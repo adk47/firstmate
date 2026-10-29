@@ -1401,6 +1401,80 @@ class IntakeD2Tests(unittest.TestCase):
         self.assertEqual(len(rows), 5)
         self.assertEqual(self.store.intake_unmatched(self.intake_id), [])
 
+    def _carry_one(self, outcome="unverifiable", need="readable_document"):
+        """What carry_forward leaves: a row of the current VERSION with an OLD run id and `at`, and no step of this
+        VERSION for that run; the filing's keys recorded (the carry copies dv_intake_keys too)."""
+        self.store.db.execute("INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, user_id, outcome, reason, "
+                              "need, account_hold, detail_json, version, intake_id) VALUES ('dv-old-run', "
+                              "'2026-10-28T09:00:00Z', ?, ?, 'Mixing', 42, ?, 'carried', ?, 0, '{}', ?, ?)",
+                              (self.sha, RID, outcome, need, VERSION, self.intake_id))
+        self.store.db.commit()
+        self.store.record_intake_keys(self.intake_id, [RID], [KEY])
+
+    def test_reread_carried_reads_only_carried_claims_then_stops(self):
+        # Fable 134: carried rows wait for a re-read under the current rule; nothing in the reader selected them.
+        self._carry_one()
+        self.assertEqual(self.store.intake_carried_keys(self.intake_id), {KEY})
+        self.assertEqual(self.store.carried_remaining(), {"rows": 1, "filings": 1, "closed_rows": 0})
+        stats, rows = self._run()                                                   # an ordinary run: settled
+        self.assertEqual((stats.intake, rows), (0, []))
+        stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, reread_carried=True)
+        self.assertEqual([(r["request_id"], r["role"], r["outcome"]) for r in rows], [(RID, "Mixing", gate.VERIFIED)])
+        steps = {s for (s,) in self.store.db.execute("SELECT step FROM dv_steps WHERE version=?", (VERSION,))}
+        self.assertTrue({"extract", "forensics", "gate"} <= steps)                  # a real read, with its steps
+        self.assertEqual(self.store.intake_carried_keys(self.intake_id), set())
+        self.assertEqual(self.store.carried_remaining(), {"rows": 0, "filings": 0, "closed_rows": 0})
+        stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, reread_carried=True)
+        self.assertEqual((stats.intake, rows), (0, []))                             # done: never read twice
+        self.assertEqual(len(self.h3_calls), 1)
+
+    def test_reread_carried_never_starves_a_new_filing(self):
+        # Fable 136: new documents first; carried re-reads only fill the idle room.
+        self._carry_one()
+        data2 = b"%PDF-1.4 a NEW filing that arrived after the carry"
+        sha2 = hashlib.sha256(data2).hexdigest()
+        rid2 = "11111111-2222-3333-4444-000000000009"
+        ps = ProofStore(self.proof_path)
+        ps.file_document(file_sha256=sha2, user_id=42, conversation_id="778", candidate_request_ids=[rid2],
+                                received_at="2026-10-29T08:00:00Z", matched_by="professional_id")
+        ps.close()
+        self.reqs[rid2] = IntakeReq(rid=rid2)
+        self.h3 = {**self.h3, f"{rid2}#Mixing": H3(verdict="GENUINE")}
+        stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, reread_carried=True, max_docs=1)
+        self.assertEqual(stats.intake, 1)
+        self.assertEqual({r["request_id"] for r in rows}, {rid2})                   # the new filing, not the carry
+        self.assertEqual(self.store.intake_carried_keys(self.intake_id), {KEY})     # the carry waits ...
+        for _ in range(3):        # the new filing is retried (its file is not found here) and then settles
+            stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, reread_carried=True, max_docs=1)
+            if {r["request_id"] for r in rows} == {RID}:
+                break
+        self.assertEqual({r["request_id"] for r in rows}, {RID})                    # ... for the idle room
+        self.assertEqual(self.store.intake_carried_keys(self.intake_id), set())
+
+    def test_reread_carried_never_loops_on_a_request_closed_since(self):
+        self._carry_one()
+        self.reqs = {}                                                              # the request closed since
+        stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, reread_carried=True)
+        self.assertEqual(rows, [])
+        self.assertEqual(self.store.intake_carried_keys(self.intake_id), set())     # recorded keys refreshed
+        # QA #1493: a closed carried claim is not unfinished work - the metric reaches 0 and names it apart
+        self.assertEqual(self.store.carried_remaining(), {"rows": 0, "filings": 0, "closed_rows": 1})
+        stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, reread_carried=True)
+        self.assertEqual(stats.intake, 0)
+
+    def test_the_cli_passes_reread_carried_to_the_runner_and_the_workers(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("cdv", Path(__file__).resolve().parents[1] / "credit-doc-verify.py")
+        cdv = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cdv)
+        args = cdv.parser().parse_args(["run", "--reread-carried", "--max-docs", "2"])
+        self.assertTrue(args.reread_carried)
+        self.assertIn("--reread-carried", cdv.worker_argv(args, 0, 4, 1))
+        self.assertNotIn("--reread-carried", cdv.worker_argv(cdv.parser().parse_args(["run"]), 0, 4, 1))
+        src = (Path(__file__).resolve().parents[1] / "credit-doc-verify.py").read_text()
+        self.assertIn("reread_carried=args.reread_carried", src)
+        self.assertIn("if args.reread_carried and (shard is None or shard[0] == 0)", src)     # one shard reports it
+
     def test_pairs_eval_runs_never_pick_up_intake(self):
         stats, _ = runner.run(self.store, self.deps, proof_store=self.proof_path, pairs={})
         self.assertEqual(stats.intake, 0)

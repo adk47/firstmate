@@ -86,7 +86,8 @@ def worker_argv(args: argparse.Namespace, i: int, n: int, budget: int) -> list[s
     if args.store:
         argv += ["--store", args.store]
     argv += ["--proof-store", args.proof_store, "run", "--max-docs", str(budget), "--shard", f"{i}/{n}"]
-    return argv + (["--since", args.since] if args.since else [])
+    return argv + (["--since", args.since] if args.since else []) + \
+        (["--reread-carried"] if getattr(args, "reread_carried", False) else [])
 
 
 def run_workers(args: argparse.Namespace, popen=None) -> int:
@@ -138,8 +139,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     store = DocVerifyStore(args.store)
     stats, _ = runner.run(store, real_deps(store, strict_pacing=shard is not None), proof_store=args.proof_store,
                           since=args.since,
-                          max_docs=args.max_docs, shard=shard, paying=paying_users(), log=log)
-    log("run " + json.dumps({**stats.as_dict(), "shard": args.shard}))
+                          max_docs=args.max_docs, shard=shard, paying=paying_users(),
+                          reread_carried=args.reread_carried, log=log)
+    # the carried-set metric is a whole-store scan (~15 s on node-8): one shard reports it, not all of them
+    extra = {"carried_remaining": store.carried_remaining()} \
+        if args.reread_carried and (shard is None or shard[0] == 0) else {}
+    log("run " + json.dumps({**stats.as_dict(), "shard": args.shard, **extra}))
     print("NO_REPLY")
     return 0
 
@@ -357,6 +362,9 @@ def parser() -> argparse.ArgumentParser:
     pr.add_argument("--since", default=None, help="ISO time; overrides the stored cutoff for this run")
     pr.add_argument("--workers", type=int, default=1,
                     help="parallel readers, each on its own sha256 shard (paced and capped together)")
+    pr.add_argument("--reread-carried", action="store_true",
+                    help="read ONLY filings whose standing rows were carried into this VERSION without a read, and "
+                         "re-read those claims under the current rule (Fable 134); paid first")
     pr.add_argument("--shard", default=None, help="i/n: this process is worker i of n (set by --workers)")
     pr.set_defaults(fn=cmd_run)
     ps = sub.add_parser("eval-select", help="build the eval manifest (node-8)")

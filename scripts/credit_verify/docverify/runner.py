@@ -344,12 +344,17 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
 def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, since: str | None = None,
         max_docs: int = 30, pairs: dict[str, list[str]] | None = None, intake: bool | None = None,
         shard: tuple[int, int] | None = None, paying: set[int] | frozenset[int] | None = None,
+        reread_carried: bool = False,
         log: Callable[[str], None] = lambda m: None) -> tuple[Stats, list[dict[str, Any]]]:
     """One run. `pairs` (eval): verify exactly these documents and claims,
     ignoring `since` and what is already done. The cron (no `pairs`) then fills the rest of
     `max_docs` with documents filed in proof_intake (D2) unless `intake` is False.
     `shard=(i, n)`: this run is worker i of n and takes only the documents whose sha256 falls in
-    its shard (pace.shard_of), so parallel workers never read the same document."""
+    its shard (pace.shard_of), so parallel workers never read the same document.
+    `reread_carried` (Fable 134/136): NEW filings first (the ordinary intake selection), then the idle room goes to
+    filings with claims whose standing row was carried forward into this VERSION without a read; those claims are
+    re-read under the current rule. The new rows are ordinary rows of this VERSION, with their steps; nothing is
+    hand-written. A re-read never starves a new document."""
     intake_from_store = (pairs is None) if intake is None else intake
     keep = None if shard is None else (lambda pid: pace.shard_of(pid, shard[1]) == shard[0])
     run_id = f"dv-{utcnow()}-{uuid.uuid4().hex[:8]}"
@@ -357,7 +362,9 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
     proof_db = ro(proof_store)
     rows: list[dict[str, Any]] = []
     try:
-        if pairs is None:
+        if reread_carried:
+            pairs, intake_from_store = {}, True
+        elif pairs is None:
             cutoff = since or store.set_state_once("since", utcnow())
             pairs = candidates(proof_db, store, cutoff, max_docs, keep=keep)
             log(f"since {cutoff}: {len(pairs)} documents to verify")
@@ -374,7 +381,13 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
             log(f"document {proof_id[:12]}: {len(keys)} claims")
         if intake_from_store:
             room = max(0, max_docs - stats.documents)
-            for doc in intake_read.intake_docs(proof_db, store.intake_settled, room, keep=keep, paying=paying):
+            docs = intake_read.intake_docs(proof_db, store.intake_settled, room, keep=keep, paying=paying)
+            if reread_carried and len(docs) < room:             # carried re-reads only fill the idle room
+                taken = {d.intake_id for d in docs}
+                docs += [d for d in intake_read.intake_docs(proof_db, lambda iid, ids: not store.intake_carried_keys(iid),
+                                                            room - len(docs) + len(taken), keep=keep, paying=paying)
+                         if d.intake_id not in taken][:room - len(docs)]
+            for doc in docs:
                 stats.documents += 1
                 stats.intake += 1
                 try:
@@ -384,6 +397,8 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
                                {"candidates": len(doc.candidate_ids), "keys": len(keys), "first_keys": keys[:20]},
                                f"intake:{doc.intake_id}")
                     finished = store.intake_finished_keys(doc.intake_id)
+                    if reread_carried:
+                        finished -= store.intake_carried_keys(doc.intake_id)    # carried = not read under this rule
                     todo = [k for k in keys if k not in finished]      # capped after the fan-out cut
                     if not todo:
                         continue

@@ -390,6 +390,47 @@ class DocVerifyStore:
         except (ValueError, TypeError):
             return None
 
+    def intake_carried_keys(self, intake_id: str) -> set[str]:
+        """Claim keys of one filing whose STANDING row under the current VERSION was carried forward, never read:
+        its run wrote no step of this VERSION for the document (carry_forward copies a row with its old run_id
+        and `at`). Only keys the last run recorded as open count, so a request closed since never loops.
+        Fable 134: such a row waits for a re-read under the current rule before any ask."""
+        rec = self.intake_keys_recorded(intake_id)
+        open_keys = set((rec or {}).get("keys") or [])
+        if not open_keys:
+            return set()
+        rows = self.db.execute(
+            "SELECT o.request_id, o.role FROM dv_outcomes o JOIN (SELECT MAX(id) id FROM dv_outcomes WHERE intake_id=? "
+            "AND version=? GROUP BY proof_id, request_id, role) l USING(id) WHERE NOT EXISTS (SELECT 1 FROM dv_steps s "
+            "WHERE s.proof_id=o.proof_id AND s.run_id=o.run_id AND s.version=?)", (intake_id, VERSION, VERSION))
+        return {f"{rid}#{role}" for rid, role in rows} & open_keys
+
+    def carried_remaining(self) -> dict[str, int]:
+        """How much of the carried set is still unread under the current VERSION: `rows` / `filings` count only
+        claims still OPEN (in the filing's last recorded keys, as intake_carried_keys does), so the number reaches
+        0 when the re-read is done; `closed_rows` are carried claims whose request closed since (QA #1493: never
+        re-read, so they must not look unfinished)."""
+        rows = self.db.execute(
+            "SELECT o.intake_id, o.request_id || '#' || o.role, k.keys_json FROM dv_outcomes o JOIN (SELECT MAX(id) id "
+            "FROM dv_outcomes WHERE version=? GROUP BY coalesce(intake_id, ''), proof_id, request_id, role) l USING(id) "
+            "LEFT JOIN dv_intake_keys k ON k.intake_id=o.intake_id AND k.version=? WHERE o.intake_id IS NOT NULL AND "
+            "NOT EXISTS (SELECT 1 FROM dv_steps s WHERE s.proof_id=o.proof_id AND s.run_id=o.run_id AND s.version=?)",
+            (VERSION, VERSION, VERSION)).fetchall()
+        open_keys: dict[str, set[str]] = {}
+        n_open, n_closed, filings = 0, 0, set()
+        for iid, key, keys_json in rows:
+            if iid not in open_keys:
+                try:
+                    open_keys[iid] = set(json.loads(keys_json or "[]"))
+                except ValueError:
+                    open_keys[iid] = set()
+            if key in open_keys[iid]:
+                n_open += 1
+                filings.add(iid)
+            else:
+                n_closed += 1
+        return {"rows": n_open, "filings": len(filings), "closed_rows": n_closed}
+
     def intake_settled(self, intake_id: str, candidates: list[str]) -> bool:
         """No Trino needed: the last run saw exactly these candidate requests and every
         claim key it found open is finished."""
