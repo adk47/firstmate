@@ -33,8 +33,13 @@ setup() {
   cat > "$TEST_TMPDIR/bin/muso" <<'STUB'
 #!/usr/bin/env bash
 n=$(cat "$STUB_CALL_COUNT" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$STUB_CALL_COUNT"
-line=""
-for a in "$@"; do line="$line ${a//$'\n'/ }"; done
+line=""; prev=""
+for a in "$@"; do
+  line="$line ${a//$'\n'/ }"
+  # the raw --text, untouched, so tests can measure what Slack would receive
+  [ "$prev" = "--text" ] && printf '%s' "$a" > "$STUB_CALLS_DIR/text-$n.txt"
+  prev="$a"
+done
 printf '%s\n' "$line" > "$STUB_CALLS_DIR/call-$n.line"
 printf '%s\n' "$line" >> "$STUB_CALLS"
 [ "${SLA_MUSO_FAIL:-0}" = "1" ] && exit 1
@@ -72,7 +77,8 @@ page=$(printf '%s' "$url" | sed -n 's/.*[?&]page=\([0-9]*\).*/\1/p')
 # Task requests are matched first; metadata is only what is left.
 case "$url" in
   *date_updated_gt*) f="$COUNTS_STUB_DIR/cpage${page:-0}.json" ;;
-  */task\?*)         f="$CURL_STUB_DIR/page${page:-0}.json" ;;
+  # CURL_STUB_REPEAT_PAGE: serve ONE file for every due page (a response that never says last_page).
+  */task\?*)         f="${CURL_STUB_REPEAT_PAGE:-$CURL_STUB_DIR/page${page:-0}.json}" ;;
   # LIST METADATA: `/list/<id>` with no `/task`. The due fetch reads this to
   # build its open-status filter. Without this branch the request fell through
   # to the task-page fixture, `.statuses[]?` was empty, and EVERY test silently
@@ -282,20 +288,129 @@ counts_with() { jq -n --argjson tasks "$(printf '%s\n' "$@" | jq -s '.')" '{task
   ! grep -q 'details in thread' "$STUB_CALLS_DIR/call-1.line"
 }
 
-@test "long bucket is split into multiple in-thread replies" {
-  tasks=()
-  for i in $(seq 1 8); do
-    tasks+=("$(task "o$i" "Overdue ticket number $i with a deliberately longish name" "$(due_ms 2026-06-10)" open open)")
-  done
-  page_with "${tasks[@]}"
-  SLA_DIGEST_MAX_CHARS=200 run bash "$DIGEST"
+# due_page <page> <last_page:true|false> <count>: a page of <count> open tasks
+# spread over overdue/today/tomorrow and three statuses.
+due_page() {
+  jq -n --argjson p "$1" --argjson last "$2" --argjson cnt "$3" \
+    --argjson o "$(due_ms 2026-06-10)" --argjson t "$(due_ms 2026-06-12)" --argjson m "$(due_ms 2026-06-13)" '
+    {tasks: [range(0; $cnt) as $i | ($p * $cnt + $i) as $g
+      | {id: "g\($g)", name: "Ticket \($g)", url: "https://app.clickup.com/t/g\($g)",
+         due_date: (([$o + $g * 1000, $t, $m][$g % 3]) | tostring),
+         status: {status: (["to do", "in progress", "waiting"][$g % 7 % 3]), type: "open"}}],
+     last_page: $last}'
+}
+
+@test "31 due pages, default cap → exit 0, one parent + <=3 replies" {
+  # 3100 open due tasks is the real-world shape (~2,900 on 29 Oct) that the old
+  # cap of 20 pages could not finish. PAGINATION_CAP is deliberately NOT set.
+  for p in $(seq 0 30); do due_page "$p" "$([ "$p" -eq 30 ] && echo true || echo false)" 100 > "$CURL_STUB_DIR/page$p.json"; done
+  unset PAGINATION_CAP
+  run bash "$DIGEST"
   [ "$status" -eq 0 ]
-  # parent + >=2 overdue replies (the bucket was split)
-  [ "$(grep -c 'slack send' "$STUB_CALLS")" -ge 3 ]
-  # a continuation reply is present...
-  grep -rq -- 'cont. (2/' "$STUB_CALLS_DIR/"
-  # ...and every reply still threads under the parent ts (call 1's)
-  grep -rq -- '--thread-ts 1717171711.000100' "$STUB_CALLS_DIR/"
+  [ "$(grep -c 'slack send' "$STUB_CALLS")" -le 4 ]
+  [ "$(grep -c 'slack send' "$STUB_CALLS")" -ge 2 ]
+  for f in "$STUB_CALLS_DIR"/text-*.txt; do [ "$(wc -c < "$f")" -le 3500 ]; done
+  # the parent's three counts add up to every fetched task
+  nums=$(grep -o '\*[0-9]*\* \(overdue\|due today\|due tomorrow\)' "$STUB_CALLS_DIR/text-1.txt" | grep -o '[0-9]*')
+  [ "$(echo "$nums" | awk '{s+=$1} END{print s}')" -eq 3100 ]
+}
+
+@test "no last_page ever → exit 6 at the default cap, nothing posted" {
+  due_page 0 false 5 > "$TEST_TMPDIR/forever.json"
+  unset PAGINATION_CAP
+  CURL_STUB_REPEAT_PAGE="$TEST_TMPDIR/forever.json" run bash "$DIGEST"
+  [ "$status" -eq 6 ]
+  [ "$(grep -c 'due_date_lt' "$CURL_STUB_URLS")" -eq 100 ]
+  [ ! -s "$STUB_CALLS" ]
+  [[ "$output" == *"PAGINATION_CAP=100"* ]]
+}
+
+@test "overdue reply: by-status counts, oldest N, per-status top 3 without duplicates, +K more, view link" {
+  # 9 overdue: to do x6 (a1 a2 a4 a5 a8 a9), waiting x2 (a3 a6), in progress x1 (a7).
+  # N=3 → oldest = a1 a2 a3. Per status, the 3 most overdue NOT already listed:
+  # to do → a4 a5 a8 (a9 left over), waiting → a6, in progress → a7. 8 listed, K=1.
+  page_with \
+    "$(task a1 'Ticket a1' "$(due_ms 2026-06-01)" 'to do' open)" \
+    "$(task a2 'Ticket a2' "$(due_ms 2026-06-02)" 'to do' open)" \
+    "$(task a3 'Ticket a3' "$(due_ms 2026-06-03)" waiting custom)" \
+    "$(task a4 'Ticket a4' "$(due_ms 2026-06-04)" 'to do' open)" \
+    "$(task a5 'Ticket a5' "$(due_ms 2026-06-05)" 'to do' open)" \
+    "$(task a6 'Ticket a6' "$(due_ms 2026-06-06)" waiting custom)" \
+    "$(task a7 'Ticket a7' "$(due_ms 2026-06-07)" 'in progress' custom)" \
+    "$(task a8 'Ticket a8' "$(due_ms 2026-06-08)" 'to do' open)" \
+    "$(task a9 'Ticket a9' "$(due_ms 2026-06-09)" 'to do' open)"
+  SLA_DIGEST_TOP_N=3 run bash "$DIGEST" --dry-run
+  [ "$status" -eq 0 ]
+  got="$(printf '%s\n' "$output" | sed -n '/^=== THREAD/,$p' | tail -n +2)"
+  view='https://app.clickup.com/2283334/v/li/901000600160'
+  expected="*:rotating_light: Overdue (9):*
+By status: to do 6 · waiting 2 · in progress 1
+*Oldest 3:*
+• <https://app.clickup.com/t/a1|Ticket a1> — [to do] — 11d overdue
+• <https://app.clickup.com/t/a2|Ticket a2> — [to do] — 10d overdue
+• <https://app.clickup.com/t/a3|Ticket a3> — [waiting] — 9d overdue
+*Most overdue — to do:*
+• <https://app.clickup.com/t/a4|Ticket a4> — [to do] — 8d overdue
+• <https://app.clickup.com/t/a5|Ticket a5> — [to do] — 7d overdue
+• <https://app.clickup.com/t/a8|Ticket a8> — [to do] — 4d overdue
+*Most overdue — waiting:*
+• <https://app.clickup.com/t/a6|Ticket a6> — [waiting] — 6d overdue
+*Most overdue — in progress:*
+• <https://app.clickup.com/t/a7|Ticket a7> — [in progress] — 5d overdue
++1 more overdue — <$view|open the full list>"
+  [ "$got" == "$expected" ]
+  # no ticket is listed twice
+  [ -z "$(printf '%s\n' "$got" | grep -o 'clickup.com/t/[a-z0-9]*' | sort | uniq -d)" ]
+  # the parent carries the full-list link
+  printf '%s\n' "$output" | grep -qF "<$view|Full list in ClickUp>"
+}
+
+@test "status names in the By status line are escaped" {
+  page_with "$(task t1 'x' "$(due_ms 2026-06-10)" 'R&D <q>' custom)"
+  run bash "$DIGEST" --dry-run
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF 'By status: R&amp;D &lt;q&gt; 1'
+}
+
+@test "today/tomorrow replies cap at SLA_DIGEST_TOP_N and say +K more" {
+  tasks=()
+  for i in 1 2 3 4 5; do tasks+=("$(task "d$i" "Today $i" "$(( $(due_ms 2026-06-12) + i * 1000 ))" 'to do' open)"); done
+  tasks+=("$(task m1 'Tomorrow 1' "$(due_ms 2026-06-13)" 'to do' open)")
+  page_with "${tasks[@]}"
+  SLA_DIGEST_TOP_N=2 run bash "$DIGEST" --dry-run
+  [ "$status" -eq 0 ]
+  today="$(printf '%s\n' "$output" | sed -n '/^=== THREAD: Due today/,/^=== THREAD: Due tomorrow/p' | sed '$d')"
+  [ "$(printf '%s\n' "$today" | grep -c '^• ')" -eq 2 ]
+  printf '%s\n' "$today" | grep -qF '*Due today (5):*'
+  printf '%s\n' "$today" | grep -qF 'By status: to do 5'
+  printf '%s\n' "$today" | grep -qF 'Today 1'
+  ! printf '%s\n' "$today" | grep -qF 'Today 3'
+  printf '%s\n' "$today" | grep -qF '+3 more — <https://app.clickup.com/2283334/v/li/901000600160|open the full list>'
+  # a bucket that fits has no "+K more"
+  tomorrow="$(printf '%s\n' "$output" | sed -n '/^=== THREAD: Due tomorrow/,$p')"
+  ! printf '%s\n' "$tomorrow" | grep -q 'more'
+}
+
+@test "SLA_DIGEST_VIEW_URL overrides the full-list link" {
+  page_with "$(task t1 'Due today' "$(due_ms 2026-06-12)" open open)"
+  SLA_DIGEST_VIEW_URL='https://example.test/v' run bash "$DIGEST" --dry-run
+  echo "$output" | grep -qF '<https://example.test/v|Full list in ClickUp>'
+}
+
+@test "an oversized reply is truncated, logged, never over max_chars" {
+  tasks=()
+  for i in $(seq 1 8); do tasks+=("$(task "o$i" "Overdue ticket number $i with a deliberately longish name" "$(( $(due_ms 2026-06-10) + i * 1000 ))" 'to do' open)"); done
+  page_with "${tasks[@]}"
+  LC_ALL=C SLA_DIGEST_MAX_CHARS=400 SLA_DIGEST_TOP_N=8 run bash "$DIGEST"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"clickup-sla-digest: reply "*"Overdue (8)"*" truncated to fit"* ]]
+  txt="$STUB_CALLS_DIR/text-2.txt"
+  [ "$(wc -c < "$txt")" -le 400 ]
+  # the footer counts the tickets that were dropped, so listed + K = 8
+  listed=$(grep -c '^• ' "$txt")
+  [ "$listed" -lt 8 ]
+  k=$(grep -o '^+[0-9]*' "$txt" | tr -d +)
+  [ "$((listed + k))" -eq 8 ]
 }
 
 @test "a failed thread reply → non-zero exit, parent still delivered, loud log" {
