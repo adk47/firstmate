@@ -254,6 +254,40 @@ class PartialScanNeverSends(unittest.TestCase):
         with self.assertRaises(cc.ClickUpRateLimited):
             cr.build_ticket_index("k", "list")
 
+    def test_resolve_notify_scan_that_never_reaches_last_page_raises(self):
+        rn = load("rn_cap", "resolve-notify.py")
+        n = [0]
+
+        def urlopen(req, timeout=None):
+            n[0] += 1
+            return Resp({"tasks": [{"id": f"T{n[0]}"}], "last_page": False})
+        self._patch_client(rn, urlopen)
+        with mock.patch.object(rn, "MAX_PAGES", 3):
+            with self.assertRaisesRegex(RuntimeError, "partial scan"):
+                rn.fetch_all_tasks("k", "L")
+        self.assertEqual(n[0], 3)
+
+    def test_closer_scan_that_never_reaches_last_page_raises(self):
+        cr = load("cr_cap", "close-resolved-conversations.py")
+        n = [0]
+
+        def urlopen(req, timeout=None):
+            n[0] += 1
+            return Resp({"tasks": [{"id": f"T{n[0]}", "custom_fields": [], "tags": []}],
+                         "last_page": False})
+        self._patch_client(cr, urlopen)
+        with self.assertRaisesRegex(RuntimeError, "partial scan"):
+            cr.build_ticket_index("k", "L")
+        self.assertEqual(n[0], 200)
+
+    def test_closer_200_without_a_tasks_list_raises(self):
+        cr = load("cr_nolist", "close-resolved-conversations.py")
+        for body in ({}, {"tasks": None}):
+            with self.subTest(body=body):
+                self._patch_client(cr, lambda req, timeout=None, b=body: Resp(b))
+                with self.assertRaisesRegex(RuntimeError, "no tasks list"):
+                    cr.build_ticket_index("k", "L")
+
     def test_i_clickup_list_page_survives_a_429_where_main_raised_http_error(self):
         rn = load("rn_i", "resolve-notify.py")
         s = Script(err429(Retry_After=2), {"tasks": [], "last_page": True})
