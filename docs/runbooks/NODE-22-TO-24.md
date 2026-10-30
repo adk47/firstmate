@@ -10,7 +10,7 @@ read at `origin/main` `70deafc4`.
 
 | | |
 |---|---|
-| Change | node-8 **system** Node 22.23.1 → 24.x via NodeSource `node_24.x`. Paperclip then uses the system runtime; there is no second Node on the box. |
+| Change | node-8 **system** Node 22.23.1 → 24.x via NodeSource `node_24.x`. Paperclip is unaffected: it runs its own Node at `/srv/paperclip/node/bin/node` (24.21.0 as of 21 Oct; `paperclip.service` sets `PATH=/srv/paperclip/node/bin:...`). The system runtime serves openclaw, the host-only units and the CI runners' jobs. |
 | Target | **`24.21.0-1nodesource1`** (newest in the `node_24.x` repo on 9 Oct). Any version `>= 24.16.0 < 25` is acceptable; the Step 2 assert enforces the band. |
 | Why `>= 24.16.0` | openclaw **2026.9.8** (W1 step 3) `engines.node` = `>=24.16.0 <25 \|\| >=26.1.0`. 24.15.x boots 8.35 and then blocks step 3. |
 | Why `< 25` | Neither engines range accepts 25.0–25.8; 8.35 accepts `>=25.9.0` but 9.8 does not. Stay on 24. |
@@ -94,22 +94,32 @@ npm install -g "openclaw@$PINNED"   # unconditional: a matching version string d
 openclaw --version | grep -F "$PINNED"
 ```
 
-Expected: file exists; `openclaw --version` prints `$PINNED`. `npm install -g`
-rebuilds the native addons for the new Node — see the `tree-sitter-bash` note
-in §4. Do this with the gateways still on the old process.
+Expected: file exists; `openclaw --version` prints `$PINNED`. Under npm >= 11
+(Node 24.21 ships npm 11.19.0) the global install **replaces the JS but does not
+necessarily rebuild native addons**: install scripts are gated by default and the
+real output was `npm warn install-scripts 5 packages have install scripts not yet
+covered by allowScripts: openclaw, @google/genai, koffi, tree-sitter-bash,
+protobufjs`. Nothing was rebuilt; it was harmless on 21 Oct only because
+`tree-sitter-bash` and `koffi` ship matching `prebuilds/linux-x64`, which
+`node-gyp-build` resolves at require time. pnpm 10.33.2 does the same (`Ignored
+build scripts: ...`). **§4 is therefore the real gate**, see the
+`tree-sitter-bash` note there. `npm rebuild --allow-scripts=<pkg>` is refused
+(`npm error EALLOWSCRIPTS: --allow-scripts is not allowed in project-scoped
+installs`); to build one package, run its own install script directly (for
+better-sqlite3: `PATH=<app>/node_modules/.bin:$PATH prebuild-install`, run from inside the package dir; see the `muso-mcp-gate` row in §5 for the full command and the failure path). Do this with the gateways still on the old process.
 
 ## §4 Native addon load checks (to run in the window — never evidence)
 
 Run from the global package so resolution matches the gateway:
 `cd /usr/lib/node_modules/openclaw`. Failure signature for every row:
-`ERR_DLOPEN_FAILED` or `NODE_MODULE_VERSION <n>. This version of Node.js requires NODE_MODULE_VERSION 137` → **§8 rollback**.
+`ERR_DLOPEN_FAILED` or `NODE_MODULE_VERSION <n>. This version of Node.js requires NODE_MODULE_VERSION 137` → **§8 rollback**. These are the only rollback triggers: `ERR_MODULE_NOT_FOUND` from a wrong CWD is not one.
 
 | artifact | provenance | check (paste as one line) | expected |
 |---|---|---|---|
 | `@lydell/node-pty@1.2.0-beta.15` → `@lydell/node-pty-linux-x64` | openclaw 2026.8.35 `dependencies` | `node --input-type=module -e "await import('@lydell/node-pty'); console.log('node-pty ok')"` | `node-pty ok` |
 | `tree-sitter-bash@0.25.1` (`install: node-gyp-build`, `node-addon-api@^8.2.1`) | openclaw 2026.8.35 `dependencies` | `node --input-type=module -e "await import('tree-sitter-bash'); console.log('tree-sitter-bash ok')"` | `tree-sitter-bash ok` |
 | `sqlite-vec@0.1.9` → `sqlite-vec-linux-x64` | openclaw 2026.8.35 **`optionalDependencies`** | `node --input-type=module -e "const m=await import('sqlite-vec'); console.log(m.getLoadablePath())"` | a `.so` path under `sqlite-vec-linux-x64`. **Absent is legal** (`ERR_MODULE_NOT_FOUND` for the top-level `sqlite-vec` is not a failure; a missing `sqlite-vec-linux-x64` is). It is a SQLite extension, not a Node addon, so it is not ABI-bound; only a `DLOPEN` error counts. |
-| `@ubjs/node@0.31.0-3` → `@ubjs/node-linux-x64-gnu` | `plugins/intercom/pnpm-lock.yaml:688-731, 2615-2623` | `cd /opt/hydra/plugins/intercom && node --input-type=module -e "await import('@ubjs/node'); console.log('ubjs ok')"` | `ubjs ok` |
+| `@ubjs/node@0.31.0-3` → `@ubjs/node-linux-x64-gnu` | `plugins/intercom/pnpm-lock.yaml:688-731, 2615-2623` | `cd /usr/lib/node_modules/openclaw && node --input-type=module -e "await import('@ubjs/node'); console.log('ubjs ok')"` | `ubjs ok`. Resolves in the global tree (`/usr/lib/node_modules/openclaw/node_modules/@ubjs/{core,node,node-linux-x64-gnu}`). Do **not** run it from `plugins/intercom`: that `package.json` has no `dependencies`, pnpm installs no `@ubjs` there, and the import fails `ERR_MODULE_NOT_FOUND` on any Node version. |
 
 **`tree-sitter-bash` is the one most likely to break the install, not just the
 load.** `node-gyp-build` uses a prebuild if one matches the platform/ABI and
@@ -153,8 +163,18 @@ Node. Host fact to confirm: `file "$(command -v muso)"` says `ELF`. It also mean
 |---|---|---|---|
 | `openclaw-gateway-main` | `migrate-to-multi-gateway.sh:96` | `systemctl restart openclaw-gateway-main` | `systemctl is-active` = `active`; `openclaw --profile main gateway call health` ok; `journalctl -u openclaw-gateway-main --since -2m \| grep -cE 'ERR_DLOPEN\|NODE_MODULE_VERSION'` = `0` |
 | `openclaw-gateway-edge` | `migrate-to-multi-gateway.sh:124` | `systemctl restart openclaw-gateway-edge` | same with `--profile edge` and `-u openclaw-gateway-edge` |
-| host-only node units from §1 (`intercom-webhook`, `muso-mcp-gate` if present) | not in repo | `systemctl restart <unit>` | `active`, no DLOPEN in journal |
+| `muso-mcp-gate` native rebuild (**before** its restart) | `/opt/muso-mcp-gate/app` has its own `node_modules`, installed 1 Jul under Node 22 and never rebuilt (`engines: node >=24`) | `cd /opt/muso-mcp-gate/app/node_modules/better-sqlite3 && cp -n build/Release/better_sqlite3.node build/Release/better_sqlite3.node.abi127.bak && PATH=/opt/muso-mcp-gate/app/node_modules/.bin:$PATH prebuild-install` (the `cd` is load-bearing: run from the app dir, `prebuild-install` throws a CJS loader error; from inside the package it works). Do not append `\|\| node-gyp rebuild --release`: better-sqlite3's own `scripts.install` has that, but npm injects its bundled node-gyp onto PATH for lifecycle scripts and `app/node_modules/.bin` has no `node-gyp`, so a bare call dies `command not found` and leaves the ABI-127 binary in place. | `node -e "const D=require('better-sqlite3');console.log(new D(':memory:').prepare('select 1 x').get().x,'\| ABI',process.versions.modules)"` → `1 \| ABI 137`; unit `active` on `127.0.0.1:9000`. Skipping this crash-loops the unit: `better_sqlite3.node ... NODE_MODULE_VERSION 127 ... requires 137` (the one genuine breakage of the 21 Oct window). |
+| host-only node units from §1 (`intercom-webhook`, `muso-mcp-gate` if present; **`muso-mcp-gate` only after the rebuild row above has verified ABI 137**) | not in repo | `systemctl restart <unit>` | `active`, no DLOPEN in journal |
 | `hydra-main-prune-restart.timer` → `.service` (`install-aux-units.sh:2548-2585` at `origin/main`, not the base above) | `scripts/main-prune-restart.sh:8-9` → `openclaw sessions cleanup --enforce` (offline) → start main | **No manual restart.** The timer stops and starts `openclaw-gateway-main` itself, nightly **02:30 UTC**. Verify on the first run: `systemctl show hydra-main-prune-restart.service -p Result -p ExecMainStatus` → `Result=success` `ExecMainStatus=0`; `systemctl is-active openclaw-gateway-main` = `active`; `openclaw --profile main gateway call health` ok. |
+
+Rule: after the apt change, every host-only unit with its **own** `node_modules` needs its native deps rebuilt, not just restarted. `muso-mcp-gate` (better-sqlite3) is the known one.
+
+**If `prebuild-install` cannot fetch an ABI-137 binary for `muso-mcp-gate`:**
+- **Do not restart `muso-mcp-gate`.** Leave `better_sqlite3.node.abi127.bak` in place.
+- Last-resort source build, **not executed on node-8**: `cd /opt/muso-mcp-gate/app/node_modules/better-sqlite3 && node "$(npm config get node-gyp)" rebuild --release`. The invocation is **unverified: a recovery attempt, not a verified step**. Facts it rests on, each *verified read-only 21 Oct*: node-gyp ships inside npm 11.19.0 (`npm config get node-gyp` -> `/usr/lib/node_modules/npm/node_modules/node-gyp/bin/node-gyp.js`, `--version` -> `v12.4.0`); `gcc`, `g++`, `make` in `/usr/bin`; `python3` 3.12.3; `deps/sqlite3`, `deps/sqlite3.gyp`, `deps/common.gypi` present in the package.
+- If both fail: leave the unit stopped, escalate, and close the window on the rest of the swap.
+- **A gate-only ABI-127 failure is not a §8 rollback trigger.** `muso-mcp-gate` is a single host-only unit on `127.0.0.1:9000`; the `ERR_DLOPEN_FAILED` / `NODE_MODULE_VERSION` rollback triggers above are scoped to §4's openclaw-tree and gateway checks. Do not roll a Node major back for one host-only unit.
+- Verify the primary path on the file's **ctime**, not any mtime: `stat -c %z node_modules/better-sqlite3/build/Release/better_sqlite3.node` must be after the `prebuild-install` run. `prebuild-install` overwrites the file in place, so the file's mtime (upstream's tarball mtime) and the `build/Release` directory mtime (bumped by the `cp -n` backup) both stay old or fresh regardless of success. The ABI check in the verify column remains the real gate.
 
 **`hydra-main-prune-restart` notes (all citations at `origin/main`, not the base above).**
 
@@ -228,7 +248,7 @@ strings and comments). None invoke `openclaw` or `node`.
 `tail -n 30 /var/log/openclaw-watchdog.log /var/log/codex-keepalive.log /var/log/cron-health-watchdog.log`
 after the next tick — expect fresh timestamps and no `ERR_DLOPEN`,
 `NODE_MODULE_VERSION`, or `node: bad option` lines. Also run the read-only
-auth guard: `/opt/hydra/scripts/lib/codex-auth-sync.sh --check` → `clean`.
+auth guard: `/opt/hydra/scripts/lib/codex-auth-sync.sh --check` → expect `exit 2` / `ERROR: canonical store not readable: /root/.openclaw-main/agents/main/agent/auth-profiles.json`. The pre-8.1 JSON store was retired on 10 Sep (on disk as `auth-profiles.json.SPENT-DO-NOT-USE-20260910T125343Z`); that is the correct post-8.1 state. It is not Node-related: the guard gates on `RUNTIME_FLOOR="2026.7"` against the openclaw version (`scripts/lib/codex-auth-sync.sh:88,110`, exit at `:121`), so it took the same path on Node 22. Do not read it as a rollback trigger.
 
 **Self-hosted CI check (after the restarts, before closing the window).** The hydra runners use the system Node, so confirm CI still works on Node 24: `node --version` shows `v24.x` (>= 24.16, < 25) and `pnpm --version` succeeds on the runner host. Then re-run the `plugin-tests` job (`pr-validate.yml:1609`) by re-running it on the latest `PR Validation` run (`gh run rerun <run-id> --job <job-id>` as `adk47`). Expected: green. A red `pnpm install`/`build`/`test` step for a plugin under Node 24 ⇒ record it on the card; it breaks validation of every PR, so treat it as a §8 rollback trigger unless the CTO says otherwise.
 
@@ -274,12 +294,18 @@ test -n "$ROLLBACK_PIN" \
     && node --input-type=module -e "await import('@lydell/node-pty'); console.log('node-pty ok')" \
     && node --input-type=module -e "await import('tree-sitter-bash'); console.log('tree-sitter-bash ok')" \
     && node --input-type=module -e 'try { const m = await import("sqlite-vec"); console.log(m.getLoadablePath()) } catch (e) { if (e.code === "ERR_MODULE_NOT_FOUND" && /Cannot find package .sqlite-vec. /.test(e.message)) console.log("sqlite-vec absent: legal (optionalDependency)"); else throw e }') \
-  && (cd /opt/hydra/plugins/intercom && pnpm install --frozen-lockfile \
-    && node --input-type=module -e "await import('@ubjs/node'); console.log('ubjs ok')") \
+  && (cd /opt/hydra/plugins/intercom && pnpm install --frozen-lockfile) \
+  && (cd /usr/lib/node_modules/openclaw && node --input-type=module -e "await import('@ubjs/node'); console.log('ubjs ok')") \
   && systemctl start codex-canonical-refresh.timer \
   && /opt/hydra/scripts/hydra-maintenance.sh stop \
   && echo "ROLLBACK OK" || echo "ROLLBACK FAILED at the step above: STOP, escalate"
 ```
+
+**`muso-mcp-gate` (§5 rebuild counterpart).** The ABI-127 binary is preserved at
+`/opt/muso-mcp-gate/app/node_modules/better-sqlite3/build/Release/better_sqlite3.node.abi127.bak`.
+After the downgrade, **restore it before restarting the unit**, or the gate breaks
+in the opposite direction (ABI 137 binary under Node 22):
+`cd /opt/muso-mcp-gate/app/node_modules/better-sqlite3/build/Release && cp better_sqlite3.node.abi127.bak better_sqlite3.node && systemctl restart muso-mcp-gate && systemctl is-active muso-mcp-gate`.
 
 Restart the §5.1 host-only units too if §1 found any. `$CAP` is the §1
 file; if the shell was lost, set it with `CAP=$(ls -t /root/node24-preflight-*.txt | head -1)`.
