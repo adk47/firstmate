@@ -61,7 +61,12 @@ hand the customer off.
      relationship.
 
 3. **Reply**, in this order and nothing more (the approved paragraphs, captain 2026-10-29):
-   - **They sent a document, screenshot or link** (the conversation holds an attachment or link):
+   - **A profile merge request** (any turn of a merge thread, first time in the conversation):
+     the approved merge paragraph (`faq.md`, "Can I merge duplicate profiles?"), verbatim, even
+     while you are still asking for a missing link. Never a judgement about whether their
+     profiles can or should be merged. The outbound merge guard enforces this in code.
+   - **They sent a document, screenshot or proof link** (the conversation holds an attachment or
+     a proof link; a Muso profile link sent for a merge is NOT proof, use the merge paragraph):
      <!-- approved: caroline-instructions-1029 §2.2 -->
      > Thank you. Everything you send here is recorded against your account and your open requests and goes to the verification team. If anything else is needed, the message you get will say exactly what.
    - **They asked how something works**: ONE approved paragraph from the reference library,

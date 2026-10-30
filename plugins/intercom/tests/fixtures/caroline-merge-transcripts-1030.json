@@ -1,0 +1,271 @@
+{
+ "_source": "Intercom conversations named by firstmate 017 (2026-10-30), customer turn + Caroline's ACTUAL reply, verbatim. Customer email addresses removed.",
+ "conversations": [
+  {
+   "id": "215476625749758",
+   "why": "merge ask; the profile links got the §2.2 document thank-you, never §2.4",
+   "turns": [
+    {
+     "customer": "merge 2 profiles together",
+     "reply": "Can you send links to both profiles and tell me which one you want to keep as the main profile?"
+    },
+    {
+     "customer": "https://muso.ai/profile/07ae8993-7ae0-44ea-bc0a-8c49a0eef7af\nthis is the one i want to keep",
+     "reply": "Thanks. I’ll treat this as the profile you want to keep. Can you send the link to the other profile?"
+    },
+    {
+     "customer": "https://muso.ai/profile/3b4e6358-9d5f-416a-9879-d796bdb7fad8\nthis is the other one",
+     "reply": "Thank you. Everything you send here is recorded against your account and your open requests and goes to the verification team. If anything else is needed, the message you get will say exactly what. I'm pulling in a teammate to take this from here."
+    }
+   ]
+  },
+  {
+   "id": "215476627008983",
+   "why": "rename + merge; asked for the link, no §2.4",
+   "turns": [
+    {
+     "customer": "Hi Muso team, I'm Rafael Picoli, music producer, arranger and session guitarist from São Paulo. I own the claimed profile below, but my name is misspelled on it: https://muso.ai/profile/417b3aec-08fa-4fde-a3ee-2dfa1fcd72cd 1) Name change: could you please rename it from \"Rafael Picolli\" to \"Rafael Picoli\" (one L)? When I try to save the new name in Edit Profile, it fails silently (409 error). The misspelling came from distributor metadata. 2) Merge: I believe there's another \"Rafael Picoli\" profile (my claims on it were rejected back in March). If so, could you please merge it into my claimed profile?",
+     "reply": "I’ve flagged the name-change issue, including the 409 when you try to save it. For the missing credits, you’ll hear in this conversation and by email.  Could you share the Muso profile URL for the other “Rafael Picoli” profile you’d like merged into your claimed one? I’m pulling in a teammate to take this from here."
+    }
+   ]
+  },
+  {
+   "id": "215476626852900",
+   "why": "two profiles, pending credits; hand-off with no §2.4",
+   "turns": [
+    {
+     "customer": "Hi Muso.ai team, I have two profiles on Muso.ai: Engineer profile: https://muso.ai/profile/d51d8a06-ab6d-4ac8-973f-7f2a58017974 Studio profile: https://muso.ai/profile/b94e91b1-8d3f-46a2-bb7a-effd04975fce I've noticed that some credits on my Studio profile are still pending, even though some of those same credits have already been approved on my Engineer profile.",
+     "reply": "Thank you for sharing both profile links. The team can review the Studio credit requests alongside the matching work on your Engineer profile; I can’t confirm whether the approvals will align. I’m also not sure how the Popularity bar or Top 1% is calculated, so I’ve included that question. I'm pulling in a teammate to take this from here."
+    }
+   ]
+  },
+  {
+   "id": "215476571311441",
+   "why": "merge/cleanup thread; a merge JUDGEMENT (10-27, pre-deploy) and, after deploy, the status-chase line without §2.4",
+   "turns": [
+    {
+     "customer": "Hey Muso team, I have two claimed profiles active on my dashboard due to a capitalization typo, and my production credits are split between them. Please manually merge them together into one unified account.",
+     "reply": "I’ve sent your merge request to our team with **Ginga Beatz** as the profile to keep. Please complete its claim and verification in the app."
+    },
+    {
+     "customer": "I just found one more track that I produced, but the artist accidentally misspelled my name as \"Singa Beatz\" in the metadata. Could you please add this track to the merge request as well? https://muso.ai/track/ff680ab3-ca40-47c9-82b7-800dfa9e6e98",
+     "reply": "I can see a **Producer** credit for **Xoddina** on the **Singa Beatz** profile. Moving that credit needs a separate review; the whole Singa Beatz profile shouldn’t be merged into yours. I couldn’t add this correction to the team’s request right now, so please reply here again later with the song link to retry it."
+    },
+    {
+     "customer": "Hi Caroline, I'm following up on the manual review request regarding my three Muso.AI profiles. I'd appreciate an update on both the profile merge/cleanup process.",
+     "reply": "I understand. Your request is in the verification queue, including your concern about preserving the seven producer submissions before any profile changes. I can’t confirm their transfer or the merge’s progress yet. The outcome will come to this conversation and your email; if the team needs anything from you, they’ll ask here. I’m pulling in a teammate to take this from here."
+    }
+   ]
+  },
+  {
+   "id": "215476625525975",
+   "why": "the one good reply: §2.4 given on turn 2",
+   "turns": [
+    {
+     "customer": "Hi, this profile is also mine: https://muso.ai/profile/3d156d27-1899-4bb8-aa9d-7f3c201aadb5 Some songs are tied to that one so I can't add it to my credits. Can you merge those two please?",
+     "reply": "Could you send the link to the other profile you want combined with the one you shared? I need both profile links to get the merge request to the right teammate."
+    },
+    {
+     "customer": "Yes. I use this one: https://muso.ai/profile/65d63f5c-9a9c-4c49-bdfd-350a2864998d",
+     "reply": "Merges work like this: claim every profile that is yours first (so we know they're all you), then tell me which one should be the main profile. The merge is done by our verification team and you get a message in this conversation when it's complete; credits from the duplicates move onto the main profile. Profiles claimed by someone else, and company or label profiles, are handled differently: I'll pass those on.  I'm pulling in a teammate to take this from here."
+    }
+   ]
+  },
+  {
+   "id": "qa-1530-accounts-and-tracks",
+   "why": "QA on #1530: an account merge that also mentions tracks is a profile merge",
+   "turns": [
+    {
+     "customer": "Please merge my two Muso accounts. My tracks are split between them.",
+     "reply": "Could you send the links to both profiles and tell me which one to keep? I'm pulling in a teammate to take this from here."
+    }
+   ]
+  },
+  {
+   "id": "qa-1530-altered-paragraph",
+   "why": "QA on #1530: a paragraph that starts like §2.4 but says something else is replaced by the canonical text",
+   "turns": [
+    {
+     "customer": "merge my two profiles please",
+     "reply": "Merges work like this: I merge them for you right away once you confirm. I'm pulling in a teammate to take this from here."
+    }
+   ]
+  },
+  {
+   "id": "qa-1530-model-repeats",
+   "why": "QA on #1530: the model writing §2.4 again on a later turn is dropped (exactly once)",
+   "turns": [
+    {
+     "customer": "merge my two profiles please",
+     "reply": "Could you send both links? I'm pulling in a teammate to take this from here."
+    },
+    {
+     "customer": "https://muso.ai/profile/aaaaaaaa-0000-4000-8000-000000000001 https://muso.ai/profile/aaaaaaaa-0000-4000-8000-000000000002",
+     "reply": "Merges work like this: claim every profile that is yours first (so we know they're all you), then tell me which one should be the main profile. The merge is done by our verification team and you get a message in this conversation when it's complete; credits from the duplicates move onto the main profile. Profiles claimed by someone else, and company or label profiles, are handled differently: I'll pass those on. I'm pulling in a teammate to take this from here."
+    }
+   ]
+  },
+  {
+   "id": "qa-1530-wrapped-judgement",
+   "why": "QA on #1530: a judgement wrapped across a line break is dropped",
+   "turns": [
+    {
+     "customer": "merge my two profiles please",
+     "reply": "These profiles shouldn't\nbe merged. I'm pulling in a teammate to take this from here."
+    }
+   ]
+  },
+  {
+   "id": "qa-1530-outcome-claims",
+   "why": "QA on #1530: passive outcome claims and separation judgements are dropped",
+   "turns": [
+    {
+     "customer": "Please merge my two profiles",
+     "reply": "Your profiles were merged. I’m pulling in a teammate to take this from here."
+    },
+    {
+     "customer": "really?",
+     "reply": "These profiles should stay separate. I’m pulling in a teammate to take this from here."
+    }
+   ]
+  },
+  {
+   "id": "qa-1530-wrapped-request",
+   "why": "QA on #1530: a merge request wrapped across a line break still gets §2.4",
+   "turns": [
+    {
+     "customer": "Could you merge\nmy profile with this one? https://muso.ai/profile/bbbbbbbb-0000-4000-8000-000000000001",
+     "reply": "I’m pulling in a teammate to take this from here."
+    }
+   ]
+  },
+  {
+   "id": "qa-1530-synonym-judgements",
+   "why": "QA on #1530: combine/consolidate judgements are dropped like merge ones",
+   "turns": [
+    {
+     "customer": "Please merge my two profiles",
+     "reply": "I cannot combine your two profiles. I’m pulling in a teammate to take this from here."
+    },
+    {
+     "customer": "why not?",
+     "reply": "These two profiles are not eligible to be combined. I can consolidate them for you later. I’m pulling in a teammate to take this from here."
+    }
+   ]
+  },
+  {
+   "id": "qa-1530-we-promise-and-url-ask",
+   "why": "QA on #1530: a URL-only merge ask gets §2.4; 'We can merge' promises are dropped",
+   "turns": [
+    {
+     "customer": "Could you merge https://muso.ai/profile/cccccccc-0000-4000-8000-000000000001 with https://muso.ai/profile/cccccccc-0000-4000-8000-000000000002?",
+     "reply": "We can merge your two profiles. I’m pulling in a teammate to take this from here."
+    },
+    {
+     "customer": "great",
+     "reply": "We’ll combine them shortly. I’m pulling in a teammate to take this from here."
+    }
+   ]
+  },
+  {
+   "id": "qa-1530-active-claims",
+   "why": "QA on #1530: active / progressive merge claims are dropped",
+   "turns": [
+    {
+     "customer": "Please merge my two profiles",
+     "reply": "We are merging your two profiles now. I’m pulling in a teammate to take this from here."
+    },
+    {
+     "customer": "thanks",
+     "reply": "Our team is merging them now. I’m pulling in a teammate to take this from here."
+    }
+   ]
+  },
+  {
+   "id": "qa-1530-modal-passives",
+   "why": "QA on #1530: 'will be merged' / 'can be merged' are dropped",
+   "turns": [
+    {
+     "customer": "Please merge my two profiles",
+     "reply": "The profiles will be merged soon. I’m pulling in a teammate to take this from here."
+    },
+    {
+     "customer": "ok",
+     "reply": "Your profiles can be merged. I’m pulling in a teammate to take this from here."
+    }
+   ]
+  },
+  {
+   "id": "r5-1530-unseen-phrasings",
+   "why": "r5 ruling on #1530: merge-family allow-list drops phrasings no pattern names",
+   "turns": [
+    {
+     "customer": "Please merge my two profiles",
+     "reply": "The merge went through. I’m pulling in a teammate to take this from here."
+    },
+    {
+     "customer": "thanks!",
+     "reply": "We've now combined both pages. I'd keep those as they are. I’m pulling in a teammate to take this from here."
+    }
+   ]
+  },
+  {
+   "id": "qa-1530-link-only-no-intent",
+   "why": "QA on #1530: a profile-link-only first turn (no merge words) never gets the §2.2 thank-you",
+   "turns": [
+    {
+     "customer": "https://muso.ai/profile/dddddddd-0000-4000-8000-000000000001",
+     "reply": "Thank you. Everything you send here is recorded against your account and your open requests and goes to the verification team. If anything else is needed, the message you get will say exactly what. I’m pulling in a teammate to take this from here."
+    }
+   ],
+   "expectParagraphs": 0
+  },
+  {
+   "id": "qa-1530-url-in-dropped-sentence",
+   "why": "QA on #1530: a dropped sentence carrying a profile URL leaves no URL fragment",
+   "turns": [
+    {
+     "customer": "Please merge my two profiles",
+     "reply": "Could you send me the profile you want to merge: https://muso.ai/profile/abc? I'm pulling in a teammate to take this from here."
+    }
+   ]
+  }
+ ],
+ "controls": [
+  {
+   "why": "not a merge: billing",
+   "customer": "I was charged twice this month, can you refund one?",
+   "reply": "I'm pulling in a teammate to take this from here."
+  },
+  {
+   "why": "not a profile merge: duplicate TRACKS",
+   "customer": "These two tracks are the same song, please merge the duplicate tracks: https://muso.ai/track/a and https://muso.ai/track/b",
+   "reply": "I'm pulling in a teammate to take this from here."
+  },
+  {
+   "why": "a real document in a non-merge thread keeps the §2.2 thank-you",
+   "customer": "here is my split sheet https://drive.google.com/x",
+   "reply": "Thank you. Everything you send here is recorded against your account and your open requests and goes to the verification team. If anything else is needed, the message you get will say exactly what. I'm pulling in a teammate to take this from here."
+  },
+  {
+   "why": "QA on #1530: a CREDIT merge is not a profile merge",
+   "customer": "Merge my duplicate credits",
+   "reply": "I'm pulling in a teammate to take this from here."
+  },
+  {
+   "why": "QA on #1530: a burst of a track merge + an unrelated profile message is not a profile merge",
+   "customer": "Merge these duplicate tracks.\n\nMy profile page is slow to load.",
+   "reply": "I’m pulling in a teammate to take this from here."
+  },
+  {
+   "why": "QA on #1530: a track merge and an unrelated profile sentence in ONE message is not a profile merge",
+   "customer": "Merge these duplicate tracks. My profile page is slow to load.",
+   "reply": "I’m pulling in a teammate to take this from here."
+  },
+  {
+   "why": "QA on #1530: a credit merge with an incidental account word is not a profile merge",
+   "customer": "Merge duplicate credits in my account please.",
+   "reply": "I’m pulling in a teammate to take this from here."
+  }
+ ]
+}

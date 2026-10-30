@@ -16,6 +16,7 @@ import {
   IntercomAssignmentConflictError,
 } from "./outbound.js";
 import { sanitizeReasoningLeak } from "./sanitize-reasoning-leak.js";
+import { prepareMergeReply } from "./merge-reply-guard.js";
 import { surfaceLinkTargets } from "./filters.js";
 import { initStateStore, loadSessions, saveSessions } from "./state-store.js";
 import {
@@ -1676,6 +1677,22 @@ export const intercomPlugin = createChatChannelPlugin({
                   `[intercom:reasoning-leak] [${tag}] conv=${result.conversationId} action=stripped markers=${JSON.stringify(guard.matchedMarkers)} sample=${JSON.stringify(guard.droppedSample ?? "")}`,
                 );
               }
+              // Merge-reply guard (firstmate 017): the shipped merge doctrine was skipped in 4
+              // of 5 merge asks, so on a profile-merge thread the approved §2.4 paragraph goes
+              // out exactly once per conversation, a profile-link turn never gets the document
+              // thank-you, and any merge judgement sentence is dropped. The "sent" marker is
+              // committed only after a DELIVERED reply and then persisted (QA on #1530).
+              const mergePrep = prepareMergeReply(state, bodyForDispatch, guard.body, new Date().toISOString());
+              if (mergePrep.result.actions.length > 0) {
+                log?.warn?.(
+                  `[intercom:merge-guard] [${tag}] conv=${result.conversationId} actions=${mergePrep.result.actions.join(",")}` +
+                    (mergePrep.result.droppedJudgements.length ? ` dropped=${JSON.stringify(mergePrep.result.droppedJudgements)}` : ""),
+                );
+              }
+              guard.body = mergePrep.body;
+              const commitMerge = (delivered: boolean) => {
+                if (mergePrep.commit(delivered)) saveSessions(accountSessions).catch(() => {});
+              };
               if (guard.body.trim().length === 0) {
                 // Nothing left to post after stripping control tokens
                 // (e.g. Caroline emitted only `[[PRIORITY]]` with no
@@ -1687,6 +1704,7 @@ export const intercomPlugin = createChatChannelPlugin({
                   `[${tag}] empty reply after token strip — posting nothing conv=${result.conversationId}` +
                     (prioritySignal.fired ? " (priority signal already paged)" : ""),
                 );
+                commitMerge(false);
               } else {
                 try {
                   const reply = await client.replyToConversation({
@@ -1700,6 +1718,7 @@ export const intercomPlugin = createChatChannelPlugin({
                     chunks: bufferedChunks.length,
                     reply,
                   });
+                  commitMerge(outcome.delivered);
                   if (outcome.delivered) {
                     trackOutboundMessageId(reply.messageId, state.outboundMessageIds);
                     state.updatedAt = new Date().toISOString();
@@ -1712,6 +1731,7 @@ export const intercomPlugin = createChatChannelPlugin({
                   // Customer-facing delivery failure: grep-able alert prefix
                   // so ops can wire Slack/Sentry on `[intercom:ALERT]`.
                   // TODO(follow-up): POST to account.fallbackSlackSupervisionChannel.
+                  commitMerge(false);
                   log?.error?.(
                     `[intercom:ALERT] [${tag}] flush failed conv=${result.conversationId} chunks=${bufferedChunks.length} error=${err}`,
                   );

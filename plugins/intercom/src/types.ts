@@ -184,6 +184,11 @@ export interface IntercomSessionState {
   // that leaves Caroline active, whereas escalationFiredAt gates the heavyweight
   // human-takeover handoff.
   priorityFiredAt?: string | null;
+  // Merge-reply guard (merge-reply-guard.ts, firstmate 017): the first customer turn that
+  // showed profile-merge intent, and when the approved §2.4 merge paragraph was sent, so a
+  // merge thread keeps its intent across turns and §2.4 goes out exactly once.
+  mergeIntentAt?: string | null;
+  mergeParagraphSentAt?: string | null;
   userTurnCount?: number;
   // Customer EXCHANGES (a burst of customer messages before any reply counts once; see
   // handler.ts continuesCustomerBurst). Drives only the hard turn-count cap; Jev and the
