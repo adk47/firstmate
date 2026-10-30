@@ -374,6 +374,55 @@ class DocVerifyStore:
                 if not (o == "unknown" and provider_down(why))]          # a provider outage is not a try
         return any(o != "unknown" for o in rows) or len(rows) >= MAX_UNKNOWN
 
+    def restore_over_provider_down(self) -> int:
+        """2026-10-30 (queue 2 audit): in the 10-29 402 window a provider-refusal `unknown` row was written ON TOP of a
+        claim's earlier real verdict, so every 'latest row' reader (trays, L11, the need queue, other teams) saw
+        `unknown` and lost the verdict (2,724 standing rows, 95 filings, 63 users). The reader itself was right (a
+        provider refusal is not a try), the standing view was not.
+        For each claim (intake/proof, request, role) of the CURRENT version whose latest row is a provider-refusal
+        `unknown` (provider_down) and which has an earlier decided row, append a COPY of that latest decided row,
+        keeping its run, read time and content, marked detail.restored_from = {superseded_id, decided_id, why}.
+        Append-only, idempotent (a restored claim's latest row is decided), one transaction; the write lock is taken only
+        when there is something to restore (a lock-free read first: every reader run calls this). Returns rows appended."""
+        sql = ("SELECT o.id, o.reason, coalesce(o.intake_id, ''), o.proof_id, o.request_id, o.role FROM dv_outcomes o "
+               "JOIN (SELECT MAX(id) id FROM dv_outcomes WHERE version=? GROUP BY coalesce(intake_id, ''), proof_id, "
+               "request_id, role) l USING(id) WHERE o.outcome = 'unknown'")
+        if not any(provider_down(why) for _, why, *_ in self.db.execute(sql, (VERSION,))):
+            return 0
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                latest = self.db.execute(sql, (VERSION,)).fetchall()      # again, under the lock
+                n = 0
+                for oid, why, iid, pid, rid, role in latest:
+                    if not provider_down(why):
+                        continue
+                    # QA #1533: walk back over provider-refusal unknowns ONLY; the first other row is what stood before
+                    # the outage. Restore it only if it is decided (a document-failure unknown stands as it was).
+                    prev = None
+                    for pid_, out_, why_ in self.db.execute(
+                            "SELECT id, outcome, reason FROM dv_outcomes WHERE version=? AND coalesce(intake_id, '')=? "
+                            "AND proof_id=? AND request_id=? AND role=? AND id < ? ORDER BY id DESC",
+                            (VERSION, iid, pid, rid, role, oid)):
+                        if out_ == "unknown" and provider_down(why_):
+                            continue
+                        prev = (pid_,) if out_ != "unknown" else None
+                        break
+                    if prev is None:
+                        continue
+                    n += self.db.execute(
+                        "INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, user_id, source_ref, h3_verdict, "
+                        "outcome, reason, need, account_hold, detail_json, version, intake_id) "
+                        "SELECT run_id, at, proof_id, request_id, role, user_id, source_ref, h3_verdict, outcome, reason, need, "
+                        "account_hold, CASE WHEN json_valid(detail_json) THEN json_set(detail_json, '$.restored_from', "
+                        "json_object('superseded_id', ?, 'decided_id', id, 'why', 'provider_down')) ELSE detail_json END, "
+                        "version, intake_id FROM dv_outcomes WHERE id=?", (oid, prev[0])).rowcount
+                self.db.commit()
+                return n
+            except Exception:
+                self.db.rollback()
+                raise
+
     def intake_finished_keys(self, intake_id: str) -> set[str]:
         """Claim keys '<request_id>#<role>' of one filing that need no more runs: a decided
         outcome (anything but `unknown`), or MAX_UNKNOWN unknown outcomes. Per claim, never

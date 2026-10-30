@@ -412,6 +412,9 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
             cutoff = since or store.set_state_once("since", utcnow())
             pairs = candidates(proof_db, store, cutoff, max_docs, keep=keep)
             log(f"since {cutoff}: {len(pairs)} documents to verify")
+        restored = store.restore_over_provider_down()    # idempotent: a no-op once the 10-29 rows are restored
+        if restored:
+            log(f"restored {restored} claim verdicts masked by a provider-refusal unknown")
         held = store.held_users()
         for uid in sorted(held):           # belt and braces: no held account keeps a standing `verified`
             stats.superseded += store.supersede_verified(run_id, uid, "account on hold")

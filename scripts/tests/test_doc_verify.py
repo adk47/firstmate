@@ -2623,6 +2623,43 @@ class TrayTests(unittest.TestCase):
         carried = {p for (p,) in db.execute("SELECT proof_id FROM dv_outcomes WHERE version=?", (VERSION,))}
         self.assertEqual(carried, {"pclean"})                            # the font edit is re-read
 
+    def test_a_verdict_masked_by_a_later_provider_refusal_unknown_is_restored_once(self):
+        # 2026-10-30 queue 2 audit: a 402 'unknown' written on top of a real verdict hid it from every 'latest row'
+        # reader (trays, L11, the need queue). The restore appends a copy of the real verdict; idempotent.
+        db = self.store.db
+
+        def row(iid, role, outcome, reason, at, need=None):
+            db.execute("INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, outcome, reason, need, account_hold, "
+                       "detail_json, version, intake_id) VALUES ('r', ?, 'p', 'rq', ?, ?, ?, ?, 0, '{\"x\": 1}', ?, ?)",
+                       (at, role, outcome, reason, need, VERSION, iid))
+        row("1:a", "Mixing", "unverifiable", "H3 SUSPECT ...", "2026-10-29T10:00:00Z", need="readable_document")
+        row("1:a", "Mixing", "unknown", "tooling: extraction did not run (http 402)", "2026-10-29T23:00:00Z")   # masks it
+        row("1:a", "Mixing", "unknown", "tooling: extraction did not run (http 402)", "2026-10-29T23:30:00Z")   # twice
+        row("1:b", "Mixing", "unknown", "tooling: extraction did not run (http 402)", "2026-10-29T23:00:00Z")   # nothing earlier
+        row("1:c", "Mixing", "verified", "ok", "2026-10-29T10:00:00Z")
+        row("1:c", "Mixing", "unknown", "tooling: H3 UNDETERMINED", "2026-10-29T23:00:00Z")      # a document failure stands
+        row("1:e", "Mixing", "verified", "ok", "2026-10-29T09:00:00Z")                # QA #1533 mixed stack:
+        row("1:e", "Mixing", "unknown", "tooling: H3 UNDETERMINED", "2026-10-29T10:00:00Z")      # this stood before
+        row("1:e", "Mixing", "unknown", "tooling: extraction did not run (http 402)", "2026-10-29T23:00:00Z")
+        row("1:d", "Mixing", "unverifiable", "x", "2026-10-29T10:00:00Z")
+        row("1:d", "Mixing", "unknown", "x (http 503)", "2026-10-29T23:00:00Z")                 # a 5xx can be the document
+        db.commit()
+
+        def standing():
+            return {(i, o) for i, o in db.execute(
+                "SELECT o.intake_id, o.outcome FROM dv_outcomes o JOIN (SELECT MAX(id) id FROM dv_outcomes WHERE version=? "
+                "GROUP BY coalesce(intake_id,''), proof_id, request_id, role) l USING(id)", (VERSION,))}
+        self.assertEqual(self.store.restore_over_provider_down(), 1)
+        self.assertEqual(standing(), {("1:a", "unverifiable"), ("1:b", "unknown"), ("1:c", "unknown"), ("1:d", "unknown"),
+                                      ("1:e", "unknown")})                       # never the older verified over H3
+        r = db.execute("SELECT at, need, detail_json FROM dv_outcomes WHERE intake_id='1:a' ORDER BY id DESC LIMIT 1").fetchone()
+        self.assertEqual((r[0], r[1]), ("2026-10-29T10:00:00Z", "readable_document"))      # the original read time + need
+        d = json.loads(r[2])
+        self.assertEqual((d["x"], d["restored_from"]["why"]), (1, "provider_down"))
+        self.assertEqual(self.store.restore_over_provider_down(), 0)                        # idempotent
+        src = (Path(__file__).resolve().parents[1] / "credit_verify" / "docverify" / "runner.py").read_text()
+        self.assertIn("restored = store.restore_over_provider_down()", src)                 # every reader run
+
     def test_a_template_match_that_does_not_name_the_claimant_is_unverifiable_never_forged(self):
         # Fable 165 (df38bbd1): H3 now says SUSPECT with a SOFT template_match_another_account (was FORGED_LIKELY).
         ex = validate({**GOOD_ANSWER, "doc_type": "contract", "credits": []})
