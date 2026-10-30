@@ -3113,3 +3113,30 @@ mobile_only() { printf '{"type":"list","data":[{"id":"mob1","role":"user","email
   [ "$(posts)" -eq 0 ]; [ "$(replies)" -eq 0 ]
 }
 
+@test "title lists name each TRACK once (two roles on one track), in order, case/space-insensitive; 'and N more' counts tracks (r5)" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Me Dominas:X" "u2:Producer:Me Dominas:X"
+  run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == *'credit requests for "Me Dominas": they'"'"'re waiting on one thing from you'* ]]
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Warum fall ich:X" "u2:Mixing:Geschwiegen:X" "u3:Producer:geschwiegen :X" "u4:Mixing:C:X" "u5:Mixing:D:X" "u6:Mixing:E:X"
+  run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == *'credit requests for "Warum fall ich", "Geschwiegen" and "C" (and 2 more):'* ]]
+  # r5: DIFFERENT tracks with the same title are both named (identity = track_id); 'and N more' counts tracks
+  # (same title AND same artist - e.g. a single and an album version - so only the track id tells them apart)
+  credits "$TEST_TMPDIR/c0.json" Jane "u1:Mixing:Home:X" "u2:Mixing:Home:X" "u3:Mixing:Other:X" "u4:Mixing:More:X"
+  jq '.credits[0].track_id = "trk-a" | .credits[1].track_id = "trk-b" | .credits[2].track_id = "trk-c" | .credits[3].track_id = "trk-d"' "$TEST_TMPDIR/c0.json" > "$TEST_TMPDIR/c.json"
+  run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == *'credit requests for "Home", "Home" and "Other" (and 1 more):'* ]]
+  # two roles on ONE track (same track_id) are named once - even if the artist string differs
+  jq '.credits[1].track_id = "trk-a" | .credits[1].artist_name = "X feat. Y"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json"
+  run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c2.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == *'credit requests for "Home", "Other" and "More":'* ]]
+  # no track ids: the same title by DIFFERENT artists is two tracks; by the same artist, one
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Home:X" "u2:Mixing:Home:Y" "u3:Producer:home :X"
+  run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == *'credit requests for "Home" and "Home":'* ]]
+  # the shared titles() (R1 and the other status notes) does the same
+  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:Slap:X" "s2:Producer:Slap:X" "s3:Mixing:Knockout:X"
+  run -0 "$LOCKED" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == *'for "Slap" and "Knockout":'* ]]
+}
+

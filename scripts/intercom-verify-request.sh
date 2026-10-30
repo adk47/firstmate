@@ -1195,6 +1195,15 @@ RENDER_JQ=""
 IFS= read -r -d '' RENDER_JQ <<'JQ' || true
 def esc: gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;") | gsub("\""; "&quot;") | gsub("'"; "&#39;");
 def andjoin: if length <= 1 then (.[0] // "") else (.[0:-1] | join(", ")) + " and " + .[-1] end;
+# One track can carry several requests (two roles): every title list names each TRACK once, in order (r5 on the free
+# dry run: 23 notes read '"Me Dominas", "Me Dominas"'). Normalised by case and whitespace.
+def tnorm: tostring | ascii_downcase | gsub("\\s+"; " ") | gsub("^ +| +$"; "");
+# r5 on #1504: the identity is the TRACK (track_id), not the title - two different tracks called "Home" are both named.
+# Without a track_id: title + artist (normalised); the same title by the same artist is the same track.
+def tkey: if ((.track_id // "") | length) > 0 then "id:" + .track_id
+          else "t:" + ((.track_title // "") | tnorm) + "|" + ((.artist_name // "") | tnorm) end;
+def utitles($c): reduce $c[] as $x ([]; ($x | tkey) as $k | if any(.[]; .k == $k) then . else . + [{k: $k, t: $x.track_title}] end)
+  | map(.t);
 # A title that already carries its own quote marks at both ends is shown as it is.
 def qt: if test("^[\"“”„«»'‘’‚].*[\"“”„«»'‘’‚]$") then . else "\"" + . + "\"" end;
 # "Mixing, Mastering" -> "Mixing and Mastering credits"; one role stays "Mixing credit".
@@ -1400,9 +1409,10 @@ def uvn_status($fn; $c; $maxl):
                   {p: "Any one of these works (a link, photo or PDF is fine):"}, {ul: uvn_list},
                   {p: "Just reply to this message with it. You will see the credit on your profile as soon as it is approved, and we will let you know here if anything else is needed."} ] + sig) }
     else
-      ([ $c[0:$maxl][] | "\(.track_title | qt)" ]) as $t
+      utitles($c) as $u
+      | ([ $u[0:$maxl][] | qt ]) as $t
       | { subject: "Your Muso credit requests: one thing we still need",
-          segs: ([ {p: "Hi \($fn), a quick status update on your credit requests for \($t | andjoin)\(if $n > $maxl then " (and \($n - $maxl) more)" else "" end): they're waiting on one thing from you, something that shows your role on each."},
+          segs: ([ {p: "Hi \($fn), a quick status update on your credit requests for \($t | andjoin)\(if ($u | length) > $maxl then " (and \(($u | length) - $maxl) more)" else "" end): they're waiting on one thing from you, something that shows your role on each."},
                   {p: "Any one of these works (a link, photo or PDF is fine):"}, {ul: uvn_list},
                   {p: "Just reply to this message with it. You will see each credit on your profile as soon as it is approved, and we will let you know here if anything else is needed."} ] + sig) }
     end;
@@ -1413,7 +1423,9 @@ def withdrawal_confirm($c):
       segs: [ {p: "Hi! We've withdrawn your credit request for \($x.role) on \($x.track_title | qt), as you asked. Nothing else changes on your profile. If you need anything else, just reply here."} ] };
 # Status notes (firstmate 070 verbatim; 071 as credit-trust-llm-t01 drafted). Not asks.
 def req_s($n): if $n == 1 then "request" else "requests" end;
-def titles($c; $maxl): ([ $c[0:$maxl][] | "\(.track_title | qt)" ] | andjoin) + (if ($c|length) > $maxl then " and \(($c|length) - $maxl) more" else "" end);
+def titles($c; $maxl):
+  utitles($c) as $u
+  | ([ $u[0:$maxl][] | qt ] | andjoin) + (if ($u|length) > $maxl then " and \(($u|length) - $maxl) more" else "" end);
 def status_doc_received($fn; $c; $maxl):
   { subject: "Your Muso credit \(req_s($c|length)): an update",
     segs: [ {p: "Hi \($fn), a quick update on your credit \(req_s($c|length)) for \(titles($c; $maxl)): we have the document you sent us, and our team is reviewing it. Nothing else is needed from you right now, and you'll see each credit on your profile as soon as it's approved."} ] };
