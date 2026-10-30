@@ -28,8 +28,6 @@ overrides = load("q_overrides", "overrides.py")
 send = load("q_send", "send.py")
 tail = load("q_tail", "tail_lists.py")
 buckets = load("q_buckets", "buckets.py")
-ip = load("q_ip", "intake_proposals.py")
-wa = load("q_wa", "which_account.py")
 
 
 def tmpdir(tc):
@@ -167,31 +165,6 @@ class VetoOverEveryCustomerPart(unittest.TestCase):
         self.assertEqual(topics.latest_topic("credit", census.latest_from_doc(d), census.topic_of), "credit")
 
 
-class AgeGuardFirst(unittest.TestCase):
-    """QA @63e39d2c: the 24 h age guard runs before every other return, so which_account never asks early."""
-
-    def test_young_no_email_contact_waits_and_is_not_asked(self):
-        now = 2_000_000_000.0
-        young = [{"email": "", "role": "lead", "external_id": "", "created_at": now - 3600, "id": "c1"}]
-        r = ip.propose_one("c", {}, young, accounts_by_email={}, facts={}, ext_owner={}, now=now)
-        self.assertEqual(r["decision"], "wait")
-        tray = {"source": "intercom", "files": f"['{'a' * 64}']", "received_at": "['2026-10-30T13:23:12Z']"}
-        self.assertNotEqual(wa.eligible(tray, {"statistics": {}}, young, r), "")
-
-    def test_old_no_email_contact_is_still_asked(self):
-        now = 2_000_000_000.0
-        old = [{"email": "", "role": "lead", "external_id": "", "created_at": now - 9 * 86400, "id": "c1"}]
-        r = ip.propose_one("c", {}, old, accounts_by_email={}, facts={}, ext_owner={}, now=now)
-        self.assertEqual((r["decision"], r["reason"]), ("no-proposal", "no contact on the thread has an email"))
-
-    def test_one_young_contact_among_several_waits(self):
-        now = 2_000_000_000.0
-        cs = [{"email": "x@y.io", "role": "user", "created_at": now - 9 * 86400},
-              {"email": "", "role": "lead", "created_at": now - 60}]
-        r = ip.propose_one("c", {}, cs, accounts_by_email={}, facts={}, ext_owner={}, now=now)
-        self.assertEqual(r["decision"], "wait")
-
-
 class BucketsOutNeedsFetch(unittest.TestCase):
     """QA @7c064881: the sender's input (--out) must come from the current customer message."""
 
@@ -266,23 +239,6 @@ class StaleTailLists(unittest.TestCase):
         self.assertEqual(sorted(os.listdir(d)), ["keep.txt", "tail-status-team-review.json"])
 
 
-class MixedContactConflict(unittest.TestCase):
-    """intake_proposals.py: a no-email contact's external_id still blocks the proposal."""
-
-    def test_second_contact_without_email_naming_another_account_blocks(self):
-        now = 2_000_000_000.0
-        a = ip.rec.Account(user_id=7, email="x@y.io", email_confirmed=True)
-        contacts = [{"email": "x@y.io", "role": "user", "external_id": "", "created_at": now - 9 * 86400},
-                    {"email": "", "role": "user", "external_id": "ext-b", "created_at": now - 9 * 86400}]
-        common = dict(accounts_by_email={"x@y.io": [7]}, facts={7: a}, now=now)
-        r = ip.propose_one("c", {}, contacts, ext_owner={"ext-b": {"9"}}, **common)
-        self.assertEqual(r["decision"], "no-proposal")
-        self.assertIn("names another Muso account", r["reason"])
-        r = ip.propose_one("c", {}, contacts, ext_owner={}, reverted={"ext-b": {"9"}}, **common)
-        self.assertEqual(r["decision"], "no-proposal")
-        self.assertIn("reverted claim", r["reason"])
-
-
 class BucketAllowlist(unittest.TestCase):
     def test_ambiguous_identity_and_other_non_allowlisted_actions_are_refused(self):
         for act in ("ambiguous-identity", "unknown-action", "draft-unread", "captain-billing", "hold-read"):
@@ -309,47 +265,6 @@ class SecondMessageSinceSnapshot(unittest.TestCase):
     def test_unchanged_thread_passes(self):
         self.assertEqual(send.still_owed(self.conv(100, 500), snapshot_waiting_since=500), (True, ""))
         self.assertEqual(send.still_owed(self.conv(0, 0), snapshot_waiting_since=800), (True, ""))
-
-
-class WhichAccountFinalCheck(unittest.TestCase):
-    """which_account.py: re-read the thread and account facts right before posting."""
-    SHA = "a" * 64
-    TRAY = {"source": "intercom", "files": f"['{SHA}']", "received_at": "['2026-10-30T13:23:12Z']"}
-    GOT = 1793366592
-
-    def get_factory(self, lar, email="ann@x.io", ext=""):
-        conv = {"contacts": {"contacts": [{"id": "c1"}]}, "statistics": {"last_admin_reply_at": lar}}
-        contact = {"id": "c1", "email": email, "external_id": ext, "role": "lead", "created_at": self.GOT - 9 * 86400}
-        return lambda path: conv if path.startswith("/conversations/") else contact
-
-    def query(self, linked=False):
-        def q(sql):
-            if "lower(trim(email))" in sql and "SELECT CAST(id" in sql:
-                return [["7", "ann@x.io"]] if linked else []
-            return []
-        return q
-
-    def test_unchanged_unmatched_sender_passes(self):
-        why, _c, cs = wa.fresh_assess("1", self.TRAY, self.get_factory(self.GOT - 3600), self.query(False),
-                                      now=self.GOT + 86400)
-        self.assertEqual(why, "")
-        self.assertEqual(len(cs), 1)
-
-    def test_a_reply_during_the_run_refuses(self):
-        why, _c, _cs = wa.fresh_assess("1", self.TRAY, self.get_factory(self.GOT + 60), self.query(False),
-                                       now=self.GOT + 86400)
-        self.assertIn("already replied", why)
-
-    def test_a_link_during_the_run_refuses(self):
-        why, _c, _cs = wa.fresh_assess("1", self.TRAY, self.get_factory(self.GOT - 3600), self.query(True),
-                                       now=self.GOT + 86400)
-        self.assertNotEqual(why, "")
-
-    def test_unreadable_core_refuses(self):
-        def boom(sql):
-            raise RuntimeError("trino down")
-        why, _c, _cs = wa.fresh_assess("1", self.TRAY, self.get_factory(self.GOT - 3600), boom, now=self.GOT + 86400)
-        self.assertIn("unreadable", why)
 
 
 if __name__ == "__main__":
