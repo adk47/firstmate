@@ -3024,3 +3024,37 @@ mobile_only() { printf '{"type":"list","data":[{"id":"mob1","role":"user","email
   [[ "$output" == *"more than 500 ids; refusing rather than matching a subset"* ]]
   [ "$(posts)" -eq 1 ]
 }
+
+@test "reply_due (Fable [key=reply-due]): one in-thread answer despite the core-notice cooldown; comm_state verifies the trigger; the ledger records the part" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  export STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]' ',"state":"open"')"
+  # unsolicited: the core-notice cooldown defers it
+  STUB_CORE_NOTICE=hold run -3 "$UVN" send --campaign uvn-status --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"DEFERRED core_notice_within_7d"* ]]
+  # comm_state says the reply is not due (answered / < 24 h / off-topic / not this user's thread): held, nothing sent
+  STUB_CORE_NOTICE=hold STUB_COMM_STATE=hold run -3 "$UVN" send --campaign uvn-status --conversation 777 --reply-due 57000000002 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  grep -q -- "--reply-due 57000000002" "$TEST_TMPDIR/comm-state-args"
+  [ "$(replies)" -eq 0 ]
+  # due: the cooldown does not apply to the answer; the ledger records the triggering part and the thread
+  STUB_CORE_NOTICE=hold run -0 "$UVN" send --campaign uvn-status --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"POSTED comment conversation=777"* ]]
+  [[ "$(sql "SELECT approval_ref FROM verify_messages WHERE status='sent'")" == *"reply_due:57000000001 thread:777"* ]]
+  # never a second uvn-status note to this user (that rule is not a cooldown; one answer per part: test_comm_state)
+  credits "$TEST_TMPDIR/c.json" Jane "u2:Mixing:Song B:Big Star"
+  INTERCOM_VERIFY_TEST_DAY=2026-10-31 run -0 "$UVN" send --campaign uvn-status --conversation 777 --reply-due 57000000003 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "SKIPPED already_sent"* ]]
+  [ "$(replies)" -eq 1 ]
+}
+
+@test "reply_due: refused without a digit part id, without --conversation, or for another campaign" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  run -1 "$UVN" send --campaign uvn-status --conversation 777 --reply-due "12;rm" --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"--reply-due needs the customer part id"* ]]
+  run -1 "$UVN" send --campaign uvn-status --reply-due 57000000001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"--conversation <id> is required"* ]]
+  unlocked_gate received
+  run -1 "$GATE" send --campaign status-doc-received --copy received --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"applies to uvn-status"* ]]
+  [ "$(posts)" -eq 0 ]; [ "$(replies)" -eq 0 ]
+}
+

@@ -504,6 +504,26 @@ def with_filing(payload: dict[str, Any], src: dict[str, Any]) -> dict[str, Any]:
     return payload
 
 
+def with_reply_due(payload: dict[str, Any], src: dict[str, Any]) -> dict[str, Any]:
+    """Fable [key=reply-due]: a list row naming the user's unanswered customer part ({part, conversation}, digits)
+    makes the note that thread's ONE answer: the gate gets --conversation + --reply-due and comm_state verifies the
+    trigger (customer part, unanswered > 24 h, on-topic thread of exactly this contact). Anything malformed: ignored."""
+    rd = src.get("reply_due") if isinstance(src.get("reply_due"), dict) else {}
+    part, conv = str(rd.get("part") or ""), str(rd.get("conversation") or "")
+    if part.isdigit() and conv.isdigit() and len(part) <= 24 and len(conv) <= 24:
+        payload["extra"] = list(payload.get("extra") or []) + ["--conversation", conv, "--reply-due", part]
+    return payload
+
+
+def reply_due_of(payload: dict[str, Any]) -> dict[str, str]:
+    """The {part, conversation} a built payload answers (its --reply-due / --conversation gate args), or {}."""
+    ex = list(payload.get("extra") or [])
+    try:
+        return {"part": ex[ex.index("--reply-due") + 1], "conversation": ex[ex.index("--conversation") + 1]}
+    except (ValueError, IndexError):
+        return {}
+
+
 def note_payload(acct: dict[str, str], uid: int, credits: list[dict[str, Any]], as_count: bool,
                  total: int, since: str | None = None) -> dict[str, Any]:
     user = {"email": acct["email"], "id": str(uid), "professional_id": acct["professional_id"],
@@ -713,11 +733,15 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                         why = verify_ledger.gap_user_done(db, acct["email"], now=now, user_id=str(u["user_id"]))
                     else:
                         why = verify_ledger.uvn_user_done(db, acct["email"], now=now, campaign=campaign,
-                                                          user_id=str(u["user_id"]))
+                                                          user_id=str(u["user_id"]),
+                                                          skip_7d=bool(with_reply_due({}, u).get("extra")))
                     if why == "recently_asked":
                         report.recently_asked += 1
                         report.note(why)
                         continue
+                    # [key=reply-due]: the 7-day note cooldown governs unsolicited notes, never the ONE answer to a
+                    # user who wrote to us (QA #1509: this filter dropped the reply_due row before the gate saw it);
+                    # the 90-day ask lock and one-per-user-ever still apply
                     if why in verify_ledger.DEFER_REASONS:
                         report.deferred_users += 1
                         report.note(why)
@@ -765,7 +789,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                     if as_count:
                         report.count_copy += 1
                         report.note("count_copy")
-                    batch.append((listed, with_filing(note_payload(acct, uid, live, as_count, total, created_of(pending, live)), u),
+                    batch.append((listed, with_reply_due(with_filing(note_payload(acct, uid, live, as_count, total, created_of(pending, live)), u), u),
                                   0 if as_count else left_out(listed, pending, is_ask)))
         finally:
             db.close()
@@ -862,7 +886,9 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                         report.note("documents_on_file")
                         continue
                     acct = {k: p["user"].get(k, "") for k in ("email", "professional_id", "auth_id", "first_name")}
-                    p = with_filing(note_payload(acct, uid, live, as_count, total, created_of(fresh, live)), p["user"])
+                    # rebuilt from a fresh replica read: the answer's gate args (reply_due) carry over (QA #1509)
+                    p = with_reply_due(with_filing(note_payload(acct, uid, live, as_count, total, created_of(fresh, live)),
+                                                   p["user"]), {"reply_due": reply_due_of(p)})
                     if calls and pace_seconds:
                         time.sleep(pace_seconds)
                 before = report.sent_notes if mode == "apply" else report.validated + report.recipient_ok

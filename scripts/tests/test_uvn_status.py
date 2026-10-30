@@ -1716,5 +1716,47 @@ class DryRunEqualsApplyTest(UvnStatusTests):
         self.assertEqual(got, {"dry-run": [], "apply": []})
 
 
+class ReplyDueListTest(unittest.TestCase):
+    def test_a_list_row_with_reply_due_becomes_the_gate_args(self):
+        p = uvn_status.with_reply_due({"user": {}, "credits": []}, {"reply_due": {"part": "57000000001", "conversation": "215473681300330"}})
+        self.assertEqual(p["extra"], ["--conversation", "215473681300330", "--reply-due", "57000000001"])
+        for bad in ({"part": "1; rm", "conversation": "2"}, {"part": "1"}, "x", None):
+            self.assertNotIn("extra", uvn_status.with_reply_due({"user": {}}, {"reply_due": bad}))
+
+
+class ReplyDueRunnerTest(UvnStatusTests):
+    """QA #1509: the real runner carries a reply_due row to the gate in BOTH modes, past the 7-day note cooldown
+    (the ledger filter dropped it, and the apply rebuild lost its gate args)."""
+
+    def run_both(self, with_reply_due=True):
+        got = {}
+        for mode in ("dry-run", "apply"):
+            Path(self.ledger).unlink(missing_ok=True)
+            db = verify_ledger.connect(self.ledger)
+            old = NOW - timedelta(days=2)
+            r = verify_ledger.claim(db, user_key="u7@x.com", day=old.strftime("%Y-%m-%d"), request_ids=["x7"],
+                                    message_type="email", approved_by="U", approval_ref="ref", campaign="status-team-review",
+                                    user_id="7", now=old)
+            verify_ledger.finalize(db, message_row=int(r["message_row"]), status="sent", message_id="1", now=old)
+            db.close()
+            row = {"user_id": 7, "paid": True, "skip": None, "request_ids": ["r7"], "oldest": "2026-10-15 07:21:38 UTC"}
+            if with_reply_due:
+                row["reply_due"] = {"part": "57000000001", "conversation": "215473681300330"}
+            self.users = [row]
+            self.write_list()
+            _rep, gate = self.run_(mode=mode, query=replica([7], rows={"r7": {"created": "2026-10-15 07:21:38 UTC"}}))
+            got[mode] = [(p["user"]["id"], a[a.index("--reply-due") + 1] if "--reply-due" in a else "",
+                          a[a.index("--conversation") + 1] if "--conversation" in a else "") for a, p in gate.calls]
+        return got
+
+    def test_the_answer_reaches_the_gate_in_both_modes_with_its_args(self):
+        got = self.run_both()
+        self.assertEqual(got["dry-run"], got["apply"])
+        self.assertEqual(got["apply"], [("7", "57000000001", "215473681300330")])
+
+    def test_without_reply_due_the_7_day_cooldown_still_defers(self):
+        self.assertEqual(self.run_both(with_reply_due=False), {"dry-run": [], "apply": []})
+
+
 if __name__ == "__main__":
     unittest.main()

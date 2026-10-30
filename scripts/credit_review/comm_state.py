@@ -230,6 +230,8 @@ def core_facts(uid: int, keys: list[str], query: Query) -> dict[str, Any]:
     return out
 
 
+# who answers for us in Intercom: a teammate, a bot, or a team inbox (one set for every 'did we answer' check; QA #1509)
+SUPPORT_AUTHORS = ("admin", "bot", "team")
 URL_RE = re.compile(r"https?://([^/\s?#:]+)", re.I)
 # a shared-document link = a URL whose HOST is one of these providers or a subdomain of one (QA #1508: matched on the
 # parsed hostname - 'sandbox.com/help' or 'drive.google.com.evil.example' are not documents)
@@ -296,7 +298,7 @@ def thread_facts(conversation: str, ic: Intercom, now: float | None = None) -> l
         raise Unknown("conversation unreadable")
     parts = [conv.get("source") or {}] + ((conv.get("conversation_parts") or {}).get("conversation_parts") or [])
     out: list[str] = []
-    admin = [p for p in parts if (p.get("author") or {}).get("type") in ("admin", "bot", "team")
+    admin = [p for p in parts if (p.get("author") or {}).get("type") in SUPPORT_AUTHORS
              and (p.get("part_type") or "comment") not in ("note",) and (p.get("body") or "").strip()]
     if any((p.get("created_at") or 0) >= now - 7 * 86400 for p in admin):
         out.append("R5_admin_comment_7d")
@@ -412,9 +414,62 @@ def owes_proof(uid: int, query: Query) -> list[str]:
     return sorted(set(out))
 
 
+REPLY_DUE_AFTER_S = 24 * 3600
+REPLY_DUE_CAMPAIGNS = ("uvn-status",)          # the answer copies allowed for a reply_due answer (more as they ship)
+# R9: the SAME pattern as the gate's thread_on_topic (intercom-verify-request.sh). Bare 'verification' / 'under review'
+# are not enough: 'Your payment is under review' and 'Account verification for billing' are billing threads (QA #1509).
+TOPIC_RE = re.compile(r"\bcredits?\b|\bclaim(s|ed|ing)?\b|\bmerg(e|es|ed|ing)\b|split ?sheets?|\bproof of\b|"
+                      r"\b(song|track) ?credits?\b")
+
+
+def on_topic(conv: dict[str, Any]) -> bool:
+    """R9 (thread kind): the thread is about credits / claims / merges - ticket type, title, subject, opening message
+    or one of its last 3 human parts ('credit card' / 'credit note' are billing words)."""
+    src = conv.get("source") or {}
+    parts = [p for p in ((conv.get("conversation_parts") or {}).get("conversation_parts") or [])
+             if (p.get("author") or {}).get("type") in ("user", "lead", "contact", "admin")
+             and (p.get("part_type") or "comment") != "note" and (p.get("body") or "")]
+    text = " \n ".join(str(x) for x in [((conv.get("ticket") or {}).get("ticket_type") or {}).get("name") or "",
+                                         conv.get("title") or "", src.get("subject") or "", src.get("body") or ""]
+                        + [p["body"] for p in parts[-3:]])
+    return bool(TOPIC_RE.search(re.sub(r"credit[ -]?cards?|credit notes?|store credit", " ", text.lower())))
+
+
+def reply_due(conversation: str, contact_id: str, part_id: str, ic: Intercom, now: float | None = None) -> list[str]:
+    """Fable [key=reply-due] (l1 219, p1 200): the user wrote to us in a credit/claim/merge thread and nobody answered
+    for > 24 h. Empty list = due (the gate may send EXACTLY ONE in-thread answer despite the 7-day cooldowns);
+    otherwise the reasons it is not. Fail closed on anything unreadable."""
+    if not (conversation.isdigit() and part_id.isdigit() and contact_id):
+        return ["reply_due:bad_input"]
+    now = now or time.time()
+    conv = ic("GET", f"/conversations/{conversation}?display_as=plaintext", None)
+    if str(conv.get("id") or "") != conversation:
+        raise Unknown("conversation unreadable")
+    why: list[str] = []
+    if [str(x.get("id")) for x in (conv.get("contacts") or {}).get("contacts") or []] != [contact_id]:
+        why.append("reply_due:not_this_users_thread")
+    if not on_topic(conv):
+        why.append("reply_due:R9_thread_not_about_credits")
+    parts = [conv.get("source") or {}] + ((conv.get("conversation_parts") or {}).get("conversation_parts") or [])
+    idx = next((i for i, p in enumerate(parts) if str(p.get("id") or "") == part_id), None)
+    if idx is None:
+        return why + ["reply_due:part_not_in_thread"]
+    trig = parts[idx]
+    if (trig.get("author") or {}).get("type") not in ("user", "lead", "contact"):
+        why.append("reply_due:not_a_customer_part")
+    if any((p.get("author") or {}).get("type") in SUPPORT_AUTHORS and (p.get("part_type") or "comment") != "note"
+           and ((p.get("body") or "").strip() or p.get("attachments")) for p in parts[idx + 1:]):
+        why.append("reply_due:already_answered")
+    # the 24 h run from the customer's LATEST message (QA #1509): part A 30 h ago + part B 1 h ago is not due yet
+    custs = [p for p in parts[idx:] if (p.get("author") or {}).get("type") in ("user", "lead", "contact")]
+    if max(((p.get("created_at") or now) for p in custs), default=now) > now - REPLY_DUE_AFTER_S:
+        why.append("reply_due:not_24h_yet")
+    return why
+
+
 def check(campaign: str, copy: str, uid: int, keys: list[str], contact_id: str, *, conversation: str = "",
-          query: Query = trino, ic: Intercom = intercom, fraud: Callable[[int, Query], list[str]] | None = None
-          ) -> dict[str, Any]:
+          query: Query = trino, ic: Intercom = intercom, fraud: Callable[[int, Query], list[str]] | None = None,
+          reply_due_part: str = "") -> dict[str, Any]:
     if nothing_else(campaign, copy):
         why = owes_proof(uid, query)
         return {"hold": bool(why), "state": "owes_proof" if why else "owes_nothing", "reasons": why}
@@ -425,6 +480,12 @@ def check(campaign: str, copy: str, uid: int, keys: list[str], contact_id: str, 
     thread = thread_facts(conversation, ic)
     fr = (fraud or fraud_facts)(uid, query)
     state, why = decide(campaign, copy, st, core, ic_found, thread, fr)
+    if reply_due_part:
+        # [key=reply-due]: answering a user who wrote to us is not an unsolicited note - the 7-day cooldowns do not
+        # apply to EXACTLY this one answer; every other rule (decided/told, documents, fraud, thread, identity) does
+        due = (["reply_due:campaign_not_allowed"] if campaign not in REPLY_DUE_CAMPAIGNS
+               else reply_due(conversation, contact_id, reply_due_part, ic))
+        why = [w for w in why if not w.startswith("messaged_7d")] if not due else why + due
     return {"hold": bool(why), "state": state, "reasons": why}
 
 
@@ -438,13 +499,14 @@ def _main(argv: list[str] | None = None) -> int:
     c.add_argument("--request-ids", default="")
     c.add_argument("--contact-id", default="")
     c.add_argument("--conversation", default="", help="the conversation the note would go into (R1: the filing one)")
+    c.add_argument("--reply-due", default="", help="[key=reply-due]: the customer part this note answers")
     a = ap.parse_args(argv)
     if not str(a.user_id).isdigit():
         print(json.dumps({"hold": None, "reasons": ["no Muso user id"]}))
         return 2
     try:
         res = check(a.campaign, a.copy, int(a.user_id), [k for k in a.request_ids.split(",") if k], a.contact_id,
-                    conversation=a.conversation)
+                    conversation=a.conversation, reply_due_part=a.reply_due)
     except Unknown as exc:
         print(json.dumps({"hold": None, "reasons": [f"unknown: {exc}"]}))
         return 2

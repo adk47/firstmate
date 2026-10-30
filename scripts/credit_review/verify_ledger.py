@@ -422,12 +422,14 @@ def past_user_done(db: sqlite3.Connection, user_key: str, user_id: str = "") -> 
 
 
 def uvn_user_done(db: sqlite3.Connection, user_key: str, *, now: datetime | None = None,
-                  campaign: str = "uvn-status", user_id: str = "") -> str:
+                  campaign: str = "uvn-status", user_id: str = "", skip_7d: bool = False) -> str:
     """A STATUS_CAMPAIGNS note: why this user must not get it ('' when they may). One per user,
     ever, per campaign; never within 7 days of any note from this gate (messaged_7d, a deferral);
     uvn-status (an ask) also never after a proof reply, and never within 90 days of an ask from
     any ask campaign (the shared one-ask lock: recently_asked, a deferral, nothing closed).
-    "This user" is _same_user: an email change is the same user."""
+    "This user" is _same_user: an email change is the same user.
+    skip_7d: a reply_due ANSWER ([key=reply-due]) - only the 7-day cooldown on unsolicited notes is lifted; one per
+    user ever, proof_received and the 90-day ask lock still apply (QA #1509)."""
     cond, params = _same_user(db, user_key, user_id)
     if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.campaign=? AND m.kind='initial' "
                   "AND m.status IN ('attempted','sent') LIMIT 1", (*params, campaign)).fetchone():
@@ -438,8 +440,8 @@ def uvn_user_done(db: sqlite3.Connection, user_key: str, *, now: datetime | None
             (*params, *CLAIM_CAMPAIGNS)).fetchone():
         return "proof_received"
     since = ((now or utcnow()) - timedelta(days=7)).strftime("%Y-%m-%d")
-    if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.day>=? AND m.status IN ('attempted','sent') "
-                  "LIMIT 1", (*params, since)).fetchone():
+    if not skip_7d and db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.day>=? "
+                                  "AND m.status IN ('attempted','sent') LIMIT 1", (*params, since)).fetchone():
         return "messaged_7d"
     # uvn-status is an ask: the shared one-ask-per-user-per-90-days lock across the ask
     # campaigns applies (QA @59645fb; doc rule 'One ask per user per 90 days'). A deferral,
@@ -522,7 +524,7 @@ def followed_notes(db: sqlite3.Connection, user_key: str, *, now: datetime | Non
 def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[str], message_type: str,
           approved_by: str, approval_ref: str, contact_id: str = "", campaign: str = "verify-live",
           refs: list[dict[str, Any]] | None = None, windowed: bool = False, now: datetime | None = None,
-          enforce_cap: bool = True, user_id: str = "") -> dict[str, Any]:
+          enforce_cap: bool = True, user_id: str = "", reply_due: str = "", conversation: str = "") -> dict[str, Any]:
     """Atomically claim an initial note. One transaction (BEGIN IMMEDIATE) so two
     concurrent runs cannot both claim the same user-day or request id. A claim-proof-ask note
     records its close day (claim_close_day) as due_day."""
@@ -541,8 +543,25 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
         if hold:
             db.execute("COMMIT")
             return {"result": "refusal_hold", "request_ids": fresh, **hold}
+        if reply_due:
+            # [key=reply-due]: EXACTLY ONE answer per triggering customer part, ever, and one reply_due answer per
+            # thread per 48 h; the 7-day status cooldown does not apply to answering (the gate verified the trigger)
+            if not (reply_due.isdigit() and conversation.isdigit()):
+                db.execute("COMMIT")
+                return {"result": "refusal_hold", "request_ids": fresh, "reason": "reply_due needs a part and a thread"}
+            if db.execute("SELECT 1 FROM verify_messages WHERE approval_ref LIKE ? AND status IN ('attempted','sent') LIMIT 1",
+                          (f"%reply_due:{reply_due} %",)).fetchone():
+                db.execute("COMMIT")
+                return {"result": "already_notified", "request_ids": []}
+            since48 = stamp((now or utcnow()) - timedelta(hours=48))
+            if db.execute("SELECT 1 FROM verify_messages WHERE approval_ref LIKE ? AND created_at >= ? "
+                          "AND status IN ('attempted','sent') LIMIT 1", (f"%thread:{conversation}%", since48)).fetchone():
+                db.execute("COMMIT")
+                return {"result": "recent", "reason": "reply_due_48h", "request_ids": fresh}
+            approval_ref = f"{approval_ref} reply_due:{reply_due} thread:{conversation}"
         if campaign in STATUS_CAMPAIGNS and enforce_cap:
-            why = uvn_user_done(db, user_key, now=now, campaign=campaign, user_id=user_id)
+            # inside this transaction: a reply_due answer lifts ONLY the 7-day cooldown (QA #1509)
+            why = uvn_user_done(db, user_key, now=now, campaign=campaign, user_id=user_id, skip_7d=bool(reply_due))
             if why in DEFER_REASONS:
                 db.execute("COMMIT")
                 return {"result": "recent", "reason": why, "request_ids": fresh}
@@ -1398,6 +1417,8 @@ def _main(argv: list[str] | None = None) -> int:
         s.add_argument("--reason", default="")
         s.add_argument("--user-id", default="",
                        help="the Muso account id (the per-user locks key on it too; re-checkable refusals)")
+        s.add_argument("--reply-due", default="", help="[key=reply-due]: the customer part this note answers")
+        s.add_argument("--conversation", default="", help="[key=reply-due]: the thread the answer goes into")
     ld = sub.add_parser("log-deferral", help="a note held back for an outside reason: logged, never a lock")
     ld.add_argument("--campaign", required=True, choices=CAMPAIGNS)
     ld.add_argument("--user-key", required=True)
@@ -1469,7 +1490,8 @@ def _main(argv: list[str] | None = None) -> int:
         kw = dict(user_key=a.user_key, day=a.day, request_ids=_ids(a.request_ids), message_type=a.message_type,
                   approved_by=a.approved_by, approval_ref=a.approval_ref, campaign=a.campaign)
         if a.op == "claim":
-            out = claim(db, contact_id=a.contact_id, refs=refs, windowed=a.windowed, user_id=a.user_id, **kw)
+            out = claim(db, contact_id=a.contact_id, refs=refs, windowed=a.windowed, user_id=a.user_id,
+                        reply_due=a.reply_due, conversation=a.conversation, **kw)
         else:
             out = refuse(db, reason=a.reason, user_id=a.user_id, **kw)
     elif a.op == "log-deferral":
