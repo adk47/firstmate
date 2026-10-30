@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS fingerprints (
   track_listed INTEGER,                -- F5a: submitter's track title/ISRC in the document; NULL not checked
   matched_name_hash TEXT,              -- content.name_hash of the name that matched the claimant; NULL none/unknown
   name_verified INTEGER,               -- 1 that name is a verified identity
+  text_sha TEXT,                       -- fingerprint.text_sha of the extracted text; NULL unknown
   created_at TEXT NOT NULL,
   PRIMARY KEY (proof_id, contact_h, track_key)
 );
@@ -108,6 +109,7 @@ MIGRATIONS = (
     ("fingerprints", "track_listed", "INTEGER"),
     ("fingerprints", "matched_name_hash", "TEXT"),
     ("fingerprints", "name_verified", "INTEGER"),
+    ("fingerprints", "text_sha", "TEXT"),       # exact normalized-text identity (Fable b1 on #1514)
     ("forensics", "request_id", "TEXT NOT NULL DEFAULT ''"),
     ("verdicts", "contact_h", "TEXT NOT NULL DEFAULT ''"),
     ("verdicts", "track_key", "TEXT NOT NULL DEFAULT ''"),
@@ -191,14 +193,14 @@ class ProofStore:
                             (fp.proof_id, now, source, source_ref, fp.contact_h, fp.mime, nbytes))
             self.db.execute("INSERT OR REPLACE INTO fingerprints (proof_id, contact_h, kind, mime, phash, "
                             "minhash_json, n_shingles, entities_json, track_key, role_families, claimant_named, "
-                            "track_listed, matched_name_hash, name_verified, created_at) "
-                            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                            "track_listed, matched_name_hash, name_verified, text_sha, created_at) "
+                            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                             (fp.proof_id, fp.contact_h, fp.kind, fp.mime,
                              None if fp.phash is None else format(fp.phash, "016x"), json.dumps(fp.minhash),
                              fp.n_shingles, json.dumps(fp.entities), fp.track_key or "", ",".join(fp.role_families),
                              None if fp.claimant_named is None else int(fp.claimant_named),
                              None if fp.track_listed is None else int(fp.track_listed), fp.name_h,
-                             None if fp.name_verified is None else int(fp.name_verified), now))
+                             None if fp.name_verified is None else int(fp.name_verified), fp.text_sha, now))
             self.db.executemany(
                 "INSERT INTO forensics (proof_id, analyzer_version, check_id, name, severity, value_json, reason, "
                 "evidence_json, created_at, request_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -352,8 +354,11 @@ class ProofStore:
                                                     excerpt=f"matches proof {other.proof_id[:12]}")))
                 continue
             acc = accounts.setdefault(other.contact_h, {"how": set(), "tracks": set(), "proof": other.proof_id,
-                                                        "names": set(), "verified": set()})
+                                                        "names": set(), "verified": set(), "strict": False})
             acc["how"].add(how)
+            # Fable 165 (df38bbd1): a text match is the SAME document only with the same split signature on the
+            # same track/ISRC (or no track on either); otherwise it is one template filled in per track.
+            acc["strict"] = acc["strict"] or how != "same_text_and_entities" or same_document_text(fp, other)
             acc["tracks"].add(other.track_key or "")
             if other.claimant_named:
                 acc["names"].add(other.name_h)
@@ -365,7 +370,7 @@ class ProofStore:
             out.extend(cross_account(fp, acc["how"], acc["tracks"], linked,
                                      Evidence(file=path, tool="credit_verify.fingerprint",
                                               excerpt=f"matches proof {acc['proof'][:12]}"),
-                                     acc["names"], acc["verified"]))
+                                     acc["names"], acc["verified"], strict=acc["strict"]))
         if len(families) >= 2:
             out.append(Signal("F2b", "template_family", INFO, value={"other_accounts": len(families)},
                               evidence=Evidence(file=path, tool="credit_verify.fingerprint")))
@@ -389,12 +394,29 @@ def _fingerprint(r: sqlite3.Row) -> Fingerprint:
                        claimant_named=None if r["claimant_named"] is None else bool(r["claimant_named"]),
                        track_listed=None if r["track_listed"] is None else bool(r["track_listed"]),
                        name_h=r["matched_name_hash"],
-                       name_verified=None if r["name_verified"] is None else bool(r["name_verified"]))
+                       name_verified=None if r["name_verified"] is None else bool(r["name_verified"]),
+                       # a store not migrated yet (the doc-verify reader opens proof.sqlite read-only): unknown
+                       text_sha=r["text_sha"] if "text_sha" in r.keys() else None)
+
+
+def same_document_text(fp: Fingerprint, other: Fingerprint) -> bool:
+    """A `same_text_and_entities` match is the SAME document (Fable 165) only when the normalized text is EXACTLY the
+    same (fingerprint.text_sha; Fable b1: MinHash >= 0.85 is similarity, not equality - unknown on either side is not
+    the same), the split signature is the same (non-empty, at least two shares) AND both uploads claim the same track
+    (the same claim track key, which carries the track's ISRC identity), or no track on either. Anything else is one
+    TEMPLATE filled in twice. The ISRCs PRINTED on the documents are not compared: the same text prints the same ISRCs."""
+    if not fp.text_sha or fp.text_sha != other.text_sha:
+        return False
+    a, b = fp.entities or {}, other.entities or {}
+    sig = a.get("percent_sig") or ""
+    if not sig or sig != (b.get("percent_sig") or "") or sig.count(",") < 1:
+        return False
+    return (fp.track_key or "") == (other.track_key or "")
 
 
 def cross_account(fp: Fingerprint, hows: set[str], tracks: set[str], linked: bool, ev: Evidence,
-                  other_names: set[str | None] = frozenset(), other_verified: set[str | None] = frozenset()
-                  ) -> list[Signal]:
+                  other_names: set[str | None] = frozenset(), other_verified: set[str | None] = frozenset(),
+                  strict: bool = True) -> list[Signal]:
     """Another account sent this document (`hows`: how it matched; `tracks`:
     the tracks that account used it for; `other_names`: the name hashes that
     account was matched under, None when unknown; `other_verified`: those that
@@ -449,6 +471,12 @@ def cross_account(fp: Fingerprint, hows: set[str], tracks: set[str], linked: boo
     value = {"how": sorted(hows), "tracks": len(tracks),
              "same_track": same_track if (same_track or other_track) else None}
     reused = Signal("F2", "reused_by_another_account", SOFT, value=value, evidence=ev)
+    if fp.claimant_named is False and not strict:
+        # Fable 165: a TEMPLATE match (same text, different splits or another track) is not a passed-around
+        # document - an evidence line, never FORGED_LIKELY. The document still does not name the claimant.
+        return [Signal("F2", "template_match_another_account", SOFT, value={**value, "template": True},
+                       reason="Another account sent a document from the same template (different splits or "
+                              "another track); this one does not name the claimant.", evidence=ev)]
     if fp.claimant_named is False:
         if other_track:
             return [Signal("F2", "reused_on_another_track", HARD, value=value,

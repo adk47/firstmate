@@ -18,7 +18,7 @@ Decision-tree reference for the 10 most frequent customer scenarios, based on re
    - **If they also mention wanting a refund** ("cancel and refund it", "cancel and get my money back"): the `refund-retention` skill takes precedence. Handle via Row #9, not here.
 2. If they can't find the setting in the app:
    - Walk them through Settings > Billing or Subscription section, or – if they've clearly asked to cancel – run the Row #9 flow and cancel for them.
-3. **Escalate:** If they're unable to make the change after following the steps (and it isn't a cancel Caroline can do herself), create a ticket with category "Billing – Self-Service Failure". SLA: 1 business day.
+3. **Escalate:** If they're unable to make the change after following the steps (and it isn't a cancel Caroline can do herself), create a ticket with category "Billing – Self-Service Failure". No timeframe to the customer.
 
 ---
 
@@ -26,13 +26,16 @@ Decision-tree reference for the 10 most frequent customer scenarios, based on re
 
 **Customer says:** "I tried to claim my profile but nothing is happening" / "My claim was rejected."
 
-**Resolution path:**
-0. **Ground first**: call `profile_claim_status` with the profile URL, then branch on `own_claim_state`: `pending` with `route_selfserve_claim` → the `customer-profile-claim` skill can verify it now (take the returned `claim_id`); `rejected` → explain the returned reason and the resubmission path below; `processed` → the claim is already approved, this is an access question; `reverted` / `multiple` / any conflict or suspicion flag → file the `profile-claim` packet the tool suggests, never argue ownership. If it fails closed (identity unverified) continue below without asserting claim state.
-1. **Pending:** tell them plainly the claim is pending, in the app's own words for that state ("We are verifying your claim and will notify you when it has been processed"). Quote no timeframe and never say a person will review it: claims are decided under written rules, not by a human review queue. If we already sent them a message asking for a code, the code goes exactly where that message says; never invent a code, a surface, or a check of your own.
-2. **Rejected:** explain the reason the tool returned. The claim form asks for a link or two they control (their own website, streaming artist page, or social account); claiming again with such a link is the resubmission path. There is no ID upload in the claim flow, so never ask for a government ID.
-3. **Stuck, contested, or anything the tool routes:** file the `profile-claim` packet it suggests (account email, profile URL, date of submission or rejection reason). `create_ticket` returns no timeframe for claims; quote none.
-4. Claim notifications from the app (the bell and the claim email) go out on their own; your reply in this conversation is separate from them.
-5. If the customer says the profile belongs to someone else they represent (a client, an artist on their roster), STOP – this is not a self-claim. Switch to row 2b below.
+**Hand off only** (`AGENTS.md`, "Credits, documents, claims and merges: hand off only"). Do not look
+up the claim and say nothing about its state.
+1. If they asked how claiming works, the approved claim paragraph in `faq.md` ("How do I claim my
+   profile?"); a closed or rejected claim: the decline paragraph in `credits-and-profiles.md`.
+2. File one `create_ticket` with `actionType: "profile-claim"`, the profile link and what they said.
+   Proof they send: add `details.handoff: "document"` and use the approved thank-you paragraph in
+   `verification-handoff`.
+3. End with the handoff line: "I'm pulling in a teammate to take this from here." Timing: only
+   "usually within a day once the step is done"; no outcome, never a claim code or a surface.
+4. If the customer says the profile belongs to someone else they represent, use 2b.
 
 ---
 
@@ -40,17 +43,15 @@ Decision-tree reference for the 10 most frequent customer scenarios, based on re
 
 **Customer says:** "I manage this artist and need to claim their profile" / "The artist has no social media so they can't claim it" / "We have a contract that gives us the right to administer their catalog."
 
-This is an **on-behalf claim**, NOT a self-claim. The standard claim flow (the artist's own links) does not apply. It is decided by the claim lane on the organization path: the strongest proof is a confirmed Muso account email on the official domain of the label, management company or publisher shown on the artist's streaming page or website (no free-mail address). `profile_claim_status` can still supply the facts for the packet (existing claims on the profile, conflicts).
-
-**Resolution path:**
-1. NEVER tell the customer the artist must claim the profile themselves. If they have already explained the artist cannot complete self-claim (no social media, deceased, unreachable, contractual delegation), repeating the self-claim instructions is the single worst response – it is exactly what frustrated customers quote back at us.
-2. Collect the on-behalf evidence (any they can provide; screenshots accepted):
-   - Publishing / rights-management / management contract naming the artist
-   - A letter of authorization (LOA) from the artist or rights holder
-   - The customer's own account email and the exact profile URL or name they need access to
-3. Create ONE ticket with `actionType: "profile-claim"` and put `"on_behalf": true`, the representative's relationship (manager / publisher / label), the domain of their account email, and the documentation summary in `details`. Set `details.escalation_reason: "on_behalf_claim_manual_review"` (the tag name is historical; it routes the ticket to the claim lane's organization path, not to a person).
-4. Quote no timeframe and do not say it needs a manual review: `create_ticket` returns no timeframe for claims. Do not promise a reply here either: the claim decision reaches them as an app notification and email.
-5. On any follow-up about the same request, follow the SLA-breach rules (see SOUL.md "Repeat follow-ups") – do not file fresh tickets and do not re-promise turnarounds.
+This is an **on-behalf claim**, decided by the claim lane on the organization path. Hand off only.
+1. NEVER tell the customer the artist must claim the profile themselves.
+2. File one `create_ticket` with `actionType: "profile-claim"`, `details.on_behalf: true`, their
+   relationship (manager / publisher / label), the profile link, and what they said or attached
+   (`details.handoff: "document"` when they attached proof). Set
+   `details.escalation_reason: "on_behalf_claim_manual_review"` (historical tag name; it routes to
+   the organization path, not a person).
+3. Reply with the handoff line. No timeframe, no "manual review", no outcome.
+4. Follow-ups append to the same ticket; never re-promise anything.
 
 ---
 
@@ -58,31 +59,22 @@ This is an **on-behalf claim**, NOT a self-claim. The standard claim flow (the a
 
 **Customer says:** "I show up twice / under different names. Can you merge them?"
 
-There is **no self-service merge UI** in app.muso.ai yet. Do NOT direct customers to "Settings > Profile > Merge Request", "My profiles > Merge" or any similar in-app flow until this file says it is live. Merges are claim-first (captain rule 2026-10-23): a merge happens only when EVERY profile involved has a processed claim by this customer and is in their workspace.
+There is **no self-service merge UI** in app.muso.ai yet. Do NOT direct customers to "Settings > Profile > Merge Request", "My profiles > Merge" or any similar in-app flow until this file says it is live. Merges are claim-first (captain rule 2026-10-23) and are done by the merge agent. **Hand off only**: run no check on their profiles.
 
-**Resolution path:**
-1. Ask the customer for the link to the profile they want to keep as their **main** profile (e.g., `https://credits.muso.ai/profile/<id>` or `https://app.muso.ai/profile/<id>`).
-2. Ask for the link(s) to the **duplicate** profile(s) to merge into the main.
-3. Run `dedupe_check` (security routing first, as in `customer-profile-dedupe`), then answer from what it says about each profile:
-   - **Every profile already claimed by this customer** (`owns_survivor: true` and every duplicate `claim_state: "claimed_same_owner"`): nothing more is needed from them. Never tell them their claims need review or ask them to claim again.
-   - **A duplicate not claimed by them yet** (`claim_state: "unclaimed"`; check `profile_claim_status` for a pending or rejected claim of theirs): name exactly which one, and tell them to claim it through the app first, then ask us to merge (claim-first rule above).
-   - **`claimed_different_user`, `unresolved`, or a security flag:** never discuss the other account and promise no outcome; route it per `customer-profile-dedupe`.
-4. Create an action-request ticket with `actionType: "profile-merge"`. Include in `details`:
-   - `main_profile_url` – the URL the customer wants kept
-   - `duplicate_profile_urls` – array of duplicate profile URLs to merge in
-5. Promise no date: `create_ticket` returns no timeframe for merges. When the merge is done (or needs something from them), the result is posted as a reply in this conversation. Never say "I can merge them" or ask them to confirm a merge unless `profiles_consolidate` returned a successful preview this turn, and never say a merge is done unless a tool result says so.
+1. Ask for the link to the profile they want to keep as **main** and the link(s) to the
+   **duplicate(s)** (customer-facing URLs only, e.g. `https://credits.muso.ai/profile/<id>`).
+2. File one `create_ticket` with `actionType: "profile-merge"`, `details.main_profile_url`,
+   `details.duplicate_profile_urls[]` and `details.handoff: "merge"` (`unmerge-request` when another
+   artist's tracks were mixed in).
+3. Reply: if they asked how merging works, the approved merge paragraph in `faq.md` ("Can I merge
+   duplicate profiles?"), then the handoff line. Never say which of their
+   profiles are claimed, never "I can merge them", never a date, never that a merge is done.
 
 **Notes:**
-- Never share an internal team member's email or assign a specific reviewer by name – the operations team triages from the ticket queue.
-- Never reference internal tools or URLs (e.g., admin dashboards, retool). Customer-facing URLs only.
-- If the customer can't provide URLs and only knows profile names, run `profile_lookup` to confirm matches before opening the ticket – include the resolved profile IDs in `details` instead of (or alongside) URLs. `profile_credits_status` also surfaces same-name duplicate CANDIDATES (claim state + credit counts) when the customer can't name the duplicates yet – candidates only, never confirmed duplicates.
-- **Known cause (2026-08-26, internal; do not quote the mechanism to customers):**
-  a claim can mint an EMPTY twin of the profile rather than attaching to the
-  populated one. The signature is a duplicate with the right name and few or zero
-  credits, created around the time they claimed. That is our defect (IDP #1538), not
-  customer error, so never imply they created it or claimed the wrong profile. File
-  the `profile-merge` ticket as normal and note "empty twin, likely claim-mint" in
-  `details` so ops can batch them.
+- Never share an internal team member's email or name a reviewer; never reference internal tools.
+- **Known cause (2026-08-26, internal; do not quote the mechanism to customers):** a claim can mint
+  an EMPTY twin of the profile (IDP #1538). Never imply they created it; note "empty twin, likely
+  claim-mint" in `details` if they say the duplicate appeared when they claimed.
 
 ---
 
@@ -90,61 +82,36 @@ There is **no self-service merge UI** in app.muso.ai yet. Do NOT direct customer
 
 **Customer says:** "My credit isn't showing" / "The credit is wrong."
 
-**Resolution path:**
-0. **Ground first**: call `profile_credits_status` with the profile and the track/role in question, then branch on its diagnosis: `on_this_profile` → the credit is already visible, show them where; `pending_verification` → it's in review, not missing (Row #5 flow); `awaiting_review` → answer from status: "N credits are waiting for our team to review", taking N from the diagnosis (it says "more than N" when the queue is truncated; never quote an exact capped count) (no proof ask, no date promise, and do NOT continue to step 1); `on_other_profile` → wrong-profile correction, file the handoff packet it returns; `not_found` → continue below.
-1. Is the credit missing or incorrect?
-   - If **missing**: first check the track is on Spotify – if it isn't (YouTube/Instagram-only release, live session video), we cannot add the track or its credits for now; say so plainly instead of promising a review. Otherwise ask if they've tried adding it themselves. If not, walk them through it for where they are – web: own profile > Summary panel > Add Credits > search or paste Spotify link > specify role > submit; app: track/album > Add Missing Credits > specify role > submit. Our team reviews submitted credits; review times vary, so don't promise a set time – the customer doesn't need to do anything while it waits for review.
-   - If **incorrect**: continue to step 2.
-2. Is the credit sourced from Muso or an external platform?
-   - Ask: does the incorrect credit appear on Spotify, Apple Music, or their distributor in the same wrong form?
-   - If **yes (external source)**: explain that Muso reflects what the source reports. They need to contact their distributor or that platform to correct the metadata. Once fixed at the source, Muso updates automatically.
-   - If **no (Muso source or unsure)**: they can request a correction through their account. If that doesn't work, escalate.
-3. **Escalate:** Create a ticket with category "Credit Error – Muso Source" or "Credit Error – Source Discrepancy". Include: account email, track/album URL, the incorrect credit detail, what the correct credit should be. `create_ticket` returns no timeframe for credit requests; quote none.
+**Hand off only** for anything about THEIR credit (missing, wrong, pending, stuck). Do not look it up.
+1. General answers you may give from the reference library:
+   - how to add a missing credit: web: own profile > Summary panel > Add Credits > search or paste
+     the Spotify link > role > submit; app: track/album > Add Missing Credits > role > submit;
+   - the track must be on Spotify: a YouTube- or Instagram-only release or a live session video
+     cannot be added for now;
+   - a credit that comes from Spotify, Apple Music or a distributor is corrected at that source,
+     and Muso reflects the fix automatically.
+2. File one `create_ticket` (`credit-claim` missing, `credit-correction` wrong role,
+   `bulk-credit-change` several tracks) with `details.handoff: "credit-status"`, the profile and
+   track links and what they said.
+3. If they asked how credit checks work, the approved credit paragraph in `faq.md` ("How long does
+   credit verification take?"); a declined credit or "that credit isn't mine", the paragraphs in
+   `credits-and-profiles.md`. Then the handoff line. No timeframe, no status, no outcome.
 
 ---
 
 ## 5. Documentation needed for pending credits
 
-**Customer says:** "What do I need to send to verify my credit?"
+**Customer says:** "What do I need to send to verify my credit?" / sends a document.
 
-**Resolution path:**
-1. **Where to send it and what to include:** Proof goes here in the in-app
-   support chat. There is nowhere else to upload it. Ask the customer to include
-   their Muso profile link, the track title, the artist name, their role on the
-   track, and a release link, along with the proof itself. For multiple tracks,
-   have them list each track with their role on it so the team can match each
-   piece of proof cleanly.
-2. Accepted forms of proof (screenshots are accepted for all of these):
-   - A public link where the credit is listed – Tidal, Genius, Discogs,
-     AllMusic, ASCAP, or BMI
-   - Documentation of the work – a project/session file, communication with the
-     artist, a contract, session agreement, release form, or split sheet showing
-     the role
-   - A production receipt or invoice, or an official credit listing on a label or
-     distributor portal
-   - Confirmation from a credited collaborator, the artist, or the rights holder
-     (forwarded by the customer)
-3. For songwriter/composer credits: PRO registration (ASCAP, BMI, SESAC, etc.) is strong supporting evidence.
-4. If the customer isn't sure which document applies:
-   - Ask what role they're claiming (producer, writer, engineer, etc.) and guide them toward the most relevant doc type above.
-5. If they have no documentation at all:
-   - Explain that without supporting documentation claims are harder to verify, but they can still submit and explain the context in the claim notes.
-6. If the credit is in "user verification needed", the `customer-credit-verification`
-   skill governs the full flow (ownership check, proof intake, routing to the team).
-   When it's unclear whether the credit is pending at all, `profile_credits_status`
-   reads the pending queue (`credit.pending`, `pending_verification` state) and the
-   awaiting-review queue (`credit.awaiting_review`, `awaiting_review` state) before
-   you enter the proof flow. Awaiting-review credits need no proof from the customer.
-7. **Status first:** if they have already sent documentation, look up the real state with `credit_verification_check` / `profile_credits_status` and tell them what it says (on the profile, waiting for review, or exactly what is still missing). Never ask again for proof they already sent. If the state cannot be read, file `credit-verify` with the details; quote no timeframe.
-
-**Notes:**
-- **Before asking for more proof:** a credit sitting in `user_verification_needed` is
-  usually NOT under suspicion. Most holds today are transient pipeline states
-  (commonly the track still being captured) surfaced as if they were risk decisions
-  (internal ref IDP #1537). Never tell a customer their credit was flagged, doubted,
-  or held for review of their honesty. If they have already sent proof once, do not
-  ask again; file the follow-up and reply per "Document received" in the
-  `customer-credit-verification` skill. _(added 2026-08-26)_
+**Hand off only.** The verification agent asks for exactly what it needs, in its own message;
+Caroline does not ask for proof and does not list proof types beyond the approved credit
+paragraph's one generic list (`faq.md`, "How long does credit verification take?").
+1. File one `create_ticket` with `actionType: "credit-verify"` and `details.handoff: "credit-status"`
+   (a question) or `"document"` (they sent a document, screenshot or link).
+2. Reply: a question gets the approved credit paragraph; a document gets the approved thank-you
+   paragraph in `verification-handoff`; then the handoff line. None of the barred phrases in
+   `verification-handoff`.
+3. Never tell a customer their credit was flagged, doubted or held for review of their honesty.
 
 ---
 
@@ -156,11 +123,11 @@ There is **no self-service merge UI** in app.muso.ai yet. Do NOT direct customer
 1. Ask them to check:
    - Is the charge showing as settled (not pending) on their bank statement?
    - Is the email on their Muso account the same one that received the payment receipt?
-2. If charge is still pending: it can take 1-2 business days to process. Ask them to wait and check again.
+2. If the charge is still pending at their bank: it can take a day or two to settle. Ask them to check again after that.
 3. If charge is settled and email matches but account still shows inactive:
    - Wait up to 24 hours from payment settlement before escalating.
 4. If 24+ hours have passed and subscription is still inactive:
-   - **Escalate:** Create a ticket with category "Billing – Charged but Inactive". Include: account email, payment confirmation or receipt, amount and date charged. SLA: 1 business day.
+   - **Escalate:** Create a ticket with category "Billing – Charged but Inactive". Include: account email, payment confirmation or receipt, amount and date charged. No timeframe to the customer.
 
 ---
 
@@ -198,7 +165,7 @@ data-integrity issue.
    - `warming` (or any result with `metrics.measured: false`): the analytics cache was cold, so no numbers were read. The tool already retried once. Do NOT file a ticket and do NOT quote the metrics, they are `null` rather than `0` for exactly this reason. Tell the customer their numbers are still loading and re-run the check before concluding anything.
    - `missing`, `stale`, or `inconsistent`: file `create_ticket` with `actionType: analytics-followup`.
 
-4. If subscription and seat are fine and the data still looks off or stale, treat it like any data-integrity issue: file `create_ticket` with `actionType: analytics-followup`, then tell the customer plainly you've flagged it and quote the SLA once (2 business days). New story, simple and honest: *"Analytics are running on our upgraded platform now. If yours still looks off, tell me what you're seeing and I'll take a closer look and flag it for our team."* Your reply uses escalation language, so the ticket call is atomic with it – see Rule 1.
+4. If subscription and seat are fine and the data still looks off or stale, treat it like any data-integrity issue: file `create_ticket` with `actionType: analytics-followup`, then tell the customer plainly you've flagged it and quote no timeframe. New story, simple and honest: *"Analytics are running on our upgraded platform now. If yours still looks off, tell me what you're seeing and I'll take a closer look and flag it for our team."* Your reply uses escalation language, so the ticket call is atomic with it – see Rule 1.
 
    Collect enough detail for the team in the same turn whenever the customer has
    it: Muso profile link, affected track or release links, source platform links,
@@ -273,7 +240,7 @@ This is a how-to. Steps first. Do NOT call `create_ticket` and do NOT use `actio
 
 4. **In the iOS and Android apps there is no switch.** *"In the app there's nothing to turn on. It shows by itself on the Lifetime view of Analytics."* Never name an app version and never say "update your app".
 
-**Escalate only when all five hold:** (a) eligible on all three clauses, (b) Lifetime selected, (c) Live updates on, (d) Full format, and (e) the number is still static or clearly wrong. Anything short of all five is a how-to answer, not an escalation. In the iOS and Android apps there is no switch or format choice, so the app test is three conditions: (a) eligible on all three clauses, (b) the Lifetime view is open, and (e) the number is still static or clearly wrong. When the applicable conditions hold, file `create_ticket` with `actionType: analytics-followup` and continue at section 7 step 4 (the ticket and the one-time SLA quote) and its tone rules. Step 0 of section 7 does not apply to an escalation from 7b. If the reply uses escalation language, the `create_ticket` call happens in the same turn (Rule 1).
+**Escalate only when all five hold:** (a) eligible on all three clauses, (b) Lifetime selected, (c) Live updates on, (d) Full format, and (e) the number is still static or clearly wrong. Anything short of all five is a how-to answer, not an escalation. In the iOS and Android apps there is no switch or format choice, so the app test is three conditions: (a) eligible on all three clauses, (b) the Lifetime view is open, and (e) the number is still static or clearly wrong. When the applicable conditions hold, file `create_ticket` with `actionType: analytics-followup` and continue at section 7 step 4 (the ticket, no timeframe) and its tone rules. Step 0 of section 7 does not apply to an escalation from 7b. If the reply uses escalation language, the `create_ticket` call happens in the same turn (Rule 1).
 
 ---
 
@@ -293,7 +260,7 @@ This is a how-to. Steps first. Do NOT call `create_ticket` and do NOT use `actio
 5. If they reset the password and still can't log in:
    - Check if they're using the right email – common issue is having multiple email addresses.
 6. If still unable to log in after all steps:
-   - **Escalate:** Create a ticket with category "Login – Account Access". Include: account email (or emails they've tried), login method (email/social), error message if any. SLA: 1 business day.
+   - **Escalate:** Create a ticket with category "Login – Account Access". Include: account email (or emails they've tried), login method (email/social), error message if any. No timeframe to the customer.
 
 ---
 
@@ -339,7 +306,7 @@ The `refund-retention` skill governs this ENTIRE flow – run it FIRST (SOUL.md 
    - **Last alternative** – one final save (whichever hasn't been offered) before the exit.
 2. If the customer still wants out, ASK which exit they want:
    - **Cancel only** – Caroline cancels in-chat via `cancel_subscription` (period end: access runs to the end of the paid period, no money moves). Quote the returned `access_until` date. No ticket.
-   - **Refund** – run `billing_status` (`customer_request: "refund"`) and hand off to the `action-request` skill with `subscription-refund` (Tier 3), including its `handoff_packet` (charge/refund facts pre-filled) and the `retention_context` block. Quote the SLA the ticket response returns (per the skill's handoff) – do NOT promise a fixed turnaround here. Operations reviews, and handles the cancel together with the refund.
+   - **Refund** – run `billing_status` (`customer_request: "refund"`) and hand off to the `action-request` skill with `subscription-refund` (Tier 3), including its `handoff_packet` (charge/refund facts pre-filled) and the `retention_context` block. Quote no timeframe (per the skill's handoff) – do NOT promise a fixed turnaround here. Operations reviews, and handles the cancel together with the refund.
 3. There is no self-service refund path, and Caroline never processes the refund herself – Operations reviews and executes it.
 
 **Billing-issue exception:** charged twice / wrong amount / charged after cancel is NOT a retention case – it follows the `billing-issue` path inside the skill (Gate 2 files a Tier-2 billing ticket), not the refund gates.
@@ -359,7 +326,7 @@ The `refund-retention` skill governs this ENTIRE flow – run it FIRST (SOUL.md 
 4. If they want plain account deletion:
    - There is no self-service account deletion.
    - Do NOT promise that "all data will be removed" – account data (login, email, personal details) is deleted on request, but credit records on published works are handled separately (see `gdpr-erasure-requests`).
-   - **Escalate:** file via the `action-request` skill with `actionType: data-deletion` (Tier 3). Include: account email, confirmation they want the account permanently deleted. Quote the SLA the ticket response returns – do not promise a fixed turnaround.
+   - Reply with the approved acknowledgement in `gdpr-erasure-requests.md` and file `create_ticket` with `actionType: data-deletion` (account email, what they want removed). `create_ticket` returns no timeframe: quote none, never a business-day number, never "deleted".
 
 ---
 

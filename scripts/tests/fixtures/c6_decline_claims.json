@@ -1,0 +1,706 @@
+{
+ "_doc": "C6 fixtures: d2 ruled these 17 claims by hand (14 decline / 3 hold: the kals fraud-tier account is held, claim-route-zero (C)); the G59 trio is d2 needs-code and must NOT decline (related profiles, catalog shares 287-438 recordings). Trimmed facts from claims-review-prep-c1/c2 (2026-10-27); no emails. shared_tracks from matvw_profile_credit 2026-10-29.",
+ "deceased": [
+  "2056a2df-156b-4a54-91d5-b59705bb9994"
+ ],
+ "shared_tracks": [
+  [
+   "80381030-cca8-44b1-9b32-c99bab81aee6",
+   "fb7be586-bf94-4ebe-b9d7-47f8ef4742df",
+   287
+  ],
+  [
+   "99283489-c74b-4acc-9b58-8188a444fabb",
+   "fb7be586-bf94-4ebe-b9d7-47f8ef4742df",
+   0
+  ],
+  [
+   "35e96343-94d2-4e76-89c5-3b269cf02070",
+   "fb7be586-bf94-4ebe-b9d7-47f8ef4742df",
+   0
+  ],
+  [
+   "02bf329e-e42a-4d5e-80ee-c77a53792da8",
+   "35e96343-94d2-4e76-89c5-3b269cf02070",
+   0
+  ],
+  [
+   "02bf329e-e42a-4d5e-80ee-c77a53792da8",
+   "80381030-cca8-44b1-9b32-c99bab81aee6",
+   383
+  ],
+  [
+   "35e96343-94d2-4e76-89c5-3b269cf02070",
+   "99283489-c74b-4acc-9b58-8188a444fabb",
+   0
+  ],
+  [
+   "35e96343-94d2-4e76-89c5-3b269cf02070",
+   "80381030-cca8-44b1-9b32-c99bab81aee6",
+   0
+  ],
+  [
+   "02bf329e-e42a-4d5e-80ee-c77a53792da8",
+   "fb7be586-bf94-4ebe-b9d7-47f8ef4742df",
+   438
+  ],
+  [
+   "80381030-cca8-44b1-9b32-c99bab81aee6",
+   "99283489-c74b-4acc-9b58-8188a444fabb",
+   0
+  ],
+  [
+   "02bf329e-e42a-4d5e-80ee-c77a53792da8",
+   "99283489-c74b-4acc-9b58-8188a444fabb",
+   0
+  ]
+ ],
+ "rows": [
+  {
+   "claim": {
+    "id": 1618667,
+    "userId": 58586,
+    "profileId": "a34a942f-26e5-4c4d-8263-245afb318972",
+    "profileType": "artist",
+    "reason": null,
+    "status": "pending",
+    "createdAt": "2026-10-18T01:09:11.454+00:00",
+    "email_domain": "gmail.com",
+    "verificationLinks": {},
+    "pk_profile_other_claims": []
+   },
+   "profile": {
+    "name": "Piper Rockelle",
+    "popularity": 53,
+    "creditCount": 27
+   },
+   "gate": {
+    "decision": "hold",
+    "band": "red",
+    "watch": true
+   },
+   "expect": "hold"
+  },
+  {
+   "claim": {
+    "id": 1618708,
+    "userId": 58586,
+    "profileId": "4456e948-2bd4-4b99-8f68-c61d5a74f0a0",
+    "profileType": "artist",
+    "reason": null,
+    "status": "pending",
+    "createdAt": "2026-10-18T04:44:39.63+00:00",
+    "email_domain": "gmail.com",
+    "verificationLinks": {},
+    "pk_profile_other_claims": []
+   },
+   "profile": {
+    "name": "Elliana Walmsley",
+    "popularity": 1,
+    "creditCount": 5
+   },
+   "gate": {
+    "decision": "hold",
+    "band": "red",
+    "watch": true
+   },
+   "expect": "hold"
+  },
+  {
+   "claim": {
+    "id": 1620251,
+    "userId": 58586,
+    "profileId": "4d7e1719-10af-464b-9290-b35ff712d6fb",
+    "profileType": "artist",
+    "reason": null,
+    "status": "pending",
+    "createdAt": "2026-10-23T18:17:55.537+00:00",
+    "email_domain": "gmail.com",
+    "verificationLinks": {},
+    "pk_profile_other_claims": []
+   },
+   "profile": {
+    "name": "Paris Hilton",
+    "popularity": 72,
+    "creditCount": 137
+   },
+   "gate": {
+    "decision": "hold",
+    "band": "red",
+    "watch": true
+   },
+   "expect": "hold"
+  },
+  {
+   "claim": {
+    "id": 1614355,
+    "userId": 1404557,
+    "profileId": "2056a2df-156b-4a54-91d5-b59705bb9994",
+    "profileType": "artist",
+    "reason": null,
+    "status": "pending",
+    "createdAt": "2026-10-02T14:16:03.89+00:00",
+    "email_domain": "gmail.com",
+    "verificationLinks": {},
+    "pk_profile_other_claims": []
+   },
+   "profile": {
+    "name": "Nipsey Hussle",
+    "popularity": 85,
+    "creditCount": 1352
+   },
+   "gate": {
+    "decision": "allow",
+    "band": "green",
+    "watch": false
+   },
+   "expect": "decline"
+  },
+  {
+   "claim": {
+    "id": 1608918,
+    "userId": 1398875,
+    "profileId": "99283489-c74b-4acc-9b58-8188a444fabb",
+    "profileType": "artist",
+    "reason": null,
+    "status": "pending",
+    "createdAt": "2026-09-13T14:56:00.182+00:00",
+    "email_domain": "gmail.com",
+    "verificationLinks": {},
+    "pk_profile_other_claims": []
+   },
+   "profile": {
+    "name": "Bob Gaudio",
+    "popularity": 86,
+    "creditCount": 6193
+   },
+   "gate": {
+    "decision": "allow",
+    "band": "green",
+    "watch": false
+   },
+   "expect": "decline"
+  },
+  {
+   "claim": {
+    "id": 1607654,
+    "userId": 1398875,
+    "profileId": "35e96343-94d2-4e76-89c5-3b269cf02070",
+    "profileType": "organization",
+    "reason": "company claim on add",
+    "status": "pending",
+    "createdAt": "2026-09-09T19:09:56.852+00:00",
+    "email_domain": "gmail.com",
+    "verificationLinks": {
+     "role": "other"
+    },
+    "pk_profile_other_claims": []
+   },
+   "profile": {
+    "name": "Pinkfong",
+    "popularity": 80,
+    "creditCount": 5877
+   },
+   "gate": {
+    "decision": "allow",
+    "band": "green",
+    "watch": false
+   },
+   "expect": "decline"
+  },
+  {
+   "claim": {
+    "id": 1604304,
+    "userId": 147786,
+    "profileId": "3d8ae2e0-c401-43f9-bc19-eb66d353f76d",
+    "profileType": "artist",
+    "reason": null,
+    "status": "pending",
+    "createdAt": "2026-08-27T13:11:02.03+00:00",
+    "email_domain": "cloudtestlabaccounts.com",
+    "verificationLinks": {
+     "weblinks": "admin@muso.ai"
+    },
+    "pk_profile_other_claims": [
+     {
+      "userId": null,
+      "status": "rejected"
+     },
+     {
+      "userId": 223635,
+      "status": "rejected"
+     },
+     {
+      "userId": 119795,
+      "status": "rejected"
+     }
+    ]
+   },
+   "profile": {
+    "name": "Rick Rubin",
+    "popularity": 92,
+    "creditCount": 3563
+   },
+   "gate": {
+    "decision": "allow",
+    "band": "green",
+    "watch": false
+   },
+   "expect": "decline"
+  },
+  {
+   "claim": {
+    "id": 1610051,
+    "userId": 147786,
+    "profileId": "814b2aae-3d5d-4a3e-be13-765d86c40260",
+    "profileType": "organization",
+    "reason": "company claim on add",
+    "status": "pending",
+    "createdAt": "2026-09-17T08:56:00.713+00:00",
+    "email_domain": "cloudtestlabaccounts.com",
+    "verificationLinks": {
+     "role": "admin@muso.ai"
+    },
+    "pk_profile_other_claims": []
+   },
+   "profile": {
+    "name": "SLAVERY MUSIC (ADMIN BY RESERV",
+    "popularity": 75,
+    "creditCount": 1252
+   },
+   "gate": {
+    "decision": "allow",
+    "band": "green",
+    "watch": false
+   },
+   "expect": "decline"
+  },
+  {
+   "claim": {
+    "id": 1608834,
+    "userId": 41797,
+    "profileId": "438a50e2-f928-4be9-b9f1-3794a8a97b82",
+    "profileType": "organization",
+    "reason": "company claim on add",
+    "status": "pending",
+    "createdAt": "2026-09-13T07:08:25.859+00:00",
+    "email_domain": "yahoo.com",
+    "verificationLinks": {
+     "role": "Songwriter"
+    },
+    "pk_profile_other_claims": [
+     {
+      "userId": 285834,
+      "status": "rejected"
+     }
+    ]
+   },
+   "profile": {
+    "name": "CONCORD MUSIC GROUP, INC. DBA CONCORD SOUNDS",
+    "popularity": 95,
+    "creditCount": 109072
+   },
+   "gate": {
+    "decision": "allow",
+    "band": "green",
+    "watch": false
+   },
+   "expect": "decline"
+  },
+  {
+   "claim": {
+    "id": 1609413,
+    "userId": 275720,
+    "profileId": "b0d67419-43ae-438b-a094-3a8382783544",
+    "profileType": "organization",
+    "reason": "company claim on add",
+    "status": "pending",
+    "createdAt": "2026-09-15T10:04:06.439+00:00",
+    "email_domain": "gmail.com",
+    "verificationLinks": {
+     "role": "Artist"
+    },
+    "pk_profile_other_claims": [
+     {
+      "userId": 274776,
+      "status": "rejected"
+     },
+     {
+      "userId": 335508,
+      "status": "rejected"
+     }
+    ]
+   },
+   "profile": {
+    "name": "网易云音乐",
+    "popularity": 82,
+    "creditCount": 111080
+   },
+   "gate": {
+    "decision": "allow",
+    "band": "green",
+    "watch": false
+   },
+   "expect": "decline"
+  },
+  {
+   "claim": {
+    "id": 1610840,
+    "userId": 1402064,
+    "profileId": "d084571b-5c98-422d-b984-08124c7111a0",
+    "profileType": "organization",
+    "reason": "company claim on add",
+    "status": "pending",
+    "createdAt": "2026-09-20T04:06:14.84+00:00",
+    "email_domain": "gmail.com",
+    "verificationLinks": {
+     "role": "Owner"
+    },
+    "pk_profile_other_claims": [
+     {
+      "userId": null,
+      "status": "closed"
+     },
+     {
+      "userId": null,
+      "status": "rejected"
+     },
+     {
+      "userId": null,
+      "status": "rejected"
+     },
+     {
+      "userId": 218535,
+      "status": "closed"
+     },
+     {
+      "userId": 129057,
+      "status": "rejected"
+     },
+     {
+      "userId": 274950,
+      "status": "rejected"
+     },
+     {
+      "userId": 321744,
+      "status": "rejected"
+     },
+     {
+      "userId": 366032,
+      "status": "rejected"
+     }
+    ]
+   },
+   "profile": {
+    "name": "RCA Records ",
+    "popularity": 95,
+    "creditCount": 56002
+   },
+   "gate": {
+    "decision": "allow",
+    "band": "green",
+    "watch": false
+   },
+   "expect": "decline"
+  },
+  {
+   "claim": {
+    "id": 1614946,
+    "userId": 1392055,
+    "profileId": "611a9459-38d0-43e4-b0cc-0027ec0b78ff",
+    "profileType": "organization",
+    "reason": "company claim on add",
+    "status": "pending",
+    "createdAt": "2026-10-04T18:38:20.571+00:00",
+    "email_domain": "gmail.com",
+    "verificationLinks": {
+     "role": "Atlantic Records"
+    },
+    "pk_profile_other_claims": [
+     {
+      "userId": 213493,
+      "status": "rejected"
+     },
+     {
+      "userId": 197629,
+      "status": "rejected"
+     },
+     {
+      "userId": 225533,
+      "status": "reverted"
+     },
+     {
+      "userId": 283545,
+      "status": "rejected"
+     },
+     {
+      "userId": 329994,
+      "status": "rejected"
+     },
+     {
+      "userId": 332888,
+      "status": "rejected"
+     },
+     {
+      "userId": 291563,
+      "status": "rejected"
+     },
+     {
+      "userId": 291563,
+      "status": "rejected"
+     },
+     {
+      "userId": 101893,
+      "status": "rejected"
+     },
+     {
+      "userId": 1374471,
+      "status": "rejected"
+     },
+     {
+      "userId": 1405451,
+      "status": "rejected"
+     }
+    ]
+   },
+   "profile": {
+    "name": "Atlantic Records",
+    "popularity": 96,
+    "creditCount": 14216
+   },
+   "gate": {
+    "decision": "allow",
+    "band": "green",
+    "watch": false
+   },
+   "expect": "decline"
+  },
+  {
+   "claim": {
+    "id": 1619131,
+    "userId": 1407930,
+    "profileId": "22ce4453-5dd4-493a-b418-c1a170632192",
+    "profileType": "organization",
+    "reason": "company claim on add",
+    "status": "pending",
+    "createdAt": "2026-10-20T01:14:34.344+00:00",
+    "email_domain": "gmail.com",
+    "verificationLinks": {
+     "role": "Producer"
+    },
+    "pk_profile_other_claims": []
+   },
+   "profile": {
+    "name": "MUSIC CUBE, INC.",
+    "popularity": 90,
+    "creditCount": 28982
+   },
+   "gate": {
+    "decision": "allow",
+    "band": "green",
+    "watch": false
+   },
+   "expect": "decline"
+  },
+  {
+   "claim": {
+    "id": 1617173,
+    "userId": 1406551,
+    "profileId": "40a4b606-1597-40a7-9db9-8bfb84823c41",
+    "profileType": "organization",
+    "reason": "company claim on add",
+    "status": "pending",
+    "createdAt": "2026-10-12T06:37:39.212+00:00",
+    "email_domain": "gmail.com",
+    "verificationLinks": {
+     "role": "a&r"
+    },
+    "pk_profile_other_claims": [
+     {
+      "userId": null,
+      "status": "rejected"
+     }
+    ]
+   },
+   "profile": {
+    "name": "ROC NATION MUSIC",
+    "popularity": 87,
+    "creditCount": 7140
+   },
+   "gate": {
+    "decision": "allow",
+    "band": "green",
+    "watch": false
+   },
+   "expect": "decline"
+  },
+  {
+   "claim": {
+    "id": 1618974,
+    "userId": 1407829,
+    "profileId": "b8b05180-bc72-47f3-93a0-deab0e866609",
+    "profileType": "organization",
+    "reason": "company claim on add",
+    "status": "pending",
+    "createdAt": "2026-10-19T13:01:26.968+00:00",
+    "email_domain": "privaterelay.appleid.com",
+    "verificationLinks": {
+     "role": "artist"
+    },
+    "pk_profile_other_claims": []
+   },
+   "profile": {
+    "name": "Capital Music",
+    "popularity": 81,
+    "creditCount": 1963
+   },
+   "gate": {
+    "decision": "allow",
+    "band": "green",
+    "watch": false
+   },
+   "expect": "decline"
+  },
+  {
+   "claim": {
+    "id": 1620572,
+    "userId": 1408921,
+    "profileId": "9fea51ff-6318-4fa4-a61b-2ef1764f9f29",
+    "profileType": "organization",
+    "reason": "company claim on add",
+    "status": "pending",
+    "createdAt": "2026-10-24T21:04:41.243+00:00",
+    "email_domain": "gmail.com",
+    "verificationLinks": {
+     "role": "Producer"
+    },
+    "pk_profile_other_claims": [
+     {
+      "userId": 1408921,
+      "status": "closed"
+     }
+    ]
+   },
+   "profile": {
+    "name": "BMI",
+    "popularity": 52,
+    "creditCount": 466
+   },
+   "gate": {
+    "decision": "allow",
+    "band": "green",
+    "watch": false
+   },
+   "expect": "decline"
+  },
+  {
+   "claim": {
+    "id": 1610276,
+    "userId": 1401588,
+    "profileId": "a2b77d37-001b-4f24-b92f-f1eff9c3c350",
+    "profileType": "organization",
+    "reason": "company claim on add",
+    "status": "pending",
+    "createdAt": "2026-09-18T02:34:11.841+00:00",
+    "email_domain": "gmail.com",
+    "verificationLinks": {
+     "role": "other"
+    },
+    "pk_profile_other_claims": [
+     {
+      "userId": 1375395,
+      "status": "rejected"
+     }
+    ]
+   },
+   "profile": {
+    "name": "YouTube",
+    "popularity": 47,
+    "creditCount": 67
+   },
+   "gate": {
+    "decision": "allow",
+    "band": "green",
+    "watch": false
+   },
+   "expect": "decline"
+  },
+  {
+   "claim": {
+    "id": 1605024,
+    "userId": 297922,
+    "profileId": "fb7be586-bf94-4ebe-b9d7-47f8ef4742df",
+    "profileType": "organization",
+    "reason": "company claim on add",
+    "status": "pending",
+    "createdAt": "2026-08-30T13:39:05.503+00:00",
+    "email_domain": "gmail.com",
+    "verificationLinks": {
+     "role": "Marketing & Social Media"
+    },
+    "pk_profile_other_claims": []
+   },
+   "profile": {
+    "name": "G59 Records",
+    "popularity": 89,
+    "creditCount": 917
+   },
+   "gate": {
+    "decision": "allow",
+    "band": "green",
+    "watch": false
+   },
+   "expect": "none"
+  },
+  {
+   "claim": {
+    "id": 1605026,
+    "userId": 297922,
+    "profileId": "80381030-cca8-44b1-9b32-c99bab81aee6",
+    "profileType": "artist",
+    "reason": null,
+    "status": "pending",
+    "createdAt": "2026-08-30T13:40:38.551+00:00",
+    "email_domain": "gmail.com",
+    "verificationLinks": {},
+    "pk_profile_other_claims": []
+   },
+   "profile": {
+    "name": "Aristos Petrou",
+    "popularity": 90,
+    "creditCount": 525
+   },
+   "gate": {
+    "decision": "allow",
+    "band": "green",
+    "watch": false
+   },
+   "expect": "none"
+  },
+  {
+   "claim": {
+    "id": 1605027,
+    "userId": 297922,
+    "profileId": "02bf329e-e42a-4d5e-80ee-c77a53792da8",
+    "profileType": "artist",
+    "reason": null,
+    "status": "pending",
+    "createdAt": "2026-08-30T13:40:48.734+00:00",
+    "email_domain": "gmail.com",
+    "verificationLinks": {},
+    "pk_profile_other_claims": []
+   },
+   "profile": {
+    "name": "Budd Dwyer",
+    "popularity": 92,
+    "creditCount": 986
+   },
+   "gate": {
+    "decision": "allow",
+    "band": "green",
+    "watch": false
+   },
+   "expect": "none"
+  }
+ ]
+}

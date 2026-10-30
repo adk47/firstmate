@@ -953,5 +953,93 @@ class TrayAnchors(unittest.TestCase):
         self.assertIn("no server-side anchor endpoint", p.stderr)
 
 
+
+class D5b(unittest.TestCase):
+    """Fable 171: doc-verify verified requests -> same-run capture -> anchor only on V9 APPROVE."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.store = Store(os.path.join(self.tmp, "dsp.sqlite"))
+        self.good, self.wait = req(1), req(2)
+        self.admin = FakeAdmin([self.good, self.wait, req(3)])
+
+        def reading(t):
+            if t["track_id"] == self.good["trackId"]:
+                return {"spotify": credited(), "tidal": credited("tidal")}
+            return {"spotify": credited(), "tidal": NO_REC}            # one DSP only: WAIT
+        self.pod = FakePod(reading=reading)
+        self.deps = runner.Deps(admin=self.admin, select=fake_select(self.admin), capture=self.pod,
+                                gate=lambda uid: account_gate.GateResult("allow", (), {"band": "green"}),
+                                paying=frozenset(), watch_user_ids=frozenset(), watch_profile_ids=frozenset(),
+                                now=lambda: datetime(2026, 10, 28, 3, 20, tzinfo=timezone.utc))
+
+    def test_only_verified_requests_are_captured_and_only_approve_is_anchored(self):
+        from credit_verify.dspverify import d5b
+        ids = [self.good["id"], self.wait["id"]]                       # req(3) is pending but not doc-verified
+        out = d5b.run(self.store, self.deps, verified=ids, now=NOW)
+        self.assertEqual(out["submitted"], 2)
+        self.assertEqual(out["anchors_built"], 0)                      # captured, not yet read
+        out = d5b.run(self.store, self.deps, verified=ids, now=NOW)    # the next hour: read, then anchor
+        self.assertEqual(out["submitted"], 0)                          # a final verdict < 24 h: no re-capture
+        self.assertEqual(out["anchors_built"], 1)
+        built = [a for a in self.store.anchors() if a["outcome"] == "built"]
+        self.assertEqual([a["request_id"] for a in built], [self.good["id"]])
+        self.assertEqual(self.store.latest_captured_for(self.wait["id"])["verdict"], rules.WAIT)
+        self.assertFalse([a for a in self.store.anchors() if a["request_id"] == self.wait["id"]])  # WAIT: no record
+        self.assertNotIn(req(3)["id"], {r for c in self.store.db.execute("SELECT request_ids_json FROM dsp_captures")
+                                        for r in json.loads(c[0])})
+        out = d5b.run(self.store, self.deps, verified=ids, now=NOW)    # never two records from one verdict
+        self.assertEqual(out["anchors_built"], 0)
+        self.assertEqual(len([a for a in self.store.anchors() if a["outcome"] == "built"]), 1)
+        self.assertTrue(all(p.startswith("/admin/") for p in self.admin.paths))       # core is only read
+        self.assertFalse(any("conditional-status" in p or "anchor" in p for p in self.admin.paths))
+
+    def test_verified_requests_reads_the_standing_doc_verify_outcome_read_only(self):
+        from credit_verify.docverify import VERSION as DV
+        from credit_verify.dspverify import d5b
+        path = os.path.join(self.tmp, "dv.sqlite")
+        db = sqlite3.connect(path)
+        db.execute("CREATE TABLE dv_outcomes (id INTEGER PRIMARY KEY, intake_id TEXT, proof_id TEXT, request_id TEXT, "
+                   "role TEXT, outcome TEXT, version TEXT)")
+        rows = [("i1", "p1", "AAA", "Mixing", "verified", DV),
+                ("i1", "p2", "BBB", "Mixing", "verified", DV), ("i1", "p2", "BBB", "Mixing", "unverifiable", DV),
+                ("i1", "p3", "CCC", "Mixing", "verified", "dv-old")]
+        db.executemany("INSERT INTO dv_outcomes (intake_id, proof_id, request_id, role, outcome, version) "
+                       "VALUES (?,?,?,?,?,?)", rows)
+        db.commit()
+        db.close()
+        self.assertEqual(d5b.verified_requests(path), ["aaa"])       # BBB superseded, CCC an old version
+        with self.assertRaises(sqlite3.OperationalError):
+            d5b.verified_requests(os.path.join(self.tmp, "missing.sqlite"))    # never 'none verified'
+
+    def test_the_cli_paces_every_admin_get_through_the_host_pacer(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("cdv", Path(__file__).resolve().parents[1] / "credit-dsp-verify.py")
+        cdv = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cdv)
+        waits, calls = [], []
+
+        class A:
+            other = "x"
+
+            def get(self, path, params=None):
+                calls.append(path)
+                return {}
+        pa = cdv.PacedAdmin(A())
+        pa._pacer = type("P", (), {"wait": lambda self: waits.append(1)})()
+        pa.get("/admin/x")
+        pa.get("/admin/y", {"a": 1})
+        self.assertEqual((len(waits), calls), (2, ["/admin/x", "/admin/y"]))
+        self.assertEqual(pa.other, "x")
+        src = (Path(__file__).resolve().parents[1] / "credit-dsp-verify.py").read_text()
+        self.assertIn("admin=PacedAdmin(admin_api.AdminClient())", src)
+
+
+class PodDriverSource(unittest.TestCase):
+    def test_claimant_holder_carries_the_request_profile_id(self):
+        # core #11010 claimantMatch: a linked holder matches only when its profile_id is the request's profileId.
+        src = (Path(__file__).resolve().parents[1] / "credit_verify/dspverify/pod_driver.py").read_text()
+        self.assertIn('t["profile_id"] if mine_id else catalog_of(p[0])', src)
+
 if __name__ == "__main__":
     unittest.main()

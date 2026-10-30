@@ -55,9 +55,10 @@ def real_deps(store, *, intercom_fetch: bool = True, strict_pacing: bool = False
         log("no MUSOAI_INTERCOM_TOKEN: only cached attachments can be verified this run")
     # 1 request/s per API across EVERY reader process on the host (run --workers N): MusicBrainz's
     # own limit, and Intercom/admin GETs kept at the single-reader rate (proof-loop lead 2026-10-28).
-    mb, ic, ad = (Pacer(n, 1.0, log=log, strict=strict_pacing) for n in ("musicbrainz", "intercom", "admin"))
+    mb, ic, ad, wb = (Pacer(n, 1.0, log=log, strict=strict_pacing)
+                      for n in ("musicbrainz", "intercom", "admin", "wayback"))
     fetch = ic.paced(intercom.make_fetch(tok)) if tok else None
-    return Deps(sandbox=sandbox.run, extractor=Extractor(store), net=xc.Net(mb_pacer=mb),
+    return Deps(sandbox=sandbox.run, extractor=Extractor(store), net=xc.Net(mb_pacer=mb, archive_pacer=wb),
                 raw_credits=lambda tid: store.cached_raw_credits(
                     tid, ad.paced(lambda t: admin_api.track_raw_credits(admin, t))),
                 requests=lambda ids: stage2.requests(ids), fetch=fetch, dl=stage2.download,
@@ -115,6 +116,9 @@ def _gmail_raw():
     return gog_raw
 
 
+EX_PROVIDER_DOWN = 75        # EX_TEMPFAIL: the model provider refused (credit / auth / rate limit / cap / no key)
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     from credit_verify.docverify import runner
     from credit_verify.docverify.store import DocVerifyStore
@@ -146,6 +150,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         if args.reread_carried and (shard is None or shard[0] == 0) else {}
     log("run " + json.dumps({**stats.as_dict(), "shard": args.shard, **extra}))
     print("NO_REPLY")
+    if stats.provider_down:
+        # Fable b1 #1518: a run the provider refused is a FAILED run (a shard / the cron sees nonzero, the
+        # unknown-share watchdog and the shard loop's back-off see it), never a quiet success
+        log(f"run FAILED: provider down ({stats.provider_down})")
+        return EX_PROVIDER_DOWN
     return 0
 
 
@@ -267,7 +276,7 @@ def cmd_l11_watch(args: argparse.Namespace) -> int:
     store = DocVerifyStore.read_only(args.store)       # a report: never writes
     # no file = UNKNOWN (never clean); an empty reviewed file = known zero
     flags = l11.parse_false_forged(Path(args.false_forged).read_text()) if args.false_forged else None
-    w = l11.watch(store, since=args.since, false_forged=flags)
+    w = l11.watch(store, since=args.since, false_forged=flags, dsp_store=args.dsp_store)
     print(json.dumps(w, indent=1, default=str) if args.json else l11.line(w))
     return 0
 
@@ -429,6 +438,26 @@ def cmd_summary(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_challenge(args: argparse.Namespace) -> int:
+    """F9: `issue` the request's challenge code (h2 calls it when it SENDS the need=distributor_dashboard_with_code
+    ask; an active code is returned again) or `show` its codes. Prints JSON. Writes only dv_challenges."""
+    from credit_verify.docverify.store import DocVerifyStore
+    from credit_verify.proof import stage2
+    store = DocVerifyStore(args.store)
+    if args.action == "show":
+        print(json.dumps(store.challenges(args.request), indent=1))
+        return 0
+    uid = args.user
+    if uid is None:
+        req = stage2.requests([args.request]).get(args.request)
+        if req is None:
+            log(f"challenge: request {args.request} not found in core; nothing issued")
+            return 2
+        uid = req.user_id
+    print(json.dumps(store.issue_challenge(args.request, uid)))
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     from credit_verify.docverify.runner import PROOF_STORE
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -469,12 +498,19 @@ def parser() -> argparse.ArgumentParser:
     pl.add_argument("--false-forged", help="the reviewed flag file: 'false-forged: <prefix>' or 'ruling: forged-<prefix> "
                     "not' lines (e.g. trays/rulings-forged.txt). Without it false forged is UNKNOWN and never clean")
     pl.add_argument("--json", action="store_true")
+    pl.add_argument("--dsp-store", default="/var/lib/hydra-credit-verify/dsp-verify.sqlite",
+                    help="the DSP verifier's store (D5b anchors, read-only); '' = none")
     pl.set_defaults(fn=cmd_l11_watch)
     pj = sub.add_parser("junk-list", help="JUNK PROOF option C: artifact kind per filed document -> purge list per "
                                           "user + decline proposal (read-only; writes two files)")
     pj.add_argument("--batch", type=int, required=True)
     pj.add_argument("--out-dir", required=True)
     pj.set_defaults(fn=cmd_junk_list)
+    pc = sub.add_parser("challenge", help="F9 challenge code for a request: issue (when the ask is sent) or show")
+    pc.add_argument("action", choices=("issue", "show"))
+    pc.add_argument("--request", required=True)
+    pc.add_argument("--user", type=int, help="the request's account (default: read from core)")
+    pc.set_defaults(fn=cmd_challenge)
     pt = sub.add_parser("tray", help="Jan's tray (jan-docs-dv-bN.md) + h2's need queue from the latest outcomes")
     pt.add_argument("--batch", type=int, required=True)
     pt.add_argument("--out-dir", required=True)

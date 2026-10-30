@@ -24,72 +24,6 @@ describe("support_action_router", () => {
     ]);
   });
 
-  it("routes credit verification to the read check first, then preview/apply", async () => {
-    const start = await call({ intent: "credit_verification" });
-    expect(start.ok).toBe(true);
-    expect(start.availability).toBe("live");
-    expect(start.next).toMatchObject({
-      outcome: "run_skill",
-      skill: "customer-credit-verification",
-      tool: "credit_verification_check",
-    });
-    expect(start.live_tools.write).toEqual(["credits_verify"]);
-
-    for (const state of ["read_ok", "missing_info"]) {
-      const out = await call({ intent: "credit_verification", state });
-      expect(out.next.outcome).not.toBe("ask_missing_info");
-      expect(out.next).toMatchObject({
-        outcome: "run_skill",
-        skill: "customer-credit-verification",
-      });
-      expect(out.next.instruction).toContain("ONLY if none was given before");
-      expect(out.next.instruction).toContain("needs-human credit-verify ticket");
-    }
-
-    // The emitted sequence must not hand off before corroboration: the proof
-    // step defers to the checks, and the handoff is only the final fallback.
-    const seq: string[] = start.sequence;
-    const proofIdx = seq.findIndex((s) => s.includes("ONLY if none was given before"));
-    const previewIdx = seq.findIndex((s) => s.includes("preview credits_verify"));
-    const handoffIdx = seq.findIndex((s) => /ticket|handoff/i.test(s));
-    expect(proofIdx).toBeGreaterThanOrEqual(0);
-    expect(seq[proofIdx]).toContain("continue with the skill's Step 3 checks");
-    expect(proofIdx).toBeLessThan(previewIdx);
-    expect(previewIdx).toBeLessThan(handoffIdx);
-    expect(handoffIdx).toBe(seq.length - 1);
-
-    const preview = await call({ intent: "credit_verification", state: "preview_ok" });
-    expect(preview.next).toMatchObject({
-      outcome: "ask_confirmation",
-      tool: "credits_verify",
-    });
-
-    const confirmed = await call({ intent: "credit_verification", state: "customer_confirmed" });
-    expect(confirmed.next).toMatchObject({
-      outcome: "apply_tool",
-      tool: "credits_verify",
-    });
-  });
-
-  it("routes profile claims through the read-only claim-status resolver first", async () => {
-    const start = await call({ intent: "profile_claim" });
-    expect(start.ok).toBe(true);
-    expect(start.live_tools.read).toContain("profile_claim_status");
-    expect(start.next).toMatchObject({
-      outcome: "run_skill",
-      skill: "customer-profile-claim",
-      tool: "profile_claim_status",
-    });
-    // The resolver discovers the claim id now — it is no longer missing info.
-    expect(start.missing_info).toEqual(["Profile URL"]);
-
-    const readOk = await call({ intent: "profile_claim", state: "read_ok" });
-    expect(readOk.next).toMatchObject({ outcome: "call_tool", tool: "profiles_claim_self" });
-
-    const accountChange = await call({ intent: "account_profile_change" });
-    expect(accountChange.live_tools.read).toContain("profile_claim_status");
-  });
-
   it("exposes the live retention/cancel trio but keeps refunds handoff-only", async () => {
     const out = await call({ intent: "billing_cancel_refund", state: "read_ok" });
     expect(out.ok).toBe(true);
@@ -149,56 +83,44 @@ describe("support_action_router", () => {
     expect(readOk.handoff_when).toContain("profile_analytics_status reports missing, stale, or inconsistent analytics");
   });
 
-  it("turns refused self-service duplicate merges into profile-merge handoff packets", async () => {
-    const out = await call({ intent: "profile_duplicates", state: "tool_refused" });
-    expect(out.next).toMatchObject({
-      outcome: "handoff",
-      tool: "create_ticket",
-      action_type: "profile-merge",
-    });
-    expect(out.human_gated_writes).toContain("cross-owner merge");
-  });
+  // Captain 2026-10-28: Caroline only hands off on credits, documents, claims, removals and
+  // merges. QA on #1451: the router must never send her to a denied tool or a removed skill.
+  const RETIRED_TOOLS = ["credit_verification_check", "credits_verify", "profiles_claim_self", "profiles_consolidate",
+    "profile_claim_status", "profile_credits_status", "dedupe_check", "remove_credits"];
+  const RETIRED_SKILLS = ["customer-credit-verification", "customer-profile-claim", "customer-profile-consolidate",
+    "customer-profile-dedupe", "customer-track-dedupe", "customer-credit-removal"];
+  const HANDOFF: Record<string, string> = {
+    credit_verification: "credit-verify", profile_claim: "profile-claim",
+    profile_duplicates: "profile-merge", remove_wrong_credits: "credit-correction",
+  };
+  const STATES = ["new_request", "read_ok", "preview_ok", "customer_confirmed", "applied_ok", "tool_refused", "tool_disabled", "loop_detected"];
 
-  it("exposes profile_credits_status as a live read on the credit/profile routes", async () => {
-    for (const intent of ["credit_verification", "profile_claim", "profile_duplicates", "remove_wrong_credits", "catalog_metadata_repair"]) {
-      const out = await call({ intent });
-      expect(out.live_tools.read).toContain("profile_credits_status");
+  it("every state of the verification/merge routes is the verification-handoff ticket of its kind", async () => {
+    for (const [intent, kind] of Object.entries(HANDOFF)) {
+      for (const state of STATES) {
+        const out = await call({ intent, state });
+        expect(out.next, `${intent}/${state}`).toMatchObject({
+          outcome: "run_skill", skill: "verification-handoff", tool: "create_ticket", action_type: kind,
+        });
+        expect(out.next.instruction).toMatch(/no look-up/);
+        expect(out.next.instruction).toMatch(/Never say you checked, filed, verified or merged/);
+      }
+      const ask = await call({ intent, state: "missing_info" });
+      expect(ask.next.outcome).toBe("ask_missing_info");
+      expect(ask.next.instruction).toContain(kind);
+      expect(ask.live_tools).toEqual({ read: [], write: [], handoff: ["create_ticket"] });
     }
-
-    // catalog read_ok now diagnoses a referenced credit before filing.
-    const catalogReadOk = await call({ intent: "catalog_metadata_repair", state: "read_ok" });
-    expect(catalogReadOk.next).toMatchObject({ outcome: "call_tool", tool: "profile_credits_status" });
   });
 
-  it("never applies or announces a credit removal on remove_wrong_credits (agent previews and routes only)", () => {
-    const route = SUPPORT_ACTION_ROUTES.remove_wrong_credits;
-    expect(route.live_write_tools).not.toContain("remove_credits");
-    expect(route.live_read_tools).toContain("remove_credits");
-    expect(route.human_gated_writes).toContain("credit removal");
-    for (const [state, step] of Object.entries(route.steps)) {
-      expect(step.outcome, state).not.toBe("apply_tool");
-      expect(step.outcome, state).not.toBe("close");
-      expect(step.instruction, state).not.toMatch(/\b(were|was|been) removed\b|already gone|apply:\s*true/i);
-    }
-    const prose = JSON.stringify([route.goal, route.sequence, route.close_when]);
-    expect(prose).not.toMatch(/apply:\s*true|apply only after|returns ok with removals|\bRemove mechanical/i);
+  it("no route names a retired verification/merge tool or skill, in any state or field", () => {
+    const blob = JSON.stringify(SUPPORT_ACTION_ROUTES);
+    for (const name of [...RETIRED_TOOLS, ...RETIRED_SKILLS]) expect(blob).not.toContain(name);
   });
 
-  it("routes the remove_wrong_credits preview to a handoff, not an apply confirmation", async () => {
-    const out = await call({ intent: "remove_wrong_credits", state: "preview_ok" });
-    expect(out.next.outcome).toBe("handoff");
-  });
-
-  it("makes the credit-correction packet mandatory before any in-app instruction on remove_wrong_credits", async () => {
-    const out = await call({ intent: "remove_wrong_credits", state: "preview_ok" });
-    expect(out.next.action_type).toBe("credit-correction");
-    // the packet comes first and is not an alternative to the self-service hint
-    expect(out.next.instruction).toMatch(/file the credit-correction packet first/i);
-    expect(out.next.instruction).not.toMatch(/\bor file\b/i);
-    const seq = SUPPORT_ACTION_ROUTES.remove_wrong_credits.sequence.join(" | ");
-    expect(seq.indexOf("packet")).toBeGreaterThan(-1);
-    expect(seq.indexOf("packet")).toBeLessThan(seq.indexOf("in the app"));
-    expect(seq).not.toMatch(/\bor file\b/i);
+  it("catalog repair no longer diagnoses a credit itself; a credit question is a hand-off", async () => {
+    const out = await call({ intent: "catalog_metadata_repair", state: "read_ok" });
+    expect(out.next).toMatchObject({ outcome: "handoff", tool: "create_ticket" });
+    expect(out.next.instruction).toContain("verification-handoff");
   });
 
   it("keeps raw execution and broad admin surfaces denied in every route", async () => {

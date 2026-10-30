@@ -12,6 +12,8 @@ import {
   AGENT_LANE_ACTIONS,
   customerSlaFor,
   outcomeChannelFor,
+  handoffTag,
+  HANDOFF_TAGS,
 } from "../src/tools/ticket-format.js";
 
 // The exact extraction regex used by scripts/dedup/sweeps/close-merged-tickets.sh
@@ -170,15 +172,45 @@ describe("buildFollowupComment", () => {
 describe("buildTicketTags", () => {
   it("keeps the three base tags and adds the team tag", () => {
     expect(buildTicketTags({ actionType: "credit-claim", tier: 1 })).toEqual([
-      "hydra-action-request", "tier-1", "action:credit-claim", "team:catalog",
+      "hydra-action-request", "tier-1", "action:credit-claim", "team:catalog", "handoff:credit-status",
     ]);
     expect(buildTicketTags({ actionType: "subscription-refund", tier: 3 })).toEqual([
       "hydra-action-request", "tier-3", "action:subscription-refund", "team:growth",
     ]);
     // track-merge is Catalog data (not in GROWTH_ACTIONS) → routes to team:catalog.
     expect(buildTicketTags({ actionType: "track-merge", tier: 2 })).toEqual([
-      "hydra-action-request", "tier-2", "action:track-merge", "team:catalog",
+      "hydra-action-request", "tier-2", "action:track-merge", "team:catalog", "handoff:merge",
     ]);
+  });
+
+  it("every credit, claim and merge kind carries exactly one handoff tag; other kinds carry none (captain 2026-10-28)", () => {
+    const want: Record<string, string> = {
+      "credit-claim": "handoff:credit-status", "credit-correction": "handoff:credit-status",
+      "credit-verify": "handoff:credit-status", "bulk-credit-change": "handoff:credit-status",
+      "profile-claim": "handoff:claim", "profile-merge": "handoff:merge", "track-merge": "handoff:merge",
+      "unmerge-request": "handoff:merge",
+    };
+    for (const [kind, tag] of Object.entries(want)) {
+      const tags = buildTicketTags({ actionType: kind, tier: getTierForAction(kind) });
+      expect(tags.filter((t) => t.startsWith("handoff:"))).toEqual([tag]);
+    }
+    for (const kind of ["support-general", "billing-issue", "subscription-refund", "order-fulfillment", "data-deletion", "profile-update"]) {
+      expect(buildTicketTags({ actionType: kind, tier: getTierForAction(kind) }).some((t) => t.startsWith("handoff:"))).toBe(false);
+    }
+  });
+
+  it("details.handoff 'document' is honoured only on credit and claim kinds; anything else falls back to the kind's tag", () => {
+    expect(handoffTag("credit-verify", { handoff: "document" })).toBe("handoff:document");
+    expect(handoffTag("profile-claim", { handoff: " Document " })).toBe("handoff:document");
+    expect(handoffTag("profile-merge", { handoff: "document" })).toBe("handoff:merge");
+    expect(handoffTag("credit-claim", { handoff: "merge" })).toBe("handoff:credit-status");
+    expect(handoffTag("credit-claim", { handoff: "approve; rm -rf" })).toBe("handoff:credit-status");
+    expect(handoffTag("credit-claim", { handoff: 42 })).toBe("handoff:credit-status");
+    expect(handoffTag("support-general", { handoff: "document" })).toBeNull();
+  });
+
+  it("every HANDOFF_TAGS kind is a real action type", () => {
+    for (const k of Object.keys(HANDOFF_TAGS)) expect(Object.prototype.hasOwnProperty.call(TIER_MAP, k)).toBe(true);
   });
 
   it("adds an escalation tag for known escalation reasons", () => {
@@ -293,15 +325,21 @@ describe("customerSlaFor (no human-review timeframe on credit/claim/merge reques
     for (const a of ["profile-merge", "track-merge", "unmerge-request"]) expect(outcomeChannelFor(a)).toBe("conversation");
     expect(outcomeChannelFor("profile-claim")).toBe("app_notification");
     for (const a of ["credit-claim", "credit-correction", "credit-verify", "bulk-credit-change"]) {
-      expect(outcomeChannelFor(a)).toBe("unspecified");
+      expect(outcomeChannelFor(a)).toBe("conversation_email");
     }
   });
 
-  it("keeps the tier SLA for kinds a person still owns (billing, refunds, deletion)", () => {
-    expect(customerSlaFor("billing-issue")).toBe(TIER_SLAS[2]);
-    expect(customerSlaFor("subscription-refund")).toBe(TIER_SLAS[3]);
-    expect(customerSlaFor("data-deletion")).toBe(TIER_SLAS[3]);
-    expect(customerSlaFor("support-general")).toBe(TIER_SLAS[1]);
+  it("quotes no timeframe for ANY kind, person-owned ones included (caroline-instructions-1029 §2.9/§3)", () => {
+    for (const a of Object.keys(TIER_MAP)) expect(customerSlaFor(a)).toBeNull();
+    // the tier SLA itself stays internal (ClickUp due date / Slack line)
+    expect(TIER_SLAS[3]).toBe("5-10 business days");
+  });
+
+  it("data-deletion's outcome is the written erasure confirmation; person-owned kinds hear here and by email", () => {
+    expect(outcomeChannelFor("data-deletion")).toBe("erasure");
+    for (const a of ["subscription-refund", "billing-issue", "support-general", "order-fulfillment", "dispute"]) {
+      expect(outcomeChannelFor(a)).toBe("conversation_email");
+    }
   });
 });
 

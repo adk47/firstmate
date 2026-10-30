@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import glob
 import hashlib
+import json
 import os
 import shutil
 import sqlite3
@@ -38,14 +39,19 @@ from credit_verify.proof.sandbox import MAX_BYTES, SandboxError
 
 from . import VERSION
 from . import crosscheck as xc
-from . import artifacts, forensics, gate, intake_read, intel, pace
+from . import artifacts, challenge, forensics, gate, intake_read, intel, pace
 from .extract import MIN_CONFIDENCE, Extraction, Extractor, claimant_elsewhere, supports
 from .store import DocVerifyStore, utcnow
+from .store import provider_down as store_provider_down
 
 PROOF_STORE = os.environ.get("CREDIT_PROOF_STORE", "/var/lib/hydra-credit-verify/proof.sqlite")
 CACHE_ROOT = os.environ.get("CREDIT_PROOF_INTERCOM_CACHE", "/root/.openclaw-edge/media/intercom")
 TRANSIENT = ("http ", "transport:", "daily model spend cap", "no OpenRouter key", "unusable model answer")
 MAX_EXTRACT_ATTEMPTS = 3
+
+
+class ProviderDown(RuntimeError):
+    """The model provider / network / spend cap failed (store.provider_down): stop the run, write no outcome."""
 
 SandboxRun = Callable[..., dict[str, Any]]
 Fetch = Callable[[str], "dict[str, Any] | None"]
@@ -166,11 +172,13 @@ class Stats:
     intake: int = 0
     outcomes: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     errors: list[str] = field(default_factory=list)
+    provider_down: str | None = None          # the account-wide refusal that stopped this run (a FAILED run)
 
     def as_dict(self) -> dict[str, Any]:
         return {"run_id": self.run_id, "documents": self.documents, "pairs": self.pairs, "retry": self.retry,
                 "superseded": self.superseded, "intake": self.intake,
-                "outcomes": dict(self.outcomes), "errors": self.errors[:10]}
+                "outcomes": dict(self.outcomes), "errors": self.errors[:10],
+                **({"provider_down": self.provider_down} if self.provider_down else {})}
 
 
 def extract_attempts(store: DocVerifyStore, proof_id: str) -> int:
@@ -217,6 +225,13 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
         else:
             ex = Extraction(ok=False, degraded=True, error="document not located" if not path else
                             f"sandbox failed: {str(raw['fatal'])[:120]}" if raw.get("fatal") else "no readable text")
+        # (what, date) pairs an EARLIER read of this document also extracted at >= OCR_DATE_MIN (Fable 127: an
+        # OCR date is impossible content only when stable on a re-read); read before this read is recorded
+        stable_dates = earlier_firm_dates(store, proof_id)
+        if not ex.ok and store_provider_down(ex.error):
+            # never an attempt, never an outcome: the document is read again when the provider is back
+            store.step(run_id, proof_id, "extract", "provider_down", ex.as_dict())
+            raise ProviderDown(ex.error)
         store.step(run_id, proof_id, "extract", "ok" if ex.ok else "error", ex.as_dict())
         # JUNK PROOF option C (captain-1028-214x): what kind of artifact this is, with the full text; a record
         # only - it decides no outcome here (artifacts.junk_list builds the purge / decline proposal).
@@ -236,11 +251,13 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
                 return rows
         # Document-level issuer checks (the issuer does not change per claim).
         issuer, itype = ex.issuer_name, ex.issuer.get("type")
-        official, how = xc.official_domains(deps.net, issuer) if issuer else ([], "no issuer")
+        official, how = cached_official(store, deps.net, issuer) if issuer else ([], "no issuer")
         dom = xc.domain_check(deps.net, ex.sender.get("domain"), issuer, official, how,
                               float(ex.sender.get("confidence") or 0.0))
         sig = xc.signatory_check(deps.net, ex.signatory.get("name") if ex.signatory.get("confidence", 0) >= MIN_CONFIDENCE
                                  else None, official)
+        archive = ArchiveCheck(store, deps.net, run_id, proof_id, ex)
+        dom = archive.domain(dom)
         store.step(run_id, proof_id, "xc_domain", dom.status, dom.detail)
         store.step(run_id, proof_id, "xc_signatory", sig.status, sig.detail)
         h3_map: dict[str, forensics.H3] = {}
@@ -260,6 +277,7 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
         dint = intel.domain_intel(deps.net, ex.sender.get("domain") if sure else None,
                                   [e.rsplit("@", 1)[1] for e in ex.emails if "@" in e], issuer, itype, official,
                                   uncertain=[] if sure else [ex.sender.get("domain")])
+        dint = archive.intel(dint, ex.sender.get("domain") if sure else None)
         store.step(run_id, proof_id, "xc_domain_intel", dint.status, dint.detail)
         credits_cache: dict[str, tuple[list[dict[str, Any]] | None, str | None]] = {}
         release_cache: dict[str, xc.Release] = {}
@@ -268,7 +286,8 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
             r = reqs.get(rid)
             h3 = (h3_map.get(key) or forensics.H3(verdict=None)) if intake is not None \
                 else forensics.read_h3(proof_db, proof_id, key)
-            findings = forensics.check(h3, ex, facts, mime)
+            findings = forensics.check(h3, ex, facts, mime, text_source=raw.get("text_source"),
+                                       stable_dates=stable_dates)
             store.step(run_id, proof_id, "forensics", forensics.worst(findings) or "ok",
                        {"h3": h3.verdict, "h3_reasons": h3.reasons[:3], "findings": [f.as_dict() for f in findings]},
                        key)
@@ -289,10 +308,22 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
                 rel = None
                 if r.isrc:
                     if r.isrc not in release_cache:
-                        release_cache[r.isrc] = xc.release_facts(deps.net, r.isrc)
+                        release_cache[r.isrc] = cached_release(store, deps.net, r.isrc)
                     rel = release_cache[r.isrc]
                 checks.append(xc.isrc_check(rel, role, r.names))
                 checks.append(xc.label_check(issuer, itype, rel))
+                # F9: a code we issued with the per-need ask, shown in this document inside its window
+                chs = store.challenges(rid) if intake is not None else []
+                ch = challenge.check(text, chs, user_id=r.user_id,
+                                     received_at=intake.received_at if intake is not None else None,
+                                     consumer=f"intake:{intake.intake_id}" if intake is not None else None)
+                if ch is not None and ch.status == xc.POSITIVE and \
+                        not store.consume_challenge(ch.detail["challenge_id"], f"intake:{intake.intake_id}"):
+                    # another filing claimed this one-use code first (a concurrent reader): never F9 here
+                    ch = xc.Check("xc_challenge", xc.WEAK, {"why": ["the code was already used by another document"],
+                                                            "challenge_id": ch.detail["challenge_id"], "raced": True})
+                if ch is not None:
+                    checks.append(ch)
             for c in checks[3:]:
                 store.step(run_id, proof_id, c.step, c.status, c.detail, key)
             uid = r.user_id if r else None
@@ -307,7 +338,10 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
                             elsewhere=elsewhere)
             store.step(run_id, proof_id, "gate", o.outcome, {"reason": o.reason, "need": o.need,
                                                             "account_hold": o.account_hold,
-                                                            "extracted_support": support}, key)
+                                                            "extracted_support": support,
+                                                            # QA #1476: F9 counted only on a dashboard
+                                                            "f9": gate.f9_anchor(checks, ex, h3.kind or raw.get("kind"))},
+                       key)
             hold = o.account_hold and intake is None     # the intake path writes no hold (proof-loop lead)
             store.outcome(run_id, proof_id=proof_id, request_id=rid, role=role, user_id=uid, source_ref=ref,
                           h3_verdict=h3.verdict, outcome=o.outcome, reason=o.reason, need=o.need,
@@ -339,7 +373,8 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
         # a human, never an outcome: most collaborators have no public footprint.
         track_credits = [c for rc, _ in credits_cache.values() for c in (rc or [])]
         ppl = intel.people_check(deps.net, intel.people_of(ex), graph=deps.people_graph, track_credits=track_credits,
-                                 issuer_site_names=[ex.signatory.get("name")] if sig.status == xc.POSITIVE else [])
+                                 issuer_site_names=[ex.signatory.get("name")] if sig.status == xc.POSITIVE else [],
+                                 artist_search=lambda name: cached_artist(store, deps.net, name))
         store.step(run_id, proof_id, "xc_people", ppl.status, ppl.detail)
         for row in rows:
             row["checks"]["xc_domain_intel"] = dint.status
@@ -384,6 +419,11 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
             stats.documents += 1
             try:
                 rows += verify_document(store, proof_db, proof_id, keys, deps, run_id, stats, held)
+            except ProviderDown as exc:
+                stats.provider_down = str(exc)
+                stats.errors.append(f"provider down ({exc}): run stopped, nothing recorded")
+                log(f"provider down ({exc}): run stopped; the documents are read again next run")
+                return stats, rows
             except Exception as exc:  # noqa: BLE001 - one document must not stop the run
                 stats.errors.append(f"{proof_id[:12]}: {type(exc).__name__}: {str(exc)[:160]}")
                 store.step(run_id, proof_id, "run", "error", {"error": f"{type(exc).__name__}: {str(exc)[:300]}"})
@@ -412,6 +452,11 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
                     if not todo:
                         continue
                     rows += verify_document(store, proof_db, doc.sha, todo, deps, run_id, stats, held, intake=doc)
+                except ProviderDown as exc:
+                    stats.provider_down = str(exc)
+                    stats.errors.append(f"provider down ({exc}): run stopped, nothing recorded")
+                    log(f"provider down ({exc}): run stopped; the documents are read again next run")
+                    return stats, rows
                 except Exception as exc:  # noqa: BLE001 - one document must not stop the run
                     stats.errors.append(f"intake {doc.intake_id[:16]}: {type(exc).__name__}: {str(exc)[:160]}")
                     store.step(run_id, doc.sha, "run", "error", {"error": f"{type(exc).__name__}: {str(exc)[:300]}"},
@@ -423,6 +468,139 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
 
 
 FANOUT = 50     # candidate requests above which a filed document is read only against the tracks it names
+
+
+def lookup_key(name: str | None) -> str:
+    """A LOSSLESS cache key for a name (QA #1499): NFKC, casefold, collapsed whitespace - every letter kept, so
+    non-Latin names never collide (xc.fold drops non-ASCII letters: 张伟 and 李娜 both fold to '')."""
+    import unicodedata
+    return " ".join(unicodedata.normalize("NFKC", str(name or "")).casefold().split())
+
+
+def cached_official(store: DocVerifyStore, net: Any, issuer: str) -> tuple[list[str], str]:
+    """xc.official_domains through the shared 24 h cache, keyed on the folded issuer; a MusicBrainz error is not
+    cached (Fable 149)."""
+    key = lookup_key(issuer)
+    if not key:
+        return xc.official_domains(net, issuer)          # nothing to key on: never cached
+    v = store.cached_lookup("issuer_domains", key, lambda: list(xc.official_domains(net, issuer)),
+                            ok=lambda v: not str(v[1]).startswith("musicbrainz error"))
+    return list(v[0]), str(v[1])
+
+
+def cached_artist(store: DocVerifyStore, net: Any, name: str) -> Any:
+    """MusicBrainz artist search through the shared 24 h cache, keyed losslessly on the name (never cached when
+    the key is empty)."""
+    fetch = lambda: net.mb("artist", {"query": f'artist:"{name[:80]}"', "limit": "3"})   # noqa: E731
+    key = lookup_key(name)
+    return store.cached_lookup("mb_artist", key, fetch) if key else fetch()
+
+
+def cached_release(store: DocVerifyStore, net: Any, isrc: str) -> xc.Release:
+    """xc.release_facts (MusicBrainz + Deezer) through the shared 24 h cache, keyed on the normalized ISRC; facts
+    that carry any source error are not cached (Fable 149)."""
+    from dataclasses import asdict
+
+    from .extract import norm_isrc
+    v = store.cached_lookup("isrc_release", norm_isrc(isrc) or isrc, lambda: asdict(xc.release_facts(net, isrc)),
+                            ok=lambda v: not v.get("errors"))
+    return xc.Release(**v)
+
+
+def document_date(ex: Any) -> Any:
+    """The document's own date: the earliest signed/issued/sent date read at >= 0.6 (None when there is none)."""
+    from datetime import date as _date
+    out = None
+    for d in getattr(ex, "dates", None) or []:
+        if d.get("what") in forensics.CLAIMED_DATE_KINDS and float(d.get("confidence") or 0) >= 0.6:
+            try:
+                v = _date.fromisoformat(str(d.get("date")))
+            except ValueError:
+                continue
+            out = v if out is None or v < out else out
+    return out
+
+
+class ArchiveCheck:
+    """Fable 140 (audit-25, 1372907): before a dead or young sender domain counts as a FABRICATED sender, the web
+    archive is asked for its first capture (paced, cached 24 h per domain). A capture from before the document's own
+    date makes it a lapsed / re-registered domain: xc_domain is WEAK (not contradicts), and the 'does not exist' /
+    'registered N days ago' intel flags of that domain are set aside (recorded as lapsed_flags). The first capture
+    is recorded in an `xc_domain_archive` step either way. No capture, no document date, or an archive error
+    leaves the checks exactly as they were."""
+
+    def __init__(self, store: DocVerifyStore, net: Any, run_id: str, proof_id: str, ex: Any):
+        self.store, self.net, self.run_id, self.proof_id = store, net, run_id, proof_id
+        self.doc_date = document_date(ex)
+        self.seen: dict[str, bool] = {}
+
+    def lapsed(self, domain: str | None) -> bool:
+        if not domain or self.doc_date is None or not hasattr(self.net, "first_capture"):
+            return False
+        if domain in self.seen:
+            return self.seen[domain]
+        try:
+            # cached per (domain, document date): the host-wide fallback answers 'archived before THIS date'
+            first = self.store.cached_first_capture(f"{domain}<{self.doc_date:%Y%m%d}",
+                                                    lambda _k: self.net.first_capture(domain, before=self.doc_date))
+            ok, err = xc.lapsed_domain(first, self.doc_date), None
+        except Exception as exc:  # noqa: BLE001 - an archive we cannot read never clears a sender
+            first, ok, err = None, False, f"{type(exc).__name__}: {str(exc)[:120]}"
+        self.store.step(self.run_id, self.proof_id, "xc_domain_archive", "lapsed" if ok else "error" if err else "ok",
+                        {"domain": domain, "first_capture": first, "document_date": self.doc_date.isoformat(),
+                         **({"error": err} if err else {})})
+        self.seen[domain] = ok
+        return ok
+
+    def domain(self, dom: xc.Check) -> xc.Check:
+        if dom.status != xc.CONTRADICTS or dom.detail.get("note") not in xc.DEAD_DOMAIN_NOTES:
+            return dom
+        if not self.lapsed(dom.detail.get("sender_domain")):
+            return dom
+        return xc.Check("xc_domain", xc.WEAK, {**dom.detail, "lapsed": True,
+                                                "note": "lapsed domain: archived before the document's date, "
+                                                        "not a fabricated sender"})
+
+    def intel(self, dint: xc.Check, sender: str | None) -> xc.Check:
+        from .intel import registrable_domain
+        flags = list(dint.detail.get("flags") or [])
+        snd = registrable_domain(sender) if sender else None
+        dead = [f for f in flags if snd and f.startswith(f"{snd}: ") and
+                (f.endswith(": does not exist") or " registered " in f and f.endswith(" days ago"))]
+        if not dead or not self.lapsed(snd):
+            return dint
+        rest = [f for f in flags if f not in dead]
+        detail = {**dint.detail, "flags": rest, "lapsed_flags": dead}
+        return xc.Check("xc_domain_intel", xc.SOFT if rest else xc.UNKNOWN, detail)
+
+
+def earlier_firm_dates(store: DocVerifyStore, proof_id: str) -> frozenset[tuple[str, str]]:
+    """(what, date) pairs the IMMEDIATELY PRECEDING successful extraction of this document read at >= OCR_DATE_MIN,
+    minus any `what` for which some firm read ever gave a DIFFERENT date (QA #1489: reads A -> B -> A must never make
+    A 'stable'). Called before this run's read is recorded, so a read never confirms itself."""
+    reads: list[set[tuple[str, str]]] = []
+    for (det,) in store.db.execute("SELECT detail_json FROM dv_steps WHERE proof_id=? AND step='extract' AND "
+                                   "status='ok' ORDER BY id", (proof_id,)):
+        try:
+            dates = (json.loads(det or "{}") or {}).get("dates") or []
+        except ValueError:
+            continue
+        firm: set[tuple[str, str]] = set()
+        for d in dates:
+            try:
+                if float(d.get("confidence") or 0) >= forensics.OCR_DATE_MIN and d.get("what") and d.get("date"):
+                    firm.add((str(d["what"]), str(d["date"])))
+            except (TypeError, ValueError, AttributeError):
+                continue
+        reads.append(firm)
+    if not reads:
+        return frozenset()
+    seen: dict[str, set[str]] = {}
+    for firm in reads:
+        for what, d in firm:
+            seen.setdefault(what, set()).add(d)
+    conflicted = {what for what, ds in seen.items() if len(ds) > 1}
+    return frozenset(p for p in reads[-1] if p[0] not in conflicted)
 
 
 def named_by(ex: Any, r: Any, min_confidence: float | None = None) -> bool:

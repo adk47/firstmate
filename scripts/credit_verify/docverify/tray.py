@@ -5,9 +5,11 @@ reader's latest outcomes into the tray Jan works from, plus the per-need queue f
 (locked) ask campaign. It writes the two files it is asked to and nothing else: no status
 write, no hold, no message.
 
-  APPROVE (Jan)        `verified` AND a same-run Spotify+Tidal anchor (xc_dsp positive with a
-                       fresh capture requested by the run, D5b) AND account_gate allow. A
-                       `verified` row missing either is listed as not approvable, with why.
+  APPROVE (Jan)        `verified` AND an approve-grade anchor - a same-run Spotify+Tidal capture
+                       (xc_dsp positive with a fresh capture requested by the run, D5b) OR F9 (our
+                       one-time code on a dashboard screenshot, xc_challenge positive, WITH the extracted
+                       credit; Fable 094) - AND account_gate allow. A `verified` row missing either
+                       is listed as not approvable, with why.
   FRAUD DENY           `forged_positive` (two independent fraud signal families, captain-1028-213x):
   (Fable -> t01b)      listed with both signals; the deny happens ONLY for a document Fable confirms
                        (ruling forged-<sha8>, `forged_tray`), through t01b's executor. Never here.
@@ -216,6 +218,29 @@ def _dsp_anchor(store: Any, proof_id: str, key: str) -> tuple[bool, str]:
     return True, f"Spotify and Tidal both credit the claimant on captures since {detail['fresh_since']}"
 
 
+def _f9_anchor(store: Any, proof_id: str, key: str) -> tuple[bool, str]:
+    """F9 (Fable 094, the captain's second form of stateless proof: 'a one-time code on a page the profile
+    already controls'): the claim's latest xc_challenge is POSITIVE AND the gate recorded the extracted credit
+    (the claimant in that role on that track). A code alone never approves."""
+    ch = store.db.execute("SELECT status FROM dv_steps WHERE proof_id=? AND request_id=? AND step='xc_challenge' "
+                          "ORDER BY id DESC LIMIT 1", (proof_id, key)).fetchone()
+    if not ch or ch[0] != "positive":
+        return False, "no F9 code shown"
+    g = store.db.execute("SELECT detail_json FROM dv_steps WHERE proof_id=? AND request_id=? AND step='gate' "
+                         "ORDER BY id DESC LIMIT 1", (proof_id, key)).fetchone()
+    try:
+        support = json.loads(g[0]).get("extracted_support") if g else None
+    except ValueError:
+        support = None
+    if not support:
+        return False, "F9 code shown, but the document does not show the claimant in this role on this track"
+    if not (json.loads(g[0]).get("f9") if g else False):
+        # the gate counts F9 only on a dashboard screenshot / distributor portal (QA #1476); a row written
+        # before that mark is not approve-grade through F9 (fail closed)
+        return False, "F9 code shown, but not on a distributor/DSP dashboard (or read before the dashboard rule)"
+    return True, "F9: our one-time code on the distributor dashboard, with the claimant in this role on this track"
+
+
 def build(store: Any, *, gate: Gate, tracks: Tracks) -> Tray:
     tray = Tray()
     rows = store.latest_outcomes()
@@ -233,6 +258,10 @@ def build(store: Any, *, gate: Gate, tracks: Tracks) -> Tray:
         o = r["outcome"]
         if o == "verified":
             anchored, why_a = _dsp_anchor(store, r["proof_id"], key)
+            if not anchored:                       # F9 is the second approve-grade anchor class (Fable 094)
+                f9, why_f = _f9_anchor(store, r["proof_id"], key)
+                if f9:
+                    anchored, why_a = True, why_f
             allow, why_g = gate(r["user_id"]) if r["user_id"] else (False, "no account id")
             if anchored and allow:
                 tray.approve.append({**base, "anchor": why_a, "gate": why_g})
@@ -266,7 +295,8 @@ def markdown(tray: Tray, batch: int, generated_at: str) -> str:
            f"FRAUD DENY (Fable confirm first) {len({a['proof'] for a in tray.fraud_deny})} documents / "
            f"HOLD forged {len(tray.decline['forged'])}, contradicted {len(tray.decline['contradicted'])} / "
            f"NEED queue {len(tray.need)} / retry {tray.retry}.**", "",
-           "## APPROVE — `verified` + same-run Spotify/Tidal anchor + account gate allow", ""]
+           "## APPROVE — `verified` + an approve-grade anchor (same-run Spotify+Tidal, or F9 code + the credit) "
+           "+ account gate allow", ""]
     if tray.approve:
         out += ["| user | request | track | role | anchor | gate | document |", "|---|---|---|---|---|---|---|"]
         out += [f"| {esc(a['user_id'])} | `{a['request_id']}` | {esc(a['track'])} | {esc(a['role'])} | "

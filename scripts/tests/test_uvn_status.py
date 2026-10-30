@@ -206,7 +206,7 @@ def replica(users, status=None, requests=None, no_auth=(), no_pro=(), verificati
         return [[rid, str(u), "p", "t", rows.get(rid, {}).get("title", f"Song {rid}"), '[{"name":"Art"}]',
                  rows.get(rid, {}).get("role", "{Mixing}"),
                  rows.get(rid, {}).get("pop", "5"), json.dumps(verification.get(rid, {})),
-                 json.dumps(rows.get(rid, {}).get("metadata", {}))]
+                 json.dumps(rows.get(rid, {}).get("metadata", {})), rows.get(rid, {}).get("created", "")]
                 for u in sorted(ids & set(users)) if status.get(u, "user_verification_needed") in wanted
                 for rid in requests.get(u, [f"r{u}"])]
     return q
@@ -1646,6 +1646,116 @@ class WithdrawalConfirmTests(unittest.TestCase):
         self.assertTrue(refused)
         _, refused, _, _ = withdrawal_confirm.run([self.RID], mode="apply", query=lambda sql: [], runner=gate, wrapper="/gate")
         self.assertEqual(refused, [f"{self.RID}: not found"])
+
+
+class DocumentPostdatesRequestTest(unittest.TestCase):
+    """p1 198 / Fable 199 (rule, from Lamberto 298376): a document filed BEFORE a request was created cannot be its
+    proof, so it never blocks the ask about that request. One naming the request, or arriving after it, still does."""
+
+    def pof(self, *entries):
+        d = verify_notify.ProofOnFile()
+        for rid, kind, at in entries:
+            d.setdefault("298376", []).append((rid, kind))
+            d.dated.setdefault("298376", []).append((rid, kind, at))
+        return d
+
+    def test_lamberto_march_documents_do_not_block_an_october_request(self):
+        d = self.pof((None, "human_approved_after_doc", "2026-03-29T11:40:36Z"),
+                     (None, "human_approved_after_doc", "2026-03-29T11:30:52Z"))
+        ask = ["5915db5d-fb40-4f5d-b204-45c19d4a6a47"]
+        self.assertTrue(uvn_status.documents_block(d, "298376", ask, set()))                         # date unknown
+        self.assertFalse(uvn_status.documents_block(d, "298376", ask, set(), "2026-10-15 07:21:38.896000 UTC"))
+        self.assertFalse(uvn_status.documents_block(d, "298376", ask, set(),
+                                                    uvn_status.oldest_created([{"_created": "2026-10-15 07:21:38 UTC"}])))
+
+    def test_a_later_document_or_one_naming_the_request_still_blocks(self):
+        ask = ["5915db5d"]
+        later = self.pof((None, "pending_doc", "2026-10-20T00:00:00Z"))
+        self.assertTrue(uvn_status.documents_block(later, "298376", ask, set(), "2026-10-15 07:21:38 UTC"))
+        named = self.pof(("5915db5d", "approved_doc", "2026-03-01T00:00:00Z"))
+        self.assertTrue(uvn_status.documents_block(named, "298376", ask, set(), "2026-10-15 07:21:38 UTC"))
+        undated = self.pof((None, "pending_doc", ""))
+        self.assertTrue(uvn_status.documents_block(undated, "298376", ask, set(), "2026-10-15 07:21:38 UTC"))
+        # unknown request date (any row without createdat): fail closed
+        self.assertIsNone(uvn_status.oldest_created([{"_created": "2026-10-15 07:21:38 UTC"}, {"_created": ""}]))
+
+    def test_load_keeps_proof_at(self):
+        d = verify_notify.ProofOnFile()
+        self.assertEqual(d.dated, {})
+
+
+class DryRunEqualsApplyTest(UvnStatusTests):
+    """QA #1508 (b1): the dry run IS the code the send runs - with only March proof for an October request, dry run and
+    apply select the same users (the apply path's early 'documented' guard ran before the date filter)."""
+
+    def run_both(self, entries):
+        proof(self.proof, entries)
+        self.users = [{"user_id": 7, "paid": True, "skip": None, "request_ids": ["r7"], "oldest": "2026-10-15 07:21:38.896000 UTC"}]
+        self.write_list()
+        q = replica([7], rows={"r7": {"created": "2026-10-15 07:21:38.896000 UTC"}})
+        got = {}
+        for mode in ("dry-run", "apply"):
+            Path(self.ledger).unlink(missing_ok=True)
+            _rep, gate = self.run_(mode=mode, query=q)
+            got[mode] = sorted(p["user"]["id"] for _, p in gate.calls)
+            self.since = getattr(self, "since", {})
+            self.since[mode] = next((p["user"].get("requests_since") for _, p in gate.calls), None)
+        return got
+
+    def test_march_proof_for_an_october_request_asks_in_both_modes(self):
+        got = self.run_both([{"user_id": 7, "request_id": None, "kind": "human_approved_after_doc", "source": "intercom",
+                              "ref": "x", "proof_at": "2026-03-29T11:40:36Z"}])
+        self.assertEqual(got["dry-run"], got["apply"])
+        self.assertEqual(got["apply"], ["7"])
+        # ... and the gate gets the request date for its own document check (user.requests_since), in both modes
+        self.assertEqual(self.since, {"dry-run": "2026-10-15T07:21:38.896000+00:00", "apply": "2026-10-15T07:21:38.896000+00:00"})
+
+    def test_proof_after_the_request_holds_in_both_modes(self):
+        got = self.run_both([{"user_id": 7, "request_id": None, "kind": "pending_doc", "source": "intercom",
+                              "ref": "x", "proof_at": "2026-10-20T00:00:00Z"}])
+        self.assertEqual(got, {"dry-run": [], "apply": []})
+
+
+class ReplyDueListTest(unittest.TestCase):
+    def test_a_list_row_with_reply_due_becomes_the_gate_args(self):
+        p = uvn_status.with_reply_due({"user": {}, "credits": []}, {"reply_due": {"part": "57000000001", "conversation": "215473681300330"}})
+        self.assertEqual(p["extra"], ["--conversation", "215473681300330", "--reply-due", "57000000001"])
+        for bad in ({"part": "1; rm", "conversation": "2"}, {"part": "1"}, "x", None):
+            self.assertNotIn("extra", uvn_status.with_reply_due({"user": {}}, {"reply_due": bad}))
+
+
+class ReplyDueRunnerTest(UvnStatusTests):
+    """QA #1509: the real runner carries a reply_due row to the gate in BOTH modes, past the 7-day note cooldown
+    (the ledger filter dropped it, and the apply rebuild lost its gate args)."""
+
+    def run_both(self, with_reply_due=True):
+        got = {}
+        for mode in ("dry-run", "apply"):
+            Path(self.ledger).unlink(missing_ok=True)
+            db = verify_ledger.connect(self.ledger)
+            old = NOW - timedelta(days=2)
+            r = verify_ledger.claim(db, user_key="u7@x.com", day=old.strftime("%Y-%m-%d"), request_ids=["x7"],
+                                    message_type="email", approved_by="U", approval_ref="ref", campaign="status-team-review",
+                                    user_id="7", now=old)
+            verify_ledger.finalize(db, message_row=int(r["message_row"]), status="sent", message_id="1", now=old)
+            db.close()
+            row = {"user_id": 7, "paid": True, "skip": None, "request_ids": ["r7"], "oldest": "2026-10-15 07:21:38 UTC"}
+            if with_reply_due:
+                row["reply_due"] = {"part": "57000000001", "conversation": "215473681300330"}
+            self.users = [row]
+            self.write_list()
+            _rep, gate = self.run_(mode=mode, query=replica([7], rows={"r7": {"created": "2026-10-15 07:21:38 UTC"}}))
+            got[mode] = [(p["user"]["id"], a[a.index("--reply-due") + 1] if "--reply-due" in a else "",
+                          a[a.index("--conversation") + 1] if "--conversation" in a else "") for a, p in gate.calls]
+        return got
+
+    def test_the_answer_reaches_the_gate_in_both_modes_with_its_args(self):
+        got = self.run_both()
+        self.assertEqual(got["dry-run"], got["apply"])
+        self.assertEqual(got["apply"], [("7", "57000000001", "215473681300330")])
+
+    def test_without_reply_due_the_7_day_cooldown_still_defers(self):
+        self.assertEqual(self.run_both(with_reply_due=False), {"dry-run": [], "apply": []})
 
 
 if __name__ == "__main__":

@@ -40,10 +40,13 @@ export interface ExecuteEscalationDeps {
 function buildFarewell(assessment: RiskAssessment, ticket: TicketResult): string {
   const isMagic = assessment.source === "user_request";
   const prefix = isMagic ? "Got it — " : "";
-  if (ticket.ok && ticket.ticketId && ticket.sla) {
-    return `${prefix}I'm pulling in a teammate to take this from here. They'll follow up here within ${ticket.sla}. Reference: ${ticket.ticketId}.`;
+  // No timeframe on any customer reply (Fable caroline-instructions-1029 §2.9/§3): the tier
+  // SLA stays on the ticket and in the Slack line, never in the farewell, and no "shortly".
+  const tail = " You'll hear from us in this conversation and by email.";
+  if (ticket.ok && ticket.ticketId) {
+    return `${prefix}I'm pulling in a teammate to take this from here.${tail} Reference: ${ticket.ticketId}.`;
   }
-  return `${prefix}I'm pulling in a teammate to take this from here. We'll follow up here shortly.`;
+  return `${prefix}I'm pulling in a teammate to take this from here.${tail}`;
 }
 
 const SUMMARY_PREFIX_BY_SOURCE: Record<NonNullable<RiskAssessment["source"]>, (reason: string) => string> = {

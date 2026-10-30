@@ -26,7 +26,7 @@ Design and operator view: docs/credit-verification/doc-verify.md.
 """
 
 # Bump when a rule change must re-verify documents; the deployed reader then re-reads them itself.
-VERSION = "dv-3"
+VERSION = "dv-4"
 # The bump's carry-forward (store.carry_forward, done once by the first reader that opens the store):
 # {new version: (previous version, outcomes that send a document back, steps that send it back)}.
 # A document carries (its rows copied, marked `carried_from`) only when NONE of its standing outcomes is
@@ -60,6 +60,8 @@ FRAUD_SIGNAL_FAMILY = {
     "impersonation_suspected": "reuse",
     # the same template text with other entities on another account (R-C5: never alone)
     "template_family": "template", "template_reused": "template",
+    # Fable 165: an F2 text match with other splits / another track is a template (SOFT), not reuse
+    "template_match_another_account": "template",
     # facts on the document that cannot be true
     "iswc_check_digit_invalid": "impossible_content", "upc_check_digit_invalid": "impossible_content",
     "document_date_future": "impossible_content", "file_predates_document": "impossible_content",
@@ -73,4 +75,10 @@ FRAUD_SIGNAL_FAMILY = {
 CARRY = {"dv-2": ("dv-1", frozenset({"forged", "verified"}), ("xc_domain",)),
          # dv-3 also tightens `verified` (the document itself must name the claimant, and be a document of
          # record): every standing `verified` is re-read as well.
-         "dv-3": ("dv-2", frozenset({"forged", "verified"}), (), ("forensics", tuple(sorted(FRAUD_SIGNAL_FAMILY))))}
+         "dv-3": ("dv-2", frozenset({"forged", "verified"}), (), ("forensics", tuple(sorted(FRAUD_SIGNAL_FAMILY)))),
+         # dv-4 (Fable 165, df38bbd1): H3 F2 'reused' is HARD only for the same document (byte-identical, or the same
+         # text with the same splits on the same track/ISRC); a template match is SOFT. Only a document H3 called
+         # forged can change: every standing forged / forged_positive is re-read, and every document whose
+         # forensics carried a hard F2 reuse signal; everything else carries.
+         "dv-4": ("dv-3", frozenset({"forged", "forged_positive"}), (),
+                  ("forensics", ("reused_by_another_account_same_claim", "reused_on_another_track")))}

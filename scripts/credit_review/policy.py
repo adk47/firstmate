@@ -68,6 +68,8 @@ KNOWN_APPROVERS = frozenset({
 KNOWN_AGENT_APPROVERS = {
     "agent-credit-decider@muso.ai": "credit-trust-decide",
     "agent-uvn-cron@muso.ai": "uvn-under30",
+    # L12 executor approvals (core FABLE_RULED, #11010/#11011): Fable's own account; anchor-backed rows only.
+    "agent-fable@muso.ai": "fable-decider",
 }
 
 # Server mirror (core-backend services/credit-requests/agentApprovalGuard.js).

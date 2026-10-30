@@ -264,7 +264,7 @@ describe("callJev", () => {
 
     it("succeeds against the real generated caroline-questions.json fixture, so a future question-set change the validator can't satisfy fails this test", async () => {
       const realAnswers = {
-        first_tool: { type: "choice", choice: "credit_verification_check" },
+        first_tool: { type: "choice", choice: "create_ticket" },
         // Fractional on purpose: the earlier score:0 here was exactly the one
         // value a key-membership check accepted, so this test could not see
         // the bug that rejected most production answers.
@@ -272,7 +272,7 @@ describe("callJev", () => {
         intent: { type: "choice", choice: "credit_verification" },
         off_topic_or_bad_faith: { type: "noul", noul: 0.05 },
         resolution_path: { type: "choice", choice: "caroline_tool" },
-        skill: { type: "choice", choice: "customer-credit-verification" },
+        skill: { type: "choice", choice: "verification-handoff" },
       };
       const { result } = await run(realAnswers, carolineQuestions as unknown as Record<string, unknown>);
       expect(result.ok).toBe(true);

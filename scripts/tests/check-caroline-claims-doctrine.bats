@@ -53,12 +53,12 @@ pad_large() { python3 -c "import sys; open(sys.argv[1],'a').write(('filler line 
 @test "CAN FAIL: a removed required anchor is caught" {
   python3 - "$CI_MD" <<'EOF'
 import sys; p=sys.argv[1]; s=open(p).read()
-s=s.replace("Never tell them their claims need review or ask them to claim again", "Tell them it is pending")
+s=s.replace("**Hand off only**: run no check on their profiles.", "Run dedupe_check first.")
 open(p,'w').write(s)
 EOF
   run_gate
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Q6 all claimed by them"* ]]
+  [[ "$output" == *"Q5 merge: hand off only, no check"* ]]
 }
 
 @test "a large file with every anchor present still passes (require is not false-red on SIGPIPE)" {
@@ -78,8 +78,7 @@ EOF
 @test "CAN FAIL: a conversation-reply promise for claims is caught" {
   python3 - "$CI_MD" <<'EOF'
 import sys; p=sys.argv[1]; s=open(p).read()
-s=s.replace("Do not promise a reply here either: the claim decision reaches them as an app notification and email.",
-            "The outcome is posted in this conversation.")
+s += "\n`create_ticket` returns no timeframe for claims. The outcome is posted in this conversation.\n"
 open(p,'w').write(s)
 EOF
   run_gate
@@ -115,14 +114,127 @@ EOF
   [[ "$output" == *"more than one barred-phrases marker line"* ]]
 }
 
-@test "CAN FAIL: dropping the proof_intake condition on 'document received' is caught" {
-  CV_MD="$FAKE/workspaces/support/skills/customer-credit-verification/SKILL.md"
+@test "CAN FAIL: a scripted claim of an action is caught (captain 2026-10-28: 'raised the priority', 'I've checked')" {
+  AR_MD="$FAKE/workspaces/support/skills/action-request/SKILL.md"
+  printf '\n"I have raised the priority on your request."\n' >> "$AR_MD"
+  printf "\n\"I've checked quite a lot for you today already.\"\n" >> "$CI_MD"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"raised the priority"* ]]
+  [[ "$output" == *"I've checked quite a lot"* ]]
+}
+
+@test "CAN FAIL: dropping 'I've verified' / 'I can merge' from the never-say line is caught" {
+  CV_MD="$FAKE/workspaces/support/skills/verification-handoff/SKILL.md"
   python3 - "$CV_MD" <<'PY'
 import sys; p=sys.argv[1]; s=open(p).read()
-s=s.replace("ONLY when a tool result\n    in this turn returned `may_say_document_passed_on: true`", "whenever they send one")
+s=s.replace('"I\'ve verified", "I verified", ', '', 1)
 open(p,'w').write(s)
 PY
   run_gate
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Q11 document received only on a proof_intake row"* ]]
+  [[ "$output" == *"Q12 the never-say-checked/filed/verified/merged phrases"* ]]
+}
+
+@test "CAN FAIL: a removed verification/merge skill coming back is caught (dir or routing reference)" {
+  mkdir -p "$FAKE/workspaces/support/skills/customer-profile-consolidate"
+  printf -- '---\nname: customer-profile-consolidate\n---\nMerge their profiles.\n' > "$FAKE/workspaces/support/skills/customer-profile-consolidate/SKILL.md"
+  printf '\n- Duplicates -> `customer-profile-dedupe`.\n' >> "$CI_MD"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"removed verification/merge skill is back"* ]]
+  [[ "$output" == *"routes to a removed verification/merge skill"* ]]
+}
+
+@test "CAN FAIL: a ticket kind losing its handoff tag is caught" {
+  sed -i.bak 's/"profile-merge": { default: "merge", allowed: \["merge"\] },//' \
+    "$FAKE/plugins/support-tools/src/tools/ticket-format.ts"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Q12 merge kinds tag merge"* ]]
+}
+
+@test "CAN FAIL: a hand-off line that is not the approved one is caught" {
+  CV_MD="$FAKE/workspaces/support/skills/verification-handoff/SKILL.md"
+  sed -i.bak "s/I'm pulling in a teammate to take this from here./I've passed this to our team and checked it./" "$CV_MD"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"hand-off line is the approved one"* ]]
+}
+
+@test "CAN FAIL: Jaxsta coming back into any support doctrine file is caught (captain 2026-10-29)" {
+  printf '\n- A public link where the credit is listed: Tidal, Genius, JAXSTA, Discogs\n' >> "$FAKE/workspaces/support/reference/faq.md"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Jaxsta is not named to users"* ]]
+}
+
+# --- caroline-instructions-1029 evals (captain 2026-10-29) ----------------------------
+
+@test "CAN FAIL: 'why was my credit rejected?' answered with a reason is caught (§2.6)" {
+  CAP_MD="$FAKE/workspaces/support/reference/credits-and-profiles.md"
+  python3 - "$CAP_MD" <<'PY'
+import sys; p=sys.argv[1]; s=open(p).read()
+s=s.replace("A request is closed when the supporting information we received wasn't enough to confirm the credit.",
+            "Your request was declined because the document doesn't name you.")
+open(p,'w').write(s)
+PY
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Q3 declined: the approved decline paragraph"* ]]
+}
+
+@test "CAN FAIL: 'how do you verify credits?' naming our sources or a score is caught (§3)" {
+  printf '\nWe compare every credit against Spotify and Tidal and MusicBrainz, then a risk score decides.\n' >> "$FAKE/workspaces/support/reference/faq.md"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Spotify and Tidal"* ]]
+  [[ "$output" == *"MusicBrainz"* ]]
+  [[ "$output" == *"risk score"* ]]
+}
+
+@test "CAN FAIL: a GDPR reply with a business-day number or the old SLA step is caught (§2.7)" {
+  GDPR_MD="$FAKE/workspaces/support/reference/gdpr-erasure-requests.md"
+  printf '\n3. Reply with the Tier 3 template from the skill and quote the returned SLA once (5-10 business days).\n' >> "$GDPR_MD"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Q14 no tier-3 SLA quote"* ]]
+  [[ "$output" == *"5-10 business days"* ]]
+}
+
+@test "CAN FAIL: a promise of inaction ('nothing is needed from you') is caught (captain 2026-10-29)" {
+  printf '\nThanks, nothing is needed from you right now.\n' >> "$CI_MD"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"nothing is needed from you"* ]]
+}
+
+@test "CAN FAIL: an internal or vendor name in the reference library is caught (§3)" {
+  printf '\nFable and DeepSeek review every document.\n' >> "$FAKE/workspaces/support/reference/faq.md"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Fable"* ]]
+  [[ "$output" == *"DeepSeek"* ]]
+}
+
+@test "CAN FAIL: a second never-reveal marker line cannot smuggle signal words past the forbid list" {
+  printf '\n<!-- never-reveal --> your risk score was high\n<!-- never-reveal --> again\n' >> "$CI_MD"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"more than one never-reveal marker line"* ]]
+}
+
+@test "CAN FAIL: the approved GDPR acknowledgement removed is caught (§2.7)" {
+  GDPR_MD="$FAKE/workspaces/support/reference/gdpr-erasure-requests.md"
+  sed -i.bak 's/within one month of today\./soon./' "$GDPR_MD"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Q14 the approved GDPR acknowledgement"* ]]
+}
+
+@test "CAN FAIL: an always-loaded template quoting the SLA is caught (QA on #1451)" {
+  printf '\n- `create_ticket {submitted:true, sla}` -- "You will hear back within `<sla>`."\n' >> "$FAKE/workspaces/support/SOUL.md"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no reply template quotes an SLA"* ]]
 }

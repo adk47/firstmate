@@ -212,8 +212,8 @@ back to Prodigi – say so in the request you file.
   server-side) and validates the address (≤40-char lines + required Name/Line1/
   Postcode/City/Country/Phone). Always dry-run → show the customer → explicit "yes" →
   apply. On any refusal it falls back to a request for the team.
-- **Can – escalate**: file a structured `order-fulfillment` request (Tier 1, 2 business
-  days) for anything she can't apply (vendor-lane requests, non-owner requesters,
+- **Can – escalate**: file a structured `order-fulfillment` request (Tier 1, no customer
+  timeframe) for anything she can't apply (vendor-lane requests, non-owner requesters,
   already-shipped orders, apply failures). The request carries a deterministic
   `address_validation` stamp.
 - **Cannot**: reply to Prodigi on Muso's behalf, or edit an order on a vendor's

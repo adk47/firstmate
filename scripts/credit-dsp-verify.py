@@ -17,6 +17,9 @@ Subcommands:
                    from the verifier's OWN standing verdict and packet, never from the tray; log every
                    record or refusal to dsp_anchors and print them as JSONL. Fable ruling
                    l12-approvals-core = A. `--write` is refused: core has no anchor endpoint yet.
+  d5b              D5b (Fable 171): every request doc-verify reads `verified` gets a same-run capture (submit,
+                   unless one is open or a final verdict is < 24 h old), verify reads it, and an APPROVE verdict
+                   gets its dsp-anchor/1 record built locally. A document never upgrades a WAIT.
   export           The standing (latest) verdict per request as JSONL on stdout.
   summary          Counts of the standing verdicts (by verdict, class, need, anchor, paid).
 
@@ -48,6 +51,22 @@ def killed() -> str | None:
     return next((p for p in KILL_SWITCHES if p and Path(p).exists()), None)
 
 
+class PacedAdmin:
+    """Every admin GET through the HOST-WIDE admin pacer (1/s across every process, shared with the doc-verify
+    readers; 2026-10-30 05:13Z: an unpaced paid-queue submit beside 4 reader shards got HTTP 429)."""
+
+    def __init__(self, admin):
+        from credit_verify.docverify.pace import Pacer
+        self._admin, self._pacer = admin, Pacer("admin", 1.0, log=log)
+
+    def get(self, path, params=None):
+        self._pacer.wait()
+        return self._admin.get(path, params)
+
+    def __getattr__(self, name):
+        return getattr(self._admin, name)
+
+
 def real_deps():
     from credit_review import account_gate
     from credit_review import admin as admin_api
@@ -61,7 +80,7 @@ def real_deps():
     paying, why = paying_users()
     if paying is None:
         log(f"paying status unknown ({why}): plain oldest-first order")
-    return Deps(admin=admin_api.AdminClient(), capture=capture.call, gate=account_gate.Cached(),
+    return Deps(admin=PacedAdmin(admin_api.AdminClient()), capture=capture.call, gate=account_gate.Cached(),
                 deny_user_ids=frozenset(pol.deny_user_ids), deny_profile_ids=frozenset(pol.deny_profile_ids),
                 watch_user_ids=frozenset(wl.user_ids),
                 watch_profile_ids=frozenset(str(x).lower() for x in wl.profile_ids),
@@ -110,6 +129,20 @@ def cmd_run(args: argparse.Namespace) -> int:
     store, deps = Store(args.store), real_deps()
     runner.verify(store, deps, max_groups=args.max_groups)       # read what earlier runs filed
     runner.submit(store, deps, max_requests=args.max_requests)   # then file the next captures
+    print("NO_REPLY")
+    return 0
+
+
+def cmd_d5b(args: argparse.Namespace) -> int:
+    """D5b (Fable 171): same-run captures + anchors for doc-verify's verified requests (see dspverify/d5b.py)."""
+    from credit_verify.dspverify import d5b
+    from credit_verify.dspverify.store import Store
+    if (k := killed()):
+        log(f"kill switch present at {k}; no d5b run")
+        print("NO_REPLY")
+        return 0
+    d5b.run(Store(args.store), real_deps(), dv_path=args.doc_verify_store, max_groups=args.max_groups,
+            max_requests=args.max_requests, log=log)
     print("NO_REPLY")
     return 0
 
@@ -177,6 +210,11 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--max-requests", type=int, default=300)
     s.add_argument("--max-groups", type=int, default=200)
     s.set_defaults(fn=cmd_run)
+    s = sub.add_parser("d5b", help="D5b: capture + anchor doc-verify's verified requests (own store only)")
+    s.add_argument("--doc-verify-store", default="/var/lib/hydra-credit-verify/doc-verify.sqlite")
+    s.add_argument("--max-requests", type=int, default=300)
+    s.add_argument("--max-groups", type=int, default=200)
+    s.set_defaults(fn=cmd_d5b)
     s = sub.add_parser("verify-packets")
     s.add_argument("packets", help="JSON list or JSONL file of packets, or '-' for stdin")
     s.add_argument("--log", action="store_true", help="also log the verdicts to the shadow store")

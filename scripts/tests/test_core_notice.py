@@ -18,11 +18,11 @@ NOW = datetime(2026, 10, 27, 15, 0, tzinfo=timezone.utc)
 
 
 def fake(requests, claims=()):
-    """requests: [(uid, approvedNotice, proofRequest, infoRequest, updatedat)]; claims: [(uid, max updatedat)]."""
+    """requests: [(uid, approvedNotice, proofRequest, infoRequest, updatedat)]; claims: [(uid, updatedat[, createdat])]."""
     def q(sql):
         if "credit_requests" in sql:
             return [[str(r[0]), *r[1:]] for r in requests]
-        return [[str(c[0]), c[1]] for c in claims]
+        return [[str(c[0]), c[1], c[2] if len(c) > 2 else "2026-01-01 00:00:00.000"] for c in claims]
     return q
 
 
@@ -42,6 +42,27 @@ class ReasonsTest(unittest.TestCase):
             self.assertEqual(self.why([r])[1], [want])
         self.assertEqual(self.why([(1, "", "", "", old)], claims=[(1, "2026-10-24 10:00:00.000")])[1],
                          ["claim updated within 7d"])
+
+    def test_a_claim_never_touched_since_filing_is_not_a_notice(self):
+        # p1 180: claims 1621336/1621425/1621613 were held only because they were FILED within 7 days
+        old = "2026-09-01 00:00:00.000"
+        filed = "2026-10-27 21:21:41.075000 UTC"
+        self.assertEqual(self.why([(1, "", "", "", old)], claims=[(1, filed, filed)])[1], [])
+        # touched after filing (a decision / code check) still holds, as does any other recent claim of the user
+        self.assertEqual(self.why([(1, "", "", "", old)], claims=[(1, "2026-10-28 09:00:00.000 UTC", filed)])[1],
+                         ["claim updated within 7d"])
+        self.assertEqual(self.why([(1, "", "", "", old)], claims=[(1, filed, filed), (1, "2026-10-26 10:00:00.000", "2026-10-01 00:00:00.000")])[1],
+                         ["claim updated within 7d"])
+
+    def test_the_untouched_rule_is_claims_only_a_request_marker_still_counts(self):
+        # r5 on #1498: a credit REQUEST never updated since it was created still holds on a core marker - the
+        # updatedat == createdat exclusion applies to claim filings only
+        filed = "2026-10-27 21:21:41.075000 UTC"
+        filed = "2026-10-25 10:00:00.000 UTC"   # never updated since: updatedat == the marker time
+        self.assertEqual(self.why([(1, "", '{"noticeSentAt":"2026-10-25T10:00:00Z"}', "", filed)])[1],
+                         ["proofRequest within 7d"])
+        self.assertEqual(self.why([(1, "", "", '{"sentAt":"2026-10-26T09:00:00Z"}', "2026-10-26 09:00:00.000")])[1],
+                         ["infoRequest within 7d"])
 
     def test_offsets_are_honoured_at_the_7_day_boundary(self):
         # QA + Fable on #1397: at 2026-10-27T15:00Z, 2026-10-20T14:30:00-02:00 = 16:30Z is 6 d 22.5 h old (hold);

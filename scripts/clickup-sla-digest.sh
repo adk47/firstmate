@@ -11,9 +11,10 @@
 #
 # The digest is posted as a THREAD: a short glance lands top-level in
 # #cs_chats, and the per-bucket detail (overdue / today / tomorrow) is
-# nested as threaded replies — one reply per bucket, split into several
-# in-thread replies when a bucket is long. This keeps the channel
-# scannable instead of a daily wall of text. The glance also carries a
+# nested as threaded replies — one BOUNDED reply per bucket (counts by status,
+# the oldest N tickets, the most overdue per status, and a "+K more" pointer to
+# the full ClickUp view). This keeps the channel scannable instead of a daily
+# wall of text, however large the open backlog grows. The glance also carries a
 # flow line — how many tickets were opened and closed YESTERDAY across
 # the whole support board — for at-a-glance throughput tracking.
 #
@@ -39,9 +40,13 @@
 #                         "Ops" app that posts the other #cs_chats digests)
 #   SLA_DIGEST_TZ         bucketing timezone (default America/New_York)
 #   SLA_DIGEST_NOW        epoch-seconds override for "now" (tests)
-#   SLA_DIGEST_MAX_CHARS  max chars per threaded bucket reply before it is
-#                         split into continuation replies (default 3500)
-#   PAGINATION_CAP        max ClickUp pages (default 20)
+#   SLA_DIGEST_MAX_CHARS  hard cap on chars per threaded bucket reply (default
+#                         3500); a longer reply has ticket lines dropped from
+#                         the end and a loud stderr line — it is never split
+#   SLA_DIGEST_TOP_N      tickets listed per bucket, oldest first (default 10)
+#   SLA_DIGEST_VIEW_URL   full-list ClickUp view linked from the digest
+#                         (default the support list view, team 2283334)
+#   PAGINATION_CAP        max ClickUp pages, a runaway guard (default 100)
 # ──────────────────────────────────────────────────────────────
 set -euo pipefail
 
@@ -76,12 +81,19 @@ channel="${SLA_DIGEST_CHANNEL:-C0ANM0PN9L5}"
 bot="${SLA_DIGEST_BOT:-operations}"
 tz="${SLA_DIGEST_TZ:-America/New_York}"
 now="${SLA_DIGEST_NOW:-$(date +%s)}"
-# Per-reply char budget before a bucket is split into continuation replies.
+# Per-reply hard char budget (a longer reply is truncated, never split).
 # Slack's chat.postMessage `text` hard limit is ~40000, but clients truncate
 # the visible message around 3000-4000 chars; 3500 keeps each threaded reply
 # readable without client-side truncation while staying well clear of the API cap.
 max_chars="${SLA_DIGEST_MAX_CHARS:-3500}"
-pagination_cap="${PAGINATION_CAP:-20}"
+pagination_cap="${PAGINATION_CAP:-100}"
+top_n="${SLA_DIGEST_TOP_N-10}"
+# Fail loud before anything is fetched or posted: a bad N would otherwise reach
+# jq --argjson and silently produce an empty reply.
+case "$top_n" in
+  ''|*[!0-9]*|0*) echo "clickup-sla-digest: SLA_DIGEST_TOP_N must be a positive integer (got '$top_n')" >&2; exit 2 ;;
+esac
+view_url="${SLA_DIGEST_VIEW_URL:-https://app.clickup.com/2283334/v/li/901000600160}"
 [ -n "$api_key" ] || { echo "clickup-sla-digest: CLICKUP_API_KEY not set" >&2; exit 2; }
 
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/clickup-sla-digest.XXXXXX")
@@ -195,9 +207,14 @@ fi
 #   without a status filter : >25 pages, >2600 tasks, never exhausted
 #   with    a status filter :   6 pages,   598 tasks
 #
-# So filter by the list's OWN open statuses, server-side. This scales with OPEN
-# ticket count (bounded by team capacity) rather than with all history, which a
-# bigger cap would not: raising it to 80 works today and breaks again later.
+# So filter by the list's OWN open statuses, server-side. This scales with the
+# OPEN ticket count rather than with all history. The open backlog has since
+# grown ~5x (21 Oct onward: ~2,900 due tasks, ~30 pages, so the old cap of 20
+# exited 6 every day), so the cap is now a RUNAWAY GUARD with headroom, not a
+# size estimate: ClickUp has no count endpoint, so a cap is the only protection
+# against a response that never says `last_page`. 100 pages = 10k tasks (3.4x
+# today). At ~1.5 s/page (20 pages in 30 s on 29 Oct) a runaway costs ~100
+# requests over ~2.5 min, under the token's 100 req/min.
 #
 # Read the status names from the list itself rather than hardcoding them — a
 # renamed or added status would otherwise silently drop its tickets from the
@@ -293,66 +310,68 @@ else
 fi
 now_line="Now: *${overdue_n}* overdue · *${today_n}* due today · *${tomorrow_n}* due tomorrow"
 [ "$total" -gt 0 ] && now_line="$now_line — _details in thread_"
-parent=$(printf ':hourglass_flowing_sand: *SLA digest — support tickets* (%s)\n%s\n%s' \
-  "$today" "$flow_line" "$now_line")
+parent=$(printf ':hourglass_flowing_sand: *SLA digest — support tickets* (%s)\n%s\n%s\n<%s|Full list in ClickUp>' \
+  "$today" "$flow_line" "$now_line" "$view_url")
 
 # ── Build the per-bucket threaded replies ─────────────────────────
-# One section per non-empty bucket, greedily packed into chunks under
-# $max_chars so a long bucket becomes several in-thread replies rather
-# than one oversized message. Built once and reused by both the dry-run
-# print and the live post so they can never diverge.
+# One BOUNDED reply per non-empty bucket: by-status counts, the first $top_n
+# tickets by due date, (overdue only) the 3 most overdue per status not already
+# listed, and "+K more" with the full-list link. Built once and reused by both
+# the dry-run print and the live post so they can never diverge.
 reply_texts=()    # full reply body (header + lines), one per array slot
 reply_labels=()   # short label for the --dry-run delimiter
 
-bucket_section() {  # bucket_section <key> <title> <count>
-  # <count> is the bucket's ticket count, already computed for the glance line
-  # above — passed in so we don't re-slurp due.jsonl just to recount.
-  local key="$1" title="$2" count="$3" lines_json
+bucket_section() {  # bucket_section <key> <title> <count> <more-label>
+  local key="$1" title="$2" count="$3" more="$4" ln i last listed k text label
   [ "$count" -eq 0 ] && return 0
-  # Render each ticket to its mrkdwn line (same format as before): linked
-  # name, status, and (overdue only) days past SLA. esc neutralizes Slack
-  # control chars (& first) and flattens newlines so a hostile/odd ticket
-  # title cannot break the <url|label> link or the one-line layout.
-  lines_json=$(jq -rs --arg k "$key" '
+  # esc neutralizes Slack control chars (& first) and flattens newlines so a
+  # hostile/odd ticket title or status cannot break the <url|label> link or the
+  # one-line layout.
+  local lines=() rendered
+  # Capture first: a jq failure inside `done < <(jq …)` would be swallowed.
+  rendered=$(jq -rs --arg k "$key" --argjson n "$top_n" \
+    --arg title "$title" --argjson m "$count" '
     def esc: gsub("&";"&amp;") | gsub("<";"&lt;") | gsub(">";"&gt;") | gsub("[\\n\\r]+";" ");
     def line: "• <\(.url)|\(.name|esc)> — [\(.status|esc)]"
       + (if .bucket == "overdue" then " — \(.days_overdue)d overdue" else "" end);
-    [.[] | select(.bucket==$k)] | sort_by(.due) | map(line)
-  ' "$tmp/due.jsonl")
+    [.[] | select(.bucket==$k)] | sort_by(.due) as $all
+    | $all[:$n] as $head
+    | ($head | map(.url)) as $seen
+    | ($all | group_by(.status) | map({s: .[0].status, items: .}) | sort_by(-(.items | length))) as $groups
+    | ["*\($title) (\($m)):*",
+       "By status: " + ($groups | map("\(.s|esc) \(.items|length)") | join(" · "))]
+      + (if $k == "overdue" then ["*Oldest \($head|length):*"] else [] end)
+      + ($head | map(line))
+      + (if $k == "overdue" then
+           [$groups[] | . as $g
+            | ($g.items | map(select(.url as $u | any($seen[]; . == $u) | not)) | .[:3]) as $x
+            | select($x | length > 0)
+            | "*Most overdue — \($g.s|esc):*", ($x | map(line)[])]
+         else [] end)
+    | .[]' "$tmp/due.jsonl")
+  while IFS= read -r ln; do lines+=("$ln"); done <<<"$rendered"
+  label="${title} (${count})"
 
-  # Greedy pack lines into chunks under $max_chars (avoid mapfile for
-  # portability with bash 3.2 on dev machines).
-  local chunks=() buf="" ln
-  while IFS= read -r ln; do
-    [ -z "$ln" ] && continue
-    if [ -n "$buf" ] && [ $(( ${#buf} + 1 + ${#ln} )) -gt "$max_chars" ]; then
-      chunks+=("$buf"); buf="$ln"
-    else
-      buf="${buf:+$buf$'\n'}$ln"
-    fi
-  done < <(printf '%s\n' "$lines_json" | jq -r '.[]')
-  [ -n "$buf" ] && chunks+=("$buf")
-
-  local m=${#chunks[@]} k=0 hdr
-  for body in "${chunks[@]}"; do
-    k=$((k+1))
-    if [ "$k" -eq 1 ]; then
-      hdr="*${title} (${count}):*"
-    else
-      hdr="*${title} (${count}) — cont. (${k}/${m}):*"
-    fi
-    reply_texts+=("$(printf '%s\n%s' "$hdr" "$body")")
-    if [ "$m" -gt 1 ]; then
-      reply_labels+=("${title} (${count}) ${k}/${m}")
-    else
-      reply_labels+=("${title} (${count})")
-    fi
+  # "+K more" counts every ticket not listed. SLA_DIGEST_MAX_CHARS is a hard
+  # bound: drop ticket lines from the end until the reply fits, loudly.
+  while :; do
+    listed=0; for ln in "${lines[@]}"; do case "$ln" in "• "*) listed=$((listed+1)) ;; esac; done
+    k=$((count - listed))
+    text=$(printf '%s\n' "${lines[@]}")
+    [ "$k" -gt 0 ] && text="$text"$'\n'"+${k} ${more} — <${view_url}|open the full list>"
+    [ "${#text}" -le "$max_chars" ] && break
+    last=-1; for i in "${!lines[@]}"; do case "${lines[$i]}" in "• "*) last=$i ;; esac; done
+    echo "clickup-sla-digest: reply '$label' truncated to fit SLA_DIGEST_MAX_CHARS=$max_chars" >&2
+    if [ "$last" -lt 0 ]; then text="${text:0:$max_chars}"; break; fi
+    unset "lines[$last]"; lines=("${lines[@]}")
   done
+  reply_texts+=("$text")
+  reply_labels+=("$label")
 }
 
-bucket_section "overdue"  ":rotating_light: Overdue" "$overdue_n"
-bucket_section "today"    "Due today" "$today_n"
-bucket_section "tomorrow" "Due tomorrow" "$tomorrow_n"
+bucket_section "overdue"  ":rotating_light: Overdue" "$overdue_n" "more overdue"
+bucket_section "today"    "Due today" "$today_n" "more"
+bucket_section "tomorrow" "Due tomorrow" "$tomorrow_n" "more"
 
 # ── Dry-run: print parent + delimited replies, never touch Slack ──
 if [ "$dry_run" -eq 1 ]; then

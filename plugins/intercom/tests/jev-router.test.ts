@@ -268,8 +268,9 @@ describe("decide", () => {
         "first_tool: credit_verification_check (0.88)",
         "skill: customer-credit-verification (0.86)",
         "Follow this routing unless a tool result contradicts it. path=caroline_tool means: use",
-        "the tool, do not create a ticket. path=ask_customer means: ask for exactly the one",
-        "missing item, nothing else.",
+        "the tool, do not create a ticket, EXCEPT credit, document, claim and merge questions:",
+        "there the verification-handoff ticket IS the action, always file it. path=ask_customer",
+        "means: ask for exactly the one missing item, nothing else.",
         "[/ROUTING]",
       ].join("\n"),
     );
@@ -922,12 +923,12 @@ describe("createJevTurnRunner", () => {
       json: async () => ({
         model: "jev-1.13.0",
         answers: {
-          first_tool: { type: "choice", choice: "credit_verification_check" },
+          first_tool: { type: "choice", choice: "create_ticket" },
           frustration: { type: "score", score: 0, legend: { "0": "Calm" } },
           intent: { type: "choice", choice: "credit_verification" },
           off_topic_or_bad_faith: { type: "noul", noul: 0.05 },
           resolution_path: { type: "choice", choice: "caroline_tool" },
-          skill: { type: "choice", choice: "customer-credit-verification" },
+          skill: { type: "choice", choice: "verification-handoff" },
         },
         usage: { input_tokens: 3 },
       }),
@@ -976,12 +977,12 @@ describe("createJevTurnRunner", () => {
       status: 200,
       json: async () => ({
         answers: {
-          first_tool: { type: "choice", choice: "credit_verification_check" },
+          first_tool: { type: "choice", choice: "create_ticket" },
           frustration: { type: "score", score: 0, legend: { "0": "Calm" } },
           intent: { type: "choice", choice: "credit_verification" },
           off_topic_or_bad_faith: { type: "noul", noul: 0.05 },
           resolution_path: { type: "choice", choice: "caroline_tool" },
-          skill: { type: "choice", choice: "customer-credit-verification" },
+          skill: { type: "choice", choice: "verification-handoff" },
         },
       }),
     })) as unknown as typeof fetch;

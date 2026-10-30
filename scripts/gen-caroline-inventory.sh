@@ -265,15 +265,10 @@ def tool_meta_from_tools_md(name, sections):
 # ---------------------------------------------------------------------------
 INCLUDE_SKILLS = {
     "action-request",
-    "customer-credit-removal",
-    "customer-credit-verification",
-    "customer-profile-claim",
-    "customer-profile-consolidate",
-    "customer-profile-dedupe",
-    "customer-track-dedupe",
     "milestone-badge-purchase",
     "order-fulfillment",
     "refund-retention",
+    "verification-handoff",
 }
 EXCLUDE_SKILLS = {
     "input-sanitizer": "pipeline/guard skill (pre-processes messages before the LLM; empty triggers, not customer-request-shaped)",
@@ -321,12 +316,28 @@ def parse_skill(dirpath):
 # ---------------------------------------------------------------------------
 def parse_intents():
     text = ROUTER_TS.read_text(encoding="utf-8")
-    key_re = re.compile(r"^  ([a-z_]+): \{$", re.M)
-    keys = [(m.group(1), m.start()) for m in key_re.finditer(text)]
+    # Routes are either an object literal (`  key: {`) or, for the hand-off-only
+    # verification/merge intents (captain 2026-10-28), a builder call
+    # (`  key: verificationHandoffRoute(label, goal, actionType, missing, tags)`).
+    key_re = re.compile(r"^  ([a-z_]+): (\{|verificationHandoffRoute\()$", re.M)
+    keys = [(m.group(1), m.start(), m.group(2) != "{") for m in key_re.finditer(text)]
     intents = []
-    for i, (key, start) in enumerate(keys):
+    for i, (key, start, is_handoff) in enumerate(keys):
         end = keys[i + 1][1] if i + 1 < len(keys) else len(text)
         block = text[start:end]
+        if is_handoff:
+            args = re.findall(r'"((?:[^"\\]|\\.)*)"', block)
+            intents.append(
+                {
+                    "intent": key,
+                    "description": args[1].replace('\\"', '"'),
+                    "first_read_tool": "",
+                    "write_tools": [],
+                    "handoff_when": "Always: this request is decided by the verification / merge agents",
+                    "action_type_on_handoff": args[2],
+                }
+            )
+            continue
 
         def field(name):
             m = re.search(rf'{name}:\s*"((?:[^"\\]|\\.)*)"', block)
@@ -386,12 +397,11 @@ def build_questions(inventory):
     # the activation condition itself.
     skill_parts = [f"{s['name']} ({truncate(s['activates_when'], 20)})" for s in skills]
     caroline_tool_text = (
-        "Caroline resolves it herself. Read tools cover the customer's own profile, credits, "
-        "pending credit verification, profile claims, duplicate profiles, orders, subscription, "
-        "billing and founding status; gated write tools verify credits, approve the customer's "
-        "own claim, merge their own duplicates, remove their own wrong credits, fix an order "
+        "Caroline resolves it herself. Read tools cover the customer's own profile, analytics, "
+        "orders, subscription, billing and founding status; gated write tools fix an order "
         "address, apply the retention discount, cancel at period end, and file a structured "
-        "ticket. Skills: " + "; ".join(skill_parts)
+        "ticket. Credit status, documents, claims, removals and merges are ALWAYS a hand-off "
+        "(verification-handoff: one ticket, no look-up), never a read. Skills: " + "; ".join(skill_parts)
     )
 
     resolution_path = {
@@ -400,9 +410,10 @@ def build_questions(inventory):
         + " Decide how the customer's need is resolved: does Caroline already have a tool or "
         + "skill that handles it, is one fact missing before a tool can act, does it require a "
         + "human, or does it need no reply at all? The customer's identity is verified by "
-        + "Intercom, and Caroline's read tools find their profile, credits, claims, orders and "
-        + "subscription from that verified email without asking. Prefer caroline_tool whenever "
-        + "a tool can read or act on what the customer is asking about.",
+        + "Intercom, and Caroline's read tools find their profile, orders and subscription from "
+        + "that verified email without asking. Prefer caroline_tool whenever a tool can read or "
+        + "act on what the customer is asking about; credit, document, claim and merge questions "
+        + "are caroline_tool via the verification-handoff skill (a ticket, never a look-up).",
         "criteria": {
             "caroline_tool": caroline_tool_text,
             "ask_customer": (

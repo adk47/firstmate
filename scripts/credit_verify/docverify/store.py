@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -28,6 +29,18 @@ from typing import Any
 from . import CARRY, VERSION
 
 MAX_UNKNOWN = 3
+# 2026-10-29 22:00-01:05Z: the model provider answered HTTP 402 (out of credit) for ~3 h; every read became
+# `unknown` and 3,521 claims (85 documents) used up MAX_UNKNOWN and settled with no real read. An ACCOUNT-WIDE
+# refusal (credit, auth, rate limit, our own spend cap, no key) can never be about the DOCUMENT: it never uses a
+# retry, never settles a claim, and the reader stops the run at the first one (runner.ProviderDown). A timeout or a
+# 5xx can be the document (an oversized prompt), so those keep counting: a file that always times out must settle,
+# never stall every run. Document-specific failures (an unusable answer, a file we cannot locate) still count.
+PROVIDER_DOWN = re.compile(r"\b(http (401|402|403|429)\b|daily model spend cap|no OpenRouter key)")
+
+
+def provider_down(reason: str | None) -> bool:
+    """True when an `unknown` outcome / extract error was the provider or network, not the document."""
+    return bool(reason) and bool(PROVIDER_DOWN.search(str(reason)))
 
 
 class RawCreditsLockError(RuntimeError):
@@ -74,7 +87,7 @@ CREATE TABLE IF NOT EXISTS dv_llm_calls (
   at TEXT NOT NULL,
   proof_id TEXT,
   model TEXT,
-  outcome TEXT NOT NULL,                 -- ok | error | skipped
+  outcome TEXT NOT NULL,                 -- ok | error | skipped | cached (dv_extract_cache, no call)
   reason TEXT,
   prompt_sha256 TEXT,
   input_tokens INTEGER,
@@ -83,9 +96,21 @@ CREATE TABLE IF NOT EXISTS dv_llm_calls (
   latency_ms INTEGER
 );
 CREATE TABLE IF NOT EXISTS dv_state (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+-- The model's answer per exact prompt (extract.py): the same document text + facts asked again within the
+-- TTL reuses the answer instead of a second call. Untruncated; only answers that validated are stored.
+CREATE TABLE IF NOT EXISTS dv_extract_cache (prompt_sha256 TEXT PRIMARY KEY, at REAL NOT NULL, model TEXT NOT NULL,
+  call_id INTEGER, answer_json TEXT NOT NULL);
+-- F9 challenge codes (challenge.py): one active code per request, issued when h2 sends the per-need ask.
+CREATE TABLE IF NOT EXISTS dv_challenges (id INTEGER PRIMARY KEY AUTOINCREMENT, request_id TEXT NOT NULL,
+  user_id INTEGER, code TEXT NOT NULL UNIQUE, issued_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+  consumed_at TEXT, consumed_by TEXT);
+CREATE INDEX IF NOT EXISTS dv_challenges_request ON dv_challenges(request_id);
 -- Muso's stored raw credits per track, shared by every reader process (one admin GET per track per
 -- TTL instead of one per document): an account's documents usually name the same tracks.
 CREATE TABLE IF NOT EXISTS dv_raw_credits (track_id TEXT PRIMARY KEY, at TEXT NOT NULL, items_json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS dv_lookup_cache (kind TEXT NOT NULL, key TEXT NOT NULL, at REAL NOT NULL, value_json TEXT NOT NULL,
+  PRIMARY KEY (kind, key));
+CREATE TABLE IF NOT EXISTS dv_archive_cache (domain TEXT PRIMARY KEY, at REAL NOT NULL, first_capture TEXT);
 -- D2: a filing's candidate requests and claim keys as the last run saw them, UNTRUNCATED (dv_steps
 -- detail is capped at 20,000 chars; a 40-request filing overflowed it and broke selection).
 -- Claim keys of a filing the document does not name (fan-out cut, > FANOUT candidate requests):
@@ -236,13 +261,85 @@ class DocVerifyStore:
                  reason[:600], need, int(account_hold), json.dumps(detail, default=str, ensure_ascii=False)[:20_000],
                  VERSION, intake_id))
 
-    def llm_call(self, row: dict[str, Any]) -> None:
+    def llm_call(self, row: dict[str, Any]) -> int:
         with self.lock, self.db:
-            self.db.execute("INSERT INTO dv_llm_calls (at, proof_id, model, outcome, reason, prompt_sha256,"
-                            " input_tokens, output_tokens, cost_usd, latency_ms) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                            (utcnow(), row.get("proof_id"), row.get("model"), row["outcome"], row.get("reason"),
-                             row.get("prompt_sha256"), row.get("input_tokens"), row.get("output_tokens"),
-                             row.get("cost_usd"), row.get("latency_ms")))
+            cur = self.db.execute("INSERT INTO dv_llm_calls (at, proof_id, model, outcome, reason, prompt_sha256,"
+                                  " input_tokens, output_tokens, cost_usd, latency_ms) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                                  (utcnow(), row.get("proof_id"), row.get("model"), row["outcome"], row.get("reason"),
+                                   row.get("prompt_sha256"), row.get("input_tokens"), row.get("output_tokens"),
+                                   row.get("cost_usd"), row.get("latency_ms")))
+            return int(cur.lastrowid)
+
+    def cached_answer(self, prompt_sha256: str, model: str, ttl_s: float, now: float) -> tuple[Any, int | None, float] | None:
+        """(answer, call id, age s) of a validated answer to this exact prompt by this model within `ttl_s`."""
+        row = self.db.execute("SELECT at, call_id, answer_json FROM dv_extract_cache WHERE prompt_sha256=? AND model=?",
+                              (prompt_sha256, model)).fetchone()
+        if not row or not (now - float(row[0])) < ttl_s:
+            return None
+        try:
+            return json.loads(row[2]), row[1], now - float(row[0])
+        except (TypeError, ValueError):
+            return None
+
+    def cache_answer(self, prompt_sha256: str, model: str, call_id: int, answer: Any, now: float,
+                     ttl_s: float = 24 * 3600) -> None:
+        """Store a validated extraction payload (extract.cache_payload, never the raw model answer) and delete
+        every row past its TTL, so nothing outlives the cache window (QA #1469)."""
+        with self.lock, self.db:
+            self.db.execute("DELETE FROM dv_extract_cache WHERE at < ?", (now - ttl_s,))
+            self.db.execute("INSERT OR REPLACE INTO dv_extract_cache (prompt_sha256, at, model, call_id, answer_json) "
+                            "VALUES (?,?,?,?,?)", (prompt_sha256, now, model, call_id,
+                                                   json.dumps(answer, ensure_ascii=False, default=str)))
+
+    def issue_challenge(self, request_id: str, user_id: int | None, now: Any = None) -> dict[str, Any]:
+        """The request's active code (unexpired, unconsumed), or a new one. Never two active codes."""
+        from . import challenge
+        t = now or challenge.now_utc()
+        stamp = t.strftime("%Y-%m-%dT%H:%M:%SZ")
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                row = self.db.execute("SELECT id, code, issued_at, expires_at FROM dv_challenges WHERE request_id=? AND "
+                                      "consumed_at IS NULL AND expires_at > ? ORDER BY id DESC LIMIT 1",
+                                      (request_id, stamp)).fetchone()
+                if row:
+                    self.db.commit()
+                    return {"request_id": request_id, "id": row[0], "code": row[1], "issued_at": row[2],
+                            "expires_at": row[3], "new": False}
+                for _ in range(5):
+                    code = challenge.new_code()
+                    try:
+                        cur = self.db.execute("INSERT INTO dv_challenges (request_id, user_id, code, issued_at, expires_at) "
+                                              "VALUES (?,?,?,?,?)", (request_id, user_id, code, stamp,
+                                                                     challenge.expiry(t).strftime("%Y-%m-%dT%H:%M:%SZ")))
+                        break
+                    except sqlite3.IntegrityError:
+                        continue                      # a code already used, ever: draw again
+                else:
+                    raise RuntimeError("could not draw an unused challenge code")
+                self.db.commit()
+                return {"request_id": request_id, "id": cur.lastrowid, "code": code, "issued_at": stamp,
+                        "expires_at": challenge.expiry(t).strftime("%Y-%m-%dT%H:%M:%SZ"), "new": True}
+            except BaseException:
+                self.db.rollback()
+                raise
+
+    def challenges(self, request_id: str) -> list[dict[str, Any]]:
+        return [{"id": i, "user_id": u, "code": c, "issued_at": a, "expires_at": e, "consumed_at": k, "consumed_by": b}
+                for i, u, c, a, e, k, b in self.db.execute(
+                    "SELECT id, user_id, code, issued_at, expires_at, consumed_at, consumed_by FROM dv_challenges "
+                    "WHERE request_id=? "
+                    "ORDER BY id", (request_id,))]
+
+    def consume_challenge(self, challenge_id: int, by: str) -> bool:
+        """ATOMIC one-use claim (QA #1476): True when `by` holds the code after this call - it claimed it now, or it
+        had already claimed it (the same filing's other roles). False when another filing claimed it first, also
+        when two readers race (the conditional UPDATE lets exactly one win; the loser reads the winner back)."""
+        with self.lock, self.db:
+            self.db.execute("UPDATE dv_challenges SET consumed_at=?, consumed_by=? WHERE id=? AND consumed_at IS NULL",
+                            (utcnow(), by, challenge_id))
+            row = self.db.execute("SELECT consumed_by FROM dv_challenges WHERE id=?", (challenge_id,)).fetchone()
+        return bool(row) and row[0] == by
 
     # -- reads ---------------------------------------------------------------
     def spent_today_usd(self) -> float:
@@ -256,8 +353,9 @@ class DocVerifyStore:
         current VERSION. An `unknown` (tooling) outcome is retried, up to
         MAX_UNKNOWN runs; the last one then stands."""
         rid, _, role = request_key.partition("#")
-        rows = [r[0] for r in self.db.execute("SELECT outcome FROM dv_outcomes WHERE proof_id=? AND request_id=? "
-                                              "AND role=? AND version=?", (proof_id, rid, role, VERSION))]
+        rows = [o for o, why in self.db.execute("SELECT outcome, reason FROM dv_outcomes WHERE proof_id=? AND "
+                                                "request_id=? AND role=? AND version=?", (proof_id, rid, role, VERSION))
+                if not (o == "unknown" and provider_down(why))]          # a provider outage is not a try
         return any(o != "unknown" for o in rows) or len(rows) >= MAX_UNKNOWN
 
     def intake_finished_keys(self, intake_id: str) -> set[str]:
@@ -267,9 +365,11 @@ class DocVerifyStore:
         done: set[str] = set(self.intake_unmatched(intake_id))
         unknown: dict[str, int] = {}
         runs: dict[str, bool] = {}            # run -> did it decide anything for this document?
-        for rid, role, outcome, run in self.db.execute(
-                "SELECT request_id, role, outcome, run_id FROM dv_outcomes WHERE intake_id=? AND version=?",
+        for rid, role, outcome, run, why in self.db.execute(
+                "SELECT request_id, role, outcome, run_id, reason FROM dv_outcomes WHERE intake_id=? AND version=?",
                 (intake_id, VERSION)):
+            if outcome == "unknown" and provider_down(why):
+                continue                       # a provider outage is not a try (2026-10-29 402 window)
             key = f"{rid}#{role}"
             runs[run] = runs.get(run, False) or outcome != "unknown"
             if outcome != "unknown":
@@ -303,6 +403,42 @@ class DocVerifyStore:
             self.db.execute("INSERT OR REPLACE INTO dv_intake_keys (intake_id, version, at, candidates_json, keys_json) "
                             "VALUES (?,?,?,?,?)", (intake_id, VERSION, utcnow(), json.dumps(sorted(candidates)),
                                                    json.dumps(keys)))
+
+    def cached_lookup(self, kind: str, key: str, fetch: Any, *, ok: Any = lambda v: True, ttl_s: float = 24 * 3600,
+                      now: Any = None) -> Any:
+        """A public lookup (MusicBrainz issuer domains, ISRC release facts, artist search) through a 24 h cache
+        shared by every reader (Fable 149: MusicBrainz 1/s host-wide is the reading bound). `fetch()` is called
+        on a miss; its value is stored only when `ok(value)` (an answer carrying an error is asked again next time).
+        A fetch that raises is never cached and propagates. Expired rows are deleted on write."""
+        import time as _t
+        t = _t.time() if now is None else now
+        row = self.db.execute("SELECT at, value_json FROM dv_lookup_cache WHERE kind=? AND key=?", (kind, key)).fetchone()
+        if row and t - float(row[0]) < ttl_s:
+            try:
+                return json.loads(row[1])
+            except ValueError:
+                pass
+        value = fetch()
+        if ok(value):
+            with self.lock, self.db:
+                self.db.execute("DELETE FROM dv_lookup_cache WHERE at < ?", (t - ttl_s,))
+                self.db.execute("INSERT OR REPLACE INTO dv_lookup_cache (kind, key, at, value_json) VALUES (?,?,?,?)",
+                                (kind, key, t, json.dumps(value, default=str)))
+        return value
+
+    def cached_first_capture(self, domain: str, fetch: Any, ttl_s: float = 24 * 3600, now: Any = None) -> str | None:
+        """The web archive's first capture of `domain` ('YYYYMMDDhhmmss', or None when it has none) through a
+        24 h cache shared by every reader (Fable 140). A fetch that raises is not cached and propagates."""
+        import time as _t
+        t = _t.time() if now is None else now
+        row = self.db.execute("SELECT at, first_capture FROM dv_archive_cache WHERE domain=?", (domain,)).fetchone()
+        if row and t - float(row[0]) < ttl_s:
+            return row[1]
+        first = fetch(domain)
+        with self.lock, self.db:
+            self.db.execute("INSERT OR REPLACE INTO dv_archive_cache (domain, at, first_capture) VALUES (?,?,?)",
+                            (domain, t, first))
+        return first
 
     def cached_raw_credits(self, track_id: str, fetch: Any, ttl_s: float = RAW_CREDITS_TTL_S,
                            now: Any = None) -> list[dict[str, Any]]:

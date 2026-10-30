@@ -1509,6 +1509,32 @@ print(s); print("\n".join(l[2:] if l.startswith("- ") else l for l in b.split("\
   [ -z "$(sql "select * from verify_requests where request_id = 'u1'")" ]
 }
 
+@test "uvn-status: a document sent BEFORE the request existed is not its proof (user.requests_since; p1 198 / Fable 199, Lamberto 298376)" {
+  # a March 2026 attachment (created_at 1774784436) vs a request created 2026-10-15
+  march='{"conversations":[{"id":"777","created_at":1774784436,"source":{"author":{"type":"user"},"attachments":[{"name":"Captura.png"}]},"tags":{"tags":[]}}],"pages":{}}'
+  # the thread's own parts: one March attachment (the parts check must not count it either)
+  export STUB_CONVERSATION='{"type":"conversation","id":"777","source":{"author":{"type":"user"}},"contacts":{"contacts":[{"id":"6650aa01"}]},"conversation_parts":{"conversation_parts":[{"part_type":"comment","author":{"type":"user"},"attachments":[{"name":"Captura2.png"}],"created_at":1774784500}]}}'
+  credits "$TEST_TMPDIR/c0.json" Jane "u1:Mixing:Song A:Big Star"
+  jq '.user.requests_since = "2026-10-15T07:21:38.896000+00:00"' "$TEST_TMPDIR/c0.json" > "$TEST_TMPDIR/c.json"
+  STUB_CONTACT_CONVS="$march" run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email"* ]]
+  # the same attachment AFTER the request still skips; with no requests_since every document counts (as before)
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  STUB_CONTACT_CONVS="$(printf '%s' "$march" | jq -c '.conversations[0].created_at = 1792500000')" \
+    run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "SKIPPED docs_submitted credits=1"* ]]
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  credits "$TEST_TMPDIR/c.json" Jane "u2:Mixing:Song B:Big Star"
+  STUB_CONTACT_CONVS="$march" run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "SKIPPED docs_submitted credits=1"* ]]
+  # an attachment with no readable time counts (fail closed)
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  jq '.user.requests_since = "2026-10-15T07:21:38Z"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c3.json"
+  STUB_CONTACT_CONVS="$(printf '%s' "$march" | jq -c 'del(.conversations[0].created_at)')" \
+    run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c3.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "SKIPPED docs_submitted credits=1"* ]]
+}
+
 @test "uvn-status: a user who attached a document in Intercom is skipped and closed" {
   credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
   STUB_CONTACT_CONVS='{"conversations":[{"id":"5","source":{"author":{"type":"user"},"attachments":[{"name":"split.pdf"}]},"tags":{"tags":[]}}],"pages":{}}' \
@@ -2998,3 +3024,37 @@ mobile_only() { printf '{"type":"list","data":[{"id":"mob1","role":"user","email
   [[ "$output" == *"more than 500 ids; refusing rather than matching a subset"* ]]
   [ "$(posts)" -eq 1 ]
 }
+
+@test "reply_due (Fable [key=reply-due]): one in-thread answer despite the core-notice cooldown; comm_state verifies the trigger; the ledger records the part" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  export STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]' ',"state":"open"')"
+  # unsolicited: the core-notice cooldown defers it
+  STUB_CORE_NOTICE=hold run -3 "$UVN" send --campaign uvn-status --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"DEFERRED core_notice_within_7d"* ]]
+  # comm_state says the reply is not due (answered / < 24 h / off-topic / not this user's thread): held, nothing sent
+  STUB_CORE_NOTICE=hold STUB_COMM_STATE=hold run -3 "$UVN" send --campaign uvn-status --conversation 777 --reply-due 57000000002 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  grep -q -- "--reply-due 57000000002" "$TEST_TMPDIR/comm-state-args"
+  [ "$(replies)" -eq 0 ]
+  # due: the cooldown does not apply to the answer; the ledger records the triggering part and the thread
+  STUB_CORE_NOTICE=hold run -0 "$UVN" send --campaign uvn-status --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"POSTED comment conversation=777"* ]]
+  [[ "$(sql "SELECT approval_ref FROM verify_messages WHERE status='sent'")" == *"reply_due:57000000001 thread:777"* ]]
+  # never a second uvn-status note to this user (that rule is not a cooldown; one answer per part: test_comm_state)
+  credits "$TEST_TMPDIR/c.json" Jane "u2:Mixing:Song B:Big Star"
+  INTERCOM_VERIFY_TEST_DAY=2026-10-31 run -0 "$UVN" send --campaign uvn-status --conversation 777 --reply-due 57000000003 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "SKIPPED already_sent"* ]]
+  [ "$(replies)" -eq 1 ]
+}
+
+@test "reply_due: refused without a digit part id, without --conversation, or for another campaign" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  run -1 "$UVN" send --campaign uvn-status --conversation 777 --reply-due "12;rm" --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"--reply-due needs the customer part id"* ]]
+  run -1 "$UVN" send --campaign uvn-status --reply-due 57000000001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"--conversation <id> is required"* ]]
+  unlocked_gate received
+  run -1 "$GATE" send --campaign status-doc-received --copy received --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"applies to uvn-status"* ]]
+  [ "$(posts)" -eq 0 ]; [ "$(replies)" -eq 0 ]
+}
+

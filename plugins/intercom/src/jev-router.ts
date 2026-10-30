@@ -301,10 +301,13 @@ function findSkillForIntent(
   return matches.length === 1 ? matches[0] : undefined;
 }
 
+// Credit, document, claim and merge questions are hand-off only (captain 2026-10-28): for
+// them the ticket IS the action, so "do not create a ticket" must never apply (QA on #1451).
 const ROUTE_INSTRUCTIONS =
   "Follow this routing unless a tool result contradicts it. path=caroline_tool means: use\n" +
-  "the tool, do not create a ticket. path=ask_customer means: ask for exactly the one\n" +
-  "missing item, nothing else.";
+  "the tool, do not create a ticket, EXCEPT credit, document, claim and merge questions:\n" +
+  "there the verification-handoff ticket IS the action, always file it. path=ask_customer\n" +
+  "means: ask for exactly the one missing item, nothing else.";
 
 // The design doc gives the decline block only as prose ("decline in one
 // sentence, do not offer help, no ticket") rather than a literal quoted

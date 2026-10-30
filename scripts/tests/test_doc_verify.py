@@ -16,6 +16,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
+import time as _time
 import unittest
 import unittest.mock
 import urllib.error
@@ -57,9 +58,9 @@ def or_response(obj, cost=0.0004):
 
 
 class FakeNet(xc.Net):
-    def __init__(self, *, mx="mx", mb=None, deezer=None, pages=None, txt=None, rdap=None):
+    def __init__(self, *, mx="mx", mb=None, deezer=None, pages=None, txt=None, rdap=None, archive=None):
         self._mx, self._mbmap, self._deezer, self._pages = mx, mb or {}, deezer or {}, pages or {}
-        self._txt, self._rdap = txt or {}, rdap or {}
+        self._txt, self._rdap, self._archive = txt or {}, rdap or {}, archive or {}
         self.calls: list[str] = []
 
     def txt(self, name):
@@ -76,13 +77,21 @@ class FakeNet(xc.Net):
             return self._mbmap[path]
         raise urllib.error.HTTPError("u", 404, "nf", {}, None)
 
-    def json(self, url):
+    def json(self, url, timeout=None):
         self.calls.append(url)
         if url.startswith("https://rdap.org/domain/"):
             reg = self._rdap.get(url.rsplit("/", 1)[1])
             if reg is None:
                 raise urllib.error.HTTPError(url, 404, "nf", {}, None)
             return {"events": [{"eventAction": "registration", "eventDate": reg}]}
+        if url.startswith("https://web.archive.org/cdx/search/cdx?"):
+            q = {k: v[0] for k, v in urllib.parse.parse_qs(urllib.parse.urlparse(url).query).items()}
+            a = self._archive.get(q["url"])        # a root timestamp, or {"root": ts|None, "pages": [ts, ...]}
+            a = a if isinstance(a, dict) else {"root": a, "pages": []}
+            if q.get("matchType") == "host":       # any capture of the host, up to `to` (inclusive day)
+                ts = [t for t in [a["root"], *a["pages"]] if t and t[:8] <= q["to"]]
+                return [["timestamp"]] + ([[ts[0]]] if ts else [])
+            return [["timestamp"]] + ([[a["root"]]] if a["root"] else [])
         if url in self._deezer:
             return self._deezer[url]
         return {"error": {"code": 800}}
@@ -261,8 +270,108 @@ class ExtractTests(unittest.TestCase):
             self.assertIn("finish=length", rows[0][1])
             self.assertAlmostEqual(sum(r[2] for r in rows), 0.0014)     # both attempts count against the cap
             calls = []
-            ex = Extractor(store, key="k", post=lambda *a: (calls.append(1), bad)[1]).extract("text", {}, "q")
+            # another document (the first one's answer is now cached for its exact prompt)
+            ex = Extractor(store, key="k", post=lambda *a: (calls.append(1), bad)[1]).extract("other", {}, "q")
             self.assertEqual((ex.ok, ex.degraded, ex.error, len(calls)), (False, True, "unusable model answer", 2))
+
+    def test_the_same_prompt_reuses_the_validated_answer_for_24h(self):
+        # Proof-loop lead 079: 22% of good calls repeated a prompt answered < 1.3 h earlier.
+        with tempfile.TemporaryDirectory() as td:
+            store = DocVerifyStore(os.path.join(td, "dv.sqlite"))
+            calls = []
+            post = lambda *a: (calls.append(1), or_response(GOOD_ANSWER))[1]     # noqa: E731
+            first = Extractor(store, key="k", post=post).extract("doc text", {"mime": "application/pdf"}, "p1")
+            again = Extractor(store, key="k", post=post).extract("doc text", {"mime": "application/pdf"}, "p1b")
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(again.as_dict(), first.as_dict())
+            rows = store.db.execute("SELECT outcome, cost_usd, prompt_sha256, reason FROM dv_llm_calls ORDER BY id").fetchall()
+            self.assertEqual([r[0] for r in rows], ["ok", "cached"])
+            self.assertEqual((rows[1][1], rows[1][2]), (0, rows[0][2]))
+            self.assertIn("same prompt answered by call", rows[1][3])
+            Extractor(store, key="k", post=post).extract("doc text", {"mime": "image/png"}, "p1")   # other facts
+            Extractor(store, key="k", post=post).extract("doc text 2", {"mime": "application/pdf"}, "p1")
+            self.assertEqual(len(calls), 3)                              # a different prompt is a new question
+            store.llm_call({"outcome": "ok", "cost_usd": 99.0})          # over the daily cap: a cached answer
+            ex = Extractor(store, key="k", post=lambda *a: self.fail("no call"), daily_usd=5).extract(
+                "doc text", {"mime": "application/pdf"}, "p1")          # costs nothing and is still served
+            self.assertTrue(ex.ok)
+            with unittest.mock.patch("credit_verify.docverify.extract.time.time", return_value=_time.time() + 24 * 3600 + 1):
+                Extractor(store, key="k", post=post, daily_usd=1000).extract("doc text", {"mime": "application/pdf"}, "p1")
+            self.assertEqual(len(calls), 4)                              # past 24 h: asked again
+            other = Extractor(store, key="k", model="another/model", post=post, daily_usd=1000)
+            other.extract("doc text", {"mime": "application/pdf"}, "p1")
+            self.assertEqual(len(calls), 5)                              # another model is never served this cache
+
+    def test_the_cache_holds_only_the_validated_extraction_and_purges_expired_rows(self):
+        # QA #1469: a model answer carrying an extra 50 KB `document_text` is cached WITHOUT it, bounded, and purged
+        # after the TTL - the cache never keeps document contents.
+        from credit_verify.docverify.extract import cache_payload
+        secret = "PRIVATE CONTRACT " * 3000                                     # ~51 KB
+        noisy = {**GOOD_ANSWER, "document_text": secret, "notes": {"raw": secret},
+                 "issuer": {**GOOD_ANSWER["issuer"], "extra": secret, "name": "Blue Fern Records" + "x" * 500},
+                 "credits": [{**GOOD_ANSWER["credits"][0], "comment": secret}]}
+        with tempfile.TemporaryDirectory() as td:
+            store = DocVerifyStore(os.path.join(td, "dv.sqlite"))
+            ex = Extractor(store, key="k", post=lambda *a: or_response(noisy)).extract("doc", {"mime": "x"}, "p1")
+            (blob,) = store.db.execute("SELECT answer_json FROM dv_extract_cache").fetchone()
+            self.assertNotIn("PRIVATE CONTRACT", blob)
+            self.assertLess(len(blob), 4000)
+            self.assertNotIn("document_text", json.loads(blob))
+            self.assertEqual(set(json.loads(blob)), {"doc_type", "issuer", "signatory", "sender", "emails", "is_email",
+                                                     "tracks", "credits", "dates", "amounts"})
+            again = Extractor(store, key="k", post=lambda *a: self.fail("no call")).extract("doc", {"mime": "x"}, "p1")
+            self.assertEqual(again.as_dict(), ex.as_dict())                       # served from the clean payload
+            self.assertEqual({**validate(cache_payload(ex)).as_dict(), "model": None},
+                             {**ex.as_dict(), "model": None})                        # the round trip is exact
+            # a later write purges every row past the TTL
+            store.cache_answer("other", "m", 1, cache_payload(ex), _time.time() + 24 * 3600 + 5)
+            self.assertEqual([r[0] for r in store.db.execute("SELECT prompt_sha256 FROM dv_extract_cache")], ["other"])
+
+    def test_an_answer_without_an_explicit_matching_model_is_never_cached(self):
+        # QA #1469: the ledger row may fall back to the configured model when the provider omits `model`, but the
+        # cache may only be filled on an explicit, exact report - an answer routed elsewhere (or unreported) must
+        # not be replayed for 24 h as the configured model's.
+        for label, resp in (("no model field", {k: v for k, v in or_response(GOOD_ANSWER).items() if k != "model"}),
+                            ("another model", {**or_response(GOOD_ANSWER), "model": "someone/else-9b"}),
+                            ("non-string model", {**or_response(GOOD_ANSWER), "model": {"id": "x"}})):
+            with self.subTest(label), tempfile.TemporaryDirectory() as td:
+                store = DocVerifyStore(os.path.join(td, "dv.sqlite"))
+                calls = []
+                post = lambda *a: (calls.append(1), resp)[1]                  # noqa: E731
+                first = Extractor(store, key="k", post=post).extract("doc text", {"mime": "application/pdf"}, "p1")
+                self.assertTrue(first.ok)
+                self.assertEqual(store.db.execute("SELECT count(*) FROM dv_extract_cache").fetchone()[0], 0, label)
+                Extractor(store, key="k", post=post).extract("doc text", {"mime": "application/pdf"}, "p2")
+                self.assertEqual(len(calls), 2, f"{label}: the second identical prompt must call the model again")
+                # the ledger still records the audit label (configured model as fallback, or the reported one)
+                models = [r[0] for r in store.db.execute("SELECT model FROM dv_llm_calls WHERE outcome = 'ok'")]
+                self.assertEqual(len(models), 2)
+                self.assertNotIn("_reported_model", json.dumps(models))
+        # control: the explicit exact report IS cached (one network call for two identical prompts)
+        with tempfile.TemporaryDirectory() as td:
+            store = DocVerifyStore(os.path.join(td, "dv.sqlite"))
+            calls = []
+            post = lambda *a: (calls.append(1), or_response(GOOD_ANSWER))[1]     # noqa: E731
+            Extractor(store, key="k", post=post).extract("doc text", {"mime": "application/pdf"}, "p1")
+            Extractor(store, key="k", post=post).extract("doc text", {"mime": "application/pdf"}, "p2")
+            self.assertEqual(len(calls), 1)
+
+    def test_a_failed_answer_is_never_cached(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = DocVerifyStore(os.path.join(td, "dv.sqlite"))
+            bad = {"choices": [{"message": {"content": "{not json"}, "finish_reason": "length"}], "usage": {}}
+            calls = []
+            for _ in range(2):
+                Extractor(store, key="k", post=lambda *a: (calls.append(1), bad)[1]).extract("t", {}, "p")
+            self.assertEqual(len(calls), 4)                              # 2 runs x (call + one retry)
+            self.assertEqual(store.db.execute("SELECT count(*) FROM dv_extract_cache").fetchone()[0], 0)
+            store.db.execute("INSERT INTO dv_extract_cache VALUES (?, ?, ?, 1, '{\"doc_type\": 7')",
+                             (store.db.execute("SELECT prompt_sha256 FROM dv_llm_calls LIMIT 1").fetchone()[0],
+                              _time.time(), "deepseek/deepseek-v4.1-flash-1017"))
+            store.db.commit()
+            ok = Extractor(store, key="k", post=lambda *a: (calls.append(1), or_response(GOOD_ANSWER))[1]).extract("t", {}, "p")
+            self.assertTrue(ok.ok)                                       # an unreadable cache row: asked live
+            self.assertEqual(len(calls), 5)
 
     def test_retry_respects_the_daily_cap(self):
         with tempfile.TemporaryDirectory() as td:
@@ -296,9 +405,30 @@ class ForensicsTests(unittest.TestCase):
         self.assertIn("email_screenshot", [x.name for x in f])
         self.assertEqual(forensics.worst(f), forensics.WEAK)
 
+    def test_an_ocr_date_is_impossible_content_only_when_firm_and_stable(self):
+        # Fable 127 (6d004ade): '1/18/2026' OCR'd as 2026-11-18 at 0.5-0.6 flapped a positive across runs.
+        ex = lambda c: self.ex(dates=[{"what": "signed", "date": "2026-11-18", "confidence": c}])   # noqa: E731
+        facts, today = {"exif_datetime_original": "2026:02:15 08:03:54"}, date(2026, 10, 29)
+        for c, src, stable, firm in ((0.6, "ocr", {("signed", "2026-11-18")}, False),      # below 0.8
+                                     (0.9, "ocr", set(), False),                             # not stable on a re-read
+                                     (0.9, "ocr", {("signed", "2026-11-19")}, False),        # a re-read disagreed
+                                     (0.9, None, {("signed", "2026-11-18")}, True),          # unknown source, firm+stable
+                                     (0.9, "ocr", {("signed", "2026-11-18")}, True),
+                                     (0.6, "pdf_text", set(), True)):                        # a text layer
+            f = forensics.check(H3("GENUINE"), ex(c), facts, "image/png", today=today, text_source=src,
+                                stable_dates=stable)
+            names = {x.name for x in f}
+            want = {"document_date_future", "file_predates_document"}
+            self.assertEqual(names & (want | {n + "_unconfirmed" for n in want}),
+                             want if firm else {n + "_unconfirmed" for n in want}, (c, src, stable))
+            self.assertEqual(forensics.worst(f), forensics.SOFT)                 # still doubt: blocks verified
+        from credit_verify.docverify import FRAUD_SIGNAL_FAMILY
+        self.assertNotIn("document_date_future_unconfirmed", FRAUD_SIGNAL_FAMILY)   # never half of a pair
+
     def test_file_older_than_the_date_it_claims(self):
         f = forensics.check(H3("GENUINE"), self.ex(dates=[{"what": "signed", "date": "2025-06-01", "confidence": 0.9}]),
-                            {"created": "D:20240101120000+00'00'"}, "application/pdf", today=date(2026, 10, 26))
+                            {"created": "D:20240101120000+00'00'"}, "application/pdf", today=date(2026, 10, 26),
+                            text_source="pdf_text")
         names = {x.name: x.severity for x in f}
         self.assertEqual(names.get("file_predates_document"), forensics.SOFT)
         # a scan made after the signing date is normal
@@ -308,8 +438,9 @@ class ForensicsTests(unittest.TestCase):
 
     def test_future_date_and_exif_date(self):
         f = forensics.check(H3("GENUINE"), self.ex(dates=[{"what": "issued", "date": "2027-01-01", "confidence": 0.9}]),
-                            {"exif_datetime_original": "2026:01:02 10:00:00"}, "image/jpeg", today=date(2026, 10, 26))
-        self.assertEqual({x.name for x in f}, {"document_date_future", "file_predates_document"})
+                            {"exif_datetime_original": "2026:01:02 10:00:00"}, "image/jpeg", today=date(2026, 10, 26),
+                            text_source="ocr", stable_dates={("issued", "2027-01-01")})
+        self.assertEqual({x.name for x in f}, {"document_date_future", "file_predates_document"})   # OCR >= 0.8, stable
 
     def test_h3_signals_mapped(self):
         h3 = H3("SUSPECT", signals=[{"name": "online_editor_producer", "severity": "soft"},
@@ -709,7 +840,8 @@ class GateTests(unittest.TestCase):
         o = self.decide(h3="FORGED_LIKELY", findings=[
             F("h3_forged", forensics.HARD, ["F2 reused_on_another_track", "F3b copy_move_region"]),
             F("h3_reused_on_another_track", forensics.INFO, {"note": "hard H3 signal behind h3_forged"}),
-            F("h3_copy_move_region", forensics.SOFT, {"page": 1, "region": [0, 0, 50, 50]})])
+            F("h3_copy_move_region", forensics.SOFT, {"page": 1, "region": [0, 0, 50, 50],
+                                                      "value": {"fields": ["claimant_name"]}})])
         self.assertEqual(o.outcome, gate.FORGED_POSITIVE)
         self.assertEqual(sorted(e["family"] for e in o.detail["fraud_pair"]), ["file_tamper", "reuse"])
         # a fabricated sender read >= 0.8 is a family of its own
@@ -717,12 +849,18 @@ class GateTests(unittest.TestCase):
                                                      "note": "the sender's domain does not exist"})
         o = gate.decide(h3_verdict="SUSPECT", kind="contract", ex=self.good_ex,
                         findings=[F("h3_copy_move_region", forensics.SOFT)], checks=[dom], account_held=False, covers=True)
+        self.assertNotEqual(o.outcome, gate.FORGED_POSITIVE)      # Fable 127: an unlocated copy-move never pairs
+        located = F("h3_copy_move_region", forensics.SOFT, {"page": 1, "region": [0, 0, 9, 9],
+                                                            "value": {"fields": ["claimant_name"]}})
+        o = gate.decide(h3_verdict="SUSPECT", kind="contract", ex=self.good_ex,
+                        findings=[located], checks=[dom], account_held=False, covers=True)
         self.assertEqual(o.outcome, gate.FORGED_POSITIVE)
 
     def test_a_lookalike_cc_address_is_not_a_sender_signal(self):
         # QA #1470: domain-intel flags on another address on the document never make the `sender` family.
         F = forensics.Finding
-        tamper = [F("h3_copy_move_region", forensics.SOFT, {"page": 1, "region": [0, 0, 9, 9]})]
+        tamper = [F("h3_copy_move_region", forensics.SOFT, {"page": 1, "region": [0, 0, 9, 9],
+                                                            "value": {"fields": ["claimant_name"]}})]
         cc = xc.Check("xc_domain_intel", xc.SOFT, {"domains": [{"domain": "bluefern.com", "role": "sender"},
                                                               {"domain": "bluefem.com", "role": "other address"}],
                                                   "flags": ["bluefem.com: look-alike of the official bluefern.com "
@@ -853,10 +991,26 @@ class GateTests(unittest.TestCase):
                          ("impossible_content", "h3_document_date_future")):
             self.assertIsNotNone(gate.positive_pair([{"id": sid, "family": fam}, T]), fam)
 
+    def test_the_tamper_half_of_any_pair_sits_on_a_located_claim_field(self):
+        # Fable 127 (6d004ade): the copy-move was the iOS viewer's '9 of 9' page counter.
+        cm = {"id": "h3_copy_move_region@pNone:[93.0, 596.0, 433.0, 643.0]", "family": "file_tamper",
+              "region": [93.0, 596.0, 433.0, 643.0]}
+        date_ = {"id": "document_date_future", "family": "impossible_content"}
+        for other in (date_, {"id": "h3_reused_on_another_track", "family": "reuse"},
+                      {"id": "h3_c2pa_ai_source", "family": "ai_generated"},
+                      {"id": "xc_domain: lookalike (x.co)", "family": "sender"}):
+            self.assertIsNone(gate.positive_pair([cm, other]), other["family"])       # no field: never
+            self.assertIsNotNone(gate.positive_pair([{**cm, "fields": ["claimant_name"]}, other]), other["family"])
+            self.assertIsNone(gate.positive_pair([{**cm, "fields": ["contact"]}, other]), other["family"])
+        self.assertIsNotNone(gate.positive_pair([date_, {"id": "h3_reused_on_another_track", "family": "reuse"}]))
+        fx = json.loads((Path(__file__).parent / "fixtures" / "forged-positive-ruled-not-1029.json").read_text())
+        six = next(r for r in fx if r["proof_id"].startswith("6d004ade"))
+        self.assertIsNone(gate.positive_pair(six["fraud_signals"], six["claim_fields"]))
+
     def test_the_two_live_positives_ruled_not_are_not_positive(self):
         # Fable 1029: e9ec352a and e47c9af3, the only dv-3 forged_positive documents, were both ruled NOT forged.
         fx = json.loads((Path(__file__).parent / "fixtures" / "forged-positive-ruled-not-1029.json").read_text())
-        self.assertEqual(sorted(r["proof_id"][:8] for r in fx), ["e47c9af3", "e9ec352a"])
+        self.assertEqual(sorted(r["proof_id"][:8] for r in fx), ["6d004ade", "e47c9af3", "e9ec352a"])   # 0 of 3
         for r in fx:
             self.assertIsNotNone(r["fraud_pair"])                       # what dv-3 stored before the rule
             self.assertIsNone(gate.positive_pair(r["fraud_signals"], r["claim_fields"]), r["proof_id"][:8])
@@ -969,7 +1123,8 @@ class GateTests(unittest.TestCase):
         o = gate.decide(h3_verdict="GENUINE", kind="contract", ex=self.good_ex,
                         findings=[forensics.Finding("editor_software_on_screenshot", forensics.SOFT)],
                         checks=base + [dom(0.9)], account_held=False, covers=True)               # forensic doubt = second signal
-        self.assertEqual(o.outcome, gate.FORGED_POSITIVE)       # and two independent families: positive
+        # ... a FORGED hold (R-C6), but no longer positive: a document-level editor flag sits on no claim field
+        self.assertEqual((o.outcome, o.account_hold), (gate.FORGED, True))      # (Fable 127)
         o = self.decide(xc_dsp=xc.CONTRADICTS)
         self.assertEqual((o.outcome, o.account_hold), (gate.CONTRADICTED, True))
 
@@ -1058,6 +1213,138 @@ class RunnerTests(unittest.TestCase):
         stats, _ = runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
         self.assertEqual(stats.documents, 0)
 
+    def test_the_same_bytes_give_the_same_outcome_on_every_run(self):
+        # Fable 127 (6d004ade): the outcome flapped forged_positive/unverifiable across 4 runs because each run
+        # re-asked the model, and its self-reported date confidence moved 0.5 / 0.6 / 0.55 around a threshold.
+        # With the extraction cache the same bytes + facts get the SAME answer, so the SAME outcome, every run.
+        calls = []
+        confidences = iter([0.95, 0.4, 0.95, 0.4, 0.95, 0.4])
+
+        def post(*a):
+            calls.append(1)
+            c = next(confidences)
+            return or_response({**GOOD_ANSWER, "credits": [{**GOOD_ANSWER["credits"][0], "confidence": c}],
+                                "dates": [{"what": "signed", "date": "2027-11-18", "confidence": c}]})
+        self.deps.extractor = Extractor(self.store, key="k", post=post)
+        outcomes = []
+        for _ in range(3):
+            self.store.db.execute("DELETE FROM dv_outcomes")
+            self.store.db.execute("DELETE FROM dv_steps WHERE step != 'extract'")
+            self.store.db.commit()
+            _, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
+            outcomes.append([(r["request_id"], r["role"], r["outcome"]) for r in rows])
+        self.assertEqual(len(calls), 1)                                          # one model call, two cache hits
+        self.assertEqual(outcomes[0], outcomes[1])
+        self.assertEqual(outcomes[1], outcomes[2])
+        self.assertTrue(outcomes[0])
+
+    def test_musicbrainz_lookups_are_cached_across_documents_and_runs(self):
+        # Fable 149: MusicBrainz 1/s host-wide bounds reading; the issuer-domain, ISRC and artist lookups repeat.
+        runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
+        mb_first = [c for c in self.net.calls if c.startswith("mb:")]
+        self.assertTrue(any(c == "mb:label" for c in mb_first))                       # the issuer lookup ran once
+        self.store.db.execute("DELETE FROM dv_outcomes")
+        self.store.db.execute("DELETE FROM dv_steps")
+        self.store.db.commit()
+        self.net.calls.clear()
+        runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
+        self.assertEqual([c for c in self.net.calls if c.startswith("mb:")], [])        # second read: all cached
+        self.assertEqual([c for c in self.net.calls if "deezer" in c], [])
+        kinds = {k for (k,) in self.store.db.execute("SELECT DISTINCT kind FROM dv_lookup_cache")}
+        self.assertTrue({"issuer_domains", "isrc_release"} <= kinds, kinds)
+
+    def test_a_lookup_with_an_error_is_never_cached_and_expired_rows_are_purged(self):
+        calls = []
+
+        def fetch():
+            calls.append(1)
+            return ["x.com"], "musicbrainz error TimeoutError"
+        for _ in range(2):
+            self.store.cached_lookup("issuer_domains", "blue fern", lambda: list(fetch()),
+                                     ok=lambda v: not str(v[1]).startswith("musicbrainz error"))
+        self.assertEqual(len(calls), 2)                                                  # asked again: not cached
+        rel = xc.Release("USAB12400001", errors=["musicbrainz http 503"])
+        n = []
+        for _ in range(2):
+            self.store.cached_lookup("isrc_release", "USAB12400001", lambda: (n.append(1), rel.__dict__)[1],
+                                     ok=lambda v: not v.get("errors"))
+        self.assertEqual(len(n), 2)
+        self.store.cached_lookup("mb_artist", "ann alpha", lambda: {"artists": []}, now=1000.0)
+        self.store.cached_lookup("mb_artist", "bob beta", lambda: {"artists": []}, now=1000.0 + 24 * 3600 + 1)
+        self.assertEqual([k for (k,) in self.store.db.execute("SELECT key FROM dv_lookup_cache")], ["bob beta"])
+        with self.assertRaises(RuntimeError):                                            # a raise propagates
+            self.store.cached_lookup("mb_artist", "carl", lambda: (_ for _ in ()).throw(RuntimeError("down")))
+        self.assertIsNone(self.store.db.execute("SELECT 1 FROM dv_lookup_cache WHERE key='carl'").fetchone())
+
+    def test_the_people_check_uses_the_cached_artist_search(self):
+        from credit_verify.docverify import intel
+        asked = []
+        out = intel.people_check(self.net, [{"name": "Zed Nobody", "as": "signatory"}], graph=None, track_credits=[],
+                                 artist_search=lambda name: (asked.append(name), {"artists": []})[1])
+        self.assertEqual(asked, ["Zed Nobody"])
+        self.assertFalse(any(c == "mb:artist" for c in self.net.calls))
+        self.assertEqual(out.status, xc.WEAK)
+        src = (Path(__file__).resolve().parents[1] / "credit_verify" / "docverify" / "runner.py").read_text()
+        self.assertIn("artist_search=lambda name: cached_artist(store, deps.net, name)", src)
+
+    def test_non_latin_names_never_share_a_cache_entry(self):
+        # QA #1499: xc.fold drops non-ASCII letters, so 张伟 and 李娜 both folded to '' and shared one entry.
+        self.assertEqual(xc.fold("张伟"), xc.fold("李娜"))                              # the old collision
+        self.assertNotEqual(runner.lookup_key("张伟"), runner.lookup_key("李娜"))
+        self.assertEqual(runner.lookup_key("  Blue  FERN Records "), runner.lookup_key("blue fern records"))
+        self.assertEqual(runner.lookup_key("\uff22\uff4c\uff55\uff45"), runner.lookup_key("blue"))     # NFKC fullwidth
+        asked = []
+        net = self.net
+        net.mb = lambda path, params: (asked.append(params["query"]), {"artists": [{"name": params["query"]}]})[1]
+        a = runner.cached_artist(self.store, net, "张伟")
+        b = runner.cached_artist(self.store, net, "李娜")
+        self.assertEqual(len(asked), 2)                                                  # two lookups, two answers
+        self.assertNotEqual(a, b)
+        runner.cached_artist(self.store, net, "张伟")
+        self.assertEqual(len(asked), 2)                                                  # the same name: cached
+        runner.cached_artist(self.store, net, "   ")
+        runner.cached_artist(self.store, net, "   ")
+        self.assertEqual(len(asked), 4)                                                  # an empty key: never cached
+        doms = []
+
+        def official(n, issuer):
+            doms.append(issuer)
+            return [issuer + ".com"], "musicbrainz label x"
+        with unittest.mock.patch.object(runner.xc, "official_domains", official):
+            self.assertEqual(runner.cached_official(self.store, net, "张伟唱片")[0], ["张伟唱片.com"])
+            self.assertEqual(runner.cached_official(self.store, net, "李娜唱片")[0], ["李娜唱片.com"])
+        self.assertEqual(doms, ["张伟唱片", "李娜唱片"])
+
+
+    def test_a_re_read_date_is_stable_only_from_an_earlier_firm_read(self):
+        self.assertEqual(runner.earlier_firm_dates(self.store, self.proof_id), frozenset())
+        for c, d in ((0.6, "2026-11-18"), (0.9, "2026-11-18"), (0.95, "2028-11-18")):
+            self.store.step("r0", self.proof_id, "extract", "ok", {"dates": [{"what": "signed", "date": d, "confidence": c}]})
+        self.store.step("r0", self.proof_id, "extract", "error", {"dates": [{"what": "signed", "date": "2030-01-01",
+                                                                               "confidence": 0.99}]})   # a failed read
+        # QA #1489: 2026-11-18 then 2028-11-18 read firmly = the reads DISAGREE on `signed`: nothing is stable
+        self.assertEqual(runner.earlier_firm_dates(self.store, self.proof_id), frozenset())
+
+    def test_a_date_is_stable_only_when_the_preceding_read_agrees_and_no_firm_read_disagrees(self):
+        def read(*dates):
+            self.store.step("r0", self.proof_id, "extract", "ok",
+                            {"dates": [{"what": w, "date": d, "confidence": c} for w, d, c in dates]})
+        read(("signed", "2026-11-18", 0.9))
+        self.assertEqual(runner.earlier_firm_dates(self.store, self.proof_id), {("signed", "2026-11-18")})
+        read(("signed", "2027-01-01", 0.9))                                 # A -> B
+        self.assertEqual(runner.earlier_firm_dates(self.store, self.proof_id), frozenset())
+        read(("signed", "2026-11-18", 0.9))                                 # A -> B -> A: still conflicted
+        self.assertEqual(runner.earlier_firm_dates(self.store, self.proof_id), frozenset())
+        read(("issued", "2026-03-01", 0.95))                                # another kind, never disputed
+        self.assertEqual(runner.earlier_firm_dates(self.store, self.proof_id), {("issued", "2026-03-01")})
+        read(("issued", "2026-03-01", 0.5))                                 # the preceding read is not firm
+        self.assertEqual(runner.earlier_firm_dates(self.store, self.proof_id), frozenset())
+        src = (Path(__file__).resolve().parents[1] / "credit_verify" / "docverify" / "runner.py").read_text()
+        # read BEFORE this run's extract step is recorded (a read never confirms itself)
+        self.assertLess(src.index("stable_dates = earlier_firm_dates(store, proof_id)"),
+                        src.index('store.step(run_id, proof_id, "extract"'))
+        self.assertIn("stable_dates=stable_dates", src)
+
     def test_since_cutoff_is_recorded_once_and_respected(self):
         db = sqlite3.connect(self.proof_path)
         db.execute("UPDATE verdicts SET created_at='2020-01-01T00:00:00Z'")
@@ -1072,6 +1359,78 @@ class RunnerTests(unittest.TestCase):
         stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
         self.assertEqual(rows[0]["outcome"], gate.FORGED)
         self.assertEqual(self.store.held_users(), {42})
+
+    def _dead_sender(self, archive):
+        self.answer = {**GOOD_ANSWER, "sender": {"email": "jahan@synapse-studio-rec.com", "confidence": 0.95}}
+        self.net._mx = {"synapse-studio-rec.com": "nxdomain"}
+        self.net._archive = archive
+        return runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
+
+    def test_a_dead_sender_domain_with_no_archive_history_is_still_a_fabricated_sender(self):
+        stats, rows = self._dead_sender({})
+        self.assertEqual(rows[0]["outcome"], gate.FORGED)
+        st = self.store.db.execute("SELECT status, detail_json FROM dv_steps WHERE step='xc_domain_archive'").fetchone()
+        self.assertEqual((st[0], json.loads(st[1])["first_capture"]), ("ok", None))
+
+    def test_a_lapsed_sender_domain_archived_before_the_document_is_not_fabricated(self):
+        # Fable 140 (audit-25, 1372907): a 2017 invoice from a domain live 2016-2025, NXDOMAIN today (client hold).
+        stats, rows = self._dead_sender({"synapse-studio-rec.com": "20161114113642"})
+        self.assertNotEqual(rows[0]["outcome"], gate.FORGED)
+        self.assertFalse(rows[0]["account_hold"])
+        self.assertEqual(self.store.held_users(), set())
+        steps = {s: (st, json.loads(d)) for s, st, d in self.store.db.execute(
+            "SELECT step, status, detail_json FROM dv_steps WHERE step IN ('xc_domain', 'xc_domain_archive', "
+            "'xc_domain_intel')")}
+        self.assertEqual(steps["xc_domain_archive"][0], "lapsed")
+        self.assertEqual(steps["xc_domain_archive"][1]["first_capture"], "20161114113642")   # recorded in the step
+        self.assertEqual(steps["xc_domain_archive"][1]["document_date"], "2025-03-01")
+        self.assertEqual(steps["xc_domain"][0], xc.WEAK)
+        self.assertTrue(steps["xc_domain"][1]["lapsed"])
+        self.assertIn("synapse-studio-rec.com: does not exist", steps["xc_domain_intel"][1]["lapsed_flags"])
+        self.assertNotIn("synapse-studio-rec.com: does not exist", steps["xc_domain_intel"][1]["flags"])
+        # one CDX call per domain per 24 h, shared through the store
+        self.assertEqual(sum(1 for c in self.net.calls if "web.archive.org" in c), 1)
+        self.store.db.execute("DELETE FROM dv_outcomes")
+        self.store.db.execute("DELETE FROM dv_steps")
+        self.store.db.commit()
+        runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
+        self.assertEqual(sum(1 for c in self.net.calls if "web.archive.org" in c), 1)        # cache hit
+
+    def test_an_archive_capture_after_the_document_date_does_not_clear_the_sender(self):
+        stats, rows = self._dead_sender({"synapse-studio-rec.com": "20260630000000"})       # first seen after 2025-03-01
+        self.assertEqual(rows[0]["outcome"], gate.FORGED)
+        self.assertFalse(xc.lapsed_domain("20260630000000", date(2025, 3, 1)))
+        self.assertTrue(xc.lapsed_domain("20161114113642", date(2017, 9, 13)))
+        self.assertFalse(xc.lapsed_domain("20161114113642", None))                             # no document date
+        self.assertFalse(xc.lapsed_domain(None, date(2017, 9, 13)))
+
+    def test_a_domain_archived_only_on_a_subpage_before_the_document_is_lapsed(self):
+        # QA #1494: CDX's default is an exact URL; a host whose ROOT was never captured before the document but whose
+        # /about page was is still a lapsed domain - one host-wide query, only when the root does not answer.
+        stats, rows = self._dead_sender({"synapse-studio-rec.com": {"root": None, "pages": ["20170102030405"]}})
+        self.assertNotEqual(rows[0]["outcome"], gate.FORGED)
+        st = self.store.db.execute("SELECT status, detail_json FROM dv_steps WHERE step='xc_domain_archive'").fetchone()
+        self.assertEqual((st[0], json.loads(st[1])["first_capture"]), ("lapsed", "20170102030405"))
+        cdx = [c for c in self.net.calls if "web.archive.org" in c]
+        self.assertEqual(len(cdx), 2)
+        self.assertNotIn("matchType", cdx[0])                                       # the fast root query first
+        self.assertIn("matchType=host", cdx[1])
+        self.assertIn("to=20250228", cdx[1])                                        # strictly before 2025-03-01
+
+    def test_a_subpage_captured_only_after_the_document_does_not_clear_the_sender(self):
+        stats, rows = self._dead_sender({"synapse-studio-rec.com": {"root": "20260630000000",
+                                                                    "pages": ["20260101000000"]}})
+        self.assertEqual(rows[0]["outcome"], gate.FORGED)
+
+    def test_an_unreadable_archive_never_clears_a_sender(self):
+        def boom(dom, **kw):
+            raise urllib.error.URLError("down")
+        self.net.first_capture = boom
+        stats, rows = self._dead_sender({"synapse-studio-rec.com": "20161114113642"})
+        self.assertEqual(rows[0]["outcome"], gate.FORGED)
+        st = self.store.db.execute("SELECT status FROM dv_steps WHERE step='xc_domain_archive'").fetchone()
+        self.assertEqual(st[0], "error")
+        self.assertIsNone(self.store.db.execute("SELECT 1 FROM dv_archive_cache").fetchone())   # errors never cached
 
     def test_low_confidence_sender_end_to_end_is_not_forged(self):
         self.answer = {**GOOD_ANSWER, "sender": {"email": "contact@mistyped.invalid", "confidence": 0.0}}
@@ -1187,6 +1546,51 @@ class RunnerTests(unittest.TestCase):
         stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
         self.assertEqual((rows[0]["outcome"], rows[0]["need"]), (gate.UNKNOWN, None))   # never verifies, never asks
 
+    def test_a_provider_outage_stops_the_run_and_never_uses_a_retry(self):
+        # 2026-10-29 22:00-01:05Z: HTTP 402 (out of credit) for ~3 h made 3,521 claims settle as unknown.
+        calls = []
+
+        def broke(*a):
+            calls.append(1)
+            raise urllib.error.HTTPError("u", 402, "Payment Required", {}, None)
+        self.deps.extractor = Extractor(self.store, key="k", post=broke)
+        for _ in range(runner.MAX_EXTRACT_ATTEMPTS + 3):                   # far past every retry budget
+            stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
+            self.assertEqual(rows, [])                                       # no outcome, never `unknown`
+            self.assertTrue(any("provider down (http 402)" in e for e in stats.errors), stats.errors)
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM dv_outcomes").fetchone()[0], 0)
+        self.assertEqual(runner.extract_attempts(self.store, self.proof_id), 0)          # not one attempt used
+        self.assertEqual(stats.provider_down, "http 402")                               # a FAILED run, by name
+        self.assertEqual(stats.as_dict()["provider_down"], "http 402")
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM dv_steps WHERE step='extract' AND "
+                                               "status='provider_down'").fetchone()[0], runner.MAX_EXTRACT_ATTEMPTS + 3)
+        # credit restored: the document is read for real
+        self.deps.extractor = Extractor(self.store, key="k", post=lambda *a: or_response(GOOD_ANSWER))
+        stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
+        self.assertTrue(rows)
+        self.assertNotEqual(rows[0]["outcome"], gate.UNKNOWN)
+
+    def test_unknowns_written_during_a_provider_outage_do_not_settle_a_claim(self):
+        # the 2026-10-29 rows already in the store: `unknown` with reason 'http 402' never count toward MAX_UNKNOWN
+        from credit_verify.docverify.store import MAX_UNKNOWN, provider_down
+        for _ in range(MAX_UNKNOWN + 2):
+            self.store.outcome("r402", proof_id=self.proof_id, request_id=RID, role="Mixing", user_id=42, source_ref="c",
+                               h3_verdict=None, outcome=gate.UNKNOWN, need=None, account_hold=False, detail={},
+                               reason="tooling: extraction did not run (http 402)")
+        self.assertFalse(self.store.done(self.proof_id, f"{RID}#Mixing"))
+        for why in ("tooling: extraction did not run (http 402)", "x (http 401)", "x (http 429)",
+                    "x (daily model spend cap reached)", "x (no OpenRouter key)"):
+            self.assertTrue(provider_down(why), why)
+        for why in ("tooling: extraction did not run (transport: TimeoutError)", "x (http 503)", "x (http 400)",
+                    "tooling: extraction did not run (unusable model answer)", "x (document not located)",
+                    "tooling: H3 UNDETERMINED", "x (http 4020)", None, ""):
+            self.assertFalse(provider_down(why), why)                       # can be the document: still counts
+        for _ in range(MAX_UNKNOWN):
+            self.store.outcome("rdoc", proof_id=self.proof_id, request_id=RID, role="Mixing", user_id=42, source_ref="c",
+                               h3_verdict=None, outcome=gate.UNKNOWN, need=None, account_hold=False, detail={},
+                               reason="tooling: extraction did not run (unusable model answer)")
+        self.assertTrue(self.store.done(self.proof_id, f"{RID}#Mixing"))      # document failures still settle
+
     def test_unknown_is_retried_then_stands(self):
         from credit_verify.docverify.store import MAX_UNKNOWN
         Path(self.cache, "12345", "notif_x", "0.pdf").write_bytes(b"not the file H3 judged")
@@ -1279,6 +1683,41 @@ class IntakeD2Tests(unittest.TestCase):
     def _run(self):
         return runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
 
+    def test_f9_a_dashboard_showing_our_code_confirms_the_credit(self):
+        # proof-loop lead 092/093: the code issued with the per-need ask, shown in the next document, = F9 anchor.
+        from datetime import datetime, timezone
+        ch = self.store.issue_challenge(RID, 42, now=datetime(2026, 10, 27, 12, tzinfo=timezone.utc))
+        self.assertEqual(self.store.issue_challenge(RID, 42, now=datetime(2026, 10, 27, 13, tzinfo=timezone.utc))["code"],
+                         ch["code"])                                   # one active code per request
+        spaced = " ".join(ch["code"][:4]) + "-" + ch["code"][4:]       # OCR splits it
+
+        def sandbox(path, declared, ctx, want_text=False):
+            return {"doc_text": f"DistroKid dashboard  Ann Alpha mixed Night Drive  code {spaced}",
+                    "mime": "image/png", "kind": "distributor_portal", "facts": {}}
+        self.deps.sandbox = sandbox
+        self.answer = {**GOOD_ANSWER, "doc_type": "dashboard_screenshot"}   # the extraction reads a dashboard
+        self.deps.raw_credits = lambda tid: []                         # no DSP anchor: only F9 can confirm
+        self.h3 = {KEY: H3(verdict="GENUINE")}
+        stats, rows = self._run()
+        steps = dict(self.store.db.execute("SELECT step, status FROM dv_steps WHERE step='xc_challenge'").fetchall())
+        self.assertEqual(steps, {"xc_challenge": xc.POSITIVE})
+        self.assertEqual([r["outcome"] for r in rows], [gate.VERIFIED])
+        self.assertIsNotNone(self.store.challenges(RID)[0]["consumed_at"])
+        g = json.loads(self.store.db.execute("SELECT detail_json FROM dv_steps WHERE step='gate'").fetchone()[0])
+        self.assertTrue(g["f9"])                                        # recorded for the tray
+        detail = self.store.db.execute("SELECT detail_json FROM dv_steps WHERE step='xc_challenge'").fetchone()[0]
+        self.assertNotIn(ch["code"], detail)                           # the code itself is never logged
+
+    def test_f9_an_expired_or_missing_code_is_unverifiable_never_a_hold(self):
+        from datetime import datetime, timezone
+        self.store.issue_challenge(RID, 42, now=datetime(2026, 10, 10, tzinfo=timezone.utc))   # expired 10-17
+        self.deps.raw_credits = lambda tid: []
+        stats, rows = self._run()
+        st, det = self.store.db.execute("SELECT status, detail_json FROM dv_steps WHERE step='xc_challenge'").fetchone()
+        self.assertEqual(st, xc.WEAK)
+        self.assertIn("expired", det)
+        self.assertEqual([(r["outcome"], r["account_hold"]) for r in rows], [(gate.UNVERIFIABLE, False)])
+
     def test_a_filed_document_is_read_by_sha_and_judged_against_its_open_request(self):
         stats, rows = self._run()
         self.assertEqual((stats.intake, stats.outcomes), (1, {"verified": 1}))
@@ -1314,6 +1753,28 @@ class IntakeD2Tests(unittest.TestCase):
         self.reqs = {RID: IntakeReq(uid=99)}                                      # another account's request
         stats, rows = self._run()
         self.assertEqual(rows, [])
+
+    def test_an_intake_read_the_provider_refused_is_a_failed_run_with_no_outcome(self):
+        def broke(*a):
+            raise urllib.error.HTTPError("u", 402, "Payment Required", {}, None)
+        self.deps.extractor = Extractor(self.store, key="k", post=broke)
+        stats, rows = self._run()
+        self.assertEqual((stats.provider_down, rows), ("http 402", []))
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM dv_outcomes").fetchone()[0], 0)
+
+    def test_intake_unknowns_from_a_provider_outage_do_not_finish_the_filing(self):
+        from credit_verify.docverify.store import MAX_UNKNOWN
+        iid = self.intake_id
+        for n in range(MAX_UNKNOWN + 1):
+            self.store.outcome(f"r{n}", proof_id="p", request_id=RID, role="Mixing", user_id=42, source_ref="c",
+                               h3_verdict=None, outcome=gate.UNKNOWN, need=None, account_hold=False, detail={},
+                               reason="tooling: extraction did not run (http 402)", intake_id=iid)
+        self.assertEqual(self.store.intake_finished_keys(iid), set())          # 4 runs of 402: nothing finished
+        for n in range(MAX_UNKNOWN):
+            self.store.outcome(f"d{n}", proof_id="p", request_id=RID, role="Mixing", user_id=42, source_ref="c",
+                               h3_verdict=None, outcome=gate.UNKNOWN, need=None, account_hold=False, detail={},
+                               reason="tooling: H3 UNDETERMINED", intake_id=iid)
+        self.assertEqual(self.store.intake_finished_keys(iid), {f"{RID}#Mixing"})
 
     def test_a_document_not_found_in_its_conversation_is_retried_then_unknown(self):
         self.deps.dl = lambda url, dest: Path(dest).write_bytes(b"not it") and 1
@@ -1528,6 +1989,27 @@ class IntakeD2Tests(unittest.TestCase):
         stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, reread_carried=True)
         self.assertEqual(stats.intake, 0)
 
+    def test_a_run_the_provider_refused_exits_nonzero_so_the_shard_counts_it_failed(self):
+        # Fable b1 #1518: provider-down must exit nonzero (a FAILED shard / cron run), never a quiet 0
+        import importlib.util
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("cdv", Path(__file__).resolve().parents[1] / "credit-doc-verify.py")
+        cdv = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cdv)
+        args = cdv.parser().parse_args(["--store", os.path.join(self.td.name, "cli.sqlite"), "run", "--shard", "0/4",
+                                        "--max-docs", "2"])
+        for down, want in (("http 402", cdv.EX_PROVIDER_DOWN), (None, 0)):
+            st = runner.Stats("r")
+            st.provider_down = down
+            with mock.patch.object(runner, "run", return_value=(st, [])), \
+                    mock.patch.object(cdv, "real_deps", return_value=None), \
+                    mock.patch.object(cdv, "paying_users", return_value=None), \
+                    mock.patch.object(cdv, "KILL_SWITCH", os.path.join(self.td.name, "absent")):
+                self.assertEqual(cdv.cmd_run(args), want, down)
+        self.assertNotEqual(cdv.EX_PROVIDER_DOWN, 0)
+        src = (Path(__file__).resolve().parents[1] / "credit-doc-verify.py").read_text()
+        self.assertIn("rcs = {i: p.wait() for i, p in procs}", src)             # a worker's nonzero fails the parent
+
     def test_the_cli_passes_reread_carried_to_the_runner_and_the_workers(self):
         import importlib.util
         spec = importlib.util.spec_from_file_location("cdv", Path(__file__).resolve().parents[1] / "credit-doc-verify.py")
@@ -1551,6 +2033,7 @@ class IntakeD2Tests(unittest.TestCase):
             self.store.db.execute("DELETE FROM dv_outcomes")
             self.store.db.execute("DELETE FROM dv_steps")
             self.store.db.execute("DELETE FROM dv_intake_keys")
+            self.store.db.execute("DELETE FROM dv_extract_cache")      # the cache would (rightly) replay the 0.1 answer
             self.store.db.commit()
             self.answer = {**GOOD_ANSWER, "credits": [],
                            "tracks": [{"title": "Night Drive", "isrc": "USAB12400001", "confidence": conf}]}
@@ -1888,6 +2371,29 @@ class TrayTests(unittest.TestCase):
                                                    "fresh_anchor": {d: d in anchor for d in ("spotify", "tidal")}},
                         f"{rid}#Mixing")
 
+    def test_an_f9_code_with_the_credit_is_an_approve_grade_anchor(self):
+        from credit_verify.docverify import tray
+        self._out("p8", "r-f9", "verified", fresh=False)                 # no D5b capture
+        self.store.step("r1", "p8", "xc_challenge", "positive", {"anchor_class": "F9"}, "r-f9#Mixing")
+        self.store.step("r1", "p8", "gate", "verified", {"extracted_support": {"person": "Ann"}, "f9": True},
+                        "r-f9#Mixing")
+        self._out("p10", "r-f9-letter", "verified", fresh=False)          # QA #1476: the code on a non-dashboard
+        self.store.step("r1", "p10", "xc_challenge", "positive", {"anchor_class": "F9"}, "r-f9-letter#Mixing")
+        self.store.step("r1", "p10", "gate", "verified", {"extracted_support": {"person": "Ann"}, "f9": False},
+                        "r-f9-letter#Mixing")
+        self._out("p9", "r-code-only", "verified", fresh=False)
+        self.store.step("r1", "p9", "xc_challenge", "positive", {"anchor_class": "F9"}, "r-code-only#Mixing")
+        self.store.step("r1", "p9", "gate", "verified", {"extracted_support": None}, "r-code-only#Mixing")
+        t = tray.build(self.store, gate=lambda uid: (True, "allow"), tracks=lambda ids: {})
+        self.assertEqual([a["request_id"] for a in t.approve], ["r-f9"])
+        self.assertIn("F9", t.approve[0]["anchor"])
+        self.assertEqual(sorted(a["request_id"] for a in t.not_approvable), ["r-code-only", "r-f9-letter"])
+        ok, why = tray._f9_anchor(self.store, "p10", "r-f9-letter#Mixing")
+        self.assertEqual(ok, False)
+        self.assertIn("not on a distributor/DSP dashboard", why)
+        t = tray.build(self.store, gate=lambda uid: (False, "account gate hold"), tracks=lambda ids: {})
+        self.assertEqual(t.approve, [])                                   # the gate still decides
+
     def test_trays_sort_by_outcome_and_anchor(self):
         from credit_verify.docverify import tray
         self._out("p1", "r-ok", "verified")
@@ -2116,6 +2622,47 @@ class TrayTests(unittest.TestCase):
                                  ("forensics", tuple(sorted(FRAUD_SIGNAL_FAMILY))))
         carried = {p for (p,) in db.execute("SELECT proof_id FROM dv_outcomes WHERE version=?", (VERSION,))}
         self.assertEqual(carried, {"pclean"})                            # the font edit is re-read
+
+    def test_a_template_match_that_does_not_name_the_claimant_is_unverifiable_never_forged(self):
+        # Fable 165 (df38bbd1): H3 now says SUSPECT with a SOFT template_match_another_account (was FORGED_LIKELY).
+        ex = validate({**GOOD_ANSWER, "doc_type": "contract", "credits": []})
+        sig = {"name": "template_match_another_account", "severity": "soft", "check": "F2", "value": {"template": True}}
+        fs = forensics.check(forensics.H3("SUSPECT", ["F2 template_match_another_account"], [sig], "contract"), ex, {},
+                             "application/pdf")
+        self.assertEqual([(f.name, f.severity) for f in fs], [("h3_template_match_another_account", "soft")])
+        o = gate.decide(h3_verdict="SUSPECT", kind="contract", ex=ex, findings=fs, checks=[], account_held=False,
+                        extracted_support=None)
+        self.assertEqual(o.outcome, gate.UNVERIFIABLE)
+        self.assertEqual(o.need, gate.NEED_COUNTERPARTY)          # a contract: the counter-signed / registered copy
+        self.assertIn("forensic doubt: h3_template_match_another_account", o.reason)
+        sigs = gate.fraud_signals(fs, [])
+        self.assertEqual([(x["id"], x["family"]) for x in sigs], [("h3_template_match_another_account", "template")])
+        self.assertIsNone(gate.positive_pair(sigs))                 # one template signal never makes a fraud pair
+
+    def test_dv4_rereads_every_forged_and_every_hard_f2_reuse_and_carries_the_rest(self):
+        # Fable 165 (df38bbd1): the F2 template rule can only change a document H3 called forged.
+        from credit_verify.docverify import CARRY, FRAUD_SIGNAL_FAMILY
+        self.assertEqual(VERSION, "dv-4")
+        self.assertEqual(FRAUD_SIGNAL_FAMILY["template_match_another_account"], "template")    # pairs only with an edit
+        prev, reread, steps, detail = CARRY["dv-4"]
+        self.assertEqual((prev, reread), ("dv-3", frozenset({"forged", "forged_positive"})))
+        db = self.store.db
+        rows = (("pforged", "forged", '{"h3_reasons": ["F2 reused_on_another_track"]}'),
+                ("ppos", "forged_positive", '{"findings": []}'),
+                ("preuse", "unverifiable", '{"h3_reasons": ["F2 reused_by_another_account_same_claim"]}'),
+                ("psoft", "unverifiable", '{"findings": [{"name": "h3_reused_by_another_account", "severity": "soft"}]}'),
+                ("pclean", "unverifiable", '{"findings": []}'))
+        for pid, outcome, det in rows:
+            db.execute("INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, outcome, reason, account_hold, "
+                       "detail_json, version, intake_id) VALUES ('r', 't', ?, 'rq', 'Producer', ?, 'x', 0, '{}', 'dv-3', ?)",
+                       (pid, outcome, f"42:{pid}"))
+            db.execute("INSERT INTO dv_steps (run_id, at, proof_id, request_id, step, status, detail_json, version) "
+                       "VALUES ('r', 't', ?, 'rq#Producer', 'forensics', 'ok', ?, 'dv-3')", (pid, det))
+        db.execute("DELETE FROM dv_state WHERE k='carried:dv-3->dv-4'")     # the store's own open carried an empty store
+        db.commit()
+        self.store.carry_forward(prev, "dv-4", reread, steps, detail)
+        carried = {p for (p,) in db.execute("SELECT proof_id FROM dv_outcomes WHERE version='dv-4'")}
+        self.assertEqual(carried, {"psoft", "pclean"})         # a soft reuse / no reuse cannot change: carried
     def test_l11_watch_is_clean_only_after_24h_with_no_false_forged_and_d5b_live(self):
         from datetime import datetime, timezone
 
@@ -2154,6 +2701,48 @@ class TrayTests(unittest.TestCase):
         w = l11.watch(self.store, since=since, false_forged=flags, now=late)
         self.assertEqual((w["total"]["false_forged"], w["clean"]), (1, False))
         self.assertIn("false forged 1", l11.line(w))
+
+    def test_l11_counts_a_verified_claim_anchored_by_a_d5b_record_within_24h(self):
+        # Fable 171: join = a verified row + a BUILT dsp_anchor (dsp-verify store) on the same request covering the
+        # role, captured within 24 h of the verified read
+        from datetime import datetime, timezone
+
+        from credit_verify.docverify import l11
+        since, late = "2026-10-29T04:00:00Z", datetime(2026, 10, 30, 5, 0, tzinfo=timezone.utc)
+        self.store.db.execute("INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, outcome, reason, "
+                              "account_hold, detail_json, version, intake_id) VALUES ('r', '2026-10-29T05:00:00Z', "
+                              "'pv', 'RQ-A', 'Mixing', 'verified', 'x', 0, '{}', ?, '1:pv')", (VERSION,))
+        self.store.db.commit()
+        dsp = os.path.join(self.td.name, "dsp.sqlite")
+
+        def anchors(*recs):
+            db = sqlite3.connect(dsp)
+            db.execute("DROP TABLE IF EXISTS dsp_anchors")
+            db.execute("CREATE TABLE dsp_anchors (id INTEGER PRIMARY KEY, request_id TEXT, kind TEXT, outcome TEXT, "
+                       "record_json TEXT)")
+            db.executemany("INSERT INTO dsp_anchors (request_id, kind, outcome, record_json) VALUES (?,?,?,?)",
+                           [(r, k, o, json.dumps(rec)) for r, k, o, rec in recs])
+            db.commit()
+            db.close()
+
+        def anchored():
+            return l11.watch(self.store, since=since, now=late, false_forged=set(), dsp_store=dsp)["total"]["verified_anchored"]
+        good = {"roles": ["Mixing"], "captured_at": "2026-10-29T06:10:00Z"}
+        anchors(("rq-a", "dsp_anchor", "built", good))
+        self.assertEqual(anchored(), 1)
+        self.assertTrue(l11.watch(self.store, since=since, now=late, false_forged=set(), dsp_store=dsp)["clean"])
+        for bad in (("rq-a", "dsp_anchor", "refused", good),                                   # not built
+                    ("rq-a", "dsp_label_line", "built", good),                                 # a label line
+                    ("rq-a", "dsp_anchor", "built", {**good, "roles": ["Producer"]}),           # another role
+                    ("rq-b", "dsp_anchor", "built", good),                                     # another request
+                    ("rq-a", "dsp_anchor", "built", {**good, "captured_at": "2026-10-31T06:00:00Z"}),   # > 24 h
+                    ("rq-a", "dsp_anchor", "built", {**good, "captured_at": "garbage"})):
+            anchors(bad)
+            self.assertEqual(anchored(), 0, bad)
+        anchors(("rq-a", "dsp_anchor", "built", {**good, "captured_at": "2026-10-29T06:10:00"}))     # naive = UTC
+        self.assertEqual(anchored(), 1)
+        self.assertEqual(l11.watch(self.store, since=since, now=late, false_forged=set(),
+                                   dsp_store=os.path.join(self.td.name, "none.sqlite"))["total"]["verified_anchored"], 0)
 
     def test_l11_watch_counts_documents_once_and_anchors_only_from_the_same_run(self):
         from datetime import datetime, timezone
@@ -2463,6 +3052,90 @@ class ArtifactTests(unittest.TestCase):
     def test_the_reader_records_the_artifact_kind(self):
         src = (Path(__file__).resolve().parents[1] / "credit_verify" / "docverify" / "runner.py").read_text()
         self.assertIn('store.step(run_id, proof_id, "artifact"', src)
+
+class ChallengeTests(unittest.TestCase):
+    def test_codes_and_windows(self):
+        from credit_verify.docverify import challenge
+        codes = {challenge.new_code() for _ in range(500)}
+        self.assertEqual(len(codes), 500)
+        self.assertTrue(all(challenge.well_formed(c) for c in codes))
+        self.assertFalse(any(set(c) & set("0O1IL2Z5S8B") for c in codes))   # no OCR-confusable pair
+        ch = [{"id": 1, "user_id": 7, "code": "ACDE3467", "issued_at": "2026-10-28T00:00:00Z",
+               "expires_at": "2026-11-04T00:00:00Z"}]
+        ok = challenge.check("Code: ACDE 3467", ch, user_id=7, received_at="2026-10-29T10:00:00Z")
+        self.assertEqual((ok.status, ok.detail["anchor_class"]), (xc.POSITIVE, "F9"))
+        for text, uid, at, why in (("ACDE3467", 8, "2026-10-29T10:00:00Z", "another account"),
+                                   ("ACDE3467", 7, "2026-10-27T10:00:00Z", "before the code"),
+                                   ("ACDE3467", 7, "2026-11-05T10:00:00Z", "expired"),
+                                   ("no code here", 7, "2026-10-29T10:00:00Z", "does not show the code")):
+            c = challenge.check(text, ch, user_id=uid, received_at=at)
+            self.assertEqual(c.status, xc.WEAK)
+            self.assertIn(why, " ".join(c.detail["why"]))
+        self.assertIsNone(challenge.check("x", [], user_id=7, received_at="2026-10-29T10:00:00Z"))
+        # QA #1476: one use. Consumed by filing A -> confirms A again (its other roles), never filing B
+        used = [{**ch[0], "consumed_at": "2026-10-29T10:05:00Z", "consumed_by": "intake:42:aaa"}]
+        again = challenge.check("ACDE3467", used, user_id=7, received_at="2026-10-29T10:00:00Z", consumer="intake:42:aaa")
+        self.assertEqual(again.status, xc.POSITIVE)
+        other = challenge.check("ACDE3467", used, user_id=7, received_at="2026-10-30T10:00:00Z", consumer="intake:42:bbb")
+        self.assertEqual(other.status, xc.WEAK)
+        self.assertIn("already used by another document", " ".join(other.detail["why"]))
+        self.assertEqual(challenge.check("ACDE3467", used, user_id=7, received_at="2026-10-30T10:00:00Z").status, xc.WEAK)
+
+    def test_a_consumed_code_never_confirms_a_second_filing_end_to_end(self):
+        with tempfile.TemporaryDirectory() as td:
+            store = DocVerifyStore(os.path.join(td, "dv.sqlite"))
+            issued = store.issue_challenge(RID, 7)
+            (cid,) = [c["id"] for c in store.challenges(RID)]
+            store.consume_challenge(cid, "intake:7:first")
+            chs = store.challenges(RID)
+            self.assertEqual(chs[0]["consumed_by"], "intake:7:first")
+            from credit_verify.docverify import challenge
+            got = challenge.check(f"code {issued['code']}", chs, user_id=7, received_at=chs[0]["issued_at"],
+                                  consumer="intake:7:second")
+            self.assertEqual(got.status, xc.WEAK)
+        src = (Path(__file__).resolve().parents[1] / "credit_verify" / "docverify" / "runner.py").read_text()
+        self.assertIn('consumer=f"intake:{intake.intake_id}"', src)
+
+    def test_the_gate_takes_f9_only_with_the_extracted_credit(self):
+        ex = validate({**GOOD_ANSWER, "doc_type": "dashboard_screenshot"})
+        f9 = xc.Check("xc_challenge", xc.POSITIVE, {"anchor_class": "F9"})
+        o = gate.decide(h3_verdict="GENUINE", kind="distributor_portal", ex=ex, findings=[], checks=[f9],
+                        account_held=False, extracted_support={"person": "Ann Alpha"})
+        self.assertEqual(o.outcome, gate.VERIFIED)
+        o = gate.decide(h3_verdict="GENUINE", kind="distributor_portal", ex=ex, findings=[], checks=[f9],
+                        account_held=False, extracted_support=None)
+        self.assertEqual(o.outcome, gate.UNVERIFIABLE)                  # a code alone confirms nothing
+        # QA #1476: F9 only on a dashboard. A contract/letter carrying the code is not F9 evidence
+        dash = validate({**GOOD_ANSWER, "doc_type": "dashboard_screenshot"})
+        o = gate.decide(h3_verdict="GENUINE", kind=None, ex=dash, findings=[], checks=[f9],
+                        account_held=False, extracted_support={"person": "Ann Alpha"})
+        self.assertEqual(o.outcome, gate.VERIFIED)                     # a dashboard screenshot + the code
+        for doc_type in ("letter", "contract", "email_screenshot", "other"):
+            ex2 = validate({**GOOD_ANSWER, "doc_type": doc_type})
+            o = gate.decide(h3_verdict="GENUINE", kind=None, ex=ex2, findings=[], checks=[f9],
+                            account_held=False, extracted_support={"person": "Ann Alpha"})
+            self.assertNotIn("xc_challenge", o.detail.get("confirmed") or [], doc_type)
+            self.assertFalse(gate.f9_anchor([f9], ex2, None), doc_type)
+        # QA #1476 14:10Z: H3's keyword `kind` is not dashboard proof - a contract naming DistroKid is still a contract
+        contract = validate({**GOOD_ANSWER, "doc_type": "contract"})
+        self.assertFalse(gate.f9_anchor([f9], contract, "distributor_portal"))
+        o = gate.decide(h3_verdict="GENUINE", kind="distributor_portal", ex=contract, findings=[], checks=[f9],
+                        account_held=False, extracted_support={"person": "Ann Alpha"})
+        self.assertNotEqual(o.outcome, gate.VERIFIED)
+
+    def test_a_code_raced_by_two_filings_confirms_only_the_winner(self):
+        # QA #1476 14:10Z: two readers both see the unconsumed code; exactly one filing may claim it.
+        with tempfile.TemporaryDirectory() as td:
+            a, b = (DocVerifyStore(os.path.join(td, "dv.sqlite")) for _ in range(2))      # two reader processes
+            a.issue_challenge(RID, 7)
+            (cid,) = [c["id"] for c in a.challenges(RID)]
+            self.assertTrue(a.consume_challenge(cid, "intake:7:first"))
+            self.assertFalse(b.consume_challenge(cid, "intake:7:second"))               # the loser learns it lost
+            self.assertTrue(a.consume_challenge(cid, "intake:7:first"))                 # the winner's other roles
+            self.assertEqual(b.challenges(RID)[0]["consumed_by"], "intake:7:first")
+        src = (Path(__file__).resolve().parents[1] / "credit_verify" / "docverify" / "runner.py").read_text()
+        self.assertIn("not store.consume_challenge(", src)
+        self.assertIn('"raced": True', src)
 
 
 class CronContractTests(unittest.TestCase):

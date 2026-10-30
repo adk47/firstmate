@@ -9,24 +9,43 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from credit_review import account_gate  # noqa: E402
 from credit_review import claim_executor as cx  # noqa: E402
+from claim_verify import decline_rules as dr  # noqa: E402
 
 NOW = datetime(2026, 10, 29, 3, 0, tzinfo=timezone.utc)
 ALLOW = account_gate.GateResult("allow", ("no account-level signal",), {"decision": "allow"})
 PID = "35e96343-94d2-4e76-89c5-3b269cf02070"
 
 
+# The facts the coded rule decided 1607654 on (Pinkfong, d2 fixture): an org company claim from gmail, role 'other'.
+PINKFONG = {"id": 1607654, "userId": 1398875, "profileId": PID, "profileType": "organization",
+            "reason": "company claim on add", "status": "pending", "createdAt": "2026-09-09T00:00:00+00:00",
+            "email_domain": "gmail.com", "verificationLinks": {"role": "other"}, "pk_profile_other_claims": []}
+PINKFONG_PROFILE = {"name": "Pinkfong", "popularity": 80, "creditCount": 5877}
+
+
+def snap(**over):
+    s = dr.snapshot({**PINKFONG, **over.pop("claim", {})}, {**PINKFONG_PROFILE, **over.pop("profile", {})})
+    s.update(over)
+    return s
+
+
+def fresh_ok(ids):
+    """The executor's fresh derivation, faked: Pinkfong's true facts (the rule declines it)."""
+    return {i: snap() for i in ids}
+
+
 def row(cid=1607654, **kw):
     r = {"claim_id": cid, "user_id": 1398875, "profile_id": PID, "profile_type": "organization",
-         "ruling_id": "claim-route-zero", "contradiction": "individual_claims_company",
+         "ruling_id": "c6-decline-rules-v1:individual_claims_company", "contradiction": "individual_claims_company",
          "evidence": "Pinkfong as the company of a 1-day gmail account who also claims Bob Gaudio",
-         "audit_reason": "STD org text"}
+         "audit_reason": "STD org text", "facts": snap()}
     r.update(kw)
     return r
 
 
 def facts(**kw):
     d = dict(status="pending", user_id=1398875, profile_id=PID, profile_type="organization",
-             reason="company claim on add", deleted=False)
+             reason="company claim on add", deleted=False, email_domain="gmail.com", role="other")
     d.update(kw)
     return cx.ClaimFacts(**d)
 
@@ -41,11 +60,28 @@ class TrayTest(unittest.TestCase):
         t = self.load({"action": "reject_claim", "rows": [row()]})
         self.assertEqual(t.rows[0].claim_id, 1607654)
 
+    def test_forged_rows_do_not_reproduce(self):
+        # QA #1506 repro: a hand row labelled with a class the rule never emits, on otherwise valid facts.
+        forged = row(ruling_id="c6-decline-rules-v1:impersonation", contradiction="impersonation")
+        cases = [
+            (forged, "does not reproduce"),
+            (row(facts=snap(profile={"popularity": 10, "creditCount": 40, "name": "Tiny Label"})), "does not reproduce"),
+            (row(facts=snap(claim={"email_domain": "pinkfong.com"})), "does not reproduce"),
+            (row(facts=snap(claim={"id": 1}, profile={})), "not this claim"),
+            (row(facts=None), "snapshot"),
+            (row(facts={"claim": {"id": 1607654}}), "not this claim"),
+        ]
+        for r, msg in cases:
+            with self.assertRaisesRegex(cx.TrayError, msg):
+                self.load({"action": "reject_claim", "rows": [r]})
+
     def test_refusals(self):
         bad = [
             ({"action": "reject", "rows": [row()]}, "action"),
             ({"action": "reject_claim", "rows": []}, "non-empty"),
             ({"action": "reject_claim", "rows": [row(ruling_id="")]}, "ruling"),
+            ({"action": "reject_claim", "rows": [row(ruling_id="claim-route-zero")]}, "coded rule"),
+            ({"action": "reject_claim", "rows": [row(ruling_id="c6-decline-rules-v1:test_account")]}, "coded rule"),
             ({"action": "reject_claim", "rows": [row(contradiction="name_only")]}, "contradiction"),
             ({"action": "reject_claim", "rows": [row(contradiction=None)]}, "contradiction"),
             ({"action": "reject_claim", "rows": [row(evidence="short")]}, "evidence"),
@@ -60,8 +96,15 @@ class TrayTest(unittest.TestCase):
 
 
 class GuardTest(unittest.TestCase):
-    R = cx.ClaimRow(1607654, 1398875, PID, "organization", "claim-route-zero", "individual_claims_company",
-                    "x" * 30)
+    R = cx.ClaimRow(1607654, 1398875, PID, "organization", "c6-decline-rules-v1:individual_claims_company", "individual_claims_company",
+                    "x" * 30, "", "gmail.com", "other")
+
+    def test_fresh_facts_must_match_the_snapshot(self):
+        self.assertEqual(cx.refusal(self.R, facts(email_domain="concord.com"), ALLOW), "facts_changed:email_domain")
+        self.assertEqual(cx.refusal(self.R, facts(role="Owner"), ALLOW), "facts_changed:role")
+        self.assertEqual(cx.refusal(self.R, facts(email_domain=None), ALLOW), "facts_unreadable")
+        self.assertEqual(cx.refusal(self.R, facts(role=None), ALLOW), "facts_unreadable")
+        self.assertIsNone(cx.refusal(self.R, facts(role="  OTHER "), ALLOW))       # normalized compare
 
     def test_allows_a_clean_open_claim(self):
         self.assertIsNone(cx.refusal(self.R, facts(), ALLOW))
@@ -99,14 +142,14 @@ class RunTest(unittest.TestCase):
         self.state = {}
 
     def tray(self, n=3):
-        rows = tuple(cx.ClaimRow(1000 + i, 1398875, PID, "organization", "claim-route-zero",
-                                 "individual_claims_company", "x" * 30) for i in range(n))
+        rows = tuple(cx.ClaimRow(1000 + i, 1398875, PID, "organization", "c6-decline-rules-v1:individual_claims_company",
+                                 "individual_claims_company", "x" * 30, "", "gmail.com", "other") for i in range(n))
         return cx.ClaimTray(str(self.tmp / "t.json"), "0" * 64, rows, 100)
 
     def facts_fn(self, ids):
         return {i: facts(status=self.state.get(i, "pending")) for i in ids}
 
-    def writer(self, cid, ruling, run_id, tray_path):
+    def writer(self, cid, ruling, run_id, tray_path, *rest):
         self.calls.append(cid)
         self.state[cid] = "rejected"
         return {}
@@ -114,9 +157,40 @@ class RunTest(unittest.TestCase):
     def go(self, t, **kw):
         args = dict(apply=True, facts_fn=self.facts_fn, gate_fn=lambda u: ALLOW, writer=self.writer,
                     audit_path=self.audit, registry_path=str(self.registry), kill_file=self.kill,
-                    lock_path=str(self.tmp / "lock"), now=lambda: NOW, sleep=lambda s: None)
+                    lock_path=str(self.tmp / "lock"), now=lambda: NOW, sleep=lambda s: None, derive_fn=fresh_ok)
         args.update(kw)
         return cx.run(t, **args)
+
+    def test_writes_only_when_the_rule_reproduces_on_FRESH_facts(self):
+        # QA #1506 repro: a self-consistent forged snapshot (a living artist marked deceased) reproduces itself, so the
+        # write must be gated on facts the executor derives itself.
+        fresh_none = lambda ids: {i: snap(profile={"popularity": 10, "creditCount": 40, "name": "Tiny"}) for i in ids}
+        res = self.go(self.tray(1), derive_fn=fresh_none)
+        self.assertEqual((self.calls, res.written), ([], 0))
+        self.assertTrue(any(k.startswith("not_reproduced_on_fresh_facts") for k in res.refused), res.refused)
+
+    def test_unreadable_fresh_facts_refuse(self):
+        for derive in (lambda ids: {}, lambda ids: (_ for _ in ()).throw(RuntimeError("trino down")),
+                       lambda ids: {i: {"claim": {}} for i in ids}):
+            self.calls = []
+            res = self.go(self.tray(1), derive_fn=derive)
+            self.assertEqual(self.calls, [])
+            self.assertIn("fresh_facts_unreadable", res.refused)
+
+    def test_forged_deceased_snapshot_loads_but_is_refused_on_fresh_facts(self):
+        living = {**PINKFONG, "profileType": "artist", "reason": None}
+        forged_snap = dr.snapshot(living, {"name": "A Living Artist", "popularity": 30, "creditCount": 10},
+                                  deceased=frozenset({PID}))
+        forged = row(profile_type="artist", ruling_id="c6-decline-rules-v1:deceased_self_claim",
+                     contradiction="deceased_self_claim", facts=forged_snap)
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump({"action": "reject_claim", "rows": [forged]}, fh)
+        t = cx.load_claim_tray(fh.name)                          # internally consistent: the loader admits it
+        fresh = dr.snapshot(living, {"name": "A Living Artist", "popularity": 30, "creditCount": 10})
+        res = self.go(t, facts_fn=lambda ids: {i: facts(profile_type="artist", reason="") for i in ids},
+                      derive_fn=lambda ids: {i: fresh for i in ids})
+        self.assertEqual(self.calls, [])
+        self.assertTrue(any(k.startswith("not_reproduced_on_fresh_facts") for k in res.refused), res.refused)
 
     def lines(self):
         return [json.loads(l) for l in Path(self.audit).read_text().splitlines()]
@@ -127,11 +201,11 @@ class RunTest(unittest.TestCase):
         self.assertEqual(self.calls, [1000, 1001, 1002])
         outs = [l["outcome"] for l in self.lines()]
         self.assertEqual(outs, ["reserved", "written"] * 3)
-        self.assertTrue(all(l["request_id"].startswith("claim:") and l["ruling_id"] == "claim-route-zero"
+        self.assertTrue(all(l["request_id"].startswith("claim:") and l["ruling_id"] == "c6-decline-rules-v1:individual_claims_company"
                             for l in self.lines()))
 
     def test_dry_run_writes_nothing(self):
-        res = cx.run(self.tray(), apply=False, facts_fn=self.facts_fn, gate_fn=lambda u: ALLOW)
+        res = cx.run(self.tray(), apply=False, facts_fn=self.facts_fn, gate_fn=lambda u: ALLOW, derive_fn=fresh_ok)
         self.assertEqual((self.calls, res.refused), ([], {"would_write": 3}))
 
     def test_refused_claim_is_skipped_and_audited(self):
@@ -211,10 +285,16 @@ class RunTest(unittest.TestCase):
         orig = cx.subprocess.run
         cx.subprocess.run = fake_run
         try:
-            cx.admin_claim_writer(script="/x.sh")(1607654, "claim-route-zero", "r1", "/t.json")
+            cx.admin_claim_writer(script="/x.sh")(1607654, "c6-decline-rules-v1:individual_claims_company", "r1", "/t.json",
+                                                  "ab12" * 16, "company claim on major org X from a free-mail address")
         finally:
             cx.subprocess.run = orig
-        self.assertEqual(seen["argv"][-3:], ["POST", "/admin/claiming/1607654/reject", "{}"])
+        self.assertEqual(seen["argv"][-3:-1], ["POST", "/admin/claiming/1607654/reject"])
+        body = json.loads(seen["argv"][-1])
+        self.assertEqual(body, {"rulingId": "c6-decline-rules-v1:individual_claims_company", "traySha": "ab12" * 16,
+                                "opsReason": "company claim on major org X from a free-mail address"})
+        self.assertNotIn("reason", body)                 # no customer-facing reason: standard template only
+        self.assertNotIn("note", body)
 
 
 if __name__ == "__main__":

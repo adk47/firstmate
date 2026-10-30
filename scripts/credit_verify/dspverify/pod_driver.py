@@ -265,8 +265,12 @@ def main(payload):
                                     for p in rec.get("credits") or []:
                                         if len(p) >= 2 and fc._fold(p[1]) in fam:
                                             mine_id = p[0] in (sp.person_raw_ids if sp else ())
+                                            # The claimant's own linked holder carries the REQUEST's profile id:
+                                            # core's anchor route matches the claimant on (linked, profile_id ==
+                                            # request.profileId) (core #11010 claimantMatch); a None there could
+                                            # never match.
                                             credited.append([name_of(p[0]), p[1], mine_id, p[0],
-                                                             None if mine_id else catalog_of(p[0])])
+                                                             t["profile_id"] if mine_id else catalog_of(p[0])])
                                     for u in rec.get("unresolved") or []:
                                         if fc._fold(u.get("normalized_credit")) in fam or fc._fold(u.get("credit")) in fam:
                                             unresolved.append([u.get("contributor_name"), u.get("credit")])

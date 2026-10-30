@@ -385,13 +385,13 @@ esac
 # Email through Intercom (POST /messages, message_type email): Intercom delivers it to the
 # user's inbox and the reply lands in the same conversation. The one other channel is a
 # Caroline comment in the user's own conversation (in-thread delivery, above).
-CREDITS_FILE="" APPROVED_BY="" MESSAGE_ID="" ACTION="post" THREAD="" THREAD_AUTO=0
+CREDITS_FILE="" APPROVED_BY="" MESSAGE_ID="" ACTION="post" THREAD="" THREAD_AUTO=0 REPLY_DUE=""
 MESSAGE_TYPE="email"
 readonly REQ_TYPE="email" EXPECT_TYPE="email"
 CAMPAIGN="verify-live" KIND="initial" PARENT_ID="" CAMPAIGN_SET=0 KIND_SET=0 COPY_ARG=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --credits-file|--approved-by|--message-id|--campaign|--kind|--parent-message-id|--copy|--conversation)
+    --credits-file|--approved-by|--message-id|--campaign|--kind|--parent-message-id|--copy|--conversation|--reply-due)
       [ $# -ge 2 ] || { usage; die "$1 needs a value"; }
       case "$1" in
         --credits-file)      CREDITS_FILE="$2" ;;
@@ -402,6 +402,7 @@ while [ $# -gt 0 ]; do
         --parent-message-id) PARENT_ID="$2" ;;
         --copy)              COPY_ARG="$2" ;;
         --conversation)      THREAD="$2" ;;
+        --reply-due)         REPLY_DUE="$2" ;;
       esac
       shift 2 ;;
     --dry-run)  ACTION="dry-run"; shift ;;
@@ -701,6 +702,15 @@ esac
   || refuse "--check-recipient applies to a verify-live initial note only (it must never reach a path that writes)."
 [ "$ACTION" != "doc-check" ] || [ "$CAMPAIGN" = "retro-past" ] \
   || refuse "--doc-check applies to --campaign retro-past only: a removal notice is not an ask, and a new credit's note is never skipped for an Intercom attachment."
+# Fable [key=reply-due] (l1 219, p1 200): answering a user who wrote to us and got no answer for > 24 h. EXACTLY ONE
+# in-thread answer per triggering customer part (ledger), one per thread per 48 h. The 7-day cooldowns (core notice,
+# any-thread admin part, the gate's own 7-day note rule) do not apply to it; comm_state verifies the trigger (the
+# customer's part, unanswered, > 24 h old, in an on-topic thread of exactly this contact) and every other rule applies.
+if [ -n "$REPLY_DUE" ]; then
+  printf '%s' "$REPLY_DUE" | grep -qE '^[0-9]{1,24}$' || refuse "--reply-due needs the customer part id (digits)."
+  [ -n "$THREAD" ] || refuse "--reply-due answers in the user's own thread: --conversation <id> is required."
+  [ "$CAMPAIGN" = "uvn-status" ] || refuse "--reply-due applies to uvn-status (the per-need ask) only for now."
+fi
 if [ -n "$THREAD" ]; then
   case "$CAMPAIGN" in
     uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-status|gap-ask|merge-pending|credit-hold-status|claim-proof-pending) ;;
@@ -1043,7 +1053,8 @@ if [ "$ACTION" = "post" ]; then
         || die "the ledger write failed."
       printf 'SKIPPED %s credits=%s\n' "$done_why" "$(printf '%s' "$pending" | "$JQ_BIN" -r 'length')"; exit 0
     fi
-    if [ "$(printf '%s' "$peek" | "$JQ_BIN" -r '.recent // false')" = "true" ]; then
+    if [ "$(printf '%s' "$peek" | "$JQ_BIN" -r '.recent // false')" = "true" ] \
+       && { [ -z "$REPLY_DUE" ] || [ "$(printf '%s' "$peek" | "$JQ_BIN" -r '.recent_why // empty')" = "recently_asked" ]; }; then
       if [ "$(printf '%s' "$peek" | "$JQ_BIN" -r '.recent_why // empty')" = "recently_asked" ]; then
         printf 'DEFERRED recently-asked credits=%s (this user got an ask in the last 90 days; the credits wait)\n' \
           "$(printf '%s' "$pending" | "$JQ_BIN" -r 'length')"; exit 3
@@ -1090,7 +1101,11 @@ fi
 # verify_messages as status 'deferred': nothing is claimed, refused or closed, so the note is offered again
 # once the window passes. Unreadable, or nothing to check
 # (no user id and no valid email) -> nothing sent (exit 4), never "clear".
-if [ "$ACTION" = "post" ]; then
+if [ "$ACTION" = "post" ] && [ -n "$REPLY_DUE" ]; then
+  # [key=reply-due]: the core-notice cooldown governs our UNSOLICITED notes, never answering the user (comm_state
+  # verifies the trigger before anything is claimed or sent)
+  printf 'reply_due %s: core-notice cooldown not applied to this answer\n' "$REPLY_DUE" >&2
+elif [ "$ACTION" = "post" ]; then
   # By Muso user id; a note keyed only by email (removal notices) is checked for every account with that email.
   if printf '%s' "$USER_ID" | grep -qE '^[0-9]{1,12}$'; then cn_who=(--user-id "$USER_ID"); else cn_who=(--email "$EMAIL"); fi
   [ -r "$CORE_NOTICE_HELPER" ] || { echo "CORE NOTICE CHECK NOT POSSIBLE: $CORE_NOTICE_HELPER is missing; nothing was sent or claimed" >&2; exit 4; }
@@ -1842,7 +1857,8 @@ if { [ "$GOLIVE" = "1" ] || [ "$NIE" = "1" ]; } && [ "$ACTION" = "post" ]; then
   set +e
   CS="$("$PY_BIN" -I "$COMM_STATE_HELPER" check --campaign "$CAMPAIGN" --copy "$COPY" --user-id "$USER_ID" \
         --request-ids "$ALL_IDS" --contact-id "$CONTACT_ID" \
-        --conversation "$(if [ "$COPY" = "docrecvr" ]; then printf '%s' "${fconv:-}"; else printf '%s' "${THREAD:-}"; fi)" 2>/dev/null)"; cs_rc=$?
+        --conversation "$(if [ "$COPY" = "docrecvr" ]; then printf '%s' "${fconv:-}"; else printf '%s' "${THREAD:-}"; fi)" \
+        --reply-due "${REPLY_DUE:-}" 2>/dev/null)"; cs_rc=$?
   set -e
   case "$cs_rc" in
     0) ;;
@@ -1867,6 +1883,11 @@ fi
 # do not send: a contact with more conversations than we can check counts as "sent".
 # The text of the conversations is never extracted; only authors, attachment counts and tags.
 DOC_SCAN_MAX=150
+# p1 198 / Fable 199 (rule): a document sent BEFORE the oldest named request was created cannot be its proof. The
+# runner passes user.requests_since (ISO UTC); attachments older than it do not count. Absent = every document counts.
+REQUESTS_SINCE="$(printf '%s' "$(cat "$CREDITS_FILE" 2>/dev/null)" | "$JQ_BIN" -r '(.user.requests_since // "") | tostring
+  | if test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|\\+00:00)$") then (sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z") | fromdateiso8601) else 0 end' 2>/dev/null || echo 0)"
+printf '%s' "$REQUESTS_SINCE" | grep -qE '^[0-9]{1,12}$' || REQUESTS_SINCE=0
 docs_submitted() { # <contact-id> -> prints the reason when documents exist; exit 4 on a failed read
   local contact="$1" after="" body ids n total=0 cid convo
   while :; do
@@ -1878,7 +1899,7 @@ docs_submitted() { # <contact-id> -> prints the reason when documents exist; exi
     if printf '%s' "$body" | "$JQ_BIN" -e --arg tag "$PROOF_TAG" '[.conversations[] | ((.tags.tags // [])[] | (.name // "") | ascii_downcase) | select(. == $tag)] | length > 0' >/dev/null; then
       echo "a conversation is tagged $PROOF_TAG"; return 0
     fi
-    if printf '%s' "$body" | "$JQ_BIN" -e '[.conversations[] | select((.source.author.type // "") == "user" and ((.source.attachments // []) | length) > 0)] | length > 0' >/dev/null; then
+    if printf '%s' "$body" | "$JQ_BIN" -e --argjson since "$REQUESTS_SINCE" '[.conversations[] | select((.source.author.type // "") == "user" and ((.source.attachments // []) | length) > 0 and ((.created_at // null) == null or .created_at >= $since))] | length > 0' >/dev/null; then
       echo "the user opened a conversation with an attachment"; return 0
     fi
     ids="$(printf '%s' "$body" | "$JQ_BIN" -r '.conversations[].id | tostring')"
@@ -1891,7 +1912,7 @@ docs_submitted() { # <contact-id> -> prints the reason when documents exist; exi
         || { printf 'DOCUMENT CHECK FAILED (curl) on conversation %s; nothing was sent or claimed:\n%s\n' "$cid" "$convo" >&2; exit 4; }
       printf '%s' "$convo" | "$JQ_BIN" -e '(.type // "") == "conversation"' >/dev/null 2>&1 \
         || { printf 'DOCUMENT CHECK NOT VERIFIED on conversation %s; nothing was sent or claimed:\n%s\n' "$cid" "$convo" >&2; exit 4; }
-      if printf '%s' "$convo" | "$JQ_BIN" -e '[(.conversation_parts.conversation_parts // [])[] | select((.author.type // "") == "user" and ((.attachments // []) | length) > 0)] | length > 0' >/dev/null; then
+      if printf '%s' "$convo" | "$JQ_BIN" -e --argjson since "$REQUESTS_SINCE" '[(.conversation_parts.conversation_parts // [])[] | select((.author.type // "") == "user" and ((.attachments // []) | length) > 0 and ((.created_at // null) == null or .created_at >= $since))] | length > 0' >/dev/null; then
         echo "the user attached a document in a conversation"; return 0
       fi
     done
@@ -1964,7 +1985,8 @@ if [ "$STATUSLIKE" = "1" ] && [ "$ACTION" = "post" ]; then
       printf 'SKIPPED docs_submitted credits=%s (%s)\n' "$N" "$DOCS_WHY"; exit 0
     fi
   fi
-  RECENT_WHY="$(for_each_account_contact recently_messaged)"
+  RECENT_WHY=""
+  [ -n "$REPLY_DUE" ] || RECENT_WHY="$(for_each_account_contact recently_messaged)"
   if [ -n "$RECENT_WHY" ]; then
     # Not closed: the user may get this note once the 7 days have passed.
     printf 'DEFERRED messaged_7d credits=%s (%s)\n' "$N" "$RECENT_WHY"; exit 3
@@ -2087,7 +2109,8 @@ if [ "$KIND" = "initial" ]; then
   printf '%s' "$INPUT" | "$JQ_BIN" -c '[.credits[] | {request_id, profile_id, track_id}]' > "$REFS_FILE"
   CLAIM="$(ledger claim --campaign "$CAMPAIGN" --user-key "$EMAIL" --user-id "$USER_ID" --day "$DAY" --request-ids "$ALL_IDS" \
     --message-type "$MESSAGE_TYPE" --approved-by "$APPROVED_BY" --approval-ref "$APPROVAL_REF" \
-    --contact-id "$CONTACT_ID" --refs-file "$REFS_FILE" ${WINDOWED_FLAG:+"$WINDOWED_FLAG"})" \
+    --contact-id "$CONTACT_ID" --refs-file "$REFS_FILE" ${WINDOWED_FLAG:+"$WINDOWED_FLAG"} \
+    ${REPLY_DUE:+--reply-due "$REPLY_DUE" --conversation "$THREAD"})" \
     || die "the ledger claim failed; refusing to send without the idempotency record."
 else
   CLAIM="$(ledger claim-reminder --parent-message-id "$PARENT_ID" --kind "$KIND" --user-key "$EMAIL" --day "$DAY" \

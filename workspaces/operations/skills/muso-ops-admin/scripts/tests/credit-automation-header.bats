@@ -117,3 +117,30 @@ score_header_count() {
     [ "$(score_header_count)" -eq 0 ]
     [ "$(header_count)" -eq 0 ]
 }
+
+anchor_post() {
+    # $1 = DSP_ANCHOR_WRITER value, $2 = requester, $3 = path
+    run --separate-stderr env DSP_ANCHOR_WRITER="$1" \
+        bash "$SCRIPT" --requester "$2" call POST "$3" '{"records":[]}'
+}
+
+anchor_header_count() {
+    grep -cx "X-Credit-Automation-Id: dsp-evidence-verifier" "$CURL_ARGV" || true
+}
+
+@test "the DSP verifier's anchor upload carries its own X-Credit-Automation-Id, only on the anchor route" {
+    anchor_post 1 "dsp-evidence-verifier@hydra-ops" /admin/credit-anchors
+    [ "$status" -eq 0 ]
+    [ "$(anchor_header_count)" -eq 1 ]
+    [ "$(header_count)" -eq 0 ]
+    grep -qx "Requester: dsp-evidence-verifier@hydra-ops" "$CURL_ARGV"
+}
+
+@test "the anchor-writer header needs its flag, its requester AND the anchor route" {
+    anchor_post 0 "dsp-evidence-verifier@hydra-ops" /admin/credit-anchors
+    [ "$(anchor_header_count)" -eq 0 ]
+    anchor_post 1 "fable-decider@hydra-ops" /admin/credit-anchors
+    [ "$(anchor_header_count)" -eq 0 ]
+    anchor_post 1 "dsp-evidence-verifier@hydra-ops" /admin/credit-requests/conditional-status
+    [ "$(anchor_header_count)" -eq 0 ]
+}

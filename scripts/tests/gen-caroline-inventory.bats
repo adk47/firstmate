@@ -124,15 +124,10 @@ print('\n'.join(sorted(s['name'] for s in d['skills'])))
 ")"
 
   expected="action-request
-customer-credit-removal
-customer-credit-verification
-customer-profile-claim
-customer-profile-consolidate
-customer-profile-dedupe
-customer-track-dedupe
 milestone-badge-purchase
 order-fulfillment
-refund-retention"
+refund-retention
+verification-handoff"
 
   [ "$inv_skills" = "$expected" ]
 
@@ -227,46 +222,19 @@ print('ok')
   [[ "$output" == *"ok"* ]]
 }
 
-@test "credit_verification_check classifies as read and appears in first_tool criteria" {
-  # Regression for the 2026-09-22 QA defect: a negated PUT mention deep in
-  # this tool's TOOLS.md Wraps prose ("...cannot reach the gated PUT
-  # /admin/credit-requests approve path...") was outscoring its own
-  # "read-only lookup..." declaration, misclassifying it as kind=write and
-  # dropping the one correct read tool for "my credits are not approved"
-  # out of first_tool.criteria entirely.
+@test "verification and merge tools never appear in first_tool criteria (captain 2026-10-28: Caroline hands off)" {
+  # They left TOOLS.md (and the edge allowlist); the router must never suggest them, whatever
+  # the plugin still registers until the code removal lands.
   run "$GEN" --out-dir "$TEST_TMPDIR/run"
   [ "$status" -eq 0 ]
 
   run python3 -c "
 import json
-inv = json.load(open('$TEST_TMPDIR/run/caroline-inventory.json'))
 q = json.load(open('$TEST_TMPDIR/run/caroline-questions.json'))
-kinds = {t['name']: t['kind'] for t in inv['tools']}
-assert kinds['credit_verification_check'] == 'read', kinds['credit_verification_check']
-assert 'credit_verification_check' in q['first_tool']['criteria']
-print('ok')
-"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"ok"* ]]
-}
-
-@test "genuinely gated write tools stay kind write and stay out of first_tool criteria" {
-  # Sibling regression: the fix must not overcorrect. profiles_claim_self's
-  # own Wraps bullet mentions "read-only" too (describing its read
-  # counterpart tool), so a naive read-only-first rule would misclassify a
-  # real write tool as read. An explicit "WRITE" keyword declaration must
-  # win over an incidental "read-only" mention elsewhere in the bullet.
-  run "$GEN" --out-dir "$TEST_TMPDIR/run"
-  [ "$status" -eq 0 ]
-
-  run python3 -c "
-import json
-inv = json.load(open('$TEST_TMPDIR/run/caroline-inventory.json'))
-q = json.load(open('$TEST_TMPDIR/run/caroline-questions.json'))
-kinds = {t['name']: t['kind'] for t in inv['tools']}
-for name in ('credits_verify', 'remove_credits', 'profiles_consolidate', 'profiles_claim_self'):
-    assert kinds[name] == 'write', (name, kinds[name])
+for name in ('credit_verification_check', 'credits_verify', 'remove_credits', 'profiles_consolidate',
+             'profiles_claim_self', 'dedupe_check', 'profile_claim_status', 'profile_credits_status'):
     assert name not in q['first_tool']['criteria'], name
+assert 'create_ticket' in q['first_tool']['criteria']
 print('ok')
 "
   [ "$status" -eq 0 ]

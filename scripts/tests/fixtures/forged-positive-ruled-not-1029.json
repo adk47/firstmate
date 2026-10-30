@@ -130,5 +130,53 @@
    "role",
    "track"
   ]
+ },
+ {
+  "proof_id": "6d004ade1ca3f9abc3f79a4b06c4b1dc0d9b6d6a204b11301787b756120c9669",
+  "ruling": "not (Fable 1029 06:27Z)",
+  "dv3_outcome": "forged_positive",
+  "fraud_signals": [
+   {
+    "id": "h3_copy_move_region@pNone:[93.0, 596.0, 433.0, 643.0]",
+    "family": "file_tamper",
+    "region": [
+     93.0,
+     596.0,
+     433.0,
+     643.0
+    ]
+   },
+   {
+    "id": "document_date_future",
+    "family": "impossible_content"
+   },
+   {
+    "id": "file_predates_document",
+    "family": "impossible_content"
+   }
+  ],
+  "fraud_pair": [
+   {
+    "id": "h3_copy_move_region@pNone:[93.0, 596.0, 433.0, 643.0]",
+    "family": "file_tamper",
+    "region": [
+     93.0,
+     596.0,
+     433.0,
+     643.0
+    ]
+   },
+   {
+    "id": "document_date_future",
+    "family": "impossible_content"
+   }
+  ],
+  "claim_fields": [
+   "claimant_name",
+   "date",
+   "isrc",
+   "role",
+   "track"
+  ]
  }
 ]

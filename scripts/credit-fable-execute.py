@@ -32,7 +32,8 @@ MESSAGING_PG = os.environ.get(
     "kubectl -n messaging exec -i messaging-pg-pgha-6c8n-0 -c database -- psql -U postgres -d preferences -At '-F|'")
 
 
-def fanout_check(rows: list[tuple[str, int, str | None]], since: datetime) -> str | None:
+def fanout_check(rows: list[tuple[str, int, str | None]], since: datetime,
+                 template: str = "credits_rejected") -> str | None:
     """credits_rejected notes since the batch started, per user (send-gateway ledger, read-only). Core emits one
     rejection event per (user, profile) group per call, so more notes than that for a user is a surprise."""
     time.sleep(FANOUT_WAIT_S)
@@ -40,7 +41,7 @@ def fanout_check(rows: list[tuple[str, int, str | None]], since: datetime) -> st
     groups: dict[int, set] = {}
     for _, u, pid in rows:
         groups.setdefault(u, set()).add(pid)
-    sql = ("select user_id, count(*) from send.messages where template_key = 'credits_rejected' "
+    sql = (f"select user_id, count(*) from send.messages where template_key = '{template}' "
            f"and created_at >= '{since.strftime('%Y-%m-%dT%H:%M:%SZ')}' "
            f"and user_id in ({','.join(repr(str(u)) for u in users)}) group by 1;")
     p = subprocess.run(shlex.split(MESSAGING_PG), input=sql, capture_output=True, text=True, timeout=120,
@@ -56,7 +57,7 @@ def fanout_check(rows: list[tuple[str, int, str | None]], since: datetime) -> st
     print(json.dumps({"fanout": {"since": since.isoformat(), "users": len(users), "notes": sum(counts.values()),
                                  "users_noted": len(counts), "over": over}}), file=sys.stderr)
     if over:
-        return f"more credits_rejected notes than (user, profile) groups for {sorted(over)[:10]}"
+        return f"more {template} notes than (user, profile) groups for {sorted(over)[:10]}"
     return None
 
 
@@ -114,6 +115,7 @@ def main() -> int:
     ap.add_argument("--ruling")
     ap.add_argument("--run-id")
     ap.add_argument("--expected")
+    ap.add_argument("--status", default="rejected", help="(wrapper boundary) the body's target status")
     ap.add_argument("--ids", help="comma-separated request ids")
     ap.add_argument("--claims", action="store_true",
                     help="the tray is a claim-decline tray (action reject_claim; Fable claim-route-zero)")
@@ -126,7 +128,8 @@ def main() -> int:
         if not all([a.tray, a.ruling, a.run_id, a.expected, a.ids]):
             print("verify-batch: --tray, --ruling, --run-id, --expected and --ids are all required", file=sys.stderr)
             return 3
-        why = fx.verify_batch(a.tray, a.ruling, a.run_id, [i for i in a.ids.split(",") if i], a.expected)
+        why = fx.verify_batch(a.tray, a.ruling, a.run_id, [i for i in a.ids.split(",") if i], a.expected,
+                              status=a.status)
         if why:
             print(f"fable_decider boundary: {why}", file=sys.stderr)
             return 3
@@ -148,8 +151,10 @@ def main() -> int:
     except (fx.TrayError, OSError) as exc:
         print(json.dumps({"tray": a.tray, "refused": str(exc)}))
         return 2
+    template = fx.TEMPLATE[tray.action]
     res = fx.run(tray, apply=a.apply, limit=a.limit,
-                 between_batches=None if (a.no_fanout_check or not a.apply) else fanout_check)
+                 between_batches=None if (a.no_fanout_check or not a.apply)
+                 else (lambda rows, since: fanout_check(rows, since, template)))
     print(json.dumps({**res.as_dict(), "tray_sha256": tray.sha256, "daily_cap": tray.daily_cap,
                       "cap_ruling_id": tray.cap_ruling_id}))
     return 1 if res.stopped else 0

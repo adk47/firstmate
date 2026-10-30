@@ -65,8 +65,8 @@ the conversation is looping, stop and file `support-general` with the matching
 `details.escalation_reason` (`customer_requested_human` | `frustration_detected` |
 `loop_detected`) – see `action-request/SKILL.md` "Human Handoff" – then reply:
 
-> "Sorry this has been frustrating – I've passed you over to one of our teammates,
-> they'll pick this up shortly."
+> "Sorry this has been frustrating – I've passed you over to one of our teammates.
+> You'll hear from us in this conversation and by email."
 
 Then stop.
 
@@ -77,7 +77,7 @@ Look at who sent the message (the contact email in `[CONVERSATION_CONTEXT]`).
 - **Vendor lane** – the sender is **Prodigi** (email ends in `@prodigi.com` /
   `@prodigigroup.com`, or signs off as "Prodigi") **and** the message references an
   order. The sender is the VENDOR, not the order owner – **do NOT run the customer
-  ownership checks** (the preview-only ownership checks in `customer-credit-removal`); they don't apply to a
+  ownership checks**; they don't apply to a
   vendor. Go to Step 2.
 - **Customer lane** – anyone else (a customer asking about their own plaque). Go to
   Step 3.
@@ -210,7 +210,7 @@ create_ticket({
 - Fill `proposed_corrected_address` with whatever you have; leave unknown fields
   empty. The tool stamps an `address_validation` block (≤40-char + required-field
   check) onto the request automatically – you don't need to compute it.
-- `order-fulfillment` is Tier 1 (2 business days). It does **not** require a profile
+- `order-fulfillment` is Tier 1 (no customer timeframe). It does **not** require a profile
   id.
 
 ## Step 5 – Reply to whoever you're talking to
@@ -220,7 +220,7 @@ human; never say "ticket", "system", "tool", or name any internal place.
 
 **Vendor lane (talking to Prodigi):**
 > "Thanks – I've passed this to our fulfillment team to confirm the correct shipping
-> details for that order. They'll get the confirmed address back to you shortly."
+> details for that order. They'll get the confirmed address back to you in this thread."
 
 **Customer lane – address change:**
 > "Got it – I've flagged your delivery details for our fulfillment team. They'll get
@@ -229,7 +229,7 @@ human; never say "ticket", "system", "tool", or name any internal place.
 
 **Customer lane – status/tracking:**
 > "I've flagged your order with our fulfillment team so they can check where it's at
-> and get you a tracking update. You'll hear back within a couple of business days."
+> and get you a tracking update. You'll hear from us in this conversation and by email."
 
 If `create_ticket` returns `submitted: false` (`rate_limited` / `queue_busy`), use the
 matching template from `action-request/SKILL.md` "Error Handling".

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Doctrine eval for Caroline's most common claim / credit / merge / channel questions (Q1-Q11).
+# Doctrine eval for Caroline's most common claim / credit / merge / channel questions (Q1-Q14).
 #
 # Why: the 2026-10-26 merge audit (profile-merge-ops-m1) found 27 of 30 merge asks told
 # "within 5 business days" (a date nobody kept: 0 merge tickets closed in 7 days), users
@@ -31,12 +31,13 @@ FAQ="$WS/reference/faq.md"
 CAP="$WS/reference/credits-and-profiles.md"
 PF="$WS/reference/platform-features.md"
 AR="$WS/skills/action-request/SKILL.md"
-CR="$WS/skills/customer-credit-removal/SKILL.md"
-CV="$WS/skills/customer-credit-verification/SKILL.md"
+# Captain 2026-10-28 12:1xZ / 12:3xZ: the six verification/merge skills are gone; the one
+# verification-handoff skill replaces them (Caroline answers, files the ticket kind, hands off).
+CV="$WS/skills/verification-handoff/SKILL.md"
 TF_SUPPORT="$ROOT/plugins/support-tools/src/tools/ticket-format.ts"
 TF_INTERCOM="$ROOT/plugins/intercom/src/ticket-format.ts"
 
-for f in "$SOUL" "$AGENTS" "$TOOLS" "$CI" "$FAQ" "$CAP" "$PF" "$AR" "$CR" "$CV" "$TF_SUPPORT" "$TF_INTERCOM"; do
+for f in "$SOUL" "$AGENTS" "$TOOLS" "$CI" "$FAQ" "$CAP" "$PF" "$AR" "$CV" "$TF_SUPPORT" "$TF_INTERCOM"; do
   [ -f "$f" ] || { echo "Missing $f (run from repo root, or set REPO_ROOT / SUPPORT_WORKSPACE)." >&2; exit 2; }
 done
 
@@ -46,7 +47,10 @@ fail=0
 # At most one such line per file is allowed (checked below), so the marker cannot be used
 # to smuggle a violation past the forbid list.
 BARRED_MARKER='<!-- barred-phrases -->'
-_normalized() { grep -vF -- "$BARRED_MARKER" "$1" | tr '\n' ' ' | tr -s '[:space:]' ' '; }
+# The process-never-judgement list (verification-handoff) has to name the signal words it
+# bans; its one line carries this second marker, same one-per-file rule.
+REVEAL_MARKER='<!-- never-reveal -->'
+_normalized() { grep -vF -e "$BARRED_MARKER" -e "$REVEAL_MARKER" -- "$1" | tr '\n' ' ' | tr -s '[:space:]' ' '; }
 _normalize_pat() { printf '%s' "$1" | tr '\n' ' ' | tr -s '[:space:]' ' '; }
 
 # The text is captured into a variable FIRST and grep reads it from a here-string, never
@@ -103,40 +107,54 @@ _forbid_report() {
 # --- Q1 "How do I claim my profile?" ----------------------------------------------
 # The real form (claim-flow-fix-fable-c1, seen 2026-10-21): "add a link or two you control";
 # there is no ID scan and no admin step the user waits on.
-require "$FAQ" "Q1 claim how-to: links the claimant controls" "Add a link or two you control"
-require "$CAP" "Q1 claim how-to: no ID scan, no human queue" "no ID scan, no human queue"
+require "$FAQ" "Q1 claim how-to: the approved claim paragraph (caroline-instructions-1029 §2.3)" "Claims are confirmed by something only the profile's owner can do, so nobody can claim a profile that isn't theirs."
+require "$FAQ" "Q1 claim how-to: the only claim timing line" "the claim is approved automatically, usually within a day"
+require "$FAQ" "Q1 claim how-to: never ID" "We never ask for ID."
+forbid "$FAQ" "Q1 old claim flow is gone" "Add a link or two you control"
+require "$CAP" "Q1 claim how-to: no ID step" "There is no ID step."
 for f in "$FAQ" "$CAP" "$PF"; do
   forbid "$f" "Q1 there is no ID scan in the claim flow" "ID scan or social media login"
   forbid "$f" "Q1 there is no ID scan in the claim flow" "via ID card scan"
 done
 forbid "$CAP" "Q1 no admin review step" "3. Admin review"
 
+# Captain 2026-10-28 12:1xZ / 12:3xZ: Caroline only hands off on credits, documents, claims
+# and merges. Q2-Q9 and Q11 now assert the HAND-OFF answer: no look-up, the ticket kind + the
+# handoff tag, the one approved handoff line, no status / outcome / timeframe.
+HANDOFF_LINE="I'm pulling in a teammate to take this from here."
+for f in "$AGENTS" "$CV"; do
+  require "$f" "hand-off line is the approved one, verbatim" "$HANDOFF_LINE"
+done
+
 # --- Q2 "My claim is pending, how long will it take?" ------------------------------
-require "$CI" "Q2 pending claim: the app's own pending wording" \
-  "We are verifying your claim and will notify you when it has been processed"
-require "$CI" "Q2 pending claim: no timeframe" "Quote no timeframe and never say a person will review it"
-require "$CI" "Q2 never invent a code or surface" "never invent a code, a surface, or a check of your own"
+require "$CI" "Q2 claim: hand off only, no look-up" "Do not look up the claim and say nothing about its state."
+require "$CV" "Q2 claim: profile-claim ticket, claim tag" '| their profile claim (status, rejected, stuck, on behalf of an artist) | `profile-claim` | `claim` |'
+require "$CV" "Q2 never a claim code or a surface" "no claim code, no surface to put a code on"
 forbid "$CI" "Q2 no business-day wait on claims" "within normal review time"
 forbid "$CI" "Q2 no business-day wait on claims" "If more than 5 business days"
 forbid "$FAQ" "Q2 no business-day wait on claims" "no update after 5 business days"
+forbid "$FAQ" "Q2 Caroline does not look up the claim" "Caroline looks up its real state"
 
 # --- Q3 "My claim was rejected" -----------------------------------------------------
-require "$CI" "Q3 rejected: resubmit with a link they control" "claiming again with such a link is the resubmission path"
+require "$CAP" "Q3 declined: the approved decline paragraph (§2.6), no reason" "A request is closed when the supporting information we received wasn't enough to confirm the credit."
+forbid "$CAP" "Q3 declined: never a reason" "gives the reason (for example, the document doesn't name"
+forbid "$CAP" "Q3 removal: never a reason" "with the reason for each"
 for f in "$CI" "$FAQ"; do
   forbid "$f" "Q3 no government-ID ask (no ID upload exists)" "resubmit with a government-issued ID"
   forbid "$f" "Q3 no government-ID ask (no ID upload exists)" "government-issued ID is most reliable"
 done
 
 # --- Q4 "I manage this artist / label, can I claim it?" -----------------------------
-require "$CI" "Q4 on-behalf: organization path on an official-domain email" "official domain of the label, management company or publisher"
+require "$CI" "Q4 on-behalf: organization path, hand off" "decided by the claim lane on the organization path. Hand off only."
+require "$CI" "Q4 never tell them the artist must claim" "NEVER tell the customer the artist must claim the profile themselves."
 forbid "$CI" "Q4 on-behalf is not an open-ended human review" "no fixed turnaround"
 forbid "$CI" "Q4 on-behalf is not an open-ended human review" "manual review by our team"
 forbid "$CI" "Q4 on-behalf is not an open-ended human review" "This kind of access needs a manual review"
 forbid "$CAP" "Q4 company claims are not reviewed manually" "profiles are reviewed manually"
 
 # --- Q5 "Can you merge my duplicate profiles?" --------------------------------------
-require "$CI" "Q5 merge: claim-first" "a merge happens only when EVERY profile involved has a processed claim by this customer"
-require "$CI" "Q5 merge: no date" "Promise no date"
+require "$CV" "Q5 merge: profile-merge ticket, merge tag" '| duplicate profiles / merge | `profile-merge` | `merge` |'
+require "$CI" "Q5 merge: hand off only, no check" "**Hand off only**: run no check on their profiles."
 require "$AGENTS" "Q5 merge: claim-first rule + no date in the always-loaded contract" "Never promise the merge or a date"
 forbid "$CI" "Q5 merge date nobody keeps (audit 2026-10-26: 27/30)" "merge typically within 5 business days"
 forbid "$FAQ" "Q5 merge is not a manual review" "need manual review before anything changes"
@@ -147,33 +165,35 @@ forbid "$AR" "Q7 bulk credit change carries no 5-day promise" '| `bulk-credit-ch
 forbid "$CI" "Q5 self-serve merge is not live" "Profile merges are handled by the operations team via support ticket"
 
 # --- Q6 "Both profiles are already claimed by me, why are they not merged?" ---------
-require "$CI" "Q6 all claimed by them: never 'claims need review'" "Never tell them their claims need review or ask them to claim again"
-require "$AGENTS" "Q6 all claimed by them: never 'claims need review'" "never say their claims need review or ask them to claim again"
-require "$AGENTS" "Q6 never offer a merge the tool did not preview" 'never say "I can merge them" or ask them to'
+require "$AGENTS" "Q6 never 'claims need review' to claimed users" "never say their claims need review or ask them to claim again"
+require "$AGENTS" "Q6 never offer a merge" 'never say "I can merge them"'
+require "$CI" "Q6 never say which profiles are claimed" "Never say which of their profiles are claimed"
 
 # --- Q7 "Where is my credit request?" -----------------------------------------------
-require "$AGENTS" "Q7 credit status: ground in profile_credits_status" '"My credit is missing / wrong / did it sync" -> `profile_credits_status` first'
-require "$CI" "Q7 credit error ticket: no timeframe" "returns no timeframe for credit requests; quote none"
+require "$CV" "Q7 credit status: credit-verify ticket, credit-status tag" '| a pending / stuck credit, "where is my credit request" | `credit-verify` | `credit-status` |'
+require "$CI" "Q7 credit: hand off only, no look-up" "**Hand off only** for anything about THEIR credit (missing, wrong, pending, stuck). Do not look it up."
+forbid "$AGENTS" "Q7 no credit-status look-up" '-> `profile_credits_status` first'
 forbid "$CI" "Q7 no business-day promise on credit errors" "what the correct credit should be. SLA: 2 business days"
 
 # --- Q8 "What proof do I need for my pending credit?" -------------------------------
-require "$CI" "Q8 proof goes in the in-app support chat" "Proof goes here in the in-app"
-require "$CV" "Q8 awaiting-review credits need nothing and no date" "do **not** promise a date"
+require "$CV" "Q8 Caroline never asks for proof" "Never ask for proof and never list proof types"
+require "$CI" "Q8 Caroline never asks for proof" "Caroline does not ask for proof and does not list proof types beyond the approved credit"
+forbid "$CI" "Q8 no proof-type list from Caroline" "Accepted forms of proof (screenshots are accepted for all of these)"
 
 # --- Q9 "I already sent my documents, any update?" ----------------------------------
-require "$CI" "Q9 status first, never re-ask" "Never ask again for proof they already sent"
+require "$CV" "Q9 document: credit-verify ticket, document tag" '| a document, screenshot or link as proof for a credit | `credit-verify` | `document` |'
 forbid "$CI" "Q9 no 5-day wait on documented credits" "open more than 5 business days with no update"
+forbid "$CI" "Q9 no status look-up" "look up the real state with"
 
 # --- Q10 "Will you call me / email me?" ---------------------------------------------
 require "$SOUL" "Q10 never promise a phone call" "NEVER promise a phone call or a separate email"
 require "$SOUL" "Q10 replies land in the Intercom conversation" "your reply lands in their Intercom conversation"
 require "$AGENTS" "Q10 bell + email notices are separate" "App notices (bell + email) go out separately"
-require "$CI" "Q4/Q10 claim decision is an app notification, not a chat reply" "the claim decision reaches them as an app notification and email"
 forbid "$CI" "Q4 no conversation-reply promise for claims" "returns no timeframe for claims. The outcome is posted in this conversation"
 require "$AGENTS" "Q10 channel rule in the always-loaded contract" "Never promise a phone call or a"
 
 # --- create_ticket gives Caroline no timeframe to quote on these kinds --------------
-require "$SOUL" "SLA: null means quote no timeframe" "If it returned \`sla: null\`, quote no timeframe at all"
+require "$SOUL" "SLA: null means quote no timeframe" "\`create_ticket\` returns \`sla: null\` for every kind; say only that they will hear in this conversation and by email."
 require "$TOOLS" "TOOLS documents sla: null" "\`sla\` null + \`customer_timing\` for credit/claim/merge kinds"
 forbid "$SOUL" "no per-category SLA table for claims/credits" "2 business days for profile claims/credits"
 forbid "$SOUL" "no hard-coded tier SLA list" "Tier 2: 5 business days"
@@ -183,22 +203,74 @@ for f in "$TF_SUPPORT" "$TF_INTERCOM"; do
   require "$f" "profile-claim outcome is an app notification" 'if (actionType === "profile-claim") return "app_notification";'
 done
 
-# --- Q11 "I sent my screenshots, did you get them?" (captain 2026-10-27 02:51Z) -------
+# --- Q11 "I sent my screenshots, did you get them?" (captain 2026-10-27 02:51Z, 2026-10-28) --
 # 10-27 paid threads were told "I've passed your screenshots ... to our team" / "added to the
-# review already underway" with no proof_intake row behind it. A document is "received and in
-# the review queue" only when a tool returned may_say_document_passed_on: true (#1402/#1415).
-require "$CV" "Q11 document received only on a proof_intake row" "ONLY when a tool result in this turn returned \`may_say_document_passed_on: true\`"
+# review already underway" with nothing behind it. Since 2026-10-28 Caroline never says a
+# document was received at all: "Thank you", the document ticket, the handoff line.
+require "$CV" "Q11 a document gets the approved thank-you paragraph (§2.2)" "Thank you. Everything you send here is recorded against your account and your open requests and goes to the verification team."
 # The marker line is excluded from normal matching, so check it raw: exactly one line that
 # carries the marker AND names the barred phrases.
 if [ "$(grep -F -- "$BARRED_MARKER" "$CV" | grep -cF -- '"nothing else is needed", "no need to resend", "passed to our team"' || true)" != "1" ]; then
   echo "FAIL: ${CV#"$ROOT"/}: Q11 the barred phrases must be named on the one barred-phrases marker line" >&2
   fail=1
 fi
-require "$AGENTS" "Q11 pointer in the always-loaded contract" "\`may_say_document_passed_on: true\`"
 forbid "$CAP" "Q11 no 'we'll check it, usually within a few days'" "usually within a few days"
 forbid "$CI" "Q11 awaiting review is not 'nothing you need to do'" "nothing you need to do right now"
-forbid "$CV" "Q11 awaiting review is not 'nothing you need to do'" "there's nothing you need to do right now"
-forbid "$CV" "Q11 no team-handoff claim on proof" "say you've **passed it to the team for review**"
+forbid "$CV" "Q11 no 'received for review'" "may_say_document_passed_on"
+
+# --- Q12 "Did you check / verify / merge it?" (captain 2026-10-28 12:1xZ) -------------
+# Caroline never says she checked, filed, verified or merged anything, and never "raised the
+# priority" (red-team AP-5, seen live 10-27/28). The verification/merge skills that scripted
+# look-ups, previews and merges are deleted; their names must not come back as skills or
+# routing targets.
+if [ "$(grep -F -- "$BARRED_MARKER" "$CV" | grep -cF -- "\"I've checked\", \"I checked\", \"I've filed\", \"I've logged\", \"I've verified\", \"I verified\", \"I've merged\", \"I merged\", \"I can merge\"" || true)" != "1" ]; then
+  echo "FAIL: ${CV#"$ROOT"/}: Q12 the never-say-checked/filed/verified/merged phrases must be on the barred-phrases line" >&2
+  fail=1
+fi
+require "$CV" "Q12 no look-ups for these questions" "No look-ups for these questions"
+require "$AGENTS" "Q12 hand-off section in the always-loaded contract" "never check, file a document, verify, approve, claim, merge or remove anything, and you never say you did"
+for f in "$TF_SUPPORT" "$TF_INTERCOM"; do
+  require "$f" "Q12 the ticket carries the handoff tag" 'return `handoff:${rule.allowed.includes(asked) ? asked : rule.default}`;'
+  require "$f" "Q12 credit kinds tag credit-status" '"credit-verify": { default: "credit-status", allowed: ["credit-status", "document"] },'
+  require "$f" "Q12 merge kinds tag merge" '"profile-merge": { default: "merge", allowed: ["merge"] },'
+done
+for gone in customer-credit-verification customer-profile-claim customer-profile-consolidate \
+            customer-profile-dedupe customer-track-dedupe customer-credit-removal; do
+  if [ -e "$WS/skills/$gone" ]; then
+    echo "FAIL: workspaces/support/skills/$gone: removed verification/merge skill is back (captain 2026-10-28)" >&2
+    fail=1
+  fi
+done
+
+# --- Q13 "How do you verify credits?" / process, never judgement (captain 2026-10-29) ---
+require "$FAQ" "Q13 the approved credit paragraph (§2.1)" "we check it automatically against public credit sources."
+require "$CV" "Q13 the process-never-judgement rule" "Explain the PROCESS (what happens, in what order, where they hear from us, what they can do)."
+require "$AGENTS" "Q13 process-never-judgement in the always-loaded contract" "Explain the process, never the judgement"
+require "$CV" "Q13 status chasing: the approved queue paragraph (§2.8), only with a filed item" "ONLY when this conversation already holds a"
+require "$FAQ" "Q13 merges: the approved merge paragraph (§2.4)" "Merges work like this: claim every profile that is yours first"
+require "$CAP" "Q13 removals: the approved removal paragraph (§2.5)" "A credit is only removed from a profile after we've checked it against the streaming platforms' own credits"
+
+# --- every reply template is SLA-free (customerSlaFor is null for every kind; QA on #1451) --
+for f in "$SOUL" "$AGENTS" "$AR" "$WS/skills/refund-retention/SKILL.md" "$WS/skills/order-fulfillment/SKILL.md"; do
+  forbid "$f" "no reply template quotes an SLA" "within \`<sla>\`"
+  forbid "$f" "no reply template quotes an SLA" "within [sla]"
+  forbid "$f" "no instruction to quote the SLA" "quote the SLA once"
+  forbid "$f" "no instruction to quote the SLA" "quote the returned \`sla\` once"
+done
+require "$CV" "merge hand-off names customerProfileId without a look-up" "the id in the profile link the customer gave"
+require "$CV" "unmerge hand-off maps the other profile or artist" "\`details.suspect_artist_names[]\` = those names"
+
+# The absolute timeframe ban must exempt the two approved sentences, or Caroline may drop the
+# required GDPR acknowledgement (QA on #1451).
+require "$AGENTS" "timeframe ban exempts the approved GDPR + claim sentences" "the GDPR acknowledgement's \"within one month of today\" and the claim paragraph's \"usually within a day\""
+require "$SOUL" "timeframe ban exempts the approved GDPR + claim sentences" "Only exceptions, verbatim: the GDPR ack's \"within one month of today\", the claim paragraph's \"usually within a day\"."
+
+# --- Q14 "Delete my profile under GDPR" (gdpr-ruling 2026-10-29 §2) ----------------------
+GDPR="$WS/reference/gdpr-erasure-requests.md"
+require "$GDPR" "Q14 the approved GDPR acknowledgement" "we confirm that the page is about you, we take the page out of Muso search and public view, and you receive our written confirmation on this thread within one month of today."
+require "$GDPR" "Q14 hidden pages do not come back" "once a page is hidden it stays"
+forbid "$GDPR" "Q14 no tier-3 SLA quote" "quote the returned SLA once"
+forbid "$FAQ" "Q14 deletion goes through the acknowledgement" "Create a support ticket with category \"Account – Deletion Request\""
 
 # --- global: no human-review date promise anywhere in the support workspace ---------
 while IFS= read -r -d '' f; do
@@ -206,6 +278,11 @@ while IFS= read -r -d '' f; do
   n="$(grep -cF -- "$BARRED_MARKER" "$f" || true)"
   if [ "${n:-0}" -gt 1 ]; then
     echo "FAIL: ${f#"$ROOT"/}: more than one barred-phrases marker line ($n); only the one rule line may carry it" >&2
+    fail=1
+  fi
+  n="$(grep -cF -- "$REVEAL_MARKER" "$f" || true)"
+  if [ "${n:-0}" -gt 1 ]; then
+    echo "FAIL: ${f#"$ROOT"/}: more than one never-reveal marker line ($n); only the one list line may carry it" >&2
     fail=1
   fi
   forbid_in "$f" "$t" "captain 02:51Z barred phrase" "nothing else is needed"
@@ -217,6 +294,24 @@ while IFS= read -r -d '' f; do
   forbid_in "$f" "$t" "captain 02:51Z barred phrase" "review underway"
   forbid_in "$f" "$t" "captain 02:51Z barred phrase" "review already underway"
   forbid_in "$f" "$t" "captain 02:51Z barred phrase" "nothing more they need to send"
+  # Captain 2026-10-29 03:2xZ: Jaxsta leaves every user-facing line (Fable, h2 #1460).
+  forbid_in "$f" "$t" "captain 2026-10-29: Jaxsta is not named to users" "Jaxsta"
+  # Captain 2026-10-29 (caroline-instructions-1029 §2.9/§3): no business-day number, no
+  # promise of inaction (a user told "nothing is needed from you" waited 10 days), and none of
+  # the quotable "secret sauce" strings: sources, signals, vendors, internal names.
+  for bad in "5-10 business days" "within 5 business days" "2 business days" "1 business day" \
+             "nothing is needed from you" "nothing you need to do" "you don't need to do anything" \
+             "risk score" "fraud lens" "MusicBrainz" "Deezer" "DKIM" "copy-move" \
+             "Spotify and Tidal" "DeepSeek" "OpenRouter" "Fable"; do
+    forbid_in "$f" "$t" "captain 2026-10-29: never said to users" "$bad"
+  done
+  forbid_in "$f" "$t" "captain 2026-10-28 never claims an action" "raised the priority"
+  forbid_in "$f" "$t" "captain 2026-10-28 never claims an action" "marked it at the highest priority"
+  forbid_in "$f" "$t" "captain 2026-10-28 never claims an action" "I've checked quite a lot"
+  for gone in customer-credit-verification customer-profile-claim customer-profile-consolidate \
+              customer-profile-dedupe customer-track-dedupe customer-credit-removal; do
+    forbid_in "$f" "$t" "routes to a removed verification/merge skill" "\`$gone\`"
+  done
   forbid_in "$f" "$t" "no 5-business-day merge/credit promise" "they'll follow up within 5 business days"
   forbid_in "$f" "$t" "no 5-business-day merge/credit promise" "You'll hear back within 5 business days"
   forbid_in "$f" "$t" "no 'claims need to be checked' to claimed users" "The claims need to be checked before anything can be combined"
@@ -227,4 +322,4 @@ if [ "$fail" -ne 0 ]; then
   echo "Caroline claims/credits/merges doctrine drifted. See scripts/check-caroline-claims-doctrine.sh header." >&2
   exit 1
 fi
-echo "OK: Caroline claims/credits/merges doctrine (11 questions + create_ticket timing) intact."
+echo "OK: Caroline claims/credits/merges doctrine (14 questions + timing + hand-off + secret-sauce) intact."

@@ -615,8 +615,10 @@ load_admin_identity() {
     local identity="${MUSO_ADMIN_IDENTITY:-}"
     [[ -n "$identity" ]] || return 0
     case "$identity" in
-        credit-decider|uvn-cron) ;;
-        *) die "MUSO_ADMIN_IDENTITY '$identity' is not a known automation identity (credit-decider, uvn-cron)" ;;
+        # fable = agent-fable@muso.ai: the L12 executor's APPROVALS only (core binds fable-decider approvals to
+        # Fable's own account; the decider's account writes the anchor records, so the two never coincide).
+        credit-decider|uvn-cron|fable) ;;
+        *) die "MUSO_ADMIN_IDENTITY '$identity' is not a known automation identity (credit-decider, uvn-cron, fable)" ;;
     esac
     local file="$MUSO_ADMIN_IDENTITY_DIR/$identity.env"
     [[ -f "$file" && -r "$file" ]] || die "admin identity '$identity': $file is missing or unreadable (no fallback)"
@@ -1278,6 +1280,65 @@ is_credit_trust_score_approval() {
     ' >/dev/null 2>&1
 }
 
+# The L12 executor's APPROVALS (executor PR 2; core FABLE_RULED scope #11010/#11011): the one agent shape past
+# this gate for a validator-declined row. Fable's own login (MUSO_ADMIN_IDENTITY=fable = agent-fable@muso.ai),
+# fable-decider requester + header, PUT conditional-status approved from unverified / user_verification_needed /
+# rejected, <= 50 unique ids, a Fable ruling id, the registry entry approved, the kill file absent, and the same
+# boundary re-check as the closes (verify_batch on a clean env, with the approve tray's guards). Core then admits
+# only rows with a server-held anchor set (the UPDATE pins it); nothing here can widen that.
+is_fable_decider_approval() {
+    local method="$1" path="$2" body="$3"
+    [[ "${FABLE_DECIDER:-0}" == "1" ]] || return 1
+    [[ "${REQUESTER_EMAIL:-}" == "fable-decider@hydra-ops" ]] || return 1
+    [[ "${MUSO_ADMIN_IDENTITY:-}" == "fable" ]] || return 1
+    [[ "$method" == "PUT" ]] || return 1
+    [[ "$path" == "/admin/credit-requests/conditional-status" ]] || return 1
+    if [[ -e "$FABLE_DECIDER_KILL_FILE" ]]; then
+        echo "fable_decider: kill file $FABLE_DECIDER_KILL_FILE present - refusing" >&2
+        return 1
+    fi
+    [[ "${FABLE_RULING_ID:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._:\|-]{2,120}$ ]] || {
+        echo "fable_decider: FABLE_RULING_ID missing or malformed - refusing" >&2
+        return 1
+    }
+    jq -e '.automations["fable-decider"]
+           | .approved == true
+             and ((.approved_by // "") | tostring | length > 0)
+             and ((.approval_ref // "") | tostring | length > 0)' \
+        "$CREDIT_APPROVAL_REGISTRY" >/dev/null 2>&1 || {
+        echo "fable_decider: fable-decider is not approved in $CREDIT_APPROVAL_REGISTRY - refusing" >&2
+        return 1
+    }
+    printf '%s' "$body" | jq -e '
+        type == "object"
+        and ((keys | sort) == ["expectedStatus", "requestIds", "status"])
+        and .status == "approved"
+        and (.expectedStatus == "unverified" or .expectedStatus == "user_verification_needed"
+             or .expectedStatus == "rejected")
+        and (
+            .requestIds as $ids
+            | ($ids | type) == "array"
+            and ($ids | length) > 0
+            and ($ids | length) <= 50
+            and all($ids[];
+                type == "string"
+                and length == 36
+                and test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+            )
+            and (($ids | map(ascii_downcase) | unique | length) == ($ids | length))
+        )
+    ' >/dev/null 2>&1 || return 1
+    [[ -n "${FABLE_DECIDER_RUN_ID:-}" && -n "${FABLE_DECIDER_TRAY:-}" ]] || {
+        echo "fable_decider: FABLE_DECIDER_RUN_ID / FABLE_DECIDER_TRAY missing - refusing" >&2
+        return 1
+    }
+    if ! fable_decider_verify_batch "$body"; then
+        echo "fable_decider: boundary re-check refused the approval batch" >&2
+        return 1
+    fi
+    return 0
+}
+
 enforce_credit_approve_gate() {
     local method="$1" path="$2" body="$3"
 
@@ -1317,6 +1378,9 @@ enforce_credit_approve_gate() {
         return 0
     fi
     if is_credit_trust_score_approval "$method" "$path" "$body"; then
+        return 0
+    fi
+    if is_fable_decider_approval "$method" "$path" "$body"; then
         return 0
     fi
 
@@ -1702,14 +1766,15 @@ is_fable_decider_close() {
 # PATH and HOME only), so no caller-set variable can redirect the tray loader, registry, audit file, Trino or the
 # account gate to a path of the caller's choosing. The verifier path is fixed relative to THIS file.
 fable_decider_verify_batch() {
-    local body="$1" verifier ids expected
+    local body="$1" verifier ids expected status
     verifier="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../../.." 2>/dev/null && pwd)/scripts/credit-fable-execute.py"
     [[ -f "$verifier" ]] || { echo "fable_decider: verifier $verifier missing - refusing" >&2; return 1; }
     ids="$(printf '%s' "$body" | jq -r '.requestIds | join(",")')"
     expected="$(printf '%s' "$body" | jq -r '.expectedStatus')"
+    status="$(printf '%s' "$body" | jq -r '.status')"
     env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/root \
         python3 "$verifier" --verify-batch --tray "$FABLE_DECIDER_TRAY" --ruling "$FABLE_RULING_ID" \
-        --run-id "$FABLE_DECIDER_RUN_ID" --expected "$expected" --ids "$ids" >&2
+        --run-id "$FABLE_DECIDER_RUN_ID" --expected "$expected" --status "$status" --ids "$ids" >&2
 }
 
 # --- Credit reject gate (incident 2026-07-22) ---
@@ -3255,6 +3320,12 @@ EOF
     # The L12 executor: its own automation id on the decider account (closes only; see is_fable_decider_close).
     if [[ "${FABLE_DECIDER:-0}" == "1" && "$REQUESTER_EMAIL" == "fable-decider@hydra-ops" ]]; then
         curl_args+=(-H "X-Credit-Automation-Id: fable-decider")
+    fi
+    # The DSP verifier's anchor upload (credit-anchors-push.py): its own id on the decider account; core admits
+    # POST /admin/credit-anchors ONLY under this id (resolveAnchorWriter), and only on that one route.
+    if [[ "${DSP_ANCHOR_WRITER:-0}" == "1" && "$REQUESTER_EMAIL" == "dsp-evidence-verifier@hydra-ops" \
+          && "$path" == "/admin/credit-anchors" ]]; then
+        curl_args+=(-H "X-Credit-Automation-Id: dsp-evidence-verifier")
     fi
     # Same contract for score-approve: its own id on the same decider account.
     if [[ "${CREDIT_TRUST_SCORE_APPROVE:-0}" == "1" && "$REQUESTER_EMAIL" == "credit-trust-score-approve@hydra-ops" ]]; then
