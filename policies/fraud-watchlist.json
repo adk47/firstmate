@@ -907,15 +907,23 @@
       "added_by": "credit-trust-llm-t01 (firstmate 154 seed)"
     },
     {
-      "tier": "review",
-      "user_ids": [],
+      "tier": "fraud",
+      "user_ids": [
+        1384418
+      ],
       "profile_ids": [
         "94ad2ad2-0be9-4b8e-94a6-dc85eb100310"
       ],
-      "reason": "pre-watchlist deny_profile_ids entry (fleet scan >= 30% held, stillfloo)",
-      "evidence": "hydra policies/credit-trust-decide.json (since hydra PR 1243)",
+      "reason": "stillfloo (credit-fraud-forensics-f1): 3,372 rows fraud-removed 2026-10-11; user id added 2026-10-30 (fraud-lens-monitor-f1 gap: only the profile was listed, so a request from this user on another profile passed the deny-by-user check)",
+      "evidence": "data/credit-fraud-forensics-f1/report.md; data/fraud-lens-monitor-f1/report.md",
       "added_at": "2026-10-23",
-      "added_by": "credit-trust-llm-t01 (firstmate 154 seed)"
+      "added_by": "credit-trust-llm-t01 (firstmate 154 seed) + fraud-lens-monitor-f1 (firstmate 037, 2026-10-30)",
+      "name_sha256": [
+        "da8852dfdd89508956e68c155c305e90bdd367b5d6080fc1add218eacae0b163"
+      ],
+      "email_sha256": [
+        "4e7eef2731afd1e39fc3d0507026a7b667bd7b4d5af4f2bf4dfc8dd54e933d80"
+      ]
     },
     {
       "tier": "review",

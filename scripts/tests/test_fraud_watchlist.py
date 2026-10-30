@@ -41,6 +41,32 @@ class Shipped(unittest.TestCase):
         dl = up.load_deny_list(ROOT / "policies/credit-trust-decide.json", ledger())
         self.assertTrue(wl.user_ids <= set(dl.user_ids) and wl.profile_ids <= set(dl.profile_ids))
 
+    def test_fraud_confirmed_users_are_denied_by_user_on_any_profile(self):
+        """fraud-lens-monitor-f1 gap 2026-10-30 (firstmate 037): stillfloo (1384418) was listed only as a
+        PROFILE, so a request from that user on ANOTHER profile passed every deny-by-user check. Every
+        fraud-confirmed actor must be denied by USER id, in both the watchlist (fraud tier) and the
+        decider policy, and the decider's rule stage must refuse the user whatever profile the row names."""
+        pol = decide.Policy.load()
+        wl = watchlist.load()
+        for uid in (1384418, 58586, 162720, 301754):
+            self.assertIn(uid, wl.fraud_user_ids, f"{uid} must be a fraud-tier USER entry")
+            self.assertIn(uid, pol.deny_user_ids, f"{uid} must be in deny_user_ids")
+        other_profile = "22222222-2222-4222-8222-222222222222"
+        self.assertNotIn(other_profile, pol.deny_profile_ids)
+        dl = up.load_deny_list(ROOT / "policies/credit-trust-decide.json", ledger())
+        self.assertIn(1384418, set(dl.user_ids))
+        # score-approve: a row that is otherwise approvable (validator-approved, low risk, small track) on a
+        # profile that is NOT denied is still refused because the USER is.
+        from credit_review import score_approve as sa
+        row = {"id": "00000000-0000-4000-8000-000000000001", "userId": 1384418, "profileId": other_profile,
+               "trackId": "t-any", "status": "unverified", "spotifyPopularity": 20, "credits": ["Guitar"],
+               "metadata": {"source": "industry"},
+               "verificationData": {"is_approved": True, "total_risk_percent": 5, "rule_risk_percent": {}}}
+        why = sa.why_not(row, sa.ScorePolicy(enabled=True), pol)
+        self.assertIsNotNone(why)
+        self.assertIn("deny", why)
+        self.assertIn("user", why)
+
     def test_no_clear_text_names_or_emails(self):
         doc = json.loads((ROOT / "policies/fraud-watchlist.json").read_text())
         allowed = {"tier", "user_ids", "profile_ids", "reason", "evidence", "added_at", "added_by",
