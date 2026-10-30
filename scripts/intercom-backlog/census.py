@@ -90,8 +90,8 @@ def band(age_days):
 CUSTOMER = ("user", "lead", "contact")
 
 
-def latest_customer_text(token, cid, last_n=3):
-    """(final customer part, last_n customer parts joined) after the opening, or None when unreadable."""
+def latest_customer_text(token, cid, last_n=None):
+    """(final customer part, every customer message joined), or None when unreadable."""
     req = urllib.request.Request(f"{API}/conversations/{cid}", headers={
         "Authorization": f"Bearer {token}", "Accept": "application/json", "Intercom-Version": VER})
     for i in range(4):
@@ -106,18 +106,33 @@ def latest_customer_text(token, cid, last_n=3):
     return latest_from_doc(doc, last_n)
 
 
-def latest_from_doc(doc, last_n=3):
-    """Pure: (final customer part, last_n customer parts joined) of a conversation document. The topic comes
-    from the final part only; the legal / billing veto also looks at the recent parts (topics.latest_topic)."""
+def window_parts(doc):
+    """Pure: EVERY customer message of the conversation, oldest first (the opening plus every customer part).
+    QA @63e39d2c: the billing / legal veto reads every customer part, not only the last few or those after our
+    last reply - a "we'll look into it" does not settle a refund ask, and the veto only ever routes to the
+    captain (the safe direction)."""
+    src = doc.get("source") or {}
+    out = [(src.get("subject") or "") + " " + (src.get("body") or "")]
+    out += [p["body"] for p in ((doc.get("conversation_parts") or {}).get("conversation_parts") or [])
+            if (p.get("author") or {}).get("type") in CUSTOMER and p.get("body")
+            and (p.get("part_type") or "comment") != "note"]
+    return [c for c in (" ".join(TAG_RE.sub(" ", b).split()) for b in out) if c]
+
+
+def latest_from_doc(doc, last_n=None):
+    """Pure: (final customer part, every customer message joined). The topic comes from the final part only; the
+    legal / billing veto reads every customer message (topics.latest_topic)."""
     parts = [p.get("body") for p in ((doc.get("conversation_parts") or {}).get("conversation_parts") or [])
              if (p.get("author") or {}).get("type") in CUSTOMER and p.get("body")]
-    clean = [" ".join(TAG_RE.sub(" ", b).split()) for b in parts[-last_n:]]
-    return (clean[-1], " ".join(clean)) if clean else ("", "")
+    final = " ".join(TAG_RE.sub(" ", parts[-1]).split()) if parts else ""
+    return final, " ".join(window_parts(doc))
 
 
 def has_followup(row):
-    """The customer wrote again after the opening message (the opening alone no longer says what they want)."""
-    return (row.get("lcr") or 0) > (row.get("created_at") or 0) + 60
+    """The customer wrote again after the opening message (the opening alone no longer says what they want).
+    QA @63e39d2c: no slack - a customer part even one second after the opening is read, so it cannot slip past
+    the billing veto."""
+    return (row.get("lcr") or 0) > (row.get("created_at") or 0)
 
 
 def mask(email):

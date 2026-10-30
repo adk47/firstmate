@@ -142,15 +142,18 @@ def customer_text(token, cid, last_n=3):
     return texts_from_doc(doc, last_n)
 
 
-def texts_from_doc(doc, last_n=3):
-    """Pure: (final customer message, last_n customer messages joined; the opening counts as one)."""
+def texts_from_doc(doc, last_n=None):
+    """Pure: (final customer message - the opening when they never wrote again -, every customer message joined:
+    the captain buckets read all of it, QA @63e39d2c)."""
+    import census  # noqa: PLC0415  one definition of the window
     src = doc.get("source") or {}
     texts = [(src.get("subject") or "") + " " + (src.get("body") or "")]
     for part in (doc.get("conversation_parts") or {}).get("conversation_parts") or []:
         if (part.get("author") or {}).get("type") in CUSTOMER and part.get("body"):
             texts.append(part["body"])
-    clean = [" ".join(TAG_RE.sub(" ", t).split()) for t in texts]
-    return clean[-1], " ".join(clean[-last_n:])
+    final = " ".join(TAG_RE.sub(" ", texts[-1]).split())
+    window = census.window_parts(doc)
+    return final, " ".join(window) if window else final
 
 
 def main():

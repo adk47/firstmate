@@ -101,12 +101,16 @@ def propose_one(cid: str, tray: dict[str, Any], contacts: list[dict[str, Any]] |
     it (conflict evidence only, never ownership)."""
     reverted = reverted or {}
     presented = presented or {}
-    """Pure: one conversation -> a proposal or a no-proposal with its reason."""
     base = {"conversation_id": cid, "tray_why": tray.get("why", ""), "files": len(_files(tray))}
     if contacts is None:
         return dict(base, decision="no-proposal", reason="a contact on the thread is unreadable")
     if not contacts:
         return dict(base, decision="no-proposal", reason="the thread has no contacts")
+    # QA (#1379 @63e39d2c): the 24 h age guard runs FIRST, over every contact, so no later return (e.g. "no
+    # contact has an email", which which_account.py asks on) can fire for a contact the intake will retry.
+    young = [c for c in contacts if not c.get("created_at") or now - float(c.get("created_at") or 0) < CONTACT_MIN_AGE_S]
+    if young:
+        return dict(base, decision="wait", reason="the contact is younger than 24 h (the intake retries it)")
     emailed = [c for c in contacts if str(c.get("email") or "").strip()]
     emails = {str(c["email"]).strip().lower() for c in emailed}
     if not emails:
@@ -117,9 +121,6 @@ def propose_one(cid: str, tray: dict[str, Any], contacts: list[dict[str, Any]] |
     if not rec.EMAIL_RE.match(email):
         return dict(base, decision="no-proposal", reason="the contact email is not checkable")
     base["email_sha"] = ehash(email)[:12]
-    young = [c for c in emailed if not c.get("created_at") or now - float(c.get("created_at") or 0) < CONTACT_MIN_AGE_S]
-    if young:
-        return dict(base, decision="wait", reason="the contact is younger than 24 h (the intake retries it)")
     accts = sorted(set(accounts_by_email.get(email, [])))
     if not accts:
         return dict(base, decision="no-proposal", reason="no Muso account has this email")

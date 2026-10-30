@@ -65,7 +65,9 @@ class LatestMessageTopic(unittest.TestCase):
     def test_followup_detection(self):
         self.assertTrue(census.has_followup({"lcr": 2000, "created_at": 1000}))
         self.assertFalse(census.has_followup({"lcr": 0, "created_at": 1000}))
-        self.assertFalse(census.has_followup({"lcr": 1030, "created_at": 1000}))
+        # QA @63e39d2c: no 60 s slack - a customer part one second after the opening is read
+        self.assertTrue(census.has_followup({"lcr": 1001, "created_at": 1000}))
+        self.assertFalse(census.has_followup({"lcr": 1000, "created_at": 1000}))
 
     def test_shared_billing_pattern(self):
         try:
@@ -127,6 +129,67 @@ class FinalMessageEndToEnd(unittest.TestCase):
         got = buckets.texts_from_doc(doc("my credit is wrong on my song", "I cannot sign in"))
         fam = count.classify("credit", got, buckets.bucket_of(got[1], got[0]))
         self.assertEqual(fam, "account-access")
+
+
+class VetoOverEveryCustomerPart(unittest.TestCase):
+    """QA @63e39d2c: the billing / legal veto reads every customer part, wherever it sits."""
+
+    def many(self, msgs, admin_between=True):
+        parts = []
+        for m in msgs:
+            parts.append({"author": {"type": "user"}, "body": m})
+            if admin_between:
+                parts.append({"author": {"type": "admin"}, "body": "ok"})
+        return {"source": {"subject": "", "body": "Another question"},
+                "conversation_parts": {"conversation_parts": parts}}
+
+    def test_a_refund_four_parts_back_still_vetoes(self):
+        d = self.many(["please refund my annual plan", "any update?", "hello", "still there?", "my credit is wrong"])
+        latest = census.latest_from_doc(d)
+        self.assertEqual(latest[0], "my credit is wrong")
+        self.assertEqual(topics.latest_topic("credit", latest, census.topic_of), "billing")
+        last, joined = buckets.texts_from_doc(d)
+        self.assertEqual(buckets.bucket_of(joined, last), "billing-money")
+        self.assertNotEqual(count.classify("credit", (last, joined), buckets.bucket_of(joined, last)),
+                            "credit-claim-merge")
+
+    def test_a_refund_in_the_opening_and_within_a_second_vetoes(self):
+        d = {"source": {"subject": "", "body": "I was charged twice"},
+             "conversation_parts": {"conversation_parts": [{"author": {"type": "user"}, "body": "my credits too"}]}}
+        self.assertEqual(topics.latest_topic("credit", census.latest_from_doc(d), census.topic_of), "billing")
+        self.assertTrue(census.has_followup({"lcr": 1001, "created_at": 1000}))
+
+    def test_notes_are_not_customer_parts(self):
+        d = {"source": {"subject": "", "body": "hi"},
+             "conversation_parts": {"conversation_parts": [
+                 {"author": {"type": "user"}, "body": "refund", "part_type": "note"},
+                 {"author": {"type": "user"}, "body": "my credit is wrong"}]}}
+        self.assertEqual(topics.latest_topic("credit", census.latest_from_doc(d), census.topic_of), "credit")
+
+
+class AgeGuardFirst(unittest.TestCase):
+    """QA @63e39d2c: the 24 h age guard runs before every other return, so which_account never asks early."""
+
+    def test_young_no_email_contact_waits_and_is_not_asked(self):
+        now = 2_000_000_000.0
+        young = [{"email": "", "role": "lead", "external_id": "", "created_at": now - 3600, "id": "c1"}]
+        r = ip.propose_one("c", {}, young, accounts_by_email={}, facts={}, ext_owner={}, now=now)
+        self.assertEqual(r["decision"], "wait")
+        tray = {"source": "intercom", "files": f"['{'a' * 64}']", "received_at": "['2026-10-30T13:23:12Z']"}
+        self.assertNotEqual(wa.eligible(tray, {"statistics": {}}, young, r), "")
+
+    def test_old_no_email_contact_is_still_asked(self):
+        now = 2_000_000_000.0
+        old = [{"email": "", "role": "lead", "external_id": "", "created_at": now - 9 * 86400, "id": "c1"}]
+        r = ip.propose_one("c", {}, old, accounts_by_email={}, facts={}, ext_owner={}, now=now)
+        self.assertEqual((r["decision"], r["reason"]), ("no-proposal", "no contact on the thread has an email"))
+
+    def test_one_young_contact_among_several_waits(self):
+        now = 2_000_000_000.0
+        cs = [{"email": "x@y.io", "role": "user", "created_at": now - 9 * 86400},
+              {"email": "", "role": "lead", "created_at": now - 60}]
+        r = ip.propose_one("c", {}, cs, accounts_by_email={}, facts={}, ext_owner={}, now=now)
+        self.assertEqual(r["decision"], "wait")
 
 
 class BucketsOutNeedsFetch(unittest.TestCase):
