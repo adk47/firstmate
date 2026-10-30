@@ -42,7 +42,7 @@ class CommStateTest(unittest.TestCase):
         vl.connect(cs.LEDGER).close()
         cs.PROOF_STORE = str(d / "proof.sqlite")
         p = sqlite3.connect(cs.PROOF_STORE)
-        p.execute("CREATE TABLE proof_intake (user_id INTEGER, file_sha256 TEXT)")
+        p.execute("CREATE TABLE proof_intake (user_id INTEGER, file_sha256 TEXT, received_at TEXT DEFAULT '')")
         p.commit(); p.close()
         cs.DV_STORE = str(d / "dv.sqlite")
         v = sqlite3.connect(cs.DV_STORE)
@@ -73,10 +73,11 @@ class CommStateTest(unittest.TestCase):
 
     def test_rule1_any_document_or_reply_on_file_holds_the_wait_lines(self):
         cases = {
-            "proof_intake": lambda: sqlite3.connect(cs.PROOF_STORE).executescript(f"INSERT INTO proof_intake VALUES ({UID}, 's');"),
+            "proof_intake": lambda: sqlite3.connect(cs.PROOF_STORE).executescript(f"INSERT INTO proof_intake (user_id, file_sha256) VALUES ({UID}, 's');"),
             "dv_outcomes": lambda: sqlite3.connect(cs.DV_STORE).executescript(f"INSERT INTO dv_outcomes VALUES ({UID}, 'r1');"),
             "proof_on_file": lambda: Path(cs.PROOF_ON_FILE).write_text(json.dumps({"entries": [{"user_id": UID, "source": "gmail"}]})),
-            "ledger_reply": lambda: self.note("uvn-status", reply=OLD),
+            "ledger_reply": lambda: (self.note("uvn-status"), sqlite3.connect(cs.LEDGER).executescript(
+                f"UPDATE verify_messages SET proof_tagged_at='{OLD}';")),   # a tagged proof (attachments), not text
             "intercom_attachment": lambda: self.ic.convs.update({"9": {"source": {"author": {"type": "user"}, "attachments": [{"name": "a.pdf"}]}}}),
         }
         for name, add in cases.items():
@@ -90,19 +91,134 @@ class CommStateTest(unittest.TestCase):
                     self.assertTrue(any(r.startswith("proof_on_file:") for r in res["reasons"]), res)
                     self.assertIn(name.split("_")[0], json.dumps(res["reasons"]))
 
-    def test_rule1_a_reply_after_our_last_ask_holds_and_one_before_does_not(self):
+    def test_rule1_a_text_reply_is_never_replied_an_attachment_is(self):
+        # Fable 199 / p1 200 (rule change): a text message - even 'is there anything I have to provide?' after our
+        # ask - is an ask trigger, never 'replied'; a document (attachment) is
         ask = (datetime.now(timezone.utc) - timedelta(days=20)).strftime("%Y-%m-%dT%H:%M:%SZ")
         self.core = [["r1", "user_verification_needed", "", ask]]
         epoch = datetime.fromisoformat(ask.replace("Z", "+00:00")).timestamp()
         self.ic.convs["9"] = {"source": {"author": {"type": "admin"}},
                               "conversation_parts": {"conversation_parts": [
-                                  {"author": {"type": "user"}, "body": "earlier", "created_at": epoch - 100}]}}
+                                  {"author": {"type": "user"}, "body": "is there any specific information I have to provide?",
+                                   "created_at": epoch + 100}]}}
+        self.assertFalse(self.run_()["hold"])
+        self.note("uvn-status", reply=OLD)                       # a ledger text reply stamp: not 'replied' either
+        self.assertFalse(self.run_()["hold"], self.run_())
+        # ... but a LINK to a shared document is a document (b1 on #1508); a plain URL is not
+        self.ic.convs["9"]["conversation_parts"]["conversation_parts"].append(
+            {"author": {"type": "user"}, "body": "see https://www.tidal.com/track/1", "created_at": epoch + 150})
         self.assertFalse(self.run_()["hold"])
         self.ic.convs["9"]["conversation_parts"]["conversation_parts"].append(
-            {"author": {"type": "user"}, "body": "here is my split sheet link", "created_at": epoch + 100})
+            {"author": {"type": "user"}, "body": "here: https://drive.google.com/file/d/abc/view", "created_at": epoch + 160})
+        self.assertIn("intercom_document_link", json.dumps(self.run_()["reasons"]))
+        self.ic.convs["9"]["conversation_parts"]["conversation_parts"].pop()
+        self.ic.convs["9"]["conversation_parts"]["conversation_parts"].append(
+            {"author": {"type": "user"}, "body": "", "attachments": [{"name": "split.pdf"}], "created_at": epoch + 200})
         res = self.run_()
         self.assertTrue(res["hold"])
-        self.assertIn("intercom_reply_after_ask", json.dumps(res["reasons"]))
+        self.assertIn("intercom_attachment", json.dumps(res["reasons"]))
+
+    def test_b1_cases_per_source(self):
+        # doc-verify b1 204: request R created 2026-10-15T07:21:38Z; ASK = no hold from documents, HOLD = held
+        R, created = "r1", "2026-10-15 07:21:38 UTC"
+        oct20 = datetime(2026, 10, 20, tzinfo=timezone.utc).timestamp()
+        mar29 = datetime(2026, 3, 29, tzinfo=timezone.utc).timestamp()
+        pof = lambda e: (lambda: Path(cs.PROOF_ON_FILE).write_text(json.dumps({"entries": [dict({"user_id": UID, "source": "x"}, **e)]})))
+        def intake(at, cands=None):
+            def go():
+                db = sqlite3.connect(cs.PROOF_STORE)
+                db.execute("ALTER TABLE proof_intake ADD COLUMN candidate_request_ids_json TEXT")
+                db.execute("INSERT INTO proof_intake VALUES (?,?,?,?)", (UID, "s", at, json.dumps(cands or ["other"])))
+                db.commit(); db.close()
+            return go
+        dv = lambda rid: (lambda: sqlite3.connect(cs.DV_STORE).executescript(f"INSERT INTO dv_outcomes VALUES ({UID}, '{rid}');"))
+        att = lambda at: (lambda: self.ic.convs.update({"9": {"source": dict({"author": {"type": "user"},
+                                                                              "attachments": [{"name": "a.png"}]},
+                                                                             **({"created_at": at} if at else {}))}}))
+        cases = {
+            "P1": (pof({"proof_at": "2026-03-29T11:40:36Z"}), False),
+            "P2": (pof({"request_id": R, "proof_at": "2026-03-01T00:00:00Z"}), True),
+            "P3": (pof({"proof_at": "2026-10-20T00:00:00Z"}), True),
+            "P4": (pof({}), True),
+            "P5": (pof({"request_id": "another", "proof_at": "2026-03-01T00:00:00Z"}), False),
+            "I1": (intake("2026-03-29T00:00:00Z"), False),
+            "I2": (intake("2026-10-20T00:00:00Z"), True),
+            "I3": (intake("2026-03-29T00:00:00Z", [R.upper()]), True),
+            "I4": (intake(""), True),
+            "D1": (dv(R), True),
+            "D2": (dv("another"), False),
+            "C1": (att(mar29), False),
+            "C2": (att(oct20), True),
+            "C3": (att(None), True),
+            # QA #1508: the opening attachment's time on the CONVERSATION (source.created_at absent): a March one is old
+            "C4": (lambda: self.ic.convs.update({"9": {"created_at": mar29, "source": {"author": {"type": "user"},
+                                                                                     "attachments": [{"name": "a.png"}]}}}), False),
+            "C5": (lambda: self.ic.convs.update({"9": {"created_at": oct20, "source": {"author": {"type": "user"},
+                                                                                     "attachments": [{"name": "a.png"}]}}}), True),
+            # QA #1508: source.created_at present but NULL, the conversation dated March -> old, not undated
+            "C6": (lambda: self.ic.convs.update({"9": {"created_at": mar29, "source": {"author": {"type": "user"}, "created_at": None,
+                                                                                     "attachments": [{"name": "a.png"}]}}}), False),
+        }
+        for name, (add, held) in cases.items():
+            with self.subTest(name):
+                self.setUp()
+                self.core = [[R, "user_verification_needed", "", "", created]]
+                add()
+                self.assertEqual(self.run_("uvn-status", "uvnstatus")["hold"], held, name)
+        # mixed: two named requests, the oldest (10-15) is the bar; a 10-20 entry postdates it -> HELD (per user)
+        self.setUp()
+        self.core = [["r1", "user_verification_needed", "", "", created],
+                     ["r2", "user_verification_needed", "", "", "2026-10-28 00:00:00 UTC"]]
+        pof({"proof_at": "2026-10-20T00:00:00Z"})()
+        self.assertTrue(self.run_("uvn-status", "uvnstatus", keys=("r1", "r2"))["hold"])
+
+    def test_rule1_only_a_document_that_postdates_the_named_request_counts(self):
+        # p1 198 / Fable 199 (Lamberto 298376): March 2026 screenshots / approvals cannot prove a request filed 10-15
+        created = "2026-10-15 07:21:38.896000 UTC"
+        march = datetime(2026, 3, 29, 11, 40, tzinfo=timezone.utc)
+        older = {
+            "proof_intake": lambda: sqlite3.connect(cs.PROOF_STORE).executescript(
+                f"INSERT INTO proof_intake VALUES ({UID}, 's', '2026-03-29T11:40:36Z');"),
+            "proof_on_file": lambda: Path(cs.PROOF_ON_FILE).write_text(json.dumps({"entries": [
+                {"user_id": UID, "source": "intercom", "kind": "human_approved_after_doc", "request_id": None,
+                 "proof_at": "2026-03-29T11:40:36Z"}]})),
+            "intercom_attachment": lambda: self.ic.convs.update({"9": {"source": {
+                "author": {"type": "user"}, "attachments": [{"name": "Captura.png"}], "created_at": march.timestamp()}}}),
+        }
+        for name, add in older.items():
+            with self.subTest(name):
+                self.setUp()
+                self.core = [["r1", "user_verification_needed", "", "", created]]
+                add()
+                self.assertFalse(self.run_("uvn-status", "uvnstatus")["hold"], name)
+                # ... unknown request date (old 4-column row): every document counts (fail closed)
+                self.core = [["r1", "user_verification_needed", "", ""]]
+                self.assertTrue(self.run_("uvn-status", "uvnstatus")["hold"], name)
+        # an older intake FILED AGAINST the named request (candidate_request_ids) still holds (p1 203)
+        self.setUp()
+        self.core = [["r1", "user_verification_needed", "", "", created]]
+        db = sqlite3.connect(cs.PROOF_STORE)
+        db.execute("ALTER TABLE proof_intake ADD COLUMN candidate_request_ids_json TEXT")
+        db.execute("INSERT INTO proof_intake VALUES (?, 's', '2026-03-29T11:40:36Z', '[\"R1\"]')", (UID,))
+        db.commit(); db.close()
+        self.assertTrue(self.run_("uvn-status", "uvnstatus")["hold"])
+        # a dv read of ANOTHER request does not count; one of the named request does
+        self.setUp()
+        self.core = [["r1", "user_verification_needed", "", "", created]]
+        sqlite3.connect(cs.DV_STORE).executescript(f"INSERT INTO dv_outcomes VALUES ({UID}, 'other');")
+        self.assertFalse(self.run_("uvn-status", "uvnstatus")["hold"])
+        sqlite3.connect(cs.DV_STORE).executescript(f"INSERT INTO dv_outcomes VALUES ({UID}, 'r1');")
+        self.assertTrue(self.run_("uvn-status", "uvnstatus")["hold"])
+        # a document AFTER the request, or one naming it, still holds
+        self.setUp()
+        self.core = [["r1", "user_verification_needed", "", "", created]]
+        sqlite3.connect(cs.PROOF_STORE).executescript(f"INSERT INTO proof_intake VALUES ({UID}, 's', '2026-10-20T00:00:00Z');")
+        self.assertTrue(self.run_("uvn-status", "uvnstatus")["hold"])
+        self.setUp()
+        self.core = [["r1", "user_verification_needed", "", "", created]]
+        Path(cs.PROOF_ON_FILE).write_text(json.dumps({"entries": [{"user_id": UID, "source": "gmail", "request_id": "r1",
+                                                                   "proof_at": "2026-03-01T00:00:00Z"}]}))
+        self.assertTrue(self.run_("uvn-status", "uvnstatus")["hold"])
 
     def test_rule1_never_after_a_receipt_or_a_decision(self):
         self.core = [["r1", "user_verification_needed", "", ""]]
@@ -122,7 +238,7 @@ class CommStateTest(unittest.TestCase):
         self.core = [["r1", "rejected", "", ""]]
         self.assertTrue(self.run_(RECEIPT, "docrecvr")["hold"])
         # a document on file is exactly why R1 goes: it never holds R1
-        sqlite3.connect(cs.PROOF_STORE).executescript(f"INSERT INTO proof_intake VALUES ({UID}, 's');")
+        sqlite3.connect(cs.PROOF_STORE).executescript(f"INSERT INTO proof_intake (user_id, file_sha256) VALUES ({UID}, 's');")
         self.core = [["r1", "unverified", "", ""]]
         self.assertFalse(self.run_(RECEIPT, "docrecvr")["hold"])
 
@@ -144,7 +260,7 @@ class CommStateTest(unittest.TestCase):
         self.core = [["r1", "user_verification_needed", "", ""]]
         cut = self.run_()                       # the list is cut: the user qualifies
         self.assertFalse(cut["hold"])
-        sqlite3.connect(cs.PROOF_STORE).executescript(f"INSERT INTO proof_intake VALUES ({UID}, 'new');")   # files now
+        sqlite3.connect(cs.PROOF_STORE).executescript(f"INSERT INTO proof_intake (user_id, file_sha256) VALUES ({UID}, 'new');")   # files now
         at_send = self.run_()                   # the gate re-reads right before the post
         self.assertTrue(at_send["hold"])
         self.assertEqual(at_send["state"], "replied")
@@ -326,6 +442,18 @@ class OwesProofGuardTest(CommStateTest):
         with self.assertRaises(cs.Unknown):
             cs.check("status-team-review", "teamreview", UID, ["r1"], "c1", query=lambda sql: [["x"]], ic=self.ic,
                      fraud=lambda u, q: [])
+
+
+class DocLinkHostTest(unittest.TestCase):
+    def test_document_links_match_the_parsed_host_only(self):
+        yes = ["https://drive.google.com/file/d/x/view", "see https://www.dropbox.com/s/abc?dl=0", "https://we.tl/t-abc",
+               "https://contoso.sharepoint.com/:b:/s/x", "https://app.box.com/s/x", "https://1drv.ms/b/s!x"]
+        no = ["https://sandbox.com/help", "https://drive.google.com.evil.example/x", "https://evil.example/?u=drive.google.com",
+              "https://notbox.com/x", "https://tidal.com/track/1", "drive.google.com/file (no scheme)"]
+        for t in yes:
+            self.assertTrue(cs.has_doc_link(t), t)
+        for t in no:
+            self.assertFalse(cs.has_doc_link(t), t)
 
 
 if __name__ == "__main__":

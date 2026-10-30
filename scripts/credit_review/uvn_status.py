@@ -102,7 +102,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import fraud_lens, policy, stage2_verdicts, verify_ledger, verify_notify
+from . import evidence, fraud_lens, policy, stage2_verdicts, verify_ledger, verify_notify
 from .roles import ONE_PERSON_FAMILIES, family_of
 
 # The proof-on-file kinds that mean "we approved a document" (decide.APPROVED_PROOF_KINDS).
@@ -361,7 +361,8 @@ def uvn_requests(user_ids: list[int], query: Query = trino,
                 "SELECT CAST(id AS varchar), userid, CAST(profileid AS varchar), CAST(trackid AS varchar), "
                 "spotifytracktitle, json_format(CAST(spotifytrackartists AS json)), "
                 "credits, spotifypopularity, "
-                "json_format(CAST(verificationdata AS json)), json_format(CAST(metadata AS json)) "
+                "json_format(CAST(verificationdata AS json)), json_format(CAST(metadata AS json)), "
+                "CAST(createdat AS varchar) "
                 "FROM postgresql_core.public.credit_requests "
                 f"WHERE status IN ({in_statuses}) AND deletedat IS NULL AND userid IN ({_ids(chunk)})"):
             # credits is a Postgres text[] literal in a varchar on the replica (2026-10-22: the
@@ -378,6 +379,7 @@ def uvn_requests(user_ids: list[int], query: Query = trino,
                 "_incomplete": _row_incomplete((title or "").strip(), (artist or "").strip(), (credits or "").strip(),
                                                pid or "", tid or ""),
                 "_pop": int(pop) if str(pop).isdigit() else -1,
+                "_created": str(extra[2]) if len(extra) > 2 and extra[2] else "",
                 "_no_ask": _row_class(credits, pop, *(list(extra) + [None, None])[:2])})
     for rows in reqs.values():
         rows.sort(key=lambda r: (-r["_pop"], r["track_title"].casefold()))  # most popular first
@@ -386,18 +388,55 @@ def uvn_requests(user_ids: list[int], query: Query = trino,
     return reqs
 
 
-def documents_block(documented: dict[str, Any], uid: str, ask_ids: list[str] | set[str], released: set[str]) -> bool:
+def documents_block(documented: dict[str, Any], uid: str, ask_ids: list[str] | set[str], released: set[str],
+                    created: str | None = None) -> bool:
     """True when the proof-on-file export keeps this user from an ask about `ask_ids`. A user with
     no entry is free. A user with entries is let through only when stage 2 released EVERY credit
     asked about (`released`) and no APPROVED proof names one of them; an entry for a credit stage
-    2 did not release (or no credit at all) still excludes the user."""
+    2 did not release (or no credit at all) still excludes the user.
+    p1 198 / Fable 199: only a document that could be THIS ask's proof counts - one naming a request asked about, or
+    one that arrived on/after the oldest asked-about request was created (`created`). A document filed before the
+    request existed cannot prove it (Lamberto 298376: March screenshots vs a 10-15 request). Unknown dates count."""
     entries = documented.get(str(uid)) or []
+    since = when(created) if created else None
+    dated = getattr(documented, "dated", {}).get(str(uid))
+    if since is not None and dated is not None:
+        ids0 = {str(r).strip().lower() for r in ask_ids if str(r).strip()}
+        keep = []
+        for rid, kind, proof_at in dated:
+            at = when(proof_at) if proof_at else None
+            if (rid and rid.lower() in ids0) or at is None or at >= since:
+                keep.append((rid, kind))
+        entries = keep
     if not entries:
         return False
     ids = {str(r).strip().lower() for r in ask_ids if str(r).strip()}
     if not ids or not ids <= released:
         return True
     return any(rid and rid.lower() in ids and kind in APPROVED_PROOF_KINDS for rid, kind in entries)
+
+
+def when(value: Any) -> Any:
+    """A timestamp from ISO or the replica's 'YYYY-MM-DD HH:MM:SS[.ffffff] UTC' (evidence.parse_ts reads only ISO)."""
+    v = str(value or "").strip()
+    if v.endswith(" UTC"):
+        v = v[:-4].strip().replace(" ", "T", 1) + "Z"
+    return evidence.parse_ts(v) if v else None
+
+
+def oldest_created(rows: list[dict[str, Any]]) -> str | None:
+    """The oldest createdat among the rows (None when any is unknown: then every document counts, fail closed)."""
+    ts = [r.get("_created") or "" for r in rows]
+    if not ts or not all(ts):
+        return None
+    parsed = [when(t) for t in ts]
+    return None if any(p is None for p in parsed) else min(parsed).isoformat()
+
+
+def created_of(rows: list[dict[str, Any]], live: list[dict[str, Any]]) -> str | None:
+    """The oldest createdat of the `live` requests, read from the replica `rows` (plan() strips the '_' fields)."""
+    ids = {str(r["request_id"]).lower() for r in live}
+    return oldest_created([r for r in rows if str(r["request_id"]).lower() in ids]) if ids else None
 
 
 def stage2_released(campaign: str, path: str | None = None, *, user_ids: list[int] | None = None) -> set[str]:
@@ -466,9 +505,13 @@ def with_filing(payload: dict[str, Any], src: dict[str, Any]) -> dict[str, Any]:
 
 
 def note_payload(acct: dict[str, str], uid: int, credits: list[dict[str, Any]], as_count: bool,
-                 total: int) -> dict[str, Any]:
+                 total: int, since: str | None = None) -> dict[str, Any]:
     user = {"email": acct["email"], "id": str(uid), "professional_id": acct["professional_id"],
             "auth_id": acct["auth_id"], "first_name": acct.get("first_name", "")}
+    since = since or oldest_created(credits)
+    if since:
+        # the gate's document check counts only documents sent on/after this (p1 198 / Fable 199)
+        user["requests_since"] = since
     if as_count:
         return {"user": {**user, "pending_count": total}, "credits": credits, "extra": ["--copy", "count"]}
     return {"user": user, "credits": credits}
@@ -587,7 +630,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                 report.note("excluded_today")
                 continue
             listed = [str(r) for r in (u.get("request_ids") or [])]
-            if is_ask and documents_block(documented, str(u.get("user_id")), listed, released):
+            if is_ask and documents_block(documented, str(u.get("user_id")), listed, released, u.get("oldest") or None):
                 report.proof_on_file += 1
                 report.note("documents_on_file")
                 continue
@@ -705,7 +748,8 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                     if why:
                         report.note(why)
                         continue
-                    if live and is_ask and documents_block(documented, str(uid), [r["request_id"] for r in live], released):
+                    if live and is_ask and documents_block(documented, str(uid), [r["request_id"] for r in live], released,
+                                                           created_of(pending, live)):
                         report.proof_on_file += 1
                         report.note("documents_on_file")
                         continue
@@ -721,7 +765,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                     if as_count:
                         report.count_copy += 1
                         report.note("count_copy")
-                    batch.append((listed, with_filing(note_payload(acct, uid, live, as_count, total), u),
+                    batch.append((listed, with_filing(note_payload(acct, uid, live, as_count, total, created_of(pending, live)), u),
                                   0 if as_count else left_out(listed, pending, is_ask)))
         finally:
             db.close()
@@ -788,7 +832,10 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                                 mine = stage2_released(campaign, stage2_path, user_ids=[uid])
                             except stage2_verdicts.Stage2Error:
                                 mine = set()
-                        if documented.get(str(uid)) and not mine:
+                        # a stage-2-populated campaign (gap-ask): the population IS the release - a credit no longer
+                        # released is a document on file, date or not. Every other ask: the one date-aware check below
+                        # (documents_block with the request date), the same as the dry run (QA #1508).
+                        if from_stage2 and documented.get(str(uid)) and not mine:
                             report.proof_on_file += 1
                             report.note("documents_on_file")
                             continue
@@ -809,12 +856,13 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                             report.not_pending += 1
                         report.note("changed_before_send")
                         continue
-                    if is_ask and documents_block(documented, str(uid), [r["request_id"] for r in live], mine):
+                    if is_ask and documents_block(documented, str(uid), [r["request_id"] for r in live], mine,
+                                                  created_of(fresh, live)):
                         report.proof_on_file += 1
                         report.note("documents_on_file")
                         continue
                     acct = {k: p["user"].get(k, "") for k in ("email", "professional_id", "auth_id", "first_name")}
-                    p = with_filing(note_payload(acct, uid, live, as_count, total), p["user"])
+                    p = with_filing(note_payload(acct, uid, live, as_count, total, created_of(fresh, live)), p["user"])
                     if calls and pace_seconds:
                         time.sleep(pace_seconds)
                 before = report.sent_notes if mode == "apply" else report.validated + report.recipient_ok

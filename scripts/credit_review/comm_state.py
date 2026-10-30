@@ -123,19 +123,33 @@ def _ro(path: str) -> sqlite3.Connection:
     return sqlite3.connect(f"file:{path}?mode=ro", uri=True)
 
 
-def store_facts(uid: int, keys: list[str] | tuple[str, ...] = ()) -> dict[str, Any]:
-    """Documents / replies on file for this user in our own stores (any subject, any request)."""
+def store_facts(uid: int, keys: list[str] | tuple[str, ...] = (), since: str = "") -> dict[str, Any]:
+    """Documents on file for this user in our own stores. p1 198 / Fable 199 (rule): only a document that could be
+    proof of the NAMED requests counts - one that arrived on/after the oldest named request was created (`since`,
+    ISO UTC; empty = unknown = every document counts, fail closed) or one tied to a named request."""
     out: dict[str, Any] = {"docs": [], "acked": "", "notes_7d": [], "told_notes": [], "last_ask": ""}
+    want0 = {str(k).lower() for k in keys}
     try:
         db = _ro(PROOF_STORE)
-        if db.execute("SELECT 1 FROM proof_intake WHERE user_id=? LIMIT 1", (uid,)).fetchone():
-            out["docs"].append("proof_intake")
+        cols = {r[1] for r in db.execute("PRAGMA table_info(proof_intake)")}
+        cand = "coalesce(candidate_request_ids_json, '[]')" if "candidate_request_ids_json" in cols else "'[]'"
+        for at, cj in db.execute(f"SELECT received_at, {cand} FROM proof_intake WHERE user_id=?", (uid,)):
+            try:
+                named = {str(x).lower() for x in json.loads(cj or "[]")}
+            except ValueError:
+                named = set()
+            # p1 203: filed against a named request, or arrived on/after the oldest named request was created
+            if not since or named & want0 or not _ts(at) or _ts(at) >= since:
+                out["docs"].append("proof_intake")
+                break
     except sqlite3.Error as exc:
         raise Unknown(f"proof_intake unreadable: {exc}") from exc
     if os.path.exists(DV_STORE):
         try:
-            if _ro(DV_STORE).execute("SELECT 1 FROM dv_outcomes WHERE user_id=? LIMIT 1", (uid,)).fetchone():
-                out["docs"].append("dv_outcomes")
+            for (rid,) in _ro(DV_STORE).execute("SELECT lower(request_id) FROM dv_outcomes WHERE user_id=?", (uid,)):
+                if not since or rid in want0:
+                    out["docs"].append("dv_outcomes")
+                    break
         except sqlite3.Error as exc:
             raise Unknown(f"doc-verify store unreadable: {exc}") from exc
     try:
@@ -143,7 +157,9 @@ def store_facts(uid: int, keys: list[str] | tuple[str, ...] = ()) -> dict[str, A
             entries = json.load(fh).get("entries") or []
     except (OSError, ValueError) as exc:
         raise Unknown(f"proof-on-file unreadable: {exc}") from exc
-    srcs = sorted({str(e.get("source") or "?") for e in entries if str(e.get("user_id")) == str(uid)})
+    srcs = sorted({str(e.get("source") or "?") for e in entries if str(e.get("user_id")) == str(uid)
+                   and (not since or str(e.get("request_id") or "").lower() in want0
+                        or not _ts(str(e.get("proof_at") or "")) or _ts(str(e.get("proof_at"))) >= since)})
     if srcs:
         out["docs"].append("proof_on_file:" + "+".join(srcs))
     try:
@@ -153,12 +169,13 @@ def store_facts(uid: int, keys: list[str] | tuple[str, ...] = ()) -> dict[str, A
                           "FROM verify_messages WHERE account_id=?", (str(uid),)).fetchall()
     except sqlite3.Error as exc:
         raise Unknown(f"verify ledger unreadable: {exc}") from exc
-    since = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+    week = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
     want = {str(k).lower() for k in keys}
-    for camp, kind, status, at, reply, tagged, day, ids_json in rows:
+    for camp, kind, status, at, _reply, tagged, day, ids_json in rows:
         if status not in ("sent", "attempted"):
             continue
-        if _ts(reply) or _ts(tagged):
+        # a TEXT reply is never 'replied' (Fable 199); a tagged proof (attachments after our note) is
+        if _ts(tagged) and (not since or _ts(tagged) >= since):
             out["docs"].append(f"ledger_reply:{camp}")
         if camp == RECEIPT:
             out["acked"] = max(out["acked"], _ts(at))
@@ -173,23 +190,27 @@ def store_facts(uid: int, keys: list[str] | tuple[str, ...] = ()) -> dict[str, A
                 named = set()
             if named & want:
                 out["told_notes"].append(camp)
-        if str(day or "") >= since:
+        if str(day or "") >= week:
             out["notes_7d"].append(camp)
     return out
 
 
 def core_facts(uid: int, keys: list[str], query: Query) -> dict[str, Any]:
     """Decided / told state of the named requests (credits) and the user's latest core ask marker."""
-    out: dict[str, Any] = {"decided": [], "told": [], "last_ask": ""}
+    out: dict[str, Any] = {"decided": [], "told": [], "last_ask": "", "created": ""}
     rows = query("SELECT lower(CAST(id AS varchar)), status, "
                  "coalesce(json_extract_scalar(metadata, '$.approvedNotice.noticeSentAt'), ''), "
-                 "coalesce(json_extract_scalar(metadata, '$.proofRequest.noticeSentAt'), '') "
+                 "coalesce(json_extract_scalar(metadata, '$.proofRequest.noticeSentAt'), ''), "
+                 "CAST(createdat AS varchar) "
                  f"FROM postgresql_core.public.credit_requests WHERE userid = {int(uid)} AND deletedat IS NULL")
     want = {k.lower() for k in keys}
+    created: list[str] = []
     for row in rows:
-        if len(row) != 4:
+        if len(row) not in (4, 5):
             raise Unknown("unexpected replica row shape")
-        rid, status, notice, ask = row
+        rid, status, notice, ask = row[:4]
+        if rid in want:
+            created.append(_ts(row[4]) if len(row) == 5 else "")
         out["last_ask"] = max(out["last_ask"], _ts(ask))
         if rid in want:
             if status in ("approved", "rejected"):
@@ -204,11 +225,31 @@ def core_facts(uid: int, keys: list[str], query: Query) -> dict[str, Any]:
                 raise Unknown("unexpected replica row shape")
             if row[1] not in ("pending", "processing"):
                 out["decided"].append(f"claim-{row[0]}")
+    # the oldest named request's creation (ISO UTC); empty when any named request's date is unknown (fail closed)
+    out["created"] = min(created) if created and all(created) else ""
     return out
 
 
-def intercom_facts(contact_id: str, last_ask: str, ic: Intercom) -> list[str]:
-    """Anything the user sent us in Intercom: an attachment ever, or any message after our last ask."""
+URL_RE = re.compile(r"https?://([^/\s?#:]+)", re.I)
+# a shared-document link = a URL whose HOST is one of these providers or a subdomain of one (QA #1508: matched on the
+# parsed hostname - 'sandbox.com/help' or 'drive.google.com.evil.example' are not documents)
+DOC_HOSTS = ("drive.google.com", "docs.google.com", "dropbox.com", "onedrive.live.com", "1drv.ms", "icloud.com",
+             "wetransfer.com", "we.tl", "box.com", "sharepoint.com")
+
+
+def has_doc_link(text: str) -> bool:
+    for host in URL_RE.findall(text or ""):
+        h = host.lower().rstrip(".")
+        if any(h == d or h.endswith("." + d) for d in DOC_HOSTS):
+            return True
+    return False
+
+
+def intercom_facts(contact_id: str, last_ask: str, ic: Intercom, since: str = "") -> list[str]:
+    """An attachment the user sent us in Intercom on/after `since` (the oldest named request's creation; empty =
+    any time). Fable 199: a text message is never 'replied' - a text question is an ask trigger, so `last_ask` no
+    longer turns a text reply into a hold (kept in the signature for the callers)."""
+    since_epoch = datetime.fromisoformat(since).replace(tzinfo=timezone.utc).timestamp() if since else None
     if not contact_id:
         raise Unknown("no Intercom contact to read")
     found: list[str] = []
@@ -219,20 +260,27 @@ def intercom_facts(contact_id: str, last_ask: str, ic: Intercom) -> list[str]:
         raise Unknown("conversation search unreadable")
     if (res.get("total_count") or len(convs)) > CONV_CAP:
         return ["intercom:more_conversations_than_checked"]   # in doubt: treat as having replied
-    ask_epoch = datetime.fromisoformat(last_ask).replace(tzinfo=timezone.utc).timestamp() if last_ask else None
     for c in convs:
         cid = str(c.get("id") or "")
         if not cid.isdigit():
             raise Unknown("conversation id unreadable")
         conv = ic("GET", f"/conversations/{cid}?display_as=plaintext", None)
-        parts = [conv.get("source") or {}] + ((conv.get("conversation_parts") or {}).get("conversation_parts") or [])
+        # the opening message's time: Intercom may leave source.created_at out and date the opening on the
+        # conversation itself (QA #1508; the shell gate reads the top-level date too) - unknown only when neither is set
+        src = dict(conv.get("source") or {})
+        if not src.get("created_at"):          # absent, null or 0: the conversation's own date (QA #1508)
+            src["created_at"] = conv.get("created_at") or c.get("created_at")
+        parts = [src] + ((conv.get("conversation_parts") or {}).get("conversation_parts") or [])
         for p in parts:
             if (p.get("author") or {}).get("type") not in ("user", "lead", "contact"):
                 continue
-            if p.get("attachments"):
+            fresh = since_epoch is None or not p.get("created_at") or p["created_at"] >= since_epoch
+            # an attachment with no readable time counts (fail closed; b1 C3)
+            if p.get("attachments") and fresh:
                 found.append(f"intercom_attachment:{cid}")
-            elif ask_epoch is not None and (p.get("created_at") or 0) > ask_epoch and (p.get("body") or "").strip():
-                found.append(f"intercom_reply_after_ask:{cid}")
+            # a text reply is not 'replied' - but a LINK to a shared document is a document (b1 on #1508)
+            elif fresh and has_doc_link(p.get("body") or ""):
+                found.append(f"intercom_document_link:{cid}")
     return sorted(set(found))
 
 
@@ -370,9 +418,10 @@ def check(campaign: str, copy: str, uid: int, keys: list[str], contact_id: str, 
     if nothing_else(campaign, copy):
         why = owes_proof(uid, query)
         return {"hold": bool(why), "state": "owes_proof" if why else "owes_nothing", "reasons": why}
-    st = store_facts(uid, keys)
     core = core_facts(uid, keys, query)
-    ic_found = intercom_facts(contact_id, max(st["last_ask"], core["last_ask"]), ic) if campaign in WAIT_LINES else []
+    st = store_facts(uid, keys, core["created"])
+    ic_found = (intercom_facts(contact_id, max(st["last_ask"], core["last_ask"]), ic, core["created"])
+                if campaign in WAIT_LINES else [])
     thread = thread_facts(conversation, ic)
     fr = (fraud or fraud_facts)(uid, query)
     state, why = decide(campaign, copy, st, core, ic_found, thread, fr)

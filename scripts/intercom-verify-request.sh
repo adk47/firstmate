@@ -1867,6 +1867,11 @@ fi
 # do not send: a contact with more conversations than we can check counts as "sent".
 # The text of the conversations is never extracted; only authors, attachment counts and tags.
 DOC_SCAN_MAX=150
+# p1 198 / Fable 199 (rule): a document sent BEFORE the oldest named request was created cannot be its proof. The
+# runner passes user.requests_since (ISO UTC); attachments older than it do not count. Absent = every document counts.
+REQUESTS_SINCE="$(printf '%s' "$(cat "$CREDITS_FILE" 2>/dev/null)" | "$JQ_BIN" -r '(.user.requests_since // "") | tostring
+  | if test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]+)?(Z|\\+00:00)$") then (sub("\\.[0-9]+"; "") | sub("\\+00:00$"; "Z") | fromdateiso8601) else 0 end' 2>/dev/null || echo 0)"
+printf '%s' "$REQUESTS_SINCE" | grep -qE '^[0-9]{1,12}$' || REQUESTS_SINCE=0
 docs_submitted() { # <contact-id> -> prints the reason when documents exist; exit 4 on a failed read
   local contact="$1" after="" body ids n total=0 cid convo
   while :; do
@@ -1878,7 +1883,7 @@ docs_submitted() { # <contact-id> -> prints the reason when documents exist; exi
     if printf '%s' "$body" | "$JQ_BIN" -e --arg tag "$PROOF_TAG" '[.conversations[] | ((.tags.tags // [])[] | (.name // "") | ascii_downcase) | select(. == $tag)] | length > 0' >/dev/null; then
       echo "a conversation is tagged $PROOF_TAG"; return 0
     fi
-    if printf '%s' "$body" | "$JQ_BIN" -e '[.conversations[] | select((.source.author.type // "") == "user" and ((.source.attachments // []) | length) > 0)] | length > 0' >/dev/null; then
+    if printf '%s' "$body" | "$JQ_BIN" -e --argjson since "$REQUESTS_SINCE" '[.conversations[] | select((.source.author.type // "") == "user" and ((.source.attachments // []) | length) > 0 and ((.created_at // null) == null or .created_at >= $since))] | length > 0' >/dev/null; then
       echo "the user opened a conversation with an attachment"; return 0
     fi
     ids="$(printf '%s' "$body" | "$JQ_BIN" -r '.conversations[].id | tostring')"
@@ -1891,7 +1896,7 @@ docs_submitted() { # <contact-id> -> prints the reason when documents exist; exi
         || { printf 'DOCUMENT CHECK FAILED (curl) on conversation %s; nothing was sent or claimed:\n%s\n' "$cid" "$convo" >&2; exit 4; }
       printf '%s' "$convo" | "$JQ_BIN" -e '(.type // "") == "conversation"' >/dev/null 2>&1 \
         || { printf 'DOCUMENT CHECK NOT VERIFIED on conversation %s; nothing was sent or claimed:\n%s\n' "$cid" "$convo" >&2; exit 4; }
-      if printf '%s' "$convo" | "$JQ_BIN" -e '[(.conversation_parts.conversation_parts // [])[] | select((.author.type // "") == "user" and ((.attachments // []) | length) > 0)] | length > 0' >/dev/null; then
+      if printf '%s' "$convo" | "$JQ_BIN" -e --argjson since "$REQUESTS_SINCE" '[(.conversation_parts.conversation_parts // [])[] | select((.author.type // "") == "user" and ((.attachments // []) | length) > 0 and ((.created_at // null) == null or .created_at >= $since))] | length > 0' >/dev/null; then
         echo "the user attached a document in a conversation"; return 0
       fi
     done

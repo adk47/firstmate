@@ -321,6 +321,9 @@ class ProofOnFile(dict[str, list[tuple[Optional[str], str]]]):
     def __init__(self, *args: Any, support_contacts: frozenset[str] = frozenset(), **kw: Any):
         super().__init__(*args, **kw)
         self.support_contacts = support_contacts
+        # {user: [(request_id | None, kind, proof_at | "")]}: when each document arrived (p1 198 / Fable 199: a
+        # document filed BEFORE a request cannot be that request's proof)
+        self.dated: dict[str, list[tuple[Optional[str], str, str]]] = {}
 
 
 def is_support_contact(documented: dict[str, Any], uid: str) -> bool:
@@ -376,6 +379,7 @@ def load_proof_on_file(path: str | None = None, *, max_age_h: float = PROOF_MAX_
     for e in doc["entries"]:
         rid = str(e.get("request_id") or "").strip() or None
         out.setdefault(str(e["user_id"]).strip(), []).append((rid, e["kind"]))
+        out.dated.setdefault(str(e["user_id"]).strip(), []).append((rid, e["kind"], str(e.get("proof_at") or "")))
     return out
 
 
