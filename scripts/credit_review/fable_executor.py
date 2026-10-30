@@ -81,7 +81,8 @@ FABLE_RULE_RE = re.compile(r"^(R-[A-Z0-9][A-Za-z0-9().-]{0,40}|C[0-9]{1,2}[:/][A
 #: A row's coded-rule outcome: a row id in one of the two coded deciders' append-only stores -
 #:   decisions:<id>    the credit-review decider ledger's `decisions` table (C3/C5 closes, approvals)
 #:   dv_outcomes:<id>  doc-verify's `dv_outcomes` (C8 fraud deny: the executing document's `forged` outcome row)
-CODED_OUTCOME_RE = re.compile(r"^(decisions|dv_outcomes):[0-9]{1,12}$")
+#   dsp_verdicts:<id> the V9 DSP verifier's own APPROVE verdict (ANCHORED approvals; same-run Spotify+Tidal)
+CODED_OUTCOME_RE = re.compile(r"^(decisions|dv_outcomes|dsp_verdicts):[0-9]{1,12}$")
 LEDGER_PATH = os.environ.get("CREDIT_REVIEW_LEDGER", "/var/lib/hydra/credit-review/ledger.sqlite3")
 DOC_VERIFY_STORE = os.environ.get("CREDIT_DOC_VERIFY_STORE", "/var/lib/hydra-credit-verify/doc-verify.sqlite")
 #: What the decider's decision must say for each tray action.
@@ -289,12 +290,61 @@ def ledger_outcomes(ids: Iterable[str], path: str | None = None,
                                         "select id, lower(request_id), decision, mode from decisions where id in (%s)",
                                         dec):
             out[f"decisions:{i}"] = {"request_id": rid, "decision": d, "mode": m}
+    vv = sorted({int(i.split(":", 1)[1]) for i in ids if CODED_OUTCOME_RE.match(i) and i.startswith("dsp_verdicts:")})
+    if vv:
+        out.update(dsp_verdict_outcomes(vv))
     dv = sorted({int(i.split(":", 1)[1]) for i in ids if CODED_OUTCOME_RE.match(i) and i.startswith("dv_outcomes:")})
     if dv:
         for i, rid, outcome in _read_store(dv_path or DOC_VERIFY_STORE,
                                            "select id, lower(request_id), outcome from dv_outcomes where id in (%s)", dv):
             out[f"dv_outcomes:{i}"] = {"request_id": rid, "decision": "close" if outcome == "forged" else "none",
                                        "mode": "apply"}
+    return out
+
+
+def dsp_verdict_outcomes(nums: list[int], path: str | None = None, version: str | None = None) -> dict[str, dict]:
+    """{'dsp_verdicts:<id>': {request_id, decision, mode}} - decision 'approve' ONLY for a verdict that is APPROVE,
+    of the current verifier version, from a `verify` run on this store's OWN capture for that request (the anchor
+    builder's provenance, dspverify Store.latest_captured_for) AND still the request's latest such verdict (a later
+    WAIT/DECLINE withdraws it). Anything else = 'none'. Unreadable = absent (refused). Never raises."""
+    import sqlite3
+    try:
+        if version is None:
+            from credit_verify.dspverify import VERSION as version
+        con = sqlite3.connect(f"file:{path or DSP_STORE}?mode=ro", uri=True, timeout=10)
+    except Exception:  # noqa: BLE001
+        return {}
+    out: dict[str, dict] = {}
+    try:
+        for vid in nums:
+            row = con.execute("SELECT v.request_id, v.verdict, v.version, v.capture_request_id, v.packet_json, r.kind "
+                              "FROM dsp_verdicts v JOIN dsp_runs r ON r.run_id = v.run_id WHERE v.id = ?",
+                              (vid,)).fetchone()
+            if row is None:
+                continue
+            rid, verdict, ver, cap, packet_json, kind = row
+            rid = str(rid).lower()
+            latest = con.execute("SELECT max(v.id) FROM dsp_verdicts v JOIN dsp_runs r ON r.run_id = v.run_id "
+                                 "WHERE lower(v.request_id) = ? AND v.version = ? AND r.kind = 'verify'",
+                                 (rid, version)).fetchone()[0]
+            own = False
+            if cap:
+                for (ids_json,) in con.execute("SELECT request_ids_json FROM dsp_captures WHERE capture_request_id = ?",
+                                               (cap,)):
+                    try:
+                        own = own or rid in {str(x).lower() for x in json.loads(ids_json or "[]")}
+                    except ValueError:
+                        pass
+                try:
+                    own = own and (json.loads(packet_json or "{}").get("capture") or {}).get("request_id") == cap
+                except ValueError:
+                    own = False
+            ok = verdict == "APPROVE" and ver == version and kind == "verify" and own and latest == vid
+            out[f"dsp_verdicts:{vid}"] = {"request_id": rid, "decision": "approve" if ok else "none", "mode": "apply"}
+    except Exception:  # noqa: BLE001 - unreadable = absent = refused
+        return {}
+    finally:
+        con.close()
     return out
 
 
