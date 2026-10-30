@@ -577,7 +577,8 @@ def cmd_uvn_status(args: argparse.Namespace) -> int:
     report = uvn_status.run(list_path=args.list, segment=args.segment, mode=args.mode, max_users=args.max_users,
                             campaign=args.campaign, wording=args.wording or "",
                             ledger_path=args.ledger, proof_path=args.proof_on_file, preview_dir=args.preview,
-                            from_stage2=args.from_stage2, stage2_path=args.proof_store, exclude_users=exclude)
+                            from_stage2=args.from_stage2, stage2_path=args.proof_store, exclude_users=exclude,
+                            check_recipients=args.check_recipients)
     log("uvn-status " + json.dumps({k: v for k, v in vars(report).items() if not isinstance(v, (list, dict))}))
     print(uvn_status.render(report, args.mode, args.segment))
     return 1 if report.failed else 0
@@ -590,8 +591,13 @@ def cmd_claim_proof_ask(args: argparse.Namespace) -> int:
         return 0
     if args.preview:
         Path(args.preview).mkdir(mode=0o700, parents=True, exist_ok=True)
+    if args.check_recipients and args.reminders:
+        # QA #1516: a reminder's claim path differs; its recipient check would silently fall back to offline validation
+        print("--check-recipients applies to first notes only, not --reminders.")
+        return 2
     report = claim_proof_ask.run(list_path=args.list, segment=args.segment, mode=args.mode,
-                                 max_users=args.max_users, reminders=args.reminders, preview_dir=args.preview)
+                                 max_users=args.max_users, reminders=args.reminders, preview_dir=args.preview,
+                                 check_recipients=args.check_recipients)
     print(claim_proof_ask.render(report, args.mode, args.segment, reminders=args.reminders))
     return 1 if report.failed else 0
 
@@ -908,6 +914,8 @@ def parser() -> argparse.ArgumentParser:
     vn.set_defaults(fn=cmd_verify_notify)
 
     us = sub.add_parser("uvn-status", help="UVN status + reminder: one message per waiting requester (firstmate 060)")
+    us.add_argument("--check-recipients", action="store_true", help="C11: the dry run runs every send-time check read-only "
+                    "(the gate's --check-recipient), so it reports the same deferrals as the send")
     us.add_argument("--list", default=None, help="credit-trust-llm-t01's uvn-reminder-list.json (<= 30 h old); "
                                                   "required unless --from-stage2")
     us.add_argument("--segment", choices=["paid", "free"], required=True)
@@ -936,6 +944,8 @@ def parser() -> argparse.ArgumentParser:
                                                 "(steers-1830 #5; send-locked in the gate until Fable + firstmate)")
     cp.add_argument("--list", required=True, help="claim-flow-fix-fable-c1's claim list (<= 30 h old, names the daily code check)")
     cp.add_argument("--segment", choices=["paid", "free"], required=True)
+    cp.add_argument("--check-recipients", action="store_true", help="C11: the dry run runs every send-time check read-only "
+                    "(the gate's --check-recipient), so it reports the same deferrals as the send")
     cp.add_argument("--mode", choices=["apply", "dry-run"], default="dry-run")
     cp.add_argument("--max-users", type=int, default=20, help="messages this run (canary: 3)")
     cp.add_argument("--reminders", action="store_true", help="send the due day-7 reminders instead of first asks")

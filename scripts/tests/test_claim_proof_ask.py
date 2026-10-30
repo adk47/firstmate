@@ -384,5 +384,36 @@ class ClaimStatusTests(unittest.TestCase):
         self.assertEqual((rep.second_claim, rep.not_pending, rep.support_hold), (1, 1, 1))
 
 
+class CheckRecipientDryRunTest(unittest.TestCase):
+    """C11 (p1 223): a dry run with check_recipients runs the gate's --check-recipient (every send-time check, read
+    only) - also when a preview was asked for - so the dry run reports the deferrals the send would."""
+
+    def test_the_dry_run_uses_the_recipient_check(self):
+        from credit_review import verify_notify
+        seen = []
+
+        def gate(argv):
+            seen.append(argv[-1])
+            return type("R", (), {"returncode": 3, "stdout": "DEFERRED core_notice_within_7d credits=1 (x)\n", "stderr": ""})()
+        rep = verify_notify.Report()
+        p = {"user": {"id": "1382623"}, "credits": [{"request_id": "r"}]}
+        with mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, None)):
+            verify_notify.send_all([p], rep, mode="dry-run", runner=gate, check_recipients=True,
+                                   preview_dir=tempfile.mkdtemp())
+            verify_notify.send_all([p], rep, mode="dry-run", runner=gate)
+        self.assertEqual(seen, ["--check-recipient", "--validate"])
+        self.assertEqual(rep.deferred_users, 2)
+
+    def test_reminders_with_check_recipients_are_refused_never_validated_offline(self):
+        # QA #1516: the reminder claim path has no recipient check; the combination is rejected, in code and on the CLI
+        from credit_review import claim_proof_ask
+        with self.assertRaises(ValueError):
+            claim_proof_ask.run(list_path="/nonexistent", segment="paid", reminders=True, check_recipients=True)
+        r = subprocess.run([sys.executable, str(ROOT / "scripts" / "credit-review.py"), "claim-proof-ask", "--list", "/nonexistent",
+                            "--segment", "paid", "--reminders", "--check-recipients"], capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("first notes only", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

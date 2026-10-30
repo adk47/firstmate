@@ -578,6 +578,13 @@ fi
 [ "$CAMPAIGN" != "claim-status" ] || [ "$KIND" = "initial" ] || refuse "claim-status has no follow-ups (one note per claim)."
 [ "$CAMPAIGN" != "claim-proof-pending" ] || [ "$KIND" = "initial" ] || refuse "claim-proof-pending has no follow-ups (one note per claim)."
 
+# C11: LIVE = a real send OR its read-only recipient check - every send lock and send-time check runs on LIVE, so the
+# check reports what the send would do (QA #1516: set before the copy selection, whose locks read it too)
+[ "$ACTION" != "check-recipient" ] || [ "$KIND" = "initial" ] \
+  || refuse "--check-recipient applies to an initial note only (it must never reach a path that writes)."
+LIVE=0
+if [ "$ACTION" = "post" ] || [ "$ACTION" = "check-recipient" ]; then LIVE=1; fi
+
 # COPY: which fixed text this message uses.
 #   verify-live  windowed (every real send) | v1 (preview only)
 #   retro-past   past           (no deadline, no removal language, no follow-up)
@@ -585,11 +592,11 @@ case "$CAMPAIGN" in
   verify-live)
     MAX_CREDITS=200; MAX_LISTED=25
     case "$COPY_ARG" in ""|v1|windowed) ;; *) refuse "--copy must be v1 or windowed (got '$COPY_ARG')." ;; esac
-    if [ "$ACTION" = "post" ] && [ "$KIND" = "initial" ] && [ "$COPY_ARG" != "windowed" ]; then
+    if [ "$LIVE" = "1" ] && [ "$KIND" = "initial" ] && [ "$COPY_ARG" != "windowed" ]; then
       # firstmate 090: every new credit's note is the no-threat v1 note, never removal-due.
       [ "$LIVE_V1_COPY_APPROVED" = "1" ] || refuse "the verify-live v1 copy is not approved for sending (LIVE_V1_COPY_APPROVED=0)."
       COPY="v1"
-    elif [ "$ACTION" = "post" ]; then
+    elif [ "$LIVE" = "1" ]; then
       [ "$LIVE_WINDOWED_COPY_APPROVED" = "1" ] \
         || refuse "no verify-live message may name a deadline or say a credit will be removed (firstmate 090: the captain dropped auto-removal). The windowed note and its follow-ups are send-locked (LIVE_WINDOWED_COPY_APPROVED=0); a new credit's note is the v1 copy."
       [ "$KIND" != "initial" ] || [ "$COPY_ARG" = "windowed" ] || refuse "internal: unexpected copy '$COPY_ARG'."
@@ -698,8 +705,10 @@ case "$CAMPAIGN" in
     ;;
   *) refuse "--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status, gap-ask, merge-pending, credit-hold-status or claim-proof-pending (got '$CAMPAIGN'). Each campaign is pinned in this script; there is no other." ;;
 esac
-[ "$ACTION" != "check-recipient" ] || { [ "$CAMPAIGN" = "verify-live" ] && [ "$KIND" = "initial" ]; } \
-  || refuse "--check-recipient applies to a verify-live initial note only (it must never reach a path that writes)."
+# C11 (p1 223): --check-recipient is the dry run that equals the send. It runs every send-time check a real send runs
+# up to the claim (the ledger peek, core_notice, the go-live guards, comm_state, the status-note Intercom reads, the
+# thread check) READ-ONLY: each write on that path is guarded by ACTION=post (LIVE below), so it still never writes.
+# Initial notes only (a reminder's claim path is different).
 [ "$ACTION" != "doc-check" ] || [ "$CAMPAIGN" = "retro-past" ] \
   || refuse "--doc-check applies to --campaign retro-past only: a removal notice is not an ask, and a new credit's note is never skipped for an Intercom attachment."
 # Fable [key=reply-due] (l1 219, p1 200): answering a user who wrote to us and got no answer for > 24 h. EXACTLY ONE
@@ -978,59 +987,59 @@ claim_day_label() { "$PY_BIN" -I -c 'import datetime,sys; d=datetime.date.fromis
 # the removal date; firstmate decision 2026-10-16 on review finding v1-copy-never-removal-due):
 # the v1 "nothing changes while we check" copy is preview-only, so a note that promised no
 # date can never reach a new credit.
-if { [ "$ACTION" = "post" ] || [ "$ACTION" = "validate" ]; } && [ "$CAMPAIGN" = "takeback-notice" ] && [ "$TAKEBACK_COPY_APPROVED" != "1" ]; then
+if { [ "$LIVE" = "1" ] || [ "$ACTION" = "validate" ]; } && [ "$CAMPAIGN" = "takeback-notice" ] && [ "$TAKEBACK_COPY_APPROVED" != "1" ]; then
   refuse "the takeback-notice copy is not approved for sending yet (TAKEBACK_COPY_APPROVED=0). It needs Fable's copy GO and the captain's approval, landed in a PR that flips the lock; --dry-run renders it."
 fi
-if [ "$ACTION" = "post" ] && [ "$CAMPAIGN" = "removal-notice" ] && [ "$REMOVAL_COPY_APPROVED" != "1" ]; then
+if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "removal-notice" ] && [ "$REMOVAL_COPY_APPROVED" != "1" ]; then
   refuse "the removal-notice copy is not approved for sending yet (REMOVAL_COPY_APPROVED=0). It needs Fable's copy GO, landed in a PR that flips the lock, and firstmate's approval of the backfill list; --dry-run renders exactly what would be sent."
 fi
-if [ "$ACTION" = "post" ] && [ "$CAMPAIGN" = "withdrawal-confirm" ] && [ "$WITHDRAWAL_COPY_APPROVED" != "1" ]; then
+if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "withdrawal-confirm" ] && [ "$WITHDRAWAL_COPY_APPROVED" != "1" ]; then
   refuse "the withdrawal-confirm copy is not approved for sending (WITHDRAWAL_COPY_APPROVED=0)."
 fi
-if [ "$ACTION" = "post" ] && { [ "$CAMPAIGN" = "status-doc-received" ] || [ "$CAMPAIGN" = "status-team-review" ]; } && [ "$STATUS_NOTES_COPY_APPROVED" != "1" ]; then
+if [ "$LIVE" = "1" ] && { [ "$CAMPAIGN" = "status-doc-received" ] || [ "$CAMPAIGN" = "status-team-review" ]; } && [ "$STATUS_NOTES_COPY_APPROVED" != "1" ]; then
   refuse "the status-note copy is not approved for sending (STATUS_NOTES_COPY_APPROVED=0)."
 fi
-if [ "$ACTION" = "post" ] && [ "$COPY" = "docrecvr" ] && [ "$STATUS_RECEIVED_COPY_APPROVED" != "1" ]; then
+if [ "$LIVE" = "1" ] && [ "$COPY" = "docrecvr" ] && [ "$STATUS_RECEIVED_COPY_APPROVED" != "1" ]; then
   refuse "the receipt line R1 (status-doc-received --copy received) is not approved for sending yet (STATUS_RECEIVED_COPY_APPROVED=0). It waits for the captain's yes, landed in a PR that flips the lock; --dry-run renders exactly what would be sent."
 fi
-if [ "$ACTION" = "post" ] && { [ "$CAMPAIGN" = "email-changed" ] || [ "$CAMPAIGN" = "email-changed-dup" ]; } && [ "$EMAIL_CHANGE_COPY_APPROVED" != "1" ]; then
+if [ "$LIVE" = "1" ] && { [ "$CAMPAIGN" = "email-changed" ] || [ "$CAMPAIGN" = "email-changed-dup" ]; } && [ "$EMAIL_CHANGE_COPY_APPROVED" != "1" ]; then
   refuse "the email-changed copy is not approved for sending (EMAIL_CHANGE_COPY_APPROVED=0)."
 fi
-if [ "$ACTION" = "post" ] && [ "$CAMPAIGN" = "claim-proof-ask" ] && [ "$CLAIM_PROOF_ASK_COPY_APPROVED" != "1" ]; then
+if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "claim-proof-ask" ] && [ "$CLAIM_PROOF_ASK_COPY_APPROVED" != "1" ]; then
   refuse "the claim-proof-ask copy is not approved for sending yet (CLAIM_PROOF_ASK_COPY_APPROVED=0). It needs Fable's copy approval and firstmate's GO, landed in a PR that flips the lock; --dry-run renders exactly what would be sent."
 fi
-if [ "$ACTION" = "post" ] && [ "$CAMPAIGN" = "claim-status" ] && [ "$CLAIM_STATUS_COPY_APPROVED" != "1" ]; then
+if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "claim-status" ] && [ "$CLAIM_STATUS_COPY_APPROVED" != "1" ]; then
   refuse "the claim-status copy is not approved for sending yet (CLAIM_STATUS_COPY_APPROVED=0). Fable approved the text; it waits for firstmate's GO after the 5-user dry run, landed in a PR that flips the lock; --dry-run renders exactly what would be sent."
 fi
-if [ "$ACTION" = "post" ] && [ "$CAMPAIGN" = "uvn-status" ] && [ "$UVN_STATUS_COPY_APPROVED" != "1" ]; then
+if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "uvn-status" ] && [ "$UVN_STATUS_COPY_APPROVED" != "1" ]; then
   refuse "the uvn-status copy is not approved for sending (UVN_STATUS_COPY_APPROVED=0)."
 fi
-if [ "$ACTION" = "post" ] && [ "$CAMPAIGN" = "gap-ask" ] && [ "$GAP_ASK_COPY_APPROVED" != "1" ]; then
+if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "gap-ask" ] && [ "$GAP_ASK_COPY_APPROVED" != "1" ]; then
   refuse "the gap-ask copy is not approved for sending (GAP_ASK_COPY_APPROVED=0)."
 fi
 # Per-campaign kill switch (rulings-1028-1430 section 2.4): `touch /etc/hydra/<campaign>.disabled` stops every real
 # send of that campaign at once, before any claim or Intercom call; the dry run still renders. Removing the file
 # resumes it. Exit 3: nothing is claimed, refused or closed.
-if [ "$ACTION" = "post" ] && [ -e "$DISABLED_DIR/$CAMPAIGN.disabled" ]; then
+if [ "$LIVE" = "1" ] && [ -e "$DISABLED_DIR/$CAMPAIGN.disabled" ]; then
   printf 'STOPPED %s is disabled (%s present); nothing was sent or claimed\n' "$CAMPAIGN" "$DISABLED_DIR/$CAMPAIGN.disabled"; exit 3
 fi
-if [ "$ACTION" = "post" ] && [ "$CAMPAIGN" = "merge-pending" ] && [ "$MERGE_PENDING_COPY_APPROVED" != "1" ]; then
+if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "merge-pending" ] && [ "$MERGE_PENDING_COPY_APPROVED" != "1" ]; then
   refuse "the merge-pending copy is not approved for sending yet (MERGE_PENDING_COPY_APPROVED=0). It waits for the captain's own yes on line M1, landed in a PR that flips the lock; --dry-run renders exactly what would be sent."
 fi
-if [ "$ACTION" = "post" ] && [ "$CAMPAIGN" = "credit-hold-status" ] && [ "$CREDIT_HOLD_STATUS_COPY_APPROVED" != "1" ]; then
+if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "credit-hold-status" ] && [ "$CREDIT_HOLD_STATUS_COPY_APPROVED" != "1" ]; then
   refuse "the credit-hold-status copy is not approved for sending yet (CREDIT_HOLD_STATUS_COPY_APPROVED=0). It waits for the captain's yes on L14a, landed in a PR that flips the lock; --dry-run renders exactly what would be sent."
 fi
-if [ "$ACTION" = "post" ] && [ "$CAMPAIGN" = "claim-proof-pending" ] && [ "$CLAIM_PROOF_PENDING_COPY_APPROVED" != "1" ]; then
+if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "claim-proof-pending" ] && [ "$CLAIM_PROOF_PENDING_COPY_APPROVED" != "1" ]; then
   refuse "the claim-proof-pending copy is not approved for sending yet (CLAIM_PROOF_PENDING_COPY_APPROVED=0). It waits for the captain's yes on L14b, landed in a PR that flips the lock; --dry-run renders exactly what would be sent."
 fi
-if [ "$ACTION" = "post" ] && [ "$CAMPAIGN" = "retro-past" ] && [ "$RETRO_COPY_APPROVED" != "1" ]; then
+if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "retro-past" ] && [ "$RETRO_COPY_APPROVED" != "1" ]; then
   refuse "the retro-past copy is not approved for sending yet (RETRO_COPY_APPROVED=0). It needs Fable's copy GO and the captain's approval of the rendered notes, landed in a PR that flips the lock; --dry-run renders exactly what would be sent."
 fi
 
 # On a real send, look at the ledger first so a re-run is a quiet no-op before any Intercom
 # call. The atomic claims below re-check all of this inside their transactions.
 CONTACT_ID="" DUE_DAY="" REMOVAL_DAY=""
-if [ "$ACTION" = "post" ]; then
+if [ "$LIVE" = "1" ]; then
   if [ "$KIND" = "initial" ]; then
     peek="$(ledger pending --campaign "$CAMPAIGN" --user-key "$EMAIL" --user-id "$USER_ID" --day "$DAY" --request-ids "$(ids_csv "$INPUT")")" \
       || die "the ledger read failed; refusing to send without the idempotency record."
@@ -1049,7 +1058,7 @@ if [ "$ACTION" = "post" ]; then
     if [ -n "$done_why" ]; then
       # retro-past: one message per user ever, none after a proof reply. Close the rows so
       # the wave never offers them again.
-      ledger skip --campaign "$CAMPAIGN" --request-ids "$(printf '%s' "$pending" | "$JQ_BIN" -r 'join(",")')" >/dev/null \
+      [ "$ACTION" != "post" ] || ledger skip --campaign "$CAMPAIGN" --request-ids "$(printf '%s' "$pending" | "$JQ_BIN" -r 'join(",")')" >/dev/null \
         || die "the ledger write failed."
       printf 'SKIPPED %s credits=%s\n' "$done_why" "$(printf '%s' "$pending" | "$JQ_BIN" -r 'length')"; exit 0
     fi
@@ -1101,11 +1110,11 @@ fi
 # verify_messages as status 'deferred': nothing is claimed, refused or closed, so the note is offered again
 # once the window passes. Unreadable, or nothing to check
 # (no user id and no valid email) -> nothing sent (exit 4), never "clear".
-if [ "$ACTION" = "post" ] && [ -n "$REPLY_DUE" ]; then
+if [ "$LIVE" = "1" ] && [ -n "$REPLY_DUE" ]; then
   # [key=reply-due]: the core-notice cooldown governs our UNSOLICITED notes, never answering the user (comm_state
   # verifies the trigger before anything is claimed or sent)
   printf 'reply_due %s: core-notice cooldown not applied to this answer\n' "$REPLY_DUE" >&2
-elif [ "$ACTION" = "post" ]; then
+elif [ "$LIVE" = "1" ]; then
   # By Muso user id; a note keyed only by email (removal notices) is checked for every account with that email.
   if printf '%s' "$USER_ID" | grep -qE '^[0-9]{1,12}$'; then cn_who=(--user-id "$USER_ID"); else cn_who=(--email "$EMAIL"); fi
   [ -r "$CORE_NOTICE_HELPER" ] || { echo "CORE NOTICE CHECK NOT POSSIBLE: $CORE_NOTICE_HELPER is missing; nothing was sent or claimed" >&2; exit 4; }
@@ -1117,7 +1126,7 @@ elif [ "$ACTION" = "post" ]; then
     3) cn_why="$(printf '%s' "$CN" | "$JQ_BIN" -r '(.reasons // []) | join("; ")' 2>/dev/null)"
        # Logged in verify_messages as status 'deferred' (a log, never a lock: the note is offered again next run).
        # A failed log changes nothing about the deferral (nothing was sent); it is reported, not swallowed.
-       ledger log-deferral --campaign "$CAMPAIGN" --user-key "$EMAIL" --user-id "$USER_ID" --day "$DAY" \
+       [ "$ACTION" != "post" ] || ledger log-deferral --campaign "$CAMPAIGN" --user-key "$EMAIL" --user-id "$USER_ID" --day "$DAY" \
          --request-ids "$(ids_csv "$INPUT")" --message-type "$MESSAGE_TYPE" --approved-by "$APPROVED_BY" \
          --approval-ref "$APPROVAL_REF" --reason core_notice_within_7d --detail "$cn_why" >/dev/null \
          || echo "WARNING: the core_notice_within_7d deferral was not logged in the ledger" >&2
@@ -1777,7 +1786,7 @@ GOLIVE=0
 case "$CAMPAIGN:$COPY" in merge-pending:*|credit-hold-status:*|claim-proof-pending:*|status-doc-received:docrecvr|uvn-status:*) GOLIVE=1 ;; esac
 # the claim code ask's FIRST message too ([key=claim-code-ask-release]); its day-7 reminder keeps its own rules
 [ "$CAMPAIGN:$KIND" = "claim-proof-ask:initial" ] && GOLIVE=1
-if [ "$GOLIVE" = "1" ] && [ "$ACTION" = "post" ]; then
+if [ "$GOLIVE" = "1" ] && [ "$LIVE" = "1" ]; then
   # G4: the recipient is the ACCOUNT behind the request, never a staff address.
   case "$EMAIL" in *@muso.ai|*.muso.ai) refuse "G4: the recipient email is a Muso staff address; nothing was sent or claimed." ;; esac
   # G5: no link, address or markup in any interpolated field (names and titles are third-party text).
@@ -1848,7 +1857,7 @@ fi
 # 'just go'): comm_state reads it at send (UVN row, review hold, account hold, open ask -> held).
 NIE=0
 case "$CAMPAIGN:$COPY" in status-team-review:*|claim-status:*|status-doc-received:docrecv|status-doc-received:docrecvq) NIE=1 ;; esac
-if { [ "$GOLIVE" = "1" ] || [ "$NIE" = "1" ]; } && [ "$ACTION" = "post" ]; then
+if { [ "$GOLIVE" = "1" ] || [ "$NIE" = "1" ]; } && [ "$LIVE" = "1" ]; then
   # The user's communication state, read from the live stores RIGHT NOW (captain 18:2xZ; comm_state.py): the
   # "wait for our message" lines never go to anyone with a document or reply on file (they get R1 or nothing), R1
   # never after a decision was told, nothing within 7 days of another note. A hold is logged in verify_messages
@@ -1863,7 +1872,7 @@ if { [ "$GOLIVE" = "1" ] || [ "$NIE" = "1" ]; } && [ "$ACTION" = "post" ]; then
   case "$cs_rc" in
     0) ;;
     3) cs_why="$(printf '%s' "$CS" | "$JQ_BIN" -r '(.state // "") + ": " + ((.reasons // []) | join("; "))' 2>/dev/null)"
-       ledger log-deferral --campaign "$CAMPAIGN" --user-key "$EMAIL" --user-id "$USER_ID" --day "$DAY" \
+       [ "$ACTION" != "post" ] || ledger log-deferral --campaign "$CAMPAIGN" --user-key "$EMAIL" --user-id "$USER_ID" --day "$DAY" \
          --request-ids "$ALL_IDS" --message-type "$MESSAGE_TYPE" --approved-by "$APPROVED_BY" \
          --approval-ref "$APPROVAL_REF" --reason comm_state --detail "$cs_why" >/dev/null \
          || echo "WARNING: the comm_state hold was not logged in the ledger" >&2
@@ -1961,7 +1970,7 @@ case "$CAMPAIGN" in uvn-status|status-doc-received|status-team-review|claim-stat
 # days defers the note AND its reminder (nothing closed; the next run looks again; a reminder
 # deferred past the day before the close day is never sent).
 [ "$CAMPAIGN" != "claim-proof-ask" ] || STATUSLIKE=1
-if [ "$STATUSLIKE" = "1" ] && [ "$ACTION" = "post" ]; then
+if [ "$STATUSLIKE" = "1" ] && [ "$LIVE" = "1" ]; then
   # gap-ask is never skipped for documents in Intercom: a document on file is why it is sent.
   if [ "$CAMPAIGN" = "gap-ask" ]; then
     FOLLOWED_IDS="$(ledger followed-notes --user-key "$EMAIL" --user-id "$USER_ID" | "$JQ_BIN" -c '.message_ids')" \
@@ -1981,7 +1990,7 @@ if [ "$STATUSLIKE" = "1" ] && [ "$ACTION" = "post" ]; then
   if [ "$CAMPAIGN" = "uvn-status" ] && [ "$S2_NODOC" != "1" ]; then
     DOCS_WHY="$(for_each_account_contact docs_submitted)"
     if [ -n "$DOCS_WHY" ]; then
-      ledger skip --campaign "$CAMPAIGN" --request-ids "$ALL_IDS" >/dev/null || die "the ledger write failed."
+      [ "$ACTION" != "post" ] || ledger skip --campaign "$CAMPAIGN" --request-ids "$ALL_IDS" >/dev/null || die "the ledger write failed."
       printf 'SKIPPED docs_submitted credits=%s (%s)\n' "$N" "$DOCS_WHY"; exit 0
     fi
   fi
@@ -2045,7 +2054,7 @@ thread_check() { # sets THREAD_WHY (empty when $THREAD can carry the note) and T
   [ -z "$btag" ] || THREAD_WHY="conversation $THREAD carries the '$btag' tag (do not auto-message); not sending."
 }
 THREAD_CONTACT_PICK=""
-if [ -n "$THREAD" ] && [ "$ACTION" = "post" ]; then
+if [ -n "$THREAD" ] && [ "$LIVE" = "1" ]; then
   thread_check
   if [ -z "$THREAD_WHY" ] && [ -n "$THREAD_CONTACT_PICK" ]; then
     CONTACT_ID="$THREAD_CONTACT_PICK"
@@ -2069,7 +2078,7 @@ if [ "$CAMPAIGN" = "retro-past" ]; then
     exit 0
   fi
   if [ -n "$DOCS_WHY" ]; then
-    ledger skip --campaign "$CAMPAIGN" --request-ids "$ALL_IDS" >/dev/null || die "the ledger write failed."
+    [ "$ACTION" != "post" ] || ledger skip --campaign "$CAMPAIGN" --request-ids "$ALL_IDS" >/dev/null || die "the ledger write failed."
     printf 'SKIPPED docs_submitted credits=%s (%s)\n' "$N" "$DOCS_WHY"; exit 0
   fi
 fi

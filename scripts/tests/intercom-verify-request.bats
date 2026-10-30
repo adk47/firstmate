@@ -441,6 +441,9 @@ OTHER_PRO="0c4e7a2b-1f3d-4b6a-9e8c-7d5a3b1f0e92"
   jq '.user.auth_id = "auth0|ab36d71d"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json" && mv "$TEST_TMPDIR/c2.json" "$TEST_TMPDIR/c.json"
   STUB_CONTACTS='{"type":"list","data":[{"id":"u1","role":"user","email":"jane.doe@example.com"}]}' run -1 send
   [[ "$output" == *"has no external_id"* ]]
+  # QA #1516: the check runs the send's ledger peek too, so compare it with a send in the SAME state - a fresh ledger
+  # (after the send above recorded its refusal, both a re-send and the check would skip as already-notified)
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
   STUB_CONTACTS='{"type":"list","data":[{"id":"u1","role":"user","email":"jane.doe@example.com","external_id":""}]}' \
     run -1 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --check-recipient
   [[ "$output" == *"has no external_id"* ]]
@@ -452,6 +455,7 @@ OTHER_PRO="0c4e7a2b-1f3d-4b6a-9e8c-7d5a3b1f0e92"
   jq 'del(.user.professional_id, .user.auth_id)' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json" && mv "$TEST_TMPDIR/c2.json" "$TEST_TMPDIR/c.json"
   run -1 send
   [[ "$output" == *"no account Intercom identity"* ]]
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"          # the same state as the send above (QA #1516)
   run -1 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --check-recipient
   [[ "$output" == *"no account Intercom identity"* ]]
   [ "$(posts)" -eq 0 ]
@@ -477,8 +481,59 @@ OTHER_PRO="0c4e7a2b-1f3d-4b6a-9e8c-7d5a3b1f0e92"
   [ "$(posts)" -eq 0 ]
   [ -z "$(sql 'select * from verify_messages')" ]
   [ -z "$(sql 'select * from verify_requests')" ]
-  run -1 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --check-recipient --campaign retro-past
-  [[ "$output" == *"--check-recipient applies to a verify-live initial note only"* ]]
+  # C11: any campaign's INITIAL note may be checked; a reminder (another claim path) may not
+  run -1 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --check-recipient --kind reminder-14 --parent-message-id 1001
+  [[ "$output" == *"--check-recipient applies to an initial note only"* ]]
+}
+
+@test "C11: --check-recipient returns the SAME deferral / hold / skip as the real send, and writes nothing (dry run == send)" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  # core_notice (a post-only check before C11: claim 1621425 validated in the dry run, deferred at send)
+  STUB_CORE_NOTICE=hold run -3 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --check-recipient
+  [[ "$output" == "DEFERRED core_notice_within_7d"* ]]
+  # comm_state
+  STUB_COMM_STATE=hold run -3 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --check-recipient
+  [[ "$output" == "HELD comm_state"* ]]
+  # the status-note Intercom reads: a document the user sent skips the ask
+  STUB_CONTACT_CONVS='{"conversations":[{"id":"6","source":{"author":{"type":"user"},"attachments":[{"name":"split.pdf"}]}}],"pages":{}}' \
+    run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --check-recipient
+  [[ "$output" == "SKIPPED docs_submitted"* ]]
+  # nothing above wrote a ledger row or posted; the real send writes the same deferral it reported
+  [ -z "$(sql 'select * from verify_messages')" ]
+  [ -z "$(sql 'select * from verify_requests')" ]
+  [ "$(posts)" -eq 0 ]; [ "$(replies)" -eq 0 ]
+  STUB_CORE_NOTICE=hold run -3 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "DEFERRED core_notice_within_7d"* ]]
+  [ "$(sql "select count(*) from verify_messages where status='deferred'")" -eq 1 ]
+  # QA #1516: a send-LOCKED campaign and a kill-switched one fail the check exactly as they fail the send
+  run -1 "$LOCKED" send --campaign retro-past --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --check-recipient
+  [[ "$output" == *"RETRO_COPY_APPROVED"* || "$output" == *"send-locked"* || "$output" == *"locked"* ]]
+  export INTERCOM_VERIFY_TEST_DISABLED_DIR="$TEST_TMPDIR/disabled"
+  mkdir -p "$INTERCOM_VERIFY_TEST_DISABLED_DIR" && touch "$INTERCOM_VERIFY_TEST_DISABLED_DIR/uvn-status.disabled"
+  run "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --check-recipient
+  check_rc=$status; check_out="$output"
+  run "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [ "$check_rc" -eq "$status" ] && [ "$check_rc" -ne 0 ]
+  [[ "$check_out" == *"disabled"* ]]
+  rm -f "$INTERCOM_VERIFY_TEST_DISABLED_DIR/uvn-status.disabled"
+  # QA #1516 (257): the verify-live WINDOWED copy lock and the takeback lock fail the check exactly like the send
+  credits "$TEST_TMPDIR/v.json" Jane "r1:Mixing:Song A:Big Star"
+  run "$LOCKED" send --credits-file "$TEST_TMPDIR/v.json" --approved-by U7RP6HKUZ --copy windowed --check-recipient
+  wc=$status; wo="$output"
+  run "$LOCKED" send --credits-file "$TEST_TMPDIR/v.json" --approved-by U7RP6HKUZ --copy windowed
+  [ "$wc" -eq "$status" ] && [ "$wc" -eq 1 ]
+  [[ "$wo" == *"LIVE_WINDOWED_COPY_APPROVED=0"* ]]
+  tbcredits "$TEST_TMPDIR/t.json" "t1|Mixing|Song A|Big Star|Jane Doe|https://www.discogs.com/release/1|public credits page"
+  run "$LOCKED" send --campaign takeback-notice --credits-file "$TEST_TMPDIR/t.json" --approved-by U7RP6HKUZ --check-recipient
+  tc=$status; to="$output"
+  run "$LOCKED" send --campaign takeback-notice --credits-file "$TEST_TMPDIR/t.json" --approved-by U7RP6HKUZ
+  [ "$tc" -eq "$status" ] && [ "$tc" -eq 1 ]
+  [[ "$to" == *"TAKEBACK_COPY_APPROVED=0"* ]]
+  # a clean user: RECIPIENT OK, still nothing written by the check
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  run -0 "$LOCKED" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --check-recipient
+  [[ "$output" == "RECIPIENT OK uvn-status initial"* ]]
+  [ -z "$(sql 'select * from verify_messages')" ]
 }
 
 # --- api-log before, response verified after -----------------------------------------

@@ -651,7 +651,8 @@ def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
             argv = [wrapper, "send", "--credits-file", path, "--approved-by", CAPTAIN_UID]
             argv += (extra or []) + (p.get("extra") or [])
             if mode != "apply":
-                argv.append("--dry-run" if preview_dir else ("--check-recipient" if check_recipients else "--validate"))
+                # C11: the recipient check runs every send-time check read-only (dry run == send); it wins over a preview
+                argv.append("--check-recipient" if check_recipients else ("--dry-run" if preview_dir else "--validate"))
             res = runner(argv)
         finally:
             os.unlink(path)

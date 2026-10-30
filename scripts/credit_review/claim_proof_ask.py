@@ -153,7 +153,9 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
         preview_dir: str | None = None, query: Query = trino, wrapper: str = verify_notify.WRAPPER,
         runner: verify_notify.Runner = verify_notify._run, ledger_path: str | None = None,
         support_contacts: frozenset[str] | None = None, now: datetime | None = None,
-        export_path: str | None = None) -> ClaimReport:
+        export_path: str | None = None, check_recipients: bool = False) -> ClaimReport:
+    if check_recipients and reminders:
+        raise ValueError("check_recipients applies to first notes only, not reminders (QA #1516)")
     report = ClaimReport()
     claims, why = load_list(list_path, now=now)
     if why:
@@ -223,7 +225,8 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
         payloads.append(_payload(c, acct))
     report.users = len(payloads)
     verify_notify.send_all(payloads, report, mode=mode, wrapper=wrapper, runner=runner,
-                           extra=["--campaign", CAMPAIGN], preview_dir=preview_dir)
+                           extra=["--campaign", CAMPAIGN], preview_dir=preview_dir,
+                           check_recipients=check_recipients and mode != "apply")
     if mode == "apply":
         export_asked(db, export_path)
     return report

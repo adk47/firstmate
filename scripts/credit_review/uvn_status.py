@@ -573,7 +573,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
         ledger_path: str | None = None, proof_path: str | None = None, query: Query = trino,
         wrapper: str = verify_notify.WRAPPER, runner: verify_notify.Runner = verify_notify._run,
         now: datetime | None = None, preview_dir: str | None = None, pace_seconds: float = 1.0,
-        campaign: str = CAMPAIGN, post: verify_notify.Poster = verify_notify.post_cs_priority,
+        check_recipients: bool = False, campaign: str = CAMPAIGN, post: verify_notify.Poster = verify_notify.post_cs_priority,
         wording: str = "", from_stage2: bool = False, stage2_path: str | None = None,
         exclude_users: set[str] | frozenset[str] = frozenset(), lens: fraud_lens.LensFn | None = None,
         watchlist_path: str | None = None, holds_path: str | None = None) -> UvnReport:
@@ -894,7 +894,8 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                 before = report.sent_notes if mode == "apply" else report.validated + report.recipient_ok
                 verify_notify.send_all([p], report, mode=mode, wrapper=wrapper, runner=runner,
                                        extra=["--campaign", campaign] + (["--copy", wording] if wording else []),
-                                       pace_seconds=0, preview_dir=preview_dir)
+                                       pace_seconds=0, preview_dir=preview_dir,
+                                       check_recipients=check_recipients and mode != "apply")
                 calls += 1
                 reached = (report.sent_notes if mode == "apply" else report.validated + report.recipient_ok) - before
                 report.users += reached
