@@ -251,7 +251,11 @@ def admin_claim_writer(script: str | None = None, timeout_s: int = 120) -> Claim
         if not tray_sha:
             tray_sha = hashlib.sha256(open(tray_path, "rb").read()).hexdigest()
         env = {**os.environ, "FABLE_RULING_ID": ruling_id, "FABLE_DECIDER_RUN_ID": run_id,
-               "FABLE_DECIDER_TRAY": os.path.abspath(tray_path), "MUSO_ADMIN_IDENTITY": fx.ADMIN_IDENTITY}
+               "FABLE_DECIDER_TRAY": os.path.abspath(tray_path),
+               # Core binds the fable-decider automation ONLY to agent-fable@muso.ai (AUTOMATION_APPROVAL_SCOPES;
+               # core #11012/#11013 claimDeclineCaller): the decider's credit-decider login is refused 403
+               # claim_decline_automation_refused. The wrapper fails closed while /etc/openclaw/agents/fable.env is absent.
+               "MUSO_ADMIN_IDENTITY": fx.APPROVE_IDENTITY}
         proc = subprocess.run(["bash", script, "--requester", fx.REQUESTER, "call", "POST",
                                f"/admin/claiming/{int(claim_id)}/reject", reject_body(ruling_id, tray_sha, ops_reason)],
                               capture_output=True, text=True, timeout=timeout_s, check=False, env=env)

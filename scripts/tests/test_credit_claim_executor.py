@@ -281,6 +281,7 @@ class RunTest(unittest.TestCase):
 
         def fake_run(argv, **kw):
             seen["argv"] = argv
+            seen["identity"] = kw["env"]["MUSO_ADMIN_IDENTITY"]
             return sp.CompletedProcess(argv, 0, json.dumps({"http_status": 200, "body": {}}), "")
         orig = cx.subprocess.run
         cx.subprocess.run = fake_run
@@ -295,6 +296,8 @@ class RunTest(unittest.TestCase):
                                 "opsReason": "company claim on major org X from a free-mail address"})
         self.assertNotIn("reason", body)                 # no customer-facing reason: standard template only
         self.assertNotIn("note", body)
+        # core binds fable-decider to agent-fable@ only: the decline must log in as 'fable', never 'credit-decider'
+        self.assertEqual(seen["identity"], "fable")
 
 
 if __name__ == "__main__":
