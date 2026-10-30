@@ -1739,7 +1739,7 @@ jobs:
         # Stdlib unittest, by name.
         run: |
           set -euo pipefail
-          python3 -m unittest -v tests.test_intercom_backlog_send tests.test_intercom_backlog_tail tests.test_intercom_backlog_intake
+          python3 -m unittest -v tests.test_intercom_backlog_send tests.test_intercom_backlog_tail tests.test_intercom_backlog_intake tests.test_intercom_backlog_which_account
       - name: Run paperclip-intake tests
         # scripts/paperclip-intake.py is how agents file Paperclip cards: the
         # fingerprint port (hydra#1002), exact-token dedupe, the zero-token
