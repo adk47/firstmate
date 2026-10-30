@@ -2458,9 +2458,19 @@ statusfile() {
   run -0 "$LOCKED" send --campaign claim-status --credits-file "$TEST_TMPDIR/s.json" --approved-by U7RP6HKUZ --dry-run
   [[ "${lines[0]}" == "DRY-RUN claim-status initial email credits=1 copy=claimstatus" ]]
   [ "$(rendered .subject)" = "Your claim on Big Star" ]
-  [ "$(rendered .body | plain)" = "Hi Jane, a quick update on your claim on Big Star: it is with our team for review. Nothing else is needed from you right now, and we will message you here as soon as it has been checked.
+  [ "$(rendered .body | plain)" = "Hi Jane, a quick update on your claim on Big Star: it is with our team for review, and we will message you here as soon as it has been checked.
 Thank you,
 Caroline, Muso Support" ]
+}
+
+@test "claim-status: fable-copy-1030-r5/g - the captain-barred nothing-needed line never renders (p1 STOP 10-30)" {
+  statusfile "$TEST_TMPDIR/s.json"
+  run -0 "$LOCKED" send --campaign claim-status --credits-file "$TEST_TMPDIR/s.json" --approved-by U7RP6HKUZ --dry-run
+  body="$(rendered .body | plain | tr '[:upper:]' '[:lower:]')"
+  [[ "$body" != *"nothing else is needed"* ]]
+  [[ "$body" != *"nothing is needed"* ]]
+  [[ "$body" != *"right now"* ]]
+  [[ "$body" == *"it is with our team for review, and we will message you here as soon as it has been checked."* ]]
 }
 
 @test "claim-status: server facts only - claim key, profile id, account id and profile name required; no follow-ups" {

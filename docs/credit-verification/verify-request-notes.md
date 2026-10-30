@@ -491,7 +491,9 @@ This asks the claimant of a pending profile claim in band B or C to add the clai
 The no-ask note for a pending claimant who gets **no** proof ask: holds, organizations, claims with no surface the daily code check can read, and any row the list routes with `"audience": "status"` (e.g. A-48h claims). Fable's copy, verbatim:
 
 > Subject: Your claim on {profile_name}
-> Hi {first_name}, a quick update on your claim on {profile_name}: it is with our team for review. Nothing else is needed from you right now, and we will message you here as soon as it has been checked.
+> Hi {first_name}, a quick update on your claim on {profile_name}: it is with our team for review, and we will message you here as soon as it has been checked.
+>
+> _(Body replaced 2026-10-30 under `fable-copy-1030-r5/g`: the captain-barred 'Nothing else is needed from you right now' removed; p1 STOP on the q4 batch.)_
 > Thank you, / Caroline, Muso Support
 
 **Status:** unlocked (`CLAIM_STATUS_COPY_APPROVED=1`) on firstmate's GO after the 5-user dry run on node-8 (2026-10-26). The proof ask is locked again (captain 2026-10-27 01:1xZ); status notes go alone, paid first.

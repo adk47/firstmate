@@ -304,7 +304,7 @@ readonly APPROVAL_REF_STATUS_RECEIVED="$APPROVAL_REF_STATUS The receipt line R1 
 readonly APPROVAL_REF_STATUS_COUNT="$APPROVAL_REF_STANDING_ORDER; count-only status-team-review wording (--copy count) approved by firstmate 2026-10-26 16:58Z (verify-ask-wiring-h2 inbox 005, Fable decides under the captain's 12:40Z order; captain 16:05Z: \"everyone should be communicated or credits and profiles awarded\"), for a user whose requests cannot be listed (unshowable fields or more than 1,000). Not an ask."
 readonly APPROVAL_REF_STATUS_NOASK="$APPROVAL_REF_STATUS The no-ask team-review wording B0 (--copy no-ask: Copy B without its optional proof sentence) approved by firstmate 2026-10-21 (credit-trust-llm-t01 key pending-status-1021, relayed in inbox 106)."
 readonly APPROVAL_REF_EMAIL_CHANGE="$APPROVAL_REF_STANDING_ORDER; email-changed templates approved by firstmate under it 2026-10-20 00:55Z (inbox 073): a threaded reply into the requester's own conversation, once per ticket, no customer-typed content."
-readonly APPROVAL_REF_CLAIM_STATUS="Fable claims-documentation-readiness-1023 ruling 3 (2026-10-23 19:15Z): claim status note APPROVED as drafted, scope narrowed to pending claimants who get no proof ask within 7 days; captain 2026-10-26 16:05Z: everyone with a pending claim is approved or told its status; firstmate claim-lane-resume-c2 005: option A."
+readonly APPROVAL_REF_CLAIM_STATUS="Fable claims-documentation-readiness-1023 ruling 3 (2026-10-23 19:15Z): claim status note APPROVED as drafted, scope narrowed to pending claimants who get no proof ask within 7 days; captain 2026-10-26 16:05Z: everyone with a pending claim is approved or told its status; firstmate claim-lane-resume-c2 005: option A. Body replaced 2026-10-30 under fable-copy-1030-r5/g (p1 STOP: the captain-barred 'Nothing else is needed from you right now' removed; 10-29 03:2xZ, #1432)."
 readonly APPROVAL_REF_CLAIM_ASK="Fable program lead steers-1830 #5 (relayed by firstmate 125, 2026-10-22 19:43Z): dated proof ask for claim bands B/C, copy approved by Fable; firstmate 126 (2026-10-22 20:01Z): the close day is allowed for claim-proof-ask only, as a plain day; no send until claim-flow-fix-fable-c1's daily code check runs."
 # claim-proof-ask: the platform keys the binding resolver may name, and the ONLY words the note
 # uses for each ("add the code ... to your <surface>"). ONLY surfaces claim-flow-fix-fable-c1's
@@ -1491,7 +1491,7 @@ def claim_ask($fn; $c):
 # claim-status (Fable claims-documentation-readiness-1023 ruling 3, verbatim): no ask, no promise of an outcome.
 def claim_status_note($fn; $c):
   { subject: "Your claim on \($c.profile_name)",
-    segs: [ {p: "Hi \($fn), a quick update on your claim on \($c.profile_name): it is with our team for review. Nothing else is needed from you right now, and we will message you here as soon as it has been checked."} ] };
+    segs: [ {p: "Hi \($fn), a quick update on your claim on \($c.profile_name): it is with our team for review, and we will message you here as soon as it has been checked."} ] };
 # merge-pending (go-live-today line M1, verbatim): status only, names the profiles, no date, no instruction.
 def merge_pending($fn; $m):
   { subject: "Your Muso merge request",
