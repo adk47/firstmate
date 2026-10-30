@@ -7,7 +7,7 @@ other (Fable review of hydra#1379 @4a57414d).
   remove {id: reason}  -> action "hold-read": a keyword misfire off the captain's list that a
                           person must read before any reply; held, never send-eligible
 
-Fails CLOSED: a missing, unreadable or malformed file raises OverridesError, and every caller
+Fails CLOSED: a missing, unreadable or malformed file, or one without BOTH maps, raises OverridesError, and every caller
 stops (send.py refuses the run; lists.py exits non-zero). An id in both maps is malformed.
 """
 import json
@@ -32,7 +32,12 @@ def load(path=DEFAULT_PATH):
         raise OverridesError(f"cannot read captain overrides {path}: {e}") from e
     if not isinstance(data, dict):
         raise OverridesError("captain overrides must be a JSON object")
-    add, remove = data.get("add", {}), data.get("remove", {})
+    missing = [k for k in ("add", "remove") if k not in data]
+    if missing:
+        # QA: a truncated or regenerated file without a map must never load it as empty (a lost 'add' would
+        # drop a captain/privacy case from the list and make it send-eligible).
+        raise OverridesError(f"captain overrides lack {missing} (both 'add' and 'remove' are required, even if empty)")
+    add, remove = data["add"], data["remove"]
     if not isinstance(add, dict) or not isinstance(remove, dict):
         raise OverridesError("'add' and 'remove' must be objects keyed by conversation id")
     bad = [k for k in list(add) + list(remove) if not _ID.match(str(k))]

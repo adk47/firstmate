@@ -22,6 +22,10 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import topics  # noqa: E402  latest-message topic + the shared billing veto
 
 API = "https://api.intercom.io"
 VER = "2.11"
@@ -83,6 +87,32 @@ def band(age_days):
     return "gt30d"
 
 
+CUSTOMER = ("user", "lead", "contact")
+
+
+def latest_customer_text(token, cid, last_n=3):
+    """The customer's last messages (up to last_n parts after the opening), or None when unreadable."""
+    req = urllib.request.Request(f"{API}/conversations/{cid}", headers={
+        "Authorization": f"Bearer {token}", "Accept": "application/json", "Intercom-Version": VER})
+    for i in range(4):
+        try:
+            with urllib.request.urlopen(req, timeout=50) as r:
+                doc = json.load(r)
+            break
+        except (urllib.error.HTTPError, urllib.error.URLError):
+            if i == 3:
+                return None
+            time.sleep(2 ** i)
+    parts = [p.get("body") for p in ((doc.get("conversation_parts") or {}).get("conversation_parts") or [])
+             if (p.get("author") or {}).get("type") in CUSTOMER and p.get("body")]
+    return " ".join(" ".join(TAG_RE.sub(" ", b).split()) for b in parts[-last_n:])
+
+
+def has_followup(row):
+    """The customer wrote again after the opening message (the opening alone no longer says what they want)."""
+    return (row.get("lcr") or 0) > (row.get("created_at") or 0) + 60
+
+
 def mask(email):
     if not email or "@" not in email:
         return ""
@@ -105,6 +135,7 @@ def main():
     path = os.path.join(OUT_DIR, f"census-{stamp}.jsonl")
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     out = os.fdopen(fd, "w")
+    rows = []
     scanned = 0
     counts = {}
     after = None
@@ -155,11 +186,9 @@ def main():
                 "lar": lar, "lcr": lcr, "created_at": c.get("created_at"),
                 "inbound": inbound,
             }
-            out.write(json.dumps(row) + "\n")
-            k = (row["band"], row["topic"], "team" if row["team_assignee_id"] else "-",
-                 "admin" if row["admin_assignee_id"] else "-")
-            counts[k] = counts.get(k, 0) + 1
-            if a.limit and sum(counts.values()) >= a.limit:
+            row["opening_topic"] = row["topic"]
+            rows.append(row)
+            if a.limit and len(rows) >= a.limit:
                 after = None
                 break
         else:
@@ -167,6 +196,18 @@ def main():
             after = nxt.get("starting_after") if isinstance(nxt, dict) else None
         if not after:
             break
+    # QA: classify on the LATEST customer message, with the billing veto (topics.py). The opening message
+    # decides only when the customer never wrote again.
+    todo = [r["id"] for r in rows if has_followup(r)]
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        latest = dict(zip(todo, ex.map(lambda c: latest_customer_text(token, c), todo)))
+    for r in rows:
+        if r["id"] in latest:
+            r["topic"] = topics.latest_topic(r["opening_topic"], latest[r["id"]], topic_of)
+        out.write(json.dumps(r) + "\n")
+        k = (r["band"], r["topic"], "team" if r["team_assignee_id"] else "-",
+             "admin" if r["admin_assignee_id"] else "-")
+        counts[k] = counts.get(k, 0) + 1
     out.close()
     by_band, by_topic = {}, {}
     for (b, t, _, _), n in counts.items():

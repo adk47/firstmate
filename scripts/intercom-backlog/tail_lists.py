@@ -142,6 +142,33 @@ def read_core(uids):
     return pending, claims
 
 
+OUTPUTS = {"A": ("status-doc-received", "tail-status-doc-received.json"),
+           "B": ("status-team-review", "tail-status-team-review.json"),
+           "C": ("uvn-status", "tail-uvn-status.json"),
+           "D": (None, "tail-claim-status-handoff.json")}
+
+
+def publish(out_dir, out, now=None):
+    """Write this run's lists and REMOVE every list this run did not produce (QA: a list from an earlier run in
+    the same directory is still fresh to the driver, so a run that finds no A/B entries, e.g. proof-on-file
+    unreadable, must leave no A/B file behind). Each file is written to a temp name and renamed."""
+    os.makedirs(out_dir, mode=0o700, exist_ok=True)
+    files = {}
+    for cls, (camp, name) in OUTPUTS.items():
+        path = os.path.join(out_dir, name)
+        if not out.get(cls):
+            if os.path.exists(path):
+                os.unlink(path)
+            continue
+        doc = (driver_list(out[cls], camp, now=now) if camp else
+               {"for": "claim-lane-resume-c2", "claims": out[cls]})
+        tmp = path + ".tmp"
+        write_json(tmp, doc)
+        os.replace(tmp, path)
+        files[cls] = path
+    return files
+
+
 def write_json(path, doc):
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as f:
@@ -168,17 +195,7 @@ def main():
         documented, proof_note = None, f"UNREADABLE ({e}): no A/B list written"
     pending, claims = read_core(r.get("user_id") for r in rows)
     out = classify(rows, pending, claims, documented, tag=a.tag)
-    os.makedirs(a.out, mode=0o700, exist_ok=True)
-    files = {}
-    for cls, camp in (("A", "status-doc-received"), ("B", "status-team-review"), ("C", "uvn-status")):
-        if out.get(cls):
-            p = os.path.join(a.out, f"tail-{camp}.json")
-            write_json(p, driver_list(out[cls], camp))
-            files[cls] = p
-    if out.get("D"):
-        p = os.path.join(a.out, "tail-claim-status-handoff.json")
-        write_json(p, {"for": "claim-lane-resume-c2", "claims": out["D"]})
-        files["D"] = p
+    files = publish(a.out, out)
     counts = {k: {"total": len(v), "paid": sum(1 for e in v if e["paid"])} for k, v in sorted(out.items())}
     support = sum(1 for k in ("A", "B") for e in out.get(k, [])
                   if documented is not None and verify_notify.is_support_contact(documented, str(e["user_id"])))

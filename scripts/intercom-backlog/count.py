@@ -10,9 +10,10 @@ Nothing is written to Intercom, core or any ledger; no text is stored. Output:
   /var/lib/intercom-backlog-i1/backlog-count-history.jsonl  one line per run
 and one `backlog:` line on stdout.
 
-credit/claim/merge = the first message's topic (census.topic_of) is credit / claim / merge, OR the last
-message's bucket is credit-like / merge-like / removal-like (the families verify-program-lead-fable-l1
-drains via reply_due; the removal-like are c3's). Everything else is counted by bucket.
+credit/claim/merge = the topic of the LATEST customer message (topics.latest_topic: legal and the shared billing
+veto first, then its own topic, else the opening's) is credit / claim / merge, OR the last message's bucket is
+credit-like / merge-like / removal-like, AND the latest text carries no billing words (the families
+verify-program-lead-fable-l1 drains via reply_due; the removal-like are c3's). Everything else is counted by bucket.
 
 Usage (node-8): set -a; . /etc/openclaw/main.env; set +a; python3 count.py [--min-hours 48]
 """
@@ -29,6 +30,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import buckets  # noqa: E402
 import census  # noqa: E402
+import topics  # noqa: E402
 
 OUT_DIR = os.environ.get("INTERCOM_BACKLOG_OUT", "/var/lib/intercom-backlog-i1")
 CREDIT_TOPICS = ("credit", "claim", "merge")
@@ -53,9 +55,14 @@ def waiting(c, now):
     return ws, text + " " + " ".join(t for t in tags if t not in census.NEUTRAL_TAGS)
 
 
-def classify(first_topic, last_bucket):
-    """Pure: the comms family of one conversation."""
-    if first_topic in CREDIT_TOPICS or last_bucket in CREDIT_BUCKETS:
+def classify(opening_topic, latest_text, last_bucket):
+    """Pure: the comms family of one conversation. latest_text None = not read (counted 'unread')."""
+    topic = topics.latest_topic(opening_topic, latest_text, census.topic_of)
+    if topic == "unread":
+        return "unread"
+    if topic in ("legal", "billing"):
+        return "legal" if topic == "legal" else (last_bucket if last_bucket and last_bucket.startswith("billing") else "billing-money")
+    if topic in CREDIT_TOPICS or last_bucket in CREDIT_BUCKETS:
         return "credit-claim-merge"
     return last_bucket
 
@@ -84,12 +91,16 @@ def main():
         after = nxt.get("starting_after") if isinstance(nxt, dict) else None
         if not after:
             break
-    todo = [cid for cid, _, t in owed if t not in CREDIT_TOPICS]
-    last = {}
+    # Every owed thread's latest customer text is read: the opening topic alone can hide a later refund ask.
+    todo = [cid for cid, _, _ in owed]
+    got = {}
     with ThreadPoolExecutor(max_workers=6) as ex:
-        for cid, got in zip(todo, ex.map(lambda c: buckets.customer_text(token, c), todo)):
-            last[cid] = buckets.bucket_of(got[1], got[0]) if got else "unread"
-    fam = collections.Counter(classify(t, last.get(cid)) for cid, _, t in owed)
+        for cid, g in zip(todo, ex.map(lambda c: buckets.customer_text(token, c), todo)):
+            got[cid] = g
+    fam = collections.Counter(
+        classify(t, got[cid][1] if got.get(cid) else None,
+                 buckets.bucket_of(got[cid][1], got[cid][0]) if got.get(cid) else None)
+        for cid, _, t in owed)
     ages = sorted((now - ws) / 86400 for _, ws, _ in owed)
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     doc = {"at": stamp, "min_hours": a.min_hours, "open": open_n, "owed_gt": len(owed),

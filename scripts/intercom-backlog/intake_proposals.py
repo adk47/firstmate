@@ -135,7 +135,9 @@ def propose_one(cid: str, tray: dict[str, Any], contacts: list[dict[str, Any]] |
         blockers.append("another account holds this email")
     if a.admin_history:
         blockers.append("an admin gave this email to another account")
-    exts = {str(c.get("external_id") or "").strip() for c in emailed} - {""}
+    # QA: the conflict set comes from EVERY contact on the thread, not only those with an email: a second contact
+    # with no email but another account's external_id (or reverted claim) must block the proposal.
+    exts = {str(c.get("external_id") or "").strip() for c in contacts} - {""}
     other = sorted({o for x in exts for o in ext_owner.get(x, set()) if o != str(a.user_id)})
     if other:
         blockers.append("a contact's external_id names another Muso account (" + ",".join(other) + ")")

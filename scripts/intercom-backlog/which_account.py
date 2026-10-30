@@ -110,6 +110,46 @@ def eligible(tray: dict[str, Any], conv: dict[str, Any] | None, contacts: list[d
     return ""
 
 
+def lookups(contact_lists, query=None) -> dict[str, Any]:
+    """Core facts for the contacts given (read-only): accounts by email, account facts, external_id owners
+    (users.id / professional id / Auth0 subject / presented profile) and reverted-claim holders."""
+    query = query or verify_notify.trino
+    emails = sorted({str(x.get("email") or "").strip().lower() for cs in contact_lists if cs for x in cs} - {""})
+    by_email = ip.accounts_for(emails, query) if emails else {}
+    uids = sorted({u for v in by_email.values() for u in v})
+    facts = rec.account_facts(uids, query) if uids else {}
+    exts = sorted({str(x.get("external_id") or "").strip() for cs in contact_lists if cs for x in cs} - {""})
+    owners = rec.ext_owners(exts, query) if exts else {}
+    presented = rec.presented_owners(exts, query) if exts else {}
+    for x, us in presented.items():
+        owners.setdefault(x, set()).update(us)
+    reverted = rec.reverted_holders(exts, query) if exts else {}
+    return {"by_email": by_email, "facts": facts, "owners": owners, "presented": presented, "reverted": reverted}
+
+
+def assess(cid: str, tray_row: dict[str, Any], conv, cs, L: dict[str, Any], now: float) -> str:
+    """Pure over its inputs: '' when the ask may go, else the skip reason."""
+    named = {x for x, us in L["owners"].items() if us}
+    if cs and any(str(c.get("external_id") or "").strip() in named for c in cs):
+        # an external_id that names ANY account: the intake resolves it, or it names someone else
+        return "the external_id names a Muso account (the intake resolves it)"
+    prop = ip.propose_one(cid, tray_row, cs, accounts_by_email=L["by_email"], facts=L["facts"],
+                          ext_owner=L["owners"], now=now, reverted=L["reverted"], presented=L["presented"])
+    return eligible(tray_row, conv, cs, prop)
+
+
+def fresh_assess(cid: str, tray_row: dict[str, Any], get, query=None, now: float | None = None):
+    """QA: re-read THIS conversation, its contacts and the account facts immediately before posting, so a reply
+    by another agent or a link made during the run is seen. Returns (why, conv, contacts)."""
+    conv = get(f"/conversations/{cid}")
+    cs = ip.thread_contacts(conv, lambda i: get(f"/contacts/{i}")) if conv else None
+    try:
+        L = lookups([cs] if cs else [], query)
+    except Exception:
+        return "core facts unreadable on the final check", conv, cs
+    return assess(cid, tray_row, conv, cs, L, time.time() if now is None else now), conv, cs
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--tray", default=ip.TRAY)
@@ -125,19 +165,7 @@ def main() -> int:
     convs = {cid: ip.intercom_get(token, f"/conversations/{cid}") for cid in tray}
     contacts = {cid: (ip.thread_contacts(c, lambda i: ip.intercom_get(token, f"/contacts/{i}")) if c else None)
                 for cid, c in convs.items()}
-    emails = sorted({str(x.get("email") or "").strip().lower() for cs in contacts.values() if cs for x in cs} - {""})
-    by_email = ip.accounts_for(emails, verify_notify.trino)
-    uids = sorted({u for v in by_email.values() for u in v})
-    facts = rec.account_facts(uids, verify_notify.trino) if uids else {}
-    exts = sorted({str(x.get("external_id") or "").strip() for cs in contacts.values() if cs for x in cs} - {""})
-    owners = rec.ext_owners(exts, verify_notify.trino) if exts else {}
-    presented = rec.presented_owners(exts, verify_notify.trino) if exts else {}
-    for x, us in presented.items():
-        owners.setdefault(x, set()).update(us)
-    reverted = rec.reverted_holders(exts, verify_notify.trino) if exts else {}
-    # An external_id that names ANY account means the intake can (or will, with the presented key)
-    # resolve it, or it names someone else: never ask.
-    named = {x for x, us in owners.items() if us}
+    L = lookups(list(contacts.values()))
     now = time.time()
     today = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d")
     db = verify_ledger.connect(LEDGER) if a.apply else ip_ledger_ro(LEDGER)
@@ -151,12 +179,7 @@ def main() -> int:
         if done >= a.max:
             break
         cs = contacts.get(cid)
-        if cs and any(str(c.get("external_id") or "").strip() in named for c in cs):
-            skip("the external_id names a Muso account (the intake resolves it)")
-            continue
-        prop = ip.propose_one(cid, tray[cid], cs, accounts_by_email=by_email, facts=facts, ext_owner=owners,
-                              now=now, reverted=reverted, presented=presented)
-        why = eligible(tray[cid], convs.get(cid), cs, prop)
+        why = assess(cid, tray[cid], convs.get(cid), cs, L, now)
         if why:
             skip(why)
             continue
@@ -186,6 +209,14 @@ def main() -> int:
             if not a.apply:
                 stats["dry"] += 1
                 print(f"DRY {cid} docs={len(fresh)} :: {body}")
+                continue
+            # final check on fresh facts (QA): re-read the thread, contacts and accounts for THIS conversation
+            why, _conv, fresh_cs = fresh_assess(cid, tray[cid], lambda path: ip.intercom_get(token, path))
+            if why:
+                skip(f"changed before posting: {why}")
+                continue
+            if user_key(fresh_cs[0]) != key:
+                skip("changed before posting: the contact's email changed")
                 continue
             c = verify_ledger.claim(db, user_key=key, day=today, request_ids=fresh, message_type="comment",
                                     approved_by=APPROVER, approval_ref=COPY_REF, contact_id=str(contact.get("id") or ""),

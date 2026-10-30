@@ -131,14 +131,53 @@ def get_conv(token, cid):
         return json.load(r)
 
 
-def still_owed(c):
+def still_owed(c, snapshot_waiting_since=None):
+    """Live check right before a send: still open, the customer still spoke last, AND (QA) the customer has
+    not written again since the snapshot the line was picked from. A new customer message may change the
+    topic (a refund or legal request after a stats question), so a changed thread is refused, never answered
+    with the old line."""
     if c.get("state") != "open":
         return False, "not open"
     st = c.get("statistics") or {}
     lar, lcr = st.get("last_admin_reply_at") or 0, st.get("last_contact_reply_at") or 0
     if lar >= lcr and not (lar == 0 and lcr == 0):
         return False, "answered since census"
+    if snapshot_waiting_since is not None:
+        # snapshot waiting_since = the last customer reply then, or created_at for an unanswered first message
+        if lcr and lcr > int(snapshot_waiting_since) + 1:
+            return False, "the customer wrote again since the snapshot (re-bucket before answering)"
     return True, ""
+
+
+PENDING_CREDIT = ("unverified", "processing", "user_verification_needed")
+
+
+def live_pending(uid, query=None):
+    """(credit rows pending, claims pending) for one account, read from the core replica right now (QA: the
+    'nothing pending' lines must not rest on a stale triage snapshot)."""
+    query = query or trino
+    q = int(uid)
+    c = query("select cast(count(*) as varchar) from postgresql_core.public.credit_requests where deletedat is null "
+              f"and status in ('unverified','processing','user_verification_needed') and userid = {q}")
+    k = query("select cast(count(*) as varchar) from postgresql_core.public.claiming where deletedat is null "
+              f"and status = 'pending' and userid = {q}")
+    return int(c[0][0]) if c else 0, int(k[0][0]) if k else 0
+
+
+def live_state_ok(row, query=None):
+    """'' when the live core facts still justify the row's line, else the skip reason. Every line this tool
+    sends was chosen because the account had NOTHING pending (triage: gate-* / claim-pending rows are other
+    owners'), so any pending credit row or claim now means the snapshot is stale."""
+    uid = row.get("user_id")
+    if not uid:
+        return ""  # no account: no credit/claim state to contradict the line
+    try:
+        credits, claims = live_pending(uid, query)
+    except Exception:
+        return "core state unreadable"
+    if credits or claims:
+        return f"state changed since triage ({credits} pending credit rows, {claims} pending claims)"
+    return ""
 
 
 class Refused(Exception):
@@ -212,10 +251,12 @@ def eligible(row):
 
 
 def bucket_eligible(row):
-    """Bucket mode's send-eligible test, after the captain overrides: the bucket maps to a line, and the
-    triage action is not the captain's, a hand-read hold, gate- or claim-owned, or already messaged today."""
+    """Bucket mode's send-eligible test, after the captain overrides: the bucket maps to a line AND the triage
+    action is on the SAME explicit allowlist as the other modes (ACTION_LINE: draft-* and no-identity). So
+    ambiguous-identity (two accounts), captain-*, hold-read, gate-*, claim-* and ledger-today rows are refused
+    (QA: an allowlist, not a denylist)."""
     act = str(row.get("action") or "")
-    return row.get("bucket") in BUCKET_LINE and not act.startswith(NEVER_ACTIONS)
+    return row.get("bucket") in BUCKET_LINE and act in ACTION_LINE and not act.startswith(NEVER_ACTIONS)
 
 
 def row_ok(row, band):
@@ -333,10 +374,13 @@ def _main():
         if pre:
             skip(pre); continue
         try:
-            ok, why = still_owed(get_conv(token, r["id"]))
+            ok, why = still_owed(get_conv(token, r["id"]), r.get("waiting_since"))
         except Exception:
             skip("intercom read failed"); continue
         if not ok:
+            skip(why); continue
+        why = live_state_ok(r)
+        if why:
             skip(why); continue
         if a.band == "bucket":
             body = render_bucket(r, names.get(uid or "", ""))
