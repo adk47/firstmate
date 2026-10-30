@@ -415,5 +415,115 @@ class CheckRecipientDryRunTest(unittest.TestCase):
         self.assertIn("first notes only", r.stdout)
 
 
+class GateReasonRecordTest(unittest.TestCase):
+    """C11 (p1 223): every per-user gate answer that is not a send is recorded with the user and the gate's own reason,
+    and the claim report shows it (claim 1621425 was 'deferred by the gate 1' with no reason, 10-30 00:16Z)."""
+
+    def gate(self, rc, out="", err=""):
+        return lambda argv: type("R", (), {"returncode": rc, "stdout": out, "stderr": err})()
+
+    def test_deferral_refusal_skip_and_a_silent_gate_are_all_recorded(self):
+        from credit_review import claim_proof_ask, verify_notify
+        rep = claim_proof_ask.ClaimReport()
+        p = lambda uid: {"user": {"id": uid}, "credits": [{"request_id": "r"}]}
+        cases = [(p("1382623"), self.gate(3, "DEFERRED messaged_7d credits=1 (we started a conversation with them in the last 7 days)\n")),
+                 (p("2"), self.gate(1, "", "REFUSED: G5: 1 interpolated field(s) carry a link\n")),
+                 (p("3"), self.gate(0, "SKIPPED already-notified credits=1\n")),
+                 (p("4"), self.gate(3))]
+        for payload, runner in cases:
+            with mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, None)):
+                verify_notify.send_all([payload], rep, mode="apply", runner=runner)
+        self.assertEqual([(o["user"], o["result"]) for o in rep.outcomes],
+                         [("1382623", "deferred"), ("2", "refused"), ("3", "skipped"), ("4", "deferred")])
+        self.assertIn("messaged_7d", rep.outcomes[0]["reason"])
+        self.assertEqual(rep.outcomes[3]["reason"], "(the gate printed no reason)")
+        text = claim_proof_ask.render(rep, "apply", "paid")
+        self.assertIn("user 1382623: messaged_7d credits=1 (we started a conversation with them in the last 7 days)", text)
+        self.assertIn("user 4: (the gate printed no reason)", text)
+
+    def test_the_refused_line_is_the_gates_own_and_a_pre_claim_refusal_is_named_unledgered(self):
+        # r5 on #1515 (Lamberto, 10-30 01:52Z): the first stderr line was an info line; the real one came after it
+        from credit_review import claim_proof_ask, verify_notify
+        rep = claim_proof_ask.ClaimReport()
+        p = lambda uid: {"user": {"id": uid}, "credits": [{"request_id": "r"}]}
+        err = ("reply_due 56871591200: core-notice cooldown not applied to this answer\n"
+               "REFUSED: G2: conversation 215473681300330 was opened by us (an admin or bot), not the customer; nothing was sent or claimed.\n")
+        cases = [(p("298376"), self.gate(1, "", err)),
+                 (p("5"), self.gate(1, "", "REFUSED: the rendered note contains a link; not sent.\n")),
+                 (p("6"), self.gate(1, "", "Traceback (most recent call last):\n  boom\n"))]
+        for payload, runner in cases:
+            with mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, None)):
+                verify_notify.send_all([payload], rep, mode="apply", runner=runner)
+        self.assertEqual([(o["user"], o["result"]) for o in rep.outcomes],
+                         [("298376", "refused_unledgered"), ("5", "refused"), ("6", "failed")])
+        self.assertTrue(rep.outcomes[0]["reason"].startswith("G2: conversation 215473681300330 was opened by us"))
+        self.assertEqual((rep.refused_users, rep.failed_users), (2, 1))
+
+
+class GateReasonSummaryTest(unittest.TestCase):
+    """QA #1515: a run with only a gate deferral still shows the reason; the outcomes file is 0600 even if it existed."""
+
+    def test_a_lone_gate_deferral_reaches_the_summary_with_its_reason(self):
+        from credit_review import verify_notify
+        rep = verify_notify.Report(deferred_users=1, deferrals=["user 1621425: messaged_7d credits=1 (we started a conversation)"])
+        text = rep.render("apply")
+        self.assertNotEqual(text, "NO_REPLY")
+        self.assertIn("1 account(s) deferred by the gate: user 1621425: messaged_7d", text)
+        self.assertNotIn("already had today's note", text)
+        cap = verify_notify.Report(deferred_users=1, deferrals=["user 7: daily-cap credits=1 (already had a message)"])
+        self.assertEqual(cap.render("apply"), "NO_REPLY")              # the daily cap alone recurs every run: not news
+
+    def test_the_outcomes_file_is_0600_even_when_it_already_existed(self):
+        import argparse, importlib.util, os, stat
+        spec = importlib.util.spec_from_file_location("credit_review_cli", str(ROOT / "scripts" / "credit-review.py"))
+        cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(cli)
+        out = Path(tempfile.mkdtemp()) / "o.json"
+        out.write_text("old"); os.chmod(out, 0o644)
+        from credit_review import verify_notify
+        cli.write_outcomes(argparse.Namespace(outcomes_json=str(out), mode="dry-run", segment="paid"),
+                           verify_notify.Report(outcomes=[{"user": "1", "result": "deferred", "reason": "x"}]))
+        self.assertEqual(stat.S_IMODE(os.stat(out).st_mode), 0o600)
+        self.assertEqual(json.loads(out.read_text())["outcomes"][0]["user"], "1")
+        self.assertEqual([f for f in os.listdir(out.parent) if f.startswith(".outcomes-")], [])   # no temp left behind
+
+    def cli(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("credit_review_cli2", str(ROOT / "scripts" / "credit-review.py"))
+        cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(cli)
+        return cli
+
+    def test_an_unwritable_outcomes_path_stops_BEFORE_any_send(self):
+        import argparse
+        cli = self.cli()
+        sent = []
+        base = Path(tempfile.mkdtemp())
+        # QA #1515: a guaranteed-missing parent (a fresh temp dir's missing child), and an existing DIRECTORY target
+        for target in (base / "missing-child" / "o.json", base):
+            args = argparse.Namespace(outcomes_json=str(target), mode="apply", segment="paid", list="x", max_users=1,
+                                      reminders=False, preview=None, check_recipients=False)
+            with mock.patch.object(cli.claim_proof_ask, "run", lambda **kw: sent.append(kw) or None), \
+                    mock.patch.object(cli, "CREDIT_OPS_NOTES_KILL_SWITCH", Path("/nonexistent-kill")):
+                rc = cli.cmd_claim_proof_ask(args)
+            self.assertEqual((rc, sent), (2, []), target)
+
+    def test_a_write_failure_after_the_sends_keeps_the_summary(self):
+        import argparse, io, contextlib
+        cli = self.cli()
+        from credit_review import claim_proof_ask
+        d = Path(tempfile.mkdtemp())
+        args = argparse.Namespace(outcomes_json=str(d / "o.json"), mode="apply", segment="paid", list="x", max_users=1,
+                                  reminders=False, preview=None, check_recipients=False)
+        rep = claim_proof_ask.ClaimReport(sent_notes=2)
+        buf = io.StringIO()
+        with mock.patch.object(cli.claim_proof_ask, "run", lambda **kw: rep), \
+                mock.patch.object(cli, "CREDIT_OPS_NOTES_KILL_SWITCH", Path("/nonexistent-kill")), \
+                mock.patch.object(cli.os, "replace", side_effect=OSError("disk full")), contextlib.redirect_stdout(buf):
+            rc = cli.cmd_claim_proof_ask(args)
+        out = buf.getvalue()
+        self.assertEqual(rc, 1)
+        self.assertIn("sent 2", out)                                   # the run summary is still printed
+        self.assertIn("OUTCOMES NOT WRITTEN", out)
+
+
 if __name__ == "__main__":
     unittest.main()

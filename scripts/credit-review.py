@@ -554,6 +554,50 @@ def cmd_verify_notify(args: argparse.Namespace) -> int:
     return 1 if report.failed else 0
 
 
+def write_outcomes(args: argparse.Namespace, report: object) -> str:
+    """C11: --outcomes-json PATH - every per-user gate answer that was not a send ({user, result, reason}), so a dry
+    run and the send can be compared user by user. Written 0600; ids and gate reasons only (no message text)."""
+    path = getattr(args, "outcomes_json", None)
+    if not path:
+        return ""
+    # QA #1515 / b1: a NEW 0600 temp file in the same directory, then an atomic replace - never an old file's mode,
+    # never a half-written file. A write failure is reported and returned, never raised past the send summary.
+    import tempfile  # noqa: PLC0415
+    tmp = ""
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=".outcomes-", dir=os.path.dirname(os.path.abspath(path)))
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"mode": args.mode, "segment": args.segment, "outcomes": list(getattr(report, "outcomes", []))},
+                      fh, indent=1)
+        os.replace(tmp, path)
+        return ""
+    except OSError as exc:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        return f"the outcomes file {path} could not be written ({exc}); the run above is complete"
+
+
+def preflight_outcomes(args: argparse.Namespace) -> str:
+    """Before ANY send: the --outcomes-json directory must exist and be writable (a probe temp file), so a send is never
+    followed by a lost comparison file. '' when fine (or no path)."""
+    path = getattr(args, "outcomes_json", None)
+    if not path:
+        return ""
+    import tempfile  # noqa: PLC0415
+    if os.path.isdir(path):                  # QA #1515: the replace would fail on a directory, after the sends
+        return f"--outcomes-json {path} is a directory; nothing was sent"
+    try:
+        with tempfile.NamedTemporaryFile(prefix=".outcomes-probe-", dir=os.path.dirname(os.path.abspath(path))):
+            pass
+    except OSError as exc:
+        return f"--outcomes-json {path} is not writable ({exc}); nothing was sent"
+    return ""
+
+
 def cmd_uvn_status(args: argparse.Namespace) -> int:
     if CREDIT_OPS_NOTES_KILL_SWITCH.exists():
         log(f"credit-ops-notes kill switch present at {CREDIT_OPS_NOTES_KILL_SWITCH}; nothing sent")
@@ -574,14 +618,19 @@ def cmd_uvn_status(args: argparse.Namespace) -> int:
     if args.exclude_users:
         exclude = {ln.strip() for ln in Path(args.exclude_users).read_text().splitlines()
                    if ln.strip() and not ln.startswith("#")}
+    why = preflight_outcomes(args)
+    if why:
+        print(f"UVN STATUS: {why}.")
+        return 2
     report = uvn_status.run(list_path=args.list, segment=args.segment, mode=args.mode, max_users=args.max_users,
                             campaign=args.campaign, wording=args.wording or "",
                             ledger_path=args.ledger, proof_path=args.proof_on_file, preview_dir=args.preview,
                             from_stage2=args.from_stage2, stage2_path=args.proof_store, exclude_users=exclude,
                             check_recipients=args.check_recipients)
     log("uvn-status " + json.dumps({k: v for k, v in vars(report).items() if not isinstance(v, (list, dict))}))
-    print(uvn_status.render(report, args.mode, args.segment))
-    return 1 if report.failed else 0
+    werr = write_outcomes(args, report)
+    print(uvn_status.render(report, args.mode, args.segment) + (f" OUTCOMES NOT WRITTEN: {werr}." if werr else ""))
+    return 1 if report.failed or werr else 0
 
 
 def cmd_claim_proof_ask(args: argparse.Namespace) -> int:
@@ -595,11 +644,17 @@ def cmd_claim_proof_ask(args: argparse.Namespace) -> int:
         # QA #1516: a reminder's claim path differs; its recipient check would silently fall back to offline validation
         print("--check-recipients applies to first notes only, not --reminders.")
         return 2
+    why = preflight_outcomes(args)
+    if why:
+        print(f"CLAIM PROOF ASK: {why}.")
+        return 2
     report = claim_proof_ask.run(list_path=args.list, segment=args.segment, mode=args.mode,
                                  max_users=args.max_users, reminders=args.reminders, preview_dir=args.preview,
                                  check_recipients=args.check_recipients)
-    print(claim_proof_ask.render(report, args.mode, args.segment, reminders=args.reminders))
-    return 1 if report.failed else 0
+    werr = write_outcomes(args, report)
+    print(claim_proof_ask.render(report, args.mode, args.segment, reminders=args.reminders)
+          + (f" OUTCOMES NOT WRITTEN: {werr}." if werr else ""))
+    return 1 if report.failed or werr else 0
 
 
 def cmd_claim_status(args: argparse.Namespace) -> int:
@@ -916,6 +971,7 @@ def parser() -> argparse.ArgumentParser:
     us = sub.add_parser("uvn-status", help="UVN status + reminder: one message per waiting requester (firstmate 060)")
     us.add_argument("--check-recipients", action="store_true", help="C11: the dry run runs every send-time check read-only "
                     "(the gate's --check-recipient), so it reports the same deferrals as the send")
+    us.add_argument("--outcomes-json", default=None, help="C11: write every per-user deferral/refusal/skip with the gate's reason")
     us.add_argument("--list", default=None, help="credit-trust-llm-t01's uvn-reminder-list.json (<= 30 h old); "
                                                   "required unless --from-stage2")
     us.add_argument("--segment", choices=["paid", "free"], required=True)
@@ -946,6 +1002,7 @@ def parser() -> argparse.ArgumentParser:
     cp.add_argument("--segment", choices=["paid", "free"], required=True)
     cp.add_argument("--check-recipients", action="store_true", help="C11: the dry run runs every send-time check read-only "
                     "(the gate's --check-recipient), so it reports the same deferrals as the send")
+    cp.add_argument("--outcomes-json", default=None, help="C11: write every per-user deferral/refusal/skip with the gate's reason")
     cp.add_argument("--mode", choices=["apply", "dry-run"], default="dry-run")
     cp.add_argument("--max-users", type=int, default=20, help="messages this run (canary: 3)")
     cp.add_argument("--reminders", action="store_true", help="send the due day-7 reminders instead of first asks")

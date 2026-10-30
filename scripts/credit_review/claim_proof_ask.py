@@ -445,5 +445,6 @@ def render(report: ClaimReport, mode: str, segment: str, reminders: bool = False
                      ("FAILED", report.failed_users)):
         if v:
             parts.append(f"{label} {v}")
-    detail = (report.refusals + report.failures)[:5]
+    # C11: every deferral is shown with its user and the gate's reason (never a bare count)
+    detail = report.deferrals[:20] + (report.refusals + report.failures)[:5]
     return "; ".join(parts) + "." + (" " + "; ".join(detail) if detail else "")

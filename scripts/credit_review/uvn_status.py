@@ -966,6 +966,8 @@ def render(report: UvnReport, mode: str, segment: str) -> str:
                      ("left for the next run (daily cap / run size)", report.over_daily_max)):
         if n:
             parts.append(f"{n} {label}")
+    if report.deferrals:
+        parts.append(f"{len(report.deferrals)} deferred by the gate at send: " + "; ".join(report.deferrals[:20]))
     if report.refused_users:
         parts.append(f"{report.refused_users} refused by the gate: " + "; ".join(report.refusals[:3]))
     if report.refused_recheck:

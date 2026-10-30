@@ -125,6 +125,10 @@ class Report:
     halted: str = ""
     failures: list[str] = field(default_factory=list)
     refusals: list[str] = field(default_factory=list)
+    # C11 (p1 223): every per-user gate answer that was not a send, with the user and the gate's own reason - a dry run
+    # and a send are compared on these, and a deferral is never reported without why (claim 1621425, 10-30 00:16Z)
+    deferrals: list[str] = field(default_factory=list)
+    outcomes: list[dict[str, str]] = field(default_factory=list)
     flag_failures: list[str] = field(default_factory=list)
 
     @property
@@ -135,9 +139,10 @@ class Report:
         if self.halted:
             return (f"{title}: NO asks sent this run: {self.halted}. Nothing was sent "
                     "(missing or stale proof-on-file list: when in doubt, no ask goes out).")
-        # Deferred accounts alone are not news: they recur every run until tomorrow's note.
-        # Held-for-human users are news too (once a day): a human must see them.
-        if not (self.sent_notes or self.refused_users or self.failed_users or self.reminders_sent
+        # A daily-cap deferral alone is not news (it recurs every run until tomorrow's note); any OTHER gate deferral
+        # is (C11, QA #1515: the reason must reach the summary). Held-for-human users are news too (once a day).
+        news_defer = [d for d in self.deferrals if "daily-cap" not in d]
+        if not (self.sent_notes or self.refused_users or self.failed_users or self.reminders_sent or news_defer
                 or self.proof_tagged or self.proof_failed or self.extension_requests
                 or self.claim_proof_tagged or self.claim_replies
                 or self.affiliation_held or self.documented_users or self.support_contact_users
@@ -161,7 +166,9 @@ class Report:
             parts.append(f"{self.mixed_v1_users} account(s) got one no-deadline note covering a paid provisional "
                          "credit and other new credits (one note per user; no removal date)")
         if self.deferred_users:
-            parts.append(f"{self.deferred_users} account(s) already had today's note (their credits go in tomorrow's)")
+            # the label comes from the gate's own reasons (QA #1515), never a fixed 'already had today's note'
+            parts.append(f"{self.deferred_users} account(s) deferred by the gate"
+                         + (": " + "; ".join(self.deferrals[:20]) if self.deferrals else " (no reason recorded)"))
         if self.refused_users:
             parts.append(f"{self.refused_users} refused by the gate: " + "; ".join(self.refusals[:5]))
         if self.not_approved_now:
@@ -677,14 +684,47 @@ def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
                 report.sent_credits += len(p["credits"])
         elif res.returncode == 0:
             report.skipped += 1
+            _outcome(report, p, "skipped", out)
         elif res.returncode == 3:
             report.deferred_users += 1
-        elif res.returncode == 1:
+            why = _outcome(report, p, "deferred", out.removeprefix("DEFERRED ") or err)
+            report.deferrals.append(f"user {_uid(p)}: {why}"[:200])
+        elif res.returncode == 1 and _refused_line(res.stderr):
+            # the gate's OWN refusal line (r5 on #1515: the first stderr line can be an info line). A refusal before the
+            # claim ('nothing was sent or claimed', e.g. G1-G5) has no ledger row by design: recorded as such, by user
+            why = _refused_line(res.stderr)
             report.refused_users += 1
-            report.refusals.append(err.removeprefix("REFUSED: ")[:160])
+            report.refusals.append(why[:160])
+            _outcome(report, p, "refused_unledgered" if "nothing was sent or claimed" in why else "refused", why)
+        elif res.returncode == 1:
+            # rc 1 with no REFUSED line: the gate stopped abnormally - a failure, never a silent 'refused'
+            report.failed_users += 1
+            report.failures.append(f"rc=1 without a REFUSED line: {err or out}"[:200])
+            _outcome(report, p, "failed", f"rc=1 without a REFUSED line: {err or out}")
         else:
             report.failed_users += 1
             report.failures.append(f"rc={res.returncode} {err or out}"[:200])
+            _outcome(report, p, "failed", f"rc={res.returncode} {err or out}")
+
+
+def _refused_line(stderr: str) -> str:
+    """The gate's 'REFUSED: <reason>' line (anywhere in its stderr), without the prefix; '' when there is none."""
+    for ln in (stderr or "").splitlines():
+        if ln.startswith("REFUSED: "):
+            return ln.removeprefix("REFUSED: ").strip()
+    return ""
+
+
+def _uid(p: dict[str, Any]) -> str:
+    return re.sub(r"[^A-Za-z0-9-]", "", str((p.get("user") or {}).get("id") or ""))[:64] or "?"
+
+
+def _outcome(report: Report, p: dict[str, Any], result: str, reason: str) -> str:
+    """Record one per-user gate answer that was not a send (C11): the user, the result and the gate's own first line;
+    a gate that gave no line is recorded as such, never dropped."""
+    why = (reason or "").strip()[:200] or "(the gate printed no reason)"
+    report.outcomes.append({"user": _uid(p), "result": result, "reason": why})
+    return why
 
 
 AUTH_ID_RE = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
