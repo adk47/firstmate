@@ -27,6 +27,7 @@ count = load("q_count", "count.py")
 overrides = load("q_overrides", "overrides.py")
 send = load("q_send", "send.py")
 tail = load("q_tail", "tail_lists.py")
+buckets = load("q_buckets", "buckets.py")
 ip = load("q_ip", "intake_proposals.py")
 wa = load("q_wa", "which_account.py")
 
@@ -53,10 +54,13 @@ class LatestMessageTopic(unittest.TestCase):
     def test_credit_card_is_not_a_credit_word_but_is_billing(self):
         self.assertEqual(self.t("other", "my credit card was declined"), "billing")
 
-    def test_uninformative_latest_keeps_the_opening_topic_and_unread_is_held(self):
-        self.assertEqual(self.t("credit", "hello?"), "credit")
-        self.assertEqual(self.t("credit", None), "unread")
+    def test_a_final_message_without_a_topic_is_other_never_the_openings(self):
+        # QA @7c064881: the opening no longer decides once the customer wrote again
+        self.assertEqual(self.t("credit", "hello?"), "other")
         self.assertFalse(send.eligible({"action": "draft-unread"}))
+
+    def test_unread_is_held(self):
+        self.assertEqual(self.t("credit", None), "unread")
 
     def test_followup_detection(self):
         self.assertTrue(census.has_followup({"lcr": 2000, "created_at": 1000}))
@@ -80,6 +84,67 @@ class LatestMessageTopic(unittest.TestCase):
         self.assertEqual(count.classify("credit", "where is my credit request?", "credit-like"), "credit-claim-merge")
         self.assertEqual(count.classify("credit", None, None), "unread")
         self.assertEqual(count.classify("other", "my attorney", "other"), "legal")
+
+
+def doc(*customer_msgs, opening="Issue with my profile", admin_after_first=True):
+    parts = []
+    for i, m in enumerate(customer_msgs):
+        if i == 1 and admin_after_first:
+            parts.append({"author": {"type": "admin"}, "body": "<p>Thanks, we'll look into it.</p>"})
+        parts.append({"author": {"type": "user"}, "body": f"<p>{m}</p>"})
+    return {"source": {"subject": "", "body": f"<p>{opening}</p>"},
+            "conversation_parts": {"conversation_parts": parts}}
+
+
+class FinalMessageEndToEnd(unittest.TestCase):
+    """QA @7c064881: extractor -> classifier with CONFLICTING sequential customer messages."""
+
+    def test_census_path_credit_then_sign_in_is_account(self):
+        latest = census.latest_from_doc(doc("my credit is wrong on my song", "I cannot sign in to my account"))
+        self.assertEqual(latest[0], "I cannot sign in to my account")
+        self.assertEqual(topics.latest_topic("credit", latest, census.topic_of), "account")
+
+    def test_census_path_refund_earlier_still_routes_to_the_captain(self):
+        latest = census.latest_from_doc(doc("I want a refund", "hello? anyone?"))
+        self.assertEqual(topics.latest_topic("credit", latest, census.topic_of), "billing")
+
+    def test_buckets_path_stats_then_login_is_account_access(self):
+        last, joined = buckets.texts_from_doc(doc("my streams are missing on spotify", "I cannot log in now",
+                                                  opening="Another question"))
+        self.assertEqual(buckets.bucket_of(joined, last), "account-access")
+
+    def test_buckets_path_credit_then_sign_in_is_not_credit(self):
+        last, joined = buckets.texts_from_doc(doc("my credit is wrong on my song", "password reset link?"))
+        self.assertEqual(buckets.bucket_of(joined, last), "account-access")
+
+    def test_buckets_path_final_without_topic_is_other_but_money_wins(self):
+        last, joined = buckets.texts_from_doc(doc("my streams are wrong", "hmm"))
+        self.assertEqual(buckets.bucket_of(joined, last), "other")
+        last, joined = buckets.texts_from_doc(doc("refund me please", "hmm"))
+        self.assertEqual(buckets.bucket_of(joined, last), "billing-money")
+
+    def test_count_path_credit_then_sign_in_is_not_counted_as_credit(self):
+        got = buckets.texts_from_doc(doc("my credit is wrong on my song", "I cannot sign in"))
+        fam = count.classify("credit", got, buckets.bucket_of(got[1], got[0]))
+        self.assertEqual(fam, "account-access")
+
+
+class BucketsOutNeedsFetch(unittest.TestCase):
+    """QA @7c064881: the sender's input (--out) must come from the current customer message."""
+
+    def test_out_without_fetch_is_refused(self):
+        import subprocess
+        d = tmpdir(self)
+        tri = os.path.join(d, "t.jsonl")
+        with open(tri, "w") as f:
+            f.write(json.dumps({"id": "1", "waiting_since": 1, "band": "gt30d", "topic": "other",
+                                "action": "draft-other", "subject": "", "excerpt": "my streams"}) + "\n")
+        env = {k: v for k, v in os.environ.items() if k != "MUSOAI_INTERCOM_TOKEN"}
+        p = subprocess.run([sys.executable, os.path.join(DIR, "buckets.py"), tri, "--out", os.path.join(d, "o.jsonl")],
+                           capture_output=True, text=True, env=env, timeout=30)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("--out (the sender's input) needs --fetch", p.stderr)
+        self.assertFalse(os.path.exists(os.path.join(d, "o.jsonl")))
 
 
 class OverridesBothMaps(unittest.TestCase):

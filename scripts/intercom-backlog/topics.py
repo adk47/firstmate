@@ -30,17 +30,24 @@ LEGAL_RE = re.compile(r"\b(lawyer|attorney|legal action|cease and desist|c&d|dmc
 NOT_CREDIT = re.compile(r"credit[ -]?cards?|credit notes?|store credit", re.I)
 
 
-def latest_topic(opening_topic, latest_text, topic_of):
-    """Pure. topic_of = census.topic_of. latest_text None (not read) -> 'unread' (held, never sent)."""
-    if latest_text is None:
+def latest_topic(opening_topic, latest, topic_of):
+    """Pure. topic_of = census.topic_of. latest = (final customer part, recent customer parts joined), or a
+    plain string (treated as both), or None (not read) -> 'unread' (held, never sent).
+
+    QA (hydra#1379): the topic comes from the FINAL customer part only ("my credit is wrong" then "I cannot
+    sign in" is account). Legal and billing words in the recent parts still win (the safe direction: they route
+    to the captain). A final part with no topic of its own is "other", never the opening's topic; the opening
+    decides only when the customer never wrote again (the caller does not call this then)."""
+    if latest is None:
         return "unread"
-    raw = latest_text.lower()
-    if LEGAL_RE.search(raw):
+    final, recent = (latest, latest) if isinstance(latest, str) else latest
+    raw_final, raw_recent = (final or "").lower(), (recent or final or "").lower()
+    if LEGAL_RE.search(raw_final) or LEGAL_RE.search(raw_recent):
         return "legal"
-    if TOPIC_BILLING_RE.search(raw):  # on the raw text: "credit card" IS a billing phrase
+    # on the raw text: "credit card" IS a billing phrase
+    if TOPIC_BILLING_RE.search(raw_final) or TOPIC_BILLING_RE.search(raw_recent):
         return "billing"
-    own = topic_of(NOT_CREDIT.sub(" ", raw))  # ...and never a credit word
-    return own if own != "other" else opening_topic
+    return topic_of(NOT_CREDIT.sub(" ", raw_final))  # ...and never a credit word
 
 
 def billing_veto(text):

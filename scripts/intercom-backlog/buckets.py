@@ -91,19 +91,36 @@ def is_thanks(text):
     return 0 < len(words) <= 14 and all(w in THANKS_WORDS for w in words)
 
 
+# Buckets that route to the captain: checked over the customer's recent messages too (the safe direction: an
+# earlier refund / legal ask is never hidden by a later "hello?").
+CAPTAIN_BUCKETS = ("legal", "billing-money", "billing-cancel")
+
+
 def bucket_of(text, last=None):
-    """last = the customer's LAST message: a thanks-only last message means the thread is satisfied,
-    whatever came before (c3's satisfied-close class)."""
+    """text = the customer's recent messages joined; last = their FINAL message (None = not read).
+
+    QA (hydra#1379): the bucket that picks a reply line comes from the FINAL customer message only, so "my
+    credit is wrong" followed by "I cannot sign in" is account-access, not credit. Only the captain buckets
+    (legal, money, cancel) also look at the recent history. A final message with no topic of its own is
+    "other" (read by hand), never the older message's bucket. A thanks-only final message = satisfied."""
     t = " ".join((text or "").split())
-    if last is not None and is_thanks(last):
+    if last is None:  # nothing fetched: the opening text is all there is (counting only; --out refuses this)
+        if not t or is_thanks(t):
+            return "thanks-only"
+        for name, rx in BUCKET_RE:
+            if rx.search(t):
+                return name
+        return "other"
+    final = " ".join(last.split())
+    if is_thanks(final) or not final:
         return "thanks-only"
-    if not t or is_thanks(t):
-        return "thanks-only"
-    if last is not None and NO_DETAIL.match(" ".join(last.split())) and not any(
-            rx.search(t) for n, rx in BUCKET_RE if n not in ("howto", "auto-noise")):
+    for name, rx in BUCKET_RE:
+        if name in CAPTAIN_BUCKETS and (rx.search(t) or rx.search(final)):
+            return name
+    if NO_DETAIL.match(final):
         return "no-detail"
     for name, rx in BUCKET_RE:
-        if rx.search(t):
+        if name not in CAPTAIN_BUCKETS and rx.search(final):
             return name
     return "other"
 
@@ -122,6 +139,11 @@ def customer_text(token, cid, last_n=3):
             if i == 3:
                 return None
             time.sleep(2 ** i)
+    return texts_from_doc(doc, last_n)
+
+
+def texts_from_doc(doc, last_n=3):
+    """Pure: (final customer message, last_n customer messages joined; the opening counts as one)."""
     src = doc.get("source") or {}
     texts = [(src.get("subject") or "") + " " + (src.get("body") or "")]
     for part in (doc.get("conversation_parts") or {}).get("conversation_parts") or []:
@@ -139,6 +161,9 @@ def main():
     ap.add_argument("--out", help="ALSO write the sender's input here (0600; carries user id and contact email "
                                   "for the shared-ledger key, never text). stdout stays PII-free.")
     a = ap.parse_args()
+    if a.out and not a.fetch:
+        # QA: the sender's input must come from the CURRENT customer message, never the opening text
+        sys.exit("REFUSED: --out (the sender's input) needs --fetch: buckets must come from the current customer message.")
     now = time.time()
     rows = []
     for line in open(a.triage):
@@ -159,8 +184,11 @@ def main():
     for r in rows:
         hours = (now - r["waiting_since"]) / 3600
         got = texts.get(r["id"])
-        last, t = got if got else (None, (r.get("subject") or "") + " " + (r.get("excerpt") or ""))
-        b = "credit-owned-l1" if r["credit"] else bucket_of(t, last)
+        if a.fetch and not r["credit"] and not got:
+            b = "unread"  # the current message could not be read: held, never a reply line
+        else:
+            last, t = got if got else (None, (r.get("subject") or "") + " " + (r.get("excerpt") or ""))
+            b = "credit-owned-l1" if r["credit"] else bucket_of(t, last)
         slim = {"id": r["id"], "bucket": b, "band": r["band"], "age_days": round(hours / 24, 1),
                 "paid": bool(r.get("paid")), "waiting_since": r["waiting_since"],
                 "topic": r.get("topic"), "action": r.get("action"), "assignee": r.get("admin_assignee_id")}

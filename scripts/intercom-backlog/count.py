@@ -55,9 +55,10 @@ def waiting(c, now):
     return ws, text + " " + " ".join(t for t in tags if t not in census.NEUTRAL_TAGS)
 
 
-def classify(opening_topic, latest_text, last_bucket):
-    """Pure: the comms family of one conversation. latest_text None = not read (counted 'unread')."""
-    topic = topics.latest_topic(opening_topic, latest_text, census.topic_of)
+def classify(opening_topic, latest, last_bucket):
+    """Pure: the comms family of one conversation. latest = (final customer message, recent joined) as
+    buckets.customer_text returns it, or a string, or None = not read (counted 'unread')."""
+    topic = topics.latest_topic(opening_topic, latest, census.topic_of)
     if topic == "unread":
         return "unread"
     if topic in ("legal", "billing"):
@@ -98,7 +99,7 @@ def main():
         for cid, g in zip(todo, ex.map(lambda c: buckets.customer_text(token, c), todo)):
             got[cid] = g
     fam = collections.Counter(
-        classify(t, got[cid][1] if got.get(cid) else None,
+        classify(t, got[cid] if got.get(cid) else None,
                  buckets.bucket_of(got[cid][1], got[cid][0]) if got.get(cid) else None)
         for cid, _, t in owed)
     ages = sorted((now - ws) / 86400 for _, ws, _ in owed)

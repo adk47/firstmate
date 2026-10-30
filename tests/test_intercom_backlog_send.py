@@ -244,7 +244,8 @@ class BucketMode(unittest.TestCase):
         self.assertIn("muso.ai/amp/promote/plaque", body)
         self.assertTrue(body.endswith("If you still need help, just reply here."))
         self.assertTrue(ib_send.render_bucket(self.brow("1", "stats"), "").startswith("Hi there,"))
-        wrapper = open(os.path.join(ROOT, "scripts", "intercom-ops-write.sh")).read()
+        with open(os.path.join(ROOT, "scripts", "intercom-ops-write.sh")) as fh:
+            wrapper = fh.read()
         words = re.search(r'readonly SANITIZER_WORDS="([^"]+)"', wrapper).group(1)
         leak = re.compile(r"(^|[^A-Za-z0-9_])(" + words + r")([^A-Za-z0-9_]|$)", re.I)
         for k, line in ib_send.BUCKET_LINES.items():

@@ -91,7 +91,7 @@ CUSTOMER = ("user", "lead", "contact")
 
 
 def latest_customer_text(token, cid, last_n=3):
-    """The customer's last messages (up to last_n parts after the opening), or None when unreadable."""
+    """(final customer part, last_n customer parts joined) after the opening, or None when unreadable."""
     req = urllib.request.Request(f"{API}/conversations/{cid}", headers={
         "Authorization": f"Bearer {token}", "Accept": "application/json", "Intercom-Version": VER})
     for i in range(4):
@@ -103,9 +103,16 @@ def latest_customer_text(token, cid, last_n=3):
             if i == 3:
                 return None
             time.sleep(2 ** i)
+    return latest_from_doc(doc, last_n)
+
+
+def latest_from_doc(doc, last_n=3):
+    """Pure: (final customer part, last_n customer parts joined) of a conversation document. The topic comes
+    from the final part only; the legal / billing veto also looks at the recent parts (topics.latest_topic)."""
     parts = [p.get("body") for p in ((doc.get("conversation_parts") or {}).get("conversation_parts") or [])
              if (p.get("author") or {}).get("type") in CUSTOMER and p.get("body")]
-    return " ".join(" ".join(TAG_RE.sub(" ", b).split()) for b in parts[-last_n:])
+    clean = [" ".join(TAG_RE.sub(" ", b).split()) for b in parts[-last_n:]]
+    return (clean[-1], " ".join(clean)) if clean else ("", "")
 
 
 def has_followup(row):
