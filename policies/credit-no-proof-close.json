@@ -1,0 +1,9 @@
+{
+  "rule": "C5:no_proof_after_ask/v1",
+  "description": "Policy close of a credit request whose user was asked for proof, reminded, and filed nothing by ask + 14 d (Fable [key=paid-to-zero], captain 2026-10-30 13:2xZ). Shadow first; apply needs this file flipped in a reviewed PR with an approved closing line.",
+  "apply_enabled": false,
+  "approved_by": null,
+  "approval_ref": null,
+  "closing_line_campaign": null,
+  "daily_cap": 100
+}

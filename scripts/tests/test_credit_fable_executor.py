@@ -460,6 +460,58 @@ class QaRound2Test(RunTest):
         self.assertEqual([c[2] for c in self.calls], ["A", "B"])
         self.assertIn("daily cap", res.stopped)
 
+    def test_an_evidence_recheck_tray_refuses_a_row_whose_user_answered_since(self):
+        """QA #1536: a coded close whose evidence can change re-reads it per batch at write time."""
+        base = self.tray()
+        t = fx.Tray(base.path, base.sha256, "reject", "unverified", base.rows, 100, None,
+                    recheck_evidence="no_proof_after_ask")
+        first, second = (r.request_id for r in base.rows)
+        seen = []
+
+        def evidence(rows):
+            seen.append([r.request_id for r in rows])
+            return {first: "replied_after_ask:intercom_reply:7", second: ""}
+        res = self.go(t, evidence_fn=evidence)
+        self.assertEqual(res.written, 1)
+        self.assertEqual(self.calls[0][0], [second])
+        self.assertEqual(res.refused, {"evidence_changed": 1})
+        self.assertIn("evidence_changed:replied_after_ask:intercom_reply:7",
+                      [l.get("reason") for l in self.audit_lines() if l["outcome"] == "refused"])
+        self.assertTrue(seen)
+        self.calls.clear()
+        dry = self.go(t, apply=False, evidence_fn=lambda rows: {})            # unreadable -> refused, never written
+        self.assertEqual(dry.refused, {"evidence_changed": 2, "would_write": 0})
+
+    def test_a_tray_without_the_flag_never_calls_the_evidence_reader(self):
+        res = self.go(self.tray(), evidence_fn=lambda rows: self.fail("must not be called"))
+        self.assertEqual(res.written, 2)
+
+    def test_the_boundary_rechecks_evidence_too(self):
+        doc = {"action": "reject", "expected_status": "unverified", "recheck_evidence": "no_proof_after_ask",
+               "rows": [{"request_id": RID, "user_id": 42, "coded_outcome": "decisions:1", "ruling_id": "u10k-3",
+                         "rule": "reject_publisher_label_credit"}]}
+        p = self.tmp / "tray-ev.json"
+        p.write_text(json.dumps(doc))
+        sha = fx.load_tray(str(p)).sha256
+        self._reserve(sha)
+        kw = dict(facts_fn=lambda xs: {x: facts() for x in xs}, gate_fn=lambda u: ALLOW, anchor_fn=lambda xs: {},
+                  audit_path=self.audit, now=lambda: NOW)
+        self.assertIsNone(fx.verify_batch(str(p), "u10k-3", "run1", [RID], "unverified",
+                                          evidence_fn=lambda rows: {RID: ""}, **kw))
+        self.assertIn("evidence_changed:proof_on_file",
+                      fx.verify_batch(str(p), "u10k-3", "run1", [RID], "unverified",
+                                      evidence_fn=lambda rows: {RID: "proof_on_file:proof_intake"}, **kw))
+
+    def test_recheck_evidence_is_validated_and_close_only(self):
+        for bad, want in (("whatever", "must be one of"), (True, "must be one of")):
+            doc = {"action": "reject", "expected_status": "unverified", "recheck_evidence": bad, "rows": [
+                {"request_id": RID, "user_id": 42, "coded_outcome": "decisions:1", "ruling_id": "u10k-3",
+                 "rule": "reject_publisher_label_credit"}]}
+            p = self.tmp / "bad.json"
+            p.write_text(json.dumps(doc))
+            with self.assertRaisesRegex(fx.TrayError, want):
+                fx.load_tray(str(p))
+
     def test_limit_must_be_positive(self):
         for bad in (0, -1, True):
             with self.assertRaisesRegex(ValueError, "positive"):

@@ -122,6 +122,9 @@ class Tray:
     #: Fable [key=junk-b1]: refuse a row whose request has a same-run DSP anchor (it belongs to the approve path);
     #: re-read from the V9 verifier store before each batch. No verdict / unreadable store = UNKNOWN = refused.
     refuse_if_dsp_anchor: bool = False
+    #: A coded producer whose evidence can change between decision and execution names its re-check here
+    #: ('no_proof_after_ask': proof + replies re-read per batch, QA #1536). "" = none.
+    recheck_evidence: str = ""
 
 
 @dataclass(frozen=True)
@@ -142,8 +145,10 @@ class Facts:
     owns_profile: bool | None = None
 
 
-def load_tray(path: str) -> Tray:
-    """Read and validate a tray file. Any row without a Fable ruling id refuses the WHOLE tray."""
+def load_tray(path: str, now: datetime | None = None) -> Tray:
+    """Read and validate a tray file. Any row without a Fable ruling id refuses the WHOLE tray. A tray carrying
+    `expires_at` (coded producers re-check their evidence at publication, e.g. C5 no_proof_after_ask) is refused once
+    that time has passed or when it is unreadable: its evidence is stale."""
     raw = Path(path).read_bytes()
     try:
         doc = json.loads(raw)
@@ -151,6 +156,15 @@ def load_tray(path: str) -> Tray:
         raise TrayError(f"tray is not JSON: {exc}") from exc
     if not isinstance(doc, dict):
         raise TrayError("tray must be a JSON object")
+    if "expires_at" in doc:
+        try:
+            exp = datetime.fromisoformat(str(doc["expires_at"]).replace("Z", "+00:00"))
+            if exp.tzinfo is None:
+                raise ValueError("no timezone")
+        except ValueError as exc:
+            raise TrayError(f"tray expires_at unreadable: {exc}") from exc
+        if (now or datetime.now(timezone.utc)) >= exp:
+            raise TrayError(f"tray expired at {doc['expires_at']}: its producer's evidence is stale; re-publish it")
     action = doc.get("action")
     if action == "role_correction":
         # C9 (rules-to-code-1029): no in-place role write exists; create-then-remove is a REMOVAL -> never automated.
@@ -210,8 +224,35 @@ def load_tray(path: str) -> Tray:
         raise TrayError("refuse_if_dsp_anchor must be true or false")
     if action == "approve" and anchor_flag:
         raise TrayError("refuse_if_dsp_anchor is a close guard; an approve tray cannot set it")
+    recheck = doc.get("recheck_evidence", "")
+    if recheck not in EVIDENCE_RECHECKS:
+        raise TrayError(f"recheck_evidence {recheck!r} must be one of {EVIDENCE_RECHECKS}")
+    if action == "approve" and recheck:
+        raise TrayError("recheck_evidence is a close guard; an approve tray cannot set it")
     return Tray(str(path), hashlib.sha256(raw).hexdigest(), action, expected, tuple(rows), cap,
-                cap_ruling if isinstance(cap_ruling, str) else None, anchor_flag)
+                cap_ruling if isinstance(cap_ruling, str) else None, anchor_flag, recheck)
+
+
+EVIDENCE_RECHECKS = ("", "no_proof_after_ask")
+
+
+def coded_evidence(rows: Iterable["TrayRow"]) -> dict[str, str]:
+    """{request id: '' (the close still stands) | why not} - the C5 no_proof_after_ask evidence re-read (proof in our
+    stores + Intercom documents + any reply since the ask) for rows citing decisions:<id>. Never raises; a row whose
+    evidence cannot be read is refused."""
+    rows = list(rows)
+    try:
+        from credit_review import no_proof_close
+        ids = {r.request_id.lower(): int(r.coded_outcome.split(":", 1)[1]) for r in rows
+               if r.coded_outcome.startswith("decisions:")}
+        out = no_proof_close.recheck_decisions(ids)
+    except Exception as exc:  # noqa: BLE001 - unreadable = refused
+        return {r.request_id.lower(): f"unknown:{str(exc)[:80]}" for r in rows}
+    return {r.request_id.lower(): out.get(r.request_id.lower(), "unknown:no evidence row") for r in rows}
+
+
+def _evidence_refusal(why: str | None) -> str | None:
+    return f"evidence_changed:{why}"[:160] if why else None
 
 
 def _read_store(path: str, sql: str, nums: list[int]) -> list[tuple]:
@@ -556,6 +597,7 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
         readback_tries: int = 6, readback_wait_s: float = 5.0,
         sleep: Callable[[float], None] = time.sleep,
         outcome_fn: Callable[[list[str]], dict[str, dict[str, Any]]] = ledger_outcomes,
+        evidence_fn: Callable[[list["TrayRow"]], dict[str, str]] = coded_evidence,
         ) -> Result:
     """Execute (apply) or dry-run one tray. In apply mode EVERY batch re-reads its rows' facts and the account gate
     immediately before its PUT (no fact or gate answer outlives its batch, QA #1475), under one lock from the cap
@@ -574,12 +616,15 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
         n = 0
         anchors = anchor_fn([r.request_id for r in rows]) if tray.refuse_if_dsp_anchor else {}
         outcomes = outcome_fn([r.coded_outcome for r in rows])
+        evidence = evidence_fn(rows) if tray.recheck_evidence else {}
         for r in rows:
             why = refusal_for(tray)(r, facts.get(r.request_id.lower()), gate(r.user_id), tray.expected_status)
             if not why:
                 why = coded_outcome_refusal(tray, r, outcomes)
             if not why and tray.refuse_if_dsp_anchor:
                 why = _anchor_refusal(anchors.get(r.request_id.lower(), "unknown"))
+            if not why and tray.recheck_evidence:
+                why = _evidence_refusal(evidence.get(r.request_id.lower(), "unknown"))
             if why:
                 _bump(res, why)
             else:
@@ -620,6 +665,7 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
                 gate = account_gate.Cached(gate_fn)
                 anchors = anchor_fn([r.request_id for r in window]) if tray.refuse_if_dsp_anchor else {}
                 outcomes = outcome_fn([r.coded_outcome for r in window])
+                evidence = evidence_fn(window) if tray.recheck_evidence else {}
                 chunk: list[TrayRow] = []
                 consumed = 0
                 for r in window:
@@ -632,6 +678,8 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
                         why = coded_outcome_refusal(tray, r, outcomes)
                     if not why and tray.refuse_if_dsp_anchor:
                         why = _anchor_refusal(anchors.get(r.request_id.lower(), "unknown"))
+                    if not why and tray.recheck_evidence:
+                        why = _evidence_refusal(evidence.get(r.request_id.lower(), "unknown"))
                     if why:
                         _bump(res, why)
                         audit({**_base(tray, run_id, r, f, now(), "apply"), "outcome": "refused",
@@ -710,6 +758,7 @@ def verify_batch(tray_path: str, ruling_id: str, run_id: str, ids: list[str], ex
                  gate_fn: Callable[[Any], account_gate.GateResult] | None = None,
                  anchor_fn: Callable[[list[str]], dict[str, str]] = dsp_anchors,
                  outcome_fn: Callable[[list[str]], dict[str, dict[str, Any]]] = ledger_outcomes,
+                 evidence_fn: Callable[[list["TrayRow"]], dict[str, str]] = coded_evidence,
                  audit_path: str = AUDIT_PATH, now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
                  ) -> str | None:
     """Re-check ONE batch at the wrapper boundary, independently of the run that asked for it. None = allowed,
@@ -763,6 +812,7 @@ def verify_batch(tray_path: str, ruling_id: str, run_id: str, ids: list[str], ex
     gate = account_gate.Cached(gate_fn)
     anchors = anchor_fn(want) if tray.refuse_if_dsp_anchor else {}
     outcomes = outcome_fn([rows[i].coded_outcome for i in want])
+    evidence = evidence_fn([rows[i] for i in want]) if tray.recheck_evidence else {}
     for i in want:
         r = rows[i]
         why = refusal_for(tray)(r, facts.get(i), gate(r.user_id), tray.expected_status)
@@ -770,6 +820,8 @@ def verify_batch(tray_path: str, ruling_id: str, run_id: str, ids: list[str], ex
             why = coded_outcome_refusal(tray, r, outcomes)
         if not why and tray.refuse_if_dsp_anchor:
             why = _anchor_refusal(anchors.get(i, "unknown"))
+        if not why and tray.recheck_evidence:
+            why = _evidence_refusal(evidence.get(i, "unknown"))
         if why:
             return f"{i}: {why}"
     return None
