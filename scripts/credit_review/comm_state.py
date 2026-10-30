@@ -422,6 +422,16 @@ TOPIC_RE = re.compile(r"\bcredits?\b|\bclaim(s|ed|ing)?\b|\bmerg(e|es|ed|ing)\b|
                       r"\b(song|track) ?credits?\b")
 
 
+def ticket_type_name(conv: dict[str, Any]) -> str:
+    """The thread's ticket type name, whatever shape Intercom gives it: an object with a name, a bare string, or
+    nothing (a string ticket_type crashed R9 with AttributeError -> COMM STATE CHECK FAILED, unledgered; h2 10-30)."""
+    t = conv.get("ticket")
+    tt = t.get("ticket_type") if isinstance(t, dict) else None
+    if isinstance(tt, dict):
+        return str(tt.get("name") or "")
+    return tt if isinstance(tt, str) else ""
+
+
 def on_topic(conv: dict[str, Any]) -> bool:
     """R9 (thread kind): the thread is about credits / claims / merges - ticket type, title, subject, opening message
     or one of its last 3 human parts ('credit card' / 'credit note' are billing words)."""
@@ -429,7 +439,7 @@ def on_topic(conv: dict[str, Any]) -> bool:
     parts = [p for p in ((conv.get("conversation_parts") or {}).get("conversation_parts") or [])
              if (p.get("author") or {}).get("type") in ("user", "lead", "contact", "admin")
              and (p.get("part_type") or "comment") != "note" and (p.get("body") or "")]
-    text = " \n ".join(str(x) for x in [((conv.get("ticket") or {}).get("ticket_type") or {}).get("name") or "",
+    text = " \n ".join(str(x) for x in [ticket_type_name(conv),
                                          conv.get("title") or "", src.get("subject") or "", src.get("body") or ""]
                         + [p["body"] for p in parts[-3:]])
     return bool(TOPIC_RE.search(re.sub(r"credit[ -]?cards?|credit notes?|store credit", " ", text.lower())))

@@ -611,5 +611,18 @@ class OnTopicTest(unittest.TestCase):
         self.assertIn("reply_due:R9_thread_not_about_credits", cs.reply_due("5", "c1", "57000000001", ic))
 
 
+class TicketTypeShapeTest(unittest.TestCase):
+    """R9 reads the ticket type in any shape Intercom returns; a string or missing one never crashes the check."""
+
+    def test_object_string_and_missing_ticket_types(self):
+
+        self.assertTrue(cs.on_topic({"ticket": {"ticket_type": {"name": "Credit verification"}}}))
+        self.assertTrue(cs.on_topic({"ticket": {"ticket_type": "Credit claim"}}))
+        self.assertFalse(cs.on_topic({"ticket": {"ticket_type": "Billing"}}))
+        self.assertFalse(cs.on_topic({"ticket": "123", "title": "Hello"}))
+        self.assertFalse(cs.on_topic({"ticket": None}))
+        self.assertTrue(cs.on_topic({"ticket": {"ticket_type": None}, "title": "my credits"}))
+
+
 if __name__ == "__main__":
     unittest.main()
