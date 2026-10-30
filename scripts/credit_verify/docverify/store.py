@@ -331,6 +331,22 @@ class DocVerifyStore:
                     "WHERE request_id=? "
                     "ORDER BY id", (request_id,))]
 
+    def void_challenge(self, request_id: str, code: str, reason: str = "held_send") -> dict[str, Any]:
+        """Retire an issued code whose ask was NOT sent (h2 190: a hold between the gate's preflight and the send).
+        Atomic: only this request's code, only while unconsumed; it becomes consumed_by 'void:<reason>', so it can
+        never confirm a document and the next `issue` mints a fresh one. A code a document already used is never
+        voided (that filing's F9 stands)."""
+        why = "".join(ch for ch in str(reason or "held_send") if ch.isalnum() or ch in "_-")[:40] or "held_send"
+        with self.lock, self.db:
+            n = self.db.execute("UPDATE dv_challenges SET consumed_at=?, consumed_by=? WHERE request_id=? AND code=? "
+                                "AND consumed_at IS NULL", (utcnow(), f"void:{why}", request_id, code)).rowcount
+            row = self.db.execute("SELECT consumed_by FROM dv_challenges WHERE request_id=? AND code=?",
+                                  (request_id, code)).fetchone()
+        if n:
+            return {"voided": True, "request_id": request_id, "code": code, "consumed_by": f"void:{why}"}
+        return {"voided": False, "request_id": request_id, "code": code,
+                "why": "no such code for this request" if row is None else f"already consumed by {row[0]}"}
+
     def consume_challenge(self, challenge_id: int, by: str) -> bool:
         """ATOMIC one-use claim (QA #1476): True when `by` holds the code after this call - it claimed it now, or it
         had already claimed it (the same filing's other roles). False when another filing claimed it first, also

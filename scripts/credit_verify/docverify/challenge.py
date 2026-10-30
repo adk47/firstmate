@@ -63,6 +63,9 @@ def check(text: str | None, challenges: list[dict[str, Any]], *, user_id: int | 
     whys = []
     for ch in challenges:
         issued, expires = _ts(ch["issued_at"]), _ts(ch["expires_at"])
+        if str(ch.get("consumed_by") or "").startswith("void:"):
+            whys.append("the code was voided (its ask was not sent)")
+            continue
         if ch.get("consumed_at") and (consumer is None or ch.get("consumed_by") != consumer):
             whys.append("the code was already used by another document")
             continue

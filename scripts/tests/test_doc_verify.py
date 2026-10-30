@@ -3054,6 +3054,38 @@ class ArtifactTests(unittest.TestCase):
         self.assertIn('store.step(run_id, proof_id, "artifact"', src)
 
 class ChallengeTests(unittest.TestCase):
+    def test_a_code_whose_ask_was_not_sent_is_voided_and_the_next_issue_mints_a_fresh_one(self):
+        # h2 190 (#1513 residual window): a hold between the gate's preflight and the send leaves an issued code.
+        from credit_verify.docverify import challenge
+        with tempfile.TemporaryDirectory() as td:
+            s = DocVerifyStore(os.path.join(td, "dv.sqlite"))
+            first = s.issue_challenge(RID, 7)
+            self.assertEqual(s.issue_challenge(RID, 7)["code"], first["code"])                 # one active code
+            self.assertEqual(s.void_challenge(RID, "WRONGCOD")["why"], "no such code for this request")
+            self.assertEqual(s.void_challenge("other-request", first["code"])["voided"], False)   # not its request
+            res = s.void_challenge(RID, first["code"], "held send!")
+            self.assertEqual((res["voided"], res["consumed_by"]), (True, "void:heldsend"))
+            self.assertFalse(s.void_challenge(RID, first["code"])["voided"])                     # once
+            fresh = s.issue_challenge(RID, 7)
+            self.assertNotEqual(fresh["code"], first["code"])                                    # a NEW code next run
+            chs = s.challenges(RID)
+            # the voided code never confirms a document, even one showing it
+            c = challenge.check(f"code {first['code']}", [x for x in chs if x["code"] == first["code"]], user_id=7,
+                                received_at=chs[0]["issued_at"], consumer="intake:7:x")
+            self.assertEqual(c.status, xc.WEAK)
+            self.assertIn("voided", " ".join(c.detail["why"]))
+            # a code a document already used is never voided: that filing's F9 stands
+            (cid,) = [x["id"] for x in s.challenges(RID) if x["code"] == fresh["code"]]
+            self.assertTrue(s.consume_challenge(cid, "intake:7:doc"))
+            res = s.void_challenge(RID, fresh["code"])
+            self.assertEqual((res["voided"], res["why"]), (False, "already consumed by intake:7:doc"))
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("cdv", Path(__file__).resolve().parents[1] / "credit-doc-verify.py")
+        cdv = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cdv)
+        a = cdv.parser().parse_args(["challenge", "void", "--request", RID, "--code", "ACDE3467"])
+        self.assertEqual((a.action, a.code, a.reason), ("void", "ACDE3467", "held_send"))
+
     def test_codes_and_windows(self):
         from credit_verify.docverify import challenge
         codes = {challenge.new_code() for _ in range(500)}

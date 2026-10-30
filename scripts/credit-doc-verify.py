@@ -440,13 +440,21 @@ def cmd_summary(args: argparse.Namespace) -> int:
 
 def cmd_challenge(args: argparse.Namespace) -> int:
     """F9: `issue` the request's challenge code (h2 calls it when it SENDS the need=distributor_dashboard_with_code
-    ask; an active code is returned again) or `show` its codes. Prints JSON. Writes only dv_challenges."""
+    ask; an active code is returned again), `void` an issued code whose ask was NOT sent (a hold after the preflight;
+    exit 1 when nothing was voided), or `show` its codes. Prints JSON. Writes only dv_challenges."""
     from credit_verify.docverify.store import DocVerifyStore
     from credit_verify.proof import stage2
     store = DocVerifyStore(args.store)
     if args.action == "show":
         print(json.dumps(store.challenges(args.request), indent=1))
         return 0
+    if args.action == "void":
+        if not args.code:
+            log("challenge void needs --code")
+            return 2
+        res = store.void_challenge(args.request, args.code, args.reason)
+        print(json.dumps(res))
+        return 0 if res["voided"] else 1
     uid = args.user
     if uid is None:
         req = stage2.requests([args.request]).get(args.request)
@@ -506,8 +514,11 @@ def parser() -> argparse.ArgumentParser:
     pj.add_argument("--batch", type=int, required=True)
     pj.add_argument("--out-dir", required=True)
     pj.set_defaults(fn=cmd_junk_list)
-    pc = sub.add_parser("challenge", help="F9 challenge code for a request: issue (when the ask is sent) or show")
-    pc.add_argument("action", choices=("issue", "show"))
+    pc = sub.add_parser("challenge", help="F9 challenge code for a request: issue (when the ask is sent), void (the ask "
+                                          "was not sent) or show")
+    pc.add_argument("action", choices=("issue", "void", "show"))
+    pc.add_argument("--code", help="void: the code to retire")
+    pc.add_argument("--reason", default="held_send", help="void: why (recorded as consumed_by 'void:<reason>')")
     pc.add_argument("--request", required=True)
     pc.add_argument("--user", type=int, help="the request's account (default: read from core)")
     pc.set_defaults(fn=cmd_challenge)
