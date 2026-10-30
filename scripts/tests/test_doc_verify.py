@@ -2614,6 +2614,48 @@ class TrayTests(unittest.TestCase):
         self.assertEqual((w["total"]["false_forged"], w["clean"]), (1, False))
         self.assertIn("false forged 1", l11.line(w))
 
+    def test_l11_counts_a_verified_claim_anchored_by_a_d5b_record_within_24h(self):
+        # Fable 171: join = a verified row + a BUILT dsp_anchor (dsp-verify store) on the same request covering the
+        # role, captured within 24 h of the verified read
+        from datetime import datetime, timezone
+
+        from credit_verify.docverify import l11
+        since, late = "2026-10-29T04:00:00Z", datetime(2026, 10, 30, 5, 0, tzinfo=timezone.utc)
+        self.store.db.execute("INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, outcome, reason, "
+                              "account_hold, detail_json, version, intake_id) VALUES ('r', '2026-10-29T05:00:00Z', "
+                              "'pv', 'RQ-A', 'Mixing', 'verified', 'x', 0, '{}', ?, '1:pv')", (VERSION,))
+        self.store.db.commit()
+        dsp = os.path.join(self.td.name, "dsp.sqlite")
+
+        def anchors(*recs):
+            db = sqlite3.connect(dsp)
+            db.execute("DROP TABLE IF EXISTS dsp_anchors")
+            db.execute("CREATE TABLE dsp_anchors (id INTEGER PRIMARY KEY, request_id TEXT, kind TEXT, outcome TEXT, "
+                       "record_json TEXT)")
+            db.executemany("INSERT INTO dsp_anchors (request_id, kind, outcome, record_json) VALUES (?,?,?,?)",
+                           [(r, k, o, json.dumps(rec)) for r, k, o, rec in recs])
+            db.commit()
+            db.close()
+
+        def anchored():
+            return l11.watch(self.store, since=since, now=late, false_forged=set(), dsp_store=dsp)["total"]["verified_anchored"]
+        good = {"roles": ["Mixing"], "captured_at": "2026-10-29T06:10:00Z"}
+        anchors(("rq-a", "dsp_anchor", "built", good))
+        self.assertEqual(anchored(), 1)
+        self.assertTrue(l11.watch(self.store, since=since, now=late, false_forged=set(), dsp_store=dsp)["clean"])
+        for bad in (("rq-a", "dsp_anchor", "refused", good),                                   # not built
+                    ("rq-a", "dsp_label_line", "built", good),                                 # a label line
+                    ("rq-a", "dsp_anchor", "built", {**good, "roles": ["Producer"]}),           # another role
+                    ("rq-b", "dsp_anchor", "built", good),                                     # another request
+                    ("rq-a", "dsp_anchor", "built", {**good, "captured_at": "2026-10-31T06:00:00Z"}),   # > 24 h
+                    ("rq-a", "dsp_anchor", "built", {**good, "captured_at": "garbage"})):
+            anchors(bad)
+            self.assertEqual(anchored(), 0, bad)
+        anchors(("rq-a", "dsp_anchor", "built", {**good, "captured_at": "2026-10-29T06:10:00"}))     # naive = UTC
+        self.assertEqual(anchored(), 1)
+        self.assertEqual(l11.watch(self.store, since=since, now=late, false_forged=set(),
+                                   dsp_store=os.path.join(self.td.name, "none.sqlite"))["total"]["verified_anchored"], 0)
+
     def test_l11_watch_counts_documents_once_and_anchors_only_from_the_same_run(self):
         from datetime import datetime, timezone
 

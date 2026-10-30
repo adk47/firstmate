@@ -66,6 +66,19 @@
       "approval_ref": "captain-1028-213x: captain verbatim 2026-10-28 21:3xZ \"move credits and profiles along ... if you get one fraud document deny ...\" + 21:4xZ \"yes approve all if Fable confirms\" (data/captain.md:586); Fable exec plan data/verify-program-lead-fable-l1/exec-plan-captain-1028-213x.md section (a); Fable confirms data/verify-program-lead-fable-l1/confirms-captain-1028-214x.md; APPROVE scope: captain 2026-10-29 12:1xZ \"ddl go\" (anchor records: DDL GO ANCHOR RECORDS, firstmate 110) + Fable [key=l12-approvals-core] = option A and r3 [key=ddl-anchor-records-guards] (approvals <= 50/day, gate allow, not watchlisted, pop 1-59)",
       "cap_per_day": 100,
       "approve_cap_per_day": 50
+    },
+    "credit-dsp-verify-d5b": {
+      "description": "credit-dsp-verify.py d5b (Fable 171): same-run Spotify+Tidal captures and LOCAL dsp-anchor/1 records for doc-verify's verified requests. It approves nothing and writes no core state; it is registered because its anchor records are the approve-grade fact a later executor consumes.",
+      "entrypoints": [
+        "credit-dsp-verify.py d5b"
+      ],
+      "cron_names": [
+        "credit-dsp-verify-d5b"
+      ],
+      "approved": false,
+      "approved_by": null,
+      "approval_ref": null,
+      "status_note": "Registered approved:false per Fable 171 (it approves nothing; the executor does). The cron ships enabled:false because the registry check refuses an enabled cron of an approved:false entry; enabling it is firstmate's call with the registry change."
     }
   }
 }

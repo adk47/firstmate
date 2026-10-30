@@ -268,7 +268,7 @@ def cmd_l11_watch(args: argparse.Namespace) -> int:
     store = DocVerifyStore.read_only(args.store)       # a report: never writes
     # no file = UNKNOWN (never clean); an empty reviewed file = known zero
     flags = l11.parse_false_forged(Path(args.false_forged).read_text()) if args.false_forged else None
-    w = l11.watch(store, since=args.since, false_forged=flags)
+    w = l11.watch(store, since=args.since, false_forged=flags, dsp_store=args.dsp_store)
     print(json.dumps(w, indent=1, default=str) if args.json else l11.line(w))
     return 0
 
@@ -490,6 +490,8 @@ def parser() -> argparse.ArgumentParser:
     pl.add_argument("--false-forged", help="the reviewed flag file: 'false-forged: <prefix>' or 'ruling: forged-<prefix> "
                     "not' lines (e.g. trays/rulings-forged.txt). Without it false forged is UNKNOWN and never clean")
     pl.add_argument("--json", action="store_true")
+    pl.add_argument("--dsp-store", default="/var/lib/hydra-credit-verify/dsp-verify.sqlite",
+                    help="the DSP verifier's store (D5b anchors, read-only); '' = none")
     pl.set_defaults(fn=cmd_l11_watch)
     pj = sub.add_parser("junk-list", help="JUNK PROOF option C: artifact kind per filed document -> purge list per "
                                           "user + decline proposal (read-only; writes two files)")

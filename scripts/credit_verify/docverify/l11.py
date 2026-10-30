@@ -61,8 +61,42 @@ def _anchored(db: Any, proof_id: str, key: str, run_id: str, version: str) -> bo
     return bool(d.get("fresh_since")) and a.get("spotify") is True and a.get("tidal") is True
 
 
+def dsp_anchors(path: str | None) -> dict[str, list[tuple[datetime, set[str]]]]:
+    """D5b: request -> [(capture time, roles)] of every BUILT dsp_anchor record in the DSP verifier's store
+    (read-only). No path / no store = no anchors (the line then says D5b is not live)."""
+    out: dict[str, list[tuple[datetime, set[str]]]] = {}
+    if not path:
+        return out
+    import os
+    import sqlite3
+    if not os.path.exists(path):
+        return out
+    db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        for rid, rec in db.execute("SELECT lower(request_id), record_json FROM dsp_anchors WHERE outcome='built' AND "
+                                   "kind='dsp_anchor' AND record_json IS NOT NULL"):
+            try:
+                r = json.loads(rec)
+                at = _ts(r.get("captured_at") or r.get("capture_read_at") or "")
+                at = at if at.tzinfo else at.replace(tzinfo=timezone.utc)
+            except (ValueError, TypeError, AttributeError):
+                continue
+            out.setdefault(rid, []).append((at, {str(x) for x in r.get("roles") or []}))
+    finally:
+        db.close()
+    return out
+
+
+def _d5b_anchored(anchors: dict[str, list[tuple[datetime, set[str]]]], rid: str, role: str, at: str) -> bool:
+    """A verified claim is anchored by D5b when a built dsp_anchor for its request covers its role and was captured
+    no more than 24 h from the verified read (either side: the capture follows the read it was filed for)."""
+    when = _ts(at)
+    return any(role in roles and abs((cap - when).total_seconds()) <= 24 * 3600
+               for cap, roles in anchors.get((rid or "").lower(), []))
+
+
 def watch(store: Any, *, since: str, false_forged: set[str] | None = None,
-          now: datetime | None = None) -> dict[str, Any]:
+          now: datetime | None = None, dsp_store: str | None = None) -> dict[str, Any]:
     """`false_forged=None` means the reviewed flag file was not supplied: UNKNOWN, so never clean (QA #1471)."""
     now = now or datetime.now(timezone.utc)
     db = store.db
@@ -71,6 +105,7 @@ def watch(store: Any, *, since: str, false_forged: set[str] | None = None,
         "o.version FROM dv_outcomes o JOIN (SELECT MAX(id) id FROM dv_outcomes WHERE version=? GROUP BY "
         "coalesce(intake_id, ''), proof_id, request_id, role) l USING(id) WHERE o.at >= ?", (VERSION, since)).fetchall()
     first: dict[str, dict[str, Any]] = {}
+    anchors = dsp_anchors(dsp_store)
     for pid, rid, role, outcome, doc, at, run_id, version in rows:
         d = first.setdefault(doc, {"proof_ids": set(), "forged_ids": set(), "at": at, "outcomes": set(),
                                    "anchored": False})
@@ -80,7 +115,7 @@ def watch(store: Any, *, since: str, false_forged: set[str] | None = None,
         if outcome in ("forged", "forged_positive"):
             d["forged_ids"].add(pid)            # every proof id with a forged outcome (QA #1471), matched below
         if outcome == "verified" and not d["anchored"]:
-            d["anchored"] = _anchored(db, pid, f"{rid}#{role}", run_id, version)
+            d["anchored"] = _anchored(db, pid, f"{rid}#{role}", run_id, version) or _d5b_anchored(anchors, rid, role, at)
     flags = false_forged or set()
 
     def flagged(d: dict[str, Any]) -> bool:

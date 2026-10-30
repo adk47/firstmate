@@ -226,6 +226,11 @@ class Store:
                  None if record is None else _j(record), (record or {}).get("record_sha256"),
                  None if sink_response is None else _j(sink_response)))
 
+    def built_anchor_verdict_ids(self) -> set[int]:
+        """Verdict ids an anchor record was already BUILT from (D5b never builds two records from one verdict)."""
+        return {r[0] for r in self.db.execute("SELECT DISTINCT verdict_id FROM dsp_anchors WHERE outcome='built' "
+                                              "AND verdict_id IS NOT NULL")}
+
     def anchors(self, request_id: str | None = None) -> list[dict[str, Any]]:
         self.db.row_factory = sqlite3.Row
         try:
