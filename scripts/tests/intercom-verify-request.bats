@@ -2798,6 +2798,46 @@ Caroline, Muso Support" ]
   grep -q '^POST https://api.intercom.io/conversations/777/reply$' "$CURL_STUB_LOG"
 }
 
+@test "R1 [key=r1-filing-thread]: a filing thread WE opened carries the receipt only when every named request was filed in it and the customer's filing part is there" {
+  unlocked_gate received
+  OLD='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
+  export INTERCOM_VERIFY_TEST_NOW=1761000000
+  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X" "s2:Producer:B:X"
+  jq '.user.filing_conversation = "777"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/f.json"
+  intake() {  # <conversation> <candidates json>
+    python3 -c "import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.execute('DROP TABLE IF EXISTS proof_intake'); d.execute('CREATE TABLE proof_intake (user_id INTEGER, conversation_id TEXT, candidate_request_ids_json TEXT, file_sha256 TEXT, received_at TEXT)'); d.execute('INSERT INTO proof_intake VALUES (42,?,?,?,?)', (sys.argv[2], sys.argv[3], 'a'*64, '2026-10-22T11:20:05Z')); d.commit()" \
+      "$INTERCOM_VERIFY_TEST_PROOF_DB" "$1" "$2"
+  }
+  ours='{"type":"conversation","id":"777","source":{"author":{"type":"admin","id":"5763097"},"body":"Hi Jane"},"contacts":{"contacts":[{"id":"6650aa01"}]},"conversation_parts":{"conversation_parts":[{"id":"5","part_type":"comment","author":{"type":"user"},"body":"here","attachments":[{"name":"split.pdf"}]}]}}'
+  send_r1() { STUB_CONTACT_GET="$OLD" STUB_CONV_SEARCH='{"type":"conversation.list","conversations":[]}' STUB_CONVERSATION="$1" \
+      run "$GATE" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/f.json" --approved-by U7RP6HKUZ; }
+  # every named request filed in 777 + the customer's attachment part in it: posts INTO 777, though we opened it
+  intake 777 '["s1","s2"]'
+  send_r1 "$ours"
+  [ "$status" -eq 0 ]; [[ "$output" == "POSTED comment"* ]]
+  grep -q '^POST https://api.intercom.io/conversations/777/reply$' "$CURL_STUB_LOG"
+  [ "$(posts)" -eq 0 ]; [ "$(replies)" -eq 1 ]
+  # QA #1532: the same with an EXPLICIT --conversation equal to the filing conversation
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+  STUB_CONTACT_GET="$OLD" STUB_CONV_SEARCH='{"type":"conversation.list","conversations":[]}' STUB_CONVERSATION="$ours" \
+    run -0 "$GATE" send --campaign status-doc-received --copy received --conversation 777 --credits-file "$TEST_TMPDIR/f.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED comment"* ]]
+  grep -q '^POST https://api.intercom.io/conversations/777/reply$' "$CURL_STUB_LOG"
+  # the next cases on a fresh ledger: G2 stays for everything else
+  for c in partial elsewhere nopart; do
+    rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+    case "$c" in
+      partial)   intake 777 '["s1"]'; conv="$ours" ;;                           # s2 was never filed in 777
+      elsewhere) intake 888 '["s1","s2"]'; conv="$ours" ;;                      # filed in ANOTHER thread
+      nopart)    intake 777 '["s1","s2"]'; conv="$(jq -c '.conversation_parts.conversation_parts[0].attachments = []' <<<"$ours")" ;;
+    esac
+    send_r1 "$conv"
+    [ "$status" -eq 1 ] || [ "$status" -eq 3 ] || { echo "case $c: rc=$status $output" >&2; false; }
+    [[ "$output" == *"opened by us"* ]] || { echo "case $c: $output" >&2; false; }
+    [ "$(replies)" -eq 0 ]; [ "$(posts)" -eq 0 ]
+  done
+}
+
 @test "kill switch: /etc/hydra/<campaign>.disabled stops every real send of that campaign; the dry run still renders; removing it resumes" {
   unlocked_gate merge
   export INTERCOM_VERIFY_TEST_DISABLED_DIR="$TEST_TMPDIR/etc-hydra"; mkdir -p "$INTERCOM_VERIFY_TEST_DISABLED_DIR"

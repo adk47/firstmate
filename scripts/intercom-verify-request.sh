@@ -787,11 +787,40 @@ INPUT_FILING_CONV="$("$JQ_BIN" -r '(.user.filing_conversation // "") | tostring'
 # never into whichever conversation the 14-day auto-pick would choose and never by email instead. The dry run
 # renders it in-thread too. A filing thread that cannot carry it is a hold (below), not a fallback.
 R1_THREAD=0
+# [key=r1-filing-thread] (r5 10-30 13:3xZ, firstmate 283): the R1 receipt goes INTO the filing thread even when WE
+# opened it - a NARROW exemption from G2's opener rule only, never an email detour. All required: the R1 filing-thread
+# path (status-doc-received, --conversation == user.filing_conversation); EVERY named request has a proof_intake row
+# of this user filed IN this conversation (never any other thread we opened); the customer's filing part, with its
+# attachment, is in the thread. G2's single-contact / account-user checks, R1 once-ever and the ledger claim are
+# unchanged. $1 = the conversation JSON. 0 = exempt.
+r1_filing_thread_ok() {
+  [ "$CAMPAIGN" = "status-doc-received" ] && [ "$R1_THREAD" = "1" ] && [ -n "$THREAD" ] && [ "$THREAD" = "$INPUT_FILING_CONV" ] || return 1
+  printf '%s' "$1" | "$JQ_BIN" -e '[.source, ((.conversation_parts.conversation_parts // [])[])]
+      | any(.[]; ((.author.type // "") | IN("user", "lead", "contact")) and (((.attachments // []) | length) > 0))' >/dev/null 2>&1 || return 1
+  "$PY_BIN" -I - "$PROOF_DB" "$USER_ID" "$THREAD" "$ALL_IDS" <<'PY' >/dev/null 2>&1
+import json, re, sqlite3, sys
+db_path, uid, conv, ids = sys.argv[1], sys.argv[2], sys.argv[3], [i.strip().lower() for i in sys.argv[4].split(",") if i.strip()]
+if not re.fullmatch(r"[0-9]{1,12}", uid) or not ids:
+    sys.exit(1)
+db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+filed = set()
+for (cj,) in db.execute("SELECT coalesce(candidate_request_ids_json, '[]') FROM proof_intake WHERE user_id=? AND conversation_id=?",
+                        (int(uid), conv)):
+    try:
+        filed |= {str(x).strip().lower() for x in json.loads(cj or "[]")}
+    except ValueError:
+        continue
+sys.exit(0 if all(i in filed for i in ids) else 1)
+PY
+}
+
 # QA #1460: an explicit --conversation for R1 must BE the filing conversation (the one G3 and comm_state judge).
 if [ "$COPY" = "docrecvr" ] && [ -n "$THREAD" ] && [ "$THREAD" != "$INPUT_FILING_CONV" ]; then
   refuse "R1 goes only into the filing conversation ($INPUT_FILING_CONV); --conversation $THREAD is another thread. Nothing was sent or claimed."
 fi
-if [ "$COPY" = "docrecvr" ] && [ -z "$THREAD" ] && printf '%s' "$INPUT_FILING_CONV" | grep -qE '^[0-9]{1,24}$'; then
+if [ "$COPY" = "docrecvr" ] && printf '%s' "$INPUT_FILING_CONV" | grep -qE '^[0-9]{1,24}$' \
+   && { [ -z "$THREAD" ] || [ "$THREAD" = "$INPUT_FILING_CONV" ]; }; then
+  # QA #1532: an explicit --conversation that IS the filing conversation (e.g. a reply_due answer) is the same R1 path
   THREAD="$INPUT_FILING_CONV"; MESSAGE_TYPE="comment"; R1_THREAD=1
 fi
 # G1's "older than the request": the oldest credits[].created_at the caller passed (epoch, or ISO with Z, a +hh:mm /
@@ -1830,6 +1859,7 @@ if [ "$GOLIVE" = "1" ] && [ "$LIVE" = "1" ]; then
     g2conv="$(api GET "/conversations/$THREAD?display_as=plaintext")" \
       || { printf 'CONVERSATION READ FAILED (curl); nothing was sent or claimed\n' >&2; exit 4; }
     printf '%s' "$g2conv" | "$JQ_BIN" -e '((.source.author.type // "") | IN("user", "lead", "contact"))' >/dev/null 2>&1 \
+      || r1_filing_thread_ok "$g2conv" \
       || refuse "G2: conversation $THREAD was opened by us (an admin or bot), not the customer; nothing was sent or claimed."
     G_CONTACT="$THREAD_CONTACT_JSON"
   else
@@ -2059,7 +2089,8 @@ thread_check() { # sets THREAD_WHY (empty when $THREAD can carry the note) and T
   if [ -n "$assignee" ] && [ "$assignee" != "0" ] && [ "$assignee" != "$INTERCOM_ADMIN_ID" ]; then
     THREAD_WHY="conversation $THREAD is assigned to a human (admin $assignee), who is handling this user; not sending."; return 0
   fi
-  if [ "${GOLIVE:-0}" = "1" ] && ! printf '%s' "$tconv" | "$JQ_BIN" -e '((.source.author.type // "") | IN("user", "lead", "contact"))' >/dev/null 2>&1; then
+  if [ "${GOLIVE:-0}" = "1" ] && ! printf '%s' "$tconv" | "$JQ_BIN" -e '((.source.author.type // "") | IN("user", "lead", "contact"))' >/dev/null 2>&1 \
+     && ! r1_filing_thread_ok "$tconv"; then
     THREAD_WHY="G2: conversation $THREAD was opened by us (an admin or bot), not the customer; not sending in it."; return 0
   fi
   btag="$(printf '%s' "$tconv" | "$JQ_BIN" -r --arg b "$BLOCKED_CONV_TAGS" '($b | split(" ")) as $bl | [(.tags.tags // [])[] | (.name // "") | ascii_downcase | select(IN($bl[]))] | .[0] // empty')"
