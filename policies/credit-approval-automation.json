@@ -75,10 +75,11 @@
       "cron_names": [
         "credit-dsp-verify-d5b"
       ],
-      "approved": false,
-      "approved_by": null,
-      "approval_ref": null,
-      "status_note": "Registered approved:false per Fable 171 (it approves nothing; the executor does). The cron ships enabled:false because the registry check refuses an enabled cron of an approved:false entry; enabling it is firstmate's call with the registry change."
+      "approved": true,
+      "approved_by": "fable-delegated-1030 l1+v1",
+      "approval_ref": "data/verify-program-lead-fable-l1/switch-on-plan-1030.md item 1 (l1+v1 GO); firstmate doc-verify-build-b1.inbox 206 + 208: register credit-dsp-verify-d5b as capture-only (approves nothing, writes only its own shadow ledger); live approval use stays a separate r5 GO after a shadow read",
+      "status_note": "SHADOW only: captures + local dsp-anchor/1 records for doc-verify's verified requests, written to dsp-verify.sqlite; it approves nothing and writes no core state (anchor upload stays manual, credit-anchors-push.py). Kill switches /etc/hydra/credit-dsp-verify.disabled and /etc/hydra/credit-verify.disabled. Any LIVE approval use is a separate r5 GO after a shadow read.",
+      "scope": "capture-only"
     }
   }
 }
