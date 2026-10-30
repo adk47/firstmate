@@ -51,8 +51,8 @@ setup() {
   [ -f "$HYDRA_REPO/scripts/lib/intercom_link.py" ]
 }
 
-@test "the timer fires hourly" {
-  grep -q 'OnCalendar=hourly' <<< "$TMR"
+@test "the timer fires at :40 past every hour, clear of the other ClickUp scanners" {
+  grep -qF 'OnCalendar=*-*-* *:40:00' <<< "$TMR"
 }
 
 @test "the timer is Persistent so a reboot does not silently skip a window" {
