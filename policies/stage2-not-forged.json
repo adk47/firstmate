@@ -1,0 +1,19 @@
+{
+  "description": "Stage-2 documents a ruling found NOT forged. A reject_hold verdict resting on one of these documents reads as 'review' (a human looks at the request; the account is no longer held for a forgery). The stored stage2_shadow rows are never edited. Read by scripts/credit_review/stage2_verdicts.py.",
+  "documents": [
+    {
+      "proof_id": "47c36755b0910e61f79f540a3e9a0efffa45b5c2444a30141855717e3ba0736a",
+      "source_ref": "intercom:215469782523805:0",
+      "user_id": 121667,
+      "requests": 8,
+      "ruling": "l11b-forged-11: BeatStars licence-template family match, not a forgery (Fable; firstmate 152, 2026-10-30)"
+    },
+    {
+      "proof_id": "c836ec438219be319b602d24732201eb604655128b1b0a8ccb3648544663bc57",
+      "source_ref": "intercom:215469472559402:0",
+      "user_id": 184339,
+      "requests": 3,
+      "ruling": "l11b-forged-11: BeatStars licence-template family match, not a forgery (Fable; firstmate 152, 2026-10-30)"
+    }
+  ]
+}

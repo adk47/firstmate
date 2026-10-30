@@ -109,6 +109,70 @@ class VerdictTests(unittest.TestCase):
         self.assertTrue(json.loads(out)["eligible"])
 
 
+class NotForgedTests(unittest.TestCase):
+    """firstmate 152 / Fable l11b-forged-11: a reject_hold resting on a document ruled NOT forged reads as review, and
+    the account is no longer held for a forgery; everything else about the store stays as it is."""
+    PID = "a" * 64
+
+    def setUp(self):
+        self.s = Store(Path(tempfile.mkdtemp()) / "proof.sqlite")
+        self.policy = Path(tempfile.mkdtemp()) / "not-forged.json"
+        self.old = stage2_verdicts.NOT_FORGED
+        stage2_verdicts.NOT_FORGED = str(self.policy)
+
+    def tearDown(self):
+        stage2_verdicts.NOT_FORGED = self.old
+
+    def rule(self, entries):
+        self.policy.write_text(json.dumps({"documents": entries}))
+
+    def test_a_ruled_document_lifts_the_account_hold_and_the_request_goes_to_review(self):
+        self.s.add("f1", 7, "reject_hold", proof_id=self.PID, reason="likely forged")
+        self.s.add("g1", 7, "need_more", proof_id="other")
+        self.assertEqual(stage2_verdicts.held_accounts(stage2_verdicts.load(self.s.path)), {7})
+        self.rule([{"proof_id": self.PID, "user_id": 7, "ruling": "l11b-forged-11"}])
+        v = stage2_verdicts.load(self.s.path)
+        self.assertEqual(stage2_verdicts.held_accounts(v), set())
+        self.assertEqual(v["f1"]["Mixing"].outcome, "review")
+        self.assertIn("ruled NOT forged (l11b-forged-11)", v["f1"]["Mixing"].reason)
+        self.assertEqual(stage2_verdicts.released(v, "need_more"), {"g1"})     # the account's other ask flows again
+        self.assertNotIn("f1", stage2_verdicts.released(v, "need_more"))      # the ruled request is not asked
+
+    def test_the_ruling_binds_to_its_user_and_a_broken_file_releases_nothing(self):
+        self.s.add("f1", 7, "reject_hold", proof_id=self.PID)
+        for bad in ([{"proof_id": self.PID, "user_id": 8, "ruling": "x"}],      # another account's document
+                    [{"proof_id": self.PID[:10], "user_id": 7, "ruling": "x"}],  # not a sha256
+                    [{"proof_id": self.PID, "user_id": 7, "ruling": " "}],      # no ruling reference
+                    [{"proof_id": self.PID, "user_id": "7", "ruling": "x"}]):   # user id not an integer
+            self.rule(bad)
+            self.assertEqual(stage2_verdicts.held_accounts(stage2_verdicts.load(self.s.path)), {7}, bad)
+        for shape in ('{"documents": 1}', '{"documents": "x"}', '{"documents": {"a": 1}}', '[1, 2]', '"x"',
+                      '{"documents": [1, null, "x"]}'):
+            self.policy.write_text(shape)           # QA #1543: valid JSON, wrong shape -> holds stay, no crash
+            self.assertEqual(stage2_verdicts.held_accounts(stage2_verdicts.load(self.s.path)), {7}, shape)
+            self.assertFalse(stage2_verdicts.gap_credits(["f1"], user_id="7", path=self.s.path)["eligible"])
+        self.policy.write_text("{not json")
+        self.assertEqual(stage2_verdicts.held_accounts(stage2_verdicts.load(self.s.path)), {7})
+        self.policy.unlink()
+        self.assertEqual(stage2_verdicts.held_accounts(stage2_verdicts.load(self.s.path)), {7})
+
+    def test_the_gate_cli_honours_the_ruling_under_isolated_mode(self):
+        import os
+        import subprocess
+        self.s.add("f1", 7, "reject_hold", proof_id=self.PID)
+        self.s.add("g1", 7, "need_more", proof_id="other")
+        self.rule([{"proof_id": self.PID, "user_id": 7, "ruling": "l11b-forged-11"}])
+        out = subprocess.run([sys.executable, "-I", str(ROOT / "scripts/credit_review/stage2_verdicts.py"),
+                              "--db", self.s.path, "gap-credits", "--request-ids", "g1", "--user-id", "7"],
+                             capture_output=True, text=True, check=True,
+                             env={**os.environ, "STAGE2_NOT_FORGED": str(self.policy)}).stdout
+        self.assertTrue(json.loads(out)["eligible"])
+
+    def test_the_shipped_policy_is_well_formed(self):
+        got = stage2_verdicts.not_forged(self.old)
+        self.assertEqual(sorted(e["user_id"] for e in got.values()), [121667, 184339])
+
+
 class RunnerTests(unittest.TestCase):
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp(prefix="s2ask-"))

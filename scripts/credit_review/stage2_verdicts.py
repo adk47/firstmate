@@ -51,6 +51,30 @@ ACCOUNT_HOLD_PREFIX = "account hold"
 DOC_KINDS = ("split_sheet", "contract", "invoice", "letter_of_direction", "pro_portal", "distributor_portal",
              "dsp_for_artists", "daw_session", "catalog_page")
 CHUNK = 400
+# Documents a ruling found NOT forged (e.g. a licence-template family match). A `reject_hold` verdict resting on one
+# of them reads as `review` instead: the request stays with a human, and the ACCOUNT is no longer held for a forgery.
+# The stored verdict is never edited (stage2_shadow stays append-only); this is a read-time rule, logged in the file.
+NOT_FORGED = os.environ.get("STAGE2_NOT_FORGED",
+                            str(Path(__file__).resolve().parents[2] / "policies" / "stage2-not-forged.json"))
+NOT_FORGED_OUTCOME = "review"
+
+
+def not_forged(path: str | None = None) -> dict[str, dict[str, Any]]:
+    """{proof id: entry} of the documents ruled not forged. Missing / unreadable / malformed = {} (every reject_hold
+    keeps holding: a release is never inferred from a broken file)."""
+    try:
+        doc = json.loads(Path(path or NOT_FORGED).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    docs = doc.get("documents") if isinstance(doc, dict) else None
+    if not isinstance(docs, list):          # QA #1543: a valid-JSON non-list must not crash the gate
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for e in docs:
+        if (isinstance(e, dict) and isinstance(e.get("proof_id"), str) and len(e["proof_id"]) == 64
+                and isinstance(e.get("user_id"), int) and isinstance(e.get("ruling"), str) and e["ruling"].strip()):
+            out[e["proof_id"]] = e
+    return out
 
 
 class Stage2Error(RuntimeError):
@@ -123,13 +147,20 @@ def load(path: str | None = None, *, request_ids: Iterable[str] | None = None,
     version = version or analyzer_version()
     db = _connect(path)
     out: dict[str, dict[str, Verdict]] = {}
+    ruled = not_forged()
     try:
         def take(where: str, params: list[Any]) -> None:
             for r in db.execute(LATEST.format(where=where), [version, *params]):
                 rid = str(r["request_id"]).strip().lower()
+                outcome, reason = str(r["outcome"]), str(r["reason"] or "")
+                e = ruled.get(str(r["proof_id"] or ""))
+                if outcome == "reject_hold" and e is not None and r["user_id"] == e["user_id"]:
+                    outcome = NOT_FORGED_OUTCOME
+                    reason = (f"document ruled NOT forged ({e['ruling']}); a human reviews it, no account hold "
+                              f"(was: {reason})")[:400]
                 out.setdefault(rid, {})[str(r["role"])] = Verdict(
                     request_id=rid, role=str(r["role"]), user_id=r["user_id"], paid=r["paid"],
-                    outcome=str(r["outcome"]), reason=str(r["reason"] or ""), doc_kind=str(r["doc_kind"] or ""),
+                    outcome=outcome, reason=reason, doc_kind=str(r["doc_kind"] or ""),
                     proof_id=str(r["proof_id"] or ""), lists=_lists(r["detail_json"], r["proof_id"]),
                     judged_at=str(r["judged_at"] or ""))
         if request_ids is None and user_ids is None:
