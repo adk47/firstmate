@@ -2000,6 +2000,7 @@ jobs:
           # L12 executor (fable-decider closes): tray validation, every write-boundary guard (each with a
           # red mutant), daily cap, kill file, registry re-check, read-back, audit. Hermetic.
           python3 scripts/tests/test_credit_fable_executor.py
+          python3 scripts/tests/test_credit_anchor_upload.py
           python3 scripts/tests/test_credit_forged_tray.py
           python3 scripts/tests/test_credit_claim_executor.py
           # C6 claim declines as code (claim_verify/decline_rules): d2's 17 as fixtures (14/3), the related-trio

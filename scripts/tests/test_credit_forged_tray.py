@@ -42,6 +42,8 @@ class ForgedTrayTest(unittest.TestCase):
         self.assertEqual((r["rule"], r["reason_code"], r["ruling_id"]), ("R-FRAUD-DOC", "fraud_document", "forged-abcd1234"))
         self.assertEqual(r["signal_ids"], ["s1", "s2"])
         self.assertGreaterEqual(len(r["evidence"]), 20)
+        # captain 16:0xZ: the row admits on its coded outcome = the executing document's dv_outcomes row
+        self.assertEqual(r["coded_outcome"], "dv_outcomes:7")
 
     def test_executable_row_not_confirmed_refuses_the_batch(self):
         for text in ("ruling: forged-abcd1234 not", "ruling: forged-99999999 confirm"):

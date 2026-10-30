@@ -118,7 +118,10 @@ def build(doc: dict[str, Any], rulings_text: str | None,
                           "rule": "R-FRAUD-DOC", "evidence": evidence, "reason_code": "fraud_document",
                           "proof_id": d.get("proof_id"), "intake_id": d.get("intake_id"),
                           "fraud_pair": d.get("fraud_pair"), "signal_ids": d.get("signal_ids"),
-                          "outcome_ids": outcomes, "contributors": contributors, "subject": "credit"})
+                          "outcome_ids": outcomes, "contributors": contributors, "subject": "credit",
+                          # the coded-rule outcome the executor admits on (captain 16:0xZ): the executing document's
+                          # own `forged` dv_outcomes row for this request
+                          "coded_outcome": f"dv_outcomes:{int(q.get('outcome_id'))}"})
         report["requests"] += 1
     return trays, report
 

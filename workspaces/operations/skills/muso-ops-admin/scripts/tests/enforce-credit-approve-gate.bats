@@ -1284,3 +1284,91 @@ api_setup() {
     [ "$status" -ne 0 ]
     [[ "$output" == *"CV_EVIDENCE_MODE must be one of"* ]]
 }
+
+# ── fable-decider APPROVALS (L12 executor PR 2; core FABLE_RULED #11010/#11011) ─────────────────────────────────
+fda_setup() {
+    export CREDIT_APPROVAL_REGISTRY="$TEST_ROOT/registry.json"
+    printf '%s' '{"automations":{"fable-decider":{"approved":true,"approved_by":"captain","approval_ref":"captain-1028-213x"}}}' \
+        > "$CREDIT_APPROVAL_REGISTRY"
+    export FABLE_DECIDER_KILL_FILE="$TEST_ROOT/fable-decider.disabled"
+    FDA_PATH=/admin/credit-requests/conditional-status
+    FDA_BODY='{"requestIds":["11111111-1111-4111-8111-111111111111"],"status":"approved","expectedStatus":"unverified"}'
+}
+
+fda_run() {  # fda_run <path> <body> [extra env assignments...]  (verifier stubbed: FD_VERIFY=ok|refuse)
+    local p="$1" b="$2"; shift 2
+    env FABLE_DECIDER=1 FD_REQUESTER=fable-decider@hydra-ops FABLE_RULING_ID=label-credits-a MUSO_ADMIN_IDENTITY=fable \
+        FABLE_DECIDER_RUN_ID=run1 FABLE_DECIDER_TRAY="$TEST_ROOT/tray.json" FD_VERIFY=ok CV_APPROVE_GATE_DISABLED=0 "$@" \
+        FD_P="$p" FD_B="$b" bash -c 'set --; source "$0"; REQUESTER_EMAIL="$FD_REQUESTER"
+            case "$FD_VERIFY" in
+                ok) fable_decider_verify_batch() { echo "$1" > "$TEST_ROOT/verified-body"; return 0; } ;;
+                refuse) fable_decider_verify_batch() { return 3; } ;;
+            esac
+            is_fable_decider_approval PUT "$FD_P" "$FD_B"' "${FDA_SCRIPT:-$WRAPPED}"
+}
+
+@test "fable-decider approve: the registered shape passes and runs the boundary re-check" {
+    fda_setup
+    run fda_run "$FDA_PATH" "$FDA_BODY"
+    [ "$status" -eq 0 ]
+    grep -q '"approved"' "$TEST_ROOT/verified-body"
+    run fda_run "$FDA_PATH" "$FDA_BODY" FD_VERIFY=refuse
+    [ "$status" -ne 0 ]
+}
+
+@test "fable-decider approve: rejected is approvable (the batch0 correction); approved never re-approves" {
+    fda_setup
+    run fda_run "$FDA_PATH" '{"requestIds":["11111111-1111-4111-8111-111111111111"],"status":"approved","expectedStatus":"rejected"}'
+    [ "$status" -eq 0 ]
+    run fda_run "$FDA_PATH" '{"requestIds":["11111111-1111-4111-8111-111111111111"],"status":"approved","expectedStatus":"approved"}'
+    [ "$status" -ne 0 ]
+    run fda_run "$FDA_PATH" '{"requestIds":["11111111-1111-4111-8111-111111111111"],"status":"approved"}'
+    [ "$status" -ne 0 ]
+}
+
+@test "fable-decider approve: only Fable's own login, only the conditional route, only its requester + flag" {
+    fda_setup
+    run fda_run "$FDA_PATH" "$FDA_BODY" MUSO_ADMIN_IDENTITY=credit-decider
+    [ "$status" -ne 0 ]
+    run fda_run /admin/credit-requests "$FDA_BODY"
+    [ "$status" -ne 0 ]
+    run fda_run "$FDA_PATH" "$FDA_BODY" FD_REQUESTER=credit-trust-decide@hydra-ops
+    [ "$status" -ne 0 ]
+    run fda_run "$FDA_PATH" "$FDA_BODY" FABLE_DECIDER=0
+    [ "$status" -ne 0 ]
+    run fda_run "$FDA_PATH" "$FDA_BODY" FABLE_RULING_ID=
+    [ "$status" -ne 0 ]
+    run fda_run "$FDA_PATH" "$FDA_BODY" FABLE_DECIDER_RUN_ID=
+    [ "$status" -ne 0 ]
+}
+
+@test "fable-decider approve: kill file and registry refuse" {
+    fda_setup
+    touch "$FABLE_DECIDER_KILL_FILE"
+    run fda_run "$FDA_PATH" "$FDA_BODY"
+    [ "$status" -ne 0 ]
+    rm -f "$FABLE_DECIDER_KILL_FILE"
+    printf '%s' '{"automations":{"fable-decider":{"approved":false,"approved_by":"captain","approval_ref":"x"}}}' > "$CREDIT_APPROVAL_REGISTRY"
+    run fda_run "$FDA_PATH" "$FDA_BODY"
+    [ "$status" -ne 0 ]
+}
+
+@test "fable-decider approve: more than 50 ids, duplicates or extra keys refuse" {
+    fda_setup
+    ids=$(python3 -c 'import json; print(json.dumps(["%08d-1111-4111-8111-111111111111" % i for i in range(51)]))')
+    run fda_run "$FDA_PATH" "{\"requestIds\":$ids,\"status\":\"approved\",\"expectedStatus\":\"unverified\"}"
+    [ "$status" -ne 0 ]
+    run fda_run "$FDA_PATH" '{"requestIds":["11111111-1111-4111-8111-111111111111","11111111-1111-4111-8111-111111111111"],"status":"approved","expectedStatus":"unverified"}'
+    [ "$status" -ne 0 ]
+    run fda_run "$FDA_PATH" '{"requestIds":["11111111-1111-4111-8111-111111111111"],"status":"approved","expectedStatus":"unverified","notify":false}'
+    [ "$status" -ne 0 ]
+}
+
+@test "fable-decider approve: the REAL verifier refuses a flags-only caller" {
+    fda_setup
+    command -v python3 >/dev/null || skip "python3 not available"
+    # the in-repo wrapper (its verifier path is fixed relative to the wrapper file)
+    FDA_SCRIPT="$SCRIPT" run fda_run "$FDA_PATH" "$FDA_BODY" FD_VERIFY=real
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"fable_decider boundary: tray unusable"* ]]
+}

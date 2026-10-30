@@ -953,5 +953,12 @@ class TrayAnchors(unittest.TestCase):
         self.assertIn("no server-side anchor endpoint", p.stderr)
 
 
+
+class PodDriverSource(unittest.TestCase):
+    def test_claimant_holder_carries_the_request_profile_id(self):
+        # core #11010 claimantMatch: a linked holder matches only when its profile_id is the request's profileId.
+        src = (Path(__file__).resolve().parents[1] / "credit_verify/dspverify/pod_driver.py").read_text()
+        self.assertIn('t["profile_id"] if mine_id else catalog_of(p[0])', src)
+
 if __name__ == "__main__":
     unittest.main()

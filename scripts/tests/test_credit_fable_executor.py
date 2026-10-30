@@ -15,7 +15,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from credit_review import account_gate  # noqa: E402
-from credit_review import fable_executor as fx  # noqa: E402
+from credit_review import fable_executor as fx
+_REAL_CODED_OUTCOME_REFUSAL = fx.coded_outcome_refusal
+fx.coded_outcome_refusal = lambda tray, row, outcomes: None   # pinned for real in CodedOutcomeTest  # noqa: E402
 
 RID = "11111111-1111-4111-8111-111111111111"
 RID2 = "22222222-2222-4222-8222-222222222222"
@@ -46,9 +48,9 @@ class TrayTest(unittest.TestCase):
 
     def tray(self, **over):
         doc = {"action": "reject", "expected_status": "unverified",
-               "rows": [{"request_id": RID, "user_id": 42, "ruling_id": "u10k-3",
+               "rows": [{"request_id": RID, "user_id": 42, "coded_outcome": "decisions:1", "ruling_id": "u10k-3",
                          "rule": "reject_publisher_label_credit", "paid": False},
-                        {"request_id": RID2, "user_id": "7", "ruling_id": "u10k-3",
+                        {"request_id": RID2, "user_id": "7", "coded_outcome": "decisions:1", "ruling_id": "u10k-3",
                          "rule": "reject_artist_credit", "paid": True}]}
         doc.update(over)
         return doc
@@ -65,10 +67,13 @@ class TrayTest(unittest.TestCase):
         with self.assertRaisesRegex(fx.TrayError, "ruling id"):
             fx.load_tray(self.write(doc))
 
-    def test_only_reject_actions_are_executable(self):
-        for action in ("approve", "delete", None):
+    def test_only_reject_and_approve_actions_are_executable(self):
+        for action in ("delete", "merge", None):
             with self.assertRaisesRegex(fx.TrayError, "not executable"):
                 fx.load_tray(self.write(self.tray(action=action)))
+        # an approve tray citing a validator reject_* rule is refused (approvals cite a Fable rule + evidence)
+        with self.assertRaisesRegex(fx.TrayError, "never a reject_"):
+            fx.load_tray(self.write(self.tray(action="approve")))
 
     def test_approved_rows_can_never_be_the_expected_status(self):
         with self.assertRaisesRegex(fx.TrayError, "expected_status"):
@@ -108,7 +113,7 @@ class FraudDenyPassthroughTest(unittest.TestCase):
         pair = [{"id": "sig-a", "family": "font", "fields": ["date"], "page": 1, "region": [10, 20, 30, 40]},
                 {"id": "sig-b", "family": "metadata", "fields": ["producer"], "page": 1, "region": None}]
         doc = {"action": "reject", "expected_status": "unverified", "rows": [{
-            "request_id": RID, "user_id": 42, "ruling_id": "forged-ab12cd34", "rule": "R-FRAUD-DOC",
+            "request_id": RID, "user_id": 42, "coded_outcome": "decisions:1", "ruling_id": "forged-ab12cd34", "rule": "R-FRAUD-DOC",
             "evidence": "proof sha256 ff00 forged: font + metadata families", "reason_code": "fraud_document",
             "proof_id": "ff00", "fraud_pair": pair, "signal_ids": ["sig-a", "sig-b"], "outcome_ids": [7, 8],
             "subject": "credit"}]}
@@ -406,8 +411,8 @@ class QaFixTest(RunTest):
 
     def test_as_listed_order_is_kept(self):
         doc = {"action": "reject", "expected_status": "unverified", "order": "as_listed", "rows": [
-            {"request_id": RID2, "user_id": 9, "ruling_id": "junk-b1", "rule": "reject_x", "paid": False},
-            {"request_id": RID, "user_id": 1, "ruling_id": "junk-b1", "rule": "reject_x", "paid": True}]}
+            {"request_id": RID2, "user_id": 9, "coded_outcome": "decisions:1", "ruling_id": "junk-b1", "rule": "reject_x", "paid": False},
+            {"request_id": RID, "user_id": 1, "coded_outcome": "decisions:1", "ruling_id": "junk-b1", "rule": "reject_x", "paid": True}]}
         f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
         json.dump(doc, f)
         f.close()
@@ -469,7 +474,7 @@ class QaRound2Test(RunTest):
 
     def _tray_file(self):
         doc = {"action": "reject", "expected_status": "unverified", "rows": [
-            {"request_id": RID, "user_id": 42, "ruling_id": "u10k-3", "rule": "reject_publisher_label_credit"}]}
+            {"request_id": RID, "user_id": 42, "coded_outcome": "decisions:1", "ruling_id": "u10k-3", "rule": "reject_publisher_label_credit"}]}
         p = self.tmp / "tray.json"
         p.write_text(json.dumps(doc))
         return str(p), fx.load_tray(str(p)).sha256
@@ -513,6 +518,266 @@ class QaRound2Test(RunTest):
             self._reserve(sha, run_id=f"r{i}", rid=f"x{i}")
         self._reserve(sha)
         self.assertIn("daily cap", self._verify(path, [RID]))
+
+
+APPROVE_ROW = {"request_id": RID, "user_id": 42, "coded_outcome": "decisions:1", "ruling_id": "label-credits-a", "rule": "R-LABEL-ANCHOR",
+               "evidence": "org-label-anchor A: DSP label line names the org; processed org claim", "paid": True}
+
+
+class ApproveTrayTest(unittest.TestCase):
+    """Executor PR 2: approve trays (core FABLE_RULED scope; Fable r3 [key=ddl-anchor-records-guards])."""
+
+    def write(self, doc):
+        f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump(doc, f)
+        f.close()
+        return f.name
+
+    def doc(self, **over):
+        d = {"action": "approve", "expected_status": "unverified", "rows": [dict(APPROVE_ROW)]}
+        d.update(over)
+        return d
+
+    def test_loads_with_its_own_cap(self):
+        t = fx.load_tray(self.write(self.doc()))
+        self.assertEqual((t.action, t.daily_cap, fx.target_status(t)), ("approve", 50, "approved"))
+
+    def test_rejected_is_approvable_for_the_correction(self):
+        self.assertEqual(fx.load_tray(self.write(self.doc(expected_status="rejected"))).expected_status, "rejected")
+
+    def test_refusals(self):
+        for doc, msg in (
+            (self.doc(expected_status="approved"), "expected_status"),
+            (self.doc(daily_cap=51), "daily_cap"),
+            (self.doc(refuse_if_dsp_anchor=True), "close guard"),
+            (self.doc(rows=[{**APPROVE_ROW, "evidence": "short"}]), "evidence"),
+            (self.doc(rows=[{**APPROVE_ROW, "ruling_id": ""}]), "ruling id"),
+        ):
+            with self.assertRaisesRegex(fx.TrayError, msg):
+                fx.load_tray(self.write(doc))
+
+    def test_approve_guards(self):
+        r = fx.TrayRow(RID, 42, "label-credits-a", "R-LABEL-ANCHOR", True, "x" * 30)
+        ok = facts(owns_profile=True, rules={"reject_publisher_label_credit": 100.0})
+        self.assertIsNone(fx.approve_refusal(r, ok, ALLOW, "unverified"))      # a held claim is fine for approvals
+        cases = [
+            (None, ALLOW, "row_not_found"), (facts(deleted=True), ALLOW, "row_deleted"),
+            (facts(status="approved"), ALLOW, "status_changed"), (facts(user_id=7), ALLOW, "user_mismatch"),
+            (facts(popularity=0), ALLOW, "big_or_unknown"), (facts(popularity=60), ALLOW, "big_or_unknown"),
+            (facts(metadata_source="client"), ALLOW, "big_or_unknown"),
+            (facts(), account_gate.GateResult("hold", ("x",), {}), "account_gate_hold"),
+            (facts(), account_gate.GateResult("allow", ("AMBER watchlist review-local",), {"decision": "allow"}),
+             "watchlisted_account"),
+        ]
+        for f, g, want in cases:
+            self.assertTrue((fx.approve_refusal(r, f, g, "unverified") or "").startswith(want), want)
+
+
+class ApproveRunTest(RunTest):
+    def approve_tray(self, n=2):
+        rows = tuple(fx.TrayRow(f"{i:08d}-1111-4111-8111-111111111111", 42, "label-credits-a", "R-LABEL-ANCHOR",
+                                True, "x" * 30) for i in range(n))
+        return fx.Tray(str(self.tmp / "a.json"), "0" * 64, "approve", "unverified", rows, 50)
+
+    def test_writes_approved_reads_back_approved_and_audits_the_action(self):
+        seen = {}
+
+        def write(ids, expected, ruling, run_id, tray_path, status="rejected"):
+            seen["status"] = status
+            self.calls.append((list(ids), expected, ruling))
+            return {"updatedIds": ids}
+
+        def readback(status, ids):
+            seen["rb"] = status
+            return set(ids)
+        t = self.approve_tray()
+        res = fx.run(t, apply=True, facts_fn=lambda ids: {i: facts() for i in ids}, gate_fn=lambda u: ALLOW,
+                     writer=write, readback=readback, audit_path=self.audit, registry_path=self.registry,
+                     kill_file=self.kill, now=lambda: NOW, lock_path=str(self.tmp / "lock"), sleep=lambda s: None)
+        self.assertEqual((res.written, seen["status"], seen["rb"]), (2, "approved", "approved"))
+        lines = self.audit_lines()
+        self.assertTrue(all(l["action"] == "approve" for l in lines))
+        self.assertTrue(all(l["after"] == "approved" for l in lines if l["outcome"] == "written"))
+
+    def test_approve_cap_is_separate_from_the_close_cap(self):
+        with open(self.audit, "w") as fh:
+            for i in range(99):     # 99 closes today (no action field = close)
+                fh.write(json.dumps({"ts": "2026-10-28T01:00:00Z", "run_id": "c", "outcome": "written",
+                                     "request_id": f"c{i}"}) + "\n")
+            for i in range(49):     # 49 approvals today
+                fh.write(json.dumps({"ts": "2026-10-28T01:00:00Z", "run_id": "a", "outcome": "written",
+                                     "request_id": f"a{i}", "action": "approve"}) + "\n")
+        self.assertEqual(fx.writes_today(self.audit, NOW, "reject"), 99)
+        self.assertEqual(fx.writes_today(self.audit, NOW, "approve"), 49)
+        t = self.approve_tray(3)
+
+        def write(ids, expected, ruling, run_id, tray_path, status="rejected"):
+            self.calls.append(list(ids))
+            return {"updatedIds": ids}
+        res = fx.run(t, apply=True, facts_fn=lambda ids: {i: facts() for i in ids}, gate_fn=lambda u: ALLOW,
+                     writer=write, readback=lambda s, ids: set(ids), audit_path=self.audit,
+                     registry_path=self.registry, kill_file=self.kill, now=lambda: NOW,
+                     lock_path=str(self.tmp / "lock"), sleep=lambda s: None)
+        self.assertEqual(sum(len(c) for c in self.calls), 1)
+        self.assertIn("daily cap", res.stopped)
+
+    def test_boundary_uses_the_approve_guards(self):
+        doc = {"action": "approve", "expected_status": "unverified", "rows": [dict(APPROVE_ROW)]}
+        p = self.tmp / "approve.json"
+        p.write_text(json.dumps(doc))
+        sha = fx.load_tray(str(p)).sha256
+        with open(self.audit, "a") as fh:
+            fh.write(json.dumps({"ts": "2026-10-28T21:58:00Z", "run_id": "r1", "outcome": "reserved",
+                                 "request_id": RID, "tray_sha256": sha, "action": "approve"}) + "\n")
+        kw = dict(facts_fn=lambda xs: {x: facts(owns_profile=True) for x in xs}, gate_fn=lambda u: ALLOW,
+                  anchor_fn=lambda xs: {}, audit_path=self.audit, now=lambda: NOW)
+        self.assertIsNone(fx.verify_batch(str(p), "label-credits-a", "r1", [RID], "unverified", status="approved", **kw))
+        # a close-shaped body can never ride an approve tray's reservations, nor the reverse
+        self.assertIn("not what this approve tray writes",
+                      fx.verify_batch(str(p), "label-credits-a", "r1", [RID], "unverified", **kw))
+        kw["facts_fn"] = lambda xs: {x: facts(popularity=0) for x in xs}
+        self.assertIn("big_or_unknown",
+                      fx.verify_batch(str(p), "label-credits-a", "r1", [RID], "unverified", status="approved", **kw))
+
+    def test_a_close_tray_never_authorizes_an_approval(self):
+        doc = {"action": "reject", "expected_status": "unverified", "rows": [
+            {"request_id": RID, "user_id": 42, "coded_outcome": "decisions:1", "ruling_id": "u10k-3", "rule": "reject_publisher_label_credit"}]}
+        p = self.tmp / "close.json"
+        p.write_text(json.dumps(doc))
+        self.assertIn("not what this reject tray writes",
+                      fx.verify_batch(str(p), "u10k-3", "r1", [RID], "unverified", status="approved",
+                                      facts_fn=lambda xs: {}, gate_fn=lambda u: ALLOW, anchor_fn=lambda xs: {},
+                                      audit_path=self.audit, now=lambda: NOW))
+
+
+class CodedOutcomeTest(unittest.TestCase):
+    """Captain 2026-10-29 16:0xZ: per-item decisions come from the coded decider; Fable ruling ids no longer admit."""
+
+    def write(self, doc):
+        f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump(doc, f)
+        f.close()
+        return f.name
+
+    def doc(self, **row):
+        r = {"request_id": RID, "user_id": 42, "ruling_id": "junk_proof", "rule": "C3:junk_proof/v1",
+             "evidence": "every filed document is a non-evidence artifact (C3)", "coded_outcome": "decisions:7"}
+        r.update(row)
+        return {"action": "reject", "expected_status": "unverified", "rows": [r]}
+
+    def test_a_row_without_a_coded_outcome_refuses_the_tray(self):
+        for bad in (None, "", "forged-ab12cd34", "decisions:", "decisions:x", "dv_outcomes:", "llm_calls:3"):
+            d = self.doc(coded_outcome=bad)
+            if bad is None:
+                del d["rows"][0]["coded_outcome"]
+            with self.assertRaisesRegex(fx.TrayError, "coded-rule outcome"):
+                fx.load_tray(self.write(d))
+
+    def test_coded_rule_ids_are_accepted_as_the_rule(self):
+        self.assertEqual(fx.load_tray(self.write(self.doc())).rows[0].rule, "C3:junk_proof/v1")
+
+    def test_role_correction_is_refused_as_a_removal_class(self):
+        with self.assertRaisesRegex(fx.TrayError, "refused:removal_class"):
+            fx.load_tray(self.write({**self.doc(), "action": "role_correction"}))
+
+    def test_the_outcome_must_exist_name_the_request_be_apply_and_match_the_action(self):
+        t = fx.load_tray(self.write(self.doc()))
+        r = t.rows[0]
+        ok = {"decisions:7": {"request_id": RID.lower(), "decision": "close", "mode": "apply"}}
+        self.assertIsNone(_REAL_CODED_OUTCOME_REFUSAL(t, r, ok))
+        cases = [
+            ({}, "coded_outcome_missing"),
+            ({"decisions:7": {**ok["decisions:7"], "request_id": RID2.lower()}}, "coded_outcome_other_request"),
+            ({"decisions:7": {**ok["decisions:7"], "mode": "shadow"}}, "coded_outcome_not_apply"),
+            ({"decisions:7": {**ok["decisions:7"], "decision": "approve"}}, "coded_outcome_decision"),
+        ]
+        for outcomes, want in cases:
+            self.assertTrue((_REAL_CODED_OUTCOME_REFUSAL(t, r, outcomes) or "").startswith(want), want)
+
+    def test_ledger_outcomes_reads_the_decisions_table(self):
+        import sqlite3
+        d = tempfile.mkdtemp()
+        db = f"{d}/ledger.sqlite3"
+        con = sqlite3.connect(db)
+        con.execute("create table decisions (id integer primary key, request_id text, decision text, mode text)")
+        con.execute("insert into decisions values (7, ?, 'close', 'apply')", (RID.upper(),))
+        con.commit()
+        con.close()
+        self.assertEqual(fx.ledger_outcomes(["decisions:7", "decisions:8", "junk"], path=db),
+                         {"decisions:7": {"request_id": RID.lower(), "decision": "close", "mode": "apply"}})
+        self.assertEqual(fx.ledger_outcomes(["decisions:7"], path=f"{d}/missing.sqlite3"), {})
+
+    def test_dv_outcomes_admit_only_a_forged_row_for_this_request(self):
+        import sqlite3
+        d = tempfile.mkdtemp()
+        db = f"{d}/doc-verify.sqlite"
+        con = sqlite3.connect(db)
+        con.execute("create table dv_outcomes (id integer primary key, request_id text, outcome text)")
+        con.execute("insert into dv_outcomes values (3, ?, 'forged')", (RID,))
+        con.execute("insert into dv_outcomes values (4, ?, 'unverifiable')", (RID,))
+        con.commit()
+        con.close()
+        got = fx.ledger_outcomes(["dv_outcomes:3", "dv_outcomes:4"], path=f"{d}/none.sqlite3", dv_path=db)
+        self.assertEqual(got["dv_outcomes:3"], {"request_id": RID.lower(), "decision": "close", "mode": "apply"})
+        self.assertEqual(got["dv_outcomes:4"]["decision"], "none")
+        t = fx.load_tray(self.write(self.doc(coded_outcome="dv_outcomes:3")))
+        self.assertIsNone(_REAL_CODED_OUTCOME_REFUSAL(t, t.rows[0], got))
+        t4 = fx.load_tray(self.write(self.doc(coded_outcome="dv_outcomes:4")))
+        self.assertTrue(_REAL_CODED_OUTCOME_REFUSAL(t4, t4.rows[0], got).startswith("coded_outcome_decision"))
+
+
+class CodedCloseEndToEndTest(RunTest):
+    """The REAL coded-outcome check (no stub) through run(): a close row admits only on a decider-ledger `decisions`
+    row with decision 'close', mode 'apply', for the same request (contract: data/doc-verify-build-b1/
+    coded-close-row-shape.md, Fable [key=coded-close-store]). Until a producer writes such rows (b1's C3/C5 PRs),
+    every close is refused: fail closed, by the captain's 16:0xZ rule (no per-item decision outside the coded decider)."""
+
+    def setUp(self):
+        super().setUp()
+        import sqlite3
+        self.ledger = str(self.tmp / "ledger.sqlite3")
+        con = sqlite3.connect(self.ledger)
+        con.execute("create table decisions (id integer primary key, request_id text, decision text, mode text)")
+        con.executemany("insert into decisions values (?,?,?,?)", [
+            (1, RID, "close", "apply"),        # admits RID
+            (2, RID2, "close", "shadow"),      # shadow: refused
+            (3, RID2, "defer", "apply"),       # not a close: refused
+        ])
+        con.commit()
+        con.close()
+
+    def tearDown(self):
+        fx.coded_outcome_refusal = lambda tray, row, outcomes: None     # back to the module-wide stub
+
+    def real(self):
+        fx.coded_outcome_refusal = _REAL_CODED_OUTCOME_REFUSAL
+
+    def tray_with(self, outcomes):
+        rows = tuple(fx.TrayRow(rid, 42, "junk_proof", "C3:junk_proof/v1", True, "x" * 30, (), oc)
+                     for rid, oc in outcomes)
+        return fx.Tray(str(self.tmp / "t.json"), "0" * 64, "reject", "unverified", rows, 100)
+
+    def go_real(self, t):
+        return self.go(t, facts_map={RID: facts(), RID2: facts(user_id=42)},
+                       outcome_fn=lambda ids: fx.ledger_outcomes(ids, path=self.ledger))
+
+    def test_a_decider_close_row_admits_its_request_and_only_it(self):
+        self.real()
+        res = self.go_real(self.tray_with([(RID, "decisions:1")]))
+        self.assertEqual(res.written, 1)
+        self.assertEqual([l["coded_outcome"] for l in self.audit_lines() if l["outcome"] == "written"], ["decisions:1"])
+
+    def test_shadow_non_close_missing_and_other_request_rows_never_write(self):
+        self.real()
+        res = self.go_real(self.tray_with([(RID2, "decisions:2")]))
+        self.assertEqual((res.written, self.calls), (0, []))
+        self.assertEqual(res.refused, {"coded_outcome_not_apply": 1})
+        self.calls.clear()
+        for oc, why in (("decisions:3", "coded_outcome_decision"), ("decisions:9", "coded_outcome_missing"),
+                        ("decisions:1", "coded_outcome_other_request")):
+            res = self.go_real(self.tray_with([(RID2, oc)]))
+            self.assertEqual((res.written, list(res.refused)), (0, [why]), oc)
+        self.assertEqual(self.calls, [])
 
 
 if __name__ == "__main__":

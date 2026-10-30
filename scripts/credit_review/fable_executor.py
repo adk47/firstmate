@@ -59,6 +59,15 @@ BATCH_MAX = 100
 WRITE_LOCK = os.environ.get("CV_CREDIT_WRITE_LOCK_PATH", "/var/lib/hydra/credit-status-writes.lock")
 CLOSE_STATUS = "rejected"
 CLOSABLE_FROM = ("unverified", "user_verification_needed")
+# ── approvals (executor PR 2; Fable [key=l12-approvals-core] = A; core #11010/#11011 FABLE_RULED) ──
+#: An approve tray approves ONLY what core's FABLE_RULED scope admits on a server-held anchor record; the executor
+#: adds its own guards (account gate, watchlist, known-small) and a separate, lower cap.
+APPROVE_STATUS = "approved"
+APPROVABLE_FROM = ("unverified", "user_verification_needed", "rejected")   # rejected: the 880d34b3 correction
+APPROVE_CAP = 50                    # Fable r3 (4): approvals <= 50/day
+APPROVE_IDENTITY = "fable"          # agent-fable@muso.ai: core binds fable-decider approvals to Fable's OWN account
+#: The send template each action's write fires (one per (user, profile) group per call).
+TEMPLATE = {"reject": "credits_rejected", "approve": "credits_accepted"}
 UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
 RULING_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:|-]{2,120}$")
 BIG_POPULARITY = 60
@@ -68,7 +77,15 @@ BIG_POPULARITY = 60
 #: Tray row fields carried verbatim into the audit (doc-verify's jan-forged-bN.json contract).
 AUDIT_PASSTHROUGH = ("reason_code", "proof_id", "intake_id", "fraud_pair", "signal_ids", "outcome_ids", "subject",
                      "contributors")   # contributors: every forged document behind one request (QA #1480)
-FABLE_RULE_RE = re.compile(r"^R-[A-Z0-9][A-Za-z0-9().-]{0,40}$")
+FABLE_RULE_RE = re.compile(r"^(R-[A-Z0-9][A-Za-z0-9().-]{0,40}|C[0-9]{1,2}[:/][A-Za-z0-9_.:/-]{1,60})$")
+#: A row's coded-rule outcome: a row id in one of the two coded deciders' append-only stores -
+#:   decisions:<id>    the credit-review decider ledger's `decisions` table (C3/C5 closes, approvals)
+#:   dv_outcomes:<id>  doc-verify's `dv_outcomes` (C8 fraud deny: the executing document's `forged` outcome row)
+CODED_OUTCOME_RE = re.compile(r"^(decisions|dv_outcomes):[0-9]{1,12}$")
+LEDGER_PATH = os.environ.get("CREDIT_REVIEW_LEDGER", "/var/lib/hydra/credit-review/ledger.sqlite3")
+DOC_VERIFY_STORE = os.environ.get("CREDIT_DOC_VERIFY_STORE", "/var/lib/hydra-credit-verify/doc-verify.sqlite")
+#: What the decider's decision must say for each tray action.
+DECISION_FOR = {"reject": "close", "approve": "approve"}
 
 
 class TrayError(ValueError):
@@ -86,6 +103,11 @@ class TrayRow:
     #: Copied VERBATIM into every audit line of this row (Fable [key=l11-registry-fraud-close]: a fraud_document
     #: close carries its two signals with where they sit, so a take-back is judged without re-reading the file).
     audit_extra: tuple[tuple[str, Any], ...] = ()
+    #: Captain 2026-10-29 16:0xZ: per-item decisions come from CODE (the node-8 decider), never from a Fable seat.
+    #: Every row cites the coded-rule outcome that decided it: `decisions:<id>` = a row of the decider ledger's
+    #: append-only `decisions` table (/var/lib/hydra/credit-review/ledger.sqlite3). Verified at run time and at the
+    #: wrapper boundary: it exists, names this request, is mode 'apply', and its decision matches the tray action.
+    coded_outcome: str = ""
 
 
 @dataclass(frozen=True)
@@ -130,11 +152,16 @@ def load_tray(path: str) -> Tray:
     if not isinstance(doc, dict):
         raise TrayError("tray must be a JSON object")
     action = doc.get("action")
-    if action != "reject":
-        raise TrayError(f"action {action!r} is not executable here (this executor closes only: 'reject')")
+    if action == "role_correction":
+        # C9 (rules-to-code-1029): no in-place role write exists; create-then-remove is a REMOVAL -> never automated.
+        raise TrayError("refused:removal_class - a role correction on approved rows is a removal (captain card), "
+                        "never an executor action")
+    if action not in ("reject", "approve"):
+        raise TrayError(f"action {action!r} is not executable here ('reject' or 'approve')")
     expected = doc.get("expected_status")
-    if expected not in CLOSABLE_FROM:
-        raise TrayError(f"expected_status must be one of {CLOSABLE_FROM}, got {expected!r}")
+    allowed_from = CLOSABLE_FROM if action == "reject" else APPROVABLE_FROM
+    if expected not in allowed_from:
+        raise TrayError(f"expected_status must be one of {allowed_from} for {action}, got {expected!r}")
     rows_in = doc.get("rows")
     if not isinstance(rows_in, list) or not rows_in:
         raise TrayError("tray has no rows")
@@ -157,24 +184,112 @@ def load_tray(path: str) -> Tray:
         evidence = r.get("evidence") if isinstance(r.get("evidence"), str) else ""
         if not isinstance(rule, str) or not (rule.startswith("reject_") or FABLE_RULE_RE.match(rule)):
             raise TrayError(f"row {i} ({rid}): rule {rule!r} is neither a validator reject_* rule nor a Fable R- rule")
+        if action == "approve" and not FABLE_RULE_RE.match(rule):
+            raise TrayError(f"row {i} ({rid}): an approval cites a Fable R- rule with evidence, never a reject_* rule")
         if not rule.startswith("reject_") and len(evidence.strip()) < 20:
             raise TrayError(f"row {i} ({rid}): Fable rule {rule} needs its evidence text in the row")
         extra = tuple((k, r[k]) for k in AUDIT_PASSTHROUGH if k in r)
-        rows.append(TrayRow(rid, uid, ruling, rule, bool(r.get("paid")), evidence.strip(), extra))
+        coded = r.get("coded_outcome")
+        if not isinstance(coded, str) or not CODED_OUTCOME_RE.match(coded):
+            raise TrayError(f"row {i} ({rid}): no coded-rule outcome id (decisions:<id> | dv_outcomes:<id>); per-item decisions come "
+                            "from the decider, never a hand list - the whole tray is refused")
+        rows.append(TrayRow(rid, uid, ruling, rule, bool(r.get("paid")), evidence.strip(), extra, coded))
     if doc.get("order") != "as_listed":
         rows.sort(key=lambda t: (not t.paid, t.user_id, t.request_id))   # paid first (default)
-    cap, cap_ruling = DAILY_CAP, doc.get("cap_ruling_id")
+    base_cap = DAILY_CAP if action == "reject" else APPROVE_CAP
+    ceiling = CAP_CEILING if action == "reject" else APPROVE_CAP
+    cap, cap_ruling = base_cap, doc.get("cap_ruling_id")
     if "daily_cap" in doc:
         cap = doc.get("daily_cap")
-        if not isinstance(cap, int) or isinstance(cap, bool) or not 1 <= cap <= CAP_CEILING:
-            raise TrayError(f"daily_cap {cap!r} must be an integer 1..{CAP_CEILING}")
-        if cap > DAILY_CAP and not (isinstance(cap_ruling, str) and RULING_RE.match(cap_ruling)):
-            raise TrayError(f"daily_cap {cap} above {DAILY_CAP} needs a cap_ruling_id (a Fable ruling)")
+        if not isinstance(cap, int) or isinstance(cap, bool) or not 1 <= cap <= ceiling:
+            raise TrayError(f"daily_cap {cap!r} must be an integer 1..{ceiling} for {action}")
+        if cap > base_cap and not (isinstance(cap_ruling, str) and RULING_RE.match(cap_ruling)):
+            raise TrayError(f"daily_cap {cap} above {base_cap} needs a cap_ruling_id (a Fable ruling)")
     anchor_flag = doc.get("refuse_if_dsp_anchor", False)
     if not isinstance(anchor_flag, bool):
         raise TrayError("refuse_if_dsp_anchor must be true or false")
+    if action == "approve" and anchor_flag:
+        raise TrayError("refuse_if_dsp_anchor is a close guard; an approve tray cannot set it")
     return Tray(str(path), hashlib.sha256(raw).hexdigest(), action, expected, tuple(rows), cap,
                 cap_ruling if isinstance(cap_ruling, str) else None, anchor_flag)
+
+
+def _read_store(path: str, sql: str, nums: list[int]) -> list[tuple]:
+    import sqlite3
+    try:
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10)
+        try:
+            return list(con.execute(sql % ",".join("?" * len(nums)), nums))
+        finally:
+            con.close()
+    except Exception:  # noqa: BLE001 - unreadable = no outcome = refused
+        return []
+
+
+def ledger_outcomes(ids: Iterable[str], path: str | None = None,
+                    dv_path: str | None = None) -> dict[str, dict[str, Any]]:
+    """{coded outcome id: {request_id, decision, mode}} for the cited rows of either coded decider (read-only).
+    decisions:<id> -> the ledger row as written; dv_outcomes:<id> -> decision 'close' only for outcome 'forged'
+    (anything else = 'none'), mode 'apply' (doc-verify writes final outcomes only). Missing / unreadable = absent
+    (the row is then refused). Never raises."""
+    ids = list(ids)
+    out: dict[str, dict[str, Any]] = {}
+    dec = sorted({int(i.split(":", 1)[1]) for i in ids if CODED_OUTCOME_RE.match(i) and i.startswith("decisions:")})
+    if dec:
+        for i, rid, d, m in _read_store(path or LEDGER_PATH,
+                                        "select id, lower(request_id), decision, mode from decisions where id in (%s)",
+                                        dec):
+            out[f"decisions:{i}"] = {"request_id": rid, "decision": d, "mode": m}
+    dv = sorted({int(i.split(":", 1)[1]) for i in ids if CODED_OUTCOME_RE.match(i) and i.startswith("dv_outcomes:")})
+    if dv:
+        for i, rid, outcome in _read_store(dv_path or DOC_VERIFY_STORE,
+                                           "select id, lower(request_id), outcome from dv_outcomes where id in (%s)", dv):
+            out[f"dv_outcomes:{i}"] = {"request_id": rid, "decision": "close" if outcome == "forged" else "none",
+                                       "mode": "apply"}
+    return out
+
+
+def coded_outcome_refusal(tray: "Tray", row: TrayRow, outcomes: dict[str, dict[str, Any]]) -> str | None:
+    o = outcomes.get(row.coded_outcome)
+    if o is None:
+        return "coded_outcome_missing"
+    if o.get("request_id") != row.request_id.lower():
+        return "coded_outcome_other_request"
+    if o.get("mode") != "apply":
+        return f"coded_outcome_not_apply:{o.get('mode')}"
+    if o.get("decision") != DECISION_FOR[tray.action]:
+        return f"coded_outcome_decision:{o.get('decision')}"
+    return None
+
+
+def target_status(tray: "Tray") -> str:
+    return APPROVE_STATUS if tray.action == "approve" else CLOSE_STATUS
+
+
+def approve_refusal(row: TrayRow, facts: Facts | None, gate: account_gate.GateResult, expected: str) -> str | None:
+    """Why this row must NOT be approved now, or None (the executor's own guards; core's FABLE_RULED scope then
+    re-checks the anchor set, the rules and the claim inside the approving UPDATE). Fail closed."""
+    if facts is None:
+        return "row_not_found"
+    if facts.deleted:
+        return "row_deleted"
+    if facts.status != expected:
+        return f"status_changed:{facts.status}"
+    if facts.user_id != row.user_id:
+        return "user_mismatch"
+    pop = facts.popularity
+    if facts.metadata_source == "client" or pop is None or not 1 <= pop < BIG_POPULARITY:
+        return f"big_or_unknown_popularity:{pop}"
+    if not gate.allowed:
+        return f"account_gate_{gate.decision}"
+    watch = gate.payload.get("watch") if isinstance(gate.payload, dict) else None
+    if watch or any("watchlist" in r.lower() or "deny" in r.lower() for r in gate.reasons):
+        return "watchlisted_account"
+    return None
+
+
+def refusal_for(tray: "Tray") -> Callable[..., str | None]:
+    return approve_refusal if tray.action == "approve" else refusal
 
 
 def _num(v: Any) -> float | None:
@@ -301,9 +416,10 @@ def dsp_anchors(ids: Iterable[str], path: str | None = None) -> dict[str, str]:
 
 
 # ── audit + cap ─────────────────────────────────────────────────────────────
-def writes_today(path: str = AUDIT_PATH, now: datetime | None = None) -> int:
+def writes_today(path: str = AUDIT_PATH, now: datetime | None = None, action: str = "reject") -> int:
     """Rows this automation RESERVED today (UTC), from its own audit file. A reservation is written BEFORE its PUT
-    (QA #1475), so a write whose final audit line was lost still counts: the cap can only over-count."""
+    (QA #1475), so a write whose final audit line was lost still counts: the cap can only over-count. Closes and
+    approvals have SEPARATE caps; a line without an `action` field is a close (reject / claim decline)."""
     day = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
     seen: set[str] = set()
     try:
@@ -313,7 +429,8 @@ def writes_today(path: str = AUDIT_PATH, now: datetime | None = None) -> int:
                     rec = json.loads(line)
                 except ValueError:
                     continue
-                if rec.get("outcome") in ("reserved", "written") and str(rec.get("ts", "")).startswith(day):
+                if (rec.get("outcome") in ("reserved", "written") and str(rec.get("ts", "")).startswith(day)
+                        and (rec.get("action") or "reject") == action):
                     rid = rec.get("request_id")
                     # a reservation and its final line are ONE write; a line without ids counts on its own
                     seen.add(f"{rec.get('run_id', '')}|{rid}" if rid else f"line{n}")
@@ -349,13 +466,14 @@ def admin_writer(script: str | None = None, timeout_s: int = 300) -> Writer:
     from . import admin as admin_api
     script = script or os.environ.get("CREDIT_REVIEW_ADMIN_SCRIPT", admin_api.DEFAULT_ADMIN_SCRIPT)
 
-    def write(ids: list[str], expected: str, ruling_id: str, run_id: str, tray_path: str) -> dict[str, Any]:
-        body = json.dumps({"requestIds": ids, "status": CLOSE_STATUS, "expectedStatus": expected},
+    def write(ids: list[str], expected: str, ruling_id: str, run_id: str, tray_path: str,
+              status: str = CLOSE_STATUS) -> dict[str, Any]:
+        body = json.dumps({"requestIds": ids, "status": status, "expectedStatus": expected},
                           separators=(",", ":"), sort_keys=True)
         env = {**os.environ, "FABLE_DECIDER": "1", "FABLE_RULING_ID": ruling_id,
                "FABLE_DECIDER_RUN_ID": run_id, "FABLE_DECIDER_TRAY": os.path.abspath(tray_path),
                "CREDIT_TRUST_DECIDE": "0", "CREDIT_TRUST_SCORE_APPROVE": "0", "UVN_POPULARITY_CRON": "0",
-               "MUSO_ADMIN_IDENTITY": ADMIN_IDENTITY}
+               "MUSO_ADMIN_IDENTITY": APPROVE_IDENTITY if status == APPROVE_STATUS else ADMIN_IDENTITY}
         proc = subprocess.run(["bash", script, "--requester", REQUESTER, "call", "PUT", CONDITIONAL_PATH, body],
                               capture_output=True, text=True, timeout=timeout_s, check=False, env=env)
         if proc.returncode != 0:
@@ -409,7 +527,8 @@ def _base(tray: Tray, run_id: str, r: TrayRow, f: Facts | None, now: datetime, m
     return {"ts": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "run_id": run_id, "automation": AUTOMATION_ID,
             "tray": tray.path, "tray_sha256": tray.sha256, "request_id": r.request_id, "user_id": r.user_id,
             "paid": bool(f.paid) if f else r.paid, "rule": r.rule, "ruling_id": r.ruling_id,
-            "before": f.status if f else None, "mode": mode, **dict(r.audit_extra)}
+            "before": f.status if f else None, "mode": mode, "action": tray.action,
+            "coded_outcome": r.coded_outcome, **dict(r.audit_extra)}
 
 
 def _anchor_refusal(state: str) -> str | None:
@@ -436,6 +555,7 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
         anchor_fn: Callable[[list[str]], dict[str, str]] = dsp_anchors,
         readback_tries: int = 6, readback_wait_s: float = 5.0,
         sleep: Callable[[float], None] = time.sleep,
+        outcome_fn: Callable[[list[str]], dict[str, dict[str, Any]]] = ledger_outcomes,
         ) -> Result:
     """Execute (apply) or dry-run one tray. In apply mode EVERY batch re-reads its rows' facts and the account gate
     immediately before its PUT (no fact or gate answer outlives its batch, QA #1475), under one lock from the cap
@@ -453,8 +573,11 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
         facts = facts_fn([r.request_id for r in rows])
         n = 0
         anchors = anchor_fn([r.request_id for r in rows]) if tray.refuse_if_dsp_anchor else {}
+        outcomes = outcome_fn([r.coded_outcome for r in rows])
         for r in rows:
-            why = refusal(r, facts.get(r.request_id.lower()), gate(r.user_id), tray.expected_status)
+            why = refusal_for(tray)(r, facts.get(r.request_id.lower()), gate(r.user_id), tray.expected_status)
+            if not why:
+                why = coded_outcome_refusal(tray, r, outcomes)
             if not why and tray.refuse_if_dsp_anchor:
                 why = _anchor_refusal(anchors.get(r.request_id.lower(), "unknown"))
             if why:
@@ -483,7 +606,7 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
                 if not registry_approved(registry_path):
                     res.stopped = f"registry entry {AUTOMATION_ID} not approved"
                     return res
-                room = min(BATCH_MAX, daily_cap - writes_today(audit_path, now()))
+                room = min(BATCH_MAX, daily_cap - writes_today(audit_path, now(), tray.action))
                 if room <= 0:
                     res.stopped = f"daily cap {daily_cap} reached"
                     return res
@@ -496,6 +619,7 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
                 facts = facts_fn([r.request_id for r in window])
                 gate = account_gate.Cached(gate_fn)
                 anchors = anchor_fn([r.request_id for r in window]) if tray.refuse_if_dsp_anchor else {}
+                outcomes = outcome_fn([r.coded_outcome for r in window])
                 chunk: list[TrayRow] = []
                 consumed = 0
                 for r in window:
@@ -503,7 +627,9 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
                         break
                     consumed += 1
                     f = facts.get(r.request_id.lower())
-                    why = refusal(r, f, gate(r.user_id), tray.expected_status)
+                    why = refusal_for(tray)(r, f, gate(r.user_id), tray.expected_status)
+                    if not why:
+                        why = coded_outcome_refusal(tray, r, outcomes)
                     if not why and tray.refuse_if_dsp_anchor:
                         why = _anchor_refusal(anchors.get(r.request_id.lower(), "unknown"))
                     if why:
@@ -521,7 +647,8 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
                     audit({**_base(tray, run_id, r, facts.get(r.request_id.lower()), now(), "apply"),
                            "outcome": "reserved"}, audit_path)
                 try:
-                    body = writer(ids, tray.expected_status, ruling, run_id, tray.path)
+                    body = (writer(ids, tray.expected_status, ruling, run_id, tray.path, APPROVE_STATUS)
+                        if tray.action == "approve" else writer(ids, tray.expected_status, ruling, run_id, tray.path))
                 except Exception as exc:  # noqa: BLE001 - any refusal/failure stops the run
                     res.stopped = f"write failed: {str(exc)[:300]}"
                     body = {}
@@ -534,7 +661,7 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
                 landed: set[str] = set()
                 for attempt in range(readback_tries):
                     try:
-                        landed |= {x.lower() for x in readback(CLOSE_STATUS, ids)}
+                        landed |= {x.lower() for x in readback(target_status(tray), ids)}
                     except Exception as exc:  # noqa: BLE001
                         res.stopped = (res.stopped + "; " if res.stopped else "") + f"read-back failed: {str(exc)[:200]}"
                         break
@@ -546,7 +673,7 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
                     f = facts.get(r.request_id.lower())
                     audit({**_base(tray, run_id, r, f, now(), "apply"), "before": tray.expected_status,
                            "server_reported_updated": r.request_id.lower() in reported,
-                           "after": CLOSE_STATUS if moved else "unchanged_or_unknown",
+                           "after": target_status(tray) if moved else "unchanged_or_unknown",
                            "outcome": "written" if moved else "not_moved"}, audit_path)
                     if moved:
                         res.written += 1
@@ -578,9 +705,11 @@ RESERVATION_MAX_AGE_S = 600
 
 
 def verify_batch(tray_path: str, ruling_id: str, run_id: str, ids: list[str], expected: str, *,
+                 status: str = CLOSE_STATUS,
                  facts_fn: Callable[[list[str]], dict[str, Facts]] = fetch_facts,
                  gate_fn: Callable[[Any], account_gate.GateResult] | None = None,
                  anchor_fn: Callable[[list[str]], dict[str, str]] = dsp_anchors,
+                 outcome_fn: Callable[[list[str]], dict[str, dict[str, Any]]] = ledger_outcomes,
                  audit_path: str = AUDIT_PATH, now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
                  ) -> str | None:
     """Re-check ONE batch at the wrapper boundary, independently of the run that asked for it. None = allowed,
@@ -592,6 +721,8 @@ def verify_batch(tray_path: str, ruling_id: str, run_id: str, ids: list[str], ex
         tray = load_tray(tray_path)
     except (TrayError, OSError) as exc:
         return f"tray unusable: {exc}"
+    if status != target_status(tray):
+        return f"body status {status} is not what this {tray.action} tray writes ({target_status(tray)})"
     if expected != tray.expected_status:
         return f"expectedStatus {expected} is not the tray's {tray.expected_status}"
     rows = {r.request_id.lower(): r for r in tray.rows}
@@ -626,14 +757,17 @@ def verify_batch(tray_path: str, ruling_id: str, run_id: str, ids: list[str], ex
     missing = [i for i in want if i not in reserved]
     if missing:
         return f"{len(missing)} id(s) have no fresh reservation from run {run_id} on this tray"
-    if writes_today(audit_path, now()) > tray.daily_cap:
+    if writes_today(audit_path, now(), tray.action) > tray.daily_cap:
         return f"daily cap {tray.daily_cap} exceeded by today's reservations"
     facts = facts_fn(want)
     gate = account_gate.Cached(gate_fn)
     anchors = anchor_fn(want) if tray.refuse_if_dsp_anchor else {}
+    outcomes = outcome_fn([rows[i].coded_outcome for i in want])
     for i in want:
         r = rows[i]
-        why = refusal(r, facts.get(i), gate(r.user_id), tray.expected_status)
+        why = refusal_for(tray)(r, facts.get(i), gate(r.user_id), tray.expected_status)
+        if not why:
+            why = coded_outcome_refusal(tray, r, outcomes)
         if not why and tray.refuse_if_dsp_anchor:
             why = _anchor_refusal(anchors.get(i, "unknown"))
         if why:
