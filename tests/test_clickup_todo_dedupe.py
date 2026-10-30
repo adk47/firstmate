@@ -241,6 +241,8 @@ class Paging(unittest.TestCase):
         calls = []
 
         class FakeResp:
+            status = 200
+
             def __init__(self, payload):
                 self.payload = payload
 
@@ -254,19 +256,14 @@ class Paging(unittest.TestCase):
             def __exit__(self, *a):
                 return False
 
-        def fake_urlopen(req, timeout=None):
-            return FakeResp(pages[len(calls)])
-
-        real_urlopen = m.urllib.request.urlopen
-        real_load = m.json.load
-        m.urllib.request.urlopen = lambda req, timeout=None: (
-            calls.append(1), FakeResp(pages[len(calls) - 1]))[1]
-        m.json.load = lambda fh: __import__("json").loads(fh.read().decode())
+        client = m.clickup_client.ClickUp(
+            "tok", urlopen=lambda req, timeout=None: (calls.append(1), FakeResp(pages[len(calls) - 1]))[1])
+        real_shared = m.clickup_client.shared
+        m.clickup_client.shared = lambda key, base=None: client
         try:
             out = m.fetch_status("tok", "list", "to do")
         finally:
-            m.urllib.request.urlopen = real_urlopen
-            m.json.load = real_load
+            m.clickup_client.shared = real_shared
         self.assertEqual([t["id"] for t in out], ["a", "b"])
 
 

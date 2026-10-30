@@ -24,6 +24,17 @@ _spec.loader.exec_module(mon)  # type: ignore[union-attr]
 EMAIL = "jane@example.com"
 
 
+class FakeClickUp(mon.clickup_client.ClickUp):
+    """The real client's paging/dedupe on top of a faked transport."""
+
+    def __init__(self, http):
+        super().__init__("k")
+        self._http = http
+
+    def request(self, method, url, body=None, timeout=60):
+        return self._http(method, url if url.startswith("http") else self.base + url, {}, body)
+
+
 def load_legacy():
     spec = importlib.util.spec_from_file_location(
         "notify_merged_customers", ROOT / "scripts" / "dedup" / "sweeps" / "notify-merged-customers.py")
@@ -99,6 +110,8 @@ class MergeOutcomeNotifyTests(unittest.TestCase):
         os.environ.update({"CLICKUP_API_KEY": "k", "MUSOAI_INTERCOM_TOKEN": "t",
                            "MERGE_OUTCOME_STATE": str(self.dir / "state.json"),
                            "MERGE_KEEP_CONFLICT_SPOOL": str(self.dir / "spool")})
+        self._shared, self.cu = mon.clickup_client.shared, None
+        mon.clickup_client.shared = lambda key, base=None: self.cu
         self._orig = (mon.rn.http, mon.rn.get_conversation, mon.rn.urllib.request.urlopen, mon.rn.time.sleep,
                       mon.MERGE_OUTCOME_COPY_APPROVED, mon.rn.post_slack)
         self.slack, self.slack_ok = [], True
@@ -109,12 +122,14 @@ class MergeOutcomeNotifyTests(unittest.TestCase):
         mon.rn.post_slack = post_slack
 
     def tearDown(self):
+        mon.clickup_client.shared = self._shared
         (mon.rn.http, mon.rn.get_conversation, mon.rn.urllib.request.urlopen, mon.rn.time.sleep,
          mon.MERGE_OUTCOME_COPY_APPROVED, mon.rn.post_slack) = self._orig
 
     def wire(self, tasks, convs):
         f = Fake(tasks, convs)
         mon.rn.http, mon.rn.get_conversation = f.http, f.get_conversation
+        self.cu = FakeClickUp(f.http)
         return f
 
     def state(self):
@@ -154,7 +169,7 @@ class MergeOutcomeNotifyTests(unittest.TestCase):
             page = int(url.split("page=")[1].split("&")[0])
             requested.append((kind, page))
             return 200, {"tasks": [{"id": f"{kind}-{page}"}], "last_page": page == pages - 1}
-        mon.rn.http = http
+        self.cu = FakeClickUp(http)
         ids = {t["id"] for t in mon.fetch_merge_tasks("k", "list9")}
         self.assertEqual(ids, {f"{k}-{p}" for k in mon.KINDS for p in range(pages)})
         self.assertEqual(len(requested), pages * len(mon.KINDS))
@@ -688,8 +703,8 @@ class MergeOutcomeNotifyTests(unittest.TestCase):
         self.spool("r1", {"ticket_ids": ["abc123"], "conversation_id": "777"})
         f = self.wire([task("t1", conv="901")], {"901": conv()})
         fake_http = f.http
-        mon.rn.http = lambda method, url, *a, **k: ((503, {"err": "down"}) if method == "GET" and "/task?" in url
-                                                    else fake_http(method, url, *a, **k))
+        self.cu = FakeClickUp(lambda method, url, *a, **k: (503, {"err": "down"}) if method == "GET" and "/task?" in url
+                              else fake_http(method, url, *a, **k))
         self.assertEqual(mon.main(["--apply"]), 3)
         self.assertEqual(len(self.slack), 1)
         self.assertIn("keep-conflict could not be flagged in ClickUp: tickets <https://app.clickup.com/t/abc123|abc123>",
@@ -697,7 +712,7 @@ class MergeOutcomeNotifyTests(unittest.TestCase):
         self.assertFalse((self.dir / "spool" / "r1.json").exists())
         self.assertEqual(json.loads((self.dir / "state.json").read_text())["spool_posted"], ["r1"])
         self.assertEqual(f.posts, [])
-        mon.rn.http = fake_http
+        self.cu = FakeClickUp(fake_http)
         self.assertEqual(mon.main(["--apply"]), 0)
         self.assertEqual((len(self.slack), [p[0] for p in f.posts]), (1, ["901"]))
 
@@ -705,11 +720,11 @@ class MergeOutcomeNotifyTests(unittest.TestCase):
         self.spool("r1", {"ticket_ids": ["abc123"]})
         f = self.wire([task("old", conv="901", at=day(2))], {"901": conv()})
         fake_http = f.http
-        mon.rn.http = lambda method, url, *a, **k: ((503, {}) if method == "GET" and "/task?" in url
-                                                    else fake_http(method, url, *a, **k))
+        self.cu = FakeClickUp(lambda method, url, *a, **k: (503, {}) if method == "GET" and "/task?" in url
+                              else fake_http(method, url, *a, **k))
         self.assertEqual(mon.main(["--apply"]), 3)
         self.assertFalse((self.dir / "state.json").exists())
-        mon.rn.http = fake_http
+        self.cu = FakeClickUp(fake_http)
         self.assertEqual(mon.main(["--apply"]), 0)
         self.assertEqual(self.state(), {"old": "seeded"})
         self.assertEqual(f.posts, [])

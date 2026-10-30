@@ -87,6 +87,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from lib import clickup_client  # noqa: E402
 from lib.customer_outcome import customer_complete, workflow_terminal  # noqa: E402
 from lib.intercom_identity import resolve_admin_id  # noqa: E402
 from lib.jev_shadow import shadow_judge  # noqa: E402
@@ -149,6 +150,7 @@ BLOCKED_CONV_TAGS = {
     "whatsapp", "messenger", "tiktok", "sms",
 }
 
+MAX_PAGES = 200
 DEFAULT_SUMMARY_CHANNEL = "C0ANM0PN9L5"  # #cs_chats
 SLACK_API = "https://slack.com/api/chat.postMessage"
 
@@ -205,8 +207,8 @@ def clickup_list_page(key, list_id, page):
     q = urllib.parse.urlencode(
         {"archived": "false", "include_closed": "true",
          "subtasks": "false", "order_by": "updated", "page": str(page)})
-    s, body = http("GET", f"{CLICKUP_API}/list/{list_id}/task?{q}",
-                   {"Authorization": key})
+    s, body = clickup_client.shared(key, CLICKUP_API).request(
+        "GET", f"/list/{list_id}/task?{q}")
     if s != 200 or not isinstance(body, dict) or "tasks" not in body:
         raise RuntimeError(f"clickup list page {page} -> {s}: "
                            f"{(body or {}).get('err') if isinstance(body, dict) else body}")
@@ -653,8 +655,10 @@ def post_slack(text, channel, config_path, account):
 
 
 def fetch_all_tasks(key, list_id):
+    """Every task of the list. A scan that does not reach last_page raises: a
+    partial list must never reach the send loop."""
     tasks, page = [], 0
-    while page < 200:
+    while page < MAX_PAGES:
         body = clickup_list_page(key, list_id, page)
         batch = body.get("tasks", [])
         if not batch:
@@ -663,6 +667,9 @@ def fetch_all_tasks(key, list_id):
         if body.get("last_page"):
             break
         page += 1
+    else:
+        raise RuntimeError(f"clickup list {list_id}: no last_page after {MAX_PAGES} pages; "
+                           f"refusing a partial scan")
     return tasks
 
 
