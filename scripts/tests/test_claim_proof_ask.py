@@ -384,6 +384,88 @@ class ClaimStatusTests(unittest.TestCase):
         self.assertEqual((rep.second_claim, rep.not_pending, rep.support_hold), (1, 1, 1))
 
 
+class ClaimStatusCheckRecipientsTest(unittest.TestCase):
+    """firstmate 103: claim-status gets the C11 send-time checks (--check-recipients / --outcomes-json), like the ask,
+    and an interpolated profile name loses its markup ('lauriam<3' was refused G5)."""
+    setUp = ClaimProofAskTests.setUp
+    tearDown = ClaimProofAskTests.tearDown
+    lst = ClaimProofAskTests.lst
+    status = ClaimStatusTests.status
+
+    def test_status_dry_run_with_check_recipients_uses_the_recipient_check(self):
+        seen = []
+        orig = claim_proof_ask.verify_notify.send_all
+
+        def spy(payloads, report, **kw):
+            seen.append(kw.get("check_recipients"))
+        claim_proof_ask.verify_notify.send_all = spy
+        try:
+            q = replica({1: ("pending", 1)}, {1: "a@x.com"})
+            self.status(self.lst([claim(1, 1, band="D")]), q, mode="dry-run", check_recipients=True)
+            self.status(self.lst([claim(1, 1, band="D")]), q, mode="dry-run")
+            self.status(self.lst([claim(1, 1, band="D")]), q, mode="apply", check_recipients=True)
+        finally:
+            claim_proof_ask.verify_notify.send_all = orig
+        self.assertEqual(seen, [True, False, False])          # never on apply: the send itself runs the checks
+
+    def test_status_cli_takes_the_flags_and_refuses_check_recipients_on_apply(self):
+        r = subprocess.run([sys.executable, str(ROOT / "scripts" / "credit-review.py"), "claim-status", "--list", "/nonexistent",
+                            "--segment", "paid", "--mode", "apply", "--check-recipients"], capture_output=True, text=True, timeout=120)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("dry-run only", r.stdout)
+
+    def test_status_outcomes_path_is_preflighted_before_any_send(self):
+        import argparse
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("credit_review_cli3", str(ROOT / "scripts" / "credit-review.py"))
+        cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(cli)
+        sent = []
+        args = argparse.Namespace(outcomes_json=str(Path(tempfile.mkdtemp()) / "missing" / "o.json"), mode="apply",
+                                  segment="paid", list="x", max_users=1, preview=None, check_recipients=False)
+        with mock.patch.object(cli.claim_proof_ask, "run_status", lambda **kw: sent.append(kw) or None), \
+                mock.patch.object(cli, "CREDIT_OPS_NOTES_KILL_SWITCH", Path("/nonexistent-kill")):
+            rc = cli.cmd_claim_status(args)
+        self.assertEqual((rc, sent), (2, []))
+
+    def test_checked_dry_run_renders_the_accepted_recipients(self):
+        # QA #1534: under --check-recipients the gate's accepts land in recipient_ok; the summary must count them
+        for status in (True, False):
+            rep = claim_proof_ask.ClaimReport(listed=3)
+            rep.recipient_ok = 2
+            out = claim_proof_ask.render(rep, "dry-run", "paid", status=status)
+            self.assertIn("would send (recipient checked) 2", out)
+            rep = claim_proof_ask.ClaimReport(listed=3)
+            rep.validated = 1
+            self.assertIn("would send (validated) 1", claim_proof_ask.render(rep, "dry-run", "paid", status=status))
+
+    def test_a_checked_status_run_end_to_end_counts_the_accepted_user(self):
+        from credit_review import verify_notify
+
+        def gate(argv):
+            return subprocess.CompletedProcess(argv, 0, "RECIPIENT OK credits=1\n", "")
+        q = replica({1: ("pending", 1)}, {1: "a@x.com"})
+        with mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, None)):
+            rep, _ = self.status(self.lst([claim(1, 1, band="D")]), q, mode="dry-run", check_recipients=True, gate=gate)
+        self.assertEqual(rep.recipient_ok + rep.validated, 1, vars(rep))
+        self.assertIn("would send (recipient checked) 1", claim_proof_ask.render(rep, "dry-run", "paid", status=True))
+
+    def test_display_name_strips_markup_and_hearts(self):
+        d = claim_proof_ask.display_name
+        self.assertEqual([d("lauriam<3"), d("A <b>bold</b> name"), d("x </3 y"), d("Tom & Jerry"), d("<3")],
+                         ["lauriam", "A bold name", "x y", "Tom & Jerry", ""])
+
+    def test_the_interpolated_name_is_the_clean_one_and_an_empty_one_is_skipped(self):
+        q = replica({1: ("pending", 1), 2: ("pending", 2)}, {1: "a@x.com", 2: "b@x.com"})
+        rep, gate = self.status(self.lst([claim(1, 1, band="D", profile_name="lauriam<3"),
+                                          claim(2, 2, band="D", profile_name="<3")]), q)
+        self.assertEqual([c[1]["claim"] for c in gate.calls], [{"profile_name": "lauriam"}])
+        self.assertEqual(rep.no_profile_id, 1)
+        rep, gate = ClaimProofAskTests.go(self, self.lst([claim(1, 1, profile_name="lauriam<3"),
+                                                          claim(2, 2, profile_name="<3")]), q)
+        self.assertEqual([c[1]["claim"]["profile_name"] for c in gate.calls], ["lauriam"])
+        self.assertEqual(rep.no_profile_id, 1)
+
+
 class CheckRecipientDryRunTest(unittest.TestCase):
     """C11 (p1 223): a dry run with check_recipients runs the gate's --check-recipient (every send-time check, read
     only) - also when a preview was asked for - so the dry run reports the deferrals the send would."""

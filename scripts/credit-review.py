@@ -664,10 +664,20 @@ def cmd_claim_status(args: argparse.Namespace) -> int:
         return 0
     if args.preview:
         Path(args.preview).mkdir(mode=0o700, parents=True, exist_ok=True)
+    if args.check_recipients and args.mode != "dry-run":
+        print("--check-recipients is for --mode dry-run only.")
+        return 2
+    why = preflight_outcomes(args)
+    if why:
+        print(f"CLAIM STATUS NOTE: {why}.")
+        return 2
     report = claim_proof_ask.run_status(list_path=args.list, segment=args.segment, mode=args.mode,
-                                        max_users=args.max_users, preview_dir=args.preview)
-    print(claim_proof_ask.render(report, args.mode, args.segment, status=True))
-    return 1 if report.failed else 0
+                                        max_users=args.max_users, preview_dir=args.preview,
+                                        check_recipients=args.check_recipients)
+    werr = write_outcomes(args, report)
+    print(claim_proof_ask.render(report, args.mode, args.segment, status=True)
+          + (f" OUTCOMES NOT WRITTEN: {werr}." if werr else ""))
+    return 1 if report.failed or werr else 0
 
 
 def cmd_intercom_reconcile(args: argparse.Namespace) -> int:
@@ -1013,6 +1023,9 @@ def parser() -> argparse.ArgumentParser:
                                              "(Fable 1023 ruling 3; send-locked in the gate until firstmate's GO)")
     cs.add_argument("--list", required=True, help="the claim list (<= 30 h old); rows with audience 'status', or not B/C / no readable surface")
     cs.add_argument("--segment", choices=["paid", "free"], required=True)
+    cs.add_argument("--check-recipients", action="store_true", help="C11: the dry run runs every send-time check read-only "
+                    "(the gate's --check-recipient), so it reports the same deferrals as the send")
+    cs.add_argument("--outcomes-json", default=None, help="C11: write every per-user deferral/refusal/skip with the gate's reason")
     cs.add_argument("--mode", choices=["apply", "dry-run"], default="dry-run")
     cs.add_argument("--max-users", type=int, default=50, help="messages this run (canary: 3)")
     cs.add_argument("--preview", default="", help="dry-run: write each rendered note to this dir (0700)")

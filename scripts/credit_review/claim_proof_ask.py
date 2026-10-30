@@ -132,8 +132,22 @@ def claim_states(claim_ids: list[int], query: Query = trino) -> dict[int, tuple[
     return out
 
 
+_TAG = re.compile(r"<[^<>]{0,200}>")
+_HEART = re.compile(r"</?3+")
+
+
+def display_name(value: Any) -> str:
+    """The profile name as interpolated into a note: tags and '<3' / '</3' emoticons removed, any remaining angle
+    bracket dropped, whitespace collapsed (firstmate 103: 'lauriam<3' was refused G5 as markup). A link or an address
+    in the name is NOT rewritten here: the gate's G5 still refuses it."""
+    text = _HEART.sub("", _TAG.sub("", str(value or "")))
+    return " ".join(text.replace("<", "").replace(">", "").split())
+
+
 def _facts(c: dict[str, Any]) -> dict[str, str]:
-    return {k: str(c.get(k) or "").strip() for k in ("profile_name", "profile_url", "code", "platform")}
+    out = {k: str(c.get(k) or "").strip() for k in ("profile_url", "code", "platform")}
+    out["profile_name"] = display_name(c.get("profile_name"))
+    return {k: out[k] for k in ("profile_name", "profile_url", "code", "platform")}
 
 
 def _profile_id(c: dict[str, Any]) -> str:
@@ -190,7 +204,7 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
             report.code_found += 1
         elif str(c.get("platform") or "").strip().lower() not in READABLE:
             report.no_readable_surface += 1
-        elif not _profile_id(c):
+        elif not _profile_id(c) or not display_name(c.get("profile_name")):
             report.no_profile_id += 1
         else:
             keep.append(c)
@@ -246,8 +260,10 @@ def is_status_audience(c: dict[str, Any]) -> bool:
 def run_status(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int = 50,
                preview_dir: str | None = None, query: Query = trino, wrapper: str = verify_notify.WRAPPER,
                runner: verify_notify.Runner = verify_notify._run, ledger_path: str | None = None,
-               support_contacts: frozenset[str] | None = None, now: datetime | None = None) -> ClaimReport:
-    """The claim-status note run (see the module docstring)."""
+               support_contacts: frozenset[str] | None = None, now: datetime | None = None,
+               check_recipients: bool = False) -> ClaimReport:
+    """The claim-status note run (see the module docstring). check_recipients (dry run only, C11): every send-time
+    check runs read-only through the gate's --check-recipient, so the dry run reports what the send would do."""
     report = ClaimReport()
     claims, why = load_list(list_path, now=now, require_daily_check=False)
     if why:
@@ -277,7 +293,7 @@ def run_status(*, list_path: str, segment: str, mode: str = "dry-run", max_users
             report.ask_audience += 1         # told through the proof ask (or on the approval path)
         elif c.get("code_found"):
             report.code_found += 1
-        elif not _profile_id(c) or not str(c.get("profile_name") or "").strip():
+        elif not _profile_id(c) or not display_name(c.get("profile_name")):
             report.no_profile_id += 1
         else:
             keep.append(c)
@@ -310,11 +326,12 @@ def run_status(*, list_path: str, segment: str, mode: str = "dry-run", max_users
             continue
         seen.add(uid)
         p = _payload(c, acct)
-        p["claim"] = {"profile_name": str(c.get("profile_name") or "").strip()}
+        p["claim"] = {"profile_name": display_name(c.get("profile_name"))}
         payloads.append(p)
     report.users = len(payloads)
     verify_notify.send_all(payloads, report, mode=mode, wrapper=wrapper, runner=runner,
-                           extra=["--campaign", STATUS_CAMPAIGN], preview_dir=preview_dir)
+                           extra=["--campaign", STATUS_CAMPAIGN], preview_dir=preview_dir,
+                           check_recipients=check_recipients and mode != "apply")
     return report
 
 
@@ -425,8 +442,12 @@ def render(report: ClaimReport, mode: str, segment: str, reminders: bool = False
     what = "CLAIM STATUS NOTE" if status else ("CLAIM PROOF REMINDERS" if reminders else "CLAIM PROOF ASK")
     if report.halted:
         return f"{what} ({segment}): NOTHING sent: {report.halted}."
-    verb = "sent" if mode == "apply" else "would send (validated)"
-    n = (report.reminders_sent if reminders else report.sent_notes) if mode == "apply" else report.validated
+    # QA #1534: a --check-recipients dry run counts an accepted recipient in recipient_ok (the real gate's read-only
+    # check), not in validated, so the would-send figure is their sum, labelled by what was checked.
+    checked = getattr(report, "recipient_ok", 0)
+    verb = "sent" if mode == "apply" else ("would send (recipient checked)" if checked else "would send (validated)")
+    n = ((report.reminders_sent if reminders else report.sent_notes) if mode == "apply"
+         else report.validated + checked)
     parts = [f"{what} ({segment}, {mode}): {report.listed} claims on the list; {verb} {n}"]
     for label, v in (("not band B/C", report.not_band), ("code already found", report.code_found),
                      ("no surface the daily check can read (waits for the documents path)", report.no_readable_surface),
