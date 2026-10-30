@@ -116,6 +116,9 @@ def _gmail_raw():
     return gog_raw
 
 
+EX_PROVIDER_DOWN = 75        # EX_TEMPFAIL: the model provider refused (credit / auth / rate limit / cap / no key)
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     from credit_verify.docverify import runner
     from credit_verify.docverify.store import DocVerifyStore
@@ -147,6 +150,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         if args.reread_carried and (shard is None or shard[0] == 0) else {}
     log("run " + json.dumps({**stats.as_dict(), "shard": args.shard, **extra}))
     print("NO_REPLY")
+    if stats.provider_down:
+        # Fable b1 #1518: a run the provider refused is a FAILED run (a shard / the cron sees nonzero, the
+        # unknown-share watchdog and the shard loop's back-off see it), never a quiet success
+        log(f"run FAILED: provider down ({stats.provider_down})")
+        return EX_PROVIDER_DOWN
     return 0
 
 

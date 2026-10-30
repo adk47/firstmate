@@ -1546,6 +1546,51 @@ class RunnerTests(unittest.TestCase):
         stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
         self.assertEqual((rows[0]["outcome"], rows[0]["need"]), (gate.UNKNOWN, None))   # never verifies, never asks
 
+    def test_a_provider_outage_stops_the_run_and_never_uses_a_retry(self):
+        # 2026-10-29 22:00-01:05Z: HTTP 402 (out of credit) for ~3 h made 3,521 claims settle as unknown.
+        calls = []
+
+        def broke(*a):
+            calls.append(1)
+            raise urllib.error.HTTPError("u", 402, "Payment Required", {}, None)
+        self.deps.extractor = Extractor(self.store, key="k", post=broke)
+        for _ in range(runner.MAX_EXTRACT_ATTEMPTS + 3):                   # far past every retry budget
+            stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
+            self.assertEqual(rows, [])                                       # no outcome, never `unknown`
+            self.assertTrue(any("provider down (http 402)" in e for e in stats.errors), stats.errors)
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM dv_outcomes").fetchone()[0], 0)
+        self.assertEqual(runner.extract_attempts(self.store, self.proof_id), 0)          # not one attempt used
+        self.assertEqual(stats.provider_down, "http 402")                               # a FAILED run, by name
+        self.assertEqual(stats.as_dict()["provider_down"], "http 402")
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM dv_steps WHERE step='extract' AND "
+                                               "status='provider_down'").fetchone()[0], runner.MAX_EXTRACT_ATTEMPTS + 3)
+        # credit restored: the document is read for real
+        self.deps.extractor = Extractor(self.store, key="k", post=lambda *a: or_response(GOOD_ANSWER))
+        stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
+        self.assertTrue(rows)
+        self.assertNotEqual(rows[0]["outcome"], gate.UNKNOWN)
+
+    def test_unknowns_written_during_a_provider_outage_do_not_settle_a_claim(self):
+        # the 2026-10-29 rows already in the store: `unknown` with reason 'http 402' never count toward MAX_UNKNOWN
+        from credit_verify.docverify.store import MAX_UNKNOWN, provider_down
+        for _ in range(MAX_UNKNOWN + 2):
+            self.store.outcome("r402", proof_id=self.proof_id, request_id=RID, role="Mixing", user_id=42, source_ref="c",
+                               h3_verdict=None, outcome=gate.UNKNOWN, need=None, account_hold=False, detail={},
+                               reason="tooling: extraction did not run (http 402)")
+        self.assertFalse(self.store.done(self.proof_id, f"{RID}#Mixing"))
+        for why in ("tooling: extraction did not run (http 402)", "x (http 401)", "x (http 429)",
+                    "x (daily model spend cap reached)", "x (no OpenRouter key)"):
+            self.assertTrue(provider_down(why), why)
+        for why in ("tooling: extraction did not run (transport: TimeoutError)", "x (http 503)", "x (http 400)",
+                    "tooling: extraction did not run (unusable model answer)", "x (document not located)",
+                    "tooling: H3 UNDETERMINED", "x (http 4020)", None, ""):
+            self.assertFalse(provider_down(why), why)                       # can be the document: still counts
+        for _ in range(MAX_UNKNOWN):
+            self.store.outcome("rdoc", proof_id=self.proof_id, request_id=RID, role="Mixing", user_id=42, source_ref="c",
+                               h3_verdict=None, outcome=gate.UNKNOWN, need=None, account_hold=False, detail={},
+                               reason="tooling: extraction did not run (unusable model answer)")
+        self.assertTrue(self.store.done(self.proof_id, f"{RID}#Mixing"))      # document failures still settle
+
     def test_unknown_is_retried_then_stands(self):
         from credit_verify.docverify.store import MAX_UNKNOWN
         Path(self.cache, "12345", "notif_x", "0.pdf").write_bytes(b"not the file H3 judged")
@@ -1708,6 +1753,28 @@ class IntakeD2Tests(unittest.TestCase):
         self.reqs = {RID: IntakeReq(uid=99)}                                      # another account's request
         stats, rows = self._run()
         self.assertEqual(rows, [])
+
+    def test_an_intake_read_the_provider_refused_is_a_failed_run_with_no_outcome(self):
+        def broke(*a):
+            raise urllib.error.HTTPError("u", 402, "Payment Required", {}, None)
+        self.deps.extractor = Extractor(self.store, key="k", post=broke)
+        stats, rows = self._run()
+        self.assertEqual((stats.provider_down, rows), ("http 402", []))
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM dv_outcomes").fetchone()[0], 0)
+
+    def test_intake_unknowns_from_a_provider_outage_do_not_finish_the_filing(self):
+        from credit_verify.docverify.store import MAX_UNKNOWN
+        iid = self.intake_id
+        for n in range(MAX_UNKNOWN + 1):
+            self.store.outcome(f"r{n}", proof_id="p", request_id=RID, role="Mixing", user_id=42, source_ref="c",
+                               h3_verdict=None, outcome=gate.UNKNOWN, need=None, account_hold=False, detail={},
+                               reason="tooling: extraction did not run (http 402)", intake_id=iid)
+        self.assertEqual(self.store.intake_finished_keys(iid), set())          # 4 runs of 402: nothing finished
+        for n in range(MAX_UNKNOWN):
+            self.store.outcome(f"d{n}", proof_id="p", request_id=RID, role="Mixing", user_id=42, source_ref="c",
+                               h3_verdict=None, outcome=gate.UNKNOWN, need=None, account_hold=False, detail={},
+                               reason="tooling: H3 UNDETERMINED", intake_id=iid)
+        self.assertEqual(self.store.intake_finished_keys(iid), {f"{RID}#Mixing"})
 
     def test_a_document_not_found_in_its_conversation_is_retried_then_unknown(self):
         self.deps.dl = lambda url, dest: Path(dest).write_bytes(b"not it") and 1
@@ -1921,6 +1988,27 @@ class IntakeD2Tests(unittest.TestCase):
         self.assertEqual(self.store.carried_remaining(), {"rows": 0, "filings": 0, "closed_rows": 1})
         stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, reread_carried=True)
         self.assertEqual(stats.intake, 0)
+
+    def test_a_run_the_provider_refused_exits_nonzero_so_the_shard_counts_it_failed(self):
+        # Fable b1 #1518: provider-down must exit nonzero (a FAILED shard / cron run), never a quiet 0
+        import importlib.util
+        from unittest import mock
+        spec = importlib.util.spec_from_file_location("cdv", Path(__file__).resolve().parents[1] / "credit-doc-verify.py")
+        cdv = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cdv)
+        args = cdv.parser().parse_args(["--store", os.path.join(self.td.name, "cli.sqlite"), "run", "--shard", "0/4",
+                                        "--max-docs", "2"])
+        for down, want in (("http 402", cdv.EX_PROVIDER_DOWN), (None, 0)):
+            st = runner.Stats("r")
+            st.provider_down = down
+            with mock.patch.object(runner, "run", return_value=(st, [])), \
+                    mock.patch.object(cdv, "real_deps", return_value=None), \
+                    mock.patch.object(cdv, "paying_users", return_value=None), \
+                    mock.patch.object(cdv, "KILL_SWITCH", os.path.join(self.td.name, "absent")):
+                self.assertEqual(cdv.cmd_run(args), want, down)
+        self.assertNotEqual(cdv.EX_PROVIDER_DOWN, 0)
+        src = (Path(__file__).resolve().parents[1] / "credit-doc-verify.py").read_text()
+        self.assertIn("rcs = {i: p.wait() for i, p in procs}", src)             # a worker's nonzero fails the parent
 
     def test_the_cli_passes_reread_carried_to_the_runner_and_the_workers(self):
         import importlib.util

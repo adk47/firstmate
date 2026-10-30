@@ -42,11 +42,16 @@ from . import crosscheck as xc
 from . import artifacts, challenge, forensics, gate, intake_read, intel, pace
 from .extract import MIN_CONFIDENCE, Extraction, Extractor, claimant_elsewhere, supports
 from .store import DocVerifyStore, utcnow
+from .store import provider_down as store_provider_down
 
 PROOF_STORE = os.environ.get("CREDIT_PROOF_STORE", "/var/lib/hydra-credit-verify/proof.sqlite")
 CACHE_ROOT = os.environ.get("CREDIT_PROOF_INTERCOM_CACHE", "/root/.openclaw-edge/media/intercom")
 TRANSIENT = ("http ", "transport:", "daily model spend cap", "no OpenRouter key", "unusable model answer")
 MAX_EXTRACT_ATTEMPTS = 3
+
+
+class ProviderDown(RuntimeError):
+    """The model provider / network / spend cap failed (store.provider_down): stop the run, write no outcome."""
 
 SandboxRun = Callable[..., dict[str, Any]]
 Fetch = Callable[[str], "dict[str, Any] | None"]
@@ -167,11 +172,13 @@ class Stats:
     intake: int = 0
     outcomes: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     errors: list[str] = field(default_factory=list)
+    provider_down: str | None = None          # the account-wide refusal that stopped this run (a FAILED run)
 
     def as_dict(self) -> dict[str, Any]:
         return {"run_id": self.run_id, "documents": self.documents, "pairs": self.pairs, "retry": self.retry,
                 "superseded": self.superseded, "intake": self.intake,
-                "outcomes": dict(self.outcomes), "errors": self.errors[:10]}
+                "outcomes": dict(self.outcomes), "errors": self.errors[:10],
+                **({"provider_down": self.provider_down} if self.provider_down else {})}
 
 
 def extract_attempts(store: DocVerifyStore, proof_id: str) -> int:
@@ -221,6 +228,10 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
         # (what, date) pairs an EARLIER read of this document also extracted at >= OCR_DATE_MIN (Fable 127: an
         # OCR date is impossible content only when stable on a re-read); read before this read is recorded
         stable_dates = earlier_firm_dates(store, proof_id)
+        if not ex.ok and store_provider_down(ex.error):
+            # never an attempt, never an outcome: the document is read again when the provider is back
+            store.step(run_id, proof_id, "extract", "provider_down", ex.as_dict())
+            raise ProviderDown(ex.error)
         store.step(run_id, proof_id, "extract", "ok" if ex.ok else "error", ex.as_dict())
         # JUNK PROOF option C (captain-1028-214x): what kind of artifact this is, with the full text; a record
         # only - it decides no outcome here (artifacts.junk_list builds the purge / decline proposal).
@@ -408,6 +419,11 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
             stats.documents += 1
             try:
                 rows += verify_document(store, proof_db, proof_id, keys, deps, run_id, stats, held)
+            except ProviderDown as exc:
+                stats.provider_down = str(exc)
+                stats.errors.append(f"provider down ({exc}): run stopped, nothing recorded")
+                log(f"provider down ({exc}): run stopped; the documents are read again next run")
+                return stats, rows
             except Exception as exc:  # noqa: BLE001 - one document must not stop the run
                 stats.errors.append(f"{proof_id[:12]}: {type(exc).__name__}: {str(exc)[:160]}")
                 store.step(run_id, proof_id, "run", "error", {"error": f"{type(exc).__name__}: {str(exc)[:300]}"})
@@ -436,6 +452,11 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
                     if not todo:
                         continue
                     rows += verify_document(store, proof_db, doc.sha, todo, deps, run_id, stats, held, intake=doc)
+                except ProviderDown as exc:
+                    stats.provider_down = str(exc)
+                    stats.errors.append(f"provider down ({exc}): run stopped, nothing recorded")
+                    log(f"provider down ({exc}): run stopped; the documents are read again next run")
+                    return stats, rows
                 except Exception as exc:  # noqa: BLE001 - one document must not stop the run
                     stats.errors.append(f"intake {doc.intake_id[:16]}: {type(exc).__name__}: {str(exc)[:160]}")
                     store.step(run_id, doc.sha, "run", "error", {"error": f"{type(exc).__name__}: {str(exc)[:300]}"},

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -28,6 +29,18 @@ from typing import Any
 from . import CARRY, VERSION
 
 MAX_UNKNOWN = 3
+# 2026-10-29 22:00-01:05Z: the model provider answered HTTP 402 (out of credit) for ~3 h; every read became
+# `unknown` and 3,521 claims (85 documents) used up MAX_UNKNOWN and settled with no real read. An ACCOUNT-WIDE
+# refusal (credit, auth, rate limit, our own spend cap, no key) can never be about the DOCUMENT: it never uses a
+# retry, never settles a claim, and the reader stops the run at the first one (runner.ProviderDown). A timeout or a
+# 5xx can be the document (an oversized prompt), so those keep counting: a file that always times out must settle,
+# never stall every run. Document-specific failures (an unusable answer, a file we cannot locate) still count.
+PROVIDER_DOWN = re.compile(r"\b(http (401|402|403|429)\b|daily model spend cap|no OpenRouter key)")
+
+
+def provider_down(reason: str | None) -> bool:
+    """True when an `unknown` outcome / extract error was the provider or network, not the document."""
+    return bool(reason) and bool(PROVIDER_DOWN.search(str(reason)))
 
 
 class RawCreditsLockError(RuntimeError):
@@ -340,8 +353,9 @@ class DocVerifyStore:
         current VERSION. An `unknown` (tooling) outcome is retried, up to
         MAX_UNKNOWN runs; the last one then stands."""
         rid, _, role = request_key.partition("#")
-        rows = [r[0] for r in self.db.execute("SELECT outcome FROM dv_outcomes WHERE proof_id=? AND request_id=? "
-                                              "AND role=? AND version=?", (proof_id, rid, role, VERSION))]
+        rows = [o for o, why in self.db.execute("SELECT outcome, reason FROM dv_outcomes WHERE proof_id=? AND "
+                                                "request_id=? AND role=? AND version=?", (proof_id, rid, role, VERSION))
+                if not (o == "unknown" and provider_down(why))]          # a provider outage is not a try
         return any(o != "unknown" for o in rows) or len(rows) >= MAX_UNKNOWN
 
     def intake_finished_keys(self, intake_id: str) -> set[str]:
@@ -351,9 +365,11 @@ class DocVerifyStore:
         done: set[str] = set(self.intake_unmatched(intake_id))
         unknown: dict[str, int] = {}
         runs: dict[str, bool] = {}            # run -> did it decide anything for this document?
-        for rid, role, outcome, run in self.db.execute(
-                "SELECT request_id, role, outcome, run_id FROM dv_outcomes WHERE intake_id=? AND version=?",
+        for rid, role, outcome, run, why in self.db.execute(
+                "SELECT request_id, role, outcome, run_id, reason FROM dv_outcomes WHERE intake_id=? AND version=?",
                 (intake_id, VERSION)):
+            if outcome == "unknown" and provider_down(why):
+                continue                       # a provider outage is not a try (2026-10-29 402 window)
             key = f"{rid}#{role}"
             runs[run] = runs.get(run, False) or outcome != "unknown"
             if outcome != "unknown":
