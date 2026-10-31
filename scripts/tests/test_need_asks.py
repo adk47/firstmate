@@ -64,6 +64,10 @@ class NeedAsksTest(unittest.TestCase):
     def q(self, sql):
         if "FROM postgresql_core.public.users" in sql:
             return [[str(u), f"u{u}@x.com", "Jane", "", ""] for u in self.pending]
+        if sql == na.FACTS_SQL:                                   # r5 #1582 (c): the signing header's facts read
+            st = getattr(self, "facts_status", {})
+            return [[str(u), r.lower(), st.get(r, "user_verification_needed"), "false"]
+                    for u, rids in self.pending.items() for r in rids]
         out = []
         for u, rids in self.pending.items():
             for r in rids:
@@ -414,6 +418,152 @@ class NeedAsksTest(unittest.TestCase):
                       ledger_path=str(self.d / "ledger.sqlite3"))
         self.assertEqual(rep.halted, "")
 
+    def test_check_recipients_asks_the_live_gate_for_every_user_and_lists_the_deferred(self):
+        # r5 RULE (10-31 14:2xZ): signable only on the live gates' answer - the gate's --check-recipient, never --validate
+        lst = self.d / "list.json"
+        lst.write_text(json.dumps(self.build()))
+        calls, answer = [], {"rc": 3, "out": "DEFERRED core_notice_within_7d credits=1 (approvedNotice within 7d)\n"}
+        def gate(argv):
+            calls.append((argv, json.load(open(argv[argv.index("--credits-file") + 1]))["user"]["id"]))
+            return type("R", (), {"returncode": answer["rc"], "stdout": answer["out"], "stderr": ""})()
+        def run(**kw):
+            return na.send(list_path=str(lst), segment="paid", mode="dry-run", query=self.q, runner=gate,
+                           ledger_path=str(self.d / "ledger.sqlite3"), **kw)
+        rep = run(check_recipients=True)
+        self.assertTrue(calls)
+        self.assertTrue(all("--check-recipient" in a and "--validate" not in a and "--dry-run" not in a for a, _ in calls))
+        self.assertEqual((rep.sent_notes, rep.recipient_ok), (0, 0))
+        self.assertEqual([o["user"] for o in rep.outcomes], [u for _, u in calls])   # the deferred user is LISTED
+        answer.update(rc=0, out="RECIPIENT OK proof-need-ask initial copy=proofneed credits=1\n")
+        calls.clear()
+        rep = run(check_recipients=True)
+        self.assertEqual(rep.recipient_ok, len(calls))                             # the would-send set
+        self.assertEqual([a["user"] for a in rep.accepted], [u for _, u in calls])  # ... named (QA #1582)
+        self.assertTrue(all(a["campaign"] == "proof-need-ask" and a["request_ids"] and a["gate"].startswith("RECIPIENT OK")
+                            for a in rep.accepted))
+        calls.clear()
+        run()                                                                       # a plain dry run only renders
+        self.assertTrue(calls and all("--check-recipient" not in a for a, _ in calls))
+
+    def test_cli_emits_the_would_send_ids_and_writes_the_outcomes_safely(self):
+        # QA #1582: a mixed run (one deferred, one accepted) names the accepted user; the outcomes file is a fresh 0600
+        # file even over an existing 0644 one; an unwritable outcomes location stops BEFORE any gate call
+        import contextlib, io, os, stat
+        from unittest import mock
+        lst = self.d / "list.json"
+        lst.write_text(json.dumps(self.build()))
+        seen = []
+        def gate(argv):
+            uid = json.load(open(argv[argv.index("--credits-file") + 1]))["user"]["id"]
+            seen.append(uid)
+            if len(seen) == 1:
+                return type("R", (), {"returncode": 3, "stdout": "DEFERRED core_notice_within_7d credits=1 (x)\n", "stderr": ""})()
+            return type("R", (), {"returncode": 0, "stdout": "RECIPIENT OK proof-need-ask initial copy=x credits=1\n", "stderr": ""})()
+        real = na.send
+        def send(**kw):
+            return real(**{**kw, "query": self.q, "runner": gate, "ledger_path": str(self.d / "ledger.sqlite3")})
+        out = self.d / "out.json"
+        out.write_text("old"); os.chmod(out, 0o644)
+        buf = io.StringIO()
+        with mock.patch.object(na, "send", send), contextlib.redirect_stdout(buf):
+            na._main(["send", "--list", str(lst), "--segment", "free", "--check-recipients", "--outcomes-json", str(out)])
+        doc = json.loads(out.read_text())
+        self.assertEqual(stat.S_IMODE(os.stat(out).st_mode), 0o600)                # fresh 0600, not the old 0644
+        self.assertGreaterEqual(len(seen), 2, "fixture needs two gate calls")
+        # r5's A/B/C: A filtered before the gate (named, with why), B accepted, C deferred - and they add up to listed
+        self.assertEqual(doc["counts"], {"accepted": 1, "gate_non_send": 1, "filtered": 1})
+        self.assertEqual(doc["listed"], 3)
+        self.assertTrue(doc["balanced"])
+        self.assertEqual([f["user"] for f in doc["filtered"]], ["4"])
+        self.assertIn("intake newer", doc["filtered"][0]["reason"])
+        self.assertTrue(doc["accepted"][0]["gate"].startswith("RECIPIENT OK"))
+        self.assertEqual(doc["would_send_users"], seen[1:])                        # the accepted, by id
+        self.assertEqual([o["user"] for o in doc["outcomes"]], seen[:1])           # the deferred one, listed apart
+        self.assertEqual(json.loads(buf.getvalue().strip().splitlines()[-1])["would_send_users"], seen[1:])
+        seen.clear()
+        with mock.patch.object(na, "send", send), contextlib.redirect_stdout(io.StringIO()) as b2:
+            rc = na._main(["send", "--list", str(lst), "--segment", "paid", "--mode", "apply",
+                           "--outcomes-json", str(self.d / "no" / "such" / "dir" / "o.json")])
+        self.assertEqual((rc, seen), (2, []))
+        self.assertIn("not writable", b2.getvalue())
+
+    def test_the_built_list_carries_the_signing_header_and_verify_facts_names_changes(self):
+        # r5 #1582 (c): exact runnable SQL + its sha256 + a facts sha256; verify-facts re-reads it at signing
+        import copy, hashlib
+        seen = []
+        real = self.q
+        lst = na.build(dv_store=self.dv, proof_store=self.proof, paying_path=str(self.paying),
+                       query=lambda sql: seen.append(sql) or real(sql))
+        head = lst["replica_facts"]
+        self.assertIn(head["query"], seen)                                          # the exact string the build ran
+        self.assertTrue(head["query"].startswith("SELECT "))
+        self.assertEqual(head["query_sha256"], hashlib.sha256(head["query"].encode()).hexdigest())
+        self.assertEqual(head["sha256"], na.facts_header(lst["users"])["sha256"])
+        self.assertTrue(all(u["facts"] for u in lst["users"]))
+        self.assertEqual(na.verify_facts(lst, self.q), [])                          # unchanged: signable
+        u0 = lst["users"][0]
+        rid = sorted({a["request_id"] for a in u0["asks"]})[0]
+        self.facts_status = {rid: "processing"}                                     # one request moved since the build
+        self.assertEqual([d.split(":")[0] for d in na.verify_facts(lst, self.q)], [u0["user_id"]])
+        self.facts_status = {}
+        # QA #1582: the same request, same status, now owned by ANOTHER user - a change (never signable as built)
+        real_q = self.q
+        moved = lambda sql: [[("999" if r[1] == rid.lower() else r[0]), *r[1:]] for r in real_q(sql)] if sql == na.FACTS_SQL else real_q(sql)
+        self.assertEqual([d.split(":")[0] for d in na.verify_facts(lst, moved)], [u0["user_id"]])
+        edited = copy.deepcopy(lst)
+        edited["users"][0]["facts"] = [["x", "y", "z"]]
+        self.assertTrue(any(d.startswith("header:") for d in na.verify_facts(edited, self.q)))
+
+    def test_an_identity_held_user_is_named_and_the_run_stays_balanced(self):
+        # QA #1582: no professional id -> held before the gate -> named in filtered (never vanishes)
+        from unittest import mock
+        lst = self.d / "list.json"
+        lst.write_text(json.dumps(self.build()))
+        with mock.patch.object(na.verify_notify, "attach_identities", lambda ps, rep: (rep.__setattr__("no_professional_id", len(ps)) or [], ps)):
+            rep = na.send(list_path=str(lst), segment="paid", mode="dry-run", query=self.q, runner=FakeGate(),
+                          ledger_path=str(self.d / "ledger.sqlite3"), check_recipients=True)
+        acc = na.accounting(rep)
+        self.assertTrue(acc["balanced"], acc)
+        self.assertEqual(acc["counts"]["accepted"], 0)
+        self.assertTrue(rep.filtered and all("professional id" in f["reason"] for f in rep.filtered
+                                             if f["user"] in rep.listed_users and "already" not in f["reason"]))
+
+    def test_an_unbalanced_recipient_check_exits_nonzero(self):
+        # QA #1582: the gate answers VALID (not RECIPIENT OK) under --check-recipients - counted as validated, neither
+        # accepted nor a non-send -> unbalanced -> exit 3 (never 0), and the JSON says balanced false
+        import contextlib, io
+        from unittest import mock
+        lst = self.d / "list.json"
+        lst.write_text(json.dumps(self.build()))
+        real = na.send
+        drift = lambda argv: type("R", (), {"returncode": 0, "stdout": "VALID proof-need-ask initial copy=x credits=1\n", "stderr": ""})()
+        def send(**kw):
+            return real(**{**kw, "query": self.q, "runner": drift, "ledger_path": str(self.d / "ledger.sqlite3")})
+        buf = io.StringIO()
+        with mock.patch.object(na, "send", send), contextlib.redirect_stdout(buf):
+            rc = na._main(["send", "--list", str(lst), "--segment", "paid", "--check-recipients"])
+        self.assertEqual(rc, 3)
+        self.assertFalse(json.loads(buf.getvalue().strip().splitlines()[-1])["balanced"])
+        ok = lambda argv: type("R", (), {"returncode": 0, "stdout": "RECIPIENT OK proof-need-ask initial copy=x credits=1\n", "stderr": ""})()
+        def send_ok(**kw):
+            return real(**{**kw, "query": self.q, "runner": ok, "ledger_path": str(self.d / "ledger2.sqlite3")})
+        with mock.patch.object(na, "send", send_ok), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(na._main(["send", "--list", str(lst), "--segment", "paid", "--check-recipients"]), 0)
+
+    def test_an_unaccounted_user_makes_the_run_unbalanced(self):
+        # r5 #1582: accepted + gate non-sends + filtered must equal the listed users, else the list is not signable
+        rep = na.verify_notify.Report()
+        rep.listed_users = ["1", "2", "3"]
+        rep.accepted = [{"user": "1", "campaign": "proof-need-ask", "request_ids": ["r1"], "gate": "RECIPIENT OK x"}]
+        rep.outcomes = [{"user": "2", "result": "deferred", "reason": "x"}]
+        self.assertFalse(na.accounting(rep)["balanced"])                           # user 3 is nowhere
+        rep.filtered = [{"user": "3", "result": "filtered", "reason": "y"}]
+        self.assertTrue(na.accounting(rep)["balanced"])
+
+    def test_check_recipients_is_refused_with_apply(self):
+        self.assertEqual(na._main(["send", "--list", "/nonexistent", "--segment", "paid", "--mode", "apply",
+                                   "--check-recipients"]), 2)
+
     def test_unreadable_inputs_list_nothing(self):
         with self.assertRaises(na.NeedError):
             na.build(dv_store=str(self.d / "nope.sqlite"), proof_store=self.proof, paying_path=str(self.paying), query=self.q)
@@ -438,7 +588,7 @@ class BoundAfterLedgerTest(unittest.TestCase):
         ledger = str(d / "ledger.sqlite3")
         seen = []
 
-        def payloads(users, query, asked, held=None):
+        def payloads(users, query, asked, held=None, filtered=None):
             seen.append([u["user_id"] for u in users])
             return []
         with mock.patch.object(na, "payloads", payloads):
@@ -463,7 +613,7 @@ class BoundAfterLedgerTest(unittest.TestCase):
                                              for u in (1, 2, 3, 4)]}))
         sent = []
 
-        def payloads(users, query, asked, held=None):
+        def payloads(users, query, asked, held=None, filtered=None):
             return [{"user": {"id": u["user_id"]}, "credits": [], "need": {"code": "readable_document"}}
                     for u in users if u["user_id"] not in ("1", "2")]
 
@@ -507,7 +657,7 @@ class DistributorIssueOrderTest(unittest.TestCase):
                 report.recipient_ok += len(batch)
                 return
             events.extend(f"send:{p['user']['id']}" for p in batch)
-        with mock.patch.object(na, "payloads", lambda users, q, asked, held=None: ps), \
+        with mock.patch.object(na, "payloads", lambda users, q, asked, held=None, filtered=None: ps), \
                 mock.patch.object(na.verify_notify, "send_all", send_all), \
                 mock.patch.object(na.uvn_status, "campaign_lock_open", lambda w, lk: True):
             na.send(list_path=str(lst), segment="paid", mode="apply", query=lambda sql: [], runner=FakeGate(),
@@ -536,7 +686,7 @@ class DistributorIssueOrderTest(unittest.TestCase):
         def issuer(rid, uid):
             issued.append(rid)
             return {"code": "MUSO-AB12", "expires_at": "2099-01-01T00:00:00Z", "new": True}
-        with mock.patch.object(na, "payloads", lambda users, q, asked, held=None: ps), \
+        with mock.patch.object(na, "payloads", lambda users, q, asked, held=None, filtered=None: ps), \
                 mock.patch.object(na.verify_notify, "attach_identities", lambda ps, r: (ps, None)), \
                 mock.patch.object(na.uvn_status, "campaign_lock_open", lambda w, lk: True):
             rep1 = na.send(list_path=str(lst), segment="paid", mode="apply", query=lambda sql: [], runner=gate,
@@ -569,7 +719,7 @@ class DistributorVoidTest(unittest.TestCase):
                 return type("R", (), {"returncode": 0, "stdout": "RECIPIENT OK contact=c\n", "stderr": ""})()
             out = live_out or ("POSTED email message=1 credits=1\n" if live_rc == 0 else "DEFERRED messaged_7d credits=1 (x)\n")
             return type("R", (), {"returncode": live_rc, "stdout": out, "stderr": ""})()
-        with mock.patch.object(na, "payloads", lambda users, q, asked, held=None: ps), \
+        with mock.patch.object(na, "payloads", lambda users, q, asked, held=None, filtered=None: ps), \
                 mock.patch.object(na.verify_notify, "attach_identities", lambda ps, r: (ps, None)), \
                 mock.patch.object(na.uvn_status, "campaign_lock_open", lambda w, lk: True):
             return na.send(list_path=str(lst), segment="paid", mode="apply", query=lambda sql: [], runner=gate,

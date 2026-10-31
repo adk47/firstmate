@@ -20,12 +20,14 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import hashlib
 import json
 import os
 import re
 import sqlite3
 import subprocess
 import sys
+import tempfile
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -179,8 +181,55 @@ def build(*, dv_store: str = DV_STORE, proof_store: str = PROOF_STORE, paying_pa
         counts[f"list_{'paid' if is_paid else 'free'}"] += 1
         counts["list_requests"] += len(rows)
     users.sort(key=lambda u: (not u["paid"], u["asks"][0]["doc_received_at"]))
+    facts = replica_facts(query or uvn_status.trino) if users else {}
+    for u in users:
+        u["facts"] = facts_of(u, facts)
     return {"generated_at": (now or datetime.now(timezone.utc)).isoformat(timespec="seconds"),
-            "users": users, "counts": dict(counts)}
+            "replica_facts": facts_header(users), "users": users, "counts": dict(counts)}
+
+
+# r5 #1582 (c): an E list carries the SAME signing header as owing_proof's - the exact runnable SQL, its sha256, and a
+# sha256 over every listed user's per-request facts (request id, core status, proof_required) as read at build time;
+# `verify-facts` re-runs THIS string at signing and names every user whose facts changed (they are out of the batch)
+FACTS_SQL = ("SELECT CAST(cr.userid AS varchar), lower(CAST(cr.id AS varchar)), cr.status, "
+             "CAST(coalesce(CAST(json_extract(cr.verificationdata, '$.proof_required') AS boolean), false) AS varchar) "
+             "FROM postgresql_core.public.credit_requests cr WHERE cr.deletedat IS NULL AND cr.userid IS NOT NULL "
+             "AND cr.status NOT IN ('approved', 'rejected')")
+
+
+def replica_facts(query: uvn_status.Query) -> dict[str, list[str]]:
+    rows = query(FACTS_SQL)
+    if any(len(r) != 4 or not str(r[0]).isdigit() for r in rows):
+        raise NeedError("unexpected replica facts row shape")
+    # QA #1582: the OWNER is part of the fact - a request that moved to another user is a change
+    return {str(r[1]).lower(): [str(r[1]).lower(), str(r[2]), str(r[3]).lower(), str(r[0])] for r in rows}
+
+
+def facts_of(u: dict[str, Any], facts: dict[str, list[str]]) -> list[list[str]]:
+    rids = sorted({str(a["request_id"]).lower() for a in u["asks"]})
+    return [facts.get(r, [r, "gone", "", ""]) for r in rids]
+
+
+def facts_header(users: list[dict[str, Any]]) -> dict[str, str]:
+    blob = json.dumps(sorted([u["user_id"], u.get("facts")] for u in users), separators=(",", ":"))
+    return {"query": FACTS_SQL, "query_sha256": hashlib.sha256(FACTS_SQL.encode()).hexdigest(),
+            "sha256": hashlib.sha256(blob.encode()).hexdigest()}
+
+
+def verify_facts(lst: dict[str, Any], query: uvn_status.Query) -> list[str]:
+    """Re-read the replica for a built E list (the signing rule): a header that no longer matches the listed facts (the
+    list was edited) and every user whose facts changed since the build. Empty = signable as built."""
+    diffs = []
+    users = lst.get("users") or []
+    head = lst.get("replica_facts") or {}
+    if head.get("query") != FACTS_SQL or head.get("sha256") != facts_header(users)["sha256"]:
+        diffs.append("header: replica_facts does not match the listed facts or the query (the list changed after its build)")
+    now = replica_facts(query)
+    for u in users:
+        cur = facts_of(u, now)
+        if cur != u.get("facts"):
+            diffs.append(f"{u['user_id']}: listed {u.get('facts')} -> now {cur}")
+    return diffs
 
 
 def core_proof_requested(rids: list[str], query: uvn_status.Query) -> set[str]:
@@ -200,7 +249,7 @@ def core_proof_requested(rids: list[str], query: uvn_status.Query) -> set[str]:
 
 
 def payloads(users: list[dict[str, Any]], query: uvn_status.Query, asked: set[str] | None = None,
-             held_out: list[str] | None = None) -> list[dict[str, Any]]:
+             held_out: list[str] | None = None, filtered_out: list[dict[str, str]] | None = None) -> list[dict[str, Any]]:
     """ONE gate payload per user (Fable [key=l11c-plural]): the first need group, counterparty first, that still has
     pending requests nobody asked about. The unit is (user, DOCUMENT) (p1 156): the message is about the documents of
     that need sent on the NEWEST day in one filing thread (named by kind + date in the copy, Fable 166) and names
@@ -216,8 +265,10 @@ def payloads(users: list[dict[str, Any]], query: uvn_status.Query, asked: set[st
         uid = int(u["user_id"])
         acct = accts.get(uid)
         if not acct or not acct.get("email"):
+            _filtered(filtered_out, uid, "no_deliverable_account")
             continue
         rows = {r["request_id"].lower(): r for r in pend.get(uid, []) if not r["_incomplete"]}
+        n_out, n_held = len(out), len(held)
         for need in NEED_ORDER:
             cand = [a for a in u["asks"] if a["need"] == need and a["request_id"].lower() in rows
                     and a["request_id"].lower() not in asked]
@@ -274,7 +325,15 @@ def payloads(users: list[dict[str, Any]], query: uvn_status.Query, asked: set[st
                                  # QA #1418: the INTAKE each named document was read from (the gate checks that row)
                                  "doc_intakes": {a["doc_sha"]: a.get("intake_id", "") for a in docs if a.get("intake_id")}}})
             break
+        if len(out) == n_out:            # QA / r5 #1582: no payload for this user - say why (per user, never a count)
+            why = held[-1].split(": ", 1)[1] if len(held) > n_held else "no pending, not-yet-asked request (re-read now)"
+            _filtered(filtered_out, uid, why)
     return out
+
+
+def _filtered(sink: list[dict[str, str]] | None, uid: Any, reason: str) -> None:
+    if sink is not None:
+        sink.append({"user": str(uid), "result": "filtered", "reason": reason[:200]})
 
 
 def issue_code(request_id: str, user_id: str) -> dict[str, str]:
@@ -347,13 +406,17 @@ def with_codes(ps: list[dict[str, Any]], mode: str, report: verify_notify.Report
 def send(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int = 25, preview_dir: str | None = None,
          query: uvn_status.Query | None = None, wrapper: str = verify_notify.WRAPPER,
          runner: verify_notify.Runner = verify_notify._run, ledger_path: str | None = None,
-         issuer: Any = issue_code, voider: Any = void_code) -> verify_notify.Report:
+         issuer: Any = issue_code, voider: Any = void_code, check_recipients: bool = False) -> verify_notify.Report:
+    """r5 RULE (10-31 14:2xZ, after the 14:00Z E batch sent 0/22): a batch is signable ONLY on the live gates' answer -
+    check_recipients (dry run) asks the gate's --check-recipient for every user (core notice, comm_state, G1-G5;
+    read-only), so the would-send set is known before anyone signs. A plain dry run only renders."""
     report = verify_notify.Report()
     if mode == "apply" and not uvn_status.campaign_lock_open(wrapper, LOCK):
         report.halted = f"{CAMPAIGN} is send-locked in the gate ({LOCK}=0); nothing sent (dry-run renders it)"
         return report
     with open(list_path, encoding="utf-8") as fh:
         users = [u for u in json.load(fh)["users"] if u["paid"] == (segment == "paid")]
+    report.listed_users = [str(u["user_id"]) for u in users]   # QA / r5 #1582: every one is accounted for below
     try:
         from credit_review import verify_ledger  # noqa: PLC0415
         db = verify_ledger.connect(ledger_path or verify_ledger.DEFAULT_PATH)
@@ -364,20 +427,26 @@ def send(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int 
         return report
     # the bound applies AFTER the ledger (QA #1418): a user whose every ask is already handled never takes a batch
     # slot, so repeated bounded runs keep reaching new users instead of re-selecting the first max_users forever
+    for u in users:
+        if not any(a["request_id"] not in asked for a in u["asks"]):
+            _filtered(report.filtered, u["user_id"], "already_asked (every ask of this user is in the ledger)")
     users = [u for u in users if any(a["request_id"] not in asked for a in u["asks"])]
     # ... and AFTER the live re-read too (QA #1418): payloads() drops users whose requests resolved or who have no
     # deliverable account; only then is the batch bounded, so a stale first page never consumes every slot
     held: list[str] = []
-    live = payloads(users, query or uvn_status.trino, asked, held)
+    live = payloads(users, query or uvn_status.trino, asked, held, report.filtered)
     report.held_newer = held        # needs the send would hold (comm_state.newer_intake): listed, never retried
     report.not_found = len(users) - len(live)
     ps = live[:max_users]
+    for p in live[max_users:]:
+        _filtered(report.filtered, p["user"]["id"], f"over --max-users {max_users} (a later batch)")
     report.candidates = len(ps)
     # QA #1513: a distributor ask's F9 code is issued for THAT payload immediately before its own gate call (never a
     # whole batch of codes up front), and a reused active code must still have the promised 7 days (with_codes)
     plain = [p for p in ps if p["need"]["code"] != DISTRIBUTOR]
     verify_notify.send_all(plain, report, mode=mode, wrapper=wrapper, runner=runner, extra=["--campaign", CAMPAIGN],
-                           pace_seconds=1.0, preview_dir=preview_dir)
+                           pace_seconds=1.0, preview_dir=preview_dir,
+                           check_recipients=check_recipients and mode != "apply")
     for p in ps:
         if p["need"]["code"] != DISTRIBUTOR:
             continue
@@ -386,7 +455,8 @@ def send(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int 
         coded = with_codes([p], mode, report, issuer)
         before, n_out = report.sent_notes, len(report.outcomes)
         verify_notify.send_all(coded, report, mode=mode, wrapper=wrapper, runner=runner,
-                               extra=["--campaign", CAMPAIGN], pace_seconds=1.0, preview_dir=preview_dir)
+                               extra=["--campaign", CAMPAIGN], pace_seconds=1.0, preview_dir=preview_dir,
+                           check_recipients=check_recipients and mode != "apply")
         if mode == "apply" and coded and report.sent_notes == before:
             rid, code = coded[0]["credits"][0]["request_id"], coded[0]["need"]["verify_code"]
             new = report.outcomes[n_out:]
@@ -429,20 +499,42 @@ def preflight_ok(p: dict[str, Any], report: verify_notify.Report, wrapper: str, 
     return False
 
 
+def accounting(rep: verify_notify.Report) -> dict[str, Any]:
+    """QA / r5 #1582: accepted + every gate non-send + filtered-before-gate == listed, per user (a check run). `balanced`
+    False = a user the run cannot account for: the list is NOT signable."""
+    listed = list(getattr(rep, "listed_users", []))
+    acc = [a["user"] for a in rep.accepted]
+    gate = [str(o.get("user")) for o in rep.outcomes]
+    filt = [f["user"] for f in rep.filtered]
+    return {"listed": len(listed), "would_send_users": acc,
+            "counts": {"accepted": len(acc), "gate_non_send": len(gate), "filtered": len(filt)},
+            "balanced": sorted(acc + gate + filt) == sorted(listed)}
+
+
 def _main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="op", required=True)
     b = sub.add_parser("build")
     b.add_argument("--out", required=True)
     b.add_argument("--tray", default=None, help="b1's L11c tray JSON (the source of truth, Fable [key=l11c-plural])")
+    v = sub.add_parser("verify-facts")
+    v.add_argument("--list", required=True)
     s = sub.add_parser("send")
     s.add_argument("--list", required=True)
     s.add_argument("--segment", choices=("paid", "free"), required=True)
     s.add_argument("--mode", choices=("dry-run", "apply"), default="dry-run")
     s.add_argument("--max-users", type=int, default=25)
     s.add_argument("--preview", default=None)
+    s.add_argument("--check-recipients", action="store_true",
+                   help="dry run: the gate's live --check-recipient for every user (the signable would-send set)")
+    s.add_argument("--outcomes-json", default=None, help="write every non-send gate answer {user, result, reason} (0600)")
     a = ap.parse_args(argv)
     try:
+        if a.op == "verify-facts":
+            with open(a.list, encoding="utf-8") as fh:
+                diffs = verify_facts(json.load(fh), uvn_status.trino)
+            print(json.dumps({"changed": diffs}))
+            return 1 if diffs else 0
         if a.op == "build":
             res = build(tray=a.tray)
             fd = os.open(a.out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -452,16 +544,48 @@ def _main(argv: list[str] | None = None) -> int:
             return 0
         if a.preview:
             Path(a.preview).mkdir(mode=0o700, parents=True, exist_ok=True)
-        rep = send(list_path=a.list, segment=a.segment, mode=a.mode, max_users=a.max_users, preview_dir=a.preview)
+        if a.check_recipients and a.mode == "apply":
+            print("NEED ASKS: --check-recipients is a dry-run check; nothing sent")
+            return 2
+        tmp = ""
+        if a.outcomes_json:
+            # QA #1582: preflight BEFORE any send - a fresh 0600 temp file beside the target (never an existing file's
+            # mode); an unwritable location stops the run with nothing sent
+            try:
+                fd, tmp = tempfile.mkstemp(prefix=".outcomes-", dir=os.path.dirname(os.path.abspath(a.outcomes_json)))
+                os.close(fd)
+            except OSError as exc:
+                print(f"NEED ASKS: --outcomes-json {a.outcomes_json} is not writable ({exc}); nothing sent")
+                return 2
+        rep = send(list_path=a.list, segment=a.segment, mode=a.mode, max_users=a.max_users, preview_dir=a.preview,
+                   check_recipients=a.check_recipients)
+        if tmp:
+            try:
+                with open(tmp, "w", encoding="utf-8") as fh:
+                    json.dump({"mode": a.mode, "segment": a.segment, "check_recipients": a.check_recipients,
+                               **accounting(rep),
+                               "accepted": list(rep.accepted), "outcomes": list(rep.outcomes),
+                               "filtered": list(rep.filtered)}, fh)
+                os.replace(tmp, a.outcomes_json)          # atomic, and the fresh file's 0600 mode goes with it
+            except OSError as exc:
+                rep.failures.append(f"outcomes file not written: {exc}"[:200])
+                rep.failed_users += 1                     # surfaced: the run exits 1
+                Path(tmp).unlink(missing_ok=True)
     except NeedError as exc:
         print(f"NEED ASKS: nothing listed or sent: {exc}")
         return 2
     print(json.dumps({"halted": rep.halted, "candidates": rep.candidates, "not_found": rep.not_found,
-                      "validated": rep.validated, "sent": rep.sent_notes, "deferred": rep.deferred_users,
+                      "validated": rep.validated, "would_send": getattr(rep, "recipient_ok", 0),
+                      **accounting(rep),
+                      "sent": rep.sent_notes, "deferred": rep.deferred_users,
                       "refused": rep.refused_users, "failed": rep.failed_users, "refusals": rep.refusals[:10],
                       "held_newer_intake": len(getattr(rep, "held_newer", [])),
                       "held_newer_examples": getattr(rep, "held_newer", [])[:10],
                       "failures": rep.failures[:10]}))
+    # QA #1582: a recipient check that cannot account for every listed user (e.g. the gate answered VALID instead of
+    # RECIPIENT OK - wrapper drift) is NOT a signable set: fail closed on the exit status, not only in the JSON
+    if a.check_recipients and not accounting(rep)["balanced"]:
+        return 3
     return 1 if rep.halted or rep.failed_users else 0
 
 

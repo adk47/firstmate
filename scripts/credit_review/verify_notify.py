@@ -121,6 +121,9 @@ class Report:
     already_today: int = 0             # messages the ledger already holds for today (counted against the cap)
     paying_hold: str = ""              # paying status unknown and the cap would have to choose: nothing sent
     recipient_ok: int = 0              # dry run with --check-recipients: the real gate accepted the recipient
+    # ... and WHO, per user: {user, campaign, request_ids, gate} - the gate's own RECIPIENT OK line (QA / r5 #1582)
+    accepted: list = field(default_factory=list)
+    filtered: list = field(default_factory=list)  # users a runner dropped BEFORE the gate: {user, result, reason}
     validated: int = 0                 # dry run: the gate validated (or rendered) the note it would send
     halted: str = ""
     failures: list[str] = field(default_factory=list)
@@ -650,10 +653,13 @@ def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
              check_recipients: bool = False) -> None:
     if mode == "apply" or check_recipients:
         try:
-            payloads, _ = attach_identities(payloads, report)
+            payloads, held = attach_identities(payloads, report)
         except Exception as exc:  # noqa: BLE001 - an unreadable replica sends nothing
             report.halted = f"the accounts' professional ids cannot be read from the replica ({exc}); nothing is sent"[:300]
             return
+        # QA #1582: a user held here never reaches the gate - name them, so the run accounts for every listed user
+        report.filtered += [{"user": _uid(p), "result": "filtered",
+                             "reason": "no professional id on the account (Intercom identity unverifiable): held"} for p in held or []]
     for i, p in enumerate(payloads):
         if i and pace_seconds and mode == "apply":
             time.sleep(pace_seconds)
@@ -679,6 +685,10 @@ def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
         out, err = _first_line(res.stdout), _first_line(res.stderr)
         if res.returncode == 0 and out.startswith("RECIPIENT OK"):
             report.recipient_ok += 1
+            camp = (extra or [])[(extra or []).index("--campaign") + 1] if "--campaign" in (extra or [])[:-1] else ""
+            report.accepted.append({"user": _uid(p), "campaign": camp,
+                                    "request_ids": [str(c.get("request_id") or "") for c in p.get("credits") or []],
+                                    "gate": out[:300]})
         elif res.returncode == 0 and mode != "apply" and out.startswith(("VALID ", "DRY-RUN ")):
             report.validated += 1
         elif res.returncode == 0 and out.startswith("POSTED") and reminder:
