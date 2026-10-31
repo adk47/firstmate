@@ -57,22 +57,14 @@ from datetime import datetime, timezone
 from typing import Any
 
 from . import proof_parts, verify_ledger, verify_notify
-from .uvn_status import Query, accounts_of, trino
+from .uvn_status import Query, accounts_of, gmail_held, trino
 
 CAMPAIGN = verify_ledger.CLAIM_CAMPAIGN
 BANDS = ("B", "C")
 LIST_MAX_AGE_H = 30
-# Fable p1 [key=claims-scoped-pof] (10-31 07:14Z) + r5 co-sign bound (07:20Z): while ONLY the cs-gmail part is
-# unusable, the claim notes run on fresh core + cs-intercom and hold every claimant the stale part could vouch for. The
-# LAST GOOD Gmail scan (the cs-gmail part and its support@ contact snapshot) must be <= 24 h old; past that EVERY
-# claimant is held as stale_source:cs-gmail (listed in the outcomes), because a list days old is not "fresh".
-SCOPED_GMAIL_MAX_AGE_H = 24.0
-
-
-class AllUsers(frozenset):
-    """Every user is held (the last good Gmail scan is too old to vouch for anyone)."""
-    def __contains__(self, item: object) -> bool:
-        return True
+# Fable p1 [key=claims-scoped-pof] (10-31 07:14Z): while ONLY the cs-gmail part is unusable, the claim notes run on fresh
+# core + cs-intercom and hold every claimant cs-gmail DID vouch for in the last good scan (the frozen did-vouch set,
+# [key=gmail-held-fallback] (3)); each held row waits on gmail with a due time (uvn_status.gmail_held: one row shape).
 STALE_GMAIL_REASON = "stale_source:cs-gmail"
 PROOF_STORE = os.environ.get("COMM_STATE_PROOF_STORE", "/var/lib/hydra-credit-verify/proof.sqlite")
 DAILY_CHECK_MAX_AGE_H = 30
@@ -239,7 +231,7 @@ def claim_holds(path: str | None = None, *, now: datetime | None = None, proof_s
     rule's 14), anyone with a proof_intake row filed from email, anyone with a ledger note referencing a support@
     filing, anyone with a gmail-sourced proof entry in the export itself (400-day scan). Anything else unusable (core, cs-intercom, another flagged part, a half-written export, a cs-gmail part or
     snapshot that is absent or malformed) raises ProofFileError: refuse all. [key=gmail-held-fallback] (3): the hold is the
-    did-vouch set FROZEN on the last good scan, whatever its age - never every claimant (the old 24 h AllUsers bound)."""
+    did-vouch set FROZEN on the last good scan, whatever its age - never every claimant."""
     now = now or datetime.now(timezone.utc)
     try:
         return ClaimHolds(frozenset(str(u) for u in verify_notify.load_proof_on_file(path, now=now).support_contacts))
@@ -281,7 +273,7 @@ def claim_holds(path: str | None = None, *, now: datetime | None = None, proof_s
         proof_parts.check_entries(doc)
     except proof_parts.PartsError:
         raise first from None
-    # Fable FINAL [key=gmail-held-fallback] (3) (r5 580, 10-31 12:1xZ; supersedes the 24 h AllUsers bound): the did-vouch
+    # Fable FINAL [key=gmail-held-fallback] (3) (r5 580, 10-31 12:1xZ): the did-vouch
     # set is FROZEN on the last good scan - its support@ contact snapshot (whatever its age: a dated, well-formed record
     # of who wrote to support@ in the 90 days before it), email proof_intake rows, ledger support@ refs and gmail export
     # entries. Those users are held; everyone with no support@ trace as of that scan is admitted on fresh core +
@@ -298,10 +290,12 @@ def claim_holds(path: str | None = None, *, now: datetime | None = None, proof_s
     return ClaimHolds(frozenset(held), scoped=True)
 
 
-def _support_held(report: ClaimReport, uid: int, scoped: bool) -> None:
+def _support_held(report: ClaimReport, uid: int, scoped: bool, paid: bool = False) -> None:
     if scoped:
         report.stale_source_hold += 1
-        report.outcomes.append({"user": str(uid), "result": "held", "reason": STALE_GMAIL_REASON})
+        # [key=gmail-held-fallback] (2) on the claim side (c2's follow-up to #1579): the SAME row the asks write -
+        # waiting_on third_party:gmail, due_at, paid - one builder, uvn_status.gmail_held
+        report.outcomes.append(gmail_held(uid, paid))
     else:
         report.support_hold += 1
 
@@ -365,7 +359,7 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
             report.not_pending += 1
             continue
         if str(uid) in support_contacts:
-            _support_held(report, uid, scoped)
+            _support_held(report, uid, scoped, bool(c.get("paid")))
             continue
         acct = accts.get(uid) or {}
         if not acct.get("email"):
@@ -456,7 +450,7 @@ def run_status(*, list_path: str, segment: str, mode: str = "dry-run", max_users
             report.not_pending += 1
             continue
         if str(uid) in support_contacts:
-            _support_held(report, uid, scoped)
+            _support_held(report, uid, scoped, bool(c.get("paid")))
             continue
         acct = accts.get(uid) or {}
         if not acct.get("email"):
@@ -567,7 +561,7 @@ def _reminders(report: ClaimReport, by_id: dict[int, dict[str, Any]], *, db: Any
             report.no_profile_id += 1         # held, never sent without the profile id
             continue
         if str(c["user_id"]) in support_contacts:
-            _support_held(report, int(c["user_id"]), scoped)
+            _support_held(report, int(c["user_id"]), scoped, bool(c.get("paid")))
             continue
         if len(payloads) >= budget:
             report.over_daily_max += 1
