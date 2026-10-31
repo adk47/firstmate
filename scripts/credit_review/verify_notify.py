@@ -660,8 +660,8 @@ def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
         fd, path = tempfile.mkstemp(prefix="verify-note-", suffix=".json")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump({"user": p["user"], "credits": p["credits"], **({"claim": p["claim"]} if "claim" in p else {})},
-                          fh, ensure_ascii=False)
+                json.dump({"user": p["user"], "credits": p["credits"],
+                           **{k: p[k] for k in ("claim", "need") if k in p}}, fh, ensure_ascii=False)
             argv = [wrapper, "send", "--credits-file", path, "--approved-by", CAPTAIN_UID]
             argv += (extra or []) + (p.get("extra") or [])
             if mode != "apply":

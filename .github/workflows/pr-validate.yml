@@ -1986,6 +1986,10 @@ jobs:
           python3 scripts/tests/test_verify_ledger_owing_proof.py
           # the S1 credit-hold-status audience (credit_review/owing_proof.py; the campaign stays send-locked).
           python3 scripts/tests/test_owing_proof.py
+          # proof-need-ask (card L11c; send-locked): ledger rules like gap-ask.
+          python3 scripts/tests/test_verify_ledger_proof_need.py
+          # the L11c audience + sender path (credit_review/need_asks.py; the gate owns copy, lock and guards).
+          python3 scripts/tests/test_need_asks.py
           for f in scripts/paid-status/*.py; do python3 -m py_compile "$f"; done
           # The stage-2 release from the proof-on-file hold (credit_review/stage2_verdicts.py):
           # uvn-status for no_document, gap-ask for need_more, the gap-ask ledger rules. Stdlib only.

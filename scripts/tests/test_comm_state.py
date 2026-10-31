@@ -46,8 +46,8 @@ class CommStateTest(unittest.TestCase):
         p.commit(); p.close()
         cs.DV_STORE = str(d / "dv.sqlite")
         v = sqlite3.connect(cs.DV_STORE)
-        # the production columns this module reads (id, at, user_id, request_id, outcome)
-        v.execute("CREATE TABLE dv_outcomes (id INTEGER PRIMARY KEY, at TEXT, user_id INTEGER, request_id TEXT, outcome TEXT)")
+        v.execute("CREATE TABLE dv_outcomes (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, request_id TEXT, "
+                  "proof_id TEXT, need TEXT, outcome TEXT, at TEXT DEFAULT '2026-10-20T00:00:00Z')")
         v.commit(); v.close()
         cs.PROOF_ON_FILE = str(d / "pof.json")
         Path(cs.PROOF_ON_FILE).write_text(json.dumps({"entries": []}))
@@ -349,7 +349,7 @@ class ThreadAndFraudRulesTest(CommStateTest):
         self.conv("7", [{"author": {"type": "user"}, "body": "doc", "created_at": self.NOW - 3 * 86400}])
         self.assertFalse(self.r1("7")["hold"])
         self.ic.convs["7"]["state"] = "closed"
-        self.assertIn("R7_thread_resolved", self.r1("7")["reasons"])
+        self.assertIn("R7_thread_closed", self.r1("7")["reasons"])            # R1: a closed thread gets nothing
         self.conv("8", [{"author": {"type": "user"}, "body": "thanks, all sorted now", "created_at": self.NOW - 3 * 86400}])
         self.assertIn("R7_thread_resolved", self.r1("8")["reasons"])
 
@@ -745,6 +745,32 @@ class OnTopicTest(unittest.TestCase):
             c["ticket"] = {"ticket_type": tt}
             self.assertEqual(cs.on_topic(c), want, tt)
 
+
+    def test_claim_and_proof_of_need_a_credit_context_and_billing_vetoes_a_bare_credit(self):
+        # QA #1418 (b1 16:00Z)
+        for t in ("Refund claim for a credit card charge", "I was charged for credits", "Claim for my payment",
+                  "proof of purchase", "Your subscription credits"):
+            self.assertFalse(cs.on_topic(self.conv(t)), t)
+        for t in ("Claim my artist profile", "proof of my role", "about my credits", "credit request for my song"):
+            self.assertTrue(cs.on_topic(self.conv(t)), t)
+
+    def test_merge_needs_a_profile_context_and_billing_vetoes_strong_terms(self):
+        # QA #1418 (07:06Z, reproduced): bare 'merge' made a billing thread on-topic
+        for t in ("Please merge my invoices", "merge the two payments", "My song credits - and I need a refund",
+                  "merge my accounts and refund the charge"):
+            self.assertFalse(cs.on_topic(self.conv(t)), t)
+        for t in ("Can you merge my accounts?", "merge these two artist pages", "my profiles merged wrong",
+                  "duplicate profile", "Merge my two profiles", "merging duplicates"):
+            self.assertTrue(cs.on_topic(self.conv(t)), t)
+
+    def test_the_gate_carries_the_same_patterns(self):
+        import re as _re
+        gate = (Path(__file__).resolve().parents[1] / "intercom-verify-request.sh").read_text()
+        strong = _re.search(r"^TOPIC_STRONG='(.*)'$", gate, _re.M).group(1).replace("\\\\", "\\")
+        billing = _re.search(r"^TOPIC_BILLING='(.*)'$", gate, _re.M).group(1).replace("\\\\", "\\")
+        self.assertEqual(strong, cs.TOPIC_STRONG_RE.pattern)
+        self.assertEqual(billing, cs.TOPIC_BILLING_RE.pattern)
+
     def test_billing_thread_is_never_reply_due(self):
         ic = FakeIntercom()
         ic.convs["5"] = {"id": "5", "title": "Your payment is under review", "state": "open",
@@ -887,6 +913,317 @@ class ApprovalPathOwesNothingTest(unittest.TestCase):
                      approved_by="U", approval_ref="r", user_id=str(UID))
         vl.finalize(db, message_row=c["message_row"], status="sent", message_id="1"); db.close()
         self.assertEqual(cs.owes_proof(UID, self.q), ["owes:open_ask", "owes:uvn"])
+
+class NeedAskRulesTest(CommStateTest):
+    """L11c (proof-need-ask), p1 ruling 096: only at 'checked' for the named document; anything newer holds."""
+    SHA = "a" * 64
+    DOC_AT = (datetime.now(timezone.utc) - timedelta(days=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    DOC_EPOCH = datetime.fromisoformat(DOC_AT.replace("Z", "+00:00")).timestamp()
+
+    def checked(self, sha=None, need="readable_document", outcome="unverifiable", rid="r1", at=None):
+        db = sqlite3.connect(cs.DV_STORE)
+        db.execute("INSERT INTO dv_outcomes (user_id, request_id, proof_id, need, outcome) VALUES (?,?,?,?,?)",
+                   (UID, rid, sha or self.SHA, need, outcome))
+        db.commit(); db.close()
+        db = sqlite3.connect(cs.PROOF_STORE)
+        # one intake per arrived file (a dv row per request does not mean another upload)
+        if not db.execute("SELECT 1 FROM proof_intake WHERE user_id=? AND file_sha256=?", (UID, sha or self.SHA)).fetchone():
+            db.execute("INSERT INTO proof_intake VALUES (?,?,?)", (UID, sha or self.SHA, at or self.DOC_AT))
+        db.commit(); db.close()
+
+    def ask(self, **kw):
+        self.core = self.core or [["r1", "user_verification_needed", "", ""]]
+        doc_sha, doc_at = kw.pop("doc_sha", self.SHA), kw.pop("doc_at", self.DOC_AT)
+        if "doc_intakes" not in kw:
+            # the builder's binding: each named document -> its FIRST arrival's intake (the one that was read)
+            db = sqlite3.connect(cs.PROOF_STORE)
+            kw["doc_intakes"] = {}
+            for sha in doc_sha.split(","):
+                r = db.execute("SELECT 'rowid:' || rowid FROM proof_intake WHERE user_id=? AND lower(file_sha256)=? "
+                               "ORDER BY received_at, rowid LIMIT 1", (UID, sha.lower())).fetchone()
+                if r:
+                    kw["doc_intakes"][sha.lower()] = r[0]
+            db.close()
+        return self.run_("proof-need-ask", "proofneed", doc_sha=doc_sha, doc_at=doc_at,
+                         need_code=kw.pop("need_code", "readable_document"), **kw)
+
+    def run_(self, campaign="credit-hold-status", copy="credithold", keys=("r1",), conversation="", fraud=(), **kw):
+        return cs.check(campaign, copy, UID, list(keys), "c1", conversation=conversation,
+                        query=lambda sql: [list(r) for r in self.core] if "credit_requests" in sql else [],
+                        ic=self.ic, fraud=lambda uid, q: list(fraud), **kw)
+
+    def test_checked_document_with_a_need_sends_and_a_document_on_file_never_holds_it(self):
+        self.checked()
+        res = self.ask()
+        self.assertEqual((res["hold"], res["state"]), (False, "checked"), res)
+
+    def test_not_checked_holds(self):
+        res = self.ask()                                   # no dv_outcomes row at all
+        self.assertTrue(any(r.startswith("not_checked") for r in res["reasons"]))
+        self.setUp(); self.checked(outcome="verified")     # verified, not a need
+        self.assertTrue(self.ask()["hold"])
+        self.setUp(); self.checked(need="")                # no need code
+        self.assertTrue(self.ask()["hold"])
+        self.setUp(); self.checked(rid="r2")               # another request
+        self.assertTrue(self.ask()["hold"])
+        # [key=l11c-plural]: one message names several requests; EVERY one needs its own need row
+        self.setUp(); self.checked()
+        self.core = [["r1", "user_verification_needed", "", ""], ["r2", "user_verification_needed", "", ""]]
+        res = self.ask(keys=("r1", "r2"))
+        self.assertTrue(res["hold"])
+        self.assertIn("not_checked:r2", res["reasons"])
+        self.checked(sha="b" * 64, rid="r2")              # r2 checked from another document
+        self.assertIn("not_checked:r2", self.ask(keys=("r1", "r2"))["reasons"])   # ... that the message does not name
+        self.assertFalse(self.ask(keys=("r1", "r2"), doc_sha=f"{self.SHA},{'b' * 64}",
+                                  doc_map={"r1": self.SHA, "r2": "b" * 64})["hold"])   # both named, each its own: it goes
+
+    def test_qa_round4_repro_named_document_rechecked_while_an_older_document_keeps_the_need(self):
+        # QA #1418 round 4, exact case: the NAMED document is re-checked to verified; an OLDER document of the same
+        # request still carries the same need -> the ask about the named document must hold
+        old = "e" * 64
+        older = (datetime.now(timezone.utc) - timedelta(days=12)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.checked(sha=old, at=older)                             # older document, same need, still unverifiable
+        self.checked()                                              # the named document
+        self.assertFalse(self.ask()["hold"])
+        db = sqlite3.connect(cs.DV_STORE)
+        db.execute("INSERT INTO dv_outcomes (user_id, request_id, proof_id, need, outcome, at) VALUES (?,?,?,?,?,?)",
+                   (UID, "r1", self.SHA, "", "verified", "2026-10-28T00:00:00Z"))
+        db.commit(); db.close()
+        res = self.ask()
+        self.assertTrue(res["hold"])
+        self.assertIn("not_checked:r1", res["reasons"])
+
+    def test_qa_1418_every_named_document_is_rechecked_not_only_the_newest(self):
+        # QA #1418 (23:39Z): r1 has two same-day documents, A (older) and B (newest; doc_map r1 -> B). Both unverifiable:
+        # the ask goes. A is then re-checked to verified: "the documents ... can't be checked" is false -> hold.
+        a = "c" * 64
+        earlier = (datetime.strptime(self.DOC_AT, "%Y-%m-%dT%H:%M:%SZ") - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.checked(sha=a, at=earlier)
+        self.checked()
+        both = {"doc_sha": f"{a},{self.SHA}", "doc_map": {"r1": self.SHA}}
+        self.assertFalse(self.ask(**both)["hold"], self.ask(**both))
+        db = sqlite3.connect(cs.DV_STORE)
+        db.execute("INSERT INTO dv_outcomes (user_id, request_id, proof_id, need, outcome, at) VALUES (?,?,?,?,?,?)",
+                   (UID, "r1", a, "", "verified", "2026-10-28T00:00:00Z"))
+        db.commit(); db.close()
+        res = self.ask(**both)
+        self.assertTrue(res["hold"], res)
+        self.assertIn("named_document_rechecked:cccccccc", json.dumps(res["reasons"]))
+
+    def test_r5_repro_the_email_path_keeps_the_filing_part_evidence(self):
+        # r5 / QA #1418 (L1990): R9 (or a closed thread) moves delivery to email and no thread is judged; the filing
+        # part must still be recognised, else the document's own part reads as newer and the email path never sends
+        self.checked()
+        self.ic.convs["9"] = {"id": "9", "source": {"author": {"type": "user"}, "attachments": [{"name": "d.jpg"}],
+                                                    "created_at": self.DOC_EPOCH}, "conversation_parts": {"conversation_parts": []}}
+        self.assertIn("newer_after_document", json.dumps(self.ask(conversation="")["reasons"]))      # the bug
+        self.assertFalse(self.ask(conversation="", filing_conversation="9")["hold"])                 # the fix
+        # ... and a real later attachment still holds on the email path
+        self.ic.convs["9"]["conversation_parts"]["conversation_parts"].append(
+            {"author": {"type": "user"}, "attachments": [{"name": "y.pdf"}], "created_at": self.DOC_EPOCH + 60})
+        self.assertIn("newer_after_document", json.dumps(self.ask(conversation="", filing_conversation="9")["reasons"]))
+
+    def test_r5_repro_each_request_is_judged_on_its_own_document(self):
+        # r5 / QA #1418 (L350): r1's own document is A, r2's is B; B carries the need for r1 too - that must not
+        # satisfy r1 (A was re-checked and no longer has it)
+        b = "b" * 64
+        self.checked(); self.checked(sha=b, rid="r2"); self.checked(sha=b, rid="r1")
+        self.core = [["r1", "user_verification_needed", "", ""], ["r2", "user_verification_needed", "", ""]]
+        both = f"{self.SHA},{b}"
+        own = {"r1": self.SHA, "r2": b}
+        self.assertFalse(self.ask(keys=("r1", "r2"), doc_sha=both, doc_map=own)["hold"])
+        db = sqlite3.connect(cs.DV_STORE)                      # r1's own document A re-checked: verified
+        db.execute("INSERT INTO dv_outcomes (user_id, request_id, proof_id, need, outcome, at) VALUES (?,?,?,?,?,?)",
+                   (UID, "r1", self.SHA, "", "verified", "2026-10-28T00:00:00Z"))
+        db.commit(); db.close()
+        res = self.ask(keys=("r1", "r2"), doc_sha=both, doc_map=own)
+        self.assertIn("not_checked:r1", res["reasons"])        # B's row does not stand in for r1
+        self.assertIn("not_checked:r2", self.ask(keys=("r1", "r2"), doc_sha=both, doc_map={"r1": b})["reasons"])  # unmapped
+        with self.assertRaises(cs.Unknown):                    # several named documents, no map: cannot judge
+            self.ask(keys=("r1", "r2"), doc_sha=both)
+
+    def test_qa_round4_repro_a_second_attachment_in_the_same_second_holds(self):
+        # QA #1418 round 4, exact case: a correction attachment in the SAME second as the filing part, same thread.
+        # No stable part id is stored (provenance = cache path / attachment index), so two such parts = ambiguous = hold
+        self.checked()
+        filing = {"author": {"type": "user"}, "attachments": [{"name": "d.jpg"}], "created_at": self.DOC_EPOCH}
+        self.ic.convs["9"] = {"id": "9", "source": filing, "conversation_parts": {"conversation_parts": [
+            {"author": {"type": "user"}, "attachments": [{"name": "fix.pdf"}], "created_at": self.DOC_EPOCH}]}}
+        self.assertIn("newer_after_document", json.dumps(self.ask(conversation="9")["reasons"]))
+        self.setUp(); self.checked()
+        self.ic.convs["9"] = {"id": "9", "source": filing, "conversation_parts": {"conversation_parts": []}}
+        self.assertFalse(self.ask(conversation="9")["hold"])           # the filing part alone is not news
+
+    def test_the_latest_dv_row_per_request_decides(self):
+        # the unit is (request, document): r5 (re-checked document) + p1 156 / b1 153 (other documents do not cancel)
+        self.checked()
+        self.assertFalse(self.ask()["hold"])
+        db = sqlite3.connect(cs.DV_STORE)
+        db.execute("INSERT INTO dv_outcomes (user_id, request_id, proof_id, need, outcome, at) VALUES (?,?,?,?,?,?)",
+                   (UID, "r1", "c" * 64, "", "verified", "2026-10-28T00:00:00Z"))
+        db.commit(); db.close()
+        res = self.ask()
+        self.assertFalse(res["hold"], res)        # another document's verified read does not cancel this one (p1 156)
+        # the SAME document re-checked since the cut (its latest row verified): no longer askable (r5)
+        db = sqlite3.connect(cs.DV_STORE)
+        db.execute("INSERT INTO dv_outcomes (user_id, request_id, proof_id, need, outcome, at) VALUES (?,?,?,?,?,?)",
+                   (UID, "r1", self.SHA, "", "verified", "2026-10-28T00:00:00Z"))
+        db.commit(); db.close()
+        res = self.ask()
+        self.assertTrue(res["hold"])
+        self.assertIn("not_checked:r1", res["reasons"])
+
+    def test_anything_newer_than_the_document_holds(self):
+        self.checked()
+        later = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        sqlite3.connect(cs.PROOF_STORE).executescript(f"INSERT INTO proof_intake VALUES ({UID}, '{'c' * 64}', '{later}');")
+        self.assertIn("newer_document", json.dumps(self.ask()["reasons"]))
+        # the SAME file arriving again later (another intake of it) also holds: arrival, not content (QA #1418)
+        self.setUp(); self.checked()
+        sqlite3.connect(cs.PROOF_STORE).executescript(f"INSERT INTO proof_intake VALUES ({UID}, '{self.SHA}', '{later}');")
+        self.assertIn("newer_document", json.dumps(self.ask()["reasons"]))
+        # an Intercom customer message, or attachment, after the document
+        for part in ({"author": {"type": "user"}, "body": "here is the split sheet", "created_at": self.DOC_EPOCH + 3600},
+                     {"author": {"type": "user"}, "body": "", "attachments": [{"name": "x.pdf"}], "created_at": self.DOC_EPOCH + 3600}):
+            self.setUp(); self.checked()
+            self.ic.convs["9"] = {"id": "9", "source": {"author": {"type": "user"}, "created_at": self.DOC_EPOCH},
+                                  "conversation_parts": {"conversation_parts": [part]}}
+            self.assertIn("newer_after_document", json.dumps(self.ask()["reasons"]))
+        # QA #1418 (no slack window): a correction or another file 1-5 s after the document holds
+        for dt in (1, 3, 5):
+            for part in ({"author": {"type": "user"}, "body": "sorry, wrong file", "created_at": self.DOC_EPOCH + dt},
+                         {"author": {"type": "user"}, "body": "", "attachments": [{"name": "y.pdf"}],
+                          "created_at": self.DOC_EPOCH + dt}):
+                self.setUp(); self.checked()
+                self.ic.convs["9"] = {"id": "9", "source": {"author": {"type": "user"}, "attachments": [{"name": "d.jpg"}],
+                                                            "created_at": self.DOC_EPOCH},
+                                      "conversation_parts": {"conversation_parts": [part]}}
+                self.assertTrue(self.ask(conversation="9")["hold"], (dt, part))
+        # QA #1418 06:34Z: a TEXT correction in the SAME second as the filing attachment (its own part, after or before
+        # it by part id) holds the ask - same-second text counts (fail closed)
+        for pid in ("2", "0"):
+            self.setUp(); self.checked()
+            self.ic.convs["9"] = {"id": "9", "source": {"id": "1", "author": {"type": "user"}, "attachments": [{"name": "d.jpg"}],
+                                                        "created_at": self.DOC_EPOCH},
+                                  "conversation_parts": {"conversation_parts": [
+                                      {"id": pid, "part_type": "comment", "author": {"type": "user"}, "body": "sorry, wrong file",
+                                       "created_at": self.DOC_EPOCH}]}}
+            res = self.ask(conversation="9")
+            self.assertTrue(res["hold"], (pid, res))
+            self.assertIn("intercom_reply_after_ask", json.dumps(res["reasons"]))
+        # another attachment in ANOTHER conversation at the same second is not the filing event: holds
+        self.setUp(); self.checked()
+        self.ic.convs["8"] = {"id": "8", "source": {"author": {"type": "user"}, "attachments": [{"name": "z.pdf"}],
+                                                    "created_at": self.DOC_EPOCH}, "conversation_parts": {"conversation_parts": []}}
+        self.ic.convs["9"] = {"id": "9", "source": {"author": {"type": "user"}, "attachments": [{"name": "d.jpg"}],
+                                                    "created_at": self.DOC_EPOCH}, "conversation_parts": {"conversation_parts": []}}
+        self.assertTrue(self.ask(conversation="9")["hold"])
+        # the document's own part (its filing conversation, its second) and anything before it do not
+        self.setUp(); self.checked()
+        self.ic.convs["9"] = {"id": "9", "source": {"author": {"type": "user"}, "attachments": [{"name": "d.jpg"}],
+                                                    "created_at": self.DOC_EPOCH},
+                              "conversation_parts": {"conversation_parts": [
+                                  {"author": {"type": "user"}, "body": "earlier", "created_at": self.DOC_EPOCH - 99}]}}
+        self.assertFalse(self.ask(conversation="9")["hold"])
+
+    def test_doc_at_must_be_an_arrival_of_the_named_document(self):
+        # QA #1418: day-1 checked document, day-2 re-upload, payload claims day 3: the day-2 upload must not look older
+        self.checked()
+        day2 = (datetime.now(timezone.utc) - timedelta(days=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        day3 = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        sqlite3.connect(cs.PROOF_STORE).executescript(f"INSERT INTO proof_intake VALUES ({UID}, '{self.SHA}', '{day2}');")
+        res = self.ask(doc_at=day3)
+        self.assertTrue(res["hold"], res)
+        self.assertIn("doc_at_not_the_arrival_of_the_named_intake", json.dumps(res["reasons"]))
+        # the true arrival of the named document passes this check
+        self.setUp(); self.checked()
+        self.assertFalse(self.ask(doc_at=self.DOC_AT)["hold"])
+
+    def test_qa_repro_a_same_sha_reupload_never_borrows_the_earlier_intakes_read(self):
+        # QA #1418 / b1 272, exact case, prod-shaped stores (intake ids on both sides): the 10-18 intake was read
+        # (unverifiable, readable_document); the identical file is re-uploaded 10-26 and never read
+        for path, table in ((cs.PROOF_STORE, "proof_intake"), (cs.DV_STORE, "dv_outcomes")):
+            db = sqlite3.connect(path); db.execute(f"ALTER TABLE {table} ADD COLUMN intake_id TEXT"); db.commit(); db.close()
+        d18, d26 = "2026-10-18T09:00:00Z", "2026-10-26T09:00:00Z"
+        db = sqlite3.connect(cs.PROOF_STORE)
+        db.execute("INSERT INTO proof_intake (user_id, file_sha256, received_at, intake_id) VALUES (?,?,?,?)", (UID, self.SHA, d18, "42:i18"))
+        db.execute("INSERT INTO proof_intake (user_id, file_sha256, received_at, intake_id) VALUES (?,?,?,?)", (UID, self.SHA, d26, "42:i26"))
+        db.commit(); db.close()
+        db = sqlite3.connect(cs.DV_STORE)
+        db.execute("INSERT INTO dv_outcomes (user_id, request_id, proof_id, need, outcome, intake_id) VALUES (?,?,?,?,?,?)",
+                   (UID, "r1", self.SHA, "readable_document", "unverifiable", "42:i18"))
+        db.commit(); db.close()
+        # the payload names the 10-26 upload: that intake was never read -> not checked
+        res = self.ask(doc_at=d26, doc_intakes={self.SHA: "42:i26"})
+        self.assertTrue(res["hold"], res)
+        self.assertIn("not_checked:r1", res["reasons"])
+        # 10-26 arrival time but the 10-18 intake named: the time is not that intake's arrival -> holds
+        res = self.ask(doc_at=d26, doc_intakes={self.SHA: "42:i18"})
+        self.assertIn("doc_at_not_the_arrival_of_the_named_intake", json.dumps(res["reasons"]))
+        # the 10-18 intake, honestly named: checked, but the 10-26 re-upload is newer -> the ask still waits
+        res = self.ask(doc_at=d18, doc_intakes={self.SHA: "42:i18"})
+        self.assertNotIn("not_checked:r1", res["reasons"])
+        self.assertIn("newer_document:proof_intake", json.dumps(res["reasons"]))
+        # no named intake at all: unbound, never checked (fail closed)
+        self.assertIn("not_checked:r1", self.ask(doc_at=d18, doc_intakes={})["reasons"])
+
+    def test_qa1513_a_different_intake_in_the_same_second_holds(self):
+        # QA #1513: whole-second times cannot order two intakes; another intake in the SAME second as the named
+        # document (e.g. an email-filed document then a second file at once) is 'anything newer' - the ask waits
+        self.checked()
+        self.assertFalse(self.ask()["hold"])
+        sqlite3.connect(cs.PROOF_STORE).executescript(f"INSERT INTO proof_intake VALUES ({UID}, '{'d' * 64}', '{self.DOC_AT}');")
+        res = self.ask()
+        self.assertIn("newer_document:proof_intake", json.dumps(res["reasons"]))
+        # the shared predicate itself: a named intake in the same second is not newer; another one is; later always is
+        self.assertFalse(cs.newer_intake("2026-10-18T09:30:00Z", [("2026-10-18T09:30:00Z", "i1")], {"i1"}))
+        self.assertTrue(cs.newer_intake("2026-10-18T09:30:00Z", [("2026-10-18T09:30:00Z", "i2")], {"i1"}))
+        self.assertTrue(cs.newer_intake("2026-10-18T09:30:00Z", [("2026-10-18T09:30:01Z", "i1")], {"i1"}))
+        self.assertFalse(cs.newer_intake("2026-10-18T09:30:00Z", ["2026-10-18T09:30:00Z"]))      # legacy bare time
+
+    def test_the_need_must_match_the_documents_latest_row(self):
+        # QA #1418: the latest row of the document must carry the need THIS message is about
+        self.checked(need="readable_document")
+        self.assertFalse(self.ask(need_code="readable_document")["hold"])
+        self.assertIn("not_checked:r1", self.ask(need_code="counterparty_signed_or_registered")["reasons"])
+        db = sqlite3.connect(cs.DV_STORE)     # the same document re-checked: its need changed
+        db.execute("INSERT INTO dv_outcomes (user_id, request_id, proof_id, need, outcome, at) VALUES (?,?,?,?,?,?)",
+                   (UID, "r1", self.SHA, "counterparty_signed_or_registered", "unverifiable", "2026-10-28T00:00:00Z"))
+        db.commit(); db.close()
+        self.assertIn("not_checked:r1", self.ask(need_code="readable_document")["reasons"])
+        self.assertFalse(self.ask(need_code="counterparty_signed_or_registered")["hold"])
+        with self.assertRaises(cs.Unknown):
+            self.ask(need_code="")
+
+    def test_decided_told_seven_days_and_the_filing_thread_rules_hold(self):
+        self.checked(); self.core = [["r1", "rejected", "", ""]]
+        self.assertIn("decided_or_told", self.ask()["reasons"])
+        self.setUp(); self.checked()
+        self.note("status-doc-received", at=(datetime.now(timezone.utc) - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        self.assertTrue(any(r.startswith("messaged_7d") for r in self.ask()["reasons"]))   # receipt 3 days ago
+        self.setUp(); self.checked()
+        self.note("status-doc-received", at=(datetime.now(timezone.utc) - timedelta(days=8)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        self.assertFalse(self.ask()["hold"])               # the >= 7-day 'checked' follow-up after a receipt
+        self.setUp(); self.checked()
+        now = datetime.now(timezone.utc).timestamp()
+        self.ic.convs["7"] = {"id": "7", "state": "closed", "source": {"author": {"type": "user"}, "created_at": now - 86400},
+                              "conversation_parts": {"conversation_parts": []}}
+        # l1 [key=l11c-asks]: a CLOSED filing thread does not hold the per-need ask (the gate sends it by email)
+        res = self.ask(conversation="7")
+        self.assertFalse(res["hold"], res)
+        # ... but a thread where the matter was closed as "sorted" still holds it
+        self.ic.convs["7"]["conversation_parts"]["conversation_parts"] = [
+            {"author": {"type": "user"}, "body": "doc", "created_at": now - 3600},
+            {"author": {"type": "admin"}, "part_type": "comment", "body": "Great news, it's all sorted now!", "created_at": now - 1800}]
+        self.ic.convs["7"]["state"] = "open"
+        self.assertIn("R7_thread_resolved", self.ask(conversation="7")["reasons"])
+        self.ic.convs["7"]["conversation_parts"]["conversation_parts"] = []
+        self.ic.convs["7"]["source"]["created_at"] = now - 40 * 86400
+        self.assertIn("R6_stale_thread", self.ask(conversation="7")["reasons"])
+
+    def test_no_document_named_is_unknown(self):
+        with self.assertRaises(cs.Unknown):
+            self.ask(doc_sha="")
 
 
 class ProofRequiredOwesTest(unittest.TestCase):

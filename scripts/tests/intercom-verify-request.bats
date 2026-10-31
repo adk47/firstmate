@@ -162,6 +162,13 @@ case "$method $path" in
     printf '%s' "$payload" > "$CURL_STUB_REPLY"
     if [ -n "${STUB_REPLY_RESPONSE:-}" ]; then printf '%s' "$STUB_REPLY_RESPONSE"; exit 0; fi
     printf '{"type":"conversation","id":"777","conversation_parts":{"conversation_parts":[{"id":"87000","part_type":"comment","author":{"type":"user","id":"6650aa01"}},{"id":"88001","part_type":"comment","author":{"type":"admin","id":"5763097"}}]}}' ;;
+  "GET /conversations/888?display_as=plaintext")
+    # a second conversation of the user (R9: the R1 receipt's other credit thread); not found unless a test says so
+    if [ -n "${STUB_CONVERSATION_888:-}" ]; then printf '%s' "$STUB_CONVERSATION_888"; exit 0; fi
+    printf '{"type":"error.list","errors":[{"code":"not_found"}]}' ;;
+  "POST /conversations/888/reply")
+    printf '%s' "$payload" > "$CURL_STUB_REPLY"
+    printf '{"type":"conversation","id":"888","conversation_parts":{"conversation_parts":[{"id":"88001","part_type":"comment","author":{"type":"admin","id":"5763097"}}]}}' ;;
   *) printf '{"type":"error.list","errors":[{"code":"not_found"}]}' ;;
 esac
 STUB
@@ -751,6 +758,7 @@ unlocked_gate() { # derived copy with the send locks flipped: $1 = retro | windo
     owing)    e=(-e 's/^readonly CREDIT_HOLD_STATUS_COPY_APPROVED=0$/readonly CREDIT_HOLD_STATUS_COPY_APPROVED=1/'
                  -e 's/^readonly CLAIM_PROOF_PENDING_COPY_APPROVED=0$/readonly CLAIM_PROOF_PENDING_COPY_APPROVED=1/'
                  -e 's/^readonly CLAIM_PROOF_ASK_COPY_APPROVED=0$/readonly CLAIM_PROOF_ASK_COPY_APPROVED=1/') ;;
+    need)     e=(-e 's/^readonly PROOF_NEED_ASK_COPY_APPROVED=0$/readonly PROOF_NEED_ASK_COPY_APPROVED=1/') ;;
     claims)   e=(-e 's/^readonly CLAIM_PROOF_ASK_COPY_APPROVED=0$/readonly CLAIM_PROOF_ASK_COPY_APPROVED=1/'
                  -e 's/^readonly CLAIM_STATUS_COPY_APPROVED=0$/readonly CLAIM_STATUS_COPY_APPROVED=1/') ;;
     both)     e=(-e 's/^readonly RETRO_COPY_APPROVED=0$/readonly RETRO_COPY_APPROVED=1/'
@@ -1024,7 +1032,7 @@ PY
 @test "unknown campaigns and kinds are refused" {
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
   run -1 send --campaign everything
-  [[ "$output" == *"--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status, gap-ask, merge-pending, credit-hold-status or claim-proof-pending"* ]]
+  [[ "$output" == *"--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status, gap-ask, merge-pending, credit-hold-status, claim-proof-pending or proof-need-ask"* ]]
   run -1 send --kind final-notice --parent-message-id 1
   [[ "$output" == *"--kind must be initial, reminder-14, reminder-25, after-rejection or reminder-7"* ]]
 }
@@ -1906,7 +1914,7 @@ GAP_PARA_2='. If you have a tracklist, split sheet, contract, or a DSP/label pag
 # ---- in-thread delivery (firstmate 063) ----------------------------------------------------
 
 thread() { # <contacts-json-array> [extra conversation fields]
-  printf '{"type":"conversation","id":"777","state":"closed","source":{"author":{"type":"user","id":"6650aa01"}},"contacts":{"type":"contact.list","contacts":%s}%s,"conversation_parts":{"conversation_parts":[]}}' "$1" "${2:-}"
+  printf '{"type":"conversation","id":"777","state":"closed","title":"about my credit","source":{"author":{"type":"user","id":"6650aa01"}},"contacts":{"type":"contact.list","contacts":%s}%s,"conversation_parts":{"conversation_parts":[]}}' "$1" "${2:-}"
 }
 
 @test "in-thread: a conversation that is not this user's own is refused and recorded; nothing is posted" {
@@ -1934,7 +1942,7 @@ thread() { # <contacts-json-array> [extra conversation fields]
   [ "$(replies)" -eq 0 ]
   [ "$(posts)" -eq 0 ]
   run -1 "$LOCKED" send --campaign retro-past --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
-  [[ "$output" == *"applies to uvn-status, withdrawal-confirm, the status notes, claim-status, email-changed, gap-ask, merge-pending, credit-hold-status and claim-proof-pending only"* ]]
+  [[ "$output" == *"applies to uvn-status, withdrawal-confirm, the status notes, claim-status, email-changed, gap-ask, merge-pending, credit-hold-status, claim-proof-pending and proof-need-ask only"* ]]
   run -1 "$LOCKED" send --campaign withdrawal-confirm --conversation abc --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
 }
 
@@ -1979,6 +1987,53 @@ thread() { # <contacts-json-array> [extra conversation fields]
   STUB_CONVERSATION="{\"type\":\"conversation\",\"id\":\"777\",\"source\":{\"id\":\"1\"},\"conversation_parts\":{\"conversation_parts\":[$before,{\"id\":\"89000\",\"part_type\":\"comment\",\"author\":{\"type\":\"user\",\"id\":\"6650aa01\"},\"created_at\":$now,\"attachments\":[{\"name\":\"split.pdf\"}]}]}}" \
     run -0 "$LOCKED" tag-proof --message-id 88001
   [[ "$output" == *"TAGGED credit-proof conversation=777 message=88001 attachments=1"* ]]
+}
+
+@test "R9: uvn-status never goes into an open thread that is not about credits (a refund thread); it goes by email (Fable 166)" {
+  now=$(date -u +%s)
+  open="{\"conversations\":[{\"id\":\"777\",\"state\":\"open\",\"updated_at\":$((now - 86400))}],\"total_count\":1}"
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  STUB_OPEN_CONVS="$open" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]' ',"title":"Your receipt from Muso.AI - refund?"')" \
+    run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"R9: conversation 777 is not about credits"* ]]
+  [[ "$output" == *"POSTED email message=1001 credits=1" ]]
+  [ "$(replies)" -eq 0 ]; [ "$(posts)" -eq 1 ]
+  # QA #1418 (b1): 'claim' outside a credit context + a billing word is off-topic too, in the GATE (jq) as in comm_state
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+  credits "$TEST_TMPDIR/c.json" Jane "u2:Mixing:Song B:Big Star"
+  STUB_OPEN_CONVS="$open" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]' ',"title":"Refund claim for a credit card charge"')" \
+    run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"R9: conversation 777 is not about credits"* ]]
+  [ "$(replies)" -eq 0 ]
+  # QA #1418 (07:06Z): bare 'merge' beside a billing word is off-topic in the GATE too (the exact reproduced sentence)
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+  credits "$TEST_TMPDIR/c.json" Jane "u3:Mixing:Song C:Big Star"
+  STUB_OPEN_CONVS="$open" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]' ',"title":"Please merge my invoices"')" \
+    run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"R9: conversation 777 is not about credits"* ]]
+  [ "$(replies)" -eq 0 ]
+  # ... and a billing word vetoes even a strong term (a refund thread that also mentions song credits)
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+  credits "$TEST_TMPDIR/c.json" Jane "u4:Mixing:Song D:Big Star"
+  STUB_OPEN_CONVS="$open" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]' ',"title":"My song credits - and I need a refund"')" \
+    run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"R9: conversation 777 is not about credits"* ]]
+  [ "$(replies)" -eq 0 ]
+  # QA #1418: a STRING ticket_type (a prod shape) never makes the gate's topic filter throw: read as the type name
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+  STUB_OPEN_CONVS="$open" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]' ',"title":"hello","ticket":{"ticket_type":"Credit verification"}')" \
+    run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" != *"is not about credits"* ]]
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+  STUB_OPEN_CONVS="$open" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]' ',"title":"hello","ticket":{"ticket_type":"Billing"}')" \
+    run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"R9: conversation 777 is not about credits"* ]]
+  [[ "$output" == *"POSTED email"* ]]
+  # and a profile claim thread stays on topic
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+  STUB_OPEN_CONVS="$open" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]' ',"title":"Claim my artist profile"')" \
+    run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" != *"is not about credits"* ]]
 }
 
 @test "uvn-status: a picked conversation that fails a check is dropped and the note goes by email, never refused" {
@@ -2839,18 +2894,18 @@ Caroline, Muso Support" ]
   [[ "$output" == *"G3"* ]]
   # the filing conversation's contact is someone else -> refused
   jq '.user.filing_conversation = "777"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/f.json"
-  STUB_CONTACT_GET="$OLD" STUB_CONVERSATION='{"type":"conversation","id":"777","source":{"author":{"type":"user"}},"contacts":{"contacts":[{"id":"7770bb02"}]}}' \
+  STUB_CONTACT_GET="$OLD" STUB_CONVERSATION='{"type":"conversation","id":"777","title":"about my credit","source":{"author":{"type":"user"}},"contacts":{"contacts":[{"id":"7770bb02"}]}}' \
     run "$GATE" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/f.json" --approved-by U7RP6HKUZ
   # another person's thread: never sent (refused, or the contact read does not verify; both claim nothing)
   [ "$status" -eq 1 ] || [ "$status" -eq 4 ]
   [ "$(posts)" -eq 0 ]; [ "$(replies)" -eq 0 ]
   # an explicit --conversation that is not the filing conversation is refused (QA #1460), nothing sent
   STUB_CONTACT_GET="$OLD" run -1 "$GATE" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/f.json" --approved-by U7RP6HKUZ --conversation 778
-  [[ "$output" == *"R1 goes only into the filing conversation (777); --conversation 778 is another thread"* ]]
+  [[ "$output" == *"goes only into the filing conversation (777); --conversation 778 is another thread"* ]]
   [ "$(posts)" -eq 0 ]; [ "$(replies)" -eq 0 ]
   # the filing thread is assigned to a person -> HELD (exit 3), never email instead, nothing claimed
   STUB_CONTACT_GET="$OLD" \
-    STUB_CONVERSATION='{"type":"conversation","id":"777","admin_assignee_id":"999","source":{"author":{"type":"user"}},"contacts":{"contacts":[{"id":"6650aa01"}]}}' \
+    STUB_CONVERSATION='{"type":"conversation","id":"777","title":"about my credit","admin_assignee_id":"999","source":{"author":{"type":"user"}},"contacts":{"contacts":[{"id":"6650aa01"}]}}' \
     run -3 "$GATE" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/f.json" --approved-by U7RP6HKUZ
   [[ "$output" == "HELD r1_filing_thread"* ]]
   [ "$(posts)" -eq 0 ]; [ "$(replies)" -eq 0 ]
@@ -2861,7 +2916,7 @@ Caroline, Muso Support" ]
   # the filer is the recipient -> it posts INTO the filing conversation 777 (with no open conversation to auto-pick,
   # the old path sent it by email)
   STUB_CONTACT_GET="$OLD" STUB_CONV_SEARCH='{"type":"conversation.list","conversations":[]}' \
-    STUB_CONVERSATION='{"type":"conversation","id":"777","source":{"author":{"type":"user"}},"contacts":{"contacts":[{"id":"6650aa01"}]}}' \
+    STUB_CONVERSATION='{"type":"conversation","id":"777","title":"about my credit","source":{"author":{"type":"user"}},"contacts":{"contacts":[{"id":"6650aa01"}]}}' \
     run -0 "$GATE" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/f.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED comment"* ]]
   [ "$(posts)" -eq 0 ]; [ "$(replies)" -eq 1 ]
@@ -2878,7 +2933,8 @@ Caroline, Muso Support" ]
     python3 -c "import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.execute('DROP TABLE IF EXISTS proof_intake'); d.execute('CREATE TABLE proof_intake (user_id INTEGER, conversation_id TEXT, candidate_request_ids_json TEXT, file_sha256 TEXT, received_at TEXT)'); d.execute('INSERT INTO proof_intake VALUES (42,?,?,?,?)', (sys.argv[2], sys.argv[3], 'a'*64, '2026-10-22T11:20:05Z')); d.commit()" \
       "$INTERCOM_VERIFY_TEST_PROOF_DB" "$1" "$2"
   }
-  ours='{"type":"conversation","id":"777","source":{"author":{"type":"admin","id":"5763097"},"body":"Hi Jane"},"contacts":{"contacts":[{"id":"6650aa01"}]},"conversation_parts":{"conversation_parts":[{"id":"5","part_type":"comment","author":{"type":"user"},"body":"here","attachments":[{"name":"split.pdf"}]}]}}'
+  # (our credit thread - #1418's R9 applies to filing threads too, so it carries its credit title)
+  ours='{"type":"conversation","id":"777","title":"Credit Verification","source":{"author":{"type":"admin","id":"5763097"},"body":"Hi Jane"},"contacts":{"contacts":[{"id":"6650aa01"}]},"conversation_parts":{"conversation_parts":[{"id":"5","part_type":"comment","author":{"type":"user"},"body":"here","attachments":[{"name":"split.pdf"}]}]}}'
   send_r1() { STUB_CONTACT_GET="$OLD" STUB_CONV_SEARCH='{"type":"conversation.list","conversations":[]}' STUB_CONVERSATION="$1" \
       run "$GATE" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/f.json" --approved-by U7RP6HKUZ; }
   # every named request filed in 777 + the customer's attachment part in it: posts INTO 777, though we opened it
@@ -3148,7 +3204,7 @@ mobile_only() { printf '{"type":"list","data":[{"id":"mob1","role":"user","email
   unlocked_gate merge
   export INTERCOM_VERIFY_TEST_NOW=1761000000
   MOB='{"type":"contact","id":"mob1","role":"user","created_at":1700000000}'
-  UCONV='{"type":"conversation","id":"777","source":{"author":{"type":"user","id":"mob1"}},"contacts":{"type":"contact.list","contacts":[{"type":"contact","id":"mob1"}]},"conversation_parts":{"conversation_parts":[]}}'
+  UCONV='{"type":"conversation","id":"777","title":"please merge my profiles","source":{"author":{"type":"user","id":"mob1"}},"contacts":{"type":"contact.list","contacts":[{"type":"contact","id":"mob1"}]},"conversation_parts":{"conversation_parts":[]}}'
   mergefile "$TEST_TMPDIR/m.json" ".user.presented_ids = [\"$PRESENTED\"]"
   STUB_CONTACTS="$(dual)" STUB_CONTACT_GET="$MOB" STUB_CONVERSATION="$UCONV" \
     run -0 "$GATE" send --campaign merge-pending --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ --conversation 777
@@ -3448,7 +3504,7 @@ rd_locked() { sed 's/^readonly REPLY_DUE_CORRECTION_APPROVED=1$/readonly REPLY_D
   }
   intake 777 '["s1"]'
   conv() {  # <extra parts json, after the customer's filing part at t=100>
-    printf '{"type":"conversation","id":"777","source":{"author":{"type":"user","id":"6650aa01"},"body":"hi"},"contacts":{"contacts":[{"id":"6650aa01"}]},"conversation_parts":{"conversation_parts":[{"id":"5","part_type":"comment","created_at":100,"author":{"type":"user"},"body":"here","attachments":[{"name":"split.pdf"}]}%s]}}' "$1"
+    printf '{"type":"conversation","id":"777","title":"Credit Verification","source":{"author":{"type":"user","id":"6650aa01"},"body":"hi"},"contacts":{"contacts":[{"id":"6650aa01"}]},"conversation_parts":{"conversation_parts":[{"id":"5","part_type":"comment","created_at":100,"author":{"type":"user"},"body":"here","attachments":[{"name":"split.pdf"}]}%s]}}' "$1"
   }
   send_r1() { rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
     STUB_CONTACT_GET="$OLD" STUB_CONV_SEARCH='{"type":"conversation.list","conversations":[]}' STUB_CONVERSATION="$1" \
@@ -3474,7 +3530,7 @@ rd_locked() { sed 's/^readonly REPLY_DUE_CORRECTION_APPROVED=1$/readonly REPLY_D
   [ "$status" -eq 0 ]; [[ "$output" == "POSTED comment"* ]]; [ "$(replies)" -eq 1 ]
   # an admin comment BEFORE the filing part (it asked for the document) is not a receipt of it
   rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
-  early='{"type":"conversation","id":"777","source":{"author":{"type":"user","id":"6650aa01"},"body":"hi"},"contacts":{"contacts":[{"id":"6650aa01"}]},"conversation_parts":{"conversation_parts":[{"id":"4","part_type":"comment","created_at":50,"author":{"type":"admin","id":"5763097"},"body":"Please send a split sheet."},{"id":"5","part_type":"comment","created_at":100,"author":{"type":"user"},"body":"here","attachments":[{"name":"split.pdf"}]}]}}'
+  early='{"type":"conversation","id":"777","title":"Credit Verification","source":{"author":{"type":"user","id":"6650aa01"},"body":"hi"},"contacts":{"contacts":[{"id":"6650aa01"}]},"conversation_parts":{"conversation_parts":[{"id":"4","part_type":"comment","created_at":50,"author":{"type":"admin","id":"5763097"},"body":"Please send a split sheet."},{"id":"5","part_type":"comment","created_at":100,"author":{"type":"user"},"body":"here","attachments":[{"name":"split.pdf"}]}]}}'
   send_r1 "$early"
   [ "$status" -eq 0 ]; [[ "$output" == "POSTED comment"* ]]
 }
@@ -3554,7 +3610,7 @@ rd_locked() { sed 's/^readonly REPLY_DUE_CORRECTION_APPROVED=1$/readonly REPLY_D
   }
   intake 777 '["s1"]'
   conv() {  # <extra parts json, after the customer's filing part at t=100>
-    printf '{"type":"conversation","id":"777","source":{"author":{"type":"user","id":"6650aa01"},"body":"hi"},"contacts":{"contacts":[{"id":"6650aa01"}]},"conversation_parts":{"conversation_parts":[{"id":"5","part_type":"comment","created_at":100,"author":{"type":"user"},"body":"here","attachments":[{"name":"split.pdf"}]}%s]}}' "$1"
+    printf '{"type":"conversation","id":"777","title":"Credit Verification","source":{"author":{"type":"user","id":"6650aa01"},"body":"hi"},"contacts":{"contacts":[{"id":"6650aa01"}]},"conversation_parts":{"conversation_parts":[{"id":"5","part_type":"comment","created_at":100,"author":{"type":"user"},"body":"here","attachments":[{"name":"split.pdf"}]}%s]}}' "$1"
   }
   send_n() { rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
     STUB_CONTACT_GET="$OLD" STUB_CONV_SEARCH='{"type":"conversation.list","conversations":[]}' STUB_CONVERSATION="$1" \
@@ -3680,5 +3736,316 @@ rd_locked() { sed 's/^readonly REPLY_DUE_CORRECTION_APPROVED=1$/readonly REPLY_D
       fi
     done
   done
+}
+
+# --- proof-need-ask (proof-loop captain card L11c; LOCKED until the captain's yes) -------------------------
+
+needfile() { # $1 file, $2 jq edit (default: the readable_document need)
+  jq -n '{user:{email:"Jane.Doe@Example.com", id:"42", professional_id:"9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64",
+                auth_id:"auth0|9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64", first_name:"Jane"},
+          credits:[{request_id:"r1", role:"Mixing", track_title:"Song A", artist_name:"Big Star", profile_id:"p1", track_id:"t1"}],
+          need:{code:"readable_document", doc_sha:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                doc_received_at:"2026-10-18T09:30:00Z", doc_kind:"image", doc_count:1,
+                doc_shas:["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}}' | jq -c "${2:-.}" > "$1"
+}
+
+@test "proof-need-ask: the gate's strong-identity set equals receipts.STRONG_MATCH (email-filed asks)" {
+  want="$(python3 -c "import sys; sys.path.insert(0, '$HYDRA_REPO/scripts'); from credit_review import receipts; print(' '.join(receipts.STRONG_MATCH))")"
+  grep -qx "readonly EMAIL_FILED_STRONG_MATCH=\"$want\"" "$REAL_SCRIPT"
+}
+
+@test "proof-need-ask: UNLOCKED as committed (Fable [key=l11c-asks]); the dry run renders the ruled text for each need code" {
+  grep -qx "readonly PROOF_NEED_ASK_COPY_APPROVED=1" "$REAL_SCRIPT"
+  grep -qx "readonly DISTRIBUTOR_CODES_ENABLED=0" "$REAL_SCRIPT"
+  needfile "$TEST_TMPDIR/n.json"
+  open='Hi Jane, thanks for the image you sent on October 18 for your Mixing credit on "Song A" by Big Star. We have it on file, but on its own it isn'"'"'t something we can check against an outside source.'
+  close='Your request stays open while we look, and nothing is removed.
+Thank you,
+Caroline, Muso Support'
+  run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "${lines[0]}" == "DRY-RUN proof-need-ask initial email credits=1 copy=proofneed" ]]
+  [ "$(rendered .subject)" = 'About the document for your Muso credit request' ]
+  [ "$(rendered .body | plain)" = "$open
+The file is hard to read on our side. Reply to this message with the same document as a PDF or a clear photo of the whole page, and we'll check it.
+$close" ]
+  needfile "$TEST_TMPDIR/n.json" '.need += {code:"issuer_email_from_official_domain", issuer:"Sony Music"}'
+  run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain)" = "$open
+It's a message from Sony Music. Please ask Sony Music to send one line to verify@muso.ai from their own address confirming you were Mixing on \"Song A\" - or forward us their original email with its headers.
+$close" ]
+  needfile "$TEST_TMPDIR/n.json" '.need += {code:"distributor_dashboard_with_code", verify_code:"MUSO-7K2Q"}'
+  run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain)" = "$open
+Sign in to the distributor or label account that released \"Song A\", type this code into its search box: MUSO-7K2Q, and reply with a screenshot that shows the release and the code together. The code works for 7 days.
+$close" ]
+  needfile "$TEST_TMPDIR/n.json" '.need += {code:"counterparty_signed_or_registered"}'
+  run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain)" = "$open
+We need the other side of it: a split sheet or agreement signed by the artist or label, a PRO registration (ASCAP, BMI, SOCAN or similar) that lists you as Mixing, or a royalty statement that names the track. Reply here with it and we'll check it.
+$close" ]
+  # l1 [key=l11c-asks] exact text (+ the p1 165 / Fable 166 document naming): no Jaxsta, no "nothing else is needed"
+  body="$(rendered .body | plain)"
+  [[ "$body" != *"Jaxsta"* ]]; [[ "$body" != *"Nothing else is needed"* ]]
+}
+
+@test "proof-need-ask: the distributor-code line is HELD while DISTRIBUTOR_CODES_ENABLED=0; a CLOSED filing thread sends by email" {
+  unlocked_gate need
+  export STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
+  export INTERCOM_VERIFY_TEST_NOW=1761000000
+  export STUB_CONV_SEARCH='{"type":"conversation.list","conversations":[]}'
+  needfile "$TEST_TMPDIR/n.json" '.user.filing_conversation = "777" | .need += {code:"distributor_dashboard_with_code", verify_code:"MUSO-7K2Q"}'
+  STUB_CONVERSATION='{"type":"conversation","id":"777","title":"about my credit","source":{"author":{"type":"user"}},"contacts":{"contacts":[{"id":"6650aa01"}]}}' \
+    run -3 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "HELD distributor_codes_off credits=1"* ]]
+  [ "$(posts)" -eq 0 ]; [ "$(replies)" -eq 0 ]
+  # a closed filing conversation: the ask goes by EMAIL (a reply opens a new conversation of the same contact)
+  needfile "$TEST_TMPDIR/n.json" '.user.filing_conversation = "777"'
+  STUB_CONVERSATION='{"type":"conversation","id":"777","title":"about my credit","state":"closed","open":false,"source":{"author":{"type":"user"}},"contacts":{"contacts":[{"id":"6650aa01"}]}}' \
+    run -0 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email"* ]]
+  [ "$(replies)" -eq 0 ]
+}
+
+@test "proof-need-ask: the need comes from the tray and is held to its shape; one request per note; no follow-ups" {
+  for edit in '.need = {}' '.need = {code:"something_else"}' \
+              '.need = {code:"issuer_email_from_official_domain"}' \
+              '.need = {code:"issuer_email_from_official_domain", issuer:"evil.com"}' \
+              '.need = {code:"issuer_email_from_official_domain", issuer:"<a href=x>Sony</a>"}' \
+              '.need = {code:"issuer_email_from_official_domain", issuer:"Sony https://x.io"}' \
+              '.need = {code:"distributor_dashboard_with_code"}' \
+              '.need = {code:"distributor_dashboard_with_code", verify_code:"abc"}' \
+              '.need.doc_sha = "abc"' '.need.doc_sha = ""' '.need.doc_received_at = "2026-10-18"' \
+              '.need.doc_received_at = "2026-02-30T00:00:00Z"' '.need.doc_kind = "spreadsheet"' \
+              '.user.id = ""'; do
+    needfile "$TEST_TMPDIR/n.json" "$edit"
+    run -1 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+    [[ "$output" == *"proof-need-ask"* ]] || { echo "edit: $edit -> $output"; false; }
+  done
+  needfile "$TEST_TMPDIR/n.json"
+  run -1 "$LOCKED" send --campaign proof-need-ask --kind reminder-14 --parent-message-id 1 --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  run -1 "$LOCKED" send --campaign proof-need-ask --copy queued --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(calls)" -eq 0 ]
+}
+
+@test "proof-need-ask unlocked: once per request, ever; never after a gap ask on the same request" {
+  unlocked_gate need
+  # go-live guards (#1456) + delivery INTO the document's filing conversation (p1 ruling 096), like R1
+  export STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
+  export INTERCOM_VERIFY_TEST_NOW=1761000000
+  export STUB_CONV_SEARCH='{"type":"conversation.list","conversations":[]}'
+  export STUB_CONVERSATION='{"type":"conversation","id":"777","title":"about my credit","source":{"author":{"type":"user"}},"contacts":{"contacts":[{"id":"6650aa01"}]}}'
+  needfile "$TEST_TMPDIR/n.json" '.user.filing_conversation = "777" | .credits[0].ask_class = "core_proof_request"'
+  run -0 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED comment"* ]]
+  grep -q '^POST https://api.intercom.io/conversations/777/reply$' "$CURL_STUB_LOG"
+  # each argument checked on its own (QA #1418: other flags, e.g. --reply-due, may sit between them)
+  for a in "--campaign proof-need-ask" "--copy proofneed" "--user-id 42" "--request-ids r1" "--contact-id 6650aa01" \
+           "--conversation 777" "--doc-sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "--doc-at 2026-10-18T09:30:00Z"; do
+    grep -q -- "$a" "$TEST_TMPDIR/comm-state-args" || { echo "missing comm_state arg: $a" >&2; false; }
+  done
+  [[ "$(sql "select campaign||'|'||status||'|'||approval_ref from verify_messages")" == "proof-need-ask|sent|"*"card L11c"* ]]
+  # QA #1418: the L11c send carries its provenance - a request core already proof-requested is recorded as
+  # ask_class=core_proof_request in the ledger refs (audit, p1 178)
+  [ "$(sql "select json_extract(refs_json, '\$[0].ask_class') from verify_messages where campaign='proof-need-ask'")" = "core_proof_request" ]
+  INTERCOM_VERIFY_TEST_DAY=2026-12-01 run -0 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  [ "$output" = "SKIPPED already-notified credits=1" ]
+}
+
+@test "proof-need-ask: no filing conversation refuses (G3); the verify@ line is HELD while VERIFY_AT_ENABLED=0; the dry run still renders it" {
+  unlocked_gate need
+  export STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
+  export INTERCOM_VERIFY_TEST_NOW=1761000000
+  needfile "$TEST_TMPDIR/n.json"
+  run -1 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"G3"* ]]
+  grep -qx "readonly VERIFY_AT_ENABLED=0" "$REAL_SCRIPT"
+  needfile "$TEST_TMPDIR/n.json" '.user.filing_conversation = "777" | .need += {code:"issuer_email_from_official_domain", issuer:"Sony Music"}'
+  run -3 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "HELD verify_at_off credits=1"* ]]
+  [ "$(posts)" -eq 0 ]; [ "$(replies)" -eq 0 ]
+  [ -z "$(sql "select * from verify_messages where status in ('sent','attempted','refused')")" ]
+  run -0 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == *"verify@muso.ai"* ]]
+}
+
+@test "proof-need-ask plural (Fable [key=l11c-plural]): one message per user per need, up to 3 titles + 'and N more'; 2 titles join with 'and'" {
+  needfile "$TEST_TMPDIR/n.json" '.need.code = "counterparty_signed_or_registered" | .credits += [
+    {request_id:"r2", role:"Mastering", track_title:"Song B", artist_name:"Big Star", profile_id:"p1", track_id:"t2"},
+    {request_id:"r3", role:"Mixing", track_title:"Song C", artist_name:"Big Star", profile_id:"p1", track_id:"t3"},
+    {request_id:"r4", role:"Mixing", track_title:"Song D", artist_name:"Big Star", profile_id:"p1", track_id:"t4"}]'
+  run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "${lines[0]}" == "DRY-RUN proof-need-ask initial email credits=4 copy=proofneed" ]]
+  [ "$(rendered .subject)" = 'About the document for your Muso credit requests' ]
+  [ "$(rendered .body | plain)" = 'Hi Jane, thanks for the image you sent on October 18 for your credit requests for "Song A", "Song B" and "Song C" and 1 more. We have it on file, but on its own it isn'"'"'t something we can check against an outside source.
+We need the other side of it: a split sheet or agreement signed by the artist or label, a PRO registration (ASCAP, BMI, SOCAN or similar) that lists you in your role on each track, or a royalty statement that names the tracks. Reply here with it and we'"'"'ll check it.
+Your requests stay open while we look, and nothing is removed.
+Thank you,
+Caroline, Muso Support' ]
+  jq '.credits |= .[0:2] | .need.code = "readable_document"' "$TEST_TMPDIR/n.json" > "$TEST_TMPDIR/n2.json"
+  run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n2.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == 'Hi Jane, thanks for the image you sent on October 18 for your credit requests for "Song A" and "Song B". We have it on file'*"The file is hard to read on our side. Reply to this message with the same document"* ]]
+  # the document is named as the user knows it: kind + the day they sent it (p1 156, QA #1418)
+  jq '.need.doc_kind = "PDF" | .need.doc_received_at = "2026-09-03T23:10:00Z"' "$TEST_TMPDIR/n2.json" > "$TEST_TMPDIR/n3.json"
+  run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n3.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == 'Hi Jane, thanks for the PDF you sent on September 3 for your credit requests for '* ]]
+  # several documents sent that day (Fable 166): the count IS the named group (QA #1418 08:36Z: doc_shas == doc_count)
+  jq '.need.doc_count = 2 | .need.doc_shas += ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]' "$TEST_TMPDIR/n3.json" > "$TEST_TMPDIR/n4.json"
+  run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n4.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == 'Hi Jane, thanks for the documents you sent on September 3 for your credit requests for '* ]]
+  # a malformed count is refused now, never a silent fallback to the singular (QA #1418 08:36Z)
+  jq '.need.doc_count = "2; rm -rf /"' "$TEST_TMPDIR/n3.json" > "$TEST_TMPDIR/n5.json"
+  run -1 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n5.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"need_doc_group_mismatch"* ]]
+  # a non-image, non-PDF document is "the file" (l1 176)
+  jq '.need.doc_kind = "document"' "$TEST_TMPDIR/n3.json" > "$TEST_TMPDIR/n6.json"
+  run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n6.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == 'Hi Jane, thanks for the file you sent on September 3 for '* ]]
+}
+
+@test "proof-need-ask: an EMAIL-filed document (filing_conversation \"email\") is asked by Intercom email to the account's verified contact, never a bare address; R1 never takes this path (p1 152)" {
+  unlocked_gate need
+  export STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
+  export INTERCOM_VERIFY_TEST_NOW=1761000000
+  export STUB_CONV_SEARCH='{"type":"conversation.list","conversations":[]}'
+  needfile "$TEST_TMPDIR/n.json" '.user.filing_conversation = "email"'
+  # QA #1418: the gate checks the PROOF STORE, never the caller's "email": no intake row, an Intercom filing, or a
+  # weakly matched support@ document all refuse; only a strongly matched email filing goes
+  A=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  intake() { python3 -c "import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.execute('CREATE TABLE IF NOT EXISTS proof_intake (user_id INTEGER, file_sha256 TEXT, received_at TEXT, conversation_id TEXT, matched_by TEXT)'); d.execute('DELETE FROM proof_intake'); d.execute('INSERT INTO proof_intake VALUES (42,?,?,?,?)', (sys.argv[2], '2026-10-18T09:30:00Z', sys.argv[3], sys.argv[4])); d.commit()" "$INTERCOM_VERIFY_TEST_PROOF_DB" "$A" "$1" "$2"; }
+  run -1 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"email-filed per-need ask: the proof store could not be read"* ]]      # no store: fail closed
+  python3 -c "import sqlite3,sys; sqlite3.connect(sys.argv[1]).execute('CREATE TABLE proof_intake (user_id INTEGER, file_sha256 TEXT, received_at TEXT, conversation_id TEXT, matched_by TEXT)')" "$INTERCOM_VERIFY_TEST_PROOF_DB"
+  run -1 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"email-filed per-need ask: no intake row"* ]]
+  intake "" proof_on_file
+  run -1 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"matched to this account by a weak identity (proof_on_file)"* ]]
+  intake 777 authenticated_email
+  run -1 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"filed in Intercom conversation 777, not by email"* ]]
+  [ "$(posts)" -eq 0 ]
+  # QA #1418: the same bytes first emailed with a WEAK match, then resubmitted strongly: the NAMED intake (the one read)
+  # decides, not the earliest row for the sha
+  python3 -c "import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.execute('DROP TABLE IF EXISTS proof_intake'); d.execute('CREATE TABLE proof_intake (user_id INTEGER, file_sha256 TEXT, received_at TEXT, conversation_id TEXT, matched_by TEXT, intake_id TEXT)'); d.execute(\"INSERT INTO proof_intake VALUES (42,?,'2026-10-10T00:00:00Z','','proof_on_file','42:weak')\", (sys.argv[2],)); d.execute(\"INSERT INTO proof_intake VALUES (42,?,'2026-10-18T09:30:00Z','','authenticated_email','42:strong')\", (sys.argv[2],)); d.commit()" "$INTERCOM_VERIFY_TEST_PROOF_DB" "$A"
+  run -1 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"weak identity (proof_on_file)"* ]]                       # no named intake: the earliest (weak) row
+  jq --arg a "$A" '.need.doc_intakes = {($a): "42:strong"}' "$TEST_TMPDIR/n.json" > "$TEST_TMPDIR/n2.json"
+  run -0 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n2.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message="* ]]                                # the named strong intake goes
+  [ "$(posts)" -eq 1 ]; [ "$(replies)" -eq 0 ]
+  # the recipient is the Intercom USER the identity checks chose, by id (never a raw email address)
+  [ "$(jq -r '.to.type + ":" + .to.id' "$CURL_STUB_MESSAGE")" = "user:6650aa01" ]
+  [ "$(jq -r '.to.email // empty' "$CURL_STUB_MESSAGE")" = "" ]
+  grep -q -- "--campaign proof-need-ask --copy proofneed" "$TEST_TMPDIR/comm-state-args"
+  # with an explicit conversation it is refused, and R1 with "email" still refuses (G3: R1 goes only in-thread)
+  run -1 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --conversation 777
+  unlocked_gate received
+  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
+  jq '.user.filing_conversation = "email"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json"
+  INTERCOM_VERIFY_TEST_DAY=2026-10-30 run -1 "$GATE" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/c2.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"G3"* ]]
+}
+
+@test "R9: a filing thread that is not about credits (refund thread with a receipt attached) is never the delivery thread - R1 and the per-need ask go by email (p1 165, Fable 166)" {
+  unlocked_gate received
+  refund='{"type":"conversation","id":"777","state":"open","updated_at":1760900000,"title":"Fwd: Your receipt from Muso.AI","source":{"id":"1001","author":{"type":"user","id":"6650aa01"},"created_at":1760000000,"body":"this payment was made automatically, can I get a refund? paid by credit card","attachments":[{"name":"receipt.pdf"}]},"contacts":{"contacts":[{"id":"6650aa01"}]},"conversation_parts":{"conversation_parts":[{"part_type":"comment","author":{"type":"user","id":"6650aa01"},"body":"any news on my refund?","created_at":1760100000},{"part_type":"comment","author":{"type":"user","id":"6650aa01"},"body":"thank you","created_at":1760100100}]}}'
+  credits "$TEST_TMPDIR/c0.json" Jane "s1:Mixing:A:X"
+  jq '.user.filing_conversation = "777"' "$TEST_TMPDIR/c0.json" > "$TEST_TMPDIR/c.json"
+  export STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
+  export INTERCOM_VERIFY_TEST_NOW=1761000000
+  export STUB_CONVERSATION="$refund"
+  run -0 "$GATE" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"R9 filing conversation 777 is not about credits"* ]]
+  [[ "$output" == *"POSTED email message="* ]]
+  [ "$(replies)" -eq 0 ]; [ "$(posts)" -eq 1 ]
+  [ "$(jq -r '.to.type + ":" + .to.id' "$CURL_STUB_MESSAGE")" = "user:6650aa01" ]
+  # comm_state does not judge the unrelated thread (no --conversation 777) but keeps its filing-part evidence (r5)
+  if grep -q -- "--conversation 777" "$TEST_TMPDIR/comm-state-args"; then false; fi
+  grep -q -- "--filing-conversation 777" "$TEST_TMPDIR/comm-state-args"
+  # the same thread ABOUT credits is used in-thread
+  export STUB_CONVERSATION="$(printf '%s' "$refund" | jq -c '.title = "my mixing credit" | .source.body = "here is proof of my credit"')"
+  INTERCOM_VERIFY_TEST_DAY=2026-10-30 run -0 "$GATE" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" != *"R9"* ]]
+  # with our reply after the receipt attachment (the prod shape: "I passed your refund request to the team"), the
+  # receipted rule holds first - the document was already acknowledged in that thread (r5 rule 1, wording-independent)
+  export STUB_CONVERSATION="$(printf '%s' "$refund" | jq -c '.conversation_parts.conversation_parts += [{"part_type":"comment","author":{"type":"admin","id":"1"},"body":"I passed your refund request to the team","created_at":1760100200}]')"
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  run -3 "$GATE" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "HELD r1_receipted_in_thread"* ]]
+}
+
+@test "R9 (r5, R1 only): an off-topic filing thread sends the receipt into the user's OTHER open credit conversation, judged there; email only when none qualifies" {
+  unlocked_gate received
+  export STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
+  export INTERCOM_VERIFY_TEST_NOW=1761000000
+  export STUB_CONVERSATION='{"type":"conversation","id":"777","state":"open","title":"Fwd: Your receipt from Muso.AI","source":{"id":"1001","author":{"type":"user","id":"6650aa01"},"body":"refund please","attachments":[{"name":"r.pdf"}]},"contacts":{"contacts":[{"id":"6650aa01"}]},"conversation_parts":{"conversation_parts":[]}}'
+  export STUB_OPEN_CONVS='{"conversations":[{"id":"777","state":"open","updated_at":1760990000},{"id":"888","state":"open","updated_at":1760900000}],"total_count":2}'
+  credits "$TEST_TMPDIR/c0.json" Jane "s1:Mixing:A:X"
+  jq '.user.filing_conversation = "777"' "$TEST_TMPDIR/c0.json" > "$TEST_TMPDIR/c.json"
+  # 888 is this user's credit thread -> the receipt goes there, and comm_state judges 888
+  export STUB_CONVERSATION_888='{"type":"conversation","id":"888","state":"open","title":"my mixing credit","source":{"author":{"type":"user","id":"6650aa01"}},"contacts":{"contacts":[{"id":"6650aa01"}]},"conversation_parts":{"conversation_parts":[]}}'
+  run -0 "$GATE" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"delivering into the user's credit conversation 888"* ]]
+  [[ "$output" == *"POSTED comment conversation=888"* ]]
+  grep -q -- "--conversation 888" "$TEST_TMPDIR/comm-state-args"
+  [ "$(posts)" -eq 0 ]
+  # 888 belongs to someone else, or is itself off-topic -> email
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  export STUB_CONVERSATION_888='{"type":"conversation","id":"888","state":"open","title":"my mixing credit","source":{"author":{"type":"user"}},"contacts":{"contacts":[{"id":"someone-else"}]},"conversation_parts":{"conversation_parts":[]}}'
+  run -0 "$GATE" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"no other open credit conversation; delivering by email"* ]]
+  [[ "$output" == *"POSTED email"* ]]
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  export STUB_CONVERSATION_888='{"type":"conversation","id":"888","state":"open","title":"billing question","source":{"author":{"type":"user"}},"contacts":{"contacts":[{"id":"6650aa01"}]},"conversation_parts":{"conversation_parts":[]}}'
+  run -0 "$GATE" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"POSTED email"* ]]
+}
+
+@test "proof-need-ask: every NAMED document (need.doc_shas) reaches comm_state, shape-limited (QA #1418 round 4)" {
+  unlocked_gate need
+  export STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
+  export INTERCOM_VERIFY_TEST_NOW=1761000000
+  export STUB_CONV_SEARCH='{"type":"conversation.list","conversations":[]}'
+  export STUB_CONVERSATION='{"type":"conversation","id":"777","title":"about my credit","source":{"author":{"type":"user"}},"contacts":{"contacts":[{"id":"6650aa01"}]}}'
+  B=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  A=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  # QA #1418 (08:36Z): a garbage entry is no longer filtered out of the group - the group is refused, nothing claimed
+  needfile "$TEST_TMPDIR/g.json" ".user.filing_conversation = \"777\" | .need.doc_count = 2 | .need.doc_shas = [\"$B\", \"not-a-sha; rm -rf /\"]"
+  run -1 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/g.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"need_doc_group_mismatch"* ]]
+  if grep -q "rm -rf" "$TEST_TMPDIR/comm-state-args" 2>/dev/null; then false; fi
+  needfile "$TEST_TMPDIR/n.json" ".user.filing_conversation = \"777\" | .need.doc_count = 2 | .need.doc_shas = [\"$A\", \"$B\"] | .need.doc_map = {\"r1\": \"$B\", \"r2;x\": \"$B\", \"r3\": \"zz\"}"
+  run -0 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  grep -q -- "--doc-sha aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,$B --doc-at" "$TEST_TMPDIR/comm-state-args"
+  if grep -q "rm -rf" "$TEST_TMPDIR/comm-state-args"; then false; fi
+  # each request's own document (r5), shape-limited: only r1=<sha> survives
+  grep -q -- "--doc-map r1=$B" "$TEST_TMPDIR/comm-state-args"
+  if grep -q -- "r2;x\|r3=" "$TEST_TMPDIR/comm-state-args"; then false; fi
+}
+
+@test "proof-need-ask: the named group must be EXACTLY the checked documents - 21 documents, or a count that differs, is refused and nothing claimed (QA #1418 08:36Z)" {
+  unlocked_gate need
+  export STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
+  export INTERCOM_VERIFY_TEST_NOW=1761000000
+  shas="$(python3 -c 'import json, hashlib; print(json.dumps([hashlib.sha256(str(i).encode()).hexdigest() for i in range(21)]))')"
+  needfile "$TEST_TMPDIR/n.json" ".user.filing_conversation = \"777\" | .need.doc_shas = $shas | .need.doc_count = 21 | .need.doc_sha = .need.doc_shas[0]"
+  run -1 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"need_doc_group_mismatch"* ]]
+  run -1 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"need_doc_group_mismatch"* ]]
+  [ "$(posts)" -eq 0 ]; [ "$(replies)" -eq 0 ]
+  [ "$(sqlite3 "$INTERCOM_VERIFY_TEST_LEDGER" "select count(*) from verify_messages" 2>/dev/null || echo 0)" -eq 0 ]
+  # 20 is the most one ask names, and it passes the shape rule
+  needfile "$TEST_TMPDIR/m.json" ".user.filing_conversation = \"777\" | .need.doc_shas = ($shas | .[0:20]) | .need.doc_count = 20 | .need.doc_sha = .need.doc_shas[0]"
+  run "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" != *"need_doc_group_mismatch"* ]]
+  # a garbage entry riding along with a matching count is refused too (never filtered out of the group)
+  needfile "$TEST_TMPDIR/x.json" ".user.filing_conversation = \"777\" | .need.doc_shas += [\"not-a-sha\"]"
+  run -1 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/x.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"need_doc_group_mismatch"* ]]
+  # a count that is not the group size (the copy would say 'the documents' for one, or 'the file' for many)
+  needfile "$TEST_TMPDIR/c.json" ".user.filing_conversation = \"777\" | .need.doc_count = 3"
+  run -1 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"need_doc_group_mismatch"* ]]
 }
 

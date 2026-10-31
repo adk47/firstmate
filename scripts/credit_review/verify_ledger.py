@@ -99,7 +99,7 @@ BLOCKING = ("attempted", "sent", "refused", "skipped")
 DEFERRED = "deferred_pending_doc"
 CAMPAIGNS = ("verify-live", "retro-past", "removal-notice", "takeback-notice", "uvn-status", "withdrawal-confirm",
              "status-doc-received", "status-team-review", "email-changed", "email-changed-dup",
-             "claim-proof-ask", "claim-status", "gap-ask", "merge-pending", "credit-hold-status", "claim-proof-pending")
+             "claim-proof-ask", "claim-status", "gap-ask", "merge-pending", "credit-hold-status", "claim-proof-pending", "proof-need-ask")
 # claim-proof-ask (steers-1830 #5, firstmate 125/126): a dated ask to the claimant of a pending
 # profile CLAIM (band B/C) to put the claim's bound-proof code in one platform bio. Its "request
 # id" is the claim key "claim-<claiming.id>", so only its own rows block it (claim ids never meet
@@ -131,6 +131,12 @@ GAP_ASK = "gap-ask"
 # "merge-<merge request id>". A notice (only its own rows block it: one note per merge request, ever), never an
 # ask, and never within 7 days of another note from this gate to the user (messaged_7d, a deferral).
 MERGE_PENDING = "merge-pending"
+# proof-need-ask (proof-loop captain card L11c; send-locked until the captain's yes): the per-need ask for ONE
+# credit whose document the reader could not check. An ASK (it counts for the one-ask locks), handled like
+# gap-ask: it exists because a document arrived, so only its own rows and a gap ask on the same request block
+# it (once per request, ever), and it may follow a status-doc-received note inside 7 days.
+PROOF_NEED_ASK = "proof-need-ask"
+GAP_LIKE = (GAP_ASK, PROOF_NEED_ASK)
 # The notes the gap ask may follow inside 7 days (one per day still holds): the doc-received
 # status note says "we have the document you sent ... we'll message you here as soon as it's
 # checked", and the gap ask is that message (firstmate, verify-ask-wiring-h2 inbox 003).
@@ -153,7 +159,7 @@ MAX_REFUSALS = 3
 # The campaigns that ASK the user for something. Only these count as "already asked";
 # notices and confirmations (removal-notice, takeback-notice, withdrawal-confirm) never close
 # a user's asks (firstmate 063/064).
-ASK_CAMPAIGNS = ("verify-live", "retro-past", "uvn-status", GAP_ASK)
+ASK_CAMPAIGNS = ("verify-live", "retro-past", "uvn-status", GAP_ASK, PROOF_NEED_ASK)
 AFTER_REJECTION = "after-rejection"
 KINDS = ("initial", "reminder-14", "reminder-25", AFTER_REJECTION, CLAIM_REMINDER)
 # Days after a WINDOWED note (reminder-14/25) or a claim-proof-ask note (reminder-7) at which each
@@ -324,9 +330,16 @@ def blocked_ids(db: sqlite3.Connection, request_ids: list[str], campaign: str = 
     out: set[str] = set()
     asks = ",".join("?" * len(ASK_CAMPAIGNS))
     for rid in request_ids:
-        other = None if campaign in NOTICE_CAMPAIGNS or campaign == GAP_ASK else db.execute(
-            f"SELECT 1 FROM verify_requests WHERE request_id=? AND campaign<>? AND campaign IN ({asks}) "
-            "AND status IN ('attempted','sent') LIMIT 1", (rid, campaign, *ASK_CAMPAIGNS)).fetchone()
+        if campaign in GAP_LIKE:
+            # the document asks never cross on one request: a gap ask closes it for proof-need-ask and back
+            sib = [c for c in GAP_LIKE if c != campaign]
+            other = db.execute(
+                f"SELECT 1 FROM verify_requests WHERE request_id=? AND campaign IN ({_marks(sib)}) "
+                "AND status IN ('attempted','sent') LIMIT 1", (rid, *sib)).fetchone()
+        else:
+            other = None if campaign in NOTICE_CAMPAIGNS else db.execute(
+                f"SELECT 1 FROM verify_requests WHERE request_id=? AND campaign<>? AND campaign IN ({asks}) "
+                "AND status IN ('attempted','sent') LIMIT 1", (rid, campaign, *ASK_CAMPAIGNS)).fetchone()
         if other is not None:
             out.add(rid)
             continue
@@ -569,7 +582,7 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
                 _skip(db, campaign, fresh, ts)
                 db.execute("COMMIT")
                 return {"result": "user_done", "reason": why, "request_ids": fresh}
-        if campaign == GAP_ASK and enforce_cap:
+        if campaign in GAP_LIKE and enforce_cap:
             why = gap_user_done(db, user_key, now=now, user_id=user_id)
             if why:
                 db.execute("COMMIT")
@@ -1564,7 +1577,7 @@ def _main(argv: list[str] | None = None) -> int:
             out["user_done"] = "" if why in DEFER_REASONS else why
             out["recent"] = why in DEFER_REASONS
             out["recent_why"] = why if why in DEFER_REASONS else ""
-        if a.user_key and a.campaign == GAP_ASK:
+        if a.user_key and a.campaign in GAP_LIKE:
             why = gap_user_done(db, a.user_key, user_id=a.user_id)
             out["user_done"], out["recent"], out["recent_why"] = "", bool(why), why
     elif a.op == "hold-silent":

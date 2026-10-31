@@ -92,10 +92,10 @@ set -euo pipefail
 #
 # Usage:
 #   intercom-verify-request.sh send --credits-file FILE --approved-by <SlackUID> \
-#       [--campaign verify-live|retro-past|removal-notice|takeback-notice|uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-proof-ask|claim-status|gap-ask|merge-pending|credit-hold-status|claim-proof-pending] [--kind initial|reminder-14|reminder-25|after-rejection \
+#       [--campaign verify-live|retro-past|removal-notice|takeback-notice|uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-proof-ask|claim-status|gap-ask|merge-pending|credit-hold-status|claim-proof-pending|proof-need-ask] [--kind initial|reminder-14|reminder-25|after-rejection \
 #        --parent-message-id <id>] [--copy v1|windowed (verify-live preview only) | queued|received (status-doc-received) | no-ask|count (status-team-review)] \
 #       [--conversation <id> (uvn-status, withdrawal-confirm, status notes, claim-status, email-changed, gap-ask, merge-pending,
-#        credit-hold-status, claim-proof-pending)] [--dry-run|--validate|--doc-check|--check-recipient]
+#        credit-hold-status, claim-proof-pending, proof-need-ask)] [--dry-run|--validate|--doc-check|--check-recipient]
 #   intercom-verify-request.sh tag-proof --message-id <id> [--dry-run]
 #
 # In-thread delivery (firstmate 063): uvn-status and withdrawal-confirm reply IN the user's
@@ -142,6 +142,14 @@ set -euo pipefail
 # anything. One per user (S1) / per claim (S2), ever; never within 7 days of another note from this gate;
 # S2 never to a claim with a claim-proof-ask note. SEND-LOCKED (CREDIT_HOLD_STATUS_COPY_APPROVED,
 # CLAIM_PROOF_PENDING_COPY_APPROVED) until the captain's yes lands in a PR that flips the lock.
+# proof-need-ask (proof-loop captain card L11c; UNLOCKED on Fable [key=l11c-asks] - readable + counterparty only):
+# the per-need ask for ONE credit request whose document the reader could not check on its own. FILE carries
+# one credits entry (request_id, role, track_title, artist_name) and "need": {"code": readable_document |
+# issuer_email_from_official_domain | distributor_dashboard_with_code | counterparty_signed_or_registered,
+# "issuer": the issuer's name (issuer_email only; plain letters/digits/&.,'- only, at most 80 characters),
+# "verify_code": the 7-day code we issued (distributor_dashboard only)} from b1's need tray. One ask per
+# request, ever; like gap-ask it may follow a status-doc-received note inside 7 days (that note promised this
+# message) and never crosses a gap ask on the same request.
 #
 # FILE is JSON: {"user": {"email": "...", "id": "<muso user id>", "professional_id": "<users.neptuneProfessionalId>",
 #                         "auth_id": "<auth0 subject>", "first_name": "..."},
@@ -283,6 +291,21 @@ readonly MERGE_PENDING_COPY_APPROVED=0
 #   CLAIM_PROOF_PENDING_COPY_APPROVED claim-proof-pending (S2, verbatim): LOCKED until the captain's yes on L14b.
 readonly CREDIT_HOLD_STATUS_COPY_APPROVED=0
 readonly CLAIM_PROOF_PENDING_COPY_APPROVED=0
+#   PROOF_NEED_ASK_COPY_APPROVED  proof-need-ask (proof-loop captain card L11c, the four per-need lines + common
+#       opening + closing, verbatim): LOCKED until the captain's yes lands in a PR that flips it.
+#       UNLOCKED 2026-10-29 by Fable ruling [key=l11c-asks] (captain 14:3xZ status-wording delegation + 03:2xZ "use fable
+#       and i take the recommendation of it just go"; firstmate shows the captain the text with a veto): readable_document
+#       and counterparty_signed_or_registered only. issuer_email waits for verify@ (VERIFY_AT_ENABLED), the distributor
+#       code line for b1's F9 code issuer (DISTRIBUTOR_CODES_ENABLED); both are HELD at send.
+#   Reviewed baseline: deploy overwrites - 2026-10-29 (verify-ask-wiring-h2): this blob sets PROOF_NEED_ASK_COPY_APPROVED=1.
+readonly PROOF_NEED_ASK_COPY_APPROVED=1
+#   VERIFY_AT_ENABLED  verify@muso.ai intake (the issuer_email_from_official_domain need line asks the issuer to write
+#       to it). OFF until Intercom identity verification (i2) is live (Fable exec-plan captain-1028-213x (c); p1
+#       ruling 096): that need is HELD at send (exit 3, nothing claimed); the dry run still renders it.
+readonly VERIFY_AT_ENABLED=0
+#   DISTRIBUTOR_CODES_ENABLED  the distributor_dashboard_with_code need line names a 7-day challenge code; nothing issues
+#       or reads those codes until b1's F9 issuer lands, so that need is HELD at send (exit 3) until this is 1.
+readonly DISTRIBUTOR_CODES_ENABLED=0
 
 # PINNED. Caroline (skills-all/muso-intercom/SKILL.md, Reply Identity), same literal and
 # same variable name as intercom-ops-write.sh so check-intercom-reply-identity.sh keys on it.
@@ -300,10 +323,13 @@ readonly PROD_CORE_NOTICE_HELPER="/opt/hydra/scripts/credit_review/core_notice.p
 # The send-time communication-state check for the go-live cohorts (captain 2026-10-28 18:2xZ): comm_state.py.
 readonly PROD_COMM_STATE_HELPER="/opt/hydra/scripts/credit_review/comm_state.py"
 readonly PROD_PROOF_DB="/var/lib/hydra-credit-verify/proof.sqlite"
+# l1 [key=l11c-email-filed]: the identities that prove an email-filed document is the account's (= receipts.STRONG_MATCH)
+readonly EMAIL_FILED_STRONG_MATCH="professional_id authenticated_email session"
 readonly PROOF_TAG="credit-proof"
 readonly CLAIM_PROOF_TAG="claim-proof"
 # The ONLY approver of these campaigns, and where he approved each.
 readonly CAPTAIN_UID="U7RP6HKUZ"
+readonly MAX_DOC_GROUP=20             # QA #1418: the most documents one per-need ask may name (need_asks.MAX_DOC_GROUP)
 readonly APPROVAL_REF_LIVE="captain U7RP6HKUZ 2026-10-15 22:12Z: \"i want AI live now - we have too many credits to approve and to get supporting data for - let users know where there was a credit given and that it needs support (trust yet verify approach)\""
 readonly APPROVAL_REF_LIVE_WINDOWED="$APPROVAL_REF_LIVE; 2026-10-15 23:40Z: \"if no valid verification comes it should be removed\" (kept for new provisional approvals at 2026-10-16 00:35Z); copy = Fable copy-review-fable-2026-10-17 pack 1 (GO with edits); enable = Fable decision-verify-notify-enable-2026-10-17 (firstmate 051, 2026-10-17 23:15Z: enable Monday 2026-10-20 under its 7 conditions)"
 readonly APPROVAL_REF_LIVE_V1="$APPROVAL_REF_LIVE; paid provisional approvals: Fable credit-backlog-1019 ruling 4 as amended by firstmate 073 (2026-10-19 14:58Z: provisional approve + doc request, NO day-30 auto-removal, no removal language; captain rule 10-15: deletes must confirm removal at Spotify/Tidal or prove a different profile)"
@@ -331,6 +357,7 @@ readonly CLAIM_SURFACES
 readonly APPROVAL_REF_GAP_ASK="captain U7RP6HKUZ 2026-10-26 12:40Z: Fable decides, do not ask him; ~13:00Z: \"credit and profile verifications nothing is waiting on us right? you are moving these forward and ball should be in users court if required otherwise they are approved? if not get on this\"; Fable ruling 2026-10-26 13:23Z (captain-asks-fable-r4 report section H, GO 2): 460 need_more -> dated gap ask, one per user per day, Fable-approved paragraph, no deadline, no removal words; last sentence swapped to \"Your request stays open while we look.\" (the asked rows are pending, not live) by Fable decision (B) relayed by firstmate 2026-10-26 16:58Z (verify-ask-wiring-h2 inbox 005)"
 readonly APPROVAL_REF_MERGE_PENDING="captain 2026-10-28 12:4xZ: \"go live today and start conversations with users who requested credits, profiles (claims) or merges ASAP\"; copy = program-lead-fable-p2 go-live-today line M1, sent only on the captain's own yes to M1"
 readonly APPROVAL_REF_OWING_PROOF="captain U7RP6HKUZ 2026-10-27 20:1xZ: \"are you sure all users that need to be communicated have been already? If not get on it - make this a durable process that does not rely on my computer; do this all on OVH.\"; copy = Fable verify-program-lead-fable-l1 copy-owing-proof-1027 (20:2xZ), sent only on the captain's yes (L14a S1 credit-hold-status / L14b S2 claim-proof-pending)"
+readonly APPROVAL_REF_PROOF_NEED_ASK="captain 2026-10-27 21:5xZ: every user who owes proof is told exactly what we need (proof-loop-lead-fable-p1 plan section 1); copy = proof-loop captain card L11c (22:5xZ), verbatim per need code; sent only on the captain's yes"
 readonly APPROVAL_REF_REMOVAL="firstmate 2026-10-16 15:14Z, captain-driven: owners of credits WE removed must be told which credit and role, why, and how to dispute by replying with a document (support measured 35 owners never told). Fraud removals stay silent by captain order (firstmate 2026-10-16 15:48Z)."
 readonly APPROVAL_REF_PAST="captain U7RP6HKUZ 2026-10-15 23:35Z: \"im referring to before when nick made changes and did a trust verify flow and now we have a lotnof credits to verify with documents and give people 30 days to send something in for the ones missing documents\"; 2026-10-16 00:35Z: \"how many credits were approved without documentstion i dont want to lose users unless its obvious fraud feom tbe past\""
 # Caroline's outbound sanitizer word list, IDENTICAL to intercom-ops-write.sh's
@@ -717,6 +744,12 @@ case "$CAMPAIGN" in
     [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live and the status notes; claim-proof-pending has one copy, Fable's S2."
     [ "$KIND" = "initial" ] || refuse "claim-proof-pending has no follow-ups (one note per claim)."
     ;;
+  proof-need-ask)
+    # Card L11c: ONE message per user per need code (Fable [key=l11c-plural]), up to 3 titles + "and N more".
+    MAX_CREDITS=1000; MAX_LISTED=3; COPY="proofneed"; APPROVAL_REF="$APPROVAL_REF_PROOF_NEED_ASK"
+    [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live and the status notes; proof-need-ask's line is picked by need.code."
+    [ "$KIND" = "initial" ] || refuse "proof-need-ask has no follow-ups: one ask per request, ever."
+    ;;
   gap-ask)
     # Fable's gap ask for credits whose document on file does not cover them (stage-2
     # need_more). Once per credit; up to 3 track/role pairs, then "and N more".
@@ -724,7 +757,7 @@ case "$CAMPAIGN" in
     [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live; gap-ask has one copy, Fable's paragraph."
     [ "$KIND" = "initial" ] || refuse "gap-ask has no follow-ups: no deadline, no reminders."
     ;;
-  *) refuse "--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status, gap-ask, merge-pending, credit-hold-status or claim-proof-pending (got '$CAMPAIGN'). Each campaign is pinned in this script; there is no other." ;;
+  *) refuse "--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status, gap-ask, merge-pending, credit-hold-status, claim-proof-pending or proof-need-ask (got '$CAMPAIGN'). Each campaign is pinned in this script; there is no other." ;;
 esac
 # C11 (p1 223): --check-recipient is the dry run that equals the send. It runs every send-time check a real send runs
 # up to the claim (the ledger peek, core_notice, the go-live guards, comm_state, the status-note Intercom reads, the
@@ -745,8 +778,8 @@ if [ -n "$REPLY_DUE" ]; then
 fi
 if [ -n "$THREAD" ]; then
   case "$CAMPAIGN" in
-    uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-status|gap-ask|merge-pending|credit-hold-status|claim-proof-pending) ;;
-    *) refuse "--conversation (in-thread delivery) applies to uvn-status, withdrawal-confirm, the status notes, claim-status, email-changed, gap-ask, merge-pending, credit-hold-status and claim-proof-pending only." ;;
+    uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-status|gap-ask|merge-pending|credit-hold-status|claim-proof-pending|proof-need-ask) ;;
+    *) refuse "--conversation (in-thread delivery) applies to uvn-status, withdrawal-confirm, the status notes, claim-status, email-changed, gap-ask, merge-pending, credit-hold-status, claim-proof-pending and proof-need-ask only." ;;
   esac
   printf '%s' "$THREAD" | grep -qE '^[0-9]{1,24}$' \
     || refuse "--conversation must be the numeric Intercom conversation id (got '$THREAD')."
@@ -795,6 +828,13 @@ INPUT="$("$JQ_BIN" -c '
     claim: ((.claim // {}) | { profile_name: ((.profile_name // "") | clean), profile_url: ((.profile_url // "") | clean),
                                code: ((.code // "") | clean), platform: ((.platform // "") | clean | ascii_downcase) }),
     merge: ((.merge // {}) | { profiles: [ (.profiles // [])[] | clean ] }),
+    need: ((.need // {}) | { code: ((.code // "") | clean), issuer: ((.issuer // "") | clean),
+                             verify_code: ((.verify_code // "") | clean), doc_sha: ((.doc_sha // "") | clean | ascii_downcase),
+                             doc_received_at: ((.doc_received_at // "") | clean), doc_kind: ((.doc_kind // "") | clean),
+                             doc_count: (.doc_count // 1 | if type == "number" and . >= 1 and . <= 99 and . == floor then . else 1 end),
+                             doc_shas: ([(.doc_shas // [])[]? | strings | select(test("^[0-9a-f]{64}$"))] | unique | .[0:20]),
+                             doc_map: ((.doc_map // {}) | if type == "object" then with_entries(select((.key | test("^[A-Za-z0-9-]{1,64}$")) and ((.value | type) == "string") and (.value | test("^[0-9a-f]{64}$")))) else {} end),
+                             doc_intakes: ((.doc_intakes // {}) | if type == "object" then with_entries(select((.key | test("^[0-9a-f]{64}$")) and ((.value | type) == "string") and (.value | test("^[A-Za-z0-9:._-]{1,80}$")))) else {} end) }),
     credits: [ .credits[] | { request_id: ((.request_id // "") | clean), role: ((.role // "") | clean),
                               track_title: ((.track_title // "") | clean), artist_name: ((.artist_name // "") | clean),
                               role_families: ([(.role_families // [])[] | clean] | if length == 0 then ["other"] else . end),
@@ -804,12 +844,62 @@ INPUT="$("$JQ_BIN" -c '
                               other_names: [(.other_names // [])[] | clean | select(length > 0)],
                               evidence_source: ((.evidence_source // "") | clean),
                               corroboration_url: ((.corroboration_url // "") | clean),
-                              profile_id: ((.profile_id // "") | clean), track_id: ((.track_id // "") | clean) } ] }' "$CREDITS_FILE")"
+                              profile_id: ((.profile_id // "") | clean), track_id: ((.track_id // "") | clean),
+                              ask_class: ((.ask_class // "") | clean | ascii_downcase | .[0:32]),
+                              is_approved: ((.is_approved // "") | clean | ascii_downcase | .[0:8]) } ] }' "$CREDITS_FILE")"
 
 INPUT_FILING_CONV="$("$JQ_BIN" -r '(.user.filing_conversation // "") | tostring' "$CREDITS_FILE" 2>/dev/null || true)"
 # R1 is delivered INTO the filing conversation (p1's batch-1 signature: the thread comm_state's R5-R7 and G3 judged),
 # never into whichever conversation the 14-day auto-pick would choose and never by email instead. The dry run
 # renders it in-thread too. A filing thread that cannot carry it is a hold (below), not a fallback.
+# R9 (proof-loop p1 165, Fable 166): a thread we deliver INTO must be about credits / claims / merges - by its ticket
+# type, title/subject, the customer's opening message, or one of its last 3 human parts. A refund, billing or analytics
+# thread is never used for a credit note: the note goes by email instead (a reply opens a conversation the intake
+# files). "credit card" / "credit note" are billing words, not credit words. Reads a conversation JSON on stdin.
+TOPIC_STRONG='\\b(song|track) ?credits?\\b|\\bcredit (request|verification|review|claim)s?\\b|split ?sheets?|\\bmerg(e|es|ed|ing)( (my|the|these|those|our|two|both|duplicate|muso|artist))* (profiles?|accounts?|pages?|duplicates?)\\b|\\b(profiles?|accounts?|pages?) (merged|merging|merge)\\b|\\bduplicate (profiles?|accounts?|artist pages?)\\b|\\b(profile|artist|page) claims?\\b|\\bclaim(s|ed|ing)? (my |the |this |a |an |our )?(muso )?(profile|artist|page)s?\\b|\\bproof of (my |the |our |this )?(credits?|role|work|contribution|authorship|ownership)\\b'
+TOPIC_BILLING='\\b(refund\\w*|charge[sd]?|chargeback|invoice\\w*|billing|billed|payment\\w*|subscription\\w*|paypal|card)\\b'
+thread_on_topic() {
+  "$JQ_BIN" -e '
+    def human: ((.author.type // "") | IN("user", "lead", "contact", "admin")) and ((.part_type // "comment") != "note");
+    def words: ascii_downcase | gsub("credit[ -]?cards?|credit notes?|store credit"; " ");
+    # QA #1418: the ticket type in any shape (an object with a name, a bare string, or nothing), like comm_state
+    # ticket_type_name - a string must never make this filter throw (no quotes in this comment: jq program)
+    def ttype: (.ticket | if type == "object" then (.ticket_type | if type == "object" then (.name // "")
+                elif type == "string" then . else "" end) else "" end);
+    ([ ttype, (.title // ""), (.source.subject // ""), (.source.body // "") ]
+     + ([ (.conversation_parts.conversation_parts // [])[] | select(human) | select(((.body // "") | length) > 0) ]
+        | .[-3:] | map(.body)))
+    | map(tostring | words) | join(" \n ")
+    # QA #1418: the same STRONG / weak / billing patterns and rule as comm_state.on_topic (test-pinned): billing vetoes all
+    | (test("'"$TOPIC_BILLING"'") | not) and (test("'"$TOPIC_STRONG"'") or test("\\bcredits?\\b"))' \
+    >/dev/null 2>&1
+}
+R9_EXEMPT=0
+case "$CAMPAIGN" in email-changed|email-changed-dup|withdrawal-confirm) R9_EXEMPT=1 ;; esac
+# r5 (R1 only): when the filing thread fails R9, the receipt goes into the user's OTHER open credit/claim/merge
+# conversation (exactly this contact, on topic, updated in the last 30 days, newest first), judged by the same
+# thread_check / comm_state as the filing thread; only when there is none does it go by email. Prints the id or
+# nothing; exit 1 = the lookup could not be verified (nothing sent).
+credit_thread_of() { # <contact_id> <exclude_conversation>
+  local since res ids id c
+  since=$(( $(g1_now) - 30*86400 ))
+  res="$(printf '%s' "$1" | "$JQ_BIN" -Rc --argjson since "$since" \
+    '{query: {operator: "AND", value: [{field: "contact_ids", operator: "=", value: .}, {field: "state", operator: "=", value: "open"}, {field: "updated_at", operator: ">", value: $since}]}, pagination: {per_page: 20}}' \
+    | api POST /conversations/search)" || return 1
+  printf '%s' "$res" | "$JQ_BIN" -e '(.conversations|type) == "array"' >/dev/null 2>&1 || return 1
+  ids="$(printf '%s' "$res" | "$JQ_BIN" -r --arg x "$2" --argjson since "$since" \
+    '[.conversations[] | select((.state // "") == "open" and ((.updated_at // 0) > $since) and ((.id // "") | tostring) != $x)]
+     | sort_by(.updated_at) | reverse | .[0:10][] | (.id | tostring)')"
+  for id in $ids; do
+    printf '%s' "$id" | grep -qE '^[0-9]{1,24}$' || return 1
+    c="$(api GET "/conversations/$id?display_as=plaintext")" || return 1
+    printf '%s' "$c" | "$JQ_BIN" -e --arg t "$id" --arg me "$1" '(.type // "") == "conversation" and ((.id // "") | tostring) == $t
+        and ([(.contacts.contacts // [])[] | (.id // "") | tostring] == [$me])' >/dev/null 2>&1 || continue
+    printf '%s' "$c" | thread_on_topic || continue
+    printf '%s' "$id"; return 0
+  done
+  return 0
+}
 R1_THREAD=0
 R1LIKE=0; case "$COPY" in docrecvr|docrecvn) R1LIKE=1 ;; esac   # /i takes R1's thread rules (r5 10-30 §i)
 # r5 HOLD 10-30 19:0xZ (3 paid R1), two thread rules on the conversation as read (plaintext):
@@ -875,12 +965,12 @@ fi
 if [ "$COPY" = "docrecvr" ] && [ "$("$JQ_BIN" -r '.user | has("filing_muso_ui") and .filing_muso_ui == false' "$CREDITS_FILE" 2>/dev/null)" != "true" ]; then
   refuse "r1_filing_class_unknown: the R1 payload does not state the filing's class (user.filing_muso_ui must be false); nothing was sent or claimed."
 fi
-if [ "$R1LIKE" = "1" ] && [ -n "$THREAD" ] && [ "$THREAD" != "$INPUT_FILING_CONV" ]; then
-  refuse "R1 goes only into the filing conversation ($INPUT_FILING_CONV); --conversation $THREAD is another thread. Nothing was sent or claimed."
+if { [ "$R1LIKE" = "1" ] || [ "$COPY" = "proofneed" ]; } && [ -n "$THREAD" ] && [ "$THREAD" != "$INPUT_FILING_CONV" ]; then
+  refuse "R1 / the per-need ask goes only into the filing conversation ($INPUT_FILING_CONV); --conversation $THREAD is another thread. Nothing was sent or claimed."
 fi
-if [ "$R1LIKE" = "1" ] && printf '%s' "$INPUT_FILING_CONV" | grep -qE '^[0-9]{1,24}$' \
+if { [ "$R1LIKE" = "1" ] || [ "$COPY" = "proofneed" ]; } && printf '%s' "$INPUT_FILING_CONV" | grep -qE '^[0-9]{1,24}$' \
    && { [ -z "$THREAD" ] || [ "$THREAD" = "$INPUT_FILING_CONV" ]; }; then
-  # QA #1532: an explicit --conversation that IS the filing conversation (e.g. a reply_due answer) is the same R1 path
+  # QA #1532: an explicit --conversation that IS the filing conversation (e.g. a reply_due answer) is the same path
   THREAD="$INPUT_FILING_CONV"; MESSAGE_TYPE="comment"; R1_THREAD=1
 fi
 # G1's "older than the request": the oldest credits[].created_at the caller passed (epoch, or ISO with Z, a +hh:mm /
@@ -1035,6 +1125,37 @@ if [ "$CAMPAIGN" = "takeback-notice" ]; then
 fi
 dups="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '[.credits[].request_id] | length - (unique | length)')"
 [ "$dups" -eq 0 ] || refuse "credits repeats a request_id; each credit request appears once."
+if [ "$CAMPAIGN" = "proof-need-ask" ]; then
+  # The need comes from b1's tray (the reader's need code); the issuer is a document-derived NAME, so it is held
+  # to a plain-name shape (no links, no addresses, no markup): anything else refuses the note, never renders it.
+  printf '%s' "$USER_ID" | grep -qE '^[0-9]{1,12}$' || refuse "proof-need-ask needs user.id, the Muso account id."
+  NEED_CODE="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.need.code')"
+  case "$NEED_CODE" in
+    readable_document|counterparty_signed_or_registered) ;;
+    issuer_email_from_official_domain)
+      printf '%s' "$INPUT" | "$JQ_BIN" -e ".need.issuer | test(\"^[A-Za-z0-9][A-Za-z0-9 &.,'-]{0,79}\$\") and (test(\"[.][A-Za-z]{2,}(\$| )\") | not)" >/dev/null \
+        || refuse "proof-need-ask issuer_email_from_official_domain needs need.issuer: the issuer's plain name (letters, digits, space, & . , ' -; at most 80 characters; never a domain or address)." ;;
+    distributor_dashboard_with_code)
+      printf '%s' "$INPUT" | "$JQ_BIN" -e '.need.verify_code | test("^[A-Z0-9][A-Z0-9-]{3,31}$")' >/dev/null \
+        || refuse "proof-need-ask distributor_dashboard_with_code needs need.verify_code: the 7-day code we issued (4 to 32 capital letters, digits or dashes)." ;;
+    *) refuse "proof-need-ask needs need.code: readable_document, issuer_email_from_official_domain, distributor_dashboard_with_code or counterparty_signed_or_registered (got '$NEED_CODE')." ;;
+  esac
+  # The document the reader checked (p1 ruling 096): its sha, when it arrived, and its kind, so the ask names it and
+  # comm_state can tell whether anything newer came in after it.
+  printf '%s' "$INPUT" | "$JQ_BIN" -e '.need.doc_sha | test("^[0-9a-f]{64}$")' >/dev/null \
+    || refuse "proof-need-ask needs need.doc_sha: the sha256 of the document the reader checked (dv_outcomes.proof_id)."
+  printf '%s' "$INPUT" | "$JQ_BIN" -e '.need.doc_received_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$") and ((. | fromdateiso8601 | todate) == .)' >/dev/null \
+    || refuse "proof-need-ask needs need.doc_received_at: when the document arrived (proof_intake.received_at, YYYY-MM-DDTHH:MM:SSZ)."
+  printf '%s' "$INPUT" | "$JQ_BIN" -e '.need.doc_kind | IN("image", "PDF", "document")' >/dev/null \
+    || refuse "proof-need-ask needs need.doc_kind: image, PDF or document (from proof_intake.mime)."
+  # QA #1418 (08:36Z): the group the copy names must be EXACTLY the documents the send checks and locks - the RAW
+  # payload's doc_shas are need.doc_count distinct sha256s, at most MAX_DOC_GROUP of them; never silently truncated
+  # (a group of 21 would name 21 and check 20) and never a count clamped to 1 ("the file" for many)
+  "$JQ_BIN" -e --argjson max "$MAX_DOC_GROUP" '.need as $n | ($n.doc_shas | type == "array") and ($n.doc_count | type == "number")
+      and ([$n.doc_shas[] | select(type == "string" and test("^[0-9a-f]{64}$"))] | unique | length) as $k
+      | $k == ($n.doc_shas | length) and $k == $n.doc_count and $k >= 1 and $k <= $max' "$CREDITS_FILE" >/dev/null \
+    || refuse "need_doc_group_mismatch: need.doc_shas must be exactly need.doc_count distinct sha256s (1 to $MAX_DOC_GROUP); the ask would name documents it does not check. Nothing was sent or claimed."
+fi
 if [ "$CAMPAIGN" = "gap-ask" ]; then
   # The verdict is read HERE, from the proof store, never taken from the caller: every credit's
   # latest stage-2 verdict (every claimed role) must be need_more for THIS account, the account
@@ -1120,6 +1241,15 @@ if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "credit-hold-status" ] && [ "$CREDIT_HOL
 fi
 if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "claim-proof-pending" ] && [ "$CLAIM_PROOF_PENDING_COPY_APPROVED" != "1" ]; then
   refuse "the claim-proof-pending copy is not approved for sending yet (CLAIM_PROOF_PENDING_COPY_APPROVED=0). It waits for the captain's yes on L14b, landed in a PR that flips the lock; --dry-run renders exactly what would be sent."
+fi
+if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "proof-need-ask" ] && [ "$PROOF_NEED_ASK_COPY_APPROVED" != "1" ]; then
+  refuse "the proof-need-ask copy is not approved for sending yet (PROOF_NEED_ASK_COPY_APPROVED=0). It waits for the captain's yes on card L11c, landed in a PR that flips the lock; --dry-run renders exactly what would be sent."
+fi
+if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "proof-need-ask" ] && [ "$NEED_CODE" = "distributor_dashboard_with_code" ] && [ "$DISTRIBUTOR_CODES_ENABLED" != "1" ]; then
+  printf 'HELD distributor_codes_off credits=%s (no challenge-code issuer is live yet, b1 F9); nothing was sent or claimed\n' "$N"; exit 3
+fi
+if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "proof-need-ask" ] && [ "$NEED_CODE" = "issuer_email_from_official_domain" ] && [ "$VERIFY_AT_ENABLED" != "1" ]; then
+  printf 'HELD verify_at_off credits=%s (the issuer-email line points at verify@muso.ai, which stays off until Intercom identity verification is live); nothing was sent or claimed\n' "$N"; exit 3
 fi
 if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "retro-past" ] && [ "$RETRO_COPY_APPROVED" != "1" ]; then
   refuse "the retro-past copy is not approved for sending yet (RETRO_COPY_APPROVED=0). It needs Fable's copy GO and the captain's approval of the rendered notes, landed in a PR that flips the lock; --dry-run renders exactly what would be sent."
@@ -1615,6 +1745,46 @@ def removal_notice($fn; $c; $maxl):
 # <doc summary>, <track> and <role> are its only slots. <doc summary> is the stage-2 verdict's best document: its kind (a fixed label, a
 # plain "document" when stage 2 could not tell) and up to two OTHER held titles it names (catalog
 # titles, never document text). Several credits: up to 3 "<track> as <role>" pairs, then "and N more".
+# proof-need-ask (proof-loop captain card L11c, verbatim): common opening, the line for the reader's need code,
+# (the counterparty line ends "Reply here with it and we'll check it.": p1 ruling 098 under captain-1028-213x (c)),
+# common closing (its "Thank you, Caroline, Muso Support" is the shared sign-off). One character differs from the
+# card: the issuer line's em dash is " - " (the gate refuses an em dash in any note: Caroline's voice; the approved
+# queued line uses the same " - "), flagged to proof-loop-lead-fable-p1 for the captain's yes.
+def proof_need_line($n; $x):
+  if $n.code == "readable_document" then
+    "The file is hard to read on our side. Reply to this message with the same document as a PDF or a clear photo of the whole page, and we'll check it."
+  elif $n.code == "issuer_email_from_official_domain" then
+    "It's a message from \($n.issuer). Please ask \($n.issuer) to send one line to verify@muso.ai from their own address confirming you were \($x.role) on \($x.track_title | qt) - or forward us their original email with its headers."
+  elif $n.code == "distributor_dashboard_with_code" then
+    "Sign in to the distributor or label account that released \($x.track_title | qt), type this code into its search box: \($n.verify_code), and reply with a screenshot that shows the release and the code together. The code works for 7 days."
+  else
+    "We need the other side of it: a split sheet or agreement signed by the artist or label, a PRO registration (ASCAP, BMI, SOCAN or similar) that lists you as \($x.role), or a royalty statement that names the track. Reply here with it and we'll check it."
+  end;
+# the plural lines (Fable [key=l11c-plural]); only readable + counterparty can send (the other two are held at send)
+def proof_need_line_plural($n; $x):
+  if $n.code == "counterparty_signed_or_registered" then
+    "We need the other side of it: a split sheet or agreement signed by the artist or label, a PRO registration (ASCAP, BMI, SOCAN or similar) that lists you in your role on each track, or a royalty statement that names the tracks. Reply here with it and we'll check it."
+  else proof_need_line($n; $x) end;
+# the document is named as the user knows it: its kind and the day they sent it (l1 176 = final, via p1 168: l1's text
+# with that one insertion; kind image / PDF / file from the mime, server facts only; several documents sent on the
+# newest date -> "the documents you sent on {date}")
+def doc_named($n):
+  ["January","February","March","April","May","June","July","August","September","October","November","December"] as $m
+  | (if (($n.doc_count // 1) | tonumber? // 1) > 1 then "the documents" else "the \(if $n.doc_kind == "document" then "file" else $n.doc_kind end)" end)
+    + " you sent on \($m[($n.doc_received_at[5:7] | tonumber) - 1]) \($n.doc_received_at[8:10] | tonumber)";
+def proof_need_ask($fn; $c; $n; $maxl):
+  $c[0] as $x
+  | if ($c | length) == 1 then
+      { subject: "About the document for your Muso credit request",
+        segs: ([ {p: "Hi \($fn), thanks for \(doc_named($n)) for your \($x.role) credit on \($x.track_title | qt) by \($x.artist_name). We have it on file, but on its own it isn't something we can check against an outside source."},
+                 {p: proof_need_line($n; $x)},
+                 {p: "Your request stays open while we look, and nothing is removed."} ] + sig) }
+    else
+      { subject: "About the document for your Muso credit requests",
+        segs: ([ {p: "Hi \($fn), thanks for \(doc_named($n)) for your credit requests for \(titles($c; $maxl)). We have it on file, but on its own it isn't something we can check against an outside source."},
+                 {p: proof_need_line_plural($n; $x)},
+                 {p: "Your requests stay open while we look, and nothing is removed."} ] + sig) }
+    end;
 def gap_label: {split_sheet: "split sheet", contract: "contract", invoice: "invoice",
   letter_of_direction: "letter of direction", pro_portal: "PRO registration",
   distributor_portal: "distributor screenshot", dsp_for_artists: "streaming-dashboard screenshot",
@@ -1663,6 +1833,7 @@ def gap_ask($fn; $c; $maxl):
    elif $copy == "withdrawal" then withdrawal_confirm(.credits)
    elif $copy == "uvn" then uvn_status($fn; .credits; $maxl)
    elif $copy == "gap" then gap_ask($fn; .credits; $maxl)
+   elif $copy == "proofneed" then proof_need_ask($fn; .credits; .need; $maxl)
    elif $copy == "takeback" then takeback_notice($fn; .credits; $maxl)
    elif $copy == "removal" then removal_notice($fn; .credits; $maxl)
    elif $copy == "past" then
@@ -1942,7 +2113,7 @@ for_each_account_contact() { # <fn>: the first non-empty answer of <fn> over thi
 # The clock G1 reads; the test copy pins it (INTERCOM_VERIFY_TEST_NOW, epoch) so the 24h rule is testable.
 g1_now() { if [ "$TESTABLE" = "1" ] && [ -n "${INTERCOM_VERIFY_TEST_NOW:-}" ]; then printf '%s' "$INTERCOM_VERIFY_TEST_NOW"; else date -u +%s; fi; }
 GOLIVE=0
-case "$CAMPAIGN:$COPY" in merge-pending:*|credit-hold-status:*|claim-proof-pending:*|status-doc-received:docrecvr|status-doc-received:docrecvn|uvn-status:*) GOLIVE=1 ;; esac
+case "$CAMPAIGN:$COPY" in merge-pending:*|credit-hold-status:*|claim-proof-pending:*|status-doc-received:docrecvr|status-doc-received:docrecvn|uvn-status:*|proof-need-ask:*) GOLIVE=1 ;; esac
 # QA #1517: every reply_due answer, whatever its class, passes the go-live recipient gates (G1-G5; G2's opener rule is
 # replaced by the verified trigger for reply_due only)
 [ -z "$REPLY_DUE" ] || GOLIVE=1
@@ -1997,18 +2168,87 @@ if [ "$GOLIVE" = "1" ] && [ "$LIVE" = "1" ]; then
     || refuse "G4: the recipient contact is not an Intercom user (a lead or visitor); nothing was sent or claimed."
   # G3 (R1 only): the receipt goes to the contact that FILED the document. The caller passes the proof_intake row's
   # conversation as user.filing_conversation; its single contact must be this account's contact.
-  if [ "$R1LIKE" = "1" ]; then
+  # An EMAIL-filed document (support@, no Intercom filing conversation; user.filing_conversation = "email") gets the
+  # per-need ask by Intercom email to the account's verified Intercom user - a reply threads into that user's own
+  # conversation, which the intake files (proof-loop-lead-fable-p1 152). R1 never takes this path.
+  if [ "$COPY" = "proofneed" ] && [ "$INPUT_FILING_CONV" = "email" ]; then
+    [ -z "$THREAD" ] || refuse "an email-filed document's ask goes by email; --conversation does not apply. Nothing was sent or claimed."
+    # QA #1418: never on the caller's word - the proof store must show each named document was FILED by email (its
+    # earliest intake, the one read, has no Intercom conversation) and matched to this account by a strong identity
+    # (l1 [key=l11c-email-filed]; the set is receipts.STRONG_MATCH, pinned by a test). Anything else refuses.
+    ef_why="$("$PY_BIN" -I - "$PROOF_DB" "$USER_ID" "$EMAIL_FILED_STRONG_MATCH" \
+      "$(printf '%s' "$INPUT" | "$JQ_BIN" -r '([.need.doc_sha // empty] + (.need.doc_shas // [])) | unique | join(",")')" \
+      "$(printf '%s' "$INPUT" | "$JQ_BIN" -c '.need.doc_intakes // {}')" <<'PY' 2>&1 || true
+import json, re, sqlite3, sys
+db_path, uid, strong, shas = sys.argv[1], sys.argv[2], set(sys.argv[3].split()), [s for s in sys.argv[4].split(",") if s]
+try:
+    named = {str(k).lower(): str(v) for k, v in json.loads(sys.argv[5] or "{}").items() if re.fullmatch(r"[A-Za-z0-9:._-]{1,80}", str(v))}
+except ValueError:
+    named = {}
+try:
+    if not re.fullmatch(r"[0-9]{1,12}", uid) or not shas:
+        raise ValueError("no user id or no named document")
+    db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    for sha in shas:
+        # QA #1418: the intake the reader READ (need.doc_intakes, from dv_outcomes.intake_id) when named; else the
+        # earliest arrival of the file (the one read before intake ids existed)
+        if sha.lower() in named:
+            row = db.execute("SELECT coalesce(conversation_id, ''), coalesce(matched_by, '') FROM proof_intake WHERE user_id=? "
+                             "AND lower(file_sha256)=lower(?) AND intake_id=?", (int(uid), sha, named[sha.lower()])).fetchone()
+        else:
+            row = db.execute("SELECT coalesce(conversation_id, ''), coalesce(matched_by, '') FROM proof_intake WHERE user_id=? "
+                             "AND lower(file_sha256)=lower(?) ORDER BY received_at ASC LIMIT 1", (int(uid), sha)).fetchone()
+        if row is None:
+            print(f"no intake row of document {sha[:12]} for this user"); sys.exit(0)
+        if str(row[0]).strip().isdigit():
+            print(f"document {sha[:12]} was filed in Intercom conversation {row[0]}, not by email"); sys.exit(0)
+        if row[1] not in strong:
+            print(f"document {sha[:12]} was matched to this account by a weak identity ({row[1] or 'none'})"); sys.exit(0)
+except Exception as exc:  # unreadable store: refuse (fail closed)
+    print(f"the proof store could not be read ({exc})"); sys.exit(0)
+PY
+)"
+    [ -z "$ef_why" ] || refuse "email-filed per-need ask: $ef_why; nothing was sent or claimed."
+    MESSAGE_TYPE="email"; R1_THREAD=0
+  elif [ "$R1LIKE" = "1" ] || [ "$COPY" = "proofneed" ]; then
     fconv="$(printf '%s' "$INPUT_FILING_CONV" | grep -E '^[0-9]{1,24}$' || true)"
+    FILING_SRC="$fconv"   # the document's filing conversation, kept for comm_state even when delivery moves (R9)
     [ -n "$fconv" ] || refuse "G3: the receipt names no filing conversation (user.filing_conversation); nothing was sent or claimed."
     g3="$(api GET "/conversations/$fconv?display_as=plaintext")" \
       || { printf 'CONVERSATION READ FAILED (curl); nothing was sent or claimed\n' >&2; exit 4; }
     [ "$(printf '%s' "$g3" | "$JQ_BIN" -r '[(.contacts.contacts // [])[] | (.id // "") | tostring] | join(",")')" = "$CONTACT_ID" ] \
       || refuse "G3: the contact that filed the document (conversation $fconv) is not this receipt's recipient; nothing was sent or claimed (tray)."
-    # r5 19:0xZ: the filing thread already carries our free-text acknowledgement after the filing part -> no R1
-    rcpt="$(printf '%s' "$g3" | "$JQ_BIN" -r "$RECEIPTED_JQ" 2>/dev/null)" \
-      || { printf 'FILING THREAD NOT READABLE for the receipted check (conversation %s); nothing was sent or claimed\n' "$fconv" >&2; exit 4; }
-    if [ -n "$rcpt" ]; then
-      printf 'HELD r1_receipted_in_thread credits=%s last_admin_comment_at=%s (conversation %s: we already acknowledged the document there); nothing was sent or claimed\n' "$N" "$rcpt" "$fconv"; exit 3
+    # r5 19:0xZ: the filing thread already carries our free-text acknowledgement after the filing part -> no R1 / /i
+    # (receipts only: the per-need ask is not a receipt)
+    if [ "$R1LIKE" = "1" ]; then
+      rcpt="$(printf '%s' "$g3" | "$JQ_BIN" -r "$RECEIPTED_JQ" 2>/dev/null)" \
+        || { printf 'FILING THREAD NOT READABLE for the receipted check (conversation %s); nothing was sent or claimed\n' "$fconv" >&2; exit 4; }
+      if [ -n "$rcpt" ]; then
+        printf 'HELD r1_receipted_in_thread credits=%s last_admin_comment_at=%s (conversation %s: we already acknowledged the document there); nothing was sent or claimed\n' "$N" "$rcpt" "$fconv"; exit 3
+      fi
+    fi
+    # The per-need ask goes INTO the filing thread; if that thread is CLOSED it goes by email instead, so the
+    # reply opens a new Intercom conversation of the same contact (l1 [key=l11c-asks]). R1 never does this.
+    if [ "$COPY" = "proofneed" ] && printf '%s' "$g3" | "$JQ_BIN" -e '((.state // "") | ascii_downcase) == "closed" or .open == false' >/dev/null 2>&1; then
+      THREAD=""; MESSAGE_TYPE="email"; R1_THREAD=0
+    fi
+    # R9: a filing thread that is not about credits (e.g. a refund thread where a receipt was attached) is never the
+    # delivery thread; the note goes by email and comm_state's thread rules are not judged on that unrelated thread
+    if ! printf '%s' "$g3" | thread_on_topic; then
+      if [ "$COPY" = "docrecvr" ]; then
+        r9alt="$(credit_thread_of "$CONTACT_ID" "$fconv")" \
+          || { printf 'R9 OTHER-THREAD LOOKUP NOT VERIFIED; nothing was sent or claimed\n' >&2; exit 4; }
+        if [ -n "$r9alt" ]; then
+          printf 'R9 filing conversation %s is not about credits; delivering into the user'"'"'s credit conversation %s\n' "$fconv" "$r9alt" >&2
+          THREAD="$r9alt"; fconv="$r9alt"; MESSAGE_TYPE="comment"
+        else
+          printf 'R9 filing conversation %s is not about credits and the user has no other open credit conversation; delivering by email\n' "$fconv" >&2
+          THREAD=""; MESSAGE_TYPE="email"; R1_THREAD=0; fconv=""
+        fi
+      else
+        printf 'R9 filing conversation %s is not about credits, claims or merges; delivering by email\n' "$fconv" >&2
+        THREAD=""; MESSAGE_TYPE="email"; R1_THREAD=0; fconv=""
+      fi
     fi
   fi
   # G1: the contact existed for more than 24 hours, and before the oldest request this note names (when given).
@@ -2050,8 +2290,14 @@ if { [ "$GOLIVE" = "1" ] || [ "$NIE" = "1" ]; } && [ "$LIVE" = "1" ]; then
   set +e
   CS="$("$PY_BIN" -I "$COMM_STATE_HELPER" check --campaign "$CAMPAIGN" --copy "$COPY" --user-id "$USER_ID" \
         --request-ids "$ALL_IDS" --contact-id "$CONTACT_ID" \
-        --conversation "$(if [ "$R1LIKE" = "1" ]; then printf '%s' "${fconv:-}"; else printf '%s' "${THREAD:-}"; fi)" \
-        --reply-due "${REPLY_DUE:-}" ${NIE_ARGS[@]+"${NIE_ARGS[@]}"} 2>/dev/null)"; cs_rc=$?
+        --conversation "$(if [ "$R1LIKE" = "1" ] || [ "$COPY" = "proofneed" ]; then printf '%s' "${fconv:-}"; else printf '%s' "${THREAD:-}"; fi)" \
+        --reply-due "${REPLY_DUE:-}" ${NIE_ARGS[@]+"${NIE_ARGS[@]}"} \
+        --doc-sha "$(printf '%s' "$INPUT" | "$JQ_BIN" -r '([.need.doc_sha // empty] + (.need.doc_shas // [])) | unique | join(",")')" \
+        --doc-at "$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.need.doc_received_at // ""')" \
+        --need "$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.need.code // ""')" \
+        --filing-conversation "${FILING_SRC:-}" \
+        --doc-map "$(printf '%s' "$INPUT" | "$JQ_BIN" -r '(.need.doc_map // {}) | to_entries | map("\(.key)=\(.value)") | join(",")')" \
+        --doc-intakes "$(printf '%s' "$INPUT" | "$JQ_BIN" -r '(.need.doc_intakes // {}) | to_entries | map("\(.key)=\(.value)") | join(",")')" 2>/dev/null)"; cs_rc=$?
   set -e
   case "$cs_rc" in
     0) ;;
@@ -2161,14 +2407,14 @@ recently_messaged() { # <contact-id> -> prints the reason when we wrote to them 
   done
   return 0
 }
-case "$CAMPAIGN" in uvn-status|status-doc-received|status-team-review|claim-status|gap-ask|merge-pending|credit-hold-status|claim-proof-pending) STATUSLIKE=1 ;; *) STATUSLIKE=0 ;; esac
+case "$CAMPAIGN" in uvn-status|status-doc-received|status-team-review|claim-status|gap-ask|merge-pending|credit-hold-status|claim-proof-pending|proof-need-ask) STATUSLIKE=1 ;; *) STATUSLIKE=0 ;; esac
 # A claim ask never crosses a person: any admin or Caroline reply to this user in the last 7
 # days defers the note AND its reminder (nothing closed; the next run looks again; a reminder
 # deferred past the day before the close day is never sent).
 [ "$CAMPAIGN" != "claim-proof-ask" ] || STATUSLIKE=1
 if [ "$STATUSLIKE" = "1" ] && [ "$LIVE" = "1" ]; then
-  # gap-ask is never skipped for documents in Intercom: a document on file is why it is sent.
-  if [ "$CAMPAIGN" = "gap-ask" ]; then
+  # gap-ask / proof-need-ask are never skipped for documents in Intercom: a document on file is why they are sent.
+  if [ "$CAMPAIGN" = "gap-ask" ] || [ "$CAMPAIGN" = "proof-need-ask" ]; then
     FOLLOWED_IDS="$(ledger followed-notes --user-key "$EMAIL" --user-id "$USER_ID" | "$JQ_BIN" -c '.message_ids')" \
       || die "the ledger read failed; refusing to send without the idempotency record."
   fi
@@ -2223,9 +2469,9 @@ fi
 # or one tagged do-not-message. An explicit --conversation that fails is a recorded refusal
 # (nothing sent); a conversation the gate picked itself that fails is dropped and the note
 # goes by email, so the ask stays open and is delivered.
-thread_check() { # sets THREAD_WHY (empty when $THREAD can carry the note) and THREAD_UNREAD
+thread_check() { # sets THREAD_WHY (empty when $THREAD can carry the note), THREAD_UNREAD and THREAD_OFFTOPIC
   local tconv assignee btag
-  THREAD_WHY="" THREAD_UNREAD=0 THREAD_WAIT=""
+  THREAD_WHY="" THREAD_UNREAD=0 THREAD_WAIT="" THREAD_OFFTOPIC=0
   if ! tconv="$(api GET "/conversations/$THREAD?display_as=plaintext")" \
      || ! printf '%s' "$tconv" | "$JQ_BIN" -e --arg t "$THREAD" '(.type // "") == "conversation" and ((.id // "") | tostring) == $t' >/dev/null 2>&1; then
     THREAD_UNREAD=1; THREAD_WHY="conversation $THREAD could not be read: ${tconv:0:300}"; return 0
@@ -2257,7 +2503,10 @@ thread_check() { # sets THREAD_WHY (empty when $THREAD can carry the note) and T
     THREAD_WHY="G2: conversation $THREAD was opened by us (an admin or bot), not the customer; not sending in it."; return 0
   fi
   btag="$(printf '%s' "$tconv" | "$JQ_BIN" -r --arg b "$BLOCKED_CONV_TAGS" '($b | split(" ")) as $bl | [(.tags.tags // [])[] | (.name // "") | ascii_downcase | select(IN($bl[]))] | .[0] // empty')"
-  [ -z "$btag" ] || THREAD_WHY="conversation $THREAD carries the '$btag' tag (do not auto-message); not sending."
+  [ -z "$btag" ] || { THREAD_WHY="conversation $THREAD carries the '$btag' tag (do not auto-message); not sending."; return 0; }
+  if [ "$R9_EXEMPT" = "0" ] && ! printf '%s' "$tconv" | thread_on_topic; then
+    THREAD_OFFTOPIC=1; THREAD_WHY="R9: conversation $THREAD is not about credits, claims or merges"
+  fi
 }
 THREAD_CONTACT_PICK=""
 if [ -n "$THREAD" ] && [ "$LIVE" = "1" ]; then
@@ -2269,6 +2518,10 @@ if [ -n "$THREAD" ] && [ "$LIVE" = "1" ]; then
     if [ -n "${THREAD_WAIT:-}" ]; then
       # r5 19:0xZ: a thread waiting on the customer gets no automated line, by thread or as an email beside it
       printf 'HELD waiting_on_customer credits=%s last_admin_question_at=%s (%s); nothing was sent or claimed\n' "$N" "$THREAD_WAIT" "${THREAD_WHY:0:200}"; exit 3
+    elif [ "$THREAD_OFFTOPIC" = "1" ]; then
+      # R9: never into an unrelated thread; by email instead (every campaign, R1 included - p1 165 / Fable 166)
+      printf 'R9 %s; delivering by email\n' "$THREAD_WHY" >&2
+      THREAD=""; MESSAGE_TYPE="email"; R1_THREAD=0
     elif [ "$R1_THREAD" = "1" ]; then
       printf 'HELD r1_filing_thread credits=%s (%s); nothing was sent or claimed\n' "$N" "${THREAD_WHY:0:300}"; exit 3
     elif [ "$THREAD_AUTO" = "1" ]; then
@@ -2436,7 +2689,8 @@ if [ -n "$REPLY_DUE" ] && [ "$ACTION" = "post" ]; then rd_final_read; fi
 if [ "$KIND" = "initial" ]; then
   REFS_FILE="$(mktemp)"
   trap 'rm -f "$REFS_FILE"' EXIT
-  printf '%s' "$INPUT" | "$JQ_BIN" -c '[.credits[] | {request_id, profile_id, track_id}]' > "$REFS_FILE"
+  # ask_class (p1 178: core_proof_request is an audit class) + is_approved per request ride into refs_json (QA #1418)
+  printf '%s' "$INPUT" | "$JQ_BIN" -c '[.credits[] | {request_id, profile_id, track_id} + (if .ask_class != "" then {ask_class} else {} end) + (if .is_approved != "" then {is_approved} else {} end)]' > "$REFS_FILE"
   CLAIM="$(ledger claim --campaign "$CAMPAIGN" --user-key "$EMAIL" --user-id "$USER_ID" --day "$DAY" --request-ids "$ALL_IDS" \
     --message-type "$MESSAGE_TYPE" --approved-by "$APPROVED_BY" \
     --approval-ref "$APPROVAL_REF$(if [ "$RD_PREFIX" = "1" ]; then printf '; correction %s' "$REPLY_DUE_CORRECTION_REF"; fi)" \

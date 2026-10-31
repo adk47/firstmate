@@ -22,6 +22,11 @@ Rules (exit 3 = HOLD with the reasons; nothing is sent or claimed):
      last line there closed the matter ("sorted", "resolved", ...; R7).
   every go-live line: never to a user the production fraud lens holds or the watchlist / deny list names (R8),
      read at send time, not only at the list cut.
+  L11c (proof-need-ask; p1 ruling 096): sent ONLY at state 'checked' for the document it names (a dv_outcomes row
+     with a need code for need.doc_sha on the request); held when anything newer arrived after that document (a
+     proof_intake row, an Intercom customer message or attachment), when the request is decided or told, and by
+     the 7-day rule (which also makes it the >= 7-day 'checked' follow-up after a receipt). R6/R7 apply to its
+     filing conversation. A document on file never holds it: it is why the ask goes.
 Unreadable store, replica or Intercom read = UNKNOWN (exit 2): the gate sends nothing.
 
 CLI:  comm_state.py check --campaign C --user-id N --request-ids a,b [--contact-id X]
@@ -56,6 +61,9 @@ INTERCOM = "https://api.intercom.io"
 # sent only at state none / asked-with-no-reply).
 WAIT_LINES = ("credit-hold-status", "claim-proof-pending", "uvn-status", "claim-proof-ask")
 RECEIPT = "status-doc-received"
+NEED_ASK = "proof-need-ask"
+ASKABLE_NEEDS = ("readable_document", "counterparty_signed_or_registered", "issuer_email_from_official_domain",
+                 "distributor_dashboard_with_code")   # the gate holds the last two at send
 # The "nothing else is needed" family (message-book-1029 A2/A3/C3/C4/D3; Fable [key=message-book-1029], captain 'just
 # go'): only ever to a user who owes NOTHING. Checked at send with one replica read + the ledger + the hold list.
 REVIEW_FIRED = r'"review_[a-z_]+":\s*[1-9]'
@@ -253,11 +261,19 @@ def has_doc_link(text: str) -> bool:
     return False
 
 
-def intercom_facts(contact_id: str, last_ask: str, ic: Intercom, since: str = "") -> list[str]:
-    """An attachment the user sent us in Intercom on/after `since` (the oldest named request's creation; empty =
-    any time). Fable 199: a text message is never 'replied' - a text question is an ask trigger, so `last_ask` no
-    longer turns a text reply into a hold (kept in the signature for the callers)."""
+def intercom_facts(contact_id: str, last_ask: str, ic: Intercom, since: str = "", *, attach_since: float | None = None,
+                   filing: tuple[str, float] | None = None, text_after_ask: bool = False) -> list[str]:
+    """An attachment (or a shared-document link) the user sent us in Intercom on/after `since` (the oldest named
+    request's creation; empty = any time) - or on/after `attach_since` (epoch) when given. Fable 199: a text message
+    is never 'replied' ... except for the per-need ask (`text_after_ask`, L11c p1 096): ANY customer message after
+    `last_ask` (the document's arrival) holds it - a correction or a question about that document is news.
+    `filing` = (conversation, epoch) of the document's OWN part (proof_intake.received_at is that part's created_at):
+    exactly that part is not news; every other customer part from that second on is."""
     since_epoch = datetime.fromisoformat(since).replace(tzinfo=timezone.utc).timestamp() if since else None
+    if attach_since is not None:
+        since_epoch = attach_since
+    ask_epoch = (datetime.fromisoformat(last_ask).replace(tzinfo=timezone.utc).timestamp()
+                 if text_after_ask and last_ask else None)
     if not contact_id:
         raise Unknown("no Intercom contact to read")
     found: list[str] = []
@@ -279,9 +295,18 @@ def intercom_facts(contact_id: str, last_ask: str, ic: Intercom, since: str = ""
         if not src.get("created_at"):          # absent, null or 0: the conversation's own date (QA #1508)
             src["created_at"] = conv.get("created_at") or c.get("created_at")
         parts = [src] + ((conv.get("conversation_parts") or {}).get("conversation_parts") or [])
+        # proof_intake keeps no Intercom part id (provenance is a cache path or an attachment index), so the filing
+        # part is recognised only when it is the ONE customer attachment part of the filing conversation in that
+        # second; a second one in the same second (a correction) makes it ambiguous and the ask holds (QA round 4)
+        same_second = sum(1 for p in parts if filing and cid == filing[0] and p.get("attachments")
+                          and (p.get("author") or {}).get("type") in ("user", "lead", "contact")
+                          and int(p.get("created_at") or 0) == int(filing[1]))
         for p in parts:
             if (p.get("author") or {}).get("type") not in ("user", "lead", "contact"):
                 continue
+            if filing and p.get("attachments") and cid == filing[0] and int(p.get("created_at") or 0) == int(filing[1]) \
+                    and same_second == 1:
+                continue                                  # the filing event itself (the ONLY such part: fail closed)
             fresh = since_epoch is None or not p.get("created_at") or p["created_at"] >= since_epoch
             # an attachment with no readable time counts (fail closed; b1 C3)
             if p.get("attachments") and fresh:
@@ -289,6 +314,11 @@ def intercom_facts(contact_id: str, last_ask: str, ic: Intercom, since: str = ""
             # a text reply is not 'replied' - but a LINK to a shared document is a document (b1 on #1508)
             elif fresh and has_doc_link(p.get("body") or ""):
                 found.append(f"intercom_document_link:{cid}")
+            # the per-need ask only: any customer message after the document (text included) is news
+            # (same SECOND included, QA #1418 06:34Z: Intercom times are whole seconds, so a correction sent with the
+            # filing attachment shares its second - any customer text part other than the filing part counts)
+            elif ask_epoch is not None and int(p.get("created_at") or 0) >= int(ask_epoch) and (p.get("body") or "").strip():
+                found.append(f"intercom_reply_after_ask:{cid}")
     return sorted(set(found))
 
 
@@ -312,7 +342,7 @@ def thread_facts(conversation: str, ic: Intercom, now: float | None = None) -> l
     if not cust or max(cust) < now - STALE_THREAD_DAYS * 86400:
         out.append("R6_stale_thread")
     if str(conv.get("state") or "").lower() == "closed" or conv.get("open") is False:
-        out.append("R7_thread_resolved")          # r5: a closed conversation is not a delivery target
+        out.append("R7_thread_closed")            # r5: a closed conversation is not a delivery target
     if admin:
         last = max(admin, key=lambda p: p.get("created_at") or 0)
         if RESOLVED.search(last.get("body") or "") and (last.get("created_at") or 0) >= max(cust or [0]):
@@ -442,8 +472,113 @@ def fraud_facts(uid: int, query: Query) -> list[str]:
     return out
 
 
+def newer_intake(doc_at: str, arrivals: list[Any] | tuple[Any, ...], named: set[str] | frozenset[str] = frozenset()) -> bool:
+    """L11c 'anything newer holds' (QA #1418): did ANY intake of this user arrive after the named document? The ONE
+    predicate shared by the send-time check (need_facts) and the batch builder's selection (need_asks.payloads).
+    An arrival is (received_at, intake_id) (a bare time = a pre-intake-id row). QA #1513: whole-second times cannot
+    order two intakes of the same second, so a DIFFERENT intake (not one the message names) in the SAME second as the
+    named document counts as newer too."""
+    t = _ts(doc_at)
+    for a in arrivals:
+        at, iid = (a[0], str(a[1] or "")) if isinstance(a, (list, tuple)) else (a, "")
+        ts = _ts(at)
+        if ts > t or (ts == t and iid and iid not in named):
+            return True
+    return False
+
+
+def need_facts(uid: int, keys: list[str], doc_sha: str, doc_at: str, need_code: str = "",
+               doc_map: dict[str, str] | None = None, doc_intakes: dict[str, str] | None = None) -> dict[str, Any]:
+    """L11c: was EVERY named request checked with a need code, and did anything arrive after the NEWEST named document
+    (doc_sha / doc_at; Fable [key=l11c-plural] (c))?"""
+    out: dict[str, Any] = {"checked": False, "newer": [], "unchecked": []}
+    # the NAMED documents (QA #1418 round 4): doc_sha may list every document the message names, comma-separated
+    named = {s.strip().lower() for s in (doc_sha or "").split(",") if re.fullmatch(r"[0-9a-fA-F]{64}", s.strip())}
+    if not named or not doc_at:
+        raise Unknown("proof-need-ask needs the newest named document (doc sha and arrival time)")
+    # r5 / QA #1418: each request is judged ONLY on its own document (need.doc_map); several named documents with no
+    # per-request map cannot be judged
+    doc_map = {str(k).lower(): str(v).lower() for k, v in (doc_map or {}).items()}
+    if len(named) > 1 and not doc_map:
+        raise Unknown("several named documents and no per-request document map")
+    # QA #1418 / b1 272: each named document is bound to the EXACT intake doc-verify read (need.doc_intakes, from
+    # dv_outcomes.intake_id). A same-sha re-upload is a different intake; it never borrows the earlier intake's read.
+    doc_intakes = {str(k).lower(): str(v) for k, v in (doc_intakes or {}).items() if str(v)}
+    try:
+        pdb = _ro(PROOF_STORE)
+        pcols = {r[1] for r in pdb.execute("PRAGMA table_info(proof_intake)")}
+        # an intake store without intake ids names each arrival by its row (still one id per arrival, never per file)
+        pid_col = "coalesce(intake_id, '')" if "intake_id" in pcols else "'rowid:' || rowid"
+        intakes = list(pdb.execute(
+            f"SELECT lower(file_sha256), received_at, {pid_col} FROM proof_intake WHERE user_id=? "
+            "ORDER BY received_at, rowid", (uid,)))
+    except sqlite3.Error as exc:
+        raise Unknown(f"need facts unreadable: {exc}") from exc
+    earliest: dict[str, str] = {}
+    for sha, _at, iid in intakes:
+        earliest.setdefault(sha, iid)
+
+    def bound(proof: str, row_intake: str) -> bool:
+        want = doc_intakes.get(proof)
+        if not want:
+            return False                              # no named intake for this document: unbound, never checked
+        # a pre-intake-id read (empty dv intake_id) belongs to the file's FIRST arrival only
+        return row_intake == want if row_intake else want == earliest.get(proof)
+    try:
+        if os.path.exists(DV_STORE):
+            db = _ro(DV_STORE)
+            dcols = {r[1] for r in db.execute("PRAGMA table_info(dv_outcomes)")}
+            iid_col = "coalesce(intake_id, '')" if "intake_id" in dcols else "''"
+            doc_state: dict[str, bool] = {}               # named document -> still an askable need on every bound read
+            for k in keys:
+                # the unit is (request, DOCUMENT) (p1 156, b1 153): the request is askable when SOME document's LATEST row
+                # for it is still an unverifiable need. A document re-checked since the cut no longer counts (r5 / QA
+                # #1418), and a dashboard or verified read of ANOTHER document does not cancel this one.
+                # the latest row per (document, INTAKE): a later read of another intake of the same file is its own unit
+                rows = db.execute(f"SELECT proof_id, outcome, coalesce(need, ''), {iid_col} FROM dv_outcomes d WHERE "
+                                  "user_id=? AND lower(request_id)=? AND id = (SELECT e.id FROM dv_outcomes e WHERE "
+                                  "e.user_id=d.user_id AND lower(e.request_id)=lower(d.request_id) AND e.proof_id=d.proof_id "
+                                  f"AND {iid_col.replace('intake_id', 'e.intake_id')} = {iid_col.replace('intake_id', 'd.intake_id')} "
+                                  "ORDER BY e.at DESC, e.id DESC LIMIT 1)", (uid, k.lower())).fetchall()
+                # ... on a document THIS message names (QA #1418 round 4: another document's row never stands in for
+                # the named one), and that latest row's need is the one this message is about (round 3)
+                if not doc_map:
+                    own = named
+                elif doc_map.get(k.lower()) in named:
+                    own = {doc_map[k.lower()]}
+                else:
+                    own = set()                       # unmapped, or mapped to a document the message does not name
+                if not any(str(p).lower() in own and o == "unverifiable" and n in ASKABLE_NEEDS
+                           and (not need_code or n == need_code) and bound(str(p).lower(), str(ri)) for p, o, n, ri in rows):
+                    out["unchecked"].append(k)
+                for p, o, n, ri in rows:
+                    pl = str(p).lower()
+                    if pl in named and bound(pl, str(ri)):
+                        ok = o == "unverifiable" and n in ASKABLE_NEEDS and (not need_code or n == need_code)
+                        doc_state[pl] = doc_state.get(pl, True) and ok
+            # QA #1418 (23:39Z): EVERY document the message names - not only each request's newest - must still be an
+            # askable need on its latest bound read; one re-checked since the cut (or never read on a named request)
+            # makes "the documents ... can't be checked" false: hold
+            for pl in (sorted(named) if not out["unchecked"] else []):    # (a request already failing holds anyway)
+                if not doc_state.get(pl, False):
+                    out["unchecked"].append(f"named_document_rechecked:{pl[:8]}")
+            out["checked"] = bool(keys) and not out["unchecked"]
+        # by ARRIVAL, not content (QA #1418): any intake of this user that arrived after the newest named document,
+        # even the same file again, means they sent us something since - the ask waits
+        # QA #1418: the comparison point must BE the arrival of a named document's OWN (bound) intake - a doc_at that
+        # matches another intake (a same-sha re-upload) could make that re-upload look already read; it holds
+        if not any(sha in named and _ts(at) == _ts(doc_at) and doc_intakes.get(sha) == iid for sha, at, iid in intakes):
+            out["newer"].append("doc_at_not_the_arrival_of_the_named_intake")
+        if newer_intake(doc_at, [(at, iid) for _sha, at, iid in intakes], set(doc_intakes.values())):
+            out["newer"].append("newer_document:proof_intake")
+    except sqlite3.Error as exc:
+        raise Unknown(f"need facts unreadable: {exc}") from exc
+    return out
+
+
 def decide(campaign: str, copy: str, st: dict[str, Any], core: dict[str, Any], ic_found: list[str],
-           thread: list[str] | None = None, fraud: list[str] | None = None) -> tuple[str, list[str]]:
+           thread: list[str] | None = None, fraud: list[str] | None = None,
+           need: dict[str, Any] | None = None) -> tuple[str, list[str]]:
     """(state, hold reasons) - empty reasons = send."""
     docs = st["docs"] + ic_found
     decided = sorted(set(core["decided"]))
@@ -463,10 +598,23 @@ def decide(campaign: str, copy: str, st: dict[str, Any], core: dict[str, Any], i
             why.append("already_acknowledged")
         if decided or told:
             why.append("decided_or_told")
+    elif campaign == NEED_ASK:
+        nd = need or {"checked": False, "newer": []}
+        if not nd["checked"]:
+            why.append("not_checked:" + ",".join((nd.get("unchecked") or ["no dv_outcomes need row"])[:5]))
+        newer = sorted(set(nd["newer"] + ic_found))
+        if newer:
+            why.append("newer_after_document:" + ",".join(newer)[:300])
+        if decided or told:
+            why.append("decided_or_told")
+        # a CLOSED filing thread is not a hold here: the gate sends the ask by email instead (l1 [key=l11c-asks])
+        why += [t for t in thread if t in ("R6_stale_thread", "R7_thread_resolved")]
+        if not why:
+            state = "checked"
     elif campaign == RECEIPT and copy in ("docrecvr", "docrecvn", "docrecvq", "docrecv"):
         if decided or told:
             why.append("decided_or_told:" + ",".join((decided + told)[:5]))
-        why += [t for t in thread if t in ("R6_stale_thread", "R7_thread_resolved")]
+        why += [t for t in thread if t in ("R6_stale_thread", "R7_thread_resolved", "R7_thread_closed")]
     return state, why
 
 
@@ -616,8 +764,13 @@ PRODUCT_RE = re.compile(
     r"subscription|upgrade|premium|bug|crash\w*|error|log ?in|password|api|app store|android|ios|iphone)\b", re.I)
 # R9: the SAME pattern as the gate's thread_on_topic (intercom-verify-request.sh). Bare 'verification' / 'under review'
 # are not enough: 'Your payment is under review' and 'Account verification for billing' are billing threads (QA #1509).
-TOPIC_RE = re.compile(r"\bcredits?\b|\bclaim(s|ed|ing)?\b|\bmerg(e|es|ed|ing)\b|split ?sheets?|\bproof of\b|"
-                      r"\b(song|track) ?credits?\b")
+# QA #1418 (b1 16:00Z): 'claim' / 'proof of' count only in a credit context, and a bare 'credit(s)' never counts in a
+# billing thread ("Refund claim for a credit card charge"). QA #1418 07:06Z: 'merge' counts only beside a profile /
+# account / page / duplicate ("Please merge my invoices" is billing), and a billing word vetoes the whole thread, strong
+# terms included. The gate's thread_on_topic carries the same three patterns and the same rule (test-pinned).
+TOPIC_STRONG_RE = re.compile(r"\b(song|track) ?credits?\b|\bcredit (request|verification|review|claim)s?\b|split ?sheets?|\bmerg(e|es|ed|ing)( (my|the|these|those|our|two|both|duplicate|muso|artist))* (profiles?|accounts?|pages?|duplicates?)\b|\b(profiles?|accounts?|pages?) (merged|merging|merge)\b|\bduplicate (profiles?|accounts?|artist pages?)\b|\b(profile|artist|page) claims?\b|\bclaim(s|ed|ing)? (my |the |this |a |an |our )?(muso )?(profile|artist|page)s?\b|\bproof of (my |the |our |this )?(credits?|role|work|contribution|authorship|ownership)\b")
+TOPIC_WEAK_RE = re.compile(r"\bcredits?\b")
+TOPIC_BILLING_RE = re.compile(r"\b(refund\w*|charge[sd]?|chargeback|invoice\w*|billing|billed|payment\w*|subscription\w*|paypal|card)\b")
 
 
 def ticket_type_name(conv: dict[str, Any]) -> str:
@@ -640,7 +793,9 @@ def on_topic(conv: dict[str, Any]) -> bool:
     text = " \n ".join(str(x) for x in [ticket_type_name(conv),
                                          conv.get("title") or "", src.get("subject") or "", src.get("body") or ""]
                         + [p["body"] for p in parts[-3:]])
-    return bool(TOPIC_RE.search(re.sub(r"credit[ -]?cards?|credit notes?|store credit", " ", text.lower())))
+    t = re.sub(r"credit[ -]?cards?|credit notes?|store credit", " ", text.lower())
+    # QA #1418 (07:06Z): a billing word vetoes the whole thread, strong terms included ("Please merge my invoices")
+    return bool(not TOPIC_BILLING_RE.search(t) and (TOPIC_STRONG_RE.search(t) or TOPIC_WEAK_RE.search(t)))
 
 
 def reply_due(conversation: str, contact_id: str, part_id: str, ic: Intercom, now: float | None = None) -> list[str]:
@@ -934,8 +1089,11 @@ def answer_class(st: dict[str, Any], core: dict[str, Any], docs: list[str], owes
 
 
 def check(campaign: str, copy: str, uid: int, keys: list[str], contact_id: str, *, conversation: str = "",
-          query: Query = trino, ic: Intercom = intercom, fraud: Callable[[int, Query], list[str]] | None = None,
-          reply_due_part: str = "", nothing_needed_body: bool = False) -> dict[str, Any]:
+          doc_sha: str = "", doc_at: str = "", need_code: str = "", filing_conversation: str = "",
+          doc_map: dict[str, str] | None = None, doc_intakes: dict[str, str] | None = None,
+          query: Query = trino, ic: Intercom = intercom,
+          fraud: Callable[[int, Query], list[str]] | None = None, reply_due_part: str = "",
+          nothing_needed_body: bool = False) -> dict[str, Any]:
     # QA #1517 (critical): a reply_due answer ALWAYS takes the full path below (trigger, class, thread, assignee); the
     # 'nothing is needed' fast path is for unsolicited notes only. answer_class keeps that family from owes-proof users.
     if nothing_else(campaign, copy) and not reply_due_part:
@@ -952,15 +1110,31 @@ def check(campaign: str, copy: str, uid: int, keys: list[str], contact_id: str, 
         return {**res, "hold": bool(res["hold"] or owe), "reasons": list(res["reasons"]) + [f"nothing_needed_body:{w}" for w in owe]}
     core = core_facts(uid, keys, query)
     st = store_facts(uid, keys, core["created"])
-    ic_found = (intercom_facts(contact_id, max(st["last_ask"], core["last_ask"]), ic, core["created"])
-                if campaign in WAIT_LINES else [])
+    need = None
+    if campaign in WAIT_LINES:
+        ic_found = intercom_facts(contact_id, max(st["last_ask"], core["last_ask"]), ic, core["created"])
+    elif campaign == NEED_ASK:
+        if not need_code:
+            raise Unknown("proof-need-ask needs the need code the message is about")
+        need = need_facts(uid, keys, doc_sha, doc_at, need_code, doc_map, doc_intakes)
+        # the filing event itself is the document's own part at its arrival second; ANY customer part after that second
+        # (a correction or another file 1 s later) holds the ask (QA #1418: no slack window)
+        since = datetime.fromisoformat(_ts(doc_at)).replace(tzinfo=timezone.utc).timestamp()
+        # the filing-part evidence comes from the FILING conversation even when the note goes by email (R9 / a closed
+        # thread): r5 / QA #1418 - otherwise the document's own part reads as newer and the email path never sends
+        fc = filing_conversation or conversation
+        ic_found = intercom_facts(contact_id, _ts(datetime.fromtimestamp(since, timezone.utc).isoformat()), ic,
+                                  attach_since=since, filing=(fc, since) if fc.isdigit() else None,
+                                  text_after_ask=True)
+    else:
+        ic_found = []
     thread = thread_facts(conversation, ic)
     fr = (fraud or fraud_facts)(uid, query)
     if campaign in ASKS:
         # [key=r8-hold-due]: a volume-only hold holds approvals and keeps the 'nothing is needed' family off - never the
         # ask that resolves it; a hard hold (or an unknown kind) still holds the ask
         fr = [f for f in fr if f != HOLD_VOLUME]
-    state, why = decide(campaign, copy, st, core, ic_found, thread, fr)
+    state, why = decide(campaign, copy, st, core, ic_found, thread, fr, need)
     if reply_due_part:
         # [key=reply-due]: answering a user who wrote to us is not an unsolicited note - the 7-day cooldowns do not
         # apply to EXACTLY this one answer; every other rule (decided/told, documents, fraud, thread, identity) does
@@ -1002,13 +1176,24 @@ def _main(argv: list[str] | None = None) -> int:
     c.add_argument("--reply-due", default="", help="[key=reply-due]: the customer part this note answers")
     c.add_argument("--nothing-needed-body", action="store_true",
                    help="the rendered note says nothing (else) is needed: hold anyone who still owes proof")
+    c.add_argument("--doc-sha", default="", help="proof-need-ask: the checked document's sha256")
+    c.add_argument("--doc-at", default="", help="proof-need-ask: when that document arrived (ISO UTC)")
+    c.add_argument("--need", default="", help="proof-need-ask: the need code the message is about")
+    c.add_argument("--filing-conversation", default="", help="proof-need-ask: the document's filing conversation "
+                   "(its own part is not news), even when the note goes by email")
+    c.add_argument("--doc-map", default="", help="proof-need-ask: request=sha,... each request's own document")
+    c.add_argument("--doc-intakes", default="", help="proof-need-ask: sha=intake_id,... the intake each document was read from")
     a = ap.parse_args(argv)
     if not str(a.user_id).isdigit():
         print(json.dumps({"hold": None, "reasons": ["no Muso user id"]}))
         return 2
     try:
         res = check(a.campaign, a.copy, int(a.user_id), [k for k in a.request_ids.split(",") if k], a.contact_id,
-                    conversation=a.conversation, reply_due_part=a.reply_due, nothing_needed_body=a.nothing_needed_body)
+                    conversation=a.conversation, reply_due_part=a.reply_due, doc_sha=a.doc_sha, doc_at=a.doc_at,
+                    need_code=a.need, filing_conversation=a.filing_conversation,
+                    doc_map=dict(x.split("=", 1) for x in a.doc_map.split(",") if "=" in x),
+                    doc_intakes=dict(x.split("=", 1) for x in a.doc_intakes.split(",") if "=" in x),
+                    nothing_needed_body=a.nothing_needed_body)
     except Unknown as exc:
         print(json.dumps({"hold": None, "reasons": [f"unknown: {exc}"]}))
         return 2

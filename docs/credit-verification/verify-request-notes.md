@@ -486,6 +486,32 @@ This asks the claimant of a pending profile claim in band B or C to add the clai
   - Replies to S2 are tagged claim-proof.
 - **Locks:** `CREDIT_HOLD_STATUS_COPY_APPROVED=0` and `CLAIM_PROOF_PENDING_COPY_APPROVED=0`. `--dry-run` renders exactly what would be sent. The audience build and the node-8 cron wiring follow in a separate PR.
 
+## Per-need ask (`--campaign proof-need-ask`; proof-loop captain card L11c; UNLOCKED `PROOF_NEED_ASK_COPY_APPROVED=1` on Fable [key=l11c-asks], readable + counterparty only)
+
+- **Who:** one credit request whose returned document the reader could not check on its own. The input is b1's need tray `{user_id, request_id, need, track, role, issuer, received_at}`, mapped to one credits entry plus `need: {code, issuer, verify_code}`.
+- **Copy:** the card's common opening, the line for the need code (`readable_document`, `issuer_email_from_official_domain`, `distributor_dashboard_with_code`, `counterparty_signed_or_registered`) and the common closing, signed "Thank you, Caroline, Muso Support". The text is verbatim except the issuer line's em dash, which renders " - ": the gate refuses an em dash in any note.
+- **Shape checks:**
+  - The issuer is a document-derived name, held to a plain-name shape: letters, digits, space, `& . , ' -`, at most 80 characters, never a domain. Anything else refuses the note.
+  - The verify code is 4 to 32 capital letters, digits or dashes.
+  - An unknown need code refuses.
+- **Ledger:** it is an ask (`ASK_CAMPAIGNS`) handled like gap-ask (`GAP_LIKE`): once per request, ever. An earlier ask on the request does not block it, because the document came back after that ask. A gap ask on the same request blocks it, and it blocks a gap ask in turn. It may follow a `status-doc-received` note inside 7 days, but no other note.
+
+- **Send-time state (p1 ruling 096, captain-1028-213x (c)):** the gate's go-live guards apply (G1-G5, G8, kill switch). `comm_state.py check --doc-sha --doc-at` sends it ONLY at state `checked`: a `dv_outcomes` row with a need code for that document (`proof_id` = `need.doc_sha`) on the request. It is held when:
+  - anything newer arrived after the document: any later `proof_intake` arrival (even the same file), or ANY Intercom customer message or attachment after the document's own part (no slack window: the filing part itself is exactly the attachment part in the filing conversation at `received_at`);
+  - each named request must have a document whose LATEST dv row is still unverifiable with THIS message's need code (a re-check that changed or settled it holds);
+  - the request is decided or told;
+  - any note went in the last 7 days, including Caroline in-thread. After a receipt, this makes the ask the >= 7-day "checked" follow-up.
+  - A document on file never holds it, because the document is why the ask goes.
+- **Delivery:** INTO `user.filing_conversation`, the document's own thread (G3: its one contact is this account's). A CLOSED filing thread sends by email instead (`R7_thread_closed`, l1); an email-filed (support@) document goes by Intercom email to the verified account contact. Never into another thread; R6 (stale) and a sorted thread hold.
+- **Which document:** the unit is (user, DOCUMENT) (p1 156). Each message is about ONE document, the newest with that need, and names only that document's pending requests. It goes into that document's own filing thread, so the reply lands next to it. `need.doc_kind` / `need.doc_received_at` travel in the payload, the ledger and the dry run. The copy names it (l1 176, final): "thanks for the {image|PDF|file} you sent on {Month D} for your …"; several documents of that need sent on the newest day in one thread -> "the documents you sent on {Month D}". Kind from the mime, date = the day it arrived (server facts only; proof_intake has no real file names).
+- **R9 (every campaign that delivers into a thread):** the thread must be about credits / claims / merges (ticket type, title/subject, the opening message, or one of its last 3 human parts; "credit card" does not count). Otherwise the note goes by email; for R1 / the per-need ask, comm_state then does not judge the unrelated thread. Exempt: the thread-only replies (email-changed, withdrawal-confirm).
+- **verify@ is off:** `issuer_email_from_official_domain` points the issuer at verify@muso.ai. While `VERIFY_AT_ENABLED=0` (until Intercom identity verification, i2), it is HELD at send: exit 3, nothing claimed, and the dry run still renders it.
+- **Unlocked 2026-10-29** (Fable [key=l11c-asks], [key=l11c-plural], [key=l11c-email-filed]):
+  - readable_document and counterparty_signed_or_registered send;
+  - issuer_email (`VERIFY_AT_ENABLED=0`) and distributor_dashboard_with_code (`DISTRIBUTOR_CODES_ENABLED=0`) are HELD at send.
+- **Shape:** ONE message per user per need per document (newest first), counterparty first, up to 3 titles + "and N more", with the ruled plural text. It goes into the newest named document's filing thread. If that thread is closed it goes by email; an email-filed document (support@) is asked by Intercom email to the verified account contact, and only when the filing matched strongly.
+- **State at send:** each named request must have SOME document whose latest dv row is an unverifiable need. A document re-checked since the cut no longer counts, and a read of another document does not cancel it. Anything after the newest named document holds the ask.
+- **Source:** b1's L11c tray (`need_asks.py build --tray`).
 ## Claim status note (`--campaign claim-status`, Fable claims-documentation-readiness-1023 ruling 3)
 
 The no-ask note for a pending claimant who gets **no** proof ask: holds, organizations, claims with no surface the daily code check can read, and any row the list routes with `"audience": "status"` (e.g. A-48h claims). Fable's copy, verbatim:
