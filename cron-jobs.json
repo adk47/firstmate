@@ -1400,7 +1400,7 @@
       "agentId": "operations",
       "name": "credit-trust-decide-15m",
       "description": "TRUST-YET-VERIFY decider (captain 2026-10-15 ~22:12Z: 'i want AI live now ... trust yet verify approach'; wiring data/credit-trust-system-fable-a1/live-tonight.md Piece 1). Every 15 min, oldest held (unverified) rows first, <= 500 per run: provisional APPROVE only for non-big tracks with no validator conflict and one evidence kind (trusted catalog confirmation, a trusted footprint, or Codex on server-fetched sources with verified quotes on >= 2 independent domains, never crowd-edited MusicBrainz/Wikipedia alone; $0; editorial roles only on trusted catalog confirmation under pop 30), else REQUEST SUPPORT (user_verification_needed - Knock asks the user for proof). Big tracks and the fraud lists are never approved (no named-user rules); paying users' rows are decided first; support requests are never re-sent (proof on file -> hold, a credit asked once ever, one ask per user per 24h, none at all while the proof-on-file export is unknown); a model outage DEFERS rows instead of sending support requests. Every decision is in the decisions table of /var/lib/hydra/credit-review/ledger.sqlite3 before the write (credit-review.py explain <id>; revert --run <id>). Command-shaped: exit code = run status. Registered in policies/credit-approval-automation.json (credit-trust-decide). Kill switch /etc/hydra/credit-trust-decide.disabled.",
-      "enabled": false,
+      "enabled": true,
       "createdAtMs": 1792103400000,
       "updatedAtMs": 1792103400000,
       "schedule": {
