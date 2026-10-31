@@ -39,6 +39,19 @@ TIMEOUT_S = int(os.environ.get("CREDIT_DOC_VERIFY_LLM_TIMEOUT_S", "90"))
 MAX_TOKENS = 8000             # headroom for long credit lists; the cause of the backfill's 6 unusable
                               # answers was not measured, so finish_reason is now recorded per call
 UNUSABLE_RETRIES = 1
+# finish=length (10-31, measured: 18 calls / 8 documents since 10-30, every one at the 8,000-token cap while ok answers
+# average 1,316): 7 of the 8 were SHORT OCR screenshots (283-1,113 chars) on which the model repeated itself until
+# the cap; 1 was a 16,000-char PRO-portal PDF. So:
+#  - the output cap stays MAX_TOKENS: an input-bounded budget was measured and REJECTED (it would have truncated 591
+#    of 7,862 ok answers; ok-answer p99 = 7,490 tokens, and short inputs legitimately give long answers);
+#  - a truncated answer is never re-asked with the SAME prompt: a short text retries ONCE with an anti-repetition
+#    penalty, a long one is read in chunks (<= CHUNK_CHARS each, <= MAX_CHUNKS) and the answers merged;
+#  - still degenerate after that = DEGENERATE: a recorded, non-tooling outcome (unverifiable, need readable_document
+#    -> the per-need ask), never a retry loop and never a silent carry (r5).
+RETRY_FREQUENCY_PENALTY = 0.5
+DEGENERATE = "unreadable:degenerate"
+CHUNK_CHARS = 6000
+MAX_CHUNKS = 6
 # Same prompt (the document's text + facts, byte for byte) = same question: reuse the validated answer
 # for 24 h instead of asking again (proof-loop lead 079; 2026-10-28: 22% of good calls repeated a prompt
 # already answered within 1.3 h - 88 min of model wait, 26% of all). Keyed by the PROMPT sha256, so a
@@ -287,6 +300,57 @@ def _post(body: dict[str, Any], key: str, timeout: int) -> dict[str, Any]:
         return json.load(resp)
 
 
+def chunks(text: str, size: int = CHUNK_CHARS) -> list[str]:
+    """The text cut at line boundaries into pieces of <= `size` chars (a single longer line is cut hard)."""
+    out: list[str] = []
+    cur = ""
+    for line in (text or "").splitlines(keepends=True):
+        while len(line) > size:
+            if cur:
+                out.append(cur)
+                cur = ""
+            out.append(line[:size])
+            line = line[size:]
+        if len(cur) + len(line) > size:
+            out.append(cur)
+            cur = ""
+        cur += line
+    if cur.strip():
+        out.append(cur)
+    return [c for c in out if c.strip()]
+
+
+def merge(parts: list[Extraction], proof_ids: list[str]) -> Extraction:
+    """One extraction from per-chunk extractions of ONE document: document-level fields from the first chunk that
+    states them, list fields concatenated in order and de-duplicated. Every part must be ok, and every part must be
+    of the same proof id (r5: a chunk set never mixes documents)."""
+    if len(proof_ids) != len(parts) or len(set(proof_ids)) != 1:
+        raise ValueError("a chunk set must be one document (one proof id per part)")
+    if not all(p.ok for p in parts):
+        raise ValueError("every chunk must have a usable answer")
+    ex = Extraction(ok=True)
+    ex.doc_type = next((p.doc_type for p in parts if p.doc_type != "other"), "other")
+    ex.issuer = next((p.issuer for p in parts if p.issuer.get("name")), parts[0].issuer if parts else {})
+    ex.signatory = next((p.signatory for p in parts if p.signatory.get("name")), parts[0].signatory if parts else {})
+    ex.sender = next((p.sender for p in parts if p.sender.get("email")), parts[0].sender if parts else {})
+    ex.is_email = any(p.is_email for p in parts)
+    ex.emails = list(dict.fromkeys(e for p in parts for e in p.emails))[:20]
+
+    def uniq(rows: list[dict[str, Any]], cap: int) -> list[dict[str, Any]]:
+        seen, out = set(), []
+        for r in rows:
+            k = json.dumps(r, sort_keys=True, default=str)
+            if k not in seen:
+                seen.add(k)
+                out.append(r)
+        return out[:cap]
+    ex.tracks = uniq([t for p in parts for t in p.tracks], 60 * MAX_CHUNKS)
+    ex.credits = uniq([c for p in parts for c in p.credits], 120 * MAX_CHUNKS)
+    ex.dates = uniq([d for p in parts for d in p.dates], 20 * MAX_CHUNKS)
+    ex.amounts = uniq([a for p in parts for a in p.amounts], 20 * MAX_CHUNKS)
+    return ex
+
+
 def build_messages(text: str, meta: dict[str, Any]) -> list[dict[str, str]]:
     user = ("Return JSON in exactly this shape (types shown by example):\n" + json.dumps(FORMAT, indent=1)
             + "\n\nFILE FACTS (from our parser, trusted): " + json.dumps(meta, default=str)
@@ -304,6 +368,28 @@ class Extractor:
         self.daily_usd = daily_usd
 
     def extract(self, text: str, meta: dict[str, Any], proof_id: str) -> Extraction:
+        return self._extract(text, meta, proof_id, chunk_ok=True)
+
+    def _extract_chunked(self, text: str, meta: dict[str, Any], proof_id: str) -> Extraction:
+        """A long document whose answer was truncated, read in <= MAX_CHUNKS pieces and merged. Fail closed: a
+        document longer than MAX_CHUNKS pieces, or any piece that does not give a usable answer, is unusable."""
+        parts_text = chunks(text)
+        if len(parts_text) > MAX_CHUNKS:
+            return fallback(text, f"unusable model answer: {len(parts_text)} chunks > {MAX_CHUNKS}")
+        parts, ids = [], []
+        for i, piece in enumerate(parts_text):
+            ex = self._extract(piece, {**meta, "chunk": f"{i + 1}/{len(parts_text)}"}, proof_id, chunk_ok=False)
+            if not ex.ok:
+                # a degenerate chunk keeps that classification; any other failure stays a tooling error (retried)
+                head = DEGENERATE if str(ex.error or "").startswith(DEGENERATE) else "unusable model answer"
+                return fallback(text, f"{head} (chunk {i + 1}/{len(parts_text)}: {ex.error})")
+            parts.append(ex)
+            ids.append(proof_id)
+        out = merge(parts, ids)
+        out.model = parts[0].model if parts else self.model
+        return out
+
+    def _extract(self, text: str, meta: dict[str, Any], proof_id: str, *, chunk_ok: bool) -> Extraction:
         if not (text or "").strip():
             return fallback("", "no readable text in the document")
         messages = build_messages(text, meta)
@@ -336,6 +422,7 @@ class Extractor:
         # 82 answers did not parse). Every attempt is its own ledger row and
         # counts against the daily cap; a transport/HTTP error is not retried
         # here (the runner retries it on a later run).
+        truncated = 0
         for attempt in range(1 + UNUSABLE_RETRIES):
             if attempt and self.store.spent_today_usd() >= self.daily_usd:
                 self.store.llm_call({**row, "outcome": "skipped", "reason": "daily cap reached before the retry"})
@@ -365,6 +452,18 @@ class Extractor:
             att.update(input_tokens=usage.get("prompt_tokens"), output_tokens=usage.get("completion_tokens"),
                        cost_usd=usage.get("cost"), latency_ms=latency, model=reported_model or self.model,
                        _reported_model=reported_model)
+            if finish == "length":
+                # QA #1577: a capped answer is NEVER accepted, even when what came back parses (a complete object
+                # followed by repetition, or a cut list) - it may have lost credits, and it is never cached.
+                # Measured: 66 ok answers had run to exactly MAX_TOKENS before this. Never the same prompt again
+                # (10-31): a long text is read in chunks; a short one retries once with an anti-repetition penalty.
+                self.store.llm_call({**{k: v for k, v in att.items() if k != "_reported_model"}, "outcome": "error",
+                                     "reason": "unusable answer: truncated at the output cap (finish=length)"})
+                truncated += 1
+                if chunk_ok and len(text) > CHUNK_CHARS:
+                    return self._extract_chunked(text, meta, proof_id)
+                body = {**body, "frequency_penalty": RETRY_FREQUENCY_PENALTY}
+                continue
             try:
                 content = ((choice.get("message") or {}).get("content")) or ""
                 m = re.search(r"\{.*\}", content, re.S)
@@ -377,6 +476,10 @@ class Extractor:
             row = att
             break
         else:
+            if truncated == 1 + UNUSABLE_RETRIES:
+                # truncated at the output cap on every attempt, the last one with the anti-repetition penalty
+                return fallback(text, f"{DEGENERATE} (the model ran to the {MAX_TOKENS}-token cap on every attempt, "
+                                      "the last with an anti-repetition penalty)")
             return fallback(text, "unusable model answer")
         ex.model = row["model"]
         reported_model = row.pop("_reported_model", None)

@@ -273,7 +273,152 @@ class ExtractTests(unittest.TestCase):
             calls = []
             # another document (the first one's answer is now cached for its exact prompt)
             ex = Extractor(store, key="k", post=lambda *a: (calls.append(1), bad)[1]).extract("other", {}, "q")
-            self.assertEqual((ex.ok, ex.degraded, ex.error, len(calls)), (False, True, "unusable model answer", 2))
+            # truncated at the cap on both attempts (the second penalised) = DEGENERATE, not a tooling error (10-31)
+            self.assertEqual((ex.ok, ex.degraded, len(calls)), (False, True, 2))
+            self.assertTrue(ex.error.startswith("unreadable:degenerate"), ex.error)
+            garbage = {"choices": [{"message": {"content": "{not json"}, "finish_reason": "stop"}], "usage": {}}
+            ex = Extractor(store, key="k", post=lambda *a: garbage).extract("third", {}, "r")
+            self.assertEqual(ex.error, "unusable model answer")                  # not truncated: a tooling error
+            mixed = [bad, garbage]                     # truncated once, then a non-truncated unusable answer
+            ex = Extractor(store, key="k", post=lambda *a: mixed.pop(0)).extract("fourth", {}, "s")
+            self.assertEqual(ex.error, "unusable model answer")                  # degenerate needs EVERY attempt
+
+    def test_finish_length_short_text_retries_with_a_penalty_never_the_same_body(self):
+        # 10-31 measured: 7 of 8 truncated documents were SHORT OCR texts the model repeated itself on until the cap.
+        from credit_verify.docverify import extract as xm
+        with tempfile.TemporaryDirectory() as td:
+            store = DocVerifyStore(os.path.join(td, "dv.sqlite"))
+            bad = {"choices": [{"message": {"content": "{\"a\": [1, 1, 1"}, "finish_reason": "length"}], "usage": {}}
+            bodies = []
+            answers = [bad, or_response(GOOD_ANSWER)]
+            ex = Extractor(store, key="k", post=lambda b, *a: (bodies.append(dict(b)), answers.pop(0))[1]).extract(
+                "Blue Fern Records split sheet, 300 chars of OCR", {}, "p")
+            self.assertTrue(ex.ok)
+            self.assertNotIn("frequency_penalty", bodies[0])
+            self.assertEqual(bodies[1]["frequency_penalty"], xm.RETRY_FREQUENCY_PENALTY)
+            # an input-bounded budget was measured and rejected (591 of 7,862 ok answers would have been cut)
+            self.assertEqual([b["max_tokens"] for b in bodies], [xm.MAX_TOKENS, xm.MAX_TOKENS])
+            self.assertEqual(bodies[1]["messages"], bodies[0]["messages"])         # same document, penalised call
+
+    def test_a_degenerate_document_is_a_recorded_unverifiable_ask_never_a_tooling_retry(self):
+        # r5: still degenerate after the penalised retry -> a recorded outcome on the per-need ask path
+        # (unverifiable, readable_document); the runner never retries it as transient, the gate never calls it
+        # our tooling failing
+        from credit_verify.docverify import extract as xm
+        ex = fallback("blurry screenshot", f"{xm.DEGENERATE} (the model ran to the cap)")
+        self.assertEqual(gate.tooling_errors(ex, "GENUINE", []), [])
+        self.assertFalse(str(ex.error).startswith(runner.TRANSIENT))
+        self.assertEqual(gate.need_for(ex, None), gate.NEED_READABLE)
+        o = gate.decide(h3_verdict="GENUINE", kind=None, ex=ex, findings=[], checks=[], account_held=False)
+        self.assertEqual(o.outcome, gate.UNVERIFIABLE)
+
+    def test_a_capped_answer_that_parses_is_still_never_accepted_or_cached(self):
+        # QA #1577: a complete JSON object followed by repetition still parses; finish=length must win.
+        with tempfile.TemporaryDirectory() as td:
+            store = DocVerifyStore(os.path.join(td, "dv.sqlite"))
+            capped = or_response(GOOD_ANSWER)
+            capped["choices"][0]["finish_reason"] = "length"
+            capped["choices"][0]["message"]["content"] += " repeat repeat repeat"
+            answers = [capped, or_response({**GOOD_ANSWER, "doc_type": "split_sheet"})]
+            ex = Extractor(store, key="k", post=lambda *a: answers.pop(0)).extract("short text", {}, "p")
+            self.assertTrue(ex.ok)
+            self.assertEqual(ex.doc_type, "split_sheet")                         # the retry's answer, not the capped
+            rows = store.db.execute("SELECT outcome, reason FROM dv_llm_calls ORDER BY id").fetchall()
+            self.assertEqual(rows[0], ("error", "unusable answer: truncated at the output cap (finish=length)"))
+            calls = []
+            ex = Extractor(store, key="k", post=lambda *a: (calls.append(1), capped)[1]).extract("other text", {}, "q")
+            self.assertTrue(ex.error.startswith("unreadable:degenerate"), ex.error)
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(store.db.execute("SELECT count(*) FROM dv_extract_cache").fetchone()[0], 1)  # retry only
+
+    def test_a_merged_long_document_keeps_every_credit_when_read_again_from_the_cache(self):
+        # QA #1577 (2): the MERGED extraction is never cached or re-validated - each chunk's own answer is cached
+        # (within validate's 120/60 caps) and merge() runs again on a re-read, so > 120 credits / > 60 tracks
+        # across chunks survive the round-trip.
+        from credit_verify.docverify import extract as xm
+        with tempfile.TemporaryDirectory() as td:
+            store = DocVerifyStore(os.path.join(td, "dv.sqlite"))
+            capped = {"choices": [{"message": {"content": "{"}, "finish_reason": "length"}], "usage": {}}
+            text = "".join(f"row {i} " + "x" * 90 + "\n" for i in range(180))           # ~17k chars -> 3 chunks
+            n = len(xm.chunks(text))
+            calls = []
+
+            def post(body, *a):
+                calls.append(1)
+                user = body["messages"][1]["content"]
+                if '"chunk"' not in user:
+                    return capped
+                k = int(user.split('"chunk": "')[1].split("/")[0])
+                return or_response({**GOOD_ANSWER,
+                                    "tracks": [{"title": f"T{k}-{j}", "isrc": None, "confidence": 0.9} for j in range(50)],
+                                    "credits": [{"person": "Ann Alpha", "role": "Mixer", "track": f"T{k}-{j}",
+                                                 "confidence": 0.9} for j in range(100)]})
+            first = Extractor(store, key="k", post=post).extract(text, {}, "p")
+            self.assertEqual((len(first.credits), len(first.tracks)), (100 * n, 50 * n))   # > 120 / > 60
+            k1 = len(calls)
+            again = Extractor(store, key="k", post=post).extract(text, {}, "p")
+            self.assertEqual(len(calls) - k1, 1)                       # only the (never cached) whole-text call
+            self.assertEqual((again.credits, again.tracks), (first.credits, first.tracks))
+
+    def test_a_chunk_set_is_one_document(self):
+        from credit_verify.docverify import extract as xm
+        a = validate(GOOD_ANSWER)
+        self.assertTrue(xm.merge([a, a], ["p", "p"]).ok)
+        for ids in (["p", "q"], ["p"]):
+            with self.assertRaises(ValueError):
+                xm.merge([a, a], ids)
+        with self.assertRaises(ValueError):
+            xm.merge([a, Extraction(ok=False)], ["p", "p"])
+
+    def test_finish_length_on_a_long_text_reads_it_in_chunks_and_merges(self):
+        from credit_verify.docverify import extract as xm
+        with tempfile.TemporaryDirectory() as td:
+            store = DocVerifyStore(os.path.join(td, "dv.sqlite"))
+            bad = {"choices": [{"message": {"content": "{\"credits\": [{"}, "finish_reason": "length"}], "usage": {}}
+            text = "".join(f"line {i} Track {i} - Ann Alpha - Mixer\n" for i in range(600))      # ~21k chars
+            n = len(xm.chunks(text))
+            self.assertTrue(1 < n <= xm.MAX_CHUNKS)
+            part = lambda i: {**GOOD_ANSWER, "doc_type": "other" if i else "split_sheet",           # noqa: E731
+                              "credits": [{"person": "Ann Alpha", "role": "Mixer", "track": f"Track {i}",
+                                           "confidence": 0.9}]}
+            seen = []
+
+            def post(body, *a):
+                user = body["messages"][1]["content"]
+                seen.append(user)
+                if len(seen) == 1:
+                    return bad
+                i = len(seen) - 2
+                return or_response(part(i))
+            ex = Extractor(store, key="k", post=post).extract(text, {"mime": "application/pdf"}, "p")
+            self.assertTrue(ex.ok, ex.error)
+            self.assertEqual(len(seen), 1 + n)                                   # the whole text once, then n chunks
+            self.assertTrue(all('"chunk"' in u for u in seen[1:]))
+            self.assertEqual(ex.doc_type, "split_sheet")
+            self.assertEqual(sorted(c["track"] for c in ex.credits), sorted(f"Track {i}" for i in range(n)))
+            self.assertEqual(ex.issuer["name"], "Blue Fern Records")
+
+    def test_a_failed_chunk_or_too_many_chunks_is_unusable_never_partial(self):
+        from credit_verify.docverify import extract as xm
+        with tempfile.TemporaryDirectory() as td:
+            store = DocVerifyStore(os.path.join(td, "dv.sqlite"))
+            bad = {"choices": [{"message": {"content": "{"}, "finish_reason": "length"}], "usage": {}}
+            text = "y" * (xm.CHUNK_CHARS * 2 + 10)
+            calls = [bad, or_response(GOOD_ANSWER), bad, bad]                   # chunk 2 fails (and its retry)
+            ex = Extractor(store, key="k", post=lambda *a: calls.pop(0)).extract(text, {}, "p")
+            self.assertFalse(ex.ok)
+            self.assertIn("chunk 2/3", ex.error)
+            self.assertTrue(ex.error.startswith(xm.DEGENERATE), ex.error)       # a degenerate chunk stays degenerate
+            huge = "z\n" * (xm.CHUNK_CHARS * xm.MAX_CHUNKS)                      # more than MAX_CHUNKS pieces
+            ex = Extractor(store, key="k", post=lambda *a: bad).extract(huge, {}, "q")
+            self.assertFalse(ex.ok)
+            self.assertIn("chunks >", ex.error)
+
+    def test_chunks_cut_at_lines_and_hard_cut_one_long_line(self):
+        from credit_verify.docverify import extract as xm
+        self.assertEqual(xm.chunks("ab\ncd\n", size=3), ["ab\n", "cd\n"])
+        self.assertEqual(xm.chunks("abcdefg", size=3), ["abc", "def", "g"])
+        self.assertEqual("".join(xm.chunks("a\n" * 50, size=7)), "a\n" * 50)
 
     def test_the_same_prompt_reuses_the_validated_answer_for_24h(self):
         # Proof-loop lead 079: 22% of good calls repeated a prompt answered < 1.3 h earlier.
