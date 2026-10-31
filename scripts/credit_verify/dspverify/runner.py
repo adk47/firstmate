@@ -65,10 +65,12 @@ class Stats:
     errors: list[str] = field(default_factory=list)
     verdicts: dict[str, int] = field(default_factory=dict)
     classes: dict[str, int] = field(default_factory=dict)
+    late_receipts: int = 0                # closed captures re-verified because a late receipt changed a source
 
     def as_dict(self) -> dict[str, Any]:
         return {"run_id": self.run_id, "kind": self.kind, "requests": self.requests, "groups": self.groups,
-                "verdicts": self.verdicts, "classes": self.classes, "errors": self.errors[:10]}
+                "verdicts": self.verdicts, "classes": self.classes, "errors": self.errors[:10],
+                "late_receipts": self.late_receipts}
 
 
 def new_run_id(kind: str) -> str:
@@ -451,6 +453,25 @@ def still_pending(admin: admin_api.Admin, cap: dict[str, Any]) -> dict[str, dict
     return _scoped_reads(admin, scopes, cap_statuses, want, 5)
 
 
+def _closed_sources(read_row: dict[str, Any]) -> dict[tuple[str, str, str], str]:
+    return {(tk, role, src): str((s or {}).get("state"))
+            for tk, t in (read_row.get("tracks") or {}).items()
+            for role, r in ((t or {}).get("roles") or {}).items()
+            for src, s in (((r or {}).get("sources")) or {}).items()}
+
+
+def late_changed(last_read_json: str | None, row: dict[str, Any]) -> bool:
+    """True when a source the last read closed on (NO_FRESH_CAPTURE) now reads in another state. An unreadable
+    last read counts as changed (fail toward reading, never toward skipping evidence)."""
+    try:
+        old = _closed_sources(json.loads(last_read_json or "{}"))
+    except (ValueError, AttributeError):
+        return True
+    new = _closed_sources(row)
+    return any(st == "NO_FRESH_CAPTURE" and new.get(k, "NO_FRESH_CAPTURE") not in ("NO_FRESH_CAPTURE", "WAITING")
+               for k, st in old.items())
+
+
 def _waiting(read_row: dict[str, Any]) -> bool:
     return any(s.get("state") == "WAITING" for t in (read_row.get("tracks") or {}).values()
                for r in (t.get("roles") or {}).values() for s in ((r or {}).get("sources") or {}).values())
@@ -462,6 +483,12 @@ def verify(store: Store, deps: Deps, *, max_groups: int = 200) -> tuple[Stats, l
     out: list[dict[str, Any]] = []
     try:
         caps = store.open_captures()[:max_groups]
+        # d3 10-31: a source closed as NO_FRESH_CAPTURE can still get its receipt under the ORIGINAL capture request
+        # id (re-enqueued on an idle lane). Inside the same-run window (REVERIFY_AFTER) such a capture is read again;
+        # it is re-verified only when the late read actually changed one of those sources (no admin cost otherwise).
+        since = (deps.now() - REVERIFY_AFTER).strftime("%Y-%m-%dT%H:%M:%S")
+        late = {c["id"]: c for c in store.late_captures(since)[:max(0, max_groups - len(caps))]}
+        caps = caps + list(late.values())
         builder = EvidenceBuilder(deps.admin, now=deps.now())
         dups = Duplicates(deps.admin)
         reads: dict[int, dict[str, Any]] = {}
@@ -483,6 +510,10 @@ def verify(store: Store, deps: Deps, *, max_groups: int = 200) -> tuple[Stats, l
             if row.get("error"):
                 st.errors.append(f"{cap['key']}: {row['error']}")
                 continue
+            if cap["id"] in late:
+                if not late_changed(cap.get("last_read_json"), row):
+                    continue                      # nothing landed: no write, no packet reads
+                st.late_receipts += 1
             st.groups += 1
             age = deps.now() - (parse_ts(cap["requested_at"]) or deps.now())
             closed = not _waiting(row) or age > CLOSE_AFTER

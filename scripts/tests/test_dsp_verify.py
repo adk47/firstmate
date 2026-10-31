@@ -827,6 +827,54 @@ class RunnerAndStore(unittest.TestCase):
         self.assertEqual(self.store.open_captures(), [])           # every reading final -> closed
         self.assertEqual(self.store.summary()["by_verdict"], {"APPROVE": 1})
 
+    def test_a_late_tidal_receipt_reopens_a_closed_capture_once(self):
+        # d3 10-31: Tidal receipts landed after the 90-min window closed the capture as NO_FRESH_CAPTURE; verify must
+        # read the closed capture again inside the same-run window, re-verify ONLY when a source changed, and never
+        # spend packet reads on an unchanged one.
+        admin = FakeAdmin([req(1)])
+        late = {"tidal": {"state": "NO_FRESH_CAPTURE", "helper_verdict": "WAITING"}}
+        pod = FakePod(reading=lambda t: {"spotify": credited(), "tidal": late["tidal"]})
+        d = self.deps(admin, pod)
+        runner.submit(self.store, d)
+        _, out = runner.verify(self.store, d)
+        self.assertEqual([v["verdict"] for v in out], [rules.WAIT])
+        self.assertEqual(self.store.open_captures(), [])                     # closed on NO_FRESH_CAPTURE
+        n_paths = len(admin.paths)
+        st, out = runner.verify(self.store, d)                              # nothing landed
+        self.assertEqual((out, st.late_receipts), ([], 0))
+        self.assertEqual(len(admin.paths), n_paths)                         # no packet reads spent
+        late["tidal"] = credited("tidal")                                   # the late receipt
+        st, out = runner.verify(self.store, d)
+        self.assertEqual(st.late_receipts, 1)
+        self.assertEqual([v["verdict"] for v in out], [rules.APPROVE], out and out[0]["reason"])
+        st, out = runner.verify(self.store, d)                              # read once: no longer a candidate
+        self.assertEqual((out, st.late_receipts), ([], 0))
+
+    def test_a_late_receipt_outside_the_same_run_window_is_never_read(self):
+        admin = FakeAdmin([req(1)])
+        late = {"tidal": {"state": "NO_FRESH_CAPTURE", "helper_verdict": "WAITING"}}
+        pod = FakePod(reading=lambda t: {"spotify": credited(), "tidal": late["tidal"]})
+        d = self.deps(admin, pod)
+        runner.submit(self.store, d)
+        runner.verify(self.store, d)
+        late["tidal"] = credited("tidal")
+        d2 = dataclasses.replace(d, now=lambda: datetime(2026, 10, 29, 3, 1, tzinfo=timezone.utc))
+        st, out = runner.verify(self.store, d2)                             # > 24 h after the capture request
+        self.assertEqual((out, st.late_receipts), ([], 0))
+
+    def test_late_changed_reads_only_a_source_that_left_no_fresh_capture(self):
+        old = json.dumps({"tracks": {"t|p": {"roles": {"Mixing": {"sources": {
+            "spotify": {"state": "CAPTURED"}, "tidal": {"state": "NO_FRESH_CAPTURE"}}}}}}})
+        same = json.loads(old)
+        self.assertFalse(runner.late_changed(old, same))
+        waiting = json.loads(old)
+        waiting["tracks"]["t|p"]["roles"]["Mixing"]["sources"]["tidal"]["state"] = "WAITING"
+        self.assertFalse(runner.late_changed(old, waiting))
+        got = json.loads(old)
+        got["tracks"]["t|p"]["roles"]["Mixing"]["sources"]["tidal"]["state"] = "CAPTURED"
+        self.assertTrue(runner.late_changed(old, got))
+        self.assertTrue(runner.late_changed("{not json", same))
+
     def test_gate_hold_never_approves_in_the_runner(self):
         admin = FakeAdmin([req(1)])
         d = self.deps(admin, FakePod(), gate_decision="hold")

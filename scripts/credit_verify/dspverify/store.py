@@ -186,6 +186,18 @@ class Store:
             self.db.execute("UPDATE dsp_captures SET last_read_at=?, last_read_json=?, reads=reads+1, closed=?"
                             " WHERE id=?", (utcnow(), body, 1 if closed else 0, cap_id))
 
+    def late_captures(self, since: str) -> list[dict[str, Any]]:
+        """Closed captures requested at or after `since` whose last read had a source the capture window closed on
+        (NO_FRESH_CAPTURE): a late receipt (d3's re-enqueue under the ORIGINAL request id) can still land for them."""
+        self.db.row_factory = sqlite3.Row
+        try:
+            rows = self.db.execute("SELECT * FROM dsp_captures WHERE closed=1 AND capture_request_id IS NOT NULL AND "
+                                   "requested_at >= ? AND last_read_json LIKE '%\"NO_FRESH_CAPTURE\"%' ORDER BY id",
+                                   (since,)).fetchall()
+            return [dict(r) for r in rows]
+        finally:
+            self.db.row_factory = None
+
     def requests_with_open_capture(self) -> set[str]:
         out: set[str] = set()
         for (raw,) in self.db.execute("SELECT request_ids_json FROM dsp_captures WHERE closed=0"
