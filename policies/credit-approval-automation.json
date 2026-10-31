@@ -37,10 +37,24 @@
       "cron_names": [
         "credit-trust-decide-15m"
       ],
-      "approved": true,
+      "approved": false,
       "approved_by": "captain (Aaron)",
       "approval_ref": "2026-10-15 ~22:12Z (verbatim, relayed by firstmate inbox 002/003): 'i want AI live now - we have too many credits to approve and to get supporting data for - let users know where there was a credit given and that it needs support (trust yet verify approach)'",
-      "status_note": "Wiring: data/credit-trust-system-fable-a1/live-tonight.md Piece 1 (Fable). Cron ships enabled=true from the repo (captain's 22:12Z approval above); there are no live toggles, because deploy.sh re-syncs cron-jobs.json on every deploy, so disabling it durably is a repo PR. Kill switches: /etc/hydra/credit-trust-decide.disabled (silences it), cron enabled=false, or approved=false here (the wrapper then refuses every approval)."
+      "status_note": "JUDGE-ONLY (Fable [key=switch-on-plan] item 3, firstmate 159, 2026-10-30 21:50Z): the WRITER is not approved (approved=false: muso-admin-api.sh refuses every apply write, and the writer kill file /etc/hydra/credit-trust-decide.disabled stays). The decider may run --mode judge only: decider rows in the ledger, no core write, no ask, no notify. Previously approved by captain (Aaron) (2026-10-15 ~22:12Z (verbatim, relayed by firstmate inbox 002...); re-approving apply is a captain decision in a reviewed PR. Wiring: data/credit-trust-system-fable-a1/live-tonight.md Piece 1 (Fable). Cron ships enabled=true from the repo (captain's 22:12Z approval above); there are no live toggles, because deploy.sh re-syncs cron-jobs.json on every deploy, so disabling it durably is a repo PR. Kill switches: /etc/hydra/credit-trust-decide.disabled (silences it), cron enabled=false, or approved=false here (the wrapper then refuses every approval).",
+      "judge_only": {
+        "allowed": true,
+        "approved_by": "Fable (switch-on plan, item 3) under the captain delegation",
+        "approval_ref": "[key=switch-on-plan] item 3 via firstmate inbox 159, 2026-10-30 21:50Z",
+        "kill_switch": "/etc/hydra/credit-trust-judge.disabled",
+        "command": "python3 /opt/hydra/scripts/credit-review.py decide --mode judge",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-review.py",
+          "decide",
+          "--mode",
+          "judge"
+        ]
+      }
     },
     "credit-trust-score-approve": {
       "description": "scripts/credit-review.py score-approve --mode apply (cron credit-trust-score-approve-15m): executes the validator's own APPROVE verdict on held unverified / user_verification_needed rows whose total_risk_percent is < 30 (paid first, then risk 0, then oldest; at most 100 per run; caps 20/user, 50/profile, 2,000 fleet per day). Every other guard intact: no validator conflict, no reject_* rule, core's approval guard clear (band A; band B only after core's phase-1 twin is live, Fable 2026-10-20; a band-hint-only proof stamp is not an open ask unless the user engaged: proof on file, support email, Intercom conversation), popularity known, > 0 and < 60, no organization/label/publisher/studio role, user and profile not on the decider's deny/fraud/PULL/HOLD lists, per-user daily approval cap. Ledger before write (decisions.evidence_kind validator_low_risk); writes via the decider's conditional PUT (expected = the row's own held status, caps and pause re-checked under the write lock before every batch) as credit-trust-decide@hydra-ops; reversible per run (credit-review.py revert --run, named human). Provisional: verify-notify candidates (one v1 note).",

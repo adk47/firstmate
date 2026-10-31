@@ -319,7 +319,16 @@ def cmd_eval(args: argparse.Namespace) -> int:
 
 def cmd_decide(args: argparse.Namespace) -> int:
     from credit_review import decide
-    if decide.KILL_SWITCH.exists():
+    # Fable [key=switch-on-plan] item 3: the WRITER kill file stops shadow and apply; --mode judge (decider rows only:
+    # no core write, no ask, no notify) is stopped by its OWN kill file, so judging can run while the writer stays off.
+    if args.mode == "judge":
+        if decide.JUDGE_KILL_SWITCH.exists():
+            log(f"decide: judge kill switch present at {decide.JUDGE_KILL_SWITCH}; nothing judged")
+            print("NO_REPLY")
+            return 0
+        if decide.KILL_SWITCH.exists():
+            log(f"decide: writer kill switch {decide.KILL_SWITCH} present; running JUDGE-ONLY (decider rows only)")
+    elif decide.KILL_SWITCH.exists():
         log(f"decide: kill switch present at {decide.KILL_SWITCH}; nothing decided")
         print("NO_REPLY")
         return 0

@@ -126,3 +126,51 @@ jq_edit() {
   CREDIT_APPROVAL_REGISTRY="$TEST_TMPDIR/bad.json" run "$SCRIPT"
   [ "$status" -eq 2 ]
 }
+
+# Fable [key=switch-on-plan] item 3: credit-trust-decide is JUDGE-ONLY - its writer is approved:false, and its cron
+# may run enabled only as `decide --mode judge` (decider rows only) with the judge-only approval recorded.
+@test "the repo keeps the credit-trust-decide writer unapproved with a recorded judge-only approval" {
+  run jq -r '.automations["credit-trust-decide"] | "\(.approved) \(.judge_only.allowed) \(.judge_only.approved_by != null)"' "$HYDRA_REPO/policies/credit-approval-automation.json"
+  [ "$output" = "false true true" ]
+}
+
+@test "passes when the decide cron is enabled as exactly '--mode judge' (judge-only)" {
+  jq_edit "$CRON_JOBS_FILE" '(.jobs[] | select(.name == "credit-trust-decide-15m") | .enabled) = true'
+  run "$SCRIPT"
+  [ "$status" -eq 0 ]
+}
+
+@test "FAILS when the enabled decide cron could write: a second --mode, --mode=apply, apply, or a message" {
+  for argv in '["python3","/opt/hydra/scripts/credit-review.py","decide","--mode","judge","--mode","apply"]' \
+              '["python3","/opt/hydra/scripts/credit-review.py","decide","--mode=apply","--mode","judge"]' \
+              '["python3","/opt/hydra/scripts/credit-review.py","decide","--mode","apply"]' \
+              '["python3","/opt/hydra/scripts/credit-review.py","decide"]' \
+              '["bash","-c","python3 /opt/hydra/scripts/credit-review.py decide --mode apply; # /opt/hydra/scripts/credit-review.py","decide","--mode","judge"]' \
+              '["python3","/tmp/credit-review.py","decide","--mode","judge"]' \
+              '["python3","/opt/hydra/scripts/credit-review.py","decide","--mode","judge","--extra"]' \
+              '["/opt/hydra/scripts/credit-review.py","decide","--mode","judge"]'; do
+    cp "$HYDRA_REPO/cron-jobs.json" "$CRON_JOBS_FILE"
+    jq_edit "$CRON_JOBS_FILE" "(.jobs[] | select(.name == \"credit-trust-decide-15m\")) |= (.enabled = true | .payload.argv = $argv)"
+    run --separate-stderr "$SCRIPT"
+    [ "$status" -eq 1 ]
+    [[ "$stderr" == *"credit-trust-decide-15m"*"ENABLED"* ]]
+  done
+  cp "$HYDRA_REPO/cron-jobs.json" "$CRON_JOBS_FILE"
+  jq_edit "$CRON_JOBS_FILE" '(.jobs[] | select(.name == "credit-trust-decide-15m")) |= (.enabled = true | .payload.message = "also approve")'
+  run --separate-stderr "$SCRIPT"
+  [ "$status" -eq 1 ]
+}
+
+@test "FAILS when a judge-only cron runs without the recorded judge-only approval" {
+  jq_edit "$CRON_JOBS_FILE" '(.jobs[] | select(.name == "credit-trust-decide-15m") | .enabled) = true'
+  for f in 'del(.automations["credit-trust-decide"].judge_only)' \
+           '.automations["credit-trust-decide"].judge_only.allowed = false' \
+           '.automations["credit-trust-decide"].judge_only.approval_ref = ""' \
+           'del(.automations["credit-trust-decide"].judge_only.argv)' \
+           '.automations["credit-trust-decide"].judge_only.argv = ["python3","/opt/hydra/scripts/credit-review.py","decide","--mode","apply"]'; do
+    cp "$HYDRA_REPO/policies/credit-approval-automation.json" "$CREDIT_APPROVAL_REGISTRY"
+    jq_edit "$CREDIT_APPROVAL_REGISTRY" "$f"
+    run --separate-stderr "$SCRIPT"
+    [ "$status" -eq 1 ]
+  done
+}

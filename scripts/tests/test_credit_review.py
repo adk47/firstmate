@@ -482,16 +482,36 @@ class KnownAgentApproverTests(unittest.TestCase):
     def test_audit_run_routes_automation_breaks_to_their_own_alert(self):
         r = request("a2", pid=PID_GOOD, track="t1", roles=("Mixing",), approved=False)
         r["metadata"]["approval"] = {"via": "admin", "account": self.DECIDER, "isAgent": True}
+        from unittest import mock
+        from credit_review import policy as _policy
         with tempfile.TemporaryDirectory() as tmp:
+            # the rule-break routing of an APPROVED automation (the shipped registry has the writer approved:false,
+            # Fable [key=switch-on-plan] item 3 - that case is test_unapproved_writer_approval_is_its_own_alert)
+            reg = json.loads(_policy.AUTOMATION_REGISTRY.read_text())
+            reg["automations"]["credit-trust-decide"]["approved"] = True
+            (Path(tmp) / "reg.json").write_text(json.dumps(reg))
             ledger = Ledger(str(Path(tmp) / "l.sqlite3"))
-            alerts, _ = run_audit(FakeAdmin([r], {"t1": []}, PROFILES, TRACKS), ledger, None,
-                                  Config(mode="audit", sample_rate=0.0), window_min=90, now=NOW)
+            with mock.patch.object(_policy, "AUTOMATION_REGISTRY", Path(tmp) / "reg.json"):
+                alerts, _ = run_audit(FakeAdmin([r], {"t1": []}, PROFILES, TRACKS), ledger, None,
+                                      Config(mode="audit", sample_rate=0.0), window_min=90, now=NOW)
             ledger.close()
         mine = [a for a in alerts if "registered automation approval broke a rule" in a]
         self.assertEqual(len(mine), 1, alerts)
         self.assertIn("a2: automation credit-trust-decide", mine[0])
         self.assertIn("big track approved without trusted-source confirmation", mine[0])
         self.assertFalse(any("forbidden or unknown approver" in a for a in alerts), alerts)
+
+
+    def test_unapproved_writer_approval_is_its_own_alert(self):
+        """The shipped registry: credit-trust-decide is JUDGE-ONLY (approved:false), so any approval it made alerts."""
+        r = request("a3", pid=PID_GOOD, track="t1", roles=("Mixing",), approved=False)
+        r["metadata"]["approval"] = {"via": "admin", "account": self.DECIDER, "isAgent": True}
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = Ledger(str(Path(tmp) / "l.sqlite3"))
+            alerts, _ = run_audit(FakeAdmin([r], {"t1": []}, PROFILES, TRACKS), ledger, None,
+                                  Config(mode="audit", sample_rate=0.0), window_min=90, now=NOW)
+            ledger.close()
+        self.assertTrue(any("credit-trust-decide" in a and "not approved:true" in a for a in alerts), alerts)
 
 
 class JudgeTests(unittest.TestCase):
@@ -1273,6 +1293,60 @@ def load_cli():
     return mod
 
 
+class DecideKillSwitchTests(unittest.TestCase):
+    """Fable [key=switch-on-plan] item 3: the WRITER kill file stops shadow/apply but never judging; --mode judge has
+    its own kill file. Judge mode reaches decide.run with mode='judge' (decider rows only)."""
+
+    def setUp(self):
+        from credit_review import decide
+        self.decide = decide
+        self.cli = load_cli()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.old = (decide.KILL_SWITCH, decide.JUDGE_KILL_SWITCH, decide.run, decide.Policy.load)
+        decide.KILL_SWITCH = Path(self.tmp.name) / "writer.disabled"
+        decide.JUDGE_KILL_SWITCH = Path(self.tmp.name) / "judge.disabled"
+        self.calls = []
+
+        class Res:
+            mode, scanned, approved, support, write_errors, deferred, errors, note = "judge", 0, 0, 0, 0, 0, 0, ""
+            skipped_by_server = {}
+
+            def line(self):
+                return "res"
+
+        def fake_run(admin, db, judge, *, mode, **kw):
+            self.calls.append(mode)
+            return Res()
+        decide.run = fake_run
+        decide.Policy.load = classmethod(lambda cls, *a, **k: type("P", (), {"max_rows_per_run": 500})())
+        self.cli.make_judge = lambda args, *a, **k: None
+        self.cli.Ledger = lambda path: type("L", (), {"db": None})()
+        self.cli.admin_api.AdminClient = lambda *a, **k: None
+
+    def tearDown(self):
+        self.decide.KILL_SWITCH, self.decide.JUDGE_KILL_SWITCH, self.decide.run, self.decide.Policy.load = self.old
+        self.tmp.cleanup()
+
+    def go(self, mode):
+        args = self.cli.parser().parse_args(["decide", "--mode", mode])
+        args.ledger = str(Path(self.tmp.name) / "l")
+        return self.cli.cmd_decide(args)
+
+    def test_writer_kill_file_stops_shadow_and_apply_but_not_judge(self):
+        self.decide.KILL_SWITCH.write_text("")
+        self.assertEqual((self.go("apply"), self.go("shadow")), (0, 0))
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.go("judge"), 0)
+        self.assertEqual(self.calls, ["judge"])
+
+    def test_the_judge_kill_file_stops_judging_only(self):
+        self.decide.JUDGE_KILL_SWITCH.write_text("")
+        self.go("judge")
+        self.assertEqual(self.calls, [])
+        self.go("shadow")
+        self.assertEqual(self.calls, ["shadow"])
+
+
 class ModelGateTests(unittest.TestCase):
     """The model judge is OFF by default (no OpenRouter spend until the captain
     tops the account up) and never spends below the balance floor."""
@@ -1358,12 +1432,20 @@ class CronContractTests(unittest.TestCase):
                 self.assertIn(j["name"], reg["cron_names"])
                 self.assertTrue(reg["approved"] is True and reg["approved_by"] and reg["approval_ref"])
             if argv[2] == "decide":
-                # The one writing subcommand: only as the registered, captain-approved
-                # credit-trust-decide automation (policies/credit-approval-automation.json).
+                # The one writing subcommand: only as the registered credit-trust-decide automation, and either
+                # captain-approved for writes or (Fable [key=switch-on-plan] item 3) JUDGE-ONLY: exactly one --mode,
+                # judge, with the judge-only approval recorded.
                 reg = json.loads((Path(__file__).resolve().parents[2] / "policies"
                                   / "credit-approval-automation.json").read_text())["automations"]["credit-trust-decide"]
                 self.assertIn(j["name"], reg["cron_names"])
-                self.assertTrue(reg["approved"] is True and reg["approved_by"] and reg["approval_ref"])
+                if reg["approved"] is True:
+                    self.assertTrue(reg["approved_by"] and reg["approval_ref"])
+                else:
+                    self.assertEqual([a for a in argv if a.startswith("--mode")], ["--mode"])
+                    self.assertEqual(argv[argv.index("--mode") + 1], "judge")
+                    jo = reg["judge_only"]
+                    self.assertTrue(jo["allowed"] is True and jo["approved_by"] and jo["approval_ref"])
+                    self.assertEqual(argv, jo["argv"])        # the exact argv the CI guard admits (QA/r5 #1551)
             if argv[2] == "review":
                 self.assertIn("shadow", argv, "the reviewer ships in shadow (Phase 0)")
 

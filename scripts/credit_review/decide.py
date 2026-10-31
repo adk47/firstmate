@@ -133,6 +133,8 @@ BATCH = 50
 
 ROOT = Path(__file__).resolve().parents[2]
 KILL_SWITCH = Path(os.environ.get("CREDIT_TRUST_DECIDE_KILL_SWITCH", "/etc/hydra/credit-trust-decide.disabled"))
+#: Stops --mode judge only (decider rows, no core write). The writer kill file above never stops judging.
+JUDGE_KILL_SWITCH = Path(os.environ.get("CREDIT_TRUST_JUDGE_KILL_SWITCH", "/etc/hydra/credit-trust-judge.disabled"))
 WRITE_LOCK = Path(os.environ.get("CV_CREDIT_WRITE_LOCK_PATH", "/var/lib/hydra/credit-status-writes.lock"))
 PAYING_USERS_FILE = Path(os.environ.get("CREDIT_TRUST_PAYING_USERS_FILE", "/var/lib/credit-trust/paying-users.json"))
 PAYING_USERS_MAX_AGE = timedelta(hours=3)

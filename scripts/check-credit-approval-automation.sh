@@ -81,20 +81,27 @@ done < <(jq -r '.automations | to_entries[]
   | select(((.value.approved_by // "") | tostring | length == 0) or ((.value.approval_ref // "") | tostring | length == 0))
   | .key' "$REGISTRY")
 
-# One row per cron job: name <TAB> enabled <TAB> payload text (tabs/newlines flattened).
+# One row per cron job: name <TAB> enabled <TAB> exact_argv <TAB> payload text (tabs/newlines flattened).
+# exact_argv (Fable [key=switch-on-plan] item 3) is the job's argv as compact JSON when the payload is a pure COMMAND
+# (no agent-turn message/text), else "-". A judge-only exception is granted ONLY when this argv EQUALS the registry's
+# judge_only.argv element for element (QA/r5 #1551: matching tokens anywhere let `bash -c '... --mode apply; #
+# credit-review.py' decide --mode judge` pass). An exact argv cannot hide a shell, a second --mode, or extra flags.
 jobs_tsv=$(jq -r '
   (if type == "array" then . else (.jobs // []) end)[]
   | [ (.name // .id // "<unnamed>"),
       # NOT `.enabled // true`: jq `//` treats false as absent, so a disabled
       # job would read as enabled.
       (if .enabled == false then "false" else "true" end),
+      (if (.payload.kind == "command") and ((.payload.message // "") == "") and ((.payload.text // "") == "")
+          and ((.payload.argv // null) | type == "array")
+       then (.payload.argv | tojson) else "-" end),
       ([ (.payload.argv // [] | join(" ")),
          (.payload.message // ""),
          (.payload.text // "") ] | join(" ") | gsub("[\t\n\r]"; " ")) ]
   | @tsv' "$CRON_FILE")
 
 matched=0
-while IFS=$'\t' read -r name enabled text; do
+while IFS=$'\t' read -r name enabled exact_argv text; do
   [ -n "$name" ] || continue
 
   for ep in "${NEVER_SCHEDULED[@]}"; do
@@ -129,6 +136,16 @@ while IFS=$'\t' read -r name enabled text; do
       continue
     fi
     if [ "$enabled" = "true" ]; then
+      # A judge-only run of an automation whose WRITER is not approved is allowed only when the registry records
+      # who approved judge-only running and where (approved == false keeps every apply refused at the wrapper).
+      if [ "$exact_argv" != "-" ] && jq -e --arg k "$key" --argjson argv "$exact_argv" '
+           .automations[$k].judge_only.allowed == true
+           and ((.automations[$k].judge_only.approved_by // "") | tostring | length > 0)
+           and ((.automations[$k].judge_only.approval_ref // "") | tostring | length > 0)
+           and ((.automations[$k].judge_only.argv // null) | type == "array")
+           and .automations[$k].judge_only.argv == $argv' "$REGISTRY" >/dev/null; then
+        continue
+      fi
       if ! jq -e --arg k "$key" '.automations[$k].approved == true' "$REGISTRY" >/dev/null; then
         violation "cron '$name' is ENABLED but automation '$key' has approved != true. Set \"enabled\": false in cron-jobs.json, or record the captain's approval in policies/credit-approval-automation.json"
       fi
