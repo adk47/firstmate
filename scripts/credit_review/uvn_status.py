@@ -392,6 +392,42 @@ def uvn_requests(user_ids: list[int], query: Query = trino,
     return reqs
 
 
+def asks_proof_on_file(proof_path: str | None, *, now: datetime | None = None,
+                       ledger_path: str | None = None) -> verify_notify.ProofOnFile:
+    """r5 [key=asks-scoped-pof] (adopted by Fable 08:29Z): the ask/answer classes' proof-on-file read. Every part usable
+    = load_proof_on_file, unchanged. When the ONLY unusable part is cs-gmail, the CLAIM notes' predicate decides - one
+    implementation, claim_proof_ask.claim_holds, imported, never copied: it admits on fresh core + cs-intercom and names
+    every user cs-gmail could vouch for (the support@ snapshot, email proof_intake rows, ledger support@ refs, gmail proof
+    entries; a last good scan > 24 h = everyone). Those users are held (documents_block) and listed per run as
+    stale_source:cs-gmail. Anything else unusable raises ProofFileError: nothing is asked.
+    QA #1573: ONE snapshot - the export is read once into a private copy, and the strict read, claim_holds and the
+    entries all come from that copy (an atomic replace between two opens can never pair A's holds with B's entries)."""
+    import tempfile  # noqa: PLC0415
+    src = proof_path or verify_notify.PROOF_ON_FILE
+    try:
+        with open(src, "rb") as fh:
+            raw = fh.read()
+    except OSError as exc:
+        raise verify_notify.ProofFileError(f"the proof-on-file list {src} is unreadable ({type(exc).__name__})") from exc
+    fd, snap = tempfile.mkstemp(prefix=".pof-", suffix=".json")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(raw)
+        try:
+            return verify_notify.load_proof_on_file(snap, now=now)
+        except verify_notify.ProofFileError:
+            from credit_review import claim_proof_ask  # noqa: PLC0415  (lazy: claim_proof_ask imports this module)
+            holds = claim_proof_ask.claim_holds(snap, now=now, ledger_path=ledger_path)    # raises: refuse all
+            out = verify_notify.proof_from_entries(json.loads(raw), holds.held)  # AllUsers when > 24 h: everyone held
+            out.scoped = holds.scoped
+            return out
+    finally:
+        os.unlink(snap)
+
+
+STALE_GMAIL_REASON = "stale_source:cs-gmail"
+
+
 def documents_block(documented: dict[str, Any], uid: str, ask_ids: list[str] | set[str], released: set[str],
                     created: str | None = None) -> bool:
     """True when the proof-on-file export keeps this user from an ask about `ask_ids`. A user with
@@ -655,7 +691,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
     documented: dict[str, Any] = {}
     if is_ask:
         try:
-            documented = verify_notify.load_proof_on_file(proof_path)
+            documented = asks_proof_on_file(proof_path, now=now, ledger_path=ledger_path)
         except verify_notify.ProofFileError as exc:
             report.halted = str(exc)
             return report
@@ -692,6 +728,10 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                 report.note("excluded_today")
                 continue
             listed = [str(r) for r in (u.get("request_ids") or [])]
+            if is_ask and getattr(documented, "scoped", False) and str(u.get("user_id")) in documented.support_contacts:
+                report.note(STALE_GMAIL_REASON)                     # held, and LISTED per user (r5 condition 2)
+                report.outcomes.append({"user": str(u.get("user_id")), "result": "held", "reason": STALE_GMAIL_REASON})
+                continue
             if is_ask and documents_block(documented, str(u.get("user_id")), listed, released, u.get("oldest") or None):
                 report.proof_on_file += 1
                 report.note("documents_on_file")
@@ -891,10 +931,15 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                     mine = released
                     if is_ask:
                         try:
-                            documented = verify_notify.load_proof_on_file(proof_path)
+                            documented = asks_proof_on_file(proof_path, now=now, ledger_path=ledger_path)
                         except verify_notify.ProofFileError as exc:
                             report.halted = str(exc)
                             break
+                        if getattr(documented, "scoped", False) and str(uid) in documented.support_contacts:
+                            # QA #1573: vouched for by cs-gmail since the batch read - held AND listed, never sent
+                            report.note(STALE_GMAIL_REASON)
+                            report.outcomes.append({"user": str(uid), "result": "held", "reason": STALE_GMAIL_REASON})
+                            continue
                         # The stage-2 release, re-read for this user right before the send (a
                         # later run may have judged a credit again). Unreadable = no release.
                         if documented.get(str(uid)) and campaign in stage2_verdicts.RELEASES:

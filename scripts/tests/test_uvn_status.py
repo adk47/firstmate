@@ -1878,5 +1878,115 @@ class ReplyDueRowKeysTest(unittest.TestCase):
         self.assertIn('reply_due_row(uid, {**u, "credits": payload.get("credits") or []}, query=query)', src)
 
 
+class AsksScopedProofOnFileTest(unittest.TestCase):
+    """r5 [key=asks-scoped-pof] (Fable 08:29Z): the ask path reuses claim_proof_ask.claim_holds VERBATIM. Only cs-gmail
+    stale: admit on fresh core + cs-intercom, hold + LIST every user cs-gmail could vouch for; a last good scan > 24 h
+    holds everyone; any other part unusable refuses all; a fully fresh export is the strict read, unchanged."""
+    setUp0 = UvnStatusTests.setUp
+    write_list = UvnStatusTests.write_list
+    run_ = UvnStatusTests.run_
+    gate_file = UvnStatusTests.gate_file
+
+    def setUp(self):
+        self.setUp0()
+        from credit_review import claim_proof_ask
+        self.cpa = claim_proof_ask
+        self.saved = claim_proof_ask.PROOF_STORE
+        claim_proof_ask.PROOF_STORE = str(self.dir / "proof.sqlite")
+        import sqlite3
+        db = sqlite3.connect(claim_proof_ask.PROOF_STORE)
+        db.execute("CREATE TABLE proof_intake (user_id INTEGER, source TEXT)")
+        db.execute("INSERT INTO proof_intake VALUES (9, 'email')")
+        db.commit(); db.close()
+        verify_ledger.connect(self.ledger).close()      # claim_holds reads the ledger's support@ refs (it always exists live)
+        self.users = [{"user_id": 1, "paid": True, "skip": None, "request_ids": ["r1", "r2"]},
+                      {"user_id": 4, "paid": True, "skip": None, "request_ids": ["r5"]}]
+        self.write_list()
+        self.q = query({"users": [["1", "a@x.com", "Ann", pro(1), auth(1)], ["4", "d@x.com", "Dee", pro(4), auth(4)]],
+                        "requests": [["r1", "1", "p1", "t1", "Low", '[{"name":"Art"}]', "{Mixing}", "10"],
+                                     ["r5", "4", "p4", "t5", "Hi", '[{"name":"Art"}]', "{Mixing}", "10"]]})
+
+    def tearDown(self):
+        self.cpa.PROOF_STORE = self.saved
+
+    def feed(self, gmail_h=12.0, intercom_stale=False, contacts=("1",)):
+        self.proof.write_text(json.dumps({
+            "generated_at": iso(0.2), "users": 0, "entries": [],
+            "sources": [{"name": "core", "generated_at": iso(0.2)},
+                        {"name": "cs-intercom", "generated_at": iso(0.5), "stale": intercom_stale},
+                        {"name": "cs-gmail", "generated_at": iso(gmail_h), "stale": True}],
+            "gmail_contacts_90d": {"generated_at": iso(gmail_h), "source": "test", "user_ids": list(contacts)}}))
+
+    def run_scoped(self, mode="apply"):
+        return self.run_(mode=mode)                 # run_ passes proof_path=self.proof to the runner
+
+    def test_gmail_vouched_users_are_held_and_listed_the_rest_are_asked(self):
+        self.feed(gmail_h=12.0, contacts=("1",))
+        rep, gate = self.run_scoped()
+        self.assertEqual(rep.halted, "")
+        self.assertEqual(sorted(str(p["user"]["id"]) for _, p in gate.calls), ["4"])
+        self.assertIn({"user": "1", "result": "held", "reason": "stale_source:cs-gmail"}, rep.outcomes)
+
+    def test_a_user_vouched_for_between_the_cut_and_the_send_is_held_at_send(self):
+        # the re-read right before each send (an email filing that arrived mid-run): documents_block holds them there
+        self.feed(gmail_h=12.0, contacts=())
+        real, calls = self.cpa.claim_holds, []
+        def holds(*a, **kw):
+            calls.append(1)
+            h = real(*a, **kw)
+            return self.cpa.ClaimHolds(frozenset(h.held) | ({"4"} if len(calls) > 1 else set()), scoped=h.scoped)
+        self.cpa.claim_holds = holds
+        try:
+            rep, gate = self.run_scoped()
+        finally:
+            self.cpa.claim_holds = real
+        self.assertGreater(len(calls), 1)
+        self.assertNotIn("4", [str(p["user"]["id"]) for _, p in gate.calls])
+        self.assertIn({"user": "4", "result": "held", "reason": "stale_source:cs-gmail"}, rep.outcomes)   # LISTED
+
+    def test_holds_and_entries_come_from_one_snapshot(self):
+        # QA #1573: the export replaced between claim_holds and the parse must never pair A's holds with B's entries
+        self.feed(gmail_h=12.0, contacts=())
+        real, b = self.cpa.claim_holds, self.proof.read_text()
+        def holds(path, **kw):
+            h = real(path, **kw)                                   # validated on snapshot A (user 4 not a contact)
+            d = json.loads(b); d["gmail_contacts_90d"]["user_ids"] = ["4"]
+            d["entries"] = [{"user_id": "4", "request_id": "r5", "kind": "approved_doc", "source": "cs-intercom", "ref": "x"}]
+            self.proof.write_text(json.dumps(d))                   # ... then the live file becomes snapshot B
+            return h
+        self.cpa.claim_holds = holds
+        try:
+            pof = uvn_status.asks_proof_on_file(str(self.proof), ledger_path=self.ledger)
+        finally:
+            self.cpa.claim_holds = real
+        self.assertNotIn("4", pof)                                 # entries are A's (no document for 4), not B's
+
+    def test_the_dry_run_holds_and_lists_them_too(self):
+        # the signed list is the dry run: a held user is never previewed or validated (the send-time re-read is apply-only)
+        self.feed(gmail_h=12.0, contacts=("1",))
+        rep, gate = self.run_scoped(mode="dry-run")
+        self.assertEqual(sorted(str(p["user"]["id"]) for _, p in gate.calls), ["4"])
+        self.assertIn({"user": "1", "result": "held", "reason": "stale_source:cs-gmail"}, rep.outcomes)
+
+    def test_a_last_good_scan_older_than_a_day_holds_everyone_listed(self):
+        self.feed(gmail_h=25.0)
+        rep, gate = self.run_scoped()
+        self.assertEqual(gate.calls, [])
+        self.assertEqual(sorted(o["user"] for o in rep.outcomes if o.get("reason") == "stale_source:cs-gmail"), ["1", "4"])
+
+    def test_another_part_unusable_refuses_all(self):
+        self.feed(gmail_h=2.0, intercom_stale=True)
+        rep, gate = self.run_scoped()
+        self.assertTrue(rep.halted)
+        self.assertEqual(gate.calls, [])
+
+    def test_a_fresh_export_is_the_strict_read(self):
+        proof(self.proof)
+        pof = uvn_status.asks_proof_on_file(str(self.proof))
+        self.assertFalse(pof.scoped)
+        rep, gate = self.run_scoped()
+        self.assertEqual(sorted(str(p["user"]["id"]) for _, p in gate.calls), ["1", "4"])
+
+
 if __name__ == "__main__":
     unittest.main()

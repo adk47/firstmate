@@ -328,6 +328,7 @@ class ProofOnFile(dict[str, list[tuple[Optional[str], str]]]):
     def __init__(self, *args: Any, support_contacts: frozenset[str] = frozenset(), **kw: Any):
         super().__init__(*args, **kw)
         self.support_contacts = support_contacts
+        self.scoped = False      # [key=asks-scoped-pof]: cs-gmail stale; support_contacts = claim_holds' held set
         # {user: [(request_id | None, kind, proof_at | "")]}: when each document arrived (p1 198 / Fable 199: a
         # document filed BEFORE a request cannot be that request's proof)
         self.dated: dict[str, list[tuple[Optional[str], str, str]]] = {}
@@ -382,7 +383,13 @@ def load_proof_on_file(path: str | None = None, *, max_age_h: float = PROOF_MAX_
     if contacts is None:
         raise ProofFileError(f"the proof-on-file list {path} has no readable, fresh {proof_parts.SUPPORT_CONTACTS} "
                              "snapshot (anyone may have emailed support@)")
-    out = ProofOnFile(support_contacts=frozenset(str(u) for u in contacts))
+    return proof_from_entries(doc, frozenset(str(u) for u in contacts))
+
+
+def proof_from_entries(doc: dict[str, Any], support_contacts: frozenset[str]) -> ProofOnFile:
+    """The documents of an export whose entries[] passed proof_parts.check_entries, keyed by user id (the one parser:
+    load_proof_on_file, and the asks' scoped read [key=asks-scoped-pof] after claim_holds admitted the export)."""
+    out = ProofOnFile(support_contacts=support_contacts)
     for e in doc["entries"]:
         rid = str(e.get("request_id") or "").strip() or None
         out.setdefault(str(e["user_id"]).strip(), []).append((rid, e["kind"]))
