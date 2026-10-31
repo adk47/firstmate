@@ -1223,5 +1223,149 @@ class StatusAllowlistTableTest(unittest.TestCase):
             self.assertTrue(r["why"].startswith("how-to / change request"), r)
 
 
+class HoldKindTest(unittest.TestCase):
+    """[key=r8-hold-due] (r5/p1 10-31): asks ignore R8_approval_hold_volume and hold on R8_hard; a volume hold still
+    holds every non-ask note and stays truthy for the approval-side readers; any doubt about the kind = hard."""
+
+    def setUp(self):
+        CommStateTest.setUp(self)
+        d = Path(tempfile.mkdtemp())
+        self.saved = (cs.ACCOUNT_HOLDS, cs.ACCOUNT_BANDS)
+        cs.ACCOUNT_HOLDS, cs.ACCOUNT_BANDS = str(d / "holds.jsonl"), str(d / "bands.json")
+        Path(cs.ACCOUNT_HOLDS).write_text(json.dumps({"user_id": str(UID), "kind": "approval_hold"}) + "\n")
+
+    def tearDown(self):
+        cs.ACCOUNT_HOLDS, cs.ACCOUNT_BANDS = self.saved
+
+    def bands(self, kind, decision="hold", age_h=0.5):
+        Path(cs.ACCOUNT_BANDS).write_text(json.dumps({"users": {str(UID): {"decision": decision, "hold_kind": kind}}}))
+        os.utime(cs.ACCOUNT_BANDS, (time.time() - age_h * 3600,) * 2)
+
+    def held_by_r8(self, campaign, copy):
+        q = lambda sql: [["0", "0"]] if "proof_required_owed" in sql else [] if "regexp_like" in sql else (
+            [["r1", "user_verification_needed", "", "", "2026-10-15 07:21:38 UTC"]] if "credit_requests" in sql else [])
+        fr = lambda uid, qq: cs.account_hold_facts(uid)
+        res = cs.check(campaign, copy, UID, ["r1"], "c1", query=q, ic=self.ic, fraud=fr)
+        return [r for r in res["reasons"] if r.startswith("R8")]
+
+    def test_a_volume_hold_does_not_hold_the_ask(self):
+        self.bands("R8_approval_hold_volume")
+        self.assertEqual(cs.account_hold_facts(UID), ["R8_approval_hold_volume"])     # truthy: approvals stay held
+        self.assertEqual(self.held_by_r8("uvn-status", "uvn"), [])                     # the ask goes
+        q = lambda sql: [["0", "0"]] if "proof_required_owed" in sql else []
+        k = cs.check("status-team-review", "teamreview", UID, ["r1"], "c1", query=q, ic=self.ic,
+                     fraud=lambda uid, qq: cs.account_hold_facts(uid))
+        self.assertTrue(k["hold"], k)                                                  # never /k: owes the hold
+        self.assertIn("owes:account_hold", k["reasons"])
+
+    def test_a_hard_hold_holds_the_ask(self):
+        self.bands("R8_hard")
+        self.assertEqual(self.held_by_r8("uvn-status", "uvn"), ["R8_account_hold"])
+
+    def test_any_doubt_about_the_kind_is_hard(self):
+        for setup in (lambda: None,                                                    # no bands file
+                      lambda: self.bands("R8_approval_hold_volume", age_h=4),          # stale (> 3 h)
+                      lambda: self.bands("R8_approval_hold_volume", decision="allow"),  # the scan does not hold them
+                      lambda: self.bands(None),                                        # no kind
+                      lambda: Path(cs.ACCOUNT_BANDS).write_text("{not json")):
+            Path(cs.ACCOUNT_BANDS).unlink(missing_ok=True)
+            setup()
+            self.assertEqual(cs.account_hold_facts(UID), ["R8_account_hold"])
+            self.assertEqual(self.held_by_r8("uvn-status", "uvn"), ["R8_account_hold"])
+
+    def test_no_hold_row_is_no_hold_whatever_the_band_says(self):
+        Path(cs.ACCOUNT_HOLDS).write_text("")
+        self.bands("R8_approval_hold_volume")
+        self.assertEqual(cs.account_hold_facts(UID), [])
+
+
+class ReleaseRowTest(unittest.TestCase):
+    """[key=r8-release-row] (r5 + p1 10-31): the latest row by `at` decides; a release clears the hold for asks AND
+    approvals only when the lens's current scan agrees; anything doubtful = held. One reader for everyone."""
+
+    def setUp(self):
+        d = Path(tempfile.mkdtemp())
+        self.saved = (cs.ACCOUNT_HOLDS, cs.ACCOUNT_BANDS)
+        cs.ACCOUNT_HOLDS, cs.ACCOUNT_BANDS = str(d / "holds.jsonl"), str(d / "bands.json")
+        self.bands({})
+
+    def tearDown(self):
+        cs.ACCOUNT_HOLDS, cs.ACCOUNT_BANDS = self.saved
+
+    def rows(self, *rows):
+        Path(cs.ACCOUNT_HOLDS).write_text("".join(json.dumps({"user_id": u, "kind": k, "at": at}) + "\n" for u, k, at in rows))
+
+    def bands(self, users, age_h=0.5):
+        Path(cs.ACCOUNT_BANDS).write_text(json.dumps({"users": users, "failed_chunks_users": []}))
+        os.utime(cs.ACCOUNT_BANDS, (time.time() - age_h * 3600,) * 2)
+
+    def test_a_confirmed_release_ends_the_hold_for_everyone(self):
+        self.rows(("7", "approval_hold", "2026-10-29T10:00:00Z"), ("7", "release", "2026-10-30T10:00:00Z"))
+        self.assertEqual(cs.held_user_ids(), set())
+        self.assertEqual(cs.account_hold_facts(7), [])                                # asks + approval-side readers
+
+    def test_a_later_hold_after_a_release_holds(self):
+        self.rows(("7", "approval_hold", "2026-10-29T10:00:00Z"), ("7", "release", "2026-10-30T10:00:00Z"),
+                  ("7", "approval_hold", "2026-10-31T01:00:00Z"))
+        self.assertEqual(cs.held_user_ids(), {"7"})
+
+    def test_latest_is_by_at_not_by_file_order(self):
+        self.rows(("7", "release", "2026-10-30T10:00:00Z"), ("7", "approval_hold", "2026-10-29T10:00:00Z"))
+        self.assertEqual(cs.held_user_ids(), set())                                   # the release is later
+        self.rows(("7", "approval_hold", "2026-10-31T10:00:00.000Z"), ("7", "release", "2026-10-30T10:00:00Z"))
+        self.assertEqual(cs.held_user_ids(), {"7"})                                   # the hold is later
+
+    def test_a_release_without_the_lens_agreeing_holds(self):
+        rel = (("7", "approval_hold", "2026-10-29T10:00:00Z"), ("7", "release", "2026-10-30T10:00:00Z"))
+        for bands in (lambda: self.bands({"7": {"decision": "hold", "hold_kind": "R8_hard"}}),   # the scan disagrees
+                      lambda: self.bands({}, age_h=4),                                        # stale scan
+                      lambda: Path(cs.ACCOUNT_BANDS).unlink(),                                # no scan
+                      lambda: Path(cs.ACCOUNT_BANDS).write_text("{broken")):                  # unreadable scan
+            self.rows(*rel)
+            self.bands({})
+            bands()
+            self.assertEqual(cs.held_user_ids(), {"7"})
+
+    def test_only_a_valid_band_agreement_confirms_a_release(self):
+        # QA #1570: a present but malformed entry, or an absence from a scan of unknown completeness, keeps them held
+        rel = (("7", "approval_hold", "2026-10-29T10:00:00Z"), ("7", "release", "2026-10-30T10:00:00Z"))
+        for users, failed, held in (({"7": None}, [], {"7"}),
+                                    ({"7": {"decision": "unknown"}}, [], {"7"}),
+                                    ({"7": "allow"}, [], {"7"}),
+                                    ({}, None, {"7"}),                       # no failed_chunks_users: completeness unknown
+                                    ({}, ["7"], {"7"}),                      # the scan could not read them
+                                    ({}, [], set()),                         # absent from a complete scan: released
+                                    ({"7": {"decision": "allow"}}, [], set())):
+            self.rows(*rel)
+            doc = {"users": users} if failed is None else {"users": users, "failed_chunks_users": failed}
+            Path(cs.ACCOUNT_BANDS).write_text(json.dumps(doc))
+            self.assertEqual(cs.held_user_ids(), held, (users, failed))
+
+    def test_doubtful_rows_hold(self):
+        self.rows(("7", "approval_hold", "2026-10-29T10:00:00Z"), ("7", "release", "not a time"),
+                  ("8", "mystery", "2026-10-29T10:00:00Z"), ("8", "release", "2026-10-30T10:00:00Z"))
+        self.assertEqual(cs.held_user_ids(), {"7", "8"})
+
+    def test_the_ledger_itself_unreadable_or_stale_is_unknown(self):
+        with self.assertRaises(cs.Unknown):
+            cs.held_user_ids()                                                        # no file
+        self.rows(("7", "approval_hold", "2026-10-29T10:00:00Z"))
+        os.utime(cs.ACCOUNT_HOLDS, (time.time() - 73 * 3600,) * 2)
+        with self.assertRaises(cs.Unknown):
+            cs.held_user_ids()
+
+    def test_owing_proof_and_receipts_read_through_the_one_reader(self):
+        from credit_review import owing_proof, receipts
+        import sqlite3
+        led = str(Path(tempfile.mkdtemp()) / "l.sqlite3")
+        db = sqlite3.connect(led)
+        db.execute("CREATE TABLE verify_refusal_holds (user_id TEXT, flagged_at TEXT, reason TEXT)")
+        db.commit(); db.close()
+        self.rows(("7", "approval_hold", "2026-10-29T10:00:00Z"), ("7", "release", "2026-10-30T10:00:00Z"),
+                  ("9", "approval_hold", "2026-10-29T10:00:00Z"))
+        self.assertEqual(owing_proof.held_accounts(cs.ACCOUNT_HOLDS, led), {9})
+        self.assertEqual(receipts.held_accounts(cs.ACCOUNT_HOLDS, led), {9})
+
+
 if __name__ == "__main__":
     unittest.main()

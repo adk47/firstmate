@@ -119,15 +119,16 @@ def held_accounts(holds_path: str, ledger_path: str, now: datetime | None = None
             # QA #1456: a FUTURE mtime has a negative age that never exceeds the limit, so a stale (or clock-skewed)
             # list would read as fresh. Its age is unknowable: stop.
             raise ReceiptsError(f"G8: the account hold list's mtime is {-age_h * 60:.0f} min in the future; its age is unknown")
-        with open(holds_path, encoding="utf-8") as fh:
-            for line in fh:
-                if line.strip():
-                    held.add(int(json.loads(line)["user_id"]))
+        # [key=r8-release-row]: the ONE reader (latest row by at; a release only with the lens's current scan agreeing)
+        from credit_review import comm_state  # noqa: PLC0415
+        held |= {int(u) for u in comm_state.held_user_ids(holds_path=holds_path) if str(u).isdigit()}
         db = sqlite3.connect(f"file:{ledger_path}?mode=ro", uri=True)
         held |= {int(u) for (u,) in db.execute(
             "SELECT DISTINCT user_id FROM verify_refusal_holds WHERE flagged_at IS NOT NULL AND reason='account-hold' "
             "AND user_id IS NOT NULL") if str(u).isdigit()}
-    except (OSError, ValueError, KeyError, sqlite3.Error) as exc:
+    except (OSError, ValueError, KeyError, sqlite3.Error, RuntimeError) as exc:
+        if isinstance(exc, ReceiptsError):
+            raise
         raise ReceiptsError(f"account holds unreadable: {exc}") from exc
     return held
 

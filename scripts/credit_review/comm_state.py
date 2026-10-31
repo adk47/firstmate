@@ -74,6 +74,12 @@ RESOLVED = re.compile(r"\b(all sorted|sorted now|it'?s sorted|now sorted|resolve
 POLICIES = os.environ.get("COMM_STATE_POLICIES", "/opt/hydra/policies")
 ACCOUNT_HOLDS = os.environ.get("COMM_STATE_ACCOUNT_HOLDS", "/opt/firstmate/fraud-lens/out/account_holds.jsonl")
 ACCOUNT_HOLDS_MAX_AGE = 72 * 3600
+# [key=r8-hold-due] (r5/p1 10-31): the lens's per-user hold KIND, from its hourly scan. Asks ignore a hold held ONLY by
+# unanchored volume (it holds approvals, never the ask that resolves it); everything else holds on R8_hard.
+ACCOUNT_BANDS = os.environ.get("COMM_STATE_ACCOUNT_BANDS", "/opt/firstmate/fraud-lens/out/account_bands.json")
+ACCOUNT_BANDS_MAX_AGE = 3 * 3600
+HOLD_VOLUME = "R8_approval_hold_volume"
+HOLD_HARD = "R8_account_hold"
 Query = Callable[[str], "list[list[str]]"]
 Intercom = Callable[[str, str, dict | None], dict]
 
@@ -317,23 +323,103 @@ def thread_facts(conversation: str, ic: Intercom, now: float | None = None) -> l
     return sorted(set(out))
 
 
-def account_hold_facts(uid: int, now: float | None = None) -> list[str]:
-    """R8 (r5): the fraud-lens account-hold set, read at send time; older than 72 h or unreadable = UNKNOWN."""
-    now = now or time.time()
+def _bands_users(path: str, now: float) -> dict[str, Any] | None:
+    """The lens's current scan, per user id - or None when it is missing, unreadable, older than 3 h or future-dated."""
     try:
-        age = now - os.path.getmtime(ACCOUNT_HOLDS)
-        held = set()
-        with open(ACCOUNT_HOLDS, encoding="utf-8") as fh:
-            for ln in fh:
-                if ln.strip():
-                    held.add(str(json.loads(ln).get("user_id")))
+        age = now - os.path.getmtime(path)
+        if age > ACCOUNT_BANDS_MAX_AGE or age < -300:
+            return None
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        users = doc.get("users")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return users if isinstance(users, dict) else None
+
+
+def _scan_failed(path: str) -> set[str] | None:
+    """The users the lens's scan could NOT read (failed_chunks_users); None when that list is absent or malformed (the
+    scan's completeness is then unknown, so an absence proves nothing)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            failed = json.load(fh).get("failed_chunks_users")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return {str(u) for u in failed} if isinstance(failed, list) else None
+
+
+_ABSENT = object()
+
+
+def held_user_ids(holds_path: str | None = None, bands_path: str | None = None, now: float | None = None) -> set[str]:
+    """[key=r8-release-row] (r5 + p1 10-31): THE one reader of the fraud lens's account-hold ledger - every reader (asks,
+    stale-velocity revalidate, validator-reject close, owing_proof, receipts) goes through it; none parses the file.
+    A user's hold state is their LATEST row by `at`: approval_hold = held; release = clear ONLY when the lens's current
+    scan agrees (account_bands.json fresh and the user not `hold` in it) - disagreement, or a missing / unreadable /
+    stale band, = held. A row with an unreadable `at` or an unknown kind holds that user. The ledger itself missing,
+    unreadable, older than 72 h or future-dated = Unknown (no reader may treat 'no file' as 'nobody held')."""
+    holds_path, bands_path, now = holds_path or ACCOUNT_HOLDS, bands_path or ACCOUNT_BANDS, now or time.time()
+    try:
+        age = now - os.path.getmtime(holds_path)
+        latest: dict[str, tuple[datetime, int, str]] = {}
+        doubtful: set[str] = set()
+        with open(holds_path, encoding="utf-8") as fh:
+            for i, ln in enumerate(fh):
+                if not ln.strip():
+                    continue
+                row = json.loads(ln)
+                uid, kind = str(row.get("user_id")), row.get("kind") or "approval_hold"
+                try:
+                    at = datetime.fromisoformat(str(row.get("at") or "").replace("Z", "+00:00"))
+                    at = at if at.tzinfo else at.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    doubtful.add(uid)
+                    continue
+                if kind not in ("approval_hold", "release"):
+                    doubtful.add(uid)
+                if uid not in latest or (at, i) >= latest[uid][:2]:
+                    latest[uid] = (at, i, kind)
     except (OSError, ValueError, AttributeError) as exc:
         raise Unknown(f"account holds unreadable: {exc}") from exc
     if age > ACCOUNT_HOLDS_MAX_AGE:
         raise Unknown(f"account holds are {int(age // 3600)}h old (> 72h)")
     if age < -300:      # a future mtime (> 5 min ahead): its age is unknowable (QA #1456 on G8)
         raise Unknown("account holds mtime is in the future; age unknown")
-    return ["R8_account_hold"] if str(uid) in held else []
+    bands = _bands_users(bands_path, now)
+    failed = _scan_failed(bands_path) if bands is not None else None
+    held = set(doubtful)
+    for uid, (_, _, kind) in latest.items():
+        if kind != "release":
+            held.add(uid)
+            continue
+        # QA #1570: only a VALID agreement confirms the release - the scan says decision 'allow', or the user is absent
+        # from a COMPLETE scan (failed_chunks_users readable and not naming them). A present but malformed entry (null,
+        # an unknown decision), a scan whose completeness is unknown, or 'hold' = held.
+        cur = bands.get(uid, _ABSENT) if bands is not None else None
+        agrees = (isinstance(cur, dict) and cur.get("decision") == "allow") or \
+                 (cur is _ABSENT and failed is not None and uid not in failed)
+        if not agrees:
+            held.add(uid)
+    return held
+
+
+def account_hold_facts(uid: int, now: float | None = None) -> list[str]:
+    """R8 (r5): is this user held (held_user_ids), and the hold's kind; the ledger stale or unreadable = UNKNOWN."""
+    now = now or time.time()
+    return [hold_kind(uid, now)] if str(uid) in held_user_ids(now=now) else []
+
+
+def hold_kind(uid: int, now: float | None = None) -> str:
+    """The kind of a held user's hold: HOLD_VOLUME only when the lens's CURRENT scan (account_bands.json, at most 3 h
+    old) says this user is held and the kind is R8_approval_hold_volume; anything else - hard, an unknown kind, the
+    user absent, the file missing, unreadable, stale or future-dated - is HOLD_HARD (fail-closed: held for everything).
+    Either kind is truthy, so every approval-side reader keeps holding."""
+    bands = _bands_users(ACCOUNT_BANDS, now or time.time())
+    if bands is None:
+        return HOLD_HARD
+    row = bands.get(str(uid)) or {}
+    return HOLD_VOLUME if isinstance(row, dict) and row.get("decision") == "hold" and row.get("hold_kind") == HOLD_VOLUME \
+        else HOLD_HARD
 
 
 def fraud_facts(uid: int, query: Query) -> list[str]:
@@ -870,6 +956,10 @@ def check(campaign: str, copy: str, uid: int, keys: list[str], contact_id: str, 
                 if campaign in WAIT_LINES else [])
     thread = thread_facts(conversation, ic)
     fr = (fraud or fraud_facts)(uid, query)
+    if campaign in ASKS:
+        # [key=r8-hold-due]: a volume-only hold holds approvals and keeps the 'nothing is needed' family off - never the
+        # ask that resolves it; a hard hold (or an unknown kind) still holds the ask
+        fr = [f for f in fr if f != HOLD_VOLUME]
     state, why = decide(campaign, copy, st, core, ic_found, thread, fr)
     if reply_due_part:
         # [key=reply-due]: answering a user who wrote to us is not an unsolicited note - the 7-day cooldowns do not
