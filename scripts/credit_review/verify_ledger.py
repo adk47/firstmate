@@ -99,7 +99,8 @@ BLOCKING = ("attempted", "sent", "refused", "skipped")
 DEFERRED = "deferred_pending_doc"
 CAMPAIGNS = ("verify-live", "retro-past", "removal-notice", "takeback-notice", "uvn-status", "withdrawal-confirm",
              "status-doc-received", "status-team-review", "email-changed", "email-changed-dup",
-             "claim-proof-ask", "claim-status", "gap-ask", "merge-pending", "credit-hold-status", "claim-proof-pending", "proof-need-ask")
+             "claim-proof-ask", "claim-status", "gap-ask", "merge-pending", "credit-hold-status", "claim-proof-pending", "proof-need-ask",
+             "merge-claim-first")
 # claim-proof-ask (steers-1830 #5, firstmate 125/126): a dated ask to the claimant of a pending
 # profile CLAIM (band B/C) to put the claim's bound-proof code in one platform bio. Its "request
 # id" is the claim key "claim-<claiming.id>", so only its own rows block it (claim ids never meet
@@ -131,6 +132,9 @@ GAP_ASK = "gap-ask"
 # "merge-<merge request id>". A notice (only its own rows block it: one note per merge request, ever), never an
 # ask, and never within 7 days of another note from this gate to the user (messaged_7d, a deferral).
 MERGE_PENDING = "merge-pending"
+# merge-claim-first (r5 copy e1): the claim-first ask for the dup-dsp-linked class; key "mcf-<user id>", so only its own
+# rows block it (one ask per user, ever). Not a credit ask (its replies are claim/merge, never credit proof).
+MERGE_CLAIM_FIRST = "merge-claim-first"
 # proof-need-ask (proof-loop captain card L11c; send-locked until the captain's yes): the per-need ask for ONE
 # credit whose document the reader could not check. An ASK (it counts for the one-ask locks), handled like
 # gap-ask: it exists because a document arrived, so only its own rows and a gap ask on the same request block
@@ -146,7 +150,7 @@ GAP_ASK_FOLLOWS = ("status-doc-received",)
 STATUS_CAMPAIGNS = ("uvn-status", "status-doc-received", "status-team-review", CREDIT_HOLD_CAMPAIGN)
 # Notices: only their own rows block them (they are not asks and never close one).
 NOTICE_CAMPAIGNS = ("takeback-notice", "withdrawal-confirm", "status-doc-received", "status-team-review",
-                    "email-changed", "email-changed-dup", CLAIM_CAMPAIGN, CLAIM_STATUS_CAMPAIGN, MERGE_PENDING,
+                    "email-changed", "email-changed-dup", CLAIM_CAMPAIGN, CLAIM_STATUS_CAMPAIGN, MERGE_PENDING, MERGE_CLAIM_FIRST,
                     CLAIM_PENDING_CAMPAIGN, CREDIT_HOLD_CAMPAIGN)
 # Campaigns whose gate refusals are re-checkable (firstmate 076, 082, 083): a refusal holds the
 # USER (campaign, user_key or user_id) in verify_refusal_holds for RECHECK_DAYS (the runner and the gate skip

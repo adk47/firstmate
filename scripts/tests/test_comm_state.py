@@ -86,7 +86,8 @@ class CommStateTest(unittest.TestCase):
                 self.setUp()
                 self.core = [["r1", "user_verification_needed", "", ""]]
                 add()
-                for camp, copy in (("credit-hold-status", "credithold"), ("claim-proof-pending", "claimpending")):
+                for camp, copy in (("credit-hold-status", "credithold"), ("claim-proof-pending", "claimpending"),
+                                   ("merge-claim-first", "mergeclaimfirst")):   # QA #1566: a wait line too
                     res = self.run_(camp, copy)
                     self.assertTrue(res["hold"], (name, camp, res))
                     self.assertTrue(any(r.startswith("proof_on_file:") for r in res["reasons"]), res)
@@ -1609,6 +1610,34 @@ class HoldKindTest(unittest.TestCase):
             setup()
             self.assertEqual(cs.account_hold_facts(UID), ["R8_account_hold"])
             self.assertEqual(self.held_by_r8("uvn-status", "uvn"), ["R8_account_hold"])
+
+    def mcf_r8(self):
+        q = lambda sql: [["0", "0"]] if "proof_required_owed" in sql else []
+        res = cs.check("merge-claim-first", "mergeclaimfirst", UID, [f"mcf-{UID}"], "c1", query=q, ic=self.ic,
+                       fraud=lambda uid, qq: cs.account_hold_facts(uid))
+        return [r for r in res["reasons"] if r.startswith("R8")]
+
+    def test_merge_claim_first_passes_only_a_current_volume_hold(self):
+        # QA #1566: the CURRENT scan's kind, through the real account_hold_facts / hold_kind - never historical reasons
+        self.bands("R8_approval_hold_volume")
+        self.assertEqual(self.mcf_r8(), [])
+        self.bands("R8_hard")
+        self.assertEqual(self.mcf_r8(), ["R8_account_hold"])
+        for setup in (lambda: None,                                                    # no scan
+                      lambda: self.bands("R8_approval_hold_volume", age_h=4),          # stale scan
+                      lambda: self.bands("R8_approval_hold_volume", decision="allow"),
+                      lambda: self.bands(None),
+                      lambda: Path(cs.ACCOUNT_BANDS).write_text("{not json")):         # unreadable scan
+            Path(cs.ACCOUNT_BANDS).unlink(missing_ok=True)
+            setup()
+            self.assertEqual(self.mcf_r8(), ["R8_account_hold"])
+        # an old unanchored-volume REASON in the holds history never turns a hard/unknown current kind into a pass
+        Path(cs.ACCOUNT_HOLDS).write_text(json.dumps({"user_id": str(UID), "kind": "approval_hold",
+                                                      "reasons": ["unanchored count 30d 189 >= level 150"]}) + "\n")
+        Path(cs.ACCOUNT_BANDS).unlink(missing_ok=True)
+        self.assertEqual(self.mcf_r8(), ["R8_account_hold"])
+        # it is not a credit ask: the ASKS-only ledger readers never count it
+        self.assertNotIn("merge-claim-first", cs.ASKS)
 
     def test_no_hold_row_is_no_hold_whatever_the_band_says(self):
         Path(cs.ACCOUNT_HOLDS).write_text("")

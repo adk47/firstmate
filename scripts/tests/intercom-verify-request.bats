@@ -757,6 +757,7 @@ unlocked_gate() { # derived copy with the send locks flipped: $1 = retro | windo
     claim)    e=(-e 's/^readonly CLAIM_PROOF_ASK_COPY_APPROVED=0$/readonly CLAIM_PROOF_ASK_COPY_APPROVED=1/') ;;
     gap)      e=(-e 's/^readonly GAP_ASK_COPY_APPROVED=0$/readonly GAP_ASK_COPY_APPROVED=1/') ;;
     merge)    e=(-e 's/^readonly MERGE_PENDING_COPY_APPROVED=0$/readonly MERGE_PENDING_COPY_APPROVED=1/') ;;
+    mcf)      e=(-e 's/^readonly TESTABLE=1$/readonly TESTABLE=1/') ;;   # merge-claim-first ships unlocked (r5 e1)
     received)  e=(-e 's/^readonly STATUS_RECEIVED_COPY_APPROVED=0$/readonly STATUS_RECEIVED_COPY_APPROVED=1/') ;;
     owing)    e=(-e 's/^readonly CREDIT_HOLD_STATUS_COPY_APPROVED=0$/readonly CREDIT_HOLD_STATUS_COPY_APPROVED=1/'
                  -e 's/^readonly CLAIM_PROOF_PENDING_COPY_APPROVED=0$/readonly CLAIM_PROOF_PENDING_COPY_APPROVED=1/'
@@ -1035,7 +1036,7 @@ PY
 @test "unknown campaigns and kinds are refused" {
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
   run -1 send --campaign everything
-  [[ "$output" == *"--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status, gap-ask, merge-pending, credit-hold-status, claim-proof-pending or proof-need-ask"* ]]
+  [[ "$output" == *"--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status, gap-ask, merge-pending, merge-claim-first, credit-hold-status, claim-proof-pending or proof-need-ask"* ]]
   run -1 send --kind final-notice --parent-message-id 1
   [[ "$output" == *"--kind must be initial, reminder-14, reminder-25, after-rejection or reminder-7"* ]]
 }
@@ -1945,7 +1946,7 @@ thread() { # <contacts-json-array> [extra conversation fields]
   [ "$(replies)" -eq 0 ]
   [ "$(posts)" -eq 0 ]
   run -1 "$LOCKED" send --campaign retro-past --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
-  [[ "$output" == *"applies to uvn-status, withdrawal-confirm, the status notes, claim-status, email-changed, gap-ask, merge-pending, credit-hold-status, claim-proof-pending and proof-need-ask only"* ]]
+  [[ "$output" == *"applies to uvn-status, withdrawal-confirm, the status notes, claim-status, email-changed, gap-ask, merge-pending, merge-claim-first, credit-hold-status, claim-proof-pending and proof-need-ask only"* ]]
   run -1 "$LOCKED" send --campaign withdrawal-confirm --conversation abc --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
 }
 
@@ -4289,4 +4290,75 @@ Caroline, Muso Support' ]
   INTERCOM_VERIFY_TEST_DAY="$d2" run -0 "$LOCKED" send --campaign withdrawal-confirm --credits-file "$TEST_TMPDIR/w.json" --approved-by U7RP6HKUZ
   run -3 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == *"messaged_7d"* ]]
+}
+
+# --- merge-claim-first (r5 copy fable-copy-1030-r5/e1; p2 062; firstmate 063) ------------------------------------
+
+mcffile() {
+  jq -n '{user:{email:"Jane.Doe@Example.com", id:"1380289", professional_id:"9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64",
+                auth_id:"auth0|9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64", first_name:"Agustin"},
+          merge:{link_profile_id:"E85FAD75-1fcf-4c5c-b450-e8a33a10117a"},
+          credits:[{request_id:"mcf-1380289"}]}' | jq -c "${2:-.}" > "$1"
+}
+
+@test "merge-claim-first: r5's e1 verbatim, the faq.md line 20 paragraph byte-identical, one-line sign-off in both modes" {
+  grep -qx "readonly MERGE_CLAIM_FIRST_COPY_APPROVED=1" "$REAL_SCRIPT"
+  P24="$(sed -n 20p "$HYDRA_REPO/workspaces/support/reference/faq.md")"
+  [[ "$P24" == "Merges work like this:"* ]]
+  E1="Hi Agustin, the credits you asked about are listed on another Muso profile with your name, the one linked to the Spotify artist page for these tracks: https://credits.muso.ai/profile/e85fad75-1fcf-4c5c-b450-e8a33a10117a. If that profile is also you, claim it first and tell me which one should be the main profile."
+  mcffile "$TEST_TMPDIR/m.json"
+  run -0 "$LOCKED" send --campaign merge-claim-first --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "${lines[0]}" == "DRY-RUN merge-claim-first initial email credits=1 copy=mergeclaimfirst" ]]
+  [ "$(rendered .subject)" = "Your Muso credit request: a second profile with your name" ]
+  [ "$(rendered .body | plain)" = "$E1
+$P24
+Thank you, Caroline, Muso Support" ]
+  run -0 "$LOCKED" send --campaign merge-claim-first --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ --dry-run --conversation 215476530361345
+  [ "$(rendered .body | plain)" = "$E1
+$P24
+Thank you, Caroline, Muso Support" ]
+  [ "$(calls)" -eq 0 ]
+}
+
+@test "merge-claim-first: server facts only - mcf-<user id> key, a catalog uuid, r5's signed set; no follow-ups" {
+  for edit in '.credits[0].request_id = "mcf-1"' '.credits[0].request_id = "merge-x"' '.user.id = ""' \
+              '.merge.link_profile_id = "https://evil.example/x"' '.merge = {}' \
+              '.user.id = "42" | .credits[0].request_id = "mcf-42"'; do
+    mcffile "$TEST_TMPDIR/m.json" "$edit"
+    run -1 "$LOCKED" send --campaign merge-claim-first --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ --dry-run
+  done
+  mcffile "$TEST_TMPDIR/m.json"
+  run -1 "$LOCKED" send --campaign merge-claim-first --kind reminder-14 --parent-message-id 1 --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ --dry-run
+  run -1 "$LOCKED" send --campaign merge-claim-first --copy v1 --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(calls)" -eq 0 ]
+}
+
+@test "merge-claim-first: one ask per user, ever (ledger), and the per-campaign kill file stops it" {
+  unlocked_gate mcf
+  export STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
+  mcffile "$TEST_TMPDIR/m.json"
+  export INTERCOM_VERIFY_TEST_DISABLED_DIR="$TEST_TMPDIR/disabled"
+  mkdir -p "$INTERCOM_VERIFY_TEST_DISABLED_DIR" && touch "$INTERCOM_VERIFY_TEST_DISABLED_DIR/merge-claim-first.disabled"
+  run -3 "$GATE" send --campaign merge-claim-first --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "STOPPED merge-claim-first is disabled"* ]]
+  [ "$(calls)" -eq 0 ]
+  rm "$INTERCOM_VERIFY_TEST_DISABLED_DIR/merge-claim-first.disabled"
+  run -0 "$GATE" send --campaign merge-claim-first --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message="* ]]
+  [[ "$(sql "select campaign||'|'||status from verify_messages")" == "merge-claim-first|sent" ]]
+  INTERCOM_VERIFY_TEST_DAY=2026-12-01 run -0 "$GATE" send --campaign merge-claim-first --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ
+  [ "$output" = "SKIPPED already-notified credits=1" ]
+}
+
+@test "merge-claim-first (QA #1566): an auto-picked off-topic thread is never used - the ask goes by email" {
+  unlocked_gate mcf
+  export STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
+  now=$(date -u +%s)
+  open="{\"conversations\":[{\"id\":\"777\",\"state\":\"open\",\"updated_at\":$((now - 86400))}],\"total_count\":1}"
+  mcffile "$TEST_TMPDIR/m.json"
+  STUB_OPEN_CONVS="$open" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]' ',"title":"Your receipt from Muso.AI - refund?"')" \
+    run -0 "$GATE" send --campaign merge-claim-first --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"R9: conversation 777 is not about credits"* ]]
+  [[ "$output" == *"POSTED email"* ]]
+  [ "$(replies)" -eq 0 ]
 }

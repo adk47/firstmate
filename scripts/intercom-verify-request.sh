@@ -92,7 +92,7 @@ set -euo pipefail
 #
 # Usage:
 #   intercom-verify-request.sh send --credits-file FILE --approved-by <SlackUID> \
-#       [--campaign verify-live|retro-past|removal-notice|takeback-notice|uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-proof-ask|claim-status|gap-ask|merge-pending|credit-hold-status|claim-proof-pending|proof-need-ask] [--kind initial|reminder-14|reminder-25|after-rejection \
+#       [--campaign verify-live|retro-past|removal-notice|takeback-notice|uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-proof-ask|claim-status|gap-ask|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask] [--kind initial|reminder-14|reminder-25|after-rejection \
 #        --parent-message-id <id>] [--copy v1|windowed (verify-live preview only) | queued|received (status-doc-received) | no-ask|count (status-team-review)] \
 #       [--conversation <id> (uvn-status, withdrawal-confirm, status notes, claim-status, email-changed, gap-ask, merge-pending,
 #        credit-hold-status, claim-proof-pending, proof-need-ask)] [--inapp-fallback] [--dry-run|--validate|--doc-check|--check-recipient]
@@ -130,6 +130,12 @@ set -euo pipefail
 # claim_cross_check). In-thread when the user has an open conversation, else email. FILE is the
 # claim-proof-ask shape without code/platform (only claim.profile_name is rendered).
 #
+# merge-claim-first (pr-review-fable-r5 copy fable-copy-1030-r5/e1, 2026-10-31 05:2xZ/05:4xZ; program-lead-fable-p2
+# 062 (ii); firstmate 063): the claim-first ask to a requester whose credits sit on an UNCLAIMED second profile that
+# carries the DSP id. FILE: ONE credits entry with request_id "mcf-<user.id>" (one ask per user, ever) and
+# "merge": {"link_profile_id": "<uuid>"} (the link is built here from the uuid; no URL is ever taken from the file).
+# Only the accounts in MERGE_CLAIM_FIRST_USERS (r5's signed set). In-thread only into an on-topic (R9) thread of the
+# user, else email with r5's subject. A WAIT line in comm_state (r5/QA); a volume-only R8 hold does not stop it.
 # merge-pending (program-lead-fable-p2 go-live-today section 2 D, line M1; SEND-LOCKED MERGE_PENDING_COPY_APPROVED until
 # the captain's yes): a status note to someone who asked us to merge profiles. FILE carries ONE credits entry whose
 # request_id is the merge key "merge-<merge request id>" and "merge": {"profiles": ["<catalog name>", ...] (1 to 4)}.
@@ -298,6 +304,11 @@ readonly GAP_ASK_COPY_APPROVED=0
 #   MERGE_PENDING_COPY_APPROVED  merge-pending (program-lead-fable-p2 go-live-today section 2 D, line M1 verbatim):
 #       LOCKED until the captain's own yes on M1 lands in a PR that flips it (copy = captain words).
 readonly MERGE_PENDING_COPY_APPROVED=0
+#   MERGE_CLAIM_FIRST_COPY_APPROVED  merge-claim-first: pr-review-fable-r5 approved copy fable-copy-1030-r5/e1 and the four
+#       recipients on 2026-10-31 05:2xZ (amended 05:4xZ for u1406401); program-lead-fable-p2 062 ordered the coded path.
+readonly MERGE_CLAIM_FIRST_COPY_APPROVED=1
+# r5's signed set (data/profile-merge-ops-m1/claim-first-ask-e1-send-1031.json). Adding an account is a PR.
+readonly MERGE_CLAIM_FIRST_USERS="1380289 122029 104450 1406401"
 #   CREDIT_HOLD_STATUS_COPY_APPROVED  credit-hold-status (Fable copy-owing-proof-1027 S1, verbatim): LOCKED
 #       until the captain's yes on L14a (ws2-captain-lifts-1027) lands in a PR that flips it.
 #   CLAIM_PROOF_PENDING_COPY_APPROVED claim-proof-pending (S2, verbatim): LOCKED until the captain's yes on L14b.
@@ -374,6 +385,7 @@ readonly APPROVAL_REF_CLAIM_ASK="Fable program lead steers-1830 #5 (relayed by f
 CLAIM_SURFACES='{"spotify": "Spotify artist bio", "website": "website (as one line in a file at /.well-known/muso.txt, or in a meta tag named muso-verify)", "youtube": "YouTube channel About section"}'
 readonly CLAIM_SURFACES
 readonly APPROVAL_REF_GAP_ASK="captain U7RP6HKUZ 2026-10-26 12:40Z: Fable decides, do not ask him; ~13:00Z: \"credit and profile verifications nothing is waiting on us right? you are moving these forward and ball should be in users court if required otherwise they are approved? if not get on this\"; Fable ruling 2026-10-26 13:23Z (captain-asks-fable-r4 report section H, GO 2): 460 need_more -> dated gap ask, one per user per day, Fable-approved paragraph, no deadline, no removal words; last sentence swapped to \"Your request stays open while we look.\" (the asked rows are pending, not live) by Fable decision (B) relayed by firstmate 2026-10-26 16:58Z (verify-ask-wiring-h2 inbox 005)"
+readonly APPROVAL_REF_MERGE_CLAIM_FIRST="pr-review-fable-r5 fable-copy-1030-r5/e1 (2026-10-31 05:2xZ, amended 05:4xZ); program-lead-fable-p2 062 (ii); firstmate 063; captain 13:1xZ delegation (Fable decides)"
 readonly APPROVAL_REF_MERGE_PENDING="captain 2026-10-28 12:4xZ: \"go live today and start conversations with users who requested credits, profiles (claims) or merges ASAP\"; copy = program-lead-fable-p2 go-live-today line M1, sent only on the captain's own yes to M1"
 readonly APPROVAL_REF_OWING_PROOF="captain U7RP6HKUZ 2026-10-27 20:1xZ: \"are you sure all users that need to be communicated have been already? If not get on it - make this a durable process that does not rely on my computer; do this all on OVH.\"; copy = Fable verify-program-lead-fable-l1 copy-owing-proof-1027 (20:2xZ), sent only on the captain's yes (L14a S1 credit-hold-status / L14b S2 claim-proof-pending)"
 readonly APPROVAL_REF_PROOF_NEED_ASK="captain 2026-10-27 21:5xZ: every user who owes proof is told exactly what we need (proof-loop-lead-fable-p1 plan section 1); copy = proof-loop captain card L11c (22:5xZ), verbatim per need code; sent only on the captain's yes"
@@ -751,6 +763,12 @@ case "$CAMPAIGN" in
     [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live and the status notes; merge-pending has one copy, line M1."
     [ "$KIND" = "initial" ] || refuse "merge-pending has no follow-ups: one note per merge request, ever."
     ;;
+  merge-claim-first)
+    # r5 copy e1: one ask per user, ever; no follow-ups.
+    MAX_CREDITS=1; MAX_LISTED=1; COPY="mergeclaimfirst"; APPROVAL_REF="$APPROVAL_REF_MERGE_CLAIM_FIRST"
+    [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live and the status notes; merge-claim-first has one copy, r5's e1."
+    [ "$KIND" = "initial" ] || refuse "merge-claim-first has no follow-ups: one ask per user, ever."
+    ;;
   credit-hold-status)
     # Fable S1 (copy-owing-proof-1027): a requester who owes proof, while no ask can go out. One per
     # user, ever; up to 3 titles. Not an ask, never "nothing else is needed".
@@ -777,7 +795,7 @@ case "$CAMPAIGN" in
     [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live; gap-ask has one copy, Fable's paragraph."
     [ "$KIND" = "initial" ] || refuse "gap-ask has no follow-ups: no deadline, no reminders."
     ;;
-  *) refuse "--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status, gap-ask, merge-pending, credit-hold-status, claim-proof-pending or proof-need-ask (got '$CAMPAIGN'). Each campaign is pinned in this script; there is no other." ;;
+  *) refuse "--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status, gap-ask, merge-pending, merge-claim-first, credit-hold-status, claim-proof-pending or proof-need-ask (got '$CAMPAIGN'). Each campaign is pinned in this script; there is no other." ;;
 esac
 # C11 (p1 223): --check-recipient is the dry run that equals the send. It runs every send-time check a real send runs
 # up to the claim (the ledger peek, core_notice, the go-live guards, comm_state, the status-note Intercom reads, the
@@ -798,8 +816,8 @@ if [ -n "$REPLY_DUE" ]; then
 fi
 if [ -n "$THREAD" ]; then
   case "$CAMPAIGN" in
-    uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-status|gap-ask|merge-pending|credit-hold-status|claim-proof-pending|proof-need-ask) ;;
-    *) refuse "--conversation (in-thread delivery) applies to uvn-status, withdrawal-confirm, the status notes, claim-status, email-changed, gap-ask, merge-pending, credit-hold-status, claim-proof-pending and proof-need-ask only." ;;
+    uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-status|gap-ask|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask) ;;
+    *) refuse "--conversation (in-thread delivery) applies to uvn-status, withdrawal-confirm, the status notes, claim-status, email-changed, gap-ask, merge-pending, merge-claim-first, credit-hold-status, claim-proof-pending and proof-need-ask only." ;;
   esac
   printf '%s' "$THREAD" | grep -qE '^[0-9]{1,24}$' \
     || refuse "--conversation must be the numeric Intercom conversation id (got '$THREAD')."
@@ -847,7 +865,7 @@ INPUT="$("$JQ_BIN" -c '
             filing_muso_ui: (.user.filing_muso_ui == true) },   # r5 19:2xZ: a Muso-UI filing (SYS-001) gets no R1
     claim: ((.claim // {}) | { profile_name: ((.profile_name // "") | clean), profile_url: ((.profile_url // "") | clean),
                                code: ((.code // "") | clean), platform: ((.platform // "") | clean | ascii_downcase) }),
-    merge: ((.merge // {}) | { profiles: [ (.profiles // [])[] | clean ] }),
+    merge: ((.merge // {}) | { profiles: [ (.profiles // [])[] | clean ], link_profile_id: ((.link_profile_id // "") | clean | ascii_downcase) }),
     need: ((.need // {}) | { code: ((.code // "") | clean), issuer: ((.issuer // "") | clean),
                              verify_code: ((.verify_code // "") | clean),
                              distributor: ((.distributor // "") | clean | .[0:40]), doc_sha: ((.doc_sha // "") | clean | ascii_downcase),
@@ -1071,6 +1089,18 @@ case "$CAMPAIGN" in
     printf '%s' "$INPUT" | "$JQ_BIN" -e '.merge.profiles | length >= 1 and length <= 4 and all(.[]; length > 0 and length <= 120)' >/dev/null \
       || refuse "merge.profiles must be 1 to 4 catalog profile names (1 to 120 characters each)."
     INPUT="$(printf '%s' "$INPUT" | "$JQ_BIN" -c '.credits[0] += {role: "-", track_title: "-", artist_name: "-"}')" ;;
+  merge-claim-first)
+    printf '%s' "$INPUT" | "$JQ_BIN" -e '.user.id | test("^[0-9]{1,12}$")' >/dev/null \
+      || refuse "merge-claim-first needs user.id, the requester's Muso account id."
+    printf '%s' "$INPUT" | "$JQ_BIN" -e '.credits[0].request_id == ("mcf-" + .user.id)' >/dev/null \
+      || refuse "merge-claim-first needs one entry whose request_id is mcf-<user.id> (one ask per user, ever)."
+    printf '%s' "$INPUT" | "$JQ_BIN" -e '.merge.link_profile_id | test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")' >/dev/null \
+      || refuse "merge.link_profile_id must be the linked profile's catalog uuid."
+    case " $MERGE_CLAIM_FIRST_USERS " in
+      *" $(printf '%s' "$INPUT" | "$JQ_BIN" -r '.user.id') "*) ;;
+      *) refuse "merge-claim-first goes only to r5's signed set (MERGE_CLAIM_FIRST_USERS); adding an account is a PR." ;;
+    esac
+    INPUT="$(printf '%s' "$INPUT" | "$JQ_BIN" -c '.credits[0] += {role: "-", track_title: "-", artist_name: "-"}')" ;;
   claim-status|claim-proof-pending)
     printf '%s' "$INPUT" | "$JQ_BIN" -e '.credits[0].request_id | test("^claim-[0-9]{1,19}$")' >/dev/null \
       || refuse "$CAMPAIGN needs one entry whose request_id is the claim key claim-<claiming.id>."
@@ -1256,6 +1286,9 @@ if [ "$LIVE" = "1" ] && [ -e "$DISABLED_DIR/$CAMPAIGN.disabled" ]; then
 fi
 if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "merge-pending" ] && [ "$MERGE_PENDING_COPY_APPROVED" != "1" ]; then
   refuse "the merge-pending copy is not approved for sending yet (MERGE_PENDING_COPY_APPROVED=0). It waits for the captain's own yes on line M1, landed in a PR that flips the lock; --dry-run renders exactly what would be sent."
+fi
+if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "merge-claim-first" ] && [ "$MERGE_CLAIM_FIRST_COPY_APPROVED" != "1" ]; then
+  refuse "the merge-claim-first copy is not approved for sending (MERGE_CLAIM_FIRST_COPY_APPROVED=0)."
 fi
 if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "credit-hold-status" ] && [ "$CREDIT_HOLD_STATUS_COPY_APPROVED" != "1" ]; then
   refuse "the credit-hold-status copy is not approved for sending yet (CREDIT_HOLD_STATUS_COPY_APPROVED=0). It waits for the captain's yes on L14a, landed in a PR that flips the lock; --dry-run renders exactly what would be sent."
@@ -1733,6 +1766,13 @@ def claim_status_note($fn; $c):
 def merge_pending($fn; $m):
   { subject: "Your Muso merge request",
     segs: [ {p: "Hi \($fn), a quick update on your request to merge \([ $m.profiles[] ] | andjoin): it's in our review queue, nothing has been changed yet, and we will message you here when it has been checked."} ] };
+# merge-claim-first (r5 fable-copy-1030-r5/e1, verbatim): the ask, the approved §2.4 merge paragraph (faq.md line 20,
+# verbatim; a test pins the two equal) and r5's one-line sign-off, in BOTH delivery modes.
+def merge_claim_first($fn; $m):
+  { subject: "Your Muso credit request: a second profile with your name",
+    segs: [ {p: "Hi \($fn), the credits you asked about are listed on another Muso profile with your name, the one linked to the Spotify artist page for these tracks: https://credits.muso.ai/profile/\($m.link_profile_id). If that profile is also you, claim it first and tell me which one should be the main profile."},
+            {p: "Merges work like this: claim every profile that is yours first (so we know they're all you), then tell me which one should be the main profile. The merge is done by our verification team and you get a message in this conversation when it's complete; credits from the duplicates move onto the main profile. Profiles claimed by someone else, and company or label profiles, are handled differently: I'll pass those on."},
+            {p: "Thank you, Caroline, Muso Support"} ] };
 # credit-hold-status / claim-proof-pending (Fable copy-owing-proof-1027 S1 / S2, verbatim): one sentence each,
 # no ask, no date, never "nothing else is needed". S1 for ONE request says "it can't be ... and is waiting"
 # (grammar, not new copy: p1 ruling 097 under captain-1028-214x); plural verbatim.
@@ -1850,6 +1890,7 @@ def gap_ask($fn; $c; $maxl):
    elif $copy == "claimask7" then claim_ask_reminder($fn; .claim)
    elif $copy == "claimstatus" then claim_status_note($fn; .claim)
    elif $copy == "mergepending" then merge_pending($fn; .merge)
+   elif $copy == "mergeclaimfirst" then merge_claim_first($fn; .merge)
    elif $copy == "claimpending" then claim_proof_pending($fn; .claim)
    elif $copy == "credithold" then credit_hold_status($fn; .credits; $maxl)
    elif $copy == "teamreviewcount" then status_team_review_count($fn; (.user.pending_count // (.credits | length)))
@@ -2167,7 +2208,7 @@ for_each_account_contact() { # <fn>: the first non-empty answer of <fn> over thi
 # The clock G1 reads; the test copy pins it (INTERCOM_VERIFY_TEST_NOW, epoch) so the 24h rule is testable.
 g1_now() { if [ "$TESTABLE" = "1" ] && [ -n "${INTERCOM_VERIFY_TEST_NOW:-}" ]; then printf '%s' "$INTERCOM_VERIFY_TEST_NOW"; else date -u +%s; fi; }
 GOLIVE=0
-case "$CAMPAIGN:$COPY" in merge-pending:*|credit-hold-status:*|claim-proof-pending:*|status-doc-received:docrecvr|status-doc-received:docrecvn|uvn-status:*|proof-need-ask:*) GOLIVE=1 ;; esac
+case "$CAMPAIGN:$COPY" in merge-pending:*|merge-claim-first:*|credit-hold-status:*|claim-proof-pending:*|status-doc-received:docrecvr|status-doc-received:docrecvn|uvn-status:*|proof-need-ask:*) GOLIVE=1 ;; esac
 # QA #1517: every reply_due answer, whatever its class, passes the go-live recipient gates (G1-G5; G2's opener rule is
 # replaced by the verified trigger for reply_due only)
 [ -z "$REPLY_DUE" ] || GOLIVE=1
@@ -2463,7 +2504,7 @@ recently_messaged() { # <contact-id> -> prints the reason when we wrote to them 
   done
   return 0
 }
-case "$CAMPAIGN" in uvn-status|status-doc-received|status-team-review|claim-status|gap-ask|merge-pending|credit-hold-status|claim-proof-pending|proof-need-ask) STATUSLIKE=1 ;; *) STATUSLIKE=0 ;; esac
+case "$CAMPAIGN" in uvn-status|status-doc-received|status-team-review|claim-status|gap-ask|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask) STATUSLIKE=1 ;; *) STATUSLIKE=0 ;; esac
 # A claim ask never crosses a person: any admin or Caroline reply to this user in the last 7
 # days defers the note AND its reminder (nothing closed; the next run looks again; a reminder
 # deferred past the day before the close day is never sent).

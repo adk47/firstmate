@@ -59,7 +59,8 @@ INTERCOM = "https://api.intercom.io"
 # The lines that must never reach someone who already sent proof or replied: the "wait for our message" notes and
 # the uvn-status proof ask (captain 03:2xZ: L14a retired, its audience gets the ask; p1 115 / l1 [key=l14a-retire-ask]:
 # sent only at state none / asked-with-no-reply).
-WAIT_LINES = ("credit-hold-status", "claim-proof-pending", "uvn-status", "claim-proof-ask")
+# merge-claim-first is a wait line (r5 NO-GO @eb751806 + QA #1566): proof on file, a reply or a decision holds it.
+WAIT_LINES = ("credit-hold-status", "claim-proof-pending", "uvn-status", "claim-proof-ask", "merge-claim-first")
 RECEIPT = "status-doc-received"
 NEED_ASK = "proof-need-ask"
 ASKABLE_NEEDS = ("readable_document", "counterparty_signed_or_registered", "issuer_email_from_official_domain",
@@ -450,6 +451,12 @@ def hold_kind(uid: int, now: float | None = None) -> str:
     row = bands.get(str(uid)) or {}
     return HOLD_VOLUME if isinstance(row, dict) and row.get("decision") == "hold" and row.get("hold_kind") == HOLD_VOLUME \
         else HOLD_HARD
+
+
+# merge-claim-first resolves a volume-only hold the same way the asks do (Fable [key=r8-hold-due]; QA #1566): it reads
+# the CURRENT scan's kind through hold_kind() - stale / unreadable / unknown / hard = R8_account_hold, which holds it.
+# It is not in ASKS: it is not a credit ask (no last_ask, no owes:open_ask).
+VOLUME_PASS_CAMPAIGNS = ("merge-claim-first",)
 
 
 def fraud_facts(uid: int, query: Query) -> list[str]:
@@ -1130,7 +1137,7 @@ def check(campaign: str, copy: str, uid: int, keys: list[str], contact_id: str, 
         ic_found = []
     thread = thread_facts(conversation, ic)
     fr = (fraud or fraud_facts)(uid, query)
-    if campaign in ASKS:
+    if campaign in ASKS or campaign in VOLUME_PASS_CAMPAIGNS:
         # [key=r8-hold-due]: a volume-only hold holds approvals and keeps the 'nothing is needed' family off - never the
         # ask that resolves it; a hard hold (or an unknown kind) still holds the ask
         fr = [f for f in fr if f != HOLD_VOLUME]
