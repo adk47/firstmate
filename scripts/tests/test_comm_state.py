@@ -46,7 +46,8 @@ class CommStateTest(unittest.TestCase):
         p.commit(); p.close()
         cs.DV_STORE = str(d / "dv.sqlite")
         v = sqlite3.connect(cs.DV_STORE)
-        v.execute("CREATE TABLE dv_outcomes (user_id INTEGER, request_id TEXT)")
+        # the production columns this module reads (id, at, user_id, request_id, outcome)
+        v.execute("CREATE TABLE dv_outcomes (id INTEGER PRIMARY KEY, at TEXT, user_id INTEGER, request_id TEXT, outcome TEXT)")
         v.commit(); v.close()
         cs.PROOF_ON_FILE = str(d / "pof.json")
         Path(cs.PROOF_ON_FILE).write_text(json.dumps({"entries": []}))
@@ -74,7 +75,7 @@ class CommStateTest(unittest.TestCase):
     def test_rule1_any_document_or_reply_on_file_holds_the_wait_lines(self):
         cases = {
             "proof_intake": lambda: sqlite3.connect(cs.PROOF_STORE).executescript(f"INSERT INTO proof_intake (user_id, file_sha256) VALUES ({UID}, 's');"),
-            "dv_outcomes": lambda: sqlite3.connect(cs.DV_STORE).executescript(f"INSERT INTO dv_outcomes VALUES ({UID}, 'r1');"),
+            "dv_outcomes": lambda: sqlite3.connect(cs.DV_STORE).executescript(f"INSERT INTO dv_outcomes (user_id, request_id) VALUES ({UID}, 'r1');"),
             "proof_on_file": lambda: Path(cs.PROOF_ON_FILE).write_text(json.dumps({"entries": [{"user_id": UID, "source": "gmail"}]})),
             "ledger_reply": lambda: (self.note("uvn-status"), sqlite3.connect(cs.LEDGER).executescript(
                 f"UPDATE verify_messages SET proof_tagged_at='{OLD}';")),   # a tagged proof (attachments), not text
@@ -131,7 +132,7 @@ class CommStateTest(unittest.TestCase):
                 db.execute("INSERT INTO proof_intake VALUES (?,?,?,?)", (UID, "s", at, json.dumps(cands or ["other"])))
                 db.commit(); db.close()
             return go
-        dv = lambda rid: (lambda: sqlite3.connect(cs.DV_STORE).executescript(f"INSERT INTO dv_outcomes VALUES ({UID}, '{rid}');"))
+        dv = lambda rid: (lambda: sqlite3.connect(cs.DV_STORE).executescript(f"INSERT INTO dv_outcomes (user_id, request_id) VALUES ({UID}, '{rid}');"))
         att = lambda at: (lambda: self.ic.convs.update({"9": {"source": dict({"author": {"type": "user"},
                                                                               "attachments": [{"name": "a.png"}]},
                                                                              **({"created_at": at} if at else {}))}}))
@@ -205,9 +206,9 @@ class CommStateTest(unittest.TestCase):
         # a dv read of ANOTHER request does not count; one of the named request does
         self.setUp()
         self.core = [["r1", "user_verification_needed", "", "", created]]
-        sqlite3.connect(cs.DV_STORE).executescript(f"INSERT INTO dv_outcomes VALUES ({UID}, 'other');")
+        sqlite3.connect(cs.DV_STORE).executescript(f"INSERT INTO dv_outcomes (user_id, request_id) VALUES ({UID}, 'other');")
         self.assertFalse(self.run_("uvn-status", "uvnstatus")["hold"])
-        sqlite3.connect(cs.DV_STORE).executescript(f"INSERT INTO dv_outcomes VALUES ({UID}, 'r1');")
+        sqlite3.connect(cs.DV_STORE).executescript(f"INSERT INTO dv_outcomes (user_id, request_id) VALUES ({UID}, 'r1');")
         self.assertTrue(self.run_("uvn-status", "uvnstatus")["hold"])
         # a document AFTER the request, or one naming it, still holds
         self.setUp()
@@ -622,6 +623,120 @@ class TicketTypeShapeTest(unittest.TestCase):
         self.assertFalse(cs.on_topic({"ticket": "123", "title": "Hello"}))
         self.assertFalse(cs.on_topic({"ticket": None}))
         self.assertTrue(cs.on_topic({"ticket": {"ticket_type": None}, "title": "my credits"}))
+
+
+class NothingNeededBodyTest(unittest.TestCase):
+    """p1 / r5 rule gap: a nothing-needed line in the rendered body of ANY campaign holds a user who still owes proof."""
+
+    def test_body_flag_holds_an_owes_proof_user_outside_the_family(self):
+        CommStateTest.setUp(self)
+        cs.ACCOUNT_HOLDS = str(Path(tempfile.mkdtemp()) / "h.jsonl"); Path(cs.ACCOUNT_HOLDS).write_text("")
+        core = [["r1", "user_verification_needed", "", "", "2026-10-15 07:21:38 UTC"]]
+        def q(sql):
+            if "regexp_like" in sql:
+                return [["user_verification_needed", "false"]]
+            return [list(r) for r in core] if "credit_requests" in sql else []
+        plain = cs.check("withdrawal-confirm", "withdrawal", UID, ["r1"], "c1", query=q, ic=self.ic, fraud=lambda u, qq: [])
+        self.assertFalse(any(r.startswith("nothing_needed_body") for r in plain["reasons"]), plain)
+        res = cs.check("withdrawal-confirm", "withdrawal", UID, ["r1"], "c1", query=q, ic=self.ic, fraud=lambda u, qq: [],
+                       nothing_needed_body=True)
+        self.assertTrue(res["hold"], res)
+        self.assertIn("nothing_needed_body:owes:uvn", res["reasons"])
+
+
+class DvUnverifiableOwesTest(unittest.TestCase):
+    """l1 [key=nm-batch2-unverifiable]: an 'unverifiable' latest filing on an open unverified/processing row = owes
+    proof, so the owes-nothing gate HOLDS /k (and every nothing-needed body) for that user."""
+
+    def setUp(self):
+        CommStateTest.setUp(self)
+        self.d = Path(tempfile.mkdtemp())
+        cs.ACCOUNT_HOLDS = str(self.d / "h.jsonl"); Path(cs.ACCOUNT_HOLDS).write_text("")
+        cs.DV_STORE = str(self.d / "dv.sqlite")
+        db = sqlite3.connect(cs.DV_STORE)
+        db.execute("CREATE TABLE dv_outcomes (id INTEGER PRIMARY KEY, at TEXT, user_id INTEGER, request_id TEXT, outcome TEXT)")
+        db.executemany("INSERT INTO dv_outcomes (at, user_id, request_id, outcome) VALUES (?,?,?,?)", [
+            ("2026-10-20", UID, "R1", "verified"), ("2026-10-25", UID, "R1", "unverifiable"),   # latest = unverifiable
+            ("2026-10-25", UID, "r2", "unverifiable"), ("2026-10-26", UID, "r2", "verified")])  # latest = verified
+        db.commit(); db.close()
+        self.open_ids = ["r1"]
+
+    def q(self, sql):
+        if "regexp_like" in sql:
+            return [["unverified", "false"]]                        # only an unverified row, no review rule fired
+        if "lower(CAST(id AS varchar)) IN (" in sql:
+            return [[r] for r in self.open_ids if f"'{r}'" in sql]
+        return []
+
+    def test_unverifiable_open_row_owes_and_k_is_held(self):
+        self.assertEqual(cs.owes_proof(UID, self.q), ["owes:dv_unverifiable"])
+        res = cs.check("status-team-review", "teamreview", UID, ["r1"], "c1", query=self.q, ic=self.ic, fraud=lambda u, qq: [])
+        self.assertEqual((res["hold"], res["state"]), (True, "owes_proof"), res)
+
+    def test_a_later_verified_read_or_a_closed_row_does_not_owe(self):
+        self.open_ids = []                                          # r1 no longer open (decided): nothing owed
+        self.assertEqual(cs.owes_proof(UID, self.q), [])
+        Path(cs.DV_STORE).unlink()                                  # no reads yet: no dv facts
+        self.open_ids = ["r1"]
+        self.assertEqual(cs.owes_proof(UID, self.q), [])
+
+    def test_an_unreadable_store_fails_closed(self):
+        Path(cs.DV_STORE).write_text("not sqlite")
+        with self.assertRaises(cs.Unknown):
+            cs.owes_proof(UID, self.q)
+
+
+class ApprovalPathOwesNothingTest(unittest.TestCase):
+    """r5 / p1 [h2 452] (b): UVN rows the approval path admits (uvn_status.approval_path_admits - the same predicate)
+    owe nothing, so /k reads true for that user; any admit condition failing, an open ask, a document on file, or an
+    unjudgeable row keeps them owing (red)."""
+    ADMIT = {"is_approved": True, "total_risk_percent": 12,
+             "rule_risk_percent": {"review_role_credited_to_other_at_trusted_source": 0}}
+
+    def setUp(self):
+        CommStateTest.setUp(self)
+        cs.ACCOUNT_HOLDS = str(Path(tempfile.mkdtemp()) / "h.jsonl"); Path(cs.ACCOUNT_HOLDS).write_text("")
+        self.vd, self.pop, self.broken = dict(self.ADMIT), "5", False
+
+    def q(self, sql):
+        if "regexp_like" in sql:
+            return [["user_verification_needed", "false"]]
+        if "spotifytracktitle" in sql:
+            if self.broken:
+                raise cs.Unknown("replica down")
+            return [["ra", str(UID), "p1", "t1", "Song", '[{"name":"Art"}]', "{Mixing}", self.pop,
+                     json.dumps(self.vd), "{}", "2026-10-20 00:00:00"]]
+        return []
+
+    def k(self):
+        return cs.check("status-team-review", "teamreview", UID, ["ra"], "c1", query=self.q, ic=self.ic, fraud=lambda u, qq: [])
+
+    def test_an_admitting_uvn_row_owes_nothing_and_k_goes(self):
+        self.assertEqual(cs.owes_proof(UID, self.q), [])
+        res = self.k()
+        self.assertEqual((res["hold"], res["state"], res["reasons"]), (False, "owes_nothing", ["owes_nothing:approval_path"]))
+
+    def test_any_admit_condition_failing_still_owes(self):
+        for name, vd, pop in (("risk 45", dict(self.ADMIT, total_risk_percent=45), "5"),
+                              ("not validator-approved", dict(self.ADMIT, is_approved=False), "5"),
+                              ("popularity 60", dict(self.ADMIT), "60")):
+            with self.subTest(name):
+                self.vd, self.pop = vd, pop
+                self.assertEqual(cs.owes_proof(UID, self.q), ["owes:uvn"])
+                self.assertTrue(self.k()["hold"])
+
+    def test_an_open_ask_a_document_or_an_unjudgeable_row_still_owes(self):
+        self.broken = True
+        self.assertEqual(cs.owes_proof(UID, self.q), ["owes:uvn"])
+        self.broken = False
+        sqlite3.connect(cs.PROOF_STORE).executescript(f"INSERT INTO proof_intake VALUES ({UID}, 's', '2026-10-20T00:00:00Z');")
+        self.assertEqual(cs.owes_proof(UID, self.q), ["owes:uvn"])
+        sqlite3.connect(cs.PROOF_STORE).executescript(f"DELETE FROM proof_intake WHERE user_id = {UID};")
+        db = vl.connect(cs.LEDGER)
+        c = vl.claim(db, campaign="uvn-status", user_key="a@x.com", day="2026-10-25", request_ids=["ra"], message_type="email",
+                     approved_by="U", approval_ref="r", user_id=str(UID))
+        vl.finalize(db, message_row=c["message_row"], status="sent", message_id="1"); db.close()
+        self.assertEqual(cs.owes_proof(UID, self.q), ["owes:open_ask", "owes:uvn"])
 
 
 if __name__ == "__main__":

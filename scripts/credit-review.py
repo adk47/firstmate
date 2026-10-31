@@ -989,7 +989,7 @@ def parser() -> argparse.ArgumentParser:
                     help="uvn-status (the ask, t01's uvn-reminder list) or a no-ask status note: "
                          "status-doc-received (status-A list) / status-team-review (status-B list); "
                          "gap-ask: Fable's gap ask for stage-2 need_more credits (with --from-stage2)")
-    us.add_argument("--wording", choices=["queued", "received", "no-ask"], default=None,
+    us.add_argument("--wording", choices=["queued", "received", "queued-neutral", "no-ask"], default=None,
                     help="queued: status-doc-received's 'in our review queue' wording (firstmate 092); "
                          "received: the receipt R1 for a user who still owes proof (send-locked in the gate); "
                          "no-ask: status-team-review's Copy B0, without the proof sentence (firstmate 106)")

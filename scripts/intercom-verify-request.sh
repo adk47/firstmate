@@ -300,6 +300,7 @@ readonly APPROVAL_REF_UVN="$APPROVAL_REF_STANDING_ORDER; copy approved by firstm
 readonly APPROVAL_REF_WITHDRAWAL="$APPROVAL_REF_STANDING_ORDER; withdrawal-confirm copy approved by firstmate under it 2026-10-19 21:21Z (inbox 061, confirmed in 064), sent only for a request the requester withdrew (metadata.withdrawal.by = requester)"
 readonly APPROVAL_REF_STATUS="$APPROVAL_REF_STANDING_ORDER; status notes approved by firstmate under it 2026-10-20 (inbox 070: team-review verbatim; 071: doc-received as credit-trust-llm-t01 drafted it). Not asks."
 readonly APPROVAL_REF_STATUS_QUEUED="$APPROVAL_REF_STATUS The 'in our review queue' doc-received wording (--copy queued) approved by firstmate 092."
+readonly APPROVAL_REF_STATUS_NEUTRAL="$APPROVAL_REF_STATUS Status A neutral (--copy queued-neutral) for an unread, unanswered filing: fable-copy-1030-r5/i (captain 21:3xZ wording)."
 readonly APPROVAL_REF_STATUS_RECEIVED="$APPROVAL_REF_STATUS The receipt line R1 (--copy received: the queued line without 'no need to send anything else'), proof-loop-lead-fable-p1 captain card 2026-10-27 22:5xZ, sent only on the captain's yes."
 readonly APPROVAL_REF_STATUS_COUNT="$APPROVAL_REF_STANDING_ORDER; count-only status-team-review wording (--copy count) approved by firstmate 2026-10-26 16:58Z (verify-ask-wiring-h2 inbox 005, Fable decides under the captain's 12:40Z order; captain 16:05Z: \"everyone should be communicated or credits and profiles awarded\"), for a user whose requests cannot be listed (unshowable fields or more than 1,000). Not an ask."
 readonly APPROVAL_REF_STATUS_NOASK="$APPROVAL_REF_STATUS The no-ask team-review wording B0 (--copy no-ask: Copy B without its optional proof sentence) approved by firstmate 2026-10-21 (credit-trust-llm-t01 key pending-status-1021, relayed in inbox 106)."
@@ -649,13 +650,20 @@ case "$CAMPAIGN" in
       status-doc-received:queued) COPY="docrecvq"; APPROVAL_REF="$APPROVAL_REF_STATUS_QUEUED" ;;
       # Card R1 (proof loop): the receipt for a user who still owes proof; send-locked (STATUS_RECEIVED_COPY_APPROVED).
       status-doc-received:received) COPY="docrecvr"; APPROVAL_REF="$APPROVAL_REF_STATUS_RECEIVED" ;;
+      # fable-copy-1030-r5/i: status A NEUTRAL for an UNREAD filing - every R1 thread rule applies (R1LIKE below)
+      status-doc-received:queued-neutral) COPY="docrecvn"; APPROVAL_REF="$APPROVAL_REF_STATUS_NEUTRAL" ;;
       status-team-review:no-ask) COPY="teamreviewb0"; APPROVAL_REF="$APPROVAL_REF_STATUS_NOASK" ;;
       # Count-only (firstmate inbox 005): no titles, so any request may be in it; the ledger
       # records the ids given (the driver sends at most 1,000) and user.pending_count is the total.
       status-team-review:count) COPY="teamreviewcount"; APPROVAL_REF="$APPROVAL_REF_STATUS_COUNT"; MAX_CREDITS=1000 ;;
-      *) refuse "--copy applies to verify-live (v1|windowed), status-doc-received (queued|received) and status-team-review (no-ask|count) only." ;;
+      *) refuse "--copy applies to verify-live (v1|windowed), status-doc-received (queued|received|queued-neutral) and status-team-review (no-ask|count) only." ;;
     esac
     [ "$KIND" = "initial" ] || refuse "$CAMPAIGN has no follow-ups: one message per user, ever."
+    if [ "$COPY" = "teamreviewcount" ]; then
+      # fable-copy-1030-r5/k has no approved singular count form: one request is never rendered in the count wording
+      [ "$("$JQ_BIN" -r '(.user.pending_count // (.credits | length)) >= 2' "$CREDITS_FILE" 2>/dev/null)" = "true" ] \
+        || refuse "status-team-review --copy count needs 2 or more requests (the /k count form has no singular); nothing was sent or claimed."
+    fi
     ;;
   email-changed|email-changed-dup)
     # A threaded reply that an account's sign-in email change is done (firstmate 073). The one
@@ -767,7 +775,8 @@ INPUT="$("$JQ_BIN" -c '
             ext_other_account: (.user.ext_other_account | if type == "boolean" then . else null end),
             thread_external_id: ((.user.thread_external_id // "") | clean),
             pending_count: (.user.pending_count | if type == "number" and . == floor and . >= 0 and . <= 1000000 then . else null end),
-            first_name: ((.user.first_name // "") | clean) },
+            first_name: ((.user.first_name // "") | clean),
+            filing_muso_ui: (.user.filing_muso_ui == true) },   # r5 19:2xZ: a Muso-UI filing (SYS-001) gets no R1
     claim: ((.claim // {}) | { profile_name: ((.profile_name // "") | clean), profile_url: ((.profile_url // "") | clean),
                                code: ((.code // "") | clean), platform: ((.platform // "") | clean | ascii_downcase) }),
     merge: ((.merge // {}) | { profiles: [ (.profiles // [])[] | clean ] }),
@@ -787,6 +796,32 @@ INPUT_FILING_CONV="$("$JQ_BIN" -r '(.user.filing_conversation // "") | tostring'
 # never into whichever conversation the 14-day auto-pick would choose and never by email instead. The dry run
 # renders it in-thread too. A filing thread that cannot carry it is a hold (below), not a fallback.
 R1_THREAD=0
+R1LIKE=0; case "$COPY" in docrecvr|docrecvn) R1LIKE=1 ;; esac   # /i takes R1's thread rules (r5 10-30 §i)
+# r5 HOLD 10-30 19:0xZ (3 paid R1), two thread rules on the conversation as read (plaintext):
+# WAITING_JQ -> the created_at of our last admin/bot COMMENT when it asks the customer a question ("?") and no customer
+#   comment came after it: the thread is waiting on the customer, and no automated line of any class goes into it (a
+#   human/Caroline follow-up (any class, reminders included: r5 "no automated line of any class goes there").
+# RECEIPTED_JQ -> the created_at of the latest admin/bot comment AFTER the customer's latest filing part (a customer part
+#   with an attachment; else the opener): we already acknowledged the document in free text (the un-ledgered #1510
+#   class), so the R1 receipt would repeat it - skip until the backfill ledgers those lines.
+# shellcheck disable=SC2016
+THREAD_JQ_DEFS='def cust: (.author.type // "") | IN("user", "lead", "contact");
+  def ours: (.author.type // "") | IN("admin", "bot");
+  def said: (.part_type // "") == "comment" and ((.body // "") | gsub("\\s"; "") | length) > 0;
+  def spoke: (.part_type // "comment") != "note" and ((((.body // "") | gsub("\\s"; "") | length) > 0)
+             or (((.attachments // []) | length) > 0));
+  def parts: [ (.conversation_parts.conversation_parts // [])[] ];'
+# shellcheck disable=SC2016
+WAITING_JQ="$THREAD_JQ_DEFS"'
+  [ parts[] | select((ours and said) or (cust and spoke)) ] | sort_by(.created_at // 0) | last
+  | if . != null and ours and ((.body // "") | test("\\?|\\b(could|can) you\\b|\\bplease (send|share)\\b"; "i"))
+    then (.created_at // 0 | tostring) else empty end'
+# shellcheck disable=SC2016
+RECEIPTED_JQ="$THREAD_JQ_DEFS"'
+  ([ (.source // {}) | select(cust and ((.attachments // []) | length) > 0) | 0 ]
+   + [ parts[] | select(cust and ((.attachments // []) | length) > 0) | (.created_at // 0) ] | max) as $f
+  | ($f // 0) as $f
+  | [ parts[] | select(said and ours) | select((.created_at // 0) > $f) | (.created_at // 0) ] | max // empty | tostring'
 # [key=r1-filing-thread] (r5 10-30 13:3xZ, firstmate 283): the R1 receipt goes INTO the filing thread even when WE
 # opened it - a NARROW exemption from G2's opener rule only, never an email detour. All required: the R1 filing-thread
 # path (status-doc-received, --conversation == user.filing_conversation); EVERY named request has a proof_intake row
@@ -815,10 +850,20 @@ PY
 }
 
 # QA #1460: an explicit --conversation for R1 must BE the filing conversation (the one G3 and comm_state judge).
-if [ "$COPY" = "docrecvr" ] && [ -n "$THREAD" ] && [ "$THREAD" != "$INPUT_FILING_CONV" ]; then
+# r5 10-30 19:2xZ: an R1 receipts a document of record only - a filing read as a screenshot of Muso itself (doc-verify
+# SYS-001) is never receipted (L13 is retired from R1; that user's next message is the ask, not a receipt)
+if [ "$R1LIKE" = "1" ] && [ "$("$JQ_BIN" -r '.user.filing_muso_ui == true' "$CREDITS_FILE" 2>/dev/null)" != "false" ]; then
+  refuse "R1: the filing was read as a screenshot of Muso itself (user.filing_muso_ui); a receipt goes only for a document of record. Nothing was sent or claimed."
+fi
+# r5 / QA #1554: the R1 receipt itself needs the filing's class STATED - user.filing_muso_ui explicitly false. A payload
+# without it (no producer sets it yet) is r1_filing_class_unknown: refused, never a receipt by default.
+if [ "$COPY" = "docrecvr" ] && [ "$("$JQ_BIN" -r '.user | has("filing_muso_ui") and .filing_muso_ui == false' "$CREDITS_FILE" 2>/dev/null)" != "true" ]; then
+  refuse "r1_filing_class_unknown: the R1 payload does not state the filing's class (user.filing_muso_ui must be false); nothing was sent or claimed."
+fi
+if [ "$R1LIKE" = "1" ] && [ -n "$THREAD" ] && [ "$THREAD" != "$INPUT_FILING_CONV" ]; then
   refuse "R1 goes only into the filing conversation ($INPUT_FILING_CONV); --conversation $THREAD is another thread. Nothing was sent or claimed."
 fi
-if [ "$COPY" = "docrecvr" ] && printf '%s' "$INPUT_FILING_CONV" | grep -qE '^[0-9]{1,24}$' \
+if [ "$R1LIKE" = "1" ] && printf '%s' "$INPUT_FILING_CONV" | grep -qE '^[0-9]{1,24}$' \
    && { [ -z "$THREAD" ] || [ "$THREAD" = "$INPUT_FILING_CONV" ]; }; then
   # QA #1532: an explicit --conversation that IS the filing conversation (e.g. a reply_due answer) is the same R1 path
   THREAD="$INPUT_FILING_CONV"; MESSAGE_TYPE="comment"; R1_THREAD=1
@@ -1430,9 +1475,11 @@ def takeback_notice($fn; $c0; $maxl):
 def uvn_list: [ "A public link where the credit is listed: Tidal, Genius, Discogs, AllMusic, ASCAP or BMI.",
                 "Documentation of the work: a project or session file, a message with the artist, a contract or split sheet, or anything else that shows you worked on it." ];
 def uvn_status($fn; $c; $maxl):
-  ($c | length) as $n
+  # fable-copy-1030-r5/l: singular/plural keys on DISTINCT TRACKS (after #1504's dedupe), never on request rows - one
+  # track with several roles is the singular body naming every role ("your Producer and Mixing credits")
+  (utitles($c) | length) as $n
   | if $n == 1 then
-      $c[0] as $x
+      ($c[0] + {role: ([ $c[].role | split(",")[] | gsub("^\\s+|\\s+$"; "") | select(length > 0) ] | reduce .[] as $r ([]; if index([$r]) then . else . + [$r] end) | join(", "))}) as $x
       | { subject: "Your Muso credit request: one thing we still need",
           segs: ([ {p: "Hi \($fn), a quick status update on your credit request for \($x.track_title | qt) by \($x.artist_name): it's waiting on one thing from you, something that shows your \($x.role | role_credits)."},
                   {p: "Any one of these works (a link, photo or PDF is fine):"}, {ul: uvn_list},
@@ -1461,27 +1508,47 @@ def status_doc_received($fn; $c; $maxl):
 def status_doc_queued($fn; $c; $maxl):
   { subject: "Your Muso credit \(req_s($c|length)): an update",
     segs: [ {p: "Hi \($fn), a quick update on your credit \(req_s($c|length)) for \(titles($c; $maxl)): we have the document you sent, and it's in our review queue. We'll message you here as soon as it's checked - no need to send anything else."} ] };
-def status_team_review($fn; $c; $maxl):
-  { subject: "Your Muso credit \(req_s($c|length)): an update",
-    segs: [ {p: "Hi \($fn), a quick update on your credit \(req_s($c|length)) for \(titles($c; $maxl)): they're with our team for review. Nothing else is needed from you right now. If you have something that shows your role on these specific tracks (for example a credit listing link or a split sheet), you can reply with it and it helps us confirm them faster."} ] };
-# Count-only (firstmate inbox 005, verbatim; one request reads in the singular).
+# fable-copy-1030-r5/k (byte-for-byte): the team-review status line WITHOUT the retired "Nothing else is needed" sentence
+# and without the soft ask ("If you have something that shows your role...": a status line never asks). Singular /
+# plural key on DISTINCT TRACKS (#1504, r5 /l); more than 3 tracks = the count form. Replaces teamreview AND its no-ask
+# B0 variant (both now the same approved line) and the count variant.
+def team_review_k($fn; $c; $maxl):
+  utitles($c) as $u
+  | if ($u | length) == 1 then
+      { subject: "Your Muso credit request: an update",
+        segs: [ {p: "Hi \($fn), a quick update on your credit request for \($u[0] | qt): it's with our team for review, and we'll message you here as soon as it's been checked."} ] }
+    elif ($u | length) <= 3 then
+      { subject: "Your Muso credit requests: an update",
+        segs: [ {p: "Hi \($fn), a quick update on your credit requests for \([ $u[] | qt ] | andjoin): they're with our team for review, and we'll message you here as soon as they've been checked."} ] }
+    else
+      { subject: "Your Muso credit requests: an update",
+        segs: [ {p: "Hi \($fn), a quick update on your \($c | length) credit requests: they're with our team for review, and we'll message you here as soon as they've been checked."} ] }
+    end;
+# fable-copy-1030-r5/i (byte-for-byte): status A NEUTRAL for an UNREAD filing - never "document", "proof" or "review
+# queue" (that is R1, reserved for record/f9 filings by #1526); singular/plural on distinct tracks.
+def status_neutral($fn; $c; $maxl):
+  utitles($c) as $u
+  | if ($u | length) == 1 then
+      { subject: "Your Muso credit request: an update",
+        segs: [ {p: "Hi \($fn), a quick update on your credit request for \($u[0] | qt): we've received what you sent, and it's with our team. We'll message you here as soon as it's been checked."} ] }
+    else
+      { subject: "Your Muso credit requests: an update",
+        segs: [ {p: "Hi \($fn), a quick update on your credit requests for \([ $u[0:$maxl][] | qt ] | andjoin)\(if ($u | length) > $maxl then " and \(($u | length) - $maxl) more" else "" end): we've received what you sent, and it's with our team. We'll message you here as soon as they've been checked."} ] }
+    end;
+def status_team_review($fn; $c; $maxl): team_review_k($fn; $c; $maxl);
 def status_team_review_count($fn; $n):
-  { subject: "Your Muso credit \(req_s($n)): an update",
-    segs: [ {p: (if $n == 1 then "Hi \($fn), a quick update on your pending credit request: it is with our team for review. Nothing else is needed from you right now."
-                 else "Hi \($fn), a quick update on your \($n) pending credit requests: they are with our team for review. Nothing else is needed from you right now." end)} ] };
-# Card R1 (proof loop, verbatim): the queued line without "no need to send anything else".
+  if $n >= 2 then
+    { subject: "Your Muso credit requests: an update",
+      segs: [ {p: "Hi \($fn), a quick update on your \($n) credit requests: they're with our team for review, and we'll message you here as soon as they've been checked."} ] }
+  else error("teamreviewcount: the /k count form is for 2 or more requests") end;
 def status_doc_received_r1($fn; $c; $maxl):
   { subject: "Your Muso credit \(req_s($c|length)): an update",
-    segs: [ {p: "Hi \($fn), a quick update on your credit \(req_s($c|length)) for \(titles($c; $maxl)): we have the document you sent, and it's in our review queue. We'll message you here as soon as it's checked."},
-            # L13 (rulings-1028-1430 section 1: "R1 + L13 as a second paragraph", captain 14:3xZ via Fable)
-            {p: "A screenshot of Muso itself doesn't show where the credit is published, so it can't be used as proof; a page or document from outside Muso that names you on the track is what we can check."} ] };
-def status_team_review_noask($fn; $c; $maxl):
-  { subject: "Your Muso credit \(req_s($c|length)): an update",
-    segs: [ {p: "Hi \($fn), a quick update on your credit \(req_s($c|length)) for \(titles($c; $maxl)): they're with our team for review. Nothing else is needed from you right now."} ] };
-# claim-proof-ask (steers-1830 #5; Fable-approved D38 + paragraph 3 as amended in
-# claims-documentation-readiness-1023 ruling 1; send-locked until firstmate's GO): the dated code ask and its
-# day-7 reminder. Server facts only: catalog profile name and link, the claim's code, one fixed
-# surface phrase, the close day ($due, a plain day).
+    segs: [ {p: "Hi \($fn), a quick update on your credit \(req_s($c|length)) for \(titles($c; $maxl)): we have the document you sent, and it's in our review queue. We'll message you here as soon as it's checked."}
+            # L13 (rulings-1028-1430: "R1 + L13 as a second paragraph") is RETIRED from R1 - r5 10-30 19:2xZ: with #1526
+            # an R1 only ever receipts a document of record (record / f9), never a screenshot of Muso itself, so the L13
+            # sentence never renders on an R1 (a Muso-UI filing is refused below, never receipted)
+          ] };
+def status_team_review_noask($fn; $c; $maxl): team_review_k($fn; $c; $maxl);
 def claim_ask($fn; $c):
   { subject: "Confirming your claim on \($c.profile_name)",
     segs: ([ {p: "Hi \($fn),"},
@@ -1566,6 +1633,7 @@ def gap_ask($fn; $c; $maxl):
 | (if $copy == "docrecv" then status_doc_received($fn; .credits; $maxl)
    elif $copy == "docrecvq" then status_doc_queued($fn; .credits; $maxl)
    elif $copy == "docrecvr" then status_doc_received_r1($fn; .credits; $maxl)
+   elif $copy == "docrecvn" then status_neutral($fn; .credits; $maxl)
    elif $copy == "teamreview" then status_team_review($fn; .credits; $maxl)
    elif $copy == "teamreviewb0" then status_team_review_noask($fn; .credits; $maxl)
    elif $copy == "claimask" then claim_ask($fn; .claim)
@@ -1589,9 +1657,9 @@ def gap_ask($fn; $c; $maxl):
    else live_followup($fn; .credits; $maxl; $kind; $due) end)
 # Status notes carry the approved "Muso Support" sign-off on email only (the handoff copy, firstmate
 # 092/103/106); an in-thread reply sits under Caroline's own name in the conversation and stays unsigned.
-| (if ($copy | IN("docrecv", "docrecvq", "docrecvr", "teamreview", "teamreviewb0", "teamreviewcount", "credithold")) and $mtype == "email"
+| (if ($copy | IN("docrecv", "docrecvq", "docrecvr", "credithold")) and $mtype == "email"
    then .segs += [ {p: "Muso Support"} ] else . end)
-| (if ($copy | IN("claimstatus", "mergepending", "claimpending")) and $mtype == "email" then .segs += sig else . end)
+| (if ($copy | IN("claimstatus", "mergepending", "claimpending", "docrecvn", "teamreview", "teamreviewb0", "teamreviewcount")) and $mtype == "email" then .segs += sig else . end)
 | { subject: .subject,
     text: ([ .segs[] | if has("ul") then (.ul | map("- " + .) | join("\n")) else .p end ] | join("\n\n")),
     html: ([ .segs[] | if has("ul") then "<ul>" + ([.ul[] | "<li>" + esc + "</li>"] | join("")) + "</ul>" else "<p>" + (.p | esc) + "</p>" end ] | join("")) }
@@ -1824,7 +1892,7 @@ for_each_account_contact() { # <fn>: the first non-empty answer of <fn> over thi
 # The clock G1 reads; the test copy pins it (INTERCOM_VERIFY_TEST_NOW, epoch) so the 24h rule is testable.
 g1_now() { if [ "$TESTABLE" = "1" ] && [ -n "${INTERCOM_VERIFY_TEST_NOW:-}" ]; then printf '%s' "$INTERCOM_VERIFY_TEST_NOW"; else date -u +%s; fi; }
 GOLIVE=0
-case "$CAMPAIGN:$COPY" in merge-pending:*|credit-hold-status:*|claim-proof-pending:*|status-doc-received:docrecvr|uvn-status:*) GOLIVE=1 ;; esac
+case "$CAMPAIGN:$COPY" in merge-pending:*|credit-hold-status:*|claim-proof-pending:*|status-doc-received:docrecvr|status-doc-received:docrecvn|uvn-status:*) GOLIVE=1 ;; esac
 # the claim code ask's FIRST message too ([key=claim-code-ask-release]); its day-7 reminder keeps its own rules
 [ "$CAMPAIGN:$KIND" = "claim-proof-ask:initial" ] && GOLIVE=1
 if [ "$GOLIVE" = "1" ] && [ "$LIVE" = "1" ]; then
@@ -1870,13 +1938,19 @@ if [ "$GOLIVE" = "1" ] && [ "$LIVE" = "1" ]; then
     || refuse "G4: the recipient contact is not an Intercom user (a lead or visitor); nothing was sent or claimed."
   # G3 (R1 only): the receipt goes to the contact that FILED the document. The caller passes the proof_intake row's
   # conversation as user.filing_conversation; its single contact must be this account's contact.
-  if [ "$COPY" = "docrecvr" ]; then
+  if [ "$R1LIKE" = "1" ]; then
     fconv="$(printf '%s' "$INPUT_FILING_CONV" | grep -E '^[0-9]{1,24}$' || true)"
     [ -n "$fconv" ] || refuse "G3: the receipt names no filing conversation (user.filing_conversation); nothing was sent or claimed."
     g3="$(api GET "/conversations/$fconv?display_as=plaintext")" \
       || { printf 'CONVERSATION READ FAILED (curl); nothing was sent or claimed\n' >&2; exit 4; }
     [ "$(printf '%s' "$g3" | "$JQ_BIN" -r '[(.contacts.contacts // [])[] | (.id // "") | tostring] | join(",")')" = "$CONTACT_ID" ] \
       || refuse "G3: the contact that filed the document (conversation $fconv) is not this receipt's recipient; nothing was sent or claimed (tray)."
+    # r5 19:0xZ: the filing thread already carries our free-text acknowledgement after the filing part -> no R1
+    rcpt="$(printf '%s' "$g3" | "$JQ_BIN" -r "$RECEIPTED_JQ" 2>/dev/null)" \
+      || { printf 'FILING THREAD NOT READABLE for the receipted check (conversation %s); nothing was sent or claimed\n' "$fconv" >&2; exit 4; }
+    if [ -n "$rcpt" ]; then
+      printf 'HELD r1_receipted_in_thread credits=%s last_admin_comment_at=%s (conversation %s: we already acknowledged the document there); nothing was sent or claimed\n' "$N" "$rcpt" "$fconv"; exit 3
+    fi
   fi
   # G1: the contact existed for more than 24 hours, and before the oldest request this note names (when given).
   { [ "${INPUT_RAW_CREATED:-}" != "BAD" ] && { [ -z "${INPUT_RAW_CREATED:-}" ] || printf '%s' "$INPUT_RAW_CREATED" | grep -qE '^[0-9]{1,12}$'; }; } \
@@ -1899,6 +1973,15 @@ fi
 # 'just go'): comm_state reads it at send (UVN row, review hold, account hold, open ask -> held).
 NIE=0
 case "$CAMPAIGN:$COPY" in status-team-review:*|claim-status:*|status-doc-received:docrecv|status-doc-received:docrecvq) NIE=1 ;; esac
+# p1 / r5 rule gap (10-30 18:4xZ): the owes-nothing rule follows the RENDERED body, never the campaign name - any note
+# whose text says nothing (else) is needed / no need to send anything is held for a user who still owes proof
+NIE_BODY=0
+NIE_PHRASE="$(printf '%s' "$RENDERED" | "$JQ_BIN" -r '(.subject // "") + " " + (.text // "") + " " + (.html // "")' 2>/dev/null \
+     | grep -oiE 'nothing( else)? is needed|no need to (send|resend)' | head -1 || true)"
+if [ -n "$NIE_PHRASE" ]; then
+  NIE=1; NIE_BODY=1
+fi
+NIE_ARGS=(); [ "$NIE_BODY" = "1" ] && NIE_ARGS=(--nothing-needed-body)
 if { [ "$GOLIVE" = "1" ] || [ "$NIE" = "1" ]; } && [ "$LIVE" = "1" ]; then
   # The user's communication state, read from the live stores RIGHT NOW (captain 18:2xZ; comm_state.py): the
   # "wait for our message" lines never go to anyone with a document or reply on file (they get R1 or nothing), R1
@@ -1908,8 +1991,8 @@ if { [ "$GOLIVE" = "1" ] || [ "$NIE" = "1" ]; } && [ "$LIVE" = "1" ]; then
   set +e
   CS="$("$PY_BIN" -I "$COMM_STATE_HELPER" check --campaign "$CAMPAIGN" --copy "$COPY" --user-id "$USER_ID" \
         --request-ids "$ALL_IDS" --contact-id "$CONTACT_ID" \
-        --conversation "$(if [ "$COPY" = "docrecvr" ]; then printf '%s' "${fconv:-}"; else printf '%s' "${THREAD:-}"; fi)" \
-        --reply-due "${REPLY_DUE:-}" 2>/dev/null)"; cs_rc=$?
+        --conversation "$(if [ "$R1LIKE" = "1" ]; then printf '%s' "${fconv:-}"; else printf '%s' "${THREAD:-}"; fi)" \
+        --reply-due "${REPLY_DUE:-}" ${NIE_ARGS[@]+"${NIE_ARGS[@]}"} 2>/dev/null)"; cs_rc=$?
   set -e
   case "$cs_rc" in
     0) ;;
@@ -1918,7 +2001,9 @@ if { [ "$GOLIVE" = "1" ] || [ "$NIE" = "1" ]; } && [ "$LIVE" = "1" ]; then
          --request-ids "$ALL_IDS" --message-type "$MESSAGE_TYPE" --approved-by "$APPROVED_BY" \
          --approval-ref "$APPROVAL_REF" --reason comm_state --detail "$cs_why" >/dev/null \
          || echo "WARNING: the comm_state hold was not logged in the ledger" >&2
-       printf 'HELD comm_state credits=%s (%s)\n' "$N" "$cs_why"; exit 3 ;;
+       # p1: a hold of the owes-nothing check by BODY names the phrase it found
+       printf 'HELD comm_state credits=%s (%s)%s\n' "$N" "$cs_why" \
+         "$([ "$NIE_BODY" = "1" ] && printf ' [owes-nothing check by body: the rendered note says "%s"]' "$NIE_PHRASE")"; exit 3 ;;
     *) printf 'COMM STATE CHECK FAILED (rc=%s); nothing was sent or claimed: %s\n' "$cs_rc" "${CS:0:300}" >&2; exit 4 ;;
   esac
 fi
@@ -2071,7 +2156,7 @@ fi
 # goes by email, so the ask stays open and is delivered.
 thread_check() { # sets THREAD_WHY (empty when $THREAD can carry the note) and THREAD_UNREAD
   local tconv assignee btag
-  THREAD_WHY="" THREAD_UNREAD=0
+  THREAD_WHY="" THREAD_UNREAD=0 THREAD_WAIT=""
   if ! tconv="$(api GET "/conversations/$THREAD?display_as=plaintext")" \
      || ! printf '%s' "$tconv" | "$JQ_BIN" -e --arg t "$THREAD" '(.type // "") == "conversation" and ((.id // "") | tostring) == $t' >/dev/null 2>&1; then
     THREAD_UNREAD=1; THREAD_WHY="conversation $THREAD could not be read: ${tconv:0:300}"; return 0
@@ -2085,6 +2170,11 @@ thread_check() { # sets THREAD_WHY (empty when $THREAD can carry the note) and T
     THREAD_WHY="conversation $THREAD is not this user's own conversation (its contacts are not exactly one Intercom user of this account); not sending."; return 0
   fi
   THREAD_CONTACT_PICK="$tc_one"
+  wait_at="$(printf '%s' "$tconv" | "$JQ_BIN" -r "$WAITING_JQ" 2>/dev/null)" \
+    || { THREAD_UNREAD=1; THREAD_WHY="conversation $THREAD: the last-comment read failed"; return 0; }
+  if [ -n "$wait_at" ]; then
+    THREAD_WAIT="$wait_at"; THREAD_WHY="conversation $THREAD is waiting on the customer (our last comment, at $wait_at, asks them a question)"; return 0
+  fi
   assignee="$(printf '%s' "$tconv" | "$JQ_BIN" -r '.admin_assignee_id // empty | tostring')"
   if [ -n "$assignee" ] && [ "$assignee" != "0" ] && [ "$assignee" != "$INTERCOM_ADMIN_ID" ]; then
     THREAD_WHY="conversation $THREAD is assigned to a human (admin $assignee), who is handling this user; not sending."; return 0
@@ -2103,7 +2193,10 @@ if [ -n "$THREAD" ] && [ "$LIVE" = "1" ]; then
     CONTACT_ID="$THREAD_CONTACT_PICK"
   fi
   if [ -n "$THREAD_WHY" ]; then
-    if [ "$R1_THREAD" = "1" ]; then
+    if [ -n "${THREAD_WAIT:-}" ]; then
+      # r5 19:0xZ: a thread waiting on the customer gets no automated line, by thread or as an email beside it
+      printf 'HELD waiting_on_customer credits=%s last_admin_question_at=%s (%s); nothing was sent or claimed\n' "$N" "$THREAD_WAIT" "${THREAD_WHY:0:200}"; exit 3
+    elif [ "$R1_THREAD" = "1" ]; then
       printf 'HELD r1_filing_thread credits=%s (%s); nothing was sent or claimed\n' "$N" "${THREAD_WHY:0:300}"; exit 3
     elif [ "$THREAD_AUTO" = "1" ]; then
       THREAD=""; MESSAGE_TYPE="email"

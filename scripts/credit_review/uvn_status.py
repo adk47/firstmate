@@ -166,7 +166,8 @@ def _cap_env(name: str, default: int) -> int:
 STATUS_DAILY_MAX = _cap_env("CREDIT_STATUS_DAILY_MAX", 1000)  # sanity bound for the no-ask status notes
 LIST_MAX_AGE_H = 30
 # (campaign, wording) pairs the gate takes as --copy; LOCKED_WORDINGS name the gate lock each one waits on.
-WORDINGS = (("status-doc-received", "queued"), ("status-doc-received", "received"), ("status-team-review", "no-ask"))
+WORDINGS = (("status-doc-received", "queued"), ("status-doc-received", "received"), ("status-doc-received", "queued-neutral"),
+            ("status-team-review", "no-ask"))
 LOCKED_WORDINGS = {"received": "STATUS_RECEIVED_COPY_APPROVED"}
 
 

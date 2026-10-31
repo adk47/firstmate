@@ -377,14 +377,28 @@ def decide(campaign: str, copy: str, st: dict[str, Any], core: dict[str, Any], i
             why.append("already_acknowledged")
         if decided or told:
             why.append("decided_or_told")
-    elif campaign == RECEIPT and copy in ("docrecvr", "docrecvq", "docrecv"):
+    elif campaign == RECEIPT and copy in ("docrecvr", "docrecvn", "docrecvq", "docrecv"):
         if decided or told:
             why.append("decided_or_told:" + ",".join((decided + told)[:5]))
         why += [t for t in thread if t in ("R6_stale_thread", "R7_thread_resolved")]
     return state, why
 
 
-def owes_proof(uid: int, query: Query) -> list[str]:
+def approval_path_exempt(uid: int, query: Query) -> bool:
+    """r5 / p1 [h2 452] (b): a user whose EVERY open UVN row is one the approval path admits (uvn_status's own
+    approval_path_admits - the same predicate, never a copy: validator-approved, risk < 30, pop 1-59, no proof needed)
+    owes nothing on those rows - the decider approves them without the user. Any failure to build or judge the rows =
+    not exempt (they keep owing: fail closed)."""
+    try:
+        from credit_review import uvn_status            # lazy: uvn_status imports this module
+        rows = uvn_status.uvn_requests([int(uid)], query, ("user_verification_needed",)).get(int(uid), [])
+        # each row's _no_ask is uvn_status.ask_class(raw row), which is approval_path_admits for 'approval_path'
+        return bool(rows) and all(r.get("_no_ask") == "approval_path" for r in rows)
+    except Exception:  # noqa: BLE001 - an unjudgeable row is never an exemption
+        return False
+
+
+def owes_proof(uid: int, query: Query, notes: list[str] | None = None) -> list[str]:
     """Why this user still owes proof (empty = owes nothing): U (any user_verification_needed row), H2 (an unverified
     row whose IDP review_* rule fired), H1 (an account hold), or an open ask (an ask went out and a request is still
     pending). The steward's CLASS_SQL (captain 12:55Z), read at send."""
@@ -411,7 +425,40 @@ def owes_proof(uid: int, query: Query) -> list[str]:
         raise Unknown(f"verify ledger unreadable: {exc}") from exc
     if asked and pending:
         out.append("owes:open_ask")
+    out += dv_unverifiable(uid, query)
+    # r5 / p1 (b): only the UVN reason can be lifted, and only with no open ask and no document on file
+    if out == ["owes:uvn"] * len(out) and out and not store_facts(uid)["docs"] and approval_path_exempt(uid, query):
+        out = []
+        if notes is not None:
+            notes.append("owes_nothing:approval_path")
     return sorted(set(out))
+
+
+def dv_unverifiable(uid: int, query: Query) -> list[str]:
+    """l1 [key=nm-batch2-unverifiable] / r5: a user whose filing doc-verify READ and found it does not verify the credit
+    (latest outcome per request 'unverifiable' or 'not_document*') still owes a better document - by verdict, whatever
+    core's status says - so the owes-nothing lines (/k, nothing-needed bodies) never go to them. A missing store = no
+    reads yet; an unreadable one fails closed."""
+    if not os.path.exists(DV_STORE):
+        return []
+    try:
+        latest: dict[str, str] = {}
+        for rid, outcome in _ro(DV_STORE).execute(
+                "SELECT lower(request_id), coalesce(outcome, '') FROM dv_outcomes WHERE user_id = ? ORDER BY at, id", (int(uid),)):
+            latest[str(rid)] = str(outcome)
+    except sqlite3.Error as exc:
+        raise Unknown(f"doc-verify store unreadable: {exc}") from exc
+    bad = sorted(r for r, o in latest.items() if re.fullmatch(r"[a-z0-9-]{1,64}", r)
+                 and (o == "unverifiable" or o.startswith("not_document")))
+    if not bad:
+        return []
+    rows = query("SELECT lower(CAST(id AS varchar)) FROM postgresql_core.public.credit_requests "
+                 f"WHERE userid = {int(uid)} AND deletedat IS NULL "
+                 "AND status IN ('user_verification_needed', 'unverified', 'processing') "
+                 "AND lower(CAST(id AS varchar)) IN (" + ",".join(f"'{r}'" for r in bad) + ")")
+    if any(len(r) != 1 for r in rows):
+        raise Unknown("unexpected replica row shape")
+    return ["owes:dv_unverifiable"] if rows else []
 
 
 REPLY_DUE_AFTER_S = 24 * 3600
@@ -479,10 +526,19 @@ def reply_due(conversation: str, contact_id: str, part_id: str, ic: Intercom, no
 
 def check(campaign: str, copy: str, uid: int, keys: list[str], contact_id: str, *, conversation: str = "",
           query: Query = trino, ic: Intercom = intercom, fraud: Callable[[int, Query], list[str]] | None = None,
-          reply_due_part: str = "") -> dict[str, Any]:
+          reply_due_part: str = "", nothing_needed_body: bool = False) -> dict[str, Any]:
     if nothing_else(campaign, copy):
-        why = owes_proof(uid, query)
-        return {"hold": bool(why), "state": "owes_proof" if why else "owes_nothing", "reasons": why}
+        notes: list[str] = []
+        why = owes_proof(uid, query, notes)
+        return {"hold": bool(why), "state": "owes_proof" if why else "owes_nothing", "reasons": why or notes}
+    if nothing_needed_body:
+        # p1 / r5 (rule gap, 10-30 18:4xZ): the gate found a "nothing (else) is needed" line in the RENDERED body of a
+        # campaign outside the family above - the owes-nothing rule (captain 12:55Z) applies by body, not by name:
+        # every other check runs AND a user who owes proof is held
+        res = check(campaign, copy, uid, keys, contact_id, conversation=conversation, query=query, ic=ic, fraud=fraud,
+                    reply_due_part=reply_due_part)
+        owe = owes_proof(uid, query)
+        return {**res, "hold": bool(res["hold"] or owe), "reasons": list(res["reasons"]) + [f"nothing_needed_body:{w}" for w in owe]}
     core = core_facts(uid, keys, query)
     st = store_facts(uid, keys, core["created"])
     ic_found = (intercom_facts(contact_id, max(st["last_ask"], core["last_ask"]), ic, core["created"])
@@ -510,13 +566,15 @@ def _main(argv: list[str] | None = None) -> int:
     c.add_argument("--contact-id", default="")
     c.add_argument("--conversation", default="", help="the conversation the note would go into (R1: the filing one)")
     c.add_argument("--reply-due", default="", help="[key=reply-due]: the customer part this note answers")
+    c.add_argument("--nothing-needed-body", action="store_true",
+                   help="the rendered note says nothing (else) is needed: hold anyone who still owes proof")
     a = ap.parse_args(argv)
     if not str(a.user_id).isdigit():
         print(json.dumps({"hold": None, "reasons": ["no Muso user id"]}))
         return 2
     try:
         res = check(a.campaign, a.copy, int(a.user_id), [k for k in a.request_ids.split(",") if k], a.contact_id,
-                    conversation=a.conversation, reply_due_part=a.reply_due)
+                    conversation=a.conversation, reply_due_part=a.reply_due, nothing_needed_body=a.nothing_needed_body)
     except Unknown as exc:
         print(json.dumps({"hold": None, "reasons": [f"unknown: {exc}"]}))
         return 2
