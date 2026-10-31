@@ -504,7 +504,14 @@ fi
 
 # ledger <op> [args...]: one JSON line on stdout. -I (isolated) so PYTHON* env cannot
 # redirect the helper on a deployed copy.
-ledger() { "$PY_BIN" -I "$LEDGER_HELPER" --db "$LEDGER" "$@"; }
+# QA #1564: the read-only actions open the ledger read-only (mode=ro: never created, never migrated); a ledger that would
+# need either refuses the check instead of writing - a dry run or recipient check never changes persistent state
+ledger() {
+  case "$ACTION" in
+    check-recipient|dry-run|validate) "$PY_BIN" -I "$LEDGER_HELPER" --db "$LEDGER" --readonly "$@" ;;
+    *) "$PY_BIN" -I "$LEDGER_HELPER" --db "$LEDGER" "$@" ;;
+  esac
+}
 
 # api METHOD PATH [payload-on-stdin]: the response body on stdout, curl rc as the status.
 # The payload travels through STDIN, never argv (MAX_ARG_STRLEN; see intercom-ops-write.sh).
@@ -555,7 +562,8 @@ if [ "$MODE" = "tag-proof" ]; then
       *) printf 'LOOKUP NOT VERIFIED for message %s: expected 0 or 1 conversation, got %s\n' "$MESSAGE_ID" "$n" >&2; exit 4 ;;
     esac
     printf '%s' "$CONV" | grep -qE '^[0-9]+$' || { echo "LOOKUP NOT VERIFIED: conversation id '$CONV' is not numeric" >&2; exit 4; }
-    ledger set-conversation --message-id "$MESSAGE_ID" --conversation-id "$CONV" >/dev/null
+    # the lookup is cached for the real tagging only: a dry run writes nothing to the ledger (QA #1564)
+    [ "$ACTION" = dry-run ] || ledger set-conversation --message-id "$MESSAGE_ID" --conversation-id "$CONV" >/dev/null
   fi
   convo="$(api GET "/conversations/$CONV?display_as=plaintext")" \
     || { printf 'READ FAILED for conversation %s:\n%s\n' "$CONV" "$convo" >&2; exit 4; }

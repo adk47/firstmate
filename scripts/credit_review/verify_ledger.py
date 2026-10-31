@@ -88,6 +88,7 @@ import json
 import os
 import re
 import sqlite3
+import urllib.parse
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -264,7 +265,15 @@ def stamp(now: datetime | None = None) -> str:
     return (now or utcnow()).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# QA #1564 (round 3): a process under the credit-ops-notes kill sets this ONCE; from then on EVERY connect() in the
+# process - the runner's, verify_notify's, any later one - is connect_ro(must_exist=True): never created, never migrated,
+# and a write fails loud (sqlite: readonly database). Not a per-call promise that a later open could forget.
+READ_ONLY_PROCESS = False
+
+
 def connect(path: str) -> sqlite3.Connection:
+    if READ_ONLY_PROCESS and path != ":memory:":
+        return connect_ro(path, must_exist=True)
     if path != ":memory:":
         Path(path).parent.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(path, timeout=30, isolation_level=None)
@@ -272,6 +281,53 @@ def connect(path: str) -> sqlite3.Connection:
     db.executescript(SCHEMA)
     _migrate(db)
     db.executescript(INDEXES)
+    return db
+
+
+class ReadOnlyLedgerError(RuntimeError):
+    """A read-only open is impossible without writing (the ledger is missing or needs a migration)."""
+
+
+def connect_ro(path: str, *, must_exist: bool = False) -> sqlite3.Connection:
+    """QA #1564: the ledger opened READ-ONLY (mode=ro) - never created, never migrated. A missing ledger, or one whose
+    schema lacks any table, index, trigger, view or column connect() would add (it would CREATE / ALTER), raises: the caller that must not
+    write (a dry run under the credit-ops-notes kill, the gate's --check-recipient) then refuses instead.
+    A ledger that does not exist yet reads as an EMPTY one (an in-memory copy of the schema: nothing was ever sent, so
+    nothing is recorded) and no file is created; `must_exist` makes a missing ledger an error instead."""
+    if path == ":memory:" or not Path(path).exists():
+        if must_exist:
+            raise ReadOnlyLedgerError(f"verify ledger {path} does not exist (a read-only run never creates it)")
+        mem = sqlite3.connect(":memory:", isolation_level=None)
+        mem.row_factory = sqlite3.Row
+        mem.executescript(SCHEMA)
+        mem.executescript(INDEXES)
+        return mem
+    # QA #1564: the path is PERCENT-ENCODED into the URI - a raw '?' (or '#') in it would end the path early and open a
+    # different, writable file without mode=ro
+    db = sqlite3.connect(f"file:{urllib.parse.quote(str(Path(path).resolve()))}?mode=ro", uri=True, timeout=30,
+                         isolation_level=None)
+    db.row_factory = sqlite3.Row
+    ref = sqlite3.connect(":memory:")
+    try:
+        # QA #1564 (round 2): EVERYTHING connect() could write is checked - every table, index, trigger and view that
+        # SCHEMA + INDEXES create (a missing index = CREATE INDEX = a schema write), and every column (_migrate)
+        ref.executescript(SCHEMA)
+        ref.executescript(INDEXES)
+        q = "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
+        missing = sorted({(str(t), str(n)) for t, n in ref.execute(q)} - {(str(t), str(n)) for t, n in db.execute(q)})
+        if missing:
+            db.close()
+            raise ReadOnlyLedgerError(f"verify ledger {path} needs a migration (missing {missing[:3]}); "
+                                      "a read-only run never migrates it")
+        for table in TABLES:
+            have = {str(r[1]) for r in db.execute(f"PRAGMA table_info({table})").fetchall()}
+            want = {str(r[1]) for r in ref.execute(f"PRAGMA table_info({table})").fetchall()}
+            if want - have:
+                db.close()
+                raise ReadOnlyLedgerError(f"verify ledger {path} needs a migration ({table}: {sorted(want - have)[:3]}); "
+                                          "a read-only run never migrates it")
+    finally:
+        ref.close()
     return db
 
 
@@ -1498,6 +1554,7 @@ def _ids(s: str) -> list[str]:
 def _main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="verify-request ledger ops (JSON on stdout)")
     p.add_argument("--db", default=DEFAULT_PATH)
+    p.add_argument("--readonly", action="store_true", help="QA #1564: open mode=ro; never create or migrate (read ops only)")
     sub = p.add_subparsers(dest="op", required=True)
     sub.add_parser("migrate", help="create or upgrade the verify tables in this ledger (idempotent; "
                                    "touches no other table); scripts/deploy.sh runs it every deploy")
@@ -1594,7 +1651,11 @@ def _main(argv: list[str] | None = None) -> int:
     c.add_argument("--message-id", required=True)
     c.add_argument("--conversation-id", required=True)
     a = p.parse_args(argv)
-    db = connect(a.db)
+    try:
+        db = connect_ro(a.db) if a.readonly else connect(a.db)
+    except ReadOnlyLedgerError as exc:
+        print(json.dumps({"error": str(exc)}), file=sys.stderr)
+        return 2
     if a.op == "migrate":
         # connect() already created/upgraded every verify table; report what is there now.
         out = {"result": "ok", "tables": {t: sorted(str(r[1]) for r in db.execute(f"PRAGMA table_info({t})"))

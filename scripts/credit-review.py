@@ -608,10 +608,31 @@ def preflight_outcomes(args: argparse.Namespace) -> str:
 
 
 def cmd_uvn_status(args: argparse.Namespace) -> int:
-    if CREDIT_OPS_NOTES_KILL_SWITCH.exists():
+    # r5 (10-31 05:19Z, h2 06Z deadlock): the kill stops SENDS. --mode apply refuses under it; a dry run / preview /
+    # --check-recipients still runs - strictly read-only (the gate writes nothing on --dry-run / --check-recipient, and
+    # the runner writes nothing outside apply) - so the dry run a lift is conditional on can be produced and signed
+    killed = CREDIT_OPS_NOTES_KILL_SWITCH.exists()
+    if killed and args.mode == "apply":
         log(f"credit-ops-notes kill switch present at {CREDIT_OPS_NOTES_KILL_SWITCH}; nothing sent")
         print("NO_REPLY")
         return 0
+    if killed:
+        # QA #1564: read-only for REAL - a missing or pre-migration ledger refuses (connect() would create or ALTER it);
+        # a current one is only ever read here (the row-count tests fail on any write), and the gate reads it mode=ro
+        src = args.ledger or verify_ledger.DEFAULT_PATH
+        try:
+            verify_ledger.connect_ro(src, must_exist=True).close()
+        except verify_ledger.ReadOnlyLedgerError as exc:
+            print(f"KILL SWITCH PRESENT ({CREDIT_OPS_NOTES_KILL_SWITCH}): dry run refused - {exc}")
+            return 2
+        verify_ledger.READ_ONLY_PROCESS = True     # every later open in this run is mode=ro (QA #1564 round 3)
+        log(f"credit-ops-notes kill switch present at {CREDIT_OPS_NOTES_KILL_SWITCH}: dry run only (read-only)")
+        print(f"KILL SWITCH PRESENT ({CREDIT_OPS_NOTES_KILL_SWITCH}): dry run only - no messages are sent and no "
+              "verify-ledger entries are recorded")
+    return _uvn_status(args)
+
+
+def _uvn_status(args: argparse.Namespace) -> int:
     if args.preview:
         Path(args.preview).mkdir(mode=0o700, parents=True, exist_ok=True)
     if args.wording and (args.campaign, args.wording) not in uvn_status.WORDINGS:

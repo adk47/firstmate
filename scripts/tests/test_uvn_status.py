@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -2200,6 +2201,176 @@ class SegmentDailyCapTest(unittest.TestCase):
         Path(f"{self.ledger}.segments.jsonl").write_text("not json\n")
         with self.assertRaises(ValueError):
             self.run_(max_users=10, query=replica(range(1, 3)), segment_daily_cap=10)
+
+
+class OpsKillDryRunTest(unittest.TestCase):
+    """r5 (10-31 05:19Z) + QA #1564: under the credit-ops-notes kill, uvn-status --mode apply refuses (NO_REPLY), and a
+    dry run / --check-recipients for an ELIGIBLE user still runs through the real CLI: exit 0, the gate's dry-run /
+    check-recipient action runs for that user, and not one row lands in any verify-ledger table."""
+    setUp = UvnStatusTests.setUp
+    write_list = UvnStatusTests.write_list
+    gate_file = UvnStatusTests.gate_file
+
+    def cli(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("credit_review_cli_kill", ROOT / "scripts" / "credit-review.py")
+        cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli)
+        return cli
+
+    def rows(self):
+        import sqlite3
+        db = sqlite3.connect(self.ledger)
+        names = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+        return {n: db.execute(f'SELECT count(*) FROM "{n}"').fetchone()[0] for n in names}
+
+    def run_cli(self, *extra, gate=None, kill=True):
+        import contextlib
+        import io
+        cli = self.cli()
+        ks = self.dir / "credit-ops-notes.disabled"
+        if kill:
+            ks.write_text("")
+        gate = gate or FakeGate()
+        real = uvn_status.run
+        cli.uvn_status.run = lambda **kw: real(**{**kw, "query": self.q, "runner": gate, "wrapper": self.gate_file(),
+                                                  "now": NOW, "pace_seconds": 0})
+        out = io.StringIO()
+        try:
+            with mock.patch.object(cli, "CREDIT_OPS_NOTES_KILL_SWITCH", ks), \
+                 mock.patch.dict(os.environ, {"CREDIT_REVIEW_LOG": str(self.dir / "run.log")}), \
+                 contextlib.redirect_stdout(out):
+                rc = cli.main(["--ledger", self.ledger, "uvn-status", "--list", str(self.list), "--segment", "paid",
+                               "--proof-on-file", str(self.proof), "--max-users", "10", *extra])
+        finally:
+            cli.uvn_status.run = real
+            ro = verify_ledger.READ_ONLY_PROCESS
+            verify_ledger.READ_ONLY_PROCESS = False      # one CLI run per process in prod; reset between tests
+        self.last_read_only = ro
+        return rc, out.getvalue(), gate
+
+    def test_apply_refuses_under_the_kill(self):
+        verify_ledger.connect(self.ledger).close()
+        before = self.rows()
+        rc, out, gate = self.run_cli("--mode", "apply")
+        self.assertEqual((rc, out.strip()), (0, "NO_REPLY"))
+        self.assertEqual(gate.calls, [])
+        self.assertEqual(self.rows(), before)
+
+    def test_a_dry_run_under_the_kill_runs_the_gate_dry_and_writes_nothing(self):
+        verify_ledger.connect(self.ledger).close()
+        before = self.rows()
+        self.assertTrue(before and not any(before.values()), before)        # every table exists and is empty
+        rc, out, gate = self.run_cli("--mode", "dry-run")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("KILL SWITCH PRESENT", out)
+        self.assertIn("no messages are sent and no verify-ledger entries are recorded", out)
+        self.assertEqual(sorted({str(p["user"]["id"]) for _, p in gate.calls}), ["1"], out)   # the one eligible paid user (4 has no open row)
+        # the runner's dry run is the gate's offline --validate (render only: no Intercom, no ledger) - never a send
+        self.assertTrue(all("--validate" in a and "--dry-run" not in a or "--dry-run" in a for a, _ in gate.calls))
+        self.assertFalse([a for a, _ in gate.calls if not ({"--validate", "--dry-run", "--check-recipient"} & set(a))])
+        self.assertEqual(self.rows(), before)
+
+    def test_a_missing_or_pre_migration_ledger_is_never_created_or_migrated_under_the_kill(self):
+        # QA #1564: verify_ledger.connect would create a missing file / ALTER an old one - under the kill it refuses
+        import sqlite3
+        Path(self.ledger).unlink(missing_ok=True)
+        rc, out, gate = self.run_cli("--mode", "dry-run")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("does not exist", out)
+        self.assertFalse(Path(self.ledger).exists())                               # never created
+        self.assertEqual(gate.calls, [])
+        db = sqlite3.connect(self.ledger)                                           # an OLD ledger: one table, few columns
+        db.execute("CREATE TABLE verify_messages (id INTEGER PRIMARY KEY, campaign TEXT)"); db.commit(); db.close()
+        before = sqlite3.connect(self.ledger).execute("SELECT sql FROM sqlite_master").fetchall()
+        rc, out, gate = self.run_cli("--mode", "dry-run")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("needs a migration", out)
+        self.assertEqual(sqlite3.connect(self.ledger).execute("SELECT sql FROM sqlite_master").fetchall(), before)
+
+    def test_a_ledger_missing_only_an_index_is_refused_untouched_under_the_kill(self):
+        # QA #1564 round 2 (reproduced: schema_version 8 -> 9): all columns present, verify_messages_msg dropped
+        import sqlite3
+        verify_ledger.connect(self.ledger).close()
+        db = sqlite3.connect(self.ledger); db.execute("DROP INDEX verify_messages_msg"); db.commit(); db.close()
+        snap = lambda: (sqlite3.connect(self.ledger).execute("PRAGMA schema_version").fetchone()[0],
+                        sqlite3.connect(self.ledger).execute("SELECT type, name, sql FROM sqlite_master ORDER BY name").fetchall(),
+                        Path(self.ledger).read_bytes())
+        before = snap()
+        rc, out, gate = self.run_cli("--mode", "dry-run")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("verify_messages_msg", out)
+        self.assertEqual(gate.calls, [])
+        self.assertEqual(snap(), before)                                            # schema AND bytes unchanged
+        with self.assertRaises(verify_ledger.ReadOnlyLedgerError):
+            verify_ledger.connect_ro(self.ledger)
+
+    def test_a_schema_change_after_the_precheck_is_still_never_written_under_the_kill(self):
+        # QA #1564 round 3: the index disappears AFTER the precheck (another process) - the runner's own opens must
+        # not recreate it: every open in the process is read-only once the kill is seen
+        import sqlite3
+        from unittest import mock
+        verify_ledger.connect(self.ledger).close()
+        real_run = uvn_status.run
+        def drop_then_run(**kw):
+            db = sqlite3.connect(self.ledger); db.execute("DROP INDEX verify_messages_msg"); db.commit(); db.close()
+            return real_run(**kw)
+        with mock.patch.object(uvn_status, "run", drop_then_run):
+            rc, out, gate = self.run_cli("--mode", "dry-run")
+        self.assertTrue(self.last_read_only)
+        self.assertNotEqual(rc, 0, out)
+        self.assertEqual(gate.calls, [])
+        names = {n for (n,) in sqlite3.connect(self.ledger).execute("SELECT name FROM sqlite_master WHERE type='index'")}
+        self.assertNotIn("verify_messages_msg", names)                              # never recreated
+
+    def test_a_path_with_a_question_mark_opens_THAT_file_read_only(self):
+        # QA #1564: 'ledger.db?tag' must never become file:ledger.db (writable) - write attempts fail, both files unchanged
+        import sqlite3
+        d = Path(self.ledger).parent
+        plain, odd = str(d / "l2.db"), str(d / "l2.db?tag")
+        for f in (plain, odd):
+            verify_ledger.connect(f).close()
+        before = {f: Path(f).read_bytes() for f in (plain, odd)}
+        db = verify_ledger.connect_ro(odd)
+        with self.assertRaises(sqlite3.OperationalError):
+            db.execute("INSERT INTO verify_messages (campaign, day, status) VALUES ('x', '2026-10-31', 'sent')")
+        db.close()
+        self.assertEqual({f: Path(f).read_bytes() for f in (plain, odd)}, before)
+
+    def test_the_ledger_cli_readonly_never_writes(self):
+        import sqlite3
+        Path(self.ledger).unlink(missing_ok=True)
+        p = subprocess.run([sys.executable, str(ROOT / "scripts" / "credit_review" / "verify_ledger.py"), "--db", self.ledger,
+                            "--readonly", "pending", "--campaign", "uvn-status", "--user-key", "a@x.com", "--day", "2026-10-31",
+                            "--request-ids", "r1"], capture_output=True, text=True, timeout=60, check=False)
+        self.assertEqual(p.returncode, 0, p.stderr)                                  # a missing ledger reads as empty
+        self.assertFalse(Path(self.ledger).exists())                                 # ... and is never created
+        import sqlite3
+        db = sqlite3.connect(self.ledger)                                            # an OLD ledger is refused, untouched
+        db.execute("CREATE TABLE verify_messages (id INTEGER PRIMARY KEY, campaign TEXT)"); db.commit(); db.close()
+        before = sqlite3.connect(self.ledger).execute("SELECT sql FROM sqlite_master").fetchall()
+        p = subprocess.run([sys.executable, str(ROOT / "scripts" / "credit_review" / "verify_ledger.py"), "--db", self.ledger,
+                            "--readonly", "pending", "--campaign", "uvn-status", "--user-key", "a@x.com", "--day", "2026-10-31",
+                            "--request-ids", "r1"], capture_output=True, text=True, timeout=60, check=False)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertEqual(sqlite3.connect(self.ledger).execute("SELECT sql FROM sqlite_master").fetchall(), before)
+        Path(self.ledger).unlink()
+        verify_ledger.connect(self.ledger).close()
+        p = subprocess.run([sys.executable, str(ROOT / "scripts" / "credit_review" / "verify_ledger.py"), "--db", self.ledger,
+                            "--readonly", "pending", "--campaign", "uvn-status", "--user-key", "a@x.com", "--day", "2026-10-31",
+                            "--request-ids", "r1"], capture_output=True, text=True, timeout=60, check=False)
+        self.assertEqual(p.returncode, 0, p.stderr)                                  # a current ledger reads fine
+
+    def test_check_recipients_under_the_kill_writes_nothing(self):
+        verify_ledger.connect(self.ledger).close()
+        before = self.rows()
+        gate = FakeGate(out="RECIPIENT OK uvn-status initial copy=uvnstatus credits=2")
+        rc, out, gate = self.run_cli("--mode", "dry-run", "--check-recipients", gate=gate)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("KILL SWITCH PRESENT", out)
+        self.assertTrue(gate.calls, out)
+        self.assertTrue(all("--check-recipient" in a for a, _ in gate.calls), [a for a, _ in gate.calls])
+        self.assertEqual(self.rows(), before)
 
 
 if __name__ == "__main__":

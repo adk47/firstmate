@@ -859,6 +859,9 @@ no_removal_language() {
 # note: no date, no removal language, no follow-ups, and its ledger row is never removal-due.
 # decider_approved <request_id> <evidence_kind>: a server-confirmed decider approval in the ledger.
 decider_approved() {
+  # the prod ledger file always carries the verify tables (the gate creates them on first use); a read-only check
+  # (QA #1564: mode=ro, never migrated) needs that realistic file, not one holding only the decider's tables
+  python3 "$HYDRA_REPO/scripts/credit_review/verify_ledger.py" --db "$INTERCOM_VERIFY_TEST_LEDGER" migrate >/dev/null
   python3 - "$INTERCOM_VERIFY_TEST_LEDGER" "$1" "$2" <<'PY'
 import sqlite3, sys
 db = sqlite3.connect(sys.argv[1])
@@ -2635,6 +2638,7 @@ Caroline, Muso Support" ]
   run -0 "$GATE" send --campaign claim-status --credits-file "$TEST_TMPDIR/s.json" --approved-by U7RP6HKUZ
   run -0 "$GATE" tag-proof --message-id 1001 --dry-run
   [ "$output" = "DRY-RUN tag claim-proof conversation=777 attachments=1" ]
+  [ -z "$(sql "select conversation_id from verify_messages where message_id='1001' and conversation_id is not null and conversation_id != ''")" ]   # QA #1564: a dry run caches nothing
 }
 
 @test "claim-proof-ask: a malformed-success conversation read is a failed reply check, never 'no reply' (QA on #1330)" {
