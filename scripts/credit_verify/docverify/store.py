@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS dv_llm_calls (
   latency_ms INTEGER
 );
 CREATE TABLE IF NOT EXISTS dv_state (k TEXT PRIMARY KEY, v TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS dv_blobs (sha256 TEXT PRIMARY KEY, at TEXT NOT NULL, source TEXT NOT NULL);
 -- The model's answer per exact prompt (extract.py): the same document text + facts asked again within the
 -- TTL reuses the answer instead of a second call. Untruncated; only answers that validated are stored.
 CREATE TABLE IF NOT EXISTS dv_extract_cache (prompt_sha256 TEXT PRIMARY KEY, at REAL NOT NULL, model TEXT NOT NULL,
@@ -229,10 +230,22 @@ class DocVerifyStore:
             "coalesce(intake_id, proof_id) NOT IN (SELECT coalesce(intake_id, proof_id) FROM dv_outcomes WHERE version=?)",
             (VERSION, VERSION)).fetchone()[0]
 
+    # -- blobs (Fable 10-31: a re-read reads stored bytes; a deleted blob never implies a re-fetch) ---------
+    def register_blob(self, sha: str, source: str) -> None:
+        with self.lock, self.db:
+            self.db.execute("INSERT OR IGNORE INTO dv_blobs (sha256, at, source) VALUES (?,?,?)", (sha, utcnow(), source))
+
+    def blob_registered(self, sha: str) -> bool:
+        return bool(self.db.execute("SELECT 1 FROM dv_blobs WHERE sha256=?", (sha,)).fetchone())
+
     # -- state ---------------------------------------------------------------
     def get_state(self, k: str) -> str | None:
         row = self.db.execute("SELECT v FROM dv_state WHERE k=?", (k,)).fetchone()
         return row[0] if row else None
+
+    def set_state(self, k: str, v: str) -> None:
+        with self.lock, self.db:
+            self.db.execute("INSERT OR REPLACE INTO dv_state (k, v) VALUES (?, ?)", (k, v))
 
     def set_state_once(self, k: str, v: str) -> str:
         """Set `k` only if it is unset; return the value that stands."""

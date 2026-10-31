@@ -559,6 +559,33 @@ class GmailIntakeTest(unittest.TestCase):
         for t in ("forensics", "verdicts", "fingerprints"):
             self.assertEqual(self.store.db.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0], 0, t)
 
+    def test_the_filer_stores_the_bytes_it_holds_so_the_reader_never_pulls_gmail(self) -> None:
+        # Fable 10-31: the blob is stored at filing time (and on a duplicate re-scan); a dry run stores nothing;
+        # a failing blob store never blocks the filing (counted; blob-backfill restores the bytes).
+        import hashlib
+        kept: dict[str, bytes] = {}
+        sha = hashlib.sha256(b"%PDF-1.4 emailed split sheet").hexdigest()
+        run = lambda apply, blobs: self.g.run(self.store, message_ids=["m1"], fetch=self._fetch,  # noqa: E731
+                                              lookup=lambda a: self.accounts.get(a, []),
+                                              open_rows=lambda uids: {u: self.rows.get(u, []) for u in uids},
+                                              apply=apply, blobs=blobs)
+        self.assertEqual(run(False, kept.__setitem__)["blobs_stored"], 0)
+        self.assertEqual(kept, {})
+        st = run(True, kept.__setitem__)
+        self.assertEqual((st["files_filed"], st["blobs_stored"], list(kept)), (1, 1, [sha]))
+        kept.clear()
+        self.assertEqual(run(True, kept.__setitem__)["blobs_stored"], 1)            # duplicate scan: stored too
+        self.assertEqual(list(kept), [sha])
+        kept.clear()
+        self.assertEqual(run(False, kept.__setitem__)["blobs_stored"], 0)           # a dry re-scan stores nothing
+        self.assertEqual(kept, {})
+
+        def broken(s, d):
+            raise OSError("disk full")
+        self.store.db.execute("DELETE FROM proof_intake")
+        st = run(True, broken)
+        self.assertEqual((st["files_filed"], st["blob_errors"], len(self._rows())), (1, 1, 1))
+
     def test_spoofable_unconfirmed_unknown_and_unreadable_messages_are_counted_never_filed(self) -> None:
         stats = self._run(["m2", "m3", "m9"])
         self.assertEqual(self._rows(), [])

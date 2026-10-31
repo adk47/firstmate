@@ -159,7 +159,7 @@ class Deps:
     shadow_store: Any = None
     # Muso credits graph name index for the people check (intel.trino_name_index); None = skipped.
     people_graph: intel.NameIndex | None = None
-    gmail_raw: Any = None          # message id -> RFC 822 bytes (gmail_intake.gog_raw) for email filings
+    blobs: Any = None              # docverify/blobs.BlobStore: filed bytes by sha256 (Fable 10-31; never Gmail)
 
 
 @dataclass
@@ -173,11 +173,12 @@ class Stats:
     outcomes: dict[str, int] = field(default_factory=lambda: defaultdict(int))
     errors: list[str] = field(default_factory=list)
     provider_down: str | None = None          # the account-wide refusal that stopped this run (a FAILED run)
+    blob_owed: int = 0                        # filings whose bytes only blob-backfill restores (never read here)
 
     def as_dict(self) -> dict[str, Any]:
         return {"run_id": self.run_id, "documents": self.documents, "pairs": self.pairs, "retry": self.retry,
                 "superseded": self.superseded, "intake": self.intake,
-                "outcomes": dict(self.outcomes), "errors": self.errors[:10],
+                "outcomes": dict(self.outcomes), "errors": self.errors[:10], "blob_owed": self.blob_owed,
                 **({"provider_down": self.provider_down} if self.provider_down else {})}
 
 
@@ -198,7 +199,12 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
     try:
         if intake is not None:
             path, ref, errs = intake_read.locate_intake(intake, tmp, fetch=deps.fetch, dl=deps.dl,
-                                                        cache_root=deps.cache_root, gmail_raw=deps.gmail_raw)
+                                                        cache_root=deps.cache_root, blobs=deps.blobs,
+                                                        register=store.register_blob,
+                                                        registered=store.blob_registered)
+            if intake_read.BLOB_OWED in errs:
+                stats.blob_owed += 1          # selection skips these; reached only on a race: no step, no outcome
+                return rows
         else:
             path, ref, errs = locate(source_refs(proof_db, proof_id), proof_id, tmp, fetch=deps.fetch, dl=deps.dl,
                                      cache_root=deps.cache_root)
@@ -433,11 +439,15 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
             log(f"document {proof_id[:12]}: {len(keys)} claims")
         if intake_from_store:
             room = max(0, max_docs - stats.documents)
-            docs = intake_read.intake_docs(proof_db, store.intake_settled, room, keep=keep, paying=paying)
+            def readable(d: intake_read.IntakeDoc) -> bool:
+                return not intake_read.needs_backfill(d, deps.blobs, store.blob_registered)
+            docs = intake_read.intake_docs(proof_db, store.intake_settled, room, keep=keep, paying=paying,
+                                           readable=readable)
             if reread_carried and len(docs) < room:             # carried re-reads only fill the idle room
                 taken = {d.intake_id for d in docs}
                 docs += [d for d in intake_read.intake_docs(proof_db, lambda iid, ids: not store.intake_carried_keys(iid),
-                                                            room - len(docs) + len(taken), keep=keep, paying=paying)
+                                                            room - len(docs) + len(taken), keep=keep, paying=paying,
+                                                            readable=readable)
                          if d.intake_id not in taken][:room - len(docs)]
             for doc in docs:
                 stats.documents += 1

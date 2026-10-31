@@ -15,8 +15,9 @@ verdict row). Same rules as the E-IN Maildir reader (`email_in.py`), so email ha
      10). Oversized ones are COUNTED (`files_too_large`), never silently skipped.
 
 Messages are read with `gog gmail get <id> --format raw` (read-only), at most one per second.
-No bytes are kept: `file_path` stays NULL and `conversation_id` is `gmail:<message id>`; the
-reader re-reads the message and picks the attachment by sha256. Dry run unless apply=True.
+`file_path` stays NULL and `conversation_id` is `gmail:<message id>`. With `blobs` (an applied run), the
+attachment's bytes are stored by sha256 at filing time (docverify/blobs.py), so the reader never re-pulls
+the message (Fable 10-31: the reader's re-pulls held support@ at 429 for 9 h). Dry run unless apply=True.
 """
 
 from __future__ import annotations
@@ -115,11 +116,25 @@ def message_attachment(raw: bytes, sha: str) -> tuple[str, str, bytes] | None:
 
 def run(store: ProofStore, *, message_ids: list[str], fetch: RawFetch, lookup: Lookup, open_rows: OpenRows,
         apply: bool = False, authserv: str = AUTHSERV, filed_by: str = "credit-proof.py file --source gmail",
-        log: Callable[[str], None] = lambda m: None) -> dict[str, Any]:
+        log: Callable[[str], None] = lambda m: None,
+        blobs: Callable[[str, bytes], Any] | None = None) -> dict[str, Any]:
     stats: dict[str, Any] = {"messages": len(message_ids), "filed_messages": [], "duplicate_messages": [],
                              "no_document_messages": [], "refused": {}, "fetch_errors": [],
                              "files_filed": 0, "files_duplicate": 0, "files_too_large": 0,
-                             "candidates_refreshed": 0, "users": 0, "with_candidate_requests": 0}
+                             "candidates_refreshed": 0, "users": 0, "with_candidate_requests": 0,
+                             "blobs_stored": 0, "blob_errors": 0}
+
+    def keep_bytes(sha: str, data: bytes) -> None:
+        # The bytes we already hold, stored once by sha256; a failure never blocks the filing (the bytes are
+        # then restored by the paced blob-backfill, never by the reader).
+        if not (apply and blobs is not None):
+            return
+        try:
+            blobs(sha, data)
+            stats["blobs_stored"] += 1
+        except Exception as exc:  # noqa: BLE001 - counted and logged
+            stats["blob_errors"] += 1
+            log(f"blob {sha[:12]}: {type(exc).__name__}")
     matched: list[tuple[str, EmailMessage, int, str]] = []
     for mid in dict.fromkeys(str(m).strip() for m in message_ids if str(m).strip()):
         try:
@@ -159,6 +174,7 @@ def run(store: ProofStore, *, message_ids: list[str], fetch: RawFetch, lookup: L
                 continue
             seen.add((uid, sha))
             if store.already_filed(uid, sha):
+                keep_bytes(sha, data)
                 if (store.add_candidates(uid, sha, cands) if apply else store.missing_candidates(uid, sha, cands)):
                     stats["candidates_refreshed"] += 1
                 stats["files_duplicate"] += 1
@@ -170,6 +186,7 @@ def run(store: ProofStore, *, message_ids: list[str], fetch: RawFetch, lookup: L
                                     matched_by="authenticated_email", contact_h=user_hash(uid), mime=ctype,
                                     nbytes=len(data), detail={"provenance": PREFIX + mid, "name": name[-80:],
                                                               "sender_auth": how})
+                keep_bytes(sha, data)
             stats["files_filed"] += 1
             filed_here += 1
         stats["filed_messages" if filed_here else "duplicate_messages"].append(mid)

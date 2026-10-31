@@ -46,6 +46,12 @@ INTAKE_KILL = os.environ.get("CREDIT_DOC_INTAKE_KILL", "/etc/hydra/credit-doc-in
 UNRESOLVED = os.environ.get("CREDIT_DOC_INTAKE_UNRESOLVED", "/var/lib/hydra-credit-verify/intake-unresolved.jsonl")
 
 
+
+def _blob_put():
+    """Filed bytes stored by sha256 at filing time (docverify/blobs.py; Fable 10-31)."""
+    from credit_verify.docverify.blobs import BlobStore
+    return BlobStore().put
+
 def log(msg: str) -> None:
     print(f"[credit-proof] {msg}", file=sys.stderr)
 
@@ -105,7 +111,8 @@ def cmd_file_gmail(args: argparse.Namespace) -> int:
     ids = ids[: args.limit or None]
     stats = gmail_intake.run(ProofStore.for_run(args.store, args.apply), message_ids=ids, fetch=gmail_intake.gog_raw,
                              lookup=email_in.admin_user_lookup(admin_api.AdminClient()),
-                             open_rows=intake.open_rows_trino, apply=args.apply, log=log)
+                             open_rows=intake.open_rows_trino, apply=args.apply, log=log,
+                             blobs=_blob_put())
     stats["not_message_ids"] = bad
     log("file gmail " + json.dumps({k: (len(v) if isinstance(v, list) else v) for k, v in stats.items()}))
     if args.out:
@@ -201,7 +208,7 @@ def cmd_file_recent(args: argparse.Namespace) -> int:
                                                 lookup=intake.professional_lookup)), UNRESOLVED, args.apply),
             file_messages=lambda ids: gmail_intake.run(
                 store, message_ids=ids, fetch=gmail_intake.gog_raw, lookup=admin_lookup,
-                open_rows=intake.open_rows_trino, apply=args.apply, log=log),
+                open_rows=intake.open_rows_trino, apply=args.apply, log=log, blobs=_blob_put()),
             log=log)
     except recent.Busy as exc:
         log(str(exc))

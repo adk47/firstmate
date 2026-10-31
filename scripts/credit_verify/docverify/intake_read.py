@@ -48,7 +48,8 @@ class IntakeDoc:
 
 def intake_docs(proof_db: sqlite3.Connection, settled: Callable[[str, list[str]], bool],
                 limit: int, *, keep: Callable[[str], bool] | None = None,
-                paying: set[int] | frozenset[int] | None = None) -> list[IntakeDoc]:
+                paying: set[int] | frozenset[int] | None = None,
+                readable: Callable[[IntakeDoc], bool] | None = None) -> list[IntakeDoc]:
     """Filed credit documents with candidate requests that are not settled yet (some claim
     unfinished, or the candidates changed): PAID accounts first when `paying` is given (proof-loop
     lead 2026-10-28), then oldest first. `keep(sha256)` restricts a parallel worker to its own
@@ -73,7 +74,10 @@ def intake_docs(proof_db: sqlite3.Connection, settled: Callable[[str, list[str]]
         except ValueError:
             ids = []
         if ids and not settled(r[0], ids):
-            out.append(IntakeDoc(r[0], int(r[1]), r[2], str(r[3]), r[4], r[5] or "", ids, r[7] or "", r[8] or ""))
+            doc = IntakeDoc(r[0], int(r[1]), r[2], str(r[3]), r[4], r[5] or "", ids, r[7] or "", r[8] or "")
+            if readable is not None and not readable(doc):
+                continue                  # bytes owed by blob-backfill: never selected, never a retry, no network
+            out.append(doc)
     return out
 
 
@@ -108,36 +112,52 @@ def _sha(path: str) -> str:
     return h.hexdigest()
 
 
+BLOB_OWED = "bytes owed by blob-backfill"
+
+
+def needs_backfill(doc: IntakeDoc, blobs: Any, registered: Callable[[str], bool]) -> bool:
+    """True when the reader must NOT read this filing now (Fable 10-31): a support@ email filing whose bytes are
+    not stored (the reader never pulls Gmail), or any filing whose stored blob was deleted (a cache delete never
+    implies a re-fetch). Either is restored only by `credit-doc-verify.py blob-backfill`."""
+    if blobs is None:
+        return doc.conversation_id.startswith("gmail:")
+    if blobs.has(doc.sha):
+        return False
+    return doc.conversation_id.startswith("gmail:") or registered(doc.sha)
+
+
 def locate_intake(doc: IntakeDoc, tmp: str, *, fetch: Callable[[str], Any] | None,
                   dl: Callable[[str, str], int] | None, cache_root: str,
-                  gmail_raw: Callable[[str], bytes] | None = None) -> tuple[str | None, str | None, list[str]]:
-    """(path, source_ref, errors): the filer's cache copy when its sha256 still matches,
-    else the conversation attachment whose bytes hash to the filed sha256. A `gmail:<id>`
-    filing (support@ email) is re-read from Gmail and its attachment picked by sha256."""
+                  blobs: Any = None, register: Callable[[str, str], None] | None = None,
+                  registered: Callable[[str], bool] | None = None) -> tuple[str | None, str | None, list[str]]:
+    """(path, source_ref, errors): the stored blob (docverify/blobs.py) when its bytes still hash to the filed
+    sha256; else, for an Intercom filing never stored before, the filer's cache copy or the conversation
+    attachment, which is then stored once. A `gmail:<id>` filing (support@ email) is read ONLY from its stored
+    blob: the reader never calls Gmail (Fable 10-31). A blob that was stored and is gone is never re-fetched."""
     from credit_verify.proof.stage2 import customer_attachments
     errors: list[str] = []
-    if doc.conversation_id.startswith("gmail:"):
-        from credit_verify.proof.gmail_intake import message_attachment
-        mid = doc.conversation_id.split(":", 1)[1]
-        if gmail_raw is None:
-            return None, None, ["no Gmail reader configured"]
-        try:
-            hit = message_attachment(gmail_raw(mid), doc.sha)
-        except Exception as exc:  # noqa: BLE001 - recorded; the document is retried
-            return None, None, [f"gmail {mid[-6:]}: {type(exc).__name__}Error"]
-        if hit is None:
-            return None, None, ["no attachment in the message has the filed sha256"]
-        name, _ctype, data = hit
-        dest = os.path.join(tmp, re.sub(r"[^A-Za-z0-9._-]", "_", name)[-60:] or "attachment")
-        with open(dest, "wb") as fh:
-            fh.write(data)
-        return dest, doc.conversation_id, errors
+    if blobs is not None:
+        p = blobs.get(doc.sha)
+        if p:
+            if register is not None:
+                register(doc.sha, "read")
+            return p, doc.conversation_id if doc.conversation_id.startswith("gmail:") else f"blob:{doc.sha[:16]}", errors
+        if blobs.has(doc.sha):
+            # QA #1563: a stored blob that no longer hashes is corrupt. It is moved aside and owed (never read, never
+            # a reason to fall through to a network fetch); blob-backfill restores it.
+            blobs.quarantine(doc.sha)
+            if register is not None:
+                register(doc.sha, "corrupt")
+            return None, None, [BLOB_OWED]
+    if needs_backfill(doc, blobs, registered or (lambda s: False)):
+        return None, None, [BLOB_OWED]
     root = os.path.realpath(cache_root)
     if doc.file_path:
         p = os.path.realpath(doc.file_path)
         if p.startswith(root + os.sep) and os.path.isfile(p):
             try:
                 if _sha(p) == doc.sha:
+                    _keep(blobs, register, doc.sha, p, "intercom-cache")
                     return p, os.path.relpath(p, root), errors
             except OSError as exc:
                 errors.append(f"cache: {type(exc).__name__}")
@@ -154,11 +174,25 @@ def locate_intake(doc: IntakeDoc, tmp: str, *, fetch: Callable[[str], Any] | Non
         try:
             dl(str(a["url"]), dest)
             if _sha(dest) == doc.sha:
+                _keep(blobs, register, doc.sha, dest, "intercom")
                 return dest, f"intercom:{doc.conversation_id}:{i}", errors
             os.remove(dest)
         except Exception as exc:  # noqa: BLE001
             errors.append(f"attachment …{doc.conversation_id[-5:]}#{i}: {type(exc).__name__}Error")
     return None, None, errors + ["no attachment in the conversation has the filed sha256"]
+
+
+def _keep(blobs: Any, register: Callable[[str, str], None] | None, sha: str, path: str, source: str) -> None:
+    """Store bytes we just located once, so no later read downloads them again; a failure only costs a re-read."""
+    if blobs is None:
+        return
+    try:
+        with open(path, "rb") as fh:
+            blobs.put(sha, fh.read())
+        if register is not None:
+            register(sha, source)
+    except (OSError, ValueError):
+        pass
 
 
 def shadow_h3(shadow: ShadowProofStore, path: str, doc: IntakeDoc, requests: list[Any],

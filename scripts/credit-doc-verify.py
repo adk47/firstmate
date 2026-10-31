@@ -49,6 +49,7 @@ def real_deps(store, *, intercom_fetch: bool = True, strict_pacing: bool = False
     from credit_verify.docverify.runner import Deps
     from credit_verify.proof import intercom, sandbox, stage2
     from credit_verify.docverify.pace import Pacer
+    from credit_verify.docverify.blobs import BlobStore
     admin = admin_api.AdminClient()
     tok = intercom.intercom_token() if intercom_fetch else None
     if intercom_fetch and not tok:
@@ -63,7 +64,7 @@ def real_deps(store, *, intercom_fetch: bool = True, strict_pacing: bool = False
                     tid, ad.paced(lambda t: admin_api.track_raw_credits(admin, t))),
                 requests=lambda ids: stage2.requests(ids), fetch=fetch, dl=stage2.download,
                 # The local name index (built from one Trino export per 6 h), never a scan per document.
-                people_graph=name_index.lazy(log=log), gmail_raw=_gmail_raw())
+                people_graph=name_index.lazy(log=log), blobs=BlobStore())
 
 
 def paying_users() -> frozenset[int] | None:
@@ -111,9 +112,42 @@ def run_workers(args: argparse.Namespace, popen=None) -> int:
     return 1 if bad else 0
 
 
-def _gmail_raw():
-    from credit_verify.proof.gmail_intake import gog_raw
-    return gog_raw
+def cmd_blob_backfill(args: argparse.Namespace) -> int:
+    """Restore stored bytes for support@ email filings: the ONLY doc-verify path that calls Gmail (Fable 10-31)."""
+    import sqlite3
+    import time
+    from datetime import datetime, timezone
+    from credit_verify.docverify import backfill
+    from credit_verify.docverify.blobs import BlobStore
+    from credit_verify.docverify.store import DocVerifyStore
+    from credit_verify.proof import gmail_intake
+    if Path(KILL_SWITCH).exists():
+        log(f"kill switch present at {KILL_SWITCH}; no blob-backfill")
+        print("NO_REPLY")
+        return 0
+    if not hasattr(gmail_intake, "SUPPORT_GMAIL_LOCK"):
+        # rule (2): every support@ Gmail call takes the shared lock (#1558); code without it never fetches
+        log("blob-backfill refused: gmail_intake has no shared support@ Gmail lock on this deploy (#1558)")
+        return 2
+    store = DocVerifyStore(args.store)
+    proof_db = sqlite3.connect(f"file:{args.proof_store}?mode=ro", uri=True)
+    if args.intercom_max > 0:
+        # QA #1563: registered Intercom blobs that are gone, restored from the filer's cache copy or ONE Intercom
+        # fetch each (paced 1/s host-wide, the reader's pacer) - never by the reader itself
+        from credit_verify.docverify.pace import Pacer
+        from credit_verify.docverify.runner import CACHE_ROOT
+        from credit_verify.proof import intercom, stage2
+        tok = intercom.intercom_token()
+        fetch = Pacer("intercom", 1.0, log=log).paced(intercom.make_fetch(tok)) if tok else None
+        ist = backfill.restore_intercom(proof_db, store, BlobStore(), fetch=fetch, dl=stage2.download,
+                                        cache_root=CACHE_ROOT, max_docs=args.intercom_max, log=log)
+        log("blob-backfill intercom " + json.dumps(ist))
+    st = backfill.backfill(proof_db, store, BlobStore(), fetch_raw=gmail_intake.gog_raw,
+                           max_messages=args.max_messages, min_interval=60.0 / max(1, args.per_min),
+                           now=lambda: datetime.now(timezone.utc), sleep=time.sleep, log=log)
+    log("blob-backfill " + json.dumps(st))
+    print("NO_REPLY")
+    return EX_PROVIDER_DOWN if st["stopped"] and ("quota" in st["stopped"] or "backoff" in st["stopped"]) else 0
 
 
 EX_PROVIDER_DOWN = 75        # EX_TEMPFAIL: the model provider refused (credit / auth / rate limit / cap / no key)
@@ -526,6 +560,13 @@ def parser() -> argparse.ArgumentParser:
     pt.add_argument("--batch", type=int, required=True)
     pt.add_argument("--out-dir", required=True)
     pt.set_defaults(fn=cmd_tray)
+    pb = sub.add_parser("blob-backfill", help="restore stored bytes of support@ email filings (paced, budgeted, "
+                                              "shared Gmail lock, stops on quota): the reader never calls Gmail")
+    pb.add_argument("--max-messages", type=int, default=30)
+    pb.add_argument("--per-min", type=int, default=6, help="Gmail message fetches per minute (default 6)")
+    pb.add_argument("--intercom-max", type=int, default=30,
+                    help="registered Intercom blobs that are gone, restored per run (paced 1/s; 0 = skip)")
+    pb.set_defaults(fn=cmd_blob_backfill)
     pm = sub.add_parser("summary", help="outcome counts")
     pm.set_defaults(fn=cmd_summary)
     return p

@@ -85,3 +85,21 @@ Consumers read the **latest** row per (proof, request, role, version) (`DocVerif
 The first `run` records the cutoff (`dv_state.since` = now). From then on, every document whose H3 verdict row is written after the cutoff is verified once per `VERSION` (`dv-2` since 2026-10-28).
 
 **A rule change is a `VERSION` bump** (proof-loop lead 075). Nobody writes outcome rows by hand. `CARRY` in `docverify/__init__.py` names the previous version and the outcomes that send a document back to the reader. On the first open after the deploy, `store.carry_forward` copies, once, the rows of every document whose standing outcomes include none of those (marked `detail.carried_from`); the deployed reader re-reads the rest. `dv-1 → dv-2` (the #1452/#1457 sender rules) re-reads the documents standing `forged` or `verified`, because those rules can only remove a `forged` or block a `verified`. A rule that can change any outcome sets the set to `None`, and nothing carries. Until a document is re-read its old rows stand in no tray; the tray footer counts them (`store.awaiting_reread`). Use `--since` to widen a single run. The admin client needs the gateway env (`MUSO_API_URL` …, in `/etc/openclaw/main.env`), which the cron inherits.
+
+## Filed bytes: stored once, never re-downloaded (Fable 10-31)
+
+On 10-30 the carried re-read loop pulled 4 support@ email filings from Gmail **2,019 times in 8 h**, then kept
+retrying through the quota refusals, holding support@ at 429 for ~9 h. Rules since then (`docverify/blobs.py`):
+
+1. **The reader never calls Gmail.**
+   - `gmail_intake` stores each filed attachment's bytes by sha256 at filing time (`/var/lib/hydra-credit-verify/blobs/<sha[:2]>/<sha>`, 0600/0700).
+   - A re-read reads that blob, re-hashed on every read.
+   - A Gmail filing without a blob is not selected: no step, no retry, no network.
+2. **`credit-doc-verify.py blob-backfill` is the only Gmail path.**
+   - One fetch per message, paced (`--per-min`, default 6) and budgeted (`--max-messages`).
+   - It goes through `gmail_intake.gog_raw`, which holds the shared support@ lock (#1558); the command refuses to run on code without that lock.
+   - The first quota refusal stops the run and records `gmail_backoff_until` from Retry-After (15 min without one). Every run refuses until then (exit 75).
+3. **A cache delete never implies a re-fetch.**
+   - Once a blob is registered (`dv_blobs`) and later goes missing, the reader treats it as owed by blob-backfill and never downloads it again, from Gmail or Intercom.
+   - An Intercom filing is fetched at most once, then stored. A registered Intercom blob that goes missing is restored by `blob-backfill` (`--intercom-max`, filer cache copy first, else one Intercom fetch paced 1/s host-wide).
+   - A blob that no longer hashes is moved aside (`<sha>.corrupt`) and is owed the same way. It is never read, and never a reason to fetch.

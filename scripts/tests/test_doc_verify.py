@@ -9,6 +9,7 @@ admin API are all faked.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -1621,6 +1622,121 @@ class IntakeReq:
         self.artists, self.release_date = ["Small Act"], None
 
 
+class BlobBackfillTests(unittest.TestCase):
+    """Fable 10-31: blob-backfill is the only Gmail path - paced, budgeted, stopped (with a backoff) by quota."""
+
+    def setUp(self):
+        from email.message import EmailMessage
+        from credit_verify.docverify.blobs import BlobStore
+        self.td = tempfile.TemporaryDirectory()
+        self.store = DocVerifyStore(os.path.join(self.td.name, "dv.sqlite"))
+        self.blobs = BlobStore(os.path.join(self.td.name, "blobs"))
+        self.proof_path = os.path.join(self.td.name, "proof.sqlite")
+        ps = ProofStore(self.proof_path)
+        self.raw = {}
+        for i in range(4):
+            m = EmailMessage()
+            m["From"] = "ann@example.com"
+            m.set_content("proof")
+            datas = [f"doc {i} a".encode(), f"doc {i} b".encode()]
+            for j, data in enumerate(datas):
+                m.add_attachment(data, maintype="application", subtype="pdf", filename=f"d{j}.pdf")
+                ps.file_document(file_sha256=hashlib.sha256(data).hexdigest(), user_id=40 + i,
+                                 conversation_id=f"gmail:abc{i}", candidate_request_ids=[RID],
+                                 received_at=f"2026-10-2{i}T20:00:00Z", matched_by="authenticated_email")
+            self.raw[f"abc{i}"] = m.as_bytes()
+        ps.close()
+        self.proof_db = sqlite3.connect(self.proof_path)
+        self.now = datetime(2026, 10, 31, 6, tzinfo=timezone.utc)
+        self.sleeps, self.asked = [], []
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def _bf(self, fetch=None, max_messages=10):
+        from credit_verify.docverify import backfill
+        return backfill.backfill(self.proof_db, self.store, self.blobs,
+                                 fetch_raw=fetch or (lambda mid: self.asked.append(mid) or self.raw[mid]),
+                                 max_messages=max_messages, min_interval=10, now=lambda: self.now,
+                                 sleep=self.sleeps.append)
+
+    def test_one_fetch_per_message_fills_every_filed_attachment_within_budget_and_pace(self):
+        st = self._bf(max_messages=3)
+        self.assertEqual((self.asked, st["blobs_stored"]), (["abc0", "abc1", "abc2"], 6))
+        self.assertEqual(self.sleeps, [10, 10])                                   # paced between fetches
+        st = self._bf()
+        self.assertEqual((self.asked[3:], st["owed_messages"]), (["abc3"], 1))   # stored ones never fetched again
+
+    def test_a_quota_refusal_stops_the_run_and_backs_off_by_retry_after(self):
+        from credit_verify.docverify import backfill
+
+        def refused(mid):
+            self.asked.append(mid)
+            raise RuntimeError("gog rc=1: googleapi: Error 429: rateLimitExceeded, Retry-After: 1200")
+        st = self._bf(fetch=refused)
+        self.assertEqual(self.asked, ["abc0"])                                    # stopped at once, no retry
+        self.assertEqual(self.store.get_state(backfill.BACKOFF_KEY), "2026-10-31T06:20:00Z")
+        self.assertIn("quota", st["stopped"])
+        self.now = datetime(2026, 10, 31, 6, 19, tzinfo=timezone.utc)
+        st = self._bf()
+        self.assertEqual((self.asked, st["fetched"]), (["abc0"], 0))             # backoff still in force
+        self.now = datetime(2026, 10, 31, 6, 21, tzinfo=timezone.utc)
+        self.assertEqual(self._bf()["blobs_stored"], 8)
+
+    def test_googles_retry_after_timestamp_is_honoured_not_read_as_seconds(self):
+        # Google's 429: "Retry after 2026-10-31T07:05:00.123Z" (c3 #1558). '2026' must never be 2,026 s.
+        from credit_verify.docverify import backfill
+
+        def refused(mid):
+            raise RuntimeError("googleapi: Error 429: User-rate limit exceeded.  Retry after 2026-10-31T07:05:00.123Z, "
+                               "rateLimitExceeded")
+        self._bf(fetch=refused)
+        self.assertEqual(self.store.get_state(backfill.BACKOFF_KEY), "2026-10-31T07:05:01Z")
+        self.assertEqual(backfill.retry_after_s("Retry after 2026-10-31T05:00:00Z", self.now), 60)   # past: 60 s
+        self.assertEqual(backfill.retry_after_s("Retry after 2026-10-31T08:00:00+01:00", self.now), 3601)
+
+    def test_a_quota_refusal_without_retry_after_backs_off_15_minutes(self):
+        from credit_verify.docverify import backfill
+
+        def refused(mid):
+            raise RuntimeError("quota exceeded for quota metric 'Queries'")
+        self._bf(fetch=refused)
+        self.assertEqual(self.store.get_state(backfill.BACKOFF_KEY), "2026-10-31T06:15:00Z")
+
+    def test_other_errors_stop_after_three_in_a_row(self):
+        def broken(mid):
+            self.asked.append(mid)
+            raise RuntimeError("gog rc=2: message not found")
+        st = self._bf(fetch=broken)
+        self.assertEqual((len(self.asked), st["stopped"]), (3, "3 consecutive Gmail errors"))
+
+    def test_a_corrupt_blob_is_owed_again_and_backfill_restores_it(self):
+        # QA #1563: has() alone would hide a corrupt blob from backfill forever.
+        from credit_verify.docverify import backfill
+        self._bf()
+        sha = hashlib.sha256(b"doc 0 a").hexdigest()
+        Path(self.blobs.path(sha)).write_bytes(b"bit rot")
+        self.assertEqual(list(backfill.owed_messages(self.proof_db, self.blobs)), ["abc0"])
+        self.assertTrue(os.path.isfile(self.blobs.path(sha) + ".corrupt"))           # moved aside, kept for review
+        self.asked.clear()
+        self.assertEqual((self._bf()["blobs_stored"], self.asked), (1, ["abc0"]))
+        self.assertTrue(self.blobs.get(sha))
+
+    def test_a_blob_whose_bytes_do_not_hash_is_refused_and_never_served(self):
+        sha = hashlib.sha256(b"real").hexdigest()
+        with self.assertRaises(ValueError):
+            self.blobs.put(sha, b"forged")
+        self.blobs.put(sha, b"real")
+        Path(self.blobs.path(sha)).write_bytes(b"tampered")
+        self.assertIsNone(self.blobs.get(sha))
+        good = hashlib.sha256(b"good").hexdigest()
+        self.blobs.put(good, b"good")
+        self.assertFalse(self.blobs.quarantine(good))                                # a sound blob is never moved
+        self.assertTrue(self.blobs.get(good))
+        self.assertTrue(self.blobs.quarantine(sha))
+        self.assertEqual(oct(os.stat(os.path.dirname(self.blobs.path(sha))).st_mode & 0o777), "0o700")
+
+
 class IntakeD2Tests(unittest.TestCase):
     """D2: the reader takes proof_intake filings directly (proof-loop lead 2026-10-27)."""
 
@@ -1843,25 +1959,142 @@ class IntakeD2Tests(unittest.TestCase):
         stats, _ = self._run()                                                         # selection runs on
         self.assertEqual(stats.errors, [])
 
-    def test_an_emailed_document_is_read_from_gmail_by_sha(self):
+    def _gmail_filing(self):
         from email.message import EmailMessage
         m = EmailMessage()
         m["From"] = "ann@example.com"
         m.set_content("proof")
         m.add_attachment(b"not it", maintype="image", subtype="png", filename="x.png")
         m.add_attachment(self.data, maintype="application", subtype="pdf", filename="sheet.pdf")
-        raw = m.as_bytes()
         db = sqlite3.connect(self.proof_path)
         db.execute("UPDATE proof_intake SET conversation_id='gmail:18f00aa', source='email'")
         db.commit()
         db.close()
-        asked = []
-        self.deps.gmail_raw = lambda mid: asked.append(mid) or raw
+        return m.as_bytes()
+
+    def test_an_emailed_document_is_read_from_its_stored_blob_never_gmail(self):
+        # Fable 10-31: the reader never re-downloads a filed attachment; the filer stored the bytes at filing time.
+        from credit_verify.docverify.blobs import BlobStore
+        self._gmail_filing()
+        self.deps.blobs = BlobStore(os.path.join(self.td.name, "blobs"))
+        self.deps.blobs.put(self.sha, self.data)
         stats, rows = self._run()
-        self.assertEqual((asked, self.fetches), (["18f00aa"], []))       # Gmail, never Intercom
+        self.assertEqual(self.fetches, [])                                         # no Intercom, and no Gmail exists
         self.assertEqual(self.h3_calls[0][0], self.data)
         o = self.store.db.execute("SELECT source_ref, outcome FROM dv_outcomes").fetchone()
         self.assertEqual(tuple(o), ("gmail:18f00aa", gate.VERIFIED))
+        self.assertTrue(self.store.blob_registered(self.sha))
+
+    def test_an_emailed_document_without_stored_bytes_is_not_selected_until_backfill(self):
+        # No blob: the reader neither reads nor retries it (no step, no outcome, no network); blob-backfill
+        # restores the bytes from one paced Gmail fetch, and the next run reads it.
+        from datetime import datetime, timezone
+        from credit_verify.docverify import backfill
+        from credit_verify.docverify.blobs import BlobStore
+        raw = self._gmail_filing()
+        self.deps.blobs = BlobStore(os.path.join(self.td.name, "blobs"))
+        for _ in range(3):
+            stats, rows = self._run()
+            self.assertEqual((stats.intake, rows, self.fetches), (0, [], []))
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM dv_steps").fetchone()[0], 0)
+        asked = []
+        proof_db = sqlite3.connect(self.proof_path)
+        st = backfill.backfill(proof_db, self.store, self.deps.blobs, fetch_raw=lambda mid: asked.append(mid) or raw,
+                               max_messages=5, min_interval=10, now=lambda: datetime(2026, 10, 31, tzinfo=timezone.utc),
+                               sleep=lambda s: None)
+        self.assertEqual((asked, st["blobs_stored"], st["stopped"]), (["18f00aa"], 1, None))
+        self.assertEqual(backfill.owed_messages(proof_db, self.deps.blobs), {})    # nothing owed: never fetched again
+        stats, rows = self._run()
+        self.assertEqual(self.h3_calls[0][0], self.data)
+        self.assertEqual(self.store.db.execute("SELECT outcome FROM dv_outcomes").fetchone()[0], gate.VERIFIED)
+
+    def test_a_document_read_from_the_filers_cache_copy_is_stored_as_a_blob(self):
+        from credit_verify.docverify import intake_read
+        from credit_verify.docverify.blobs import BlobStore
+        blobs = BlobStore(os.path.join(self.td.name, "blobs"))
+        os.makedirs(self.cache, exist_ok=True)
+        cached = os.path.join(self.cache, "777-doc.pdf")
+        Path(cached).write_bytes(self.data)
+        doc = intake_read.intake_docs(sqlite3.connect(self.proof_path), lambda i, ids: False, 5)[0]
+        doc = dataclasses.replace(doc, file_path=cached)
+        path, ref, errs = intake_read.locate_intake(doc, self.td.name, fetch=None, dl=None, cache_root=self.cache,
+                                                    blobs=blobs, register=self.store.register_blob)
+        self.assertEqual(path, os.path.realpath(cached))
+        self.assertTrue(blobs.get(self.sha) and self.store.blob_registered(self.sha))
+
+    def test_a_corrupt_blob_is_never_read_and_never_a_reason_to_fetch(self):
+        # QA #1563: a stored blob that no longer hashes is moved aside and owed; the reader neither reads it nor
+        # falls through to a network fetch.
+        from credit_verify.docverify import intake_read
+        from credit_verify.docverify.blobs import BlobStore
+        self._gmail_filing()
+        blobs = BlobStore(os.path.join(self.td.name, "blobs"))
+        blobs.put(self.sha, self.data)
+        Path(blobs.path(self.sha)).write_bytes(b"bit rot")
+        doc = intake_read.intake_docs(sqlite3.connect(self.proof_path), lambda i, ids: False, 5)[0]
+        path, ref, errs = intake_read.locate_intake(doc, self.td.name, fetch=lambda c: self.fetches.append(c),
+                                                    dl=lambda u, d: 1, cache_root=self.cache, blobs=blobs,
+                                                    register=self.store.register_blob,
+                                                    registered=self.store.blob_registered)
+        self.assertEqual((path, errs, self.fetches), (None, [intake_read.BLOB_OWED], []))
+        self.assertFalse(blobs.has(self.sha))
+        self.assertTrue(intake_read.needs_backfill(doc, blobs, self.store.blob_registered))
+
+    def test_backfill_restores_a_registered_intercom_blob_that_is_gone_once(self):
+        # QA #1563: rule 3 makes a gone Intercom blob owed; blob-backfill (not the reader) restores it with one
+        # paced Intercom fetch, and an Intercom filing never stored is not its work (the reader stores it).
+        from credit_verify.docverify import backfill
+        from credit_verify.docverify.blobs import BlobStore
+        blobs = BlobStore(os.path.join(self.td.name, "blobs"))
+        proof_db = sqlite3.connect(self.proof_path)
+        self.assertEqual(backfill.owed_intercom(proof_db, self.store, blobs), [])     # never stored: not owed
+        self.deps.blobs = blobs
+        self._run()
+        os.remove(blobs.path(self.sha))
+        self.fetches.clear()
+        st = backfill.restore_intercom(proof_db, self.store, blobs, fetch=self.deps.fetch, dl=self.deps.dl,
+                                       cache_root=self.cache, max_docs=5)
+        self.assertEqual((st["owed_intercom"], st["restored"], self.fetches), (1, 1, ["777"]))
+        self.assertEqual(Path(blobs.get(self.sha)).read_bytes(), self.data)
+        self.assertEqual(backfill.restore_intercom(proof_db, self.store, blobs, fetch=self.deps.fetch,
+                                                   dl=self.deps.dl, cache_root=self.cache, max_docs=5)["owed_intercom"], 0)
+
+    def test_without_a_blob_store_an_emailed_document_is_never_read_or_fetched(self):
+        self._gmail_filing()
+        self.assertIsNone(self.deps.blobs)
+        stats, rows = self._run()
+        self.assertEqual((stats.intake, rows, self.fetches), (0, [], []))         # never via the Intercom path
+
+    def test_a_blob_gone_between_selection_and_read_writes_nothing(self):
+        from credit_verify.docverify import intake_read
+        from credit_verify.docverify.blobs import BlobStore
+        self._gmail_filing()
+        self.deps.blobs = BlobStore(os.path.join(self.td.name, "blobs"))
+        doc = intake_read.intake_docs(sqlite3.connect(self.proof_path), lambda i, ids: False, 5)[0]
+        st = runner.Stats("r1")
+        rows = runner.verify_document(self.store, sqlite3.connect(self.proof_path), doc.sha, [KEY], self.deps, "r1",
+                                      st, set(), intake=doc)
+        self.assertEqual((rows, st.blob_owed, self.fetches), ([], 1, []))
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM dv_steps").fetchone()[0], 0)
+
+    def test_a_located_intercom_document_is_stored_once_and_a_deleted_blob_is_never_refetched(self):
+        from credit_verify.docverify import intake_read
+        from credit_verify.docverify.blobs import BlobStore
+        self.deps.blobs = BlobStore(os.path.join(self.td.name, "blobs"))
+        self._run()
+        self.assertEqual(self.fetches, ["777"])                                     # the first read fetches once
+        self.assertTrue(self.deps.blobs.get(self.sha) and self.store.blob_registered(self.sha))
+        doc = intake_read.intake_docs(sqlite3.connect(self.proof_path), lambda i, ids: False, 5)[0]
+        path, ref, errs = intake_read.locate_intake(doc, self.td.name, fetch=None, dl=None, cache_root=self.cache,
+                                                    blobs=self.deps.blobs, registered=self.store.blob_registered)
+        self.assertEqual((Path(path).read_bytes(), ref), (self.data, f"blob:{self.sha[:16]}"))
+        os.remove(self.deps.blobs.path(self.sha))                                    # the cache is deleted
+        n = len(self.fetches)
+        path, ref, errs = intake_read.locate_intake(doc, self.td.name, fetch=lambda c: self.fetches.append(c),
+                                                    dl=lambda u, d: 1, cache_root=self.cache, blobs=self.deps.blobs,
+                                                    registered=self.store.blob_registered)
+        self.assertEqual((path, errs, len(self.fetches)), (None, [intake_read.BLOB_OWED], n))
+        self.assertTrue(intake_read.needs_backfill(doc, self.deps.blobs, self.store.blob_registered))
 
     def test_a_document_that_only_gives_unknown_stops_after_three_runs_not_per_pair(self):
         # Proof-loop lead 070: a 180-pair document with a document-level failure burned 3 rounds x 3 chunks.
