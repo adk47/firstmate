@@ -606,7 +606,10 @@ against sources the user does not control; UNKNOWN never approves:
 `docs/credit-verification/doc-verify.md`.
 The DSP evidence verifier (shadow, `scripts/credit-dsp-verify.py`) is the same posture for credit requests: approve-verdicts
 only on a same-run Spotify AND Tidal by-id anchor; it runs as its own job, never in Caroline:
-`docs/credit-verification/dsp-evidence-verifier.md`.
+`docs/credit-verification/dsp-evidence-verifier.md`. A missing contributor id on the presented profile is only
+ever PROPOSED, in shadow, in `link_proposals`. That table is never the decider's `decisions`, whose readers treat
+every row as a credit decision. Code never links on a name alone and never relinks:
+`docs/credit-verification/profile-link-proposals.md`.
 
 ## Picking the right extension mechanism
 

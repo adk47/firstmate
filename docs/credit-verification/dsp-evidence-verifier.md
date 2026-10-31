@@ -93,6 +93,10 @@ not apply to a decline: it rests on evidence either way.
 | `org_label_anchor` / `org_not_on_label_strings` / `org_string_missing` / `org_role_on_person_profile` | org lane: the org name vs the track's label / ℗ / © strings (distinctive tokens, order-free). Evidence only: approving on it is the captain's `declined-org-label-anchor-call` | varies |
 | `no_fresh_capture` / `unknown` | nothing this run can stand on | - |
 
+The `link_profile` / `fix_profile_link` classes feed the shadow profile-link proposals
+([profile-link-proposals.md](profile-link-proposals.md)): a link is proposed only when it is unambiguous. An id held
+by another profile goes to the merge lane. A mismatch goes to the tray and is never relinked.
+
 UNKNOWN never approves and never declines (exhaustively tested in `UnknownNeverApproves`). Only a reading with an
 explicit `state: CAPTURED` can anchor or contradict, and only `complete_snapshot: true` can contradict; a missing
 field is UNKNOWN.

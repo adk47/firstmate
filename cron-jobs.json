@@ -1717,6 +1717,35 @@
         "cwd": "/opt/hydra",
         "timeoutSeconds": 3000
       }
+    },
+    {
+      "id": "4ee6ff2b-a619-5ae7-95b2-d5b11e0992b2",
+      "agentId": "operations",
+      "createdAtMs": 1793347200000,
+      "updatedAtMs": 1793347200000,
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "delivery": {
+        "mode": "none"
+      },
+      "enabled": true,
+      "name": "credit-profile-link-proposals",
+      "description": "Profile-link proposals, SHADOW (Fable [key=profile-link-anchor], 2026-10-30): reads the DSP verifier's store /var/lib/hydra-credit-verify/dsp-verify.sqlite READ-ONLY and proposes a Spotify/Tidal contributor id for the PRESENTED profile only when unambiguous (credit_verify/dspverify/link_proposal.py, rule link-1: same-run Spotify AND Tidal credit under the exact folded profile name on two independent tracks, or one track + a processed claim by the same account; id held by another profile = merge handoff, no row; link_mismatch / id_conflict = tray row; common / big / guarded / multi-account profiles refused). Writes ONLY link_proposals + link_runs in /var/lib/hydra/credit-review/ledger.sqlite3 (mode shadow, append-only, one row per proposal per rule version). Never writes core, never links, approves, declines or messages: the core profile-link route is a separate registered automation after the 24 h verifier-eval-v1 bar. Hourly at :45. Kill switches: /etc/hydra/credit-dsp-verify.disabled, /etc/hydra/credit-verify.disabled.",
+      "schedule": {
+        "kind": "cron",
+        "expr": "45 * * * *",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-dsp-verify.py",
+          "link-proposals"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 900
+      }
     }
   ]
 }

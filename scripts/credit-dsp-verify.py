@@ -20,6 +20,11 @@ Subcommands:
   d5b              D5b (Fable 171): every request doc-verify reads `verified` gets a same-run capture (submit,
                    unless one is open or a final verdict is < 24 h old), verify reads it, and an APPROVE verdict
                    gets its dsp-anchor/1 record built locally. A document never upgrades a WAIT.
+  link-proposals   Profile-link proposals, SHADOW (Fable [key=profile-link-anchor]): read this store READ-ONLY
+                   and propose a DSP contributor id for the presented profile only when unambiguous
+                   (dspverify/link_proposal.py); rows go to `link_proposals` in the decider ledger. Never core.
+  link-queue       The shadow proposals as a blind JSONL queue for verifier-eval-v1 (no basis, no confidence).
+  link-score       Score verifier-eval-v1's labels ({proposal_id: correct|wrong|unsure}) against the bar.
   export           The standing (latest) verdict per request as JSONL on stdout.
   summary          Counts of the standing verdicts (by verdict, class, need, anchor, paid).
 
@@ -182,6 +187,44 @@ def cmd_anchors(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_link_proposals(args: argparse.Namespace) -> int:
+    """SHADOW link proposals. Reads the V9 store read-only; writes only link_proposals / link_runs."""
+    from credit_verify.dspverify import VERSION, link_proposal
+    from credit_verify.dspverify.store import DEFAULT_PATH
+    if (k := killed()):
+        log(f"kill switch present at {k}; no link proposals")
+        print("NO_REPLY")
+        return 0
+    claim = None
+    if not args.no_claim_lookup:
+        from credit_verify.dspverify.runner import trino_org_claim
+        from credit_verify.proof.stage2 import trino_query
+        claim = trino_org_claim(trino_query)       # any failure = None = no claim evidence (never a proposal)
+    c = link_proposal.run(args.store or DEFAULT_PATH, args.ledger, claim_lookup=claim, dry_run=args.dry_run, log=log)
+    log(f"V9 version {VERSION}, rule {link_proposal.RULE_VERSION}")
+    print(json.dumps(c, indent=1, sort_keys=True, default=str) if args.dry_run or args.json else "NO_REPLY")
+    return 0
+
+
+def cmd_link_queue(args: argparse.Namespace) -> int:
+    from credit_verify.dspverify import link_proposal
+    db = link_proposal.open_ledger(args.ledger)
+    for row in link_proposal.blind_queue(db):
+        print(json.dumps(row, ensure_ascii=False, default=str))
+    return 0
+
+
+def cmd_link_score(args: argparse.Namespace) -> int:
+    from credit_verify.dspverify import link_proposal
+    labels = json.loads(Path(args.labels).read_text(encoding="utf-8"))
+    if not isinstance(labels, dict):
+        log("labels must be a JSON object {proposal_id: correct|wrong|unsure}")
+        return 2
+    out = link_proposal.score(link_proposal.open_ledger(args.ledger), {str(k): v for k, v in labels.items()})
+    print(json.dumps(out, indent=1, sort_keys=True))
+    return 0 if out["bar_met"] else 1
+
+
 def cmd_export(args: argparse.Namespace) -> int:
     from credit_verify.dspverify.store import Store, export_jsonl
     for line in export_jsonl(Store(args.store).latest()):
@@ -223,6 +266,20 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--tray", required=True)
     s.add_argument("--write", action="store_true", help="refused until core's anchor endpoint exists")
     s.set_defaults(fn=cmd_anchors)
+    s = sub.add_parser("link-proposals", help="SHADOW profile-link proposals (decider ledger only, never core)")
+    s.add_argument("--ledger", default=None, help="decider ledger (default $CREDIT_REVIEW_LEDGER)")
+    s.add_argument("--dry-run", action="store_true", help="print what would be recorded; write nothing")
+    s.add_argument("--no-claim-lookup", action="store_true",
+                   help="skip the Trino processed-claim read (the one-track + claim basis then never applies)")
+    s.add_argument("--json", action="store_true", help="print the run counts")
+    s.set_defaults(fn=cmd_link_proposals)
+    s = sub.add_parser("link-queue", help="blind JSONL queue of shadow proposals for verifier-eval-v1")
+    s.add_argument("--ledger", default=None)
+    s.set_defaults(fn=cmd_link_queue)
+    s = sub.add_parser("link-score", help="score labels against the 24 h / 0-wrong bar (exit 1 = bar not met)")
+    s.add_argument("--ledger", default=None)
+    s.add_argument("--labels", required=True)
+    s.set_defaults(fn=cmd_link_score)
     sub.add_parser("export").set_defaults(fn=cmd_export)
     sub.add_parser("summary").set_defaults(fn=cmd_summary)
     args = ap.parse_args(argv)
