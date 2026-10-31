@@ -13,8 +13,8 @@ one of these outcomes:
                     the paused sweep path) or a core change that ignores retired rules. NOT approvable today.
   ask               the user owes proof: the standard ask by comm_state class on the outbound timer (no special note)
   hold              a CURRENT hard signal (account gate not allow, watchlisted, R8 account hold, another rule firing,
-                    a big or unknown popularity, a claim on the profile) or an unreadable input (V9 unread,
-                    gate unknown); the current reason is written
+                    a big or unknown popularity; NOT a claim on the credited profile, the owner's normal state)
+                    or an unreadable input (V9 unread, gate unknown); the current reason is written
 
 Nothing is deleted; the stored verdict is untouched. The 7 users must still be green at run time: account gate allow,
 not watchlisted, no R8 account hold.
@@ -123,11 +123,12 @@ def evaluate(scope: list[tuple[str, int]], facts: dict[str, Any], v9: dict[str, 
             outcome, why = "hold", "current_rule:" + ",".join(current)
         elif missing:
             outcome, why = "hold", "incomplete_rule_scores:" + ",".join(missing)
-        # hard signals hold BEFORE any V9 branch (QA #1539): a held row never reaches an ask either
+        # hard signals hold BEFORE any V9 branch (QA #1539): a held row never reaches an ask either. A claim by the
+        # submitter on the credited profile is NOT one: owning your own artist/producer profile is the normal state,
+        # core's ANCHORED person path does not require its absence, and an ask to the profile owner is the right ask
+        # (that guard is the executor's CLOSE rail, batch0: a reject must never hit a label/org owner).
         elif f.metadata_source == "client" or pop is None or not 1 <= pop < BIG_POPULARITY:
             outcome, why = "hold", f"big_or_unknown_popularity:{pop}"
-        elif f.owns_profile is not False:
-            outcome, why = "hold", "submitter_has_claim_on_profile" if f.owns_profile else "profile_claim_unknown"
         elif not verdict:
             outcome, why = "hold", "v9_unread"
         elif verdict == "APPROVE":

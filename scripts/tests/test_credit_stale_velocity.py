@@ -74,8 +74,6 @@ class OutcomeTest(unittest.TestCase):
             ({"f": facts(pop=0)}, "big_or_unknown_popularity"),
             ({"f": facts(pop=60)}, "big_or_unknown_popularity"),
             ({"f": facts(source="client")}, "big_or_unknown_popularity"),
-            ({"f": facts(owns=True)}, "submitter_has_claim_on_profile"),
-            ({"f": facts(owns=None)}, "profile_claim_unknown"),
             ({"f": facts(uid=7)}, "user_mismatch"),
             # QA #1539: a stored verdict that did not score every hold rule is not a current-rule clearance
             ({"f": facts(rules={})}, "incomplete_rule_scores"),                       # null / unreadable map
@@ -86,13 +84,21 @@ class OutcomeTest(unittest.TestCase):
             ({"f": facts(pop=60), "v9": "WAIT"}, "big_or_unknown_popularity"),
             ({"f": facts(pop=None), "v9": "DECLINE"}, "big_or_unknown_popularity"),
             ({"f": facts(source="client"), "v9": "WAIT"}, "big_or_unknown_popularity"),
-            ({"f": facts(owns=True), "v9": "WAIT"}, "submitter_has_claim_on_profile"),
-            ({"f": facts(owns=None), "v9": "DECLINE"}, "profile_claim_unknown"),
         ]
         for kw, want in cases:
             o = self.one(**kw)
             self.assertEqual(o.outcome, "hold", kw)
             self.assertTrue(o.reason.startswith(want), (kw, o.reason))
+
+    def test_owning_the_credited_profile_is_not_a_hold(self):
+        """doc-verify 158 / live preview: 855 of the 1,348 rows were held only because their submitter claims the
+        credited profile - their own artist/producer page. That is the CLOSE rail (never reject an owner), not a
+        reason to withhold the owner's own ask or an ANCHORED person-path release (core does not require it)."""
+        for owns in (True, None):
+            self.assertEqual(self.one(f=facts(owns=owns), v9="WAIT").outcome, "ask")
+            self.assertEqual(self.one(f=facts(owns=owns, rules={**VEL, "reject_high_velocity_profile": 0.0})).outcome,
+                             "release_anchored")
+        self.assertEqual(self.one(f=facts(owns=True, pop=0), v9="WAIT").outcome, "hold")   # pop still holds
 
     def test_unreadable_gate_or_hold_set_is_not_green(self):
         def boom(u):
