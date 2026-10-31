@@ -157,6 +157,12 @@ class DocVerifyStore:
             self.db.execute("ALTER TABLE dv_outcomes ADD COLUMN intake_id TEXT")
             self.db.commit()
         self.db.execute("CREATE INDEX IF NOT EXISTS dv_out_intake ON dv_outcomes(intake_id)")
+        # QA/r5 #1537: the fan-out markers THIS version recorded, apart from the ones carry_forward copied (which
+        # only copies keys_json): a copied marker is not a read. Rows from before the column read as recorded by no
+        # version, so their keys are re-read once (fail toward reading).
+        if "own_keys_json" not in {r[1] for r in self.db.execute("PRAGMA table_info(dv_intake_unmatched)")}:
+            self.db.execute("ALTER TABLE dv_intake_unmatched ADD COLUMN own_keys_json TEXT NOT NULL DEFAULT '[]'")
+            self.db.commit()
         self.lock = threading.Lock()
         if VERSION in CARRY:
             prev, reread, steps, *more = CARRY[VERSION]
@@ -465,8 +471,20 @@ class DocVerifyStore:
     def record_intake_unmatched(self, intake_id: str, keys: list[str]) -> None:
         with self.lock, self.db:
             have = self.intake_unmatched(intake_id)
-            self.db.execute("INSERT OR REPLACE INTO dv_intake_unmatched (intake_id, version, at, keys_json) "
-                            "VALUES (?,?,?,?)", (intake_id, VERSION, utcnow(), json.dumps(sorted(set(have) | set(keys)))))
+            own = self.intake_unmatched_own(intake_id)
+            self.db.execute("INSERT OR REPLACE INTO dv_intake_unmatched (intake_id, version, at, keys_json, "
+                            "own_keys_json) VALUES (?,?,?,?,?)",
+                            (intake_id, VERSION, utcnow(), json.dumps(sorted(set(have) | set(keys))),
+                             json.dumps(sorted(set(own) | set(keys)))))
+
+    def intake_unmatched_own(self, intake_id: str) -> list[str]:
+        """The not-matched markers THIS version's fan-out cut recorded on the filing (never a copied one)."""
+        row = self.db.execute("SELECT own_keys_json FROM dv_intake_unmatched WHERE intake_id=? AND version=?",
+                              (intake_id, VERSION)).fetchone()
+        try:
+            return list(json.loads(row[0])) if row else []
+        except (TypeError, ValueError):
+            return []
 
     def intake_unmatched(self, intake_id: str) -> list[str]:
         row = self.db.execute("SELECT keys_json FROM dv_intake_unmatched WHERE intake_id=? AND version=?",
@@ -617,7 +635,13 @@ class DocVerifyStore:
             "SELECT o.request_id, o.role FROM dv_outcomes o JOIN (SELECT MAX(id) id FROM dv_outcomes WHERE intake_id=? "
             "AND version=? GROUP BY proof_id, request_id, role) l USING(id) WHERE NOT EXISTS (SELECT 1 FROM dv_steps s "
             "WHERE s.proof_id=o.proof_id AND s.run_id=o.run_id AND s.version=?)", (intake_id, VERSION, VERSION))
-        return {f"{rid}#{role}" for rid, role in rows} & open_keys
+        # 2026-10-30 livelock: a key the current version READ and the fan-out rule recorded as not matched has no outcome
+        # row, so its carried row stayed standing and the reader picked the same filing again every run (4 shards spun
+        # on the same 2 filings for hours). Read under this version = no longer carried.
+        # QA/r5 #1537: subtract only the markers THIS version's cut recorded. carry_forward copies the previous
+        # version's markers into keys_json, and a copied marker (e.g. a claim this version matched but left past the
+        # per-run cap) is not a read: it stays carried until this version reads or cuts it.
+        return ({f"{rid}#{role}" for rid, role in rows} & open_keys) - set(self.intake_unmatched_own(intake_id))
 
     def carried_remaining(self) -> dict[str, int]:
         """How much of the carried set is still unread under the current VERSION: `rows` / `filings` count only
@@ -631,19 +655,28 @@ class DocVerifyStore:
             "NOT EXISTS (SELECT 1 FROM dv_steps s WHERE s.proof_id=o.proof_id AND s.run_id=o.run_id AND s.version=?)",
             (VERSION, VERSION, VERSION)).fetchall()
         open_keys: dict[str, set[str]] = {}
-        n_open, n_closed, filings = 0, 0, set()
+        fanout: dict[str, set[str]] = {}
+        for iid, keys_json in self.db.execute("SELECT intake_id, own_keys_json FROM dv_intake_unmatched WHERE "
+                                              "version=?", (VERSION,)):     # one read; this version's markers only
+            try:
+                fanout[iid] = set(json.loads(keys_json or "[]"))
+            except (TypeError, ValueError):
+                fanout[iid] = set()
+        n_open, n_closed, n_fanout, filings = 0, 0, 0, set()
         for iid, key, keys_json in rows:
             if iid not in open_keys:
                 try:
                     open_keys[iid] = set(json.loads(keys_json or "[]"))
                 except ValueError:
                     open_keys[iid] = set()
-            if key in open_keys[iid]:
+            if key in fanout.get(iid, ()):
+                n_fanout += 1          # READ under this version, recorded not matched by the fan-out rule (no row)
+            elif key in open_keys[iid]:
                 n_open += 1
                 filings.add(iid)
             else:
                 n_closed += 1
-        return {"rows": n_open, "filings": len(filings), "closed_rows": n_closed}
+        return {"rows": n_open, "filings": len(filings), "closed_rows": n_closed, "fanout_read_rows": n_fanout}
 
     def intake_settled(self, intake_id: str, candidates: list[str]) -> bool:
         """No Trino needed: the last run saw exactly these candidate requests and every

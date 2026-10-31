@@ -2175,7 +2175,7 @@ class IntakeD2Tests(unittest.TestCase):
         # Fable 134: carried rows wait for a re-read under the current rule; nothing in the reader selected them.
         self._carry_one()
         self.assertEqual(self.store.intake_carried_keys(self.intake_id), {KEY})
-        self.assertEqual(self.store.carried_remaining(), {"rows": 1, "filings": 1, "closed_rows": 0})
+        self.assertEqual(self.store.carried_remaining(), {"rows": 1, "filings": 1, "closed_rows": 0, "fanout_read_rows": 0})
         stats, rows = self._run()                                                   # an ordinary run: settled
         self.assertEqual((stats.intake, rows), (0, []))
         stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, reread_carried=True)
@@ -2183,10 +2183,79 @@ class IntakeD2Tests(unittest.TestCase):
         steps = {s for (s,) in self.store.db.execute("SELECT step FROM dv_steps WHERE version=?", (VERSION,))}
         self.assertTrue({"extract", "forensics", "gate"} <= steps)                  # a real read, with its steps
         self.assertEqual(self.store.intake_carried_keys(self.intake_id), set())
-        self.assertEqual(self.store.carried_remaining(), {"rows": 0, "filings": 0, "closed_rows": 0})
+        self.assertEqual(self.store.carried_remaining(), {"rows": 0, "filings": 0, "closed_rows": 0, "fanout_read_rows": 0})
         stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, reread_carried=True)
         self.assertEqual((stats.intake, rows), (0, []))                             # done: never read twice
         self.assertEqual(len(self.h3_calls), 1)
+
+    def test_a_carried_claim_the_fan_out_rule_read_is_no_longer_carried(self):
+        # 2026-10-30 livelock: the current version READ the filing, the fan-out rule (> 50 candidates, the document names
+        # other tracks) recorded the key as not matched and wrote no outcome row, so the carried row stayed standing and
+        # 4 shards re-picked the same 2 filings every run for hours (carried_remaining flat at 3,606).
+        self._carry_one()
+        self.assertEqual(self.store.intake_carried_keys(self.intake_id), {KEY})
+        self.store.record_intake_unmatched(self.intake_id, [KEY])                  # what THIS version's cut writes
+        self.assertEqual(self.store.intake_carried_keys(self.intake_id), set())
+        self.assertEqual(self.store.carried_remaining(),
+                         {"rows": 0, "filings": 0, "closed_rows": 0, "fanout_read_rows": 1})
+        stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, reread_carried=True)
+        self.assertEqual((stats.intake, rows, self.h3_calls), (0, [], []))         # not picked again
+
+    def test_a_fan_out_marker_copied_by_the_version_carry_is_not_a_current_read(self):
+        # QA #1537: carry_forward copies dv_intake_unmatched from the previous version; that marker is the OLD
+        # version's read, so the key must still be re-read under the current one.
+        db = self.store.db
+        db.execute("INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, user_id, outcome, reason, need, "
+                   "account_hold, detail_json, version, intake_id) VALUES ('dv-old-run', '2026-10-28T09:00:00Z', ?, ?, "
+                   "'Mixing', 42, 'unverifiable', 'x', 'readable_document', 0, '{}', 'dv-old', ?)",
+                   (self.sha, RID, self.intake_id))
+        db.execute("INSERT INTO dv_intake_keys (intake_id, version, at, candidates_json, keys_json) VALUES (?, 'dv-old', "
+                   "'2026-10-28T09:00:00Z', ?, ?)", (self.intake_id, json.dumps([RID]), json.dumps([KEY])))
+        db.execute("INSERT INTO dv_intake_unmatched (intake_id, version, at, keys_json) VALUES (?, 'dv-old', "
+                   "'2026-10-28T09:00:00Z', ?)", (self.intake_id, json.dumps([KEY])))
+        db.commit()
+        self.store.carry_forward("dv-old", VERSION, frozenset(), ())               # carries rows AND the marker
+        self.assertEqual(self.store.intake_unmatched(self.intake_id), [KEY])       # the copied marker
+        self.assertEqual(self.store.intake_carried_keys(self.intake_id), {KEY})     # still owed a current read
+        self.assertEqual(self.store.carried_remaining()["fanout_read_rows"], 0)
+
+    def test_a_copied_marker_this_version_left_past_the_cap_stays_carried(self):
+        # r5 #1537 @ec5ce803: THIS version ran the fan-out (its own markers recorded), but a marker copied from the
+        # previous version - a claim this version matched yet left past MAX_INTAKE_CLAIMS - was never re-decided.
+        # Only this version's own markers leave the carried set.
+        k2 = f"{RID}#Piano"
+        db = self.store.db
+        for k in (KEY, k2):
+            rid, role = k.split("#")
+            db.execute("INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, user_id, outcome, reason, need, "
+                       "account_hold, detail_json, version, intake_id) VALUES ('dv-old-run', '2026-10-28T09:00:00Z', ?, ?, "
+                       "?, 42, 'unverifiable', 'x', 'readable_document', 0, '{}', 'dv-old', ?)",
+                       (self.sha, rid, role, self.intake_id))
+        db.execute("INSERT INTO dv_intake_keys (intake_id, version, at, candidates_json, keys_json) VALUES (?, 'dv-old', "
+                   "'2026-10-28T09:00:00Z', ?, ?)", (self.intake_id, json.dumps([RID]), json.dumps([KEY, k2])))
+        db.execute("INSERT INTO dv_intake_unmatched (intake_id, version, at, keys_json) VALUES (?, 'dv-old', "
+                   "'2026-10-28T09:00:00Z', ?)", (self.intake_id, json.dumps([k2])))     # the OLD version's cut
+        db.commit()
+        self.store.carry_forward("dv-old", VERSION, frozenset(), ())
+        self.store.record_intake_unmatched(self.intake_id, [KEY])                  # this version cut KEY only
+        self.assertEqual(sorted(self.store.intake_unmatched(self.intake_id)), sorted([KEY, k2]))   # merged row
+        self.assertEqual(self.store.intake_unmatched_own(self.intake_id), [KEY])
+        self.assertEqual(self.store.intake_carried_keys(self.intake_id), {k2})     # copied: still owed a read
+        rem = self.store.carried_remaining()
+        self.assertEqual((rem["rows"], rem["fanout_read_rows"]), (1, 1))
+        self.store.record_intake_unmatched(self.intake_id, [f"{RID}#Guitar"])      # a later cut of this version
+        self.assertEqual(sorted(self.store.intake_unmatched_own(self.intake_id)), sorted([KEY, f"{RID}#Guitar"]))
+
+    def test_a_store_from_before_the_own_markers_column_is_migrated(self):
+        p = os.path.join(self.td.name, "old.sqlite")
+        old = sqlite3.connect(p)
+        old.execute("CREATE TABLE dv_intake_unmatched (intake_id TEXT NOT NULL, version TEXT NOT NULL, at TEXT NOT NULL, "
+                    "keys_json TEXT NOT NULL, PRIMARY KEY (intake_id, version))")
+        old.execute("INSERT INTO dv_intake_unmatched VALUES ('i1', ?, 'x', '[\"k\"]')", (VERSION,))
+        old.commit()
+        old.close()
+        s = DocVerifyStore(p)
+        self.assertEqual((s.intake_unmatched("i1"), s.intake_unmatched_own("i1")), (["k"], []))   # re-read once
 
     def test_reread_carried_never_starves_a_new_filing(self):
         # Fable 136: new documents first; carried re-reads only fill the idle room.
@@ -2218,7 +2287,7 @@ class IntakeD2Tests(unittest.TestCase):
         self.assertEqual(rows, [])
         self.assertEqual(self.store.intake_carried_keys(self.intake_id), set())     # recorded keys refreshed
         # QA #1493: a closed carried claim is not unfinished work - the metric reaches 0 and names it apart
-        self.assertEqual(self.store.carried_remaining(), {"rows": 0, "filings": 0, "closed_rows": 1})
+        self.assertEqual(self.store.carried_remaining(), {"rows": 0, "filings": 0, "closed_rows": 1, "fanout_read_rows": 0})
         stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path, reread_carried=True)
         self.assertEqual(stats.intake, 0)
 
