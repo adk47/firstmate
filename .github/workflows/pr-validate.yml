@@ -2012,6 +2012,10 @@ jobs:
           # L12 executor (fable-decider closes): tray validation, every write-boundary guard (each with a
           # red mutant), daily cap, kill file, registry re-check, read-back, audit. Hermetic.
           python3 scripts/tests/test_credit_fable_executor.py
+          # coded closes in the coded-close shape: C5 validator_reject (#1559, not wired before) and C3 junk_proof /
+          # C8 fraud_document (credit_review/doc_close.py). Ledger, gate, V9 and core facts faked.
+          python3 scripts/tests/test_credit_validator_reject_close.py
+          python3 scripts/tests/test_credit_doc_close.py
           python3 scripts/tests/test_credit_anchor_upload.py
           python3 scripts/tests/test_credit_forged_tray.py
           python3 scripts/tests/test_credit_claim_executor.py

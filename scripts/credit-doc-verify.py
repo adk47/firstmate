@@ -373,40 +373,9 @@ def cmd_junk_list(args: argparse.Namespace) -> int:
     # a report: read-only, never creates, alters or carries the store (QA #1470)
     store = argparse.Namespace(db=sqlite3.connect(f"file:{path}?mode=ro", uri=True))
     pdb = sqlite3.connect(f"file:{args.proof_store}?mode=ro", uri=True)
-    latest: dict[tuple[str, str], dict] = {}
-    for pid, step, det in store.db.execute("SELECT proof_id, step, detail_json FROM dv_steps WHERE step IN "
-                                           "('artifact', 'extract', 'text') ORDER BY id"):
-        try:
-            latest[(pid, step)] = json.loads(det or "{}")
-        except ValueError:
-            continue
-    kinds = dict(pdb.execute("SELECT proof_id, kind FROM fingerprints"))
-    paid = paying_users() or frozenset()
-    rows = []
-    for iid, uid, sha, cands in pdb.execute("SELECT intake_id, user_id, file_sha256, candidate_request_ids_json "
-                                            "FROM proof_intake ORDER BY intake_id"):
-        try:
-            cand = [str(c) for c in json.loads(cands or "[]")]
-        except ValueError:
-            cand = []
-        art = latest.get((sha, "artifact"))
-        if art is not None:
-            kind, why, checked = art.get("artifact"), art.get("why"), bool(art.get("text_checked"))
-        elif (sha, "extract") in latest:
-            facts = (latest.get((sha, "text")) or {}).get("facts") or {}
-            kind, why = artifacts.classify(text=None, ex=latest[(sha, "extract")], facts=facts,
-                                           kind=kinds.get(sha) or (latest.get((sha, "text")) or {}).get("kind"))
-            checked = False
-        else:
-            kind, why, checked = None, "not read yet", False
-        rows.append({"intake_id": iid, "sha": sha, "user_id": uid, "paid": uid in paid, "candidates": cand, "artifact": kind,
-                     "why": why, "text_checked": checked, "read": (sha, "extract") in latest or art is not None})
     from credit_verify.docverify.extract import _title_key
     from credit_verify.proof import stage2
-    for r in rows:
-        ex = latest.get((r.pop("sha"), "extract")) or {}
-        r["named"] = sorted({_title_key(t.get("title")) for t in ex.get("tracks") or [] if t.get("title")} |
-                            {_title_key(c.get("track")) for c in ex.get("credits") or [] if c.get("track")})
+    rows = artifacts.filed_rows(store.db, pdb, paying_users() or frozenset())
     junk_rids = sorted({rid for r in rows if r["artifact"] for rid in r["candidates"]})
     reqs = stage2.requests(junk_rids) if junk_rids else {}
     titles = {rid: _title_key(q.title) for rid, q in reqs.items()}

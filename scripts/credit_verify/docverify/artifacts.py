@@ -186,3 +186,49 @@ def junk_list(rows: list[dict[str, Any]], titles: dict[str, str] | None = None,
     return {"documents": len(rows), "document_rows": every, "junk_documents": sum(totals.values()), "by_kind": totals,
             "sys_001": totals.get(SYS_001, 0), "text_checked": sum(1 for r in rows if r.get("text_checked")),
             "users": order, "decline_requests": decline, "held_untied": held, "closed_since_filing": closed}
+
+
+def filed_rows(store_db: Any, proof_db: Any, paid: frozenset[int] | set[int],
+               version: str | None = None) -> list[dict[str, Any]]:
+    """junk_list's input: one row per filed document (proof_intake) with its artifact kind from the reader's latest
+    steps (or the stored-data rules when only an extract exists), `read`, and `named` (folded track titles the
+    extraction names). `version`: count only that reader version's steps (the coded C3 close needs a read under the
+    current reader; the junk-list report keeps every version). Read-only."""
+    import json
+    from .extract import _title_key
+    sql = "SELECT proof_id, step, detail_json FROM dv_steps WHERE step IN ('artifact', 'extract', 'text')"
+    args: tuple[Any, ...] = ()
+    if version is not None:
+        sql += " AND version = ?"
+        args = (version,)
+    latest: dict[tuple[str, str], dict[str, Any]] = {}
+    for pid, step, det in store_db.execute(sql + " ORDER BY id", args):
+        try:
+            latest[(pid, step)] = json.loads(det or "{}")
+        except ValueError:
+            continue
+    kinds = dict(proof_db.execute("SELECT proof_id, kind FROM fingerprints"))
+    rows = []
+    for iid, uid, sha, cands in proof_db.execute("SELECT intake_id, user_id, file_sha256, candidate_request_ids_json "
+                                                 "FROM proof_intake ORDER BY intake_id"):
+        try:
+            cand = [str(c) for c in json.loads(cands or "[]")]
+        except ValueError:
+            cand = []
+        art = latest.get((sha, "artifact"))
+        if art is not None:
+            kind, why, checked = art.get("artifact"), art.get("why"), bool(art.get("text_checked"))
+        elif (sha, "extract") in latest:
+            facts = (latest.get((sha, "text")) or {}).get("facts") or {}
+            kind, why = classify(text=None, ex=latest[(sha, "extract")], facts=facts,
+                                 kind=kinds.get(sha) or (latest.get((sha, "text")) or {}).get("kind"))
+            checked = False
+        else:
+            kind, why, checked = None, "not read yet", False
+        ex = latest.get((sha, "extract")) or {}
+        named = sorted({_title_key(t.get("title")) for t in ex.get("tracks") or [] if t.get("title")} |
+                       {_title_key(c.get("track")) for c in ex.get("credits") or [] if c.get("track")})
+        rows.append({"intake_id": iid, "user_id": uid, "paid": uid in paid, "candidates": cand, "artifact": kind,
+                     "why": why, "text_checked": checked, "read": (sha, "extract") in latest or art is not None,
+                     "named": named})
+    return rows
