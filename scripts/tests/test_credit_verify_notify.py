@@ -1642,6 +1642,8 @@ case "$method ${url#https://api.intercom.io}" in
     n=$(( $(cat "$STUB_N" 2>/dev/null || echo 500) + 1 )); echo "$n" > "$STUB_N"
     printf '{"type":"admin_message","id":"%s","message_type":"email","conversation_id":null}' "$n" ;;
   "POST /conversations/search") printf '{"conversations":[]}' ;;
+  "GET /contacts/"*)   # the contact read (Intercom returns the contact object; #1511 reads its email reachability)
+    printf '{"type":"contact","id":"%s","role":"user","has_hard_bounced":false}' "${url##*/}" ;;
   *) printf '{"type":"error.list","errors":[{"code":"not_found"}]}' ;;
 esac
 """

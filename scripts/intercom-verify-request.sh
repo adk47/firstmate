@@ -95,7 +95,7 @@ set -euo pipefail
 #       [--campaign verify-live|retro-past|removal-notice|takeback-notice|uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-proof-ask|claim-status|gap-ask|merge-pending|credit-hold-status|claim-proof-pending|proof-need-ask] [--kind initial|reminder-14|reminder-25|after-rejection \
 #        --parent-message-id <id>] [--copy v1|windowed (verify-live preview only) | queued|received (status-doc-received) | no-ask|count (status-team-review)] \
 #       [--conversation <id> (uvn-status, withdrawal-confirm, status notes, claim-status, email-changed, gap-ask, merge-pending,
-#        credit-hold-status, claim-proof-pending, proof-need-ask)] [--dry-run|--validate|--doc-check|--check-recipient]
+#        credit-hold-status, claim-proof-pending, proof-need-ask)] [--inapp-fallback] [--dry-run|--validate|--doc-check|--check-recipient]
 #   intercom-verify-request.sh tag-proof --message-id <id> [--dry-run]
 #
 # In-thread delivery (firstmate 063): uvn-status and withdrawal-confirm reply IN the user's
@@ -165,10 +165,15 @@ set -euo pipefail
 # already sent documents in Intercom (read only: prints DOCS <why> | NO_DOCS, writes nothing,
 # sends nothing) for audits. It never reaches the claim or the POST.
 #
+# --inapp-fallback (fable-copy-1030-r5/h): when the selected route is email and Intercom will not email the
+# contact (hard-bounced / unsubscribed / spam), send the same approved body as an Intercom in-app message to a
+# user contact the messenger has seen. Off by default: armed by the runner only after the signed first-batch
+# dry run (p1 + r5). Without it, or with no in-app route, the note is refused and recorded as no_channel.
+#
 # --check-recipient (initial notes) runs every check a real send runs up to the claim: input,
 # render + leak check, the Intercom recipient (exactly one user with the account email, its
-# external_id the account's), the v1 eligibility read; prints RECIPIENT OK <copy> credits=N
-# or refuses. Read only: no ledger write, nothing sent. A dry run that skips this cannot see a
+# external_id the account's), the v1 eligibility read, the delivery channel; prints
+# RECIPIENT OK <copy> credits=N route=<comment:ID|email|inapp> or refuses. Read only: no ledger write, nothing sent. A dry run that skips this cannot see a
 # recipient refusal (2026-10-20 07:00Z: all 21 first notes refused at the external_id check).
 #
 # user.professional_id / user.auth_id: Intercom's external_id for a Muso user is the account's
@@ -435,7 +440,7 @@ esac
 # user's inbox and the reply lands in the same conversation. The one other channel is a
 # Caroline comment in the user's own conversation (in-thread delivery, above).
 CREDITS_FILE="" APPROVED_BY="" MESSAGE_ID="" ACTION="post" THREAD="" THREAD_AUTO=0 REPLY_DUE=""
-MESSAGE_TYPE="email"
+MESSAGE_TYPE="email" INAPP_FALLBACK=0 ROUTE_WHY=""
 readonly REQ_TYPE="email" EXPECT_TYPE="email"
 CAMPAIGN="verify-live" KIND="initial" PARENT_ID="" CAMPAIGN_SET=0 KIND_SET=0 COPY_ARG=""
 while [ $# -gt 0 ]; do
@@ -458,6 +463,7 @@ while [ $# -gt 0 ]; do
     --doc-check) ACTION="doc-check"; shift ;;
     --thread-contact) ACTION="thread-contact"; shift ;;
     --check-recipient) ACTION="check-recipient"; shift ;;
+    --inapp-fallback) INAPP_FALLBACK=1; shift ;;
     --validate) ACTION="validate"; shift ;;
     -h|--help)  usage; exit 0 ;;
     *) usage; die "unknown argument '$1'" ;;
@@ -1954,6 +1960,13 @@ payload() { # <rendered-json> <contact-id>
       '{message_type: "comment", type: "admin", admin_id: $admin, body: .html}'
     return
   fi
+  if [ "$MESSAGE_TYPE" = "inapp" ]; then
+    # fable-copy-1030-r5/h: the SAME approved body, byte-identical, as an Intercom in-app message
+    # (no subject or email template: in-app messages carry the body only).
+    printf '%s' "$1" | "$JQ_BIN" -c --arg admin "$INTERCOM_ADMIN_ID" --arg to "$2" \
+      '{message_type: "inapp", from: {type: "admin", id: $admin}, to: {type: "user", id: $to}, body: .html}'
+    return
+  fi
   printf '%s' "$1" | "$JQ_BIN" -c --arg mt "$REQ_TYPE" --arg admin "$INTERCOM_ADMIN_ID" --arg to "$2" \
     '{message_type: $mt, template: "personal", from: {type: "admin", id: $admin}, to: {type: "user", id: $to}, body: .html}
      + {subject: .subject}'
@@ -2522,6 +2535,9 @@ thread_check() { # sets THREAD_WHY (empty when $THREAD can carry the note), THRE
   fi
 }
 THREAD_CONTACT_PICK=""
+# QA #1511: the recipient the identity checks chose (G4 read it into G_CONTACT). An auto-picked thread may belong to
+# another of the account's contacts; if that thread then fails its check, the email goes to THIS contact again.
+CANON_CONTACT_ID="$CONTACT_ID"
 if [ -n "$THREAD" ] && [ "$LIVE" = "1" ]; then
   thread_check
   if [ -z "$THREAD_WHY" ] && [ -n "$THREAD_CONTACT_PICK" ]; then
@@ -2538,11 +2554,57 @@ if [ -n "$THREAD" ] && [ "$LIVE" = "1" ]; then
     elif [ "$R1_THREAD" = "1" ]; then
       printf 'HELD r1_filing_thread credits=%s (%s); nothing was sent or claimed\n' "$N" "${THREAD_WHY:0:300}"; exit 3
     elif [ "$THREAD_AUTO" = "1" ]; then
-      THREAD=""; MESSAGE_TYPE="email"
+      THREAD=""; MESSAGE_TYPE="email"; CONTACT_ID="$CANON_CONTACT_ID"
     elif [ "$THREAD_UNREAD" = "1" ]; then
       printf 'THREAD CHECK NOT VERIFIED; nothing was sent or claimed: %s\n' "$THREAD_WHY" >&2; exit 4
     else
       record_refusal "$THREAD_WHY"
+    fi
+  fi
+fi
+# Delivery channel (p1 191; r5 #1511, fable-copy-1030-r5/h, firstmate 022). The ROUTE is selected first (above:
+# the user's own open conversation, else a note by email); reachability is checked only for the route that
+# was selected, and an unreachable route moves to the NEXT channel in this fixed order:
+#   1. in-thread Caroline comment (an open conversation) - already chosen above; email reachability is moot;
+#   2. email (POST /messages, message_type email) - only when Intercom will email this contact;
+#   3. Intercom in-app (POST /messages, message_type inapp, the same approved body) - only with --inapp-fallback
+#      (armed after the signed first-batch dry run) and only for a USER contact the messenger has seen
+#      (web, iOS or Android last_seen_at);
+#   4. push, 5. bell - hydra has no sender for either yet (core #11075 dark), so they are named in the reason only;
+#   none left: refused and RECORDED as no_channel (terminal, never a send row; the next run skips the user and the
+#   outbound tick's no-channel tray carries it). Only a readable contact object for THIS contact proves anything.
+if [ -z "$THREAD" ] && [ "$LIVE" = "1" ]; then
+  # QA #1511: reachability is read for the FINAL recipient; the cached G4 contact is reused only when it IS that contact.
+  reach="${G_CONTACT:-}"
+  if [ -z "$reach" ] || ! printf '%s' "$reach" | "$JQ_BIN" -e --arg c "$CONTACT_ID" '((.id // "") | tostring) == $c' >/dev/null 2>&1; then
+    reach="$(api GET "/contacts/$CONTACT_ID")" \
+      || { printf 'CONTACT READ FAILED (curl) before choosing the channel; nothing was sent or claimed\n' >&2; exit 4; }
+  fi
+  printf '%s' "$reach" | "$JQ_BIN" -e --arg c "$CONTACT_ID" 'type == "object" and (.type // "") == "contact"
+      and ((.id // "") | tostring) == $c' >/dev/null 2>&1 \
+    || { printf 'CONTACT READ NOT VERIFIED before choosing the channel (not this contact object); nothing was sent or claimed\n' >&2; exit 4; }
+  unreach="$(printf '%s' "$reach" | "$JQ_BIN" -r 'if .has_hard_bounced == true then "hard_bounced"
+    elif .unsubscribed_from_emails == true then "unsubscribed" elif .marked_email_as_spam == true then "marked_spam"
+    else "" end' 2>/dev/null)" || unreach="unreadable"
+  if [ -n "$unreach" ]; then
+    inapp_why=""
+    if [ "$USER_ID" = "15" ]; then
+      inapp_why="account 15 never gets an in-app message (fable-copy-1030-r5/h)"
+    elif [ "$(printf '%s' "$reach" | "$JQ_BIN" -r '.role // ""' 2>/dev/null)" != "user" ]; then
+      inapp_why="in-app goes to Intercom users only (this contact is not a user)"
+    elif ! printf '%s' "$reach" | "$JQ_BIN" -e '[.last_seen_at, .ios_last_seen_at, .android_last_seen_at]
+        | map(select(type == "number" and . > 0)) | length > 0' >/dev/null 2>&1; then
+      inapp_why="in-app not deliverable (the messenger has never seen this contact)"
+    elif [ "$INAPP_FALLBACK" != "1" ]; then
+      # QA #1511: an in-app route EXISTS but is not armed yet (armed only after the signed first-batch dry run).
+      # Not a terminal refusal: nothing is recorded, so the first run with --inapp-fallback still reaches this user.
+      printf 'DEFERRED inapp_not_armed credits=%s (email_unreachable:%s; an in-app route exists, --inapp-fallback not set); nothing was sent or claimed\n' "$N" "$unreach"
+      exit 3
+    fi
+    if [ -z "$inapp_why" ]; then
+      MESSAGE_TYPE="inapp"; ROUTE_WHY="email_unreachable:$unreach"
+    else
+      record_refusal "no_channel: email_unreachable:$unreach (Intercom will not email this contact); $inapp_why; push and bell have no hydra sender yet; nothing was sent"
     fi
   fi
 fi
@@ -2682,7 +2744,8 @@ if [ -n "$REPLY_DUE" ]; then
   esac
 fi
 if [ "$ACTION" = "check-recipient" ]; then
-  printf 'RECIPIENT OK %s %s copy=%s credits=%s\n' "$CAMPAIGN" "$KIND" "$COPY" "$N"; exit 0
+  printf 'RECIPIENT OK %s %s copy=%s credits=%s route=%s%s\n' "$CAMPAIGN" "$KIND" "$COPY" "$N" \
+    "$(if [ -n "$THREAD" ]; then echo "comment:$THREAD"; else echo "$MESSAGE_TYPE"; fi)" "${ROUTE_WHY:+ ($ROUTE_WHY)}"; exit 0
 fi
 [ "$ACTION" = "post" ] || die "internal: '$ACTION' past the recipient check."
 if [ "$KIND" = "reminder-7" ]; then
@@ -2829,10 +2892,11 @@ if [ -n "$THREAD" ]; then
       "$THREAD" "${R_TYPE:-<none>}" "${R_PART:-<none>}" "$LOG_FILE" "$RESPONSE" >&2
     exit 4
   fi
-elif [ "$R_TYPE" != "admin_message" ] || [ "$R_MT" != "$EXPECT_TYPE" ] || ! printf '%s' "$R_ID" | grep -qE '^[0-9]+$'; then
+elif [ "$R_TYPE" != "admin_message" ] || [ "$R_MT" != "$(if [ "$MESSAGE_TYPE" = "inapp" ]; then echo inapp; else echo "$EXPECT_TYPE"; fi)" ] \
+     || ! printf '%s' "$R_ID" | grep -qE '^[0-9]+$'; then
   ledger finalize --message-row "$ROW_ID" --status attempted --reason "unverified response type=${R_TYPE:-none} message_type=${R_MT:-none}" --api-log "$LOG_FILE" >/dev/null || true
   printf 'POST NOT VERIFIED: expected an admin_message of type "%s", Intercom answered type "%s" message_type "%s". Logged at %s; left CLAIMED. Response:\n%s\n' \
-    "$EXPECT_TYPE" "${R_TYPE:-<none>}" "${R_MT:-<none>}" "$LOG_FILE" "$RESPONSE" >&2
+    "$(if [ "$MESSAGE_TYPE" = "inapp" ]; then echo inapp; else echo "$EXPECT_TYPE"; fi)" "${R_TYPE:-<none>}" "${R_MT:-<none>}" "$LOG_FILE" "$RESPONSE" >&2
   exit 4
 fi
 ledger finalize --message-row "$ROW_ID" --status sent --message-id "$R_ID" --conversation-id "$R_CONV" \

@@ -151,6 +151,9 @@ case "$method $path" in
   "POST /conversations/777/tags")
     printf '{"type":"tag","id":"9","name":"%s"}' "${STUB_TAG_NAME:-credit-proof}" ;;
   "GET /contacts/"*)
+    # STUB_CONTACT_GET_<id> answers for that one contact only (QA #1511: two contacts, opposite reachability)
+    per="STUB_CONTACT_GET_$(printf '%s' "${path#/contacts/}" | sed 's/[?].*//' | tr -cd 'A-Za-z0-9')"
+    if [ -n "${!per:-}" ]; then printf '%s' "${!per}"; exit 0; fi
     if [ -n "${STUB_CONTACT_GET:-}" ]; then printf '%s' "$STUB_CONTACT_GET"; exit 0; fi
     # default: the contact asked for, an Intercom USER created long ago (the go-live guards G1/G4 read it)
     cid="${path#/contacts/}"; cid="${cid%%\?*}"
@@ -500,7 +503,7 @@ OTHER_PRO="0c4e7a2b-1f3d-4b6a-9e8c-7d5a3b1f0e92"
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
   decider_approved r1 catalog_confirmed
   run -0 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --check-recipient
-  [[ "$output" == "RECIPIENT OK verify-live initial copy=v1 credits=1" ]]
+  [[ "$output" == "RECIPIENT OK verify-live initial copy=v1 credits=1 route=email" ]]
   STUB_CONTACTS='{"type":"list","data":[{"id":"u1","role":"user","email":"jane.doe@example.com","external_id":"999"}]}' \
     run -1 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --check-recipient
   [[ "$output" == *"external_id mismatch"* ]]
@@ -3499,6 +3502,123 @@ rd_locked() { sed 's/^readonly REPLY_DUE_CORRECTION_APPROVED=1$/readonly REPLY_D
   [[ "$(rendered .body | plain)" == *'for "Slap" and "Knockout":'* ]]
 }
 
+@test "email reachability (p1 191, r5, QA #1511): decided AFTER the route - an email to a bounced/unsubscribed/spam contact is refused and RECORDED (no send row; the next run skips); an in-app route still goes" {
+  for flag in has_hard_bounced unsubscribed_from_emails marked_email_as_spam; do
+    rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+    credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+    STUB_CONTACT_GET="{\"type\":\"contact\",\"id\":\"6650aa01\",\"role\":\"user\",\"created_at\":1700000000,\"$flag\":true}" \
+      run -1 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+    [[ "$output" == *"email_unreachable:"* ]]
+    [ "$(posts)" -eq 0 ]
+    [ -z "$(sql "SELECT * FROM verify_messages WHERE status IN ('attempted','sent','rejected')")" ]     # never attempted
+    [[ "$(sql "SELECT status || ':' || reason FROM verify_messages")" == "refused:no_channel: email_unreachable:"* ]]  # durable record
+  done
+  # the next run does not refuse again: the recorded refusal closes these requests for the campaign
+  STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000,"marked_email_as_spam":true}' \
+    run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "SKIPPED"* ]]; [ "$(posts)" -eq 0 ]
+  # a bounced contact WITH a valid open conversation: the auto-picked in-app route goes (email reachability is moot)
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+  now=$(date -u +%s)
+  open="{\"conversations\":[{\"id\":\"777\",\"state\":\"open\",\"updated_at\":$((now - 86400))}],\"total_count\":1}"
+  STUB_OPEN_CONVS="$open" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]' ',"title":"Credit Verification"')" \
+    STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000,"has_hard_bounced":true}' \
+    run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED comment"* ]]; [ "$(replies)" -eq 1 ]; [ "$(posts)" -eq 0 ]
+  # ... and when that thread fails a check the route falls back to email: then the bounce refuses it
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+  STUB_OPEN_CONVS="$open" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]' ',"title":"Credit Verification","admin_assignee_id":10206197')" \
+    STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000,"has_hard_bounced":true}' \
+    run -1 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"email_unreachable:hard_bounced"* ]]; [ "$(posts)" -eq 0 ]; [ "$(replies)" -eq 0 ]
+  # an unreadable contact (another object) is never emailed and claims nothing
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+  STUB_CONTACT_GET='{"type":"contact","id":"someone-else","role":"user","created_at":1700000000}' \
+    run "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [ "$status" -ne 0 ]; [ "$(posts)" -eq 0 ]
+  [ -z "$(sql "SELECT * FROM verify_messages WHERE status IN ('attempted','sent')")" ]
+  # a reachable contact is sent as before
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+  STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000,"has_hard_bounced":false}' \
+    run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email"* ]]
+}
+
+
+@test "channel order (firstmate 022, r5 #1511, copy /h): route first; email unreachable -> Intercom in-app (armed, messenger-seen user) -> push/bell (no sender) -> no_channel recorded" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  seen='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000,"has_hard_bounced":true,"last_seen_at":1760000000}'
+  # 1. armed + bounced + messenger-seen user: the SAME approved body goes as in-app, ledgered message_type=inapp
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+  STUB_CONTACT_GET="$seen" run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --inapp-fallback
+  [[ "$output" == "POSTED inapp message="* ]]; [ "$(posts)" -eq 1 ]; [ "$(replies)" -eq 0 ]
+  [ "$(msg .message_type)" = "inapp" ]; [ "$(msg .to.id)" = "6650aa01" ]; [ "$(msg .from.id)" = "5763097" ]
+  [ "$(msg '.subject // "none"')" = "none" ]; [ "$(msg '.template // "none"')" = "none" ]
+  inapp_body="$(msg .body)"
+  [ "$(sql "SELECT status || ':' || message_type FROM verify_messages")" = "sent:inapp" ]
+  # byte-identical to the email body for a reachable contact (copy /h: no text change, channel only)
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+  STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}' \
+    run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --inapp-fallback
+  [[ "$output" == "POSTED email"* ]]; [ "$(msg .message_type)" = "email" ]; [ "$(msg .body)" = "$inapp_body" ]
+  # 2. the check-recipient preview names the route (the signed dry run reads this) and writes nothing
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+  STUB_CONTACT_GET="$seen" run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --inapp-fallback --check-recipient
+  [[ "$output" == "RECIPIENT OK"*"route=inapp (email_unreachable:hard_bounced)"* ]]; [ "$(posts)" -eq 0 ]
+  [ -z "$(sql "SELECT * FROM verify_messages" 2>/dev/null)" ]
+  # 3. an open conversation still wins (route selected BEFORE reachability): in-thread comment, no in-app
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+  now=$(date -u +%s)
+  STUB_OPEN_CONVS="{\"conversations\":[{\"id\":\"777\",\"state\":\"open\",\"updated_at\":$((now - 86400))}],\"total_count\":1}" \
+    STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]' ',"title":"Credit Verification"')" \
+    STUB_CONTACT_GET="$seen" run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --inapp-fallback
+  [[ "$output" == "POSTED comment"* ]]; [ "$(replies)" -eq 1 ]; [ "$(posts)" -eq 0 ]
+  # 4. NOT armed but an in-app route exists (QA #1511): DEFERRED, NOTHING recorded - the first armed run still reaches them
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+  STUB_CONTACT_GET="$seen" run -3 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "DEFERRED inapp_not_armed credits=1 (email_unreachable:hard_bounced"* ]]; [ "$(posts)" -eq 0 ]
+  [ -z "$(sql "SELECT * FROM verify_messages" 2>/dev/null)" ]
+  STUB_CONTACT_GET="$seen" run -3 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --check-recipient
+  [[ "$output" == "DEFERRED inapp_not_armed"* ]]                       # the read-only check answers the same (C11)
+  STUB_CONTACT_GET="$seen" run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --inapp-fallback
+  [[ "$output" == "POSTED inapp"* ]]                                    # ... and the next ARMED run sends in-app
+  # no in-app route at all (never seen), unarmed: recorded no_channel naming every channel tried
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+  STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000,"has_hard_bounced":true}' \
+    run -1 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"no_channel: email_unreachable:hard_bounced"*"never seen"*"push and bell have no hydra sender"* ]]; [ "$(posts)" -eq 0 ]
+  [[ "$(sql "SELECT status || ':' || reason FROM verify_messages")" == "refused:no_channel:"* ]]
+  # 5. armed, but the messenger never saw the contact / the contact is a lead: no_channel, nothing sent
+  for c in '{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000,"unsubscribed_from_emails":true}' \
+           '{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000,"unsubscribed_from_emails":true,"last_seen_at":null,"ios_last_seen_at":0}'; do
+    rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+    STUB_CONTACT_GET="$c" run -1 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --inapp-fallback
+    [[ "$output" == *"no_channel: email_unreachable:"* ]]; [ "$(posts)" -eq 0 ]; [ "$(replies)" -eq 0 ]
+    [[ "$(sql "SELECT status FROM verify_messages")" == "refused" ]]
+  done
+  # a lead never reaches the channel choice (G4 refuses non-users first); nothing goes by any channel
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+  STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"lead","created_at":1700000000,"marked_email_as_spam":true,"last_seen_at":1760000000}' \
+    run "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --inapp-fallback
+  [ "$status" -ne 0 ]; [ "$(posts)" -eq 0 ]; [ "$(replies)" -eq 0 ]
+  # account 15 never gets an in-app message (copy /h), armed or not
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+  jq '.user.id = "15"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c15.json"
+  STUB_CONTACT_GET="$seen" run -1 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c15.json" --approved-by U7RP6HKUZ --inapp-fallback
+  [[ "$output" == *"no_channel: email_unreachable:hard_bounced"*"account 15 never gets an in-app message"* ]]; [ "$(posts)" -eq 0 ]
+  # 6. a mobile-only messenger visit counts as seen
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+  STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000,"has_hard_bounced":true,"ios_last_seen_at":1760000000}' \
+    run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --inapp-fallback
+  [[ "$output" == "POSTED inapp"* ]]
+  # 7. Intercom answering an in-app send with an EMAIL message is NOT VERIFIED (left claimed, never re-sent)
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+  STUB_MESSAGE_RESPONSE='{"type":"admin_message","id":"5001","message_type":"email","conversation_id":null}' \
+    STUB_CONTACT_GET="$seen" run -4 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --inapp-fallback
+  [[ "$output" == *'POST NOT VERIFIED: expected an admin_message of type "inapp"'* ]]
+  [ "$(sql "SELECT status FROM verify_messages")" = "attempted" ]
+}
+
 @test "R1 (r5 HOLD 10-30 19:0xZ): our free-text acknowledgement after the filing part = already receipted -> held, nothing claimed; a note or an earlier comment does not count" {
   unlocked_gate received
   OLD='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
@@ -3659,6 +3779,35 @@ rd_locked() { sed 's/^readonly REPLY_DUE_CORRECTION_APPROVED=1$/readonly REPLY_D
   [[ "$output" != *"r1_filing_class_unknown"* ]]
 }
 
+@test "QA #1511: two contacts, opposite reachability - an auto-picked thread of the OTHER contact that fails its check falls back to the canonical contact, and reachability is read for that contact" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"; presented "[\"$PRESENTED\"]"
+  now=$(date -u +%s)
+  open="{\"conversations\":[{\"id\":\"777\",\"state\":\"open\",\"updated_at\":$((now - 86400))}],\"total_count\":1}"
+  human="$(thread '[{"type":"contact","id":"mob1"}]' ',"title":"Credit Verification","admin_assignee_id":10206197')"
+  web_ok='{"type":"contact","id":"web1","role":"user","created_at":1700000000}'
+  web_bad='{"type":"contact","id":"web1","role":"user","created_at":1700000000,"has_hard_bounced":true}'
+  mob_ok='{"type":"contact","id":"mob1","role":"user","created_at":1700000000}'
+  mob_bad='{"type":"contact","id":"mob1","role":"user","created_at":1700000000,"has_hard_bounced":true}'
+  # canonical web1 reachable, mob1 (owner of the human-assigned thread) bounced: email goes to web1
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+  STUB_CONTACTS="$(dual)" STUB_OPEN_CONVS="$open" STUB_CONVERSATION="$human" \
+    STUB_CONTACT_GET_web1="$web_ok" STUB_CONTACT_GET_mob1="$mob_bad" \
+    run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email"* ]]; [ "$(msg .to.id)" = "web1" ]; [ "$(replies)" -eq 0 ]
+  [ "$(sql "SELECT contact_id FROM verify_messages WHERE status='sent'")" = "web1" ]
+  # reversed: web1 bounced, mob1 reachable: the canonical recipient web1 cannot be emailed -> no_channel (not armed)
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+  STUB_CONTACTS="$(dual)" STUB_OPEN_CONVS="$open" STUB_CONVERSATION="$human" \
+    STUB_CONTACT_GET_web1="$web_bad" STUB_CONTACT_GET_mob1="$mob_ok" \
+    run -1 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"no_channel: email_unreachable:hard_bounced"* ]]; [ "$(posts)" -eq 0 ]; [ "$(replies)" -eq 0 ]
+  # a passing thread of mob1 carries the note in-thread to mob1 (reachability moot)
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+  STUB_CONTACTS="$(dual)" STUB_OPEN_CONVS="$open" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"mob1"}]' ',"title":"Credit Verification"')" \
+    STUB_CONTACT_GET_web1="$web_bad" STUB_CONTACT_GET_mob1="$mob_bad" \
+    run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED comment"* ]]; [ "$(replies)" -eq 1 ]
+}
 
 @test "reply_due handoff (QA #1517 race): the customer wrote again after comm_state read the thread -> HELD reply_due_newer_part, no note, no tag, no ledger row" {
   credits "$TEST_TMPDIR/c.json" Jane "u1:A&R:La Flor:Lerica"
