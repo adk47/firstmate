@@ -1,0 +1,7 @@
+{
+  "rule": "C5:validator_reject/v1",
+  "description": "Coded close of a request the IDP validator declined (a current reject_* rule at 100, no review_* hold, no claim of any type by the submitter on the profile, pop 1-59, gate allow, not watchlisted, no R8 hold, V9 read and not anchored). Shadow first; apply needs this file flipped in a reviewed PR after r5's GO on the shadow read (firstmate 174). The executor closes one PUT per user per day, paid first.",
+  "apply_enabled": false,
+  "approved_by": null,
+  "approval_ref": null
+}

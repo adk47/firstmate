@@ -234,14 +234,21 @@ def load_tray(path: str, now: datetime | None = None) -> Tray:
                 cap_ruling if isinstance(cap_ruling, str) else None, anchor_flag, recheck)
 
 
-EVIDENCE_RECHECKS = ("", "no_proof_after_ask")
+EVIDENCE_RECHECKS = ("", "no_proof_after_ask", "validator_reject")
 
 
-def coded_evidence(rows: Iterable["TrayRow"]) -> dict[str, str]:
-    """{request id: '' (the close still stands) | why not} - the C5 no_proof_after_ask evidence re-read (proof in our
-    stores + Intercom documents + any reply since the ask) for rows citing decisions:<id>. Never raises; a row whose
-    evidence cannot be read is refused."""
+def coded_evidence(rows: Iterable["TrayRow"], kind: str = "no_proof_after_ask") -> dict[str, str]:
+    """{request id: '' (the close still stands) | why not}, re-read at execution for a coded producer whose rule can
+    change between decision and write. no_proof_after_ask: proof in our stores + Intercom documents + any reply since
+    the ask. validator_reject: the cited reject rule still at 100 and current, no review_* hold, no R8 account hold
+    (QA #1559; the executor's own rails cover gate / watchlist / claim / pop / V9). Never raises; unreadable = refused."""
     rows = list(rows)
+    if kind == "validator_reject":
+        try:
+            from credit_review import validator_reject_close
+            return validator_reject_close.recheck_rows(rows)
+        except Exception as exc:  # noqa: BLE001 - unreadable = refused
+            return {r.request_id.lower(): f"unknown:{str(exc)[:80]}" for r in rows}
     try:
         from credit_review import no_proof_close
         ids = {r.request_id.lower(): int(r.coded_outcome.split(":", 1)[1]) for r in rows
@@ -668,7 +675,7 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
         readback_tries: int = 6, readback_wait_s: float = 5.0,
         sleep: Callable[[float], None] = time.sleep,
         outcome_fn: Callable[[list[str]], dict[str, dict[str, Any]]] = ledger_outcomes,
-        evidence_fn: Callable[[list["TrayRow"]], dict[str, str]] = coded_evidence,
+        evidence_fn: Callable[[list["TrayRow"]], dict[str, str]] | None = None,
         ) -> Result:
     """Execute (apply) or dry-run one tray. In apply mode EVERY batch re-reads its rows' facts and the account gate
     immediately before its PUT (no fact or gate answer outlives its batch, QA #1475), under one lock from the cap
@@ -676,6 +683,7 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
     surprise: a refused/failed write, a row the server reports not moved, a read-back failure, an unwritable audit,
     the kill file, the cap or the fan-out check."""
     res = Result(tray.path, "apply" if apply else "dry-run", rows=len(tray.rows))
+    evidence_fn = evidence_fn or (lambda rs: coded_evidence(rs, tray.recheck_evidence))
     daily_cap = tray.daily_cap if daily_cap is None else daily_cap
     run_id = uuid.uuid4().hex[:12]
     if limit is not None and (not isinstance(limit, int) or isinstance(limit, bool) or limit < 1):
@@ -869,7 +877,7 @@ def verify_batch(tray_path: str, ruling_id: str, run_id: str, ids: list[str], ex
                  gate_fn: Callable[[Any], account_gate.GateResult] | None = None,
                  anchor_fn: Callable[[list[str]], dict[str, str]] = dsp_anchors,
                  outcome_fn: Callable[[list[str]], dict[str, dict[str, Any]]] = ledger_outcomes,
-                 evidence_fn: Callable[[list["TrayRow"]], dict[str, str]] = coded_evidence,
+                 evidence_fn: Callable[[list["TrayRow"]], dict[str, str]] | None = None,
                  audit_path: str = AUDIT_PATH, now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
                  ) -> str | None:
     """Re-check ONE batch at the wrapper boundary, independently of the run that asked for it. None = allowed,
@@ -929,6 +937,7 @@ def verify_batch(tray_path: str, ruling_id: str, run_id: str, ids: list[str], ex
     closed = closed_today(audit_path, now(), tray.action, own_batch=(run_id, want))
     anchors = anchor_fn(want) if tray.refuse_if_dsp_anchor else {}
     outcomes = outcome_fn([rows[i].coded_outcome for i in want])
+    evidence_fn = evidence_fn or (lambda rs: coded_evidence(rs, tray.recheck_evidence))
     evidence = evidence_fn([rows[i] for i in want]) if tray.recheck_evidence else {}
     for i in want:
         r = rows[i]

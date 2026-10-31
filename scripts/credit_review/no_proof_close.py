@@ -479,18 +479,22 @@ def publish(db: sqlite3.Connection, run_id: str, tray_dir: str, now: datetime, r
         except Exception as exc:  # noqa: BLE001 - unreadable = it no longer stands
             why = f"unknown:{str(exc)[:80]}"
         (expired.append((did, r, why)) if why else fresh.append((did, r)))
-    docs = tray_docs(fresh)
     staged = []
-    for status, doc in docs.items():
-        ids = [int(x["coded_outcome"].split(":")[1]) for x in doc["rows"]]
-        name = tray_name(status, ids)
-        doc["expires_at"] = (now + TRAY_TTL).strftime("%Y-%m-%dT%H:%M:%SZ")
-        tmp = outdir / (name + ".tmp")
-        tmp.write_text(json.dumps(doc, indent=1), encoding="utf-8")
-        staged.append((name, tmp, doc))
+    # The slow re-checks ran outside the lock; the CLAIM is atomic (QA #1559): under one write lock, keep only rows
+    # still unmarked (a concurrent publisher may have taken some), stage, mark, commit - then rename.
     db.commit()
     db.execute("BEGIN IMMEDIATE")
     try:
+        still = {did for did, _r, _ev in unpublished(db)}
+        fresh = [(did, r) for did, r in fresh if did in still]
+        expired = [(did, r, why) for did, r, why in expired if did in still]
+        for status, doc in tray_docs(fresh).items():
+            ids = [int(x["coded_outcome"].split(":")[1]) for x in doc["rows"]]
+            name = tray_name(status, ids)
+            doc["expires_at"] = (now + TRAY_TTL).strftime("%Y-%m-%dT%H:%M:%SZ")
+            tmp = outdir / (name + ".tmp")
+            tmp.write_text(json.dumps(doc, indent=1), encoding="utf-8")
+            staged.append((name, tmp, doc))
         for did, r, why in expired:
             db.execute("INSERT INTO decision_outcomes (run_id, at, request_id, action, outcome) VALUES (?,?,?,?,?)",
                        (run_id, at, r.request_id, "tray", f"expired:decisions:{did}:{why}"[:300]))

@@ -334,6 +334,20 @@ class PublishTest(unittest.TestCase):
                         (json.dumps(["33333333-3333-4333-8333-333333333333"]),))
         self.assertEqual(npc.latest_ask_id(self.db, R1), 1)
 
+    def test_two_publishers_never_put_one_decision_in_two_trays(self):
+        """QA #1559 (same race as validator_reject): B publishes after A's slow re-check but before A's lock."""
+        npc.record(self.db, "run-1", "apply", [self.close_row()], NOW)
+        db_b = sqlite3.connect(self.path, timeout=5)
+        b_paths = []
+
+        def recheck_then_race(uid, rids, since, contact):
+            if not b_paths:
+                b_paths.append(npc.publish(db_b, "run-b", self.dir, NOW, self.ok)["trays"])
+            return ""
+        a_paths = npc.publish(self.db, "run-a", self.dir, NOW, recheck_then_race)["trays"]
+        self.assertEqual((len(b_paths[0]), a_paths), (1, []))              # B took it; A publishes nothing
+        self.assertEqual(len(list(Path(self.dir).glob("*.json"))), 1)
+
     def test_shadow_rows_are_never_published(self):
         npc.record(self.db, "run-1", "shadow", [self.close_row()], NOW)
         self.assertEqual(npc.unpublished(self.db), [])
