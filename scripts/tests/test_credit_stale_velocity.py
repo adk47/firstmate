@@ -41,7 +41,15 @@ class OutcomeTest(unittest.TestCase):
 
     def test_v9_approve_on_a_row_still_carrying_the_retired_rule_is_blocked_not_released(self):
         o = self.one()
-        self.assertEqual((o.outcome, sv.DECISION_FOR[o.outcome]), ("blocked_stale_rule", "hold"))
+        # core #11067/#11068: the retired velocity score no longer blocks the ANCHORED path -> released
+        self.assertEqual((o.outcome, sv.DECISION_FOR[o.outcome]), ("release_anchored", "approve"))
+        self.assertIn("retired, ignored by core: reject_high_velocity_profile", o.reason)
+        real = sv.BLOCKED_BY_CORE
+        sv.BLOCKED_BY_CORE = frozenset({"reject_high_velocity_profile"})     # a rule core does not ignore yet
+        try:
+            self.assertEqual(self.one().outcome, "blocked_stale_rule")
+        finally:
+            sv.BLOCKED_BY_CORE = real
         self.assertEqual(o.evidence["retired_firing"], ["reject_high_velocity_profile"])
 
     def test_v9_approve_with_no_firing_rule_is_release_anchored(self):
@@ -158,7 +166,7 @@ class SummaryAndRecordTest(unittest.TestCase):
         self.assertEqual(sv.record(db, "run-1", "shadow", rows, datetime(2026, 10, 30, tzinfo=timezone.utc)), 1)
         got = db.execute("SELECT decision, evidence_kind, reason_code, mode, rule_version, expected_status, "
                          "evidence_json FROM decisions").fetchone()
-        self.assertEqual(got[:4], ("hold", "revalidate", "revalidate_blocked_stale_rule", "shadow"))
+        self.assertEqual(got[:4], ("approve", "revalidate", "revalidate_release_anchored", "shadow"))
         self.assertTrue(got[4].startswith(sv.RULE_ID + "+"))
         self.assertEqual(got[5], "user_verification_needed")
         self.assertEqual(json.loads(got[6])["retired_firing"], ["reject_high_velocity_profile"])

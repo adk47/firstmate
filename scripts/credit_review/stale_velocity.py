@@ -7,10 +7,9 @@ one of these outcomes:
 
   release_anchored  V9's latest verdict is APPROVE (same-run Spotify+Tidal), pop 1..59, no CURRENT rule fires
                     -> eligible for the ANCHORED path only (anchor upload + the executor's approve tray)
-  blocked_stale_rule  as release_anchored, but core's stored verdict still carries the retired rule at 100, and
-                    core's ANCHORED predicate refuses ANY firing reject_* (agentApprovalGuard anchorAllowedSql,
-                    person path). Needs either a validator re-run that clears it (core no-notify re-validate:
-                    the paused sweep path) or a core change that ignores retired rules. NOT approvable today.
+  blocked_stale_rule  as release_anchored, but a retired rule still fires that core's ANCHORED predicate does NOT yet
+                    ignore (BLOCKED_BY_CORE; empty since core #11067/#11068 exempt the velocity rule). Such a
+                    rule needs its core twin before the row is approvable.
   ask               the user owes proof: the standard ask by comm_state class on the outbound timer (no special note)
   hold              a CURRENT hard signal (account gate not allow, watchlisted, R8 account hold, another rule firing,
                     a big or unknown popularity; NOT a claim on the credited profile, the owner's normal state)
@@ -45,6 +44,10 @@ EVIDENCE_KIND = "revalidate"
 #: paid user's 33 dsp_conflict rows are a hold signal, not an ask). A whitelist: a new class holds until listed.
 OWES_PROOF_CLASSES = ("person_not_linked", "needs_profile_link", "single_dsp_anchor", "absent_on_spotify",
                       "absent_on_tidal")
+#: retired rules core's ANCHORED predicate still refuses. Empty since core #11067/#11068 (RETIRED_ANCHORED_RULES =
+#: ['reject_high_velocity_profile'], master live 2026-10-31 ~03:48Z). A rule retired in hydra but not yet in core goes
+#: here until its core twin ships.
+BLOCKED_BY_CORE: frozenset[str] = frozenset()
 DECISION_FOR = {"release_anchored": "approve", "blocked_stale_rule": "hold", "ask": "defer", "hold": "hold"}
 
 
@@ -132,12 +135,15 @@ def evaluate(scope: list[tuple[str, int]], facts: dict[str, Any], v9: dict[str, 
         elif not verdict:
             outcome, why = "hold", "v9_unread"
         elif verdict == "APPROVE":
-            if stale:
-                outcome, why = "blocked_stale_rule", ("V9 APPROVE (same-run Spotify+Tidal), but core's stored verdict "
-                                                      "still fires " + ",".join(stale) + "; core's ANCHORED predicate "
-                                                      "refuses any firing reject_*")
+            # core #11067/#11068 (live 2026-10-31 ~03:48Z): the ANCHORED predicate ignores RETIRED_ANCHORED_RULES, so a
+            # stored retired score no longer blocks; BLOCKED_BY_CORE lists rules core still refuses (none today)
+            if set(stale) & BLOCKED_BY_CORE:
+                outcome, why = "blocked_stale_rule", ("V9 APPROVE (same-run Spotify+Tidal), but core's ANCHORED "
+                                                      "predicate still refuses " + ",".join(sorted(set(stale)
+                                                                                                   & BLOCKED_BY_CORE)))
             else:
-                outcome, why = "release_anchored", "V9 APPROVE (same-run Spotify+Tidal), no current rule fires"
+                outcome, why = "release_anchored", ("V9 APPROVE (same-run Spotify+Tidal), no current rule fires"
+                                                    + (f" (retired, ignored by core: {','.join(stale)})" if stale else ""))
         elif verdict == "WAIT" and v9_class.get(rid, "") in OWES_PROOF_CLASSES:
             outcome, why = "ask", f"owes proof (V9 WAIT {v9_class[rid]}); the standard ask by comm_state class"
         else:
