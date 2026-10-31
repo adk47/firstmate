@@ -311,13 +311,26 @@ def verify_document(store: DocVerifyStore, proof_db: sqlite3.Connection, proof_i
                 # Ruling 057: the evidence says WHEN Muso's stored credits were read (a cache hit can be
                 # up to the TTL old). It is never a same-run read: only D5b's fresh capture sets fresh_since.
                 checks[-1].detail["raw_credits_read_at"] = store.raw_credits_read_at(r.track_id)
+                # Fable 250 / measured 10-31: the ISRC release facts (MusicBrainz + Deezer, ~95% of MusicBrainz traffic)
+                # feed only two gate uses - confirming a claim that could otherwise be VERIFIED (which needs the
+                # document itself to show the claimant in this role on this track), and rescuing an unreadable DSP
+                # check from `unknown`; no fraud signal reads them. In one hour 2,520 of 2,556 looked-up ISRCs (99%)
+                # served no such claim, so they are looked up only when one of the two can apply.
                 rel = None
-                if r.isrc:
+                needs_release = needs_release_facts(supports(ex, r.names, role, r.title, r.isrc), checks[-1])
+                if r.isrc and needs_release:
                     if r.isrc not in release_cache:
                         release_cache[r.isrc] = cached_release(store, deps.net, r.isrc)
                     rel = release_cache[r.isrc]
-                checks.append(xc.isrc_check(rel, role, r.names))
-                checks.append(xc.label_check(issuer, itype, rel))
+                if r.isrc and not needs_release:
+                    why = {"why": "not looked up: no use for the release facts on this claim (the document does not "
+                                  "show the claimant in this role on this track, and the DSP check read)",
+                           "isrc": r.isrc}
+                    checks.append(xc.Check("xc_isrc", xc.SKIPPED, why))
+                    checks.append(xc.Check("xc_label", xc.SKIPPED, why))
+                else:
+                    checks.append(xc.isrc_check(rel, role, r.names))
+                    checks.append(xc.label_check(issuer, itype, rel))
                 # F9: a code we issued with the per-need ask, shown in this document inside its window
                 chs = store.challenges(rid) if intake is not None else []
                 ch = challenge.check(text, chs, user_id=r.user_id,
@@ -488,6 +501,13 @@ def lookup_key(name: str | None) -> str:
     non-Latin names never collide (xc.fold drops non-ASCII letters: 张伟 and 李娜 both fold to '')."""
     import unicodedata
     return " ".join(unicodedata.normalize("NFKC", str(name or "")).casefold().split())
+
+
+def needs_release_facts(support: Any, dsp_check: Any) -> bool:
+    """The ISRC release facts can change this claim's outcome only when the document supports the claim (the
+    VERIFIED path, where xc_isrc can confirm and xc_label can doubt) or the DSP check errored (a POSITIVE xc_isrc keeps
+    the claim out of `unknown`). Every other gate path ignores them (gate.decide; no fraud signal reads them)."""
+    return support is not None or getattr(dsp_check, "status", None) == xc.ERROR
 
 
 def cached_official(store: DocVerifyStore, net: Any, issuer: str) -> tuple[list[str], str]:

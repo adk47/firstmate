@@ -1399,6 +1399,66 @@ class RunnerTests(unittest.TestCase):
         kinds = {k for (k,) in self.store.db.execute("SELECT DISTINCT kind FROM dv_lookup_cache")}
         self.assertTrue({"issuer_domains", "isrc_release"} <= kinds, kinds)
 
+    def test_the_isrc_release_lookup_is_made_only_when_it_can_change_the_outcome(self):
+        # Fable 250 / 10-31: 99% of ISRC lookups served no claim that could use them.
+        def run_with(answer, raw_credits=None):
+            self.store.db.execute("DELETE FROM dv_outcomes")
+            self.store.db.execute("DELETE FROM dv_steps")
+            self.store.db.execute("DELETE FROM dv_lookup_cache")
+            self.store.db.execute("DELETE FROM dv_extract_cache")
+            self.store.db.commit()
+            self.net.calls.clear()
+            self.answer = answer
+            self.deps.extractor = Extractor(self.store, key=str(id(answer)), post=lambda *a: or_response(self.answer))
+            if raw_credits is not None:
+                self.deps.raw_credits = raw_credits
+            runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
+            isrc = [c for c in self.net.calls if c.startswith("mb:isrc") or "deezer.com/track/isrc" in c]
+            st = self.store.db.execute("SELECT status, detail_json FROM dv_steps WHERE step='xc_isrc'").fetchone()
+            return isrc, st
+        # supported claim (the document names Ann Alpha mixing Night Drive): the lookup is made
+        isrc, st = run_with(GOOD_ANSWER)
+        self.assertTrue(isrc)
+        self.assertNotEqual(st[0], xc.SKIPPED)
+        # unsupported claim, DSP check read: no MusicBrainz / Deezer ISRC call, recorded as SKIPPED with the why
+        other = {**GOOD_ANSWER, "credits": [{"person": "Somebody Else", "role": "Mixer", "track": "Night Drive",
+                                             "confidence": 0.9}]}
+        isrc, st = run_with(other)
+        self.assertEqual(isrc, [])
+        self.assertEqual(st[0], xc.SKIPPED)
+        self.assertIn("not looked up", json.loads(st[1])["why"])
+        # unsupported claim but the DSP check ERRORED: the lookup is made (a POSITIVE xc_isrc keeps it out of unknown)
+
+        def broken(tid):
+            raise RuntimeError("admin down")
+        isrc, st = run_with(other, raw_credits=broken)
+        self.assertTrue(isrc)
+
+    def test_skipping_the_release_facts_never_changes_an_unsupported_claims_outcome_or_need(self):
+        # Every gate path for a claim the document does not support, with the DSP check read: the outcome and need are
+        # the same whether xc_isrc / xc_label carry their real status or are SKIPPED.
+        import itertools
+        skip = [xc.Check("xc_isrc", xc.SKIPPED, {}), xc.Check("xc_label", xc.SKIPPED, {})]
+        exs = [validate(GOOD_ANSWER), validate({**GOOD_ANSWER, "doc_type": "dashboard_screenshot"}),
+               fallback("x", "no readable text in the document")]
+        n = 0
+        for h3v, isrc_st, label_st, dsp_st, ex, held in itertools.product(
+                ("GENUINE", "SUSPECT", "UNDETERMINED", None), (xc.POSITIVE, xc.SOFT, xc.UNKNOWN, xc.ERROR),
+                (xc.POSITIVE, xc.SOFT, xc.UNKNOWN), (xc.POSITIVE, xc.UNKNOWN, xc.WEAK), exs, (False, True)):
+            base = [xc.Check("xc_dsp", dsp_st, {})]
+            real = base + [xc.Check("xc_isrc", isrc_st, {}), xc.Check("xc_label", label_st, {})]
+            a = gate.decide(h3_verdict=h3v, kind="contract", ex=ex, findings=[], checks=real, account_held=held,
+                            extracted_support=None)
+            b = gate.decide(h3_verdict=h3v, kind="contract", ex=ex, findings=[], checks=base + skip, account_held=held,
+                            extracted_support=None)
+            self.assertEqual((a.outcome, a.need, a.account_hold), (b.outcome, b.need, b.account_hold),
+                             (h3v, isrc_st, label_st, dsp_st, ex.doc_type, held))
+            n += 1
+        self.assertEqual(n, 4 * 4 * 3 * 3 * 3 * 2)
+        self.assertTrue(runner.needs_release_facts({"person": "x"}, xc.Check("xc_dsp", xc.POSITIVE, {})))
+        self.assertTrue(runner.needs_release_facts(None, xc.Check("xc_dsp", xc.ERROR, {})))
+        self.assertFalse(runner.needs_release_facts(None, xc.Check("xc_dsp", xc.UNKNOWN, {})))
+
     def test_a_lookup_with_an_error_is_never_cached_and_expired_rows_are_purged(self):
         calls = []
 
