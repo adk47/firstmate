@@ -64,7 +64,7 @@ class CommStateTest(unittest.TestCase):
 
     def run_(self, campaign="credit-hold-status", copy="credithold", keys=("r1",), conversation="", fraud=()):
         return cs.check(campaign, copy, UID, list(keys), "c1", conversation=conversation,
-                        query=lambda sql: [list(r) for r in self.core] if "credit_requests" in sql else [],
+                        query=lambda sql: [["0", "0"]] if "proof_required_owed" in sql else ([list(r) for r in self.core] if "credit_requests" in sql else []),
                         ic=self.ic, fraud=lambda uid, q: list(fraud))
 
     def test_a_never_told_user_with_nothing_on_file_gets_the_wait_line(self):
@@ -415,7 +415,7 @@ class OwesProofGuardTest(CommStateTest):
         Path(cs.ACCOUNT_HOLDS).write_text(json.dumps({"user_id": str(UID)}) + "\n" if held else "")
         if asked:
             self.note("uvn-status")
-        q = lambda sql: [list(r) for r in rows] if "credit_requests" in sql else []
+        q = lambda sql: [["0", "0"]] if "proof_required_owed" in sql else ([list(r) for r in rows] if "credit_requests" in sql else [])
         try:
             return [cs.check(c, k, UID, ["r1"], "c1", query=q, ic=self.ic, fraud=lambda u, q: []) for c, k in self.FIVE]
         finally:
@@ -478,14 +478,14 @@ class ReplyDueTest(unittest.TestCase):
     def run_due(self, part="57000000001", campaign="uvn-status", copy="uvnstatus"):
         self.core = [["r1", "user_verification_needed", "", "", "2026-10-15 07:21:38 UTC"]]
         return cs.check(campaign, copy, UID, ["r1"], "c1", conversation="215473681300330", reply_due_part=part,
-                        query=lambda sql: [list(r) for r in self.core] if "credit_requests" in sql else [],
+                        query=lambda sql: [["0", "0"]] if "proof_required_owed" in sql else ([list(r) for r in self.core] if "credit_requests" in sql else []),
                         ic=self.ic, fraud=lambda uid, q: [])
 
     def test_lamberto_an_unanswered_question_is_answered_despite_a_note_inside_7_days(self):
         CommStateTest.note(self, "status-team-review", at=(datetime.now(timezone.utc) - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ"))
         self.core = [["r1", "user_verification_needed", "", "", "2026-10-15 07:21:38 UTC"]]
         plain = cs.check("uvn-status", "uvnstatus", UID, ["r1"], "c1", conversation="215473681300330",
-                         query=lambda sql: [list(r) for r in self.core] if "credit_requests" in sql else [],
+                         query=lambda sql: [["0", "0"]] if "proof_required_owed" in sql else ([list(r) for r in self.core] if "credit_requests" in sql else []),
                          ic=self.ic, fraud=lambda uid, q: [])
         self.assertTrue(any(r.startswith("messaged_7d") for r in plain["reasons"]), plain)     # unsolicited: held
         self.assertFalse(self.run_due()["hold"], self.run_due())                                 # the answer: goes
@@ -633,6 +633,8 @@ class NothingNeededBodyTest(unittest.TestCase):
         cs.ACCOUNT_HOLDS = str(Path(tempfile.mkdtemp()) / "h.jsonl"); Path(cs.ACCOUNT_HOLDS).write_text("")
         core = [["r1", "user_verification_needed", "", "", "2026-10-15 07:21:38 UTC"]]
         def q(sql):
+            if "proof_required_owed" in sql:
+                return [["0", "0"]]
             if "regexp_like" in sql:
                 return [["user_verification_needed", "false"]]
             return [list(r) for r in core] if "credit_requests" in sql else []
@@ -662,6 +664,8 @@ class DvUnverifiableOwesTest(unittest.TestCase):
         self.open_ids = ["r1"]
 
     def q(self, sql):
+        if "proof_required_owed" in sql:
+            return [["0", "0"]]
         if "regexp_like" in sql:
             return [["unverified", "false"]]                        # only an unverified row, no review rule fired
         if "lower(CAST(id AS varchar)) IN (" in sql:
@@ -699,6 +703,8 @@ class ApprovalPathOwesNothingTest(unittest.TestCase):
         self.vd, self.pop, self.broken = dict(self.ADMIT), "5", False
 
     def q(self, sql):
+        if "proof_required_owed" in sql:
+            return [["0", "0"]]
         if "regexp_like" in sql:
             return [["user_verification_needed", "false"]]
         if "spotifytracktitle" in sql:
@@ -737,6 +743,45 @@ class ApprovalPathOwesNothingTest(unittest.TestCase):
                      approved_by="U", approval_ref="r", user_id=str(UID))
         vl.finalize(db, message_row=c["message_row"], status="sent", message_id="1"); db.close()
         self.assertEqual(cs.owes_proof(UID, self.q), ["owes:open_ask", "owes:uvn"])
+
+
+class ProofRequiredOwesTest(unittest.TestCase):
+    """v1 STOP-CLASS (10-31 03:12Z): /k told 21 of 22 users 'with our team for review' while their unverified rows said
+    proof_required=true - they OWE proof. Such a row owes (unless core marks a review stage), so /k and every
+    nothing-needed body are held and the user goes to the ask class; a pending fresh DSP capture holds too."""
+
+    def setUp(self):
+        CommStateTest.setUp(self)
+        cs.ACCOUNT_HOLDS = str(Path(tempfile.mkdtemp()) / "h.jsonl"); Path(cs.ACCOUNT_HOLDS).write_text("")
+        self.pr = ["1", "0"]
+
+    def q(self, sql):
+        if "proof_required_owed" in sql:
+            return [self.pr]
+        if "regexp_like" in sql:
+            return [["unverified", "false"]]                 # the 21's shape: unverified, no review rule fired
+        return []
+
+    def k(self):
+        return cs.check("status-team-review", "teamreview", UID, ["r1"], "c1", query=self.q, ic=self.ic, fraud=lambda u, qq: [])
+
+    def test_proof_required_owes_and_k_is_held(self):
+        self.assertEqual(cs.owes_proof(UID, self.q), ["owes:proof_required"])
+        res = self.k()
+        self.assertEqual((res["hold"], res["state"]), (True, "owes_proof"), res)
+        self.assertIn("owes:proof_required", res["reasons"])
+
+    def test_a_pending_fresh_capture_holds_and_a_clean_user_goes(self):
+        self.pr = ["0", "1"]
+        self.assertEqual(cs.owes_proof(UID, self.q), ["owes:fresh_capture_pending"])
+        self.pr = ["0", "0"]
+        self.assertEqual(cs.owes_proof(UID, self.q), [])
+        self.assertFalse(self.k()["hold"])
+
+    def test_an_unreadable_answer_fails_closed(self):
+        self.pr = ["x"]
+        with self.assertRaises(cs.Unknown):
+            cs.owes_proof(UID, self.q)
 
 
 if __name__ == "__main__":

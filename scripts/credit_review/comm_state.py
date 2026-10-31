@@ -426,12 +426,34 @@ def owes_proof(uid: int, query: Query, notes: list[str] | None = None) -> list[s
     if asked and pending:
         out.append("owes:open_ask")
     out += dv_unverifiable(uid, query)
+    out += proof_required_owed(uid, query)
     # r5 / p1 (b): only the UVN reason can be lifted, and only with no open ask and no document on file
     if out == ["owes:uvn"] * len(out) and out and not store_facts(uid)["docs"] and approval_path_exempt(uid, query):
         out = []
         if notes is not None:
             notes.append("owes_nothing:approval_path")
     return sorted(set(out))
+
+
+def proof_required_owed(uid: int, query: Query) -> list[str]:
+    """v1 STOP-CLASS (10-31 03:12Z, captain hard limit): an open unverified/processing row whose validator verdict says
+    proof is required (verificationData.proof_required = true) OWES proof - whatever core's status says - unless core has
+    set a review-stage mark on it (metadata.reviewStage); and a row with a fresh DSP capture pending
+    (metadata.freshDspCapture) is not settled either. Either way the owes-nothing lines (/k, nothing-needed bodies)
+    never go: the user gets the ask class. One count row; any other shape fails closed."""
+    rows = query("SELECT CAST(count_if(CAST(json_extract(verificationdata, '$.proof_required') AS boolean) "
+                 "AND json_extract(metadata, '$.reviewStage') IS NULL) AS varchar), "
+                 "CAST(count_if(json_extract(metadata, '$.freshDspCapture') IS NOT NULL) AS varchar) "
+                 "FROM postgresql_core.public.credit_requests /* proof_required_owed */ "
+                 f"WHERE userid = {int(uid)} AND deletedat IS NULL AND status IN ('unverified', 'processing')")
+    if len(rows) != 1 or len(rows[0]) != 2 or not all(str(x).isdigit() for x in rows[0]):
+        raise Unknown("unexpected replica row shape (proof_required)")
+    out = []
+    if int(rows[0][0]):
+        out.append("owes:proof_required")
+    if int(rows[0][1]):
+        out.append("owes:fresh_capture_pending")
+    return out
 
 
 def dv_unverifiable(uid: int, query: Query) -> list[str]:

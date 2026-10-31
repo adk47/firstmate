@@ -359,6 +359,8 @@ class CountCopyTests(unittest.TestCase):
             replica([1], requests={1: ["a3", "a1", "a2", "a4"]}, rows=rows)
 
         def q(sql):
+            if "proof_required_owed" in sql:              # the /k preflight read (owes nothing here), not a snapshot
+                return [["0", "0"]]
             if "credit_requests" in sql:
                 calls["n"] += 1
                 return (early if calls["n"] == 1 else late)(sql)

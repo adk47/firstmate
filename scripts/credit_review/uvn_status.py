@@ -638,6 +638,24 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
             return report
     want_paid = {"paid": True, "free": False}[segment]
     offered = [u for u in users if u.get("skip") is None and bool(u.get("paid")) is want_paid]
+    if campaign == "status-team-review":
+        # v1 STOP-CLASS / r5 + p1 [key=k-proof-required]: a status line is for owes-nothing users only. Read core's
+        # proof_required for EVERY offered user before anything goes: one proof_required=true (or fresh capture pending)
+        # row in the list REFUSES the run (the list was built wrong); an unreadable read refuses too (fail closed)
+        from credit_review import comm_state              # lazy: the gate-side owes rule, the same read
+        bad: list[str] = []
+        for u in offered:
+            try:
+                owed = comm_state.proof_required_owed(int(u["user_id"]), query)
+            except Exception as exc:  # noqa: BLE001 - an unreadable read never lets a status line through
+                report.halted = f"proof_required read failed for user {u['user_id']} ({exc}); nothing sent"
+                return report
+            if owed:
+                bad.append(f"{u['user_id']}:{'+'.join(owed)}")
+        if bad:
+            report.halted = (f"{len(bad)} user(s) in this status-team-review list owe proof per core proof_required "
+                             f"({', '.join(bad[:10])}); the list must be rebuilt - nothing sent")
+            return report
     report.listed = len(offered)
     day = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
     path = ledger_path or verify_ledger.DEFAULT_PATH

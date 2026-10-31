@@ -61,6 +61,8 @@ class FakeGate:
 
 def query(rows_by_sql):
     def q(sql):
+        if "proof_required_owed" in sql:                 # core proof_required read (status-team-review preflight)
+            return rows_by_sql.get("proof_required", [["0", "0"]])
         return rows_by_sql["users" if "public.users" in sql else "requests"]
     return q
 
@@ -198,6 +200,8 @@ def replica(users, status=None, requests=None, no_auth=(), no_pro=(), verificati
     status, requests, verification, rows = status or {}, requests or {}, verification or {}, rows or {}
 
     def q(sql):
+        if "proof_required_owed" in sql:
+            return [["0", "0"]]
         ids = {int(x) for x in re.search(r"IN \(([0-9,]+)\)", sql).group(1).split(",")}
         if "public.users" in sql:
             return [[str(u), f"u{u}@x.com", f"N{u}", None if u in no_pro else pro(u), None if u in no_auth else auth(u)]
@@ -1756,6 +1760,44 @@ class ReplyDueRunnerTest(UvnStatusTests):
 
     def test_without_reply_due_the_7_day_cooldown_still_defers(self):
         self.assertEqual(self.run_both(with_reply_due=False), {"dry-run": [], "apply": []})
+
+
+class TeamReviewProofRequiredTest(unittest.TestCase):
+    """v1 STOP-CLASS / [key=k-proof-required]: a status-team-review (/k) run REFUSES when any listed user has an open
+    proof_required=true row (or a fresh capture pending) per core - the list was built wrong; nothing is sent."""
+    setUp = UvnStatusTests.setUp
+    write_list = UvnStatusTests.write_list
+    run_ = UvnStatusTests.run_
+    gate_file = UvnStatusTests.gate_file
+
+    def pr_query(self, pr):
+        base = replica(range(1, 4), status={1: "unverified", 2: "unverified", 3: "unverified"})
+
+        def q(sql):
+            if "proof_required_owed" in sql:
+                uid = int(__import__("re").search(r"userid = ([0-9]+)", sql).group(1))
+                return [pr.get(uid, ["0", "0"])]
+            return base(sql)
+        return q
+
+    def test_one_proof_required_user_refuses_the_whole_run(self):
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 4)]
+        self.write_list()
+        rep, gate = self.run_(campaign="status-team-review", query=self.pr_query({2: ["1", "0"]}))
+        self.assertEqual(gate.calls, [])
+        self.assertIn("owe proof per core proof_required", rep.halted)
+        self.assertIn("2:owes:proof_required", rep.halted)
+        rep, gate = self.run_(campaign="status-team-review", query=self.pr_query({3: ["0", "1"]}))
+        self.assertEqual(gate.calls, []); self.assertIn("3:owes:fresh_capture_pending", rep.halted)
+
+    def test_an_unreadable_read_refuses_and_a_clean_list_goes(self):
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 4)]
+        self.write_list()
+        rep, gate = self.run_(campaign="status-team-review", query=self.pr_query({1: ["x"]}))
+        self.assertEqual(gate.calls, []); self.assertIn("proof_required read failed", rep.halted)
+        rep, gate = self.run_(campaign="status-team-review", query=self.pr_query({}))
+        self.assertEqual(rep.halted, "")
+        self.assertEqual(len(gate.calls), 3)
 
 
 if __name__ == "__main__":
