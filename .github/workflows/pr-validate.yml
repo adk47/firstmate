@@ -2018,6 +2018,8 @@ jobs:
           python3 scripts/tests/test_credit_doc_close.py
           python3 scripts/tests/test_credit_anchor_upload.py
           python3 scripts/tests/test_credit_forged_tray.py
+          # decision-told (Fable decided-not-told-531): one core decision notice per user, signed dry run, ladder.
+          python3 scripts/tests/test_credit_decision_told.py
           python3 scripts/tests/test_credit_claim_executor.py
           # C6 claim declines as code (claim_verify/decline_rules): d2's 17 as fixtures (14/3), the related-trio
           # negative, every rail, and the tray round-tripped through the executor loader. Hermetic.
