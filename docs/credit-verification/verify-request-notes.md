@@ -508,7 +508,8 @@ This asks the claimant of a pending profile claim in band B or C to add the clai
 - **verify@ is off:** `issuer_email_from_official_domain` points the issuer at verify@muso.ai. While `VERIFY_AT_ENABLED=0` (until Intercom identity verification, i2), it is HELD at send: exit 3, nothing claimed, and the dry run still renders it.
 - **Unlocked 2026-10-29** (Fable [key=l11c-asks], [key=l11c-plural], [key=l11c-email-filed]):
   - readable_document and counterparty_signed_or_registered send;
-  - issuer_email (`VERIFY_AT_ENABLED=0`) and distributor_dashboard_with_code (`DISTRIBUTOR_CODES_ENABLED=0`) are HELD at send.
+  - distributor_dashboard_with_code is captain-approved (`DISTRIBUTOR_COPY_APPROVED="captain 2026-10-29 19:0xZ"`, p1 208): the universal Ctrl+F / Cmd+F form with the request's 7-day F9 code (issued at send by `credit-doc-verify.py challenge issue`; a masked `MUSO-XXXX` in dry runs), ONE credit per ask;
+  - issuer_email (`VERIFY_AT_ENABLED=0`) is HELD at send.
 - **Shape:** ONE message per user per need per document (newest first), counterparty first, up to 3 titles + "and N more", with the ruled plural text. It goes into the newest named document's filing thread. If that thread is closed it goes by email; an email-filed document (support@) is asked by Intercom email to the verified account contact, and only when the filing matched strongly.
 - **State at send:** each named request must have SOME document whose latest dv row is an unverifiable need. A document re-checked since the cut no longer counts, and a read of another document does not cancel it. Anything after the newest named document holds the ask.
 - **Source:** b1's L11c tray (`need_asks.py build --tray`).

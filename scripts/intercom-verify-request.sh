@@ -296,16 +296,17 @@ readonly CLAIM_PROOF_PENDING_COPY_APPROVED=0
 #       UNLOCKED 2026-10-29 by Fable ruling [key=l11c-asks] (captain 14:3xZ status-wording delegation + 03:2xZ "use fable
 #       and i take the recommendation of it just go"; firstmate shows the captain the text with a veto): readable_document
 #       and counterparty_signed_or_registered only. issuer_email waits for verify@ (VERIFY_AT_ENABLED), the distributor
-#       code line for b1's F9 code issuer (DISTRIBUTOR_CODES_ENABLED); both are HELD at send.
+#       code line is captain-approved (DISTRIBUTOR_COPY_APPROVED); issuer_email is HELD at send.
 #   Reviewed baseline: deploy overwrites - 2026-10-29 (verify-ask-wiring-h2): this blob sets PROOF_NEED_ASK_COPY_APPROVED=1.
 readonly PROOF_NEED_ASK_COPY_APPROVED=1
 #   VERIFY_AT_ENABLED  verify@muso.ai intake (the issuer_email_from_official_domain need line asks the issuer to write
 #       to it). OFF until Intercom identity verification (i2) is live (Fable exec-plan captain-1028-213x (c); p1
 #       ruling 096): that need is HELD at send (exit 3, nothing claimed); the dry run still renders it.
 readonly VERIFY_AT_ENABLED=0
-#   DISTRIBUTOR_CODES_ENABLED  the distributor_dashboard_with_code need line names a 7-day challenge code; nothing issues
-#       or reads those codes until b1's F9 issuer lands, so that need is HELD at send (exit 3) until this is 1.
-readonly DISTRIBUTOR_CODES_ENABLED=0
+#   DISTRIBUTOR_COPY_APPROVED  the distributor_dashboard_with_code need line (the universal Ctrl+F / Cmd+F form; the 7-day
+#       F9 challenge code from credit-doc-verify.py challenge issue, #1476). CAPTAIN-APPROVED: captain 2026-10-29 19:0xZ
+#       ("approved if Fable says go"), Fable GO 19:2xZ, proof-loop-lead-fable-p1 208. Empty = HELD at send (exit 3).
+readonly DISTRIBUTOR_COPY_APPROVED="captain 2026-10-29 19:0xZ; fable-copy-1030-r5/a (byte-for-byte)"
 
 # PINNED. Caroline (skills-all/muso-intercom/SKILL.md, Reply Identity), same literal and
 # same variable name as intercom-ops-write.sh so check-intercom-reply-identity.sh keys on it.
@@ -829,7 +830,8 @@ INPUT="$("$JQ_BIN" -c '
                                code: ((.code // "") | clean), platform: ((.platform // "") | clean | ascii_downcase) }),
     merge: ((.merge // {}) | { profiles: [ (.profiles // [])[] | clean ] }),
     need: ((.need // {}) | { code: ((.code // "") | clean), issuer: ((.issuer // "") | clean),
-                             verify_code: ((.verify_code // "") | clean), doc_sha: ((.doc_sha // "") | clean | ascii_downcase),
+                             verify_code: ((.verify_code // "") | clean),
+                             distributor: ((.distributor // "") | clean | .[0:40]), doc_sha: ((.doc_sha // "") | clean | ascii_downcase),
                              doc_received_at: ((.doc_received_at // "") | clean), doc_kind: ((.doc_kind // "") | clean),
                              doc_count: (.doc_count // 1 | if type == "number" and . >= 1 and . <= 99 and . == floor then . else 1 end),
                              doc_shas: ([(.doc_shas // [])[]? | strings | select(test("^[0-9a-f]{64}$"))] | unique | .[0:20]),
@@ -1245,8 +1247,12 @@ fi
 if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "proof-need-ask" ] && [ "$PROOF_NEED_ASK_COPY_APPROVED" != "1" ]; then
   refuse "the proof-need-ask copy is not approved for sending yet (PROOF_NEED_ASK_COPY_APPROVED=0). It waits for the captain's yes on card L11c, landed in a PR that flips the lock; --dry-run renders exactly what would be sent."
 fi
-if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "proof-need-ask" ] && [ "$NEED_CODE" = "distributor_dashboard_with_code" ] && [ "$DISTRIBUTOR_CODES_ENABLED" != "1" ]; then
-  printf 'HELD distributor_codes_off credits=%s (no challenge-code issuer is live yet, b1 F9); nothing was sent or claimed\n' "$N"; exit 3
+if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "proof-need-ask" ] && [ "$NEED_CODE" = "distributor_dashboard_with_code" ] && [ -z "$DISTRIBUTOR_COPY_APPROVED" ]; then
+  printf 'HELD distributor_copy_unapproved credits=%s; nothing was sent or claimed\n' "$N"; exit 3
+fi
+# an F9 challenge code verifies exactly ONE request: a distributor ask names exactly one credit
+if [ "$CAMPAIGN" = "proof-need-ask" ] && [ "$NEED_CODE" = "distributor_dashboard_with_code" ] && [ "$N" -ne 1 ]; then
+  refuse "a distributor_dashboard_with_code ask names exactly one credit (one challenge code per request); got $N."
 fi
 if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "proof-need-ask" ] && [ "$NEED_CODE" = "issuer_email_from_official_domain" ] && [ "$VERIFY_AT_ENABLED" != "1" ]; then
   printf 'HELD verify_at_off credits=%s (the issuer-email line points at verify@muso.ai, which stays off until Intercom identity verification is live); nothing was sent or claimed\n' "$N"; exit 3
@@ -1756,7 +1762,7 @@ def proof_need_line($n; $x):
   elif $n.code == "issuer_email_from_official_domain" then
     "It's a message from \($n.issuer). Please ask \($n.issuer) to send one line to verify@muso.ai from their own address confirming you were \($x.role) on \($x.track_title | qt) - or forward us their original email with its headers."
   elif $n.code == "distributor_dashboard_with_code" then
-    "Sign in to the distributor or label account that released \($x.track_title | qt), type this code into its search box: \($n.verify_code), and reply with a screenshot that shows the release and the code together. The code works for 7 days."
+    "Open your \(if ($n.distributor // "") != "" then $n.distributor + " dashboard" else "distributor dashboard" end) in a web browser with your release \($x.track_title | qt) visible, press Ctrl+F (or Cmd+F on a Mac), type this code in the find box: \($n.verify_code), and take one screenshot that shows both. On a phone, open the dashboard website and use Share → Find on page. Reply here with the screenshot; the code works for 7 days."
   else
     "We need the other side of it: a split sheet or agreement signed by the artist or label, a PRO registration (ASCAP, BMI, SOCAN or similar) that lists you as \($x.role), or a royalty statement that names the track. Reply here with it and we'll check it."
   end;

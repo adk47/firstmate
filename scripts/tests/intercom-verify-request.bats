@@ -3756,7 +3756,7 @@ needfile() { # $1 file, $2 jq edit (default: the readable_document need)
 
 @test "proof-need-ask: UNLOCKED as committed (Fable [key=l11c-asks]); the dry run renders the ruled text for each need code" {
   grep -qx "readonly PROOF_NEED_ASK_COPY_APPROVED=1" "$REAL_SCRIPT"
-  grep -qx "readonly DISTRIBUTOR_CODES_ENABLED=0" "$REAL_SCRIPT"
+  grep -qx 'readonly DISTRIBUTOR_COPY_APPROVED="captain 2026-10-29 19:0xZ; fable-copy-1030-r5/a (byte-for-byte)"' "$REAL_SCRIPT"
   needfile "$TEST_TMPDIR/n.json"
   open='Hi Jane, thanks for the image you sent on October 18 for your Mixing credit on "Song A" by Big Star. We have it on file, but on its own it isn'"'"'t something we can check against an outside source.'
   close='Your request stays open while we look, and nothing is removed.
@@ -3776,7 +3776,7 @@ $close" ]
   needfile "$TEST_TMPDIR/n.json" '.need += {code:"distributor_dashboard_with_code", verify_code:"MUSO-7K2Q"}'
   run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
   [ "$(rendered .body | plain)" = "$open
-Sign in to the distributor or label account that released \"Song A\", type this code into its search box: MUSO-7K2Q, and reply with a screenshot that shows the release and the code together. The code works for 7 days.
+Open your distributor dashboard in a web browser with your release \"Song A\" visible, press Ctrl+F (or Cmd+F on a Mac), type this code in the find box: MUSO-7K2Q, and take one screenshot that shows both. On a phone, open the dashboard website and use Share → Find on page. Reply here with the screenshot; the code works for 7 days.
 $close" ]
   needfile "$TEST_TMPDIR/n.json" '.need += {code:"counterparty_signed_or_registered"}'
   run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
@@ -3788,22 +3788,31 @@ $close" ]
   [[ "$body" != *"Jaxsta"* ]]; [[ "$body" != *"Nothing else is needed"* ]]
 }
 
-@test "proof-need-ask: the distributor-code line is HELD while DISTRIBUTOR_CODES_ENABLED=0; a CLOSED filing thread sends by email" {
+@test "proof-need-ask: the distributor-code ask (captain-approved 2026-10-29 19:0xZ) sends, names its distributor when known, one credit only; a CLOSED filing thread sends by email" {
   unlocked_gate need
   export STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
   export INTERCOM_VERIFY_TEST_NOW=1761000000
   export STUB_CONV_SEARCH='{"type":"conversation.list","conversations":[]}'
   needfile "$TEST_TMPDIR/n.json" '.user.filing_conversation = "777" | .need += {code:"distributor_dashboard_with_code", verify_code:"MUSO-7K2Q"}'
   STUB_CONVERSATION='{"type":"conversation","id":"777","title":"about my credit","source":{"author":{"type":"user"}},"contacts":{"contacts":[{"id":"6650aa01"}]}}' \
-    run -3 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
-  [[ "$output" == "HELD distributor_codes_off credits=1"* ]]
-  [ "$(posts)" -eq 0 ]; [ "$(replies)" -eq 0 ]
+    run -0 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED comment conversation=777"* ]]
+  [[ "$(jq -r .body "$CURL_STUB_REPLY" | plain)" == *"press Ctrl+F (or Cmd+F on a Mac), type this code in the find box: MUSO-7K2Q"* ]]
+  # the distributor's name when the need row carries it
+  needfile "$TEST_TMPDIR/n2.json" '.need += {code:"distributor_dashboard_with_code", verify_code:"MUSO-7K2Q", distributor:"DistroKid"}'
+  run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n2.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == *"Open your DistroKid dashboard in a web browser"* ]]
+  # one challenge code verifies one request: two credits are refused
+  needfile "$TEST_TMPDIR/n3.json" '.need += {code:"distributor_dashboard_with_code", verify_code:"MUSO-7K2Q"} | .credits += [.credits[0] | .request_id = "r2"]'
+  run -1 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n3.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"names exactly one credit"* ]]
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
   # a closed filing conversation: the ask goes by EMAIL (a reply opens a new conversation of the same contact)
   needfile "$TEST_TMPDIR/n.json" '.user.filing_conversation = "777"'
   STUB_CONVERSATION='{"type":"conversation","id":"777","title":"about my credit","state":"closed","open":false,"source":{"author":{"type":"user"}},"contacts":{"contacts":[{"id":"6650aa01"}]}}' \
     run -0 "$GATE" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED email"* ]]
-  [ "$(replies)" -eq 0 ]
+  [ "$(replies)" -eq 1 ]      # only the earlier in-thread distributor ask
 }
 
 @test "proof-need-ask: the need comes from the tray and is held to its shape; one request per note; no follow-ups" {

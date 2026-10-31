@@ -36,7 +36,7 @@ class NeedAsksTest(unittest.TestCase):
         rows = [  # (at, sha, request, user, outcome, need)
             ("2026-10-20T00:00:00Z", SHA_A, "R1", 1, "unverifiable", "readable_document"),        # listed
             ("2026-10-21T00:00:00Z", SHA_B, "r2", 1, "unverifiable", "counterparty_signed_or_registered"),
-            ("2026-10-20T00:00:00Z", SHA_A, "r3", 2, "unverifiable", "distributor_dashboard_with_code"),  # no issuer
+            ("2026-10-20T00:00:00Z", SHA_A, "r3", 2, "unverifiable", "distributor_dashboard_with_code"),  # F9 code ask
             ("2026-10-20T00:00:00Z", SHA_A, "r4", 3, "unverifiable", "issuer_email_from_official_domain"),  # verify@
             ("2026-10-20T00:00:00Z", SHA_A, "r5", 4, "unverifiable", "readable_document"),
             ("2026-10-22T00:00:00Z", SHA_B, "r5", 4, "verified", ""),           # ANOTHER document verified (QA #1418)
@@ -99,7 +99,8 @@ class NeedAsksTest(unittest.TestCase):
         by = {u["user_id"]: u for u in res["users"]}
         # user 1; user 4 (QA #1418: its document A still needs a readable copy - document B's verified read does not
         # hide it); email-filed user 8 (free)
-        self.assertEqual(sorted(by), ["1", "4", "8"])
+        # ... and user 2: the distributor-code ask is captain-approved (p1 208)
+        self.assertEqual(sorted(by), ["1", "2", "4", "8"])
         self.assertEqual([(a["request_id"], a["doc_sha"]) for a in by["4"]["asks"]], [("r5", SHA_A)])
         self.assertEqual((by["8"]["paid"], by["8"]["asks"][0]["filing_conversation"]), (False, "email"))
         # l1 [key=l11c-email-filed]: an email filing matched by a weak identity is never asked (tray)
@@ -116,8 +117,9 @@ class NeedAsksTest(unittest.TestCase):
                          ("readable_document", SHA_A, "image", "777", "2026-10-18T09:30:00Z"))
         self.assertEqual((a2["need"], a2["doc_kind"], a2["filing_conversation"]), ("counterparty_signed_or_registered", "PDF", "778"))
         c = first["counts"]
-        self.assertEqual((c["skip_no_code_issuer"], c["skip_verify_at_off"], c["skip_no_intake_row"],
-                          c["skip_not_pending"], c["list_paid"], c["email_filed_rows"]), (1, 1, 1, 1, 1, 1))
+        self.assertNotIn("skip_no_code_issuer", c)                           # distributor asks are listed now
+        self.assertEqual((c["skip_verify_at_off"], c["skip_no_intake_row"],
+                          c["skip_not_pending"], c["list_paid"], c["email_filed_rows"]), (1, 1, 1, 1, 1))
         # the SAME document re-read as verified: no longer askable
         db = sqlite3.connect(self.dv)
         db.execute("INSERT INTO dv_outcomes (at, proof_id, request_id, user_id, outcome, need) VALUES (?,?,?,?,?,?)",
@@ -172,12 +174,41 @@ class NeedAsksTest(unittest.TestCase):
         self.assertEqual(gate.calls, [])
         self.assertEqual(sorted(rep.held_newer), ["user 1: counterparty_signed_or_registered (an intake newer than its newest document)",
                                                   "user 1: readable_document (an intake newer than its newest document)"])
-        # the free side: user 4's readable document A (10-18) is older than its B intake (10-21): held, not sent;
-        # the email-filed user 8 is asked by Intercom email (p1 152)
+        # the free side: user 2 (distributor code, masked in a dry run) and the email-filed user 8 (Intercom email, p1 152);
+        # user 4's readable document A (10-18) is older than its B intake (10-21): held, not sent
         rep, gate = self.send_(lst, segment="free")
         convs = {c[1]["user"]["id"]: c[1]["user"]["filing_conversation"] for c in gate.calls}
-        self.assertEqual(convs, {"8": "email"})
+        self.assertEqual(convs, {"2": "777", "8": "email"})
         self.assertEqual(rep.held_newer, ["user 4: readable_document (an intake newer than its newest document)"])
+        d = next(c[1] for c in gate.calls if c[1]["user"]["id"] == "2")
+        self.assertEqual((d["need"]["code"], d["need"]["verify_code"], len(d["credits"])),
+                         ("distributor_dashboard_with_code", na.CODE_PLACEHOLDER, 1))
+
+    def test_qa_1513_same_second_intakes_in_two_threads_are_held_by_the_builder_like_the_send(self):
+        # QA #1513 17:13Z repro: two documents of ONE need, the SAME second, filed in DIFFERENT conversations. The group
+        # names one thread only; the send's newer_intake (over need.doc_intakes) sees the other intake as newer and holds.
+        # The builder must hold it too (never selected, so a held user never takes a --max-users slot run after run).
+        t = "2026-10-20T08:00:00Z"
+        u = {"user_id": "1", "paid": True, "arrivals": [[t, "1:a"], [t, "1:b"]], "asks": [
+            {"request_id": "r1", "need": "readable_document", "doc_sha": SHA_A, "doc_received_at": t, "doc_kind": "PDF",
+             "filing_conversation": "777", "matched_by": "", "intake_id": "1:a"},
+            {"request_id": "r2", "need": "readable_document", "doc_sha": SHA_B, "doc_received_at": t, "doc_kind": "PDF",
+             "filing_conversation": "778", "matched_by": "", "intake_id": "1:b"}]}
+        self.pending[1] = ["r1", "r2"]
+        held = []
+        self.assertEqual(na.payloads([u], self.q, None, held), [])
+        self.assertEqual(held, ["user 1: readable_document (an intake newer than its newest document)"])
+        # and the send-time predicate, given what the message WOULD have named, agrees
+        newest = max(u["asks"], key=lambda a: (a["doc_received_at"], a["doc_sha"]))
+        self.assertTrue(na.comm_state.newer_intake(t, u["arrivals"], {newest["intake_id"]}))
+        # same second, SAME thread: both documents are in the group, both intakes named -> it goes (no false hold)
+        for a in u["asks"]:
+            a["filing_conversation"] = "777"
+        held = []
+        ps = na.payloads([u], self.q, None, held)
+        self.assertEqual(held, [])
+        self.assertEqual(sorted(c["request_id"] for c in ps[0]["credits"]), ["r1", "r2"])
+        self.assertEqual(ps[0]["need"]["doc_intakes"], {SHA_A: "1:a", SHA_B: "1:b"})
 
     def test_qa_1418_a_held_old_need_never_blocks_a_readable_new_one(self):
         # QA #1418 04:52Z repro: day-1 counterparty need, day-2 readable need. Counterparty is FIRST in NEED_ORDER, but
@@ -196,6 +227,42 @@ class NeedAsksTest(unittest.TestCase):
         from credit_review import comm_state as cs
         self.assertTrue(cs.newer_intake("2026-10-18T09:30:00Z", u["arrivals"]))
         self.assertFalse(cs.newer_intake("2026-10-19T10:00:00Z", u["arrivals"]))
+
+    def test_distributor_codes_are_issued_at_send_only_and_one_request_per_ask(self):
+        # p1 208: the F9 code is issued when the ask is SENT (apply); a dry run issues nothing (masked placeholder);
+        # a code that cannot be issued drops that ask; one code verifies one request
+        base = {"user": {"id": "2"}, "credits": [{"request_id": "r3"}], "need": {"code": "distributor_dashboard_with_code"}}
+        other = {"user": {"id": "1"}, "credits": [{"request_id": "r1"}], "need": {"code": "readable_document"}}
+        calls = []
+        rep = na.verify_notify.Report()
+        out = na.with_codes([base, other], "dry-run", rep, issuer=lambda rid, uid: calls.append(rid) or "MUSO-AB12")
+        self.assertEqual((calls, out[0]["need"]["verify_code"], out[1]), ([], na.CODE_PLACEHOLDER, other))
+        out = na.with_codes([base, other], "apply", rep, issuer=lambda rid, uid: calls.append((rid, uid)) or "MUSO-AB12")
+        self.assertEqual((calls, out[0]["need"]["verify_code"]), ([("r3", "2")], "MUSO-AB12"))
+        out = na.with_codes([base, other], "apply", rep, issuer=lambda rid, uid: "")
+        self.assertEqual((out, rep.refusals), ([other], ["distributor_code_not_issued:r3"]))
+        # QA #1513: a re-used ACTIVE code with less than the promised 7 days left is never sent; a full one is
+        from datetime import datetime, timedelta, timezone
+        t0 = datetime(2026, 10, 30, 6, 0, tzinfo=timezone.utc)
+        short = lambda rid, uid: {"code": "MUSO-AB12", "expires_at": (t0 + timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ"), "new": True}
+        full = lambda rid, uid: {"code": "MUSO-CD34", "expires_at": (t0 + timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ"), "new": True}
+        # QA #1513: a REUSED active code with 6 d 23 h 31 m left is never sent (the copy promises 7 days)
+        reused = lambda rid, uid: {"code": "MUSO-EF56", "new": False,
+                                   "expires_at": (t0 + timedelta(days=6, hours=23, minutes=31)).strftime("%Y-%m-%dT%H:%M:%SZ")}
+        rep3 = na.verify_notify.Report()
+        self.assertEqual(na.with_codes([base], "apply", rep3, issuer=reused, now=t0), [])
+        self.assertEqual(rep3.refusals, ["distributor_code_not_fresh:r3"])
+        rep2 = na.verify_notify.Report()
+        self.assertEqual(na.with_codes([base], "apply", rep2, issuer=short, now=t0), [])
+        self.assertEqual(rep2.refusals, ["distributor_code_window_short:r3"])
+        self.assertEqual(na.with_codes([base], "apply", rep2, issuer=full, now=t0)[0]["need"]["verify_code"], "MUSO-CD34")
+        # one request per distributor ask, the newest document's
+        u = {"user_id": "2", "paid": True, "asks": [
+            {"request_id": r, "need": "distributor_dashboard_with_code", "doc_sha": SHA_A, "doc_received_at": "2026-10-18T09:30:00Z",
+             "doc_kind": "image", "filing_conversation": "777", "matched_by": ""} for r in ("r3", "r7")]}
+        self.pending[2] = ["r3", "r7"]
+        p = na.payloads([u], self.q)[0]
+        self.assertEqual(len(p["credits"]), 1)
 
     def test_qa_repro_one_request_two_documents_both_survive_the_audience(self):
         # QA #1418 (need_asks.py:64 and :94): outcomes keyed (user, request) let one document overwrite another
@@ -397,7 +464,8 @@ class BoundAfterLedgerTest(unittest.TestCase):
         sent = []
 
         def payloads(users, query, asked, held=None):
-            return [{"user": {"id": u["user_id"]}, "credits": []} for u in users if u["user_id"] not in ("1", "2")]
+            return [{"user": {"id": u["user_id"]}, "credits": [], "need": {"code": "readable_document"}}
+                    for u in users if u["user_id"] not in ("1", "2")]
 
         def send_all(ps, report, **kw):
             sent.extend(p["user"]["id"] for p in ps)
@@ -415,9 +483,130 @@ class SameSecondIntakeBuilderTest(unittest.TestCase):
         import inspect
         src = inspect.getsource(na.payloads)
         self.assertIn("comm_state.newer_intake(newest[\"doc_received_at\"], u.get(\"arrivals\") or [],", src)
+        # QA #1513 (17:13Z): the builder's 'named' set is the FINAL group's intakes (what need.doc_intakes carries)
+        self.assertIn("for a in docs if a.get(\"intake_id\")", src)
+        self.assertNotIn("for a in cand if a.get(\"intake_id\")", src)
         named = {"42:i1"}
         self.assertTrue(na.comm_state.newer_intake("2026-10-18T09:30:00Z", [["2026-10-18T09:30:00Z", "42:i2"]], named))
         self.assertFalse(na.comm_state.newer_intake("2026-10-18T09:30:00Z", [["2026-10-18T09:30:00Z", "42:i1"]], named))
+
+
+class DistributorIssueOrderTest(unittest.TestCase):
+    def test_each_code_is_issued_right_before_its_own_gate_call(self):
+        # QA #1513: never a batch of codes up front - issue, send, issue, send
+        from unittest import mock
+        d = Path(tempfile.mkdtemp())
+        lst = d / "l.json"
+        lst.write_text(json.dumps({"users": [{"user_id": str(u), "paid": True, "asks": [{"request_id": f"r{u}"}]} for u in (1, 2)]}))
+        events = []
+        ps = [{"user": {"id": str(u)}, "credits": [{"request_id": f"r{u}"}], "need": {"code": na.DISTRIBUTOR}} for u in (1, 2)]
+
+        def send_all(batch, report, **kw):
+            if kw.get("check_recipients"):
+                events.extend(f"check:{p['user']['id']}" for p in batch)
+                report.recipient_ok += len(batch)
+                return
+            events.extend(f"send:{p['user']['id']}" for p in batch)
+        with mock.patch.object(na, "payloads", lambda users, q, asked, held=None: ps), \
+                mock.patch.object(na.verify_notify, "send_all", send_all), \
+                mock.patch.object(na.uvn_status, "campaign_lock_open", lambda w, lk: True):
+            na.send(list_path=str(lst), segment="paid", mode="apply", query=lambda sql: [], runner=FakeGate(),
+                    ledger_path=str(d / "ledger.sqlite3"),
+                    issuer=lambda rid, uid: events.append(f"issue:{uid}") or {"code": "MUSO-AB12", "expires_at": "2099-01-01T00:00:00Z"})
+        self.assertEqual(events, ["check:1", "issue:1", "send:1", "check:2", "issue:2", "send:2"])
+
+    def test_a_held_preflight_mints_nothing_and_the_next_run_retries_with_a_fresh_code(self):
+        # QA #1513, through the REAL sender (verify_notify.send_all + the gate's answers): day 1 the gate would defer
+        # (7-day cooldown) -> no code is minted, the deferral is in the report; day 2 it clears -> a fresh code, sent
+        from unittest import mock
+        d = Path(tempfile.mkdtemp())
+        lst = d / "l.json"
+        lst.write_text(json.dumps({"users": [{"user_id": "1", "paid": True, "asks": [{"request_id": "r1"}]}]}))
+        ps = [{"user": {"id": "1"}, "credits": [{"request_id": "r1"}], "need": {"code": na.DISTRIBUTOR}}]
+        state = {"day": 1, "argv": []}
+
+        def gate(argv):
+            state["argv"].append(argv)
+            if "--check-recipient" in argv:
+                ok = state["day"] == 2
+                return type("R", (), {"returncode": 0 if ok else 3, "stderr": "",
+                                      "stdout": "RECIPIENT OK contact=c\n" if ok else "DEFERRED messaged_7d credits=1 (x)\n"})()
+            return type("R", (), {"returncode": 0, "stdout": "POSTED email message=1 credits=1\n", "stderr": ""})()
+        issued = []
+        def issuer(rid, uid):
+            issued.append(rid)
+            return {"code": "MUSO-AB12", "expires_at": "2099-01-01T00:00:00Z", "new": True}
+        with mock.patch.object(na, "payloads", lambda users, q, asked, held=None: ps), \
+                mock.patch.object(na.verify_notify, "attach_identities", lambda ps, r: (ps, None)), \
+                mock.patch.object(na.uvn_status, "campaign_lock_open", lambda w, lk: True):
+            rep1 = na.send(list_path=str(lst), segment="paid", mode="apply", query=lambda sql: [], runner=gate,
+                           ledger_path=str(d / "ledger.sqlite3"), issuer=issuer)
+            self.assertEqual(issued, [])                                    # nothing minted while it would be held
+            self.assertEqual((rep1.deferred_users, rep1.sent_notes), (1, 0))
+            self.assertIn("distributor_preflight_not_ok:r1", rep1.refusals)
+            self.assertTrue(all("--check-recipient" in a for a in state["argv"]))   # no live send attempted
+            state["day"] = 2
+            rep2 = na.send(list_path=str(lst), segment="paid", mode="apply", query=lambda sql: [], runner=gate,
+                           ledger_path=str(d / "ledger.sqlite3"), issuer=issuer)
+        self.assertEqual(issued, ["r1"])
+        self.assertEqual(rep2.sent_notes, 1)
+        sent = [a for a in state["argv"] if "--check-recipient" not in a]
+        self.assertEqual(len(sent), 1)
+
+
+class DistributorVoidTest(unittest.TestCase):
+    """b1 #1527: a code minted for a send the gate then held is voided, so the next run issues a fresh one."""
+
+    def run_day(self, live_rc, voided, live_out=None):
+        from unittest import mock
+        d = Path(tempfile.mkdtemp())
+        lst = d / "l.json"
+        lst.write_text(json.dumps({"users": [{"user_id": "1", "paid": True, "asks": [{"request_id": "r1"}]}]}))
+        ps = [{"user": {"id": "1"}, "credits": [{"request_id": "r1"}], "need": {"code": na.DISTRIBUTOR}}]
+
+        def gate(argv):
+            if "--check-recipient" in argv:
+                return type("R", (), {"returncode": 0, "stdout": "RECIPIENT OK contact=c\n", "stderr": ""})()
+            out = live_out or ("POSTED email message=1 credits=1\n" if live_rc == 0 else "DEFERRED messaged_7d credits=1 (x)\n")
+            return type("R", (), {"returncode": live_rc, "stdout": out, "stderr": ""})()
+        with mock.patch.object(na, "payloads", lambda users, q, asked, held=None: ps), \
+                mock.patch.object(na.verify_notify, "attach_identities", lambda ps, r: (ps, None)), \
+                mock.patch.object(na.uvn_status, "campaign_lock_open", lambda w, lk: True):
+            return na.send(list_path=str(lst), segment="paid", mode="apply", query=lambda sql: [], runner=gate,
+                           ledger_path=str(d / "ledger.sqlite3"),
+                           issuer=lambda rid, uid: {"code": "MUSO-AB12", "expires_at": "2099-01-01T00:00:00Z", "new": True},
+                           voider=lambda rid, code: voided.append((rid, code)) or True)
+
+    def test_a_held_send_after_minting_voids_the_code(self):
+        voided = []
+        rep = self.run_day(3, voided)
+        self.assertEqual(voided, [("r1", "MUSO-AB12")])
+        self.assertIn("distributor_code_voided:r1", rep.refusals)
+
+    def test_an_ambiguous_failure_never_voids(self):
+        # r5 (QA #1513): rc 4 (e.g. POST rejected / unverified) may have reached the POST - the code is kept, reported
+        voided = []
+        rep = self.run_day(4, voided)
+        self.assertEqual(voided, [])
+        self.assertIn("distributor_code_kept_ambiguous:r1", rep.refusals)
+
+    def test_r5_posted_then_nonzero_keeps_the_code_and_held_rc3_voids_it(self):
+        # r5 @28145fb0, the exact pair: the gate printed POSTED but exited non-zero (ledger finalize failed after a
+        # successful Intercom POST) -> the customer may hold the code: preserved; 'HELD ...' rc=3 -> voided
+        voided = []
+        rep = self.run_day(4, voided, live_out="POSTED comment conversation=777 message=88001 credits=1\n"
+                                               "LEDGER FINALIZE FAILED\n")
+        self.assertEqual(voided, [])
+        self.assertIn("distributor_code_kept_ambiguous:r1", rep.refusals)
+        voided = []
+        rep = self.run_day(3, voided, live_out="HELD r1_filing_thread credits=1 (x); nothing was sent or claimed\n")
+        self.assertEqual(voided, [("r1", "MUSO-AB12")])
+        self.assertIn("distributor_code_voided:r1", rep.refusals)
+
+    def test_a_sent_code_is_never_voided(self):
+        voided = []
+        rep = self.run_day(0, voided)
+        self.assertEqual((voided, rep.sent_notes), ([], 1))
 
 
 if __name__ == "__main__":

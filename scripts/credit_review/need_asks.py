@@ -19,13 +19,15 @@ CLI:  need_asks.py build --out FILE
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import re
 import sqlite3
+import subprocess
 import sys
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -34,8 +36,12 @@ from credit_review import comm_state, receipts, uvn_status, verify_notify  # noq
 
 CAMPAIGN = "proof-need-ask"
 LOCK = "PROOF_NEED_ASK_COPY_APPROVED"
-SENDABLE = ("readable_document", "counterparty_signed_or_registered")
-NOT_YET = {"distributor_dashboard_with_code": "no_code_issuer", "issuer_email_from_official_domain": "verify_at_off"}
+DISTRIBUTOR = "distributor_dashboard_with_code"
+# distributor: captain-approved 2026-10-29 19:0xZ (p1 208); F9 challenge codes issued at send (credit-doc-verify.py)
+SENDABLE = ("readable_document", "counterparty_signed_or_registered", DISTRIBUTOR)
+NOT_YET = {"issuer_email_from_official_domain": "verify_at_off"}
+DOC_VERIFY_CLI = os.environ.get("NEED_ASKS_DOC_VERIFY_CLI", "/opt/hydra/scripts/credit-doc-verify.py")
+CODE_PLACEHOLDER = "MUSO-XXXX"          # dry-run previews: the code is masked, nothing is issued
 DV_STORE = "/var/lib/hydra-credit-verify/doc-verify.sqlite"
 PROOF_STORE = "/var/lib/hydra-credit-verify/proof.sqlite"
 PAYING = "/var/lib/credit-trust/paying-users.json"
@@ -73,7 +79,7 @@ def latest_outcomes(dv_store: str) -> dict[tuple[int, str, str], tuple[str, str,
     return out
 
 
-NEED_ORDER = ("counterparty_signed_or_registered", "readable_document")   # Fable [key=l11c-plural] (d): counterparty first
+NEED_ORDER = ("counterparty_signed_or_registered", "readable_document", DISTRIBUTOR)   # Fable [key=l11c-plural] (d): counterparty first
 
 
 def tray_outcomes(tray_path: str) -> tuple[dict[tuple[int, str, str], tuple[str, str, str]],
@@ -234,16 +240,20 @@ def payloads(users: list[dict[str, Any]], query: uvn_status.Query, asked: set[st
                 if rid not in seen:
                     seen.add(rid)
                     group.append(a)
-            # QA #1418 (03:1xZ): judged AFTER the group is built, on the GROUP's intakes only - exactly the set the send
-            # names. A same-second document in ANOTHER conversation is then newer here too (builder == send).
-            # QA #1418: the SAME rule the send applies (comm_state.newer_intake): a need whose newest document is older
-            # than any intake of this user would be held at send - skip it here, so the batch reaches the need that
-            # CAN go (never a held ask retried every run). Rows built before 'arrivals' existed are not filtered.
+            group.reverse()
+            if need == DISTRIBUTOR:
+                group = group[-1:]          # one F9 code verifies ONE request: one credit per distributor ask
+                docs = [a for a in docs if a["request_id"].lower() == group[0]["request_id"].lower()]
+            # QA #1418 (03:1xZ) / QA #1513: judged AFTER the group is built (and, for a distributor ask, narrowed to its one
+            # request), with the SAME rule the send applies (comm_state.newer_intake over the intakes the MESSAGE
+            # NAMES, i.e. exactly need.doc_intakes below): a need whose newest document is older than any intake of this
+            # user, or shares its second with an intake the message does not name (another thread's same-second
+            # document), would be held at send - skip it here, so the batch reaches the need that CAN go and a held
+            # user never takes a --max-users slot run after run. Rows built before 'arrivals' existed are not filtered.
             if comm_state.newer_intake(newest["doc_received_at"], u.get("arrivals") or [],
                                        {str(a.get("intake_id") or "") for a in docs if a.get("intake_id")}):
                 held.append(f"user {uid}: {need} (an intake newer than its newest document)")
                 continue
-            group.reverse()
             n_docs = len({a["doc_sha"] for a in docs})
             if n_docs > MAX_DOC_GROUP:
                 # QA #1418 (08:36Z): the gate refuses a group larger than it checks; list it here, never a batch slot
@@ -267,9 +277,77 @@ def payloads(users: list[dict[str, Any]], query: uvn_status.Query, asked: set[st
     return out
 
 
+def issue_code(request_id: str, user_id: str) -> dict[str, str]:
+    """F9 (#1476): the request's 7-day challenge code (an active one is returned again) as {code, expires_at}; {} when
+    it cannot be issued."""
+    try:
+        p = subprocess.run([sys.executable, DOC_VERIFY_CLI, "challenge", "issue", "--request", request_id, "--user", str(user_id)],
+                           capture_output=True, text=True, timeout=120, check=False)
+        got = json.loads(p.stdout or "{}") if p.returncode == 0 else {}
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return {}
+    code = str(got.get("code") or "")
+    return ({"code": code, "expires_at": str(got.get("expires_at") or ""), "new": got.get("new") is True}
+            if re.fullmatch(r"[A-Z0-9][A-Z0-9-]{3,31}", code) else {})
+
+
+# the gate's answers that are CONFIRMED pre-POST (verify_notify outcome results): only these void a minted code
+PRE_POST_RESULTS = ("deferred", "skipped", "refused", "refused_unledgered")
+
+
+def void_code(request_id: str, code: str) -> bool:
+    """b1 #1527: retire a minted code whose send did not go (a held send after the preflight). True = voided."""
+    try:
+        p = subprocess.run([sys.executable, DOC_VERIFY_CLI, "challenge", "void", "--request", request_id, "--code", code,
+                            "--reason", "held_send"], capture_output=True, text=True, timeout=120, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return p.returncode == 0
+
+
+CODE_WINDOW_MIN = timedelta(days=7) - timedelta(minutes=5)    # a FRESH code: issued seconds before its send (QA #1513)
+
+
+def with_codes(ps: list[dict[str, Any]], mode: str, report: verify_notify.Report,
+               issuer: Any = issue_code, now: datetime | None = None) -> list[dict[str, Any]]:
+    """Distributor asks get their F9 code: issued at send (apply), masked placeholder in a dry run (nothing issued).
+    A code that cannot be issued drops that ask (nothing sent; noted)."""
+    out = []
+    for p in ps:
+        if p["need"]["code"] != DISTRIBUTOR:
+            out.append(p)
+            continue
+        rid = p["credits"][0]["request_id"]
+        got = CODE_PLACEHOLDER if mode != "apply" else issuer(rid, p["user"]["id"])
+        code = got.get("code", "") if isinstance(got, dict) else str(got or "")
+        if not code:
+            report.refusals.append(f"distributor_code_not_issued:{rid}")
+            continue
+        # QA #1513: an ACTIVE code is returned again; one issued for an earlier attempt that the gate then held may have
+        # less than the promised 7 days left - never send it (it expires, then the next run draws a fresh one)
+        # QA #1513: the copy promises 7 days, so only a code issued NOW for this send goes; an earlier attempt's still-
+        # active code (returned again by 'challenge issue') is never re-sent - it lapses, then the next run gets a fresh one
+        if isinstance(got, dict) and got.get("new") is False:
+            # counted as a deferral, never a silent drop (QA #1513): the run's report shows it
+            report.deferred_users += 1
+            report.refusals.append(f"distributor_code_not_fresh:{rid}")
+            continue
+        if isinstance(got, dict) and got.get("expires_at"):
+            try:
+                left = datetime.fromisoformat(got["expires_at"].replace("Z", "+00:00")) - (now or datetime.now(timezone.utc))
+            except ValueError:
+                left = timedelta(0)
+            if left < CODE_WINDOW_MIN:
+                report.refusals.append(f"distributor_code_window_short:{rid}")
+                continue
+        out.append({**p, "need": {**p["need"], "verify_code": code}})
+    return out
+
+
 def send(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int = 25, preview_dir: str | None = None,
          query: uvn_status.Query | None = None, wrapper: str = verify_notify.WRAPPER,
-         runner: verify_notify.Runner = verify_notify._run, ledger_path: str | None = None) -> verify_notify.Report:
+         runner: verify_notify.Runner = verify_notify._run, ledger_path: str | None = None,
+         issuer: Any = issue_code, voider: Any = void_code) -> verify_notify.Report:
     report = verify_notify.Report()
     if mode == "apply" and not uvn_status.campaign_lock_open(wrapper, LOCK):
         report.halted = f"{CAMPAIGN} is send-locked in the gate ({LOCK}=0); nothing sent (dry-run renders it)"
@@ -295,9 +373,60 @@ def send(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int 
     report.not_found = len(users) - len(live)
     ps = live[:max_users]
     report.candidates = len(ps)
-    verify_notify.send_all(ps, report, mode=mode, wrapper=wrapper, runner=runner, extra=["--campaign", CAMPAIGN],
+    # QA #1513: a distributor ask's F9 code is issued for THAT payload immediately before its own gate call (never a
+    # whole batch of codes up front), and a reused active code must still have the promised 7 days (with_codes)
+    plain = [p for p in ps if p["need"]["code"] != DISTRIBUTOR]
+    verify_notify.send_all(plain, report, mode=mode, wrapper=wrapper, runner=runner, extra=["--campaign", CAMPAIGN],
                            pace_seconds=1.0, preview_dir=preview_dir)
+    for p in ps:
+        if p["need"]["code"] != DISTRIBUTOR:
+            continue
+        if mode == "apply" and not preflight_ok(p, report, wrapper, runner):
+            continue                         # QA #1513: the gate would not send it now -> no code is minted
+        coded = with_codes([p], mode, report, issuer)
+        before, n_out = report.sent_notes, len(report.outcomes)
+        verify_notify.send_all(coded, report, mode=mode, wrapper=wrapper, runner=runner,
+                               extra=["--campaign", CAMPAIGN], pace_seconds=1.0, preview_dir=preview_dir)
+        if mode == "apply" and coded and report.sent_notes == before:
+            rid, code = coded[0]["credits"][0]["request_id"], coded[0]["need"]["verify_code"]
+            new = report.outcomes[n_out:]
+            result = new[-1]["result"] if len(new) == 1 else ""
+            if result in PRE_POST_RESULTS:
+                # the gate held or refused it BEFORE any POST, after the code was minted (a change since the
+                # preflight): retire the code so the next run issues a fresh one (b1 #1527); a failed void is reported
+                report.refusals.append(f"distributor_code_{'voided' if voider(rid, code) else 'void_failed'}:{rid}")
+            else:
+                # r5 (QA #1513): a failure / ambiguous result may have reached the POST - the code is NEVER voided on it
+                # (the user may hold it); it lapses on its own and is reported
+                report.refusals.append(f"distributor_code_kept_ambiguous:{rid}")
     return report
+
+
+def preflight_ok(p: dict[str, Any], report: verify_notify.Report, wrapper: str, runner: verify_notify.Runner) -> bool:
+    """QA #1513: BEFORE an F9 code is minted, the gate runs every send-time check read-only on the masked payload
+    (--check-recipient, C11: the same deferral / hold / refusal as the send). Only 'RECIPIENT OK' mints; any other
+    answer is recorded in the run's report exactly as the send would have recorded it, and no code exists to strand.
+    The send itself re-checks everything (a change between the two reads holds, never sends)."""
+    pre = verify_notify.Report()
+    masked = {**p, "need": {**p["need"], "verify_code": CODE_PLACEHOLDER}}
+    verify_notify.send_all([masked], pre, mode="dry-run", wrapper=wrapper, runner=runner, extra=["--campaign", CAMPAIGN],
+                           check_recipients=True)
+    if pre.recipient_ok == 1 and not pre.halted:
+        return False if pre.failed_users else True
+    for f in dataclasses.fields(pre):
+        if f.name in ("recipient_ok", "validated", "candidates"):
+            continue
+        a, b = getattr(report, f.name), getattr(pre, f.name)
+        if isinstance(b, bool) or b in (None, "", [], {}, 0):
+            continue
+        if isinstance(b, int):
+            setattr(report, f.name, a + b)
+        elif isinstance(b, list):
+            a.extend(b)
+        elif isinstance(b, str) and not a:
+            setattr(report, f.name, b)
+    report.refusals.append(f"distributor_preflight_not_ok:{p['credits'][0]['request_id']}")
+    return False
 
 
 def _main(argv: list[str] | None = None) -> int:
