@@ -2002,5 +2002,121 @@ class AsksScopedProofOnFileTest(unittest.TestCase):
         self.assertEqual(sorted(str(p["user"]["id"]) for _, p in gate.calls), ["1", "4"])
 
 
+class MixedUserTest(unittest.TestCase):
+    """r5 on #1541 (rule a): a user with UVN AND held (H1/H2) rows - the uvn-status note names ONLY the UVN rows; the held
+    row is never named, claimed or closed by this campaign (it stays for the per-request campaigns)."""
+
+    setUp = UvnStatusTests.setUp
+    write_list = UvnStatusTests.write_list
+    run_ = UvnStatusTests.run_
+    gate_file = UvnStatusTests.gate_file
+
+    def test_the_uvn_note_names_uvn_rows_only(self):
+        import re
+        import sqlite3
+        self.users = [{"user_id": 1, "paid": True, "skip": None, "class": "uvn", "request_ids": ["ru", "rh"]}]
+        self.write_list()
+        status = {"ru": "user_verification_needed", "rh": "unverified"}
+
+        def q(sql):
+            if "public.users" in sql:
+                return [["1", "a@x.com", "Ann", pro(1), auth(1)]]
+            m = re.search(r"status IN \(([^)]*)\)", sql)
+            wanted = set(re.findall(r"'([a-z_]+)'", m.group(1))) if m else set(status.values())
+            return [[rid, "1", "p1", "t1", f"Song {rid}", '[{"name":"Art"}]', "{Mixing}", "10"]
+                    for rid, st in status.items() if st in wanted]
+        rep, gate = self.run_(mode="apply", query=q)
+        self.assertEqual(len(gate.calls), 1)
+        _argv, payload = gate.calls[0]
+        self.assertEqual([c["request_id"] for c in payload["credits"]], ["ru"])
+        db = sqlite3.connect(self.ledger)
+        named = " ".join(r[0] or "" for r in db.execute("SELECT request_ids_json FROM verify_messages"))
+        self.assertNotIn("rh", named)
+
+
+class SegmentDailyCapTest(unittest.TestCase):
+    """QA #1541: the policy's per-segment daily cap is enforced BY THE RUNNER under its run lock, re-read before every
+    send, from the runner's own segment record (the list's paid flag at send time)."""
+    setUp = UvnStatusTests.setUp
+    write_list = UvnStatusTests.write_list
+    run_ = UvnStatusTests.run_
+    gate_file = UvnStatusTests.gate_file
+
+    def recs(self):
+        p = Path(f"{self.ledger}.segments.jsonl")
+        return [json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
+
+    def test_the_cap_binds_and_every_send_is_recorded_for_its_segment(self):
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 8)]
+        self.write_list()
+        rep, gate = self.run_(max_users=10, query=replica(range(1, 8)), segment_daily_cap=3)
+        self.assertEqual(len(gate.calls), 3)
+        self.assertEqual([(r["segment"], r["user"], r["n"]) for r in self.recs()], [("paid", "1", 1), ("paid", "2", 1), ("paid", "3", 1)])
+        self.assertEqual(uvn_status.segment_sent_today(self.ledger, "uvn-status", "paid", NOW.strftime("%Y-%m-%d")), 3)
+        self.assertEqual(uvn_status.segment_sent_today(self.ledger, "uvn-status", "free", NOW.strftime("%Y-%m-%d")), 0)
+
+    def test_slots_another_run_used_after_the_wrappers_read_are_honoured(self):
+        # a hand-run batch took 9 of 10 paid slots after the timer's pre-check: this run sends 1, never 10
+        day = NOW.strftime("%Y-%m-%d")
+        uvn_status.record_segment(self.ledger, "uvn-status", "paid", day, "900", 9)
+        uvn_status.record_segment(self.ledger, "uvn-status", "free", day, "901", 50)      # another segment: not counted
+        uvn_status.record_segment(self.ledger, "uvn-status", "paid", "2000-01-01", "902", 50)   # another day: not counted
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 8)]
+        self.write_list()
+        rep, gate = self.run_(max_users=10, query=replica(range(1, 8)), segment_daily_cap=10)
+        self.assertEqual(len(gate.calls), 1)
+        self.assertEqual(rep.over_daily_max > 0, True)
+
+    def test_unrecorded_ledger_sends_count_against_both_segments(self):
+        # QA #1541: a hand run WITHOUT --segment-daily-cap sent 8 today (ledger rows, no segment record): unknown
+        # segment = charged to this one too; a recorded user's rows are not double counted
+        day = NOW.strftime("%Y-%m-%d")
+        db = verify_ledger.connect(self.ledger)
+        for i in range(8):                                   # the real claim path, as a hand run's gate writes it
+            c = verify_ledger.claim(db, campaign="uvn-status", user_key=f"u{800 + i}@x.com", day=day,
+                                    request_ids=[f"h{i}"], message_type="email", approved_by="U7RP6HKUZ",
+                                    approval_ref="ref", now=NOW, user_id=str(800 + i))
+            verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id=str(900 + i))
+        db.close()
+        uvn_status.record_segment(self.ledger, "uvn-status", "free", day, "800", 1)   # one of them is known (free)
+        self.assertEqual(uvn_status.segment_used_today(self.ledger, "uvn-status", "paid", day), 7)
+        self.assertEqual(uvn_status.segment_used_today(self.ledger, "uvn-status", "free", day), 8)
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 8)]
+        self.write_list()
+        rep, gate = self.run_(max_users=10, query=replica(range(1, 8)), segment_daily_cap=9)
+        self.assertEqual(len(gate.calls), 2)                                        # 9 - 7 unknown-segment sends
+
+    def test_no_cap_records_nothing_and_a_broken_record_fails_closed(self):
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 3)]
+        self.write_list()
+        self.run_(max_users=10, query=replica(range(1, 3)))
+        self.assertEqual(self.recs(), [])
+        Path(f"{self.ledger}.segments.jsonl").write_text("not json\n")
+        with self.assertRaises(ValueError):
+            self.run_(max_users=10, query=replica(range(1, 3)), segment_daily_cap=10)
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
+
+class RunnerCapFromEnvTest(unittest.TestCase):
+    """QA #1541 (uvn_status.py:869): the outbound tick sets CREDIT_UVN_DAILY_MAX / CREDIT_STATUS_DAILY_MAX for its own
+    runner calls; the runner process must take them (and keep the bounded defaults otherwise)."""
+
+    def caps(self, env):
+        import subprocess
+        e = {k: v for k, v in os.environ.items() if not k.startswith("CREDIT_")}
+        e.update(env)
+        out = subprocess.run([sys.executable, "-c", "from credit_review import uvn_status as u; print(u.DAILY_MAX, u.STATUS_DAILY_MAX)"],
+                             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))), env=e,
+                             capture_output=True, text=True, timeout=60)
+        return out.stdout.split()
+
+    def test_env_raises_the_runner_cap_to_the_policy(self):
+        self.assertEqual(self.caps({"CREDIT_UVN_DAILY_MAX": "2500", "CREDIT_STATUS_DAILY_MAX": "2500"}), ["2500", "2500"])
+
+    def test_defaults_and_bad_values_keep_the_bound(self):
+        self.assertEqual(self.caps({}), ["400", "1000"])
+        self.assertEqual(self.caps({"CREDIT_UVN_DAILY_MAX": "0", "CREDIT_STATUS_DAILY_MAX": "lots"}), ["400", "1000"])

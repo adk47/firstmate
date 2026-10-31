@@ -26,7 +26,7 @@ Rules, all re-checked here at send time:
   - users who emailed support@ in the last 90 days are held for a human (proof-on-file feed;
     unreadable feed = nothing sent);
   - one claim per user per run (the gate also caps one message per user per UTC day);
-  - paid first, then oldest claim id; at most CLAIM_DAILY_MAX messages a day (first notes and
+  - paid first, then oldest claim id; at most the shared claim cap (policy shared_daily_cap.claim) a day (first notes and
     reminders together).
 Reminders (--reminders): every sent note whose day-7 reminder is due; the claim must still be
 pending, still in band B/C on today's list and not routed to the status note (audience "status"), its code not found and the claim still on today's list (for the server facts) in
@@ -43,7 +43,7 @@ cannot read. Never a band-A claim without an explicit audience (it is on the app
 claim whose code was found. One note per claim ever (the gate's ledger), never to a claim that has a
 proof ask, never within 7 days of another note to the user (verify_ledger.claim_cross_check). The same
 replica, support@ and account checks as the ask; paid first, one claim per user per run, at most
-CLAIM_STATUS_DAILY_MAX a day. The list must be fresh; the daily code check is not required (the
+the shared claim cap (policy shared_daily_cap.claim) a day. The list must be fresh; the daily code check is not required (the
 note promises no code check). A row with audience "status" is never sent the proof ask."""
 
 from __future__ import annotations
@@ -68,8 +68,23 @@ LIST_MAX_AGE_H = 30
 STALE_GMAIL_REASON = "stale_source:cs-gmail"
 PROOF_STORE = os.environ.get("COMM_STATE_PROOF_STORE", "/var/lib/hydra-credit-verify/proof.sqlite")
 DAILY_CHECK_MAX_AGE_H = 30
-CLAIM_DAILY_MAX = 150
-CLAIM_STATUS_DAILY_MAX = 400
+# QA #1541 / b1 (10-31 14:29Z): ONE claim cap - the outbound policy's shared_daily_cap.claim (500/day), the number the
+# timer's room() reads too, counted across BOTH claim campaigns. No runner-local constant can bind below it (the old
+# 150 / 400 made later ticks send 0 while the wrapper reported room). Unreadable policy = budget 0 (nothing sent).
+CLAIM_POLICY = os.environ.get("CVO_POLICY", "/opt/hydra/policies/credit-verify-outbound.json")
+
+
+def claim_daily_cap(path: str | None = None) -> int:
+    try:
+        with open(path or CLAIM_POLICY, encoding="utf-8") as fh:
+            cap = json.load(fh)["shared_daily_cap"]["claim"]
+        return int(cap) if not isinstance(cap, bool) and int(cap) >= 0 else 0
+    except (OSError, ValueError, KeyError, TypeError):
+        return 0
+
+
+def claim_sent_today(db: Any, day: str) -> int:
+    return sum(verify_ledger.messages_today(db, campaign=c, day=day) for c in (CAMPAIGN, STATUS_CAMPAIGN))
 STATUS_CAMPAIGN = verify_ledger.CLAIM_STATUS_CAMPAIGN
 CLAIM_KEY = re.compile(r"^claim-([0-9]{1,19})$")
 READABLE = ("spotify", "website", "youtube")
@@ -440,7 +455,7 @@ def run_status(*, list_path: str, segment: str, mode: str = "dry-run", max_users
             keep.append(c)
     states = claim_states([int(c["claim_id"]) for c in keep], query) if keep else {}
     accts = accounts_of(sorted({int(c["user_id"]) for c in keep}), query) if keep else {}
-    budget = max(0, min(max_users, CLAIM_STATUS_DAILY_MAX - verify_ledger.messages_today(db, campaign=STATUS_CAMPAIGN, day=day)))
+    budget = max(0, min(max_users, claim_daily_cap() - claim_sent_today(db, day)))
     seen: set[int] = set()
     payloads: list[dict[str, Any]] = []
     for c in keep:
@@ -477,9 +492,9 @@ def run_status(*, list_path: str, segment: str, mode: str = "dry-run", max_users
 
 
 def _budget(db: Any, day: str, max_users: int) -> int:
-    """Messages this run may send: max_users, within what is left of today's CLAIM_DAILY_MAX
+    """Messages this run may send: max_users, within what is left of today's shared claim cap
     after every claim-proof-ask message (first note or reminder) already claimed today."""
-    return max(0, min(max_users, CLAIM_DAILY_MAX - verify_ledger.messages_today(db, campaign=CAMPAIGN, day=day)))
+    return max(0, min(max_users, claim_daily_cap() - claim_sent_today(db, day)))
 
 
 def export_asked(db: Any, path: str | None = None) -> int:

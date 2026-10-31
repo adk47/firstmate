@@ -1,0 +1,35 @@
+{
+  "_doc": "credit-verify-outbound.sh CAPACITY caps (Fable 10-30 23:4xZ: the fixed small daily caps go; the safety is the auto-kill: bounce / spam / unsub > 2 %, any fraud hit, the zero-read, v1's 2 h sample). daily_cap = users messaged per campaign per UTC day by segment (credit: the runner's own segment record; claim: ledger rows of the campaign). shared_daily_cap = every campaign of the group together per UTC day (m2's shared send cap inside notify: credit 2,500 / claim 500; messaging-monitoring-m2, H-DevOps #4598). A campaign with no row or no group never applies (fail closed). Raising a cap is a PR.",
+  "daily_cap": {
+    "uvn-status": {
+      "paid": 2500,
+      "free": 2500
+    },
+    "status-doc-received": {
+      "paid": 2500,
+      "free": 2500
+    },
+    "claim-status": {
+      "paid": 500,
+      "free": 500
+    },
+    "claim-proof-ask": {
+      "paid": 500,
+      "free": 500
+    }
+  },
+  "groups": {
+    "credit": [
+      "uvn-status",
+      "status-doc-received"
+    ],
+    "claim": [
+      "claim-status",
+      "claim-proof-ask"
+    ]
+  },
+  "shared_daily_cap": {
+    "credit": 2500,
+    "claim": 500
+  }
+}

@@ -635,7 +635,7 @@ def cmd_uvn_status(args: argparse.Namespace) -> int:
                             campaign=args.campaign, wording=args.wording or "",
                             ledger_path=args.ledger, proof_path=args.proof_on_file, preview_dir=args.preview,
                             from_stage2=args.from_stage2, stage2_path=args.proof_store, exclude_users=exclude,
-                            check_recipients=args.check_recipients)
+                            check_recipients=args.check_recipients, segment_daily_cap=args.segment_daily_cap)
     log("uvn-status " + json.dumps({k: v for k, v in vars(report).items() if not isinstance(v, (list, dict))}))
     werr = write_outcomes(args, report)
     print(uvn_status.render(report, args.mode, args.segment) + (f" OUTCOMES NOT WRITTEN: {werr}." if werr else ""))
@@ -1004,6 +1004,8 @@ def parser() -> argparse.ArgumentParser:
                          "no-ask: status-team-review's Copy B0, without the proof sentence (firstmate 106)")
     us.add_argument("--mode", choices=["apply", "dry-run"], default="dry-run")
     us.add_argument("--max-users", type=int, default=50, help="messages this run (canary: 3)")
+    us.add_argument("--segment-daily-cap", type=int, default=None,
+                    help="QA #1541: the policy's per-campaign+segment daily cap, enforced under the run lock")
     us.add_argument("--preview", default=None, help="dry-run: write each user's rendered note to this dir as <user id>.txt (0700)")
     us.add_argument("--proof-on-file", default=None, metavar="FILE")
     us.add_argument("--from-stage2", action="store_true",

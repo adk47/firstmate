@@ -646,7 +646,8 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
         check_recipients: bool = False, campaign: str = CAMPAIGN, post: verify_notify.Poster = verify_notify.post_cs_priority,
         wording: str = "", from_stage2: bool = False, stage2_path: str | None = None,
         exclude_users: set[str] | frozenset[str] = frozenset(), lens: fraud_lens.LensFn | None = None,
-        watchlist_path: str | None = None, holds_path: str | None = None) -> UvnReport:
+        watchlist_path: str | None = None, holds_path: str | None = None,
+        segment_daily_cap: int | None = None) -> UvnReport:
     if campaign not in CAMPAIGNS:
         raise ValueError(f"unknown campaign {campaign!r}")
     if wording and (campaign, wording) not in WORDINGS:
@@ -904,12 +905,21 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
             report.halted = f"another {campaign} apply run is in progress; nothing sent by this one"
             return report
 
-    def remaining_cap() -> int:
+    def ledger_left() -> int:
         db = verify_ledger.connect(path)
         try:
             return cap - verify_ledger.sent_today(db, campaign=campaign, day=day)
         finally:
             db.close()
+
+    def remaining_cap() -> int:
+        left = ledger_left()
+        if segment_daily_cap is not None:
+            # QA #1541: the per-SEGMENT daily policy cap, re-read under this run's lock before every send (atomic with
+            # the send) and counted from the runner's own segment record (the list's paid flag at send time - the
+            # same source that chose the segment), never from a separate paying export
+            left = min(left, segment_daily_cap - segment_used_today(path, campaign, segment, day))
+        return left
 
     # Notes sent (or, on a dry run, that the gate would send) use the budget, and so does a gate
     # call that left its claim in the ledger without a verified post (outcome unknown: it may have
@@ -993,6 +1003,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                     if calls and pace_seconds:
                         time.sleep(pace_seconds)
                 before = report.sent_notes if mode == "apply" else report.validated + report.recipient_ok
+                l0 = ledger_left() if mode == "apply" else 0
                 verify_notify.send_all([p], report, mode=mode, wrapper=wrapper, runner=runner,
                                        extra=["--campaign", campaign] + (["--copy", wording] if wording else []),
                                        pace_seconds=0, preview_dir=preview_dir,
@@ -1005,9 +1016,12 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                     report.rows_held += dropped
                     report.note("rows_left_out")
                 if mode == "apply":
-                    unknown = max(0, left - remaining_cap() - reached)
+                    unknown = max(0, l0 - ledger_left() - reached)
                     report.outcome_unknown += unknown
                     counted += unknown
+                    if segment_daily_cap is not None and reached + unknown:
+                        # QA #1541: this segment's messages (sent + outcome-unknown), under the run lock
+                        record_segment(path, campaign, segment, day, str(uid), reached + unknown)
                 if report.halted:
                     break
             if report.halted:
@@ -1020,6 +1034,55 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
     if mode == "apply" and campaign in verify_ledger.RECHECKABLE_REFUSALS:
         verify_notify.flag_refusals(report, ledger_path=path, campaigns=[campaign], post=post, now=now)
     return report
+
+
+def _segments_path(ledger: str) -> str:
+    return f"{ledger}.segments.jsonl"
+
+
+def segment_sent_today(ledger: str, campaign: str, segment: str, day: str) -> int:
+    """Messages the runner recorded for campaign+segment on `day` (sent or outcome-unknown). Missing file = 0; an
+    unreadable or malformed record raises (the run halts: fail closed)."""
+    p = _segments_path(ledger)
+    if not os.path.exists(p):
+        return 0
+    n = 0
+    with open(p, encoding="utf-8") as f:
+        for ln in f:
+            if ln.strip():
+                r = json.loads(ln)
+                if r["day"] == day and r["campaign"] == campaign and r["segment"] == segment:
+                    n += int(r["n"])
+    return n
+
+
+def segment_used_today(ledger: str, campaign: str, segment: str, day: str) -> int:
+    """QA #1541: what the segment cap charges - the runner's record for this segment PLUS every message the ledger shows
+    for the campaign today that the record does not cover (a hand run without --segment-daily-cap, a crash between the
+    ledger claim and the record): unknown segment = charged to BOTH segments (fail closed)."""
+    recorded_users: set[str] = set()
+    p = _segments_path(ledger)
+    if os.path.exists(p):
+        with open(p, encoding="utf-8") as f:
+            for ln in f:
+                if ln.strip():
+                    r = json.loads(ln)
+                    if r["day"] == day and r["campaign"] == campaign:
+                        recorded_users.add(str(r["user"]))
+    db = verify_ledger.connect(ledger)
+    try:
+        rows = db.execute("SELECT account_id FROM verify_messages WHERE campaign=? AND day=? "
+                          "AND status IN ('attempted','sent')", (campaign, day)).fetchall()
+    finally:
+        db.close()
+    unrecorded = sum(1 for (a,) in rows if str(a) not in recorded_users)
+    return segment_sent_today(ledger, campaign, segment, day) + unrecorded
+
+
+def record_segment(ledger: str, campaign: str, segment: str, day: str, user: str, n: int) -> None:
+    with open(_segments_path(ledger), "a", encoding="utf-8") as f:
+        f.write(json.dumps({"day": day, "campaign": campaign, "segment": segment, "user": user, "n": int(n)}) + "\n")
+        f.flush(); os.fsync(f.fileno())
 
 
 def render(report: UvnReport, mode: str, segment: str) -> str:

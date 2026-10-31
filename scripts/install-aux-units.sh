@@ -1926,6 +1926,22 @@ CRONPAIDSTATUS
 chmod 644 /etc/cron.d/hydra-paid-status
 install -d -m 700 /var/lib/hydra/paid-status
 
+# ─── Credit-verify outbound tick, every 2 h (captain 2026-10-30 14:4xZ) ─────
+# The server-side outbound schedule that replaces hand-run batches (firstmate
+# data/proof-loop-lead-fable-p1/unattended-1030.md): per campaign family the
+# deployed builder -> --check-recipients --outcomes-json -> 5 bodies -> apply up
+# to the cap -> health -> auto-kill. DRY-RUN unless /etc/hydra/credit-verify-
+# outbound.live exists; paid segments also need .paid-enabled; kill switch
+# /etc/hydra/credit-verify-outbound.disabled (also written by the auto-kill).
+# Runbook in the script header. Approves nothing (registered approved:false).
+cat > /etc/cron.d/credit-verify-outbound << CRONCVOUTBOUND
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+0 */2 * * * root $HYDRA_ROOT/scripts/credit-verify-outbound.sh >> /var/log/credit-verify-outbound.log 2>&1
+CRONCVOUTBOUND
+chmod 644 /etc/cron.d/credit-verify-outbound
+install -d -m 700 /var/lib/hydra/credit-verify-outbound
+
 # ─── Codex OAuth keepalive at 15-min cadence ──────────────────
 # PROACTIVE complement to the watchdog: openclaw-watchdog.sh pages REACTIVELY
 # (journal 401 signature, after the fleet is already on the mini fallback);

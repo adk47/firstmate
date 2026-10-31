@@ -36,6 +36,10 @@ def claim(cid: int, uid: int, **kw):
             "code_found": False, **kw}
 
 
+
+# QA #1541: the claim runners read the outbound policy's shared claim cap; the tests read the repo's own policy file
+claim_proof_ask.CLAIM_POLICY = str(Path(__file__).resolve().parents[2] / "policies" / "credit-verify-outbound.json")
+
 class FakeGate:
     def __init__(self, out="POSTED email message=1 credits=1"):
         self.calls, self.out = [], out
@@ -285,11 +289,42 @@ class ClaimProofAskTests(unittest.TestCase):
         self._sent_note(4, 10, "u10@x.com", "2026-10-24")      # already one claim-proof-ask message today
         q = replica({1: ("pending", 7), 2: ("pending", 8), 3: ("pending", 9)},
                     {7: "u7@x.com", 8: "u8@x.com", 9: "u9@x.com"})
-        with mock.patch.object(claim_proof_ask, "CLAIM_DAILY_MAX", 3):
+        with mock.patch.object(claim_proof_ask, "claim_daily_cap", lambda path=None: 3):
             rep, gate = self.go(self.lst([claim(1, 7), claim(2, 8), claim(3, 9)]), q, reminders=True)
         self.assertEqual([p["credits"][0]["request_id"] for _, p in gate.calls], ["claim-1", "claim-2"])
         self.assertEqual(rep.over_daily_max, 1)
         self.assertEqual(q.user_reads, 1)
+
+    def test_one_claim_cap_from_the_policy_shared_by_both_claim_campaigns(self):
+        # QA #1541 / b1: no runner-local constant - the policy's shared_daily_cap.claim, across claim-proof-ask AND
+        # claim-status; an unreadable policy sends nothing
+        pol = json.load(open(claim_proof_ask.CLAIM_POLICY))
+        self.assertEqual(claim_proof_ask.claim_daily_cap(), pol["shared_daily_cap"]["claim"])
+        self.assertFalse(hasattr(claim_proof_ask, "CLAIM_DAILY_MAX") or hasattr(claim_proof_ask, "CLAIM_STATUS_DAILY_MAX"))
+        db = verify_ledger.connect(self.ledger)
+        day = "2026-10-24"
+        for i in range(3):
+            for camp in ("claim-proof-ask", "claim-status"):
+                c = verify_ledger.claim(db, campaign=camp, user_key=f"{camp}{i}@x.com", day=day, request_ids=[f"claim-{camp}-{i}"],
+                                        message_type="email", approved_by="U", approval_ref="r", user_id=str(100 + i), enforce_cap=False)
+                verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id=f"m{camp}{i}")
+        with mock.patch.object(claim_proof_ask, "claim_daily_cap", lambda path=None: 8):
+            self.assertEqual(claim_proof_ask._budget(db, day, 250), 2)                # 8 - (3 + 3), both campaigns count
+        self.assertEqual(claim_proof_ask.claim_daily_cap("/nonexistent/policy.json"), 0)
+
+    def test_repeated_real_runner_ticks_stop_at_the_policy_cap(self):
+        # QA #1541 / b1: ticks of the REAL runner reach the shared policy cap and then send 0 - never stall below it
+        day = NOW.strftime("%Y-%m-%d")
+        uids = list(range(20, 30))
+        q = replica({i: ("pending", u) for i, u in enumerate(uids, 1)}, {u: f"u{u}@x.com" for u in uids})
+        lst = self.lst([claim(i, u) for i, u in enumerate(uids, 1)])
+        sent = []
+        with mock.patch.object(claim_proof_ask, "claim_daily_cap", lambda path=None: 5):
+            for _ in range(3):
+                gate = LedgerGate(self.ledger, day)
+                rep, gate = self.go(lst, q, max_users=3, gate=gate)
+                sent.append(len(gate.calls))
+        self.assertEqual(sent, [3, 2, 0])
 
     def test_ledger_close_day_is_always_14_days_after_the_note(self):
         db = verify_ledger.connect(self.ledger)
