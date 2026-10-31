@@ -105,6 +105,18 @@
       "approved_by": null,
       "approval_ref": null,
       "status_note": "Approves no credit request. DRY-RUN unless /etc/hydra/credit-verify-outbound.live exists; paid segments also need .paid-enabled; kill switch /etc/hydra/credit-verify-outbound.disabled."
+    },
+    "credit-batch-judge": {
+      "description": "scripts/credit_review/batch_judge.py (Fable [key=scale-now-openclaw], consolidated 204): ONE tool-less Codex call per OUTBOUND batch through credit_trust/llm.py (judge-only; never an OpenClaw agent turn), reading every rendered body for COPY + CONSISTENCY only (approved copy ref, barred list, number agreement, facts <-> body <-> first-hits). STOP-ONLY: it approves NO credit request and writes no core, admin or Intercom state; its verdict row is the batch's signature of record and the #1541 tick applies only when may_apply() is true for THAT batch sha.",
+      "entrypoints": [
+        "credit_review/batch_judge.py"
+      ],
+      "cron_names": [],
+      "approved": true,
+      "approved_by": "captain (Aaron) 'use openclaw' 2026-10-31 17:5xZ, as batch SIGNER only",
+      "approval_ref": "Fable [key=scale-now-openclaw] 201 + consolidated final 204 (l1 + p1 + r5); firstmate credit-refresh-t01b.inbox 201-204",
+      "scope": "batch-signer",
+      "status_note": "Approves no credit. Signs outbound batches only: fail-closed (UNKNOWN / timeout / finish=length / parse failure / batch-sha mismatch / model off ALLOWED_MODELS / body missing = STOP = no apply). Codex-only ladder on constant models; OpenRouter fallback only through CappedJudge, and a fallback pass never signs the first batch of a class (r5 signs it). SHADOW until b1's eval set (the three hand stops + clean batches) shows its stops cover every hand stop; live from Sun 00Z on that bar."
     }
   }
 }
