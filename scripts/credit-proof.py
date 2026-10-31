@@ -100,7 +100,12 @@ def cmd_intercom(args: argparse.Namespace) -> int:
 def cmd_file_gmail(args: argparse.Namespace) -> int:
     """`file --source gmail`: support@ messages by id (read-only gog), same proof_intake contract."""
     from credit_verify.proof import email_in, gmail_intake, intake
+    from credit_verify.proof.gmail_kill import GMAIL_READERS_KILL, gmail_readers_disabled
     from credit_verify.proof.store import ProofStore
+    if gmail_readers_disabled():
+        log(f"support@ Gmail readers disabled ({GMAIL_READERS_KILL}); nothing fetched")
+        print("NO_REPLY")
+        return 0
     if not args.message_ids:
         log("--source gmail needs --message-ids FILE")
         print("NO_REPLY")
@@ -161,6 +166,17 @@ def cmd_file(args: argparse.Namespace) -> int:
     return 0
 
 
+def file_recent_no_gmail(flag: bool) -> bool:
+    """file-recent reads support@ only without --no-gmail AND without the shared Gmail readers kill file."""
+    from credit_verify.proof.gmail_kill import GMAIL_READERS_KILL, gmail_readers_disabled
+    if flag:
+        return True
+    if gmail_readers_disabled():
+        log(f"support@ Gmail readers disabled ({GMAIL_READERS_KILL}): Intercom only; queued support@ ids kept")
+        return True
+    return False
+
+
 def cmd_file_recent(args: argparse.Namespace) -> int:
     """The hourly document intake (cron credit-verify-proof-file): everything customers sent since the
     last run, Intercom + support@, into proof_intake only. Dry run unless --apply."""
@@ -191,11 +207,12 @@ def cmd_file_recent(args: argparse.Namespace) -> int:
         paying = set()
         log("paying users unreadable: conversations are filed in search order")
     admin_lookup = email_in.admin_user_lookup(admin_api.AdminClient())
+    no_gmail = file_recent_no_gmail(args.no_gmail)
     try:
         res = recent.run(
             state_path=args.state or recent.STATE, hours=args.hours, apply=args.apply,
             conv_search=recent.intercom_search(tok),
-            gmail_search=None if args.no_gmail else recent.gog_search(),
+            gmail_search=None if no_gmail else recent.gog_search(),
             max_messages=args.max_fetches,          # the same per-run cap for support@ (the rest is carried)
             order=lambda convs: recent.paid_first(convs, export, paying),
             # unresolved conversations go to the tray inside the pass, before the window is saved (QA #1481)

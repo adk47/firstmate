@@ -17,6 +17,15 @@
 
 set -euo pipefail
 
+# 0. One kill file for every support@ Gmail reader (firstmate 10-31: a deploy re-enables a disabled cron, an
+# /etc file survives it). Present = this run reads nothing from support@.
+# A constant, never an env var (r5 [key=unattended]: a kill path the environment can move is a bypass).
+GMAIL_READERS_KILL="/etc/hydra/gmail-readers.disabled"
+if [ -e "$GMAIL_READERS_KILL" ]; then
+  echo "preflight failed: support@ Gmail readers disabled ($GMAIL_READERS_KILL)" >&2
+  return 1 2>/dev/null || exit 1
+fi
+
 # 1. Required tools.
 for tool in gog python3; do
   command -v "$tool" >/dev/null 2>&1 || {

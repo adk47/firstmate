@@ -68,7 +68,15 @@ def judge(email_, **kw):
     return {"human_7d": human, "auto_7d": auto, "last_human": last}
 
 
+# The ONE support@ Gmail readers kill file (#1569; a constant, never an env var - r5 [key=unattended]).
+GMAIL_READERS_KILL = "/etc/hydra/gmail-readers.disabled"
+
+
 def main():
+    import os
+    if os.path.exists(GMAIL_READERS_KILL):
+        # before the first gog call; fail closed like an unreadable mailbox (never 'no human reply')
+        sys.exit(f"support@ Gmail readers disabled ({GMAIL_READERS_KILL}): support@ check skipped (fail closed)")
 
 
     segs = json.load(open(f"{D}/segments.json"))

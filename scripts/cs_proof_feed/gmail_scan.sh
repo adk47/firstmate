@@ -6,6 +6,13 @@
 # the scan finished. --timezone UTC: gog prints dates in host-local time by default, and
 # gmail_proof.py / proof_export.py read them as UTC (proof_at). gog's credentials come from /etc/openclaw/main.env (never printed).
 set -u
+# The ONE support@ Gmail readers kill file (#1569; a constant, never an env var - r5 [key=unattended]). Present =
+# no gog call at all; the scan does not finish (no DONE line), so cs-gmail stays stale and its gate holds.
+GMAIL_READERS_KILL="/etc/hydra/gmail-readers.disabled"
+if [ -e "$GMAIL_READERS_KILL" ]; then
+  echo "support@ Gmail readers disabled ($GMAIL_READERS_KILL): no scan" >&2
+  exit 4
+fi
 # CS_PROOF_ENV / CS_PROOF_GOG exist for the tests (a CI runner may itself hold the real env file and
 # gog: the tests must never reach the real mailbox).
 ENV_FILE="${CS_PROOF_ENV:-/etc/openclaw/main.env}"

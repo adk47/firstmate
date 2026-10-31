@@ -74,7 +74,8 @@ export must survive into the rest of the pipeline):
 source scripts/preflight.sh
 ```
 
-Preflight (a) verifies `support@muso.ai` is authenticated in `gog`, and (b) creates a
+Preflight first stops when `/etc/hydra/gmail-readers.disabled` exists (the kill file shared by every support@
+Gmail reader, so a deploy that re-enables the cron cannot restart Gmail reads). It then (a) verifies `support@muso.ai` is authenticated in `gog`, and (b) creates a
 `mktemp -d` `WORKDIR` with an INT/TERM cleanup trap. On any preflight failure it prints a
 single `preflight failed: ...` line and returns non-zero. **If preflight fails, emit that
 exact line as your final assistant message and STOP.** Do not fetch, classify, or

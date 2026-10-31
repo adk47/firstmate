@@ -125,6 +125,11 @@ def cmd_blob_backfill(args: argparse.Namespace) -> int:
         log(f"kill switch present at {KILL_SWITCH}; no blob-backfill")
         print("NO_REPLY")
         return 0
+    from credit_verify.proof.gmail_kill import GMAIL_READERS_KILL, gmail_readers_disabled
+    if gmail_readers_disabled():
+        log(f"support@ Gmail readers disabled ({GMAIL_READERS_KILL}); no blob-backfill")
+        print("NO_REPLY")
+        return 0
     if not hasattr(gmail_intake, "SUPPORT_GMAIL_LOCK"):
         # rule (2): every support@ Gmail call takes the shared lock (#1558); code without it never fetches
         log("blob-backfill refused: gmail_intake has no shared support@ Gmail lock on this deploy (#1558)")
