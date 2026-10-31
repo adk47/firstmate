@@ -14,15 +14,15 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 from credit_review import owing_proof as op  # noqa: E402
 
-#        user, request, status, created, paid, review_fired, proofRequest
-ROWS = [["1", "u1", "user_verification_needed", "2026-09-01", "0", "0", "0"],   # free U, never told
-        ["2", "h2", "unverified", "2026-08-01", "1", "1", "0"],                  # paid H2, never told
-        ["2", "ok", "processing", "2026-08-02", "1", "0", "0"],                  #   (not owed: not named)
-        ["3", "a3", "unverified", "2026-10-01", "1", "0", "0"],                  # paid held account (H1)
-        ["4", "t4", "user_verification_needed", "2026-07-01", "1", "0", "0"],    # paid U but told by the ledger
-        ["5", "m5", "user_verification_needed", "2026-07-01", "0", "0", "1"],    # proofRequest marker: told
-        ["6", "n6", "unverified", "2026-07-01", "1", "0", "0"],                  # owes nothing: not listed
-        ["7", "r7", "user_verification_needed", "2026-10-02", "1", "0", "0"]]    # paid U, at-risk
+#        user, request, status, created, paid, review_fired, proofRequest, proof_required
+ROWS = [["1", "u1", "user_verification_needed", "2026-09-01", "0", "0", "0", "0"],   # free U, never told
+        ["2", "h2", "unverified", "2026-08-01", "1", "1", "0", "0"],                  # paid H2, never told
+        ["2", "ok", "processing", "2026-08-02", "1", "0", "0", "0"],                  #   (not owed: not named)
+        ["3", "a3", "unverified", "2026-10-01", "1", "0", "0", "0"],                  # paid held account (H1)
+        ["4", "t4", "user_verification_needed", "2026-07-01", "1", "0", "0", "0"],    # paid U but told by the ledger
+        ["5", "m5", "user_verification_needed", "2026-07-01", "0", "0", "1", "0"],    # proofRequest marker: told
+        ["6", "n6", "unverified", "2026-07-01", "1", "0", "0", "0"],                  # owes nothing: not listed
+        ["7", "r7", "user_verification_needed", "2026-10-02", "1", "0", "0", "0"]]    # paid U, at-risk
 
 
 class OwingProofTest(unittest.TestCase):
@@ -30,9 +30,9 @@ class OwingProofTest(unittest.TestCase):
         d = Path(tempfile.mkdtemp())
         self.ledger = str(d / "ledger.sqlite3")
         db = sqlite3.connect(self.ledger)
-        db.execute("CREATE TABLE verify_messages (account_id TEXT, status TEXT)")
+        db.execute("CREATE TABLE verify_messages (account_id TEXT, status TEXT, campaign TEXT DEFAULT 'uvn-status')")
         db.execute("CREATE TABLE verify_refusal_holds (user_id TEXT, reason TEXT, flagged_at TEXT)")
-        db.execute("INSERT INTO verify_messages VALUES ('4', 'sent'), ('1', 'refused')")   # a refusal is not "told"
+        db.execute("INSERT INTO verify_messages (account_id, status) VALUES ('4', 'sent'), ('1', 'refused')")   # a refusal is not "told"
         db.execute("INSERT INTO verify_refusal_holds VALUES ('3', 'account-hold', 'x')")
         db.commit()
         self.holds = str(d / "holds.jsonl"); Path(self.holds).write_text("")
@@ -61,10 +61,66 @@ class OwingProofTest(unittest.TestCase):
         self.assertEqual(res["counts"]["at_risk_source"], "missing")
 
     def test_inputs_fail_closed(self):
-        for kw in ({"query": lambda sql: [["1", "x", "unverified", "d", "1", "maybe", "0"]]},
+        for kw in ({"query": lambda sql: [["1", "x", "unverified", "d", "1", "maybe", "0", "0"]]},
+                   {"query": lambda sql: [["1", "x", "unverified", "d", "1", "0", "0", "yes"]]},
                    {"ledger_path": str(self.d / "nodir" / "l.sqlite3")}, {"holds_path": str(self.d / "nope.jsonl")}):
             with self.assertRaises(op.OwingProofError, msg=str(kw)):
                 self.build(**kw)
+
+
+class ProofRequiredAudienceTest(OwingProofTest):
+    """v1 / r5 / p1 [key=k-proof-required]: an open unverified/processing row with core proof_required = true is OWED
+    (the ask class), and only an earlier uvn-status ASK - never a status line - keeps a user off the list."""
+
+    def test_proof_required_rows_are_asked_and_a_status_line_does_not_block(self):
+        rows = [["8", "p8", "unverified", "2026-09-05", "1", "0", "0", "1"],      # the 21's shape
+                ["8", "q8", "processing", "2026-09-06", "1", "0", "0", "0"],      # not owed: not named
+                ["9", "p9", "unverified", "2026-09-07", "1", "0", "0", "1"],      # told by a status line only
+                ["10", "p10", "unverified", "2026-09-08", "1", "0", "0", "1"]]    # already ASKED
+        db = sqlite3.connect(self.ledger)
+        db.execute("INSERT INTO verify_messages VALUES ('9', 'sent', 'status-team-review'), ('10', 'sent', 'uvn-status')")
+        db.commit(); db.close()
+        res = self.build(query=lambda sql: [list(r) for r in rows])
+        got = {u["user_id"]: (u["class"], u["request_ids"], u["facts"]) for u in res["users"]}
+        self.assertEqual(got, {"8": ("uvn", ["p8"], [["p8", "unverified", True]]),
+                               "9": ("uvn", ["p9"], [["p9", "unverified", True]])})
+        self.assertEqual(len(res["replica_facts"]["sha256"]), 64)
+        self.assertIn("proof_required", res["replica_facts"]["query"])
+        # r5: the header's query is the EXACT runnable SQL the build ran (and verify_facts re-runs), with its sha256
+        seen = []
+        res = self.build(query=lambda sql: seen.append(sql) or [list(r) for r in rows])
+        self.assertIn(res["replica_facts"]["query"], seen)
+        self.assertTrue(res["replica_facts"]["query"].startswith("SELECT "))
+        import hashlib
+        self.assertEqual(res["replica_facts"]["query_sha256"], hashlib.sha256(res["replica_facts"]["query"].encode()).hexdigest())
+
+    def vf(self, lst, query):
+        return op.verify_facts(lst, query, holds_path=self.holds, ledger_path=self.ledger)
+
+    def test_verify_facts_flags_a_user_whose_rows_changed(self):
+        rows = [["8", "p8", "unverified", "2026-09-05", "1", "0", "0", "1"]]
+        lst = self.build(query=lambda sql: [list(r) for r in rows])
+        self.assertEqual(self.vf(lst, lambda sql: [list(r) for r in rows]), [])
+        moved = [["8", "p8", "approved", "2026-09-05", "1", "0", "0", "1"]]            # decided since the build
+        self.assertEqual(len(self.vf(lst, lambda sql: [list(r) for r in moved])), 1)
+        cleared = [["8", "p8", "unverified", "2026-09-05", "1", "0", "0", "0"]]        # proof no longer required
+        self.assertEqual(len(self.vf(lst, lambda sql: [list(r) for r in cleared])), 1)
+    def test_verify_facts_sees_a_request_owed_after_the_build_and_an_edited_list(self):
+        # QA #1565: the owed set is RECOMPUTED - a second proof_required row that appeared after the build is a change
+        rows = [["8", "p8", "unverified", "2026-09-05", "1", "0", "0", "1"]]
+        lst = self.build(query=lambda sql: [list(r) for r in rows])
+        self.assertEqual(self.vf(lst, lambda sql: [list(r) for r in rows]), [])
+        more = rows + [["8", "p9", "processing", "2026-10-30", "1", "0", "0", "1"]]
+        self.assertEqual(len(self.vf(lst, lambda sql: [list(r) for r in more])), 1)
+        import copy
+        edited = copy.deepcopy(lst)
+        u8 = next(u for u in edited["users"] if u["user_id"] == "8")
+        u8["request_ids"] = []                                                    # ids no longer what is owed
+        self.assertTrue(any(d.startswith("8:") for d in self.vf(edited, lambda sql: [list(r) for r in rows])))
+        tampered = copy.deepcopy(lst)
+        next(u for u in tampered["users"] if u["user_id"] == "8")["facts"] = [["p8", "unverified", False]]
+        self.assertTrue(any(d.startswith("header:") for d in self.vf(tampered, lambda sql: [list(r) for r in rows])))
+
 
 
 if __name__ == "__main__":

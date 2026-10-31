@@ -349,6 +349,12 @@ readonly APPROVAL_REF_LIVE_V1="$APPROVAL_REF_LIVE; paid provisional approvals: F
 readonly APPROVAL_REF_TAKEBACK="captain via firstmate 012, 2026-10-16: every take-back sends the user a short, polite message saying which credit and role, why (who the public credits name, with the link), and how to dispute it by replying with a document."
 readonly APPROVAL_REF_STANDING_ORDER="captain U7RP6HKUZ standing order 2026-10-19 17:24Z: \"are you properly communicating to everybody that's making credit request and also are you figuring out how to do profile merges that are being requested by Caroline as well make sure that you have all of the operation functions that Jan performs under your watch. I still want the guard up, but I want you to do everything based off of the research that you do and also your communications with the actual users.\""
 readonly APPROVAL_REF_UVN="$APPROVAL_REF_STANDING_ORDER; copy approved by firstmate under it 2026-10-19 21:07Z (inbox 060, confirmed in 064): copy-uvn-status-reminder-1019 section A with the closing-line edit"
+# fable-copy-1030-r5/c2 (byte-for-byte; [key=k-proof-required]): the first sentence of a uvn-status ask that follows a
+# status line we sent this user about any of the same requests (/k, the team-review / doc-received lines). No overlap =
+# the plain ask. The corrected ask goes by EMAIL (its own message, never into an auto-picked thread: preview == send).
+readonly CORRECTION_C2_ONE="A correction to our earlier note: this request does need one thing from you."
+readonly CORRECTION_C2_MANY="A correction to our earlier note: these requests do need one thing from you."
+readonly CORRECTION_C2_REF="fable-copy-1030-r5/c2"
 readonly APPROVAL_REF_WITHDRAWAL="$APPROVAL_REF_STANDING_ORDER; withdrawal-confirm copy approved by firstmate under it 2026-10-19 21:21Z (inbox 061, confirmed in 064), sent only for a request the requester withdrew (metadata.withdrawal.by = requester)"
 readonly APPROVAL_REF_STATUS="$APPROVAL_REF_STANDING_ORDER; status notes approved by firstmate under it 2026-10-20 (inbox 070: team-review verbatim; 071: doc-received as credit-trust-llm-t01 drafted it). Not asks."
 readonly APPROVAL_REF_STATUS_QUEUED="$APPROVAL_REF_STATUS The 'in our review queue' doc-received wording (--copy queued) approved by firstmate 092."
@@ -1950,7 +1956,29 @@ add_conv_tag() { # <conversation> <tag>: tags are only ever ADDED (r5 i)
   [ "$(printf '%s' "$resp" | "$JQ_BIN" -r 'select(.type == "tag") | .name // empty' | tr '[:upper:]' '[:lower:]')" = "$2" ] || return 4
 }
 
+# r5 / p1 [key=k-proof-required] (/c2): did we send this user a status line about any of these requests? Then this
+# ask corrects it: the correction sentence first, by email, and our own 7-day cooldown (the line being corrected) does
+# not defer it. Read from the verify ledger (no ledger yet = no earlier line); an unreadable ledger sends nothing.
+C2="" C2_SUFFIX="" C2_EX="[]"
+# A reply_due ANSWER is never /c2: it goes in-thread, where #1517's locked correction covers an earlier nothing-needed
+# line in that thread (/c2 is the unsolicited ask's correction, by email).
+if [ "$CAMPAIGN" = "uvn-status" ] && [ "$KIND" = "initial" ] && [ -z "$REPLY_DUE" ] && [ -f "$LEDGER" ]; then
+  nn="$(ledger nothing-needed-overlap --user-id "$USER_ID" --request-ids "$ALL_IDS")" \
+    || { printf 'LEDGER READ FAILED (earlier status line); nothing was sent or claimed\n' >&2; exit 4; }
+  if [ "$(printf '%s' "$nn" | "$JQ_BIN" -r '(.overlap // []) | length' 2>/dev/null)" != "0" ]; then
+    C2=1; C2_SUFFIX="; correction $CORRECTION_C2_REF (follows a status line on $(printf '%s' "$nn" | "$JQ_BIN" -r '.overlap | join(",")' | cut -c1-200))"
+    # QA #1565: ONLY the status line(s) being corrected are exempt from the 7-day recent-contact check (by message id)
+    C2_EX="$(printf '%s' "$nn" | "$JQ_BIN" -c '[.message_ids[]? | tostring]')" || C2_EX="[]"
+    [ -z "$THREAD" ] || refuse "a corrected ask (/c2) goes by email, its own message; --conversation does not apply. Nothing was sent or claimed."
+  fi
+fi
+with_c2() { # <rendered-json> -> the same note with the /c2 sentence first; singular/plural as the body renders (/l)
+  printf '%s' "$1" | "$JQ_BIN" -c --arg one "$CORRECTION_C2_ONE" --arg many "$CORRECTION_C2_MANY" '
+    (if (.text | test("your credit requests ")) then $many else $one end) as $p
+    | .html = "<p>" + $p + "</p>" + .html | .text = $p + "\n\n" + .text'
+}
 RENDERED="$(render "$INPUT")"
+[ -z "$C2" ] || RENDERED="$(with_c2 "$RENDERED")"
 leak="$(leak_reason "$RENDERED")"
 [ -z "$leak" ] || record_refusal "the rendered note contains $leak (from a track title, artist or role). Customers never see internal surfaces; this note is not sent and the credits are recorded as refused for a human to look at."
 
@@ -2307,6 +2335,7 @@ if [ -n "$NIE_PHRASE" ]; then
   NIE=1; NIE_BODY=1
 fi
 NIE_ARGS=(); [ "$NIE_BODY" = "1" ] && NIE_ARGS=(--nothing-needed-body)
+C2_ARGS=(); [ -n "${C2:-}" ] && C2_ARGS=(--correction)
 if { [ "$GOLIVE" = "1" ] || [ "$NIE" = "1" ]; } && [ "$LIVE" = "1" ]; then
   # The user's communication state, read from the live stores RIGHT NOW (captain 18:2xZ; comm_state.py): the
   # "wait for our message" lines never go to anyone with a document or reply on file (they get R1 or nothing), R1
@@ -2317,7 +2346,7 @@ if { [ "$GOLIVE" = "1" ] || [ "$NIE" = "1" ]; } && [ "$LIVE" = "1" ]; then
   CS="$("$PY_BIN" -I "$COMM_STATE_HELPER" check --campaign "$CAMPAIGN" --copy "$COPY" --user-id "$USER_ID" \
         --request-ids "$ALL_IDS" --contact-id "$CONTACT_ID" \
         --conversation "$(if [ "$R1LIKE" = "1" ] || [ "$COPY" = "proofneed" ]; then printf '%s' "${fconv:-}"; else printf '%s' "${THREAD:-}"; fi)" \
-        --reply-due "${REPLY_DUE:-}" ${NIE_ARGS[@]+"${NIE_ARGS[@]}"} \
+        --reply-due "${REPLY_DUE:-}" ${NIE_ARGS[@]+"${NIE_ARGS[@]}"} ${C2_ARGS[@]+"${C2_ARGS[@]}"} \
         --doc-sha "$(printf '%s' "$INPUT" | "$JQ_BIN" -r '([.need.doc_sha // empty] + (.need.doc_shas // [])) | unique | join(",")')" \
         --doc-at "$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.need.doc_received_at // ""')" \
         --need "$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.need.code // ""')" \
@@ -2406,7 +2435,8 @@ docs_submitted() { # <contact-id> -> prints the reason when documents exist; exi
 # ask is the follow-up they promised); every other message from us still defers it.
 FOLLOWED_IDS="[]"
 recently_messaged() { # <contact-id> -> prints the reason when we wrote to them in 7 days; exit 4 on a failed read
-  local contact="$1" since body ids n cid convo ex="$FOLLOWED_IDS"
+  local contact="$1" since body ids n cid convo ex
+  ex="$("$JQ_BIN" -nc --argjson a "$FOLLOWED_IDS" --argjson b "${C2_EX:-[]}" '$a + $b')" || ex="$FOLLOWED_IDS"
   since=$(( $(date -u +%s) - 7*86400 ))
   body="$(printf '%s' "$contact" | "$JQ_BIN" -Rc --argjson since "$since" \
     '{query: {operator: "AND", value: [{field: "contact_ids", operator: "=", value: .}, {field: "updated_at", operator: ">", value: $since}]}, pagination: {per_page: 50}}' \
@@ -2463,6 +2493,7 @@ if [ "$STATUSLIKE" = "1" ] && [ "$LIVE" = "1" ]; then
     fi
   fi
   RECENT_WHY=""
+  # (a /c2 correction is not deferred by our own recent note - it corrects that note)
   [ -n "$REPLY_DUE" ] || RECENT_WHY="$(for_each_account_contact recently_messaged)"
   if [ -n "$RECENT_WHY" ]; then
     # Not closed: the user may get this note once the 7 days have passed.
@@ -2471,7 +2502,7 @@ if [ "$STATUSLIKE" = "1" ] && [ "$LIVE" = "1" ]; then
   # In-thread when the user has a conversation going: their most recently updated OPEN
   # conversation of the last 14 days. None: email. A failed lookup sends nothing.
   # claim-proof-ask always goes by email.
-  if [ -z "$THREAD" ] && [ "$CAMPAIGN" != "claim-proof-ask" ]; then
+  if [ -z "$THREAD" ] && [ "$CAMPAIGN" != "claim-proof-ask" ] && [ -z "$C2" ]; then
     since14=$(( $(date -u +%s) - 14*86400 ))
     # r5: across every Intercom user of this account (a mobile conversation is theirs too).
     open_all="[]"
@@ -2769,13 +2800,13 @@ if [ "$KIND" = "initial" ]; then
   printf '%s' "$INPUT" | "$JQ_BIN" -c '[.credits[] | {request_id, profile_id, track_id} + (if .ask_class != "" then {ask_class} else {} end) + (if .is_approved != "" then {is_approved} else {} end)]' > "$REFS_FILE"
   CLAIM="$(ledger claim --campaign "$CAMPAIGN" --user-key "$EMAIL" --user-id "$USER_ID" --day "$DAY" --request-ids "$ALL_IDS" \
     --message-type "$MESSAGE_TYPE" --approved-by "$APPROVED_BY" \
-    --approval-ref "$APPROVAL_REF$(if [ "$RD_PREFIX" = "1" ]; then printf '; correction %s' "$REPLY_DUE_CORRECTION_REF"; fi)" \
+    --approval-ref "$APPROVAL_REF$(if [ "$RD_PREFIX" = "1" ]; then printf '; correction %s' "$REPLY_DUE_CORRECTION_REF"; fi)${C2_SUFFIX:-}" \
     --contact-id "$CONTACT_ID" --refs-file "$REFS_FILE" ${WINDOWED_FLAG:+"$WINDOWED_FLAG"} \
     ${REPLY_DUE:+--reply-due "$REPLY_DUE" --conversation "$THREAD"})" \
     || die "the ledger claim failed; refusing to send without the idempotency record."
 else
   CLAIM="$(ledger claim-reminder --parent-message-id "$PARENT_ID" --kind "$KIND" --user-key "$EMAIL" --day "$DAY" \
-    --request-ids "$ALL_IDS" --approved-by "$APPROVED_BY" --approval-ref "$APPROVAL_REF")" \
+    --request-ids "$ALL_IDS" --approved-by "$APPROVED_BY" --approval-ref "$APPROVAL_REF${C2_SUFFIX:-}")" \
     || die "the ledger claim failed; refusing to send without the idempotency record."
 fi
 case "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r 'if .result == "recent" and .reason == "recently_asked" then .reason else .result end')" in
@@ -2809,6 +2840,7 @@ fi
 CLAIMED_INPUT="$(keep_ids "$INPUT" "$(printf '%s' "$CLAIM" | "$JQ_BIN" -c '.request_ids')")"
 RENDERED="$(render "$CLAIMED_INPUT")"
 [ "$RD_PREFIX" != "1" ] || RENDERED="$(with_prefix "$RENDERED")"
+[ -z "$C2" ] || RENDERED="$(with_c2 "$RENDERED")"
 NC="$(printf '%s' "$CLAIMED_INPUT" | "$JQ_BIN" -r '.credits | length')"
 leak="$(leak_reason "$RENDERED")"
 if [ -n "$leak" ]; then

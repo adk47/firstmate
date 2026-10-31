@@ -1704,5 +1704,26 @@ class ReleaseRowTest(unittest.TestCase):
         self.assertEqual(receipts.held_accounts(cs.ACCOUNT_HOLDS, led), {9})
 
 
+class CorrectionCooldownTest(unittest.TestCase):
+    """[key=k-proof-required] /c2: an ask that corrects OUR recent status line is not deferred by our own 7-day cooldown
+    (that line); every other hold stays. Only for uvn-status."""
+
+    def test_correction_lifts_only_our_messaged_7d(self):
+        CommStateTest.setUp(self)
+        cs.ACCOUNT_HOLDS = str(Path(tempfile.mkdtemp()) / "h.jsonl"); Path(cs.ACCOUNT_HOLDS).write_text("")
+        db = vl.connect(cs.LEDGER)
+        c = vl.claim(db, campaign="status-team-review", user_key="a@x.com", day=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                     request_ids=["r1"], message_type="email", approved_by="U", approval_ref="r", user_id=str(UID))
+        vl.finalize(db, message_row=c["message_row"], status="sent", message_id="1"); db.close()
+        q = lambda sql: [["0", "0"]] if "proof_required_owed" in sql else (
+            [["r1", "user_verification_needed", "", "", "2026-10-15 07:21:38 UTC"]] if "credit_requests" in sql else [])
+        plain = cs.check("uvn-status", "uvn", UID, ["r1"], "c1", query=q, ic=self.ic, fraud=lambda u, qq: [])
+        self.assertTrue(any(r.startswith("messaged_7d") for r in plain["reasons"]), plain)
+        fixed = cs.check("uvn-status", "uvn", UID, ["r1"], "c1", query=q, ic=self.ic, fraud=lambda u, qq: [], correction=True)
+        self.assertFalse(any(r.startswith("messaged_7d") for r in fixed["reasons"]), fixed)
+        other = cs.check("gap-ask", "gap", UID, ["r1"], "c1", query=q, ic=self.ic, fraud=lambda u, qq: [], correction=True)
+        self.assertTrue(any(r.startswith("messaged_7d") for r in other["reasons"]), other)       # uvn-status only
+
+
 if __name__ == "__main__":
     unittest.main()

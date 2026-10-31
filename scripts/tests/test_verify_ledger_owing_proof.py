@@ -96,5 +96,41 @@ class OwingProofTest(unittest.TestCase):
         self.assertEqual(vl.past_user_done(self.db, "jane@example.com", "42"), "")
 
 
+class CorrectionCooldownLedgerTest(unittest.TestCase):
+    """[key=k-proof-required] /c2 (r5 05:3xZ): a status line sent HOURS ago does not defer the ask that corrects it -
+    in uvn_user_done (claim + the runner prefilter). A recent note of any other kind still defers."""
+
+    def test_recent_status_line_on_the_same_request_does_not_defer_its_correction(self):
+        import tempfile as _t
+        from datetime import datetime as _dt, timezone as _tz
+        from credit_review import verify_ledger as vl
+        db = vl.connect(str(Path(_t.mkdtemp()) / "l.sqlite3"))
+        today = _dt.now(_tz.utc).strftime("%Y-%m-%d")
+        c = vl.claim(db, campaign="status-team-review", user_key="a@x.com", day=today, request_ids=["r1"],
+                     message_type="email", approved_by="U", approval_ref="r", user_id="7")
+        vl.finalize(db, message_row=c["message_row"], status="sent", message_id="1")
+        self.assertEqual(vl.uvn_user_done(db, "a@x.com", user_id="7", request_ids=["r1"]), "")
+        self.assertEqual(vl.uvn_user_done(db, "a@x.com", user_id="7", request_ids=["r9"]), "messaged_7d")   # other request
+        self.assertEqual(vl.uvn_user_done(db, "a@x.com", user_id="7"), "messaged_7d")                     # no ids: no exemption
+        c = vl.claim(db, campaign="withdrawal-confirm", user_key="a@x.com", day=today, request_ids=["w1"],
+                     message_type="email", approved_by="U", approval_ref="r", user_id="7", enforce_cap=False)
+        vl.finalize(db, message_row=c["message_row"], status="sent", message_id="2")
+        self.assertEqual(vl.uvn_user_done(db, "a@x.com", user_id="7", request_ids=["r1"]), "messaged_7d")  # another note
+
+
+    def test_an_attempted_status_line_keeps_the_cooldown(self):
+        # QA / r5 #1565: unknown holds - an unconfirmed line earns no correction, so it never lifts messaged_7d
+        import tempfile as _t
+        from datetime import datetime as _dt, timezone as _tz
+        from credit_review import verify_ledger as vl
+        db = vl.connect(str(Path(_t.mkdtemp()) / "l.sqlite3"))
+        today = _dt.now(_tz.utc).strftime("%Y-%m-%d")
+        c = vl.claim(db, campaign="status-team-review", user_key="a@x.com", day=today, request_ids=["r1"],
+                     message_type="email", approved_by="U", approval_ref="r", user_id="7")
+        self.assertEqual(db.execute("SELECT status FROM verify_messages WHERE id=?", (c["message_row"],)).fetchone()[0], "attempted")
+        self.assertEqual(vl.uvn_user_done(db, "a@x.com", user_id="7", request_ids=["r1"]), "messaged_7d")
+        vl.finalize(db, message_row=c["message_row"], status="sent", message_id="1")
+        self.assertEqual(vl.uvn_user_done(db, "a@x.com", user_id="7", request_ids=["r1"]), "")
+
 if __name__ == "__main__":
     unittest.main()

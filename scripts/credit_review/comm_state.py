@@ -1093,7 +1093,7 @@ def check(campaign: str, copy: str, uid: int, keys: list[str], contact_id: str, 
           doc_map: dict[str, str] | None = None, doc_intakes: dict[str, str] | None = None,
           query: Query = trino, ic: Intercom = intercom,
           fraud: Callable[[int, Query], list[str]] | None = None, reply_due_part: str = "",
-          nothing_needed_body: bool = False) -> dict[str, Any]:
+          nothing_needed_body: bool = False, correction: bool = False) -> dict[str, Any]:
     # QA #1517 (critical): a reply_due answer ALWAYS takes the full path below (trigger, class, thread, assignee); the
     # 'nothing is needed' fast path is for unsolicited notes only. answer_class keeps that family from owes-proof users.
     if nothing_else(campaign, copy) and not reply_due_part:
@@ -1160,6 +1160,10 @@ def check(campaign: str, copy: str, uid: int, keys: list[str], contact_id: str, 
             if a and a["action"] == "skip":
                 why.append(f"reply_due:human_assignee:{a['id']}")           # listed for that human, never posted
             return {"hold": bool(why), "state": state, "reasons": why, "reply_due": facts}
+    if correction and campaign == "uvn-status":
+        # [key=k-proof-required] /c2: this ask corrects OUR recent status line about the same requests - our own 7-day
+        # cooldown (that line) does not defer the correction; every other rule still holds
+        why = [w for w in why if not w.startswith("messaged_7d")]
     return {"hold": bool(why), "state": state, "reasons": why}
 
 
@@ -1174,6 +1178,8 @@ def _main(argv: list[str] | None = None) -> int:
     c.add_argument("--contact-id", default="")
     c.add_argument("--conversation", default="", help="the conversation the note would go into (R1: the filing one)")
     c.add_argument("--reply-due", default="", help="[key=reply-due]: the customer part this note answers")
+    c.add_argument("--correction", action="store_true",
+                   help="uvn-status /c2: this ask corrects our earlier status line (our 7-day cooldown does not apply)")
     c.add_argument("--nothing-needed-body", action="store_true",
                    help="the rendered note says nothing (else) is needed: hold anyone who still owes proof")
     c.add_argument("--doc-sha", default="", help="proof-need-ask: the checked document's sha256")
@@ -1193,7 +1199,7 @@ def _main(argv: list[str] | None = None) -> int:
                     need_code=a.need, filing_conversation=a.filing_conversation,
                     doc_map=dict(x.split("=", 1) for x in a.doc_map.split(",") if "=" in x),
                     doc_intakes=dict(x.split("=", 1) for x in a.doc_intakes.split(",") if "=" in x),
-                    nothing_needed_body=a.nothing_needed_body)
+                    nothing_needed_body=a.nothing_needed_body, correction=a.correction)
     except Unknown as exc:
         print(json.dumps({"hold": None, "reasons": [f"unknown: {exc}"]}))
         return 2

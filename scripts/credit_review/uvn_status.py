@@ -209,6 +209,7 @@ class UvnReport(verify_notify.Report):
     incomplete: int = 0
     rows_held: int = 0                 # requests left out of a note sent or validated (blank or gate-refused field)
     unlisted: int = 0
+    facts_changed: list = field(default_factory=list)   # QA #1565: listed users whose owed set changed since the build
     recently_asked: int = 0
     excluded: int = 0                  # --exclude-users (another lane messages them today)
     count_copy: int = 0                # status-team-review users sent the count-only note (not held)
@@ -235,6 +236,31 @@ def load_list(path: str, *, now: datetime | None = None) -> tuple[list[dict[str,
     if age_h > LIST_MAX_AGE_H or age_h < -0.1:
         return [], f"the list is {age_h:.1f}h old (limit {LIST_MAX_AGE_H}h): re-run build.py first"
     return users, ""
+
+
+def _enforce_facts(list_path: str, users: list[dict[str, Any]], report: Any, query: Query) -> str:
+    """QA #1565: a list built by owing_proof (it carries replica_facts) is checked against the replica BEFORE any send -
+    the same owing_proof.verify_facts the signers run, enforced here so no ask goes on a stale list. A list edited
+    after its build (or users carrying facts with no header) halts the run; a user whose owed set changed since the
+    build is taken OUT (listed in facts_changed, never closed) - their one ask must not omit a newly owed row. An
+    unreadable re-read halts (nothing sent). A list without facts (t01's uvn lists) is unchanged: plan() re-reads it."""
+    with open(list_path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    if not isinstance(doc, dict) or ("replica_facts" not in doc and not any("facts" in u for u in users)):
+        return ""
+    from credit_review import owing_proof               # lazy: the builder's own rule, one implementation
+    try:
+        diffs = owing_proof.verify_facts(doc, query)    # the builder's own holds + ledger, as --verify-facts at signing
+    except Exception as exc:  # noqa: BLE001 - a re-read that fails sends nothing
+        return f"the replica facts re-read failed ({exc}); nothing sent"[:300]
+    if any(d.startswith("header:") for d in diffs):
+        return next(d for d in diffs if d.startswith("header:")) + "; nothing sent"
+    changed = {d.split(":", 1)[0] for d in diffs}
+    report.facts_changed = sorted(changed)
+    users[:] = [u for u in users if str(u.get("user_id")) not in changed]
+    for _ in changed:
+        report.note("facts_changed")
+    return ""
 
 
 def _ids(xs: list[Any]) -> str:
@@ -384,7 +410,8 @@ def uvn_requests(user_ids: list[int], query: Query = trino,
                                                pid or "", tid or ""),
                 "_pop": int(pop) if str(pop).isdigit() else -1,
                 "_created": str(extra[2]) if len(extra) > 2 and extra[2] else "",
-                "_no_ask": _row_class(credits, pop, *(list(extra) + [None, None])[:2])})
+                "_no_ask": _no_ask_of(credits, pop, *(list(extra) + [None, None])[:2]),
+                "_proof_required": _proof_required(*(list(extra) + [None, None])[:2])})
     for rows in reqs.values():
         rows.sort(key=lambda r: (-r["_pop"], r["track_title"].casefold()))  # most popular first
         for r in rows:
@@ -436,6 +463,31 @@ GMAIL_HOLD_DUE_AT = "2026-11-01T16:00:00Z"
 def gmail_held(uid: Any, paid: bool) -> dict[str, Any]:
     return {"user": str(uid), "result": "held", "reason": STALE_GMAIL_REASON, "waiting_on": GMAIL_HOLD_WAITING_ON,
             "due_at": GMAIL_HOLD_DUE_AT, "paid": bool(paid)}
+
+
+def _no_ask_of(roles: str, pop: Any, vd_raw: Any, meta_raw: Any) -> str:
+    """The row's no-ask class - except that core's EXPLICIT proof_required verdict (QA #1565) overrides the approval-path
+    exclusion: a row core says needs proof is owed and asked, whatever the low-risk shortcut would have said.
+    already_on_profile (the credit is already shown) is a different fact and stays."""
+    cls = _row_class(roles, pop, vd_raw, meta_raw)
+    return "" if cls == "approval_path" and _proof_required(vd_raw, meta_raw) else cls
+
+
+def _proof_required(vd_json: Any, md_json: Any) -> bool:
+    """[key=k-proof-required]: core's validator says this row needs proof (verificationData.proof_required = true) and
+    core has not set a review-stage mark on it. Unparseable = False here (the row is simply not added to the ask)."""
+    try:
+        vd = json.loads(vd_json) if isinstance(vd_json, str) else (vd_json or {})
+        md = json.loads(md_json) if isinstance(md_json, str) else (md_json or {})
+    except ValueError:
+        return False
+    return isinstance(vd, dict) and vd.get("proof_required") is True and not (isinstance(md, dict) and md.get("reviewStage"))
+
+
+# v1 / r5 / p1 [key=k-proof-required]: "every other unverified/UVN row is the ASK class" - an open unverified or
+# processing row whose validator verdict says proof is required joins the uvn-status ask (it is owed, whatever core's
+# status reads); it is never a status line
+PROOF_REQUIRED_STATUSES = ("unverified", "processing")
 
 
 def documents_block(documented: dict[str, Any], uid: str, ask_ids: list[str] | set[str], released: set[str],
@@ -509,6 +561,12 @@ def pending_rows(user_ids: list[int], campaign: str, released: set[str],
     if campaign == GAP_ASK or with_released:
         reqs = {u: kept for u, rows in reqs.items()
                 if (kept := [r for r in rows if r["request_id"].lower() in released])}
+    if campaign == CAMPAIGN and not with_released:
+        for u, rows in uvn_requests(user_ids, query, PROOF_REQUIRED_STATUSES).items():
+            have = {r["request_id"].lower() for r in reqs.get(u, [])}
+            add = [r for r in rows if r.get("_proof_required") and r["request_id"].lower() not in have]
+            if add:
+                reqs.setdefault(u, []).extend(add)
     extra = RELEASED_EXTRA_STATUSES.get(campaign)
     if extra and released and with_released:
         for u, rows in uvn_requests(user_ids, query, extra).items():
@@ -693,6 +751,11 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
         if why:
             report.halted = why
             return report
+        if is_ask:
+            why = _enforce_facts(list_path, users, report, query)
+            if why:
+                report.halted = why
+                return report
     if lens is None:
         try:
             lens = DEFAULT_LENS(query, watchlist_path=watchlist_path, holds_path=holds_path)
@@ -827,7 +890,8 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                     else:
                         why = verify_ledger.uvn_user_done(db, acct["email"], now=now, campaign=campaign,
                                                           user_id=str(u["user_id"]),
-                                                          skip_7d=bool(with_reply_due({}, u).get("extra")))
+                                                          skip_7d=bool(with_reply_due({}, u).get("extra")),
+                                                          request_ids=list(u.get("request_ids") or []))
                     if why == "recently_asked":
                         report.recently_asked += 1
                         report.note(why)
@@ -1118,6 +1182,8 @@ def render(report: UvnReport, mode: str, segment: str) -> str:
                       "(re-checked next run, not closed)", report.incomplete),
                      ("request(s) left out of a note (blank or unshowable field; still pending in core and "
                       "reviewed, not asked about again by this campaign)", report.rows_held),
+                     ("held: their owed requests changed since the list was built (rebuild the list; not closed)",
+                      len(report.facts_changed)),
                      ("held: a request waiting on them is not on the list yet (re-run build.py; not closed)",
                       report.unlisted),
                      ("account(s) held: no professional id on the account, so the Intercom recipient cannot "

@@ -435,7 +435,8 @@ def past_user_done(db: sqlite3.Connection, user_key: str, user_id: str = "") -> 
 
 
 def uvn_user_done(db: sqlite3.Connection, user_key: str, *, now: datetime | None = None,
-                  campaign: str = "uvn-status", user_id: str = "", skip_7d: bool = False) -> str:
+                  campaign: str = "uvn-status", user_id: str = "", skip_7d: bool = False,
+                  request_ids: list[str] | tuple[str, ...] = ()) -> str:
     """A STATUS_CAMPAIGNS note: why this user must not get it ('' when they may). One per user,
     ever, per campaign; never within 7 days of any note from this gate (messaged_7d, a deferral);
     uvn-status (an ask) also never after a proof reply, and never within 90 days of an ask from
@@ -453,9 +454,18 @@ def uvn_user_done(db: sqlite3.Connection, user_key: str, *, now: datetime | None
             (*params, *CLAIM_CAMPAIGNS)).fetchone():
         return "proof_received"
     since = ((now or utcnow()) - timedelta(days=7)).strftime("%Y-%m-%d")
-    if not skip_7d and db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.day>=? "
-                                  "AND m.status IN ('attempted','sent') LIMIT 1", (*params, since)).fetchone():
-        return "messaged_7d"
+    if not skip_7d:
+        recent = db.execute(f"SELECT m.campaign, m.request_ids_json, m.status FROM verify_messages m WHERE {cond} AND m.day>=? "
+                            "AND m.status IN ('attempted','sent')", (*params, since)).fetchall()
+        # [key=k-proof-required] /c2 (r5 05:3xZ): an ask about requests a recent STATUS LINE of ours named corrects that
+        # line - when EVERY note of the last 7 days is such a line (naming one of these requests), the cooldown it set
+        # does not defer the correction. Any other recent note still defers. Read here, never on the caller's word.
+        # QA / r5 #1565: only a CONFIRMED (sent) status line is exempt - the /c2 correction is computed from sent lines
+        # only, so an ATTEMPTED (unknown) line keeps its cooldown: unknown holds, never an uncorrected ask.
+        want = {str(r).strip().lower() for r in request_ids if str(r).strip()}
+        if recent and not (campaign == "uvn-status" and want and all(
+                c in STATUS_LINE_CAMPAIGNS and st == "sent" and want & _ids_of(j) for c, j, st in recent)):
+            return "messaged_7d"
     # uvn-status is an ask: the shared one-ask-per-user-per-90-days lock across the ask
     # campaigns applies (QA @59645fb; doc rule 'One ask per user per 90 days'). A deferral,
     # like messaged_7d: nothing is closed, the user is offered again once the lock lapses.
@@ -574,7 +584,8 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
             approval_ref = f"{approval_ref} reply_due:{reply_due} thread:{conversation}"
         if campaign in STATUS_CAMPAIGNS and enforce_cap:
             # inside this transaction: a reply_due answer lifts ONLY the 7-day cooldown (QA #1509)
-            why = uvn_user_done(db, user_key, now=now, campaign=campaign, user_id=user_id, skip_7d=bool(reply_due))
+            why = uvn_user_done(db, user_key, now=now, campaign=campaign, user_id=user_id, skip_7d=bool(reply_due),
+                                request_ids=fresh)
             if why in DEFER_REASONS:
                 db.execute("COMMIT")
                 return {"result": "recent", "reason": why, "request_ids": fresh}
@@ -1379,6 +1390,47 @@ def claim_reminders_due(db: sqlite3.Connection, *, day: str) -> list[dict[str, A
     return out
 
 
+# r5 / p1 [key=k-proof-required], fable-copy-1030-r5/c2: the status notes that tell a user their requests are with us
+# (nothing asked of them) - an ask about any of the SAME requests afterwards opens with the correction sentence
+STATUS_LINE_CAMPAIGNS = ("status-team-review", "status-doc-received")
+
+
+def _ids_of(request_ids_json: str | None) -> set[str]:
+    try:
+        return {str(x).strip().lower() for x in json.loads(request_ids_json or "[]")}
+    except ValueError:
+        return set()
+
+
+def nothing_needed_overlap(db: sqlite3.Connection, user_id: str, request_ids: list[str]) -> dict[str, Any]:
+    """The requests among `request_ids` an earlier SENT status line to this user named, and where those lines went
+    (conversation ids; empty = by email) and their message ids (QA #1565: exactly those messages - nothing else - are
+    exempt from the gate's 7-day recent-contact check). No overlap = no correction (that note was about other requests)."""
+    want = {str(r).strip().lower() for r in request_ids if str(r).strip()}
+    overlap: set[str] = set()
+    convs: set[str] = set()
+    mids: set[str] = set()
+    by_email = False
+    for rids, conv, mid in db.execute(
+            f"SELECT request_ids_json, coalesce(conversation_id, ''), coalesce(message_id, '') FROM verify_messages WHERE account_id=? "
+            f"AND status='sent' AND campaign IN ({','.join('?' * len(STATUS_LINE_CAMPAIGNS))})",
+            (str(user_id), *STATUS_LINE_CAMPAIGNS)):
+        try:
+            named = {str(x).strip().lower() for x in json.loads(rids or "[]")}
+        except ValueError:
+            named = set(want)                                # unreadable ids: assume it named them (correct, never omit)
+        hit = named & want
+        if hit:
+            overlap |= hit
+            if mid:
+                mids.add(str(mid))
+            if conv:
+                convs.add(str(conv))
+            else:
+                by_email = True
+    return {"overlap": sorted(overlap), "conversations": sorted(convs), "by_email": by_email, "message_ids": sorted(mids)}
+
+
 def sent_today(db: sqlite3.Connection, *, campaign: str, day: str, kind: str = "initial") -> int:
     return int(db.execute("SELECT COUNT(*) FROM verify_messages WHERE campaign=? AND kind=? AND day=? "
                           "AND status IN ('attempted','sent')", (campaign, kind, day)).fetchone()[0])
@@ -1522,6 +1574,10 @@ def _main(argv: list[str] | None = None) -> int:
     mr = sub.add_parser("mark-replied", help="the user replied to a note: hold its removal for a human")
     mr.add_argument("--message-id", required=True)
     mr.add_argument("--replied-at", default="", help="UTC time of the latest user reply (YYYY-MM-DDTHH:MM:SSZ)")
+    nn = sub.add_parser("nothing-needed-overlap", help="fable-copy-1030-r5/c2: an earlier status note to this user about "
+                        "any of these requests (the ask then opens with the correction)")
+    nn.add_argument("--user-id", required=True)
+    nn.add_argument("--request-ids", required=True)
     ve = sub.add_parser("v1-eligible", help="may a note over these credits use the v1 (no-deadline) copy?")
     ve.add_argument("--request-ids", required=True)
     hs = sub.add_parser("hold-silent", help="hold Muso users from the status notes for good (flagged refusal hold)")
@@ -1573,7 +1629,8 @@ def _main(argv: list[str] | None = None) -> int:
         if a.user_key and a.campaign == "retro-past":
             out["user_done"] = past_user_done(db, a.user_key, a.user_id)
         if a.user_key and a.campaign in STATUS_CAMPAIGNS:
-            why = uvn_user_done(db, a.user_key, campaign=a.campaign, user_id=a.user_id)
+            why = uvn_user_done(db, a.user_key, campaign=a.campaign, user_id=a.user_id,
+                                request_ids=_ids(a.request_ids) if getattr(a, "request_ids", None) else ())
             out["user_done"] = "" if why in DEFER_REASONS else why
             out["recent"] = why in DEFER_REASONS
             out["recent_why"] = why if why in DEFER_REASONS else ""
@@ -1597,6 +1654,8 @@ def _main(argv: list[str] | None = None) -> int:
         out = {"result": "ok"}
     elif a.op == "v1-eligible":
         out = v1_eligible(db, _ids(a.request_ids))
+    elif a.op == "nothing-needed-overlap":
+        out = nothing_needed_overlap(db, a.user_id, _ids(a.request_ids))
     elif a.op == "mark-replied":
         out = {"result": mark_replied(db, message_id=a.message_id, replied_at=a.replied_at)}
     else:

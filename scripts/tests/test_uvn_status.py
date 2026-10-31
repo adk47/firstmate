@@ -983,7 +983,8 @@ class UvnStatusTests(unittest.TestCase):
 
         def q(sql):
             out = base(sql)
-            if "credit_requests" in sql:
+            # one PASS = the primary (UVN) read; its [key=k-proof-required] companion read is part of the same pass
+            if "credit_requests" in sql and "'user_verification_needed'" in sql:
                 reads.append(sql)
                 if len(reads) == 1:
                     change()
@@ -1834,6 +1835,111 @@ class TeamReviewProofRequiredTest(unittest.TestCase):
         rep, gate = self.run_(campaign="status-team-review", query=self.pr_query({}))
         self.assertEqual(rep.halted, "")
         self.assertEqual(len(gate.calls), 3)
+
+
+class ProofRequiredAskTest(unittest.TestCase):
+    """v1 / [key=k-proof-required]: an open unverified/processing row with core proof_required = true (no reviewStage)
+    is named by the uvn-status ASK; one without it, or with a review-stage mark, is not."""
+    setUp = UvnStatusTests.setUp
+    write_list = UvnStatusTests.write_list
+    run_ = UvnStatusTests.run_
+    gate_file = UvnStatusTests.gate_file
+
+    def test_the_ask_names_proof_required_rows(self):
+        import re
+
+        status = {"ru": "user_verification_needed", "rp": "unverified", "rn": "unverified", "rs": "processing"}
+        vd = {"rp": {"proof_required": True}, "rn": {"proof_required": False}, "rs": {"proof_required": True}}
+        md = {"rs": {"reviewStage": "manual"}}
+
+        def q(sql):
+            if "public.users" in sql:
+                return [["1", "a@x.com", "Ann", pro(1), auth(1)]]
+            m = re.search(r"status IN \(([^)]*)\)", sql)
+            wanted = set(re.findall(r"'([a-z_]+)'", m.group(1))) if m else set(status.values())
+            return [[rid, "1", "p1", "t1", f"Song {rid}", '[{"name":"Art"}]', "{Mixing}", "10",
+                     json.dumps(vd.get(rid, {})), json.dumps(md.get(rid, {})), ""]
+                    for rid, st in status.items() if st in wanted]
+        self.users = [{"user_id": 1, "paid": True, "skip": None, "class": "uvn", "request_ids": ["rn", "rp", "rs", "ru"]}]
+        self.write_list()
+        rep, gate = self.run_(mode="apply", query=q)
+        self.assertEqual(len(gate.calls), 1, rep)
+        self.assertEqual(sorted(c["request_id"] for c in gate.calls[0][1]["credits"]), ["rp", "ru"])
+
+    def test_core_proof_required_overrides_the_approval_path_exclusion(self):
+        # QA #1565 (reproduced): an approval-path-shaped verdict that ALSO says proof_required is asked, never dropped
+        import re
+        vd = {"rp": {"proof_required": True, "is_approved": True, "total_risk_percent": 0, "rule_risk_percent": {},
+                     "band_hint": "A"},
+              "ra": {"proof_required": False, "is_approved": True, "total_risk_percent": 0, "rule_risk_percent": {},
+                     "band_hint": "A"}}
+        # no plain UVN row: the proof_required row is the user's ONLY owed row (QA: plan() = nothing_to_ask without the fix)
+        status = {"rp": "unverified", "ra": "user_verification_needed"}
+
+        def q(sql):
+            if "public.users" in sql:
+                return [["1", "a@x.com", "Ann", pro(1), auth(1)]]
+            m = re.search(r"status IN \(([^)]*)\)", sql)
+            wanted = set(re.findall(r"'([a-z_]+)'", m.group(1))) if m else set(status.values())
+            return [[rid, "1", "p1", "t" + rid, f"Song {rid}", '[{"name":"Art"}]', "{Mixing}", "10",
+                     json.dumps(vd.get(rid, {})), "{}", ""] for rid, st in status.items() if st in wanted]
+        self.users = [{"user_id": 1, "paid": True, "skip": None, "class": "uvn", "request_ids": ["ra", "rp"]}]
+        self.write_list()
+        rep, gate = self.run_(mode="apply", query=q)
+        self.assertEqual(len(gate.calls), 1, rep)
+        named = sorted(c["request_id"] for c in gate.calls[0][1]["credits"])
+        self.assertIn("rp", named)                      # proof_required wins over the approval path
+        self.assertNotIn("ra", named)                   # a plain approval-path row is still not asked
+
+    def test_plan_keeps_a_proof_required_row_that_looks_like_the_approval_path(self):
+        # QA #1565's exact reproduction at plan(): proof_required + an approval-path-shaped verdict, popularity 10
+        vd = {"proof_required": True, "is_approved": True, "total_risk_percent": 0, "rule_risk_percent": {}, "band_hint": "A"}
+        row = {"request_id": "rp", "_no_ask": uvn_status._no_ask_of("{Mixing}", "10", json.dumps(vd), "{}"),
+               "_proof_required": True, "_incomplete": False}
+        self.assertNotEqual(uvn_status.plan({"rp"}, [row], True)[0], "nothing_to_ask")
+        plain = {**vd, "proof_required": False}
+        self.assertEqual(uvn_status._no_ask_of("{Mixing}", "10", json.dumps(plain), "{}"), "approval_path")
+
+    def test_an_owing_proof_list_is_verified_against_the_replica_before_any_ask(self):
+        # QA #1565: --verify-facts is ENFORCED by the runner - a user whose owed set changed since the build (a newly owed
+        # row the ask would omit) is taken out, never asked or closed; an edited list halts; a re-read failure halts
+        import re
+        from unittest import mock
+        from credit_review import owing_proof
+
+        def q(sql):
+            if "public.users" in sql:
+                return [["1", "a@x.com", "Ann", pro(1), auth(1)]]
+            m = re.search(r"status IN \(([^)]*)\)", sql)
+            wanted = set(re.findall(r"'([a-z_]+)'", m.group(1))) if m else {"user_verification_needed"}
+            return [["ru", "1", "p1", "t1", "Song ru", '[{"name":"Art"}]', "{Mixing}", "10", "{}", "{}", ""]] \
+                if "user_verification_needed" in wanted else []
+        self.users = [{"user_id": 1, "paid": True, "skip": None, "class": "uvn", "request_ids": ["ru"],
+                       "facts": [["ru", "user_verification_needed", False]]}]
+        self.list.write_text(json.dumps({"generated_at": iso(2), "users": self.users,
+                                         "replica_facts": owing_proof.facts_header(self.users)}))
+        seen = []
+        def vf(answer):
+            def f(doc, query, **kw):
+                seen.append(doc["replica_facts"]["sha256"])
+                if isinstance(answer, Exception):
+                    raise answer
+                return answer
+            return f
+        with mock.patch.object(owing_proof, "verify_facts", vf(["1: listed [['ru'...]] -> now [['ru'...], ['rp'...]]"])):
+            rep, gate = self.run_(mode="apply", query=q)
+        self.assertEqual((gate.calls, rep.facts_changed, rep.halted), ([], ["1"], ""))
+        self.assertTrue(seen)                                                       # the runner called it, on THIS list
+        self.assertIn("owed requests changed since the list was built", uvn_status.render(rep, "apply", "paid"))
+        with mock.patch.object(owing_proof, "verify_facts", vf(["header: replica_facts.sha256 x does not match"])):
+            rep, gate = self.run_(mode="apply", query=q)
+        self.assertIn("replica_facts.sha256", rep.halted); self.assertEqual(gate.calls, [])
+        with mock.patch.object(owing_proof, "verify_facts", vf(RuntimeError("trino down"))):
+            rep, gate = self.run_(mode="apply", query=q)
+        self.assertIn("re-read failed", rep.halted); self.assertEqual(gate.calls, [])
+        with mock.patch.object(owing_proof, "verify_facts", vf([])):                # unchanged: the ask goes
+            rep, gate = self.run_(mode="apply", query=q)
+        self.assertEqual(len(gate.calls), 1, rep)
 
 
 class ReplyDueTitleParityTest(unittest.TestCase):

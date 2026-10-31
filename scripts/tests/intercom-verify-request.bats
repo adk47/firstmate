@@ -3330,6 +3330,19 @@ rd_locked() { sed 's/^readonly REPLY_DUE_CORRECTION_APPROVED=1$/readonly REPLY_D
   STUB_COMM_STATE_JSON="$(rd_cs 56450261657 null)" run -0 "$RD" send --campaign uvn-status --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [ "$(jq -r .body "$CURL_STUB_REPLY")" = "<p>A correction to our earlier note here: this request does need one thing from you.</p>$plainbody" ]
   [[ "$(sql "SELECT approval_ref FROM verify_messages WHERE status='sent'")" == *"correction fable-copy-1030-r5/c"* ]]
+  # h2 (#1565 on #1517): a reply_due ANSWER is never /c2 - even after a SENT status line naming the same request it
+  # goes in-thread (never refused for its --conversation) with only #1517's in-thread correction, never the email /c2
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  python3 -c "
+import sys; sys.path.insert(0, '$HYDRA_REPO/scripts')
+from credit_review import verify_ledger as vl
+db = vl.connect('$INTERCOM_VERIFY_TEST_LEDGER')
+c = vl.claim(db, campaign='status-team-review', user_key='jane.doe@example.com', day='2026-10-29', request_ids=['u1'],
+             message_type='email', approved_by='U', approval_ref='r', user_id='42', enforce_cap=False)
+vl.finalize(db, message_row=c['message_row'], status='sent', message_id='9001')"
+  STUB_COMM_STATE_JSON="$(rd_cs 56450261657 null)" run -0 "$RD" send --campaign uvn-status --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [ "$(jq -r .body "$CURL_STUB_REPLY")" = "<p>A correction to our earlier note here: this request does need one thing from you.</p>$plainbody" ]
+  [[ "$(sql "SELECT approval_ref FROM verify_messages WHERE campaign='uvn-status' AND status='sent'")" != *"r5/c2"* ]]
   # r5 /c: never above a status-team-review line (the earlier 'nothing is needed' note does not contradict it)
   rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
   STUB_COMM_STATE_JSON="$(rd_cs 56450261657 null)" run -0 "$RD" send --campaign status-team-review --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
@@ -4214,3 +4227,66 @@ Caroline, Muso Support' ]
   [[ "$output" == *"need_doc_group_mismatch"* ]]
 }
 
+@test "uvn-status /c2 ([key=k-proof-required]): after a status line about the SAME request the ask opens with the correction, by email; no overlap = the plain ask" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  # yesterday on the REAL clock: inside the 7-day cooldown window, and not the ask's own (pinned) day - so this
+  # exercises the cooldown itself, not the separate one-message-per-user-per-UTC-day cap
+  yday="$(python3 -c 'import datetime as d; print((d.datetime.now(d.timezone.utc) - d.timedelta(days=1)).strftime("%Y-%m-%d"))')"
+  # the status line (/k) we sent this user about u1 TODAY (r5 05:3xZ: a few hours ago, never backdated - the 7-day
+  # cooldown it sets must not defer its own correction, in the ledger claim or the gate)
+  INTERCOM_VERIFY_TEST_DAY="$yday" run -0 "$LOCKED" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email"* ]]
+  run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == 'A correction to our earlier note: this request does need one thing from you.'$'\n''Hi Jane, a quick status update on your credit request for "Song A" by Big Star: it'"'"'s waiting on one thing from you'* ]]
+  # QA / r5 #1565: an ATTEMPTED (unconfirmed) status line earns no correction, so it keeps its 7-day cooldown - the ask
+  # defers (messaged_7d), never goes out plain after a line that may have reached the user
+  python3 -c 'import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.execute("UPDATE verify_messages SET status=? WHERE campaign=?", (sys.argv[2], "status-team-review")); d.commit()' "$INTERCOM_VERIFY_TEST_LEDGER" attempted
+  run -3 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"messaged_7d"* ]]; [ "$(posts)" -eq 1 ]
+  python3 -c 'import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.execute("UPDATE verify_messages SET status=? WHERE campaign=?", (sys.argv[2], "status-team-review")); d.commit()' "$INTERCOM_VERIFY_TEST_LEDGER" sent
+  # live: by email (never an auto-picked thread), ledgered under /c2
+  # an open thread we started yesterday (the status line): a plain ask would be deferred (messaged_7d) or go into it;
+  # the correction is its own email message and our own recent line does not defer it
+  now=$(date -u +%s)
+  # QA #1565: the status line's OWN message (its ledger message_id = the email conversation's source id) is the only
+  # recent contact the correction is exempt from - a SECOND admin conversation in the window still defers it
+  k="$(sql "SELECT message_id FROM verify_messages WHERE campaign='status-team-review'")"
+  [ -n "$k" ]
+  STUB_OPEN_CONVS="{\"conversations\":[{\"id\":\"777\",\"state\":\"open\",\"created_at\":$((now - 86400)),\"updated_at\":$((now - 86400)),\"source\":{\"id\":\"$k\",\"author\":{\"type\":\"admin\"}}}],\"total_count\":1}" \
+    STUB_CONV_SEARCH="{\"type\":\"conversation.list\",\"conversations\":[{\"id\":\"777\",\"created_at\":$((now - 86400)),\"source\":{\"id\":\"$k\",\"author\":{\"type\":\"admin\"}}},{\"id\":\"778\",\"created_at\":$((now - 3600)),\"source\":{\"id\":\"s9\",\"author\":{\"type\":\"admin\"}}}],\"total_count\":2}" \
+    STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]' ',"title":"Credit Verification"')" \
+    run -3 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"messaged_7d"*"started a conversation"* ]]; [ "$(posts)" -eq 1 ]
+  # ... and a failed recent-contact search fails closed for a correction too (exit 4, nothing claimed)
+  STUB_CONV_SEARCH='not json' STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]' ',"title":"Credit Verification"')" \
+    run -4 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  # only the status line itself in the window: the correction goes
+  STUB_OPEN_CONVS="{\"conversations\":[{\"id\":\"777\",\"state\":\"open\",\"created_at\":$((now - 86400)),\"updated_at\":$((now - 86400)),\"source\":{\"id\":\"$k\",\"author\":{\"type\":\"admin\"}}}],\"total_count\":1}" \
+    STUB_CONV_SEARCH="{\"type\":\"conversation.list\",\"conversations\":[{\"id\":\"777\",\"created_at\":$((now - 86400)),\"source\":{\"id\":\"$k\",\"author\":{\"type\":\"admin\"}}}],\"total_count\":1}" \
+    STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]' ',"title":"Credit Verification"')" \
+    run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"POSTED email"* ]]; [ "$(replies)" -eq 0 ]
+  [[ "$(msg .body | plain)" == 'A correction to our earlier note: this request does need one thing from you.'* ]]
+  [[ "$(sql "SELECT approval_ref FROM verify_messages WHERE campaign='uvn-status'")" == *"correction fable-copy-1030-r5/c2 (follows a status line on u1)"* ]]
+  # plural: two tracks named, one of them in the earlier line
+  credits "$TEST_TMPDIR/p.json" Jane "u1:Mixing:Song A:Big Star" "u2:Mixing:Song B:Big Star"
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  INTERCOM_VERIFY_TEST_DAY="$yday" run -0 "$LOCKED" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/p.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == 'A correction to our earlier note: these requests do need one thing from you.'$'\n''Hi Jane, a quick status update on your credit requests for'* ]]
+  # no overlap: the earlier line was about another request -> the plain ask
+  credits "$TEST_TMPDIR/o.json" Jane "u9:Mixing:Other:Big Star"
+  run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/o.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == 'Hi Jane, a quick status update'* ]]
+  # an explicit --conversation is refused for a corrected ask (its own email message)
+  run -1 "$UVN" send --campaign uvn-status --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"corrected ask (/c2) goes by email"* ]]
+  # ... but a recent note that is NOT a status line on these requests still defers the ask (messaged_7d)
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  credits "$TEST_TMPDIR/w.json" Jane "w1:Mastering:Nowhere Fast:Somebody"
+  INTERCOM_VERIFY_TEST_DAY="$yday" run -0 "$LOCKED" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  d2="$(python3 -c 'import datetime as d; print((d.datetime.now(d.timezone.utc) - d.timedelta(days=2)).strftime("%Y-%m-%d"))')"
+  INTERCOM_VERIFY_TEST_DAY="$d2" run -0 "$LOCKED" send --campaign withdrawal-confirm --credits-file "$TEST_TMPDIR/w.json" --approved-by U7RP6HKUZ
+  run -3 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"messaged_7d"* ]]
+}
