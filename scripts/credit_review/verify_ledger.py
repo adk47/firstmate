@@ -794,6 +794,36 @@ def claim_reminder(db: sqlite3.Connection, *, parent_message_id: str, kind: str,
 DEFERRAL_REASONS = ("core_notice_within_7d", "comm_state")
 
 
+THREAD_EVENTS = ("handoff", "reassign")
+
+
+def thread_event(db: sqlite3.Connection, *, kind: str, conversation: str, from_admin: str, to_admin: str,
+                 note_part: str, reply_due_part: str, request_ids: list[str], user_id: str, approved_by: str,
+                 approval_ref: str, now: datetime | None = None) -> dict[str, Any]:
+    """Fable [key=lamberto-reply-due]: a reply_due thread event, ledgered BEFORE anything is posted to the customer.
+    'handoff' = the internal note carrying the exact coded answer for the assigned human (note_part = that note);
+    'reassign' = the thread moved to the gate's admin with an internal note (reversible: reassign back to from_admin).
+    The row is keyed to the THREAD (user_key 'thread:<id>', no account_id) and carries its own status, so no per-user
+    lock, cooldown or 'told' read ever counts it as a message to the user."""
+    if kind not in THREAD_EVENTS:
+        raise ValueError(f"unknown thread event {kind!r}")
+    for name, v in (("conversation", conversation), ("note part", note_part), ("reply_due part", reply_due_part),
+                    ("from admin", from_admin), ("to admin", to_admin)):
+        if not re.fullmatch(r"[0-9]{1,24}", str(v or "")):
+            raise ValueError(f"{name} must be digits")
+    ts = stamp(now)
+    cur = db.execute(
+        "INSERT INTO verify_messages (campaign, kind, user_key, account_id, day, status, message_type, message_id, "
+        "conversation_id, request_ids_json, n_credits, approved_by, approval_ref, created_at, updated_at) "
+        "VALUES (?, 'initial', ?, NULL, ?, ?, 'note', ?, ?, ?, ?, ?, ?, ?, ?)",
+        (kind, f"thread:{conversation}", ts[:10], kind, note_part, conversation, json.dumps(sorted(request_ids)),
+         len(request_ids), approved_by,
+         # the event first: a long approval_ref (the captain's standing order) must never truncate it away
+         f"{kind} from:{from_admin} to:{to_admin} reply_due:{reply_due_part} user:{user_id} | {approval_ref}"[:500], ts, ts))
+    db.commit()
+    return {"result": "recorded", "message_row": cur.lastrowid}
+
+
 def log_deferral(db: sqlite3.Connection, *, campaign: str, user_key: str, day: str, request_ids: list[str],
                  message_type: str, approved_by: str, approval_ref: str, reason: str, detail: str = "",
                  user_id: str = "", now: datetime | None = None) -> dict[str, Any]:
@@ -1430,6 +1460,17 @@ def _main(argv: list[str] | None = None) -> int:
     ld.add_argument("--approval-ref", required=True)
     ld.add_argument("--reason", required=True, choices=DEFERRAL_REASONS)
     ld.add_argument("--detail", default="")
+    te = sub.add_parser("thread-event", help="[key=lamberto-reply-due] a handoff / reassign row, before any post")
+    te.add_argument("--kind", required=True, choices=THREAD_EVENTS)
+    te.add_argument("--conversation", required=True)
+    te.add_argument("--from-admin", required=True)
+    te.add_argument("--to-admin", required=True)
+    te.add_argument("--note-part", required=True)
+    te.add_argument("--reply-due", required=True)
+    te.add_argument("--request-ids", required=True)
+    te.add_argument("--user-id", default="")
+    te.add_argument("--approved-by", required=True)
+    te.add_argument("--approval-ref", required=True)
     cr = sub.add_parser("claim-reminder")
     cr.add_argument("--parent-message-id", required=True)
     cr.add_argument("--kind", required=True, choices=KINDS[1:])
@@ -1498,6 +1539,10 @@ def _main(argv: list[str] | None = None) -> int:
         out = log_deferral(db, campaign=a.campaign, user_key=a.user_key, user_id=a.user_id, day=a.day,
                            request_ids=_ids(a.request_ids), message_type=a.message_type, approved_by=a.approved_by,
                            approval_ref=a.approval_ref, reason=a.reason, detail=a.detail)
+    elif a.op == "thread-event":
+        out = thread_event(db, kind=a.kind, conversation=a.conversation, from_admin=a.from_admin, to_admin=a.to_admin,
+                           note_part=a.note_part, reply_due_part=a.reply_due, request_ids=_ids(a.request_ids),
+                           user_id=a.user_id, approved_by=a.approved_by, approval_ref=a.approval_ref)
     elif a.op == "claim-reminder":
         out = claim_reminder(db, parent_message_id=a.parent_message_id, kind=a.kind, user_key=a.user_key, day=a.day,
                              request_ids=_ids(a.request_ids), approved_by=a.approved_by, approval_ref=a.approval_ref)

@@ -1758,6 +1758,42 @@ class ReplyDueRunnerTest(UvnStatusTests):
         self.assertEqual(got["dry-run"], got["apply"])
         self.assertEqual(got["apply"], [("7", "57000000001", "215473681300330")])
 
+    def test_the_dry_run_lists_prior_note_and_assignee_per_reply_due_row(self):
+        # r5 bars (e)/(j) on [key=lamberto-reply-due]: the reviewer reads the thread facts the gate will act on
+        from unittest import mock
+        facts = {"prior_note": {"part": "56450261657", "campaign": "unledgered (#1510 backfill class)", "at": 1760900000},
+                 "assignee": {"id": "5465657", "name": "Jan Delmo", "action": "handoff", "handoff_part": "", "handoff_at": 0,
+                              "human_replied_after": False, "last_part_at": 0},
+                 "trigger_class": {"class": "status", "why": "status term 'under review'", "part_age_d": 4.6}}
+        row = {"user_id": 7, "paid": True, "skip": None, "request_ids": ["r7"], "oldest": "2026-10-15 07:21:38 UTC",
+               "reply_due": {"part": "57000000001", "conversation": "215473681300330"}}
+        self.users = [row]; self.write_list()
+        keys_seen = []
+        with mock.patch.object(uvn_status.comm_state, "reply_due_thread", lambda conv, ic, **k: facts), \
+                mock.patch.object(uvn_status.comm_state, "intercom", lambda m, p, b=None: {}), \
+                mock.patch.object(uvn_status.comm_state, "status_trigger",
+                                  lambda uid, keys, *a, **k: keys_seen.append(list(keys)) or facts["trigger_class"]):
+            rep, _gate = self.run_(mode="dry-run", query=replica([7], rows={"r7": {"created": "2026-10-15 07:21:38 UTC"}}))
+            # QA #1517: through run(), the row is classified on the payload's request ids (what the gate receives)
+            self.assertEqual(keys_seen, [["r7"]])
+            self.assertEqual(rep.reply_due_rows, [{"user": "7", "part": "57000000001", "conversation": "215473681300330", **facts}])
+            text = uvn_status.render(rep, "dry-run", "paid")
+            self.assertIn("reply_due user 7 part 57000000001 conversation 215473681300330: prior_note 56450261657 "
+                          "(unledgered (#1510 backfill class)); assignee 5465657 Jan Delmo action=handoff; "
+                          "trigger_class status (status term 'under review', 4.6 d)", text)
+            Path(self.ledger).unlink(missing_ok=True)
+            rep2, _ = self.run_(mode="apply", query=replica([7], rows={"r7": {"created": "2026-10-15 07:21:38 UTC"}}))
+            self.assertEqual(rep2.reply_due_rows, [])                     # the send re-reads in the gate; no report row
+
+    def test_every_reply_due_row_is_rendered(self):
+        # QA #1517: 21 rows -> 21 rendered (no silent cut a reviewer could miss)
+        rep = uvn_status.UvnReport(listed=21)
+        rep.reply_due_rows = [{"user": str(i), "part": str(1000 + i), "conversation": "2", "prior_note": None, "assignee": None}
+                              for i in range(21)]
+        text = uvn_status.render(rep, "dry-run", "paid")
+        self.assertEqual(text.count("reply_due user "), 21)
+        self.assertIn("reply_due user 20 part 1020", text)
+
     def test_without_reply_due_the_7_day_cooldown_still_defers(self):
         self.assertEqual(self.run_both(with_reply_due=False), {"dry-run": [], "apply": []})
 
@@ -1798,6 +1834,48 @@ class TeamReviewProofRequiredTest(unittest.TestCase):
         rep, gate = self.run_(campaign="status-team-review", query=self.pr_query({}))
         self.assertEqual(rep.halted, "")
         self.assertEqual(len(gate.calls), 3)
+
+
+class ReplyDueTitleParityTest(unittest.TestCase):
+    """QA #1517 / b1 270: the dry-run row classifies the part with the SAME function as the send gate's comm_state.check
+    (comm_state.status_trigger: open titles + filed-request evidence), on the payload's own request ids."""
+
+    def test_the_dry_run_uses_status_trigger_with_the_named_requests(self):
+        from unittest import mock
+        seen = {}
+        def st(uid, keys, conversation, part, query, ic, conv=None):
+            seen.update({"uid": uid, "keys": list(keys), "conversation": conversation, "part": part})
+            return {"class": "status", "why": "names their track", "part_age_d": 1.0}
+        with mock.patch.object(uvn_status.comm_state, "reply_due_thread", lambda conv, ic, **k: {"prior_note": None, "assignee": None}), \
+                mock.patch.object(uvn_status.comm_state, "status_trigger", st):
+            row = uvn_status.reply_due_row(7, {"reply_due": {"part": "9", "conversation": "2"},
+                                               "credits": [{"request_id": "r7"}]}, query=lambda sql: [])
+        self.assertEqual(seen, {"uid": 7, "keys": ["r7"], "conversation": "2", "part": "9"})
+        self.assertEqual(row["trigger_class"]["class"], "status")
+
+    def test_check_uses_the_same_function(self):
+        import inspect
+        src = inspect.getsource(uvn_status.comm_state.check)
+        self.assertIn("status_trigger(uid, keys, conversation, reply_due_part, query, ic)", src)
+        self.assertNotIn("trigger_class(", src)
+
+
+class ReplyDueRowKeysTest(unittest.TestCase):
+    """QA #1517: the dry-run row passes the PAYLOAD's request ids to status_trigger (the list row has request_ids)."""
+
+    def test_keys_come_from_the_payload(self):
+        from unittest import mock
+        seen = {}
+        def st(uid, keys, conversation, part, query, ic, conv=None):
+            seen["keys"] = list(keys)
+            return {"class": "status", "why": "x", "part_age_d": 1.0}
+        with mock.patch.object(uvn_status.comm_state, "reply_due_thread", lambda conv, ic, **k: {"prior_note": None, "assignee": None}), \
+                mock.patch.object(uvn_status.comm_state, "status_trigger", st):
+            uvn_status.reply_due_row(7, {"request_ids": ["r7"], "reply_due": {"part": "9", "conversation": "2"},
+                                         "credits": [{"request_id": "r7"}]}, query=lambda sql: [])
+        self.assertEqual(seen["keys"], ["r7"])
+        src = open(uvn_status.__file__).read()
+        self.assertIn('reply_due_row(uid, {**u, "credits": payload.get("credits") or []}, query=query)', src)
 
 
 if __name__ == "__main__":

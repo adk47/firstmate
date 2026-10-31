@@ -463,8 +463,21 @@ class ReplyDueTest(unittest.TestCase):
 
     def setUp(self):
         CommStateTest.setUp(self)
+        cs.ACCOUNT_HOLDS = str(Path(tempfile.mkdtemp()) / "h.jsonl")   # owes_proof reads the hold set (fresh, empty)
+        Path(cs.ACCOUNT_HOLDS).write_text("")
         self.now = time.time()
         self.thread("215473681300330", title="Credit Verification", last_user_age_h=78)
+        self.link("215473681300330")
+
+    def link(self, conversation, ids=("r1",)):
+        """b1 270: the filed-request evidence - one of our sent notes in THIS thread named the request (ledger)"""
+        db = sqlite3.connect(cs.LEDGER)
+        db.execute("INSERT INTO verify_messages (campaign, kind, user_key, account_id, day, status, message_type, conversation_id, "
+                   "request_ids_json, n_credits, approved_by, approval_ref, created_at, updated_at, sent_at) "
+                   "VALUES ('verify-live','initial','j@x.com',?,'2026-09-01','sent','comment',?,?,1,'U','ref',"
+                   "'2026-09-01T00:00:00Z','2026-09-01T00:00:00Z','2026-09-01T00:00:00Z')",
+                   (str(UID), conversation, json.dumps(list(ids))))
+        db.commit(); db.close()
 
     def thread(self, cid, *, title="Credit Verification", last_user_age_h=78, contact="c1", after=None):
         parts = [{"id": "1", "part_type": "comment", "author": {"type": "admin"}, "body": "status update",
@@ -475,18 +488,26 @@ class ReplyDueTest(unittest.TestCase):
         self.ic.convs[cid] = {"id": cid, "title": title, "state": "open", "source": {"id": "0", "author": {"type": "user"}},
                               "contacts": {"contacts": [{"id": contact}]}, "conversation_parts": {"conversation_parts": parts}}
 
+    def q(self, sql):
+        """the replica fake, by query shape: core rows, owes_proof (status, review-fired), open track titles"""
+        if "proof_required_owed" in sql:
+            return [["0", "0"]]
+        if "spotifytracktitle" in sql:
+            return [["Song A"]]
+        if "regexp_like" in sql:
+            return [["user_verification_needed", "false"]]
+        return [list(r) for r in self.core] if "credit_requests" in sql else []
+
     def run_due(self, part="57000000001", campaign="uvn-status", copy="uvnstatus"):
         self.core = [["r1", "user_verification_needed", "", "", "2026-10-15 07:21:38 UTC"]]
         return cs.check(campaign, copy, UID, ["r1"], "c1", conversation="215473681300330", reply_due_part=part,
-                        query=lambda sql: [["0", "0"]] if "proof_required_owed" in sql else ([list(r) for r in self.core] if "credit_requests" in sql else []),
-                        ic=self.ic, fraud=lambda uid, q: [])
+                        query=self.q, ic=self.ic, fraud=lambda uid, q: [])
 
     def test_lamberto_an_unanswered_question_is_answered_despite_a_note_inside_7_days(self):
         CommStateTest.note(self, "status-team-review", at=(datetime.now(timezone.utc) - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ"))
         self.core = [["r1", "user_verification_needed", "", "", "2026-10-15 07:21:38 UTC"]]
         plain = cs.check("uvn-status", "uvnstatus", UID, ["r1"], "c1", conversation="215473681300330",
-                         query=lambda sql: [["0", "0"]] if "proof_required_owed" in sql else ([list(r) for r in self.core] if "credit_requests" in sql else []),
-                         ic=self.ic, fraud=lambda uid, q: [])
+                         query=self.q, ic=self.ic, fraud=lambda uid, q: [])
         self.assertTrue(any(r.startswith("messaged_7d") for r in plain["reasons"]), plain)     # unsolicited: held
         self.assertFalse(self.run_due()["hold"], self.run_due())                                 # the answer: goes
 
@@ -500,6 +521,7 @@ class ReplyDueTest(unittest.TestCase):
                                                         "body": "we are on it", "created_at": self.now - 3600}]),
             "reply_due:R9_thread_not_about_credits": dict(title="Fwd: Your receipt from Muso.AI"),
             "reply_due:not_this_users_thread": dict(contact="someone-else"),
+            "reply_due:thread_not_open": dict(),                     # state set per case below (QA #1517)
             # QA #1509: the nominated part is 78 h old but the customer wrote AGAIN 1 h ago: the 24 h run from the latest
             "reply_due:not_24h_yet ": dict(after=[{"id": "57000000002", "part_type": "comment", "author": {"type": "user"},
                                                    "body": "any news?", "created_at": self.now - 3600}]),
@@ -507,6 +529,8 @@ class ReplyDueTest(unittest.TestCase):
         for want, kw in cases.items():
             with self.subTest(want):
                 self.thread("215473681300330", **({"title": "refund"} if want.startswith("reply_due:R9") else {}) | kw)
+                if want == "reply_due:thread_not_open":
+                    self.ic.convs["215473681300330"]["state"] = "snoozed"
                 if want.startswith("reply_due:R9"):
                     self.ic.convs["215473681300330"]["conversation_parts"]["conversation_parts"][1]["body"] = "refund please"
                     self.ic.convs["215473681300330"]["conversation_parts"]["conversation_parts"][0]["body"] = "passed on"
@@ -514,16 +538,129 @@ class ReplyDueTest(unittest.TestCase):
                 self.assertTrue(res["hold"], (want, res))
                 self.assertIn(want.strip(), res["reasons"])
         self.thread("215473681300330")
+        del self.ic.convs["215473681300330"]["state"]                        # missing state: not verified open
+        self.assertIn("reply_due:thread_not_open", self.run_due()["reasons"])
+        self.thread("215473681300330")
         self.assertIn("reply_due:not_a_customer_part", self.run_due(part="1")["reasons"])
         self.assertIn("reply_due:part_not_in_thread", self.run_due(part="123")["reasons"])
         self.assertIn("reply_due:campaign_not_allowed", self.run_due(campaign="credit-hold-status", copy="credithold")["reasons"])
 
-    def test_the_other_rules_still_hold_a_reply_due_answer(self):
-        self.core = [["r1", "user_verification_needed", "", "", "2026-10-15 07:21:38 UTC"]]
+    def test_a_document_held_user_gets_the_status_class_not_the_ask(self):
+        # [key=reply-due-classes] (a): a document on file -> the answer is status-doc-received (never receipted yet);
+        # the ask is held with the class it should be, and the status campaign itself goes
         sqlite3.connect(cs.PROOF_STORE).executescript(f"INSERT INTO proof_intake VALUES ({UID}, 's', '2026-10-20T00:00:00Z');")
         res = self.run_due()
-        self.assertTrue(res["hold"])
-        self.assertTrue(any(r.startswith("proof_on_file") for r in res["reasons"]), res)
+        self.assertIn("reply_due:class_is:status-doc-received", res["reasons"], res)
+        ok = self.run_due(campaign="status-doc-received", copy="docrecvr")
+        self.assertFalse(ok["hold"], ok)
+        self.assertEqual(ok["reply_due"]["answer_class"]["campaign"], "status-doc-received")
+        # already receipted: never a second receipt (r5 A). The user still owes proof (a uvn row) -> no coded class,
+        # never 'nothing is needed' (the existing guard) - the handoff list
+        CommStateTest.note(self, "status-doc-received", at="2026-10-21T00:00:00Z")
+        self.assertTrue(any(r.startswith("reply_due:no_coded_class: owes proof")
+                            for r in self.run_due(campaign="status-doc-received", copy="docrecvr")["reasons"]))
+        # ... and owing nothing (the request moved to review) -> status-team-review
+        base = self.q
+        self.q = lambda sql: [] if "regexp_like" in sql else base(sql)
+        self.assertIn("reply_due:class_is:status-team-review", self.run_due(campaign="status-doc-received", copy="docrecvr")["reasons"])
+
+    def test_the_answer_class_order(self):
+        st = {"told_notes": [], "acked": ""}
+        core = {"told": [], "decided": []}
+        self.assertEqual(cs.answer_class(st, core, [], ["owes:uvn"])[0], "uvn-status")            # owes proof: the ask
+        self.assertEqual(cs.answer_class(st, core, [], [])[0], "status-team-review")              # QA #1517: owes nothing
+        self.assertEqual(cs.answer_class(st, core, ["proof_intake"], ["owes:uvn"])[0], "status-doc-received")
+        self.assertEqual(cs.answer_class({**st, "acked": "x"}, core, ["proof_intake"], [])[0], "status-team-review")
+        self.assertEqual(cs.answer_class({**st, "acked": "x"}, core, ["proof_intake"], ["owes:uvn"])[0], "")   # owes proof
+        self.assertEqual(cs.answer_class(st, {"told": ["r1"], "decided": []}, [], [])[0], "")              # decision told
+        self.assertEqual(cs.answer_class(st, {"told": [], "decided": ["r1"]}, ["proof_intake"], [])[0], "")
+
+    def test_the_status_part_classifier(self):
+        # [key=reply-due-classes] (b), r5 B: 4438's Dolby Atmos question (stale AND not a status part) is refused
+        now = time.time()
+        tc = lambda *a, **k: cs.trigger_class(*a, **{"filed": ["r1"], **k})
+        def conv(body, age_d, prev=None):
+            ps = ([prev] if prev else []) + [{"id": "9", "part_type": "comment", "author": {"type": "user"}, "body": body,
+                                             "created_at": now - age_d * 86400}]
+            return {"source": {"author": {"type": "user"}, "body": "hi", "created_at": now - 300 * 86400},
+                    "conversation_parts": {"conversation_parts": ps}}
+        dolby = "Hello- just checking, is there a way to register Dolby Atmos credits into the system database? I haven't heard"
+        self.assertEqual(tc(conv(dolby, 190), "9")["class"], "non_status")
+        self.assertIn("stale", tc(conv(dolby, 190), "9")["why"])
+        self.assertEqual(tc(conv("is there a way to register Dolby Atmos credits?", 2), "9")["class"], "non_status")
+        self.assertEqual(tc(conv("my credits", 2), "9")["class"], "non_status")       # 'credits' alone
+        # QA #1517: a product question that merely uses 'request' is not a status part
+        self.assertEqual(tc(conv("Can I request Dolby Atmos credits?", 2), "9")["class"], "non_status")
+        self.assertEqual(tc(conv("Is my request approved yet?", 2), "9")["class"], "status")
+        # QA #1517: timing words alone are a product question; tied to their request they are status
+        self.assertEqual(tc(conv("When will Dolby Atmos credits be supported?", 2), "9")["class"], "non_status")
+        self.assertEqual(tc(conv("How long does a split sheet take in general?", 2), "9")["class"], "non_status")
+        self.assertEqual(tc(conv("when will my request be approved", 2), "9")["class"], "status")      # 'my request' 
+        # b1 270: timing words are never a status cue by themselves (no regex proximity); a status term still is
+        self.assertEqual(tc(conv("how long until it is approved?", 2), "9")["class"], "non_status")
+        self.assertEqual(tc(conv("how long until my request is approved?", 2), "9")["class"], "status")
+        # QA #1517 / b1 270: the SINGULAR product question (and any product cue) is vetoed, whatever else it says
+        r = tc(conv("When will my Dolby Atmos credit feature be supported?", 2), "9")
+        self.assertEqual((r["class"], r["why"].startswith("product cue")), ("non_status", True))
+        self.assertEqual(tc(conv("my request is pending - is the feature available in the app?", 2), "9")["class"], "non_status")
+        self.assertEqual(tc(conv("When will my credit be supported on Spotify?", 2), "9")["class"], "non_status")
+        # b1 270: no filed request of theirs linked to this thread = never a status answer
+        r = cs.trigger_class(conv("Is my request approved yet?", 2), "9", filed=[])
+        self.assertEqual((r["class"], r["why"]), ("non_status", "no open request of theirs is linked to this thread"))
+        # QA #1517 (b): a short title ("Can", "Home") never makes a product question status; a distinctive one does
+        self.assertEqual(tc(conv("Can I request Dolby Atmos credits?", 2), "9", titles=["Can", "Home"])["class"], "non_status")
+        self.assertEqual(tc(conv("La Flor de la Vida - nothing yet", 2), "9", titles=["La Flor de la Vida"])["class"], "status")
+        self.assertEqual(tc(conv("Scandinavia is lovely", 2), "9", titles=["Scandi"])["class"], "non_status")  # not word-bounded
+        # QA #1517 (a): a later customer part (a product question) means the status part is not the one to answer
+        c2 = conv("where is my request?", 4)
+        c2["conversation_parts"]["conversation_parts"].append({"id": "10", "part_type": "comment", "author": {"type": "user"},
+                                                             "body": "also, can I add Dolby Atmos?", "created_at": now - 3 * 86400})
+        r = tc(c2, "9")
+        self.assertEqual((r["class"], r["why"]), ("non_status", "not the customer's latest part"))
+        self.assertEqual(tc(conv("where is my request? any update?", 2), "9")["class"], "status")
+        self.assertEqual(tc(conv("La Flor de la Vida - still nothing", 2), "9", titles=["La Flor de la Vida"])["class"], "status")
+        ours = {"id": "8", "part_type": "comment", "author": {"type": "admin", "id": "5763097"}, "body": "Hi Jane, a quick status..."}
+        # b1 19:05Z (allowlist): a reply to our note is no longer status by itself - 'ok thanks' goes to a person
+        self.assertEqual(tc(conv("ok thanks, here you go", 2, prev=ours), "9")["class"], "non_status")
+        r = tc(conv("where is my request?", 2), "9")
+        self.assertEqual((r["part_age_d"] >= 1.9, r["part_age_d"] <= 2.1), (True, True))
+
+    def test_send_path_singular_product_question_and_unlinked_thread_hold(self):
+        # QA #1517 / b1 270, through cs.check (the send gate's call): the singular product question holds even on an
+        # open, linked credit thread with nothing owed; a status question in a thread with no linked request holds too
+        self.thread("215473681300330")
+        self.ic.convs["215473681300330"]["conversation_parts"]["conversation_parts"][1]["body"] = \
+            "When will my Dolby Atmos credit feature be supported?"
+        res = self.run_due(campaign="status-team-review", copy="teamreview")
+        self.assertTrue(res["hold"], res)
+        self.assertTrue(any(r.startswith("reply_due:non_status_part") and "product cue" in r for r in res["reasons"]), res)
+        self.thread("215473681300331")
+        self.ic.convs["215473681300331"]["conversation_parts"]["conversation_parts"][1]["body"] = "Is my request approved yet?"
+        self.core = [["r1", "user_verification_needed", "", "", "2026-10-15 07:21:38 UTC"]]
+        res = cs.check("uvn-status", "uvnstatus", UID, ["r1"], "c1", conversation="215473681300331",
+                       reply_due_part="57000000001", query=self.q, ic=self.ic, fraud=lambda uid, q: [])
+        self.assertTrue(any("no open request of theirs is linked to this thread" in r for r in res["reasons"]), res)
+
+    def test_status_team_review_reply_due_takes_the_full_path(self):
+        # QA #1517 (critical): the nothing-is-needed fast path never short-circuits a reply_due answer - a closed thread,
+        # a product question and a human assignee all hold status-team-review exactly as they hold the ask
+        base = self.q
+        self.q = lambda sql: [] if "regexp_like" in sql else base(sql)          # owes nothing (the fast path's case)
+        self.ic.convs["215473681300330"]["state"] = "closed"
+        self.assertIn("reply_due:thread_not_open", self.run_due(campaign="status-team-review", copy="teamreview")["reasons"])
+        self.thread("215473681300330")
+        self.ic.convs["215473681300330"]["conversation_parts"]["conversation_parts"][1]["body"] = "Can I request Dolby Atmos credits?"
+        r = self.run_due(campaign="status-team-review", copy="teamreview")
+        self.assertTrue(any(x.startswith("reply_due:non_status_part") for x in r["reasons"]), r)
+        self.thread("215473681300330")
+        ok = self.run_due(campaign="status-team-review", copy="teamreview")     # no document, owes nothing -> team review
+        self.assertFalse(ok["hold"], ok)
+        self.assertEqual(ok["reply_due"]["answer_class"]["campaign"], "status-team-review")
+
+    def test_a_non_status_part_is_never_auto_answered(self):
+        self.ic.convs["215473681300330"]["conversation_parts"]["conversation_parts"][1]["body"] = "is there a way to add Dolby Atmos?"
+        res = self.run_due()
+        self.assertTrue(any(r.startswith("reply_due:non_status_part") for r in res["reasons"]), res)
 
 
 class ReplyDueLedgerTest(unittest.TestCase):
@@ -600,6 +737,13 @@ class OnTopicTest(unittest.TestCase):
         for t in ("Credit Verification", "My song credits are under review", "Profile claim", "Merge my two profiles",
                   "Split sheet attached"):
             self.assertTrue(cs.on_topic(self.conv(t)), t)
+
+    def test_a_ticket_type_given_as_a_string_or_an_object_is_read_never_a_crash(self):
+        # prod (10-30): some conversations carry ticket.ticket_type as a bare string; comm_state raised on them
+        for tt, want in (("Credit verification", True), ({"name": "Credit verification"}, True), ("Billing", False), (None, False)):
+            c = self.conv("hello")
+            c["ticket"] = {"ticket_type": tt}
+            self.assertEqual(cs.on_topic(c), want, tt)
 
     def test_billing_thread_is_never_reply_due(self):
         ic = FakeIntercom()
@@ -782,6 +926,301 @@ class ProofRequiredOwesTest(unittest.TestCase):
         self.pr = ["x"]
         with self.assertRaises(cs.Unknown):
             cs.owes_proof(UID, self.q)
+
+
+class ReplyDueThreadTest(CommStateTest):
+    """Fable [key=lamberto-reply-due] 238/240 + r5: prior_note and the human-assignee states, read from the thread."""
+    CONV = "215473681300330"
+
+    def thread(self, *, assignee=None, parts=(), opener="admin"):
+        now = time.time()
+        self.ic.convs[self.CONV] = {
+            "id": self.CONV, "created_at": now - 200 * 86400, "admin_assignee_id": assignee,
+            "source": {"id": "0", "author": {"type": opener, "id": "5344997" if opener == "admin" else "c1"}},
+            "contacts": {"contacts": [{"id": "c1"}]}, "conversation_parts": {"conversation_parts": list(parts)}}
+
+    def part(self, pid, typ, aid, body, age_h, ptype="comment"):
+        return {"id": pid, "part_type": ptype, "author": {"type": typ, "id": aid}, "body": body,
+                "created_at": time.time() - age_h * 3600}
+
+    def facts(self, part="56871591200"):
+        return cs.reply_due_thread(self.CONV, self.ic, part=part)
+
+    def test_the_bot_set_is_caroline_only(self):
+        self.assertEqual(cs.GATE_BOT_ADMINS, frozenset({"5763097"}))
+
+    def test_prior_note_only_from_our_nothing_needed_line(self):
+        line = "Hi Lamberto, a quick status update: we're reviewing your credit request. Nothing is needed from you right now."
+        self.thread(parts=[self.part("56450261657", "admin", "5763097", line, 250)])
+        pn = self.facts()["prior_note"]
+        self.assertEqual((pn["part"], pn["campaign"]), ("56450261657", "unledgered (#1510 backfill class)"))
+        # another wording, or a HUMAN admin saying it, or an internal note: no prior note
+        for prt in (self.part("1", "admin", "5763097", "we're reviewing your request", 250),
+                    self.part("1", "admin", "5465657", line, 250),
+                    self.part("1", "admin", "5763097", line, 250, ptype="note")):
+            self.thread(parts=[prt])
+            self.assertIsNone(self.facts()["prior_note"], prt)
+        # QA #1517: a ledgered note with NO matching comment in the thread is not evidence (no prior note); with the
+        # comment present, the ledger labels its campaign
+        db = vl.connect(cs.LEDGER)
+        g = vl.claim(db, user_key="l@x.com", day="2026-10-19", request_ids=["r1"], message_type="comment",
+                     approved_by="U", approval_ref="ref", campaign="status-team-review", user_id="298376")
+        vl.finalize(db, message_row=int(g["message_row"]), status="sent", message_id="777", conversation_id=self.CONV)
+        db.close()
+        self.thread(parts=[])
+        self.assertIsNone(self.facts()["prior_note"])
+        self.thread(parts=[self.part("777", "admin", "5763097", line, 250)])
+        self.assertEqual(self.facts()["prior_note"]["campaign"], "status-team-review")
+
+    def handoff_row(self, age_h, kind="handoff"):
+        db = vl.connect(cs.LEDGER)
+        at = datetime.now(timezone.utc) - timedelta(hours=age_h)
+        # the gate's shapes: a handoff is from = to = the assigned human; a reassign moves the thread to Caroline's admin
+        vl.thread_event(db, kind=kind, conversation=self.CONV, from_admin="5465657",
+                        to_admin="5465657" if kind == "handoff" else "5763097", note_part="900",
+                        reply_due_part="56871591200", request_ids=["r1"], user_id="298376", approved_by="U",
+                        approval_ref="ref", now=at)
+        db.close()
+
+    def test_a_handoff_of_part_a_never_stands_in_for_a_new_part_b(self):
+        # QA #1517: part A (56871591200) was handed off 50 h ago; the customer now has a DIFFERENT unanswered part B.
+        # A's note is not B's: B gets its own handoff note first, never a straight reassign+answer
+        self.thread(assignee="5465657", parts=[self.part("1", "admin", "5465657", "looking into it", 200)])
+        self.handoff_row(50)
+        self.assertEqual(self.facts()["assignee"]["action"], "reassign+answer")              # A's own 48 h elapsed
+        self.assertEqual(self.facts(part="57000000099")["assignee"]["action"], "handoff")    # B: its own note first
+
+    def test_a_truncated_history_is_unknown_never_a_missing_prior_note(self):
+        # QA #1517 (c): > 500 parts -> the earlier nothing-needed line may be out of view: fail closed
+        self.thread(parts=[self.part(str(i), "admin", "5763097", "hi", 300) for i in range(500)])
+        with self.assertRaises(cs.Unknown):
+            self.facts()
+        self.thread(parts=[self.part("1", "admin", "5763097", "hi", 300)])
+        self.ic.convs[self.CONV]["conversation_parts"]["total_count"] = 812
+        with self.assertRaises(cs.Unknown):
+            self.facts()
+
+    def test_human_assignee_states(self):
+        cust = self.part("56871591200", "user", "c1", "This track has been under review for months now.", 100)
+        tags = self.part("2", "admin", "5465657", "", 5, ptype="conversation_tags_updated")     # recent, but not the human writing
+        self.thread(assignee=5465657, parts=[cust, tags])
+        a = self.facts()["assignee"]
+        self.assertEqual((a["id"], a["action"]), ("5465657", "handoff"))
+        self.handoff_row(10)                                                     # note 10 h ago: the human has 48 h
+        self.assertEqual(self.facts()["assignee"]["action"], "wait")
+        self.setUp(); self.thread(assignee=5465657, parts=[cust]); self.handoff_row(50)
+        a = self.facts()["assignee"]
+        self.assertEqual((a["action"], a["handoff_part"], a["human_replied_after"]), ("reassign+answer", "900", False))
+        # the human replied after the note (and > 48 h ago, so only the after-the-note rule can skip it); any human counts
+        self.setUp(); self.handoff_row(100)
+        self.thread(assignee=5465657, parts=[cust, self.part("3", "admin", "5000001", "Hi, looking at it", 60)])
+        a = self.facts()["assignee"]
+        self.assertEqual((a["action"], a["human_replied_after"]), ("skip", True))
+        # the human wrote within 48 h (an own note counts too): skip
+        self.setUp(); self.thread(assignee=5465657, parts=[cust, self.part("4", "admin", "5465657", "internal", 5, ptype="note")])
+        self.assertEqual(self.facts()["assignee"]["action"], "skip")
+        # reassigned within 7 days: never again
+        self.setUp(); self.handoff_row(60); self.handoff_row(1, kind="reassign"); self.thread(assignee=5465657, parts=[cust])
+        self.assertEqual(self.facts()["assignee"]["action"], "skip")
+        # QA #1517: a note handed to A does not count once the thread is B's - B gets their own handoff
+        self.setUp(); self.handoff_row(60); self.thread(assignee=5000002, parts=[cust])
+        a = self.facts()["assignee"]
+        self.assertEqual((a["id"], a["action"], a["handoff_part"]), ("5000002", "handoff", ""))
+        # unassigned, or assigned to Caroline's admin: no assignee state
+        for asg in (None, 0, 5763097):
+            self.setUp(); self.thread(assignee=asg, parts=[cust])
+            self.assertIsNone(self.facts()["assignee"], asg)
+
+    def test_thread_events_never_count_as_a_message_to_the_user(self):
+        self.handoff_row(1)
+        db = vl.connect(cs.LEDGER)
+        self.assertEqual(vl.uvn_user_done(db, "l@x.com", user_id="298376"), "")
+        row = db.execute("SELECT user_key, account_id, status FROM verify_messages WHERE campaign='handoff'").fetchone()
+        self.assertEqual(tuple(row), (f"thread:{self.CONV}", None, "handoff"))
+        with self.assertRaises(ValueError):
+            vl.thread_event(db, kind="other", conversation=self.CONV, from_admin="1", to_admin="2", note_part="3",
+                            reply_due_part="4", request_ids=[], user_id="", approved_by="U", approval_ref="r")
+
+
+class FiledRequestEvidenceTest(unittest.TestCase):
+    """b1 270: a status answer needs a request that exists, is still open, and is linked to THIS conversation."""
+
+    def setUp(self):
+        CommStateTest.setUp(self)
+        ReplyDueTest.link(self, "777", ids=("r1",))
+        db = sqlite3.connect(cs.PROOF_STORE)
+        cols = {r[1] for r in db.execute("PRAGMA table_info(proof_intake)")}
+        if "candidate_request_ids_json" not in cols:
+            db.execute("ALTER TABLE proof_intake ADD COLUMN candidate_request_ids_json TEXT")
+        if "conversation_id" not in cols:
+            db.execute("ALTER TABLE proof_intake ADD COLUMN conversation_id TEXT")
+        db.commit(); db.close()
+
+    def q(self, open_ids):
+        return lambda sql: [[r] for r in open_ids if f"'{r}'" in sql]
+
+    def test_open_and_linked_only(self):
+        self.assertEqual(cs.filed_requests(UID, ["r1"], "777", self.q(["r1"])), ["r1"])
+        self.assertEqual(cs.filed_requests(UID, ["r1"], "888", self.q(["r1"])), [])      # another thread
+        self.assertEqual(cs.filed_requests(UID, ["r1"], "777", self.q([])), [])          # decided / deleted / not theirs
+        self.assertEqual(cs.filed_requests(UID, ["r2"], "777", self.q(["r2"])), [])      # open but never named in 777
+        self.assertEqual(cs.filed_requests(UID, ["x'; drop"], "777", self.q(["r1"])), [])  # never reaches the SQL
+        self.assertEqual(cs.filed_requests(UID, ["r1"], "", self.q(["r1"])), [])
+
+    def test_a_filing_in_the_thread_links_the_request(self):
+        db = sqlite3.connect(cs.PROOF_STORE)
+        cols = [r[1] for r in db.execute("PRAGMA table_info(proof_intake)")]
+        row = {c: None for c in cols}
+        row.update({"user_id": UID, "conversation_id": "999", "candidate_request_ids_json": '["r3"]'})
+        for c in cols:   # fill NOT NULL text columns
+            if row[c] is None:
+                row[c] = "x" if c != "received_at" else "2026-10-01T00:00:00Z"
+        db.execute(f"INSERT INTO proof_intake ({','.join(cols)}) VALUES ({','.join('?' * len(cols))})", [row[c] for c in cols])
+        db.commit(); db.close()
+        self.assertEqual(cs.filed_requests(UID, ["r3"], "999", self.q(["r3"])), ["r3"])
+
+
+class OtherRequestTest(unittest.TestCase):
+    """QA #1517: A is linked to this thread; 'Any update on Other Song?' names open request B -> never A's answer."""
+
+    setUp = ReplyDueTest.setUp
+    thread = ReplyDueTest.thread
+    link = ReplyDueTest.link
+
+    def test_through_check(self):
+        self.ic.convs["215473681300330"]["conversation_parts"]["conversation_parts"][1]["body"] = "Any update on Other Song?"
+        def q(sql):
+            if "spotifytracktitle" in sql:
+                return [["La Flor de la Vida"]] if "lower(CAST(id AS varchar)) IN (" in sql else [["La Flor de la Vida"], ["Other Song"]]
+            return ReplyDueTest.q(self, sql)
+        self.core = [["r1", "user_verification_needed", "", "", "2026-10-15 07:21:38 UTC"]]
+        res = cs.check("uvn-status", "uvnstatus", UID, ["r1"], "c1", conversation="215473681300330", reply_due_part="57000000001",
+                       query=q, ic=self.ic, fraud=lambda uid, qq: [])
+        self.assertTrue(res["hold"], res)
+        self.assertTrue(any("names another open request 'Other Song'" in r for r in res["reasons"]), res)
+        # the linked request's own title with a status cue still answers
+        self.ic.convs["215473681300330"]["conversation_parts"]["conversation_parts"][1]["body"] = "Any update on La Flor de la Vida?"
+        res = cs.check("uvn-status", "uvnstatus", UID, ["r1"], "c1", conversation="215473681300330", reply_due_part="57000000001",
+                       query=q, ic=self.ic, fraud=lambda uid, qq: [])
+        self.assertFalse(any("names another open request" in r for r in res["reasons"]), res)
+
+
+class BillingStatusVetoTest(unittest.TestCase):
+    """r5 (QA #1517): a billing word vetoes the status class (one pattern with #1418's R9 billing veto)."""
+
+    def test_billing_part_is_handoff(self):
+        now = time.time()
+        conv = lambda body: {"source": {"author": {"type": "user"}, "body": "hi", "created_at": now - 9 * 86400},
+                             "conversation_parts": {"conversation_parts": [
+                                 {"id": "9", "part_type": "comment", "author": {"type": "user"}, "body": body,
+                                  "created_at": now - 2 * 86400}]}}
+        for body in ("my request is pending but I was charged twice", "any update on my refund?",
+                     "is my credit request approved? also my subscription renewed"):
+            r = cs.trigger_class(conv(body), "9", filed=["r1"])
+            self.assertEqual(r["class"], "non_status", body)
+            self.assertTrue(r["why"].startswith("billing cue"), r)
+        self.assertEqual(cs.trigger_class(conv("Is my request approved yet?"), "9", filed=["r1"])["class"], "status")
+
+
+class ActionRequestTest(unittest.TestCase):
+    """QA #1517: 'Please cancel my credit request.' on a linked, open thread is an action for a person, never status."""
+    setUp = ReplyDueTest.setUp
+    thread = ReplyDueTest.thread
+    link = ReplyDueTest.link
+    q = ReplyDueTest.q
+
+    def test_through_check(self):
+        for body in ("Please cancel my credit request.", "Can you delete my request for this song", "I want to withdraw it",
+                     "wrong role on my credit request", "this is not me, my request was a mistake",
+                     # b1 (QA #1517): corrections to what they sent
+                     "I uploaded the wrong document; can you replace it?", "please use this file instead",
+                     "can I resend the proof", "I need to re-upload my split sheet", "swap the screenshot for this one"):
+            with self.subTest(body):
+                self.ic.convs["215473681300330"]["conversation_parts"]["conversation_parts"][1]["body"] = body
+                res = ReplyDueTest.run_due(self, campaign="status-team-review", copy="teamreview")
+                self.assertTrue(res["hold"], res)
+                self.assertTrue(any("action request" in r for r in res["reasons"]), res)
+        # a plain status question still answers
+        self.ic.convs["215473681300330"]["conversation_parts"]["conversation_parts"][1]["body"] = "Is my request approved yet?"
+        res = ReplyDueTest.run_due(self, campaign="status-team-review", copy="teamreview")
+        self.assertFalse(any("action request" in r for r in res["reasons"]), res)
+
+
+class LinkedTitlesTest(unittest.TestCase):
+    """b1 (QA 11:36): the title cue counts only for requests linked to THIS conversation (no A/B cross-reply)."""
+
+    def test_only_the_linked_requests_titles(self):
+        seen = []
+
+        def q(sql):
+            seen.append(sql)
+            if "spotifytracktitle" in sql:
+                if "lower(CAST(id AS varchar)) IN (" not in sql:
+                    return [["La Flor de la Vida"], ["Other Song"]]
+                return [["La Flor de la Vida"]] if "'ra'" in sql else [["Other Song"]]
+            return []
+        self.assertEqual(cs.open_titles(7, q, only=["ra"]), ["La Flor de la Vida"])
+        self.assertEqual(cs.open_titles(7, q, only=[]), [])
+        self.assertEqual(cs.open_titles(7, q, only=["x'; drop"]), [])
+        self.assertEqual(cs.open_titles(7, q), ["La Flor de la Vida", "Other Song"])
+
+    def test_status_trigger_scopes_titles_to_filed(self):
+        from unittest import mock
+        got = {}
+        with mock.patch.object(cs, "filed_requests", lambda uid, keys, conv, q: ["rb"]), \
+                mock.patch.object(cs, "open_titles", lambda uid, q, only=None: got.setdefault("only", only) and ["T"]), \
+                mock.patch.object(cs, "trigger_class", lambda conv, part, titles=(), filed=(), other_titles=(): {"titles": titles, "filed": filed}):
+            r = cs.status_trigger(7, ["ra", "rb"], "777", "9", lambda sql: [], None, conv={})
+        self.assertEqual(got["only"], ["rb"])
+        self.assertEqual(r["filed"], ["rb"])
+
+
+class StatusAllowlistTableTest(unittest.TestCase):
+    """b1 19:05Z (QA #1517, 6th veto round): the classifier is INVERTED - status only for an allowlisted status question
+    with no veto; every phrase QA has reported so far is a handoff."""
+    STATUS = (
+        "Where is my credit request?", "any update on my credit?", "Any news on my request?", "What's the status of my request?",
+        "status of my claim please", "Has it been approved?", "Is my request approved yet?",
+        "will my credit be verified soon", "This track has been under review for months now.",
+        "still waiting to hear back about my credits", "La Flor de la Vida - nothing yet", "my credits are still pending",
+        "have my credits been checked yet?", "how long until my request is approved?",
+    )
+    HANDOFF = (
+        # every QA-reported phrase, rounds 1-6
+        "Can I edit my credit request for this song?", "How do I upload my document?",
+        "Can I request Dolby Atmos credits?", "When will Dolby Atmos credits be supported?",
+        "When will my Dolby Atmos credit feature be supported?", "How long does a split sheet take in general?",
+        "how long until it is approved?", "Please cancel my credit request.", "Can you delete my request for this song",
+        "I want to withdraw it", "wrong role on my credit request", "I uploaded the wrong document; can you replace it?",
+        "please use this file instead", "my request is pending but I was charged twice", "any update on my refund?",
+        "is my credit request approved? also my subscription renewed", "my request is pending - is the feature available in the app?",
+        "When will my credit be supported on Spotify?", "my credits", "ok thanks, here you go", "Scandinavia is lovely",
+        "is there a way to add a new role?", "How can I change the role on my credit?", "Could I fix the title?",
+        "I'd like to update my profile name", "thanks!", "hello?",
+        # QA #1517 22:0xZ: status words that do not name the credit/request/claim/merge/track/title
+        "Any update on my concert tickets?", "Any update on my concert tickets? I also have a credit request.", "any update?", "Any news on this?", "still waiting to hear back", "nothing yet", "have they been checked yet?",
+    )
+
+    def conv(self, body):
+        now = time.time()
+        return {"source": {"author": {"type": "user"}, "body": "hi", "created_at": now - 9 * 86400},
+                "conversation_parts": {"conversation_parts": [
+                    {"id": "9", "part_type": "comment", "author": {"type": "user"}, "body": body, "created_at": now - 2 * 86400}]}}
+
+    def test_the_table(self):
+        for body in self.STATUS:
+            with self.subTest(status=body):
+                r = cs.trigger_class(self.conv(body), "9", filed=["r1"], titles=["La Flor de la Vida"])
+                self.assertEqual(r["class"], "status", (body, r))
+        for body in self.HANDOFF:
+            with self.subTest(handoff=body):
+                r = cs.trigger_class(self.conv(body), "9", filed=["r1"], titles=["La Flor de la Vida", "Scandi"])
+                self.assertEqual(r["class"], "non_status", (body, r))
+
+    def test_the_two_reported_phrases_name_the_how_to_veto(self):
+        for body in ("Can I edit my credit request for this song?", "How do I upload my document?"):
+            r = cs.trigger_class(self.conv(body), "9", filed=["r1"])
+            self.assertTrue(r["why"].startswith("how-to / change request"), r)
 
 
 if __name__ == "__main__":

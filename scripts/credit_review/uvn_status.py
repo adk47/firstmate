@@ -100,9 +100,9 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from . import evidence, fraud_lens, policy, stage2_verdicts, verify_ledger, verify_notify
+from . import comm_state, evidence, fraud_lens, policy, stage2_verdicts, verify_ledger, verify_notify
 from .roles import ONE_PERSON_FAMILIES, family_of
 
 # The proof-on-file kinds that mean "we approved a document" (decide.APPROVED_PROOF_KINDS).
@@ -190,6 +190,9 @@ DEFAULT_LENS = fraud_lens.default_lens
 
 @dataclass
 class UvnReport(verify_notify.Report):
+    # r5 bars (e)/(j) on [key=lamberto-reply-due]: every reply_due row of a run, with the thread facts the gate will act
+    # on - {user, part, conversation, prior_note, assignee} (read live; 'unknown: ...' when unreadable)
+    reply_due_rows: list = field(default_factory=list)
     listed: int = 0
     stale_list: str = ""
     no_longer_uvn: int = 0
@@ -516,6 +519,26 @@ def with_reply_due(payload: dict[str, Any], src: dict[str, Any]) -> dict[str, An
     return payload
 
 
+def reply_due_row(uid: Any, src: dict[str, Any], facts: Callable[[str], dict[str, Any]] | None = None,
+                  query: Query = trino) -> dict[str, Any]:
+    """The dry-run row for one reply_due answer: the thread facts (comm_state.reply_due_thread) the gate acts on."""
+    rd = src["reply_due"]
+    row: dict[str, Any] = {"user": str(uid), "part": str(rd["part"]), "conversation": str(rd["conversation"])}
+    try:
+        f = (facts or (lambda conv: comm_state.reply_due_thread(conv, comm_state.intercom, part=row["part"])))(row["conversation"])
+        row.update({"prior_note": f.get("prior_note"), "assignee": f.get("assignee")})
+        if facts is None:      # r5 B: the classifier's verdict on the part (the class itself: comm_state at the gate)
+            # the SAME function the send gate's comm_state.check uses (QA #1517: titles + filed-request evidence)
+            keys = [str(c.get("request_id") or "") for c in (src.get("credits") or [])]
+            row["trigger_class"] = comm_state.status_trigger(int(uid), keys, row["conversation"], row["part"], query,
+                                                             comm_state.intercom)
+        else:
+            row["trigger_class"] = f.get("trigger_class")
+    except Exception as exc:  # noqa: BLE001 - a report column; the gate re-reads and decides at send
+        row.update({"prior_note": f"unknown: {exc}"[:120], "assignee": f"unknown: {exc}"[:120]})
+    return row
+
+
 def reply_due_of(payload: dict[str, Any]) -> dict[str, str]:
     """The {part, conversation} a built payload answers (its --reply-due / --conversation gate args), or {}."""
     ex = list(payload.get("extra") or [])
@@ -808,8 +831,12 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                     if as_count:
                         report.count_copy += 1
                         report.note("count_copy")
-                    batch.append((listed, with_reply_due(with_filing(note_payload(acct, uid, live, as_count, total, created_of(pending, live)), u), u),
-                                  0 if as_count else left_out(listed, pending, is_ask)))
+                    payload = with_reply_due(with_filing(note_payload(acct, uid, live, as_count, total, created_of(pending, live)), u), u)
+                    if mode != "apply" and with_reply_due({}, u).get("extra"):
+                        # QA #1517: the row is classified on the PAYLOAD's own request ids - exactly what the gate's
+                        # comm_state receives at send (the raw list row has request_ids, not credits)
+                        report.reply_due_rows.append(reply_due_row(uid, {**u, "credits": payload.get("credits") or []}, query=query))
+                    batch.append((listed, payload, 0 if as_count else left_out(listed, pending, is_ask)))
         finally:
             db.close()
         return batch
@@ -1000,4 +1027,12 @@ def render(report: UvnReport, mode: str, segment: str) -> str:
                      "left claimed and never re-sent automatically; counted toward the run size and daily cap)")
     if report.failed_users:
         parts.append(f"FAILED {report.failed_users}: " + "; ".join(report.failures[:3]))
+    for r in report.reply_due_rows:                                   # every row (QA #1517): the reviewer reads them all
+        pn, a = r.get("prior_note"), r.get("assignee")
+        parts.append(f"reply_due user {r['user']} part {r['part']} conversation {r['conversation']}: prior_note "
+                     + (f"{pn['part']} ({pn['campaign']})" if isinstance(pn, dict) else str(pn or "none"))
+                     + "; assignee " + (f"{a['id']} {a.get('name') or ''} action={a['action']}".replace("  ", " ")
+                                        if isinstance(a, dict) else str(a or "none"))
+                     + (f"; trigger_class {tc['class']} ({tc['why']}, {tc['part_age_d']} d)"
+                        if isinstance((tc := r.get("trigger_class")), dict) else ""))
     return ". ".join(parts) + "."

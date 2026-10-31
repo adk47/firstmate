@@ -213,6 +213,19 @@ readonly TAKEBACK_COPY_APPROVED=0
 #       proof; no two campaigns in 7 days). No ask batch before the intake cron (#1481) is deployed.
 #   Reviewed baseline: deploy overwrites - 2026-10-29 (verify-ask-wiring-h2): this blob sets UVN_STATUS_COPY_APPROVED=1.
 readonly UVN_STATUS_COPY_APPROVED=1
+# Fable [key=lamberto-reply-due] FINAL (firstmate 240; r5 co-sign): a reply_due answer in a thread that carries our
+# earlier "Nothing is needed from you right now" line starts with ONE correction sentence, and only above the ASK
+# (uvn-status): never above a status-team-review / receipt line, which the earlier note does not contradict.
+# Copy APPROVED: fable-copy-1030-r5/c (data/pr-review-fable-r5/copy-approvals-1030.md, under the captain's 2026-10-30
+# 13:1xZ delegation "use fable, do not wait for me"; firstmate 286), byte-for-byte.
+readonly REPLY_DUE_CORRECTION_TEXT="A correction to our earlier note here: this request does need one thing from you."
+readonly REPLY_DUE_CORRECTION_APPROVED=1
+readonly REPLY_DUE_CORRECTION_REF="fable-copy-1030-r5/c"
+# A thread assigned to a HUMAN admin: the answer is handed to them first (tag + internal note), and only if no human
+# writes within 48 h of that note is the thread reassigned to this gate's admin (+ note) and the answer posted.
+readonly HANDOFF_TAG="credit-answer-ready"
+readonly REASSIGN_NOTE="handed to the automated verification loop"
+RD_PREFIX=0 RD_ACT="" RD_ASG="" RD_PRIOR=""
 #   WITHDRAWAL_COPY_APPROVED     withdrawal-confirm: APPROVED by firstmate 2026-10-19 21:21Z (inbox
 #       061, confirmed in 064) under the same standing order; fixed text, role + title from the
 #       request row only.
@@ -726,7 +739,9 @@ esac
 if [ -n "$REPLY_DUE" ]; then
   printf '%s' "$REPLY_DUE" | grep -qE '^[0-9]{1,24}$' || refuse "--reply-due needs the customer part id (digits)."
   [ -n "$THREAD" ] || refuse "--reply-due answers in the user's own thread: --conversation <id> is required."
-  [ "$CAMPAIGN" = "uvn-status" ] || refuse "--reply-due applies to uvn-status (the per-need ask) only for now."
+  # [key=reply-due-classes]: the coded answer classes; comm_state holds any campaign that is not the ONE class it picks
+  case "$CAMPAIGN" in uvn-status|status-doc-received|status-team-review) ;;
+    *) refuse "--reply-due applies to uvn-status, status-doc-received and status-team-review (the coded answer classes)." ;; esac
 fi
 if [ -n "$THREAD" ]; then
   case "$CAMPAIGN" in
@@ -1710,6 +1725,41 @@ record_refusal() {
   refuse "$1"
 }
 
+# [key=lamberto-reply-due] helpers. Each Intercom write is verified; a failure exits before any customer post.
+with_prefix() { # <rendered-json> -> the same note with the correction sentence first (the approved body unchanged after it)
+  printf '%s' "$1" | "$JQ_BIN" -c --arg p "$REPLY_DUE_CORRECTION_TEXT" \
+    '.html = "<p>" + $p + "</p>" + .html | .text = $p + "\n\n" + .text'
+}
+post_note() { # <conversation> <html> -> prints the internal note's part id
+  local resp
+  resp="$("$JQ_BIN" -nc --arg a "$INTERCOM_ADMIN_ID" --arg b "$2" '{message_type: "note", type: "admin", admin_id: $a, body: $b}' \
+    | api POST "/conversations/$1/reply")" || { printf 'NOTE FAILED on conversation %s; nothing was sent to the customer:\n%s\n' "$1" "${resp:0:300}" >&2; return 4; }
+  printf '%s' "$resp" | "$JQ_BIN" -r '[(.conversation_parts.conversation_parts // [])[] | select((.part_type // "") == "note")] | last | .id // empty | tostring' \
+    | grep -E '^[0-9]{1,24}$' || { printf 'NOTE NOT VERIFIED on conversation %s:\n%s\n' "$1" "${resp:0:300}" >&2; return 4; }
+}
+assign_to_gate() { # <conversation> <note-html> -> prints the assignment part id. ONE call: the reassignment carries its
+  # internal note, so a failure leaves neither (never a "handed to the loop" note on a thread that was not handed over)
+  local resp
+  resp="$("$JQ_BIN" -nc --arg a "$INTERCOM_ADMIN_ID" --arg b "$2" '{message_type: "assignment", type: "admin", admin_id: $a, assignee_id: $a, body: $b}' \
+    | api POST "/conversations/$1/parts")" || { printf 'REASSIGN FAILED on conversation %s:\n%s\n' "$1" "${resp:0:300}" >&2; return 4; }
+  [ "$(printf '%s' "$resp" | "$JQ_BIN" -r '.admin_assignee_id // empty | tostring')" = "$INTERCOM_ADMIN_ID" ] \
+    || { printf 'REASSIGN NOT VERIFIED on conversation %s:\n%s\n' "$1" "${resp:0:300}" >&2; return 4; }
+  printf '%s' "$resp" | "$JQ_BIN" -r '[(.conversation_parts.conversation_parts // [])[] | select((.part_type // "") == "assignment")] | last | .id // empty | tostring' \
+    | grep -E '^[0-9]{1,24}$' || { printf 'REASSIGN PART NOT VERIFIED on conversation %s:\n%s\n' "$1" "${resp:0:300}" >&2; return 4; }
+}
+add_conv_tag() { # <conversation> <tag>: tags are only ever ADDED (r5 i)
+  local tags tid created resp
+  tags="$(api GET /tags)" || return 4
+  tid="$(printf '%s' "$tags" | "$JQ_BIN" -r --arg n "$2" '[(.data // [])[] | select(((.name // "")|ascii_downcase) == $n) | .id][0] // empty')"
+  if [ -z "$tid" ]; then
+    created="$(printf '{"name":"%s"}' "$2" | api POST /tags)" || return 4
+    tid="$(printf '%s' "$created" | "$JQ_BIN" -r 'select(.type == "tag") | .id // empty' 2>/dev/null || true)"
+    [ -n "$tid" ] || return 4
+  fi
+  resp="$("$JQ_BIN" -nc --arg id "$tid" --arg a "$INTERCOM_ADMIN_ID" '{id:$id, admin_id:$a}' | api POST "/conversations/$1/tags")" || return 4
+  [ "$(printf '%s' "$resp" | "$JQ_BIN" -r 'select(.type == "tag") | .name // empty' | tr '[:upper:]' '[:lower:]')" = "$2" ] || return 4
+}
+
 RENDERED="$(render "$INPUT")"
 leak="$(leak_reason "$RENDERED")"
 [ -z "$leak" ] || record_refusal "the rendered note contains $leak (from a track title, artist or role). Customers never see internal surfaces; this note is not sent and the credits are recorded as refused for a human to look at."
@@ -1893,6 +1943,9 @@ for_each_account_contact() { # <fn>: the first non-empty answer of <fn> over thi
 g1_now() { if [ "$TESTABLE" = "1" ] && [ -n "${INTERCOM_VERIFY_TEST_NOW:-}" ]; then printf '%s' "$INTERCOM_VERIFY_TEST_NOW"; else date -u +%s; fi; }
 GOLIVE=0
 case "$CAMPAIGN:$COPY" in merge-pending:*|credit-hold-status:*|claim-proof-pending:*|status-doc-received:docrecvr|status-doc-received:docrecvn|uvn-status:*) GOLIVE=1 ;; esac
+# QA #1517: every reply_due answer, whatever its class, passes the go-live recipient gates (G1-G5; G2's opener rule is
+# replaced by the verified trigger for reply_due only)
+[ -z "$REPLY_DUE" ] || GOLIVE=1
 # the claim code ask's FIRST message too ([key=claim-code-ask-release]); its day-7 reminder keeps its own rules
 [ "$CAMPAIGN:$KIND" = "claim-proof-ask:initial" ] && GOLIVE=1
 if [ "$GOLIVE" = "1" ] && [ "$LIVE" = "1" ]; then
@@ -1926,9 +1979,15 @@ if [ "$GOLIVE" = "1" ] && [ "$LIVE" = "1" ]; then
     CONTACT_ID="$g2c"
     g2conv="$(api GET "/conversations/$THREAD?display_as=plaintext")" \
       || { printf 'CONVERSATION READ FAILED (curl); nothing was sent or claimed\n' >&2; exit 4; }
-    printf '%s' "$g2conv" | "$JQ_BIN" -e '((.source.author.type // "") | IN("user", "lead", "contact"))' >/dev/null 2>&1 \
-      || r1_filing_thread_ok "$g2conv" \
-      || refuse "G2: conversation $THREAD was opened by us (an admin or bot), not the customer; nothing was sent or claimed."
+    # [key=reply-due-g2] (Fable 244, r5 245, p1 246): for a --reply-due answer ONLY, the opener rule is replaced by the
+    # verified trigger - comm_state (before any claim) proves the customer's latest part in THIS thread is unanswered
+    # > 24 h, the thread is open and on topic (R9), and its single contact is this account's user; a human-assigned
+    # thread goes the handoff path. Every other G1-G5 rule stays. [key=r1-filing-thread]: R1 into the filing thread.
+    if [ -z "$REPLY_DUE" ]; then
+      printf '%s' "$g2conv" | "$JQ_BIN" -e '((.source.author.type // "") | IN("user", "lead", "contact"))' >/dev/null 2>&1 \
+        || r1_filing_thread_ok "$g2conv" \
+        || refuse "G2: conversation $THREAD was opened by us (an admin or bot), not the customer; nothing was sent or claimed."
+    fi
     G_CONTACT="$THREAD_CONTACT_JSON"
   else
     G_CONTACT="$(api GET "/contacts/$CONTACT_ID")" \
@@ -2006,6 +2065,16 @@ if { [ "$GOLIVE" = "1" ] || [ "$NIE" = "1" ]; } && [ "$LIVE" = "1" ]; then
          "$([ "$NIE_BODY" = "1" ] && printf ' [owes-nothing check by body: the rendered note says "%s"]' "$NIE_PHRASE")"; exit 3 ;;
     *) printf 'COMM STATE CHECK FAILED (rc=%s); nothing was sent or claimed: %s\n' "$cs_rc" "${CS:0:300}" >&2; exit 4 ;;
   esac
+  if [ -n "$REPLY_DUE" ]; then
+    RD_PRIOR="$(printf '%s' "$CS" | "$JQ_BIN" -r '.reply_due.prior_note.part // empty' 2>/dev/null)"
+    RD_ACT="$(printf '%s' "$CS" | "$JQ_BIN" -r '.reply_due.assignee.action // empty' 2>/dev/null)"
+    RD_ASG="$(printf '%s' "$CS" | "$JQ_BIN" -r '.reply_due.assignee.id // empty' 2>/dev/null)"
+    if [ -n "$RD_PRIOR" ] && [ "$CAMPAIGN" = "uvn-status" ]; then
+      [ "$REPLY_DUE_CORRECTION_APPROVED" = "1" ] || {
+        printf 'DEFERRED reply_due_correction_locked credits=%s (our earlier nothing-is-needed note in this thread: part %s; the correction sentence awaits the captain)\n' "$N" "$RD_PRIOR"; exit 3; }
+      RD_PREFIX=1
+    fi
+  fi
 fi
 
 # ---------------------------------------------------------------------------------------
@@ -2176,10 +2245,14 @@ thread_check() { # sets THREAD_WHY (empty when $THREAD can carry the note) and T
     THREAD_WAIT="$wait_at"; THREAD_WHY="conversation $THREAD is waiting on the customer (our last comment, at $wait_at, asks them a question)"; return 0
   fi
   assignee="$(printf '%s' "$tconv" | "$JQ_BIN" -r '.admin_assignee_id // empty | tostring')"
-  if [ -n "$assignee" ] && [ "$assignee" != "0" ] && [ "$assignee" != "$INTERCOM_ADMIN_ID" ]; then
+  # (a reply_due answer whose comm_state verdict is reassign+answer reassigns the thread before it posts)
+  # (a reply_due answer whose comm_state verdict is reassign+answer may take over ONLY the very human it was handed to:
+  # if the thread moved to someone else since that verdict, QA #1517, the answer holds)
+  if [ -n "$assignee" ] && [ "$assignee" != "0" ] && [ "$assignee" != "$INTERCOM_ADMIN_ID" ] \
+     && ! { [ -n "$RD_ACT" ] && [ "$assignee" = "$RD_ASG" ]; }; then   # every assignee action is decided below (QA #1517)
     THREAD_WHY="conversation $THREAD is assigned to a human (admin $assignee), who is handling this user; not sending."; return 0
   fi
-  if [ "${GOLIVE:-0}" = "1" ] && ! printf '%s' "$tconv" | "$JQ_BIN" -e '((.source.author.type // "") | IN("user", "lead", "contact"))' >/dev/null 2>&1 \
+  if [ "${GOLIVE:-0}" = "1" ] && [ -z "$REPLY_DUE" ] && ! printf '%s' "$tconv" | "$JQ_BIN" -e '((.source.author.type // "") | IN("user", "lead", "contact"))' >/dev/null 2>&1 \
      && ! r1_filing_thread_ok "$tconv"; then
     THREAD_WHY="G2: conversation $THREAD was opened by us (an admin or bot), not the customer; not sending in it."; return 0
   fi
@@ -2231,6 +2304,117 @@ if [ "$KIND" = "initial" ] && [ "$COPY" = "v1" ]; then
   [ "$(printf '%s' "$V1" | "$JQ_BIN" -r '.eligible')" = "true" ] \
     || refuse "a verify-live note goes only to credits the decider approved and the server confirmed: $(printf '%s' "$V1" | "$JQ_BIN" -r '.reason')."
 fi
+# r5 (QA #1517): the FINAL read before any reply_due post - the part being answered must still be the customer's LATEST
+# part (comm_state classified exactly that part). A newer customer part means they wrote again: hold, and the newer
+# part becomes its own reply_due trigger (classified on the next run). Unreadable = nothing sent.
+# QA #1517 (b1 00:36Z): ONE set of thread checks for BOTH reply_due reads - the final read (before the claim, the
+# handoff note or the answer) and the post-claim takeover read (before assign_to_gate). <conv-json> -> 0 = the answer
+# may go; 1 = hold (RD_HOLD = "<code> <reason>"); 2 = unverifiable (RD_HOLD = the reason). The thread must be OPEN, its
+# contact exactly CONTACT_ID, the checked part still the customer's LATEST, NO support comment (admin / bot / team,
+# text or attachment) since that part, and the assignee the one comm_state's decision was about.
+rd_thread_checks() {
+  local c="$1" latest ans now act
+  RD_HOLD=""
+  latest="$(printf '%s' "$c" | "$JQ_BIN" -r '[.source, ((.conversation_parts.conversation_parts // [])[])]
+      | map(select(((.author.type // "") | IN("user", "lead", "contact")) and ((.part_type // "comment") != "note")
+                   and ((((.body // "") | length) > 0) or (((.attachments // []) | length) > 0))))
+      | last | (.id // "") | tostring' 2>/dev/null)" || { RD_HOLD="the latest-part read failed"; return 2; }
+  if [ "$latest" != "$REPLY_DUE" ]; then
+    RD_HOLD="reply_due_newer_part (the customer wrote again in $THREAD: part ${latest:-?} after $REPLY_DUE; it is answered on its own)"; return 1
+  fi
+  ans="$(printf '%s' "$c" | "$JQ_BIN" -r --arg p "$REPLY_DUE" '[.source, ((.conversation_parts.conversation_parts // [])[])] as $all
+      | ([ $all[] | select(((.id // "") | tostring) == $p) | (.created_at // 0) ] | first) as $at
+      | if $at == null then "unknown" else
+          ([ $all[] | select(((.author.type // "") | IN("admin", "bot", "team")) and ((.part_type // "comment") == "comment")
+                             and (((.body // "") | length) > 0 or ((.attachments // []) | length) > 0)
+                             and ((.created_at // 0) >= $at) and (((.id // "") | tostring) != $p)) | (.id // "" | tostring) ] | first // "")
+        end' 2>/dev/null)" || { RD_HOLD="the answered-check read failed"; return 2; }
+  [ "$ans" != "unknown" ] || { RD_HOLD="part $REPLY_DUE is not in the thread"; return 2; }
+  if [ -n "$ans" ]; then
+    RD_HOLD="reply_due_answered (part $REPLY_DUE in $THREAD was answered by support part $ans since it was checked)"; return 1
+  fi
+  # QA #1517 (01:30Z): a human's internal NOTE since the part is activity under the 48 h rule (a person is working the
+  # thread) - any admin/team note by someone other than this gate (the gate's own handoff note never counts)
+  # QA #1517 (03:1xZ): bounded like comm_state's assignee_state - for a takeover, notes since the handoff note; else
+  # notes within the last 48 h (an old note must never block the handoff / answer forever)
+  local nsince
+  if [ "$RD_ACT" = "reassign+answer" ]; then
+    nsince="$(printf '%s' "${CS:-}" | "$JQ_BIN" -r '(.reply_due.assignee.handoff_at // 0) | floor' 2>/dev/null)" || nsince=""
+    printf '%s' "$nsince" | grep -qE '^[0-9]+$' || { RD_HOLD="the handoff time is unreadable"; return 2; }
+  else
+    nsince=$(( $(g1_now) - 172800 ))
+  fi
+  act="$(printf '%s' "$c" | "$JQ_BIN" -r --arg p "$REPLY_DUE" --arg bot "$INTERCOM_ADMIN_ID" --argjson since "$nsince" '
+      [.source, ((.conversation_parts.conversation_parts // [])[])] as $all
+      | ([ $all[] | select(((.id // "") | tostring) == $p) | (.created_at // 0) ] | first) as $at
+      | [ $all[] | select((.part_type // "") == "note" and ((.author.type // "") | IN("admin", "team"))
+                          and (((.author.id // "") | tostring) != $bot) and ((.created_at // 0) >= ($at // 0))
+                          and ((.created_at // 0) >= $since)
+                          and (((.body // "") | length) > 0 or ((.attachments // []) | length) > 0)) | (.id // "" | tostring) ] | first // ""' 2>/dev/null)" \
+    || { RD_HOLD="the human-activity read failed"; return 2; }
+  if [ -n "$act" ]; then
+    RD_HOLD="reply_due_human_active (a person left note $act in $THREAD since part $REPLY_DUE; they are working it)"; return 1
+  fi
+  if [ "$(printf '%s' "$c" | "$JQ_BIN" -r '.state // ""')" != "open" ]; then
+    RD_HOLD="reply_due_not_open (conversation $THREAD is no longer open)"; return 1
+  fi
+  now="$(printf '%s' "$c" | "$JQ_BIN" -r '.admin_assignee_id // 0 | tostring')"
+  if [ -z "$RD_ACT" ]; then
+    case "$now" in 0|""|null|"$INTERCOM_ADMIN_ID") ;;
+      *) RD_HOLD="reply_due_assigned (conversation $THREAD is now assigned to admin $now)"; return 1 ;;
+    esac
+  elif [ "$now" != "$RD_ASG" ]; then
+    RD_HOLD="reply_due_assigned (conversation $THREAD is now assigned to $now, not $RD_ASG)"; return 1
+  fi
+  if [ "$(printf '%s' "$c" | "$JQ_BIN" -r '[(.contacts.contacts // [])[] | (.id // "") | tostring] | join(",")')" != "$CONTACT_ID" ]; then
+    RD_HOLD="reply_due_contact_changed (conversation $THREAD no longer has exactly contact $CONTACT_ID)"; return 1
+  fi
+  return 0
+}
+rd_final_read() {  # QA #1517: before the claim, a handoff note or the answer - a human is never handed a stale answer
+  local rc
+  rdf="$(api GET "/conversations/$THREAD?display_as=plaintext")" \
+    || { printf 'FINAL THREAD READ FAILED for %s; nothing was sent or claimed\n' "$THREAD" >&2; exit 4; }
+  rc=0; rd_thread_checks "$rdf" || rc=$?
+  case "$rc" in
+    0) ;;
+    1) printf 'HELD %s credits=%s; nothing was sent or claimed\n' "${RD_HOLD%% *}" "$N"; printf '  %s\n' "${RD_HOLD#* }"; exit 3 ;;
+    *) printf 'FINAL THREAD READ NOT VERIFIED for %s: %s; nothing was sent or claimed\n' "$THREAD" "$RD_HOLD" >&2; exit 4 ;;
+  esac
+}
+# QA #1517 (b1 16:00Z): the reply_due handoff / wait branches run only HERE - after the ledger peek, comm_state,
+# thread_check (open, single contact = the account's, tags, the assignee is exactly the human comm_state named) and the
+# recipient checks: a human is never handed an answer the gate itself would refuse to send.
+if [ -n "$REPLY_DUE" ]; then
+  case "$RD_ACT" in
+    ""|"reassign+answer") ;;
+    handoff)
+      printf '%s' "$RD_ASG" | grep -qE '^[0-9]{1,24}$' || refuse "reply_due handoff: the assignee id is unreadable; nothing was sent."
+      HANDED="$RENDERED"; [ "$RD_PREFIX" != "1" ] || HANDED="$(with_prefix "$RENDERED")"
+      if [ "$ACTION" != "post" ]; then
+        printf 'HANDOFF-READY conversation=%s to=%s credits=%s (the answer would be handed to the assigned human)\n' "$THREAD" "$RD_ASG" "$N"; exit 0
+      fi
+      HNOTE="$("$JQ_BIN" -nr --arg ids "$ALL_IDS" --arg body "$(printf '%s' "$HANDED" | "$JQ_BIN" -r '.html')" \
+        '"<p><b>credit-answer-ready</b>: the automated verification loop has this answer ready for the customer (request \($ids)). Please send it, or answer in your own words. If no one replies here within 48 hours, the loop reassigns this conversation and sends it.</p><hr>" + $body')"
+      LOG_FILE="$(new_log_file reply-due-handoff "$THREAD")"
+      "$JQ_BIN" -nc --arg c "$THREAD" --arg to "$RD_ASG" --arg p "$REPLY_DUE" --arg ids "$ALL_IDS" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{agent:"operations", action:"intercom_reply_due_handoff", target:("conversation:" + $c), assignee:$to, reply_due_part:$p, request_ids:$ids, timestamp:$ts, authorization:"Fable [key=lamberto-reply-due]: internal note + tag only, no customer message"}' > "$LOG_FILE"
+      rd_final_read   # the customer may have written again since comm_state read the thread: never a stale handoff
+      NOTE_ID="$(post_note "$THREAD" "$HNOTE")" || exit 4
+      ledger thread-event --kind handoff --conversation "$THREAD" --from-admin "$RD_ASG" --to-admin "$RD_ASG" --note-part "$NOTE_ID" \
+        --reply-due "$REPLY_DUE" --request-ids "$ALL_IDS" --user-id "$USER_ID" --approved-by "$APPROVED_BY" --approval-ref "$APPROVAL_REF" >/dev/null \
+        || die "the handoff note $NOTE_ID was posted but the ledger write failed; nothing was sent to the customer."
+      add_conv_tag "$THREAD" "$HANDOFF_TAG" || { printf 'HANDOFF TAG FAILED on conversation %s (note %s is ledgered)\n' "$THREAD" "$NOTE_ID" >&2; exit 4; }
+      printf 'HANDOFF conversation=%s note=%s to=%s credits=%s\n' "$THREAD" "$NOTE_ID" "$RD_ASG" "$N"; exit 0 ;;
+    wait)
+      # the human has 48 h from the note. QA #1517: the handoff's tag is re-applied (idempotent) on every run, so a
+      # tag that failed once is recovered instead of the human silently missing it
+      [ "$ACTION" != "post" ] || add_conv_tag "$THREAD" "$HANDOFF_TAG" \
+        || { printf 'HANDOFF TAG RETRY FAILED on conversation %s; nothing was sent\n' "$THREAD" >&2; exit 4; }
+      printf 'HELD reply_due_assignee credits=%s (wait: handed to admin %s, 48 h from the note)\n' "$N" "$RD_ASG"; exit 3 ;;
+    *) printf 'HELD reply_due_assignee credits=%s (%s, admin %s)\n' "$N" "$RD_ACT" "$RD_ASG"; exit 3 ;;
+  esac
+fi
 if [ "$ACTION" = "check-recipient" ]; then
   printf 'RECIPIENT OK %s %s copy=%s credits=%s\n' "$CAMPAIGN" "$KIND" "$COPY" "$N"; exit 0
 fi
@@ -2248,12 +2432,14 @@ if [ "$KIND" = "reminder-7" ]; then
     *) printf 'REPLY CHECK FAILED for message %s (rc=%s); nothing was sent or claimed:\n%s\n' "$PARENT_ID" "$rc" "$REPLY_CHECK" >&2; exit 4 ;;
   esac
 fi
+if [ -n "$REPLY_DUE" ] && [ "$ACTION" = "post" ]; then rd_final_read; fi
 if [ "$KIND" = "initial" ]; then
   REFS_FILE="$(mktemp)"
   trap 'rm -f "$REFS_FILE"' EXIT
   printf '%s' "$INPUT" | "$JQ_BIN" -c '[.credits[] | {request_id, profile_id, track_id}]' > "$REFS_FILE"
   CLAIM="$(ledger claim --campaign "$CAMPAIGN" --user-key "$EMAIL" --user-id "$USER_ID" --day "$DAY" --request-ids "$ALL_IDS" \
-    --message-type "$MESSAGE_TYPE" --approved-by "$APPROVED_BY" --approval-ref "$APPROVAL_REF" \
+    --message-type "$MESSAGE_TYPE" --approved-by "$APPROVED_BY" \
+    --approval-ref "$APPROVAL_REF$(if [ "$RD_PREFIX" = "1" ]; then printf '; correction %s' "$REPLY_DUE_CORRECTION_REF"; fi)" \
     --contact-id "$CONTACT_ID" --refs-file "$REFS_FILE" ${WINDOWED_FLAG:+"$WINDOWED_FLAG"} \
     ${REPLY_DUE:+--reply-due "$REPLY_DUE" --conversation "$THREAD"})" \
     || die "the ledger claim failed; refusing to send without the idempotency record."
@@ -2292,6 +2478,7 @@ fi
 # Render again from exactly the claimed credits.
 CLAIMED_INPUT="$(keep_ids "$INPUT" "$(printf '%s' "$CLAIM" | "$JQ_BIN" -c '.request_ids')")"
 RENDERED="$(render "$CLAIMED_INPUT")"
+[ "$RD_PREFIX" != "1" ] || RENDERED="$(with_prefix "$RENDERED")"
 NC="$(printf '%s' "$CLAIMED_INPUT" | "$JQ_BIN" -r '.credits | length')"
 leak="$(leak_reason "$RENDERED")"
 if [ -n "$leak" ]; then
@@ -2299,6 +2486,28 @@ if [ -n "$leak" ]; then
   refuse "the rendered note contains $leak; not sent."
 fi
 PAYLOAD="$(payload "$RENDERED" "$CONTACT_ID")"
+# [key=lamberto-reply-due]: the handed answer went unsent for 48 h - reassign to this gate (+ note), ledger row FIRST,
+# then the answer. Any failure: the claim is closed refused and nothing is posted to the customer.
+if [ "$RD_ACT" = "reassign+answer" ]; then
+  # QA #1517: re-read the thread IMMEDIATELY before taking it over - a human comment since the handoff note (the human
+  # answered after comm_state's read) means the answer is theirs: hold, nothing reassigned or posted
+  hnow="$(api GET "/conversations/$THREAD?display_as=plaintext")" \
+    || { ledger finalize --message-row "$ROW_ID" --status refused --reason "pre-reassign read failed" >/dev/null; refuse "the pre-reassign read of $THREAD failed; nothing was sent."; }
+  # QA #1517 (b1 00:36Z): the SAME checks as the final read, on this post-claim snapshot (the claim closes refused)
+  rc=0; rd_thread_checks "$hnow" || rc=$?
+  if [ "$rc" != 0 ]; then
+    ledger finalize --message-row "$ROW_ID" --status refused --reason "takeover read: ${RD_HOLD:0:200}" >/dev/null
+    if [ "$rc" = 1 ]; then
+      printf 'HELD %s credits=%s; nothing reassigned\n' "${RD_HOLD%% *}" "$N"; printf '  %s\n' "${RD_HOLD#* }"; exit 3
+    fi
+    refuse "the takeover read of $THREAD could not be verified ($RD_HOLD); nothing was sent."
+  fi
+  RNOTE="$(assign_to_gate "$THREAD" "<p>$REASSIGN_NOTE</p>")" \
+    || { ledger finalize --message-row "$ROW_ID" --status refused --reason "reassign failed" >/dev/null; refuse "reassign failed on conversation $THREAD; nothing was sent."; }
+  ledger thread-event --kind reassign --conversation "$THREAD" --from-admin "$RD_ASG" --to-admin "$INTERCOM_ADMIN_ID" --note-part "$RNOTE" \
+    --reply-due "$REPLY_DUE" --request-ids "$ALL_IDS" --user-id "$USER_ID" --approved-by "$APPROVED_BY" --approval-ref "$APPROVAL_REF" >/dev/null \
+    || { ledger finalize --message-row "$ROW_ID" --status refused --reason "reassign ledger write failed" >/dev/null; refuse "the reassign of $THREAD could not be ledgered; nothing was sent."; }
+fi
 BODY_SHA="$(printf '%s' "$PAYLOAD" | "$JQ_BIN" -r '.body' | "$PY_BIN" -I -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
 
 # ---------------------------------------------------------------------------------------
