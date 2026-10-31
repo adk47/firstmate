@@ -51,16 +51,30 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from . import verify_ledger, verify_notify
+from . import proof_parts, verify_ledger, verify_notify
 from .uvn_status import Query, accounts_of, trino
 
 CAMPAIGN = verify_ledger.CLAIM_CAMPAIGN
 BANDS = ("B", "C")
 LIST_MAX_AGE_H = 30
+# Fable p1 [key=claims-scoped-pof] (10-31 07:14Z) + r5 co-sign bound (07:20Z): while ONLY the cs-gmail part is
+# unusable, the claim notes run on fresh core + cs-intercom and hold every claimant the stale part could vouch for. The
+# LAST GOOD Gmail scan (the cs-gmail part and its support@ contact snapshot) must be <= 24 h old; past that EVERY
+# claimant is held as stale_source:cs-gmail (listed in the outcomes), because a list days old is not "fresh".
+SCOPED_GMAIL_MAX_AGE_H = 24.0
+
+
+class AllUsers(frozenset):
+    """Every user is held (the last good Gmail scan is too old to vouch for anyone)."""
+    def __contains__(self, item: object) -> bool:
+        return True
+STALE_GMAIL_REASON = "stale_source:cs-gmail"
+PROOF_STORE = os.environ.get("COMM_STATE_PROOF_STORE", "/var/lib/hydra-credit-verify/proof.sqlite")
 DAILY_CHECK_MAX_AGE_H = 30
 CLAIM_DAILY_MAX = 150
 CLAIM_STATUS_DAILY_MAX = 400
@@ -74,6 +88,7 @@ ASKED_EXPORT = os.environ.get("CLAIM_PROOF_ASKED_EXPORT", "/var/lib/hydra/credit
 @dataclass
 class ClaimReport(verify_notify.Report):
     listed: int = 0
+    stale_source_hold: int = 0        # scoped mode: held because cs-gmail is stale and could vouch for this claimant
     not_band: int = 0
     code_found: int = 0
     not_pending: int = 0
@@ -163,6 +178,117 @@ def _payload(c: dict[str, Any], acct: dict[str, str], extra: list[str] | None = 
             **({"extra": extra} if extra else {})}
 
 
+@dataclass(frozen=True)
+class ClaimHolds:
+    """Who a claim note never goes to. ``scoped`` = the cs-gmail part is stale and every held user is held for
+    that reason (``stale_source:cs-gmail``, listed in the outcomes)."""
+    held: frozenset[str]
+    scoped: bool = False
+
+
+def _gmail_filers(proof_store: str) -> set[str]:
+    """Users with a document filed from support@ (proof_intake source='email'). Unreadable = refuse all."""
+    try:
+        db = sqlite3.connect(f"file:{proof_store}?mode=ro", uri=True)
+        try:
+            return {str(int(u)) for (u,) in db.execute("SELECT DISTINCT user_id FROM proof_intake WHERE source='email'")}
+        finally:
+            db.close()
+    except (sqlite3.Error, ValueError, TypeError) as exc:
+        raise verify_notify.ProofFileError(f"scoped check: proof_intake {proof_store} unreadable ({exc})") from exc
+
+
+def _ledger_support_refs(ledger_path: str) -> set[str]:
+    """Users with a ledger note whose reason or gate log references a support@ filing. Unreadable = refuse all."""
+    try:
+        db = sqlite3.connect(f"file:{ledger_path}?mode=ro", uri=True)
+        try:
+            rows = db.execute("SELECT DISTINCT account_id FROM verify_messages WHERE account_id IS NOT NULL AND "
+                              "(lower(coalesce(reason,'')) LIKE '%support@%' OR lower(coalesce(api_log,'')) LIKE '%support@%')")
+            return {str(int(u)) for (u,) in rows if str(u).strip().isdigit()}
+        finally:
+            db.close()
+    except (sqlite3.Error, ValueError, TypeError) as exc:
+        raise verify_notify.ProofFileError(f"scoped check: ledger {ledger_path} unreadable ({exc})") from exc
+
+
+def claim_holds(path: str | None = None, *, now: datetime | None = None, proof_store: str | None = None,
+                ledger_path: str | None = None) -> ClaimHolds:
+    """The proof-on-file read for the CLAIM notes. Every part usable -> the full check (verify_notify, unchanged).
+    Fable [key=claims-scoped-pof]: when the ONLY unusable part is cs-gmail, admit on fresh core + cs-intercom and hold
+    every claimant cs-gmail could vouch for: anyone on the last support@ contact snapshot (90 days, a superset of the
+    rule's 14), anyone with a proof_intake row filed from email, anyone with a ledger note referencing a support@
+    filing, anyone with a gmail-sourced proof entry in the export itself (400-day scan). Anything else unusable (core, cs-intercom, another flagged part, a half-written export, a cs-gmail part or
+    snapshot older than SCOPED_GMAIL_MAX_AGE_H) raises ProofFileError: refuse all."""
+    now = now or datetime.now(timezone.utc)
+    try:
+        return ClaimHolds(frozenset(str(u) for u in verify_notify.load_proof_on_file(path, now=now).support_contacts))
+    except verify_notify.ProofFileError as full:
+        first = full
+    path = path or verify_notify.PROOF_ON_FILE
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        raise first from None
+    if not isinstance(doc, dict):
+        raise first
+    lim, skew = verify_notify.PROOF_MAX_AGE_H, verify_notify.PROOF_MAX_SKEW_H
+    gen = proof_parts.parse_ts(doc.get("generated_at"))
+    if gen is None or not -skew <= (now - gen).total_seconds() / 3600 <= lim:
+        raise first
+    sources = doc.get("sources") if isinstance(doc.get("sources"), list) else []
+    named = [x for x in sources if isinstance(x, dict)]
+    for label, match in proof_parts.REQUIRED:
+        found = [x for x in named if match(str(x.get("name") or ""))]
+        if len(found) != 1:
+            raise first
+        if label == proof_parts.GMAIL:
+            # QA #1568 round 3: scoped mode exists ONLY for an unusable cs-gmail PART. A usable part with some other
+            # problem (e.g. its contact snapshot alone is stale) keeps the full check's refusal.
+            if proof_parts.part_problem(found[0], label, now=now, max_age_h=lim, max_skew_h=skew) is None:
+                raise first
+            # the stale part: missing or with no readable stamp = refuse all; too old = hold everyone (below)
+            gmail_ts = proof_parts.parse_ts(found[0].get("generated_at"))
+            if found[0].get("missing") or gmail_ts is None or (now - gmail_ts).total_seconds() / 3600 < -skew:
+                raise verify_notify.ProofFileError("scoped check refused: cs-gmail is missing or has no readable stamp")
+        elif proof_parts.part_problem(found[0], label, now=now, max_age_h=lim, max_skew_h=skew):
+            raise first                      # core or cs-intercom unusable: refuse all
+    if any(not isinstance(x, dict) or (not proof_parts._is_required(str(x.get("name") or ""))  # noqa: SLF001
+                                       and (x.get("stale") or x.get("missing"))) for x in sources):
+        raise first
+    try:
+        proof_parts.check_entries(doc)
+    except proof_parts.PartsError:
+        raise first from None
+    # Fable/r5 bound (iii): the LAST GOOD scan must be <= 24 h old, else everyone is held (not refused: listed).
+    if (now - gmail_ts).total_seconds() / 3600 > SCOPED_GMAIL_MAX_AGE_H:
+        return ClaimHolds(AllUsers(), scoped=True)
+    contacts = proof_parts.support_contacts(doc, now=now, max_age_h=SCOPED_GMAIL_MAX_AGE_H, max_skew_h=skew)
+    if contacts is None:
+        snap = doc.get(proof_parts.SUPPORT_CONTACTS)
+        snap_ts = proof_parts.parse_ts(snap.get("generated_at")) if isinstance(snap, dict) else None
+        if snap_ts is not None and isinstance(snap.get("user_ids"), list) \
+                and (now - snap_ts).total_seconds() / 3600 > SCOPED_GMAIL_MAX_AGE_H:
+            return ClaimHolds(AllUsers(), scoped=True)          # the snapshot itself is too old: hold everyone
+        raise verify_notify.ProofFileError("scoped check refused: the support@ contact snapshot is absent or malformed")
+    held = {str(u) for u in contacts}
+    held |= _gmail_filers(proof_store or PROOF_STORE)
+    held |= _ledger_support_refs(ledger_path or verify_ledger.DEFAULT_PATH)
+    # QA #1568: the export's OWN gmail-sourced proof entries (a 400-day scan) reach further back than the 90-day
+    # contact snapshot and need no proof_intake or ledger row: every such user is held too.
+    held |= {str(e["user_id"]).strip() for e in doc["entries"] if "gmail" in str(e.get("source") or "").lower()}
+    return ClaimHolds(frozenset(held), scoped=True)
+
+
+def _support_held(report: ClaimReport, uid: int, scoped: bool) -> None:
+    if scoped:
+        report.stale_source_hold += 1
+        report.outcomes.append({"user": str(uid), "result": "held", "reason": STALE_GMAIL_REASON})
+    else:
+        report.support_hold += 1
+
+
 def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int = 20, reminders: bool = False,
         preview_dir: str | None = None, query: Query = trino, wrapper: str = verify_notify.WRAPPER,
         runner: verify_notify.Runner = verify_notify._run, ledger_path: str | None = None,
@@ -175,12 +301,14 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
     if why:
         report.halted = why
         return report
+    scoped = False
     if support_contacts is None:
         try:
-            support_contacts = verify_notify.load_proof_on_file().support_contacts
+            holds = claim_holds(now=now, ledger_path=ledger_path)
         except verify_notify.ProofFileError as exc:
             report.halted = f"the support-contact feed is unusable ({exc})"[:300]
             return report
+        support_contacts, scoped = holds.held, holds.scoped
     want_paid = segment == "paid"
     by_id = {int(c["claim_id"]): c for c in claims if str(c.get("claim_id", "")).isdigit()}
     report.listed = len(by_id)
@@ -189,7 +317,7 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
     if reminders:
         return _reminders(report, by_id, db=db, day=day, mode=mode, max_users=max_users, query=query,
                           wrapper=wrapper, runner=runner, preview_dir=preview_dir, support_contacts=support_contacts,
-                          want_paid=want_paid)
+                          want_paid=want_paid, scoped=scoped)
     offered = sorted((c for c in by_id.values() if bool(c.get("paid")) is want_paid), key=lambda c: int(c["claim_id"]))
     asked = verify_ledger.blocked_ids(db, [f"claim-{int(c['claim_id'])}" for c in offered], CAMPAIGN)
     keep: list[dict[str, Any]] = []
@@ -220,7 +348,7 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
             report.not_pending += 1
             continue
         if str(uid) in support_contacts:
-            report.support_hold += 1
+            _support_held(report, uid, scoped)
             continue
         acct = accts.get(uid) or {}
         if not acct.get("email"):
@@ -269,12 +397,14 @@ def run_status(*, list_path: str, segment: str, mode: str = "dry-run", max_users
     if why:
         report.halted = why
         return report
+    scoped = False
     if support_contacts is None:
         try:
-            support_contacts = verify_notify.load_proof_on_file().support_contacts
+            holds = claim_holds(now=now, ledger_path=ledger_path)
         except verify_notify.ProofFileError as exc:
             report.halted = f"the support-contact feed is unusable ({exc})"[:300]
             return report
+        support_contacts, scoped = holds.held, holds.scoped
     want_paid = segment == "paid"
     by_id = {int(c["claim_id"]): c for c in claims if str(c.get("claim_id", "")).isdigit()}
     report.listed = len(by_id)
@@ -309,7 +439,7 @@ def run_status(*, list_path: str, segment: str, mode: str = "dry-run", max_users
             report.not_pending += 1
             continue
         if str(uid) in support_contacts:
-            report.support_hold += 1
+            _support_held(report, uid, scoped)
             continue
         acct = accts.get(uid) or {}
         if not acct.get("email"):
@@ -365,7 +495,8 @@ def export_asked(db: Any, path: str | None = None) -> int:
 
 def _reminders(report: ClaimReport, by_id: dict[int, dict[str, Any]], *, db: Any, day: str, mode: str,
                max_users: int, query: Query, wrapper: str, runner: verify_notify.Runner,
-               preview_dir: str | None, support_contacts: frozenset[str], want_paid: bool) -> ClaimReport:
+               preview_dir: str | None, support_contacts: frozenset[str], want_paid: bool,
+               scoped: bool = False) -> ClaimReport:
     due = []
     for d in verify_ledger.claim_reminders_due(db, day=day):
         if d["result"] == "due":
@@ -419,7 +550,7 @@ def _reminders(report: ClaimReport, by_id: dict[int, dict[str, Any]], *, db: Any
             report.no_profile_id += 1         # held, never sent without the profile id
             continue
         if str(c["user_id"]) in support_contacts:
-            report.support_hold += 1
+            _support_held(report, int(c["user_id"]), scoped)
             continue
         if len(payloads) >= budget:
             report.over_daily_max += 1
@@ -452,7 +583,9 @@ def render(report: ClaimReport, mode: str, segment: str, reminders: bool = False
     for label, v in (("not band B/C", report.not_band), ("code already found", report.code_found),
                      ("no surface the daily check can read (waits for the documents path)", report.no_readable_surface),
                      ("claim no longer pending or another owner", report.not_pending),
-                     ("held: emailed support@ in 90 days", report.support_hold), ("no account email", report.no_email),
+                     ("held: emailed support@ in 90 days", report.support_hold),
+                     (f"held: {STALE_GMAIL_REASON} (cs-gmail could vouch for them)", report.stale_source_hold),
+                     ("no account email", report.no_email),
                      ("second claim of the same user (next run)", report.second_claim),
                      ("over today's cap (next run)", report.over_daily_max),
                      ("already asked (earlier run)", report.already_asked),

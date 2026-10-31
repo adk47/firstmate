@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import credit_test_env  # noqa: F401,E402 - first: test logs never reach the production run.log
 import json
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -605,6 +606,150 @@ class GateReasonSummaryTest(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn("sent 2", out)                                   # the run summary is still printed
         self.assertIn("OUTCOMES NOT WRITTEN", out)
+
+
+
+
+class ScopedProofOnFileTest(unittest.TestCase):
+    """Fable p1 [key=claims-scoped-pof] (10-31): the claim notes run on fresh core + cs-intercom while ONLY cs-gmail
+    is stale, and hold everyone the stale part could vouch for (stale_source:cs-gmail, in the outcomes)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        d = Path(self.tmp.name)
+        self.pof, self.store, self.ledger = str(d / "pof.json"), str(d / "proof.sqlite"), str(d / "l.sqlite3")
+        self.export = str(d / "asked.jsonl")
+        db = sqlite3.connect(self.store)
+        db.execute("CREATE TABLE proof_intake (intake_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, source TEXT NOT NULL)")
+        db.executemany("INSERT INTO proof_intake VALUES (?,?,?)", [("a", 71, "email"), ("b", 72, "intercom")])
+        db.commit()
+        db.close()
+        led = verify_ledger.connect(self.ledger)
+        c = verify_ledger.claim(led, campaign="claim-proof-ask", user_key="x@y.com", day="2026-10-20",
+                                request_ids=["claim-999"], message_type="email", approved_by="U", approval_ref="r",
+                                user_id="73")
+        led.execute("UPDATE verify_messages SET reason='filed from support@muso.ai', account_id='73' WHERE id=?",
+                    (c["message_row"],))
+        led.commit()
+        led.close()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def doc(self, *, gmail=10, gmail_stale=True, intercom=0.2, intercom_stale=False, core=0.1, snap=10, snapshot=True):
+        d = {"generated_at": iso(0.1), "users": 3,
+             "entries": [{"user_id": 9, "request_id": None, "kind": "approved_doc", "source": "intercom"},
+                         # QA #1568: an OLD gmail proof (400-day scan), absent from the 90-day snapshot and from
+                         # proof_intake / the ledger
+                         {"user_id": 74, "request_id": None, "kind": "approved_doc", "source": "gmail"},
+                         {"user_id": 75, "request_id": "r1", "kind": "pending_doc", "source": "core.verifications.upload"}],
+             "sources": [{"name": "core", "generated_at": iso(core)},
+                         {"name": "cs-intercom", "generated_at": iso(intercom), "stale": intercom_stale},
+                         {"name": "cs-gmail", "generated_at": iso(gmail), "stale": gmail_stale}]}
+        if snapshot:
+            d["gmail_contacts_90d"] = {"generated_at": iso(snap), "source": "support@", "user_ids": [70]}
+        Path(self.pof).write_text(json.dumps(d))
+
+    def holds(self):
+        return claim_proof_ask.claim_holds(self.pof, now=NOW, proof_store=self.store, ledger_path=self.ledger)
+
+    def test_all_fresh_is_the_full_check_unchanged(self):
+        self.doc(gmail=0.5, gmail_stale=False, snap=0.5)
+        h = self.holds()
+        self.assertFalse(h.scoped)
+        self.assertEqual(h.held, frozenset({"70"}))
+
+    def test_only_gmail_stale_admits_on_core_and_intercom_and_holds_who_gmail_could_vouch_for(self):
+        self.doc()
+        h = self.holds()
+        self.assertTrue(h.scoped)
+        # 70 on the support@ snapshot, 71 filed a document from email, 73 has a ledger note naming support@;
+        # 74 has an old gmail-sourced proof entry outside the snapshot (QA #1568); 72 filed through Intercom only and 9 /
+        # 75 hold intercom / core entries, which the fresh parts cover: admitted
+        self.assertEqual(h.held, frozenset({"70", "71", "73", "74"}))
+
+    def test_refuse_all_when_any_other_part_is_unusable(self):
+        cases = {"intercom stale": {"intercom_stale": True}, "intercom old": {"intercom": 4},
+                 "core old": {"core": 4}, "no snapshot": {"snapshot": False},
+                 "both stale and gmail old": {"intercom_stale": True, "gmail": 30}}
+        for name, kw in cases.items():
+            self.doc(**kw)
+            with self.assertRaises(claim_proof_ask.verify_notify.ProofFileError, msg=name):
+                self.holds()
+
+    def test_r5_bound_last_good_scan_over_24h_holds_everyone_listed(self):
+        """r5 co-sign (iii): the last good Gmail scan must be <= 24 h old; older = every claimant HELD, not admitted."""
+        for kw in ({"gmail": 24.5}, {"snap": 24.5}, {"gmail": 30, "snap": 30}):
+            self.doc(**kw)
+            h = self.holds()
+            self.assertTrue(h.scoped, kw)
+            for u in ("72", "1", "999999"):
+                self.assertIn(u, h.held, kw)
+        self.doc(gmail=23.5, snap=23.5)
+        self.assertNotIn("72", self.holds().held)              # within 24 h: the Intercom-only filer is admitted
+
+    def test_qa_1568_scoped_mode_needs_the_gmail_PART_unusable_not_only_its_snapshot(self):
+        """cs-gmail part fresh, gmail_contacts_90d alone 10 h old: the full check refuses, and scoped mode must NOT
+        rescue it (a claimant who wrote to support@ after the snapshot would be missed)."""
+        self.doc(gmail=0.5, gmail_stale=False, snap=10)
+        with self.assertRaises(claim_proof_ask.verify_notify.ProofFileError):
+            self.holds()
+        self.doc(gmail=0.5, gmail_stale=False, snap=0.5)
+        self.assertFalse(self.holds().scoped)                    # all fresh: the full check, unchanged
+
+    def test_unreadable_holds_stores_refuse_all(self):
+        self.doc()
+        for kw in ({"proof_store": self.store + ".missing"}, {"ledger_path": self.store}):
+            args = {"proof_store": self.store, "ledger_path": self.ledger, **kw}
+            with self.assertRaises(claim_proof_ask.verify_notify.ProofFileError, msg=str(kw)):
+                claim_proof_ask.claim_holds(self.pof, now=NOW, **args)
+
+    def test_runner_holds_the_gmail_filer_with_the_reason_in_the_outcomes_and_sends_the_rest(self):
+        self.doc()
+        lst = Path(self.tmp.name) / "list.json"
+        lst.write_text(json.dumps({"generated_at": iso(1), "daily_check": {"owner": "c", "last_run_at": iso(2)},
+                                   "claims": [claim(1, 71), claim(2, 72)]}))
+        q = replica({1: ("pending", 71), 2: ("pending", 72)}, {71: "a@x.com", 72: "b@x.com"})
+        gate = FakeGate()
+        with mock.patch.object(claim_proof_ask.verify_notify, "PROOF_ON_FILE", self.pof), \
+                mock.patch.object(claim_proof_ask, "PROOF_STORE", self.store):
+            rep = claim_proof_ask.run(list_path=str(lst), segment="paid", mode="apply", max_users=20, query=q,
+                                      wrapper="/gate", runner=gate, ledger_path=self.ledger, now=NOW,
+                                      export_path=self.export)
+        self.assertFalse(rep.halted)
+        self.assertEqual(rep.stale_source_hold, 1)
+        self.assertIn({"user": "71", "result": "held", "reason": "stale_source:cs-gmail"}, rep.outcomes)
+        self.assertEqual([c[1]["user"]["id"] for c in gate.calls], ["72"])
+        self.assertIn("stale_source:cs-gmail", claim_proof_ask.render(rep, "apply", "paid"))
+
+    def test_runner_with_an_old_scan_sends_nobody_and_lists_everyone(self):
+        self.doc(gmail=25)
+        lst = Path(self.tmp.name) / "list.json"
+        lst.write_text(json.dumps({"generated_at": iso(1), "daily_check": {"owner": "c", "last_run_at": iso(2)},
+                                   "claims": [claim(1, 71), claim(2, 72)]}))
+        q = replica({1: ("pending", 71), 2: ("pending", 72)}, {71: "a@x.com", 72: "b@x.com"})
+        gate = FakeGate()
+        with mock.patch.object(claim_proof_ask.verify_notify, "PROOF_ON_FILE", self.pof), \
+                mock.patch.object(claim_proof_ask, "PROOF_STORE", self.store):
+            rep = claim_proof_ask.run(list_path=str(lst), segment="paid", mode="apply", max_users=20, query=q,
+                                      wrapper="/gate", runner=gate, ledger_path=self.ledger, now=NOW,
+                                      export_path=self.export)
+        self.assertEqual(gate.calls, [])
+        self.assertEqual(rep.stale_source_hold, 2)
+        self.assertEqual(sorted(o["user"] for o in rep.outcomes if o["reason"] == "stale_source:cs-gmail"), ["71", "72"])
+
+    def test_red_mutants(self):
+        """The two mutants Fable named must be caught: a gmail-filed claimant admitted; both parts stale admitting."""
+        self.doc()
+        real = claim_proof_ask._gmail_filers
+        with mock.patch.object(claim_proof_ask, "_gmail_filers", lambda p: set()):
+            self.assertNotIn("71", self.holds().held)            # the mutant admits 71 ...
+        self.assertIn("71", self.holds().held)                   # ... the real reader holds it
+        self.assertIs(claim_proof_ask._gmail_filers, real)
+        self.assertIn("74", self.holds().held)                   # QA #1568: the old gmail entry is held
+        self.doc(intercom_stale=True)
+        with self.assertRaises(claim_proof_ask.verify_notify.ProofFileError):
+            self.holds()                                         # both stale: refuse all, never admit
 
 
 if __name__ == "__main__":
