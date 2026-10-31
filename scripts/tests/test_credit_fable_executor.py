@@ -276,11 +276,22 @@ class RunTest(unittest.TestCase):
         self.assertEqual([l["outcome"] for l in self.audit_lines()], ["reserved", "reserved", "not_moved", "not_moved"])
 
     def test_batches_are_at_most_100_and_the_fanout_check_runs_between_them(self):
+        # Fable [key=executor-one-put-per-user]: 150 rows of ONE user = ONE PUT of 100; the other 50 wait a day
         seen = []
         res = self.go(self.tray(n=150, cap=400), between_batches=lambda rows, since: seen.append(len(rows)))
-        self.assertEqual([len(c[0]) for c in self.calls], [100, 50])
-        self.assertEqual(seen, [100, 50])
-        self.assertEqual(res.written, 150)
+        self.assertEqual([len(c[0]) for c in self.calls], [100])
+        self.assertEqual(seen, [100])
+        self.assertEqual((res.written, res.refused), (100, {"user_rows_over_room_wait_for_another_day": 50}))
+        # two users: one PUT each, and the fan-out check runs between them
+        self.calls.clear()
+        rows = tuple(fx.TrayRow(f"{i:08d}-2222-4222-8222-222222222222", 7 if i < 3 else 8, "u10k-3",
+                                "reject_publisher_label_credit", True) for i in range(5))
+        fm = {r.request_id: facts(user_id=r.user_id) for r in rows}
+        seen.clear()
+        res = self.go(fx.Tray("t2.json", "1" * 64, "reject", "unverified", rows, 400, None), facts_map=fm,
+                      between_batches=lambda moved, since: seen.append(sorted({u for _, u, _ in moved})))
+        self.assertEqual([len(c[0]) for c in self.calls], [3, 2])
+        self.assertEqual(seen, [[7], [8]])
 
     def test_a_fanout_surprise_stops_after_that_batch(self):
         res = self.go(self.tray(n=150, cap=400), between_batches=lambda rows, since: "2 notes for user 42")
@@ -351,12 +362,17 @@ class QaFixTest(RunTest):
     def test_facts_and_gate_are_re_read_for_every_batch(self):
         t = self.tray(n=150, cap=400)
         late = t.rows[120].request_id
+        t = fx.Tray(t.path, t.sha256, "reject", "unverified",
+                    tuple(fx.TrayRow(r.request_id, 42 if i < 100 else 43, r.ruling_id, r.rule, r.paid)
+                          for i, r in enumerate(t.rows)), 400, None)
         calls = {"facts": 0}
 
         def facts_fn(ids):
             calls["facts"] += 1
             # after batch 1 wrote, row 120 turned big: the second batch must see it
-            return {i: (facts(popularity=80) if (i == late and calls["facts"] > 1) else facts()) for i in ids}
+            uid = {r.request_id: r.user_id for r in t.rows}
+            return {i: (facts(popularity=80, user_id=uid[i]) if (i == late and calls["facts"] > 1)
+                        else facts(user_id=uid[i])) for i in ids}
         res = fx.run(t, apply=True, facts_fn=facts_fn, gate_fn=lambda u: ALLOW,
                      writer=lambda ids, e, r, run, tp: {"updatedIds": ids}, readback=lambda s_, ids: set(ids),
                      audit_path=self.audit, registry_path=self.registry, kill_file=self.kill, now=lambda: NOW,
@@ -456,8 +472,8 @@ class QaRound2Test(RunTest):
         t = fx.Tray("t.json", "0" * 64, "reject", "unverified", tuple(sorted(rows, key=lambda r: (not r.paid,))), 2)
         res = self.go(t)
         written = [i for c in self.calls for i in c[0]]
-        self.assertEqual(written, [rows[0].request_id, rows[1].request_id])   # both paid rows, rulings A then B
-        self.assertEqual([c[2] for c in self.calls], ["A", "B"])
+        self.assertEqual(written, [rows[0].request_id, rows[1].request_id])   # both paid rows, rulings A + B
+        self.assertEqual([c[2] for c in self.calls], ["user:42"])             # ONE PUT for the user (all rulings)
         self.assertIn("daily cap", res.stopped)
 
     def test_an_evidence_recheck_tray_refuses_a_row_whose_user_answered_since(self):
@@ -479,6 +495,7 @@ class QaRound2Test(RunTest):
                       [l.get("reason") for l in self.audit_lines() if l["outcome"] == "refused"])
         self.assertTrue(seen)
         self.calls.clear()
+        Path(self.audit).unlink()                                           # a fresh day for this user
         dry = self.go(t, apply=False, evidence_fn=lambda rows: {})            # unreadable -> refused, never written
         self.assertEqual(dry.refused, {"evidence_changed": 2, "would_write": 0})
 
@@ -511,6 +528,175 @@ class QaRound2Test(RunTest):
             p.write_text(json.dumps(doc))
             with self.assertRaisesRegex(fx.TrayError, want):
                 fx.load_tray(str(p))
+
+    # ── Fable [key=executor-one-put-per-user] ──
+    def test_n_rows_for_one_user_are_one_put_and_one_notice(self):
+        """n1: user 161334 got 4 rejection emails (core's transition notice fires per PUT). N rows of one user ->
+        ONE PUT (the fan-out read counts one notice), whatever their rulings."""
+        rows = tuple(fx.TrayRow(f"{i:08d}-3333-4333-8333-333333333333", 42, f"decisions-{i}", "C5:no_proof_after_ask/v1",
+                                True, "x" * 30) for i in range(4))
+        notices = []
+        res = self.go(fx.Tray("t.json", "2" * 64, "reject", "unverified", rows, 100, None),
+                      between_batches=lambda moved, since: notices.append({u for _, u, _ in moved}) and None)
+        self.assertEqual(len(self.calls), 1)
+        self.assertEqual((sorted(self.calls[0][0]), self.calls[0][2]), (sorted(r.request_id for r in rows), "user:42"))
+        self.assertEqual((res.written, notices), (4, [{42}]))
+
+    def test_a_second_run_the_same_day_makes_zero_puts_for_that_user(self):
+        """FINAL (Fable + r5): a user who already had a reject PUT today gets no further one - held to tomorrow's run
+        with reason day_cap_user, new rows included; other users still close."""
+        ids = [f"{i:08d}-4444-4444-8444-444444444444" for i in range(3)]
+        first = fx.Tray("t1.json", "3" * 64, "reject", "unverified",
+                        (fx.TrayRow(ids[0], 42, "u10k-3", "reject_publisher_label_credit", True),), 100, None)
+        self.assertEqual(self.go(first).written, 1)
+        self.calls.clear()
+        later = fx.Tray("t2.json", "4" * 64, "reject", "unverified",
+                        (fx.TrayRow(ids[1], 42, "u10k-3", "reject_publisher_label_credit", True),
+                         fx.TrayRow(ids[2], 7, "u10k-3", "reject_publisher_label_credit", True)), 100, None)
+        fm = {ids[1]: facts(), ids[2]: facts(user_id=7)}
+        res = self.go(later, facts_map=fm)
+        self.assertEqual([c[0] for c in self.calls], [[ids[2]]])          # 0 PUTs for user 42, user 7 closes
+        self.assertEqual(res.refused, {"day_cap_user": 1})
+        self.assertIn("day_cap_user", [l.get("reason") for l in self.audit_lines() if l["outcome"] == "refused"])
+        self.calls.clear()
+        self.assertEqual(self.go(later, facts_map=fm, apply=False).refused, {"day_cap_user": 2, "would_write": 0})
+
+    def test_the_fanout_check_runs_on_the_batch_that_reaches_the_cap(self):
+        """QA #1553: 3 eligible rows, room 2 -> the PUT closes 2; the fan-out read of THAT batch still runs and a
+        surprise there is what the run reports."""
+        with open(self.audit, "w") as fh:
+            for i in range(98):
+                fh.write(json.dumps({"ts": "2026-10-28T01:00:00Z", "run_id": "old", "outcome": "written",
+                                     "request_id": f"o{i}", "user_id": 1000 + i}) + "\n")
+        seen = []
+        res = self.go(self.tray(n=3), between_batches=lambda rows, since: seen.append(len(rows)) or "2 notes for user 42")
+        self.assertEqual((len(self.calls), seen), (1, [2]))
+        self.assertIn("fan-out", res.stopped)
+        self.calls.clear()
+        Path(self.audit).unlink()
+        with open(self.audit, "w") as fh:
+            for i in range(98):
+                fh.write(json.dumps({"ts": "2026-10-28T01:00:00Z", "run_id": "old", "outcome": "written",
+                                     "request_id": f"o{i}", "user_id": 1000 + i}) + "\n")
+        res = self.go(self.tray(n=3), between_batches=lambda rows, since: None)
+        self.assertIn("daily cap", res.stopped)                            # clean fan-out -> the cap stop
+
+    def test_the_boundary_counts_an_earlier_batch_of_the_same_run(self):
+        """QA #1553: a second wrapper call in the SAME run for another row of a user already PUT today is refused."""
+        doc = {"action": "reject", "expected_status": "unverified", "rows": [
+            {"request_id": RID, "user_id": 42, "coded_outcome": "decisions:1", "ruling_id": "u10k-3",
+             "rule": "reject_publisher_label_credit"},
+            {"request_id": RID2, "user_id": 42, "coded_outcome": "decisions:2", "ruling_id": "u10k-3",
+             "rule": "reject_publisher_label_credit"}]}
+        p = self.tmp / "same-run.json"
+        p.write_text(json.dumps(doc))
+        sha = fx.load_tray(str(p)).sha256
+        kw = dict(facts_fn=lambda xs: {x: facts() for x in xs}, gate_fn=lambda u: ALLOW, anchor_fn=lambda xs: {},
+                  audit_path=self.audit, now=lambda: NOW)
+        self._reserve(sha)
+        self.assertIsNone(fx.verify_batch(str(p), "u10k-3", "run1", [RID], "unverified", **kw))
+        with open(self.audit, "a") as fh:
+            fh.write(json.dumps({"ts": "2026-10-28T21:58:30Z", "run_id": "run1", "outcome": "written",
+                                 "request_id": RID, "user_id": 42}) + "\n")
+        self._reserve(sha, rid=RID2)
+        self.assertIn("day_cap_user", fx.verify_batch(str(p), "u10k-3", "run1", [RID2], "unverified", **kw))
+
+    def test_paid_first_holds_across_users_at_the_cap(self):
+        """QA #1553: [user 42 paid, user 7 paid, user 42 free] with room 2 closes 42-paid and 7-paid; 42-free waits."""
+        with open(self.audit, "w") as fh:
+            for i in range(98):
+                fh.write(json.dumps({"ts": "2026-10-28T01:00:00Z", "run_id": "old", "outcome": "written",
+                                     "request_id": f"o{i}", "user_id": 1000 + i}) + "\n")
+        ids = [f"{i:08d}-5555-4555-8555-555555555555" for i in range(3)]
+        rows = (fx.TrayRow(ids[0], 42, "u10k-3", "reject_publisher_label_credit", True),
+                fx.TrayRow(ids[1], 7, "u10k-3", "reject_publisher_label_credit", True),
+                fx.TrayRow(ids[2], 42, "u10k-3", "reject_publisher_label_credit", False))
+        fm = {ids[0]: facts(), ids[1]: facts(user_id=7), ids[2]: facts()}
+        res = self.go(fx.Tray("t.json", "5" * 64, "reject", "unverified", rows, 100, None), facts_map=fm)
+        self.assertEqual([c[0] for c in self.calls], [[ids[0]], [ids[1]]])
+        self.assertEqual(res.refused, {"user_rows_over_room_wait_for_another_day": 1})
+        self.assertIn("daily cap", res.stopped)
+
+    def test_the_boundary_counts_a_not_moved_attempt_of_the_same_request(self):
+        """QA #1553: an earlier same-day PUT that left request X not_moved still counts when X is re-reserved."""
+        path, sha = self._tray_file()
+        with open(self.audit, "w") as fh:
+            fh.write(json.dumps({"ts": "2026-10-28T21:50:00Z", "run_id": "run0", "outcome": "not_moved",
+                                 "request_id": RID, "user_id": 42}) + "\n")
+        self._reserve(sha)
+        self.assertIn("day_cap_user", self._verify(path, [RID]))
+
+    def test_a_crash_after_the_put_still_counts_as_the_users_put_today(self):
+        """QA #1553: a run killed after its PUT but before the final audit line leaves only 'reserved'; a later run
+        must treat that as the user's PUT today (day_cap_user), and the boundary must not count its OWN batch."""
+        with open(self.audit, "w") as fh:
+            fh.write(json.dumps({"ts": "2026-10-28T01:00:00Z", "run_id": "crashed", "outcome": "reserved",
+                                 "request_id": "older-row", "user_id": 42, "action": "reject"}) + "\n")
+        res = self.go(self.tray(n=2))
+        self.assertEqual((self.calls, res.refused), ([], {"day_cap_user": 2}))
+        # the boundary: this batch's own reservation (with its user id) is not an earlier attempt
+        Path(self.audit).unlink()
+        path, sha = self._tray_file()
+        with open(self.audit, "w") as fh:
+            fh.write(json.dumps({"ts": "2026-10-28T21:58:00Z", "run_id": "run1", "outcome": "reserved",
+                                 "request_id": RID, "user_id": 42, "tray_sha256": sha}) + "\n")
+        self.assertIsNone(self._verify(path, [RID]))
+        with open(self.audit, "a") as fh:            # ...but another run's reservation for the same user is
+            fh.write(json.dumps({"ts": "2026-10-28T21:57:00Z", "run_id": "run0", "outcome": "reserved",
+                                 "request_id": RID2, "user_id": 42}) + "\n")
+        self.assertIn("day_cap_user", self._verify(path, [RID]))
+
+    def test_an_ineligible_row_ahead_never_burns_a_slot(self):
+        """QA #1553: [42 paid (rule no longer fires), 7 paid (eligible), 42 free (eligible)] with room 2 - the
+        ineligible row takes no slot, so 7-paid AND 42-free both close (one PUT each)."""
+        with open(self.audit, "w") as fh:
+            for i in range(98):
+                fh.write(json.dumps({"ts": "2026-10-28T01:00:00Z", "run_id": "old", "outcome": "written",
+                                     "request_id": f"o{i}", "user_id": 1000 + i}) + "\n")
+        ids = [f"{i:08d}-6666-4666-8666-666666666666" for i in range(3)]
+        rows = (fx.TrayRow(ids[0], 42, "u10k-3", "reject_publisher_label_credit", True),
+                fx.TrayRow(ids[1], 7, "u10k-3", "reject_publisher_label_credit", True),
+                fx.TrayRow(ids[2], 42, "u10k-3", "reject_publisher_label_credit", False))
+        fm = {ids[0]: facts(rules={}), ids[1]: facts(user_id=7), ids[2]: facts()}
+        tray = fx.Tray("t.json", "6" * 64, "reject", "unverified", rows, 100, None)
+        res = self.go(tray, facts_map=fm)
+        self.assertEqual([c[0] for c in self.calls], [[ids[1]], [ids[2]]])  # paid 7 FIRST, then 42's free row
+        self.assertEqual(res.refused.get("rule_not_firing"), 1)
+        # an early stop after the first PUT leaves the PAID row written, never the free one (QA #1553)
+        self.calls.clear()
+        Path(self.audit).unlink()
+        with open(self.audit, "w") as fh:
+            for i in range(98):
+                fh.write(json.dumps({"ts": "2026-10-28T01:00:00Z", "run_id": "old", "outcome": "written",
+                                     "request_id": f"o{i}", "user_id": 1000 + i}) + "\n")
+        res = self.go(tray, facts_map=fm, between_batches=lambda moved, since: "stop")
+        self.assertEqual(([c[0] for c in self.calls], res.written), ([[ids[1]]], 1))
+
+    def test_yesterday_and_approvals_do_not_count_as_closed_today(self):
+        with open(self.audit, "w") as fh:
+            fh.write(json.dumps({"ts": "2026-10-27T23:00:00Z", "run_id": "y", "outcome": "written",
+                                 "request_id": "x", "user_id": 42}) + "\n")
+            fh.write(json.dumps({"ts": "2026-10-28T01:00:00Z", "run_id": "a", "outcome": "written",
+                                 "request_id": "z", "user_id": 42, "action": "approve"}) + "\n")
+        self.assertEqual(fx.closed_today(self.audit, NOW, "reject"), {})
+        self.assertEqual(fx.closed_today(self.audit, NOW, "approve"), {42: "2026-10-28T01:00:00Z"})
+
+    def test_the_boundary_refuses_a_batch_spanning_users_or_a_user_ruling_for_another_user(self):
+        doc = {"action": "reject", "expected_status": "unverified", "rows": [
+            {"request_id": RID, "user_id": 42, "coded_outcome": "decisions:1", "ruling_id": "a1-x",
+             "rule": "reject_publisher_label_credit"},
+            {"request_id": RID2, "user_id": 7, "coded_outcome": "decisions:2", "ruling_id": "a1-x",
+             "rule": "reject_publisher_label_credit"}]}
+        p = self.tmp / "two-users.json"
+        p.write_text(json.dumps(doc))
+        sha = fx.load_tray(str(p)).sha256
+        self._reserve(sha)
+        self._reserve(sha, rid=RID2)
+        kw = dict(facts_fn=lambda xs: {x: facts(user_id=42 if x == RID else 7) for x in xs}, gate_fn=lambda u: ALLOW,
+                  anchor_fn=lambda xs: {}, audit_path=self.audit, now=lambda: NOW)
+        self.assertIn("spans several users", fx.verify_batch(str(p), "a1-x", "run1", [RID, RID2], "unverified", **kw))
+        self.assertIn("not a row of user:7", fx.verify_batch(str(p), "user:7", "run1", [RID], "unverified", **kw))
+        self.assertIsNone(fx.verify_batch(str(p), "user:42", "run1", [RID], "unverified", **kw))
 
     def test_limit_must_be_positive(self):
         for bad in (0, -1, True):

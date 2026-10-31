@@ -145,6 +145,7 @@ class Facts:
     owns_profile: bool | None = None
 
 
+
 def load_tray(path: str, now: datetime | None = None) -> Tray:
     """Read and validate a tray file. Any row without a Fable ruling id refuses the WHOLE tray. A tray carrying
     `expires_at` (coded producers re-check their evidence at publication, e.g. C5 no_proof_after_ask) is refused once
@@ -480,6 +481,76 @@ def writes_today(path: str = AUDIT_PATH, now: datetime | None = None, action: st
     return len(seen)
 
 
+def closed_today(path: str = AUDIT_PATH, now: datetime | None = None, action: str = "reject",
+                 own_batch: tuple[str, Iterable[str]] | None = None) -> dict[int, str]:
+    """{user id: the latest time today (UTC) a PUT of this action WROTE (or tried: not_moved) one of their rows},
+    from the audit file. Fable [key=executor-one-put-per-user]: core's transition notice fires per PUT with no
+    per-user daily cap, so a user who had such a PUT today gets no further one today. EVERY run counts, this one
+    included, and every attempt counts - a retried request id too (QA #1553). A 'reserved' line counts as an attempt
+    too (a crash after the PUT but before its final line leaves only the reservation, QA #1553): only `own_batch`
+    = (run id, request ids) - the boundary's own batch, reserved right before its PUT - is not counted."""
+    day = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
+    own_run, own_ids = (own_batch[0], {str(i).lower() for i in own_batch[1]}) if own_batch else (None, set())
+    out: dict[int, str] = {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                ts = str(rec.get("ts", ""))
+                if (rec.get("outcome") == "reserved" and rec.get("run_id") == own_run
+                        and str(rec.get("request_id", "")).lower() in own_ids):
+                    continue
+                if (rec.get("outcome") in ("written", "not_moved", "reserved") and ts.startswith(day)
+                        and (rec.get("action") or "reject") == action
+                        and isinstance(rec.get("user_id"), int)):
+                    out[rec["user_id"]] = max(out.get(rec["user_id"], ""), ts)
+    except FileNotFoundError:
+        return {}
+    return out
+
+
+def _eligible(tray: "Tray", rows: list["TrayRow"], facts_fn: Callable, gate_fn: Any, anchor_fn: Callable,
+              outcome_fn: Callable, evidence_fn: Callable, audit_path: str, at: datetime) -> set[int]:
+    """id() of every row that passes the full guard chain right now (the slot pre-read)."""
+    facts = facts_fn([r.request_id for r in rows])
+    closed = closed_today(audit_path, at, tray.action)
+    gate = account_gate.Cached(gate_fn)
+    anchors = anchor_fn([r.request_id for r in rows]) if tray.refuse_if_dsp_anchor else {}
+    outcomes = outcome_fn([r.coded_outcome for r in rows])
+    evidence = evidence_fn(rows) if tray.recheck_evidence else {}
+    ok: set[int] = set()
+    for r in rows:
+        f = facts.get(r.request_id.lower())
+        why = refusal_for(tray)(r, f, gate(r.user_id), tray.expected_status)
+        if not why:
+            why = same_day_refusal(r, closed)
+        if not why:
+            why = coded_outcome_refusal(tray, r, outcomes)
+        if not why and tray.refuse_if_dsp_anchor:
+            why = _anchor_refusal(anchors.get(r.request_id.lower(), "unknown"))
+        if not why and tray.recheck_evidence:
+            why = _evidence_refusal(evidence.get(r.request_id.lower(), "unknown"))
+        if not why:
+            ok.add(id(r))
+    return ok
+
+
+def same_day_refusal(row: "TrayRow", closed: dict[int, str]) -> str | None:
+    """Fable + r5 [key=executor-one-put-per-user] FINAL: a user who already had a PUT of this action today gets no
+    further one - every later row waits for tomorrow's run (day_cap_user). Enforced here, independent of core."""
+    return "day_cap_user" if row.user_id in closed else None
+
+
+def batch_ruling(rows: list["TrayRow"]) -> str:
+    """The ruling id a one-user PUT carries: the rows' common ruling, else `user:<id>` (the boundary then checks
+    every id is that user's row in the tray)."""
+    rulings = {r.ruling_id for r in rows}
+    return rulings.pop() if len(rulings) == 1 else f"user:{rows[0].user_id}"
+
+
 def audit(rec: dict[str, Any], path: str = AUDIT_PATH) -> None:
     """Append one audit line; raises if it cannot (the caller then stops)."""
     Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -617,8 +688,11 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
         anchors = anchor_fn([r.request_id for r in rows]) if tray.refuse_if_dsp_anchor else {}
         outcomes = outcome_fn([r.coded_outcome for r in rows])
         evidence = evidence_fn(rows) if tray.recheck_evidence else {}
+        closed = closed_today(audit_path, now(), tray.action)
         for r in rows:
             why = refusal_for(tray)(r, facts.get(r.request_id.lower()), gate(r.user_id), tray.expected_status)
+            if not why:
+                why = same_day_refusal(r, closed)
             if not why:
                 why = coded_outcome_refusal(tray, r, outcomes)
             if not why and tray.refuse_if_dsp_anchor:
@@ -635,13 +709,35 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
     if readback is None:
         from .decide import status_readback
         readback = status_readback()
-    # Batches follow the TRAY order (paid first, or as listed): a batch is a run of consecutive rows sharing one
-    # ruling id (the wrapper stamps one ruling per call), so a ruling change never pushes a paid row behind free
-    # rows of another ruling at the cap (QA #1475).
-    queue = list(rows)
-    while queue:
-        ruling = queue[0].ruling_id
+    # Fable [key=executor-one-put-per-user]: ONE PUT per user per run (core's transition notice fires per PUT, with
+    # no per-user daily cap). Users follow the TRAY order of their first row (paid first, or as listed); a batch is
+    # every row of that user (all rulings: the PUT carries batch_ruling()), at most the day's room and BATCH_MAX. Rows
+    # of a user that do not fit wait for another day, never for a second PUT today.
+    # Paid-first holds ACROSS users at the cap (QA #1553): a user's batch takes only their rows inside the first `room`
+    # rows still pending in tray order; their rows behind other users' pending rows wait (another day - the user has
+    # had their one PUT), so [42 paid, 7 paid, 42 free] with room 2 closes 42-paid and 7-paid.
+    # Slots go to ELIGIBLE rows only (QA #1553: an ineligible row ahead must not burn a slot and strand a later
+    # eligible one): one pre-read of the whole tray decides the paid-first slot order; every batch still re-reads
+    # fresh facts before its PUT, and a row that turned ineligible since simply leaves its slot unused.
+    try:
+        pre = _eligible(tray, rows, facts_fn, gate_fn, anchor_fn, outcome_fn, evidence_fn, audit_path, now())
+    except (OSError, TimeoutError) as exc:
+        res.stopped = f"audit/lock failure: {str(exc)[:200]}"
+        return res
+    except Exception as exc:  # noqa: BLE001 - an unreadable pre-read sends nothing
+        res.stopped = f"eligibility pre-read failed: {str(exc)[:200]}"
+        return res
+    remaining = list(rows)
+    while remaining:
+        # the next user is the owner of the first ELIGIBLE pending row (QA #1553: a user whose first row is
+        # ineligible must not jump ahead of an eligible paid row of another user); with none eligible left, the
+        # rest are batches of refusals only (audited, never written)
+        uid = next((r.user_id for r in remaining if id(r) in pre), remaining[0].user_id)
+        user_rows = [r for r in remaining if r.user_id == uid]
+        remaining = [r for r in remaining if r.user_id != uid]
+        ahead = user_rows + remaining              # the global pending order, this user's rows first in it
         moved_rows: list[tuple[str, int, str | None]] = []
+        waiting = 0
         batch_start = now()
         try:
             with _locked(lock_path):
@@ -655,25 +751,33 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
                 if room <= 0:
                     res.stopped = f"daily cap {daily_cap} reached"
                     return res
-                # FRESH facts + gate for this batch only, right before the PUT
-                window = []
-                for r in queue:
-                    if r.ruling_id != ruling or len(window) >= room * 2:
-                        break
-                    window.append(r)
+                # FRESH facts + gate for this batch only, right before the PUT. Inside the room: this user's rows
+                # among the first `room` pending rows in tray order (paid first across users).
+                order = {id(r): n for n, r in enumerate(rows)}
+                pending = [r for r in sorted(ahead, key=lambda r: order[id(r)]) if id(r) in pre][:room]
+                inside = {id(r) for r in pending}
+                # this user's rows inside the room, plus their pre-read-ineligible rows (refused + audited below)
+                window = [r for r in user_rows if id(r) in inside or id(r) not in pre]
+                for r in user_rows:
+                    if id(r) in pre and id(r) not in inside:
+                        waiting += 1
+                        _bump(res, "user_rows_over_room_wait_for_another_day")
                 facts = facts_fn([r.request_id for r in window])
+                closed = closed_today(audit_path, now(), tray.action)
                 gate = account_gate.Cached(gate_fn)
                 anchors = anchor_fn([r.request_id for r in window]) if tray.refuse_if_dsp_anchor else {}
                 outcomes = outcome_fn([r.coded_outcome for r in window])
                 evidence = evidence_fn(window) if tray.recheck_evidence else {}
                 chunk: list[TrayRow] = []
-                consumed = 0
                 for r in window:
                     if len(chunk) >= room:
-                        break
-                    consumed += 1
+                        waiting += 1        # never a second PUT for this user today: the rest waits a day
+                        _bump(res, "user_rows_over_room_wait_for_another_day")
+                        continue
                     f = facts.get(r.request_id.lower())
                     why = refusal_for(tray)(r, f, gate(r.user_id), tray.expected_status)
+                    if not why:
+                        why = same_day_refusal(r, closed)
                     if not why:
                         why = coded_outcome_refusal(tray, r, outcomes)
                     if not why and tray.refuse_if_dsp_anchor:
@@ -686,10 +790,10 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
                                "reason": why, "after": f.status if f else None}, audit_path)
                         continue
                     chunk.append(r)
-                del queue[:consumed]
                 if not chunk:
                     continue
                 ids = [r.request_id for r in chunk]
+                ruling = batch_ruling(chunk)
                 # durable reservation BEFORE the PUT: if this cannot be written, nothing is sent
                 for r in chunk:
                     audit({**_base(tray, run_id, r, facts.get(r.request_id.lower()), now(), "apply"),
@@ -745,6 +849,13 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
             if surprise:
                 res.stopped = f"fan-out: {surprise}"
                 return res
+        # the cap stop comes AFTER the fan-out read of the batch that reached it (QA #1553)
+        if waiting and writes_today(audit_path, now(), tray.action) >= daily_cap:
+            res.stopped = f"daily cap {daily_cap} reached; {waiting} row(s) of user {user_rows[0].user_id} wait"
+            return res
+    held = res.refused.get("user_rows_over_room_wait_for_another_day", 0)
+    if held and writes_today(audit_path, now(), tray.action) >= daily_cap:
+        res.stopped = f"daily cap {daily_cap} reached; {held} row(s) wait for another day"
     return res
 
 
@@ -782,8 +893,13 @@ def verify_batch(tray_path: str, ruling_id: str, run_id: str, ids: list[str], ex
         r = rows.get(i)
         if r is None:
             return f"{i} is not in the tray"
-        if r.ruling_id != ruling_id:
+        if ruling_id.startswith("user:"):
+            if f"user:{r.user_id}" != ruling_id:
+                return f"{i} is not a row of {ruling_id} in the tray"
+        elif r.ruling_id != ruling_id:
             return f"{i} is not under ruling {ruling_id} in the tray"
+    if len({rows[i].user_id for i in want}) != 1:
+        return "one PUT per user: this batch spans several users"
     cutoff = now().timestamp() - RESERVATION_MAX_AGE_S
     reserved: set[str] = set()
     try:
@@ -810,12 +926,15 @@ def verify_batch(tray_path: str, ruling_id: str, run_id: str, ids: list[str], ex
         return f"daily cap {tray.daily_cap} exceeded by today's reservations"
     facts = facts_fn(want)
     gate = account_gate.Cached(gate_fn)
+    closed = closed_today(audit_path, now(), tray.action, own_batch=(run_id, want))
     anchors = anchor_fn(want) if tray.refuse_if_dsp_anchor else {}
     outcomes = outcome_fn([rows[i].coded_outcome for i in want])
     evidence = evidence_fn([rows[i] for i in want]) if tray.recheck_evidence else {}
     for i in want:
         r = rows[i]
         why = refusal_for(tray)(r, facts.get(i), gate(r.user_id), tray.expected_status)
+        if not why:
+            why = same_day_refusal(r, closed)
         if not why:
             why = coded_outcome_refusal(tray, r, outcomes)
         if not why and tray.refuse_if_dsp_anchor:
