@@ -1925,7 +1925,7 @@ class AsksScopedProofOnFileTest(unittest.TestCase):
         rep, gate = self.run_scoped()
         self.assertEqual(rep.halted, "")
         self.assertEqual(sorted(str(p["user"]["id"]) for _, p in gate.calls), ["4"])
-        self.assertIn({"user": "1", "result": "held", "reason": "stale_source:cs-gmail"}, rep.outcomes)
+        self.assertIn(("1", "held", "stale_source:cs-gmail"), [(o["user"], o["result"], o.get("reason")) for o in rep.outcomes])
 
     def test_a_user_vouched_for_between_the_cut_and_the_send_is_held_at_send(self):
         # the re-read right before each send (an email filing that arrived mid-run): documents_block holds them there
@@ -1942,7 +1942,7 @@ class AsksScopedProofOnFileTest(unittest.TestCase):
             self.cpa.claim_holds = real
         self.assertGreater(len(calls), 1)
         self.assertNotIn("4", [str(p["user"]["id"]) for _, p in gate.calls])
-        self.assertIn({"user": "4", "result": "held", "reason": "stale_source:cs-gmail"}, rep.outcomes)   # LISTED
+        self.assertIn(("4", "held", "stale_source:cs-gmail"), [(o["user"], o["result"], o.get("reason")) for o in rep.outcomes])   # LISTED
 
     def test_holds_and_entries_come_from_one_snapshot(self):
         # QA #1573: the export replaced between claim_holds and the parse must never pair A's holds with B's entries
@@ -1966,13 +1966,27 @@ class AsksScopedProofOnFileTest(unittest.TestCase):
         self.feed(gmail_h=12.0, contacts=("1",))
         rep, gate = self.run_scoped(mode="dry-run")
         self.assertEqual(sorted(str(p["user"]["id"]) for _, p in gate.calls), ["4"])
-        self.assertIn({"user": "1", "result": "held", "reason": "stale_source:cs-gmail"}, rep.outcomes)
+        self.assertIn(("1", "held", "stale_source:cs-gmail"), [(o["user"], o["result"], o.get("reason")) for o in rep.outcomes])
 
-    def test_a_last_good_scan_older_than_a_day_holds_everyone_listed(self):
-        self.feed(gmail_h=25.0)
+    def test_a_gmail_held_user_waits_on_gmail_with_a_due_time_and_is_counted_paid_free(self):
+        # Fable [key=gmail-held-fallback]: a stage with an owner and a clock, listed and counted on every run
+        self.feed(gmail_h=12.0, contacts=("1",))
+        rep, gate = self.run_scoped(mode="dry-run")
+        row = next(o for o in rep.outcomes if o["user"] == "1")
+        self.assertEqual((row["waiting_on"], row["due_at"], row["paid"]), ("third_party:gmail", "2026-11-01T16:00:00Z", True))
+        self.assertIn("held by the Gmail outage: 1 paid / 0 free", uvn_status.render(rep, "dry-run", "paid"))
+        self.assertEqual(sorted(str(p["user"]["id"]) for _, p in gate.calls), ["4"])        # no trace: admitted
+        self.users.append({"user_id": 3, "paid": False, "skip": None, "request_ids": ["r4"]})
+        self.write_list(); self.feed(gmail_h=12.0, contacts=("3",))
+        rep, _ = self.run_(mode="dry-run", segment="free")
+        self.assertIn("held by the Gmail outage: 0 paid / 1 free", uvn_status.render(rep, "dry-run", "free"))
+
+    def test_past_a_day_the_frozen_did_vouch_set_is_held_and_the_rest_asked(self):
+        # Fable FINAL [key=gmail-held-fallback] (3): the snapshot (user 1) is frozen, user 4 (no trace) is still asked
+        self.feed(gmail_h=30.0, contacts=("1",))
         rep, gate = self.run_scoped()
-        self.assertEqual(gate.calls, [])
-        self.assertEqual(sorted(o["user"] for o in rep.outcomes if o.get("reason") == "stale_source:cs-gmail"), ["1", "4"])
+        self.assertEqual(sorted(str(p["user"]["id"]) for _, p in gate.calls), ["4"])
+        self.assertEqual([o["user"] for o in rep.outcomes if o.get("reason") == "stale_source:cs-gmail"], ["1"])
 
     def test_another_part_unusable_refuses_all(self):
         self.feed(gmail_h=2.0, intercom_stale=True)

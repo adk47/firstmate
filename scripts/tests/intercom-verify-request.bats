@@ -3302,6 +3302,13 @@ rd_locked() { sed 's/^readonly REPLY_DUE_CORRECTION_APPROVED=1$/readonly REPLY_D
   [ "$(notes)" -eq 0 ]
 }
 
+@test "[key=gmail-held-fallback] (4): the /o clause is committed LOCKED, byte-exact, and nothing renders it" {
+  grep -qx 'readonly GMAIL_FALLBACK_O_APPROVED=0' "$REAL_SCRIPT"
+  grep -qx 'readonly GMAIL_FALLBACK_O_TEXT="If you have already emailed it to support@muso.ai, just reply here to say so and we will match it to your request."' "$REAL_SCRIPT"
+  # defined and pinned only: no render path reads it while it is locked (the lift is its own reviewed PR)
+  [ "$(grep -c 'GMAIL_FALLBACK_O_' "$REAL_SCRIPT")" -eq 2 ]
+}
+
 @test "reply_due correction: LOCKED = deferred, never sent without it; unlocked = the ONE sentence first, the approved body unchanged after it" {
   # fable-copy-1030-r5/c: approved byte-for-byte and unlocked as committed
   grep -qx 'readonly REPLY_DUE_CORRECTION_APPROVED=1' "$REAL_SCRIPT"

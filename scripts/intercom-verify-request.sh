@@ -227,6 +227,13 @@ readonly UVN_STATUS_COPY_APPROVED=1
 # Copy APPROVED: fable-copy-1030-r5/c (data/pr-review-fable-r5/copy-approvals-1030.md, under the captain's 2026-10-30
 # 13:1xZ delegation "use fable, do not wait for me"; firstmate 286), byte-for-byte.
 readonly REPLY_DUE_CORRECTION_TEXT="A correction to our earlier note here: this request does need one thing from you."
+# Fable FINAL [key=gmail-held-fallback] (4), r5 /o, text confirmed by p1 + Fable 10-31 12:1xZ: the ONE clause the held
+# stale_source:cs-gmail set may get (last sentence before the sign-off, once per user) - only if Gmail is still dark at
+# Sun 11-01 12:00Z AND p1 + r5 sign that batch. LOCKED: nothing renders it until the lock is lifted by a reviewed PR.
+# shellcheck disable=SC2034  # locked on purpose: pinned by bats, read only by the reviewed lift PR
+readonly GMAIL_FALLBACK_O_APPROVED=0
+# shellcheck disable=SC2034  # locked on purpose: pinned by bats, read only by the reviewed lift PR
+readonly GMAIL_FALLBACK_O_TEXT="If you have already emailed it to support@muso.ai, just reply here to say so and we will match it to your request."
 readonly REPLY_DUE_CORRECTION_APPROVED=1
 readonly REPLY_DUE_CORRECTION_REF="fable-copy-1030-r5/c"
 # A thread assigned to a HUMAN admin: the answer is handed to them first (tag + internal note), and only if no human

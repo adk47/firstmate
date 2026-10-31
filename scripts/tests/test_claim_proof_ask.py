@@ -677,16 +677,27 @@ class ScopedProofOnFileTest(unittest.TestCase):
             with self.assertRaises(claim_proof_ask.verify_notify.ProofFileError, msg=name):
                 self.holds()
 
-    def test_r5_bound_last_good_scan_over_24h_holds_everyone_listed(self):
-        """r5 co-sign (iii): the last good Gmail scan must be <= 24 h old; older = every claimant HELD, not admitted."""
-        for kw in ({"gmail": 24.5}, {"snap": 24.5}, {"gmail": 30, "snap": 30}):
+    def test_gmail_held_fallback_the_did_vouch_set_is_frozen_on_the_last_good_scan(self):
+        """Fable FINAL [key=gmail-held-fallback] (3), r5 580: past 24 h the hold stays the FROZEN did-vouch set - the
+        snapshot's ids (70), email proof_intake (71), ledger support@ refs (73), gmail export entries (74); every
+        no-trace claimant (72, 1, 999999) stays admitted. (Supersedes the 24 h everyone-held bound.)"""
+        for kw in ({"gmail": 24.5}, {"snap": 24.5}, {"gmail": 30, "snap": 30}, {"gmail": 23.5, "snap": 23.5}):
             self.doc(**kw)
             h = self.holds()
             self.assertTrue(h.scoped, kw)
+            self.assertEqual(set(h.held), {"70", "71", "73", "74"}, kw)
             for u in ("72", "1", "999999"):
-                self.assertIn(u, h.held, kw)
-        self.doc(gmail=23.5, snap=23.5)
-        self.assertNotIn("72", self.holds().held)              # within 24 h: the Intercom-only filer is admitted
+                self.assertNotIn(u, h.held, kw)
+
+    def test_a_malformed_or_future_snapshot_refuses_all(self):
+        import json as _j
+        for bad in ({"generated_at": "nope", "user_ids": [70]}, {"generated_at": iso(-2), "user_ids": [70]},
+                    {"generated_at": iso(30), "user_ids": ["70x"]}, {"generated_at": iso(30), "user_ids": "70"}):
+            self.doc(gmail=30, snap=30)
+            d = _j.loads(Path(self.pof).read_text()); d["gmail_contacts_90d"] = {**bad, "source": "support@"}
+            Path(self.pof).write_text(_j.dumps(d))
+            with self.assertRaises(claim_proof_ask.verify_notify.ProofFileError, msg=str(bad)):
+                self.holds()
 
     def test_qa_1568_scoped_mode_needs_the_gmail_PART_unusable_not_only_its_snapshot(self):
         """cs-gmail part fresh, gmail_contacts_90d alone 10 h old: the full check refuses, and scoped mode must NOT
@@ -722,7 +733,7 @@ class ScopedProofOnFileTest(unittest.TestCase):
         self.assertEqual([c[1]["user"]["id"] for c in gate.calls], ["72"])
         self.assertIn("stale_source:cs-gmail", claim_proof_ask.render(rep, "apply", "paid"))
 
-    def test_runner_with_an_old_scan_sends_nobody_and_lists_everyone(self):
+    def test_runner_with_an_old_scan_holds_the_frozen_did_vouch_set_and_sends_the_rest(self):
         self.doc(gmail=25)
         lst = Path(self.tmp.name) / "list.json"
         lst.write_text(json.dumps({"generated_at": iso(1), "daily_check": {"owner": "c", "last_run_at": iso(2)},
@@ -734,9 +745,9 @@ class ScopedProofOnFileTest(unittest.TestCase):
             rep = claim_proof_ask.run(list_path=str(lst), segment="paid", mode="apply", max_users=20, query=q,
                                       wrapper="/gate", runner=gate, ledger_path=self.ledger, now=NOW,
                                       export_path=self.export)
-        self.assertEqual(gate.calls, [])
-        self.assertEqual(rep.stale_source_hold, 2)
-        self.assertEqual(sorted(o["user"] for o in rep.outcomes if o["reason"] == "stale_source:cs-gmail"), ["71", "72"])
+        self.assertEqual([c[1]["user"]["id"] for c in gate.calls], ["72"])        # no support@ trace: admitted
+        self.assertEqual(rep.stale_source_hold, 1)
+        self.assertEqual(sorted(o["user"] for o in rep.outcomes if o["reason"] == "stale_source:cs-gmail"), ["71"])
 
     def test_red_mutants(self):
         """The two mutants Fable named must be caught: a gmail-filed claimant admitted; both parts stale admitting."""

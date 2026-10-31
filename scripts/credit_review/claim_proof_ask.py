@@ -212,6 +212,25 @@ def _ledger_support_refs(ledger_path: str) -> set[str]:
         raise verify_notify.ProofFileError(f"scoped check: ledger {ledger_path} unreadable ({exc})") from exc
 
 
+def _frozen_contacts(doc: dict[str, Any], *, now: datetime, skew: float) -> set[str] | None:
+    """The support@ contact snapshot as last read: its user ids, or None when it is absent, has no readable stamp, is
+    dated in the future, or holds a malformed id (then nobody can be admitted: refuse all)."""
+    snap = doc.get(proof_parts.SUPPORT_CONTACTS)
+    if not isinstance(snap, dict):
+        return None
+    ts = proof_parts.parse_ts(snap.get("generated_at"))
+    ids = snap.get("user_ids")
+    if ts is None or (now - ts).total_seconds() / 3600 < -skew or not isinstance(ids, list):
+        return None
+    out = set()
+    for u in ids:
+        text = "" if isinstance(u, bool) else str(u).strip()
+        if not text.isdigit():
+            return None
+        out.add(str(int(text)))
+    return out
+
+
 def claim_holds(path: str | None = None, *, now: datetime | None = None, proof_store: str | None = None,
                 ledger_path: str | None = None) -> ClaimHolds:
     """The proof-on-file read for the CLAIM notes. Every part usable -> the full check (verify_notify, unchanged).
@@ -219,7 +238,8 @@ def claim_holds(path: str | None = None, *, now: datetime | None = None, proof_s
     every claimant cs-gmail could vouch for: anyone on the last support@ contact snapshot (90 days, a superset of the
     rule's 14), anyone with a proof_intake row filed from email, anyone with a ledger note referencing a support@
     filing, anyone with a gmail-sourced proof entry in the export itself (400-day scan). Anything else unusable (core, cs-intercom, another flagged part, a half-written export, a cs-gmail part or
-    snapshot older than SCOPED_GMAIL_MAX_AGE_H) raises ProofFileError: refuse all."""
+    snapshot that is absent or malformed) raises ProofFileError: refuse all. [key=gmail-held-fallback] (3): the hold is the
+    did-vouch set FROZEN on the last good scan, whatever its age - never every claimant (the old 24 h AllUsers bound)."""
     now = now or datetime.now(timezone.utc)
     try:
         return ClaimHolds(frozenset(str(u) for u in verify_notify.load_proof_on_file(path, now=now).support_contacts))
@@ -261,16 +281,13 @@ def claim_holds(path: str | None = None, *, now: datetime | None = None, proof_s
         proof_parts.check_entries(doc)
     except proof_parts.PartsError:
         raise first from None
-    # Fable/r5 bound (iii): the LAST GOOD scan must be <= 24 h old, else everyone is held (not refused: listed).
-    if (now - gmail_ts).total_seconds() / 3600 > SCOPED_GMAIL_MAX_AGE_H:
-        return ClaimHolds(AllUsers(), scoped=True)
-    contacts = proof_parts.support_contacts(doc, now=now, max_age_h=SCOPED_GMAIL_MAX_AGE_H, max_skew_h=skew)
+    # Fable FINAL [key=gmail-held-fallback] (3) (r5 580, 10-31 12:1xZ; supersedes the 24 h AllUsers bound): the did-vouch
+    # set is FROZEN on the last good scan - its support@ contact snapshot (whatever its age: a dated, well-formed record
+    # of who wrote to support@ in the 90 days before it), email proof_intake rows, ledger support@ refs and gmail export
+    # entries. Those users are held; everyone with no support@ trace as of that scan is admitted on fresh core +
+    # cs-intercom (the residual - a first-ever support@ email inside the dark window - is the /c2 class we correct).
+    contacts = _frozen_contacts(doc, now=now, skew=skew)
     if contacts is None:
-        snap = doc.get(proof_parts.SUPPORT_CONTACTS)
-        snap_ts = proof_parts.parse_ts(snap.get("generated_at")) if isinstance(snap, dict) else None
-        if snap_ts is not None and isinstance(snap.get("user_ids"), list) \
-                and (now - snap_ts).total_seconds() / 3600 > SCOPED_GMAIL_MAX_AGE_H:
-            return ClaimHolds(AllUsers(), scoped=True)          # the snapshot itself is too old: hold everyone
         raise verify_notify.ProofFileError("scoped check refused: the support@ contact snapshot is absent or malformed")
     held = {str(u) for u in contacts}
     held |= _gmail_filers(proof_store or PROOF_STORE)

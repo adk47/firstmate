@@ -418,7 +418,7 @@ def asks_proof_on_file(proof_path: str | None, *, now: datetime | None = None,
         except verify_notify.ProofFileError:
             from credit_review import claim_proof_ask  # noqa: PLC0415  (lazy: claim_proof_ask imports this module)
             holds = claim_proof_ask.claim_holds(snap, now=now, ledger_path=ledger_path)    # raises: refuse all
-            out = verify_notify.proof_from_entries(json.loads(raw), holds.held)  # AllUsers when > 24 h: everyone held
+            out = verify_notify.proof_from_entries(json.loads(raw), holds.held)  # the frozen did-vouch set
             out.scoped = holds.scoped
             return out
     finally:
@@ -426,6 +426,16 @@ def asks_proof_on_file(proof_path: str | None, *, now: datetime | None = None,
 
 
 STALE_GMAIL_REASON = "stale_source:cs-gmail"
+# Fable [key=gmail-held-fallback] (10-31 11:5xZ, co-signed p1 + l1): a gmail-vouched user is held until Gmail is read -
+# a stage with a named owner and a clock: waiting on the third party (the support@ mailbox; the captain's passkey), due
+# the 16:00Z cutoff + 24 h. Listed on every run, counted paid / free (the line the captain card shows).
+GMAIL_HOLD_WAITING_ON = "third_party:gmail"
+GMAIL_HOLD_DUE_AT = "2026-11-01T16:00:00Z"
+
+
+def gmail_held(uid: Any, paid: bool) -> dict[str, Any]:
+    return {"user": str(uid), "result": "held", "reason": STALE_GMAIL_REASON, "waiting_on": GMAIL_HOLD_WAITING_ON,
+            "due_at": GMAIL_HOLD_DUE_AT, "paid": bool(paid)}
 
 
 def documents_block(documented: dict[str, Any], uid: str, ask_ids: list[str] | set[str], released: set[str],
@@ -730,7 +740,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
             listed = [str(r) for r in (u.get("request_ids") or [])]
             if is_ask and getattr(documented, "scoped", False) and str(u.get("user_id")) in documented.support_contacts:
                 report.note(STALE_GMAIL_REASON)                     # held, and LISTED per user (r5 condition 2)
-                report.outcomes.append({"user": str(u.get("user_id")), "result": "held", "reason": STALE_GMAIL_REASON})
+                report.outcomes.append(gmail_held(u.get("user_id"), u.get("paid")))
                 continue
             if is_ask and documents_block(documented, str(u.get("user_id")), listed, released, u.get("oldest") or None):
                 report.proof_on_file += 1
@@ -938,7 +948,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                         if getattr(documented, "scoped", False) and str(uid) in documented.support_contacts:
                             # QA #1573: vouched for by cs-gmail since the batch read - held AND listed, never sent
                             report.note(STALE_GMAIL_REASON)
-                            report.outcomes.append({"user": str(uid), "result": "held", "reason": STALE_GMAIL_REASON})
+                            report.outcomes.append(gmail_held(uid, want_paid))
                             continue
                         # The stage-2 release, re-read for this user right before the send (a
                         # later run may have judged a credit again). Unreadable = no release.
@@ -1080,4 +1090,9 @@ def render(report: UvnReport, mode: str, segment: str) -> str:
                                         if isinstance(a, dict) else str(a or "none"))
                      + (f"; trigger_class {tc['class']} ({tc['why']}, {tc['part_age_d']} d)"
                         if isinstance((tc := r.get("trigger_class")), dict) else ""))
+    gh = [o for o in report.outcomes if o.get("reason") == STALE_GMAIL_REASON]
+    if gh:
+        paid = sum(1 for o in gh if o.get("paid"))
+        parts.append(f"held by the Gmail outage: {paid} paid / {len(gh) - paid} free (waiting on {GMAIL_HOLD_WAITING_ON}, "
+                     f"due {GMAIL_HOLD_DUE_AT}; listed in the outcomes)")
     return ". ".join(parts) + "."
