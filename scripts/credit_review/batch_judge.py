@@ -258,8 +258,23 @@ def may_apply(row: dict[str, Any] | None, batch: str, *, first_of_class: bool = 
     is not a signature (r5 signs that batch by hand)."""
     return (isinstance(row, dict) and isinstance(batch, str) and len(batch) == 64 and row.get("batch_sha") == batch
             and row.get("verdict") == "pass" and row.get("approval_ref") == APPROVAL_REF
-            and not row.get("stop_ids") and row.get("model") in ALLOWED_MODELS
+            and _id_list(row.get("stop_ids")) == [] and _id_list(row.get("reasons")) is not None
+            and _allowed_model(row.get("model"))
             and not (first_of_class and row.get("fallback_model") is not False))
+
+
+def _allowed_model(model: Any) -> bool:
+    """Only a str on ALLOWED_MODELS; a list / dict / None is not allowed and never raises (frozenset membership hashes)."""
+    return isinstance(model, str) and model in ALLOWED_MODELS
+
+
+def _id_list(value: Any) -> list[str] | None:
+    """A persisted list of ids/reasons, or None when it is not one (an int, a dict, nested lists): the caller holds."""
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(x, (str, int)) and not isinstance(x, bool) for x in value):
+        return None
+    return [str(x) for x in value]
 
 
 # r5 + p1 judge rail FINAL for 29b (10-31 21:4xZ): per-BODY verdicts. A body-level stop holds only that body; these are
@@ -286,7 +301,7 @@ def applicable(row: dict[str, Any] | None, batch: str, body_ids: Iterable[str], 
         return whole("empty_batch")
     if not (isinstance(row, dict) and isinstance(batch, str) and len(batch) == 64 and row.get("batch_sha") == batch):
         return whole("no_verdict_for_this_batch")
-    if row.get("approval_ref") != APPROVAL_REF or row.get("model") not in ALLOWED_MODELS:
+    if row.get("approval_ref") != APPROVAL_REF or not _allowed_model(row.get("model")):
         return whole("verdict_not_a_signature")
     if first_of_class and row.get("fallback_model") is not False:
         return whole("first_of_class_fallback_model")          # r5 signs that batch by hand
@@ -294,10 +309,13 @@ def applicable(row: dict[str, Any] | None, batch: str, body_ids: Iterable[str], 
     by_id = {str(b.get("id")): b for b in bodies if isinstance(b, dict)}
     if len(bodies) != len(ids) or sorted(by_id) != sorted(ids):
         return whole("verdict_bodies_do_not_match_the_batch")
-    other = sorted({str(r) for r in row.get("reasons") or []} - PER_BODY_REASONS)
+    reasons, raw_stop_ids = _id_list(row.get("reasons")), _id_list(row.get("stop_ids"))
+    if reasons is None or raw_stop_ids is None:
+        return whole("verdict_row_unreadable")                 # a malformed persisted row holds, never raises
+    other = sorted(set(reasons) - PER_BODY_REASONS)
     if other:
         return whole("batch_level:" + ",".join(other)[:200])
-    stop_ids = {str(i) for i in row.get("stop_ids") or []}
+    stop_ids = set(raw_stop_ids)
     if stop_ids - set(ids):
         return whole("stop_ids_not_in_batch")                  # QA #1597: an inconsistent stop signal applies nothing
     stopped = [i for i in ids if by_id[i].get("verdict") != "pass" or i in stop_ids]

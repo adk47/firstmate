@@ -266,6 +266,19 @@ class RailTest(unittest.TestCase):
              "reasons": reasons if reasons is not None else (["body_stop", "batch_stop"] if stops else []), **kw}
         return r, ids
 
+    def test_a_malformed_persisted_row_holds_and_never_raises(self):
+        # a verdict row read back from the batch_verdicts table is DATA: a malformed value must hold, never raise
+        row, ids = self.per_body_row(stops=("u7",))
+        for key, bad in (("model", []), ("model", {}), ("model", None), ("model", ["gpt-6-sol"]),
+                         ("stop_ids", 7), ("stop_ids", {"u7": 1}), ("stop_ids", [["u7"]]), ("stop_ids", [True]),
+                         ("reasons", 7), ("reasons", {"body_stop": 1}), ("reasons", [None])):
+            a = bj.applicable({**row, key: bad}, SHA, ids)
+            self.assertEqual(a["apply"], [], (key, bad))
+            self.assertTrue(a["hold_whole"], (key, bad))
+            self.assertFalse(bj.may_apply({**self.row, key: bad}, SHA), (key, bad))
+        clean, cids = self.per_body_row()
+        self.assertEqual(bj.applicable(clean, SHA, cids)["apply"], cids)               # a clean row still applies
+
     def test_per_body_rail_applies_exactly_the_pass_ids_and_lists_the_stopped(self):
         # r5 + p1 FINAL: one stopped body of 20 (5 %) is held with its reason + quote; the other 19 apply, in input order
         row, ids = self.per_body_row(stops=("u7",))
