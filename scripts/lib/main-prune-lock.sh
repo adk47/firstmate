@@ -14,11 +14,21 @@
 
 MAIN_PRUNE_LOCK_FILE="${MAIN_PRUNE_LOCK_FILE:-/run/lock/hydra-main-prune-restart.lock}"
 MAIN_PRUNE_LOCK_WAIT_SECS="${MAIN_PRUNE_LOCK_WAIT_SECS:-1500}"
+# Fable [key=signed-on-sha] (QA #1604): when DEPLOY_APPLY_LOCK_FILE is set (deploy.sh sets it; rollback does not), the
+# same holder ALSO takes the credit-message apply lock EXCLUSIVELY and non-blocking, held with the prune lock for the
+# whole deploy: an apply in flight (it holds the lock shared) refuses the deploy (rc 3, nothing changed), and no apply can
+# start while the deploy mutates node-8 (an apply's shared non-blocking take fails and it sends nothing).
+DEPLOY_APPLY_LOCK_FILE="${DEPLOY_APPLY_LOCK_FILE:-}"
 
-# rc 0 held; 1 timed out (a prune is still running); 2 lock file cannot be opened.
+# rc 0 held; 1 timed out (a prune is still running); 2 lock file cannot be opened; 3 a credit-message apply is in flight.
 acquire_main_prune_lock() {
   { exec 213>"$MAIN_PRUNE_LOCK_FILE"; } 2>/dev/null || return 2
   flock -w "$MAIN_PRUNE_LOCK_WAIT_SECS" 213 || return 1
+  if [ -n "$DEPLOY_APPLY_LOCK_FILE" ]; then
+    mkdir -p "$(dirname "$DEPLOY_APPLY_LOCK_FILE")" 2>/dev/null
+    { exec 215>>"$DEPLOY_APPLY_LOCK_FILE"; } 2>/dev/null || return 2
+    flock -n -x 215 || return 3
+  fi
 }
 
 # ssh mode (laptop deploy/rollback): the lock has to be held ON node-8, or the prune there cannot see us. Start a
@@ -32,13 +42,16 @@ acquire_main_prune_lock_remote() {
   # mktemp-ok: every failure return rm -rf's it; on success the watcher subshell removes it when this process exits (no trap: it would clobber the caller's)
   tmp="$(mktemp -d 2>/dev/null)" || return 2
   mkfifo "$tmp/in" || { rm -rf "$tmp"; return 2; }
-  "$@" "exec 9>'$MAIN_PRUNE_LOCK_FILE' && flock -w $wait_secs 9 && echo LOCKED && exec cat >/dev/null" \
+  local apply_take=""
+  [ -z "$DEPLOY_APPLY_LOCK_FILE" ] || apply_take="mkdir -p '$(dirname "$DEPLOY_APPLY_LOCK_FILE")' && exec 8>>'$DEPLOY_APPLY_LOCK_FILE' && { flock -n -x 8 || { echo APPLY_BUSY; exit 3; }; } && "
+  "$@" "exec 9>'$MAIN_PRUNE_LOCK_FILE' && flock -w $wait_secs 9 && ${apply_take}echo LOCKED && exec cat >/dev/null" \
     <"$tmp/in" >"$tmp/out" 2>"$tmp/err" &
   MAIN_PRUNE_LOCK_REMOTE_PID=$!
   exec 214>"$tmp/in"
   while ! grep -q '^LOCKED$' "$tmp/out" 2>/dev/null; do
     if ! kill -0 "$MAIN_PRUNE_LOCK_REMOTE_PID" 2>/dev/null; then
       cat "$tmp/err" >&2 2>/dev/null
+      if grep -q '^APPLY_BUSY$' "$tmp/out" 2>/dev/null; then exec 214>&-; rm -rf "$tmp"; return 3; fi
       exec 214>&-; rm -rf "$tmp"; return 1
     fi
     i=$((i + 1)); [ "$i" -gt $((wait_secs * 5 + 300)) ] && { kill "$MAIN_PRUNE_LOCK_REMOTE_PID" 2>/dev/null; exec 214>&-; rm -rf "$tmp"; return 1; }

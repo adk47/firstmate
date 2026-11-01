@@ -14,7 +14,7 @@ setup() {
     echo "source '$LIB'"
     echo 'HYDRA_LOCAL=${HYDRA_LOCAL:-true}'
     awk '/^# Serialise with scripts\/main-prune-restart.sh BEFORE the first node-8 mutation/ { on = 1 }
-         /^log "Claiming the mutation marker/ { on = 0 }
+         /^# -- end of the deploy locks: everything below runs under them/ { on = 0 }
          on' "$DEPLOY"
     echo 'echo REACHED-MARKER-CLAIM'
   } > "$TEST_TMPDIR/block.sh"
@@ -76,7 +76,7 @@ _ssh_block() {
     echo 'SSH_KEY=k; SSH_OPTS=(-o X=y); NODE8_USER=u; NODE8_IP=h; HYDRA_LOCAL=false'
     echo "ssh() { $1; }"
     awk '/^# Serialise with scripts\/main-prune-restart.sh BEFORE the first node-8 mutation/ { on = 1 }
-         /^log "Claiming the mutation marker/ { on = 0 }
+         /^# -- end of the deploy locks: everything below runs under them/ { on = 0 }
          on' "$DEPLOY"
     echo "$2"
     echo 'echo REACHED-MARKER-CLAIM'
@@ -228,4 +228,66 @@ _heal_trap() {
   if grep -q 'flock' "$TEST_TMPDIR/node8.cmds"; then false; fi
   grep -q "systemctl start openclaw-gateway-main" "$TEST_TMPDIR/node8.cmds"
   [ "$(cat "$TEST_TMPDIR/systemctl.argv")" = "start openclaw-gateway-main" ]
+}
+
+# Fable [key=signed-on-sha] / QA #1604: the deploy ALSO holds the credit-message apply lock EXCLUSIVELY with the prune
+# lock, for its whole run - an apply in flight (holding it shared) refuses the deploy before the marker claim, and no
+# apply can take it while the deploy runs.
+_hold_shared() { bash -c 'exec 8>>"$1"; flock -n -s 8 && exec sleep "$2"' _ "$1" "$2" >/dev/null 2>&1 3>&- & }
+
+@test "apply lock: deploy.sh names verify_notify's apply lock, and sets it before the lock block it lifts" {
+  py="$(python3 -c "import sys; sys.path.insert(0, '$BATS_TEST_DIRNAME/..'); from credit_review import verify_notify as v; print(v.APPLY_LOCK_PATH)" 2>/dev/null | tail -1)"
+  [ -n "$py" ]
+  grep -qx "DEPLOY_APPLY_LOCK_FILE=\"/var/lib/hydra/credit-review/apply.lock\"" "$DEPLOY"
+  set_at=$(line_of '^DEPLOY_APPLY_LOCK_FILE=')
+  lock=$(line_of '^  acquire_main_prune_lock \|\| lock_rc=\$\?')
+  [ "$set_at" -lt "$lock" ]
+  if grep -q 'DEPLOY_APPLY_LOCK_FILE' "$BATS_TEST_DIRNAME/../rollback.sh"; then false; fi   # rollback is not gated
+}
+
+@test "apply lock (local): an apply in flight refuses the deploy before the marker claim; a free one is held exclusively for the run" {
+  export DEPLOY_APPLY_LOCK_FILE="$TEST_TMPDIR/cr/apply.lock"
+  mkdir -p "$TEST_TMPDIR/cr"
+  _hold_shared "$DEPLOY_APPLY_LOCK_FILE" 30; holder=$!
+  sleep 1
+  run bash "$TEST_TMPDIR/block.sh"
+  kill "$holder" 2>/dev/null || true
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"FATAL: deploy refused: a credit-message apply is in flight on node-8"* ]]
+  [[ "$output" != *"REACHED-MARKER-CLAIM"* ]]
+  # free: held for the run - an apply's shared non-blocking take fails while the deploy is past the lock block
+  rm -rf "$TEST_TMPDIR/cr"     # a missing directory is created, never skipped
+  { cat "$TEST_TMPDIR/block.sh"; echo 'exec 8>>"$DEPLOY_APPLY_LOCK_FILE"; if flock -n -s 8; then echo APPLY-COULD-START; else echo APPLY-EXCLUDED; fi'; } > "$TEST_TMPDIR/block2.sh"
+  run bash "$TEST_TMPDIR/block2.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"REACHED-MARKER-CLAIM"* ]]
+  [[ "$output" == *"APPLY-EXCLUDED"* ]]
+}
+
+@test "apply lock (ssh mode): an apply in flight on node-8 refuses the deploy; a free one is held on the far side for the run" {
+  export DEPLOY_APPLY_LOCK_FILE="$TEST_TMPDIR/cr/apply.lock"
+  mkdir -p "$TEST_TMPDIR/cr"
+  _hold_shared "$DEPLOY_APPLY_LOCK_FILE" 30; holder=$!
+  sleep 1
+  _ssh_block "$FAKE_SSH_OK" ''
+  run bash "$TEST_TMPDIR/ssh-block.sh"
+  kill "$holder" 2>/dev/null || true
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"FATAL: deploy refused: a credit-message apply is in flight on node-8"* ]]
+  [[ "$output" != *"REACHED-MARKER-CLAIM"* ]]
+  _ssh_block "$FAKE_SSH_OK" 'exec 7>>"$DEPLOY_APPLY_LOCK_FILE"; if flock -n -s 7; then echo APPLY-COULD-START; else echo APPLY-EXCLUDED; fi'
+  run bash "$TEST_TMPDIR/ssh-block.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"APPLY-EXCLUDED"* ]]
+  [[ "$output" == *"REACHED-MARKER-CLAIM"* ]]
+}
+
+@test "apply lock (QA #1604): the deploy locks are taken BEFORE Step 4a.5 (the muso CLI pin, the first node-8 write) and after the --report-only exit" {
+  locks=$(line_of '^DEPLOY_APPLY_LOCK_FILE=')
+  prune=$(line_of '^  acquire_main_prune_lock \|\| lock_rc=\$\?')
+  endl=$(line_of '^# -- end of the deploy locks')
+  pin=$(line_of '^  log "Step 4a.5/8: Pinning muso CLI')
+  ro=$(line_of '^if \[\[ "\$REPORT_ONLY" == "1" \]\]; then')
+  sync=$(line_of 'Step 4b/8')
+  [ "$ro" -lt "$locks" ] && [ "$locks" -lt "$prune" ] && [ "$prune" -lt "$endl" ] && [ "$endl" -lt "$pin" ] && [ "$pin" -lt "$sync" ]
 }

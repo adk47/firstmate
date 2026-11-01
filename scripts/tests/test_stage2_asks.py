@@ -5,6 +5,8 @@ intercom-verify-request.bats. No network, no Trino."""
 
 from __future__ import annotations
 
+import credit_test_env  # noqa: F401,E402 - first: test logs + the signed-head harness never reach production
+
 import json
 import sqlite3
 import sys

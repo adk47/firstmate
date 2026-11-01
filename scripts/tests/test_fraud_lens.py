@@ -3,6 +3,8 @@ uvn-status runner's use of it: the >= 10 single-signal threshold, velocity bands
 holds (missing = fatal), ask-only users never get Copy A / B0. Trino and the gate are faked."""
 from __future__ import annotations
 
+import credit_test_env  # noqa: F401,E402 - first: test logs + the signed-head harness never reach production
+
 import json
 import re
 import sys

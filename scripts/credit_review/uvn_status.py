@@ -227,6 +227,7 @@ class UvnReport(verify_notify.Report):
 def load_list(path: str, *, now: datetime | None = None) -> tuple[list[dict[str, Any]], str]:
     with open(path, encoding="utf-8") as fh:
         doc = json.load(fh)
+    verify_notify.bind_list(doc)           # [key=signed-on-sha]: the per-user sha rail reads this header
     from .evidence import parse_ts
     gen = parse_ts(doc.get("generated_at")) if isinstance(doc, dict) else None
     users = doc.get("users") if isinstance(doc, dict) else None

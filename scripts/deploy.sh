@@ -2328,6 +2328,33 @@ if [[ "$REPORT_ONLY" == "1" ]]; then
   exit 0
 fi
 
+# Fable [key=signed-on-sha] (2) / r5 747 / QA #1604 (11-01 04:21Z: a deploy landed between a signed batch and its
+# apply): the deploy holds the credit-message apply lock EXCLUSIVELY with the prune lock below, for its whole run - an
+# apply in flight refuses the deploy (nothing changed), and no apply can start while it mutates node-8.
+DEPLOY_APPLY_LOCK_FILE="/var/lib/hydra/credit-review/apply.lock"
+# Serialise with scripts/main-prune-restart.sh BEFORE the first node-8 mutation (MUS-3742): a restart during its
+# offline cleanup would race it. Held until exit (lib/main-prune-lock.sh); failing here touched nothing.
+if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
+  lock_rc=0
+  log "Taking the main prune/restart lock (waits up to ${MAIN_PRUNE_LOCK_WAIT_SECS}s for an in-flight prune)..."
+  acquire_main_prune_lock || lock_rc=$?
+  case "$lock_rc" in
+    0) ;;
+    1) fail "a main prune/restart still holds $MAIN_PRUNE_LOCK_FILE after ${MAIN_PRUNE_LOCK_WAIT_SECS}s; refusing to deploy underneath it (nothing was changed). Re-run once it finishes." ;;
+    3) fail "deploy refused: a credit-message apply is in flight on node-8 (it holds $DEPLOY_APPLY_LOCK_FILE). A signed batch is for one deploy head; nothing was changed. Re-run once the apply ends." ;;
+    *) fail "cannot open $MAIN_PRUNE_LOCK_FILE (rc=$lock_rc); refusing to deploy without the main prune/restart lock (nothing was changed)" ;;
+  esac
+else
+  # ssh mode: the lock must live on node-8 (a local flock would not exclude the prune there), held by a background ssh
+  # for the life of this process; refused = fail closed, same as the local branch.
+  lock_rc=0
+  log "Taking the main prune/restart lock ON node-8 (waits up to ${MAIN_PRUNE_LOCK_WAIT_SECS}s for an in-flight prune)..."
+  acquire_main_prune_lock_remote ssh -i "$SSH_KEY" "${SSH_OPTS[@]}" "$NODE8_USER@$NODE8_IP" || lock_rc=$?
+  [ "$lock_rc" != 3 ] || fail "deploy refused: a credit-message apply is in flight on node-8 (it holds $DEPLOY_APPLY_LOCK_FILE). A signed batch is for one deploy head; nothing was changed. Re-run once the apply ends."
+  [ "$lock_rc" = 0 ] || fail "could not take $MAIN_PRUNE_LOCK_FILE on node-8 (rc=$lock_rc: a main prune/restart still holds it, or node-8 is unreachable); refusing to deploy underneath it (nothing was changed). Re-run once it finishes."
+fi
+# -- end of the deploy locks: everything below runs under them (QA #1604) --
+
 # -------------------------------------------------------------------
 # Step 4a.5: pin the muso CLI — BEFORE anything is synced.
 # -------------------------------------------------------------------
@@ -2373,25 +2400,6 @@ DEPLOY_RUN_TOKEN="${HYDRA_DEPLOY_RUN_ID:-manual-$(hostname 2>/dev/null || echo h
 # marker held by another live owner is a refusal, never an overwrite; a
 # dead owner is cleared by hand or compare-and-swapped away with
 # HYDRA_TAKEOVER_MUTATION_MARKER=<that owner's token>.
-# Serialise with scripts/main-prune-restart.sh BEFORE the first node-8 mutation (MUS-3742): a restart during its
-# offline cleanup would race it. Held until exit (lib/main-prune-lock.sh); failing here touched nothing.
-if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)
-  lock_rc=0
-  log "Taking the main prune/restart lock (waits up to ${MAIN_PRUNE_LOCK_WAIT_SECS}s for an in-flight prune)..."
-  acquire_main_prune_lock || lock_rc=$?
-  case "$lock_rc" in
-    0) ;;
-    1) fail "a main prune/restart still holds $MAIN_PRUNE_LOCK_FILE after ${MAIN_PRUNE_LOCK_WAIT_SECS}s; refusing to deploy underneath it (nothing was changed). Re-run once it finishes." ;;
-    *) fail "cannot open $MAIN_PRUNE_LOCK_FILE (rc=$lock_rc); refusing to deploy without the main prune/restart lock (nothing was changed)" ;;
-  esac
-else
-  # ssh mode: the lock must live on node-8 (a local flock would not exclude the prune there), held by a background ssh
-  # for the life of this process; refused = fail closed, same as the local branch.
-  lock_rc=0
-  log "Taking the main prune/restart lock ON node-8 (waits up to ${MAIN_PRUNE_LOCK_WAIT_SECS}s for an in-flight prune)..."
-  acquire_main_prune_lock_remote ssh -i "$SSH_KEY" "${SSH_OPTS[@]}" "$NODE8_USER@$NODE8_IP" || lock_rc=$?
-  [ "$lock_rc" = 0 ] || fail "could not take $MAIN_PRUNE_LOCK_FILE on node-8 (rc=$lock_rc: a main prune/restart still holds it, or node-8 is unreachable); refusing to deploy underneath it (nothing was changed). Re-run once it finishes."
-fi
 log "Claiming the mutation marker ($DEPLOY_PATH/.deploy-mutating, owner $DEPLOY_RUN_TOKEN)"
 marker_rc=0
 if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a command name)

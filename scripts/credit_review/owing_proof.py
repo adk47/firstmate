@@ -219,7 +219,8 @@ def _main(argv: list[str] | None = None) -> int:
         return 2
     tmp = a.out + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump({"generated_at": res["generated_at"], "replica_facts": res["replica_facts"], "users": res["users"]},
+        json.dump({"generated_at": res["generated_at"], "replica_facts": res["replica_facts"], "users": res["users"],
+                   "signed_on": verify_notify.deployed_head()},     # [key=signed-on-sha]
                   fh, indent=1)
     os.replace(tmp, a.out)
     print(json.dumps({"generated_at": res["generated_at"], "counts": res["counts"]}))

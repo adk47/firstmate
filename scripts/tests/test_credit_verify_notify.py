@@ -1651,6 +1651,166 @@ esac
 
 @unittest.skipUnless(shutil.which("jq") and (shutil.which("timeout") or shutil.which("gtimeout")),
                      "jq and timeout are needed for the wiring test")
+class SignedHeadTests(unittest.TestCase):
+    """Fable [key=signed-on-sha]: a list-driven apply sends only on the deploy head its list was signed on (signed_on in
+    the header) - re-read before EVERY user - and holds the shared apply lock for its whole run."""
+
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp())
+        self.sha = self.d / ".deployed-sha"
+        self.sha.write_text("a" * 40 + "\n")
+        self.lock = self.d / "lock" / "apply.lock"
+        (self.d / "lock").mkdir()
+        self.p = [unittest.mock.patch.object(verify_notify, "DEPLOYED_SHA_PATH", str(self.sha)),
+                  unittest.mock.patch.object(verify_notify, "APPLY_LOCK_PATH", str(self.lock)),
+                  unittest.mock.patch.object(verify_notify, "LIST_SIGNED_ON", "a" * 40),
+                  unittest.mock.patch.object(verify_notify, "HEAD_REFUSED", 0)]
+        for x in self.p:
+            x.start()
+
+    def tearDown(self):
+        for x in self.p:
+            x.stop()
+
+    def payloads(self, n=5):
+        return [{"user": {"id": str(i), "email": f"u{i}@x.com"}, "credits": [{"request_id": f"r{i}"}]} for i in range(n)]
+
+    def apply(self, runner, n=5):
+        rep = Report()
+        with unittest.mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, [])):
+            verify_notify.send_all(self.payloads(n), rep, mode="apply", runner=runner, extra=["--campaign", "uvn-status"])
+        return rep
+
+    def test_a_deploy_mid_batch_defers_every_remaining_user(self):
+        import fcntl
+        sent = []
+
+        def run(argv):
+            uid = json.load(open(argv[argv.index("--credits-file") + 1]))["user"]["id"]
+            with open(self.lock) as fh:                        # the shared apply lock is held while sending
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            sent.append(uid)
+            if uid == "1":
+                self.sha.write_text("b" * 40 + "\n")          # a deploy lands after user 1
+            return subprocess.CompletedProcess(argv, 0, "POSTED email message=1 credits=1\n", "")
+        rep = self.apply(run)
+        self.assertEqual(sent, ["0", "1"])
+        self.assertEqual(rep.deferred_users, 3)
+        self.assertTrue(all("sha_mismatch: signed on aaaaaaaaaaaa, deployed bbbbbbbbbbbb" in o["reason"] for o in rep.outcomes))
+        self.assertEqual(verify_notify.HEAD_REFUSED, 3)
+        with open(self.lock) as fh:                            # released after the run
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_a_header_without_signed_on_sends_nothing_a_mismatch_neither_and_dry_runs_are_unaffected(self):
+        calls = []
+        run = lambda argv: calls.append(argv) or subprocess.CompletedProcess(argv, 0, "POSTED email message=1 credits=1\n", "")
+        verify_notify.bind_list({"generated_at": "x", "users": []})              # no signed_on in the header
+        rep = self.apply(run)
+        self.assertEqual((calls, rep.deferred_users), ([], 5))
+        self.assertIn("the list header carries no signed_on", rep.outcomes[0]["reason"])
+        # QA #1604: the FULL sha exactly - a prefix, another case, a padded value or another head refuses
+        for bad in ("aaaaaaa", "a" * 39, "A" * 40, " " + "a" * 40, "a" * 40 + "\n", "b" * 40, "a" * 41):
+            verify_notify.bind_list({"signed_on": bad})
+            self.assertTrue(verify_notify.head_mismatch().startswith("sha_mismatch"), repr(bad))
+        verify_notify.bind_list({"signed_on": "a" * 40})
+        self.assertEqual(verify_notify.head_mismatch(), "")
+        # a malformed or truncated deployed record is UNREADABLE (never normalised): refuse
+        for rec in ("aaaaaaaZ\n", "a" * 39 + "\n", "a" * 40 + "Z\n", "A" * 40 + "\n", " " + "a" * 40 + "\n", ""):
+            self.sha.write_text(rec)
+            verify_notify.bind_list({"signed_on": "a" * 40})
+            self.assertIn("unreadable", verify_notify.head_mismatch(), repr(rec))
+            verify_notify.bind_list({"signed_on": "aaaaaaa"})
+            self.assertTrue(verify_notify.head_mismatch().startswith("sha_mismatch"), repr(rec))
+        self.sha.write_text("a" * 40 + "\n")
+        self.sha.unlink()
+        self.assertIn("unreadable", verify_notify.head_mismatch())               # signed, but the head cannot be read
+        verify_notify.bind_list({"users": []})                                   # QA #1604: BOTH missing -> refuse
+        self.assertIn("unreadable", verify_notify.head_mismatch())
+        with unittest.mock.patch.object(verify_notify, "LIST_SIGNED_ON", None):  # not a list-driven send
+            self.assertEqual(verify_notify.head_mismatch(), "")
+        verify_notify.bind_list({"signed_on": "b" * 40})
+        rep = Report()
+        verify_notify.send_all(self.payloads(2), rep, mode="dry-run", runner=lambda a: subprocess.CompletedProcess(
+            a, 0, "VALID uvn-status credits=1\n", ""), extra=["--campaign", "uvn-status"], workers=1)
+        self.assertEqual(rep.deferred_users, 0)                                  # the rail is apply-only
+
+    def test_a_held_or_missing_apply_lock_dir_never_fails_open(self):
+        import fcntl
+        calls = []
+        run = lambda argv: calls.append(argv) or subprocess.CompletedProcess(argv, 0, "POSTED email message=1 credits=1\n", "")
+        # QA #1604: a deploy holding the lock exclusively -> the apply sends nothing
+        with open(self.lock, "a+") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            rep = self.apply(run)
+        self.assertEqual(calls, [])
+        self.assertIn("a deploy holds the apply lock", rep.halted)
+        # a missing lock directory is CREATED (never 'no lock'), and the apply runs under the lock
+        missing = self.d / "fresh" / "dir" / "apply.lock"
+        with unittest.mock.patch.object(verify_notify, "APPLY_LOCK_PATH", str(missing)):
+            rep = self.apply(run, n=1)
+        self.assertTrue(missing.exists())
+        self.assertEqual(len(calls), 1)
+        # an unopenable lock refuses
+        with unittest.mock.patch.object(verify_notify, "APPLY_LOCK_PATH", str(self.sha) + "/x/apply.lock"):
+            rep = self.apply(run, n=1)
+        self.assertIn("cannot be opened", rep.halted)
+        self.assertEqual(len(calls), 1)
+
+    def test_one_apply_lock_spans_the_whole_run_between_users_and_the_cli_refuses_under_a_deploy(self):
+        import fcntl, argparse, importlib.util
+        run = lambda argv: subprocess.CompletedProcess(argv, 0, "POSTED email message=1 credits=1\n", "")
+
+        def deploy_can_lock():
+            with open(self.lock, "a+") as fh:
+                try:
+                    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return True
+                except BlockingIOError:
+                    return False
+        # QA #1604: between two per-user send_all calls of ONE run the deploy still cannot take the lock
+        with verify_notify.apply_session():
+            self.apply(run, n=1)
+            self.assertFalse(deploy_can_lock())                 # the gap between users
+            self.apply(run, n=1)
+            with verify_notify.apply_session():                 # re-entrant: an inner session does not release it
+                pass
+            self.assertFalse(deploy_can_lock())
+        self.assertTrue(deploy_can_lock())                      # released when the run ends
+        # the CLI: a deploy holding the lock -> the apply run refuses before ANY work (exit 3)
+        spec = importlib.util.spec_from_file_location("credit_review_cli_lock", str(ROOT / "scripts" / "credit-review.py"))
+        cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(cli)
+        called = []
+        ns = argparse.Namespace(cmd="uvn-status", mode="apply", fn=lambda a: called.append(1) or 0)
+        with open(self.lock, "a+") as fh, unittest.mock.patch.object(cli, "parser") as par:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            par.return_value.parse_args.return_value = ns
+            self.assertEqual(cli.main([]), 3)
+        self.assertEqual(called, [])
+
+    def test_the_builders_record_signed_on_and_the_loaders_bind_it(self):
+        self.sha.write_text("c" * 40 + "\n")
+        self.assertEqual(verify_notify.deployed_head(), "c" * 40)
+        self.sha.write_text("aaaaaaaZ\n")
+        self.assertEqual(verify_notify.deployed_head(), "")                       # QA #1604: never normalised
+        self.sha.write_text("c" * 40 + "\n")
+        from credit_review import uvn_status, need_asks, owing_proof, receipts, claim_proof_ask
+        for mod in (owing_proof, receipts):
+            self.assertIn('"signed_on": verify_notify.deployed_head()', open(mod.__file__).read(), mod.__name__)
+        self.assertIn('"signed_on": verify_notify.deployed_head()}', open(need_asks.__file__).read())
+        src = open(need_asks.__file__).read()
+        self.assertLess(src.index("    verify_notify.bind_list(doc)"), src.index('    users = [u for u in doc["users"]'))
+        lst = self.d / "l.json"
+        lst.write_text(json.dumps({"generated_at": datetime.now(timezone.utc).isoformat(), "users": [],
+                                   "signed_on": "d" * 40}))
+        uvn_status.load_list(str(lst))
+        self.assertEqual(verify_notify.LIST_SIGNED_ON, "d" * 40)
+        lst.write_text(json.dumps({"generated_at": datetime.now(timezone.utc).isoformat(), "claims": [],
+                                   "signed_on": "e" * 40}))
+        claim_proof_ask.load_list(str(lst), require_daily_check=False)
+        self.assertEqual(verify_notify.LIST_SIGNED_ON, "e" * 40)
+
+
 class ParallelCheckTests(unittest.TestCase):
     """Fable 526: a read-only pass runs its gate calls on CHECK_WORKERS threads; the report equals the serial pass field
     for field (accepted in list order), and a real send (apply) never runs two gate calls at once."""

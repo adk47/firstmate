@@ -123,6 +123,7 @@ def load_list(path: str, *, now: datetime | None = None, require_daily_check: bo
             doc = json.load(fh)
     except (OSError, json.JSONDecodeError) as exc:
         return [], f"the claim list {path} is unreadable ({type(exc).__name__})"
+    verify_notify.bind_list(doc)           # [key=signed-on-sha]: the per-user sha rail reads this header
     gen = parse_ts(doc.get("generated_at")) if isinstance(doc, dict) else None
     claims = doc.get("claims") if isinstance(doc, dict) else None
     if gen is None or not isinstance(claims, list):

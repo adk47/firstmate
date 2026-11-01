@@ -185,7 +185,8 @@ def build(*, dv_store: str = DV_STORE, proof_store: str = PROOF_STORE, paying_pa
     for u in users:
         u["facts"] = facts_of(u, facts)
     return {"generated_at": (now or datetime.now(timezone.utc)).isoformat(timespec="seconds"),
-            "replica_facts": facts_header(users), "users": users, "counts": dict(counts)}
+            "replica_facts": facts_header(users), "users": users, "counts": dict(counts),
+            "signed_on": verify_notify.deployed_head()}
 
 
 # r5 #1582 (c): an E list carries the SAME signing header as owing_proof's - the exact runnable SQL, its sha256, and a
@@ -415,7 +416,9 @@ def send(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int 
         report.halted = f"{CAMPAIGN} is send-locked in the gate ({LOCK}=0); nothing sent (dry-run renders it)"
         return report
     with open(list_path, encoding="utf-8") as fh:
-        users = [u for u in json.load(fh)["users"] if u["paid"] == (segment == "paid")]
+        doc = json.load(fh)
+    verify_notify.bind_list(doc)           # [key=signed-on-sha]: the per-user sha rail reads this header
+    users = [u for u in doc["users"] if u["paid"] == (segment == "paid")]
     report.listed_users = [str(u["user_id"]) for u in users]   # QA / r5 #1582: every one is accounted for below
     try:
         from credit_review import verify_ledger  # noqa: PLC0415
@@ -557,8 +560,18 @@ def _main(argv: list[str] | None = None) -> int:
             except OSError as exc:
                 print(f"NEED ASKS: --outcomes-json {a.outcomes_json} is not writable ({exc}); nothing sent")
                 return 2
-        rep = send(list_path=a.list, segment=a.segment, mode=a.mode, max_users=a.max_users, preview_dir=a.preview,
-                   check_recipients=a.check_recipients)
+        if a.mode == "apply":
+            # QA #1604: ONE apply lock for the whole run - preflight, code issuance and every send
+            try:
+                with verify_notify.apply_session():
+                    rep = send(list_path=a.list, segment=a.segment, mode=a.mode, max_users=a.max_users,
+                               preview_dir=a.preview, check_recipients=a.check_recipients)
+            except verify_notify.ApplyLockError as exc:
+                print(f"NEED ASKS: {exc}")
+                return 3
+        else:
+            rep = send(list_path=a.list, segment=a.segment, mode=a.mode, max_users=a.max_users, preview_dir=a.preview,
+                       check_recipients=a.check_recipients)
         if tmp:
             try:
                 with open(tmp, "w", encoding="utf-8") as fh:
@@ -586,7 +599,9 @@ def _main(argv: list[str] | None = None) -> int:
     # RECIPIENT OK - wrapper drift) is NOT a signable set: fail closed on the exit status, not only in the JSON
     if a.check_recipients and not accounting(rep)["balanced"]:
         return 3
-    return 1 if rep.halted or rep.failed_users else 0
+    if rep.halted or rep.failed_users:
+        return 1
+    return 3 if verify_notify.HEAD_REFUSED else 0     # [key=signed-on-sha]: users deferred on the sha rail -> exit 3
 
 
 if __name__ == "__main__":

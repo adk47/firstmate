@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """credit_review/provisional_tracker.py: 7-day backup clock from the DELIVERED ask, day-N route,
 backup_ask_undelivered. Trino faked; stdlib only."""
+import credit_test_env  # noqa: F401,E402 - first: test logs + the signed-head harness never reach production
 import csv
 import io
 import json

@@ -654,6 +654,115 @@ def _first_line(text: str) -> str:
 # send (apply) is always serial: one writer for claims, caps and pacing.
 CHECK_WORKERS = 4
 
+# Fable [key=signed-on-sha] (r5 747, the 04:21Z C p3 stop: a deploy landed between signing and apply): a signature is
+# for ONE deploy head. Every list builder records signed_on = the deployed sha at build / dry-run time; a list-driven
+# apply re-reads /opt/hydra/.deployed-sha before EVERY user and defers that user (sha_mismatch, nothing sent, no claim)
+# when it differs - a deploy mid-batch stops the rest, and a list header without signed_on sends nothing. Every apply
+# also holds APPLY_LOCK (shared: applies may run side by side) so a deploy refuses while one is in flight (deploy.sh).
+DEPLOYED_SHA_PATH = "/opt/hydra/.deployed-sha"
+APPLY_LOCK_PATH = "/var/lib/hydra/credit-review/apply.lock"
+
+
+def _test_harness_dir() -> str:
+    """The credit test harness's temp dir (scripts/tests/credit_test_env.py) - honoured ONLY when it is a directory
+    under the system temp dir carrying the harness marker; anything else is production. Same posture as the timer's
+    harness-only cfg: the suites run on node-8 (PR Validation) and must never read its deploy head or take its lock."""
+    d = os.environ.get("CREDIT_TEST_ENV_DIR") or ""
+    if not d:
+        return ""
+    real, tmp = os.path.realpath(d), os.path.realpath(tempfile.gettempdir())
+    ok = real.startswith(tmp + os.sep) and os.path.isdir(real) and os.path.isfile(os.path.join(real, ".credit-test-env"))
+    return real if ok else ""
+
+
+if _test_harness_dir():
+    DEPLOYED_SHA_PATH = os.path.join(_test_harness_dir(), "no-deployed-sha")
+    APPLY_LOCK_PATH = os.path.join(_test_harness_dir(), "apply.lock")
+
+LIST_SIGNED_ON: str | None = None       # bound by the list loaders (None = no list loaded: not a list-driven send)
+HEAD_REFUSED = 0                        # users this process deferred on the sha rail (the CLIs exit 3)
+
+
+def deployed_head() -> str:
+    """The deployed sha, or '' when it cannot be read or is not EXACTLY a 40-hex sha (QA #1604: never normalised - a
+    malformed or truncated record is unreadable, and an unreadable head refuses). For the builders' signed_on."""
+    try:
+        raw = open(DEPLOYED_SHA_PATH, encoding="utf-8").read()
+    except (OSError, UnicodeDecodeError):
+        return ""
+    raw = raw[:-1] if raw.endswith("\n") else raw
+    return raw if re.fullmatch(r"[0-9a-f]{40}", raw) else ""
+
+
+def bind_list(doc: Any) -> None:
+    """Record the loaded list's signed_on (its header) for the per-user sha rail."""
+    global LIST_SIGNED_ON
+    LIST_SIGNED_ON = str(doc.get("signed_on") or "") if isinstance(doc, dict) else ""
+
+
+def head_mismatch() -> str:
+    """'' when this apply may send now; otherwise why not (one line)."""
+    if LIST_SIGNED_ON is None:
+        return ""                                    # not a list-driven send
+    h = _test_harness_dir()
+    if h and DEPLOYED_SHA_PATH == os.path.join(h, "no-deployed-sha"):
+        return ""                                    # the credit test harness's stand-in (its own tests patch a real one)
+    # QA #1604: no readable deployed sha = refuse, whatever the header says (a list-driven apply never sends blind)
+    dep = deployed_head()
+    if not dep:
+        return f"sha_mismatch: the deployed sha ({DEPLOYED_SHA_PATH}) is unreadable"
+    s_ = LIST_SIGNED_ON
+    if not s_:
+        return "sha_mismatch: the list header carries no signed_on (re-build / re-dry-run it on the deployed head)"
+    # the FULL sha, exactly (QA #1604): no prefix match, no case folding, no trimming
+    if not re.fullmatch(r"[0-9a-f]{40}", s_) or s_ != dep:
+        return f"sha_mismatch: signed on {s_[:12]}, deployed {dep[:12]} - re-dry-run and re-sign on the deployed head"
+    return ""
+
+
+class ApplyLockError(RuntimeError):
+    pass
+
+
+_SESSION_LOCK: Any = None              # the apply lock held for a whole outer apply run (apply_session)
+
+
+class apply_session:  # noqa: N801 - used as `with verify_notify.apply_session():`
+    """QA #1604 (b1 568): the shared apply lock is held ONCE around a whole apply run (every per-user send_all call, E's
+    preflight + code issuance + send) - a deploy cannot slip in between two users. Re-entrant: send_all inside a session
+    does not take or release the lock itself. Raises ApplyLockError when the lock cannot be taken (nothing is sent)."""
+
+    def __enter__(self) -> "apply_session":
+        global _SESSION_LOCK
+        self.outer = _SESSION_LOCK is None
+        if self.outer:
+            _SESSION_LOCK = _apply_lock()
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        global _SESSION_LOCK
+        if self.outer and _SESSION_LOCK is not None:
+            _SESSION_LOCK.close()
+            _SESSION_LOCK = None
+
+
+def _apply_lock() -> Any:
+    """Take the apply lock SHARED and non-blocking for this apply's whole run (QA #1604: the directory is created when
+    missing - never 'no lock'). A deploy holding it exclusively (deploy.sh, with the prune lock) or an unopenable lock
+    raises ApplyLockError: the apply sends nothing."""
+    import fcntl  # noqa: PLC0415
+    try:
+        os.makedirs(os.path.dirname(APPLY_LOCK_PATH), mode=0o700, exist_ok=True)
+        fh = open(APPLY_LOCK_PATH, "a+")
+    except OSError as exc:
+        raise ApplyLockError(f"the apply lock {APPLY_LOCK_PATH} cannot be opened ({exc}); nothing sent") from exc
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except OSError as exc:
+        fh.close()
+        raise ApplyLockError(f"a deploy holds the apply lock {APPLY_LOCK_PATH}; nothing sent (re-run after it)") from exc
+    return fh
+
 
 ASK_CAMPAIGNS = ("uvn-status", "proof-need-ask", "gap-ask", "claim-proof-ask", "verify-live", "retro-past")
 
@@ -709,9 +818,36 @@ def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
     if mode != "apply" and n_workers > 1 and len(payloads) > 1:
         with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as ex:
             pre = list(ex.map(gate, payloads))           # list order, whatever order they finish in
+    lock = None
+    if mode == "apply" and _SESSION_LOCK is None:    # inside an apply_session the run already holds it
+        try:
+            lock = _apply_lock()
+        except ApplyLockError as exc:
+            report.halted = str(exc)[:300]
+            return
+    try:
+        _send_loop(payloads, report, mode=mode, pace_seconds=pace_seconds, pre=pre, gate=gate, extra=extra,
+                   preview_dir=preview_dir, reminder=reminder)
+    finally:
+        if lock is not None:
+            lock.close()
+
+
+def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pace_seconds: float, pre: Any,
+               gate: Callable[[dict[str, Any]], Any], extra: list[str] | None, preview_dir: str | None,
+               reminder: bool) -> None:
     for i, p in enumerate(payloads):
         if i and pace_seconds and mode == "apply":
             time.sleep(pace_seconds)
+        if mode == "apply":
+            hm = head_mismatch()
+            if hm:
+                global HEAD_REFUSED
+                HEAD_REFUSED += 1
+                report.deferred_users += 1
+                why = _outcome(report, p, "deferred", hm)
+                report.deferrals.append(f"user {_uid(p)}: {why}"[:200])
+                continue
         res = pre[i] if pre is not None else gate(p)
         if preview_dir and mode != "apply" and res.returncode == 0:
             uid = re.sub(r"[^A-Za-z0-9-]", "", str(p["user"].get("id") or ""))[:64]

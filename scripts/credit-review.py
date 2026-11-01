@@ -1172,7 +1172,18 @@ def main(argv: list[str] | None = None) -> int:
         print("NO_REPLY")
         return 0
     try:
-        return args.fn(args)
+        if getattr(args, "mode", "") == "apply":
+            # QA #1604: ONE apply lock for the whole run (every user), taken before the first send
+            try:
+                with verify_notify.apply_session():
+                    rc = args.fn(args)
+            except verify_notify.ApplyLockError as exc:
+                print(f"Credit review {args.cmd}: {exc}")
+                return 3
+        else:
+            rc = args.fn(args)
+        # [key=signed-on-sha]: a user deferred on the sha rail makes the apply exit 3 (nothing sent to them)
+        return 3 if verify_notify.HEAD_REFUSED and rc == 0 else rc
     except admin_api.AdminError as exc:
         kept = log(f"admin API unavailable: {exc}")
         print(f"Credit review could not run: the admin API is unavailable. No credits were changed. "

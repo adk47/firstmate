@@ -1,4 +1,5 @@
 """uvn_status daily caps are env-overridable, fail closed to the reviewed defaults (firstmate 014, [key=p2-caps])."""
+import credit_test_env  # noqa: F401,E402 - first: test logs + the signed-head harness never reach production
 import importlib
 import os
 import sys

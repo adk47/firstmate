@@ -248,7 +248,8 @@ def _main(argv: list[str] | None = None) -> int:
     for k, users in res["lists"].items():
         p = out / f"receipts-{k}.json"
         tmp = p.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"generated_at": res["generated_at"], "users": users}, indent=1))
+        tmp.write_text(json.dumps({"generated_at": res["generated_at"], "users": users,
+                                   "signed_on": verify_notify.deployed_head()}, indent=1))   # [key=signed-on-sha]
         os.replace(tmp, p)
     print(json.dumps({"generated_at": res["generated_at"], "counts": res["counts"]}))
     return 0
