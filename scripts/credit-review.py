@@ -582,6 +582,7 @@ def write_outcomes(args: argparse.Namespace, report: object) -> str:
             # runner's accepted list, never list - outcomes), plus the pre-gate drops - one file accounts for every user
             json.dump({"mode": args.mode, "segment": args.segment, "outcomes": list(getattr(report, "outcomes", [])),
                        "accepted": list(getattr(report, "accepted", [])), "filtered": list(getattr(report, "filtered", [])),
+                       "sent": list(getattr(report, "sent", [])),
                        "recipient_ok": getattr(report, "recipient_ok", 0)}, fh, indent=1)
         os.replace(tmp, path)
         return ""

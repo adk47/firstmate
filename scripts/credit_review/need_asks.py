@@ -577,7 +577,8 @@ def _main(argv: list[str] | None = None) -> int:
                 with open(tmp, "w", encoding="utf-8") as fh:
                     json.dump({"mode": a.mode, "segment": a.segment, "check_recipients": a.check_recipients,
                                **accounting(rep),
-                               "accepted": list(rep.accepted), "outcomes": list(rep.outcomes),
+                               "accepted": list(rep.accepted), "sent": list(getattr(rep, "sent", [])),
+                               "outcomes": list(rep.outcomes),
                                "filtered": list(rep.filtered)}, fh)
                 os.replace(tmp, a.outcomes_json)          # atomic, and the fresh file's 0600 mode goes with it
             except OSError as exc:

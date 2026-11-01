@@ -226,6 +226,9 @@ class ClaimProofAskTests(unittest.TestCase):
         rep, gate = self.go(self.lst([claim(1, 7), claim(2, 8), claim(3, 9)]), q, reminders=True)
         self.assertEqual([p["credits"][0]["request_id"] for _, p in gate.calls], ["claim-3"])
         self.assertEqual(rep.closed_reminders, 2)
+        # QA #1606: the POSTED reminder is in report.sent (every POSTED line of every runner path)
+        self.assertEqual([(s["user"], s["campaign"], s.get("kind"), s["request_ids"]) for s in rep.sent],
+                         [("9", "claim-proof-ask", "reminder", ["claim-3"])])
         closed = db.execute("SELECT reason FROM verify_messages WHERE kind='reminder-7' AND status='skipped'").fetchall()
         self.assertEqual([r[0] for r in closed], ["claimant replied", "claimant replied"])
         self.assertEqual(verify_ledger.reminder_state(db, parent_message_id="901", kind="reminder-7",

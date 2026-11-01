@@ -1811,6 +1811,36 @@ class SignedHeadTests(unittest.TestCase):
         self.assertEqual(verify_notify.LIST_SIGNED_ON, "e" * 40)
 
 
+class ApplySentRecordTests(unittest.TestCase):
+    """t01b 563: a clean apply records WHO it sent to - report.sent per POSTED user, written as "sent" in the outcomes
+    file (it held only non-sends, so a 50/50 apply left an empty file)."""
+
+    def test_an_apply_records_every_posted_user_and_the_outcomes_file_carries_them(self):
+        import argparse, importlib.util
+        pays = [{"user": {"id": str(i), "email": f"u{i}@x.com"}, "credits": [{"request_id": f"r{i}"}]} for i in (7, 8)]
+        run = lambda argv: subprocess.CompletedProcess(argv, 0, "POSTED email message=55%s credits=1\n" % argv[-1][-1:], "")
+        rep = Report()
+        with unittest.mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, [])):
+            verify_notify.send_all(pays, rep, mode="apply", runner=run, extra=["--campaign", "uvn-status"])
+        self.assertEqual([(s["user"], s["campaign"], s["request_ids"]) for s in rep.sent],
+                         [("7", "uvn-status", ["r7"]), ("8", "uvn-status", ["r8"])])
+        self.assertTrue(all(s["gate"].startswith("POSTED email message=") for s in rep.sent))
+        self.assertEqual((rep.outcomes, rep.sent_notes), ([], 2))
+        spec = importlib.util.spec_from_file_location("credit_review_cli_sent", str(ROOT / "scripts" / "credit-review.py"))
+        cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(cli)
+        out = Path(tempfile.mkdtemp()) / "o.json"
+        cli.write_outcomes(argparse.Namespace(outcomes_json=str(out), mode="apply", segment="paid"), rep)
+        d = json.loads(out.read_text())
+        self.assertEqual(([s["user"] for s in d["sent"]], d["outcomes"]), (["7", "8"], []))
+        # QA #1606: a POSTED reminder lands in sent too (every POSTED line of every runner path)
+        rep = Report()
+        with unittest.mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, [])):
+            verify_notify.send_all(pays[:1], rep, mode="apply", runner=run, extra=["--campaign", "claim-proof-ask"],
+                                   reminder=True)
+        self.assertEqual((rep.reminders_sent, [(s["user"], s["campaign"], s.get("kind")) for s in rep.sent]),
+                         (1, [("7", "claim-proof-ask", "reminder")]))
+
+
 class ParallelCheckTests(unittest.TestCase):
     """Fable 526: a read-only pass runs its gate calls on CHECK_WORKERS threads; the report equals the serial pass field
     for field (accepted in list order), and a real send (apply) never runs two gate calls at once."""

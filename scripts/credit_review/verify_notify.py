@@ -124,6 +124,9 @@ class Report:
     recipient_ok: int = 0              # dry run with --check-recipients: the real gate accepted the recipient
     # ... and WHO, per user: {user, campaign, request_ids, gate} - the gate's own RECIPIENT OK line (QA / r5 #1582)
     accepted: list = field(default_factory=list)
+    # t01b 563: every user an APPLY posted to, {user, campaign, request_ids, gate} (the gate's POSTED line carries the
+    # channel + message id) - the per-user read-back record next to the ledger
+    sent: list = field(default_factory=list)
     filtered: list = field(default_factory=list)  # users a runner dropped BEFORE the gate: {user, result, reason}
     validated: int = 0                 # dry run: the gate validated (or rendered) the note it would send
     halted: str = ""
@@ -871,8 +874,16 @@ def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pac
             report.validated += 1
         elif res.returncode == 0 and out.startswith("POSTED") and reminder:
             report.reminders_sent += 1
+            camp = (extra or [])[(extra or []).index("--campaign") + 1] if "--campaign" in (extra or [])[:-1] else ""
+            report.sent.append({"user": _uid(p), "campaign": camp, "kind": "reminder",      # QA #1606: every POSTED
+                                "request_ids": [str(c.get("request_id") or "") for c in p.get("credits") or []],
+                                "gate": out[:300]})
         elif res.returncode == 0 and out.startswith("POSTED"):
             report.sent_notes += 1
+            camp = (extra or [])[(extra or []).index("--campaign") + 1] if "--campaign" in (extra or [])[:-1] else ""
+            report.sent.append({"user": _uid(p), "campaign": camp,
+                                "request_ids": [str(c.get("request_id") or "") for c in p.get("credits") or []],
+                                "gate": out[:300]})
             try:
                 report.sent_credits += int(out.rsplit("credits=", 1)[1].split()[0])
             except (IndexError, ValueError):
