@@ -262,6 +262,59 @@ def may_apply(row: dict[str, Any] | None, batch: str, *, first_of_class: bool = 
             and not (first_of_class and row.get("fallback_model") is not False))
 
 
+# r5 + p1 judge rail FINAL for 29b (10-31 21:4xZ): per-BODY verdicts. A body-level stop holds only that body; these are
+# the only reasons a per-body apply tolerates - anything else is a batch-level failure and holds every body.
+PER_BODY_REASONS = frozenset({"body_stop", "batch_stop"})
+WHOLE_HOLD_SHARE = 0.10                        # >= 10 % of the bodies stopped: a rule gap, the whole batch is hand-read
+
+
+def applicable(row: dict[str, Any] | None, batch: str, body_ids: Iterable[str], *,
+               first_of_class: bool = False) -> dict[str, Any]:
+    """The per-body rail (replaces the whole-batch may_apply at the tick): {"apply": ids, "held": [...], "hold_whole": ""}.
+    apply = exactly the ids THIS batch's verdict row marks pass, in input order. held = every stopped body with its
+    reason code and quote (-> the hand-read tray, listed). hold_whole = why nothing applies: no/foreign/invalid row, a
+    batch-level failure, a batch stop that names no body, or >= 10 % of the bodies stopped. Never a second call: a stopped
+    body is not re-judged and neither is the remainder (a second sample of the same input biases toward pass)."""
+    ids = [str(i) for i in body_ids]
+    out: dict[str, Any] = {"apply": [], "held": [], "hold_whole": ""}
+
+    def whole(why: str) -> dict[str, Any]:
+        out["apply"], out["hold_whole"] = [], why
+        return out
+
+    if not ids:
+        return whole("empty_batch")
+    if not (isinstance(row, dict) and isinstance(batch, str) and len(batch) == 64 and row.get("batch_sha") == batch):
+        return whole("no_verdict_for_this_batch")
+    if row.get("approval_ref") != APPROVAL_REF or row.get("model") not in ALLOWED_MODELS:
+        return whole("verdict_not_a_signature")
+    if first_of_class and row.get("fallback_model") is not False:
+        return whole("first_of_class_fallback_model")          # r5 signs that batch by hand
+    bodies = row.get("bodies") if isinstance(row.get("bodies"), list) else []
+    by_id = {str(b.get("id")): b for b in bodies if isinstance(b, dict)}
+    if len(bodies) != len(ids) or sorted(by_id) != sorted(ids):
+        return whole("verdict_bodies_do_not_match_the_batch")
+    other = sorted({str(r) for r in row.get("reasons") or []} - PER_BODY_REASONS)
+    if other:
+        return whole("batch_level:" + ",".join(other)[:200])
+    stop_ids = {str(i) for i in row.get("stop_ids") or []}
+    if stop_ids - set(ids):
+        return whole("stop_ids_not_in_batch")                  # QA #1597: an inconsistent stop signal applies nothing
+    stopped = [i for i in ids if by_id[i].get("verdict") != "pass" or i in stop_ids]
+    out["held"] = [{"id": i, "reason_code": str(by_id[i].get("reason_code") or "")[:80],
+                    "evidence_quote": str(by_id[i].get("evidence_quote") or "")[:400]} for i in stopped]
+    # QA #1597: a per-body apply needs every held body to carry the model's REAL reason and quote for the hand read; a
+    # stop without them is an unexplained verdict - nothing applies (fail closed), the held list still names them
+    if any(not h["reason_code"].strip() or not h["evidence_quote"].strip() for h in out["held"]):
+        return whole("held_body_without_reason_or_quote")
+    if row.get("verdict") != "pass" and not stopped:
+        return whole("batch_stop_names_no_body")
+    if stopped and len(stopped) >= WHOLE_HOLD_SHARE * len(ids):
+        return whole(f"stopped_{len(stopped)}_of_{len(ids)}_at_or_above_10pct")
+    out["apply"] = [i for i in ids if i not in set(stopped)]
+    return out
+
+
 class OpenRouterBatchJudge:
     """The metered fallback's inner judge (wrap it in CappedJudge): one chat call with the batch prompt, no web, JSON
     answer, cost from OpenRouter's usage. ``.judge(mode, evidence)`` matches CappedJudge's inner contract."""

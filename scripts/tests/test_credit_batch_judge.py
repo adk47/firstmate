@@ -256,6 +256,72 @@ class RailTest(unittest.TestCase):
         self.assertFalse(bj.may_apply({**self.row, "stop_ids": ["u1"]}, SHA))
         self.assertFalse(bj.may_apply(self.row, "short"))
 
+    def per_body_row(self, n=20, stops=(), reasons=None, verdict=None, **kw):
+        ids = [f"u{i}" for i in range(n)]
+        bodies = [{"id": i, "verdict": "stop" if i in stops else "pass",
+                   "reason_code": "number_agreement" if i in stops else "", "evidence_quote": f"q-{i}" if i in stops else ""}
+                  for i in ids]
+        r = {**self.row, "batch_sha": SHA, "bodies": bodies, "stop_ids": list(stops),
+             "verdict": verdict or ("stop" if stops else "pass"),
+             "reasons": reasons if reasons is not None else (["body_stop", "batch_stop"] if stops else []), **kw}
+        return r, ids
+
+    def test_per_body_rail_applies_exactly_the_pass_ids_and_lists_the_stopped(self):
+        # r5 + p1 FINAL: one stopped body of 20 (5 %) is held with its reason + quote; the other 19 apply, in input order
+        row, ids = self.per_body_row(stops=("u7",))
+        a = bj.applicable(row, SHA, ids)
+        self.assertEqual(a["hold_whole"], "")
+        self.assertEqual(a["apply"], [i for i in ids if i != "u7"])
+        self.assertEqual(a["held"], [{"id": "u7", "reason_code": "number_agreement", "evidence_quote": "q-u7"}])
+        row, ids = self.per_body_row()                                          # all pass
+        self.assertEqual(bj.applicable(row, SHA, ids)["apply"], ids)
+
+    def test_per_body_rail_holds_the_whole_batch(self):
+        row, ids = self.per_body_row(stops=("u1", "u2"))                        # 2 of 20 = 10 %: a rule gap
+        a = bj.applicable(row, SHA, ids)
+        self.assertEqual((a["apply"], a["hold_whole"]), ([], "stopped_2_of_20_at_or_above_10pct"))
+        self.assertEqual([h["id"] for h in a["held"]], ["u1", "u2"])
+        row, ids = self.per_body_row(n=5, stops=("u0",))                        # 1 of 5: any stop in a small batch
+        self.assertEqual(bj.applicable(row, SHA, ids)["apply"], [])
+        row, ids = self.per_body_row(verdict="stop", reasons=["batch_stop"])    # a batch stop that names no body
+        self.assertEqual(bj.applicable(row, SHA, ids)["hold_whole"], "batch_stop_names_no_body")
+        for why in (["batch_sha_mismatch"], ["missing_bodies:1"], ["duplicate_bodies:1"], ["model_not_allowed:x"],
+                    ["no_verdict:timeout"], ["body_stop", "unknown_bodies:1"]):
+            row, ids = self.per_body_row(stops=("u3",), reasons=why)
+            a = bj.applicable(row, SHA, ids)
+            self.assertEqual(a["apply"], [], why)
+            self.assertTrue(a["hold_whole"].startswith("batch_level:"), why)
+        row, ids = self.per_body_row()
+        self.assertEqual(bj.applicable(None, SHA, ids)["hold_whole"], "no_verdict_for_this_batch")
+        other = bj.batch_sha(BODIES[:1], {}, "decision-approved", [], {})
+        self.assertEqual(bj.applicable(row, other, ids)["apply"], [])           # another batch's verdict
+        self.assertEqual(bj.applicable({**row, "approval_ref": "x"}, SHA, ids)["apply"], [])
+        self.assertEqual(bj.applicable({**row, "model": "gpt-4o-mini"}, SHA, ids)["apply"], [])
+        self.assertEqual(bj.applicable(row, SHA, ids + ["u99"])["hold_whole"], "verdict_bodies_do_not_match_the_batch")
+        self.assertEqual(bj.applicable(row, SHA, ids[:-1])["apply"], [])
+        self.assertEqual(bj.applicable({**row, "fallback_model": True}, SHA, ids, first_of_class=True)["apply"], [])
+        self.assertEqual(bj.applicable(row, SHA, [])["hold_whole"], "empty_batch")
+        # a stop id with a 'pass' body row still holds that body (either signal is a stop)
+        row, ids = self.per_body_row(stop_ids=["u4"])
+        # (the stop id u4 has a pass body row with no reason / quote -> unexplained: covered below, the batch holds)
+        a = bj.applicable({**row, "reasons": ["body_stop"], "verdict": "stop"}, SHA, ids)
+        self.assertEqual(([h["id"] for h in a["held"]], a["apply"]), (["u4"], []))
+        # QA #1597: a stop id outside the batch is an inconsistent verdict - nothing applies
+        row, ids = self.per_body_row()
+        self.assertEqual(bj.applicable({**row, "stop_ids": ["unknown"], "reasons": ["body_stop"], "verdict": "stop"}, SHA, ids),
+                         {"apply": [], "held": [], "hold_whole": "stop_ids_not_in_batch"})
+        # QA #1597: a held body with no reason OR no quote is an unexplained stop - the WHOLE batch holds
+        for blank in ({"reason_code": ""}, {"evidence_quote": ""}, {"reason_code": " ", "evidence_quote": " "}):
+            row, ids = self.per_body_row(stops=("u5",))
+            row["bodies"] = [{**b, **blank} if b["id"] == "u5" else b for b in row["bodies"]]
+            a = bj.applicable(row, SHA, ids)
+            self.assertEqual((a["apply"], a["hold_whole"], [h["id"] for h in a["held"]]),
+                             ([], "held_body_without_reason_or_quote", ["u5"]), blank)
+        # a stop named only in stop_ids (its body row says pass, no reason) is unexplained too
+        row, ids = self.per_body_row(stop_ids=["u6"])
+        self.assertEqual(bj.applicable({**row, "reasons": ["body_stop"], "verdict": "stop"}, SHA, ids)["hold_whole"],
+                         "held_body_without_reason_or_quote")
+
     def test_the_batch_sha_binds_exactly_what_is_judged(self):
         same = bj.batch_sha(list(reversed(BODIES)), {"u1": {"status": "approved"}}, "decision-approved",
                             ["nothing is needed"], {"r": 1})
