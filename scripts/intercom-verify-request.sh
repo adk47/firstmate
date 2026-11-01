@@ -836,12 +836,15 @@ case "$CAMPAIGN" in
     MAX_CREDITS=1000; MAX_LISTED=3; COPY="proofneed"; APPROVAL_REF="$APPROVAL_REF_PROOF_NEED_ASK"
     [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live and the status notes; proof-need-ask's line is picked by need.code."
     [ "$KIND" = "initial" ] || refuse "proof-need-ask has no follow-ups: one ask per request, ever."
-    # p1 549 (c2's E dry run): the proofneed renderer comma-joins a multi-role row ("Co-Producer, Guitar credit") - /l2
-    # (roles joined with "and" + "credits") is not coded on this path yet. The roles are named only on a ONE-track body
-    # (the plural body names titles only), so an E row of one distinct track naming 2+ distinct roles refuses
-    if [ "$("$JQ_BIN" -r "$TRACKS_JQ"' ntracks as $t
-        | if $t == 1 then ([.credits[]?.role // "" | split(",")[] | ascii_downcase | gsub("^\\s+|\\s+$"; "") | select(length > 0)] | unique | length) else 0 end' "$CREDITS_FILE" 2>/dev/null || echo 99)" -ge 2 ]; then
-      refuse "e_roles_uncoded: this per-need ask names 2 or more roles on one track, and the /l2 roles line is not coded in the proofneed renderer yet. Nothing was sent or claimed."
+    # fable-copy-1030-r5/l2 (1) / p1 552: a document older than 180 days is NOT asked about by the automated line - the row
+    # waits for a human (wait:stale_filing, need_asks build lists it); refused here too, nothing claimed
+    if [ "$("$JQ_BIN" -r --arg day "$DAY" '((.need.doc_received_at // "")[0:10]) as $d
+        | if ($d | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")) | not then "shape"
+          elif (($d + "T00:00:00Z" | fromdateiso8601 | todate)[0:10]) != $d then "shape"   # 2026-02-30 is not a day
+          elif (($day + "T00:00:00Z" | fromdateiso8601) - ($d + "T00:00:00Z" | fromdateiso8601)) > 180 * 86400 then "stale"
+          else "ok" end' "$CREDITS_FILE" 2>/dev/null || echo shape)" = "stale" ]; then
+      # (an unreadable date is the need-shape check's refusal, below)
+      refuse "e_stale_filing: the document this per-need ask is about was sent more than 180 days ago; a human picks it up (wait:stale_filing). Nothing was sent or claimed."
     fi
     ;;
   gap-ask)
@@ -1936,20 +1939,27 @@ def proof_need_line_plural($n; $x):
 # the document is named as the user knows it: its kind and the day they sent it (l1 176 = final, via p1 168: l1's text
 # with that one insertion; kind image / PDF / file from the mime, server facts only; several documents sent on the
 # newest date -> "the documents you sent on {date}")
+def doc_many($n): (($n.doc_count // 1) | tonumber? // 1) > 1;
+# fable-copy-1030-r5/l2 (1): a document not from the current year carries its year ("January 26, 2022")
 def doc_named($n):
   ["January","February","March","April","May","June","July","August","September","October","November","December"] as $m
-  | (if (($n.doc_count // 1) | tonumber? // 1) > 1 then "the documents" else "the \(if $n.doc_kind == "document" then "file" else $n.doc_kind end)" end)
-    + " you sent on \($m[($n.doc_received_at[5:7] | tonumber) - 1]) \($n.doc_received_at[8:10] | tonumber)";
+  | (if doc_many($n) then "the documents" else "the \(if $n.doc_kind == "document" then "file" else $n.doc_kind end)" end)
+    + " you sent on \($m[($n.doc_received_at[5:7] | tonumber) - 1]) \($n.doc_received_at[8:10] | tonumber)"
+    + (if $n.doc_received_at[0:4] != $day[0:4] then ", \($n.doc_received_at[0:4])" else "" end);
+def doc_it($n): if doc_many($n) then "them" else "it" end;
+# fable-copy-1030-r5/l2 (2): the roles on ONE track follow /l - joined "and", plural "credits" ("Mixing credit" for one)
+def track_roles($c): reduce ($c[].role // "" | split(",")[] | gsub("^\\s+|\\s+$"; "") | select(length > 0)) as $r
+  ([]; if any(.[]; ascii_downcase == ($r | ascii_downcase)) then . else . + [$r] end);   # in order, each role once
 def proof_need_ask($fn; $c; $n; $maxl):
-  $c[0] as $x
-  | if ($c | length) == 1 then
-      { subject: "About the document for your Muso credit request",
-        segs: ([ {p: "Hi \($fn), thanks for \(doc_named($n)) for your \($x.role) credit on \($x.track_title | qt) by \($x.artist_name). We have it on file, but on its own it isn't something we can check against an outside source."},
+  ($c[0] + {role: (track_roles($c) | andjoin)}) as $x
+  | if (utitles($c) | length) == 1 then
+      { subject: "About the document for your Muso credit request\(if ($c | length) > 1 then "s" else "" end)",
+        segs: ([ {p: "Hi \($fn), thanks for \(doc_named($n)) for your \(track_roles($c) | join(", ") | role_credits) on \($x.track_title | qt) by \($x.artist_name). We have \(doc_it($n)) on file, but on \(if doc_many($n) then "their own they aren't" else "its own it isn't" end) something we can check against an outside source."},
                  {p: proof_need_line($n; $x)},
-                 {p: "Your request stays open while we look, and nothing is removed."} ] + sig) }
+                 {p: "Your request\(if ($c | length) > 1 then "s stay" else " stays" end) open while we look, and nothing is removed."} ] + sig) }
     else
       { subject: "About the document for your Muso credit requests",
-        segs: ([ {p: "Hi \($fn), thanks for \(doc_named($n)) for your credit requests for \(titles($c; $maxl)). We have it on file, but on its own it isn't something we can check against an outside source."},
+        segs: ([ {p: "Hi \($fn), thanks for \(doc_named($n)) for your credit requests for \(titles($c; $maxl)). We have \(doc_it($n)) on file, but on \(if doc_many($n) then "their own they aren't" else "its own it isn't" end) something we can check against an outside source."},
                  {p: proof_need_line_plural($n; $x)},
                  {p: "Your requests stay open while we look, and nothing is removed."} ] + sig) }
     end;
@@ -2023,7 +2033,7 @@ JQ
 readonly RENDER_JQ
 render() { # <input-json> -> {subject, text, html}
   printf '%s' "$1" | "$JQ_BIN" -c --argjson maxl "$MAX_LISTED" --arg copy "$COPY" --arg kind "$KIND" \
-    --arg due "$DUE_LABEL" --argjson rt "$REJECTION_TEXT" --arg mtype "$MESSAGE_TYPE" "$RENDER_JQ"
+    --arg due "$DUE_LABEL" --argjson rt "$REJECTION_TEXT" --arg mtype "$MESSAGE_TYPE" --arg day "$DAY" "$RENDER_JQ"
 }
 
 # leak_reason <rendered-json>: empty when clean. Same patterns as a customer-facing

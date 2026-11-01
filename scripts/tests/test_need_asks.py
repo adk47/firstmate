@@ -7,6 +7,8 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+import unittest.mock
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -28,6 +30,9 @@ class FakeGate:
 
 class NeedAsksTest(unittest.TestCase):
     def setUp(self):
+        # the fixture documents are dated 2026-10; the 180-day wait rule has its own test (no wall-clock time bomb)
+        p = unittest.mock.patch.object(na, "STALE_FILING_DAYS", 10 ** 6)
+        p.start(); self.addCleanup(p.stop)
         self.d = Path(tempfile.mkdtemp())
         self.dv = str(self.d / "dv.sqlite")
         db = sqlite3.connect(self.dv)
@@ -76,6 +81,23 @@ class NeedAsksTest(unittest.TestCase):
 
     def build(self):
         return na.build(dv_store=self.dv, proof_store=self.proof, paying_path=str(self.paying), query=self.q)
+
+    def test_a_document_older_than_180_days_waits_for_a_human_with_a_due_at(self):
+        # fable-copy-1030-r5/l2 (1) / p1 552: the row is not asked about; it is LISTED as wait:stale_filing, due a day out
+        now = datetime(2027, 4, 17, 12, 0, tzinfo=timezone.utc)      # the 10-18 documents are 181 days back, 10-19 180
+        with unittest.mock.patch.object(na, "STALE_FILING_DAYS", 180):
+            res = na.build(dv_store=self.dv, proof_store=self.proof, paying_path=str(self.paying), query=self.q, now=now)
+        asked = {a["request_id"] for u in res["users"] for a in u["asks"]}
+        waits = {w["request_id"]: w for w in res["waits"]}
+        self.assertEqual(sorted(waits), ["r1", "r3", "r5", "r9"])     # the 10-18 documents wait ...
+        self.assertIn("r2", asked)                                    # ... the 10-19 one (exactly 180 days) is asked
+        self.assertFalse(set(waits) & asked)
+        self.assertTrue(all(w["reason"] == "wait:stale_filing" and w["due_at"] == "2027-04-18T12:00:00+00:00" for w in waits.values()))
+        self.assertEqual(res["counts"]["wait_stale_filing"], len(waits))
+        with unittest.mock.patch.object(na, "STALE_FILING_DAYS", 180):
+            self.assertTrue(na.stale_filing("2026-10-18T23:59:00Z", now))
+            self.assertFalse(na.stale_filing("2026-10-19T00:00:00Z", now))
+            self.assertFalse(na.stale_filing("not a date", now))
 
     def test_core_proof_request_is_recorded_not_counted_as_an_l11c_ask(self):
         # p1 178: core's generic proofRequest on a named request is recorded as ask_class=core_proof_request (audit);

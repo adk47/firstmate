@@ -4034,22 +4034,45 @@ needfile() { # $1 file, $2 jq edit (default: the readable_document need)
   [[ "$output" != *"e_roles_uncoded"* ]]
 }
 
-@test "proof-need-ask (p1 549): a one-track E row naming 2+ distinct roles refuses e_roles_uncoded until /l2 is in the proofneed renderer; one role (any case/spacing, repeated) still renders" {
+@test "proof-need-ask /l2 (fable-copy-1030-r5/l2, p1 552): roles on ONE track join with 'and' + 'credits'; them/it by document count; a non-current-year date carries its year; older than 180 days refuses e_stale_filing" {
+  # (2) one track, two roles - in one row or in two rows: the SINGULAR body naming both roles
   needfile "$TEST_TMPDIR/n.json" '.credits[0].role = "Co-Producer, Guitar"'
-  run -1 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
-  [[ "$output" == *"e_roles_uncoded"* ]]
-  run -1 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
-  [[ "$output" == *"e_roles_uncoded"* ]]
-  [ "$(calls)" -eq 0 ]
-  needfile "$TEST_TMPDIR/n.json" '.credits += [(.credits[0] | .request_id = "r2" | .role = "Mastering")]'
-  run -1 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
-  [[ "$output" == *"e_roles_uncoded"* ]]
-  # two tracks, two roles: the plural body names titles only (no roles) - it renders
-  needfile "$TEST_TMPDIR/n.json" '.credits += [(.credits[0] | .request_id = "r2" | .role = "Mastering" | .track_title = "Song B" | .track_id = "t2")]'
   run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
-  [[ "$(rendered .body | plain)" == *'your credit requests for "Song A" and "Song B"'* ]]
+  [[ "$(rendered .body | plain)" == 'Hi Jane, thanks for the image you sent on October 18 for your Co-Producer and Guitar credits on "Song A" by Big Star. We have it on file, but on its own it isn'"'"'t something we can check against an outside source.'* ]]
+  [ "$(rendered .subject)" = 'About the document for your Muso credit request' ]
+  needfile "$TEST_TMPDIR/n.json" '.credits += [(.credits[0] | .request_id = "r2" | .role = "Mastering")]'
+  run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == *'for your Mixing and Mastering credits on "Song A" by Big Star.'* ]]
+  [[ "$(rendered .body | plain)" == *'Your requests stay open while we look, and nothing is removed.'* ]]
+  [ "$(rendered .subject)" = 'About the document for your Muso credit requests' ]
+  # one role, repeated or spaced: unchanged byte-exact singular
   needfile "$TEST_TMPDIR/n.json" '.credits[0].role = "Mixing, mixing "'
   run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == *'for your Mixing credit on "Song A" by Big Star. We have it on file'* ]]
+  # them/it by document count
+  needfile "$TEST_TMPDIR/n.json" '.need.doc_count = 2 | .need.doc_shas += ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]'
+  run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == *'thanks for the documents you sent on October 18 for your Mixing credit on "Song A" by Big Star. We have them on file, but on their own they aren'"'"'t something'* ]]
+  # QA #1613: never the mixed-number "on its own they aren't"
+  if rendered .body | plain | grep -q "on its own they"; then false; fi
+  # (1) a document from another year carries its year; within 180 days it is still asked about
+  needfile "$TEST_TMPDIR/n.json" '.need.doc_received_at = "2025-12-30T09:30:00Z"'
+  INTERCOM_VERIFY_TEST_DAY=2026-02-10 run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == *'the image you sent on December 30, 2025 for your Mixing credit'* ]]
+  # older than 180 days: refused (a human picks it up), nothing claimed - dry run and send alike
+  needfile "$TEST_TMPDIR/n.json" '.need.doc_received_at = "2026-03-30T09:30:00Z"'
+  INTERCOM_VERIFY_TEST_DAY=2026-11-01 run -1 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"e_stale_filing"* ]]
+  INTERCOM_VERIFY_TEST_DAY=2026-11-01 run -1 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"e_stale_filing"* ]]
+  [ "$(calls)" -eq 0 ]
+  # 181 days: refused
+  needfile "$TEST_TMPDIR/n.json" '.need.doc_received_at = "2026-05-04T09:30:00Z"'
+  INTERCOM_VERIFY_TEST_DAY=2026-11-01 run -1 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"e_stale_filing"* ]]
+  # exactly 180 days is still asked about
+  needfile "$TEST_TMPDIR/n.json" '.need.doc_received_at = "2026-05-05T09:30:00Z"'
+  INTERCOM_VERIFY_TEST_DAY=2026-11-01 run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
 }
 
 @test "proof-need-ask: the gate's strong-identity set equals receipts.STRONG_MATCH (email-filed asks)" {
@@ -4514,3 +4537,4 @@ Thank you, Caroline, Muso Support" ]
   [[ "$output" == *"POSTED email"* ]]
   [ "$(replies)" -eq 0 ]
 }
+

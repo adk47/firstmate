@@ -114,6 +114,20 @@ def tray_outcomes(tray_path: str) -> tuple[dict[tuple[int, str, str], tuple[str,
     return out, intake, paid, len(carried)
 
 
+STALE_FILING_DAYS = 180
+
+
+def stale_filing(received: Any, now: datetime) -> bool:
+    """The document was sent more than STALE_FILING_DAYS before `now` (the gate's e_stale_filing, same day-granular rule).
+    An unreadable date is not stale here (the gate's need-shape check refuses it)."""
+    try:
+        d = datetime.strptime(str(received or "")[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return False
+    today = now.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    return (today - d).days > STALE_FILING_DAYS
+
+
 def build(*, dv_store: str = DV_STORE, proof_store: str = PROOF_STORE, paying_path: str = PAYING,
           query: uvn_status.Query | None = None, now: datetime | None = None, tray: str | None = None) -> dict[str, Any]:
     counts: Counter[str] = Counter()
@@ -170,13 +184,27 @@ def build(*, dv_store: str = DV_STORE, proof_store: str = PROOF_STORE, paying_pa
                                           "intake_id": doc[5]})
     pend = uvn_status.uvn_requests(sorted(cands), query or uvn_status.trino, PENDING) if cands else {}
     users: list[dict[str, Any]] = []
+    waits: list[dict[str, Any]] = []
+    t_now = now or datetime.now(timezone.utc)
     for uid, rows in cands.items():
         live = {r["request_id"].lower() for r in pend.get(uid, []) if not r["_incomplete"]}
         rows = sorted((r for r in rows if r["request_id"] in live), key=lambda r: r["doc_received_at"])
+        is_paid = uid in (tray_paid if tray_paid is not None else paying)
+        # fable-copy-1030-r5/l2 (1) / p1 552: a document older than STALE_FILING_DAYS is NOT asked about by the automated
+        # line - the row WAITS for a human (wait:stale_filing, due_at = a day out), listed, never silently dropped
+        fresh = []
+        for r in rows:
+            if stale_filing(r.get("doc_received_at"), t_now):
+                waits.append({"user_id": str(uid), "paid": is_paid, "request_id": r["request_id"], "reason": "wait:stale_filing",
+                              "doc_received_at": r.get("doc_received_at"),
+                              "due_at": (t_now + timedelta(days=1)).isoformat(timespec="seconds")})
+                counts["wait_stale_filing"] += 1
+            else:
+                fresh.append(r)
+        rows = fresh
         if not rows:
             counts["skip_not_pending"] += 1
             continue
-        is_paid = uid in (tray_paid if tray_paid is not None else paying)
         users.append({"user_id": str(uid), "paid": is_paid, "asks": rows, "arrivals": sorted(arrivals.get(uid, []))})
         counts[f"list_{'paid' if is_paid else 'free'}"] += 1
         counts["list_requests"] += len(rows)
@@ -185,7 +213,7 @@ def build(*, dv_store: str = DV_STORE, proof_store: str = PROOF_STORE, paying_pa
     for u in users:
         u["facts"] = facts_of(u, facts)
     return {"generated_at": (now or datetime.now(timezone.utc)).isoformat(timespec="seconds"),
-            "replica_facts": facts_header(users), "users": users, "counts": dict(counts),
+            "replica_facts": facts_header(users), "users": users, "counts": dict(counts), "waits": waits,
             "signed_on": verify_notify.deployed_head()}
 
 
