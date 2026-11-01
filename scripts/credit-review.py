@@ -661,7 +661,8 @@ def _uvn_status(args: argparse.Namespace) -> int:
                             ledger_path=args.ledger, proof_path=args.proof_on_file, preview_dir=args.preview,
                             from_stage2=args.from_stage2, stage2_path=args.proof_store, exclude_users=exclude,
                             check_recipients=args.check_recipients, segment_daily_cap=args.segment_daily_cap,
-                            gmail_fallback_o=args.gmail_fallback_o)
+                            gmail_fallback_o=args.gmail_fallback_o,
+                            no_correction=args.no_correction)
     log("uvn-status " + json.dumps({k: v for k, v in vars(report).items() if not isinstance(v, (list, dict))}))
     werr = write_outcomes(args, report)
     print(uvn_status.render(report, args.mode, args.segment) + (f" OUTCOMES NOT WRITTEN: {werr}." if werr else ""))
@@ -1026,6 +1027,8 @@ def parser() -> argparse.ArgumentParser:
                          "gap-ask: Fable's gap ask for stage-2 need_more credits (with --from-stage2)")
     us.add_argument("--gmail-fallback-o", action="store_true",
                     help="[key=gmail-o-forward] the /o batch: the frozen did-vouch set ONLY, the ask + /o; only while cs-gmail is stale")
+    us.add_argument("--no-correction", action="store_true",
+                    help="[key=scale-now] defer any ask that would carry the /c2 correction (class C stays signed-only)")
     us.add_argument("--wording", choices=["queued", "received", "queued-neutral", "no-ask"], default=None,
                     help="queued: status-doc-received's 'in our review queue' wording (firstmate 092); "
                          "received: the receipt R1 for a user who still owes proof (send-locked in the gate); "

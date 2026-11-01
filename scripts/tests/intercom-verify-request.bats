@@ -4301,6 +4301,25 @@ Caroline, Muso Support' ]
   [[ "$output" == *"need_doc_group_mismatch"* ]]
 }
 
+@test "uvn-status --no-correction ([key=scale-now] p1 18:42Z): an ask that would carry the /c2 correction is DEFERRED at the check and at the send; a plain ask is unaffected" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  yday="$(python3 -c 'import datetime as d; print((d.datetime.now(d.timezone.utc) - d.timedelta(days=1)).strftime("%Y-%m-%d"))')"
+  INTERCOM_VERIFY_TEST_DAY="$yday" run -0 "$LOCKED" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email"* ]]
+  run -3 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --check-recipient --no-correction
+  [[ "$output" == "DEFERRED c2_signed_only credits=1"* ]]
+  run -3 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --no-correction
+  [[ "$output" == "DEFERRED c2_signed_only"* ]]; [ "$(posts)" -eq 1 ]
+  [ -z "$(sql "SELECT 1 FROM verify_messages WHERE campaign='uvn-status'")" ]
+  # without the flag the same ask is the corrected ask (unchanged)
+  run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == 'A correction to our earlier note'* ]]
+  # a request no status line named: --no-correction changes nothing
+  credits "$TEST_TMPDIR/o.json" Jane "u9:Mixing:Other:Big Star"
+  run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/o.json" --approved-by U7RP6HKUZ --dry-run --no-correction
+  [[ "$(rendered .body | plain)" == 'Hi Jane, a quick status update'* ]]
+}
+
 @test "uvn-status /c2 ([key=k-proof-required]): after a status line about the SAME request the ask opens with the correction, by email; no overlap = the plain ask" {
   credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
   # yesterday on the REAL clock: inside the 7-day cooldown window, and not the ask's own (pinned) day - so this

@@ -465,7 +465,7 @@ esac
 # Email through Intercom (POST /messages, message_type email): Intercom delivers it to the
 # user's inbox and the reply lands in the same conversation. The one other channel is a
 # Caroline comment in the user's own conversation (in-thread delivery, above).
-CREDITS_FILE="" APPROVED_BY="" MESSAGE_ID="" ACTION="post" THREAD="" THREAD_AUTO=0 REPLY_DUE="" GMO=0
+CREDITS_FILE="" APPROVED_BY="" MESSAGE_ID="" ACTION="post" THREAD="" THREAD_AUTO=0 REPLY_DUE="" GMO=0 NO_CORRECTION=0
 MESSAGE_TYPE="email" INAPP_FALLBACK=0 ROUTE_WHY=""
 readonly REQ_TYPE="email" EXPECT_TYPE="email"
 CAMPAIGN="verify-live" KIND="initial" PARENT_ID="" CAMPAIGN_SET=0 KIND_SET=0 COPY_ARG=""
@@ -490,6 +490,9 @@ while [ $# -gt 0 ]; do
     --thread-contact) ACTION="thread-contact"; shift ;;
     --check-recipient) ACTION="check-recipient"; shift ;;
     --gmail-fallback-o) GMO=1; shift ;;   # [key=gmail-o-forward]: the /o clause for the frozen did-vouch set
+    # [key=scale-now] (p1 18:42Z): the unattended timer sends uvn-status asks but NOT /c2 corrections until class C has
+    # its own clean read-back - an ask that would need the /c2 sentence is deferred, at the check and at the send alike
+    --no-correction) NO_CORRECTION=1; shift ;;
     --inapp-fallback) INAPP_FALLBACK=1; shift ;;
     --validate) ACTION="validate"; shift ;;
     -h|--help)  usage; exit 0 ;;
@@ -2084,6 +2087,10 @@ if [ "$CAMPAIGN" = "uvn-status" ] && [ "$KIND" = "initial" ] && [ -z "$REPLY_DUE
     # QA #1565: ONLY the status line(s) being corrected are exempt from the 7-day recent-contact check (by message id)
     C2_EX="$(printf '%s' "$nn" | "$JQ_BIN" -c '[.message_ids[]? | tostring]')" || C2_EX="[]"
     [ -z "$THREAD" ] || refuse "a corrected ask (/c2) goes by email, its own message; --conversation does not apply. Nothing was sent or claimed."
+    if [ "$NO_CORRECTION" = 1 ]; then
+      printf 'DEFERRED c2_signed_only credits=%s (this ask would correct an earlier status line - class C stays signed-only on the timer); nothing was sent or claimed\n' "$N"
+      exit 3
+    fi
   fi
 fi
 with_o() { # <rendered-json> -> /o as the LAST sentence before the sign-off ("Thank you," starts it), byte-exact

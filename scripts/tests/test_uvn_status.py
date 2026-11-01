@@ -783,7 +783,7 @@ class UvnStatusTests(unittest.TestCase):
         prev.mkdir()
         rep, gate = self.run_(mode="dry-run", gate=Renders(), query=replica((1, 2, 3)), preview_dir=str(prev))
         self.assertTrue(all("--dry-run" in a for a, _ in gate.calls))
-        self.assertEqual(sorted(os.listdir(prev)), ["1.txt", "2.txt", "3.txt"])
+        self.assertEqual(sorted(f for f in os.listdir(prev) if f.endswith(".txt")), ["1.txt", "2.txt", "3.txt"])
         self.assertEqual([(prev / f"{u}.txt").read_text().splitlines()[1] for u in (1, 2, 3)],
                          ["note for 1", "note for 2", "note for 3"])
         self.assertEqual(rep.validated, 3)
@@ -2126,6 +2126,48 @@ class AsksScopedProofOnFileTest(unittest.TestCase):
         self.assertFalse(pof.scoped)
         rep, gate = self.run_scoped()
         self.assertEqual(sorted(str(p["user"]["id"]) for _, p in gate.calls), ["1", "4"])
+
+
+class NoCorrectionFlagTest(unittest.TestCase):
+    """[key=scale-now] (p1 18:42Z): run(no_correction=True) - the timer's class-C rail - reaches EVERY gate call as
+    --no-correction (the gate then defers a /c2 ask, check and send alike); off by default."""
+    setUp = UvnStatusTests.setUp
+    write_list = UvnStatusTests.write_list
+    run_ = UvnStatusTests.run_
+    gate_file = UvnStatusTests.gate_file
+
+    def test_the_flag_rides_every_gate_call_and_only_when_asked(self):
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 3)]
+        self.write_list()
+        rep, gate = self.run_(mode="apply", query=replica(range(1, 3)), no_correction=True)
+        self.assertTrue(gate.calls, rep)
+        self.assertTrue(all("--no-correction" in argv for argv, _ in gate.calls))
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(3, 5)]
+        self.write_list()
+        rep, gate = self.run_(mode="apply", query=replica(range(3, 5)))
+        self.assertTrue(gate.calls, rep)
+        self.assertFalse(any("--no-correction" in argv for argv, _ in gate.calls))
+
+
+class JudgeFactsTest(unittest.TestCase):
+    """[key=scale-now-openclaw] (p1 485 / r5): every previewed body has the RENDERER's facts beside it, a JSON object
+    (class, owes_proof, distinct tracks + roles, document dates) - the batch judge's contract; never derived later."""
+    setUp = UvnStatusTests.setUp
+    write_list = UvnStatusTests.write_list
+    run_ = UvnStatusTests.run_
+    gate_file = UvnStatusTests.gate_file
+
+    def test_preview_writes_the_renderers_facts_beside_each_body(self):
+        self.users = [{"user_id": 1, "paid": True, "skip": None, "request_ids": ["r1"]}]
+        self.write_list()
+        d = Path(tempfile.mkdtemp())
+        rep, gate = self.run_(mode="dry-run", query=replica(range(1, 2)), preview_dir=str(d))
+        files = sorted(d.glob("*.facts.json"))
+        self.assertTrue(files, rep)
+        f = json.loads(files[0].read_text())
+        self.assertEqual((f["class"], f["campaign"], f["owes_proof"], f["source"]), ("ask", "uvn-status", True, "renderer"))
+        self.assertEqual(f["distinct_tracks"], len(f["tracks_roles"]))
+        self.assertEqual(oct(files[0].stat().st_mode & 0o777), "0o600")
 
 
 class MixedUserTest(unittest.TestCase):

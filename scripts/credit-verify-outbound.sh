@@ -62,10 +62,12 @@ KILL2="$STATE/credit-verify-outbound.disabled"
 OUT_ROOT="${CVO_OUT_ROOT:-/root/h2-runs/sched}"   # reports only: never a gate input
 PY="$(cfg PY_BIN python3)"
 RUNNER="$(cfg CVO_RUNNER "$HYDRA_ROOT/scripts/credit-review.py")"
+NEED_RUNNER="$(cfg CVO_NEED_RUNNER "$HYDRA_ROOT/scripts/credit_review/need_asks.py")"   # proof-need-ask (E): build + send
 OWING="$(cfg CVO_OWING "$HYDRA_ROOT/scripts/credit_review/owing_proof.py")"
 RECEIPTS="$(cfg CVO_RECEIPTS "$HYDRA_ROOT/scripts/credit_review/receipts.py")"
 HEALTH="$(cfg CVO_HEALTH "$HYDRA_ROOT/scripts/paid-status/health_check.py")"
 ZERO_READ="$(cfg CVO_ZERO_READ "$HYDRA_ROOT/scripts/credit_verify/zero_read.py")"   # n1's durable zero-read (#1545)
+JUDGE="$(cfg CVO_JUDGE "$HYDRA_ROOT/scripts/credit-batch-judge.py")"   # b1 / t01b's batch judge (#1591): SHADOW only here
 FRAUD="$(cfg CVO_FRAUD "")"   # a fraud re-check stub <ledger> <lo> <hi> (tests only); otherwise the lens inline below
 MAIN_ENV="$(cfg CVO_MAIN_ENV /etc/openclaw/main.env)"
 LEDGER="$(cfg CVO_LEDGER /var/lib/hydra/credit-review/ledger.sqlite3)"
@@ -79,15 +81,69 @@ R1_CAP="$(cfg CVO_R1_CAP 250)"
 CLAIM_CAP="$(cfg CVO_CLAIM_CAP 250)"
 DOW="$(cfg CVO_DOW "$(date -u +%u)")"     # 6 = Saturday, 7 = Sunday: claim families first
 REFUSAL_SPIKE="$(cfg CVO_REFUSAL_SPIKE 0.20)"
+FIRST_CAP=100                          # [key=scale-now]: a family's first unsigned ticks, until v1's 10-sample line
+# p1 22:0xZ / 519, b1 518, QA #1587: a live-gate check costs ~6-15 s a user (10-31), and the 20:00Z dry tick ran past
+# 22:00Z holding the lock, so the 22:00Z tick exited. A tick must end inside its 2 h cadence. The per-family SIZE is the
+# family cap (FIRST_CAP before v1's date, the full cap after - #1596 runs read-only checks on 4 workers); the TIME is
+# bounded at every step by a hard deadline inside the cadence:
+#  - no NEW family after TICK_BUDGET_S, and none whose worst case (check + bodies = 2 x cap x CHECK_S_PER_USER, plus
+#    RESERVE_PAD_S) does not fit before TICK_HARD_S;
+#  - the bodies are skipped once TICK_HARD_S is passed; the apply is cut to what fits before it at APPLY_S_PER_USER.
+TICK_BUDGET_S="$(cfg CVO_TICK_BUDGET_S 6000)"
+TICK_HARD_S="$(cfg CVO_TICK_HARD_S 6900)"
+CHECK_S_PER_USER="$(cfg CVO_CHECK_S_PER_USER 4)"   # ~10-15 s a live-gate check on 4 read-only workers (#1596)
+RESERVE_PAD_S="$(cfg CVO_RESERVE_PAD_S 300)"      # + the replica read (~86 s) and the health / zero-read rails
+APPLY_S_PER_USER="$(cfg CVO_APPLY_S_PER_USER 15)"
+TICK_ELAPSED0="$(cfg CVO_TICK_ELAPSED0 0)"     # bats only: the tick started this many seconds ago
+TICK_CADENCE_S=7200
+TIMEOUT_BIN="$(cfg CVO_TIMEOUT_BIN /usr/bin/timeout)"   # QA #1587: every stage of a started family runs under the deadline
+# [key=scale-now] FINAL (Fable + p1 + r5, 10-31 17:5xZ): a family APPLIES on this unattended timer only from the date
+# p1's read-back line set for it HERE - its first batch read back clean (ledger sent set == the check-recipients
+# would-send set, health + zero-read clean). Unset = SIGNED-only: the tick still checks it and writes its bodies,
+# but never applies it (a signed batch goes by hand). FULL_CAP_FROM = v1's 10-sample line: before it the family runs
+# at FIRST_CAP, after it at its normal cap. Constants only - a date moves by PR, never by env or a state file.
+declare -A UNSIGNED_FROM=(
+  [uvn-status]="2026-10-31T18:02Z"     # AE-send-3: 3/3 = would-send 3, health + zero-read clean (h2 18:05Z, n1 465)
+  [status-team-review]="2026-10-31T08:20Z"   # /k-ap 7: 7/7 = the signed set, health + zero-read clean (not a timer family yet)
+  [claim-status]="2026-10-31T17:55Z"   # c2 batch 5 FREE 250: ledger 5763-6052 == the checked/signed 250, health + zero-read clean (p1 488)
+  # status-doc-received (r1): UNSET - no r1 batch has read back clean under the strict definition (p1 488)
+  # proof-need-ask (E): UNSET (p1 555). First clean coded batch 2026-11-01T03:19:09Z (c2 E batch 1: 3 sent == signed,
+  # +60 health + zero-read clean), but it needed two hand-applied /l2 rules (180-d filing, roles) not yet in the
+  # renderer - it is dated only from a clean batch on the deployed /l2 renderer
+)
+# a SUB-class inside a family: uvn-status:c2 = the asks that carry the /c2 correction (class C, never sent yet). Until
+# its date is set the uvn-status family passes --no-correction and the gate defers them (check == send)
+declare -A FULL_CAP_FROM=()
+# bats only (cfg reads env only under the harness): one dated full-cap entry "family=ISO" to test a REACHED date
+FULL_CAP_FROM_TEST="$(cfg CVO_FULL_CAP_FROM_TEST "")"
+[ -z "$FULL_CAP_FROM_TEST" ] || FULL_CAP_FROM["${FULL_CAP_FROM_TEST%%=*}"]="${FULL_CAP_FROM_TEST#*=}"
+# the bats harness only (cfg's seam): every family unsigned at its full cap, so the family tests exercise the applies
+UNSIGNED_ALL="$(cfg CVO_UNSIGNED_ALL 0)"
+NOW_EPOCH="$(cfg CVO_NOW_EPOCH "$(date -u +%s)")"   # harness-only clock for the date boundaries
+# QA #1587: a dated constant counts only once its UTC time has PASSED (equal = passed); a future or unparseable date
+# is not yet - the family stays signed-only / at the first cap
+reached() { # <YYYY-MM-DDTHH:MMZ>
+  [ -n "$1" ] || return 1
+  py - "$1" "$NOW_EPOCH" <<'PY'
+import sys
+from datetime import datetime, timezone
+try:
+    t = datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%MZ").replace(tzinfo=timezone.utc).timestamp()
+except ValueError:
+    sys.exit(1)
+sys.exit(0 if t <= int(sys.argv[2]) else 1)
+PY
+}
 if [ "${1:-}" = "--print-config" ]; then
   for v in CVO_HARNESS HYDRA_ROOT KILL KILL2 LIVE_FLAG PAID_FLAG EXCLUDE STATE PY RUNNER OWING RECEIPTS HEALTH ZERO_READ \
-           FRAUD MAIN_ENV LEDGER SCRIPTS_DIR RD_SCAN RD_CAP POLICY CLAIM_LIST CAP R1_CAP CLAIM_CAP DOW REFUSAL_SPIKE; do
+           FRAUD MAIN_ENV LEDGER SCRIPTS_DIR RD_SCAN RD_CAP POLICY CLAIM_LIST CAP R1_CAP CLAIM_CAP DOW REFUSAL_SPIKE NEED_RUNNER FIRST_CAP UNSIGNED_ALL NOW_EPOCH JUDGE TICK_BUDGET_S TICK_HARD_S CHECK_S_PER_USER RESERVE_PAD_S APPLY_S_PER_USER TICK_ELAPSED0 FULL_CAP_FROM_TEST TIMEOUT_BIN; do
     printf '%s=%s\n' "$v" "${!v}"
   done
   exit 0
 fi
 
 STAMP="$(date -u +%Y%m%dT%H%MZ)"
+TICK_T0="$(( $(date -u +%s) - TICK_ELAPSED0 ))"
 OUT="$OUT_ROOT/$STAMP"
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$OUT/tick.log"; }
 killed() { [ -e "$KILL" ] || [ -e "$KILL2" ]; }
@@ -98,8 +154,20 @@ killed && { echo "$(date -u +%FT%TZ) credit-verify-outbound: kill file $KILL or 
   || { [ ! -e "$STATE" ] && [ -d "$(dirname "$STATE")" ] && [ -w "$(dirname "$STATE")" ]; }; } \
   || { echo "$(date -u +%FT%TZ) credit-verify-outbound: neither $ETC nor $STATE is writable for a kill file; nothing runs" >&2; exit 2; }
 install -d -m 700 "$STATE" "$OUT_ROOT" "$OUT" || exit 2
-exec 9>"$STATE/tick.lock"
-flock -n 9 || { log "another tick holds $STATE/tick.lock; exit"; exit 0; }
+exec 9>>"$STATE/tick.lock"
+if ! flock -n 9; then
+  # the measured reason (b1 518 / p1 519 (2)): who holds it and for how long. A held flock is a LIVE tick (it dies with its
+  # holder), possibly mid-apply - so a tick past its cadence is logged STALE for a human, never killed or taken over.
+  read -r hpid hstart < "$STATE/tick.holder" 2>/dev/null || { hpid="?"; hstart=""; }
+  age=$(( $(date -u +%s) - ${hstart:-$(date -u +%s)} ))
+  if [ "$age" -gt "$TICK_CADENCE_S" ]; then
+    log "STALE: tick pid $hpid has held $STATE/tick.lock for ${age}s (> cadence ${TICK_CADENCE_S}s); this tick exits, nothing taken over"
+  else
+    log "another tick holds $STATE/tick.lock (pid $hpid, ${age}s); exit"
+  fi
+  exit 0
+fi
+printf '%s %s\n' "$$" "$(date -u +%s)" > "$STATE/tick.holder"
 if [ -r "$MAIN_ENV" ]; then set -a; # shellcheck source=/dev/null
   . "$MAIN_ENV"; set +a; fi
 LIVE=0; [ -e "$LIVE_FLAG" ] && LIVE=1
@@ -137,7 +205,7 @@ autokill() { # <why>
 
 # refusal spike of one apply's outcomes JSON: refused / (sent + refused) > REFUSAL_SPIKE
 spike() { # <outcomes json> <sent>
-  "$PY" - "$1" "$2" "$REFUSAL_SPIKE" <<'PY'
+  py - "$1" "$2" "$REFUSAL_SPIKE" <<'PY'
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
@@ -158,7 +226,7 @@ PY
 # #1541: atomic with the send, one segment source - the list's paid flag at send time, never the paying export); the
 # claim runners keep their own daily maxima. Unreadable record / policy, or no policy row = 0 (fail closed).
 room() {
-  "$PY" - "$LEDGER" "$POLICY" "$1" "$2" "$3" "$SCRIPTS_DIR" <<'PY'
+  py - "$LEDGER" "$POLICY" "$1" "$2" "$3" "$SCRIPTS_DIR" <<'PY'
 import datetime, json, sqlite3, sys
 ledger, policy, campaign, seg, cap, scripts = sys.argv[1:7]
 sys.path.insert(0, scripts)
@@ -169,8 +237,12 @@ try:
     group = next(g for g, cs in pol["groups"].items() if campaign in cs)
     shared = int(pol["shared_daily_cap"][group])
     day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-    if group == "credit":
+    if group == "credit" and campaign != "proof-need-ask":
         done = uvn_status.segment_used_today(ledger, campaign, seg, day)
+    elif campaign == "proof-need-ask":   # need_asks keeps no segment record: its own ledger rows today (both segments)
+        done = sqlite3.connect(f"file:{ledger}?mode=ro", uri=True).execute(
+            "SELECT count(*) FROM verify_messages WHERE day=? AND campaign=? AND status IN ('sent','attempted')",
+            (day, campaign)).fetchone()[0]
     else:  # claim runners keep no segment record: count the campaign's ledger rows for the day (both segments)
         done = 0
     cs = pol["groups"][group]
@@ -186,8 +258,8 @@ PY
 # fraudhit <lo> <hi>: re-run the fraud lens on every account this apply sent to (ledger rows lo..hi, sent/attempted).
 # Prints "ok", "hit <ids>" or "unreadable <why>". A held account that RECEIVED a message is the fraud hit (Fable 10-30).
 fraudhit() {
-  if [ -n "$FRAUD" ]; then "$PY" "$FRAUD" "$LEDGER" "$1" "$2" 2>&1 | tail -1; return 0; fi
-  "$PY" - "$LEDGER" "$1" "$2" "$SCRIPTS_DIR" <<'PY'
+  if [ -n "$FRAUD" ]; then py "$FRAUD" "$LEDGER" "$1" "$2" 2>&1 | tail -1; return 0; fi
+  py - "$LEDGER" "$1" "$2" "$SCRIPTS_DIR" <<'PY'
 import sqlite3, sys
 ledger, lo, hi, scripts = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
 sys.path.insert(0, scripts)
@@ -211,7 +283,7 @@ sample() {   # returns non-zero when the pointer could not be written (QA #1541:
     "$(date -u +%FT%TZ)" "$STAMP" "$1" "$(( $2 + 1 ))" "$3" "$OUT/$1-bodies" >> "$STATE/samples.jsonl" 2>/dev/null
 }
 
-maxid() { "$PY" -c 'import sqlite3,sys
+maxid() { py -c 'import sqlite3,sys
 try:
     print(sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True).execute("SELECT coalesce(max(id),0) FROM verify_messages").fetchone()[0])
 except sqlite3.Error:
@@ -219,26 +291,99 @@ except sqlite3.Error:
 
 # family <name> <segment> <list file> <cap> <runner subcommand> <runner args...>:
 #   check -> bodies -> (apply -> health -> spike -> fraud hit -> zero-read -> sample pointer)
+# judge_shadow <tag>: the batch judge's items file from this family's rendered bodies - {user_id, body_html, facts (the
+# renderer's own JSON object), copy_ref} per body - and, when the judge is deployed, its verdict in SHADOW: written and
+# logged next to the batch, acting on NOTHING (p1 / r5: live only after the coverage set; the GO-or-no-apply rail is its
+# own PR). A missing judge or a failed call is logged, never a stopped tick.
+judge_shadow() {
+  local tag="$1" items="$OUT/$1-items.jsonl"
+  py - "$OUT/$tag-bodies" "$items" <<'PY' >> "$OUT/tick.log" 2>&1 || { log "$tag: judge items not built"; return 0; }
+import glob, json, os, sys
+d, out = sys.argv[1:3]
+n = 0
+with open(out, "w") as fh:
+    os.chmod(out, 0o600)
+    for f in sorted(glob.glob(os.path.join(d, "*.txt"))):
+        txt = open(f).read()
+        head, _, rest = txt.partition("\n")
+        try:
+            body = json.loads(rest).get("body", "")
+        except ValueError:
+            body = ""
+        ff = f[:-4] + ".facts.json"
+        facts = json.load(open(ff)) if os.path.exists(ff) else None
+        ref = next((w[5:] for w in head.split() if w.startswith("copy=")), "")
+        fh.write(json.dumps({"user_id": os.path.basename(f)[:-4], "body_html": body, "facts": facts, "copy_ref": ref}) + "\n")
+        n += 1
+print(f"judge items: {n} bodies -> {out}")
+PY
+  if [ -r "$JUDGE" ]; then
+    py "$JUDGE" judge --items "$items" > "$OUT/$tag-judge.out" 2>&1
+    log "$tag judge SHADOW (rc=$?, acts on nothing): $(tail -c 300 "$OUT/$tag-judge.out")"
+  else
+    log "$tag judge: not deployed ($JUDGE); items written for the shadow read"
+  fi
+  return 0
+}
+
+elapsed() { echo $(( $(date -u +%s) - TICK_T0 )); }
+# QA #1587: every subprocess of a started family runs under the deadline - `bounded` gives it the seconds left before
+# TICK_HARD_S (at least 1) and SIGTERMs it there (SIGKILL 30 s later); rc 124/137 = it hit the deadline
+bounded() { local left=$(( TICK_HARD_S - $(elapsed) )); [ "$left" -ge 1 ] || left=1
+  "$TIMEOUT_BIN" --kill-after=30 "${left}s" "$@"; }
+deadline_rc() { [ "$1" = 124 ] || [ "$1" = 137 ]; }
+# b1 560: EVERY python subprocess of the tick - builders, filters, cap reads, checks, renders, the judge, the apply and
+# the post-send health / ledger / zero-read reads - runs under the one deadline wrapper; no exceptions
+py() { bounded "$PY" "$@"; }
+# QA #1587 / b1 546: ONE cap rule - past the family's dated full-cap line its own cap, before it at most FIRST_CAP
+family_cap() { # <family> <its cap>
+  if [ "$UNSIGNED_ALL" = 1 ] || reached "${FULL_CAP_FROM[$1]:-}"; then echo "$2"
+  elif [ "$2" -gt "$FIRST_CAP" ]; then echo "$FIRST_CAP"; else echo "$2"; fi
+}
+
 family() {
   local name="$1" seg="$2" list="$3" cap="$4" sub="$5"; shift 5
   local tag="$name-$seg" rc
   killed && { log "$tag: kill file present; stop"; return 1; }
+  if [ "$(elapsed)" -ge "$TICK_BUDGET_S" ]; then
+    log "$tag: tick budget ${TICK_BUDGET_S}s reached; this family waits for the next tick"; return 0
+  fi
+
   [ -s "$list" ] || { log "$tag: empty audience; skipped"; return 0; }
   local excl=(); [ "$sub" = uvn-status ] && excl=("${EXCL_ARGS[@]}")
-  "$PY" "$RUNNER" "$sub" --list "$list" --segment "$seg" "$@" "${excl[@]}" --mode dry-run --max-users "$cap" \
+  local runner="$RUNNER"; if [ "$sub" = need-send ]; then runner="$NEED_RUNNER"; sub=send; fi
+  # [key=scale-now]: the family's unsigned date (unset = SIGNED-only) and its cap before v1's 10-sample line
+  local fam="$name"; [ "$name" = r1 ] && fam=status-doc-received
+  local unsigned=""
+  reached "${UNSIGNED_FROM[$fam]:-}" && unsigned="${UNSIGNED_FROM[$fam]}"
+  [ "$UNSIGNED_ALL" = 1 ] && unsigned=harness
+  cap="$(family_cap "$fam" "$cap")"
+  local worst=$(( 2 * cap * CHECK_S_PER_USER + RESERVE_PAD_S ))
+  if [ $(( $(elapsed) + worst )) -gt "$TICK_HARD_S" ]; then
+    log "$tag: $(elapsed)s into the tick and its worst case is ${worst}s (cap $cap); it does not fit before the ${TICK_HARD_S}s deadline; this family waits for the next tick"
+    return 0
+  fi
+  py "$runner" "$sub" --list "$list" --segment "$seg" "$@" "${excl[@]}" --mode dry-run --max-users "$cap" \
     --check-recipients --outcomes-json "$OUT/$tag-check.json" > "$OUT/$tag-check.out" 2>&1; rc=$?
   log "$tag check (rc=$rc): $(head -c 600 "$OUT/$tag-check.out")"
+  if deadline_rc "$rc"; then log "$tag: check hit the ${TICK_HARD_S}s deadline (read-only, stopped); the tick ends"; return 1; fi
   [ "$rc" = 0 ] || { log "$tag: check failed; tick stops"; return 1; }
+  if [ "$(elapsed)" -ge "$TICK_HARD_S" ]; then log "$tag: ${TICK_HARD_S}s deadline passed after the check; no bodies, no apply this tick"; return 0; fi
   install -d -m 700 "$OUT/$tag-bodies"
-  # r5: the 5 bodies ARE the after-the-fact review sample - no sample, no send (the tick stops)
-  "$PY" "$RUNNER" "$sub" --list "$list" --segment "$seg" "$@" "${excl[@]}" --mode dry-run --max-users 5 \
-    --preview "$OUT/$tag-bodies" > "$OUT/$tag-bodies.out" 2>&1 \
-    || { log "$tag: body sample failed; no apply, tick stops: $(head -c 300 "$OUT/$tag-bodies.out")"; return 1; }
+  # r5: the bodies ARE the after-the-fact review sample - no sample, no send (the tick stops). [key=scale-now-openclaw]:
+  # the WHOLE batch is rendered (not 5), each body with the renderer's facts beside it - the batch judge's items
+  py "$runner" "$sub" --list "$list" --segment "$seg" "$@" "${excl[@]}" --mode dry-run --max-users "$cap" \
+    --preview "$OUT/$tag-bodies" > "$OUT/$tag-bodies.out" 2>&1; rc=$?
+  if deadline_rc "$rc"; then log "$tag: bodies hit the ${TICK_HARD_S}s deadline (read-only, stopped); no apply, the tick ends"; return 1; fi
+  [ "$rc" = 0 ] || { log "$tag: body sample failed; no apply, tick stops: $(head -c 300 "$OUT/$tag-bodies.out")"; return 1; }
+  judge_shadow "$tag"
   local live="$LIVE"; [ "$seg" = "paid" ] && live="$PAID_LIVE"
   if [ "$live" != 1 ]; then log "$tag: DRY-RUN tick (no send)"; return 0; fi
+  if [ -z "$unsigned" ]; then log "$tag: SIGNED-only family (no read-back date in UNSIGNED_FROM): checked, not applied"; return 0; fi
   killed && { log "$tag: kill file present; stop"; return 1; }
   local campaign; campaign="$(printf '%s\n' "$@" | awk 'p{print; exit} $0=="--campaign"{p=1}')"
   [ -n "$campaign" ] || campaign="$sub"   # the claim runners: the subcommand IS the campaign
+  [ "$runner" = "$NEED_RUNNER" ] && campaign=proof-need-ask
   local rm n daily; rm="$(room "$campaign" "$seg" "$cap")"
   if [[ "$rm" == ERR* ]] || ! [[ "$rm" =~ ^[0-9]+\ [0-9]+\ [0-9]+$ ]]; then
     # QA #1541: an unreadable policy / ledger is an operational failure, not an exhausted cap - stop and page
@@ -246,6 +391,9 @@ family() {
   fi
   local shared; read -r n daily shared <<<"$rm"
   if [ "${n:-0}" -le 0 ]; then log "$tag: daily cap reached for $campaign/$seg; no apply"; return 0; fi
+  local fit=$(( (TICK_HARD_S - $(elapsed)) / APPLY_S_PER_USER ))
+  if [ "$fit" -le 0 ]; then log "$tag: no time left before the ${TICK_HARD_S}s deadline; no apply this tick"; return 0; fi
+  if [ "$n" -gt "$fit" ]; then log "$tag: apply cut from $n to $fit (what fits before the ${TICK_HARD_S}s deadline)"; n="$fit"; fi
   local lo; lo="$(maxid)"
   [ "$lo" -ge 0 ] || { autokill "$tag: ledger unreadable before the apply"; return 1; }
   local capargs=(); [ "$sub" = uvn-status ] && capargs=(--segment-daily-cap "$daily")
@@ -254,17 +402,19 @@ family() {
   # BELOW the policy and later ticks would report room but send 0. For this apply it gets the policy's shared group
   # cap (the binding daily total), so one number governs and room() and the runner cannot disagree.
   CREDIT_UVN_DAILY_MAX="$shared" CREDIT_STATUS_DAILY_MAX="$shared" \
-  "$PY" "$RUNNER" "$sub" --list "$list" --segment "$seg" "$@" "${excl[@]}" --mode apply --max-users "$n" "${capargs[@]}" \
+  py "$runner" "$sub" --list "$list" --segment "$seg" "$@" "${excl[@]}" --mode apply --max-users "$n" "${capargs[@]}" \
     --outcomes-json "$OUT/$tag-apply.json" > "$OUT/$tag-apply.out" 2>&1; rc=$?
   log "$tag APPLY (rc=$rc): $(head -c 600 "$OUT/$tag-apply.out")"
-  local h hrc; h="$("$PY" "$HEALTH" --since "$RUN_START" --bounce-max-pct 2 --unsub-max-pct 2 --spam-max-pct 2 2>&1 | tail -1)"; hrc=$?
+  # a SEND cut at the deadline: whatever it sent is in the ledger, but the read-back is incomplete - a human looks first
+  if deadline_rc "$rc"; then autokill "$tag: the apply hit the ${TICK_HARD_S}s deadline mid-run (ledger $((lo + 1))-…); read back by hand before re-arming"; return 1; fi
+  local h hrc; h="$(py "$HEALTH" --since "$RUN_START" --bounce-max-pct 2 --unsub-max-pct 2 --spam-max-pct 2 2>&1 | tail -1)"; hrc=$?
   log "$tag health (rc=$hrc): $h"
   [ "$hrc" = 0 ] || { autokill "$tag health check rc=$hrc: ${h:0:200}"; return 1; }
   # p1 / n1: the durable zero-read over exactly this apply's ledger rows - OK continues; STOP or UNMEASURED (or a missing
   # reader) writes the kill file. Nothing new in the ledger = nothing to read.
   local hi; hi="$(maxid)"
   [ "$hi" -ge 0 ] || { autokill "$tag: ledger unreadable after the apply"; return 1; }   # QA #1541: never a -1 range
-  local nsent; nsent="$("$PY" -c 'import sqlite3,sys
+  local nsent; nsent="$(py -c 'import sqlite3,sys
 print(sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True).execute(
     "SELECT count(*) FROM verify_messages WHERE id > ? AND id <= ? AND status IN (?, ?)",
     (int(sys.argv[2]), int(sys.argv[3]), "sent", "attempted")).fetchone()[0])' \
@@ -278,7 +428,7 @@ print(sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True).execute(
     log "$tag fraud re-check ledger $((lo + 1))-$hi: ${fh:0:300}"
     [ "$fh" = ok ] || { autokill "$tag FRAUD ${fh:0:200} (ledger $((lo + 1))-$hi)"; return 1; }
     sample "$tag" "$lo" "$hi" || { autokill "$tag: the v1 sample pointer for ledger $((lo + 1))-$hi could not be written to $STATE/samples.jsonl"; return 1; }
-    local zr zrc; zr="$("$PY" "$ZERO_READ" --ledger-ids "$((lo + 1))-$hi" 2>&1 | tail -1)"; zrc=$?
+    local zr zrc; zr="$(py "$ZERO_READ" --ledger-ids "$((lo + 1))-$hi" 2>&1 | tail -1)"; zrc=$?
     [ -r "$ZERO_READ" ] || zrc=2
     log "$tag zero-read ledger $((lo + 1))-$hi (rc=$zrc): ${zr:0:300}"
     [ "$zrc" = 0 ] || { autokill "$tag zero-read $([ "$zrc" = 1 ] && echo STOP || echo UNMEASURED) for ledger $((lo + 1))-$hi: ${zr:0:200}"; return 1; }
@@ -287,11 +437,11 @@ print(sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True).execute(
 }
 
 # ---- audiences (deployed builders only) ----------------------------------------------------------------------
-"$PY" "$OWING" --out "$OUT/owing.json" > "$OUT/owing.out" 2>&1 || { log "owing builder failed: $(tail -c 300 "$OUT/owing.out")"; exit 1; }
-"$PY" "$RECEIPTS" --out-dir "$OUT/receipts" > "$OUT/receipts.out" 2>&1 || { log "receipts builder failed: $(tail -c 300 "$OUT/receipts.out")"; exit 1; }
+py "$OWING" --out "$OUT/owing.json" > "$OUT/owing.out" 2>&1 || { log "owing builder failed: $(tail -c 300 "$OUT/owing.out")"; exit 1; }
+py "$RECEIPTS" --out-dir "$OUT/receipts" > "$OUT/receipts.out" 2>&1 || { log "receipts builder failed: $(tail -c 300 "$OUT/receipts.out")"; exit 1; }
 # r5 on #1541: the uvn-status family is the UVN class only (owing_proof also lists hold classes - review_hold /
 # account_hold - that the uvn-status runner does not cover; they belong to their own campaign's family)
-"$PY" - "$OUT/owing.json" "$OUT/owing-uvn.json" <<'PY' >> "$OUT/tick.log" || { log "owing split failed"; exit 1; }
+py - "$OUT/owing.json" "$OUT/owing-uvn.json" <<'PY' >> "$OUT/tick.log" || { log "owing split failed"; exit 1; }
 import json, sys, collections
 d = json.load(open(sys.argv[1]))
 users = d.get("users") or []
@@ -301,18 +451,38 @@ PY
 log "audiences: owing $(head -c 300 "$OUT/owing.out"); receipts $(head -c 300 "$OUT/receipts.out")"
 
 # ---- the families, in p1's order (paid first; a family whose builder/runner is not deployed is logged) ---------
-for f in proof-need-ask uvn-reminder-7; do
-  log "$f: no deployed audience builder/runner on this tree yet (rides its PR); skipped"
-done
+log "uvn-reminder-7: no deployed audience builder/runner on this tree yet (rides its PR); skipped"
 # reply_due (h2 / firstmate 031): the ONE answer to a user who wrote to us, built by the DEPLOYED reply_due_scan.py
 # (open threads where the customer replied > 24 h ago and after us; comm_state.reply_due() per thread; one row per user;
 # paid first). It runs FIRST so answers go before unsolicited notes. It sends through the uvn-status runner, so it
 # charges the SAME uvn-status daily row and the shared credit cap as the uvn-status family (room() counts every
 # uvn-status message of the day, whatever list it came from). Not deployed = logged and skipped; a builder that IS
 # deployed and fails stops the tick, like the other builders.
+NEED_LIST=""
+if py "$NEED_RUNNER" build --out "$OUT/need-asks-all.json" > "$OUT/need-asks.out" 2>&1; then
+  # the exclude file (users another lane messages today) holds them out of the need family too - need_asks has no
+  # --exclude-users, so the tick filters its list, as it does the claim list
+  py - "$OUT/need-asks-all.json" "$EXCLUDE" "$OUT/need-asks.json" <<'PY' >> "$OUT/tick.log" || { log "need list filter failed"; exit 1; }
+import json, os, sys
+src, excl, out = sys.argv[1:4]
+doc = json.load(open(src))
+held = {l.strip() for l in open(excl) if l.strip() and not l.startswith("#")} if os.path.exists(excl) else set()
+users = doc.get("users") or []
+keep = [u for u in users if str(u.get("user_id")) not in held]
+if keep:
+    json.dump({**doc, "users": keep}, open(out, "w"))
+else:
+    open(out, "w").close()                       # an empty audience: the family logs and skips
+print(f"need list: {len(users)} users, {len(users) - len(keep)} held out by the exclude file")
+PY
+  NEED_LIST="$OUT/need-asks.json"
+  log "audiences: proof-need-ask $(head -c 300 "$OUT/need-asks.out")"
+else
+  log "proof-need-ask builder failed: $(tail -c 300 "$OUT/need-asks.out")"; exit 1
+fi
 RD_LIST=""
 if [ -r "$RD_SCAN" ]; then
-  "$PY" "$RD_SCAN" --out "$OUT/reply-due.json" > "$OUT/reply-due.out" 2>&1 \
+  py "$RD_SCAN" --out "$OUT/reply-due.json" > "$OUT/reply-due.out" 2>&1 \
     || { log "reply_due builder failed: $(tail -c 300 "$OUT/reply-due.out")"; exit 1; }
   RD_LIST="$OUT/reply-due.json"
   log "audiences: reply_due $(head -c 300 "$OUT/reply-due.out")"
@@ -324,17 +494,27 @@ credit_families() {
     family reply-due paid "$RD_LIST" "$RD_CAP" uvn-status --campaign uvn-status || return 1
     family reply-due free "$RD_LIST" "$RD_CAP" uvn-status --campaign uvn-status || return 1
   fi
-  family uvn-status paid "$OUT/owing-uvn.json" "$CAP" uvn-status --campaign uvn-status || return 1
+  local c2=(); reached "${UNSIGNED_FROM[uvn-status:c2]:-}" || c2=(--no-correction)
+  family uvn-status paid "$OUT/owing-uvn.json" "$CAP" uvn-status --campaign uvn-status "${c2[@]}" || return 1
   family r1 paid "$OUT/receipts/receipts-received.json" "$R1_CAP" uvn-status --campaign status-doc-received --wording received || return 1
-  family uvn-status free "$OUT/owing-uvn.json" "$CAP" uvn-status --campaign uvn-status || return 1
+  family uvn-status free "$OUT/owing-uvn.json" "$CAP" uvn-status --campaign uvn-status "${c2[@]}" || return 1
   family r1 free "$OUT/receipts/receipts-received.json" "$R1_CAP" uvn-status --campaign status-doc-received --wording received || return 1
+  # [key=proof-need-ask-family] (b1 / Fable 17:5xZ): the per-need ask (E) - need_asks.py, --check-recipients (#1582);
+  # SIGNED-only until E's first clean coded batch sets UNSIGNED_FROM[proof-need-ask]. QA #1587: a deployed runner that
+  # predates #1582 (no --check-recipients) cannot be checked - logged and skipped, never a failed tick
+  if grep -q -- '"--check-recipients"' "$NEED_RUNNER" 2>/dev/null; then
+    family proof-need-ask paid "$NEED_LIST" "$CAP" need-send || return 1
+    family proof-need-ask free "$NEED_LIST" "$CAP" need-send || return 1
+  else
+    log "proof-need-ask: the deployed need_asks.py has no --check-recipients (#1582 not deployed); skipped"
+  fi
 }
 claim_families() {
   if [ ! -s "$CLAIM_LIST" ]; then log "claim families: no claim list at $CLAIM_LIST (the claim lane drops it); skipped"; return 0; fi
   # QA #1541: the exclude file holds users out of EVERY family - the claim runners take no --exclude-users, so the
   # held claimants are removed from the claim list before any check / preview / apply (unreadable = no claim family)
   local cl="$OUT/claims-filtered.json"
-  "$PY" - "$CLAIM_LIST" "$EXCLUDE" "$cl" <<'PY' >> "$OUT/tick.log" 2>&1 || { autokill "claim families: the claim list or the exclude file is unreadable"; return 1; }
+  py - "$CLAIM_LIST" "$EXCLUDE" "$cl" <<'PY' >> "$OUT/tick.log" 2>&1 || { autokill "claim families: the claim list or the exclude file is unreadable"; return 1; }
 import json, os, sys
 src, excl, out = sys.argv[1:4]
 doc = json.load(open(src))

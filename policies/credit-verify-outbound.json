@@ -16,12 +16,17 @@
     "claim-proof-ask": {
       "paid": 500,
       "free": 500
+    },
+    "proof-need-ask": {
+      "paid": 2500,
+      "free": 2500
     }
   },
   "groups": {
     "credit": [
       "uvn-status",
-      "status-doc-received"
+      "status-doc-received",
+      "proof-need-ask"
     ],
     "claim": [
       "claim-status",

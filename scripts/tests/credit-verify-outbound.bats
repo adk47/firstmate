@@ -8,11 +8,15 @@ setup() {
   export HYDRA_ROOT="$TEST_TMPDIR/hydra" CVO_MAIN_ENV="$TEST_TMPDIR/none.env"
   mkdir -p "$CVO_ETC" "$HYDRA_ROOT/scripts/lib"
   export CALLS="$TEST_TMPDIR/calls.log"; : > "$CALLS"
+  export CVO_TICK_HARD_S=999999 CVO_CHECK_S_PER_USER=0 CVO_RESERVE_PAD_S=0   # the deadline rails have their own tests
+  export CVO_TIMEOUT_BIN="$(command -v timeout)"
   cat > "$TEST_TMPDIR/runner.py" <<'PY'
 import json, os, sys
 a = sys.argv[1:]
 open(os.environ["CALLS"], "a").write(" ".join(a) + "\n")
 mode = a[a.index("--mode") + 1]
+if os.environ.get("STUB_SLEEP") and mode == os.environ.get("STUB_SLEEP_MODE") and (mode == "apply" or "--check-recipients" in a):
+    import time; time.sleep(float(os.environ["STUB_SLEEP"]))
 if mode == "apply":
     open(os.environ["CALLS"] + ".env", "a").write(f"{os.environ.get('CREDIT_UVN_DAILY_MAX', '-')} {os.environ.get('CREDIT_STATUS_DAILY_MAX', '-')}\n")
 if mode == "apply" and os.environ.get("STUB_RUNNER_CAP_MODEL"):
@@ -34,7 +38,8 @@ if "--list" in a:
     open(os.environ["CALLS"] + ".lists", "a").write(os.path.basename(a[a.index("--list") + 1]) + " " + ",".join(ids) + "\n")
 if "--preview" in a:
     d = a[a.index("--preview") + 1]
-    open(os.path.join(d, "1.txt"), "w").write("DRY-RUN body\n")
+    open(os.path.join(d, "1.txt"), "w").write('DRY-RUN uvn-status initial email credits=1 copy=uvn\n{"body": "<p>Hi there</p>"}\n')
+    json.dump({"class": "ask", "owes_proof": True, "distinct_tracks": 1, "source": "renderer"}, open(os.path.join(d, "1.facts.json"), "w"))
     if os.environ.get("STUB_KILL_DURING"):
         open(os.environ["STUB_KILL_DURING"], "w").write("killed by a human mid-tick\n")
 if mode == "apply" and os.environ.get("STUB_BREAK_LEDGER"):
@@ -57,6 +62,8 @@ else:
     print(f"UVN STATUS: {os.environ.get('STUB_SENT', '3')} sent." if mode == "apply" else "UVN STATUS (dry run): 3 would be messaged.")
 PY
   cat > "$TEST_TMPDIR/owing.py" <<'PY'
+import os as _o, time as _t
+if _o.environ.get("STUB_OWING_SLEEP"): _t.sleep(float(_o.environ["STUB_OWING_SLEEP"]))
 import json, sys
 json.dump({"users": [{"user_id": "1", "paid": True, "class": "uvn"}, {"user_id": "2", "paid": False, "class": "uvn"},
                      {"user_id": "8", "paid": True, "class": "review_hold"}, {"user_id": "9", "paid": False, "class": "account_hold"}]},
@@ -76,6 +83,22 @@ sys.exit(int(os.environ.get("STUB_HEALTH_RC", "0")))
 PY
   export CVO_RUNNER="$TEST_TMPDIR/runner.py" CVO_OWING="$TEST_TMPDIR/owing.py" CVO_RECEIPTS="$TEST_TMPDIR/receipts.py"
   export CVO_HEALTH="$TEST_TMPDIR/health.py"
+  # proof-need-ask (E): build writes the audience; send is the same stub runner
+  cat > "$TEST_TMPDIR/need.py" <<'PY'
+import json, os, subprocess, sys
+# this stub speaks #1582's CLI: "--check-recipients" / --outcomes-json (the tick checks the deployed runner for it)
+a = sys.argv[1:]
+if a and a[0] == "build":
+    open(os.environ["CALLS"] + ".need", "a").write("need-build\n")
+    if os.environ.get("STUB_NEED_BUILD_FAIL"):
+        print("need build failed"); sys.exit(1)
+    users = [{"user_id": "5", "paid": True, "asks": []}, {"user_id": "7", "paid": True, "asks": []},
+             {"user_id": "6", "paid": False, "asks": []}] if os.environ.get("STUB_NEED_USERS") else []
+    json.dump({"users": users}, open(a[a.index("--out") + 1], "w"))
+    print('{"counts": {}}'); sys.exit(0)
+sys.exit(subprocess.run([sys.executable, os.environ["CVO_RUNNER"], *a]).returncode)
+PY
+  export CVO_NEED_RUNNER="$TEST_TMPDIR/need.py" CVO_UNSIGNED_ALL=1
   export CVO_POLICY="$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json"
   export CVO_SCRIPTS="$BATS_TEST_DIRNAME/.."
   export CVO_LEDGER="$TEST_TMPDIR/ledger.sqlite3"
@@ -113,9 +136,11 @@ applies() { grep -c -- "--mode apply" "$CALLS" || true; }
   evil=(HYDRA_ROOT="$E" CVO_ETC="$E/etc" CVO_STATE="$E/state" PY_BIN="$E/py" CVO_RUNNER="$E/r" CVO_OWING="$E/o" CVO_RECEIPTS="$E/rc"
         CVO_HEALTH="$E/h" CVO_ZERO_READ="$E/z" CVO_FRAUD="$E/f" CVO_MAIN_ENV="$E/env" CVO_LEDGER="$E/l.sqlite3" CVO_SCRIPTS="$E/s"
         CVO_RD_SCAN="$E/rd" CVO_RD_CAP=99999 CVO_POLICY="$E/p.json" CVO_CLAIM_LIST="$E/c.json" CVO_CAP=99999 CVO_R1_CAP=99999
-        CVO_CLAIM_CAP=99999 CVO_REFUSAL_SPIKE=1.0 CVO_DOW=9)
+        CVO_CLAIM_CAP=99999 CVO_REFUSAL_SPIKE=1.0 CVO_DOW=9 CVO_NEED_RUNNER="$E/n" CVO_UNSIGNED_ALL=1 CVO_NOW_EPOCH=1 CVO_JUDGE="$E/j" CVO_TICK_BUDGET_S=999999 CVO_TICK_HARD_S=999999 CVO_CHECK_S_PER_USER=0 CVO_RESERVE_PAD_S=0 CVO_APPLY_S_PER_USER=1 CVO_TICK_ELAPSED0=99 CVO_FULL_CAP_FROM_TEST=uvn-status=2000-01-01T00:00Z CVO_TIMEOUT_BIN="$E/t")
   run -0 env -u BATS_TEST_TMPDIR "${evil[@]}" "$SCRIPT" --print-config
   [[ "$output" != *"$E"* ]]; [[ "$output" != *99999* ]]
+  now_line="$(printf '%s\n' "$output" | grep '^NOW_EPOCH=')"; [ "${now_line#NOW_EPOCH=}" -gt 1700000000 ]   # the real clock, never CVO_NOW_EPOCH=1
+  output="$(printf '%s\n' "$output" | grep -v '^NOW_EPOCH=')"
   want="CVO_HARNESS=0
 HYDRA_ROOT=/opt/hydra
 KILL=/etc/hydra/credit-verify-outbound.disabled
@@ -142,15 +167,174 @@ CAP=250
 R1_CAP=250
 CLAIM_CAP=250
 DOW=$(date -u +%u)
-REFUSAL_SPIKE=0.20"
+REFUSAL_SPIKE=0.20
+NEED_RUNNER=/opt/hydra/scripts/credit_review/need_asks.py
+FIRST_CAP=100
+UNSIGNED_ALL=0
+JUDGE=/opt/hydra/scripts/credit-batch-judge.py
+TICK_BUDGET_S=6000
+TICK_HARD_S=6900
+CHECK_S_PER_USER=4
+RESERVE_PAD_S=300
+APPLY_S_PER_USER=15
+TICK_ELAPSED0=0
+FULL_CAP_FROM_TEST=
+TIMEOUT_BIN=/usr/bin/timeout"
   [ "$output" = "$want" ]
   # a BATS_TEST_TMPDIR that is not a directory is not the harness either
   run -0 env BATS_TEST_TMPDIR=/nonexistent/x "${evil[@]}" "$SCRIPT" --print-config
+  output="$(printf '%s\n' "$output" | grep -v '^NOW_EPOCH=')"
   [ "$output" = "$want" ]
   # under the harness (bats sets BATS_TEST_TMPDIR) the test values are the seam
   run -0 "$SCRIPT" --print-config
   [[ "$output" == *"CVO_HARNESS=1"* ]]; [[ "$output" == *"KILL=$CVO_ETC/credit-verify-outbound.disabled"* ]]
   [[ "$output" == *"LEDGER=$CVO_LEDGER"* ]]
+}
+
+@test "outbound tick ([key=proof-need-ask-family]): the per-need ask runs as a family - built each tick, checked with --check-recipients, applied as proof-need-ask under the credit group cap" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  export STUB_NEED_USERS=1
+  printf '7\n' > "$CVO_ETC/credit-verify-outbound.exclude"     # another lane messages user 7 today
+  run -0 "$SCRIPT"
+  grep -q "^need-build" "$CALLS.need"
+  grep -q "^need-asks.json 5,6$" "$CALLS.lists"                # the need list without the excluded user 7
+  grep -q "^send --list .*need-asks.json --segment paid --mode dry-run --max-users 250 --check-recipients" "$CALLS"
+  grep -q "^send --list .*need-asks.json --segment paid --mode apply" "$CALLS"
+  grep -q "^send --list .*need-asks.json --segment free --mode apply" "$CALLS"
+  # QA #1587: a deployed runner that predates #1582 (no --check-recipients) is skipped, and the tick goes on
+  rm -f "$CVO_ETC/credit-verify-outbound.disabled"; : > "$CALLS"
+  grep -v -- '"--check-recipients"' "$CVO_NEED_RUNNER" > "$TEST_TMPDIR/need-old.py"
+  CVO_NEED_RUNNER="$TEST_TMPDIR/need-old.py" run -0 "$SCRIPT"
+  if grep -q "^send " "$CALLS"; then false; fi
+  grep -q "^uvn-status .*--mode apply" "$CALLS"
+  grep -q "no --check-recipients (#1582 not deployed); skipped" "$CVO_OUT_ROOT"/*/tick.log
+  # a builder that fails stops the tick (like the other builders)
+  rm -f "$CVO_ETC/credit-verify-outbound.disabled"; : > "$CALLS"; STUB_NEED_BUILD_FAIL=1 run -1 "$SCRIPT"
+  if grep -q -- "--mode apply" "$CALLS"; then false; fi
+}
+
+@test "outbound tick ([key=scale-now]): a family with no read-back date in UNSIGNED_FROM is SIGNED-only - checked and sampled, never applied; before v1's sample date it runs at the first cap of 100" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  # p1 18:42Z: class C (/c2 corrections) has no date - the uvn-status family defers them at the gate, check and apply
+  grep -q "^uvn-status .*--campaign uvn-status --no-correction .*--check-recipients" "$CALLS"
+  grep -q "^uvn-status .*--campaign uvn-status --no-correction .*--mode apply" "$CALLS"
+  # uvn-status has its date (AE-send-3 read-back): applied, at FIRST_CAP (no FULL_CAP_FROM yet)
+  grep -q "^uvn-status --list .*owing-uvn.json --segment paid --campaign uvn-status .*--mode apply" "$CALLS"
+  grep -q "^uvn-status --list .*owing-uvn.json --segment paid --campaign uvn-status .*--mode dry-run --max-users 100 --check-recipients" "$CALLS"
+  # every other family: checked (dry-run --check-recipients) but NO apply
+  grep -q "^send --list .*need-asks.json --segment paid --mode dry-run --max-users 100 --check-recipients" "$CALLS"
+  if grep -q "^send .*--mode apply" "$CALLS"; then false; fi
+  if grep -q "campaign status-doc-received.*--mode apply" "$CALLS"; then false; fi
+  if grep -q "^claim-.*--mode apply" "$CALLS"; then false; fi
+  grep -q "SIGNED-only family" "$CVO_OUT_ROOT"/*/tick.log
+  # QA #1587: the dates are TIMES - before uvn-status's date it is signed-only too; at / after it, it applies
+  : > "$CALLS"; STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 CVO_NOW_EPOCH="$(python3 -c 'import datetime as d; print(int(d.datetime(2026,10,31,18,1,tzinfo=d.timezone.utc).timestamp()))')" run -0 "$SCRIPT"
+  if grep -q -- "--mode apply" "$CALLS"; then false; fi
+  : > "$CALLS"; STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 CVO_NOW_EPOCH="$(python3 -c 'import datetime as d; print(int(d.datetime(2026,10,31,18,2,tzinfo=d.timezone.utc).timestamp()))')" run -0 "$SCRIPT"
+  grep -q "^uvn-status .*--mode apply" "$CALLS"
+  # outside the harness the seam is a constant 0
+  run -0 env -u BATS_TEST_TMPDIR CVO_UNSIGNED_ALL=1 "$SCRIPT" --print-config
+  [[ "$output" == *"UNSIGNED_ALL=0"* ]]; [[ "$output" == *"FIRST_CAP=100"* ]]
+}
+
+@test "outbound tick ([key=scale-now-openclaw]): every family writes the batch judge's items (body + the renderer's facts object) and the judge runs in SHADOW - a STOP verdict blocks nothing" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  cat > "$TEST_TMPDIR/judge.py" <<'PY'
+import json, os, sys
+items = [json.loads(l) for l in open(sys.argv[sys.argv.index("--items") + 1])]
+open(os.environ["CALLS"] + ".judge", "a").write(f"{len(items)} {items[0]['copy_ref']} {type(items[0]['facts']).__name__}\n")
+print(json.dumps({"verdict": "STOP", "reason_code": "test"}))
+PY
+  CVO_JUDGE="$TEST_TMPDIR/judge.py" run -0 "$SCRIPT"
+  out="$(ls -d "$CVO_OUT_ROOT"/*/ | head -1)"
+  python3 -c "import json,sys; it=[json.loads(l) for l in open(sys.argv[1])]; assert it and it[0]['facts']['class']=='ask' and it[0]['body_html']=='<p>Hi there</p>' and it[0]['copy_ref']=='uvn', it" "$out/uvn-status-free-items.jsonl"
+  grep -q "^1 uvn dict$" "$CALLS.judge"
+  grep -q "judge SHADOW" "$out/tick.log"
+  grep -q -- "--mode apply" "$CALLS"                                 # shadow: the STOP blocked no apply
+  # no judge deployed: the items are still written, the tick goes on
+  rm -rf "$CVO_OUT_ROOT"; : > "$CALLS"; run -0 "$SCRIPT"
+  out="$(ls -d "$CVO_OUT_ROOT"/*/ | head -1)"
+  [ -s "$out/uvn-status-free-items.jsonl" ]; grep -q "judge: not deployed" "$out/tick.log"
+}
+
+@test "outbound tick (p1 22:0xZ): a spent tick budget starts no new family - the rest wait for the next tick, nothing fails" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  CVO_TICK_BUDGET_S=0 run -0 "$SCRIPT"
+  if grep -q -- "--check-recipients" "$CALLS"; then false; fi
+  grep -q "tick budget 0s reached; this family waits for the next tick" "$CVO_OUT_ROOT"/*/tick.log
+}
+
+@test "outbound tick (QA #1587, b1 546): ONE cap rule - before the family's full-cap date at most 100, after a REACHED date its whole cap (250); a held lock is measured (holder + age, STALE past the cadence) and never taken over" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  export CVO_UNSIGNED_ALL=0 CVO_NOW_EPOCH="$(python3 -c 'import datetime as d; print(int(d.datetime(2026,11,1,4,0,tzinfo=d.timezone.utc).timestamp()))')"
+  run -0 "$SCRIPT"                                                  # uvn-status: no full-cap date -> 100
+  grep -q -- "--campaign uvn-status .*--max-users 100 --check-recipients" "$CALLS"
+  if grep -q -- "--campaign uvn-status .*--max-users 250 --check-recipients" "$CALLS"; then false; fi
+  : > "$CALLS"; rm -f "$CVO_LEDGER.segments.jsonl"
+  CVO_FULL_CAP_FROM_TEST="uvn-status=2026-11-01T03:00Z" run -0 "$SCRIPT"   # a REACHED date -> the whole 250
+  grep -q -- "--campaign uvn-status .*--max-users 250 --check-recipients" "$CALLS"
+  : > "$CALLS"; rm -f "$CVO_LEDGER.segments.jsonl"
+  CVO_FULL_CAP_FROM_TEST="uvn-status=2026-11-01T05:00Z" run -0 "$SCRIPT"   # a date not reached yet -> still 100
+  grep -q -- "--campaign uvn-status .*--max-users 100 --check-recipients" "$CALLS"
+  unset CVO_UNSIGNED_ALL CVO_NOW_EPOCH; : > "$CALLS"; rm -f "$CVO_LEDGER.segments.jsonl"
+  run -0 "$SCRIPT"
+  # the holder record a later tick measures: a pid and a start epoch from THIS run
+  read -r hp hs < "$CVO_STATE/tick.holder"
+  [[ "$hp" =~ ^[0-9]+$ ]] && [ "$hs" -gt $(( $(date -u +%s) - 900 )) ]
+  # a live holder: the measured reason, then exit 0 without running anything
+  : > "$CALLS"
+  rm -f "$CVO_STATE/tick.holder"
+  ( exec 9>>"$CVO_STATE/tick.lock"; flock 9; printf '4242 %s\n' "$(( $(date -u +%s) - 9000 ))" > "$CVO_STATE/tick.holder"; sleep 6 ) &
+  for _ in $(seq 50); do [ -s "$CVO_STATE/tick.holder" ] && break; sleep 0.1; done   # the holder has the lock
+  run -0 "$SCRIPT"
+  wait
+  [ ! -s "$CALLS" ]
+  grep -q "STALE: tick pid 4242 has held .*tick.lock for 9[0-9][0-9][0-9]s (> cadence 7200s); this tick exits, nothing taken over" "$CVO_OUT_ROOT"/*/tick.log
+}
+
+@test "outbound tick (QA #1587): a started family is bounded in TIME - none starts without its reserve before the deadline, and the apply is cut to what fits" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  # 5000 s in, cap 250 x 2 x 4 s + 300 s = 2300 s worst case > the 6900 s deadline: no family starts
+  CVO_TICK_ELAPSED0=5000 CVO_CHECK_S_PER_USER=4 CVO_RESERVE_PAD_S=300 CVO_TICK_HARD_S=6900 run -0 "$SCRIPT"
+  if grep -q -- "--check-recipients" "$CALLS"; then false; fi
+  grep -q "its worst case is 2300s (cap 250); it does not fit before the 6900s deadline; this family waits for the next tick" "$CVO_OUT_ROOT"/*/tick.log
+  # 30 s before the deadline at 15 s a user: a started family applies at most 2
+  : > "$CALLS"; rm -f "$CVO_LEDGER.segments.jsonl"
+  CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6870 CVO_CHECK_S_PER_USER=0 CVO_RESERVE_PAD_S=0 CVO_TICK_HARD_S=6900 CVO_APPLY_S_PER_USER=15 run -0 "$SCRIPT"
+  grep -q -- "--mode apply --max-users [12] " "$CALLS"
+  if grep -E -- "--mode apply --max-users ([3-9]|[1-9][0-9]+) " "$CALLS"; then false; fi
+  grep -qE "apply cut from [0-9]+ to [12] \(what fits before the 6900s deadline\)" "$CVO_OUT_ROOT"/*/tick.log
+}
+
+@test "outbound tick (QA #1587): every subprocess runs under the deadline - a slow read-only check is stopped there and the tick ends (lock released); a slow APPLY cut at the deadline writes the kill file" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  # 3 s before the deadline, a check that would take 30 s: stopped at ~3 s, the tick ends, nothing applied, no kill
+  t0=$(date +%s)
+  STUB_SLEEP_MODE=dry-run STUB_SLEEP=30 CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6897 CVO_TICK_HARD_S=6900 run -1 "$SCRIPT"
+  [ $(( $(date +%s) - t0 )) -lt 25 ]
+  grep -q "check hit the 6900s deadline (read-only, stopped); the tick ends" "$CVO_OUT_ROOT"/*/tick.log
+  [ "$(applies)" -eq 0 ]; [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]
+  # the lock is released: the next tick runs at once
+  run -0 "$SCRIPT"
+  if grep -q "another tick holds" "$CVO_OUT_ROOT"/*/tick.log; then false; fi
+  # an apply that runs past the deadline: stopped there, and the kill file is written (a human reads it back)
+  : > "$CALLS"; rm -f "$CVO_LEDGER.segments.jsonl"
+  STUB_SLEEP_MODE=apply STUB_SLEEP=30 CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6880 CVO_TICK_HARD_S=6900 CVO_APPLY_S_PER_USER=1 run -1 "$SCRIPT"
+  grep -q "the apply hit the 6900s deadline mid-run" "$CVO_ETC/credit-verify-outbound.disabled"
+}
+
+@test "outbound tick (b1 560): EVERY python subprocess runs under the one deadline wrapper - a slow builder is stopped at the deadline and the tick ends" {
+  # no bare "$PY" command left outside the py() wrapper itself
+  src="$BATS_TEST_DIRNAME/../credit-verify-outbound.sh"; [ -s "$src" ]
+  grep -q '^py() { bounded "\$PY" "\$@"; }' "$src"
+  if grep -nE '(^|[[:space:](;|&]|\$\()"\$PY" ' "$src" | grep -v ':py() {'; then false; fi
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  t0=$(date +%s)
+  STUB_OWING_SLEEP=30 CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6897 CVO_TICK_HARD_S=6900 run -1 "$SCRIPT"
+  [ $(( $(date +%s) - t0 )) -lt 25 ]
+  grep -q "owing builder failed" "$CVO_OUT_ROOT"/*/tick.log
+  if grep -q -- "--check-recipients" "$CALLS"; then false; fi
 }
 
 @test "outbound tick: the kill file stops everything - no builder, no runner" {
@@ -165,7 +349,7 @@ REFUSAL_SPIKE=0.20"
   [ "$(applies)" -eq 0 ]
   grep -q -- "--campaign uvn-status .*--mode dry-run --max-users 250 --check-recipients --outcomes-json" "$CALLS"
   grep -q -- "--campaign status-doc-received --wording received .*--check-recipients" "$CALLS"
-  grep -q -- "--max-users 5 --preview" "$CALLS"
+  grep -q -- "--max-users 250 --preview" "$CALLS"                 # the whole batch is rendered (the judge's items)
   out="$(ls -d "$CVO_OUT_ROOT"/*)"
   [ -s "$out/uvn-status-paid-check.json" ] && [ -s "$out/uvn-status-paid-bodies/1.txt" ]
   grep -q "DRY-RUN tick (no send)" "$out/tick.log"
@@ -425,6 +609,22 @@ J
   run -1 "$SCRIPT"
   [ "$(applies)" -eq 1 ]
   grep -q "sample pointer for ledger 1-2 could not be written" "$CVO_ETC/credit-verify-outbound.disabled"
+}
+
+@test "outbound tick (QA #1587, p1 488): production mode with a claim list - claim-status applies only from its read-back date (17:55Z); claim-proof-ask is SIGNED-only, checked and never applied" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  printf '{"generated_at": "x", "claims": [{"claim_id": 1, "user_id": 5}]}' > "$CVO_STATE.claims.json"
+  export CVO_CLAIM_LIST="$CVO_STATE.claims.json" CVO_UNSIGNED_ALL=0
+  at() { python3 -c 'import datetime as d,sys; print(int(d.datetime(2026,10,31,int(sys.argv[1]),int(sys.argv[2]),tzinfo=d.timezone.utc).timestamp()))' "$1" "$2"; }
+  CVO_NOW_EPOCH="$(at 17 54)" run -0 "$SCRIPT"                      # before the read-back: nothing claim-side applies
+  if grep -q -- "^claim-.*--mode apply" "$CALLS"; then false; fi
+  grep -q -- "^claim-status --list .*--mode dry-run .*--check-recipients" "$CALLS"
+  : > "$CALLS"; rm -f "$CVO_LEDGER.segments.jsonl"
+  CVO_NOW_EPOCH="$(at 17 56)" run -0 "$SCRIPT"                      # after it: claim-status applies, claim-proof-ask never
+  grep -q -- "^claim-status --list .*/claims-filtered.json --segment free .*--mode apply" "$CALLS"
+  if grep -q -- "^claim-proof-ask .*--mode apply" "$CALLS"; then false; fi
+  grep -q -- "^claim-proof-ask --list .*--mode dry-run .*--check-recipients" "$CALLS"
+  grep -q "claim-proof-ask-free: SIGNED-only" "$CVO_OUT_ROOT"/*/tick.log
 }
 
 @test "outbound tick (QA #1541): the exclude file holds claimants out of the claim families too; an unreadable claim list kills" {

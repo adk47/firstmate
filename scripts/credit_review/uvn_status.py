@@ -705,7 +705,8 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
         wording: str = "", from_stage2: bool = False, stage2_path: str | None = None,
         exclude_users: set[str] | frozenset[str] = frozenset(), lens: fraud_lens.LensFn | None = None,
         watchlist_path: str | None = None, holds_path: str | None = None,
-        segment_daily_cap: int | None = None, gmail_fallback_o: bool = False) -> UvnReport:
+        segment_daily_cap: int | None = None, gmail_fallback_o: bool = False,
+        no_correction: bool = False) -> UvnReport:
     if campaign not in CAMPAIGNS:
         raise ValueError(f"unknown campaign {campaign!r}")
     if wording and (campaign, wording) not in WORDINGS:
@@ -1084,7 +1085,8 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                 l0 = ledger_left() if mode == "apply" else 0
                 verify_notify.send_all([p], report, mode=mode, wrapper=wrapper, runner=runner,
                                        extra=["--campaign", campaign] + (["--copy", wording] if wording else [])
-                                       + (["--gmail-fallback-o"] if gmail_fallback_o else []),
+                                       + (["--gmail-fallback-o"] if gmail_fallback_o else [])
+                                       + (["--no-correction"] if no_correction else []),
                                        pace_seconds=0, preview_dir=preview_dir,
                                        check_recipients=check_recipients and mode != "apply")
                 calls += 1

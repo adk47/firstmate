@@ -655,6 +655,27 @@ def _first_line(text: str) -> str:
 CHECK_WORKERS = 4
 
 
+ASK_CAMPAIGNS = ("uvn-status", "proof-need-ask", "gap-ask", "claim-proof-ask", "verify-live", "retro-past")
+
+
+def render_facts(p: dict[str, Any], extra: list[str]) -> dict[str, Any]:
+    """The facts row the batch judge reads for one rendered body, from the payload the gate rendered: the class (ask /
+    status, by campaign), whether the user owes proof (an ask, or the R1 receipt to a user who still owes it), the
+    distinct tracks with their roles, and the document dates the copy may name."""
+    camp = extra[extra.index("--campaign") + 1] if "--campaign" in extra[:-1] else ""
+    copy = extra[extra.index("--copy") + 1] if "--copy" in extra[:-1] else ""
+    credits = p.get("credits") or []
+    tracks: dict[str, list[str]] = {}
+    for c in credits:
+        tracks.setdefault(str(c.get("track_title") or ""), []).append(str(c.get("role") or ""))
+    need = p.get("need") or {}
+    dates = sorted({str(d)[:10] for d in [need.get("doc_received_at")] + [c.get("doc_received_at") for c in credits] if d})
+    return {"class": "ask" if camp in ASK_CAMPAIGNS else "status", "campaign": camp, "copy": copy,
+            "owes_proof": camp in ASK_CAMPAIGNS or copy == "received",
+            "distinct_tracks": len(tracks), "tracks_roles": [[t, sorted(set(r))] for t, r in sorted(tracks.items())],
+            "document_dates": dates, "credits": len(credits), "source": "renderer"}
+
+
 def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
              wrapper: str = WRAPPER, runner: Runner = _run, extra: list[str] | None = None,
              pace_seconds: float = 0.0, preview_dir: str | None = None, reminder: bool = False,
@@ -698,6 +719,11 @@ def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
             fdp = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fdp, "w", encoding="utf-8") as fh:
                 fh.write(res.stdout)
+            # [key=scale-now-openclaw] the batch judge's contract (p1 485 / r5): the RENDERER's own facts for this body,
+            # a JSON object beside it - never derived later from the text
+            fdf = os.open(out_path[:-4] + ".facts.json", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fdf, "w", encoding="utf-8") as fh:
+                json.dump(render_facts(p, extra or []), fh)
         out, err = _first_line(res.stdout), _first_line(res.stderr)
         if res.returncode == 0 and out.startswith("RECIPIENT OK"):
             report.recipient_ok += 1

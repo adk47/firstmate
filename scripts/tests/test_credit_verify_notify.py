@@ -1524,7 +1524,7 @@ class WaveTests(unittest.TestCase):
         verify_notify.run_wave(FakeAdmin([req("r1")]), wave_path=self.wave, ledger_path=self.path, mode="dry-run",
                                runner=fake, wrapper="/w", preview_dir=prev)
         self.assertIn("--dry-run", fake.argv[0])
-        self.assertEqual(os.listdir(prev), ["42.txt"])
+        self.assertEqual([f for f in os.listdir(prev) if f.endswith(".txt")], ["42.txt"])   # + its .facts.json (the judge)
         self.assertEqual(stat.S_IMODE(os.stat(os.path.join(prev, "42.txt")).st_mode), 0o600)
 
 
