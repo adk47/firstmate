@@ -1426,6 +1426,12 @@ if [ "$LIVE" = "1" ]; then
     if [ "$pending" = "[]" ]; then
       printf 'SKIPPED already-notified credits=%s\n' "$N"; exit 0
     fi
+    nc_why="$(printf '%s' "$peek" | "$JQ_BIN" -r '.no_channel // empty')"
+    if [ -n "$nc_why" ]; then
+      # r5 / p1 [no-channel]: the last message to this user was refused by Intercom (action_forbidden) - no campaign
+      # re-attempts until a person clears it (verify_ledger clear-no-channel); listed, never sent or claimed
+      printf 'HELD no_channel credits=%s (%s); nothing was sent or claimed\n' "$N" "${nc_why#no_channel: }"; exit 3
+    fi
     if [ "$(printf '%s' "$peek" | "$JQ_BIN" -r '.hold.flagged // false')" = "true" ]; then
       printf 'SKIPPED refused-flagged credits=%s (refused %s times; with a human)\n' "$N" "3"; exit 0
     fi
@@ -1458,7 +1464,12 @@ if [ "$LIVE" = "1" ]; then
     st="$(ledger reminder-state --parent-message-id "$PARENT_ID" --kind "$KIND" --day "$DAY")" \
       || die "the ledger read failed; refusing to send without the idempotency record."
     case "$(printf '%s' "$st" | "$JQ_BIN" -r '.result')" in
-      due) ;;
+      due)
+        # QA #1588: a follow-up of a user Intercom refused (action_forbidden) waits for a person's clear, like any note
+        if [ -n "$(printf '%s' "$st" | "$JQ_BIN" -r '.no_channel // ""')" ]; then
+          printf 'HELD no_channel credits=%s (%s); nothing was sent\n' "$(printf '%s' "$st" | "$JQ_BIN" -r '.request_ids | length')" \
+            "$(printf '%s' "$st" | "$JQ_BIN" -r '.no_channel | sub("^no_channel: "; "")')"; exit 3
+        fi ;;
       no_parent) refuse "message $PARENT_ID is not a sent note in the ledger; a follow-up follows up a note this wrapper sent." ;;
       not_applicable) refuse "note $PARENT_ID has no $KIND: only a windowed note (one that named a removal date) gets follow-ups." ;;
       not_due) printf 'NOT DUE %s message=%s\n' "$KIND" "$PARENT_ID"; exit 3 ;;
@@ -2984,6 +2995,9 @@ case "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r 'if .result == "recent" and .reason 
     printf 'SKIPPED %s credits=%s\n' "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.reason')" "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.request_ids | length')"; exit 0 ;;
   recent)
     printf 'DEFERRED messaged_7d credits=%s (a note from this gate in the last 7 days)\n' "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.request_ids | length')"; exit 3 ;;
+  no_channel)
+    printf 'HELD no_channel credits=%s (%s); nothing was sent\n' "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.request_ids | length')" \
+      "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.reason | sub("^no_channel: "; "")')"; exit 3 ;;
   refusal_hold)
     printf 'DEFERRED refused-recheck credits=%s (refused before; held for a re-check or a human)\n' "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.request_ids | length')"; exit 3 ;;
   daily_cap)

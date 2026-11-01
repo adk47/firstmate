@@ -499,6 +499,32 @@ OTHER_PRO="0c4e7a2b-1f3d-4b6a-9e8c-7d5a3b1f0e92"
   [ "$(posts)" -eq 0 ]
 }
 
+@test "no-channel (r5 / p1 10-31): after Intercom refused a message with action_forbidden, --check-recipient and the send HOLD every campaign until a person clears it" {
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
+  decider_approved r1 catalog_confirmed
+  python3 "$HYDRA_REPO/scripts/credit_review/verify_ledger.py" --db "$INTERCOM_VERIFY_TEST_LEDGER" migrate >/dev/null
+  python3 - "$INTERCOM_VERIFY_TEST_LEDGER" <<'PY'
+import sqlite3, sys
+d = sqlite3.connect(sys.argv[1])
+d.execute("INSERT INTO verify_messages (campaign, kind, user_key, day, status, message_type, request_ids_json, n_credits, "
+          "approved_by, approval_ref, reason, attempts, created_at, updated_at, account_id) VALUES "
+          "('uvn-status','initial','jane.doe@example.com','2026-10-30','rejected','email','[\"r0\"]',1,'U','r',"
+          "'intercom error: action_forbidden',1,'2026-10-30T13:04:36Z','2026-10-30T13:04:37Z','42')")
+d.commit()
+PY
+  run -3 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --check-recipient
+  [[ "$output" == "HELD no_channel credits=1 (Intercom refused our message with action_forbidden on 2026-10-30"* ]]
+  run -3 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "HELD no_channel"* ]]
+  [ "$(posts)" -eq 0 ]
+  [ "$(sql "select count(*) from verify_messages where status != 'rejected'")" = "0" ]
+  # a person clears it (named, with a reason): the check passes again
+  python3 "$HYDRA_REPO/scripts/credit_review/verify_ledger.py" --db "$INTERCOM_VERIFY_TEST_LEDGER" clear-no-channel \
+    --user-key jane.doe@example.com --cleared-by U7RP6HKUZ --ref "contact unblocked in Intercom" >/dev/null
+  run -0 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --check-recipient
+  [[ "$output" == "RECIPIENT OK verify-live initial"* ]]
+}
+
 @test "--check-recipient: the real recipient check, read only (no ledger row, nothing posted)" {
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
   decider_approved r1 catalog_confirmed
@@ -2502,6 +2528,42 @@ Caroline, Muso Support" ]
   INTERCOM_VERIFY_TEST_DAY=2026-10-23 run -0 rem
   [ "$output" = "SKIPPED reminder-7-done message=1001" ]
   [ "$(posts)" -eq 2 ]
+}
+
+@test "no-channel (QA #1588): a reminder whose attempt Intercom REJECTED (action_forbidden) is held at the peek and in the atomic claim until a person clears it" {
+  unlocked_gate claim
+  claimfile "$TEST_TMPDIR/c.json"
+  run -0 "$GATE" send --campaign claim-proof-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [ "$output" = "POSTED email message=1001 credits=1" ]
+  # the day-7 reminder went out and Intercom refused it (the rejected attempt the retry would follow)
+  python3 - "$INTERCOM_VERIFY_TEST_LEDGER" <<'PY'
+import sqlite3, sys
+d = sqlite3.connect(sys.argv[1])
+p = d.execute("SELECT id, user_key, account_id, request_ids_json FROM verify_messages WHERE message_id='1001'").fetchone()
+d.execute("INSERT INTO verify_messages (campaign, kind, parent_row, user_key, account_id, day, status, message_type, "
+          "request_ids_json, n_credits, approved_by, approval_ref, reason, attempts, created_at, updated_at) VALUES "
+          "('claim-proof-ask','reminder-7',?,?,?,'2026-10-22','rejected','email',?,1,'U','r',"
+          "'intercom error: action_forbidden',1,'2026-10-22T09:00:00Z','2026-10-22T09:00:01Z')", (p[0], p[1], p[2], p[3]))
+d.commit()
+PY
+  rem() { "$GATE" send --campaign claim-proof-ask --kind reminder-7 --parent-message-id 1001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ "$@"; }
+  # held at the PEEK - before any Intercom read for this user (the claim below is the atomic second wall)
+  before="$(calls)"
+  STUB_CONVERSATION="$(quiet_claim_conv 1001)" INTERCOM_VERIFY_TEST_DAY=2026-10-22 run -3 rem
+  [[ "$output" == "HELD no_channel credits=1 (Intercom refused our message with action_forbidden"* ]]
+  [ "$(calls)" -eq "$before" ]
+  [ "$(posts)" -eq 1 ]
+  [ "$(sql "SELECT count(*) FROM verify_messages WHERE kind='reminder-7' AND status != 'rejected'")" = "0" ]
+  # the atomic claim holds even when the peek is bypassed (another caller, a race): the ledger answers no_channel
+  python3 "$HYDRA_REPO/scripts/credit_review/verify_ledger.py" --db "$INTERCOM_VERIFY_TEST_LEDGER" claim-reminder --parent-message-id 1001 \
+    --kind reminder-7 --user-key jane.doe@example.com --day 2026-10-22 --request-ids "$(sql "SELECT request_ids_json FROM verify_messages WHERE message_id='1001'" | jq -r '.[0]')" \
+    --approved-by U --approval-ref r > "$TEST_TMPDIR/cr.json" 2>&1 || { cat "$TEST_TMPDIR/cr.json"; false; }
+  jq -e ".result == \"no_channel\"" "$TEST_TMPDIR/cr.json" >/dev/null
+  # a person clears it: the reminder goes
+  python3 "$HYDRA_REPO/scripts/credit_review/verify_ledger.py" --db "$INTERCOM_VERIFY_TEST_LEDGER" clear-no-channel \
+    --user-key jane.doe@example.com --cleared-by U7RP6HKUZ --ref "contact unblocked in Intercom" >/dev/null
+  STUB_CONVERSATION="$(quiet_claim_conv 1001)" INTERCOM_VERIFY_TEST_DAY=2026-10-22 run -0 rem
+  [[ "$output" == "POSTED reminder-7 email"* ]]
 }
 
 @test "claim-proof-ask: no reminder on or after the close day, or once the claim is closed for it" {

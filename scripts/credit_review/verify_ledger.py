@@ -245,13 +245,21 @@ CREATE TABLE IF NOT EXISTS verify_refusal_holds (
   updated_at TEXT NOT NULL,
   PRIMARY KEY (campaign, user_key)
 );
+CREATE TABLE IF NOT EXISTS verify_channel_clears (
+  user_key TEXT NOT NULL,            -- lower-cased account email
+  user_id TEXT NOT NULL DEFAULT '',  -- the Muso account id
+  cleared_by TEXT NOT NULL,          -- the person who cleared the no-channel hold (Slack id / name)
+  ref TEXT NOT NULL,                 -- why (the ticket, the contact fix)
+  cleared_at TEXT NOT NULL,
+  after_row INTEGER NOT NULL DEFAULT 0   -- verify_messages max(id) when cleared: covers failures up to that row only
+);
 """
 INDEXES = """
 CREATE INDEX IF NOT EXISTS verify_messages_user_day ON verify_messages(user_key, day);
 CREATE INDEX IF NOT EXISTS verify_messages_msg ON verify_messages(message_id);
 CREATE INDEX IF NOT EXISTS verify_messages_parent ON verify_messages(parent_row, kind);
 """
-TABLES = ("verify_messages", "verify_proof_reviews", "verify_requests", "verify_refusal_holds")
+TABLES = ("verify_messages", "verify_proof_reviews", "verify_requests", "verify_refusal_holds", "verify_channel_clears")
 # The verify_messages columns credit-retro's take-back / wave reader depends on
 # (credit_retro.waves.already_engaged). Pinned here, next to the writer's schema, and
 # checked against it by scripts/tests/test_verify_ledger_contract.py.
@@ -434,6 +442,46 @@ def refusal_hold(db: sqlite3.Connection, campaign: str, user_key: str, now: date
         return {"flagged": True}
     until = max((str(r["next_recheck_at"]) for r in rows), default="")
     return {"until": until} if until > stamp(now) else {}
+
+
+def no_channel(db: sqlite3.Connection, user_key: str, user_id: str = "") -> str:
+    """r5 / p1 (10-31 17:1xZ) [no-channel]: when this user's LATEST delivery outcome from this gate (a sent or a rejected
+    row, any campaign) is Intercom refusing the message with action_forbidden, the contact cannot be reached: '' -> a
+    reason, and NO campaign re-attempts them - the no-channel tray - until a person records a clear after that rejection
+    (clear-no-channel). A later successful send ends it too. Read at the dry run (pending) and at the send (claim)."""
+    if not (user_key or str(user_id or "").strip()):
+        return ""
+    cond, params = _same_user(db, user_key, user_id)
+    # QA #1588: ordered by ROW ID (monotonic), never by 1-second timestamps. The channel FAILURES: an Intercom
+    # action_forbidden rejection, or #1511's terminal refusal (email unreachable and no in-app route) - p1 17:35Z. Only a
+    # later successful SEND ends one; any other rejection or refusal after it proves nothing about the channel.
+    last = db.execute(f"SELECT m.id, m.day, m.status, m.reason FROM verify_messages m WHERE ({cond}) AND ("
+                      "(m.status = 'rejected' AND m.reason LIKE '%action_forbidden%') OR "
+                      "(m.status = 'refused' AND m.reason LIKE 'no_channel: email_unreachable%')) "
+                      "ORDER BY m.id DESC LIMIT 1", params).fetchone()
+    if last is None:
+        return ""
+    if db.execute(f"SELECT 1 FROM verify_messages m WHERE ({cond}) AND m.status = 'sent' AND m.id > ? LIMIT 1",
+                  (*params, last["id"])).fetchone():
+        return ""
+    uid = str(user_id or "").strip()
+    # a person's clear covers the failures written BEFORE it (by row id): a refusal after the clear holds again
+    cleared = db.execute("SELECT max(after_row) FROM verify_channel_clears WHERE user_key = ? OR (? <> '' AND user_id = ?)",
+                         (user_key, uid, uid)).fetchone()[0]
+    if cleared is not None and int(cleared) >= int(last["id"]):
+        return ""
+    what = "Intercom refused our message with action_forbidden" if last["status"] == "rejected" else \
+        "Intercom will not email this contact and there is no in-app route (email_unreachable)"
+    return f"no_channel: {what} on {last['day']} (ledger {last['id']})"
+
+
+def clear_no_channel(db: sqlite3.Connection, *, user_key: str, user_id: str, cleared_by: str, ref: str,
+                     now: datetime | None = None) -> None:
+    if not (cleared_by.strip() and ref.strip()):
+        raise ValueError("a no-channel clear names the person and the reason")
+    hi = db.execute("SELECT coalesce(max(id), 0) FROM verify_messages").fetchone()[0]
+    db.execute("INSERT INTO verify_channel_clears (user_key, user_id, cleared_by, ref, cleared_at, after_row) VALUES (?,?,?,?,?,?)",
+               (user_key, str(user_id or ""), cleared_by.strip(), ref.strip(), stamp(now), int(hi)))
 
 
 def _same_user(db: sqlite3.Connection, user_key: str, user_id: str = "") -> tuple[str, tuple[Any, ...]]:
@@ -623,6 +671,10 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
         if not fresh:
             db.execute("COMMIT")
             return {"result": "already_notified", "request_ids": []}
+        nc = no_channel(db, user_key, user_id)
+        if nc:
+            db.execute("COMMIT")
+            return {"result": "no_channel", "reason": nc, "request_ids": fresh}
         hold = refusal_hold(db, campaign, user_key, now, user_id) if enforce_cap else {}
         if hold:
             db.execute("COMMIT")
@@ -853,6 +905,12 @@ def claim_reminder(db: sqlite3.Connection, *, parent_message_id: str, kind: str,
         if not keep:
             db.execute("COMMIT")
             return {**st, "result": "no_credits"}
+        # QA #1588: the no-channel hold covers follow-ups too, inside the same atomic claim - a reminder whose earlier
+        # attempt Intercom refused (action_forbidden) is never re-attempted without a person's clear
+        nc = no_channel(db, user_key, st.get("account_id") or "")
+        if nc:
+            db.execute("COMMIT")
+            return {**st, "result": "no_channel", "reason": nc, "request_ids": keep}
         if capped(db, user_key=user_key, day=day, user_id=st.get("account_id") or ""):
             db.execute("COMMIT")
             return {**st, "result": "daily_cap"}
@@ -1642,6 +1700,11 @@ def _main(argv: list[str] | None = None) -> int:
     nn.add_argument("--request-ids", required=True)
     ve = sub.add_parser("v1-eligible", help="may a note over these credits use the v1 (no-deadline) copy?")
     ve.add_argument("--request-ids", required=True)
+    nc = sub.add_parser("clear-no-channel", help="a PERSON clears a no-channel hold (after the contact was fixed)")
+    nc.add_argument("--user-key", required=True)
+    nc.add_argument("--user-id", default="")
+    nc.add_argument("--cleared-by", required=True)
+    nc.add_argument("--ref", required=True)
     hs = sub.add_parser("hold-silent", help="hold Muso users from the status notes for good (flagged refusal hold)")
     hs.add_argument("--user-ids-file", required=True, help="one Muso user id per line")
     hs.add_argument("--reason", required=True, help="a short slug, e.g. owe-proof-told-nothing-needed")
@@ -1689,7 +1752,8 @@ def _main(argv: list[str] | None = None) -> int:
         ids = _ids(a.request_ids)
         blocked = blocked_ids(db, ids, a.campaign)
         out = {"request_ids": [r for r in dict.fromkeys(ids) if r not in blocked],
-               "hold": refusal_hold(db, a.campaign, a.user_key, user_id=a.user_id)}
+               "hold": refusal_hold(db, a.campaign, a.user_key, user_id=a.user_id),
+               "no_channel": no_channel(db, a.user_key, a.user_id)}
         if a.user_key and a.day:
             out["daily_cap"] = capped(db, user_key=a.user_key, day=a.day, user_id=a.user_id)
         if a.user_key and a.campaign == "retro-past":
@@ -1703,6 +1767,9 @@ def _main(argv: list[str] | None = None) -> int:
         if a.user_key and a.campaign in GAP_LIKE:
             why = gap_user_done(db, a.user_key, user_id=a.user_id)
             out["user_done"], out["recent"], out["recent_why"] = "", bool(why), why
+    elif a.op == "clear-no-channel":
+        clear_no_channel(db, user_key=a.user_key, user_id=a.user_id, cleared_by=a.cleared_by, ref=a.ref)
+        out = {"result": "cleared"}
     elif a.op == "hold-silent":
         ids = [ln.split("#")[0].strip() for ln in Path(a.user_ids_file).read_text().splitlines()]
         out = hold_silent(db, user_ids=[i for i in ids if i], reason=a.reason)
@@ -1712,6 +1779,8 @@ def _main(argv: list[str] | None = None) -> int:
         out = {"skipped": skip_requests(db, campaign=a.campaign, request_ids=_ids(a.request_ids))}
     elif a.op == "reminder-state":
         out = reminder_state(db, parent_message_id=a.parent_message_id, kind=a.kind, day=a.day)
+        if out.get("result") == "due":       # QA #1588: the pre-send peek reads the same hold the claim enforces
+            out["no_channel"] = no_channel(db, out.get("user_key") or "", out.get("account_id") or "")
     elif a.op == "message":
         r = message(db, a.message_id)
         out = dict(r) if r is not None else None
