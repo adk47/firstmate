@@ -239,11 +239,13 @@ readonly UVN_STATUS_COPY_APPROVED=1
 # 13:1xZ delegation "use fable, do not wait for me"; firstmate 286), byte-for-byte.
 readonly REPLY_DUE_CORRECTION_TEXT="A correction to our earlier note here: this request does need one thing from you."
 # Fable FINAL [key=gmail-held-fallback] (4), r5 /o, text confirmed by p1 + Fable 10-31 12:1xZ: the ONE clause the held
-# stale_source:cs-gmail set may get (last sentence before the sign-off, once per user) - only if Gmail is still dark at
-# Sun 11-01 12:00Z AND p1 + r5 sign that batch. LOCKED: nothing renders it until the lock is lifted by a reviewed PR.
-# shellcheck disable=SC2034  # locked on purpose: pinned by bats, read only by the reviewed lift PR
-readonly GMAIL_FALLBACK_O_APPROVED=0
-# shellcheck disable=SC2034  # locked on purpose: pinned by bats, read only by the reviewed lift PR
+# stale_source:cs-gmail set may get (last sentence before the sign-off, once per user). [key=gmail-o-forward] (Fable 495,
+# p1 497, 10-31 21:0xZ): UNLOCKED for the signed /o batches only, inside a dated window, and only while cs-gmail is still
+# stale (the gate re-reads the frozen did-vouch set itself: a user outside it, or a fresh Gmail scan, refuses - the stop
+# rule). Rendered only under --gmail-fallback-o on an initial uvn-status ask; a reply to it waits on gmail (comm_state).
+readonly GMAIL_FALLBACK_O_APPROVED=1
+readonly GMAIL_FALLBACK_O_UNTIL="2026-11-02T16:00:00Z"
+readonly GMAIL_FALLBACK_O_REF="fable-copy-1030-r5/o"
 readonly GMAIL_FALLBACK_O_TEXT="If you have already emailed it to support@muso.ai, just reply here to say so and we will match it to your request."
 readonly REPLY_DUE_CORRECTION_APPROVED=1
 readonly REPLY_DUE_CORRECTION_REF="fable-copy-1030-r5/c"
@@ -407,7 +409,7 @@ refuse() { printf 'REFUSED: %s\n' "$*" >&2; exit 1; }
 if [ "$TESTABLE" != "1" ]; then
   for v in INTERCOM_VERIFY_TEST_LOG_DIR INTERCOM_VERIFY_TEST_CURL_BIN INTERCOM_VERIFY_TEST_TIMEOUT_BIN \
            INTERCOM_VERIFY_TEST_LEDGER INTERCOM_VERIFY_TEST_LEDGER_HELPER INTERCOM_VERIFY_TEST_DAY \
-           INTERCOM_VERIFY_TEST_PROOF_DB INTERCOM_VERIFY_TEST_STAGE2_HELPER INTERCOM_VERIFY_TEST_CORE_NOTICE_HELPER INTERCOM_VERIFY_TEST_NOW INTERCOM_VERIFY_TEST_DISABLED_DIR INTERCOM_VERIFY_TEST_COMM_STATE_HELPER; do
+           INTERCOM_VERIFY_TEST_PROOF_DB INTERCOM_VERIFY_TEST_STAGE2_HELPER INTERCOM_VERIFY_TEST_CORE_NOTICE_HELPER INTERCOM_VERIFY_TEST_NOW INTERCOM_VERIFY_TEST_DISABLED_DIR INTERCOM_VERIFY_TEST_COMM_STATE_HELPER INTERCOM_VERIFY_TEST_GMO; do
     [ -z "${!v:-}" ] || die "$v is not settable on a deployed copy of this script. The log, the ledger, the client and the clock are not parameters: a caller-selectable one is a send nobody can audit."
   done
   LOG_DIR="$PROD_LOG_DIR"
@@ -457,7 +459,7 @@ esac
 # Email through Intercom (POST /messages, message_type email): Intercom delivers it to the
 # user's inbox and the reply lands in the same conversation. The one other channel is a
 # Caroline comment in the user's own conversation (in-thread delivery, above).
-CREDITS_FILE="" APPROVED_BY="" MESSAGE_ID="" ACTION="post" THREAD="" THREAD_AUTO=0 REPLY_DUE=""
+CREDITS_FILE="" APPROVED_BY="" MESSAGE_ID="" ACTION="post" THREAD="" THREAD_AUTO=0 REPLY_DUE="" GMO=0
 MESSAGE_TYPE="email" INAPP_FALLBACK=0 ROUTE_WHY=""
 readonly REQ_TYPE="email" EXPECT_TYPE="email"
 CAMPAIGN="verify-live" KIND="initial" PARENT_ID="" CAMPAIGN_SET=0 KIND_SET=0 COPY_ARG=""
@@ -481,6 +483,7 @@ while [ $# -gt 0 ]; do
     --doc-check) ACTION="doc-check"; shift ;;
     --thread-contact) ACTION="thread-contact"; shift ;;
     --check-recipient) ACTION="check-recipient"; shift ;;
+    --gmail-fallback-o) GMO=1; shift ;;   # [key=gmail-o-forward]: the /o clause for the frozen did-vouch set
     --inapp-fallback) INAPP_FALLBACK=1; shift ;;
     --validate) ACTION="validate"; shift ;;
     -h|--help)  usage; exit 0 ;;
@@ -822,6 +825,15 @@ if [ -n "$REPLY_DUE" ]; then
   case "$CAMPAIGN" in uvn-status|status-doc-received|status-team-review) ;;
     *) refuse "--reply-due applies to uvn-status, status-doc-received and status-team-review (the coded answer classes)." ;; esac
 fi
+if [ "$GMO" = 1 ]; then
+  [ "$CAMPAIGN" = "uvn-status" ] && [ "$KIND" = "initial" ] && [ -z "$REPLY_DUE" ] \
+    || refuse "--gmail-fallback-o (/o) applies to an initial uvn-status ask only, never a reply_due answer or a follow-up."
+  if [ "$ACTION" = "post" ]; then
+    [ "$GMAIL_FALLBACK_O_APPROVED" = "1" ] || refuse "/o is locked (GMAIL_FALLBACK_O_APPROVED=0). Nothing was sent or claimed."
+    [ "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \< "$GMAIL_FALLBACK_O_UNTIL" ] \
+      || refuse "/o's window closed at $GMAIL_FALLBACK_O_UNTIL (dated unlock). Nothing was sent or claimed."
+  fi
+fi
 if [ -n "$THREAD" ]; then
   case "$CAMPAIGN" in
     uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-status|gap-ask|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask) ;;
@@ -1037,6 +1049,24 @@ INPUT_RAW_CREATED="$("$JQ_BIN" -r '
 EMAIL="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.user.email')"
 USER_ID="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.user.id')"
 AUTH_ID="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.user.auth_id')"
+if [ "$GMO" = 1 ]; then
+  # [key=gmail-o-forward] the gate's OWN read of the frozen did-vouch set (claim_holds, the #1579 predicate): /o goes only
+  # to a member, and only while cs-gmail is stale - a fresh Gmail scan retires /o (the stop rule); unreadable = refuse
+  if [ "$TESTABLE" = "1" ] && [ -n "${INTERCOM_VERIFY_TEST_GMO:-}" ]; then
+    gmo="$INTERCOM_VERIFY_TEST_GMO"
+  else
+    gmo="$("$PY_BIN" -I -c 'import sys; sys.path.insert(0, sys.argv[1])
+from credit_review import claim_proof_ask
+h = claim_proof_ask.claim_holds()
+print("fresh" if not h.scoped else ("held" if sys.argv[2] in h.held else "not_held"))' "$(dirname "$(dirname "$COMM_STATE_HELPER")")" "$USER_ID" 2>/dev/null || echo unreadable)"
+  fi
+  case "$gmo" in
+    held) APPROVAL_REF_SUFFIX_O="; gmail-fallback $GMAIL_FALLBACK_O_REF" ;;
+    fresh) refuse "/o is retired: cs-gmail reads fresh again, so the real Gmail scan runs first (the stop rule). Nothing was sent or claimed." ;;
+    not_held) refuse "/o goes only to the frozen did-vouch set; user $USER_ID is not in it. Nothing was sent or claimed." ;;
+    *) refuse "/o: the did-vouch set could not be read ($gmo); nothing was sent or claimed." ;;
+  esac
+fi
 printf '%s' "$EMAIL" | grep -qE '^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$' \
   || refuse "user.email must be the credit request's account email (got an invalid value)."
 [ -z "$USER_ID" ] || printf '%s' "$USER_ID" | grep -qE '^[A-Za-z0-9-]{1,64}$' \
@@ -2021,6 +2051,13 @@ if [ "$CAMPAIGN" = "uvn-status" ] && [ "$KIND" = "initial" ] && [ -z "$REPLY_DUE
     [ -z "$THREAD" ] || refuse "a corrected ask (/c2) goes by email, its own message; --conversation does not apply. Nothing was sent or claimed."
   fi
 fi
+with_o() { # <rendered-json> -> /o as the LAST sentence before the sign-off ("Thank you," starts it), byte-exact
+  printf '%s' "$1" | "$JQ_BIN" -c --arg o "$GMAIL_FALLBACK_O_TEXT" '
+    if (.html | test("<p>Thank you,</p>")) and (.text | test("\nThank you,")) then
+      .html |= sub("<p>Thank you,</p>"; "<p>" + $o + "</p><p>Thank you,</p>")
+      | .text |= sub("\nThank you,"; "\n" + $o + "\nThank you,")
+    else error("no sign-off to place /o before") end'
+}
 with_c2() { # <rendered-json> -> the same note with the /c2 sentence first; singular/plural as the body renders (/l)
   printf '%s' "$1" | "$JQ_BIN" -c --arg one "$CORRECTION_C2_ONE" --arg many "$CORRECTION_C2_MANY" '
     (if (.text | test("your credit requests ")) then $many else $one end) as $p
@@ -2028,6 +2065,7 @@ with_c2() { # <rendered-json> -> the same note with the /c2 sentence first; sing
 }
 RENDERED="$(render "$INPUT")"
 [ -z "$C2" ] || RENDERED="$(with_c2 "$RENDERED")"
+[ "$GMO" != 1 ] || RENDERED="$(with_o "$RENDERED")"
 leak="$(leak_reason "$RENDERED")"
 [ -z "$leak" ] || record_refusal "the rendered note contains $leak (from a track title, artist or role). Customers never see internal surfaces; this note is not sent and the credits are recorded as refused for a human to look at."
 
@@ -2849,7 +2887,7 @@ if [ "$KIND" = "initial" ]; then
   printf '%s' "$INPUT" | "$JQ_BIN" -c '[.credits[] | {request_id, profile_id, track_id} + (if .ask_class != "" then {ask_class} else {} end) + (if .is_approved != "" then {is_approved} else {} end)]' > "$REFS_FILE"
   CLAIM="$(ledger claim --campaign "$CAMPAIGN" --user-key "$EMAIL" --user-id "$USER_ID" --day "$DAY" --request-ids "$ALL_IDS" \
     --message-type "$MESSAGE_TYPE" --approved-by "$APPROVED_BY" \
-    --approval-ref "$APPROVAL_REF$(if [ "$RD_PREFIX" = "1" ]; then printf '; correction %s' "$REPLY_DUE_CORRECTION_REF"; fi)${C2_SUFFIX:-}" \
+    --approval-ref "$APPROVAL_REF$(if [ "$RD_PREFIX" = "1" ]; then printf '; correction %s' "$REPLY_DUE_CORRECTION_REF"; fi)${C2_SUFFIX:-}${APPROVAL_REF_SUFFIX_O:-}" \
     --contact-id "$CONTACT_ID" --refs-file "$REFS_FILE" ${WINDOWED_FLAG:+"$WINDOWED_FLAG"} \
     ${REPLY_DUE:+--reply-due "$REPLY_DUE" --conversation "$THREAD"})" \
     || die "the ledger claim failed; refusing to send without the idempotency record."
@@ -2890,6 +2928,7 @@ CLAIMED_INPUT="$(keep_ids "$INPUT" "$(printf '%s' "$CLAIM" | "$JQ_BIN" -c '.requ
 RENDERED="$(render "$CLAIMED_INPUT")"
 [ "$RD_PREFIX" != "1" ] || RENDERED="$(with_prefix "$RENDERED")"
 [ -z "$C2" ] || RENDERED="$(with_c2 "$RENDERED")"
+[ "$GMO" != 1 ] || RENDERED="$(with_o "$RENDERED")"
 NC="$(printf '%s' "$CLAIMED_INPUT" | "$JQ_BIN" -r '.credits | length')"
 leak="$(leak_reason "$RENDERED")"
 if [ -n "$leak" ]; then

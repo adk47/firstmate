@@ -3310,11 +3310,40 @@ rd_locked() { sed 's/^readonly REPLY_DUE_CORRECTION_APPROVED=1$/readonly REPLY_D
   [ "$(notes)" -eq 0 ]
 }
 
-@test "[key=gmail-held-fallback] (4): the /o clause is committed LOCKED, byte-exact, and nothing renders it" {
-  grep -qx 'readonly GMAIL_FALLBACK_O_APPROVED=0' "$REAL_SCRIPT"
+@test "[key=gmail-o-forward] /o: byte-exact as the LAST sentence before the sign-off, only under --gmail-fallback-o, only to the frozen did-vouch set while cs-gmail is stale" {
   grep -qx 'readonly GMAIL_FALLBACK_O_TEXT="If you have already emailed it to support@muso.ai, just reply here to say so and we will match it to your request."' "$REAL_SCRIPT"
-  # defined and pinned only: no render path reads it while it is locked (the lift is its own reviewed PR)
-  [ "$(grep -c 'GMAIL_FALLBACK_O_' "$REAL_SCRIPT")" -eq 2 ]
+  O='If you have already emailed it to support@muso.ai, just reply here to say so and we will match it to your request.'
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  # without the flag: the plain ask, no /o
+  run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" != *"support@muso.ai"* ]]
+  # a held member: /o is the last line before "Thank you," (html and text)
+  INTERCOM_VERIFY_TEST_GMO=held run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --gmail-fallback-o
+  body="$(rendered .body | plain)"
+  [[ "$body" == "Hi Jane, a quick status update"*"$O"$'\n''Thank you,'$'\n''Caroline, Muso Support' ]]
+  [ "$(printf '%s' "$body" | grep -c 'support@muso.ai')" -eq 1 ]
+  # not a member / Gmail fresh again (the stop rule) / unreadable: refused, nothing claimed
+  INTERCOM_VERIFY_TEST_GMO=not_held run -1 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --gmail-fallback-o
+  [[ "$output" == *"/o goes only to the frozen did-vouch set"* ]]
+  INTERCOM_VERIFY_TEST_GMO=fresh run -1 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --gmail-fallback-o
+  [[ "$output" == *"/o is retired: cs-gmail reads fresh again"* ]]
+  INTERCOM_VERIFY_TEST_GMO=garbage run -1 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --gmail-fallback-o
+  [[ "$output" == *"could not be read"* ]]
+  # only an initial uvn-status ask: never a status note, never a reply_due answer
+  INTERCOM_VERIFY_TEST_GMO=held run -1 "$LOCKED" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --gmail-fallback-o
+  [[ "$output" == *"applies to an initial uvn-status ask only"* ]]
+  INTERCOM_VERIFY_TEST_GMO=held run -1 "$UVN" send --campaign uvn-status --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --gmail-fallback-o
+  [[ "$output" == *"applies to an initial uvn-status ask only"* ]]
+  # a real send records the /o approval on the ledger row
+  INTERCOM_VERIFY_TEST_GMO=held run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --gmail-fallback-o
+  [[ "$output" == "POSTED email"* ]]
+  [[ "$(msg .body | plain)" == *"$O"$'\n''Thank you,'* ]]
+  [[ "$(sql "SELECT approval_ref FROM verify_messages WHERE campaign='uvn-status'")" == *"gmail-fallback fable-copy-1030-r5/o"* ]]
+  # the dated window: after GMAIL_FALLBACK_O_UNTIL a real /o send is refused
+  sed 's/^readonly GMAIL_FALLBACK_O_UNTIL=.*/readonly GMAIL_FALLBACK_O_UNTIL="2020-01-01T00:00:00Z"/' "$UVN" > "$TEST_TMPDIR/uvn-closed.sh"; chmod +x "$TEST_TMPDIR/uvn-closed.sh"
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  INTERCOM_VERIFY_TEST_GMO=held run -1 "$TEST_TMPDIR/uvn-closed.sh" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --gmail-fallback-o
+  [[ "$output" == *"/o's window closed"* ]]
 }
 
 @test "reply_due correction: LOCKED = deferred, never sent without it; unlocked = the ONE sentence first, the approved body unchanged after it" {

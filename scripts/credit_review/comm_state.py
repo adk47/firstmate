@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import html
 import io
 import json
 import os
@@ -805,6 +806,43 @@ def on_topic(conv: dict[str, Any]) -> bool:
     return bool(not TOPIC_BILLING_RE.search(t) and (TOPIC_STRONG_RE.search(t) or TOPIC_WEAK_RE.search(t)))
 
 
+# QA #1594 (b1 521): the CLOSED shape of an /o "I already emailed it" reply - the whole message must match; one extra
+# clause (a question, a negation, a new request) falls out of it and the reply stays due (an answer is owed).
+_SAID_EMAILED_RE = re.compile(
+    r"(?:(?:yes|yep|yeah|ok|okay|done|hi|hello|hey)[\s,.!]*)*"
+    r"(?:i|we)?\s*(?:have|'ve|ve)?\s*(?:already|just)?\s*(?:sent|emailed|e-mailed|mailed|forwarded)"
+    r"(?:\s+(?:it|them|this|that|everything|the\s+(?:document|documents|docs|file|files|proof|pdf|screenshot|screenshots"
+    r"|split\s+sheet|contract|invoice|email)))?"
+    r"(?:\s+(?:over|across))?(?:\s+to\s+(?:you|you\s+guys|support|muso|muso\s+support|support@muso\.ai))?"
+    r"(?:\s+(?:already|earlier|today|yesterday|this\s+morning|last\s+week|a\s+while\s+ago|before))?"
+    r"[\s,.!]*(?:(?:thanks|thank\s+you|thx|cheers|regards)[\s,.!]*)?",
+    re.I)
+
+
+def said_emailed(custs: list[dict[str, Any]]) -> bool:
+    """The customer's reply after our /o ask says the document was already sent: there is affirmative TEXT, and EVERY
+    text part is the closed affirmative shape (whole message; it has no room for a question or a negation). An attachment
+    never makes it said_emailed on its own (r5 + p1 10-31 23:3xZ): an attachment with a question, or with no text, stays
+    reply_due - the attachment is read as a filing on its own path."""
+    texts = [re.sub(r"<[^>]+>", " ", html.unescape(p.get("body") or "")).strip() for p in custs]
+    if not any(texts):
+        return False
+    return all(_SAID_EMAILED_RE.fullmatch(t) for t in texts if t)   # the closed shape admits no "?" and no negation
+
+
+def _is_o_thread(source_id: str) -> bool:
+    """The conversation was started by our /o ask: its source id is the message id ledgered for a sent uvn-status note
+    carrying the /o approval suffix. Unreadable ledger = Unknown (fail closed)."""
+    if not source_id.isdigit() or not os.path.exists(LEDGER):
+        return False
+    try:
+        return _ro(LEDGER).execute("SELECT 1 FROM verify_messages WHERE message_id=? AND status='sent' "
+                                   "AND approval_ref LIKE '%gmail-fallback fable-copy-1030-r5/o%' LIMIT 1",
+                                   (source_id,)).fetchone() is not None
+    except sqlite3.Error as exc:
+        raise Unknown(f"ledger unreadable: {exc}") from exc
+
+
 def reply_due(conversation: str, contact_id: str, part_id: str, ic: Intercom, now: float | None = None) -> list[str]:
     """Fable [key=reply-due] (l1 219, p1 200): the user wrote to us in a credit/claim/merge thread and nobody answered
     for > 24 h. Empty list = due (the gate may send EXACTLY ONE in-thread answer despite the 7-day cooldowns);
@@ -834,6 +872,11 @@ def reply_due(conversation: str, contact_id: str, part_id: str, ic: Intercom, no
         why.append("reply_due:already_answered")
     # the 24 h run from the customer's LATEST message (QA #1509): part A 30 h ago + part B 1 h ago is not due yet
     custs = [p for p in parts[idx:] if (p.get("author") or {}).get("type") in ("user", "lead", "contact")]
+    if _is_o_thread(str((conv.get("source") or {}).get("id") or "")) and said_emailed(custs):
+        # [key=gmail-o-forward] (r5; QA #1594): in the thread our /o ask started, ONLY an affirmative "I sent/emailed/
+        # forwarded it" (or an attachment) is the coded outcome said_emailed - the match waits on the Gmail read
+        # (waiting_on third_party:gmail). A question, a "haven't", "how do I send it" or anything else stays reply_due.
+        why.append("reply_due:gmail_o_reply (said_emailed; waiting_on third_party:gmail)")
     if max(((p.get("created_at") or now) for p in custs), default=now) > now - REPLY_DUE_AFTER_S:
         why.append("reply_due:not_24h_yet")
     return why

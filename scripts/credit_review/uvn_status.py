@@ -457,7 +457,7 @@ STALE_GMAIL_REASON = "stale_source:cs-gmail"
 # a stage with a named owner and a clock: waiting on the third party (the support@ mailbox; the captain's passkey), due
 # the 16:00Z cutoff + 24 h. Listed on every run, counted paid / free (the line the captain card shows).
 GMAIL_HOLD_WAITING_ON = "third_party:gmail"
-GMAIL_HOLD_DUE_AT = "2026-11-01T16:00:00Z"
+GMAIL_HOLD_DUE_AT = "2026-11-02T16:00:00Z"   # [key=gmail-o-forward] (Fable 495 (3)): moved on the /o run
 
 
 def gmail_held(uid: Any, paid: bool) -> dict[str, Any]:
@@ -705,7 +705,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
         wording: str = "", from_stage2: bool = False, stage2_path: str | None = None,
         exclude_users: set[str] | frozenset[str] = frozenset(), lens: fraud_lens.LensFn | None = None,
         watchlist_path: str | None = None, holds_path: str | None = None,
-        segment_daily_cap: int | None = None) -> UvnReport:
+        segment_daily_cap: int | None = None, gmail_fallback_o: bool = False) -> UvnReport:
     if campaign not in CAMPAIGNS:
         raise ValueError(f"unknown campaign {campaign!r}")
     if wording and (campaign, wording) not in WORDINGS:
@@ -769,6 +769,11 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
         except verify_notify.ProofFileError as exc:
             report.halted = str(exc)
             return report
+    if gmail_fallback_o and not (campaign == CAMPAIGN and is_ask and getattr(documented, "scoped", False)):
+        # [key=gmail-o-forward] STOP RULE in code: /o exists only while cs-gmail is stale - a fresh Gmail scan means the
+        # real scan runs first and these users get the ordinary ask or receipt (never a double ask)
+        report.halted = "--gmail-fallback-o runs only for uvn-status while cs-gmail is stale (Gmail reads fresh: the real scan runs first); nothing sent"
+        return report
     want_paid = {"paid": True, "free": False}[segment]
     offered = [u for u in users if u.get("skip") is None and bool(u.get("paid")) is want_paid]
     if campaign == "status-team-review":
@@ -802,7 +807,11 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                 report.note("excluded_today")
                 continue
             listed = [str(r) for r in (u.get("request_ids") or [])]
-            if is_ask and getattr(documented, "scoped", False) and str(u.get("user_id")) in documented.support_contacts:
+            held_o = is_ask and getattr(documented, "scoped", False) and str(u.get("user_id")) in documented.support_contacts
+            if gmail_fallback_o and not held_o:
+                report.note("not_in_gmail_held_set")                # [key=gmail-o-forward]: an /o run is the held set ONLY
+                continue
+            if held_o and not gmail_fallback_o:
                 report.note(STALE_GMAIL_REASON)                     # held, and LISTED per user (r5 condition 2)
                 report.outcomes.append(gmail_held(u.get("user_id"), u.get("paid")))
                 continue
@@ -1019,7 +1028,12 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                         except verify_notify.ProofFileError as exc:
                             report.halted = str(exc)
                             break
-                        if getattr(documented, "scoped", False) and str(uid) in documented.support_contacts:
+                        held_o = getattr(documented, "scoped", False) and str(uid) in documented.support_contacts
+                        if gmail_fallback_o and not held_o:
+                            # [key=gmail-o-forward]: left the held set (or Gmail read fresh) since the batch read - no /o
+                            report.note("not_in_gmail_held_set")
+                            continue
+                        if held_o and not gmail_fallback_o:
                             # QA #1573: vouched for by cs-gmail since the batch read - held AND listed, never sent
                             report.note(STALE_GMAIL_REASON)
                             report.outcomes.append(gmail_held(uid, want_paid))
@@ -1069,7 +1083,8 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                 before = report.sent_notes if mode == "apply" else report.validated + report.recipient_ok
                 l0 = ledger_left() if mode == "apply" else 0
                 verify_notify.send_all([p], report, mode=mode, wrapper=wrapper, runner=runner,
-                                       extra=["--campaign", campaign] + (["--copy", wording] if wording else []),
+                                       extra=["--campaign", campaign] + (["--copy", wording] if wording else [])
+                                       + (["--gmail-fallback-o"] if gmail_fallback_o else []),
                                        pace_seconds=0, preview_dir=preview_dir,
                                        check_recipients=check_recipients and mode != "apply")
                 calls += 1

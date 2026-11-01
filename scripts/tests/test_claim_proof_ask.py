@@ -766,7 +766,7 @@ class ScopedProofOnFileTest(unittest.TestCase):
         self.assertEqual(rep.stale_source_hold, 1)
         # [key=gmail-held-fallback] (2), claim side: the held row is a stage - waiting on gmail, with its due time
         self.assertIn({"user": "71", "result": "held", "reason": "stale_source:cs-gmail", "waiting_on": "third_party:gmail",
-                       "due_at": "2026-11-01T16:00:00Z", "paid": True}, rep.outcomes)
+                       "due_at": "2026-11-02T16:00:00Z", "paid": True}, rep.outcomes)
         self.assertEqual([c[1]["user"]["id"] for c in gate.calls], ["72"])
         self.assertIn("stale_source:cs-gmail", claim_proof_ask.render(rep, "apply", "paid"))
 

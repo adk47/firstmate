@@ -2034,6 +2034,25 @@ class AsksScopedProofOnFileTest(unittest.TestCase):
         self.assertEqual(sorted(str(p["user"]["id"]) for _, p in gate.calls), ["4"])
         self.assertIn(("1", "held", "stale_source:cs-gmail"), [(o["user"], o["result"], o.get("reason")) for o in rep.outcomes])
 
+    def test_the_o_run_asks_ONLY_the_held_set_with_the_flag_and_stops_when_gmail_is_fresh(self):
+        # [key=gmail-o-forward]: an /o run = the frozen did-vouch set ONLY (the rest are skipped), each gate call carries
+        # --gmail-fallback-o; cs-gmail fresh (not scoped) = the stop rule: the run halts, nothing is sent
+        self.feed(gmail_h=12.0, contacts=("1",))
+        rep, gate = self.run_(mode="apply", gmail_fallback_o=True)
+        self.assertEqual(rep.halted, "")
+        self.assertEqual(sorted(str(p["user"]["id"]) for _, p in gate.calls), ["1"])
+        self.assertTrue(all("--gmail-fallback-o" in argv for argv, _ in gate.calls))
+        self.assertNotIn("stale_source:cs-gmail", [o.get("reason") for o in rep.outcomes])
+        self.assertTrue(rep.by_reason.get("not_in_gmail_held_set"))
+        real = self.cpa.claim_holds
+        self.cpa.claim_holds = lambda *a, **kw: self.cpa.ClaimHolds(frozenset(), scoped=False)
+        try:
+            rep, gate = self.run_(mode="apply", gmail_fallback_o=True)
+        finally:
+            self.cpa.claim_holds = real
+        self.assertIn("cs-gmail is stale", rep.halted)
+        self.assertEqual(gate.calls, [])
+
     def test_a_user_vouched_for_between_the_cut_and_the_send_is_held_at_send(self):
         # the re-read right before each send (an email filing that arrived mid-run): documents_block holds them there
         self.feed(gmail_h=12.0, contacts=())
@@ -2080,7 +2099,7 @@ class AsksScopedProofOnFileTest(unittest.TestCase):
         self.feed(gmail_h=12.0, contacts=("1",))
         rep, gate = self.run_scoped(mode="dry-run")
         row = next(o for o in rep.outcomes if o["user"] == "1")
-        self.assertEqual((row["waiting_on"], row["due_at"], row["paid"]), ("third_party:gmail", "2026-11-01T16:00:00Z", True))
+        self.assertEqual((row["waiting_on"], row["due_at"], row["paid"]), ("third_party:gmail", "2026-11-02T16:00:00Z", True))
         self.assertIn("held by the Gmail outage: 1 paid / 0 free", uvn_status.render(rep, "dry-run", "paid"))
         self.assertEqual(sorted(str(p["user"]["id"]) for _, p in gate.calls), ["4"])        # no trace: admitted
         self.users.append({"user_id": 3, "paid": False, "skip": None, "request_ids": ["r4"]})

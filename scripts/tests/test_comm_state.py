@@ -504,6 +504,46 @@ class ReplyDueTest(unittest.TestCase):
         return cs.check(campaign, copy, UID, ["r1"], "c1", conversation="215473681300330", reply_due_part=part,
                         query=self.q, ic=self.ic, fraud=lambda uid, q: [])
 
+    def test_a_reply_in_an_o_thread_waits_on_gmail_never_on_us(self):
+        # [key=gmail-o-forward] (r5): the conversation our /o ask started (its source id = the ledgered message id of a
+        # sent /o note) - the customer's reply there is the coded outcome said_emailed, not due
+        db = sqlite3.connect(cs.LEDGER)
+        db.execute("INSERT INTO verify_messages (campaign, kind, user_key, account_id, day, status, message_type, message_id, "
+                   "request_ids_json, n_credits, approved_by, approval_ref, created_at, updated_at, sent_at) "
+                   "VALUES ('uvn-status','initial','j@x.com',?,'2026-10-31','sent','email','880001',?,1,'U',"
+                   "'captain ...; gmail-fallback fable-copy-1030-r5/o','2026-10-31T22:00:00Z','2026-10-31T22:00:00Z','2026-10-31T22:00:00Z')",
+                   (str(UID), json.dumps(["r1"])))
+        db.commit(); db.close()
+        self.ic.convs["215473681300330"]["source"] = {"id": "880001", "author": {"type": "admin"}}
+        why = cs.reply_due("215473681300330", "c1", "57000000001", self.ic, now=self.now)
+        trig = next(p for p in [self.ic.convs["215473681300330"]["source"]] + self.ic.convs["215473681300330"]
+                    ["conversation_parts"]["conversation_parts"] if str(p.get("id")) == "57000000001")
+        # QA #1594: provenance alone is NOT said_emailed - only an affirmative "sent it" (or an attachment) is
+        O = "reply_due:gmail_o_reply (said_emailed; waiting_on third_party:gmail)"
+        for body, want in (("I already emailed it to support@muso.ai", True), ("Yes, sent it yesterday, thanks!", True),
+                           ("i've forwarded the documents", True), ("Done. Emailed them over to you this morning.", True),
+                           ("I have not emailed it", False), ("how do I send it?", False), ("sent it?", False),
+                           ("I didn't send it yet", False), ("sent it wrong, can I resend", False),
+                           ("Which email address should I use", False), ("", False)):
+            trig["body"], trig["attachments"] = body, []
+            self.assertEqual(O in cs.reply_due("215473681300330", "c1", "57000000001", self.ic, now=self.now), want, body)
+        # r5 + p1 23:3xZ: an attachment is never enough on its own - affirmative text is required with it
+        for body, want in (("", False), ("is this the right one?", False), ("I already emailed it", True)):
+            trig["body"], trig["attachments"] = body, [{"name": "split.pdf"}]
+            self.assertEqual(O in cs.reply_due("215473681300330", "c1", "57000000001", self.ic, now=self.now), want,
+                             f"attachment + {body!r}")
+        # every customer part counts: an affirmative followed by a question is an answer owed
+        conv = self.ic.convs["215473681300330"]
+        trig["body"], trig["attachments"] = "I already emailed it", []
+        later = {"id": "57000000009", "part_type": "comment", "author": {"type": "user", "id": "c1"},
+                 "body": "how long will it take?", "created_at": trig.get("created_at") or 1}
+        conv["conversation_parts"]["conversation_parts"].append(later)
+        self.assertNotIn(O, cs.reply_due("215473681300330", "c1", "57000000001", self.ic, now=self.now))
+        conv["conversation_parts"]["conversation_parts"].remove(later)
+        self.ic.convs["215473681300330"]["source"] = {"id": "880002", "author": {"type": "admin"}}   # another note's thread
+        self.assertNotIn("reply_due:gmail_o_reply (said_emailed; waiting_on third_party:gmail)",
+                         cs.reply_due("215473681300330", "c1", "57000000001", self.ic, now=self.now))
+
     def test_lamberto_an_unanswered_question_is_answered_despite_a_note_inside_7_days(self):
         CommStateTest.note(self, "status-team-review", at=(datetime.now(timezone.utc) - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ"))
         self.core = [["r1", "user_verification_needed", "", "", "2026-10-15 07:21:38 UTC"]]
