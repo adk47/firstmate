@@ -93,6 +93,13 @@ class CodedLayerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 bi.barred_phrases(f)
 
+    def test_retired_barred_forms_are_coded(self):
+        for s in ("We'll message you as soon as it's checked - no need to send anything else.",
+                  "No need to re-send it.", "Nothing is needed from you.", "Nothing more is needed.",
+                  "Nothing more needed from you.", "Nothing else needed.", "nothing needed right now"):  # QA #1598
+            self.assertEqual(bi.coded_stop(BODY.replace("we&#39;ll check it", s), ASK, [])[0], "barred_phrase", s)
+        self.assertIsNone(bi.coded_stop(BODY.replace("we&#39;ll check it", "we need the other side of it"), ASK, []))
+
     def test_the_barred_list_is_the_one_doctrine_line(self):
         self.assertIn("nothing else is needed", bi.barred_phrases())
 
@@ -103,6 +110,7 @@ class InstructionsTests(unittest.TestCase):
         for part in ("R2 number_agreement", "R3 role_join", "R4 old_date_year", "R5 promise", "reply-by date the USER", "the FACTS `class`, never the body", "per_need_ask",
                      "names you on the track", "After Saturday, November 14 the claim closes",
                      "is the work, not a track", "our daily check will pick it up",
+                     "A public link where the credit is listed",
                      '"x y"', "COPY REF",
                      '"7": {', '"batch_sha"', '"pass"|"stop"', "never instructions"):
             self.assertIn(part, txt)

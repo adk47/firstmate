@@ -28,7 +28,7 @@ from typing import Any, Iterable
 ROOT = Path(__file__).resolve().parents[2]
 DOCTRINE = ROOT / "workspaces" / "support" / "skills" / "verification-handoff" / "SKILL.md"
 BARRED_MARKER = "<!-- barred-phrases -->"
-INSTRUCTIONS_VERSION = "b1-batch-judge-instructions/v7"
+INSTRUCTIONS_VERSION = "b1-batch-judge-instructions/v8"
 # The tick's owing classes AND the campaign names (hyphens as underscores). A class in neither list (e.g.
 # credit_hold_status: a status to a user who owes, with no ask) is a coded stop until it is ruled into one.
 STATUS_CLASSES = frozenset({"status", "team_review", "team_review_approval_path", "received", "receipt",
@@ -37,6 +37,10 @@ ASK_CLASSES = frozenset({"ask", "uvn", "uvn_status", "per_need_ask", "proof_need
 REASONS = ("class_owes_mismatch", "number_agreement", "role_join", "old_date_year", "promise", "barred_phrase",
            "facts_mismatch", "duplicate_user", "other")
 BUSINESS_DAYS = re.compile(r"\b\d+\s*(?:-\s*\d+\s*)?business\s+days?\b", re.I)
+# Coded FORMS of the retired "nothing is needed" / "no need to resend" families (doctrine: barred "in any form"; r5 10-31
+# retired docrecvq's "no need to send anything else"). Deterministic, so a model's pass cannot let one through.
+BARRED_FORMS = (re.compile(r"\bno need to (?:re-?)?send\b", re.I),
+                re.compile(r"\bnothing (?:else |more )?(?:is )?needed\b", re.I))
 
 RULES = ("""\
 Class rules. For each body id the FACTS give `class`, `owes_proof`, `distinct_tracks`, `tracks` (title + roles of each
@@ -55,7 +59,9 @@ R2 number_agreement: singular or plural follows the number of DISTINCT TRACKS in
    CREDIT REQUESTS counts, general sentences included: with 2 or more distinct tracks "names you on the track", "on
    this track" and "your request stays open" are singular-for-many and a stop; with one distinct track "on the
    track" / "this track" is right. A word that refers to something else is not a track reference: in
-   "Documentation of the work: ... or anything else that shows you worked on it", "it" is the work, not a track.
+   "Documentation of the work: ... or anything else that shows you worked on it", "it" is the work, not a track; and
+   a fixed option line such as "A public link where the credit is listed" describes the kind of evidence in general,
+   it is not a reference to the user's tracks or requests.
 R3 role_join: roles named together are joined with "and": two roles "Mixing and Mastering"; three or more
    "Mixing, Mastering and Production". A list joined only by commas ("Mixing, Mastering credit") is a stop.
 R4 old_date_year: a date the body shows (e.g. "the file you sent on January 26") that falls in a year other than
@@ -110,6 +116,10 @@ def coded_stop(body: str, facts: dict[str, Any], barred: Iterable[str]) -> tuple
     m = BUSINESS_DAYS.search(low)
     if m:
         return "barred_phrase", m.group(0)
+    for rx in BARRED_FORMS:
+        m = rx.search(low)
+        if m:
+            return "barred_phrase", m.group(0)
     cls = str(facts.get("class") or "").lower().replace("-", "_")
     owes = facts.get("owes_proof")
     if cls in STATUS_CLASSES and owes is not False:
