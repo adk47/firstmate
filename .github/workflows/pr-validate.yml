@@ -322,6 +322,19 @@ jobs:
           scripts/validate-config-matrix.sh
           echo "::endgroup::"
 
+      - name: Agent exec posture — no shell for untrusted-text readers
+        # guardrails-1101 gap 2 (H1), security-arch-fable-s1 [key=exec-scope]/[key=exec-lever] 2026-11-01.
+        # policies/agent-exec-policy.json records every agent's posture; the rules are constants in the
+        # script: a denied agent denies every shell-capable tool (exec, process, lobster, nodes, computer,
+        # terminal on main); a full agent needs reason + exit + ruling + an expiry <= 31 days out and goes
+        # red the day after it; no codex agent may use tools.exec deny/allowlist (the silent openrouter
+        # fallback). --base adds: a non-ops agent denied on main can never get exec back, and a new agent
+        # can never start with it. Exit 2 (unreadable input) is a failure, never a pass.
+        run: |
+          echo "::group::Agent exec posture"
+          python3 scripts/check-agent-exec-policy.py --base origin/main
+          echo "::endgroup::"
+
       - name: SOUL.md check — all workspaces
         run: |
           echo "::group::Checking SOUL.md in all workspaces"
@@ -1675,6 +1688,15 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_paperclip_intake
+      - name: Run agent exec posture red-team tests
+        # tests/fixtures/exec-injection-corpus.json: Slack / PR-body / fetched-page / email / Intercom text that
+        # tries to become `curl ... | sh`; every case must resolve to `refused` for every denied agent on the
+        # real configs, and every rule of scripts/check-agent-exec-policy.py is mutation-tested (incl. the
+        # lobster bypass and the re-grant guard). Also covers the verdict logic of the post-deploy probe
+        # scripts/redteam/exec_injection_probe.py. Stdlib unittest + git, by name.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_agent_exec_policy
       - name: Run store-only cron guard tests
         # scripts/lib/detect-store-only-crons.py is the deploy gate that HALTS if
         # the live SQLite cron store holds a recurring cron absent from

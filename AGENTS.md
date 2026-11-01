@@ -620,6 +620,20 @@ text pass the detection-only injection watch (TS + Python copies pinned equal). 
 case (`plugins/intercom/redteam/`); a case that gets through fails CI and the daily replay pages. See
 `docs/support/caroline-safety-layer.md`.
 
+## Agent shell (exec) posture: who can run commands as root on node-8
+
+Every agent's posture (`denied`, or `full` with a reason, exit plan and expiry no more than 31 days out) is in
+`policies/agent-exec-policy.json`. The rules are constants in `scripts/check-agent-exec-policy.py`, which runs in PR CI
+(`--base origin/main`) and post-deploy on node-8 (`--live`). Three traps on openclaw 2026.8.35, all verified in code:
+- **Never set `tools.exec.security`/`mode` to `deny` or `allowlist` on a codex agent** (all main agents are codex):
+  `@openclaw/codex` refuses the turn and the fallback runner silently moves it to openrouter. Lock a shell with
+  `tools.deny` instead.
+- **`tools.deny: [exec]` restricts the codex harness**: native web_search, skill_search, memories and MCP go off with
+  the shell (validate-config-matrix check #8). Price that per agent.
+- **`lobster` is a shell the tool policy cannot see**: its `exec --shell` steps spawn directly. Every main agent gets it
+  via `tools.alsoAllow`, so a denied agent must deny `lobster` too.
+Runtime proof per agent: `scripts/redteam/exec_injection_probe.py --agent <id>` (post-deploy, sends one injected turn).
+
 ## Picking the right extension mechanism
 
 Before writing new code in this repo, walk this decision tree top-down and stop at

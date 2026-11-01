@@ -453,7 +453,17 @@
             "openrouter/anthropic/claude-haiku-5.5"
           ]
         },
-        "thinkingDefault": "low"
+        "thinkingDefault": "low",
+        "tools": {
+          "deny": [
+            "exec",
+            "process",
+            "lobster",
+            "nodes",
+            "computer",
+            "terminal"
+          ]
+        }
       }
     ]
   },

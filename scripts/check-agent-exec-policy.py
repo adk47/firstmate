@@ -1,0 +1,342 @@
+#!/usr/bin/env python3
+"""check-agent-exec-policy.py - which OpenClaw agents can run shell commands, enforced from code.
+
+guardrails-1101 gap 2 (H1): tools.exec security=full, ask=off runs every main agent's shell as root on node-8, so a
+prompt-injected Slack thread, fetched page or PR body can become `curl ... | sh`. Rulings: security-arch-fable-s1
+[key=exec-scope] and [key=exec-lever], 2026-11-01. policies/agent-exec-policy.json records each agent's posture;
+the RULES are the constants below, so a PR cannot widen a rule by editing data.
+
+  python3 scripts/check-agent-exec-policy.py                    repo configs vs the registry (deploy, local)
+  python3 scripts/check-agent-exec-policy.py --base origin/main  + the re-grant / new-agent / extension rules (PR CI)
+  python3 scripts/check-agent-exec-policy.py --live              node-8 live configs vs the repo (post-deploy)
+
+Exit 0 = clean; 1 = a violation (each named on stdout); 2 = a config or registry could not be read (never a pass).
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+REGISTRY = "policies/agent-exec-policy.json"
+# Paths are constants on purpose (standing rule: kill/guard paths never come from env).
+LIVE_CONFIG = {
+    "openclaw-main.json": "/root/.openclaw-main/openclaw.json",
+    "openclaw-edge.json": "/root/.openclaw-edge/openclaw.json",
+}
+# The only agents that may hold exec indefinitely-renewable; everyone else is on borrowed, dated time.
+OPS_AGENTS = frozenset({"operations", "devops", "clio"})
+MAX_EXPIRY_DAYS = 31
+
+# Shell-capable tool ids a `denied` agent must deny, per profile.
+#   exec     - OpenClaw host exec; its codex aliases gateway_exec / node_exec / sandbox_exec follow it, and because
+#              exec is not in the codex safe-deny set, denying it also drops the codex-native shell.
+#   process  - background shell sessions (gateway_process / sandbox_process follow it).
+#   lobster  - @clawdbot/lobster `exec --shell` steps call child_process.spawn with NO tool-policy check (the plugin
+#              returns null only when sandboxed), so an exec-denied agent that keeps lobster still has a root shell.
+#              hydra grants it to every main agent via tools.alsoAllow ["lobster"].
+#   nodes / computer - command and control on paired nodes (paired nodes exist: node_exec calls seen 2026-10).
+#   terminal - reads/writes operator-opened terminals.
+# Edge requires only exec: Caroline's exact 15-name list belongs to scripts/lib/assert-support-deny.sh (captain
+# 2026-10-28) and edge loads no lobster plugin. Hardening her beyond exec is the captain's call, not this script's.
+REQUIRED_DENY = {
+    "openclaw-main.json": ("exec", "process", "lobster", "nodes", "computer", "terminal"),
+    "openclaw-edge.json": ("exec",),
+}
+TOOL_GROUPS = {  # openclaw 2026.8.35 docs/gateway/config-tools.md "Tool groups" (shell-relevant groups)
+    "group:runtime": {"exec", "process", "code_execution"},
+    "group:nodes": {"nodes", "computer"},
+    "group:ui": {"browser", "screen", "dashboard", "terminal", "portal", "canvas", "show_widget"},
+    "group:automation": {"heartbeat_respond", "cron", "gateway"},
+}
+# A tool call by one of these names is governed by the canonical tool on the right.
+ALIASES = {
+    "bash": "exec", "gateway_exec": "exec", "node_exec": "exec", "sandbox_exec": "exec",
+    "gateway_process": "process", "sandbox_process": "process",
+}
+SHELL_TOOLS = ("exec", "process", "lobster", "nodes", "computer", "terminal")
+NATIVE_SHELL = "codex-native-shell"
+# @openclaw/codex CODEX_TOOL_POLICY_SAFE_DENY_NAMES (2026.8.35; mirrored in validate-config-matrix.sh check #8).
+# A deny made only of these keeps the codex-native surface (incl. its shell); anything else restricts it.
+CODEX_SAFE_DENY = frozenset({
+    "automations", "canvas", "dashboard", "gateway", "heartbeat_respond", "image_generate", "memory_get",
+    "memory_search", "message", "music_generate", "show_widget", "skill_workshop", "tts", "video_generate",
+    "web_fetch", "x_search",
+})
+EXEC_SHAPE_TRAP = frozenset({"deny", "allowlist"})
+
+
+class Unreadable(Exception):
+    """A config or registry that cannot be parsed: exit 2, never a pass."""
+
+
+# ---------------------------------------------------------------- config reading
+def agents_of(cfg: dict) -> dict:
+    agents = cfg.get("agents") or {}
+    if isinstance(agents.get("entries"), dict) and agents["entries"]:
+        return {k: (v or {}) for k, v in agents["entries"].items()}
+    if isinstance(agents.get("list"), list) and agents["list"]:
+        return {a["id"]: a for a in agents["list"] if isinstance(a, dict) and a.get("id")}
+    raise Unreadable("config has neither a non-empty agents.list nor agents.entries")
+
+
+def _tools(obj) -> dict:
+    t = (obj or {}).get("tools")
+    return t if isinstance(t, dict) else {}
+
+
+def expand(names) -> set:
+    out = set()
+    for n in names or []:
+        out |= TOOL_GROUPS.get(n, {n})
+    return out
+
+
+def deny_set(cfg: dict, agent: dict) -> set:
+    """Effective deny: global + agents.defaults + agent (openclaw unions every explicit deny layer)."""
+    defaults = (cfg.get("agents") or {}).get("defaults") or {}
+    return expand(_tools(cfg).get("deny")) | expand(_tools(defaults).get("deny")) | expand(_tools(agent).get("deny"))
+
+
+def grants(cfg: dict, agent: dict) -> set:
+    t, g = _tools(agent), _tools(cfg)
+    return expand(t.get("allow")) | expand(t.get("alsoAllow")) | expand(g.get("allow")) | expand(g.get("alsoAllow"))
+
+
+def runtime_of(cfg: dict, agent: dict) -> str:
+    model = agent.get("model")
+    primary = model.get("primary") if isinstance(model, dict) else model
+    if not primary:
+        dm = ((cfg.get("agents") or {}).get("defaults") or {}).get("model")
+        primary = dm.get("primary") if isinstance(dm, dict) else dm
+    provider = (primary or "").split("/", 1)[0]
+    prov = ((cfg.get("models") or {}).get("providers") or {}).get(provider) or {}
+    return ((prov.get("agentRuntime") or {}).get("id")) or "embedded"
+
+
+def exec_mode(cfg: dict, agent: dict) -> str:
+    """Layered like @openclaw/codex applyOpenClawExecPolicyLayer: a `mode` wins over `security` at each layer."""
+    mode = "full"
+    defaults = (cfg.get("agents") or {}).get("defaults") or {}
+    for layer in (_tools(cfg).get("exec"), _tools(defaults).get("exec"), _tools(agent).get("exec")):
+        if not isinstance(layer, dict):
+            continue
+        if layer.get("mode"):
+            mode = layer["mode"]
+        elif layer.get("security"):
+            mode = {"full": "full", "deny": "deny", "allowlist": "allowlist"}.get(layer["security"], mode)
+    return mode
+
+
+def harness_restricted(cfg: dict, agent: dict) -> bool:
+    deny = deny_set(cfg, agent)
+    narrowing_allow = [a for a in (_tools(agent).get("allow") or []) if a != "*"] or \
+                      [a for a in (_tools(cfg).get("allow") or []) if a != "*"]
+    return bool(deny - CODEX_SAFE_DENY) or bool(narrowing_allow)
+
+
+def reachable_shell(cfg: dict, agent: dict, tools=SHELL_TOOLS) -> set:
+    """Shell surfaces this agent can still reach, modelled from config (static; the live probe is the runtime proof)."""
+    deny, out = deny_set(cfg, agent), set()
+    mode = exec_mode(cfg, agent)
+    for tool in tools:
+        if tool in deny:
+            continue
+        if tool == "exec" and mode == "deny":
+            continue
+        if tool == "lobster" and not ("lobster" in ((cfg.get("plugins") or {}).get("allow") or [])
+                                      and "lobster" in grants(cfg, agent)):
+            continue
+        out.add(tool)
+    if runtime_of(cfg, agent) == "codex" and not harness_restricted(cfg, agent) and mode == "full":
+        out.add(NATIVE_SHELL)
+    return out
+
+
+def resolve_call(cfg: dict, agent: dict, tool_name: str) -> str:
+    """'executes' if a call by this tool name would run a command for this agent, else 'refused'."""
+    reach = reachable_shell(cfg, agent)
+    canonical = ALIASES.get(tool_name, tool_name)
+    if tool_name in ("bash", "shell", "exec_command"):  # codex names its native shell tool `bash`
+        return "executes" if (NATIVE_SHELL in reach or "exec" in reach) else "refused"
+    return "executes" if canonical in reach else "refused"
+
+
+# ---------------------------------------------------------------- checks
+def _date(value, where, errors):
+    try:
+        return dt.date.fromisoformat(str(value))
+    except ValueError:
+        errors.append(f"{where}: '{value}' is not a YYYY-MM-DD date")
+        return None
+
+
+def check_profile(profile: str, cfg: dict, reg: dict, today: dt.date, errors: list, notes: list) -> None:
+    agents = agents_of(cfg)
+    want = set(reg)
+    for missing in sorted(set(agents) - want):
+        errors.append(f"{profile}: agent '{missing}' is not in {REGISTRY} - every agent must declare its exec posture")
+    for stale in sorted(want - set(agents)):
+        errors.append(f"{profile}: {REGISTRY} lists '{stale}' but the config has no such agent - drop the entry")
+    for aid in sorted(set(agents) & want):
+        a, entry, where = agents[aid], reg[aid], f"{profile}:{aid}"
+        posture = entry.get("posture")
+        if runtime_of(cfg, a) == "codex" and exec_mode(cfg, a) in EXEC_SHAPE_TRAP:
+            errors.append(f"{where}: effective tools.exec mode/security is '{exec_mode(cfg, a)}' on a codex-runtime "
+                          "agent - @openclaw/codex refuses every such turn (AgentHarnessPreflightError) and the "
+                          "fallback runner silently moves it to openrouter. Use tools.deny instead.")
+        if posture == "denied":
+            missing = [t for t in REQUIRED_DENY[profile] if t not in deny_set(cfg, a)]
+            if missing:
+                errors.append(f"{where}: posture=denied but tools.deny lacks {missing}")
+            regrant = sorted(set(REQUIRED_DENY[profile]) & expand(_tools(a).get("allow")) |
+                             set(REQUIRED_DENY[profile]) & expand(_tools(a).get("alsoAllow")))
+            if regrant:
+                errors.append(f"{where}: posture=denied but the agent's tools.allow/alsoAllow names {regrant}")
+            reach = reachable_shell(cfg, a, REQUIRED_DENY[profile])
+            if reach:
+                errors.append(f"{where}: posture=denied but shell is still reachable via {sorted(reach)}")
+            beyond = reachable_shell(cfg, a) - reach
+            if beyond:  # outside this profile's rule (edge: the captain's list) - shown, never silently passed
+                notes.append(f"::notice::{where}: not denied (outside {profile}'s REQUIRED_DENY): {sorted(beyond)}")
+            if entry.get("since"):
+                _date(entry["since"], f"{where}.since", errors)
+            notes.append(f"{where}: denied ({len(_tools(a).get('deny') or [])} deny entries)")
+        elif posture == "full":
+            for k in ("reason", "exit", "ruling"):
+                if not str(entry.get(k) or "").strip():
+                    errors.append(f"{where}: posture=full needs a non-empty '{k}'")
+            exp = _date(entry.get("expires"), f"{where}.expires", errors)
+            if exp is not None:
+                if today > exp:
+                    errors.append(f"{where}: posture=full EXPIRED on {exp} - deny exec, or renew with a new ruling")
+                elif (exp - today).days > MAX_EXPIRY_DAYS:
+                    errors.append(f"{where}: expires {exp} is more than {MAX_EXPIRY_DAYS} days out")
+                else:
+                    notes.append(f"{where}: full until {exp} ({(exp - today).days}d left)"
+                                 + ("" if aid in OPS_AGENTS else " - non-ops, dated exception"))
+        else:
+            errors.append(f"{where}: posture must be 'denied' or 'full', got {posture!r}")
+
+
+def check_base(profile: str, cfg: dict, reg: dict, base_cfg, base_reg, errors: list, notes: list) -> None:
+    """Rules that need the base branch: no re-grant, no new agent at full, extensions are visible."""
+    if base_cfg is None:
+        notes.append(f"{profile}: absent on base - no re-grant comparison")
+        return
+    base_agents = agents_of(base_cfg)
+    for aid, entry in sorted(reg.items()):
+        if entry.get("posture") != "full":
+            continue
+        if aid not in base_agents:
+            errors.append(f"{profile}:{aid}: a NEW agent cannot start with exec (posture=full); declare it denied")
+            continue
+        base_denied = "exec" in deny_set(base_cfg, base_agents[aid]) or \
+            ((base_reg or {}).get(aid) or {}).get("posture") == "denied"
+        if base_denied:
+            msg = f"{profile}:{aid}: RE-GRANT - exec is denied on base and this change gives it back"
+            if aid in OPS_AGENTS:
+                notes.append(msg + " (ops agent: allowed, reviewer must see this)")
+            else:
+                errors.append(msg + " (non-ops agent: never; a re-grant needs a change to this script's rules)")
+        old = ((base_reg or {}).get(aid) or {}).get("expires")
+        if old and entry.get("expires") and str(entry["expires"]) > str(old):
+            notes.append(f"::warning::{profile}:{aid}: expiry EXTENDED {old} -> {entry['expires']} - needs a ruling")
+
+
+def check_live(profile: str, repo_cfg: dict, live_cfg: dict, errors: list, notes: list) -> None:
+    r, l = agents_of(repo_cfg), agents_of(live_cfg)
+    if set(r) != set(l):
+        errors.append(f"{profile}: live agents {sorted(l)} != repo agents {sorted(r)}")
+    if _tools(repo_cfg).get("exec") != _tools(live_cfg).get("exec"):
+        errors.append(f"{profile}: live tools.exec {_tools(live_cfg).get('exec')} != repo {_tools(repo_cfg).get('exec')}")
+    for aid in sorted(set(r) & set(l)):
+        rd, ld = sorted(_tools(r[aid]).get("deny") or []), sorted(_tools(l[aid]).get("deny") or [])
+        if rd != ld:
+            errors.append(f"{profile}:{aid}: live tools.deny ({len(ld)}) != repo ({len(rd)}); "
+                          f"only-live={sorted(set(ld) - set(rd))} only-repo={sorted(set(rd) - set(ld))}")
+        elif rd:
+            notes.append(f"{profile}:{aid}: live deny == repo deny ({len(rd)})")
+        if _tools(r[aid]).get("exec") != _tools(l[aid]).get("exec"):
+            errors.append(f"{profile}:{aid}: live tools.exec differs from repo")
+
+
+# ---------------------------------------------------------------- io
+def load(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise Unreadable(f"cannot read {path}: {exc}") from exc
+
+
+def git_show(ref: str, rel: str, root: Path):
+    try:
+        out = subprocess.run(["git", "-C", str(root), "show", f"{ref}:{rel}"], capture_output=True, text=True,
+                             check=True).stdout
+    except subprocess.CalledProcessError:
+        return None
+    try:
+        return json.loads(out)
+    except ValueError as exc:
+        raise Unreadable(f"{ref}:{rel} is not JSON: {exc}") from exc
+
+
+def run(root: Path = REPO, base: str | None = None, live: bool = False, today: dt.date | None = None,
+        live_paths: dict | None = None) -> tuple[int, list, list]:
+    today = today or dt.datetime.now(dt.timezone.utc).date()
+    errors, notes = [], []
+    try:
+        registry = load(root / REGISTRY)
+        if registry.get("version") != 1 or not isinstance(registry.get("profiles"), dict):
+            raise Unreadable(f"{REGISTRY}: expected version 1 with a profiles object")
+        on_disk = sorted(p.name for p in root.glob("openclaw-*.json"))
+        for name in on_disk:
+            if name not in registry["profiles"]:
+                errors.append(f"{name}: profile is not in {REGISTRY}")
+            if name not in REQUIRED_DENY:
+                errors.append(f"{name}: no REQUIRED_DENY rule for this profile in {Path(__file__).name}")
+        for name in registry["profiles"]:
+            if name not in on_disk:
+                errors.append(f"{REGISTRY}: profile {name} has no config file at the repo root")
+        base_reg = git_show(base, REGISTRY, root) if base else None
+        for profile in on_disk:
+            if profile not in registry["profiles"] or profile not in REQUIRED_DENY:
+                continue
+            cfg, reg = load(root / profile), registry["profiles"][profile]
+            check_profile(profile, cfg, reg, today, errors, notes)
+            if base:
+                check_base(profile, cfg, reg, git_show(base, profile, root),
+                           ((base_reg or {}).get("profiles") or {}).get(profile), errors, notes)
+            if live:
+                live_cfg = load(Path((live_paths or LIVE_CONFIG)[profile]))
+                check_live(profile, cfg, live_cfg, errors, notes)
+                # The posture rules must also hold on what node-8 actually runs, not only on the repo copy.
+                lerr: list = []
+                check_profile(profile, live_cfg, reg, today, lerr, [])
+                errors.extend(f"LIVE {e}" for e in lerr)
+    except Unreadable as exc:
+        return 2, [str(exc)], notes
+    return (1 if errors else 0), errors, notes
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--base", help="git ref to compare against (PR CI: origin/main)")
+    ap.add_argument("--live", action="store_true", help="also compare node-8 live configs (post-deploy)")
+    args = ap.parse_args(argv)
+    rc, errors, notes = run(base=args.base, live=args.live)
+    for n in notes:
+        print(f"ok   {n}" if not n.startswith("::") else n)
+    for e in errors:
+        print(f"FAIL {e}")
+    print({0: "agent exec policy: clean", 1: f"agent exec policy: {len(errors)} violation(s)",
+           2: "agent exec policy: UNREADABLE input - not a pass"}[rc])
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

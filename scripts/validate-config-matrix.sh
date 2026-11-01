@@ -276,7 +276,15 @@ for cfg in ${PROFILES[@]+"${PROFILES[@]}"}; do
   #        tools (support-tools), not codex-native ones, and `support` already runs the restricted
   #        harness because of `exec` above, so they add no further native-surface cost. They are listed
   #        here so a deploy keeps the live deny list (scripts/lib/assert-support-deny.sh).
-  HARNESS_DENY_EXCEPTIONS='["openclaw-edge.json:support:exec","openclaw-main.json:operations:web_search","openclaw-edge.json:support:credits_verify","openclaw-edge.json:support:credit_verification_check","openclaw-edge.json:support:profiles_claim_self","openclaw-edge.json:support:profiles_consolidate","openclaw-edge.json:support:profile_claim_status","openclaw-edge.json:support:profile_credits_status","openclaw-edge.json:support:dedupe_check","openclaw-edge.json:support:remove_credits","openclaw-edge.json:support:credit_status_lookup","openclaw-edge.json:support:document_intake","openclaw-edge.json:support:merge_request_intake","openclaw-edge.json:support:credit_trust_handoff","openclaw-edge.json:support:merge_intake","openclaw-edge.json:support:proof_on_file"]'
+  #      - openclaw-main.json:scout:{exec,process,lobster,nodes,computer,terminal} -- security-arch-fable-s1
+  #        [key=exec-lever] 2026-11-01: an agent that READS untrusted text never holds a shell; scout reads the open
+  #        web, so it goes first. The bill is the same as Caroline's and it is LARGE for scout: the restricted
+  #        harness turns native web_search / web_run OFF (@openclaw/codex resolveCodexWebSearchPlan: restricted ->
+  #        kind=managed; hydra configures no managed provider, check #7), plus skill_search/memories/MCP. Scout keeps
+  #        web_fetch, company_finder_* and the support-tools lookups. lobster is denied because its `exec --shell`
+  #        steps spawn with no tool-policy check. The registry + rules live in policies/agent-exec-policy.json and
+  #        scripts/check-agent-exec-policy.py; revert = drop these six rows and scout's deny together.
+  HARNESS_DENY_EXCEPTIONS='["openclaw-main.json:scout:exec","openclaw-main.json:scout:process","openclaw-main.json:scout:lobster","openclaw-main.json:scout:nodes","openclaw-main.json:scout:computer","openclaw-main.json:scout:terminal","openclaw-edge.json:support:exec","openclaw-main.json:operations:web_search","openclaw-edge.json:support:credits_verify","openclaw-edge.json:support:credit_verification_check","openclaw-edge.json:support:profiles_claim_self","openclaw-edge.json:support:profiles_consolidate","openclaw-edge.json:support:profile_claim_status","openclaw-edge.json:support:profile_credits_status","openclaw-edge.json:support:dedupe_check","openclaw-edge.json:support:remove_credits","openclaw-edge.json:support:credit_status_lookup","openclaw-edge.json:support:document_intake","openclaw-edge.json:support:merge_request_intake","openclaw-edge.json:support:credit_trust_handoff","openclaw-edge.json:support:merge_intake","openclaw-edge.json:support:proof_on_file"]'
 
   #    REACH OF THIS GATE, stated honestly: openclaw classifies over
   #    explicitPolicies = [globalPolicy, globalProviderPolicy, agentPolicy,

@@ -1,0 +1,99 @@
+{
+  "_doc": [
+    "Which OpenClaw agents may run shell commands, and until when. Enforced by scripts/check-agent-exec-policy.py",
+    "(PR Validation, and post-deploy with --live on node-8). The RULES live in that script as constants; this file only",
+    "records each agent's posture, so a PR cannot widen a rule by editing data.",
+    "",
+    "posture=denied: the agent's tools.deny carries every shell-capable tool for its profile (the script's REQUIRED_DENY:",
+    "  exec + process + lobster + nodes + computer + terminal on main; exec on edge). exec also removes the codex aliases",
+    "  gateway_exec / node_exec / sandbox_exec, and - because exec is outside the codex harness's audited safe-deny set -",
+    "  the codex-native shell. Cost, accepted per agent: the restricted harness also drops native web_search, skill_search,",
+    "  memories, browser_use and every MCP server (scripts/validate-config-matrix.sh check #8, incident 2026-09-10).",
+    "posture=full: the agent keeps exec (security=full, ask=off, root on node-8). Allowed ONLY with a reason, a ruling",
+    "  reference, an exit plan and an expiry no more than 31 days out; CI goes red the day after expiry. A non-ops agent",
+    "  that is denied on main can never come back to full, and a new agent can never start at full (--base check).",
+    "",
+    "Why not tools.exec.security deny/allowlist per agent: on openclaw 2026.8.35 every main agent runs the codex harness",
+    "and @openclaw/codex refuses a turn whose effective exec mode is deny/allowlist (AgentHarnessPreflightError), so the",
+    "fallback runner silently moves the agent to openrouter on the embedded runtime. The script rejects that shape.",
+    "Why not reason/expiry inside openclaw-main.json: its schema is additionalProperties:false at every level, so an",
+    "unknown key stops the gateway from starting.",
+    "",
+    "Rulings: security-arch-fable-s1 [key=exec-scope] and [key=exec-lever], 2026-11-01 (guardrails-1101 gap 2, H1)."
+  ],
+  "version": 1,
+  "profiles": {
+    "openclaw-main.json": {
+      "scout": {
+        "posture": "denied",
+        "since": "2026-11-01",
+        "ruling": "security-arch-fable-s1 [key=exec-lever] 2026-11-01: scout = tools.deny [exec,process] NOW",
+        "note": "Reads the open web (373 web_fetch + ~3,300 native searches in 14d) = the most injectable main agent; 150 shell calls in 14d (muso-read.sh SQL ~55, the rest reading skill files). Accepted cost: the restricted codex harness turns native web_search/web_run OFF (verified in @openclaw/codex resolveCodexWebSearchPlan: restricted -> kind=managed, hydra configures no managed provider). Canary after deploy: scripts/redteam/exec_injection_probe.py --agent scout and --check-search. Revert = remove scout's deny entries (and its HARNESS_DENY_EXCEPTIONS rows) in one PR."
+      },
+      "finance": {
+        "posture": "full",
+        "expires": "2026-11-08",
+        "reason": "Stripe reporting is shell: 339 stripe CLI calls in 14d (312 via gateway_exec for Secret Store env), plus inline python over the output.",
+        "exit": "One read-only wrapper stripe-report.sh run by a cron that posts its output to finance's channel (finance consumes text, never runs it); then posture=denied.",
+        "ruling": "security-arch-fable-s1 [key=exec-lever] 2026-11-01 item 2"
+      },
+      "qa": {
+        "posture": "full",
+        "expires": "2026-11-08",
+        "reason": "The review pipeline is shell (26,132 calls in 14d: qa-gh.sh, qa-review-clone.sh, qa-review-status.sh, qa-pr-approve.sh, qa-slack-dm.sh). RESIDUAL RISK, stated plainly: qa reviews attacker-authored PR text with exec=full on node-8 until this expires.",
+        "exit": "Compensating control: PR bodies/diffs reach qa as fenced data, and every qa-*.sh refuses argv/stdin without the dispatch nonce; then T9 moves qa to its own gateway (pods/qa-review-gateway).",
+        "ruling": "security-arch-fable-s1 [key=exec-lever] 2026-11-01 item 3"
+      },
+      "cto": {
+        "posture": "full",
+        "expires": "2026-11-15",
+        "reason": "Engineering shell (5,650 bash + 1,254 gateway_exec in 14d: gh, git, kubectl, muso-read.sh). Reads PR bodies and GitHub = untrusted, second-highest risk.",
+        "exit": "Every untrusted read goes through a no-exec reader agent whose output comes back as quoted data; then an allowlist or deny.",
+        "ruling": "security-arch-fable-s1 [key=exec-lever] 2026-11-01 item 4"
+      },
+      "ceo": {
+        "posture": "full",
+        "expires": "2026-11-15",
+        "reason": "966 bash + 333 gateway_exec in 14d (muso CLI, gh, muso-admin-api, skill reads).",
+        "exit": "Untrusted reads through the no-exec reader agent; then an allowlist or deny.",
+        "ruling": "security-arch-fable-s1 [key=exec-lever] 2026-11-01 item 4"
+      },
+      "cmo": {
+        "posture": "full",
+        "expires": "2026-11-15",
+        "reason": "1,061 bash + 228 gateway_exec in 14d (gog 277, muso-read.sh 192).",
+        "exit": "Untrusted reads through the no-exec reader agent; then an allowlist or deny.",
+        "ruling": "security-arch-fable-s1 [key=exec-lever] 2026-11-01 item 4"
+      },
+      "operations": {
+        "posture": "full",
+        "expires": "2026-11-15",
+        "reason": "Ops agent: acts only for god-mode requesters; its exec runs the ops wrappers (muso CLI, intercom-ops-write.sh, agent-bridge-request.sh, muso-admin-api.sh, stripe). Already on the restricted harness (web_fetch/web_search deny).",
+        "exit": "Allowlist of its named wrapper scripts.",
+        "ruling": "security-arch-fable-s1 [key=exec-lever] 2026-11-01 item 5"
+      },
+      "devops": {
+        "posture": "full",
+        "expires": "2026-11-15",
+        "reason": "Ops agent: kubectl, journalctl, systemctl, prod-log fetchers; acts only for god-mode requesters.",
+        "exit": "Allowlist of its named wrapper scripts.",
+        "ruling": "security-arch-fable-s1 [key=exec-lever] 2026-11-01 item 5"
+      },
+      "clio": {
+        "posture": "full",
+        "expires": "2026-11-15",
+        "reason": "Ops/coordination agent: rg, gh, kubectl, muso CLI; acts only for god-mode requesters.",
+        "exit": "Allowlist of its named wrapper scripts.",
+        "ruling": "security-arch-fable-s1 [key=exec-lever] 2026-11-01 item 5"
+      }
+    },
+    "openclaw-edge.json": {
+      "support": {
+        "posture": "denied",
+        "since": "2026-10-28",
+        "ruling": "captain 2026-10-28 12:1xZ / 12:3xZ (#408): Caroline holds no shell and no verification/merge tool",
+        "note": "The exact 15-name deny list is owned by scripts/lib/assert-support-deny.sh; this registry only requires exec. Edge loads no lobster plugin."
+      }
+    }
+  }
+}

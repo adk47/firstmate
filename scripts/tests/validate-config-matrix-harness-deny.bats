@@ -75,6 +75,20 @@ JSON
   declare_model_catalog
 }
 
+# Append `scout` with its REAL deny (read from the repo's openclaw-main.json, so this
+# cannot drift) to the current fixture. Any openclaw-main.json fixture needs it once
+# scout carries excepted denies: without scout those exception rows are judged
+# STALE, which is the gate working, not the case under test.
+# $1 (optional) = jq filter applied to scout's deny array (default: unchanged).
+add_scout_agent() {
+  local deny
+  deny=$(jq -c --argjson d "$(jq -c '.agents.list[] | select(.id=="scout") | .tools.deny' "$HYDRA_REPO/openclaw-main.json")" \
+    -n "\$d | ${1:-.}")
+  jq --argjson deny "$deny" '.agents.list += [{"id":"scout","thinkingDefault":"medium",
+      "model":{"primary":"openai/gpt-5.6-sol","fallbacks":["openrouter/anthropic/claude-haiku-4.5"]},
+      "tools":{"deny":$deny}}]' "$PROFILE" > "$PROFILE.tmp" && mv "$PROFILE.tmp" "$PROFILE"
+}
+
 # Same fixture, converted to the keyed `.agents.entries{}` form the >=2026.8
 # doctor understands. DERIVED from write_policy_profile rather than hand-written,
 # so the two shapes are provably the same config -- which is what the
@@ -208,8 +222,25 @@ SUPPORT_DENY='["exec","credits_verify","credit_verification_check","profiles_cla
 
 @test "check8: documented exception (main:operations:web_search) PASSES" {
   write_policy_profile '{"deny":["web_fetch","web_search"]}' 'operations' 'openclaw-main.json'
+  add_scout_agent
   run "$SCRIPT" "$PROFILE"
   [ "$status" -eq 0 ]
+}
+
+@test "check8: documented exception (main:scout shell lockdown, exec-lever 2026-11-01) PASSES" {
+  write_policy_profile '{"deny":["web_fetch","web_search"]}' 'operations' 'openclaw-main.json'
+  add_scout_agent
+  jq -e '.agents.list[] | select(.id=="scout") | .tools.deny | index("lobster")' "$PROFILE" >/dev/null
+  run "$SCRIPT" "$PROFILE"
+  [ "$status" -eq 0 ]
+}
+
+@test "check8: scout dropping lobster leaves a STALE exception (red build, never a silent re-open)" {
+  write_policy_profile '{"deny":["web_fetch","web_search"]}' 'operations' 'openclaw-main.json'
+  add_scout_agent 'map(select(. != "lobster"))'
+  run "$SCRIPT" "$PROFILE"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'STALE EXCEPTION "openclaw-main.json:scout:lobster"'* ]]
 }
 
 @test "check8: exception is scoped to its AGENT — same deny elsewhere still FAILS" {
@@ -250,6 +281,7 @@ SUPPORT_DENY='["exec","credits_verify","credit_verification_check","profiles_cla
   # openclaw-edge.json:support:exec must not be reported while validating a
   # main-profile fixture — it is not applicable to this file, not stale.
   write_policy_profile '{"deny":["web_fetch","web_search"]}' 'operations' 'openclaw-main.json'
+  add_scout_agent
   run "$SCRIPT" "$PROFILE"
   [ "$status" -eq 0 ]
   [[ "$output" != *"support"* ]]
