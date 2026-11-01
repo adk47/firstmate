@@ -2008,6 +2008,8 @@ jobs:
           python3 scripts/tests/test_credit_trust_llm.py
           # batch-judge (Fable scale-now-openclaw): ONE tool-less judge call per outbound batch, STOP-only, fail closed.
           python3 scripts/tests/test_credit_batch_judge.py
+          # b1's coded pre-layer + instructions for it (runs BEFORE judge_batch; a coded stop never reaches the model).
+          python3 scripts/tests/test_batch_judge_instructions.py
           # credit-trust-decide (trust-yet-verify decider): server-mirror conflict
           # predicate, big tracks never approved, never re-ask, ledger before PUT.
           python3 scripts/tests/test_credit_trust_decide.py

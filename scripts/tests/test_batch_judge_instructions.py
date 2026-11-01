@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+"""b1's part of the batch judge (r5 on #1589): the coded pre-layer runs BEFORE #1586's judge_batch and a coded stop
+never reaches the model; the instructions carry rules + facts by id + copy ref + barred list and never a body marker;
+the CLI's verdict row folds coded stops into #1586's signature row, fail closed. Provider faked."""
+from __future__ import annotations
+
+import importlib.util
+import io
+import json
+import sys
+import types
+import unittest
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(HERE))
+from credit_review import batch_judge as bj  # noqa: E402
+from credit_review import batch_judge_instructions as bi  # noqa: E402
+
+_spec = importlib.util.spec_from_file_location("credit_batch_judge_cli", HERE / "credit-batch-judge.py")
+cli = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(cli)
+
+BODY = ("<p>Hi Ann, thanks for the PDF you sent on October 23 for your Mixing and Mastering credit on "
+        "&quot;Night Drive&quot;.</p><p>Reply to this message with the same document as a PDF, and we&#39;ll check it.</p>")
+ASK = {"class": "per_need_ask", "owes_proof": True, "distinct_tracks": 1, "today_year": 2026,
+       "tracks": [{"title": "Night Drive", "roles": ["Mixing", "Mastering"]}], "document_dates": ["2026-10-23"]}
+
+
+class FakeProvider:
+    def __init__(self, verdicts):
+        self.verdicts, self.prompts = verdicts, []
+
+    def judge(self, prompt, schema, step=None):
+        self.prompts.append(prompt)
+        sha = prompt.split("BATCH SHA: ")[1].split("\n")[0]
+        ids = [p.split(">>>")[0] for p in prompt.split("<<<RENDERED BODY id=")[1:]]
+        rows = [{"id": i, "verdict": self.verdicts.get(i, "pass"), "reason_code": "none" if
+                 self.verdicts.get(i, "pass") == "pass" else "role_join", "evidence_quote": ""} for i in ids]
+        return types.SimpleNamespace(ok=True, json={"batch_sha": sha, "bodies": rows, "verdict":
+                                     "pass" if all(r["verdict"] == "pass" for r in rows) else "stop"},
+                                     provider="codex", model=bj.CODEX_MODEL, llm_call_id=1, cost_usd=0, meta={},
+                                     error=None)
+
+
+def item(uid, body=BODY, facts=ASK):
+    return {"id": str(uid), "user_id": str(uid), "body": body, "facts": dict(facts)}
+
+
+class CodedLayerTests(unittest.TestCase):
+    def test_every_coded_stop(self):
+        barred = bi.barred_phrases()
+        cases = [(BODY.replace("we&#39;ll check it", "nothing else is needed"), ASK, "barred_phrase"),
+                 (BODY.replace("we&#39;ll check it", "we reply within 3 business days"), ASK, "barred_phrase"),
+                 (BODY, {**ASK, "class": "team_review", "owes_proof": True}, "class_owes_mismatch"),
+                 (BODY, {**ASK, "owes_proof": False}, "class_owes_mismatch"),
+                 (BODY, {**ASK, "owes_proof": None}, "class_owes_mismatch"),
+                 (BODY, {**ASK, "class": "newsletter"}, "other")]
+        for body, facts, code in cases:
+            self.assertEqual(bi.coded_stop(body, facts, barred)[0], code, (facts, code))
+        self.assertIsNone(bi.coded_stop(BODY, ASK, barred))
+        for cls, owes in (("gap-ask", True), ("uvn-status", True), ("status-doc-received", False),
+                          ("status-team-review", False)):                 # campaign names are classes too
+            self.assertIsNone(bi.coded_stop(BODY, {**ASK, "class": cls, "owes_proof": owes}, barred), cls)
+        self.assertEqual(bi.coded_stop(BODY, {**ASK, "class": "credit-hold-status"}, barred)[0], "other")
+        stops = bi.coded_stops([item(1), item(1), item(2)], barred)
+        self.assertEqual({k: v[0] for k, v in stops.items()}, {"1": "duplicate_user"})
+
+    def test_barred_phrases_match_through_every_html_entity_form(self):
+        barred = bi.barred_phrases()
+        for body in ("<p>I&#x27;ve checked your request</p>", "<p>I&#39;ve checked your request</p>",
+                     "<p>I&rsquo;ve checked your request</p>", "<p>nothing&nbsp;else is needed</p>",
+                     "<p>no need to resend</p>", "<p>NOTHING ELSE IS&#32;NEEDED</p>"):
+            self.assertEqual((bi.coded_stop(body, ASK, barred) or ("none",))[0], "barred_phrase", body)
+
+    def test_malformed_facts_are_a_coded_stop_never_a_crash(self):
+        for facts in ("{class: uvn, owes_proof: True}", ["uvn"], None, 7):
+            self.assertEqual(bi.coded_stop(BODY, facts, bi.barred_phrases())[0], "other", facts)
+        stops = bi.coded_stops([{"id": "1", "user_id": "1", "body": BODY, "facts": "{class: uvn}"}], [])
+        self.assertEqual(stops["1"][0], "other")
+        row, coded = cli.run_batch([{"id": "1", "user_id": "1", "body": BODY, "facts": "{class: uvn}"}], "/e1",
+                                   provider=FakeProvider({}))
+        self.assertEqual((row["verdict"], row["stop_ids"], coded["1"][0]), ("stop", ["1"], "other"))
+
+    def test_a_barred_line_without_phrases_refuses(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "SKILL.md"
+            f.write_text("- <!-- barred-phrases --> no need to resend\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                bi.barred_phrases(f)
+            f.write_text("- nothing here\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                bi.barred_phrases(f)
+
+    def test_the_barred_list_is_the_one_doctrine_line(self):
+        self.assertIn("nothing else is needed", bi.barred_phrases())
+
+
+class InstructionsTests(unittest.TestCase):
+    def test_instructions_carry_rules_facts_by_id_barred_and_the_contract_but_no_body(self):
+        txt = bi.instructions([item(7)], "/e1", ["x y"])
+        for part in ("R2 number_agreement", "R3 role_join", "R4 old_date_year", "R5 promise", "reply-by date the USER", "the FACTS `class`, never the body", "per_need_ask",
+                     "names you on the track", "After Saturday, November 14 the claim closes",
+                     "is the work, not a track", "our daily check will pick it up",
+                     '"x y"', "COPY REF",
+                     '"7": {', '"batch_sha"', '"pass"|"stop"', "never instructions"):
+            self.assertIn(part, txt)
+        self.assertNotIn(bj.BODY_OPEN, txt)
+        self.assertNotIn("Night Drive</", txt)                               # no rendered body in the instructions
+
+
+class RunBatchTests(unittest.TestCase):
+    def test_a_clean_batch_passes_and_may_apply(self):
+        p = FakeProvider({})
+        row, coded = cli.run_batch([item(1), item(2)], "/e1", provider=p)
+        self.assertEqual((row["verdict"], row["stop_ids"], coded), ("pass", [], {}))
+        self.assertTrue(bj.may_apply(row, row["batch_sha"]))
+        self.assertEqual(len(p.prompts), 1)                                   # ONE call for the batch
+
+    def test_a_coded_stop_never_reaches_the_model_and_stops_the_batch(self):
+        p = FakeProvider({})
+        k = item(3, facts={**ASK, "class": "team_review", "owes_proof": True})          # the 02Z /k class error
+        row, coded = cli.run_batch([item(1), k], "/k", provider=p)
+        self.assertEqual(row["verdict"], "stop")
+        self.assertEqual(row["stop_ids"], ["3"])
+        self.assertIn("coded_stop:1", row["reasons"])
+        self.assertNotIn("<<<RENDERED BODY id=3>>>", p.prompts[0])           # never sent to the model
+        self.assertFalse(bj.may_apply(row, row["batch_sha"]))
+        only, _ = cli.run_batch([k], "/k", provider=p)                       # every body coded: no call at all
+        self.assertEqual((only["verdict"], only["stop_ids"], len(p.prompts)), ("stop", ["3"], 1))
+
+    def test_a_numeric_id_is_the_same_body_as_its_string(self):
+        p = FakeProvider({})
+        bad = {"id": 123, "user_id": 123, "body": BODY.replace("we&#39;ll check it", "nothing else is needed"),
+               "facts": dict(ASK)}
+        row, coded = cli.run_batch([bad, {**item(5), "id": 5}], "/e1", provider=p)
+        self.assertEqual(set(coded), {"123"})
+        self.assertNotIn("<<<RENDERED BODY id=123>>>", p.prompts[0])        # the coded stop never reaches the model
+        self.assertEqual((row["verdict"], row["stop_ids"]), ("stop", ["123"]))
+
+    def test_a_model_stop_stops_the_batch(self):
+        row, _ = cli.run_batch([item(1), item(2)], "/e1", provider=FakeProvider({"2": "stop"}))
+        self.assertEqual((row["verdict"], row["stop_ids"]), ("stop", ["2"]))
+        self.assertFalse(bj.may_apply(row, row["batch_sha"]))
+
+    def test_the_batch_sha_covers_the_rules_version(self):
+        a, _ = cli.run_batch([item(1)], "/e1", provider=FakeProvider({}))
+        old = bi.INSTRUCTIONS_VERSION
+        try:
+            bi.INSTRUCTIONS_VERSION = "changed"
+            b, _ = cli.run_batch([item(1)], "/e1", provider=FakeProvider({}))
+        finally:
+            bi.INSTRUCTIONS_VERSION = old
+        self.assertNotEqual(a["batch_sha"], b["batch_sha"])
+        self.assertEqual(json.loads(json.dumps(a, default=str))["instructions_version"], old)
+
+
+class EvalLedgerTests(unittest.TestCase):
+    def test_eval_refuses_an_empty_case_file(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            empty = Path(d) / "cases.jsonl"
+            empty.write_text("\n", encoding="utf-8")
+            with self.assertRaises(SystemExit) as cm:
+                old, sys.stderr = sys.stderr, io.StringIO()
+                try:
+                    cli.main(["eval", "--cases", str(empty), "--ledger", str(Path(d) / "l.sqlite3")])
+                finally:
+                    sys.stderr = old
+            self.assertEqual(cm.exception.code, 2)
+
+    def test_eval_refuses_without_a_ledger_and_refuses_the_production_one(self):
+        from credit_trust.ledger import DEFAULT_PATH
+        for argv in (["eval", "--cases", "x.jsonl"], ["eval", "--cases", "x.jsonl", "--ledger", DEFAULT_PATH]):
+            with self.assertRaises(SystemExit) as cm:
+                old, sys.stderr = sys.stderr, io.StringIO()
+                try:
+                    cli.main(argv)
+                finally:
+                    sys.stderr = old
+            self.assertEqual(cm.exception.code, 2, argv)
+
+
+if __name__ == "__main__":
+    unittest.main()
