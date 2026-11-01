@@ -763,6 +763,7 @@ unlocked_gate() { # derived copy with the send locks flipped: $1 = retro | windo
                  -e 's/^readonly CLAIM_PROOF_PENDING_COPY_APPROVED=0$/readonly CLAIM_PROOF_PENDING_COPY_APPROVED=1/'
                  -e 's/^readonly CLAIM_PROOF_ASK_COPY_APPROVED=0$/readonly CLAIM_PROOF_ASK_COPY_APPROVED=1/') ;;
     need)     e=(-e 's/^readonly PROOF_NEED_ASK_COPY_APPROVED=0$/readonly PROOF_NEED_ASK_COPY_APPROVED=1/') ;;
+    replyref) e=(-e 's/^readonly REPLY_REF_APPROVED=0$/readonly REPLY_REF_APPROVED=1/') ;;
     claims)   e=(-e 's/^readonly CLAIM_PROOF_ASK_COPY_APPROVED=0$/readonly CLAIM_PROOF_ASK_COPY_APPROVED=1/'
                  -e 's/^readonly CLAIM_STATUS_COPY_APPROVED=0$/readonly CLAIM_STATUS_COPY_APPROVED=1/') ;;
     both)     e=(-e 's/^readonly RETRO_COPY_APPROVED=0$/readonly RETRO_COPY_APPROVED=1/'
@@ -3294,6 +3295,45 @@ rd_cs() { # <prior-part-or-empty> <assignee-json-or-null>: comm_state's reply_du
 rd_unlocked() { RD="$UVN"; }   # fable-copy-1030-r5/c: the correction is unlocked as committed
 rd_locked() { sed 's/^readonly REPLY_DUE_CORRECTION_APPROVED=1$/readonly REPLY_DUE_CORRECTION_APPROVED=0/' "$UVN" > "$TEST_TMPDIR/rdl.sh"; chmod +x "$TEST_TMPDIR/rdl.sh"; RDL="$TEST_TMPDIR/rdl.sh"; }
 
+@test "reply-ref ([key=product-dispute-refs]): r5's approved reply set q-y renders byte-exact as a reply_due answer; send-locked; /z and anything else refused" {
+  credits "$TEST_TMPDIR/r.json" Jane "reply-57000000001:-:-:-"     # the reply's key + shape placeholders
+  run -0 "$LOCKED" send --campaign reply-ref --copy r --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain)" = "Hi Jane, streaming numbers come from each platform on its own schedule, so Muso can lag what you see on the platform itself, and the two can differ because each platform attributes and reports in its own way. Analytics also need an active Pro or Business plan with a seat assigned to your profile: both are under Settings, so please check the plan shows Pro or Business and that your profile has a seat.
+Thank you,
+Caroline, Muso Support" ]
+  run -0 "$LOCKED" send --campaign reply-ref --copy w --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ --dry-run
+  # r5 504 / c1 (19:4xZ): /w IS the captain-approved faq §2.4 paragraph (faq.md line 20) VERBATIM, first letter lowercased
+  # after the greeting - one merge wording for the gate and Caroline (#1530 / #1592); the 18:4xZ wording is withdrawn
+  P24="$(sed -n 20p "$HYDRA_REPO/workspaces/support/reference/faq.md")"
+  [[ "$P24" == "Merges work like this:"* ]]
+  [ "$(rendered .body | plain)" = "Hi Jane, m${P24:1}"$'\n''Thank you,'$'\n''Caroline, Muso Support' ]
+  if rendered .body | plain | grep -q "done on our side once every profile is claimed"; then false; fi
+  for k in q s t u v x y; do
+    run -0 "$LOCKED" send --campaign reply-ref --copy "$k" --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ --dry-run
+    [[ "$(rendered .body | plain)" == "Hi Jane, "*"Caroline, Muso Support" ]]
+  done
+  # SEND-LOCKED: a real post is refused (nothing claimed) until REPLY_REF_APPROVED flips by PR
+  run -1 "$LOCKED" send --campaign reply-ref --copy r --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"reply_ref:pick_match_uncoded"* ]]; [ "$(replies)" -eq 0 ]
+  # QA #1601 (2): even with the send-lock lifted, a post refuses until the send-time pick match is coded
+  sed 's/^readonly REPLY_REF_APPROVED=0/readonly REPLY_REF_APPROVED=1/' "$LOCKED" > "$TEST_TMPDIR/rr-unlocked.sh"; chmod +x "$TEST_TMPDIR/rr-unlocked.sh"
+  run -1 "$TEST_TMPDIR/rr-unlocked.sh" send --campaign reply-ref --copy u --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"reply_ref:pick_match_uncoded"* ]]; [ "$(replies)" -eq 0 ]
+  # /z (Jan's review list read not wired), an unknown ref, and no --reply-due: refused
+  run -1 "$LOCKED" send --campaign reply-ref --copy z --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"/z is posted only where the row is literally in Jan's review list"* ]]
+  run -1 "$LOCKED" send --campaign reply-ref --copy p --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"reply-ref needs --copy q|r|s|t|u|v|w|x|y"* ]]
+  run -1 "$LOCKED" send --campaign reply-ref --copy r --conversation 777 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"reply-ref is a reply_due answer only"* ]]
+  # unlocked: the post goes through comm_state's reply_due check (its hold holds it) like any reply_due answer
+  unlocked_gate replyref
+  export STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]' ',"state":"open"' | jq -c '.conversation_parts = {"conversation_parts":[{"id":"57000000001","part_type":"comment","author":{"type":"user","id":"6650aa01"},"body":"streams not updating","created_at":1}]}')"
+  STUB_COMM_STATE=hold run -3 "$GATE" send --campaign reply-ref --copy r --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ --check-recipient   # a post refuses pick_match_uncoded first (QA #1601)
+  grep -q -- "--campaign reply-ref --copy refr" "$TEST_TMPDIR/comm-state-args"
+  [ "$(replies)" -eq 0 ]
+}
+
 @test "reply_due G2: an admin-opened thread is answered ONLY under --reply-due with comm_state's verified trigger; without it G2 still refuses" {
   credits "$TEST_TMPDIR/c.json" Jane "u1:A&R:La Flor:Lerica"
   export STUB_CONVERSATION="$(rd_thread null)"
@@ -3517,7 +3557,7 @@ vl.finalize(db, message_row=c['message_row'], status='sent', message_id='9001')"
   [[ "$output" == *"--conversation <id> is required"* ]]
   unlocked_gate received
   run -1 "$GATE" send --campaign claim-status --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
-  [[ "$output" == *"applies to uvn-status, status-doc-received and status-team-review"* ]]
+  [[ "$output" == *"applies to uvn-status, status-doc-received, status-team-review (the coded answer classes) and reply-ref"* ]]
   [ "$(posts)" -eq 0 ]; [ "$(replies)" -eq 0 ]
 }
 

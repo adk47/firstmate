@@ -727,7 +727,8 @@ def dv_unverifiable(uid: int, query: Query) -> list[str]:
 
 REPLY_DUE_AFTER_S = 24 * 3600
 # Fable [key=reply-due-classes] (r5 249, p1 250): the coded answer classes; comm_state picks EXACTLY one per answer
-REPLY_DUE_CAMPAIGNS = ("uvn-status", "status-doc-received", "status-team-review")
+REPLY_DUE_CAMPAIGNS = ("uvn-status", "status-doc-received", "status-team-review", "reply-ref")
+REPLY_REF = "reply-ref"   # [key=product-dispute-refs]: r5's approved reply set - only where the picker hands the part off
 STATUS_PART_DAYS = 30                           # a customer part older than this is never auto-answered (handoff)
 # b1 / QA #1517 (19:05Z, 6th veto round): the classifier is an ALLOWLIST, not a synonym chase. A part is a STATUS
 # question only when it asks one of these explicit status questions (where is / any update / status of / has it been
@@ -1198,7 +1199,17 @@ def check(campaign: str, copy: str, uid: int, keys: list[str], contact_id: str, 
             klass, kwhy = answer_class(st, core, docs, owes_proof(uid, query))
             # the class decides the answer, so the per-campaign document holds of the asked campaign do not apply
             why = [w for w in why if not w.startswith(("proof_on_file", "already_acknowledged"))]
-            if tc["class"] != "status":
+            if campaign == REPLY_REF:
+                # an approved ref answers ONLY a part the picker hands off - a status part gets its coded class instead
+                if tc["class"] == "status":
+                    why.append(f"reply_due:coded_class_applies:{klass or 'none'}")
+                # QA #1601: a handoff is only the customer's LATEST, FRESH part - a superseded, stale, undated or
+                # missing part is never answered by a ref (the same holds the coded classes keep)
+                tw = str(tc.get("why") or "")
+                if tw.startswith(("not the customer's latest part", "stale part", "part not in thread")):
+                    why.append("reply_ref:part_not_answerable: " + tw)
+                why += reply_ref_facts(copy, uid, keys, query)
+            elif tc["class"] != "status":
                 why.append("reply_due:non_status_part (handoff:product): " + tc["why"])
             elif not klass:
                 why.append("reply_due:no_coded_class: " + kwhy)
@@ -1215,6 +1226,25 @@ def check(campaign: str, copy: str, uid: int, keys: list[str], contact_id: str, 
         # cooldown (that line) does not defer the correction; every other rule still holds
         why = [w for w in why if not w.startswith("messaged_7d")]
     return {"hold": bool(why), "state": state, "reasons": why}
+
+
+def reply_ref_facts(copy: str, uid: int, keys: list[str], query: Query) -> list[str]:
+    """r5's send-time facts for the approved reply set, read live (unreadable = Unknown, fail closed): /q only when the
+    user has NO open credit request; /y only when the named request is DECIDED (approved / rejected)."""
+    if copy == "refq":
+        n = query(f"SELECT count(*) FROM postgresql_core.public.credit_requests WHERE userid = {int(uid)} "
+                  "AND deletedat IS NULL AND status NOT IN ('approved', 'rejected')")
+        if not n or int(n[0][0]) != 0:
+            return ["reply_ref:q_open_request_exists"]
+    if copy == "refy":
+        rid = (keys or [""])[0].lower()
+        if not re.fullmatch(r"[0-9a-f-]{36}", rid):
+            return ["reply_ref:y_needs_the_request_id"]
+        st = query(f"SELECT status FROM postgresql_core.public.credit_requests WHERE lower(CAST(id AS varchar)) = '{rid}' "
+                   f"AND userid = {int(uid)} AND deletedat IS NULL")
+        if not st or str(st[0][0]) not in ("approved", "rejected"):
+            return ["reply_ref:y_request_not_decided"]
+    return []
 
 
 def _main(argv: list[str] | None = None) -> int:

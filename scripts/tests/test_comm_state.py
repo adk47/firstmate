@@ -12,6 +12,7 @@ import time
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -543,6 +544,46 @@ class ReplyDueTest(unittest.TestCase):
         self.ic.convs["215473681300330"]["source"] = {"id": "880002", "author": {"type": "admin"}}   # another note's thread
         self.assertNotIn("reply_due:gmail_o_reply (said_emailed; waiting_on third_party:gmail)",
                          cs.reply_due("215473681300330", "c1", "57000000001", self.ic, now=self.now))
+
+    def test_reply_ref_never_answers_a_superseded_or_stale_part(self):
+        # QA #1601 (1): trigger_class calls a superseded / stale part non_status; a ref must not answer it either
+        for why in ("not the customer's latest part", "stale part (> 30 d, or undated)", "part not in thread"):
+            with unittest.mock.patch.object(cs, "trigger_class", lambda *a, _w=why, **kw: {"class": "non_status", "why": _w,
+                                                                                         "part_age_d": None}):
+                res = cs.check("reply-ref", "refr", UID, ["r1"], "c1", conversation="215473681300330",
+                               reply_due_part="57000000001", query=self.q, ic=self.ic, fraud=lambda uid, qq: [])
+            self.assertTrue(any(r.startswith("reply_ref:part_not_answerable") for r in res["reasons"]), (why, res))
+
+    def test_reply_ref_only_on_a_handed_off_part_and_only_when_its_fact_holds(self):
+        # [key=product-dispute-refs]: an approved ref answers a part the picker hands off - a STATUS part gets its coded
+        # class instead; /q needs NO open request, /y a DECIDED named request (read live, fail closed)
+        facts = {"open": 0, "status": "rejected"}
+        def q(sql):
+            if sql.startswith("SELECT count(*) FROM postgresql_core.public.credit_requests WHERE userid"):
+                return [[str(facts["open"])]]
+            if sql.startswith("SELECT status FROM postgresql_core.public.credit_requests WHERE lower"):
+                return [[facts["status"]]] if facts["status"] else []
+            return self.q(sql)
+        def ref(copy, keys=("r1",)):
+            self.core = [["r1", "user_verification_needed", "", "", "2026-10-15 07:21:38 UTC"]]
+            return cs.check("reply-ref", copy, UID, list(keys), "c1", conversation="215473681300330",
+                            reply_due_part="57000000001", query=q, ic=self.ic, fraud=lambda uid, qq: [])
+        # the default part is a status question: the coded class applies, never a ref
+        res = ref("refr")
+        self.assertTrue(any(r.startswith("reply_due:coded_class_applies") for r in res["reasons"]), res)
+        # a product part (streams): handed off -> the ref may go
+        self.ic.convs["215473681300330"]["conversation_parts"]["conversation_parts"][1]["body"] = \
+            "my streams are not updating on the analytics page"
+        res = ref("refr")
+        self.assertFalse(res["hold"], res)
+        self.assertEqual(ref("refq")["reasons"], [])                                 # no open request: /q fits
+        facts["open"] = 2
+        self.assertIn("reply_ref:q_open_request_exists", ref("refq")["reasons"])
+        rid = "0b0e4c1e-1111-2222-3333-444455556666"
+        self.assertEqual(ref("refy", keys=(rid,))["reasons"], [])                    # decided (rejected): /y fits
+        facts["status"] = "user_verification_needed"
+        self.assertIn("reply_ref:y_request_not_decided", ref("refy", keys=(rid,))["reasons"])
+        self.assertIn("reply_ref:y_needs_the_request_id", ref("refy", keys=("reply-57000000001",))["reasons"])
 
     def test_lamberto_an_unanswered_question_is_answered_despite_a_note_inside_7_days(self):
         CommStateTest.note(self, "status-team-review", at=(datetime.now(timezone.utc) - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ"))

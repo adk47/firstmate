@@ -249,6 +249,12 @@ readonly GMAIL_FALLBACK_O_REF="fable-copy-1030-r5/o"
 readonly GMAIL_FALLBACK_O_TEXT="If you have already emailed it to support@muso.ai, just reply here to say so and we will match it to your request."
 readonly REPLY_DUE_CORRECTION_APPROVED=1
 readonly REPLY_DUE_CORRECTION_REF="fable-copy-1030-r5/c"
+# [key=product-dispute-refs] reply-ref: r5's APPROVED REPLY SET fable-copy-1031-r5/q-y, posted ONLY as a reply_due answer
+# (one per customer part, one per thread per 48 h, every reply_due rule) to a part the class picker hands off - never
+# over a coded answer class (comm_state). /z needs a literal "in Jan's review list" read that is not wired: refused.
+# SEND-LOCKED until r5 + p1 read c1's classifier dry run (Sun 02Z) - checks and dry runs only until this flips by PR.
+readonly REPLY_REF_APPROVED=0
+readonly REPLY_REF_SERIES="fable-copy-1031-r5"
 # A thread assigned to a HUMAN admin: the answer is handed to them first (tag + internal note), and only if no human
 # writes within 48 h of that note is the thread reassigned to this gate's admin (+ note) and the answer posted.
 readonly HANDOFF_TAG="credit-answer-ready"
@@ -748,6 +754,25 @@ case "$CAMPAIGN" in
         || refuse "status-team-review --copy count needs 2 or more requests (the /k count form has no singular); nothing was sent or claimed."
     fi
     ;;
+  reply-ref)
+    MAX_CREDITS=1; MAX_LISTED=1
+    case "$COPY_ARG" in
+      q|r|s|t|u|v|w|x|y) COPY="ref$COPY_ARG"; APPROVAL_REF="$REPLY_REF_SERIES/$COPY_ARG" ;;
+      z) refuse "reply-ref /z is posted only where the row is literally in Jan's review list; that read is not wired yet - nothing was sent or claimed." ;;
+      *) refuse "reply-ref needs --copy q|r|s|t|u|v|w|x|y (fable-copy-1031-r5); got '$COPY_ARG'." ;;
+    esac
+    [ -n "$REPLY_DUE" ] || refuse "reply-ref is a reply_due answer only: --reply-due <part> --conversation <id>."
+    [ "$KIND" = "initial" ] || refuse "reply-ref has no follow-ups."
+    # QA #1601 (2): the ref must be the one the classifier picked for THIS part, matched at send time. That match
+    # (the picker's recorded pick for conversation + part) is not coded yet, so every reply-ref POST refuses here,
+    # whatever REPLY_REF_APPROVED says - dry runs / --check-recipient only. Coding the match lifts this line.
+    if [ "$ACTION" = "post" ]; then
+      refuse "reply_ref:pick_match_uncoded - the send-time match to the classifier's pick for this part is not coded; dry run / --check-recipient only. Nothing was sent or claimed."
+    fi
+    if [ "$ACTION" = "post" ] && [ "$REPLY_REF_APPROVED" != "1" ]; then
+      refuse "reply-ref is send-locked (REPLY_REF_APPROVED=0) until r5 + p1 read the classifier dry run; --dry-run / --check-recipient only. Nothing was sent or claimed."
+    fi
+    ;;
   email-changed|email-changed-dup)
     # A threaded reply that an account's sign-in email change is done (firstmate 073). The one
     # "credit" entry carries only the ticket key (request_id) used for once-per-ticket.
@@ -822,8 +847,8 @@ if [ -n "$REPLY_DUE" ]; then
   printf '%s' "$REPLY_DUE" | grep -qE '^[0-9]{1,24}$' || refuse "--reply-due needs the customer part id (digits)."
   [ -n "$THREAD" ] || refuse "--reply-due answers in the user's own thread: --conversation <id> is required."
   # [key=reply-due-classes]: the coded answer classes; comm_state holds any campaign that is not the ONE class it picks
-  case "$CAMPAIGN" in uvn-status|status-doc-received|status-team-review) ;;
-    *) refuse "--reply-due applies to uvn-status, status-doc-received and status-team-review (the coded answer classes)." ;; esac
+  case "$CAMPAIGN" in uvn-status|status-doc-received|status-team-review|reply-ref) ;;
+    *) refuse "--reply-due applies to uvn-status, status-doc-received, status-team-review (the coded answer classes) and reply-ref (the approved reply set)." ;; esac
 fi
 if [ "$GMO" = 1 ]; then
   [ "$CAMPAIGN" = "uvn-status" ] && [ "$KIND" = "initial" ] && [ -z "$REPLY_DUE" ] \
@@ -836,7 +861,7 @@ if [ "$GMO" = 1 ]; then
 fi
 if [ -n "$THREAD" ]; then
   case "$CAMPAIGN" in
-    uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-status|gap-ask|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask) ;;
+    uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-status|gap-ask|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask|reply-ref) ;;
     *) refuse "--conversation (in-thread delivery) applies to uvn-status, withdrawal-confirm, the status notes, claim-status, email-changed, gap-ask, merge-pending, merge-claim-first, credit-hold-status, claim-proof-pending and proof-need-ask only." ;;
   esac
   printf '%s' "$THREAD" | grep -qE '^[0-9]{1,24}$' \
@@ -1111,6 +1136,11 @@ N="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.credits | length')"
 [ "$N" -ge 1 ] || refuse "credits is empty; there is nothing to ask the user to verify."
 [ "$N" -le "$MAX_CREDITS" ] || refuse "credits has $N entries; at most $MAX_CREDITS per $CAMPAIGN note."
 case "$CAMPAIGN" in
+  reply-ref)
+    # the ONE entry is the reply's key: the decided request for /y (comm_state reads it), else any key for this part
+    printf '%s' "$INPUT" | "$JQ_BIN" -e '.credits[0].request_id | test("^[A-Za-z0-9-]{1,64}$")' >/dev/null \
+      || refuse "reply-ref needs one entry whose request_id is the reply's key (the decided request for /y)."
+    INPUT="$(printf '%s' "$INPUT" | "$JQ_BIN" -c '.credits[0] += {role: "-", track_title: "-", artist_name: "-"}')" ;;
   email-changed|email-changed-dup)
     [ -n "$THREAD" ] || refuse "$CAMPAIGN is a threaded reply only: --conversation <id> (the requester's own conversation) is required."
     printf '%s' "$INPUT" | "$JQ_BIN" -e '.credits[0].request_id | test("^[A-Za-z0-9-]{1,64}$")' >/dev/null \
@@ -1527,6 +1557,10 @@ def role_credits: [ split(",")[] | gsub("^\\s+|\\s+$"; "") | select(length > 0) 
 def line: "\(.role) on \(.track_title | qt) by \(.artist_name)";
 def listed($c; $maxl): [ $c[0:$maxl][] | line ] + (if ($c|length) > $maxl then ["and \(($c|length) - $maxl) more"] else [] end);
 def sig: [ {p: "Thank you,"}, {p: "Caroline, Muso Support"} ];
+# fable-copy-1031-r5/q-y [key=product-dispute-refs]: the APPROVED REPLY SET, byte-exact (r5 18:5xZ); greeting + sig shared
+def reply_ref($fn; $k):
+  ({q: "thanks for checking in. There's no open credit request on your account right now. If there's a credit you'd like added, open the track and use Add Credits on the web (top right of your profile's Summary panel) or Add Missing Credits in the app, and choose the role you held.", r: "streaming numbers come from each platform on its own schedule, so Muso can lag what you see on the platform itself, and the two can differ because each platform attributes and reports in its own way. Analytics also need an active Pro or Business plan with a seat assigned to your profile: both are under Settings, so please check the plan shows Pro or Business and that your profile has a seat.", s: "to put the right role on a track, open the track and add the credit with the role you held: Add Credits on the web (top right of your profile's Summary panel) or Add Missing Credits in the app. It's checked the same way as any credit request, and the outcome shows on your request page.", t: "a credit appears on your profile once it's confirmed; until then it stays on your request page. If the credit isn't there at all, open the track and add it with Add Credits on the web or Add Missing Credits in the app, choosing the role you held.", u: "plaques are ordered in the Muso mobile app (iOS or Android): open the Analytics tab and tap Plaque, or go to Flex and choose Make it Official or one of your milestone cards, then customise the title there before checkout. Plaque ordering isn't available on the website right now, and it needs an active subscription.", v: "to add a credit: on the web, open your profile and click Add Credits at the top right of the Summary panel, then search for the track or paste its Spotify link; in the app, open the track or album and tap Add Missing Credits. Choose the role you held and submit. We check it against public credit sources; if we can confirm it, it goes live on your profile, and if we can't confirm it on our own, we message you here and by email with exactly what would settle it.", w: "merges work like this: claim every profile that is yours first (so we know they're all you), then tell me which one should be the main profile. The merge is done by our verification team and you get a message in this conversation when it's complete; credits from the duplicates move onto the main profile. Profiles claimed by someone else, and company or label profiles, are handled differently: I'll pass those on.", x: "your plan is under Settings: you can see which plan is active, assign the seat to your profile, and cancel there if you need to. After cancelling you keep access until the end of the billing period, and your credits and profile data are never deleted.", y: "the outcome of a credit request, and the reason, is shown on your request page. If you have something from outside Muso that shows your role on the track, a distributor or label statement, a split sheet, a contract, an invoice or a PRO registration, add the credit again and attach it, and it will be checked against that."}[$k]) as $body
+  | { subject: "About your message", segs: ([ {p: "Hi \($fn), \($body)"} ] + sig) };
 def docs: {
   mix_master: {label: "mixing and mastering",
     items: ["the mix/master invoice or a payment record for this track (you can black out amounts);",
@@ -1932,6 +1966,7 @@ def gap_ask($fn; $c; $maxl):
    elif $copy == "claimpending" then claim_proof_pending($fn; .claim)
    elif $copy == "credithold" then credit_hold_status($fn; .credits; $maxl)
    elif $copy == "teamreviewcount" then status_team_review_count($fn; (.user.pending_count // (.credits | length)))
+   elif ($copy | startswith("ref")) then reply_ref($fn; $copy[3:])
    elif $copy == "emailchg" then email_changed(false)
    elif $copy == "emailchgdup" then email_changed(true)
    elif $copy == "withdrawal" then withdrawal_confirm(.credits)
