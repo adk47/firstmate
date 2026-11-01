@@ -16,6 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 from credit_review import receipts  # noqa: E402
+from credit_verify.docverify import VERSION as VER  # noqa: E402
 
 SCHEMA = """CREATE TABLE proof_intake (intake_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, subject TEXT NOT NULL,
   candidate_request_ids_json TEXT NOT NULL DEFAULT '[]', conversation_id TEXT NOT NULL, source TEXT NOT NULL,
@@ -71,6 +72,105 @@ class ReceiptsTest(unittest.TestCase):
     def build(self, **kw):
         return receipts.build(**{"proof_store": self.store, "paying_path": self.paying, "query": self.query,
                                  "holds_path": self.holds, "ledger_path": self.ledger, **kw})
+
+    def dv(self, verdicts, extract=None, version=None):
+        """A doc-verify store with the reader's latest artifact step per file sha ({sha: kind-or-None}) and its extract
+        step's status ({sha: 'ok'|'error'}, default 'ok' for every sha in verdicts)."""
+        self.n_dv = getattr(self, "n_dv", 0) + 1
+        path = str(self.d / f"dv{self.n_dv}.sqlite")
+        dv = sqlite3.connect(path)
+        dv.execute("CREATE TABLE dv_steps (id INTEGER PRIMARY KEY, proof_id TEXT, step TEXT, status TEXT, detail_json TEXT, "
+                   "version TEXT)")
+        for sha, st in {**{s: "ok" for s in verdicts}, **(extract or {})}.items():
+            dv.execute("INSERT INTO dv_steps (proof_id, step, status, detail_json, version) VALUES (?, 'extract', ?, ?, ?)",
+                       (sha, st, json.dumps({"ok": st == "ok", "error": None if st == "ok" else "boom"}), version or VER))
+        for sha, kind in verdicts.items():
+            dv.execute("INSERT INTO dv_steps (proof_id, step, status, detail_json, version) VALUES (?, 'artifact', ?, ?, ?)",
+                       (sha, kind or "none", json.dumps({"artifact": kind, "why": "t", "text_checked": True}), version or VER))
+        dv.commit()
+        db = sqlite3.connect(self.store)
+        db.execute("CREATE TABLE IF NOT EXISTS fingerprints (proof_id TEXT, kind TEXT)")
+        db.commit()
+        return path
+
+    def test_the_r1_list_states_the_filing_class_from_the_doc_reader_and_only_when_known(self):
+        # h2 r1 filing-class producer: user 2 (received; sha6) read as a document of record -> false; user 7 (sha1) a
+        # Muso screenshot (SYS-001) -> true; user 8 (sha2) unread -> no field (the gate refuses r1_filing_class_unknown)
+        res = self.build(dv_store=self.dv({"sha6": None, "sha1": "muso_ui_screenshot", "sha4": "muso_ui_screenshot", "sha5": None}))
+        got = {u["user_id"]: u.get("filing_muso_ui", "absent") for u in res["lists"]["received"]}
+        self.assertEqual(got, {"2": False, "7": True, "8": "absent"})
+        # one Muso screenshot among a user's filings (user 1: sha4 SYS-001 + sha5 a record) states true
+        self.assertIs(next(u for u in res["lists"]["queued"] if u["user_id"] == "1")["filing_muso_ui"], True)
+        self.assertEqual((res["counts"]["filing_class_record"], res["counts"]["filing_class_muso_ui"]), (1, 2))
+        # one unread filing among a user's documents keeps the class unknown (every filing must be read for 'false')
+        db = sqlite3.connect(self.store)
+        db.execute("INSERT INTO proof_intake (intake_id, user_id, subject, candidate_request_ids_json, conversation_id, "
+                   "source, file_sha256, received_at, filed_by, matched_by) VALUES ('2:x', 2, 'credit', '[\"r-c\"]', '777', "
+                   "'intercom', 'sha-unread', '2026-10-28T08:00:00Z', 'b1', 'professional_id')")
+        db.commit()
+        res = self.build(dv_store=self.dv({"sha6": None, "sha1": "muso_ui_screenshot"}))
+        self.assertNotIn("filing_muso_ui", next(u for u in res["lists"]["received"] if u["user_id"] == "2"))
+        # QA #1602: an extract that ENDED IN ERROR is unread - the class stays unknown, never false (user 8, sha2)
+        V = {"sha6": None, "sha1": "muso_ui_screenshot", "sha2": None}
+        res = self.build(dv_store=self.dv(V, extract={"sha2": "error"}))
+        self.assertNotIn("filing_muso_ui", next(u for u in res["lists"]["received"] if u["user_id"] == "8"))
+        # ... and a later ok re-read makes it a record (the LATEST extract step counts)
+        path = self.dv(V, extract={"sha2": "error"})
+        dv = sqlite3.connect(path)
+        dv.execute("INSERT INTO dv_steps (proof_id, step, status, detail_json, version) VALUES ('sha2', 'extract', 'ok', '{}', ?)", (VER,))
+        dv.execute("INSERT INTO dv_steps (proof_id, step, status, detail_json, version) VALUES ('sha2', 'artifact', 'none', ?, ?)",
+                   (json.dumps({"artifact": None, "why": "t", "text_checked": True}), VER))   # its verdict follows it
+        dv.commit()
+        res = self.build(dv_store=path)
+        self.assertIs(next(u for u in res["lists"]["received"] if u["user_id"] == "8")["filing_muso_ui"], False)
+        # QA #1602: reads under an OLDER reader version say nothing - only the current VERSION's steps count
+        res = self.build(dv_store=self.dv({"sha6": None, "sha1": "muso_ui_screenshot"}, version="dv-old"))
+        self.assertTrue(all("filing_muso_ui" not in u for k in res["lists"] for u in res["lists"][k]))
+        # ... and a current-version artifact whose only ok extract is from an OLDER reader stays unknown (user 8, sha2)
+        path = self.dv({"sha6": None, "sha1": "muso_ui_screenshot", "sha2": None})
+        dv = sqlite3.connect(path)
+        dv.execute("DELETE FROM dv_steps WHERE proof_id = 'sha2' AND step = 'extract'")
+        dv.execute("INSERT INTO dv_steps (proof_id, step, status, detail_json, version) VALUES ('sha2', 'extract', 'ok', '{}', 'dv-old')")
+        dv.commit()
+        res = self.build(dv_store=path)
+        self.assertNotIn("filing_muso_ui", next(u for u in res["lists"]["received"] if u["user_id"] == "8"))
+        # QA #1602: an ok extract with NO artifact verdict (the stored-data fallback) stays unknown (user 8, sha2)
+        path = self.dv({"sha6": None, "sha1": "muso_ui_screenshot", "sha2": None})
+        dv = sqlite3.connect(path)
+        dv.execute("DELETE FROM dv_steps WHERE proof_id = 'sha2' AND step = 'artifact'")
+        dv.commit()
+        res = self.build(dv_store=path)
+        self.assertNotIn("filing_muso_ui", next(u for u in res["lists"]["received"] if u["user_id"] == "8"))
+        # QA #1602: a NEW ok extract committed after the latest artifact verdict (its own verdict not written yet) - the
+        # older verdict is for an earlier read: unknown (user 8, sha2)
+        path = self.dv({"sha6": None, "sha1": "muso_ui_screenshot", "sha2": None})
+        dv = sqlite3.connect(path)
+        dv.execute("INSERT INTO dv_steps (proof_id, step, status, detail_json, version) VALUES ('sha2', 'extract', 'ok', '{}', ?)", (VER,))
+        dv.commit()
+        res = self.build(dv_store=path)
+        self.assertNotIn("filing_muso_ui", next(u for u in res["lists"]["received"] if u["user_id"] == "8"))
+        dv.execute("INSERT INTO dv_steps (proof_id, step, status, detail_json, version) VALUES ('sha2', 'artifact', 'none', ?, ?)",
+                   (json.dumps({"artifact": None, "why": "t", "text_checked": True}), VER))
+        dv.commit()
+        res = self.build(dv_store=path)                       # ... its verdict lands: a record again
+        self.assertIs(next(u for u in res["lists"]["received"] if u["user_id"] == "8")["filing_muso_ui"], False)
+        # a filing the reader returns no row for is unread, never a record
+        import unittest.mock
+        from credit_verify.docverify import artifacts
+        with unittest.mock.patch.object(artifacts, "filed_rows", lambda *a, **kw: []):
+            res = self.build(dv_store=self.dv({}))
+        self.assertTrue(all("filing_muso_ui" not in u for k in res["lists"] for u in res["lists"][k]))
+        # unreadable doc-verify store: nobody gets the field (fail closed), and the run says so
+        res = self.build(dv_store=str(self.d / "missing" / "dv.sqlite"))
+        self.assertTrue(all("filing_muso_ui" not in u for k in res["lists"] for u in res["lists"][k]))
+        self.assertEqual(res["counts"]["filing_class_unreadable"], 1)
+
+    def test_with_filing_carries_the_class_only_as_a_bool(self):
+        from credit_review import uvn_status
+        for src, want in (({"filing_muso_ui": False}, False), ({"filing_muso_ui": True}, True),
+                          ({"filing_muso_ui": "false"}, "absent"), ({}, "absent")):
+            p = uvn_status.with_filing({"user": {"id": "2"}}, src)
+            self.assertEqual(p["user"].get("filing_muso_ui", "absent"), want, src)
 
     def test_lists_split_on_owing_proof_and_skip_what_cannot_be_named(self):
         res = self.build()

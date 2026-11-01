@@ -609,6 +609,10 @@ def with_filing(payload: dict[str, Any], src: dict[str, Any]) -> dict[str, Any]:
     fc = str(src.get("filing_conversation") or "")
     if fc:
         payload["user"]["filing_conversation"] = fc
+    # h2: the filing's class as receipts.py stated it from the doc reader (a bool only; absent = unknown -> the gate
+    # refuses the R1 with r1_filing_class_unknown, a true -> refused as a Muso screenshot)
+    if isinstance(src.get("filing_muso_ui"), bool):
+        payload["user"]["filing_muso_ui"] = src["filing_muso_ui"]
     return payload
 
 

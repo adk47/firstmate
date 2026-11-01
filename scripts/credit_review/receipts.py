@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from credit_review import verify_notify  # noqa: E402
 
 PROOF_STORE = "/var/lib/hydra-credit-verify/proof.sqlite"
+DV_STORE = "/var/lib/hydra-credit-verify/doc-verify.sqlite"
 PAYING = "/var/lib/credit-trust/paying-users.json"
 ACCOUNT_HOLDS = "/opt/firstmate/fraud-lens/out/account_holds.jsonl"
 LEDGER = "/var/lib/hydra/credit-review/ledger.sqlite3"
@@ -59,12 +60,12 @@ def intake_by_user(proof_store: str) -> tuple[dict[int, dict[str, Any]], Counter
     counts: Counter = Counter()
     try:
         db = sqlite3.connect(f"file:{proof_store}?mode=ro", uri=True)
-        rows = db.execute("SELECT user_id, subject, candidate_request_ids_json, received_at, matched_by, conversation_id "
-                          "FROM proof_intake ORDER BY received_at").fetchall()
+        rows = db.execute("SELECT user_id, subject, candidate_request_ids_json, received_at, matched_by, conversation_id, "
+                          "intake_id FROM proof_intake ORDER BY received_at").fetchall()
     except sqlite3.Error as exc:
         raise ReceiptsError(f"proof_intake unreadable: {exc}") from exc
     out: dict[int, dict[str, Any]] = {}
-    for uid, subject, cands, received, matched, conv in rows:
+    for uid, subject, cands, received, matched, conv, iid in rows:
         counts[f"intake_rows_{subject}"] += 1
         if subject != "credit":
             continue
@@ -81,10 +82,58 @@ def intake_by_user(proof_store: str) -> tuple[dict[int, dict[str, Any]], Counter
             raise ReceiptsError(f"proof_intake row for user {uid}: candidate ids must be a JSON array of request ids")
         ids = [x.strip().lower() for x in raw]
         u = out.setdefault(int(uid), {"request_ids": [], "first_received": str(received),
-                                      "filing_conversation": str(conv or "")})
+                                      "filing_conversation": str(conv or ""), "intake_ids": []})
+        u["intake_ids"].append(str(iid))
         u["request_ids"] = list(dict.fromkeys(u["request_ids"] + ids))
         u["first_received"] = min(u["first_received"], str(received))
     return out, counts
+
+
+def filing_classes(users: dict[int, dict[str, Any]], *, dv_store: str, proof_store: str) -> dict[int, bool] | None:
+    """h2 [r1 filing-class producer] (r5 / QA #1554: an R1 states the filing's class): {user: filing_muso_ui} from the
+    doc reader's latest artifact verdict on the user's OWN receipted intake rows (artifacts.filed_rows, read-only).
+    True = any of them is a screenshot of Muso itself (SYS-001; the gate refuses that R1); False = EVERY one was read
+    (its latest extract step ended 'ok' - an errored read is unread, QA #1602) and none is; a user with an unread filing is left out (unknown: the gate refuses r1_filing_class_unknown).
+    None = the stores are unreadable (nobody gets the field: fail closed)."""
+    from credit_verify import docverify  # noqa: PLC0415 - the doc reader's own version, classifier and row reader
+    from credit_verify.docverify import artifacts  # noqa: PLC0415
+    try:
+        dv = sqlite3.connect(f"file:{dv_store}?mode=ro", uri=True)
+        pdb = sqlite3.connect(f"file:{proof_store}?mode=ro", uri=True)
+        # QA #1602: only the CURRENT reader version counts - an ok read under an older reader says nothing about the
+        # class the current one would give (credit-doc-close reads the same way, version=VERSION)
+        rows = artifacts.filed_rows(dv, pdb, frozenset(), version=docverify.VERSION)
+        # QA #1602 (b1 548): a filing counts as READ only when its LATEST extract step ended ok - filed_rows counts an
+        # errored extract as read, so an error (or no extract at all) is unread here: never stated false
+        ext: dict[str, tuple[int, str]] = {}
+        for sid, pid, st in dv.execute("SELECT id, proof_id, status FROM dv_steps WHERE step = 'extract' AND version = ? "
+                                       "ORDER BY id", (docverify.VERSION,)):
+            ext[str(pid)] = (int(sid), str(st or ""))
+        # QA #1602: 'false' also needs a COMPLETED current-version ARTIFACT verdict for THAT extract - the latest artifact
+        # step must come after the latest extract (an older artifact is a verdict on an earlier read; filed_rows would
+        # fall back to it, or to the stored-data rules that cannot see a text-only Muso UI screenshot)
+        art: dict[str, int] = {}
+        for sid, pid in dv.execute("SELECT id, proof_id FROM dv_steps WHERE step = 'artifact' AND version = ? ORDER BY id",
+                                   (docverify.VERSION,)):
+            art[str(pid)] = int(sid)
+        sha_of = {str(i): str(sha) for i, sha in pdb.execute("SELECT intake_id, file_sha256 FROM proof_intake")}
+    except (sqlite3.Error, OSError, ValueError):
+        return None
+    def _read(r: dict[str, Any]) -> bool:
+        sha = sha_of.get(str(r["intake_id"]), "")
+        e = ext.get(sha)
+        return bool(r["read"]) and e is not None and e[1] == "ok" and art.get(sha, -1) > e[0]
+    by_intake = {str(r["intake_id"]): {**r, "read": _read(r)} for r in rows}
+    out: dict[int, bool] = {}
+    for uid, u in users.items():
+        mine = [by_intake.get(i) or {"artifact": None, "read": False} for i in u.get("intake_ids") or []]
+        if not mine:
+            continue
+        if any(r["artifact"] == artifacts.SYS_001 for r in mine):
+            out[uid] = True
+        elif all(r["read"] for r in mine):
+            out[uid] = False
+    return out
 
 
 def pending_rows(user_ids: list[int], query: Query) -> dict[int, dict[str, tuple[str, bool]]]:
@@ -134,7 +183,8 @@ def held_accounts(holds_path: str, ledger_path: str, now: datetime | None = None
 
 
 def build(*, proof_store: str = PROOF_STORE, paying_path: str = PAYING, query: Query | None = None,
-          now: datetime | None = None, holds_path: str = ACCOUNT_HOLDS, ledger_path: str = LEDGER) -> dict[str, Any]:
+          now: datetime | None = None, holds_path: str = ACCOUNT_HOLDS, ledger_path: str = LEDGER,
+          dv_store: str = DV_STORE) -> dict[str, Any]:
     """The two runner lists + counts. Raises ReceiptsError when an input is unreadable (nothing is listed)."""
     now = now or datetime.now(timezone.utc)
     users, counts = intake_by_user(proof_store)
@@ -145,6 +195,10 @@ def build(*, proof_store: str = PROOF_STORE, paying_path: str = PAYING, query: Q
         raise ReceiptsError(f"paying list unreadable: {exc}") from exc
     pend = pending_rows(sorted(users), query or verify_notify.trino) if users else {}
     held = held_accounts(holds_path, ledger_path) if users else set()
+    fclass = filing_classes(users, dv_store=dv_store, proof_store=proof_store) if users else {}
+    if fclass is None:
+        counts["filing_class_unreadable"] += 1
+        fclass = {}
     lists: dict[str, list[dict[str, Any]]] = {"queued": [], "received": []}
     for uid, u in users.items():
         rows = pend.get(uid, {})
@@ -161,8 +215,12 @@ def build(*, proof_store: str = PROOF_STORE, paying_path: str = PAYING, query: Q
         if why:
             counts[f"owes_{why}"] += 1
         key = "received" if why else "queued"
-        lists[key].append({"user_id": str(uid), "paid": uid in paying, "skip": None, "request_ids": note,
-                           "first_received": u["first_received"], "filing_conversation": u["filing_conversation"]})
+        row = {"user_id": str(uid), "paid": uid in paying, "skip": None, "request_ids": note,
+               "first_received": u["first_received"], "filing_conversation": u["filing_conversation"]}
+        if uid in fclass:
+            row["filing_muso_ui"] = fclass[uid]
+        counts[f"filing_class_{ {True: 'muso_ui', False: 'record'}.get(fclass.get(uid), 'unknown') }"] += 1
+        lists[key].append(row)
         counts[f"list_{key}_{'paid' if uid in paying else 'free'}"] += 1
     stamp = now.isoformat(timespec="seconds")
     for k in lists:
@@ -174,12 +232,14 @@ def _main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="receipt lists from proof_intake (read-only)")
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--proof-store", default=PROOF_STORE)
+    ap.add_argument("--doc-verify-store", default=DV_STORE)
     ap.add_argument("--paying", default=PAYING)
     ap.add_argument("--account-holds", default=ACCOUNT_HOLDS)
     ap.add_argument("--ledger", default=LEDGER)
     a = ap.parse_args(argv)
     try:
-        res = build(proof_store=a.proof_store, paying_path=a.paying, holds_path=a.account_holds, ledger_path=a.ledger)
+        res = build(proof_store=a.proof_store, paying_path=a.paying, holds_path=a.account_holds, ledger_path=a.ledger,
+                    dv_store=a.doc_verify_store)
     except (ReceiptsError, RuntimeError) as exc:
         print(json.dumps({"error": str(exc)}))
         return 2
