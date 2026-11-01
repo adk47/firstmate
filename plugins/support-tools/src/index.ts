@@ -187,14 +187,16 @@ const plugin: ReturnType<typeof definePluginEntry> = definePluginEntry({
     };
     api.registerTool(profileAnalyticsStatusFactory, { name: "profile_analytics_status" });
 
-    // ORDER_DETAILS_REQUIRE_IV (default TRUE, fail closed): while Intercom Identity Verification is off,
-    // a contact's email + external_id are browser-assertable, so order_lookup returns {status, hold} to
-    // EVERY caller. Only an explicit false / "false" / 0 / "0" opens the owner-anchored detail path, and
-    // that is set only once intercom-identity-fix-i2 ships and IV is enforced in the workspace.
+    // orderDetailsRequireIv (default TRUE, fail closed): while Intercom Identity Verification is off,
+    // a contact's email + external_id are browser-assertable, so order_lookup returns {status, hold} and
+    // order_address_update refuses, to EVERY caller. Only an explicit false / "false" / 0 / "0" opens the
+    // owner-anchored path. Precondition (s1, 01 Nov): false is set ONLY by a PR to openclaw-edge.json merged after
+    // the Intercom workspace enforces Messenger Security for web. Plugin config only, NO env fallback: a host env
+    // file must not be able to open it (ORDER_DETAILS_REQUIRE_IV is set nowhere on node-8, checked 01 Nov).
     const orderDetailsRequireIvRaw =
       [_entry.orderDetailsRequireIv, _legacy.orderDetailsRequireIv].find(
         (v) => typeof v === "boolean" || typeof v === "string" || typeof v === "number",
-      ) ?? process.env.ORDER_DETAILS_REQUIRE_IV;
+      );
     const orderDetailsRequireIv = orderDetailsRequireIvFrom(orderDetailsRequireIvRaw);
     const orderLookupFactory = (ctx: any) => {
       return createOrderLookupTool({
@@ -250,6 +252,9 @@ const plugin: ReturnType<typeof definePluginEntry> = definePluginEntry({
       pluginConfig.updateOrderAddressScriptPath ?? DEFAULT_UPDATE_ORDER_ADDRESS_SCRIPT;
     const orderAddressUpdateFactory = (ctx: any) => {
       return createOrderAddressUpdateTool({
+        orderDetailsRequireIv,
+        intercomReader,
+        intercomToken,
         scriptPath: updateOrderAddressScriptPath,
         rateLimiter,
         sessionId: ctx.sessionId ?? "unknown",

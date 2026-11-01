@@ -35,8 +35,16 @@ const VALID_RECIPIENT = {
 };
 
 const CONV_KEY = "agent:support:intercom:direct:215476355817432";
+const NOW = 1793116800;
+const contact = (o: Record<string, unknown> = {}) => ({ email: "a@b.com", role: "user", externalId: "pro-1",
+  contactCreatedAt: NOW - 30 * 86400, conversationCreatedAt: NOW - 3600, ...o });
+const readerFor = (who: unknown) => ({ getAuthorEmail: async () => null, getLatestCustomerPart: async () => null,
+  findBotMarkerInOtherConversations: async () => "unknown", getContactIdentity: async () => who }) as never;
 
-function makeTool(opts: Parameters<typeof makeMockExecFile>[0] = {}, sessionKey: string = CONV_KEY) {
+// The existing cases exercise the wrapper path, so they run with the IV gate explicitly OFF and the requester
+// anchored as the verified contact a@b.com (the order's owner check stays the wrapper's).
+function makeTool(opts: Parameters<typeof makeMockExecFile>[0] = {}, sessionKey: string = CONV_KEY,
+                  extra: Record<string, unknown> = {}) {
   const rateLimiter = new RateLimiter();
   const { mock, calls } = makeMockExecFile(opts);
   const tool = createOrderAddressUpdateTool({
@@ -45,7 +53,12 @@ function makeTool(opts: Parameters<typeof makeMockExecFile>[0] = {}, sessionKey:
     sessionId: "s",
     sessionKey,
     execFileImpl: mock as never,
-  });
+    orderDetailsRequireIv: false,
+    intercomToken: "tok",
+    intercomReader: readerFor(contact()),
+    nowSeconds: () => NOW,
+    ...extra,
+  } as never);
   return { tool, calls, rateLimiter };
 }
 
@@ -108,13 +121,13 @@ describe("createOrderAddressUpdateTool", () => {
 
   it("dry-run: execs the wrapper with a Stripe-shape body and no --apply", async () => {
     const { tool, calls } = makeTool({ stdout: '{"ok":true,"mode":"dry-run","applied":false}' });
-    const out = parse(await tool.execute("c", { order_ref: "ZGOP1", customer_email: "owner@x.com", recipient: VALID_RECIPIENT }));
+    const out = parse(await tool.execute("c", { order_ref: "ZGOP1", customer_email: "a@b.com", recipient: VALID_RECIPIENT }));
 
     expect(out).toEqual({ ok: true, mode: "dry-run", applied: false });
     expect(calls).toHaveLength(1);
     const { args, body } = calls[0];
     expect(argFlag(args, "--order-ref")).toBe("ZGOP1");
-    expect(argFlag(args, "--customer-email")).toBe("owner@x.com");
+    expect(argFlag(args, "--customer-email")).toBe("a@b.com");
     expect(args).not.toContain("--apply");
     // Body is the backend PUT shape: top-level name/phoneNumber + Stripe-shape address.
     expect(body).toEqual({
@@ -127,7 +140,7 @@ describe("createOrderAddressUpdateTool", () => {
   it("forwards a normalized taxId/taxIdType in the body when tax_id is supplied", async () => {
     const { tool, calls } = makeTool({ stdout: '{"ok":true,"mode":"dry-run","applied":false}' });
     const mx = { ...VALID_RECIPIENT, country: "MX", tax_id: " gode-561231.gr8 " };
-    await tool.execute("c", { order_ref: "ZGOP1", customer_email: "owner@x.com", recipient: mx });
+    await tool.execute("c", { order_ref: "ZGOP1", customer_email: "a@b.com", recipient: mx });
     const { body } = calls[0];
     // taxId is normalized (upper, stripped) and type inferred; address/name preserved.
     expect(body!.taxId).toBe("GODE561231GR8");
@@ -138,7 +151,7 @@ describe("createOrderAddressUpdateTool", () => {
 
   it("omits taxId from the body entirely when tax_id is not supplied", async () => {
     const { tool, calls } = makeTool({ stdout: '{"ok":true}' });
-    await tool.execute("c", { order_ref: "ZGOP1", customer_email: "owner@x.com", recipient: VALID_RECIPIENT });
+    await tool.execute("c", { order_ref: "ZGOP1", customer_email: "a@b.com", recipient: VALID_RECIPIENT });
     expect(calls[0].body).not.toHaveProperty("taxId");
     expect(calls[0].body).not.toHaveProperty("taxIdType");
   });
@@ -150,7 +163,7 @@ describe("createOrderAddressUpdateTool", () => {
     // core-backend accepts it and would release the hold on save.
     const { tool, calls } = makeTool({ stdout: '{"ok":true,"mode":"dry-run","applied":false}' });
     const br = { ...VALID_RECIPIENT, country: "BR", tax_id: "111.444.777-35" };
-    const out = parse(await tool.execute("c", { order_ref: "ZGOP1", customer_email: "owner@x.com", recipient: br }));
+    const out = parse(await tool.execute("c", { order_ref: "ZGOP1", customer_email: "a@b.com", recipient: br }));
     expect(out.ok).toBe(true);
     expect(calls[0].body!.taxId).toBe("11144477735");
     expect(calls[0].body!.taxIdType).toBe("cpf");
@@ -185,7 +198,7 @@ describe("createOrderAddressUpdateTool", () => {
 
   it("apply: passes --apply and --intercom-conv-id through", async () => {
     const { tool, calls } = makeTool({ stdout: '{"ok":true,"mode":"apply","applied":true}' });
-    const out = parse(await tool.execute("c", { order_ref: "ZGOP1", customer_email: "owner@x.com", recipient: VALID_RECIPIENT, apply: true }));
+    const out = parse(await tool.execute("c", { order_ref: "ZGOP1", customer_email: "a@b.com", recipient: VALID_RECIPIENT, apply: true }));
     expect(out.applied).toBe(true);
     expect(calls[0].args).toContain("--apply");
     expect(argFlag(calls[0].args, "--intercom-conv-id")).toBe("215476355817432");
@@ -201,5 +214,59 @@ describe("createOrderAddressUpdateTool", () => {
     for (let i = 0; i < 5; i++) await tool.execute("c", { order_ref: "ZGOP1", customer_email: "a@b.com", recipient: VALID_RECIPIENT });
     const out = parse(await tool.execute("c", { order_ref: "ZGOP1", customer_email: "a@b.com", recipient: VALID_RECIPIENT }));
     expect(out.error).toBe("rate_limited");
+  });
+});
+
+// s1 guardrails-1101 gap 6 (red-team EX-1, 3/3): the wrapper's dry run returns the order's CURRENT address, so an
+// unverified or non-owning contact must be refused BEFORE the wrapper runs: a refusal code, no address field.
+describe("order_address_update owner gate (s1 gap 6)", () => {
+  const PII = ["Av Enriquillo", "Santo Domingo", "11108", "+1 809 555 0100", "current_address"];
+  const call = async (extra: Record<string, unknown>, email = "a@b.com", apply = false) => {
+    const { tool, calls } = makeTool({ stdout: JSON.stringify({ ok: true, mode: "dry-run", current_address: { line1: "Av Enriquillo 36" } }) },
+      CONV_KEY, extra);
+    const out = parse(await tool.execute("c", { order_ref: "ZGOP1", customer_email: email, recipient: VALID_RECIPIENT, apply }));
+    return { out, calls };
+  };
+  const refused = (out: any, calls: unknown[], error: string, check: string) => {
+    expect(out).toMatchObject({ ok: false, error, owner_check: check });
+    expect(calls).toHaveLength(0);
+    for (const p of PII) expect(JSON.stringify(out), p).not.toContain(p);
+  };
+
+  it("default (IV gate on, flag absent or true): every caller is refused, preview and apply, with no exec", async () => {
+    for (const flag of [undefined, true]) {
+      for (const apply of [false, true]) {
+        const { out, calls } = await call({ orderDetailsRequireIv: flag }, "a@b.com", apply);
+        refused(out, calls, "owner_undetermined", "identity_verification_off");
+      }
+    }
+  });
+
+  it("red-team case 1: an identified contact names a FOREIGN customer's email (gate off) -> owner_mismatch, no exec", async () => {
+    const { out, calls } = await call({}, "victim@example.com");
+    refused(out, calls, "owner_mismatch", "customer_email_is_not_the_verified_contact");
+  });
+
+  it("red-team case 2: a lead / no external_id / fresh contact asks for the preview (gate off) -> refused, no exec", async () => {
+    for (const [who, check] of [[contact({ role: "lead" }), "contact_not_user"],
+                                [contact({ externalId: null }), "contact_no_external_id"],
+                                [contact({ contactCreatedAt: NOW - 600 }), "contact_too_new"]] as const) {
+      const { out, calls } = await call({ intercomReader: readerFor(who) });
+      refused(out, calls, "owner_undetermined", check);
+    }
+  });
+
+  it("red-team case 3: no readable contact or no token (gate off) -> refused, no exec", async () => {
+    for (const extra of [{ intercomReader: readerFor(null) }, { intercomToken: "" }]) {
+      const { out, calls } = await call(extra);
+      expect(out.ok).toBe(false);
+      expect(calls).toHaveLength(0);
+    }
+  });
+
+  it("the verified owner (gate explicitly off) reaches the wrapper, which re-checks the order's owner", async () => {
+    const { out, calls } = await call({});
+    expect(out.ok).toBe(true);
+    expect(calls).toHaveLength(1);
   });
 });

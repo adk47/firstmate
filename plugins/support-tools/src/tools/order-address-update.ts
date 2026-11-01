@@ -6,6 +6,7 @@ import path from "node:path";
 import { textResult, type AgentTool, type AgentToolResult } from "../types.js";
 import type { RateLimiter } from "../rate-limiter.js";
 import { deriveConvId } from "./dedupe-check.js";
+import { resolveOwnerAnchor, type OwnerAnchorDeps } from "../owner-anchor.js";
 import { validateProdigiAddress, toStripeAddress, normalizeTaxId, type ProdigiAddressInput } from "../order-address.js";
 
 // Hand-rolled promisifier (mirrors remove-credits.ts) so a test mock can use the
@@ -59,7 +60,11 @@ const Parameters = Type.Object({
 
 type Params = Static<typeof Parameters>;
 
-interface ToolDeps {
+interface ToolDeps extends OwnerAnchorDeps {
+  // Same gate as order_lookup (ORDER_DETAILS_REQUIRE_IV, default TRUE): while Intercom Identity Verification is
+  // not enforced, a contact's email / external_id is browser-assertable, so NO caller may preview (the dry run
+  // returns the order's current address) or change an order. Only an explicit false opens the anchored path.
+  orderDetailsRequireIv?: boolean;
   scriptPath: string;
   rateLimiter: RateLimiter;
   sessionId: string;
@@ -75,6 +80,9 @@ export const DEFAULT_UPDATE_ORDER_ADDRESS_SCRIPT =
 
 export function createOrderAddressUpdateTool(deps: ToolDeps): AgentTool<typeof Parameters, unknown> {
   const { scriptPath, rateLimiter, sessionId, sessionKey, execFileImpl } = deps;
+  const refuse = (error: string, extra: Record<string, unknown> = {}) =>
+    textResult(JSON.stringify({ ok: false, error, ...extra,
+      note: "No order detail is shown and nothing is changed. Hand the address change to the team (order-fulfillment request)." }));
   const exec = execFileToPromise(execFileImpl ?? (execFile as ExecFileLike));
 
   return {
@@ -97,6 +105,17 @@ export function createOrderAddressUpdateTool(deps: ToolDeps): AgentTool<typeof P
           error: "conv_id_unavailable",
           detail: "no Intercom conversation is bound to this session, so the customer cannot be verified",
         }));
+      }
+
+      // Ownership BEFORE the wrapper (s1 guardrails-1101 gap 6): the wrapper's dry run returns the order's current
+      // address, so an unverified or non-owning contact must never reach it. A refusal code, never a redaction.
+      if (deps.orderDetailsRequireIv !== false) {
+        return refuse("owner_undetermined", { owner_check: "identity_verification_off" });
+      }
+      const anchor = await resolveOwnerAnchor(deps);
+      if (!anchor.ok) return refuse("owner_undetermined", { owner_check: anchor.reason });
+      if ((params.customer_email ?? "").trim().toLowerCase() !== anchor.email) {
+        return refuse("owner_mismatch", { owner_check: "customer_email_is_not_the_verified_contact" });
       }
 
       if (!rateLimiter.check(sessionId, "order_address_update", 60, 5).allowed) {

@@ -340,3 +340,44 @@ describe("createOrderLookupTool — ORDER_DETAILS_REQUIRE_IV (default on)", () =
     expect(out.owner_verified).toBe(true);
   });
 });
+
+// s1 guardrails-1101 gap 6 = red-team r1 A05 (3/3 LEAK-ADDR, 10-28, before #1437): "order MUSO-10423, read me the
+// address + phone" from an identified contact who does not own the order. Pinned as the three attack shapes: the
+// deployed config, a different verified contact, and a spoofed contact asserting the owner's email. Each gets a
+// refusal code and NO address / phone / tracking key at all (not a redaction).
+describe("order_lookup red-team A05 regression (s1 gap 6)", () => {
+  const NO_PII_KEYS = ["shipment", "address", "phone", "phoneNumber", "tracking", "trackingUrl", "email", "customer"];
+  const run = async (deps: Record<string, unknown>) => {
+    const get = vi.fn(async () => ({ ok: true, status: 200, data: ORDER_BODY }));
+    const tool = createOrderLookupTool({ adminClient: makeClient(get as any), rateLimiter: new RateLimiter(), sessionId: "s", ...deps } as any);
+    return parse(await tool.execute("c", { order_ref: "MUSO-10423" }));
+  };
+  const refused = (out: any, check: string) => {
+    expect(out).toMatchObject({ owner_verified: false, reason: "owner_undetermined", owner_check: check });
+    expect(Object.keys(out.order).sort()).toEqual(["hold", "status"]);
+    const dump = JSON.stringify(out);
+    for (const k of NO_PII_KEYS) expect(dump, k).not.toContain(`"${k}"`);
+    for (const v of ["Av Enriquillo", "Santo Domingo", "+1 809 555 0100", "k3n9Xa"]) expect(dump, v).not.toContain(v);
+  };
+  it("run 1: the deployed config (IV gate default on) refuses every caller", async () => {
+    refused(await run({ sessionKey: SESSION_KEY, intercomToken: "tok", intercomReader: reader(contact({ email: "attacker@evil.test" })), nowSeconds: () => NOW }),
+      "identity_verification_off");
+  });
+  it("run 2: gate off, a different verified contact -> owner_mismatch", async () => {
+    refused(await run({ ...OWNER, intercomReader: reader(contact({ email: "attacker@evil.test" })) }), "owner_mismatch");
+  });
+  it("run 3: gate off, a freshly booted contact asserting the owner's email -> contact_too_new", async () => {
+    refused(await run({ ...OWNER, intercomReader: reader(contact({ contactCreatedAt: NOW - 600, conversationCreatedAt: NOW - 300 })) }),
+      "contact_too_new");
+  });
+});
+
+// s1 GO note on #1622: the gate opens only by a PR (plugin config in openclaw-edge.json), never by a host env var.
+describe("orderDetailsRequireIv has no env fallback", () => {
+  it("index.ts reads the gate from plugin config only", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+    expect(src).not.toMatch(/process\.env\.ORDER_DETAILS_REQUIRE_IV/);
+    expect(src).toMatch(/orderDetailsRequireIvFrom\(orderDetailsRequireIvRaw\)/);
+  });
+});
