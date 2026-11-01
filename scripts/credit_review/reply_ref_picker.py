@@ -39,6 +39,10 @@ SCRIPTS = Path(__file__).resolve().parents[1]
 # a CONSTANT. No environment variable moves the allow-list, the gate binary, the kill file or the arming.
 REFS_FILE = SCRIPTS.parent / "policies" / "reply-refs.json"
 GATE = SCRIPTS / "intercom-verify-request.sh"
+# h2's send-time pick match (verify ledger table reply_ref_picks): the gate refuses a reply-ref post AND
+# --check-recipient unless the LATEST pick for conversation + part names exactly this ref, reason 'mapped', with an
+# llm_call_id, <= 24 h old. So every decided row is recorded here BEFORE the gate is called.
+VERIFY_LEDGER_CLI = SCRIPTS / "credit_review" / "verify_ledger.py"
 KILL_FILE = "/etc/hydra/caroline-ref-picker.disabled"
 # Armed ONLY by this file, written by firstmate after the signed 10-thread dry run (p1 + r5). It binds to the EXACT
 # approved ref set: two lines, compared exactly (QA #1585: a substring match let 'fable-copy-1031-r5-old' arm):
@@ -99,6 +103,17 @@ THIRD_PARTY = re.compile(r"\b(someone else'?s (work|song|track|credit)|not my (w
                          r"took credit for|claiming (my|our) (work|song|track))", re.I)
 LEGAL = re.compile(r"\b(lawyer|attorney|solicitor|legal action|lawsuit|sue\b|suing|court|cease and desist|chargeback|"
                    r"charge back|dispute (it|this|the charge) with (my|the) bank|fraud|copyright infringement)", re.I)
+# A billing / plan GRIEVANCE (r5 + p1 01 Nov, on the dry run's plan complaint -> /r): money or a plan the customer
+# is unhappy about is never answered by an FAQ ref, even when it names a data symptom ("streams never updated").
+# Coded before the model; it stays unanswered_by_code.
+BILLING_GRIEVANCE = re.compile(
+    r"\b(paid for|i paid|we paid|paying for|charged|overcharged|double charged|refund|money back|my money|"
+    r"wasted? (my )?money|waste of money|rip ?off|scam|cancel (because|since|as)|cancell?ing (because|since|as)|"
+    r"(plan|subscription|membership)\b[^.?!]{0,25}\b(was|is|has been) (bad|useless|worthless|terrible|awful|a joke|not worth)|"
+    r"not worth (it|the money|paying)|"
+    r"(bad|useless|worthless) (plan|subscription|membership))", re.I)
+
+
 # Ordinary dispute language (QA #1585): a person reviews it; the model never maps it to an FAQ ref.
 DISPUTE = re.compile(r"\b(dispute|disputing|disputed|contest(ing)?|object(ing)? to|wrong(ly)? (credited|attributed)|"
                      r"incorrect(ly)? credited|false credit|fake credit|that'?s my (song|track|work)|"
@@ -106,18 +121,26 @@ DISPUTE = re.compile(r"\b(dispute|disputing|disputed|contest(ing)?|object(ing)? 
 RESIDUAL = re.compile(f"(?:{LEGAL.pattern})|(?:{THIRD_PARTY.pattern})|(?:{DISPUTE.pattern})", re.I)
 MARKERS = re.compile(r"\[/?(?:CONVERSATION_CONTEXT|CUSTOMER_MESSAGE|KNOWLEDGE_BASE|UNTRUSTED_CUSTOMER_TEXT)\]", re.I)
 
+# Codex strict structured output (dry run 01 Nov, llm_calls 3550-3553): every property listed in `required` and
+# `additionalProperties: false`, or the call is refused ("invalid schema for response_format") and every row fails
+# closed to unanswered_by_code.
 SCHEMA = {
     "type": "object",
-    "required": ["ref"],
+    "additionalProperties": False,
+    "required": ["ref", "why"],
     "properties": {"ref": {"type": "string"}, "why": {"type": "string"}},
 }
+
+
+GATE_COPY_RE = re.compile(r"^[a-z0-9-]{1,24}$")
 
 
 def load_dispute_ref(path: Path = REFS_FILE) -> dict[str, Any] | None:
     """The coded dispute ref (r5 /z) and its campaign; None when absent or malformed."""
     d = (json.loads(Path(path).read_text(encoding="utf-8")).get("dispute_ref") or {})
     ref = d.get("ref")
-    return d if isinstance(ref, str) and REF_RE.match(ref) and isinstance(d.get("campaign"), str) else None
+    return d if (isinstance(ref, str) and REF_RE.match(ref) and isinstance(d.get("campaign"), str)
+                 and isinstance(d.get("gate_copy"), str) and GATE_COPY_RE.match(d["gate_copy"])) else None
 
 
 def load_refs(path: Path = REFS_FILE) -> dict[str, dict[str, Any]]:
@@ -126,7 +149,8 @@ def load_refs(path: Path = REFS_FILE) -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for ref, meta in (doc.get("refs") or {}).items():
         if (isinstance(ref, str) and REF_RE.match(ref) and ref not in (MODEL_NONE, *NON_REF) and isinstance(meta, dict)
-                and isinstance(meta.get("campaign"), str) and isinstance(meta.get("class"), str)):
+                and isinstance(meta.get("campaign"), str) and isinstance(meta.get("class"), str)
+                and isinstance(meta.get("gate_copy"), str) and GATE_COPY_RE.match(meta["gate_copy"])):
             out[ref] = meta
     return out
 
@@ -181,6 +205,8 @@ def decide(text: str | None, refs: dict[str, dict[str, Any]], judge: Callable[[s
         return {"ref": JAN_REVIEW, "reason": "residual_dispute_third_party", "llm_call_id": None}
     if DISPUTE.search(text):
         return {"ref": JAN_REVIEW, "reason": "residual_dispute", "llm_call_id": None}
+    if BILLING_GRIEVANCE.search(text):
+        return {"ref": HUMAN, "reason": "billing_grievance", "llm_call_id": None}
     if not refs:
         return {"ref": HUMAN, "reason": "no_approved_refs", "llm_call_id": None}
     if len(text) > MAX_TEXT:
@@ -206,9 +232,11 @@ def decide(text: str | None, refs: dict[str, dict[str, Any]], judge: Callable[[s
     return {"ref": ref, "reason": "mapped", "llm_call_id": cid, "send_time_fact": refs[ref].get("send_time_fact")}
 
 
-def gate_argv(row: dict[str, Any], ref: str, campaign: str, gate: Path = GATE) -> list[str]:
+def gate_argv(row: dict[str, Any], ref: str, campaign: str, gate_copy: str, gate: Path = GATE) -> list[str]:
+    """`--copy` is the GATE's own copy token for the ref (reply-ref: the letter q..y; /i: status-doc-received
+    'queued-neutral', the fable-copy-1030-r5/i wording; 'queued' is retired by #1603), from the allow-list's `gate_copy`; the ref id itself is never passed as copy."""
     return [str(gate), "--campaign", campaign, "--conversation", str(row["conversation"]),
-            "--reply-due", str(row["part"]), "--copy", ref, "--credits-file", str(row["credits_file"]),
+            "--reply-due", str(row["part"]), "--copy", gate_copy, "--credits-file", str(row["credits_file"]),
             "--approved-by", "caroline-ref-picker"]
 
 
@@ -253,10 +281,42 @@ def post_allowed(post: bool, kill_file: str = KILL_FILE, live_file: str = LIVE_F
     return True, "post"
 
 
+def record_pick(rec: dict[str, Any], refs_sha: str, recorder: Callable[..., Any]) -> bool:
+    """Record this row's decision (a ref OR a non-ref outcome: an unanswered / jan_review row overwrites an older
+    mapped pick for the same part). True only on a clean record; a failed record means the gate is NOT called."""
+    argv = ["python3", str(VERIFY_LEDGER_CLI), "record-pick", "--conversation", rec["conversation"],
+            "--part", rec["part"], "--ref", str(rec["ref"]), "--reason", str(rec.get("reason") or "")[:200],
+            "--llm-call-id", str(rec.get("llm_call_id") or "")]
+    if refs_sha:
+        argv += ["--refs-sha256", refs_sha]
+    try:
+        p = recorder(argv, capture_output=True, text=True, timeout=60, check=False)
+    except Exception:  # noqa: BLE001 - an unrecorded pick never reaches the gate
+        return False
+    return p.returncode == 0
+
+
+def check_recipient(row: dict[str, Any], meta: dict[str, Any], runner: Callable[..., Any]) -> dict[str, Any]:
+    """r5 (c)4: the would-send rule for refs too. The gate's read-only --check-recipient on the row's own credits
+    file; 'RECIPIENT OK' is the only pass. Never posts (the gate refuses to reach a write path on this action)."""
+    if not row.get("credits_file"):
+        return {"check": "no_credits_file"}
+    argv = gate_argv(row, "", str(meta["campaign"]), str(meta["gate_copy"])) + ["--check-recipient"]
+    try:
+        p = runner(argv, capture_output=True, text=True, timeout=180, check=False)
+    except Exception as exc:  # noqa: BLE001 - a failed check is a failed check, never a pass
+        return {"check": "error", "check_error": type(exc).__name__}
+    out = (p.stdout or "").strip()
+    ok = p.returncode == 0 and out.startswith("RECIPIENT OK")
+    return {"check": "ok" if ok else "refused", "check_rc": p.returncode,
+            "check_out": (out or (p.stderr or "")).strip()[-300:]}
+
+
 def run(rows: list[dict[str, Any]], *, ic: Callable[[str, str, dict | None], dict],
-        judge: Callable[[str, dict], Any], refs: dict[str, dict[str, Any]], post: bool = False,
+        judge: Callable[[str, dict], Any], refs: dict[str, dict[str, Any]], post: bool = False, check: bool = False,
         runner: Callable[..., Any] = subprocess.run, kill_file: str = KILL_FILE, live_file: str = LIVE_FILE,
-        approval_ref: str = "", refs_sha: str = "", dispute_ref: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        approval_ref: str = "", refs_sha: str = "", dispute_ref: dict[str, Any] | None = None,
+        recorder: Callable[..., Any] = subprocess.run) -> list[dict[str, Any]]:
     _, mode = post_allowed(post, kill_file, live_file, approval_ref, refs_sha)
     out = []
     for row in rows:
@@ -274,7 +334,16 @@ def run(rows: list[dict[str, Any]], *, ic: Callable[[str, str, dict | None], dic
             rec["read_error"] = type(exc).__name__
         rec.update(decide(text, refs, judge, dispute_ref))
         rec["posted"] = False
-        if rec["ref"] not in NON_REF:
+        if check or post:
+            rec["pick_recorded"] = record_pick(rec, refs_sha, recorder)
+            if not rec["pick_recorded"]:
+                rec["posted"] = False
+                out.append(rec)
+                continue
+        if check and rec["ref"] not in NON_REF:
+            meta = dispute_ref if dispute_ref and rec["ref"] == dispute_ref["ref"] else refs[rec["ref"]]
+            rec.update(check_recipient(row, meta, runner))
+        if rec["ref"] not in NON_REF and not check:
             # Re-checked IMMEDIATELY before each gate call (QA #1585): a kill file dropped mid-batch stops the next post.
             may_post, rec["mode"] = post_allowed(post, kill_file, live_file, approval_ref, refs_sha)
             if not may_post:
@@ -282,10 +351,10 @@ def run(rows: list[dict[str, Any]], *, ic: Callable[[str, str, dict | None], dic
             elif not row.get("credits_file"):
                 rec.update(reason="no_credits_file", posted=False)
             else:
-                campaign = (dispute_ref["campaign"] if dispute_ref and rec["ref"] == dispute_ref["ref"]
-                            else str(refs[rec["ref"]]["campaign"]))
+                meta = dispute_ref if dispute_ref and rec["ref"] == dispute_ref["ref"] else refs[rec["ref"]]
+                campaign, gate_copy = str(meta["campaign"]), str(meta["gate_copy"])
                 try:
-                    p = runner(gate_argv(row, rec["ref"], campaign), capture_output=True, text=True, timeout=180,
+                    p = runner(gate_argv(row, rec["ref"], campaign, gate_copy), capture_output=True, text=True, timeout=180,
                                check=False)
                 except Exception as exc:  # noqa: BLE001 - a failed gate call is this row unposted, never the batch
                     rec.update(gate_error=type(exc).__name__, posted=False)
@@ -308,6 +377,8 @@ def _main(argv: list[str] | None = None) -> int:
     ap.add_argument("--post", action="store_true", help="post mapped refs through the gate (needs the arming file "
                     f"{LIVE_FILE} with approval_ref=<..> and refs_sha256=<..> of the deployed allow-list, and no kill "
                     f"file {KILL_FILE})")
+    ap.add_argument("--check", action="store_true", help="dry run that ALSO asks the gate --check-recipient for each "
+                    "mapped row (needs the row's credits_file); never posts")
     ap.add_argument("--arming-line", action="store_true", help="print the two lines firstmate writes to the arming "
                     "file for THIS deployed allow-list, then exit")
     a = ap.parse_args(argv)
@@ -327,7 +398,9 @@ def _main(argv: list[str] | None = None) -> int:
 
     rows = [json.loads(ln) for ln in Path(a.rows).read_text(encoding="utf-8").splitlines() if ln.strip()]
     approval_ref = str(json.loads(REFS_FILE.read_text(encoding="utf-8")).get("approval_ref") or "")
-    res = run(rows, ic=intercom, judge=judge, refs=load_refs(), post=a.post, dispute_ref=load_dispute_ref(),
+    if a.check and a.post:
+        ap.error("--check is a dry run; it never posts (drop --post)")
+    res = run(rows, ic=intercom, judge=judge, refs=load_refs(), post=a.post, check=a.check, dispute_ref=load_dispute_ref(),
               approval_ref=approval_ref, refs_sha=refs_sha256())
     body = "\n".join(json.dumps(r, sort_keys=True) for r in res) + ("\n" if res else "")
     if a.out:
@@ -337,7 +410,8 @@ def _main(argv: list[str] | None = None) -> int:
     summary = {"rows": len(res), "mapped": sum(1 for r in res if r["ref"] not in NON_REF),
                "posted": sum(1 for r in res if r["posted"]), "unanswered_by_code": sum(1 for r in res if r["ref"] == UNANSWERED),
                "jan_review": sum(1 for r in res if r["ref"] == JAN_REVIEW),
-               "ack_no_reply_needed": sum(1 for r in res if r["ref"] == NO_REPLY)}
+               "ack_no_reply_needed": sum(1 for r in res if r["ref"] == NO_REPLY),
+               "check_ok": sum(1 for r in res if r.get("check") == "ok")}
     print(json.dumps(summary), file=sys.stderr)
     return 0
 

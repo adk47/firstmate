@@ -6,52 +6,62 @@
     "fable-copy-1031-r5/q": {
       "campaign": "reply-ref",
       "send_time_fact": "no_open_credit_request",
-      "class": "asks for the status or timing of a credit request, or just nudges ('any update?', 'why so long', 'pending'). The gate sends the coded status line instead when an open request exists"
+      "class": "asks for the status or timing of a credit request, or just nudges ('any update?', 'why so long', 'pending'). The gate sends the coded status line instead when an open request exists",
+      "gate_copy": "q"
     },
     "fable-copy-1031-r5/r": {
       "campaign": "reply-ref",
       "send_time_fact": null,
-      "class": "streams, views, playlist or analytics numbers not updating or not matching the platform"
+      "class": "streams, views, playlist or analytics numbers not updating or not matching the platform",
+      "gate_copy": "r"
     },
     "fable-copy-1031-r5/s": {
       "campaign": "reply-ref",
       "send_time_fact": null,
-      "class": "a role or credit detail is wrong and they want the right role added (NOT a request to remove a credit)"
+      "class": "a role or credit detail is wrong and they want the right role added (NOT a request to remove a credit)",
+      "gate_copy": "s"
     },
     "fable-copy-1031-r5/t": {
       "campaign": "reply-ref",
       "send_time_fact": null,
-      "class": "a role or credit is not showing on their profile"
+      "class": "a role or credit is not showing on their profile",
+      "gate_copy": "t"
     },
     "fable-copy-1031-r5/u": {
       "campaign": "reply-ref",
       "send_time_fact": null,
-      "class": "a plaque title or plaque ordering question"
+      "class": "a plaque title or plaque ordering question",
+      "gate_copy": "u"
     },
     "fable-copy-1031-r5/v": {
       "campaign": "reply-ref",
       "send_time_fact": null,
-      "class": "how to add credits, or how to show all their credits"
+      "class": "how to add credits, or how to show all their credits",
+      "gate_copy": "v"
     },
     "fable-copy-1031-r5/w": {
       "campaign": "reply-ref",
       "send_time_fact": null,
-      "class": "merging profiles or a duplicate profile"
+      "class": "merging profiles or a duplicate profile",
+      "gate_copy": "w"
     },
     "fable-copy-1031-r5/x": {
       "campaign": "reply-ref",
       "send_time_fact": null,
-      "class": "a plan, seat or cancel question (NOT a charge dispute, a refund or 'charged but inactive')"
+      "class": "a plan, seat or cancel question (NOT a charge dispute, a refund or 'charged but inactive')",
+      "gate_copy": "x"
     },
     "fable-copy-1031-r5/y": {
       "campaign": "reply-ref",
       "send_time_fact": "named_request_decided",
-      "class": "why a credit request was rejected or a credit removed"
+      "class": "why a credit request was rejected or a credit removed",
+      "gate_copy": "y"
     },
     "fable-copy-1030-r5/i": {
       "campaign": "status-doc-received",
       "send_time_fact": "intake_row_exists",
-      "class": "they sent a link, a detail, a document or proof (an answer to our ask), with no other question"
+      "class": "they sent a link, a detail, a document or proof (an answer to our ask), with no other question",
+      "gate_copy": "queued-neutral"
     }
   },
   "source": "data/pr-review-fable-r5/copy-approvals-1030.md (fable-copy-1031-r5 q-z, 18:5xZ; /i from fable-copy-1030-r5)",
@@ -59,6 +69,7 @@
     "ref": "fable-copy-1031-r5/z",
     "campaign": "reply-ref",
     "send_time_fact": "handoff_row_in_jan_review_list",
-    "doc": "coded, never chosen by the model: a dispute over someone else's work maps here; the gate posts it only when the row is literally in Jan's review list"
+    "doc": "coded, never chosen by the model: a dispute over someone else's work maps here; the gate posts it only when the row is literally in Jan's review list",
+    "gate_copy": "z"
   }
 }

@@ -13,9 +13,22 @@ SCRIPTS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SCRIPTS))
 from credit_review import reply_ref_picker as P  # noqa: E402
 
+PICKS = []
+
+
+def ok_recorder(argv, **kw):
+    """Stub of verify_ledger.py record-pick: remembers the call, answers recorded."""
+    PICKS.append(argv)
+    return SimpleNamespace(returncode=0, stdout='{"result": "recorded"}', stderr="")
+
+
+def prun(*a, **kw):
+    kw.setdefault("recorder", ok_recorder)
+    return P.run(*a, **kw)
+
 REFS = {
-    "faq-add-credit": {"campaign": "reply-ref", "class": "how to add a missing credit"},
-    "faq-billing": {"campaign": "reply-ref", "class": "a billing or plan question"},
+    "faq-add-credit": {"campaign": "reply-ref", "class": "how to add a missing credit", "gate_copy": "v"},
+    "faq-billing": {"campaign": "reply-ref", "class": "a billing or plan question", "gate_copy": "x"},
 }
 CONV, PART = "215476000000001", "90001"
 APPROVAL = "fable-copy-1031-r5"
@@ -59,7 +72,7 @@ def run(text="how do I add a credit?", judge=None, post=False, refs=REFS, gate=N
     gate = gate or Gate()
     judge = judge or judge_says("faq-add-credit")
     rows = [row or {"conversation": CONV, "part": PART, "credits_file": "/tmp/c.json"}]
-    out = P.run(rows, ic=lambda m, p, b: conv(text, author), judge=judge, refs=refs, post=post, runner=gate,
+    out = prun(rows, ic=lambda m, p, b: conv(text, author), judge=judge, refs=refs, post=post, runner=gate,
                 kill_file=kill, live_file=live, approval_ref=approval, refs_sha=sha)
     return out[0], gate, judge
 
@@ -96,7 +109,7 @@ class DecideTest(unittest.TestCase):
     def test_a_dispute_over_someone_elses_work_is_the_coded_z_ref_never_the_model(self):
         z = {"ref": "fable-copy-1031-r5/z", "campaign": "reply-ref", "send_time_fact": "handoff_row_in_jan_review_list"}
         for t in ("that is someone else's song on my profile", "this credit is not my work"):
-            out = P.run([{"conversation": CONV, "part": PART, "credits_file": "/tmp/c"}], ic=lambda m, p, b, t=t: conv(t),
+            out = prun([{"conversation": CONV, "part": PART, "credits_file": "/tmp/c"}], ic=lambda m, p, b, t=t: conv(t),
                         judge=judge_says("x"), refs=REFS, runner=Gate(), dispute_ref=z)
             self.assertEqual((out[0]["ref"], out[0]["send_time_fact"]), ("fable-copy-1031-r5/z", "handoff_row_in_jan_review_list"), t)
         r, _, j = run(text="that is someone else's song")      # no dispute ref configured: review only, nothing posted
@@ -104,14 +117,14 @@ class DecideTest(unittest.TestCase):
 
     def test_the_dispute_ref_posts_under_its_own_campaign(self):
         try:
-            z = {"ref": "fable-copy-1031-r5/z", "campaign": "reply-dispute"}
+            z = {"ref": "fable-copy-1031-r5/z", "campaign": "reply-dispute", "gate_copy": "z"}
             g = Gate()
-            P.run([{"conversation": CONV, "part": PART, "credits_file": "/tmp/c"}],
+            prun([{"conversation": CONV, "part": PART, "credits_file": "/tmp/c"}],
                   ic=lambda m, p, b: conv("not my track"), judge=judge_says("x"), refs=REFS, runner=g,
                   kill_file="/nonexistent", dispute_ref=z, post=True, **ARM)
             argv = g.calls[0]
             self.assertEqual((argv[argv.index("--campaign") + 1], argv[argv.index("--copy") + 1]),
-                             ("reply-dispute", "fable-copy-1031-r5/z"))
+                             ("reply-dispute", "z"))
         finally:
             pass
 
@@ -133,7 +146,8 @@ class DecideTest(unittest.TestCase):
         for t in ("Thanks. Refund", "Ok, Cancel", "thanks - Refund", "ok\nCancel please", "Thanks Maria"):
             r, _, j = run(text=t)
             self.assertNotEqual(r["ref"], "ack_no_reply_needed", t)
-            self.assertEqual(len(j.calls), 1, t)
+            if r["reason"] != "billing_grievance":          # a refund ask is now coded unanswered, before the model
+                self.assertEqual(len(j.calls), 1, t)
         for t in ("Thanks - Maria", "Thank you!\nJohn Smith", "ok thanks - Ana B."):
             r, _, _ = run(text=t)
             self.assertEqual(r["ref"], "ack_no_reply_needed", t)
@@ -154,16 +168,26 @@ class DecideTest(unittest.TestCase):
             return SimpleNamespace(ok=True, json={"ref": "faq-add-credit"}, text='{"ref":"faq-add-credit"}', error="",
                                    llm_call_id=9)
         rows = [{"conversation": CONV, "part": PART, "credits_file": "/tmp/c"}] * 2
-        out = P.run(rows, ic=lambda m, p, b: conv("how do I add a credit?"), judge=flaky, refs=REFS, runner=Gate())
+        out = prun(rows, ic=lambda m, p, b: conv("how do I add a credit?"), judge=flaky, refs=REFS, runner=Gate())
         self.assertEqual([(o["ref"], o["reason"]) for o in out],
                          [("unanswered_by_code", "judge_error: TimeoutError"), ("faq-add-credit", "mapped")])
 
     def test_qa_1585_an_over_limit_message_is_never_classified_from_a_truncation(self):
-        text = "how do I add a credit? " + "x " * 1100 + "also please cancel my subscription and refund me"
+        text = "how do I add a credit? " + "x " * 1100 + "also please merge my two profiles"
         r, _, j = run(text=text)
         self.assertEqual((r["ref"], r["reason"], j.calls), ("unanswered_by_code", "text_over_limit", []))
         r, _, j = run(text="how do I add a credit? " + "x " * 980)            # just under the limit: classified
         self.assertEqual(len(j.calls), 1)
+
+    def test_a_billing_grievance_is_unanswered_before_any_model_even_with_a_data_symptom(self):
+        """r5 + p1 (01 Nov): the dry run's plan complaint mapped to /r; a grievance is never an FAQ answer."""
+        for t in ("also this plan i had was bad for the whole month mostly the streams in analytics never were updated",
+                  "I paid for Pro and my streams never updated", "I want a refund, analytics are wrong",
+                  "what a waste of money, nothing updates", "I was charged twice", "cancelling because the data is stale"):
+            r, _, j = run(text=t, judge=judge_says("faq-billing"))
+            self.assertEqual((r["ref"], r["reason"], j.calls), ("unanswered_by_code", "billing_grievance", []), t)
+        r, _, j = run(text="how do I change my plan?", judge=judge_says("faq-billing"))
+        self.assertEqual((r["ref"], len(j.calls)), ("faq-billing", 1))          # a plain plan question still classifies
 
     def test_issue_is_not_sue(self):
         r, _, j = run(text="there is an issue with my streams")
@@ -184,7 +208,7 @@ class DecideTest(unittest.TestCase):
     def test_unreadable_thread_is_human(self):
         def boom(m, p, b):
             raise RuntimeError("Intercom 500")
-        out = P.run([{"conversation": CONV, "part": PART, "credits_file": "/tmp/c"}], ic=boom, judge=judge_says("x"),
+        out = prun([{"conversation": CONV, "part": PART, "credits_file": "/tmp/c"}], ic=boom, judge=judge_says("x"),
                     refs=REFS, runner=Gate())
         self.assertEqual((out[0]["ref"], out[0]["read_error"]), ("unanswered_by_code", "RuntimeError"))
 
@@ -275,7 +299,7 @@ class PostTest(unittest.TestCase):
         argv = g.calls[0]
         self.assertTrue(argv[0].endswith("intercom-verify-request.sh"))
         for pair in (["--campaign", "reply-ref"], ["--conversation", CONV], ["--reply-due", PART],
-                     ["--copy", "faq-add-credit"], ["--credits-file", "/tmp/c.json"],
+                     ["--copy", "v"], ["--credits-file", "/tmp/c.json"],
                      ["--approved-by", "caroline-ref-picker"]):
             i = argv.index(pair[0])
             self.assertEqual(argv[i + 1], pair[1], pair)
@@ -304,7 +328,7 @@ class PostTest(unittest.TestCase):
                     Path(kill).write_text("")
                 return SimpleNamespace(ok=True, json={"ref": "faq-add-credit"}, text="", error="", llm_call_id=1)
             rows = [{"conversation": CONV, "part": PART, "credits_file": "/tmp/c"}] * 3
-            out = P.run(rows, ic=lambda m, p, b: conv("how do I add a credit?"), judge=judge, refs=REFS, runner=g,
+            out = prun(rows, ic=lambda m, p, b: conv("how do I add a credit?"), judge=judge, refs=REFS, runner=g,
                         post=True, kill_file=kill, **ARM)
         self.assertEqual([o["posted"] for o in out], [True, False, False])
         self.assertEqual([o["mode"] for o in out], ["post", "kill_file", "kill_file"])
@@ -319,7 +343,7 @@ class PostTest(unittest.TestCase):
                 raise OSError("gate exec failed")
             return SimpleNamespace(returncode=0, stdout=f"POSTED comment conversation={CONV} message=1 credits=0", stderr="")
         rows = [{"conversation": CONV, "part": PART, "credits_file": "/tmp/c"}] * 2
-        out = P.run(rows, ic=lambda m, p, b: conv("how do I add a credit?"), judge=judge_says("faq-add-credit"),
+        out = prun(rows, ic=lambda m, p, b: conv("how do I add a credit?"), judge=judge_says("faq-add-credit"),
                     refs=REFS, runner=gate, post=True, kill_file="/nonexistent", **ARM)
         self.assertEqual([(o["posted"], o.get("gate_error")) for o in out], [(False, "OSError"), (True, None)])
 
@@ -330,6 +354,63 @@ class PostTest(unittest.TestCase):
             self.assertEqual((r["posted"], r["gate_rc"], r.get("gate_result")), (False, 0, "skipped"), out)
         r, _, _ = run(post=True)
         self.assertTrue(r["posted"])
+
+    def test_check_mode_asks_the_gate_check_recipient_per_mapped_row_and_never_posts(self):
+        class CheckGate(Gate):
+            def __call__(self, argv, **kw):
+                self.calls.append(argv)
+                return SimpleNamespace(returncode=0, stdout="RECIPIENT OK reply-ref initial copy=refv credits=1 route=comment:1",
+                                       stderr="")
+        g = CheckGate()
+        out = prun([{"conversation": CONV, "part": PART, "credits_file": "/tmp/c"},
+                     {"conversation": CONV, "part": PART}],
+                    ic=lambda m, p, b: conv("how do I add a credit?"), judge=judge_says("faq-add-credit"), refs=REFS,
+                    runner=g, check=True, post=True, **ARM)                # armed + post: check still never posts
+        self.assertEqual([(o["check"], o["posted"]) for o in out], [("ok", False), ("no_credits_file", False)])
+        self.assertEqual(len(g.calls), 1)
+        self.assertEqual(g.calls[0][-1], "--check-recipient")
+        self.assertEqual(g.calls[0][g.calls[0].index("--copy") + 1], "v")
+        refused = prun([{"conversation": CONV, "part": PART, "credits_file": "/tmp/c"}],
+                        ic=lambda m, p, b: conv("how do I add a credit?"), judge=judge_says("faq-add-credit"), refs=REFS,
+                        runner=Gate(rc=3, out="REFUSED: reply_due:not_24h_yet"), check=True)
+        self.assertEqual((refused[0]["check"], refused[0]["posted"]), ("refused", False))
+        unanswered = prun([{"conversation": CONV, "part": PART, "credits_file": "/tmp/c"}],
+                           ic=lambda m, p, b: conv("how do I add a credit?"), judge=judge_says("human"), refs=REFS,
+                           runner=g, check=True)
+        self.assertNotIn("check", unanswered[0])
+
+    def test_every_decided_row_is_recorded_before_the_gate_and_an_unrecorded_pick_never_reaches_it(self):
+        """h2 pick match (01 Nov): the gate refuses unless the LATEST pick for conversation + part is this ref, mapped,
+        audited and fresh; so every decided row (a ref or a non-ref) is recorded first, in --check and post mode."""
+        PICKS.clear()
+        g = Gate()
+        out = prun([{"conversation": CONV, "part": PART, "credits_file": "/tmp/c"}],
+                   ic=lambda m, p, b: conv("how do I add a credit?"), judge=judge_says("faq-add-credit"), refs=REFS,
+                   runner=g, post=True, refs_sha=SHA, **{k: v for k, v in ARM.items() if k != "refs_sha"})
+        argv = PICKS[-1]
+        self.assertTrue(argv[1].endswith("credit_review/verify_ledger.py"))
+        for k, v in (("record-pick", None), ("--conversation", CONV), ("--part", PART), ("--ref", "faq-add-credit"),
+                     ("--reason", "mapped"), ("--llm-call-id", "7"), ("--refs-sha256", SHA)):
+            self.assertIn(k, argv)
+            if v is not None:
+                self.assertEqual(argv[argv.index(k) + 1], v, k)
+        self.assertTrue(out[0]["pick_recorded"] and out[0]["posted"])
+        PICKS.clear()                                          # a non-ref is recorded too (it overwrites an older pick)
+        prun([{"conversation": CONV, "part": PART, "credits_file": "/tmp/c"}], ic=lambda m, p, b: conv("I'll call my lawyer"),
+             judge=judge_says("x"), refs=REFS, runner=Gate(), check=True)
+        self.assertEqual(PICKS[-1][PICKS[-1].index("--ref") + 1], "jan_review")
+
+        def bad_recorder(argv, **kw):
+            return SimpleNamespace(returncode=2, stdout="", stderr="db locked")
+        g = Gate()
+        out = P.run([{"conversation": CONV, "part": PART, "credits_file": "/tmp/c"}],
+                    ic=lambda m, p, b: conv("how do I add a credit?"), judge=judge_says("faq-add-credit"), refs=REFS,
+                    runner=g, post=True, check=False, recorder=bad_recorder, **ARM)
+        self.assertEqual((out[0]["pick_recorded"], out[0]["posted"], g.calls), (False, False, []))
+        PICKS.clear()                                          # a plain dry run records nothing and calls nothing
+        prun([{"conversation": CONV, "part": PART}], ic=lambda m, p, b: conv("how do I add a credit?"),
+             judge=judge_says("faq-add-credit"), refs=REFS, runner=Gate())
+        self.assertEqual(PICKS, [])
 
     def test_no_credits_file_never_posts(self):
         r, g, _ = run(post=True, row={"conversation": CONV, "part": PART})
@@ -345,9 +426,31 @@ class RefsFileTest(unittest.TestCase):
         self.assertEqual(P.load_dispute_ref()["ref"], "fable-copy-1031-r5/z")
         self.assertNotIn("fable-copy-1031-r5/z", P.load_refs())       # never a model choice
 
+    def test_the_gate_copy_tokens_match_the_deployed_gate(self):
+        """Dry run 01 Nov: the gate takes `--copy q..y` for reply-ref and `status-doc-received --copy queued-neutral` for
+        /i (p1 073: the /i wording; plain 'queued' is retired by #1603);
+        the picker must pass THAT token, never the ref id."""
+        refs = P.load_refs()
+        for c in "qrstuvwxy":
+            self.assertEqual((refs[f"fable-copy-1031-r5/{c}"]["campaign"], refs[f"fable-copy-1031-r5/{c}"]["gate_copy"]),
+                             ("reply-ref", c))
+        self.assertEqual((refs["fable-copy-1030-r5/i"]["campaign"], refs["fable-copy-1030-r5/i"]["gate_copy"]),
+                         ("status-doc-received", "queued-neutral"))
+        gate = (SCRIPTS / "intercom-verify-request.sh").read_text()
+        self.assertIn("status-doc-received:queued-neutral) COPY=", gate)
+        self.assertIn("q|r|s|t|u|v|w|x|y) COPY=\"ref$COPY_ARG\"", gate)
+
+    def test_the_response_schema_is_codex_strict(self):
+        """Dry run 01 Nov, llm_calls 3550-3553: Codex refuses a schema without additionalProperties:false or with a
+        property missing from required."""
+        self.assertIs(P.SCHEMA.get("additionalProperties"), False)
+        self.assertEqual(sorted(P.SCHEMA["required"]), sorted(P.SCHEMA["properties"]))
+
     def test_malformed_entries_are_dropped(self):
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
-            json.dump({"refs": {"ok-ref": {"campaign": "reply-ref", "class": "x"}, "Bad Ref": {"campaign": "c", "class": "x"},
+            json.dump({"refs": {"ok-ref": {"campaign": "reply-ref", "class": "x", "gate_copy": "q"},
+                                "no-gate-copy": {"campaign": "reply-ref", "class": "x"},
+                                "bad-gate-copy": {"campaign": "reply-ref", "class": "x", "gate_copy": "fable-copy-1031-r5/q"}, "Bad Ref": {"campaign": "c", "class": "x"},
                                 "human": {"campaign": "c", "class": "x"}, "unanswered_by_code": {"campaign": "c", "class": "x"}, "jan_review": {"campaign": "c", "class": "x"}, "ack_no_reply_needed": {"campaign": "c", "class": "x"}, "no-class": {"campaign": "c"}}}, f)
         try:
             self.assertEqual(list(P.load_refs(Path(f.name))), ["ok-ref"])
