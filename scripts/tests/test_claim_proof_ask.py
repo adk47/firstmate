@@ -603,6 +603,16 @@ class GateReasonSummaryTest(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(os.stat(out).st_mode), 0o600)
         self.assertEqual(json.loads(out.read_text())["outcomes"][0]["user"], "1")
         self.assertEqual([f for f in os.listdir(out.parent) if f.startswith(".outcomes-")], [])   # no temp left behind
+        # the gate's ACCEPTED set rides with the non-sends (h2 11-01: would-send = the runner's accepted list, never
+        # list - outcomes), plus the pre-gate drops
+        rep = verify_notify.Report(outcomes=[{"user": "1", "result": "deferred", "reason": "x"}])
+        rep.accepted.append({"user": "2", "campaign": "uvn-status", "request_ids": ["r2"], "gate": "RECIPIENT OK"})
+        rep.filtered.append({"user": "3", "result": "filtered", "reason": "no professional id"})
+        rep.recipient_ok = 1
+        cli.write_outcomes(argparse.Namespace(outcomes_json=str(out), mode="dry-run", segment="paid"), rep)
+        d = json.loads(out.read_text())
+        self.assertEqual(([a["user"] for a in d["accepted"]], [f["user"] for f in d["filtered"]], d["recipient_ok"]),
+                         (["2"], ["3"], 1))
 
     def cli(self):
         import importlib.util

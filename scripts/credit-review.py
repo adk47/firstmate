@@ -564,8 +564,9 @@ def cmd_verify_notify(args: argparse.Namespace) -> int:
 
 
 def write_outcomes(args: argparse.Namespace, report: object) -> str:
-    """C11: --outcomes-json PATH - every per-user gate answer that was not a send ({user, result, reason}), so a dry
-    run and the send can be compared user by user. Written 0600; ids and gate reasons only (no message text)."""
+    """C11: --outcomes-json PATH - every per-user gate answer that was not a send ({user, result, reason}), the gate's
+    ACCEPTED set ({user, campaign, request_ids, gate}) and the pre-gate drops, so a dry run and the send can be compared
+    user by user. Written 0600; ids and gate reasons only (no message text)."""
     path = getattr(args, "outcomes_json", None)
     if not path:
         return ""
@@ -577,8 +578,11 @@ def write_outcomes(args: argparse.Namespace, report: object) -> str:
         fd, tmp = tempfile.mkstemp(prefix=".outcomes-", dir=os.path.dirname(os.path.abspath(path)))
         os.fchmod(fd, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump({"mode": args.mode, "segment": args.segment, "outcomes": list(getattr(report, "outcomes", []))},
-                      fh, indent=1)
+            # h2 10-31 / 11-01 01:0xZ: the gate's ACCEPTED set rides with the non-sends (the signers' would-send set is the
+            # runner's accepted list, never list - outcomes), plus the pre-gate drops - one file accounts for every user
+            json.dump({"mode": args.mode, "segment": args.segment, "outcomes": list(getattr(report, "outcomes", [])),
+                       "accepted": list(getattr(report, "accepted", [])), "filtered": list(getattr(report, "filtered", [])),
+                       "recipient_ok": getattr(report, "recipient_ok", 0)}, fh, indent=1)
         os.replace(tmp, path)
         return ""
     except OSError as exc:
