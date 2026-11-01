@@ -3039,12 +3039,18 @@ if [ "$RD_ACT" = "reassign+answer" ]; then
     || { ledger finalize --message-row "$ROW_ID" --status refused --reason "reassign ledger write failed" >/dev/null; refuse "the reassign of $THREAD could not be ledgered; nothing was sent."; }
 fi
 BODY_SHA="$(printf '%s' "$PAYLOAD" | "$JQ_BIN" -r '.body' | "$PY_BIN" -I -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())')"
+# p1 565 (t01b's read-back, ledger 6360): Intercom re-formats the HTML it stores (newlines, entities), so the post-check
+# and the reconcile compare the body's NORMALISED TEXT (tags out, the entities the renderer emits decoded, whitespace
+# collapsed) - sha256 of it is logged with the post (text_sha256)
+readonly NTEXT_JQ='def ntext: gsub("<[^>]+>"; " ") | gsub("&nbsp;"; " ") | gsub("&quot;"; "\"") | gsub("&#39;|&#x27;|&apos;"; "'"'"'")
+  | gsub("&lt;"; "<") | gsub("&gt;"; ">") | gsub("&amp;"; "&") | gsub("\\s+"; " ") | gsub("^ | $"; "");'
+TEXT_SHA="$(printf '%s' "$PAYLOAD" | "$JQ_BIN" -r "$NTEXT_JQ"' .body | ntext' | "$PY_BIN" -I -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read().rstrip(b"\n")).hexdigest())')"
 
 # ---------------------------------------------------------------------------------------
 # Log BEFORE the write, then POST, then verify.
 LOG_FILE="$(new_log_file verify-request "$CONTACT_ID")"
 "$JQ_BIN" -nc --arg target "user:$CONTACT_ID" --arg mt "$MESSAGE_TYPE" --arg appr "$APPROVED_BY" --arg thread "$THREAD" \
-  --arg ref "$APPROVAL_REF" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg sha "$BODY_SHA" \
+  --arg ref "$APPROVAL_REF" --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg sha "$BODY_SHA" --arg tsha "$TEXT_SHA" \
   --arg campaign "$CAMPAIGN" --arg kind "$KIND" --arg parent "$PARENT_ID" --arg due "$DUE_DAY" \
   --arg copy "$COPY" --arg removal "$REMOVAL_DAY" --arg legacy "$LEGACY_MATCH" \
   --argjson ids "$(printf '%s' "$CLAIMED_INPUT" | "$JQ_BIN" -c '[.credits[].request_id]')" --arg row "$ROW_ID" \
@@ -3053,7 +3059,7 @@ LOG_FILE="$(new_log_file verify-request "$CONTACT_ID")"
     copy:$copy, removal_day:(if $removal == "" then null else $removal end),
     target:$target, conversation:(if $thread == "" then null else $thread end),
     message_type:$mt, request_ids:$ids, ledger_row:($row|tonumber), approved_by:$appr,
-    approval_ref:$ref, body_sha256:$sha, timestamp:$ts,
+    approval_ref:$ref, body_sha256:$sha, text_sha256:$tsha, admin_id:"'"$INTERCOM_ADMIN_ID"'", timestamp:$ts,
     recipient_match:(if $legacy == "" then "id" else "in-thread-legacy-id " + $legacy end),
     authorization:"captain approved this verify-request campaign (fixed copy); see approval_ref"}' > "$LOG_FILE"
 
@@ -3074,6 +3080,13 @@ if [ -n "$THREAD" ]; then
   R_CONV="$(printf '%s' "$RESPONSE" | "$JQ_BIN" -r '.id // empty | tostring' 2>/dev/null || true)"
   R_ID="$(printf '%s' "$RESPONSE" | "$JQ_BIN" -r '(.conversation_parts.conversation_parts // [])[-1].id // empty | tostring' 2>/dev/null || true)"
   R_PART="$(printf '%s' "$RESPONSE" | "$JQ_BIN" -r '(.conversation_parts.conversation_parts // [])[-1] | "\(.part_type // "")/\(.author.type // "")/\(.author.id // "")"' 2>/dev/null || true)"
+  # p1 565: replying into an UNASSIGNED thread, Intercom stores our reply as an ASSIGNMENT part (it assigns the thread to
+  # us) carrying the body. That is POSTED when it is ours AND its normalised text is exactly what we sent.
+  if [ "$R_PART" = "assignment/admin/$INTERCOM_ADMIN_ID" ]; then
+    R_TEXT_SHA="$(printf '%s' "$RESPONSE" | "$JQ_BIN" -r "$NTEXT_JQ"' (.conversation_parts.conversation_parts // [])[-1].body // "" | ntext' 2>/dev/null \
+      | "$PY_BIN" -I -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read().rstrip(b"\n")).hexdigest())' 2>/dev/null || true)"
+    [ "$R_TEXT_SHA" != "$TEXT_SHA" ] || R_PART="comment/admin/$INTERCOM_ADMIN_ID"
+  fi
 else
   R_MT="$(printf '%s' "$RESPONSE" | "$JQ_BIN" -r '.message_type // empty' 2>/dev/null || true)"
   R_ID="$(printf '%s' "$RESPONSE" | "$JQ_BIN" -r '.id // empty | tostring' 2>/dev/null || true)"

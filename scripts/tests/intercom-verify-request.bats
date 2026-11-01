@@ -1982,6 +1982,29 @@ thread() { # <contacts-json-array> [extra conversation fields]
   [ "$(sql "SELECT status FROM verify_messages")" = "attempted" ]
 }
 
+@test "in-thread (p1 565, ledger 6360): an ASSIGNMENT part by our admin carrying exactly our text is POSTED; a different text or another admin is not" {
+  credits "$TEST_TMPDIR/c.json" Jane "w1:Mastering:Nowhere Fast:Some \"Body\" & Co"
+  STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]')" \
+    run -0 "$LOCKED" send --campaign withdrawal-confirm --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  html="$(rendered .body)"
+  # Intercom stores the reply re-formatted (a newline between paragraphs, the entities decoded) as an assignment part
+  stored="$(printf '%s' "$html" | sed 's#</p><p>#</p>\n<p>#g; s#&quot;#"#g; s#&\#39;#'"'"'#g; s#&amp;#\&#g')"
+  resp() { jq -nc --arg b "$1" --arg a "$2" '{type:"conversation", id:"777", conversation_parts:{conversation_parts:[{id:"88002", part_type:"assignment", author:{type:"admin", id:$a}, body:$b}]}}'; }
+  STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]')" STUB_REPLY_RESPONSE="$(resp "$stored" 5763097)" \
+    run -0 "$LOCKED" send --campaign withdrawal-confirm --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED comment conversation=777"* ]]
+  [ "$(sql "SELECT status || ':' || message_id FROM verify_messages")" = "sent:88002" ]
+  jq -e '.text_sha256 | test("^[0-9a-f]{64}$")' "$(ls -t "$INTERCOM_VERIFY_TEST_LOG_DIR"/intercom-verify-request-*.json | head -1)" >/dev/null
+  # a different text in the assignment part (or another admin's): not verified, left attempted
+  for r in "$(resp "<p>Hi Jane, something else.</p>" 5763097)" "$(resp "$stored" 111)"; do
+    rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+    STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]')" STUB_REPLY_RESPONSE="$r" \
+      run -4 "$LOCKED" send --campaign withdrawal-confirm --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+    [[ "$output" == *"POST NOT VERIFIED"* ]]
+    [ "$(sql "SELECT status FROM verify_messages")" = "attempted" ]
+  done
+}
+
 @test "uvn-status: goes into the user's most recently updated open conversation; tag-proof counts only what follows the note" {
   credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
   now=$(date -u +%s)
