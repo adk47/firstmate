@@ -2038,6 +2038,8 @@ jobs:
           # Document intake (credit-proof.py file): files a conversation's documents into
           # proof_intake with the account + candidate requests; never judges. Intercom/Trino faked.
           python3 scripts/tests/test_proof_intake.py
+          # reply_due product/dispute -> one approved ref or 'unanswered_by_code' (FABLE [key=product-dispute-refs]). Fakes only.
+          python3 scripts/tests/test_reply_ref_picker.py
           # support@ Gmail readers kill file (/etc/hydra/gmail-readers.disabled; firstmate 10-31).
           python3 scripts/tests/test_gmail_kill.py
           # DSP evidence verifier SHADOW (same-run Spotify+Tidal by-id anchors, contradictions,
