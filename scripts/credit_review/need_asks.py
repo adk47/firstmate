@@ -432,7 +432,33 @@ def with_codes(ps: list[dict[str, Any]], mode: str, report: verify_notify.Report
     return out
 
 
-def send(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int = 25, preview_dir: str | None = None,
+_GROUP_LOCKED: dict[str, bool] = {}
+
+
+def send(*, mode: str = "dry-run", ledger_path: str | None = None, **kw: Any) -> verify_notify.Report:
+    """QA #1617: an apply holds the credit-group run lock (ONE shared budget with every credit campaign, uvn_status's
+    runs included) from before the budget read to after the last send; a dry run takes no lock."""
+    if mode != "apply" or not uvn_status.campaign_lock_open(kw.get("wrapper", verify_notify.WRAPPER), LOCK):
+        return _send(mode=mode, ledger_path=ledger_path, **kw)      # (a send-locked apply halts there, no lock taken)
+    import fcntl  # noqa: PLC0415
+    from credit_review import verify_ledger  # noqa: PLC0415
+    lpath = ledger_path or verify_ledger.DEFAULT_PATH
+    with open(uvn_status.group_lock_path(lpath, CAMPAIGN), "a+") as fh:
+        try:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            report = verify_notify.Report()
+            report.halted = "another credit-group apply run is in progress (one shared budget); nothing sent by this one"
+            return report
+        _GROUP_LOCKED[lpath] = True
+        try:
+            return _send(mode=mode, ledger_path=ledger_path, **kw)
+        finally:
+            _GROUP_LOCKED.pop(lpath, None)
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+
+def _send(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int = 25, preview_dir: str | None = None,
          query: uvn_status.Query | None = None, wrapper: str = verify_notify.WRAPPER,
          runner: verify_notify.Runner = verify_notify._run, ledger_path: str | None = None,
          issuer: Any = issue_code, voider: Any = void_code, check_recipients: bool = False) -> verify_notify.Report:
@@ -476,6 +502,29 @@ def send(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int 
     ps = live[:max_users]
     for p in live[max_users:]:
         _filtered(report.filtered, p["user"]["id"], f"over --max-users {max_users} (a later batch)")
+    # QA #1617 (Critical): proof-need-ask is in the policy's credit group - an apply spends the SAME shared daily budget
+    # as every credit campaign, under the same group run lock. A signed, unpaged apply goes whole or not at all (exit 3);
+    # otherwise the users past today's room are cap-stopped with a daily_cap outcome each. Unreadable policy = refusal.
+    if mode == "apply":
+        if not uvn_status.POLICY_OK:
+            report.halted = f"cap_policy_unreadable: {uvn_status.POLICY_PATH} is missing or malformed; nothing sent"
+            report.policy_error = True
+            return report
+        lpath = ledger_path or verify_ledger.DEFAULT_PATH
+        if not _GROUP_LOCKED.get(lpath):    # send() takes the group lock for the whole apply (below)
+            report.halted = "the credit-group run lock is not held; nothing sent"
+            return report
+        left = max(uvn_status.credit_group_left(lpath, datetime.now(timezone.utc).strftime("%Y-%m-%d")), 0)
+        if verify_notify.APPLY_ONLY is not None and not verify_notify.APPLY_PAGE and left < len(ps):
+            report.cap_short = True
+            report.halted = (f"daily_cap_short: {left} left of today's shared credit cap, {len(ps)} signed users in this "
+                             "list - a signed list goes whole or not at all; nothing sent")
+            for p in ps:
+                verify_notify._outcome(report, p, "deferred", "daily_cap_short")
+            return report
+        for p in ps[left:]:
+            verify_notify._outcome(report, p, "deferred", "daily_cap: today's shared credit cap is spent; a later run")
+        ps = ps[:left]
     report.candidates = len(ps)
     # QA #1513: a distributor ask's F9 code is issued for THAT payload immediately before its own gate call (never a
     # whole batch of codes up front), and a reused active code must still have the promised 7 days (with_codes)
@@ -622,6 +671,7 @@ def _main(argv: list[str] | None = None) -> int:
         if a.max_users is None or not a.page:
             a.max_users = cap
         verify_notify.APPLY_ONLY = signed
+        verify_notify.APPLY_PAGE = bool(a.page)   # QA #1617: the tick's paged apply sends what fits; a hand apply is whole
     if a.op == "send" and a.max_users is None:
         a.max_users = 25
     try:
@@ -696,6 +746,10 @@ def _main(argv: list[str] | None = None) -> int:
     # RECIPIENT OK - wrapper drift) is NOT a signable set: fail closed on the exit status, not only in the JSON
     if a.check_recipients and not accounting(rep)["balanced"]:
         return 3
+    if getattr(rep, "policy_error", False):
+        return 2                                      # QA #1617: an unreadable cap policy is an operational failure
+    if getattr(rep, "cap_short", False):
+        return 3                                      # [key=uvn-daily-cap-400]: refused whole before the first send
     if rep.halted or rep.failed_users:
         return 1
     if signed is not None:

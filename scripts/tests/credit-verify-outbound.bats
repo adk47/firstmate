@@ -20,12 +20,13 @@ if os.environ.get("STUB_SLEEP") and mode == os.environ.get("STUB_SLEEP_MODE") an
 if mode == "apply":
     open(os.environ["CALLS"] + ".env", "a").write(f"{os.environ.get('CREDIT_UVN_DAILY_MAX', '-')} {os.environ.get('CREDIT_STATUS_DAILY_MAX', '-')}\n")
 if mode == "apply" and os.environ.get("STUB_RUNNER_CAP_MODEL"):
-    # the real runner's own campaign cap: min(max_users, CREDIT_UVN_DAILY_MAX (default 400) - uvn-status rows today)
+    # the real runner's own campaign cap: min(max_users, the POLICY file's shared credit cap - uvn-status rows today)
     import datetime, sqlite3
     day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
     used = sqlite3.connect(os.environ["CVO_LEDGER"]).execute(
         "SELECT count(*) FROM verify_messages WHERE campaign='uvn-status' AND day=?", (day,)).fetchone()[0]
-    os.environ["STUB_SENT"] = str(max(0, min(int(a[a.index("--max-users") + 1]), int(os.environ.get("CREDIT_UVN_DAILY_MAX", "400")) - used)))
+    cap = json.load(open(os.environ["CVO_POLICY"]))["shared_daily_cap"]["credit"]
+    os.environ["STUB_SENT"] = str(max(0, min(int(a[a.index("--max-users") + 1]), int(cap) - used)))
 if "--outcomes-json" in a:
     p = a[a.index("--outcomes-json") + 1]
     n = int(os.environ.get("STUB_REFUSED", "0")) if mode == "apply" else 0
@@ -724,14 +725,14 @@ PY
   grep -q -- "owing-uvn.json --segment free --campaign uvn-status .*--mode apply --max-users 1 " "$CALLS"
 }
 
-@test "outbound tick (QA #1541 uvn_status.py:869): the runner's own campaign cap follows the policy - no multi-tick stall at 400" {
+@test "outbound tick (QA #1541, [key=uvn-daily-cap-400]): the runner's own campaign cap IS the policy file's (read in code) - the tick passes no cap through the environment; no multi-tick stall at 400" {
   touch "$CVO_ETC/credit-verify-outbound.live"
   today="$(date -u +%F)"
   # 400 uvn-status sends already today (earlier ticks): the runner's DEFAULT cap would be exhausted
   python3 -c "import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.executemany(\"INSERT INTO verify_messages (campaign, day, status, account_id) VALUES ('uvn-status', ?, 'sent', '5')\", [(sys.argv[2],)]*400); d.commit()" "$CVO_LEDGER" "$today"
   STUB_RUNNER_CAP_MODEL=1 run -0 "$SCRIPT"
-  # every apply hands the runner the policy's shared credit cap (2,500), so the 401st message of the day still goes
-  [ "$(sort -u "$CALLS.env")" = "2500 2500" ]
+  # r5 626: no env-moved cap - the runner reads the policy file itself, so the 401st message of the day still goes
+  [ "$(sort -u "$CALLS.env")" = "- -" ]
   grep -q "uvn-status-free APPLY (rc=0): UVN STATUS: 250 sent" "$CVO_OUT_ROOT"/*/tick.log
 }
 

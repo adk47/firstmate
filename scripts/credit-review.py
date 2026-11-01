@@ -673,6 +673,10 @@ def _uvn_status(args: argparse.Namespace) -> int:
     log("uvn-status " + json.dumps({k: v for k, v in vars(report).items() if not isinstance(v, (list, dict))}))
     werr = write_outcomes(args, report)
     print(uvn_status.render(report, args.mode, args.segment) + (f" OUTCOMES NOT WRITTEN: {werr}." if werr else ""))
+    if getattr(report, "policy_error", False):
+        return 2                                   # QA #1617: an unreadable cap policy is an operational failure
+    if getattr(report, "cap_short", False):
+        return 3                                   # [key=uvn-daily-cap-400]: refused whole before the first send
     return 1 if report.failed or werr else 0
 
 
@@ -1270,6 +1274,7 @@ def signed_accepted(args: argparse.Namespace) -> tuple[str, frozenset[str] | Non
     if args.max_users is None or not getattr(args, "page", False):
         args.max_users = cap
     verify_notify.APPLY_ONLY = acc
+    verify_notify.APPLY_PAGE = bool(getattr(args, "page", False))
     return "", acc
 
 

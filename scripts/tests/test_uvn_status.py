@@ -278,7 +278,8 @@ class UvnStatusTests(unittest.TestCase):
         import fcntl
         self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 4)]
         self.write_list()
-        with open(f"{self.ledger}.uvn-status.run.lock", "a+") as held:
+        # QA #1617: the credit campaigns share ONE run lock (one budget) - a status-note apply holding it blocks the ask
+        with open(f"{self.ledger}.credit-group.run.lock", "a+") as held:
             fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             rep, gate = self.run_(query=replica(range(1, 4)))
         self.assertIn("in progress", rep.halted)
@@ -902,6 +903,70 @@ class UvnStatusTests(unittest.TestCase):
             self.run_(mode="dry-run", campaign="status-team-review", query=replica(range(1, 11)), max_users=3,
                       max_entries=4, start_entry=2)
         self.assertEqual(read, [3, 4, 5, 6])
+
+    def test_the_shared_cap_counts_every_credit_campaign_and_an_unreadable_policy_refuses(self):
+        # QA #1617 (Critical): 3 status-doc-received sends today use the SAME budget as the ask (cap 4 -> 1 left)
+        import unittest.mock
+        db = verify_ledger.connect(self.ledger)
+        for k in range(3):
+            c = verify_ledger.claim(db, campaign="status-doc-received", user_key=f"s{k}@x.com", day=NOW.strftime("%Y-%m-%d"),
+                                    request_ids=[f"s{k}"], message_type="email", approved_by="U", approval_ref="r",
+                                    now=NOW, user_id=str(90 + k))
+            verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id=f"8{k}")
+        db.close()
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 4)]
+        self.write_list()
+        with unittest.mock.patch.object(uvn_status, "DAILY_MAX", 4):
+            rep, gate = self.run_(mode="apply", query=replica(range(1, 4)), max_users=5, gate=LedgerGate(self.ledger))
+        self.assertEqual(len(gate.calls), 1)
+        # QA #1617: a missing / malformed policy is a refusal (the CLI exits 2), never a silent 0-cap run
+        with unittest.mock.patch.object(uvn_status, "POLICY_OK", False):
+            rep, gate = self.run_(mode="apply", query=replica(range(1, 4)))
+        self.assertEqual((gate.calls, rep.policy_error), ([], True))
+        self.assertIn("cap_policy_unreadable", rep.halted)
+
+    def test_a_signed_apply_short_of_cap_room_refuses_whole_and_a_cap_stop_balances_its_outcomes(self):
+        # [key=uvn-daily-cap-400] (C p10: 5 of 53 sent, rc 0): whole or not at all before the first send; a paged / unsigned
+        # run that the cap stops writes daily_cap for every user it left
+        import unittest.mock
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 6)]
+        self.write_list()
+        with unittest.mock.patch.object(uvn_status, "DAILY_MAX", 3), \
+                unittest.mock.patch.object(uvn_status.verify_notify, "APPLY_ONLY", frozenset({"1", "2", "3", "4", "5"})), \
+                unittest.mock.patch.object(uvn_status.verify_notify, "APPLY_PAGE", False):
+            rep, gate = self.run_(mode="apply", query=replica(range(1, 6)), max_users=5)
+        self.assertEqual((rep.cap_short, gate.calls), (True, []))
+        self.assertIn("daily_cap_short: 3 left", rep.halted)
+        self.assertEqual(sorted(o["user"] for o in rep.outcomes if o["reason"] == "daily_cap_short"), ["1", "2", "3", "4", "5"])
+        # the tick's paged apply (or an unsigned run): sends what the cap takes, and every left user is a daily_cap row
+        Path(self.ledger).unlink(missing_ok=True)
+        with unittest.mock.patch.object(uvn_status, "DAILY_MAX", 3), \
+                unittest.mock.patch.object(uvn_status.verify_notify, "APPLY_ONLY", frozenset({"1", "2", "3", "4", "5"})), \
+                unittest.mock.patch.object(uvn_status.verify_notify, "APPLY_PAGE", True):
+            rep, gate = self.run_(mode="apply", query=replica(range(1, 6)), max_users=5, gate=LedgerGate(self.ledger))
+        self.assertEqual((rep.cap_short, len(gate.calls)), (False, 3))
+        self.assertEqual(sorted(o["user"] for o in rep.outcomes if o["reason"] == "daily_cap"), ["4", "5"])
+        # another sender takes the cap MID-batch (two more sends land while user 1 posts): the batch's rest are rows too
+        Path(self.ledger).unlink(missing_ok=True)
+        ledger = self.ledger
+
+        class Busy(LedgerGate):
+            def __call__(self, argv):
+                res = super().__call__(argv)
+                if len(self.calls) == 1:
+                    db = verify_ledger.connect(ledger)
+                    for k in (91, 92):
+                        c = verify_ledger.claim(db, campaign="uvn-status", user_key=f"o{k}@x.com", day=NOW.strftime("%Y-%m-%d"),
+                                                request_ids=[f"o{k}"], message_type="email", approved_by="U",
+                                                approval_ref="r", now=NOW, user_id=str(k))
+                        verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id=f"9{k}")
+                    db.close()
+                return res
+        with unittest.mock.patch.object(uvn_status, "DAILY_MAX", 3), \
+                unittest.mock.patch.object(uvn_status.verify_notify, "APPLY_ONLY", None):
+            rep, gate = self.run_(mode="apply", query=replica(range(1, 6)), max_users=5, gate=Busy(self.ledger))
+        self.assertEqual(len(gate.calls), 1)
+        self.assertEqual(sorted(o["user"] for o in rep.outcomes if o["reason"] == "daily_cap"), ["2", "3", "4", "5"])
 
     def test_dry_run_validates_without_sending(self):
         _, gate = self.run_(mode="dry-run")
@@ -2551,25 +2616,3 @@ class OpsKillDryRunTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-
-class RunnerCapFromEnvTest(unittest.TestCase):
-    """QA #1541 (uvn_status.py:869): the outbound tick sets CREDIT_UVN_DAILY_MAX / CREDIT_STATUS_DAILY_MAX for its own
-    runner calls; the runner process must take them (and keep the bounded defaults otherwise)."""
-
-    def caps(self, env):
-        import subprocess
-        e = {k: v for k, v in os.environ.items() if not k.startswith("CREDIT_")}
-        e.update(env)
-        out = subprocess.run([sys.executable, "-c", "from credit_review import uvn_status as u; print(u.DAILY_MAX, u.STATUS_DAILY_MAX)"],
-                             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))), env=e,
-                             capture_output=True, text=True, timeout=60)
-        return out.stdout.split()
-
-    def test_env_raises_the_runner_cap_to_the_policy(self):
-        self.assertEqual(self.caps({"CREDIT_UVN_DAILY_MAX": "2500", "CREDIT_STATUS_DAILY_MAX": "2500"}), ["2500", "2500"])
-
-    def test_defaults_and_bad_values_keep_the_bound(self):
-        self.assertEqual(self.caps({}), ["400", "1000"])
-        self.assertEqual(self.caps({"CREDIT_UVN_DAILY_MAX": "0", "CREDIT_STATUS_DAILY_MAX": "lots"}), ["400", "1000"])

@@ -798,6 +798,7 @@ PREVIEW_ONLY: frozenset[str] | None = None
 # set - set by --signed-accepted. A user outside it is never sent (deferred, no gate call). None = no signed set.
 APPLY_ONLY: frozenset[str] | None = None
 APPLY_REPORTS: list[Any] = []          # the reports a signed apply ran through send_all (for the sent == signed check)
+APPLY_PAGE = False                     # --page: the outbound tick's signed set may be paged (cap / deadline)
 
 
 def not_signed(mode: str, uid: Any) -> bool:

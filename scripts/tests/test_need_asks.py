@@ -440,6 +440,79 @@ class NeedAsksTest(unittest.TestCase):
                       ledger_path=str(self.d / "ledger.sqlite3"))
         self.assertEqual(rep.halted, "")
 
+    def test_an_apply_spends_the_shared_credit_budget_under_the_group_lock(self):
+        # QA #1617 (Critical): proof-need-ask is in the policy's credit group - other credit campaigns' sends today use
+        # its budget; a signed unpaged apply short of room refuses whole (CLI 3); a held group lock sends nothing
+        import fcntl
+        from credit_review import verify_ledger
+        lst = self.d / "list.json"
+        lst.write_text(json.dumps(self.build()))
+        ledger = str(self.d / "ledger.sqlite3")
+        unlocked = self.d / "gate-open.sh"
+        unlocked.write_text("readonly PROOF_NEED_ASK_COPY_APPROVED=1\n")
+        day = datetime.now(timezone.utc)
+        db = verify_ledger.connect(ledger)
+        for k in range(2):
+            c = verify_ledger.claim(db, campaign="uvn-status", user_key=f"o{k}@x.com", day=day.strftime("%Y-%m-%d"),
+                                    request_ids=[f"o{k}"], message_type="email", approved_by="U", approval_ref="r",
+                                    now=day, user_id=str(900 + k))
+            verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id=f"9{k}")
+        db.close()
+        run = lambda gate: na.send(list_path=str(lst), segment="paid", mode="apply", query=self.q, runner=gate,  # noqa: E731
+                                   wrapper=str(unlocked), ledger_path=ledger)
+        with unittest.mock.patch.object(na.uvn_status, "DAILY_MAX", 2):        # spent by the uvn-status sends
+            gate = FakeGate(); rep = run(gate)
+        self.assertEqual([a for a in gate.calls if "--check-recipient" not in a], [])
+        self.assertTrue(rep.outcomes and all(o["reason"].startswith("daily_cap") for o in rep.outcomes))
+        with unittest.mock.patch.object(na.uvn_status, "DAILY_MAX", 2), \
+                unittest.mock.patch.object(na.verify_notify, "APPLY_ONLY", frozenset({"1"})), \
+                unittest.mock.patch.object(na.verify_notify, "APPLY_PAGE", False):
+            gate = FakeGate(); rep = run(gate)
+        self.assertTrue(getattr(rep, "cap_short", False))
+        self.assertEqual([o["reason"] for o in rep.outcomes], ["daily_cap_short"])
+        self.assertEqual([a for a in gate.calls if "--check-recipient" not in a], [])
+        with unittest.mock.patch.object(na.uvn_status, "DAILY_MAX", 3):        # one slot left: the one user goes
+            gate = FakeGate(); rep = run(gate)
+        self.assertEqual(rep.halted, "")
+        self.assertFalse([o for o in rep.outcomes if o["reason"].startswith("daily_cap")])
+        with open(f"{ledger}.credit-group.run.lock", "a+") as held:
+            fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            gate = FakeGate(); rep = run(gate)
+        self.assertIn("credit-group apply run is in progress", rep.halted)
+        self.assertEqual(gate.calls, [])
+        with unittest.mock.patch.object(na.uvn_status, "POLICY_OK", False):
+            gate = FakeGate(); rep = run(gate)
+        self.assertTrue(rep.policy_error); self.assertEqual(gate.calls, [])
+
+    def test_the_cli_pages_a_signed_apply_only_with_page(self):
+        # QA #1617: the tick's signed apply (--page) sends what fits today's room; a hand signed apply is whole-or-nothing
+        import contextlib, io
+        lst = self.d / "signed.json"
+        lst.write_text(json.dumps({"users": [{"user_id": "1", "paid": True, "asks": []}]}))
+        chk = self.d / "check.json"
+        chk.write_text(json.dumps({"accepted": [{"user": "1"}], "max_users": 5}))
+        seen = []
+        def send(**kw):
+            seen.append(na.verify_notify.APPLY_PAGE)
+            return na.verify_notify.Report()
+        for extra, want in ((["--page"], True), ([], False)):
+            with unittest.mock.patch.object(na, "send", send), unittest.mock.patch.object(na.verify_notify, "APPLY_ONLY", None), \
+                    unittest.mock.patch.object(na.verify_notify, "APPLY_PAGE", None), contextlib.redirect_stdout(io.StringIO()):
+                na._main(["send", "--list", str(lst), "--segment", "paid", "--mode", "apply", "--signed-accepted", str(chk), *extra])
+            self.assertIs(seen[-1], want, extra)
+
+    def test_the_cli_exits_3_on_a_cap_short_apply_and_2_on_an_unreadable_policy(self):
+        import contextlib, io
+        lst = self.d / "list.json"
+        lst.write_text(json.dumps(self.build()))
+        for attr, want in (("cap_short", 3), ("policy_error", 2)):
+            def send(**kw):
+                r = na.verify_notify.Report(); setattr(r, attr, True); r.halted = attr
+                return r
+            with unittest.mock.patch.object(na, "send", send), contextlib.redirect_stdout(io.StringIO()):
+                rc = na._main(["send", "--list", str(lst), "--segment", "paid", "--mode", "apply"])
+            self.assertEqual(rc, want, attr)
+
     def test_check_recipients_asks_the_live_gate_for_every_user_and_lists_the_deferred(self):
         # r5 RULE (10-31 14:2xZ): signable only on the live gates' answer - the gate's --check-recipient, never --validate
         lst = self.d / "list.json"

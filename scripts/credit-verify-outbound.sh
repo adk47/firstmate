@@ -468,7 +468,7 @@ family() {
     # QA #1541: an unreadable policy / ledger is an operational failure, not an exhausted cap - stop and page
     autokill "$tag: cap source unreadable (${rm:0:200})"; return 1
   fi
-  local shared; read -r n daily shared <<<"$rm"
+  local _shared; read -r n daily _shared <<<"$rm"   # (the shared cap is the runner's own policy read)
   if [ "${n:-0}" -le 0 ]; then log "$tag: daily cap reached for $campaign/$seg; no apply"; return 0; fi
   local fit=$(( (TICK_HARD_S - $(elapsed)) / APPLY_S_PER_USER ))
   if [ "$fit" -le 0 ]; then log "$tag: no time left before the ${TICK_HARD_S}s deadline; no apply this tick"; return 0; fi
@@ -476,13 +476,10 @@ family() {
   local lo; lo="$(maxid)"
   [ "$lo" -ge 0 ] || { autokill "$tag: ledger unreadable before the apply"; return 1; }
   local capargs=(); [ "$sub" = uvn-status ] && capargs=(--segment-daily-cap "$daily")
-  # QA #1541 (uvn_status.py:869): the runner also caps each campaign per UTC day by itself (CREDIT_UVN_DAILY_MAX,
-  # default 400 / CREDIT_STATUS_DAILY_MAX, default 1000, both segments together). Left at those defaults it binds
-  # BELOW the policy and later ticks would report room but send 0. For this apply it gets the policy's shared group
-  # cap (the binding daily total), so one number governs and room() and the runner cannot disagree.
+  # [key=uvn-daily-cap-400] (r5 626): the runner reads the ONE credit daily cap from the policy file itself - the tick
+  # passes no cap through the environment (no env-moved gate input)
   # [key=apply-sized-to-list]: the apply sends only this tick's own check's accepted set (--signed-accepted); the
   # tick pages that set by its caps and deadline by design (--page: a subset, never a user outside it)
-  CREDIT_UVN_DAILY_MAX="$shared" CREDIT_STATUS_DAILY_MAX="$shared" \
   py "$runner" "$sub" --list "$list" --segment "$seg" "$@" "${excl[@]}" "${pg[@]}" --mode apply --max-users "$n" "${capargs[@]}" \
     --signed-accepted "$OUT/$tag-check.json" --page \
     --outcomes-json "$OUT/$tag-apply.json" > "$OUT/$tag-apply.out" 2>&1; rc=$?

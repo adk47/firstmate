@@ -150,20 +150,67 @@ def campaign_lock_open(wrapper: str, var: str) -> bool:
 RELEASED_EXTRA_STATUSES = {"uvn-status": ("unverified",)}
 # Reviewed baseline: deploy overwrites - 2026-10-26 (verify-ask-wiring-h2, firstmate inbox 015): node-8's
 # paid-wave-runner-p2 hot-patch [key=p2-caps] (DAILY_MAX / STATUS_DAILY_MAX 20000, marked "reverts on next
-# deploy") is superseded by the reviewed env caps below (CREDIT_STATUS_DAILY_MAX / CREDIT_UVN_DAILY_MAX).
+# deploy") was superseded by env caps, which are now gone too: the policy file below is the ONE source.
 CAP_LIMIT = 100000
 
 
-def _cap_env(name: str, default: int) -> int:
-    """A daily cap from the environment (firstmate 014, [key=p2-caps]: the captain's 2026-10-26 "move fast" order
-    raised these for one night by a node-8 hot patch; this makes it a reviewed setting instead). A whole number
-    1..CAP_LIMIT overrides the default; anything else (unset, blank, malformed, zero, negative, too large) keeps the
-    default, so a typo can never remove the bound."""
-    raw = os.environ.get(name, "").strip()
-    return int(raw) if re.fullmatch(r"[0-9]{1,6}", raw) and 0 < int(raw) <= CAP_LIMIT else default
+# [key=uvn-daily-cap-400] (r5 626 + p1, 11-01): ONE daily cap for the credit messages, read IN CODE by the hand runner
+# and the outbound tick alike - the policy file's shared_daily_cap.credit (credit-verify-outbound.json, a PR-owned
+# constant: a change is a PR). No environment variable moves it ([key=unattended]; CREDIT_UVN_DAILY_MAX /
+# CREDIT_STATUS_DAILY_MAX are ignored). An unreadable policy is a cap of 0 (fail closed: nothing is sent).
+POLICY_PATH = str(Path(__file__).resolve().parents[2] / "policies" / "credit-verify-outbound.json")
 
 
-STATUS_DAILY_MAX = _cap_env("CREDIT_STATUS_DAILY_MAX", 1000)  # sanity bound for the no-ask status notes
+# QA #1617: the credit campaigns the shared cap MUST cover (each has a daily_cap row in the policy and a sender here or
+# in need_asks); a policy whose credit group omits one is malformed (refused), never a smaller budget
+REQUIRED_CREDIT_GROUP = frozenset({"uvn-status", "status-doc-received", "proof-need-ask"})
+
+
+def read_policy(path: str = POLICY_PATH) -> tuple[int, tuple[str, ...]] | None:
+    """(the shared credit cap, the credit group's campaigns) from the policy file; None = unreadable or malformed."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+        v, group = doc["shared_daily_cap"]["credit"], doc["groups"]["credit"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not (isinstance(v, int) and 0 <= v <= CAP_LIMIT and isinstance(group, list)
+            and all(isinstance(c, str) for c in group)):
+        return None
+    if not REQUIRED_CREDIT_GROUP <= set(group):
+        return None        # QA #1617: a credit group missing a credit campaign would let it spend outside the shared cap
+    return v, tuple(group)
+
+
+def policy_credit_cap(path: str = POLICY_PATH) -> int:
+    p = read_policy(path)
+    return p[0] if p else 0
+
+
+_POLICY = read_policy()
+
+
+def group_lock_path(ledger: str, campaign: str) -> str:
+    """QA #1617: ONE run lock for every credit campaign (one shared budget), whichever module sends it."""
+    return f"{ledger}.{'credit-group' if campaign in CREDIT_GROUP else campaign}.run.lock"
+
+
+def credit_group_left(ledger: str, day: str) -> int:
+    """QA #1617: what is left today of the policy's shared credit cap, counted over EVERY credit campaign's sends."""
+    db = verify_ledger.connect(ledger)
+    try:
+        return DAILY_MAX - sum(verify_ledger.sent_today(db, campaign=c, day=day) for c in CREDIT_GROUP)
+    finally:
+        db.close()
+POLICY_OK = _POLICY is not None     # QA #1617: an unreadable policy is a REFUSAL, never a silent cap of 0
+# QA #1617 (Critical): the shared cap is ONE budget for every credit message - each campaign's run counts the whole
+# group's sends today (the policy's credit group, plus every campaign this runner sends), under ONE group run lock
+CREDIT_GROUP = tuple(dict.fromkeys((_POLICY[1] if _POLICY else ()) + ("uvn-status", "status-doc-received",
+                                                                      "status-team-review", "gap-ask",
+                                                                      "credit-hold-status", "uvn-new-rows")))
+
+
+STATUS_DAILY_MAX = policy_credit_cap()  # the no-ask status notes
 LIST_MAX_AGE_H = 30
 # (campaign, wording) pairs the gate takes as --copy; LOCKED_WORDINGS name the gate lock each one waits on.
 WORDINGS = (("status-doc-received", "queued"), ("status-doc-received", "received"), ("status-doc-received", "queued-neutral"),
@@ -179,7 +226,7 @@ def gate_lock_open(wrapper: str, var: str) -> bool:
     except OSError:
         return False
     return re.search(rf"^readonly {re.escape(var)}=1$", text, re.M) is not None
-DAILY_MAX = _cap_env("CREDIT_UVN_DAILY_MAX", 400)  # the ask
+DAILY_MAX = policy_credit_cap()  # the ask
 MAX_CALLS_PER_USER = 5
 Query = verify_notify.Query
 trino = verify_notify.trino
@@ -190,6 +237,8 @@ DEFAULT_LENS = fraud_lens.default_lens
 
 @dataclass
 class UvnReport(verify_notify.Report):
+    policy_error: bool = False         # QA #1617: the cap policy could not be read (a refusal, CLI exit 2)
+    cap_short: bool = False            # [key=uvn-daily-cap-400]: a signed apply refused before its first send
     # r5 bars (e)/(j) on [key=lamberto-reply-due]: every reply_due row of a run, with the thread facts the gate will act
     # on - {user, part, conversation, prior_note, assignee} (read live; 'unknown: ...' when unreadable)
     reply_due_rows: list = field(default_factory=list)
@@ -989,8 +1038,14 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
     # remaining daily slots and could both send past the cap). The lock is held for the whole
     # send loop, and the remaining cap is re-read from the ledger before every send.
     lock_fh = None
+    if mode == "apply" and not POLICY_OK:
+        report.halted = f"cap_policy_unreadable: {POLICY_PATH} is missing or malformed; the daily cap cannot be read - nothing sent"
+        report.policy_error = True
+        return report
     if mode == "apply":
-        lock_fh = open(f"{path}.{campaign}.run.lock", "a+")
+        # QA #1617: the credit campaigns share ONE budget, so they share ONE run lock (two campaigns' applies can never
+        # both read the same remaining slots)
+        lock_fh = open(group_lock_path(path, campaign), "a+")
         try:
             fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
@@ -1001,7 +1056,8 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
     def ledger_left() -> int:
         db = verify_ledger.connect(path)
         try:
-            return cap - verify_ledger.sent_today(db, campaign=campaign, day=day)
+            group = CREDIT_GROUP if campaign in CREDIT_GROUP else (campaign,)
+            return cap - sum(verify_ledger.sent_today(db, campaign=c, day=day) for c in group)
         finally:
             db.close()
 
@@ -1026,6 +1082,23 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
         left = remaining_cap() if mode == "apply" else max_users
         return min(max_users - counted, max_calls - calls, left), left
 
+    # [key=uvn-daily-cap-400] (C p10: 5 of 53 sent, rc 0): a SIGNED apply goes whole or not at all - when what is left of
+    # today's cap cannot take every signed user of this list, it refuses BEFORE the first send (daily_cap_short; the
+    # CLI exits 3). The tick pages by design (--page) and is not refused here.
+    if mode == "apply" and verify_notify.APPLY_ONLY is not None and not verify_notify.APPLY_PAGE:
+        n_signed = sum(1 for u in cands if str(u.get("user_id")) in verify_notify.APPLY_ONLY)
+        left_now = remaining_cap()
+        if left_now < n_signed:
+            report.cap_short = True
+            report.halted = (f"daily_cap_short: {left_now} left of today's {campaign} cap, {n_signed} signed users in this "
+                             "list - a signed list goes whole or not at all; nothing sent")
+            for u in cands:
+                if str(u.get("user_id")) in verify_notify.APPLY_ONLY:
+                    report.outcomes.append({"user": str(u.get("user_id")), "result": "deferred", "reason": "daily_cap_short"})
+            if lock_fh is not None:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+                lock_fh.close()
+            return report
     try:
         while (want := room()[0]) > 0:
             batch = next_batch(want)
@@ -1075,6 +1148,10 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                 allowed, left = room()
                 if allowed <= 0:
                     report.over_daily_max += len(batch) - i
+                    # r5 [key=cap-stop-p10] (3): every user a cap stop leaves is an outcome row, so the run balances
+                    why = "daily_cap" if left <= 0 else "run_size"
+                    report.outcomes += [{"user": str(b[1]["user"]["id"]), "result": "deferred", "reason": why}
+                                        for b in batch[i:]]
                     examined.difference_update(str(b[1]["user"]["id"]) for b in batch[i:])   # not got to
                     break
                 if mode == "apply":
@@ -1172,6 +1249,10 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
             fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
             lock_fh.close()
     report.over_daily_max += len(cands) - pos
+    if pos < len(cands) and not report.halted:
+        # r5 [key=cap-stop-p10] (3): the users the run never reached because the cap (or the run size) stopped it
+        why = "daily_cap" if (mode == "apply" and remaining_cap() <= 0) else "run_size"
+        report.outcomes += [{"user": str(u.get("user_id")), "result": "deferred", "reason": why} for u in cands[pos:]]
     # QA #1612: page.end = the first page entry this run did NOT get to (the cap or the room stopped it there), so the
     # next run starts exactly there; page_end = where the page itself ends
     in_cands = {id(u) for u in cands}

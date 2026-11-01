@@ -1960,8 +1960,8 @@ chmod 644 /etc/cron.d/openclaw-watchdog
 # (captain 2026-10-26 16:05Z "nothing sits silent"): paid only at 00:30Z (first claim on each UTC
 # day's caps), paid then free at 15:00Z. scripts/paid-status/daily.sh; runbook in its header.
 # Document asks run ONLY with ASKS=1 (captain 2026-10-27 01:0xZ: no proof ask until a returned
-# document can be accepted), so this cron sends status-only notes. Caps come from main.env
-# (CREDIT_STATUS_DAILY_MAX / CREDIT_UVN_DAILY_MAX, the email warm-up ceilings). Stop switch:
+# document can be accepted), so this cron sends status-only notes. The daily cap is the policy file's
+# shared credit cap, read in code ([key=uvn-daily-cap-400]; main.env CREDIT_*_DAILY_MAX are ignored). Stop switch:
 # touch /etc/hydra/credit-ops-notes.disabled. Replaces the hand-installed 2026-10-26 file.
 cat > /etc/cron.d/hydra-paid-status << CRONPAIDSTATUS
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
