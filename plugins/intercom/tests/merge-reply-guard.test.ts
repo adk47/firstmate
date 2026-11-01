@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import {
   applyMergeReplyGuard,
   prepareMergeReply,
+  containsMergeParagraph,
   findJudgements,
   hasMergeIntent,
   MERGE_PARAGRAPH,
@@ -316,6 +317,16 @@ describe("merge-reply guard on the 2026-10-30 transcripts (firstmate 017)", () =
     expect(applyMergeReplyGuard({ customerText: "?", reply: keep, mergeIntentEarlier: true, paragraphAlreadySent: true }).body).toBe(keep);
     // a URL at the very end of a forbidden sentence
     expect(applyMergeReplyGuard({ customerText: "hi", reply: "We merged https://muso.ai/profile/a.", paragraphAlreadySent: true }).body).toBe(HANDOFF_LINE);
+  });
+
+  it("containsMergeParagraph: exact, the gate's /w form, HTML and curly apostrophes count; altered or partial do not (firstmate 028)", () => {
+    expect(containsMergeParagraph(MERGE_PARAGRAPH)).toBe(true);
+    expect(containsMergeParagraph(`Hi Sam, m${MERGE_PARAGRAPH.slice(1)} Thank you, Caroline, Muso Support`)).toBe(true);
+    expect(containsMergeParagraph(`<p>Hi Sam, ${MERGE_PARAGRAPH.replace(/'/g, "’").replace(/ /g, "&nbsp;")}</p>`)).toBe(true);
+    expect(containsMergeParagraph(MERGE_PARAGRAPH.replace("verification team", "support team"))).toBe(false);
+    expect(containsMergeParagraph(MERGE_PARAGRAPH.slice(0, 120))).toBe(false);
+    expect(containsMergeParagraph(`X${MERGE_PARAGRAPH.slice(1)}`)).toBe(false);
+    expect(containsMergeParagraph("")).toBe(false);
   });
 
   it("(c) benign sentences with no merge-family word pass on a merge thread", () => {

@@ -387,3 +387,28 @@ export function prepareMergeReply(
     },
   };
 }
+
+// --- §2.4 already in the thread (r5 504 / firstmate 028) -------------------------------------
+// The same approved paragraph can reach a thread WITHOUT this plugin: the verify gate posts
+// fable-copy-1031-r5/w ("Hi {first}, merges work like this: ...", §2.4 verbatim after the
+// greeting) as Caroline's admin, and operators re-contact through intercom-ops-write.sh. Neither
+// sets mergeParagraphSentAt, so the guard would add §2.4 a second time on the customer's next
+// merge ask. The live conversation read (handler.ts) runs this over Caroline's own visible parts:
+// HTML stripped, whitespace collapsed, the first letter compared case-insensitively (the ref
+// lowercases it after the greeting); every other byte must match.
+export function containsMergeParagraph(text: string): boolean {
+  const plain = (text || "")
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&#39;|&apos;|&rsquo;/g, "'")
+    .replace(/[’]/g, "'")
+    .replace(/\s+/g, " ");
+  const tail = MERGE_PARAGRAPH.slice(1);
+  let at = plain.indexOf(tail);
+  while (at > 0) {
+    if (plain[at - 1].toLowerCase() === MERGE_PARAGRAPH[0].toLowerCase()) return true;
+    at = plain.indexOf(tail, at + 1);
+  }
+  return false;
+}

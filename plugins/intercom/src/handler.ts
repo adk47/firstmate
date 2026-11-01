@@ -26,6 +26,7 @@ import {
   type JevV2Part,
 } from "./jev-router.js";
 import { appendJevShadowRow } from "./jev-shadow-log.js";
+import { containsMergeParagraph } from "./merge-reply-guard.js";
 import { DEFAULT_JEV_MODEL } from "./jev-client.js";
 import {
   handleAssignment,
@@ -354,6 +355,19 @@ export async function handleWebhookEvent(
           // actually reads it. See buildRecentPartsFromLiveConversation.
           liveConversationParts = conversation.conversation_parts?.conversation_parts;
           liveConversationSource = conversation.source;
+          // §2.4 posted into this thread outside the plugin (the gate's /w ref, an operator
+          // re-contact) counts as sent, so the merge guard never repeats it (firstmate 028).
+          if (!state.mergeParagraphSentAt) {
+            const seen = [conversation.source, ...(liveConversationParts ?? [])].find(
+              (p) =>
+                p &&
+                p.author?.type === "admin" &&
+                String(p.author?.id ?? "") === botAdminId &&
+                ((p as IntercomConversationPart).part_type ?? "comment") === "comment" &&
+                containsMergeParagraph(p.body ?? ""),
+            );
+            if (seen) state.mergeParagraphSentAt = new Date().toISOString();
+          }
 
           // Check lifecycle state from live data
           if (conversation.state === "closed" || conversation.state === "snoozed") {
