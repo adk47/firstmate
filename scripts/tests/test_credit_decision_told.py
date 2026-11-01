@@ -32,6 +32,8 @@ D1 = "d1111111-1111-4111-8111-111111111111"
 D2 = "d2222222-2222-4222-8222-222222222222"
 D3 = "d3333333-3333-4333-8333-333333333333"
 NOW = datetime.now(timezone.utc)
+#: the one clock the midnight test may use: 30 s before a UTC midnight, far from any real "today" a CI run can have
+FROZEN_MIDNIGHT_EVE = datetime(1999, 12, 31, 23, 59, 30, tzinfo=timezone.utc)
 
 
 def list_file(users):
@@ -402,27 +404,55 @@ class LadderTest(Base):
         self.assertEqual((len(route.calls), out["stopped"]), (1, "day_cap"))
 
     def test_a_batch_crossing_midnight_counts_each_attempt_on_its_own_utc_day(self):
-        self.first_real()
+        # FROZEN clock only (Fable 224): nothing here reads the real date or names a calendar day. Every timestamp -
+        # the read-back run, the 99 seed rows, the batch's reservations - derives from FROZEN_MIDNIGHT_EVE.
+        day1 = FROZEN_MIDNIGHT_EVE
+        stamp = lambda t: t.strftime("%Y-%m-%dT%H:%M:%SZ")                     # noqa: E731
         db = sqlite3.connect(self.led, isolation_level=None)
-        day1 = datetime(2026, 11, 1, 23, 59, 30, tzinfo=timezone.utc)
-        for i in range(dt.FIRST_DAY_CAP - 1):                                   # day 1 already holds 99 users
+        dt.ensure_table(db)
+        earlier = stamp(day1 - timedelta(hours=3))
+        db.execute("INSERT INTO decision_told (run_id, at, user_id, group_key, copy_ref, subject_ids_json, mode, "
+                   "outcome) VALUES ('rb', ?, 999, 'g', 'decision-approved', '[]', 'apply', 'attempt')", (earlier,))
+        db.execute("INSERT INTO decision_told (run_id, at, user_id, group_key, copy_ref, subject_ids_json, mode, "
+                   "outcome) VALUES ('rb', ?, 999, 'g', 'decision-approved', '[]', 'apply', 'sent')", (earlier,))
+        for i in range(dt.FIRST_DAY_CAP - 2):                                   # with 999: day 1 holds 99 users
             db.execute("INSERT INTO decision_told (run_id, at, user_id, group_key, copy_ref, subject_ids_json, mode, "
                        "outcome) VALUES ('x', ?, ?, 'g', 'decision-approved', '[]', 'apply', 'attempt')",
-                       ("2026-11-01T20:00:00Z", 5000 + i))
+                       (earlier, 5000 + i))
         ticks = iter([day1 + timedelta(seconds=10),                  # 23:59:40: the 100th user of day 1
                       day1 + timedelta(seconds=40),                  # 00:00:10: day 2
-                      day1 + timedelta(seconds=50)])                 # 00:00:20: day 2
+                      day1 + timedelta(seconds=50),                  # 00:00:20: day 2
+                      day1 + timedelta(seconds=60)])                 # 00:00:30: day 2
         hd, users = dt.load_list(Path(self.lst).read_bytes(), self.sha)
         core = {k: (v[0], v[1] == "true", v[2] == "true", v[3], v[4]) for k, v in LIVE.items()}
         plans = dt.plan(users, core, {}, dt.attempts(db), day1)
+        signed = {p.user_id: (p.group_key, p.subject_ids) for p in plans if not p.hold}
         route = Route()
-        dt.run(db, plans, route, run_id="midnight", now=day1, channel="live", apply=True, limit=9,
-               signed=dt.signed_subjects(json.loads(Path(self.dry).read_text())), kill_file=self.kill,
-               readback_of=self.rb[1], clock=lambda: next(ticks))
-        self.assertEqual(len(route.calls), 3)            # day 1 fills to 100 with the first; the next two are day 2's
+        dt.run(db, plans, route, run_id="midnight", now=day1, channel="live", apply=True, limit=9, signed=signed,
+               kill_file=self.kill, readback_of="rb", clock=lambda: next(ticks))
+        self.assertEqual(len(route.calls), 4)            # day 1 fills to 100 with the first; the other three are day 2's
         got = [r[0] for r in db.execute("SELECT substr(at, 1, 10) FROM decision_told WHERE run_id = 'midnight' AND "
                                         "outcome = 'attempt' ORDER BY id")]
-        self.assertEqual(got, ["2026-11-01", "2026-11-02", "2026-11-02"])
+        d1, d2 = day1.strftime("%Y-%m-%d"), (day1 + timedelta(days=1)).strftime("%Y-%m-%d")
+        self.assertEqual(got, [d1, d2, d2, d2])
+
+    def test_the_midnight_test_never_reads_the_real_clock(self):
+        """Lint (Fable 224): the clock-sensitive test may use only the frozen clock - no real-clock helper, no
+        datetime.now, no NOW, no literal date string."""
+        import ast
+        import inspect
+        import textwrap
+        src = textwrap.dedent(inspect.getsource(LadderTest.test_a_batch_crossing_midnight_counts_each_attempt_on_its_own_utc_day))
+        tree = ast.parse(src)
+        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+        attrs = {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+        for barred in ("NOW", "first_real", "signed_dry", "run", "seam_main"):
+            self.assertNotIn(barred, names, barred)
+        for barred in ("now", "utcnow", "today", "first_real", "signed_dry"):
+            self.assertNotIn(barred, attrs, barred)
+        literals = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+        import re
+        self.assertEqual([x for x in literals if re.search(r"\b(19|20)\d\d-\d\d-\d\d", x)], [])
 
     def test_two_concurrent_processes_never_pass_the_first_live_limit(self):
         self.signed_dry()
