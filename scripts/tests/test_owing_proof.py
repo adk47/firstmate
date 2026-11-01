@@ -30,9 +30,10 @@ class OwingProofTest(unittest.TestCase):
         d = Path(tempfile.mkdtemp())
         self.ledger = str(d / "ledger.sqlite3")
         db = sqlite3.connect(self.ledger)
-        db.execute("CREATE TABLE verify_messages (account_id TEXT, status TEXT, campaign TEXT DEFAULT 'uvn-status')")
+        db.execute("CREATE TABLE verify_messages (account_id TEXT, status TEXT, campaign TEXT DEFAULT 'uvn-status', "
+                   "request_ids_json TEXT DEFAULT '[]')")
         db.execute("CREATE TABLE verify_refusal_holds (user_id TEXT, reason TEXT, flagged_at TEXT)")
-        db.execute("INSERT INTO verify_messages (account_id, status) VALUES ('4', 'sent'), ('1', 'refused')")   # a refusal is not "told"
+        db.execute("INSERT INTO verify_messages (account_id, status, request_ids_json) VALUES ('4', 'sent', '[\"t4\"]'), ('1', 'refused', '[\"u1\"]')")   # a refusal is not "told"
         db.execute("INSERT INTO verify_refusal_holds VALUES ('3', 'account-hold', 'x')")
         db.commit()
         self.holds = str(d / "holds.jsonl"); Path(self.holds).write_text("")
@@ -78,7 +79,7 @@ class ProofRequiredAudienceTest(OwingProofTest):
                 ["9", "p9", "unverified", "2026-09-07", "1", "0", "0", "1"],      # told by a status line only
                 ["10", "p10", "unverified", "2026-09-08", "1", "0", "0", "1"]]    # already ASKED
         db = sqlite3.connect(self.ledger)
-        db.execute("INSERT INTO verify_messages VALUES ('9', 'sent', 'status-team-review'), ('10', 'sent', 'uvn-status')")
+        db.execute("INSERT INTO verify_messages VALUES ('9', 'sent', 'status-team-review', '[]'), ('10', 'sent', 'uvn-status', '[\"p10\"]')")
         db.commit(); db.close()
         res = self.build(query=lambda sql: [list(r) for r in rows])
         got = {u["user_id"]: (u["class"], u["request_ids"], u["facts"]) for u in res["users"]}
@@ -142,6 +143,30 @@ class ProofRequiredAudienceTest(OwingProofTest):
         self.assertIn("signed_on", doc)
         with self.assertRaises(SystemExit):
             op._main(["--out", str(out), "--class-out", "bogus=x"])
+
+    def test_told_users_owing_rows_no_ask_named_are_the_follow_up_class_with_only_those_rows(self):
+        # Fable 590 (b): user 4 was asked about t4; a NEW owed row t4b appeared since -> listed uvn_new_rows [t4b];
+        # user 9's other row carries a core proofRequest marker (core asked it) -> only its unmarked row is listed
+        db = sqlite3.connect(self.ledger)
+        db.execute("UPDATE verify_messages SET request_ids_json = '[\"t4\"]' WHERE account_id = '4'")
+        db.commit()
+        rows = [list(r) for r in ROWS] + [
+            ["4", "t4b", "user_verification_needed", "2026-10-20", "1", "0", "0", "0"],
+            ["9", "m9", "user_verification_needed", "2026-09-01", "0", "0", "1", "0"],
+            ["9", "n9", "user_verification_needed", "2026-10-21", "0", "0", "0", "0"],
+            ["5", "m5b", "user_verification_needed", "2026-07-02", "0", "0", "1", "0"]]   # every owed row marked: none
+        res = self.build(query=lambda sql: [list(r) for r in rows])
+        got = {u["user_id"]: (u["class"], u["request_ids"]) for u in res["users"] if u["class"] == op.NEW_ROWS}
+        self.assertEqual(got, {"4": (op.NEW_ROWS, ["t4b"]), "9": (op.NEW_ROWS, ["n9"])})
+        self.assertEqual((res["counts"]["list_uvn_new_rows_paid"], res["counts"]["list_uvn_new_rows_free"]), (1, 1))
+        # the class list verifies against the replica + the ledger (its owed set = only the un-asked rows)
+        lst = op.class_list(res, op.NEW_ROWS)
+        self.assertEqual(self.vf(lst, lambda sql: [list(r) for r in rows]), [])
+        db.execute("UPDATE verify_messages SET request_ids_json = '[\"t4\", \"t4b\"]' WHERE account_id = '4'")
+        db.commit()                                              # asked since the build: user 4's set changed
+        self.assertTrue(any(d.startswith("4:") for d in self.vf(lst, lambda sql: [list(r) for r in rows])))
+        # never in the uvn-status family's list
+        self.assertNotIn("4", [u["user_id"] for u in op.class_list(res, "uvn")["users"]])
 
 
 if __name__ == "__main__":

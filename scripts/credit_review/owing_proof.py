@@ -81,6 +81,29 @@ def told_users(ledger_path: str) -> set[int]:
         raise OwingProofError(f"verify ledger unreadable: {exc}") from exc
 
 
+NEW_ROWS = "uvn_new_rows"   # Fable 590 (b): owed rows the user's earlier ask never named (the follow-up class)
+
+
+def asked_rows(ledger_path: str) -> dict[int, set[str]]:
+    """{user: request ids named by a SENT uvn-status ask} - the rows an earlier ask already covered."""
+    out: dict[int, set[str]] = defaultdict(set)
+    try:
+        db = sqlite3.connect(f"file:{ledger_path}?mode=ro", uri=True)
+        for a, ids in db.execute("SELECT account_id, request_ids_json FROM verify_messages WHERE status='sent' "
+                                 "AND campaign='uvn-status'"):
+            if str(a or "").isdigit():
+                out[int(a)].update(str(i).lower() for i in json.loads(ids or "[]"))
+    except (sqlite3.Error, ValueError) as exc:
+        raise OwingProofError(f"verify ledger unreadable: {exc}") from exc
+    return out
+
+
+def new_rows(owe: dict[str, list[str]], asked: set[str]) -> dict[str, list[str]]:
+    """Fable 590 (b): the owed rows of an already-told user that no sent ask named AND that carry no core proofRequest
+    marker of their own (core already asked about those) - what a follow-up would ask about, and nothing else."""
+    return {rid: r for rid, r in owe.items() if rid not in asked and r[6] != "1"}
+
+
 def held_accounts(holds_path: str, ledger_path: str) -> set[int]:
     held: set[int] = set()
     try:
@@ -114,6 +137,7 @@ def build(*, query: Query | None = None, ledger_path: str = LEDGER, holds_path: 
           at_risk_path: str = AT_RISK, now: datetime | None = None) -> dict[str, Any]:
     rows = replica_rows(query or verify_notify.trino)
     told = told_users(ledger_path)
+    asked = asked_rows(ledger_path)
     held = held_accounts(holds_path, ledger_path)
     risky, risk_src = at_risk_users(at_risk_path)
     by_user: dict[int, list[list[str]]] = defaultdict(list)
@@ -128,6 +152,15 @@ def build(*, query: Query | None = None, ledger_path: str = LEDGER, holds_path: 
             continue
         if uid in told or any(r[6] == "1" for r in rs):
             counts[f"skip_already_told_{cls}"] += 1
+            # Fable 590 (b): told (by our ask or core's marker), yet owing rows nobody asked about - the follow-up
+            # class, listed with ONLY those rows (its copy is r5's to approve; nothing sends it until then)
+            fresh = new_rows(owe, asked.get(uid, set())) if cls == "uvn" else {}
+            if fresh:
+                paid = any(r[4] == "1" for r in rs)
+                users.append({"user_id": str(uid), "paid": paid, "skip": None, "at_risk": uid in risky,
+                              "request_ids": sorted(fresh), "class": NEW_ROWS, "oldest": min(r[3] for r in fresh.values()),
+                              "_tier": 0 if (paid and uid in risky) else 1 if paid else 2, "facts": _facts_of(fresh)})
+                counts[f"list_{NEW_ROWS}_{'paid' if paid else 'free'}"] += 1
             continue
         paid = any(r[4] == "1" for r in rs)
         tier = 0 if (paid and uid in risky) else 1 if paid else 2
@@ -199,8 +232,11 @@ def verify_facts(lst: dict[str, Any], query: Query, *, holds_path: str = ACCOUNT
     for r in replica_rows(query):
         now.setdefault(r[0], []).append(r)
     held = held_accounts(holds_path, ledger_path)
+    asked = asked_rows(ledger_path) if any(u.get("class") == NEW_ROWS for u in lst.get("users") or []) else {}
     for u in lst.get("users") or []:
         owe, _ = owed(now.get(str(u["user_id"]), []), int(u["user_id"]) in held)
+        if u.get("class") == NEW_ROWS:          # the follow-up class: only the rows no ask named (as build lists them)
+            owe = new_rows(owe, asked.get(int(u["user_id"]), set()))
         cur = _facts_of(owe)
         if cur != u.get("facts") or sorted(owe) != sorted(u.get("request_ids") or []):
             diffs.append(f"{u['user_id']}: listed {u.get('facts')} ids {sorted(u.get('request_ids') or [])} -> now {cur}")
@@ -234,8 +270,8 @@ def _main(argv: list[str] | None = None) -> int:
     outs = []
     for spec in a.class_out:
         cls, _, path = spec.partition("=")
-        if cls not in ("uvn", "review_hold", "account_hold") or not path:
-            ap.error(f"--class-out {spec!r}: want CLASS=PATH with CLASS uvn / review_hold / account_hold")
+        if cls not in ("uvn", "review_hold", "account_hold", NEW_ROWS) or not path:
+            ap.error(f"--class-out {spec!r}: want CLASS=PATH with CLASS uvn / review_hold / account_hold / {NEW_ROWS}")
         outs.append((cls, path))
     try:
         res = build(ledger_path=a.ledger, holds_path=a.account_holds, at_risk_path=a.at_risk)
