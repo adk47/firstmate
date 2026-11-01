@@ -528,10 +528,24 @@ def _main(argv: list[str] | None = None) -> int:
     s.add_argument("--mode", choices=("dry-run", "apply"), default="dry-run")
     s.add_argument("--max-users", type=int, default=25)
     s.add_argument("--preview", default=None)
+    s.add_argument("--preview-accepted", default="", metavar="CHECK_JSON",
+                   help="with --preview: render exactly the users this --check-recipients outcomes file accepted")
     s.add_argument("--check-recipients", action="store_true",
                    help="dry run: the gate's live --check-recipient for every user (the signable would-send set)")
     s.add_argument("--outcomes-json", default=None, help="write every non-send gate answer {user, result, reason} (0600)")
     a = ap.parse_args(argv)
+    if a.op == "send" and a.preview_accepted:
+        # t01b 584: the preview renders exactly the check's accepted set, walking the whole list
+        if not a.preview or a.mode != "dry-run" or a.check_recipients:
+            print("NEED ASKS: --preview-accepted goes with --preview on a plain --mode dry-run; nothing rendered")
+            return 2
+        try:
+            verify_notify.PREVIEW_ONLY = verify_notify.load_preview_accepted(a.preview_accepted)
+            with open(a.list, encoding="utf-8") as fh:
+                a.max_users = max(a.max_users, len(json.load(fh).get("users") or []), 1)
+        except (OSError, ValueError, TypeError, AttributeError) as exc:
+            print(f"NEED ASKS: --preview-accepted: {exc}; nothing rendered")
+            return 2
     try:
         if a.op == "verify-facts":
             with open(a.list, encoding="utf-8") as fh:
@@ -579,7 +593,10 @@ def _main(argv: list[str] | None = None) -> int:
                                **accounting(rep),
                                "accepted": list(rep.accepted), "sent": list(getattr(rep, "sent", [])),
                                "outcomes": list(rep.outcomes),
-                               "filtered": list(rep.filtered)}, fh)
+                               "filtered": list(rep.filtered),
+                               # p1 579: the deploy head this ran on, and the head its list was signed on
+                               "deployed": verify_notify.deployed_head() or None,
+                               "signed_on": verify_notify.LIST_SIGNED_ON or None}, fh)
                 os.replace(tmp, a.outcomes_json)          # atomic, and the fresh file's 0600 mode goes with it
             except OSError as exc:
                 rep.failures.append(f"outcomes file not written: {exc}"[:200])

@@ -790,6 +790,32 @@ class UvnStatusTests(unittest.TestCase):
                          ["note for 1", "note for 2", "note for 3"])
         self.assertEqual(rep.validated, 3)
 
+    def test_the_preview_renders_exactly_the_checks_accepted_set_past_ten_deferred_users(self):
+        # t01b 584 (C page 6 on e4f65c4a): the 60-render preview hit its cap on users the check DEFERRED, so the last 3
+        # accepted ids had no body. With --preview-accepted the preview renders the accepted set, whatever precedes it.
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 16)]
+        self.write_list()
+
+        class Renders(FakeGate):
+            def __call__(self, argv):
+                super().__call__(argv)
+                uid = self.calls[-1][1]["user"]["id"]
+                return subprocess.CompletedProcess(argv, 0, f"DRY-RUN uvn-status initial email credits=1\nnote for {uid}\n", "")
+        accepted = {"11", "12", "13", "14", "15"}                 # users 1-10 were deferred by the check
+        prev = self.dir / "preview-acc"
+        prev.mkdir()
+        with unittest.mock.patch.object(uvn_status.verify_notify, "PREVIEW_ONLY", frozenset(accepted)):
+            rep, gate = self.run_(mode="dry-run", gate=Renders(), query=replica(range(1, 16)), preview_dir=str(prev),
+                                  max_users=15)
+        self.assertEqual({f[:-4] for f in os.listdir(prev) if f.endswith(".txt")}, accepted)
+        self.assertEqual({str(p["user"]["id"]) for _, p in gate.calls}, accepted)     # no render for a deferred user
+        # without it, a run sized to the accepted count renders deferred users and misses accepted ones (the bug)
+        prev2 = self.dir / "preview-cap"
+        prev2.mkdir()
+        rep, gate = self.run_(mode="dry-run", gate=Renders(), query=replica(range(1, 16)), preview_dir=str(prev2),
+                              max_users=5)
+        self.assertNotEqual({f[:-4] for f in os.listdir(prev2) if f.endswith(".txt")}, accepted)
+
     def test_dry_run_validates_without_sending(self):
         _, gate = self.run_(mode="dry-run")
         self.assertIn("--validate", gate.calls[0][0])

@@ -2540,5 +2540,69 @@ class TestLogIsolation(unittest.TestCase):
         self.assertIn("absent.json is missing", Path(credit_test_env.LOG_PATH).read_text())
 
 
+
+class PreviewAcceptedTests(unittest.TestCase):
+    """t01b 584 / p1 579: the preview renders exactly the check's accepted set; every outcomes file names the head."""
+
+    def setUp(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("credit_review_cli_pa", str(ROOT / "scripts" / "credit-review.py"))
+        self.cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.cli)
+        self.d = Path(tempfile.mkdtemp())
+        self.chk = self.d / "check.json"
+        self.chk.write_text(json.dumps({"mode": "dry-run", "accepted": [{"user": "11"}, {"user": "12"}], "outcomes": []}))
+        self.lst = self.d / "list.json"
+        self.lst.write_text(json.dumps({"users": [{"user_id": str(u)} for u in range(1, 13)]}))
+        self.p = unittest.mock.patch.object(verify_notify, "PREVIEW_ONLY", None)
+        self.p.start()
+
+    def tearDown(self):
+        self.p.stop()
+
+    def ns(self, **kw):
+        import argparse
+        base = dict(preview_accepted=str(self.chk), preview=str(self.d / "prev"), mode="dry-run", check_recipients=False,
+                    list=str(self.lst), max_users=5)
+        return argparse.Namespace(**{**base, **kw})
+
+    def test_the_cli_loads_the_accepted_set_and_walks_the_whole_list(self):
+        a = self.ns()
+        self.assertEqual(self.cli.preview_accepted(a), "")
+        self.assertEqual((verify_notify.PREVIEW_ONLY, a.max_users), (frozenset({"11", "12"}), 12))
+        for bad in (dict(mode="apply"), dict(check_recipients=True), dict(preview="")):
+            self.assertIn("goes with --preview", self.cli.preview_accepted(self.ns(**bad)))
+        self.chk.write_text(json.dumps({"mode": "apply", "accepted": []}))          # an apply file is not a check
+        self.assertIn("--preview-accepted", self.cli.preview_accepted(self.ns()))
+        self.chk.write_text(json.dumps({"mode": "dry-run", "outcomes": []}))         # no accepted set
+        self.assertIn("--preview-accepted", self.cli.preview_accepted(self.ns()))
+        self.assertEqual(self.cli.preview_accepted(self.ns(preview_accepted="")), "")   # off by default
+
+    def test_send_all_renders_only_the_accepted_users_and_calls_no_gate_for_the_rest(self):
+        calls = []
+        def run(argv):
+            calls.append(json.load(open(argv[argv.index("--credits-file") + 1]))["user"]["id"])
+            return subprocess.CompletedProcess(argv, 0, "DRY-RUN uvn-status initial email credits=1\nx\n", "")
+        pays = [{"user": {"id": str(u), "email": f"u{u}@x.com"}, "credits": [{"request_id": f"r{u}"}]} for u in range(1, 13)]
+        prev = self.d / "prev"; prev.mkdir()
+        verify_notify.PREVIEW_ONLY = frozenset({"11", "12"})
+        verify_notify.send_all(pays, Report(), mode="dry-run", runner=run, preview_dir=str(prev), workers=1)
+        self.assertEqual((calls, sorted(f for f in os.listdir(prev) if f.endswith(".txt"))), (["11", "12"], ["11.txt", "12.txt"]))
+        calls.clear()
+        verify_notify.send_all(pays, Report(), mode="dry-run", runner=run, check_recipients=True, workers=1)
+        self.assertEqual(len(calls), 12)                         # the CHECK itself is never narrowed
+
+    def test_the_outcomes_file_names_the_deployed_head_and_the_lists_signed_on(self):
+        import argparse
+        sha = self.d / ".deployed-sha"; sha.write_text("b" * 40 + "\n")
+        out = self.d / "o.json"
+        with unittest.mock.patch.object(verify_notify, "DEPLOYED_SHA_PATH", str(sha)), \
+                unittest.mock.patch.object(verify_notify, "LIST_SIGNED_ON", "c" * 40):
+            self.assertEqual(self.cli.write_outcomes(argparse.Namespace(outcomes_json=str(out), mode="dry-run",
+                                                                        segment="paid"), Report()), "")
+        d = json.loads(out.read_text())
+        self.assertEqual((d["deployed"], d["signed_on"]), ("b" * 40, "c" * 40))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

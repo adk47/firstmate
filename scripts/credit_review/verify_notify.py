@@ -788,10 +788,28 @@ def render_facts(p: dict[str, Any], extra: list[str]) -> dict[str, Any]:
             "document_dates": dates, "credits": len(credits), "source": "renderer"}
 
 
+# t01b 584 / p1 579: a preview renders EXACTLY the check's accepted set. Set (by --preview-accepted) to the user ids the
+# --check-recipients run accepted; a preview then renders those users only - a user the check deferred never takes a
+# render (or a slot of the run's size). None = every user (the default).
+PREVIEW_ONLY: frozenset[str] | None = None
+
+
+def load_preview_accepted(path: str) -> frozenset[str]:
+    """The `accepted` user ids of a --check-recipients --outcomes-json file. Raises ValueError when it has none."""
+    with open(path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    acc = doc.get("accepted") if isinstance(doc, dict) else None
+    if not isinstance(acc, list) or doc.get("mode") == "apply":
+        raise ValueError(f"{path} is not a dry-run check's outcomes file with an accepted set")
+    return frozenset(str(a.get("user")) for a in acc if isinstance(a, dict))
+
+
 def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
              wrapper: str = WRAPPER, runner: Runner = _run, extra: list[str] | None = None,
              pace_seconds: float = 0.0, preview_dir: str | None = None, reminder: bool = False,
              check_recipients: bool = False, workers: int | None = None) -> None:
+    if PREVIEW_ONLY is not None and preview_dir and mode != "apply" and not check_recipients:
+        payloads = [p for p in payloads if _uid(p) in PREVIEW_ONLY]          # never a gate call for the rest
     if mode == "apply" or check_recipients:
         try:
             payloads, held = attach_identities(payloads, report)

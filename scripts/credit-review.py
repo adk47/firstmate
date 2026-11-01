@@ -583,7 +583,10 @@ def write_outcomes(args: argparse.Namespace, report: object) -> str:
             json.dump({"mode": args.mode, "segment": args.segment, "outcomes": list(getattr(report, "outcomes", [])),
                        "accepted": list(getattr(report, "accepted", [])), "filtered": list(getattr(report, "filtered", [])),
                        "sent": list(getattr(report, "sent", [])),
-                       "recipient_ok": getattr(report, "recipient_ok", 0)}, fh, indent=1)
+                       "recipient_ok": getattr(report, "recipient_ok", 0),
+                       # p1 579: every tick artefact names the deploy head it ran on and the head its list was signed on
+                       "deployed": verify_notify.deployed_head() or None,
+                       "signed_on": verify_notify.LIST_SIGNED_ON or None}, fh, indent=1)
         os.replace(tmp, path)
         return ""
     except OSError as exc:
@@ -1039,6 +1042,9 @@ def parser() -> argparse.ArgumentParser:
     us.add_argument("--segment-daily-cap", type=int, default=None,
                     help="QA #1541: the policy's per-campaign+segment daily cap, enforced under the run lock")
     us.add_argument("--preview", default=None, help="dry-run: write each user's rendered note to this dir as <user id>.txt (0700)")
+    us.add_argument("--preview-accepted", default="", metavar="CHECK_JSON",
+                    help="with --preview: render exactly the users this --check-recipients outcomes file accepted "
+                         "(t01b 584: a deferred user takes no render and no slot)")
     us.add_argument("--proof-on-file", default=None, metavar="FILE")
     us.add_argument("--from-stage2", action="store_true",
                     help="build the population live from the stage-2 verdicts (uvn-status: no_document; gap-ask: "
@@ -1060,6 +1066,9 @@ def parser() -> argparse.ArgumentParser:
     cp.add_argument("--max-users", type=int, default=20, help="messages this run (canary: 3)")
     cp.add_argument("--reminders", action="store_true", help="send the due day-7 reminders instead of first asks")
     cp.add_argument("--preview", default="", help="dry-run: write each rendered note to this dir (0700)")
+    cp.add_argument("--preview-accepted", default="", metavar="CHECK_JSON",
+                    help="with --preview: render exactly the users this --check-recipients outcomes file accepted "
+                         "(t01b 584: a deferred user takes no render and no slot)")
     cp.set_defaults(fn=cmd_claim_proof_ask)
 
     cs = sub.add_parser("claim-status", help="no-ask status note to pending claimants who get no proof ask "
@@ -1072,6 +1081,9 @@ def parser() -> argparse.ArgumentParser:
     cs.add_argument("--mode", choices=["apply", "dry-run"], default="dry-run")
     cs.add_argument("--max-users", type=int, default=50, help="messages this run (canary: 3)")
     cs.add_argument("--preview", default="", help="dry-run: write each rendered note to this dir (0700)")
+    cs.add_argument("--preview-accepted", default="", metavar="CHECK_JSON",
+                    help="with --preview: render exactly the users this --check-recipients outcomes file accepted "
+                         "(t01b 584: a deferred user takes no render and no slot)")
     cs.set_defaults(fn=cmd_claim_status)
 
     ir = sub.add_parser("intercom-reconcile", help="Fable ruling A: reconcile Intercom external_id for identity-refused "
@@ -1163,6 +1175,25 @@ def _warning_to_log(message, category, filename, lineno, file=None, line=None) -
     log(f"warning: {category.__name__}: {message} ({filename}:{lineno})")
 
 
+def preview_accepted(args: argparse.Namespace) -> str:
+    """--preview-accepted: load the check's accepted ids into verify_notify.PREVIEW_ONLY and walk the whole list (the
+    run size becomes the list's entry count, so no accepted user is past the cap). '' = go, else the refusal."""
+    path = getattr(args, "preview_accepted", "")
+    if not path:
+        return ""
+    if not args.preview or args.mode != "dry-run" or getattr(args, "check_recipients", False):
+        return "--preview-accepted goes with --preview on a plain --mode dry-run"
+    try:
+        verify_notify.PREVIEW_ONLY = verify_notify.load_preview_accepted(path)
+        with open(args.list, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError, TypeError) as exc:
+        return f"--preview-accepted: {exc}"
+    rows = (doc.get("users") or doc.get("claims") or []) if isinstance(doc, dict) else []
+    args.max_users = max(int(args.max_users or 0), len(rows), 1)
+    return ""
+
+
 def main(argv: list[str] | None = None) -> int:
     # Python warnings go to the run log, never to stderr: openclaw posts a command
     # cron's stderr to Slack next to its stdout.
@@ -1172,6 +1203,10 @@ def main(argv: list[str] | None = None) -> int:
         log(f"kill switch present at {KILL_SWITCH}; nothing reviewed")
         print("NO_REPLY")
         return 0
+    why = preview_accepted(args)
+    if why:
+        print(f"Credit review {args.cmd}: {why}; nothing rendered")
+        return 2
     try:
         if getattr(args, "mode", "") == "apply":
             # QA #1604: ONE apply lock for the whole run (every user), taken before the first send

@@ -29,7 +29,10 @@ if mode == "apply" and os.environ.get("STUB_RUNNER_CAP_MODEL"):
 if "--outcomes-json" in a:
     p = a[a.index("--outcomes-json") + 1]
     n = int(os.environ.get("STUB_REFUSED", "0")) if mode == "apply" else 0
-    json.dump({"mode": mode, "outcomes": [{"user": str(i), "result": "refused", "reason": "G5"} for i in range(n)]}, open(p, "w"))
+    doc = {"mode": mode, "outcomes": [{"user": str(i), "result": "refused", "reason": "G5"} for i in range(n)]}
+    if mode != "apply" and not os.environ.get("STUB_NO_ACCEPTED"):     # the runner's accepted set (#1600)
+        doc["accepted"] = [{"user": u} for u in os.environ.get("STUB_ACCEPTED", "1").split(",") if u]
+    json.dump(doc, open(p, "w"))
 if "--preview" in a and os.environ.get("STUB_PREVIEW_FAIL"):
     print("preview failed"); sys.exit(1)
 if "--list" in a:
@@ -38,8 +41,9 @@ if "--list" in a:
     open(os.environ["CALLS"] + ".lists", "a").write(os.path.basename(a[a.index("--list") + 1]) + " " + ",".join(ids) + "\n")
 if "--preview" in a:
     d = a[a.index("--preview") + 1]
-    open(os.path.join(d, "1.txt"), "w").write('DRY-RUN uvn-status initial email credits=1 copy=uvn\n{"body": "<p>Hi there</p>"}\n')
-    json.dump({"class": "ask", "owes_proof": True, "distinct_tracks": 1, "source": "renderer"}, open(os.path.join(d, "1.facts.json"), "w"))
+    for u in os.environ.get("STUB_PREVIEW_USERS", "1").split(","):
+        open(os.path.join(d, f"{u}.txt"), "w").write('DRY-RUN uvn-status initial email credits=1 copy=uvn\n{"body": "<p>Hi there</p>"}\n')
+        json.dump({"class": "ask", "owes_proof": True, "distinct_tracks": 1, "source": "renderer"}, open(os.path.join(d, f"{u}.facts.json"), "w"))
     if os.environ.get("STUB_KILL_DURING"):
         open(os.environ["STUB_KILL_DURING"], "w").write("killed by a human mid-tick\n")
 if mode == "apply" and os.environ.get("STUB_BREAK_LEDGER"):
@@ -87,6 +91,7 @@ print('{"verdict": "%s"}' % ("healthy" if os.environ.get("STUB_HEALTH_RC", "0") 
 sys.exit(int(os.environ.get("STUB_HEALTH_RC", "0")))
 PY
   export CVO_RUNNER="$TEST_TMPDIR/runner.py" CVO_OWING="$TEST_TMPDIR/owing.py" CVO_RECEIPTS="$TEST_TMPDIR/receipts.py"
+  export CVO_DEPLOYED_SHA="$TEST_TMPDIR/deployed-sha"
   export CVO_HEALTH="$TEST_TMPDIR/health.py"
   # proof-need-ask (E): build writes the audience; send is the same stub runner
   cat > "$TEST_TMPDIR/need.py" <<'PY'
@@ -141,7 +146,7 @@ applies() { grep -c -- "--mode apply" "$CALLS" || true; }
   evil=(HYDRA_ROOT="$E" CVO_ETC="$E/etc" CVO_STATE="$E/state" PY_BIN="$E/py" CVO_RUNNER="$E/r" CVO_OWING="$E/o" CVO_RECEIPTS="$E/rc"
         CVO_HEALTH="$E/h" CVO_ZERO_READ="$E/z" CVO_FRAUD="$E/f" CVO_MAIN_ENV="$E/env" CVO_LEDGER="$E/l.sqlite3" CVO_SCRIPTS="$E/s"
         CVO_RD_SCAN="$E/rd" CVO_RD_CAP=99999 CVO_POLICY="$E/p.json" CVO_CLAIM_LIST="$E/c.json" CVO_CAP=99999 CVO_R1_CAP=99999
-        CVO_CLAIM_CAP=99999 CVO_REFUSAL_SPIKE=1.0 CVO_DOW=9 CVO_NEED_RUNNER="$E/n" CVO_UNSIGNED_ALL=1 CVO_NOW_EPOCH=1 CVO_JUDGE="$E/j" CVO_TICK_BUDGET_S=999999 CVO_TICK_HARD_S=999999 CVO_CHECK_S_PER_USER=0 CVO_RESERVE_PAD_S=0 CVO_APPLY_S_PER_USER=1 CVO_TICK_ELAPSED0=99 CVO_FULL_CAP_FROM_TEST=uvn-status=2000-01-01T00:00Z CVO_TIMEOUT_BIN="$E/t")
+        CVO_CLAIM_CAP=99999 CVO_REFUSAL_SPIKE=1.0 CVO_DOW=9 CVO_NEED_RUNNER="$E/n" CVO_UNSIGNED_ALL=1 CVO_NOW_EPOCH=1 CVO_JUDGE="$E/j" CVO_DEPLOYED_SHA="$E/d" CVO_TICK_BUDGET_S=999999 CVO_TICK_HARD_S=999999 CVO_CHECK_S_PER_USER=0 CVO_RESERVE_PAD_S=0 CVO_APPLY_S_PER_USER=1 CVO_TICK_ELAPSED0=99 CVO_FULL_CAP_FROM_TEST=uvn-status=2000-01-01T00:00Z CVO_TIMEOUT_BIN="$E/t")
   run -0 env -u BATS_TEST_TMPDIR "${evil[@]}" "$SCRIPT" --print-config
   [[ "$output" != *"$E"* ]]; [[ "$output" != *99999* ]]
   now_line="$(printf '%s\n' "$output" | grep '^NOW_EPOCH=')"; [ "${now_line#NOW_EPOCH=}" -gt 1700000000 ]   # the real clock, never CVO_NOW_EPOCH=1
@@ -177,6 +182,7 @@ NEED_RUNNER=/opt/hydra/scripts/credit_review/need_asks.py
 FIRST_CAP=100
 UNSIGNED_ALL=0
 JUDGE=/opt/hydra/scripts/credit-batch-judge.py
+DEPLOYED_SHA_FILE=/opt/hydra/.deployed-sha
 TICK_BUDGET_S=6000
 TICK_HARD_S=6900
 CHECK_S_PER_USER=4
@@ -248,7 +254,9 @@ TIMEOUT_BIN=/usr/bin/timeout"
   cat > "$TEST_TMPDIR/judge.py" <<'PY'
 import json, os, sys
 items = [json.loads(l) for l in open(sys.argv[sys.argv.index("--items") + 1])]
-open(os.environ["CALLS"] + ".judge", "a").write(f"{len(items)} {items[0]['copy_ref']} {type(items[0]['facts']).__name__}\n")
+ref = sys.argv[sys.argv.index("--copy-ref") + 1]               # the deployed judge requires it (rc=2 without)
+assert all(i["copy_ref"] == ref for i in items), (ref, items)
+open(os.environ["CALLS"] + ".judge", "a").write(f"{len(items)} {ref} {type(items[0]['facts']).__name__}\n")
 print(json.dumps({"verdict": "STOP", "reason_code": "test"}))
 PY
   CVO_JUDGE="$TEST_TMPDIR/judge.py" run -0 "$SCRIPT"
@@ -256,6 +264,13 @@ PY
   python3 -c "import json,sys; it=[json.loads(l) for l in open(sys.argv[1])]; assert it and it[0]['facts']['class']=='ask' and it[0]['body_html']=='<p>Hi there</p>' and it[0]['copy_ref']=='uvn', it" "$out/uvn-status-free-items.jsonl"
   grep -q "^1 uvn dict$" "$CALLS.judge"
   grep -q "judge SHADOW" "$out/tick.log"
+  if grep -q "JUDGE CALL FAILED" "$out/tick.log"; then false; fi
+  # r5 596: a judge call that fails (the 10:00Z argv error) is LOUD - logged and paged - and still blocks nothing
+  printf 'import sys\nsys.stderr.write("usage: credit-batch-judge.py judge --copy-ref COPY_REF\\n"); sys.exit(2)\n' > "$TEST_TMPDIR/judge-bad.py"
+  rm -rf "$CVO_OUT_ROOT"; : > "$CALLS"
+  CVO_JUDGE="$TEST_TMPDIR/judge-bad.py" run -0 "$SCRIPT"
+  grep -q "JUDGE CALL FAILED (rc=2) copy=uvn" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q -- "--mode apply" "$CALLS"
   grep -q -- "--mode apply" "$CALLS"                                 # shadow: the STOP blocked no apply
   # no judge deployed: the items are still written, the tick goes on
   rm -rf "$CVO_OUT_ROOT"; : > "$CALLS"; run -0 "$SCRIPT"
@@ -708,4 +723,31 @@ PY
   # every apply hands the runner the policy's shared credit cap (2,500), so the 401st message of the day still goes
   [ "$(sort -u "$CALLS.env")" = "2500 2500" ]
   grep -q "uvn-status-free APPLY (rc=0): UVN STATUS: 250 sent" "$CVO_OUT_ROOT"/*/tick.log
+}
+
+@test "outbound tick (p1 579): the bodies and the judge's items are the check's ACCEPTED set, never the rendered cap; every artefact names the deploy head" {
+  printf '%s\n' "$(printf 'a%.0s' $(seq 40))" > "$CVO_DEPLOYED_SHA"
+  STUB_PREVIEW_USERS=1,2,3 STUB_ACCEPTED=1,3 run -0 "$SCRIPT"
+  o=$(ls -d "$CVO_OUT_ROOT"/*/ | head -1)
+  [ "$(cd "$o/uvn-status-paid-bodies" && ls *.txt | tr '\n' ' ')" = "1.txt 3.txt " ]
+  [ -e "$o/uvn-status-paid-bodies-not-accepted/2.txt" ] && [ -e "$o/uvn-status-paid-bodies-not-accepted/2.facts.json" ]
+  [ "$(jq -r .user_id "$o/uvn-status-paid-items.jsonl" | tr '\n' ' ')" = "1 3 " ]
+  [ "$(jq -r .deployed "$o/uvn-status-paid-items.jsonl" | sort -u)" = "$(cat "$CVO_DEPLOYED_SHA")" ]
+  grep -q "tick start: .* deployed=$(cat "$CVO_DEPLOYED_SHA")" "$o/tick.log"
+  grep -q "bodies == accepted: 2 kept, 1 rendered but not accepted moved aside, 0 accepted without a body" "$o/tick.log"
+  # t01b 584: the body render is told the check's accepted set (it renders those, walking the whole list)
+  grep -qE -- "--preview [^ ]*/uvn-status-paid-bodies --preview-accepted [^ ]*/uvn-status-paid-check.json" "$CALLS"
+  # an accepted user with no rendered body, or a check file with no accepted set: no apply, the tick stops
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  # QA #1610: a check that accepted NOBODY (live flags on) is a no-apply family outcome, never an apply over the list
+  rm -rf "$CVO_OUT_ROOT"; : > "$CALLS"
+  STUB_ACCEPTED="" run -0 env STUB_ACCEPTED= "$SCRIPT"
+  grep -q "uvn-status-paid: the check accepted nobody; no apply this tick" "$CVO_OUT_ROOT"/*/tick.log
+  if grep -q -- "--segment paid --campaign uvn-status .*--mode apply" "$CALLS"; then false; fi
+  for e in "STUB_ACCEPTED=1,4" "STUB_NO_ACCEPTED=1"; do
+    rm -rf "$CVO_OUT_ROOT"; : > "$CALLS"
+    run -1 env "$e" "$SCRIPT"
+    grep -q "the rendered bodies are not the check's accepted set" "$CVO_OUT_ROOT"/*/tick.log
+    [ "$(applies)" = 0 ]
+  done
 }

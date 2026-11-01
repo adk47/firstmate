@@ -67,6 +67,7 @@ OWING="$(cfg CVO_OWING "$HYDRA_ROOT/scripts/credit_review/owing_proof.py")"
 RECEIPTS="$(cfg CVO_RECEIPTS "$HYDRA_ROOT/scripts/credit_review/receipts.py")"
 HEALTH="$(cfg CVO_HEALTH "$HYDRA_ROOT/scripts/paid-status/health_check.py")"
 ZERO_READ="$(cfg CVO_ZERO_READ "$HYDRA_ROOT/scripts/credit_verify/zero_read.py")"   # n1's durable zero-read (#1545)
+DEPLOYED_SHA_FILE="$(cfg CVO_DEPLOYED_SHA "$HYDRA_ROOT/.deployed-sha")"   # p1 579: named in every tick artefact
 JUDGE="$(cfg CVO_JUDGE "$HYDRA_ROOT/scripts/credit-batch-judge.py")"   # b1 / t01b's batch judge (#1591): SHADOW only here
 FRAUD="$(cfg CVO_FRAUD "")"   # a fraud re-check stub <ledger> <lo> <hi> (tests only); otherwise the lens inline below
 MAIN_ENV="$(cfg CVO_MAIN_ENV /etc/openclaw/main.env)"
@@ -136,7 +137,7 @@ PY
 }
 if [ "${1:-}" = "--print-config" ]; then
   for v in CVO_HARNESS HYDRA_ROOT KILL KILL2 LIVE_FLAG PAID_FLAG EXCLUDE STATE PY RUNNER OWING RECEIPTS HEALTH ZERO_READ \
-           FRAUD MAIN_ENV LEDGER SCRIPTS_DIR RD_SCAN RD_CAP POLICY CLAIM_LIST CAP R1_CAP CLAIM_CAP DOW REFUSAL_SPIKE NEED_RUNNER FIRST_CAP UNSIGNED_ALL NOW_EPOCH JUDGE TICK_BUDGET_S TICK_HARD_S CHECK_S_PER_USER RESERVE_PAD_S APPLY_S_PER_USER TICK_ELAPSED0 FULL_CAP_FROM_TEST TIMEOUT_BIN; do
+           FRAUD MAIN_ENV LEDGER SCRIPTS_DIR RD_SCAN RD_CAP POLICY CLAIM_LIST CAP R1_CAP CLAIM_CAP DOW REFUSAL_SPIKE NEED_RUNNER FIRST_CAP UNSIGNED_ALL NOW_EPOCH JUDGE DEPLOYED_SHA_FILE TICK_BUDGET_S TICK_HARD_S CHECK_S_PER_USER RESERVE_PAD_S APPLY_S_PER_USER TICK_ELAPSED0 FULL_CAP_FROM_TEST TIMEOUT_BIN; do
     printf '%s=%s\n' "$v" "${!v}"
   done
   exit 0
@@ -179,7 +180,7 @@ fi
 PAID_LIVE=0; [ "$LIVE" = 1 ] && [ -e "$PAID_FLAG" ] && PAID_LIVE=1
 EXCL_ARGS=(); [ -s "$EXCLUDE" ] && EXCL_ARGS=(--exclude-users "$EXCLUDE")
 RUN_START="$(date -u +%FT%TZ)"
-log "tick start: live=$LIVE paid_live=$PAID_LIVE cap=$CAP out=$OUT"
+log "tick start: live=$LIVE paid_live=$PAID_LIVE cap=$CAP out=$OUT deployed=$(cat "$DEPLOYED_SHA_FILE" 2>/dev/null || echo unreadable)"
 
 page() { # best effort: the kill file is the guarantee, the page is the notice
   # shellcheck source=/dev/null
@@ -295,11 +296,40 @@ except sqlite3.Error:
 # renderer's own JSON object), copy_ref} per body - and, when the judge is deployed, its verdict in SHADOW: written and
 # logged next to the batch, acting on NOTHING (p1 / r5: live only after the coverage set; the GO-or-no-apply rail is its
 # own PR). A missing judge or a failed call is logged, never a stopped tick.
+# p1 579 (the 08:00Z artefacts: claim-status free rendered 100 bodies, 13 accepted): the judge contract is
+# items == would-send. accept_bodies keeps in <tag>-bodies ONLY the users in the check's ACCEPTED set (the runner's
+# report.accepted, written by --outcomes-json); every other rendered body moves to <tag>-bodies-not-accepted. An
+# unreadable check file or an accepted user with no rendered body stops the family (the sample IS the would-send set).
+accept_bodies() {
+  local tag="$1"
+  py - "$OUT/$tag-check.json" "$OUT/$tag-bodies" "$OUT/$tag-bodies-not-accepted" <<'PY' >> "$OUT/tick.log" 2>&1
+import glob, json, os, sys
+chk, d, aside = sys.argv[1:4]
+try:
+    acc = {str(a.get("user")) for a in json.load(open(chk))["accepted"]}
+except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+    print(f"accepted set unreadable from {chk}: {type(exc).__name__}"); sys.exit(1)
+os.makedirs(aside, mode=0o700, exist_ok=True)
+have, moved = set(), 0
+for f in sorted(glob.glob(os.path.join(d, "*.txt"))):
+    uid = os.path.basename(f)[:-4]
+    if uid in acc:
+        have.add(uid); continue
+    for g in (f, f[:-4] + ".facts.json"):
+        if os.path.exists(g):
+            os.replace(g, os.path.join(aside, os.path.basename(g)))
+    moved += 1
+missing = sorted(acc - have)
+print(f"bodies == accepted: {len(have)} kept, {moved} rendered but not accepted moved aside, {len(missing)} accepted without a body")
+sys.exit(2 if missing else 3 if not acc else 0)      # 3 = the check accepted nobody (QA #1610: no apply)
+PY
+}
+
 judge_shadow() {
   local tag="$1" items="$OUT/$1-items.jsonl"
-  py - "$OUT/$tag-bodies" "$items" <<'PY' >> "$OUT/tick.log" 2>&1 || { log "$tag: judge items not built"; return 0; }
+  py - "$OUT/$tag-bodies" "$items" "$(cat "$DEPLOYED_SHA_FILE" 2>/dev/null)" <<'PY' >> "$OUT/tick.log" 2>&1 || { log "$tag: judge items not built"; return 0; }
 import glob, json, os, sys
-d, out = sys.argv[1:3]
+d, out, deployed = sys.argv[1:4]
 n = 0
 with open(out, "w") as fh:
     os.chmod(out, 0o600)
@@ -313,13 +343,28 @@ with open(out, "w") as fh:
         ff = f[:-4] + ".facts.json"
         facts = json.load(open(ff)) if os.path.exists(ff) else None
         ref = next((w[5:] for w in head.split() if w.startswith("copy=")), "")
-        fh.write(json.dumps({"user_id": os.path.basename(f)[:-4], "body_html": body, "facts": facts, "copy_ref": ref}) + "\n")
+        fh.write(json.dumps({"user_id": os.path.basename(f)[:-4], "body_html": body, "facts": facts, "copy_ref": ref,
+                             "deployed": deployed or None}) + "\n")
         n += 1
 print(f"judge items: {n} bodies -> {out}")
 PY
   if [ -r "$JUDGE" ]; then
-    py "$JUDGE" judge --items "$items" > "$OUT/$tag-judge.out" 2>&1
-    log "$tag judge SHADOW (rc=$?, acts on nothing): $(tail -c 300 "$OUT/$tag-judge.out")"
+    # the 10:00Z tick on 231d6c47: the deployed judge wants the batch's --copy-ref (rc=2 without it). One judge call
+    # per copy ref in the items (a family renders one copy, but a mixed batch is split, never mislabelled)
+    local ref refs
+    refs="$(py -c 'import json,sys; print("\n".join(sorted({json.loads(l).get("copy_ref") or "" for l in open(sys.argv[1]) if l.strip()})))' "$items" 2>/dev/null)"
+    : > "$OUT/$tag-judge.out"
+    while IFS= read -r ref; do
+      [ -n "$ref" ] || { log "$tag JUDGE CALL FAILED: an item has no copy_ref; not judged"; page "$tag: shadow judge not run - an item has no copy_ref"; continue; }
+      py -c 'import json,sys; [sys.stdout.write(l) for l in open(sys.argv[1]) if l.strip() and json.loads(l).get("copy_ref") == sys.argv[2]]' \
+        "$items" "$ref" > "$OUT/$tag-items-$ref.jsonl" 2>/dev/null
+      local jrc
+      py "$JUDGE" judge --items "$OUT/$tag-items-$ref.jsonl" --copy-ref "$ref" >> "$OUT/$tag-judge.out" 2>&1; jrc=$?
+      log "$tag judge SHADOW copy=$ref (rc=$jrc, acts on nothing): $(tail -c 300 "$OUT/$tag-judge.out")"
+      # r5 596: a judge call that fails (argv, crash) is LOUD - logged as such and paged - never a silent shadow line;
+      # it still acts on nothing (shadow)
+      [ "$jrc" = 0 ] || { log "$tag JUDGE CALL FAILED (rc=$jrc) copy=$ref"; page "$tag: shadow judge call failed rc=$jrc (copy=$ref)"; }
+    done <<<"$refs"
   else
     log "$tag judge: not deployed ($JUDGE); items written for the shadow read"
   fi
@@ -373,9 +418,14 @@ family() {
   # r5: the bodies ARE the after-the-fact review sample - no sample, no send (the tick stops). [key=scale-now-openclaw]:
   # the WHOLE batch is rendered (not 5), each body with the renderer's facts beside it - the batch judge's items
   py "$runner" "$sub" --list "$list" --segment "$seg" "$@" "${excl[@]}" --mode dry-run --max-users "$cap" \
-    --preview "$OUT/$tag-bodies" > "$OUT/$tag-bodies.out" 2>&1; rc=$?
+    --preview "$OUT/$tag-bodies" --preview-accepted "$OUT/$tag-check.json" > "$OUT/$tag-bodies.out" 2>&1; rc=$?
   if deadline_rc "$rc"; then log "$tag: bodies hit the ${TICK_HARD_S}s deadline (read-only, stopped); no apply, the tick ends"; return 1; fi
   [ "$rc" = 0 ] || { log "$tag: body sample failed; no apply, tick stops: $(head -c 300 "$OUT/$tag-bodies.out")"; return 1; }
+  accept_bodies "$tag"; rc=$?
+  if deadline_rc "$rc"; then log "$tag: the accepted-bodies step hit the ${TICK_HARD_S}s deadline; no apply, the tick ends"; return 1; fi
+  # QA #1610: a check that accepted NOBODY is a no-apply family outcome - never an apply over the original list
+  if [ "$rc" = 3 ]; then log "$tag: the check accepted nobody; no apply this tick (the family is done)"; return 0; fi
+  [ "$rc" = 0 ] || { log "$tag: the rendered bodies are not the check's accepted set (rc=$rc); no apply, tick stops"; return 1; }
   judge_shadow "$tag"
   local live="$LIVE"; [ "$seg" = "paid" ] && live="$PAID_LIVE"
   if [ "$live" != 1 ]; then log "$tag: DRY-RUN tick (no send)"; return 0; fi
