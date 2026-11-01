@@ -167,6 +167,22 @@ def facts_header(users: list[dict[str, Any]]) -> dict[str, Any]:
             "sha256": hashlib.sha256(blob.encode()).hexdigest()}
 
 
+def class_list(res: dict[str, Any], cls: str) -> dict[str, Any]:
+    """r5 776 / p1 581 (the 08:00Z dry tick stopped: the tick's own split kept the FULL list's facts sha, so the uvn
+    check rightly refused a list changed after its build): the builder emits a one-class list ITSELF, from the same
+    build, with the header re-derived over exactly the users it lists, and the parent's digest named in split_of."""
+    users = [u for u in res["users"] if u.get("class") == cls]
+    return {"generated_at": res["generated_at"], "replica_facts": facts_header(users), "users": users,
+            "split_of": {"class": cls, "users": len(res["users"]), "sha256": res["replica_facts"]["sha256"]}}
+
+
+def _write(path: str, doc: dict[str, Any]) -> None:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({**doc, "signed_on": verify_notify.deployed_head()}, fh, indent=1)     # [key=signed-on-sha]
+    os.replace(tmp, path)
+
+
 def verify_facts(lst: dict[str, Any], query: Query, *, holds_path: str = ACCOUNT_HOLDS,
                  ledger_path: str = LEDGER) -> list[str]:
     """Re-read the replica for a built list (r5 signing rule); every listed user whose OWED set changed since the build
@@ -196,6 +212,9 @@ def _main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", default="")
     ap.add_argument("--verify-facts", default="", help="a built list: re-read the replica and print the users whose "
                     "facts changed since it was built (r5 signing rule); exit 1 when any did")
+    ap.add_argument("--class-out", action="append", default=[], metavar="CLASS=PATH",
+                    help="also write the one-class list (uvn / review_hold / account_hold) from this build, with its own "
+                         "facts header (r5 776: the tick never edits a built list)")
     ap.add_argument("--at-risk", default=AT_RISK)
     ap.add_argument("--ledger", default=LEDGER)
     ap.add_argument("--account-holds", default=ACCOUNT_HOLDS)
@@ -212,18 +231,22 @@ def _main(argv: list[str] | None = None) -> int:
         return 1 if diffs else 0
     if not a.out:
         ap.error("--out is required")
+    outs = []
+    for spec in a.class_out:
+        cls, _, path = spec.partition("=")
+        if cls not in ("uvn", "review_hold", "account_hold") or not path:
+            ap.error(f"--class-out {spec!r}: want CLASS=PATH with CLASS uvn / review_hold / account_hold")
+        outs.append((cls, path))
     try:
         res = build(ledger_path=a.ledger, holds_path=a.account_holds, at_risk_path=a.at_risk)
     except (OwingProofError, RuntimeError) as exc:
         print(json.dumps({"error": str(exc)}))
         return 2
-    tmp = a.out + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump({"generated_at": res["generated_at"], "replica_facts": res["replica_facts"], "users": res["users"],
-                   "signed_on": verify_notify.deployed_head()},     # [key=signed-on-sha]
-                  fh, indent=1)
-    os.replace(tmp, a.out)
-    print(json.dumps({"generated_at": res["generated_at"], "counts": res["counts"]}))
+    _write(a.out, {"generated_at": res["generated_at"], "replica_facts": res["replica_facts"], "users": res["users"]})
+    for cls, path in outs:
+        _write(path, class_list(res, cls))
+    classes = dict(Counter(u.get("class") for u in res["users"]))
+    print(json.dumps({"generated_at": res["generated_at"], "counts": res["counts"], "classes": classes}))
     return 0
 
 

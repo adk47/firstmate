@@ -122,6 +122,27 @@ class ProofRequiredAudienceTest(OwingProofTest):
         self.assertTrue(any(d.startswith("header:") for d in self.vf(tampered, lambda sql: [list(r) for r in rows])))
 
 
+    def test_the_builders_class_list_verifies_and_a_rewrite_carrying_the_parent_header_does_not(self):
+        # r5 776: the 08:00Z dry tick's split kept the full list's facts sha -> the uvn check refused it (rightly)
+        q = lambda sql: [list(r) for r in ROWS]
+        res = self.build()
+        uvn = op.class_list(res, "uvn")
+        self.assertEqual([u["user_id"] for u in uvn["users"]], ["7", "1"])
+        self.assertEqual(uvn["split_of"], {"class": "uvn", "users": 4, "sha256": res["replica_facts"]["sha256"]})
+        self.assertEqual(self.vf(uvn, q), [])                                   # the split list verifies
+        old_way = {**res, "users": uvn["users"]}                                # the tick's old rewrite
+        self.assertTrue(any(d.startswith("header:") for d in self.vf(old_way, q)))
+        # the CLI writes it with signed_on, from the same build
+        import json, unittest.mock
+        out, cls = self.d / "owing.json", self.d / "owing-uvn.json"
+        with unittest.mock.patch.object(op, "build", lambda **kw: res):
+            self.assertEqual(op._main(["--out", str(out), "--class-out", f"uvn={cls}"]), 0)
+        doc = json.loads(cls.read_text())
+        self.assertEqual((doc["replica_facts"], doc["users"]), (uvn["replica_facts"], uvn["users"]))
+        self.assertIn("signed_on", doc)
+        with self.assertRaises(SystemExit):
+            op._main(["--out", str(out), "--class-out", "bogus=x"])
+
 
 if __name__ == "__main__":
     unittest.main()

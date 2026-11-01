@@ -437,17 +437,15 @@ print(sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True).execute(
 }
 
 # ---- audiences (deployed builders only) ----------------------------------------------------------------------
-py "$OWING" --out "$OUT/owing.json" > "$OUT/owing.out" 2>&1 || { log "owing builder failed: $(tail -c 300 "$OUT/owing.out")"; exit 1; }
-py "$RECEIPTS" --out-dir "$OUT/receipts" > "$OUT/receipts.out" 2>&1 || { log "receipts builder failed: $(tail -c 300 "$OUT/receipts.out")"; exit 1; }
 # r5 on #1541: the uvn-status family is the UVN class only (owing_proof also lists hold classes - review_hold /
-# account_hold - that the uvn-status runner does not cover; they belong to their own campaign's family)
-py - "$OUT/owing.json" "$OUT/owing-uvn.json" <<'PY' >> "$OUT/tick.log" || { log "owing split failed"; exit 1; }
-import json, sys, collections
-d = json.load(open(sys.argv[1]))
-users = d.get("users") or []
-json.dump({**d, "users": [u for u in users if u.get("class", "uvn") == "uvn"]}, open(sys.argv[2], "w"))
-print("owing classes:", dict(collections.Counter(u.get("class", "uvn") for u in users)), "-> uvn-status family gets the uvn class")
-PY
+# account_hold - that the uvn-status runner does not cover; they belong to their own campaign's family).
+# r5 776 / p1 581: the BUILDER writes the uvn-class list (its own facts header over exactly those users); the tick
+# never edits a built list - a list changed after its build is refused by the facts check, by design.
+py "$OWING" --out "$OUT/owing.json" --class-out "uvn=$OUT/owing-uvn.json" > "$OUT/owing.out" 2>&1 \
+  || { log "owing builder failed: $(tail -c 300 "$OUT/owing.out")"; exit 1; }
+[ -s "$OUT/owing-uvn.json" ] || { log "owing builder wrote no uvn-class list; tick stops"; exit 1; }
+py "$RECEIPTS" --out-dir "$OUT/receipts" > "$OUT/receipts.out" 2>&1 || { log "receipts builder failed: $(tail -c 300 "$OUT/receipts.out")"; exit 1; }
+log "owing classes: $(tail -1 "$OUT/owing.out" | py -c 'import json,sys; print(json.dumps(json.loads(sys.stdin.read() or "{}").get("classes", {})))' 2>/dev/null) -> uvn-status family gets the uvn class (owing-uvn.json, built by the builder)"
 log "audiences: owing $(head -c 300 "$OUT/owing.out"); receipts $(head -c 300 "$OUT/receipts.out")"
 
 # ---- the families, in p1's order (paid first; a family whose builder/runner is not deployed is logged) ---------

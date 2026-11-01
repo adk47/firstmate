@@ -65,10 +65,15 @@ PY
 import os as _o, time as _t
 if _o.environ.get("STUB_OWING_SLEEP"): _t.sleep(float(_o.environ["STUB_OWING_SLEEP"]))
 import json, sys
-json.dump({"users": [{"user_id": "1", "paid": True, "class": "uvn"}, {"user_id": "2", "paid": False, "class": "uvn"},
-                     {"user_id": "8", "paid": True, "class": "review_hold"}, {"user_id": "9", "paid": False, "class": "account_hold"}]},
-          open(sys.argv[sys.argv.index("--out") + 1], "w"))
-print('{"counts": {}}')
+open(_o.environ["CALLS"] + ".owing", "a").write(" ".join(sys.argv[1:]) + "\n")
+users = [{"user_id": "1", "paid": True, "class": "uvn"}, {"user_id": "2", "paid": False, "class": "uvn"},
+         {"user_id": "8", "paid": True, "class": "review_hold"}, {"user_id": "9", "paid": False, "class": "account_hold"}]
+json.dump({"users": users}, open(sys.argv[sys.argv.index("--out") + 1], "w"))
+for i, a in enumerate(sys.argv):                        # the builder writes the one-class list itself (r5 776)
+    if a == "--class-out" and not _o.environ.get("STUB_NO_CLASS_OUT"):
+        cls, _, path = sys.argv[i + 1].partition("=")
+        json.dump({"users": [u for u in users if u["class"] == cls], "split_of": {"class": cls}}, open(path, "w"))
+print('{"counts": {}, "classes": {"uvn": 2, "review_hold": 1, "account_hold": 1}}')
 PY
   cat > "$TEST_TMPDIR/receipts.py" <<'PY'
 import json, os, sys
@@ -421,6 +426,17 @@ PY
   grep -q "^owing-uvn.json 1,2$" "$CALLS.lists"
   if grep -qE "^owing(-uvn)?\.json .*\b(8|9)\b" "$CALLS.lists"; then false; fi
   grep -q "owing classes:.*review_hold" "$CVO_OUT_ROOT"/*/tick.log
+}
+
+@test "outbound tick (r5 776, the 08:00Z dry tick): the split list verifies - the BUILDER writes owing-uvn.json, the tick never edits a built list" {
+  run -0 "$SCRIPT"
+  grep -q -- "--out .*/owing.json --class-out uvn=.*/owing-uvn.json" "$CALLS.owing"
+  jq -e '.split_of.class == "uvn"' "$CVO_OUT_ROOT"/*/owing-uvn.json >/dev/null      # the builder's file, not a rewrite
+  # a builder that writes no class list stops the tick before any family
+  rm -rf "$CVO_OUT_ROOT"; : > "$CALLS"
+  STUB_NO_CLASS_OUT=1 run -1 "$SCRIPT"
+  grep -q "owing builder wrote no uvn-class list; tick stops" "$CVO_OUT_ROOT"/*/tick.log
+  if grep -q "^uvn-status " "$CALLS"; then false; fi
 }
 
 @test "outbound tick (r5 #1541): a failed body sample stops the tick before any apply" {
