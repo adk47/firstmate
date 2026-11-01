@@ -2604,5 +2604,99 @@ class PreviewAcceptedTests(unittest.TestCase):
         self.assertEqual((d["deployed"], d["signed_on"]), ("b" * 40, "c" * 40))
 
 
+
+class SignedAcceptedTests(SignedHeadTests):
+    """Fable [key=apply-sized-to-list] (amended 586; C p4 sent 50 of a signed 51): the apply is sized from the signed
+    check's attempt cap, sends only its accepted set, and the sent set equals it or the run exits 3."""
+
+    def setUp(self):
+        super().setUp()
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("credit_review_cli_sa", str(ROOT / "scripts" / "credit-review.py"))
+        self.cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.cli)
+        self.chk = self.d / "check.json"
+        self.chk.write_text(json.dumps({"mode": "dry-run", "max_users": 51,
+                                        "accepted": [{"user": u} for u in ("1", "2", "3")], "outcomes": []}))
+        self.sub = self.d / "signed-subset.json"           # a NEW list of exactly the signed rows
+        self.sub.write_text(json.dumps({"users": [{"user_id": u, "paid": True} for u in ("1", "2", "3")]}))
+        self.q = [unittest.mock.patch.object(verify_notify, "APPLY_ONLY", None),
+                  unittest.mock.patch.object(verify_notify, "APPLY_REPORTS", [])]
+        for x in self.q:
+            x.start()
+
+    def tearDown(self):
+        for x in self.q:
+            x.stop()
+        super().tearDown()
+
+    def ns(self, **kw):
+        import argparse
+        return argparse.Namespace(**{"signed_accepted": str(self.chk), "mode": "apply", "max_users": None, "page": False,
+                                     "list": str(self.sub), "segment": "paid", **kw})
+
+    def test_the_run_is_sized_from_the_signed_checks_attempt_cap_never_a_default(self):
+        a = self.ns()
+        self.assertEqual(self.cli.signed_accepted(a), ("", frozenset({"1", "2", "3"})))
+        self.assertEqual((a.max_users, verify_notify.APPLY_ONLY), (51, frozenset({"1", "2", "3"})))
+        why, _ = self.cli.signed_accepted(self.ns(max_users=50))                       # the C p4 shape: 50 < 51
+        self.assertIn("apply-sized-to-list", why)
+        self.assertEqual(self.cli.signed_accepted(self.ns(max_users=50, page=True))[0], "")   # the tick pages
+        self.assertIn("--mode apply", self.cli.signed_accepted(self.ns(mode="dry-run"))[0])
+        # Fable rule (r5, E page 2): the PARENT list (rows outside the signed set) refuses; paged (the tick) it may
+        parent = self.d / "parent.json"
+        parent.write_text(json.dumps({"users": [{"user_id": u, "paid": True} for u in ("1", "2", "3", "4")]
+                                      + [{"user_id": "9", "paid": False}]}))
+        why, _ = self.cli.signed_accepted(self.ns(list=str(parent)))
+        self.assertIn("signed-subset-list: the list holds 1 paid user(s) outside the signed accepted set (4)", why)
+        self.assertEqual(self.cli.signed_accepted(self.ns(list=str(parent), page=True))[0], "")
+        self.assertIn("needs the --list", self.cli.signed_accepted(self.ns(list=None))[0])
+        self.chk.write_text(json.dumps({"mode": "dry-run", "accepted": []}))           # no attempt cap recorded
+        self.assertIn("no attempt cap", self.cli.signed_accepted(self.ns())[0])
+
+    def test_only_the_signed_set_is_sent_and_a_short_send_exits_3(self):
+        run = lambda argv: subprocess.CompletedProcess(argv, 0, "POSTED email message=1 credits=1\n", "")
+        verify_notify.APPLY_ONLY = frozenset({"1", "2", "3"})
+        rep = self.apply(run, n=5)                                                     # users 0..4 offered
+        self.assertEqual(sorted(s["user"] for s in rep.sent), ["1", "2", "3"])
+        self.assertEqual(sorted(o["user"] for o in rep.outcomes if "not_in_signed_accepted" in o["reason"]), ["0", "4"])
+        acc = frozenset({"1", "2", "3"})
+        self.assertEqual(verify_notify.signed_set_mismatch(verify_notify.APPLY_REPORTS, acc, page=False), "")
+        short = frozenset({"1", "2", "3", "9"})                                        # 9 signed, never sent
+        self.assertIn("SIGNED SET NOT SENT WHOLE: 3 of 4", verify_notify.signed_set_mismatch([rep], short, page=False))
+        self.assertEqual(verify_notify.signed_set_mismatch([rep], short, page=True), "")
+        self.assertIn("SENT OUTSIDE THE SIGNED SET", verify_notify.signed_set_mismatch([rep], frozenset({"1"}), page=True))
+
+    def test_the_cli_exits_3_when_the_sent_set_is_not_the_signed_set(self):
+        run = lambda argv: subprocess.CompletedProcess(argv, 0, "POSTED email message=1 credits=1\n", "")
+
+        def fn(args):
+            self.assertEqual(args.max_users, 51)
+            self.apply(run, n=3)                                                       # sends 1, 2 (0 is outside)
+            return 0
+        import argparse
+        ns = argparse.Namespace(cmd="uvn-status", mode="apply", fn=fn, signed_accepted=str(self.chk), max_users=None,
+                                page=False, max_users_default=50, preview_accepted="", preview="",
+                                list=str(self.sub), segment="paid")
+        with unittest.mock.patch.object(self.cli, "parser") as par, \
+                unittest.mock.patch.object(self.cli, "write_outcomes", lambda a, r: ""):
+            par.return_value.parse_args.return_value = ns
+            self.assertEqual(self.cli.main([]), 3)                                     # 3 was signed, never sent
+
+    def test_need_asks_send_takes_the_same_rule(self):
+        import contextlib, io
+        from credit_review import need_asks
+        base = ["send", "--list", str(self.d / "none.json"), "--segment", "paid", "--signed-accepted", str(self.chk)]
+        parent = self.d / "parent-n.json"
+        parent.write_text(json.dumps({"users": [{"user_id": u, "paid": True} for u in ("1", "2", "3", "4")]}))
+        for extra, want in ((["--mode", "dry-run"], "is for --mode apply"),
+                            (["--mode", "apply", "--max-users", "50"], "apply-sized-to-list"),
+                            (["--mode", "apply", "--list", str(parent)], "signed-subset-list")):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(need_asks._main(base + extra), 2)
+            self.assertIn(want, out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

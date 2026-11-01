@@ -816,6 +816,17 @@ class UvnStatusTests(unittest.TestCase):
                               max_users=5)
         self.assertNotEqual({f[:-4] for f in os.listdir(prev2) if f.endswith(".txt")}, accepted)
 
+    def test_a_signed_paged_apply_reaches_the_signed_user_past_a_prefix_of_unsigned_ones(self):
+        # QA #1611: the signed set is applied BEFORE the run-size slice - users 1-4 unsigned, 5 signed, --max-users 1
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 6)]
+        self.write_list()
+        import unittest.mock
+        with unittest.mock.patch.object(uvn_status.verify_notify, "APPLY_ONLY", frozenset({"5"})):
+            rep, gate = self.run_(mode="apply", query=replica(range(1, 6)), max_users=1)
+        self.assertEqual([p["user"]["id"] for _, p in gate.calls], ["5"])
+        self.assertEqual(sorted(o["user"] for o in rep.outcomes if o["reason"] == "not_in_signed_accepted"),
+                         ["1", "2", "3", "4"])
+
     def test_dry_run_validates_without_sending(self):
         _, gate = self.run_(mode="dry-run")
         self.assertIn("--validate", gate.calls[0][0])

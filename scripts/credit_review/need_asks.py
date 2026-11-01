@@ -440,6 +440,11 @@ def send(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int 
     live = payloads(users, query or uvn_status.trino, asked, held, report.filtered)
     report.held_newer = held        # needs the send would hold (comm_state.newer_intake): listed, never retried
     report.not_found = len(users) - len(live)
+    # QA #1611: a signed apply keeps only the signed accepted users BEFORE the run-size slice, the distributor
+    # preflight and the F9 code issuance - an unsigned user takes no slot, no gate call and no code
+    for p in [p for p in live if verify_notify.not_signed(mode, p["user"]["id"])]:
+        _filtered(report.filtered, p["user"]["id"], "not_in_signed_accepted (not in the signed check's accepted set)")
+    live = [p for p in live if not verify_notify.not_signed(mode, p["user"]["id"])]
     ps = live[:max_users]
     for p in live[max_users:]:
         _filtered(report.filtered, p["user"]["id"], f"over --max-users {max_users} (a later batch)")
@@ -526,7 +531,12 @@ def _main(argv: list[str] | None = None) -> int:
     s.add_argument("--list", required=True)
     s.add_argument("--segment", choices=("paid", "free"), required=True)
     s.add_argument("--mode", choices=("dry-run", "apply"), default="dry-run")
-    s.add_argument("--max-users", type=int, default=25)
+    s.add_argument("--max-users", type=int, default=None, help="users this run (default 25); with --signed-accepted: "
+                   "the signed check's attempt cap")
+    s.add_argument("--signed-accepted", default="", metavar="CHECK_JSON",
+                   help="apply: send exactly the users this signed --check-recipients outcomes file accepted; the sent "
+                        "set must equal it or the run exits 3 ([key=apply-sized-to-list])")
+    s.add_argument("--page", action="store_true", help="with --signed-accepted: a subset may be sent (the outbound tick)")
     s.add_argument("--preview", default=None)
     s.add_argument("--preview-accepted", default="", metavar="CHECK_JSON",
                    help="with --preview: render exactly the users this --check-recipients outcomes file accepted")
@@ -542,10 +552,50 @@ def _main(argv: list[str] | None = None) -> int:
         try:
             verify_notify.PREVIEW_ONLY = verify_notify.load_preview_accepted(a.preview_accepted)
             with open(a.list, encoding="utf-8") as fh:
-                a.max_users = max(a.max_users, len(json.load(fh).get("users") or []), 1)
+                a.max_users = max(a.max_users or 0, len(json.load(fh).get("users") or []), 1)
         except (OSError, ValueError, TypeError, AttributeError) as exc:
             print(f"NEED ASKS: --preview-accepted: {exc}; nothing rendered")
             return 2
+    signed = None
+    if a.op == "send" and a.signed_accepted:
+        # Fable [key=apply-sized-to-list] (amended 586): sized from the signed check's attempt cap; sends only its set
+        if a.mode != "apply":
+            print("NEED ASKS: --signed-accepted is for --mode apply; nothing sent")
+            return 2
+        try:
+            signed = verify_notify.load_preview_accepted(a.signed_accepted)
+            with open(a.signed_accepted, encoding="utf-8") as fh:
+                cap = json.load(fh).get("max_users")
+        except (OSError, ValueError, TypeError) as exc:
+            print(f"NEED ASKS: --signed-accepted: {exc}; nothing sent")
+            return 2
+        if not isinstance(cap, int) or cap < 1:
+            print(f"NEED ASKS: --signed-accepted: {a.signed_accepted} records no attempt cap (max_users); nothing sent")
+            return 2
+        if a.max_users is not None and a.max_users < cap and not a.page:
+            print(f"NEED ASKS: apply-sized-to-list: the signed check ran at --max-users {cap}; --max-users {a.max_users} "
+                  f"would cut the signed set - apply it whole (omit --max-users); nothing sent")
+            return 2
+        if not a.page:
+            # Fable rule (r5, E page 2): a signed subset is applied from a NEW list of exactly the signed rows
+            try:
+                with open(a.list, encoding="utf-8") as fh:
+                    ids = {str(u.get("user_id")) for u in json.load(fh).get("users") or []
+                           if bool(u.get("paid")) is (a.segment == "paid")}
+            except (OSError, ValueError, AttributeError) as exc:
+                print(f"NEED ASKS: --signed-accepted: the list is unreadable ({exc}); nothing sent")
+                return 2
+            extra = sorted(ids - signed)
+            if extra:
+                print(f"NEED ASKS: signed-subset-list: the list holds {len(extra)} user(s) outside the signed accepted set "
+                      f"({', '.join(extra[:10])}); apply a signed subset from a NEW list of exactly the signed rows; "
+                      "nothing sent")
+                return 2
+        if a.max_users is None or not a.page:
+            a.max_users = cap
+        verify_notify.APPLY_ONLY = signed
+    if a.op == "send" and a.max_users is None:
+        a.max_users = 25
     try:
         if a.op == "verify-facts":
             with open(a.list, encoding="utf-8") as fh:
@@ -596,7 +646,8 @@ def _main(argv: list[str] | None = None) -> int:
                                "filtered": list(rep.filtered),
                                # p1 579: the deploy head this ran on, and the head its list was signed on
                                "deployed": verify_notify.deployed_head() or None,
-                               "signed_on": verify_notify.LIST_SIGNED_ON or None}, fh)
+                               "signed_on": verify_notify.LIST_SIGNED_ON or None,
+                               "max_users": a.max_users}, fh)          # this run's attempt cap
                 os.replace(tmp, a.outcomes_json)          # atomic, and the fresh file's 0600 mode goes with it
             except OSError as exc:
                 rep.failures.append(f"outcomes file not written: {exc}"[:200])
@@ -619,6 +670,11 @@ def _main(argv: list[str] | None = None) -> int:
         return 3
     if rep.halted or rep.failed_users:
         return 1
+    if signed is not None:
+        bad = verify_notify.signed_set_mismatch(verify_notify.APPLY_REPORTS or [rep], signed, page=a.page)
+        if bad:
+            print(f"NEED ASKS: {bad}")
+            return 3
     return 3 if verify_notify.HEAD_REFUSED else 0     # [key=signed-on-sha]: users deferred on the sha rail -> exit 3
 
 

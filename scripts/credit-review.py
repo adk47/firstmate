@@ -586,7 +586,8 @@ def write_outcomes(args: argparse.Namespace, report: object) -> str:
                        "recipient_ok": getattr(report, "recipient_ok", 0),
                        # p1 579: every tick artefact names the deploy head it ran on and the head its list was signed on
                        "deployed": verify_notify.deployed_head() or None,
-                       "signed_on": verify_notify.LIST_SIGNED_ON or None}, fh, indent=1)
+                       "signed_on": verify_notify.LIST_SIGNED_ON or None,
+                       "max_users": getattr(args, "max_users", None)}, fh, indent=1)    # the attempt cap of this run
         os.replace(tmp, path)
         return ""
     except OSError as exc:
@@ -1038,10 +1039,17 @@ def parser() -> argparse.ArgumentParser:
                          "received: the receipt R1 for a user who still owes proof (send-locked in the gate); "
                          "no-ask: status-team-review's Copy B0, without the proof sentence (firstmate 106)")
     us.add_argument("--mode", choices=["apply", "dry-run"], default="dry-run")
-    us.add_argument("--max-users", type=int, default=50, help="messages this run (canary: 3)")
+    us.add_argument("--max-users", type=int, default=None, help="messages this run (default 50; canary: 3); "
+                    "with --signed-accepted: the signed check's attempt cap")
+    us.set_defaults(max_users_default=50)
     us.add_argument("--segment-daily-cap", type=int, default=None,
                     help="QA #1541: the policy's per-campaign+segment daily cap, enforced under the run lock")
     us.add_argument("--preview", default=None, help="dry-run: write each user's rendered note to this dir as <user id>.txt (0700)")
+    us.add_argument("--signed-accepted", default="", metavar="CHECK_JSON",
+                    help="apply: send exactly the users this signed --check-recipients outcomes file accepted, sized "
+                         "from its attempt cap; the sent set must equal it or the run exits 3 ([key=apply-sized-to-list])")
+    us.add_argument("--page", action="store_true",
+                    help="with --signed-accepted: the run may send a subset (the outbound tick pages by design)")
     us.add_argument("--preview-accepted", default="", metavar="CHECK_JSON",
                     help="with --preview: render exactly the users this --check-recipients outcomes file accepted "
                          "(t01b 584: a deferred user takes no render and no slot)")
@@ -1063,9 +1071,16 @@ def parser() -> argparse.ArgumentParser:
                     "(the gate's --check-recipient), so it reports the same deferrals as the send")
     cp.add_argument("--outcomes-json", default=None, help="C11: write every per-user deferral/refusal/skip with the gate's reason")
     cp.add_argument("--mode", choices=["apply", "dry-run"], default="dry-run")
-    cp.add_argument("--max-users", type=int, default=20, help="messages this run (canary: 3)")
+    cp.add_argument("--max-users", type=int, default=None, help="messages this run (default 20; canary: 3); "
+                    "with --signed-accepted: the signed check's attempt cap")
+    cp.set_defaults(max_users_default=20)
     cp.add_argument("--reminders", action="store_true", help="send the due day-7 reminders instead of first asks")
     cp.add_argument("--preview", default="", help="dry-run: write each rendered note to this dir (0700)")
+    cp.add_argument("--signed-accepted", default="", metavar="CHECK_JSON",
+                    help="apply: send exactly the users this signed --check-recipients outcomes file accepted, sized "
+                         "from its attempt cap; the sent set must equal it or the run exits 3 ([key=apply-sized-to-list])")
+    cp.add_argument("--page", action="store_true",
+                    help="with --signed-accepted: the run may send a subset (the outbound tick pages by design)")
     cp.add_argument("--preview-accepted", default="", metavar="CHECK_JSON",
                     help="with --preview: render exactly the users this --check-recipients outcomes file accepted "
                          "(t01b 584: a deferred user takes no render and no slot)")
@@ -1079,8 +1094,15 @@ def parser() -> argparse.ArgumentParser:
                     "(the gate's --check-recipient), so it reports the same deferrals as the send")
     cs.add_argument("--outcomes-json", default=None, help="C11: write every per-user deferral/refusal/skip with the gate's reason")
     cs.add_argument("--mode", choices=["apply", "dry-run"], default="dry-run")
-    cs.add_argument("--max-users", type=int, default=50, help="messages this run (canary: 3)")
+    cs.add_argument("--max-users", type=int, default=None, help="messages this run (default 50; canary: 3); "
+                    "with --signed-accepted: the signed check's attempt cap")
+    cs.set_defaults(max_users_default=50)
     cs.add_argument("--preview", default="", help="dry-run: write each rendered note to this dir (0700)")
+    cs.add_argument("--signed-accepted", default="", metavar="CHECK_JSON",
+                    help="apply: send exactly the users this signed --check-recipients outcomes file accepted, sized "
+                         "from its attempt cap; the sent set must equal it or the run exits 3 ([key=apply-sized-to-list])")
+    cs.add_argument("--page", action="store_true",
+                    help="with --signed-accepted: the run may send a subset (the outbound tick pages by design)")
     cs.add_argument("--preview-accepted", default="", metavar="CHECK_JSON",
                     help="with --preview: render exactly the users this --check-recipients outcomes file accepted "
                          "(t01b 584: a deferred user takes no render and no slot)")
@@ -1194,6 +1216,56 @@ def preview_accepted(args: argparse.Namespace) -> str:
     return ""
 
 
+def outside_signed(list_path: str | None, segment: str, acc: frozenset[str]) -> str:
+    """'' when every user (or claimant) of this segment of the list is in the signed accepted set; else the refusal."""
+    if not list_path:
+        return "--signed-accepted needs the --list it signed (a subset list holding exactly the signed rows)"
+    try:
+        with open(list_path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, ValueError) as exc:
+        return f"--signed-accepted: the list {list_path} is unreadable ({exc})"
+    rows = (doc.get("users") or doc.get("claims") or []) if isinstance(doc, dict) else []
+    want = segment == "paid"
+    ids = {str(r.get("user_id")) for r in rows if isinstance(r, dict) and bool(r.get("paid")) is want}
+    extra = sorted(ids - acc)
+    if extra:
+        return (f"signed-subset-list: the list holds {len(extra)} {segment} user(s) outside the signed accepted set "
+                f"({', '.join(extra[:10])}); apply a signed subset from a NEW list of exactly the signed rows")
+    return ""
+
+
+def signed_accepted(args: argparse.Namespace) -> tuple[str, frozenset[str] | None]:
+    """Fable [key=apply-sized-to-list] (amended 586): --signed-accepted CHECK_JSON on an apply - the run's size is the
+    signed dry run's ATTEMPT cap (its max_users), never a default; a smaller --max-users refuses unless --page; and
+    send_all sends only users in the check's accepted set. Returns (refusal or '', the accepted set or None)."""
+    path = getattr(args, "signed_accepted", "")
+    if not path:
+        return "", None
+    if args.mode != "apply":
+        return "--signed-accepted is for --mode apply", None
+    try:
+        acc = verify_notify.load_preview_accepted(path)
+        cap = json.load(open(path, encoding="utf-8")).get("max_users")
+    except (OSError, ValueError, TypeError) as exc:
+        return f"--signed-accepted: {exc}", None
+    if not isinstance(cap, int) or cap < 1:
+        return f"--signed-accepted: {path} records no attempt cap (max_users); re-run the check on this head", None
+    if args.max_users is not None and args.max_users < cap and not getattr(args, "page", False):
+        return (f"apply-sized-to-list: the signed check ran at --max-users {cap}; --max-users {args.max_users} would "
+                f"cut the signed set - apply it whole (omit --max-users)"), None
+    if not getattr(args, "page", False):
+        # Fable rule (r5, E page 2): a signed SUBSET is applied from a NEW list holding exactly the signed rows - the
+        # runner refuses a list (this segment) with any user outside the signed accepted set
+        why = outside_signed(getattr(args, "list", None), getattr(args, "segment", ""), acc)
+        if why:
+            return why, None
+    if args.max_users is None or not getattr(args, "page", False):
+        args.max_users = cap
+    verify_notify.APPLY_ONLY = acc
+    return "", acc
+
+
 def main(argv: list[str] | None = None) -> int:
     # Python warnings go to the run log, never to stderr: openclaw posts a command
     # cron's stderr to Slack next to its stdout.
@@ -1207,6 +1279,12 @@ def main(argv: list[str] | None = None) -> int:
     if why:
         print(f"Credit review {args.cmd}: {why}; nothing rendered")
         return 2
+    why, signed = signed_accepted(args)
+    if why:
+        print(f"Credit review {args.cmd}: {why}; nothing sent")
+        return 2
+    if getattr(args, "max_users", 0) is None:
+        args.max_users = args.max_users_default
     try:
         if getattr(args, "mode", "") == "apply":
             # QA #1604: ONE apply lock for the whole run (every user), taken before the first send
@@ -1218,6 +1296,12 @@ def main(argv: list[str] | None = None) -> int:
                 return 3
         else:
             rc = args.fn(args)
+        if signed is not None:
+            # [key=apply-sized-to-list]: the sent set IS the signed accepted set (paged: a subset), or the run exits 3
+            bad = verify_notify.signed_set_mismatch(verify_notify.APPLY_REPORTS, signed, page=getattr(args, "page", False))
+            if bad:
+                print(f"Credit review {args.cmd}: {bad}")
+                return 3
         # [key=signed-on-sha]: a user deferred on the sha rail makes the apply exit 3 (nothing sent to them)
         return 3 if verify_notify.HEAD_REFUSED and rc == 0 else rc
     except admin_api.AdminError as exc:

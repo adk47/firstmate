@@ -1018,6 +1018,11 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
             if not batch:
                 break
             for i, (listed, p, dropped) in enumerate(batch):
+                if verify_notify.not_signed(mode, p["user"]["id"]):
+                    # QA #1611: a signed apply never spends a slot, a re-plan or a gate call on an unsigned user
+                    report.outcomes.append({"user": str(p["user"]["id"]), "result": "filtered",
+                                            "reason": "not_in_signed_accepted"})
+                    continue
                 allowed, left = room()
                 if allowed <= 0:
                     report.over_daily_max += len(batch) - i

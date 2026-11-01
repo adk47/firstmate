@@ -232,6 +232,8 @@ TIMEOUT_BIN=/usr/bin/timeout"
   grep -q "^uvn-status .*--campaign uvn-status --no-correction .*--mode apply" "$CALLS"
   # uvn-status has its date (AE-send-3 read-back): applied, at FIRST_CAP (no FULL_CAP_FROM yet)
   grep -q "^uvn-status --list .*owing-uvn.json --segment paid --campaign uvn-status .*--mode apply" "$CALLS"
+  # [key=apply-sized-to-list]: the apply sends only this tick's own check's accepted set, paged by the tick
+  grep -qE -- "--mode apply .*--signed-accepted [^ ]*/uvn-status-paid-check.json --page" "$CALLS"
   grep -q "^uvn-status --list .*owing-uvn.json --segment paid --campaign uvn-status .*--mode dry-run --max-users 100 --check-recipients" "$CALLS"
   # every other family: checked (dry-run --check-recipients) but NO apply
   grep -q "^send --list .*need-asks.json --segment paid --mode dry-run --max-users 100 --check-recipients" "$CALLS"

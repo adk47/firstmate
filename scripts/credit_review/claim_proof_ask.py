@@ -387,6 +387,9 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
         if uid in seen:
             report.second_claim += 1
             continue
+        if verify_notify.not_signed(mode, uid):          # QA #1611: before the budget slot
+            report.outcomes.append({"user": str(uid), "result": "filtered", "reason": "not_in_signed_accepted"})
+            continue
         if len(payloads) >= budget:
             report.over_daily_max += 1
             continue
@@ -477,6 +480,9 @@ def run_status(*, list_path: str, segment: str, mode: str = "dry-run", max_users
             continue
         if uid in seen:
             report.second_claim += 1
+            continue
+        if verify_notify.not_signed(mode, uid):          # QA #1611: before the budget slot
+            report.outcomes.append({"user": str(uid), "result": "filtered", "reason": "not_in_signed_accepted"})
             continue
         if len(payloads) >= budget:
             report.over_daily_max += 1
@@ -578,6 +584,9 @@ def _reminders(report: ClaimReport, by_id: dict[int, dict[str, Any]], *, db: Any
             continue
         if str(c["user_id"]) in support_contacts:
             _support_held(report, int(c["user_id"]), scoped, bool(c.get("paid")))
+            continue
+        if verify_notify.not_signed(mode, c["user_id"]):     # QA #1611: before the budget slot
+            report.outcomes.append({"user": str(c["user_id"]), "result": "filtered", "reason": "not_in_signed_accepted"})
             continue
         if len(payloads) >= budget:
             report.over_daily_max += 1

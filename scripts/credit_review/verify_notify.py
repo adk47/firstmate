@@ -794,6 +794,34 @@ def render_facts(p: dict[str, Any], extra: list[str]) -> dict[str, Any]:
 PREVIEW_ONLY: frozenset[str] | None = None
 
 
+# Fable [key=apply-sized-to-list] (amended 586): an apply of a SIGNED check sends only users in that check's accepted
+# set - set by --signed-accepted. A user outside it is never sent (deferred, no gate call). None = no signed set.
+APPLY_ONLY: frozenset[str] | None = None
+APPLY_REPORTS: list[Any] = []          # the reports a signed apply ran through send_all (for the sent == signed check)
+
+
+def not_signed(mode: str, uid: Any) -> bool:
+    """QA #1611: True when a signed apply (APPLY_ONLY set) must leave this user out BEFORE any per-user work - the
+    run-size slice, a preflight, a code issuance. Callers drop such users before they take a slot."""
+    return mode == "apply" and APPLY_ONLY is not None and str(uid) not in APPLY_ONLY
+
+
+def signed_set_mismatch(reports: list[Any], accepted: frozenset[str], *, page: bool) -> str:
+    """'' when the apply's sent set is the signed accepted set (or, paged, a subset of it); else the refusal naming the
+    users. A user sent outside the set is always a refusal (it cannot happen through send_all - a second wall)."""
+    sent = {str(x.get("user")) for r in reports for x in getattr(r, "sent", [])}
+    outcomes = [o for r in reports for o in getattr(r, "outcomes", [])]
+    extra, missing = sorted(sent - accepted), sorted(accepted - sent)
+    if extra:
+        return f"SENT OUTSIDE THE SIGNED SET: {len(extra)} user(s) ({', '.join(extra[:20])})"
+    if missing and not page:
+        why = {o.get("user"): o.get("reason", "") for o in outcomes}
+        named = "; ".join(f"{u}: {(why.get(u) or 'not reached')[:80]}" for u in missing[:20])
+        return (f"SIGNED SET NOT SENT WHOLE: {len(sent)} of {len(accepted)} signed accepted users sent; "
+                f"{len(missing)} not ({named})")
+    return ""
+
+
 def load_preview_accepted(path: str) -> frozenset[str]:
     """The `accepted` user ids of a --check-recipients --outcomes-json file. Raises ValueError when it has none."""
     with open(path, encoding="utf-8") as fh:
@@ -810,6 +838,13 @@ def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
              check_recipients: bool = False, workers: int | None = None) -> None:
     if PREVIEW_ONLY is not None and preview_dir and mode != "apply" and not check_recipients:
         payloads = [p for p in payloads if _uid(p) in PREVIEW_ONLY]          # never a gate call for the rest
+    if APPLY_ONLY is not None and mode == "apply":
+        if not any(r is report for r in APPLY_REPORTS):
+            APPLY_REPORTS.append(report)
+        for p in [p for p in payloads if _uid(p) not in APPLY_ONLY]:
+            report.deferred_users += 1
+            _outcome(report, p, "deferred", "not_in_signed_accepted: not in the signed check's accepted set; not sent")
+        payloads = [p for p in payloads if _uid(p) in APPLY_ONLY]
     if mode == "apply" or check_recipients:
         try:
             payloads, held = attach_identities(payloads, report)

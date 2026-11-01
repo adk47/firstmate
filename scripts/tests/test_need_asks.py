@@ -665,6 +665,35 @@ class DistributorIssueOrderTest(unittest.TestCase):
                     issuer=lambda rid, uid: events.append(f"issue:{uid}") or {"code": "MUSO-AB12", "expires_at": "2099-01-01T00:00:00Z"})
         self.assertEqual(events, ["check:1", "issue:1", "send:1", "check:2", "issue:2", "send:2"])
 
+    def test_a_signed_apply_drops_unsigned_users_before_the_slice_the_preflight_and_the_code(self):
+        # QA #1611: (1) an unsigned F9 user gets NO preflight, NO code, NO void; (2) a paged apply (--max-users 1) after
+        # a prefix of unsigned users still reaches the signed one
+        from unittest import mock
+        d = Path(tempfile.mkdtemp())
+        lst = d / "l.json"
+        lst.write_text(json.dumps({"users": [{"user_id": str(u), "paid": True, "asks": [{"request_id": f"r{u}"}]} for u in (1, 2, 3)]}))
+        ps = [{"user": {"id": str(u)}, "credits": [{"request_id": f"r{u}"}], "need": {"code": na.DISTRIBUTOR}} for u in (1, 2, 3)]
+        gate_users, issued, voided = [], [], []
+
+        def gate(argv):
+            gate_users.append(json.load(open(argv[argv.index("--credits-file") + 1]))["user"]["id"])
+            if "--check-recipient" in argv:
+                return type("R", (), {"returncode": 0, "stdout": "RECIPIENT OK contact=c\n", "stderr": ""})()
+            return type("R", (), {"returncode": 0, "stdout": "POSTED email message=1 credits=1\n", "stderr": ""})()
+        with mock.patch.object(na, "payloads", lambda users, q, asked, held=None, filtered=None: ps), \
+                mock.patch.object(na.verify_notify, "attach_identities", lambda ps, r: (ps, None)), \
+                mock.patch.object(na.verify_notify, "head_mismatch", lambda: ""), \
+                mock.patch.object(na.verify_notify, "_apply_lock", lambda: open(__import__("os").devnull)), \
+                mock.patch.object(na.verify_notify, "APPLY_ONLY", frozenset({"3"})), \
+                mock.patch.object(na.uvn_status, "campaign_lock_open", lambda w, lk: True):
+            rep = na.send(list_path=str(lst), segment="paid", mode="apply", query=lambda sql: [], runner=gate,
+                          ledger_path=str(d / "ledger.sqlite3"), max_users=1,
+                          issuer=lambda rid, uid: issued.append(uid) or {"code": "MUSO-AB12", "expires_at": "2099-01-01T00:00:00Z", "new": True},
+                          voider=lambda rid, code: voided.append(rid) or True)
+        self.assertEqual((set(gate_users), issued, voided), ({"3"}, ["3"], []))   # 1 and 2: no gate, no code, no void
+        self.assertEqual([s["user"] for s in rep.sent], ["3"])
+        self.assertEqual(sorted(f["user"] for f in rep.filtered if "not_in_signed_accepted" in f["reason"]), ["1", "2"])
+
     def test_a_held_preflight_mints_nothing_and_the_next_run_retries_with_a_fresh_code(self):
         # QA #1513, through the REAL sender (verify_notify.send_all + the gate's answers): day 1 the gate would defer
         # (7-day cooldown) -> no code is minted, the deferral is in the report; day 2 it clears -> a fresh code, sent

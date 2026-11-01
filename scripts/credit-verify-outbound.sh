@@ -451,8 +451,11 @@ family() {
   # default 400 / CREDIT_STATUS_DAILY_MAX, default 1000, both segments together). Left at those defaults it binds
   # BELOW the policy and later ticks would report room but send 0. For this apply it gets the policy's shared group
   # cap (the binding daily total), so one number governs and room() and the runner cannot disagree.
+  # [key=apply-sized-to-list]: the apply sends only this tick's own check's accepted set (--signed-accepted); the
+  # tick pages that set by its caps and deadline by design (--page: a subset, never a user outside it)
   CREDIT_UVN_DAILY_MAX="$shared" CREDIT_STATUS_DAILY_MAX="$shared" \
   py "$runner" "$sub" --list "$list" --segment "$seg" "$@" "${excl[@]}" --mode apply --max-users "$n" "${capargs[@]}" \
+    --signed-accepted "$OUT/$tag-check.json" --page \
     --outcomes-json "$OUT/$tag-apply.json" > "$OUT/$tag-apply.out" 2>&1; rc=$?
   log "$tag APPLY (rc=$rc): $(head -c 600 "$OUT/$tag-apply.out")"
   # a SEND cut at the deadline: whatever it sent is in the ledger, but the read-back is incomplete - a human looks first

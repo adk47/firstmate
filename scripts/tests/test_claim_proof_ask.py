@@ -105,6 +105,15 @@ class ClaimProofAskTests(unittest.TestCase):
                                   now=kw.pop("now", NOW), export_path=self.export, **kw)
         return rep, gate
 
+    def test_a_signed_paged_apply_reaches_the_signed_claim_past_unsigned_ones(self):
+        # QA #1611: unsigned claimants never take a budget slot - claims of users 7, 8 unsigned, 9 signed, budget 1
+        import unittest.mock
+        q = replica({c: ("pending", u) for c, u in ((1, 7), (2, 8), (3, 9))}, {u: f"u{u}@x.com" for u in (7, 8, 9)})
+        with unittest.mock.patch.object(claim_proof_ask.verify_notify, "APPLY_ONLY", frozenset({"9"})):
+            rep, gate = self.go(self.lst([claim(1, 7), claim(2, 8), claim(3, 9)]), q, max_users=1)
+        self.assertEqual([p["user"]["id"] for _, p in gate.calls], ["9"])
+        self.assertEqual(sorted(o["user"] for o in rep.outcomes if o.get("reason") == "not_in_signed_accepted"), ["7", "8"])
+
     def test_nothing_sends_without_a_named_recent_daily_code_check(self):
         """firstmate 126: 'we check for it every day' must be true."""
         q = replica({1: ("pending", 7)}, {7: "a@x.com"})
