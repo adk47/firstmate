@@ -37,6 +37,7 @@ without those columns is a contract break and fails loud.
 from __future__ import annotations
 
 import collections
+import concurrent.futures
 import json
 import os
 import re
@@ -647,10 +648,17 @@ def _first_line(text: str) -> str:
     return (text.strip().splitlines() or [""])[0][:200]
 
 
+# Fable 526 / measured 10-31 23:1xZ: a live-gate check costs ~10 s, so a read-only pass (check-recipients, preview,
+# validate) runs its gate calls on CHECK_WORKERS threads. Safe because every gate write is guarded by ACTION=post and the
+# ledger opens --readonly off post; results are consumed in LIST order, so the accounting equals a serial pass. A real
+# send (apply) is always serial: one writer for claims, caps and pacing.
+CHECK_WORKERS = 4
+
+
 def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
              wrapper: str = WRAPPER, runner: Runner = _run, extra: list[str] | None = None,
              pace_seconds: float = 0.0, preview_dir: str | None = None, reminder: bool = False,
-             check_recipients: bool = False) -> None:
+             check_recipients: bool = False, workers: int | None = None) -> None:
     if mode == "apply" or check_recipients:
         try:
             payloads, held = attach_identities(payloads, report)
@@ -660,9 +668,7 @@ def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
         # QA #1582: a user held here never reaches the gate - name them, so the run accounts for every listed user
         report.filtered += [{"user": _uid(p), "result": "filtered",
                              "reason": "no professional id on the account (Intercom identity unverifiable): held"} for p in held or []]
-    for i, p in enumerate(payloads):
-        if i and pace_seconds and mode == "apply":
-            time.sleep(pace_seconds)
+    def gate(p: dict[str, Any]) -> subprocess.CompletedProcess:
         fd, path = tempfile.mkstemp(prefix="verify-note-", suffix=".json")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -673,9 +679,19 @@ def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
             if mode != "apply":
                 # C11: the recipient check runs every send-time check read-only (dry run == send); it wins over a preview
                 argv.append("--check-recipient" if check_recipients else ("--dry-run" if preview_dir else "--validate"))
-            res = runner(argv)
+            return runner(argv)
         finally:
             os.unlink(path)
+
+    n_workers = CHECK_WORKERS if workers is None else workers
+    pre: list[subprocess.CompletedProcess] | None = None
+    if mode != "apply" and n_workers > 1 and len(payloads) > 1:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as ex:
+            pre = list(ex.map(gate, payloads))           # list order, whatever order they finish in
+    for i, p in enumerate(payloads):
+        if i and pace_seconds and mode == "apply":
+            time.sleep(pace_seconds)
+        res = pre[i] if pre is not None else gate(p)
         if preview_dir and mode != "apply" and res.returncode == 0:
             uid = re.sub(r"[^A-Za-z0-9-]", "", str(p["user"].get("id") or ""))[:64]
             out_path = os.path.join(preview_dir, f"{uid or f'{i + 1:05d}'}.txt")

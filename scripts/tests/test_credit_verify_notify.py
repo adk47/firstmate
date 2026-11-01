@@ -1651,6 +1651,62 @@ esac
 
 @unittest.skipUnless(shutil.which("jq") and (shutil.which("timeout") or shutil.which("gtimeout")),
                      "jq and timeout are needed for the wiring test")
+class ParallelCheckTests(unittest.TestCase):
+    """Fable 526: a read-only pass runs its gate calls on CHECK_WORKERS threads; the report equals the serial pass field
+    for field (accepted in list order), and a real send (apply) never runs two gate calls at once."""
+
+    def outcomes(self):
+        lines = {0: (0, "RECIPIENT OK user=%s", ""), 1: (3, "DEFERRED comm_state: hold", ""),
+                 2: (1, "", "REFUSED: some gate rule (%s)"), 3: (0, "SKIPPED already told %s", "")}
+        return lines
+
+    def runner(self, live, peak, lock):
+        import random, threading, time as _t
+        lines = self.outcomes()
+
+        def run(argv):
+            with lock:
+                live[0] += 1; peak[0] = max(peak[0], live[0])
+            try:
+                _t.sleep(random.uniform(0, 0.02))           # completions arrive out of order
+                uid = json.load(open(argv[argv.index("--credits-file") + 1]))["user"]["id"]
+                rc, out, err = lines[int(uid) % 4]
+                return subprocess.CompletedProcess(argv, rc, (out % uid) if "%s" in out else out,
+                                                   (err % uid) if "%s" in err else err)
+            finally:
+                with lock:
+                    live[0] -= 1
+        return run, threading
+
+    def payloads(self, n=23):
+        return [{"user": {"id": str(i), "email": f"u{i}@x.com"}, "credits": [{"request_id": f"r{i}"}]} for i in range(n)]
+
+    def report_of(self, mode, workers, check=True):
+        import threading
+        live, peak, lock = [0], [0], threading.Lock()
+        run, _ = self.runner(live, peak, lock)
+        rep = Report()
+        with unittest.mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, [])):
+            verify_notify.send_all(self.payloads(), rep, mode=mode, runner=run, extra=["--campaign", "uvn-status"],
+                                   check_recipients=check, workers=workers)
+        return rep, peak[0]
+
+    def test_parallel_check_equals_serial_and_keeps_list_order(self):
+        serial, sp = self.report_of("dry-run", 1)
+        par, pp = self.report_of("dry-run", 4)
+        self.assertEqual(sp, 1)
+        self.assertGreater(pp, 1)                            # it really ran concurrently
+        self.assertEqual([a["user"] for a in par.accepted], [str(i) for i in range(23) if i % 4 == 0])
+        self.assertEqual(par.accepted, serial.accepted)
+        self.assertEqual(par.outcomes, serial.outcomes)
+        self.assertEqual((par.recipient_ok, par.deferred_users, par.deferrals, par.skipped),
+                         (serial.recipient_ok, serial.deferred_users, serial.deferrals, serial.skipped))
+
+    def test_apply_is_always_serial(self):
+        _, peak = self.report_of("apply", 4, check=False)
+        self.assertEqual(peak, 1)
+
+
 class WiringTests(unittest.TestCase):
     """The real gate (TESTABLE copy) behind the real driver: one note per account,
     then a second run the same day sends nothing."""
