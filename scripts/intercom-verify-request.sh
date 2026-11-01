@@ -2971,6 +2971,8 @@ if [ "$KIND" = "reminder-7" ]; then
   esac
 fi
 if [ -n "$REPLY_DUE" ] && [ "$ACTION" = "post" ]; then rd_final_read; fi
+# p1 615: the copy this note renders and its openers/prefixes go on the ledger row (audits read the ledger)
+NOTE_VARIANT="$( { [ "${C2:-0}" = "1" ] && echo c2; [ "${RD_PREFIX:-0}" = "1" ] && echo reply_due_correction; [ -n "${APPROVAL_REF_SUFFIX_O:-}" ] && echo o; true; } | paste -sd, -)"
 if [ "$KIND" = "initial" ]; then
   REFS_FILE="$(mktemp)"
   trap 'rm -f "$REFS_FILE"' EXIT
@@ -2980,11 +2982,12 @@ if [ "$KIND" = "initial" ]; then
     --message-type "$MESSAGE_TYPE" --approved-by "$APPROVED_BY" \
     --approval-ref "$APPROVAL_REF$(if [ "$RD_PREFIX" = "1" ]; then printf '; correction %s' "$REPLY_DUE_CORRECTION_REF"; fi)${C2_SUFFIX:-}${APPROVAL_REF_SUFFIX_O:-}" \
     --contact-id "$CONTACT_ID" --refs-file "$REFS_FILE" ${WINDOWED_FLAG:+"$WINDOWED_FLAG"} \
-    ${REPLY_DUE:+--reply-due "$REPLY_DUE" --conversation "$THREAD"})" \
+    ${REPLY_DUE:+--reply-due "$REPLY_DUE" --conversation "$THREAD"} --copy-ref "$COPY" --variant "$NOTE_VARIANT")" \
     || die "the ledger claim failed; refusing to send without the idempotency record."
 else
   CLAIM="$(ledger claim-reminder --parent-message-id "$PARENT_ID" --kind "$KIND" --user-key "$EMAIL" --day "$DAY" \
-    --request-ids "$ALL_IDS" --approved-by "$APPROVED_BY" --approval-ref "$APPROVAL_REF${C2_SUFFIX:-}")" \
+    --request-ids "$ALL_IDS" --approved-by "$APPROVED_BY" --approval-ref "$APPROVAL_REF${C2_SUFFIX:-}" \
+    --copy-ref "$COPY" --variant "$NOTE_VARIANT")" \
     || die "the ledger claim failed; refusing to send without the idempotency record."
 fi
 case "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r 'if .result == "recent" and .reason == "recently_asked" then .reason else .result end')" in

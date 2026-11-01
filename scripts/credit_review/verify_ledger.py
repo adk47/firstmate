@@ -210,7 +210,9 @@ CREATE TABLE IF NOT EXISTS verify_messages (
   proof_checked_at TEXT,             -- last proof sweep look (sweep rotates oldest-checked first)
   proof_attachments INTEGER NOT NULL DEFAULT 0,  -- user attachments counted when last tagged
   extension_requested_at TEXT,       -- initial note: the user replied (text or attachment); removal held for a human
-  last_reply_at TEXT                 -- this message: time of the latest user reply seen in its conversation
+  last_reply_at TEXT,                -- this message: time of the latest user reply seen in its conversation
+  copy_ref TEXT,                     -- p1 615: the gate's copy token this note rendered (uvn, docrecvr, refq, ...)
+  variant TEXT                       -- p1 615: the openers/prefixes it carried, comma-joined (c2, reply_due_correction, o)
 );
 CREATE TABLE IF NOT EXISTS verify_proof_reviews (
   family INTEGER NOT NULL,           -- verify_messages.id of the initial note
@@ -656,7 +658,8 @@ def followed_notes(db: sqlite3.Connection, user_key: str, *, now: datetime | Non
 def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[str], message_type: str,
           approved_by: str, approval_ref: str, contact_id: str = "", campaign: str = "verify-live",
           refs: list[dict[str, Any]] | None = None, windowed: bool = False, now: datetime | None = None,
-          enforce_cap: bool = True, user_id: str = "", reply_due: str = "", conversation: str = "") -> dict[str, Any]:
+          enforce_cap: bool = True, user_id: str = "", reply_due: str = "", conversation: str = "", copy_ref: str = "",
+          variant: str = "") -> dict[str, Any]:
     """Atomically claim an initial note. One transaction (BEGIN IMMEDIATE) so two
     concurrent runs cannot both claim the same user-day or request id. A claim-proof-ask note
     records its close day (claim_close_day) as due_day."""
@@ -753,6 +756,9 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
              message_type, contact_id or None,
              json.dumps(fresh), json.dumps(keep) if keep else None, len(fresh), approved_by, approval_ref, ts, ts))
         row = int(cur.lastrowid)
+        # p1 615: what the note rendered, on the row - audits read the ledger, never a preview dir
+        db.execute("UPDATE verify_messages SET copy_ref = ?, variant = ? WHERE id = ?",
+                   (copy_ref or None, variant or None, row))
         for rid in fresh:
             db.execute(
                 "INSERT INTO verify_requests (campaign, request_id, message_row, status, attempts, updated_at) "
@@ -888,7 +894,7 @@ def close_reminder(db: sqlite3.Connection, *, parent_message_id: str, kind: str,
 
 def claim_reminder(db: sqlite3.Connection, *, parent_message_id: str, kind: str, user_key: str, day: str,
                    request_ids: list[str], approved_by: str, approval_ref: str,
-                   now: datetime | None = None) -> dict[str, Any]:
+                   now: datetime | None = None, copy_ref: str = "", variant: str = "") -> dict[str, Any]:
     """Atomically claim follow-up `kind` of a sent note. The listed credits must be
     a subset of the note's credits; the user must be the note's user."""
     ts = stamp(now)
@@ -927,6 +933,8 @@ def claim_reminder(db: sqlite3.Connection, *, parent_message_id: str, kind: str,
              st["removal_day"], "attempted",
              st["message_type"], st["contact_id"], json.dumps(keep), len(keep), approved_by, approval_ref, attempts,
              ts, ts))
+        db.execute("UPDATE verify_messages SET copy_ref = ?, variant = ? WHERE id = ?",
+                   (copy_ref or None, variant or None, int(cur.lastrowid)))
         db.execute("COMMIT")
         return {**st, "result": "claimed", "message_row": int(cur.lastrowid), "request_ids": keep}
     except Exception:
@@ -1634,6 +1642,8 @@ def _main(argv: list[str] | None = None) -> int:
                        help="the Muso account id (the per-user locks key on it too; re-checkable refusals)")
         s.add_argument("--reply-due", default="", help="[key=reply-due]: the customer part this note answers")
         s.add_argument("--conversation", default="", help="[key=reply-due]: the thread the answer goes into")
+        s.add_argument("--copy-ref", default="", help="p1 615: the gate's copy token this note renders")
+        s.add_argument("--variant", default="", help="p1 615: its openers/prefixes, comma-joined (c2, o, ...)")
     ld = sub.add_parser("log-deferral", help="a note held back for an outside reason: logged, never a lock")
     ld.add_argument("--campaign", required=True, choices=CAMPAIGNS)
     ld.add_argument("--user-key", required=True)
@@ -1657,6 +1667,8 @@ def _main(argv: list[str] | None = None) -> int:
     te.add_argument("--approved-by", required=True)
     te.add_argument("--approval-ref", required=True)
     cr = sub.add_parser("claim-reminder")
+    cr.add_argument("--copy-ref", default="")
+    cr.add_argument("--variant", default="")
     cr.add_argument("--parent-message-id", required=True)
     cr.add_argument("--kind", required=True, choices=KINDS[1:])
     cr.add_argument("--user-key", required=True)
@@ -1730,7 +1742,7 @@ def _main(argv: list[str] | None = None) -> int:
                   approved_by=a.approved_by, approval_ref=a.approval_ref, campaign=a.campaign)
         if a.op == "claim":
             out = claim(db, contact_id=a.contact_id, refs=refs, windowed=a.windowed, user_id=a.user_id,
-                        reply_due=a.reply_due, conversation=a.conversation, **kw)
+                        reply_due=a.reply_due, conversation=a.conversation, copy_ref=a.copy_ref, variant=a.variant, **kw)
         else:
             out = refuse(db, reason=a.reason, user_id=a.user_id, **kw)
     elif a.op == "log-deferral":
@@ -1743,7 +1755,8 @@ def _main(argv: list[str] | None = None) -> int:
                            user_id=a.user_id, approved_by=a.approved_by, approval_ref=a.approval_ref)
     elif a.op == "claim-reminder":
         out = claim_reminder(db, parent_message_id=a.parent_message_id, kind=a.kind, user_key=a.user_key, day=a.day,
-                             request_ids=_ids(a.request_ids), approved_by=a.approved_by, approval_ref=a.approval_ref)
+                             request_ids=_ids(a.request_ids), approved_by=a.approved_by, approval_ref=a.approval_ref,
+                             copy_ref=a.copy_ref, variant=a.variant)
     elif a.op == "finalize":
         finalize(db, message_row=a.message_row, status=a.status, message_id=a.message_id,
                  conversation_id=a.conversation_id, reason=a.reason, body_sha256=a.body_sha256, api_log=a.api_log)

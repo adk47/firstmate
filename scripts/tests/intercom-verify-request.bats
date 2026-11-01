@@ -3477,6 +3477,7 @@ Caroline, Muso Support" ]
   [[ "$output" == "POSTED email"* ]]
   [[ "$(msg .body | plain)" == *"$O"$'\n''Thank you,'* ]]
   [[ "$(sql "SELECT approval_ref FROM verify_messages WHERE campaign='uvn-status'")" == *"gmail-fallback fable-copy-1030-r5/o"* ]]
+  [[ "$(sql "SELECT variant FROM verify_messages WHERE campaign='uvn-status'")" == *"o"* ]]   # p1 615
   # the dated window: after GMAIL_FALLBACK_O_UNTIL a real /o send is refused
   sed 's/^readonly GMAIL_FALLBACK_O_UNTIL=.*/readonly GMAIL_FALLBACK_O_UNTIL="2020-01-01T00:00:00Z"/' "$UVN" > "$TEST_TMPDIR/uvn-closed.sh"; chmod +x "$TEST_TMPDIR/uvn-closed.sh"
   rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
@@ -3502,6 +3503,7 @@ Caroline, Muso Support" ]
   STUB_COMM_STATE_JSON="$(rd_cs 56450261657 null)" run -0 "$RD" send --campaign uvn-status --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [ "$(jq -r .body "$CURL_STUB_REPLY")" = "<p>A correction to our earlier note here: this request does need one thing from you.</p>$plainbody" ]
   [[ "$(sql "SELECT approval_ref FROM verify_messages WHERE status='sent'")" == *"correction fable-copy-1030-r5/c"* ]]
+  [[ "$(sql "SELECT variant FROM verify_messages WHERE status='sent'")" == *"reply_due_correction"* ]]   # p1 615
   # h2 (#1565 on #1517): a reply_due ANSWER is never /c2 - even after a SENT status line naming the same request it
   # goes in-thread (never refused for its --conversation) with only #1517's in-thread correction, never the email /c2
   rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
@@ -3515,6 +3517,7 @@ vl.finalize(db, message_row=c['message_row'], status='sent', message_id='9001')"
   STUB_COMM_STATE_JSON="$(rd_cs 56450261657 null)" run -0 "$RD" send --campaign uvn-status --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [ "$(jq -r .body "$CURL_STUB_REPLY")" = "<p>A correction to our earlier note here: this request does need one thing from you.</p>$plainbody" ]
   [[ "$(sql "SELECT approval_ref FROM verify_messages WHERE campaign='uvn-status' AND status='sent'")" != *"r5/c2"* ]]
+  [[ "$(sql "SELECT coalesce(variant, '-') FROM verify_messages WHERE campaign='uvn-status' AND status='sent'")" != *"c2"* ]]   # p1 615
   # r5 /c: never above a status-team-review line (the earlier 'nothing is needed' note does not contradict it)
   rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
   STUB_COMM_STATE_JSON="$(rd_cs 56450261657 null)" run -0 "$RD" send --campaign status-team-review --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
@@ -4529,6 +4532,8 @@ Caroline, Muso Support' ]
   [[ "$output" == *"POSTED email"* ]]; [ "$(replies)" -eq 0 ]
   [[ "$(msg .body | plain)" == 'A correction to our earlier note: this request does need one thing from you.'* ]]
   [[ "$(sql "SELECT approval_ref FROM verify_messages WHERE campaign='uvn-status'")" == *"correction fable-copy-1030-r5/c2 (follows a status line on u1)"* ]]
+  # p1 615: the row itself says what it rendered - the copy token and the /c2 prefix (audits read the ledger)
+  [ "$(sql "SELECT copy_ref || '|' || variant FROM verify_messages WHERE campaign='uvn-status'")" = "uvn|c2" ]
   # plural: two tracks named, one of them in the earlier line
   credits "$TEST_TMPDIR/p.json" Jane "u1:Mixing:Song A:Big Star" "u2:Mixing:Song B:Big Star"
   rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
