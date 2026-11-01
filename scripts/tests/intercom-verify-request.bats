@@ -393,7 +393,7 @@ OTHER_PRO="0c4e7a2b-1f3d-4b6a-9e8c-7d5a3b1f0e92"
 }
 
 @test "recipient (professional id): a legacy account with no Auth0 subject is matched by its professional id for uvn-status and the status notes" {
-  for camp in uvn-status status-doc-received status-team-review; do
+  for camp in uvn-status status-team-review; do   # bare status-doc-received is retired (r5 10-31)
     rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
     credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
     jq --arg p "$LEGACY_PRO" '.user |= (del(.auth_id) | .professional_id = $p)' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json" && mv "$TEST_TMPDIR/c2.json" "$TEST_TMPDIR/c.json"
@@ -425,9 +425,9 @@ OTHER_PRO="0c4e7a2b-1f3d-4b6a-9e8c-7d5a3b1f0e92"
   [ "$(sql "select status from verify_requests where request_id='r1'")" = "refused" ]
   credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
   STUB_CONTACTS='{"type":"list","data":[{"id":"u1","role":"user","email":"jane.doe@example.com","external_id":""}]}' \
-    run -1 "$LOCKED" send --campaign status-doc-received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+    run -1 "$LOCKED" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == *"has no external_id"* ]]
-  [ "$(sql "select campaign || ':' || refusals from verify_refusal_holds")" = "status-doc-received:1" ]
+  [ "$(sql "select campaign || ':' || refusals from verify_refusal_holds")" = "status-team-review:1" ]
   [ "$(sql "select count(*) from verify_requests where request_id='s1'")" = "0" ]
   [ "$(posts)" -eq 0 ]
 }
@@ -1694,13 +1694,15 @@ GAP_PARA_2='. If you have a tracklist, split sheet, contract, or a DSP/label pag
   stage2 g3 Mixing 42 need_more contract p3
   stage2 g4 Mixing 42 need_more contract p4
   stage2 g4 Mastering 42 need_more contract p4
+  # r5 (10-31 21:0xZ): two or more distinct TRACKS need the plural gap text (not approved yet) -> refused
   credits "$TEST_TMPDIR/c.json" Jane "g1:Mixing:A:X" "g2:Producer:B:X" "g3:Mixing:C:X" "g4:Mixing, Mastering:D:X"
-  run -0 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
-  [ "$(rendered .subject)" = 'About the documents for 4 of your credits on Muso' ]
-  [[ "$(rendered .body | plain)" == *"${GAP_PARA_1}"'documents but does not cover "A" as Mixing, "B" as Producer or "C" as Mixing (and 1 more of your credits)'"${GAP_PARA_2}"* ]]
+  run -1 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"gap_plural_uncoded"* ]]
   credits "$TEST_TMPDIR/c.json" Jane "g1:Mixing:A:X" "g3:Mixing:C:X"
-  run -0 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
-  [[ "$(rendered .body | plain)" == *'It shows contracts but does not cover "A" as Mixing or "C" as Mixing.'* ]]
+  run -1 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"gap_plural_uncoded"* ]]
+  [ "$(calls)" -eq 0 ]
+  # one track, two roles: still singular, still renders
   credits "$TEST_TMPDIR/c.json" Jane "g4:Mixing, Mastering:D:X"
   run -0 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [[ "$(rendered .body | plain)" == *'It shows a contract but does not cover "D" as Mixing and Mastering.'* ]]
@@ -1763,8 +1765,9 @@ GAP_PARA_2='. If you have a tracklist, split sheet, contract, or a DSP/label pag
   day_ago() { python3 -c 'import datetime as d, sys; print((d.datetime.now(d.timezone.utc).date() - d.timedelta(days=int(sys.argv[1]))).isoformat())' "$1"; }
   stage2 g1 Mixing 42 need_more
   credits "$TEST_TMPDIR/d.json" Jane "s1:Mixing:Song A:Big Star"
-  INTERCOM_VERIFY_TEST_DAY="$(day_ago 0)" run -0 "$LOCKED" send --campaign status-doc-received --copy queued --credits-file "$TEST_TMPDIR/d.json" --approved-by U7RP6HKUZ
-  [[ "$output" == "POSTED email message=1001 credits=1" ]]
+  # the doc-received note it follows up, as the ledger records a sent one (R1 / the retired default alike)
+  python3 -c 'import sys, json; sys.path.insert(0, sys.argv[2]); from credit_review import verify_ledger as v; db = v.connect(sys.argv[1])
+db.execute("INSERT INTO verify_messages (campaign, kind, user_key, account_id, day, status, message_type, message_id, request_ids_json, n_credits, approved_by, approval_ref, created_at, updated_at, sent_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", ("status-doc-received", "initial", "jane.doe@example.com", "42", sys.argv[3], "sent", "email", "1001", json.dumps(["s1"]), 1, "U7RP6HKUZ", "x", sys.argv[3] + "T00:00:00Z", sys.argv[3] + "T00:00:00Z", sys.argv[3] + "T00:00:00Z")); db.commit()' "$INTERCOM_VERIFY_TEST_LEDGER" "$HYDRA_REPO/scripts" "$(day_ago 0)"
   credits "$TEST_TMPDIR/c.json" Jane "g1:Mixing:Song A:Big Star"
   INTERCOM_VERIFY_TEST_DAY="$(day_ago 0)" run -3 "$GATE" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "DEFERRED daily-cap"* ]]
@@ -1772,13 +1775,13 @@ GAP_PARA_2='. If you have a tracklist, split sheet, contract, or a DSP/label pag
   now=$(date -u +%s)
   STUB_CONV_SEARCH="{\"conversations\":[{\"id\":\"777\",\"created_at\":$now,\"source\":{\"id\":\"1001\",\"author\":{\"type\":\"admin\"}}}],\"total_count\":1}" \
   INTERCOM_VERIFY_TEST_DAY="$(day_ago -1)" run -0 "$GATE" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
-  [[ "$output" == "POSTED email message=1002 credits=1" ]]
+  [[ "$output" == "POSTED email message=1001 credits=1" ]]
   # Any OTHER message from us in 7 days still defers it.
   stage2 g2 Mixing 42 need_more
   credits "$TEST_TMPDIR/c.json" Jane "g2:Mixing:Song B:Big Star"
   INTERCOM_VERIFY_TEST_DAY="$(day_ago -3)" run -3 "$GATE" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "DEFERRED messaged_7d"* ]]
-  [ "$(posts)" -eq 2 ]
+  [ "$(posts)" -eq 1 ]   # the doc-received note is a seeded ledger row now (the bare default is retired)
 }
 
 @test "uvn-status + stage-2 no_document: the Intercom documents skip yields to the store's verdict for THIS account only" {
@@ -1843,7 +1846,7 @@ GAP_PARA_2='. If you have a tracklist, split sheet, contract, or a DSP/label pag
 
 @test "core notice (Fable sender map item 2): a core notice within 7 days defers EVERY campaign; unreadable sends nothing" {
   credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
-  for camp in uvn-status status-team-review status-doc-received withdrawal-confirm; do
+  for camp in uvn-status status-team-review withdrawal-confirm; do   # a bare status-doc-received is retired (r5 702 (1))
     STUB_CORE_NOTICE=hold run -3 "$UVN" send --campaign "$camp" --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
     [[ "$output" == "DEFERRED core_notice_within_7d credits=1 (approvedNotice within 7d)" ]]
   done
@@ -1862,7 +1865,7 @@ GAP_PARA_2='. If you have a tracklist, split sheet, contract, or a DSP/label pag
   # and nothing is claimed, refused or closed: no other status, no verify_requests row, no refusal hold
   [ "$(sql "select campaign||'|'||status||'|'||reason from verify_messages order by id" | head -1)" = \
     "uvn-status|deferred|core_notice_within_7d: approvedNotice within 7d" ]
-  [ "$(sql "select count(*) from verify_messages")" -eq 5 ]
+  [ "$(sql "select count(*) from verify_messages")" -eq 4 ]   # one deferral row per campaign above + the default send (the bare status-doc-received left the loop)
   [ "$(sql "select count(*) from verify_messages where status<>'deferred'")" -eq 0 ]
   [ "$(sql "select count(*) from verify_requests")" -eq 0 ]
   [ "$(sql "select count(*) from verify_refusal_holds")" -eq 0 ]
@@ -2088,15 +2091,12 @@ thread() { # <contacts-json-array> [extra conversation fields]
 
 # ---- status notes + email-changed (firstmate 068-073) ------------------------------------
 
-@test "status-doc-received --copy queued: the approved alternative wording (firstmate 092); no other campaign takes it" {
+@test "status-doc-received --copy queued is RETIRED (r5 10-31: 'no need to send anything else' is barred); /i queued-neutral is the only A line" {
   credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
-  run -0 "$LOCKED" send --campaign status-doc-received --copy queued --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
-  [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit request for "A": we have the document you sent, and it'"'"'s in our review queue. We'"'"'ll message you here as soon as it'"'"'s checked - no need to send anything else.'$'\n''Muso Support' ]
-  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X" "s2:Mixing:B:X" "s3:Mixing:C:X" "s4:Mixing:D:X" "s5:Mixing:E:X"
-  run -0 "$LOCKED" send --campaign status-doc-received --copy queued --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
-  [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit requests for "A", "B" and "C" and 2 more: we have the document you sent, and it'"'"'s in our review queue. We'"'"'ll message you here as soon as it'"'"'s checked - no need to send anything else.'$'\n''Muso Support' ]
+  run -1 "$LOCKED" send --campaign status-doc-received --copy queued --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"status-doc-received --copy queued is retired"* ]]
   run -1 "$LOCKED" send --campaign status-team-review --copy queued --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
-  [[ "$output" == *"--copy applies to verify-live (v1|windowed), status-doc-received (queued|received|queued-neutral) and status-team-review (no-ask|count) only"* ]]
+  [[ "$output" == *"--copy applies to verify-live (v1|windowed), status-doc-received (received|queued-neutral) and status-team-review (no-ask|count) only"* ]]
   run -1 "$LOCKED" send --campaign status-doc-received --copy windowed --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [ "$(calls)" -eq 0 ]
 }
@@ -2121,22 +2121,22 @@ thread() { # <contacts-json-array> [extra conversation fields]
   [[ "$(sql "SELECT approval_ref FROM verify_messages")" == *"pending-status-1021"* ]]
 }
 
-@test "status-doc-received --copy queued: a send records the firstmate 092 approval in the ledger and the api-log" {
+@test "status-doc-received --copy queued (retired): a real send is refused before anything is claimed or posted" {
   credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
-  run -0 "$LOCKED" send --campaign status-doc-received --copy queued --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
-  [[ "$output" == "POSTED email message="* ]]
-  [[ "$(msg .body | plain)" == *"it's in our review queue"* ]]
-  [[ "$(sql "SELECT approval_ref FROM verify_messages")" == *"(--copy queued) approved by firstmate 092"* ]]
-  [[ "$(jq -r .approval_ref "$(find "$INTERCOM_VERIFY_TEST_LOG_DIR" -name '*.json' | head -1)")" == *"approved by firstmate 092"* ]]
-  credits "$TEST_TMPDIR/c.json" Jane "s9:Mixing:B:X"
-  INTERCOM_VERIFY_TEST_LEDGER="$TEST_TMPDIR/l2.sqlite3" run -0 "$LOCKED" send --campaign status-doc-received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
-  [[ "$(python3 -c 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute("SELECT approval_ref FROM verify_messages").fetchone()[0])' "$TEST_TMPDIR/l2.sqlite3")" != *"firstmate 092"* ]]
+  run -1 "$LOCKED" send --campaign status-doc-received --copy queued --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"is retired"* ]]
+  [ "$(posts)" -eq 0 ]; [ -z "$(sql "SELECT 1 FROM verify_messages")" ]
 }
 
 @test "status-doc-received / status-team-review: the approved texts, 3 titles then 'and N more', never an ask" {
   credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
-  run -0 "$LOCKED" send --campaign status-doc-received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
-  [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit request for "A": we have the document you sent us, and our team is reviewing it. Nothing else is needed from you right now, and you'"'"'ll see each credit on your profile as soon as it'"'"'s approved.'$'\n''Muso Support' ]
+  # r5 702 (1) / p1 528 (a): the bare default (the old docrecv, "Nothing else is needed from you right now") is RETIRED -
+  # no --copy is no render, dry run and send alike; R1 (--copy received) and /i (--copy queued-neutral) are the only ones
+  run -1 "$LOCKED" send --campaign status-doc-received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"status-doc-received needs --copy received (R1) or --copy queued-neutral (/i)"* ]]
+  run -1 "$LOCKED" send --campaign status-doc-received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [ "$(calls)" -eq 0 ]
+  if grep -q "Nothing else is needed from you right now" "$REAL_SCRIPT" && grep -q 'COPY="docrecv";' "$REAL_SCRIPT" && ! grep -q 'status-doc-received:) refuse' "$REAL_SCRIPT"; then false; fi
   credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X" "s2:Mixing:B:X" "s3:Mixing:C:X" "s4:Mixing:D:X"
   run -0 "$LOCKED" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   # fable-copy-1030-r5/k: > 3 tracks = the count form; the soft ask is removed (a status line never asks)
@@ -2146,10 +2146,10 @@ thread() { # <contacts-json-array> [extra conversation fields]
 
 @test "status notes: email carries the approved 'Muso Support' sign-off; an in-thread reply does not" {
   credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
-  for args in "status-doc-received" "status-doc-received --copy queued"; do
+  for args in "status-team-review"; do   # bare status-doc-received and --copy queued are retired (r5 10-31)
     # shellcheck disable=SC2086
     run -0 "$LOCKED" send --campaign $args --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
-    [[ "$(rendered .body)" == *"<p>Muso Support</p>" ]]
+    [[ "$(rendered .body)" == *"<p>Thank you,</p><p>Caroline, Muso Support</p>" ]]
   done
   # fable-copy-1030-r5/k: team-review notes sign 'Thank you, Caroline, Muso Support' on email
   for args in "status-team-review" "status-team-review --copy no-ask"; do
@@ -2162,7 +2162,7 @@ thread() { # <contacts-json-array> [extra conversation fields]
   [[ "$(msg .body)" == *"<p>Thank you,</p><p>Caroline, Muso Support</p>" ]]   # /k signature on email
   credits "$TEST_TMPDIR/c.json" Jane "s2:Mixing:B:X"
   INTERCOM_VERIFY_TEST_LEDGER="$TEST_TMPDIR/l2.sqlite3" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]')" \
-    run -0 "$LOCKED" send --campaign status-doc-received --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+    run -0 "$LOCKED" send --campaign status-team-review --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED comment conversation=777"* ]]
   [[ "$(jq -r .body "$CURL_STUB_REPLY")" != *"Muso Support"* ]]
   credits "$TEST_TMPDIR/c.json" Jane "s3:Mixing:C:X"
@@ -2182,18 +2182,18 @@ thread() { # <contacts-json-array> [extra conversation fields]
   credits "$TEST_TMPDIR/c.json" Jane "s2:Mixing:B:X"
   INTERCOM_VERIFY_TEST_LEDGER="$TEST_TMPDIR/l2.sqlite3" \
   STUB_OPEN_CONVS="$open" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]' ',"admin_assignee_id":10206197')" \
-    run -0 "$LOCKED" send --campaign status-doc-received --copy queued --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+    run -0 "$LOCKED" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ   # queued retired (r5 10-31)
   [[ "$output" == "POSTED email message="* ]]
-  [ "$(msg .body | plain)" = 'Hi Jane, a quick update on your credit request for "B": we have the document you sent, and it'"'"'s in our review queue. We'"'"'ll message you here as soon as it'"'"'s checked - no need to send anything else.'$'\n''Muso Support' ]
+  [[ "$(msg .body | plain)" == 'Hi Jane, a quick update on your credit request for "B"'*$'\n''Thank you,'$'\n''Caroline, Muso Support' ]]
 }
 
 @test "status notes: a user who sent documents still gets one (it is about their documents); once per user, ever" {
   credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
   STUB_CONTACT_CONVS='{"conversations":[{"id":"5","source":{"author":{"type":"user"},"attachments":[{"name":"split.pdf"}]},"tags":{"tags":[]}}],"pages":{}}' \
-    run -0 "$LOCKED" send --campaign status-doc-received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+    run -0 "$LOCKED" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED"* ]]
   credits "$TEST_TMPDIR/c.json" Jane "s2:Mixing:B:X"
-  INTERCOM_VERIFY_TEST_DAY=2026-11-30 run -0 "$LOCKED" send --campaign status-doc-received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  INTERCOM_VERIFY_TEST_DAY=2026-11-30 run -0 "$LOCKED" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "SKIPPED already_sent credits=1" ]]
   [ "$(posts)" -eq 1 ]
 }
@@ -2286,8 +2286,8 @@ ticket() { jq -n --arg t "$1" '{user:{email:"jane.doe@example.com", id:"42", aut
 
 @test "status notes: a user flagged after three refusals is skipped by the gate, whatever requests" {
   credits "$TEST_TMPDIR/c.json" Jane "s7:Mixing:A:X"
-  python3 -c 'import sqlite3,sys; sys.path.insert(0, sys.argv[2]); from credit_review import verify_ledger as v; db=v.connect(sys.argv[1]); db.execute("INSERT INTO verify_refusal_holds (campaign,user_key,user_id,refusals,reason,next_recheck_at,flagged_at,updated_at) VALUES (?,?,?,?,?,?,?,?)", ("status-doc-received","jane.doe@example.com","42",3,"x","2000-01-01T00:00:00Z","2026-10-20T00:00:00Z","2026-10-20T00:00:00Z"))' "$INTERCOM_VERIFY_TEST_LEDGER" "$HYDRA_REPO/scripts"
-  run -0 "$LOCKED" send --campaign status-doc-received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  python3 -c 'import sqlite3,sys; sys.path.insert(0, sys.argv[2]); from credit_review import verify_ledger as v; db=v.connect(sys.argv[1]); db.execute("INSERT INTO verify_refusal_holds (campaign,user_key,user_id,refusals,reason,next_recheck_at,flagged_at,updated_at) VALUES (?,?,?,?,?,?,?,?)", ("status-team-review","jane.doe@example.com","42",3,"x","2000-01-01T00:00:00Z","2026-10-20T00:00:00Z","2026-10-20T00:00:00Z"))' "$INTERCOM_VERIFY_TEST_LEDGER" "$HYDRA_REPO/scripts"
+  run -0 "$LOCKED" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "SKIPPED refused-flagged credits=1"* ]]
   [ "$(posts)" -eq 0 ]
   [ "$(replies)" -eq 0 ]
@@ -2756,6 +2756,19 @@ v.set_conversation(v.connect(sys.argv[1]), message_id="1002", conversation_id="7
   run -0 "$LOCKED" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [[ "${lines[0]}" == "DRY-RUN status-doc-received initial email credits=1 copy=docrecvr" ]]
   [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit request for "A": we have the document you sent, and it'"'"'s in our review queue. We'"'"'ll message you here as soon as it'"'"'s checked.'$'\n''Muso Support' ]
+  # r5 702 (2) / p1 529: 1 track with 2 role requests - the R1 line numbers by request rows, /l numbers by distinct
+  # tracks, and the singular-naming-both-roles R1 line is not approved yet: refused (r1_number_uncoded), nothing claimed
+  credits "$TEST_TMPDIR/c1.json" Jane "s1:Mixing:A:X" "s2:Mastering:a :X"
+  run -1 "$LOCKED" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/c1.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"r1_number_uncoded"* ]]
+  run -1 "$LOCKED" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/c1.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"r1_number_uncoded"* ]]
+  [ "$(calls)" -eq 0 ]
+  # r5 10-31 22:4xZ (withdrawn (a), guard = a PIN): two distinct tracks render the plural, byte-exact, and never L13
+  credits "$TEST_TMPDIR/c2.json" Jane "s1:Mixing:A:X" "s2:Mixing:B:X"
+  run -0 "$LOCKED" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/c2.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit requests for "A" and "B": we have the document you sent, and it'"'"'s in our review queue. We'"'"'ll message you here as soon as it'"'"'s checked.'$'\n''Muso Support' ]
+  if rendered .body | plain | grep -q 'names you on the track'; then false; fi
   # r5 10-30 19:2xZ: the L13 sentence NEVER renders on an R1; a filing read as a Muso screenshot is refused, not receipted
   if rendered .body | plain | grep -q 'A screenshot of Muso itself'; then false; fi
   if grep -q "A screenshot of Muso itself" "$REAL_SCRIPT"; then false; fi
@@ -2765,9 +2778,9 @@ v.set_conversation(v.connect(sys.argv[1]), message_id="1002", conversation_id="7
   [[ "$output" != *"no need to send anything else"* ]]
   run -1 "$LOCKED" send --campaign status-team-review --copy received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   run -1 "$LOCKED" send --campaign uvn-status --copy received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
-  # the approved queued line is unchanged and still sends
-  run -0 "$LOCKED" send --campaign status-doc-received --copy queued --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
-  [[ "$output" == "POSTED email message="* ]]
+  # the old queued line (docrecvq) is RETIRED (r5 10-31): it refuses, nothing is sent
+  run -1 "$LOCKED" send --campaign status-doc-received --copy queued --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"is retired"* ]]
 }
 
 # --- merge-pending (go-live-today line M1; LOCKED until the captain's own yes) -------------------------
@@ -3023,8 +3036,8 @@ Caroline, Muso Support" ]
 
 @test "comm state guards the 'nothing else is needed' family: a user who owes proof is held for all five (message-book-1029)" {
   credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X" "s2:Mixing:B:X"   # 2 requests: the /k count form needs 2+
-  for args in "--campaign status-team-review" "--campaign status-team-review --copy count" "--campaign status-doc-received" \
-              "--campaign status-doc-received --copy queued"; do
+  for args in "--campaign status-team-review" "--campaign status-team-review --copy count"; do
+    # (status-doc-received --copy queued is retired - r5 10-31 - so it left this family)
     # shellcheck disable=SC2086
     STUB_COMM_STATE=hold run -3 "$LOCKED" send $args --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
     [[ "$output" == "HELD comm_state"* ]] || { echo "$args -> $output"; false; }
@@ -3197,14 +3210,14 @@ mobile_only() { printf '{"type":"list","data":[{"id":"mob1","role":"user","email
 @test "r5: an in-thread status note goes into the mobile user's own conversation, and the ledger names that contact" {
   credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"; presented "[\"$PRESENTED\"]"
   STUB_CONTACTS="$(dual)" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"mob1"}]')" \
-    run -0 "$LOCKED" send --campaign status-doc-received --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+    run -0 "$LOCKED" send --campaign status-team-review --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED comment conversation=777"* ]]
   [ "$(sql "SELECT contact_id FROM verify_messages WHERE status='sent'")" = "mob1" ]
   # Without the presented id, the mobile conversation is not this user's own: refused as before.
   rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
   credits "$TEST_TMPDIR/c.json" Jane "s2:Mixing:B:X"
   STUB_CONTACTS="$(dual)" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"mob1"}]')" \
-    run -1 "$LOCKED" send --campaign status-doc-received --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+    run -1 "$LOCKED" send --campaign status-team-review --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == *"not this user's own conversation"* ]]
   [ "$(replies)" -eq 1 ]
 }
@@ -3583,10 +3596,13 @@ vl.finalize(db, message_row=c['message_row'], status='sent', message_id='9001')"
   credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Home:X" "u2:Mixing:Home:Y" "u3:Producer:home :X"
   run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [[ "$(rendered .body | plain)" == *'credit requests for "Home" and "Home":'* ]]
-  # the shared titles() (R1 and the other status notes) does the same
+  # the shared titles() (the status notes) does the same
   credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:Slap:X" "s2:Producer:Slap:X" "s3:Mixing:Knockout:X"
-  run -0 "$LOCKED" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  run -0 "$LOCKED" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [[ "$(rendered .body | plain)" == *'for "Slap" and "Knockout":'* ]]
+  # ... but R1 (request-row number) refuses a track carrying two role requests until its /l line is approved (r5 702 (2))
+  run -1 "$LOCKED" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"r1_number_uncoded"* ]]
 }
 
 @test "email reachability (p1 191, r5, QA #1511): decided AFTER the route - an email to a bounced/unsubscribed/spam contact is refused and RECORDED (no send row; the next run skips); an in-app route still goes" {
@@ -3990,6 +4006,50 @@ needfile() { # $1 file, $2 jq edit (default: the readable_document need)
           need:{code:"readable_document", doc_sha:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 doc_received_at:"2026-10-18T09:30:00Z", doc_kind:"image", doc_count:1,
                 doc_shas:["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}}' | jq -c "${2:-.}" > "$1"
+}
+
+@test "track identity (QA #1603): the gate's number/roles checks count TRACKS by the renderer's own tkey - two tracks both called 'Home' are two" {
+  # the gate's TRACKS_JQ defs are byte-identical to the renderer's
+  for d in 'def tnorm: tostring | ascii_downcase | gsub("\\s+"; " ") | gsub("^ +| +$"; "");' 'def tkey: if ((.track_id // "") | length) > 0 then "id:" + .track_id'; do
+    [ "$(grep -cF "$d" "$REAL_SCRIPT")" -eq 2 ] || { echo "not shared: $d"; false; }
+  done
+  # gap-ask: two different tracks titled "Home" -> plural -> refused; one track twice (same id) -> renders
+  stage2 g1 Mixing 42 need_more contract p1
+  stage2 g2 Mixing 42 need_more contract p2
+  credits "$TEST_TMPDIR/c0.json" Jane "g1:Mixing:Home:X" "g2:Mixing:Home:X"
+  jq '.credits[0].track_id = "trk-a" | .credits[1].track_id = "trk-b"' "$TEST_TMPDIR/c0.json" > "$TEST_TMPDIR/c.json"
+  run -1 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"gap_plural_uncoded"* ]]
+  # R1: two different tracks titled "Home" are two tracks (not r1_number_uncoded); one track with two role rows is
+  credits "$TEST_TMPDIR/r0.json" Jane "s1:Mixing:Home:X" "s2:Mixing:Home:X"
+  jq '.credits[0].track_id = "trk-a" | .credits[1].track_id = "trk-b"' "$TEST_TMPDIR/r0.json" > "$TEST_TMPDIR/r.json"
+  run "$LOCKED" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" != *"r1_number_uncoded"* ]]
+  jq '.credits[0].track_id = "trk-a" | .credits[1].track_id = "trk-a" | .credits[1].role = "Mastering"' "$TEST_TMPDIR/r0.json" > "$TEST_TMPDIR/r.json"
+  run -1 "$LOCKED" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"r1_number_uncoded"* ]]
+  # E: two different "Home" tracks with different roles are two tracks (the plural body names titles only) - no refusal
+  needfile "$TEST_TMPDIR/n.json" '.credits[0].track_title = "Home" | .credits += [(.credits[0] | .request_id = "r2" | .role = "Mastering" | .track_id = "t2")]'
+  run "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" != *"e_roles_uncoded"* ]]
+}
+
+@test "proof-need-ask (p1 549): a one-track E row naming 2+ distinct roles refuses e_roles_uncoded until /l2 is in the proofneed renderer; one role (any case/spacing, repeated) still renders" {
+  needfile "$TEST_TMPDIR/n.json" '.credits[0].role = "Co-Producer, Guitar"'
+  run -1 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"e_roles_uncoded"* ]]
+  run -1 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"e_roles_uncoded"* ]]
+  [ "$(calls)" -eq 0 ]
+  needfile "$TEST_TMPDIR/n.json" '.credits += [(.credits[0] | .request_id = "r2" | .role = "Mastering")]'
+  run -1 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"e_roles_uncoded"* ]]
+  # two tracks, two roles: the plural body names titles only (no roles) - it renders
+  needfile "$TEST_TMPDIR/n.json" '.credits += [(.credits[0] | .request_id = "r2" | .role = "Mastering" | .track_title = "Song B" | .track_id = "t2")]'
+  run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == *'your credit requests for "Song A" and "Song B"'* ]]
+  needfile "$TEST_TMPDIR/n.json" '.credits[0].role = "Mixing, mixing "'
+  run -0 "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
 }
 
 @test "proof-need-ask: the gate's strong-identity set equals receipts.STRONG_MATCH (email-filed asks)" {

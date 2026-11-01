@@ -177,15 +177,13 @@ class DailyShTest(unittest.TestCase):
                             a[a.index("--exclude-users") + 1]))
         return out
 
-    def test_receipts_send_the_approved_queued_line_and_wait_on_the_r1_lock(self):
-        # proof loop ACK: proof_intake -> queued receipts for users who owe nothing else, paid then free;
+    def test_receipts_queued_lane_is_retired_and_r1_waits_on_its_lock(self):
+        # r5 702 (1) / QA #1603: the queued receipt (docrecvq) is retired - the RQ lane is logged, never sent;
         # R1 (owes proof) is send-locked in the gate: never run, the waiting count is logged.
         p, calls = self.run_daily()
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        got = self.receipt_calls(calls)
-        self.assertEqual([(l, s, w) for l, s, w, _ in got],
-                         [("list-RQ.json", "paid", "queued"), ("list-RQ.json", "free", "queued")])
-        self.assertTrue(all(x.endswith("exclude.txt") for *_, x in got))
+        self.assertEqual(self.receipt_calls(calls), [])
+        self.assertIn("paid RQ: retired lane", p.stdout)
         self.assertIn("receipts paid: R1 send-locked (STATUS_RECEIVED_COPY_APPROVED=0): 1 owe proof", p.stdout)
         day = sorted(d for d in os.listdir(self.state) if d[:2] == "20")[0]
         excl = open(os.path.join(self.state, day, "receipts", "exclude.txt")).read().split()
@@ -235,7 +233,8 @@ class DailyShTest(unittest.TestCase):
         p, calls = self.run_daily()
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         sent = self.campaigns(calls)
-        self.assertIn("status-doc-received", sent)
+        self.assertNotIn("status-doc-received", sent)               # QA #1603: the A lane is retired
+        self.assertIn("paid A: retired lane", p.stdout)
         self.assertIn("status-team-review", sent)
         self.assertNotIn("uvn-status", sent)                       # no Intercom ask
         self.assertNotIn("uvn-status", self.campaigns(calls, "dry-run"))
@@ -259,9 +258,9 @@ class DailyShTest(unittest.TestCase):
 
     def test_a_failed_intercom_apply_stops_the_run_and_exits_nonzero(self):
         # QA on #1384: a nonzero send must never be followed by later sends and a 'done'.
-        p, calls = self.run_daily(FAIL_CAMPAIGN="status-doc-received")
+        p, calls = self.run_daily(FAIL_CAMPAIGN="status-team-review")
         self.assertNotEqual(p.returncode, 0)
-        self.assertEqual(self.campaigns(calls), ["status-doc-received"])   # nothing after the failure
+        self.assertEqual(self.campaigns(calls), ["status-team-review"])    # nothing after the failure
         self.assertIn("apply FAILED", p.stdout)
         self.assertIn("STOPPED (a send failed", p.stdout)
         self.assertNotIn(" done:", p.stdout)
@@ -285,12 +284,12 @@ class DailyShTest(unittest.TestCase):
         # leave the earlier run's list behind to be sent.
         p, calls = self.run_daily()
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        self.assertIn("status-doc-received", self.campaigns(calls))
+        self.assertIn("status-team-review", self.campaigns(calls))
         open(self.calls, "w").write("")
-        p, calls = self.run_daily(LISTS="B")
+        p, calls = self.run_daily(LISTS="A")        # a later run with no B class: the earlier B list is never sent
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
-        self.assertNotIn("status-doc-received", self.campaigns(calls, "dry-run"))
-        self.assertEqual(self.campaigns(calls), ["status-team-review"])
+        self.assertNotIn("status-team-review", self.campaigns(calls, "dry-run"))
+        self.assertEqual(self.campaigns(calls), [])
 
     def test_a_missing_cs_exclusion_list_refuses_the_run(self):
         os.remove(self.excl)

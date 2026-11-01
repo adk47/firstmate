@@ -376,7 +376,6 @@ readonly CORRECTION_C2_MANY="A correction to our earlier note: these requests do
 readonly CORRECTION_C2_REF="fable-copy-1030-r5/c2"
 readonly APPROVAL_REF_WITHDRAWAL="$APPROVAL_REF_STANDING_ORDER; withdrawal-confirm copy approved by firstmate under it 2026-10-19 21:21Z (inbox 061, confirmed in 064), sent only for a request the requester withdrew (metadata.withdrawal.by = requester)"
 readonly APPROVAL_REF_STATUS="$APPROVAL_REF_STANDING_ORDER; status notes approved by firstmate under it 2026-10-20 (inbox 070: team-review verbatim; 071: doc-received as credit-trust-llm-t01 drafted it). Not asks."
-readonly APPROVAL_REF_STATUS_QUEUED="$APPROVAL_REF_STATUS The 'in our review queue' doc-received wording (--copy queued) approved by firstmate 092."
 readonly APPROVAL_REF_STATUS_NEUTRAL="$APPROVAL_REF_STATUS Status A neutral (--copy queued-neutral) for an unread, unanswered filing: fable-copy-1030-r5/i (captain 21:3xZ wording)."
 readonly APPROVAL_REF_STATUS_RECEIVED="$APPROVAL_REF_STATUS The receipt line R1 (--copy received: the queued line without 'no need to send anything else'), proof-loop-lead-fable-p1 captain card 2026-10-27 22:5xZ, sent only on the captain's yes."
 readonly APPROVAL_REF_STATUS_COUNT="$APPROVAL_REF_STANDING_ORDER; count-only status-team-review wording (--copy count) approved by firstmate 2026-10-26 16:58Z (verify-ask-wiring-h2 inbox 005, Fable decides under the captain's 12:40Z order; captain 16:05Z: \"everyone should be communicated or credits and profiles awarded\"), for a user whose requests cannot be listed (unshowable fields or more than 1,000). Not an ask."
@@ -407,6 +406,12 @@ readonly APPROVAL_REF_PAST="captain U7RP6HKUZ 2026-10-15 23:35Z: \"im referring 
 readonly BLOCKED_CONV_TAGS="abuse-block instagram facebook twitter x whatsapp messenger tiktok sms"
 readonly SANITIZER_WORDS="profile_status|profile_lookup|credits_search|create_ticket|subscription_status|remove_credits|dedupe_check|credit_verification_check|profiles_claim_self|credits_verify|profiles_consolidate|order_lookup|order_address_update|founding_status|founding_buyback_link|support_action_router|memory_search|memory_get|profile_analytics_status|profile_credits_status|profile_claim_status|retention_offer_check|retention_offer_apply|cancel_subscription|billing_status|track_analytics_status|analytics_refresh_request|analytics_recheck|subscription_cancel|refund_policy_check|refund_create|catalog_status|track_lookup|metadata_capture_request|artwork_refresh_request|catalog_recheck|user_status|resend_verification|email_delivery_status|login_recovery_packet|profile_change_packet|profile_merge_check|account_merge_preflight|email_change_preflight|profile_removal_preflight|ticket|tool failed|error fetching|unable to look up|the system says|my system|there was an issue with|ClickUp|openclaw|HYDRA|platform-data-processing"
 
+# QA #1603: the gate's number / roles checks count TRACKS with the renderer's own identity (tkey: track_id, else the
+# normalised title + artist) - two different tracks both called "Home" are two tracks. Byte-identical to RENDER_JQ's defs.
+readonly TRACKS_JQ='def tnorm: tostring | ascii_downcase | gsub("\\s+"; " ") | gsub("^ +| +$"; "");
+def tkey: if ((.track_id // "") | length) > 0 then "id:" + .track_id
+          else "t:" + ((.track_title // "") | tnorm) + "|" + ((.artist_name // "") | tnorm) end;
+def ntracks: [ .credits[]? | tkey ] | unique | length;'
 die()    { printf 'ERROR: %s\n' "$*" >&2; exit 2; }
 refuse() { printf 'REFUSED: %s\n' "$*" >&2; exit 1; }
 
@@ -738,8 +743,13 @@ case "$CAMPAIGN" in
     # Approved alternative wordings: status-doc-received --copy queued (firstmate 092);
     # status-team-review --copy no-ask = Copy B0 (pending-status-1021, firstmate 106).
     case "$CAMPAIGN:$COPY_ARG" in
+      # p1 528 / b1 527 (deployed-copy finding 1): a bare status-doc-received rendered the OLD docrecv line ("Nothing else
+      # is needed from you right now", barred) - no --copy is no render: R1 is --copy received, /i is --copy queued-neutral
+      status-doc-received:) refuse "status-doc-received needs --copy received (R1) or --copy queued-neutral (/i); the default docrecv line ('Nothing else is needed from you right now') is retired. Nothing was sent or claimed." ;;
       *:) ;;
-      status-doc-received:queued) COPY="docrecvq"; APPROVAL_REF="$APPROVAL_REF_STATUS_QUEUED" ;;
+      # r5 (10-31 21:0xZ, b1's coverage set): docrecvq is RETIRED - "no need to send anything else" is the barred
+      # "nothing is needed / no need to resend" family in another form; /i queued-neutral is the only A line
+      status-doc-received:queued) refuse "status-doc-received --copy queued is retired (r5 10-31: 'no need to send anything else' is barred); use --copy queued-neutral (/i). Nothing was sent or claimed." ;;
       # Card R1 (proof loop): the receipt for a user who still owes proof; send-locked (STATUS_RECEIVED_COPY_APPROVED).
       status-doc-received:received) COPY="docrecvr"; APPROVAL_REF="$APPROVAL_REF_STATUS_RECEIVED" ;;
       # fable-copy-1030-r5/i: status A NEUTRAL for an UNREAD filing - every R1 thread rule applies (R1LIKE below)
@@ -748,7 +758,7 @@ case "$CAMPAIGN" in
       # Count-only (firstmate inbox 005): no titles, so any request may be in it; the ledger
       # records the ids given (the driver sends at most 1,000) and user.pending_count is the total.
       status-team-review:count) COPY="teamreviewcount"; APPROVAL_REF="$APPROVAL_REF_STATUS_COUNT"; MAX_CREDITS=1000 ;;
-      *) refuse "--copy applies to verify-live (v1|windowed), status-doc-received (queued|received|queued-neutral) and status-team-review (no-ask|count) only." ;;
+      *) refuse "--copy applies to verify-live (v1|windowed), status-doc-received (received|queued-neutral) and status-team-review (no-ask|count) only." ;;
     esac
     [ "$KIND" = "initial" ] || refuse "$CAMPAIGN has no follow-ups: one message per user, ever."
     if [ "$COPY" = "teamreviewcount" ]; then
@@ -826,6 +836,13 @@ case "$CAMPAIGN" in
     MAX_CREDITS=1000; MAX_LISTED=3; COPY="proofneed"; APPROVAL_REF="$APPROVAL_REF_PROOF_NEED_ASK"
     [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live and the status notes; proof-need-ask's line is picked by need.code."
     [ "$KIND" = "initial" ] || refuse "proof-need-ask has no follow-ups: one ask per request, ever."
+    # p1 549 (c2's E dry run): the proofneed renderer comma-joins a multi-role row ("Co-Producer, Guitar credit") - /l2
+    # (roles joined with "and" + "credits") is not coded on this path yet. The roles are named only on a ONE-track body
+    # (the plural body names titles only), so an E row of one distinct track naming 2+ distinct roles refuses
+    if [ "$("$JQ_BIN" -r "$TRACKS_JQ"' ntracks as $t
+        | if $t == 1 then ([.credits[]?.role // "" | split(",")[] | ascii_downcase | gsub("^\\s+|\\s+$"; "") | select(length > 0)] | unique | length) else 0 end' "$CREDITS_FILE" 2>/dev/null || echo 99)" -ge 2 ]; then
+      refuse "e_roles_uncoded: this per-need ask names 2 or more roles on one track, and the /l2 roles line is not coded in the proofneed renderer yet. Nothing was sent or claimed."
+    fi
     ;;
   gap-ask)
     # Fable's gap ask for credits whose document on file does not cover them (stage-2
@@ -833,6 +850,11 @@ case "$CAMPAIGN" in
     MAX_CREDITS=1000; MAX_LISTED=3; COPY="gap"; APPROVAL_REF="$APPROVAL_REF_GAP_ASK"
     [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live; gap-ask has one copy, Fable's paragraph."
     [ "$KIND" = "initial" ] || refuse "gap-ask has no follow-ups: no deadline, no reminders."
+    # r5 (10-31 21:0xZ) / /l on number: the gap paragraph is singular ("this track ... Your request stays open"); two or
+    # more distinct tracks need the plural text, which is not coded or approved yet - refuse until it is
+    if [ "$("$JQ_BIN" -r "$TRACKS_JQ"' ntracks' "$CREDITS_FILE" 2>/dev/null || echo 99)" -ge 2 ]; then
+      refuse "gap_plural_uncoded: this gap ask names 2 or more tracks, and the plural gap text is not approved yet (r5 /l on number). Nothing was sent or claimed."
+    fi
     ;;
   *) refuse "--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status, gap-ask, merge-pending, merge-claim-first, credit-hold-status, claim-proof-pending or proof-need-ask (got '$CAMPAIGN'). Each campaign is pinned in this script; there is no other." ;;
 esac
@@ -1049,6 +1071,12 @@ if [ "$R1LIKE" = "1" ] && [ "$("$JQ_BIN" -r '.user.filing_muso_ui == true' "$CRE
 fi
 # r5 / QA #1554: the R1 receipt itself needs the filing's class STATED - user.filing_muso_ui explicitly false. A payload
 # without it (no producer sets it yet) is r1_filing_class_unknown: refused, never a receipt by default.
+# r5 + p1 (10-31 23:3xZ, b1's deployed-copy finding 2): the R1 line numbers by request rows, but /l numbers by DISTINCT
+# TRACKS (1 track / 2 requests = singular naming both roles) - that copy is not approved yet, so until it is the gate
+# refuses an R1 whose request count differs from its distinct-track count (the same track key the uvn and /i lines use)
+if [ "$COPY" = "docrecvr" ] && [ "$("$JQ_BIN" -r "$TRACKS_JQ"' ntracks == (.credits | length)' "$CREDITS_FILE" 2>/dev/null || echo false)" != "true" ]; then
+  refuse "r1_number_uncoded: this R1 receipt has more requests than distinct tracks (two roles on one track); the approved line numbers by request rows and the /l singular-naming-both-roles line is not approved yet. Nothing was sent or claimed."
+fi
 if [ "$COPY" = "docrecvr" ] && [ "$("$JQ_BIN" -r '.user | has("filing_muso_ui") and .filing_muso_ui == false' "$CREDITS_FILE" 2>/dev/null)" != "true" ]; then
   refuse "r1_filing_class_unknown: the R1 payload does not state the filing's class (user.filing_muso_ui must be false); nothing was sent or claimed."
 fi

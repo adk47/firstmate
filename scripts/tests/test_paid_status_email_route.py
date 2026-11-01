@@ -100,6 +100,17 @@ class LedgerReadsTest(unittest.TestCase):
         # and the retryable row is re-offered by the ledger (a rejected row below MAX_ATTEMPTS blocks nothing)
         self.assertEqual(verify_ledger.blocked_ids(self.db, ["r2-send-"], "uvn-status"), set())
 
+    def test_retired_status_copies_are_held_never_rendered_for_email(self):
+        # QA #1603: the email route's status texts are retired copy (docrecvq "no need to send anything else"; the
+        # pre-/k teamreview "Nothing else is needed") - both campaigns are held with a stated reason; the ask is not
+        self.assertEqual(set(er.RETIRED_EMAIL), {"status-doc-received", "status-team-review"})
+        self.assertNotIn("uvn-status", er.RETIRED_EMAIL)
+        src = open(er.__file__).read()
+        main = src[src.index("def main():"):]
+        self.assertIn('if campaign in RETIRED_EMAIL:\n            done("hold", RETIRED_EMAIL[campaign]); continue', main)
+        # the hold comes before ANY read or send decision for that row
+        self.assertLess(main.index("if campaign in RETIRED_EMAIL:"), main.index('if a.mode == "apply" and (uid, campaign) not in approved:'))
+
     def test_a_status_note_silent_hold_never_blocks_the_ask(self):
         verify_ledger.hold_silent(self.db, user_ids=["7"], reason="owe-proof-told-nothing-needed", now=NOW)
         self.assertIsNone(er.other_refusal_hold(self.db, "uvn-status", "u7@x.com", 7, NOW))

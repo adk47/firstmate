@@ -75,6 +75,10 @@ health() {
   return 0
 }
 
+retired() { # <segment> <tag>: a lane whose copy is retired - logged, never sent, never a failure of the run
+  log "$1 $2: retired lane (status-doc-received queued/default copy retired, r5 10-31 702 (1)); nothing sent"
+}
+
 email() { # <lists-file> <tag>
   local f="$1" tag="$2" plan
   [ "$EMAIL_ROUTE" = "1" ] && [ -s "$f" ] || return 0
@@ -134,7 +138,7 @@ PY
   python3 "$BIN/classify2.py" --users "$W/cand-clear.txt" --out-dir "$W/cls" > classify.out || { log "$SEG classify failed"; FAILED=1; continue; }
   python3 "$BIN/build_lists.py" > lists.out || { log "$SEG build_lists failed"; FAILED=1; continue; }
   log "$SEG lists: $(cat lists.out)"
-  runner "$SEG" A status-doc-received --wording queued || break
+  retired "$SEG" A   # r5 702 (1) / QA #1603: docrecvq + the bare docrecv are retired; receipts go by the timer's R1 / /i
   runner "$SEG" B status-team-review --wording no-ask || break
   # captain 2026-10-27 01:0xZ (firstmate 024): NO proof ask offering documents until a returned document can be
   # accepted. The uvn ask runs only with ASKS=1 (set it only after an explicit captain/firstmate GO).
@@ -147,7 +151,7 @@ PY
     python3 "$BIN/b0_gap.py" > b0gap.out || { log "$SEG b0_gap failed"; FAILED=1; break; }
     log "$SEG b0_gap: $(tr -d '\n' < b0gap.out)"
     runner "$SEG" B2 status-team-review --wording no-ask || break
-    runner "$SEG" A3 status-doc-received --wording queued || break
+    retired "$SEG" A3
   fi
   # email route: users the Intercom gate cannot reach (identity refusal / action_forbidden)
   EMAIL_PLAN=""; email email-lists.json main || break
@@ -187,7 +191,7 @@ if [ "${FAILED:-0}" != 1 ] && [ "${RECEIPTS:-1}" = 1 ] && ! killed; then
     log "receipts: $(cat receipts.out)"
     cp receipts-queued.json list-RQ.json; cp receipts-received.json list-RR.json
     for SEG in paid free; do
-      runner "$SEG" RQ status-doc-received --wording queued --exclude-users exclude.txt || break
+      retired "$SEG" RQ
       if grep -qx 'readonly STATUS_RECEIVED_COPY_APPROVED=1' "$GATE_SCRIPT" && [ "${R1_DAILY:-0}" = 1 ]; then
         runner "$SEG" RR status-doc-received --wording received --exclude-users exclude.txt || break
       elif grep -qx 'readonly STATUS_RECEIVED_COPY_APPROVED=1' "$GATE_SCRIPT"; then

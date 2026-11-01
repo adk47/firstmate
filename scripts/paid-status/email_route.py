@@ -88,6 +88,16 @@ def variables(campaign, fn_raw, credits):
             "titles": andjoin(t) + (f" and {n - MAX_LISTED} more" if n > MAX_LISTED else "")}
 
 
+# r5 10-31 702 (1) / QA #1603: these email texts are retired copy - the status-doc-received email is the barred "no need
+# to send anything else" line (docrecvq), and the status-team-review email still carries "Nothing else is needed from
+# you right now" (replaced by fable-copy-1030-r5/k on the gate). The email route holds them (recorded, never sent)
+# until its templates carry the approved copy; the uvn-status ask path is unchanged.
+RETIRED_EMAIL = {
+    "status-doc-received": "retired copy: status-doc-received queued/default (r5 702 (1)); held",
+    "status-team-review": "retired copy: the email teamreview text predates /k ('Nothing else is needed'); held",
+}
+
+
 def render_text(campaign, v):
     """The text the user reads (subject, body), for the leak check and the sample; the send-gateway template renders
     the same sentences (templates.patch test asserts them word for word)."""
@@ -281,6 +291,8 @@ def main():
 
         def done(decision, why=""):
             row.update(decision=decision, why=why); counts[(campaign, decision, why.split(":")[0])] += 1; rows.append(row)
+        if campaign in RETIRED_EMAIL:
+            done("hold", RETIRED_EMAIL[campaign]); continue
 
         if a.mode == "apply" and (uid, campaign) not in approved:
             continue
