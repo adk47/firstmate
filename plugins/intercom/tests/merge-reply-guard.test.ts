@@ -405,7 +405,8 @@ describe("merge-reply guard on the 2026-10-30 transcripts (firstmate 017)", () =
     expect(delivered).toBeGreaterThan(send);
     expect(failed).toBeGreaterThan(delivered);
     expect(src.slice(prep, send)).toContain("commitMerge(false);");
-    expect(src.slice(prep, send)).toMatch(/if \(mergePrep\.commit\(delivered\)\) saveSessions\(accountSessions\)/);
+    // caroline-guard-g1: a reply the output guard replaced never carried the paragraph.
+    expect(src.slice(prep, send)).toMatch(/if \(mergePrep\.commit\(delivered && !outputBlocked\)\) saveSessions\(accountSessions\)/);
     expect(src.slice(prep, send)).toContain("guard.body = mergePrep.body;");
   });
 

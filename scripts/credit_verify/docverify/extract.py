@@ -358,6 +358,17 @@ def build_messages(text: str, meta: dict[str, Any]) -> list[dict[str, str]]:
     return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
 
 
+def _watch_injection(text: str, proof_id: str) -> None:
+    """Prompt-injection watch on the document text the model is about to read (caroline-guard-g1). DETECTION
+    ONLY: a ledger row, nothing else; the extraction below is byte-for-byte the same with or without a hit, and
+    no failure here can reach the caller."""
+    try:
+        from lib import injection_watch
+        injection_watch.record("proof_extract", proof_id, text or "")
+    except Exception:  # noqa: BLE001 - detection must never change or break the extraction
+        pass
+
+
 class Extractor:
     def __init__(self, store: Any, *, model: str = MODEL, key: str | None = None, post: Post | None = None,
                  daily_usd: float = DAILY_USD):
@@ -368,6 +379,7 @@ class Extractor:
         self.daily_usd = daily_usd
 
     def extract(self, text: str, meta: dict[str, Any], proof_id: str) -> Extraction:
+        _watch_injection(text, proof_id)
         return self._extract(text, meta, proof_id, chunk_ok=True)
 
     def _extract_chunked(self, text: str, meta: dict[str, Any], proof_id: str) -> Extraction:

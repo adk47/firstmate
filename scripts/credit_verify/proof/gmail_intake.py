@@ -25,6 +25,7 @@ from __future__ import annotations
 import base64
 import email
 import email.policy
+import email.utils
 import hashlib
 import json
 import subprocess
@@ -114,6 +115,23 @@ def message_attachment(raw: bytes, sha: str) -> tuple[str, str, bytes] | None:
     return None
 
 
+def _watch_injection(mid: str, msg: EmailMessage) -> None:
+    """Prompt-injection watch on every support@ message read here, authenticated or not (caroline-guard-g1).
+    DETECTION ONLY: a ledger row (lib/injection_watch.py), never a change to what is filed; no failure here can
+    reach the caller."""
+    try:
+        from lib import injection_watch
+        parts = [str(msg.get("Subject") or "")]
+        body = msg.get_body(preferencelist=("plain", "html"))
+        if body is not None:
+            parts.append(str(body.get_content())[:200_000])
+        parts += [name for name, _c, _d in attachments(msg)]
+        sender = email.utils.parseaddr(str(msg.get("From") or ""))[1] or None
+        injection_watch.record("support_email", f"gmail:{mid}", "\n".join(parts), email=sender)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def run(store: ProofStore, *, message_ids: list[str], fetch: RawFetch, lookup: Lookup, open_rows: OpenRows,
         apply: bool = False, authserv: str = AUTHSERV, filed_by: str = "credit-proof.py file --source gmail",
         log: Callable[[str], None] = lambda m: None,
@@ -142,6 +160,8 @@ def run(store: ProofStore, *, message_ids: list[str], fetch: RawFetch, lookup: L
         except Exception as exc:  # noqa: BLE001 - counted; the message is retried by a re-run
             stats["fetch_errors"].append(f"{mid}: {type(exc).__name__}")
             continue
+        if apply:
+            _watch_injection(mid, msg)
         sender, why = authenticated_sender(msg, authserv)
         if sender is None:
             stats["refused"][why] = stats["refused"].get(why, 0) + 1

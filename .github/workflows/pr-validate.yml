@@ -2037,6 +2037,10 @@ jobs:
           # Doc-verify SHADOW (never take a returned document at face value): extraction,
           # forensics, independent cross-checks, gate. Model, network, DNS, Intercom faked.
           python3 scripts/tests/test_doc_verify.py
+          # Prompt-injection watch, Python side (caroline-guard-g1): support@ + proof-extract detection is
+          # ledger-only (the hooks never change a reader's result), digest/watch candidates, and the doc-verify
+          # red-team (an injected document can never make the gate verify without an independent anchor).
+          python3 scripts/tests/test_injection_watch.py
           # Document intake (credit-proof.py file): files a conversation's documents into
           # proof_intake with the account + candidate requests; never judges. Intercom/Trino faked.
           python3 scripts/tests/test_proof_intake.py
@@ -2109,6 +2113,15 @@ jobs:
         # this job used to borrow it. scripts/ci/arc-toolchain.sh installs node-8's node and
         # pnpm versions into the runner's home and puts them on PATH for later steps.
         run: bash scripts/ci/arc-toolchain.sh node
+      - name: Caroline answer-bank doctrine gate (one versioned set of approved lines)
+        # caroline-guard-g1: every line in plugins/intercom/src/answer-bank.ts is in its workspace anchor
+        # verbatim, pending copy PRs are not already live, and a copy change bumps BANK_VERSION + the pin.
+        # Needs node >= 22.6 (--experimental-strip-types), hence this job. --base: the bank at the PR base is the
+        # independent monotonic source, so changed lines without a BANK_VERSION bump fail even when the pin moved.
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "+refs/heads/${{ github.base_ref || 'main' }}:refs/remotes/origin/answer-bank-base"
+          bash scripts/check-caroline-answer-bank.sh --base origin/answer-bank-base
       - name: deploy install path matches CI (pnpm --frozen-lockfile)
         # Guards the #385 / Deploy HYDRA #217 class-of-bug: this CI job
         # installs plugins with `pnpm install --frozen-lockfile` (pinned,

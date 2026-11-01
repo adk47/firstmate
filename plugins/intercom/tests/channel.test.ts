@@ -23,6 +23,8 @@ import {
 } from "../src/channel.js";
 import { decide, type JevActionsConfig, type JevAnswers, type JevBands } from "../src/jev-router.js";
 import { MockIntercomClient } from "../src/outbound.js";
+import { readFileSync } from "node:fs";
+import { HANDOFF_LINE } from "../src/answer-bank.js";
 import { canAgentReply } from "../src/handoff.js";
 import { stripModelFallbackNotice } from "../src/sanitize-model-fallback.js";
 
@@ -1096,17 +1098,55 @@ describe("sendTextReply (the sendText path hands a gate-dropped reply to a human
   it("reassigns the conversation and reports dropped, never a delivered id", async () => {
     const client = new DroppingClient();
     const errors: string[] = [];
-    const r = await sendTextReply({ client, account, conversationId: "conv_1", body: "x", log: { error: (m) => errors.push(m) } });
+    const r = await sendTextReply({ client, account, conversationId: "conv_1", body: "x", log: { error: (m) => errors.push(m) }, safetyDeps: quiet });
     expect(client.calls.assignConversation).toEqual([{ conversationId: "conv_1", adminId: "bot_1", assigneeId: "inbox_7" }]);
     expect(r.messageId).toBe("");
     expect(r.meta).toEqual({ dropped: true, reason: "empty-after-sanitize" });
     expect(errors.some((m) => m.startsWith("[intercom:ALERT]"))).toBe(true);
   });
+  const quiet = { appendLedger: async () => null, page: async () => true, classify: async () => ({ label: "unavailable" as const, score: null }) };
   it("a delivered reply is not reassigned and carries its id", async () => {
     const client = new MockIntercomClient();
-    const r = await sendTextReply({ client, account, conversationId: "conv_1", body: "hi" });
+    const r = await sendTextReply({ client, account, conversationId: "conv_1", body: "hi", safetyDeps: quiet });
     expect(client.calls.assignConversation ?? []).toEqual([]);
     expect(r.messageId).not.toBe("");
     expect(r.meta).toBeUndefined();
+  });
+  // caroline-guard-g1 / Fable s1 finding on #1628: the adapter's outbound sendText is a second door
+  // into a customer conversation and passes the SAME output guard as the main dispatch.
+  it.each([
+    ["promise", "Your credits will be approved by Friday."],
+    ["reveal", "Your document got a high risk score from our checks."],
+    ["contradict", "Nothing else is needed from you."],
+    ["off_topic", "Here's a poem about the sea."],
+  ])("a barred-family body (%s) via sendText is replaced by the hand-off line and reassigned", async (_family, body) => {
+    const client = new MockIntercomClient();
+    const pages: string[] = [];
+    const r = await sendTextReply({
+      client, account, conversationId: "conv_9", body,
+      safetyDeps: { ...quiet, page: async (t: string) => { pages.push(t); return true; } },
+    });
+    expect(client.calls.replyToConversation).toHaveLength(1);
+    expect((client.calls.replyToConversation[0] as { body: string }).body).toBe(HANDOFF_LINE);
+    expect(client.calls.assignConversation).toEqual([{ conversationId: "conv_9", adminId: "bot_1", assigneeId: "inbox_7" }]);
+    expect(pages).toHaveLength(1);
+    expect(r.messageId).not.toBe("");
+  });
+  it("a phone number on this path fails closed (no customer turn to echo)", async () => {
+    const client = new MockIntercomClient();
+    await sendTextReply({ client, account, conversationId: "conv_9", body: "Call them on +44 7700 900123.", safetyDeps: quiet });
+    expect((client.calls.replyToConversation[0] as { body: string }).body).toBe(HANDOFF_LINE);
+  });
+  it("the adapter sendText hands every body to sendTextReply (no unguarded post)", () => {
+    const src = readFileSync(new URL("../src/channel.ts", import.meta.url), "utf8");
+    const start = src.indexOf("sendText: async ({ cfg, to, text, accountId }");
+    expect(start).toBeGreaterThan(0);
+    const adapter = src.slice(start, src.indexOf("\n      },\n", start));
+    expect(adapter).toContain("await sendTextReply({");
+    expect(adapter).not.toContain("replyToConversation");
+    const fn = src.slice(src.indexOf("export async function sendTextReply("), src.indexOf("export function", src.indexOf("export async function sendTextReply(")));
+    expect(fn.indexOf("await guardOutbound(")).toBeGreaterThan(0);
+    expect(fn.indexOf("await guardOutbound(")).toBeLessThan(fn.indexOf("client.replyToConversation("));
+    expect(fn).toContain("const body = og.body;");
   });
 });

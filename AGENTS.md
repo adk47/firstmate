@@ -611,6 +611,15 @@ ever PROPOSED, in shadow, in `link_proposals`. That table is never the decider's
 every row as a credit decision. Code never links on a name alone and never relinks:
 `docs/credit-verification/profile-link-proposals.md`.
 
+## Caroline's replies pass a code output guard
+
+Every Caroline reply passes `plugins/intercom/src/caroline-output-guard.ts` (promises, secret sauce,
+process contradictions, off-topic -> approved hand-off line + reassignment). Approved lines live ONCE in
+`answer-bank.ts` (pinned by `scripts/check-caroline-answer-bank.sh`). Inbound Intercom, support@ and proof
+text pass the detection-only injection watch (TS + Python copies pinned equal). Changing a rule = add a red-team
+case (`plugins/intercom/tests/redteam/`); a case that gets through fails CI and the daily replay pages. See
+`docs/support/caroline-safety-layer.md`.
+
 ## Picking the right extension mechanism
 
 Before writing new code in this repo, walk this decision tree top-down and stop at

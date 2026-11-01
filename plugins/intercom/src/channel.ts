@@ -17,6 +17,7 @@ import {
 } from "./outbound.js";
 import { sanitizeReasoningLeak } from "./sanitize-reasoning-leak.js";
 import { prepareMergeReply } from "./merge-reply-guard.js";
+import { guardOutbound, watchInbound, type SafetyDeps } from "./caroline-safety.js";
 import { surfaceLinkTargets } from "./filters.js";
 import { initStateStore, loadSessions, saveSessions } from "./state-store.js";
 import {
@@ -492,19 +493,48 @@ export async function handleDroppedReply(params: {
  * return a dropped result instead of a delivered id.
  */
 export async function sendTextReply(params: {
-  client: Pick<IntercomClient, "replyToConversation" | "assignConversation">;
+  client: Pick<IntercomClient, "replyToConversation" | "assignConversation" | "addTag">;
   account: { accountId: string; botAdminId: string; defaultInboxId?: string; fallbackSlackSupervisionChannel?: string };
   conversationId: string;
   body: string;
-  log?: { info?: (m: string) => void; error?: (m: string) => void };
+  /** What the customer last said / verified identity, so the PII rule can tell an echo from a leak. */
+  customerText?: string;
+  customerNames?: string[];
+  customerEmails?: string[];
+  log?: { info?: (m: string) => void; warn?: (m: string) => void; error?: (m: string) => void };
   fetchImpl?: typeof fetch;
+  /** Test seam for the output guard's side effects (ledger, page, classifier). */
+  safetyDeps?: SafetyDeps;
 }): Promise<{ channel: "intercom"; messageId: string; conversationId: string; meta?: { dropped: true; reason: string }; timestamp?: number }> {
-  const { client, account, conversationId, body, log, fetchImpl } = params;
+  const { client, account, conversationId, log, fetchImpl } = params;
+  const tag = `intercom:${account.accountId}`;
+  // caroline-guard-g1 (Fable s1 finding on #1628): the channel adapter's outbound sendText is a
+  // second door into a customer conversation (agent / cron / hooks callers). It passes the SAME
+  // output guard as the main dispatch: a barred body becomes the approved hand-off line and the
+  // conversation is reassigned to the team inbox. There is no path that posts model text unguarded.
+  const og = await guardOutbound({
+    client,
+    account,
+    conversationId,
+    reply: params.body,
+    customerText: params.customerText ?? "",
+    customerNames: params.customerNames,
+    customerEmails: params.customerEmails,
+    tag,
+    log,
+    deps: {
+      page: (text: string) =>
+        account.fallbackSlackSupervisionChannel
+          ? postSupervisionAlert({ url: account.fallbackSlackSupervisionChannel, text, tag, conversationId, log, fetchImpl })
+          : Promise.resolve(false),
+      ...params.safetyDeps,
+    },
+  });
+  const body = og.body;
   const reply = await client.replyToConversation({ conversationId, adminId: account.botAdminId, body });
   if (!reply.dropped) {
     return { channel: "intercom", messageId: reply.messageId, conversationId, timestamp: Date.now() };
   }
-  const tag = `intercom:${account.accountId}`;
   log?.error?.(`[intercom:ALERT] [${tag}] sendText dropped: emptied by help-link gate conv=${conversationId}`);
   await handleDroppedReply({ client, account, conversationId, tag, log, fetchImpl });
   return { channel: "intercom", messageId: "", conversationId, meta: { dropped: true, reason: "empty-after-sanitize" } };
@@ -1412,6 +1442,25 @@ export const intercomPlugin = createChatChannelPlugin({
           }
           const mediaExtraContext = buildMediaExtraContext(merged.entries);
           const bodyForDispatch = combineBatchBodies(batch);
+          // Prompt-injection watch (caroline-guard-g1): DETECTION ONLY. Runs beside the dispatch,
+          // never before it, and nothing it returns reaches the agent or changes the turn: a hit
+          // is a ledger row, a conversation tag and (on a burst / repeat sender) a page.
+          const safetyPage = (text: string) =>
+            account.fallbackSlackSupervisionChannel
+              ? postSupervisionAlert({ url: account.fallbackSlackSupervisionChannel, text, tag, conversationId, log })
+              : Promise.resolve(false);
+          void watchInbound({
+            client,
+            account,
+            conversationId,
+            contactId: latest.authorId,
+            turnId: latest.messageId,
+            contactEmail: state.enrichment?.verifiedEmail ?? state.knownFacts?.accountEmail ?? null,
+            text: bodyForDispatch,
+            tag,
+            log,
+            deps: { page: safetyPage },
+          }).catch((err) => log?.error?.(`[intercom:ALERT] [${tag}] injection watch failed conv=${conversationId}: ${err}`));
           if (batch.length > 1) {
             log?.info?.(
               `[${tag}] coalesced ${batch.length} messages into one dispatch conv=${conversationId}`,
@@ -1690,8 +1739,30 @@ export const intercomPlugin = createChatChannelPlugin({
                 );
               }
               guard.body = mergePrep.body;
+              // OUTPUT GUARD (caroline-guard-g1): the last code-owned gate before the customer sees
+              // anything. A blocked reply becomes the approved hand-off line and the conversation
+              // goes to the team inbox (caroline-safety.ts); nothing a prompt says can relax it.
+              let outputBlocked = false;
+              if (guard.body.trim().length > 0) {
+                const og = await guardOutbound({
+                  client,
+                  account,
+                  conversationId: result.conversationId,
+                  reply: guard.body,
+                  customerText: bodyForDispatch,
+                  customerNames: [state.enrichment?.verifiedName ?? ""].filter(Boolean),
+                  customerEmails: [state.enrichment?.verifiedEmail ?? "", state.knownFacts?.accountEmail ?? ""].filter(Boolean),
+                  tag,
+                  log,
+                  deps: { page: safetyPage },
+                });
+                guard.body = og.body;
+                outputBlocked = og.blocked;
+              }
+              // A blocked reply did not carry the merge paragraph to the customer, so the
+              // once-per-conversation marker must not be committed for it.
               const commitMerge = (delivered: boolean) => {
-                if (mergePrep.commit(delivered)) saveSessions(accountSessions).catch(() => {});
+                if (mergePrep.commit(delivered && !outputBlocked)) saveSessions(accountSessions).catch(() => {});
               };
               if (guard.body.trim().length === 0) {
                 // Nothing left to post after stripping control tokens
@@ -2278,7 +2349,11 @@ export const intercomPlugin = createChatChannelPlugin({
           account,
           conversationId,
           body: stripKnowledgeBase(stripConversationContext(text)),
-          log: { info: (m) => console.log(m), error: (m) => console.error(m) },
+          // No customer turn is held on this path, so a phone/address echo fails CLOSED (hand-off).
+          customerText: "",
+          customerNames: [state?.enrichment?.verifiedName ?? ""].filter(Boolean),
+          customerEmails: [state?.enrichment?.verifiedEmail ?? "", state?.knownFacts?.accountEmail ?? ""].filter(Boolean),
+          log: { info: (m) => console.log(m), warn: (m) => console.warn(m), error: (m) => console.error(m) },
         });
         if (sent.meta) return sent;
         const { messageId } = sent;

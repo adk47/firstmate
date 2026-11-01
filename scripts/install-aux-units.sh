@@ -427,6 +427,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/resolution-matcher.py missing"
 [[ -f "$HYDRA_ROOT/scripts/caroline-behavior-digest.py" ]] \
   || fail "$HYDRA_ROOT/scripts/caroline-behavior-digest.py missing"
+[[ -x "$HYDRA_ROOT/scripts/caroline-safety-daily.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/caroline-safety-daily.sh missing or not executable"
 [[ -f "$HYDRA_ROOT/scripts/support-changelog-sync.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/support-changelog-sync.sh missing"
 [[ -f "$HYDRA_ROOT/scripts/sync-platform-llms.sh" ]] \
@@ -1332,6 +1334,50 @@ cbd=caroline-behavior-digest.timer
 systemctl enable "$cbd" >/dev/null 2>&1 || log "WARN: could not enable $cbd"
 systemctl start "$cbd" >/dev/null 2>&1 || log "WARN: could not start $cbd"
 log "  $cbd: $(systemctl is-active "$cbd" 2>/dev/null || echo unknown)"
+
+# ─── Caroline safety layer: daily red-team replay + injection digest (06:10 UTC) ──
+# caroline-guard-g1. Replays the red-team corpus against the DEPLOYED edge plugin
+# (output guard + inbound injection watch) and the injected-document cases against
+# the doc-verify judge, then summarises the shared ledger
+# (/var/lib/hydra/injection-watch/ledger.jsonl) and refreshes the fraud-lens watch
+# CANDIDATES file. Posts the digest to #clio_devops; any failing case, an unloadable
+# layer or fewer passing cases than yesterday pages (and the unit fails -> OnFailure).
+# Read-only against customers/core/Intercom; no model call. See
+# scripts/caroline-safety-daily.sh and docs/support/caroline-safety-layer.md.
+# The shared injection/output-guard ledger dir (both writers create only this leaf; pre-create it so the first
+# daily digest does not page "ledger directory missing" before any hit has been written).
+install -d -m 700 /var/lib/hydra/injection-watch
+cat > /etc/systemd/system/caroline-safety-daily.service << CAROSAFETYSVC
+[Unit]
+Description=Caroline safety layer daily red-team replay + injection digest (#clio_devops; pages on regression)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+Environment=MUSO_BIN=/usr/local/bin/muso
+ExecStart=/bin/bash $HYDRA_ROOT/scripts/caroline-safety-daily.sh
+CAROSAFETYSVC
+
+cat > /etc/systemd/system/caroline-safety-daily.timer << CAROSAFETYTMR
+[Unit]
+Description=Daily — Caroline safety red-team replay + injection digest at 06:10 UTC
+
+[Timer]
+OnCalendar=*-*-* 06:10:00 UTC
+Persistent=true
+RandomizedDelaySec=120
+Unit=caroline-safety-daily.service
+
+[Install]
+WantedBy=timers.target
+CAROSAFETYTMR
+
+systemctl daemon-reload
+csd=caroline-safety-daily.timer
+systemctl enable "$csd" >/dev/null 2>&1 || log "WARN: could not enable $csd"
+systemctl start "$csd" >/dev/null 2>&1 || log "WARN: could not start $csd"
+log "  $csd: $(systemctl is-active "$csd" 2>/dev/null || echo unknown)"
 
 # ─── Caroline shipped-work feed (daily 05:30 UTC) ─────────────────────────
 # Renders customer-visible product changes into
@@ -3408,6 +3454,7 @@ log "  $qart: $(systemctl is-active "$qart" 2>/dev/null || echo unknown)"
 # OnFailure= at itself is an infinite loop.
 AUX_ONFAILURE_UNITS=(
   caroline-behavior-digest.service
+  caroline-safety-daily.service
   clickup-sla-digest.service
   clickup-todo-dedupe.service
   close-duplicate-conversations.service
