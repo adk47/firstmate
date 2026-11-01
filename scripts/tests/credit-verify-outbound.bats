@@ -30,6 +30,10 @@ if "--outcomes-json" in a:
     p = a[a.index("--outcomes-json") + 1]
     n = int(os.environ.get("STUB_REFUSED", "0")) if mode == "apply" else 0
     doc = {"mode": mode, "outcomes": [{"user": str(i), "result": "refused", "reason": "G5"} for i in range(n)]}
+    if "--start-entry" in a:                                         # the uvn runner's page record (QA #1612)
+        st, me = int(a[a.index("--start-entry") + 1]), int(a[a.index("--max-entries") + 1])
+        listed = int(os.environ.get("STUB_LISTED", "450"))
+        doc["page"] = {"start": st, "end": int((os.environ.get("STUB_APPLY_PAGE_END") if mode == "apply" else "") or os.environ.get("STUB_PAGE_END") or min(listed, st + me)), "listed": listed}
     if mode != "apply" and not os.environ.get("STUB_NO_ACCEPTED"):     # the runner's accepted set (#1600)
         doc["accepted"] = [{"user": u} for u in os.environ.get("STUB_ACCEPTED", "1").split(",") if u]
     json.dump(doc, open(p, "w"))
@@ -146,7 +150,7 @@ applies() { grep -c -- "--mode apply" "$CALLS" || true; }
   evil=(HYDRA_ROOT="$E" CVO_ETC="$E/etc" CVO_STATE="$E/state" PY_BIN="$E/py" CVO_RUNNER="$E/r" CVO_OWING="$E/o" CVO_RECEIPTS="$E/rc"
         CVO_HEALTH="$E/h" CVO_ZERO_READ="$E/z" CVO_FRAUD="$E/f" CVO_MAIN_ENV="$E/env" CVO_LEDGER="$E/l.sqlite3" CVO_SCRIPTS="$E/s"
         CVO_RD_SCAN="$E/rd" CVO_RD_CAP=99999 CVO_POLICY="$E/p.json" CVO_CLAIM_LIST="$E/c.json" CVO_CAP=99999 CVO_R1_CAP=99999
-        CVO_CLAIM_CAP=99999 CVO_REFUSAL_SPIKE=1.0 CVO_DOW=9 CVO_NEED_RUNNER="$E/n" CVO_UNSIGNED_ALL=1 CVO_NOW_EPOCH=1 CVO_JUDGE="$E/j" CVO_DEPLOYED_SHA="$E/d" CVO_TICK_BUDGET_S=999999 CVO_TICK_HARD_S=999999 CVO_CHECK_S_PER_USER=0 CVO_RESERVE_PAD_S=0 CVO_APPLY_S_PER_USER=1 CVO_TICK_ELAPSED0=99 CVO_FULL_CAP_FROM_TEST=uvn-status=2000-01-01T00:00Z CVO_TIMEOUT_BIN="$E/t")
+        CVO_CLAIM_CAP=99999 CVO_REFUSAL_SPIKE=1.0 CVO_DOW=9 CVO_NEED_RUNNER="$E/n" CVO_UNSIGNED_ALL=1 CVO_NOW_EPOCH=1 CVO_JUDGE="$E/j" CVO_DEPLOYED_SHA="$E/d" CVO_CHECK_ENTRIES=99999 CVO_TICK_BUDGET_S=999999 CVO_TICK_HARD_S=999999 CVO_CHECK_S_PER_USER=0 CVO_RESERVE_PAD_S=0 CVO_APPLY_S_PER_USER=1 CVO_TICK_ELAPSED0=99 CVO_FULL_CAP_FROM_TEST=uvn-status=2000-01-01T00:00Z CVO_TIMEOUT_BIN="$E/t")
   run -0 env -u BATS_TEST_TMPDIR "${evil[@]}" "$SCRIPT" --print-config
   [[ "$output" != *"$E"* ]]; [[ "$output" != *99999* ]]
   now_line="$(printf '%s\n' "$output" | grep '^NOW_EPOCH=')"; [ "${now_line#NOW_EPOCH=}" -gt 1700000000 ]   # the real clock, never CVO_NOW_EPOCH=1
@@ -183,6 +187,7 @@ FIRST_CAP=100
 UNSIGNED_ALL=0
 JUDGE=/opt/hydra/scripts/credit-batch-judge.py
 DEPLOYED_SHA_FILE=/opt/hydra/.deployed-sha
+CHECK_ENTRIES=200
 TICK_BUDGET_S=6000
 TICK_HARD_S=6900
 CHECK_S_PER_USER=4
@@ -234,6 +239,9 @@ TIMEOUT_BIN=/usr/bin/timeout"
   grep -q "^uvn-status --list .*owing-uvn.json --segment paid --campaign uvn-status .*--mode apply" "$CALLS"
   # [key=apply-sized-to-list]: the apply sends only this tick's own check's accepted set, paged by the tick
   grep -qE -- "--mode apply .*--signed-accepted [^ ]*/uvn-status-paid-check.json --page" "$CALLS"
+  # p1 599 / r5 598: the uvn check, bodies and apply walk ONE page of list entries; the claim runners take no such flag
+  [ "$(grep -c -- "^uvn-status .*--max-entries 200 " "$CALLS")" -eq "$(grep -c "^uvn-status " "$CALLS")" ]
+  if grep -q -- "^claim-.*--max-entries" "$CALLS"; then false; fi
   grep -q "^uvn-status --list .*owing-uvn.json --segment paid --campaign uvn-status .*--mode dry-run --max-users 100 --check-recipients" "$CALLS"
   # every other family: checked (dry-run --check-recipients) but NO apply
   grep -q "^send --list .*need-asks.json --segment paid --mode dry-run --max-users 100 --check-recipients" "$CALLS"
@@ -752,4 +760,27 @@ PY
     grep -q "the rendered bodies are not the check's accepted set" "$CVO_OUT_ROOT"/*/tick.log
     [ "$(applies)" = 0 ]
   done
+}
+
+@test "outbound tick (QA #1612): the uvn page ROTATES across ticks by a per-family cursor; one tick's check, bodies and apply walk the same page" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  run -0 "$SCRIPT"
+  # QA #1612: the page rotates - tick 1 walks from 0, the cursor moves to 200, then 400, then wraps to 0 (450 listed)
+  [ "$(cat "$CVO_STATE/cursor-uvn-status-paid")" = "200" ]
+  grep -q -- "^uvn-status .*--segment paid --campaign uvn-status .*--start-entry 0 " "$CALLS"
+  for want in 400 0; do
+    rm -rf "$CVO_OUT_ROOT"; run -0 "$SCRIPT"; [ "$(cat "$CVO_STATE/cursor-uvn-status-paid")" = "$want" ]
+  done
+  : > "$CALLS"; rm -rf "$CVO_OUT_ROOT"; echo 200 > "$CVO_STATE/cursor-uvn-status-paid"; run -0 "$SCRIPT"
+  [ "$(grep -c -- "^uvn-status .*--segment paid --campaign uvn-status .*--start-entry 200 " "$CALLS")" -ge 2 ]   # check + bodies (+ apply): one page
+  if grep -q -- "^uvn-status .*--segment paid --campaign uvn-status .*--start-entry [^2]" "$CALLS"; then false; fi
+  # QA #1612 round 2: the run reached its cap at entry 260 (page.end) - the next tick starts THERE, not at 400
+  echo 200 > "$CVO_STATE/cursor-uvn-status-paid"; rm -rf "$CVO_OUT_ROOT"
+  STUB_PAGE_END=260 run -0 "$SCRIPT"; [ "$(cat "$CVO_STATE/cursor-uvn-status-paid")" = "260" ]
+  # ... and a live apply that stopped earlier than its check (time / daily cap) moves it only to where the APPLY stopped
+  echo 200 > "$CVO_STATE/cursor-uvn-status-paid"; rm -rf "$CVO_OUT_ROOT"
+  STUB_PAGE_END=300 STUB_APPLY_PAGE_END=240 run -0 "$SCRIPT"; [ "$(cat "$CVO_STATE/cursor-uvn-status-paid")" = "240" ]
+  # a step failing after the check (the body sample) leaves the page un-done: the cursor does not move
+  echo 200 > "$CVO_STATE/cursor-uvn-status-paid"; rm -rf "$CVO_OUT_ROOT"
+  STUB_PREVIEW_FAIL=1 run "$SCRIPT"; [ "$(cat "$CVO_STATE/cursor-uvn-status-paid")" = "200" ]
 }

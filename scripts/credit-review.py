@@ -584,6 +584,7 @@ def write_outcomes(args: argparse.Namespace, report: object) -> str:
                        "accepted": list(getattr(report, "accepted", [])), "filtered": list(getattr(report, "filtered", [])),
                        "sent": list(getattr(report, "sent", [])),
                        "recipient_ok": getattr(report, "recipient_ok", 0),
+                       "page": getattr(report, "page", None) or None,     # QA #1612: the entries walked
                        # p1 579: every tick artefact names the deploy head it ran on and the head its list was signed on
                        "deployed": verify_notify.deployed_head() or None,
                        "signed_on": verify_notify.LIST_SIGNED_ON or None,
@@ -667,7 +668,8 @@ def _uvn_status(args: argparse.Namespace) -> int:
                             from_stage2=args.from_stage2, stage2_path=args.proof_store, exclude_users=exclude,
                             check_recipients=args.check_recipients, segment_daily_cap=args.segment_daily_cap,
                             gmail_fallback_o=args.gmail_fallback_o,
-                            no_correction=args.no_correction)
+                            no_correction=args.no_correction, max_entries=args.max_entries,
+                            start_entry=args.start_entry)
     log("uvn-status " + json.dumps({k: v for k, v in vars(report).items() if not isinstance(v, (list, dict))}))
     werr = write_outcomes(args, report)
     print(uvn_status.render(report, args.mode, args.segment) + (f" OUTCOMES NOT WRITTEN: {werr}." if werr else ""))
@@ -1032,6 +1034,11 @@ def parser() -> argparse.ArgumentParser:
                          "gap-ask: Fable's gap ask for stage-2 need_more credits (with --from-stage2)")
     us.add_argument("--gmail-fallback-o", action="store_true",
                     help="[key=gmail-o-forward] the /o batch: the frozen did-vouch set ONLY, the ask + /o; only while cs-gmail is stale")
+    us.add_argument("--start-entry", type=int, default=0, metavar="K",
+                    help="QA #1612: the page starts at this segment's list entry K (the outbound tick's cursor)")
+    us.add_argument("--max-entries", type=int, default=None, metavar="N",
+                    help="walk at most N list entries this run (the page; p1 599: a check costs per entry walked, and "
+                         "--max-users caps accepts only)")
     us.add_argument("--no-correction", action="store_true",
                     help="[key=scale-now] defer any ask that would carry the /c2 correction (class C stays signed-only)")
     us.add_argument("--wording", choices=["queued", "received", "queued-neutral", "no-ask"], default=None,

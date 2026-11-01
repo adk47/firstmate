@@ -815,6 +815,44 @@ class UvnStatusTests(unittest.TestCase):
         rep, gate = self.run_(mode="dry-run", gate=Renders(), query=replica(range(1, 16)), preview_dir=str(prev2),
                               max_users=5)
         self.assertNotEqual({f[:-4] for f in os.listdir(prev2) if f.endswith(".txt")}, accepted)
+    def test_a_check_walks_one_page_of_list_entries_in_parallel_and_accepts_the_list_order_prefix(self):
+        # p1 599 / r5 598 (the 10:00Z check walked the whole 4,172-user list one gate call at a time for an hour):
+        # --max-entries pages the WALK by list entries; the dry run's gate calls run on the parallel check workers;
+        # the accepted set is the list-order prefix up to the run size (what the apply would send)
+        import threading, time
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 16)]
+        self.write_list()
+
+        class Checks(FakeGate):
+            def __init__(self):
+                super().__init__()
+                self.live, self.peak, self.mu = 0, 0, threading.Lock()
+
+            def __call__(self, argv):
+                with self.mu:
+                    self.live += 1
+                    self.peak = max(self.peak, self.live)
+                time.sleep(0.05)
+                payload = json.loads(Path(argv[argv.index("--credits-file") + 1]).read_text())
+                with self.mu:
+                    self.live -= 1
+                    self.calls.append((argv, payload))
+                uid = int(payload["user"]["id"])
+                if uid in (1, 2, 3):                                  # the gate defers the first three
+                    return subprocess.CompletedProcess(argv, 1, "DEFERRED messaged_7d", "")
+                return subprocess.CompletedProcess(argv, 0, "RECIPIENT OK uvn-status initial email credits=1", "")
+        g = Checks()
+        rep, _ = self.run_(mode="dry-run", gate=g, query=replica(range(1, 16)), check_recipients=True, max_users=4,
+                           max_entries=10)
+        self.assertEqual([a["user"] for a in rep.accepted], ["4", "5", "6", "7"])     # list order, the run's size
+        self.assertGreater(g.peak, 1)                                                  # parallel check workers
+        walked = {int(p["user"]["id"]) for _, p in g.calls}
+        self.assertTrue(walked <= set(range(1, 11)), walked)                          # never past the 10-entry page
+        g2 = Checks()
+        rep, _ = self.run_(mode="dry-run", gate=g2, query=replica(range(1, 16)), check_recipients=True, max_users=100,
+                           max_entries=5)
+        self.assertEqual({int(p["user"]["id"]) for _, p in g2.calls}, {1, 2, 3, 4, 5})
+        self.assertEqual(([a["user"] for a in rep.accepted], rep.not_walked), (["4", "5"], 10))
 
     def test_a_signed_paged_apply_reaches_the_signed_user_past_a_prefix_of_unsigned_ones(self):
         # QA #1611: the signed set is applied BEFORE the run-size slice - users 1-4 unsigned, 5 signed, --max-users 1
@@ -826,6 +864,44 @@ class UvnStatusTests(unittest.TestCase):
         self.assertEqual([p["user"]["id"] for _, p in gate.calls], ["5"])
         self.assertEqual(sorted(o["user"] for o in rep.outcomes if o["reason"] == "not_in_signed_accepted"),
                          ["1", "2", "3", "4"])
+
+    def test_successive_pages_reach_past_a_page_of_persistent_deferrals(self):
+        # QA #1612 (1): the first 5 entries are deferred on every run; the caller advances start_entry from report.page,
+        # so the next run walks entries 6-10 and accepts there - candidate 6 is never starved
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 11)]
+        self.write_list()
+
+        class Checks(FakeGate):
+            def __call__(self, argv):
+                super().__call__(argv)
+                uid = int(self.calls[-1][1]["user"]["id"])
+                return subprocess.CompletedProcess(argv, 0 if uid > 5 else 1,
+                                                   "RECIPIENT OK c" if uid > 5 else "DEFERRED messaged_7d", "")
+        rep, _ = self.run_(mode="dry-run", gate=Checks(), query=replica(range(1, 11)), check_recipients=True,
+                           max_users=3, max_entries=5)
+        self.assertEqual((rep.accepted, rep.page), ([], {"start": 0, "end": 5, "listed": 10, "page_end": 5}))
+        rep, g = self.run_(mode="dry-run", gate=Checks(), query=replica(range(1, 11)), check_recipients=True,
+                           max_users=3, max_entries=5, start_entry=rep.page["end"])
+        self.assertEqual([a["user"] for a in rep.accepted], ["6", "7", "8"])
+        self.assertTrue({int(p["user"]["id"]) for _, p in g.calls} <= set(range(6, 11)))
+        # QA #1612 (round 2): the cap (3) was reached at entry 8 - page.end is the first entry NOT got to (9), not the
+        # page's end (10): the next run starts there, so entries 9-10 are never skipped
+        self.assertEqual(rep.page, {"start": 5, "end": 8, "listed": 10, "page_end": 10})
+        rep, g = self.run_(mode="dry-run", gate=Checks(), query=replica(range(1, 11)), check_recipients=True,
+                           max_users=3, max_entries=5, start_entry=rep.page["end"])
+        self.assertEqual([a["user"] for a in rep.accepted], ["9", "10"])
+
+    def test_the_status_team_review_preflight_reads_only_the_page(self):
+        # QA #1612 (2): the proof_required preflight runs per user - only the page's users are read
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 11)]
+        self.write_list()
+        import unittest.mock
+        from credit_review import comm_state
+        read = []
+        with unittest.mock.patch.object(comm_state, "proof_required_owed", lambda uid, q: read.append(uid) or []):
+            self.run_(mode="dry-run", campaign="status-team-review", query=replica(range(1, 11)), max_users=3,
+                      max_entries=4, start_entry=2)
+        self.assertEqual(read, [3, 4, 5, 6])
 
     def test_dry_run_validates_without_sending(self):
         _, gate = self.run_(mode="dry-run")

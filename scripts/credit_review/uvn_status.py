@@ -214,6 +214,8 @@ class UvnReport(verify_notify.Report):
     excluded: int = 0                  # --exclude-users (another lane messages them today)
     count_copy: int = 0                # status-team-review users sent the count-only note (not held)
     stage2_released: int = 0           # documented users let through by a stage-2 verdict
+    not_walked: int = 0                # p1 599: list entries outside this run's --max-entries page (other runs')
+    page: dict = field(default_factory=dict)   # QA #1612: {start, end, listed} - the list entries this run walked
     campaign: str = ""
     fraud_held: int = 0
     ask_only: int = 0
@@ -711,7 +713,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
         exclude_users: set[str] | frozenset[str] = frozenset(), lens: fraud_lens.LensFn | None = None,
         watchlist_path: str | None = None, holds_path: str | None = None,
         segment_daily_cap: int | None = None, gmail_fallback_o: bool = False,
-        no_correction: bool = False) -> UvnReport:
+        no_correction: bool = False, max_entries: int | None = None, start_entry: int = 0) -> UvnReport:
     if campaign not in CAMPAIGNS:
         raise ValueError(f"unknown campaign {campaign!r}")
     if wording and (campaign, wording) not in WORDINGS:
@@ -782,6 +784,15 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
         return report
     want_paid = {"paid": True, "free": False}[segment]
     offered = [u for u in users if u.get("skip") is None and bool(u.get("paid")) is want_paid]
+    # p1 599 / QA #1612: a run walks ONE page of this segment's LIST ENTRIES - [start_entry, start_entry + max_entries)
+    # - chosen BEFORE any per-user read (the status-team-review preflight included). The caller advances start_entry
+    # from report.page between runs (the tick keeps a cursor), so a page of persistent deferrals never starves the rest.
+    n_listed = len(offered)
+    start = max(0, min(int(start_entry or 0), n_listed)) if n_listed else 0
+    stop = n_listed if max_entries is None else min(n_listed, start + max(0, int(max_entries)))
+    offered = offered[start:stop]
+    report.page = {"start": start, "end": stop, "listed": n_listed}
+    report.not_walked = n_listed - (stop - start)
     if campaign == "status-team-review":
         # v1 STOP-CLASS / r5 + p1 [key=k-proof-required]: a status line is for owes-nothing users only. Read core's
         # proof_required for EVERY offered user before anything goes: one proof_required=true (or fresh capture pending)
@@ -800,7 +811,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
             report.halted = (f"{len(bad)} user(s) in this status-team-review list owe proof per core proof_required "
                              f"({', '.join(bad[:10])}); the list must be rebuilt - nothing sent")
             return report
-    report.listed = len(offered)
+    report.listed = n_listed
     day = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
     path = ledger_path or verify_ledger.DEFAULT_PATH
     cap = DAILY_MAX if is_ask else STATUS_DAILY_MAX
@@ -835,6 +846,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
     finally:
         db.close()
     pos = 0
+    examined: set[str] = set()       # QA #1612: page entries this run actually got to (the cursor's next start)
 
     def held(why: str) -> None:
         setattr(report, HOLDS[why], getattr(report, HOLDS[why]) + 1)
@@ -853,8 +865,9 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                 if mode == "apply" and listed:
                     verify_ledger.skip_requests(db, campaign=campaign, request_ids=listed)
 
-            while pos < len(cands) and len(batch) < want:
-                chunk = cands[pos:pos + min(500, max(50, want - len(batch)))]
+            end = len(cands)                 # the page was cut from the list entries above
+            while pos < end and len(batch) < want:
+                chunk = cands[pos:min(end, pos + min(500, max(50, want - len(batch))))]
                 accounts = accounts_of([int(u["user_id"]) for u in chunk], query)
                 # The fraud lens runs FIRST, before any branch that can close a user's requests in the
                 # ledger: a held user is never closed, whatever else is true of them (QA @214ea86).
@@ -864,6 +877,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                     if len(batch) + len(picked) >= want:
                         break
                     pos += 1
+                    examined.add(str(u.get("user_id")))
                     v = verdicts.get(int(u["user_id"]))
                     if v is None or v.held:
                         # Never messaged, never closed: re-checked on every run.
@@ -1017,6 +1031,41 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
             batch = next_batch(want)
             if not batch:
                 break
+            if mode != "apply":
+                # r5 598 / p1 599: a DRY run (check, preview, validate) sends nothing and re-plans nothing per user, so
+                # the batch's gate calls run on #1596's parallel check workers; the results are read per user in LIST
+                # order, and the batch is sized to what is left of the run (room), so the accepted set is the list-order
+                # prefix the apply would send (next_batch already sized it to room())
+                take = batch
+                outs: dict[str, str] = {}
+
+                def seen(argv: list[str], _run=runner) -> Any:
+                    res = _run(argv)
+                    try:
+                        with open(argv[argv.index("--credits-file") + 1], encoding="utf-8") as fh:
+                            uid_ = str(json.load(fh)["user"].get("id") or "")
+                    except (OSError, ValueError, KeyError, IndexError):
+                        uid_ = ""
+                    if res.returncode == 0 and verify_notify._first_line(res.stdout).startswith(("RECIPIENT OK", "VALID ", "DRY-RUN ")):
+                        outs[uid_] = "ok"
+                    return res
+                verify_notify.send_all([p for _, p, _ in take], report, mode=mode, wrapper=wrapper, runner=seen,
+                                       extra=["--campaign", campaign] + (["--copy", wording] if wording else [])
+                                       + (["--gmail-fallback-o"] if gmail_fallback_o else [])
+                                       + (["--no-correction"] if no_correction else []),
+                                       pace_seconds=0, preview_dir=preview_dir,
+                                       check_recipients=check_recipients)
+                calls += len(take)
+                for _, p, dropped in take:
+                    if outs.get(str(p["user"].get("id") or "")) == "ok":
+                        report.users += 1
+                        counted += 1
+                        if dropped:
+                            report.rows_held += dropped
+                            report.note("rows_left_out")
+                if report.halted:
+                    break
+                continue
             for i, (listed, p, dropped) in enumerate(batch):
                 if verify_notify.not_signed(mode, p["user"]["id"]):
                     # QA #1611: a signed apply never spends a slot, a re-plan or a gate call on an unsigned user
@@ -1026,6 +1075,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                 allowed, left = room()
                 if allowed <= 0:
                     report.over_daily_max += len(batch) - i
+                    examined.difference_update(str(b[1]["user"]["id"]) for b in batch[i:])   # not got to
                     break
                 if mode == "apply":
                     uid = int(p["user"]["id"])
@@ -1122,6 +1172,14 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
             fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
             lock_fh.close()
     report.over_daily_max += len(cands) - pos
+    # QA #1612: page.end = the first page entry this run did NOT get to (the cap or the room stopped it there), so the
+    # next run starts exactly there; page_end = where the page itself ends
+    in_cands = {id(u) for u in cands}
+    first_open = next((j for j, u in enumerate(offered) if id(u) in in_cands and str(u.get("user_id")) not in examined),
+                      None)
+    report.page["page_end"] = report.page.get("end", 0)
+    if first_open is not None:
+        report.page["end"] = report.page["start"] + first_open
     if mode == "apply" and campaign in verify_ledger.RECHECKABLE_REFUSALS:
         verify_notify.flag_refusals(report, ledger_path=path, campaigns=[campaign], post=post, now=now)
     return report
@@ -1187,7 +1245,8 @@ def render(report: UvnReport, mode: str, segment: str) -> str:
              if mode == "apply" else f"{head}: {report.listed} on the list, {report.users} would be messaged"]
     if mode == "apply":
         parts.append(f"{report.sent_notes} sent")
-    for label, n in (("documents on file (not asked)", report.proof_on_file),
+    for label, n in (("list entries outside this run's --max-entries page (other runs')", report.not_walked),
+                     ("documents on file (not asked)", report.proof_on_file),
                      ("with documents on file, let through by a stage-2 verdict", report.stage2_released),
                      ("left out: another lane messages them today (--exclude-users)", report.excluded),
                      ("told by the count-only note (requests unshowable or over 1,000, no titles named)",

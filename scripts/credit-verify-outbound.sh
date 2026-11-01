@@ -92,6 +92,7 @@ FIRST_CAP=100                          # [key=scale-now]: a family's first unsig
 #  - the bodies are skipped once TICK_HARD_S is passed; the apply is cut to what fits before it at APPLY_S_PER_USER.
 TICK_BUDGET_S="$(cfg CVO_TICK_BUDGET_S 6000)"
 TICK_HARD_S="$(cfg CVO_TICK_HARD_S 6900)"
+CHECK_ENTRIES="$(cfg CVO_CHECK_ENTRIES 200)"   # p1 599 / r5 598: a uvn family walks at most this many LIST ENTRIES a tick
 CHECK_S_PER_USER="$(cfg CVO_CHECK_S_PER_USER 4)"   # ~10-15 s a live-gate check on 4 read-only workers (#1596)
 RESERVE_PAD_S="$(cfg CVO_RESERVE_PAD_S 300)"      # + the replica read (~86 s) and the health / zero-read rails
 APPLY_S_PER_USER="$(cfg CVO_APPLY_S_PER_USER 15)"
@@ -137,7 +138,7 @@ PY
 }
 if [ "${1:-}" = "--print-config" ]; then
   for v in CVO_HARNESS HYDRA_ROOT KILL KILL2 LIVE_FLAG PAID_FLAG EXCLUDE STATE PY RUNNER OWING RECEIPTS HEALTH ZERO_READ \
-           FRAUD MAIN_ENV LEDGER SCRIPTS_DIR RD_SCAN RD_CAP POLICY CLAIM_LIST CAP R1_CAP CLAIM_CAP DOW REFUSAL_SPIKE NEED_RUNNER FIRST_CAP UNSIGNED_ALL NOW_EPOCH JUDGE DEPLOYED_SHA_FILE TICK_BUDGET_S TICK_HARD_S CHECK_S_PER_USER RESERVE_PAD_S APPLY_S_PER_USER TICK_ELAPSED0 FULL_CAP_FROM_TEST TIMEOUT_BIN; do
+           FRAUD MAIN_ENV LEDGER SCRIPTS_DIR RD_SCAN RD_CAP POLICY CLAIM_LIST CAP R1_CAP CLAIM_CAP DOW REFUSAL_SPIKE NEED_RUNNER FIRST_CAP UNSIGNED_ALL NOW_EPOCH JUDGE DEPLOYED_SHA_FILE CHECK_ENTRIES TICK_BUDGET_S TICK_HARD_S CHECK_S_PER_USER RESERVE_PAD_S APPLY_S_PER_USER TICK_ELAPSED0 FULL_CAP_FROM_TEST TIMEOUT_BIN; do
     printf '%s=%s\n' "$v" "${!v}"
   done
   exit 0
@@ -386,6 +387,16 @@ family_cap() { # <family> <its cap>
   elif [ "$2" -gt "$FIRST_CAP" ]; then echo "$FIRST_CAP"; else echo "$2"; fi
 }
 
+# QA #1612: the next page's first entry from a run's own page record ({start, end, listed}; end = the first entry that
+# run did not get to), wrapping to 0 at the list's end. Non-zero rc = no page record.
+page_next() { py -c 'import json,sys; p=json.load(open(sys.argv[1])).get("page") or {}; e,n=int(p["end"]),int(p["listed"]); print(e if e < n else 0)' "$1" 2>/dev/null; }
+advance_cursor() { # <tag> <cursor file> <run's outcomes json> <this tick's start>; uvn families only (a cursor file)
+  [ -n "$2" ] || return 0
+  local nxt; nxt="$(page_next "$3")" || { log "$1: no page record in $(basename "$3"); the cursor stays at $4"; return 0; }
+  printf '%s\n' "$nxt" > "$2.tmp" && mv -f "$2.tmp" "$2"
+  log "$1 page: entries from $4 this tick; next tick starts at $nxt"
+}
+
 family() {
   local name="$1" seg="$2" list="$3" cap="$4" sub="$5"; shift 5
   local tag="$name-$seg" rc
@@ -396,6 +407,17 @@ family() {
 
   [ -s "$list" ] || { log "$tag: empty audience; skipped"; return 0; }
   local excl=(); [ "$sub" = uvn-status ] && excl=("${EXCL_ARGS[@]}")
+  # p1 599 / r5 598 (the 10:00Z check walked all 4,172 entries for an hour): the uvn runner's walk is paged by LIST
+  # ENTRIES - the check, the bodies and the apply walk the same page (--max-users caps accepts only)
+  # QA #1612: the page ROTATES - a per-family cursor in $STATE (the next page's first entry), advanced from the check's
+  # own page record right after a clean check, wrapping to 0 at the list's end; so persistent deferrals at the head
+  # never starve the rest. The check, bodies and apply of one tick walk the SAME page (the value read here).
+  local cur_file="" cur=0
+  if [ "$sub" = uvn-status ]; then
+    cur_file="$STATE/cursor-$tag"
+    cur="$(cat "$cur_file" 2>/dev/null || echo 0)"; [[ "$cur" =~ ^[0-9]{1,9}$ ]] || cur=0
+  fi
+  local pg=(); [ "$sub" = uvn-status ] && pg=(--max-entries "$CHECK_ENTRIES" --start-entry "$cur")
   local runner="$RUNNER"; if [ "$sub" = need-send ]; then runner="$NEED_RUNNER"; sub=send; fi
   # [key=scale-now]: the family's unsigned date (unset = SIGNED-only) and its cap before v1's 10-sample line
   local fam="$name"; [ "$name" = r1 ] && fam=status-doc-received
@@ -403,32 +425,39 @@ family() {
   reached "${UNSIGNED_FROM[$fam]:-}" && unsigned="${UNSIGNED_FROM[$fam]}"
   [ "$UNSIGNED_ALL" = 1 ] && unsigned=harness
   cap="$(family_cap "$fam" "$cap")"
-  local worst=$(( 2 * cap * CHECK_S_PER_USER + RESERVE_PAD_S ))
+  local walk="$cap"; [ "$sub" = uvn-status ] && [ "$CHECK_ENTRIES" -gt "$cap" ] && walk="$CHECK_ENTRIES"
+  local worst=$(( 2 * walk * CHECK_S_PER_USER + RESERVE_PAD_S ))
   if [ $(( $(elapsed) + worst )) -gt "$TICK_HARD_S" ]; then
     log "$tag: $(elapsed)s into the tick and its worst case is ${worst}s (cap $cap); it does not fit before the ${TICK_HARD_S}s deadline; this family waits for the next tick"
     return 0
   fi
-  py "$runner" "$sub" --list "$list" --segment "$seg" "$@" "${excl[@]}" --mode dry-run --max-users "$cap" \
+  py "$runner" "$sub" --list "$list" --segment "$seg" "$@" "${excl[@]}" "${pg[@]}" --mode dry-run --max-users "$cap" \
     --check-recipients --outcomes-json "$OUT/$tag-check.json" > "$OUT/$tag-check.out" 2>&1; rc=$?
   log "$tag check (rc=$rc): $(head -c 600 "$OUT/$tag-check.out")"
   if deadline_rc "$rc"; then log "$tag: check hit the ${TICK_HARD_S}s deadline (read-only, stopped); the tick ends"; return 1; fi
   [ "$rc" = 0 ] || { log "$tag: check failed; tick stops"; return 1; }
+  # QA #1612 (round 2): the cursor moves only when the family's step for this page is DONE - a dry tick or a check
+  # that accepted nobody (to where the CHECK stopped), or a clean apply (to where the APPLY stopped) - and to the
+  # first entry that run did not get to (page.end), never past entries a capped run never examined
+  if [ "$sub" = uvn-status ]; then
+    page_next "$OUT/$tag-check.json" >/dev/null || { log "$tag: the check recorded no page; tick stops"; return 1; }
+  fi
   if [ "$(elapsed)" -ge "$TICK_HARD_S" ]; then log "$tag: ${TICK_HARD_S}s deadline passed after the check; no bodies, no apply this tick"; return 0; fi
   install -d -m 700 "$OUT/$tag-bodies"
   # r5: the bodies ARE the after-the-fact review sample - no sample, no send (the tick stops). [key=scale-now-openclaw]:
   # the WHOLE batch is rendered (not 5), each body with the renderer's facts beside it - the batch judge's items
-  py "$runner" "$sub" --list "$list" --segment "$seg" "$@" "${excl[@]}" --mode dry-run --max-users "$cap" \
+  py "$runner" "$sub" --list "$list" --segment "$seg" "$@" "${excl[@]}" "${pg[@]}" --mode dry-run --max-users "$cap" \
     --preview "$OUT/$tag-bodies" --preview-accepted "$OUT/$tag-check.json" > "$OUT/$tag-bodies.out" 2>&1; rc=$?
   if deadline_rc "$rc"; then log "$tag: bodies hit the ${TICK_HARD_S}s deadline (read-only, stopped); no apply, the tick ends"; return 1; fi
   [ "$rc" = 0 ] || { log "$tag: body sample failed; no apply, tick stops: $(head -c 300 "$OUT/$tag-bodies.out")"; return 1; }
   accept_bodies "$tag"; rc=$?
   if deadline_rc "$rc"; then log "$tag: the accepted-bodies step hit the ${TICK_HARD_S}s deadline; no apply, the tick ends"; return 1; fi
   # QA #1610: a check that accepted NOBODY is a no-apply family outcome - never an apply over the original list
-  if [ "$rc" = 3 ]; then log "$tag: the check accepted nobody; no apply this tick (the family is done)"; return 0; fi
+  if [ "$rc" = 3 ]; then log "$tag: the check accepted nobody; no apply this tick (the family is done)"; advance_cursor "$tag" "$cur_file" "$OUT/$tag-check.json" "$cur"; return 0; fi
   [ "$rc" = 0 ] || { log "$tag: the rendered bodies are not the check's accepted set (rc=$rc); no apply, tick stops"; return 1; }
   judge_shadow "$tag"
   local live="$LIVE"; [ "$seg" = "paid" ] && live="$PAID_LIVE"
-  if [ "$live" != 1 ]; then log "$tag: DRY-RUN tick (no send)"; return 0; fi
+  if [ "$live" != 1 ]; then log "$tag: DRY-RUN tick (no send)"; advance_cursor "$tag" "$cur_file" "$OUT/$tag-check.json" "$cur"; return 0; fi
   if [ -z "$unsigned" ]; then log "$tag: SIGNED-only family (no read-back date in UNSIGNED_FROM): checked, not applied"; return 0; fi
   killed && { log "$tag: kill file present; stop"; return 1; }
   local campaign; campaign="$(printf '%s\n' "$@" | awk 'p{print; exit} $0=="--campaign"{p=1}')"
@@ -454,7 +483,7 @@ family() {
   # [key=apply-sized-to-list]: the apply sends only this tick's own check's accepted set (--signed-accepted); the
   # tick pages that set by its caps and deadline by design (--page: a subset, never a user outside it)
   CREDIT_UVN_DAILY_MAX="$shared" CREDIT_STATUS_DAILY_MAX="$shared" \
-  py "$runner" "$sub" --list "$list" --segment "$seg" "$@" "${excl[@]}" --mode apply --max-users "$n" "${capargs[@]}" \
+  py "$runner" "$sub" --list "$list" --segment "$seg" "$@" "${excl[@]}" "${pg[@]}" --mode apply --max-users "$n" "${capargs[@]}" \
     --signed-accepted "$OUT/$tag-check.json" --page \
     --outcomes-json "$OUT/$tag-apply.json" > "$OUT/$tag-apply.out" 2>&1; rc=$?
   log "$tag APPLY (rc=$rc): $(head -c 600 "$OUT/$tag-apply.out")"
@@ -487,6 +516,7 @@ print(sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True).execute(
     [ "$zrc" = 0 ] || { autokill "$tag zero-read $([ "$zrc" = 1 ] && echo STOP || echo UNMEASURED) for ledger $((lo + 1))-$hi: ${zr:0:200}"; return 1; }
   fi
   [ "$rc" = 0 ] || { log "$tag: apply failed rc=$rc; tick stops"; return 1; }
+  advance_cursor "$tag" "$cur_file" "$OUT/$tag-apply.json" "$cur"
 }
 
 # ---- audiences (deployed builders only) ----------------------------------------------------------------------
