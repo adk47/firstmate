@@ -29,10 +29,11 @@
 #     network result surfaces exactly once (inline or as a wake, never both), a
 #     read-only session declares the checks it skipped, and the tasks-axi
 #     compatibility verdict is paid for once per session start
-#   - the --compact post-compaction view of a large synthetic fleet stays under
-#     64 KiB, keeps the wake queue and its acknowledgement, and drops hold
-#     reasons, routine status history, and curated memory bodies the full view
-#     still prints
+#   - the --compact post-compaction view of a large synthetic fleet with
+#     live-sized curated memory stays within 128 KiB, keeps the wake queue and
+#     its acknowledgement, the routing tables, each section's own total, and a
+#     bounded curated-memory head, and drops hold reasons, routine status
+#     history, and the memory tail the full view still prints
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -2247,8 +2248,8 @@ SH
 }
 
 # write_large_fleet_home <home>: >=180 task records with long status logs
-# ending in a mix of states, orphan logs, oversized curated memory, and a
-# routing table larger than its compact budget.
+# ending in a mix of states, orphan logs, curated memory the size of a live
+# home's (~173 KB captain.md, ~125 KB learnings.md), and a sizable routing table.
 write_large_fleet_home() {
   local home=$1 i id status long
   long=$(printf 'STATUS-HISTORY-BODY %.0s' $(seq 1 30))
@@ -2268,14 +2269,21 @@ write_large_fleet_home() {
   for i in $(seq -w 1 30); do
     printf 'done: orphan %s\n' "$long" > "$home/state/orphan-$i.status"
   done
-  for i in $(seq 1 3000); do printf 'CAPTAIN-MEMORY-BODY preference line %s\n' "$i"; done > "$home/data/captain.md"
-  for i in $(seq 1 3000); do printf 'LEARNINGS-BODY fleet fact line %s\n' "$i"; done > "$home/data/learnings.md"
+  {
+    printf 'CAPTAIN-HEAD-MARKER first preference\n'
+    for i in $(seq 1 2276); do printf 'CAPTAIN-MEMORY-BODY preference line %05d with enough words to be realistic\n' "$i"; done
+    printf 'CAPTAIN-TAIL-MARKER last preference\n'
+  } > "$home/data/captain.md"
+  {
+    for i in $(seq 1 1760); do printf 'LEARNINGS-BODY fleet fact line %05d with enough words to be realistic\n' "$i"; done
+    printf 'LEARNINGS-TAIL-MARKER last fact\n'
+  } > "$home/data/learnings.md"
   for i in $(seq 1 120); do printf -- '- repo-%s: no-mistakes, yolo off, a registry line long enough to matter\n' "$i"; done > "$home/data/projects.md"
   printf '# Backlog\n\n## In flight\n- [ ] large-task-001 - placeholder (repo: firstmate) (kind: ship)\n' > "$home/data/backlog.md"
 }
 
 test_compact_view_stays_bounded_for_a_large_fleet() {
-  local rec root home fakebin compact fleet full compact_bytes full_bytes limit=65536
+  local rec root home fakebin compact fleet full compact_bytes full_bytes held_shown held_omitted limit=131072
   rec=$(new_world compact-large)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -2290,7 +2298,7 @@ EOF
   compact=$(run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" \
     --reemit --compact --source compact)
   compact_bytes=$(printf '%s\n' "$compact" | LC_ALL=C wc -c | tr -d ' ')
-  [ "$compact_bytes" -lt "$limit" ] \
+  [ "$compact_bytes" -le "$limit" ] \
     || fail "compact post-compaction digest is $compact_bytes bytes, over its $limit-byte bound"
   assert_contains "$compact" "COMPACT POST-COMPACTION VIEW" "--compact did not label its view"
   assert_contains "$compact" "LARGE-FLEET-QUEUED-WAKE" "the compact view dropped the queued wake"
@@ -2306,13 +2314,23 @@ EOF
   fleet=$(printf '%s\n' "$compact" | sed -n '/^FLEET STATE$/,/^NETWORK CHECKS$/p')
   assert_contains "$fleet" "Work under way" "the compact fleet-state section could not be isolated"
   assert_not_contains "$fleet" "STATUS-HISTORY-BODY" "the compact view inlined routine status history"
-  assert_not_contains "$compact" "CAPTAIN-MEMORY-BODY" "the compact view re-inlined data/captain.md"
-  assert_not_contains "$compact" "LEARNINGS-BODY" "the compact view re-inlined data/learnings.md"
+  assert_contains "$compact" "CAPTAIN-HEAD-MARKER" "the compact view dropped the head of data/captain.md"
+  assert_contains "$compact" "(truncated - read $home/data/captain.md for the rest)" \
+    "the compact view cut data/captain.md without its truncation marker"
+  assert_not_contains "$compact" "CAPTAIN-TAIL-MARKER" "the compact view re-inlined all of data/captain.md"
+  assert_not_contains "$compact" "LEARNINGS-TAIL-MARKER" "the compact view re-inlined the tail of data/learnings.md"
   assert_contains "$compact" "present (" "the compact view did not name curated memory with its size"
+  assert_contains "$compact" "- repo-120: no-mistakes" "the compact view cut the projects routing table"
   assert_contains "$compact" "  held-captain-call-001 (ship, core-backend-001) - Synthetic task held-captain-call-001,..." \
     "a held row lost its id, kind, repo, or decoded title"
   assert_contains "$compact" "held item(s) omitted by the post-compaction size budget" \
     "the held budget did not disclose what it left out"
+  assert_contains "$compact" "(195 item(s))" "the held budget swallowed its section total"
+  held_shown=$(printf '%s\n' "$compact" | grep -c '^  held-captain-call-')
+  held_omitted=$(printf '%s\n' "$compact" | sed -n 's/^(\([0-9]*\) more held item(s) omitted .*/\1/p')
+  [ "$((held_shown + ${held_omitted:-0}))" -eq 195 ] \
+    || fail "held rows shown ($held_shown) plus disclosed omitted ($held_omitted) do not account for exactly 195"
+  assert_not_contains "$compact" ", (195" "a section total leaked into the omitted-ids list"
   assert_contains "$compact" "first 10 shown, 15 more" "the ready list was not capped with a remainder count"
   assert_contains "$compact" "  no-record-1 (task, -)" "an in-flight item with no task record was lost"
   assert_contains "$compact" "185 more listed under Work under way" "in-flight rows with records were not deduplicated"
@@ -2327,11 +2345,12 @@ EOF
   full=$(run_named_harness_session_start claude "$home" "$root" "$fakebin:$BASE_PATH" \
     --reemit --source compact)
   full_bytes=$(printf '%s\n' "$full" | LC_ALL=C wc -c | tr -d ' ')
-  [ "$full_bytes" -gt "$((limit * 4))" ] \
+  [ "$full_bytes" -gt "$((limit * 3))" ] \
     || fail "the large-fleet fixture is too small to prove the bound: full view only $full_bytes bytes"
   assert_not_contains "$full" "COMPACT POST-COMPACTION VIEW" "a run without --compact rendered the compact view"
   assert_contains "$full" "HOLD-REASON-BODY" "the full view lost its hold reasons"
-  assert_contains "$full" "CAPTAIN-MEMORY-BODY" "the full view lost data/captain.md"
+  assert_contains "$full" "CAPTAIN-TAIL-MARKER" "the full view lost data/captain.md"
+  assert_contains "$full" "LEARNINGS-TAIL-MARKER" "the full view lost data/learnings.md"
 
   pass "compact post-compaction view of a 185-task, 195-held fleet is $compact_bytes bytes (full view $full_bytes) and keeps the wake queue and acknowledgement"
 }

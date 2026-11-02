@@ -228,12 +228,16 @@
 #             or bodies (titles cut, the ready list capped), every task record
 #             as one line (id, endpoint alive/dead, PR, newest status event;
 #             backend and terminal only when the endpoint is not alive),
-#             orphan status logs by id, and the projects and secondmates
-#             routing tables. Curated memory (captain, captain-shared,
-#             learnings) is named with its size rather than re-inlined. The
-#             COMPACT_* budgets below own the exact bounds; every section that
-#             hits one discloses its omitted count, the omitted ids where
-#             useful, and the command that lists the rest.
+#             and orphan status logs by id. The projects and secondmates
+#             routing tables print verbatim, as in the full view. Curated
+#             memory (captain, then captain-shared, then learnings) is named
+#             with its size and re-inlined only as the head of each file
+#             within one shared byte budget derived from
+#             config/startup-memory-budget; a file cut at a line boundary says
+#             so and names the path that holds the rest. The COMPACT_* budgets
+#             below own the exact bounds; every section that hits one
+#             discloses its omitted count, the omitted ids where useful, and
+#             the command that lists the rest.
 #             Every other caller - a true startup, /clear, and any explicit
 #             run - keeps the full digest.
 #
@@ -372,6 +376,8 @@ PRIMARY_HARNESS=$("$SCRIPT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-line-cap-lib.sh
 . "$SCRIPT_DIR/fm-line-cap-lib.sh"
+# shellcheck source=bin/fm-startup-memory-budget-lib.sh
+. "$SCRIPT_DIR/fm-startup-memory-budget-lib.sh"
 
 # One tasks-axi compatibility verdict per session start. The probe costs three
 # tasks-axi subprocesses and this digest needs the same answer twice - here for
@@ -389,9 +395,12 @@ case "$QUEUED_LIMIT" in ''|*[!0-9]*|0) QUEUED_LIMIT=20 ;; esac
 BACKLOG_FIELDS=blocked_by,hold_kind,hold_reason
 
 # Compact post-compaction view (--compact). Every bound below is a fixed byte or
-# character budget rather than a per-fleet scale, so the whole compact digest -
-# excluding only the verbatim wake-queue presentation and an AGENTS.md
-# instruction refresh - stays under 64 KiB however large the fleet grows; their
+# character budget rather than a per-fleet scale. With the curated-memory
+# excerpt (config/startup-memory-budget estimated tokens at that library's 3
+# bytes per token, about 22.5 KB at its 7500 default, shared across the three
+# memory files), the whole compact digest - excluding only the verbatim
+# wake-queue presentation, the verbatim routing tables, and an AGENTS.md
+# instruction refresh - stays under 128 KiB however large the fleet grows; their
 # sum, plus this script's fixed sections, is what
 # tests/fm-session-start.test.sh holds to that bound. Each section that hits its
 # budget discloses an exact omitted count and the command that shows the rest.
@@ -406,7 +415,6 @@ COMPACT_MANUAL_BUDGET=16384
 COMPACT_TASKS_BUDGET=12288
 COMPACT_OMITTED_IDS_BUDGET=1024
 COMPACT_ORPHAN_BUDGET=1024
-COMPACT_ROUTING_FILE_BUDGET=1024
 
 RULE='================================================================================'
 SUBRULE='--------------------------------------------------------------------------------'
@@ -585,13 +593,17 @@ print_status_tail() {
   done < <(tail -n "$STATUS_TAIL" "$status")
 }
 
-# compact_budget <bytes> <noun> <pointer> [<id-list-bytes>]: pass stdin lines
-# through while they fit in <bytes>, then count every remaining line and
-# disclose it with <pointer>. A positive <id-list-bytes> also names the omitted
-# lines' first words (their task ids) within that second budget, so a bounded
-# section still says WHICH records it left out. Byte semantics under LC_ALL=C.
+# compact_budget <bytes> <noun> <pointer> [<id-list-bytes>]: pass stdin row
+# lines - indented or list-item lines - through while they fit in <bytes>, then
+# count every remaining row and disclose it with <pointer>. Every other line (a
+# heading, a header, a "(...)" summary or footer) passes through uncounted, so
+# the omitted count is exact and a section's own totals survive. A positive
+# <id-list-bytes> also names the omitted rows' first words (their task ids)
+# within that second budget, so a bounded section still says WHICH records it
+# left out. Byte semantics under LC_ALL=C.
 compact_budget() {
   LC_ALL=C awk -v budget="$1" -v noun="$2" -v pointer="$3" -v idbudget="${4:-0}" '
+    !/^[[:space:]*-]/ { print; next }
     {
       n = length($0) + 1
       if (!over && used + n <= budget) { print; used += n; next }
@@ -847,35 +859,41 @@ print_work_under_way_compact() {
     compact_budget "$COMPACT_TASKS_BUDGET" "task record(s)" "read state/<id>.meta and bin/fm-crew-state.sh <id>" "$COMPACT_OMITTED_IDS_BUDGET"
 }
 
-# print_routing_or_absent <path> <label>: a small routing table in the compact
-# view, byte-bounded with its remainder disclosed, never confused with ABSENT.
-print_routing_or_absent() {
-  local path=$1 label=$2
-  subsection "$label"
-  if [ -f "$path" ]; then
-    if [ -s "$path" ]; then
-      compact_budget "$COMPACT_ROUTING_FILE_BUDGET" "line(s)" "read $path" < "$path"
-    else
-      printf '(present, empty)\n'
-    fi
-  else
-    printf 'ABSENT\n'
-  fi
+# compact_memory_budget_bytes: the one byte budget the compact view's three
+# curated-memory excerpts share - config/startup-memory-budget's estimated
+# tokens (its default when absent or invalid) at that library's 3 bytes per
+# token.
+compact_memory_budget_bytes() {
+  local tokens
+  tokens=$(fm_startup_memory_budget_read "$CONFIG" 2>/dev/null) || tokens=$FM_STARTUP_MEMORY_BUDGET_DEFAULT
+  printf '%s\n' "$((tokens * 3))"
 }
 
-# print_memory_pointer <path> <label>: curated memory is not re-inlined after a
-# compaction. The full digest delivered it at true session start, it is stable
-# session to session, and it is the content this script's ORDERING note already
-# ranks cheapest to lose; a pointer with its size keeps ABSENT distinguishable.
-print_memory_pointer() {
-  local path=$1 label=$2 bytes
+# print_memory_excerpt <path> <label>: curated memory after a compaction - its
+# size, then the head of the file cut at a line boundary within whatever of
+# COMPACT_MEMORY_LEFT earlier files left, which it spends. The full digest
+# delivered the whole file at true session start, and this script's ORDERING
+# note ranks it cheapest to lose, so a cut file names the path holding the rest.
+print_memory_excerpt() {
+  local path=$1 label=$2 bytes excerpt rc used
   subsection "$label"
-  if [ -f "$path" ]; then
-    bytes=$(wc -c < "$path" 2>/dev/null | tr -d ' ')
-    printf 'present (%s bytes) - not re-inlined after compaction; read %s, or grep it, before a decision that depends on it.\n' "${bytes:-?}" "$path"
-  else
+  if [ ! -f "$path" ]; then
     printf 'ABSENT\n'
+    return 0
   fi
+  bytes=$(wc -c < "$path" 2>/dev/null | tr -d ' ')
+  printf 'present (%s bytes) - head re-inlined within the shared post-compaction memory budget; read %s, or grep it, before a decision that depends on the rest.\n' "${bytes:-?}" "$path"
+  excerpt=$(LC_ALL=C awk -v budget="$COMPACT_MEMORY_LEFT" '
+    { n = length($0) + 1; if (used + n > budget) { cut = 1; exit } print; used += n }
+    END { if (cut) exit 3 }
+  ' "$path")
+  rc=$?
+  if [ -n "$excerpt" ]; then
+    printf '%s\n' "$excerpt"
+    used=$(printf '%s\n' "$excerpt" | LC_ALL=C wc -c | tr -d ' ')
+    COMPACT_MEMORY_LEFT=$((COMPACT_MEMORY_LEFT - used))
+  fi
+  [ "$rc" -ne 3 ] || printf '(truncated - read %s for the rest)\n' "$path"
 }
 
 hash_file_sha256() {
@@ -969,7 +987,8 @@ fi
 if [ "$COMPACT" -eq 1 ]; then
   printf 'COMPACT POST-COMPACTION VIEW: the wake queue, its acknowledgement, open\n'
   printf 'decisions, and supervision instructions are complete; the fleet state is\n'
-  printf 'one bounded line per item and curated memory is named, not re-inlined.\n'
+  printf 'one bounded line per item and curated memory is re-inlined only as a\n'
+  printf 'bounded head of each file.\n'
 fi
 # --- 1. lock -----------------------------------------------------------
 stage lock
@@ -1134,14 +1153,17 @@ This is the COMPACT view a context compaction re-delivers, so it stays small
 enough not to refill the context it was compacted from. Below: every task
 record as one line (id, endpoint alive/dead, PR, newest status event), the
 backlog as one line per item without hold reasons, the ready list capped, the
-routing tables bounded, and the curated memory files named with their sizes.
+routing tables in full, and the curated memory files named with their sizes,
+each re-inlined only as its head within one shared budget (a cut file says
+"(truncated - read <path> for the rest)").
 Every section that hit its budget says how many items it left out and how to
 list them.
 Do NOT bulk re-read data/backlog.md, state/*.meta, or state/*.status to rebuild
 the full view. Go to a source directly only for the item a decision needs:
   - one task: state/<id>.meta, state/<id>.status, bin/fm-crew-state.sh <id>,
   - one backlog item or hold reason: tasks-axi show <id> --full,
-  - curated memory a decision depends on: data/captain.md, data/learnings.md,
+  - curated memory past its excerpt that a decision depends on:
+    data/captain.md, data/captain-shared.md, data/learnings.md,
   - the NETWORK CHECKS verdict when still IN PROGRESS
     (bin/fm-startup-network.sh report),
   - or a STARTUP TRUNCATED banner named the stage that would have printed it, in
@@ -1295,11 +1317,12 @@ fi
 stage context
 section "CONTEXT"
 if [ "$COMPACT" -eq 1 ]; then
-  print_routing_or_absent "$DATA/projects.md" "data/projects.md"
-  print_routing_or_absent "$DATA/secondmates.md" "data/secondmates.md"
-  print_memory_pointer "$DATA/captain.md" "data/captain.md"
-  print_memory_pointer "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
-  print_memory_pointer "$DATA/learnings.md" "data/learnings.md"
+  print_file_or_absent "$DATA/projects.md" "data/projects.md"
+  print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
+  COMPACT_MEMORY_LEFT=$(compact_memory_budget_bytes)
+  print_memory_excerpt "$DATA/captain.md" "data/captain.md"
+  print_memory_excerpt "$DATA/captain-shared.md" "data/captain-shared.md (shared, main-authoritative, read-only in secondmate homes)"
+  print_memory_excerpt "$DATA/learnings.md" "data/learnings.md"
 else
   print_file_or_absent "$DATA/projects.md" "data/projects.md"
   print_file_or_absent "$DATA/secondmates.md" "data/secondmates.md"
