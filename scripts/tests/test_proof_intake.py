@@ -447,7 +447,11 @@ class StrictIdentityTest(IntakeTest):
         stats = self._strict(["111"])
         self.assertEqual((stats["files_filed"], stats["unresolved"]), (1, []))
         row = self.store.db.execute("SELECT user_id, filed_by, matched_by FROM proof_intake").fetchone()
-        self.assertEqual(tuple(row), (11, "intake-cron", "external_id+email"))
+        # [key=receipt-match-label] (l1 ruling-external-id-receipts-1102.md): the contact-handle match is a
+        # professional-id+email match; it is written under the label the receipts allowlist already understands,
+        # so a receipt is not skipped for a spelling difference. The identity work is unchanged: external_id must
+        # map to exactly one account AND the contact's email must equal that account's email.
+        self.assertEqual(tuple(row), (11, "intake-cron", "professional_id+email"))
 
     def test_every_identity_doubt_is_unresolved_never_filed(self) -> None:
         cases = {

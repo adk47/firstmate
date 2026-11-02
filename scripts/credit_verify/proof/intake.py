@@ -244,7 +244,12 @@ def strict_identity(*, contact_fetch: Callable[[str], dict[str, Any] | None], lo
         acct = email_of_account(ids[0])
         if not acct or acct != email_hash(c.get("email")):
             return None, "unresolved: the contact's email does not match the account"
-        return ids[0], "external_id+email"
+        # [key=receipt-match-label] (l1 ruling-external-id-receipts-1102.md): the Intercom contact's external_id
+        # IS the account's professional id, and this branch additionally proves the contact's email equals that
+        # account's email. Write the label the receipts allowlist already understands, so the match is not
+        # skipped for a spelling difference. (receipts.strong_label also folds the old spelling for rows already
+        # written, so no data migration is needed.)
+        return ids[0], "professional_id+email"
     return resolve
 
 

@@ -47,7 +47,27 @@ REVIEW_FIRED = "regexp_like(coalesce(json_format(json_extract(verificationdata, 
 CHUNK = 400
 # security-arch-fable-s1 bar (r5 on #1416): a receipt only for a filing whose account match is strong. An
 # email-only (or unknown) match never triggers one: the account the note would go to may not be the sender.
-STRONG_MATCH = ("professional_id", "authenticated_email", "session")
+STRONG_MATCH = ("professional_id", "professional_id+email", "authenticated_email", "session")
+# [key=receipt-match-label] (l1 ruling-external-id-receipts-1102.md): intake.py wrote the Intercom contact-handle
+# match as "external_id+email". external_id IS the account's professional id in our identity doctrine (the
+# verify-request identity gate rests on the same equivalence), and intake only accepts that handle when it maps
+# to EXACTLY one account AND the contact's email equals that account's email - so the skip was a naming
+# mismatch between the matcher and this allowlist, not a weak identity. Normalise at the label boundary so the
+# existing rows re-admit with no data migration. Do NOT add the literal "external_id+email" to STRONG_MATCH:
+# that would blind us to any future external_id that is not a professional id.
+MATCH_ALIASES = {"external_id+email": "professional_id+email"}
+
+
+def strong_label(matched: str | None) -> str:
+    """The allowlist spelling of a matcher label, or '' when the match is not strong enough for a receipt.
+
+    A receipt asserts "we received what you filed on your own authenticated thread" - a fact about a filing,
+    addressed back to the same contact. It is not an identity claim and not an approval, so the strict set
+    still governs approvals, awards, dedupe/link and merges.
+    """
+    label = (matched or "").strip()
+    label = MATCH_ALIASES.get(label, label)
+    return label if label in STRONG_MATCH else ""
 Query = Callable[[str], "list[list[str]]"]
 
 
@@ -69,7 +89,7 @@ def intake_by_user(proof_store: str) -> tuple[dict[int, dict[str, Any]], Counter
         counts[f"intake_rows_{subject}"] += 1
         if subject != "credit":
             continue
-        if (matched or "") not in STRONG_MATCH:
+        if not strong_label(matched):
             counts["skip_weak_identity"] += 1
             continue
         try:

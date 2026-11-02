@@ -247,3 +247,57 @@ class ReceiptsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StrongLabelTest(unittest.TestCase):
+    """[key=receipt-match-label] (l1 ruling-external-id-receipts-1102.md): the Intercom contact-handle match is
+    a professional-id+email match under an older spelling. Normalising the LABEL re-admits the rows already in
+    the store without a data migration, and does not widen the allowlist to any other string."""
+
+    def test_the_old_spelling_normalises_and_admits(self):
+        self.assertEqual(receipts.strong_label("external_id+email"), "professional_id+email")
+        self.assertIn(receipts.strong_label("external_id+email"), receipts.STRONG_MATCH)
+
+    def test_the_strict_set_is_unchanged_and_the_literal_is_not_added(self):
+        self.assertNotIn("external_id+email", receipts.STRONG_MATCH)
+        for label in ("professional_id", "professional_id+email", "authenticated_email", "session"):
+            self.assertEqual(receipts.strong_label(label), label)
+
+    def test_weak_or_unknown_labels_stay_refused(self):
+        for label in (None, "", "  ", "email", "email+domain", "external_id", "proof_on_file",
+                      "professional_id+email+extra", "unmatched: no verified account handle"):
+            self.assertEqual(receipts.strong_label(label), "", label)
+
+    def test_the_new_spelling_is_what_todays_writer_emits(self):
+        src = (ROOT / "scripts" / "credit_verify" / "proof" / "intake.py").read_text()
+        self.assertIn('return ids[0], "professional_id+email"', src)
+        self.assertNotIn('return ids[0], "external_id+email"', src)
+
+
+class LegacyRowAdmittanceTest(unittest.TestCase):
+    """The 999 rows already written with the old label must produce receipts on the next build, and
+    proof_on_file must keep being skipped until l1 answers Ruling 2 (it is an identity label, but a
+    weaker one: it has no email confirmation - only a unique export conversation bucket)."""
+
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp())
+        self.store = str(self.d / "proof.sqlite")
+        db = sqlite3.connect(self.store)
+        db.execute(SCHEMA)
+        for i, (uid, matched) in enumerate(((11, "external_id+email"), (12, "proof_on_file"),
+                                            (13, "professional_id+email"), (14, "email"))):
+            db.execute("INSERT INTO proof_intake (intake_id, user_id, subject, candidate_request_ids_json, "
+                       "conversation_id, source, file_sha256, received_at, filed_by, matched_by) "
+                       "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                       (f"{uid}:{i}", uid, "credit", json.dumps([f"r-{uid}"]), "215475213550081",
+                        "intercom", f"sha{uid}", "2026-11-01T02:20:11Z", "intake-cron", matched))
+        db.commit()
+
+    def test_old_label_admits_and_weak_labels_do_not(self):
+        out, counts = receipts.intake_by_user(self.store)
+        self.assertIn(11, out)                     # the old spelling, re-admitted
+        self.assertIn(13, out)                     # today's spelling
+        self.assertNotIn(14, out)                  # email-only: still weak
+        self.assertNotIn(12, out)                  # proof_on_file: Ruling 2, still skipped
+        self.assertEqual(counts["skip_weak_identity"], 2)
+        self.assertEqual(out[11]["request_ids"], ["r-11"])
