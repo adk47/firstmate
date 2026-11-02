@@ -484,6 +484,45 @@ class NeedAsksTest(unittest.TestCase):
             gate = FakeGate(); rep = run(gate)
         self.assertTrue(rep.policy_error); self.assertEqual(gate.calls, [])
 
+    def test_a_run_walks_one_page_of_list_entries_and_records_where_it_stopped(self):
+        # r5 639 / p1 638: [start_entry, start_entry + max_entries) of this segment's entries, before any read; page.end =
+        # the first entry this run will not examine (past --max-users), so the tick's cursor resumes exactly there
+        users = [{"user_id": str(i), "paid": True, "asks": [{"request_id": f"q{i}"}]} for i in range(1, 8)]
+        lst = self.d / "paged.json"
+        lst.write_text(json.dumps({"users": users}))
+        seen = []
+        def payloads(us, q, asked, held=None, filtered=None):
+            seen.append([u["user_id"] for u in us])
+            return [{"user": {"id": u["user_id"]}, "credits": [{"request_id": u["asks"][0]["request_id"]}],
+                     "need": {"code": "x"}} for u in us]
+        with unittest.mock.patch.object(na, "payloads", payloads), \
+                unittest.mock.patch.object(na.verify_notify, "send_all", lambda *a, **k: None):
+            rep = na.send(list_path=str(lst), segment="paid", mode="dry-run", max_users=2, query=lambda sql: [],
+                          ledger_path=str(self.d / "ledger.sqlite3"), max_entries=4, start_entry=2)
+        self.assertEqual(seen, [["3", "4", "5", "6"]])                      # entries 2..5 only
+        self.assertEqual(rep.page, {"start": 2, "end": 4, "listed": 7, "page_end": 6})   # users 5, 6 not examined
+        self.assertEqual(sorted(rep.listed_users), ["3", "4", "5", "6"])
+        with unittest.mock.patch.object(na, "payloads", payloads), \
+                unittest.mock.patch.object(na.verify_notify, "send_all", lambda *a, **k: None):
+            rep = na.send(list_path=str(lst), segment="paid", mode="dry-run", max_users=9, query=lambda sql: [],
+                          ledger_path=str(self.d / "ledger.sqlite3"), max_entries=4, start_entry=6)
+        self.assertEqual(rep.page, {"start": 6, "end": 7, "listed": 7, "page_end": 7})    # the tail; the tick wraps to 0
+
+    def test_the_cli_passes_the_page_through_and_records_it_for_the_tick_cursor(self):
+        import contextlib, io
+        lst = self.d / "l.json"
+        lst.write_text(json.dumps({"users": [{"user_id": "1", "paid": True, "asks": []}]}))
+        out, got = self.d / "o.json", {}
+        def send(**kw):
+            got.update(kw)
+            r = na.verify_notify.Report(); r.page = {"start": 200, "end": 260, "listed": 450}
+            return r
+        with unittest.mock.patch.object(na, "send", send), contextlib.redirect_stdout(io.StringIO()):
+            na._main(["send", "--list", str(lst), "--segment", "paid", "--check-recipients", "--max-entries", "200",
+                      "--start-entry", "200", "--outcomes-json", str(out)])
+        self.assertEqual((got["max_entries"], got["start_entry"]), (200, 200))
+        self.assertEqual(json.loads(out.read_text())["page"], {"start": 200, "end": 260, "listed": 450})
+
     def test_the_cli_pages_a_signed_apply_only_with_page(self):
         # QA #1617: the tick's signed apply (--page) sends what fits today's room; a hand signed apply is whole-or-nothing
         import contextlib, io

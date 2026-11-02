@@ -390,7 +390,7 @@ family_cap() { # <family> <its cap>
 # QA #1612: the next page's first entry from a run's own page record ({start, end, listed}; end = the first entry that
 # run did not get to), wrapping to 0 at the list's end. Non-zero rc = no page record.
 page_next() { py -c 'import json,sys; p=json.load(open(sys.argv[1])).get("page") or {}; e,n=int(p["end"]),int(p["listed"]); print(e if e < n else 0)' "$1" 2>/dev/null; }
-advance_cursor() { # <tag> <cursor file> <run's outcomes json> <this tick's start>; uvn families only (a cursor file)
+advance_cursor() { # <tag> <cursor file> <run's outcomes json> <this tick's start>; the paged families only (a cursor file)
   [ -n "$2" ] || return 0
   local nxt; nxt="$(page_next "$3")" || { log "$1: no page record in $(basename "$3"); the cursor stays at $4"; return 0; }
   printf '%s\n' "$nxt" > "$2.tmp" && mv -f "$2.tmp" "$2"
@@ -412,12 +412,14 @@ family() {
   # QA #1612: the page ROTATES - a per-family cursor in $STATE (the next page's first entry), advanced from the check's
   # own page record right after a clean check, wrapping to 0 at the list's end; so persistent deferrals at the head
   # never starve the rest. The check, bodies and apply of one tick walk the SAME page (the value read here).
-  local cur_file="" cur=0
-  if [ "$sub" = uvn-status ]; then
+  local cur_file="" cur=0 paged=0
+  # r5 639 / p1 638: the proof-need-ask family (need_asks) pages the same way (it ran unpaged for 85+ min at 16:20Z)
+  { [ "$sub" = uvn-status ] || [ "$sub" = need-send ]; } && paged=1
+  if [ "$paged" = 1 ]; then
     cur_file="$STATE/cursor-$tag"
     cur="$(cat "$cur_file" 2>/dev/null || echo 0)"; [[ "$cur" =~ ^[0-9]{1,9}$ ]] || cur=0
   fi
-  local pg=(); [ "$sub" = uvn-status ] && pg=(--max-entries "$CHECK_ENTRIES" --start-entry "$cur")
+  local pg=(); [ "$paged" = 1 ] && pg=(--max-entries "$CHECK_ENTRIES" --start-entry "$cur")
   local runner="$RUNNER"; if [ "$sub" = need-send ]; then runner="$NEED_RUNNER"; sub=send; fi
   # [key=scale-now]: the family's unsigned date (unset = SIGNED-only) and its cap before v1's 10-sample line
   local fam="$name"; [ "$name" = r1 ] && fam=status-doc-received
@@ -425,7 +427,7 @@ family() {
   reached "${UNSIGNED_FROM[$fam]:-}" && unsigned="${UNSIGNED_FROM[$fam]}"
   [ "$UNSIGNED_ALL" = 1 ] && unsigned=harness
   cap="$(family_cap "$fam" "$cap")"
-  local walk="$cap"; [ "$sub" = uvn-status ] && [ "$CHECK_ENTRIES" -gt "$cap" ] && walk="$CHECK_ENTRIES"
+  local walk="$cap"; [ "$paged" = 1 ] && [ "$CHECK_ENTRIES" -gt "$cap" ] && walk="$CHECK_ENTRIES"
   local worst=$(( 2 * walk * CHECK_S_PER_USER + RESERVE_PAD_S ))
   if [ $(( $(elapsed) + worst )) -gt "$TICK_HARD_S" ]; then
     log "$tag: $(elapsed)s into the tick and its worst case is ${worst}s (cap $cap); it does not fit before the ${TICK_HARD_S}s deadline; this family waits for the next tick"
@@ -439,7 +441,7 @@ family() {
   # QA #1612 (round 2): the cursor moves only when the family's step for this page is DONE - a dry tick or a check
   # that accepted nobody (to where the CHECK stopped), or a clean apply (to where the APPLY stopped) - and to the
   # first entry that run did not get to (page.end), never past entries a capped run never examined
-  if [ "$sub" = uvn-status ]; then
+  if [ "$paged" = 1 ]; then
     page_next "$OUT/$tag-check.json" >/dev/null || { log "$tag: the check recorded no page; tick stops"; return 1; }
   fi
   if [ "$(elapsed)" -ge "$TICK_HARD_S" ]; then log "$tag: ${TICK_HARD_S}s deadline passed after the check; no bodies, no apply this tick"; return 0; fi
@@ -606,6 +608,18 @@ keep = [c for c in claims if str(c.get("user_id")) not in held]
 json.dump({**doc, "claims": keep}, open(out, "w"))
 print(f"claim list: {len(claims)} claims, {len(claims) - len(keep)} held out by the exclude file")
 PY
+  # p1 638 / r5 639 (16Z on 29f: the claim checks ran a list signed on e4f65c4a with 5e733e0f deployed): a claim list
+  # whose signed_on is not EXACTLY the deployed head is never checked - the claim lane rebuilds it on the deployed head.
+  # Read after the filter (which kills on an unreadable list). Refused LOUD (logged + paged) before any check; the
+  # credit families still run. An unreadable deployed sha or a missing signed_on = refused.
+  local cl_signed dep_sha
+  cl_signed="$(py -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("signed_on") or "" if isinstance(d, dict) else "")' "$cl" 2>/dev/null)" || cl_signed=""
+  dep_sha="$(cat "$DEPLOYED_SHA_FILE" 2>/dev/null)" || dep_sha=""
+  if ! [[ "$dep_sha" =~ ^[0-9a-f]{40}$ ]] || [ "$cl_signed" != "$dep_sha" ]; then
+    log "claim families: list_signed_on_stale - $CLAIM_LIST is signed on ${cl_signed:-(none)}, deployed ${dep_sha:-(unreadable)}; not checked this tick (the claim lane rebuilds it on the deployed head)"
+    page "claim families: list_signed_on_stale (signed on ${cl_signed:0:12}, deployed ${dep_sha:0:12}) - claim list not checked; rebuild it on the deployed head"
+    return 0
+  fi
   family claim-proof-ask paid "$cl" "$CLAIM_CAP" claim-proof-ask || return 1
   family claim-status paid "$cl" "$CLAIM_CAP" claim-status || return 1
   family claim-proof-ask free "$cl" "$CLAIM_CAP" claim-proof-ask || return 1

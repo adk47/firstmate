@@ -97,6 +97,7 @@ sys.exit(int(os.environ.get("STUB_HEALTH_RC", "0")))
 PY
   export CVO_RUNNER="$TEST_TMPDIR/runner.py" CVO_OWING="$TEST_TMPDIR/owing.py" CVO_RECEIPTS="$TEST_TMPDIR/receipts.py"
   export CVO_DEPLOYED_SHA="$TEST_TMPDIR/deployed-sha"
+  DEP="$(printf 'd%.0s' $(seq 40))"            # a deployed head (the claim lists below are signed on it)
   export CVO_HEALTH="$TEST_TMPDIR/health.py"
   # proof-need-ask (E): build writes the audience; send is the same stub runner
   cat > "$TEST_TMPDIR/need.py" <<'PY'
@@ -215,9 +216,13 @@ TIMEOUT_BIN=/usr/bin/timeout"
   run -0 "$SCRIPT"
   grep -q "^need-build" "$CALLS.need"
   grep -q "^need-asks.json 5,6$" "$CALLS.lists"                # the need list without the excluded user 7
-  grep -q "^send --list .*need-asks.json --segment paid --mode dry-run --max-users 250 --check-recipients" "$CALLS"
-  grep -q "^send --list .*need-asks.json --segment paid --mode apply" "$CALLS"
-  grep -q "^send --list .*need-asks.json --segment free --mode apply" "$CALLS"
+  grep -q "^send --list .*need-asks.json --segment paid --max-entries [0-9]* --start-entry 0 --mode dry-run --max-users 250 --check-recipients" "$CALLS"
+  grep -q "^send --list .*need-asks.json --segment paid --max-entries [0-9]* --start-entry 0 --mode apply" "$CALLS"
+  grep -q "^send --list .*need-asks.json --segment free --max-entries [0-9]* --start-entry 0 --mode apply" "$CALLS"
+  # r5 639 / p1 638: the need family is PAGED like uvn-status - its own cursor moves to the run's page.end (450 listed)
+  [ "$(cat "$CVO_STATE/cursor-proof-need-ask-paid")" = "200" ]
+  : > "$CALLS"; rm -rf "$CVO_OUT_ROOT"; run -0 "$SCRIPT"
+  grep -q "^send --list .*need-asks.json --segment paid --max-entries [0-9]* --start-entry 200 --mode dry-run" "$CALLS"
   # QA #1587: a deployed runner that predates #1582 (no --check-recipients) is skipped, and the tick goes on
   rm -f "$CVO_ETC/credit-verify-outbound.disabled"; : > "$CALLS"
   grep -v -- '"--check-recipients"' "$CVO_NEED_RUNNER" > "$TEST_TMPDIR/need-old.py"
@@ -245,7 +250,7 @@ TIMEOUT_BIN=/usr/bin/timeout"
   if grep -q -- "^claim-.*--max-entries" "$CALLS"; then false; fi
   grep -q "^uvn-status --list .*owing-uvn.json --segment paid --campaign uvn-status .*--mode dry-run --max-users 100 --check-recipients" "$CALLS"
   # every other family: checked (dry-run --check-recipients) but NO apply
-  grep -q "^send --list .*need-asks.json --segment paid --mode dry-run --max-users 100 --check-recipients" "$CALLS"
+  grep -q "^send --list .*need-asks.json --segment paid --max-entries [0-9]* --start-entry 0 --mode dry-run --max-users 100 --check-recipients" "$CALLS"
   if grep -q "^send .*--mode apply" "$CALLS"; then false; fi
   if grep -q "campaign status-doc-received.*--mode apply" "$CALLS"; then false; fi
   if grep -q "^claim-.*--mode apply" "$CALLS"; then false; fi
@@ -611,7 +616,8 @@ PY
 J
   export CVO_POLICY="$TEST_TMPDIR/policy.json"
   python3 -c "import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.executemany(\"INSERT INTO verify_messages (campaign, day, status, account_id) VALUES (?, ?, 'sent', '5')\", [('status-doc-received', sys.argv[2])]*8 + [('claim-status', sys.argv[2])]*3); d.commit()" "$CVO_LEDGER" "$today"
-  printf '{"generated_at": "x", "claims": [{"claim_id": 1, "user_id": 5}]}' > "$CVO_STATE.claims.json"
+  printf '%s\n' "$DEP" > "$CVO_DEPLOYED_SHA"
+  printf '{"generated_at": "x", "signed_on": "%s", "claims": [{"claim_id": 1, "user_id": 5}]}' "$DEP" > "$CVO_STATE.claims.json"
   CVO_CLAIM_LIST="$CVO_STATE.claims.json" run -0 "$SCRIPT"
   grep -q -- "--segment free --campaign uvn-status .*--mode apply --max-users 2 " "$CALLS"   # 10 - 8 credit rows
   grep -q -- "^claim-proof-ask .*--segment free .*--mode apply --max-users 1" "$CALLS"        # 4 - 3 claim rows
@@ -619,7 +625,8 @@ J
 
 @test "outbound tick (Fable 10-30): the claim families run from the claim lane's list, FIRST on Sat/Sun, after credit on weekdays; no list = skipped" {
   touch "$CVO_ETC/credit-verify-outbound.live"
-  printf '{"generated_at": "x", "claims": [{"claim_id": 1, "user_id": 5}]}' > "$CVO_STATE.claims.json"
+  printf '%s\n' "$DEP" > "$CVO_DEPLOYED_SHA"
+  printf '{"generated_at": "x", "signed_on": "%s", "claims": [{"claim_id": 1, "user_id": 5}]}' "$DEP" > "$CVO_STATE.claims.json"
   export CVO_CLAIM_LIST="$CVO_STATE.claims.json"
   run -0 "$SCRIPT"
   grep -q -- "^claim-proof-ask --list .*/claims-filtered.json --segment free .*--mode apply --max-users 250" "$CALLS"
@@ -655,7 +662,8 @@ J
 
 @test "outbound tick (QA #1587, p1 488): production mode with a claim list - claim-status applies only from its read-back date (17:55Z); claim-proof-ask is SIGNED-only, checked and never applied" {
   touch "$CVO_ETC/credit-verify-outbound.live"
-  printf '{"generated_at": "x", "claims": [{"claim_id": 1, "user_id": 5}]}' > "$CVO_STATE.claims.json"
+  printf '%s\n' "$DEP" > "$CVO_DEPLOYED_SHA"
+  printf '{"generated_at": "x", "signed_on": "%s", "claims": [{"claim_id": 1, "user_id": 5}]}' "$DEP" > "$CVO_STATE.claims.json"
   export CVO_CLAIM_LIST="$CVO_STATE.claims.json" CVO_UNSIGNED_ALL=0
   at() { python3 -c 'import datetime as d,sys; print(int(d.datetime(2026,10,31,int(sys.argv[1]),int(sys.argv[2]),tzinfo=d.timezone.utc).timestamp()))' "$1" "$2"; }
   CVO_NOW_EPOCH="$(at 17 54)" run -0 "$SCRIPT"                      # before the read-back: nothing claim-side applies
@@ -669,10 +677,34 @@ J
   grep -q "claim-proof-ask-free: SIGNED-only" "$CVO_OUT_ROOT"/*/tick.log
 }
 
+@test "outbound tick (p1 638 / r5 639): a claim list not signed on EXACTLY the deployed head is never checked - list_signed_on_stale, loud; the credit families still run" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  printf '%s\n' "$DEP" > "$CVO_DEPLOYED_SHA"
+  export CVO_CLAIM_LIST="$CVO_STATE.claims.json"
+  for signed in "$(printf 'e%.0s' $(seq 40))" "${DEP:0:12}" "" "$(printf 'D%.0s' $(seq 40))"; do
+    : > "$CALLS"; rm -rf "$CVO_OUT_ROOT"
+    printf '{"generated_at": "x", "signed_on": "%s", "claims": [{"claim_id": 1, "user_id": 5}]}' "$signed" > "$CVO_CLAIM_LIST"
+    run -0 "$SCRIPT"
+    if grep -q "^claim-" "$CALLS"; then false; fi                     # no check, no preview, no apply
+    grep -q "claim families: list_signed_on_stale" "$CVO_OUT_ROOT"/*/tick.log
+    grep -q "^uvn-status .*--mode apply" "$CALLS"                     # the credit families still ran
+  done
+  # an unreadable deployed sha refuses too, whatever the list says
+  : > "$CALLS"; rm -rf "$CVO_OUT_ROOT"; rm -f "$CVO_DEPLOYED_SHA"
+  printf '{"signed_on": "%s", "claims": [{"claim_id": 1, "user_id": 5}]}' "$DEP" > "$CVO_CLAIM_LIST"
+  run -0 "$SCRIPT"
+  if grep -q "^claim-" "$CALLS"; then false; fi
+  # the exact head: checked
+  printf '%s\n' "$DEP" > "$CVO_DEPLOYED_SHA"; : > "$CALLS"; rm -rf "$CVO_OUT_ROOT"
+  run -0 "$SCRIPT"
+  grep -q "^claim-status .*--check-recipients" "$CALLS"
+}
+
 @test "outbound tick (QA #1541): the exclude file holds claimants out of the claim families too; an unreadable claim list kills" {
   touch "$CVO_ETC/credit-verify-outbound.live"
   printf '5\n' > "$CVO_ETC/credit-verify-outbound.exclude"
-  printf '{"generated_at": "x", "claims": [{"claim_id": 1, "user_id": 5}, {"claim_id": 2, "user_id": 6}]}' > "$CVO_STATE.claims.json"
+  printf '%s\n' "$DEP" > "$CVO_DEPLOYED_SHA"
+  printf '{"generated_at": "x", "signed_on": "%s", "claims": [{"claim_id": 1, "user_id": 5}, {"claim_id": 2, "user_id": 6}]}' "$DEP" > "$CVO_STATE.claims.json"
   CVO_CLAIM_LIST="$CVO_STATE.claims.json" run -0 "$SCRIPT"
   grep -q "^claims-filtered.json 6$" "$CALLS.lists"
   if grep -qE "^claims(-filtered)?\.json .*\b5\b" "$CALLS.lists"; then false; fi

@@ -459,6 +459,7 @@ def send(*, mode: str = "dry-run", ledger_path: str | None = None, **kw: Any) ->
 
 
 def _send(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int = 25, preview_dir: str | None = None,
+          max_entries: int | None = None, start_entry: int = 0,
          query: uvn_status.Query | None = None, wrapper: str = verify_notify.WRAPPER,
          runner: verify_notify.Runner = verify_notify._run, ledger_path: str | None = None,
          issuer: Any = issue_code, voider: Any = void_code, check_recipients: bool = False) -> verify_notify.Report:
@@ -473,6 +474,15 @@ def _send(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int
         doc = json.load(fh)
     verify_notify.bind_list(doc)           # [key=signed-on-sha]: the per-user sha rail reads this header
     users = [u for u in doc["users"] if u["paid"] == (segment == "paid")]
+    # r5 639 / p1 638 (the proof-need-ask check ran unpaged for 85+ min): like uvn-status (#1612), a run walks ONE page
+    # of this segment's LIST ENTRIES - [start_entry, start_entry + max_entries) - chosen before any ledger or replica
+    # read; report.page {start, end, listed} lets the caller (the tick's cursor) start the next run where this one stopped
+    n_listed = len(users)
+    start = max(0, min(int(start_entry or 0), n_listed)) if n_listed else 0
+    stop = n_listed if max_entries is None else min(n_listed, start + max(0, int(max_entries)))
+    users = users[start:stop]
+    page_users = [str(u["user_id"]) for u in users]
+    report.page = {"start": start, "end": stop, "listed": n_listed}
     report.listed_users = [str(u["user_id"]) for u in users]   # QA / r5 #1582: every one is accounted for below
     try:
         from credit_review import verify_ledger  # noqa: PLC0415
@@ -526,6 +536,14 @@ def _send(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int
             verify_notify._outcome(report, p, "deferred", "daily_cap: today's shared credit cap is spent; a later run")
         ps = ps[:left]
     report.candidates = len(ps)
+    # page.end = the first page entry this run will NOT examine (past --max-users, or past today's room), so the next
+    # run starts exactly there (never past entries a capped run never reached); page_end = where the page itself ends
+    taken = {str(p["user"]["id"]) for p in ps}
+    unexamined = {str(p["user"]["id"]) for p in live} - taken
+    report.page["page_end"] = report.page["end"]
+    first_open = next((j for j, uid in enumerate(page_users) if uid in unexamined), None)
+    if first_open is not None:
+        report.page["end"] = report.page["start"] + first_open
     # QA #1513: a distributor ask's F9 code is issued for THAT payload immediately before its own gate call (never a
     # whole batch of codes up front), and a reused active code must still have the promised 7 days (with_codes)
     plain = [p for p in ps if p["need"]["code"] != DISTRIBUTOR]
@@ -614,6 +632,10 @@ def _main(argv: list[str] | None = None) -> int:
                    help="apply: send exactly the users this signed --check-recipients outcomes file accepted; the sent "
                         "set must equal it or the run exits 3 ([key=apply-sized-to-list])")
     s.add_argument("--page", action="store_true", help="with --signed-accepted: a subset may be sent (the outbound tick)")
+    s.add_argument("--start-entry", type=int, default=0, metavar="K",
+                   help="r5 639: walk this segment's list from entry K (the tick's cursor; default 0)")
+    s.add_argument("--max-entries", type=int, default=None, metavar="N",
+                   help="r5 639: walk at most N list entries this run (default: all); the outcomes record the page")
     s.add_argument("--preview", default=None)
     s.add_argument("--preview-accepted", default="", metavar="CHECK_JSON",
                    help="with --preview: render exactly the users this --check-recipients outcomes file accepted")
@@ -707,13 +729,14 @@ def _main(argv: list[str] | None = None) -> int:
             try:
                 with verify_notify.apply_session():
                     rep = send(list_path=a.list, segment=a.segment, mode=a.mode, max_users=a.max_users,
-                               preview_dir=a.preview, check_recipients=a.check_recipients)
+                               preview_dir=a.preview, check_recipients=a.check_recipients,
+                               max_entries=a.max_entries, start_entry=a.start_entry)
             except verify_notify.ApplyLockError as exc:
                 print(f"NEED ASKS: {exc}")
                 return 3
         else:
             rep = send(list_path=a.list, segment=a.segment, mode=a.mode, max_users=a.max_users, preview_dir=a.preview,
-                       check_recipients=a.check_recipients)
+                       check_recipients=a.check_recipients, max_entries=a.max_entries, start_entry=a.start_entry)
         if tmp:
             try:
                 with open(tmp, "w", encoding="utf-8") as fh:
@@ -725,7 +748,8 @@ def _main(argv: list[str] | None = None) -> int:
                                # p1 579: the deploy head this ran on, and the head its list was signed on
                                "deployed": verify_notify.deployed_head() or None,
                                "signed_on": verify_notify.LIST_SIGNED_ON or None,
-                               "max_users": a.max_users}, fh)          # this run's attempt cap
+                               "max_users": a.max_users,               # this run's attempt cap
+                               "page": getattr(rep, "page", None) or None}, fh)   # r5 639: the entries walked
                 os.replace(tmp, a.outcomes_json)          # atomic, and the fresh file's 0600 mode goes with it
             except OSError as exc:
                 rep.failures.append(f"outcomes file not written: {exc}"[:200])
