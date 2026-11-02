@@ -814,8 +814,22 @@ def render_facts(p: dict[str, Any], extra: list[str]) -> dict[str, Any]:
     dates = sorted({str(d)[:10] for d in [need.get("doc_received_at")] + [c.get("doc_received_at") for c in credits] if d})
     return {"class": "ask" if camp in ASK_CAMPAIGNS else "status", "campaign": camp, "copy": copy,
             "owes_proof": camp in ASK_CAMPAIGNS or copy == "received",
-            "distinct_tracks": len(tracks), "tracks_roles": sorted([t, sorted(r)] for t, r in tracks.values()),
+            # t01b 655 / b1 656: ONE fact name on both sides - the v9 RULES name `tracks` (title + roles of each distinct
+            # track), so the fact is `tracks` [[title, [roles]]] (was tracks_roles, which no rule named); today_year is
+            # the judge clock's year (never the body's: R4 old_date_year ran blind live without it); document_count is
+            # what the payload's need names (None = not known)
+            "distinct_tracks": len(tracks), "tracks": sorted([t, sorted(r)] for t, r in tracks.values()),
+            "today_year": datetime.now(timezone.utc).year,
+            "document_count": _doc_count(need),
             "document_dates": dates, "credits": len(credits), "source": "renderer"}
+
+
+def _doc_count(need: dict[str, Any]) -> int | None:
+    n = need.get("doc_count")
+    if isinstance(n, int) and not isinstance(n, bool) and n >= 1:
+        return n
+    shas = need.get("doc_shas")
+    return len(set(shas)) if isinstance(shas, list) and shas else None
 
 
 # t01b 584 / p1 579: a preview renders EXACTLY the check's accepted set. Set (by --preview-accepted) to the user ids the

@@ -2346,7 +2346,7 @@ class JudgeFactsTest(unittest.TestCase):
         self.assertTrue(files, rep)
         f = json.loads(files[0].read_text())
         self.assertEqual((f["class"], f["campaign"], f["owes_proof"], f["source"]), ("ask", "uvn-status", True, "renderer"))
-        self.assertEqual(f["distinct_tracks"], len(f["tracks_roles"]))
+        self.assertEqual(f["distinct_tracks"], len(f["tracks"]))
         self.assertEqual(oct(files[0].stat().st_mode & 0o777), "0o600")
 
 

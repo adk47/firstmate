@@ -10,6 +10,7 @@ import json
 import sys
 import types
 import unittest
+import unittest.mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parents[1]
@@ -120,10 +121,10 @@ class R1RolesCoverageTests(unittest.TestCase):
         want = vn.render_facts(payload, ["--campaign", "status-doc-received", "--copy", "received"])
         one = vn.render_facts({"credits": [{"track_title": "Midnight Drive", "role": "Mixing, Mastering"}]},
                               ["--campaign", "status-doc-received", "--copy", "received"])
-        self.assertEqual(one["tracks_roles"], want["tracks_roles"])   # QA #1626: a comma-combined role is two roles
+        self.assertEqual(one["tracks"], want["tracks"])   # QA #1626: a comma-combined role is two roles
         x = ["--campaign", "status-doc-received", "--copy", "received"]
         dup = vn.render_facts({"credits": [{"track_title": "A", "role": "Mixing"}, {"track_title": "A", "role": "mixing "}]}, x)
-        self.assertEqual((dup["distinct_tracks"], dup["tracks_roles"]), (1, [["A", ["Mixing"]]]))   # renders singular
+        self.assertEqual((dup["distinct_tracks"], dup["tracks"]), (1, [["A", ["Mixing"]]]))   # renders singular
         two = vn.render_facts({"credits": [{"track_title": "Home", "role": "Mixing", "artist_name": "X"},
                                            {"track_title": "Home", "role": "Mixing", "artist_name": "Y"}]}, x)
         self.assertEqual(two["distinct_tracks"], 2)            # the renderer's tkey: same title, other artist = 2 tracks
@@ -132,9 +133,11 @@ class R1RolesCoverageTests(unittest.TestCase):
         self.assertEqual(same["distinct_tracks"], 1)           # ... and case/space variants of one title + artist = 1
         ids = vn.render_facts({"credits": [{"track_title": "Home", "role": "Mixing", "track_id": "a"},
                                            {"track_title": "Home (Edit)", "role": "Mastering", "track_id": "a"}]}, x)
-        self.assertEqual((ids["distinct_tracks"], ids["tracks_roles"]), (1, [["Home", ["Mastering", "Mixing"]]]))
-        for it in self.items:         # the RENDERER's facts, never hand-written
-            self.assertEqual({k: v for k, v in it["facts"].items()}, want)
+        self.assertEqual((ids["distinct_tracks"], ids["tracks"]), (1, [["Home", ["Mastering", "Mixing"]]]))
+        from datetime import datetime, timezone
+        self.assertEqual(want["today_year"], datetime.now(timezone.utc).year)   # b1 656: the judge clock, never the body
+        for it in self.items:         # the RENDERER's facts, never hand-written (today_year is the fixture's own year)
+            self.assertEqual({k: v for k, v in it["facts"].items()}, {**want, "today_year": it["facts"]["today_year"]})
 
     def test_the_facts_key_tracks_and_roles_with_the_renderers_own_jq_string_rules(self):
         # QA #1626: jq's ascii_downcase lowers A-Z only and jq's \s is not Python's - the facts must split / merge
@@ -160,8 +163,71 @@ class R1RolesCoverageTests(unittest.TestCase):
         for cell in role_cells:
             want = json.loads(subprocess.run([jq, "-c", roles + " track_roles([{role: .}])"], input=json.dumps(cell),
                                              capture_output=True, text=True, check=True).stdout)
-            got = vn.render_facts({"credits": [{"track_title": "T", "role": cell}]}, x)["tracks_roles"][0][1]
+            got = vn.render_facts({"credits": [{"track_title": "T", "role": cell}]}, x)["tracks"][0][1]
             self.assertEqual(got, sorted(want), cell)
+
+    def test_the_r1_number_roles_and_document_wording_are_coded_from_the_facts(self):
+        # t01b 655 / b1 656: the v9 model missed m1 + m5 5/5 - the coded layer decides the R1 template's number, named
+        # roles and document wording from the facts, exactly as status_doc_received_r1 renders them
+        by = {it["case"].split("/")[1]: it for it in self.items}
+        want = {"original": None, "m1-singular-for-two-roles": "number_agreement", "m2-plural-roles-unnamed": "number_agreement",
+                "m3-one-role-dropped": "facts_mismatch", "m4-role-not-in-facts": "facts_mismatch",
+                "m5-documents-them-uncounted": "facts_mismatch"}
+        for case, code in want.items():
+            got = bi.coded_stop(by[case]["body_html"], by[case]["facts"], [])
+            self.assertEqual(got[0] if got else None, code, case)
+        f = dict(by["original"]["facts"])
+        tail = ": we have the document you sent, and it&#39;s in our review queue. We&#39;ll message you here as soon as it&#39;s checked.</p>"
+        one = {**f, "distinct_tracks": 1, "tracks": [["Maybach Jump'n", ["Mixing"]]], "credits": 2}   # r5 886: right copy
+        self.assertIsNone(bi.coded_stop("<p>Hi Jo, a quick update on your credit request for &quot;Maybach Jump&#39;n&quot;" + tail, one, []))
+        self.assertEqual(bi.coded_stop("<p>Hi Jo, a quick update on your credit requests for &quot;Maybach Jump&#39;n&quot;" + tail,
+                                       one, [])[0], "number_agreement")
+        self.assertEqual(bi.coded_stop("<p>Hi Jo, a quick update on your Mixing credit request for &quot;X&quot;" + tail,
+                                       one, [])[0], "facts_mismatch")          # the one-role line names no role
+        many = {**f, "distinct_tracks": 2, "tracks": [["A", ["Mixing"]], ["B", ["Mastering", "Vocals"]]]}
+        self.assertIsNone(bi.coded_stop("<p>Hi Jo, a quick update on your credit requests for &quot;A&quot; and &quot;B&quot;" + tail, many, []))
+        self.assertEqual(bi.coded_stop("<p>Hi Jo, a quick update on your credit request for &quot;A&quot; and &quot;B&quot;" + tail,
+                                       many, [])[0], "number_agreement")
+        three = {**f, "tracks": [["X", ["Mixing", "Mastering", "Production"]]]}
+        self.assertIsNone(bi.coded_stop("<p>Hi Jo, a quick update on your Mixing, Mastering and Production credit requests for "
+                                        "&quot;X&quot;" + tail, three, []))
+        base = by["original"]["body_html"]
+        self.assertEqual(bi.coded_stop(base, {**f, "document_count": 2}, [])[0], "facts_mismatch")   # template names ONE
+        self.assertIsNone(bi.coded_stop(base, {**f, "document_count": 1}, []))
+        for bad in ({**f, "document_count": 0}, {**f, "document_count": "1"}, {**f, "document_count": True}):
+            self.assertEqual(bi.coded_stop(base, bad, [])[0], "other")
+        self.assertEqual(bi.coded_stop(base.replace(", and it&#39;s in our review queue", ""), f, [])[0], "facts_mismatch")
+        self.assertEqual(bi.coded_stop("<p>Hi Jo, thanks.</p>", f, [])[0], "other")    # no lead line at all
+        self.assertEqual(bi.coded_stop("<p>Hi Jo, a quick update on your credit request: status for &quot;X&quot;" + tail, one,
+                                       [])[0], "other")                         # "credit request(s) for" is the lead, whole
+        for bad in ({k: v for k, v in f.items() if k != "tracks"}, {**f, "tracks": "Midnight Drive"},
+                    {**f, "distinct_tracks": 2}, {**f, "distinct_tracks": True}, {**f, "tracks": [["Midnight Drive"]]}):
+            self.assertEqual(bi.coded_stop(base, bad, [])[0], "other")
+        # an ask class is never put through the R1 template check
+        self.assertIsNone(bi.coded_stop("<p>Please send it</p>", {**f, "class": "ask", "campaign": "proof-need-ask",
+                                                                  "copy": "proofneed"}, []))
+
+    def test_render_facts_carries_the_rules_fact_names_and_the_document_count(self):
+        from datetime import datetime, timezone
+        from credit_review import verify_notify as vn
+        x = ["--campaign", "status-doc-received", "--copy", "received"]
+        f = vn.render_facts({"credits": [{"track_title": "T", "role": "Mixing"}], "need": {"doc_count": 3, "doc_shas": ["a"]}}, x)
+        self.assertEqual((f["tracks"], f["today_year"], f["document_count"]),
+                         ([["T", ["Mixing"]]], datetime.now(timezone.utc).year, 3))
+        class Later(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2031, 1, 1, 0, 0, 1, tzinfo=tz)
+        with unittest.mock.patch.object(vn, "datetime", Later):
+            self.assertEqual(vn.render_facts({"credits": []}, x)["today_year"], 2031)   # the clock's year, read per render
+        self.assertNotIn("tracks_roles", f)
+        self.assertEqual(vn.render_facts({"credits": [], "need": {"doc_shas": ["a", "b", "a"]}}, x)["document_count"], 2)
+        for need in ({}, {"doc_count": 0}, {"doc_count": True, "doc_shas": []}, {"doc_count": "2"}):
+            self.assertIsNone(vn.render_facts({"credits": [], "need": need}, x)["document_count"], need)
+        rules = bi.RULES
+        for name in ("`tracks`", "`today_year`", "`distinct_tracks`", "`document_dates`"):
+            self.assertIn(name, rules)                   # every fact the rules name is a key the renderer writes
+            self.assertIn(name.strip("`"), f)
 
     def test_the_r1_carve_out_needs_owes_proof_exactly_true(self):
         # QA #1626: a missing or non-boolean owes_proof is malformed input - the coded class/owes stop still fires
@@ -169,7 +235,7 @@ class R1RolesCoverageTests(unittest.TestCase):
         for bad in ({k: v for k, v in facts.items() if k != "owes_proof"}, {**facts, "owes_proof": "true"},
                     {**facts, "owes_proof": 1}, {**facts, "owes_proof": None}):
             self.assertEqual(bi.coded_stop("<p>a quick update</p>", bad, [])[0], "class_owes_mismatch", bad.get("owes_proof"))
-        self.assertIsNone(bi.coded_stop("<p>a quick update</p>", facts, []))
+        self.assertIsNone(bi.coded_stop(self.items[0]["body_html"], facts, []))
 
     def test_an_r1_receipt_is_not_a_class_mismatch_but_its_barred_forms_and_other_owing_statuses_still_are(self):
         facts = self.items[0]["facts"]

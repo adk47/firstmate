@@ -116,6 +116,53 @@ def r1_receipt(facts: dict[str, Any]) -> bool:
     return facts.get("campaign") == "status-doc-received" and facts.get("copy") == "received"
 
 
+# t01b [key=judge-coverage-v9] (firstmate 655): the v9 model missed the R1 number (m1 "your Mixing and Mastering credit
+# request for", 2 roles) and the document count (m5 "the documents you sent ... they're") 5/5. The R1 receipt is ONE
+# fixed template (status_doc_received_r1 in intercom-verify-request.sh), so its number, named roles and document wording
+# are decided in code from the facts, exactly as the renderer decides them (fable-copy-1101-r5/r1-roles: number by
+# distinct (track, role) pairs): one track with 2+ distinct roles = "your <roles> credit requests for"; one track with
+# one role = "your credit request for"; 2+ tracks = "your credit requests for" (no roles named); always "the document
+# you sent, and it's in our review queue", so a document_count of 2+ is a stop (b1 656: count agreement in code).
+_R1_LEAD = re.compile(r"\byour (.{0,200}?)credit (requests?) for\b")
+
+
+def _role_set(text: str) -> set[str]:
+    return {r.strip() for r in re.split(r",\s*|\s+and\s+", text.strip()) if r.strip()}
+
+
+def r1_shape_stop(low: str, facts: dict[str, Any]) -> tuple[str, str] | None:
+    """(reason_code, evidence) when an R1 receipt body (normalised) is not the renderer's shape for its facts."""
+    tr = facts.get("tracks")
+    nt = facts.get("distinct_tracks")
+    if (not isinstance(tr, list) or not all(isinstance(t, list) and len(t) == 2 and isinstance(t[1], list) for t in tr)
+            or not isinstance(nt, int) or isinstance(nt, bool) or nt < 1 or nt != len(tr)):
+        return "other", "R1 facts must carry tracks [[title, [roles]]] matching distinct_tracks"
+    roles = {_norm(str(r)) for r in tr[0][1] if _norm(str(r))} if nt == 1 else set()
+    shape = "roles" if nt == 1 and len(roles) >= 2 else ("one" if nt == 1 else "many")
+    m = _R1_LEAD.search(low)
+    if not m:
+        return "other", "an R1 receipt without its 'your ... credit request(s) for' line"
+    named, word = m.group(1).strip(), m.group(2)
+    want = "request" if shape == "one" else "requests"
+    if word != want:
+        return "number_agreement", f"{m.group(0)!r}: {nt} track(s), {len(roles) if nt == 1 else 'n/a'} role(s) -> credit {want}"
+    if shape == "roles":
+        if not named:
+            return "number_agreement", f"{m.group(0)!r}: plural over one track without its roles named"
+        if _role_set(named) != roles:
+            return "facts_mismatch", f"{m.group(0)!r}: roles named {sorted(_role_set(named))} != facts {sorted(roles)}"
+    elif named:
+        return "facts_mismatch", f"{m.group(0)!r}: the renderer names no role in the {shape} shape"
+    dc = facts.get("document_count")
+    if dc is not None and (not isinstance(dc, int) or isinstance(dc, bool) or dc < 1):
+        return "other", f"document_count must be a positive integer or null, got {dc!r}"
+    if dc is not None and dc >= 2:
+        return "facts_mismatch", f"document_count {dc}: the R1 template names ONE document ('the document you sent')"
+    if "the document you sent, and it's in our review queue" not in low:      # ("the documents ... they're" fails here)
+        return "facts_mismatch", "the R1 receipt does not say 'the document you sent, and it's in our review queue'"
+    return None
+
+
 def coded_stop(body: str, facts: dict[str, Any], barred: Iterable[str]) -> tuple[str, str] | None:
     """(reason_code, evidence) for what the facts alone decide, or None. Facts that are not a JSON object (a string,
     a Python repr, a list) are a coded stop, never a crash (QA #1591)."""
@@ -142,6 +189,8 @@ def coded_stop(body: str, facts: dict[str, Any], barred: Iterable[str]) -> tuple
         return "class_owes_mismatch", f"class {cls} (an ask) to a user with owes_proof={owes}"
     if cls not in STATUS_CLASSES | ASK_CLASSES:
         return "other", f"unknown message class {cls!r}"
+    if r1_receipt(facts):
+        return r1_shape_stop(low, facts)
     return None
 
 
