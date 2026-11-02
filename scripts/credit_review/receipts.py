@@ -56,6 +56,15 @@ STRONG_MATCH = ("professional_id", "professional_id+email", "authenticated_email
 # existing rows re-admit with no data migration. Do NOT add the literal "external_id+email" to STRONG_MATCH:
 # that would blind us to any future external_id that is not a professional id.
 MATCH_ALIASES = {"external_id+email": "professional_id+email"}
+# [key=proof-on-file-same-conversation] (l1 ruling-external-id-receipts-1102.md, Ruling 2): a filing resolved
+# through proof-on-file.json - the conversation is filed under EXACTLY one account, but with no email
+# confirmation - is weaker than external_id+email by exactly that check. It is admitted for a receipt ONLY
+# where a receipt cannot leave the thread the document arrived in: the R1 receipt is addressed to the filing
+# conversation itself (uvn_status.with_filing -> the gate's G3 sends it only to the contact that filed the
+# document), so a same-conversation receipt asserts "we received what was filed here" and no identity claim.
+# No conversation id = no same-conversation receipt = still skipped. Approvals, awards, dedupe/link and merges
+# keep the strict set: this label never reaches them.
+SAME_CONVERSATION_MATCH = ("proof_on_file",)
 
 
 def strong_label(matched: str | None) -> str:
@@ -68,6 +77,18 @@ def strong_label(matched: str | None) -> str:
     label = (matched or "").strip()
     label = MATCH_ALIASES.get(label, label)
     return label if label in STRONG_MATCH else ""
+
+
+def receipt_label(matched: str | None, conversation: str | None) -> str:
+    """The label a RECEIPT may be built on, or '' - the strict set, plus a same-conversation label that is
+    only usable because the receipt goes back into that same conversation (hence the conversation requirement)."""
+    label = strong_label(matched)
+    if label:
+        return label
+    raw = (matched or "").strip()
+    if raw in SAME_CONVERSATION_MATCH and str(conversation or "").strip():
+        return raw
+    return ""
 Query = Callable[[str], "list[list[str]]"]
 
 
@@ -89,9 +110,12 @@ def intake_by_user(proof_store: str) -> tuple[dict[int, dict[str, Any]], Counter
         counts[f"intake_rows_{subject}"] += 1
         if subject != "credit":
             continue
-        if not strong_label(matched):
+        label = receipt_label(matched, conv)
+        if not label:
             counts["skip_weak_identity"] += 1
             continue
+        if label in SAME_CONVERSATION_MATCH:
+            counts["admit_same_conversation_match"] += 1
         try:
             raw = json.loads(cands or "[]")
         except ValueError as exc:
@@ -102,7 +126,9 @@ def intake_by_user(proof_store: str) -> tuple[dict[int, dict[str, Any]], Counter
             raise ReceiptsError(f"proof_intake row for user {uid}: candidate ids must be a JSON array of request ids")
         ids = [x.strip().lower() for x in raw]
         u = out.setdefault(int(uid), {"request_ids": [], "first_received": str(received),
-                                      "filing_conversation": str(conv or ""), "intake_ids": []})
+                                      "filing_conversation": str(conv or ""), "intake_ids": [],
+                                      "labels": set()})
+        u["labels"].add(label)
         u["intake_ids"].append(str(iid))
         u["request_ids"] = list(dict.fromkeys(u["request_ids"] + ids))
         u["first_received"] = min(u["first_received"], str(received))
@@ -222,6 +248,9 @@ def build(*, proof_store: str = PROOF_STORE, paying_path: str = PAYING, query: Q
     lists: dict[str, list[dict[str, Any]]] = {"queued": [], "received": []}
     for uid, u in users.items():
         rows = pend.get(uid, {})
+        if u.get("labels") and set(u["labels"]) <= set(SAME_CONVERSATION_MATCH) and not u["filing_conversation"]:
+            counts["skip_no_filing_conversation"] += 1   # same-conversation receipt has no conversation to reply into
+            continue
         if not u["request_ids"]:
             counts["skip_no_candidate_request"] += 1
             continue

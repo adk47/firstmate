@@ -245,8 +245,6 @@ class ReceiptsTest(unittest.TestCase):
             self.assertTrue(doc["generated_at"])
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class StrongLabelTest(unittest.TestCase):
@@ -285,11 +283,13 @@ class LegacyRowAdmittanceTest(unittest.TestCase):
         db = sqlite3.connect(self.store)
         db.execute(SCHEMA)
         for i, (uid, matched) in enumerate(((11, "external_id+email"), (12, "proof_on_file"),
-                                            (13, "professional_id+email"), (14, "email"))):
+                                            (13, "professional_id+email"), (14, "email"),
+                                            (15, "proof_on_file"))):
+            conv = "" if uid == 15 else "215475213550081"   # 15: same-conversation label with no conversation
             db.execute("INSERT INTO proof_intake (intake_id, user_id, subject, candidate_request_ids_json, "
                        "conversation_id, source, file_sha256, received_at, filed_by, matched_by) "
                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                       (f"{uid}:{i}", uid, "credit", json.dumps([f"r-{uid}"]), "215475213550081",
+                       (f"{uid}:{i}", uid, "credit", json.dumps([f"r-{uid}"]), conv,
                         "intercom", f"sha{uid}", "2026-11-01T02:20:11Z", "intake-cron", matched))
         db.commit()
 
@@ -298,6 +298,20 @@ class LegacyRowAdmittanceTest(unittest.TestCase):
         self.assertIn(11, out)                     # the old spelling, re-admitted
         self.assertIn(13, out)                     # today's spelling
         self.assertNotIn(14, out)                  # email-only: still weak
-        self.assertNotIn(12, out)                  # proof_on_file: Ruling 2, still skipped
+        self.assertIn(12, out)                     # proof_on_file WITH a conversation: admitted (Ruling 2)
+        self.assertNotIn(15, out)                  # proof_on_file without one: no same-conversation receipt
         self.assertEqual(counts["skip_weak_identity"], 2)
+        self.assertEqual(counts["admit_same_conversation_match"], 1)
         self.assertEqual(out[11]["request_ids"], ["r-11"])
+        self.assertEqual(out[12]["filing_conversation"], "215475213550081")   # the thread the receipt replies into
+
+    def test_a_same_conversation_label_is_never_in_the_strict_set(self):
+        """Ruling 2 admits proof_on_file for RECEIPTS only; the identity sets used by approvals/link/dedupe
+        must stay exactly the strict set, so the label can never leak into them."""
+        self.assertEqual(receipts.strong_label("proof_on_file"), "")
+        self.assertNotIn("proof_on_file", receipts.STRONG_MATCH)
+        self.assertEqual(receipts.receipt_label("proof_on_file", "215475213550081"), "proof_on_file")
+        self.assertEqual(receipts.receipt_label("proof_on_file", ""), "")
+
+if __name__ == "__main__":
+    unittest.main()
