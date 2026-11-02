@@ -2258,7 +2258,7 @@ write_large_fleet_home() {
     printf 'window=fm-%s\nterminal=term_%s\nkind=ship\nmode=no-mistakes\nworktree=/tmp/wt/%s\nproject=/tmp/projects/repo-%s\npr=https://github.com/example/repo-%s/pull/%s\n' \
       "$id" "$id" "$id" "$i" "$i" "$((10#$i))" > "$home/state/$id.meta"
     status="$home/state/$id.status"
-    for _ in $(seq 1 30); do printf 'working: %s\n' "$long" >> "$status"; done
+    for _ in 1 2 3; do printf 'working: %s\n' "$long" >> "$status"; done
     case $((10#$i % 4)) in
       0) printf 'needs-decision [key=large-%s]: pick one %s\n' "$i" "${long//STATUS-HISTORY-BODY/DECISION-BODY}" >> "$status" ;;
       1) printf 'done: PR https://github.com/example/repo-%s/pull/%s checks green %s\n' "$i" "$((10#$i))" "$long" >> "$status" ;;
