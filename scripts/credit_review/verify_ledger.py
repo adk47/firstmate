@@ -255,13 +255,24 @@ CREATE TABLE IF NOT EXISTS verify_channel_clears (
   cleared_at TEXT NOT NULL,
   after_row INTEGER NOT NULL DEFAULT 0   -- verify_messages max(id) when cleared: covers failures up to that row only
 );
+CREATE TABLE IF NOT EXISTS reply_ref_picks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  conversation TEXT NOT NULL,        -- QA #1601 (2): the classifier's pick, recorded BEFORE the gate is called,
+  part TEXT NOT NULL,                -- keyed by conversation + the customer part it answers
+  ref TEXT NOT NULL,                 -- the allow-listed ref id it picked (fable-copy-1031-r5/<letter>) or a non-ref
+  reason TEXT NOT NULL,              -- 'mapped' is the only reason a reply-ref may be posted on
+  llm_call_id TEXT,                  -- the credit_trust.llm row of the classification (append-only audit)
+  refs_sha256 TEXT,                  -- the allow-list file the pick was made against
+  picked_at TEXT NOT NULL
+);
 """
 INDEXES = """
 CREATE INDEX IF NOT EXISTS verify_messages_user_day ON verify_messages(user_key, day);
 CREATE INDEX IF NOT EXISTS verify_messages_msg ON verify_messages(message_id);
 CREATE INDEX IF NOT EXISTS verify_messages_parent ON verify_messages(parent_row, kind);
 """
-TABLES = ("verify_messages", "verify_proof_reviews", "verify_requests", "verify_refusal_holds", "verify_channel_clears")
+TABLES = ("verify_messages", "verify_proof_reviews", "verify_requests", "verify_refusal_holds", "verify_channel_clears",
+          "reply_ref_picks")
 # The verify_messages columns credit-retro's take-back / wave reader depends on
 # (credit_retro.waves.already_engaged). Pinned here, next to the writer's schema, and
 # checked against it by scripts/tests/test_verify_ledger_contract.py.
@@ -659,7 +670,7 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
           approved_by: str, approval_ref: str, contact_id: str = "", campaign: str = "verify-live",
           refs: list[dict[str, Any]] | None = None, windowed: bool = False, now: datetime | None = None,
           enforce_cap: bool = True, user_id: str = "", reply_due: str = "", conversation: str = "", copy_ref: str = "",
-          variant: str = "") -> dict[str, Any]:
+          variant: str = "", pick_id: str = "") -> dict[str, Any]:
     """Atomically claim an initial note. One transaction (BEGIN IMMEDIATE) so two
     concurrent runs cannot both claim the same user-day or request id. A claim-proof-ask note
     records its close day (claim_close_day) as due_day."""
@@ -693,10 +704,18 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
                 db.execute("COMMIT")
                 return {"result": "already_notified", "request_ids": []}
             since48 = stamp((now or utcnow()) - timedelta(hours=48))
-            if db.execute("SELECT 1 FROM verify_messages WHERE approval_ref LIKE ? AND created_at >= ? "
-                          "AND status IN ('attempted','sent') LIMIT 1", (f"%thread:{conversation}%", since48)).fetchone():
+            if _ref_marked(db, f"thread:{conversation}", "AND created_at >= ? AND status IN ('attempted','sent')",
+                           (since48,)):
                 db.execute("COMMIT")
                 return {"result": "recent", "reason": "reply_due_48h", "request_ids": fresh}
+            if campaign == "reply-ref":
+                # QA #1615: the classifier's pick is serialized WITH the claim - inside this transaction the latest pick
+                # for the part must still be the one the gate matched (record_pick refuses once this claim exists)
+                latest = pick_for(db, conversation=conversation, part=reply_due)
+                if not latest or str(latest["id"]) != str(pick_id or ""):
+                    db.execute("COMMIT")
+                    return {"result": "pick_changed", "request_ids": fresh,
+                            "reason": f"latest pick {latest['id'] if latest else 'none'} != matched pick {pick_id or 'none'}"}
             approval_ref = f"{approval_ref} reply_due:{reply_due} thread:{conversation}"
         if campaign in STATUS_CAMPAIGNS and enforce_cap:
             # inside this transaction: a reply_due answer lifts ONLY the 7-day cooldown (QA #1509)
@@ -946,6 +965,63 @@ DEFERRAL_REASONS = ("core_notice_within_7d", "comm_state")
 
 
 THREAD_EVENTS = ("handoff", "reassign")
+
+
+def _ref_marked(db: sqlite3.Connection, mark: str, where: str, params: tuple = ()) -> bool:
+    """QA #1615: a verify_messages row whose approval_ref carries `mark` as WHOLE space-separated tokens - never a
+    prefix (`thread:777` must not match `thread:7777`). LIKE narrows the rows; the token match decides."""
+    rx = re.compile(r"(?:^| )" + re.escape(mark) + r"(?: |$)")
+    for (ref,) in db.execute(f"SELECT approval_ref FROM verify_messages WHERE approval_ref LIKE ? {where}",
+                             (f"%{mark}%", *params)):
+        if rx.search(ref or ""):
+            return True
+    return False
+
+
+class PickLocked(ValueError):
+    """A reply-ref send for this part is claimed or sent: no newer pick may be recorded for it."""
+
+
+def record_pick(db: sqlite3.Connection, *, conversation: str, part: str, ref: str, reason: str, llm_call_id: str = "",
+                refs_sha256: str = "", now: datetime | None = None) -> int:
+    """QA #1601 (2): the reply-ref picker's pick for one customer part, recorded before it calls the gate."""
+    for name, v in (("conversation", conversation), ("part", part)):
+        if not re.fullmatch(r"[0-9]{1,24}", str(v or "")):
+            raise ValueError(f"{name} must be digits")
+    if not ref or not reason:
+        raise ValueError("ref and reason are required")
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        # QA #1615: once a reply-ref send for this part is claimed (attempted) or sent, its pick is final - a later pick
+        # is refused (the picker does not call the gate), so no in-flight send can be superseded under it
+        if _ref_marked(db, f"reply_due:{part} thread:{conversation}", "AND campaign = 'reply-ref' AND status IN ('attempted','sent')"):
+            raise PickLocked(f"a reply-ref send for part {part} in conversation {conversation} is claimed or sent; "
+                             "its pick is final")
+        cur = db.execute("INSERT INTO reply_ref_picks (conversation, part, ref, reason, llm_call_id, refs_sha256, picked_at) "
+                         "VALUES (?, ?, ?, ?, ?, ?, ?)", (conversation, part, ref, reason, llm_call_id or None,
+                                                         refs_sha256 or None, stamp(now)))
+        db.execute("COMMIT")
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+    return int(cur.lastrowid)
+
+
+def pick_for(db: sqlite3.Connection, *, conversation: str, part: str) -> dict[str, Any] | None:
+    """The LATEST recorded pick for this conversation + part (None = never picked, or the table is not there yet)."""
+    try:
+        r = db.execute("SELECT id, ref, reason, llm_call_id, refs_sha256, picked_at FROM reply_ref_picks "
+                       "WHERE conversation = ? AND part = ? ORDER BY id DESC LIMIT 1", (conversation, part)).fetchone()
+    except sqlite3.OperationalError as exc:
+        # QA #1615: only a ledger that predates the table reads as "no pick"; a locked / failing read raises (the gate
+        # then refuses reply_ref:pick_unreadable - an outage is never mislabelled as a classifier decision)
+        if "no such table" in str(exc):
+            return None
+        raise
+    if not r:
+        return None
+    return {"id": int(r[0]), "ref": r[1], "reason": r[2], "llm_call_id": r[3] or "", "refs_sha256": r[4] or "",
+            "picked_at": r[5]}
 
 
 def thread_event(db: sqlite3.Connection, *, kind: str, conversation: str, from_admin: str, to_admin: str,
@@ -1644,6 +1720,7 @@ def _main(argv: list[str] | None = None) -> int:
         s.add_argument("--conversation", default="", help="[key=reply-due]: the thread the answer goes into")
         s.add_argument("--copy-ref", default="", help="p1 615: the gate's copy token this note renders")
         s.add_argument("--variant", default="", help="p1 615: its openers/prefixes, comma-joined (c2, o, ...)")
+        s.add_argument("--pick-id", default="", help="QA #1615: reply-ref - the pick the gate matched (re-checked here)")
     ld = sub.add_parser("log-deferral", help="a note held back for an outside reason: logged, never a lock")
     ld.add_argument("--campaign", required=True, choices=CAMPAIGNS)
     ld.add_argument("--user-key", required=True)
@@ -1723,6 +1800,16 @@ def _main(argv: list[str] | None = None) -> int:
     fo = sub.add_parser("followed-notes", help="gap-ask: this user's status-doc-received notes of the last 7 days")
     fo.add_argument("--user-key", required=True)
     fo.add_argument("--user-id", default="")
+    rp = sub.add_parser("record-pick", help="QA #1601 (2): the reply-ref classifier's pick for conversation + part")
+    rp.add_argument("--conversation", required=True)
+    rp.add_argument("--part", required=True)
+    rp.add_argument("--ref", required=True)
+    rp.add_argument("--reason", required=True)
+    rp.add_argument("--llm-call-id", default="")
+    rp.add_argument("--refs-sha256", default="")
+    pf = sub.add_parser("pick-for", help="the latest recorded pick for conversation + part ({} when none)")
+    pf.add_argument("--conversation", required=True)
+    pf.add_argument("--part", required=True)
     c = sub.add_parser("set-conversation")
     c.add_argument("--message-id", required=True)
     c.add_argument("--conversation-id", required=True)
@@ -1742,13 +1829,23 @@ def _main(argv: list[str] | None = None) -> int:
                   approved_by=a.approved_by, approval_ref=a.approval_ref, campaign=a.campaign)
         if a.op == "claim":
             out = claim(db, contact_id=a.contact_id, refs=refs, windowed=a.windowed, user_id=a.user_id,
-                        reply_due=a.reply_due, conversation=a.conversation, copy_ref=a.copy_ref, variant=a.variant, **kw)
+                        reply_due=a.reply_due, conversation=a.conversation, copy_ref=a.copy_ref, variant=a.variant,
+                        pick_id=a.pick_id, **kw)
         else:
             out = refuse(db, reason=a.reason, user_id=a.user_id, **kw)
     elif a.op == "log-deferral":
         out = log_deferral(db, campaign=a.campaign, user_key=a.user_key, user_id=a.user_id, day=a.day,
                            request_ids=_ids(a.request_ids), message_type=a.message_type, approved_by=a.approved_by,
                            approval_ref=a.approval_ref, reason=a.reason, detail=a.detail)
+    elif a.op == "record-pick":
+        try:
+            out = {"id": record_pick(db, conversation=a.conversation, part=a.part, ref=a.ref, reason=a.reason,
+                                     llm_call_id=a.llm_call_id, refs_sha256=a.refs_sha256)}
+        except PickLocked as exc:            # QA #1615: the send owns this part; the caller must not call the gate
+            print(json.dumps({"result": "pick_locked", "error": str(exc)}))
+            return 3
+    elif a.op == "pick-for":
+        out = pick_for(db, conversation=a.conversation, part=a.part) or {}
     elif a.op == "thread-event":
         out = thread_event(db, kind=a.kind, conversation=a.conversation, from_admin=a.from_admin, to_admin=a.to_admin,
                            note_part=a.note_part, reply_due_part=a.reply_due, request_ids=_ids(a.request_ids),

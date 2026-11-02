@@ -254,6 +254,7 @@ readonly REPLY_DUE_CORRECTION_REF="fable-copy-1030-r5/c"
 # over a coded answer class (comm_state). /z needs a literal "in Jan's review list" read that is not wired: refused.
 # SEND-LOCKED until r5 + p1 read c1's classifier dry run (Sun 02Z) - checks and dry runs only until this flips by PR.
 readonly REPLY_REF_APPROVED=0
+readonly PICK_MAX_AGE_S=86400   # QA #1601 (2): a reply-ref post follows its classifier pick within a day, else re-picked
 readonly REPLY_REF_SERIES="fable-copy-1031-r5"
 # A thread assigned to a HUMAN admin: the answer is handed to them first (tag + internal note), and only if no human
 # writes within 48 h of that note is the thread reassigned to this gate's admin (+ note) and the answer posted.
@@ -776,11 +777,24 @@ case "$CAMPAIGN" in
     esac
     [ -n "$REPLY_DUE" ] || refuse "reply-ref is a reply_due answer only: --reply-due <part> --conversation <id>."
     [ "$KIND" = "initial" ] || refuse "reply-ref has no follow-ups."
-    # QA #1601 (2): the ref must be the one the classifier picked for THIS part, matched at send time. That match
-    # (the picker's recorded pick for conversation + part) is not coded yet, so every reply-ref POST refuses here,
-    # whatever REPLY_REF_APPROVED says - dry runs / --check-recipient only. Coding the match lifts this line.
-    if [ "$ACTION" = "post" ]; then
-      refuse "reply_ref:pick_match_uncoded - the send-time match to the classifier's pick for this part is not coded; dry run / --check-recipient only. Nothing was sent or claimed."
+    # QA #1601 (2): the ref must be the one the classifier picked for THIS part, matched at send time (and in the
+    # read-only --check-recipient, so the dry run == the send): the LATEST pick the picker recorded for conversation +
+    # part (verify_ledger record-pick, written before it calls the gate) must name exactly this ref, with reason
+    # 'mapped', an llm_call_id, and be 0..PICK_MAX_AGE_S old (never future-dated, by any amount). No pick / another ref / stale = refused.
+    if [ "$ACTION" = "post" ] || [ "$ACTION" = "check-recipient" ]; then
+      [[ "$THREAD" =~ ^[0-9]{1,24}$ ]] && [[ "$REPLY_DUE" =~ ^[0-9]{1,24}$ ]] \
+        || refuse "reply_ref:no_pick - the conversation and the answered part must be ids; nothing was sent or claimed."
+      PICK_JSON="$(ledger pick-for --conversation "$THREAD" --part "$REPLY_DUE" 2>/dev/null)" \
+        || refuse "reply_ref:pick_unreadable - the classifier's recorded pick could not be read; nothing was sent or claimed."
+      PICK_WHY="$(printf '%s' "$PICK_JSON" | "$JQ_BIN" -r --arg want "$APPROVAL_REF" --argjson max "$PICK_MAX_AGE_S" '
+        if (.ref // "") == "" then "no_pick"
+        elif .ref != $want then "pick_mismatch: the classifier picked \(.ref) for this part, not \($want)"
+        elif .reason != "mapped" then "pick_not_mapped: \(.reason)"
+        elif ((.llm_call_id // "") | length) == 0 then "pick_unaudited: no llm_call_id"
+        elif ((now - ((.picked_at // "") | fromdateiso8601? // 0)) as $age | $age > $max or $age < 0) then "pick_stale: picked at \(.picked_at) (outside 0..\($max) s of now)"
+        else "ok" end' 2>/dev/null || echo unreadable)"
+      [ "$PICK_WHY" = "ok" ] || refuse "reply_ref:$PICK_WHY - nothing was sent or claimed."
+      PICK_ID="$(printf '%s' "$PICK_JSON" | "$JQ_BIN" -r '.id // ""')"   # QA #1615 (b1 634): re-read at every later read
     fi
     if [ "$ACTION" = "post" ] && [ "$REPLY_REF_APPROVED" != "1" ]; then
       refuse "reply-ref is send-locked (REPLY_REF_APPROVED=0) until r5 + p1 read the classifier dry run; --dry-run / --check-recipient only. Nothing was sent or claimed."
@@ -2849,9 +2863,25 @@ fi
 # may go; 1 = hold (RD_HOLD = "<code> <reason>"); 2 = unverifiable (RD_HOLD = the reason). The thread must be OPEN, its
 # contact exactly CONTACT_ID, the checked part still the customer's LATEST, NO support comment (admin / bot / team,
 # text or attachment) since that part, and the assignee the one comm_state's decision was about.
+# QA #1615 (b1 634): the reply-ref's pick is re-read at the same points as the thread facts (the final read before the
+# claim, the takeover read) and immediately before the POST - a NEWER pick for this conversation + part since the first
+# check (the classifier re-decided) means this run's ref may be stale: held, nothing posted
+pick_unchanged() {
+  [ "$CAMPAIGN" = "reply-ref" ] || return 0
+  local now_id
+  now_id="$(ledger pick-for --conversation "$THREAD" --part "$REPLY_DUE" 2>/dev/null | "$JQ_BIN" -r '.id // ""' 2>/dev/null)" \
+    || { RD_HOLD="the pick re-read failed"; return 2; }
+  [ -n "$now_id" ] || { RD_HOLD="the pick re-read failed"; return 2; }
+  if [ "$now_id" != "${PICK_ID:-}" ]; then
+    RD_HOLD="reply_ref_pick_changed (a newer classifier pick $now_id was recorded for part $REPLY_DUE in $THREAD since this run checked pick ${PICK_ID:-?})"
+    return 1
+  fi
+  return 0
+}
 rd_thread_checks() {
   local c="$1" latest ans now act
   RD_HOLD=""
+  pick_unchanged || return $?
   latest="$(printf '%s' "$c" | "$JQ_BIN" -r '[.source, ((.conversation_parts.conversation_parts // [])[])]
       | map(select(((.author.type // "") | IN("user", "lead", "contact")) and ((.part_type // "comment") != "note")
                    and ((((.body // "") | length) > 0) or (((.attachments // []) | length) > 0))))
@@ -2982,7 +3012,8 @@ if [ "$KIND" = "initial" ]; then
     --message-type "$MESSAGE_TYPE" --approved-by "$APPROVED_BY" \
     --approval-ref "$APPROVAL_REF$(if [ "$RD_PREFIX" = "1" ]; then printf '; correction %s' "$REPLY_DUE_CORRECTION_REF"; fi)${C2_SUFFIX:-}${APPROVAL_REF_SUFFIX_O:-}" \
     --contact-id "$CONTACT_ID" --refs-file "$REFS_FILE" ${WINDOWED_FLAG:+"$WINDOWED_FLAG"} \
-    ${REPLY_DUE:+--reply-due "$REPLY_DUE" --conversation "$THREAD"} --copy-ref "$COPY" --variant "$NOTE_VARIANT")" \
+    ${REPLY_DUE:+--reply-due "$REPLY_DUE" --conversation "$THREAD"} --copy-ref "$COPY" --variant "$NOTE_VARIANT" \
+    ${PICK_ID:+--pick-id "$PICK_ID"})" \
     || die "the ledger claim failed; refusing to send without the idempotency record."
 else
   CLAIM="$(ledger claim-reminder --parent-message-id "$PARENT_ID" --kind "$KIND" --user-key "$EMAIL" --day "$DAY" \
@@ -2994,6 +3025,9 @@ case "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r 'if .result == "recent" and .reason 
   claimed) ;;
   already_notified)
     printf 'SKIPPED already-notified credits=%s\n' "$N"; exit 0 ;;
+  pick_changed)
+    printf 'HELD reply_ref_pick_changed credits=%s; nothing was sent or claimed\n' "$N"
+    printf '  (at the claim: %s)\n' "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.reason // ""')"; exit 3 ;;
   user_done)
     printf 'SKIPPED %s credits=%s\n' "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.reason')" "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.request_ids | length')"; exit 0 ;;
   recent)
@@ -3063,6 +3097,15 @@ readonly NTEXT_JQ='def ntext: gsub("<[^>]+>"; " ") | gsub("&nbsp;"; " ") | gsub(
   | gsub("&lt;"; "<") | gsub("&gt;"; ">") | gsub("&amp;"; "&") | gsub("\\s+"; " ") | gsub("^ | $"; "");'
 TEXT_SHA="$(printf '%s' "$PAYLOAD" | "$JQ_BIN" -r "$NTEXT_JQ"' .body | ntext' | "$PY_BIN" -I -c 'import hashlib,sys; print(hashlib.sha256(sys.stdin.buffer.read().rstrip(b"\n")).hexdigest())')"
 
+# QA #1615 (b1 634): the pick, re-read IMMEDIATELY before the POST (the claim is closed refused if it moved)
+if [ "$CAMPAIGN" = "reply-ref" ] && [ "$ACTION" = "post" ]; then
+  rc=0; pick_unchanged || rc=$?
+  if [ "$rc" != 0 ]; then
+    ledger finalize --message-row "$ROW_ID" --status refused --reason "pre-post pick read: ${RD_HOLD:0:200}" >/dev/null
+    if [ "$rc" = 1 ]; then printf 'HELD %s credits=%s; nothing was sent\n' "${RD_HOLD%% *}" "$N"; printf '  %s\n' "${RD_HOLD#* }"; exit 3; fi
+    refuse "the pre-post pick read could not be verified ($RD_HOLD); nothing was sent."
+  fi
+fi
 # ---------------------------------------------------------------------------------------
 # Log BEFORE the write, then POST, then verify.
 LOG_FILE="$(new_log_file verify-request "$CONTACT_ID")"

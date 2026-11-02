@@ -63,6 +63,8 @@ if m == "hold":
     print(json.dumps({"hold": True, "state": "replied", "reasons": ["proof_on_file:proof_intake"]})); sys.exit(3)
 if m == "fail":
     print(json.dumps({"hold": None, "reasons": ["unknown: replica read failed"]})); sys.exit(2)
+if os.environ.get("STUB_COMM_STATE_SIDE"):            # a side effect while comm_state runs (another writer, a race)
+    import subprocess; subprocess.run(os.environ["STUB_COMM_STATE_SIDE"], shell=True, check=True)
 if os.environ.get("STUB_COMM_STATE_JSON"):
     print(os.environ["STUB_COMM_STATE_JSON"]); sys.exit(0)
 print(json.dumps({"hold": False, "state": "asked", "reasons": []}))
@@ -3410,13 +3412,44 @@ Caroline, Muso Support" ]
     run -0 "$LOCKED" send --campaign reply-ref --copy "$k" --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ --dry-run
     [[ "$(rendered .body | plain)" == "Hi Jane, "*"Caroline, Muso Support" ]]
   done
-  # SEND-LOCKED: a real post is refused (nothing claimed) until REPLY_REF_APPROVED flips by PR
+  # QA #1601 (2): the send-time pick match - the LATEST pick recorded for conversation + part must be this ref,
+  # 'mapped', audited (llm_call_id) and fresh; no pick refuses before anything else
+  pick() { python3 "$INTERCOM_VERIFY_TEST_LEDGER_HELPER" --db "$INTERCOM_VERIFY_TEST_LEDGER" record-pick --conversation 777 --part 57000000001 "$@" >/dev/null; }
   run -1 "$LOCKED" send --campaign reply-ref --copy r --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ
-  [[ "$output" == *"reply_ref:pick_match_uncoded"* ]]; [ "$(replies)" -eq 0 ]
-  # QA #1601 (2): even with the send-lock lifted, a post refuses until the send-time pick match is coded
+  [[ "$output" == *"reply_ref:no_pick"* ]]; [ "$(replies)" -eq 0 ]
+  # SEND-LOCKED: with the right pick a real post is still refused (nothing claimed) until REPLY_REF_APPROVED flips by PR
+  pick --ref fable-copy-1031-r5/r --reason mapped --llm-call-id 41
+  run -1 "$LOCKED" send --campaign reply-ref --copy r --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"reply-ref is send-locked (REPLY_REF_APPROVED=0)"* ]]; [ "$(replies)" -eq 0 ]
   sed 's/^readonly REPLY_REF_APPROVED=0/readonly REPLY_REF_APPROVED=1/' "$LOCKED" > "$TEST_TMPDIR/rr-unlocked.sh"; chmod +x "$TEST_TMPDIR/rr-unlocked.sh"
+  # another ref than the pick; the latest pick wins; not mapped; unaudited; stale - each refused, nothing claimed
   run -1 "$TEST_TMPDIR/rr-unlocked.sh" send --campaign reply-ref --copy u --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ
-  [[ "$output" == *"reply_ref:pick_match_uncoded"* ]]; [ "$(replies)" -eq 0 ]
+  [[ "$output" == *"reply_ref:pick_mismatch: the classifier picked fable-copy-1031-r5/r for this part, not fable-copy-1031-r5/u"* ]]
+  pick --ref fable-copy-1031-r5/u --reason two_refs --llm-call-id 42
+  run -1 "$TEST_TMPDIR/rr-unlocked.sh" send --campaign reply-ref --copy u --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"reply_ref:pick_not_mapped: two_refs"* ]]
+  pick --ref fable-copy-1031-r5/u --reason mapped
+  run -1 "$TEST_TMPDIR/rr-unlocked.sh" send --campaign reply-ref --copy u --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"reply_ref:pick_unaudited"* ]]
+  python3 -c "import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.execute(\"INSERT INTO reply_ref_picks (conversation, part, ref, reason, llm_call_id, picked_at) VALUES ('777','57000000001','fable-copy-1031-r5/u','mapped','43','2026-01-01T00:00:00Z')\"); d.commit()" "$INTERCOM_VERIFY_TEST_LEDGER"
+  run -1 "$TEST_TMPDIR/rr-unlocked.sh" send --campaign reply-ref --copy u --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"reply_ref:pick_stale"* ]]
+  # QA #1615: a FUTURE-dated pick (a clock ahead, an import) is outside the window too - never eligible for > 24 h
+  python3 -c "import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.execute(\"INSERT INTO reply_ref_picks (conversation, part, ref, reason, llm_call_id, picked_at) VALUES ('777','57000000001','fable-copy-1031-r5/u','mapped','46','2099-01-01T00:00:00Z')\"); d.commit()" "$INTERCOM_VERIFY_TEST_LEDGER"
+  run -1 "$TEST_TMPDIR/rr-unlocked.sh" send --campaign reply-ref --copy u --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"reply_ref:pick_stale"* ]]
+  # ... and a NEAR-future one (a ledger clock 30 s ahead): 0..PICK_MAX_AGE_S, no skew allowance
+  soon="$(python3 -c 'import datetime as d; print((d.datetime.now(d.timezone.utc) + d.timedelta(seconds=30)).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
+  python3 -c "import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.execute(\"INSERT INTO reply_ref_picks (conversation, part, ref, reason, llm_call_id, picked_at) VALUES ('777','57000000001','fable-copy-1031-r5/u','mapped','47',?)\", (sys.argv[2],)); d.commit()" "$INTERCOM_VERIFY_TEST_LEDGER" "$soon"
+  run -1 "$TEST_TMPDIR/rr-unlocked.sh" send --campaign reply-ref --copy u --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"reply_ref:pick_stale"* ]]
+  [ "$(replies)" -eq 0 ]
+  [ -z "$(sql "SELECT * FROM verify_messages WHERE campaign='reply-ref'")" ]
+  # a pick for ANOTHER part of the thread is not this part's
+  python3 "$INTERCOM_VERIFY_TEST_LEDGER_HELPER" --db "$INTERCOM_VERIFY_TEST_LEDGER" record-pick --conversation 777 --part 57000000009 --ref fable-copy-1031-r5/u --reason mapped --llm-call-id 44 >/dev/null
+  run -1 "$TEST_TMPDIR/rr-unlocked.sh" send --campaign reply-ref --copy u --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"reply_ref:pick_stale"* ]]
+  pick --ref fable-copy-1031-r5/r --reason mapped --llm-call-id 45      # the latest pick again names /r
   # /z (Jan's review list read not wired), an unknown ref, and no --reply-due: refused
   run -1 "$LOCKED" send --campaign reply-ref --copy z --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ --dry-run
   [[ "$output" == *"/z is posted only where the row is literally in Jan's review list"* ]]
@@ -3427,9 +3460,30 @@ Caroline, Muso Support" ]
   # unlocked: the post goes through comm_state's reply_due check (its hold holds it) like any reply_due answer
   unlocked_gate replyref
   export STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]' ',"state":"open"' | jq -c '.conversation_parts = {"conversation_parts":[{"id":"57000000001","part_type":"comment","author":{"type":"user","id":"6650aa01"},"body":"streams not updating","created_at":1}]}')"
-  STUB_COMM_STATE=hold run -3 "$GATE" send --campaign reply-ref --copy r --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ --check-recipient   # a post refuses pick_match_uncoded first (QA #1601)
+  # the read-only check runs the same match (dry run == send): another ref than the pick is refused there too
+  STUB_COMM_STATE=hold run -1 "$GATE" send --campaign reply-ref --copy u --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ --check-recipient
+  [[ "$output" == *"reply_ref:pick_mismatch"* ]]
+  # the picked /r passes the match in the read-only check too, and reaches comm_state (whose hold holds it)
+  STUB_COMM_STATE=hold run -3 "$GATE" send --campaign reply-ref --copy r --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ --check-recipient
   grep -q -- "--campaign reply-ref --copy refr" "$TEST_TMPDIR/comm-state-args"
   [ "$(replies)" -eq 0 ]
+}
+
+@test "reply-ref (QA #1615, b1 634): a NEWER classifier pick recorded after the first check holds the run at the final read - HELD reply_ref_pick_changed, nothing claimed or posted" {
+  credits "$TEST_TMPDIR/r.json" Jane "reply-57000000001:-:-:-"
+  unlocked_gate replyref
+  sed 's/^readonly REPLY_REF_APPROVED=0/readonly REPLY_REF_APPROVED=1/' "$GATE" > "$TEST_TMPDIR/rr.sh"; chmod +x "$TEST_TMPDIR/rr.sh"
+  export STUB_CONVERSATION="$(rd_thread null)"
+  pick() { python3 "$INTERCOM_VERIFY_TEST_LEDGER_HELPER" --db "$INTERCOM_VERIFY_TEST_LEDGER" record-pick --conversation 777 --part 57000000001 "$@" >/dev/null; }
+  python3 "$INTERCOM_VERIFY_TEST_LEDGER_HELPER" --db "$INTERCOM_VERIFY_TEST_LEDGER" migrate >/dev/null
+  pick --ref fable-copy-1031-r5/r --reason mapped --llm-call-id 41
+  # the classifier re-decides the part WHILE this run is between its first check and the final read
+  STUB_COMM_STATE_JSON="$(rd_cs "" null)" \
+  STUB_COMM_STATE_SIDE="python3 '$INTERCOM_VERIFY_TEST_LEDGER_HELPER' --db '$INTERCOM_VERIFY_TEST_LEDGER' record-pick --conversation 777 --part 57000000001 --ref fable-copy-1031-r5/s --reason mapped --llm-call-id 42 >/dev/null" \
+    run -3 "$TEST_TMPDIR/rr.sh" send --campaign reply-ref --copy r --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"HELD reply_ref_pick_changed credits=1"* ]]
+  [ "$(replies)" -eq 0 ]; [ "$(posts)" -eq 0 ]
+  [ -z "$(sql "SELECT * FROM verify_messages WHERE campaign='reply-ref'")" ]    # held BEFORE the claim (the final read)
 }
 
 @test "reply_due G2: an admin-opened thread is answered ONLY under --reply-due with comm_state's verified trigger; without it G2 still refuses" {
