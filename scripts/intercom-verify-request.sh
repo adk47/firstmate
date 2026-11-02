@@ -1088,12 +1088,7 @@ if [ "$R1LIKE" = "1" ] && [ "$("$JQ_BIN" -r '.user.filing_muso_ui == true' "$CRE
 fi
 # r5 / QA #1554: the R1 receipt itself needs the filing's class STATED - user.filing_muso_ui explicitly false. A payload
 # without it (no producer sets it yet) is r1_filing_class_unknown: refused, never a receipt by default.
-# r5 + p1 (10-31 23:3xZ, b1's deployed-copy finding 2): the R1 line numbers by request rows, but /l numbers by DISTINCT
-# TRACKS (1 track / 2 requests = singular naming both roles) - that copy is not approved yet, so until it is the gate
-# refuses an R1 whose request count differs from its distinct-track count (the same track key the uvn and /i lines use)
-if [ "$COPY" = "docrecvr" ] && [ "$("$JQ_BIN" -r "$TRACKS_JQ"' ntracks == (.credits | length)' "$CREDITS_FILE" 2>/dev/null || echo false)" != "true" ]; then
-  refuse "r1_number_uncoded: this R1 receipt has more requests than distinct tracks (two roles on one track); the approved line numbers by request rows and the /l singular-naming-both-roles line is not approved yet. Nothing was sent or claimed."
-fi
+# fable-copy-1101-r5/r1-roles retires r1_number_uncoded: the R1 renderer numbers by distinct (track, role) pairs itself.
 if [ "$COPY" = "docrecvr" ] && [ "$("$JQ_BIN" -r '.user | has("filing_muso_ui") and .filing_muso_ui == false' "$CREDITS_FILE" 2>/dev/null)" != "true" ]; then
   refuse "r1_filing_class_unknown: the R1 payload does not state the filing's class (user.filing_muso_ui must be false); nothing was sent or claimed."
 fi
@@ -1875,9 +1870,20 @@ def status_team_review_count($fn; $n):
     { subject: "Your Muso credit requests: an update",
       segs: [ {p: "Hi \($fn), a quick update on your \($n) credit requests: they're with our team for review, and we'll message you here as soon as they've been checked."} ] }
   else error("teamreviewcount: the /k count form is for 2 or more requests") end;
+# fable-copy-1030-r5/l2 (2): the roles on ONE track follow /l - joined "and", plural "credits" ("Mixing credit" for one)
+def track_roles($c): reduce ($c[].role // "" | split(",")[] | gsub("^\\s+|\\s+$"; "") | select(length > 0)) as $r
+  ([]; if any(.[]; ascii_downcase == ($r | ascii_downcase)) then . else . + [$r] end);   # in order, each role once
+# R1. fable-copy-1101-r5/r1-roles: number by distinct (track, role) pairs - ONE track carrying 2+ distinct roles (in
+# 2+ request rows, or one row whose role is comma-combined: QA #1626) names the roles ("your Mixing and Mastering credit requests for ..."); one track whose rows collapse to
+# ONE role is the single-request line; 2+ distinct tracks keep the plural line over titles (extra roles on a track need
+# no words: the titles explain the plural). "the document you sent" as deployed (R1 facts carry no document count).
 def status_doc_received_r1($fn; $c; $maxl):
-  { subject: "Your Muso credit \(req_s($c|length)): an update",
-    segs: [ {p: "Hi \($fn), a quick update on your credit \(req_s($c|length)) for \(titles($c; $maxl)): we have the document you sent, and it's in our review queue. We'll message you here as soon as it's checked."}
+  (utitles($c) | length) as $nt | track_roles($c) as $roles
+  | (if $nt == 1 and ($roles | length) >= 2 then "roles" elif $nt == 1 then "one" else "many" end) as $shape
+  | { subject: "Your Muso credit \(if $shape == "one" then "request" else "requests" end): an update",
+    segs: [ {p: (if $shape == "roles"
+                 then "Hi \($fn), a quick update on your \($roles | andjoin) credit requests for \(titles($c; $maxl)): we have the document you sent, and it's in our review queue. We'll message you here as soon as it's checked."
+                 else "Hi \($fn), a quick update on your credit \(if $shape == "one" then "request" else "requests" end) for \(titles($c; $maxl)): we have the document you sent, and it's in our review queue. We'll message you here as soon as it's checked." end)}
             # L13 (rulings-1028-1430: "R1 + L13 as a second paragraph") is RETIRED from R1 - r5 10-30 19:2xZ: with #1526
             # an R1 only ever receipts a document of record (record / f9), never a screenshot of Muso itself, so the L13
             # sentence never renders on an R1 (a Muso-UI filing is refused below, never receipted)
@@ -1972,9 +1978,6 @@ def doc_named($n):
     + " you sent on \($m[($n.doc_received_at[5:7] | tonumber) - 1]) \($n.doc_received_at[8:10] | tonumber)"
     + (if $n.doc_received_at[0:4] != $day[0:4] then ", \($n.doc_received_at[0:4])" else "" end);
 def doc_it($n): if doc_many($n) then "them" else "it" end;
-# fable-copy-1030-r5/l2 (2): the roles on ONE track follow /l - joined "and", plural "credits" ("Mixing credit" for one)
-def track_roles($c): reduce ($c[].role // "" | split(",")[] | gsub("^\\s+|\\s+$"; "") | select(length > 0)) as $r
-  ([]; if any(.[]; ascii_downcase == ($r | ascii_downcase)) then . else . + [$r] end);   # in order, each role once
 def proof_need_ask($fn; $c; $n; $maxl):
   ($c[0] + {role: (track_roles($c) | andjoin)}) as $x
   | if (utitles($c) | length) == 1 then

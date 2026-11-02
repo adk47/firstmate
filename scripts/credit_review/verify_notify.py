@@ -770,6 +770,25 @@ def _apply_lock() -> Any:
 ASK_CAMPAIGNS = ("uvn-status", "proof-need-ask", "gap-ask", "claim-proof-ask", "verify-live", "retro-past")
 
 
+# QA #1626: the facts key tracks and roles with the RENDERER's own string rules, which are jq's: ascii_downcase lowers A-Z
+# only ("Été" and "été" stay two titles), and jq's \s is Unicode whitespace WITHOUT the separators chr(28)..chr(31) that
+# Python's \s adds (the same class as attempted_reconcile._WS, #1607)
+_JQ_WS = re.compile("[^\\S" + "".join(chr(c) for c in range(28, 32)) + "]+")
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
+
+
+def _ascii_lower(s: str) -> str:
+    return s.translate(_ASCII_LOWER)
+
+
+def _jq_tnorm(v: Any) -> str:        # the gate's tnorm: tostring | ascii_downcase | gsub("\\s+"; " ") | gsub("^ +| +$"; "")
+    return _JQ_WS.sub(" ", _ascii_lower(str(v if v is not None else ""))).strip(" ")
+
+
+def _jq_trim(s: str) -> str:          # jq: gsub("^\\s+|\\s+$"; "")
+    return re.sub("^" + _JQ_WS.pattern + "|" + _JQ_WS.pattern + "$", "", s)
+
+
 def render_facts(p: dict[str, Any], extra: list[str]) -> dict[str, Any]:
     """The facts row the batch judge reads for one rendered body, from the payload the gate rendered: the class (ask /
     status, by campaign), whether the user owes proof (an ask, or the R1 receipt to a user who still owes it), the
@@ -777,14 +796,25 @@ def render_facts(p: dict[str, Any], extra: list[str]) -> dict[str, Any]:
     camp = extra[extra.index("--campaign") + 1] if "--campaign" in extra[:-1] else ""
     copy = extra[extra.index("--copy") + 1] if "--copy" in extra[:-1] else ""
     credits = p.get("credits") or []
-    tracks: dict[str, list[str]] = {}
+    # QA #1626: the facts count tracks and roles EXACTLY as the gate renderer does - a track is its tkey (track_id, else
+    # the case/space-normalised title + artist), and a track's roles are track_roles' (comma-split, trimmed, each role
+    # once case-insensitively, the first form kept) - so the judge never sees a number the body did not render
+    tnorm = _jq_tnorm
+
+    keyed: dict[str, tuple[str, list[str]]] = {}
     for c in credits:
-        tracks.setdefault(str(c.get("track_title") or ""), []).append(str(c.get("role") or ""))
+        k = (f"id:{c['track_id']}" if str(c.get("track_id") or "") else
+             f"t:{tnorm(c.get('track_title') or '')}|{tnorm(c.get('artist_name') or '')}")
+        title, roles = keyed.setdefault(k, (str(c.get("track_title") or ""), []))
+        for r in [_jq_trim(r) for r in str(c.get("role") or "").split(",") if _jq_trim(r)]:
+            if all(_ascii_lower(r) != _ascii_lower(x) for x in roles):
+                roles.append(r)
+    tracks = {k: v for k, v in keyed.items()}
     need = p.get("need") or {}
     dates = sorted({str(d)[:10] for d in [need.get("doc_received_at")] + [c.get("doc_received_at") for c in credits] if d})
     return {"class": "ask" if camp in ASK_CAMPAIGNS else "status", "campaign": camp, "copy": copy,
             "owes_proof": camp in ASK_CAMPAIGNS or copy == "received",
-            "distinct_tracks": len(tracks), "tracks_roles": [[t, sorted(set(r))] for t, r in sorted(tracks.items())],
+            "distinct_tracks": len(tracks), "tracks_roles": sorted([t, sorted(r)] for t, r in tracks.values()),
             "document_dates": dates, "credits": len(credits), "source": "renderer"}
 
 

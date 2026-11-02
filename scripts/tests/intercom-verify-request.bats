@@ -2843,13 +2843,25 @@ v.set_conversation(v.connect(sys.argv[1]), message_id="1002", conversation_id="7
   run -0 "$LOCKED" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [[ "${lines[0]}" == "DRY-RUN status-doc-received initial email credits=1 copy=docrecvr" ]]
   [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit request for "A": we have the document you sent, and it'"'"'s in our review queue. We'"'"'ll message you here as soon as it'"'"'s checked.'$'\n''Muso Support' ]
-  # r5 702 (2) / p1 529: 1 track with 2 role requests - the R1 line numbers by request rows, /l numbers by distinct
-  # tracks, and the singular-naming-both-roles R1 line is not approved yet: refused (r1_number_uncoded), nothing claimed
+  # fable-copy-1101-r5/r1-roles (retires r1_number_uncoded): ONE track with 2 role requests names both roles, byte-exact
   credits "$TEST_TMPDIR/c1.json" Jane "s1:Mixing:A:X" "s2:Mastering:a :X"
-  run -1 "$LOCKED" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/c1.json" --approved-by U7RP6HKUZ --dry-run
-  [[ "$output" == *"r1_number_uncoded"* ]]
-  run -1 "$LOCKED" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/c1.json" --approved-by U7RP6HKUZ
-  [[ "$output" == *"r1_number_uncoded"* ]]
+  run -0 "$LOCKED" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/c1.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .subject)" = "Your Muso credit requests: an update" ]
+  [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your Mixing and Mastering credit requests for "A": we have the document you sent, and it'"'"'s in our review queue. We'"'"'ll message you here as soon as it'"'"'s checked.'$'\n''Muso Support' ]
+  # the judge coverage set's original (fixtures/batch-judge/docrecvr-roles.jsonl) IS this renderer's body, byte for byte
+  credits "$TEST_TMPDIR/cm.json" Jane "s1:Mixing:Midnight Drive:X" "s2:Mastering:Midnight Drive:X"
+  run -0 "$LOCKED" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/cm.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body)" = "$(jq -r 'select(.expected == "GO") | .body_html' "$BATS_TEST_DIRNAME/fixtures/batch-judge/docrecvr-roles.jsonl")" ]
+  # QA #1626: ONE row whose role is comma-combined ("Mixing, Mastering") is two (track, role) pairs - the roles line too
+  credits "$TEST_TMPDIR/cc.json" Jane "s1:Mixing, Mastering:A:X"
+  run -0 "$LOCKED" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/cc.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .subject)" = "Your Muso credit requests: an update" ]
+  [[ "$(rendered .body | plain)" == 'Hi Jane, a quick update on your Mixing and Mastering credit requests for "A": we have'* ]]
+  # ... rows that collapse to ONE role (a duplicate request) are the single-request line, unchanged
+  credits "$TEST_TMPDIR/c3.json" Jane "s1:Mixing:A:X" "s2:mixing :A:X"
+  run -0 "$LOCKED" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/c3.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .subject)" = "Your Muso credit request: an update" ]
+  [ "$(rendered .body | plain)" = 'Hi Jane, a quick update on your credit request for "A": we have the document you sent, and it'"'"'s in our review queue. We'"'"'ll message you here as soon as it'"'"'s checked.'$'\n''Muso Support' ]
   [ "$(calls)" -eq 0 ]
   # r5 10-31 22:4xZ (withdrawn (a), guard = a PIN): two distinct tracks render the plural, byte-exact, and never L13
   credits "$TEST_TMPDIR/c2.json" Jane "s1:Mixing:A:X" "s2:Mixing:B:X"
@@ -3742,9 +3754,9 @@ vl.finalize(db, message_row=c['message_row'], status='sent', message_id='9001')"
   credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:Slap:X" "s2:Producer:Slap:X" "s3:Mixing:Knockout:X"
   run -0 "$LOCKED" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [[ "$(rendered .body | plain)" == *'for "Slap" and "Knockout":'* ]]
-  # ... but R1 (request-row number) refuses a track carrying two role requests until its /l line is approved (r5 702 (2))
-  run -1 "$LOCKED" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
-  [[ "$output" == *"r1_number_uncoded"* ]]
+  # ... and R1 (r1-roles): 2+ distinct tracks keep the plural over titles - extra roles on a track are not uncoded
+  run -0 "$LOCKED" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == 'Hi Jane, a quick update on your credit requests for "Slap" and "Knockout": we have the document'* ]]
 }
 
 @test "email reachability (p1 191, r5, QA #1511): decided AFTER the route - an email to a bounced/unsubscribed/spam contact is refused and RECORDED (no send row; the next run skips); an in-app route still goes" {
@@ -4162,14 +4174,15 @@ needfile() { # $1 file, $2 jq edit (default: the readable_document need)
   jq '.credits[0].track_id = "trk-a" | .credits[1].track_id = "trk-b"' "$TEST_TMPDIR/c0.json" > "$TEST_TMPDIR/c.json"
   run -1 "$LOCKED" send --campaign gap-ask --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [[ "$output" == *"gap_plural_uncoded"* ]]
-  # R1: two different tracks titled "Home" are two tracks (not r1_number_uncoded); one track with two role rows is
+  # R1 (r1-roles): two different tracks titled "Home" are two tracks (the plural over titles); one track with two role
+  # rows is ONE track - the roles line (by the renderer's own tkey)
   credits "$TEST_TMPDIR/r0.json" Jane "s1:Mixing:Home:X" "s2:Mixing:Home:X"
   jq '.credits[0].track_id = "trk-a" | .credits[1].track_id = "trk-b"' "$TEST_TMPDIR/r0.json" > "$TEST_TMPDIR/r.json"
-  run "$LOCKED" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ --dry-run
-  [[ "$output" != *"r1_number_uncoded"* ]]
+  run -0 "$LOCKED" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == *'your credit requests for "Home" and "Home":'* ]]
   jq '.credits[0].track_id = "trk-a" | .credits[1].track_id = "trk-a" | .credits[1].role = "Mastering"' "$TEST_TMPDIR/r0.json" > "$TEST_TMPDIR/r.json"
-  run -1 "$LOCKED" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ --dry-run
-  [[ "$output" == *"r1_number_uncoded"* ]]
+  run -0 "$LOCKED" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$(rendered .body | plain)" == *'your Mixing and Mastering credit requests for "Home":'* ]]
   # E: two different "Home" tracks with different roles are two tracks (the plural body names titles only) - no refusal
   needfile "$TEST_TMPDIR/n.json" '.credits[0].track_title = "Home" | .credits += [(.credits[0] | .request_id = "r2" | .role = "Mastering" | .track_id = "t2")]'
   run "$LOCKED" send --campaign proof-need-ask --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run

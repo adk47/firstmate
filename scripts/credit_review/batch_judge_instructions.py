@@ -28,7 +28,7 @@ from typing import Any, Iterable
 ROOT = Path(__file__).resolve().parents[2]
 DOCTRINE = ROOT / "workspaces" / "support" / "skills" / "verification-handoff" / "SKILL.md"
 BARRED_MARKER = "<!-- barred-phrases -->"
-INSTRUCTIONS_VERSION = "b1-batch-judge-instructions/v8"
+INSTRUCTIONS_VERSION = "b1-batch-judge-instructions/v9"
 # The tick's owing classes AND the campaign names (hyphens as underscores). A class in neither list (e.g.
 # credit_hold_status: a status to a user who owes, with no ask) is a coded stop until it is ruled into one.
 STATUS_CLASSES = frozenset({"status", "team_review", "team_review_approval_path", "received", "receipt",
@@ -51,10 +51,16 @@ R1 class_owes_mismatch: the message's class is the FACTS `class`, never the body
    (owes_proof false). An ASK-class message asks for something specific, and goes only to a user who owes proof
    (owes_proof true); an ask may call itself "a quick status update" and that is fine, as long as it asks for the
    one thing the user owes ("Just reply to this message with it" is the ask, not a mismatch).
+   One ruled exception: the R1 receipt (facts campaign status-doc-received, copy received) goes to a user whose
+   document is in our review queue, so owes_proof is true; it acknowledges that document and asks for nothing - that
+   is not a mismatch (an R1 that asks for anything, or says nothing more is needed, still is).
 R2 number_agreement: singular or plural follows the number of DISTINCT TRACKS in that body's facts, not the number
    of requests or roles. With one distinct track the wording is singular ("your credit request for", "on it"; two or
    more roles on that one track = "your roles on it"); plural wording for one track ("your credit requests for
-   "X"", "your role on each") is a stop. With 2 or more distinct tracks plural is RIGHT: "your credit requests for
+   "X"", "your role on each") is a stop. One ruled form (fable-copy-1101-r5/r1-roles): one distinct track carrying
+   two or more distinct roles may name those roles before "credit requests" - "your Mixing and Mastering credit
+   requests for "X"" is right (the plural counts the named roles, each of which is in that track's facts); plural
+   for one track WITHOUT the roles named, or naming a role the facts do not carry, is still a stop. With 2 or more distinct tracks plural is RIGHT: "your credit requests for
    "A" and "B"", "your role on each track", "once they've been checked". Every reference to the TRACKS or the
    CREDIT REQUESTS counts, general sentences included: with 2 or more distinct tracks "names you on the track", "on
    this track" and "your request stays open" are singular-for-many and a stop; with one distinct track "on the
@@ -104,6 +110,12 @@ def _norm(s: str) -> str:
     return " ".join(s.lower().split())
 
 
+def r1_receipt(facts: dict[str, Any]) -> bool:
+    """The R1 receipt (status-doc-received, copy received): a status line ruled for a user whose document is in review,
+    so its owes_proof is true by design (verify_notify.render_facts) - never a class/owes mismatch on its own."""
+    return facts.get("campaign") == "status-doc-received" and facts.get("copy") == "received"
+
+
 def coded_stop(body: str, facts: dict[str, Any], barred: Iterable[str]) -> tuple[str, str] | None:
     """(reason_code, evidence) for what the facts alone decide, or None. Facts that are not a JSON object (a string,
     a Python repr, a list) are a coded stop, never a crash (QA #1591)."""
@@ -122,7 +134,9 @@ def coded_stop(body: str, facts: dict[str, Any], barred: Iterable[str]) -> tuple
             return "barred_phrase", m.group(0)
     cls = str(facts.get("class") or "").lower().replace("-", "_")
     owes = facts.get("owes_proof")
-    if cls in STATUS_CLASSES and owes is not False:
+    # QA #1626: the R1 carve-out holds only for the shape the renderer writes - owes_proof exactly True (a missing or
+    # non-boolean owes_proof is malformed input: still a mismatch stop)
+    if cls in STATUS_CLASSES and owes is not False and not (r1_receipt(facts) and owes is True):
         return "class_owes_mismatch", f"class {cls} (a status line) to a user with owes_proof={owes}"
     if cls in ASK_CLASSES and owes is not True:
         return "class_owes_mismatch", f"class {cls} (an ask) to a user with owes_proof={owes}"
