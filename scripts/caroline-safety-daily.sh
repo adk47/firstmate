@@ -29,7 +29,7 @@ today="$(date -u +%F)"
 out="$STATE_DIR/$today.json"
 
 js="$(node "$HERE/caroline-redteam.mjs" --plugin-dir "$PLUGIN_DIR" 2>&1)"; js_rc=$?
-py="$(python3 "$HERE/caroline_redteam_docverify.py" --corpus "$PLUGIN_DIR/tests/redteam/caroline-redteam-cases.json" 2>&1)"; py_rc=$?
+py="$(python3 "$HERE/caroline_redteam_docverify.py" --corpus "$PLUGIN_DIR/redteam/caroline-redteam-cases.json" 2>&1)"; py_rc=$?
 dg="$(python3 "$HERE/injection-watch.py" digest --hours 24 --write-candidates 2>&1)"; dg_rc=$?
 
 # Fable s1: the classifier's silent absence must never read as "0 hits", so every digest states it.

@@ -617,7 +617,7 @@ Every Caroline reply passes `plugins/intercom/src/caroline-output-guard.ts` (pro
 process contradictions, off-topic -> approved hand-off line + reassignment). Approved lines live ONCE in
 `answer-bank.ts` (pinned by `scripts/check-caroline-answer-bank.sh`). Inbound Intercom, support@ and proof
 text pass the detection-only injection watch (TS + Python copies pinned equal). Changing a rule = add a red-team
-case (`plugins/intercom/tests/redteam/`); a case that gets through fails CI and the daily replay pages. See
+case (`plugins/intercom/redteam/`); a case that gets through fails CI and the daily replay pages. See
 `docs/support/caroline-safety-layer.md`.
 
 ## Picking the right extension mechanism

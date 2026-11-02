@@ -3,7 +3,7 @@
 //
 // Loads the compiled guard + injection watch the running gateway actually uses
 // (<plugin-dir>/dist/*.js) and the corpus shipped with it
-// (<plugin-dir>/tests/redteam/caroline-redteam-cases.json), and checks every case exactly as
+// (<plugin-dir>/redteam/caroline-redteam-cases.json; NOT under tests/, which deploy.sh rsync excludes), and checks every case exactly as
 // plugins/intercom/tests/redteam.test.ts does in CI:
 //   - the inbound watch raises the expected rules (and flags the injected document text);
 //   - the output guard BLOCKS the bad reply (expected family) and posts the approved fallback;
@@ -33,7 +33,7 @@ try {
   guardMod = await load("dist/caroline-output-guard.js");
   watchMod = await load("dist/injection-watch.js");
   bankMod = await load("dist/answer-bank.js");
-  corpus = JSON.parse(readFileSync(join(pluginDir, "tests/redteam/caroline-redteam-cases.json"), "utf8"));
+  corpus = JSON.parse(readFileSync(join(pluginDir, "redteam/caroline-redteam-cases.json"), "utf8"));
 } catch (err) {
   console.log(JSON.stringify({ layer: "caroline", error: `cannot load the deployed safety layer from ${pluginDir}: ${err}` }));
   process.exit(2);

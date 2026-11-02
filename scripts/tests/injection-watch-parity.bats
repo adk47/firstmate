@@ -44,7 +44,7 @@ print(len(a['rules']), 'rules identical')" "$ts" "$py"
   run python3 -c "
 import json, sys; sys.path.insert(0, '$ROOT/scripts')
 from lib import injection_watch as w
-cases = json.load(open('$ROOT/plugins/intercom/tests/redteam/caroline-redteam-cases.json'))['cases']
+cases = json.load(open('$ROOT/plugins/intercom/redteam/caroline-redteam-cases.json'))['cases']
 bad = []
 for c in cases:
     got = {h['rule'] for h in w.scan(c['customer'])}

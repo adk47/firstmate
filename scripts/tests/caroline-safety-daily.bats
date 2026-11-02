@@ -163,3 +163,13 @@ daily() { run bash "$DAILY" --state-dir "$STATE" --plugin-dir "$TEST_TMPDIR/plug
   [ "$status" -eq 1 ]
   [[ "$output" == *"passing cases fell from 64 to 56"* ]]
 }
+
+@test "the red-team corpus lives on a path the deploy rsync ships (no tests/ segment)" {
+  # deploy.sh RSYNC_EXCLUDES drops every tests/ dir: a corpus there never reaches node-8 and the daily pages
+  # 'cannot load' forever (found on the first deploy of #1628).
+  grep -q -- "--exclude='tests/'" "$HYDRA_REPO/scripts/deploy.sh"
+  [ -s "$HYDRA_REPO/plugins/intercom/redteam/caroline-redteam-cases.json" ]
+  run grep -n "tests/redteam/caroline-redteam-cases" "$HYDRA_REPO/scripts/caroline-redteam.mjs" "$DAILY"
+  [ "$status" -eq 1 ]
+  grep -q '"redteam/caroline-redteam-cases.json"' "$HYDRA_REPO/scripts/caroline-redteam.mjs"
+}

@@ -26,7 +26,7 @@ import caroline_redteam_docverify as rt  # noqa: E402
 from credit_verify.docverify import crosscheck as xc, gate  # noqa: E402
 from credit_verify.docverify.extract import validate  # noqa: E402
 
-CORPUS = HERE.parent.parent / "plugins" / "intercom" / "tests" / "redteam" / "caroline-redteam-cases.json"
+CORPUS = HERE.parent.parent / "plugins" / "intercom" / "redteam" / "caroline-redteam-cases.json"
 
 
 class ScanTests(unittest.TestCase):

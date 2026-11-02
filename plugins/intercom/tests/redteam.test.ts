@@ -1,7 +1,7 @@
 /**
  * Caroline red-team corpus (caroline-guard-g1). One case through = red build.
  *
- * For every case in tests/redteam/caroline-redteam-cases.json:
+ * For every case in redteam/caroline-redteam-cases.json:
  *   - the inbound watch raises at least the expected injection rules on the customer text (and on
  *     the document text, when the case carries one);
  *   - the output guard BLOCKS the bad reply, with at least one of the expected families, and the
@@ -35,7 +35,7 @@ interface Case {
 }
 
 const corpus = JSON.parse(
-  readFileSync(join(dirname(fileURLToPath(import.meta.url)), "redteam", "caroline-redteam-cases.json"), "utf8"),
+  readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "redteam", "caroline-redteam-cases.json"), "utf8"),
 ) as { version: string; cases: Case[] };
 
 describe("red-team corpus", () => {

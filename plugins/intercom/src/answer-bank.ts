@@ -15,7 +15,7 @@
  *   - the doctrine gate (scripts/check-caroline-answer-bank.sh, bats-tested): every entry is
  *     present VERBATIM in the workspace file Caroline retrieves it from (`anchor`), so the
  *     knowledge base and the guard can never teach two different answers;
- *   - the red-team suite (plugins/intercom/tests/redteam/): every attack's safe answer is a bank
+ *   - the red-team suite (plugins/intercom/redteam/): every attack's safe answer is a bank
  *     line.
  *
  * Changing a line: edit it here AND in its anchor file in the same PR, bump BANK_VERSION, and get
