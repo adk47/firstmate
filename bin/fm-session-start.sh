@@ -636,10 +636,24 @@ compact_budget() {
 # escapes) is decoded so a comma inside a title cannot shift fields. A
 # positive <ready-limit> keeps only that many rows; <skip-ids> is a
 # space-separated id list to leave out (in-flight tasks the work-under-way
-# section already shows). The tool's own count, help, and other lines are
-# dropped; this function prints its own count.
+# section already shows). The tool's count line, field header, and help block
+# are dropped, and this function prints its own count; any other tool line,
+# such as ready_public_followups, passes through capped. Cuts count UTF-8
+# characters, the bin/fm-line-cap-lib.sh rule, so a multibyte character is
+# never cut in half.
 compact_axi_rows() {
   LC_ALL=C awk -v cap="$1" -v limit="$2" -v skip=" $3 " -v rowcap="$COMPACT_ROW_CAP" '
+    function cut(s, max,    i, n, c, keep) {
+      n = 0; keep = 0
+      for (i = 1; i <= length(s); i++) {
+        c = substr(s, i, 1)
+        if (c >= "\200" && c <= "\277") continue
+        n++
+        if (n == max - 2) keep = i - 1
+        if (n > max) return substr(s, 1, keep) "..."
+      }
+      return s
+    }
     function parse(s,    i, c, val, inq, n) {
       n = 0; val = ""; inq = 0
       for (i = 1; i <= length(s); i++) {
@@ -689,15 +703,14 @@ compact_axi_rows() {
         if (name == "hold_kind" && V[name] == "captain") continue
         out = out " " (name == "hold_kind" ? "hold" : name) "=" V[name]
       }
-      t = V["title"]
-      if (length(t) > cap) t = substr(t, 1, cap - 3) "..."
-      out = out " - " t
-      if (length(out) > rowcap) out = substr(out, 1, rowcap - 3) "..."
-      print out
+      out = out " - " cut(V["title"], cap)
+      print cut(out, rowcap)
       shown++
       next
     }
     { rows = 0 }
+    /^count:[[:space:]]*[0-9]+[[:space:]]*$/ || /^[[:space:]]*$/ { next }
+    { print cut($0, rowcap) }
     END {
       printf "(%d item(s)", total + 0
       if (limit > 0 && total > shown) printf ", first %d shown, %d more", shown, total - shown

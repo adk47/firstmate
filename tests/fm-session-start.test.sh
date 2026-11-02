@@ -2198,8 +2198,10 @@ case "$cmd" in
   ready)
     n=${FM_FAKE_LARGE_READY:-25}
     fields=
-    header ready "$n"
+    header ready "$((n + 1))"
+    printf '  ready-utf8,queued,ship,firstmate,%s\n' "$(printf '\303\251%.0s' $(seq 1 60))"
     for i in $(seq -w 1 "$n"); do row "ready-$i" queued ship firstmate; done
+    printf '%s\n' 'ready_public_followups: 2 delivery-ready obligations'
     ;;
   list)
     case "$state:$blocked" in
@@ -2331,7 +2333,13 @@ EOF
   [ "$((held_shown + ${held_omitted:-0}))" -eq 195 ] \
     || fail "held rows shown ($held_shown) plus disclosed omitted ($held_omitted) do not account for exactly 195"
   assert_not_contains "$compact" ", (195" "a section total leaked into the omitted-ids list"
-  assert_contains "$compact" "first 10 shown, 15 more" "the ready list was not capped with a remainder count"
+  assert_contains "$compact" "first 10 shown, 16 more" "the ready list was not capped with a remainder count"
+  assert_contains "$compact" "ready_public_followups: 2 delivery-ready obligations" \
+    "the compact ready listing dropped the delivery-ready obligation count"
+  assert_contains "$compact" "  ready-utf8 (ship, firstmate) - $(printf '\303\251%.0s' $(seq 1 37))..." \
+    "a multibyte title was not cut to 40 characters"
+  printf '%s\n' "$compact" | iconv -f UTF-8 -t UTF-8 > /dev/null 2>&1 \
+    || fail "the compact view cut a multibyte character in half"
   assert_contains "$compact" "  no-record-1 (task, -)" "an in-flight item with no task record was lost"
   assert_contains "$compact" "185 more listed under Work under way" "in-flight rows with records were not deduplicated"
   assert_contains "$compact" "  large-task-001 dead terminal=term_large-task-001 pr=https://github.com/example/repo-001/pull/1 last=done" \
