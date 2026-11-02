@@ -58,7 +58,7 @@ For every picked contact, load the full linked Company Intelligence row: `Compan
 
 ## What this skill does NOT do
 - Does not write to NocoDB (read-only).
-- Does not send emails (drafts only). Sending requires explicit Nick approval.
+- Does not send emails (drafts only). Sending requires explicit Nick approval (or McLaren's, for B2B outreach).
 - Does not touch GHL pipelines, Google Sheets logbooks, or any non-NocoDB source.
 - Does not email known clients / partners. See the hardcoded exclusion list above.
 

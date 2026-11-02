@@ -29,7 +29,7 @@ Sends initial B2B Ads outreach batches end to end.
 
 ## Access Control
 
-Write access: Nick (U0AL36NADEY) and Aaron (U7RP6HKUZ) only.
+Write access: Nick (U0AL36NADEY), Aaron (U7RP6HKUZ) and, for B2B outreach, McLaren (U02S7C96CGN) only.
 
 ## Shared Config
 
@@ -123,7 +123,7 @@ Post the batch to `#sales-alerts` (`C0ARQ021M40`) using `muso-slack-formatter`.
 2. ...
 ```
 
-Wait for explicit approval (`send`, `go`, `approved`). Never auto send.
+Wait for explicit approval (`send`, `go`, `approved`) from Nick, Aaron or McLaren (U02S7C96CGN). Never auto send.
 
 ### Step 7: Create Gmail Drafts
 
@@ -136,13 +136,13 @@ gog gmail drafts create \
   --label "B2B - Ads"
 ```
 
-Nick reviews drafts in Gmail before final go.
+Nick or McLaren reviews drafts in Gmail before final go.
 
 ### Step 8: Hand off to Sender Worker
 
 Do NOT call `gog gmail drafts send`. Sending is the worker's job.
 
-Once Nick / Aaron approves the batch, the sender worker (running via
+Once Nick / Aaron / McLaren approves the batch, the sender worker (running via
 Slack event handler) reads every draft under label `B2B - Ads` with
 `muso-meta/kind-new` applied, runs the precondition gate, and sends
 only the valid drafts. The worker owns Gmail send + logbook append +
