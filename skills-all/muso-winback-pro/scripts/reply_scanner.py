@@ -12,7 +12,7 @@ import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-GHL_KEY = "pit-239a5db4-6ba1-4b6e-857d-0f8cc4464410"
+GHL_KEY = os.environ.get("GHL_WINBACK_API_KEY", "")  # was hardcoded; env var since MUS-20329
 GHL_LOCATION = "fmK5Vl9sJv49WTYA0QyP"
 GHL_PIPELINE = "AZa8jK5S7UyQ0fqfxzyB"
 GHL_STAGES = {
@@ -42,6 +42,7 @@ def ghl_api(method, endpoint, data=None):
     headers = {
         "Authorization": f"Bearer {GHL_KEY}",
         "Version": "2021-07-28",
+        "User-Agent": "muso-hydra-ghl/1.0 (+ops@muso.ai)",  # urllib's default UA gets Cloudflare 403 1010 (MUS-20329)
         "Accept": "application/json",
     }
     if data:
@@ -167,7 +168,14 @@ def update_ghl_on_reply(sender_email):
     return True
 
 
+def require_ghl_key():
+    """Fail closed before any side effect when the GHL key is not in the environment (MUS-20382)."""
+    if not GHL_KEY:
+        sys.exit("GHL_WINBACK_API_KEY is not set; refusing to run (no email, sheet or GHL call made).")
+
+
 def main():
+    require_ghl_key()
     print(f"Win-Back Reply Scanner - {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     replies = scan_replies()
 

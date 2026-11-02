@@ -33,7 +33,7 @@ Personalized email campaign to win back churned Muso Pro subscribers.
 |---|---|---|
 | Audience | Individual Pro users who cancelled | Companies who never had Muso |
 | GHL Location | `fmK5Vl9sJv49WTYA0QyP` (Muso Win-Back) | `S5w31kRRgsBjjiVATWlP` (B2B Ads) |
-| GHL API Key | `pit-239a5db4-6ba1-4b6e-857d-0f8cc4464410` | `$GHL_API_KEY` (pit-bbc35461...) |
+| GHL API Key | `<redacted PIT, MUS-20329>` | `$GHL_API_KEY` (pit-bbc35461...) |
 | Pipeline | Win-Back pipeline (TBD) | B2B-Ads-Clio |
 | Email style | Personal from Aaron, 150-350 chars | Private Invite format |
 | Google Sheet | "High-Value Churns" tab | clay_n8n_clio_b2b_ads sheet |
@@ -49,7 +49,7 @@ Personalized email campaign to win back churned Muso Pro subscribers.
 ## GHL Configuration
 
 - **Location ID:** `fmK5Vl9sJv49WTYA0QyP`
-- **API Key:** `pit-239a5db4-6ba1-4b6e-857d-0f8cc4464410`
+- **API Key:** `<redacted PIT, MUS-20329>`
 - **Pipeline:** `Churn -> Win-back` (ID: `AZa8jK5S7UyQ0fqfxzyB`)
 - **Pipeline Stages:**
   - Churned: `819bd77b-9b34-4773-bdb3-4f532f925a9a`

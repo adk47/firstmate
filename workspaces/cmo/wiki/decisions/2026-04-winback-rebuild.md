@@ -35,7 +35,7 @@ the original Clio era setup and needed rebuild.
 ### Configuration
 
 - **Cadence changed**: was 7d / 14d / 21d, now 7d / 45d / 90d (90 = Lost)
-- **API key moved to env var**: was hardcoded `pit-239a5db4-6ba1-4b6e-857d-0f8cc4464410`, now `$GHL_WINBACK_API_KEY` (separate from `$GHL_API_KEY` to prevent confusion with B2B Ads)
+- **API key moved to env var**: was hardcoded `<redacted PIT, MUS-20329>`, now `$GHL_WINBACK_API_KEY` (separate from `$GHL_API_KEY` to prevent confusion with B2B Ads)
 - **Channel migrated**: was `#clio_x_fede` and `#clio_analyst`, now `#win-back-alerts` (`C0ARTH6U0S2`)
 - **CC only**: was CC `support@muso.ai` AND BCC `aaron@muso.ai`, now CC only (BCC removed because CC + BCC together triggers phishing detectors)
 - **Sheet structure updated**: tabs `pro_churned_all` and `high_value_churn` (with the latter being the ~1080 imported set)

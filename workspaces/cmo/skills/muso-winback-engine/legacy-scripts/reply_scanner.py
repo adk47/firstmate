@@ -42,6 +42,7 @@ def ghl_api(method, endpoint, data=None):
     headers = {
         "Authorization": f"Bearer {GHL_KEY}",
         "Version": "2021-07-28",
+        "User-Agent": "muso-hydra-ghl/1.0 (+ops@muso.ai)",  # urllib's default UA gets Cloudflare 403 1010 (MUS-20329)
         "Accept": "application/json",
     }
     if data:

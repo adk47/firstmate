@@ -6,6 +6,7 @@ Run daily as part of the heartbeat.
 """
 
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime
@@ -13,7 +14,7 @@ from pathlib import Path
 
 SHEET_ID = "1_gltz-8ZbRbYnXeOoYcK_Y5PyFJ8npogFbw-eT4JKPs"
 TAB = "High-Value Churns"
-GHL_KEY = "pit-239a5db4-6ba1-4b6e-857d-0f8cc4464410"
+GHL_KEY = os.environ.get("GHL_WINBACK_API_KEY", "")  # was hardcoded; env var since MUS-20329
 GHL_LOCATION = "fmK5Vl9sJv49WTYA0QyP"
 GHL_PIPELINE = "AZa8jK5S7UyQ0fqfxzyB"
 GMAIL_ACCOUNT = "a@muso.ai"
@@ -36,6 +37,7 @@ def ghl_api(method, endpoint):
     headers = {
         "Authorization": f"Bearer {GHL_KEY}",
         "Version": "2021-07-28",
+        "User-Agent": "muso-hydra-ghl/1.0 (+ops@muso.ai)",  # urllib's default UA gets Cloudflare 403 1010 (MUS-20329)
         "Accept": "application/json",
     }
     req = urllib.request.Request(url, headers=headers, method=method)
@@ -46,7 +48,14 @@ def ghl_api(method, endpoint):
         return None
 
 
+def require_ghl_key():
+    """Fail closed before any side effect when the GHL key is not in the environment (MUS-20382)."""
+    if not GHL_KEY:
+        sys.exit("GHL_WINBACK_API_KEY is not set; refusing to run (no email, sheet or GHL call made).")
+
+
 def run_sanity_check():
+    require_ghl_key()
     issues = []
     stats = {}
 
