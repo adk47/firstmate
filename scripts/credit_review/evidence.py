@@ -362,6 +362,10 @@ class EvidenceBuilder:
         self._signals: dict[str, ProfileSignals] = {}
         self._raw: dict[str, list[dict[str, Any]]] = {}
         self._tracks: dict[str, tuple[TrackCatalog, str | None]] = {}
+        # (doc, read error, was 404): ONE admin track read per track per run, shared by
+        # track_catalog (popularity) and the label/P-line consumer. Two caches bought two
+        # identical GETs per track, which is a fifth of a V9 run's admin budget.
+        self._track_docs: dict[str, tuple[dict[str, Any] | None, str | None, bool]] = {}
         self._velocity_done: set[str] = set()
         self._locks_guard = threading.Lock()
         self._profile_locks: dict[str, threading.Lock] = {}
@@ -399,17 +403,33 @@ class EvidenceBuilder:
                 self._profiles[profile_id] = None
         return self._profiles[profile_id]
 
+    def _track_read(self, track_id: str) -> tuple[dict[str, Any] | None, str | None, bool]:
+        """(doc, read error, was 404) for one track, read ONCE per run. Both failure kinds are
+        cached, and they stay distinct: a 404 is NOT_FOUND_TRACK, anything else UNKNOWN_TRACK."""
+        if track_id not in self._track_docs:
+            try:
+                self._track_docs[track_id] = (self._reread(admin_api.track, track_id), None, False)
+            except admin_api.NotFound as exc:
+                self._track_docs[track_id] = (None, f"track {track_id}: 404 on the re-read too: {exc}", True)
+            except admin_api.AdminError as exc:
+                self._track_docs[track_id] = (None, f"track {track_id}: {exc}", False)
+        return self._track_docs[track_id]
+
+    def track_doc(self, track_id: str) -> dict[str, Any] | None:
+        """The raw admin track document (label / P-line fields). Shares `_track_read` with
+        track_catalog, so a run costs one GET per track, not one per consumer."""
+        if not track_id:
+            return None
+        return self._track_read(track_id)[0]
+
     def track_catalog(self, track_id: str) -> tuple[TrackCatalog, str | None]:
         """(catalog popularity of the track and its artists, read error)."""
         if not track_id:
             return UNKNOWN_TRACK, "track: no trackId"
         if track_id not in self._tracks:
-            try:
-                doc = self._reread(admin_api.track, track_id)
-            except admin_api.NotFound as exc:
-                self._tracks[track_id] = (NOT_FOUND_TRACK, f"track {track_id}: 404 on the re-read too: {exc}")
-            except admin_api.AdminError as exc:
-                self._tracks[track_id] = (UNKNOWN_TRACK, f"track {track_id}: {exc}")
+            doc, err, not_found = self._track_read(track_id)
+            if doc is None:
+                self._tracks[track_id] = (NOT_FOUND_TRACK if not_found else UNKNOWN_TRACK, err)
             else:
                 self._tracks[track_id] = (self._catalog_of(doc), None)
         return self._tracks[track_id]

@@ -12,6 +12,7 @@ import dataclasses
 import itertools
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -24,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import credit_test_env  # noqa: E402,F401  (keeps test logs out of /var/lib)
 
 from credit_review import account_gate  # noqa: E402
+from credit_review import admin as admin_api
 from credit_review.roles import fold  # noqa: E402
 from credit_verify.dspverify import VERSION, rules, runner  # noqa: E402
 from credit_verify.dspverify.store import Store  # noqa: E402
@@ -592,6 +594,88 @@ def req(i: int, status="unverified", uid=42) -> dict:
 
 def old_id(i: int) -> str:
     return f"00000000-0000-0000-0000-{i:012x}"
+
+class _TrackFailingAdmin(FakeAdmin):
+    """FakeAdmin whose single-track GET fails the way core does (404 or a bad read)."""
+
+    def __init__(self, requests: list[dict], exc: type):
+        super().__init__(requests)
+        self.exc = exc
+
+    def get(self, path, params=None):
+        if re.fullmatch(r"/admin/track/[^/]+", path):
+            self.paths.append(path)
+            raise self.exc("track read failed")
+        return super().get(path, params)
+
+
+class OneTrackReadPerTrack(unittest.TestCase):
+    """A packet needs the admin track document for two different things: catalog popularity
+    (EvidenceBuilder.track_catalog) and the label / P-line fields (runner._track_doc). They
+    used to be two independent caches over the SAME endpoint, so every distinct track cost two
+    identical GETs. Measured on prod: the last 6 verify runs were 27 requests / 19 profile rows /
+    22 track rows, i.e. P + 2T + duplicate pages + still_pending ~= 3.9 admin reads per request
+    against a host-wide 1/s Pacer -- so the duplicate track GET is ~a fifth of the V9 ceiling
+    the scale-100pm plan is trying to lift. One read per track, and the two failure kinds stay
+    distinct (a 404 is NOT_FOUND_TRACK, anything else UNKNOWN_TRACK)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.store = Store(os.path.join(self.tmp, "dsp.sqlite"))
+
+    def deps(self, admin, pod):
+        return runner.Deps(admin=admin, select=fake_select(admin), capture=pod,
+                           gate=lambda uid: account_gate.GateResult("allow", (), {"band": "green"}),
+                           deny_user_ids=frozenset(), deny_profile_ids=frozenset(), paying=frozenset({42}),
+                           watch_user_ids=frozenset(), watch_profile_ids=frozenset(),
+                           now=lambda: datetime(2026, 10, 28, 3, 20, tzinfo=timezone.utc))
+
+    @staticmethod
+    def track_gets(admin):
+        return [p for p in admin.paths if re.fullmatch(r"/admin/track/[^/]+", p)]
+
+    def builder(self, admin):
+        from credit_review.evidence import EvidenceBuilder
+        return EvidenceBuilder(admin)
+
+    def test_a_run_reads_each_track_once(self):
+        admin = FakeAdmin([req(1)])
+        d = self.deps(admin, FakePod())
+        runner.submit(self.store, d)
+        admin.paths.clear()
+        st, _out = runner.verify(self.store, d)
+        self.assertEqual(st.requests, 1)
+        self.assertEqual(len(self.track_gets(admin)), 1, admin.paths)
+
+    def test_one_read_serves_both_consumers(self):
+        admin = FakeAdmin([])
+        b = self.builder(admin)
+        self.assertEqual((b.track_doc("trk-1") or {}).get("label"), "Indie Label")
+        cat, err = b.track_catalog("trk-1")
+        self.assertIsNone(err)
+        self.assertEqual(cat.popularity, 20)
+        self.assertEqual(len(self.track_gets(admin)), 1, admin.paths)
+
+    def test_a_404_track_stays_not_found(self):
+        from credit_review.evidence import NOT_FOUND_TRACK
+        admin = _TrackFailingAdmin([], admin_api.NotFound)
+        b = self.builder(admin)
+        self.assertIsNone(b.track_doc("trk-1"))
+        cat, err = b.track_catalog("trk-1")
+        self.assertEqual(cat, NOT_FOUND_TRACK)
+        self.assertIn("404", err or "")
+        # the documented one re-read on a 404, then the outcome is cached for the run
+        self.assertEqual(len(self.track_gets(admin)), 2, admin.paths)
+
+    def test_a_broken_track_stays_unknown(self):
+        from credit_review.evidence import UNKNOWN_TRACK
+        admin = _TrackFailingAdmin([], admin_api.AdminError)
+        b = self.builder(admin)
+        self.assertIsNone(b.track_doc("trk-1"))
+        cat, err = b.track_catalog("trk-1")
+        self.assertEqual(cat, UNKNOWN_TRACK)
+        self.assertTrue(err)
+        self.assertEqual(len(self.track_gets(admin)), 1, admin.paths)
 
 
 class RunnerAndStore(unittest.TestCase):

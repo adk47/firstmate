@@ -373,16 +373,10 @@ class Duplicates:
 
 
 def _track_doc(builder: EvidenceBuilder, tid: str) -> dict[str, Any] | None:
-    """The admin track document (label / P-line fields), one GET per track per run."""
-    if not tid:
-        return None
-    cache: dict[str, dict[str, Any] | None] = builder.__dict__.setdefault("_dsp_track_docs", {})
-    if tid not in cache:
-        try:
-            cache[tid] = builder._reread(admin_api.track, tid)
-        except admin_api.AdminError:
-            cache[tid] = None
-    return cache[tid]
+    """The admin track document (label / P-line fields). This is the SAME read
+    `track_catalog` makes, so it must go through the builder's one shared cache: a second
+    cache here cost a second identical GET per track per run."""
+    return builder.track_doc(tid)
 
 
 def build_packet(req: dict[str, Any], capture: dict[str, Any] | None, builder: EvidenceBuilder, deps: Deps,
