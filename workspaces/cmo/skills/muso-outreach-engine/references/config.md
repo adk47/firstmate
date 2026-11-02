@@ -70,7 +70,7 @@ Allowed `Status` values: `Pending Approval`, `Approved`, `Sent`, `Replied`, `No 
 
 ### API Configuration
 - **Base URL**: `https://services.leadconnectorhq.com`
-- **API Key**: `$GHL_API_KEY` (Private Integration Token in `~/.zshrc`)
+- **API Key**: `$GHL_API_KEY` (Private Integration Token in `/etc/openclaw/main.env`)
 - **Version header**: `Version: 2021-07-28`
 - **Pagination**: Use GET with `page=N` for opportunity searches. POST search is broken (caps at 100, cursor does not work).
 

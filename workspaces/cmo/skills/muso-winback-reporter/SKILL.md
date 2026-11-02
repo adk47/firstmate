@@ -120,7 +120,7 @@ Filter by date range, `outreach_status`, `Pipeline Stage`.
 
 ### GHL Pipeline
 ```bash
-source ~/.zshrc && curl -s -G "https://services.leadconnectorhq.com/opportunities/search" \
+curl -s -G "https://services.leadconnectorhq.com/opportunities/search" \
   -H "Authorization: Bearer $GHL_WINBACK_API_KEY" -H "Version: 2021-07-28" \
   -d "location_id=fmK5Vl9sJv49WTYA0QyP" \
   -d "pipeline_id=AZa8jK5S7UyQ0fqfxzyB" \
@@ -132,7 +132,7 @@ Paginate ALL pages, count by stage.
 ### Stripe (for MRR recovered)
 ```bash
 # For each row marked converted, look up the active subscription value
-source ~/.zshrc && stripe subscriptions list --customer=<cus_id> --status=active
+stripe subscriptions list --customer=<cus_id> --status=active
 ```
 
 Sum the monthly value for `MRR recovered`.

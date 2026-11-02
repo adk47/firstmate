@@ -34,7 +34,23 @@ and only marks the system as "ready" once every item is green.
 
 ## Phase 2, Environment Variables
 
-Verify each env var is set in `~/.zshrc` or the HYDRA environment.
+Credentials come from the **gateway environment** – loaded as a systemd
+`EnvironmentFile` by your gateway unit (`/etc/openclaw/main.env` for
+`openclaw-gateway-main`, `/etc/openclaw/edge.env` for `openclaw-gateway-edge`)
+and inherited by every codex child of that unit (a shell you started yourself
+over SSH is not one: it sources your profile instead). They are **NOT** in `~/.zshrc`: the gateway
+runs as a daemon and does not source an interactive shell, so sourcing your
+shell profile does nothing for you. If a variable is unset or the API returns
+401/403, tell DevOps which variable and which unit, and do not wait for a
+reply. Carry on with the work that does not need it, and stop only the
+actions that do. A check you could not run never counts as passed.
+`openclaw__secrets request` is not a shortcut around that: a requested value
+goes straight to the team store and is never given to your shell or your
+chat, so it cannot satisfy a `$VAR` your command reads. Never request a name
+that is, or should be, in the gateway env; DevOps sets those in the unit env
+file.
+
+Verify each env var is set in the gateway environment.
 
 ```bash
 echo "klaviyo: ${MUSOAI_KLAVIYO_TOKEN:+set}"
@@ -97,7 +113,7 @@ Test read access to each critical sheet:
 
 - [ ] Confirm GHL API key works:
     ```bash
-    source ~/.zshrc && curl -s -G "https://services.leadconnectorhq.com/opportunities/pipelines" \
+    curl -s -G "https://services.leadconnectorhq.com/opportunities/pipelines" \
       -H "Authorization: Bearer $GHL_API_KEY" -H "Version: 2021-07-28" \
       -d "locationId=S5w31kRRgsBjjiVATWlP" | python3 -m json.tool
     ```
@@ -119,10 +135,10 @@ Test read access to each critical sheet:
 
 ### GHL Win Back Location (separate from B2B Ads)
 
-- [ ] Confirm `$GHL_WINBACK_API_KEY` env var is set in `~/.zshrc` and is DIFFERENT from `$GHL_API_KEY`
+- [ ] Confirm `$GHL_WINBACK_API_KEY` env var is set in `/etc/openclaw/main.env` and is DIFFERENT from `$GHL_API_KEY`
 - [ ] Confirm GHL win back API key works:
     ```bash
-    source ~/.zshrc && curl -s -G "https://services.leadconnectorhq.com/opportunities/pipelines" \
+    curl -s -G "https://services.leadconnectorhq.com/opportunities/pipelines" \
       -H "Authorization: Bearer $GHL_WINBACK_API_KEY" -H "Version: 2021-07-28" \
       -d "locationId=fmK5Vl9sJv49WTYA0QyP" | python3 -m json.tool
     ```

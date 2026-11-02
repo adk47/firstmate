@@ -63,6 +63,24 @@ targeting `main` (widened 2026-08-17 — note the base differs per repo).
 as usual, never approve; his `exit 5` is expected. Humans merge. Full doctrine in
 SOUL.md → "PR Code Review".
 
+## Credentials
+
+Credentials come from the **gateway environment** – loaded as a systemd
+`EnvironmentFile` by your gateway unit (`/etc/openclaw/main.env` for
+`openclaw-gateway-main`, `/etc/openclaw/edge.env` for `openclaw-gateway-edge`)
+and inherited by every codex child of that unit (a shell you started yourself
+over SSH is not one: it sources your profile instead). They are **NOT** in `~/.zshrc`: the gateway
+runs as a daemon and does not source an interactive shell, so sourcing your
+shell profile does nothing for you. If a variable is unset or the API returns
+401/403, tell DevOps which variable and which unit, and do not wait for a
+reply. Carry on with the work that does not need it, and stop only the
+actions that do. A check you could not run never counts as passed.
+`openclaw__secrets request` is not a shortcut around that: a requested value
+goes straight to the team store and is never given to your shell or your
+chat, so it cannot satisfy a `$VAR` your command reads. Never request a name
+that is, or should be, in the gateway env; DevOps sets those in the unit env
+file.
+
 ## Troubleshooting
 
 `sessions.resolve` returns `No session found with label: @X` means one of:

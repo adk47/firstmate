@@ -135,9 +135,9 @@ curl -s \
 
 All subsequent curl commands use the same auth headers.
 
-> **Token fix applied (2026-02-16):** The `$MUSOAI_INTERCOM_TOKEN` in `~/.zshrc`
-> had a trailing space corrupting the value. This has been fixed. Run `source ~/.zshrc`
-> to reload.
+> **Token fix applied (2026-02-16):** The `$MUSOAI_INTERCOM_TOKEN` had a trailing space
+> corrupting the value. This has been fixed. It lives in your gateway profile's env file
+> (`/etc/openclaw/main.env`, or `edge.env` for the CS/Intercom profile).
 
 ## Base URL
 

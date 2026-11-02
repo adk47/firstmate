@@ -345,7 +345,7 @@ absent or scoped-out for Scout, so a `403`/auth failure here is expected and
 **must not fail the batch** — skip `IN_GHL` and flag the batch per Step 4.
 
 ```bash
-source ~/.zshrc && curl -s -G "https://services.leadconnectorhq.com/opportunities/search" \
+curl -s -G "https://services.leadconnectorhq.com/opportunities/search" \
   -H "Authorization: Bearer $GHL_API_KEY" -H "Version: 2021-07-28" \
   -d "location_id=S5w31kRRgsBjjiVATWlP" -d "pipeline_id=GeSt85TueSvJ0SNFZXfQ" \
   -d "limit=100" -d "page=1"

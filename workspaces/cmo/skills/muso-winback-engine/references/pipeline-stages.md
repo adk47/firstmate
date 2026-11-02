@@ -24,7 +24,7 @@ Stage IDs above were captured from prior config (2026-03 era). Verify they are
 still current by running this fetch command. Update IDs if any have changed:
 
 ```bash
-source ~/.zshrc && curl -s -G "https://services.leadconnectorhq.com/opportunities/pipelines" \
+curl -s -G "https://services.leadconnectorhq.com/opportunities/pipelines" \
   -H "Authorization: Bearer $GHL_WINBACK_API_KEY" \
   -H "Version: 2021-07-28" \
   -d "locationId=fmK5Vl9sJv49WTYA0QyP" \

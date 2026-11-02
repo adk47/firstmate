@@ -78,10 +78,11 @@ gog sheets get 1_gltz-8ZbRbYnXeOoYcK_Y5PyFJ8npogFbw-eT4JKPs \
 
 Past versions hardcoded the win back API key directly in the skill file because
 the agent kept confusing it with the B2B Ads `$GHL_API_KEY`. The fix: separate
-env var. Add to `~/.zshrc`:
+env var, set in `/etc/openclaw/main.env` (gateway environment, not `~/.zshrc`):
 
-```bash
-export GHL_WINBACK_API_KEY="pit-XXXXXXXXX"
+```ini
+# /etc/openclaw/main.env is a systemd EnvironmentFile: NAME=VALUE, no `export`
+GHL_WINBACK_API_KEY=pit-XXXXXXXXX
 ```
 
 Verified during STARTUP.md Phase 5.
@@ -106,7 +107,7 @@ Use GET with `page=N` for opportunity searches. POST search is broken (caps at
 100, cursor does not work).
 
 ```bash
-source ~/.zshrc && curl -s -G "https://services.leadconnectorhq.com/opportunities/search" \
+curl -s -G "https://services.leadconnectorhq.com/opportunities/search" \
   -H "Authorization: Bearer $GHL_WINBACK_API_KEY" -H "Version: 2021-07-28" \
   -d "location_id=fmK5Vl9sJv49WTYA0QyP" \
   -d "pipeline_id=AZa8jK5S7UyQ0fqfxzyB" \
@@ -135,8 +136,8 @@ Before EVERY send (initial, follow up, reply), verify the user has not already
 re subscribed:
 
 ```bash
-source ~/.zshrc && stripe customers search --query="email:'<user_email>'" --limit=1
-source ~/.zshrc && stripe subscriptions list --customer=<cus_id> --status=active --limit=1
+stripe customers search --query="email:'<user_email>'" --limit=1
+stripe subscriptions list --customer=<cus_id> --status=active --limit=1
 ```
 
 If active subscription found:

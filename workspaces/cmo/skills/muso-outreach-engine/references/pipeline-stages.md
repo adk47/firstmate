@@ -30,7 +30,7 @@ Application` and `Proposal Draft` were added after.
 Run this to pull current IDs from GHL and update the table above:
 
 ```bash
-source ~/.zshrc && curl -s -G "https://services.leadconnectorhq.com/opportunities/pipelines" \
+curl -s -G "https://services.leadconnectorhq.com/opportunities/pipelines" \
   -H "Authorization: Bearer $GHL_API_KEY" \
   -H "Version: 2021-07-28" \
   -d "locationId=S5w31kRRgsBjjiVATWlP" \

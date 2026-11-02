@@ -83,7 +83,6 @@ Once approved, execute in order:
 ### Step 4: Send to Aaron First
 Send the invoice to Aaron's email for visual review:
 ```bash
-source ~/.zshrc 2>/dev/null
 curl -s https://api.stripe.com/v1/invoices/<invoice_id>/send \
   -u "${MUSOAI_STRIPE_API_KEY}:" -X POST
 ```
@@ -96,7 +95,6 @@ Wait for Aaron to say "send it" or approve.
 On Aaron's approval, update the customer email to the real client email and re-send:
 ```bash
 stripe customers update <cus_id> --email="<client_email>"
-source ~/.zshrc 2>/dev/null
 curl -s https://api.stripe.com/v1/invoices/<invoice_id>/send \
   -u "${MUSOAI_STRIPE_API_KEY}:" -X POST
 ```

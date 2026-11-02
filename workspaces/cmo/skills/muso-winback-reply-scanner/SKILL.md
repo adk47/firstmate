@@ -77,8 +77,8 @@ For each reply, run a fresh Stripe check (the user may have re subscribed
 between the original send and now):
 
 ```bash
-source ~/.zshrc && stripe customers search --query="email:'<email>'" --limit=1
-source ~/.zshrc && stripe subscriptions list --customer=<cus_id> --status=active --limit=1
+stripe customers search --query="email:'<email>'" --limit=1
+stripe subscriptions list --customer=<cus_id> --status=active --limit=1
 ```
 
 If active subscription found:

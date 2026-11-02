@@ -44,7 +44,7 @@ See `../muso-outreach-engine/references/config.md`.
 ### Create Contact
 
 ```bash
-source ~/.zshrc && curl -s "https://services.leadconnectorhq.com/contacts/" \
+curl -s "https://services.leadconnectorhq.com/contacts/" \
   -X POST \
   -H "Authorization: Bearer $GHL_API_KEY" \
   -H "Version: 2021-07-28" \
@@ -63,7 +63,7 @@ source ~/.zshrc && curl -s "https://services.leadconnectorhq.com/contacts/" \
 ### Create Opportunity
 
 ```bash
-source ~/.zshrc && curl -s "https://services.leadconnectorhq.com/opportunities/" \
+curl -s "https://services.leadconnectorhq.com/opportunities/" \
   -X POST \
   -H "Authorization: Bearer $GHL_API_KEY" \
   -H "Version: 2021-07-28" \
@@ -81,7 +81,7 @@ source ~/.zshrc && curl -s "https://services.leadconnectorhq.com/opportunities/"
 ### Move Opportunity Stage
 
 ```bash
-source ~/.zshrc && curl -s "https://services.leadconnectorhq.com/opportunities/<opportunity_id>" \
+curl -s "https://services.leadconnectorhq.com/opportunities/<opportunity_id>" \
   -X PUT \
   -H "Authorization: Bearer $GHL_API_KEY" \
   -H "Version: 2021-07-28" \
@@ -94,7 +94,7 @@ source ~/.zshrc && curl -s "https://services.leadconnectorhq.com/opportunities/<
 ### Search Opportunities (GET with pagination, NOT POST)
 
 ```bash
-source ~/.zshrc && curl -s -G "https://services.leadconnectorhq.com/opportunities/search" \
+curl -s -G "https://services.leadconnectorhq.com/opportunities/search" \
   -H "Authorization: Bearer $GHL_API_KEY" -H "Version: 2021-07-28" \
   -d "location_id=S5w31kRRgsBjjiVATWlP" \
   -d "pipeline_id=GeSt85TueSvJ0SNFZXfQ" \
