@@ -253,18 +253,28 @@ class StrongLabelTest(unittest.TestCase):
     the store without a data migration, and does not widen the allowlist to any other string."""
 
     def test_the_old_spelling_normalises_and_admits(self):
-        self.assertEqual(receipts.strong_label("external_id+email"), "professional_id+email")
-        self.assertIn(receipts.strong_label("external_id+email"), receipts.STRONG_MATCH)
+        self.assertEqual(receipts.receipt_strong_label("external_id+email"), "professional_id+email")
+        self.assertIn(receipts.receipt_strong_label("external_id+email"), receipts.RECEIPT_MATCH)
 
     def test_the_strict_set_is_unchanged_and_the_literal_is_not_added(self):
+        """QA on #1649: STRONG_MATCH is shared with need_asks.py's producer and pinned equal to the send gate's
+        EMAIL_FILED_STRONG_MATCH. It must stay exactly these three labels, or the producer lists asks the gate
+        refuses. The receipt-only label lives in RECEIPT_MATCH."""
+        self.assertEqual(receipts.STRONG_MATCH, ("professional_id", "authenticated_email", "session"))
+        self.assertEqual(" ".join(receipts.STRONG_MATCH),
+                         "professional_id authenticated_email session")   # the gate's pinned literal
         self.assertNotIn("external_id+email", receipts.STRONG_MATCH)
-        for label in ("professional_id", "professional_id+email", "authenticated_email", "session"):
+        self.assertNotIn("proof_on_file", receipts.STRONG_MATCH)
+        for label in receipts.STRONG_MATCH:
             self.assertEqual(receipts.strong_label(label), label)
+        self.assertEqual(receipts.strong_label("professional_id+email"), "")      # receipt-only
+        self.assertEqual(receipts.receipt_strong_label("professional_id+email"), "professional_id+email")
 
     def test_weak_or_unknown_labels_stay_refused(self):
         for label in (None, "", "  ", "email", "email+domain", "external_id", "proof_on_file",
                       "professional_id+email+extra", "unmatched: no verified account handle"):
             self.assertEqual(receipts.strong_label(label), "", label)
+            self.assertEqual(receipts.receipt_strong_label(label), "", label)
 
     def test_the_new_spelling_is_what_todays_writer_emits(self):
         src = (ROOT / "scripts" / "credit_verify" / "proof" / "intake.py").read_text()
@@ -299,6 +309,7 @@ class LegacyRowAdmittanceTest(unittest.TestCase):
         self.assertIn(13, out)                     # today's spelling
         self.assertNotIn(14, out)                  # email-only: still weak
         self.assertIn(12, out)                     # proof_on_file WITH a conversation: admitted (Ruling 2)
+        self.assertIn(11, out)                     # the old spelling still re-admits through RECEIPT_MATCH
         self.assertNotIn(15, out)                  # proof_on_file without one: no same-conversation receipt
         self.assertEqual(counts["skip_weak_identity"], 2)
         self.assertEqual(counts["admit_same_conversation_match"], 1)

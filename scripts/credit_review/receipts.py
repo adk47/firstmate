@@ -47,7 +47,16 @@ REVIEW_FIRED = "regexp_like(coalesce(json_format(json_extract(verificationdata, 
 CHUNK = 400
 # security-arch-fable-s1 bar (r5 on #1416): a receipt only for a filing whose account match is strong. An
 # email-only (or unknown) match never triggers one: the account the note would go to may not be the sender.
-STRONG_MATCH = ("professional_id", "professional_id+email", "authenticated_email", "session")
+# QA on #1649: STRONG_MATCH is NOT receipts-only. need_asks.py's email-filed producer reads it, and the send
+# gate pins the same three labels (scripts/intercom-verify-request.sh: EMAIL_FILED_STRONG_MATCH, pinned equal by
+# scripts/tests/intercom-verify-request.bats). Widening it here widened the PRODUCER too, so it listed asks the
+# gate then refused - a producer/gate divergence. The receipt allowlist is therefore a separate set below.
+STRONG_MATCH = ("professional_id", "authenticated_email", "session")
+# Receipts may be built on one more label than the ask producer may: professional_id+email is at least as strong
+# as the bare professional_id already admitted (it is the same handle with the email confirmation enforced on
+# top, see intake.py). Receipt-only, so the ask producer and the send gate keep their pinned three and cannot
+# diverge from each other.
+RECEIPT_MATCH = STRONG_MATCH + ("professional_id+email",)
 # [key=receipt-match-label] (l1 ruling-external-id-receipts-1102.md): intake.py wrote the Intercom contact-handle
 # match as "external_id+email". external_id IS the account's professional id in our identity doctrine (the
 # verify-request identity gate rests on the same equivalence), and intake only accepts that handle when it maps
@@ -79,10 +88,17 @@ def strong_label(matched: str | None) -> str:
     return label if label in STRONG_MATCH else ""
 
 
+def receipt_strong_label(matched: str | None) -> str:
+    """[key=receipt-match-label], receipt side: strong_label() plus the one label only receipts may use."""
+    label = (matched or "").strip()
+    label = MATCH_ALIASES.get(label, label)
+    return label if label in RECEIPT_MATCH else ""
+
+
 def receipt_label(matched: str | None, conversation: str | None) -> str:
     """The label a RECEIPT may be built on, or '' - the strict set, plus a same-conversation label that is
     only usable because the receipt goes back into that same conversation (hence the conversation requirement)."""
-    label = strong_label(matched)
+    label = receipt_strong_label(matched)
     if label:
         return label
     raw = (matched or "").strip()
