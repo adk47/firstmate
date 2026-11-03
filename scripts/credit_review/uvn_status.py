@@ -228,6 +228,10 @@ def gate_lock_open(wrapper: str, var: str) -> bool:
     return re.search(rf"^readonly {re.escape(var)}=1$", text, re.M) is not None
 DAILY_MAX = policy_credit_cap()  # the ask
 MAX_CALLS_PER_USER = 5
+# 14:2xZ eligibility-first paging: one run may examine at most this many raw list entries per candidate it is allowed
+# to keep, so a long run of already-told / documented / handled rows can never turn a tick into a no-op
+# while still bounding the scan cost (a replica + ledger read per entry, no live call).
+SCAN_FACTOR = 20
 Query = verify_notify.Query
 trino = verify_notify.trino
 # The deployed lens factory (fraud_lens.default_lens: watchlist + messaging holds, both required).
@@ -849,41 +853,32 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
         return report
     want_paid = {"paid": True, "free": False}[segment]
     offered = [u for u in users if u.get("skip") is None and bool(u.get("paid")) is want_paid]
-    # p1 599 / QA #1612: a run walks ONE page of this segment's LIST ENTRIES - [start_entry, start_entry + max_entries)
-    # - chosen BEFORE any per-user read (the status-team-review preflight included). The caller advances start_entry
-    # from report.page between runs (the tick keeps a cursor), so a page of persistent deferrals never starves the rest.
+    # p1 599 / QA #1612 / 14:2xZ (eligibility-first): a run walks RAW entries from `start_entry` until it holds
+    # `max_entries` CANDIDATES - entries the cheap exclusions below do not already rule out. The page is over
+    # candidates, not raw rows: at 14Z the paid list's first 200 raw entries were 176 documents-on-file, 9 already
+    # handled and 13 gate-deferred, so the tick messaged nobody and the owed users sat behind a prefix we had ALREADY
+    # answered for. The cursor stays a RAW index (report.page.end = the first entry this run did not get to), because a
+    # candidate index moves under us whenever a 7-day deferral expires: entries before a candidate cursor would then be
+    # skipped until the list wrapped - the same defect this change exists to remove.
     n_listed = len(offered)
     start = max(0, min(int(start_entry or 0), n_listed)) if n_listed else 0
-    stop = n_listed if max_entries is None else min(n_listed, start + max(0, int(max_entries)))
-    offered = offered[start:stop]
-    report.page = {"start": start, "end": stop, "listed": n_listed}
-    report.not_walked = n_listed - (stop - start)
-    if campaign == "status-team-review":
-        # v1 STOP-CLASS / r5 + p1 [key=k-proof-required]: a status line is for owes-nothing users only. Read core's
-        # proof_required for EVERY offered user before anything goes: one proof_required=true (or fresh capture pending)
-        # row in the list REFUSES the run (the list was built wrong); an unreadable read refuses too (fail closed)
-        from credit_review import comm_state              # lazy: the gate-side owes rule, the same read
-        bad: list[str] = []
-        for u in offered:
-            try:
-                owed = comm_state.proof_required_owed(int(u["user_id"]), query)
-            except Exception as exc:  # noqa: BLE001 - an unreadable read never lets a status line through
-                report.halted = f"proof_required read failed for user {u['user_id']} ({exc}); nothing sent"
-                return report
-            if owed:
-                bad.append(f"{u['user_id']}:{'+'.join(owed)}")
-        if bad:
-            report.halted = (f"{len(bad)} user(s) in this status-team-review list owe proof per core proof_required "
-                             f"({', '.join(bad[:10])}); the list must be rebuilt - nothing sent")
-            return report
+    page_max = None if max_entries is None else max(0, int(max_entries))
+    scan_cap = None if page_max is None else page_max * SCAN_FACTOR
     report.listed = n_listed
     day = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
     path = ledger_path or verify_ledger.DEFAULT_PATH
     cap = DAILY_MAX if is_ask else STATUS_DAILY_MAX
     db = verify_ledger.connect(path)
+    cands: list[dict[str, Any]] = []
+    end = start
     try:
-        cands: list[dict[str, Any]] = []
-        for u in offered:
+        for idx in range(start, n_listed):
+            if page_max is not None and len(cands) >= page_max:
+                break                                   # the page is full of candidates: stop where we are
+            if scan_cap is not None and (idx - start) >= scan_cap:
+                break                                   # bounded scan: a wall of exclusions never becomes a crawl
+            u = offered[idx]
+            end = idx + 1                               # this entry HAS been examined
             if str(u.get("user_id")) in exclude_users:
                 report.excluded += 1
                 report.note("excluded_today")
@@ -910,6 +905,27 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
             cands.append(u)
     finally:
         db.close()
+    report.page = {"start": start, "end": end, "listed": n_listed}
+    report.not_walked = n_listed - (end - start)
+    if campaign == "status-team-review":
+        # v1 STOP-CLASS / r5 + p1 [key=k-proof-required]: a status line is for owes-nothing users only. Read core's
+        # proof_required for EVERY user the run would message (the candidate page - QA #1612 keeps that read on the page,
+        # never the whole list): one proof_required=true (or fresh capture pending) row REFUSES the run (the list was
+        # built wrong); an unreadable read refuses too (fail closed)
+        from credit_review import comm_state              # lazy: the gate-side owes rule, the same read
+        bad: list[str] = []
+        for u in cands:
+            try:
+                owed = comm_state.proof_required_owed(int(u["user_id"]), query)
+            except Exception as exc:  # noqa: BLE001 - an unreadable read never lets a status line through
+                report.halted = f"proof_required read failed for user {u['user_id']} ({exc}); nothing sent"
+                return report
+            if owed:
+                bad.append(f"{u['user_id']}:{'+'.join(owed)}")
+        if bad:
+            report.halted = (f"{len(bad)} user(s) in this status-team-review list owe proof per core proof_required "
+                             f"({', '.join(bad[:10])}); the list must be rebuilt - nothing sent")
+            return report
     pos = 0
     examined: set[str] = set()       # QA #1612: page entries this run actually got to (the cursor's next start)
 
@@ -1272,11 +1288,22 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
     # QA #1612: page.end = the first page entry this run did NOT get to (the cap or the room stopped it there), so the
     # next run starts exactly there; page_end = where the page itself ends
     in_cands = {id(u) for u in cands}
-    first_open = next((j for j, u in enumerate(offered) if id(u) in in_cands and str(u.get("user_id")) not in examined),
+    # the window this run scanned (start..end in RAW list coordinates): first_open is an offset WITHIN it
+    window = offered[report.page.get("start", 0):report.page.get("end", 0)]
+    first_open = next((j for j, u in enumerate(window) if id(u) in in_cands and str(u.get("user_id")) not in examined),
                       None)
     report.page["page_end"] = report.page.get("end", 0)
     if first_open is not None:
         report.page["end"] = report.page["start"] + first_open
+    # QA #1662 (finding 1): the candidate page is REBUILT for the apply, so if eligibility drifts between the check and
+    # the apply (a document lands, a 24h exclusion starts, a row gets handled) the apply's candidate window grows into
+    # raw entries the CHECK never examined. `--signed-accepted` keeps those users out of the send, but the cursor moves
+    # from "the first entry this run did not get to" - so without a clamp it would step PAST users who were neither
+    # checked nor signed, and they would wait a whole rotation. A paged apply may only claim what the check examined.
+    _cap_end = getattr(verify_notify, "APPLY_RAW_END", None)
+    if mode == "apply" and isinstance(_cap_end, int) and report.page.get("end", 0) > _cap_end:
+        report.page["end"] = _cap_end
+        report.not_walked = n_listed - (report.page["end"] - report.page["start"])
     if mode == "apply" and campaign in verify_ledger.RECHECKABLE_REFUSALS:
         verify_notify.flag_refusals(report, ledger_path=path, campaigns=[campaign], post=post, now=now)
     return report

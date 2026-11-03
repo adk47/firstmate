@@ -1275,6 +1275,14 @@ def signed_accepted(args: argparse.Namespace) -> tuple[str, frozenset[str] | Non
         args.max_users = cap
     verify_notify.APPLY_ONLY = acc
     verify_notify.APPLY_PAGE = bool(getattr(args, "page", False))
+    # QA #1662: the check's RAW page end, so a paged apply can never advance the cursor past entries the check did not
+    # examine (its own candidate window can grow if eligibility drifts between the two runs)
+    try:
+        _pgd = json.load(open(path, encoding="utf-8")).get("page") or {}
+        _end = _pgd.get("end")
+        verify_notify.APPLY_RAW_END = int(_end) if isinstance(_end, int) and _end >= 0 else None
+    except (OSError, ValueError, TypeError):
+        verify_notify.APPLY_RAW_END = None
     return "", acc
 
 

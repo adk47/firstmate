@@ -270,6 +270,11 @@ TIMEOUT_BIN=/usr/bin/timeout"
   if grep -q "campaign status-doc-received.*--mode apply" "$CALLS"; then false; fi
   if grep -q "^claim-.*--mode apply" "$CALLS"; then false; fi
   grep -q "SIGNED-only family" "$CVO_OUT_ROOT"/*/tick.log
+  # 14:3xZ (found on the 14Z live tick): a SIGNED-only family is DONE with the page it checked, so its cursor must
+  # advance to where the check stopped. It used to return before advance_cursor, so it re-walked the same first page
+  # every tick for ever (cursor-r1-free stayed 0 while every unsigned family moved to 200) and never saw entry 201.
+  grep -q "next tick starts at" "$CVO_OUT_ROOT"/*/tick.log
+  [ "$(cat "$CVO_STATE/cursor-proof-need-ask-paid" 2>/dev/null || echo 0)" -gt 0 ]
   # QA #1587: the dates are TIMES - before uvn-status's date it is signed-only too; at / after it, it applies
   : > "$CALLS"; STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 CVO_NOW_EPOCH="$(python3 -c 'import datetime as d; print(int(d.datetime(2026,10,31,18,1,tzinfo=d.timezone.utc).timestamp()))')" run -0 "$SCRIPT"
   if grep -q -- "--mode apply" "$CALLS"; then false; fi

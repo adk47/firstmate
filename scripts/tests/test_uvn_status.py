@@ -892,6 +892,53 @@ class UvnStatusTests(unittest.TestCase):
                            max_users=3, max_entries=5, start_entry=rep.page["end"])
         self.assertEqual([a["user"] for a in rep.accepted], ["9", "10"])
 
+    def test_a_prefix_of_300_excluded_entries_still_reaches_the_eligible_user_at_301(self):
+        # 14:2xZ decision (the 14Z tick sent ZERO): the page must be over CANDIDATES, not raw rows. At 14Z the paid
+        # list's first 200 entries were 176 documents-on-file, 9 handled and 13 gate-deferred, so the tick messaged
+        # nobody even though owed users sat further down. Here the first 300 entries are excluded for the cheapest
+        # reason there is (already handled today) and the only eligible user is at 301: one run, max_entries=200,
+        # must still reach and check them.
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 302)]
+        self.write_list()
+        rep, gate = self.run_(mode="dry-run", gate=FakeGate(out="RECIPIENT OK uvn-status initial email credits=1"),
+                              query=replica([301]), check_recipients=True, max_users=100, max_entries=200,
+                              exclude_users={str(u) for u in range(1, 301)})
+        self.assertEqual([a["user"] for a in rep.accepted], ["301"])
+        self.assertEqual(rep.excluded, 300)
+        # the cursor is a RAW index: it points past every entry this run examined, so nothing is revisited and nothing
+        # is skipped for good
+        self.assertEqual((rep.page["start"], rep.page["end"]), (0, 301))
+
+    def test_an_apply_clamps_its_cursor_to_the_raw_page_its_CHECK_examined(self):
+        # QA #1662 finding 1: the candidate page is REBUILT for the apply. If eligibility drifts between the check and
+        # the apply - here entries 1-5 become excluded after the check - the apply's candidate window grows into raw
+        # entries the check never examined. `--signed-accepted` keeps those users out of the SEND, but the cursor moves
+        # from "the first entry this run did not get to", so without a clamp it steps PAST users who were neither
+        # checked nor signed and they wait a whole rotation. The apply may only claim what the check reached.
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 21)]
+        self.write_list()
+        saved = verify_notify.APPLY_RAW_END
+        try:
+            verify_notify.APPLY_RAW_END = 5              # the CHECK stopped after raw entry 5
+            rep, _ = self.run_(mode="apply", query=replica(range(1, 21)), max_users=100, max_entries=5,
+                               exclude_users={str(u) for u in range(1, 6)})   # ... and these 5 became excluded
+        finally:
+            verify_notify.APPLY_RAW_END = saved
+        # the apply's own scan ran on to raw entry 10 (its candidate window grew), and the clamp holds the cursor at
+        # the boundary the check actually examined
+        self.assertEqual(rep.page["end"], 5)
+        self.assertEqual((rep.page["start"], rep.page["listed"]), (0, 20))
+
+    def test_the_cursor_stays_a_raw_index_when_candidates_fill_the_page(self):
+        # the page stops as soon as it holds max_entries CANDIDATES (the live checks are what cost time), and page.end
+        # is the first raw entry it did not get to - not the list's end
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 21)]
+        self.write_list()
+        rep, _ = self.run_(mode="dry-run", query=replica(range(1, 21)), check_recipients=True,
+                           max_users=100, max_entries=5)
+        self.assertEqual((rep.page["start"], rep.page["end"]), (0, 5))
+        self.assertEqual(rep.not_walked, 15)
+
     def test_the_status_team_review_preflight_reads_only_the_page(self):
         # QA #1612 (2): the proof_required preflight runs per user - only the page's users are read
         self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 11)]

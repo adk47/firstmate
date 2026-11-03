@@ -516,7 +516,14 @@ family() {
   judge_shadow "$tag"
   local live="$LIVE"; [ "$seg" = "paid" ] && live="$PAID_LIVE"
   if [ "$live" != 1 ]; then log "$tag: DRY-RUN tick (no send)"; advance_cursor "$tag" "$cur_file" "$OUT/$tag-check.json" "$cur"; return 0; fi
-  if [ -z "$unsigned" ]; then log "$tag: SIGNED-only family (no read-back date in UNSIGNED_FROM): checked, not applied"; return 0; fi
+  if [ -z "$unsigned" ]; then
+    # 14:3xZ (found on the 14Z tick): this branch used to return WITHOUT advancing, so a signed-only family re-walked
+    # the SAME first page on every tick for ever - it never reached entry 201, and it re-paid the page's check work every
+    # two hours (cursor-r1-free stayed 0 while every unsigned family moved to 200). "Checked, not applied" is still a
+    # page this family is DONE with: advance to where the CHECK stopped, exactly like the DRY branch above.
+    log "$tag: SIGNED-only family (no read-back date in UNSIGNED_FROM): checked, not applied"
+    advance_cursor "$tag" "$cur_file" "$OUT/$tag-check.json" "$cur"; return 0
+  fi
   killed && { log "$tag: kill file present; stop"; return 1; }
   local campaign; campaign="$(printf '%s\n' "$@" | awk 'p{print; exit} $0=="--campaign"{p=1}')"
   [ -n "$campaign" ] || campaign="$sub"   # the claim runners: the subcommand IS the campaign
