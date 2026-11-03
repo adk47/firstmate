@@ -22,6 +22,7 @@ from __future__ import annotations
 import html
 import json
 import re
+from itertools import permutations
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -126,8 +127,25 @@ def r1_receipt(facts: dict[str, Any]) -> bool:
 _R1_LEAD = re.compile(r"\byour (.{0,200}?)credit (requests?) for\b")
 
 
-def _role_set(text: str) -> set[str]:
-    return {r.strip() for r in re.split(r",\s*|\s+and\s+", text.strip()) if r.strip()}
+def _andjoin(xs: list[str]) -> str:
+    """The renderer's own join (`andjoin`, intercom-verify-request.sh:1596): one item bare, two "a and b", three or more
+    "a, b and c". Never split a rendered phrase to compare roles (r5 922): a role can itself contain " and " or ", "
+    ("Artist and Repertoire" is a real role in the taxonomy), so the delimiter is ambiguous and a correct receipt would
+    be stopped."""
+    if not xs:
+        return ""
+    if len(xs) == 1:
+        return xs[0]
+    return ", ".join(xs[:-1]) + " and " + xs[-1]
+
+
+def _role_phrases(roles: list[str]) -> set[str]:
+    """Every phrase the renderer's andjoin can build from these roles, normalised. Order-tolerant on purpose: the facts'
+    role order is not something this check may depend on (a reordered facts set must never stop a correct receipt), and no
+    split is involved, so a role that itself contains " and " or ", " stays one role."""
+    if 1 <= len(roles) <= 5:
+        return {_norm(_andjoin(list(p))) for p in permutations(roles)}
+    return {_norm(_andjoin(roles))}          # degenerate sizes keep the renderer's own order
 
 
 def r1_shape_stop(low: str, facts: dict[str, Any]) -> tuple[str, str] | None:
@@ -137,7 +155,14 @@ def r1_shape_stop(low: str, facts: dict[str, Any]) -> tuple[str, str] | None:
     if (not isinstance(tr, list) or not all(isinstance(t, list) and len(t) == 2 and isinstance(t[1], list) for t in tr)
             or not isinstance(nt, int) or isinstance(nt, bool) or nt < 1 or nt != len(tr)):
         return "other", "R1 facts must carry tracks [[title, [roles]]] matching distinct_tracks"
-    roles = {_norm(str(r)) for r in tr[0][1] if _norm(str(r))} if nt == 1 else set()
+    roles: list[str] = []        # the renderer's order, deduped case-insensitively as track_roles does (keep the first)
+    if nt == 1:
+        seen: set[str] = set()
+        for r in tr[0][1]:
+            n = _norm(str(r))
+            if n and n not in seen:
+                seen.add(n)
+                roles.append(str(r).strip())
     shape = "roles" if nt == 1 and len(roles) >= 2 else ("one" if nt == 1 else "many")
     m = _R1_LEAD.search(low)
     if not m:
@@ -149,8 +174,8 @@ def r1_shape_stop(low: str, facts: dict[str, Any]) -> tuple[str, str] | None:
     if shape == "roles":
         if not named:
             return "number_agreement", f"{m.group(0)!r}: plural over one track without its roles named"
-        if _role_set(named) != roles:
-            return "facts_mismatch", f"{m.group(0)!r}: roles named {sorted(_role_set(named))} != facts {sorted(roles)}"
+        if _norm(named) not in _role_phrases(roles):    # build the phrases the renderer could, then compare strings
+            return "facts_mismatch", f"{m.group(0)!r}: roles named {named!r} != the facts' {_andjoin(roles)!r}"
     elif named:
         return "facts_mismatch", f"{m.group(0)!r}: the renderer names no role in the {shape} shape"
     dc = facts.get("document_count")

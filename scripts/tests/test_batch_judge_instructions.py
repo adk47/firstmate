@@ -191,6 +191,22 @@ class R1RolesCoverageTests(unittest.TestCase):
         three = {**f, "tracks": [["X", ["Mixing", "Mastering", "Production"]]]}
         self.assertIsNone(bi.coded_stop("<p>Hi Jo, a quick update on your Mixing, Mastering and Production credit requests for "
                                         "&quot;X&quot;" + tail, three, []))
+        # r5 922: a role can itself contain " and " or ", ". The rendered phrase is never split - it is compared with the
+        # phrase the renderer's own andjoin would build from the facts, so a correctly rendered receipt is never stopped.
+        anr = {**f, "tracks": [["X", ["Artist and Repertoire", "Mixing"]]]}
+        self.assertIsNone(bi.coded_stop("<p>Hi Jo, a quick update on your Artist and Repertoire and Mixing credit requests for "
+                                        "&quot;X&quot;" + tail, anr, []))
+        comma = {**f, "tracks": [["X", ["Mixing, Mastering", "Producer"]]]}
+        self.assertIsNone(bi.coded_stop("<p>Hi Jo, a quick update on your Mixing, Mastering and Producer credit requests for "
+                                        "&quot;X&quot;" + tail, comma, []))
+        four = {**f, "tracks": [["X", ["Artist and Repertoire", "Mixing", "Mastering"]]]}
+        self.assertIsNone(bi.coded_stop("<p>Hi Jo, a quick update on your Artist and Repertoire, Mixing and Mastering credit "
+                                        "requests for &quot;X&quot;" + tail, four, []))
+        # ... and a wrong phrase over the same facts is still a stop
+        self.assertEqual(bi.coded_stop("<p>Hi Jo, a quick update on your Artist, Repertoire and Mixing credit requests for "
+                                       "&quot;X&quot;" + tail, anr, [])[0], "facts_mismatch")
+        self.assertEqual(bi.coded_stop("<p>Hi Jo, a quick update on your Artist and Repertoire credit requests for "
+                                       "&quot;X&quot;" + tail, anr, [])[0], "facts_mismatch")      # a role dropped
         base = by["original"]["body_html"]
         self.assertEqual(bi.coded_stop(base, {**f, "document_count": 2}, [])[0], "facts_mismatch")   # template names ONE
         self.assertIsNone(bi.coded_stop(base, {**f, "document_count": 1}, []))
