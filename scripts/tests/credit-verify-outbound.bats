@@ -7,6 +7,9 @@ setup() {
   export CVO_ETC="$TEST_TMPDIR/etc" CVO_STATE="$TEST_TMPDIR/state" CVO_OUT_ROOT="$TEST_TMPDIR/out"
   export HYDRA_ROOT="$TEST_TMPDIR/hydra" CVO_MAIN_ENV="$TEST_TMPDIR/none.env"
   mkdir -p "$CVO_ETC" "$HYDRA_ROOT/scripts/lib"
+  cat > "$HYDRA_ROOT/scripts/lib/slack-notify.sh" <<'SH'
+slack_notify_critical() { printf '%s\n' "$*" >> "$CALLS.page"; return ${STUB_SLACK_RC:-0}; }
+SH
   export CALLS="$TEST_TMPDIR/calls.log"; : > "$CALLS"
   export CVO_TICK_HARD_S=999999 CVO_CHECK_S_PER_USER=0 CVO_RESERVE_PAD_S=0   # the deadline rails have their own tests
   export CVO_TIMEOUT_BIN="$(command -v timeout)"
@@ -69,6 +72,8 @@ if mode == "apply" and os.environ.get("STUB_CLAIM_PROSE"):
     print(f"CLAIM PROOF ASK (paid): sent {os.environ.get('STUB_SENT', '3')}, refused {os.environ.get('STUB_REFUSED', '0')}.")
 else:
     print(f"UVN STATUS: {os.environ.get('STUB_SENT', '3')} sent." if mode == "apply" else "UVN STATUS (dry run): 3 would be messaged.")
+if mode == "apply" and os.environ.get("STUB_APPLY_RC"):
+    sys.exit(int(os.environ["STUB_APPLY_RC"]))   # rows were written above; the run then FAILS (a partial send)
 PY
   cat > "$TEST_TMPDIR/owing.py" <<'PY'
 import os as _o, time as _t
@@ -121,9 +126,19 @@ PY
   python3 -c "import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.execute('CREATE TABLE verify_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, campaign TEXT, day TEXT, status TEXT, account_id TEXT)'); d.commit()" "$CVO_LEDGER"
   cat > "$TEST_TMPDIR/zero.py" <<'PY'
 import os, sys
-open(os.environ["CALLS"] + ".zero", "a").write(" ".join(sys.argv[1:]) + "\n")
-print({"0": "OK", "1": "STOP: a credit email", "2": "UNMEASURED: loki unreadable"}[os.environ.get("STUB_ZERO_RC", "0")])
-sys.exit(int(os.environ.get("STUB_ZERO_RC", "0")))
+log = os.environ["CALLS"] + ".zero"
+open(log, "a").write(" ".join(sys.argv[1:]) + "\n")
+n = len([l for l in open(log).readlines() if l.strip()])          # 1-based call number
+rc = os.environ.get("STUB_ZERO_RC", "0")
+if os.environ.get("STUB_ZERO_RC_ONCE") and n > 1:
+    rc = "0"                                                       # only the FIRST read is unmeasured
+if os.environ.get("STUB_ZERO_CRASH"):
+    # a READER CRASH: the last line is not a verdict, and the exit code is 1 - which the tick reads as STOP
+    print("Traceback (most recent call last):")
+    print("subprocess.TimeoutExpired: Command '['trino']' timed out after 900 seconds")
+    sys.exit(1)
+print({"0": "OK", "1": "STOP: a credit email", "2": "UNMEASURED: loki unreadable"}[rc])
+sys.exit(int(rc))
 PY
   export CVO_ZERO_READ="$TEST_TMPDIR/zero.py"
   # the fraud re-check stub: STUB_FRAUD_HELD = comma ids the lens holds among the sent accounts; STUB_FRAUD_DOWN = lens unreadable
@@ -508,16 +523,83 @@ PY
   if grep -q "daily cap reached .*unreadable" "$CVO_OUT_ROOT"/*/tick.log; then false; fi
 }
 
-@test "outbound tick (p1 / n1 #1545): the zero-read runs over exactly each apply's new ledger rows; STOP or UNMEASURED kills" {
+@test "outbound tick (QA #1545 finding 3): a PARTIAL apply (rows written, nonzero exit) is never rescued by an UNMEASURED zero-read - the tick stops" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  rm -f "$CVO_ETC/credit-verify-outbound.disabled" "$CALLS.zero" "$CALLS.page"
+  # the runner wrote `sent` rows and THEN exited 1; Loki is unreadable, so the zero-read is UNMEASURED. Before the fix
+  # the UNMEASURED branch returned 0 and skipped the rc guard, reporting a partially-sent family as successful.
+  STUB_APPLY_RC=1 STUB_ZERO_RC=2 STUB_ZERO_RC_ONCE=1 run -1 "$SCRIPT"
+  [ -e "$CALLS.zero" ]                                    # rows existed, so the read ran over them
+  grep -q "zero-read UNMEASURED" "$CALLS.page"            # ruling B still pages the same minute
+  grep -q "apply FAILED (rc=1) AND the zero-read was UNMEASURED" "$CVO_OUT_ROOT"/*/tick.log
+  [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]      # a failed apply stops the tick; it is not a zero-read STOP
+}
+
+@test "UNMEASURED with an UNDELIVERABLE page (QA #1545 finding 2): the tick fails closed and PERSISTS the page; the next tick delivers it before any family and clears the marker" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  rm -f "$CVO_ETC/credit-verify-outbound.disabled" "$CALLS.zero" "$CALLS.page" "$CVO_STATE"/zero-unmeasured-*
+  # Slack is down while the zero-read is UNMEASURED: page() would have swallowed it (it always returned 0), leaving
+  # the outage in local logs only while the unattended tick kept running.
+  STUB_ZERO_RC=2 STUB_ZERO_RC_ONCE=1 STUB_SLACK_RC=1 run -1 "$SCRIPT"
+  grep -q "the PAGE FAILED" "$CVO_OUT_ROOT"/*/tick.log
+  if ! ls "$CVO_STATE"/zero-unmeasured-undelivered-* >/dev/null 2>&1; then false; fi   # durable, not just a log line
+  grep -q "zero-read UNMEASURED (undelivered page)" "$CVO_STATE"/zero-unmeasured-undelivered-*
+  # Slack is back: the next tick RETRIES the persisted text at the top, clears the marker, then runs its families
+  : > "$CALLS.page"
+  run -0 "$SCRIPT"
+  grep -q "RETRY (page previously undelivered)" "$CALLS.page"
+  grep -q "retried the undelivered zero-read page" "$CVO_OUT_ROOT"/*/tick.log
+  if ls "$CVO_STATE"/zero-unmeasured-undelivered-* >/dev/null 2>&1; then false; fi   # cleared only once Slack accepted
+  # and a marker that STILL cannot be delivered fails the tick closed before any family runs
+  printf 'zero-read UNMEASURED (undelivered page) x ledger 1-2: y\n' > "$CVO_STATE/zero-unmeasured-undelivered-uvn-status-free"
+  : > "$CALLS"
+  STUB_SLACK_RC=1 run -1 "$SCRIPT"
+  [ "$(applies)" -eq 0 ]
+  if ! ls "$CVO_STATE"/zero-unmeasured-undelivered-* >/dev/null 2>&1; then false; fi
+  grep -q "still cannot be delivered" "$CVO_OUT_ROOT"/*/tick.log
+  rm -f "$CVO_STATE"/zero-unmeasured-undelivered-*
+}
+
+@test "outbound tick (p1 / n1 #1545 + ruling B): the zero-read runs over exactly each apply's new ledger rows; STOP kills the whole run, UNMEASURED stops only its own family's segment" {
   touch "$CVO_ETC/credit-verify-outbound.live"
   run -0 "$SCRIPT"
   [ "$(wc -l < "$CALLS.zero" | tr -d ' ')" -eq 2 ]                 # the two free applies
   grep -q -- "--ledger-ids 1-2" "$CALLS.zero"; grep -q -- "--ledger-ids 3-4" "$CALLS.zero"
-  for rc in 1 2; do
-    rm -f "$CVO_ETC/credit-verify-outbound.disabled" "$CALLS.zero"
-    STUB_ZERO_RC=$rc run -1 "$SCRIPT"
-    grep -q "zero-read $([ $rc = 1 ] && echo STOP || echo UNMEASURED)" "$CVO_ETC/credit-verify-outbound.disabled"
-  done
+  # STOP (rc=1): an unexplained credit-class message - the auto-kill for the WHOLE run (unchanged)
+  rm -f "$CVO_ETC/credit-verify-outbound.disabled" "$CALLS.zero"
+  STUB_ZERO_RC=1 run -1 "$SCRIPT"
+  grep -q "zero-read STOP" "$CVO_ETC/credit-verify-outbound.disabled"
+  # UNMEASURED (rc=2), ruling B: NOT the whole tick. The family's users carry the verdict on their own outcome rows,
+  # #clio_devops is paged, this batch's segment stops, and the tick continues (rc 0) to the next family - the global
+  # kill file is NOT written and NO persistent marker wedges the family across ticks.
+  rm -f "$CVO_ETC/credit-verify-outbound.disabled" "$CALLS.zero" "$CALLS.page" "$CVO_STATE"/zero-unmeasured-*
+  STUB_ZERO_RC=2 STUB_ZERO_RC_ONCE=1 run -0 "$SCRIPT"
+  [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]; [ ! -e "$CVO_STATE/credit-verify-outbound.disabled" ]
+  grep -q "zero-read UNMEASURED" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "this segment stops here" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "zero-read UNMEASURED" "$CALLS.page"                    # #clio_devops paged the same minute
+  if ls "$CVO_STATE"/zero-unmeasured-* >/dev/null 2>&1; then false; fi   # no persistent marker: no indefinite wedge
+  python3 - "$CVO_OUT_ROOT" <<'PY'
+import glob, json, sys
+# the batch's outcomes balance per user: each user in the batch's ledger range carries the zero-read verdict on their row
+app = glob.glob(sys.argv[1] + "/*/uvn-status-free-apply.json")
+assert app, "no uvn-status-paid apply outcomes"
+d = json.load(open(app[0]))
+rows = d.get("outcomes") or []
+assert d.get("zero_read", {}).get("verdict") == "UNMEASURED", d.get("zero_read")
+assert rows, "no outcome rows"
+for r in rows:
+    if not r.get("user"):
+        continue
+    # the user's OWN row carries the verdict: annotated where the row existed, appended where it did not
+    assert r.get("zero_read") == "unmeasured" or r.get("result") == "zero_read_unmeasured", r
+print("outcomes balance: %d row(s), verdict %s" % (len(rows), d["zero_read"]["verdict"]))
+PY
+  # the NEXT tick runs the family again (ruling B stops a batch segment, never the family)
+  # ruling B stops THIS batch's segment, not the family forever: the next tick runs the family again
+  : > "$CALLS"; STUB_ZERO_RC=0 run -0 "$SCRIPT"
+  grep -q -- "--segment free --campaign uvn-status " "$CALLS"
+  grep -q -- "--segment free --campaign status-doc-received" "$CALLS"
   # QA #1541: an apply whose rows are only ATTEMPTED (delivery unknown) is read too - never skipped
   rm -f "$CVO_ETC/credit-verify-outbound.disabled" "$CALLS.zero"
   STUB_ROW_STATUS=attempted run -0 "$SCRIPT"
@@ -641,6 +723,39 @@ J
   run -0 "$SCRIPT"
   if grep -q "^claim-" "$CALLS"; then false; fi
   grep -q "claim families: no claim list" "$CVO_OUT_ROOT"/*/tick.log
+}
+
+@test "outbound tick (QA #1545 round 9): an UNMEASURED continuation still ADVANCES the paged family's cursor - a persistent unreadable source cannot starve every entry behind the same page" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  # the pre-fix shape: the continuation returned 0 without moving the cursor, so every later tick re-walked the SAME
+  # page and a source that stayed unreadable for hours starved the rest of the family while the tick looked clean.
+  [ ! -e "$CVO_STATE/cursor-uvn-status-free" ]
+  STUB_ZERO_RC=2 run -0 "$SCRIPT"
+  grep -q "uvn-status-free zero-read UNMEASURED" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "uvn-status-free page: entries from 0 this tick; next tick starts at 200" "$CVO_OUT_ROOT"/*/tick.log
+  [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]
+  # the cursor moved to the end of the page this apply walked (200 = the harness's page size), as a clean apply moves it
+  [ -r "$CVO_STATE/cursor-uvn-status-free" ]
+  [ "$(cat "$CVO_STATE/cursor-uvn-status-free")" = "200" ]
+  # and the NEXT tick therefore walks the NEXT page, not the same one again
+  rm -rf "$CVO_OUT_ROOT"; : > "$CALLS"
+  STUB_ZERO_RC=2 run -0 "$SCRIPT"
+  grep -q "uvn-status-free page: entries from 200 this tick" "$CVO_OUT_ROOT"/*/tick.log
+}
+
+@test "outbound tick (QA #1545 round 8): a zero-read CRASH (exit 1, no verdict line) is UNMEASURED, not a STOP - a transient timeout must never write the global kill file" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  # under `set -o pipefail` a reader traceback exits 1, and 1 means CONFIRMED STOP to the tick, whose answer is the
+  # global kill file. The reader prints exactly one verdict line; no verdict = we could not look.
+  STUB_ZERO_CRASH=1 run -0 "$SCRIPT"
+  [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]
+  [ ! -e "$CVO_STATE/credit-verify-outbound.disabled" ]
+  grep -q "zero-read UNMEASURED" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "printed no verdict (a crash is not a STOP)" "$CVO_OUT_ROOT"/*/tick.log
+  # the negative control stays exactly as it was: a real STOP verdict still kills the run
+  rm -f "$CALLS.zero" "$CALLS.page" "$CVO_STATE"/zero-unmeasured-*
+  STUB_ZERO_RC=1 run -1 "$SCRIPT"
+  grep -q "zero-read STOP" "$CVO_ETC/credit-verify-outbound.disabled"
 }
 
 @test "outbound tick (QA #1541): an unreadable LEDGER for the cap read stops the tick with the kill file, not a silent stall" {

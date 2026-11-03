@@ -28,7 +28,9 @@
 #     (credit_review.fraud_lens; the lens refusing held users BEFORE a send is normal and never kills), or the lens
 #     could not be read;
 #   - a refusal spike: refused / attempted > REFUSAL_SPIKE in one apply;
-#   - n1's zero-read (#1545) STOP / UNMEASURED.
+#   - n1's zero-read (#1545): a STOP is an unexplained credit-class message, and it kills the WHOLE run. An UNMEASURED
+#     is a source we could not read: it stops only that batch's segment, writes a zero_read_unmeasured outcome row per
+#     affected user, pages #clio_devops the same minute, and every other family continues on its own read (ruling B).
 # The 2 h after-the-fact sample: every apply's ledger id range is appended to $STATE/samples.jsonl (family, segment,
 # ledger ids, 5 rendered bodies dir) for flows-verify v1's 2-hourly read of 10 sends per family; v1 stops the tick by
 # writing the same kill file.
@@ -183,11 +185,13 @@ EXCL_ARGS=(); [ -s "$EXCLUDE" ] && EXCL_ARGS=(--exclude-users "$EXCLUDE")
 RUN_START="$(date -u +%FT%TZ)"
 log "tick start: live=$LIVE paid_live=$PAID_LIVE cap=$CAP out=$OUT deployed=$(cat "$DEPLOYED_SHA_FILE" 2>/dev/null || echo unreadable)"
 
-page() { # best effort: the kill file is the guarantee, the page is the notice
+notify() { # <text>: 0 only when the notifier ACCEPTED it (missing notifier / a Slack failure = 1)
   # shellcheck source=/dev/null
   [ -r "$HYDRA_ROOT/scripts/lib/slack-notify.sh" ] && . "$HYDRA_ROOT/scripts/lib/slack-notify.sh" \
     && declare -F slack_notify_critical >/dev/null && slack_notify_critical "credit-verify-outbound: $*" >/dev/null 2>&1
-  return 0
+}
+page() { # best effort: the kill file is the guarantee, the page is the notice (call sites keep this contract)
+  notify "$@" || { log "page not delivered: $*"; return 0; }
 }
 autokill() { # <why>
   local where="$KILL"
@@ -219,6 +223,58 @@ sent = int(sys.argv[2] or 0)
 n = sent + refused
 print("spike" if n >= 10 and refused / n > float(sys.argv[3]) else "ok")
 PY
+}
+
+# zero_unmeasured <tag> <lo> <hi> <why> - Fable ruling 2026-11-03 (B): an UNMEASURED must NOT wedge the whole tick.
+# It stops THAT batch's segment only: every affected user carries the zero-read verdict on their OWN outcome row in the
+# batch's outcomes file (annotated where the row exists, appended where it does not, with the batch ref and the reason -
+# so the batch's outcomes balance per user) and #clio_devops is paged the same minute. It stops THIS batch's segment,
+# never the family: the next tick measures its own new rows normally (no persistent marker - a single uncorrelated
+# notice must not wedge a family forever). The global kill file stays for STOP only: a STOP is an unexplained
+# credit-class message and auto-kills the whole run.
+zero_unmeasured() { # <tag> <lo> <hi> <why>
+  local out
+  out="$(py - "$OUT/$1-apply.json" "$LEDGER" "$2" "$3" "$1" "$4" <<'PY'
+import json, sqlite3, sys
+path, ledger, lo, hi, tag, why = sys.argv[1:7]
+try:
+    d = json.load(open(path))
+except (OSError, ValueError):
+    d = {}
+rows = d.get("outcomes") if isinstance(d, dict) else None
+if not isinstance(rows, list):
+    rows = []
+try:
+    db = sqlite3.connect(f"file:{ledger}?mode=ro", uri=True)
+    users = [str(r[0]) for r in db.execute(
+        "SELECT DISTINCT account_id FROM verify_messages WHERE id > ? AND id <= ? "
+        "AND status IN ('sent','attempted') AND account_id IS NOT NULL", (int(lo), int(hi)))]
+    db.close()
+except sqlite3.Error as e:
+    print("unreadable ledger: %s" % e); sys.exit(3)
+by_user = {}
+for r in rows:
+    if isinstance(r, dict) and r.get("user") is not None:
+        by_user.setdefault(str(r["user"]), []).append(r)
+annotated = appended = 0
+for u in users:
+    mine = by_user.get(u)
+    if mine:
+        for r in mine:                    # the user's own row carries the verdict; never a second row for them
+            r["zero_read"] = "unmeasured"; r["zero_read_reason"] = why; r["zero_read_batch"] = tag
+            r["zero_read_ledger"] = "%d-%d" % (int(lo) + 1, int(hi))
+        annotated += 1
+    else:
+        rows.append({"user": u, "result": "zero_read_unmeasured", "reason": why, "batch": tag})
+        appended += 1
+if isinstance(d, dict):
+    d["outcomes"] = rows
+    d["zero_read"] = {"batch": tag, "ledger": "%d-%d" % (int(lo) + 1, int(hi)), "verdict": "UNMEASURED", "reason": why}
+    json.dump(d, open(path, "w"), indent=1, sort_keys=True)
+print("zero_read_unmeasured users %d (annotated %d, appended %d)" % (len(users), annotated, appended))
+PY
+)" || { echo "zero_unmeasured failed"; return 1; }
+  echo "$out"
 }
 
 # room <campaign> <segment> <cap>: "<n> <daily>" - n = how many this apply may message today (r5 on #1541): min(cap, the
@@ -511,8 +567,49 @@ print(sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True).execute(
     sample "$tag" "$lo" "$hi" || { autokill "$tag: the v1 sample pointer for ledger $((lo + 1))-$hi could not be written to $STATE/samples.jsonl"; return 1; }
     local zr zrc; zr="$(py "$ZERO_READ" --ledger-ids "$((lo + 1))-$hi" 2>&1 | tail -1)"; zrc=$?
     [ -r "$ZERO_READ" ] || zrc=2
+    # QA #1545 round 8 (Important): under `set -o pipefail` a READER CRASH exits 1, and 1 means CONFIRMED STOP to the
+    # lines below - so a transient Trino/kubectl timeout would write the global kill file as if a credit-class message
+    # had been observed. The reader prints exactly one verdict line (OK:/STOP:/UNMEASURED:); anything else is a crash,
+    # i.e. a source we could not read, and UNMEASURED is the honest reading of it.
+    case "${zr:-}" in
+      OK|OK:*|STOP|STOP:*|UNMEASURED|UNMEASURED:*) ;;
+      *) zr="UNMEASURED: the zero-read printed no verdict (a crash is not a STOP): ${zr:0:200}"; zrc=2 ;;
+    esac
     log "$tag zero-read ledger $((lo + 1))-$hi (rc=$zrc): ${zr:0:300}"
-    [ "$zrc" = 0 ] || { autokill "$tag zero-read $([ "$zrc" = 1 ] && echo STOP || echo UNMEASURED) for ledger $((lo + 1))-$hi: ${zr:0:200}"; return 1; }
+    if [ "$zrc" = 1 ]; then
+      # STOP: an unexplained credit-class message - the auto-kill for the whole run (unchanged)
+      autokill "$tag zero-read STOP for ledger $((lo + 1))-$hi: ${zr:0:200}"; return 1
+    fi
+    if [ "$zrc" != 0 ]; then
+      # (B) UNMEASURED never wedges the tick: rows so the batch's outcomes balance, a page the same minute, this
+      # segment stops here (its remaining users stay owed and unsent), every other family continues on its own read.
+      local zu; zu="$(zero_unmeasured "$tag" "$lo" "$hi" "${zr:0:200}" 2>&1 | tail -1)"
+      log "$tag zero-read UNMEASURED ledger $((lo + 1))-$hi: $zu; this segment stops here, other families continue"
+      case "$zu" in *"zero_read_unmeasured users"*) ;; *) autokill "$tag: the zero_read_unmeasured rows could not be written ($zu) - the batch's outcomes would not balance"; return 1 ;; esac
+      # ruling B requires the page the SAME MINUTE. A page that could not be delivered is persisted and RETRIED at the
+      # top of the next tick, and THIS tick fails closed for the family - an unattended outage must never be only a log.
+      if notify "$tag zero-read UNMEASURED for ledger $((lo + 1))-$hi: ${zr:0:200}. This segment stops after its send; its remaining users stay owed and unsent; every other family continues. Rows: $OUT/$tag-apply.json"; then
+        log "$tag: paged #clio_devops"
+      else
+        printf 'zero-read UNMEASURED (undelivered page) %s ledger %d-%d: %s\n' "$(date -u +%FT%TZ)" "$((lo + 1))" "$hi" "${zr:0:200}" \
+          > "$STATE/zero-unmeasured-undelivered-$tag" 2>/dev/null \
+          || { autokill "$tag: the zero-read was UNMEASURED, the page FAILED, and no durable retry marker could be written ($STATE)"; return 1; }
+        log "$tag zero-read UNMEASURED: the PAGE FAILED; persisted $STATE/zero-unmeasured-undelivered-$tag for the next tick's retry - this tick stops here (fail closed)"
+        return 1
+      fi
+      # QA #1545 finding 3: a NONZERO apply is a FAILED apply - rows may already be sent. The UNMEASURED continuation
+      # must never turn that into a successful family by skipping the rc guard below.
+      if [ "$rc" != 0 ]; then
+        log "$tag: apply FAILED (rc=$rc) AND the zero-read was UNMEASURED; the tick stops here (a partial send is never a clean family)"
+        return 1
+      fi
+      # QA #1545 round 9 (Important): this continuation returned 0 WITHOUT moving the paged family's cursor, so every
+      # later tick re-walked the SAME page - a persistent UNMEASURED (Loki or Trino down for hours) starved every entry
+      # behind it while the tick reported clean for the other families. The page's work IS done: the apply ran and its
+      # users carry the zero-read verdict on their own rows, so the cursor moves exactly as a clean apply moves it.
+      advance_cursor "$tag" "$cur_file" "$OUT/$tag-apply.json" "$cur"
+      return 0
+    fi
   fi
   [ "$rc" = 0 ] || { log "$tag: apply failed rc=$rc; tick stops"; return 1; }
   advance_cursor "$tag" "$cur_file" "$OUT/$tag-apply.json" "$cur"
@@ -625,6 +722,20 @@ PY
   family claim-proof-ask free "$cl" "$CLAIM_CAP" claim-proof-ask || return 1
   family claim-status free "$cl" "$CLAIM_CAP" claim-status || return 1
 }
+# ruling B: an UNMEASURED tick whose page could not be delivered left a durable marker. Retry it at the top of every
+# tick; a marker that still cannot be delivered fails this tick closed (the outage is never only a log line).
+for m in "$STATE"/zero-unmeasured-undelivered-*; do
+  [ -e "$m" ] || continue
+  why="$(head -c 400 "$m" 2>/dev/null | tr '\n' ' ')"
+  if notify "RETRY (page previously undelivered): $why"; then
+    log "retried the undelivered zero-read page from $(basename "$m"); delivered - marker cleared"
+    rm -f "$m"
+  else
+    log "STOP: the undelivered zero-read page in $(basename "$m") still cannot be delivered; this tick fails closed"
+    exit 1
+  fi
+done
+
 if [ "$DOW" = 6 ] || [ "$DOW" = 7 ]; then   # Fable 10-30: claims prioritised Sat-Sun
   log "weekend: claim families first"
   claim_families || exit 1
