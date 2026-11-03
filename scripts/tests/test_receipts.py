@@ -308,21 +308,34 @@ class LegacyRowAdmittanceTest(unittest.TestCase):
         self.assertIn(11, out)                     # the old spelling, re-admitted
         self.assertIn(13, out)                     # today's spelling
         self.assertNotIn(14, out)                  # email-only: still weak
-        self.assertIn(12, out)                     # proof_on_file WITH a conversation: admitted (Ruling 2)
-        self.assertIn(11, out)                     # the old spelling still re-admits through RECEIPT_MATCH
-        self.assertNotIn(15, out)                  # proof_on_file without one: no same-conversation receipt
-        self.assertEqual(counts["skip_weak_identity"], 2)
-        self.assertEqual(counts["admit_same_conversation_match"], 1)
+        self.assertNotIn(12, out)                  # HELD: same-conversation label, sender does not pin the channel
+        self.assertNotIn(15, out)                  # same, and it has no conversation either
+        self.assertEqual(counts["skip_weak_identity"], 1)                       # only 14
+        self.assertEqual(counts["skip_same_conversation_channel_unpinned"], 2)  # 12 and 15, counted not dropped
         self.assertEqual(out[11]["request_ids"], ["r-11"])
-        self.assertEqual(out[12]["filing_conversation"], "215475213550081")   # the thread the receipt replies into
 
     def test_a_same_conversation_label_is_never_in_the_strict_set(self):
-        """Ruling 2 admits proof_on_file for RECEIPTS only; the identity sets used by approvals/link/dedupe
-        must stay exactly the strict set, so the label can never leak into them."""
+        """Ruling 2 kept proof_on_file out of the identity sets; QA @ab208f88 showed the SEND does not honour the
+        condition the admission rested on, so it is now held even for receipts - and it must still never leak into
+        approvals/link/dedupe."""
         self.assertEqual(receipts.strong_label("proof_on_file"), "")
         self.assertNotIn("proof_on_file", receipts.STRONG_MATCH)
-        self.assertEqual(receipts.receipt_label("proof_on_file", "215475213550081"), "proof_on_file")
+        self.assertEqual(receipts.receipt_label("proof_on_file", "215475213550081"), "")   # held, not admitted
         self.assertEqual(receipts.receipt_label("proof_on_file", ""), "")
+        # and the same under the #1652 spelling, so a rename cannot quietly re-open the channel
+        self.assertEqual(receipts.receipt_label("export_conversation", "215475213550081"), "")
+
+    def test_the_hold_is_a_switch_not_an_erasure(self):
+        """The admission comes back by flipping ONE constant once the sender pins the channel - and the test states
+        what that flip is worth, so a future reader cannot mistake the hold for 'this label is useless'."""
+        self.assertFalse(receipts.ADMIT_SAME_CONVERSATION)
+        saved = receipts.ADMIT_SAME_CONVERSATION
+        try:
+            receipts.ADMIT_SAME_CONVERSATION = True
+            self.assertEqual(receipts.receipt_label("proof_on_file", "215475213550081"), "proof_on_file")
+            self.assertEqual(receipts.receipt_label("proof_on_file", ""), "")   # still needs a conversation
+        finally:
+            receipts.ADMIT_SAME_CONVERSATION = saved
 
 if __name__ == "__main__":
     unittest.main()

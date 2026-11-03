@@ -67,13 +67,22 @@ RECEIPT_MATCH = STRONG_MATCH + ("professional_id+email",)
 MATCH_ALIASES = {"external_id+email": "professional_id+email"}
 # [key=proof-on-file-same-conversation] (l1 ruling-external-id-receipts-1102.md, Ruling 2): a filing resolved
 # through proof-on-file.json - the conversation is filed under EXACTLY one account, but with no email
-# confirmation - is weaker than external_id+email by exactly that check. It is admitted for a receipt ONLY
-# where a receipt cannot leave the thread the document arrived in: the R1 receipt is addressed to the filing
-# conversation itself (uvn_status.with_filing -> the gate's G3 sends it only to the contact that filed the
-# document), so a same-conversation receipt asserts "we received what was filed here" and no identity claim.
-# No conversation id = no same-conversation receipt = still skipped. Approvals, awards, dedupe/link and merges
-# keep the strict set: this label never reaches them.
+# confirmation - is weaker than external_id+email by exactly that check.
+#
+# HELD, NOT ADMITTED (QA @ab208f88). Ruling 2 admitted this label on the condition that "a receipt cannot leave
+# the thread the document arrived in". That condition is FALSE in the sender: intercom-verify-request.sh's R9
+# branch deliberately moves an off-topic filing thread's receipt OUT of the filing conversation - docrecvr goes
+# into the user's OTHER open credit conversation (credit_thread_of) and, when there is none, by email; docrecvq
+# goes by email. G3 pins the filing contact, never the channel. So admitting the label would let a receipt that
+# exists only because of the filing thread be delivered into a different conversation, which is the weaker
+# identity travelling under the stronger justification - worse than no receipt.
+#
+# The condition is enforced where the send happens (a channel pin in intercom-verify-request.sh, send-locked and
+# not this repo's builder), so this builder holds the label instead of admitting it: rows carrying it are counted
+# as hold_same_conversation_unpinned_send and produce no receipt. Flip ADMIT_SAME_CONVERSATION to True only once
+# the R9 branches are pinned to the filing conversation (or refuse), and keep the counter dropping to 0 as proof.
 SAME_CONVERSATION_MATCH = ("proof_on_file",)
+ADMIT_SAME_CONVERSATION = False
 
 
 def strong_label(matched: str | None) -> str:
@@ -96,13 +105,18 @@ def receipt_strong_label(matched: str | None) -> str:
 
 
 def receipt_label(matched: str | None, conversation: str | None) -> str:
-    """The label a RECEIPT may be built on, or '' - the strict set, plus a same-conversation label that is
-    only usable because the receipt goes back into that same conversation (hence the conversation requirement)."""
+    """The label a RECEIPT may be built on, or '' - the strict set, plus (only once the sender pins the delivery
+    channel) a same-conversation label that is usable because the receipt goes back into that same conversation.
+
+    The same-conversation label carries a conversation requirement AND a channel requirement. The channel one is
+    not ours to check here and is not satisfied by the sender (see ADMIT_SAME_CONVERSATION above), so a row that
+    would have been admitted on it now yields no receipt at all - counted, never silently dropped."""
     label = receipt_strong_label(matched)
     if label:
         return label
     raw = (matched or "").strip()
-    if raw in SAME_CONVERSATION_MATCH and str(conversation or "").strip():
+    raw = MATCH_ALIASES.get(raw, raw)
+    if ADMIT_SAME_CONVERSATION and raw in SAME_CONVERSATION_MATCH and str(conversation or "").strip():
         return raw
     return ""
 Query = Callable[[str], "list[list[str]]"]
@@ -128,10 +142,14 @@ def intake_by_user(proof_store: str) -> tuple[dict[int, dict[str, Any]], Counter
             continue
         label = receipt_label(matched, conv)
         if not label:
-            counts["skip_weak_identity"] += 1
+            if (matched or "").strip() in SAME_CONVERSATION_MATCH or \
+                    MATCH_ALIASES.get((matched or "").strip()) in SAME_CONVERSATION_MATCH:
+                # held, not skipped: the label is good enough for a receipt in principle, but the sender can move
+                # the receipt off the filing conversation, so nothing is built until that is fixed
+                counts["skip_same_conversation_channel_unpinned"] += 1
+            else:
+                counts["skip_weak_identity"] += 1
             continue
-        if label in SAME_CONVERSATION_MATCH:
-            counts["admit_same_conversation_match"] += 1
         try:
             raw = json.loads(cands or "[]")
         except ValueError as exc:
@@ -264,6 +282,9 @@ def build(*, proof_store: str = PROOF_STORE, paying_path: str = PAYING, query: Q
     lists: dict[str, list[dict[str, Any]]] = {"queued": [], "received": []}
     for uid, u in users.items():
         rows = pend.get(uid, {})
+        # Dormant while ADMIT_SAME_CONVERSATION is False: the same-conversation label no longer reaches `labels`
+        # (it is held in intake_by_user), so this guard has nothing to catch. It becomes load-bearing again the
+        # moment that constant is flipped, and it is the cheap insurance against a half-enable, so it stays.
         if u.get("labels") and set(u["labels"]) <= set(SAME_CONVERSATION_MATCH) and not u["filing_conversation"]:
             counts["skip_no_filing_conversation"] += 1   # same-conversation receipt has no conversation to reply into
             continue
