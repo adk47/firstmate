@@ -470,29 +470,39 @@ test_parallel_sends_never_lose_a_record() {
   pass "fm-send inbox: parallel sends all land as distinct intact records"
 }
 
-# The record is the delivery: a send whose record cannot be confirmed on disk
-# must refuse, never report a durable steer that is not there.
+# The record is the delivery: a send whose record vanishes between the enqueue
+# and the send's own confirmation - a replaced, retired, or reaped inbox - must
+# refuse, never report a durable steer that is not there. The record is
+# published for real (so the enqueue and its own verification succeed) and is
+# then removed while the send releases its task metadata lock, the last moment
+# before the send confirms the record itself.
 test_unconfirmed_record_fails_the_send() {
-  local dir err rc real_ln
+  local dir err rc real_rm
   dir=$(setup_case unconfirmed); err="$dir/send.err"
-  real_ln=$(command -v ln)
-  # A publish that reports success without creating the record stands in for a
-  # record lost to a replaced directory or a colliding writer.
-  cat > "$dir/fakebin/ln" <<'SH'
+  real_rm=$(command -v rm)
+  cat > "$dir/fakebin/rm" <<'SH'
 #!/usr/bin/env bash
 set -u
-case "${1:-}" in
-  -*) exec "$FM_REAL_LN" "$@" ;;
-  *) exit 0 ;;
-esac
+for a in "$@"; do
+  case "$a" in
+    *"$FM_UNCONFIRMED_LOCK"*/role) "$FM_REAL_RM" -f "$FM_UNCONFIRMED_RECORD" 2>/dev/null || true ;;
+  esac
+done
+exec "$FM_REAL_RM" "$@"
 SH
-  chmod +x "$dir/fakebin/ln"
-  run_send "$dir" "$err" FM_REAL_LN="$real_ln" -- t1 "steer that never lands"; rc=$?
-  [ "$rc" -ne 0 ] || fail "a send whose record never appeared reported success"
+  chmod +x "$dir/fakebin/rm"
+  run_send "$dir" "$err" \
+    FM_REAL_RM="$real_rm" FM_UNCONFIRMED_LOCK='.meta-t1.lock' \
+    FM_UNCONFIRMED_RECORD="$dir/home/state/t1.inbox/001.msg" \
+    -- t1 "steer that vanishes before the confirmation"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a send whose record vanished under it reported success"
   assert_contains "$(cat "$err")" "steer not sent to t1" \
     "the refusal should say the steer was not sent"
+  assert_contains "$(cat "$err")" "is not on disk carrying the instructed text" \
+    "the refusal should name the missing record rather than report delivery"
   assert_contains "$(cat "$err")" "$dir/home/state/t1.inbox" \
     "the refusal should name the inbox whose record could not be confirmed"
+  [ ! -e "$dir/home/state/t1.inbox/001.msg" ] || fail "the fixture did not remove the record"
   [ ! -s "$dir/send.log" ] || fail "a refused send still typed something:"$'\n'"$(cat "$dir/send.log")"
   [ -z "$(find "$dir/home/state/pending-replies" -type f -not -name '.*' 2>/dev/null)" ] \
     || fail "an unconfirmed record should discard the just-created pending-reply expectation"
