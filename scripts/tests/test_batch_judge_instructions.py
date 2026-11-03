@@ -202,6 +202,36 @@ class R1RolesCoverageTests(unittest.TestCase):
         four = {**f, "tracks": [["X", ["Artist and Repertoire", "Mixing", "Mastering"]]]}
         self.assertIsNone(bi.coded_stop("<p>Hi Jo, a quick update on your Artist and Repertoire, Mixing and Mastering credit "
                                         "requests for &quot;X&quot;" + tail, four, []))
+        # QA 1635: the role count must not decide whether the comparison is order-tolerant. render_facts SORTS the role
+        # names while status_doc_received_r1 renders them in credit order, so any cap on order tolerance (the old
+        # permutation branch stopped at 5) false-stops a correctly rendered receipt with 6+ roles and, being STOP-only,
+        # holds the whole outbound batch. QA's own reproduction is the six-role case below.
+        six_roles = ["Zeta", "Alpha", "Bravo", "Charlie", "Delta", "Echo"]
+        six = {**f, "tracks": [["X", six_roles]]}                       # the facts' (sorted) order
+        six_body = ("<p>Hi Jo, a quick update on your Zeta, Alpha, Bravo, Charlie, Delta and Echo credit requests for "
+                    "&quot;X&quot;" + tail)                             # the renderer's (credit) order
+        self.assertIsNone(bi.coded_stop(six_body, six, []))
+        self.assertIsNone(bi.coded_stop(six_body, {**six, "tracks": [["X", sorted(six_roles)]]}, []))
+        # ... a wrong, dropped or added role over six roles is still a stop
+        self.assertEqual(bi.coded_stop(six_body, {**six, "tracks": [["X", six_roles + ["Foxtrot"]]]}, [])[0], "facts_mismatch")
+        self.assertEqual(bi.coded_stop(six_body, {**six, "tracks": [["X", six_roles[:-1]]]}, [])[0], "facts_mismatch")
+        self.assertEqual(bi.coded_stop(six_body.replace("Delta and Echo", "Delta and Echoes"), six, [])[0], "facts_mismatch")
+        self.assertEqual(bi.coded_stop(six_body.replace(", Bravo", ""), six, [])[0], "facts_mismatch")
+        # a role that itself contains the separator still stays one role at this size
+        mixed = ["Artist and Repertoire", "Alpha", "Bravo", "Charlie", "Delta", "Echo"]
+        self.assertIsNone(bi.coded_stop("<p>Hi Jo, a quick update on your Artist and Repertoire, Alpha, Bravo, Charlie, Delta "
+                                        "and Echo credit requests for &quot;X&quot;" + tail, {**f, "tracks": [["X", mixed]]}, []))
+        # ten roles, facts sorted against a credit-order render: the boundary keeps order tolerance, not a cap
+        ten = [f"Role {c}" for c in "JIHGFEDCBA"]
+        self.assertIsNone(bi.coded_stop("<p>Hi Jo, a quick update on your " + ", ".join(ten[:-1]) + " and " + ten[-1] +
+                                        " credit requests for &quot;X&quot;" + tail, {**f, "tracks": [["X", sorted(ten)]]}, []))
+        # a role repeated in the facts is ONE role (track_roles dedupes), so the facts are the "one" shape: a plural phrase
+        # is a number stop and a named role is a facts stop - the doubled name never becomes two roles
+        dup = {**f, "tracks": [["X", ["Mixing", "Mixing"]]]}
+        self.assertEqual(bi.coded_stop("<p>Hi Jo, a quick update on your Mixing and Mixing credit requests for &quot;X&quot;" + tail,
+                                       dup, [])[0], "number_agreement")
+        self.assertEqual(bi.coded_stop("<p>Hi Jo, a quick update on your Mixing credit request for &quot;X&quot;" + tail,
+                                       dup, [])[0], "facts_mismatch")
         # ... and a wrong phrase over the same facts is still a stop
         self.assertEqual(bi.coded_stop("<p>Hi Jo, a quick update on your Artist, Repertoire and Mixing credit requests for "
                                        "&quot;X&quot;" + tail, anr, [])[0], "facts_mismatch")

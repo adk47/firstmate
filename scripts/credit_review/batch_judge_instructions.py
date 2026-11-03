@@ -22,7 +22,6 @@ from __future__ import annotations
 import html
 import json
 import re
-from itertools import permutations
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -139,13 +138,47 @@ def _andjoin(xs: list[str]) -> str:
     return ", ".join(xs[:-1]) + " and " + xs[-1]
 
 
-def _role_phrases(roles: list[str]) -> set[str]:
-    """Every phrase the renderer's andjoin can build from these roles, normalised. Order-tolerant on purpose: the facts'
-    role order is not something this check may depend on (a reordered facts set must never stop a correct receipt), and no
-    split is involved, so a role that itself contains " and " or ", " stays one role."""
-    if 1 <= len(roles) <= 5:
-        return {_norm(_andjoin(list(p))) for p in permutations(roles)}
-    return {_norm(_andjoin(roles))}          # degenerate sizes keep the renderer's own order
+def _role_match(named: str, roles: list[str]) -> bool:
+    """True when the body's normalised role phrase is what the renderer's `andjoin` produces from these roles in SOME
+    order. Only the real roles are ever joined, so a role that itself contains " and " or ", " ("Artist and Repertoire")
+    stays one role - nothing is split.
+
+    Order tolerance must not depend on how many roles there are (QA 1635): `render_facts` sorts the role names while
+    `status_doc_received_r1` renders them in credit order, so the two orders differ by construction, and the old
+    permutation enumeration (capped at 5, renderer-order only above that) false-stopped every correctly rendered receipt
+    with 6+ roles - a STOP-only judge holds the whole outbound batch on it. So instead of enumerating phrases this
+    segments the phrase: at each position the next unplaced role must match, followed by the renderer's separator for
+    that position (", " until the second-to-last item, " and " for the last). Memoised on (position, roles placed), so it
+    is polynomial and independent of the role order, of the role count, and of any number hidden inside a role name."""
+    n = len(roles)
+    if not n:
+        return not named
+    want = [_norm(r) for r in roles]
+    if not all(want):
+        return False
+    full = (1 << n) - 1
+    seen: set[tuple[int, int]] = set()
+
+    def step(pos: int, placed: int) -> bool:
+        if placed == full:
+            return pos == len(named)
+        if (pos, placed) in seen:
+            return False
+        seen.add((pos, placed))
+        k = bin(placed).count("1")           # roles already placed
+        sep = " and " if k == n - 2 else ("" if k == n - 1 else ", ")
+        for i, r in enumerate(want):
+            if placed & (1 << i) or not named.startswith(r, pos):
+                continue
+            end = pos + len(r)
+            if k == n - 1:
+                if end == len(named):
+                    return True
+            elif named.startswith(sep, end) and step(end + len(sep), placed | (1 << i)):
+                return True
+        return False
+
+    return step(0, 0)
 
 
 def r1_shape_stop(low: str, facts: dict[str, Any]) -> tuple[str, str] | None:
@@ -174,7 +207,7 @@ def r1_shape_stop(low: str, facts: dict[str, Any]) -> tuple[str, str] | None:
     if shape == "roles":
         if not named:
             return "number_agreement", f"{m.group(0)!r}: plural over one track without its roles named"
-        if _norm(named) not in _role_phrases(roles):    # build the phrases the renderer could, then compare strings
+        if not _role_match(_norm(named), roles):    # compare whole strings against the phrases andjoin can build
             return "facts_mismatch", f"{m.group(0)!r}: roles named {named!r} != the facts' {_andjoin(roles)!r}"
     elif named:
         return "facts_mismatch", f"{m.group(0)!r}: the renderer names no role in the {shape} shape"
