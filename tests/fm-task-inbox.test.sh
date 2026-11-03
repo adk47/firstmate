@@ -13,7 +13,8 @@
 #   2. Sequencing dedups per worker lifetime: the handled mv retires a record,
 #      re-acking it is a no-op, and an acknowledged sequence is never reissued.
 #      The idempotent enqueue (the remote steer leg's primitive) additionally
-#      dedups an exact-body re-run onto the existing record, handled or not.
+#      dedups an exact-body re-run onto the existing record: unhandled,
+#      acknowledged in handled/, or surviving only as its hidden link.
 #   3. No concurrent write can lose a record: many writers at once, a
 #      colliding writer publishing into the slot this writer chose, a writer
 #      that hits a live holder and times out, a writer that reclaims a stale
@@ -562,6 +563,39 @@ test_deleted_record_keeps_its_sequence() {
   pass "inbox: a record surviving only as its hidden link keeps its sequence"
 }
 
+# The documented safe recovery for an ambiguous transport failure is to re-run
+# the idempotent enqueue. When the worker's cleanup already deleted the visible
+# record, that re-run must land on the record that survives only as its hidden
+# link: publishing a second record would hand the worker one instruction twice
+# as soon as the repair pass restores the original.
+test_idempotent_write_dedups_onto_a_hidden_link() {
+  local state first second count text
+  state="$TMP_ROOT/idem-shadow/state"; mkdir -p "$state"
+  text='correlated request corr=abc'
+  first=$(inbox_lib "$state" fm_task_inbox_write_idempotent "$state" t1 "$text") \
+    || fail "idempotent write failed"
+  [ "$first" = "$state/t1.inbox/001.msg" ] || fail "first idempotent write should create 001.msg, got $first"
+  [ -e "$state/t1.inbox/.unhandled/001" ] \
+    || fail "the publish did not leave a hidden link for the unread record"
+  rm -f "$state/t1.inbox/"*.msg  # the worker's cleanup, which this plane tolerates
+  second=$(inbox_lib "$state" fm_task_inbox_write_idempotent "$state" t1 "$text") \
+    || fail "the idempotent re-run refused a record that survives only as its hidden link"
+  [ "$second" = "$first" ] \
+    || fail "the re-run should land on the original record, got $second"
+  grep -qF "$text" "$first" \
+    || fail "the re-run did not link the hidden record back into the inbox"
+  count=$(find "$state/t1.inbox" -maxdepth 1 -type f -name '*.msg' | wc -l | tr -d '[:space:]')
+  [ "$count" = 1 ] \
+    || fail "the re-run published a duplicate of the deleted record, found $count records"
+  inbox_lib "$state" fm_task_inbox_restore_unhandled "$state" t1 >/dev/null 2>&1
+  count=$(find "$state/t1.inbox" -maxdepth 1 -type f -name '*.msg' | wc -l | tr -d '[:space:]')
+  [ "$count" = 1 ] \
+    || fail "the repair pass restored a duplicate beside the deduped record, found $count records"
+  [ -e "$state/t1.inbox/.unhandled/001" ] \
+    || fail "the original record's hidden link should still be there for the deletion repair"
+  pass "inbox: an idempotent re-run dedups onto a record surviving only as its hidden link"
+}
+
 # A coalescing tick supersedes its predecessor for good: the retired record's
 # shadow must go with it, or the repair pass would resurrect every old tick.
 test_coalesced_superseded_record_is_not_resurrected() {
@@ -951,6 +985,7 @@ test_watcher_escalates_once_after_budget() {
 test_write_is_durable_and_exact
 test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
+test_idempotent_write_dedups_onto_a_hidden_link
 test_handled_mv_dedups_by_sequence
 test_concurrent_writers_never_clobber
 test_colliding_writer_never_clobbers

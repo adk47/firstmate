@@ -68,7 +68,10 @@
 #      record into handled/ sees the instruction again, which is the safe
 #      direction when the alternative is losing it silently. The shadow is
 #      retired when the record is acknowledged (moved into handled/) or
-#      superseded by a coalescing write.
+#      superseded by a coalescing write. The idempotent re-enqueue dedup reads it
+#      too, so a retried request whose visible record a worker deleted lands on
+#      that record - linked back into the root - instead of a duplicate beside
+#      the original the repair pass is about to restore.
 #
 # Sequence numbers are never reused within a task: allocation scans the inbox
 # root, handled/, and the shadow directory, so a message is processed at most
@@ -375,8 +378,12 @@ fm_task_inbox_write() {  # <state-dir> <task-id> <text> [delivery-mode]
 }
 
 # Durably enqueue one steer at most once: when a record with the exact same
-# body already exists - unhandled or already acknowledged in handled/ - no new
-# record is written and the existing record's path is printed instead.
+# body already exists - unhandled in the inbox root, already acknowledged in
+# handled/, or surviving only as its hidden link after a worker's cleanup - no
+# new record is written and the existing record's path is printed instead. A
+# shadow-only match is linked back into the inbox root first, so the re-run
+# reports a record that is on disk rather than publishing a duplicate beside the
+# deleted original the repair pass is about to restore.
 # This is the enqueue primitive for a transport that can fail with completion
 # unknown (the remote steer leg over ssh): the caller's safe recovery is to run
 # the same enqueue again, and this dedup is what makes the re-run land on the
@@ -386,40 +393,48 @@ fm_task_inbox_write() {  # <state-dir> <task-id> <text> [delivery-mode]
 # local plane keeps plain fm_task_inbox_write: its outcome is synchronous, so
 # a repeated identical local steer is a deliberate new instruction.
 fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mode]
-  local state=$1 task=$2 text=$3 delivery_mode=${4:-} dir lock want have f rec='' status=0
+  local state=$1 task=$2 text=$3 delivery_mode=${4:-} dir shadow lock want have f base rec='' status=0
   dir=$(fm_task_inbox_dir "$state" "$task")
   fm_task_inbox_prepare_dirs "$dir" || return 1
+  shadow=$(fm_task_inbox_shadow_dir "$dir")
   lock="$dir/.seq.lock"
   fm_task_inbox_lock_acquire "$lock" || return 1
   if want=$(mktemp "$dir/.dedup.XXXXXX") && have=$(mktemp "$dir/.dedup.XXXXXX"); then
     if printf '%s' "$text" > "$want"; then
-      for f in "$dir"/*.msg "$dir/handled"/*.msg; do
-        if [ ! -e "$f" ]; then
-          case "$f" in
-            "$dir"/*.msg)
-              f="$dir/handled/${f##*/}"
-              [ -e "$f" ] || continue
-              ;;
-            *) continue ;;
-          esac
-        fi
+      for f in "$dir"/*.msg "$dir/handled"/*.msg "$shadow"/*; do
+        [ -e "$f" ] || [ -L "$f" ] || continue
         if [ "$delivery_mode" = fire-and-forget ]; then
           fm_task_inbox_is_fire_and_forget "$f" || continue
         elif fm_task_inbox_is_fire_and_forget "$f"; then
           continue
         fi
         if ! fm_task_inbox_body "$f" > "$have" 2>/dev/null; then
-          case "$f" in
-            "$dir"/*.msg)
-              f="$dir/handled/${f##*/}"
-              fm_task_inbox_body "$f" > "$have" 2>/dev/null || continue
-              ;;
-            *) continue ;;
-          esac
+          # A worker may acknowledge the candidate between the scan and this
+          # read; the handled copy of the same sequence carries the same bytes.
+          f="$dir/handled/${f##*/}"
+          fm_task_inbox_body "$f" > "$have" 2>/dev/null || continue
         fi
         cmp -s "$want" "$have" || continue
-        [ ! -e "$dir/handled/${f##*/}" ] || f="$dir/handled/${f##*/}"
-        rec=$f
+        base=${f##*/}
+        base=${base%.msg}
+        # Report the copy that currently holds the record: the inbox root, else
+        # the acknowledgement, else the hidden link - which is linked back into
+        # the root here, because the caller verifies the path it is handed.
+        rec="$dir/$base.msg"
+        if [ -e "$rec" ] || [ -L "$rec" ]; then
+          :
+        elif [ -e "$dir/handled/$base.msg" ]; then
+          rec="$dir/handled/$base.msg"
+        elif [ -e "$shadow/$base" ]; then
+          ln "$shadow/$base" "$rec" 2>/dev/null || true
+          if [ ! -e "$rec" ]; then
+            rec=''
+            continue
+          fi
+        else
+          rec=''
+          continue
+        fi
         break
       done
     else
