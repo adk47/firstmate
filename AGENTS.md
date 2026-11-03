@@ -621,6 +621,10 @@ case (`plugins/intercom/redteam/`); a case that gets through fails CI and the da
 `docs/support/caroline-safety-layer.md`.
 Profile merges are judged in shadow by `scripts/merge-verify.py` (verdict + the exact command for a
 named human; no executor, no agent confirmer): `docs/credit-verification/merge-verify.md`.
+Every credits / claims / merges verifier is scored in shadow by `scripts/verifier-eval.py` over the
+frozen labelled sets in `scripts/verifier_eval/sets/` (false-approve, approve-on-known-bad and guard
+violations must be 0; nightly board in `/var/lib/hydra/verifier-eval/latest/`):
+`docs/credit-verification/verifier-eval.md`.
 
 ## Agent shell (exec) posture: who can run commands as root on node-8
 

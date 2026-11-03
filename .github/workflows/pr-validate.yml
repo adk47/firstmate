@@ -1998,6 +1998,10 @@ jobs:
           # credit-retro r1 role-scoped take-back + prepared waves (scripts/credit_retro).
           # Stdlib only; the admin API is faked. Also pins the committed manifests.
           python3 scripts/tests/test_credit_retro.py
+          # Shared verifier eval harness (scripts/verifier_eval): labelled credits/claims/merges
+          # sets, shadow replay, must-be-zero false-approve / guard-violation metrics, nightly
+          # kill switch. Stdlib only, no network; the frozen sets are committed.
+          python3 scripts/tests/test_verifier_eval.py
           # The proof-on-file completeness contract (scripts/credit_review/proof_parts.py),
           # same fixture file as plugins/support-tools/tests/proof-on-file.test.ts. Stdlib only.
           python3 scripts/tests/test_proof_parts_contract.py

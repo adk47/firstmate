@@ -1,0 +1,21 @@
+{
+ "_doc": "Disagreements between a verifier and a frozen label that were checked against the evidence. Labels stay FROZEN (never edited here); the report lists every adjudicated disagreement so a reader can see which precision losses are label defects and which are verifier errors. Append by PR with the evidence pointer.",
+ "items": {
+  "04a74b7f-e6cf-4f74-89d7-2875358ec853": {
+   "set": "credits",
+   "verifier_verdict": "APPROVE Producer",
+   "rule_fired": "credits-rules-v1 id_anchor:Producer (Spotify CREDITED person_credited_in_role_family by the linked contributor id, complete snapshot; Tidal NO_RECORDING; gate allow/green; pop 9)",
+   "finding": "label_defect_truncated_roles",
+   "why": "d1 jan-docs-p1-b7.md user 30378 rules 'Spotify credits him by id as Producer - a role he did not claim; refile as Producer'. The request's claimed roles (collect-mac.json and packets/30378.md row 1) are Instrumentation, Engineer, Arranger, Programmer, Bass, Guitar, Producer: Producer IS claimed; the tray's role cell was truncated with an ellipsis. Approving Producer only (role edit) is what d1's own rule says.",
+   "evidence": "data/docs-review-prep-p1/packets/30378.md; data/user-decisions-fable-d1/jan-docs-p1-b7.md"
+  },
+  "256237fe-4f07-4ff8-b79a-84fc48976965": {
+   "set": "credits",
+   "verifier_verdict": "APPROVE Composer, Lyricist, Arranger",
+   "rule_fired": "credits-rules-v1 id_anchor:Composer,Lyricist,Arranger (Spotify CREDITED by linked id on all three; Tidal NO_RECORDING; gate allow/amber; pop 1); Producer absent -> not approved",
+   "finding": "label_stale_capture_pending_at_ruling",
+   "why": "d1 jan-docs-p1-b2.md: 'His other row 256237fe (pop 1) has its capture pending - re-rule on the flip'. The frozen dsp-read.json (read 19:47Z) is the flipped capture: CREDITED by id on the same roles d1 approved on his sibling request 2c7590bf. The label is WAIT-as-of-ruling, not a rejection.",
+   "evidence": "data/docs-review-prep-p1/raw/dsp-read.json; data/user-decisions-fable-d1/jan-docs-p1-b2.md"
+  }
+ }
+}

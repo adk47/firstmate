@@ -167,3 +167,4 @@ __pycache__/
 # "draft" and "gh release create", removed on success. Only ever
 # present mid-release on the operator's laptop.
 RELEASE_NOTES_DRAFT.md
+verifier-eval-out/

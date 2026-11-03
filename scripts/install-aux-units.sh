@@ -1987,6 +1987,21 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 CRONCVOUTBOUND
 chmod 644 /etc/cron.d/credit-verify-outbound
 install -d -m 700 /var/lib/hydra/credit-verify-outbound
+# ─── Verifier eval, nightly (verifier-eval-v1) ───────────────────────────
+# The shared SHADOW evaluation of every credits / claims / merges verifier: replays each
+# registered verifier over the frozen labelled sets (scripts/verifier_eval/sets/) plus every
+# shadow-verdict log a verifier drops in /var/lib/hydra/verifier-eval/inbox/<set>/*.jsonl, and
+# writes <run_id>/{report.md,metrics.json,board.txt,verdicts.jsonl}, the `latest` link and
+# history.jsonl. Reads files, writes only under its root: it approves, declines, merges and
+# messages nobody. Stop switch: touch /etc/hydra/verifier-eval.disabled.
+# Docs: docs/credit-verification/verifier-eval.md.
+cat > /etc/cron.d/hydra-verifier-eval << CRONVERIFIEREVAL
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+40 4 * * * root flock -n /run/lock/hydra-verifier-eval.lock python3 $HYDRA_ROOT/scripts/verifier-eval.py nightly --root /var/lib/hydra/verifier-eval >> /var/log/hydra-verifier-eval.log 2>&1
+CRONVERIFIEREVAL
+chmod 644 /etc/cron.d/hydra-verifier-eval
+for _ve in credits claims merges; do install -d -m 750 "/var/lib/hydra/verifier-eval/inbox/$_ve"; done
 
 # ─── Codex OAuth keepalive at 15-min cadence ──────────────────
 # PROACTIVE complement to the watchdog: openclaw-watchdog.sh pages REACTIVELY
@@ -3222,7 +3237,7 @@ fi
 # reopened per tick/run, no postrotate signaling exists for them.
 cat > /etc/logrotate.d/hydra << 'HYDRALOGROTATE'
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
-/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-quota-refresh.log /var/log/codex-token-refresh.log /var/log/company-finder-cache-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log /var/log/hydra-jev-shadow-prune.log /var/log/hydra-tmp-reaper.log /var/log/hydra-main-prune-restart.log /var/log/qa-review-reconcile.log /var/log/qa-approval-retry.log /var/log/agent-soul-delivery-guard.log {
+/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-quota-refresh.log /var/log/codex-token-refresh.log /var/log/company-finder-cache-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log /var/log/hydra-jev-shadow-prune.log /var/log/hydra-tmp-reaper.log /var/log/hydra-main-prune-restart.log /var/log/qa-review-reconcile.log /var/log/qa-approval-retry.log /var/log/agent-soul-delivery-guard.log /var/log/hydra-verifier-eval.log {
     weekly
     rotate 4
     compress

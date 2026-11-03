@@ -1,0 +1,9 @@
+{
+ "_doc": "Which label set may ISSUE a readiness gate (the merges self-serve precondition), and why. Scoring and agreement are reported for every set and variant; only the set named here can answer 'ready'. An unlisted set issues no gate, so a missing entry fails closed. Changing this file is the reviewable act of declaring a new ground truth.",
+ "sets": {
+  "merges": "merges@relabel-20261028"
+ },
+ "why": {
+  "merges": "The independent re-label from the 2026-10-28 read-only facts snapshot. It is authoritative because its safety checks were either READ or resolved to the non-acting side: the legal-hold source (profile_search_visibility) is not deployed on prod core, so every merge that would otherwise execute is queued_review:LEGAL_HOLD_UNKNOWN rather than eligible. The sensitivity variant merges@relabel-20261028-holdsassumedclean assumes that unread gate is empty; agreeing with it is not evidence of readiness and must never print PRECONDITION-MET. Replace this entry when the C1 migration deploys and the facts are re-read with a real hold source."
+ }
+}
