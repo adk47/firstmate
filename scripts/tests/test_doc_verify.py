@@ -1494,8 +1494,10 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("artist_search=lambda name: cached_artist(store, deps.net, name)", src)
 
     def test_non_latin_names_never_share_a_cache_entry(self):
-        # QA #1499: xc.fold drops non-ASCII letters, so 张伟 and 李娜 both folded to '' and shared one entry.
-        self.assertEqual(xc.fold("张伟"), xc.fold("李娜"))                              # the old collision
+        # QA #1499: xc.fold used to drop non-ASCII letters, so 张伟 and 李娜 both folded to '' and shared one entry.
+        # Since [key=fold-never-deletes-a-letter] the fold itself keeps them apart; the CACHE KEY must stay distinct
+        # either way (it never depended on the collision, and an empty key is never cached - asserted below).
+        self.assertNotEqual(xc.fold("张伟"), xc.fold("李娜"))
         self.assertNotEqual(runner.lookup_key("张伟"), runner.lookup_key("李娜"))
         self.assertEqual(runner.lookup_key("  Blue  FERN Records "), runner.lookup_key("blue fern records"))
         self.assertEqual(runner.lookup_key("\uff22\uff4c\uff55\uff45"), runner.lookup_key("blue"))     # NFKC fullwidth

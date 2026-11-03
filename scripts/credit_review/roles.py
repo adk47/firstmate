@@ -105,13 +105,31 @@ def family_of(role: str) -> str:
 
 
 _SPACE = re.compile(r"\s+")
+_NON_WORD = re.compile(r"[^\w]+|_+", re.UNICODE)
+
+# Letters NFKD does not decompose into ASCII (Akan ɔ ɛ, Ewe ƒ, Polish ł, Vietnamese đ, Icelandic ß ...).
+# Dropping them did not merely lose an accent, it produced a DIFFERENT title: "Awia Mmɔ Nnɛ" folded to
+# "awia mm nn" and so never matched the same track written "Awia Mmo Nne" - a document that proves the credit
+# was read as being about another track (2026-11-03, random SUSPECT sample doc 22; 190 of 11,231 open titles
+# fold to "" entirely). [key=fold-never-deletes-a-letter]
+_TRANSLIT = str.maketrans({
+    "ɔ": "o", "Ɔ": "O", "ɛ": "e", "Ɛ": "E", "ŋ": "n", "Ŋ": "N", "ɑ": "a", "Ɑ": "A",
+    "ɡ": "g", "Ɠ": "G", "ɩ": "i", "Ɩ": "I", "ʋ": "v", "Ʋ": "V", "ɓ": "b", "Ɓ": "B",
+    "ɗ": "d", "Ɗ": "D", "ƒ": "f", "Ƒ": "F", "ł": "l", "Ł": "L", "đ": "d", "Đ": "D",
+    "ħ": "h", "Ħ": "H", "ŧ": "t", "Ŧ": "T", "ʉ": "u", "ɨ": "i", "Ɨ": "I", "ß": "ss",
+})
 
 
 def fold(text: str) -> str:
-    """Lowercase, strip accents and punctuation, collapse whitespace."""
-    t = unicodedata.normalize("NFKD", text or "")
+    """Lowercase, strip accents and punctuation, collapse whitespace.
+
+    Letters that NFKD cannot decompose are transliterated, and letters in OTHER scripts are kept rather than
+    deleted: a fold that deletes a letter turns one title (or name) into another, and an empty key compares
+    equal to every other key that also folded to nothing.
+    """
+    t = unicodedata.normalize("NFKD", text or "").translate(_TRANSLIT)
     t = "".join(ch for ch in t if not unicodedata.combining(ch))
-    t = re.sub(r"[^0-9a-zA-Z]+", " ", t).lower()
+    t = _NON_WORD.sub(" ", t).lower()
     return _SPACE.sub(" ", t).strip()
 
 

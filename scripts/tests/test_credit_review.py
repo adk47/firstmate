@@ -28,7 +28,7 @@ from credit_review.ledger import Ledger  # noqa: E402
 from credit_review.policy import (  # noqa: E402
     approver_identity_alert, combine, deterministic, facts_from_record,
 )
-from credit_review.roles import family_of, names_match  # noqa: E402
+from credit_review.roles import family_of, fold, name_key, names_match  # noqa: E402
 from credit_review import runner as runner_mod  # noqa: E402
 from credit_review.runner import (  # noqa: E402
     Config, fetch_approved_window, profile_burst_alerts, record, render_digest, run_audit, run_review, sampled,
@@ -177,6 +177,24 @@ class RoleTests(unittest.TestCase):
         self.assertFalse(names_match("Jon", "Jon Castelli"))
         self.assertFalse(names_match("stillfloo", "Serban Ghenea"))
         self.assertFalse(names_match("", "x"))
+
+    def test_fold_keeps_letters_nfkd_cannot_decompose(self):
+        """The same track spelled two ways must fold together; 2026-11-03 doc 22 ("Awia Mmɔ Nnɛ") was read as a
+        different track because ɔ and ɛ were deleted, not folded."""
+        self.assertEqual(fold("Awia Mmɔ Nnɛ"), fold("Awia Mmo Nne"))
+        self.assertEqual(fold("Awia Mmɔ Nnɛ"), "awia mmo nne")
+        self.assertEqual(fold("Zielone Płuca"), "zielone pluca")
+        self.assertEqual(fold("Zielone Płuca"), fold("Zielone Pluca"))
+        self.assertEqual(fold("Straßenlied"), fold("Strassenlied"))
+
+    def test_fold_of_a_non_latin_title_is_not_empty_and_stays_distinct(self):
+        """190 of 11,231 open titles have no Latin letter at all. Folding them all to "" made them equal to each
+        other (and useless as a key); keeping the letters keeps them apart."""
+        for title in ("Средневековье (Стоп-кран)", "سلام", "八方來財 (Stacks from All Sides)", "Я буду небом твоим"):
+            self.assertTrue(fold(title), title)
+        self.assertNotEqual(fold("Средневековье"), fold("سلام"))
+        self.assertNotEqual(name_key("Маме"), name_key("سلام"))
+        self.assertTrue(names_match("Beyoncé", "BEYONCE"))
 
 
 class ClassifyTests(unittest.TestCase):
