@@ -2012,6 +2012,9 @@ jobs:
           # (kind, outcome), 7-day outcome age, first-run seed, at most one per ticket ever.
           # Network faked. Stdlib only.
           python3 scripts/tests/test_merge_outcome_notify.py
+          # Profile-merge verifier, shadow (scripts/merge_verify, merge-verify.py): rule order, UNKNOWN
+          # never approves, guards, the m1 235-ticket regression, no executor reachable. Stdlib only.
+          python3 scripts/tests/test_merge_verify.py
           # uvn-status reminder runner + withdrawal-confirm (credit_review/uvn_status.py,
           # withdrawal_confirm.py): gate and Trino faked. Stdlib only.
           python3 scripts/tests/test_uvn_status.py
