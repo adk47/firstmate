@@ -37,7 +37,9 @@
 # regularly unheld at a turn boundary with nothing wrong. A live
 # identity-matched daemon holding this home, plus the unchanged fresh-beacon
 # test, is what proves supervision there - see fm_afk_daemon_owns_supervision in
-# bin/fm-wake-lib.sh. The strict watcher predicate is unchanged everywhere else.
+# bin/fm-wake-lib.sh. This daemon proof is the away-mode exception; with away
+# mode off, the strict watcher predicate plus the extension-only hand-off
+# tolerance in the predicate below are the only paths.
 #
 # Loop-guard, codex/Grok (default) mode: never block twice in the same turn.
 # Codex uses stop_hook_active and Grok uses stopHookActive; typed camel-case

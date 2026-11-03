@@ -167,10 +167,11 @@ fm_watcher_healthy() {
 # arm layer (bin/fm-watch-arm.sh, bin/fm-claude-stop-autoarm.sh) needs exactly
 # that - it decides whether to start, attach to, or replace a real watcher
 # process, so a leftover beacon must never satisfy it. bin/fm-turnend-guard.sh
-# also keeps this strict check because it fires at the turn boundary where the
-# auto-arm brings a fresh watcher up. The pull warning (bin/fm-guard.sh) fires
-# mid-turn, where the auto-arm model runs no watcher at all, so it wants a
-# different, model-aware question:
+# keeps this strict check as its base predicate because it fires at the turn
+# boundary where the auto-arm brings a fresh watcher up, and it consults the
+# model-aware question below for the extension model ONLY, never for autoarm. The
+# pull warning (bin/fm-guard.sh) fires mid-turn, where the autoarm model runs no
+# watcher at all, so it governs itself with that model-aware question:
 
 # fm_supervision_model
 # Print the supervision model of this home's PRIMARY harness:
@@ -291,7 +292,9 @@ fm_afk_daemon_owns_supervision() {
 
 # fm_watcher_supervision_verdict <state> <watch-path> [grace] [home] [root]
 # Model-aware "is supervision healthy right now" verdict for the pull warning
-# guard (bin/fm-guard.sh), NOT the arm layer or the turn-end guard. Sets:
+# guard (bin/fm-guard.sh) and, for the extension model only, for
+# bin/fm-turnend-guard.sh. Never for the arm layer, and never for the turn-end
+# guard under the autoarm or persistent model. Sets:
 #   FM_WATCHER_VERDICT_OK      true when supervision is healthy for this model
 #   FM_WATCHER_VERDICT_REASON  when not ok, the true failing condition:
 #                              no-watcher   - a live watcher process is the real
