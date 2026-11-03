@@ -171,6 +171,61 @@ test_write_is_durable_and_exact() {
   pass "inbox: a steer is written durably and round-trips byte-exact with a self-describing doorbell"
 }
 
+# A worker already draining its inbox can move a just-published record into
+# handled/ before the writer confirms it. That is the acknowledgement, so it must
+# confirm delivery: reporting the steer as undelivered invites a duplicate
+# retry of an instruction the worker has already acted on.
+test_acknowledged_record_is_not_a_lost_steer() {
+  local state rec
+  state="$TMP_ROOT/acked-while-publishing/state"; mkdir -p "$state"
+  rec=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    eval "$(declare -f fm_lock_release | sed "1s/fm_lock_release/_real_fm_lock_release/")"
+    fm_lock_release() {
+      local inbox=${1%/.seq.lock} f
+      for f in "$inbox"/*.msg; do
+        [ -e "$f" ] || continue
+        mv "$f" "$inbox/handled/" || return 1
+      done
+      _real_fm_lock_release "$@"
+    }
+    fm_task_inbox_write "$2" t1 "steer acknowledged while publishing"
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$state") \
+    || fail "the enqueue refused a steer the worker had already acknowledged"
+  [ "$rec" = "$state/t1.inbox/001.msg" ] \
+    || fail "the enqueue should still report its own record path, got $rec"
+  [ -f "$state/t1.inbox/handled/001.msg" ] || fail "the fixture did not acknowledge the record"
+  inbox_lib "$state" fm_task_inbox_verify "$rec" "steer acknowledged while publishing" \
+    || fail "an acknowledged record must confirm delivery"
+  inbox_lib "$state" fm_task_inbox_verify "$rec" "some other instruction" \
+    && fail "confirmation must still require the instructed text"
+  pass "inbox: a record acknowledged while publishing is delivered, not lost"
+}
+
+# The doorbell is a worker's primary instruction, so both acknowledgement forms
+# it names must run exactly where the record lives. A state path with a space is
+# supported (the brief scaffold quotes the same command for that reason).
+test_doorbell_acknowledgement_forms_run_for_a_quoted_state_path() {
+  local state rec line rename helper
+  state="$TMP_ROOT/doorbell quoted state/state"; mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "instruction one")
+  inbox_lib "$state" fm_task_inbox_write "$state" t1 "instruction two" >/dev/null
+  line=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
+  rename=$(printf '%s' "$line" | sed -n 's/.*(\(mv [^;]*\));.*/\1/p')
+  [ -n "$rename" ] || fail "the doorbell did not name the plain rename acknowledgement: $line"
+  bash -c "${rename//NNN/001}" >/dev/null 2>&1 \
+    || fail "the doorbell's rename acknowledgement does not run for a quoted state path: $rename"
+  [ -f "$state/t1.inbox/handled/001.msg" ] \
+    || fail "the doorbell's rename acknowledgement did not acknowledge the record"
+  helper=$(printf '%s' "$line" | sed -n 's/.*"\([^"]*NNN\)".*/\1/p')
+  [ -n "$helper" ] || fail "the doorbell did not name the ack helper command: $line"
+  bash -c "${helper//NNN/002}" >/dev/null 2>&1 \
+    || fail "the doorbell's helper acknowledgement does not run for a quoted state path: $helper"
+  [ -f "$state/t1.inbox/handled/002.msg" ] \
+    || fail "the doorbell's helper acknowledgement did not acknowledge the record"
+  pass "inbox: the doorbell's acknowledgement forms run for a quoted state path"
+}
+
 test_idempotent_write_dedups_exact_body() {
   local state r1 r2 r3 r4 count text
   state="$TMP_ROOT/idem/state"; mkdir -p "$state"
@@ -817,6 +872,8 @@ test_writer_refuses_when_lock_wait_times_out
 test_writer_reclaims_stale_lock_without_clobbering
 test_concurrent_acknowledgements_lose_nothing
 test_write_refuses_an_unconfirmed_record
+test_acknowledged_record_is_not_a_lost_steer
+test_doorbell_acknowledgement_forms_run_for_a_quoted_state_path
 test_worker_deletion_is_repaired
 test_deleted_record_keeps_its_sequence
 test_coalesced_superseded_record_is_not_resurrected

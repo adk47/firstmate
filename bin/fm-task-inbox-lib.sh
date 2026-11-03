@@ -267,13 +267,35 @@ fm_task_inbox_lock_acquire() {  # <lock-path>
   return 0
 }
 
-# Verify a published record: it is a regular file whose body is exactly <text>.
-# This is the enqueue's own proof, used by the writers below and by callers that
-# report a send as delivered (bin/fm-send.sh, the remote steer leg).
+# True when the sequence's record still carries <bytes-file>: either the record
+# published in the inbox root, or the acknowledged copy a worker's own mv already
+# produced under handled/. An acknowledged record is delivered, not lost.
+fm_task_inbox_record_holds() {  # <inbox-dir> <seq> <bytes-file>
+  local dir=$1 seq=$2 bytes=$3 rec
+  rec="$dir/$seq.msg"
+  if [ -e "$rec" ] || [ -L "$rec" ]; then
+    cmp -s "$bytes" "$rec"
+    return
+  fi
+  cmp -s "$bytes" "$dir/handled/$seq.msg"
+}
+
+# Verify a published record: it is a regular file whose body is exactly <text>,
+# or the acknowledged copy of that same sequence is. This is the enqueue's own
+# proof, used by the writers below and by callers that report a send as
+# delivered (bin/fm-send.sh, the remote steer leg). A worker draining the inbox
+# concurrently can move the record into handled/ between the publish and this
+# check, which is the acknowledgement, so it confirms delivery rather than
+# turning a delivered steer into a reported failure.
 fm_task_inbox_verify() {  # <record-path> <text>
-  local rec=$1 text=$2
-  [ -f "$rec" ] && [ ! -L "$rec" ] || return 1
-  cmp -s <(printf '%s' "$text") <(fm_task_inbox_body "$rec" 2>/dev/null)
+  local rec=$1 text=$2 acked
+  if [ -f "$rec" ] && [ ! -L "$rec" ]; then
+    cmp -s <(printf '%s' "$text") <(fm_task_inbox_body "$rec" 2>/dev/null)
+    return
+  fi
+  acked="${rec%/*}/handled/${rec##*/}"
+  [ -f "$acked" ] && [ ! -L "$acked" ] || return 1
+  cmp -s <(printf '%s' "$text") <(fm_task_inbox_body "$acked" 2>/dev/null)
 }
 
 # Write one record into the next free sequence slot and print its path.
@@ -304,20 +326,24 @@ _fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode] [co
     seq=$(fm_task_inbox_next_seq "$dir") || break
     rec="$dir/$seq.msg"
     if ln "$tmp" "$rec" 2>/dev/null; then
-      # The record's bytes were complete before its name existed, so a reader
-      # never sees a partial record; confirm the published bytes are ours.
-      if cmp -s "$tmp" "$rec"; then
+      # The link is the identity proof that this name holds our complete bytes,
+      # so a reader never sees a partial record. A worker already draining the
+      # inbox may have moved it into handled/ first, which confirms the same
+      # publish instead of failing it.
+      if ! fm_task_inbox_record_holds "$dir" "$seq" "$tmp"; then
+        rm -f "$tmp"
+        return 1
+      fi
+      if [ -e "$rec" ]; then
         # A second link keeps the unhandled record recoverable if the worker's
         # own cleanup deletes it. Its name carries no .msg suffix so nothing
         # mistakes it for an inbox record. Best effort: the record above is
         # already durable, so a shadow that cannot be made must not fail the send.
         ln "$tmp" "$(fm_task_inbox_shadow_dir "$dir")/${seq}" 2>/dev/null || true
-        rm -f "$tmp"
-        printf '%s' "$rec"
-        return 0
       fi
-      rm -f "$rec" "$tmp"
-      return 1
+      rm -f "$tmp"
+      printf '%s' "$rec"
+      return 0
     fi
     # A taken slot is the only expected failure: re-read the directory and let
     # the next sequence be chosen. Anything else is a real refusal, reported by
@@ -494,18 +520,31 @@ fm_task_inbox_body() {  # <record-path>
   return 1
 }
 
+# Quote one word for a line a worker will run as a shell command. A home path
+# may contain spaces, and an unquoted acknowledgement command would then be
+# unrunnable exactly where the record lives.
+fm_task_inbox_quote() {  # <word>
+  printf '%q' "$1"
+}
+
 # The constant self-describing doorbell line for the inbox containing a record.
 # Self-describing on purpose: a worker whose brief predates the inbox contract
-# still receives the complete instruction in the line itself.
+# still receives the complete instruction in the line itself. The plain rename
+# into handled/ comes first because it is the acknowledgement every backend's
+# granted paths permit; the helper comes second because it acknowledges the same
+# way and retires the hidden link immediately.
 fm_task_inbox_doorbell_line() {  # <record-path>
-  local dir=${1%/*} abs task state ack
+  local dir=${1%/*} abs task state ack inbox
   abs=$(cd "$dir" 2>/dev/null && pwd) || abs=$dir
   task=${abs##*/}
   task=${task%.inbox}
   state=${abs%/*}
   ack=$(fm_task_inbox_ack_command)
-  printf 'Firstmate instruction waiting: list %s/*.msg and, in numeric order, read and act on each, then acknowledge each handled record with "%s %s %s NNN" (that moves it into %s/handled/; never delete or clear the inbox, because deleting is not acknowledging).' \
-    "$abs" "$ack" "$state" "$task" "$abs"
+  inbox=$(fm_task_inbox_quote "$abs")
+  printf 'Firstmate instruction waiting: list %s/*.msg and, in numeric order, read and act on each, then acknowledge each handled record by moving it into %s/handled/ (mv %s/NNN.msg %s/handled/); or, where that helper path is reachable, "%s %s %s NNN", which also retires the hidden link. Never delete or clear the inbox, because deleting is not acknowledging.' \
+    "$inbox" "$inbox" "$inbox" "$inbox" \
+    "$(fm_task_inbox_quote "$ack")" "$(fm_task_inbox_quote "$state")" \
+    "$(fm_task_inbox_quote "$task")"
 }
 
 # Ring the doorbell, best-effort: one advisory composer pre-check, then the
