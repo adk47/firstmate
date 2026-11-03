@@ -408,7 +408,7 @@ def cmd_junk_list(args: argparse.Namespace) -> int:
 
 
 def cmd_tray(args: argparse.Namespace) -> int:
-    """Jan's tray + h2's need queue from the reader's latest outcomes. Writes only the two
+    """Jan's tray + h2's need queue from the reader's latest outcomes. Writes only the three
     files under --out-dir; no status write, no hold, no message."""
     from credit_review import account_gate
     from credit_verify.docverify import tray as tray_mod
@@ -428,7 +428,8 @@ def cmd_tray(args: argparse.Namespace) -> int:
     md = out / f"jan-docs-dv-b{args.batch}.md"
     md.write_text(tray_mod.markdown(t, args.batch, utcnow()))
     (out / f"need-queue-b{args.batch}.json").write_text(json.dumps(t.need, indent=1, default=str))
-    log(f"tray b{args.batch}: approve {len(t.approve)}, not approvable {len(t.not_approvable)}, forged "
+    (out / f"jan-proves-b{args.batch}.json").write_text(json.dumps(t.proves, indent=1, default=str))
+    log(f"tray b{args.batch}: approve {len(t.approve)}, proves {len(t.proves)}, not approvable {len(t.not_approvable)}, forged "
         f"{len(t.decline['forged'])}, contradicted {len(t.decline['contradicted'])}, need {len(t.need)}, "
         f"retry {t.retry} -> {md}")
     return 0

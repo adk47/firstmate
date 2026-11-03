@@ -2,7 +2,7 @@
 
 Agents never approve or reject; Jan does, from his own session. This module only SORTS the
 reader's latest outcomes into the tray Jan works from, plus the per-need queue for h2's
-(locked) ask campaign. It writes the two files it is asked to and nothing else: no status
+(locked) ask campaign. It writes the files it is asked to and nothing else: no status
 write, no hold, no message.
 
   APPROVE (Jan)        `verified` AND an approve-grade anchor - a same-run Spotify+Tidal capture
@@ -24,11 +24,19 @@ write, no hold, no message.
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from . import gate as gate_rules
+from ..proof.gmail_intake import PREFIX as GMAIL_PREFIX   # "gmail:", the support@ email filing id
+
 FIRST_HUMAN = 20
+# The one reason `_dsp_anchor` gives when the Spotify/Tidal credit is only Muso's stored capture. A `verified`
+# row whose ONLY blocker is exactly this goes to the "Document proves it" section (build()).
+STORED_CAPTURE_REASON = "Spotify/Tidal credit is from Muso's stored capture, not a same-run capture (D5b not wired)"
+DEFAULT_INTERCOM_WORKSPACE_ID = "dwjzhcge"      # as scripts/cs-needs-human-digest.py DEFAULT_WORKSPACE_ID
 
 Gate = Callable[[int], tuple[bool, str]]           # user id -> (allow, why)
 Tracks = Callable[[list[str]], dict[str, str]]     # request ids -> track title
@@ -38,6 +46,7 @@ Tracks = Callable[[list[str]], dict[str, str]]     # request ids -> track title
 class Tray:
     approve: list[dict[str, Any]] = field(default_factory=list)
     not_approvable: list[dict[str, Any]] = field(default_factory=list)
+    proves: list[dict[str, Any]] = field(default_factory=list)      # read-only: Jan reviews each one himself
     decline: dict[str, list[dict[str, Any]]] = field(default_factory=lambda: {"forged": [], "contradicted": []})
     fraud_deny: list[dict[str, Any]] = field(default_factory=list)
     need: list[dict[str, Any]] = field(default_factory=list)
@@ -210,7 +219,7 @@ def _dsp_anchor(store: Any, proof_id: str, key: str) -> tuple[bool, str]:
     if status != "positive":
         return False, f"Spotify/Tidal check {status}"
     if not detail.get("fresh_since"):
-        return False, "Spotify/Tidal credit is from Muso's stored capture, not a same-run capture (D5b not wired)"
+        return False, STORED_CAPTURE_REASON
     anchor = detail.get("fresh_anchor") or {}
     missing = [d for d in ("spotify", "tidal") if anchor.get(d) is not True]
     if missing:
@@ -241,6 +250,39 @@ def _f9_anchor(store: Any, proof_id: str, key: str) -> tuple[bool, str]:
     return True, "F9: our one-time code on the distributor dashboard, with the claimant in this role on this track"
 
 
+def _latest_detail(store: Any, proof_id: str, step: str, key: str | None = None) -> dict[str, Any]:
+    sql, args = "SELECT detail_json FROM dv_steps WHERE proof_id=? AND step=?", [proof_id, step]
+    if key is not None:
+        sql, args = sql + " AND request_id=?", args + [key]
+    row = store.db.execute(sql + " ORDER BY id DESC LIMIT 1", args).fetchone()
+    try:
+        return json.loads(row[0] or "{}") if row else {}
+    except ValueError:
+        return {}
+
+
+def _intercom_link(conversation_id: Any) -> str | None:
+    if not conversation_id or str(conversation_id).startswith(GMAIL_PREFIX):
+        return None                      # a Gmail filing is no Intercom conversation (gmail_intake.py:18)
+    ws = os.environ.get("INTERCOM_WORKSPACE_ID", DEFAULT_INTERCOM_WORKSPACE_ID)
+    return f"https://app.intercom.com/a/inbox/{ws}/inbox/conversation/{conversation_id}"
+
+
+def _proves_row(store: Any, r: Any, key: str, detail: dict[str, Any], base: dict[str, Any]) -> dict[str, Any] | None:
+    """The row for Jan's "Document proves it" section, or None. `extracted_support` is `extract.supports()`
+    (extract.py:219-246): the document names the claimant in this role family on THIS track. It also needs a
+    document OF RECORD (`gate.RECORD_DOC_TYPES`; the H3 kind list alone is not enough)."""
+    support = _latest_detail(store, r["proof_id"], "gate", key).get("extracted_support")
+    doc_type = _latest_detail(store, r["proof_id"], "extract").get("doc_type")
+    if not (isinstance(support, dict) and support.get("person") and support.get("role")
+            and doc_type in gate_rules.RECORD_DOC_TYPES):
+        return None
+    return {"user_id": base["user_id"], "request_id": base["request_id"], "role": base["role"],
+            "track": base["track"], "contributor": support["person"], "doc_type": doc_type,
+            "issuer": base["issuer"], "link": _intercom_link(detail.get("conversation_id")),
+            "source_ref": base["source_ref"], "intake_id": base["intake_id"]}
+
+
 def build(store: Any, *, gate: Gate, tracks: Tracks) -> Tray:
     tray = Tray()
     rows = store.latest_outcomes()
@@ -263,8 +305,12 @@ def build(store: Any, *, gate: Gate, tracks: Tracks) -> Tray:
                 if f9:
                     anchored, why_a = True, why_f
             allow, why_g = gate(r["user_id"]) if r["user_id"] else (False, "no account id")
+            proves = (_proves_row(store, r, key, detail, base)
+                      if not anchored and allow and why_a == STORED_CAPTURE_REASON else None)
             if anchored and allow:
                 tray.approve.append({**base, "anchor": why_a, "gate": why_g})
+            elif proves:
+                tray.proves.append(proves)
             else:
                 tray.not_approvable.append({**base, "why": "; ".join(w for ok, w in ((anchored, why_a), (allow, why_g))
                                                                      if not ok)})
@@ -291,7 +337,7 @@ def markdown(tray: Tray, batch: int, generated_at: str) -> str:
            "Sorted from the reader's latest outcomes (`doc-verify.sqlite`). **Nothing here has been written to "
            "core**: approvals and declines are Jan's, from his own session. Rule: proof-loop lead "
            "`[key=proof-loop-plan-1027]` §1 DECIDE; registry approval L11a still required for any automated path.",
-           "", f"**Totals: APPROVE {len(tray.approve)} / not approvable (verified) {len(tray.not_approvable)} / "
+           "", f"**Totals: APPROVE {len(tray.approve)} / Document proves it {len(tray.proves)} / not approvable (verified) {len(tray.not_approvable)} / "
            f"FRAUD DENY (Fable confirm first) {len({a['proof'] for a in tray.fraud_deny})} documents / "
            f"HOLD forged {len(tray.decline['forged'])}, contradicted {len(tray.decline['contradicted'])} / "
            f"NEED queue {len(tray.need)} / retry {tray.retry}.**", "",
@@ -301,6 +347,17 @@ def markdown(tray: Tray, batch: int, generated_at: str) -> str:
         out += ["| user | request | track | role | anchor | gate | document |", "|---|---|---|---|---|---|---|"]
         out += [f"| {esc(a['user_id'])} | `{a['request_id']}` | {esc(a['track'])} | {esc(a['role'])} | "
                 f"{esc(a['anchor'])} | {esc(a['gate'])} | `{esc(a['source_ref'])}` |" for a in tray.approve]
+    else:
+        out.append("None.")
+    out += ["", "## Document proves it: Jan reviews one by one", "",
+            "The document names the track, the contributor and the role. Check the document, then approve or "
+            "reject it yourself in Muso admin, one at a time.", ""]
+    if tray.proves:
+        out += ["| track | contributor | role | document type | issuer | document | request |",
+                "|---|---|---|---|---|---|---|"]
+        out += [f"| {esc(a['track'])} | {esc(a['contributor'])} | {esc(a['role'])} | {esc(a['doc_type'])} | "
+                f"{esc(a['issuer'])} | {a['link'] or '`' + esc(a['source_ref']) + '`'} | `{a['request_id']}` |"
+                for a in tray.proves]
     else:
         out.append("None.")
     out += ["", "## `verified` but NOT approvable (why)", ""]

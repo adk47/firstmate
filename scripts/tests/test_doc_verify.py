@@ -2930,6 +2930,128 @@ class TrayTests(unittest.TestCase):
         self.assertIn("0 document(s) read under an older rule version", md)
         self.assertIn("`verified` before dv-3 is the real-not-proof class", md)          # Fable 106
 
+    def _proves_row(self, pid, rid, *, doc_type="split_sheet", support=None, uid=42, **out_kw):
+        """A verified row whose only blocker is the stored-capture reason (fresh=False, dsp positive)."""
+        out_kw.setdefault("fresh", False)
+        self._out(pid, rid, "verified", uid=uid, **out_kw)
+        self.store.step("r1", pid, "extract", "ok", {"doc_type": doc_type, "issuer": {"name": "Blue Fern"}})
+        self.store.step("r1", pid, "gate", "verified",
+                        {"extracted_support": support if support is not None else
+                         {"person": "Ann Lee", "role": "Mixing", "track": "Night Drive"}}, f"{rid}#Mixing")
+
+    def test_a_document_that_proves_it_gets_its_own_section_for_jan(self):
+        from credit_verify.docverify import tray
+        self._proves_row("pv1", "r-proves")
+        t = tray.build(self.store, gate=lambda uid: (True, "allow"), tracks=lambda ids: {i: "Night Drive" for i in ids})
+        self.assertEqual([a["request_id"] for a in t.proves], ["r-proves"])
+        self.assertEqual(t.not_approvable, [])
+        self.assertEqual(t.approve, [])                                   # it approves nothing
+        row = t.proves[0]
+        self.assertEqual((row["contributor"], row["doc_type"], row["issuer"], row["track"], row["role"]),
+                         ("Ann Lee", "split_sheet", "Blue Fern", "Night Drive", "Mixing"))
+        self.assertEqual(sorted(row), sorted(["user_id", "request_id", "role", "track", "contributor", "doc_type",
+                                              "issuer", "link", "source_ref", "intake_id"]))
+        self.assertIsNone(row["link"])                                    # no conversation id: source_ref shown
+        md = tray.markdown(t, 1, "now")
+        self.assertIn("## Document proves it: Jan reviews one by one", md)
+        self.assertLess(md.index("## APPROVE"), md.index("## Document proves it"))
+        self.assertLess(md.index("## Document proves it"), md.index("NOT approvable"))
+        sect = md[md.index("## Document proves it"):md.index("NOT approvable")]
+        for want in ("Night Drive", "Ann Lee", "Mixing", "split_sheet", "Blue Fern", "`s`", "`r-proves`"):
+            self.assertIn(want, sect)
+        self.assertIn("Document proves it 1", md)                         # totals line
+        self.assertNotIn("approve all", md.lower())
+
+    def test_the_proves_link_is_the_intercom_inbox_deeplink(self):
+        from credit_verify.docverify import tray
+        self._proves_row("pv1", "r-proves")
+        self.store.db.execute("UPDATE dv_outcomes SET detail_json=?", (json.dumps(
+            {"issuer": {"name": "Blue Fern"}, "conversation_id": "12345"}),))
+        with unittest.mock.patch.dict(os.environ, {"INTERCOM_WORKSPACE_ID": "wsx"}):
+            t = tray.build(self.store, gate=lambda uid: (True, "allow"), tracks=lambda ids: {})
+        self.assertEqual(t.proves[0]["link"], "https://app.intercom.com/a/inbox/wsx/inbox/conversation/12345")
+        self.assertIn("https://app.intercom.com/a/inbox/wsx/inbox/conversation/12345", tray.markdown(t, 1, "now"))
+
+    def test_proves_gmail_intake_has_no_intercom_link(self):
+        # A support@ email filing has conversation_id "gmail:<message id>" (proof/gmail_intake.py:18): there is no
+        # Intercom conversation, so Jan gets the source_ref, never an inbox URL that 404s.
+        from credit_verify.docverify import tray
+        self._proves_row("pv1", "r-proves")
+        self.store.db.execute("UPDATE dv_outcomes SET detail_json=?", (json.dumps(
+            {"issuer": {"name": "Blue Fern"}, "conversation_id": "gmail:abc123"}),))
+        t = tray.build(self.store, gate=lambda uid: (True, "allow"), tracks=lambda ids: {})
+        self.assertEqual([a["request_id"] for a in t.proves], ["r-proves"])
+        self.assertIsNone(t.proves[0]["link"])
+        md = tray.markdown(t, 1, "now")
+        sect = md[md.index("## Document proves it"):md.index("NOT approvable")]
+        self.assertIn(f"`{t.proves[0]['source_ref']}`", sect)
+        self.assertNotIn("intercom.com", sect)
+
+    def test_a_second_blocker_keeps_the_row_out_of_the_proves_section(self):
+        from credit_verify.docverify import tray
+        allow = lambda uid: (True, "allow")                               # noqa: E731
+        cases = {
+            "pv-gate": dict(),                                            # account gate denies (below)
+            "pv-notidal": dict(fresh=True, anchor=("spotify",)),          # fresh_since set, tidal missing
+            "pv-negative": dict(dsp="negative"),
+            "pv-nosupport": dict(support={}),
+            "pv-noperson": dict(support={"person": "", "role": "Mixing"}),
+            "pv-norole": dict(support={"person": "Ann Lee", "role": ""}),
+            "pv-dashboard": dict(doc_type="dashboard_screenshot"),
+        }
+        for pid, kw in cases.items():
+            uid = 7 if pid == "pv-gate" else 42
+            self._proves_row(pid, pid, uid=uid, **kw)
+        t = tray.build(self.store, gate=lambda uid: (uid == 42, "allow" if uid == 42 else "hold"),
+                       tracks=lambda ids: {})
+        self.assertEqual(t.proves, [])
+        self.assertEqual(sorted(a["request_id"] for a in t.not_approvable), sorted(cases))
+        for pid, kw in cases.items():                                     # one assertion per case, alone
+            st = DocVerifyStore(os.path.join(self.td.name, f"{pid}.sqlite"))
+            old, self.store = self.store, st
+            try:
+                self._proves_row(pid, pid, uid=7 if pid == "pv-gate" else 42, **kw)
+                self._proves_row("ctl", "ctl")
+                tt = tray.build(st, gate=lambda uid: (uid == 42, "x"), tracks=lambda ids: {})
+                self.assertEqual([a["request_id"] for a in tt.proves], ["ctl"], pid)
+            finally:
+                self.store = old
+        self.assertEqual(allow(1), (True, "allow"))
+
+    def test_a_row_without_the_extract_step_is_not_a_record_proof(self):
+        from credit_verify.docverify import tray
+        self._out("pv-noextract", "r-noextract", "verified", fresh=False)
+        self.store.step("r1", "pv-noextract", "gate", "verified",
+                        {"extracted_support": {"person": "Ann", "role": "Mixing"}}, "r-noextract#Mixing")
+        t = tray.build(self.store, gate=lambda uid: (True, "allow"), tracks=lambda ids: {})
+        self.assertEqual(t.proves, [])
+        self.assertEqual([a["request_id"] for a in t.not_approvable], ["r-noextract"])
+
+    def test_tray_command_writes_exactly_three_files_in_out_dir(self):
+        import importlib.util
+        from unittest import mock
+        from credit_review import account_gate
+        from credit_verify.proof import stage2
+        spec = importlib.util.spec_from_file_location("cdv", Path(__file__).resolve().parents[1] / "credit-doc-verify.py")
+        cdv = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cdv)
+        self._proves_row("pv1", "r-proves")
+        out = os.path.join(self.td.name, "out")
+        args = cdv.parser().parse_args(["--store", self.store.path if hasattr(self.store, "path") else
+                                        os.path.join(self.td.name, "dv.sqlite"), "tray", "--batch", "7",
+                                        "--out-dir", out])
+        before = sorted(os.listdir(self.td.name))
+        with mock.patch.object(account_gate, "check",
+                               return_value=account_gate.GateResult("allow")), \
+                mock.patch.object(stage2, "requests", return_value={}):
+            self.assertEqual(cdv.cmd_tray(args), 0)
+        self.assertEqual(sorted(os.listdir(out)), ["jan-docs-dv-b7.md", "jan-proves-b7.json", "need-queue-b7.json"])
+        self.assertEqual(sorted(os.listdir(self.td.name)), sorted(before + ["out"]))     # nothing else written
+        rows = json.loads(Path(out, "jan-proves-b7.json").read_text())
+        self.assertEqual([r["request_id"] for r in rows], ["r-proves"])
+        self.assertEqual(sorted(rows[0]), sorted(["user_id", "request_id", "role", "track", "contributor", "doc_type",
+                                                  "issuer", "link", "source_ref", "intake_id"]))
+
     def test_a_version_bump_carries_documents_the_rule_cannot_change_and_rereads_the_rest(self):
         # Proof-loop lead 075: a rule change is a VERSION bump; the deployed reader re-reads, nobody hand-writes.
         from credit_verify.docverify import tray
