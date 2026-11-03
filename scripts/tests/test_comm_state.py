@@ -5,6 +5,8 @@ injected between the list cut and the send cancels it; never step backwards; unr
 from __future__ import annotations
 
 import credit_test_env  # noqa: F401 - first: test logs never reach the production run.log
+import contextlib
+import io
 import json
 import os
 import sqlite3
@@ -55,12 +57,14 @@ class CommStateTest(unittest.TestCase):
         self.core = []          # [rid, status, approvedNotice, proofRequest]
         self.ic = FakeIntercom()
 
-    def note(self, campaign, at=OLD, reply=None, kind="initial", status="sent", ids=("r1",)):
+    def note(self, campaign, at=OLD, reply=None, kind="initial", status="sent", ids=("r1",), msg_id=None,
+             contact_id="c1"):
         db = sqlite3.connect(cs.LEDGER)
         db.execute("INSERT INTO verify_messages (campaign, kind, user_key, account_id, day, status, message_type, "
-                   "request_ids_json, n_credits, approved_by, approval_ref, created_at, updated_at, sent_at, last_reply_at) "
-                   "VALUES (?,?,?,?,?,?,'email',?,1,'U','ref',?,?,?,?)",
-                   (campaign, kind, "j@x.com", str(UID), at[:10], status, json.dumps(list(ids)), at, at, at, reply))
+                   "request_ids_json, n_credits, approved_by, approval_ref, created_at, updated_at, sent_at, last_reply_at, "
+                   "message_id, contact_id) VALUES (?,?,?,?,?,?,'email',?,1,'U','ref',?,?,?,?,?,?)",
+                   (campaign, kind, "j@x.com", str(UID), at[:10], status, json.dumps(list(ids)), at, at, at, reply, msg_id,
+                    contact_id))
         db.commit(); db.close()
 
     def run_(self, campaign="credit-hold-status", copy="credithold", keys=("r1",), conversation="", fraud=()):
@@ -87,12 +91,16 @@ class CommStateTest(unittest.TestCase):
                 self.setUp()
                 self.core = [["r1", "user_verification_needed", "", ""]]
                 add()
-                for camp, copy in (("credit-hold-status", "credithold"), ("claim-proof-pending", "claimpending"),
-                                   ("merge-claim-first", "mergeclaimfirst")):   # QA #1566: a wait line too
+                for camp, copy in (("credit-hold-status", "credithold"), ("claim-proof-pending", "claimpending")):
                     res = self.run_(camp, copy)
                     self.assertTrue(res["hold"], (name, camp, res))
                     self.assertTrue(any(r.startswith("proof_on_file:") for r in res["reasons"]), res)
                     self.assertIn(name.split("_")[0], json.dumps(res["reasons"]))
+                # r5 fable-copy-1103-r5/mcf-proof-ack: merge-claim-first's copy ACKNOWLEDGES the documents on file, so
+                # proof stops holding it - and the same fact becomes the render fact the gate refuses without.
+                res = self.run_("merge-claim-first", "mergeclaimfirst")
+                self.assertFalse(res["hold"], res)
+                self.assertTrue(res["proof_on_file"], res)
 
     def test_rule1_a_text_reply_is_never_replied_an_attachment_is(self):
         # Fable 199 / p1 200 (rule change): a text message - even 'is there anything I have to provide?' after our
@@ -1724,6 +1732,179 @@ class HoldKindTest(unittest.TestCase):
         Path(cs.ACCOUNT_HOLDS).write_text("")
         self.bands("R8_approval_hold_volume")
         self.assertEqual(cs.account_hold_facts(UID), [])
+
+
+class MergeClaimFirstWaiverTest(CommStateTest):
+    """r5 [key=mcf-wait-lines] (2), 2026-11-03: the 7-day recency hold is waived for merge-claim-first ONLY when the
+    last customer-visible part in the conversation is OURS and its class is a status/receipt. Our own earlier ask (a
+    merge-claim ask included) leaves the customer owing a reply, so the 7-day rule stands there."""
+
+    # QA #1660 a: the waiver matches the part's ID to the ledger's message_id, so the fixtures carry real part ids
+    # (verified against prod conversations: for a part we posted, part.id IS verify_messages.message_id).
+    def conv(self, *, last_ours: bool, at: float, last_id: str = "p2"):
+        """at = the epoch of the LAST customer-visible part; the other side's part is 300 s earlier."""
+        cust = {"id": "c1", "author": {"type": "user"}, "body": "here you go",
+                "created_at": at if not last_ours else at - 300}
+        ours = {"id": last_id if last_ours else "p2", "author": {"type": "admin"}, "body": "a quick update",
+                "created_at": at if last_ours else at - 300}
+        self.ic.convs["9"] = {"id": "9", "source": {"id": "s0", "author": {"type": "admin"}, "created_at": at - 900},
+                              "conversation_parts": {"conversation_parts": [cust, ours] if last_ours else [ours, cust]}}
+
+    def run7(self, campaign="merge-claim-first", copy="mergeclaimfirst"):
+        return cs.check(campaign, copy, UID, [f"mcf-{UID}"], "c1", conversation="9",
+                        query=lambda sql: [["0", "0"]] if "proof_required_owed" in sql else ([list(r) for r in self.core]
+                                                                                            if "credit_requests" in sql else []),
+                        ic=self.ic, fraud=lambda uid, q: [])
+
+    def recent(self, campaign, epoch, msg_id="p2"):
+        self.note(campaign, at=datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                  msg_id=msg_id)
+
+    def test_a_status_note_of_ours_last_waives_the_7_days(self):
+        self.core = [["r1", "user_verification_needed", "", ""]]
+        now = time.time() - 86400
+        self.conv(last_ours=True, at=now)
+        self.recent("status-team-review", now)
+        res = self.run7()
+        self.assertFalse([r for r in res["reasons"] if r.startswith("messaged_7d")], res)
+
+    def test_our_own_earlier_ask_does_not_waive(self):
+        # the merge-claim ask itself, and any other ask: the customer still owes an answer, so 7 days stand
+        for camp in ("merge-claim-first", "verify-live", "uvn-status", "proof-need-ask"):
+            with self.subTest(camp):
+                self.setUp()
+                self.core = [["r1", "user_verification_needed", "", ""]]
+                now = time.time() - 86400
+                self.conv(last_ours=True, at=now)
+                self.recent(camp, now)
+                res = self.run7()
+                self.assertTrue([r for r in res["reasons"] if r.startswith("messaged_7d")], res)
+
+    def test_the_customers_own_last_part_never_waives(self):
+        self.core = [["r1", "user_verification_needed", "", ""]]
+        now = time.time() - 86400
+        self.conv(last_ours=False, at=now)
+        self.recent("status-team-review", now)
+        res = self.run7()
+        self.assertTrue([r for r in res["reasons"] if r.startswith("messaged_7d")], res)
+
+    def test_an_internal_note_is_not_a_message_the_customer_got(self):
+        # the last customer-visible part is theirs; our newer internal note does not turn that into "ours last"
+        self.core = [["r1", "user_verification_needed", "", ""]]
+        now = time.time() - 86400
+        self.conv(last_ours=False, at=now)
+        self.ic.convs["9"]["conversation_parts"]["conversation_parts"].append(
+            {"author": {"type": "admin"}, "part_type": "note", "body": "internal", "created_at": now + 60})
+        self.recent("status-team-review", now)
+        res = self.run7()
+        self.assertTrue([r for r in res["reasons"] if r.startswith("messaged_7d")], res)
+
+    def test_a_ledger_row_that_does_not_match_the_part_never_waives(self):
+        # the ledger's newest note is a DIFFERENT message (id p9) than the last visible part (p2): no waiver
+        self.core = [["r1", "user_verification_needed", "", ""]]
+        now = time.time() - 86400
+        self.conv(last_ours=True, at=now)
+        self.recent("status-team-review", now, msg_id="p9")
+        res = self.run7()
+        self.assertTrue([r for r in res["reasons"] if r.startswith("messaged_7d")], res)
+
+    def test_an_unledgered_human_part_right_after_our_status_never_waives(self):
+        # QA #1660 a, the adversarial case: our ledgered status is at T and a HUMAN admin comment lands at T+60 s. It
+        # is the last customer-visible part and its author is support, so a `gap <= 300 s` rule waved both 7-day holds
+        # through for it - the customer owes a reply to that human and could be messaged. Identity: part p3 is not the
+        # ledger's p2, so the 7-days stand.
+        self.core = [["r1", "user_verification_needed", "", ""]]
+        now = time.time() - 86400
+        self.conv(last_ours=True, at=now + 60, last_id="p3")
+        self.recent("status-team-review", now, msg_id="p2")
+        res = self.run7()
+        self.assertTrue([r for r in res["reasons"] if r.startswith("messaged_7d")], res)
+
+    def test_a_ledger_row_without_an_id_never_waives(self):
+        # identity unavailable on OUR side (an older row written before message_id was recorded) = fail closed
+        self.core = [["r1", "user_verification_needed", "", ""]]
+        now = time.time() - 86400
+        self.conv(last_ours=True, at=now)
+        self.recent("status-team-review", now, msg_id=None)
+        res = self.run7()
+        self.assertTrue([r for r in res["reasons"] if r.startswith("messaged_7d")], res)
+
+    def test_a_part_without_an_id_never_waives(self):
+        self.core = [["r1", "user_verification_needed", "", ""]]
+        now = time.time() - 86400
+        self.conv(last_ours=True, at=now, last_id="")
+        self.recent("status-team-review", now)
+        res = self.run7()
+        self.assertTrue([r for r in res["reasons"] if r.startswith("messaged_7d")], res)
+
+    def test_the_waiver_is_merge_claim_first_only(self):
+        # the same "our status note was last" shape does NOT release any other campaign's 7-day hold
+        for camp in ("credit-hold-status", "claim-proof-pending", "uvn-status", "claim-proof-ask"):
+            with self.subTest(camp):
+                self.setUp()
+                self.core = [["r1", "user_verification_needed", "", ""]]
+                now = time.time() - 86400
+                self.conv(last_ours=True, at=now)
+                self.recent("status-team-review", now)
+                res = self.run7(camp, camp)
+                self.assertTrue([r for r in res["reasons"] if r.startswith("messaged_7d")], (camp, res))
+
+    def test_no_last_part_or_no_ledger_means_no_waiver(self):
+        self.core = [["r1", "user_verification_needed", "", ""]]
+        now = time.time() - 86400
+        self.conv(last_ours=True, at=now)          # a status note, but no ledger row at all
+        res = self.run7()
+        self.assertTrue([r for r in res["reasons"] if r.startswith("messaged_7d")], res)
+
+    def test_proof_on_file_is_the_render_fact_not_a_hold(self):
+        self.core = [["r1", "user_verification_needed", "", ""]]
+        self.conv(last_ours=True, at=time.time() - 86400)
+        res = self.run7()
+        self.assertFalse(res["proof_on_file"], res)
+        sqlite3.connect(cs.PROOF_STORE).executescript(f"INSERT INTO proof_intake (user_id, file_sha256) VALUES ({UID}, 's');")
+        sqlite3.connect(cs.PROOF_STORE).commit()
+        res = self.run7()
+        self.assertTrue(res["proof_on_file"], res)
+        self.assertFalse([r for r in res["reasons"] if r.startswith("proof_on_file")], res)
+
+    def cli_proof(self):
+        """The gate's render read, through the same CLI the shell runs."""
+        out = io.StringIO()
+        with unittest.mock.patch.object(cs, "trino", lambda sql: [list(r) for r in self.core] if "credit_requests" in sql else []), \
+                unittest.mock.patch.object(cs, "intercom", self.ic), \
+                contextlib.redirect_stdout(out):
+            rc = cs._main(["proof-on-file", "--user-id", str(UID), "--request-ids", "r1"])
+        return rc, json.loads(out.getvalue())
+
+    def test_intercom_only_proof_is_the_same_fact_on_both_reads(self):
+        # QA #1660 b: the customer's only evidence is an Intercom attachment. `check()` counted it and the render read
+        # (`proof-on-file`) did not, so the gate's two reads of "the same" fact disagreed for EVERY such recipient and
+        # the equality guard refused the send with a 'could not read' reason. Both now answer from ONE function.
+        self.core = [["r1", "user_verification_needed", "", ""]]
+        self.conv(last_ours=True, at=time.time() - 86400)
+        self.ic.convs["7"] = {"id": "7", "source": {"author": {"type": "user"}, "created_at": time.time() - 86400,
+                              "attachments": [{"name": "contract.pdf"}]}}
+        # (a) no note of ours names a contact, so the render read falls back to the RECORD (the copy then renders
+        # without the acknowledgement - it asserts nothing) and says so; the shell refuses only the other direction
+        rc, cli = self.cli_proof()
+        self.assertEqual((rc, cli["proof_on_file"], cli["contact_unknown"]), (0, False, True), cli)
+        # (b) the contact our ledger names -> both reads see the attachment; nothing is filed in intake yet
+        self.note("claim-status", at=OLD, msg_id="p9", contact_id="c1")
+        rc, cli = self.cli_proof()
+        res = self.run7()
+        self.assertEqual(rc, 0, cli)
+        self.assertEqual((cli["proof_on_file"], res["proof_on_file"]), (True, True), (cli, res))
+        self.assertEqual((cli["record_only"], cli["intercom_only"], cli["contact_unknown"]), (False, True, False), cli)
+        self.assertEqual(res["proof_note"], ["intercom_only_proof"], res)      # named, never silent
+        self.assertFalse([r for r in res["reasons"] if r.startswith("proof_on_file")], res)   # render fact, never a hold
+        # (c) once the document is filed, the record answers on its own and the note is gone
+        sqlite3.connect(cs.PROOF_STORE).executescript(f"INSERT INTO proof_intake (user_id, file_sha256) VALUES ({UID}, 's');")
+        sqlite3.connect(cs.PROOF_STORE).commit()
+        rc, cli = self.cli_proof()
+        res = self.run7()
+        self.assertEqual((cli["proof_on_file"], res["proof_on_file"]), (True, True))
+        self.assertEqual((cli["record_only"], cli["intercom_only"]), (True, False), cli)
+        self.assertEqual(res["proof_note"], [], res)
 
 
 class ReleaseRowTest(unittest.TestCase):

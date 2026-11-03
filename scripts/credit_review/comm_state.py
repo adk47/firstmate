@@ -143,7 +143,10 @@ def store_facts(uid: int, keys: list[str] | tuple[str, ...] = (), since: str = "
     """Documents on file for this user in our own stores. p1 198 / Fable 199 (rule): only a document that could be
     proof of the NAMED requests counts - one that arrived on/after the oldest named request was created (`since`,
     ISO UTC; empty = unknown = every document counts, fail closed) or one tied to a named request."""
-    out: dict[str, Any] = {"docs": [], "acked": "", "notes_7d": [], "told_notes": [], "last_ask": ""}
+    out: dict[str, Any] = {"docs": [], "acked": "", "notes_7d": [], "told_notes": [], "last_ask": "", "last_sent": None,
+                          # the Intercom contact our newest note went to: the render-time read needs it to see the files
+                          # the customer sent us (QA #1660 b), and it must be the contact the send-time check reads
+                          "last_contact": "", "_contact_at": 0.0}
     want0 = {str(k).lower() for k in keys}
     try:
         db = _ro(PROOF_STORE)
@@ -181,13 +184,13 @@ def store_facts(uid: int, keys: list[str] | tuple[str, ...] = (), since: str = "
     try:
         db = _ro(LEDGER)
         rows = db.execute("SELECT campaign, kind, status, coalesce(sent_at, created_at), last_reply_at, proof_tagged_at, day, "
-                          "coalesce(request_ids_json, '[]') "
+                          "coalesce(request_ids_json, '[]'), message_id, coalesce(contact_id, '') "
                           "FROM verify_messages WHERE account_id=?", (str(uid),)).fetchall()
     except sqlite3.Error as exc:
         raise Unknown(f"verify ledger unreadable: {exc}") from exc
     week = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
     want = {str(k).lower() for k in keys}
-    for camp, kind, status, at, _reply, tagged, day, ids_json in rows:
+    for camp, kind, status, at, _reply, tagged, day, ids_json, msg_id, contact in rows:
         if status not in ("sent", "attempted"):
             continue
         # a TEXT reply is never 'replied' (Fable 199); a tagged proof (attachments after our note) is
@@ -208,6 +211,16 @@ def store_facts(uid: int, keys: list[str] | tuple[str, ...] = (), since: str = "
                 out["told_notes"].append(camp)
         if str(day or "") >= week:
             out["notes_7d"].append(camp)
+        # the newest note we sent this user, whatever its campaign: the [key=mcf-wait-lines] waiver needs its CLASS and
+        # its Intercom message id (QA #1660 a: the waiver matches the part by ID, never by a timestamp window - a manual
+        # admin part posted seconds after our ledgered status would otherwise be read as that status)
+        if _ts(at) and (out["last_sent"] is None or _ts(at) > out["last_sent"][1]):
+            out["last_sent"] = (camp, _ts(at), str(msg_id or ""))
+        # the newest note that NAMES a contact (older rows may predate the column): the render-time read searches this
+        # customer's Intercom conversations, so a blank here means the fact cannot be read - never 'nothing on file'
+        if contact and (not out.get("_contact_at") or _ts(at) > out["_contact_at"]):
+            out["last_contact"], out["_contact_at"] = str(contact), _ts(at)
+    out.pop("_contact_at", None)
     return out
 
 
@@ -261,6 +274,15 @@ def has_doc_link(text: str) -> bool:
         if any(h == d or h.endswith("." + d) for d in DOC_HOSTS):
             return True
     return False
+
+
+def documents_on_file(uid: int, core: dict[str, Any], st: dict[str, Any], contact_id: str, ic: Intercom) -> list[str]:
+    """THE documents-on-file fact for a wait-line campaign: our own stores (`st['docs']`) PLUS the files the customer
+    sent us in Intercom. One function because the fact has exactly one meaning (QA #1660 b): the render read
+    (`proof-on-file`, which decides whether the acknowledgement sentence can appear) and the send-time check both call
+    it, so they cannot drift. `contact_id` empty = the customer's Intercom contact is unknown = the fact cannot be
+    read (`intercom_facts` raises Unknown), never a silent "nothing on file"."""
+    return st["docs"] + intercom_facts(contact_id, max(st["last_ask"], core["last_ask"]), ic, core["created"])
 
 
 def intercom_facts(contact_id: str, last_ask: str, ic: Intercom, since: str = "", *, attach_since: float | None = None,
@@ -324,8 +346,11 @@ def intercom_facts(contact_id: str, last_ask: str, ic: Intercom, since: str = ""
     return sorted(set(found))
 
 
-def thread_facts(conversation: str, ic: Intercom, now: float | None = None) -> list[str]:
-    """R5 / R6 / R7 on the conversation the note would go into (R6/R7 apply to R1 only; see decide)."""
+def thread_facts(conversation: str, ic: Intercom, now: float | None = None,
+                 extra: dict[str, Any] | None = None) -> list[str]:
+    """R5 / R6 / R7 on the conversation the note would go into (R6/R7 apply to R1 only; see decide).
+    `extra`, when given, receives the LAST customer-visible part ({ours, at}) - an internal note is not a message the
+    customer received, so it never counts (r5 [key=mcf-wait-lines] 2)."""
     if not conversation:
         return []
     if not conversation.isdigit():
@@ -349,6 +374,15 @@ def thread_facts(conversation: str, ic: Intercom, now: float | None = None) -> l
         last = max(admin, key=lambda p: p.get("created_at") or 0)
         if RESOLVED.search(last.get("body") or "") and (last.get("created_at") or 0) >= max(cust or [0]):
             out.append("R7_thread_resolved")
+    if extra is not None:
+        visible = [p for p in parts if (p.get("part_type") or "comment") != "note" and (p.get("body") or "").strip()]
+        if visible:
+            last = max(visible, key=lambda p: p.get("created_at") or 0)
+            # `id` is the part's identity: for a part we posted it IS the ledger's message_id (verified against prod
+            # conversations), so the waiver below matches a send, not a moment in time (QA #1660 a)
+            extra["last_part"] = {"ours": (last.get("author") or {}).get("type") in SUPPORT_AUTHORS,
+                                  "at": float(last.get("created_at") or 0),
+                                  "id": str(last.get("id") or "")}
     cparts = [p for p in parts if (p.get("author") or {}).get("type") in ("user", "lead", "contact")]
     if cparts and RESOLVED.search(max(cparts, key=lambda p: p.get("created_at") or 0).get("body") or ""):
         out.append("R7_thread_resolved")          # the customer's own last word: it is sorted
@@ -458,6 +492,20 @@ def hold_kind(uid: int, now: float | None = None) -> str:
 # the CURRENT scan's kind through hold_kind() - stale / unreadable / unknown / hard = R8_account_hold, which holds it.
 # It is not in ASKS: it is not a credit ask (no last_ask, no owes:open_ask).
 VOLUME_PASS_CAMPAIGNS = ("merge-claim-first",)
+
+# r5 fable-copy-1103-r5/mcf-proof-ack (2026-11-03 13:5xZ): merge-claim-first is the ONE campaign whose copy ACKNOWLEDGES
+# the documents on file, so proof on file stops being a hold for it and becomes a REQUIRED RENDER FACT instead: the
+# sentence is rendered from that fact, read fresh per recipient, and a missing/unreadable fact is a refusal in the gate
+# (mcf_proof_unreadable) - never a body without the sentence, never a rendered blank.
+MERGE_CLAIM_FIRST = "merge-claim-first"
+
+# r5 (2) [key=mcf-wait-lines] 2026-11-03: the 7-day recency hold is WAIVED for merge-claim-first only when nothing is
+# left open on the customer's side - the LAST customer-visible part in that conversation is OURS and its class is a
+# status/receipt/admin comment. Our own earlier ASK (including a merge-claim ask) is not a status: the 7-day rule stands.
+LAST_PART_WAIVER_CAMPAIGN = MERGE_CLAIM_FIRST
+STATUS_CLASSES = (RECEIPT, "status-team-review", "email-changed", "email-changed-dup", "credit-hold-status",
+                  "merge-pending")
+
 
 
 def fraud_facts(uid: int, query: Query) -> list[str]:
@@ -584,9 +632,31 @@ def need_facts(uid: int, keys: list[str], doc_sha: str, doc_at: str, need_code: 
     return out
 
 
+def wait_line_waived(campaign: str, st: dict[str, Any], last_part: dict[str, Any] | None) -> bool:
+    """r5 [key=mcf-wait-lines] (2), in code: waive our 7-day recency hold for merge-claim-first ONLY when the last
+    customer-visible part IS the newest note in our own ledger - matched by the part's ID against the ledger's
+    message_id (QA #1660 a) - and that note's class is a status/receipt (STATUS_CLASSES). An earlier ask of ours -
+    including a merge-claim ask - is never a status, so the 7-day rule stands.
+
+    The match is IDENTITY, never a timestamp window: a human admin part posted seconds after our ledgered status is a
+    different message, and under a `gap <= N seconds` rule it was read as that status and waived both 7-day holds -  a
+    customer who owed us a reply could be messaged. No last part, no ledger row, no id on either side, or an id that
+    differs = no waiver (fail closed)."""
+    if campaign != LAST_PART_WAIVER_CAMPAIGN or not last_part or not last_part.get("ours"):
+        return False
+    sent = st.get("last_sent")
+    if not sent:
+        return False
+    camp, _at, msg_id = sent
+    if camp not in STATUS_CLASSES:
+        return False
+    part_id = str(last_part.get("id") or "")
+    return bool(part_id) and part_id == str(msg_id or "")
+
+
 def decide(campaign: str, copy: str, st: dict[str, Any], core: dict[str, Any], ic_found: list[str],
            thread: list[str] | None = None, fraud: list[str] | None = None,
-           need: dict[str, Any] | None = None) -> tuple[str, list[str]]:
+           need: dict[str, Any] | None = None, last_part: dict[str, Any] | None = None) -> tuple[str, list[str]]:
     """(state, hold reasons) - empty reasons = send."""
     docs = st["docs"] + ic_found
     decided = sorted(set(core["decided"]))
@@ -595,12 +665,16 @@ def decide(campaign: str, copy: str, st: dict[str, Any], core: dict[str, Any], i
              "replied" if docs else "asked" if (st["last_ask"] or core["last_ask"]) else "none")
     why: list[str] = list(fraud or [])
     thread = thread or []
-    if st["notes_7d"]:
+    waived = wait_line_waived(campaign, st, last_part)
+    if st["notes_7d"] and not waived:
         why.append("messaged_7d:" + "+".join(sorted(set(st["notes_7d"]))))
-    if "R5_admin_comment_7d" in thread:
+    if "R5_admin_comment_7d" in thread and not waived:
         why.append("messaged_7d:R5_admin_comment_in_thread")
     if campaign in WAIT_LINES:
-        if docs:
+        # r5 fable-copy-1103-r5/mcf-proof-ack: merge-claim-first's copy acknowledges the documents on file, so for it
+        # proof on file is a RENDER FACT (the gate refuses when it cannot read one) and not a hold. Every other wait
+        # line keeps the hold - the sentence exists only for that one approved copy.
+        if docs and campaign != MERGE_CLAIM_FIRST:
             why.append("proof_on_file:" + ",".join(sorted(set(docs)))[:300])
         if st["acked"]:
             why.append("already_acknowledged")
@@ -1164,6 +1238,7 @@ def check(campaign: str, copy: str, uid: int, keys: list[str], contact_id: str, 
     need = None
     if campaign in WAIT_LINES:
         ic_found = intercom_facts(contact_id, max(st["last_ask"], core["last_ask"]), ic, core["created"])
+        # (documents_on_file() is the same pair of reads, for the render-time caller)
     elif campaign == NEED_ASK:
         if not need_code:
             raise Unknown("proof-need-ask needs the need code the message is about")
@@ -1179,13 +1254,22 @@ def check(campaign: str, copy: str, uid: int, keys: list[str], contact_id: str, 
                                   text_after_ask=True)
     else:
         ic_found = []
-    thread = thread_facts(conversation, ic)
+    last_part: dict[str, Any] = {}
+    thread = thread_facts(conversation, ic, extra=last_part)
     fr = (fraud or fraud_facts)(uid, query)
     if campaign in ASKS or campaign in VOLUME_PASS_CAMPAIGNS:
         # [key=r8-hold-due]: a volume-only hold holds approvals and keeps the 'nothing is needed' family off - never the
         # ask that resolves it; a hard hold (or an unknown kind) still holds the ask
         fr = [f for f in fr if f != HOLD_VOLUME]
-    state, why = decide(campaign, copy, st, core, ic_found, thread, fr, need)
+    docs_all = st["docs"] + ic_found
+    # QA #1660 b: `proof-on-file` (the render read) and this return are ONE fact - see documents_on_file(). They are the
+    # same function because they disagreed once: the render read counted only our stores while this counted the
+    # customer's Intercom attachments too, so every recipient whose only evidence arrived in Intercom refused the send
+    # with a 'could not read' reason. Intercom-only evidence counts (it is a document they sent us) and is reported by
+    # name so a human can see nothing is filed in intake yet.
+    proof_on_file = bool(docs_all)
+    proof_note = (["intercom_only_proof"] if campaign == MERGE_CLAIM_FIRST and ic_found and not st["docs"] else [])
+    state, why = decide(campaign, copy, st, core, ic_found, thread, fr, need, last_part.get("last_part"))
     if reply_due_part:
         # [key=reply-due]: answering a user who wrote to us is not an unsolicited note - the 7-day cooldowns do not
         # apply to EXACTLY this one answer; every other rule (decided/told, documents, fraud, thread, identity) does
@@ -1220,12 +1304,14 @@ def check(campaign: str, copy: str, uid: int, keys: list[str], contact_id: str, 
             a = facts["assignee"]
             if a and a["action"] == "skip":
                 why.append(f"reply_due:human_assignee:{a['id']}")           # listed for that human, never posted
-            return {"hold": bool(why), "state": state, "reasons": why, "reply_due": facts}
+            return {"hold": bool(why), "state": state, "reasons": why, "reply_due": facts,
+                    "proof_on_file": proof_on_file, "proof_note": proof_note}
     if correction and campaign == "uvn-status":
         # [key=k-proof-required] /c2: this ask corrects OUR recent status line about the same requests - our own 7-day
         # cooldown (that line) does not defer the correction; every other rule still holds
         why = [w for w in why if not w.startswith("messaged_7d")]
-    return {"hold": bool(why), "state": state, "reasons": why}
+    return {"hold": bool(why), "state": state, "reasons": why, "proof_on_file": proof_on_file,
+            "proof_note": proof_note}
 
 
 def reply_ref_facts(copy: str, uid: int, keys: list[str], query: Query) -> list[str]:
@@ -1250,6 +1336,15 @@ def reply_ref_facts(copy: str, uid: int, keys: list[str], query: Query) -> list[
 def _main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="send-time communication state (read-only)")
     sub = ap.add_subparsers(dest="op", required=True)
+    pf = sub.add_parser("proof-on-file",
+                        help="the documents-on-file fact alone - the SAME fact check() decides on (our stores + the "
+                             "files the customer sent us in Intercom; QA #1660 b), so the two reads cannot disagree: the "
+                             "merge-claim-first render fact - exit 2 when it cannot be read")
+    pf.add_argument("--user-id", required=True)
+    pf.add_argument("--request-ids", default="")
+    pf.add_argument("--contact-id", default="",
+                    help="the customer's Intercom contact; default: the contact our newest ledger note went to "
+                         "(empty = unknown = unreadable, exit 2)")
     c = sub.add_parser("check")
     c.add_argument("--campaign", required=True)
     c.add_argument("--copy", default="")
@@ -1270,6 +1365,30 @@ def _main(argv: list[str] | None = None) -> int:
     c.add_argument("--doc-map", default="", help="proof-need-ask: request=sha,... each request's own document")
     c.add_argument("--doc-intakes", default="", help="proof-need-ask: sha=intake_id,... the intake each document was read from")
     a = ap.parse_args(argv)
+    if a.op == "proof-on-file":
+        if not str(a.user_id).isdigit():
+            print(json.dumps({"proof_on_file": None, "reasons": ["no Muso user id"]}))
+            return 2
+        keys = [k for k in a.request_ids.split(",") if k]
+        try:
+            core = core_facts(int(a.user_id), keys, trino)
+            st = store_facts(int(a.user_id), keys, core["created"])
+            # the render happens BEFORE the shell resolves the recipient, so the contact comes from our own ledger
+            # (the contact our newest note went to = the one the send-time check reads)
+            contact = a.contact_id or st.get("last_contact") or ""
+            docs = documents_on_file(int(a.user_id), core, st, contact, intercom) if contact else list(st["docs"])
+        except Unknown as exc:
+            print(json.dumps({"proof_on_file": None, "reasons": [f"unknown: {exc}"]}))
+            return 2
+        # A customer whose Intercom contact we do not know (no note of ours names one) is read from the record alone:
+        # the fact is then the record, the copy renders without the acknowledgement (it asserts nothing), and the gate's
+        # state check - which runs after the recipient is resolved and CAN read Intercom - may see more. The shell
+        # refuses only when the body would ASSERT a fact the state check does not confirm, so this direction is safe and
+        # is named here rather than swallowed (QA #1660 b).
+        print(json.dumps({"proof_on_file": bool(docs), "docs": sorted(set(docs)),
+                          "record_only": bool(st["docs"]), "intercom_only": bool(docs) and not st["docs"],
+                          "contact_unknown": not contact}))
+        return 0
     if not str(a.user_id).isdigit():
         print(json.dumps({"hold": None, "reasons": ["no Muso user id"]}))
         return 2

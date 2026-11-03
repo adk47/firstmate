@@ -58,6 +58,19 @@ PY
   cat > "$TEST_TMPDIR/comm_state.py" <<'PY'
 import json, os, sys
 open(os.path.join(os.path.dirname(__file__), "comm-state-args"), "w").write(" ".join(sys.argv[1:]))
+if len(sys.argv) > 1 and sys.argv[1] == "proof-on-file":      # r5 fable-copy-1103-r5/mcf-proof-ack render fact
+    m = os.environ.get("STUB_MCF_PROOF", "false")
+    if m == "intercom":                                       # the only proof is an Intercom attachment
+        has_contact = "--contact-id" in sys.argv
+        print(json.dumps({"proof_on_file": has_contact, "docs": [], "record_only": False,
+                          "intercom_only": has_contact})); sys.exit(0)
+    if m == "fail":
+        print(json.dumps({"proof_on_file": None, "reasons": ["unknown: proof store unreadable"]})); sys.exit(2)
+    if m == "missing":
+        print(json.dumps({"docs": []})); sys.exit(0)          # a 0 exit with no boolean fact at all
+    if m == "unreadable":
+        print("not json at all"); sys.exit(0)
+    print(json.dumps({"proof_on_file": m == "true", "docs": []})); sys.exit(0)
 m = os.environ.get("STUB_COMM_STATE", "")
 if m == "hold":
     print(json.dumps({"hold": True, "state": "replied", "reasons": ["proof_on_file:proof_intake"]})); sys.exit(3)
@@ -67,7 +80,8 @@ if os.environ.get("STUB_COMM_STATE_SIDE"):            # a side effect while comm
     import subprocess; subprocess.run(os.environ["STUB_COMM_STATE_SIDE"], shell=True, check=True)
 if os.environ.get("STUB_COMM_STATE_JSON"):
     print(os.environ["STUB_COMM_STATE_JSON"]); sys.exit(0)
-print(json.dumps({"hold": False, "state": "asked", "reasons": []}))
+print(json.dumps({"hold": False, "state": "asked", "reasons": [],
+                  "proof_on_file": os.environ.get("STUB_MCF_PROOF", "false") == "true"}))
 PY
   export INTERCOM_VERIFY_TEST_COMM_STATE_HELPER="$TEST_TMPDIR/comm_state.py"
   # [key=dated-windows-are-data]: the /o window is read from the policy, so the suite reads the REPO policy by default
@@ -4762,6 +4776,106 @@ Thank you, Caroline, Muso Support" ]
   [[ "$(sql "select campaign||'|'||status from verify_messages")" == "merge-claim-first|sent" ]]
   INTERCOM_VERIFY_TEST_DAY=2026-12-01 run -0 "$GATE" send --campaign merge-claim-first --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ
   [ "$output" = "SKIPPED already-notified credits=1" ]
+}
+
+ACK="We have the documents you sent for these credits on file."
+
+@test "merge-claim-first: r5's proof-ack sentence (fable-copy-1103-r5/mcf-proof-ack) renders ONLY off a documents-on-file fact" {
+  unlocked_gate mcf
+  export STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
+  # r5's copy, quoted in the ruling: paragraph 1 with the greeting REPLACED by the acknowledgement. Both renderings are
+  # pinned byte for byte, in both directions - the sentence can never appear without the fact, and the fact can never
+  # produce a body that drops it.
+  E1="Hi Agustin, the credits you asked about are listed on another Muso profile with your name, the one linked to the Spotify artist page for these tracks: https://credits.muso.ai/profile/e85fad75-1fcf-4c5c-b450-e8a33a10117a. If that profile is also you, claim it first and tell me which one should be the main profile."
+  E1_ACK="We have the documents you sent for these credits on file. The credits you asked about are listed on another Muso profile with your name, the one linked to the Spotify artist page for these tracks: https://credits.muso.ai/profile/e85fad75-1fcf-4c5c-b450-e8a33a10117a. If that profile is also you, claim it first and tell me which one should be the main profile."
+  P24="$(sed -n 20p "$HYDRA_REPO/workspaces/support/reference/faq.md")"
+  mcffile "$TEST_TMPDIR/m.json"
+  # no document on file: the approved e1, byte for byte, and never a word about documents
+  run -0 "$LOCKED" send --campaign merge-claim-first --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain)" = "$E1
+$P24
+Thank you, Caroline, Muso Support" ]
+  # a document on file: r5's amended paragraph, and the rest of the approved copy untouched
+  STUB_MCF_PROOF=true run -0 "$LOCKED" send --campaign merge-claim-first --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain)" = "$E1_ACK
+$P24
+Thank you, Caroline, Muso Support" ]
+  # and the sentence is the one pinned in the script, not a second copy living only in this test
+  [ "$ACK" = "$(grep -oP '(?<=^readonly MERGE_CLAIM_FIRST_PROOF_ACK=").*(?="$)' "$REAL_SCRIPT")" ]
+  [ "$(calls)" -eq 0 ]
+}
+
+@test "merge-claim-first: the proof-ack sentence is pinned - altering ONE word of the canonical copy turns this red" {
+  # r5's CAN-FAIL pin (b): the sentence lives once, in the script, and a one-word mutation must break the assertion
+  # above. The mutant is built here from the real copy, so a reworded sentence cannot pass silently.
+  grep -qx "readonly MERGE_CLAIM_FIRST_PROOF_ACK=\"$ACK\"" "$REAL_SCRIPT"
+  sed 's/^readonly MERGE_CLAIM_FIRST_PROOF_ACK="We have the documents/readonly MERGE_CLAIM_FIRST_PROOF_ACK="We hold the documents/' \
+    "$REAL_SCRIPT" > "$TEST_TMPDIR/mutant.sh" && chmod +x "$TEST_TMPDIR/mutant.sh"
+  grep -q 'We hold the documents' "$TEST_TMPDIR/mutant.sh"        # precondition: the mutation landed
+  unlocked_gate mcf
+  sed -i 's/^readonly MERGE_CLAIM_FIRST_PROOF_ACK=.*$/readonly MERGE_CLAIM_FIRST_PROOF_ACK="We hold the documents you sent for these credits on file."/' \
+    "$TEST_TMPDIR/unlocked.sh"
+  grep -q 'We hold the documents' "$TEST_TMPDIR/unlocked.sh"
+  export STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
+  mcffile "$TEST_TMPDIR/m.json"
+  STUB_MCF_PROOF=true run -0 "$GATE" send --campaign merge-claim-first --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ --dry-run
+  # the mutant body does NOT equal the pinned pinned sentence: this is the assertion the real copy passes
+  [ "$(rendered .body | plain)" != "$ACK The credits you asked about are listed on another Muso profile with your name, the one linked to the Spotify artist page for these tracks: https://credits.muso.ai/profile/e85fad75-1fcf-4c5c-b450-e8a33a10117a. If that profile is also you, claim it first and tell me which one should be the main profile." ]   # the pinned sentence, mutated -> red
+  [[ "$(rendered .body | plain)" == "We hold the documents"* ]]
+}
+
+@test "merge-claim-first: an absent, unreadable or non-boolean documents-on-file fact refuses the note (mcf_proof_unreadable)" {
+  unlocked_gate mcf
+  export STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
+  mcffile "$TEST_TMPDIR/m.json"
+  for mode in fail missing unreadable; do
+    STUB_MCF_PROOF="$mode" run -1 "$GATE" send --campaign merge-claim-first --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ
+    [[ "$output" == *"mcf_proof_unreadable"* ]] || { echo "$mode -> $output"; false; }
+  done
+  INTERCOM_VERIFY_TEST_COMM_STATE_HELPER="$TEST_TMPDIR/nope.py" \
+    run -1 "$GATE" send --campaign merge-claim-first --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"mcf_proof_unreadable"* ]]
+  [ "$(posts)" -eq 0 ]                 # never a send: the fact is what the body is built on, not a check after it
+  [ -z "$(sql "select status from verify_messages where status='sent'")" ]
+  # both reads now use the SAME contact, so a disagreement is a contradiction: neither body is sent, in either
+  # direction (QA #1660: a body that asserts documents we cannot confirm, and a body that drops the sentence when the
+  # documents ARE on file, are both wrong)
+  for pair in "true false" "false true"; do
+    set -- $pair
+    STUB_MCF_PROOF="$1" STUB_COMM_STATE_JSON="{\"hold\": false, \"state\": \"asked\", \"reasons\": [], \"proof_on_file\": $2}" \
+      run -1 "$GATE" send --campaign merge-claim-first --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ
+    [[ "$output" == *"mcf_proof_disagrees"* ]] || { echo "render=$1 state=$2 -> $output"; false; }
+  done
+  [ "$(posts)" -eq 0 ]
+}
+
+@test "merge-claim-first (QA #1660): an Intercom-only fact is read on the RECIPIENT's contact, so the sentence IS rendered" {
+  # QA #1660 finding 1: the render read used to fall back to the ledger's newest-note contact, so a FIRST-CONTACT
+  # recipient whose only proof is an Intercom attachment rendered WITHOUT the documents sentence - the copy defect this
+  # PR exists to fix. The fact is now re-read on the resolved contact and the body re-rendered on it.
+  unlocked_gate mcf
+  export STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
+  mcffile "$TEST_TMPDIR/m.json"
+  STUB_MCF_PROOF=intercom STUB_COMM_STATE_JSON='{"hold": false, "state": "asked", "reasons": [], "proof_on_file": true, "proof_note": ["intercom_only_proof"]}' \
+    run -0 "$GATE" send --campaign merge-claim-first --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"proofs=rerendered"* ]] || { echo "$output"; false; }
+  [ "$(posts)" -eq 1 ]
+  sent="$(grep -h '"message_type":"email"' "$CURL_STUB_PAYLOADS" | tail -1)"
+  [[ "$sent" == *"We have the documents you sent for these credits on file. The credits you asked about are listed"* ]] \
+    || { echo "$sent"; false; }
+}
+
+@test "merge-claim-first (QA #1660 b, revised): the fact is read twice on ONE contact - a disagreement sends nothing" {
+  # Before the fix this direction sent WITHOUT the acknowledgement. Both reads now see the same Intercom contact, so a
+  # disagreement means the fact is not trustworthy: refuse, and name it.
+  unlocked_gate mcf
+  export STUB_CONTACT_GET='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
+  mcffile "$TEST_TMPDIR/m.json"
+  STUB_MCF_PROOF=false STUB_COMM_STATE_JSON='{"hold": false, "state": "asked", "reasons": [], "proof_on_file": true, "proof_note": ["intercom_only_proof"]}' \
+    run -1 "$GATE" send --campaign merge-claim-first --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"mcf_proof_disagrees"* ]] || { echo "$output"; false; }
+  [ "$(posts)" -eq 0 ]
+  [ -z "$(sql "select status from verify_messages where status='sent'")" ]
 }
 
 @test "merge-claim-first (QA #1566): an auto-picked off-topic thread is never used - the ask goes by email" {

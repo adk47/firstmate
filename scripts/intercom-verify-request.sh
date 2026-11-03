@@ -325,6 +325,13 @@ readonly MERGE_PENDING_COPY_APPROVED=0
 readonly MERGE_CLAIM_FIRST_COPY_APPROVED=1
 # r5's signed set (data/profile-merge-ops-m1/claim-first-ask-e1-send-1031.json). Adding an account is a PR.
 readonly MERGE_CLAIM_FIRST_USERS="1380289 122029 104450 1406401"
+#   r5 fable-copy-1103-r5/mcf-proof-ack (2026-11-03 13:5xZ): e1 with ONE sentence prepended to paragraph 1, rendered
+#   ONLY for a recipient who has a document on file for these credits. The fact is read fresh for each recipient in the
+#   same pass that renders the body (comm_state.py proof-on-file: our stores + the named request's own creation time),
+#   and a fact that is absent or unreadable REFUSES the note (mcf_proof_unreadable) - a rendered blank, or a body that
+#   silently drops the sentence, would read as if we never opened what they sent. It says the documents ARE on file:
+#   never that we checked them, never an outcome, never a date, never a human.
+readonly MERGE_CLAIM_FIRST_PROOF_ACK="We have the documents you sent for these credits on file."
 #   CREDIT_HOLD_STATUS_COPY_APPROVED  credit-hold-status (Fable copy-owing-proof-1027 S1, verbatim): LOCKED
 #       until the captain's yes on L14a (ws2-captain-lifts-1027) lands in a PR that flips it.
 #   CLAIM_PROOF_PENDING_COPY_APPROVED claim-proof-pending (S2, verbatim): LOCKED until the captain's yes on L14b.
@@ -402,7 +409,7 @@ readonly APPROVAL_REF_CLAIM_ASK="Fable program lead steers-1830 #5 (relayed by f
 CLAIM_SURFACES='{"spotify": "Spotify artist bio", "website": "website (as one line in a file at /.well-known/muso.txt, or in a meta tag named muso-verify)", "youtube": "YouTube channel About section"}'
 readonly CLAIM_SURFACES
 readonly APPROVAL_REF_GAP_ASK="captain U7RP6HKUZ 2026-10-26 12:40Z: Fable decides, do not ask him; ~13:00Z: \"credit and profile verifications nothing is waiting on us right? you are moving these forward and ball should be in users court if required otherwise they are approved? if not get on this\"; Fable ruling 2026-10-26 13:23Z (captain-asks-fable-r4 report section H, GO 2): 460 need_more -> dated gap ask, one per user per day, Fable-approved paragraph, no deadline, no removal words; last sentence swapped to \"Your request stays open while we look.\" (the asked rows are pending, not live) by Fable decision (B) relayed by firstmate 2026-10-26 16:58Z (verify-ask-wiring-h2 inbox 005)"
-readonly APPROVAL_REF_MERGE_CLAIM_FIRST="pr-review-fable-r5 fable-copy-1030-r5/e1 (2026-10-31 05:2xZ, amended 05:4xZ); program-lead-fable-p2 062 (ii); firstmate 063; captain 13:1xZ delegation (Fable decides)"
+readonly APPROVAL_REF_MERGE_CLAIM_FIRST="pr-review-fable-r5 fable-copy-1030-r5/e1 (2026-10-31 05:2xZ, amended 05:4xZ); r5 fable-copy-1103-r5/mcf-proof-ack (2026-11-03 13:5xZ: the documents-on-file sentence, rendered only off a read fact); program-lead-fable-p2 062 (ii); firstmate 063; captain 13:1xZ delegation (Fable decides)"
 readonly APPROVAL_REF_MERGE_PENDING="captain 2026-10-28 12:4xZ: \"go live today and start conversations with users who requested credits, profiles (claims) or merges ASAP\"; copy = program-lead-fable-p2 go-live-today line M1, sent only on the captain's own yes to M1"
 readonly APPROVAL_REF_OWING_PROOF="captain U7RP6HKUZ 2026-10-27 20:1xZ: \"are you sure all users that need to be communicated have been already? If not get on it - make this a durable process that does not rely on my computer; do this all on OVH.\"; copy = Fable verify-program-lead-fable-l1 copy-owing-proof-1027 (20:2xZ), sent only on the captain's yes (L14a S1 credit-hold-status / L14b S2 claim-proof-pending)"
 readonly APPROVAL_REF_PROOF_NEED_ASK="captain 2026-10-27 21:5xZ: every user who owes proof is told exactly what we need (proof-loop-lead-fable-p1 plan section 1); copy = proof-loop captain card L11c (22:5xZ), verbatim per need code; sent only on the captain's yes"
@@ -1948,9 +1955,16 @@ def merge_pending($fn; $m):
     segs: [ {p: "Hi \($fn), a quick update on your request to merge \([ $m.profiles[] ] | andjoin): it's in our review queue, nothing has been changed yet, and we will message you here when it has been checked."} ] };
 # merge-claim-first (r5 fable-copy-1030-r5/e1, verbatim): the ask, the approved §2.4 merge paragraph (faq.md line 20,
 # verbatim; a test pins the two equal) and r5's one-line sign-off, in BOTH delivery modes.
-def merge_claim_first($fn; $m):
+# r5 fable-copy-1103-r5/mcf-proof-ack quotes the amended paragraph as the acknowledgement sentence followed directly by
+# "The credits you asked about are listed ...": the greeting is REPLACED by the acknowledgement, not kept behind it. So the
+# paragraph is written once, and only its opening varies - that keeps one copy of the copy, so the two renderings cannot
+# drift apart, and the no-proof rendering stays e1 verbatim.
+def mcf_first_paragraph($fn; $m; $proof):
+  "\(if $proof == true then $ack + " " else "Hi \($fn), " end)\(if $proof == true then "The" else "the" end) credits you asked about are listed on another Muso profile with your name, the one linked to the Spotify artist page for these tracks: https://credits.muso.ai/profile/\($m.link_profile_id). If that profile is also you, claim it first and tell me which one should be the main profile.";
+
+def merge_claim_first($fn; $m; $proof):
   { subject: "Your Muso credit request: a second profile with your name",
-    segs: [ {p: "Hi \($fn), the credits you asked about are listed on another Muso profile with your name, the one linked to the Spotify artist page for these tracks: https://credits.muso.ai/profile/\($m.link_profile_id). If that profile is also you, claim it first and tell me which one should be the main profile."},
+    segs: [ {p: mcf_first_paragraph($fn; $m; $proof)},
             {p: "Merges work like this: claim every profile that is yours first (so we know they're all you), then tell me which one should be the main profile. The merge is done by our verification team and you get a message in this conversation when it's complete; credits from the duplicates move onto the main profile. Profiles claimed by someone else, and company or label profiles, are handled differently: I'll pass those on."},
             {p: "Thank you, Caroline, Muso Support"} ] };
 # credit-hold-status / claim-proof-pending (Fable copy-owing-proof-1027 S1 / S2, verbatim): one sentence each,
@@ -2074,7 +2088,9 @@ def gap_ask($fn; $c; $maxl):
    elif $copy == "claimask7" then claim_ask_reminder($fn; .claim)
    elif $copy == "claimstatus" then claim_status_note($fn; .claim)
    elif $copy == "mergepending" then merge_pending($fn; .merge)
-   elif $copy == "mergeclaimfirst" then merge_claim_first($fn; .merge)
+   # r5 fable-copy-1103-r5/mcf-proof-ack: the ack sentence is rendered from a required fact; no boolean fact = no note.
+   elif $copy == "mergeclaimfirst" then
+     (if ($mcfproof | type) != "boolean" then error("mcf_proof_unreadable") else merge_claim_first($fn; .merge; $mcfproof) end)
    elif $copy == "claimpending" then claim_proof_pending($fn; .claim)
    elif $copy == "credithold" then credit_hold_status($fn; .credits; $maxl)
    elif $copy == "teamreviewcount" then status_team_review_count($fn; (.user.pending_count // (.credits | length)))
@@ -2104,6 +2120,7 @@ JQ
 readonly RENDER_JQ
 render() { # <input-json> -> {subject, text, html}
   printf '%s' "$1" | "$JQ_BIN" -c --argjson maxl "$MAX_LISTED" --arg copy "$COPY" --arg kind "$KIND" \
+    --arg ack "$MERGE_CLAIM_FIRST_PROOF_ACK" --argjson mcfproof "${MCF_PROOF:-null}" \
     --arg due "$DUE_LABEL" --argjson rt "$REJECTION_TEXT" --arg mtype "$MESSAGE_TYPE" --arg day "$DAY" "$RENDER_JQ"
 }
 
@@ -2214,6 +2231,43 @@ with_c2() { # <rendered-json> -> the same note with the /c2 sentence first; sing
     (if (.text | test("your credit requests ")) then $many else $one end) as $p
     | .html = "<p>" + $p + "</p>" + .html | .text = $p + "\n\n" + .text'
 }
+# r5 fable-copy-1103-r5/mcf-proof-ack pin (a): merge-claim-first's body cannot be built without the recipient's
+# documents-on-file fact, read HERE - one read per recipient, in this pass, from our own stores against the named
+# request's own creation time. Absent or unreadable = refusal, never a blank and never a body without the sentence.
+# mcf_proof_read <contact-id|"">: prints true|false. An empty contact reads the ledger's newest-note contact (the
+# render pass runs before the recipient is resolved); anything else reads THAT contact. Every failure is a named
+# refusal by the caller, never a blank.
+mcf_proof_read() {
+  [ -r "$COMM_STATE_HELPER" ] || return 90
+  local -a args=(proof-on-file --user-id "$USER_ID" --request-ids "$ALL_IDS")
+  [ -z "${1:-}" ] || args+=(--contact-id "$1")
+  local pf rc
+  set +e
+  pf="$("$PY_BIN" -I "$COMM_STATE_HELPER" "${args[@]}" 2>/dev/null)"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || return "$rc"
+  # jq failure is a REFUSAL with a named reason by the caller, not this script's exit status
+  printf '%s' "$pf" | "$JQ_BIN" -r 'if (.proof_on_file | type) == "boolean" then .proof_on_file else empty end' 2>/dev/null || true
+}
+mfcfail() { # <rc> <contact>: one refusal reason, whatever the read said
+  if [ "$1" = "90" ]; then
+    refuse "mcf_proof_unreadable: the documents-on-file fact cannot be read ($COMM_STATE_HELPER is missing). Nothing was sent or claimed."
+  fi
+  refuse "mcf_proof_unreadable: the documents-on-file fact could not be read (rc=$1, contact=${2:-ledger}). Nothing was sent or claimed."
+}
+MCF_PROOF="" MCF_SET=0 MCF_CONTACT=""
+if [ "$CAMPAIGN" = "merge-claim-first" ]; then
+  set +e
+  MCF_PROOF="$(mcf_proof_read "")"
+  pf_rc=$?
+  set -e
+  [ "$pf_rc" -eq 0 ] || mfcfail "$pf_rc" ""
+  case "$MCF_PROOF" in
+    true|false) MCF_SET=1 ;;
+    *) refuse "mcf_proof_unreadable: the documents-on-file fact is missing or not a boolean; the acknowledgement cannot be rendered honestly. Nothing was sent or claimed." ;;
+  esac
+fi
 RENDERED="$(render "$INPUT")"
 [ -z "$C2" ] || RENDERED="$(with_c2 "$RENDERED")"
 [ "$GMO" != 1 ] || RENDERED="$(with_o "$RENDERED")"
@@ -2572,6 +2626,32 @@ NIE_PHRASE="$(printf '%s' "$RENDERED" | "$JQ_BIN" -r '(.subject // "") + " " + (
 if [ -n "$NIE_PHRASE" ]; then
   NIE=1; NIE_BODY=1
 fi
+# QA #1660 (important): the note must be rendered from the fact of the contact it is actually going to, and that
+# contact is only resolved above. Until now the render read fell back to the ledger's newest-note contact, so a FIRST
+# CONTACT recipient whose only proof is an Intercom attachment rendered WITHOUT the sentence this PR exists to add
+# (render=false, state=true). Re-read on the resolved contact and re-render on it; the guard below then compares one
+# fact read twice instead of two different ones.
+if [ "$MCF_SET" = "1" ] && [ -n "${CONTACT_ID:-}" ] && [ "$CONTACT_ID" != "$MCF_CONTACT" ]; then
+  MCF_CONTACT="$CONTACT_ID"
+  set +e
+  MCF_PROOF2="$(mcf_proof_read "$CONTACT_ID")"
+  pf2_rc=$?
+  set -e
+  [ "$pf2_rc" -eq 0 ] || mfcfail "$pf2_rc" "$CONTACT_ID"
+  case "$MCF_PROOF2" in
+    true|false) ;;
+    *) refuse "mcf_proof_unreadable: the documents-on-file fact for contact $CONTACT_ID is missing or not a boolean. Nothing was sent or claimed." ;;
+  esac
+  if [ "$MCF_PROOF2" != "$MCF_PROOF" ]; then
+    MCF_PROOF="$MCF_PROOF2"
+    RENDERED="$(render "$INPUT")"
+    [ -z "$C2" ] || RENDERED="$(with_c2 "$RENDERED")"
+    [ "$GMO" != 1 ] || RENDERED="$(with_o "$RENDERED")"
+    leak="$(leak_reason "$RENDERED")"
+    [ -z "$leak" ] || record_refusal "the rendered note contains $leak (from a track title, artist or role). Customers never see internal surfaces; this note is not sent and the credits are recorded as refused for a human to look at."
+    printf 'NOTE proofs=rerendered contact=%s proof_on_file=%s (the render fact was re-read on the resolved recipient)\n' "$CONTACT_ID" "$MCF_PROOF" >&2
+  fi
+fi
 NIE_ARGS=(); [ "$NIE_BODY" = "1" ] && NIE_ARGS=(--nothing-needed-body)
 C2_ARGS=(); [ -n "${C2:-}" ] && C2_ARGS=(--correction)
 if { [ "$GOLIVE" = "1" ] || [ "$NIE" = "1" ]; } && [ "$LIVE" = "1" ]; then
@@ -2604,6 +2684,28 @@ if { [ "$GOLIVE" = "1" ] || [ "$NIE" = "1" ]; } && [ "$LIVE" = "1" ]; then
          "$([ "$NIE_BODY" = "1" ] && printf ' [owes-nothing check by body: the rendered note says "%s"]' "$NIE_PHRASE")"; exit 3 ;;
     *) printf 'COMM STATE CHECK FAILED (rc=%s); nothing was sent or claimed: %s\n' "$cs_rc" "${CS:0:300}" >&2; exit 4 ;;
   esac
+  # r5 fable-copy-1103-r5/mcf-proof-ack: the state check reads the same stores; two reads that disagree about a
+  # document on file mean the fact is not trustworthy, so the body (which may already say it) is not sent.
+  if [ "$CAMPAIGN" = "merge-claim-first" ]; then
+    cs_proof="$(printf '%s' "$CS" | "$JQ_BIN" -r 'if (.proof_on_file | type) == "boolean" then .proof_on_file else empty end' 2>/dev/null)"
+    case "$cs_proof" in
+      true|false)
+        # QA #1660 (important): both reads now use the SAME Intercom contact (the render fact is re-read on the resolved
+        # recipient above), so a disagreement is a contradiction about one contact - the fact is not trustworthy and
+        # neither body is sent. A body asserting documents we cannot confirm is the dangerous direction; a body
+        # WITHOUT the sentence when the documents ARE on file is the copy defect this PR fixes. Both are refusals.
+        if [ "$MCF_PROOF" != "$cs_proof" ]; then
+          refuse "mcf_proof_disagrees: the documents-on-file fact is not stable across the render and state reads of contact ${CONTACT_ID:-?} (render=$MCF_PROOF, state=$cs_proof). Nothing was sent or claimed."
+        fi ;;
+      *) refuse "mcf_proof_unreadable: the state check did not return the documents-on-file fact; the acknowledgement cannot be verified. Nothing was sent or claimed." ;;
+    esac
+    # QA #1660 b: the fact counts the files the customer sent us in Intercom, but nothing is filed in intake yet. The
+    # note goes out WITH the acknowledgement (it is true: they sent us the documents), and a human is told that the
+    # only evidence is Intercom so the intake work is not silently skipped.
+    case ",$(printf '%s' "$CS" | "$JQ_BIN" -r '(.proof_note // []) | join(",")' 2>/dev/null || true)," in
+      *,intercom_only_proof,*) printf 'NOTE proofs=intercom_only (the documents the customer sent us are on file in Intercom only, not in intake yet)\n' >&2 ;;
+    esac
+  fi
   if [ -n "$REPLY_DUE" ]; then
     RD_PRIOR="$(printf '%s' "$CS" | "$JQ_BIN" -r '.reply_due.prior_note.part // empty' 2>/dev/null)"
     RD_ACT="$(printf '%s' "$CS" | "$JQ_BIN" -r '.reply_due.assignee.action // empty' 2>/dev/null)"
