@@ -7,3 +7,7 @@ PyMuPDF==1.27.2.2
 numpy==2.4.3
 openpyxl==3.1.5
 dnspython==2.8.0
+# tests/ outreach sender suite (pr-validate py-tests); node-8: pytest 7.4.4, pluggy 1.6.0, iniconfig 2.3.0
+pytest==7.4.4
+pluggy==1.6.0
+iniconfig==2.3.0

@@ -69,7 +69,7 @@ skill (REST API, no MCP — see `config.md`), filter:
 ```bash
 bash scripts/nocodb-api.sh records.ls m9vsbijhrr9ddeu \
   --where "(Status,blank)" \
-  --fields "Id,Domain,Company Name,First Name,Last Name,Title,Job Category,Rank,Valid Professional Email"
+  --fields "Id,Row ID,Domain,Company Name,First Name,Last Name,Title,Job Category,Rank,Valid Professional Email"
 ```
 
 Apply the exclusion set. Drop matches.
@@ -153,6 +153,14 @@ reason code. Fix and re-approve; do NOT bypass.
 
 
 See `docs/runbooks/RUNBOOK-outreach-sender-worker.md` for ops details.
+
+### Review-only drafts
+
+When McLaren, Nick or Aaron ask for drafts "unsent, for my review" and send
+metadata cannot be built, create the drafts with the `B2B - Ads` label and
+without any `muso-meta/*` labels or JSON comment. The worker refuses them
+(`METADATA_MISSING`), so they stay review-only. Never stop the batch on
+metadata. To send one later, re-create it with full metadata after approval.
 
 ## Constraints
 

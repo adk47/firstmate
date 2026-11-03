@@ -19,7 +19,9 @@ from .config import (
     OUTREACH_LABEL,
 )
 from .metadata import parse_from_draft
-from .types import Kind, Metadata
+import re
+
+from .types import ContactRow, Kind, Metadata, NocoContact
 
 
 def _safe_slack(fn, *args, fallback_tag: str = "") -> None:
@@ -60,6 +62,7 @@ class ProcessResult:
 class Adapters(Protocol):
     gmail: object
     sheets: object
+    nocodb: object
     slack: object
     ghl: object
 
@@ -78,10 +81,39 @@ def _fetch_thread(meta: Metadata, adapters) -> Optional[object]:
     return adapters.gmail.fetch_thread(meta.original_thread_id, meta.sender)
 
 
-def _fetch_contact_row(meta: Metadata, adapters) -> Optional[object]:
+def _fetch_noco(meta: Metadata, adapters) -> Optional[NocoContact]:
+    """NocoDB record for a NocoDB-keyed draft. A record whose Row ID differs
+    from the draft's is a different contact: treat it as not found."""
+    if meta.nocodb_id is None:
+        return None
+    rec = adapters.nocodb.get_contact(meta.nocodb_id)
+    if rec is None or rec.row_id != meta.row_id:
+        return None
+    return rec
+
+
+def _fetch_contact_row(meta: Metadata, adapters, noco=None) -> Optional[ContactRow]:
     if meta.kind is not Kind.NEW:
         return None
+    if meta.nocodb_id is not None:
+        if noco is None:
+            return None
+        return ContactRow(noco.row_id, noco.valid_professional_email)
     return adapters.sheets.get_contact_by_row_id(meta.sheet_row_id)
+
+
+_FOLLOW_UP_STATUS_RE = re.compile(r"Follow Up (\d+)")
+
+
+def prior_followups(meta: Metadata, adapters, noco=None) -> int:
+    """Follow-ups already sent to this contact. NocoDB keys take the larger
+    of the logbook count and the NocoDB Status ("Follow Up N"): the status
+    can only make the cap stricter."""
+    if meta.nocodb_id is None:
+        return adapters.sheets.count_prior_followups(meta.sheet_row_id)
+    logged = adapters.sheets.count_prior_followups_by_token(f"nocodb:{meta.nocodb_id}")
+    m = _FOLLOW_UP_STATUS_RE.fullmatch(noco.status) if noco else None
+    return max(logged, int(m.group(1)) if m else 0)
 
 
 def _fetch_inbound(meta: Metadata, draft, adapters) -> tuple:
@@ -94,8 +126,19 @@ def _fetch_inbound(meta: Metadata, draft, adapters) -> tuple:
     )
 
 
-def _run_all_gates(draft, meta, thread, contact_row, adapters) -> gates.GateResult:
+def _run_all_gates(draft, meta, thread, contact_row, adapters, noco=None) -> gates.GateResult:
     """Run gates A–G in order; first failure wins."""
+    if meta.nocodb_id is not None and noco is None:
+        # Follow-ups take the recipient from the thread, but the Status cap
+        # lives on the NocoDB record: no usable record means no send.
+        return gates.GateResult(
+            passed=False,
+            reason_code=gates.RECIPIENT_SOURCE_MISSING,
+            reason_human=(
+                f"{gates._contact_ref(meta)} was not found in NocoDB "
+                "(or its Row ID differs from the draft's)."
+            ),
+        )
     a = gates.gate_a_recipient_match(draft, meta, thread, contact_row)
     if not a.passed:
         return a
@@ -115,7 +158,7 @@ def _run_all_gates(draft, meta, thread, contact_row, adapters) -> gates.GateResu
         return d
     prior = 0
     if meta.kind is Kind.FOLLOWUP:
-        prior = adapters.sheets.count_prior_followups(meta.sheet_row_id)
+        prior = prior_followups(meta, adapters, noco)
     e = gates.gate_e_followup_cap(prior, cap=MAX_FOLLOWUPS_PER_CONTACT)
     if not e.passed:
         return e
@@ -131,7 +174,10 @@ def _build_logbook_row(draft, meta, sent_message_id: str) -> list:
     date_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
     domain = (draft.to_addrs[0].split("@")[-1] if draft.to_addrs else "")
     action = "Follow-Up Sent" if meta.kind is Kind.FOLLOWUP else "Sent"
-    notes = f"row:{meta.sheet_row_id} template:{meta.template}"
+    if meta.nocodb_id is not None:
+        notes = f"nocodb:{meta.nocodb_id} row_id:{meta.row_id} template:{meta.template}"
+    else:
+        notes = f"row:{meta.sheet_row_id} template:{meta.template}"
     if meta.override_reason:
         notes += f" override:{meta.override_reason[:120]}"
     return [
@@ -185,9 +231,10 @@ def process_draft(draft_id: str, account: str, adapters) -> ProcessResult:
         )
 
     thread = _fetch_thread(meta, adapters)
-    contact_row = _fetch_contact_row(meta, adapters)
+    noco = _fetch_noco(meta, adapters)
+    contact_row = _fetch_contact_row(meta, adapters, noco)
 
-    gate_result = _run_all_gates(draft, meta, thread, contact_row, adapters)
+    gate_result = _run_all_gates(draft, meta, thread, contact_row, adapters, noco)
     if not gate_result.passed:
         _safe_slack(
             adapters.slack.post_sales_alert,
@@ -243,10 +290,12 @@ def process_draft(draft_id: str, account: str, adapters) -> ProcessResult:
     # For now: skip the sync entirely rather than 400 GHL on every send.
     # Fede's runbook step "Advance the opp manually" remains the interim process.
     # TODO(outreach-sender): wire in stage-id lookup and re-enable.
+    opp_hint = (f"advance opp `{meta.opp_id}` manually" if meta.opp_id
+                else "no GHL opp yet — create it manually")
     _safe_slack(
         adapters.slack.post_sales_alert,
         f":information_source: Draft `{draft_id}` sent + logged. "
-        f"GHL sync deferred - advance opp `{meta.opp_id}` manually "
+        f"GHL sync deferred - {opp_hint} "
         "(see runbook).",
         fallback_tag="ghl-deferred-info",
     )
@@ -326,3 +375,48 @@ def process_batch(draft_ids: list[str], account: str, adapters) -> BatchReport:
     )
     return BatchReport(sent_count=sent, blocked_count=blocked,
                        send_failed_count=send_failed, batch_halted=halted)
+
+
+def dry_run(labels: tuple[str, ...], adapters) -> tuple[list[str], int]:
+    """Parse draft labels and look the contact up, with no side effects.
+
+    Returns (output lines, exit code): 0 when the contact is found (and its
+    Row ID matches), 1 when the labels do not parse or it is not. Only read calls
+    are made (NocoDB / sheet lookups). The contact's email is never printed.
+    """
+    from .types import Draft
+    stub = Draft("dry-run", "", (), (), (), "", tuple(labels), None)
+    try:
+        meta, _ = parse_from_draft(stub)
+    except ValueError as e:
+        return [f"metadata_error={e.args[0]}"], 1
+    lines = [
+        f"kind={meta.kind.value}",
+        f"nocodb_id={meta.nocodb_id}",
+        f"row_id={meta.row_id}",
+        f"sheet_row_id={meta.sheet_row_id}",
+        f"opp_id={meta.opp_id}",
+        f"template={meta.template}",
+        f"sender={meta.sender}",
+        f"thread={meta.original_thread_id}",
+    ]
+    if meta.nocodb_id is not None:
+        rec = adapters.nocodb.get_contact(meta.nocodb_id)
+        found = rec is not None
+        match = found and rec.row_id == meta.row_id
+        noco = rec if match else None
+        email = bool(noco and noco.valid_professional_email)
+    elif meta.kind is Kind.NEW:
+        row = adapters.sheets.get_contact_by_row_id(meta.sheet_row_id)
+        found, match, noco = row is not None, "n/a", None
+        email = bool(row and row.valid_professional_email)
+    else:
+        found, match, noco, email = True, "n/a", None, "n/a"
+    lines += [
+        f"contact_found={str(found).lower()}",
+        f"row_id_match={str(match).lower() if isinstance(match, bool) else match}",
+        f"email_present={str(email).lower() if isinstance(email, bool) else email}",
+    ]
+    if meta.kind is Kind.FOLLOWUP:
+        lines.append(f"prior={prior_followups(meta, adapters, noco)}")
+    return lines, 0 if found and match is not False else 1

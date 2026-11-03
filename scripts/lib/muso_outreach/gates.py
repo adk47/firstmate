@@ -38,6 +38,12 @@ def _first_outgoing_muso(thread: Thread) -> Optional[object]:
     return None
 
 
+def _contact_ref(meta) -> str:
+    if meta.nocodb_id is not None:
+        return f"NocoDB contact Id {meta.nocodb_id} (Row ID {meta.row_id})"
+    return f"Sheet row {meta.sheet_row_id}"
+
+
 def gate_a_recipient_match(
     draft: Draft,
     meta: Metadata,
@@ -70,8 +76,9 @@ def gate_a_recipient_match(
                 passed=False,
                 reason_code=RECIPIENT_SOURCE_MISSING,
                 reason_human=(
-                    f"Sheet row {meta.sheet_row_id} has no valid_professional_email. "
-                    "Update the sheet or drop this draft."
+                    f"{_contact_ref(meta)} has no valid_professional_email "
+                    "(or the contact was not found). "
+                    "Update the contact or drop this draft."
                 ),
             )
         expected = _norm(contact_row.valid_professional_email)

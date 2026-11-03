@@ -15,6 +15,9 @@ LOGBOOK_SHEET_ID = "1o1aUpAhQ8tNuZtzWqUm9bOUFvyPaGrCHbImbB4mtmW0"
 # filter views and formulas, so we match the sheet as-is.
 LOGBOOK_TAB = "Logobook"
 
+# NocoDB (Contacts Intelligence table; read-only from the worker)
+CONTACTS_NOCODB_TABLE = "m9vsbijhrr9ddeu"
+
 # Gmail
 OUTREACH_LABEL = "B2B - Ads"
 AUTO_FU_APPROVED_LABEL = "B2B - Ads/auto-fu-approved"

@@ -254,10 +254,11 @@ Before handing an email back to sender, verify:
 After generating the HTML body, ALWAYS append this HTML comment at the
 very bottom of `body_html`:
 
-    <!-- muso-outreach:v1 {"kind":"new","sheet_row_id":<N>,"opp_id":"<X>","template":"<T>","sender":"a@muso.ai","original_thread_id":null} -->
+    <!-- muso-outreach:v1 {"kind":"new","nocodb_id":<Id>,"row_id":"<Row ID>","opp_id":null,"template":"<T>","sender":"a@muso.ai","original_thread_id":null} -->
 
-(For follow-ups, use `"kind":"followup"` and set `"original_thread_id"`
-to the original thread's ID.)
+(For follow-ups, use `"kind":"followup"`, set `"opp_id"` to the GHL opp
+and `"original_thread_id"` to the original thread's ID. A new contact has
+no opp yet, so `"opp_id"` stays null.)
 
 When creating the Gmail draft via `gog gmail drafts create`, ALWAYS
 also apply the full set of `muso-meta/*` labels described in

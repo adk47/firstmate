@@ -117,15 +117,19 @@ worker (see `scripts/muso-outreach-sender-worker.py`).
 
 **Labels (primary):**
 - `muso-meta/kind-followup` or `muso-meta/kind-new`
-- `muso-meta/row-<sheet_row_id>`
-- `muso-meta/opp-<ghl_opp_id>`
+- `muso-meta/nocodb_id-<Id>` (NocoDB Contacts Intelligence `Id`, digits only)
+- `muso-meta/row_id-<Row ID>` (the same record's `Row ID`, e.g. `dangjf643`)
+- `muso-meta/opp-<ghl_opp_id>` (required for follow-ups; omit for a new contact, ghl-sync creates the opp after the send)
 - `muso-meta/template-<template_key>`
 - `muso-meta/sender-<a_at_muso.ai>` (replace `@` with `_at_`)
 - `muso-meta/thread-<thread_id>` (follow-ups only)
+- `muso-meta/row-<int>`: **legacy, read-only for in-flight drafts, never create.** It is the int row of the retired sheet tab. A draft with both `nocodb_id` and `row` is refused (`METADATA_LABEL_DISAGREE`).
 
 **JSON comment (fallback):**
 
-    <!-- muso-outreach:v1 {"kind":"followup","sheet_row_id":1234,"opp_id":"abc","template":"FU-01","sender":"a@muso.ai","original_thread_id":"1812f..."} -->
+    <!-- muso-outreach:v1 {"kind":"new","nocodb_id":2,"row_id":"dangjf643","opp_id":null,"template":"PrivateInvite","sender":"a@muso.ai","original_thread_id":null} -->
+
+(Legacy drafts carry `"sheet_row_id":1234` instead of `nocodb_id`/`row_id`.)
 
 The worker prefers labels (they survive body edits). If the two
 disagree, the worker blocks the draft with code `METADATA_LABEL_DISAGREE`.

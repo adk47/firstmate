@@ -18,7 +18,10 @@ import pytest
 
 from scripts.lib.muso_outreach import worker
 from scripts.lib.muso_outreach.types import Kind
-from tests.conftest import make_contact_row, make_draft, make_message, make_metadata, make_thread
+from tests.conftest import (
+    make_contact_row, make_draft, make_message, make_metadata, make_noco_contact,
+    make_thread,
+)
 
 
 class Adapters:
@@ -26,6 +29,7 @@ class Adapters:
     def __init__(self):
         self.gmail = MagicMock()
         self.sheets = MagicMock()
+        self.nocodb = MagicMock()
         self.slack = MagicMock()
         self.ghl = MagicMock()
 
@@ -33,13 +37,16 @@ class Adapters:
 def _labels_for(meta):
     kind_label = f"muso-meta/kind-{meta.kind.value}"
     sender_label = f"muso-meta/sender-{meta.sender.replace('@', '_at_')}"
+    key_labels = (
+        [f"muso-meta/nocodb_id-{meta.nocodb_id}", f"muso-meta/row_id-{meta.row_id}"]
+        if meta.nocodb_id is not None else [f"muso-meta/row-{meta.sheet_row_id}"])
     labels = [
-        "B2B - Ads", kind_label,
-        f"muso-meta/row-{meta.sheet_row_id}",
-        f"muso-meta/opp-{meta.opp_id}",
+        "B2B - Ads", kind_label, *key_labels,
         f"muso-meta/template-{meta.template}",
         sender_label,
     ]
+    if meta.opp_id:
+        labels.append(f"muso-meta/opp-{meta.opp_id}")
     if meta.kind is Kind.FOLLOWUP:
         labels.append(f"muso-meta/thread-{meta.original_thread_id}")
     return tuple(labels)
@@ -255,3 +262,171 @@ def test_batch_halts_after_two_consecutive_send_failures(monkeypatch):
     # r3 never attempted.
     fetched = {call.args[0] for call in a.gmail.fetch_draft.call_args_list}
     assert "r3" not in fetched
+
+
+# --- NocoDB-keyed drafts ---------------------------------------------------
+
+def _noco_meta(kind=Kind.NEW, **kw):
+    return make_metadata(kind=kind, sheet_row_id=None, nocodb_id=2,
+                         row_id="dangjf643", opp_id=None if kind is Kind.NEW else "abc",
+                         template="PrivateInvite" if kind is Kind.NEW else "FU-01",
+                         original_thread_id=None if kind is Kind.NEW else "t1", **kw)
+
+
+def _noco_new(a, record=None, to=("ow@larsenstrings.com",)):
+    meta = _noco_meta()
+    a.gmail.fetch_draft.return_value = make_draft(labels=_labels_for(meta), to=to)
+    a.gmail.search_inbound_from.return_value = ()
+    a.gmail.send_draft.return_value = "sent-msg-id"
+    a.nocodb.get_contact.return_value = record or make_noco_contact()
+    return meta
+
+
+def test_nocodb_new_draft_looks_up_nocodb_not_sheets(monkeypatch):
+    a = Adapters()
+    _noco_new(a)
+    monkeypatch.setattr(worker, "NOW_EPOCH", lambda: 1776096000)
+    result = worker.process_draft("r1", "a@muso.ai", a)
+    assert result.sent, result
+    a.nocodb.get_contact.assert_called_once_with(2)
+    a.sheets.get_contact_by_row_id.assert_not_called()
+    row = a.sheets.append_logbook_row.call_args.args[0]
+    assert row[-1] == "nocodb:2 row_id:dangjf643 template:PrivateInvite"
+
+
+def test_no_opp_slack_line_says_create_manually(monkeypatch):
+    a = Adapters()
+    _noco_new(a)
+    monkeypatch.setattr(worker, "NOW_EPOCH", lambda: 1776096000)
+    worker.process_draft("r1", "a@muso.ai", a)
+    msgs = [c.args[0] for c in a.slack.post_sales_alert.call_args_list]
+    assert any("no GHL opp yet" in m and "create it manually" in m for m in msgs)
+    assert not any("None" in m for m in msgs)
+
+
+def test_row_id_mismatch_blocks_at_gate_a(monkeypatch):
+    a = Adapters()
+    _noco_new(a, record=make_noco_contact(row_id="someoneelse"))
+    monkeypatch.setattr(worker, "NOW_EPOCH", lambda: 1776096000)
+    result = worker.process_draft("r1", "a@muso.ai", a)
+    assert not result.sent
+    assert result.reason_code == "RECIPIENT_SOURCE_MISSING"
+    assert "NocoDB contact Id 2" in result.reason_human
+    a.gmail.send_draft.assert_not_called()
+
+
+def test_contact_not_found_blocks_at_gate_a(monkeypatch):
+    a = Adapters()
+    _noco_new(a)
+    a.nocodb.get_contact.return_value = None
+    monkeypatch.setattr(worker, "NOW_EPOCH", lambda: 1776096000)
+    result = worker.process_draft("r1", "a@muso.ai", a)
+    assert result.reason_code == "RECIPIENT_SOURCE_MISSING"
+    a.gmail.send_draft.assert_not_called()
+
+
+def test_nocodb_error_raises_before_any_send(monkeypatch):
+    a = Adapters()
+    _noco_new(a)
+    a.nocodb.get_contact.side_effect = RuntimeError("nocodb down")
+    with pytest.raises(RuntimeError):
+        worker.process_draft("r1", "a@muso.ai", a)
+    a.gmail.send_draft.assert_not_called()
+
+
+def _noco_followup(a, status, logged):
+    meta = _noco_meta(Kind.FOLLOWUP)
+    a.gmail.fetch_draft.return_value = make_draft(labels=_labels_for(meta))
+    a.gmail.fetch_thread.return_value = make_thread(messages=(
+        make_message(from_addr="a@muso.ai", to_addrs=("ow@larsenstrings.com",),
+                     date_epoch=100),))
+    a.gmail.send_draft.return_value = "sent-msg-id"
+    a.nocodb.get_contact.return_value = make_noco_contact(status=status)
+    a.sheets.count_prior_followups_by_token.return_value = logged
+
+
+def test_followup_cap_takes_max_of_logbook_and_status(monkeypatch):
+    monkeypatch.setattr(worker, "NOW_EPOCH", lambda: 1776096000)
+    a = Adapters()
+    _noco_followup(a, status="Follow Up 3", logged=1)
+    result = worker.process_draft("r1", "a@muso.ai", a)
+    assert not result.sent
+    assert result.reason_code == "FOLLOWUP_CAP_REACHED"
+    a.sheets.count_prior_followups_by_token.assert_called_once_with("nocodb:2")
+    # logbook alone also hits the cap; a lower status never loosens it
+    b = Adapters()
+    _noco_followup(b, status="Follow Up 1", logged=3)
+    assert worker.process_draft("r1", "a@muso.ai", b).reason_code == "FOLLOWUP_CAP_REACHED"
+    # under the cap on both -> sends
+    c = Adapters()
+    _noco_followup(c, status="Emailed", logged=1)
+    assert worker.process_draft("r1", "a@muso.ai", c).sent
+
+
+def test_legacy_draft_still_uses_sheets_path(monkeypatch):
+    a = Adapters()
+    _happy_followup(a)
+    monkeypatch.setattr(worker, "NOW_EPOCH", lambda: 1776096000)
+    assert worker.process_draft("r1", "a@muso.ai", a).sent
+    a.sheets.count_prior_followups.assert_called_once_with(1234)
+    a.nocodb.get_contact.assert_not_called()
+    assert a.sheets.append_logbook_row.call_args.args[0][-1] == "row:1234 template:FU-01"
+
+
+def _logbook(monkeypatch, notes):
+    from scripts.lib.muso_outreach import sheets_client
+    header = ["Action", "Hook / Notes"]
+    rows = [header] + [["Follow-Up Sent", n] for n in notes]
+    monkeypatch.setattr(sheets_client, "_run_gog",
+                        lambda *a: __import__("json").dumps({"values": rows}))
+    return sheets_client
+
+
+def test_logbook_token_match_is_whole_token(monkeypatch):
+    sc = _logbook(monkeypatch, ["nocodb:12 row_id:x template:T",
+                                "nocodb:1 row_id:y template:T",
+                                "foo nocodb:1", "xnocodb:1"])
+    assert sc.count_prior_followups_by_token("nocodb:1") == 2
+    assert sc.count_prior_followups_by_token("nocodb:12") == 1
+
+
+def test_legacy_logbook_needle_is_whole_token(monkeypatch):
+    sc = _logbook(monkeypatch, ["row:12 template:T", "row:1 template:T"])
+    assert sc.count_prior_followups(1) == 1
+
+
+def _noco_followup_record(a, record):
+    meta = _noco_meta(kind=Kind.FOLLOWUP)
+    a.gmail.fetch_draft.return_value = make_draft(labels=_labels_for(meta))
+    a.gmail.fetch_thread.return_value = make_thread(messages=(
+        make_message(from_addr="a@muso.ai",
+                     to_addrs=("ow@larsenstrings.com",), date_epoch=100),
+    ))
+    a.gmail.send_draft.return_value = "sent-msg-id"
+    a.sheets.count_prior_followups_by_token.return_value = 0
+    a.nocodb.get_contact.return_value = record
+    return meta
+
+
+@pytest.mark.parametrize("record", [
+    None,
+    make_noco_contact(row_id="other", status="Follow Up 3"),
+], ids=["not-found", "row-id-mismatch"])
+def test_nocodb_followup_with_unusable_record_is_blocked(monkeypatch, record):
+    """The Status cap is read from NocoDB: a follow-up whose record is gone or
+    belongs to another contact must not send with that cap silently dropped
+    (dry-run reports contact_found=false for the same labels)."""
+    a = Adapters()
+    _noco_followup_record(a, record)
+    monkeypatch.setattr(worker, "NOW_EPOCH", lambda: 1776096000)
+    result = worker.process_draft("r1", "a@muso.ai", a)
+    assert not result.sent
+    assert result.reason_code == "RECIPIENT_SOURCE_MISSING"
+    a.gmail.send_draft.assert_not_called()
+
+
+def test_nocodb_followup_with_matching_record_still_sends(monkeypatch):
+    a = Adapters()
+    _noco_followup_record(a, make_noco_contact(status="Follow Up 1"))
+    monkeypatch.setattr(worker, "NOW_EPOCH", lambda: 1776096000)
+    assert worker.process_draft("r1", "a@muso.ai", a).sent

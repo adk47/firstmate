@@ -9,6 +9,7 @@ gog surface (v0.12.0, verified 2026-04-14):
 from __future__ import annotations
 
 import json
+import re
 from typing import Optional
 
 from ._gog import run_gog
@@ -37,14 +38,20 @@ def get_contact_by_row_id(row_id: int, account: str = "a@muso.ai") -> Optional[C
             continue
         if str(row[idx_row]).strip() != str(row_id):
             continue
-        return ContactRow(row_id=row_id,
+        return ContactRow(row_id=str(row_id),
                           valid_professional_email=(row[idx_email] or "").strip())
     return None
 
 
 def count_prior_followups(sheet_row_id: int, account: str = "a@muso.ai") -> int:
-    """Scan the logbook for Action='Follow-Up Sent' rows with this
-    sheet_row_id embedded in the notes or contact column."""
+    """Legacy key: count follow-ups logged with the token `row:<id>`."""
+    return count_prior_followups_by_token(f"row:{sheet_row_id}", account)
+
+
+def count_prior_followups_by_token(token: str, account: str = "a@muso.ai") -> int:
+    """Scan the logbook for Action='Follow-Up Sent' rows whose notes carry
+    `token` as a whole whitespace-delimited token (`nocodb:1` must not
+    count `nocodb:12`)."""
     out = _run_gog("sheets", "get", LOGBOOK_SHEET_ID,
                    f"{LOGBOOK_TAB}!A:Z",
                    "--account", account, "--json")
@@ -58,12 +65,12 @@ def count_prior_followups(sheet_row_id: int, account: str = "a@muso.ai") -> int:
         idx_notes = header.index("Hook / Notes")
     except ValueError:
         return 0
-    needle = f"row:{sheet_row_id}"
+    needle = re.compile(rf"(^|\s){re.escape(token)}(\s|$)")
     count = 0
     for row in rows[1:]:
         if len(row) <= max(idx_action, idx_notes):
             continue
-        if row[idx_action].strip() == "Follow-Up Sent" and needle in (row[idx_notes] or ""):
+        if row[idx_action].strip() == "Follow-Up Sent" and needle.search(row[idx_notes] or ""):
             count += 1
     return count
 

@@ -22,6 +22,15 @@ CMO agent creates drafts; this worker sends them.
       /opt/hydra/scripts/muso-outreach-sender-worker.py \
         --label "B2B - Ads/auto-fu-approved" --account a@muso.ai
 
+- **Check a draft's metadata without sending:** pass its labels to the
+  dry run. It parses them, looks the NocoDB contact up (read-only) and
+  prints `contact_found`, `row_id_match`, `email_present` and the
+  follow-up `prior`. It sends, logs and alerts nothing, and never prints
+  the email. Exit 0 = found, 1 = not found or bad labels.
+
+      /opt/hydra/scripts/muso-outreach-sender-worker.py --dry-run \
+        --meta-labels "muso-meta/kind-new,muso-meta/nocodb_id-2,muso-meta/row_id-dangjf643,muso-meta/template-PrivateInvite,muso-meta/sender-a_at_muso.ai"
+
 ## Reading the output
 
 After every run the worker posts a batch summary to `#sales-alerts`:

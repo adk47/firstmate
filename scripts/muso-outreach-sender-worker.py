@@ -7,6 +7,10 @@ Usage:
 
   muso-outreach-sender-worker.py --draft-id r1234 --account a@muso.ai
 
+  muso-outreach-sender-worker.py --dry-run --meta-labels "muso-meta/kind-new,..."
+      Parse the labels and look the contact up. Sends, logs and alerts
+      nothing; never prints the contact's email.
+
 The worker reads drafts, validates recipient against original thread
 (for follow-ups) or against the contacts sheet (for new outreach),
 verifies no contact/human-teammate reply has landed, then sends and
@@ -23,22 +27,29 @@ import os
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
-from lib.muso_outreach import gmail_client, ghl_client, sheets_client, slack_client
-from lib.muso_outreach.worker import process_batch, process_draft
+from lib.muso_outreach import (
+    gmail_client, ghl_client, nocodb_client, sheets_client, slack_client,
+)
+from lib.muso_outreach.worker import dry_run, process_batch, process_draft
 
 
 class RealAdapters:
     gmail = gmail_client
     sheets = sheets_client
+    nocodb = nocodb_client
     slack = slack_client
     ghl = ghl_client
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--account", required=True,
+    p.add_argument("--account", default=None,
                    help="Sending Gmail account, e.g. a@muso.ai")
-    group = p.add_mutually_exclusive_group(required=True)
+    p.add_argument("--dry-run", action="store_true",
+                   help="Check draft metadata + contact lookup only (needs --meta-labels)")
+    p.add_argument("--meta-labels",
+                   help="Comma-separated draft labels, for --dry-run")
+    group = p.add_mutually_exclusive_group()
     group.add_argument("--draft-id",
                        help="Process exactly one draft by ID")
     group.add_argument("--label",
@@ -46,6 +57,17 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     a = RealAdapters()
+    if args.dry_run:
+        if not args.meta_labels or args.draft_id or args.label:
+            p.error("--dry-run takes --meta-labels and no --draft-id/--label")
+        lines, rc = dry_run(tuple(x.strip() for x in args.meta_labels.split(",")
+                                  if x.strip()), a)
+        print("\n".join(lines))
+        return rc
+    if args.meta_labels:
+        p.error("--meta-labels is only valid with --dry-run")
+    if not args.account or not (args.draft_id or args.label):
+        p.error("--account and one of --draft-id/--label are required")
     if args.draft_id:
         result = process_draft(args.draft_id, args.account, a)
         print(result)

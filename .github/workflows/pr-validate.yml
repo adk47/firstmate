@@ -1621,9 +1621,10 @@ jobs:
     # parses; this proves its health *decisions* still hold — is_processed's
     # ai:*/admin-reply/closed signals, pagination, the threshold/min-volume
     # judgement, alert-vs-no-alert, and clean exits on API/usage errors.
-    # Stdlib unittest only (no pip, no network) — same bare python3 as
-    # py-syntax. Target the module by name on purpose: a broad discover would
-    # import the pytest-based tests/ outreach suite, which has no CI deps.
+    # The watchdog step is stdlib unittest, targeted by name on purpose: a broad
+    # discover would import the pytest-based outreach tests. Those run in their
+    # own "Run outreach sender tests" step below, with pytest from
+    # scripts/ci/requirements-arc.txt.
     # 2026-10-27: ovh-hydra (see the note above `validate`). The forensics suites need
     # PyMuPDF / OpenCV / Pillow / tesseract, which node-8 had installed by hand; the pod gets
     # node-8's exact versions from scripts/ci/requirements-arc.txt.
@@ -1655,6 +1656,13 @@ jobs:
           key: hydra-pip-${{ runner.os }}-${{ hashFiles('scripts/ci/requirements-arc.txt') }}
       - name: Ensure tesseract + pinned python wheels installed
         run: bash scripts/ci/arc-toolchain.sh python
+      - name: Run outreach sender tests
+        # The ONLY code path that sends B2B outreach email: draft metadata parsing,
+        # the NocoDB contact lookup, gates A-G and the --dry-run CLI. Fakes only
+        # (MagicMock adapters, a stub nocodb-api.sh); no network, no tokens.
+        run: |
+          set -euo pipefail
+          python3 -m pytest -q tests/test_metadata.py tests/test_worker.py tests/test_gates.py tests/test_gmail_client.py tests/test_nocodb_client.py tests/test_sender_worker_cli.py
       - name: Run watchdog behavioral tests
         run: |
           set -euo pipefail

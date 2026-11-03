@@ -23,7 +23,13 @@ def _decode_label_email(value: str) -> str:
     return value.replace("_at_", "@")
 
 
+_DIGITS_RE = re.compile(r"[0-9]+")
+
+
 def _parse_labels(labels: tuple[str, ...]) -> Optional[dict]:
+    """Return the label fields, None when required labels are missing or
+    malformed (METADATA_MISSING), and raise METADATA_LABEL_DISAGREE when
+    the NocoDB and legacy key shapes are both present."""
     kv: dict = {}
     for label in labels:
         m = _LABEL_RE.match(label)
@@ -31,16 +37,31 @@ def _parse_labels(labels: tuple[str, ...]) -> Optional[dict]:
             continue
         key, value = m.group(1), m.group(2)
         kv[key] = value
-    # Required keys for all kinds. `thread` is required only for followups.
-    required = ("kind", "row", "opp", "template", "sender")
-    if any(k not in kv for k in required):
+    if any(k not in kv for k in ("kind", "template", "sender")):
         return None
-    if kv["kind"] == "followup" and "thread" not in kv:
+    # opp is required for followups only: a NEW contact has no GHL opp at
+    # draft time (ghl-sync creates it after the send).
+    if kv["kind"] == "followup" and ("thread" not in kv or "opp" not in kv):
+        return None
+    if "nocodb_id" in kv and "row" in kv:
+        raise ValueError(METADATA_LABEL_DISAGREE)
+    nocodb_id = row_id = sheet_row_id = None
+    if "nocodb_id" in kv:
+        if not _DIGITS_RE.fullmatch(kv["nocodb_id"]) or not kv.get("row_id"):
+            return None
+        nocodb_id, row_id = int(kv["nocodb_id"]), kv["row_id"]
+    elif "row" in kv:
+        if not _DIGITS_RE.fullmatch(kv["row"]):
+            return None
+        sheet_row_id = int(kv["row"])
+    else:
         return None
     return {
         "kind": kv["kind"],
-        "sheet_row_id": int(kv["row"]),
-        "opp_id": kv["opp"],
+        "nocodb_id": nocodb_id,
+        "row_id": row_id,
+        "sheet_row_id": sheet_row_id,
+        "opp_id": kv.get("opp"),
         "template": kv["template"],
         "sender": _decode_label_email(kv["sender"]),
         "original_thread_id": kv.get("thread"),
@@ -60,7 +81,10 @@ def _parse_json_comment(body_html: str) -> Optional[dict]:
 def _agree(labels: dict, js: dict) -> bool:
     # JSON may include override_reason / cc_allowlist / bcc_allowlist that
     # labels do not carry. Those are compared only if present in both.
-    for key in ("kind", "sheet_row_id", "opp_id", "template",
+    # Compare the key fields of the shape the labels use.
+    key_fields = (("nocodb_id", "row_id") if labels.get("nocodb_id") is not None
+                  else ("sheet_row_id",))
+    for key in ("kind", *key_fields, "opp_id", "template",
                 "sender", "original_thread_id"):
         if labels.get(key) != js.get(key):
             return False
@@ -74,6 +98,8 @@ def _build(labels: dict, js: Optional[dict]) -> Metadata:
     bcc = tuple(extras.get("bcc_allowlist") or ())
     return Metadata(
         kind=kind,
+        nocodb_id=labels["nocodb_id"],
+        row_id=labels["row_id"],
         sheet_row_id=labels["sheet_row_id"],
         opp_id=labels["opp_id"],
         template=labels["template"],

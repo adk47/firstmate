@@ -47,18 +47,31 @@ class Draft:
 
 @dataclass(frozen=True)
 class ContactRow:
-    row_id: int
+    row_id: str
     valid_professional_email: str  # may be empty
+
+
+@dataclass(frozen=True)
+class NocoContact:
+    """One Contacts Intelligence record as read from NocoDB."""
+    nocodb_id: int
+    row_id: str
+    valid_professional_email: str  # may be empty
+    status: str  # e.g. "Follow Up 2"; may be empty
 
 
 @dataclass(frozen=True)
 class Metadata:
     kind: Kind
-    sheet_row_id: int
-    opp_id: str
+    opp_id: Optional[str]  # required for followup; a NEW contact has no opp yet
     template: str
     sender: str  # muso.ai account
     original_thread_id: Optional[str]  # followup only
+    # Exactly one key shape is set: nocodb_id (+ row_id) is the NocoDB
+    # contact; sheet_row_id is the legacy int row of the retired sheet tab.
+    nocodb_id: Optional[int] = None
+    row_id: Optional[str] = None
+    sheet_row_id: Optional[int] = None
     override_reason: Optional[str] = None
     cc_allowlist: tuple[str, ...] = field(default_factory=tuple)
     bcc_allowlist: tuple[str, ...] = field(default_factory=tuple)
