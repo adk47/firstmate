@@ -541,7 +541,7 @@ fm_task_inbox_doorbell_line() {  # <record-path>
   state=${abs%/*}
   ack=$(fm_task_inbox_ack_command)
   inbox=$(fm_task_inbox_quote "$abs")
-  printf 'Firstmate instruction waiting: list %s/*.msg and, in numeric order, read and act on each, then acknowledge each handled record by moving it into %s/handled/ (mv %s/NNN.msg %s/handled/); or, where that helper path is reachable, "%s %s %s NNN", which also retires the hidden link. Never delete or clear the inbox, because deleting is not acknowledging.' \
+  printf 'Firstmate instruction waiting: list %s/*.msg and, in numeric order, read and act on each, then acknowledge each handled record by moving it into %s/handled/. The plain form is mv %s/NNN.msg %s/handled/. Where that helper path is reachable, %s %s %s NNN acknowledges the same way and also retires the hidden link. Never delete or clear the inbox, because deleting is not acknowledging.' \
     "$inbox" "$inbox" "$inbox" "$inbox" \
     "$(fm_task_inbox_quote "$ack")" "$(fm_task_inbox_quote "$state")" \
     "$(fm_task_inbox_quote "$task")"
@@ -604,13 +604,6 @@ fm_task_inbox_oldest_unhandled() {  # <state-dir> <task-id>
   printf '%s' "$best"
 }
 
-# The re-ring ladder decision for one task. Prints exactly one of:
-#   quiet                     nothing due (healthy, within grace or spacing,
-#                             or already escalated for the current oldest)
-#   ring <record-path>        one doorbell re-ring is due
-#   escalate <record-path> <count>   attempt budget spent; surface as stale
-# An empty inbox also resets the ladder bookkeeping so the next message starts
-# a fresh ladder.
 # Repair the unhandled records a worker's own cleanup may have deleted, and
 # retire the shadows of records that are now acknowledged or superseded. The
 # inbox root is what the worker reads, so the shadow is not an archive: a record
@@ -635,10 +628,18 @@ fm_task_inbox_restore_unhandled() {  # <state-dir> <task-id>
     if ln "$s" "$dir/$base.msg" 2>/dev/null; then
       restored=$((restored + 1))
       printf 'fm-task-inbox: restored unread record %s.msg deleted from %s\n' "$base" "$dir" >&2
-    fi  done
+    fi
+  done
   return 0
 }
 
+# The re-ring ladder decision for one task. Prints exactly one of:
+#   quiet                     nothing due (healthy, within grace or spacing,
+#                             or already escalated for the current oldest)
+#   ring <record-path>        one doorbell re-ring is due
+#   escalate <record-path> <count>   attempt budget spent; surface as stale
+# An empty inbox also resets the ladder bookkeeping so the next message starts
+# a fresh ladder.
 fm_task_inbox_due_action() {  # <state-dir> <task-id>
   local dir oldest base now grace max ladder rec_base count last
   dir=$(fm_task_inbox_dir "$1" "$2")

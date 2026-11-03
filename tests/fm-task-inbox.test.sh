@@ -211,15 +211,15 @@ test_doorbell_acknowledgement_forms_run_for_a_quoted_state_path() {
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "instruction one")
   inbox_lib "$state" fm_task_inbox_write "$state" t1 "instruction two" >/dev/null
   line=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
-  rename=$(printf '%s' "$line" | sed -n 's/.*(\(mv [^;]*\));.*/\1/p')
+  rename=$(printf '%s' "$line" | sed -n 's/.*The plain form is \(.*\)\. Where that helper path.*/\1/p')
   [ -n "$rename" ] || fail "the doorbell did not name the plain rename acknowledgement: $line"
-  bash -c "${rename//NNN/001}" >/dev/null 2>&1 \
+  sh -c "${rename//NNN/001}" >/dev/null 2>&1 \
     || fail "the doorbell's rename acknowledgement does not run for a quoted state path: $rename"
   [ -f "$state/t1.inbox/handled/001.msg" ] \
     || fail "the doorbell's rename acknowledgement did not acknowledge the record"
-  helper=$(printf '%s' "$line" | sed -n 's/.*"\([^"]*NNN\)".*/\1/p')
+  helper=$(printf '%s' "$line" | sed -n 's/.*Where that helper path is reachable, \(.*\) acknowledges the same way.*/\1/p')
   [ -n "$helper" ] || fail "the doorbell did not name the ack helper command: $line"
-  bash -c "${helper//NNN/002}" >/dev/null 2>&1 \
+  sh -c "${helper//NNN/002}" >/dev/null 2>&1 \
     || fail "the doorbell's helper acknowledgement does not run for a quoted state path: $helper"
   [ -f "$state/t1.inbox/handled/002.msg" ] \
     || fail "the doorbell's helper acknowledgement did not acknowledge the record"
