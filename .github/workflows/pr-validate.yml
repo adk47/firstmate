@@ -862,6 +862,17 @@ jobs:
           bash scripts/check-dead-infra-refs.sh
           echo "::endgroup::"
 
+      - name: Credential-location doctrine check — no `source ~/.zshrc` in live agent surfaces
+        # 2026-10-19: a fresh CMO session followed muso-outreach-ghl-sync's
+        # `source ~/.zshrc && curl … $GHL_API_KEY`, found nothing (that file holds
+        # only openclaw completions and SNOVIO_*), filed a bogus secrets request and
+        # blocked a draft batch. The gateway runs as a daemon and reads /etc/openclaw/
+        # main.env; prose != enforcement, so this fails if the sourced form returns.
+        run: |
+          echo "::group::Credential-location doctrine check"
+          bash scripts/check-cred-location-doctrine.sh
+          echo "::endgroup::"
+
       - name: Egress allowlist check — no unauthorized additions
         run: |
           echo "::group::Checking egress allowlist changes"

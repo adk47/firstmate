@@ -1,0 +1,15 @@
+# .cred-location-allowlist.txt — exemptions for scripts/check-cred-location-doctrine.sh.
+#
+# Format: <path-or-dir-prefix/> -- <pattern key> -- <reason>
+#   Key: sourcerc (`source`/`.` of any shell word ending .zshrc or .bashrc: ~, $HOME,
+#   "$HOME", ${HOME}, absolute paths; backslash-continued lines are joined).
+#
+# An entry whose path no longer exists, or whose file no longer contains a
+# match for its key, fails CI — the list can only shrink. docs/ and scripts/
+# are never scanned; entries there record intent and are stale-checked directly.
+# An entry may not cover a scanned live-agent path (skills-all/, workspaces/*/
+# skills/ or root doctrine files): the gate rejects it. A live instruction
+# telling an agent to source a shell rc must be fixed (credentials come from
+# the gateway env), not allowlisted.
+scripts/apply-cmo-send-denylist.sh -- sourcerc -- tool-DENY patterns, not instructions: they deny the sourced form of `gog gmail … send` the skills used to teach; removing them widens what CMO may run (Aaron's surface; pr-validate "denials can only grow")
+docs/superpowers/plans/2026-04-14-cmo-outreach-sender-worker.md -- sourcerc -- historical plan (2026-04-14); a record, not an instruction

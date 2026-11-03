@@ -4,11 +4,8 @@
 # Example: anrok-api.sh transactions/list '{"limit":5}' '.transactions[:2]'
 # Example: anrok-api.sh transactions/id:my-txn/void '{}'
 
-# Load credentials (redirect all output)
-source "$HOME/.zshrc" >/dev/null 2>&1 || true
-
 if [ -z "${ANROK_API_KEY:-}" ]; then
-  echo "Error: ANROK_API_KEY not set" >&2
+  echo "Error: ANROK_API_KEY not set. It comes from the gateway env (/etc/openclaw/main.env, openclaw-gateway-main); edge.env does not carry it. Tell DevOps which variable is missing; do not request it." >&2
   exit 1
 fi
 
