@@ -28,6 +28,9 @@ systemctl --user daemon-reload
 systemctl --user enable --now fm-merge-queue.timer
 ```
 
+The generated service puts `%h/.local/bin` on the timer's `PATH`, because a systemd user manager's own `PATH` does not include the tools firstmate installs there.
+A run refuses at startup, with the tool named, when `gh` or `gh-axi` is not resolvable rather than reporting every row as an unanswered forge.
+
 `bin/fm-merge-queue.sh status` prints the queue size and the most recent run from the timer's own records, with no network call.
 `systemctl --user list-timers fm-merge-queue.timer` says whether the timer is armed.
 To stop it, `systemctl --user disable --now fm-merge-queue.timer`; the queue file keeps its rows, so re-enabling resumes the same work.
@@ -46,6 +49,7 @@ One row per pull request, whitespace separated:
 - `<task-id>` is the firstmate task the merge is recorded against, which keeps the merge metadata and the landed-work check working.
 - `<method>` is the merge method handed to the forge.
 
+A row is identified by owner, repository, and number together, so `acme/widgets 12` and `beta/widgets 12` are two independent rows.
 A head that has moved retires the row rather than merging a commit nobody queued, so re-queue after a push.
 Comments and blank lines are preserved exactly as written, and a repository listed twice in one tick is attempted once.
 
@@ -53,14 +57,18 @@ Comments and blank lines are preserved exactly as written, and a repository list
 
 Every row is read live on every tick; nothing in the queue file is trusted as current.
 A row merges only when the pull request proves it is ready: open, not a draft, at the head the row named, every check green, and a `qa-review` check passing on that exact head.
-`FM_MERGE_QUEUE_QA=optional` waives the QA requirement for repositories that run no QA workflow.
+That QA requirement has no configuration switch, so no home can turn it off.
+Two `qa-review` checks may exist; a failing instance holds the row.
 
-Four things keep a change away from an unattended timer and with a decider instead: a fence label naming money, secrets, a vendor console, customer copy, or irreversible work; a title or body that mentions production DDL; a draft; and a red head.
+Four things keep a change away from an unattended timer and with a decider instead: a fence label naming money, credentials, a vendor console, customer copy, or irreversible work; a title or body that mentions production DDL; a draft; and a red head.
 None of those rows merges, and a fenced one leaves the queue with its reason.
 
-A row leaves the queue only on a terminal verdict: merged, already merged, closed, fenced, a moved head, or `FM_MERGE_QUEUE_MAX_ATTEMPTS` consecutive refused merge attempts (default 6).
+The one exempted check is `credit-approval-guard`, which is red by design on a credit-impact change because the credit review itself is the gate.
+A merge that relied on that exemption says `credit-guard waived` on its own line, in the ledger, in the daily detail file, and in the daily count, so the waiver is never silent.
+
+A row leaves the queue only on a terminal verdict: merged, already merged, closed, fenced, a moved head, or `FM_MERGE_QUEUE_MAX_ATTEMPTS` consecutive refused merge attempts (default 6), which retires it as abandoned.
 A row that is merely not ready stays queued and is retried on the next tick.
-So does a row this home cannot read at all, such as one with no repository owner or an unknown merge method, because a configuration mistake must never delete the queue it was given.
+So does a row this home cannot read at all, such as one with no repository owner, an unknown merge method, or a task id that names no task in this home, because a configuration mistake must never delete the queue it was given and must never spend a retry budget.
 
 The merge itself is always `bin/fm-pr-merge.sh`, so that script's refusal rules, merge verification, metadata recording, and durable wake still apply; the timer only decides what to hand it.
 
@@ -68,13 +76,15 @@ The merge itself is always `bin/fm-pr-merge.sh`, so that script's refusal rules,
 
 Records live under `<FM_HOME>/state/merge-queue/`:
 
-- `ledger.tsv` - one line per verdict: `<epoch> <key> <verdict> <reason>`.
+- `ledger.tsv` - one line per verdict: `<epoch> <owner/repo#number> <verdict> <reason> <url>`.
+- `daily-<YYYY-MM-DD>.txt` - every merged and retired row of the summary window, one per line, with its time, row, verdict, reason, and full pull request URL.
 - `last-run` - the verdict counts of the most recent run, which is what `status` prints.
 - `.summary` - the day of the last daily line and the epoch it covered from.
 - `.lock/` - single-instance lock, so two ticks never merge at once.
 
-The first run of each UTC day appends one durable check wake summarizing what landed and what was retired since the previous one, which is how the queue reaches firstmate's chat as one line a day instead of a wake per merge.
-That line also says how many rows need the queue file fixed.
+The first run of each UTC day appends one durable check wake giving the counts and the path of that day's detail file, which is how the queue reaches firstmate's chat as one line a day instead of a wake per merge.
+No row list is truncated into the line itself, so nothing disappears off the end of a busy day.
+That line also says how many rows need the queue file fixed, and how many merges relied on the credit-guard exemption.
 No run pages anyone directly; every other verdict is a journal line.
 
 ## Limits
@@ -84,3 +94,4 @@ No run pages anyone directly; every other verdict is a journal line.
 - It merges only what the forge can already merge: no rebase, no conflict resolution, no re-review.
 - A branch that falls behind is retried every tick until its head moves or a decider intervenes.
 - A queued pull request the forge can no longer answer for stays queued and is retried every tick; remove such a row from the file by hand.
+- A row whose task id names no task in this home stays queued as unusable, so the fix is to correct the row rather than to wait.

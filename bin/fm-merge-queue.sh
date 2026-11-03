@@ -45,22 +45,31 @@
 # own refusal rules, merge verification, metadata recording, and durable wake
 # still apply; this script only decides what to hand it. It never merges a red
 # head, a draft, a head the row did not name, or a change whose labels carry
-# FENCE_WORDS (money, secrets, Cloudflare, customer copy, irreversible), and it
-# fences a title or body that names additive DDL. Those stay with a decider
-# rather than an unattended timer. FM_MERGE_QUEUE_QA=optional waives the
-# qa-review requirement for a home whose repositories run no QA workflow; the
-# default requires a passing qa-review check on the exact head.
+# FENCE_WORDS (money, credentials, Cloudflare, customer copy, irreversible),
+# and it fences a title or body that names additive DDL. Those stay with a
+# decider rather than an unattended timer. A passing qa-review on the exact
+# head is always required, so no home can turn it off by configuration.
+#
+# THE ONE EXEMPTION. A check named credit-approval-guard is red by design on a
+# credit-impact change, where the credit review itself is the real gate, so a
+# failing instance of that one check does not block. Every merge that relied on
+# that exemption says so on its own line and in the daily detail file, so the
+# waiver is never silent.
 #
 # RECORDS, all under <FM_HOME>/state/merge-queue/:
-#   ledger.tsv   one line per verdict: <epoch> <key> <verdict> <reason>
+#   ledger.tsv   one line per verdict:
+#                <epoch> <owner/repo#number> <verdict> <reason> <url>
+#   daily-<day>.txt  every merged and retired row of the summary window, one
+#                line each with its full pull request URL and verdict
 #   last-run     the verdict counts of the most recent run
 #   .summary     the day of the last daily line and the epoch it covered from
 #   .lock/       single-instance lock, so two ticks never merge at once
 #
 # THE DAILY LINE. The first run of each UTC day appends ONE durable check wake
-# summarizing what landed and what was retired since the previous one, so the
-# queue is one line a day in firstmate's chat instead of a wake per merge. No
-# run pages anyone directly: every other verdict is a journal line.
+# giving the counts and the detail file that names every row, so the queue is
+# one line a day in firstmate's chat instead of a wake per merge and no row is
+# ever silently truncated away. No run pages anyone directly: every other
+# verdict is a journal line.
 #
 # INSTALL, once per home, from the home's code root:
 #   printf '# owner: <github-login>\n' | cat - data/go-queue.txt > /tmp/q \
@@ -93,7 +102,6 @@
 #   FM_MERGE_QUEUE           queue file path.
 #   FM_MERGE_QUEUE_OWNER     GitHub owner for bare repository rows, overriding
 #                            the queue file's own "# owner:" directive.
-#   FM_MERGE_QUEUE_QA        "optional" waives the qa-review requirement.
 #   FM_MERGE_QUEUE_MAX_ATTEMPTS
 #                            consecutive failed merge attempts before a row is
 #                            retired (default 6).
@@ -123,7 +131,14 @@ METHODS="squash merge rebase"
 # Labels that keep a change away from an unattended merge: these name money,
 # credentials, vendor consoles, customer-facing copy, or work that cannot be
 # undone, and each one belongs to a decider.
-FENCE_WORDS="prod-ddl prod_ddl secret secret-s cloudflare customer-copy customer_copy money irreversible"
+# Matched against labels and label words with every separator removed, so a
+# label spelled "secret", "secrets", "customer copy" or "customer-copy" all
+# land on the same fence.
+FENCE_WORDS="monies money credentials credential secrets secret cloudflare customercopy irreversible productionddl prodddl"
+
+# The one check whose failure does not block, because the credit review it
+# stands for is the real gate on a credit-impact change.
+CREDIT_GUARD_CHECK="credit-approval-guard"
 
 CHECK_TIMEOUT_SECS=60
 MERGE_TIMEOUT_SECS=240
@@ -132,6 +147,8 @@ MERGE_TIMEOUT_SECS=240
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
 
 die() { printf 'fm-merge-queue: %s\n' "$*" >&2; exit 1; }
 usage() { sed -n '2,/^set -u$/p' "${BASH_SOURCE[0]}" | sed '$d; s/^# \{0,1\}//'; }
@@ -145,14 +162,20 @@ max_attempts() {
   printf '%s\n' "$n"
 }
 
-qa_required() {
-  [ "${FM_MERGE_QUEUE_QA:-required}" != optional ]
+# task_usable <task-id>: a row may only be handed to the merge helper when its
+# task id is well formed and this home still knows that task, because a row
+# whose id is a typo would otherwise spend the retry budget and delete a
+# merge-ready pull request. bin/fm-pr-lib.sh owns the id shape.
+task_usable() {
+  fm_pr_task_id_valid "$1" || return 1
+  [ -f "$STATE/$1.meta" ]
 }
 
 # --- records -------------------------------------------------------------
 
-record() {  # <key> <verdict> <reason>
-  printf '%s\t%s\t%s\t%s\n' "$(now_epoch)" "$1" "$2" "$3" >>"$LEDGER" || return 1
+record() {  # <key> <verdict> <reason> [url]
+  printf '%s\t%s\t%s\t%s\t%s\n' "$(now_epoch)" "$1" "$2" "$3" "${4:-}" \
+    >>"$LEDGER" || return 1
 }
 
 # fail_streak <key>: how many refused merge attempts in a row the ledger ends
@@ -204,6 +227,16 @@ lock_release() {
   rm -rf "$LOCK_DIR" 2>/dev/null || true
 }
 
+# Staged files this run created, so an interrupted run leaves nothing behind.
+run_temps=()
+cleanup_temps() {
+  local f
+  for f in ${run_temps[@]+"${run_temps[@]}"}; do
+    rm -f "$f" 2>/dev/null || true
+  done
+  return 0
+}
+
 # --- queue file ----------------------------------------------------------
 
 # queue_owner <file>: the owner for bare repository rows, from the environment
@@ -238,8 +271,13 @@ valid_sha_prefix() {
   [ "${#1}" -ge 7 ] && [ "${#1}" -le 40 ]
 }
 
-# row_key <repo> <number>: the short name the ledger and the daily line use.
-row_key() { printf '%s#%s\n' "${1##*/}" "$2"; }
+# row_key <owner> <repo> <number>: one identity per row. The owner is part of
+# it, so acme/widgets#12 and beta/widgets#12 are two rows that dedupe and retire
+# independently instead of one silently absorbing the other.
+row_key() {
+  if [ -n "$1" ]; then printf '%s/%s#%s\n' "$1" "$2" "$3"
+  else printf '%s#%s\n' "$2" "$3"; fi
+}
 
 # queue_unusable_count <queue> <owner>: how many queued rows this home cannot
 # read at all. Read from the file only, with no forge call, so the daily line
@@ -266,7 +304,8 @@ queue_unusable_count() {
       *) owner_name=$owner ;;
     esac
     if [ -n "$extra" ] || ! valid_sha_prefix "$expected" \
-      || ! valid_owner "$owner_name" || ! valid_repo_name "$repo"; then
+      || ! valid_owner "$owner_name" || ! valid_repo_name "$repo" \
+      || ! task_usable "$task"; then
       count=$((count + 1))
       continue
     fi
@@ -284,13 +323,16 @@ queue_unusable_count() {
 
 # --- forge reads ---------------------------------------------------------
 
-# read_pr <url>: one line of "<state>\t<head>\t<labels>\t<title and body>".
+# read_pr <url>: one line of "<state>\x1f<head>\x1f<labels>\x1f<title and body>".
+# The fields are separated by the unit separator rather than a tab, because a
+# tab is IFS whitespace and an empty label list would silently shift the body
+# into the labels.
 # A failed read prints nothing and exits non-zero, which the caller reports as
 # unreadable rather than as a verdict about the pull request.
 read_pr() {
   fm_run_timed "$CHECK_TIMEOUT_SECS" gh pr view "$1" \
     --json state,isDraft,headRefOid,labels,title,body \
-    --jq '[ (if .isDraft then "DRAFT" else .state end), .headRefOid, ([.labels[].name] | join(" ")), ((.title // "") + " " + (.body // "")) ] | @tsv' \
+    --jq '[ (if .isDraft then "DRAFT" else .state end), .headRefOid, ([.labels[].name] | join("\u001f")), ((.title // "") + " " + (.body // "")) ] | join("\u001f")' \
     2>/dev/null
 }
 
@@ -304,16 +346,20 @@ read_checks() {
 # fenced_reason <labels> <title-and-body>: print the fence label that keeps this
 # change off the timer, or nothing when it may merge unattended.
 fenced_reason() {
-  local labels body word
+  local labels body word plain
   labels=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
   body=$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')
+  # A label may contain spaces, and its author may spell it with a hyphen or an
+  # underscore, so the fence compares spellings with separators removed.
+  plain=$(printf '%s' "$labels" | tr -cd 'a-z0-9')
   for word in $FENCE_WORDS; do
-    case " $labels " in
-      *" $word "*) printf '%s\n' "$word"; return 0 ;;
+    case "$plain" in
+      *"$word"*) printf '%s\n' "$word"; return 0 ;;
     esac
   done
   case "$body" in
-    *prod-ddl*|*prod_ddl*|*"prod ddl"*) printf 'prod-ddl\n' ;;
+    *prod-ddl*|*prod_ddl*|*"prod ddl"*|*production-ddl*|*production_ddl*|*"production ddl"*)
+      printf 'prod-ddl\n' ;;
   esac
   return 0
 }
@@ -329,7 +375,8 @@ ROW_REASON=
 process_row() {
   local repo=$1 number=$2 expected=$3 task=$4 method=$5 owner=$6 dry_run=$7
   local owner_name slug url key fields state head labels body
-  local fenced checks name bucket bad qa_line out rc last
+  local fenced checks name bucket bad qa_line qa_fail out rc last
+  local credit_bucket waived expected_lc head_lc
 
   ROW_VERDICT=keep
   ROW_REASON=
@@ -344,7 +391,11 @@ process_row() {
       slug=$repo
       ;;
   esac
-  key=$(row_key "$slug" "$number")
+  if valid_owner "$owner_name"; then
+    key=$(row_key "$owner_name" "$slug" "$number")
+  else
+    key=$(row_key '' "$slug" "$number")
+  fi
 
   # A row this home cannot read is never deleted: a configuration mistake must
   # not destroy the operator's queue. It stays queued, says so on every tick,
@@ -371,6 +422,15 @@ process_row() {
       ;;
   esac
 
+  # A typo in the task column is a configuration mistake, not a refused merge:
+  # it stays queued and never spends the row's retry budget.
+  if ! task_usable "$task"; then
+    ROW_VERDICT=unusable
+    ROW_REASON="no such task in this home: $task"
+    printf 'keep %s unusable row: %s\n' "$key" "$ROW_REASON"
+    return 0
+  fi
+
   url="https://github.com/$owner_name/$slug/pull/$number"
 
   if ! fields=$(read_pr "$url") || [ -z "$fields" ]; then
@@ -379,7 +439,7 @@ process_row() {
     printf 'keep %s %s\n' "$key" "$ROW_REASON"
     return 0
   fi
-  IFS=$'\t' read -r state head labels body <<<"$fields"
+  IFS=$'\x1f' read -r state head labels body <<<"$fields"
 
   case "$state" in
     MERGED)
@@ -407,8 +467,10 @@ process_row() {
       ;;
   esac
 
-  case "$head" in
-    "$expected"*) ;;
+  head_lc=$(printf '%s' "$head" | tr '[:upper:]' '[:lower:]')
+  expected_lc=$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')
+  case "$head_lc" in
+    "$expected_lc"*) ;;
     *)
       ROW_VERDICT='head-moved'
       ROW_REASON="head moved to ${head:0:12} (queue expected ${expected:0:12})"
@@ -432,11 +494,20 @@ process_row() {
 
   bad=
   qa_line=
+  qa_fail=
+  credit_bucket=
+  waived=0
   while IFS=$'\t' read -r name bucket; do
     [ -n "$name" ] || continue
     case "$name" in
-      credit-approval-guard) continue ;;
-      qa-review) qa_line=$bucket ;;
+      "$CREDIT_GUARD_CHECK") credit_bucket=$bucket; continue ;;
+      qa-review)
+        qa_line=$bucket
+        case "$bucket" in
+          pass|skipping) ;;
+          *) qa_fail=$bucket ;;
+        esac
+        ;;
     esac
     case "$bucket" in
       pass|skipping) ;;
@@ -448,17 +519,32 @@ process_row() {
     printf 'keep %s not green:%s\n' "$key" "$bad"
     return 0
   fi
-  if qa_required && [ -z "$qa_line" ]; then
+  # Two checks may share the qa-review name, so one failing instance is enough
+  # to hold the row: the listing order never decides the verdict.
+  if [ -n "$qa_fail" ]; then
+    printf 'keep %s qa-review %s\n' "$key" "$qa_fail"
+    return 0
+  fi
+  if [ -z "$qa_line" ]; then
     printf 'keep %s no qa-review on this head\n' "$key"
     return 0
   fi
-  if qa_required && [ "$qa_line" != pass ]; then
+  if [ "$qa_line" != pass ]; then
     printf 'keep %s qa-review %s\n' "$key" "$qa_line"
     return 0
   fi
+  case "$credit_bucket" in
+    ''|pass|skipping) ;;
+    *) waived=1 ;;
+  esac
 
   if [ "$dry_run" = 1 ]; then
-    printf 'merge %s %s (%s, head %s)\n' "$key" "$url" "$method" "${head:0:12}"
+    if [ "$waived" = 1 ]; then
+      printf 'merge %s %s (%s, head %s, credit-guard waived)\n' \
+        "$key" "$url" "$method" "${head:0:12}"
+    else
+      printf 'merge %s %s (%s, head %s)\n' "$key" "$url" "$method" "${head:0:12}"
+    fi
     return 0
   fi
 
@@ -468,8 +554,13 @@ process_row() {
 
   if [ "$rc" -eq 0 ]; then
     ROW_VERDICT=merged
-    ROW_REASON=$method
-    printf 'merged %s %s\n' "$key" "$url"
+    if [ "$waived" = 1 ]; then
+      ROW_REASON="$method (credit-guard waived)"
+      printf 'merged %s %s (credit-guard waived)\n' "$key" "$url"
+    else
+      ROW_REASON=$method
+      printf 'merged %s %s\n' "$key" "$url"
+    fi
     return 0
   fi
 
@@ -483,8 +574,33 @@ process_row() {
 
 # --- run -----------------------------------------------------------------
 
+# write_daily_detail <day> <since-epoch>: the full, untruncated list of every
+# merged and retired row in the window, one line each with its pull request URL
+# and verdict, and print the file's path. The daily line points at it so no row
+# is ever silently cut off a summary.
+write_daily_detail() {
+  local day=$1 since=$2 path="$RECORDS/daily-$1.txt" epoch key verdict reason url
+  {
+    printf '# merge queue %s - merged and retired rows since %s\n' \
+      "$day" "$(format_epoch "$since")"
+    printf '# time\trow\tverdict\treason\turl\n'
+    while IFS=$'\t' read -r epoch key verdict reason url; do
+      [ -n "$key" ] || continue
+      printf '%s\t%s\t%s\t%s\t%s\n' \
+        "$(format_epoch "$epoch")" "$key" "$verdict" "$reason" "${url:--}"
+    done < <(awk -F '\t' -v since="$since" '
+      BEGIN {
+        n = split("merged abandoned already-merged closed fenced head-moved", v, " ")
+        for (i = 1; i <= n; i++) reported[v[i]] = 1
+      }
+      $1 >= since && ($3 in reported) { print }
+    ' "$LEDGER")
+  } >"$path"
+  printf '%s\n' "$path"
+}
+
 maybe_emit_daily() {  # <queue>
-  local queue=$1 today last_day last_epoch merged retired keys payload unusable
+  local queue=$1 today last_day last_epoch merged retired payload unusable detail waived
   [ -f "$LEDGER" ] || : >"$LEDGER"
   today=$(today_utc)
   last_day=
@@ -495,19 +611,25 @@ maybe_emit_daily() {  # <queue>
   case "${last_epoch:-}" in ''|*[!0-9]*) last_epoch=0 ;; esac
   [ "${last_day:-}" = "$today" ] && return 0
 
-  local retired_verdicts=' already-merged closed fenced head-moved '
+  local retired_verdicts=' already-merged abandoned closed fenced head-moved '
   merged=$(awk -F '\t' -v since="$last_epoch" '$1 >= since && $3 == "merged" { c++ } END { print c + 0 }' "$LEDGER")
   retired=$(awk -F '\t' -v since="$last_epoch" -v want="$retired_verdicts" '
     BEGIN { n = split(want, v, " "); for (i = 1; i <= n; i++) if (v[i] != "") is_retired[v[i]] = 1 }
     $1 >= since && ($3 in is_retired) { c++ }
     END { print c + 0 }
   ' "$LEDGER")
-  keys=$(awk -F '\t' -v since="$last_epoch" '$1 >= since && $3 == "merged" { print $2 }' "$LEDGER" \
-    | head -5 | tr '\n' ',' | sed 's/,$//; s/,/, /g')
-  [ -n "$keys" ] || keys="no merges"
+  waived=$(awk -F '\t' -v since="$last_epoch" \
+    '$1 >= since && $3 == "merged" && $4 ~ /credit-guard waived/ { c++ } END { print c + 0 }' \
+    "$LEDGER")
+  detail=$(write_daily_detail "$today" "$last_epoch")
 
   unusable=$(queue_unusable_count "$queue" "$(queue_owner "$queue")")
-  payload="check: merge queue $today - merged $merged ($keys), retired $retired since the last summary"
+  payload="check: merge queue $today - merged $merged"
+  case "${waived:-0}" in
+    0) ;;
+    *) payload="$payload ($waived with credit-guard waived)" ;;
+  esac
+  payload="$payload, retired $retired since the last summary; detail: $detail"
   case "${unusable:-0}" in
     0) ;;
     *) payload="$payload; $unusable queued row(s) need the queue file fixed" ;;
@@ -544,25 +666,42 @@ cmd_run() {
   fi
   if [ "$dry_run" = 0 ]; then
     [ -x "$MERGE_CMD" ] || die "merge entrypoint is not runnable: $MERGE_CMD (set FM_ROOT_OVERRIDE to the home's code root)"
+    # A timer runs with a bare systemd PATH, so say plainly when the forge tools
+    # are not on it instead of reporting every row as an unanswered forge.
+    for tool in gh gh-axi; do
+      command -v "$tool" >/dev/null 2>&1 \
+        || die "$tool is not on PATH ($PATH); add its directory to the unit's Environment=PATH"
+    done
     lock_acquire || { printf 'fm-merge-queue: another run is in progress, skipping this tick\n'; return 0; }
-    trap 'lock_release' EXIT INT TERM
+    # A terminated run must stop rather than keep merging with the lock gone,
+    # because the next tick would then read the same queue file concurrently.
+    trap 'lock_release; cleanup_temps' EXIT
+    trap 'lock_release; cleanup_temps; exit 1' INT TERM
     mkdir -p "$RECORDS"
     : >>"$LEDGER"
   fi
 
-  local owner tmp keep seen gone line repo number expected task method extra key unmergeable
+  local owner tmp keep seen gone line repo number expected task method extra owner_name key
+  local unmergeable row_url
   local merged=0 retired=0 skipped=0 queued=0
   owner=$(queue_owner "$queue")
 
   if [ "$dry_run" = 0 ]; then
     tmp=$(mktemp "$queue.XXXXXX") || die "cannot stage the queue rewrite next to $queue"
-    cp -p "$queue" "$tmp" 2>/dev/null && : >"$tmp"
+    run_temps+=("$tmp")
+    # The staged file must start empty: a failed copy that left the old rows
+    # behind would publish every kept row twice.
+    cp -p "$queue" "$tmp" 2>/dev/null \
+      || die "cannot stage the queue rewrite next to $queue (mode copy failed)"
+    : >"$tmp"
     keep=$tmp
   else
     keep=
   fi
   seen=$(mktemp "${TMPDIR:-/tmp}/fm-merge-queue-seen.XXXXXX") || die "cannot stage the dedupe record"
+  run_temps+=("$seen")
   gone=$(mktemp "${TMPDIR:-/tmp}/fm-merge-queue-gone.XXXXXX") || die "cannot stage the retirement record"
+  run_temps+=("$gone")
 
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
@@ -579,7 +718,15 @@ cmd_run() {
     extra=
     read -r repo number expected task method extra <<<"$line"
 
-    key=$(row_key "${repo##*/}" "${number:-0}")
+    case "$repo" in
+      */*) owner_name=${repo%%/*} ;;
+      *) owner_name=$owner ;;
+    esac
+    if valid_owner "$owner_name"; then
+      key=$(row_key "$owner_name" "${repo##*/}" "${number:-0}")
+    else
+      key=$(row_key '' "${repo##*/}" "${number:-0}")
+    fi
     if grep -qxF "$key" "$gone" 2>/dev/null; then
       # A retired key's duplicate row goes with the row that retired it.
       continue
@@ -593,6 +740,13 @@ cmd_run() {
     esac
     valid_sha_prefix "$expected" || unmergeable=1
     valid_repo_name "${repo##*/}" || unmergeable=1
+    # A bad task id stays for process_row to name precisely: it reports the
+    # unusable row with its own reason and never reaches the forge.
+
+    row_url=
+    if [ -z "$unmergeable" ]; then
+      row_url="https://github.com/$owner_name/${repo##*/}/pull/$number"
+    fi
 
     if [ -n "$unmergeable" ]; then
       printf 'keep %s unusable row: %s\n' "$key" "${line:0:80}"
@@ -620,9 +774,11 @@ cmd_run() {
         printf '%s\n' "$line" >>"$keep"
         ;;
       'merge-refused')
-        record "$key" "$ROW_VERDICT" "$ROW_REASON"
+        record "$key" "$ROW_VERDICT" "$ROW_REASON" "$row_url"
         if [ "$(fail_streak "$key")" -ge "$(max_attempts)" ]; then
           printf 'retire %s after %s failed merge attempts\n' "$key" "$(fail_streak "$key")"
+          # Its own verdict, so the abandoned row is counted and listed as retired.
+          record "$key" abandoned "gave up after repeated merge refusals" "$row_url"
           printf '%s\n' "$key" >>"$gone"
           retired=$((retired + 1))
         else
@@ -631,19 +787,19 @@ cmd_run() {
         fi
         ;;
       unreadable)
-        record "$key" "$ROW_VERDICT" "$ROW_REASON"
+        record "$key" "$ROW_VERDICT" "$ROW_REASON" "$row_url"
         skipped=$((skipped + 1))
         printf '%s\n' "$line" >>"$keep"
         ;;
       unusable)
         # Not part of a failure budget: a bad row is fixed in the file, not by
         # retrying, and it must never consume the merge-attempt allowance.
-        record "$key" "$ROW_VERDICT" "$ROW_REASON"
+        record "$key" "$ROW_VERDICT" "$ROW_REASON" "$row_url"
         skipped=$((skipped + 1))
         printf '%s\n' "$line" >>"$keep"
         ;;
       *)
-        record "$key" "$ROW_VERDICT" "$ROW_REASON"
+        record "$key" "$ROW_VERDICT" "$ROW_REASON" "$row_url"
         printf '%s\n' "$key" >>"$gone"
         if [ "$ROW_VERDICT" = merged ]; then
           merged=$((merged + 1))
@@ -734,6 +890,7 @@ Documentation=file://$FM_ROOT/docs/merge-queue.md
 Type=oneshot
 WorkingDirectory=$FM_HOME
 Environment=FM_HOME=$FM_HOME
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=$SCRIPT_DIR/fm-merge-queue.sh run
 TimeoutStartSec=600
 UNIT

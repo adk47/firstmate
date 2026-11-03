@@ -9,18 +9,25 @@
 #   (b) a row whose head moved retires without any merge attempt
 #   (c) a red check keeps the row queued and merges nothing
 #   (d) a missing qa-review on the head keeps the row queued
-#   (e) FM_MERGE_QUEUE_QA=optional waives the qa-review requirement
+#   (e) no configuration waives the qa-review requirement
 #   (f) a fenced label retires the row and merges nothing
 #   (g) an already-merged pull request retires without a merge attempt
-#   (h) a refused merge retires the row after its attempt budget
+#   (h) a refused merge retires the row after its attempt budget, as retired
 #   (i) a duplicate row is attempted once and leaves with its key
 #   (j) an unreadable forge never spends the attempt budget
 #   (k) a bare repository row with no owner stays queued as unusable
 #   (l) the queue rewrite preserves comments, blank lines, and file mode
 #   (m) --dry-run reports the plan and changes nothing
-#   (n) the first run of a day appends one daily line and the next run does not
+#   (n) the first run of a day appends one daily line and writes the detail file
 #   (o) status answers from records only, without any forge call
 #   (p) unit prints a service and a timer bound to this home
+#   (q) a waived credit-approval-guard merge says so in its line and the summary
+#   (r) two owners of one repository name are two independent rows
+#   (s) an uppercase expected head still matches the forge's lowercase object id
+#   (t) two checks named qa-review cannot mask a failing instance
+#   (u) a typo'd task id is unusable and never spends the attempt budget
+#   (v) a run refuses when the forge tools are not on PATH
+#   (w) the fence covers the natural spellings the queue actually uses
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -32,11 +39,14 @@ TMP_ROOT=$(fm_test_tmproot fm-merge-queue-tests)
 HEAD_A=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab
 
 # make_case <name>: a home with a data/ queue, a merge entrypoint stub that logs
-# its argv, and a fakebin holding the gh mock. Echoes the case directory.
+# its argv, the task records a queued row must name, and a fakebin holding the
+# gh mock. Echoes the case directory.
 make_case() {
   local name=$1 dir
   dir="$TMP_ROOT/$name"
-  mkdir -p "$dir/data" "$dir/bin" "$dir/state" "$dir/fakebin" "$dir/heads" "$dir/checks"
+  mkdir -p "$dir/data" "$dir/bin" "$dir/state" "$dir/fakebin" "$dir/heads" "$dir/checks" "$dir/corebin"
+  printf 'window=t\n' >"$dir/state/task-a.meta"
+  printf 'window=t\n' >"$dir/state/task-b.meta"
   cat >"$dir/bin/fm-pr-merge.sh" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >>"$FM_TEST_MERGE_LOG"
@@ -70,7 +80,7 @@ case "${1:-} ${2:-}" in
     if [ -f "$FM_TEST_DIR/heads/$num" ]; then
       head=$(cat "$FM_TEST_DIR/heads/$num")
     fi
-    printf '%s\t%s\t%s\t%s\n' "$state" "$head" "${FM_TEST_LABELS:-}" "${FM_TEST_BODY:-}"
+    printf '%s\037%s\037%s\037%s\n' "$state" "$head" "${FM_TEST_LABELS:-}" "${FM_TEST_BODY:-}"
     ;;
   "pr checks")
     if [ -f "$FM_TEST_DIR/checks/$num" ]; then
@@ -84,6 +94,9 @@ esac
 exit 0
 SH
   chmod +x "$dir/fakebin/gh"
+  # The merge entrypoint shells out to gh-axi, so the run provably requires it.
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$dir/fakebin/gh-axi"
+  chmod +x "$dir/fakebin/gh-axi"
 }
 
 # run_queue <dir> [args...]: run the queue against one home.
@@ -92,7 +105,6 @@ run_queue() {
   shift
   FM_HOME="$dir" \
     FM_ROOT_OVERRIDE="$dir" \
-    FM_MERGE_QUEUE_QA="${FM_MERGE_QUEUE_QA:-}" \
     FM_MERGE_QUEUE_MAX_ATTEMPTS="${FM_MERGE_QUEUE_MAX_ATTEMPTS:-}" \
     FM_TEST_MERGE_LOG="$dir/merge.log" \
     FM_TEST_GH_LOG="$dir/gh.log" \
@@ -124,7 +136,7 @@ case_a() {
   green_head
   out=$(run_queue "$dir" run)
   expect_code 0 "$?" "(a) run exits 0"
-  assert_contains "$out" "merged widgets#12" "(a) the row reports a merge"
+  assert_contains "$out" "merged acme/widgets#12" "(a) the row reports a merge"
   assert_grep "task-a https://github.com/acme/widgets/pull/12 -- --squash --admin --match-head-commit $HEAD_A" \
     "$dir/merge.log" "(a) the merge goes through the entrypoint with the live head"
   expect_code 0 "$(queue_rows "$dir")" "(a) the merged row leaves the queue"
@@ -180,7 +192,7 @@ case_d() {
   pass "a missing qa-review keeps the row queued"
 }
 
-# --- (e) the optional-QA home ---------------------------------------------
+# --- (e) no configuration waives QA ---------------------------------------
 
 case_e() {
   local dir out
@@ -188,12 +200,13 @@ case_e() {
   printf '# owner: acme\nwidgets 12 %s task-a squash\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   export FM_TEST_HEAD=$HEAD_A
   export FM_TEST_CHECKS=$'build\tpass'
-  export FM_MERGE_QUEUE_QA=optional
-  out=$(run_queue "$dir" run)
-  unset FM_MERGE_QUEUE_QA
-  assert_contains "$out" "merged widgets#12" "(e) optional QA merges a green head"
+  # A home that used to be able to switch the QA gate off cannot any more.
+  out=$(FM_MERGE_QUEUE_QA=optional run_queue "$dir" run)
+  assert_contains "$out" "no qa-review on this head" "(e) the QA gate cannot be configured away"
+  [ ! -s "$dir/merge.log" ] || fail "(e) no environment setting may merge an unreviewed head"
+  expect_code 1 "$(queue_rows "$dir")" "(e) the row stays queued"
   clear_head
-  pass "optional QA waives the qa-review requirement"
+  pass "no configuration waives the qa-review requirement"
 }
 
 # --- (f) a fenced label never merges --------------------------------------
@@ -243,6 +256,9 @@ case_h() {
     "(h) the entrypoint's own refusal is reported"
   assert_contains "$out" "after 1 failed merge attempt" "(h) the budget retires the row"
   expect_code 0 "$(queue_rows "$dir")" "(h) an exhausted row leaves the queue"
+  assert_grep $'\tabandoned\t' "$dir/state/merge-queue/ledger.tsv" \
+    "(h) the abandoned row carries its own verdict"
+  assert_grep "retired 1" "$dir/state/.wake-queue" "(h) the daily line counts it as retired"
   clear_head
   pass "a refused merge retires the row after its attempt budget"
 }
@@ -259,7 +275,7 @@ case_i() {
   attempts=$(wc -l <"$dir/merge.log" | tr -d ' ')
   expect_code 1 "$attempts" "(i) a duplicate row is merged once"
   expect_code 0 "$(queue_rows "$dir")" "(i) the duplicate leaves with its key"
-  assert_contains "$out" "merged widgets#12" "(i) the row reports the merge"
+  assert_contains "$out" "merged acme/widgets#12" "(i) the row reports the merge"
   clear_head
   pass "a duplicate row is attempted once"
 }
@@ -327,7 +343,7 @@ case_m() {
   before=$(cat "$dir/data/go-queue.txt")
   green_head
   out=$(run_queue "$dir" run --dry-run)
-  assert_contains "$out" "merge widgets#12" "(m) the dry run names the merge it would make"
+  assert_contains "$out" "merge acme/widgets#12" "(m) the dry run names the merge it would make"
   assert_contains "$out" "nothing changed" "(m) the dry run says it changed nothing"
   [ ! -s "$dir/merge.log" ] || fail "(m) a dry run must not merge"
   [ "$before" = "$(cat "$dir/data/go-queue.txt")" ] || fail "(m) a dry run must not rewrite the queue"
@@ -337,18 +353,26 @@ case_m() {
   pass "dry run reports the plan and changes nothing"
 }
 
-# --- (n) one daily line per day ------------------------------------------
+# --- (n) one daily line per day, with its detail file --------------------
 
 case_n() {
-  local dir out lines
+  local dir out lines detail
   dir=$(make_case n)
   printf '# owner: acme\nwidgets 12 %s task-a squash\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   green_head
   out=$(run_queue "$dir" run)
   assert_contains "$out" "summary: check: merge queue" "(n) the first run of the day emits the daily line"
-  assert_grep "merged 1 (widgets#12)" "$dir/state/.wake-queue" "(n) the daily line counts the merge"
+  assert_grep "merged 1" "$dir/state/.wake-queue" "(n) the daily line counts the merge"
+  assert_grep "detail: $dir/state/merge-queue/daily-" "$dir/state/.wake-queue" \
+    "(n) the daily line points at the detail file"
+  assert_no_grep "acme/widgets#12" "$dir/state/.wake-queue" \
+    "(n) the daily line does not truncate a row list into itself"
   lines=$(wc -l <"$dir/state/.wake-queue" | tr -d ' ')
   expect_code 1 "$lines" "(n) exactly one line is queued"
+  detail=$(sed -n 's/.*detail: \([^;]*\).*/\1/p' "$dir/state/.wake-queue")
+  assert_grep "acme/widgets#12" "$detail" "(n) the detail file names the merged row"
+  assert_grep "https://github.com/acme/widgets/pull/12" "$detail" \
+    "(n) the detail file carries the full pull request URL"
   out=$(run_queue "$dir" run)
   assert_not_contains "$out" "summary:" "(n) a later run the same day emits nothing"
   expect_code 1 "$(wc -l <"$dir/state/.wake-queue" | tr -d ' ')" "(n) the queue still holds one line"
@@ -382,9 +406,151 @@ case_p() {
   timer=$(FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" "${QUEUE_SCRIPT}" unit timer)
   assert_contains "$service" "ExecStart=$ROOT/bin/fm-merge-queue.sh run" "(p) the service runs this script"
   assert_contains "$service" "Environment=FM_HOME=$dir" "(p) the service names this home"
+  assert_contains "$service" "Environment=PATH=%h/.local/bin" \
+    "(p) the service puts the user's own tools on the timer's PATH"
   assert_contains "$timer" "OnUnitActiveSec=10min" "(p) the timer runs every ten minutes"
   assert_contains "$timer" "Unit=fm-merge-queue.service" "(p) the timer drives the service"
   pass "unit prints a service and a timer bound to this home"
+}
+
+# --- (q) the credit guard waiver is never silent -------------------------
+
+case_q() {
+  local dir out detail
+  dir=$(make_case q)
+  printf '# owner: acme\nwidgets 12 %s task-a squash\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  export FM_TEST_HEAD=$HEAD_A
+  export FM_TEST_CHECKS=$'qa-review\tpass\nbuild\tpass\ncredit-approval-guard\tfail'
+  out=$(run_queue "$dir" run)
+  assert_contains "$out" "merged acme/widgets#12 https://github.com/acme/widgets/pull/12 (credit-guard waived)" \
+    "(q) the merge names the waiver on its own line"
+  assert_grep "credit-guard waived" "$dir/state/merge-queue/ledger.tsv" \
+    "(q) the ledger records the waiver"
+  assert_grep "1 with credit-guard waived" "$dir/state/.wake-queue" \
+    "(q) the daily line counts the waived merge"
+  detail=$(sed -n 's/.*detail: \([^;]*\).*/\1/p' "$dir/state/.wake-queue")
+  assert_grep "credit-guard waived" "$detail" "(q) the detail file records the waiver"
+  clear_head
+  pass "a waived credit guard is reported, not hidden"
+}
+
+# --- (r) two owners of one repository name are two rows ------------------
+
+case_r() {
+  local dir out attempts
+  dir=$(make_case r)
+  printf 'acme/widgets 12 %s task-a squash\nbeta/widgets 12 %s task-b squash\n' "$HEAD_A" "$HEAD_A" \
+    >"$dir/data/go-queue.txt"
+  green_head
+  out=$(run_queue "$dir" run)
+  attempts=$(wc -l <"$dir/merge.log" | tr -d ' ')
+  expect_code 2 "$attempts" "(r) both owners' rows are attempted"
+  assert_grep "https://github.com/acme/widgets/pull/12" "$dir/merge.log" "(r) the first owner merges"
+  assert_grep "https://github.com/beta/widgets/pull/12" "$dir/merge.log" "(r) the second owner merges"
+  expect_code 0 "$(queue_rows "$dir")" "(r) both rows leave the queue"
+  clear_head
+  pass "two owners of one repository name stay independent rows"
+}
+
+# --- (s) an uppercase expected head still matches ------------------------
+
+case_s() {
+  local dir out
+  dir=$(make_case s)
+  printf '# owner: acme\nwidgets 12 %s task-a squash\n' "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB" \
+    >"$dir/data/go-queue.txt"
+  green_head
+  out=$(run_queue "$dir" run)
+  assert_contains "$out" "merged acme/widgets#12" "(s) the uppercase head merges"
+  [ -s "$dir/merge.log" ] || fail "(s) an uppercase head is a match, not a moved head"
+  clear_head
+  pass "an uppercase expected head still matches"
+}
+
+# --- (t) a duplicate qa-review name cannot mask a failure ----------------
+
+case_t() {
+  local dir out
+  dir=$(make_case t)
+  printf '# owner: acme\nwidgets 12 %s task-a squash\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  export FM_TEST_HEAD=$HEAD_A
+  export FM_TEST_CHECKS=$'qa-review\tfail\nqa-review\tpass'
+  out=$(run_queue "$dir" run)
+  assert_contains "$out" "qa-review=fail" "(t) the failing instance holds the row"
+  [ ! -s "$dir/merge.log" ] || fail "(t) a passing duplicate must not mask a failing QA check"
+  expect_code 1 "$(queue_rows "$dir")" "(t) the row stays queued"
+  clear_head
+  pass "a duplicate qa-review name cannot mask a failure"
+}
+
+# --- (u) a typo'd task id is unusable, not refused -----------------------
+
+case_u() {
+  local dir out
+  dir=$(make_case u)
+  printf '# owner: acme\nwidgets 12 %s task-typo squash\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  green_head
+  export FM_MERGE_QUEUE_MAX_ATTEMPTS=1
+  out=$(run_queue "$dir" run)
+  unset FM_MERGE_QUEUE_MAX_ATTEMPTS
+  assert_contains "$out" "no such task in this home: task-typo" "(u) the bad task id is named"
+  [ ! -s "$dir/merge.log" ] || fail "(u) an unreadable task id must never reach the merge entrypoint"
+  expect_code 1 "$(queue_rows "$dir")" "(u) the row stays queued"
+  assert_no_grep $'\tabandoned\t' "$dir/state/merge-queue/ledger.tsv" \
+    "(u) a configuration mistake never spends the retry budget"
+  clear_head
+  pass "a typo'd task id is unusable and never spends the attempt budget"
+}
+
+# --- (v) a run refuses when the forge tools are missing -----------------
+
+case_v() {
+  local dir out shell_bin
+  dir=$(make_case v)
+  printf '# owner: acme\nwidgets 12 %s task-a squash\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  green_head
+  # Resolve the shell before the PATH is emptied, so only the forge tools are
+  # missing from the run's own PATH.
+  shell_bin=$(command -v bash)
+  out=$(FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_TEST_DIR="$dir" \
+    FM_TEST_MERGE_LOG="$dir/merge.log" FM_TEST_GH_LOG="$dir/gh.log" \
+    PATH="$dir/corebin" "$shell_bin" "${QUEUE_SCRIPT}" run 2>&1)
+  expect_code 1 "$?" "(v) the run refuses instead of reporting an unanswered forge"
+  assert_contains "$out" "is not on PATH" "(v) the refusal names the missing tool"
+  [ ! -s "$dir/merge.log" ] || fail "(v) a run with no forge tools must merge nothing"
+  expect_code 1 "$(queue_rows "$dir")" "(v) the queued row is untouched"
+  clear_head
+  pass "a run refuses when the forge tools are not on PATH"
+}
+
+# --- (w) the fence covers the natural spellings -------------------------
+
+case_w() {
+  local dir out
+  dir=$(make_case w)
+  printf '# owner: acme\nwidgets 12 %s task-a squash\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  green_head
+  export FM_TEST_LABELS="secrets"
+  out=$(run_queue "$dir" run)
+  assert_contains "$out" "fenced for a decider: secrets" "(w) a plural label spelling is fenced"
+  [ ! -s "$dir/merge.log" ] || fail "(w) a secrets label must never merge unattended"
+
+  printf '# owner: acme\nwidgets 12 %s task-a squash\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  : >"$dir/merge.log"
+  export FM_TEST_LABELS="customer copy"
+  out=$(run_queue "$dir" run)
+  assert_contains "$out" "fenced for a decider: customercopy" "(w) a two-word label is fenced"
+  [ ! -s "$dir/merge.log" ] || fail "(w) customer copy must never merge unattended"
+
+  printf '# owner: acme\nwidgets 12 %s task-a squash\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  : >"$dir/merge.log"
+  unset FM_TEST_LABELS
+  export FM_TEST_BODY="This ships the production DDL for the new table."
+  out=$(run_queue "$dir" run)
+  assert_contains "$out" "fenced for a decider: prod-ddl" "(w) a body naming production DDL is fenced"
+  [ ! -s "$dir/merge.log" ] || fail "(w) production DDL must never merge unattended"
+  clear_head
+  pass "the fence covers the natural spellings"
 }
 
 case_a
@@ -403,5 +569,12 @@ case_m
 case_n
 case_o
 case_p
+case_q
+case_r
+case_s
+case_t
+case_u
+case_v
+case_w
 
 printf 'ok - fm-merge-queue suite complete\n'
