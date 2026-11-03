@@ -329,10 +329,14 @@ jobs:
         # terminal on main); a full agent needs reason + exit + ruling + an expiry <= 31 days out and goes
         # red the day after it; no codex agent may use tools.exec deny/allowlist (the silent openrouter
         # fallback). --base adds: a non-ops agent denied on main can never get exec back, and a new agent
-        # can never start with it. Exit 2 (unreadable input) is a failure, never a pass.
+        # can never start with it. Exit 2 (unreadable input, INCLUDING an unreadable base ref) is a failure,
+        # never a pass.
         run: |
           echo "::group::Agent exec posture"
-          python3 scripts/check-agent-exec-policy.py --base origin/main
+          # Fetch the base here rather than relying on an earlier step: the guard now exits 2 when it cannot read
+          # the base ref (qa-review on PR #1627), so a missing origin/main is a red build, not a skipped check.
+          git fetch --quiet --depth=1 origin "${{ github.event.pull_request.base.ref }}"
+          python3 scripts/check-agent-exec-policy.py --base "origin/${{ github.event.pull_request.base.ref }}"
           echo "::endgroup::"
 
       - name: SOUL.md check — all workspaces

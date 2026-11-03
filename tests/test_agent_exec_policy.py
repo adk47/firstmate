@@ -128,6 +128,10 @@ class Mutations(unittest.TestCase):
         subprocess.run(git + ["add", "-A"], check=True)
         subprocess.run(git + ["commit", "-qm", "base"], check=True)
 
+    def git(self, *args):
+        return subprocess.run(["git", "-C", str(self.tmp), "-c", "user.email=t@t", "-c", "user.name=t", *args],
+                              check=True, capture_output=True, text=True)
+
     def tearDown(self):
         shutil.rmtree(self.tmp)
 
@@ -237,6 +241,35 @@ class Mutations(unittest.TestCase):
     def test_unreadable_registry_is_exit_2_never_a_pass(self):
         (self.tmp / chk.REGISTRY).write_text("{not json")
         self.assertEqual(self.run_check()[0], 2)
+
+    def test_unreadable_base_ref_is_exit_2_never_a_pass(self):
+        """qa-review on PR #1627: a base we cannot read must not silently skip the re-grant comparison."""
+        rc, errors, _ = self.run_check(base="origin/does-not-exist")
+        self.assertEqual(rc, 2, errors)
+        self.assertTrue(any("cannot verify base ref" in e for e in errors), errors)
+
+    def test_a_base_ref_that_is_not_a_commit_is_exit_2(self):
+        (self.tmp / "README").write_text("x")
+        self.git("add", "README")
+        self.git("commit", "-qm", "r")
+        blob = self.git("rev-parse", "HEAD:README").stdout.strip()
+        self.assertEqual(self.run_check(base=blob)[0], 2)  # a blob is readable but not a commit
+
+    def test_absent_on_base_is_a_verified_note_not_a_silent_skip(self):
+        # Remove edge from the commit but keep it in the working tree: a readable base genuinely lacks it.
+        self.git("rm", "--cached", "-q", "openclaw-edge.json")
+        self.git("commit", "-qm", "drop edge")
+        self.assertTrue((self.tmp / "openclaw-edge.json").exists())
+        rc, errors, notes = self.run_check(base="HEAD")
+        self.assertEqual((rc, errors), (0, []))
+        self.assertTrue(any("verified absent on base" in n for n in notes), notes)
+
+    def test_unparseable_base_config_is_exit_2(self):
+        (self.tmp / "openclaw-edge.json").write_text("[] not json")
+        self.git("add", "openclaw-edge.json")
+        self.git("commit", "-qm", "bad")
+        (self.tmp / "openclaw-edge.json").write_text((ROOT / "openclaw-edge.json").read_text())
+        self.assertEqual(self.run_check(base="HEAD")[0], 2)
 
     def test_live_drift_fails_and_names_the_difference(self):
         live = Path(tempfile.mkdtemp())

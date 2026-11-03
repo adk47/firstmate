@@ -226,7 +226,9 @@ def check_profile(profile: str, cfg: dict, reg: dict, today: dt.date, errors: li
 def check_base(profile: str, cfg: dict, reg: dict, base_cfg, base_reg, errors: list, notes: list) -> None:
     """Rules that need the base branch: no re-grant, no new agent at full, extensions are visible."""
     if base_cfg is None:
-        notes.append(f"{profile}: absent on base - no re-grant comparison")
+        # git_show() only returns None for a VERIFIED-absent path on a readable ref; an unreadable ref raises
+        # Unreadable (exit 2) instead. So this is a new config on a valid base, not a skipped comparison.
+        notes.append(f"{profile}: verified absent on base - no re-grant comparison")
         return
     base_agents = agents_of(base_cfg)
     for aid, entry in sorted(reg.items()):
@@ -274,13 +276,28 @@ def load(path: Path) -> dict:
 
 
 def git_show(ref: str, rel: str, root: Path):
+    """`rel` as it exists on `ref`, or None ONLY when `ref` is readable and the path is genuinely absent there.
+
+    Fail closed: an unreadable base ref (unfetched, shallow clone, not a repo, bad object) raises Unreadable ->
+    exit 2, never a pass. Returning None for those would silently disable every base comparison in check_base()
+    and let a re-grant of exec to scout/Caroline merge green (qa-review finding on PR #1627, 2026-11-01).
+    """
+    def git(*args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True)
+
+    if git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}").returncode != 0:
+        raise Unreadable(f"cannot verify base ref {ref!r}: fetch it, or pass a ref that exists "
+                         f"(CI: actions/checkout needs fetch-depth: 0)")
+    tree = git("ls-tree", "--name-only", ref, "--", rel)
+    if tree.returncode != 0:
+        raise Unreadable(f"cannot list {rel} on base {ref}: {tree.stderr.strip()}")
+    if not tree.stdout.strip():
+        return None  # verified absent on a readable base (this PR adds the file)
+    shown = git("show", f"{ref}:{rel}")
+    if shown.returncode != 0:
+        raise Unreadable(f"cannot read {ref}:{rel}: {shown.stderr.strip()}")
     try:
-        out = subprocess.run(["git", "-C", str(root), "show", f"{ref}:{rel}"], capture_output=True, text=True,
-                             check=True).stdout
-    except subprocess.CalledProcessError:
-        return None
-    try:
-        return json.loads(out)
+        return json.loads(shown.stdout)
     except ValueError as exc:
         raise Unreadable(f"{ref}:{rel} is not JSON: {exc}") from exc
 
@@ -325,7 +342,8 @@ def run(root: Path = REPO, base: str | None = None, live: bool = False, today: d
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--base", help="git ref to compare against (PR CI: origin/main)")
+    ap.add_argument("--base", help="git ref to compare against (PR CI: origin/main). An unreadable ref exits 2, "
+                                    "never 0 - the guard cannot silently skip its base comparison")
     ap.add_argument("--live", action="store_true", help="also compare node-8 live configs (post-deploy)")
     args = ap.parse_args(argv)
     rc, errors, notes = run(base=args.base, live=args.live)
