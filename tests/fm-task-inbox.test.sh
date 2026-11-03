@@ -605,6 +605,92 @@ test_ack_helper_acknowledges_safely() {
   pass "inbox: the ack helper acknowledges records without hand-rolled inbox handling"
 }
 
+# The blocked-then-acknowledged case: a worker that already deleted the visible
+# record still gets to acknowledge it, from the hidden link, instead of being
+# told the record never existed. The acknowledgement must also retire the link,
+# otherwise the repair pass hands the worker its own handled instruction again.
+test_acknowledge_from_the_hidden_link_only() {
+  local state rec out rc
+  state="$TMP_ROOT/ack-shadow/state"; mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "instruction to acknowledge")
+  rm -f "$rec"                    # the worker's cleanup took the visible name
+  [ -e "$state/t1.inbox/.unhandled/001" ] || fail "the fixture lost the hidden link"
+  out=$(inbox_lib "$state" fm_task_inbox_acknowledge "$state" t1 001) \
+    || fail "acknowledging a record that survives only as its hidden link was refused"
+  assert_contains "$out" "acknowledged" "a shadow-only acknowledgement should report success"
+  grep -qF 'instruction to acknowledge' "$state/t1.inbox/handled/001.msg" \
+    || fail "the acknowledged record did not reach handled/ with its text"
+  [ -z "$(find "$state/t1.inbox/.unhandled" -type f 2>/dev/null)" ] \
+    || fail "acknowledging from the hidden link left that link behind"
+  inbox_lib "$state" fm_task_inbox_restore_unhandled "$state" t1 >/dev/null 2>&1
+  [ ! -e "$state/t1.inbox/001.msg" ] \
+    || fail "an acknowledged record was restored after the acknowledgement"
+  rc=0
+  inbox_lib "$state" fm_task_inbox_acknowledge "$state" t1 042 >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "acknowledging a record that never existed should fail"
+  rc=0
+  inbox_lib "$state" fm_task_inbox_acknowledge "$state" t1 'nope' >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "the acknowledge operation accepted a name that is not a sequence"
+  pass "inbox: a record the worker already deleted can still be acknowledged, from its hidden link"
+}
+
+# The repair must not only protect records published by this version: a record
+# queued by an earlier one has no hidden link, so the repair pass adopts it and
+# the deletion it suffers afterwards is repairable.
+test_repair_adopts_records_queued_without_a_link() {
+  local state rec action
+  state="$TMP_ROOT/adopt/state"; mkdir -p "$state/t1.inbox/handled"
+  # A record as an earlier version left it: no hidden link anywhere.
+  printf 'schema=fm-task-inbox.v1\nat=2020-01-01T00:00:00Z\n--\nolder unread instruction\n' \
+    > "$state/t1.inbox/007.msg"
+  rec="$state/t1.inbox/007.msg"
+  age_path "$rec"
+  [ ! -e "$state/t1.inbox/.unhandled/007" ] || fail "the fixture already had a link"
+  action=$(inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ -e "$state/t1.inbox/.unhandled/007" ] \
+    || fail "the repair pass did not adopt a pre-existing unread record"
+  case "$action" in ring" "*|escalate" "*) ;; *) fail "the adopted record is not on the ladder: $action" ;; esac
+  rm -f "$rec"                    # now the same cleanup hits the adopted record
+  inbox_lib "$state" fm_task_inbox_restore_unhandled "$state" t1 >/dev/null 2>&1
+  grep -qF 'older unread instruction' "$rec" \
+    || fail "an adopted pre-existing record was not repaired after deletion"
+  pass "inbox: the repair adopts unread records queued before it existed"
+}
+
+# A coalesced tick the worker already deleted survives only as its hidden link.
+# The supersession sweep must retire that link, or the repair pass resurrects a
+# tick its replacement already covered.
+test_coalesce_retires_a_deleted_superseded_tick() {
+  local state root shadow
+  state="$TMP_ROOT/coalesce-shadow/state"; mkdir -p "$state"
+  inbox_lib "$state" fm_task_inbox_write_coalesced "$state" t1 "tick one" tick >/dev/null 2>&1
+  rm -f "$state/t1.inbox/"*.msg  # the worker's cleanup, before the next tick
+  inbox_lib "$state" fm_task_inbox_write_coalesced "$state" t1 "tick two" tick >/dev/null 2>&1
+  inbox_lib "$state" fm_task_inbox_restore_unhandled "$state" t1 >/dev/null 2>&1
+  root=$(find "$state/t1.inbox" -maxdepth 1 -type f -name '*.msg' | wc -l | tr -d '[:space:]')
+  [ "$root" = 1 ] || fail "a superseded tick was resurrected beside its replacement ($root records)"
+  grep -qF 'tick two' "$state/t1.inbox/"*.msg || fail "the surviving record is not the replacement tick"
+  shadow=$(find "$state/t1.inbox/.unhandled" -type f | wc -l | tr -d '[:space:]')
+  [ "$shadow" = 1 ] || fail "the superseded tick's hidden link survived supersession ($shadow links)"
+  pass "inbox: coalescing retires a superseded tick whose visible record was already deleted"
+}
+
+# The doorbell must name the inbox a record belongs to even when the record is
+# already in handled/ - otherwise it tells the worker to acknowledge against
+# "<id>.inbox/handled.inbox", which cannot exist.
+test_doorbell_names_the_inbox_for_a_handled_record() {
+  local state line
+  state="$TMP_ROOT/doorbell-handled/state"; mkdir -p "$state"
+  inbox_lib "$state" fm_task_inbox_write "$state" t1 "instruction" >/dev/null
+  inbox_lib "$state" fm_task_inbox_acknowledge "$state" t1 001 >/dev/null \
+    || fail "the fixture could not acknowledge its record"
+  line=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$state/t1.inbox/handled/001.msg")
+  assert_not_contains "$line" "handled.inbox" \
+    "the doorbell derived a nonsense inbox from a handled record"
+  assert_contains "$line" "$state/t1.inbox" "the doorbell should name the inbox itself"
+  pass "inbox: the doorbell names the real inbox for a record already in handled/"
+}
+
 test_writer_retries_after_a_vanished_lock_collision() {
   local state fakebin marker rec real_ln
   state="$TMP_ROOT/vanished-lock-race/state"
@@ -878,6 +964,10 @@ test_worker_deletion_is_repaired
 test_deleted_record_keeps_its_sequence
 test_coalesced_superseded_record_is_not_resurrected
 test_ack_helper_acknowledges_safely
+test_acknowledge_from_the_hidden_link_only
+test_repair_adopts_records_queued_without_a_link
+test_coalesce_retires_a_deleted_superseded_tick
+test_doorbell_names_the_inbox_for_a_handled_record
 test_writer_retries_after_a_vanished_lock_collision
 test_ladder_writes_ignore_vanished_inbox
 test_fire_and_forget_records_never_enter_the_ladder

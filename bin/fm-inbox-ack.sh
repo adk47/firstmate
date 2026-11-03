@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
 # fm-inbox-ack.sh - acknowledge firstmate steering records the safe way.
 #
-# bin/fm-task-inbox-lib.sh owns the steering-inbox contract: the record format,
-# the sequence allocation, the acknowledgement (a record leaving the inbox root
-# into handled/), and the watcher's re-ring ladder. This script is only the
-# blessed way for a worker to perform that acknowledgement, and it exists
-# because hand-rolled handling loses instructions: a worker's own `rm`, its
-# `mv *.msg handled/` sweep, or a tidy-up glob inside the inbox can destroy a
-# record it never read. Acknowledge with this command instead of touching the
-# inbox by hand.
+# The acknowledgement rule and the inbox layout both live in
+# bin/fm-task-inbox-lib.sh (fm_task_inbox_acknowledge); this script is only the
+# command-line face of it, so a worker never has to hand-roll the handling and
+# the two can never drift apart. It exists because hand-rolled handling loses
+# instructions: a worker's own `rm`, its `mv *.msg handled/` sweep, or a tidy-up
+# glob inside the inbox can destroy a record it never read.
 #
-# What it does for each record, in order:
+# What the acknowledgement does, per record:
 #   1. Refuses a name that is not a sequence, so a typo cannot touch anything.
 #   2. Reports a record that is already acknowledged instead of failing, so a
 #      re-run after a lost reply is harmless.
-#   3. Moves the record into handled/ - the acknowledgement itself.
-#   4. Retires the record's hidden second link, which is what lets the watcher
-#      tell a genuine acknowledgement from a record a worker deleted.
+#   3. Moves the record into handled/ - the acknowledgement itself - or, when the
+#      worker already deleted the visible name, acknowledges it from the hidden
+#      link instead of reporting it missing.
+#   4. Retires the record's hidden link, which is what lets the watcher tell a
+#      genuine acknowledgement from a record a worker deleted.
 #
 # It never deletes an unread record and never touches a record it was not given.
 #
@@ -26,9 +26,11 @@
 #     <task-id>    the task whose inbox you are acknowledging
 #     <record>     a record path, or its bare sequence ("035" or "035.msg")
 #
-# Exits nonzero, having acknowledged nothing further, when a named record is in
-# neither the inbox nor handled/.
+# Exits nonzero when any named record could not be acknowledged.
 set -u
+
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+LIB="$ROOT/fm-task-inbox-lib.sh"
 
 usage() {
   sed -n '/^# Usage:/,/^# Exits/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
@@ -43,35 +45,9 @@ shift 2
 
 case "$STATE" in ''|*/) STATE=${STATE%/} ;; esac
 [ -n "$STATE" ] || { usage; exit 2; }
-case "$TASK" in ''|*/*|.|..) die "not a task id: $TASK" ;; esac
 [ -d "$STATE" ] || die "no state directory at $STATE"
 
-INBOX="$STATE/$TASK.inbox"
-[ -d "$INBOX" ] || die "no inbox at $INBOX"
-HANDLED="$INBOX/handled"
-SHADOW="$INBOX/.unhandled"
-mkdir -p "$HANDLED" || die "could not create $HANDLED"
+# shellcheck source=bin/fm-task-inbox-lib.sh
+. "$LIB" || die "cannot load the steering-inbox contract from $LIB"
 
-acked=0
-for arg in "$@"; do
-  base=${arg##*/}
-  base=${base%.msg}
-  case "$base" in
-    ''|*[!0-9]*) die "not a record sequence: $arg (expected a number such as 035)" ;;
-  esac
-  src="$INBOX/$base.msg"
-  if [ ! -f "$src" ]; then
-    if [ -f "$HANDLED/$base.msg" ]; then
-      printf 'already acknowledged: %s\n' "$HANDLED/$base.msg"
-      rm -f "$SHADOW/$base" 2>/dev/null || true
-      acked=$((acked + 1))
-      continue
-    fi
-    die "no record $base.msg in $INBOX (never delivered, or already acknowledged)"
-  fi
-  mv -f "$src" "$HANDLED/$base.msg" || die "could not move $src into $HANDLED"
-  rm -f "$SHADOW/$base" 2>/dev/null || true
-  printf 'acknowledged: %s\n' "$HANDLED/$base.msg"
-  acked=$((acked + 1))
-done
-[ "$acked" -gt 0 ] || die "nothing to acknowledge"
+fm_task_inbox_acknowledge "$STATE" "$TASK" "$@" || exit 1

@@ -1072,6 +1072,16 @@ else
     fi
     # Ring the doorbell, best-effort: no ring outcome changes the exit status,
     # because the watcher's re-ring ladder owns loss detection from here.
+    # An idempotent dedup can land on a record the worker already acknowledged;
+    # that steer was delivered and acted on, so there is nothing to announce and
+    # no acknowledgement left to ask for. The remote steer leg returns early for
+    # the same case.
+    case "$INBOX_RECORD" in
+      */handled/*)
+        echo "notice: this steer was already delivered and acknowledged at $INBOX_RECORD; nothing re-rung" >&2
+        exit 0
+        ;;
+    esac
     ring_rc=0
     fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" || ring_rc=$?
     case "$ring_rc" in

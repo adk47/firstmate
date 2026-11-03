@@ -449,6 +449,29 @@ test_coalesce_keeps_reringing_ladder() {
 
 # Several senders steer one task at the same moment (firstmate plus lead workers
 # on the same host). Every instruction must survive as its own record.
+# An idempotent steer that dedups onto a record the worker already acknowledged
+# was delivered and acted on: there is nothing left to announce, so the send must
+# succeed without typing a doorbell that asks the worker to acknowledge it again.
+test_already_acknowledged_steer_is_not_rung_again() {
+  local dir err rc inbox
+  dir=$(setup_case already-acked); err="$dir/send.err"
+  inbox="$dir/home/state/t1.inbox"
+  run_send "$dir" "$err" FM_SEND_IDEMPOTENT=1 -- t1 "steer that was already handled"; rc=$?
+  expect_code 0 "$rc" "the first idempotent steer should send"
+  [ -f "$inbox/001.msg" ] || fail "the first steer was not recorded"
+  mv "$inbox/001.msg" "$inbox/handled/"
+  : > "$dir/send.log"
+  run_send "$dir" "$err" FM_SEND_IDEMPOTENT=1 -- t1 "steer that was already handled"; rc=$?
+  expect_code 0 "$rc" "a dedup onto an acknowledged record is still a delivered steer"
+  [ -z "$(ls "$inbox"/*.msg 2>/dev/null)" ] \
+    || fail "the dedup wrote a new record instead of landing on the acknowledged one"
+  [ ! -s "$dir/send.log" ] \
+    || fail "an already-acknowledged steer was rung again:"$'\n'"$(cat "$dir/send.log")"
+  assert_contains "$(cat "$err")" "already delivered and acknowledged" \
+    "the send should say the steer was already handled"
+  pass "fm-send inbox: an already-acknowledged steer is never rung again"
+}
+
 test_parallel_sends_never_lose_a_record() {
   local dir err i pids=() rc=0 inbox count
   dir=$(setup_case parallel); err="$dir/send.err"
@@ -541,6 +564,7 @@ test_meta_lock_contention_fails_bounded
 test_unwritable_inbox_fails_loudly
 test_parallel_sends_never_lose_a_record
 test_unconfirmed_record_fails_the_send
+test_already_acknowledged_steer_is_not_rung_again
 test_stranded_meta_lock_is_reclaimed
 test_coalesce_replaces_unhandled_ticks
 test_coalesce_keeps_reringing_ladder

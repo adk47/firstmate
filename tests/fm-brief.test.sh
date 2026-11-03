@@ -839,7 +839,7 @@ test_inbox_ack_command_runs_from_a_quoted_home_path() {
   local home id brief inbox cmd
   home="$TMP_ROOT/brief home's root"
   mkdir -p "$home/data"
-  id=brief-ack-quote
+  id=brief_ack_quoted_home
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1 \
     || fail "fm-brief.sh could not scaffold a brief under a quoted home path"
   brief="$home/data/$id/brief.md"
@@ -847,6 +847,7 @@ test_inbox_ack_command_runs_from_a_quoted_home_path() {
   mkdir -p "$inbox/handled" "$inbox/.unhandled"
   # shellcheck disable=SC2016
   printf 'schema=fm-task-inbox.v1\nat=2026-01-01T00:00:00Z\n--\ninstruction to acknowledge\n' > "$inbox/001.msg"
+  # shellcheck disable=SC2016  # the sed expression is the pattern, not a shell expansion
   cmd=$(sed -n 's/.*acknowledge each handled message with `\([^`]*\)`.*/\1/p' "$brief" | head -1)
   [ -n "$cmd" ] || fail "the brief did not emit an acknowledgement command"
   cmd=${cmd//NNN/001}

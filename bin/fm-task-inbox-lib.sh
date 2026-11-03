@@ -3,7 +3,8 @@
 # constant doorbell.
 #
 # ONE owner of the steering-inbox contract: the record format, sequence
-# allocation, the idempotent re-enqueue dedup, the handled/ acknowledgement,
+# allocation, the idempotent re-enqueue dedup, the handled/ acknowledgement
+# (fm_task_inbox_acknowledge, also reachable as the bin/fm-inbox-ack.sh CLI),
 # the self-describing doorbell line, and the watcher's re-ring ladder policy.
 # bin/fm-send.sh writes and rings locally, the host-local remote steer leg
 # (bin/fm-remote-secondmate-control.sh cmd_send) writes idempotently and rings
@@ -453,7 +454,7 @@ fm_task_inbox_coalesce_key() {  # <record-path>
 # and, when it superseded any, one count line on stderr.
 fm_task_inbox_write_coalesced() {  # <state-dir> <task-id> <text> <coalesce-key>
   local state=$1 task=$2 text=$3 key=$4 dir lock rec want have f status=0 removed=0
-  local oldest='' ref='' heir ladder rec_base count last superseded_oldest=0 shadow_name
+  local oldest='' ref='' heir ladder rec_base='' count last superseded_oldest=0 shadow shadow_name
   case "$key" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
   dir=$(fm_task_inbox_dir "$state" "$task")
   fm_task_inbox_prepare_dirs "$dir" || return 1
@@ -467,16 +468,37 @@ fm_task_inbox_write_coalesced() {  # <state-dir> <task-id> <text> <coalesce-key>
     if [ -n "$oldest" ] && [ "$oldest" != "$rec" ] && ref=$(mktemp "$dir/.dedup.XXXXXX"); then
       touch -r "$oldest" "$ref" 2>/dev/null || { rm -f "$ref"; ref=; }
     fi
-    for f in "$dir"/*.msg; do
-      [ -f "$f" ] && [ "$f" != "$rec" ] || continue
+    # Supersede every record this one replaces - including a tick whose visible
+    # name the worker already deleted, which survives only as its hidden link.
+    # Skipping that case would let the repair pass resurrect the superseded tick
+    # beside its replacement.
+    shadow=$(fm_task_inbox_shadow_dir "$dir")
+    rec_base=${rec##*/}
+    rec_base=${rec_base%.msg}
+    for f in "$dir"/*.msg "$shadow"/*; do
+      [ -e "$f" ] || [ -L "$f" ] || continue
+      [ "$f" != "$rec" ] || continue
+      # The new record's own link is not a supersession candidate.
+      [ "$f" != "$shadow/$rec_base" ] || continue
+      # A shadow entry with no visible record is judged by the link itself; both
+      # carry the same bytes, so the same predicate decides both.
       if [ "$(fm_task_inbox_coalesce_key "$f" 2>/dev/null)" != "$key" ]; then
         fm_task_inbox_is_fire_and_forget "$f" && continue
         fm_task_inbox_body "$f" > "$have" 2>/dev/null || continue
         cmp -s "$want" "$have" || continue
       fi
+      shadow_name=${f##*/}
+      shadow_name=${shadow_name%.msg}
+      if [ "$f" = "$shadow/$shadow_name" ]; then
+        # A link with no visible record behind it: retire it so the repair pass
+        # cannot resurrect it, but do not count it - the record it belongs to is
+        # already handled or already counted above, and the count reports the
+        # records the worker no longer has to act on.
+        rm -f "$shadow/$shadow_name" 2>/dev/null || continue
+        continue
+      fi
       if rm "$f" 2>/dev/null; then
-        shadow_name=${f##*/}
-        rm -f "$(fm_task_inbox_shadow_dir "$dir")/${shadow_name%.msg}" 2>/dev/null || true
+        rm -f "$shadow/$shadow_name" 2>/dev/null || true
         removed=$((removed + 1))
         [ "$f" != "$oldest" ] || superseded_oldest=1
       fi
@@ -505,6 +527,68 @@ EOF
   [ "$removed" -eq 0 ] \
     || echo "fm-task-inbox: coalesced $removed superseded unhandled record(s) into ${rec##*/}" >&2
   printf '%s' "$rec"
+}
+
+# Acknowledge one or more records: each leaves the inbox root for handled/ and
+# its hidden link is retired, so the repair pass can never bring it back. This is
+# the one owner of the acknowledgement rule; bin/fm-inbox-ack.sh is a thin CLI
+# over it, so the layout and the rule cannot drift apart.
+# A record that survives only as its hidden link - a worker deleted the visible
+# name and acknowledges it anyway, which is the incident this plane tolerates -
+# is acknowledged from that link instead of being reported missing.
+# Acknowledging an already acknowledged record is a successful no-op, so a re-run
+# after a lost reply is harmless. Prints one line per record on stdout and one
+# per refusal on stderr, and fails when anything was refused.
+fm_task_inbox_acknowledge() {  # <state-dir> <task-id> <record>...
+  local state=$1 task=$2 dir shadow arg base src refused=0
+  case "$task" in ''|*/*|.|..) printf 'fm-task-inbox: not a task id: %s\n' "$task" >&2; return 1 ;; esac
+  dir=$(fm_task_inbox_dir "$state" "$task")
+  shadow=$(fm_task_inbox_shadow_dir "$dir")
+  fm_task_inbox_prepare_dirs "$dir" || return 1
+  shift 2
+  for arg in "$@"; do
+    base=${arg##*/}
+    base=${base%.msg}
+    case "$base" in
+      ''|*[!0-9]*)
+        printf 'fm-task-inbox: not a record sequence: %s (expected a number such as 035)\n' "$arg" >&2
+        refused=$((refused + 1))
+        continue
+        ;;
+    esac
+    base=$(printf '%03d' "$((10#$base))")
+    src="$dir/$base.msg"
+    if [ -e "$src" ] || [ -L "$src" ]; then
+      if mv -f "$src" "$dir/handled/$base.msg" 2>/dev/null; then
+        rm -f "$shadow/$base" 2>/dev/null || true
+        printf 'acknowledged: %s\n' "$dir/handled/$base.msg"
+      else
+        printf 'fm-task-inbox: could not move %s into %s/handled\n' "$src" "$dir" >&2
+        refused=$((refused + 1))
+      fi
+      continue
+    fi
+    if [ -e "$dir/handled/$base.msg" ]; then
+      # Retiring the link is part of acknowledging: a handled record whose link
+      # survived would be restored if the worker clears handled/.
+      rm -f "$shadow/$base" 2>/dev/null || true
+      printf 'already acknowledged: %s\n' "$dir/handled/$base.msg"
+      continue
+    fi
+    if [ -e "$shadow/$base" ]; then
+      if ln "$shadow/$base" "$dir/handled/$base.msg" 2>/dev/null; then
+        rm -f "$shadow/$base" 2>/dev/null || true
+        printf 'acknowledged: %s (from its hidden link)\n' "$dir/handled/$base.msg"
+      else
+        printf 'fm-task-inbox: could not acknowledge %s.msg from %s\n' "$base" "$shadow" >&2
+        refused=$((refused + 1))
+      fi
+      continue
+    fi
+    printf 'fm-task-inbox: no record %s.msg in %s (never delivered, or already acknowledged)\n' "$base" "$dir" >&2
+    refused=$((refused + 1))
+  done
+  [ "$refused" -eq 0 ]
 }
 
 # The exact enqueued text back out of a record.
@@ -536,6 +620,12 @@ fm_task_inbox_quote() {  # <word>
 fm_task_inbox_doorbell_line() {  # <record-path>
   local dir=${1%/*} abs task state ack inbox
   abs=$(cd "$dir" 2>/dev/null && pwd) || abs=$dir
+  # A record the worker already acknowledged sits in handled/; the inbox it
+  # belongs to is one level up, and the command must name that inbox rather than
+  # a "<id>.inbox/handled.inbox" that cannot exist.
+  case "${abs##*/}" in
+    handled) abs=${abs%/*} ;;
+  esac
   task=${abs##*/}
   task=${task%.inbox}
   state=${abs%/*}
@@ -611,10 +701,28 @@ fm_task_inbox_oldest_unhandled() {  # <state-dir> <task-id>
 # is linked back with its original mtime so the ladder still ages it correctly.
 # Prints one line per repaired record so the watcher's log shows the repair.
 fm_task_inbox_restore_unhandled() {  # <state-dir> <task-id>
-  local state=$1 task=$2 dir shadow s base restored=0
+  local state=$1 task=$2 dir shadow s base restored=0 adopted=0
   dir=$(fm_task_inbox_dir "$state" "$task")
   shadow=$(fm_task_inbox_shadow_dir "$dir")
-  [ -d "$shadow" ] || return 0
+  [ -d "$dir" ] || return 0
+  # An inbox that predates this repair has no link directory yet; creating it is
+  # what lets the adoption below protect its existing unread records.
+  mkdir -p "$shadow" 2>/dev/null || return 0
+  # Adopt an unread record that predates this repair - a record queued by an
+  # earlier version has no link yet, and a link only created at publish time
+  # would leave exactly the oldest, most likely-deleted records unprotected.
+  for s in "$dir"/*.msg; do
+    [ -e "$s" ] || continue
+    base=${s##*/}
+    base=${base%.msg}
+    [ -e "$shadow/$base" ] && continue
+    if ln "$s" "$shadow/$base" 2>/dev/null; then
+      adopted=$((adopted + 1))
+    fi
+  done
+  [ "$adopted" -eq 0 ] \
+    || printf 'fm-task-inbox: adopted %s pre-existing unread record(s) in %s for deletion repair\n' \
+      "$adopted" "$dir" >&2
   for s in "$shadow"/*; do
     [ -e "$s" ] || continue
     base=${s##*/}
