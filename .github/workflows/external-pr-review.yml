@@ -245,5 +245,16 @@ jobs:
             exit 0
           fi
 
+          # --- node8-to-pods T9 canary (2026-10-28, program-lead-fable-p2 ruling 3a). ONE PR
+          #     labelled `qa-pod-canary` is reviewed by the qa-review-gateway pods; every other
+          #     PR keeps the node-8 local path byte-for-byte. Removing the label is the revert.
+          #     A labelled PR that cannot be routed FAILS here: no silent node-8 fallback.
+          source scripts/lib/qa-pod-canary.sh
+          trap qa_pod_canary_cleanup EXIT
+          if ! GH_TOKEN="${QA_ACK_PAT:-${GH_TOKEN:-}}" qa_pod_canary_route "$REPO" "$PR"; then
+            echo "::error::${REPO}#${PR} is the qa-pod-canary but the pod gateway could not be resolved — not dispatching (remove the label to review on node-8)."
+            exit 1
+          fi
+
           echo "Dispatching QA auto-review of ${REPO}#${PR} @ ${HEAD_SHA} (author=${REAL_AUTHOR} -> ${REQUESTER_UID})"
           bash scripts/qa-dispatch-pr-review.sh "$PR" "$HEAD_SHA" "$REPO" "$REQUESTER_UID"
