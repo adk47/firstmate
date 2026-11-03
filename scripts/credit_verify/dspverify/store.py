@@ -50,7 +50,8 @@ CREATE TABLE IF NOT EXISTS dsp_captures (
   last_read_at TEXT,
   last_read_json TEXT,
   reads INTEGER NOT NULL DEFAULT 0,
-  closed INTEGER NOT NULL DEFAULT 0      -- every reading final (or past the window): verified for good
+  closed INTEGER NOT NULL DEFAULT 0,     -- every reading final (or past the window): verified for good
+  late_attempt_at TEXT                   -- last time this closed capture spent a LATE-read slot (fair rotation)
 );
 CREATE INDEX IF NOT EXISTS dsp_cap_open ON dsp_captures(closed, submitted_at);
 CREATE TABLE IF NOT EXISTS dsp_verdicts (
@@ -144,6 +145,10 @@ class Store:
         if "packet_json" not in cols:           # stores created before dsp-anchor
             self.db.execute("ALTER TABLE dsp_verdicts ADD COLUMN packet_json TEXT")
             self.db.commit()
+        cap_cols = {r[1] for r in self.db.execute("PRAGMA table_info(dsp_captures)")}
+        if "late_attempt_at" not in cap_cols:   # stores created before the late-read fair cursor
+            self.db.execute("ALTER TABLE dsp_captures ADD COLUMN late_attempt_at TEXT")
+            self.db.commit()
 
     # -- runs ------------------------------------------------------------------
     def start_run(self, run_id: str, kind: str) -> None:
@@ -187,16 +192,26 @@ class Store:
                             " WHERE id=?", (utcnow(), body, 1 if closed else 0, cap_id))
 
     def late_captures(self, since: str) -> list[dict[str, Any]]:
+        # [key=rotating-late-window] (QA #1557): never-attempted captures first, then the ones attempted
+        # longest ago. Ordering by id re-read the same prefix every run, so a row past the slice could pass
+        # the 24h cutoff without ever being read and its receipt never reached a verdict.
         """Closed captures requested at or after `since` whose last read had a source the capture window closed on
         (NO_FRESH_CAPTURE): a late receipt (d3's re-enqueue under the ORIGINAL request id) can still land for them."""
         self.db.row_factory = sqlite3.Row
         try:
             rows = self.db.execute("SELECT * FROM dsp_captures WHERE closed=1 AND capture_request_id IS NOT NULL AND "
-                                   "requested_at >= ? AND last_read_json LIKE '%\"NO_FRESH_CAPTURE\"%' ORDER BY id",
+                                   "requested_at >= ? AND last_read_json LIKE '%\"NO_FRESH_CAPTURE\"%' "
+                                   "ORDER BY COALESCE(late_attempt_at, '') ASC, id ASC",
                                    (since,)).fetchall()
             return [dict(r) for r in rows]
         finally:
             self.db.row_factory = None
+
+    def record_late_attempt(self, cap_id: int) -> None:
+        """Mark a late-read slot as spent. Written even when the read changed nothing: the cursor is about FAIR
+        scheduling, not evidence, so an unchanged row still goes to the back of the queue."""
+        with self.db:
+            self.db.execute("UPDATE dsp_captures SET late_attempt_at=? WHERE id=?", (utcnow(), cap_id))
 
     def requests_with_open_capture(self) -> set[str]:
         out: set[str] = set()

@@ -511,6 +511,10 @@ def verify(store: Store, deps: Deps, *, max_groups: int = 200) -> tuple[Stats, l
                 st.errors.append(f"{cap['key']}: {row['error']}")
                 continue
             if cap["id"] in late:
+                # [key=rotating-late-window] (QA #1557): the slot is spent whatever the read says. Stamping only
+                # the rows that CHANGED would leave every unchanged row at the front of the queue for ever, which
+                # is the starvation this cursor exists to end.
+                store.record_late_attempt(cap["id"])
                 if not late_changed(cap.get("last_read_json"), row):
                     continue                      # nothing landed: no write, no packet reads
                 st.late_receipts += 1

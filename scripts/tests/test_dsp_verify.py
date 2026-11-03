@@ -850,6 +850,41 @@ class RunnerAndStore(unittest.TestCase):
         st, out = runner.verify(self.store, d)                              # read once: no longer a candidate
         self.assertEqual((out, st.late_receipts), ([], 0))
 
+    def test_the_late_read_queue_rotates_so_a_row_past_the_slice_is_still_read(self):
+        """QA #1557 (blocking finding): late candidates were ordered by id and sliced to the remaining slots, so
+        with more late rows than slots the SAME prefix was re-read every run and a row behind it could pass the
+        24 h cutoff without ever being read - its receipt never reached a verdict or an anchor. The queue is now
+        never-attempted first, then least-recently-attempted: the third row gets its turn on the next run."""
+        late = {"state": "NO_FRESH_CAPTURE", "helper_verdict": "WAITING"}
+        closed_body = json.dumps({"tracks": {"trk-1|prof-1": {"roles": {"Mixing": {"sources": {
+            "spotify": {"state": "CAPTURED"}, "tidal": {"state": "NO_FRESH_CAPTURE"}}}}}}})
+        tracks = [{"track_id": "trk-1", "profile_id": "prof-1", "roles": ["Mixing"]}]
+        admin = FakeAdmin([req(1), req(2), req(3)])
+        pod = FakePod(reading=lambda t: {"spotify": credited(), "tidal": late})
+        d = self.deps(admin, pod)
+        for i in (1, 2, 3):
+            cap_id = self.store.add_capture("run-seed", f"42#{i}", 42, [req(i)["id"]], tracks,
+                                            {"request_id": f"cap-{i}", "requested_at": REQ_AT})
+            self.store.record_read(cap_id, {}, closed=True)
+        self.store.db.execute("UPDATE dsp_captures SET last_read_json=?", (closed_body,))
+        self.store.db.commit()
+
+        def keys_read(tag: int, call: dict) -> list[str]:
+            return [it["key"] for mode, items in call["calls"][tag:] if mode == "read" for it in items]
+
+        seen = {"calls": []}
+        pod.calls = seen["calls"]
+        runner.verify(self.store, d, max_groups=2)          # 3 candidates, 2 slots
+        first = keys_read(0, seen)
+        self.assertEqual(sorted(first), ["42#1", "42#2"], first)
+        # the slot is spent on an UNCHANGED read too - that is what keeps the queue moving
+        stuck = [r[0] for r in self.store.db.execute("SELECT COUNT(*) FROM dsp_captures WHERE late_attempt_at IS NULL")]
+        self.assertEqual(stuck, [1], "two slots spent, one row still never attempted")
+        runner.verify(self.store, d, max_groups=2)
+        second = keys_read(1, seen)
+        self.assertIn("42#3", second, f"the row past the first slice never got its turn: {second}")
+        self.assertEqual(len(second), 2, second)
+
     def test_a_late_receipt_outside_the_same_run_window_is_never_read(self):
         admin = FakeAdmin([req(1)])
         late = {"tidal": {"state": "NO_FRESH_CAPTURE", "helper_verdict": "WAITING"}}
