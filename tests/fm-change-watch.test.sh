@@ -535,6 +535,7 @@ mkdir -p "$HOME_L/bin"
 cat > "$HOME_L/bin/kubectl" <<'SHIM'
 #!/usr/bin/env bash
 case " $* " in
+  *" --raw=/version "*) printf '{"major":"1","minor":"31","gitVersion":"v1.31.0"}\n' ;;
   *" get pods "*)
     cat <<'JSON'
 {"items":[{"metadata":{"name":"feed-service-abc"},
@@ -628,6 +629,7 @@ SHIM
   cat > "$home/bin/kubectl" <<'SHIM'
 #!/usr/bin/env bash
 case " $* " in
+  *" --raw=/version "*) printf '{"major":"1","minor":"31","gitVersion":"v1.31.0"}\n' ;;
   *" set env deployment/feed-service "*) printf 'DB_HOST=10.0.0.17\nDB_PORT=6432\nDB_NAME=feed\n' ;;
   *" set env "*) printf 'ENV=production\n' ;;
   *" get pods "*)
@@ -676,11 +678,11 @@ pass "doctor proves each target's pool read and names an unresolved pool"
 
 out=$(PATH="$HOME_S/bin:$PATH" FM_CW_SSH_LOG="$HOME_S/ssh.log" run_cw "$HOME_S" 1790000300 doctor) \
   || fail "doctor failed against a console that answers: $out"
-[ "$out" = "doctor: ok pool read ubuntu@10.0.0.17:6432 returned 3 pool row(s)" ] \
+printf '%s\n' "$out" | grep -qxF "doctor: ok pool read ubuntu@10.0.0.17:6432 returned 3 pool row(s)" \
   || fail "doctor's default read is not the documented pooler path: $out"
 out=$(PATH="$HOME_S/bin:$PATH" FM_CW_SSH_LOG="$HOME_S/ssh.log" FM_CW_SSH_FAIL='Permission denied (publickey).' \
   run_cw "$HOME_S" 1790000300 doctor) && fail "doctor passed a failed console read"
-[ "$out" = "doctor: FAIL pool read ubuntu@10.0.0.17:6432: Permission denied (publickey)." ] \
+printf '%s\n' "$out" | grep -qxF "doctor: FAIL pool read ubuntu@10.0.0.17:6432: Permission denied (publickey)." \
   || fail "doctor did not state the console failure: $out"
 pass "doctor reads the documented pooler by default and states a failed read"
 
@@ -696,6 +698,334 @@ BASE_T="$HOME_T/state/change-watch/t1-3317/baseline"
 [ "$(grep -c '' "$BASE_T")" -eq 12 ] || fail "a hung console read lost the later keys"
 out=$(PATH="$HOME_T/bin:$PATH" FM_CW_SSH_LOG="$HOME_T/ssh.log" FM_CW_SSH_SLEEP=30 FM_CW_SAMPLE_DEADLINE=2 \
   run_cw "$HOME_T" 1790000300 doctor) && fail "doctor passed a hung console read"
-[ "$out" = "doctor: FAIL pool read ubuntu@10.0.0.17:6432: timed out after 2s" ] \
+printf '%s\n' "$out" | grep -qxF "doctor: FAIL pool read ubuntu@10.0.0.17:6432: timed out after 2s" \
   || fail "doctor did not state the timed-out read: $out"
 pass "a hung console read is bounded, unmeasured, and stated by the doctor"
+
+# --- the reader: kubeconfig, one probe, and a stated reason --------------------
+# Every watch once completed unmeasured for months because the ambient kubectl
+# pointed at a cluster this home could not reach. The reader now resolves the
+# kubeconfig the home documents, proves the cluster answers once per sample, and
+# records why each metric it could not read stayed unmeasured.
+
+CORE_PR='https://github.com/Muso-AI/core-backend/pull/4242'
+CORE_ID_SUFFIX='-4242'
+
+# cluster_world <name> prints a home whose kubectl answers like a live cluster:
+# it records the kubeconfig and argv it saw, proves the version probe, lists the
+# workloads inventory when one is set, and answers pod reads with the image
+# FM_CW_SHIM_IMAGE names.
+cluster_world() {
+  local home
+  home=$(new_world "$1")
+  mkdir -p "$home/bin" "$home/config" "$home/sentry"
+  cat > "$home/bin/kubectl" <<'SHIM'
+#!/usr/bin/env bash
+printf '%s\t%s\n' "${KUBECONFIG:-}" "$*" >> "$FM_CW_SHIM_LOG"
+case " $* " in
+  *" --raw=/version "*) printf '{"gitVersion":"v1.31.0"}\n' ;;
+  *" get deploy -A "*)
+    [ -z "${FM_CW_SHIM_WORKLOADS:-}" ] || cat "$FM_CW_SHIM_WORKLOADS"
+    ;;
+  *" get pods "*)
+    app=$(printf '%s' "$*" | sed -n 's/.*app=\([^ ]*\).*/\1/p')
+    printf '{"items":[{"metadata":{"name":"%s-1"},"spec":{"containers":[{"name":"c","image":"%s","resources":{"limits":{"memory":"512Mi"}}}]},"status":{"containerStatuses":[{"name":"c","restartCount":0,"lastState":{}}]}}]}\n' \
+      "$app" "${FM_CW_SHIM_IMAGE:-}"
+    ;;
+  *" top pods "*) printf '%s-1   c   100m   128Mi\n' "$(printf '%s' "$*" | sed -n 's/.*app=\([^ ]*\).*/\1/p')" ;;
+  *" logs "*) : ;;
+  *" set env "*) printf 'ENV=production\n' ;;
+  *) exit 1 ;;
+esac
+SHIM
+  chmod +x "$home/bin/kubectl"
+  printf '%s\n' "$home"
+}
+
+# seed_app_pr <home> seeds a merged application PR: source files only, no
+# manifests, so the Deployments are resolved from the image inventory.
+seed_app_pr() {
+  printf 'src/server.ts\nsrc/routes/feed.ts\n' > "$1/forge/files.txt"
+  printf '%s\n' 1790000000 > "$1/forge/merge-epoch"
+  printf '%s\n' deadbeef > "$1/forge/head-ref"
+  : > "$1/forge/diff.txt"
+}
+
+HOME_K=$(cluster_world k)
+seed_app_pr "$HOME_K"
+printf 'muso-prod\tcore-backend-api\t6\tlocalhost:30500/muso/core-backend:old-1\n' > "$HOME_K/workloads"
+printf 'muso-dev\tcore-backend-api\t1\tlocalhost:30500/muso/core-backend:old-1\n' >> "$HOME_K/workloads"
+printf '[]\n' > "$HOME_K/sentry/issues-core-backend.json"
+
+# An explicit kubeconfig wins, and the ambient default never silently decides.
+printf 'apiVersion: v1\n' > "$HOME_K/doc.kubeconfig"
+out=$(CW_CLUSTER_DIR='' PATH="$HOME_K/bin:$PATH" FM_CW_SHIM_LOG="$HOME_K/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_K/workloads" FM_CW_SHIM_IMAGE="${FM_CW_SHIM_IMAGE:-localhost:30500/muso/core-backend:old-1}" FM_CW_CONFIG_DIR="$HOME_K/config" \
+  FM_CW_KUBECONFIG="$HOME_K/doc.kubeconfig" FM_CW_SENTRY_DIR="$HOME_K/sentry" \
+  KUBECONFIG=/ambient/kubeconfig \
+  run_cw "$HOME_K" 1790000000 register k1 "$CORE_PR") || fail "register failed: $out"
+grep -q "$HOME_K/doc.kubeconfig" "$HOME_K/shim.log" \
+  || fail "the explicit kubeconfig did not reach kubectl: $(head -2 "$HOME_K/shim.log" 2>/dev/null)"
+grep -q '/ambient/kubeconfig' "$HOME_K/shim.log" \
+  && fail "an explicit kubeconfig did not win over the ambient one"
+pass "an explicit kubeconfig is what every cluster read uses"
+
+# The home's own config file is next, ahead of the ambient default.
+printf 'apiVersion: v1\n' > "$HOME_K/config/home.kubeconfig"
+printf '%s\n' "$HOME_K/config/home.kubeconfig" > "$HOME_K/config/change-watch-kubeconfig"
+: > "$HOME_K/shim.log"
+CW_CLUSTER_DIR='' PATH="$HOME_K/bin:$PATH" FM_CW_SHIM_LOG="$HOME_K/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_K/workloads" FM_CW_SHIM_IMAGE='localhost:30500/muso/core-backend:old-1' \
+  FM_CW_CONFIG_DIR="$HOME_K/config" FM_CW_SENTRY_DIR="$HOME_K/sentry" KUBECONFIG=/ambient/kubeconfig \
+  run_cw "$HOME_K" 1790000300 sample "k1$CORE_ID_SUFFIX" 300 >/dev/null || fail "sample failed"
+grep -q "$HOME_K/config/home.kubeconfig" "$HOME_K/shim.log" \
+  || fail "the home's kubeconfig config file was not used: $(head -2 "$HOME_K/shim.log" 2>/dev/null)"
+pass "a home's config/change-watch-kubeconfig is the next kubeconfig in line"
+
+# An unreachable cluster is one probe, never a metric read per key, and every
+# metric says why it stayed unmeasured.
+HOME_X=$(new_world x)
+mkdir -p "$HOME_X/bin"
+cat > "$HOME_X/bin/kubectl" <<'SHIM'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_CW_SHIM_LOG"
+printf 'Unable to connect to the server: dial tcp: lookup prod.example: no such host\n' >&2
+exit 1
+SHIM
+chmod +x "$HOME_X/bin/kubectl"
+seed_pr "$HOME_X" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_X" "$MANIFEST" "$FEED_LINE"
+printf 'apiVersion: v1\n' > "$HOME_X/doc.kubeconfig"
+CW_CLUSTER_DIR='' PATH="$HOME_X/bin:$PATH" FM_CW_SHIM_LOG="$HOME_X/shim.log" \
+  FM_CW_KUBECONFIG="$HOME_X/doc.kubeconfig" FM_CW_SENTRY_DIR="$HOME_X/sentry" \
+  run_cw "$HOME_X" 1790000000 register x1 "$PR_URL" >/dev/null || fail "register failed"
+: > "$HOME_X/shim.log"
+CW_CLUSTER_DIR='' PATH="$HOME_X/bin:$PATH" FM_CW_SHIM_LOG="$HOME_X/shim.log" \
+  FM_CW_KUBECONFIG="$HOME_X/doc.kubeconfig" FM_CW_SENTRY_DIR="$HOME_X/sentry" \
+  run_cw "$HOME_X" 1790000300 sample x1-3317 300 >/dev/null || fail "sample failed"
+[ "$(grep -c '' "$HOME_X/shim.log")" -eq 1 ] \
+  || fail "an unreachable cluster was probed $(grep -c '' "$HOME_X/shim.log") times, not once"
+REASONS_X="$HOME_X/state/change-watch/x1-3317/read-failures"
+[ "$(grep -c '' "$REASONS_X")" -eq 6 ] \
+  || fail "not every metric recorded why it was unmeasured: $(cat "$REASONS_X")"
+grep -q "cluster read failed: .*no such host" "$REASONS_X" \
+  || fail "the recorded reason does not name the unreachable cluster: $(cat "$REASONS_X")"
+pass "an unreachable cluster costs one probe and is named as every metric's reason"
+
+out=$(CW_CLUSTER_DIR='' PATH="$HOME_X/bin:$PATH" FM_CW_SHIM_LOG="$HOME_X/shim.log" \
+  FM_CW_KUBECONFIG="$HOME_X/doc.kubeconfig" FM_CW_SENTRY_DIR="$HOME_X/sentry" \
+  run_cw "$HOME_X" 1790000300 doctor x1-3317) && fail "doctor passed an unreachable cluster"
+printf '%s\n' "$out" | grep -q "doctor: FAIL cluster unreachable: .*no such host" \
+  || fail "doctor did not state the unreachable cluster: $out"
+pass "the doctor states an unreachable cluster instead of calling an unmeasured watch fine"
+
+# --- an application release is watched by the image it deploys -----------------
+# The target set comes from the Deployments that RUN the repository's image, in
+# production namespaces only: a dev copy and a test copy are not the release,
+# and a family larger than the cap is reduced to its busiest members.
+
+HOME_C=$(cluster_world c)
+seed_app_pr "$HOME_C"
+{
+  printf 'muso-prod\tcore-backend-api\t6\tlocalhost:30500/muso/core-backend:old-1\n'
+  printf 'muso-prod\tcore-backend-worker\t3\tlocalhost:30500/muso/core-backend:old-1\n'
+  printf 'muso-prod\tcore-backend-analytics\t2\tlocalhost:30500/muso/core-backend:old-1\n'
+  printf 'muso-dev\tcore-backend-api\t1\tlocalhost:30500/muso/core-backend:old-1\n'
+  printf 'muso-prod\tcore-backend-api-test\t1\tlocalhost:30500/muso/core-backend:old-1\n'
+} > "$HOME_C/workloads"
+printf '[]\n' > "$HOME_C/sentry/issues-core-backend.json"
+out=$(CW_CLUSTER_DIR='' PATH="$HOME_C/bin:$PATH" FM_CW_SHIM_LOG="$HOME_C/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_C/workloads" FM_CW_SHIM_IMAGE='localhost:30500/muso/core-backend:old-1' \
+  FM_CW_CONFIG_DIR="$HOME_C/config" \
+  FM_CW_SENTRY_DIR="$HOME_C/sentry" run_cw "$HOME_C" 1790000000 register c1 "$CORE_PR") \
+  || fail "application register failed: $out"
+TARGETS_C="$HOME_C/state/change-watch/c1$CORE_ID_SUFFIX/targets"
+[ "$(cat "$TARGETS_C")" = "$(printf 'muso-prod\tcore-backend-analytics\nmuso-prod\tcore-backend-api\nmuso-prod\tcore-backend-worker')" ] \
+  || fail "the image family resolved wrong: $(cat "$TARGETS_C")"
+case "$out" in
+  *"registered c1$CORE_ID_SUFFIX"*"(4 target(s)"*) pass "an application release is watched by the Deployments that run its image" ;;
+  *) fail "the registration line does not count every target kind: $out" ;;
+esac
+
+# A family larger than the cap is watched by its busiest members, and the line
+# says so instead of silently dropping the rest.
+HOME_FAM=$(cluster_world fam)
+seed_app_pr "$HOME_FAM"
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  printf 'muso-prod\tindustry-proc-%s\t%s\tlocalhost:30500/muso/industry-data-processing:old\n' "$i" "$i"
+done > "$HOME_FAM/workloads"
+out=$(CW_CLUSTER_DIR='' PATH="$HOME_FAM/bin:$PATH" FM_CW_SHIM_LOG="$HOME_FAM/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_FAM/workloads" FM_CW_SHIM_IMAGE="${FM_CW_SHIM_IMAGE:-localhost:30500/muso/core-backend:old-1}" FM_CW_CONFIG_DIR="$HOME_FAM/config" \
+  FM_CW_SENTRY_DIR="$HOME_FAM/sentry" FM_CW_MAX_TARGETS=3 \
+  run_cw "$HOME_FAM" 1790000000 register fam1 \
+  'https://github.com/Muso-AI/industry-data-processing/pull/620') || fail "family register failed: $out"
+[ "$(grep -c '' "$HOME_FAM/state/change-watch/fam1-620/targets")" -eq 3 ] \
+  || fail "the cap did not bound the target set"
+head -1 "$HOME_FAM/state/change-watch/fam1-620/targets" | grep -q 'industry-proc-10' \
+  || fail "the busiest Deployment was not the first target"
+case "$out" in
+  *"capped: watching the 3 busiest of 10"*) pass "a family over the cap is reduced to its busiest and says so" ;;
+  *) fail "the cap was not stated: $out" ;;
+esac
+
+# A repository whose Deployment names differ from its image name is mapped.
+HOME_M2=$(cluster_world m2)
+seed_app_pr "$HOME_M2"
+{
+  printf 'messaging\tnotify-gateway\t2\tlocalhost:30500/muso/notify-gateway:prod-1\n'
+  printf 'messaging\tsend-gateway\t2\tlocalhost:30500/muso/send-gateway:prod-1\n'
+  printf 'messaging\tpreferences\t2\tlocalhost:30500/muso/preferences:prod-1\n'
+} > "$HOME_M2/workloads"
+out=$(CW_CLUSTER_DIR='' PATH="$HOME_M2/bin:$PATH" FM_CW_SHIM_LOG="$HOME_M2/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_M2/workloads" FM_CW_SHIM_IMAGE="${FM_CW_SHIM_IMAGE:-localhost:30500/muso/core-backend:old-1}" FM_CW_CONFIG_DIR="$HOME_M2/config" \
+  FM_CW_SENTRY_DIR="$HOME_M2/sentry" run_cw "$HOME_M2" 1790000000 register m21 \
+  'https://github.com/Muso-AI/muso-messaging/pull/88') || fail "messaging register failed: $out"
+[ "$(grep -c '' "$HOME_M2/state/change-watch/m21-88/targets")" -eq 3 ] \
+  || fail "the messaging map did not resolve its three Deployments: $(cat "$HOME_M2/state/change-watch/m21-88/targets" 2>/dev/null)"
+pass "a repository mapped to differently named Deployments resolves through the map"
+
+# --- the deploy must land before anything is scored ----------------------------
+# A sample taken while the pods still run the image they ran at registration
+# measures the code the release replaced, so it is recorded as awaiting the
+# deploy and never as health.
+
+HOME_G=$(cluster_world g)
+seed_app_pr "$HOME_G"
+printf 'muso-prod\tcore-backend-api\t6\tlocalhost:30500/muso/core-backend:old-1\n' > "$HOME_G/workloads"
+printf '[]\n' > "$HOME_G/sentry/issues-core-backend.json"
+CW_CLUSTER_DIR='' PATH="$HOME_G/bin:$PATH" FM_CW_SHIM_LOG="$HOME_G/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_G/workloads" FM_CW_SHIM_IMAGE='localhost:30500/muso/core-backend:old-1' \
+  FM_CW_CONFIG_DIR="$HOME_G/config" FM_CW_SENTRY_DIR="$HOME_G/sentry" \
+  run_cw "$HOME_G" 1790000000 register g1 "$CORE_PR" >/dev/null || fail "register failed"
+CW_CLUSTER_DIR='' PATH="$HOME_G/bin:$PATH" FM_CW_SHIM_LOG="$HOME_G/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_G/workloads" FM_CW_SHIM_IMAGE='localhost:30500/muso/core-backend:old-1' \
+  FM_CW_CONFIG_DIR="$HOME_G/config" FM_CW_SENTRY_DIR="$HOME_G/sentry" FM_CW_DEBUG_LANDING=1 \
+  run_cw "$HOME_G" 1790000300 sample "g1$CORE_ID_SUFFIX" 300 >/dev/null || fail "sample failed"
+DBG=$(cat "$HOME_G/state/change-watch/g1$CORE_ID_SUFFIX/images-at-register" 2>/dev/null; echo "|"; cat "$HOME_G/state/change-watch/g1$CORE_ID_SUFFIX/shims.log" 2>/dev/null)
+SAMPLES_G="$HOME_G/state/change-watch/g1$CORE_ID_SUFFIX/samples.log"
+[ "$(awk -F'\t' '$7 == 1' "$SAMPLES_G" | wc -l | tr -d ' ')" -eq 0 ] \
+  || fail "a target still on its pre-merge image was scored: $(cat "$SAMPLES_G")"
+grep -q "awaiting the deploy" "$HOME_G/state/change-watch/g1$CORE_ID_SUFFIX/read-failures" \
+  || fail "the awaiting-deploy state was not recorded as the reason"
+pass "a sample before the rollout is recorded as awaiting the deploy, never as health"
+
+# Once the pods carry a new image the same watch scores the release.
+CW_CLUSTER_DIR='' PATH="$HOME_G/bin:$PATH" FM_CW_SHIM_LOG="$HOME_G/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_G/workloads" FM_CW_SHIM_IMAGE='localhost:30500/muso/core-backend:new-2' \
+  FM_CW_CONFIG_DIR="$HOME_G/config" FM_CW_SENTRY_DIR="$HOME_G/sentry" \
+  run_cw "$HOME_G" 1790000900 sample "g1$CORE_ID_SUFFIX" 900 >/dev/null || fail "sample failed"
+awk -F'\t' '$2 == 900 && $7 == 1' "$SAMPLES_G" | grep -q "restarts@muso-prod/core-backend-api" \
+  || fail "the landed release was not scored: $(awk -F'\t' '$2 == 900' "$SAMPLES_G")"
+pass "the new image lands and the same watch scores the release"
+
+# --- Sentry is the error signal for a repository that reports to it ------------
+# New error and fatal issues after the merge are the release's own errors; a
+# warning that reaches many users and an error first seen before the merge are
+# not.
+
+HOME_SN=$(cluster_world sn)
+seed_app_pr "$HOME_SN"
+printf 'muso-prod\tcore-backend-api\t6\tlocalhost:30500/muso/core-backend:old-1\n' > "$HOME_SN/workloads"
+# Before the sample the project has only its pre-merge errors; the release's own
+# errors appear afterwards, which is what the watch must catch.
+cat > "$HOME_SN/sentry/issues-core-backend.json" <<'JSON'
+[{"level":"error","firstSeen":"2026-09-20T06:00:00Z","count":100,"userCount":9}]
+JSON
+cat > "$HOME_SN/sentry/issues-after.json" <<'JSON'
+[{"level":"error","firstSeen":"2026-09-22T06:20:00Z","count":9,"userCount":4},
+ {"level":"error","firstSeen":"2026-09-22T06:21:00Z","count":4,"userCount":1},
+ {"level":"fatal","firstSeen":"2026-09-22T06:22:00Z","count":2,"userCount":1},
+ {"level":"warning","firstSeen":"2026-09-22T06:23:00Z","count":900,"userCount":40},
+ {"level":"error","firstSeen":"2026-09-20T06:00:00Z","count":100,"userCount":9}]
+JSON
+CW_CLUSTER_DIR='' PATH="$HOME_SN/bin:$PATH" FM_CW_SHIM_LOG="$HOME_SN/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_SN/workloads" FM_CW_SHIM_IMAGE='localhost:30500/muso/core-backend:old-1' \
+  FM_CW_CONFIG_DIR="$HOME_SN/config" FM_CW_SENTRY_DIR="$HOME_SN/sentry" \
+  run_cw "$HOME_SN" 1790000000 register sn1 "$CORE_PR" >/dev/null || fail "register failed"
+[ "$(cat "$HOME_SN/state/change-watch/sn1$CORE_ID_SUFFIX/sentry")" = "core-backend" ] \
+  || fail "the Sentry project was not recorded as a target"
+cp "$HOME_SN/sentry/issues-after.json" "$HOME_SN/sentry/issues-core-backend.json"
+CW_CLUSTER_DIR='' PATH="$HOME_SN/bin:$PATH" FM_CW_SHIM_LOG="$HOME_SN/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_SN/workloads" FM_CW_SHIM_IMAGE='localhost:30500/muso/core-backend:new-2' \
+  FM_CW_CONFIG_DIR="$HOME_SN/config" FM_CW_SENTRY_DIR="$HOME_SN/sentry" \
+  run_cw "$HOME_SN" 1790000300 sample "sn1$CORE_ID_SUFFIX" 300 >/dev/null || fail "sample failed"
+line=$(run_cw "$HOME_SN" 1790000300 verdict "sn1$CORE_ID_SUFFIX")
+[ "$line" = "change-watch regressed at +5m on sentry_new_issues (3 vs baseline 0)" ] \
+  || fail "new Sentry errors did not regress the watch: $line"
+grep -qF "check: change-watch sn1 $CORE_PR sentry_new_issues regressed" "$HOME_SN/state/.wake-queue" \
+  || fail "the Sentry regression did not queue a check wake"
+pass "new Sentry error and fatal issues regress the release, warnings do not"
+
+# No token: the Sentry target is not registered and the registration says why.
+HOME_NT=$(cluster_world nt)
+seed_app_pr "$HOME_NT"
+printf 'muso-prod\tcore-backend-api\t6\tlocalhost:30500/muso/core-backend:old-1\n' > "$HOME_NT/workloads"
+out=$(CW_CLUSTER_DIR='' PATH="$HOME_NT/bin:$PATH" FM_CW_SHIM_LOG="$HOME_NT/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_NT/workloads" FM_CW_SHIM_IMAGE="${FM_CW_SHIM_IMAGE:-localhost:30500/muso/core-backend:old-1}" FM_CW_CONFIG_DIR="$HOME_NT/config" \
+  FM_CW_SENTRY_VAULT="$HOME_NT/missing-vault.json" FM_CW_SENTRY_DIR='' \
+  run_cw "$HOME_NT" 1790000000 register nt1 "$CORE_PR") || fail "register failed: $out"
+case "$out" in
+  *"sentry unmeasured: no token in $HOME_NT/missing-vault.json"*) ;;
+  *) fail "a missing Sentry token was not stated at registration: $out" ;;
+esac
+[ -e "$HOME_NT/state/change-watch/nt1$CORE_ID_SUFFIX/sentry" ] \
+  && fail "a Sentry target was registered without a token"
+pass "a missing Sentry token is stated at registration, never a silent zero"
+
+# --- a repository that deploys to a host is watched by its deploy workflow -----
+# hydra is deployed by its own workflow, not by a rollout the cluster can see, so
+# its release is the workflow run after the merge: a failed run regresses, and a
+# run that has not happened yet is awaiting the deploy.
+
+HYDRA_PR='https://github.com/Muso-AI/hydra/pull/1383'
+HOME_R=$(new_world r)
+mkdir -p "$HOME_R/gh/runs-Muso-AI"
+printf 'src/hydra.py\n' > "$HOME_R/forge/files.txt"
+printf '%s\n' 1790000000 > "$HOME_R/forge/merge-epoch"
+printf '%s\n' deadbeef > "$HOME_R/forge/head-ref"
+out=$(CW_CLUSTER_DIR='' FM_CW_GH_DIR="$HOME_R/gh" FM_CW_SENTRY_DIR="$HOME_R/sentry" \
+  FM_CW_CONFIG_DIR="$HOME_R/config" FM_CW_WORKLOADS_DIR='' \
+  PATH="$HOME_R/bin:$PATH" run_cw "$HOME_R" 1790000000 register r1 "$HYDRA_PR") \
+  || fail "hydra register failed: $out"
+[ "$(cat "$HOME_R/state/change-watch/r1-1383/runs")" = "$(printf 'Muso-AI/hydra\t.github/workflows/deploy.yml')" ] \
+  || fail "the hydra deploy workflow was not recorded as a target: $(cat "$HOME_R/state/change-watch/r1-1383/"* 2>/dev/null | tr '\n' '|')"
+[ -e "$HOME_R/state/change-watch/r1-1383/targets" ] && fail "hydra resolved cluster targets it does not have"
+CW_CLUSTER_DIR='' FM_CW_GH_DIR="$HOME_R/gh" FM_CW_SENTRY_DIR="$HOME_R/sentry" \
+  FM_CW_CONFIG_DIR="$HOME_R/config" PATH="$HOME_R/bin:$PATH" \
+  run_cw "$HOME_R" 1790000300 sample r1-1383 300 >/dev/null || true
+grep -q "no .github/workflows/deploy.yml run since the merge" "$HOME_R/state/change-watch/r1-1383/read-failures" \
+  || fail "a deploy that has not run yet was not recorded as awaiting it"
+printf '%s\n' '[{"conclusion":"failure","status":"completed","createdAt":"2026-09-22T06:10:00Z","databaseId":9,"url":"https://github.com/Muso-AI/hydra/actions/runs/9"}]' \
+  > "$HOME_R/gh/runs-Muso-AI/hydra-.github_workflows_deploy.yml.json"
+CW_CLUSTER_DIR='' FM_CW_GH_DIR="$HOME_R/gh" FM_CW_SENTRY_DIR="$HOME_R/sentry" \
+  FM_CW_CONFIG_DIR="$HOME_R/config" PATH="$HOME_R/bin:$PATH" \
+  run_cw "$HOME_R" 1790000900 sample r1-1383 900 >/dev/null || true
+line=$(run_cw "$HOME_R" 1790000900 verdict r1-1383)
+[ "$line" = "change-watch regressed at +15m on deploy_run (0 vs baseline unmeasured)" ] \
+  || fail "a failed deploy run did not regress the watch: $line"
+pass "a failed deploy-workflow run regresses the release and a missing run is awaiting it"
+
+# --- a clean verdict still names what it never measured -----------------------
+HOME_GAP=$(cluster_world gap)
+seed_app_pr "$HOME_GAP"
+printf 'muso-prod\tcore-backend-api\t6\tlocalhost:30500/muso/core-backend:old-1\n' > "$HOME_GAP/workloads"
+printf '[]\n' > "$HOME_GAP/sentry/issues-core-backend.json"
+CW_CLUSTER_DIR='' PATH="$HOME_GAP/bin:$PATH" FM_CW_SHIM_LOG="$HOME_GAP/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_GAP/workloads" FM_CW_SHIM_IMAGE='localhost:30500/muso/core-backend:old-1' \
+  FM_CW_CONFIG_DIR="$HOME_GAP/config" FM_CW_SENTRY_DIR="$HOME_GAP/sentry" \
+  run_cw "$HOME_GAP" 1790000000 register gap1 "$CORE_PR" >/dev/null || fail "register failed"
+printf 'kind=crewmate\n' > "$HOME_GAP/state/gap1.meta"
+for offset in 300 900; do
+  CW_CLUSTER_DIR='' PATH="$HOME_GAP/bin:$PATH" FM_CW_SHIM_LOG="$HOME_GAP/shim.log" \
+    FM_CW_SHIM_WORKLOADS="$HOME_GAP/workloads" FM_CW_SHIM_IMAGE='localhost:30500/muso/core-backend:new-2' \
+    FM_CW_CONFIG_DIR="$HOME_GAP/config" FM_CW_SENTRY_DIR="$HOME_GAP/sentry" \
+    run_cw "$HOME_GAP" "$((1790000000 + offset))" sample "gap1$CORE_ID_SUFFIX" "$offset" >/dev/null || true
+done
+line=$(CW_CLUSTER_DIR='' PATH="$HOME_GAP/bin:$PATH" FM_CW_SHIM_LOG="$HOME_GAP/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_GAP/workloads" FM_CW_SHIM_IMAGE="${FM_CW_SHIM_IMAGE:-localhost:30500/muso/core-backend:old-1}" FM_CW_CONFIG_DIR="$HOME_GAP/config" \
+  FM_CW_SENTRY_DIR="$HOME_GAP/sentry" run_cw "$HOME_GAP" 1790001000 status "gap1$CORE_ID_SUFFIX")
+printf '%s\n' "$line" | grep -q "unmeasured: .*http_5xx_per_min" \
+  || fail "status did not name a metric no sample could read: $line"
+printf '%s\n' "$line" | grep -q "unmeasured: .*pgbouncer_cl_waiting" \
+  || fail "status did not name every unmeasured metric: $line"
+pass "a watch reports the metrics it never measured instead of implying they were clean"
