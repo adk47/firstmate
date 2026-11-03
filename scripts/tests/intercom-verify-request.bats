@@ -3517,37 +3517,49 @@ Caroline, Muso Support" ]
 @test "[key=gmail-o-forward] /o: byte-exact as the LAST sentence before the sign-off, only under --gmail-fallback-o, only to the frozen did-vouch set while cs-gmail is stale" {
   grep -qx 'readonly GMAIL_FALLBACK_O_TEXT="If you have already emailed it to support@muso.ai, just reply here to say so and we will match it to your request."' "$REAL_SCRIPT"
   O='If you have already emailed it to support@muso.ai, just reply here to say so and we will match it to your request.'
+  # the /o window is a DATED unlock (GMAIL_FALLBACK_O_UNTIL). A test must never depend on that deadline still being in
+  # the future: it passed at 2026-11-02T16:00Z, and every case below then failed on "window closed" before reaching the
+  # rule it is about. Derive OPEN copies for the cases that test WHY /o is allowed or refused; the CLOSED case derives
+  # its own copy dated in the past (and the committed script itself is now closed - that is pinned at the end).
+  sed 's/^readonly GMAIL_FALLBACK_O_UNTIL=.*/readonly GMAIL_FALLBACK_O_UNTIL="2099-01-01T00:00:00Z"/' "$UVN" > "$TEST_TMPDIR/uvn-open.sh"
+  sed 's/^readonly GMAIL_FALLBACK_O_UNTIL=.*/readonly GMAIL_FALLBACK_O_UNTIL="2099-01-01T00:00:00Z"/' "$LOCKED" > "$TEST_TMPDIR/locked-open.sh"
+  chmod +x "$TEST_TMPDIR/uvn-open.sh" "$TEST_TMPDIR/locked-open.sh"
+  OPEN="$TEST_TMPDIR/uvn-open.sh"; LOCKED_OPEN="$TEST_TMPDIR/locked-open.sh"
   credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
   # without the flag: the plain ask, no /o
   run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [[ "$(rendered .body | plain)" != *"support@muso.ai"* ]]
   # a held member: /o is the last line before "Thank you," (html and text)
-  INTERCOM_VERIFY_TEST_GMO=held run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --gmail-fallback-o
+  INTERCOM_VERIFY_TEST_GMO=held run -0 "$OPEN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --gmail-fallback-o
   body="$(rendered .body | plain)"
   [[ "$body" == "Hi Jane, a quick status update"*"$O"$'\n''Thank you,'$'\n''Caroline, Muso Support' ]]
   [ "$(printf '%s' "$body" | grep -c 'support@muso.ai')" -eq 1 ]
   # not a member / Gmail fresh again (the stop rule) / unreadable: refused, nothing claimed
-  INTERCOM_VERIFY_TEST_GMO=not_held run -1 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --gmail-fallback-o
+  INTERCOM_VERIFY_TEST_GMO=not_held run -1 "$OPEN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --gmail-fallback-o
   [[ "$output" == *"/o goes only to the frozen did-vouch set"* ]]
-  INTERCOM_VERIFY_TEST_GMO=fresh run -1 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --gmail-fallback-o
+  INTERCOM_VERIFY_TEST_GMO=fresh run -1 "$OPEN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --gmail-fallback-o
   [[ "$output" == *"/o is retired: cs-gmail reads fresh again"* ]]
-  INTERCOM_VERIFY_TEST_GMO=garbage run -1 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --gmail-fallback-o
+  INTERCOM_VERIFY_TEST_GMO=garbage run -1 "$OPEN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --gmail-fallback-o
   [[ "$output" == *"could not be read"* ]]
   # only an initial uvn-status ask: never a status note, never a reply_due answer
-  INTERCOM_VERIFY_TEST_GMO=held run -1 "$LOCKED" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --gmail-fallback-o
+  INTERCOM_VERIFY_TEST_GMO=held run -1 "$LOCKED_OPEN" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --gmail-fallback-o
   [[ "$output" == *"applies to an initial uvn-status ask only"* ]]
-  INTERCOM_VERIFY_TEST_GMO=held run -1 "$UVN" send --campaign uvn-status --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --gmail-fallback-o
+  INTERCOM_VERIFY_TEST_GMO=held run -1 "$OPEN" send --campaign uvn-status --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --gmail-fallback-o
   [[ "$output" == *"applies to an initial uvn-status ask only"* ]]
   # a real send records the /o approval on the ledger row
-  INTERCOM_VERIFY_TEST_GMO=held run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --gmail-fallback-o
+  INTERCOM_VERIFY_TEST_GMO=held run -0 "$OPEN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --gmail-fallback-o
   [[ "$output" == "POSTED email"* ]]
   [[ "$(msg .body | plain)" == *"$O"$'\n''Thank you,'* ]]
   [[ "$(sql "SELECT approval_ref FROM verify_messages WHERE campaign='uvn-status'")" == *"gmail-fallback fable-copy-1030-r5/o"* ]]
   [[ "$(sql "SELECT variant FROM verify_messages WHERE campaign='uvn-status'")" == *"o"* ]]   # p1 615
   # the dated window: after GMAIL_FALLBACK_O_UNTIL a real /o send is refused
-  sed 's/^readonly GMAIL_FALLBACK_O_UNTIL=.*/readonly GMAIL_FALLBACK_O_UNTIL="2020-01-01T00:00:00Z"/' "$UVN" > "$TEST_TMPDIR/uvn-closed.sh"; chmod +x "$TEST_TMPDIR/uvn-closed.sh"
+  sed 's/^readonly GMAIL_FALLBACK_O_UNTIL=.*/readonly GMAIL_FALLBACK_O_UNTIL="2020-01-01T00:00:00Z"/' "$OPEN" > "$TEST_TMPDIR/uvn-closed.sh"; chmod +x "$TEST_TMPDIR/uvn-closed.sh"
   rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
   INTERCOM_VERIFY_TEST_GMO=held run -1 "$TEST_TMPDIR/uvn-closed.sh" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --gmail-fallback-o
+  [[ "$output" == *"/o's window closed"* ]]
+  # and the COMMITTED script is past its unlock today: a real /o send is refused, nothing claimed
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  INTERCOM_VERIFY_TEST_GMO=held run -1 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --gmail-fallback-o
   [[ "$output" == *"/o's window closed"* ]]
 }
 
