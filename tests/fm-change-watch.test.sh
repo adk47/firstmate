@@ -729,8 +729,10 @@ case " $* " in
     ;;
   *" get pods "*)
     app=$(printf '%s' "$*" | sed -n 's/.*app=\([^ ]*\).*/\1/p')
-    printf '{"items":[{"metadata":{"name":"%s-1"},"spec":{"containers":[{"name":"c","image":"%s","resources":{"limits":{"memory":"512Mi"}}}]},"status":{"containerStatuses":[{"name":"c","restartCount":0,"lastState":{}}]}}]}\n' \
-      "$app" "${FM_CW_SHIM_IMAGE:-}"
+    last='{}'
+    [ -z "${FM_CW_SHIM_OOM_AT:-}" ] || last="{\"terminated\":{\"reason\":\"OOMKilled\",\"finishedAt\":\"$(date -u -d "@$FM_CW_SHIM_OOM_AT" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf '1970-01-01T00:00:00Z')\"}}"
+    printf '{"items":[{"metadata":{"name":"%s-1"},"spec":{"containers":[{"name":"c","image":"%s","resources":{"limits":{"memory":"512Mi"}}}]},"status":{"containerStatuses":[{"name":"c","restartCount":0,"lastState":%s}]}}]}\n' \
+      "$app" "${FM_CW_SHIM_IMAGE:-}" "$last"
     ;;
   *" top pods "*) printf '%s-1   c   100m   128Mi\n' "$(printf '%s' "$*" | sed -n 's/.*app=\([^ ]*\).*/\1/p')" ;;
   *" logs "*) : ;;
@@ -899,9 +901,8 @@ CW_CLUSTER_DIR='' PATH="$HOME_G/bin:$PATH" FM_CW_SHIM_LOG="$HOME_G/shim.log" \
   run_cw "$HOME_G" 1790000000 register g1 "$CORE_PR" >/dev/null || fail "register failed"
 CW_CLUSTER_DIR='' PATH="$HOME_G/bin:$PATH" FM_CW_SHIM_LOG="$HOME_G/shim.log" \
   FM_CW_SHIM_WORKLOADS="$HOME_G/workloads" FM_CW_SHIM_IMAGE='localhost:30500/muso/core-backend:old-1' \
-  FM_CW_CONFIG_DIR="$HOME_G/config" FM_CW_SENTRY_DIR="$HOME_G/sentry" FM_CW_DEBUG_LANDING=1 \
+  FM_CW_CONFIG_DIR="$HOME_G/config" FM_CW_SENTRY_DIR="$HOME_G/sentry" \
   run_cw "$HOME_G" 1790000300 sample "g1$CORE_ID_SUFFIX" 300 >/dev/null || fail "sample failed"
-DBG=$(cat "$HOME_G/state/change-watch/g1$CORE_ID_SUFFIX/images-at-register" 2>/dev/null; echo "|"; cat "$HOME_G/state/change-watch/g1$CORE_ID_SUFFIX/shims.log" 2>/dev/null)
 SAMPLES_G="$HOME_G/state/change-watch/g1$CORE_ID_SUFFIX/samples.log"
 [ "$(awk -F'\t' '$7 == 1' "$SAMPLES_G" | wc -l | tr -d ' ')" -eq 0 ] \
   || fail "a target still on its pre-merge image was scored: $(cat "$SAMPLES_G")"
@@ -1029,3 +1030,71 @@ printf '%s\n' "$line" | grep -q "unmeasured: .*http_5xx_per_min" \
 printf '%s\n' "$line" | grep -q "unmeasured: .*pgbouncer_cl_waiting" \
   || fail "status did not name every unmeasured metric: $line"
 pass "a watch reports the metrics it never measured instead of implying they were clean"
+
+# --- the baseline epoch decides which terminations count ----------------------
+# The landing gate reads the same pods first, with no epoch bound, and its row is
+# cached for the rest of the sample. An OOMKilled pod that died BEFORE the merge
+# must not be re-read as the release's own OOM, so the cache is keyed by the
+# epoch it was filtered from.
+HOME_OOM=$(cluster_world oom)
+seed_app_pr "$HOME_OOM"
+printf 'muso-prod\tcore-backend-api\t6\tlocalhost:30500/muso/core-backend:old-1\n' > "$HOME_OOM/workloads"
+printf '[]\n' > "$HOME_OOM/sentry/issues-core-backend.json"
+CW_CLUSTER_DIR='' PATH="$HOME_OOM/bin:$PATH" FM_CW_SHIM_LOG="$HOME_OOM/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_OOM/workloads" FM_CW_SHIM_IMAGE='localhost:30500/muso/core-backend:old-1' \
+  FM_CW_CONFIG_DIR="$HOME_OOM/config" FM_CW_SENTRY_DIR="$HOME_OOM/sentry" \
+  run_cw "$HOME_OOM" 1790000000 register oom1 "$CORE_PR" >/dev/null || fail "register failed"
+SAMPLES_OOM="$HOME_OOM/state/change-watch/oom1$CORE_ID_SUFFIX/samples.log"
+# The pod died at 1789999000, well before the 1790000000 merge.
+CW_CLUSTER_DIR='' PATH="$HOME_OOM/bin:$PATH" FM_CW_SHIM_LOG="$HOME_OOM/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_OOM/workloads" FM_CW_SHIM_IMAGE='localhost:30500/muso/core-backend:new-2' \
+  FM_CW_SHIM_OOM_AT=1789999000 FM_CW_CONFIG_DIR="$HOME_OOM/config" FM_CW_SENTRY_DIR="$HOME_OOM/sentry" \
+  run_cw "$HOME_OOM" 1790000300 sample "oom1$CORE_ID_SUFFIX" 300 >/dev/null || fail "sample failed"
+[ "$(awk -F'\t' '$3 == "oomkilled@muso-prod/core-backend-api" { print $4 }' "$SAMPLES_OOM")" = 0 ] \
+  || fail "a termination from before the merge was counted as the release's: $(cat "$SAMPLES_OOM")"
+line=$(run_cw "$HOME_OOM" 1790000300 verdict "oom1$CORE_ID_SUFFIX")
+case "$line" in
+  *oomkilled*) fail "a pre-merge OOMKilled regressed the watch: $line" ;;
+esac
+pass "an OOMKilled termination from before the merge is not the release's"
+
+# The same pod dying AFTER the merge is the release's OOM, which proves the
+# epoch filter is still applied rather than ignored.
+CW_CLUSTER_DIR='' PATH="$HOME_OOM/bin:$PATH" FM_CW_SHIM_LOG="$HOME_OOM/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_OOM/workloads" FM_CW_SHIM_IMAGE='localhost:30500/muso/core-backend:new-2' \
+  FM_CW_SHIM_OOM_AT=1790000200 FM_CW_CONFIG_DIR="$HOME_OOM/config" FM_CW_SENTRY_DIR="$HOME_OOM/sentry" \
+  run_cw "$HOME_OOM" 1790000900 sample "oom1$CORE_ID_SUFFIX" 900 >/dev/null || true
+line=$(run_cw "$HOME_OOM" 1790000900 verdict "oom1$CORE_ID_SUFFIX")
+[ "$line" = "change-watch regressed at +15m on oomkilled (1 vs baseline 0)" ] \
+  || fail "an OOMKilled termination after the merge did not regress the watch: $line"
+pass "an OOMKilled termination after the merge regresses the watch"
+
+# --- a spent forge budget is stated as itself --------------------------------
+# The armed drive is one long-lived process that takes every sample in-process,
+# so a forge budget measured from process start silently disabled the deploy-run
+# target after the first minute. It is now measured per sample, and a budget that
+# is genuinely spent says so instead of "read exited 1 with no value".
+HOME_FB=$(cluster_world fb)
+seed_app_pr "$HOME_FB"
+cat > "$HOME_FB/bin/gh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' '[{"conclusion":"success","status":"completed","createdAt":"2026-09-22T06:10:00Z","databaseId":7,"url":"https://github.com/Muso-AI/hydra/actions/runs/7"}]'
+STUB
+chmod +x "$HOME_FB/bin/gh"
+FM_CW_GH="$HOME_FB/bin/gh" CW_CLUSTER_DIR='' FM_CW_SENTRY_DIR="$HOME_FB/sentry" \
+  FM_CW_CONFIG_DIR="$HOME_FB/config" PATH="$HOME_FB/bin:$PATH" \
+  run_cw "$HOME_FB" 1790000000 register fb1 'https://github.com/Muso-AI/hydra/pull/1400' >/dev/null \
+  || fail "register failed"
+FM_CW_GH="$HOME_FB/bin/gh" CW_CLUSTER_DIR='' FM_CW_SENTRY_DIR="$HOME_FB/sentry" \
+  FM_CW_CONFIG_DIR="$HOME_FB/config" PATH="$HOME_FB/bin:$PATH" FM_CW_FORGE_BUDGET=0 \
+  run_cw "$HOME_FB" 1790000300 sample fb1-1400 300 >/dev/null || true
+grep -q "forge read budget for this sample was already spent" \
+  "$HOME_FB/state/change-watch/fb1-1400/read-failures" \
+  || fail "a spent forge budget was not stated as the reason: $(cat "$HOME_FB/state/change-watch/fb1-1400/read-failures" 2>/dev/null)"
+FM_CW_GH="$HOME_FB/bin/gh" CW_CLUSTER_DIR='' FM_CW_SENTRY_DIR="$HOME_FB/sentry" \
+  FM_CW_CONFIG_DIR="$HOME_FB/config" PATH="$HOME_FB/bin:$PATH" FM_CW_FORGE_BUDGET=30 \
+  run_cw "$HOME_FB" 1790000900 sample fb1-1400 900 >/dev/null || fail "sample failed"
+[ "$(awk -F'\t' '$3 == "deploy_run@run/Muso-AI/hydra#.github/workflows/deploy.yml" && $2 == 900 { print $7 }' \
+  "$HOME_FB/state/change-watch/fb1-1400/samples.log")" = 1 ] \
+  || fail "the deploy-run target was not scored when the forge budget was available: $(cat "$HOME_FB/state/change-watch/fb1-1400/samples.log")"
+pass "the forge budget is per sample and a spent one is stated"

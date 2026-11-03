@@ -268,40 +268,34 @@ cw_kubectl() { kubectl --request-timeout="$KUBECTL_TIMEOUT" "$@"; }
 # when it points at a cluster this home cannot reach, every watch completed
 # unmeasured while its record still read as a normal watch.
 cw_kubeconfig_init() {
-  local candidate='' source='' configured
-  if [ -n "${FM_CW_KUBECONFIG:-}" ]; then
-    candidate=$FM_CW_KUBECONFIG
-    source='FM_CW_KUBECONFIG'
-  elif [ -f "$CW_CONFIG_DIR/change-watch-kubeconfig" ]; then
+  local source configured candidate
+  configured=''
+  if [ -f "$CW_CONFIG_DIR/change-watch-kubeconfig" ]; then
     configured=$(sed -n 's/^[[:space:]]*#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d; p; q' \
       "$CW_CONFIG_DIR/change-watch-kubeconfig" 2>/dev/null || true)
-    if [ -n "$configured" ]; then
-      candidate=$configured
-      source='config/change-watch-kubeconfig'
+  fi
+  # Candidates are walked in precedence order and each one is tested for
+  # readability as it is offered: an unreadable file is stated and skipped so the
+  # next candidate still gets its turn. Ending the walk at the first unreadable
+  # file is what silently moved reads onto the ambient default.
+  for source in FM_CW_KUBECONFIG config/change-watch-kubeconfig KUBECONFIG mcp-viewer; do
+    case "$source" in
+      FM_CW_KUBECONFIG) candidate=${FM_CW_KUBECONFIG:-} ;;
+      config/change-watch-kubeconfig) candidate=$configured ;;
+      KUBECONFIG) candidate=${KUBECONFIG:-}; candidate=${candidate%%:*} ;;
+      mcp-viewer) candidate=$HOME/.kube/mcp-viewer.kubeconfig ;;
+    esac
+    [ -n "$candidate" ] || continue
+    if [ ! -r "$candidate" ]; then
+      printf 'notice: change-watch: kubeconfig %s (%s) is unreadable; trying the next one\n' \
+        "$candidate" "$source" >&2
+      continue
     fi
-  fi
-  if [ -z "$candidate" ] && [ -n "${KUBECONFIG:-}" ]; then
-    candidate=${KUBECONFIG%%:*}
-    source='KUBECONFIG'
-  fi
-  if [ -z "$candidate" ] && [ -r "$HOME/.kube/mcp-viewer.kubeconfig" ]; then
-    candidate=$HOME/.kube/mcp-viewer.kubeconfig
-    source='mcp-viewer kubeconfig'
-  fi
-  if [ -n "$candidate" ] && [ ! -r "$candidate" ]; then
-    # A kubeconfig the home names but cannot read is stated, never quietly
-    # replaced by another cluster: that is how a watch reads nothing for months.
-    printf 'notice: change-watch: configured kubeconfig %s (%s) is unreadable; falling back\n' \
-      "$candidate" "$source" >&2
-    candidate=''
-    source=''
-  fi
-  if [ -n "$candidate" ] && [ -r "$candidate" ]; then
     CW_KUBECONFIG=$candidate
     CW_KUBECONFIG_SOURCE=$source
     export KUBECONFIG="$candidate"
     return 0
-  fi
+  done
   CW_KUBECONFIG=''
   CW_KUBECONFIG_SOURCE='ambient default'
   return 0
@@ -332,7 +326,16 @@ cw_forge_run() {
   fm_run_timed "$left" "$@" 2>/dev/null
 }
 
-cw_budget_start() { CW_BUDGET_START=$(cw_now); CW_POD_FACTS_CACHE=''; CW_WORKLOADS_CACHE=''; }
+# Every read-scoped cache and budget starts with the sample, because the armed
+# drive is one long-lived process that takes every sample in-process: a budget
+# or a memo spent at +5m must not decide the read at +6h.
+cw_budget_start() {
+  CW_BUDGET_START=$(cw_now)
+  CW_FORGE_START=$(cw_now)
+  CW_POD_FACTS_CACHE=''
+  CW_WORKLOADS_CACHE=''
+  CW_POOL_BAD_HOSTS=''
+}
 cw_within_budget() { [ $(( $(cw_now) - CW_BUDGET_START )) -lt "$SAMPLE_DEADLINE_SECONDS" ]; }
 cw_budget_left() {
   local used=0 left
@@ -825,7 +828,15 @@ cw_app_targets() {  # <repo>
   out=$(cw_repo_targets "$repo" 2>/dev/null || true)
   targets=$(printf '%s\n' "$out" | grep -c '^target	' || true)
   if [ "$targets" -eq 0 ] && ! printf '%s\n' "$out" | grep -q '^run	'; then
-    cw_service_targets "$repo" || printf '%s\n' "$out"
+    # The image inventory resolved no Deployment. Fall back to the checkout's own
+    # manifest, and keep every non-Deployment target the map already resolved
+    # (its Sentry project, its deploy workflow): those reads never touch the
+    # cluster, so a cluster that refused the inventory is no reason to lose them.
+    if cw_service_targets "$repo"; then
+      printf '%s\n' "$out" | grep -v '^target	' || true
+    else
+      printf '%s\n' "$out"
+    fi
     return 0
   fi
   printf '%s\n' "$out"
@@ -897,7 +908,10 @@ CW_POD_FACTS_CACHE=''
 CW_WORKLOADS_CACHE=''
 cw_pod_facts() {  # <ns> <deploy> <baseline-epoch>
   local ns=$1 deploy=$2 since=$3 key cached
-  key="$ns/$deploy"
+  # The OOMKilled count is computed from `since`, so the cache key carries it: a
+  # row read for the landing gate (since=0, every termination ever) must never
+  # answer an oomkilled read bounded by the baseline epoch.
+  key="$ns/$deploy/$since"
   while IFS=$'\t' read -r k v; do
     [ "$k" = "$key" ] || continue
     printf '%s\n' "$v"
@@ -1134,7 +1148,7 @@ print(count)
 # and nothing while no run exists or one is still in flight (both are awaiting
 # the deploy, never health).
 cw_live_deploy_run() {  # <owner/repo> <workflow> <since-epoch>
-  local repo=$1 workflow=$2 since=$3 gh_cmd=${FM_CW_GH:-gh} out
+  local repo=$1 workflow=$2 since=$3 gh_cmd=${FM_CW_GH:-gh} out rc=0
   if [ -n "${FM_CW_GH_DIR:-}" ]; then
     local safe=${workflow//[\/ ]/_}
     [ -f "$FM_CW_GH_DIR/runs-$repo-$safe.json" ] || {
@@ -1145,7 +1159,13 @@ cw_live_deploy_run() {  # <owner/repo> <workflow> <since-epoch>
   else
     command -v "$gh_cmd" >/dev/null 2>&1 || return 1
     out=$(cw_forge_run "$gh_cmd" run list -R "$repo" --workflow "$workflow" --limit 20 \
-      --json conclusion,status,createdAt,databaseId,url) || return 1
+      --json conclusion,status,createdAt,databaseId,url) || rc=$?
+    if [ "${rc:-0}" -ne 0 ]; then
+      # A spent budget is stated as itself: "read exited 124 with no value" told
+      # nobody why the deploy target stayed unmeasured.
+      [ "${rc:-0}" -ne 124 ] || printf 'the forge read budget for this sample was already spent\n'
+      return 1
+    fi
   fi
   printf '%s' "$out" | python3 -c '
 import datetime, json, sys
@@ -1508,6 +1528,16 @@ cw_resolve_pools() {  # <watch-id>
   printf '%s' "$out" | cw_write "$(cw_pools_path "$id")"
 }
 
+# True when a metric's read needs the cluster, mirroring cw_sample_blocker: the
+# Sentry and deploy-run reads go over the network, so neither is gated on the
+# cluster probe.
+cw_baseline_needs_cluster() {  # <metric>
+  case "$1" in
+    sentry_new_issues|deploy_run) return 1 ;;
+  esac
+  return 0
+}
+
 cw_capture_baseline() {  # <watch-id> <baseline-epoch>
   local id=$1 since=$2 key metric target value out cluster err rc
   out=''
@@ -1522,7 +1552,12 @@ cw_capture_baseline() {  # <watch-id> <baseline-epoch>
     metric=$(cw_key_metric "$key")
     target=$(cw_key_target "$key")
     value=''
-    if [ -z "$cluster" ] && cw_within_budget; then
+    # Only a cluster-backed metric is gated on the probe. A Sentry or deploy-run
+    # baseline is read over the network, so a cluster that is down at register
+    # time must not cost the whole watch its relative bar.
+    if [ -n "$cluster" ] && cw_baseline_needs_cluster "$metric"; then
+      :
+    elif cw_within_budget; then
       rc=0
       value=$(cw_metric_read "$id" "$metric" "$target" baseline "$since" 2>"$err") || rc=$?
       if [ "$rc" -ne 0 ] || ! printf '%s' "$value" | grep -qE '^-?[0-9]+([.][0-9]+)?$'; then
