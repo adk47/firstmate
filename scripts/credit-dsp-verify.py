@@ -147,7 +147,7 @@ def cmd_d5b(args: argparse.Namespace) -> int:
         print("NO_REPLY")
         return 0
     d5b.run(Store(args.store), real_deps(), dv_path=args.doc_verify_store, max_groups=args.max_groups,
-            max_requests=args.max_requests, log=log)
+            max_requests=args.max_requests, pending_max=args.max_requests, log=log)
     print("NO_REPLY")
     return 0
 

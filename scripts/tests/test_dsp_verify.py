@@ -8,6 +8,7 @@ are faked (no network, no kubectl).
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 import json
 import os
@@ -485,9 +486,13 @@ class PaidFirstBeforeLimit(unittest.TestCase):
         seen = []
         sel = runner.trino_open_requests(lambda q: seen.append(q) or "")
         sel(("unverified",), None, 10, frozenset({7, 3}))
-        self.assertIn("ORDER BY CASE WHEN cr.userid IN (3,7) THEN 0 ELSE 1 END, cr.createdat LIMIT 10", seen[-1])
+        # paid-first, then oldest, then a STABLE id tiebreak (paging must not shuffle equal timestamps)
+        self.assertIn("ORDER BY CASE WHEN cr.userid IN (3,7) THEN 0 ELSE 1 END, cr.createdat, cr.id "
+                      "LIMIT 10 OFFSET 0", seen[-1])
+        sel(("unverified",), None, 10, frozenset({7, 3}), offset=20)
+        self.assertIn("LIMIT 10 OFFSET 20", seen[-1], "the page offset must reach the SQL: paging is what reaches novel rows")
         sel(("unverified",), None, 10, None)
-        self.assertIn("ORDER BY cr.createdat LIMIT 10", seen[-1])
+        self.assertIn("ORDER BY cr.createdat, cr.id LIMIT 10 OFFSET 0", seen[-1])
 
 
 class PodHelpers(unittest.TestCase):
@@ -539,12 +544,16 @@ class FakeAdmin:
         raise AssertionError(path)
 
 
-def fake_select(admin):
-    def select(statuses, only, limit, paying=None):
+def fake_select(admin, offsets=None):
+    """The Trino id selector, with the LIMIT/OFFSET paging the real one has (runner.MAX_SELECT_PAGES)."""
+    def select(statuses, only, limit, paying=None, offset=0):
+        if offsets is not None:
+            offsets.append((offset, limit))
         rows = sorted((r for r in admin.requests.values() if r["status"] in statuses
                        and (only is None or r["id"].lower() in only)),
-                      key=lambda r: (0 if paying and r["userId"] in paying else 1, r["createdAt"]))
-        return [{"id": r["id"], "profile_id": r["profileId"], "track_id": r["trackId"]} for r in rows][:limit]
+                      key=lambda r: (0 if paying and r["userId"] in paying else 1, r["createdAt"], r["id"]))
+        return [{"id": r["id"], "profile_id": r["profileId"], "track_id": r["trackId"]}
+                for r in rows[offset:offset + limit]]
     return select
 
 
@@ -581,6 +590,10 @@ def req(i: int, status="unverified", uid=42) -> dict:
             "profile": {"name": "Jane Mixer"}}
 
 
+def old_id(i: int) -> str:
+    return f"00000000-0000-0000-0000-{i:012x}"
+
+
 class RunnerAndStore(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -592,6 +605,121 @@ class RunnerAndStore(unittest.TestCase):
                            deny_user_ids=frozenset(), deny_profile_ids=frozenset(), paying=frozenset({42}),
                            watch_user_ids=frozenset(), watch_profile_ids=frozenset(),
                            now=lambda: datetime(2026, 10, 28, 3, 20, tzinfo=timezone.utc))
+
+    def test_a_first_time_request_outranks_an_already_decided_one(self):
+        """[key=reverify-is-a-floor-not-an-order]: REVERIFY_AFTER is a floor (never twice in a day), never a queue
+        ordering. A request we have never decided takes the slot; a familiar row only fills what nobody new
+        claimed - otherwise the cheapest, most familiar rows win the batch forever."""
+        seen = {"00000000-0000-0000-0000-00000000000a"}
+        window = [{"id": "00000000-0000-0000-0000-00000000000a", "profile_id": "p", "track_id": "t"},
+                  {"id": "00000000-0000-0000-0000-00000000000b", "profile_id": "p", "track_id": "t"}]
+        first = runner.prioritize(window, seen)
+        self.assertEqual(first[0]["id"], "00000000-0000-0000-0000-00000000000b")   # the novel one takes the slot
+        self.assertEqual(len(first), len(window))                    # nothing is dropped
+        self.assertEqual([p["id"] for p in runner.prioritize(window, set())],
+                         [w["id"] for w in window])                  # no seen set: order untouched
+        every = {w["id"] for w in window}
+        self.assertEqual([p["id"] for p in runner.prioritize(window, every)],
+                         [w["id"] for w in window])                  # all familiar: still submitted (floor)
+
+    def test_a_new_request_behind_300_decided_ones_still_gets_submitted(self):
+        """QA @292b6ac, end-to-end: 300 previously decided `unverified` requests OLDER than REVERIFY_AFTER fill the
+        window on their own, so `prioritize` has nothing novel to promote - it can only reorder the 300, and request
+        301 is never seen. Ordering inside the window was the fix one level too low; the window itself has to reach
+        the new row. Asserted through submit(), not through the helper, because the helper cannot fail this way."""
+        old = [req(i % 10) | {"id": old_id(i), "createdAt": f"2026-10-0{1 + i % 9}T00:00:00Z"} for i in range(300)]
+        new_id = "00000000-0000-0000-0000-00000000ffff"
+        fresh = {"id": new_id, "status": "unverified", "userId": 42, "profileId": "prof-1",
+                 "trackId": "trk-new", "credits": ["Mixing"], "createdAt": "2026-10-27T00:00:00Z",
+                 "verificationData": {"rule_risk_percent": {}}, "spotifyTrackTitle": "New Song",
+                 "profile": {"name": "Jane Mixer"}}
+        admin = FakeAdmin(old + [fresh])
+        # the run happens long after those verdicts, so the re-verify FLOOR does not exclude them (they are eligible
+        # AND familiar - precisely the prod shape QA described) while `skip` stays empty
+        d = dataclasses.replace(self.deps(admin, FakePod()),
+                                now=lambda: datetime(2030, 1, 1, 3, 20, tzinfo=timezone.utc))
+        for r in old:
+            self._old_verdict(r["id"])
+        self.assertTrue({pk["id"] for pk in old} <= self.store.requests_with_any_verdict())
+        self.assertEqual(self.store.requests_verified_since("2029-12-31T03:20:00Z"), set())  # floor excludes none
+        st = runner.submit(self.store, d, max_requests=300)
+        submitted = {rid for cap in self.store.open_captures() for rid in json.loads(cap["request_ids_json"])}
+        self.assertIn(new_id, submitted, "the first-time request must win a slot")
+        self.assertGreaterEqual(st.requests, 1)
+
+    def _old_verdict(self, request_id: str) -> None:
+        """A final verdict written well before the re-verify floor, exactly the prod shape QA described."""
+        v = {"request_id": request_id, "verdict": rules.WAIT, "reason_class": "no_fresh_capture",
+             "reason": "wait", "confidence": 0.6, "anchor": "none", "approve_roles": [], "decline_roles": [],
+             "role_edit_roles": [], "blockers": [], "signals": [], "roles": [], "evidence": {}}
+        self.store.add_verdict("run-old", v, {"request_id": request_id, "user_id": 42, "profile_id": "prof-1",
+                                              "track_id": "trk-1"}, False)
+
+    def test_a_first_time_request_behind_1200_decided_ones_still_gets_submitted(self):
+        """QA @9daaa07, beyond the final window of the doubling bound: 1,200 decided (familiar, eligible) rows older
+        than the re-verify floor, then one live request. Widen-by-re-reading passes 1..n only ever showed the first
+        1,200; the paging selector has to WALK to row 1,201."""
+        n = 1200
+        old = [req(i % 10) | {"id": old_id(i), "createdAt": "2026-09-01T00:00:00Z"} for i in range(n)]
+        new_id = "00000000-0000-0001-0000-000000000001"   # outside old_id()'s range on purpose
+        fresh = {"id": new_id, "status": "unverified", "userId": 42, "profileId": "prof-1",
+                 "profile_id": "prof-1", "trackId": "trk-new", "track_id": "trk-new",
+                 "credits": ["Mixing"], "createdAt": "2026-10-27T00:00:00Z",
+                 "verificationData": {"rule_risk_percent": {}}, "spotifyTrackTitle": "New Song",
+                 "profile": {"name": "Jane Mixer"}}
+        admin = FakeAdmin(old + [fresh])
+        offsets: list[tuple[int, int]] = []
+        d = dataclasses.replace(self.deps(admin, FakePod()), select=fake_select(admin, offsets),
+                                now=lambda: datetime(2030, 1, 1, 3, 20, tzinfo=timezone.utc))
+        for r in old:
+            self._old_verdict(r["id"])
+        self.assertEqual(self.store.requests_verified_since("2029-12-31T03:20:00Z"), set())
+        st = runner.submit(self.store, d, max_requests=300)
+        submitted = {rid for cap in self.store.open_captures() for rid in json.loads(cap["request_ids_json"])}
+        self.assertTrue(new_id in submitted,
+                        f"the first-time request must win a slot past a 1,200-row familiar prefix (got "
+                        f"{len(submitted)} ids, e.g. {sorted(submitted)[:3]})")
+        self.assertGreaterEqual(st.requests, 1)
+        self.assertGreater(len(offsets), 1, offsets)
+        starts = [o for o, _ in offsets]
+        self.assertEqual(starts[0], 0, offsets)
+        self.assertEqual(starts, sorted(set(starts)), f"the selector must WALK, not re-read page one: {offsets}")
+
+    def test_a_mixed_first_page_still_fills_the_batch_with_new_work_from_page_two(self):
+        """QA @5747140631, the mixed-page case: page 1 holds 299 familiar rows plus ONE first-time request and page 2
+        holds 300 more first-time requests. Stopping at the first page that CONTAINS a novel id spends 299 slots on
+        re-verification and reads none of page 2; novelty has to accumulate until the batch is full."""
+        limit = 300
+        old = [req(i % 10) | {"id": old_id(i), "createdAt": "2026-09-01T00:00:00Z"} for i in range(limit - 1)]
+        first_new = {"id": "00000000-0000-0001-0000-0000000000a1", "status": "unverified", "userId": 42,
+                     "profileId": "prof-1", "profile_id": "prof-1", "trackId": "trk-a", "track_id": "trk-a",
+                     "credits": ["Mixing"], "createdAt": "2026-09-10T00:00:00Z",
+                     "verificationData": {"rule_risk_percent": {}}, "spotifyTrackTitle": "A",
+                     "profile": {"name": "Jane Mixer"}}
+        page_two_new = [{"id": f"00000000-0000-0002-0000-{i:012d}", "status": "unverified", "userId": 42,
+                         "profileId": "prof-1", "profile_id": "prof-1", "trackId": f"trk-b{i}", "track_id": f"trk-b{i}",
+                         "credits": ["Mixing"], "createdAt": "2026-09-20T00:00:00Z",
+                         "verificationData": {"rule_risk_percent": {}}, "spotifyTrackTitle": f"B{i}",
+                         "profile": {"name": "Jane Mixer"}} for i in range(limit)]
+        # 299 familiar + 1 first-time = page one; the 300 page-two requests follow (newest first, so the mixed page
+        # is read first, exactly as QA described)
+        admin = FakeAdmin(page_two_new + [first_new] + old)
+        offsets: list[tuple[int, int]] = []
+        d = dataclasses.replace(self.deps(admin, FakePod()), select=fake_select(admin, offsets),
+                                now=lambda: datetime(2030, 1, 1, 3, 20, tzinfo=timezone.utc))
+        for r in old:
+            self._old_verdict(r["id"])
+        st = runner.submit(self.store, d, max_requests=limit)
+        submitted = {rid for cap in self.store.open_captures() for rid in json.loads(cap["request_ids_json"])}
+        familiar_submitted = {r["id"] for r in old} & submitted
+        self.assertIn(first_new["id"], submitted)
+        self.assertEqual(len(submitted), limit, f"a full batch of first-time work was available")
+        self.assertEqual(familiar_submitted, set(),
+                         f"familiar rows may not spend a slot while page 2 is full of first-time work")
+        reached = {r["id"] for r in page_two_new} & submitted
+        self.assertEqual(len(reached), limit - 1,
+                         f"page-2 work must be reached, not skipped after page 1: {len(reached)}")
+        self.assertGreater(len(offsets), 1, offsets)
 
     def test_submit_then_verify_logs_shadow_verdicts_and_only_reads_core(self):
         admin = FakeAdmin([req(1), req(2), req(3, status="approved")])
@@ -976,8 +1104,13 @@ class D5b(unittest.TestCase):
     def test_only_verified_requests_are_captured_and_only_approve_is_anchored(self):
         from credit_verify.dspverify import d5b
         ids = [self.good["id"], self.wait["id"]]                       # req(3) is pending but not doc-verified
+        # [key=verifier-fed-its-own-output]: the pending population is submitted FIRST and unconditionally, so
+        # req(3) - pending but not doc-verified - is now examined too. That is the fix, not a regression: a
+        # verifier whose input set is only its own output is an idle loop that reports throughput.
         out = d5b.run(self.store, self.deps, verified=ids, now=NOW)
-        self.assertEqual(out["submitted"], 2)
+        self.assertEqual(out["submitted_pending"], 3)                 # every pending request in the window
+        self.assertEqual(out["submitted_verified"], 0)                # already open from the pending pass
+        self.assertEqual(out["submitted"], 3)
         self.assertEqual(out["anchors_built"], 0)                      # captured, not yet read
         out = d5b.run(self.store, self.deps, verified=ids, now=NOW)    # the next hour: read, then anchor
         self.assertEqual(out["submitted"], 0)                          # a final verdict < 24 h: no re-capture
@@ -986,8 +1119,9 @@ class D5b(unittest.TestCase):
         self.assertEqual([a["request_id"] for a in built], [self.good["id"]])
         self.assertEqual(self.store.latest_captured_for(self.wait["id"])["verdict"], rules.WAIT)
         self.assertFalse([a for a in self.store.anchors() if a["request_id"] == self.wait["id"]])  # WAIT: no record
-        self.assertNotIn(req(3)["id"], {r for c in self.store.db.execute("SELECT request_ids_json FROM dsp_captures")
-                                        for r in json.loads(c[0])})
+        # ... and it IS captured now: the pending pass examines work the doc reader has not reached.
+        self.assertIn(req(3)["id"], {r for c in self.store.db.execute("SELECT request_ids_json FROM dsp_captures")
+                                     for r in json.loads(c[0])})
         out = d5b.run(self.store, self.deps, verified=ids, now=NOW)    # never two records from one verdict
         self.assertEqual(out["anchors_built"], 0)
         self.assertEqual(len([a for a in self.store.anchors() if a["outcome"] == "built"]), 1)

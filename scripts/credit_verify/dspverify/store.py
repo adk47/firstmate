@@ -193,6 +193,17 @@ class Store:
             out.update(json.loads(raw or "[]"))
         return out
 
+    def requests_with_any_verdict(self) -> set[str]:
+        """Every request this verifier has EVER reached a final verdict on (any version).
+
+        [key=reverify-is-a-floor-not-an-order] (l1 re-ruling-throughput-fixed-point-1102.md): a re-verification
+        must never outrank new work. `requests_verified_since` is the FLOOR (do not read the same row twice in a
+        day); this set is what lets submit put a first-time request ahead of a familiar one, instead of the
+        familiar set filling the batch forever.
+        """
+        return {r[0] for r in self.db.execute(
+            "SELECT DISTINCT request_id FROM dsp_verdicts WHERE instr(reason, 'capture_pending')=0")}
+
     def requests_verified_since(self, since: str) -> set[str]:
         """Requests with a FINAL (non capture_pending) verdict under this version since `since`."""
         return {r[0] for r in self.db.execute(

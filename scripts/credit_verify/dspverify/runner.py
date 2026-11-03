@@ -110,23 +110,77 @@ def _scoped_reads(admin: admin_api.Admin, scopes: list[tuple[str, str]], statuse
 
 def pending_requests(admin: admin_api.Admin, select: "Select", statuses: tuple[str, ...],
                      only: set[str] | None, limit: int, skip: set[str] | None = None,
-                     paying: frozenset[int] | None = None) -> list[dict[str, Any]]:
+                     paying: frozenset[int] | None = None,
+                     seen: set[str] | None = None) -> list[dict[str, Any]]:
     """Requests in `statuses`: ids from `select` (Trino), minus `skip`, at most `limit`; then the full
     rows through scoped admin reads (one track per read, or one profile when the track is unknown).
     The skip set is applied to the ids BEFORE the limit, and the selection window is widened by its
-    size, so requests already captured/verified can never starve the newer ones (QA @b1c4798)."""
+    size, so requests already captured/verified can never starve the newer ones (QA @b1c4798).
+
+    [key=novelty-is-a-window-property] (QA @292b6ac, @9daaa07): the window ADVANCES a page at a time
+    rather than growing from the same first row. Growing a LIMIT re-reads the same prefix, so a backlog
+    of familiar rows longer than the last window still hides request N+1 forever (QA: 1,200 decided rows
+    then a first-time one - windows of 300/600/1,200 all fill with familiar rows). OFFSET pagination
+    makes progress monotonic: page 2 starts where page 1 stopped, so any backlog within
+    MAX_SELECT_PAGES * window is reached. [key=novelty-accumulates-across-pages] (QA @5747140631):
+    novelty ACCUMULATES across pages - stopping on a page that merely CONTAINS one new id spent the whole
+    batch on 299 familiar rows while 300 new ids waited on the next page. The walk ends only when the
+    batch is full of first-time work or the source runs out, and familiar ids fill just the slots no new
+    request claimed (the floor). The read stays bounded by a constant (never an unbounded scan) and the
+    expensive scoped admin read still happens ONCE, over the picked ids only."""
     skip = {str(x).lower() for x in (skip or set())}
-    picked = [p for p in select(statuses, only, limit + len(skip), paying)
-              if str(p["id"]).lower() not in skip][:limit]
+    familiar = {str(x).lower() for x in (seen or set())}
+    window = limit + len(skip)
+    novel: list[dict[str, Any]] = []      # [key=novelty-accumulates-across-pages] (QA @5747140631): real new work
+    floor: list[dict[str, Any]] = []      # familiar work, only to fill slots no new request claimed
+    seen_novel: set[str] = set()
+    seen_floor: set[str] = set()
+    offset = 0
+    for _ in range(MAX_SELECT_PAGES):
+        raw = select(statuses, only, window, paying, offset=offset)
+        for p in prioritize([p for p in raw if str(p["id"]).lower() not in skip], seen):
+            pid = str(p["id"]).lower()
+            if familiar and pid in familiar:
+                if pid not in seen_floor:
+                    seen_floor.add(pid)
+                    floor.append(p)
+            elif pid not in seen_novel:
+                seen_novel.add(pid)
+                novel.append(p)
+        # stop only when the batch is FULL of new work or the source is exhausted: a page that merely
+        # CONTAINS one new id is not a reason to stop, or 299 familiar rows + 1 new spend the batch and the
+        # 300 new ids on the next page are never read
+        if len(novel) >= limit or len(raw) < window:
+            break
+        offset += window
+    picked = novel[:limit]
+    if len(picked) < limit:                       # only THEN does familiar work fill what new work did not
+        have = {str(p["id"]).lower() for p in picked}
+        picked += [p for p in floor if str(p["id"]).lower() not in have][:limit - len(picked)]
     want = {str(p["id"]).lower() for p in picked}
     scopes = sorted({("track", str(p["track_id"])) if p.get("track_id") else ("profile", str(p["profile_id"]))
                      for p in picked if p.get("track_id") or p.get("profile_id")})
     return list(_scoped_reads(admin, scopes, statuses, want, 10).values())
 
 
+MAX_SELECT_PAGES = 8
+
+
+def prioritize(picked: list[dict[str, Any]], seen: set[str] | None) -> list[dict[str, Any]]:
+    """[key=reverify-is-a-floor-not-an-order]: a request we have never decided goes first; an id we have ALREADY
+    decided only fills the slots nobody new claimed, so the floor still re-verifies when it is all the work there
+    is. Ordering inside the SAME window - it never widens the read and never adds a scan."""
+    if not seen:
+        return picked
+    already = {str(x).lower() for x in seen}
+    fresh = [p for p in picked if str(p["id"]).lower() not in already]
+    return fresh + [p for p in picked if str(p["id"]).lower() in already] if fresh else picked
+
+
 OPEN_SQL = ("SELECT cast(cr.id AS varchar), cast(cr.profileid AS varchar), cast(cr.trackid AS varchar)"
             " FROM postgresql_core.public.credit_requests cr"
-            " WHERE cr.deletedat IS NULL AND cr.status IN ({statuses}){only} ORDER BY {paid}cr.createdat LIMIT {limit}")
+            " WHERE cr.deletedat IS NULL AND cr.status IN ({statuses}){only}"
+            " ORDER BY {paid}cr.createdat, cr.id LIMIT {limit} OFFSET {offset}")
 MAX_PAYING_IDS_IN_SQL = 20000
 
 
@@ -136,7 +190,7 @@ def trino_open_requests(query: Callable[[str], str]) -> "Select":
     import re
 
     def select(statuses: tuple[str, ...], only: set[str] | None, limit: int,
-               paying: frozenset[int] | None = None) -> list[dict[str, str]]:
+               paying: frozenset[int] | None = None, offset: int = 0) -> list[dict[str, str]]:
         st = ",".join(f"'{x}'" for x in statuses if re.fullmatch(r"[a-z_]+", x))
         clause = ""
         if only is not None:
@@ -150,7 +204,8 @@ def trino_open_requests(query: Callable[[str], str]) -> "Select":
             if len(ids_paying) > MAX_PAYING_IDS_IN_SQL:
                 raise ValueError(f"{len(ids_paying)} paying ids exceed the selector's {MAX_PAYING_IDS_IN_SQL}")
             paid = "CASE WHEN cr.userid IN (" + ",".join(map(str, ids_paying)) + ") THEN 0 ELSE 1 END, "
-        out = query(OPEN_SQL.format(statuses=st, only=clause, limit=int(limit), paid=paid))
+        out = query(OPEN_SQL.format(statuses=st, only=clause, limit=int(limit), paid=paid,
+                                    offset=int(offset)))
         rows = []
         for r in csv.reader(io.StringIO(out)):
             if len(r) >= 2 and re.fullmatch(r"[0-9a-f-]{36}", r[0] or ""):
@@ -216,7 +271,8 @@ def submit(store: Store, deps: Deps, *, max_requests: int = 300, max_pages: int 
         skip = store.requests_with_open_capture() | store.requests_verified_since(
             (deps.now() - REVERIFY_AFTER).strftime("%Y-%m-%dT%H:%M:%SZ"))
         limit = max_requests if only is None else min(max_requests, len(only))
-        rows = order(pending_requests(deps.admin, deps.select, statuses, only, limit, skip, deps.paying),
+        seen = store.requests_with_any_verdict()
+        rows = order(pending_requests(deps.admin, deps.select, statuses, only, limit, skip, deps.paying, seen),
                      deps.paying)
         if only is not None:
             rows = [r for r in rows if str(r.get("id")).lower() in only]

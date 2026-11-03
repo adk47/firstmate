@@ -42,17 +42,28 @@ def verified_requests(dv_path: str = DOC_VERIFY_STORE) -> list[str]:
 
 
 def run(store: Any, deps: Any, *, dv_path: str = DOC_VERIFY_STORE, max_groups: int = 200, max_requests: int = 300,
-        now: datetime | None = None, verified: list[str] | None = None,
+        now: datetime | None = None, verified: list[str] | None = None, pending_max: int = 300,
         log: Callable[[str], None] = lambda m: None) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
     ids = verified if verified is not None else verified_requests(dv_path)
-    out: dict[str, Any] = {"verified": len(ids), "submitted": 0, "anchors_built": 0, "anchors_refused": 0}
-    if not ids:
-        log("d5b: no doc-verify verified request")
-        return out
+    out: dict[str, Any] = {"verified": len(ids), "submitted": 0, "submitted_pending": 0,
+                           "submitted_verified": 0, "anchors_built": 0, "anchors_refused": 0}
     runner.verify(store, deps, max_groups=max_groups)                   # read what earlier runs filed
+    # [key=verifier-fed-its-own-output] (l1 re-ruling-throughput-fixed-point-1102.md): submitting ONLY the ids
+    # doc-verify already calls `verified` makes the verifier's input set its own output - an idle loop that
+    # reports throughput (16-17 distinct ids re-read daily while 10,210 unverified requests were never
+    # submitted). So the pending population comes FIRST and unconditionally: submit(only=None) walks the
+    # selector's own window. d5b's verified-only pass is ADDITIVE on top of it, not the only submit.
+    if pending_max:
+        out["submitted_pending"] = runner.submit(store, deps, max_requests=pending_max).requests
+        out["submitted"] = out["submitted_pending"]
+    if not ids:
+        # the pending pass above already filed captures; an empty doc-verify set no longer means 'no work'
+        log(f"d5b: no doc-verify verified request ({out})")
+        return out
     # runner.submit itself skips a request with an open capture or a final verdict newer than REVERIFY_AFTER
-    out["submitted"] = runner.submit(store, deps, max_requests=max_requests, only=set(ids)).requests
+    out["submitted_verified"] = runner.submit(store, deps, max_requests=max_requests, only=set(ids)).requests
+    out["submitted"] = out["submitted_pending"] + out["submitted_verified"]
     built = store.built_anchor_verdict_ids()
     rows = []
     for rid in ids:
