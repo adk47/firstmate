@@ -50,7 +50,7 @@
 # still apply; this script only decides what to hand it. It never merges a red
 # head, a draft, a head the row did not name, or a change whose labels carry
 # FENCE_WORDS (money, credentials, Cloudflare, customer copy, irreversible),
-# and it fences a title or body that names additive DDL. Those stay with a
+# and it fences a title or body that names production DDL. Those stay with a
 # decider rather than an unattended timer. A passing qa-review on the exact
 # head is always required, so no home can turn it off by configuration.
 #

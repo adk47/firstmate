@@ -35,6 +35,8 @@
 #   (ab) a failed staging copy publishes nothing and merges nothing
 #   (ac) a hand-edit during a run is never overwritten by the rewrite
 #   (ad) the daily window does not re-report the previous summary's second
+#   (ae) a tick that overlaps a running tick merges nothing
+#   (af) a lock left by a killed run does not wedge the timer
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -726,6 +728,50 @@ case_ad() {
   pass "the daily window does not re-report the previous summary's second"
 }
 
+# --- (ae) an overlapping tick merges nothing -----------------------------
+
+case_ae() {
+  local dir out
+  dir=$(make_case ae)
+  printf '# owner: acme\nwidgets 12 %s task-a squash\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  green_head
+  # A merge call can hold a tick for minutes, and the timer fires every ten, so
+  # two ticks really can overlap: the second must decide nothing at all.
+  mkdir -p "$dir/state/merge-queue/.lock"
+  printf '%s\n' "$$" >"$dir/state/merge-queue/.lock/pid"
+  out=$(run_queue "$dir" run)
+  assert_contains "$out" "another run is in progress" "(ae) the overlapping tick reports the run in progress"
+  [ ! -s "$dir/merge.log" ] || fail "(ae) an overlapping tick must merge nothing"
+  expect_code 1 "$(queue_rows "$dir")" "(ae) the queued row is untouched"
+  assert_absent "$dir/state/merge-queue/ledger.tsv" "(ae) the skipped tick records no verdict"
+  # The running tick still owns the lock, so the skipped tick must not remove it.
+  assert_present "$dir/state/merge-queue/.lock/pid" "(ae) the running tick keeps its lock"
+  clear_head
+  pass "an overlapping tick merges nothing"
+}
+
+# --- (af) a lock left by a killed run does not wedge the timer ------------
+
+case_af() {
+  local dir out dead
+  dir=$(make_case af)
+  printf '# owner: acme\nwidgets 12 %s task-a squash\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  green_head
+  # A run killed mid-merge (a reboot, or systemd stopping the unit) leaves its
+  # lock behind. Without recovery every later tick would skip forever.
+  sh -c 'exit 0' &
+  dead=$!
+  wait "$dead" 2>/dev/null || true
+  mkdir -p "$dir/state/merge-queue/.lock"
+  printf '%s\n' "$dead" >"$dir/state/merge-queue/.lock/pid"
+  out=$(run_queue "$dir" run)
+  assert_contains "$out" "merged acme/widgets#12" "(af) the tick after a killed run still merges"
+  expect_code 0 "$(queue_rows "$dir")" "(af) the row lands instead of waiting forever"
+  assert_absent "$dir/state/merge-queue/.lock/pid" "(af) the stale lock is released"
+  clear_head
+  pass "a lock left by a killed run does not wedge the timer"
+}
+
 case_a
 case_b
 case_c
@@ -756,5 +802,7 @@ case_aa
 case_ab
 case_ac
 case_ad
+case_ae
+case_af
 
 printf 'ok - fm-merge-queue suite complete\n'

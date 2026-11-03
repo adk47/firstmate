@@ -4,8 +4,8 @@ A pull request that is green, QA-passed, and merge-ready still waits for a first
 `bin/fm-merge-queue.sh` is that batch on a timer.
 A systemd user timer runs it every ten minutes, and a queued pull request lands without anyone being woken.
 
-This page owns the queue file, the decision the timer makes, the records it writes, and the one line a day it reports.
-`bin/fm-merge-queue.sh --help` owns the exact flags and environment variables, and `bin/fm-pr-merge.sh` owns what a merge actually does.
+This page owns the operator's view: the queue file, the decision the timer makes, the records it writes, and the one line a day it reports.
+The script's own header and `--help` own the exact flags, environment variables, and the conditional detail behind each verdict, and `bin/fm-pr-merge.sh` owns what a merge actually does.
 
 ## Enable it in one home
 
@@ -29,7 +29,7 @@ systemctl --user enable --now fm-merge-queue.timer
 ```
 
 The generated service puts `%h/.local/bin` on the timer's `PATH`, because a systemd user manager's own `PATH` does not include the tools firstmate installs there.
-A run refuses at startup, with the tool named, when `gh` or `gh-axi` is not resolvable rather than reporting every row as an unanswered forge.
+A run refuses at startup, with the tool named and the `PATH` it saw, when `gh` or `gh-axi` is not resolvable rather than reporting every row as an unanswered forge, so a tool installed elsewhere needs its own directory added to the unit's `Environment=PATH`.
 
 `bin/fm-merge-queue.sh status` prints the queue size and the most recent run from the timer's own records, with no network call.
 `systemctl --user list-timers fm-merge-queue.timer` says whether the timer is armed.
@@ -79,7 +79,7 @@ The merge itself is always `bin/fm-pr-merge.sh`, so that script's refusal rules,
 
 Records live under `<FM_HOME>/state/merge-queue/`:
 
-- `ledger.tsv` - one line per verdict: `<epoch> <row> <verdict> <reason> <url>`, where a row is named by its pull request and the head it was queued at, as in `acme/widgets#12@e672a82e`.
+- `ledger.tsv` - one line per verdict: `<epoch> <row> <verdict> <reason> <url>`, where a row is named by its pull request and the head it was queued at, as in `acme/widgets#12@e672a82e`, and a row with no usable head is named by its pull request alone.
 - `daily-<YYYY-MM-DD>.txt` - every merged and retired row of the summary window, one per line, with its time, row, verdict, reason, and full pull request URL.
 - `last-run` - the verdict counts of the most recent run, which is what `status` prints.
 - `.summary` - the day of the last daily line and the epoch it covered from.
@@ -97,6 +97,6 @@ No run pages anyone directly; every other verdict is a journal line.
 - It is a systemd user timer, so it runs inside your user session; on a machine you are not logged into, enable lingering with `loginctl enable-linger <user>` so it keeps running after logout.
 - `OnBootSec=2min` restarts it shortly after a reboot.
 - It merges only what the forge can already merge: no rebase, no conflict resolution, no re-review.
-- A branch that falls behind is retried every tick until its head moves or a decider intervenes.
+- A branch that falls behind is retried on each tick until its head moves, a decider intervenes, or the retry budget retires it as abandoned.
 - A queued pull request the forge can no longer answer for stays queued and is retried every tick; remove such a row from the file by hand.
 - A row whose task id names no task in this home stays queued as unusable, so the fix is to correct the row rather than to wait.
