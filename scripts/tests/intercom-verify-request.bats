@@ -1631,6 +1631,65 @@ print(s); print("\n".join(l[2:] if l.startswith("- ") else l for l in b.split("\
   [ "$(posts)" -eq 1 ]
 }
 
+@test "uvn-new-rows (fable-copy-1101-r5/n1): a told user's un-asked rows get the n1 opener + the uvn body; send-locked; only after a SENT uvn ask; one message per row ever; never with /c2" {
+  grep -qx "readonly UVN_NEW_ROWS_COPY_APPROVED=0" "$REAL_SCRIPT"
+  sed 's/^readonly UVN_NEW_ROWS_COPY_APPROVED=0$/readonly UVN_NEW_ROWS_COPY_APPROVED=1/' "$UVN" > "$TEST_TMPDIR/nr.sh"; chmod +x "$TEST_TMPDIR/nr.sh"
+  NR="$TEST_TMPDIR/nr.sh"
+  # the render: n1 singular (one track), then the approved uvn body over the new rows only
+  credits "$TEST_TMPDIR/n.json" Jane "u2:Mixing:Song B:Big Star"
+  run -0 "$NR" send --campaign uvn-new-rows --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain | head -1)" = "Since we last wrote about your credit requests, another request of yours needs the same thing." ]
+  [[ "$(rendered .body | plain)" == *'Hi Jane, a quick status update on your credit request for "Song B" by Big Star: it'"'"'s waiting on one thing from you'* ]]
+  # plural by DISTINCT TRACKS: two tracks -> the plural opener; one track in two rows -> still singular (/l)
+  credits "$TEST_TMPDIR/n2.json" Jane "u2:Mixing:Song B:Big Star" "u3:Mixing:Song C:Big Star"
+  run -0 "$NR" send --campaign uvn-new-rows --credits-file "$TEST_TMPDIR/n2.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain | head -1)" = "Since we last wrote about your credit requests, other requests of yours need the same thing." ]
+  credits "$TEST_TMPDIR/n3.json" Jane "u2:Mixing:Song B:Big Star" "u3:Mastering:Song B:Big Star"
+  run -0 "$NR" send --campaign uvn-new-rows --credits-file "$TEST_TMPDIR/n3.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain | head -1)" = "Since we last wrote about your credit requests, another request of yours needs the same thing." ]
+  [[ "$(rendered .body | plain)" != *"Since our last note"* ]]
+  # a user with NO sent uvn-status ask: refused (the opener would be false), nothing claimed or closed
+  before="$(calls)"
+  run -1 "$NR" send --campaign uvn-new-rows --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"n1_no_prior_ask"* ]]
+  [ "$(calls)" -eq "$before" ]          # refused at the ledger peek, before any Intercom read
+  [ -z "$(sql "SELECT * FROM verify_requests WHERE campaign='uvn-new-rows'")" ]
+  # told: a SENT uvn-status ask about u1, 30 days ago
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  INTERCOM_VERIFY_TEST_DAY=2026-10-01 run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message=1001 credits=1" ]]
+  # the COMMITTED gate is send-locked (a new class): the check runs, the post refuses
+  run -1 "$UVN" send --campaign uvn-new-rows --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"uvn-new-rows is a NEW class, send-locked"* ]]
+  # unlocked: the new row goes, its own campaign, the n1 ref on the row; comm_state reads it as the uvn ask
+  INTERCOM_VERIFY_TEST_DAY=2026-10-20 run -0 "$NR" send --campaign uvn-new-rows --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED email message=1002 credits=1" ]]
+  [[ "$(msg .body | plain)" == "Since we last wrote about your credit requests, another request of yours needs the same thing."* ]]
+  [[ "$(sql "SELECT campaign || '|' || approval_ref FROM verify_messages WHERE message_id='1002'")" == "uvn-new-rows|"*"opener fable-copy-1101-r5/n1"* ]]
+  grep -q -- "--campaign uvn-status" "$TEST_TMPDIR/comm-state-args"
+  # one message per ROW ever; a row the first ask named is never followed up (any ask blocks it)
+  INTERCOM_VERIFY_TEST_DAY=2026-10-30 run -0 "$NR" send --campaign uvn-new-rows --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "SKIPPED already-notified credits=1" ]]
+  INTERCOM_VERIFY_TEST_DAY=2026-10-30 run -0 "$NR" send --campaign uvn-new-rows --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "SKIPPED already-notified credits=1" ]]
+  [ "$(posts)" -eq 2 ]
+  # a reply_due answer is never this class
+  run -1 "$NR" send --campaign uvn-new-rows --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/n.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"never a reply_due answer"* ]]
+}
+
+@test "uvn-new-rows (n1): rows a status line of ours named would need /c2 AND n1 - that pair is not approved: refused n1_c2_uncoded" {
+  sed 's/^readonly UVN_NEW_ROWS_COPY_APPROVED=0$/readonly UVN_NEW_ROWS_COPY_APPROVED=1/' "$UVN" > "$TEST_TMPDIR/nr.sh"; chmod +x "$TEST_TMPDIR/nr.sh"
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  INTERCOM_VERIFY_TEST_DAY=2026-10-01 run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  credits "$TEST_TMPDIR/s.json" Jane "u2:Mixing:Song B:Big Star"
+  INTERCOM_VERIFY_TEST_DAY=2026-10-10 run -0 "$LOCKED" send --campaign status-team-review --copy no-ask --credits-file "$TEST_TMPDIR/s.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED"* ]]
+  INTERCOM_VERIFY_TEST_DAY=2026-10-20 run -1 "$TEST_TMPDIR/nr.sh" send --campaign uvn-new-rows --credits-file "$TEST_TMPDIR/s.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"n1_c2_uncoded"* ]]
+  [ "$(posts)" -eq 2 ]
+}
+
 @test "uvn-status: an ask from verify-live within 90 days defers as recently-asked (not messaged_7d), nothing closed" {
   day_ago() { python3 -c 'import datetime as d, sys; print((d.datetime.now(d.timezone.utc).date() - d.timedelta(days=int(sys.argv[1]))).isoformat())' "$1"; }
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"

@@ -117,14 +117,18 @@ GAP_ASK = verify_ledger.GAP_ASK
 # credit-hold-status (Fable S1, card L14a): the neutral owing-proof line. NOT an ask (it asks for nothing) and not
 # "nothing else is needed"; send-locked in the gate (CREDIT_HOLD_STATUS_COPY_APPROVED) until Fable's delegated yes.
 CREDIT_HOLD = "credit-hold-status"
-CAMPAIGNS = ("uvn-status", "status-doc-received", "status-team-review", GAP_ASK, CREDIT_HOLD)
+# fable-copy-1101-r5/n1: the follow-up ask to a told user about owed rows no ask named (owing_proof class uvn_new_rows);
+# the uvn ask in every runner rule (statuses, proof_required rows, the fraud lens), send-locked in the gate.
+NEW_ROWS = "uvn-new-rows"
+CAMPAIGNS = ("uvn-status", "status-doc-received", "status-team-review", GAP_ASK, CREDIT_HOLD, NEW_ROWS)
 # The campaigns that ASK (documents-on-file exclusion, the ask cap, closing asks).
-ASKS = ("uvn-status", GAP_ASK)
+ASKS = ("uvn-status", GAP_ASK, NEW_ROWS)
 # The replica re-check per campaign (firstmate 076): uvn-status needs requests still waiting on
 # the user; the status notes need requests still pending with us. A status-note user with none
 # left is `not_pending`: counted, never closed in the ledger.
 PENDING_STATUSES = {
     "uvn-status": ("user_verification_needed",),
+    NEW_ROWS: ("user_verification_needed",),
     "status-doc-received": ("user_verification_needed", "unverified", "processing"),
     "status-team-review": ("user_verification_needed", "unverified", "processing"),
     # gap-ask: the decider's held rows; only stage-2 need_more ones are ever kept (run()).
@@ -134,7 +138,8 @@ PENDING_STATUSES = {
 }
 # A campaign the gate send-locks: a real run halts before any gate call while the gate script's own lock reads 0
 # (a status-note refusal would hold the user and count toward the three-refusal flag, for nothing they did).
-CAMPAIGN_LOCKS = {CREDIT_HOLD: "CREDIT_HOLD_STATUS_COPY_APPROVED", "uvn-status": "UVN_STATUS_COPY_APPROVED"}
+CAMPAIGN_LOCKS = {CREDIT_HOLD: "CREDIT_HOLD_STATUS_COPY_APPROVED", "uvn-status": "UVN_STATUS_COPY_APPROVED",
+                  NEW_ROWS: "UVN_NEW_ROWS_COPY_APPROVED"}
 
 
 def campaign_lock_open(wrapper: str, var: str) -> bool:
@@ -633,7 +638,7 @@ def pending_rows(user_ids: list[int], campaign: str, released: set[str],
     if campaign == GAP_ASK or with_released:
         reqs = {u: kept for u, rows in reqs.items()
                 if (kept := [r for r in rows if r["request_id"].lower() in released])}
-    if campaign == CAMPAIGN and not with_released:
+    if campaign in (CAMPAIGN, NEW_ROWS) and not with_released:
         for u, rows in uvn_requests(user_ids, query, PROOF_REQUIRED_STATUSES).items():
             have = {r["request_id"].lower() for r in reqs.get(u, [])}
             add = [r for r in rows if r.get("_proof_required") and r["request_id"].lower() not in have]
@@ -741,7 +746,28 @@ def note_payload(acct: dict[str, str], uid: int, credits: list[dict[str, Any]], 
     return {"user": user, "credits": credits}
 
 
-def plan(listed: set[str], pending: list[dict[str, Any]], is_ask: bool) -> tuple[str, list[dict[str, Any]]]:
+def asked_ids(path: str | None, campaign: str, listed: set[str], pending: list[dict[str, Any]]) -> set[str]:
+    """QA #1625 finding 1: the request ids of this user's rows that a PREVIOUS note already asked about.
+
+    The freshness hold below exists because a request opened after the list was built must not be left out of a
+    one-ever note. A still-UVN row that a prior SENT ask already named is not that: it was asked, it is unchanged,
+    and it is exactly why the n1 class exists ("over new rows only"). Without this set the prior row (absent from the
+    new-row list by construction) held the user as `unlisted_request` on every run and the NEW row never reached the
+    gate, which is per-row - the follow-up could never be sent to anyone who had been asked before."""
+    ids = sorted({r["request_id"] for r in pending} | set(listed))
+    if not path or not ids:
+        return set()
+    # its own short-lived connection: the send loop's `db` handle is closed by the time it re-plans a user, and a
+    # closed handle here would take the whole run down (sqlite3.ProgrammingError) instead of holding one user
+    db = verify_ledger.connect(path)
+    try:
+        return verify_ledger.blocked_ids(db, ids, campaign=campaign)
+    finally:
+        db.close()
+
+
+def plan(listed: set[str], pending: list[dict[str, Any]], is_ask: bool,
+         asked: set[str] | frozenset[str] = frozenset()) -> tuple[str, list[dict[str, Any]]]:
     """What one user's note may say, from their `listed` request ids and their `pending` replica
     rows: ("", the credits to show) or (a hold reason in HOLDS / "nothing_to_ask", []). Applied when
     the batch is built AND again on a fresh replica read right before the send, so a request opened
@@ -750,13 +776,14 @@ def plan(listed: set[str], pending: list[dict[str, Any]], is_ask: bool) -> tuple
     rows = [r for r in pending if not listed or r["request_id"] in listed]
     # A request waiting on them that the list does not carry yet (opened after the list was
     # built) holds the user: their one-ever note must not leave it out.
-    if is_ask and listed and any(r["request_id"] not in listed and r["_no_ask"] not in NO_ASK for r in pending):
+    if is_ask and listed and any(r["request_id"] not in listed and r["request_id"] not in asked
+                                 and r["_no_ask"] not in NO_ASK for r in pending):
         return "unlisted_request", []
     if is_ask:
-        asked = [r for r in rows if r["_no_ask"] not in NO_ASK]
-        if rows and not asked:
+        askable = [r for r in rows if r["_no_ask"] not in NO_ASK]
+        if rows and not askable:
             return "nothing_to_ask", []
-        rows = asked
+        rows = askable
     # A blank or gate-refused request is left out (never shown; it stays pending in core and is
     # reviewed like any other); the rest of the note goes (firstmate 166). Only a user with
     # nothing showable is held.
@@ -766,11 +793,12 @@ def plan(listed: set[str], pending: list[dict[str, Any]], is_ask: bool) -> tuple
     return "", [{k: v for k, v in r.items() if not k.startswith("_")} for r in rows]
 
 
-def left_out(listed: set[str], pending: list[dict[str, Any]], is_ask: bool) -> int:
+def left_out(listed: set[str], pending: list[dict[str, Any]], is_ask: bool,
+             asked: set[str] | frozenset[str] = frozenset()) -> int:
     """How many of the user's listed `pending` rows plan() leaves out as unshowable (for an ask,
     only the rows it would otherwise ask about)."""
-    return sum(1 for r in pending if r["_incomplete"] and (not listed or r["request_id"] in listed)
-               and not (is_ask and r["_no_ask"] in NO_ASK))
+    return sum(1 for r in pending if r["_incomplete"] and r["request_id"] not in asked
+               and (not listed or r["request_id"] in listed) and not (is_ask and r["_no_ask"] in NO_ASK))
 
 
 def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", max_users: int = 50,
@@ -965,7 +993,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                         report.fraud_held += 1
                         report.note("fraud_held")
                         continue
-                    if v.ask_only and campaign != CAMPAIGN:
+                    if v.ask_only and campaign not in (CAMPAIGN, NEW_ROWS):
                         # Fable Ruling B.2: big-track single-signal rows get the document ask only,
                         # never Copy A / B0 (nothing we send may imply approval). Not closed either.
                         report.ask_only += 1
@@ -997,6 +1025,17 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                         continue
                     if campaign == GAP_ASK:
                         why = verify_ledger.gap_user_done(db, acct["email"], now=now, user_id=str(u["user_id"]))
+                    elif campaign == NEW_ROWS:
+                        # QA #1625: the n1 follow-up is per ROW (one note per row ever: blocked_ids), so an earlier n1
+                        # note never closes the user - the gate's own row-scoped rule (no prior ask / proof received
+                        # close; a note within 7 d defers), never uvn_user_done's one-per-user 'already_sent'
+                        why = verify_ledger.new_rows_user_done(db, acct["email"], now=now, user_id=str(u["user_id"]))
+                        if why == "no_prior_ask":
+                            # QA #1625: a DEFERRAL, never a close - the user's first uvn-status ask may still be sent,
+                            # and then these rows are exactly the class (the gate leaves this reason unclosed too)
+                            report.deferred_users += 1
+                            report.note(why)
+                            continue
                     else:
                         why = verify_ledger.uvn_user_done(db, acct["email"], now=now, campaign=campaign,
                                                           user_id=str(u["user_id"]),
@@ -1027,7 +1066,8 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                     # request the campaign may ask about (the release is checked on each before the send).
                     listed = set() if from_stage2 else {str(r) for r in (u.get("request_ids") or [])}
                     pending = reqs.get(uid, [])
-                    why, live = plan(listed, pending, is_ask)
+                    asked = asked_ids(path, campaign, listed, pending)
+                    why, live = plan(listed, pending, is_ask, asked)
                     why, live, as_count, total = count_copy_of(campaign, listed, pending, why, live)
                     if why in HOLDS:
                         held(why)
@@ -1061,7 +1101,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                         # QA #1517: the row is classified on the PAYLOAD's own request ids - exactly what the gate's
                         # comm_state receives at send (the raw list row has request_ids, not credits)
                         report.reply_due_rows.append(reply_due_row(uid, {**u, "credits": payload.get("credits") or []}, query=query))
-                    batch.append((listed, payload, 0 if as_count else left_out(listed, pending, is_ask)))
+                    batch.append((listed, payload, 0 if as_count else left_out(listed, pending, is_ask, asked)))
         finally:
             db.close()
         return batch
@@ -1226,12 +1266,13 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                     # approved, withdrawn, opened or blanked while earlier users were being
                     # messaged must neither get a 'waiting on you' note nor be left out of it).
                     fresh = pending_rows([uid], campaign, mine, query, with_released=from_stage2).get(uid, [])
-                    why, live = plan(listed, fresh, is_ask)
+                    asked = asked_ids(path, campaign, listed, fresh)
+                    why, live = plan(listed, fresh, is_ask, asked)
                     why, live, as_count, total = count_copy_of(campaign, listed, fresh, why, live)
                     if why in HOLDS:
                         held(why)
                         continue
-                    dropped = 0 if as_count else left_out(listed, fresh, is_ask)
+                    dropped = 0 if as_count else left_out(listed, fresh, is_ask, asked)
                     if not live:
                         if is_ask:
                             report.no_longer_uvn += 1

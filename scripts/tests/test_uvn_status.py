@@ -1014,6 +1014,78 @@ class UvnStatusTests(unittest.TestCase):
             rep, gate = self.run_(mode="apply", query=replica(range(1, 6)), max_users=5, gate=Busy(self.ledger))
         self.assertEqual(len(gate.calls), 1)
         self.assertEqual(sorted(o["user"] for o in rep.outcomes if o["reason"] == "daily_cap"), ["2", "3", "4", "5"])
+    def test_a_prior_asked_row_still_uvn_does_not_hold_the_new_row(self):
+        # QA #1625 finding 1: u1 was asked about r1 (SENT uvn-status, r1 still UVN) and the new-row list now names
+        # r2. Previously pending_rows loaded [r1, r2], r1 was absent from the list by construction, and the
+        # freshness hold returned unlisted_request on every run - so r2 never reached the per-row gate and the
+        # follow-up could never be sent to anyone asked before. Both rows are present here on purpose.
+        from datetime import timedelta
+        self.users = [{"user_id": 4, "paid": True, "skip": None, "request_ids": ["r2"]}]
+        self.write_list()
+        db = verify_ledger.connect(self.ledger)
+        when = NOW - timedelta(days=30)
+        c = verify_ledger.claim(db, campaign="uvn-status", user_key="u4@x.com", day=when.strftime("%Y-%m-%d"),
+                                request_ids=["r1"], message_type="email", approved_by="U", approval_ref="r",
+                                now=when, user_id="4", enforce_cap=False)
+        verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id="m1")
+        self.assertEqual(verify_ledger.blocked_ids(db, ["r1"], "uvn-new-rows"), {"r1"})   # r1 IS prior-asked
+        self.assertEqual(verify_ledger.blocked_ids(db, ["r2"], "uvn-new-rows"), set())
+        db.close()
+        rep, gate = self.run_(mode="dry-run", campaign="uvn-new-rows",
+                              query=replica([4], requests={4: ["r1", "r2"]}))
+        self.assertEqual(rep.unlisted, 0)
+        self.assertTrue(gate.calls, "the new row must reach the gate")
+        self.assertEqual([[c["request_id"] for c in p["credits"]] for _, p in gate.calls], [["r2"]])
+
+    def test_an_UNASKED_row_outside_the_list_still_holds_the_user(self):
+        # the freshness hold must survive the fix above: a row opened after the list was built and never asked
+        # about is still unlisted_request, never silently dropped from a one-ever note. (A prior ask on r1 is what
+        # gets the user past the opener gate, so r9 is the only unlisted row in play.)
+        from datetime import timedelta
+        self.users = [{"user_id": 4, "paid": True, "skip": None, "request_ids": ["r2"]}]
+        self.write_list()
+        db = verify_ledger.connect(self.ledger)
+        when = NOW - timedelta(days=30)
+        c = verify_ledger.claim(db, campaign="uvn-status", user_key="u4@x.com", day=when.strftime("%Y-%m-%d"),
+                                request_ids=["r1"], message_type="email", approved_by="U", approval_ref="r",
+                                now=when, user_id="4", enforce_cap=False)
+        verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id="m1")
+        db.close()
+        rep, gate = self.run_(mode="dry-run", campaign="uvn-new-rows",
+                              query=replica([4], requests={4: ["r1", "r2", "r9"]}))
+        self.assertEqual(gate.calls, [])
+        self.assertEqual(rep.unlisted, 1)
+
+    def test_uvn_new_rows_runs_as_the_uvn_ask_and_halts_on_its_own_gate_lock(self):
+        # fable-copy-1101-r5/n1: the runner sends the class under its own campaign; a real run waits on the gate's lock
+        from datetime import timedelta
+        self.users = [{"user_id": 4, "paid": True, "skip": None, "request_ids": ["r4"]}]
+        self.write_list()
+        # no prior SENT uvn-status ask: the opener would be false - deferred before the gate (no_prior_ask), and an
+        # unlocked APPLY leaves the rows retryable (QA #1625: never skipped in the ledger)
+        rep, gate = self.run_(mode="dry-run", campaign="uvn-new-rows", query=replica([4]))
+        self.assertEqual(gate.calls, [])
+        with unittest.mock.patch.object(uvn_status, "campaign_lock_open", lambda w, v: True):
+            rep, gate = self.run_(mode="apply", campaign="uvn-new-rows", query=replica([4]))
+        self.assertEqual((gate.calls, rep.deferred_users), ([], 1))
+        db = verify_ledger.connect(self.ledger)
+        self.assertEqual(set(verify_ledger.blocked_ids(db, ["r4"], "uvn-new-rows")), set())
+        db.close()
+        db = verify_ledger.connect(self.ledger)
+        for camp, rid, days in (("uvn-status", "r1", 30), ("uvn-new-rows", "r3", 10)):   # the ask, then a first n1 note
+            when = NOW - timedelta(days=days)
+            c = verify_ledger.claim(db, campaign=camp, user_key="u4@x.com", day=when.strftime("%Y-%m-%d"), request_ids=[rid],
+                                    message_type="email", approved_by="U", approval_ref="r", now=when, user_id="4",
+                                    enforce_cap=False)
+            verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id=f"m{rid}")
+        db.close()
+        # QA #1625: a SECOND batch of new rows (r4), past the 7-day cooldown, still goes - one n1 note per ROW, not per user
+        rep, gate = self.run_(mode="dry-run", campaign="uvn-new-rows", query=replica([4]))
+        self.assertTrue(gate.calls and all("uvn-new-rows" in a for a, _ in gate.calls))
+        rep, gate = self.run_(mode="apply", campaign="uvn-new-rows", query=replica([4]))
+        self.assertEqual(gate.calls, [])
+        self.assertIn("UVN_NEW_ROWS_COPY_APPROVED=0", rep.halted)
+        self.assertIn("uvn-new-rows", uvn_status.ASKS)
 
     def test_dry_run_validates_without_sending(self):
         _, gate = self.run_(mode="dry-run")

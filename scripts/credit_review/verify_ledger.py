@@ -102,7 +102,8 @@ CAMPAIGNS = ("verify-live", "retro-past", "removal-notice", "takeback-notice", "
              "status-doc-received", "status-team-review", "email-changed", "email-changed-dup",
              "claim-proof-ask", "claim-status", "gap-ask", "merge-pending", "credit-hold-status", "claim-proof-pending", "proof-need-ask",
              "merge-claim-first",
-             "reply-ref")   # [key=product-dispute-refs]: r5's approved reply set, reply_due answers only
+             "reply-ref",   # [key=product-dispute-refs]: r5's approved reply set, reply_due answers only
+             "uvn-new-rows")   # fable-copy-1101-r5/n1: a told user's owed rows no ask named (one message per row ever)
 # claim-proof-ask (steers-1830 #5, firstmate 125/126): a dated ask to the claimant of a pending
 # profile CLAIM (band B/C) to put the claim's bound-proof code in one platform bio. Its "request
 # id" is the claim key "claim-<claiming.id>", so only its own rows block it (claim ids never meet
@@ -165,7 +166,10 @@ MAX_REFUSALS = 3
 # The campaigns that ASK the user for something. Only these count as "already asked";
 # notices and confirmations (removal-notice, takeback-notice, withdrawal-confirm) never close
 # a user's asks (firstmate 063/064).
-ASK_CAMPAIGNS = ("verify-live", "retro-past", "uvn-status", GAP_ASK, PROOF_NEED_ASK)
+UVN_NEW_ROWS = "uvn-new-rows"
+# an uvn-new-rows note IS an ask (its rows are never asked again by any ask), but it is never the user's one-ask-ever:
+# it exists because the user was already asked (prior_uvn_ask)
+ASK_CAMPAIGNS = ("verify-live", "retro-past", "uvn-status", GAP_ASK, PROOF_NEED_ASK, UVN_NEW_ROWS)
 AFTER_REJECTION = "after-rejection"
 KINDS = ("initial", "reminder-14", "reminder-25", AFTER_REJECTION, CLAIM_REMINDER)
 # Days after a WINDOWED note (reminder-14/25) or a claim-proof-ask note (reminder-7) at which each
@@ -525,6 +529,15 @@ def capped(db: sqlite3.Connection, *, user_key: str, day: str, user_id: str = ""
 REASK_LOCK_DAYS = 90
 
 
+def prior_uvn_ask(db: sqlite3.Connection, user_key: str, user_id: str = "") -> bool:
+    """fable-copy-1101-r5/n1 gate fact: this user has a SENT uvn-status ask (the 'told' user the n1 opener is true for)."""
+    if not (user_key or str(user_id or "").strip()):
+        return False
+    cond, params = _same_user(db, user_key, user_id)
+    return db.execute(f"SELECT 1 FROM verify_messages m WHERE ({cond}) AND m.campaign = 'uvn-status' AND m.kind = 'initial' "
+                      "AND m.status = 'sent' LIMIT 1", params).fetchone() is not None
+
+
 def asked_within(db: sqlite3.Connection, *, user_key: str, day: str, days: int = REASK_LOCK_DAYS,
                  user_id: str = "") -> bool:
     """True when this user got an initial ASK (any ASK_CAMPAIGNS note, attempted or sent)
@@ -594,6 +607,25 @@ def uvn_user_done(db: sqlite3.Connection, user_key: str, *, now: datetime | None
     if campaign == "uvn-status" and asked_within(db, user_key=user_key,
                                                  day=(now or utcnow()).strftime("%Y-%m-%d"), user_id=user_id):
         return "recently_asked"
+    return ""
+
+
+def new_rows_user_done(db: sqlite3.Connection, user_key: str, *, now: datetime | None = None, user_id: str = "") -> str:
+    """fable-copy-1101-r5/n1: why this told user must not get an uvn-new-rows note now ('' when they may).
+    'no_prior_ask' (closed: the opener is only true after a SENT uvn-status ask); 'proof_received' (closed: never ask
+    someone who sent proof); 'messaged_7d' (a deferral: any note from this gate in the last 7 days). Per ROW once is
+    blocked_ids'; the per-day cap is claim()'s. The 90-day one-ask lock does not apply: the class follows an ask by
+    definition (r5 n1's gate list)."""
+    if not prior_uvn_ask(db, user_key, user_id):
+        return "no_prior_ask"
+    cond, params = _same_user(db, user_key, user_id)
+    if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.proof_tagged_at IS NOT NULL "
+                  f"AND m.campaign NOT IN ({_marks(CLAIM_CAMPAIGNS)}) LIMIT 1", (*params, *CLAIM_CAMPAIGNS)).fetchone():
+        return "proof_received"
+    since = ((now or utcnow()) - timedelta(days=7)).strftime("%Y-%m-%d")
+    if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.day>=? AND m.status IN ('attempted','sent') "
+                  "LIMIT 1", (*params, since)).fetchone():
+        return "messaged_7d"
     return ""
 
 
@@ -733,6 +765,19 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
             if why:
                 db.execute("COMMIT")
                 return {"result": "recent", "reason": why, "request_ids": fresh}
+        if campaign == UVN_NEW_ROWS and enforce_cap:
+            # fable-copy-1101-r5/n1, inside this transaction (the peek reads the same)
+            why = new_rows_user_done(db, user_key, now=now, user_id=user_id)
+            if why == "messaged_7d":
+                db.execute("COMMIT")
+                return {"result": "recent", "reason": why, "request_ids": fresh}
+            if why == "no_prior_ask":                # never closed: the user may be asked first, then followed up
+                db.execute("COMMIT")
+                return {"result": "no_prior_ask", "request_ids": fresh}
+            if why:
+                _skip(db, campaign, fresh, ts)
+                db.execute("COMMIT")
+                return {"result": "user_done", "reason": why, "request_ids": fresh}
         if campaign == MERGE_PENDING and enforce_cap:
             cond, params = _same_user(db, user_key, user_id)
             since = (datetime.strptime(day, "%Y-%m-%d") - timedelta(days=7)).strftime("%Y-%m-%d")
@@ -1877,6 +1922,11 @@ def _main(argv: list[str] | None = None) -> int:
         if a.user_key and a.campaign in GAP_LIKE:
             why = gap_user_done(db, a.user_key, user_id=a.user_id)
             out["user_done"], out["recent"], out["recent_why"] = "", bool(why), why
+        if a.campaign == UVN_NEW_ROWS:
+            why = new_rows_user_done(db, a.user_key, user_id=a.user_id)
+            out["prior_uvn_ask"] = why != "no_prior_ask"
+            out["user_done"] = why if why == "proof_received" else ""
+            out["recent"], out["recent_why"] = why == "messaged_7d", why if why == "messaged_7d" else ""
     elif a.op == "clear-no-channel":
         clear_no_channel(db, user_key=a.user_key, user_id=a.user_id, cleared_by=a.cleared_by, ref=a.ref)
         out = {"result": "cleared"}

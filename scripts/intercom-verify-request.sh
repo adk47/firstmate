@@ -391,6 +391,13 @@ readonly APPROVAL_REF_UVN="$APPROVAL_REF_STANDING_ORDER; copy approved by firstm
 readonly CORRECTION_C2_ONE="A correction to our earlier note: this request does need one thing from you."
 readonly CORRECTION_C2_MANY="A correction to our earlier note: these requests do need one thing from you."
 readonly CORRECTION_C2_REF="fable-copy-1030-r5/c2"
+# fable-copy-1101-r5/n1 (byte-for-byte; uvn-new-rows): the first sentence of the follow-up ask to a TOLD user about owed
+# rows no ask named - singular / plural by DISTINCT TRACKS among the new rows (the body's own count decides, /l).
+# NEW CLASS: send-locked until p1 + r5 read and sign its first dry run on the deployed head.
+readonly NEW_ROWS_N1_ONE="Since we last wrote about your credit requests, another request of yours needs the same thing."
+readonly NEW_ROWS_N1_MANY="Since we last wrote about your credit requests, other requests of yours need the same thing."
+readonly NEW_ROWS_N1_REF="fable-copy-1101-r5/n1"
+readonly UVN_NEW_ROWS_COPY_APPROVED=0
 readonly APPROVAL_REF_WITHDRAWAL="$APPROVAL_REF_STANDING_ORDER; withdrawal-confirm copy approved by firstmate under it 2026-10-19 21:21Z (inbox 061, confirmed in 064), sent only for a request the requester withdrew (metadata.withdrawal.by = requester)"
 readonly APPROVAL_REF_STATUS="$APPROVAL_REF_STANDING_ORDER; status notes approved by firstmate under it 2026-10-20 (inbox 070: team-review verbatim; 071: doc-received as credit-trust-llm-t01 drafted it). Not asks."
 readonly APPROVAL_REF_STATUS_NEUTRAL="$APPROVAL_REF_STATUS Status A neutral (--copy queued-neutral) for an unread, unanswered filing: fable-copy-1030-r5/i (captain 21:3xZ wording)."
@@ -772,6 +779,15 @@ case "$CAMPAIGN" in
     [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live."
     [ "$KIND" = "initial" ] || refuse "uvn-status has no follow-ups: one message per user, ever."
     ;;
+  uvn-new-rows)
+    # fable-copy-1101-r5/n1: the follow-up ask to a TOLD user (a SENT uvn-status ask) about owed rows NO ask named -
+    # the approved uvn ask body over those rows only, the n1 opener first. One message per ROW ever (any ask blocks a
+    # row); every uvn-status gate applies (comm_state as the uvn ask, documents, 7-day cooldown, cap, holds).
+    MAX_CREDITS=1000; MAX_LISTED=3; COPY="uvn"; APPROVAL_REF="$APPROVAL_REF_UVN; opener $NEW_ROWS_N1_REF"
+    [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live."
+    [ "$KIND" = "initial" ] || refuse "uvn-new-rows has no follow-ups."
+    [ -z "$REPLY_DUE" ] || refuse "uvn-new-rows is an unsolicited follow-up ask, never a reply_due answer."
+    ;;
   withdrawal-confirm)
     # Confirms a credit request the requester asked us to withdraw: one request per message,
     # role + title from the request row. Not an ask; no follow-ups.
@@ -953,7 +969,7 @@ if [ "$GMO" = 1 ]; then
 fi
 if [ -n "$THREAD" ]; then
   case "$CAMPAIGN" in
-    uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-status|gap-ask|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask|reply-ref) ;;
+    uvn-status|uvn-new-rows|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-status|gap-ask|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask|reply-ref) ;;
     *) refuse "--conversation (in-thread delivery) applies to uvn-status, withdrawal-confirm, the status notes, claim-status, email-changed, gap-ask, merge-pending, merge-claim-first, credit-hold-status, claim-proof-pending and proof-need-ask only." ;;
   esac
   printf '%s' "$THREAD" | grep -qE '^[0-9]{1,24}$' \
@@ -1433,6 +1449,9 @@ fi
 if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "claim-status" ] && [ "$CLAIM_STATUS_COPY_APPROVED" != "1" ]; then
   refuse "the claim-status copy is not approved for sending yet (CLAIM_STATUS_COPY_APPROVED=0). Fable approved the text; it waits for firstmate's GO after the 5-user dry run, landed in a PR that flips the lock; --dry-run renders exactly what would be sent."
 fi
+if [ "$LIVE" = "1" ] && [ "$ACTION" = "post" ] && [ "$CAMPAIGN" = "uvn-new-rows" ] && [ "$UVN_NEW_ROWS_COPY_APPROVED" != "1" ]; then
+  refuse "uvn-new-rows is a NEW class, send-locked (UVN_NEW_ROWS_COPY_APPROVED=0) until p1 + r5 sign its first dry run on the deployed head; --dry-run / --check-recipient only. Nothing was sent or claimed."
+fi
 if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "uvn-status" ] && [ "$UVN_STATUS_COPY_APPROVED" != "1" ]; then
   refuse "the uvn-status copy is not approved for sending (UVN_STATUS_COPY_APPROVED=0)."
 fi
@@ -1490,6 +1509,9 @@ if [ "$LIVE" = "1" ]; then
       # r5 / p1 [no-channel]: the last message to this user was refused by Intercom (action_forbidden) - no campaign
       # re-attempts until a person clears it (verify_ledger clear-no-channel); listed, never sent or claimed
       printf 'HELD no_channel credits=%s (%s); nothing was sent or claimed\n' "$N" "${nc_why#no_channel: }"; exit 3
+    fi
+    if [ "$CAMPAIGN" = "uvn-new-rows" ] && [ "$(printf '%s' "$peek" | "$JQ_BIN" -r '.prior_uvn_ask // false')" != "true" ]; then
+      refuse "n1_no_prior_ask: uvn-new-rows follows a SENT uvn-status ask, and this user has none (the opener would be false); nothing was sent or claimed."
     fi
     if [ "$(printf '%s' "$peek" | "$JQ_BIN" -r '.hold.flagged // false')" = "true" ]; then
       printf 'SKIPPED refused-flagged credits=%s (refused %s times; with a human)\n' "$N" "3"; exit 0
@@ -2205,6 +2227,14 @@ add_conv_tag() { # <conversation> <tag>: tags are only ever ADDED (r5 i)
 C2="" C2_SUFFIX="" C2_EX="[]"
 # A reply_due ANSWER is never /c2: it goes in-thread, where #1517's locked correction covers an earlier nothing-needed
 # line in that thread (/c2 is the unsolicited ask's correction, by email).
+if [ "$CAMPAIGN" = "uvn-new-rows" ] && [ -f "$LEDGER" ]; then
+  # an n1 follow-up over rows a status line of ours named would need BOTH the /c2 and the n1 openers - that pair is not
+  # approved copy, so it refuses (a person reads it) rather than guess an order
+  nn="$(ledger nothing-needed-overlap --user-id "$USER_ID" --request-ids "$ALL_IDS")" \
+    || { printf 'LEDGER READ FAILED (earlier status line); nothing was sent or claimed\n' >&2; exit 4; }
+  [ "$(printf '%s' "$nn" | "$JQ_BIN" -r '(.overlap // []) | length' 2>/dev/null)" = "0" ] \
+    || refuse "n1_c2_uncoded: a status line of ours named some of these rows, so this follow-up would need the /c2 correction AND the n1 opener; that pair is not approved copy. Nothing was sent or claimed."
+fi
 if [ "$CAMPAIGN" = "uvn-status" ] && [ "$KIND" = "initial" ] && [ -z "$REPLY_DUE" ] && [ -f "$LEDGER" ]; then
   nn="$(ledger nothing-needed-overlap --user-id "$USER_ID" --request-ids "$ALL_IDS")" \
     || { printf 'LEDGER READ FAILED (earlier status line); nothing was sent or claimed\n' >&2; exit 4; }
@@ -2225,6 +2255,11 @@ with_o() { # <rendered-json> -> /o as the LAST sentence before the sign-off ("Th
       .html |= sub("<p>Thank you,</p>"; "<p>" + $o + "</p><p>Thank you,</p>")
       | .text |= sub("\nThank you,"; "\n" + $o + "\nThank you,")
     else error("no sign-off to place /o before") end'
+}
+with_n1() { # <rendered-json> -> the n1 opener first (uvn-new-rows); singular/plural as the body renders (/l)
+  printf '%s' "$1" | "$JQ_BIN" -c --arg one "$NEW_ROWS_N1_ONE" --arg many "$NEW_ROWS_N1_MANY" '
+    (if (.text | test("your credit requests ")) then $many else $one end) as $p
+    | .html = "<p>" + $p + "</p>" + .html | .text = $p + "\n\n" + .text'
 }
 with_c2() { # <rendered-json> -> the same note with the /c2 sentence first; singular/plural as the body renders (/l)
   printf '%s' "$1" | "$JQ_BIN" -c --arg one "$CORRECTION_C2_ONE" --arg many "$CORRECTION_C2_MANY" '
@@ -2269,6 +2304,7 @@ if [ "$CAMPAIGN" = "merge-claim-first" ]; then
   esac
 fi
 RENDERED="$(render "$INPUT")"
+[ "$CAMPAIGN" != "uvn-new-rows" ] || RENDERED="$(with_n1 "$RENDERED")"
 [ -z "$C2" ] || RENDERED="$(with_c2 "$RENDERED")"
 [ "$GMO" != 1 ] || RENDERED="$(with_o "$RENDERED")"
 leak="$(leak_reason "$RENDERED")"
@@ -2459,7 +2495,7 @@ for_each_account_contact() { # <fn>: the first non-empty answer of <fn> over thi
 # The clock G1 reads; the test copy pins it (INTERCOM_VERIFY_TEST_NOW, epoch) so the 24h rule is testable.
 g1_now() { if [ "$TESTABLE" = "1" ] && [ -n "${INTERCOM_VERIFY_TEST_NOW:-}" ]; then printf '%s' "$INTERCOM_VERIFY_TEST_NOW"; else date -u +%s; fi; }
 GOLIVE=0
-case "$CAMPAIGN:$COPY" in merge-pending:*|merge-claim-first:*|credit-hold-status:*|claim-proof-pending:*|status-doc-received:docrecvr|status-doc-received:docrecvn|uvn-status:*|proof-need-ask:*) GOLIVE=1 ;; esac
+case "$CAMPAIGN:$COPY" in merge-pending:*|merge-claim-first:*|credit-hold-status:*|claim-proof-pending:*|status-doc-received:docrecvr|status-doc-received:docrecvn|uvn-status:*|uvn-new-rows:*|proof-need-ask:*) GOLIVE=1 ;; esac
 # QA #1517: every reply_due answer, whatever its class, passes the go-live recipient gates (G1-G5; G2's opener rule is
 # replaced by the verified trigger for reply_due only)
 [ -z "$REPLY_DUE" ] || GOLIVE=1
@@ -2661,7 +2697,8 @@ if { [ "$GOLIVE" = "1" ] || [ "$NIE" = "1" ]; } && [ "$LIVE" = "1" ]; then
   # as 'deferred' (never a lock); an unreadable state sends nothing.
   [ -r "$COMM_STATE_HELPER" ] || { echo "COMM STATE CHECK NOT POSSIBLE: $COMM_STATE_HELPER is missing; nothing was sent or claimed" >&2; exit 4; }
   set +e
-  CS="$("$PY_BIN" -I "$COMM_STATE_HELPER" check --campaign "$CAMPAIGN" --copy "$COPY" --user-id "$USER_ID" \
+  # uvn-new-rows IS the uvn ask for comm_state (the same owes / documents / decision rules)
+  CS="$("$PY_BIN" -I "$COMM_STATE_HELPER" check --campaign "$(if [ "$CAMPAIGN" = "uvn-new-rows" ]; then echo uvn-status; else printf '%s' "$CAMPAIGN"; fi)" --copy "$COPY" --user-id "$USER_ID" \
         --request-ids "$ALL_IDS" --contact-id "$CONTACT_ID" \
         --conversation "$(if [ "$R1LIKE" = "1" ] || [ "$COPY" = "proofneed" ]; then printf '%s' "${fconv:-}"; else printf '%s' "${THREAD:-}"; fi)" \
         --reply-due "${REPLY_DUE:-}" ${NIE_ARGS[@]+"${NIE_ARGS[@]}"} ${C2_ARGS[@]+"${C2_ARGS[@]}"} \
@@ -2803,7 +2840,7 @@ recently_messaged() { # <contact-id> -> prints the reason when we wrote to them 
   done
   return 0
 }
-case "$CAMPAIGN" in uvn-status|status-doc-received|status-team-review|claim-status|gap-ask|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask) STATUSLIKE=1 ;; *) STATUSLIKE=0 ;; esac
+case "$CAMPAIGN" in uvn-status|uvn-new-rows|status-doc-received|status-team-review|claim-status|gap-ask|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask) STATUSLIKE=1 ;; *) STATUSLIKE=0 ;; esac
 # A claim ask never crosses a person: any admin or Caroline reply to this user in the last 7
 # days defers the note AND its reminder (nothing closed; the next run looks again; a reminder
 # deferred past the day before the close day is never sent).
@@ -2821,11 +2858,11 @@ if [ "$STATUSLIKE" = "1" ] && [ "$LIVE" = "1" ]; then
   # Intercom attachment scan is what stage 2 already read; the approved uvn-status copy goes.
   # The verdict is read here, never taken from the caller; anything else keeps the scan.
   S2_NODOC=0
-  if [ "$CAMPAIGN" = "uvn-status" ] && [ -r "$STAGE2_HELPER" ] && printf '%s' "$USER_ID" | grep -qE '^[0-9]{1,12}$'; then
+  if { [ "$CAMPAIGN" = "uvn-status" ] || [ "$CAMPAIGN" = "uvn-new-rows" ]; } && [ -r "$STAGE2_HELPER" ] && printf '%s' "$USER_ID" | grep -qE '^[0-9]{1,12}$'; then
     s2n="$("$PY_BIN" -I "$STAGE2_HELPER" --db "$PROOF_DB" gap-credits --outcome no_document --request-ids "$ALL_IDS" --user-id "$USER_ID" 2>/dev/null || true)"
     [ "$(printf '%s' "$s2n" | "$JQ_BIN" -r '.eligible // false' 2>/dev/null || echo false)" != "true" ] || S2_NODOC=1
   fi
-  if [ "$CAMPAIGN" = "uvn-status" ] && [ "$S2_NODOC" != "1" ]; then
+  if { [ "$CAMPAIGN" = "uvn-status" ] || [ "$CAMPAIGN" = "uvn-new-rows" ]; } && [ "$S2_NODOC" != "1" ]; then
     DOCS_WHY="$(for_each_account_contact docs_submitted)"
     if [ -n "$DOCS_WHY" ]; then
       [ "$ACTION" != "post" ] || ledger skip --campaign "$CAMPAIGN" --request-ids "$ALL_IDS" >/dev/null || die "the ledger write failed."
@@ -3176,6 +3213,8 @@ case "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r 'if .result == "recent" and .reason 
   pick_changed)
     printf 'HELD reply_ref_pick_changed credits=%s; nothing was sent or claimed\n' "$N"
     printf '  (at the claim: %s)\n' "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.reason // ""')"; exit 3 ;;
+  no_prior_ask)
+    refuse "n1_no_prior_ask: uvn-new-rows follows a SENT uvn-status ask, and this user has none; nothing was sent or claimed." ;;
   user_done)
     printf 'SKIPPED %s credits=%s\n' "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.reason')" "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r '.request_ids | length')"; exit 0 ;;
   recent)
@@ -3205,6 +3244,7 @@ fi
 # Render again from exactly the claimed credits.
 CLAIMED_INPUT="$(keep_ids "$INPUT" "$(printf '%s' "$CLAIM" | "$JQ_BIN" -c '.request_ids')")"
 RENDERED="$(render "$CLAIMED_INPUT")"
+[ "$CAMPAIGN" != "uvn-new-rows" ] || RENDERED="$(with_n1 "$RENDERED")"
 [ "$RD_PREFIX" != "1" ] || RENDERED="$(with_prefix "$RENDERED")"
 [ -z "$C2" ] || RENDERED="$(with_c2 "$RENDERED")"
 [ "$GMO" != 1 ] || RENDERED="$(with_o "$RENDERED")"
