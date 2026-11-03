@@ -1,0 +1,108 @@
+
+=== 0. the home's timer units (systemctl --user enable --now fm-merge-queue.timer) ===
+[Unit]
+Description=firstmate merge queue: land queued, verified pull requests
+Documentation=file:///tmp/fm-mq-demo.hJLwgj/docs/merge-queue.md
+
+[Service]
+Type=oneshot
+WorkingDirectory=/tmp/fm-mq-demo.hJLwgj
+Environment=FM_HOME=/tmp/fm-mq-demo.hJLwgj
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/aaron/.no-mistakes/worktrees/72295860b10d/01M6HMWX1R5S65JJZMPBFPGWR7/bin/fm-merge-queue.sh run
+TimeoutStartSec=600
+---
+[Unit]
+Description=firstmate merge queue every 10 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+AccuracySec=30s
+Unit=fm-merge-queue.service
+
+[Install]
+WantedBy=timers.target
+
+=== 1. what the captain queued by hand (data/go-queue.txt) ===
+# owner: acme
+# The captain's own notes survive every rewrite.
+
+widgets 12 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab task-a squash
+widgets 13 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbc task-b squash
+widgets 14 cccccccccccccccccccccccccccccccccccccccd task-a squash
+widgets 15 1111111111 task-b squash
+widgets 16 eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeef task-a squash
+widgets 17 ffffffffffffffffffffffffffffffffffffffa0 task-a squash
+widgets 19 9999999999999999999999999999999999999aab task-b squash
+
+=== 2. tick 1: fm-merge-queue.sh run  (what the ten-minute timer executes) ===
+merged acme/widgets#12 https://github.com/acme/widgets/pull/12
+merged acme/widgets#13 https://github.com/acme/widgets/pull/13 (credit-guard waived)
+retire acme/widgets#14 fenced for a decider: money
+retire acme/widgets#15 head moved to dddddddddddd (queue expected 1111111111)
+keep acme/widgets#16 not green: build=pending
+keep acme/widgets#17 no qa-review on this head
+retire acme/widgets#19 fenced for a decider: prod-ddl
+summary: check: merge queue 2026-11-03 - merged 2 (1 with credit-guard waived), retired 3 since the last summary; detail: /tmp/fm-mq-demo.hJLwgj/state/merge-queue/daily-2026-11-03.txt
+run: merged 2, retired 3, still queued/skipped 2
+
+exit status: 0
+
+=== 3. what the merge entrypoint was handed (bin/fm-pr-merge.sh argv) ===
+task-a https://github.com/acme/widgets/pull/12 -- --squash --admin --match-head-commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab
+task-b https://github.com/acme/widgets/pull/13 -- --squash --admin --match-head-commit bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbc
+
+=== 4. the queue file after the tick (hand-written comments kept) ===
+# owner: acme
+# The captain's own notes survive every rewrite.
+
+widgets 16 eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeef task-a squash
+widgets 17 ffffffffffffffffffffffffffffffffffffffa0 task-a squash
+
+=== 5. the ledger (every verdict, one line each) ===
+1793742815	acme/widgets#12@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab	merged	squash	https://github.com/acme/widgets/pull/12
+1793742815	acme/widgets#13@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbc	merged	squash (credit-guard waived)	https://github.com/acme/widgets/pull/13
+1793742815	acme/widgets#14@cccccccccccccccccccccccccccccccccccccccd	fenced	fenced for a decider: money	https://github.com/acme/widgets/pull/14
+1793742815	acme/widgets#15@1111111111	head-moved	head moved to dddddddddddd (queue expected 1111111111)	https://github.com/acme/widgets/pull/15
+1793742815	acme/widgets#19@9999999999999999999999999999999999999aab	fenced	fenced for a decider: prod-ddl	https://github.com/acme/widgets/pull/19
+
+=== 6. the ONE durable line the captain wakes to (state/.wake-queue) ===
+1793742815	1	check	merge-queue:daily:2026-11-03	check: merge queue 2026-11-03 - merged 2 (1 with credit-guard waived), retired 3 since the last summary; detail: /tmp/fm-mq-demo.hJLwgj/state/merge-queue/daily-2026-11-03.txt
+
+=== 7. the dated detail file the daily line points at ===
+# merge queue 2026-11-03 - merged and retired rows since 1970-01-01T00:00:00Z
+# time	row	verdict	reason	url
+2026-11-03T21:53:35Z	acme/widgets#12@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab	merged	squash	https://github.com/acme/widgets/pull/12
+2026-11-03T21:53:35Z	acme/widgets#13@bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbc	merged	squash (credit-guard waived)	https://github.com/acme/widgets/pull/13
+2026-11-03T21:53:35Z	acme/widgets#14@cccccccccccccccccccccccccccccccccccccccd	fenced	fenced for a decider: money	https://github.com/acme/widgets/pull/14
+2026-11-03T21:53:35Z	acme/widgets#15@1111111111	head-moved	head moved to dddddddddddd (queue expected 1111111111)	https://github.com/acme/widgets/pull/15
+2026-11-03T21:53:35Z	acme/widgets#19@9999999999999999999999999999999999999aab	fenced	fenced for a decider: prod-ddl	https://github.com/acme/widgets/pull/19
+
+=== 8. tick 2, ten minutes later on the same day ===
+keep acme/widgets#16 not green: build=pending
+keep acme/widgets#17 no qa-review on this head
+run: merged 0, retired 0, still queued/skipped 2
+
+lines in the wake queue after tick 2: 1
+
+=== 9. fm-merge-queue.sh status (records only, no forge call) ===
+merge queue: 2 row(s) in /tmp/fm-mq-demo.hJLwgj/data/go-queue.txt
+last run: 2026-11-03T21:53:35Z - merged 0, retired 0, skipped 2, 2 left queued
+daily summary: last written 2026-11-03
+
+forge calls made by status: 0
+
+=== 10. the queue the captain is left with ===
+# owner: acme
+# The captain's own notes survive every rewrite.
+
+widgets 16 eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeef task-a squash
+widgets 17 ffffffffffffffffffffffffffffffffffffffa0 task-a squash
+
+=== 11. the timer units parse as real systemd units ===
+systemd-analyze verify fm-merge-queue.service: rc=0  (no diagnostics)
+systemd-analyze verify fm-merge-queue.timer: rc=0  (no diagnostics)
+systemd user manager reachable
+
+demo home: /tmp/fm-mq-demo.hJLwgj
