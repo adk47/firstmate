@@ -266,6 +266,16 @@ class SecondMessageSinceSnapshot(unittest.TestCase):
         self.assertEqual(send.still_owed(self.conv(100, 500), snapshot_waiting_since=500), (True, ""))
         self.assertEqual(send.still_owed(self.conv(0, 0), snapshot_waiting_since=800), (True, ""))
 
+    def test_one_second_after_the_snapshot_refuses(self):
+        """QA @22:06Z, the exact boundary: a snapshot taken at second 500 for a stats question, then the
+        customer asks for a refund at second 501. The old `lcr > waiting_since + 1` was FALSE here, so bucket
+        mode would have sent the stats line to a refund request. It must refuse."""
+        ok, why = send.still_owed(self.conv(100, 501), snapshot_waiting_since=500)
+        self.assertFalse(ok, "a customer message one second after the snapshot must refuse the old line")
+        self.assertIn("wrote again", why)
+        # and one second later again, so the fix is not a one-off boundary shift
+        self.assertFalse(send.still_owed(self.conv(100, 502), snapshot_waiting_since=500)[0])
+
 
 if __name__ == "__main__":
     unittest.main()

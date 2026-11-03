@@ -209,7 +209,9 @@ customer spoke last, 25 of them past 4 h. I read each one:
     `verify_ledger`. The existing ledger suites still pass (verify_notify 112, claim_proof_ask 24,
     stage2_asks 20, paid_status_b0_gap 8).
   answered 0 / closed 0 by this lane.
-- The PR title is conventional-commit; the tier is 0 (read-only tools + a locked sender).
+- The PR title is conventional-commit. The tier was 0 at this head (read-only tools + a locked sender); it
+  is **tier 1 now** because the PR also enables the production `intercom-backlog-count-2h` cron (QA
+  @21:42Z: a historical note that still said tier 0 read as the current release tier).
 
 ## 9. Third review (@4a57414d): one overrides loader, lists regenerated
 

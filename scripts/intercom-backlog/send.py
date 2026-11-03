@@ -143,8 +143,14 @@ def still_owed(c, snapshot_waiting_since=None):
     if lar >= lcr and not (lar == 0 and lcr == 0):
         return False, "answered since census"
     if snapshot_waiting_since is not None:
-        # snapshot waiting_since = the last customer reply then, or created_at for an unanswered first message
-        if lcr and lcr > int(snapshot_waiting_since) + 1:
+        # snapshot waiting_since = the last customer reply then, or created_at for an unanswered first message.
+        # QA @22:06Z: NO slack here. A customer message ONE SECOND after the snapshot (snapshot 500, new
+        # refund request at 501) changes what they are asking for, so `lcr > waiting_since` is the test - an
+        # earlier `+ 1` let that exact case through and bucket mode would have sent the previous line.
+        # Residual, stated honestly: a customer message landing in the SAME second as the snapshot's is not
+        # distinguishable from timestamps alone; closing that needs the final customer PART ID carried in the
+        # snapshot row (census -> buckets --out -> here) and compared, which this PR does not do.
+        if lcr and lcr > int(snapshot_waiting_since):
             return False, "the customer wrote again since the snapshot (re-bucket before answering)"
     return True, ""
 
