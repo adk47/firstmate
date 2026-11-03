@@ -2081,6 +2081,9 @@ jobs:
           # Document intake (credit-proof.py file): files a conversation's documents into
           # proof_intake with the account + candidate requests; never judges. Intercom/Trino faked.
           python3 scripts/tests/test_proof_intake.py
+          # Link replies (r5 r1-link): proof_link_intake only, never proof_intake; host class from
+          # policies/proof-link-hosts.json; SSRF-safe fetch of allowlisted hosts only. Fakes only, no network.
+          python3 scripts/tests/test_proof_links.py
           # reply_due product/dispute -> one approved ref or 'unanswered_by_code' (FABLE [key=product-dispute-refs]). Fakes only.
           python3 scripts/tests/test_reply_ref_picker.py
           # support@ Gmail readers kill file (/etc/hydra/gmail-readers.disabled; firstmate 10-31).

@@ -471,6 +471,53 @@ def _guess_mime(path: str) -> str:
             "jpeg": "image/jpeg", "heic": "image/heic", "webp": "image/webp"}.get(ext, "application/octet-stream")
 
 
+def file_links(store: ProofStore, cid: str, doc: dict[str, Any], uid: int | None, how: str, policy: Any,
+               stats: dict[str, Any], *, apply: bool, filed_by: str, cands: list[dict[str, Any]],
+               fetch: Callable[..., dict[str, Any]] | None, budget: list[int]) -> None:
+    """File this conversation's customer link replies into proof_link_intake (never proof_intake). Only for a
+    resolved account (unresolved links are counted, never filed by guess). Only outside_source links are
+    fetched, within the per-run budget; a link past the budget is filed with fetch_status deferred:budget.
+    A dry run counts and fetches nothing."""
+    from . import links as L
+    found = L.customer_links(doc, policy)
+    stats["links_seen"] += len(found)
+    if not found:
+        return
+    if uid is None:
+        stats["links_unresolved"] += len(found)
+        return
+    ch = contact_hash((((doc.get("contacts") or {}).get("contacts")) or [{}])[0].get("id"))
+    for lk in found:
+        cls, why = L.classify(lk["url"], policy)
+        stats["links_by_class"][cls] = stats["links_by_class"].get(cls, 0) + 1
+        if store.link_filed(uid, lk["url"]):
+            stats["links_duplicate"] += 1
+            continue
+        result = None
+        if cls == "outside_source":
+            if not apply:
+                result = {"fetch_status": "dry_run"}
+            elif budget[0] <= 0 or fetch is None:
+                result = {"fetch_status": "deferred:budget"}
+                stats["link_fetch_deferred"] += 1
+            else:
+                budget[0] -= 1
+                stats["link_fetches"] += 1
+                result = fetch(lk["url"], policy)
+            st = str(result.get("fetch_status"))
+            stats["link_fetch"][st] = stats["link_fetch"].get(st, 0) + 1
+        if apply:
+            wrote = store.file_link(user_id=uid, url=lk["url"], url_host=L.host_of(lk["url"]), host_class=cls,
+                                    host_why=why, conversation_id=cid, part_id=lk["part_id"],
+                                    received_at=_iso(lk["received_at"]),
+                                    candidate_request_ids=[c["request_id"] for c in cands], fetch=result,
+                                    filed_by=filed_by, matched_by=how, contact_h=ch)
+            if wrote is None:
+                stats["links_duplicate"] += 1
+                continue
+        stats["links_filed"] += 1
+
+
 # ── the run ─────────────────────────────────────────────────────────────────
 def run(store: ProofStore, *, conversations: list[str], fetch: Fetch, lookup: Lookup,
         open_rows: dict[int, list[dict[str, Any]]] | None = None,
@@ -480,6 +527,8 @@ def run(store: ProofStore, *, conversations: list[str], fetch: Fetch, lookup: Lo
         subject: str = "credit", filed_by: str = "credit-proof.py file", max_fetches: int = MAX_FETCHES,
         open_rows_fn: Callable[[list[int]], dict[int, list[dict[str, Any]]]] | None = None,
         identity: Callable[[str, dict[str, Any]], tuple[int | None, str]] | None = None,
+        link_policy: Any = None, link_fetch: Callable[..., dict[str, Any]] | None = None,
+        max_link_fetches: int = 30,
         log: Callable[[str], None] = lambda m: None) -> dict[str, Any]:
     """File every document of `conversations`. `apply=False` counts only: nothing is
     written to the store (a document only Intercom holds is still downloaded to a private
@@ -500,7 +549,10 @@ def run(store: ProofStore, *, conversations: list[str], fetch: Fetch, lookup: Lo
                              "cache_not_customer": 0,
                              "files_filed": 0, "files_duplicate": 0, "files_error": 0,
                              "users": 0, "with_candidate_requests": 0, "candidate_requests": 0,
-                             "errors": [], "unresolved": [], "files_rejected_type": 0}
+                             "errors": [], "unresolved": [], "files_rejected_type": 0,
+                             # link replies (r5 r1-link): only with link_policy AND the strict identity
+                             "links_seen": 0, "links_filed": 0, "links_duplicate": 0, "links_unresolved": 0,
+                             "links_by_class": {}, "link_fetches": 0, "link_fetch_deferred": 0, "link_fetch": {}}
     ids = [str(x) for x in conversations]
     docs: dict[str, dict[str, Any] | None] = {}
 
@@ -523,6 +575,7 @@ def run(store: ProofStore, *, conversations: list[str], fetch: Fetch, lookup: Lo
         open_rows = {**open_rows_fn(uids), **open_rows} if uids else open_rows
     filed: set[tuple[int, str]] = set()     # (user, sha256) filed or counted this run
     budget = [max(0, int(max_fetches))]
+    link_budget = [max(0, int(max_link_fetches))]
     tmp = tempfile.mkdtemp(prefix="cvdocintake-", dir="/dev/shm" if os.path.isdir("/dev/shm") else None)
     os.chmod(tmp, 0o700)
     try:
@@ -540,6 +593,10 @@ def run(store: ProofStore, *, conversations: list[str], fetch: Fetch, lookup: Lo
                     open_rows = {**open_rows, **open_rows_fn([uid])}
             else:
                 uid, how = resolve_account(resolved.get(exts.get(cid) or "", []), export.get(cid, ()))
+            if link_policy is not None and identity is not None:
+                file_links(store, cid, doc, uid, how, link_policy, stats, apply=apply, filed_by=filed_by,
+                           cands=candidate_requests(uid, open_rows=open_rows, held=held) if uid is not None else [],
+                           fetch=link_fetch, budget=link_budget)
             before = budget[0]
             files, errs = collect_files(cid, doc, cache_root=cache_root, tmp=tmp, dl=dl, budget=budget, notes=stats)
             stats["fetches_used"] += before - budget[0]

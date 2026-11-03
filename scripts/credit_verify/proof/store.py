@@ -89,6 +89,28 @@ CREATE TABLE IF NOT EXISTS proof_intake (
 );
 CREATE INDEX IF NOT EXISTS proof_intake_user ON proof_intake(user_id, conversation_id);
 CREATE INDEX IF NOT EXISTS proof_intake_sha ON proof_intake(file_sha256);
+-- Link replies (r5 r1-link): a URL a customer sent instead of a file. NEVER a proof_intake row - every reader of
+-- proof_intake treats a row as a document on file. Only the coded `status-doc-received --copy link` class reads this.
+CREATE TABLE IF NOT EXISTS proof_link_intake (
+  link_id TEXT PRIMARY KEY,            -- <user_id>:<sha256(url) prefix>: a re-file is the same row
+  user_id INTEGER NOT NULL,
+  doc_kind TEXT NOT NULL DEFAULT 'link',
+  url TEXT NOT NULL,                   -- normalised (links.normalise)
+  url_host TEXT NOT NULL,
+  host_class TEXT NOT NULL,            -- outside_source | muso | unknown (links.classify, from policies/proof-link-hosts.json)
+  host_why TEXT NOT NULL,              -- allowlist:<entry> | muso:<entry> | shortener | other | unparseable | ip_literal
+  conversation_id TEXT NOT NULL,
+  part_id TEXT,
+  received_at TEXT NOT NULL,
+  candidate_request_ids_json TEXT NOT NULL DEFAULT '[]',
+  fetch_json TEXT,                     -- links.fetch result (outside_source only); NULL = not fetched
+  filed_by TEXT NOT NULL,
+  matched_by TEXT,
+  contact_h TEXT,
+  filed_at TEXT NOT NULL,
+  UNIQUE (user_id, url)
+);
+CREATE INDEX IF NOT EXISTS proof_link_intake_user ON proof_link_intake(user_id, conversation_id);
 CREATE TABLE IF NOT EXISTS verdicts (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   proof_id TEXT NOT NULL,
@@ -297,6 +319,36 @@ class ProofStore:
                  matched_by, contact_h or "", json.dumps(detail, default=str)))
             self.db.commit()
             return intake_id if cur.rowcount > 0 else None
+
+    def link_filed(self, user_id: int, url: str) -> bool:
+        with self.lock:
+            try:
+                return self.db.execute("SELECT 1 FROM proof_link_intake WHERE user_id=? AND url=?",
+                                       (int(user_id), url)).fetchone() is not None
+            except sqlite3.OperationalError:      # a read-only store from before the table existed
+                return False
+
+    def file_link(self, *, user_id: int, url: str, url_host: str, host_class: str, host_why: str,
+                  conversation_id: str, part_id: str = "", received_at: str = "",
+                  candidate_request_ids: list[str] | None = None, fetch: dict[str, Any] | None = None,
+                  filed_by: str = "intake-cron", matched_by: str = "", contact_h: str = "") -> str | None:
+        """Record a link reply in proof_link_intake - never in proof_intake (a link is not a document of record).
+        Idempotent on (user_id, url). Returns the link id, or None when the row already existed."""
+        if self.readonly:
+            raise RuntimeError("read-only proof store: file_link needs --apply")
+        import hashlib
+        link_id = f"{int(user_id)}:{hashlib.sha256(url.encode()).hexdigest()[:32]}"
+        with self.lock:
+            cur = self.db.execute(
+                "INSERT OR IGNORE INTO proof_link_intake (link_id, user_id, doc_kind, url, url_host, host_class, host_why,"
+                " conversation_id, part_id, received_at, candidate_request_ids_json, fetch_json, filed_by, matched_by,"
+                " contact_h, filed_at) VALUES (?,?,'link',?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (link_id, int(user_id), url, url_host, host_class, host_why, str(conversation_id), part_id or "",
+                 received_at or utcnow(), json.dumps([str(r) for r in (candidate_request_ids or [])]),
+                 None if fetch is None else json.dumps(fetch, default=str), filed_by, matched_by, contact_h or "",
+                 utcnow()))
+            self.db.commit()
+            return link_id if cur.rowcount > 0 else None
 
     def _prior(self) -> list[Fingerprint]:
         with self.lock:

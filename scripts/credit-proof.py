@@ -208,6 +208,10 @@ def cmd_file_recent(args: argparse.Namespace) -> int:
         log("paying users unreadable: conversations are filed in search order")
     admin_lookup = email_in.admin_user_lookup(admin_api.AdminClient())
     no_gmail = file_recent_no_gmail(args.no_gmail)
+    link_policy = link_fetch = None
+    if args.links:
+        from credit_verify.proof import links
+        link_policy, link_fetch = links.load_policy(), links.fetch      # raises on a missing/empty policy
     try:
         res = recent.run(
             state_path=args.state or recent.STATE, hours=args.hours, apply=args.apply,
@@ -220,6 +224,7 @@ def cmd_file_recent(args: argparse.Namespace) -> int:
                 store, conversations=ids, fetch=make_fetch(tok), lookup=intake.professional_lookup, held=held,
                 apply=args.apply, max_fetches=args.max_fetches, open_rows_fn=intake.open_rows_trino,
                 filed_by="intake-cron", log=log,
+                link_policy=link_policy, link_fetch=link_fetch, max_link_fetches=args.max_link_fetches,
                 # fail-closed identity: one user contact, external_id + email hash against core, > 24 h old
                 identity=intake.strict_identity(contact_fetch=Pacer("intercom", 1.0).paced(make_contact_fetch(tok)),
                                                 lookup=intake.professional_lookup)), UNRESOLVED, args.apply),
@@ -331,6 +336,10 @@ def parser() -> argparse.ArgumentParser:
     pr2.add_argument("--hours", type=float, default=2.0, help="first-run window (later runs start at the last run)")
     pr2.add_argument("--max-fetches", type=int, default=60)
     pr2.add_argument("--no-gmail", action="store_true", help="Intercom only")
+    pr2.add_argument("--links", action="store_true",
+                     help="also file customer LINK replies into proof_link_intake (r5 r1-link; never proof_intake). "
+                          "Off by default: turning it on in the cron is its own reviewed change")
+    pr2.add_argument("--max-link-fetches", type=int, default=30, help="outside-source link fetches per run")
     pr2.add_argument("--state", default=None)
     pr2.add_argument("--out", default=None)
     pr2.set_defaults(fn=cmd_file_recent)

@@ -1,0 +1,18 @@
+{
+  "_doc": "Host classes for link replies (r5 COPY RULING fable-copy-1101-r5/r1-link). Read ONLY by scripts/credit_verify/proof/links.py. A host matches an entry when it IS the entry or a subdomain of it. outside_source = an outside source the user does not control (fetched, SSRF-safe, and eligible for the `status-doc-received --copy link` receipt); muso = Muso's own pages (Muso-UI class, no receipt, never fetched); shorteners = always unknown (never followed); skip = Intercom's own file hosts (those are attachments, filed as documents, not links). Anything not listed is unknown -> a person (r1_link_unknown). Adding a host is a policy change for r5: the ruling names Tidal, Genius, Discogs, AllMusic, ASCAP, BMI; 'a recognised distributor/label domain' is EMPTY until r5 names them.",
+  "outside_source": [
+    {"host": "tidal.com", "named_by": "r5 r1-link"},
+    {"host": "genius.com", "named_by": "r5 r1-link"},
+    {"host": "discogs.com", "named_by": "r5 r1-link"},
+    {"host": "allmusic.com", "named_by": "r5 r1-link"},
+    {"host": "ascap.com", "named_by": "r5 r1-link"},
+    {"host": "bmi.com", "named_by": "r5 r1-link"}
+  ],
+  "muso": ["muso.ai"],
+  "shorteners": ["bit.ly", "tinyurl.com", "t.co", "goo.gl", "ow.ly", "is.gd", "buff.ly", "rebrand.ly", "cutt.ly",
+                 "lnk.to", "ffm.to", "smarturl.it", "found.ee", "hypeddit.com", "linkfire.com", "tinyurl.is"],
+  "skip": ["intercom-attachments.com", "intercom-attachments-1.com", "intercom-attachments-2.com",
+           "intercom-attachments-3.com", "intercom-attachments-4.com", "intercom-attachments-5.com",
+           "intercom-attachments-6.com", "intercom-attachments-7.com", "intercom-attachments-8.com",
+           "intercom-attachments-9.com", "intercomcdn.com", "intercomcdn.eu"]
+}
