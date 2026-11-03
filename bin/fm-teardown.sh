@@ -54,6 +54,11 @@
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product. Teardown proceeds only once the report exists and the shared
 # unresolved-decision completion gate verifies its captain-held inventory.
+# A task that declared an OUTCOME CHECK is not Done when its PR lands: teardown
+# also runs bin/fm-outcome-check.sh's gate and REFUSES while the declared outcome
+# is unproven, because cleanup is where an unclosed last mile would silently
+# expire. A green probe, a check waived with a reason, and a task that declared
+# none all proceed; --force discards the check along with the work and says so.
 # Before destructive cleanup, teardown validates task check artifacts as
 # ordinary single-link files on the state device. It refuses and preserves
 # task state when that proof fails; otherwise it removes the task's check,
@@ -2794,6 +2799,23 @@ if [ "$FORCE" != "--force" ] \
   fi
 fi
 
+if [ "$FORCE" != "--force" ] && [ "$KIND" != secondmate ]; then
+  # A merged PR is not an outcome. A task that declared an outcome check owns its
+  # last mile until its probe passes (bin/fm-outcome-check.sh), and cleanup is the
+  # moment that promise would silently expire: the record, the probe's verdict, and
+  # the person who was supposed to close the gap all disappear with it.
+  OUTCOME_GATE_OUT="$(
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      FM_CONFIG_OVERRIDE="$CONFIG" "$SCRIPT_DIR/fm-outcome-check.sh" gate "$ID" 2>&1
+  )" || {
+    echo "REFUSED: task $ID is not Done: its declared outcome is still unproven." >&2
+    printf '%s\n' "$OUTCOME_GATE_OUT" >&2
+    echo "Keep the task alive until the probe passes, or record why the check is not being awaited with bin/fm-outcome-check.sh waive $ID --reason \"<why>\". --force discards the check along with the work." >&2
+    exit 1
+  }
+  [ -z "$OUTCOME_GATE_OUT" ] || printf '%s\n' "$OUTCOME_GATE_OUT"
+fi
+
 # Non-blocking: a delivered public loop is not a teardown refusal (guard-work
 # already passed), but tearing down a ship whose PR merged while a loop is still
 # open with nothing owed is the moment the drop is detectable.
@@ -2802,6 +2824,12 @@ if [ "$KIND" = ship ] && [ -n "$PR_URL" ] \
     && [ "${PUBLIC_FOLLOWUP_RELAY_ACTIVE:-0}" = 1 ] \
     && fm_pf_has_delivered_open_loops "$PUBLIC_FOLLOWUP_STATE"; then
   echo "warning: an open public loop with nothing owed is still recorded in the consent-holding home while cleaning up ship task $ID. Hand it on with bin/fm-public-followup.sh rechain or close it with retire --reason." >&2
+fi
+
+if [ "$KIND" = ship ] \
+    && [ "$FORCE" = "--force" ] \
+    && [ -f "$STATE/$ID.outcome" ] && [ ! -L "$STATE/$ID.outcome" ]; then
+  echo "warning: --force is discarding the unproven outcome check recorded for $ID; nothing proved its outcome." >&2
 fi
 
 # Non-blocking: the legacy Relay link is not guarded as a refusal.
@@ -3100,7 +3128,7 @@ rm -f "$STATE/$ID.turn-ended" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
-  "$STATE/$ID.gateway-stall" \
+  "$STATE/$ID.gateway-stall" "$STATE/$ID.outcome" \
   "$STATE/.$ID.branch-outcome-index"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
 # retired endpoint; teardown only runs after landing is confirmed, so any

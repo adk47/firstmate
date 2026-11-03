@@ -113,6 +113,7 @@ state/               runtime records and signals; gitignored
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified Relay shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
   <id>.check-trust   private content binding created by fm-check-register.sh for an intentional custom check
   <id>.pr-poll       private validated data sidecar for the byte-static PR merge poll
+  <id>.outcome       a ship ticket's declared outcome check: probe path, deadline, cadence, last verdict and gap, red-since stamp, and escalation-ladder position; bin/fm-outcome-check.sh owns the format, gates teardown on it (docs/configuration.md "Outcome check")
   <id>.pr-poll-registration  private transactional provenance record binding the task, canonical metadata identity, sidecar, and static poll publication
   <id>.pr-poll-retirement  private identity-bound crash-recovery receipt for one exact validated merged result; removed after its poll artifacts retire
   <id>.pr-poll-merge-notified  canonical PR identity of the last merge outcome delivered for this task; bin/fm-pr-lib.sh owns the marker format and identity mechanics, while bin/fm-merge-outcome-lib.sh owns locked publication, duplicate suppression, and replacement
@@ -401,6 +402,11 @@ Tear down a ship task only after landing is confirmed.
 A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
 Never force teardown without explicit discard authority.
 After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work whose blockers and time gates have cleared.
+
+A landing is not an outcome.
+A ship task whose brief declared an outcome under `# Outcome check` (`bin/fm-brief.sh --outcome`, rendered by `bin/fm-dod-lib.sh`) is not Done until its probe proves that outcome, and `bin/fm-outcome-check.sh` owns the probe contract, the deadline, and the ladder that re-engages the owner with the exact gap, then asks for reassignment, then pages the captain.
+Teardown runs that gate and refuses while the declared outcome is unproven, so a merged-not-live change keeps its owner instead of losing it to cleanup.
+A check is closed by a green probe or a `waive` with its reason - never by silence, and never by a worker's own waiver.
 
 A secondmate is persistent and an empty queue is healthy.
 Retire one only on an explicit captain or main-firstmate decision, after loading `secondmate-provisioning`; its home must contain no work under way, and forced discard still requires explicit captain authority.

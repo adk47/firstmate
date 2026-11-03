@@ -824,6 +824,19 @@ The watch is read-only against Sentry and GitHub, makes no model calls, and boun
 That budget is shared fairly: each project's read gets the budget divided by the project count, at least 2 seconds and never more than `FM_SENTRY_WATCH_HTTP_TIMEOUT` (default 5), and the read order rotates round-robin every poll starting after the last project read, so a slow host starves no fixed tail and every project is read within a bounded number of polls.
 A project left unread for three consecutive polls is reported as `could-not-determine` on that transition.
 
+## Outcome check (state/<task-id>.outcome)
+
+[`bin/fm-outcome-check.sh`](../bin/fm-outcome-check.sh) is the one owner of the last mile: a ship ticket whose brief declared an outcome under `# Outcome check` (`bin/fm-brief.sh --outcome`) is not Done when its PR lands, only when the probe it declared for that outcome passes.
+Its header owns the record schema, the probe contract, the escalation ladder, and the bounds; this section owns only what an operator needs to read or change one.
+
+The record is a plain `key=value` file at `state/<task-id>.outcome`, written whole and `0600`, and removed with the task's other runtime records at teardown.
+Its probe is `data/<task-id>/outcome.sh` unless declared otherwise, and it must read the real system rather than the local worktree: exit 0 when the outcome is true, otherwise print one line naming the gap.
+Declaring arms `state/outcome-watch.check.sh` as an ordinary custom check, so the existing watcher polls every open probe on its normal `FM_CHECK_INTERVAL` cadence with no separate schedule; `FM_OUTCOME_POLL_BUDGET` (default 20) and `FM_OUTCOME_PROBE_TIMEOUT` (default 10) bound one poll and one probe so the check ends inside `FM_CHECK_TIMEOUT` with something printed rather than being killed.
+
+`bin/fm-outcome-check.sh status <task-id>` reads one ticket as `green`, `awaiting-outcome`, or `not-declared`, and `gate <task-id>` is the same judgement in exit-code form for `bin/fm-teardown.sh`, which refuses to clean up a task while its declared outcome is unproven.
+The ladder escalates once per poll and stops at the captain: re-engage the owning worker with the exact gap, then ask firstmate to reassign, then page.
+`waive <task-id> --reason '<why>'` records a deliberate decision to stop awaiting the check; it is never the worker's own call, and `--force` discards the check along with the work and says so.
+
 ## Relay (.env)
 
 Relay lets a firstmate instance answer public mentions and act on normal reversible mention requests through firstmate's normal lifecycle.

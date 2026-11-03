@@ -56,6 +56,7 @@ set -u
 fm_git_identity fmtest fmtest@example.invalid
 
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
+OUTCOME_CHECK="$ROOT/bin/fm-outcome-check.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
 REAL_GIT_FOR_TEST=$(command -v git)
@@ -728,6 +729,119 @@ test_no_mistakes_truly_unpushed_refuses() {
   expect_code 1 "$rc" "nm-unpushed: teardown should refuse"
   grep -q REFUSED "$case_dir/stderr" || fail "nm-unpushed: no REFUSED line in stderr"
   pass "no-mistakes worktree with genuinely unlanded work is refused (safety preserved)"
+}
+
+# Record a declared outcome check for task-x1 by driving the production
+# declare/run path, so the gate reads exactly what a live home would write.
+# Args: case_dir <green|red|none>
+record_outcome() {
+  local case_dir=$1 verdict=$2 id=task-x1
+  [ "$verdict" != none ] || return 0
+  mkdir -p "$case_dir/data/$id"
+  if [ "$verdict" = green ]; then
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$case_dir/data/$id/outcome.sh"
+  else
+    printf '#!/usr/bin/env bash\necho "gap: merged-not-live"\nexit 1\n' > "$case_dir/data/$id/outcome.sh"
+  fi
+  chmod 0755 "$case_dir/data/$id/outcome.sh"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
+  FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+    "$OUTCOME_CHECK" declare "$id" >/dev/null \
+    || fail "could not declare the outcome check in $case_dir"
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
+  FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+    "$OUTCOME_CHECK" run "$id" >/dev/null 2>&1 || true
+}
+
+# A brief that declares an outcome check but was never backed by a probe.
+declare_outcome_in_brief() {
+  local case_dir=$1
+  mkdir -p "$case_dir/data/task-x1"
+  printf '%s\n' "# Task" "" "# Outcome check" "the hold list is live in prod" "" \
+    "# Definition of done" "Delivery contract: mode=no-mistakes" \
+    > "$case_dir/data/task-x1/brief.md"
+}
+
+test_declared_outcome_red_refuses_teardown() {
+  local case_dir rc
+  case_dir=$(make_case outcome-red)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  record_outcome "$case_dir" red
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "outcome-red: teardown must refuse while the declared outcome is red"
+  grep -q REFUSED "$case_dir/stderr" || fail "outcome-red: no REFUSED line in stderr"
+  grep -q "not Done" "$case_dir/stderr" || fail "outcome-red: refusal did not say the task is not Done"
+  grep -q "merged-not-live" "$case_dir/stderr" || fail "outcome-red: refusal did not name the gap"
+  grep -q "waive" "$case_dir/stderr" || fail "outcome-red: refusal did not name the waive path"
+  pass "a red declared outcome refuses teardown even though the PR landed"
+}
+
+test_undeclared_probe_outcome_refuses_teardown() {
+  local case_dir rc
+  case_dir=$(make_case outcome-unrecorded)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  declare_outcome_in_brief "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "outcome-unrecorded: a declared check with no probe must refuse"
+  grep -q "no probe has ever been recorded" "$case_dir/stderr" \
+    || fail "outcome-unrecorded: refusal did not explain the missing probe"
+  pass "a brief that declared an outcome check cannot be cleaned up with nothing recorded"
+}
+
+test_green_or_waived_outcome_allows_teardown() {
+  local case_dir rc
+  case_dir=$(make_case outcome-green)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  record_outcome "$case_dir" green
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "outcome-green: a proven outcome must not block cleanup"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "outcome-green: teardown printed a REFUSED line"
+  pass "a green outcome lets the landed task be cleaned up"
+
+  case_dir=$(make_case outcome-waived)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  record_outcome "$case_dir" red
+  FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$case_dir" \
+  FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" \
+  FM_CONFIG_OVERRIDE="$case_dir/config" \
+    "$OUTCOME_CHECK" waive task-x1 --reason "the console has no read API yet" >/dev/null \
+    || fail "could not waive the outcome check"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "outcome-waived: a recorded waiver must not block cleanup"
+  grep -q REFUSED "$case_dir/stderr" && fail "outcome-waived: teardown printed a REFUSED line"
+  pass "a waived check with its reason lets the landed task be cleaned up"
 }
 
 test_squash_merged_branch_deleted_allows() {
@@ -3513,6 +3627,9 @@ test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
+test_declared_outcome_red_refuses_teardown
+test_undeclared_probe_outcome_refuses_teardown
+test_green_or_waived_outcome_allows_teardown
 test_gh_error_and_content_absent_refuses
 test_legacy_record_without_the_flag_refuses
 test_legacy_record_teardown_completes_when_landed_and_endpoint_dead

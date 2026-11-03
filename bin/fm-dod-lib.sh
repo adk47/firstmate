@@ -5,9 +5,12 @@
 # receives. Both paths must hand the worker the same contract: a promoted
 # no-mistakes worker that never received the ask-user escalation rule or the
 # `--yes` ban is the exact delivery hole this single owner exists to close.
-# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> prints the block on
-# stdout with no trailing blank line. The caller validates the mode; an unknown
-# mode is refused rather than silently rendered as the pipeline contract.
+# fm_dod_block <no-mistakes|direct-PR|local-only> <task-id> [<outcome-section>]
+# prints the block on stdout with no trailing blank line, preceded by the
+# outcome-check section when the caller passes one. The caller validates the
+# mode; an unknown mode is refused rather than silently rendered as the pipeline
+# contract. fm_outcome_section renders that section from the check the task
+# declared at intake, and bin/fm-outcome-check.sh owns everything after it.
 # The block opens with the fixed machine-readable "Delivery contract: mode=<mode>"
 # line that bin/fm-spawn.sh checks a ship brief against.
 # This file is the one owner of the no-mistakes `--intent` contract: only the
@@ -174,8 +177,38 @@ fm_ask_user_escalation_block() {  # <data-dir> <task-id>
 EOF
 }
 
-fm_dod_block() {  # <mode> <task-id>
-  local mode=$1 id=$2
+# The declared outcome check, rendered into the same contract that says how the
+# task ends: a ticket is not Done until its outcome is observable, so the
+# declaration sits directly above the Definition of done and a task that
+# declared nothing says so out loud. Bin/fm-outcome-check.sh owns the probe
+# contract, the timer, and the escalation ladder; this function only hands the
+# worker the declaration and what it owes the probe.
+fm_outcome_section() {  # <task-id> <data-dir> <fm-root> [<declared-text>]
+  local id=$1 data=$2 root=$3 text=${4:-}
+  if [ -z "$(printf '%s' "$text" | tr -d '[:space:]')" ]; then
+    cat <<'EOF'
+# Outcome check
+No outcome check was declared for this task, so its deliverable is its Definition of done and firstmate owns the last mile after your report.
+EOF
+    return 0
+  fi
+  cat <<EOF
+# Outcome check
+This task declared an outcome, and the ticket is not done until that outcome is observable:
+$(printf '%s\n' "$text")
+
+Write the probe at \`$data/$id/outcome.sh\`: a bash script that exits 0 only when that outcome is really true, and otherwise prints one line naming the gap, for example \`gap: merged-not-live\`, \`gap: approved-not-merged\`, or \`gap: merged-not-deployed\`.
+A probe that always passes is worse than no probe: it must read the real system - the live endpoint, the deployed image, the merged commit - never the local worktree alone.
+Declare it before you report done: \`$root/bin/fm-outcome-check.sh declare $id\` (add \`--due 30m\` to move the deadline), then prove it with \`$root/bin/fm-outcome-check.sh run $id\`.
+\`done\` means your deliverable is ready for firstmate; it does not mean this ticket is done, and a merged PR with a red probe is exactly the last mile this check exists to catch.
+If the probe cannot pass yet, report where it stands and what is missing instead of stopping: firstmate re-engages you with the recorded gap until it passes.
+Never waive your own check; if you believe it is wrong, say so in one status line and let firstmate decide.
+EOF
+}
+
+fm_dod_block() {  # <mode> <task-id> [<outcome-section>]
+  local mode=$1 id=$2 outcome=${3:-}
+  [ -z "$outcome" ] || printf '%s\n\n' "$outcome"
   case "$mode" in
     direct-PR)
       cat <<EOF

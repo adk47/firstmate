@@ -12,9 +12,17 @@
 # charters still use a single `{TASK}` charter fill. Firstmate may adjust other
 # sections when the task genuinely deviates (e.g. working an existing external
 # PR instead of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> --mode <no-mistakes|direct-PR|local-only> [--outcome <text>] [--herdr-lab]
 #        fm-brief.sh <task-id> <repo-name> --scout [--herdr-lab]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
+#   --outcome '<what must be true>' declares what this ship task's OUTCOME is,
+#   in the captain's own terms ("the prod fraud hold list is live", "workspace
+#   A renders email proofs"), as opposed to what its diff contains. It renders
+#   into the same contract that says how the task ends (bin/fm-dod-lib.sh), and
+#   bin/fm-outcome-check.sh then treats the ticket as open until the probe the
+#   worker writes for it passes. Omit it only when the deliverable really is the
+#   outcome; the rendered section then says so explicitly rather than leaving
+#   silence that reads as "the PR is the outcome".
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
 #   --secondmate writes a persistent secondmate charter. The project list
@@ -124,6 +132,7 @@ HERDR_LAB=0
 NO_PROJECTS=0
 MODE=
 MODE_SET=0
+OUTCOME=
 POS=()
 want_value=
 for a in "$@"; do
@@ -133,6 +142,7 @@ for a in "$@"; do
     esac
     case "$want_value" in
       mode) MODE=$a; MODE_SET=1 ;;
+      outcome) OUTCOME=$a ;;
       *) echo "error: internal parser state for --$want_value" >&2; exit 1 ;;
     esac
     want_value=
@@ -145,6 +155,8 @@ for a in "$@"; do
     --no-projects) NO_PROJECTS=1 ;;
     --mode) want_value=mode ;;
     --mode=*) MODE=${a#--mode=}; MODE_SET=1 ;;
+    --outcome) want_value=outcome ;;
+    --outcome=*) OUTCOME=${a#--outcome=} ;;
     # yolo never reaches the worker: it is firstmate's merge authority, not a
     # brief input. Refuse it loudly so it is never silently dropped here and then
     # believed to have been recorded.
@@ -173,6 +185,11 @@ elif [ "$MODE_SET" -eq 1 ]; then
   exit 1
 fi
 ID=${POS[0]}
+
+if [ -n "$OUTCOME" ] && [ "$KIND" != ship ]; then
+  echo "error: --outcome applies only to ship briefs; a scout's deliverable is a report and a charter is not a delivery contract" >&2
+  exit 1
+fi
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
@@ -445,7 +462,7 @@ case "$MODE" in
     RULE1='1. Never push to the default branch. Never merge a PR.'
     ;;
 esac
-DOD=$(fm_dod_block "$MODE" "$ID") || exit 1
+DOD=$(fm_dod_block "$MODE" "$ID" "$(fm_outcome_section "$ID" "$DATA" "$FM_ROOT" "$OUTCOME")") || exit 1
 
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
