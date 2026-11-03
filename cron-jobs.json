@@ -1589,6 +1589,34 @@
       }
     },
     {
+      "id": "32d297fd-50d2-56fa-9220-5dbdf7f05db8",
+      "agentId": "operations",
+      "createdAtMs": 1793664000000,
+      "updatedAtMs": 1793664000000,
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "delivery": {
+        "mode": "none"
+      },
+      "enabled": true,
+      "name": "credit-jan-tray-0700",
+      "description": "Jan's daily proof list (FirstMate ruling 1, 3 Nov 2026; MUS-27494). Daily at 07:00 UTC: rebuilds the doc-verify tray, reads the claims where the document proves it (jan-proves-b<date>.json) and DMs them to Jan (U038BM16T7W) as the operations bot, 20 rows per message, first 100 only, one short 'nothing to review' DM on an empty day, and no DM at all (one failure line) when the build fails. READ-ONLY: it approves nothing, writes no request status, sends nothing to any customer; Jan decides each request himself in Muso admin. Writes only /var/lib/hydra-credit-verify/jan-tray and /var/lib/hydra/credit-jan-tray-dm. Kill switch: /etc/hydra/credit-jan-tray-dm.disabled. Runbook for Jan: docs/credit-verification/jan-daily-proof-list.md.",
+      "schedule": {
+        "kind": "cron",
+        "expr": "0 7 * * *",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "bash",
+          "/opt/hydra/scripts/credit-jan-tray-dm.sh"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 900
+      }
+    },
+    {
       "id": "7d0b6e7f-62c2-5201-b075-1f942621cee2",
       "agentId": "operations",
       "name": "credit-digest-dm-0800-ny",
