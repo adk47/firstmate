@@ -151,8 +151,9 @@
 #
 # An absent metric is never implied to be healthy: a clean verdict counts only
 # the metrics that were actually read, and the completion note and status line
-# name every metric no sample ever scored, so a release watched only for
-# restarts and memory says exactly that.
+# name every metric key no sample ever scored, target included, so a release
+# watched only for restarts and memory says exactly that and a target whose own
+# pool or pods were never read is named as the gap it is.
 #
 # Schedule: +5m, +15m, +30m, then hourly to +12h. Samples stop at the first
 # regression. On a clean +12h the watch appends one note to the task's status
@@ -182,7 +183,8 @@
 #                          where change-watch-kubeconfig and change-watch-repos live
 #   FM_CW_MAX_TARGETS      cap on Deployments watched for one repository (default 8)
 #   FM_CW_WORKLOADS_DIR    directory replacing the live image inventory: a file
-#                          workloads holds "ns<TAB>name<TAB>replicas<TAB>images"
+#                          workloads holds "ns<TAB>name<TAB>replicas<TAB>images",
+#                          images comma- or space-separated
 #   FM_CW_SENTRY_VAULT     Sentry credential file (default ~/.config/muso/sentry-vault.json)
 #   FM_CW_SENTRY_DIR       directory of stubbed Sentry responses: issues-<project>.json
 #   FM_CW_GH               gh command used for the deploy-run target (default gh)
@@ -345,7 +347,7 @@ cw_budget_start() {
   CW_FORGE_START=$(cw_now)
   CW_POD_FACTS_CACHE=''
   CW_WORKLOADS_CACHE=''
-  CW_POOL_BAD_HOSTS=''
+  rm -f -- "$CW_POOL_BAD_HOSTS_FILE" 2>/dev/null || true
 }
 cw_within_budget() { [ $(( $(cw_now) - CW_BUDGET_START )) -lt "$SAMPLE_DEADLINE_SECONDS" ]; }
 cw_budget_left() {
@@ -578,10 +580,12 @@ cw_diff_changed_lines() {
 }
 
 # LIVE QUERY (cluster) - every Deployment's namespace, name, replicas, and
-# container images, one "ns<TAB>name<TAB>replicas<TAB>images" line each. One call
-# answers the whole inventory, which keeps registering an application release
-# cheap enough to run inside a merge hook. An unreadable cluster prints nothing
-# and its caller records the reason.
+# container images, one "ns<TAB>name<TAB>replicas<TAB>images" line each. A
+# Deployment with more than one container renders its images space-separated, so
+# a reader splits the field on commas and whitespace alike. One call answers the
+# whole inventory, which keeps registering an application release cheap enough
+# to run inside a merge hook. An unreadable cluster prints nothing and its caller
+# records the reason.
 cw_live_workloads() {
   if [ -n "${CW_WORKLOADS_CACHE:-}" ]; then
     printf '%s' "$CW_WORKLOADS_CACHE"
@@ -614,6 +618,15 @@ cw_live_workloads() {
 #   run:<owner>/<repo>#<workflow-path>   the repository's deploy workflow
 #                                  (a path such as .github/workflows/deploy.yml,
 #                                  so the spec stays one whitespace-free token)
+
+# The home's repository map with comments removed. A `#` starts a comment only at
+# the start of a line or after whitespace, because a `run:` spec carries one
+# inside `<owner>/<repo>#<workflow-path>`.
+cw_repo_map_clean() {
+  sed -e 's/^#.*$//' -e 's/[[:space:]]#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+    "$CW_CONFIG_DIR/change-watch-repos" 2>/dev/null | grep -v '^$' || true
+}
+
 cw_repo_map_lines() {
   cat <<'BUILTIN'
 core-backend image:core-backend sentry:core-backend
@@ -623,8 +636,7 @@ muso-messaging messaging/notify-gateway messaging/send-gateway messaging/prefere
 hydra run:Muso-AI/hydra#.github/workflows/deploy.yml
 BUILTIN
   if [ -f "$CW_CONFIG_DIR/change-watch-repos" ]; then
-    sed -e 's/#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
-      "$CW_CONFIG_DIR/change-watch-repos" 2>/dev/null | grep -v '^$' || true
+    cw_repo_map_clean
   fi
 }
 
@@ -634,8 +646,7 @@ BUILTIN
 cw_repo_specs() {  # <repo>
   local repo=$1 line specs=''
   if [ -f "$CW_CONFIG_DIR/change-watch-repos" ]; then
-    specs=$(sed -e 's/#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
-      "$CW_CONFIG_DIR/change-watch-repos" 2>/dev/null \
+    specs=$(cw_repo_map_clean \
       | awk -v r="$repo" '$1 == r { $1 = ""; sub(/^ /, ""); print }' | paste -sd ' ' -)
   fi
   [ -z "$specs" ] || { printf '%s\n' "$specs"; return 0; }
@@ -690,10 +701,11 @@ cw_spec_targets() {  # <spec>
   matched=$(cw_live_workloads 2>/dev/null | awk -F'\t' -v want="$arg" '
     {
       ns = $1; name = $2; replicas = $3 + 0; images = $4
-      n = split(images, list, ",")
+      n = split(images, list, /[,[:space:]]+/)
       for (i = 1; i <= n; i++) {
         repo = list[i]
         sub(/^.*\//, "", repo)
+        sub(/@.*$/, "", repo)
         sub(/:.*$/, "", repo)
         if (repo == want) { printf "%s\t%s\t%d\n", ns, name, replicas; break }
       }
@@ -1341,27 +1353,28 @@ sys.exit(1)
 # can never drain a caller's input stream), through the admin unix socket, and
 # bounded by the remaining sample budget. Prints the console's unaligned rows;
 # exit 124 when the bound was hit.
-# A host whose console did not answer is remembered for this process: a watch
+# A host whose console did not answer is remembered for this sample: a watch
 # with several targets on one unreachable pooler must not spend the sample budget
-# on the same connect timeout once per target.
-CW_POOL_BAD_HOSTS=''
+# on the same connect timeout once per target. The record is a file because every
+# pool read runs inside a command substitution, where a variable assignment dies
+# with its subshell.
+CW_POOL_BAD_HOSTS_FILE="${TMPDIR:-/tmp}/fm-cw-pool-unreachable.$$"
 cw_pool_console() {  # <host> <port>
   local host=$1 port=$2 left out rc
   command -v ssh >/dev/null 2>&1 || return 1
   case "$port" in ''|*[!0-9]*) return 1 ;; esac
   case "$host" in ''|*[!A-Za-z0-9.-]*) return 1 ;; esac
-  printf '%s\n' "$CW_POOL_BAD_HOSTS" | grep -qxF "$host" && {
-    printf '%s: console unreachable (recorded earlier in this read)\n' "$host"
+  if grep -qxF -- "$host" "$CW_POOL_BAD_HOSTS_FILE" 2>/dev/null; then
+    printf '%s: console unreachable (recorded earlier in this read)\n' "$host" >&2
     return 1
-  }
+  fi
   left=$(cw_budget_left) || return 124
   out=$(fm_run_timed "$left" ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
     "$POOLER_SSH_USER@$host" \
     "sudo -u postgres psql -h $POOLER_SOCKET_DIR -p $port -U pgbouncer pgbouncer -Ac 'SHOW POOLS'")
   rc=$?
   if [ "$rc" -ne 0 ]; then
-    CW_POOL_BAD_HOSTS="$CW_POOL_BAD_HOSTS$host
-"
+    printf '%s\n' "$host" >> "$CW_POOL_BAD_HOSTS_FILE" 2>/dev/null || true
     return "$rc"
   fi
   printf '%s\n' "$out"
@@ -1561,19 +1574,22 @@ cw_target_landed() {  # <watch-id> <ns> <deploy>
   return 2
 }
 
-# Record the images every Kubernetes target runs right now, the evidence the
-# rollout must replace. A target whose images cannot be read is recorded empty
-# and its gate stays open (never scored).
+# Record the images and rollout fingerprint every Kubernetes target runs right
+# now, the evidence the rollout must replace. Both come from one pod read, so a
+# target can never be recorded with images but no fingerprint. A target whose
+# pods cannot be read is recorded empty and its gate stays open (never scored).
 cw_record_images() {  # <watch-id>
-  local id=$1 ns deploy images fingerprint out=''
+  local id=$1 ns deploy facts images hashes fingerprint out=''
   [ -z "${FM_CW_CLUSTER_DIR:-}" ] || return 0
   [ -f "$(cw_targets_path "$id")" ] || return 0
   while IFS=$'\t' read -r ns deploy; do
     [ -n "${ns:-}" ] || continue
     cw_within_budget || break
-    images=$(cw_live_images "$ns" "$deploy" 2>/dev/null || true)
+    facts=$(cw_pod_facts "$ns" "$deploy" 2>/dev/null || true)
+    images=$(printf '%s' "$facts" | cut -f3)
+    hashes=$(printf '%s' "$facts" | cut -f5)
     fingerprint=''
-    [ -z "$images" ] || fingerprint=$(cw_live_fingerprint "$ns" "$deploy" 2>/dev/null || true)
+    [ -z "$images$hashes" ] || fingerprint="$images|$hashes"
     out="$out$ns/$deploy	$images	$fingerprint
 "
   done < "$(cw_targets_path "$id")"
@@ -1686,6 +1702,7 @@ cw_capture_baseline() {  # <watch-id> <baseline-epoch>
   done < <(cw_metric_keys "$id")
   [ "$err" = /dev/null ] || rm -f -- "$err" 2>/dev/null || true
   printf '%s' "$out" | cw_write "$(cw_baseline_path "$id")"
+  rm -f -- "$CW_POOL_BAD_HOSTS_FILE" 2>/dev/null || true
 }
 
 cw_baseline_value() {  # <watch-id> <key>
@@ -1789,6 +1806,7 @@ cw_take_sample() {  # <watch-id> <offset-seconds> <sample-epoch> <baseline-epoch
     [ -z "$value" ] || cw_set_previous_value "$id" "$key" "$value"
   done < <(cw_metric_keys "$id")
   [ "$err" = /dev/null ] || rm -f -- "$err" 2>/dev/null || true
+  rm -f -- "$CW_POOL_BAD_HOSTS_FILE" 2>/dev/null || true
   [ -n "$first" ] && printf '%s\n' "$first"
   return 0
 }
@@ -1989,19 +2007,26 @@ cw_unmeasured_targets() {  # <watch-id>
   rm -f -- "$want" 2>/dev/null || true
 }
 
-# Every metric no sample of this watch ever scored, across every target it was
-# registered with: the honest statement of what a clean verdict did and did not
-# cover, so a release watched only for restarts and memory says exactly that.
+# Every metric key no sample of this watch ever scored, across every target it
+# was registered with: the honest statement of what a clean verdict did and did
+# not cover, so a release watched only for restarts and memory says exactly that
+# and a target whose own pool or pods were never read is named as the gap it is.
 cw_measured_gaps() {  # <watch-id>
-  local id=$1 samples metrics measured
+  local id=$1 samples keys
   samples=$(cw_samples_path "$id")
-  metrics=$(cw_metric_keys "$id" | awk -F@ '{ print $1 }' | sort -u | paste -sd ' ' -)
-  [ -n "$metrics" ] || return 0
-  measured=$([ -f "$samples" ] && awk -F'\t' '$7 == 1 { k = $3; sub(/@.*/, "", k); print k }' "$samples" | sort -u || true)
-  for m in $metrics; do
-    printf '%s\n' "$measured" | grep -qxF "$m" && continue
-    printf '%s\n' "$m"
-  done | paste -sd ',' - | sed 's/,/, /g'
+  keys=$(cw_metric_keys "$id" | sort -u)
+  [ -n "$keys" ] || return 0
+  [ -f "$samples" ] || samples=/dev/null
+  printf '%s\n' "$keys" | awk -F'\t' -v samples="$samples" '
+    BEGIN {
+      while ((getline line < samples) > 0) {
+        n = split(line, f, "\t")
+        if (n >= 7 && f[7] == 1) measured[f[3]] = 1
+      }
+      close(samples)
+    }
+    !($1 in measured) { printf "%s%s", sep, $1; sep = ", " }
+  '
 }
 
 # The schedule ended: clean only when every target was measured at least once.
@@ -2300,7 +2325,7 @@ cmd_drive() {
   CW_DRIVE_IDENTITY_FILE=$(cw_drive_identity_path "$id")
   printf '%s\n' "$$" > "$CW_DRIVE_PIDFILE" || die "cannot record the drive pid"
   printf '%s\n' "$identity" > "$CW_DRIVE_IDENTITY_FILE" || die "cannot record the drive identity"
-  trap 'rm -f -- "$CW_DRIVE_PIDFILE" "$CW_DRIVE_IDENTITY_FILE"' EXIT
+  trap 'rm -f -- "$CW_DRIVE_PIDFILE" "$CW_DRIVE_IDENTITY_FILE" "$CW_POOL_BAD_HOSTS_FILE"' EXIT
   trap cw_drive_interrupted TERM INT HUP
 
   while IFS=$'\t' read -r offset epoch; do

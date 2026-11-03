@@ -664,6 +664,19 @@ case " $(cat "$HOME_S/ssh.log") " in
 esac
 pass "the console is read as ubuntu through the pgbouncer admin unix socket"
 
+# A metric kind read on one target is not evidence for another: search-service
+# has no pool, so its pool metric is named as the gap while feed-service's is
+# reported as measured.
+CW_CLUSTER_DIR='' PATH="$HOME_S/bin:$PATH" FM_CW_SSH_LOG="$HOME_S/ssh.log" \
+  run_cw "$HOME_S" 1790000300 sample s1-3317 300 >/dev/null || true
+line=$(CW_CLUSTER_DIR='' PATH="$HOME_S/bin:$PATH" FM_CW_SSH_LOG="$HOME_S/ssh.log" \
+  run_cw "$HOME_S" 1790000300 status s1-3317)
+printf '%s\n' "$line" | grep -q 'pgbouncer_cl_waiting@muso-prod/search-service' \
+  || fail "the status did not name the target whose pool was never resolved: $line"
+printf '%s\n' "$line" | grep -q 'pgbouncer_cl_waiting@muso-prod/feed-service' \
+  && fail "a metric measured on one target was reported as never measured: $line"
+pass "an unmeasured metric is named per target, never collapsed to its metric kind"
+
 out=$(CW_CLUSTER_DIR='' PATH="$HOME_S/bin:$PATH" FM_CW_SSH_LOG="$HOME_S/ssh.log" \
   run_cw "$HOME_S" 1790000300 doctor s1-3317) && fail "doctor passed a watch with an unresolved pool"
 case "$out" in
@@ -701,6 +714,61 @@ out=$(PATH="$HOME_T/bin:$PATH" FM_CW_SSH_LOG="$HOME_T/ssh.log" FM_CW_SSH_SLEEP=3
 printf '%s\n' "$out" | grep -qxF "doctor: FAIL pool read ubuntu@10.0.0.17:6432: timed out after 2s" \
   || fail "doctor did not state the timed-out read: $out"
 pass "a hung console read is bounded, unmeasured, and stated by the doctor"
+
+# One unreachable pooler costs one connect timeout per sample, not one per
+# target: the armed drive takes every sample in one process, so two Deployments
+# behind the same dead console must not spend the sample budget twice.
+SHARED_MANIFEST='apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notify-gateway
+  namespace: messaging
+spec:
+  template:
+    spec:
+      containers:
+        - name: notify-gateway
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: send-gateway
+  namespace: messaging
+spec:
+  template:
+    spec:
+      containers:
+        - name: send-gateway
+'
+printf '%s' "$SHARED_MANIFEST" > "$TMP_ROOT/shared.yaml"
+HOME_PM=$(new_world poolmemo)
+mkdir -p "$HOME_PM/bin"
+cp "$HOME_S/bin/ssh" "$HOME_PM/bin/ssh"
+cat > "$HOME_PM/bin/kubectl" <<'SHIM'
+#!/usr/bin/env bash
+case " $* " in
+  *" --raw=/version "*) printf '{"gitVersion":"v1.31.0"}\n' ;;
+  *" set env "*) printf 'DB_HOST=10.0.0.17\nDB_PORT=6432\nDB_NAME=feed\n' ;;
+  *" get pods "*)
+    printf '{"items":[{"metadata":{"name":"p"},"spec":{"containers":[{"name":"c","resources":{"limits":{"memory":"512Mi"}}}]},"status":{"containerStatuses":[{"name":"c","restartCount":0,"lastState":{}}]}}]}\n'
+    ;;
+  *" top pods "*) printf 'p   c   500m   300Mi\n' ;;
+  *" logs "*) : ;;
+  *) exit 1 ;;
+esac
+SHIM
+chmod +x "$HOME_PM/bin/kubectl"
+seed_pr "$HOME_PM" "$MANIFEST" "$TMP_ROOT/shared.yaml" "$MANIFEST"
+CW_CLUSTER_DIR='' PATH="$HOME_PM/bin:$PATH" FM_CW_SSH_LOG="$HOME_PM/ssh.log" \
+  FM_CW_SSH_FAIL='Connection timed out' \
+  run_cw "$HOME_PM" 1790000000 register pm1 "$PR_URL" >/dev/null || fail "shared-pooler register failed"
+: > "$HOME_PM/ssh.log"
+CW_CLUSTER_DIR='' PATH="$HOME_PM/bin:$PATH" FM_CW_SSH_LOG="$HOME_PM/ssh.log" \
+  FM_CW_SSH_FAIL='Connection timed out' \
+  run_cw "$HOME_PM" 1790000300 sample pm1-3317 300 >/dev/null || true
+[ "$(grep -c '' "$HOME_PM/ssh.log")" -eq 1 ] \
+  || fail "an unreachable pooler was dialled $(grep -c '' "$HOME_PM/ssh.log") times in one sample: $(cat "$HOME_PM/read-failures" 2>/dev/null)"
+pass "an unreachable pooler is dialled once per sample, not once per target"
 
 # --- the reader: kubeconfig, one probe, and a stated reason --------------------
 # Every watch once completed unmeasured for months because the ambient kubectl
@@ -870,6 +938,24 @@ case "$out" in
   *) fail "the cap was not stated: $out" ;;
 esac
 
+# A Deployment with more than one container renders its images space-separated,
+# which is what kubectl's jsonpath emits, and a digest-pinned reference carries
+# no tag. Both still match the image family the repository builds.
+HOME_MC=$(cluster_world mc)
+seed_app_pr "$HOME_MC"
+{
+  printf 'muso-prod\tcore-backend-api\t6\tlocalhost:30500/muso/core-backend:old-1 gcr.io/cloudsql-docker/gce-proxy:1.33\n'
+  printf 'muso-prod\tcore-backend-worker\t2\tlocalhost:30500/muso/core-backend@sha256:abcdef\n'
+  printf 'muso-prod\tfeed-proxy\t2\tlocalhost:30500/muso/unrelated:1\n'
+} > "$HOME_MC/workloads"
+CW_CLUSTER_DIR='' PATH="$HOME_MC/bin:$PATH" FM_CW_SHIM_LOG="$HOME_MC/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_MC/workloads" FM_CW_CONFIG_DIR="$HOME_MC/config" \
+  FM_CW_SENTRY_DIR="$HOME_MC/sentry" \
+  run_cw "$HOME_MC" 1790000000 register mc1 "$CORE_PR" >/dev/null || fail "multi-container register failed"
+[ "$(cat "$HOME_MC/state/change-watch/mc1$CORE_ID_SUFFIX/targets")" = "$(printf 'muso-prod\tcore-backend-api\nmuso-prod\tcore-backend-worker')" ] \
+  || fail "a multi-container or digest-pinned Deployment was not matched: $(cat "$HOME_MC/state/change-watch/mc1$CORE_ID_SUFFIX/targets" 2>/dev/null)"
+pass "a Deployment with several containers or a digest-pinned image still matches its image family"
+
 # A repository whose Deployment names differ from its image name is mapped.
 HOME_M2=$(cluster_world m2)
 seed_app_pr "$HOME_M2"
@@ -1037,6 +1123,21 @@ line=$(run_cw "$HOME_R" 1790000900 verdict r1-1383)
   || fail "a failed deploy run did not regress the watch: $line"
 pass "a failed deploy-workflow run regresses the release and a missing run is awaiting it"
 
+# A home's own map line for a workflow-deployed repository keeps its workflow
+# path: a `run:` spec uses `#` as its separator, which the comment strip must not
+# cut, while a whitespace-preceded comment still goes.
+HOME_HM=$(cluster_world hm)
+seed_app_pr "$HOME_HM"
+printf 'hydra run:Muso-AI/hydra#.github/workflows/release.yml  # this home\047s workflow\n' \
+  > "$HOME_HM/config/change-watch-repos"
+out=$(CW_CLUSTER_DIR='' FM_CW_GH_DIR="$HOME_HM/gh" FM_CW_SENTRY_DIR="$HOME_HM/sentry" \
+  FM_CW_CONFIG_DIR="$HOME_HM/config" FM_CW_WORKLOADS_DIR='' \
+  PATH="$HOME_HM/bin:$PATH" run_cw "$HOME_HM" 1790000000 register hm1 "$HYDRA_PR") \
+  || fail "mapped hydra register failed: $out"
+[ "$(cat "$HOME_HM/state/change-watch/hm1-1383/runs")" = "$(printf 'Muso-AI/hydra\t.github/workflows/release.yml')" ] \
+  || fail "a mapped deploy workflow lost its path: $(cat "$HOME_HM/state/change-watch/hm1-1383/runs" 2>/dev/null)"
+pass "a map line keeps the workflow path of its run: spec and still drops its comment"
+
 # --- a clean verdict still names what it never measured -----------------------
 HOME_GAP=$(cluster_world gap)
 seed_app_pr "$HOME_GAP"
@@ -1174,4 +1275,6 @@ CW_CLUSTER_DIR='' PATH="$HOME_FP2/bin:$PATH" FM_CW_SHIM_LOG="$HOME_FP2/shim.log"
   || fail "an unchanged rollout fingerprint was scored as health"
 grep -q "awaiting the deploy" "$HOME_FP2/state/change-watch/fp2$CORE_ID_SUFFIX/read-failures" \
   || fail "an unchanged fingerprint was not recorded as awaiting the deploy"
+awk -F'\t' '{ exit !($2 != "" && $3 != "") }' "$HOME_FP2/state/change-watch/fp2$CORE_ID_SUFFIX/images-at-register" \
+  || fail "registration recorded images without their rollout fingerprint: $(cat "$HOME_FP2/state/change-watch/fp2$CORE_ID_SUFFIX/images-at-register")"
 pass "an unchanged rollout fingerprint stays awaiting the deploy"
