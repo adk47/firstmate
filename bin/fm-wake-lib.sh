@@ -173,6 +173,23 @@ fm_watcher_healthy() {
 # pull warning (bin/fm-guard.sh) fires mid-turn, where the autoarm model runs no
 # watcher at all, so it governs itself with that model-aware question:
 
+# fm_supervision_model_for_harness <harness>
+# The single owner of the harness -> supervision-model table. fm_supervision_model
+# applies it to THIS home's detected harness, and bin/fm-spawn.sh applies it to the
+# harness it is launching, so a secondmate launch pins the model its own harness
+# really runs under rather than a hand-kept copy of this table that drifts as soon
+# as a harness's supervision shape changes - a Pi secondmate reports extension, or
+# its turn-end guard would keep the PID-strict predicate and alarm through the
+# extension's own hand-off. It reads no environment override on purpose: the harness
+# of the home being resolved decides, never a pin inherited from its spawner.
+fm_supervision_model_for_harness() {
+  case "${1:-unknown}" in
+    claude|cursor) printf 'autoarm\n' ;;
+    pi|pi-signed) printf 'extension\n' ;;
+    *) printf 'persistent\n' ;;
+  esac
+}
+
 # fm_supervision_model
 # Print the supervision model of this home's PRIMARY harness:
 #   autoarm     Claude's Stop-hook auto-arm and Cursor's stop-hook park: the
@@ -196,11 +213,7 @@ fm_supervision_model() {
     autoarm|extension|persistent) printf '%s\n' "$FM_SUPERVISION_MODEL"; return 0 ;;
   esac
   harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
-  case "$harness" in
-    claude|cursor) printf 'autoarm\n' ;;
-    pi|pi-signed) printf 'extension\n' ;;
-    *) printf 'persistent\n' ;;
-  esac
+  fm_supervision_model_for_harness "$harness"
 }
 
 # Pi primary supervision evidence. The Pi extensions record, in their state
