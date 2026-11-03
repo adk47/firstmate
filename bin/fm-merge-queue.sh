@@ -30,16 +30,20 @@
 # not opted in, and `run` does nothing at all.
 #
 # A ROW LEAVES THE QUEUE ONLY ON A TERMINAL VERDICT: merged, already merged,
-# closed, fenced, a moved head, or FM_MERGE_QUEUE_MAX_ATTEMPTS consecutive
-# refused merge attempts (default 6). A row that is merely not ready - checks
-# not green, the QA review not posted on this head, or the forge unreadable -
-# stays queued and is retried on the next tick, and so does a row this home
-# cannot read at all (no repository owner, an unknown merge method, too many
-# fields): a configuration mistake must never delete the queue it was given, so
-# such a row is kept and the daily line reports how many rows need the file
-# fixed. Every row is read live on every tick; nothing in the queue file is
-# trusted as current, and a repository that appears twice in one tick is
-# attempted once.
+# closed, fenced, a moved head, superseded by a newer row for the same pull
+# request, or FM_MERGE_QUEUE_MAX_ATTEMPTS consecutive refused merge attempts
+# (default 6).
+# A row that is merely not ready - checks not green, the QA review not posted on
+# this head, or the forge unreadable - stays queued and is retried on the next
+# tick, and so does a row this home cannot read at all (no repository owner, an
+# unknown merge method, too many fields): a configuration mistake must never
+# delete the queue it was given, so such a row is kept and the daily line reports
+# how many rows need the file fixed. Every row is read live on every tick; nothing in the queue file is
+# trusted as current. A row is identified by its pull request AND the head it
+# was written against, so re-queueing after a push is a new row rather than a
+# duplicate: the newest row for a pull request supersedes the older-head row,
+# which is recorded with its own verdict instead of being dropped, and an exact
+# duplicate of one row is attempted once.
 #
 # WHAT KEEPS IT SAFE. The merge is always bin/fm-pr-merge.sh, so that script's
 # own refusal rules, merge verification, metadata recording, and durable wake
@@ -52,13 +56,14 @@
 #
 # THE ONE EXEMPTION. A check named credit-approval-guard is red by design on a
 # credit-impact change, where the credit review itself is the real gate, so a
-# failing instance of that one check does not block. Every merge that relied on
-# that exemption says so on its own line and in the daily detail file, so the
-# waiver is never silent.
+# failing instance of that one check does not block. A guard that has not
+# finished holds the row, and a failing instance anywhere in the list is the
+# waiver. Every merge that relied on that exemption says so on its own line and
+# in the daily detail file, so the waiver is never silent.
 #
 # RECORDS, all under <FM_HOME>/state/merge-queue/:
 #   ledger.tsv   one line per verdict:
-#                <epoch> <owner/repo#number> <verdict> <reason> <url>
+#                <epoch> <owner/repo#number@head> <verdict> <reason> <url>
 #   daily-<day>.txt  every merged and retired row of the summary window, one
 #                line each with its full pull request URL and verdict
 #   last-run     the verdict counts of the most recent run
@@ -271,12 +276,90 @@ valid_sha_prefix() {
   [ "${#1}" -ge 7 ] && [ "${#1}" -le 40 ]
 }
 
+# valid_pr_number <column>: the number column is digits and nothing else, so a
+# pasted row like "12," is a broken row the daily line reports rather than a
+# pull request the forge is asked about on every tick forever.
+valid_pr_number() {
+  case "$1" in
+    ''|0*|*[!0-9]*) return 1 ;;
+  esac
+  [ "${#1}" -le 12 ]
+}
+
 # row_key <owner> <repo> <number>: one identity per row. The owner is part of
 # it, so acme/widgets#12 and beta/widgets#12 are two rows that dedupe and retire
 # independently instead of one silently absorbing the other.
 row_key() {
   if [ -n "$1" ]; then printf '%s/%s#%s\n' "$1" "$2" "$3"
   else printf '%s#%s\n' "$2" "$3"; fi
+}
+
+# row_identity <key> <expected-head>: the full identity of a queued row, which
+# is what duplicate detection and retirement key on. Two rows for one pull
+# request differ by head, so the newer one is a row of its own instead of a
+# duplicate that silently absorbs the other.
+row_identity() {
+  printf '%s@%s\n' "$1" "$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
+}
+
+# row_decidable <method> <task>: whether this run can decide a row at all, as
+# opposed to a row the operator must fix in the file. A row this home cannot read
+# never supersedes a readable row for the same pull request, and is never
+# superseded by one either: it stays queued and is reported as unusable.
+row_decidable() {
+  case " $METHODS " in
+    *" $1 "*) ;;
+    *) return 1 ;;
+  esac
+  task_usable "$2"
+}
+
+# queue_fingerprint <file>: the content of the queue file, so a run can tell
+# whether the file changed underneath it before it publishes its rewrite.
+queue_fingerprint() {
+  cksum <"$1" 2>/dev/null
+}
+
+# supersede_map <queue> <owner> <out>: one line per pull request that appears in
+# the queue with more than one head, giving the identity of its newest row.
+# Every other head for that pull request is superseded by it, and the superseded
+# row is recorded with a verdict of its own rather than dropped.
+supersede_map() {
+  local queue=$1 owner=$2 out=$3 line repo number expected task method extra owner_name slug key
+  : >"$out"
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      ''|'#'*) continue ;;
+    esac
+    repo=
+    number=
+    expected=
+    task=
+    method=
+    extra=
+    read -r repo number expected task method extra <<<"$line"
+    case "$repo" in
+      */*) owner_name=${repo%%/*} ;;
+      *) owner_name=$owner ;;
+    esac
+    slug=${repo##*/}
+    [ -z "$extra" ] || continue
+    valid_owner "$owner_name" || continue
+    valid_repo_name "$slug" || continue
+    valid_pr_number "$number" || continue
+    valid_sha_prefix "$expected" || continue
+    row_decidable "$method" "$task" || continue
+    key=$(row_key "$owner_name" "$slug" "$number")
+    printf '%s\t%s\n' "$key" "$(row_identity "$key" "$expected")" >>"$out"
+  done <"$queue"
+  awk -F '\t' '
+    {
+      if (!($1 in seen)) { seen[$1] = 1; order[++n] = $1 }
+      if ($2 != last[$1]) { heads[$1]++; last[$1] = $2 }
+    }
+    END { for (i = 1; i <= n; i++) if (heads[order[i]] > 1) print order[i] "\t" last[order[i]] }
+  ' "$out" >"$out.awk" && mv -f "$out.awk" "$out"
+  return 0
 }
 
 # queue_unusable_count <queue> <owner>: how many queued rows this home cannot
@@ -305,14 +388,10 @@ queue_unusable_count() {
     esac
     if [ -n "$extra" ] || ! valid_sha_prefix "$expected" \
       || ! valid_owner "$owner_name" || ! valid_repo_name "$repo" \
-      || ! task_usable "$task"; then
+      || ! valid_pr_number "$number" || ! task_usable "$task"; then
       count=$((count + 1))
       continue
     fi
-    case "$number" in
-      [1-9]*) [ "${#number}" -le 12 ] || count=$((count + 1)) ;;
-      *) count=$((count + 1)) ;;
-    esac
     case " $METHODS " in
       *" $method "*) ;;
       *) count=$((count + 1)) ;;
@@ -376,7 +455,7 @@ process_row() {
   local repo=$1 number=$2 expected=$3 task=$4 method=$5 owner=$6 dry_run=$7
   local owner_name slug url key fields state head labels body
   local fenced checks name bucket bad qa_line qa_fail out rc last
-  local credit_bucket waived expected_lc head_lc
+  local credit_hold waived expected_lc head_lc
 
   ROW_VERDICT=keep
   ROW_REASON=
@@ -439,6 +518,10 @@ process_row() {
     printf 'keep %s %s\n' "$key" "$ROW_REASON"
     return 0
   fi
+  # read stops at the first newline, so flatten the record before splitting it:
+  # a title or body that names production DDL on a later line must reach the
+  # fence, and not just its first line.
+  fields=$(printf '%s' "$fields" | tr '\n\r' '  ')
   IFS=$'\x1f' read -r state head labels body <<<"$fields"
 
   case "$state" in
@@ -495,12 +578,22 @@ process_row() {
   bad=
   qa_line=
   qa_fail=
-  credit_bucket=
+  credit_hold=
   waived=0
   while IFS=$'\t' read -r name bucket; do
     [ -n "$name" ] || continue
     case "$name" in
-      "$CREDIT_GUARD_CHECK") credit_bucket=$bucket; continue ;;
+      "$CREDIT_GUARD_CHECK")
+        # A failing instance is the waiver the captain ruled for; a guard that
+        # is still running holds the row. Any instance decides, so a passing
+        # duplicate can never hide a failing one.
+        case "$bucket" in
+          pass|skipping) ;;
+          fail) waived=1 ;;
+          *) credit_hold=$bucket ;;
+        esac
+        continue
+        ;;
       qa-review)
         qa_line=$bucket
         case "$bucket" in
@@ -533,10 +626,10 @@ process_row() {
     printf 'keep %s qa-review %s\n' "$key" "$qa_line"
     return 0
   fi
-  case "$credit_bucket" in
-    ''|pass|skipping) ;;
-    *) waived=1 ;;
-  esac
+  if [ -n "$credit_hold" ]; then
+    printf 'keep %s %s %s\n' "$key" "$CREDIT_GUARD_CHECK" "$credit_hold"
+    return 0
+  fi
 
   if [ "$dry_run" = 1 ]; then
     if [ "$waived" = 1 ]; then
@@ -577,7 +670,9 @@ process_row() {
 # write_daily_detail <day> <since-epoch>: the full, untruncated list of every
 # merged and retired row in the window, one line each with its pull request URL
 # and verdict, and print the file's path. The daily line points at it so no row
-# is ever silently cut off a summary.
+# is ever silently cut off a summary. The window starts strictly after the
+# previous summary's epoch, so the merge recorded in that same second belongs to
+# the earlier summary and is never reported twice.
 write_daily_detail() {
   local day=$1 since=$2 path="$RECORDS/daily-$1.txt" epoch key verdict reason url
   {
@@ -590,10 +685,10 @@ write_daily_detail() {
         "$(format_epoch "$epoch")" "$key" "$verdict" "$reason" "${url:--}"
     done < <(awk -F '\t' -v since="$since" '
       BEGIN {
-        n = split("merged abandoned already-merged closed fenced head-moved", v, " ")
+        n = split("merged abandoned already-merged closed fenced head-moved superseded", v, " ")
         for (i = 1; i <= n; i++) reported[v[i]] = 1
       }
-      $1 >= since && ($3 in reported) { print }
+      $1 > since && ($3 in reported) { print }
     ' "$LEDGER")
   } >"$path"
   printf '%s\n' "$path"
@@ -611,15 +706,15 @@ maybe_emit_daily() {  # <queue>
   case "${last_epoch:-}" in ''|*[!0-9]*) last_epoch=0 ;; esac
   [ "${last_day:-}" = "$today" ] && return 0
 
-  local retired_verdicts=' already-merged abandoned closed fenced head-moved '
-  merged=$(awk -F '\t' -v since="$last_epoch" '$1 >= since && $3 == "merged" { c++ } END { print c + 0 }' "$LEDGER")
+  local retired_verdicts=' already-merged abandoned closed fenced head-moved superseded '
+  merged=$(awk -F '\t' -v since="$last_epoch" '$1 > since && $3 == "merged" { c++ } END { print c + 0 }' "$LEDGER")
   retired=$(awk -F '\t' -v since="$last_epoch" -v want="$retired_verdicts" '
     BEGIN { n = split(want, v, " "); for (i = 1; i <= n; i++) if (v[i] != "") is_retired[v[i]] = 1 }
-    $1 >= since && ($3 in is_retired) { c++ }
+    $1 > since && ($3 in is_retired) { c++ }
     END { print c + 0 }
   ' "$LEDGER")
   waived=$(awk -F '\t' -v since="$last_epoch" \
-    '$1 >= since && $3 == "merged" && $4 ~ /credit-guard waived/ { c++ } END { print c + 0 }' \
+    '$1 > since && $3 == "merged" && $4 ~ /credit-guard waived/ { c++ } END { print c + 0 }' \
     "$LEDGER")
   detail=$(write_daily_detail "$today" "$last_epoch")
 
@@ -681,10 +776,14 @@ cmd_run() {
     : >>"$LEDGER"
   fi
 
-  local owner tmp keep seen gone line repo number expected task method extra owner_name key
-  local unmergeable row_url
+  local owner tmp keep seen gone newest queue_before line repo number expected task method extra
+  local owner_name key ident superseded_by unmergeable row_url
   local merged=0 retired=0 skipped=0 queued=0
   owner=$(queue_owner "$queue")
+  # The rewrite is published over the file the operator hand-edits, so remember
+  # what the file held when this tick read it: a row added mid-tick must never be
+  # overwritten by this run's rewrite.
+  queue_before=$(queue_fingerprint "$queue")
 
   if [ "$dry_run" = 0 ]; then
     tmp=$(mktemp "$queue.XXXXXX") || die "cannot stage the queue rewrite next to $queue"
@@ -702,6 +801,9 @@ cmd_run() {
   run_temps+=("$seen")
   gone=$(mktemp "${TMPDIR:-/tmp}/fm-merge-queue-gone.XXXXXX") || die "cannot stage the retirement record"
   run_temps+=("$gone")
+  newest=$(mktemp "${TMPDIR:-/tmp}/fm-merge-queue-supersede.XXXXXX") || die "cannot stage the supersede record"
+  run_temps+=("$newest" "$newest.awk")
+  supersede_map "$queue" "$owner" "$newest"
 
   while IFS= read -r line || [ -n "$line" ]; do
     case "$line" in
@@ -727,17 +829,10 @@ cmd_run() {
     else
       key=$(row_key '' "${repo##*/}" "${number:-0}")
     fi
-    if grep -qxF "$key" "$gone" 2>/dev/null; then
-      # A retired key's duplicate row goes with the row that retired it.
-      continue
-    fi
 
     unmergeable=
     [ -z "$extra" ] || unmergeable=1
-    case "$number" in
-      [1-9]*) [ "${#number}" -le 12 ] || unmergeable=1 ;;
-      *) unmergeable=1 ;;
-    esac
+    valid_pr_number "$number" || unmergeable=1
     valid_sha_prefix "$expected" || unmergeable=1
     valid_repo_name "${repo##*/}" || unmergeable=1
     # A bad task id stays for process_row to name precisely: it reports the
@@ -756,11 +851,33 @@ cmd_run() {
       continue
     fi
 
-    if grep -qxF "$key" "$seen" 2>/dev/null; then
+    ident=$(row_identity "$key" "$expected")
+
+    # A row re-queued after a push supersedes the older-head row for the same
+    # pull request. The superseded row gets its own verdict instead of being
+    # dropped, and the newest row is the one that decides.
+    if row_decidable "$method" "$task"; then
+      superseded_by=$(awk -F '\t' -v k="$key" '$1 == k { print $2 }' "$newest" 2>/dev/null)
+      if [ -n "$superseded_by" ] && [ "$superseded_by" != "$ident" ]; then
+        printf 'retire %s superseded by the newer row at %s\n' \
+          "$ident" "${superseded_by##*@}"
+        [ "$dry_run" = 1 ] || record "$ident" superseded \
+          "superseded by the newer row at ${superseded_by##*@}" "$row_url"
+        retired=$((retired + 1))
+        continue
+      fi
+    fi
+
+    if grep -qxF "$ident" "$gone" 2>/dev/null; then
+      # A retired row's exact duplicate goes with the row that retired it.
+      continue
+    fi
+
+    if grep -qxF "$ident" "$seen" 2>/dev/null; then
       [ -z "$keep" ] || printf '%s\n' "$line" >>"$keep"
       continue
     fi
-    printf '%s\n' "$key" >>"$seen"
+    printf '%s\n' "$ident" >>"$seen"
 
     process_row "$repo" "$number" "$expected" "$task" "$method" "$owner" "$dry_run"
 
@@ -774,12 +891,12 @@ cmd_run() {
         printf '%s\n' "$line" >>"$keep"
         ;;
       'merge-refused')
-        record "$key" "$ROW_VERDICT" "$ROW_REASON" "$row_url"
-        if [ "$(fail_streak "$key")" -ge "$(max_attempts)" ]; then
-          printf 'retire %s after %s failed merge attempts\n' "$key" "$(fail_streak "$key")"
+        record "$ident" "$ROW_VERDICT" "$ROW_REASON" "$row_url"
+        if [ "$(fail_streak "$ident")" -ge "$(max_attempts)" ]; then
+          printf 'retire %s after %s failed merge attempts\n' "$ident" "$(fail_streak "$ident")"
           # Its own verdict, so the abandoned row is counted and listed as retired.
-          record "$key" abandoned "gave up after repeated merge refusals" "$row_url"
-          printf '%s\n' "$key" >>"$gone"
+          record "$ident" abandoned "gave up after repeated merge refusals" "$row_url"
+          printf '%s\n' "$ident" >>"$gone"
           retired=$((retired + 1))
         else
           skipped=$((skipped + 1))
@@ -787,20 +904,20 @@ cmd_run() {
         fi
         ;;
       unreadable)
-        record "$key" "$ROW_VERDICT" "$ROW_REASON" "$row_url"
+        record "$ident" "$ROW_VERDICT" "$ROW_REASON" "$row_url"
         skipped=$((skipped + 1))
         printf '%s\n' "$line" >>"$keep"
         ;;
       unusable)
         # Not part of a failure budget: a bad row is fixed in the file, not by
         # retrying, and it must never consume the merge-attempt allowance.
-        record "$key" "$ROW_VERDICT" "$ROW_REASON" "$row_url"
+        record "$ident" "$ROW_VERDICT" "$ROW_REASON" "$row_url"
         skipped=$((skipped + 1))
         printf '%s\n' "$line" >>"$keep"
         ;;
       *)
-        record "$key" "$ROW_VERDICT" "$ROW_REASON" "$row_url"
-        printf '%s\n' "$key" >>"$gone"
+        record "$ident" "$ROW_VERDICT" "$ROW_REASON" "$row_url"
+        printf '%s\n' "$ident" >>"$gone"
         if [ "$ROW_VERDICT" = merged ]; then
           merged=$((merged + 1))
         else
@@ -820,7 +937,10 @@ cmd_run() {
   fi
 
   if [ -n "$keep" ]; then
-    if cmp -s "$queue" "$keep"; then
+    if [ "$(queue_fingerprint "$queue")" != "$queue_before" ]; then
+      printf 'fm-merge-queue: %s changed during this run; leaving the rewrite for the next tick\n' "$queue"
+      rm -f "$keep" 2>/dev/null || true
+    elif cmp -s "$queue" "$keep"; then
       rm -f "$keep" 2>/dev/null || true
     else
       mv -f "$keep" "$queue" || die "cannot publish the queue rewrite to $queue"

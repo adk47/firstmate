@@ -28,6 +28,13 @@
 #   (u) a typo'd task id is unusable and never spends the attempt budget
 #   (v) a run refuses when the forge tools are not on PATH
 #   (w) the fence covers the natural spellings the queue actually uses
+#   (x) a re-queued row with a new head supersedes the stale row, not dropped
+#   (y) a body that names production DDL on a later line is fenced
+#   (z) a pending credit guard holds the row and a failing one is named
+#   (aa) a PR number that is not digits is unusable without a forge call
+#   (ab) a failed staging copy publishes nothing and merges nothing
+#   (ac) a hand-edit during a run is never overwritten by the rewrite
+#   (ad) the daily window does not re-report the previous summary's second
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -553,6 +560,172 @@ case_w() {
   pass "the fence covers the natural spellings"
 }
 
+# --- (x) a re-queued row supersedes the stale row -------------------------
+
+case_x() {
+  local dir out detail
+  dir=$(make_case x)
+  # Exactly the re-queue the docs prescribe after a push: the stale row is still
+  # in the file when the row for the new head is added.
+  printf '# owner: acme\nwidgets 12 bbbbbbb task-a squash\nwidgets 12 %s task-a squash\n' "$HEAD_A" \
+    >"$dir/data/go-queue.txt"
+  green_head
+  out=$(run_queue "$dir" run)
+  assert_contains "$out" "superseded by the newer row at $HEAD_A" \
+    "(x) the stale row is reported as superseded"
+  assert_contains "$out" "merged acme/widgets#12" "(x) the re-queued row merges"
+  expect_code 1 "$(wc -l <"$dir/merge.log" | tr -d ' ')" "(x) exactly one merge is attempted"
+  expect_code 0 "$(queue_rows "$dir")" "(x) neither row is left behind"
+  assert_grep $'\tsuperseded\t' "$dir/state/merge-queue/ledger.tsv" \
+    "(x) the superseded row carries its own verdict"
+  detail=$(sed -n 's/.*detail: \([^;]*\).*/\1/p' "$dir/state/.wake-queue")
+  assert_grep "acme/widgets#12@bbbbbbb" "$detail" "(x) the detail file names the superseded row"
+  assert_grep "superseded" "$detail" "(x) the detail file records its verdict"
+  assert_grep "https://github.com/acme/widgets/pull/12" "$detail" \
+    "(x) the superseded row keeps its full pull request URL"
+
+  # A row this home cannot read is a configuration mistake, not a newer head:
+  # it stays queued for the operator and never supersedes a readable row.
+  printf '# owner: acme\nwidgets 12 %s task-a squash\nwidgets 12 cccccccccccccccccccccccccccccccccccccc task-typo squash\n' \
+    "$HEAD_A" >"$dir/data/go-queue.txt"
+  : >"$dir/merge.log"
+  out=$(run_queue "$dir" run)
+  assert_contains "$out" "merged acme/widgets#12" "(x) the readable row is not superseded by a broken one"
+  assert_contains "$out" "no such task in this home: task-typo" "(x) the broken row is still reported"
+  expect_code 1 "$(queue_rows "$dir")" "(x) the broken row stays queued for the operator"
+  clear_head
+  pass "a re-queued row supersedes the stale row instead of being dropped"
+}
+
+# --- (y) a multi-line body still reaches the fence ------------------------
+
+case_y() {
+  local dir out
+  dir=$(make_case y)
+  printf '# owner: acme\nwidgets 12 %s task-a squash\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  green_head
+  export FM_TEST_BODY=$'A one-line summary.\n\nThis change ships the production DDL for the orders table.\n'
+  out=$(run_queue "$dir" run)
+  assert_contains "$out" "fenced for a decider: prod-ddl" "(y) the later body line is fenced"
+  [ ! -s "$dir/merge.log" ] || fail "(y) production DDL named below the first line must never merge"
+  clear_head
+  pass "a body that names production DDL on a later line is fenced"
+}
+
+# --- (z) the credit guard holds while pending, waives when failing -------
+
+case_z() {
+  local dir out
+  dir=$(make_case z)
+  printf '# owner: acme\nwidgets 12 %s task-a squash\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  export FM_TEST_HEAD=$HEAD_A
+  export FM_TEST_CHECKS=$'qa-review\tpass\nbuild\tpass\ncredit-approval-guard\tpending'
+  out=$(run_queue "$dir" run)
+  assert_contains "$out" "credit-approval-guard pending" "(z) a pending guard is reported"
+  [ ! -s "$dir/merge.log" ] || fail "(z) a guard that has not finished must hold the row"
+  expect_code 1 "$(queue_rows "$dir")" "(z) the held row stays queued"
+
+  # Two instances of the one check name: the failing one is the waiver, and a
+  # passing duplicate cannot hide it.
+  export FM_TEST_CHECKS=$'qa-review\tpass\nbuild\tpass\ncredit-approval-guard\tfail\ncredit-approval-guard\tpass'
+  out=$(run_queue "$dir" run)
+  assert_contains "$out" "merged acme/widgets#12 https://github.com/acme/widgets/pull/12 (credit-guard waived)" \
+    "(z) a failing instance beside a passing one is still named as the waiver"
+  assert_grep "credit-guard waived" "$dir/state/merge-queue/ledger.tsv" \
+    "(z) the ledger records the waiver"
+  clear_head
+  pass "a pending credit guard holds and a failing one is named"
+}
+
+# --- (aa) a non-numeric PR number is unusable ----------------------------
+
+case_aa() {
+  local dir out
+  dir=$(make_case aa)
+  printf '# owner: acme\nwidgets 12, %s task-a squash\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  green_head
+  out=$(run_queue "$dir" run)
+  assert_contains "$out" "unusable row" "(aa) the pasted number is classified unusable"
+  assert_contains "$out" "1 queued row(s) need the queue file fixed" \
+    "(aa) the daily line counts it as a row the file must fix"
+  [ ! -s "$dir/gh.log" ] || fail "(aa) an unusable number must never be asked of the forge"
+  [ ! -s "$dir/merge.log" ] || fail "(aa) an unusable number must never merge"
+  expect_code 1 "$(queue_rows "$dir")" "(aa) the row stays queued for the operator to fix"
+  clear_head
+  pass "a PR number that is not digits is unusable without a forge call"
+}
+
+# --- (ab) a failed staging copy publishes nothing -----------------------
+
+case_ab() {
+  local dir out before mode
+  dir=$(make_case ab)
+  printf '# owner: acme\nwidgets 12 %s task-a squash\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  chmod 0640 "$dir/data/go-queue.txt"
+  before=$(cat "$dir/data/go-queue.txt")
+  green_head
+  # The mode copy of the queue is what makes the rewrite safe to publish, so a
+  # copy that cannot be made must stop the run before it decides any row.
+  printf '#!/usr/bin/env bash\nexit 1\n' >"$dir/fakebin/cp"
+  chmod +x "$dir/fakebin/cp"
+  out=$(run_queue "$dir" run)
+  expect_code 1 "$?" "(ab) the run fails when the queue cannot be staged"
+  assert_contains "$out" "mode copy failed" "(ab) the failure names the staging copy"
+  [ ! -s "$dir/merge.log" ] || fail "(ab) a run that cannot stage the queue must merge nothing"
+  [ "$before" = "$(cat "$dir/data/go-queue.txt")" ] || fail "(ab) a failed staging copy must not rewrite the queue"
+  mode=$(stat -c %a "$dir/data/go-queue.txt" 2>/dev/null || stat -f %Lp "$dir/data/go-queue.txt")
+  expect_code 640 "$mode" "(ab) the queue keeps its mode"
+  clear_head
+  pass "a failed staging copy publishes nothing and merges nothing"
+}
+
+# --- (ac) a hand-edit during the run is never overwritten ----------------
+
+case_ac() {
+  local dir out
+  dir=$(make_case ac)
+  printf '# owner: acme\nwidgets 12 %s task-a squash\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  green_head
+  # The captain hand-edits the queue while a tick is held by the merge call.
+  cat >"$dir/bin/fm-pr-merge.sh" <<SH
+#!/usr/bin/env bash
+printf '%s\\n' "\$*" >>"\$FM_TEST_MERGE_LOG"
+printf '# a note added by hand\\n' >>"$dir/data/go-queue.txt"
+printf 'verified merge\\n'
+SH
+  chmod +x "$dir/bin/fm-pr-merge.sh"
+  out=$(run_queue "$dir" run)
+  assert_contains "$out" "changed during this run" "(ac) the deferred rewrite is reported"
+  assert_grep "# a note added by hand" "$dir/data/go-queue.txt" \
+    "(ac) the hand-edit survives the run"
+  assert_grep "widgets 12 $HEAD_A task-a squash" "$dir/data/go-queue.txt" \
+    "(ac) nothing is published over the edited queue"
+  clear_head
+  pass "a hand-edit during a run is never overwritten by the rewrite"
+}
+
+# --- (ad) the daily window does not re-report the summary's second -------
+
+case_ad() {
+  local dir out detail epoch
+  dir=$(make_case ad)
+  mkdir -p "$dir/state/merge-queue"
+  epoch=$(date -u +%s)
+  # A merge recorded in the very second the previous summary was written
+  # belongs to that summary, so this window must not count or list it again.
+  printf '%s\tacme/widgets#12@%s\tmerged\tsquash\thttps://github.com/acme/widgets/pull/12\n' \
+    "$epoch" "$HEAD_A" >"$dir/state/merge-queue/ledger.tsv"
+  printf '2020-01-01\t%s\n' "$epoch" >"$dir/state/merge-queue/.summary"
+  printf '# owner: acme\n# nothing queued\n' >"$dir/data/go-queue.txt"
+  out=$(run_queue "$dir" run)
+  assert_contains "$out" "merged 0" "(ad) the previous summary's merge is not counted again"
+  detail=$(sed -n 's/.*detail: \([^;]*\).*/\1/p' "$dir/state/.wake-queue")
+  assert_no_grep "https://github.com/acme/widgets/pull/12" "$detail" \
+    "(ad) the detail file does not list a row the earlier summary already named"
+  clear_head
+  pass "the daily window does not re-report the previous summary's second"
+}
+
 case_a
 case_b
 case_c
@@ -576,5 +749,12 @@ case_t
 case_u
 case_v
 case_w
+case_x
+case_y
+case_z
+case_aa
+case_ab
+case_ac
+case_ad
 
 printf 'ok - fm-merge-queue suite complete\n'

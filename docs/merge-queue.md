@@ -49,9 +49,11 @@ One row per pull request, whitespace separated:
 - `<task-id>` is the firstmate task the merge is recorded against, which keeps the merge metadata and the landed-work check working.
 - `<method>` is the merge method handed to the forge.
 
-A row is identified by owner, repository, and number together, so `acme/widgets 12` and `beta/widgets 12` are two independent rows.
+A row is identified by its owner, repository, number, and expected head, so `acme/widgets 12` and `beta/widgets 12` are two independent rows and so are two heads of one pull request.
+When one pull request appears twice, the newest row supersedes the older-head row: the superseded row is recorded in the ledger and the daily detail file with its own verdict rather than dropped, and the newest row is the one that decides.
 A head that has moved retires the row rather than merging a commit nobody queued, so re-queue after a push.
-Comments and blank lines are preserved exactly as written, and a repository listed twice in one tick is attempted once.
+Comments and blank lines are preserved exactly as written, and an exact duplicate of one row is attempted once.
+A queue file edited while a tick is running is never overwritten: the run leaves its rewrite for the next tick and says so.
 
 ## What merges, and what never does
 
@@ -64,9 +66,10 @@ Four things keep a change away from an unattended timer and with a decider inste
 None of those rows merges, and a fenced one leaves the queue with its reason.
 
 The one exempted check is `credit-approval-guard`, which is red by design on a credit-impact change because the credit review itself is the gate.
+A failing instance of that check is the waiver, and a guard that has not finished holds the row.
 A merge that relied on that exemption says `credit-guard waived` on its own line, in the ledger, in the daily detail file, and in the daily count, so the waiver is never silent.
 
-A row leaves the queue only on a terminal verdict: merged, already merged, closed, fenced, a moved head, or `FM_MERGE_QUEUE_MAX_ATTEMPTS` consecutive refused merge attempts (default 6), which retires it as abandoned.
+A row leaves the queue only on a terminal verdict: merged, already merged, closed, fenced, a moved head, superseded by a newer row for the same pull request, or `FM_MERGE_QUEUE_MAX_ATTEMPTS` consecutive refused merge attempts (default 6), which retires it as abandoned.
 A row that is merely not ready stays queued and is retried on the next tick.
 So does a row this home cannot read at all, such as one with no repository owner, an unknown merge method, or a task id that names no task in this home, because a configuration mistake must never delete the queue it was given and must never spend a retry budget.
 
@@ -76,11 +79,13 @@ The merge itself is always `bin/fm-pr-merge.sh`, so that script's refusal rules,
 
 Records live under `<FM_HOME>/state/merge-queue/`:
 
-- `ledger.tsv` - one line per verdict: `<epoch> <owner/repo#number> <verdict> <reason> <url>`.
+- `ledger.tsv` - one line per verdict: `<epoch> <row> <verdict> <reason> <url>`, where a row is named by its pull request and the head it was queued at, as in `acme/widgets#12@e672a82e`.
 - `daily-<YYYY-MM-DD>.txt` - every merged and retired row of the summary window, one per line, with its time, row, verdict, reason, and full pull request URL.
 - `last-run` - the verdict counts of the most recent run, which is what `status` prints.
 - `.summary` - the day of the last daily line and the epoch it covered from.
 - `.lock/` - single-instance lock, so two ticks never merge at once.
+
+The summary window starts strictly after the epoch of the previous summary, so a merge recorded in that same second is reported once rather than twice.
 
 The first run of each UTC day appends one durable check wake giving the counts and the path of that day's detail file, which is how the queue reaches firstmate's chat as one line a day instead of a wake per merge.
 No row list is truncated into the line itself, so nothing disappears off the end of a busy day.
