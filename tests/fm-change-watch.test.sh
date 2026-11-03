@@ -797,6 +797,7 @@ case " $* " in
     ;;
   *" get pods "*)
     app=$(printf '%s' "$*" | sed -n 's/.*app=\([^ ]*\).*/\1/p')
+    [ -z "${FM_CW_SHIM_PODS_FAIL:-}" ] || exit 1
     last='{}'
     [ -z "${FM_CW_SHIM_OOM_AT:-}" ] || last="{\"terminated\":{\"reason\":\"OOMKilled\",\"finishedAt\":\"$(date -u -d "@$FM_CW_SHIM_OOM_AT" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf '1970-01-01T00:00:00Z')\"}}"
     printf '{"items":[{"metadata":{"name":"%s-1","labels":{"pod-template-hash":"%s"}},"spec":{"containers":[{"name":"c","image":"%s","resources":{"limits":{"memory":"512Mi"}}}]},"status":{"containerStatuses":[{"name":"c","restartCount":0,"lastState":%s}]}}]}\n' \
@@ -1278,3 +1279,134 @@ grep -q "awaiting the deploy" "$HOME_FP2/state/change-watch/fp2$CORE_ID_SUFFIX/r
 awk -F'\t' '{ exit !($2 != "" && $3 != "") }' "$HOME_FP2/state/change-watch/fp2$CORE_ID_SUFFIX/images-at-register" \
   || fail "registration recorded images without their rollout fingerprint: $(cat "$HOME_FP2/state/change-watch/fp2$CORE_ID_SUFFIX/images-at-register")"
 pass "an unchanged rollout fingerprint stays awaiting the deploy"
+
+# --- a spent budget is checked before the landing read -------------------------
+# cw_sample_blocker used to ask for the target's landing fingerprint first, so a
+# sample that had no budget left still paid a pod read per K8s metric and blamed
+# the landing instead of the budget. The budget is now checked first, and a
+# target whose pods cannot be read is attempted once per sample rather than once
+# per metric.
+HOME_BUD=$(cluster_world bud)
+seed_app_pr "$HOME_BUD"
+printf 'muso-prod\tcore-backend-api\t6\tlocalhost:30500/muso/core-backend:old-1\n' > "$HOME_BUD/workloads"
+printf '[]\n' > "$HOME_BUD/sentry/issues-core-backend.json"
+CW_CLUSTER_DIR='' PATH="$HOME_BUD/bin:$PATH" FM_CW_SHIM_LOG="$HOME_BUD/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_BUD/workloads" FM_CW_SHIM_IMAGE='localhost:30500/muso/core-backend:old-1' \
+  FM_CW_CONFIG_DIR="$HOME_BUD/config" FM_CW_SENTRY_DIR="$HOME_BUD/sentry" \
+  run_cw "$HOME_BUD" 1790000000 register bud1 "$CORE_PR" >/dev/null || fail "register failed"
+: > "$HOME_BUD/shim.log"
+CW_CLUSTER_DIR='' PATH="$HOME_BUD/bin:$PATH" FM_CW_SHIM_LOG="$HOME_BUD/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_BUD/workloads" FM_CW_SHIM_IMAGE='localhost:30500/muso/core-backend:new-2' \
+  FM_CW_CONFIG_DIR="$HOME_BUD/config" FM_CW_SENTRY_DIR="$HOME_BUD/sentry" FM_CW_SAMPLE_DEADLINE=0 \
+  run_cw "$HOME_BUD" 1790000300 sample "bud1$CORE_ID_SUFFIX" 300 >/dev/null || fail "sample failed"
+[ "$(grep -c 'get pods' "$HOME_BUD/shim.log")" -eq 0 ] \
+  || fail "a sample with no budget left still read the pods: $(cat "$HOME_BUD/shim.log")"
+REASONS_BUD="$HOME_BUD/state/change-watch/bud1$CORE_ID_SUFFIX/read-failures"
+[ "$(grep -c '' "$REASONS_BUD")" -ge 6 ] \
+  || fail "a spent sample did not record every metric: $(cat "$REASONS_BUD")"
+[ "$(grep -cF 'sample budget spent before this metric was read' "$REASONS_BUD")" -eq "$(grep -c '' "$REASONS_BUD")" ] \
+  || fail "a spent sample blamed the landing read instead of the budget: $(cat "$REASONS_BUD")"
+pass "a spent sample budget costs no pod read and is stated as itself"
+
+HOME_PF=$(cluster_world pf)
+seed_app_pr "$HOME_PF"
+{
+  printf 'muso-prod\tcore-backend-api\t6\tlocalhost:30500/muso/core-backend:old-1\n'
+  printf 'muso-prod\tcore-backend-worker\t3\tlocalhost:30500/muso/core-backend:old-1\n'
+} > "$HOME_PF/workloads"
+printf '[]\n' > "$HOME_PF/sentry/issues-core-backend.json"
+CW_CLUSTER_DIR='' PATH="$HOME_PF/bin:$PATH" FM_CW_SHIM_LOG="$HOME_PF/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_PF/workloads" FM_CW_SHIM_IMAGE='localhost:30500/muso/core-backend:old-1' \
+  FM_CW_CONFIG_DIR="$HOME_PF/config" FM_CW_SENTRY_DIR="$HOME_PF/sentry" \
+  run_cw "$HOME_PF" 1790000000 register pf1 "$CORE_PR" >/dev/null || fail "register failed"
+: > "$HOME_PF/shim.log"
+CW_CLUSTER_DIR='' PATH="$HOME_PF/bin:$PATH" FM_CW_SHIM_LOG="$HOME_PF/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_PF/workloads" FM_CW_SHIM_IMAGE='localhost:30500/muso/core-backend:new-2' \
+  FM_CW_CONFIG_DIR="$HOME_PF/config" FM_CW_SENTRY_DIR="$HOME_PF/sentry" FM_CW_SHIM_PODS_FAIL=1 \
+  run_cw "$HOME_PF" 1790000300 sample "pf1$CORE_ID_SUFFIX" 300 >/dev/null || fail "sample failed"
+[ "$(grep -c 'get pods' "$HOME_PF/shim.log")" -eq 2 ] \
+  || fail "a failing pod read was repeated per metric: $(grep -c 'get pods' "$HOME_PF/shim.log") reads: $(cat "$HOME_PF/shim.log")"
+grep -q "deploy landing unreadable" "$HOME_PF/state/change-watch/pf1$CORE_ID_SUFFIX/read-failures" \
+  || fail "an unreadable landing was not stated as the reason: $(cat "$HOME_PF/state/change-watch/pf1$CORE_ID_SUFFIX/read-failures")"
+pass "a target whose pods cannot be read is attempted once per sample"
+
+# --- an unreadable image inventory is not a repository that deploys nothing ----
+# The target set of an application release comes from a live inventory. When that
+# read fails, registration says so instead of claiming the merge touched no
+# deployable service.
+HOME_INV=$(cluster_world inv)
+seed_app_pr "$HOME_INV"
+INV_PR='https://github.com/Muso-AI/industry-data-processing/pull/620'
+out=$(CW_CLUSTER_DIR='' PATH="$HOME_INV/bin:$PATH" FM_CW_SHIM_LOG="$HOME_INV/shim.log" \
+  FM_CW_CONFIG_DIR="$HOME_INV/config" FM_CW_SENTRY_DIR="$HOME_INV/sentry" \
+  run_cw "$HOME_INV" 1790000000 register inv1 "$INV_PR") || fail "register failed: $out"
+case "$out" in
+  *"could not read the image inventory for $INV_PR"*"nothing registered"*) ;;
+  *) fail "an unreadable image inventory was reported as a repository that deploys nothing: $out" ;;
+esac
+[ -e "$HOME_INV/state/change-watch/inv1-620" ] \
+  && fail "a watch with an unreadable inventory was armed"
+pass "an unreadable image inventory is stated instead of read as no deployable service"
+
+# --- a status line states a rollout it could never prove ----------------------
+# When the pre-merge fingerprint cannot be read the target is still measured, and
+# the reader of the outcome must be able to tell that watch from one whose
+# rollout was proven.
+HOME_UP=$(cluster_world up)
+seed_app_pr "$HOME_UP"
+printf 'muso-prod\tcore-backend-api\t6\tlocalhost:30500/muso/core-backend:old-1\n' > "$HOME_UP/workloads"
+printf '[]\n' > "$HOME_UP/sentry/issues-core-backend.json"
+CW_CLUSTER_DIR='' PATH="$HOME_UP/bin:$PATH" FM_CW_SHIM_LOG="$HOME_UP/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_UP/workloads" FM_CW_SHIM_IMAGE='localhost:30500/muso/core-backend:old-1' \
+  FM_CW_CONFIG_DIR="$HOME_UP/config" FM_CW_SENTRY_DIR="$HOME_UP/sentry" FM_CW_SHIM_PODS_FAIL=1 \
+  run_cw "$HOME_UP" 1790000000 register up1 "$CORE_PR" >/dev/null || fail "register failed"
+CW_CLUSTER_DIR='' PATH="$HOME_UP/bin:$PATH" FM_CW_SHIM_LOG="$HOME_UP/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_UP/workloads" FM_CW_SHIM_IMAGE='localhost:30500/muso/core-backend:new-2' \
+  FM_CW_CONFIG_DIR="$HOME_UP/config" FM_CW_SENTRY_DIR="$HOME_UP/sentry" \
+  run_cw "$HOME_UP" 1790000300 sample "up1$CORE_ID_SUFFIX" 300 >/dev/null || fail "sample failed"
+line=$(run_cw "$HOME_UP" 1790000300 status "up1$CORE_ID_SUFFIX")
+printf '%s\n' "$line" | grep -q "rollout never proven: muso-prod/core-backend-api" \
+  || fail "status did not state that the rollout was never proven: $line"
+pass "a status line names every target whose rollout was never proven"
+
+# --- the clean wiki note names only what the watch measured --------------------
+# A deploy-workflow or Sentry-only watch reads no Deployment at all, so its durable
+# note must not claim a 5xx, restart, or pool-wait result it never had.
+HOME_WN=$(new_world wn)
+mkdir -p "$HOME_WN/bin" "$HOME_WN/gh/runs-Muso-AI" "$HOME_WN/state"
+cat > "$HOME_WN/bin/wiki-retro" <<'STUB'
+#!/usr/bin/env bash
+{ printf 'args: %s\n' "$*"; cat; } >> "$FM_CW_WIKI_LOG"
+STUB
+chmod +x "$HOME_WN/bin/wiki-retro"
+printf 'src/hydra.py\n' > "$HOME_WN/forge/files.txt"
+printf '%s\n' 1790000000 > "$HOME_WN/forge/merge-epoch"
+printf '%s\n' deadbeef > "$HOME_WN/forge/head-ref"
+env FM_HOME="$HOME_WN" FM_STATE_OVERRIDE="$HOME_WN/state" FM_CW_NOW=1790000000 \
+  FM_CW_FORGE_DIR="$HOME_WN/forge" FM_CW_CLUSTER_DIR='' FM_CW_WORKLOADS_DIR='' \
+  FM_CW_GH_DIR="$HOME_WN/gh" FM_CW_SENTRY_DIR="$HOME_WN/sentry" \
+  FM_CW_CONFIG_DIR="$HOME_WN/config" FM_CW_ARM_CMD="$HOME_WN/arm.sh" \
+  FM_CW_ARM_LOG="$HOME_WN/arm.log" FM_CW_SEND_CMD="$HOME_WN/send.sh" \
+  FM_CW_SEND_LOG="$HOME_WN/send.log" PATH="$HOME_WN/bin:$PATH" \
+  "$CW" register wn1 'https://github.com/Muso-AI/hydra/pull/1383' >/dev/null \
+  || fail "hydra register failed"
+printf 'kind=crewmate\n' > "$HOME_WN/state/wn1.meta"
+printf '%s\n' '[{"conclusion":"success","status":"completed","createdAt":"2026-09-22T06:10:00Z","databaseId":9,"url":"https://github.com/Muso-AI/hydra/actions/runs/9"}]' \
+  > "$HOME_WN/gh/runs-Muso-AI/hydra-.github_workflows_deploy.yml.json"
+FM_CW_WIKI_LOG="$HOME_WN/wiki.log" env FM_HOME="$HOME_WN" FM_STATE_OVERRIDE="$HOME_WN/state" \
+  FM_CW_NOW=1790044000 FM_CW_FORGE_DIR="$HOME_WN/forge" FM_CW_CLUSTER_DIR='' \
+  FM_CW_WORKLOADS_DIR='' FM_CW_GH_DIR="$HOME_WN/gh" FM_CW_SENTRY_DIR="$HOME_WN/sentry" \
+  FM_CW_CONFIG_DIR="$HOME_WN/config" FM_CW_ARM_CMD="$HOME_WN/arm.sh" \
+  FM_CW_ARM_LOG="$HOME_WN/arm.log" FM_CW_SEND_CMD="$HOME_WN/send.sh" \
+  FM_CW_SEND_LOG="$HOME_WN/send.log" FM_CW_SLEEP_CMD=true PATH="$HOME_WN/bin:$PATH" \
+  "$CW" drive wn1-1383 >/dev/null || fail "clean deploy-workflow drive failed"
+[ "$(run_cw "$HOME_WN" 1790044000 verdict wn1-1383)" = "change-watch clean" ] \
+  || fail "a successful deploy run did not complete clean: $(run_cw "$HOME_WN" 1790044000 verdict wn1-1383)"
+[ -f "$HOME_WN/wiki.log" ] || fail "a clean watch recorded no wiki note"
+grep -q "no regression on deploy_run" "$HOME_WN/wiki.log" \
+  || fail "the wiki note did not name the metric it measured: $(cat "$HOME_WN/wiki.log")"
+grep -q "run/Muso-AI/hydra" "$HOME_WN/wiki.log" \
+  || fail "the wiki note did not name the target it watched: $(cat "$HOME_WN/wiki.log")"
+grep -qE "5xx|OOMKilled|pool-wait" "$HOME_WN/wiki.log" \
+  && fail "the wiki note claimed metrics this watch never read: $(cat "$HOME_WN/wiki.log")"
+pass "a clean wiki note names only the metrics and targets the watch measured"

@@ -41,8 +41,9 @@
 #           Sentry project this home has no token for is not a target. A
 #           PR that touches no deployable service registers nothing and says
 #           so, as does one that only deletes a manifest, one whose only target
-#           could not be read, and one whose manifests could not be read; each
-#           says which of those it was.
+#           could not be read, one whose manifests could not be read, and one
+#           whose cluster image inventory could not be read; each says which of
+#           those it was.
 #           Every Kubernetes target records a rollout FINGERPRINT at
 #           registration - its pod images plus its pods' pod-template-hash
 #           labels - and the watch refuses to score it until that fingerprint
@@ -53,8 +54,9 @@
 #           a digest-pinned image still proves its own rollout. A target whose
 #           fingerprint has not changed is recorded as awaiting the deploy, never
 #           as health. When the fingerprint cannot be read at registration the
-#           target is still measured and every verdict says the rollout was never
-#           proven.
+#           target is still measured, and the clean completion, the completed-
+#           unmeasured note, and the status line each say the rollout was never
+#           proven for it.
 #           Registering an existing watch whose drive stopped before the end of
 #           its schedule re-arms the remaining samples; any other existing watch
 #           is left alone. Registration is read-only against the cluster; it
@@ -674,7 +676,7 @@ cw_target_eligible() {  # <ns> <name>
 # "run<TAB>owner/repo<TAB>workflow" lines, ranked by replica count and capped at
 # MAX_TARGETS so a large image family is watched by its busiest members.
 cw_spec_targets() {  # <spec>
-  local spec=$1 arg='' ns name matched='' total
+  local spec=$1 arg='' ns name matched='' total inventory
   case "$spec" in
     sentry:*) printf 'sentry\t%s\n' "${spec#sentry:}"; return 0 ;;
     run:*)
@@ -697,8 +699,13 @@ cw_spec_targets() {  # <spec>
   esac
   [ -n "$arg" ] || return 0
   # Match every production Deployment running an image whose repository name is
-  # <arg>, then keep the busiest MAX_TARGETS.
-  matched=$(cw_live_workloads 2>/dev/null | awk -F'\t' -v want="$arg" '
+  # <arg>, then keep the busiest MAX_TARGETS. An inventory that cannot be read is
+  # stated, so it is distinguishable from a repository that deploys nothing.
+  if ! inventory=$(cw_live_workloads 2>/dev/null); then
+    printf 'note\timage inventory unread: no Deployment of image:%s could be resolved\t\n' "$arg"
+    return 0
+  fi
+  matched=$(printf '%s\n' "$inventory" | awk -F'\t' -v want="$arg" '
     {
       ns = $1; name = $2; replicas = $3 + 0; images = $4
       n = split(images, list, /[,[:space:]]+/)
@@ -935,17 +942,25 @@ print("%.4f" % rate)
 # the sorted distinct pod-template-hash values joined by ",".
 CW_POD_FACTS_CACHE=''
 CW_WORKLOADS_CACHE=''
+# A read that failed is remembered for the sample as this sentinel, so a target
+# whose pods cannot be read costs one attempt instead of one per metric.
+CW_POD_FACTS_FAILED='!'
+cw_pod_facts_failed() {  # <key>
+  CW_POD_FACTS_CACHE="$CW_POD_FACTS_CACHE$1	$CW_POD_FACTS_FAILED
+"
+}
 cw_pod_facts() {  # <ns> <deploy>
   local ns=$1 deploy=$2 key cached
   key="$ns/$deploy"
   while IFS=$'\t' read -r k v; do
     [ "$k" = "$key" ] || continue
+    [ "$v" = "$CW_POD_FACTS_FAILED" ] && return 1
     printf '%s\n' "$v"
     return 0
   done <<CACHE
 $CW_POD_FACTS_CACHE
 CACHE
-  command -v kubectl >/dev/null 2>&1 || return 1
+  command -v kubectl >/dev/null 2>&1 || { cw_pod_facts_failed "$key"; return 1; }
   cached=$(cw_kubectl -n "$ns" get pods -l "app=$deploy" -o json 2>/dev/null | python3 -c '
 import datetime, json, sys
 try:
@@ -996,8 +1011,8 @@ for pod in items:
             pairs.append("%s,%s,%.0f" % (pname, c.get("name", ""), limit))
 print("%d\t%s\t%s\t%s\t%s" % (restarts, ",".join(str(e) for e in ooms),
                               ",".join(images), ";".join(pairs), ",".join(hashes)))
-') || return 1
-  [ -n "$cached" ] || return 1
+') || { cw_pod_facts_failed "$key"; return 1; }
+  [ -n "$cached" ] || { cw_pod_facts_failed "$key"; return 1; }
   CW_POD_FACTS_CACHE="$CW_POD_FACTS_CACHE$key	$cached
 "
   printf '%s\n' "$cached"
@@ -1817,6 +1832,10 @@ cw_take_sample() {  # <watch-id> <offset-seconds> <sample-epoch> <baseline-epoch
 # retried per metric.
 cw_sample_blocker() {  # <watch-id> <metric> <target> <cluster-probe-error>
   local id=$1 metric=$2 target=$3 cluster=$4 ns deploy landed last
+  # A spent budget is stated as itself before any read the metric would need: the
+  # landing gate and the Sentry gate both read the pods, so a sample with nothing
+  # left must not pay for them once per metric.
+  cw_within_budget || { printf 'sample budget spent before this metric was read\n'; return 0; }
   case "$metric" in
     sentry_new_issues)
       # Sentry errors are only the release's once a watched Deployment has
@@ -1843,7 +1862,6 @@ cw_sample_blocker() {  # <watch-id> <metric> <target> <cluster-probe-error>
     2) printf 'awaiting the deploy: the pods still run the image they ran at registration\n' ;;
     3) printf 'deploy landing unreadable: the target\047s pod fingerprint could not be read\n' ;;
   esac
-  cw_within_budget || printf 'sample budget spent before this metric was read\n'
   return 0
 }
 
@@ -1933,7 +1951,7 @@ cw_report_regression() {  # <watch-id>
 }
 
 cw_wiki_note() {  # <watch-id> <task> <url>
-  local id=$1 task=$2 url=$3 cmd body
+  local id=$1 task=$2 url=$3 cmd kinds targets body
   if [ "${FM_CW_NO_WIKI:-0}" = 1 ]; then
     notice "change-watch: wiki note skipped by FM_CW_NO_WIKI for $url"
     return 0
@@ -1943,7 +1961,12 @@ cw_wiki_note() {  # <watch-id> <task> <url>
     notice "change-watch: wiki note skipped (no $cmd on PATH) for $url"
     return 0
   fi
-  body="Post-merge change watch for $url (task $task) completed clean at +12h: no 5xx, restart, OOMKilled, latency, pool-wait, or RSS regression against the pre-deploy baseline."
+  # The body names the metric kinds and targets this watch actually measured: a
+  # watch of a deploy workflow or a Sentry project alone must never claim a
+  # Kubernetes metric it never read.
+  kinds=$(cw_metric_keys "$id" | awk -F@ '{ print $1 }' | sort -u | paste -sd ',' - | sed 's/,/, /g')
+  targets=$(cw_target_ids "$id" | sort -u | paste -sd ',' - | sed 's/,/, /g')
+  body="Post-merge change watch for $url (task $task) completed clean at +12h: no regression on ${kinds:-any metric} against the pre-deploy baseline${targets:+ (watched: $targets)}."
   printf '%s\n' "$body" | "$cmd" "change-watch-clean-$id" "Post-merge change watch clean: $url" \
     >/dev/null 2>&1 || notice "change-watch: wiki note failed for $url"
 }
@@ -1978,18 +2001,19 @@ cw_record_clean() {  # <watch-id>
 }
 
 cw_record_unmeasured() {  # <watch-id> <unread-targets>
-  local id=$1 unread=$2 task url list why
+  local id=$1 unread=$2 task url list unproven why
   task=$(cw_meta_get "$id" task || true)
   url=$(cw_meta_get "$id" pr_url || true)
   printf 'completed unmeasured\n' | cw_write "$(cw_verdict_path "$id")"
   cw_mark_once "$(cw_watch_dir "$id")/noted" || return 0
   list=$(printf '%s\n' "$unread" | paste -sd ',' - | sed 's/,/, /g')
+  unproven=$(cw_unproven_landing "$id" | paste -sd ',' - | sed 's/,/, /g')
   # The reason the last sample recorded is what turns "unmeasured" into an
   # actionable gap instead of a mystery.
   why=$(awk -F'\t' '{ if ($2 != "") { print $2; exit } }' "$(cw_reasons_path "$id")" 2>/dev/null || true)
   cw_task_note "$task" "$url" \
-    "note: change-watch completed unmeasured for $url (never measured: $list)${why:+; last reason: $why}"
-  notice "change-watch: wiki note skipped for $url (completed unmeasured: $list)${why:+; last reason: $why}"
+    "note: change-watch completed unmeasured for $url (never measured: $list)${unproven:+; the rollout was never proven for: $unproven}${why:+; last reason: $why}"
+  notice "change-watch: wiki note skipped for $url (completed unmeasured: $list)${unproven:+; the rollout could not be proven for: $unproven}${why:+; last reason: $why}"
 }
 
 # Targets that never had one scored reading across the whole schedule.
@@ -2174,7 +2198,7 @@ cw_rearm() {  # <watch-id> <url>
 
 cmd_register() {
   local task=$1 url=$2 provider owner repo number repo_name id derived targets sentries runs
-  local notes unread now t0 landed_unread when_name sentry_unreadable
+  local notes unread inventory_unread now t0 landed_unread when_name sentry_unreadable
   fm_pr_task_id_valid "$task" || die "invalid task id: $task"
   fm_pr_url_parse "$url" || die "invalid pr url: $url"
   provider=$FM_PR_PROVIDER
@@ -2211,10 +2235,13 @@ cmd_register() {
   fi
   if [ -z "$targets" ] && [ -z "$sentries" ] && [ -z "$runs" ]; then
     unread=$(printf '%s\n' "$derived" | grep -c '^note	manifest unread: ' || true)
+    inventory_unread=$(printf '%s\n' "$derived" | grep -c '^note	image inventory unread: ' || true)
     if ! cw_forge_files "$url" "$provider" "$owner" "$repo" "$number" >/dev/null 2>&1; then
       printf 'change-watch: cannot read the merged file list for %s; nothing registered\n' "$url"
     elif [ "$unread" -gt 0 ]; then
       printf 'change-watch: could not read %s manifest(s) for %s; nothing registered\n' "$unread" "$url"
+    elif [ "$inventory_unread" -gt 0 ]; then
+      printf 'change-watch: could not read the image inventory for %s%s; nothing registered\n' "$url" "${notes:+ ($notes)}"
     elif [ -n "$sentry_unreadable" ]; then
       printf 'change-watch: nothing measurable for %s (%s); nothing registered\n' "$url" "$notes"
     else
@@ -2365,17 +2392,17 @@ cmd_verdict() {
   cw_verdict_line "$id"
 }
 
-# One status line per watch, with the metrics no sample ever scored appended
-# when there are any: a watch is never summarized as clean without saying what
-# it did not measure.
+# One status line per watch, with the metrics no sample ever scored and any
+# target whose rollout was never proven appended when there are any: a watch is
+# never summarized as clean without saying what it did not measure.
 cw_status_line() {  # <watch-id>
-  local id=$1 gaps
+  local id=$1 gaps unproven line
   gaps=$(cw_measured_gaps "$id")
-  if [ -z "$gaps" ]; then
-    printf '%s\t%s\n' "$id" "$(cw_verdict_line "$id")"
-    return 0
-  fi
-  printf '%s\t%s\tunmeasured: %s\n' "$id" "$(cw_verdict_line "$id")" "$gaps"
+  unproven=$(cw_unproven_landing "$id" | paste -sd ',' - | sed 's/,/, /g')
+  line=$(cw_verdict_line "$id")
+  [ -z "$gaps" ] || line="$line	unmeasured: $gaps"
+  [ -z "$unproven" ] || line="$line	rollout never proven: $unproven"
+  printf '%s\t%s\n' "$id" "$line"
 }
 
 cmd_status() {
