@@ -1567,7 +1567,7 @@
       },
       "enabled": true,
       "name": "credit-doc-verify",
-      "description": "Doc-verify, SHADOW (captain 2026-10-26 23:10Z: never take a returned document at face value; 23:30Z order: extraction, forensics and independent cross-checks only, no issuer emails, no customer copy, UNKNOWN never approves). Hourly at :50, after stage 2: every document H3 judged for a linked credit request since the first run's cutoff (up to 30 documents per run) is located (Intercom cache, else one read-only Intercom GET + the customer's attachment; sha256 must equal the proof id), its text and file dates read in the same no-network sandbox, its claims extracted by OpenRouter deepseek-v4.1-flash-1017 (tool-less, data_collection deny, $5/day cap), its forensics combined with the H3 verdict (file dates vs claimed dates, email screenshots weak, cross-account template reuse), and cross-checked independently: Spotify/Tidal trusted raw credits (one admin GET per track), MusicBrainz + Deezer by ISRC, the release label vs the claimed issuer, the sender domain vs the issuer's official domain found independently (MusicBrainz label / distributor-PRO table) + MX, the signatory on the issuer's official site. Records verified / contradicted / forged / unverifiable (+ stronger-proof code, account hold) with every step in /var/lib/hydra-credit-verify/doc-verify.sqlite. Changes no credit, sends nothing to anybody. Kill switch: /etc/hydra/credit-verify.disabled. Docs: docs/credit-verification/doc-verify.md.",
+      "description": "Doc-verify, SHADOW (captain 2026-10-26 23:10Z: never take a returned document at face value; 23:30Z order: extraction, forensics and independent cross-checks only, no issuer emails, no customer copy, UNKNOWN never approves). Hourly at :50, after stage 2: every document H3 judged for a linked credit request since the first run's cutoff (up to 40 documents per run, over 4 sharded workers) is located (Intercom cache, else one read-only Intercom GET + the customer's attachment; sha256 must equal the proof id), its text and file dates read in the same no-network sandbox, its claims extracted by OpenRouter deepseek-v4.1-flash-1017 (tool-less, data_collection deny, $5/day cap), its forensics combined with the H3 verdict (file dates vs claimed dates, email screenshots weak, cross-account template reuse), and cross-checked independently: Spotify/Tidal trusted raw credits (one admin GET per track), MusicBrainz + Deezer by ISRC, the release label vs the claimed issuer, the sender domain vs the issuer's official domain found independently (MusicBrainz label / distributor-PRO table) + MX, the signatory on the issuer's official site. Records verified / contradicted / forged / unverifiable (+ stronger-proof code, account hold) with every step in /var/lib/hydra-credit-verify/doc-verify.sqlite. Changes no credit, sends nothing to anybody. Kill switch: /etc/hydra/credit-verify.disabled. Docs: docs/credit-verification/doc-verify.md.",
       "schedule": {
         "kind": "cron",
         "expr": "50 * * * *",
@@ -1580,7 +1580,9 @@
           "/opt/hydra/scripts/credit-doc-verify.py",
           "run",
           "--max-docs",
-          "30"
+          "40",
+          "--workers",
+          "4"
         ],
         "cwd": "/opt/hydra",
         "timeoutSeconds": 3000
