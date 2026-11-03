@@ -70,6 +70,21 @@ def sha256_file(path: str) -> str:
 
 
 # -- selection ------------------------------------------------------------------
+def _intake_docs(proof_db: sqlite3.Connection, store: DocVerifyStore, deps: Deps, limit: int, *,
+                 keep: Callable[[str], bool] | None = None,
+                 paying: set[int] | frozenset[int] | None = None,
+                 settled: Callable[[str, list[str]], bool] | None = None) -> list:
+    """Filed credit documents that still owe a read, best first (paid, then oldest). A document whose
+    bytes are still owed to blob-backfill is skipped here: it cannot be read yet, and spending a slot on
+    it is how a readable document behind it starves."""
+    from credit_verify.docverify import intake_read
+    if limit <= 0:
+        return []
+    readable = lambda d: not intake_read.needs_backfill(d, deps.blobs, store.blob_registered)  # noqa: E731
+    return intake_read.intake_docs(proof_db, settled or store.intake_settled, limit, keep=keep, paying=paying,
+                                   readable=readable)
+
+
 def candidates(proof_db: sqlite3.Connection, store: DocVerifyStore, since: str, limit: int,
                keep: Callable[[str], bool] | None = None) -> dict[str, list[str]]:
     """proof id -> its claim keys ('<uuid>#<role>') still to verify, oldest
@@ -425,42 +440,36 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
     proof_db = ro(proof_store)
     rows: list[dict[str, Any]] = []
     try:
+        pre_docs: list = []
         if reread_carried:
             pairs, intake_from_store = {}, True
         elif pairs is None:
             cutoff = since or store.set_state_once("since", utcnow())
-            pairs = candidates(proof_db, store, cutoff, max_docs, keep=keep)
-            log(f"since {cutoff}: {len(pairs)} documents to verify")
+            # [key=new-filings-first] (2026-11-03, Fable 15:0xZ): a FILED document is new coverage; the
+            # proof-store candidates are re-reads of documents this rule has already judged once. Selecting
+            # the re-reads first let them spend the whole `max_docs` budget, so the intake room below was 0 on
+            # every run: measured that day, 11,183 outcome rows and ZERO distinct intake_ids. The filings take
+            # the budget first; the re-reads fill whatever is left. `reread_carried` keeps its own order
+            # because there the re-reads ARE the work being asked for.
+            if intake_from_store:
+                pre_docs = _intake_docs(proof_db, store, deps, max_docs, keep=keep, paying=paying)
+            pairs = candidates(proof_db, store, cutoff, max(0, max_docs - len(pre_docs)), keep=keep)
+            log(f"since {cutoff}: {len(pre_docs)} filings + {len(pairs)} documents to verify")
         restored = store.restore_over_provider_down()    # idempotent: a no-op once the 10-29 rows are restored
         if restored:
             log(f"restored {restored} claim verdicts masked by a provider-refusal unknown")
         held = store.held_users()
         for uid in sorted(held):           # belt and braces: no held account keeps a standing `verified`
             stats.superseded += store.supersede_verified(run_id, uid, "account on hold")
-        for proof_id, keys in pairs.items():
-            stats.documents += 1
-            try:
-                rows += verify_document(store, proof_db, proof_id, keys, deps, run_id, stats, held)
-            except ProviderDown as exc:
-                stats.provider_down = str(exc)
-                stats.errors.append(f"provider down ({exc}): run stopped, nothing recorded")
-                log(f"provider down ({exc}): run stopped; the documents are read again next run")
-                return stats, rows
-            except Exception as exc:  # noqa: BLE001 - one document must not stop the run
-                stats.errors.append(f"{proof_id[:12]}: {type(exc).__name__}: {str(exc)[:160]}")
-                store.step(run_id, proof_id, "run", "error", {"error": f"{type(exc).__name__}: {str(exc)[:300]}"})
-            log(f"document {proof_id[:12]}: {len(keys)} claims")
         if intake_from_store:
             room = max(0, max_docs - stats.documents)
-            def readable(d: intake_read.IntakeDoc) -> bool:
-                return not intake_read.needs_backfill(d, deps.blobs, store.blob_registered)
-            docs = intake_read.intake_docs(proof_db, store.intake_settled, room, keep=keep, paying=paying,
-                                           readable=readable)
+            docs = pre_docs[:room] if pre_docs else _intake_docs(proof_db, store, deps, room, keep=keep,
+                                                                 paying=paying)
             if reread_carried and len(docs) < room:             # carried re-reads only fill the idle room
                 taken = {d.intake_id for d in docs}
-                docs += [d for d in intake_read.intake_docs(proof_db, lambda iid, ids: not store.intake_carried_keys(iid),
-                                                            room - len(docs) + len(taken), keep=keep, paying=paying,
-                                                            readable=readable)
+                docs += [d for d in _intake_docs(
+                    proof_db, store, deps, room - len(docs) + len(taken), keep=keep, paying=paying,
+                    settled=lambda iid, ids: not store.intake_carried_keys(iid))
                          if d.intake_id not in taken][:room - len(docs)]
             for doc in docs:
                 stats.documents += 1
@@ -488,6 +497,19 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
                     store.step(run_id, doc.sha, "run", "error", {"error": f"{type(exc).__name__}: {str(exc)[:300]}"},
                                f"intake:{doc.intake_id}")
                 log(f"intake {doc.intake_id[:16]}: {len(doc.candidate_ids)} candidate request(s)")
+        for proof_id, keys in pairs.items():
+            stats.documents += 1
+            try:
+                rows += verify_document(store, proof_db, proof_id, keys, deps, run_id, stats, held)
+            except ProviderDown as exc:
+                stats.provider_down = str(exc)
+                stats.errors.append(f"provider down ({exc}): run stopped, nothing recorded")
+                log(f"provider down ({exc}): run stopped; the documents are read again next run")
+                return stats, rows
+            except Exception as exc:  # noqa: BLE001 - one document must not stop the run
+                stats.errors.append(f"{proof_id[:12]}: {type(exc).__name__}: {str(exc)[:160]}")
+                store.step(run_id, proof_id, "run", "error", {"error": f"{type(exc).__name__}: {str(exc)[:300]}"})
+            log(f"document {proof_id[:12]}: {len(keys)} claims")
     finally:
         proof_db.close()
     return stats, rows

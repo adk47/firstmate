@@ -2320,6 +2320,30 @@ class IntakeD2Tests(unittest.TestCase):
         self.assertEqual(runs, 4)          # 3 all-unknown runs, then one try for the 10 never attempted; per pair: 6
         self.assertTrue(self.store.intake_settled(self.intake_id, rids))
 
+    def test_a_new_filing_gets_the_document_budget_before_a_stored_re_read(self):
+        # 2026-11-03 (Fable 15:0xZ, live defect): the cron (`run --max-docs 30`, no explicit pairs) selected the
+        # proof-store re-reads FIRST and they spent the whole budget, so the intake room was 0 on every run:
+        # measured that day, 11,183 outcome rows and ZERO distinct intake_ids - the reader was busy all day and
+        # never once covered a filing. A filed document is new coverage; a proof-store candidate under the same
+        # FORENSICS_VERSION is a document this rule has already judged once. The filing takes the budget first.
+        stored = hashlib.sha256(b"a stored document the proof store already lists").hexdigest()
+        db = sqlite3.connect(self.proof_path)
+        db.execute("INSERT INTO verdicts (proof_id, analyzer_version, contact_h, track_key, verdict, reasons_json, "
+                   "context_json, created_at, request_id) VALUES (?,?,?,?,?,?,?,?,?)",
+                   (stored, runner.FORENSICS_VERSION, "", "", "GENUINE", "[]", "{}",
+                    "2026-10-27T01:00:00Z", f"{RID}#mix"))
+        db.commit()
+        db.close()
+        stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path,
+                                 since="2026-10-27T00:00:00Z", max_docs=1)
+        self.assertEqual(stats.intake, 1)                        # the only slot went to the filing
+        self.assertEqual([r["intake_id"] for r in rows if r["intake_id"]], [self.intake_id])
+        self.assertEqual(rows[0]["outcome"], gate.VERIFIED)
+        # and the re-read is not lost: the next run still sees it, because it was never read under this rule
+        stats2, _ = runner.run(self.store, self.deps, proof_store=self.proof_path,
+                               since="2026-10-27T00:00:00Z", max_docs=1)
+        self.assertEqual((stats2.intake, stats2.documents), (0, 1))
+
     def test_a_candidate_added_after_the_document_cap_is_still_read(self):
         # QA #1448: three unknown runs, then a new candidate request - it must be read, not settled unseen.
         self.deps.dl = lambda url, dest: Path(dest).write_bytes(b"not it") and 1
