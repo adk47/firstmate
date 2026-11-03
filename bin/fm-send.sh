@@ -20,21 +20,26 @@
 # for a remote secondmate - and the terminal receives only one short constant
 # self-describing doorbell line plus Enter, best-effort. The durable record IS
 # the delivery, so the record's fate alone governs the exit: 0 = the steer is
-# durably sent (recorded); nonzero = nothing was confirmed delivered and a
-# resend is appropriate (unresolvable target, an endpoint that cannot be
-# locked and revalidated or that retired or changed, an unwritable record, a
-# failed or lost remote transport) or a decision-close append failed after
-# delivery (the error then carries the exact manual close). The remote enqueue
+# durably sent (recorded and confirmed on disk carrying the instructed text);
+# nonzero = nothing was confirmed delivered and a resend is appropriate
+# (unresolvable target, an endpoint that cannot be locked and revalidated or
+# that retired or changed, an unwritable record, a record that is not on disk
+# carrying the instructed text after the write, a failed or lost remote
+# transport) or a decision-close append failed after delivery (the error then
+# carries the exact manual close). The remote enqueue
 # is idempotent: the remote leg deduplicates an exact re-run of the same
 # request onto the existing record (bin/fm-task-inbox-lib.sh), so after a lost
 # transport (ssh exit 255, completion unknown) fm-send retries the same leg
 # once itself. For an ordinary reply-bearing request, a later re-run is
 # idempotent only through the printed FM_PENDING_REPLY_EXISTING_CORR=<corr>
 # command: it preserves the same correlation, body, and record, while a plain
-# re-run mints a new correlation and delivers a separate record. An explicit
-# fire-and-forget request instead retries with its same caller-supplied delivery
-# id. A still-unconfirmed reply-bearing request keeps its reply expectation
-# preserved for the record that may have landed.
+# re-run mints a new correlation and delivers a separate record. When that
+# dedup lands on a record the worker already moved into handled/, the send
+# reports success without ringing: the steer was delivered and acknowledged,
+# so there is nothing left to announce.
+# An explicit fire-and-forget request instead retries with its same
+# caller-supplied delivery id. A still-unconfirmed reply-bearing request keeps
+# its reply expectation preserved for the record that may have landed.
 # Pending-reply bookkeeping trouble after a durable enqueue NEVER exits
 # nonzero: with the recovery marker stored the watcher reconciles it silently,
 # and with both the commit and the marker lost the send prints a distinct
@@ -106,9 +111,11 @@
 # send remains successful and watcher reconciliation owns the repair, and when
 # the commit and marker are BOTH lost the send still remains successful with a
 # reply-tracking-degraded warning naming the expectation an operator must
-# inspect (it can no longer reconcile or escalate on its own). Only a
-# failed enqueue discards the expectation. On the typed plane an unconfirmed submit (exit 3) keeps
-# it armed rather than dropping it, and only a proven send failure discards it.
+# inspect (it can no longer reconcile or escalate on its own). Only a failed
+# enqueue, or an enqueue whose record cannot be confirmed on disk carrying the
+# instructed text, discards the expectation.
+# On the typed plane an unconfirmed submit (exit 3) keeps it armed rather than
+# dropping it, and only a proven send failure discards it.
 # Set FM_PENDING_REPLY_EXISTING_CORR=<id> when re-sending a recovery request
 # for an already-open expectation so a second record is not created. Direct
 # unmarked captain input never creates one. A marked secondmate instruction
@@ -683,8 +690,8 @@ if [ -n "$RESOLVE_KEYS" ]; then
 fi
 
 # Close each answered decision in this home's ledger, only after the answer is
-# durably sent: enqueued on the inbox plane, submit-confirmed on the typed
-# plane. An append failure exits nonzero with the manual close
+# durably sent: enqueued and confirmed on disk on the inbox plane,
+# submit-confirmed on the typed plane. An append failure exits nonzero with the manual close
 # command; the decision then stays open and re-surfaces, never silently lost.
 # The close is this home's own bookkeeping, written by the very turn that
 # answered the decision, so it goes through the guarded self-announced append
