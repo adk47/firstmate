@@ -1030,6 +1030,17 @@ else
       exit 1
     fi
     fm_lock_release "$INBOX_META_LOCK"
+    # The record is the delivery. Confirm it is on disk carrying this text before
+    # any bookkeeping reports the steer as delivered: a write that cannot be
+    # verified (a replaced or retired inbox) must refuse the send rather than
+    # leave firstmate believing an instruction reached the worker.
+    if ! fm_task_inbox_verify "$INBOX_RECORD" "$MESSAGE"; then
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      echo "error: steer not sent to $INBOX_TASK_ID: the inbox write reported ${INBOX_RECORD:-no record}, but that record is not on disk carrying the instructed text" >&2
+      exit 1
+    fi
     # Enqueue IS durable delivery to the task's record: mark the pending
     # expectation delivered now, without resolving it - only a correlated
     # parent report acknowledges the request.

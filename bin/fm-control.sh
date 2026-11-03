@@ -788,8 +788,9 @@ record_note() {
         echo "uncommitted change are exactly as the previous worker left them."
         echo
         echo "First, check your instruction inbox: list $STATE/$ID.inbox/*.msg, act on"
-        echo "each message in numeric order, then mv each handled file into"
-        echo "$STATE/$ID.inbox/handled/. A steer sent before the relaunch survives there."
+        echo "each message in numeric order, then acknowledge each handled record with"
+        echo "$FM_ROOT/bin/fm-inbox-ack.sh $STATE $ID NNN (never delete or clear the inbox)."
+        echo "A steer sent before the relaunch survives there."
         echo
         printf '%s\n' "$NOTE"
       } >> "$RELAUNCH_BRIEF" \

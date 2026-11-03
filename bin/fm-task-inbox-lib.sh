@@ -8,7 +8,8 @@
 # bin/fm-send.sh writes and rings locally, the host-local remote steer leg
 # (bin/fm-remote-secondmate-control.sh cmd_send) writes idempotently and rings
 # on the remote host, bin/fm-watch.sh polls and re-rings, and the brief
-# scaffold (bin/fm-brief.sh) tells the worker how to read and acknowledge;
+# scaffold (bin/fm-brief.sh) tells the worker how to read and acknowledge, and
+# bin/fm-inbox-ack.sh performs that acknowledgement on the worker's behalf;
 # none of them restates the format.
 #
 # Design (captain-adopted, data/fm-send-reliability-reframe-s1/report.md): the
@@ -21,7 +22,10 @@
 # ordinary stale wake into stuck-crewmate-recovery.
 #
 # Layout under <state-dir>:
-#   <task>.inbox/NNN.msg       one durable steer, numeric sequence, atomic rename
+#   <task>.inbox/NNN.msg       one durable steer, numeric sequence, no-clobber publish
+#   <task>.inbox/.unhandled/NNN  a second link to every unhandled record, so a
+#                              worker's own cleanup inside its inbox cannot
+#                              destroy an instruction (restored below)
 #   <task>.inbox/handled/      the worker's `mv` here IS the acknowledgement
 #   <task>.inbox/.seq.lock     serializes sequence allocation across writers
 #                              (the session and the away daemon)
@@ -38,10 +42,36 @@
 #   <exact message text; newlines are legal; a marked secondmate request keeps
 #    its from-firstmate marker and corr token verbatim in this body>
 #
+# No steering record can be overwritten or silently dropped, under any number
+# of concurrent writers and any lock outcome. Two independent mechanisms carry
+# that guarantee, and only the second one is load-bearing:
+#   1. .seq.lock serializes sequence allocation, which keeps a collision rare
+#      and keeps ordering sane. It is an optimization, not the safety proof: a
+#      writer that never takes it, a lock reclaimed after its holder's pid was
+#      recycled, and a stale lock all cost ordering only.
+#   2. Publishing is a no-clobber hard link: the record's bytes are written to a
+#      staging file first, then link(2) creates the sequence name, which fails
+#      atomically with EEXIST when that slot is already taken. The writer then
+#      re-reads the directory and takes the next free sequence, so a colliding
+#      writer costs an ordering bump and can never destroy an existing record.
+#      A writer that cannot publish verifies nothing and reports failure: every
+#      enqueue returns only after confirming its own record is on disk carrying
+#      its own text (fm_task_inbox_verify), and fm-send refuses the send when
+#      that confirmation fails.
+#   3. Every unhandled record also has a link under the inbox's hidden
+#      .unhandled/ directory. A worker that deletes records in its own inbox - a
+#      broad `rm`, a tidy-up glob - removes only the visible name, and the next
+#      watcher poll restores it (fm_task_inbox_restore_unhandled) with its
+#      original mtime, so the re-ring ladder still delivers it. That repair is
+#      deliberately at-least-once: a worker that deletes instead of moving a
+#      record into handled/ sees the instruction again, which is the safe
+#      direction when the alternative is losing it silently. The shadow is
+#      retired when the record is acknowledged (moved into handled/) or
+#      superseded by a coalescing write.
+#
 # Sequence numbers are never reused within a task: allocation scans both the
 # inbox root and handled/, so a message is processed at most once per worker
-# lifetime even if every doorbell is duplicated. Concurrent writers serialize
-# on .seq.lock; the worst racing outcome is ordering, never loss.
+# lifetime even if every doorbell is duplicated.
 #
 # Coalescing (fm_task_inbox_write_coalesced): a periodic idempotent
 # instruction - a scheduled lane tick - must not pile up behind a worker that
@@ -92,6 +122,9 @@ _FM_TASK_INBOX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_FM_TASK_INBOX_LIB_DIR/fm-backend.sh"
 
 FM_TASK_INBOX_SCHEMA='fm-task-inbox.v1'
+# Hidden home of the second link to each unhandled record. Names carry no .msg
+# suffix so no reader, counter, or glob mistake them for inbox records.
+FM_TASK_INBOX_SHADOW_DIR='.unhandled'
 FM_TASK_INBOX_GRACE_DEFAULT=90
 FM_TASK_INBOX_RING_MAX_DEFAULT=3
 FM_TASK_INBOX_LOCK_WAIT_DEFAULT=15
@@ -112,8 +145,27 @@ fm_task_inbox_dir() {  # <state-dir> <task-id>
   printf '%s/%s.inbox' "$1" "$2"
 }
 
+# The blessed acknowledgement command (bin/fm-inbox-ack.sh). The doorbell names
+# it so a worker acks instead of hand-rolling a move or a cleanup inside the
+# inbox; the acknowledgement contract itself stays here.
+fm_task_inbox_ack_command() {
+  printf '%s/fm-inbox-ack.sh' "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+}
+
 fm_task_inbox_handled_dir() {  # <state-dir> <task-id>
   printf '%s/%s.inbox/handled' "$1" "$2"
+}
+
+fm_task_inbox_shadow_dir() {  # <inbox-dir>
+  printf '%s/%s' "$1" "$FM_TASK_INBOX_SHADOW_DIR"
+}
+
+# Create the inbox's own subdirectories. Both are needed before any publish:
+# handled/ for the acknowledgement, and the shadow for the deletion repair.
+fm_task_inbox_prepare_dirs() {  # <inbox-dir>
+  local dir=$1
+  mkdir -p "$dir/handled" || return 1
+  mkdir -p "$(fm_task_inbox_shadow_dir "$dir")" || return 1
 }
 
 # Numeric sequence of one record basename, or fail for a non-record name.
@@ -196,36 +248,84 @@ fm_task_inbox_lock_acquire() {  # <lock-path>
   return 0
 }
 
-# Write one record into the next sequence slot: temp-write, then atomic
-# rename. Prints the record path. Caller must hold .seq.lock.
+# Verify a published record: it is a regular file whose body is exactly <text>.
+# This is the enqueue's own proof, used by the writers below and by callers that
+# report a send as delivered (bin/fm-send.sh, the remote steer leg).
+fm_task_inbox_verify() {  # <record-path> <text>
+  local rec=$1 text=$2
+  [ -f "$rec" ] && [ ! -L "$rec" ] || return 1
+  cmp -s <(printf '%s' "$text") <(fm_task_inbox_body "$rec" 2>/dev/null)
+}
+
+# Write one record into the next free sequence slot and print its path.
+# Publishing is a no-clobber hard link of a fully written staging file: the
+# sequence name can only come into existence if it was free, so no writer can
+# replace another writer's record no matter how the sequence was chosen. A slot
+# taken between the scan and the link costs one re-scan and the next sequence.
+# Caller normally holds .seq.lock, which keeps a collision rare; the guarantee
+# holds with or without it, because the link is the arbiter.
+FM_TASK_INBOX_PUBLISH_ATTEMPTS_DEFAULT=1000
 _fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode] [coalesce-key]
-  local dir=$1 text=$2 delivery_mode=${3:-} coalesce=${4:-} seq tmp rec status=0
-  seq=$(fm_task_inbox_next_seq "$dir")
-  rec="$dir/$seq.msg"
+  local dir=$1 text=$2 delivery_mode=${3:-} coalesce=${4:-}
+  local seq tmp rec attempt=0 attempts=${FM_TASK_INBOX_PUBLISH_ATTEMPTS:-}
+  case "$attempts" in ''|*[!0-9]*|0) attempts=$FM_TASK_INBOX_PUBLISH_ATTEMPTS_DEFAULT ;; esac
   tmp=$(mktemp "$dir/.staging.XXXXXX") || return 1
-  {
+  if ! {
     printf 'schema=%s\n' "$FM_TASK_INBOX_SCHEMA"
     printf 'at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     [ "$delivery_mode" != fire-and-forget ] || printf 'delivery=fire-and-forget\n'
     [ -z "$coalesce" ] || printf 'coalesce=%s\n' "$coalesce"
     printf -- '--\n'
     printf '%s' "$text"
-  } > "$tmp" && mv "$tmp" "$rec" || status=1
-  [ "$status" -eq 0 ] || { rm -f "$tmp"; return 1; }
-  printf '%s' "$rec"
+  } > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  while [ "$attempt" -lt "$attempts" ]; do
+    attempt=$((attempt + 1))
+    seq=$(fm_task_inbox_next_seq "$dir") || break
+    rec="$dir/$seq.msg"
+    if ln "$tmp" "$rec" 2>/dev/null; then
+      # The record's bytes were complete before its name existed, so a reader
+      # never sees a partial record; confirm the published bytes are ours.
+      if cmp -s "$tmp" "$rec"; then
+        # A second link keeps the unhandled record recoverable if the worker's
+        # own cleanup deletes it. Its name carries no .msg suffix so nothing
+        # mistakes it for an inbox record. Best effort: the record above is
+        # already durable, so a shadow that cannot be made must not fail the send.
+        ln "$tmp" "$(fm_task_inbox_shadow_dir "$dir")/${seq}" 2>/dev/null || true
+        rm -f "$tmp"
+        printf '%s' "$rec"
+        return 0
+      fi
+      rm -f "$rec" "$tmp"
+      return 1
+    fi
+    # A taken slot is the only expected failure: re-read the directory and let
+    # the next sequence be chosen. Anything else is a real refusal, reported by
+    # the caller rather than silently retried against a broken inbox.
+    [ -e "$rec" ] || [ -L "$rec" ] || break
+  done
+  rm -f "$tmp"
+  return 1
 }
 
-# Durably enqueue one steer: temp-write, then atomic rename into the next
-# sequence slot. Prints the record path. Fails without a partial record.
+# Durably enqueue one steer into the next free sequence slot. Prints the record
+# path only after the record is confirmed on disk with this text. Fails without
+# a partial record and without replacing any existing record.
 fm_task_inbox_write() {  # <state-dir> <task-id> <text> [delivery-mode]
   local state=$1 task=$2 text=$3 delivery_mode=${4:-} dir lock rec status=0
   dir=$(fm_task_inbox_dir "$state" "$task")
-  mkdir -p "$dir/handled" || return 1
+  fm_task_inbox_prepare_dirs "$dir" || return 1
   lock="$dir/.seq.lock"
   fm_task_inbox_lock_acquire "$lock" || return 1
   rec=$(_fm_task_inbox_write_record_locked "$dir" "$text" "$delivery_mode") || status=1
   fm_lock_release "$lock"
   [ "$status" -eq 0 ] || return 1
+  # Re-confirm after releasing: the inbox can be replaced or retired underneath
+  # a writer, and a send that cannot point at its own record must never report
+  # delivery. The retry is the caller's business, never a silent success.
+  fm_task_inbox_verify "$rec" "$text" || return 1
   printf '%s' "$rec"
 }
 
@@ -243,7 +343,7 @@ fm_task_inbox_write() {  # <state-dir> <task-id> <text> [delivery-mode]
 fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mode]
   local state=$1 task=$2 text=$3 delivery_mode=${4:-} dir lock want have f rec='' status=0
   dir=$(fm_task_inbox_dir "$state" "$task")
-  mkdir -p "$dir/handled" || return 1
+  fm_task_inbox_prepare_dirs "$dir" || return 1
   lock="$dir/.seq.lock"
   fm_task_inbox_lock_acquire "$lock" || return 1
   if want=$(mktemp "$dir/.dedup.XXXXXX") && have=$(mktemp "$dir/.dedup.XXXXXX"); then
@@ -290,6 +390,7 @@ fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mod
   fi
   fm_lock_release "$lock"
   [ "$status" -eq 0 ] || return 1
+  fm_task_inbox_verify "$rec" "$text" || return 1
   printf '%s' "$rec"
 }
 
@@ -308,10 +409,10 @@ fm_task_inbox_coalesce_key() {  # <record-path>
 # and, when it superseded any, one count line on stderr.
 fm_task_inbox_write_coalesced() {  # <state-dir> <task-id> <text> <coalesce-key>
   local state=$1 task=$2 text=$3 key=$4 dir lock rec want have f status=0 removed=0
-  local oldest='' ref='' heir ladder rec_base count last superseded_oldest=0
+  local oldest='' ref='' heir ladder rec_base count last superseded_oldest=0 shadow_name
   case "$key" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
   dir=$(fm_task_inbox_dir "$state" "$task")
-  mkdir -p "$dir/handled" || return 1
+  fm_task_inbox_prepare_dirs "$dir" || return 1
   lock="$dir/.seq.lock"
   fm_task_inbox_lock_acquire "$lock" || return 1
   rec=$(_fm_task_inbox_write_record_locked "$dir" "$text" "" "$key") || status=1
@@ -330,6 +431,8 @@ fm_task_inbox_write_coalesced() {  # <state-dir> <task-id> <text> <coalesce-key>
         cmp -s "$want" "$have" || continue
       fi
       if rm "$f" 2>/dev/null; then
+        shadow_name=${f##*/}
+        rm -f "$(fm_task_inbox_shadow_dir "$dir")/${shadow_name%.msg}" 2>/dev/null || true
         removed=$((removed + 1))
         [ "$f" != "$oldest" ] || superseded_oldest=1
       fi
@@ -354,6 +457,7 @@ EOF
   fi
   fm_lock_release "$lock"
   [ "$status" -eq 0 ] || return 1
+  fm_task_inbox_verify "$rec" "$text" || return 1
   [ "$removed" -eq 0 ] \
     || echo "fm-task-inbox: coalesced $removed superseded unhandled record(s) into ${rec##*/}" >&2
   printf '%s' "$rec"
@@ -376,10 +480,14 @@ fm_task_inbox_body() {  # <record-path>
 # Self-describing on purpose: a worker whose brief predates the inbox contract
 # still receives the complete instruction in the line itself.
 fm_task_inbox_doorbell_line() {  # <record-path>
-  local dir=${1%/*} abs
+  local dir=${1%/*} abs task state ack
   abs=$(cd "$dir" 2>/dev/null && pwd) || abs=$dir
-  printf 'Firstmate instruction waiting: list %s/*.msg and, in numeric order, read and act on each, then mv each handled file to %s/handled/.' \
-    "$abs" "$abs"
+  task=${abs##*/}
+  task=${task%.inbox}
+  state=${abs%/*}
+  ack=$(fm_task_inbox_ack_command)
+  printf 'Firstmate instruction waiting: list %s/*.msg and, in numeric order, read and act on each, then acknowledge each handled record with "%s %s %s NNN" (that moves it into %s/handled/; never delete or clear the inbox, because deleting is not acknowledging).' \
+    "$abs" "$ack" "$state" "$task" "$abs"
 }
 
 # Ring the doorbell, best-effort: one advisory composer pre-check, then the
@@ -446,9 +554,40 @@ fm_task_inbox_oldest_unhandled() {  # <state-dir> <task-id>
 #   escalate <record-path> <count>   attempt budget spent; surface as stale
 # An empty inbox also resets the ladder bookkeeping so the next message starts
 # a fresh ladder.
+# Repair the unhandled records a worker's own cleanup may have deleted, and
+# retire the shadows of records that are now acknowledged or superseded. The
+# inbox root is what the worker reads, so the shadow is not an archive: a record
+# present in neither the root nor handled/ was deleted rather than handled, and
+# is linked back with its original mtime so the ladder still ages it correctly.
+# Prints one line per repaired record so the watcher's log shows the repair.
+fm_task_inbox_restore_unhandled() {  # <state-dir> <task-id>
+  local state=$1 task=$2 dir shadow s base restored=0
+  dir=$(fm_task_inbox_dir "$state" "$task")
+  shadow=$(fm_task_inbox_shadow_dir "$dir")
+  [ -d "$shadow" ] || return 0
+  for s in "$shadow"/*; do
+    [ -e "$s" ] || continue
+    base=${s##*/}
+    if [ -e "$dir/$base.msg" ] || [ -L "$dir/$base.msg" ]; then
+      continue
+    fi
+    if [ -e "$dir/handled/$base.msg" ]; then
+      rm -f "$s"
+      continue
+    fi
+    if ln "$s" "$dir/$base.msg" 2>/dev/null; then
+      restored=$((restored + 1))
+      printf 'fm-task-inbox: restored unread record %s.msg deleted from %s\n' "$base" "$dir" >&2
+    fi  done
+  return 0
+}
+
 fm_task_inbox_due_action() {  # <state-dir> <task-id>
   local dir oldest base now grace max ladder rec_base count last
   dir=$(fm_task_inbox_dir "$1" "$2")
+  # A worker may delete records in its own inbox; repair them before the ladder
+  # reads, so a deleted instruction still rings and escalates as unhandled.
+  fm_task_inbox_restore_unhandled "$1" "$2" || true
   if ! oldest=$(fm_task_inbox_oldest_unhandled "$1" "$2"); then
     rm -f "$dir/.ring-state" "$dir/.escalated" 2>/dev/null || true
     printf 'quiet'

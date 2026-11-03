@@ -31,6 +31,10 @@
 #  12. Replacing the oldest unhandled tick keeps the watcher's re-ring ladder:
 #      the replacement inherits its age, ring count, and escalation, so a
 #      worker that never drains its ticks still surfaces as stale exactly once.
+#  13. Parallel sends from many processes all land as distinct intact records:
+#      concurrent steers never collapse, overwrite, or drop one another.
+#  14. A send whose record cannot be confirmed on disk fails loudly with the
+#      path, and leaves no false pending-reply expectation behind.
 # Every case below that passes a literal `$...` message quotes it on purpose
 # (the point is sending an unexpanded `$` line), so SC2016 is disabled.
 # shellcheck disable=SC2016
@@ -443,6 +447,58 @@ test_coalesce_keeps_reringing_ladder() {
   pass "fm-send inbox: a coalesced replacement keeps the oldest tick's age, ring count, and escalation"
 }
 
+# Several senders steer one task at the same moment (firstmate plus lead workers
+# on the same host). Every instruction must survive as its own record.
+test_parallel_sends_never_lose_a_record() {
+  local dir err i pids=() rc=0 inbox count
+  dir=$(setup_case parallel); err="$dir/send.err"
+  inbox="$dir/home/state/t1.inbox"
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    run_send "$dir" "$err.$i" -- t1 "parallel steer $i keep-me" &
+    pids+=($!)
+  done
+  for i in "${pids[@]}"; do
+    wait "$i" || rc=$((rc + 1))
+  done
+  [ "$rc" = 0 ] || fail "$rc parallel sends failed"
+  count=$(find "$inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')
+  [ "$count" = 12 ] || fail "12 parallel sends should yield 12 records, got $count:"$'\n'"$(ls "$inbox")"
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    grep -rqF "parallel steer $i keep-me" "$inbox" \
+      || fail "parallel steer $i was lost"
+  done
+  pass "fm-send inbox: parallel sends all land as distinct intact records"
+}
+
+# The record is the delivery: a send whose record cannot be confirmed on disk
+# must refuse, never report a durable steer that is not there.
+test_unconfirmed_record_fails_the_send() {
+  local dir err rc real_ln
+  dir=$(setup_case unconfirmed); err="$dir/send.err"
+  real_ln=$(command -v ln)
+  # A publish that reports success without creating the record stands in for a
+  # record lost to a replaced directory or a colliding writer.
+  cat > "$dir/fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  -*) exec "$FM_REAL_LN" "$@" ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$dir/fakebin/ln"
+  run_send "$dir" "$err" FM_REAL_LN="$real_ln" -- t1 "steer that never lands"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a send whose record never appeared reported success"
+  assert_contains "$(cat "$err")" "steer not sent to t1" \
+    "the refusal should say the steer was not sent"
+  assert_contains "$(cat "$err")" "$dir/home/state/t1.inbox" \
+    "the refusal should name the inbox whose record could not be confirmed"
+  [ ! -s "$dir/send.log" ] || fail "a refused send still typed something:"$'\n'"$(cat "$dir/send.log")"
+  [ -z "$(find "$dir/home/state/pending-replies" -type f -not -name '.*' 2>/dev/null)" ] \
+    || fail "an unconfirmed record should discard the just-created pending-reply expectation"
+  pass "fm-send inbox: an unconfirmable record fails the send instead of reporting delivery"
+}
+
 test_coalesce_refusals() {
   local dir err rc
   dir=$(setup_case coalesce-refuse); err="$dir/send.err"
@@ -473,6 +529,8 @@ test_secondmate_marker_and_enqueue_delivery
 test_post_enqueue_bookkeeping_failure_is_not_retryable
 test_meta_lock_contention_fails_bounded
 test_unwritable_inbox_fails_loudly
+test_parallel_sends_never_lose_a_record
+test_unconfirmed_record_fails_the_send
 test_stranded_meta_lock_is_reclaimed
 test_coalesce_replaces_unhandled_ticks
 test_coalesce_keeps_reringing_ladder

@@ -14,11 +14,22 @@
 #      re-acking it is a no-op, and an acknowledged sequence is never reissued.
 #      The idempotent enqueue (the remote steer leg's primitive) additionally
 #      dedups an exact-body re-run onto the existing record, handled or not.
-#   3. Concurrent writers serialize on the sequence lock: no clobbered records.
-#   4. The re-ring ladder: within grace is quiet, past grace rings, ring
+#   3. No concurrent write can lose a record: many writers at once, a
+#      colliding writer publishing into the slot this writer chose, a writer
+#      that hits a live holder and times out, a writer that reclaims a stale
+#      lock, and acknowledgements racing a burst of writers all end with every
+#      instruction intact. Publishing is a no-clobber link, so the overwrite
+#      guarantee does not depend on the sequence lock at all.
+#   4. A write reports the record path only when that record is on disk with the
+#      instructed text; a publish that cannot be verified, or an inbox replaced
+#      underneath the writer, fails the write instead of reporting delivery.
+#   5. A worker that deletes unread records in its own inbox (a broad rm or a
+#      tidy-up glob) does not lose them: the hidden second link restores them
+#      with their age, and acknowledgement retires that link.
+#   6. The re-ring ladder: within grace is quiet, past grace rings, ring
 #      spacing holds, a spent budget escalates exactly once, and an
 #      acknowledgement resets the ladder for the next message.
-#   5. A real fm-watch.sh subprocess re-rings the doorbell for an unhandled
+#   7. A real fm-watch.sh subprocess re-rings the doorbell for an unhandled
 #      aged message on an idle pane WITHOUT waking firstmate, waits on a busy
 #      pane, stays silent on a healthy/empty inbox, surfaces unwritable ladder
 #      bookkeeping only while its record remains unhandled, and emits exactly
@@ -249,7 +260,7 @@ test_handled_mv_dedups_by_sequence() {
 test_concurrent_writers_never_clobber() {
   local state i pids=() count
   state="$TMP_ROOT/race/state"; mkdir -p "$state"
-  for i in 1 2 3 4 5 6; do
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
     inbox_lib "$state" fm_task_inbox_write "$state" t1 "steer number $i" >/dev/null &
     pids+=($!)
   done
@@ -257,12 +268,261 @@ test_concurrent_writers_never_clobber() {
     wait "$i" || fail "a concurrent inbox write failed"
   done
   count=$(find "$state/t1.inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')
-  [ "$count" = 6 ] || fail "6 concurrent writes should yield 6 records, got $count:"$'\n'"$(ls "$state/t1.inbox")"
-  for i in 1 2 3 4 5 6; do
+  [ "$count" = 20 ] || fail "20 concurrent writes should yield 20 records, got $count:"$'\n'"$(ls "$state/t1.inbox")"
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
     grep -rqF "steer number $i" "$state/t1.inbox" \
       || fail "steer number $i was lost in the concurrent write race"
   done
-  pass "inbox: concurrent writers serialize on the sequence lock and lose nothing"
+  pass "inbox: concurrent writers lose nothing"
+}
+
+# The overwrite guarantee itself: a writer whose chosen slot is taken by a
+# colliding publisher (another home's copy of the library, a lead worker
+# repairing an inbox by hand, a Fable driver copying a record in) must never
+# replace that record. The shim publishes a foreign record into the slot this
+# writer computed, then hands over to the real tool, so the collision lands
+# exactly where a real one would.
+test_colliding_writer_never_clobbers() {
+  local state fakebin marker foreign rec real_ln count
+  state="$TMP_ROOT/colliding-writer/state"
+  fakebin="$TMP_ROOT/colliding-writer/fakebin"
+  marker="$TMP_ROOT/colliding-writer/published"
+  foreign="$TMP_ROOT/colliding-writer/foreign.msg"
+  mkdir -p "$state" "$fakebin"
+  real_ln=$(command -v ln)
+  cat > "$fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  -*) ;;
+  *)
+    if [ ! -e "$FM_COLLIDE_MARKER" ]; then
+      : > "$FM_COLLIDE_MARKER"
+      cp "$FM_COLLIDE_FOREIGN" "${2:-}"
+    fi
+    ;;
+esac
+exec "$FM_REAL_LN" "$@"
+SH
+  chmod +x "$fakebin/ln"
+  printf 'foreign instruction, do not lose me\n' > "$foreign"
+
+  rec=$(PATH="$fakebin:$PATH" FM_REAL_LN="$real_ln" FM_COLLIDE_MARKER="$marker" \
+    FM_COLLIDE_FOREIGN="$foreign" \
+    inbox_lib "$state" fm_task_inbox_write "$state" t1 "firstmate instruction") \
+    || fail "a writer gave up instead of taking the next free sequence"
+  [ -f "$state/t1.inbox/001.msg" ] \
+    || fail "the colliding writer's record was destroyed:"$'\n'"$(ls "$state/t1.inbox")"
+  grep -qF 'foreign instruction, do not lose me' "$state/t1.inbox/001.msg" \
+    || fail "the record in the contested slot is not the colliding writer's"
+  [ "$rec" = "$state/t1.inbox/002.msg" ] \
+    || fail "the writer should have published past the taken slot, got $rec"
+  grep -qF 'firstmate instruction' "$rec" || fail "the writer's own record is missing its body"
+  count=$(find "$state/t1.inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')
+  [ "$count" = 2 ] || fail "expected 2 records after the collision, got $count"
+  pass "inbox: a colliding writer can never overwrite an existing record"
+}
+
+# A live holder keeps the lock; a writer that cannot get it in its bounded wait
+# refuses instead of writing blind, and refuses without touching the inbox.
+test_writer_refuses_when_lock_wait_times_out() {
+  local state holder rec rc
+  state="$TMP_ROOT/lock-timeout/state"; mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "already queued")
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    fm_task_inbox_lock_acquire "$2" || exit 1
+    printf "held\n" > "$3"
+    sleep 30
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$state/t1.inbox/.seq.lock" "$state/held" &
+  holder=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    [ -e "$state/held" ] && break
+    sleep 0.1
+  done
+  [ -e "$state/held" ] || { kill "$holder" 2>/dev/null; fail "the fixture never took the sequence lock"; }
+  rc=0
+  FM_TASK_INBOX_LOCK_WAIT_SECS=0 bash -c '
+    . "$1"
+    fm_task_inbox_write "$2" t1 "steer while locked" >/dev/null 2>&1
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$state" || rc=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  [ "$rc" -ne 0 ] || fail "a writer whose lock wait expired reported a successful write"
+  [ -f "$rec" ] || fail "the queued record disappeared while the lock was contended"
+  [ ! -e "$state/t1.inbox/002.msg" ] \
+    || fail "a writer that never held the lock still published a record"
+  pass "inbox: a writer whose lock wait expires refuses instead of writing blind"
+}
+
+# A lock stranded by a killed holder is reclaimed, and the reclaim still
+# publishes into a free slot rather than over a record already there.
+test_writer_reclaims_stale_lock_without_clobbering() {
+  local state own rec
+  state="$TMP_ROOT/stale-lock/state"; mkdir -p "$state/t1.inbox/handled"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "queued before the crash")
+  own=$(mktemp -d "$state/t1.inbox/.seq.lock.owner.XXXXXX")
+  printf '999999\n' > "$own/pid"
+  ln -s "$own" "$state/t1.inbox/.seq.lock"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "steer after the crash") \
+    || fail "a writer refused to reclaim a lock whose holder was gone"
+  [ "$rec" = "$state/t1.inbox/002.msg" ] \
+    || fail "the reclaimed lock published into a taken slot: $rec"
+  grep -qF 'queued before the crash' "$state/t1.inbox/001.msg" \
+    || fail "reclaiming the stale lock clobbered the queued record"
+  pass "inbox: a reclaimed stale lock never costs a queued record"
+}
+
+# Acknowledgements run without the lock, concurrently with writers. Every
+# writer must still land its own record and no sequence may be reused.
+test_concurrent_acknowledgements_lose_nothing() {
+  local state i pids=() count bodies=0
+  state="$TMP_ROOT/ack-race/state"; mkdir -p "$state"
+  inbox_lib "$state" fm_task_inbox_write "$state" t1 "seed record" >/dev/null
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    inbox_lib "$state" fm_task_inbox_write "$state" t1 "racy steer $i" >/dev/null &
+    pids+=($!)
+  done
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    for f in "$state/t1.inbox"/*.msg; do
+      [ -e "$f" ] || continue
+      mv "$f" "$state/t1.inbox/handled/" 2>/dev/null || true
+    done
+  done
+  for i in "${pids[@]}"; do
+    wait "$i" || fail "a writer failed while acknowledgements were moving records"
+  done
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    grep -rqF "racy steer $i" "$state/t1.inbox" \
+      || fail "racy steer $i was lost to a concurrent acknowledgement"
+    bodies=$((bodies + 1))
+  done
+  count=$(find "$state/t1.inbox" -name '*.msg' | wc -l | tr -d ' ')
+  [ "$count" -ge "$bodies" ] \
+    || fail "fewer records survive than instructions were written ($count < $bodies)"
+  pass "inbox: acknowledgements racing a burst of writers lose no instruction"
+}
+
+# A publish that cannot be confirmed, and an inbox replaced between publish and
+# release, are both refusals: the enqueue never prints a path for a record that
+# is not on disk carrying its text.
+test_write_refuses_an_unconfirmed_record() {
+  local state fakebin real_ln rc
+  state="$TMP_ROOT/unconfirmed/state"
+  fakebin="$TMP_ROOT/unconfirmed/fakebin"
+  mkdir -p "$state" "$fakebin"
+  real_ln=$(command -v ln)
+  # A publish that reports success without creating the record (a lost link on
+  # a replaced directory) must never read as a written steer.
+  cat > "$fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  -*) exec "$FM_REAL_LN" "$@" ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$fakebin/ln"
+  rc=0
+  PATH="$fakebin:$PATH" FM_REAL_LN="$real_ln" \
+    inbox_lib "$state" fm_task_inbox_write "$state" t1 "steer into a void" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "a write whose record never appeared reported success"
+  [ -z "$(find "$state/t1.inbox" -maxdepth 1 -name '*.msg')" ] \
+    || fail "a failed publish left a record behind"
+  [ -z "$(find "$state/t1.inbox" -maxdepth 1 -name '.staging.*')" ] \
+    || fail "a failed publish left its staging file behind"
+
+  # The inbox replaced underneath a writer (retired and recreated between
+  # publish and release) is the shape that once reported a send as delivered
+  # with no record anywhere: the enqueue must fail instead.
+  rc=0
+  FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    eval "$(declare -f fm_lock_release | sed "1s/fm_lock_release/_real_fm_lock_release/")"
+    fm_lock_release() {
+      rm -rf "${1%/.seq.lock}"
+      _real_fm_lock_release "$@"
+    }
+    fm_task_inbox_write "$2" t1 "steer into a retired inbox" >/dev/null
+  ' _ "$ROOT/bin/fm-task-inbox-lib.sh" "$state" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a write into an inbox replaced under it reported success"
+  pass "inbox: an unconfirmable record fails the write instead of reporting delivery"
+}
+
+# A worker's own cleanup inside its inbox is a real loss path: a broad rm or a
+# tidy-up glob deletes unread records, which the ladder used to read as "nothing
+# waiting". The hidden second link must bring the instruction back, with its age
+# intact so it still rings and escalates.
+test_worker_deletion_is_repaired() {
+  local state rec rec2 gone action
+  state="$TMP_ROOT/worker-deletes/state"; mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "instruction one")
+  rec2=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "instruction two")
+  rm -f "$state/t1.inbox/"*.msg   # the worker's cleanup: unread records, gone
+  [ ! -e "$rec" ] && [ ! -e "$rec2" ] || fail "the fixture did not delete the records"
+  inbox_lib "$state" fm_task_inbox_restore_unhandled "$state" t1 >/dev/null 2>&1
+  grep -qF 'instruction one' "$rec" || fail "a deleted unread record was not restored"
+  grep -qF 'instruction two' "$rec2" || fail "the second deleted record was not restored"
+  age_path "$rec"
+  action=$(inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  case "$action" in
+    ring" "*|escalate" "*) ;;
+    *) fail "a restored record did not reach the re-ring ladder: $action" ;;
+  esac
+
+  # Acknowledgement retires the shadow, so nothing comes back after the mv.
+  mv "$rec" "$state/t1.inbox/handled/"
+  mv "$rec2" "$state/t1.inbox/handled/"
+  inbox_lib "$state" fm_task_inbox_restore_unhandled "$state" t1 >/dev/null 2>&1
+  [ ! -e "$rec" ] || fail "an acknowledged record was resurrected by the repair pass"
+  [ -z "$(find "$state/t1.inbox/.unhandled" -type f 2>/dev/null)" ] \
+    || fail "the repair pass left shadow links behind after acknowledgement"
+  action=$(inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = quiet ] || fail "a fully acknowledged inbox should be quiet, got: $action"
+  pass "inbox: unread records deleted by a worker's own cleanup are restored"
+}
+
+# A coalescing tick supersedes its predecessor for good: the retired record's
+# shadow must go with it, or the repair pass would resurrect every old tick.
+test_coalesced_superseded_record_is_not_resurrected() {
+  local state first second
+  state="$TMP_ROOT/coalesce-shadow/state"; mkdir -p "$state"
+  first=$(inbox_lib "$state" fm_task_inbox_write_coalesced "$state" t1 "tick" tick)
+  second=$(inbox_lib "$state" fm_task_inbox_write_coalesced "$state" t1 "tick" tick)
+  [ ! -e "$first" ] || fail "coalescing did not retire the previous tick"
+  inbox_lib "$state" fm_task_inbox_restore_unhandled "$state" t1 >/dev/null 2>&1
+  [ ! -e "$first" ] || fail "the repair pass resurrected a superseded tick: $first"
+  [ -f "$second" ] || fail "the surviving tick disappeared"
+  pass "inbox: a superseded coalesced tick is never resurrected"
+}
+
+# The blessed acknowledgement path (bin/fm-inbox-ack.sh): it retires the record
+# and its hidden link together, tolerates a re-run after a lost reply, and
+# refuses anything that is not a sequence, so a worker never has to hand-roll a
+# move or a cleanup inside its own inbox.
+test_ack_helper_acknowledges_safely() {
+  local state rec out rc
+  state="$TMP_ROOT/ack-helper/state"; mkdir -p "$state"
+  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "instruction to acknowledge")
+  out=$("$ROOT/bin/fm-inbox-ack.sh" "$state" t1 001) \
+    || fail "the ack helper refused a real record"
+  assert_contains "$out" "acknowledged" "the ack helper should report the acknowledgement"
+  [ ! -e "$rec" ] || fail "the ack helper left the record in the inbox root"
+  [ -f "$state/t1.inbox/handled/001.msg" ] || fail "the ack helper did not move the record into handled/"
+  [ -z "$(find "$state/t1.inbox/.unhandled" -type f 2>/dev/null)" ] \
+    || fail "the ack helper left the record's hidden link behind"
+  out=$("$ROOT/bin/fm-inbox-ack.sh" "$state" t1 001) \
+    || fail "a repeated acknowledgement should be a harmless no-op"
+  assert_contains "$out" "already acknowledged" "a repeated acknowledgement should say so"
+  rc=0
+  "$ROOT/bin/fm-inbox-ack.sh" "$state" t1 007 >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "the ack helper acknowledged a record that does not exist"
+  rc=0
+  "$ROOT/bin/fm-inbox-ack.sh" "$state" t1 'handled/001.msg.bak' >/dev/null 2>&1 || rc=$?
+  [ "$rc" -ne 0 ] || fail "the ack helper accepted a name that is not a sequence"
+  [ -f "$state/t1.inbox/handled/001.msg" ] \
+    || fail "a refused acknowledgement disturbed an acknowledged record"
+  pass "inbox: the ack helper acknowledges records without hand-rolled inbox handling"
 }
 
 test_writer_retries_after_a_vanished_lock_collision() {
@@ -527,6 +787,14 @@ test_idempotent_write_dedups_exact_body
 test_idempotent_write_follows_concurrent_ack
 test_handled_mv_dedups_by_sequence
 test_concurrent_writers_never_clobber
+test_colliding_writer_never_clobbers
+test_writer_refuses_when_lock_wait_times_out
+test_writer_reclaims_stale_lock_without_clobbering
+test_concurrent_acknowledgements_lose_nothing
+test_write_refuses_an_unconfirmed_record
+test_worker_deletion_is_repaired
+test_coalesced_superseded_record_is_not_resurrected
+test_ack_helper_acknowledges_safely
 test_writer_retries_after_a_vanished_lock_collision
 test_ladder_writes_ignore_vanished_inbox
 test_fire_and_forget_records_never_enter_the_ladder
