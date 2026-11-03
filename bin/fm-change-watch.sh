@@ -132,9 +132,13 @@
 #                        memory limit; regressed when value > 0.85.
 #   sentry_new_issues    issues first seen at or after the baseline epoch at
 #                        level error or fatal; regressed when value > baseline
-#                        AND value >= 3. Its target is sentry/<project>. Without
-#                        a Sentry token or a mapped project it is unmeasured for
-#                        the whole watch, with the reason recorded.
+#                        AND value >= 3. Its target is sentry/<project>. It is
+#                        not read until the watch's own landing is proven: the
+#                        watched Deployments' rollout when the watch has any,
+#                        otherwise its deploy workflow's run for this merge.
+#                        Without a Sentry token or a mapped project it is
+#                        unmeasured for the whole watch, with the reason
+#                        recorded.
 #   deploy_run           the repository's own deploy workflow as 1 when a run
 #                        created at or after the merge completed successfully
 #                        and 0 when it failed, was cancelled, or timed out;
@@ -172,7 +176,10 @@
 # Read-only against the cluster. No model calls. No new fleet workers: the
 # watcher's existing process-event runner drives the registered watch. One
 # sample, and the baseline capture at registration, are each bounded by a hard
-# budget (default 25s); every metric not read inside it is recorded unmeasured.
+# budget (default 25s). That budget bounds the cluster reads only: every metric
+# they cannot reach inside it is recorded unmeasured, while the Sentry and
+# deploy-workflow reads go over the network under their own bounds and are never
+# costed against a budget the pod reads spent.
 #
 # Test seams (all optional, all inert in production):
 #   FM_CW_NOW              fixed current epoch (integer) instead of `date +%s`
@@ -1617,6 +1624,37 @@ cw_record_images() {  # <watch-id>
   printf '%s' "$out" | cw_write "$(cw_landed_path "$id")"
 }
 
+# cw_runs_awaiting_deploy <watch-id> <since-epoch> succeeds when a watch with no
+# Deployment target has no completed deploy-workflow run for this release, and
+# prints why. The Sentry gate uses it so a repository deployed by its own workflow
+# (hydra) does not read its errors before that deploy has landed either.
+cw_runs_awaiting_deploy() {  # <watch-id> <since-epoch>
+  local id=$1 since=$2 run_repo workflow out rc seen=0 awaiting='' unreadable=''
+  [ -f "$(cw_runs_path "$id")" ] || return 1
+  while IFS=$'\t' read -r run_repo workflow; do
+    [ -n "${run_repo:-}" ] || continue
+    [ -n "${workflow:-}" ] || continue
+    seen=1
+    rc=0
+    out=$(cw_live_deploy_run "$run_repo" "$workflow" "$since" 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] && continue
+    case "$out" in
+      no\ *|'run in flight'*) awaiting=${out:-no run has been read} ;;
+      '') awaiting='no run has been read' ;;
+      *) unreadable=$out ;;
+    esac
+  done < "$(cw_runs_path "$id")"
+  [ "$seen" -eq 1 ] || return 1
+  # A read that failed for its own reason is unmeasured, never "awaiting".
+  if [ -n "$unreadable" ]; then
+    printf '%s\n' "$unreadable"
+    return 0
+  fi
+  [ -n "$awaiting" ] || return 1
+  printf 'awaiting the deploy: %s\n' "$awaiting"
+  return 0
+}
+
 # cw_all_k8s_awaiting <watch-id> succeeds when every k8s target of the watch is
 # still running the images it ran at registration, so no rollout has happened.
 cw_all_k8s_awaiting() {  # <watch-id>
@@ -1703,7 +1741,7 @@ cw_capture_baseline() {  # <watch-id> <baseline-epoch>
     # time must not cost the whole watch its relative bar.
     if [ -n "$cluster" ] && cw_baseline_needs_cluster "$metric"; then
       :
-    elif cw_within_budget; then
+    elif cw_baseline_needs_cluster "$metric" || cw_within_budget; then
       rc=0
       value=$(cw_metric_read "$id" "$metric" "$target" baseline "$since" 2>"$err") || rc=$?
       if [ "$rc" -ne 0 ] || ! printf '%s' "$value" | grep -qE '^-?[0-9]+([.][0-9]+)?$'; then
@@ -1837,19 +1875,26 @@ cw_take_sample() {  # <watch-id> <offset-seconds> <sample-epoch> <baseline-epoch
 # awaiting the deploy, and an unreachable cluster is named once instead of being
 # retried per metric.
 cw_sample_blocker() {  # <watch-id> <metric> <target> <cluster-probe-error>
-  local id=$1 metric=$2 target=$3 cluster=$4 ns deploy landed last
-  # A spent budget is stated as itself before any read the metric would need: the
-  # landing gate and the Sentry gate both read the pods, so a sample with nothing
-  # left must not pay for them once per metric.
-  cw_within_budget || { printf 'sample budget spent before this metric was read\n'; return 0; }
+  local id=$1 metric=$2 target=$3 cluster=$4 ns deploy landed since
   case "$metric" in
     sentry_new_issues)
-      # Sentry errors are only the release's once a watched Deployment has
-      # rolled out; before that they are the errors of the code it replaced.
-      if cw_all_k8s_awaiting "$id"; then
-        printf 'awaiting the deploy: no watched Deployment has rolled out yet\n'
+      # Sentry errors are only the release's once its landing is proven: the
+      # watched Deployments' rollout when the watch has any, otherwise its own
+      # deploy workflow's run for this merge. A watch with neither has nothing
+      # better to prove, so its Sentry read proceeds.
+      #
+      # Proving a rollout costs a pod read, and a spent sample budget buys none:
+      # the pod-backed metrics state that budget themselves, and a landing the
+      # sample could not read is unproven (as an unreadable fingerprint already
+      # is), never a silent reason to skip a network read.
+      if [ -s "$(cw_targets_path "$id")" ]; then
+        if cw_within_budget && cw_all_k8s_awaiting "$id"; then
+          printf 'awaiting the deploy: no watched Deployment has rolled out yet\n'
+        fi
         return 0
       fi
+      since=$(cw_meta_get "$id" t0 || true)
+      cw_runs_awaiting_deploy "$id" "$since" || true
       return 0
       ;;
     deploy_run) return 0 ;;
@@ -1862,6 +1907,11 @@ cw_sample_blocker() {  # <watch-id> <metric> <target> <cluster-probe-error>
     */*) ns=${target%%/*}; deploy=${target#*/} ;;
     *) return 0 ;;
   esac
+  # A spent budget is stated as itself before the pod read this metric needs, and
+  # stops that read only: the Sentry and deploy-workflow reads above go over the
+  # network with their own bounds, so a budget cluster reads spent never costs
+  # them the sample.
+  cw_within_budget || { printf 'sample budget spent before this metric was read\n'; return 0; }
   landed=0
   cw_target_landed "$id" "$ns" "$deploy" || landed=$?
   case "$landed" in

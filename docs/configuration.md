@@ -847,7 +847,9 @@ run:<owner>/<repo>#<workflow-path>   the repository's deploy workflow, by path
 A line for a repository replaces that repository's built-in entry rather than adding to it, so a home can point a watch at a different namespace, a narrower image, or its own Sentry project; a repository with no line and no built-in entry still resolves through the Deployments that run an image named after it.
 A `run:` spec names the workflow by file (`run:Muso-AI/hydra#.github/workflows/deploy.yml`) because a spec is one whitespace-free token and workflow display names contain spaces.
 Sentry reads use the org `auth_token` in `~/.config/muso/sentry-vault.json` (override `FM_CW_SENTRY_VAULT`); with no token or no mapped project the Sentry target is not registered and the registration line says so, and it is never a silent zero.
+A Sentry read waits for the watch's own landing — the Deployments' rollout fingerprint when the watch has any, otherwise its mapped `run:` workflow's run for this merge — because before that landing those are the errors of the code the release replaced.
 Every mapped target is bounded — an image family is watched by its busiest `FM_CW_MAX_TARGETS` (default 8) Deployments and the registration line states the cap — and a Kubernetes target is scored only once its rollout fingerprint (pod images plus pod-template hash) differs from registration, so a sample taken before the rollout is recorded as awaiting the deploy rather than as health and a rollout that changes no image still counts.
+The per-sample budget (`FM_CW_SAMPLE_DEADLINE`) bounds the cluster reads only: the Sentry and deploy-workflow reads go over the network under their own bounds, so a sample whose pod reads spent the budget still measures them.
 
 ## Relay (.env)
 

@@ -1232,6 +1232,42 @@ FM_CW_GH="$HOME_FB/bin/gh" CW_CLUSTER_DIR='' FM_CW_SENTRY_DIR="$HOME_FB/sentry" 
   || fail "the deploy-run target was not scored when the forge budget was available: $(cat "$HOME_FB/state/change-watch/fb1-1400/samples.log")"
 pass "the forge budget is per sample and a spent one is stated"
 
+# --- a workflow-deployed repository's Sentry read waits for its deploy run ----
+# hydra has no Deployment the cluster can see, so its landing is its own deploy
+# workflow's run for this merge. Reading Sentry before that run reports the
+# errors of the code the release replaced as the release's own.
+HOME_RS=$(new_world rs)
+mkdir -p "$HOME_RS/gh/runs-Muso-AI" "$HOME_RS/config" "$HOME_RS/sentry"
+printf 'src/hydra.py\n' > "$HOME_RS/forge/files.txt"
+printf '%s\n' 1790000000 > "$HOME_RS/forge/merge-epoch"
+printf '%s\n' deadbeef > "$HOME_RS/forge/head-ref"
+printf 'hydra sentry:hydra run:Muso-AI/hydra#.github/workflows/deploy.yml\n' \
+  > "$HOME_RS/config/change-watch-repos"
+printf '[]\n' > "$HOME_RS/sentry/issues-hydra.json"
+CW_CLUSTER_DIR='' FM_CW_GH_DIR="$HOME_RS/gh" FM_CW_SENTRY_DIR="$HOME_RS/sentry" \
+  FM_CW_CONFIG_DIR="$HOME_RS/config" FM_CW_WORKLOADS_DIR='' PATH="$HOME_RS/bin:$PATH" \
+  run_cw "$HOME_RS" 1790000000 register rs1 "$HYDRA_PR" >/dev/null || fail "hydra register failed"
+[ -f "$HOME_RS/state/change-watch/rs1-1383/sentry" ] \
+  || fail "the hydra Sentry target was not registered"
+CW_CLUSTER_DIR='' FM_CW_GH_DIR="$HOME_RS/gh" FM_CW_SENTRY_DIR="$HOME_RS/sentry" \
+  FM_CW_CONFIG_DIR="$HOME_RS/config" PATH="$HOME_RS/bin:$PATH" \
+  run_cw "$HOME_RS" 1790000300 sample rs1-1383 300 >/dev/null || true
+awk -F'\t' '$1 == "sentry_new_issues@sentry/hydra" && $2 ~ /awaiting the deploy/ { found = 1 } END { exit(found ? 0 : 1) }' \
+  "$HOME_RS/state/change-watch/rs1-1383/read-failures" \
+  || fail "a Sentry read before the deploy run was not awaiting the deploy: $(cat "$HOME_RS/state/change-watch/rs1-1383/read-failures" 2>/dev/null)"
+[ "$(awk -F'\t' '$3 == "sentry_new_issues@sentry/hydra" { print $7 }' \
+  "$HOME_RS/state/change-watch/rs1-1383/samples.log")" = "0" ] \
+  || fail "a Sentry read before the deploy run was scored: $(cat "$HOME_RS/state/change-watch/rs1-1383/samples.log" 2>/dev/null)"
+printf '%s\n' '[{"conclusion":"success","status":"completed","createdAt":"2026-09-22T06:10:00Z","databaseId":9,"url":"https://github.com/Muso-AI/hydra/actions/runs/9"}]' \
+  > "$HOME_RS/gh/runs-Muso-AI/hydra-.github_workflows_deploy.yml.json"
+CW_CLUSTER_DIR='' FM_CW_GH_DIR="$HOME_RS/gh" FM_CW_SENTRY_DIR="$HOME_RS/sentry" \
+  FM_CW_CONFIG_DIR="$HOME_RS/config" PATH="$HOME_RS/bin:$PATH" \
+  run_cw "$HOME_RS" 1790000900 sample rs1-1383 900 >/dev/null || fail "sample failed"
+[ "$(awk -F'\t' '$3 == "sentry_new_issues@sentry/hydra" && $2 == 900 { print $4 "/" $7 }' \
+  "$HOME_RS/state/change-watch/rs1-1383/samples.log")" = "0/1" ] \
+  || fail "the sentry read did not proceed once the deploy run existed: $(cat "$HOME_RS/state/change-watch/rs1-1383/samples.log" 2>/dev/null)"
+pass "a workflow-deployed release's Sentry read waits for its own deploy run"
+
 # --- the rollout fingerprint, so an env-only change still opens the gate ------
 # A Deployment rollout always mints a new pod-template hash, while an env, routing
 # or resource-limit change leaves every image byte-identical. Proving the landing
@@ -1280,12 +1316,12 @@ awk -F'\t' '{ exit !($2 != "" && $3 != "") }' "$HOME_FP2/state/change-watch/fp2$
   || fail "registration recorded images without their rollout fingerprint: $(cat "$HOME_FP2/state/change-watch/fp2$CORE_ID_SUFFIX/images-at-register")"
 pass "an unchanged rollout fingerprint stays awaiting the deploy"
 
-# --- a spent budget is checked before the landing read -------------------------
+# --- a spent budget bounds the pod reads, never a network read ----------------
 # cw_sample_blocker used to ask for the target's landing fingerprint first, so a
-# sample that had no budget left still paid a pod read per K8s metric and blamed
-# the landing instead of the budget. The budget is now checked first, and a
-# target whose pods cannot be read is attempted once per sample rather than once
-# per metric.
+# sample that had no budget left still paid a pod read per K8s metric. The budget
+# is now checked before that pod read and stops that read only: the Sentry read
+# goes over the network under its own bound, so a budget the pod reads spent
+# never costs the watch its error signal.
 HOME_BUD=$(cluster_world bud)
 seed_app_pr "$HOME_BUD"
 printf 'muso-prod\tcore-backend-api\t6\tlocalhost:30500/muso/core-backend:old-1\n' > "$HOME_BUD/workloads"
@@ -1303,10 +1339,15 @@ CW_CLUSTER_DIR='' PATH="$HOME_BUD/bin:$PATH" FM_CW_SHIM_LOG="$HOME_BUD/shim.log"
   || fail "a sample with no budget left still read the pods: $(cat "$HOME_BUD/shim.log")"
 REASONS_BUD="$HOME_BUD/state/change-watch/bud1$CORE_ID_SUFFIX/read-failures"
 [ "$(grep -c '' "$REASONS_BUD")" -ge 6 ] \
-  || fail "a spent sample did not record every metric: $(cat "$REASONS_BUD")"
-[ "$(grep -cF 'sample budget spent before this metric was read' "$REASONS_BUD")" -eq "$(grep -c '' "$REASONS_BUD")" ] \
+  || fail "a spent sample did not record the metrics it skipped: $(cat "$REASONS_BUD")"
+awk -F'\t' '$1 ~ /^(sentry_new_issues|deploy_run)@/ { next }
+  $2 ~ /^sample budget spent before this metric was read$/ { next }
+  { print; exit 1 }' "$REASONS_BUD" \
   || fail "a spent sample blamed the landing read instead of the budget: $(cat "$REASONS_BUD")"
-pass "a spent sample budget costs no pod read and is stated as itself"
+[ "$(awk -F'\t' '$3 == "sentry_new_issues@sentry/core-backend" && $2 == 300 { print $4 "/" $7 }' \
+  "$HOME_BUD/state/change-watch/bud1$CORE_ID_SUFFIX/samples.log")" = "0/1" ] \
+  || fail "a spent sample budget cost the watch its Sentry read: $(cat "$HOME_BUD/state/change-watch/bud1$CORE_ID_SUFFIX/samples.log")"
+pass "a spent sample budget costs no pod read, states itself, and still reads Sentry"
 
 HOME_PF=$(cluster_world pf)
 seed_app_pr "$HOME_PF"
