@@ -162,6 +162,13 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
 
 applies() { grep -c -- "--mode apply" "$CALLS" || true; }
 
+# OUT_ROOT is keyed by STAMP="$(date -u +%Y%m%dT%H%MZ)" - MINUTE resolution (credit-verify-outbound.sh:149) - and a
+# case may invoke the script more than once, so a minute boundary leaves TWO out dirs. Every read of "the run I just
+# made" goes through these helpers: a bare "$CVO_OUT_ROOT"/*/tick.log grep matches ANY run's log, so on a minute
+# split it can pass on the PREVIOUS run's output - that is a false green, not a flake (r5 on #1687; the first site,
+# the uvn-status-free outcomes glob, produced AssertionError None on #1406's Bats (1/2)).
+newest_out() { ls -dt "$CVO_OUT_ROOT"/*/ 2>/dev/null | head -1; }
+newest_tick() { printf '%s' "$(newest_out)tick.log"; }
 @test "outbound tick (r5 NO-GO @184803d6, [key=unattended]): outside the bats harness NO env var moves a gate input - kill files, state, ledger, policy, lens, spike, caps and gate scripts are constants" {
   E=/tmp/h2-evil
   evil=(HYDRA_ROOT="$E" CVO_ETC="$E/etc" CVO_STATE="$E/state" PY_BIN="$E/py" CVO_RUNNER="$E/r" CVO_OWING="$E/o" CVO_RECEIPTS="$E/rc"
@@ -244,7 +251,7 @@ TIMEOUT_BIN=/usr/bin/timeout"
   CVO_NEED_RUNNER="$TEST_TMPDIR/need-old.py" run -0 "$SCRIPT"
   if grep -q "^send " "$CALLS"; then false; fi
   grep -q "^uvn-status .*--mode apply" "$CALLS"
-  grep -q "no --check-recipients (#1582 not deployed); skipped" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "no --check-recipients (#1582 not deployed); skipped" "$(newest_tick)"
   # a builder that fails stops the tick (like the other builders)
   rm -f "$CVO_ETC/credit-verify-outbound.disabled"; : > "$CALLS"; STUB_NEED_BUILD_FAIL=1 run -1 "$SCRIPT"
   if grep -q -- "--mode apply" "$CALLS"; then false; fi
@@ -269,11 +276,11 @@ TIMEOUT_BIN=/usr/bin/timeout"
   if grep -q "^send .*--mode apply" "$CALLS"; then false; fi
   if grep -q "campaign status-doc-received.*--mode apply" "$CALLS"; then false; fi
   if grep -q "^claim-.*--mode apply" "$CALLS"; then false; fi
-  grep -q "SIGNED-only family" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "SIGNED-only family" "$(newest_tick)"
   # 14:3xZ (found on the 14Z live tick): a SIGNED-only family is DONE with the page it checked, so its cursor must
   # advance to where the check stopped. It used to return before advance_cursor, so it re-walked the same first page
   # every tick for ever (cursor-r1-free stayed 0 while every unsigned family moved to 200) and never saw entry 201.
-  grep -q "next tick starts at" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "next tick starts at" "$(newest_tick)"
   [ "$(cat "$CVO_STATE/cursor-proof-need-ask-paid" 2>/dev/null || echo 0)" -gt 0 ]
   # QA #1587: the dates are TIMES - before uvn-status's date it is signed-only too; at / after it, it applies
   : > "$CALLS"; STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 CVO_NOW_EPOCH="$(python3 -c 'import datetime as d; print(int(d.datetime(2026,10,31,18,1,tzinfo=d.timezone.utc).timestamp()))')" run -0 "$SCRIPT"
@@ -296,7 +303,7 @@ open(os.environ["CALLS"] + ".judge", "a").write(f"{len(items)} {ref} {type(items
 print(json.dumps({"verdict": "STOP", "reason_code": "test"}))
 PY
   CVO_JUDGE="$TEST_TMPDIR/judge.py" run -0 "$SCRIPT"
-  out="$(ls -d "$CVO_OUT_ROOT"/*/ | head -1)"
+  out="$(newest_out)"
   python3 -c "import json,sys; it=[json.loads(l) for l in open(sys.argv[1])]; assert it and it[0]['facts']['class']=='ask' and it[0]['body_html']=='<p>Hi there</p>' and it[0]['copy_ref']=='uvn', it" "$out/uvn-status-free-items.jsonl"
   grep -q "^1 uvn dict$" "$CALLS.judge"
   grep -q "judge SHADOW" "$out/tick.log"
@@ -305,12 +312,12 @@ PY
   printf 'import sys\nsys.stderr.write("usage: credit-batch-judge.py judge --copy-ref COPY_REF\\n"); sys.exit(2)\n' > "$TEST_TMPDIR/judge-bad.py"
   rm -rf "$CVO_OUT_ROOT"; : > "$CALLS"
   CVO_JUDGE="$TEST_TMPDIR/judge-bad.py" run -0 "$SCRIPT"
-  grep -q "JUDGE CALL FAILED (rc=2) copy=uvn" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "JUDGE CALL FAILED (rc=2) copy=uvn" "$(newest_tick)"
   grep -q -- "--mode apply" "$CALLS"
   grep -q -- "--mode apply" "$CALLS"                                 # shadow: the STOP blocked no apply
   # no judge deployed: the items are still written, the tick goes on
   rm -rf "$CVO_OUT_ROOT"; : > "$CALLS"; run -0 "$SCRIPT"
-  out="$(ls -d "$CVO_OUT_ROOT"/*/ | head -1)"
+  out="$(newest_out)"
   [ -s "$out/uvn-status-free-items.jsonl" ]; grep -q "judge: not deployed" "$out/tick.log"
 }
 
@@ -318,7 +325,7 @@ PY
   touch "$CVO_ETC/credit-verify-outbound.live"
   CVO_TICK_BUDGET_S=0 run -0 "$SCRIPT"
   if grep -q -- "--check-recipients" "$CALLS"; then false; fi
-  grep -q "tick budget 0s reached; this family waits for the next tick" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "tick budget 0s reached; this family waits for the next tick" "$(newest_tick)"
 }
 
 @test "outbound tick (QA #1587, b1 546): ONE cap rule - before the family's full-cap date at most 100, after a REACHED date its whole cap (250); a held lock is measured (holder + age, STALE past the cadence) and never taken over" {
@@ -346,7 +353,7 @@ PY
   run -0 "$SCRIPT"
   wait
   [ ! -s "$CALLS" ]
-  grep -q "STALE: tick pid 4242 has held .*tick.lock for 9[0-9][0-9][0-9]s (> cadence 7200s); this tick exits, nothing taken over" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "STALE: tick pid 4242 has held .*tick.lock for 9[0-9][0-9][0-9]s (> cadence 7200s); this tick exits, nothing taken over" "$(newest_tick)"
 }
 
 @test "outbound tick (QA #1587): a started family is bounded in TIME - none starts without its reserve before the deadline, and the apply is cut to what fits" {
@@ -354,7 +361,7 @@ PY
   # 5000 s in, cap 250 x 2 x 4 s + 300 s = 2300 s worst case > the 6900 s deadline: no family starts
   CVO_TICK_ELAPSED0=5000 CVO_CHECK_S_PER_USER=4 CVO_RESERVE_PAD_S=300 CVO_TICK_HARD_S=6900 run -0 "$SCRIPT"
   if grep -q -- "--check-recipients" "$CALLS"; then false; fi
-  grep -q "its worst case is 2300s (cap 250); it does not fit before the 6900s deadline; this family waits for the next tick" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "its worst case is 2300s (cap 250); it does not fit before the 6900s deadline; this family waits for the next tick" "$(newest_tick)"
   # 30 s before the deadline at 15 s a user: a started family applies at most 2
   : > "$CALLS"; rm -f "$CVO_LEDGER.segments.jsonl"
   CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6870 CVO_CHECK_S_PER_USER=0 CVO_RESERVE_PAD_S=0 CVO_TICK_HARD_S=6900 CVO_APPLY_S_PER_USER=15 run -0 "$SCRIPT"
@@ -369,11 +376,11 @@ PY
   t0=$(date +%s)
   STUB_SLEEP_MODE=dry-run STUB_SLEEP=30 CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6897 CVO_TICK_HARD_S=6900 run -1 "$SCRIPT"
   [ $(( $(date +%s) - t0 )) -lt 25 ]
-  grep -q "check hit the 6900s deadline (read-only, stopped); the tick ends" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "check hit the 6900s deadline (read-only, stopped); the tick ends" "$(newest_tick)"
   [ "$(applies)" -eq 0 ]; [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]
   # the lock is released: the next tick runs at once
   run -0 "$SCRIPT"
-  if grep -q "another tick holds" "$CVO_OUT_ROOT"/*/tick.log; then false; fi
+  if grep -q "another tick holds" "$(newest_tick)"; then false; fi
   # an apply that runs past the deadline: stopped there, and the kill file is written (a human reads it back)
   : > "$CALLS"; rm -f "$CVO_LEDGER.segments.jsonl"
   STUB_SLEEP_MODE=apply STUB_SLEEP=30 CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6880 CVO_TICK_HARD_S=6900 CVO_APPLY_S_PER_USER=1 run -1 "$SCRIPT"
@@ -389,7 +396,7 @@ PY
   t0=$(date +%s)
   STUB_OWING_SLEEP=30 CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6897 CVO_TICK_HARD_S=6900 run -1 "$SCRIPT"
   [ $(( $(date +%s) - t0 )) -lt 25 ]
-  grep -q "owing builder failed" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "owing builder failed" "$(newest_tick)"
   if grep -q -- "--check-recipients" "$CALLS"; then false; fi
 }
 
@@ -406,7 +413,7 @@ PY
   grep -q -- "--campaign uvn-status .*--mode dry-run --max-users 250 --check-recipients --outcomes-json" "$CALLS"
   grep -q -- "--campaign status-doc-received --wording received .*--check-recipients" "$CALLS"
   grep -q -- "--max-users 250 --preview" "$CALLS"                 # the whole batch is rendered (the judge's items)
-  out="$(ls -d "$CVO_OUT_ROOT"/*)"
+  out="$(newest_out)"
   [ -s "$out/uvn-status-paid-check.json" ] && [ -s "$out/uvn-status-paid-bodies/1.txt" ]
   grep -q "DRY-RUN tick (no send)" "$out/tick.log"
   # the families not deployed on this tree are logged, never silently missing
@@ -476,7 +483,7 @@ PY
   run -0 "$SCRIPT"
   grep -q "^owing-uvn.json 1,2$" "$CALLS.lists"
   if grep -qE "^owing(-uvn)?\.json .*\b(8|9)\b" "$CALLS.lists"; then false; fi
-  grep -q "owing classes:.*review_hold" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "owing classes:.*review_hold" "$(newest_tick)"
 }
 
 @test "outbound tick (r5 776, the 08:00Z dry tick): the split list verifies - the BUILDER writes owing-uvn.json, the tick never edits a built list" {
@@ -486,7 +493,7 @@ PY
   # a builder that writes no class list stops the tick before any family
   rm -rf "$CVO_OUT_ROOT"; : > "$CALLS"
   STUB_NO_CLASS_OUT=1 run -1 "$SCRIPT"
-  grep -q "owing builder wrote no uvn-class list; tick stops" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "owing builder wrote no uvn-class list; tick stops" "$(newest_tick)"
   if grep -q "^uvn-status " "$CALLS"; then false; fi
 }
 
@@ -494,7 +501,7 @@ PY
   touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
   STUB_PREVIEW_FAIL=1 run -1 "$SCRIPT"
   [ "$(applies)" -eq 0 ]
-  grep -q "body sample failed; no apply" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "body sample failed; no apply" "$(newest_tick)"
 }
 
 @test "outbound tick (r5 / QA #1541): the per-UTC-day segment cap from the RUNNER's segment record - at cap 0 applies, below it the remainder, and the runner gets the cap to enforce under its lock" {
@@ -520,12 +527,12 @@ PY
   run -0 "$SCRIPT"
   if grep -q -- "--segment free --campaign uvn-status .*--mode apply" "$CALLS"; then false; fi      # free uvn at its 250 cap
   grep -q -- "--segment paid --campaign uvn-status .*--mode apply --max-users 99 --segment-daily-cap 100" "$CALLS"   # 100 - 1
-  grep -q "daily cap reached for uvn-status/free" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "daily cap reached for uvn-status/free" "$(newest_tick)"
   # QA #1541: an unreadable policy = no apply anywhere AND a stop + kill file (never a silent "cap reached")
   : > "$CALLS"; CVO_POLICY="$TEST_TMPDIR/missing.json" run -1 "$SCRIPT"
   [ "$(applies)" -eq 0 ]
   grep -q "cap source unreadable" "$CVO_ETC/credit-verify-outbound.disabled"
-  if grep -q "daily cap reached .*unreadable" "$CVO_OUT_ROOT"/*/tick.log; then false; fi
+  if grep -q "daily cap reached .*unreadable" "$(newest_tick)"; then false; fi
 }
 
 @test "outbound tick (QA #1545 finding 3): a PARTIAL apply (rows written, nonzero exit) is never rescued by an UNMEASURED zero-read - the tick stops" {
@@ -536,7 +543,7 @@ PY
   STUB_APPLY_RC=1 STUB_ZERO_RC=2 STUB_ZERO_RC_ONCE=1 run -1 "$SCRIPT"
   [ -e "$CALLS.zero" ]                                    # rows existed, so the read ran over them
   grep -q "zero-read UNMEASURED" "$CALLS.page"            # ruling B still pages the same minute
-  grep -q "apply FAILED (rc=1) AND the zero-read was UNMEASURED" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "apply FAILED (rc=1) AND the zero-read was UNMEASURED" "$(newest_tick)"
   [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]      # a failed apply stops the tick; it is not a zero-read STOP
 }
 
@@ -546,14 +553,14 @@ PY
   # Slack is down while the zero-read is UNMEASURED: page() would have swallowed it (it always returned 0), leaving
   # the outage in local logs only while the unattended tick kept running.
   STUB_ZERO_RC=2 STUB_ZERO_RC_ONCE=1 STUB_SLACK_RC=1 run -1 "$SCRIPT"
-  grep -q "the PAGE FAILED" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "the PAGE FAILED" "$(newest_tick)"
   if ! ls "$CVO_STATE"/zero-unmeasured-undelivered-* >/dev/null 2>&1; then false; fi   # durable, not just a log line
   grep -q "zero-read UNMEASURED (undelivered page)" "$CVO_STATE"/zero-unmeasured-undelivered-*
   # Slack is back: the next tick RETRIES the persisted text at the top, clears the marker, then runs its families
   : > "$CALLS.page"
   run -0 "$SCRIPT"
   grep -q "RETRY (page previously undelivered)" "$CALLS.page"
-  grep -q "retried the undelivered zero-read page" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "retried the undelivered zero-read page" "$(newest_tick)"
   if ls "$CVO_STATE"/zero-unmeasured-undelivered-* >/dev/null 2>&1; then false; fi   # cleared only once Slack accepted
   # and a marker that STILL cannot be delivered fails the tick closed before any family runs
   printf 'zero-read UNMEASURED (undelivered page) x ledger 1-2: y\n' > "$CVO_STATE/zero-unmeasured-undelivered-uvn-status-free"
@@ -561,7 +568,7 @@ PY
   STUB_SLACK_RC=1 run -1 "$SCRIPT"
   [ "$(applies)" -eq 0 ]
   if ! ls "$CVO_STATE"/zero-unmeasured-undelivered-* >/dev/null 2>&1; then false; fi
-  grep -q "still cannot be delivered" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "still cannot be delivered" "$(newest_tick)"
   rm -f "$CVO_STATE"/zero-unmeasured-undelivered-*
 }
 
@@ -580,16 +587,19 @@ PY
   rm -f "$CVO_ETC/credit-verify-outbound.disabled" "$CALLS.zero" "$CALLS.page" "$CVO_STATE"/zero-unmeasured-*
   STUB_ZERO_RC=2 STUB_ZERO_RC_ONCE=1 run -0 "$SCRIPT"
   [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]; [ ! -e "$CVO_STATE/credit-verify-outbound.disabled" ]
-  grep -q "zero-read UNMEASURED" "$CVO_OUT_ROOT"/*/tick.log
-  grep -q "this segment stops here" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "zero-read UNMEASURED" "$(newest_tick)"
+  grep -q "this segment stops here" "$(newest_tick)"
   grep -q "zero-read UNMEASURED" "$CALLS.page"                    # #clio_devops paged the same minute
   if ls "$CVO_STATE"/zero-unmeasured-* >/dev/null 2>&1; then false; fi   # no persistent marker: no indefinite wedge
   python3 - "$CVO_OUT_ROOT" <<'PY'
 import glob, json, sys
 # the batch's outcomes balance per user: each user in the batch's ledger range carries the zero-read verdict on their row
-app = glob.glob(sys.argv[1] + "/*/uvn-status-free-apply.json")
-assert app, "no uvn-status-paid apply outcomes"
-d = json.load(open(app[0]))
+# QA on #1406 / Fable r3 note 2: OUT_ROOT is keyed by a MINUTE-resolution STAMP, and this test runs the script three
+# times in sequence - when a minute boundary falls between them there are two out dirs and the lexicographically first
+# is the STOP run's, which carries no zero_read verdict (the flake: AssertionError None). Read the NEWEST run's.
+app = sorted(glob.glob(sys.argv[1] + "/*/uvn-status-free-apply.json"))
+assert app, "no uvn-status-free apply outcomes"
+d = json.load(open(app[-1]))
 rows = d.get("outcomes") or []
 assert d.get("zero_read", {}).get("verdict") == "UNMEASURED", d.get("zero_read")
 assert rows, "no outcome rows"
@@ -617,7 +627,7 @@ PY
   : > "$CALLS"
   CVO_ZERO_READ="$TEST_TMPDIR/missing.py" run -0 "$SCRIPT"
   [ "$(applies)" -eq 0 ]; [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]
-  grep -q "LIVE REFUSED: the zero-read reader" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "LIVE REFUSED: the zero-read reader" "$(newest_tick)"
 }
 
 @test "outbound tick (QA #1541): a ledger read that fails AFTER an apply kills - never an empty -1 range that skips the zero-read" {
@@ -636,7 +646,7 @@ PY
   STUB_HEALTH_RC=3 run -1 "$SCRIPT"
   [ ! -e "$TEST_TMPDIR/no-such-dir/kill" ]
   grep -q "health check rc=3" "$CVO_STATE/credit-verify-outbound.disabled"
-  grep -q "wrote $CVO_STATE/credit-verify-outbound.disabled" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "wrote $CVO_STATE/credit-verify-outbound.disabled" "$(newest_tick)"
   : > "$CALLS"
   run -0 "$SCRIPT"
   [[ "$output" == *"nothing runs"* ]]; [ ! -s "$CALLS" ]
@@ -649,7 +659,7 @@ PY
   ln -s "$TEST_TMPDIR/no-such-dir/kill2" "$CVO_STATE/credit-verify-outbound.disabled"
   STUB_HEALTH_RC=3 run "$SCRIPT"
   [ "$status" -eq 3 ]
-  grep -q "BOTH kill-file writes FAILED" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "BOTH kill-file writes FAILED" "$(newest_tick)"
 }
 
 @test "outbound tick (Fable 10-30): a FRAUD HIT - an account this apply sent to is held by the lens - writes the kill file; an unreadable lens kills too" {
@@ -723,11 +733,11 @@ J
   : > "$CALLS"; rm -f "$CVO_LEDGER.segments.jsonl"
   CVO_DOW=6 run -0 "$SCRIPT"
   first="$(grep -m1 -- "--mode apply" "$CALLS" | cut -d' ' -f1)"; [ "$first" = "claim-proof-ask" ]
-  grep -q "weekend: claim families first" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "weekend: claim families first" "$(newest_tick)"
   : > "$CALLS"; rm -f "$CVO_CLAIM_LIST"
   run -0 "$SCRIPT"
   if grep -q "^claim-" "$CALLS"; then false; fi
-  grep -q "claim families: no claim list" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "claim families: no claim list" "$(newest_tick)"
 }
 
 @test "outbound tick (QA #1545 round 9): an UNMEASURED continuation still ADVANCES the paged family's cursor - a persistent unreadable source cannot starve every entry behind the same page" {
@@ -736,8 +746,8 @@ J
   # page and a source that stayed unreadable for hours starved the rest of the family while the tick looked clean.
   [ ! -e "$CVO_STATE/cursor-uvn-status-free" ]
   STUB_ZERO_RC=2 run -0 "$SCRIPT"
-  grep -q "uvn-status-free zero-read UNMEASURED" "$CVO_OUT_ROOT"/*/tick.log
-  grep -q "uvn-status-free page: entries from 0 this tick; next tick starts at 200" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "uvn-status-free zero-read UNMEASURED" "$(newest_tick)"
+  grep -q "uvn-status-free page: entries from 0 this tick; next tick starts at 200" "$(newest_tick)"
   [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]
   # the cursor moved to the end of the page this apply walked (200 = the harness's page size), as a clean apply moves it
   [ -r "$CVO_STATE/cursor-uvn-status-free" ]
@@ -745,7 +755,7 @@ J
   # and the NEXT tick therefore walks the NEXT page, not the same one again
   rm -rf "$CVO_OUT_ROOT"; : > "$CALLS"
   STUB_ZERO_RC=2 run -0 "$SCRIPT"
-  grep -q "uvn-status-free page: entries from 200 this tick" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "uvn-status-free page: entries from 200 this tick" "$(newest_tick)"
 }
 
 @test "outbound tick (QA #1545 round 8): a zero-read CRASH (exit 1, no verdict line) is UNMEASURED, not a STOP - a transient timeout must never write the global kill file" {
@@ -755,8 +765,8 @@ J
   STUB_ZERO_CRASH=1 run -0 "$SCRIPT"
   [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]
   [ ! -e "$CVO_STATE/credit-verify-outbound.disabled" ]
-  grep -q "zero-read UNMEASURED" "$CVO_OUT_ROOT"/*/tick.log
-  grep -q "printed no verdict (a crash is not a STOP)" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "zero-read UNMEASURED" "$(newest_tick)"
+  grep -q "printed no verdict (a crash is not a STOP)" "$(newest_tick)"
   # the negative control stays exactly as it was: a real STOP verdict still kills the run
   rm -f "$CALLS.zero" "$CALLS.page" "$CVO_STATE"/zero-unmeasured-*
   STUB_ZERO_RC=1 run -1 "$SCRIPT"
@@ -794,7 +804,7 @@ J
   grep -q -- "^claim-status --list .*/claims-filtered.json --segment free .*--mode apply" "$CALLS"
   if grep -q -- "^claim-proof-ask .*--mode apply" "$CALLS"; then false; fi
   grep -q -- "^claim-proof-ask --list .*--mode dry-run .*--check-recipients" "$CALLS"
-  grep -q "claim-proof-ask-free: SIGNED-only" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "claim-proof-ask-free: SIGNED-only" "$(newest_tick)"
 }
 
 @test "outbound tick (p1 638 / r5 639): a claim list not signed on EXACTLY the deployed head is never checked - list_signed_on_stale, loud; the credit families still run" {
@@ -806,7 +816,7 @@ J
     printf '{"generated_at": "x", "signed_on": "%s", "claims": [{"claim_id": 1, "user_id": 5}]}' "$signed" > "$CVO_CLAIM_LIST"
     run -0 "$SCRIPT"
     if grep -q "^claim-" "$CALLS"; then false; fi                     # no check, no preview, no apply
-    grep -q "claim families: list_signed_on_stale" "$CVO_OUT_ROOT"/*/tick.log
+    grep -q "claim families: list_signed_on_stale" "$(newest_tick)"
     grep -q "^uvn-status .*--mode apply" "$CALLS"                     # the credit families still ran
   done
   # an unreadable deployed sha refuses too, whatever the list says
@@ -829,7 +839,7 @@ J
   grep -q "^claims-filtered.json 6$" "$CALLS.lists"
   if grep -qE "^claims(-filtered)?\.json .*\b5\b" "$CALLS.lists"; then false; fi
   if grep -q -- "--list $CVO_STATE.claims.json" "$CALLS"; then false; fi      # the raw list never reaches a runner
-  grep -q "1 held out by the exclude file" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "1 held out by the exclude file" "$(newest_tick)"
   rm -f "$CVO_ETC/credit-verify-outbound.disabled"; : > "$CALLS"
   printf 'not json' > "$CVO_STATE.claims.json"
   CVO_CLAIM_LIST="$CVO_STATE.claims.json" run -1 "$SCRIPT"
@@ -849,13 +859,13 @@ PY
   first="$(grep -m1 -- "--mode apply" "$CALLS")"
   [[ "$first" == *"reply-due.json --segment paid --campaign uvn-status"*"--max-users 100"* ]]
   grep -q -- "reply-due.json --segment free --campaign uvn-status .*--mode apply" "$CALLS"
-  grep -q "audiences: reply_due" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "audiences: reply_due" "$(newest_tick)"
   grep -q "^reply-due.json 41$" "$CALLS.lists"
   # a deployed scan that fails stops the tick before any send
   : > "$CALLS"; printf 'import sys; sys.exit(3)\n' > "$TEST_TMPDIR/rd_scan.py"
   CVO_RD_SCAN="$TEST_TMPDIR/rd_scan.py" run -1 "$SCRIPT"
   [ "$(applies)" -eq 0 ]
-  grep -q "reply_due builder failed" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "reply_due builder failed" "$(newest_tick)"
 }
 
 @test "outbound tick (firstmate 031 cap accounting): reply_due answers charge the SAME uvn-status daily row and the shared credit cap" {
@@ -885,13 +895,13 @@ PY
   STUB_RUNNER_CAP_MODEL=1 run -0 "$SCRIPT"
   # r5 626: no env-moved cap - the runner reads the policy file itself, so the 401st message of the day still goes
   [ "$(sort -u "$CALLS.env")" = "- -" ]
-  grep -q "uvn-status-free APPLY (rc=0): UVN STATUS: 250 sent" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "uvn-status-free APPLY (rc=0): UVN STATUS: 250 sent" "$(newest_tick)"
 }
 
 @test "outbound tick (p1 579): the bodies and the judge's items are the check's ACCEPTED set, never the rendered cap; every artefact names the deploy head" {
   printf '%s\n' "$(printf 'a%.0s' $(seq 40))" > "$CVO_DEPLOYED_SHA"
   STUB_PREVIEW_USERS=1,2,3 STUB_ACCEPTED=1,3 run -0 "$SCRIPT"
-  o=$(ls -d "$CVO_OUT_ROOT"/*/ | head -1)
+  o=$(newest_out)
   [ "$(cd "$o/uvn-status-paid-bodies" && ls *.txt | tr '\n' ' ')" = "1.txt 3.txt " ]
   [ -e "$o/uvn-status-paid-bodies-not-accepted/2.txt" ] && [ -e "$o/uvn-status-paid-bodies-not-accepted/2.facts.json" ]
   [ "$(jq -r .user_id "$o/uvn-status-paid-items.jsonl" | tr '\n' ' ')" = "1 3 " ]
@@ -905,12 +915,12 @@ PY
   # QA #1610: a check that accepted NOBODY (live flags on) is a no-apply family outcome, never an apply over the list
   rm -rf "$CVO_OUT_ROOT"; : > "$CALLS"
   STUB_ACCEPTED="" run -0 env STUB_ACCEPTED= "$SCRIPT"
-  grep -q "uvn-status-paid: the check accepted nobody; no apply this tick" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "uvn-status-paid: the check accepted nobody; no apply this tick" "$(newest_tick)"
   if grep -q -- "--segment paid --campaign uvn-status .*--mode apply" "$CALLS"; then false; fi
   for e in "STUB_ACCEPTED=1,4" "STUB_NO_ACCEPTED=1"; do
     rm -rf "$CVO_OUT_ROOT"; : > "$CALLS"
     run -1 env "$e" "$SCRIPT"
-    grep -q "the rendered bodies are not the check's accepted set" "$CVO_OUT_ROOT"/*/tick.log
+    grep -q "the rendered bodies are not the check's accepted set" "$(newest_tick)"
     [ "$(applies)" = 0 ]
   done
 }
