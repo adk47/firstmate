@@ -261,16 +261,25 @@ def verify_facts(lst: dict[str, Any], query: uvn_status.Query) -> list[str]:
     return diffs
 
 
+# throughput (firstmate 651, measured on node-8 01:0xZ 11-02): `lower(CAST(id AS varchar)) IN (...)` cannot be pushed down
+# to Postgres, so every call was a ~14 s full scan of credit_requests (once PER USER in payloads(): ~14 s/user). A typed
+# `id IN (UUID '...')` predicate is pushed down: ~2 s for up to 200 ids, same rows. Above ~256 values Trino compacts the
+# domain and the pushdown is lost (400 ids measured 14 s), so chunks stay at 200. Only canonical 8-4-4-4-12 hex ids are
+# ever quoted (a UUID literal that does not parse would fail the whole query).
+UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+UUID_CHUNK = 200
+
+
 def core_proof_requested(rids: list[str], query: uvn_status.Query) -> set[str]:
     """The requests core itself sent its generic proof request on (metadata.proofRequest). p1 178: that is NOT an
     earlier L11c ask (L11c is the specific follow-up after we read their reply); it is recorded on the ledger row as
     ask_class=core_proof_request for the audit. The 7-day gate (core_notice) still applies."""
-    ids = sorted({r.lower() for r in rids if re.fullmatch(r"[0-9a-fA-F-]{36}", r)})
+    ids = sorted({r.lower() for r in rids if UUID_RE.fullmatch(r)})
     out: set[str] = set()
-    for i in range(0, len(ids), 200):
-        chunk = ",".join(f"'{r}'" for r in ids[i:i + 200])
+    for i in range(0, len(ids), UUID_CHUNK):
+        chunk = ",".join(f"UUID '{r}'" for r in ids[i:i + UUID_CHUNK])
         for row in query("SELECT lower(CAST(id AS varchar)), CAST(json_extract(metadata, '$.proofRequest') IS NOT NULL AS varchar) "
-                         f"FROM postgresql_core.public.credit_requests WHERE lower(CAST(id AS varchar)) IN ({chunk}) "
+                         f"FROM postgresql_core.public.credit_requests WHERE id IN ({chunk}) "
                          "AND /* core_proof_request */ 1 = 1"):
             if len(row) >= 2 and str(row[1]).lower() == "true":
                 out.add(str(row[0]).lower())
@@ -340,9 +349,8 @@ def payloads(users: list[dict[str, Any]], query: uvn_status.Query, asked: set[st
                 held.append(f"user {uid}: {need} ({n_docs} documents in one group > {MAX_DOC_GROUP}: for a person)")
                 continue
             credits = [{k: v for k, v in rows[a["request_id"].lower()].items() if not k.startswith("_")} for a in group]
-            core_asked = core_proof_requested([c["request_id"] for c in credits], query)
             for c in credits:
-                c["ask_class"] = "core_proof_request" if c["request_id"].lower() in core_asked else "asked"
+                c["ask_class"] = "asked"        # set below from ONE batched core_proof_requested read for all payloads
             out.append({"user": {"email": acct["email"], "id": str(uid), "professional_id": acct["professional_id"],
                                  "auth_id": acct["auth_id"], "first_name": acct.get("first_name", ""),
                                  "filing_conversation": newest["filing_conversation"]},
@@ -357,6 +365,10 @@ def payloads(users: list[dict[str, Any]], query: uvn_status.Query, asked: set[st
         if len(out) == n_out:            # QA / r5 #1582: no payload for this user - say why (per user, never a count)
             why = held[-1].split(": ", 1)[1] if len(held) > n_held else "no pending, not-yet-asked request (re-read now)"
             _filtered(filtered_out, uid, why)
+    core_asked = core_proof_requested([c["request_id"] for p in out for c in p["credits"]], query)
+    for p in out:
+        for c in p["credits"]:
+            c["ask_class"] = "core_proof_request" if c["request_id"].lower() in core_asked else "asked"
     return out
 
 

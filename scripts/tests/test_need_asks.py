@@ -119,6 +119,44 @@ class NeedAsksTest(unittest.TestCase):
         _rep, gate = self.send_(lst)
         self.assertEqual({c["ask_class"] for c in gate.calls[0][1]["credits"]}, {"asked"})
 
+    def test_core_proof_requested_is_one_pushed_down_read_for_every_payload(self):
+        # throughput (firstmate 651, measured 11-02): lower(CAST(id)) IN (...) is a ~14 s full scan and it ran once PER
+        # USER; the read is now a typed `id IN (UUID '...')` predicate (pushed down: ~2 s per <= 200 ids) run ONCE for all
+        # payloads, and ask_class is unchanged
+        ids = [f"{i:08x}-2222-3333-4444-555555555555" for i in range(450)]
+        seen = []
+
+        def q(sql):
+            seen.append(sql)
+            return [[ids[7], "true"], [ids[300], "true"]]
+        bad = "1111111122223333-4444-5555555555555-"                     # 36 hex/dash chars, not a UUID (fails UUID '')
+        got = na.core_proof_requested(ids + ["not-a-uuid", "11111111-2222-3333-4444-55555555555Z", bad], q)
+        self.assertEqual(got, {ids[7], ids[300]})
+        self.assertEqual(len(seen), 3)                                   # 200 + 200 + 50
+        for sql in seen:
+            self.assertNotIn("lower(CAST(id", sql.split("FROM")[1])     # the predicate, not the select list
+            self.assertLessEqual(sql.count("UUID '"), 200)
+            self.assertNotIn("not-a-uuid", sql)
+            self.assertNotIn("5555555Z", sql)
+            self.assertNotIn(bad, sql)
+        self.assertIn(f"WHERE id IN (UUID '{ids[0]}'", seen[0])
+        calls = []
+        real = na.core_proof_requested
+
+        def counting(rids, query):
+            calls.append(list(rids))
+            return {rids[0].lower()} if rids else set()
+        users = self.build()["users"]
+        with unittest.mock.patch.object(na, "core_proof_requested", counting):
+            ps = na.payloads(users, self.q)
+        self.assertGreater(len(ps), 1)
+        self.assertEqual(len(calls), 1)                                  # one read for all payloads, never per user
+        self.assertEqual(sorted(calls[0]), sorted(c["request_id"] for p in ps for c in p["credits"]))
+        classes = [c["ask_class"] for p in ps for c in p["credits"]]
+        self.assertEqual(classes.count("core_proof_request"), 1)
+        self.assertEqual(classes[0], "core_proof_request")
+        self.assertIs(na.core_proof_requested, real)
+
     def test_the_audience(self):
         res = self.build()
         first = res
