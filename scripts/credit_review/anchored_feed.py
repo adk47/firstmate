@@ -66,7 +66,7 @@ def feed(candidates: list[Candidate], *, outcomes: Callable[[list[str]], dict[st
     ids = [f"dsp_verdicts:{c.verdict_id}" for c in candidates]
     oc = outcomes(ids) if ids else {}
     fx = facts([c.request_id for c in candidates]) if candidates else {}
-    picked: list[tuple[Candidate, str]] = []
+    eligible: list[tuple[Candidate, str]] = []
     for c in candidates:
         o = oc.get(f"dsp_verdicts:{c.verdict_id}")
         f = fx.get(c.request_id)
@@ -80,16 +80,31 @@ def feed(candidates: list[Candidate], *, outcomes: Callable[[list[str]], dict[st
             res.skip("user_mismatch")
         elif f.metadata_source == "client" or f.popularity is None or not 1 <= f.popularity < 60:
             res.skip("big_or_unknown_popularity")
-        elif len(picked) >= limit:
-            res.skip("over_limit_next_run")
         else:
-            picked.append((c, f.status))
-    built = build([c for c, _ in picked]) if picked else {}
+            eligible.append((c, f.status))
+    # QA #1555: the limit counts BUILT rows, never picked ones. A refused build (a capture older than 24h, a packet
+    # that no longer re-verifies APPROVE) must not consume a slot, or the earliest eligible row - refused on every
+    # rerun - starves every later, fresh APPROVE and no tray is ever emitted for them. Build in windows of `limit`
+    # so a refusal is replaced by the next candidate instead of ending the run.
+    picked: list[tuple[Candidate, str]] = []
+    window = max(limit, 1)
+    i = 0
+    while i < len(eligible) and len(picked) < limit:
+        chunk = eligible[i:i + window]
+        i += len(chunk)
+        built = build([c for c, _ in chunk])
+        for c, status in chunk:
+            if len(picked) >= limit:                      # the window over-filled: the rest waits for the next run
+                res.skip("over_limit_next_run")
+                continue
+            why = built.get(c.request_id, "unknown")
+            if why != "built":
+                res.skip(f"anchor_not_built:{why}")
+                continue
+            picked.append((c, status))
+    for _c, _status in eligible[i:]:
+        res.skip("over_limit_next_run")
     for c, status in picked:
-        why = built.get(c.request_id, "unknown")
-        if why != "built":
-            res.skip(f"anchor_not_built:{why}")
-            continue
         res.built.append(c)
         t = res.trays.setdefault(status, {
             "action": "approve", "expected_status": status, "order": "as_listed",

@@ -132,6 +132,30 @@ class FeedTest(unittest.TestCase):
         res, seen = self.run_feed(cands, limit=1)
         self.assertEqual((seen, res.skipped), ([[R1]], {"over_limit_next_run": 1}))
 
+    def test_a_refused_first_candidate_does_not_starve_the_next_one(self):
+        """QA #1555: candidate 1's anchor build refuses (stale capture), and with limit 1 the feed used to pick it,
+        count it against the limit, and mark candidate 2 over_limit_next_run - on every rerun, forever."""
+        cands = [af.Candidate(1, R1, 42, True), af.Candidate(2, R2, 42, False)]
+        res, seen = self.run_feed(cands, built={R1: "refused:capture older than 24h", R2: "built"}, limit=1)
+        self.assertEqual(seen, [[R1], [R2]])                   # the refusal is replaced by the NEXT candidate
+        self.assertEqual([c.request_id for c in res.built], [R2])   # the fresh one is built, not starved
+        self.assertEqual(res.skipped, {"anchor_not_built": 1})
+        self.assertEqual([r["request_id"] for r in res.trays["unverified"]["rows"]], [R2])
+
+    def test_the_limit_counts_built_rows_not_picked_ones(self):
+        R3 = "33333333-3333-4333-8333-333333333333"
+        cands = [af.Candidate(1, R1, 42, True), af.Candidate(2, R2, 42, True), af.Candidate(3, R3, 42, True)]
+        res, seen = self.run_feed(cands, built={R1: "refused:stale", R2: "built", R3: "built"}, limit=2)
+        self.assertEqual([c.request_id for c in res.built], [R2, R3])
+        self.assertEqual((res.skipped, seen), ({"anchor_not_built": 1}, [[R1, R2], [R3]]))
+
+    def test_a_window_over_filling_the_limit_waits_for_the_next_run(self):
+        R3 = "33333333-3333-4333-8333-333333333333"
+        cands = [af.Candidate(1, R1, 42, True), af.Candidate(2, R2, 42, True), af.Candidate(3, R3, 42, True)]
+        res, _seen = self.run_feed(cands, limit=1)             # every build succeeds: the window is 1 each time
+        self.assertEqual([c.request_id for c in res.built], [R1])
+        self.assertEqual(res.skipped, {"over_limit_next_run": 2})
+
     def test_candidates_read_the_latest_verify_verdict_only(self):
         _p, con = store([(R1, "APPROVE", "verify", "dsp-1", True, True), (R1, "WAIT", "verify", "dsp-1", True, True),
                          (R2, "APPROVE", "verify", "dsp-1", True, True), (R2, "WAIT", "eval", "dsp-1", True, True)])
