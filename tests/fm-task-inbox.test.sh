@@ -482,6 +482,31 @@ test_worker_deletion_is_repaired() {
   pass "inbox: unread records deleted by a worker's own cleanup are restored"
 }
 
+# A worker's cleanup can leave a record's hidden link as its only remaining
+# copy. That sequence is still taken, so the next enqueue must order after it: a
+# reissued name would make the repair pass skip the deleted record (the name is
+# present again, carrying different bytes) and the acknowledgement of the new
+# record would then retire the shadow, losing the original instruction for good.
+test_deleted_record_keeps_its_sequence() {
+  local state first second
+  state="$TMP_ROOT/deleted-keeps-seq/state"; mkdir -p "$state"
+  first=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "instruction A")
+  rm -f "$state/t1.inbox/"*.msg
+  second=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "instruction B")
+  [ "$second" != "$first" ] \
+    || fail "an enqueue reused the sequence of a record that survives only as its hidden link"
+  inbox_lib "$state" fm_task_inbox_restore_unhandled "$state" t1 >/dev/null 2>&1
+  grep -qF 'instruction A' "$first" || fail "the deleted instruction was not restored under its own name"
+  grep -qF 'instruction B' "$second" || fail "the repair pass disturbed the later instruction"
+  # Acknowledging the later record must not retire the earlier one's link.
+  "$ROOT/bin/fm-inbox-ack.sh" "$state" t1 "${second##*/}" >/dev/null 2>&1 \
+    || fail "the ack helper refused the later record"
+  inbox_lib "$state" fm_task_inbox_restore_unhandled "$state" t1 >/dev/null 2>&1
+  grep -qF 'instruction A' "$first" \
+    || fail "acknowledging the later record lost the instruction whose only link was hidden"
+  pass "inbox: a record surviving only as its hidden link keeps its sequence"
+}
+
 # A coalescing tick supersedes its predecessor for good: the retired record's
 # shadow must go with it, or the repair pass would resurrect every old tick.
 test_coalesced_superseded_record_is_not_resurrected() {
@@ -793,6 +818,7 @@ test_writer_reclaims_stale_lock_without_clobbering
 test_concurrent_acknowledgements_lose_nothing
 test_write_refuses_an_unconfirmed_record
 test_worker_deletion_is_repaired
+test_deleted_record_keeps_its_sequence
 test_coalesced_superseded_record_is_not_resurrected
 test_ack_helper_acknowledges_safely
 test_writer_retries_after_a_vanished_lock_collision

@@ -69,9 +69,11 @@
 #      retired when the record is acknowledged (moved into handled/) or
 #      superseded by a coalescing write.
 #
-# Sequence numbers are never reused within a task: allocation scans both the
-# inbox root and handled/, so a message is processed at most once per worker
-# lifetime even if every doorbell is duplicated.
+# Sequence numbers are never reused within a task: allocation scans the inbox
+# root, handled/, and the shadow directory, so a message is processed at most
+# once per worker lifetime even if every doorbell is duplicated, and a record
+# whose only remaining link is its shadow keeps that sequence instead of having
+# the name handed to a different message.
 #
 # Coalescing (fm_task_inbox_write_coalesced): a periodic idempotent
 # instruction - a scheduled lane tick - must not pile up behind a worker that
@@ -122,6 +124,10 @@ _FM_TASK_INBOX_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_FM_TASK_INBOX_LIB_DIR/fm-backend.sh"
 
 FM_TASK_INBOX_SCHEMA='fm-task-inbox.v1'
+# Bound on publish attempts: every attempt that loses the slot advances to the
+# next free sequence, so this only caps the pathological case of an inbox whose
+# sequence names keep being taken by other writers.
+_FM_TASK_INBOX_PUBLISH_ATTEMPTS=1000
 # Hidden home of the second link to each unhandled record. Names carry no .msg
 # suffix so no reader, counter, or glob mistake them for inbox records.
 FM_TASK_INBOX_SHADOW_DIR='.unhandled'
@@ -176,8 +182,14 @@ fm_task_inbox_seq_of() {  # <basename>
   printf '%s' "$((10#$n))"
 }
 
-# Next unused sequence, scanning the inbox root AND handled/ so an
-# acknowledged sequence is never reissued. Caller must hold .seq.lock.
+# Next unused sequence, scanning the inbox root, handled/, and the shadow
+# directory, so an acknowledged sequence is never reissued and a record that
+# survives only as its hidden link still reserves its number. Reserving the
+# shadow matters: without it a worker's cleanup followed by the next enqueue
+# reuses that name, the repair pass then finds the name present with different
+# bytes and skips the deleted record, and acknowledging the new record retires
+# the shadow - the deleted instruction is gone with no delivery and no error.
+# Caller must hold .seq.lock.
 fm_task_inbox_next_seq() {  # <inbox-dir>
   local dir=$1 max=0 d f n
   for d in "$dir" "$dir/handled"; do
@@ -186,6 +198,13 @@ fm_task_inbox_next_seq() {  # <inbox-dir>
       n=$(fm_task_inbox_seq_of "${f##*/}") || continue
       [ "$n" -le "$max" ] || max=$n
     done
+  done
+  for f in "$(fm_task_inbox_shadow_dir "$dir")"/*; do
+    [ -e "$f" ] || continue
+    n=${f##*/}
+    case "$n" in ''|*[!0-9]*) continue ;; esac
+    n=$((10#$n))
+    [ "$n" -le "$max" ] || max=$n
   done
   printf '%03d' "$((max + 1))"
 }
@@ -264,11 +283,10 @@ fm_task_inbox_verify() {  # <record-path> <text>
 # taken between the scan and the link costs one re-scan and the next sequence.
 # Caller normally holds .seq.lock, which keeps a collision rare; the guarantee
 # holds with or without it, because the link is the arbiter.
-FM_TASK_INBOX_PUBLISH_ATTEMPTS_DEFAULT=1000
 _fm_task_inbox_write_record_locked() {  # <inbox-dir> <text> [delivery-mode] [coalesce-key]
   local dir=$1 text=$2 delivery_mode=${3:-} coalesce=${4:-}
-  local seq tmp rec attempt=0 attempts=${FM_TASK_INBOX_PUBLISH_ATTEMPTS:-}
-  case "$attempts" in ''|*[!0-9]*|0) attempts=$FM_TASK_INBOX_PUBLISH_ATTEMPTS_DEFAULT ;; esac
+  local seq tmp rec attempt=0
+  local attempts=$_FM_TASK_INBOX_PUBLISH_ATTEMPTS
   tmp=$(mktemp "$dir/.staging.XXXXXX") || return 1
   if ! {
     printf 'schema=%s\n' "$FM_TASK_INBOX_SCHEMA"
