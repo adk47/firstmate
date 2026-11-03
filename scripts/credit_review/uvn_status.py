@@ -509,12 +509,28 @@ STALE_GMAIL_REASON = "stale_source:cs-gmail"
 # a stage with a named owner and a clock: waiting on the third party (the support@ mailbox; the captain's passkey), due
 # the 16:00Z cutoff + 24 h. Listed on every run, counted paid / free (the line the captain card shows).
 GMAIL_HOLD_WAITING_ON = "third_party:gmail"
-GMAIL_HOLD_DUE_AT = "2026-11-02T16:00:00Z"   # [key=gmail-o-forward] (Fable 495 (3)): moved on the /o run
+
+
+def read_gmail_hold(path: str = POLICY_PATH) -> dict[str, Any]:
+    """The Gmail hold from the policy file's holds.gmail ([key=dated-windows-are-data], l1 ruling 2026-11-02): the wait
+    owner and the due date are DATA - a date literal in a shipped script is a CI red with a countdown on it. {} = the
+    file or the key is unreadable; the caller then states the due date as unknown rather than inventing one."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            hold = json.load(fh)["holds"]["gmail"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+    return hold if isinstance(hold, dict) else {}
+
+
+_GMAIL_HOLD = read_gmail_hold()
 
 
 def gmail_held(uid: Any, paid: bool) -> dict[str, Any]:
-    return {"user": str(uid), "result": "held", "reason": STALE_GMAIL_REASON, "waiting_on": GMAIL_HOLD_WAITING_ON,
-            "due_at": GMAIL_HOLD_DUE_AT, "paid": bool(paid)}
+    due = _GMAIL_HOLD.get("due_at")
+    return {"user": str(uid), "result": "held", "reason": STALE_GMAIL_REASON,
+            "waiting_on": _GMAIL_HOLD.get("waiting_on") or GMAIL_HOLD_WAITING_ON,
+            "due_at": due if isinstance(due, str) and due else None, "paid": bool(paid)}
 
 
 def _no_ask_of(roles: str, pop: Any, vd_raw: Any, meta_raw: Any) -> str:
@@ -1389,6 +1405,8 @@ def render(report: UvnReport, mode: str, segment: str) -> str:
     gh = [o for o in report.outcomes if o.get("reason") == STALE_GMAIL_REASON]
     if gh:
         paid = sum(1 for o in gh if o.get("paid"))
-        parts.append(f"held by the Gmail outage: {paid} paid / {len(gh) - paid} free (waiting on {GMAIL_HOLD_WAITING_ON}, "
-                     f"due {GMAIL_HOLD_DUE_AT}; listed in the outcomes)")
+        due = gh[0].get("due_at")
+        who = gh[0].get("waiting_on") or GMAIL_HOLD_WAITING_ON    # the row's own owner, never a second opinion
+        parts.append(f"held by the Gmail outage: {paid} paid / {len(gh) - paid} free (waiting on {who}, "
+                     f"due {due or 'unknown (policy holds.gmail unreadable)'}; listed in the outcomes)")
     return ". ".join(parts) + "."

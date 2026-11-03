@@ -36,7 +36,9 @@ setup() {
 
 @test "rejects when MUSOAI_INTERCOM_TOKEN missing and customer-reply check enabled" {
   # Default behavior: customer-reply check is ON, so MUSOAI_INTERCOM_TOKEN required.
-  run env CLICKUP_API_KEY=fake -u MUSOAI_INTERCOM_TOKEN bash "$SWEEP" --dry-run
+  # env(1) parses its OPTIONS before the assignments, so "-u NAME" must come FIRST: after an assignment,
+  # "-u" is taken as the command to run and the step dies 127 (bats fails that as an unasserted non-zero run).
+  run env -u MUSOAI_INTERCOM_TOKEN CLICKUP_API_KEY=fake bash "$SWEEP" --dry-run
   # The Trino-or-curl call will likely fail before this, but the script must
   # at least include the Intercom token requirement in its docs.
   bash "$SWEEP" --help | grep -q "MUSOAI_INTERCOM_TOKEN"

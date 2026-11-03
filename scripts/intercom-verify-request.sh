@@ -238,13 +238,20 @@ readonly UVN_STATUS_COPY_APPROVED=1
 # Copy APPROVED: fable-copy-1030-r5/c (data/pr-review-fable-r5/copy-approvals-1030.md, under the captain's 2026-10-30
 # 13:1xZ delegation "use fable, do not wait for me"; firstmate 286), byte-for-byte.
 readonly REPLY_DUE_CORRECTION_TEXT="A correction to our earlier note here: this request does need one thing from you."
+# l1 RULING 2026-11-02 (verify-program-lead-fable-l1/ruling-o-retire-1102.md): the /o clause RETIRES. Its
+# only value is the promise "we will match it to your request", and that promise is unkeepable while Gmail is dark - the
+# premise of the bounded experiment (Gmail back inside the window) is falsified, so renewing would re-open a promise we
+# cannot honour. RETIRED, NOT DELETED: the flag, the ref and the text stay greppable so the clause can be audited, and the
+# flag is the gate - it refuses whatever the clock says. [key=dated-windows-are-data]: the window and the hold's due date
+# now live in the policy file (holds.gmail), which this gate re-reads every run, so a window closes (and an approved one
+# reopens) by a reviewed policy value without waiting on a deploy. Reopening ALSO needs this flag back at 1: a retired
+# customer promise is a new approval decision, never a config flip alone.
 # Fable FINAL [key=gmail-held-fallback] (4), r5 /o, text confirmed by p1 + Fable 10-31 12:1xZ: the ONE clause the held
 # stale_source:cs-gmail set may get (last sentence before the sign-off, once per user). [key=gmail-o-forward] (Fable 495,
 # p1 497, 10-31 21:0xZ): UNLOCKED for the signed /o batches only, inside a dated window, and only while cs-gmail is still
 # stale (the gate re-reads the frozen did-vouch set itself: a user outside it, or a fresh Gmail scan, refuses - the stop
 # rule). Rendered only under --gmail-fallback-o on an initial uvn-status ask; a reply to it waits on gmail (comm_state).
-readonly GMAIL_FALLBACK_O_APPROVED=1
-readonly GMAIL_FALLBACK_O_UNTIL="2026-11-02T16:00:00Z"
+readonly GMAIL_FALLBACK_O_APPROVED=0
 readonly GMAIL_FALLBACK_O_REF="fable-copy-1030-r5/o"
 readonly GMAIL_FALLBACK_O_TEXT="If you have already emailed it to support@muso.ai, just reply here to say so and we will match it to your request."
 readonly REPLY_DUE_CORRECTION_APPROVED=1
@@ -356,6 +363,8 @@ readonly PROD_CORE_NOTICE_HELPER="/opt/hydra/scripts/credit_review/core_notice.p
 # The send-time communication-state check for the go-live cohorts (captain 2026-10-28 18:2xZ): comm_state.py.
 readonly PROD_COMM_STATE_HELPER="/opt/hydra/scripts/credit_review/comm_state.py"
 readonly PROD_PROOF_DB="/var/lib/hydra-credit-verify/proof.sqlite"
+# [key=dated-windows-are-data]: the policy file holds the dated windows (holds.gmail: the /o clause and the Gmail hold).
+readonly PROD_POLICY="/opt/hydra/policies/credit-verify-outbound.json"
 # l1 [key=l11c-email-filed]: the identities that prove an email-filed document is the account's (= receipts.STRONG_MATCH)
 readonly EMAIL_FILED_STRONG_MATCH="professional_id authenticated_email session"
 readonly PROOF_TAG="credit-proof"
@@ -414,6 +423,30 @@ def tkey: if ((.track_id // "") | length) > 0 then "id:" + .track_id
           else "t:" + ((.track_title // "") | tnorm) + "|" + ((.artist_name // "") | tnorm) end;
 def ntracks: [ .credits[]? | tkey ] | unique | length;'
 die()    { printf 'ERROR: %s\n' "$*" >&2; exit 2; }
+# [key=dated-windows-are-data] (l1 2026-11-02): the /o window lives in the policy file, re-read on every run - a window
+# that closes must never need a deploy to close. Prints "<state> <due_at>" where state is open | closed | unreadable;
+# unreadable is its own state and the caller refuses on it (fail closed), never "not yet expired".
+gmail_o_hold() {
+  "$PY_BIN" -I -c 'import json, sys
+from datetime import datetime
+try:
+    h = json.load(open(sys.argv[1], encoding="utf-8"))["holds"]["gmail"]
+except (OSError, ValueError, KeyError, TypeError):
+    print("unreadable -"); raise SystemExit(0)
+if not isinstance(h, dict):
+    print("unreadable -"); raise SystemExit(0)
+due = h.get("due_at")
+# QA #1647 finding 2 (round 2): a due_at is only a window if it is a REAL UTC instant, not merely well shaped. A shape
+# check accepted 9999-99-99T99:99:99Z, which compares AFTER every real clock reading and opened the gate forever. So the
+# value is PARSED: strptime rejects impossible calendar/time fields, and the round trip rejects anything that parses
+# into a different string. malformed stays its own state (the FILE read fine and the VALUE is wrong).
+try:
+    if not isinstance(due, str) or datetime.strptime(due, "%Y-%m-%dT%H:%M:%SZ").strftime("%Y-%m-%dT%H:%M:%SZ") != due:
+        raise ValueError(due)
+except (TypeError, ValueError):
+    print("malformed -"); raise SystemExit(0)
+print("%s %s" % ("open" if h.get("clause_open") is True else "closed", due))' "$POLICY_JSON" 2>/dev/null || echo "unreadable -"
+}
 refuse() { printf 'REFUSED: %s\n' "$*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------------------
@@ -421,7 +454,7 @@ refuse() { printf 'REFUSED: %s\n' "$*" >&2; exit 1; }
 if [ "$TESTABLE" != "1" ]; then
   for v in INTERCOM_VERIFY_TEST_LOG_DIR INTERCOM_VERIFY_TEST_CURL_BIN INTERCOM_VERIFY_TEST_TIMEOUT_BIN \
            INTERCOM_VERIFY_TEST_LEDGER INTERCOM_VERIFY_TEST_LEDGER_HELPER INTERCOM_VERIFY_TEST_DAY \
-           INTERCOM_VERIFY_TEST_PROOF_DB INTERCOM_VERIFY_TEST_STAGE2_HELPER INTERCOM_VERIFY_TEST_CORE_NOTICE_HELPER INTERCOM_VERIFY_TEST_NOW INTERCOM_VERIFY_TEST_DISABLED_DIR INTERCOM_VERIFY_TEST_COMM_STATE_HELPER INTERCOM_VERIFY_TEST_GMO; do
+           INTERCOM_VERIFY_TEST_PROOF_DB INTERCOM_VERIFY_TEST_STAGE2_HELPER INTERCOM_VERIFY_TEST_CORE_NOTICE_HELPER INTERCOM_VERIFY_TEST_NOW INTERCOM_VERIFY_TEST_DISABLED_DIR INTERCOM_VERIFY_TEST_COMM_STATE_HELPER INTERCOM_VERIFY_TEST_GMO INTERCOM_VERIFY_TEST_POLICY; do
     [ -z "${!v:-}" ] || die "$v is not settable on a deployed copy of this script. The log, the ledger, the client and the clock are not parameters: a caller-selectable one is a send nobody can audit."
   done
   LOG_DIR="$PROD_LOG_DIR"
@@ -432,6 +465,7 @@ if [ "$TESTABLE" != "1" ]; then
   CORE_NOTICE_HELPER="$PROD_CORE_NOTICE_HELPER"
   COMM_STATE_HELPER="$PROD_COMM_STATE_HELPER"
   PROOF_DB="$PROD_PROOF_DB"
+  POLICY_JSON="$PROD_POLICY"
   CURL_BIN="/usr/bin/curl"
   JQ_BIN="/usr/bin/jq"
   TIMEOUT_BIN="/usr/bin/timeout"
@@ -446,13 +480,14 @@ else
   CORE_NOTICE_HELPER="${INTERCOM_VERIFY_TEST_CORE_NOTICE_HELPER:-$PROD_CORE_NOTICE_HELPER}"
   COMM_STATE_HELPER="${INTERCOM_VERIFY_TEST_COMM_STATE_HELPER:-$PROD_COMM_STATE_HELPER}"
   PROOF_DB="${INTERCOM_VERIFY_TEST_PROOF_DB:-$PROD_PROOF_DB}"
+  POLICY_JSON="${INTERCOM_VERIFY_TEST_POLICY:-$PROD_POLICY}"
   CURL_BIN="${INTERCOM_VERIFY_TEST_CURL_BIN:-$(command -v curl || echo /usr/bin/curl)}"
   JQ_BIN="$(command -v jq || echo /usr/bin/jq)"
   TIMEOUT_BIN="${INTERCOM_VERIFY_TEST_TIMEOUT_BIN:-$(command -v timeout || command -v gtimeout || echo /usr/bin/timeout)}"
   PY_BIN="$(command -v python3 || echo /usr/bin/python3)"
   DAY="${INTERCOM_VERIFY_TEST_DAY:-$(date -u +%Y-%m-%d)}"
 fi
-readonly LOG_DIR LEDGER LEDGER_HELPER STAGE2_HELPER CORE_NOTICE_HELPER PROOF_DB CURL_BIN JQ_BIN TIMEOUT_BIN PY_BIN DAY
+readonly LOG_DIR LEDGER LEDGER_HELPER STAGE2_HELPER CORE_NOTICE_HELPER PROOF_DB POLICY_JSON CURL_BIN JQ_BIN TIMEOUT_BIN PY_BIN DAY
 
 # ---------------------------------------------------------------------------------------
 # Arguments
@@ -895,11 +930,19 @@ fi
 if [ "$GMO" = 1 ]; then
   [ "$CAMPAIGN" = "uvn-status" ] && [ "$KIND" = "initial" ] && [ -z "$REPLY_DUE" ] \
     || refuse "--gmail-fallback-o (/o) applies to an initial uvn-status ask only, never a reply_due answer or a follow-up."
-  if [ "$ACTION" = "post" ]; then
-    [ "$GMAIL_FALLBACK_O_APPROVED" = "1" ] || refuse "/o is locked (GMAIL_FALLBACK_O_APPROVED=0). Nothing was sent or claimed."
-    [ "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \< "$GMAIL_FALLBACK_O_UNTIL" ] \
-      || refuse "/o's window closed at $GMAIL_FALLBACK_O_UNTIL (dated unlock). Nothing was sent or claimed."
-  fi
+  # l1 o-retire-1102: the flag is the gate, whatever the clock says (a future window does not reopen a retired clause),
+  # and it gates a DRY RUN too - a retired clause must not even render, or a reviewer sees a promise we cannot keep.
+  [ "$GMAIL_FALLBACK_O_APPROVED" = "1" ] || refuse "/o is retired (GMAIL_FALLBACK_O_APPROVED=0, fable-copy-1030-r5/o: the promise needs a readable Gmail; l1 ruling 2026-11-02). Nothing was sent or claimed."
+  # QA #1647 finding 1: the policy window gates EVERY path, not only a real send. A dry run that renders a promise the
+  # send would refuse is a reviewer reading a message no user can receive - so preview and post decide together.
+  o_hold="$(gmail_o_hold)"; o_state="${o_hold%% *}"; o_due="${o_hold#* }"
+  [ "$o_state" != "unreadable" ] \
+    || refuse "/o: the policy file ($POLICY_JSON) holds.gmail could not be read, so the clause's window is unknown. Nothing was sent or claimed."
+  [ "$o_state" != "malformed" ] \
+    || refuse "/o: holds.gmail.due_at is not a canonical UTC timestamp (YYYY-MM-DDTHH:MM:SSZ) in $POLICY_JSON, so the window cannot be read. Nothing was sent or claimed."
+  [ "$o_state" = "open" ] || refuse "/o is retired in the policy (holds.gmail.clause_open=false, $GMAIL_FALLBACK_O_REF). Nothing was sent or claimed."
+  [ "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \< "$o_due" ] \
+    || refuse "/o's window closed at $o_due (holds.gmail.due_at, dated unlock). Nothing was sent or claimed."
 fi
 if [ -n "$THREAD" ]; then
   case "$CAMPAIGN" in

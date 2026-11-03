@@ -70,6 +70,8 @@ if os.environ.get("STUB_COMM_STATE_JSON"):
 print(json.dumps({"hold": False, "state": "asked", "reasons": []}))
 PY
   export INTERCOM_VERIFY_TEST_COMM_STATE_HELPER="$TEST_TMPDIR/comm_state.py"
+  # [key=dated-windows-are-data]: the /o window is read from the policy, so the suite reads the REPO policy by default
+  export INTERCOM_VERIFY_TEST_POLICY="$HYDRA_REPO/policies/credit-verify-outbound.json"
   mkdir -p "$INTERCOM_VERIFY_TEST_LOG_DIR"
 
   # curl stub: answers like Intercom per (method, path). Every call is logged as
@@ -3514,53 +3516,121 @@ Caroline, Muso Support" ]
   [ "$(notes)" -eq 0 ]
 }
 
-@test "[key=gmail-o-forward] /o: byte-exact as the LAST sentence before the sign-off, only under --gmail-fallback-o, only to the frozen did-vouch set while cs-gmail is stale" {
+@test "[key=gmail-o-forward] /o RETIRES (l1 o-retire-1102): the flag is the gate whatever the clock says; the text, ref and flag stay auditable; a future window does not reopen it" {
+  # a deleted clause cannot be audited: the flag, the ref and the exact text stay in the code, and the flag is the gate
+  grep -qx 'readonly GMAIL_FALLBACK_O_APPROVED=0' "$REAL_SCRIPT"
+  grep -qx 'readonly GMAIL_FALLBACK_O_REF="fable-copy-1030-r5/o"' "$REAL_SCRIPT"
   grep -qx 'readonly GMAIL_FALLBACK_O_TEXT="If you have already emailed it to support@muso.ai, just reply here to say so and we will match it to your request."' "$REAL_SCRIPT"
-  O='If you have already emailed it to support@muso.ai, just reply here to say so and we will match it to your request.'
-  # the /o window is a DATED unlock (GMAIL_FALLBACK_O_UNTIL). A test must never depend on that deadline still being in
-  # the future: it passed at 2026-11-02T16:00Z, and every case below then failed on "window closed" before reaching the
-  # rule it is about. Derive OPEN copies for the cases that test WHY /o is allowed or refused; the CLOSED case derives
-  # its own copy dated in the past (and the committed script itself is now closed - that is pinned at the end).
-  sed 's/^readonly GMAIL_FALLBACK_O_UNTIL=.*/readonly GMAIL_FALLBACK_O_UNTIL="2099-01-01T00:00:00Z"/' "$UVN" > "$TEST_TMPDIR/uvn-open.sh"
-  sed 's/^readonly GMAIL_FALLBACK_O_UNTIL=.*/readonly GMAIL_FALLBACK_O_UNTIL="2099-01-01T00:00:00Z"/' "$LOCKED" > "$TEST_TMPDIR/locked-open.sh"
-  chmod +x "$TEST_TMPDIR/uvn-open.sh" "$TEST_TMPDIR/locked-open.sh"
-  OPEN="$TEST_TMPDIR/uvn-open.sh"; LOCKED_OPEN="$TEST_TMPDIR/locked-open.sh"
+  # [key=dated-windows-are-data]: no date literal of this family is left in the shipped script
+  # QA #1647: `! grep` is EXEMPT from set -e in bats, so an unreadable script would pass this line green. An explicit
+  # failing assertion cannot be exempted.
+  if grep -nE '^readonly GMAIL_FALLBACK_O_UNTIL=|^readonly GMAIL_HOLD_DUE_AT=' "$REAL_SCRIPT"; then false; fi
   credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
-  # without the flag: the plain ask, no /o
+  # RETIRED: refused on a DRY RUN too (a retired clause must not even render), whatever the policy's window says
+  INTERCOM_VERIFY_TEST_GMO=held run -1 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --gmail-fallback-o
+  [[ "$output" == *"/o is retired (GMAIL_FALLBACK_O_APPROVED=0"* ]]
+  [ ! -f "$INTERCOM_VERIFY_TEST_LEDGER" ] || [ "$(sql "SELECT count(*) FROM verify_messages")" = "0" ]
+  # ... and on a REAL send, and the campaign/kind bound still runs first
+  INTERCOM_VERIFY_TEST_GMO=held run -1 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --gmail-fallback-o
+  [[ "$output" == *"/o is retired"* ]]
+  [ "$(posts)" -eq 0 ]
+  INTERCOM_VERIFY_TEST_GMO=held run -1 "$LOCKED" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --gmail-fallback-o
+  [[ "$output" == *"applies to an initial uvn-status ask only"* ]]
+  INTERCOM_VERIFY_TEST_GMO=held run -1 "$UVN" send --campaign uvn-status --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --gmail-fallback-o
+  [[ "$output" == *"applies to an initial uvn-status ask only"* ]]
+  # a future RE-APPROVAL: flip the flag in a copy; the POLICY then gates a real send (closed / expired / unreadable all refuse)
+  sed 's/^readonly GMAIL_FALLBACK_O_APPROVED=0$/readonly GMAIL_FALLBACK_O_APPROVED=1/' "$UVN" > "$TEST_TMPDIR/uvn-o-approved.sh"; chmod +x "$TEST_TMPDIR/uvn-o-approved.sh"
+  grep -qx 'readonly GMAIL_FALLBACK_O_APPROVED=1' "$TEST_TMPDIR/uvn-o-approved.sh"
+  # the committed policy holds.gmail.clause_open is false: a real send refuses
+  INTERCOM_VERIFY_TEST_GMO=held run -1 "$TEST_TMPDIR/uvn-o-approved.sh" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --gmail-fallback-o
+  [[ "$output" == *"/o is retired in the policy (holds.gmail.clause_open=false"* ]]
+  [ "$(posts)" -eq 0 ]
+  # the did-vouch read runs after the policy checks: a non-member is refused by the policy first
+  python3 - "$HYDRA_REPO/policies/credit-verify-outbound.json" "$TEST_TMPDIR/policy-open.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["holds"]["gmail"].update({"clause_open": True, "due_at": "2099-01-01T00:00:00Z"})
+json.dump(d, open(sys.argv[2], "w"))
+PY
+  # an open window whose date has passed refuses (the dated unlock)
+  python3 - "$HYDRA_REPO/policies/credit-verify-outbound.json" "$TEST_TMPDIR/policy-expired.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["holds"]["gmail"].update({"clause_open": True, "due_at": "2020-01-01T00:00:00Z"})
+json.dump(d, open(sys.argv[2], "w"))
+PY
+  INTERCOM_VERIFY_TEST_POLICY="$TEST_TMPDIR/policy-expired.json" INTERCOM_VERIFY_TEST_GMO=held run -1 "$TEST_TMPDIR/uvn-o-approved.sh" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --gmail-fallback-o
+  [[ "$output" == *"/o's window closed at 2020-01-01T00:00:00Z"* ]]
+  [ "$(posts)" -eq 0 ]
+  # QA #1647 finding 1: a DRY RUN decides exactly like a real send - a preview must never render a promise the send
+  # would refuse, or a reviewer approves copy no user can receive
+  INTERCOM_VERIFY_TEST_GMO=held run -1 "$TEST_TMPDIR/uvn-o-approved.sh" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --gmail-fallback-o
+  [[ "$output" == *"/o is retired in the policy (holds.gmail.clause_open=false"* ]]
+  INTERCOM_VERIFY_TEST_POLICY="$TEST_TMPDIR/policy-expired.json" INTERCOM_VERIFY_TEST_GMO=held run -1 "$TEST_TMPDIR/uvn-o-approved.sh" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --gmail-fallback-o
+  [[ "$output" == *"/o's window closed at 2020-01-01T00:00:00Z"* ]]
+  # QA #1647 finding 2: due_at must be a CANONICAL UTC timestamp. "z" sorts after every real clock reading, so the old
+  # lexicographic compare opened the gate on a date nobody can read. malformed fails closed on the send AND the dry run.
+  # both a SHAPE failure ("z") and an IMPOSSIBLE-BUT-WELL-SHAPED instant (9999-99-99T99:99:99Z): a shape-only check let
+  # the latter through, and it compares after every real clock reading, so the gate stayed open forever
+  for bad_due in z 9999-99-99T99:99:99Z 2026-02-30T00:00:00Z; do
+    python3 - "$HYDRA_REPO/policies/credit-verify-outbound.json" "$TEST_TMPDIR/policy-malformed-date.json" "$bad_due" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["holds"]["gmail"].update({"clause_open": True, "due_at": sys.argv[3]})
+json.dump(d, open(sys.argv[2], "w"))
+PY
+    INTERCOM_VERIFY_TEST_POLICY="$TEST_TMPDIR/policy-malformed-date.json" INTERCOM_VERIFY_TEST_GMO=held run -1 "$TEST_TMPDIR/uvn-o-approved.sh" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --gmail-fallback-o
+    [[ "$output" == *"is not a canonical UTC timestamp"* ]]
+    INTERCOM_VERIFY_TEST_POLICY="$TEST_TMPDIR/policy-malformed-date.json" INTERCOM_VERIFY_TEST_GMO=held run -1 "$TEST_TMPDIR/uvn-o-approved.sh" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --gmail-fallback-o
+    [[ "$output" == *"is not a canonical UTC timestamp"* ]]
+    [ "$(posts)" -eq 0 ]
+  done
+  # an unreadable or malformed policy is UNKNOWN, never "not yet expired" (fail closed)
+  INTERCOM_VERIFY_TEST_POLICY="$TEST_TMPDIR/no-such-policy.json" INTERCOM_VERIFY_TEST_GMO=held run -1 "$TEST_TMPDIR/uvn-o-approved.sh" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --gmail-fallback-o
+  [[ "$output" == *"holds.gmail could not be read"* ]]
+  python3 - "$TEST_TMPDIR/bad-policy.json" <<'PY'
+import json, sys
+json.dump({"holds": {"gmail": "open"}}, open(sys.argv[1], "w"))
+PY
+  INTERCOM_VERIFY_TEST_POLICY="$TEST_TMPDIR/bad-policy.json" INTERCOM_VERIFY_TEST_GMO=held run -1 "$TEST_TMPDIR/uvn-o-approved.sh" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --gmail-fallback-o
+  [[ "$output" == *"holds.gmail could not be read"* ]]
+  [ "$(posts)" -eq 0 ]
+  # the closed-window REFUSAL stays proven for a flipped flag: the policy opens the window and the clock has not passed,
+  # so the /o clause renders and a real send records it (the render path is intact for a future approved clause)
+  INTERCOM_VERIFY_TEST_POLICY="$TEST_TMPDIR/policy-open.json" INTERCOM_VERIFY_TEST_GMO=held run -0 "$TEST_TMPDIR/uvn-o-approved.sh" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --gmail-fallback-o
+  [[ "$(rendered .body | plain)" == *"support@muso.ai"* ]]
+  [ "$(posts)" -eq 0 ]
+  [ ! -f "$INTERCOM_VERIFY_TEST_LEDGER" ] || [ "$(sql "SELECT count(*) FROM verify_messages")" = "0" ]
+  # and the retired body never carries the clause
   run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
   [[ "$(rendered .body | plain)" != *"support@muso.ai"* ]]
-  # a held member: /o is the last line before "Thank you," (html and text)
-  INTERCOM_VERIFY_TEST_GMO=held run -0 "$OPEN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --gmail-fallback-o
-  body="$(rendered .body | plain)"
-  [[ "$body" == "Hi Jane, a quick status update"*"$O"$'\n''Thank you,'$'\n''Caroline, Muso Support' ]]
-  [ "$(printf '%s' "$body" | grep -c 'support@muso.ai')" -eq 1 ]
-  # not a member / Gmail fresh again (the stop rule) / unreadable: refused, nothing claimed
-  INTERCOM_VERIFY_TEST_GMO=not_held run -1 "$OPEN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --gmail-fallback-o
-  [[ "$output" == *"/o goes only to the frozen did-vouch set"* ]]
-  INTERCOM_VERIFY_TEST_GMO=fresh run -1 "$OPEN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --gmail-fallback-o
-  [[ "$output" == *"/o is retired: cs-gmail reads fresh again"* ]]
-  INTERCOM_VERIFY_TEST_GMO=garbage run -1 "$OPEN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --gmail-fallback-o
-  [[ "$output" == *"could not be read"* ]]
-  # only an initial uvn-status ask: never a status note, never a reply_due answer
-  INTERCOM_VERIFY_TEST_GMO=held run -1 "$LOCKED_OPEN" send --campaign status-team-review --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run --gmail-fallback-o
-  [[ "$output" == *"applies to an initial uvn-status ask only"* ]]
-  INTERCOM_VERIFY_TEST_GMO=held run -1 "$OPEN" send --campaign uvn-status --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --gmail-fallback-o
-  [[ "$output" == *"applies to an initial uvn-status ask only"* ]]
-  # a real send records the /o approval on the ledger row
-  INTERCOM_VERIFY_TEST_GMO=held run -0 "$OPEN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --gmail-fallback-o
-  [[ "$output" == "POSTED email"* ]]
-  [[ "$(msg .body | plain)" == *"$O"$'\n''Thank you,'* ]]
-  [[ "$(sql "SELECT approval_ref FROM verify_messages WHERE campaign='uvn-status'")" == *"gmail-fallback fable-copy-1030-r5/o"* ]]
-  [[ "$(sql "SELECT variant FROM verify_messages WHERE campaign='uvn-status'")" == *"o"* ]]   # p1 615
-  # the dated window: after GMAIL_FALLBACK_O_UNTIL a real /o send is refused
-  sed 's/^readonly GMAIL_FALLBACK_O_UNTIL=.*/readonly GMAIL_FALLBACK_O_UNTIL="2020-01-01T00:00:00Z"/' "$OPEN" > "$TEST_TMPDIR/uvn-closed.sh"; chmod +x "$TEST_TMPDIR/uvn-closed.sh"
-  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
-  INTERCOM_VERIFY_TEST_GMO=held run -1 "$TEST_TMPDIR/uvn-closed.sh" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --gmail-fallback-o
-  [[ "$output" == *"/o's window closed"* ]]
-  # and the COMMITTED script is past its unlock today: a real /o send is refused, nothing claimed
-  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
-  INTERCOM_VERIFY_TEST_GMO=held run -1 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --gmail-fallback-o
-  [[ "$output" == *"/o's window closed"* ]]
+}
+
+@test "[key=dated-windows-are-data] the Gmail hold's due date and owner are read from the policy, and an unreadable policy says UNKNOWN - never a date the code invented" {
+  python3 - "$HYDRA_REPO/policies/credit-verify-outbound.json" <<'PY'
+import json, sys
+h = json.load(open(sys.argv[1]))["holds"]["gmail"]
+assert set(h) == {"waiting_on", "due_at", "clause_ref", "clause_open"}, h
+assert h["clause_open"] is False and h["clause_ref"] == "fable-copy-1030-r5/o"
+PY
+  python3 - "$HYDRA_REPO/scripts/credit_review/uvn_status.py" <<'PY'
+import sys, json, tempfile, os
+sys.path.insert(0, sys.argv[1].rsplit("/", 2)[0])   # .../scripts, so credit_review imports
+from credit_review import uvn_status as u
+assert u.gmail_held(7, False)["due_at"] == "2026-11-02T16:00:00Z"   # the policy's value, not a code literal
+assert u.gmail_held(7, False)["waiting_on"] == "third_party:gmail"
+bad = os.path.join(tempfile.mkdtemp(), "p.json")
+for body in ('{"holds": {"gmail": "open"}}', '{"holds": {}}', "not json", "[]"):
+    open(bad, "w").write(body)
+    assert u.read_gmail_hold(bad) == {}, body
+    u._GMAIL_HOLD = u.read_gmail_hold(bad)
+    row = u.gmail_held(7, True)
+    assert row["due_at"] is None and row["waiting_on"] == "third_party:gmail", row
+    rep = u.UvnReport()
+    rep.outcomes.append(row)
+    text = u.render(rep, "dry-run", "paid")
+    assert "due unknown (policy holds.gmail unreadable)" in text, text
+PY
 }
 
 @test "reply_due correction: LOCKED = deferred, never sent without it; unlocked = the ONE sentence first, the approved body unchanged after it" {
