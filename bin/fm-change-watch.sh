@@ -349,7 +349,7 @@ cw_budget_start() {
   CW_FORGE_START=$(cw_now)
   CW_POD_FACTS_CACHE=''
   CW_WORKLOADS_CACHE=''
-  rm -f -- "$CW_POOL_BAD_HOSTS_FILE" 2>/dev/null || true
+  [ -z "$CW_POOL_BAD_HOSTS_FILE" ] || : > "$CW_POOL_BAD_HOSTS_FILE" 2>/dev/null || true
 }
 cw_within_budget() { [ $(( $(cw_now) - CW_BUDGET_START )) -lt "$SAMPLE_DEADLINE_SECONDS" ]; }
 cw_budget_left() {
@@ -1373,13 +1373,18 @@ sys.exit(1)
 # on the same connect timeout once per target. The record is a file because every
 # pool read runs inside a command substitution, where a variable assignment dies
 # with its subshell.
-CW_POOL_BAD_HOSTS_FILE="${TMPDIR:-/tmp}/fm-cw-pool-unreachable.$$"
+# The path is made once per process with mktemp so no other process can
+# pre-place it, and it is unlinked when the process exits.
+CW_POOL_BAD_HOSTS_FILE=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-cw-pool-unreachable.XXXXXX" 2>/dev/null) || CW_POOL_BAD_HOSTS_FILE=''
+cw_pool_memo_clear() {
+  [ -z "$CW_POOL_BAD_HOSTS_FILE" ] || rm -f -- "$CW_POOL_BAD_HOSTS_FILE" 2>/dev/null || true
+}
 cw_pool_console() {  # <host> <port>
   local host=$1 port=$2 left out rc
   command -v ssh >/dev/null 2>&1 || return 1
   case "$port" in ''|*[!0-9]*) return 1 ;; esac
   case "$host" in ''|*[!A-Za-z0-9.-]*) return 1 ;; esac
-  if grep -qxF -- "$host" "$CW_POOL_BAD_HOSTS_FILE" 2>/dev/null; then
+  if [ -n "$CW_POOL_BAD_HOSTS_FILE" ] && grep -qxF -- "$host" "$CW_POOL_BAD_HOSTS_FILE" 2>/dev/null; then
     printf '%s: console unreachable (recorded earlier in this read)\n' "$host" >&2
     return 1
   fi
@@ -1389,7 +1394,8 @@ cw_pool_console() {  # <host> <port>
     "sudo -u postgres psql -h $POOLER_SOCKET_DIR -p $port -U pgbouncer pgbouncer -Ac 'SHOW POOLS'")
   rc=$?
   if [ "$rc" -ne 0 ]; then
-    printf '%s\n' "$host" >> "$CW_POOL_BAD_HOSTS_FILE" 2>/dev/null || true
+    [ -z "$CW_POOL_BAD_HOSTS_FILE" ] \
+      || printf '%s\n' "$host" >> "$CW_POOL_BAD_HOSTS_FILE" 2>/dev/null || true
     return "$rc"
   fi
   printf '%s\n' "$out"
@@ -1717,7 +1723,7 @@ cw_capture_baseline() {  # <watch-id> <baseline-epoch>
   done < <(cw_metric_keys "$id")
   [ "$err" = /dev/null ] || rm -f -- "$err" 2>/dev/null || true
   printf '%s' "$out" | cw_write "$(cw_baseline_path "$id")"
-  rm -f -- "$CW_POOL_BAD_HOSTS_FILE" 2>/dev/null || true
+  cw_pool_memo_clear
 }
 
 cw_baseline_value() {  # <watch-id> <key>
@@ -1821,7 +1827,7 @@ cw_take_sample() {  # <watch-id> <offset-seconds> <sample-epoch> <baseline-epoch
     [ -z "$value" ] || cw_set_previous_value "$id" "$key" "$value"
   done < <(cw_metric_keys "$id")
   [ "$err" = /dev/null ] || rm -f -- "$err" 2>/dev/null || true
-  rm -f -- "$CW_POOL_BAD_HOSTS_FILE" 2>/dev/null || true
+  cw_pool_memo_clear
   [ -n "$first" ] && printf '%s\n' "$first"
   return 0
 }
@@ -2352,7 +2358,7 @@ cmd_drive() {
   CW_DRIVE_IDENTITY_FILE=$(cw_drive_identity_path "$id")
   printf '%s\n' "$$" > "$CW_DRIVE_PIDFILE" || die "cannot record the drive pid"
   printf '%s\n' "$identity" > "$CW_DRIVE_IDENTITY_FILE" || die "cannot record the drive identity"
-  trap 'rm -f -- "$CW_DRIVE_PIDFILE" "$CW_DRIVE_IDENTITY_FILE" "$CW_POOL_BAD_HOSTS_FILE"' EXIT
+  trap 'cw_pool_memo_clear; rm -f -- "$CW_DRIVE_PIDFILE" "$CW_DRIVE_IDENTITY_FILE"' EXIT
   trap cw_drive_interrupted TERM INT HUP
 
   while IFS=$'\t' read -r offset epoch; do
@@ -2552,6 +2558,7 @@ cmd_doctor() {
 # Every command that reads the cluster resolves the kubeconfig first, so a
 # by-hand reproduction and the armed watch read the same cluster.
 cw_kubeconfig_init
+trap cw_pool_memo_clear EXIT
 
 case "${1:-}" in
   register) [ "$#" -eq 3 ] || usage; shift; cmd_register "$@" ;;
