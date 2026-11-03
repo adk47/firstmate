@@ -123,7 +123,10 @@ def r1_receipt(facts: dict[str, Any]) -> bool:
 # distinct (track, role) pairs): one track with 2+ distinct roles = "your <roles> credit requests for"; one track with
 # one role = "your credit request for"; 2+ tracks = "your credit requests for" (no roles named); always "the document
 # you sent, and it's in our review queue", so a document_count of 2+ is a stop (b1 656: count agreement in code).
-_R1_LEAD = re.compile(r"\byour (.{0,200}?)credit (requests?) for\b")
+# No length cap on the role lead (QA 1635): the renderer has none, and a role list is only bounded by the facts, so a
+# fixed cap is another false stop waiting for a long enough receipt (ten roles named "Assistant Mixing Engineer 1..10"
+# is a 292-character lead). The lead is compared with the facts' own roles below, so bounding it buys nothing.
+_R1_LEAD = re.compile(r"\byour (.*?)credit (requests?) for\b")
 
 
 def _andjoin(xs: list[str]) -> str:

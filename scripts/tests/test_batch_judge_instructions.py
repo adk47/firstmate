@@ -225,6 +225,16 @@ class R1RolesCoverageTests(unittest.TestCase):
         ten = [f"Role {c}" for c in "JIHGFEDCBA"]
         self.assertIsNone(bi.coded_stop("<p>Hi Jo, a quick update on your " + ", ".join(ten[:-1]) + " and " + ten[-1] +
                                         " credit requests for &quot;X&quot;" + tail, {**f, "tracks": [["X", sorted(ten)]]}, []))
+        # QA 1635: the lead has no length cap, because the renderer has none - ten long role names make a 292-character
+        # lead and a fixed cap (the old 200) false-stopped it as "other", holding the whole batch
+        long_roles = [f"Assistant Mixing Engineer {i}" for i in range(1, 11)]
+        long_body = ("<p>Hi Jo, a quick update on your " + ", ".join(long_roles[:-1]) + " and " + long_roles[-1] +
+                     " credit requests for &quot;X&quot;" + tail)
+        self.assertGreater(len(", ".join(long_roles)), 200)
+        self.assertIsNone(bi.coded_stop(long_body, {**f, "tracks": [["X", long_roles]]}, []))
+        self.assertIsNone(bi.coded_stop(long_body, {**f, "tracks": [["X", sorted(long_roles)]]}, []))
+        self.assertEqual(bi.coded_stop(long_body.replace("Engineer 7", "Engineer 77"), {**f, "tracks": [["X", long_roles]]}, [])[0],
+                         "facts_mismatch")
         # a role repeated in the facts is ONE role (track_roles dedupes), so the facts are the "one" shape: a plural phrase
         # is a number stop and a named role is a facts stop - the doubled name never becomes two roles
         dup = {**f, "tracks": [["X", ["Mixing", "Mixing"]]]}
