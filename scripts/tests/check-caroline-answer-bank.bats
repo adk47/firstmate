@@ -54,13 +54,18 @@ PY
 }
 
 @test "CAN FAIL: a pending entry whose copy is already live must drop its marker" {
-  # plant the GDPR v2 acknowledgement (the pendingAnchor entries) into the anchor file
-  node --experimental-strip-types --no-warnings -e "
-    import('$BANK').then((m) => { for (const e of m.ANSWER_BANK) if (e.pendingAnchor) console.log(e.text + '\n'); });
-  " >> "$FAKE/workspaces/support/reference/gdpr-erasure-requests.md"
+  # #1619 landed the GDPR v2 copy and dropped its markers; re-mark one live entry as pending (the marker is not part
+  # of the pinned hash, so only the "already live" rule can catch it)
+  python3 - "$BANK" <<'PY'
+import sys; p = sys.argv[1]; s = open(p).read()
+a = '    id: "gdpr_slot_no_link",\n'
+assert s.count(a) == 1
+s = s.replace(a, a + '    pendingAnchor: "https://github.com/Muso-AI/hydra/pull/1619",\n')
+open(p, "w").write(s)
+PY
   run_gate
   [ "$status" -eq 1 ]
-  [[ "$output" == *"drop pendingAnchor"* ]]
+  [[ "$output" == *"gdpr_slot_no_link"*"drop pendingAnchor"* ]]
 }
 
 @test "CAN FAIL: an anchor file that does not exist is caught" {

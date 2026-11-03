@@ -25,7 +25,7 @@
  * `node --experimental-strip-types` to dump the bank, with no plugin build.
  */
 
-export const BANK_VERSION = "2026-11-01.2";
+export const BANK_VERSION = "2026-11-01.4";
 
 export interface BankEntry {
   /** Stable id: the guard's flags, the red-team cases and the ledger name it. */
@@ -153,16 +153,14 @@ export const ANSWER_BANK: readonly BankEntry[] = [
     intents: ["gdpr_erasure", "delete_my_data", "remove_my_profile"],
     source: "gdpr-ack-v2-and-arpad-1101 §2",
     anchor: "reference/gdpr-erasure-requests.md",
-    pendingAnchor: "https://github.com/Muso-AI/hydra/pull/1619",
     lead: "we have your request to remove your personal data",
     text:
       "Thank you, we have your request to remove your personal data from Muso, received {date}. Here is how it works.\n\n" +
       "1. Confirm it's you. The quickest way: open the page in the Muso app and claim it, that proves it on the spot. Or reply " +
-      "from the email address on your Muso account, if you have one. If neither applies, send the link to the page and the name " +
-      "on it as it appears on your ID; for a page that carries your name, that is enough. If you are writing for someone else, " +
-      "send their written authorisation.\n\n" +
-      "2. We hide the page. As soon as we've confirmed it's you, the page comes out of Muso search and public view (within a " +
-      "day). If your request raises a legal matter, we hide it immediately.\n\n" +
+      "from the email address on your Muso account, if you have one. If neither applies, send the link to the page and your name " +
+      "as it appears on your ID. If you are writing for someone else, send their written authorisation.\n\n" +
+      "2. We hide the page. As soon as we've confirmed it's you, the page comes out of Muso search and public view. If your " +
+      "request raises a legal matter, we hide it immediately.\n\n" +
       "3. Written confirmation on this thread, within one month of today, listing exactly what was done. Any account you hold is " +
       "closed and taken out of use on request; what has been deleted is stated in that confirmation.\n\n" +
       "Credit records on published works go through a separate formal review, and the written response covers them.",
@@ -172,7 +170,6 @@ export const ANSWER_BANK: readonly BankEntry[] = [
     intents: ["gdpr_erasure"],
     source: "gdpr-ack-v2-and-arpad-1101 §2 fixed slot",
     anchor: "reference/gdpr-erasure-requests.md",
-    pendingAnchor: "https://github.com/Muso-AI/hydra/pull/1619",
     text: "To get started, reply with the link to the Muso page.",
   },
   {
@@ -180,10 +177,9 @@ export const ANSWER_BANK: readonly BankEntry[] = [
     intents: ["gdpr_erasure"],
     source: "gdpr-ack-v2-and-arpad-1101 §2 fixed slot",
     anchor: "reference/gdpr-erasure-requests.md",
-    pendingAnchor: "https://github.com/Muso-AI/hydra/pull/1619",
     text:
-      "1. Confirm it's you. The quickest way: open the page in the Muso app and claim it. Otherwise, because the page carries " +
-      "your name, we will confirm it from that.",
+      "1. Confirm it's you. The quickest way: open the page in the Muso app and claim it. Otherwise, reply with your name as it " +
+      "appears on your ID; if the page is unclaimed and carries that name, the team can confirm it from that.",
   },
   {
     id: "hidden_stays",

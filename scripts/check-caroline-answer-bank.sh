@@ -15,8 +15,8 @@ set -euo pipefail
 # Changing a line: edit answer-bank.ts AND the anchor file, bump BANK_VERSION, update PINNED below, and get the copy
 # owner's ruling (caroline-teach-c1 ships, Fable r5 rules).
 
-PINNED_VERSION="2026-11-01.2"
-PINNED_SHA256="ffa5a48e130ef48e91317cf2b0627e85b9682940da9d11b84af65422e095f343"
+PINNED_VERSION="2026-11-01.4"
+PINNED_SHA256="38be7f678c53d32198585f151e94c0fec6ea4211c35e692895a8ac678386db72"
 
 ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 REL="plugins/intercom/src/answer-bank.ts"

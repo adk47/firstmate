@@ -4,9 +4,10 @@ How to handle "delete my data" requests that invoke GDPR, UK GDPR, the "right to
 forgotten", or erasure of personal data – as distinct from a plain subscription cancel
 or a simple account-deletion request (common-issues Row #10 covers the disambiguation).
 
-**Why this is its own flow:** Muso deletes account data on request, but factual music
-credits on published works go through a formal legal review on our side and are often
-retained. The written legal response ALWAYS comes from the team, never from Caroline.
+**Why this is its own flow:** an account is closed and taken out of use on request, but
+factual music credits on published works go through a formal legal review on our side and
+are often retained. Nothing is promised as deleted: what was deleted is stated only in the
+team's written confirmation. The written legal response ALWAYS comes from the team, never from Caroline.
 The team is on a statutory clock (one month from the day the request arrives), so file
 the handoff immediately – the same conversation the request is made in.
 
@@ -26,8 +27,9 @@ Row #1 / Row #10 – not this flow.
 ## Hard rules (never break these)
 
 1. **Never promise that credits will be removed**, and never say "all your data will
-   be deleted". Account data can be deleted; credit records go through a formal review
-   and the outcome is the team's call, not yours.
+   be deleted" or that anything gets deleted. An account is closed and taken
+   out of use; credit records go through a formal review and the outcome is the team's
+   call, not yours.
 2. **Never state or argue Muso's legal position.** No legal article numbers, no "the
    law allows us to keep it", and NEVER "it's public information anyway" – that framing
    is explicitly banned. If they push on the legal side, say the team's written
@@ -39,23 +41,48 @@ Row #1 / Row #10 – not this flow.
 
 ## Resolution path
 
-1. **Approved acknowledgement** (first reply, same conversation, always; gdpr-ruling 2026-10-29 §2, verbatim with {date} = the day the request arrived):
+1. **Approved acknowledgement** (first reply, same conversation, always; GDPR acknowledgement v2, ruled 2026-11-01, replaces the 10-29 text). Send it verbatim, with {date} = the day the request arrived. Pick the fixed slots below; never edit a sentence.
 
-   <!-- approved: gdpr-ruling-for-jan §2 -->
-   > Thank you, we have your request to remove your personal data from Muso, received {date}. Here is how it works: we confirm that the page is about you, we take the page out of Muso search and public view, and you receive our written confirmation on this thread within one month of today. Account data, your login, email and personal details, is deleted on request. Credit records on published works go through a separate formal review and our written response will cover them.
+   <!-- approved: gdpr-ack-v2-1101 -->
+   > Thank you, we have your request to remove your personal data from Muso, received {date}. Here is how it works.
+   >
+   > **1. Confirm it's you.** The quickest way: open the page in the Muso app and claim it, that proves it on the spot. Or reply from the email address on your Muso account, if you have one. If neither applies, send the link to the page and your name as it appears on your ID. If you are writing for someone else, send their written authorisation.
+   >
+   > **2. We hide the page.** As soon as we've confirmed it's you, the page comes out of Muso search and public view. If your request raises a legal matter, we hide it immediately.
+   >
+   > **3. Written confirmation on this thread**, within one month of today, listing exactly what was done. Any account you hold is closed and taken out of use on request; what has been deleted is stated in that confirmation.
+   >
+   > Credit records on published works go through a separate formal review, and the written response covers them.
 
-   If no profile link was given, add:
-   > So we act on the right pages, please reply with the link(s) to the Muso page(s) concerned.
+   Fixed slots (pick, never edit):
+   - **No Muso page link in their message:** append
+     > To get started, reply with the link to the Muso page.
+   - **A link is present and the page's name is the sender's own name** (the name they sign with or their email name): step 1 reads instead. It is a condition, never a promise: whether the name confirms them is the team's call (path C below: unclaimed pages only; claimed, big-name or high-credit pages go to a person).
+     > **1. Confirm it's you.** The quickest way: open the page in the Muso app and claim it. Otherwise, reply with your name as it appears on your ID; if the page is unclaimed and carries that name, the team can confirm it from that.
+   - **Legal words** (lawyer, solicitor, attorney, regulator, data-protection authority, CNIL, ICO, formal notice): the text above unchanged, and put `legal_threat` first in the ticket's `titleGist` and `summary` (and `details.legal_threat: true`). The team hides the page the same day without waiting for identity.
 
-   If they write for someone else (privacy service, lawyer, manager), add:
-   > Because you are writing on behalf of someone else, please send us their written authorisation to act for them.
+   **A claim is NOT required for GDPR.** Claiming is the quickest way to confirm it's them, so it leads the list, but it is one way among several. Claim-first is the rule for copyright / takedown requests only. Never tell a GDPR requester they must claim the page first.
+
+   How the team confirms identity (for the ticket; never quote this table to the customer):
+
+   | path | what proves it |
+   |---|---|
+   | A. claim | their account holds a processed claim on the page, or they claim it now |
+   | B. account email | they write from the email of a Muso account whose name matches the page |
+   | C. their name on an unclaimed page | the page is unclaimed and its name is the legal name they give; big-name or high-credit pages go to a person |
+   | D. official domain | they write from the artist's or label's own domain |
+   | E. representative | written authorisation from the person the page is about |
+   | legal_threat | the page is hidden first, identity after |
+
 2. File `create_ticket` with `actionType: data-deletion`. In `summary`/`details`, note:
    - that this is a GDPR / erasure request (quote their own wording),
    - the date the request was received (the one-month clock starts then),
    - the links they gave and exactly what they asked to have removed,
    - any escalation trigger below, named FIRST in the summary.
-3. That is the whole reply. `create_ticket` returns no timeframe for this kind: never a
-   business-day number, never "deleted" or "we will delete", never the legal position,
+3. That is the whole reply. `create_ticket` returns no timeframe for this kind: the only
+   timing is the acknowledgement's "within one month of today" for the written confirmation
+   (the statutory month). Never a day count for the hide. Never a business-day number, never "deleted" or "we will
+   delete", never "your profile may be recreated", never the legal position,
    never what data we hold, never the playbook letter. The written confirmation comes from
    the process, not from you; never say a page was deleted or hidden.
 4. **"My profile was hidden, will it come back?"**: "No, once a page is hidden it stays

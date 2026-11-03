@@ -265,9 +265,47 @@ require "$CV" "unmerge hand-off maps the other profile or artist" "\`details.sus
 require "$AGENTS" "timeframe ban exempts the approved GDPR + claim sentences" "the GDPR acknowledgement's \"within one month of today\" and the claim paragraph's \"usually within a day\""
 require "$SOUL" "timeframe ban exempts the approved GDPR + claim sentences" "Only exceptions, verbatim: the GDPR ack's \"within one month of today\", the claim paragraph's \"usually within a day\"."
 
-# --- Q14 "Delete my profile under GDPR" (gdpr-ruling 2026-10-29 §2) ----------------------
+# --- Q14 "Delete my profile under GDPR" (GDPR acknowledgement v2, ruled 2026-11-01) ----
 GDPR="$WS/reference/gdpr-erasure-requests.md"
-require "$GDPR" "Q14 the approved GDPR acknowledgement" "we confirm that the page is about you, we take the page out of Muso search and public view, and you receive our written confirmation on this thread within one month of today."
+# The FULL acknowledgement is pinned, not fragments (QA + r5 on #1619: a fragment gate let "All credit records on
+# published works are erased immediately." replace the formal-review sentence and still pass). Three layers:
+#   1. every sentence of the acknowledgement and each fixed slot, verbatim, under its own label (a mutation of any one
+#      sentence names it);
+#   2. the whole block from its approval marker to "Fixed slots", verbatim (an inserted or reordered sentence fails);
+#   3. the retired wordings are forbidden (v1, the name-match sufficiency promises, the hide day-count).
+GDPR_ACK_SENTENCES=(
+  "Thank you, we have your request to remove your personal data from Muso, received {date}."
+  "Here is how it works."
+  "**1. Confirm it's you.** The quickest way: open the page in the Muso app and claim it, that proves it on the spot."
+  "Or reply from the email address on your Muso account, if you have one."
+  "If neither applies, send the link to the page and your name as it appears on your ID."
+  "If you are writing for someone else, send their written authorisation."
+  "**2. We hide the page.** As soon as we've confirmed it's you, the page comes out of Muso search and public view."
+  "If your request raises a legal matter, we hide it immediately."
+  "**3. Written confirmation on this thread**, within one month of today, listing exactly what was done."
+  "Any account you hold is closed and taken out of use on request; what has been deleted is stated in that confirmation."
+  "Credit records on published works go through a separate formal review, and the written response covers them."
+)
+GDPR_SLOT_NO_LINK="To get started, reply with the link to the Muso page."
+GDPR_SLOT_OWN_NAME="**1. Confirm it's you.** The quickest way: open the page in the Muso app and claim it. Otherwise, reply with your name as it appears on your ID; if the page is unclaimed and carries that name, the team can confirm it from that."
+i=0
+for sentence in "${GDPR_ACK_SENTENCES[@]}"; do
+  i=$((i + 1))
+  require "$GDPR" "Q14 ack sentence $i verbatim" "$sentence"
+done
+require "$GDPR" "Q14 slot no-link verbatim" "$GDPR_SLOT_NO_LINK"
+require "$GDPR" "Q14 slot own-name verbatim" "$GDPR_SLOT_OWN_NAME"
+GDPR_BLOCK="<!-- approved: gdpr-ack-v2-1101 --> > ${GDPR_ACK_SENTENCES[0]} ${GDPR_ACK_SENTENCES[1]} > > ${GDPR_ACK_SENTENCES[2]} ${GDPR_ACK_SENTENCES[3]} ${GDPR_ACK_SENTENCES[4]} ${GDPR_ACK_SENTENCES[5]} > > ${GDPR_ACK_SENTENCES[6]} ${GDPR_ACK_SENTENCES[7]} > > ${GDPR_ACK_SENTENCES[8]} ${GDPR_ACK_SENTENCES[9]} > > ${GDPR_ACK_SENTENCES[10]} Fixed slots (pick, never edit):"
+require "$GDPR" "Q14 the full approved acknowledgement block verbatim" "$GDPR_BLOCK"
+require "$GDPR" "Q14 a claim is not required for GDPR" "A claim is NOT required for GDPR."
+require "$GDPR" "Q14 legal words carry legal_threat" "put \`legal_threat\` first in the ticket's \`titleGist\` and \`summary\`"
+forbid "$GDPR" "Q14 v1 acknowledgement retired" "we confirm that the page is about you"
+# r5 NO-GO 2026-11-01 (#1619 @31898473): a name match never promises confirmation (captain: no name-match approvals);
+# the hide carries no day count (nothing automates it or staffs it on a clock)
+forbid "$GDPR" "Q14 no name-match sufficiency promise" "that is enough"
+forbid "$GDPR" "Q14 no name-match sufficiency promise" "we will confirm it from that"
+forbid "$GDPR" "Q14 own-name slot carries no inaction promise" "nothing more is needed from you"
+forbid "$GDPR" "Q14 the hide carries no day count" "(within a day)"
 require "$GDPR" "Q14 hidden pages do not come back" "once a page is hidden it stays"
 forbid "$GDPR" "Q14 no tier-3 SLA quote" "quote the returned SLA once"
 forbid "$FAQ" "Q14 deletion goes through the acknowledgement" "Create a support ticket with category \"Account – Deletion Request\""
@@ -286,6 +324,8 @@ while IFS= read -r -d '' f; do
     fail=1
   fi
   forbid_in "$f" "$t" "captain 02:51Z barred phrase" "nothing else is needed"
+  # GDPR ack v2 (2026-11-01): nothing is promised as deleted (legal hold 1350)
+  forbid_in "$f" "$t" "GDPR v2: never promise deletion" "is deleted on request"
   forbid_in "$f" "$t" "captain 02:51Z barred phrase" "no need to resend"
   forbid_in "$f" "$t" "captain 02:51Z barred phrase" "passed to our team"
   forbid_in "$f" "$t" "captain 02:51Z barred phrase" "passed it to our team"

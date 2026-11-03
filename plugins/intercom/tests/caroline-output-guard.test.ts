@@ -194,8 +194,8 @@ describe("the bank itself carries no barred phrase (Fable r5 on #1628)", () => {
     // "usually within a day": the one approved claim timing (caroline-instructions-1029 timing)
     timing_claim: ["timeframe_within"],
     claim_how: ["timeframe_within"],
-    // gdpr-ack-v2 (rides #1619's verdict): "(within a day)" / "within one month of today" are the statutory
-    // timings, and "what has been deleted is stated in that confirmation" describes the letter, not a promise.
+    // gdpr-ack-v2 (rides #1619's verdict): "within one month of today" is the statutory timing (r5 dropped
+    // the hide's "(within a day)" on #1619), and "what has been deleted is stated in that confirmation" describes the letter, not a promise.
     gdpr_ack_v2: ["timeframe_within", "deletion_promise"],
   };
   for (const e of ANSWER_BANK) {

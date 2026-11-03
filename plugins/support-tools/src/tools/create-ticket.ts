@@ -89,8 +89,8 @@ export const NO_TIMEFRAME_NOTES: Record<OutcomeChannel, string> = {
   app_notification: `${NO_TIMEFRAME} (the only timing line allowed is "usually within a day once the step is done"). ` +
     "The claim message reaches the customer in the app and by email, so do not promise a reply in this conversation.",
   conversation_email: `${NO_TIMEFRAME}. Say only that they will hear in this conversation and by email.`,
-  erasure: `${NO_TIMEFRAME}. Use the GDPR acknowledgement (written confirmation on this thread within one month); ` +
-    "never say deleted.",
+  erasure: `${NO_TIMEFRAME}. Use the GDPR acknowledgement verbatim (its only timing: "within one month of today" for the ` +
+    "written confirmation); a claim is never required; never say deleted.",
 };
 
 function customerTiming(actionType: string): { sla: string | null; customer_timing?: string } {

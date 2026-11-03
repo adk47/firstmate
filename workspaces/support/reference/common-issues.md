@@ -325,7 +325,7 @@ The `refund-retention` skill governs this ENTIRE flow – run it FIRST (SOUL.md 
 3. **GDPR / erasure check:** if they invoke GDPR, the "right to be forgotten", or erasure of personal data, or want their credits / their name removed (not just the account), the `gdpr-erasure-requests` reference governs that ENTIRE flow – follow it. Do not promise anything about credit records here.
 4. If they want plain account deletion:
    - There is no self-service account deletion.
-   - Do NOT promise that "all data will be removed" – account data (login, email, personal details) is deleted on request, but credit records on published works are handled separately (see `gdpr-erasure-requests`).
+   - Do NOT promise that "all data will be removed" or that anything is deleted – an account is closed and taken out of use on request, and credit records on published works are handled separately (see `gdpr-erasure-requests`).
    - Reply with the approved acknowledgement in `gdpr-erasure-requests.md` and file `create_ticket` with `actionType: data-deletion` (account email, what they want removed). `create_ticket` returns no timeframe: quote none, never a business-day number, never "deleted".
 
 ---

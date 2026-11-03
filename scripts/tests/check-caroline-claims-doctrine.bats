@@ -226,10 +226,11 @@ PY
 
 @test "CAN FAIL: the approved GDPR acknowledgement removed is caught (§2.7)" {
   GDPR_MD="$FAKE/workspaces/support/reference/gdpr-erasure-requests.md"
-  sed -i.bak 's/within one month of today\./soon./' "$GDPR_MD"
+  sed -i.bak 's/within one month of today,/soon,/' "$GDPR_MD"
   run_gate
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Q14 the approved GDPR acknowledgement"* ]]
+  [[ "$output" == *"Q14 ack sentence 9 verbatim"* ]]
+  [[ "$output" == *"Q14 the full approved acknowledgement block verbatim"* ]]
 }
 
 @test "CAN FAIL: an always-loaded template quoting the SLA is caught (QA on #1451)" {
@@ -237,4 +238,84 @@ PY
   run_gate
   [ "$status" -eq 1 ]
   [[ "$output" == *"no reply template quotes an SLA"* ]]
+}
+
+@test "CAN FAIL: GDPR v2 - 'deleted on request' anywhere in the support workspace is caught (legal hold 1350)" {
+  printf '\nAccount data, your login, email and personal details, is deleted on request.\n' >> "$CI_MD"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"GDPR v2: never promise deletion"* ]]
+}
+
+@test "CAN FAIL: GDPR v2 - the identity step without 'claim it' first, or the retired v1 text, is caught" {
+  GDPR_MD="$FAKE/workspaces/support/reference/gdpr-erasure-requests.md"
+  sed -i.bak 's/The quickest way: open the page in the Muso app and claim it, that proves it on the spot\. //' "$GDPR_MD"
+  printf '\n> Here is how it works: we confirm that the page is about you, we take the page out.\n' >> "$GDPR_MD"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Q14 ack sentence 3 verbatim"* ]]
+  [[ "$output" == *"Q14 v1 acknowledgement retired"* ]]
+}
+
+@test "CAN FAIL: GDPR v2 - dropping 'a claim is not required' or the legal_threat slot is caught" {
+  GDPR_MD="$FAKE/workspaces/support/reference/gdpr-erasure-requests.md"
+  sed -i.bak -e 's/A claim is NOT required for GDPR\.//' -e 's/put `legal_threat` first/put the trigger first/' "$GDPR_MD"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Q14 a claim is not required for GDPR"* ]]
+  [[ "$output" == *"Q14 legal words carry legal_threat"* ]]
+}
+
+@test "CAN FAIL: GDPR v2 own-name slot - the r5-barred inaction or name-match promise is caught" {
+  GDPR_MD="$FAKE/workspaces/support/reference/gdpr-erasure-requests.md"
+  sed -i.bak "s/Otherwise, reply with your name as it appears on your ID; if the page is unclaimed and carries that name, the team can confirm it from that\./Otherwise nothing more is needed from you for this step: the page carries your name and we will confirm it from that./" "$GDPR_MD"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Q14 slot own-name verbatim"* ]]
+  [[ "$output" == *"Q14 own-name slot carries no inaction promise"* ]]
+  [[ "$output" == *"Q14 no name-match sufficiency promise"* ]]
+}
+
+@test "CAN FAIL: GDPR v2 (QA on #1619) - replacing the formal-review sentence with an erasure promise is caught" {
+  GDPR_MD="$FAKE/workspaces/support/reference/gdpr-erasure-requests.md"
+  sed -i.bak 's/Credit records on published works go through a separate formal review, and the written response covers them\./All credit records on published works are erased immediately./' "$GDPR_MD"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Q14 ack sentence 11 verbatim"* ]]
+  [[ "$output" == *"Q14 the full approved acknowledgement block verbatim"* ]]
+}
+
+@test "CAN FAIL: GDPR v2 - every acknowledgement sentence and fixed slot is pinned on its own (one mutation each)" {
+  GDPR_MD="$FAKE/workspaces/support/reference/gdpr-erasure-requests.md"
+  cp "$GDPR_MD" "$GDPR_MD.orig"
+  # one distinctive phrase per sentence (1..11), then the two slots
+  phrases=("received {date}." "Here is how it works." "that proves it on the spot." "if you have one." "your name as it appears on your ID." "send their written authorisation." "public view." "we hide it immediately." "listing exactly what was done." "stated in that confirmation." "the written response covers them.")
+  n=0
+  for ph in "${phrases[@]}"; do
+    n=$((n + 1))
+    python3 - "$GDPR_MD.orig" "$GDPR_MD" "$ph" <<'PY'
+import sys; src, dst, ph = sys.argv[1:4]; s = open(src).read()
+# insert one word inside the phrase's first occurrence after the approval marker
+j = s.index(ph, s.index("<!-- approved: gdpr-ack-v2-1101 -->"))
+mutated = ph.replace(" ", " X ", 1) if " " in ph else "X" + ph
+open(dst, "w").write(s[:j] + mutated + s[j + len(ph):])
+PY
+    run_gate
+    [ "$status" -eq 1 ] || { echo "sentence $n mutation passed"; return 1; }
+    [[ "$output" == *"Q14 ack sentence $n verbatim"* ]] || { echo "sentence $n not named: $output"; return 1; }
+  done
+  cp "$GDPR_MD.orig" "$GDPR_MD"
+  sed -i.bak 's/To get started, reply with the link to the Muso page\./To get started, send us the page./' "$GDPR_MD"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Q14 slot no-link verbatim"* ]]
+}
+
+@test "CAN FAIL: GDPR v2 - a day count on the hide, or a name-match sufficiency promise, is caught (r5 on #1619)" {
+  GDPR_MD="$FAKE/workspaces/support/reference/gdpr-erasure-requests.md"
+  printf '\n> the page comes out of Muso search and public view (within a day).\n> for a page that carries your name, that is enough.\n' >> "$GDPR_MD"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Q14 the hide carries no day count"* ]]
+  [[ "$output" == *"Q14 no name-match sufficiency promise"* ]]
 }
