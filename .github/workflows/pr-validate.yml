@@ -333,10 +333,13 @@ jobs:
         # never a pass.
         run: |
           echo "::group::Agent exec posture"
-          # Fetch the base here rather than relying on an earlier step: the guard now exits 2 when it cannot read
-          # the base ref (qa-review on PR #1627), so a missing origin/main is a red build, not a skipped check.
-          git fetch --quiet --depth=1 origin "${{ github.event.pull_request.base.ref }}"
-          python3 scripts/check-agent-exec-policy.py --base "origin/${{ github.event.pull_request.base.ref }}"
+          # Fetch the base only if it is MISSING: the guard exits 2 when it cannot read the base ref, so an
+          # absent origin/main must be a red build, not a skipped check. Depth matters -- a `--depth=1`
+          # fetch here replaces origin/main with a parentless tip and later steps that need the merge base
+          # (e.g. `git diff origin/main...HEAD` in the CODEOWNERS check) die with "no merge base".
+          base="${{ github.event.pull_request.base.ref }}"
+          git rev-parse --verify --quiet "origin/$base" >/dev/null || git fetch --quiet --depth=200 origin "$base"
+          python3 scripts/check-agent-exec-policy.py --base "origin/$base"
           echo "::endgroup::"
 
       - name: SOUL.md check — all workspaces
