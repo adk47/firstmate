@@ -586,6 +586,8 @@ tests/fm-control.test.sh 37798
 tests/fm-cursor-harness.test.sh 30103
 tests/fm-cursor-primary-live-e2e.test.sh 21
 tests/fm-cursor-primary.test.sh 54947
+tests/fm-decider-metrics.test.sh 1000
+tests/fm-decider-route.test.sh 4300
 tests/fm-daemon.test.sh 26870
 tests/fm-documentation-audiences.test.sh 732
 tests/fm-extension-binding.test.sh 7398

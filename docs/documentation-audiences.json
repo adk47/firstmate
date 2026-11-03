@@ -329,6 +329,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "docs/decider-worker.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "docs/documentation-audiences.md",
       "audience": "maintainer-architecture"
     },
