@@ -179,10 +179,16 @@ def prioritize(picked: list[dict[str, Any]], seen: set[str] | None) -> list[dict
     return fresh + [p for p in picked if str(p["id"]).lower() in already] if fresh else picked
 
 
+# [key=offset-before-limit-on-this-engine] (2026-11-03): the deployed Trino wrapper REJECTS `LIMIT n OFFSET m` -
+# `mismatched input 'OFFSET'. Expecting: <EOF>` - and accepts `OFFSET n LIMIT m`, which it also honours (measured:
+# OFFSET 0/5/10 return three disjoint first rows). #1651 shipped `LIMIT {limit} OFFSET {offset}`, so from that deploy
+# until this line the selector raised on EVERY call: submit never got a row list, wrote `requests: 0` and no error,
+# and the lane looked "exhausted" while 1,807 familiar ids were the only thing anyone measured. The probe on this
+# engine: plain LIMIT ok, `LIMIT 5 OFFSET 5` parse error, `OFFSET 5 LIMIT 5` ok and it skips.
 OPEN_SQL = ("SELECT cast(cr.id AS varchar), cast(cr.profileid AS varchar), cast(cr.trackid AS varchar)"
             " FROM postgresql_core.public.credit_requests cr"
             " WHERE cr.deletedat IS NULL AND cr.status IN ({statuses}){only}"
-            " ORDER BY {paid}cr.createdat, cr.id LIMIT {limit} OFFSET {offset}")
+            " ORDER BY {paid}cr.createdat, cr.id OFFSET {offset} LIMIT {limit}")
 MAX_PAYING_IDS_IN_SQL = 20000
 
 
@@ -274,8 +280,16 @@ def submit(store: Store, deps: Deps, *, max_requests: int = 300, max_pages: int 
             (deps.now() - REVERIFY_AFTER).strftime("%Y-%m-%dT%H:%M:%SZ"))
         limit = max_requests if only is None else min(max_requests, len(only))
         seen = store.requests_with_any_verdict()
-        rows = order(pending_requests(deps.admin, deps.select, statuses, only, limit, skip, deps.paying, seen),
-                     deps.paying)
+        try:
+            rows = order(pending_requests(deps.admin, deps.select, statuses, only, limit, skip, deps.paying, seen),
+                         deps.paying)
+        except Exception as exc:
+            # [key=a-zero-with-no-error-is-not-a-measurement] (2026-11-03): `finally` records the counts, so an
+            # exception in the selector used to persist `requests: 0, errors: []` - indistinguishable from an
+            # exhausted pool, and it read that way for a day. Record WHY before re-raising: the run row is the
+            # only place a cron run's failure survives.
+            st.errors.append(f"selector failed: {type(exc).__name__}: {str(exc)[:240]}")
+            raise
         if only is not None:
             rows = [r for r in rows if str(r.get("id")).lower() in only]
         rows = [r for r in rows if str(r.get("id")).lower() not in {x.lower() for x in skip}][:max_requests]

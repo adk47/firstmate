@@ -490,11 +490,24 @@ class PaidFirstBeforeLimit(unittest.TestCase):
         sel(("unverified",), None, 10, frozenset({7, 3}))
         # paid-first, then oldest, then a STABLE id tiebreak (paging must not shuffle equal timestamps)
         self.assertIn("ORDER BY CASE WHEN cr.userid IN (3,7) THEN 0 ELSE 1 END, cr.createdat, cr.id "
-                      "LIMIT 10 OFFSET 0", seen[-1])
+                      "OFFSET 0 LIMIT 10", seen[-1])
         sel(("unverified",), None, 10, frozenset({7, 3}), offset=20)
-        self.assertIn("LIMIT 10 OFFSET 20", seen[-1], "the page offset must reach the SQL: paging is what reaches novel rows")
+        self.assertIn("OFFSET 20 LIMIT 10", seen[-1], "the page offset must reach the SQL: paging is what reaches novel rows")
         sel(("unverified",), None, 10, None)
-        self.assertIn("ORDER BY cr.createdat, cr.id LIMIT 10 OFFSET 0", seen[-1])
+        self.assertIn("ORDER BY cr.createdat, cr.id OFFSET 0 LIMIT 10", seen[-1])
+
+    def test_the_clause_order_is_the_one_the_deployed_engine_parses(self):
+        """[key=offset-before-limit-on-this-engine]: the deployed Trino wrapper rejects `LIMIT n OFFSET m`
+        (`mismatched input 'OFFSET'. Expecting: <EOF>`) and accepts `OFFSET n LIMIT m` - which #1651 shipped, so
+        the selector raised on every call and submit wrote `requests: 0` with no error for a day. A unit test can
+        hold the spelling the engine was measured to accept; only a live probe can hold the engine, so this test
+        also records where that probe is (the PR body)."""
+        seen = []
+        sel = runner.trino_open_requests(lambda q: seen.append(q) or "")
+        sel(("unverified",), None, 5, offset=8)
+        sql = seen[-1]
+        self.assertIn(" OFFSET 8 LIMIT 5", sql)
+        self.assertNotRegex(sql, r"LIMIT \d+ OFFSET", "this spelling is a parse error on the deployed engine")
 
 
 class PodHelpers(unittest.TestCase):
@@ -689,6 +702,25 @@ class RunnerAndStore(unittest.TestCase):
                            deny_user_ids=frozenset(), deny_profile_ids=frozenset(), paying=frozenset({42}),
                            watch_user_ids=frozenset(), watch_profile_ids=frozenset(),
                            now=lambda: datetime(2026, 10, 28, 3, 20, tzinfo=timezone.utc))
+
+    def test_a_failing_selector_is_recorded_in_the_run_row_and_raised(self):
+        """[key=a-zero-with-no-error-is-not-a-measurement]: submit's `finally` persists the run counts, so an
+        exception in the selector used to leave `requests: 0, errors: []` - which reads exactly like an exhausted
+        pool. It read that way for a day. The row must carry the reason."""
+        def broken(*_a, **_k):
+            raise RuntimeError("trino rc=1: mismatched input 'OFFSET'")
+        deps = runner.Deps(admin=FakeAdmin([req(1)]), select=broken, capture=FakePod(),
+                           gate=lambda uid: account_gate.GateResult("allow", (), {}),
+                           deny_user_ids=frozenset(), deny_profile_ids=frozenset(), paying=frozenset(),
+                           watch_user_ids=frozenset(), watch_profile_ids=frozenset())
+        with self.assertRaises(RuntimeError):
+            runner.submit(self.store, deps, max_requests=5)
+        row = self.store.db.execute("SELECT counts_json FROM dsp_runs WHERE kind='submit' ORDER BY started_at DESC"
+                                    " LIMIT 1").fetchone()
+        self.assertIsNotNone(row)
+        counts = json.loads(row[0])
+        self.assertEqual(counts["requests"], 0)
+        self.assertTrue(any("selector failed" in e and "OFFSET" in e for e in counts["errors"]), counts)
 
     def test_a_first_time_request_outranks_an_already_decided_one(self):
         """[key=reverify-is-a-floor-not-an-order]: REVERIFY_AFTER is a floor (never twice in a day), never a queue
