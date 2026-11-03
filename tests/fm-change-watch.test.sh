@@ -919,6 +919,18 @@ awk -F'\t' '$2 == 900 && $7 == 1' "$SAMPLES_G" | grep -q "restarts@muso-prod/cor
   || fail "the landed release was not scored: $(awk -F'\t' '$2 == 900' "$SAMPLES_G")"
 pass "the new image lands and the same watch scores the release"
 
+# One pod read serves the landing gate and every pod-backed metric of a sample.
+# The armed drive takes all 15 samples in one process, so a read repeated per
+# metric is what spends a family's sample budget before its later targets.
+: > "$HOME_G/shim.log"
+CW_CLUSTER_DIR='' PATH="$HOME_G/bin:$PATH" FM_CW_SHIM_LOG="$HOME_G/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_G/workloads" FM_CW_SHIM_IMAGE='localhost:30500/muso/core-backend:new-3' \
+  FM_CW_CONFIG_DIR="$HOME_G/config" FM_CW_SENTRY_DIR="$HOME_G/sentry" \
+  run_cw "$HOME_G" 1790001500 sample "g1$CORE_ID_SUFFIX" 1800 >/dev/null || fail "sample failed"
+[ "$(grep -c 'get pods' "$HOME_G/shim.log")" -eq 1 ] \
+  || fail "the sample read the pods $(grep -c 'get pods' "$HOME_G/shim.log") times, not once: $(cat "$HOME_G/shim.log")"
+pass "one pod read per target serves the landing gate and every pod-backed metric"
+
 # --- Sentry is the error signal for a repository that reports to it ------------
 # New error and fatal issues after the merge are the release's own errors; a
 # warning that reaches many users and an error first seen before the merge are
@@ -972,6 +984,25 @@ esac
 [ -e "$HOME_NT/state/change-watch/nt1$CORE_ID_SUFFIX/sentry" ] \
   && fail "a Sentry target was registered without a token"
 pass "a missing Sentry token is stated at registration, never a silent zero"
+
+# A repository narrowed to its Sentry project on a home with no token has
+# nothing to measure. Registering it anyway arms a watch whose every sample
+# reads nothing, so its end-of-schedule verdict would report the release clean.
+HOME_SO=$(cluster_world so)
+seed_app_pr "$HOME_SO"
+printf 'core-backend sentry:core-backend\n' > "$HOME_SO/config/change-watch-repos"
+out=$(CW_CLUSTER_DIR='' PATH="$HOME_SO/bin:$PATH" FM_CW_SHIM_LOG="$HOME_SO/shim.log" \
+  FM_CW_CONFIG_DIR="$HOME_SO/config" FM_CW_SENTRY_VAULT="$HOME_SO/missing-vault.json" FM_CW_SENTRY_DIR='' \
+  run_cw "$HOME_SO" 1790000000 register so1 "$CORE_PR") || fail "register failed: $out"
+case "$out" in
+  *"nothing measurable for $CORE_PR"*"sentry unmeasured: no token in $HOME_SO/missing-vault.json"*"nothing registered"*) ;;
+  *) fail "a repository that resolves only an unreadable Sentry project was armed: $out" ;;
+esac
+[ -e "$HOME_SO/state/change-watch/so1$CORE_ID_SUFFIX" ] \
+  && fail "a watch with nothing to measure created a watch record"
+[ "$(grep -c '' "$HOME_SO/arm.log" 2>/dev/null || echo 0)" -eq 0 ] \
+  || fail "a watch with nothing to measure was armed"
+pass "a repository with nothing measurable registers nothing instead of a clean verdict"
 
 # --- a repository that deploys to a host is watched by its deploy workflow -----
 # hydra is deployed by its own workflow, not by a rollout the cluster can see, so
@@ -1032,10 +1063,10 @@ printf '%s\n' "$line" | grep -q "unmeasured: .*pgbouncer_cl_waiting" \
 pass "a watch reports the metrics it never measured instead of implying they were clean"
 
 # --- the baseline epoch decides which terminations count ----------------------
-# The landing gate reads the same pods first, with no epoch bound, and its row is
-# cached for the rest of the sample. An OOMKilled pod that died BEFORE the merge
-# must not be re-read as the release's own OOM, so the cache is keyed by the
-# epoch it was filtered from.
+# One pod read serves the landing gate and every pod-backed metric of a sample,
+# so the OOMKilled count cannot come from a row read without an epoch bound. An
+# OOMKilled pod that died BEFORE the merge must not be re-read as the release's
+# own OOM.
 HOME_OOM=$(cluster_world oom)
 seed_app_pr "$HOME_OOM"
 printf 'muso-prod\tcore-backend-api\t6\tlocalhost:30500/muso/core-backend:old-1\n' > "$HOME_OOM/workloads"

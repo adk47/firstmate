@@ -37,10 +37,12 @@
 #           through its own deploy workflow instead. A large family is capped
 #           at MAX_TARGETS busiest Deployments and the registration line states
 #           the cap. A repository that also has a Sentry project, and any
-#           workflow the map names, become additional targets of their own. A
+#           workflow the map names, become additional targets of their own; a
+#           Sentry project this home has no token for is not a target. A
 #           PR that touches no deployable service registers nothing and says
-#           so, as does one that only deletes a manifest; a PR whose manifests
-#           could not be read registers nothing and says that instead.
+#           so, as does one that only deletes a manifest, one whose only target
+#           could not be read, and one whose manifests could not be read; each
+#           says which of those it was.
 #           Every Kubernetes target records its pod images at registration, and
 #           the watch refuses to score it until those images CHANGE, so a sample
 #           taken before the rollout lands measures the release rather than the
@@ -242,7 +244,10 @@ POOLER_DEFAULT_PORT=6432
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 notice() { printf 'notice: %s\n' "$1" >&2; }
-usage() { sed -n '2,138p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() {
+  awk 'NR == 1 { next } /^set -u$/ { exit } { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
+  exit 2
+}
 
 cw_now() {
   if [ -n "${FM_CW_NOW:-}" ]; then
@@ -898,20 +903,20 @@ print("%.4f" % rate)
 }
 
 # LIVE QUERY (cluster) - one Deployment's pod facts, read once and reused by
-# every metric that needs them: restartCount total, OOMKilled terminations at or
-# after an epoch, the pod images, and the per-container memory limits that the
-# working-set ratio divides by. One read for three metrics keeps a whole image
-# family inside one sample budget. Prints "restarts<TAB>oomkilled<TAB>images<TAB>pairs"
-# where pairs is "pod,container,limit-bytes" entries joined by ";". Measured into CW_POD_FACTS_TEXT per target so a later metric of the same
-# sample never repeats the read.
+# every metric that needs them: restartCount total, the OOMKilled termination
+# epochs, the pod images, and the per-container memory limits that the
+# working-set ratio divides by. The row is epoch-free so one read answers the
+# landing gate and every pod-backed metric of the sample; cw_prime_pod_facts
+# takes that read in this process, because a memo written inside a per-metric
+# command substitution dies with its subshell. Prints
+# "restarts<TAB>oom-epochs<TAB>images<TAB>pairs" where oom-epochs is the
+# termination epochs joined by "," (0 for a termination that carries no
+# timestamp) and pairs is "pod,container,limit-bytes" joined by ";".
 CW_POD_FACTS_CACHE=''
 CW_WORKLOADS_CACHE=''
-cw_pod_facts() {  # <ns> <deploy> <baseline-epoch>
-  local ns=$1 deploy=$2 since=$3 key cached
-  # The OOMKilled count is computed from `since`, so the cache key carries it: a
-  # row read for the landing gate (since=0, every termination ever) must never
-  # answer an oomkilled read bounded by the baseline epoch.
-  key="$ns/$deploy/$since"
+cw_pod_facts() {  # <ns> <deploy>
+  local ns=$1 deploy=$2 key cached
+  key="$ns/$deploy"
   while IFS=$'\t' read -r k v; do
     [ "$k" = "$key" ] || continue
     printf '%s\n' "$v"
@@ -922,7 +927,6 @@ CACHE
   command -v kubectl >/dev/null 2>&1 || return 1
   cached=$(cw_kubectl -n "$ns" get pods -l "app=$deploy" -o json 2>/dev/null | python3 -c '
 import datetime, json, sys
-since = int(sys.argv[1] or 0)
 try:
     data = json.load(sys.stdin)
 except Exception:
@@ -931,7 +935,7 @@ items = data.get("items", [])
 if not items:
     sys.exit(1)
 restarts = 0
-ooms = 0
+ooms = []
 images = []
 pairs = []
 for pod in items:
@@ -942,15 +946,11 @@ for pod in items:
             if not isinstance(state, dict) or state.get("reason") != "OOMKilled":
                 continue
             ts = state.get("finishedAt") or ""
-            if not ts:
-                ooms += 1
-                continue
             try:
                 t = datetime.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
-                if int(t.replace(tzinfo=datetime.timezone.utc).timestamp()) >= since:
-                    ooms += 1
+                ooms.append(int(t.replace(tzinfo=datetime.timezone.utc).timestamp()))
             except ValueError:
-                ooms += 1
+                ooms.append(0)
     for c in pod.get("spec", {}).get("containers", []) or []:
         img = c.get("image", "")
         if img and img not in images:
@@ -969,30 +969,56 @@ for pod in items:
             limit = 0.0
         if limit > 0:
             pairs.append("%s,%s,%.0f" % (pname, c.get("name", ""), limit))
-print("%d\t%d\t%s\t%s" % (restarts, ooms, ",".join(images), ";".join(pairs)))
-' "$since") || return 1
+print("%d\t%s\t%s\t%s" % (restarts, ",".join(str(e) for e in ooms), ",".join(images), ";".join(pairs)))
+') || return 1
   [ -n "$cached" ] || return 1
   CW_POD_FACTS_CACHE="$CW_POD_FACTS_CACHE$key	$cached
 "
   printf '%s\n' "$cached"
 }
 
+# Read every target's pod facts once per sample so the landing gate and each
+# pod-backed metric are served by that one read: a whole image family then costs
+# one pod read per target instead of one per metric per target.
+cw_prime_pod_facts() {  # <watch-id>
+  local id=$1 ns deploy
+  [ -f "$(cw_targets_path "$id")" ] || return 0
+  while IFS=$'\t' read -r ns deploy; do
+    [ -n "${ns:-}" ] || continue
+    cw_within_budget || return 0
+    cw_pod_facts "$ns" "$deploy" >/dev/null 2>&1 || true
+  done < "$(cw_targets_path "$id")"
+}
+
+# One field of a target's pod facts, or nothing when the read failed.
+cw_pod_fact() {  # <ns> <deploy> <field>
+  local facts
+  facts=$(cw_pod_facts "$1" "$2") || return 1
+  printf '%s' "$facts" | cut -f"$3"
+}
+
 # LIVE QUERY (cluster) - total container restartCount across the Deployment.
-cw_live_restarts() {  # <ns> <deploy> <window-seconds>
-  cw_pod_facts "$1" "$2" 0 | cut -f1
+cw_live_restarts() {  # <ns> <deploy>
+  cw_pod_fact "$1" "$2" 1
 }
 
 # LIVE QUERY (cluster) - OOMKilled terminations at or after the baseline epoch.
 # An OOMKilled pod that restarted successfully never shows in the pod's current
-# STATUS, so lastState is the only honest signal.
+# STATUS, so lastState is the only honest signal. A termination that carries no
+# timestamp cannot be proven to predate the baseline, so it counts.
 cw_live_oomkilled() {  # <ns> <deploy> <baseline-epoch>
-  cw_pod_facts "$1" "$2" "${3:-0}" | cut -f2
+  local epochs
+  epochs=$(cw_pod_fact "$1" "$2" 2) || return 1
+  printf '%s' "$epochs" | awk -F, -v since="${3:-0}" '
+    { for (i = 1; i <= NF; i++) if ($i != "" && ($i + 0 == 0 || $i + 0 >= since)) n++ }
+    END { print n + 0 }
+  '
 }
 
 # LIVE QUERY (cluster) - the pod images a target runs, comma-separated. This is
 # the rollout evidence the landing gate compares against.
 cw_live_images() {  # <ns> <deploy>
-  cw_pod_facts "$1" "$2" 0 | cut -f3
+  cw_pod_fact "$1" "$2" 3
 }
 
 # LIVE QUERY (cluster) - request p95 latency where the service exposes it, from
@@ -1037,7 +1063,7 @@ except Exception:
 # metrics-server (POD NAME CONTAINER CPU MEMORY); the worst ratio wins.
 cw_live_rss_ratio() {  # <ns> <deploy> <window-seconds>
   local ns=$1 deploy=$2 limits usage
-  limits=$(cw_pod_facts "$1" "$2" 0 | cut -f4) || return 1
+  limits=$(cw_pod_fact "$1" "$2" 4) || return 1
   [ -n "$limits" ] || return 1
   usage=$(cw_kubectl -n "$ns" top pods -l "app=$deploy" --containers --no-headers 2>/dev/null) || return 1
   [ -n "$usage" ] || return 1
@@ -1076,7 +1102,9 @@ cw_live_rss_ratio() {  # <ns> <deploy> <window-seconds>
 # LIVE QUERY (http) - the mapped Sentry project's new error and fatal issues:
 # those first seen at or after <since-epoch>. A missing credential, an unmapped
 # project, or a refused read is unmeasured with its reason, never a zero.
-cw_sentry_token() {  # prints "host<TAB>org<TAB>token"
+
+# True when the vault holds a token, without ever materialising the token itself.
+cw_sentry_vault_ready() {
   local file=$SENTRY_VAULT
   [ -r "$file" ] || return 1
   python3 - "$file" <<'PY' 2>/dev/null || return 1
@@ -1086,39 +1114,76 @@ try:
 except Exception:
     sys.exit(1)
 inner = data.get("data") if isinstance(data, dict) else None
-if not isinstance(inner, dict):
+if not isinstance(inner, dict) or not (inner.get("auth_token") or ""):
     sys.exit(1)
-host = inner.get("host") or "sentry.io"
-org = inner.get("org") or "musoai"
-token = inner.get("auth_token") or ""
-if not token:
-    sys.exit(1)
-print("%s\t%s\t%s" % (host, org, token))
 PY
 }
 
-cw_live_sentry_new_issues() {  # <project> <since-epoch>
-  local project=$1 since=$2 creds host org token out
-  case "$project" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+# One page of the mapped project's issues first seen at or after <since>, as the
+# JSON its caller counts. The filter is server-side so a busy project's newest
+# issues are the page itself rather than whatever survived a most-recently-seen
+# cut, and the token is read and used inside the interpreter only: unlike a curl
+# header built from it, it never appears in any process's argv.
+cw_sentry_issue_page() {  # <project> <since-epoch>
+  local project=$1 since=$2 budget
   if [ -n "${FM_CW_SENTRY_DIR:-}" ]; then
     [ -f "$FM_CW_SENTRY_DIR/issues-$project.json" ] || return 1
-    out=$(cat "$FM_CW_SENTRY_DIR/issues-$project.json")
-  else
-    creds=$(cw_sentry_token) || { printf 'no Sentry token in %s\n' "$SENTRY_VAULT"; return 1; }
-    host=$(printf '%s' "$creds" | cut -f1)
-    org=$(printf '%s' "$creds" | cut -f2)
-    token=$(printf '%s' "$creds" | cut -f3)
-    command -v curl >/dev/null 2>&1 || return 1
-    out=$(fm_run_timed "$(cw_budget_left || printf '%s' "$SENTRY_HTTP_TIMEOUT")" curl -fsS -m "$SENTRY_HTTP_TIMEOUT" \
-      -H "Authorization: Bearer $token" \
-      -G "https://$host/api/0/projects/$org/$project/issues/" \
-      --data-urlencode 'query=is:unresolved' --data-urlencode 'limit=100' \
-      --data-urlencode 'sort=date' 2>&1) || {
-      printf 'Sentry read refused for %s: %s\n' "$project" "$(printf '%s' "$out" | tail -1 | cut -c1-120)"
-      return 1
-    }
+    cat "$FM_CW_SENTRY_DIR/issues-$project.json"
+    return 0
   fi
-  printf '%s' "$out" | python3 -c '
+  command -v python3 >/dev/null 2>&1 || return 1
+  budget=$(cw_budget_left || printf '%s' "$SENTRY_HTTP_TIMEOUT")
+  fm_run_timed "$budget" python3 -c '
+import datetime, json, sys, urllib.error, urllib.parse, urllib.request
+vault, project, since, timeout = sys.argv[1], sys.argv[2], int(sys.argv[3]), float(sys.argv[4])
+try:
+    data = json.load(open(vault))
+except Exception:
+    sys.stderr.write("no readable Sentry vault at %s\n" % vault)
+    sys.exit(1)
+inner = data.get("data") if isinstance(data, dict) else None
+if not isinstance(inner, dict):
+    sys.stderr.write("Sentry vault %s has no data section\n" % vault)
+    sys.exit(1)
+token = inner.get("auth_token") or ""
+if not token:
+    sys.stderr.write("no Sentry token in %s\n" % vault)
+    sys.exit(1)
+host = inner.get("host") or "sentry.io"
+org = inner.get("org") or "musoai"
+first_seen = datetime.datetime.fromtimestamp(since, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+params = urllib.parse.urlencode({
+    "query": "is:unresolved firstSeen:>=%s" % first_seen,
+    "limit": "100",
+    "sort": "new",
+})
+url = "https://%s/api/0/projects/%s/%s/issues/?%s" % (host, org, project, params)
+request = urllib.request.Request(url, headers={"Authorization": "Bearer %s" % token})
+try:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        body = response.read()
+except urllib.error.HTTPError as exc:
+    sys.stderr.write("Sentry read refused for %s: HTTP %s\n" % (project, exc.code))
+    sys.exit(1)
+except Exception as exc:
+    sys.stderr.write("Sentry read refused for %s: %s\n" % (project, exc))
+    sys.exit(1)
+try:
+    issues = json.loads(body)
+except ValueError:
+    issues = None
+if not isinstance(issues, list):
+    sys.stderr.write("Sentry returned an unreadable issue list for %s\n" % project)
+    sys.exit(1)
+json.dump(issues, sys.stdout)
+' "$SENTRY_VAULT" "$project" "$since" "$SENTRY_HTTP_TIMEOUT"
+}
+
+cw_live_sentry_new_issues() {  # <project> <since-epoch>
+  local project=$1 since=$2 page
+  case "$project" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  page=$(cw_sentry_issue_page "$project" "$since") || return 1
+  printf '%s' "$page" | python3 -c '
 import datetime, json, sys
 since = int(sys.argv[1] or 0)
 try:
@@ -1358,7 +1423,7 @@ cw_metric_read() {  # <watch-id> <metric> <target> <window> [<baseline-epoch>]
   if [ "$window" = baseline ]; then secs=$BASELINE_WINDOW_SECONDS; else secs=$SAMPLE_WINDOW_SECONDS; fi
   case "$metric" in
     http_5xx_per_min) cw_live_http_5xx_per_min "$ns" "$deploy" "$secs" ;;
-    restarts) cw_live_restarts "$ns" "$deploy" "$secs" ;;
+    restarts) cw_live_restarts "$ns" "$deploy" ;;
     oomkilled) cw_live_oomkilled "$ns" "$deploy" "$since" ;;
     p95_ms) cw_live_p95_ms "$ns" "$deploy" "$secs" ;;
     rss_ratio) cw_live_rss_ratio "$ns" "$deploy" "$secs" ;;
@@ -1517,6 +1582,7 @@ cw_metric_relative() {
 # no pools line and its pool metric stays unmeasured.
 cw_resolve_pools() {  # <watch-id>
   local id=$1 ns deploy spec out=''
+  [ -f "$(cw_targets_path "$id")" ] || return 0
   while IFS=$'\t' read -r ns deploy; do
     [ -n "${ns:-}" ] || continue
     cw_within_budget || break
@@ -1547,6 +1613,7 @@ cw_capture_baseline() {  # <watch-id> <baseline-epoch>
   cluster=$(cw_cluster_probe || true)
   cw_resolve_pools "$id"
   [ -z "$cluster" ] || cw_record_reason "$id" "baseline" "cluster read failed: $cluster"
+  [ -n "$cluster" ] || cw_prime_pod_facts "$id"
   while IFS= read -r key; do
     [ -n "$key" ] || continue
     metric=$(cw_key_metric "$key")
@@ -1634,6 +1701,7 @@ cw_take_sample() {  # <watch-id> <offset-seconds> <sample-epoch> <baseline-epoch
   # whole budget on reads that each failed the same way, and every watch
   # completed unmeasured while its record still looked like a normal watch.
   cluster=$(cw_cluster_probe || true)
+  [ -n "$cluster" ] || cw_prime_pod_facts "$id"
   while IFS= read -r key; do
     [ -n "$key" ] || continue
     metric=$(cw_key_metric "$key")
@@ -1898,9 +1966,10 @@ cw_measured_gaps() {  # <watch-id>
 cw_record_completion() {  # <watch-id>
   local id=$1 unread
   unread=$(cw_unmeasured_targets "$id")
-  if [ -z "$unread" ]; then
+  if [ -z "$unread" ] && [ -n "$(cw_metric_keys "$id")" ]; then
     cw_record_clean "$id"
   else
+    [ -n "$unread" ] || unread='no target of this watch was ever registered'
     cw_record_unmeasured "$id" "$unread"
   fi
 }
@@ -2038,7 +2107,7 @@ cw_rearm() {  # <watch-id> <url>
 
 cmd_register() {
   local task=$1 url=$2 provider owner repo number repo_name id derived targets sentries runs
-  local notes unread now t0 landed_unread when_name
+  local notes unread now t0 landed_unread when_name sentry_unreadable
   fm_pr_task_id_valid "$task" || die "invalid task id: $task"
   fm_pr_url_parse "$url" || die "invalid pr url: $url"
   provider=$FM_PR_PROVIDER
@@ -2064,12 +2133,23 @@ cmd_register() {
   sentries=$(printf '%s\n' "$derived" | awk -F'\t' '$1 == "sentry" && $2 != "" { print $2 }' | sort -u)
   runs=$(printf '%s\n' "$derived" | awk -F'\t' '$1 == "run" && $2 != "" && $3 != "" { print $2 "\t" $3 }' | sort -u)
   notes=$(printf '%s\n' "$derived" | awk -F'\t' '$1 == "note" { print $2 }' | sort -u | paste -sd ';' - | sed 's/;/; /g')
+  # A Sentry project this home cannot authenticate is not a target: keeping it
+  # would arm a watch whose every sample reads nothing, and whose end-of-schedule
+  # verdict would then read as a clean release.
+  sentry_unreadable=''
+  if [ -n "$sentries" ] && [ -z "${FM_CW_SENTRY_DIR:-}" ] && ! cw_sentry_vault_ready; then
+    notes="$notes${notes:+; }sentry unmeasured: no token in $SENTRY_VAULT"
+    sentries=''
+    sentry_unreadable=1
+  fi
   if [ -z "$targets" ] && [ -z "$sentries" ] && [ -z "$runs" ]; then
     unread=$(printf '%s\n' "$derived" | grep -c '^note	manifest unread: ' || true)
     if ! cw_forge_files "$url" "$provider" "$owner" "$repo" "$number" >/dev/null 2>&1; then
       printf 'change-watch: cannot read the merged file list for %s; nothing registered\n' "$url"
     elif [ "$unread" -gt 0 ]; then
       printf 'change-watch: could not read %s manifest(s) for %s; nothing registered\n' "$unread" "$url"
+    elif [ -n "$sentry_unreadable" ]; then
+      printf 'change-watch: nothing measurable for %s (%s); nothing registered\n' "$url" "$notes"
     else
       printf 'change-watch: no deployable service touched by %s%s; nothing registered\n' "$url" "${notes:+ ($notes)}"
     fi
@@ -2082,12 +2162,6 @@ cmd_register() {
     ''|*[!0-9]*) t0=$now ;;
   esac
   [ "$t0" -le "$now" ] || t0=$now
-
-  if [ -n "$sentries" ] && [ -z "$(cw_sentry_token 2>/dev/null || true)" ] \
-    && [ -z "${FM_CW_SENTRY_DIR:-}" ]; then
-    notes="$notes${notes:+; }sentry unmeasured: no token in $SENTRY_VAULT"
-    sentries=''
-  fi
 
   mkdir -p "$(cw_watch_dir "$id")" || die "cannot create watch directory"
   chmod 0700 "$(cw_watch_dir "$id")" 2>/dev/null || true
