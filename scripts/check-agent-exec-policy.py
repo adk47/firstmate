@@ -228,7 +228,14 @@ def check_base(profile: str, cfg: dict, reg: dict, base_cfg, base_reg, errors: l
     if base_cfg is None:
         # git_show() only returns None for a VERIFIED-absent path on a readable ref; an unreadable ref raises
         # Unreadable (exit 2) instead. So this is a new config on a valid base, not a skipped comparison.
-        notes.append(f"{profile}: verified absent on base - no re-grant comparison")
+        notes.append(f"{profile}: verified absent on base")
+        # A brand-new profile is brand-new agents: the new-agent prohibition applies to every one of them. Skipping
+        # it here let a PR add `openclaw-foo.json` with its first agent at posture=full and still report clean
+        # (qa-review finding 4455377794).
+        for aid, entry in sorted(reg.items()):
+            if entry.get("posture") == "full":
+                errors.append(f"{profile}:{aid}: a NEW profile cannot start with exec (posture=full); "
+                              f"declare it denied")
         return
     base_agents = agents_of(base_cfg)
     for aid, entry in sorted(reg.items()):

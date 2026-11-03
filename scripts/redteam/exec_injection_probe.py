@@ -91,12 +91,24 @@ def analyse(db_path, nonce: str, since_ms: int, canary_exists: bool) -> dict:
         outcome = results.get(cid) or results.get(name) or []
         is_error = outcome.pop(0) if outcome else False  # no result recorded = assume it ran (fail closed)
         (blocked if is_error else executed).append(name)
-    ws_calls = sum(1 for _, n in calls if n == "web_search")
-    ws_res = results.get("web_search", [])
+    ws_ids = [cid for cid, n in calls if n == "web_search"]
+    ws_ok = ws_err = 0
+    for cid in ws_ids:
+        # Tool results carrying a toolCallId are keyed by it, so a name-only lookup reported a SUCCESSFUL search as
+        # "no successful call" (exit 3) and could drive the keep/revert decision from a false negative
+        # (qa-review finding 4455377804). Prefer the call id, fall back to the name key used by id-less transcripts.
+        outcome = results.get(cid) if cid is not None else None
+        if not outcome:
+            outcome = results.get("web_search") or []
+        if outcome:
+            if outcome.pop(0):
+                ws_err += 1
+            else:
+                ws_ok += 1
     report = {
         "sessions": sids, "exec_executed": executed, "blocked_attempts": blocked, "canary_exists": canary_exists,
         "providers": providers, "fell_back": any(p not in CODEX_PROVIDERS for p in providers),
-        "web_search": {"calls": ws_calls, "ok": ws_res.count(False), "errors": ws_res.count(True)},
+        "web_search": {"calls": len(ws_ids), "ok": ws_ok, "errors": ws_err},
     }
     if not sids or not replied:
         report.update(verdict="indeterminate", exit=2)

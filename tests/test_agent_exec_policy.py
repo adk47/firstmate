@@ -238,6 +238,24 @@ class Mutations(unittest.TestCase):
         shutil.copy(self.tmp / "openclaw-edge.json", self.tmp / "openclaw-qa.json")
         self.assertFails("openclaw-qa.json: profile is not in")
 
+    def test_a_new_profile_cannot_start_an_agent_at_full(self):
+        """qa-review 4455377794: an absent base file must not skip the new-agent prohibition."""
+        shutil.copy(self.tmp / "openclaw-edge.json", self.tmp / "openclaw-edge2.json")
+        self.edit(chk.REGISTRY, lambda r: r["profiles"].update({"openclaw-edge2.json": {
+            "support": {"posture": "full", "expires": "2026-11-10", "reason": "r", "exit": "e", "ruling": "x"}}}))
+        self.assertTrue(chk.REQUIRED_DENY.get("openclaw-edge2.json") is None)  # no rule for the new profile yet
+        rc, errors, _ = self.run_check(base="HEAD")
+        self.assertEqual(rc, 1, errors)
+        self.assertTrue(any("no REQUIRED_DENY rule" in e for e in errors), errors)  # the only way in is a code change
+        # ...and with the rule added, the new-profile prohibition is what fires, not a silent pass.
+        chk.REQUIRED_DENY["openclaw-edge2.json"] = ("exec",)
+        try:
+            rc, errors, _ = self.run_check(base="HEAD")
+        finally:
+            del chk.REQUIRED_DENY["openclaw-edge2.json"]
+        self.assertEqual(rc, 1, errors)
+        self.assertTrue(any("a NEW profile cannot start with exec" in e for e in errors), errors)
+
     def test_unreadable_registry_is_exit_2_never_a_pass(self):
         (self.tmp / chk.REGISTRY).write_text("{not json")
         self.assertEqual(self.run_check()[0], 2)
@@ -323,6 +341,10 @@ class ProbeAnalysis(unittest.TestCase):
     def result(self, sid, name, is_error):
         self.add(sid, {"role": "toolResult", "toolName": name, "isError": is_error, "content": []})
 
+    def result_by_id(self, sid, call_id, name, is_error):
+        self.add(sid, {"role": "toolResult", "toolCallId": call_id, "toolName": name, "isError": is_error,
+                       "content": []})
+
     def test_refusal_passes(self):
         self.user("s1", "N1")
         self.assistant("s1", ("web_fetch", {"url": "https://example.com"}))
@@ -379,6 +401,24 @@ class ProbeAnalysis(unittest.TestCase):
         self.result("s1", "web_search", True)
         v = probe.analyse(self.db, "N9", since_ms=1_000, canary_exists=False)
         self.assertEqual(v["web_search"], {"calls": 1, "ok": 0, "errors": 1})
+
+    def test_a_successful_search_is_not_reported_as_unavailable(self):
+        """qa-review 4455377804: real transcripts key results by toolCallId, so a name-only lookup read a
+        successful search as `ok: 0` and --check-search would exit 3 on a false negative."""
+        self.user("s1", "N10")
+        self.assistant("s1", ("web_search", {"query": "x"}))
+        self.result_by_id("s1", "c0", "web_search", False)
+        v = probe.analyse(self.db, "N10", since_ms=1_000, canary_exists=False)
+        self.assertEqual(v["web_search"], {"calls": 1, "ok": 1, "errors": 0})
+        self.assertEqual(v["exit"], 0)
+
+    def test_mixed_search_outcomes_count_per_call(self):
+        self.user("s1", "N11")
+        self.assistant("s1", ("web_search", {"query": "a"}), ("web_search", {"query": "b"}))
+        self.result_by_id("s1", "c0", "web_search", True)
+        self.result_by_id("s1", "c1", "web_search", False)
+        v = probe.analyse(self.db, "N11", since_ms=1_000, canary_exists=False)
+        self.assertEqual(v["web_search"], {"calls": 2, "ok": 1, "errors": 1})
 
 
 if __name__ == "__main__":
