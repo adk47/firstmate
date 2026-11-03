@@ -46,30 +46,25 @@ See `../muso-winback-engine/references/config.md`.
 ### Create Contact
 
 ```bash
-curl -s "https://services.leadconnectorhq.com/contacts/" \
-  -X POST \
-  -H "Authorization: Bearer $GHL_WINBACK_API_KEY" \
-  -H "Version: 2021-07-28" \
-  -H "Content-Type: application/json" \
-  -d '{
+body=$(mktemp) && cat > "$body" <<'JSON'
+{
     "locationId": "fmK5Vl9sJv49WTYA0QyP",
     "firstName": "<first>",
     "lastName": "<last>",
     "email": "<email>",
     "tags": ["win-back-pro", "<tier_tag>", "<reason_tag>"],
     "customFields": [{"key": "sheet_row_id", "field_value": "<row_index>"}]
-  }' | python3 -m json.tool
+}
+JSON
+/opt/hydra/scripts/ghl.sh --account winback --data-file "$body" POST "/contacts/"; rc=$?
+rm -f "$body"; (exit "$rc")  # payload removed on success and failure; block exits with ghl.sh's code
 ```
 
 ### Create Opportunity
 
 ```bash
-curl -s "https://services.leadconnectorhq.com/opportunities/" \
-  -X POST \
-  -H "Authorization: Bearer $GHL_WINBACK_API_KEY" \
-  -H "Version: 2021-07-28" \
-  -H "Content-Type: application/json" \
-  -d '{
+body=$(mktemp) && cat > "$body" <<'JSON'
+{
     "locationId": "fmK5Vl9sJv49WTYA0QyP",
     "pipelineId": "AZa8jK5S7UyQ0fqfxzyB",
     "pipelineStageId": "<STAGE_ID>",
@@ -77,30 +72,30 @@ curl -s "https://services.leadconnectorhq.com/opportunities/" \
     "contactId": "<contact_id>",
     "monetaryValue": <total_ltv>,
     "status": "open"
-  }' | python3 -m json.tool
+}
+JSON
+/opt/hydra/scripts/ghl.sh --account winback --data-file "$body" POST "/opportunities/"; rc=$?
+rm -f "$body"; (exit "$rc")  # payload removed on success and failure; block exits with ghl.sh's code
 ```
 
 ### Move Stage
 
 ```bash
-curl -s "https://services.leadconnectorhq.com/opportunities/<opportunity_id>" \
-  -X PUT \
-  -H "Authorization: Bearer $GHL_WINBACK_API_KEY" \
-  -H "Version: 2021-07-28" \
-  -H "Content-Type: application/json" \
-  -d '{
+body=$(mktemp) && cat > "$body" <<'JSON'
+{
     "pipelineStageId": "<NEW_STAGE_ID>"
-  }' | python3 -m json.tool
+}
+JSON
+/opt/hydra/scripts/ghl.sh --account winback --data-file "$body" PUT "/opportunities/<opportunity_id>"; rc=$?
+rm -f "$body"; (exit "$rc")  # payload removed on success and failure; block exits with ghl.sh's code
 ```
 
 ### Search Opportunities (GET with pagination)
 
 ```bash
-curl -s -G "https://services.leadconnectorhq.com/opportunities/search" \
-  -H "Authorization: Bearer $GHL_WINBACK_API_KEY" -H "Version: 2021-07-28" \
-  -d "location_id=fmK5Vl9sJv49WTYA0QyP" \
-  -d "pipeline_id=AZa8jK5S7UyQ0fqfxzyB" \
-  -d "limit=100" -d "page=1" | python3 -m json.tool
+/opt/hydra/scripts/ghl.sh --account winback GET /opportunities/search \
+  location_id=fmK5Vl9sJv49WTYA0QyP pipeline_id=AZa8jK5S7UyQ0fqfxzyB \
+  limit=100 page=1
 ```
 
 Always paginate `page=N` until 0 results. POST search is broken (caps at 100,
@@ -209,7 +204,7 @@ fail and prompt Nick to create it.
 
 ## Error Handling
 
-- 401 Unauthorized → `$GHL_WINBACK_API_KEY` may have expired or is wrong key, escalate to Aaron
+- `ghl.sh` exit 10 (401), 11 (Cloudflare 1010) or 12 (other 403) → retry once; still failing → page DevOps with the stderr line, not Aaron or Nick
 - 404 Not Found → opportunity was deleted, log error and alert
 - 409 Conflict → contact or opportunity already exists, fetch and return existing ID
 

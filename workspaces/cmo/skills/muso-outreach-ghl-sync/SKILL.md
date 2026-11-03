@@ -44,12 +44,8 @@ See `../muso-outreach-engine/references/config.md`.
 ### Create Contact
 
 ```bash
-curl -s "https://services.leadconnectorhq.com/contacts/" \
-  -X POST \
-  -H "Authorization: Bearer $GHL_API_KEY" \
-  -H "Version: 2021-07-28" \
-  -H "Content-Type: application/json" \
-  -d '{
+body=$(mktemp) && cat > "$body" <<'JSON'
+{
     "locationId": "S5w31kRRgsBjjiVATWlP",
     "firstName": "<first>",
     "lastName": "<last>",
@@ -57,48 +53,47 @@ curl -s "https://services.leadconnectorhq.com/contacts/" \
     "companyName": "<company>",
     "customFields": [{"key": "sheet_row_id", "field_value": "<row_id>"}],
     "tags": ["B2B-Ads", "Outreach"]
-  }' | python3 -m json.tool
+}
+JSON
+/opt/hydra/scripts/ghl.sh --data-file "$body" POST "/contacts/"; rc=$?
+rm -f "$body"; (exit "$rc")  # payload removed on success and failure; block exits with ghl.sh's code
 ```
 
 ### Create Opportunity
 
 ```bash
-curl -s "https://services.leadconnectorhq.com/opportunities/" \
-  -X POST \
-  -H "Authorization: Bearer $GHL_API_KEY" \
-  -H "Version: 2021-07-28" \
-  -H "Content-Type: application/json" \
-  -d '{
+body=$(mktemp) && cat > "$body" <<'JSON'
+{
     "locationId": "S5w31kRRgsBjjiVATWlP",
     "pipelineId": "GeSt85TueSvJ0SNFZXfQ",
     "pipelineStageId": "<STAGE_ID>",
     "name": "<Company> | <Contact Name>",
     "contactId": "<contact_id>",
     "status": "open"
-  }' | python3 -m json.tool
+}
+JSON
+/opt/hydra/scripts/ghl.sh --data-file "$body" POST "/opportunities/"; rc=$?
+rm -f "$body"; (exit "$rc")  # payload removed on success and failure; block exits with ghl.sh's code
 ```
 
 ### Move Opportunity Stage
 
 ```bash
-curl -s "https://services.leadconnectorhq.com/opportunities/<opportunity_id>" \
-  -X PUT \
-  -H "Authorization: Bearer $GHL_API_KEY" \
-  -H "Version: 2021-07-28" \
-  -H "Content-Type: application/json" \
-  -d '{
+body=$(mktemp) && cat > "$body" <<'JSON'
+{
     "pipelineStageId": "<NEW_STAGE_ID>"
-  }' | python3 -m json.tool
+}
+JSON
+/opt/hydra/scripts/ghl.sh --data-file "$body" PUT "/opportunities/<opportunity_id>"; rc=$?
+rm -f "$body"; (exit "$rc")  # payload removed on success and failure; block exits with ghl.sh's code
 ```
 
 ### Search Opportunities (GET with pagination, NOT POST)
 
 ```bash
-curl -s -G "https://services.leadconnectorhq.com/opportunities/search" \
-  -H "Authorization: Bearer $GHL_API_KEY" -H "Version: 2021-07-28" \
-  -d "location_id=S5w31kRRgsBjjiVATWlP" \
-  -d "pipeline_id=GeSt85TueSvJ0SNFZXfQ" \
-  -d "limit=100" -d "page=1" | python3 -m json.tool
+/opt/hydra/scripts/ghl.sh GET /opportunities/search \
+  location_id=S5w31kRRgsBjjiVATWlP pipeline_id=GeSt85TueSvJ0SNFZXfQ \
+  limit=100 page=1
 ```
 
 **Always paginate** until 0 results (`page=1`, `page=2`, `page=3`, etc).
@@ -186,7 +181,7 @@ create it in GHL.
 - If create contact returns 409 (already exists): search, return existing contact ID
 - If create opportunity returns 409: search, return existing opp ID
 - If stage move returns 404: opportunity was deleted, log error and alert Nick
-- If API returns 401: `$GHL_API_KEY` may have expired, escalate to Aaron
+- If `ghl.sh` exits non-zero (10 = 401, 11 = Cloudflare 1010, 12 = other 403): retry once; still failing → page DevOps with the stderr line, not Aaron or Nick
 
 ## Constraints
 

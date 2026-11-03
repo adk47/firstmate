@@ -107,11 +107,9 @@ Use GET with `page=N` for opportunity searches. POST search is broken (caps at
 100, cursor does not work).
 
 ```bash
-curl -s -G "https://services.leadconnectorhq.com/opportunities/search" \
-  -H "Authorization: Bearer $GHL_WINBACK_API_KEY" -H "Version: 2021-07-28" \
-  -d "location_id=fmK5Vl9sJv49WTYA0QyP" \
-  -d "pipeline_id=AZa8jK5S7UyQ0fqfxzyB" \
-  -d "limit=100" -d "page=1" | python3 -m json.tool
+/opt/hydra/scripts/ghl.sh --account winback GET /opportunities/search \
+  location_id=fmK5Vl9sJv49WTYA0QyP pipeline_id=AZa8jK5S7UyQ0fqfxzyB \
+  limit=100 page=1
 ```
 
 ### Opportunity Metadata (Required on every create)

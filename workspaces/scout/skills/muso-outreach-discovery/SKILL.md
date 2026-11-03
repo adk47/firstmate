@@ -345,12 +345,11 @@ absent or scoped-out for Scout, so a `403`/auth failure here is expected and
 **must not fail the batch** — skip `IN_GHL` and flag the batch per Step 4.
 
 ```bash
-curl -s -G "https://services.leadconnectorhq.com/opportunities/search" \
-  -H "Authorization: Bearer $GHL_API_KEY" -H "Version: 2021-07-28" \
-  -d "location_id=S5w31kRRgsBjjiVATWlP" -d "pipeline_id=GeSt85TueSvJ0SNFZXfQ" \
-  -d "limit=100" -d "page=1"
-# Paginate all pages. A match → terminal reject IN_GHL (feed it into finalize's rejects).
-# On 403 / non-200 / empty $GHL_API_KEY: SKIP IN_GHL, ship the batch, flag it — never fail-closed on GHL.
+/opt/hydra/scripts/ghl.sh GET /opportunities/search \
+  location_id=S5w31kRRgsBjjiVATWlP pipeline_id=GeSt85TueSvJ0SNFZXfQ \
+  limit=100 page=1
+# Paginate all pages (or add --all). A match → terminal reject IN_GHL (feed it into finalize's rejects).
+# Any non-zero exit from ghl.sh (401/403/key unset/transport): SKIP IN_GHL, ship the batch, flag it — never fail-closed on GHL.
 ```
 
 ## Silent Rule

@@ -49,11 +49,9 @@ See `../muso-outreach-engine/references/config.md`.
 Pull contacts from GHL stages `Emailed` and `Follow-up` via the pipeline API:
 
 ```bash
-curl -s -G "https://services.leadconnectorhq.com/opportunities/search" \
-  -H "Authorization: Bearer $GHL_API_KEY" -H "Version: 2021-07-28" \
-  -d "location_id=S5w31kRRgsBjjiVATWlP" \
-  -d "pipeline_id=GeSt85TueSvJ0SNFZXfQ" \
-  -d "limit=100" -d "page=1" | python3 -m json.tool
+/opt/hydra/scripts/ghl.sh GET /opportunities/search \
+  location_id=S5w31kRRgsBjjiVATWlP pipeline_id=GeSt85TueSvJ0SNFZXfQ \
+  limit=100 page=1
 ```
 
 For each opportunity in those stages:

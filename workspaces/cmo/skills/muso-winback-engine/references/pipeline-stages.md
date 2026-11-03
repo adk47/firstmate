@@ -24,16 +24,15 @@ Stage IDs above were captured from prior config (2026-03 era). Verify they are
 still current by running this fetch command. Update IDs if any have changed:
 
 ```bash
-curl -s -G "https://services.leadconnectorhq.com/opportunities/pipelines" \
-  -H "Authorization: Bearer $GHL_WINBACK_API_KEY" \
-  -H "Version: 2021-07-28" \
-  -d "locationId=fmK5Vl9sJv49WTYA0QyP" \
-  | python3 -c 'import json, sys
+resp=$(/opt/hydra/scripts/ghl.sh --account winback GET /opportunities/pipelines \
+  locationId=fmK5Vl9sJv49WTYA0QyP); rc=$?
+if [ "$rc" -eq 0 ]; then printf '%s' "$resp" | python3 -c 'import json, sys
 data = json.load(sys.stdin)
 for p in data.get("pipelines", []):
     if p["id"] == "AZa8jK5S7UyQ0fqfxzyB":
         for s in p.get("stages", []):
-            print(f"{s[\"name\"]:<20} {s[\"id\"]}")'
+            print("%-20s %s" % (s["name"], s["id"]))'
+  rc=$?; fi; (exit "$rc")
 ```
 
 This is part of STARTUP.md Phase 5 verification.

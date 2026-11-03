@@ -50,6 +50,10 @@ chat, so it cannot satisfy a `$VAR` your command reads. Never request a name
 that is, or should be, in the gateway env; DevOps sets those in the unit env
 file.
 
+An external-API block (403/1010/401) is not a reason to stop or page a human until you have retried once through the canonical client (`/opt/hydra/scripts/ghl.sh` for GHL). If it still fails, page DevOps with the status + body, not Nick.
+
+`openclaw__secrets` is not where gateway keys live: an empty secret store never means `GHL_API_KEY` is missing; run `ghl.sh` and read its exit code (3 = key unset in this process, 10 = 401, 11 = Cloudflare 1010, 12 = other 403).
+
 Verify each env var is set in the gateway environment.
 
 ```bash
@@ -113,9 +117,8 @@ Test read access to each critical sheet:
 
 - [ ] Confirm GHL API key works:
     ```bash
-    curl -s -G "https://services.leadconnectorhq.com/opportunities/pipelines" \
-      -H "Authorization: Bearer $GHL_API_KEY" -H "Version: 2021-07-28" \
-      -d "locationId=S5w31kRRgsBjjiVATWlP" | python3 -m json.tool
+    /opt/hydra/scripts/ghl.sh GET /opportunities/pipelines \
+      locationId=S5w31kRRgsBjjiVATWlP
     ```
 - [ ] Confirm pipeline `B2B-Ads-Clio` (`GeSt85TueSvJ0SNFZXfQ`) exists
 - [ ] Fetch all 11 stage IDs and write them into `skills/muso-outreach-engine/references/pipeline-stages.md`
@@ -138,9 +141,8 @@ Test read access to each critical sheet:
 - [ ] Confirm `$GHL_WINBACK_API_KEY` env var is set in `/etc/openclaw/main.env` and is DIFFERENT from `$GHL_API_KEY`
 - [ ] Confirm GHL win back API key works:
     ```bash
-    curl -s -G "https://services.leadconnectorhq.com/opportunities/pipelines" \
-      -H "Authorization: Bearer $GHL_WINBACK_API_KEY" -H "Version: 2021-07-28" \
-      -d "locationId=fmK5Vl9sJv49WTYA0QyP" | python3 -m json.tool
+    /opt/hydra/scripts/ghl.sh --account winback GET /opportunities/pipelines \
+      locationId=fmK5Vl9sJv49WTYA0QyP
     ```
 - [ ] Confirm pipeline `Churn -> Win-back` (`AZa8jK5S7UyQ0fqfxzyB`) exists
 - [ ] Fetch all 7 stage IDs and write them into `skills/muso-winback-engine/references/pipeline-stages.md`
@@ -222,7 +224,7 @@ Run a dry run of the full outreach workflow on ONE contact without actually send
 
 - **If a token is missing**: ask Nick, do not guess, do not try to read other config files
 - **If a sheet read fails**: check `gog auth list`, confirm a@muso.ai is authenticated
-- **If GHL returns 401**: the API key may have expired, ask Nick for a new one
+- **If GHL returns 401/403/1010**: retry once through `/opt/hydra/scripts/ghl.sh`; if it still fails, page DevOps with the stderr line (exit 10 = key rejected, 11 = Cloudflare signature block, 12 = other 403), not Nick
 - **If a Slack post fails**: confirm the channel ID is correct and the bot is in the channel
 - **If any check fails twice**: stop, escalate to Nick, do not retry blindly
 

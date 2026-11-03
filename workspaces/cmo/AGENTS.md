@@ -66,6 +66,10 @@ chat, so it cannot satisfy a `$VAR` your command reads. Never request a name
 that is, or should be, in the gateway env; DevOps sets those in the unit env
 file.
 
+An external-API block (403/1010/401) is not a reason to stop or page a human until you have retried once through the canonical client (`/opt/hydra/scripts/ghl.sh` for GHL). If it still fails, page DevOps with the status + body, not Nick.
+
+`openclaw__secrets` is not where gateway keys live: an empty secret store never means `GHL_API_KEY` is missing; run `ghl.sh` and read its exit code (3 = key unset in this process, 10 = 401, 11 = Cloudflare 1010, 12 = other 403).
+
 ## Troubleshooting
 
 `sessions.resolve` returns `No session found with label: @X` means one of:

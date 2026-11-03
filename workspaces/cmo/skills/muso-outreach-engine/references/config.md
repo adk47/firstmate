@@ -72,7 +72,8 @@ Allowed `Status` values: `Pending Approval`, `Approved`, `Sent`, `Replied`, `No 
 - **Base URL**: `https://services.leadconnectorhq.com`
 - **API Key**: `$GHL_API_KEY` (Private Integration Token in `/etc/openclaw/main.env`)
 - **Version header**: `Version: 2021-07-28`
-- **Pagination**: Use GET with `page=N` for opportunity searches. POST search is broken (caps at 100, cursor does not work).
+- **Client**: Call GHL only through `/opt/hydra/scripts/ghl.sh` (gateway_exec). Python urllib's default User-Agent gets Cloudflare 1010. A 1010/403 from GHL is a client-signature block, not an account or key problem: retry once through ghl.sh before reporting it blocked.
+- **Pagination**: Use GET with `page=N` for opportunity searches (`ghl.sh --all` does it). POST search is broken (caps at 100, cursor does not work).
 
 ### Opportunity Metadata (Required on every create)
 - **Name format**: `{Company Name} | {Contact Name}`

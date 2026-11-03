@@ -30,16 +30,15 @@ Application` and `Proposal Draft` were added after.
 Run this to pull current IDs from GHL and update the table above:
 
 ```bash
-curl -s -G "https://services.leadconnectorhq.com/opportunities/pipelines" \
-  -H "Authorization: Bearer $GHL_API_KEY" \
-  -H "Version: 2021-07-28" \
-  -d "locationId=S5w31kRRgsBjjiVATWlP" \
-  | python3 -c 'import json, sys
+resp=$(/opt/hydra/scripts/ghl.sh GET /opportunities/pipelines \
+  locationId=S5w31kRRgsBjjiVATWlP); rc=$?
+if [ "$rc" -eq 0 ]; then printf '%s' "$resp" | python3 -c 'import json, sys
 data = json.load(sys.stdin)
 for p in data.get("pipelines", []):
     if p["id"] == "GeSt85TueSvJ0SNFZXfQ":
         for s in p.get("stages", []):
-            print(f"{s[\"name\"]:<30} {s[\"id\"]}")'
+            print("%-30s %s" % (s["name"], s["id"]))'
+  rc=$?; fi; (exit "$rc")
 ```
 
 Update the Stage ID column above with the output.
