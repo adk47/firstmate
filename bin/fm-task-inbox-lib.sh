@@ -58,7 +58,10 @@
 #      A writer that cannot publish verifies nothing and reports failure: every
 #      enqueue returns only after confirming its own record is on disk carrying
 #      its own text (fm_task_inbox_verify), and fm-send refuses the send when
-#      that confirmation fails.
+#      that confirmation fails. Confirmation counts any place the record can
+#      legitimately be - the root record, its handled/ acknowledgement, or its
+#      hidden link - so a concurrent acknowledgement or a worker's cleanup is
+#      delivery, while a record in none of them is a send that did not land.
 #   3. Every unhandled record also has a link under the inbox's hidden
 #      .unhandled/ directory. A worker that deletes records in its own inbox - a
 #      broad `rm`, a tidy-up glob - removes only the visible name, and the next
@@ -271,9 +274,14 @@ fm_task_inbox_lock_acquire() {  # <lock-path>
   return 0
 }
 
-# True when the sequence's record still carries <bytes-file>: either the record
-# published in the inbox root, or the acknowledged copy a worker's own mv already
-# produced under handled/. An acknowledged record is delivered, not lost.
+# The three places a sequence's record can legitimately be, all of which mean the
+# instruction is durably queued and will reach the worker:
+#   - the inbox root record, still unread;
+#   - the acknowledged copy under handled/, when the worker's own mv drained it
+#     between the publish and the check (that is the acknowledgement, not a loss);
+#   - the hidden link under .unhandled/, which a worker's own cleanup leaves
+#     behind and which the poll's repair pass restores with its original mtime.
+# A record in none of them is a steer that did not land.
 fm_task_inbox_record_holds() {  # <inbox-dir> <seq> <bytes-file>
   local dir=$1 seq=$2 bytes=$3 rec
   rec="$dir/$seq.msg"
@@ -281,25 +289,34 @@ fm_task_inbox_record_holds() {  # <inbox-dir> <seq> <bytes-file>
     cmp -s "$bytes" "$rec"
     return
   fi
-  cmp -s "$bytes" "$dir/handled/$seq.msg"
+  if [ -e "$dir/handled/$seq.msg" ] && cmp -s "$bytes" "$dir/handled/$seq.msg"; then
+    return 0
+  fi
+  cmp -s "$bytes" "$(fm_task_inbox_shadow_dir "$dir")/$seq" 2>/dev/null
 }
 
-# Verify a published record: it is a regular file whose body is exactly <text>,
-# or the acknowledged copy of that same sequence is. This is the enqueue's own
-# proof, used by the writers below and by callers that report a send as
-# delivered (bin/fm-send.sh, the remote steer leg). A worker draining the inbox
-# concurrently can move the record into handled/ between the publish and this
-# check, which is the acknowledgement, so it confirms delivery rather than
-# turning a delivered steer into a reported failure.
+# Verify a published record carries exactly <text>: the root record, its
+# acknowledged copy, or its hidden link, per fm_task_inbox_record_holds above.
+# This is the enqueue's own proof, used by the writers below and by callers that
+# report a send as delivered (bin/fm-send.sh, the remote steer leg), so a send
+# that cannot confirm its record on disk refuses instead of reporting success.
 fm_task_inbox_verify() {  # <record-path> <text>
-  local rec=$1 text=$2 acked
+  local rec=$1 text=$2 dir base acked linked
   if [ -f "$rec" ] && [ ! -L "$rec" ]; then
     cmp -s <(printf '%s' "$text") <(fm_task_inbox_body "$rec" 2>/dev/null)
     return
   fi
-  acked="${rec%/*}/handled/${rec##*/}"
-  [ -f "$acked" ] && [ ! -L "$acked" ] || return 1
-  cmp -s <(printf '%s' "$text") <(fm_task_inbox_body "$acked" 2>/dev/null)
+  dir=${rec%/*}
+  base=${rec##*/}
+  base=${base%.msg}
+  acked="$dir/handled/$base.msg"
+  if [ -f "$acked" ] && [ ! -L "$acked" ] \
+    && cmp -s <(printf '%s' "$text") <(fm_task_inbox_body "$acked" 2>/dev/null); then
+    return 0
+  fi
+  linked="$(fm_task_inbox_shadow_dir "$dir")/$base"
+  [ -e "$linked" ] || return 1
+  cmp -s <(printf '%s' "$text") <(fm_task_inbox_body "$linked" 2>/dev/null)
 }
 
 # Write one record into the next free sequence slot and print its path.

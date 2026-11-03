@@ -508,7 +508,14 @@ test_unconfirmed_record_fails_the_send() {
 set -u
 for a in "$@"; do
   case "$a" in
-    *"$FM_UNCONFIRMED_LOCK"*/role) "$FM_REAL_RM" -f "$FM_UNCONFIRMED_RECORD" 2>/dev/null || true ;;
+    *"$FM_UNCONFIRMED_LOCK"*/role)
+      # The record must be gone everywhere: the root record, its hidden link, and
+      # any acknowledged copy. Anything still on disk is a real delivery.
+      "$FM_REAL_RM" -f "$FM_UNCONFIRMED_RECORD" 2>/dev/null || true
+      "$FM_REAL_RM" -f "$FM_UNCONFIRMED_SHADOW" 2>/dev/null || true
+      "$FM_REAL_RM" -f "${FM_UNCONFIRMED_RECORD%/*}/handled/${FM_UNCONFIRMED_RECORD##*/}" 2>/dev/null || true
+      ;;
+
   esac
 done
 exec "$FM_REAL_RM" "$@"
@@ -517,6 +524,7 @@ SH
   run_send "$dir" "$err" \
     FM_REAL_RM="$real_rm" FM_UNCONFIRMED_LOCK='.meta-t1.lock' \
     FM_UNCONFIRMED_RECORD="$dir/home/state/t1.inbox/001.msg" \
+    FM_UNCONFIRMED_SHADOW="$dir/home/state/t1.inbox/.unhandled/001" \
     -- t1 "steer that vanishes before the confirmation"; rc=$?
   [ "$rc" -ne 0 ] || fail "a send whose record vanished under it reported success"
   assert_contains "$(cat "$err")" "steer not sent to t1" \
