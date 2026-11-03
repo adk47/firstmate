@@ -43,12 +43,18 @@
 #           so, as does one that only deletes a manifest, one whose only target
 #           could not be read, and one whose manifests could not be read; each
 #           says which of those it was.
-#           Every Kubernetes target records its pod images at registration, and
-#           the watch refuses to score it until those images CHANGE, so a sample
-#           taken before the rollout lands measures the release rather than the
-#           code it replaced; a target still on its pre-merge image is recorded
-#           as awaiting the deploy, never as health. When the images cannot be
-#           read the target is not scored either.
+#           Every Kubernetes target records a rollout FINGERPRINT at
+#           registration - its pod images plus its pods' pod-template-hash
+#           labels - and the watch refuses to score it until that fingerprint
+#           CHANGES, so a sample taken before the rollout lands measures the
+#           release rather than the code it replaced. The template hash is why a
+#           manifest change that rolls pods without touching an image (an env
+#           value, a routing table) still opens the gate, and why a mutable tag or
+#           a digest-pinned image still proves its own rollout. A target whose
+#           fingerprint has not changed is recorded as awaiting the deploy, never
+#           as health. When the fingerprint cannot be read at registration the
+#           target is still measured and every verdict says the rollout was never
+#           proven.
 #           Registering an existing watch whose drive stopped before the end of
 #           its schedule re-arms the remaining samples; any other existing watch
 #           is left alone. Registration is read-only against the cluster; it
@@ -374,7 +380,8 @@ cw_pools_path() { printf '%s/pools\n' "$(cw_watch_dir "$1")"; }
 # watch with no cluster targets still has targets.
 cw_sentry_path() { printf '%s/sentry\n' "$(cw_watch_dir "$1")"; }
 cw_runs_path() { printf '%s/runs\n' "$(cw_watch_dir "$1")"; }
-# The pod images a Kubernetes target ran at registration, the evidence the
+# The pod images and rollout fingerprint a Kubernetes target had at registration,
+# the evidence the
 # rollout must replace before the target is scored.
 cw_landed_path() { printf '%s/images-at-register\n' "$(cw_watch_dir "$1")"; }
 cw_landed_at_path() { printf '%s/landed-at\n' "$(cw_watch_dir "$1")"; }
@@ -905,13 +912,15 @@ print("%.4f" % rate)
 # LIVE QUERY (cluster) - one Deployment's pod facts, read once and reused by
 # every metric that needs them: restartCount total, the OOMKilled termination
 # epochs, the pod images, and the per-container memory limits that the
-# working-set ratio divides by. The row is epoch-free so one read answers the
-# landing gate and every pod-backed metric of the sample; cw_prime_pod_facts
+# working-set ratio divides by, and the pods' pod-template-hash labels that the
+# landing gate uses to prove a rollout. The row is epoch-free so one read answers
+# the landing gate and every pod-backed metric of the sample; cw_prime_pod_facts
 # takes that read in this process, because a memo written inside a per-metric
 # command substitution dies with its subshell. Prints
-# "restarts<TAB>oom-epochs<TAB>images<TAB>pairs" where oom-epochs is the
-# termination epochs joined by "," (0 for a termination that carries no
-# timestamp) and pairs is "pod,container,limit-bytes" joined by ";".
+# "restarts<TAB>oom-epochs<TAB>images<TAB>pairs<TAB>hashes" where oom-epochs is
+# the termination epochs joined by "," (0 for a termination that carries no
+# timestamp), pairs is "pod,container,limit-bytes" joined by ";", and hashes is
+# the sorted distinct pod-template-hash values joined by ",".
 CW_POD_FACTS_CACHE=''
 CW_WORKLOADS_CACHE=''
 cw_pod_facts() {  # <ns> <deploy>
@@ -937,9 +946,13 @@ if not items:
 restarts = 0
 ooms = []
 images = []
+hashes = []
 pairs = []
 for pod in items:
     pname = pod.get("metadata", {}).get("name", "")
+    h = (pod.get("metadata", {}).get("labels", {}) or {}).get("pod-template-hash", "")
+    if h and h not in hashes:
+        hashes.append(h)
     for cs in pod.get("status", {}).get("containerStatuses", []) or []:
         restarts += int(cs.get("restartCount", 0) or 0)
         for state in (cs.get("lastState", {}) or {}).values():
@@ -969,7 +982,8 @@ for pod in items:
             limit = 0.0
         if limit > 0:
             pairs.append("%s,%s,%.0f" % (pname, c.get("name", ""), limit))
-print("%d\t%s\t%s\t%s" % (restarts, ",".join(str(e) for e in ooms), ",".join(images), ";".join(pairs)))
+print("%d\t%s\t%s\t%s\t%s" % (restarts, ",".join(str(e) for e in ooms),
+                              ",".join(images), ";".join(pairs), ",".join(hashes)))
 ') || return 1
   [ -n "$cached" ] || return 1
   CW_POD_FACTS_CACHE="$CW_POD_FACTS_CACHE$key	$cached
@@ -1015,10 +1029,23 @@ cw_live_oomkilled() {  # <ns> <deploy> <baseline-epoch>
   '
 }
 
-# LIVE QUERY (cluster) - the pod images a target runs, comma-separated. This is
-# the rollout evidence the landing gate compares against.
+# LIVE QUERY (cluster) - the pod images a target runs, comma-separated.
 cw_live_images() {  # <ns> <deploy>
   cw_pod_fact "$1" "$2" 3
+}
+
+# LIVE QUERY (cluster) - the rollout fingerprint a target is judged by: its pod
+# images plus its pods' pod-template-hash labels. A Deployment rollout always
+# mints a new template hash, so an env or routing change that leaves every image
+# byte-identical still changes the fingerprint, while a mutable tag or a
+# digest-pinned reference still proves the rollout happened by its own hash.
+cw_live_fingerprint() {  # <ns> <deploy>
+  local facts images hashes
+  facts=$(cw_pod_facts "$1" "$2") || return 1
+  images=$(printf '%s' "$facts" | cut -f3)
+  hashes=$(printf '%s' "$facts" | cut -f5)
+  [ -n "$images$hashes" ] || return 1
+  printf '%s|%s\n' "$images" "$hashes"
 }
 
 # LIVE QUERY (cluster) - request p95 latency where the service exposes it, from
@@ -1502,19 +1529,32 @@ cw_target_ids() {  # <watch-id>
   fi
 }
 
-# The landing gate: a Kubernetes target is scored only once the pod images it
+# The landing gate: a Kubernetes target is scored only once the rollout it
 # ran at registration have been replaced, so a sample can never report the code
 # the release replaced as healthy. 0 = landed or nothing to compare, 2 = still
 # awaiting the rollout, 3 = images unreadable.
 cw_target_landed() {  # <watch-id> <ns> <deploy>
-  local id=$1 ns=$2 deploy=$3 recorded current
+  local id=$1 ns=$2 deploy=$3 row recorded fingerprint current
   [ -f "$(cw_landed_path "$id")" ] || return 0
-  recorded=$(awk -F'\t' -v t="$ns/$deploy" '$1 == t { print $2; found = 1 } END { exit(found ? 0 : 1) }' \
+  row=$(awk -F'\t' -v t="$ns/$deploy" '$1 == t { print $2 "|" $3; found = 1 } END { exit(found ? 0 : 1) }' \
     "$(cw_landed_path "$id")" 2>/dev/null) || return 0
-  # No images were recorded for this target, so the rollout cannot be proven.
+  recorded=${row%%|*}
+  fingerprint=${row#*|}
+  # No image was recorded for this target, so the rollout cannot be proven.
   # The watch still measures its metrics (a reader that works is worth more than
   # a silent 12h gap) but every verdict says the landing was never proven.
   [ -n "$recorded" ] || return 0
+  if [ -n "$fingerprint" ]; then
+    # A landing record from this release carries the fingerprint: the rollout is
+    # proven by the template hash, so a change that leaves every image identical
+    # (an env value, a routing table) still opens the gate.
+    current=$(cw_live_fingerprint "$ns" "$deploy" 2>/dev/null) || return 3
+    [ -n "$current" ] || return 3
+    [ "$current" = "$fingerprint" ] || return 0
+    return 2
+  fi
+  # A landed record written before the fingerprint existed compares the images,
+  # which is all it recorded.
   current=$(cw_live_images "$ns" "$deploy" 2>/dev/null) || return 3
   [ -n "$current" ] || return 3
   [ "$current" = "$recorded" ] || return 0
@@ -1525,14 +1565,16 @@ cw_target_landed() {  # <watch-id> <ns> <deploy>
 # rollout must replace. A target whose images cannot be read is recorded empty
 # and its gate stays open (never scored).
 cw_record_images() {  # <watch-id>
-  local id=$1 ns deploy images out=''
+  local id=$1 ns deploy images fingerprint out=''
   [ -z "${FM_CW_CLUSTER_DIR:-}" ] || return 0
   [ -f "$(cw_targets_path "$id")" ] || return 0
   while IFS=$'\t' read -r ns deploy; do
     [ -n "${ns:-}" ] || continue
     cw_within_budget || break
     images=$(cw_live_images "$ns" "$deploy" 2>/dev/null || true)
-    out="$out$ns/$deploy	$images
+    fingerprint=''
+    [ -z "$images" ] || fingerprint=$(cw_live_fingerprint "$ns" "$deploy" 2>/dev/null || true)
+    out="$out$ns/$deploy	$images	$fingerprint
 "
   done < "$(cw_targets_path "$id")"
   printf '%s' "$out" | cw_write "$(cw_landed_path "$id")"
@@ -1781,7 +1823,7 @@ cw_sample_blocker() {  # <watch-id> <metric> <target> <cluster-probe-error>
   cw_target_landed "$id" "$ns" "$deploy" || landed=$?
   case "$landed" in
     2) printf 'awaiting the deploy: the pods still run the image they ran at registration\n' ;;
-    3) printf 'deploy landing unreadable: the target\047s pod images could not be read\n' ;;
+    3) printf 'deploy landing unreadable: the target\047s pod fingerprint could not be read\n' ;;
   esac
   cw_within_budget || printf 'sample budget spent before this metric was read\n'
   return 0

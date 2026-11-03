@@ -731,8 +731,8 @@ case " $* " in
     app=$(printf '%s' "$*" | sed -n 's/.*app=\([^ ]*\).*/\1/p')
     last='{}'
     [ -z "${FM_CW_SHIM_OOM_AT:-}" ] || last="{\"terminated\":{\"reason\":\"OOMKilled\",\"finishedAt\":\"$(date -u -d "@$FM_CW_SHIM_OOM_AT" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf '1970-01-01T00:00:00Z')\"}}"
-    printf '{"items":[{"metadata":{"name":"%s-1"},"spec":{"containers":[{"name":"c","image":"%s","resources":{"limits":{"memory":"512Mi"}}}]},"status":{"containerStatuses":[{"name":"c","restartCount":0,"lastState":%s}]}}]}\n' \
-      "$app" "${FM_CW_SHIM_IMAGE:-}" "$last"
+    printf '{"items":[{"metadata":{"name":"%s-1","labels":{"pod-template-hash":"%s"}},"spec":{"containers":[{"name":"c","image":"%s","resources":{"limits":{"memory":"512Mi"}}}]},"status":{"containerStatuses":[{"name":"c","restartCount":0,"lastState":%s}]}}]}\n' \
+      "$app" "${FM_CW_SHIM_HASH:-h1}" "${FM_CW_SHIM_IMAGE:-}" "$last"
     ;;
   *" top pods "*) printf '%s-1   c   100m   128Mi\n' "$(printf '%s' "$*" | sed -n 's/.*app=\([^ ]*\).*/\1/p')" ;;
   *" logs "*) : ;;
@@ -1129,3 +1129,49 @@ FM_CW_GH="$HOME_FB/bin/gh" CW_CLUSTER_DIR='' FM_CW_SENTRY_DIR="$HOME_FB/sentry" 
   "$HOME_FB/state/change-watch/fb1-1400/samples.log")" = 1 ] \
   || fail "the deploy-run target was not scored when the forge budget was available: $(cat "$HOME_FB/state/change-watch/fb1-1400/samples.log")"
 pass "the forge budget is per sample and a spent one is stated"
+
+# --- the rollout fingerprint, so an env-only change still opens the gate ------
+# A Deployment rollout always mints a new pod-template hash, while an env, routing
+# or resource-limit change leaves every image byte-identical. Proving the landing
+# by the image alone would hold an H-DevOps manifest change at "awaiting the
+# deploy" for the whole watch, which is the completed-unmeasured outcome this
+# work exists to remove.
+HOME_FP=$(cluster_world fp)
+seed_app_pr "$HOME_FP"
+printf 'muso-prod\tcore-backend-api\t6\tlocalhost:30500/muso/core-backend:old-1\n' > "$HOME_FP/workloads"
+printf '[]\n' > "$HOME_FP/sentry/issues-core-backend.json"
+CW_CLUSTER_DIR='' PATH="$HOME_FP/bin:$PATH" FM_CW_SHIM_LOG="$HOME_FP/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_FP/workloads" FM_CW_SHIM_IMAGE='localhost:30500/muso/core-backend:old-1' \
+  FM_CW_SHIM_HASH=h1 FM_CW_CONFIG_DIR="$HOME_FP/config" FM_CW_SENTRY_DIR="$HOME_FP/sentry" \
+  run_cw "$HOME_FP" 1790000000 register fp1 "$CORE_PR" >/dev/null || fail "register failed"
+SAMPLES_FP="$HOME_FP/state/change-watch/fp1$CORE_ID_SUFFIX/samples.log"
+# The same image on a new ReplicaSet: the manifest changed an env value only.
+CW_CLUSTER_DIR='' PATH="$HOME_FP/bin:$PATH" FM_CW_SHIM_LOG="$HOME_FP/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_FP/workloads" FM_CW_SHIM_IMAGE='localhost:30500/muso/core-backend:old-1' \
+  FM_CW_SHIM_HASH=h2 FM_CW_CONFIG_DIR="$HOME_FP/config" FM_CW_SENTRY_DIR="$HOME_FP/sentry" \
+  run_cw "$HOME_FP" 1790000300 sample "fp1$CORE_ID_SUFFIX" 300 >/dev/null || fail "sample failed"
+awk -F'\t' '$2 == 300 && $7 == 1' "$SAMPLES_FP" | grep -q "restarts@muso-prod/core-backend-api" \
+  || fail "an env-only rollout with an unchanged image did not open the landing gate: $(cat "$SAMPLES_FP" 2>/dev/null)"
+grep -q "awaiting the deploy" "$HOME_FP/state/change-watch/fp1$CORE_ID_SUFFIX/read-failures" \
+  && fail "an env-only rollout was still recorded as awaiting the deploy"
+pass "an env-only rollout opens the landing gate with the image unchanged"
+
+# The identical fingerprint is still awaiting, so a sample taken before the
+# rollout is never scored as health.
+HOME_FP2=$(cluster_world fp2)
+seed_app_pr "$HOME_FP2"
+printf 'muso-prod\tcore-backend-api\t6\tlocalhost:30500/muso/core-backend:old-1\n' > "$HOME_FP2/workloads"
+printf '[]\n' > "$HOME_FP2/sentry/issues-core-backend.json"
+CW_CLUSTER_DIR='' PATH="$HOME_FP2/bin:$PATH" FM_CW_SHIM_LOG="$HOME_FP2/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_FP2/workloads" FM_CW_SHIM_IMAGE='localhost:30500/muso/core-backend:old-1' \
+  FM_CW_SHIM_HASH=h1 FM_CW_CONFIG_DIR="$HOME_FP2/config" FM_CW_SENTRY_DIR="$HOME_FP2/sentry" \
+  run_cw "$HOME_FP2" 1790000000 register fp2 "$CORE_PR" >/dev/null || fail "register failed"
+CW_CLUSTER_DIR='' PATH="$HOME_FP2/bin:$PATH" FM_CW_SHIM_LOG="$HOME_FP2/shim.log" \
+  FM_CW_SHIM_WORKLOADS="$HOME_FP2/workloads" FM_CW_SHIM_IMAGE='localhost:30500/muso/core-backend:old-1' \
+  FM_CW_SHIM_HASH=h1 FM_CW_CONFIG_DIR="$HOME_FP2/config" FM_CW_SENTRY_DIR="$HOME_FP2/sentry" \
+  run_cw "$HOME_FP2" 1790000300 sample "fp2$CORE_ID_SUFFIX" 300 >/dev/null || fail "sample failed"
+[ "$(awk -F'\t' '$7 == 1' "$HOME_FP2/state/change-watch/fp2$CORE_ID_SUFFIX/samples.log" | wc -l | tr -d ' ')" -eq 0 ] \
+  || fail "an unchanged rollout fingerprint was scored as health"
+grep -q "awaiting the deploy" "$HOME_FP2/state/change-watch/fp2$CORE_ID_SUFFIX/read-failures" \
+  || fail "an unchanged fingerprint was not recorded as awaiting the deploy"
+pass "an unchanged rollout fingerprint stays awaiting the deploy"
