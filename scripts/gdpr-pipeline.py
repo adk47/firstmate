@@ -338,7 +338,7 @@ def select_batch(a, kind: str, items: list[dict]) -> list[dict]:
             if not rid:
                 print(f"REFUSED: manifest entry {x!r} has no request_id")
                 raise SystemExit(1)
-            rows.append(rid)
+            rows.append(str(rid))
             if x.get("body_sha"):
                 shas[rid] = str(x["body_sha"]).strip().lower()
             if x.get("register_no") is not None:
@@ -356,7 +356,7 @@ def select_batch(a, kind: str, items: list[dict]) -> list[dict]:
         print(f"REFUSED: the manifest {a.manifest} names no requests")
         raise SystemExit(1)
     if rows:                                                    # row ids win: a register number can be renumbered
-        by_row = {x["row"]: x for x in items}
+        by_row = {str(x["row"]): x for x in items}   # the store's row id may be an int; a JSON file says str
         missing_rows = [r for r in rows if r not in by_row]
         if missing_rows:
             print(f"REFUSED: {len(missing_rows)} request(s) in the manifest are not in the {kind} set now "
