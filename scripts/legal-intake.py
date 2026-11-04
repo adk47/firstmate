@@ -21,10 +21,22 @@ ack-start.txt), from support@ via gog, English, never for legal_threat / spam / 
   NEVER sends anything (the ack copy pack is not approved), never touches a legal_threat
   thread beyond its label.
 - Exit 2 if a mailbox cannot be read (a check that cannot complete must not look clean).
+- REFUSES while /etc/hydra/gmail-readers.disabled exists (the shared freeze for every Gmail reader, firstmate 10-31).
+  This reader is not support@ - it reads notices@/legal@ - but the freeze is about the Gmail API, not one mailbox,
+  and a reader that keeps calling it during a freeze is exactly what the file exists to prevent. It exits 2 rather
+  than reporting a clean pass it did not perform, so its absence from the ledger reads as "frozen", never "no
+  requests". Missing this gate was found on 2026-11-04 while driving the erasure register: the file had existed
+  since 2026-11-03 14:47 and this script was still reading mailboxes.
 """
 import hashlib, json, os, re, sys, time, base64, html, subprocess, datetime, email.utils, urllib.request
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+
+# ONE kill file for every Gmail reader, imported rather than re-declared so the path cannot drift (see
+# credit_verify/proof/gmail_kill.py: the constant is never an env var, because a kill path the environment can move
+# is a bypass). Called as a function so tests can repoint the module attribute.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from credit_verify.proof import gmail_kill
 
 KEY = "/root/.config/gogcli/sa-YUBtdXNvLmFp.json"
 HOME = "/root/fmc1-intake"
@@ -172,7 +184,25 @@ def ensure_label(g, name, cache):
     return cache[name]
 
 
+def frozen() -> int:
+    """0 = go, 2 = refuse. FIRST thing main() does, before a token, a ledger read or any Gmail call.
+
+    The path and the check are read from the shared module at CALL time, so this refuses on exactly the file the other
+    readers refuse on - a second copy of the constant in this file is how a freeze gets a hole.
+    """
+    if gmail_kill.gmail_readers_disabled():
+        print(f"ERROR frozen: {gmail_kill.GMAIL_READERS_KILL} exists, so every Gmail reader is stopped. This reader "
+              f"reads "
+              f"notices@/legal@ through the same API, so it refuses instead of reporting a clean run it did not "
+              f"perform: nothing was read, nothing was labelled, nothing was acked, the ledger is untouched.")
+        return 2
+    return 0
+
+
 def main():
+    _frozen = frozen()
+    if _frozen:
+        sys.exit(_frozen)
     days = int(sys.argv[sys.argv.index("--since-days") + 1]) if "--since-days" in sys.argv else 2
     do_label = "--label" in sys.argv
     do_ack = "--ack" in sys.argv

@@ -5,10 +5,13 @@ Gmail reads while /etc/hydra/gmail-readers.disabled exists."""
 from __future__ import annotations
 
 import argparse
+import contextlib
 import importlib.util
+import io
 import os
 import subprocess
 import sys
+import types
 import tempfile
 import unittest
 from pathlib import Path
@@ -34,9 +37,28 @@ class GmailKillTests(unittest.TestCase):
         gmail_kill.GMAIL_READERS_KILL = self.kill
         self.cp = load("credit_proof_cli", "credit-proof.py")
         self.dv = load("credit_doc_verify_cli", "credit-doc-verify.py")
+        # legal-intake.py imports the Google client libs at module scope (they are only installed on node-8), so the
+        # import is stubbed here: the gate under test runs before any of them is used.
+        self._stubbed = []
+        stubs = {"google": {}, "google.oauth2": {},
+                 "google.oauth2.service_account": {"Credentials": object},
+                 "googleapiclient": {}, "googleapiclient.discovery": {"build": lambda *a, **k: None}}
+        for name, attrs in stubs.items():
+            if name not in sys.modules:
+                mod = types.ModuleType(name)
+                for k, v in attrs.items():
+                    setattr(mod, k, v)
+                sys.modules[name] = mod
+                self._stubbed.append(name)
+        sys.modules["google.oauth2"].service_account = sys.modules["google.oauth2.service_account"]
+        self.li = load("legal_intake_cli", "legal-intake.py")
 
     def tearDown(self):
         self.gk.GMAIL_READERS_KILL = self._old
+        for name in ("google.oauth2.service_account", "google.oauth2", "googleapiclient.discovery",
+                     "googleapiclient", "google"):
+            if name in self._stubbed:
+                sys.modules.pop(name, None)
         self.td.cleanup()
 
     def test_file_recent_turns_gmail_off_only_while_the_file_exists(self):
@@ -85,8 +107,29 @@ class OtherSupportReadersTests(unittest.TestCase):
         os.chmod(self.gog, 0o755)
         self.empty_env = os.path.join(self.td.name, "empty.env")
         Path(self.empty_env).touch()
+        # legal-intake.py imports the Google client libs at module scope (installed only on node-8), and reads the
+        # kill path from the shared module at CALL time - so repoint that module attribute, exactly as above.
+        from credit_verify.proof import gmail_kill
+        self.gk = gmail_kill
+        self._old = gmail_kill.GMAIL_READERS_KILL
+        gmail_kill.GMAIL_READERS_KILL = self.kill
+        self._stubbed = []
+        stubs = {"google": {}, "google.oauth2": {}, "google.oauth2.service_account": {"Credentials": object},
+                 "googleapiclient": {}, "googleapiclient.discovery": {"build": lambda *a, **k: None}}
+        for name, attrs in stubs.items():
+            if name not in sys.modules:
+                mod = types.ModuleType(name)
+                for k, v in attrs.items():
+                    setattr(mod, k, v)
+                sys.modules[name] = mod
+                self._stubbed.append(name)
+        sys.modules["google.oauth2"].service_account = sys.modules["google.oauth2.service_account"]
+        self.li = load("legal_intake_cli", "legal-intake.py")
 
     def tearDown(self):
+        self.gk.GMAIL_READERS_KILL = self._old
+        for name in self._stubbed:
+            sys.modules.pop(name, None)
         self.td.cleanup()
 
     def scan_copy(self):
@@ -130,6 +173,41 @@ class OtherSupportReadersTests(unittest.TestCase):
             s7.main()
         self.assertIn("fail closed", str(cm.exception.code))
         self.assertEqual(called, [])
+
+    # ---- notices@/legal@ intake (found missing on 2026-11-04: the file had existed since 11-03 14:47 and
+    # ---- legal-intake.py was still reading mailboxes, because the freeze was only wired into the support@ readers)
+    # These assert the MESSAGE, not just the exit code: main() ends in `sys.exit(2 if failed else 0)` and wraps each
+    # mailbox in `except Exception`, so a mutant that drops the gate also exits 2 - with a mailbox error instead of
+    # the refusal. Mutation-testing this file found exactly that trap; do not weaken it back to an exit-code assert.
+
+    def _boom(self, *a, **k):
+        self.gmail_calls += 1
+        raise AssertionError("a frozen legal-intake must not build a Gmail client")
+
+    def test_legal_intake_refuses_while_the_file_exists_and_says_why(self):
+        Path(self.kill).touch()
+        self.gmail_calls = 0
+        self.li.svc = self._boom
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as e:
+            self.li.main()
+        self.assertEqual(e.exception.code, 2)
+        text = out.getvalue()
+        self.assertIn("ERROR frozen", text)
+        self.assertIn("nothing was read", text)
+        self.assertEqual(self.gmail_calls, 0)                 # no client, no mailbox, no label, no ack
+        self.assertNotIn("ERROR kyran@", text)                # the failure is the freeze, not a mailbox error
+        self.assertNotIn("intake:", text)                     # and it never reports a run it did not perform
+
+    def test_legal_intake_goes_ahead_when_the_file_is_absent(self):
+        self.assertEqual(self.li.frozen(), 0)
+
+    def test_legal_intake_reads_the_shared_constant_instead_of_its_own(self):
+        # a second copy of the path in that file is how a freeze gets a hole
+        src = (HERE / "legal-intake.py").read_text()
+        self.assertIn("from credit_verify.proof import gmail_kill", src)
+        self.assertIn("gmail_kill.gmail_readers_disabled()", src)
+        self.assertNotIn('GMAIL_READERS_KILL = "/etc/hydra', src)
 
 
 if __name__ == "__main__":
