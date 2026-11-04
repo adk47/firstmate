@@ -282,3 +282,55 @@ CURLEOF
 
   rm -rf "$STUBDIR"
 }
+
+# 2026-10-29: include_closed=false hides only CLOSED-type statuses. "resolved" is DONE-type, so
+# already-resolved tickets came back every morning and were re-closed with a fresh comment
+# (869dpz17h: 25 identical closure comments). A done- or closed-type ticket is never matched,
+# even when its merge is verified; an open one with the same merge still is.
+@test "already-resolved (done/closed-type) tickets are skipped, never re-closed" {
+  STUBDIR="$(mktemp -d)"
+  cat > "$STUBDIR/muso" <<'MUSOEOF'
+#!/usr/bin/env bash
+cat > /dev/null
+printf '%s\n' '{"merge_into":"11111111-1111-4111-8111-111111111111","profiles_ids":"[\"22222222-2222-4222-8222-222222222222\"]","at":"2026-10-26 21:50:43.582000 UTC"}'
+MUSOEOF
+  chmod +x "$STUBDIR/muso"
+  cat > "$STUBDIR/curl" <<'CURLEOF'
+#!/usr/bin/env bash
+out=""; url=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2;;
+    -X|-H|-w|--data) shift 2;;
+    -sS|-s|-S) shift;;
+    http*) url="$1"; shift;;
+    *) shift;;
+  esac
+done
+AR='---ACTION-REQUEST--- {\"action_type\": \"profile-merge\", \"customer_profile_id\": \"11111111-1111-4111-8111-111111111111\", \"customer_email\": \"x@example.com\", \"details\": {\"duplicate_profile_urls\": [\"https://muso.ai/profile/22222222-2222-4222-8222-222222222222\"]}} ---END-ACTION-REQUEST---'
+if printf '%s' "$url" | grep -q 'page=0'; then
+  cat > "$out" <<JSON
+{"tasks":[
+ {"id":"OPEN","url":"u","status":{"status":"waiting","type":"custom"},"description":"$AR"},
+ {"id":"RESOLVED","url":"u","status":{"status":"resolved","type":"done"},"description":"$AR"},
+ {"id":"CLOSEDTYPE","url":"u","status":{"status":"archived-ish","type":"closed"},"description":"$AR"},
+ {"id":"RESOLVEDNAME","url":"u","status":{"status":"Resolved"},"description":"$AR"}
+]}
+JSON
+else
+  printf '%s' '{"tasks":[]}' > "$out"
+fi
+printf '200'
+CURLEOF
+  chmod +x "$STUBDIR/curl"
+
+  run env PATH="$STUBDIR:$PATH" CLICKUP_API_KEY=fake bash "$SWEEP" --dry-run --skip-customer-reply-check --days 90
+
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "pulled 1 open profile-merge tickets"
+  echo "$output" | grep -q '"task_id":"OPEN"'
+  for t in RESOLVED CLOSEDTYPE RESOLVEDNAME; do
+    if echo "$output" | grep -q "\"task_id\":\"$t\""; then echo "re-closed an already-resolved ticket: $t" >&2; return 1; fi
+  done
+  rm -rf "$STUBDIR"
+}

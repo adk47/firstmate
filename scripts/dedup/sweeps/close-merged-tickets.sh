@@ -183,8 +183,14 @@ while :; do
   fi
   n=$(echo "$resp" | jq '.tasks | length')
   [ "$n" -eq 0 ] && break
+  # include_closed=false hides only CLOSED-type statuses: "resolved" is a DONE-type status, so
+  # every already-resolved ticket came back as "open" and was re-closed with a fresh comment
+  # each morning (869dpz17h carried 25 identical closure comments by 2026-10-29). Skip done and
+  # closed types, and the resolved/closed/complete names, before matching.
   echo "$resp" | jq -c '
     .tasks[]
+    | select(((.status.type // "") | ascii_downcase) as $t | ($t != "done" and $t != "closed"))
+    | select(((.status.status // "") | ascii_downcase) as $s | ($s != "resolved" and $s != "closed" and $s != "complete"))
     | select((.description // "") | test("\"action_type\":\\s*\"profile-merge\""))
     | (.description // "") as $desc
     | ($desc | capture("---ACTION-REQUEST---\\s*(?<j>\\{[\\s\\S]*?\\})\\s*---END-ACTION-REQUEST---").j // "{}") as $jstr
