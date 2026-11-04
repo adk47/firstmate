@@ -580,6 +580,23 @@ make_path_without_lsof() {  # <case-dir>
   printf '%s\n' "$path_dir"
 }
 
+# Build an executable search path holding only the ordinary tools fm-teardown.sh
+# needs, deliberately WITHOUT a worktree-return CLI (treehouse or orca). This
+# makes "the return tool is not installed on this host" a hermetic fixture
+# instead of depending on whatever the test runner happens to have installed.
+# Mirrors make_path_without_lsof's whitelist, but keeps lsof so process reaping
+# behaves normally.
+make_path_without_worktree_return_tools() {  # <case-dir>
+  local case_dir=$1 path_dir="$1/path-without-return-tools" cmd resolved
+  mkdir -p "$path_dir"
+  for cmd in awk bash basename cat chmod cp cut date dirname env find git grep head hostname id ln \
+    lsof mkdir mktemp mv perl ps readlink realpath rm sed sh sleep sort stat tail timeout tr uname wc xargs; do
+    resolved=$(command -v "$cmd" 2>/dev/null) || continue
+    case "$resolved" in /*) ln -sf "$resolved" "$path_dir/$cmd" ;; esac
+  done
+  printf '%s\n' "$path_dir"
+}
+
 test_local_only_fork_remote_allows() {
   local case_dir rc
   case_dir=$(make_case fork-allow)
@@ -3855,6 +3872,122 @@ test_proven_change_watch_allows_teardown() {
   expect_code 0 "$rc" "cw-proven: teardown should proceed when the watch ended proven"
   ! grep -q REFUSED "$case_dir/stderr" || fail "cw-proven: teardown printed a REFUSED line for a proven watch"
   pass "a change watch that ended proven allows teardown"
+# The Captain's incident: teardown passed the landed-work gate, killed the agent
+# and closed its window, then aborted at the worktree return because treehouse is
+# not installed on this host. Verification must happen BEFORE the endpoint kill:
+# when no return path resolves at all, the teardown refuses while the agent is
+# still alive and the branch is still intact.
+test_missing_return_tool_refuses_before_killing_the_agent() {
+  local case_dir rc pid path_no_tools
+  case_dir=$(make_case missing-return-tool)
+  # The recorded worktree is a standalone repository, so ordinary git commands
+  # succeed in it while it is provably NOT a registered linked worktree of the
+  # recorded project - the "no viable return path" shape the refusal reports.
+  git init -q "$case_dir/standalone"
+  git -C "$case_dir/standalone" -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m standalone
+  git -C "$case_dir/standalone" checkout -q -b fm/task-x1
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$case_dir/standalone" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "spawn_gen=teardown-test-task-x1"
+  path_no_tools=$(make_path_without_worktree_return_tools "$case_dir")
+  rm -f "$case_dir/fakebin/treehouse"
+  # A long-lived process stands in for the crew agent in the worktree.
+  ( cd "$case_dir/standalone" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "missing-return-tool: setup sleeper did not start"
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH="$path_no_tools" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "missing-return-tool: teardown should refuse when no return tool resolves"$'\n'"$(cat "$case_dir/stderr")"
+  # The refusal must name the concrete missing requirement.
+  assert_grep 'no worktree-return tool is available' "$case_dir/stderr" \
+    "missing-return-tool: refusal did not name the missing return tool"
+  assert_grep 'leaving the agent alive and the branch intact' "$case_dir/stderr" \
+    "missing-return-tool: refusal did not report leaving the agent alive and the branch intact"
+  # The agent is still alive: verification failed before any endpoint kill.
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "missing-return-tool: the crew process was killed before the return tool was verified"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  # The worktree and its branch ref survive for inspection and retry.
+  assert_present "$case_dir/standalone" \
+    "missing-return-tool: the worktree was removed despite the refusal"
+  git -C "$case_dir/standalone" rev-parse --verify refs/heads/fm/task-x1 >/dev/null 2>&1 \
+    || fail "missing-return-tool: the task branch ref was dropped despite the refusal"
+  pass "a missing worktree-return tool refuses before the endpoint kill, leaving the agent alive and the branch intact"
+}
+
+# A plain git worktree that treehouse never leased on this host must still be
+# releasable: the guarded plain-git path runs plain `git worktree remove`, which
+# git itself refuses on a dirty worktree.
+test_plain_git_release_removes_clean_registered_worktree() {
+  local case_dir rc path_no_tools branch
+  case_dir=$(make_case plain-git-clean)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  path_no_tools=$(make_path_without_worktree_return_tools "$case_dir")
+  rm -f "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH="$path_no_tools" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "plain-git-clean: teardown should succeed without the treehouse CLI"$'\n'"$(cat "$case_dir/stderr")"
+  # The plain-git path actually performed the release and named its mechanism.
+  assert_grep 'released worktree' "$case_dir/stderr" \
+    "plain-git-clean: teardown did not report a plain-git release"
+  assert_grep 'plain git worktree remove' "$case_dir/stderr" \
+    "plain-git-clean: teardown did not name the plain git release mechanism"
+  # The worktree directory is gone and its registration is retired.
+  assert_absent "$case_dir/wt" \
+    "plain-git-clean: the released worktree directory is still present"
+  git -C "$case_dir/project" worktree list --porcelain | grep -F "$case_dir/wt" >/dev/null \
+    && fail "plain-git-clean: the released worktree is still registered with the project"
+  # The branch ref is dropped only after the release succeeds.
+  git -C "$case_dir/project" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    && fail "plain-git-clean: the task branch ref survived a successful release"
+  pass "treehouse absent: a clean registered worktree releases through guarded plain git"
+}
+
+# The guarded release never passes --force: git refuses a dirty worktree, so the
+# teardown aborts with the worktree and branch intact instead of discarding
+# uncommitted work. --force on the teardown command must not reach git.
+test_plain_git_release_refuses_dirty_worktree() {
+  local case_dir rc branch
+  case_dir=$(make_case plain-git-dirty)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  path_no_tools=$(make_path_without_worktree_return_tools "$case_dir")
+  rm -f "$case_dir/fakebin/treehouse"
+  # Uncommitted work in the worktree: git worktree remove must refuse it.
+  printf '%s\n' uncommitted > "$case_dir/wt/dirty.txt"
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH="$path_no_tools" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "plain-git-dirty: teardown should refuse a dirty worktree without --force"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'plain git release failed' "$case_dir/stderr" \
+    "plain-git-dirty: teardown did not report the plain git release refusal"
+  assert_grep 'branch and worktree intact' "$case_dir/stderr" \
+    "plain-git-dirty: teardown did not report leaving the branch and worktree intact"
+  # The dirty worktree, its uncommitted file, and its branch ref are preserved.
+  assert_present "$case_dir/wt" \
+    "plain-git-dirty: the dirty worktree was removed anyway"
+  assert_present "$case_dir/wt/dirty.txt" \
+    "plain-git-dirty: the uncommitted file was discarded"
+  git -C "$case_dir/wt" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    || fail "plain-git-dirty: the task branch ref was dropped despite the refusal"
+  pass "guarded plain git never forces: a dirty worktree refuses and stays intact"
 }
 
 test_local_only_fork_remote_allows
@@ -3947,3 +4080,6 @@ test_change_watch_interrupted_refuses_until_reregistered
 test_change_watch_gap_survives_verdict_deletion
 test_running_change_watch_does_not_block_teardown
 test_proven_change_watch_allows_teardown
+test_missing_return_tool_refuses_before_killing_the_agent
+test_plain_git_release_removes_clean_registered_worktree
+test_plain_git_release_refuses_dirty_worktree

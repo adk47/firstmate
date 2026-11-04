@@ -100,6 +100,19 @@
 # releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
+#
+# Return tool verified before the endpoint kill: worktree_release_mode resolves
+# the release path (orca, treehouse, or guarded plain git) for a task worktree
+# BEFORE reap_task_worktree_processes kills its agent. When no path resolves,
+# teardown refuses while the agent is still alive and the branch still intact,
+# naming the concrete missing requirement (treehouse absent and the directory
+# is not a registered linked worktree of the project). A plain git worktree
+# that treehouse never leased on this host releases through
+# guarded_plain_git_release, which runs plain `git worktree remove` - git
+# itself refuses a dirty or locked worktree unless --force is passed and this
+# never passes it - so an unlanded worktree is kept rather than discarded. The
+# task branch is dropped only after the release succeeds; a failed return or
+# release leaves the branch ref and the worktree intact for inspection and retry.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -1394,6 +1407,58 @@ canonical_existing_dir() {
   [ -n "$target" ] || return 1
   [ -d "$target" ] || return 1
   ( cd "$target" && pwd -P )
+}
+
+# Determine whether this task's worktree has a viable release path BEFORE any
+# destructive endpoint kill. A treehouse lease needs the treehouse CLI; a plain
+# git worktree (one treehouse never leased on this host) can be released with
+# `git worktree remove`, which refuses a dirty worktree without --force.
+# Echoes the release mode ("orca", "treehouse", "git") or returns 1 when no
+# viable path exists so the caller can leave the agent alive.
+worktree_release_mode() {  # <backend> <worktree> <project>
+  local backend=$1 wt=$2 proj=$3
+  [ -n "$wt" ] && [ -d "$wt" ] || return 1
+  if [ "$backend" = orca ]; then
+    command -v orca >/dev/null 2>&1 && { printf 'orca\n'; return 0; }
+    return 1
+  fi
+  if command -v treehouse >/dev/null 2>&1; then
+    printf 'treehouse\n'
+    return 0
+  fi
+  # treehouse is absent: only a genuine linked git worktree can be released
+  # with plain git. A directory that is not a registered worktree cannot be.
+  if worktree_registered_for_project "$proj" "$wt"; then
+    printf 'git\n'
+    return 0
+  fi
+  return 1
+}
+
+# Guarded plain-git release for a worktree treehouse never leased on this host:
+# plain `git worktree remove` only - git itself refuses a dirty or locked
+# worktree unless --force is passed, and this never passes it. The caller has
+# already run the ordinary landed/dirty checks. Echoes nothing on success;
+# prints a concrete refusal on failure and leaves the worktree intact.
+guarded_plain_git_release() {  # <worktree> <project>
+  local wt=$1 proj=$2 out
+  [ -n "$wt" ] && [ -d "$wt" ] || return 0
+  [ -n "$proj" ] && [ -d "$proj" ] || {
+    echo "teardown: cannot plain-git-release $wt; project dir ${proj:-<missing>} is not inspectable" >&2
+    return 1
+  }
+  if ! worktree_registered_for_project "$proj" "$wt"; then
+    echo "teardown: cannot plain-git-release $wt; it is not a registered worktree of $proj" >&2
+    return 1
+  fi
+  if out=$( ( cd "$proj" && git worktree remove "$wt" ) 2>&1 ); then
+    [ -n "$out" ] && printf '%s\n' "$out"
+    echo "teardown: released worktree $wt with plain git worktree remove (treehouse not installed or lease not held here)" >&2
+    return 0
+  fi
+  [ -n "$out" ] && printf '%s\n' "$out" >&2
+  echo "teardown: plain git worktree remove refused for $wt; worktree kept intact" >&2
+  return 1
 }
 
 retry_wait_secs_is_valid() {
@@ -3050,6 +3115,16 @@ fi
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
+  # Verify the worktree-return tool and returnability BEFORE the endpoint kill
+  # below. A missing/failed return leaves the agent alive and the branch intact,
+  # reporting the concrete missing requirement instead of half-tearing down.
+  TEARDOWN_RELEASE_MODE=
+  if [ -n "$WT" ] && [ -d "$WT" ]; then
+    if ! TEARDOWN_RELEASE_MODE=$(worktree_release_mode "$BACKEND" "$WT" "$PROJ"); then
+      echo "error: no worktree-return tool is available for $WT (backend=${BACKEND:-unset}); a treehouse lease needs treehouse installed and a plain git worktree needs a registered linked worktree; leaving the agent alive and the branch intact" >&2
+      exit 1
+    fi
+  fi
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
 
@@ -3077,18 +3152,17 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+  # Capture the branch before the release: returning or removing the worktree
+  # makes its HEAD unreadable, but the ref lives in the shared repo.
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-  if [ "$branch" != "HEAD" ]; then
-    if git -C "$WT" checkout --detach -q 2>/dev/null; then
-      git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-    fi
-  fi
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
-  # Kills remaining processes in the worktree (including the agent), resets, returns
-  # to pool. treehouse resolves the pool from the working directory, so run it from
-  # the project. teardown_treehouse_return tolerates transient and stale git locks
+  # Release the worktree BEFORE dropping the task branch. A failed release must
+  # leave the branch ref and the worktree intact so the lease can be inspected
+  # and retried; only a successful release may retire the local branch.
+  # treehouse resolves the pool from the working directory, so run it from the
+  # project. teardown_treehouse_return tolerates transient and stale git locks
   # left by a killed crew process; see the script header for retry and stale-lock proof.
   post_lock_cleanup_check=
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
@@ -3099,12 +3173,28 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   migrated_orca_rc=0
   teardown_migrated_orca_worktree "$META" "$WT" "$PROJ" || migrated_orca_rc=$?
   if [ "$migrated_orca_rc" -eq 3 ]; then
-    teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
-      echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
-      exit 1
-    }
+    if [ "$TEARDOWN_RELEASE_MODE" = git ]; then
+      # Guarded plain-git release for a worktree treehouse never leased on this
+      # host: plain `git worktree remove`, which git itself refuses on a dirty
+      # worktree unless --force is passed - and this never passes it.
+      guarded_plain_git_release "$WT" "$PROJ" || {
+        echo "error: plain git release failed for worktree $WT; teardown aborted with the branch and worktree intact" >&2
+        exit 1
+      }
+    else
+      teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+        echo "error: treehouse return failed for worktree $WT; teardown aborted with the branch and worktree intact" >&2
+        exit 1
+      }
+    fi
   elif [ "$migrated_orca_rc" -ne 0 ]; then
     exit 1
+  fi
+  # Release succeeded: drop the local task branch from the shared repo so it
+  # does not accumulate refs. Best effort - a branch still checked out in
+  # another worktree stays put rather than failing the teardown.
+  if [ "$branch" != "HEAD" ]; then
+    git -C "$PROJ" branch -D "$branch" >/dev/null 2>&1 || true
   fi
 fi
 
