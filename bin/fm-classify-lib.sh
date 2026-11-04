@@ -906,6 +906,10 @@ _fm_status_read_text_var() {  # <file> <output-variable>
 # or a close. A cursor persisted under the older reading has already consumed
 # such lines as ordinary status and would keep their decisions invisible
 # forever, so it must be discarded and rebuilt from byte 0.
+# 7: a time-less `paused:` line now opens like `blocked:` for its key instead of
+# waiting silently, so a line that folded as ordinary status becomes an open. A
+# cursor persisted under the older reading has already consumed that wait, so it
+# must be discarded and rebuilt from byte 0.
 FM_OPEN_DECISIONS_FOLD_VERSION=7
 
 # The host OS name, resolved once and EXPORTED so the many $(...) subshells that
