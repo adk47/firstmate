@@ -92,6 +92,8 @@ run_helper() {  # <dir> [args...]
     FM_CLIPROXY_OWNER_MAP="$dir/config/cliproxy-accounts.json" \
     FM_CLIPROXY_CLAUDE_BIN="$dir/fakebin/claude" \
     FM_CLIPROXY_DM_CMD="$dir/fakebin/dm.sh" \
+    CLIPROXY_API_KEY=fixture-key \
+    FM_CLIPROXY_CONFIG="$dir/config/cliproxyapi.yaml" \
     "$HELPER" "$@"
 }
 
@@ -201,6 +203,27 @@ assert_contains "$out" "a@x.com: already complete" "a finished account is not re
 assert_contains "$out" "b@y.com: already complete" "every finished account is left alone"
 assert_present "$DIR/auth/claude-setup-a@x.com.json" "the finished credential stays in place"
 pass "a second start leaves finished accounts alone"
+
+# --- no client key is reported, and nothing is left in the pool -------------
+
+DIR=$(home nokey)
+seed_oauth "$DIR"
+run_helper "$DIR" start --accounts a@x.com --timeout 120 >/dev/null 2>&1 \
+  || fail "start must mint a URL"
+set +e
+out=$(env PATH="$DIR/fakebin:$PATH" FM_HOME="$DIR" \
+  FM_CLIPROXY_ARCHIVE_ROOT="$DIR/archive" FM_CLIPROXY_AUTH_DIR="$DIR/auth" \
+  FM_CLIPROXY_LOGIN_REGISTRY="$DIR/config/cliproxy-login-registry.json" \
+  FM_CLIPROXY_OWNER_MAP="$DIR/config/cliproxy-accounts.json" \
+  FM_CLIPROXY_CLAUDE_BIN="$DIR/fakebin/claude" FM_CLIPROXY_DM_CMD="$DIR/fakebin/dm.sh" \
+  FM_CLIPROXY_CONFIG="$DIR/config/no-such-config.yaml" \
+  "$HELPER" submit a@x.com CODE-GOOD 2>&1)
+status=$?
+set -e
+[ "$status" -ne 0 ] || fail "a missing client key must not report success"
+assert_contains "$out" "no client API key found" "a missing client key is named, not guessed"
+assert_absent "$DIR/auth/claude-setup-a@x.com.json" "an unverifiable credential does not stay in the pool"
+pass "a missing client key is reported and nothing is left in the pool"
 
 # --- a failed verification archives the new credential, keeps the old one ---
 
