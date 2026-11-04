@@ -22,12 +22,19 @@
 #   SMOKE_SETTLE_BUDGET_S      1200  overall budget; elapsed = time slept between polls
 #   SMOKE_SETTLE_INTERVAL_S    10    poll interval
 
-# _settle_arm_a <unit> -> prints "gap" | "uptime" and returns 0 when arm (a)
-# holds; returns 1 otherwise (including when the unit/pid cannot be read).
+# _settle_pid <unit> -> prints the unit's current MainPID ("" when unreadable).
+_settle_pid() {
+  local pid
+  pid="$(systemctl show --property=MainPID --value "$1" 2>/dev/null || true)"
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] && echo "$pid"
+  return 0
+}
+
+# _settle_arm_a <pid> -> prints "gap" | "uptime" and returns 0 when arm (a)
+# holds for that process; returns 1 otherwise (including when it cannot be read).
 _settle_arm_a() {
-  local unit="$1" pid up start min="${SMOKE_SETTLE_MIN_UPTIME_S:-900}" n
-  pid="$(systemctl show --property=MainPID --value "$unit" 2>/dev/null || true)"
-  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  local pid="$1" up start min="${SMOKE_SETTLE_MIN_UPTIME_S:-900}" n
+  [[ -n "$pid" ]] || return 1
   up="$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
   [[ "$up" =~ ^[0-9]+$ ]] || return 1
   start=$(( $(date +%s) - up ))
@@ -50,14 +57,21 @@ _settle_fast_read() {
 wait_gateway_settled() {
   local profile="$1" port="$2" unit="openclaw-gateway-$1.service"
   local need="${SMOKE_SETTLE_FAST_READS:-3}" budget="${SMOKE_SETTLE_BUDGET_S:-1200}"
-  local interval="${SMOKE_SETTLE_INTERVAL_S:-10}" elapsed=0 fast=0 arm="" a
+  local interval="${SMOKE_SETTLE_INTERVAL_S:-10}" elapsed=0 fast=0 arm="" a pid="" cur
 
   while :; do
+    # A restart mid-gate gives a fresh process with its own post-start freeze
+    # ahead: the arm and the fast-read count belong to one PID only.
+    cur="$(_settle_pid "$unit")"
+    if [[ "$cur" != "$pid" ]]; then pid="$cur"; arm=""; fast=0; fi
     if [[ -z "$arm" ]]; then
-      if a="$(_settle_arm_a "$unit")"; then arm="$a"; fi
+      if a="$(_settle_arm_a "$pid")"; then arm="$a"; fi
     fi
     if [[ -n "$arm" ]]; then
       if _settle_fast_read "$port"; then fast=$((fast + 1)); else fast=0; fi
+      # restart during the read: that read does not count for the new process
+      cur="$(_settle_pid "$unit")"
+      if [[ "$cur" != "$pid" ]]; then pid="$cur"; arm=""; fast=0; fi
       if [[ "$fast" -ge "$need" ]]; then
         log "  $profile: gateway settled after ${elapsed}s (arm a: $arm; $need consecutive fast /health reads)"
         return 0

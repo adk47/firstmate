@@ -12,7 +12,7 @@ setup() {
   LIB="$BATS_TEST_DIRNAME/../lib/gateway-settle.sh"
   cat > "$T/bin/systemctl" <<'S'
 #!/bin/sh
-echo 4242
+cat "$T/pid" 2>/dev/null || echo 4242
 S
   cat > "$T/bin/ps" <<'S'
 #!/bin/sh
@@ -26,6 +26,8 @@ S
   cat > "$T/bin/journalctl" <<'S'
 #!/bin/sh
 n=$(cat "$T/jn" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$T/jn"
+# STUB_GAP_PID: only that PID ever logged the gap line
+if [ -n "${STUB_GAP_PID:-}" ] && [ "$1" != "_PID=$STUB_GAP_PID" ]; then exit 0; fi
 if [ "${STUB_GAP_AT:-0}" -gt 0 ] && [ "$n" -ge "$STUB_GAP_AT" ]; then
   echo "[health] host timing gap detected: process was frozen ~300000ms"
 fi
@@ -36,6 +38,8 @@ S
 #!/bin/sh
 n=$(cat "$T/cn" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$T/cn"
 l=$(sed -n "${n}p" "$T/reads"); [ -n "$l" ] || l=$(tail -n 1 "$T/reads")
+# STUB_RESTART_AT_CURL=n: the gateway restarts (new MainPID) during read n
+if [ -n "${STUB_RESTART_AT_CURL:-}" ] && [ "$n" -eq "$STUB_RESTART_AT_CURL" ]; then echo 5555 > "$T/pid"; fi
 printf '%s' "$l"
 S
   chmod +x "$T"/bin/*
@@ -108,6 +112,25 @@ teardown() { rm -rf "$T"; }
   run wait_gateway_settled main 18789
   [ "$status" -eq 0 ]
   [[ "$output" == *"WARN main: gateway did not settle"* ]]
+}
+
+@test "a restart between reads resets the arm and the fast count (new PID has no gap yet)" {
+  echo "200 0.2" > "$T/reads"
+  export STUB_GAP_AT=1 STUB_GAP_PID=4242 STUB_RESTART_AT_CURL=2 SMOKE_SETTLE_BUDGET_S=50
+  run wait_gateway_settled main 18789
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"gateway settled"* ]]
+  [[ "$output" == *"WARN main: gateway did not settle within 50s (condition a"* ]]
+}
+
+@test "a restart between reads: the new PID settles only after its own gap line" {
+  echo "200 0.2" > "$T/reads"
+  export STUB_GAP_AT=1 STUB_RESTART_AT_CURL=2
+  run wait_gateway_settled main 18789
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"gateway settled"*"arm a: gap"* ]]
+  # 2 reads on the old PID (the 2nd discarded), then 3 fresh ones on the new PID
+  [ "$(cat "$T/cn")" -eq 5 ]
 }
 
 # ── wiring: smoke-test.sh must call the gate before each profile's first LLM probe ──
