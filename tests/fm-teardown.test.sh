@@ -3824,6 +3824,74 @@ test_plain_git_release_refuses_initialized_submodule() {
   pass "a worktree holding an initialized submodule refuses before the agent is killed"
 }
 
+# A worktree under an Orca workspace tree is creation provenance: even a task
+# record that predates backend= and orca_worktree_id= must release through Orca,
+# never through treehouse ("not managed by treehouse") and never as a discard.
+write_orca_workspace_case() {  # <case-dir>
+  local case_dir=$1 wt commit
+  land_shippable_commit "$case_dir"
+  commit=$(git -C "$case_dir/wt" rev-parse HEAD)
+  wt="$case_dir/orca/workspaces/example-repo/wt"
+  mkdir -p "$(dirname "$wt")"
+  git -C "$case_dir/project" worktree add -q --detach "$wt" "$commit"
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$wt" \
+    "project=$case_dir/project" \
+    "kind=ship" \
+    "mode=no-mistakes" \
+    "spawn_gen=teardown-test-task-x1"
+  printf '%s\n' "$wt"
+}
+
+test_orca_workspace_path_routes_release_to_orca() {
+  local case_dir rc wt
+  case_dir=$(make_case orca-workspace-route)
+  wt=$(write_orca_workspace_case "$case_dir")
+  cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "worktree rm")
+    printf '%s\n' "$*" >> "$FM_FAKE_ORCA_LOG"
+    printf '{"ok":true}\n'
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+
+  rc=0
+  FM_FAKE_ORCA_LOG="$case_dir/orca.log" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "orca-workspace-route: an Orca-created worktree must release through orca"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep "worktree rm --worktree path:$wt" "$case_dir/orca.log" \
+    "orca-workspace-route: the release did not route through orca by the worktree path"
+  pass "an Orca workspace path routes the release through orca, not treehouse or a discard"
+}
+
+test_orca_path_miss_falls_back_to_guarded_git_release() {
+  local case_dir rc wt
+  case_dir=$(make_case orca-path-miss)
+  wt=$(write_orca_workspace_case "$case_dir")
+  cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "worktree rm") printf '{"ok":false,"error":{"code":"selector_not_found","message":"selector_not_found"}}\n'; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "orca-path-miss: Orca's miss must fall back to a guarded git release"$'\n'"$(cat "$case_dir/stderr")"
+  assert_absent "$wt" \
+    "orca-path-miss: the guarded git fallback did not release the worktree"
+  pass "an Orca path miss falls back to a guarded plain git release, never a discard"
+}
+
 # The pool probe merges an external tool's stdout and stderr, so a whitespace-only
 # row is possible input. It must be classified - not expanded as an unset array,
 # which stock-macOS bash 3.2 under `set -u` treats as unbound - so the held slot
@@ -3908,6 +3976,69 @@ test_unresolvable_home_relative_pool_listing_refuses_before_killing_the_agent() 
   git -C "$case_dir/wt" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
     || fail "pool-foreign-home: the task branch ref was dropped despite the refusal"
   pass "a pool listing this host's HOME cannot resolve refuses before the endpoint kill"
+}
+
+# A pool listing that resolves at least one `~` path speaks for THIS home, so an
+# unresolvable slot beside it is a stale entry whose directory was removed out of
+# band - not a foreign HOME. Teardown still refuses before the kill (never
+# discarding a slot treehouse may lease), but names the stale slot and the exact
+# prune command so the operator can clear the outage.
+add_stale_slot_pool_treehouse() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  status)
+    printf '1  leased  ~/.treehouse/example-repo/live-slot/example-repo\n'
+    printf '2  leased  ~/.treehouse/example-repo/stale-slot/example-repo\n'
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+test_stale_pool_entry_is_named_with_its_prune_command() {
+  local case_dir rc branch pid home
+  case_dir=$(make_case pool-stale-slot)
+  home="$case_dir/home"
+  mkdir -p "$home/.treehouse/example-repo/live-slot/example-repo"
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  add_stale_slot_pool_treehouse "$case_dir"
+  seed_backlog_in_flight "$case_dir"
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "pool-stale-slot: setup sleeper did not start"
+
+  rc=0
+  HOME="$home" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "pool-stale-slot: a stale pool entry must refuse before the kill"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'stale slot' "$case_dir/stderr" \
+    "pool-stale-slot: refusal did not name the stale slot"
+  assert_grep 'stale-slot' "$case_dir/stderr" \
+    "pool-stale-slot: refusal did not name the concrete stale slot path"
+  assert_grep 'treehouse prune' "$case_dir/stderr" \
+    "pool-stale-slot: refusal did not print the exact prune command"
+  assert_no_grep 'home-relative paths this host' "$case_dir/stderr" \
+    "pool-stale-slot: a stale slot beside a resolvable slot was misread as a foreign HOME"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "pool-stale-slot: the crew process was killed before the release was proven"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "pool-stale-slot: a refused teardown left a replayable backlog-close record"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "pool-stale-slot: the backlog row was closed despite the refusal"
+  assert_present "$case_dir/wt" \
+    "pool-stale-slot: the worktree was removed despite the refusal"
+  git -C "$case_dir/wt" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    || fail "pool-stale-slot: the task branch ref was dropped despite the refusal"
+  pass "a stale pool entry is named with its prune command and refuses before the kill"
 }
 
 # A pool listing whose only entries are longer paths that merely contain this
@@ -4197,9 +4328,12 @@ test_pool_stderr_diagnostic_is_not_pool_membership
 test_plain_git_release_refuses_dirty_worktree
 test_plain_git_release_refuses_locked_worktree
 test_plain_git_release_refuses_initialized_submodule
+test_orca_workspace_path_routes_release_to_orca
+test_orca_path_miss_falls_back_to_guarded_git_release
 test_whitespace_only_pool_listing_row_is_classified
 test_pool_listing_does_not_claim_a_longer_sibling_path
 test_unresolvable_home_relative_pool_listing_refuses_before_killing_the_agent
+test_stale_pool_entry_is_named_with_its_prune_command
 test_unpooled_unregistered_worktree_refuses_before_killing_the_agent
 test_uninspectable_project_refuses_before_killing_the_agent
 test_unreportable_pool_listing_refuses_before_killing_the_agent

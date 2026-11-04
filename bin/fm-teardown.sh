@@ -87,8 +87,13 @@
 # Return tool verified before the endpoint kill: worktree_release_mode resolves
 # the release path (orca, treehouse, or guarded plain git) for a task worktree
 # BEFORE the endpoint kill kills its agent, and refuses before the pending-close
-# record is staged. A backend=orca worktree needs the orca CLI and its recorded
-# Orca worktree id proven to resolve to that exact path. Every other
+# record is staged. An Orca-created worktree - backend=orca, a recorded Orca
+# worktree id, or a path under an Orca workspace tree, so a worktree whose task
+# record predates the backend field still routes by creation provenance - needs
+# the orca CLI, and when an Orca worktree id is recorded it must resolve to that
+# exact path. A recorded id releases by id; an Orca-created worktree without one
+# releases by its current path, and falls back to a guarded plain git release
+# when Orca's registry no longer names that path - never to a discard. Every other
 # worktree needs treehouse installed on this host plus an inspectable recorded
 # project directory, and the treehouse pool the project resolves is asked (read
 # only) whether it holds that exact worktree - judged from the `status` stdout
@@ -103,7 +108,11 @@
 # cannot report its pool listing at all (no `status` support, a failing status,
 # or no output) refuses too, and so does a listing that names home-relative
 # paths this host's HOME cannot resolve, because lease membership is then
-# unproven either way.
+# unproven either way. A listing that resolves at least one `~` path speaks for
+# this HOME, so an unresolvable slot beside it is a stale pool entry rather than
+# a foreign HOME: the refusal names that slot and the exact prune command, and
+# still refuses before the kill rather than discarding a slot treehouse may
+# still lease.
 # guarded_plain_git_release runs plain `git worktree remove` - git itself refuses
 # a dirty or locked worktree unless --force is passed and this never passes it -
 # so an unlanded worktree is kept rather than discarded. The task branch is
@@ -1404,6 +1413,17 @@ canonical_existing_dir() {
   ( cd "$target" && pwd -P )
 }
 
+# True when <worktree> lives in an Orca workspace tree, which is how Orca-created
+# worktrees are laid out even when the task meta records no backend or id. This is
+# creation provenance: "not managed by treehouse" for such a path routes to Orca
+# release, never to a discard.
+orca_workspace_path() {  # <worktree>
+  case "$1" in
+    */orca/workspaces/*) return 0 ;;
+  esac
+  return 1
+}
+
 # Read-only pool probe. Returns 0 when the listing of the pool this host's
 # treehouse resolves from <project> names <worktree> as a whole listing field, in
 # either the absolute form or the `~`-abbreviated form treehouse prints for paths
@@ -1424,8 +1444,9 @@ canonical_existing_dir() {
 # returns 2 through its exit code, whether or not it wrote to stderr.
 treehouse_pool_lists_worktree() {  # <project> <worktree>
   local proj=$1 wt=$2 listing line cand rel abs_wt abs_home field
-  local -a candidates=() fields=()
-  local unresolved=0
+  local -a candidates=() fields=() unresolved_slots=()
+  local unresolved=0 resolved_home_paths=0
+  TEARDOWN_POOL_PROBE_NOTE=
   if ! listing=$( ( cd "$proj" && treehouse status ) 2>/dev/null ); then
     return 2
   fi
@@ -1458,6 +1479,9 @@ treehouse_pool_lists_worktree() {  # <project> <worktree>
         '~'/*)
           if [ -z "$abs_home" ] || [ ! -e "$abs_home/${field#'~/'}" ]; then
             unresolved=1
+            unresolved_slots+=("$field")
+          else
+            resolved_home_paths=$((resolved_home_paths + 1))
           fi
           ;;
       esac
@@ -1465,8 +1489,20 @@ treehouse_pool_lists_worktree() {  # <project> <worktree>
   done <<EOF
 $listing
 EOF
-  [ "$unresolved" = 0 ] || return 3
-  return 1
+  if [ "$unresolved" = 0 ]; then
+    return 1
+  fi
+  # Distinguish a foreign HOME from a stale slot in THIS home's pool. A listing
+  # that resolves at least one `~` path speaks for this HOME; an unresolvable
+  # slot beside it is a stale entry whose directory was removed out of band, not
+  # proof of HOME divergence. Only a listing with NO resolvable `~` path (or a
+  # host with no `$HOME/.treehouse` at all) speaks for a different home.
+  if [ -z "$abs_home" ] || [ ! -d "${HOME:-/nonexistent}/.treehouse" ] || [ "$resolved_home_paths" -eq 0 ]; then
+    TEARDOWN_POOL_PROBE_NOTE="this host's treehouse pool listing for $proj names home-relative paths this host's HOME cannot resolve"
+    return 3
+  fi
+  TEARDOWN_POOL_PROBE_NOTE="this host's treehouse pool for $proj holds a stale slot that this host's HOME cannot resolve: ${unresolved_slots[*]+"${unresolved_slots[*]}"}; prune it with: ( cd $proj && treehouse prune )"
+  return 3
 }
 
 # Proof that a plain `git worktree remove` - which never receives --force - will
@@ -1529,15 +1565,21 @@ worktree_release_mode() {  # <backend> <worktree> <project> [<orca-worktree-id>]
     TEARDOWN_RELEASE_REFUSAL="the worktree ${wt:-<missing>} does not exist"
     return 1
   fi
-  if [ "$backend" = orca ]; then
+  # Creation provenance: a backend=orca task, a recorded Orca worktree id, or a
+  # worktree under an Orca workspace tree all mean Orca created this worktree.
+  # "not managed by treehouse" for such a path routes to Orca release, never to a
+  # discard.
+  if [ "$backend" = orca ] || [ -n "$orca_id" ] || orca_workspace_path "$wt"; then
     if ! command -v orca >/dev/null 2>&1; then
-      TEARDOWN_RELEASE_REFUSAL="a backend=orca worktree is released only through orca, and the orca CLI is not installed on this host"
+      TEARDOWN_RELEASE_REFUSAL="an Orca-created worktree is released only through orca, and the orca CLI is not installed on this host"
       return 1
     fi
-    require_orca_worktree_path_match "$orca_id" "$wt" || {
-      TEARDOWN_RELEASE_REFUSAL="Orca worktree id ${orca_id:-<missing>} does not resolve to $wt, so removing it through Orca would discard work nobody inspected"
-      return 1
-    }
+    if [ -n "$orca_id" ]; then
+      require_orca_worktree_path_match "$orca_id" "$wt" || {
+        TEARDOWN_RELEASE_REFUSAL="Orca worktree id ${orca_id} does not resolve to $wt, so removing it through Orca would discard work nobody inspected"
+        return 1
+      }
+    fi
     TEARDOWN_RELEASE_MODE=orca
     return 0
   fi
@@ -1560,7 +1602,7 @@ worktree_release_mode() {  # <backend> <worktree> <project> [<orca-worktree-id>]
       return 1
       ;;
     3)
-      TEARDOWN_RELEASE_REFUSAL="this host's treehouse pool listing for $proj names home-relative paths this host's HOME cannot resolve, so whether it holds $wt cannot be verified"
+      TEARDOWN_RELEASE_REFUSAL="${TEARDOWN_POOL_PROBE_NOTE:-this host's treehouse pool listing for $proj names home-relative paths this host's HOME cannot resolve}, so whether it holds $wt cannot be verified"
       return 1
       ;;
   esac
@@ -1600,6 +1642,19 @@ guarded_plain_git_release() {  # <worktree> <project>
   [ -n "$out" ] && printf '%s\n' "$out" >&2
   echo "teardown: plain git worktree remove refused for $wt; worktree kept intact" >&2
   return 1
+}
+
+# Remove an Orca-managed worktree when only its current path is known. Orca's
+# registry may still carry a stale path for a worktree that moved between hosts,
+# so a path selector can miss; callers fall back to a guarded plain git release.
+fm_backend_orca_remove_worktree_by_path() {  # <worktree>
+  local wt=${1:-}
+  [ -n "$wt" ] || {
+    echo "error: missing worktree path; cannot remove Orca worktree" >&2
+    return 1
+  }
+  fm_backend_source orca >/dev/null 2>&1 || return 1
+  fm_backend_orca_run_json orca worktree rm --worktree "path:$wt" --force --json
 }
 
 retry_wait_secs_is_valid() {
@@ -3178,7 +3233,7 @@ fi
 "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
-if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
+if [ "$TEARDOWN_RELEASE_MODE" = orca ] && [ "$KIND" != secondmate ]; then
   branch=HEAD
   if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
@@ -3189,12 +3244,23 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   fi
-  [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+  [ -z "$T_ORCA" ] || fm_backend_kill "orca" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   # Orca owns the release, so the task branch is dropped only once Orca reports
   # the worktree removed; a failed removal keeps the ref for inspection and retry.
-  if ! fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"; then
-    echo "error: orca worktree removal failed for ${ORCA_WORKTREE_ID:-<missing>}; teardown aborted with the branch and worktree intact" >&2
-    exit 1
+  if [ -n "$ORCA_WORKTREE_ID" ]; then
+    if ! fm_backend_remove_worktree "orca" "$ORCA_WORKTREE_ID"; then
+      echo "error: orca worktree removal failed for ${ORCA_WORKTREE_ID}; teardown aborted with the branch and worktree intact" >&2
+      exit 1
+    fi
+  elif ! fm_backend_orca_remove_worktree_by_path "$WT"; then
+    # Orca's registry may still name a stale path for a worktree that moved
+    # between hosts, so a path selector can miss. Fall back to a guarded plain
+    # git release, which never forces a dirty or locked worktree.
+    echo "teardown: orca could not remove $WT by path; attempting a guarded plain git release" >&2
+    guarded_plain_git_release "$WT" "$PROJ" || {
+      echo "error: orca worktree removal failed for $WT and a guarded plain git release could not prove it safe; teardown aborted with the branch and worktree intact" >&2
+      exit 1
+    }
   fi
   if [ "$branch" != HEAD ]; then
     git -C "$PROJ" branch -D "$branch" >/dev/null 2>&1 || true
