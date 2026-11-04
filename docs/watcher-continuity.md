@@ -30,7 +30,8 @@ A primary whose own turn ended on an inference-gateway failure is idle with noth
 
 After an actionable Pi or OpenCode child close, the adapter starts and verifies one singleton successor before it delivers the original wake.
 Arming never waits on delivery: a close that lands while an earlier record's wake is still being delivered, including a branch settlement that outlives several watcher cycles, arms its own successor immediately, and the pipeline adopts that child instead of starting a second one, so supervision is never dark for the length of a model turn.
-The bounded retry after a failing or empty close still runs once delivery settles, because that path exists to damp a child that dies on its own rather than to carry a wake.
+On Pi, the bounded retry after a failing or empty close still runs once delivery settles, because that path exists to damp a child that dies on its own rather than to carry a wake.
+OpenCode keeps no such deferral: a failing or empty close that lands inside the delivery window retries nothing until a later cycle or re-arm call.
 It confirms the handling handoff against that successor before scheduling the follow-up, retries once against the current generation and successor, and treats a failed confirmation as a restoration failure: it classifies the error, retires a successor that is no longer alive, and surfaces exactly one typed message.
 A failed confirmation is never swallowed.
 It waits at most one readiness timeout per attempt, then sends TERM and waits a bounded retirement confirmation before the next lock-verified exponential retry.

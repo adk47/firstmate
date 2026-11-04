@@ -291,7 +291,7 @@ exit 0
 SH
   chmod +x "$repo/bin/fm-watch-arm.sh"
   out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_BASE_MS=10000 FM_WATCH_REARM_RETRY_MAX_MS=10000 node --input-type=module 2>&1 <<'EOF'
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 let tool = null;
@@ -303,16 +303,24 @@ const pi = {
   },
   sendUserMessage: async () => {},
 };
+const armRows = () =>
+  existsSync(process.env.FM_ARM_LOG)
+    ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter((row) => row.startsWith("arm"))
+    : [];
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-first", {}, undefined, undefined, {});
-let redundant = null;
-for (let i = 0; i < 100; i += 1) {
+for (let i = 0; i < 100 && armRows().length === 0; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 10));
-  redundant = await tool.execute("tool-call-during-retry", {}, undefined, undefined, {});
-  if (redundant.content[0]?.text.includes("scheduled continuity retry")) break;
 }
+if (armRows().length !== 1) throw new Error(`initial call spawned ${armRows().length} arm children`);
+// The fixture exits at once, so its close handler schedules the bounded retry;
+// let it run before the tool call, which would otherwise be answered against a
+// dead-but-not-yet-closed handle and legitimately repair it with a new child.
+await new Promise((resolve) => setTimeout(resolve, 500));
+const before = armRows().length;
+const redundant = await tool.execute("tool-call-during-retry", {}, undefined, undefined, {});
 if (!redundant?.content[0]?.text.includes("Pi extension already owns a scheduled continuity retry; no manual re-arm needed")) {
   throw new Error(`scheduled retry did not return ownership-based no-op guidance: ${redundant?.content[0]?.text}`);
 }
@@ -322,9 +330,9 @@ if (/^watcher: healthy\b/.test(redundant.content[0]?.text)) {
 if (!redundant.content[0]?.text.includes("only after a later notification says the cycle is missing, failed, or unhealthy")) {
   throw new Error(`scheduled retry call omitted the repair-only condition: ${redundant.content[0]?.text}`);
 }
-await new Promise((resolve) => setTimeout(resolve, 100));
-const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
-if (rows.length !== 1) throw new Error(`scheduled retry call spawned ${rows.length} arm children`);
+await new Promise((resolve) => setTimeout(resolve, 200));
+const after = armRows().length;
+if (after !== before) throw new Error(`scheduled retry call spawned ${after - before} arm children`);
 EOF
 )
   status=$?
