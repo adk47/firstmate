@@ -606,7 +606,20 @@ def main():
     # QA #1545: an unparsed line cannot be read as "some other message" - it fails the run closed
     if report["core"].get("unclassified") and "core" not in unmeasured:
         unmeasured.append("core (unparsed lines naming a user)")
-    report["verdict"] = "STOP" if stops else ("UNMEASURED" if unmeasured else "OK")
+    # r5 ruling (2026-11-04): STOP and UNMEASURED are INDEPENDENT facts and the verdict must carry both.
+    # A run with stops AND unmeasured sources used to answer a bare "STOP", so the one line an operator reads said
+    # "these stops explain the window" while some sources had never been read at all - an overclaim in the direction
+    # that matters (it reads as a complete account of a window that is only partly measured). The combined verdict is
+    # its own word, and the exit code stays 1: a STOP is still the thing that kills the run, and the caller must not
+    # have to learn a new rc to keep that behaviour.
+    if stops and unmeasured:
+        report["verdict"] = "STOP+UNMEASURED"
+    elif stops:
+        report["verdict"] = "STOP"
+    elif unmeasured:
+        report["verdict"] = "UNMEASURED"
+    else:
+        report["verdict"] = "OK"
     report["stops"], report["reported"], report["unmeasured"] = stops, reported, unmeasured
     report["uncorrelated"] = uncorrelated
     report["unknown_template"] = unknown_template

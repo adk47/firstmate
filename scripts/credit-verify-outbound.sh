@@ -261,15 +261,29 @@ autokill() { # <why>
 
 [ "${ZR_MISSING:-0}" = 1 ] && { log "LIVE REFUSED: the zero-read reader $ZERO_READ is not deployed; this tick runs DRY"; page "live tick refused: $ZERO_READ missing (tick ran dry)"; }
 
-# refusal spike of one apply's outcomes JSON: refused / (sent + refused) > REFUSAL_SPIKE
+# refusal spike of one apply's outcomes JSON: refused / (sent + refused) > REFUSAL_SPIKE.
+# Prints exactly one of: ok | spike | unmeasured <why>.
+# "unmeasured" exists because ABSENCE HAS NO RATIO (l1, 2026-11-04 15:05Z, in production): the free family applied,
+# sent 39 real emails, then died inside the Intercom note with TimeoutExpired - so credit-review.py returned rc=1 and
+# NEVER WROTE the outcomes artefact. The old spike() printed "unreadable", the caller accepted only "ok", and the tick
+# killed with the label "refusal spike (> 0.20 of attempts refused)" - a statement about the world, when there was
+# nothing to count. The kill was right (39 sends, no artefact = outcome_unknown, fail closed); the LABEL was false, and
+# the label is the only part of an incident that a human still reads the next morning. An absent or unparseable
+# artefact can yield neither a spike NOR a clean read: it is its own verdict, it stops the family, and it names the
+# path it could not read so the next reader does not have to guess which file went missing.
 spike() { # <outcomes json> <sent>
   py - "$1" "$2" "$REFUSAL_SPIKE" <<'PY'
-import json, sys
+import json, sys, os
+path = sys.argv[1]
 try:
-    d = json.load(open(sys.argv[1]))
-except (OSError, ValueError):
-    print("unreadable"); sys.exit(0)
+    d = json.load(open(path))
+except FileNotFoundError:
+    print("unmeasured %s was never written (the apply did not reach its outcome write)" % path); sys.exit(0)
+except (OSError, ValueError) as exc:
+    print("unmeasured %s is unreadable (%s)" % (path, type(exc).__name__)); sys.exit(0)
 o = d.get("outcomes", d) if isinstance(d, dict) else d
+if not isinstance(o, list):
+    print("unmeasured %s carries no outcomes list (got %s)" % (path, type(o).__name__)); sys.exit(0)
 refused = sum(1 for x in o if str(x.get("result", "")).startswith("refused"))
 sent = int(sys.argv[2] or 0)
 n = sent + refused
@@ -643,7 +657,17 @@ print(sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True).execute(
   [ "$shared" = 1 ] && FIRST_SPENT[$fam]=$(( ${FIRST_SPENT[$fam]:-0} + nsent ))
   # QA #1541 (claim runners print 'sent N', credit runners 'N sent'): the spike reads the LEDGER's own count of this
   # apply's sends - never a grep on a runner's prose, which read 0 for claims and wrote the permanent kill file
-  [ "$(spike "$OUT/$tag-apply.json" "$nsent")" = "ok" ] || { autokill "$tag refusal spike (> $REFUSAL_SPIKE of attempts refused)"; return 1; }
+  # Two different facts, two different sentences. A SPIKE is a measurement of the run and says so with its numbers.
+  # An ABSENT/UNREADABLE artefact is the absence of a measurement: it still stops the family (fail closed), but it
+  # must never be reported as a spike - "the artefact is missing" and "too many users were refused" send a reader to
+  # two completely different investigations, and naming the wrong one is how 2026-11-04's false label happened.
+  local sv; sv="$(spike "$OUT/$tag-apply.json" "$nsent")"
+  case "$sv" in
+    ok) ;;
+    spike) autokill "$tag refusal spike: $((nsent)) sent and the run's own outcomes refused more than $(printf '%.0f' "$(awk -v t="$REFUSAL_SPIKE" 'BEGIN{print t*100}')")% of attempts (ledger $((lo + 1))-$hi)"; return 1 ;;
+    unmeasured*) autokill "$tag OUTCOMES UNMEASURED after $nsent send(s) (ledger $((lo + 1))-$hi): ${sv#unmeasured }; no ratio can be computed from an artefact that does not exist, so this is not a spike - read the sends back before lifting"; return 1 ;;
+    *) autokill "$tag spike() answered '$sv' - an unexpected verdict is not a pass (ledger $((lo + 1))-$hi)"; return 1 ;;
+  esac
   if [ "$nsent" -gt 0 ]; then
     local fh; fh="$(fraudhit "$lo" "$hi")"
     log "$tag fraud re-check ledger $((lo + 1))-$hi: ${fh:0:300}"
@@ -655,14 +679,26 @@ print(sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True).execute(
     # lines below - so a transient Trino/kubectl timeout would write the global kill file as if a credit-class message
     # had been observed. The reader prints exactly one verdict line (OK:/STOP:/UNMEASURED:); anything else is a crash,
     # i.e. a source we could not read, and UNMEASURED is the honest reading of it.
+    # qa Critical on #1747 (d2 17:1xZ): zero_read emits a COMBINED verdict `STOP+UNMEASURED:` with exit 1 when a
+    # confirmed stop AND an unread source exist in the same batch. This case listed only OK*/STOP*/UNMEASURED*, so the
+    # combined word matched NOTHING, fell into the catch-all below, was rewritten to `UNMEASURED: ... no verdict` and
+    # forced zrc=2 - which BYPASSED the stop arm entirely, exactly when both a stop and an unread source existed. The
+    # lesson is the same one that produced the bug this branch fixes: a status word that means two things, gated by a
+    # pattern that can only see one of them. A STOP of ANY form is a STOP, and it WINS over UNMEASURED.
     case "${zr:-}" in
-      OK|OK:*|STOP|STOP:*|UNMEASURED|UNMEASURED:*) ;;
+      OK|OK:*|UNMEASURED|UNMEASURED:*) ;;
+      STOP|STOP:*|STOP+UNMEASURED|STOP+UNMEASURED:*) zrc=1 ;;   # never let a STOP be re-read as a mere unmeasured
       *) zr="UNMEASURED: the zero-read printed no verdict (a crash is not a STOP): ${zr:0:200}"; zrc=2 ;;
     esac
     log "$tag zero-read ledger $((lo + 1))-$hi (rc=$zrc): ${zr:0:300}"
     if [ "$zrc" = 1 ]; then
-      # STOP: an unexplained credit-class message - the auto-kill for the whole run (unchanged)
-      autokill "$tag zero-read STOP for ledger $((lo + 1))-$hi: ${zr:0:200}"; return 1
+      # STOP: an unexplained credit-class message - the auto-kill for the whole run (unchanged).
+      # The combined verdict says something extra that the plain STOP does not: the batch had sources NOBODY read, so
+      # the stops below do not account for every source. Same kill, honest sentence.
+      case "${zr:-}" in
+        STOP+UNMEASURED*) autokill "$tag zero-read STOP+UNMEASURED for ledger $((lo + 1))-$hi (a confirmed stop AND sources that were never read - the stops below do NOT account for every source): ${zr:0:240}"; return 1 ;;
+        *) autokill "$tag zero-read STOP for ledger $((lo + 1))-$hi: ${zr:0:200}"; return 1 ;;
+      esac
     fi
     if [ "$zrc" != 0 ]; then
       # (B) UNMEASURED never wedges the tick: rows so the batch's outcomes balance, a page the same minute, this

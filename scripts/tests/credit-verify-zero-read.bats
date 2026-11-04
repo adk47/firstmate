@@ -617,3 +617,51 @@ PY
   run python3 "$ZR" --ledger-ids 103-103 --start 2026-10-30T14:35:00Z --end 2026-10-30T17:15:00Z --out "$OUT"
   [ "$status" -eq 2 ]
 }
+
+# ──────────────────────────────────────────────────────────────
+# r5 ruling (2026-11-04): STOP and UNMEASURED are INDEPENDENT facts.
+#
+# A run with stops AND unmeasured sources used to answer a bare "STOP", so the one line an operator reads said
+# "these stops explain the window" while some sources had never been read at all. That is an overclaim in the
+# direction that matters: it reads as a complete account of a window that is only partly measured. The combined
+# verdict is its own word, and the exit code stays 1 - a STOP is still what kills the run, and the caller must not
+# have to learn a new rc to keep that behaviour.
+# ──────────────────────────────────────────────────────────────
+
+@test "SPLIT: stops AND unmeasured sources -> STOP+UNMEASURED (exit 1, both facts on the line)" {
+  # a real STOP (credit-class email to a batch user) ...
+  echo '{"state":"measured","control":1076,"events":[{"user_id":"11","template_key":"credits_more_info_needed","event_type":"sent"}]}' > "$ZR_FIXTURE_DIR/email.json"
+  # ... and a source that was never read
+  echo '{"state":"error","error":"loki 503"}' > "$ZR_FIXTURE_DIR/core.json"
+  run_zr
+  [ "$status" -eq 1 ]
+  [[ "$output" == STOP+UNMEASURED:* ]]
+  [[ "$output" == *"email credits_more_info_needed -> 11"* ]]
+  [[ "$output" == *"core"* ]]
+  python3 -c "import json,glob; r=json.load(open(glob.glob('$OUT/*.json')[0])); assert r['verdict']=='STOP+UNMEASURED', r['verdict']; assert r['stops'] and r['unmeasured']"
+}
+
+@test "SPLIT: stops with every source measured stays a bare STOP (exit 1, no false UNMEASURED)" {
+  echo '{"state":"measured","control":1076,"events":[{"user_id":"11","template_key":"credits_more_info_needed","event_type":"sent"}]}' > "$ZR_FIXTURE_DIR/email.json"
+  run_zr
+  [ "$status" -eq 1 ]
+  [[ "$output" == STOP:* ]]
+  [[ "$output" != STOP+UNMEASURED:* ]]
+  python3 -c "import json,glob; r=json.load(open(glob.glob('$OUT/*.json')[0])); assert r['verdict']=='STOP' and r['stops'] and not r['unmeasured']"
+}
+
+@test "SPLIT: unmeasured with no stops stays a bare UNMEASURED (exit 2, never promoted to a STOP)" {
+  echo '{"state":"error","error":"loki 503"}' > "$ZR_FIXTURE_DIR/core.json"
+  run_zr
+  [ "$status" -eq 2 ]
+  [[ "$output" == UNMEASURED:* ]]
+  python3 -c "import json,glob; r=json.load(open(glob.glob('$OUT/*.json')[0])); assert r['verdict']=='UNMEASURED' and not r['stops'] and r['unmeasured']"
+}
+
+@test "SPLIT: the outbound tick accepts the combined verdict as a STOP and names the unmeasured part in the kill line" {
+  # The tick's case arm must not fall through to the crash branch on the new word, and the kill line must not let an
+  # operator read the stops as a complete account of the window.
+  local tick="$BATS_TEST_DIRNAME/../credit-verify-outbound.sh"
+  grep -q 'STOP+UNMEASURED' "$tick"
+  grep -q 'the stops below do NOT account for every source' "$tick"
+}

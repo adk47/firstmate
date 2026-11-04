@@ -30,7 +30,13 @@ if mode == "apply" and os.environ.get("STUB_RUNNER_CAP_MODEL"):
         "SELECT count(*) FROM verify_messages WHERE campaign='uvn-status' AND day=?", (day,)).fetchone()[0]
     cap = json.load(open(os.environ["CVO_POLICY"]))["shared_daily_cap"]["credit"]
     os.environ["STUB_SENT"] = str(max(0, min(int(a[a.index("--max-users") + 1]), int(cap) - used)))
-if "--outcomes-json" in a:
+if "--outcomes-json" in a and mode == "apply" and os.environ.get("STUB_ARTEFACT_JUNK"):
+    open(a[a.index("--outcomes-json") + 1], "w").write("{not json")
+elif "--outcomes-json" in a and mode == "apply" and os.environ.get("STUB_NO_ARTEFACT"):
+    # the 15:05Z shape in production: the apply SENT, then died inside the Intercom note with TimeoutExpired, so it
+    # returned rc=1 and NEVER WROTE this file. The ledger still carries the sends.
+    pass
+elif "--outcomes-json" in a:
     p = a[a.index("--outcomes-json") + 1]
     n = int(os.environ.get("STUB_REFUSED", "0")) if mode == "apply" else 0
     doc = {"mode": mode, "outcomes": [{"user": str(i), "result": "refused", "reason": "G5"} for i in range(n)]}
@@ -136,6 +142,10 @@ if os.environ.get("STUB_ZERO_CRASH"):
     # a READER CRASH: the last line is not a verdict, and the exit code is 1 - which the tick reads as STOP
     print("Traceback (most recent call last):")
     print("subprocess.TimeoutExpired: Command '['trino']' timed out after 900 seconds")
+    sys.exit(1)
+if rc == "3":
+    # the COMBINED verdict (#1747): a confirmed stop AND a source that was never read, in one batch. exit 1.
+    print("STOP+UNMEASURED: a credit email in the batch | unmeasured: loki unreadable")
     sys.exit(1)
 print({"0": "OK", "1": "STOP: a credit email", "2": "UNMEASURED: loki unreadable"}[rc])
 sys.exit(int(rc))
@@ -839,6 +849,44 @@ first_line() { grep -n -m1 -- "$1" "$CVO_OUT_ROOT"/*/tick.log | cut -d: -f1; }
   # and the prose can say anything: 0 printed, 5 real sends + 5 refused (50%, 10 attempts) still kills
   STUB_CLAIM_PROSE=1 STUB_SENT=0 STUB_ROWS=5 STUB_REFUSED=5 run -1 "$SCRIPT"
   grep -q "refusal spike" "$CVO_ETC/credit-verify-outbound.disabled"
+}
+
+@test "outbound tick (production 15:05Z): an ABSENT outcomes artefact after real sends is UNMEASURED, never a 'refusal spike'" {
+  # On 2026-11-04 the free family sent 39 emails, died inside the Intercom note (TimeoutExpired), returned rc=1 and
+  # never wrote its outcomes artefact. spike() answered "unreadable", the caller accepted only "ok", and the kill file
+  # read "refusal spike (> 0.20 of attempts refused)" - a statement about the world with nothing to count. The stop was
+  # right; the LABEL was false, and the label is the only part of an incident a human still reads the next morning.
+  # Absence has no ratio: it is its own verdict, it names the path it could not read, and it never says "spike".
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  STUB_NO_ARTEFACT=1 STUB_ROWS=3 STUB_REFUSED=0 run -1 "$SCRIPT"
+  [ -e "$CVO_ETC/credit-verify-outbound.disabled" ]
+  grep -q "OUTCOMES UNMEASURED after 3 send(s)" "$CVO_ETC/credit-verify-outbound.disabled"
+  grep -q "uvn-status-free-apply.json was never written" "$CVO_ETC/credit-verify-outbound.disabled"
+  grep -q "no ratio can be computed" "$CVO_ETC/credit-verify-outbound.disabled"
+  ! grep -q "refusal spike" "$CVO_ETC/credit-verify-outbound.disabled"   # and it must never WEAR the spike label
+}
+
+@test "outbound tick: an UNPARSEABLE outcomes artefact is also UNMEASURED and names the parse failure" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  STUB_ARTEFACT_JUNK=1 STUB_ROWS=2 run -1 "$SCRIPT"
+  grep -q "OUTCOMES UNMEASURED" "$CVO_ETC/credit-verify-outbound.disabled"
+  grep -q "unreadable" "$CVO_ETC/credit-verify-outbound.disabled"
+  ! grep -q "refusal spike" "$CVO_ETC/credit-verify-outbound.disabled"
+}
+
+@test "outbound tick (qa Critical, d2 17:1xZ): a COMBINED 'STOP+UNMEASURED:' verdict still KILLS - a STOP of any form wins over UNMEASURED" {
+  # zero_read.py emits STOP+UNMEASURED (exit 1) when a confirmed stop and an unread source exist in the same batch.
+  # The verdict case listed only OK*/STOP*/UNMEASURED*, so the combined WORD matched nothing, was rewritten to
+  # "UNMEASURED: ... no verdict" and forced rc=2 - which BYPASSED the stop arm at the exact moment a stop existed.
+  # That is the same defect this branch fixes, one layer up: a status word carrying two meanings, gated by a pattern
+  # that could only see one of them. This test drives the REAL call site; a grep for the word proves nothing.
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  STUB_ZERO_RC=3 CVO_UNSIGNED_ALL=0 run -1 "$SCRIPT"
+  [ -e "$CVO_ETC/credit-verify-outbound.disabled" ]
+  grep -q "zero-read STOP+UNMEASURED" "$CVO_ETC/credit-verify-outbound.disabled"
+  grep -q "do NOT account for every source" "$CVO_ETC/credit-verify-outbound.disabled"
+  # and it must never wear the "printed no verdict" rewriting, which is what happened before the fix
+  ! grep -q "printed no verdict" "$CVO_ETC/credit-verify-outbound.disabled"
 }
 
 @test "outbound tick: the exclude file rides every runner call; one tick at a time" {
