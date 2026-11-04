@@ -120,7 +120,9 @@
 # a dirty or locked worktree unless --force is passed and this never passes it -
 # so an unlanded worktree is kept rather than discarded. The task branch is
 # detached before the release and dropped only after the release succeeds; a
-# failed return or release leaves the branch ref and worktree intact for retry.
+# failed return or release re-attaches that branch, so the worktree, the branch
+# ref, and the branch checkout all survive intact for a retry that can still
+# identify and drop the ref.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -1646,6 +1648,17 @@ guarded_plain_git_release() {  # <worktree> <project>
   [ -n "$out" ] && printf '%s\n' "$out" >&2
   echo "teardown: plain git worktree remove refused for $wt; worktree kept intact" >&2
   return 1
+}
+
+# Re-attach the task branch a release block detached before a failed release,
+# best-effort. A retry learns the branch to drop from the worktree's HEAD, so a
+# release that aborts after the detach must leave the worktree on its branch again
+# rather than detached, or the retry's successful release could never retire it.
+restore_worktree_branch() {  # <worktree> <branch>
+  local wt=${1:-} branch=${2:-}
+  [ -n "$wt" ] && [ -d "$wt" ] || return 0
+  [ -n "$branch" ] && [ "$branch" != HEAD ] || return 0
+  git -C "$wt" checkout -q "$branch" 2>/dev/null || true
 }
 
 # Remove an Orca-managed worktree when only its current path is known. Orca's
@@ -3253,6 +3266,7 @@ if { [ "$TEARDOWN_RELEASE_MODE" = orca ] || [ "$BACKEND" = orca ]; } && [ "$KIND
   # the worktree removed; a failed removal keeps the ref for inspection and retry.
   if [ -n "$ORCA_WORKTREE_ID" ]; then
     if ! fm_backend_remove_worktree "orca" "$ORCA_WORKTREE_ID"; then
+      restore_worktree_branch "$WT" "$branch"
       echo "error: orca worktree removal failed for ${ORCA_WORKTREE_ID}; teardown aborted with the branch and worktree intact" >&2
       exit 1
     fi
@@ -3262,6 +3276,7 @@ if { [ "$TEARDOWN_RELEASE_MODE" = orca ] || [ "$BACKEND" = orca ]; } && [ "$KIND
     # git release, which never forces a dirty or locked worktree.
     echo "teardown: orca could not remove $WT by path; attempting a guarded plain git release" >&2
     guarded_plain_git_release "$WT" "$PROJ" || {
+      restore_worktree_branch "$WT" "$branch"
       echo "error: orca worktree removal failed for $WT and a guarded plain git release could not prove it safe; teardown aborted with the branch and worktree intact" >&2
       exit 1
     }
@@ -3297,11 +3312,13 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
     # host: plain `git worktree remove`, which git itself refuses on a dirty
     # worktree unless --force is passed - and this never passes it.
     guarded_plain_git_release "$WT" "$PROJ" || {
+      restore_worktree_branch "$WT" "$branch"
       echo "error: plain git release failed for worktree $WT; teardown aborted with the branch and worktree intact" >&2
       exit 1
     }
   else
     teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+      restore_worktree_branch "$WT" "$branch"
       echo "error: treehouse return failed for worktree $WT; teardown aborted with the branch and worktree intact" >&2
       exit 1
     }

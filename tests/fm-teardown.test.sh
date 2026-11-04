@@ -4269,6 +4269,58 @@ test_treehouse_return_drops_the_task_branch() {
   pass "a treehouse-held worktree detaches before the release so its task branch is dropped"
 }
 
+# A release that fails after the pre-release detach must put the worktree back on
+# its task branch: a retry learns which ref to drop from the worktree's HEAD, so a
+# worktree left detached could never retire its branch even when the retry's
+# release succeeds. The first attempt fails at `treehouse return`, the second one
+# over the same state succeeds and drops the ref.
+test_failed_release_restores_the_task_branch_for_retry() {
+  local case_dir rc branch marker
+  case_dir=$(make_case release-failure-retry)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  [ "$branch" != HEAD ] || fail "release-failure-retry: fixture captured no task branch"
+  marker="$case_dir/fakebin/fm-fake-treehouse-return-fails"
+  # The default fake treehouse reports this repo's pool (so the pre-kill probe
+  # proves the slot returnable) and this variant additionally refuses `return`
+  # with a non-lock error while the marker exists.
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+here="$(dirname "$0")"
+if [ "${1:-}" = status ]; then exec "$here/fm-fake-treehouse-status"; fi
+if [ -f "$here/fm-fake-treehouse-return-fails" ]; then
+  echo "treehouse: pool slot is held by another process" >&2
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+  : > "$marker"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "release-failure-retry: a failing worktree return must abort the teardown"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'treehouse return failed' "$case_dir/stderr" \
+    "release-failure-retry: teardown did not report the failed worktree return"
+  assert_present "$case_dir/wt" \
+    "release-failure-retry: the worktree was removed despite the failed return"
+  git -C "$case_dir/project" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    || fail "release-failure-retry: the task branch ref was dropped despite the failed return"
+  # The observable pre-release state: the worktree is checked out on its branch
+  # again, not left detached from it.
+  [ "$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD 2>/dev/null)" = "$branch" ] \
+    || fail "release-failure-retry: the failed release left the worktree detached from $branch"
+
+  rm -f "$marker"
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout.retry" 2> "$case_dir/stderr.retry" || rc=$?
+  expect_code 0 "$rc" "release-failure-retry: the retry's release should succeed"$'\n'"$(cat "$case_dir/stderr.retry")"
+  git -C "$case_dir/project" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    && fail "release-failure-retry: the task branch ref survived a retried successful release"
+  pass "a failed release re-attaches the task branch so a retry still drops it"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_manual_backend_leaves_the_backlog_to_the_operator
@@ -4367,3 +4419,4 @@ test_unpooled_unregistered_worktree_refuses_before_killing_the_agent
 test_uninspectable_project_refuses_before_killing_the_agent
 test_unreportable_pool_listing_refuses_before_killing_the_agent
 test_treehouse_return_drops_the_task_branch
+test_failed_release_restores_the_task_branch_for_retry
