@@ -27,6 +27,9 @@ let armRecovery = new WeakMap();
 // Arms this plugin retired itself: their close is restoration bookkeeping, not
 // a supervision gap, so it never owes a retry.
 let armRetired = new WeakSet();
+// Arms a restoration is actively waiting on: their close is answered by that
+// restoration's own bounded retry, not by a second one.
+let restorationOwned = new WeakSet();
 
 function positiveInteger(name, fallback) {
   const value = Number(process.env[name]);
@@ -295,19 +298,23 @@ function restorationFailure(status) {
 async function restoreAfterActionableClose(paths, sessionID, client, predecessorArmPid) {
   let failure = "";
   for (let attempt = 0; attempt <= REARM_RETRY_LIMIT; attempt += 1) {
-    const { status, armChild } = await ensureArm(paths, sessionID, client, predecessorArmPid, true);
-    if (status === "armed") return { failure: "", recovery: armRecovery.get(armChild) };
-    // An actionable line belongs to this arm's close handler.
-    // Do not retire it before that handler can start the successor cycle.
-    if (status === "wake") return { failure: "", recovery: armRecovery.get(armChild) };
-    failure = restorationFailure(status);
-    if (!(await retireArm(armChild))) {
-      setArmStatus("failed");
-      return { failure: `${failure}\nwatcher: FAILED - OpenCode could not restore watcher continuity because the unready successor arm did not exit within ${ARM_RETIRE_TIMEOUT_MS}ms` };
+    const { status, armChild } = await ensureArm(paths, sessionID, client, predecessorArmPid, true, true);
+    try {
+      if (status === "armed") return { failure: "", recovery: armRecovery.get(armChild) };
+      // An actionable line belongs to this arm's close handler.
+      // Do not retire it before that handler can start the successor cycle.
+      if (status === "wake") return { failure: "", recovery: armRecovery.get(armChild) };
+      failure = restorationFailure(status);
+      if (!(await retireArm(armChild))) {
+        setArmStatus("failed");
+        return { failure: `${failure}\nwatcher: FAILED - OpenCode could not restore watcher continuity because the unready successor arm did not exit within ${ARM_RETIRE_TIMEOUT_MS}ms` };
+      }
+      if (status === "read-only" || status === "not-primary" || status === "skipped") break;
+      if (attempt === REARM_RETRY_LIMIT) break;
+      await waitForRetry(attempt + 1);
+    } finally {
+      if (armChild) restorationOwned.delete(armChild);
     }
-    if (status === "read-only" || status === "not-primary" || status === "skipped") break;
-    if (attempt === REARM_RETRY_LIMIT) break;
-    await waitForRetry(attempt + 1);
   }
   setArmStatus("failed");
   return { failure: `${failure}\nwatcher: FAILED - OpenCode could not restore watcher continuity after ${REARM_RETRY_LIMIT} retries` };
@@ -436,7 +443,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
       });
       return;
     }
-    if (restorationInFlight && armRetired.has(armChild)) {
+    if (restorationOwned.has(armChild) || (restorationInFlight && armRetired.has(armChild))) {
       setArmStatus("failed");
       return;
     }
@@ -453,7 +460,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     resolveClosed();
     releaseChild();
     settleReadiness("failed");
-    if (restorationInFlight && armRetired.has(armChild)) {
+    if (restorationOwned.has(armChild) || (restorationInFlight && armRetired.has(armChild))) {
       setArmStatus("failed");
       return;
     }
@@ -484,7 +491,7 @@ function armAttempt(status, armChild, includeArmChild) {
   return includeArmChild ? { status, armChild } : status;
 }
 
-async function ensureArm(paths, sessionID, client, predecessorArmPid = "", includeArmChild = false) {
+async function ensureArm(paths, sessionID, client, predecessorArmPid = "", includeArmChild = false, ownedByRestoration = false) {
   let launchResult = null;
   if (!launchInFlight) {
     const launch = beginArm(paths, sessionID, client, predecessorArmPid);
@@ -501,6 +508,7 @@ async function ensureArm(paths, sessionID, client, predecessorArmPid = "", inclu
   if (!armChild) {
     return armAttempt(launchResult.status, null, includeArmChild);
   }
+  if (ownedByRestoration) restorationOwned.add(armChild);
   return armAttempt(await waitForArmReady(armChild), armChild, includeArmChild);
 }
 

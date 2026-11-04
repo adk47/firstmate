@@ -4457,6 +4457,95 @@ EOF
   pass "OpenCode successor that fails during a held wake prompt retries before settlement"
 }
 
+# A successor the restoration is itself waiting on must not also start a
+# competing retry when it dies before readiness: two owners would consume one
+# bounded budget and surface a spurious failure prompt.
+test_opencode_restoration_owned_pre_ready_failure_does_not_race_retry() {
+  local plugin repo home log stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-restoration-owned-root"
+  home="$TMP_ROOT/opencode-restoration-owned-home"
+  log="$TMP_ROOT/opencode-restoration-owned.log"
+  stop="$TMP_ROOT/opencode-restoration-owned.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+case "$count" in
+  1)
+    printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+    sleep 0.3
+    printf 'signal: held-delivery wake\n'
+    exit 0
+    ;;
+  2|3)
+    # The restoration's own successor dies before it ever reports readiness,
+    # with no data line to settle readiness ahead of its close.
+    exit 0
+    ;;
+esac
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_LIMIT=1 FM_WATCH_REARM_RETRY_BASE_MS=50 FM_WATCH_REARM_RETRY_MAX_MS=100 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let releasePrompt = () => {};
+const promptBlocked = new Promise((resolve) => {
+  releasePrompt = resolve;
+});
+const prompts = [];
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      prompts.push(request.body.parts[0].text);
+      if (prompts.length === 1) await promptBlocked;
+    },
+  },
+};
+const armCount = () =>
+  existsSync(process.env.FM_ARM_LOG)
+    ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter((row) => row.startsWith("arm=")).length
+    : 0;
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+for (let i = 0; i < 400; i += 1) {
+  if (prompts.length >= 1 && armCount() >= 3) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (armCount() !== 3) throw new Error(`expected the restoration's own retry chain, saw ${armCount()} arm rows`);
+if (prompts.length !== 1) throw new Error(`expected one wake prompt, got ${prompts.length}: ${JSON.stringify(prompts)}`);
+await new Promise((resolve) => setTimeout(resolve, 200));
+if (prompts.length !== 1) throw new Error(`a competing retry surfaced an extra prompt: ${JSON.stringify(prompts)}`);
+if (armCount() !== 3) throw new Error(`a competing retry started extra arm work: ${armCount()} arm rows`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+releasePrompt();
+await new Promise((resolve) => setTimeout(resolve, 100));
+EOF
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "OpenCode must not race a retry against the restoration that owns the child: $out"
+  [ -z "$out" ] || fail "OpenCode restoration-owned retry test printed output: $out"
+  pass "OpenCode restoration-owned pre-ready failure does not start a competing retry"
+}
+
 test_opencode_pre_ready_actionable_close_preserves_its_successor() {
   local plugin repo home log release retired stop out status
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -5159,6 +5248,7 @@ test_opencode_primary_watch_plugin_rearms_after_wake
 test_opencode_close_during_held_wake_prompt_arms_successor
 test_opencode_external_successor_during_delivery_is_reported
 test_opencode_failed_successor_during_held_wake_prompt_retries
+test_opencode_restoration_owned_pre_ready_failure_does_not_race_retry
 test_opencode_pre_ready_actionable_close_preserves_its_successor
 test_opencode_hung_successor_falls_back_to_typed_wake
 test_opencode_unretired_successor_falls_back_without_retry
