@@ -135,11 +135,40 @@ gdpr-pipeline.py hide-batch                  # dry run: prints both diffs
 gdpr-pipeline.py hide-batch --open-prs       # opens the two PRs (records them on the rows)
 gdpr-pipeline.py confirm --sitemap           # renders the letters due within 3 d with verified lines
 gdpr-pipeline.py ask                         # renders the identity asks
+gdpr-pipeline.py ask --manifest batch.json   # renders EXACTLY the approved rows (frozen batch; see below)
 gdpr-pipeline.py report --out register.md    # the register table
 gdpr-pipeline.py dedupe                      # report post-confirmation rows that are one customer event
 gdpr-pipeline.py dedupe --apply               # close the duplicate, keys re-pointed at the row kept
 gdpr-pipeline.py intake --candidate -         # record ONE request pushed by another producer (see below)
 ```
+
+### An approval binds a FROZEN batch, not "whatever is open at send time"
+
+The approval gate hashes the rendered letters (`approval.digest`), so a batch is approved by digest. That only means
+something if the digest names a fixed row set — and `--limit N` does not: it takes the oldest N of whatever the
+register holds *now*, so the next hourly intake re-cuts it.
+
+That is not theoretical. On 2026-11-04 a 141-letter ask batch was approved as `2ac206a275d2b0d2`; the deployed
+`gdpr-pipeline-tick.timer` then created register **#381** from a new Intercom ticket, and the same command rendered
+142 letters with digest `9f402f38a26acb2f`. The approval no longer named anything sendable and the send refused —
+correctly, and the correct response was NOT to re-approve whatever was open.
+
+`--manifest FILE` (JSON list of register numbers, or one per line, `#` allowed) names the rows instead:
+
+```
+gdpr-pipeline.py ask --manifest batch-1104.json          # dry run: digest only, as always
+gdpr-pipeline.py ask --manifest batch-1104.json --send --approved-by U0AN41ZBTRU
+```
+
+- the digest is computed over **exactly those rows**, so intake after the approval lands in the next batch;
+- order is still statutory (`oldest_first`); a register number named twice still renders one letter;
+- **it fails closed, exit 2**, if any manifest row is not in the sendable set now (closed, already sent, verdict
+  changed, or a typo). Sending the remainder would be a *different* batch under the same approval;
+- an empty, unreadable or unparseable manifest refuses, as does `--manifest` together with `--limit` (two selectors,
+  no defined winner).
+
+Cut a manifest from a dry run, and re-render immediately before sending: `--manifest` is what makes that safe, so the
+digest to quote to the approver is the one the manifest produces, never the one an unfiltered run produces.
 
 ### Accepting an erasure found by another producer
 

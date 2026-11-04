@@ -287,6 +287,61 @@ def oldest_first(items: list[dict]) -> list[dict]:
     return sorted(items, key=lambda x: (x.get("due_at") or "", x.get("register_no") or 0))
 
 
+def select_batch(a, kind: str, items: list[dict]) -> list[dict]:
+    """The approved batch is FROZEN, and a manifest is how it stays frozen (firstmate ruling 2026-11-04).
+
+    `--limit N` is a moving selector: it takes the oldest N of *whatever is open now*, so the next intake re-cuts the
+    batch and the digest a human approved no longer names it. `--manifest FILE` names the rows instead - a JSON list or
+    one register number per line - so new intake lands in the NEXT batch and cannot touch this one.
+
+    It fails closed on every way the manifest can stop being the approved batch:
+      - a register number that is not in the current sendable set (closed, already sent, verdict changed, or a typo):
+        sending the rest would be a DIFFERENT batch than the one that was approved, under the same approval;
+      - a manifest with no rows, or an unreadable/unparseable file;
+      - `--manifest` together with `--limit`: two selectors with no defined winner.
+    """
+    if not a.manifest:
+        return oldest_first(items)[:a.limit or None]
+    if a.limit:
+        print("REFUSED: --manifest and --limit are two different selectors for one batch; use one")
+        raise SystemExit(1)
+    try:
+        raw = open(a.manifest).read()
+    except OSError as exc:
+        print(f"REFUSED: cannot read the manifest {a.manifest}: {exc}")
+        raise SystemExit(1)
+    try:
+        wanted = json.loads(raw)
+        if not isinstance(wanted, list):
+            raise ValueError("not a JSON list")
+    except ValueError:
+        wanted = [tok for tok in re.split(r"[\s,]+", raw.strip()) if tok]
+    nums = []
+    for x in wanted:
+        if isinstance(x, bool) or not isinstance(x, (int, str)):
+            print(f"REFUSED: manifest entry {x!r} is not a register number")
+            raise SystemExit(1)
+        s_ = str(x).strip().lstrip("#")
+        if not s_.isdigit():
+            print(f"REFUSED: manifest entry {x!r} is not a register number")
+            raise SystemExit(1)
+        nums.append(int(s_))
+    if not nums:
+        print(f"REFUSED: the manifest {a.manifest} names no requests")
+        raise SystemExit(1)
+    want = set(nums)
+    have = {x["register_no"]: x for x in items}
+    missing = sorted(want - set(have))
+    if missing:
+        print(f"REFUSED: {len(missing)} request(s) in the manifest are not in the {kind} set now "
+              f"({', '.join('#' + str(n) for n in missing[:20])}{' …' if len(missing) > 20 else ''}). "
+              f"The manifest was cut against a different register state, so sending the rest would be a different "
+              f"batch than the one that was approved - re-cut the manifest and get a fresh approval.")
+        raise SystemExit(1)
+    picked = [have[n] for n in sorted(want)]                 # oldest_first() sorts by deadline below
+    return oldest_first(picked)
+
+
 def refuse_send(a, kind: str, items: list[dict]) -> None:
     """The gate in front of every send. THREE things, and all three are a human's to open:
 
@@ -370,6 +425,9 @@ def main() -> int:
         p.add_argument("--approved-by", default="")
         p.add_argument("--limit", type=int, default=0,
                        help="send at most N letters, OLDEST deadline first (0 = no cap)")
+        p.add_argument("--manifest", default="",
+                       help="send EXACTLY these requests (JSON list or one register number per line), so later "
+                            "intake cannot re-cut a batch a human has already approved")
         if name == "confirm":
             p.add_argument("--sitemap", action="store_true", help="walk every sitemap file for the M line")
     p = sub.add_parser("watchdog")
@@ -460,7 +518,7 @@ def main() -> int:
     elif a.cmd == "mark-hidden":
         run.mark_hidden()
     elif a.cmd == "ask":
-        items = oldest_first(run.asks(now))[:a.limit or None]
+        items = select_batch(a, "ask", run.asks(now))
         refuse_send(a, "ask", items)
         for x in items:
             print(f"#{x['register_no']} {x['channel']} -> {x['to']} [{x['kind']}]\n  {x['text']}\n")
@@ -476,7 +534,7 @@ def main() -> int:
                 m_result = checks.sitemap_absent(ids)
             except sources.Unknown as exc:
                 run.fail("M sitemap walk", exc)
-        items = oldest_first(run.confirmations(now, m_result=m_result))[:a.limit or None]
+        items = select_batch(a, "confirm", run.confirmations(now, m_result=m_result))
         refuse_send(a, "confirm", items)
         for x in items:
             print(f"===== #{x['register_no']} due {x['due_at'][:10]} -> {x['to']} S={x['S']} P={x['P']} M={x['M']}"
