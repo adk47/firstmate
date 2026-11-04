@@ -892,6 +892,138 @@ EOF
   pass "Pi successor that fails or empty-closes during a held delivery retries before settlement"
 }
 
+# The third shape: the successor armed inside the delivery window never reaches
+# readiness, so no restoration is waiting on it. Its failure is still the same
+# turn-ends-blind class and must earn the bounded retry inside the delivery.
+test_pi_unverified_successor_during_held_delivery_retries() {
+  local repo home plugin log stop out status
+  repo="$TMP_ROOT/pi-unverified-successor-root"
+  home="$TMP_ROOT/pi-unverified-successor-home"
+  log="$TMP_ROOT/pi-unverified-successor.log"
+  stop="$TMP_ROOT/pi-unverified-successor.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+case "$count" in
+  1)
+    printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+    sleep 0.4
+    printf 'signal: branch-delivery synthetic wake\n'
+    exit 0
+    ;;
+  2)
+    printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+    sleep 0.4
+    printf 'signal: branch-delivery synthetic wake\n'
+    exit 0
+    ;;
+  3)
+    # Armed inside the delivery window and gone before it ever reports
+    # readiness, so no restoration is waiting on this child.
+    printf 'watcher: FAILED - fixture successor exited before reporting readiness\n'
+    exit 1
+    ;;
+esac
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=50 FM_WATCH_REARM_RETRY_MAX_MS=100 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let releaseHeldDelivery = () => {};
+const heldDelivery = new Promise((resolve) => {
+  releaseHeldDelivery = resolve;
+});
+let heldDeliveryReleased = false;
+const offers = [];
+const prompts = [];
+let tool = null;
+const handlers = new Map();
+const bus = {
+  on(channel, handler) {
+    handlers.set(channel, [...(handlers.get(channel) ?? []), handler]);
+    return () => {};
+  },
+  emit(channel, data) {
+    for (const handler of handlers.get(channel) ?? []) handler(data);
+  },
+};
+bus.on("fm-branch-supervision:dispatch", (offer) => {
+  offers.push(offer.message);
+  if (offers.length === 1) offer.accept(heldDelivery);
+  else offer.accept();
+});
+const pi = {
+  on() {},
+  events: bus,
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+};
+const armCount = () =>
+  existsSync(process.env.FM_ARM_LOG)
+    ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter((row) => row.startsWith("arm=")).length
+    : 0;
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/branch-delivery.meta`, "project=/projects/approved\nwindow=fm-branch-delivery\n");
+writeFileSync(
+  `${process.env.FM_HOME}/state/.wake-queue`,
+  "1\t1\tsignal\tbranch-delivery.status\tsignal: branch-delivery synthetic wake\n",
+);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-unverified-successor", {}, undefined, undefined, {});
+for (let i = 0; i < 400; i += 1) {
+  if (offers.length === 1 && armCount() >= 3) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (offers.length !== 1) throw new Error(`expected one branch offer, got ${offers.length}`);
+if (armCount() !== 3) throw new Error(`expected the in-delivery successor, saw ${armCount()} arm rows`);
+
+// The branch settlement is still outstanding while the unverified successor
+// dies: continuity owes this record a retry before settlement, not after it.
+const startedAt = Date.now();
+for (let i = 0; i < 100; i += 1) {
+  if (armCount() >= 4) break;
+  await new Promise((resolve) => setTimeout(resolve, 50));
+}
+const waited = Date.now() - startedAt;
+if (armCount() < 4) {
+  throw new Error(`no retry armed within 5s after the unverified successor died under a held delivery (${waited}ms, ${armCount()} arm rows)`);
+}
+if (heldDeliveryReleased) throw new Error("test released the branch settlement before asserting continuity");
+if (offers.length !== 1) throw new Error(`the retry armed at the cost of a second branch offer: ${offers.join(" | ")}`);
+if (prompts.length !== 0) throw new Error(`the retry reached main instead of the chain: ${prompts.join(" | ")}`);
+
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+heldDeliveryReleased = true;
+releaseHeldDelivery();
+await new Promise((resolve) => setTimeout(resolve, 100));
+process.exit(0);
+EOF
+  )
+  status=$?
+  expect_code 0 "$status" "Pi unverified successor failure during a held delivery must retry inside the delivery"
+  [ -z "$out" ] || fail "Pi unverified-successor delivery retry test printed output: $out"
+  pass "Pi unverified successor that dies during a held delivery retries before settlement"
+}
+
 test_pi_branch_offer_flags_heartbeat() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-branch-heartbeat-root"
@@ -4987,6 +5119,7 @@ test_pi_actionable_close_starts_single_successor_before_delivery
 test_pi_branch_offer_owns_actionable_wake
 test_pi_close_during_held_branch_delivery_arms_successor
 test_pi_failed_successor_during_held_delivery_retries
+test_pi_unverified_successor_during_held_delivery_retries
 test_pi_branch_offer_flags_heartbeat
 test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check
 test_pi_main_only_check_classes_stay_on_main

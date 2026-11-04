@@ -217,6 +217,9 @@ const armClose = new WeakMap<ChildProcess, Promise<void>>();
 // Children the extension itself asked to exit; their close is not a failure
 // of the successor and never earns a deferred retry.
 const armRetired = new WeakSet<ChildProcess>();
+// Children a restoration is actively waiting on; their close is answered by
+// that restoration's own bounded retry, not by a second one.
+const restorationOwned = new WeakSet<ChildProcess>();
 const armRecovery = new WeakMap<ChildProcess, { generation: string; watcherPid: string }>();
 const armPendingActionable = new WeakMap<ChildProcess, PendingActionableClose>();
 
@@ -955,21 +958,26 @@ export default function (pi: ExtensionAPI) {
       if (!generationIsLive(owner)) return { failure: "" };
       const replacement = startArm(owner, predecessorArmPid);
       const successorChild = owner.child;
-      if (replacement.ok && successorChild && await waitForReadiness(successorChild)) {
-        return { failure: "", recovery: armRecovery.get(successorChild) };
-      }
-      if (replacement.ok) {
-        failure = "watcher: FAILED - Pi extension could not verify a ready successor watcher";
-        if (!(await retireArm(successorChild))) {
-          return {
-            failure: `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity because the unready successor arm did not exit within ${armRetireTimeoutMs}ms`,
-          };
+      if (successorChild) restorationOwned.add(successorChild);
+      try {
+        if (replacement.ok && successorChild && await waitForReadiness(successorChild)) {
+          return { failure: "", recovery: armRecovery.get(successorChild) };
         }
-      } else {
-        failure = /(?:read-only|no live session)/.test(replacement.message)
-          ? `watcher: FAILED - Pi extension cannot restore continuity because this session no longer owns the lock\n${replacement.message}`
-          : `watcher: FAILED - Pi extension could not start the successor watcher cycle\n${replacement.message}`;
-        if (/(?:read-only|no live session)/.test(replacement.message)) break;
+        if (replacement.ok) {
+          failure = "watcher: FAILED - Pi extension could not verify a ready successor watcher";
+          if (!(await retireArm(successorChild))) {
+            return {
+              failure: `${failure}\nwatcher: FAILED - Pi extension could not restore watcher continuity because the unready successor arm did not exit within ${armRetireTimeoutMs}ms`,
+            };
+          }
+        } else {
+          failure = /(?:read-only|no live session)/.test(replacement.message)
+            ? `watcher: FAILED - Pi extension cannot restore continuity because this session no longer owns the lock\n${replacement.message}`
+            : `watcher: FAILED - Pi extension could not start the successor watcher cycle\n${replacement.message}`;
+          if (/(?:read-only|no live session)/.test(replacement.message)) break;
+        }
+      } finally {
+        if (successorChild) restorationOwned.delete(successorChild);
       }
       if (attempt === retryLimit) break;
       await waitForRetry(attempt + 1);
@@ -1064,7 +1072,6 @@ export default function (pi: ExtensionAPI) {
     let stderr = "";
     let settled = false;
     let readinessSettled = false;
-    let verified = false;
     let resolveReadiness: (ready: boolean) => void = () => {};
     let resolveClosed: () => void = () => {};
     const readiness = new Promise<boolean>((resolveReady) => {
@@ -1078,7 +1085,6 @@ export default function (pi: ExtensionAPI) {
     const settleReadiness = (ready: boolean): void => {
       if (readinessSettled) return;
       readinessSettled = true;
-      verified = ready;
       resolveReadiness(ready);
     };
     const observeEstablishedArm = (): void => {
@@ -1126,10 +1132,10 @@ export default function (pi: ExtensionAPI) {
       if (!generationIsLive(owner)) return;
       // A failing or empty close is the same turn-ends-blind class as an
       // actionable one, so its bounded retry starts here rather than waiting
-      // for a delivery that can outlive many watcher cycles. An unready child
-      // closing here was retired by the restoration itself and keeps that
-      // path's own retries.
-      if (owner.restoring && (!verified || armRetired.has(armChild))) return;
+      // for a delivery that can outlive many watcher cycles. Only a child the
+      // restoration is itself waiting on, or one it retired, keeps that path's
+      // own retries.
+      if (owner.restoring && (armRetired.has(armChild) || restorationOwned.has(armChild))) return;
       scheduleRetry(owner, classification.message, predecessor);
     });
     armChild.on("error", (error: Error) => {
@@ -1140,9 +1146,10 @@ export default function (pi: ExtensionAPI) {
       releaseChild();
       if (!generationIsLive(owner)) return;
       // A spawn failure is a supervision gap like a failing close, so it takes
-      // the bounded retry during an in-flight delivery too. The retry is
-      // single-flight and lock-checked, so a restoration already retrying this
-      // child cannot double-start one.
+      // the bounded retry during an in-flight delivery too. A child the
+      // restoration is itself waiting on, or one it retired, keeps that path's
+      // own retries instead of racing a second one.
+      if (armRetired.has(armChild) || restorationOwned.has(armChild)) return;
       scheduleRetry(owner, `watcher: FAILED - Pi extension arm child ${id} failed: ${error.message}`, String(armChild.pid ?? ""));
     });
     return {
