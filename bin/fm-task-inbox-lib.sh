@@ -79,6 +79,25 @@
 # whose only remaining link is its shadow keeps that sequence instead of having
 # the name handed to a different message.
 #
+# A name is not an identity, though: a writer outside this library - a worker
+# hand-numbering a reply from a listing it read earlier, then publishing it by
+# rename - can put a DIFFERENT record at a sequence that was already issued.
+# This library can neither prevent that nor detect it at publish time, so every
+# decision it makes about a sequence compares bytes instead of trusting the
+# name:
+#   - the repair pass retires a hidden link only against a handled/ copy that
+#     carries that link's own bytes, and re-delivers the link under the next
+#     free sequence when another record now holds its name, so neither record
+#     is destroyed (an acknowledged-then-reused name is re-delivered rather than
+#     dropped: at-least-once is the safe direction);
+#   - acknowledgement never overwrites an existing handled/ record with
+#     different bytes - it diverts the newcomer to <name>.msg.dup-<hash> - and
+#     retires the hidden link only when the acknowledged copy carries its bytes.
+# The one write this cannot survive is an in-place truncation of the existing
+# file (a shell redirection onto the path), which rewrites the shared inode and
+# therefore the hidden link with it; a rename or an unlink-then-create, which is
+# what mv, cp and every writer in this repo do, keeps the link intact.
+#
 # Coalescing (fm_task_inbox_write_coalesced): a periodic idempotent
 # instruction - a scheduled lane tick - must not pile up behind a worker that
 # has not drained it, because N unhandled copies carry no more information
@@ -554,8 +573,30 @@ EOF
 # Acknowledging an already acknowledged record is a successful no-op, so a re-run
 # after a lost reply is harmless. Prints one line per record on stdout and one
 # per refusal on stderr, and fails when anything was refused.
+# A short content digest, used only to name a diverted record so a reissued
+# sequence leaves both records findable instead of one of them overwritten.
+_fm_task_inbox_short_hash() {  # <file>
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" 2>/dev/null | awk '{printf "%s", substr($1, 1, 8)}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" 2>/dev/null | awk '{printf "%s", substr($1, 1, 8)}'
+  else
+    cksum < "$1" 2>/dev/null | awk '{printf "%s", $1}'
+  fi
+}
+
+# Retire a record's hidden link only when the copy that proves it was handled
+# still carries that record's own bytes. A different record under the same name
+# means the sequence was reused by a writer outside this library, so the link
+# holds the only surviving copy of the original and must outlive the call.
+_fm_task_inbox_retire_link_if_handled() {  # <shadow-link> <handled-copy>
+  [ -e "$1" ] || return 0
+  cmp -s "$1" "$2" || return 0
+  rm -f "$1" 2>/dev/null || true
+}
+
 fm_task_inbox_acknowledge() {  # <state-dir> <task-id> <record>...
-  local state=$1 task=$2 dir shadow arg base src refused=0
+  local state=$1 task=$2 dir shadow arg base src hdest divert refused=0
   case "$task" in ''|*/*|.|..) printf 'fm-task-inbox: not a task id: %s\n' "$task" >&2; return 1 ;; esac
   dir=$(fm_task_inbox_dir "$state" "$task")
   shadow=$(fm_task_inbox_shadow_dir "$dir")
@@ -573,21 +614,42 @@ fm_task_inbox_acknowledge() {  # <state-dir> <task-id> <record>...
     esac
     base=$(printf '%03d' "$((10#$base))")
     src="$dir/$base.msg"
+    hdest="$dir/handled/$base.msg"
     if [ -e "$src" ] || [ -L "$src" ]; then
-      if mv -f "$src" "$dir/handled/$base.msg" 2>/dev/null; then
-        rm -f "$shadow/$base" 2>/dev/null || true
-        printf 'acknowledged: %s\n' "$dir/handled/$base.msg"
+      if [ -e "$hdest" ] || [ -L "$hdest" ]; then
+        # The name already carries an acknowledged record. Moving onto it would
+        # destroy one of the two, so only an identical copy is absorbed; any
+        # other record is diverted beside it under a name that says which bytes
+        # it holds.
+        if cmp -s "$src" "$hdest"; then
+          rm -f "$src" 2>/dev/null || true
+          printf 'already acknowledged: %s\n' "$hdest"
+        else
+          divert="$hdest.dup-$(_fm_task_inbox_short_hash "$src")"
+          if mv -f "$src" "$divert" 2>/dev/null; then
+            printf 'acknowledged: %s (a different record already held %s.msg)\n' "$divert" "$base"
+          else
+            printf 'fm-task-inbox: could not move %s beside %s\n' "$src" "$hdest" >&2
+            refused=$((refused + 1))
+          fi
+        fi
+        _fm_task_inbox_retire_link_if_handled "$shadow/$base" "$hdest"
+        continue
+      fi
+      if mv -f "$src" "$hdest" 2>/dev/null; then
+        _fm_task_inbox_retire_link_if_handled "$shadow/$base" "$hdest"
+        printf 'acknowledged: %s\n' "$hdest"
       else
         printf 'fm-task-inbox: could not move %s into %s/handled\n' "$src" "$dir" >&2
         refused=$((refused + 1))
       fi
       continue
     fi
-    if [ -e "$dir/handled/$base.msg" ]; then
+    if [ -e "$hdest" ]; then
       # Retiring the link is part of acknowledging: a handled record whose link
       # survived would be restored if the worker clears handled/.
-      rm -f "$shadow/$base" 2>/dev/null || true
-      printf 'already acknowledged: %s\n' "$dir/handled/$base.msg"
+      _fm_task_inbox_retire_link_if_handled "$shadow/$base" "$hdest"
+      printf 'already acknowledged: %s\n' "$hdest"
       continue
     fi
     if [ -e "$shadow/$base" ]; then
@@ -715,8 +777,18 @@ fm_task_inbox_oldest_unhandled() {  # <state-dir> <task-id>
 # present in neither the root nor handled/ was deleted rather than handled, and
 # is linked back with its original mtime so the ladder still ages it correctly.
 # Prints one line per repaired record so the watcher's log shows the repair.
+#
+# A name is not an identity. A writer outside this library can put a different
+# record at a sequence that was already used (a hand-numbered reply drained
+# against a stale listing). Every decision below therefore compares bytes: the
+# link survives a same-named record that does not carry its content, and the
+# true content is re-delivered under a fresh sequence rather than dropped.
+# One process owns a state dir, so the fresh-sequence retry loop races only an
+# unusual out-of-band writer and is bounded all the same.
+_FM_TASK_INBOX_RELINK_ATTEMPTS=16
 fm_task_inbox_restore_unhandled() {  # <state-dir> <task-id>
-  local state=$1 task=$2 dir shadow s base restored=0 adopted=0
+  local state=$1 task=$2 dir shadow s base visible handled restored=0 adopted=0
+  local attempt new_seq new_rec
   dir=$(fm_task_inbox_dir "$state" "$task")
   shadow=$(fm_task_inbox_shadow_dir "$dir")
   [ -d "$dir" ] || return 0
@@ -741,17 +813,45 @@ fm_task_inbox_restore_unhandled() {  # <state-dir> <task-id>
   for s in "$shadow"/*; do
     [ -e "$s" ] || continue
     base=${s##*/}
-    if [ -e "$dir/$base.msg" ] || [ -L "$dir/$base.msg" ]; then
+    visible="$dir/$base.msg"
+    handled="$dir/handled/$base.msg"
+    # Nothing but this record's own bytes anywhere under the name: it was
+    # deleted, so link it back and let it age from its original mtime.
+    if [ ! -e "$handled" ] && [ ! -e "$visible" ] && [ ! -L "$visible" ]; then
+      if ln "$s" "$visible" 2>/dev/null; then
+        restored=$((restored + 1))
+        printf 'fm-task-inbox: restored unread record %s.msg deleted from %s\n' "$base" "$dir" >&2
+      fi
       continue
     fi
-    if [ -e "$dir/handled/$base.msg" ]; then
+    # A copy that proves this record was handled retires its link. A copy that
+    # carries other bytes means another writer reused the sequence, so the link
+    # below is the only surviving copy and is never retired against it.
+    if [ -e "$handled" ] && cmp -s "$s" "$handled"; then
       rm -f "$s"
       continue
     fi
-    if ln "$s" "$dir/$base.msg" 2>/dev/null; then
-      restored=$((restored + 1))
-      printf 'fm-task-inbox: restored unread record %s.msg deleted from %s\n' "$base" "$dir" >&2
+    if [ ! -e "$handled" ] && cmp -s "$s" "$visible"; then
+      continue
     fi
+    # The name was reused: keep the other writer's record where it is and
+    # re-deliver this one under the next free sequence, which is the only
+    # outcome that loses neither record.
+    attempt=0
+    while [ "$attempt" -lt "$_FM_TASK_INBOX_RELINK_ATTEMPTS" ]; do
+      attempt=$((attempt + 1))
+      new_seq=$(fm_task_inbox_next_seq "$dir") || break
+      new_rec="$dir/$new_seq.msg"
+      if ln "$s" "$new_rec" 2>/dev/null; then
+        ln "$s" "$shadow/$new_seq" 2>/dev/null || true
+        rm -f "$s"
+        restored=$((restored + 1))
+        printf 'fm-task-inbox: re-delivered unread record %s as %s.msg in %s (another writer reused %s.msg)\n' \
+          "$base" "$new_seq" "$dir" "$base" >&2
+        break
+      fi
+      [ -e "$new_rec" ] || [ -L "$new_rec" ] || break
+    done
   done
   return 0
 }
