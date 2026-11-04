@@ -93,6 +93,41 @@ class ReceiptsTest(unittest.TestCase):
         db.commit()
         return path
 
+    def no_text_dv(self, sha, *, fatal=None, err="no readable text in the document", artifact_after=True, text_step=True):
+        """user 8's filing (sha2) read under the current reader: text step error (fatal = a sandbox failure), extract
+        error with `err`, then its artifact verdict; plus the other users' filings read fine."""
+        path = self.dv({"sha6": None, "sha1": "muso_ui_screenshot"})
+        dv = sqlite3.connect(path)
+        if text_step:
+            dv.execute("INSERT INTO dv_steps (proof_id, step, status, detail_json, version) VALUES (?, 'text', 'error', ?, ?)",
+                       (sha, json.dumps({"chars": 0, "mime": "audio/wav", "fatal": fatal}), VER))
+        dv.execute("INSERT INTO dv_steps (proof_id, step, status, detail_json, version) VALUES (?, 'extract', 'error', ?, ?)",
+                   (sha, json.dumps({"ok": False, "error": err}), VER))
+        if artifact_after:
+            dv.execute("INSERT INTO dv_steps (proof_id, step, status, detail_json, version) VALUES (?, 'artifact', 'none', ?, ?)",
+                       (sha, json.dumps({"artifact": None, "why": "t", "text_checked": False}), VER))
+        dv.commit()
+        return path
+
+    def test_a_filing_with_no_readable_text_is_listed_unreadable_never_a_record_or_unknown(self):
+        # r5 [key=r1-no-readable-text] (318440 WAV only, 52458 PNG only): the reader opened it and found no text
+        res = self.build(dv_store=self.no_text_dv("sha2"))
+        u8 = next(u for u in res["lists"]["received"] if u["user_id"] == "8")
+        self.assertIs(u8.get("filing_unreadable"), True)
+        self.assertNotIn("filing_muso_ui", u8)
+        self.assertEqual(res["counts"]["filing_class_no_text"], 1)
+        # not the deterministic shape -> NOT unreadable (stays unknown): a sandbox failure, another extract error, no
+        # artifact verdict after the read, or no text step at all
+        for kw in ({"fatal": "sandbox timed out"}, {"err": "provider 503"}, {"artifact_after": False}, {"text_step": False}):
+            res = self.build(dv_store=self.no_text_dv("sha2", **kw))
+            u8 = next(u for u in res["lists"]["received"] if u["user_id"] == "8")
+            self.assertNotIn("filing_unreadable", u8, kw)
+            self.assertNotIn("filing_muso_ui", u8, kw)
+        # the payload carries it to the gate (a bool true only)
+        from credit_review import uvn_status
+        self.assertIs(uvn_status.with_filing({"user": {}}, {"filing_unreadable": True})["user"]["filing_unreadable"], True)
+        self.assertNotIn("filing_unreadable", uvn_status.with_filing({"user": {}}, {"filing_unreadable": "yes"})["user"])
+
     def test_the_r1_list_states_the_filing_class_from_the_doc_reader_and_only_when_known(self):
         # h2 r1 filing-class producer: user 2 (received; sha6) read as a document of record -> false; user 7 (sha1) a
         # Muso screenshot (SYS-001) -> true; user 8 (sha2) unread -> no field (the gate refuses r1_filing_class_unknown)

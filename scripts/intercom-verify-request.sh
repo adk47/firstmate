@@ -1152,6 +1152,12 @@ PY
 if [ "$R1LIKE" = "1" ] && [ "$("$JQ_BIN" -r '.user.filing_muso_ui == true' "$CREDITS_FILE" 2>/dev/null)" != "false" ]; then
   refuse "R1: the filing was read as a screenshot of Muso itself (user.filing_muso_ui); a receipt goes only for a document of record. Nothing was sent or claimed."
 fi
+# r5 [key=r1-no-readable-text] (doc-verify 774): a filing the reader deterministically found NO readable text in (cover
+# art, a bare PNG, a WAV) is not a document of record - no R1 (it is the readable-document ask class, copy unapproved).
+# Its own first-hit reason, before r1_filing_class_unknown, so the facts tell the two apart.
+if [ "$R1LIKE" = "1" ] && [ "$("$JQ_BIN" -r '.user.filing_unreadable == true' "$CREDITS_FILE" 2>/dev/null)" != "false" ]; then
+  refuse "r1_unreadable_filing: the filing has no readable text (the doc reader found none); an R1 receipt goes only for a document of record. Nothing was sent or claimed."
+fi
 # r5 / QA #1554: the R1 receipt itself needs the filing's class STATED - user.filing_muso_ui explicitly false. A payload
 # without it (no producer sets it yet) is r1_filing_class_unknown: refused, never a receipt by default.
 # fable-copy-1101-r5/r1-roles retires r1_number_uncoded: the R1 renderer numbers by distinct (track, role) pairs itself.

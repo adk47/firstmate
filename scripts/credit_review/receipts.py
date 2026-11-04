@@ -169,12 +169,19 @@ def intake_by_user(proof_store: str) -> tuple[dict[int, dict[str, Any]], Counter
     return out, counts
 
 
-def filing_classes(users: dict[int, dict[str, Any]], *, dv_store: str, proof_store: str) -> dict[int, bool] | None:
+NO_TEXT = "unreadable"   # r5 [key=r1-no-readable-text]: a filing the reader DETERMINISTICALLY found no text in
+
+
+def filing_classes(users: dict[int, dict[str, Any]], *, dv_store: str, proof_store: str) -> dict[int, bool | str] | None:
     """h2 [r1 filing-class producer] (r5 / QA #1554: an R1 states the filing's class): {user: filing_muso_ui} from the
     doc reader's latest artifact verdict on the user's OWN receipted intake rows (artifacts.filed_rows, read-only).
     True = any of them is a screenshot of Muso itself (SYS-001; the gate refuses that R1); False = EVERY one was read
     (its latest extract step ended 'ok' - an errored read is unread, QA #1602) and none is; a user with an unread filing is left out (unknown: the gate refuses r1_filing_class_unknown).
-    None = the stores are unreadable (nobody gets the field: fail closed)."""
+    None = the stores are unreadable (nobody gets the field: fail closed).
+    r5 [key=r1-no-readable-text] (doc-verify 774): NO_TEXT = no Muso screenshot, and at least one filing whose LATEST
+    current-version read deterministically found NO readable text (the document was located and opened, the text step
+    ended 'error' with no sandbox failure, the extract said "no readable text", and its artifact verdict followed) -
+    cover art, a bare PNG, a WAV. That is not a document of record: no R1 (the gate refuses r1_unreadable_filing)."""
     from credit_verify import docverify  # noqa: PLC0415 - the doc reader's own version, classifier and row reader
     from credit_verify.docverify import artifacts  # noqa: PLC0415
     try:
@@ -186,9 +193,24 @@ def filing_classes(users: dict[int, dict[str, Any]], *, dv_store: str, proof_sto
         # QA #1602 (b1 548): a filing counts as READ only when its LATEST extract step ended ok - filed_rows counts an
         # errored extract as read, so an error (or no extract at all) is unread here: never stated false
         ext: dict[str, tuple[int, str]] = {}
-        for sid, pid, st in dv.execute("SELECT id, proof_id, status FROM dv_steps WHERE step = 'extract' AND version = ? "
-                                       "ORDER BY id", (docverify.VERSION,)):
+        no_text_ext: dict[str, bool] = {}
+        for sid, pid, st, dj in dv.execute("SELECT id, proof_id, status, detail_json FROM dv_steps WHERE step = 'extract' "
+                                           "AND version = ? ORDER BY id", (docverify.VERSION,)):
             ext[str(pid)] = (int(sid), str(st or ""))
+            try:
+                err = str((json.loads(dj or "{}") or {}).get("error") or "")
+            except ValueError:
+                err = ""
+            no_text_ext[str(pid)] = str(st or "") == "error" and err.startswith("no readable text")
+        # the text step before it: 'error' with no sandbox failure (fatal) = the document opened and held no text
+        txt: dict[str, tuple[int, bool]] = {}
+        for sid, pid, st, dj in dv.execute("SELECT id, proof_id, status, detail_json FROM dv_steps WHERE step = 'text' "
+                                           "AND version = ? ORDER BY id", (docverify.VERSION,)):
+            try:
+                fatal = (json.loads(dj or "{}") or {}).get("fatal")
+            except ValueError:
+                fatal = "unparsed"
+            txt[str(pid)] = (int(sid), str(st or "") == "error" and not fatal)
         # QA #1602: 'false' also needs a COMPLETED current-version ARTIFACT verdict for THAT extract - the latest artifact
         # step must come after the latest extract (an older artifact is a verdict on an earlier read; filed_rows would
         # fall back to it, or to the stored-data rules that cannot see a text-only Muso UI screenshot)
@@ -203,14 +225,21 @@ def filing_classes(users: dict[int, dict[str, Any]], *, dv_store: str, proof_sto
         sha = sha_of.get(str(r["intake_id"]), "")
         e = ext.get(sha)
         return bool(r["read"]) and e is not None and e[1] == "ok" and art.get(sha, -1) > e[0]
-    by_intake = {str(r["intake_id"]): {**r, "read": _read(r)} for r in rows}
+    def _no_text(r: dict[str, Any]) -> bool:
+        sha = sha_of.get(str(r["intake_id"]), "")
+        e, t = ext.get(sha), txt.get(sha)
+        return (e is not None and no_text_ext.get(sha, False) and t is not None and t[1] and t[0] < e[0]
+                and art.get(sha, -1) > e[0])
+    by_intake = {str(r["intake_id"]): {**r, "read": _read(r), "no_text": _no_text(r)} for r in rows}
     out: dict[int, bool] = {}
     for uid, u in users.items():
-        mine = [by_intake.get(i) or {"artifact": None, "read": False} for i in u.get("intake_ids") or []]
+        mine = [by_intake.get(i) or {"artifact": None, "read": False, "no_text": False} for i in u.get("intake_ids") or []]
         if not mine:
             continue
         if any(r["artifact"] == artifacts.SYS_001 for r in mine):
             out[uid] = True
+        elif any(r.get("no_text") for r in mine):
+            out[uid] = NO_TEXT
         elif all(r["read"] for r in mine):
             out[uid] = False
     return out
@@ -303,9 +332,12 @@ def build(*, proof_store: str = PROOF_STORE, paying_path: str = PAYING, query: Q
         key = "received" if why else "queued"
         row = {"user_id": str(uid), "paid": uid in paying, "skip": None, "request_ids": note,
                "first_received": u["first_received"], "filing_conversation": u["filing_conversation"]}
-        if uid in fclass:
+        if fclass.get(uid) == NO_TEXT:
+            row["filing_unreadable"] = True                  # r5 [key=r1-no-readable-text]: no R1; the gate refuses
+        elif uid in fclass:
             row["filing_muso_ui"] = fclass[uid]
-        counts[f"filing_class_{ {True: 'muso_ui', False: 'record'}.get(fclass.get(uid), 'unknown') }"] += 1
+        cls = fclass.get(uid)
+        counts[f"filing_class_{'no_text' if cls == NO_TEXT else {True: 'muso_ui', False: 'record'}.get(cls, 'unknown')}"] += 1
         lists[key].append(row)
         counts[f"list_{key}_{'paid' if uid in paying else 'free'}"] += 1
     stamp = now.isoformat(timespec="seconds")

@@ -4194,6 +4194,31 @@ vl.finalize(db, message_row=c['message_row'], status='sent', message_id='9001')"
   [[ "$output" != *"r1_filing_class_unknown"* ]]
 }
 
+@test "R1 (r5 [key=r1-no-readable-text]): a filing with no readable text gets NO receipt - refused r1_unreadable_filing (its own reason, before r1_filing_class_unknown), R1 and /i alike, nothing claimed" {
+  unlocked_gate received
+  OLD='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
+  credits "$TEST_TMPDIR/c.json" Jane "s1:Mixing:A:X"
+  # the 318440 shape: the class field is absent (not all read) and the reader found no text
+  jq '.user.filing_conversation = "777" | .user |= del(.filing_muso_ui) | .user.filing_unreadable = true' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/u.json"
+  STUB_CONTACT_GET="$OLD" run -1 "$GATE" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/u.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"r1_unreadable_filing"* ]]; [[ "$output" != *"r1_filing_class_unknown"* ]]
+  [ "$(posts)" -eq 0 ]; [ "$(replies)" -eq 0 ]
+  [ -z "$(sql "SELECT * FROM verify_messages WHERE status IN ('attempted','sent')")" ]
+  # even beside a stated record class (another filing read fine) the unreadable one blocks the receipt
+  jq '.user.filing_conversation = "777" | .user.filing_muso_ui = false | .user.filing_unreadable = true' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/v.json"
+  STUB_CONTACT_GET="$OLD" run -1 "$GATE" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/v.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"r1_unreadable_filing"* ]]
+  # the /i line (docrecvn copy) is a receipt too
+  credits "$TEST_TMPDIR/c3.json" Jane "s1:Mixing:A:X" "s2:Mixing:B:X" "s3:Mixing:C:X"
+  jq '.user.filing_conversation = "777" | .user.filing_unreadable = true' "$TEST_TMPDIR/c3.json" > "$TEST_TMPDIR/w.json"
+  STUB_CONTACT_GET="$OLD" run "$GATE" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/w.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"r1_unreadable_filing"* ]]
+  # false / absent: not this reason
+  jq '.user.filing_conversation = "777" | .user.filing_muso_ui = false | .user.filing_unreadable = false' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/x.json"
+  STUB_CONTACT_GET="$OLD" run "$GATE" send --campaign status-doc-received --copy received --credits-file "$TEST_TMPDIR/x.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" != *"r1_unreadable_filing"* ]]
+}
+
 @test "QA #1511: two contacts, opposite reachability - an auto-picked thread of the OTHER contact that fails its check falls back to the canonical contact, and reachability is read for that contact" {
   credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"; presented "[\"$PRESENTED\"]"
   now=$(date -u +%s)

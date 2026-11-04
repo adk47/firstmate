@@ -690,6 +690,8 @@ def with_filing(payload: dict[str, Any], src: dict[str, Any]) -> dict[str, Any]:
     # refuses the R1 with r1_filing_class_unknown, a true -> refused as a Muso screenshot)
     if isinstance(src.get("filing_muso_ui"), bool):
         payload["user"]["filing_muso_ui"] = src["filing_muso_ui"]
+    if src.get("filing_unreadable") is True:            # r5 [key=r1-no-readable-text]: the gate refuses that R1
+        payload["user"]["filing_unreadable"] = True
     return payload
 
 
