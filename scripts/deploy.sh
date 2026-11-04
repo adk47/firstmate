@@ -1317,6 +1317,7 @@ RSYNC_EXCLUDES=(
   --include='muso-ops-admin/config/tier2-endpoints.txt'
   --include='muso-ops-admin/config/tier2-approvers.txt'
   --include='muso-ops-admin/config/capability-approvers.txt'
+  --include='muso-ops-admin/config/merge-approvers.txt'
   --include='muso-ops-admin/config/bulk-destructive-exclude.txt'
   --exclude='muso-ops-admin/config/**'
   --exclude='config/'
@@ -3271,6 +3272,29 @@ if needs_target "main"; then
   else
     log "WARN: $MUSO_OPS_CFG is missing tier2-approvers.txt and/or bulk-destructive-exclude.txt —"
     log "WARN: muso approval/bulk gates fail closed until the config is rendered (render skipped, deploy continues)."
+  fi
+
+  # Verb-scoped profile-merge approver list (muso-cli#64): read ONLY for POST
+  # /admin/profiles/merge. Reconciled OUTSIDE the tier2/bulk render above, so a missing
+  # prerequisite can never leave a stale merge approver installed (QA #1473). Every listed
+  # handle needs an approved registry row (merge_approver=<handle>, approved_by,
+  # approval_ref), checked before install and on the installed copy; a missing source
+  # removes the installed copy.
+  if [ -r "$MUSO_OPS_CFG/merge-approvers.txt" ]; then
+    if ! out=$(REPO_ROOT="$DEPLOY_PATH" "$DEPLOY_PATH/scripts/lib/check-merge-approvers.sh" --check-repo "$MUSO_OPS_CFG/merge-approvers.txt" 2>&1); then  # hydra-hook: reviewed-indirection reviewed-argv (repo script by path; the expansion is the file ARG)
+      rm -f "$MUSO_CFG_DIR/merge-approvers.txt"
+      fail "merge-approvers.txt lists a handle without an approved registry row; removed the installed copy and refusing to install it: $out"
+    fi
+    install -d -m 700 "$MUSO_CFG_DIR"
+    install -m 600 "$MUSO_OPS_CFG/merge-approvers.txt" "$MUSO_CFG_DIR/merge-approvers.txt"
+    if ! out=$(REPO_ROOT="$DEPLOY_PATH" MERGE_APPROVERS_DEST="$MUSO_CFG_DIR/merge-approvers.txt" "$DEPLOY_PATH/scripts/lib/check-merge-approvers.sh" --verify-installed 2>&1); then  # hydra-hook: reviewed-indirection (repo script by path)
+      rm -f "$MUSO_CFG_DIR/merge-approvers.txt"
+      fail "installed merge-approvers.txt lists an unregistered handle (removed): $out"
+    fi
+    log "  $out"
+  else
+    rm -f "$MUSO_CFG_DIR/merge-approvers.txt"
+    log "  merge-approvers.txt source absent: no profile-merge-only approver installed"
   fi
 
   # Smoke (warn-only: prod API health is not this deploy's fault; bounded so

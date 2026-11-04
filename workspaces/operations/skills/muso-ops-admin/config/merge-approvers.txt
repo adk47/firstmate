@@ -1,0 +1,20 @@
+# Profile-merge-only approver allowlist (muso-cli: Muso-AI/muso-cli#64).
+#
+# SCOPED: muso-cli reads this file ONLY for POST /admin/profiles/merge, and only when
+# --confirmed-by is not a human on tier2-approvers.txt. An entry here can NOT authorize
+# track merges, unmerges, deletes, restores, impersonation, the credit-status PUT, the
+# bulk-destructive overflow or any capability verb. A scoped approval also needs an
+# --approval-ref naming the captain decision AND the coded decider run that admitted the case
+# (per-item decisions come from the decider, never a reviewer's ruling; captain 2026-10-29):
+#   '<conversation>|captain-<decision id>|decider-<run id>'
+#
+# Listing a handle is a captain decision recorded first in
+# policies/credit-approval-automation.json (an entry with merge_approver=<handle>,
+# approved=true, approved_by, approval_ref). scripts/lib/check-merge-approvers.sh fails
+# PR Validation and the deploy if a listed handle lacks that row.
+#
+# fable-decider: captain 2026-10-30 12:4xZ (firstmate profile-merge-ops-m1.inbox/070) - the
+# coded decider is the merge approver, scoped to `profiles merge`, bound to its decider record.
+# It is NOT on tier2-approvers.txt: this grants no delete, no bulk verb and no track merge.
+# Effective once node-8 runs a muso-cli with #64; an older CLI refuses the handle (fail closed).
+fable-decider
