@@ -1903,6 +1903,33 @@
         "cwd": "/opt/hydra",
         "timeoutSeconds": 3300
       }
+    },
+    {
+      "id": "a44ae58c-567c-442d-8da1-3480068642f0",
+      "agentId": "clio",
+      "name": "zak-waxman-proof-reply-watch",
+      "description": "Watch Zak Waxman Intercom proof-request conversation for customer replies through 2026-11-11",
+      "enabled": true,
+      "schedule": {
+        "kind": "every",
+        "everyMs": 1800000,
+        "anchorMs": 1793801569591
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/workspaces/coordinator/scripts/zak-proof-monitor.py"
+        ],
+        "timeoutSeconds": 60
+      },
+      "delivery": {
+        "mode": "announce",
+        "channel": "slack",
+        "to": "U0AL36NADEY"
+      }
     }
   ]
 }
