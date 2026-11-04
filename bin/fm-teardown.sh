@@ -105,8 +105,11 @@
 # initialized submodule.
 # When no path resolves, teardown refuses while the agent is still alive and the
 # branch still intact, naming the concrete missing requirement. A treehouse that
-# cannot report its pool listing at all (no `status` support, a failing status,
-# or no output) refuses too, and so does a listing that names home-relative
+# cannot report its pool listing at all (no `status` support or a failing status)
+# refuses too, while a successful `status` whose stdout listing is empty is an
+# answered empty pool - the pinned v2.0.1 writes its empty-pool diagnostic to
+# stderr and nothing to stdout - so the worktree is one it never leased here.
+# So does a listing that names home-relative
 # paths this host's HOME cannot resolve, because lease membership is then
 # unproven either way. A listing that resolves at least one `~` path speaks for
 # this HOME, so an unresolvable slot beside it is a stale pool entry rather than
@@ -1427,11 +1430,12 @@ orca_workspace_path() {  # <worktree>
 # Read-only pool probe. Returns 0 when the listing of the pool this host's
 # treehouse resolves from <project> names <worktree> as a whole listing field, in
 # either the absolute form or the `~`-abbreviated form treehouse prints for paths
-# under $HOME; 1 when the listing answers and does not name it; 2 when the pool
-# cannot be reported at all (no `status` support, a failing status, or no
-# output); and 3 when the listing names `~`-prefixed paths this host's HOME
-# cannot resolve, which means the listing speaks for some other home. 2 and 3
-# are never permission to proceed.
+# under $HOME; 1 when the listing answers and does not name it, including an
+# empty stdout listing from a successful `status`; 2 when the pool cannot be
+# reported at all (no `status` support or a failing status); and 3 when the
+# listing names `~`-prefixed paths this host's HOME cannot resolve, which means
+# the listing speaks for some other home. 2 and 3 are never permission to
+# proceed.
 #
 # The listing is `treehouse status`'s STDOUT only. Real treehouse keeps
 # diagnostics on stderr even when `status` succeeds (unreadable process tables,
@@ -1451,7 +1455,7 @@ treehouse_pool_lists_worktree() {  # <project> <worktree>
     return 2
   fi
   if [ -z "$listing" ]; then
-    return 2
+    return 1
   fi
   abs_wt=$(canonical_existing_dir "$wt") || abs_wt=$wt
   candidates=("$wt" "$abs_wt")
@@ -3233,7 +3237,7 @@ fi
 "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
-if [ "$TEARDOWN_RELEASE_MODE" = orca ] && [ "$KIND" != secondmate ]; then
+if { [ "$TEARDOWN_RELEASE_MODE" = orca ] || [ "$BACKEND" = orca ]; } && [ "$KIND" != secondmate ]; then
   branch=HEAD
   if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
