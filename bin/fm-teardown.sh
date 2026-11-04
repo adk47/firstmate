@@ -1606,6 +1606,25 @@ worktree_release_mode() {  # <backend> <worktree> <project> [<orca-worktree-id>]
     TEARDOWN_RELEASE_MODE=orca
     return 0
   fi
+  # tmux-era provenance: a Mac-migrated task whose record says backend=tmux has a
+  # plain git worktree this host's treehouse never leased. A host WITHOUT
+  # treehouse therefore has no pool to corrupt, so the guarded plain git release
+  # is its return path instead of the treehouse refusal below. A host WITH
+  # treehouse keeps the ordinary path, so a pool that really holds the worktree is
+  # still returned through treehouse and a pool-owned slot is never deleted out
+  # from under the pool.
+  if [ "$backend" = tmux ] && ! command -v treehouse >/dev/null 2>&1; then
+    if [ -n "$proj" ] && [ -d "$proj" ] && worktree_registered_for_project "$proj" "$wt"; then
+      if reason=$(plain_git_remove_would_succeed "$proj" "$wt"); then
+        TEARDOWN_RELEASE_MODE=git
+        return 0
+      fi
+      TEARDOWN_RELEASE_REFUSAL="this tmux-era task's worktree $wt is not leased by treehouse (treehouse is not installed on this host), and a plain git release cannot be proven safe: $reason"
+      return 1
+    fi
+    TEARDOWN_RELEASE_REFUSAL="treehouse is not installed on this host, so a treehouse lease cannot be verified or returned (install it with bin/fm-install-treehouse.sh), and $wt is not a registered linked worktree of ${proj:-<missing>} that a guarded plain git release could verify"
+    return 1
+  fi
   if ! command -v treehouse >/dev/null 2>&1; then
     TEARDOWN_RELEASE_REFUSAL="treehouse is not installed on this host, so a treehouse lease cannot be verified or returned (install it with bin/fm-install-treehouse.sh)"
     return 1
@@ -3393,16 +3412,32 @@ if { [ "$TEARDOWN_RELEASE_MODE" = orca ] || [ "$BACKEND" = orca ]; } && [ "$KIND
       echo "error: orca worktree removal failed for ${ORCA_WORKTREE_ID}; teardown aborted with the branch and worktree intact" >&2
       exit 1
     fi
-  elif ! fm_backend_orca_remove_worktree_by_path "$WT"; then
-    # Orca's registry may still name a stale path for a worktree that moved
-    # between hosts, so a path selector can miss. Fall back to a guarded plain
-    # git release, which never forces a dirty or locked worktree.
-    echo "teardown: orca could not remove $WT by path; attempting a guarded plain git release" >&2
-    guarded_plain_git_release "$WT" "$PROJ" || {
-      restore_worktree_branch "$WT" "$branch"
-      echo "error: orca worktree removal failed for $WT and a guarded plain git release could not prove it safe; teardown aborted with the branch and worktree intact" >&2
-      exit 1
-    }
+  else
+    # A path selector can miss only because Orca's registry still names a stale
+    # path for a worktree that moved between hosts. That proven registry miss -
+    # the selector_not_found error - is the ONLY failure a plain git release may
+    # cover. Every other Orca failure (app not running, ok:false for another
+    # reason, timeout) must refuse with the concrete error named, because a bare
+    # git remove would delete a worktree Orca still owns while its registry keeps
+    # naming it.
+    orca_rm_err=
+    if ! orca_rm_err=$(fm_backend_orca_remove_worktree_by_path "$WT" 2>&1); then
+      case "$orca_rm_err" in
+        *selector_not_found*)
+          echo "teardown: orca reported selector_not_found for $WT; attempting a guarded plain git release" >&2
+          guarded_plain_git_release "$WT" "$PROJ" || {
+            restore_worktree_branch "$WT" "$branch"
+            echo "error: orca reported selector_not_found for $WT and a guarded plain git release could not prove it safe; teardown aborted with the branch and worktree intact" >&2
+            exit 1
+          }
+          ;;
+        *)
+          restore_worktree_branch "$WT" "$branch"
+          echo "error: orca worktree removal failed for $WT with: ${orca_rm_err:-<no output>}; refusing to fall back to a plain git release because this is not a proven registry miss. Teardown aborted with the branch and worktree intact" >&2
+          exit 1
+          ;;
+      esac
+    fi
   fi
   if [ "$branch" != HEAD ]; then
     git -C "$PROJ" branch -D "$branch" >/dev/null 2>&1 || true
