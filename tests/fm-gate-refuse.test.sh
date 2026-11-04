@@ -267,13 +267,12 @@ test_send_refuses_and_admits() {
 # task (HEAD reachable from origin), so a normal teardown genuinely succeeds and a
 # refused one leaves the task untouched (mirrors tests/fm-teardown make_case).
 make_teardown_case() {
-  local name=$1 case_dir fakebin t
+  local name=$1 case_dir fakebin
   case_dir="$TMP/$name"; fakebin="$case_dir/fakebin"
   mkdir -p "$case_dir/state" "$case_dir/config" "$case_dir/data" "$fakebin"
-  for t in treehouse tmux; do
-    printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/$t"
-    chmod +x "$fakebin/$t"
-  done
+  fm_fake_treehouse "$fakebin"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$fakebin/tmux"
+  chmod +x "$fakebin/tmux"
   cat > "$fakebin/gh-axi" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in

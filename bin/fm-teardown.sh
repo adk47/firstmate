@@ -87,7 +87,8 @@
 # Return tool verified before the endpoint kill: worktree_release_mode resolves
 # the release path (orca, treehouse, or guarded plain git) for a task worktree
 # BEFORE the endpoint kill kills its agent, and refuses before the pending-close
-# record is staged. A backend=orca worktree needs the orca CLI. Every other
+# record is staged. A backend=orca worktree needs the orca CLI and its recorded
+# Orca worktree id proven to resolve to that exact path. Every other
 # worktree needs treehouse installed on this host plus an inspectable recorded
 # project directory, and the treehouse pool the project resolves is asked (read
 # only) whether it holds that exact worktree: a held slot returns through
@@ -853,7 +854,6 @@ if [ -z "$BUSY_GEN" ]; then
   BUSY_GEN=$(cat "$STATE/$ID.busy-gen" 2>/dev/null || true)
 fi
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
-ORCA_PATH_MATCH_VERIFIED=0
 CLEANUP_RECOVERY=$TEARDOWN_CLEANUP_RECOVERY
 
 KIND=$TEARDOWN_META_KIND
@@ -1399,11 +1399,11 @@ canonical_existing_dir() {
 }
 
 # Read-only pool probe. Returns 0 when the listing of the pool this host's
-# treehouse resolves from <project> names <worktree> (in either the absolute form
-# or the `~`-abbreviated form treehouse prints for paths under $HOME), 1 when the
-# listing answers and does not name it, and 2 when the pool cannot be reported at
-# all (no `status` support, a failing status, or no output), which is never
-# permission to proceed.
+# treehouse resolves from <project> names <worktree> as a whole listing field, in
+# either the absolute form or the `~`-abbreviated form treehouse prints for paths
+# under $HOME; 1 when the listing answers and does not name it, and 2 when the
+# pool cannot be reported at all (no `status` support, a failing status, or no
+# output), which is never permission to proceed.
 treehouse_pool_lists_worktree() {  # <project> <worktree>
   local proj=$1 wt=$2 listing line cand rel abs_wt abs_home
   local -a candidates=()
@@ -1429,8 +1429,8 @@ treehouse_pool_lists_worktree() {  # <project> <worktree>
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     for cand in "${candidates[@]}"; do
-      case "$line" in
-        *"$cand"|*"$cand "*) return 0 ;;
+      case " $line " in
+        *[[:space:]]"$cand"[[:space:]]*) return 0 ;;
       esac
     done
   done <<EOF
@@ -1443,8 +1443,8 @@ EOF
 # endpoint kill, storing the mode in TEARDOWN_RELEASE_MODE ("orca", "treehouse",
 # or "git") or the concrete missing requirement in TEARDOWN_RELEASE_REFUSAL and
 # returning 1 so the caller leaves the agent alive and the branch intact.
-worktree_release_mode() {  # <backend> <worktree> <project>
-  local backend=$1 wt=$2 proj=$3 probe=0
+worktree_release_mode() {  # <backend> <worktree> <project> [<orca-worktree-id>]
+  local backend=$1 wt=$2 proj=$3 orca_id=${4:-} probe=0
   TEARDOWN_RELEASE_MODE=
   TEARDOWN_RELEASE_REFUSAL=
   if [ -z "$wt" ] || [ ! -d "$wt" ]; then
@@ -1456,6 +1456,10 @@ worktree_release_mode() {  # <backend> <worktree> <project>
       TEARDOWN_RELEASE_REFUSAL="a backend=orca worktree is released only through orca, and the orca CLI is not installed on this host"
       return 1
     fi
+    require_orca_worktree_path_match "$orca_id" "$wt" || {
+      TEARDOWN_RELEASE_REFUSAL="Orca worktree id ${orca_id:-<missing>} does not resolve to $wt, so removing it through Orca would discard work nobody inspected"
+      return 1
+    }
     TEARDOWN_RELEASE_MODE=orca
     return 0
   fi
@@ -2097,12 +2101,6 @@ require_orca_worktree_path_match() {
     echo "Cannot verify dirty or unlanded work for the worktree Orca would remove; preserving metadata." >&2
     return 1
   fi
-}
-
-require_orca_worktree_path_match_if_present() {
-  local worktree_id=$1 inspected=$2
-  [ -n "$inspected" ] && [ -e "$inspected" ] || return 0
-  require_orca_worktree_path_match "$worktree_id" "$inspected"
 }
 
 firstmate_home_has_treehouse_slot() {
@@ -2949,8 +2947,6 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
     echo "Cannot verify dirty or unlanded work; restore the worktree path or get explicit OK to discard, then --force." >&2
     exit 1
   fi
-  require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$WT" || exit 1
-  ORCA_PATH_MATCH_VERIFIED=1
 fi
 
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
@@ -2990,12 +2986,14 @@ BACKLOG_TRANSITION_FLAGS=()
 # Resolve the worktree's release path BEFORE anything below stages a durable
 # intent to finish this teardown: a refusal here must leave no replayable
 # pending-close record behind, so a later replay cannot retire a task whose
-# agent is still alive. Not for kind=secondmate: a secondmate home's own runtime
-# lifecycle is owned by the dedicated process-event and firstmate-home removal
-# machinery further below, not by task-worktree cleanup.
+# agent is still alive. For backend=orca that includes proving the recorded
+# Orca worktree id resolves to this exact path. Not for kind=secondmate: a
+# secondmate home's own runtime lifecycle is owned by the dedicated
+# process-event and firstmate-home removal machinery further below, not by
+# task-worktree cleanup.
 TEARDOWN_RELEASE_MODE=
 if [ "$KIND" != secondmate ] && [ -n "$WT" ] && [ -d "$WT" ]; then
-  if ! worktree_release_mode "$BACKEND" "$WT" "$PROJ"; then
+  if ! worktree_release_mode "$BACKEND" "$WT" "$PROJ" "$ORCA_WORKTREE_ID"; then
     echo "error: no worktree-return path is available for $WT (backend=${BACKEND:-unset}): $TEARDOWN_RELEASE_REFUSAL; leaving the agent alive and the branch intact" >&2
     exit 1
   fi
@@ -3095,10 +3093,6 @@ fi
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
-  if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
-    require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
-    ORCA_PATH_MATCH_VERIFIED=1
-  fi
   branch=HEAD
   if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
