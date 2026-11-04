@@ -82,6 +82,8 @@ config/wedge-alarm  optional away-mode wedge-alarm active-alert directives; LOCA
 config/watched-tools.json  optional list of the tools this home depends on, read by the update check armed with bin/fm-tool-update-check.sh; LOCAL, gitignored, firstmate-maintained but human-editable, and NOT inherited by secondmate homes; see docs/configuration.md "Watched tool updates"
 config/fable-runway.env  optional FM_FABLE_RUNWAY_GROK_TERMINAL handle the Fable-runway failover doorbell rings; parsed, never sourced; LOCAL, gitignored, and NOT inherited by secondmate homes; see docs/configuration.md "Fable runway monitor"
 config/fleet-stall.env  optional fleet-stall watch thresholds and captain page command, parsed never sourced; LOCAL, gitignored, and NOT inherited by secondmate homes; see docs/configuration.md "Fleet stall watch"
+config/change-watch-kubeconfig  optional path of the kubeconfig every post-merge change-watch cluster read uses, taking precedence over an operator's KUBECONFIG and the ambient default; LOCAL, gitignored; inherited by secondmate homes; see docs/configuration.md "Post-merge change watch"
+config/change-watch-repos  optional repository map for the post-merge change watch (namespace/Deployment, image, Sentry project, deploy workflow), replacing a repository's built-in entry; LOCAL, gitignored; inherited by secondmate homes; see docs/configuration.md "Post-merge change watch"
 config/sentry-watch.json  optional Sentry watch thresholds, signatures, per-project overrides, and rail settings read by the check armed with bin/fm-sentry-watch.sh; absent means built-in defaults; LOCAL, gitignored, and NOT inherited by secondmate homes; see docs/configuration.md "Sentry watch"
 config/watchdog.env  optional fleet watchdog thresholds, unit allow and deny lists, chair unit, steering-inbox and connection ladder timings, and the fallback worker model, read by the timer-driven bin/fm-watchdog-worker.sh; absent means built-in defaults; LOCAL, gitignored, and NOT inherited by secondmate homes; see docs/configuration.md "Fleet watchdog"
 config/x-mode.env    generated Relay watcher cadence; LOCAL, gitignored; source before arming watcher when present
@@ -107,6 +109,7 @@ state/               runtime records and signals; gitignored
   <id>.cursor-session  cursor busy-source binding (projects root, task worktree, prior conversations) written by fm-spawn; removed by teardown
   <id>.reconcile-nudged  epoch second of the last inventory-reconcile nudge sent to this secondmate; bin/fm-secondmate-reconcile.sh owns its per-home cooldown window
   <id>.gateway-stall  durable record of an agent stalled on a transient inference-gateway failure and its bounded re-ring budget; bin/fm-gateway-retry-lib.sh owns the format, teardown removes it (docs/gateway-keepalive.md)
+  <id>.stopped       the captain's order to leave a task stopped; written only by bin/fm-leave-stopped.sh, whose header owns the format and what it silences (the watcher skips that endpoint entirely); teardown removes it
   <id>.backlog-close  the exact backlog transition a teardown recorded before removing the task's record, so an interrupted cleanup can still be finished at the next session start; bin/fm-backlog-transition-lib.sh owns its format and replay, and a landed transition removes it
   <id>.inbox/          durable steering inbox: sequenced firstmate instruction records the worker acknowledges by moving them into its handled/ subdirectory; written by fm-send, with ordinary records re-rung and escalated by the watcher while explicit fire-and-forget records are excluded from that ladder, and removed by teardown (bin/fm-task-inbox-lib.sh)
   <id>.meta          task metadata; each producer script's header owns its exact fields and mutation contract, with docs/configuration.md routing operator-facing backend and trace-context details
@@ -132,6 +135,7 @@ state/               runtime records and signals; gitignored
   decision-bindings/ private records marking a captured-answer source as feeding the keyed-answer intake, with a legacy origin on pre-collapse records; written only by bin/fm-captain-hold.sh bind, dropped by unbind and by source retirement (section 13; docs/captain-hold-lifecycle.md)
   when/              private condition->action watch specs, their trust bindings, and single-fire markers; written only by bin/fm-procevent-when.sh (section 13's process-event-sources trigger)
   inbox/             captain notes captured out of band by bin/fm-inbox.sh, including the voice handover's queued requests; each note appends one `check` wake and stays pending until acknowledged with `bin/fm-inbox.sh drain --ack <id>`, which moves it to inbox/handled/ (docs/voice-relay.md)
+  inbox-auto/        the automated note queue for sources that are not the captain (`--source sentry|lane-tick|ci`); same record and acknowledgement format, appended ONE `check` wake naming its class, and never printed before the captain's notes (bin/fm-inbox.sh --help)
   x-inbox/           generated Relay pending mention payloads; fmx-respond drains it (section 14)
   x-context/         generated Relay durable per-request reply context and one-wake offer markers, keyed by request_id; survives inbox cleanup and expires within seven days (section 14; bin/fm-x-lib.sh)
   x-outbox/          generated Relay dry-run reply and dismiss previews; inspect it when FMX_DRY_RUN is set (section 14)
@@ -146,7 +150,7 @@ state/               runtime records and signals; gitignored
   .watch.lock .wake-queue.lock watcher singleton and queue serialization locks
   .claude-autoarm.lock .claude-autoarm-epoch .claude-autoarm-failure-notified .claude-autoarm-failure-alarmed .turnend-claude-blocks .turnend-claude-blocks.lock   Claude Stop auto-arm single-flight, epoch, failure-episode, attended-alarm, guard-budget, and budget-lock records; never touch
   .cursor-park-owner .cursor-park-owner.lock .turnend-cursor-blocks   Cursor stop-hook owner record, publication and commit lock, and bounded repair-nag budget; never touch
-  .hash-* .count-* .stale-* .stale-since-* .churn-since-* .paused-* .wedge-escalations-* .writing-* .gw-busy-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
+  .hash-* .count-* .stale-* .stale-since-* .churn-since-* .paused-* .wedge-escalations-* .wedge-alarmed-* .writing-* .gw-busy-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .watchdog-worker.json .watchdog-worker.lock  fleet watchdog record (boot identity, per-task pane shape and stall/inbox ladder stages, connection strikes, per-unit restart history, last reported backlog difference) and its pass lock, both owned by bin/fm-watchdog-worker.sh
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes) and between a slow poll's stages; guard scripts read it
@@ -168,6 +172,7 @@ Run-tier harness surfaces run this command for you at session open while the res
 
 Read the complete digest once and trust it as this turn's startup and recovery input.
 If the harness shows only a preview and persists the full output to a file, read that file before acting.
+A context compaction re-delivers a bounded compact view instead, which re-inlines curated memory only as a size-bounded head of each file, marks every cut file `(truncated - read <path> for the rest)`, and discloses every omission; `bin/fm-session-start.sh --compact` owns what it keeps.
 Do not separately re-read the context, backlog, metadata, or bulk status inputs it just printed unless a source was reported absent or corrupt, older history is specifically needed, or a targeted workflow must inspect before writing.
 An `ABSENT` captain, shared-captain, secondmate, or learnings file means the firstmate repo's built-in defaults, no shared captain preferences, no registered secondmates, or no captured learnings; rebuild an absent or stale project registry from the clones before dispatch.
 

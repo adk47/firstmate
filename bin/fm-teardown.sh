@@ -1633,7 +1633,7 @@ task_status_is_own_parked_run() {  # <worktree> <axi-status-output>
   status=$(fm_nm_strip_quotes "$(fm_nm_field "$out" status)")
   [ -n "$status" ] || return 1
   case "$status" in
-    completed|failed|cancelled|passed|checks-passed|running|fixing|ci) return 1 ;;
+    completed|failed|cancelled|passed|checks-passed|passed-with-skips|passed-with-override|running|fixing|ci) return 1 ;;
   esac
   if ! fm_nm_head_matches_worktree "$wt" "$run_head"; then
     # The strict object-local rule rejected this run head. That rejection is
@@ -1679,7 +1679,7 @@ task_status_is_terminal_run() {  # <axi-status-output> <run-id>
   [ "$run_id" = "$expected_id" ] || return 1
   outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$out" outcome)")
   case "$outcome" in
-    cancelled|failed|passed|checks-passed) return 0 ;;
+    cancelled|failed|passed|checks-passed|passed-with-skips|passed-with-override) return 0 ;;
   esac
   return 1
 }
@@ -2695,7 +2695,7 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
       "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.reconcile-nudged" \
-      "$sub_state/$child_id.gateway-stall" \
+      "$sub_state/$child_id.gateway-stall" "$sub_state/$child_id.stopped" \
       "$sub_state/.$child_id.branch-outcome-index"
   done
 }
@@ -3100,7 +3100,7 @@ rm -f "$STATE/$ID.turn-ended" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
-  "$STATE/$ID.gateway-stall" \
+  "$STATE/$ID.gateway-stall" "$STATE/$ID.stopped" \
   "$STATE/.$ID.branch-outcome-index"
 # The steering inbox (bin/fm-task-inbox-lib.sh) is runtime state for the
 # retired endpoint; teardown only runs after landing is confirmed, so any

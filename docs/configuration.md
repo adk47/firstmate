@@ -238,6 +238,7 @@ Use `bin/fm-startup-memory-budget.sh read` to validate and print the effective v
 The stable local estimate is `ceil(UTF-8 bytes / 3)` per file, a conservative portable approximation rather than a provider-exact tokenizer.
 An inherited `data/captain-shared.md` counts in a secondmate's total but remains primary-owned and read-only there.
 The internal [`/stow` skill](../.agents/skills/stow/SKILL.md) owns curation and its automatic secondmate cascade, which accounts every home against this same per-home allowance separately rather than against a fleet total.
+The post-compaction compact digest also sizes its one shared curated-memory excerpt from this allowance at the same 3 bytes per estimated token, using the `7500` default when the file is absent or invalid so a compaction never loses its bound; `bin/fm-session-start.sh --compact` owns that excerpt.
 The helper's header owns exact parsing, publication, and report output mechanics.
 
 ## Stow pass horizon (config/stow-pass-horizon)
@@ -933,6 +934,33 @@ The watch is read-only against Sentry and GitHub, makes no model calls, and boun
 That budget is shared fairly: each project's read gets the budget divided by the project count, at least 2 seconds and never more than `FM_SENTRY_WATCH_HTTP_TIMEOUT` (default 5), and the read order rotates round-robin every poll starting after the last project read, so a slow host starves no fixed tail and every project is read within a bounded number of polls.
 A project left unread for three consecutive polls is reported as `could-not-determine` on that transition.
 
+## Post-merge change watch (config/change-watch-kubeconfig, config/change-watch-repos)
+
+[`bin/fm-change-watch.sh`](../bin/fm-change-watch.sh) watches a merged change by effect for 12 hours; its header owns the commands, metrics, bars, schedule, target resolution, and test seams, and [`docs/architecture.md`](architecture.md) "Post-merge change watch" owns why it exists.
+This section owns only the two local, gitignored files that point its reads at this home's cluster and this home's repository map.
+
+`config/change-watch-kubeconfig` holds one path on its first non-comment line: the kubeconfig every cluster read of a watch uses.
+Precedence is `FM_CW_KUBECONFIG`, then this file, then an operator's own `KUBECONFIG`, then `~/.kube/mcp-viewer.kubeconfig`, and only then the ambient `~/.kube/config` default.
+The order exists because a watch once inherited an ambient context pointed at an unreachable cluster and every watch for months completed `unmeasured` while its record looked normal, so a home that reads production should name its reader here rather than rely on whatever `kubectl` was last configured with.
+A kubeconfig named here that cannot be read is reported, never silently replaced by another cluster.
+
+`config/change-watch-repos` maps a repository to the things a watch should sample, one repository per line, `<repo> <spec>...`, where `<repo>` is the GitHub repository name and each spec is one of:
+
+```
+<namespace>/<deployment>   an explicit Deployment target
+<deployment>               a Deployment in muso-prod
+image:<name>               every Deployment running an image whose repository is <name>
+sentry:<project-slug>      the repository's Sentry project
+run:<owner>/<repo>#<workflow-path>   the repository's deploy workflow, by path
+```
+
+A line for a repository replaces that repository's built-in entry rather than adding to it, so a home can point a watch at a different namespace, a narrower image, or its own Sentry project; a repository with no line and no built-in entry still resolves through the Deployments that run an image named after it.
+A `run:` spec names the workflow by file (`run:Muso-AI/hydra#.github/workflows/deploy.yml`) because a spec is one whitespace-free token and workflow display names contain spaces.
+Sentry reads use the org `auth_token` in `~/.config/muso/sentry-vault.json` (override `FM_CW_SENTRY_VAULT`); with no token or no mapped project the Sentry target is not registered and the registration line says so, and it is never a silent zero.
+A Sentry read waits for the watch's own landing — the Deployments' rollout fingerprint when the watch has any, otherwise its mapped `run:` workflow's run for this merge — because before that landing those are the errors of the code the release replaced.
+Every mapped target is bounded — an image family is watched by its busiest `FM_CW_MAX_TARGETS` (default 8) Deployments and the registration line states the cap — and a Kubernetes target is scored only once its rollout fingerprint (pod images plus pod-template hash) differs from registration, so a sample taken before the rollout is recorded as awaiting the deploy rather than as health and a rollout that changes no image still counts.
+The per-sample budget (`FM_CW_SAMPLE_DEADLINE`) bounds the cluster reads only: the Sentry and deploy-workflow reads go over the network under their own bounds, so a sample whose pod reads spent the budget still measures them.
+
 ## Relay (.env)
 
 Relay lets a firstmate instance answer public mentions and act on normal reversible mention requests through firstmate's normal lifecycle.
@@ -1217,6 +1245,7 @@ The spoken interface in [`docs/voice-relay.md`](voice-relay.md) and the model-ba
 Each is one line in a local, gitignored `config/` file, with an environment variable that overrides it for a single run, and a missing required value refuses with the path to write rather than falling back to a value that belongs to another home.
 That configuration is the whole opt-in: an unconfigured home cannot start the relay and cannot run `fm-inbox.sh say` or `ask`, while `note`, `status`, `list` and `drain` need no configuration at all because they make no model call.
 The voice handover depends on `note`, so it keeps working in a home that has configured nothing.
+A note is filed under the class of the source that wrote it, and an automated source files into its own `state/inbox-auto/` queue so `list` and `drain` always present the captain's own notes first; `bin/fm-inbox.sh --help` owns the class list and the queue each one uses.
 
 | File | Environment | Holds |
 | --- | --- | --- |
@@ -1343,7 +1372,8 @@ FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stal
 FM_BUSY_TURN_MAX_SECS=3600         # maximum age of a busy pane's latest state/<id>.turn-ended marker, or its state/<id>.meta spawn record before any turn completes, before the same wedge escalation used for a provably-working non-busy stale takes over; inspection-only, never an automatic interrupt or restart; a declared external wait or verified captain-held transfer takes the FM_PAUSE_RESURFACE_SECS recheck below instead
 FM_PAUSE_RESURFACE_SECS=3600       # seconds between bounded rechecks of a declared external wait or verified captain-held transfer, including a live idle pane after its first inconclusive stale wake, a provably-working idle pane whose crew declared the wait, and a live busy pane past FM_BUSY_TURN_MAX_SECS; the away-mode daemon uses the same setting, ageing its window against the crew's own latest status line rather than pane busy state
 FM_SECONDMATE_WAKE_STALL_SECS=60   # minimum age of the oldest valid foreign wake-queue row before an endpoint-recorded local secondmate produces one durable parent wake-loop-stall notification; zero or invalid values use 60
-FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
+FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added; that rung also ends the ladder for an unchanged pane
+FM_WEDGE_REALARM_SECS=86400        # seconds after the ladder's last delivered escalation before an unchanged pane re-alarms once; until then every further timer expiry on the same pane is absorbed as an already-reported repeat, while an idle pane's hash change, or the pane leaving the busy state, resets the ladder and reports the pane as a first sight again (a busy pane past FM_BUSY_TURN_MAX_SECS keeps its ladder across render changes until it goes idle); a task left stopped through bin/fm-leave-stopped.sh never re-alarms at all
 FM_WORKTREE_WRITE_PRUNE='.git node_modules .venv venv __pycache__ .mypy_cache .pytest_cache .ruff_cache .tox target dist build .next .cache vendor'   # directory names the wedge detector's task-worktree write probe skips; the default keeps .git out so a supervisor's own read-only git command can never look like crew progress; set it to the empty string to prune nothing, which widens the probe to the whole depth-bounded tree rather than disabling it
 FM_WORKTREE_WRITE_MAXDEPTH=6       # depth that same probe walks below the recorded worktree; it runs only at the moment a wedge escalation would otherwise fire, never on every poll; no probe knob applies to a secondmate, whose recorded worktree is a provisioned home the probe skips entirely
 FM_WORKTREE_WRITE_TIMEOUT=10       # wall-clock seconds that one walk may take, so a worktree on a hung mount cannot stall the watcher poll that started it; hitting the bound reads as no write evidence, which leaves the escalation schedule exactly as it was; a value that is not a positive integer falls back to the default
