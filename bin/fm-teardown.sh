@@ -93,11 +93,15 @@
 # project directory, and the treehouse pool the project resolves is asked (read
 # only) whether it holds that exact worktree: a held slot returns through
 # treehouse, and a path this host's pool provably does not hold is a worktree
-# treehouse never leased here, so it releases through guarded_plain_git_release.
+# treehouse never leased here, so it releases through guarded_plain_git_release
+# only once that release is proven to succeed - an unlocked registration and a
+# tree holding no uncommitted or untracked work.
 # When no path resolves, teardown refuses while the agent is still alive and the
 # branch still intact, naming the concrete missing requirement. A treehouse that
 # cannot report its pool listing at all (no `status` support, a failing status,
-# or no output) refuses too, because lease membership is then unproven.
+# or no output) refuses too, and so does a listing that names home-relative
+# paths this host's HOME cannot resolve, because lease membership is then
+# unproven either way.
 # guarded_plain_git_release runs plain `git worktree remove` - git itself refuses
 # a dirty or locked worktree unless --force is passed and this never passes it -
 # so an unlanded worktree is kept rather than discarded. The task branch is
@@ -1401,12 +1405,15 @@ canonical_existing_dir() {
 # Read-only pool probe. Returns 0 when the listing of the pool this host's
 # treehouse resolves from <project> names <worktree> as a whole listing field, in
 # either the absolute form or the `~`-abbreviated form treehouse prints for paths
-# under $HOME; 1 when the listing answers and does not name it, and 2 when the
-# pool cannot be reported at all (no `status` support, a failing status, or no
-# output), which is never permission to proceed.
+# under $HOME; 1 when the listing answers and does not name it; 2 when the pool
+# cannot be reported at all (no `status` support, a failing status, or no
+# output); and 3 when the listing names `~`-prefixed paths this host's HOME
+# cannot resolve, which means the listing speaks for some other home. 2 and 3
+# are never permission to proceed.
 treehouse_pool_lists_worktree() {  # <project> <worktree>
-  local proj=$1 wt=$2 listing line cand rel abs_wt abs_home
-  local -a candidates=()
+  local proj=$1 wt=$2 listing line cand rel abs_wt abs_home field
+  local -a candidates=() fields=()
+  local unresolved=0
   if ! listing=$( ( cd "$proj" && treehouse status ) 2>&1 ); then
     return 2
   fi
@@ -1433,10 +1440,56 @@ treehouse_pool_lists_worktree() {  # <project> <worktree>
         *[[:space:]]"$cand"[[:space:]]*) return 0 ;;
       esac
     done
+    read -r -a fields <<<"$line"
+    for field in "${fields[@]}"; do
+      case "$field" in
+        '~'/*)
+          if [ -z "$abs_home" ] || [ ! -e "$abs_home/${field#'~/'}" ]; then
+            unresolved=1
+          fi
+          ;;
+      esac
+    done
   done <<EOF
 $listing
 EOF
+  [ "$unresolved" = 0 ] || return 3
   return 1
+}
+
+# Proof that a plain `git worktree remove` - which never receives --force - will
+# succeed for this worktree: an unlocked registration of a tree holding no
+# uncommitted or untracked work. Prints the concrete blocker when it cannot prove
+# that and returns 1.
+plain_git_remove_would_succeed() {  # <project> <worktree>
+  local proj=$1 wt=$2 listing line abs_wt dirty=
+  local current='' locked=0
+  abs_wt=$(removal_target_abs_path "$wt" 2>/dev/null) || abs_wt=$wt
+  listing=$(git -C "$proj" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || {
+    printf 'git cannot list the worktrees of %s\n' "$proj"
+    return 1
+  }
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *) current=$(removal_target_abs_path "${line#worktree }" 2>/dev/null || true) ;;
+      locked*) [ "$current" = "$abs_wt" ] && locked=1 ;;
+    esac
+  done <<EOF
+$listing
+EOF
+  if [ "$locked" = 1 ]; then
+    printf '%s is registered locked, so git worktree remove refuses it without --force\n' "$wt"
+    return 1
+  fi
+  if ! dirty=$(git -C "$wt" status --porcelain 2>/dev/null); then
+    printf 'git cannot report whether %s holds uncommitted work\n' "$wt"
+    return 1
+  fi
+  if [ -n "$dirty" ]; then
+    printf '%s holds uncommitted or untracked work, so git worktree remove refuses it without --force\n' "$wt"
+    return 1
+  fi
+  return 0
 }
 
 # Resolve how this task's worktree can be released BEFORE any destructive
@@ -1444,7 +1497,7 @@ EOF
 # or "git") or the concrete missing requirement in TEARDOWN_RELEASE_REFUSAL and
 # returning 1 so the caller leaves the agent alive and the branch intact.
 worktree_release_mode() {  # <backend> <worktree> <project> [<orca-worktree-id>]
-  local backend=$1 wt=$2 proj=$3 orca_id=${4:-} probe=0
+  local backend=$1 wt=$2 proj=$3 orca_id=${4:-} probe=0 reason=
   TEARDOWN_RELEASE_MODE=
   TEARDOWN_RELEASE_REFUSAL=
   if [ -z "$wt" ] || [ ! -d "$wt" ]; then
@@ -1481,10 +1534,18 @@ worktree_release_mode() {  # <backend> <worktree> <project> [<orca-worktree-id>]
       TEARDOWN_RELEASE_REFUSAL="this host's treehouse cannot report its pool for $proj, so whether it holds $wt cannot be verified"
       return 1
       ;;
+    3)
+      TEARDOWN_RELEASE_REFUSAL="this host's treehouse pool listing for $proj names home-relative paths this host's HOME cannot resolve, so whether it holds $wt cannot be verified"
+      return 1
+      ;;
   esac
   if worktree_registered_for_project "$proj" "$wt"; then
-    TEARDOWN_RELEASE_MODE=git
-    return 0
+    if reason=$(plain_git_remove_would_succeed "$proj" "$wt"); then
+      TEARDOWN_RELEASE_MODE=git
+      return 0
+    fi
+    TEARDOWN_RELEASE_REFUSAL="this host's treehouse pool does not hold $wt, and this host cannot prove a plain git release would succeed: $reason"
+    return 1
   fi
   TEARDOWN_RELEASE_REFUSAL="this host's treehouse pool does not hold $wt and it is not a registered linked worktree of $proj, so neither treehouse return nor a guarded plain git release can verify it"
   return 1
