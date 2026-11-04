@@ -130,6 +130,19 @@
       "approval_ref": "firstmate profile-merge-ops-m1.inbox/070 (captain DECIDED YES: fable-decider as the merge approver, scoped to `profiles merge`, bound to the decider record, tier-2 list NOT widened); Fable 048 rule C7 (the coded decider decides, core verifySelfMerge is the single predicate); muso-cli#64 + this PR",
       "scope": "profile-merge-only",
       "status_note": "ON for `profiles merge` only (captain 2026-10-30 12:4xZ). Never on tier2-approvers.txt, so it grants no delete, no bulk-destructive verb and no track merge. Effective only once node-8 runs a muso-cli release containing #64: on an older CLI the handle is simply refused (fail closed), it is not silently widened."
+    },
+    "claim-handoff-receiver": {
+      "description": "scripts/handoff/claim_handoff_receiver.py (H3a, handoff-contract.md §2/§4): after H2's shared gate admits a Caroline hand-off envelope and resolves one account, reads that account's own pending claims (replica) and either runs the claim-status campaign through intercom-verify-request.sh (claim_status) or files attachments by sha256 into proof_intake with subject claim (claim_proof). It never approves, rejects, holds or E1-verifies a claim and composes no text. Registered here so the switch that lets its status line reach a customer is a captain decision: while approved is false the campaign runs in dry-run (outcome line_withheld, reason shadow).",
+      "entrypoints": [
+        "handoff/claim_handoff_receiver.py"
+      ],
+      "cron_names": [
+        "claim-handoff-receiver"
+      ],
+      "approved": false,
+      "approved_by": null,
+      "approval_ref": null,
+      "status_note": "SHADOW (captain 2026-10-28 12:18Z; Fable 065/066). Build only; the CronJob ships suspend:true (H4, hydra-cronjobs-t5) and the kill file /etc/hydra/handoff-receivers.disabled stops it. Flip order per the contract: receivers in shadow -> sender dark -> 10% canary -> 100%, each step via firstmate."
     }
   }
 }

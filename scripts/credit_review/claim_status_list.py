@@ -36,9 +36,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
-from claim_verify.bound_pages import (  # noqa: F401 - re-exported: callers and tests use csl.<name>
-    SPOTIFY_ID, _host_path, _on, bound_surfaces, instagram_handle, registrable_host, tiktok_handle, x_handle,
-    youtube_channel_id,
+from claim_verify.bound_pages import (  # noqa: F401 - re-exported: callers and tests reach these through csl
+    SPOTIFY_ID, bound_surfaces, instagram_handle, registrable_host, tiktok_handle, x_handle, youtube_channel_id,
 )
 
 from .uvn_status import Query, trino
@@ -119,14 +118,17 @@ class Facts:
     at_risk_teams: set[str] = field(default_factory=set)                 # paying, with a live churn signal
 
 
-def read_facts(query: Query = trino, now: datetime | None = None) -> Facts:
+def read_facts(query: Query = trino, now: datetime | None = None, user_id: int | None = None) -> Facts:
+    """`user_id` limits the PENDING claims read to that one account's own (the claim-handoff receiver, H3a:
+    a claim of another account is never read); the competitor/velocity reads that judge them are unchanged."""
     now = now or datetime.now(timezone.utc)
+    only = "" if user_id is None else f" AND userid = {int(user_id)}"
     since = (now - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
     f = Facts()
     for cid, uid, tid, pid, ptype, created in query(
             "SELECT CAST(id AS varchar), CAST(userid AS varchar), CAST(teamid AS varchar), profileid, "
             "coalesce(profiletype, ''), CAST(createdat AS varchar) FROM postgresql_core.public.claiming "
-            "WHERE deletedat IS NULL AND status = 'pending'"):
+            "WHERE deletedat IS NULL AND status = 'pending'" + only):
         if str(cid).isdigit() and str(uid).isdigit():
             f.claims.append({"id": int(cid), "user_id": int(uid), "team_id": str(tid or ""), "profile_id": str(pid or ""),
                              "profile_type": str(ptype or ""), "created_at": str(created or "")})
@@ -216,10 +218,18 @@ class BuildTooSlow(Exception):
                          f"{counts.get('pending', 0)} pending unreadable)")
 
 
-def build(*, query: Query = trino, read_profile: ProfileReader = muso_profile, now: datetime | None = None) -> dict[str, Any]:
-    """The list document run_status reads, plus the counts of every excluded group."""
+def build(*, query: Query = trino, read_profile: ProfileReader = muso_profile, now: datetime | None = None,
+          user_id: int | None = None) -> dict[str, Any]:
+    """The list document run_status reads, plus the counts of every excluded group and, per excluded claim,
+    why (`excluded`: [{claim_id, user_id, paid, reason}]). `user_id` builds one account's list only."""
     now = now or datetime.now(timezone.utc)
-    facts = read_facts(query, now)
+    facts = read_facts(query, now, user_id=user_id)
+    excluded: list[dict[str, Any]] = []
+
+    def skip(c: dict[str, Any], reason: str) -> None:
+        counts[reason] += 1
+        excluded.append({"claim_id": c["id"], "user_id": c["user_id"], "paid": c["team_id"] in facts.paid_teams,
+                         "reason": reason})
     counts = {k: 0 for k in ("pending", "hold", "organization", "bc_person_excluded", "no_bindable_page",
                              "profile_unreadable", "profile_gone", "listed", "listed_paid", "listed_at_risk")}
     cache: dict[str, dict[str, Any] | None] = {}
@@ -241,17 +251,17 @@ def build(*, query: Query = trino, read_profile: ProfileReader = muso_profile, n
             cache[pid] = read_profile(pid)
         prof = cache[pid]
         if prof is None:
-            counts["profile_unreadable"] += 1
+            skip(c, "profile_unreadable")
             continue
         if prof.get("deleted") or prof.get("merged"):
-            counts["profile_gone"] += 1
+            skip(c, "profile_gone")
             continue
         org = c["profile_type"] == "organization" or str(prof.get("subType") or "") == "organization"
         if not is_hold and not org:
-            counts["bc_person_excluded"] += 1
+            skip(c, "bc_person_excluded")
             continue
         if not bound_surfaces(prof):
-            counts["no_bindable_page"] += 1
+            skip(c, "no_bindable_page")
             continue
         counts["hold" if is_hold else "organization"] += 1
         paid = c["team_id"] in facts.paid_teams
@@ -265,4 +275,4 @@ def build(*, query: Query = trino, read_profile: ProfileReader = muso_profile, n
         counts["listed_at_risk"] += int(at_risk)
     assert_not_systemic_outage(counts)
     return {"generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "source": "claim_status_list.build (node-8, live reads)",
-            "counts": counts, "claims": claims}
+            "counts": counts, "claims": claims, "excluded": excluded}
