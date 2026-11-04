@@ -25,6 +25,22 @@ fail_check() { log "FAIL: $*"; FAILURES=$((FAILURES + 1)); }
 pass_check() { log "PASS: $*"; }
 warn_check() { log "WARN: $*"; WARNINGS=$((WARNINGS + 1)); }
 
+# page_websearch_unavailable <label> <detail> — the PAGE half of the
+# page-and-warn ruling (2026-11-04): a provider-unavailable web_search result
+# must be visible to a human, not just a WARN line in a deploy log nobody
+# reads. Best-effort by design: a Slack outage must never turn a WARN into a
+# deploy failure, and this must never be the reason a deploy blocks.
+page_websearch_unavailable() {
+  local label="$1" detail="$2"
+  local lib="$_SMOKE_DIR/lib/slack-notify.sh"
+  [ -r "$lib" ] || return 0
+  # shellcheck source=lib/slack-notify.sh
+  ( . "$lib" >/dev/null 2>&1 || exit 0
+    slack_notify "web_search provider UNAVAILABLE (${label}): ${detail}. No candidate was registered, so no request was made — this is provider-side, not a payload or policy fault. The deploy proceeded; the check stays visible until the provider is back." >/dev/null 2>&1 || true
+  ) || true
+  return 0
+}
+
 # websearch_probe_attempt + its helpers (real-call evidence via the scout
 # rollout, not model text) are pure/injectable and live in a separate lib so
 # bats can unit-test them without a live gateway — see check_web_search
@@ -274,10 +290,12 @@ needs_target() { [[ "$TARGET" == "all" || ",$TARGET," == *",$1,"* ]]; }
 check_web_search() {
   local profile="$1" label="$2"
   local enabled
-  enabled=$(python3 - "$profile" <<'PYEOF' 2>/dev/null || echo "false"
+  # SMOKE_OPENCLAW_CFG_DIR is a TEST SEAM (scripts/tests/smoke-test.bats): the dispatcher branch below is the thing
+  # qa-review 2026-11-04 found untested, and it cannot be reached without a config that says search is enabled.
+  enabled=$(python3 - "$profile" "${SMOKE_OPENCLAW_CFG_DIR:-/opt/hydra}" <<'PYEOF' 2>/dev/null || echo "false"
 import json, sys
-profile = sys.argv[1]
-with open(f'/opt/hydra/openclaw-{profile}.json') as f:
+profile, cfgdir = sys.argv[1], sys.argv[2]
+with open(f'{cfgdir}/openclaw-{profile}.json') as f:
     c = json.load(f)
 print('true' if c.get('tools', {}).get('web', {}).get('search', {}).get('enabled') is True else 'false')
 PYEOF
@@ -317,6 +335,12 @@ PYEOF
       scout_detail="$(echo "$result" | sed -n 's/^DETAIL=//p')"
       case "$scout_verdict" in
         fail) fail_check "$label: web_search BROKEN (${scout_detail}) — and no deny-free agent exists to prove otherwise"; return ;;
+        # qa-review 2026-11-04 (finding 1): this arm used to WARN, so a config regression that REMOVED the deny-free
+        # reference was missed whenever scout happened to report provider-unavailable. With no reference there is
+        # nothing to attribute the provider condition to, and the missing reference is itself the regression: fail
+        # closed, exactly like `fail`. (The reference-present arm below still WARNs - there the reference is the
+        # evidence that the provider condition is not global.)
+        unavailable) fail_check "$label: web_search provider UNAVAILABLE (${scout_detail}) — and NO deny-free reference agent exists, so this cannot be attributed to a provider-side condition: the missing reference is itself a config regression. Fail closed."; return ;;
         pass) pass_check "$label: web_search ok (${scout_detail})"; return ;;
       esac
     done
@@ -337,6 +361,20 @@ PYEOF
     return
   fi
 
+  # PROVIDER-UNAVAILABLE on the deny-free reference: page and proceed. The
+  # runtime throws "disabled or no provider is available" from
+  # resolveWebSearchCandidates() when the candidate list is EMPTY, i.e. before
+  # any request — so there is no 429/timeout/entitlement rejection to read and
+  # nothing about this deploy's payload is implicated. Rolling back cannot fix
+  # a provider that was never registered, and on 2026-11-04 it blocked the
+  # Gmail readers fix behind a vendor-side capability. A POLICY refusal is
+  # still `fail` above and still blocks.
+  if [[ "$ref_verdict" == "unavailable" ]]; then
+    warn_check "$label: web_search provider UNAVAILABLE (${ref_detail}) — confirmed on deny-free agent '${reference}'; no candidate registered, so no request was made. Not a payload or policy fault; deploy proceeds and this is paged."
+    page_websearch_unavailable "$label" "$ref_detail"
+    return
+  fi
+
   result="$(websearch_probe_attempt "$profile" "$prompt" scout)"
   scout_verdict="$(echo "$result" | sed -n 's/^VERDICT=//p')"
   scout_detail="$(echo "$result" | sed -n 's/^DETAIL=//p')"
@@ -347,7 +385,20 @@ PYEOF
       fail_check "$label: web_search BROKEN for scout (${scout_detail}) and NO tool policy explains it — not attributable to a restriction"
       ;;
     warn)
-      warn_check "$label: web_search is RESTRICTED for agent 'scout' by ${restriction} — deny-free agent '${reference}' searches fine, so this is a per-agent policy, not an outage. Deploy proceeds with the restriction visible. See validate-config-matrix.sh check #8."
+      if [[ "$scout_verdict" == "unavailable" ]]; then
+        # b1's NO-GO on #1745: `unavailable` is provider-side (the candidate list was EMPTY, so no request was made).
+        # The message must not claim more than was measured: with ref=pass we know search works globally; with
+        # ref=inconclusive we do NOT, and saying "the deny-free agent proved search works" there would be asserting a
+        # fact the probe never established. Both are WARN + page; only the wording differs.
+        if [[ "$ref_verdict" == "pass" ]]; then
+          warn_check "$label: web_search provider UNAVAILABLE for scout (${scout_detail}) — deny-free agent '${reference}' proved search works, so this is not a global outage. Deploy proceeds; page sent."
+        else
+          warn_check "$label: web_search provider UNAVAILABLE for scout (${scout_detail}) — the reference probe was '${ref_verdict}', so global search is NOT proven; the provider list was empty, so no request was made and this is not a payload, policy or config fault. Deploy proceeds; page sent."
+        fi
+        page_websearch_unavailable "$label" "$scout_detail"
+      else
+        warn_check "$label: web_search is RESTRICTED for agent 'scout' by ${restriction} — deny-free agent '${reference}' searches fine, so this is a per-agent policy, not an outage. Deploy proceeds with the restriction visible. See validate-config-matrix.sh check #8."
+      fi
       ;;
     pass)
       pass_check "$label: web_search ok (${ref_detail}, via deny-free agent '${reference}')"
