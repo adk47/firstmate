@@ -27,6 +27,31 @@ Agent endpoint liveness and queue-consumption liveness are separate: on each pol
 Once that row reaches `FM_SECONDMATE_WAKE_STALL_SECS`, the primary appends one keyed `check` wake naming the mate, row sequence, and observed age; parent receipts and queued-key deduplication suppress repeats for the same row across watcher and handling crashes, while empty and younger queues remain silent.
 Endpointless registered mates remain outside this scan because startup secondmate-liveness owns dead or missing endpoint recovery, and remote homes retain their host-local supervision boundary.
 `tests/fm-wake-queue.test.sh` pins the notification, idempotence, quiet-queue, and byte-for-byte foreign-row preservation guarantees.
+
+## Thread subscriptions
+
+firstmate is a router that also executed, so every fleet event used to wait for one of its turns: a PR's QA finding and a lane's own "need firstmate: steer <lane>" line landed in a status log that firstmate reached days later (24 PRs sat with unanswered QA findings for a median 116 h), and the relay itself cost another turn.
+`bin/fm-thread-deliver.sh` removes the middleman for both, and `data/factory-autonomy-fable-a1/bob-architecture.md` section 3 is the design rationale.
+
+A thread is the durable grouping of events about one thing - a PR or MR URL, a lane's own status log, a Sentry issue - and a subscription is a task that owns that thread and must see its events.
+Thread ids are filesystem-safe slugs, so a caller may pass a raw forge URL and have it canonicalized by the same identity owner the PR poll uses.
+Subscriptions live in `state/threads/<thread-id>.subs`, one `<task-id>\t<role>\t<added-utc>` row per subscriber, and `add` is idempotent per task.
+
+Delivery reuses the existing steering-inbox transport rather than adding a second one: an event becomes a fired `fm-send` record in the owning worker's own inbox, which is what keeps it off the watcher's re-ring ladder so a thread event never climbs into a firstmate escalation.
+Where the installed `fm-send` has no fired delivery for an ordinary crew task, the fired attempt is retried as an ordinary steer and the ledger records that outcome instead of pretending the stronger one.
+Every attempt appends to `state/threads/deliveries.log`, which is the only delivery history and the measurement's input.
+
+Lane steers are the one event class with a status-log source.
+A line matching `need[s] firstmate: steer <lane>: <text>` is picked up by the watcher's poll, delivered to that lane's own `lane-<lane>` thread, and the lane is subscribed to that thread so later events about it land in the same place.
+`state/threads/.lane-cursor/<source-task>` holds the byte offset already examined, only complete lines are ever consumed, and a delivery id derived from the source line's offset makes a re-scan collapse onto the record already present rather than duplicate the instruction.
+Firstmate gets a durable copy as an ordinary `check` wake only when the lane is gone - no metadata in this home, or an endpoint the backend reports dead or missing - because that is the one case it must relay.
+A recorded lane whose send fails inconclusively keeps its line and is retried on the next scan, and a task steering itself is skipped.
+`bin/fm-teardown.sh` retires a cleaned-up task's subscriptions and cursor so routing state cannot outlive the inbox it points at.
+
+`bin/fm-thread-wake-measure.sh` exists because the claim is otherwise only asserted.
+It records a baseline (wake sequence, delivery counts) and, after the agreed window of 7 days, prints wake appends per hour from the watcher's monotonic sequence counter alongside outcomes per hour from the supervision branch's durable outcome store for the window before and after.
+The two readings are shown with the row coverage they were computed from, because either alone is misleading: the sequence counter has no history before the baseline, and a quiet fleet produces few wakes whatever the routing does.
+`tests/fm-thread-deliver.test.sh` pins the subscription, fan-out, cursor, half-written-line, dead-lane-copy, retirement, and measurement guarantees.
 When a canonical validated PR poll returns exactly `merged`, the watcher routes it through the shared merge-outcome emitter before retiring the poll.
 [`bin/fm-merge-outcome-lib.sh`](../bin/fm-merge-outcome-lib.sh)'s header owns role routing, PR-specific wake identity, marker-locked normal deduplication, and the at-least-once ordering that prefers a rare duplicate over silence.
 After successful outcome publication, the watcher immediately delivers the emitter's local actionable poll row and publishes a private retirement receipt bound to the poll's registration, bytes, file identities, metadata, provider, URL, and task ID.
