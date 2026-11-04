@@ -520,6 +520,29 @@ running an admin helper and self-approving a privileged merge. Prose is not enfo
 The fix is a real `tools.deny` (or an `allowedTools` allowlist) for that agent plus a CI
 invariant, not a soul edit.
 
+**A systemd unit may NAME a secret, never HOLD one — `Environment=` is not a secret
+store.** `intercom-webhook.service.d/env.conf` carried the Intercom token, the Intercom
+webhook signing secret, the OpenClaw gateway token and a Notion token as plaintext
+`Environment=` lines from 2026-03-25, with a `.bak.prod` second copy beside it; the
+values are readable from `systemctl show -p Environment`, `systemd-analyze dump`,
+`/proc/<pid>/environ` and every backup of `/etc`. T13 (2026-10-27) moved them into a
+0600 `EnvironmentFile` rendered from the ESO-synced Secret by
+`scripts/intercom-webhook-env.sh` (`render` / `check`), and made it mechanical in two
+places so it cannot come back: `scripts/check-no-plaintext-unit-secrets.sh` in CI, and
+`intercom-webhook-env.sh check` at the end of every deploy against the INSTALLED unit
+files. `install-aux-units.sh` writes ~40 units per deploy, so one pasted heredoc line
+would reach node-8 automatically and live in git forever — a new unit that needs a
+secret gets an `EnvironmentFile=`, not an `Environment=`. Rotation of those values is
+deliberately NOT part of the migration (captain's call); RUNBOOK § intercom-webhook
+secrets carries the list and the vendor→Vault→ESO procedure. Two of the
+rotation candidates are NOT in the unit at all: `gateway.auth.token` is the same
+literal in `openclaw-main.json` **and** `openclaw-edge.json` (and is the same
+value as the unit's `OPENCLAW_TOKEN`), and
+`channels.intercom.accounts.default.webhookSecret` in `openclaw-edge.json` is the
+live signing secret for `hydra.muso.ai/intercom/webhook` — a *different* value
+from the unit's `INTERCOM_WEBHOOK_SECRET`. Rotating one does not rotate the
+other, and both front public ports.
+
 **Two live production secrets are committed in plaintext (rotation pending).** The
 gateway config carries a literal `gateway.auth.token` (the bearer fronting the
 code-execution `/tools/invoke` path, so a leak is effectively remote-shell exposure) and

@@ -100,6 +100,169 @@ ssh root@40.160.32.80 "ls -la /opt/hydra/audit/"
 ssh root@40.160.32.80 "cd /opt/hydra/audit && git log --oneline -5"
 ```
 
+### intercom-webhook secrets live in an EnvironmentFile (T13)
+
+`intercom-webhook.service` (the loopback `:18792` receiver — the live customer
+path is Ingress → edge gateway) used to take its Intercom token, Intercom
+webhook signing secret, OpenClaw gateway token and Notion token from plaintext
+`Environment=` lines in `intercom-webhook.service.d/env.conf`, with a second
+copy as `env.conf.bak.prod` beside it. systemd's `Environment=` is not a secret
+store: `systemctl show -p Environment`, `systemd-analyze dump`,
+`/proc/<pid>/environ` and every backup of `/etc` expose it.
+
+Since T13 (node8-to-pods plan, 2026-10-27) the unit carries **no secret bytes**:
+it names one file and `scripts/intercom-webhook-env.sh` renders it.
+
+**Source chain**
+
+1. ESO-synced Kubernetes Secret `hydra/intercom-webhook` — an ExternalSecret of
+   Vault `k8s/hydra/intercom-webhook` (H-DevOps
+   `k8s/prod/security/external-secrets-hydra.yaml`). Read with node-8's own
+   kubectl. Currently carries `INTERCOM_WEBHOOK_SECRET`,
+   `INTERCOM_BOT_ADMIN_ID`, `INTERCOM_WORKSPACE_ID`.
+2. `/etc/hydra/intercom-webhook.env` (0600 root:root) — the render target; also
+   the fallback source, so a re-render never drops a key.
+3. the legacy plaintext drop-in — **migration only**. Anything resolved from
+   there is printed as `ROTATION DEBT`.
+
+**Commands**
+
+```bash
+# what would be written, and where every value came from (never the values)
+/opt/hydra/scripts/intercom-webhook-env.sh render --dry-run
+# write it (also run by every deploy, from install-aux-units.sh)
+/opt/hydra/scripts/intercom-webhook-env.sh render
+# the acceptance proof: no inline secret in any installed unit file,
+# root-only env file, every required key present, systemd references it
+/opt/hydra/scripts/intercom-webhook-env.sh check
+
+systemctl restart intercom-webhook && journalctl -u intercom-webhook -n 30
+```
+
+A deploy **fails** if `check` cannot prove the invariant, and refuses to migrate
+(leaving the old unit and drop-in untouched, loudly) if a required key cannot be
+resolved — a receiver that cannot authenticate is worse than one whose secret is
+still in the old file. CI gate on the repo side:
+`scripts/check-no-plaintext-unit-secrets.sh` (units NAME secrets, never hold
+them; a legitimate exception is `# secret-ok: <why>`).
+
+This unit also carries a **positive allow-list**: the only `Environment=` names
+its unit file or any drop-in may use are `INTERCOM_WEBHOOK_PORT`, `OPENCLAW_URL`
+and `DISPATCH_TIMEOUT_MS` (`SDENV_INTERCOM_WEBHOOK_ALLOWED_ENV` in
+`scripts/lib/systemd-env-assignments.sh`). A name outside it fails CI **and** the
+deploy regardless of what the value looks like, so a parsing subtlety (a
+continuation, a quoted tab, whitespace around `=`) cannot turn an unknown or
+secret-bearing assignment into a pass. Adding a legitimately-needed knob is a
+one-line PR that widens the list — the deliberate, reviewed cost of the rule.
+
+**Rotation list — NOT done by T13 (rotation is the captain's call).** Two of
+these sat in `/etc/systemd/system/intercom-webhook.service.d/` (and a
+`.bak.prod` copy) since 2026-03-25; the last two are *the openclaw config
+literals*, which are worse because they are **committed in git and front
+publicly reachable ports**. All of them are treated as exposed.
+
+Verified on node-8 2026-10-28 by sha256 comparison (no value printed):
+
+| credential | where it lives | identity | rotate where |
+|---|---|---|---|
+| `INTERCOM_WEBHOOK_SECRET` (unit) | ESO `hydra/intercom-webhook` ← Vault `k8s/hydra/intercom-webhook` | sha `b72f4f054c4c` — **distinct** from the edge literal below | Intercom app → webhook signing secret |
+| `INTERCOM_TOKEN` (unit) | retired drop-in → `/etc/hydra/intercom-webhook.env` | sha `af2d2892a357` | Intercom app → access token (Bearer to api.intercom.io) |
+| `OPENCLAW_TOKEN` (unit) | retired drop-in → `/etc/hydra/intercom-webhook.env` | sha `46fd1b8e7a11` — **the SAME value as `gateway.auth.token` below** | rotation of `gateway.auth.token` (nothing separate to rotate) |
+| `NOTION_API_TOKEN` (unit) | retired drop-in → `/etc/hydra/intercom-webhook.env` | sha `cc655c382d83` | Notion integration secret |
+| `gateway.auth.token` | literal in **`openclaw-main.json` AND `openclaw-edge.json`** (git + `/root/.openclaw-{main,edge}/openclaw.json`) | sha `46fd1b8e7a11` (identical in both files) | agent-ops lane: it fronts `/v1/chat/completions` and the code-execution `/tools/invoke` path on the **publicly reachable** `:18789`/`:18810`; rotate the literal, not just the unit's copy. A `{"source":"env"}` ref only resolves on a collector-backed path (see docs/lessons/working-in-hydra.md) |
+| `channels.intercom.accounts.default.webhookSecret` | literal in **`openclaw-edge.json`** (the customer-facing Ingress signing secret) | sha `cf9aa18582a8` — **distinct** from the unit's `INTERCOM_WEBHOOK_SECRET`, so rotating one does NOT rotate the other | agent-ops lane: rotate in the Intercom app **and** the edge config together, or every inbound `hydra.muso.ai/intercom/webhook` delivery fails signature verification |
+
+`INTERCOM_BOT_ADMIN_ID`, `INTERCOM_WORKSPACE_ID`, `NOTION_VERIFICATION_DB_ID`
+are identifiers, not credentials.
+
+**Status: rotation is DEFERRED.** Captain, 2026-10-28 12:30Z: *"no rotation
+tonight; #1434 stays ready as later hardening, nothing live."* The rotation
+sequence belongs to **T1** (`hydra-vault-env-t1`): hydra PR #1441 moves
+`gateway.auth.token` and the edge Intercom `webhookSecret` to root-only file
+SecretRefs, and H-DevOps PR #4533 (`hydra-gateway-token-rotate.yaml`)
+`plan` → `stage` → deploy #1441 → `rotate` (captain only) → `finalize`.
+
+**Handoff to T1 — one coupling to honour.** `OPENCLAW_TOKEN` in this unit **is**
+`gateway.auth.token` (same value, verified by sha). When T1's `rotate` mode
+changes the gateway token, the receiver keeps dispatching with the OLD token and
+gets 401 from the gateway unless the new value also reaches this unit's env file.
+Nothing in hydra needs to change for that: `scripts/intercom-webhook-env.sh`
+already prefers any managed key the ESO Secret carries, so `rotate` writes the
+rotated values as properties of **`secret/k8s/hydra/intercom-webhook`**
+(`openclaw_token`, plus `intercom_token` / `notion_api_token` when those are
+rotated) and the next hydra deploy re-renders `/etc/hydra/intercom-webhook.env`
+with them — `render` then reports no `ROTATION DEBT`. Also note the two webhook
+secrets are DIFFERENT values with DIFFERENT consumers: this unit's
+`INTERCOM_WEBHOOK_SECRET` (loopback `:18792`) and T1's
+`/opt/hydra/secrets/intercom-webhook-edge.json` (the Ingress → edge gateway
+signing secret); both live in the Intercom app and each must be rotated there.
+
+Rotation procedure for the three unit-sourced secrets (once T1 runs it):
+
+```bash
+# 1. rotate at the vendor. NEVER type a new secret onto a command line: argv is
+#    world-readable in /proc/<pid>/cmdline and lands in shell history on node-1.
+#    Use masked secret-entry (a prompt that does not echo) or a staging file that
+#    you delete afterwards, then patch Vault from that source — the "Secrets must
+#    never ride argv" rule in docs/lessons/working-in-hydra.md.
+# 2. extend the ExternalSecret data (intercom_token -> INTERCOM_TOKEN,
+#    openclaw_token -> OPENCLAW_TOKEN, notion_api_token -> NOTION_API_TOKEN)
+#    in H-DevOps k8s/prod/security/external-secrets-hydra.yaml — the renderer
+#    already reads any managed key the Secret carries, no hydra change needed.
+# 3. re-render + restart, and confirm ROTATION DEBT is gone:
+/opt/hydra/scripts/intercom-webhook-env.sh render && systemctl restart intercom-webhook
+```
+
+**Revert** (the cutover is reversible without a rotation): the pre-T13 unit and
+the retired drop-ins are kept under `/var/lib/hydra/intercom-webhook/`
+(`intercom-webhook.service.pre-t13`, `env.conf.retired-<ts>`),
+`0600`, outside systemd's scan path. Restore them and
+`systemctl daemon-reload && systemctl restart intercom-webhook`.
+
+**Retirement (plan step 6) — proof first, then a deploy.** Nothing routes to
+`:18792`; the plan retires the receiver once 7 days show 0 hits. That is a
+measurement, not a recollection:
+
+```bash
+/opt/hydra/scripts/intercom-webhook-retire.sh --check        # read-only proof
+/opt/hydra/scripts/intercom-webhook-retire.sh --check --days 3
+```
+
+`--days` (or `INTERCOM_WEBHOOK_RETIRE_DAYS`) may only be shortened for the
+**read-only** `--check` diagnostic. `--retire` requires at least **7** days and
+refuses (rc 2) before it measures or touches anything, naming `--check --days N`
+as the way to look at a shorter window; `--days 0` is rejected in both modes,
+because a zero-day window measures nothing while still printing READY. The reason
+is concrete: `--retire --days 1` would have retired a receiver that handled an
+event two days ago (1 hit the day before, 0 yesterday) and left a durable
+`RETIRED-*.json` marker that every later deploy honours.
+
+Three outcomes, never two: `hits > 0` → NOT READY (rc 1), `hits == 0` → READY
+(rc 0), **the journal does not reach back past the window start → CANNOT MEASURE
+(rc 2)**, which never counts as zero. Coverage is checked FIRST and only a
+journal that actually reaches back past `--days ago` counts: a journal vacuumed
+or rotated a day ago leaves a healthy-looking stream whose earlier days were
+never observed, and a retained first line is proof of what the journal holds, not
+of when the unit started. Retirement additionally REFUSES unless `systemctl`
+`stop` and `disable` succeed **and** `is-active` reports exactly `inactive`
+(or `failed`) — an empty or `unknown` answer is not "stopped", and the files are
+only removed after that confirmation.
+
+To actually retire, create the switch and let a deploy do it
+(never hand-remove the unit):
+
+```bash
+ssh root@40.160.32.80 'install -m 600 /dev/null /etc/hydra/intercom-webhook-retire'
+# next deploy: install-aux-units.sh re-proves 0 hits, then disables+stops the
+# unit, removes it, moves the secret file aside under retired/, and writes
+# /var/lib/hydra/intercom-webhook/RETIRED-<ts>.json with the proof.
+```
+
+While any `RETIRED-*.json` marker exists the deploy will **not** reinstall the
+unit, so a later deploy cannot resurrect a retired endpoint. Revert: restore the
+unit and `intercom-webhook.env` from `/var/lib/hydra/intercom-webhook/retired/`,
+delete the marker, redeploy.
+
 ### Pull Latest Configuration
 
 ```bash

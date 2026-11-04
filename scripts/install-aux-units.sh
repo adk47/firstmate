@@ -190,6 +190,16 @@
 #     sales lead was closed-as-answered and forwarded to Nick by
 #     email; Aaron, who owns ads, never saw it).
 #
+#   /etc/systemd/system/intercom-webhook.service
+#     The loopback (:18792) Intercom webhook receiver — the LIVE customer path
+#     is Ingress → edge gateway; this one is idle but running. Since T13 its
+#     secrets (Intercom token + signing secret, OpenClaw gateway token, Notion
+#     token) come from /etc/hydra/intercom-webhook.env, rendered 0600 root:root
+#     by scripts/intercom-webhook-env.sh out of the ESO-synced Secret
+#     hydra/intercom-webhook. The plaintext `Environment=` drop-ins that used to
+#     carry them are retired into /var/lib/hydra/intercom-webhook/ and the
+#     deploy fails if any installed unit file still holds an inline secret.
+#
 #   /etc/systemd/system/intercom-rights-holder-watchdog.{service,timer}
 #     Runs scripts/intercom-rights-holder-watchdog.py every 10 min (oneshot).
 #     Pages #cs_priority (operations bot) when an inbound Intercom
@@ -421,6 +431,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/openclaw-edge-reindex-on-start.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/stuck-lane-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/stuck-lane-watchdog.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/intercom-webhook-env.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/intercom-webhook-env.sh missing or not executable (intercom-webhook would fall back to hand-placed secrets)"
 [[ -x "$HYDRA_ROOT/scripts/qa-review-reconcile.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/qa-review-reconcile.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/qa-approval-retry.sh" ]] \
@@ -737,6 +749,158 @@ gt=gdpr-pipeline-tick.timer
 systemctl enable "$gt" >/dev/null 2>&1 || log "WARN: could not enable $gt"
 systemctl start "$gt" >/dev/null 2>&1 || log "WARN: could not start $gt"
 log "  $gt: $(systemctl is-active "$gt" 2>/dev/null || echo unknown)"
+# ─── intercom-webhook: secrets OUT of the unit, into a root-only file (T13) ──
+# Before this, intercom-webhook.service got its Intercom token, Intercom webhook
+# signing secret, OpenClaw gateway token and Notion token from plaintext
+# `Environment=` lines in intercom-webhook.service.d/env.conf (live since
+# 2026-03-25, with a second copy as env.conf.bak.prod). systemd's Environment= is
+# not a secret store: the values appear in `systemctl show -p Environment`,
+# `systemd-analyze dump`, /proc/<pid>/environ and every backup of /etc.
+#
+# The cutover is a MIGRATION, not a rotation (rotation is the captain's call —
+# see docs/runbooks/RUNBOOK.md § intercom-webhook secrets):
+#   1. render /etc/hydra/intercom-webhook.env (0600 root:root) from the
+#      ESO-synced Secret hydra/intercom-webhook, falling back per key to the
+#      existing env file and then to the legacy drop-in;
+#   2. only once every REQUIRED key resolves, install the secret-free unit and
+#      retire the plaintext drop-ins into /var/lib (never parsed by systemd);
+#   3. prove the result with `intercom-webhook-env.sh check`, which fails the
+#      DEPLOY if any installed unit file still carries an inline secret.
+# Render failure leaves the live unit and its drop-in untouched on purpose: a
+# receiver that cannot authenticate is worse than one whose secret is still in
+# the old file, and the check below still runs so the gap is never silent.
+# Revert: restore the backed-up unit + drop-in (paths logged below) and
+# `systemctl daemon-reload && systemctl restart intercom-webhook`.
+#
+# RETIREMENT (plan step 6) is a separate, deploy-driven step and is never taken
+# by this block on its own: with the request file /etc/hydra/intercom-webhook-retire
+# present, scripts/intercom-webhook-retire.sh re-proves "0 inbound events over
+# the last 7 days" on EVERY deploy and retires the receiver only when that proof
+# holds (it writes a durable RETIRED-*.json marker). While a marker exists the
+# unit is NOT reinstalled — a deploy must not resurrect a retired endpoint.
+if [ -x "$HYDRA_ROOT/scripts/intercom-webhook-env.sh" ]; then
+  # Paths are overridable so the cutover block can be exercised in a sandbox
+  # (scripts/tests/intercom-webhook-cutover.bats) — same knob pattern as
+  # AUX_SYSTEMD_UNIT_DIR below. Production never sets them.
+  iw_env_file="${INTERCOM_WEBHOOK_ENV_FILE:-/etc/hydra/intercom-webhook.env}"
+  iw_dropin_dir="${INTERCOM_WEBHOOK_DROPIN_DIR:-/etc/systemd/system/intercom-webhook.service.d}"
+  iw_retire_dir="${INTERCOM_WEBHOOK_RETIRE_DIR:-/var/lib/hydra/intercom-webhook}"
+  iw_unit="${INTERCOM_WEBHOOK_UNIT_PATH:-/etc/systemd/system/intercom-webhook.service}"
+  iw_retire_request="${INTERCOM_WEBHOOK_RETIRE_REQUEST:-/etc/hydra/intercom-webhook-retire}"
+  install -d -m 700 "$iw_retire_dir"
+  iw_retired_marker="$(find "$iw_retire_dir" -maxdepth 1 -name 'RETIRED-*.json' -type f 2>/dev/null | head -1 || true)"
+  if [ -f "$iw_retire_request" ] && [ -z "$iw_retired_marker" ] \
+     && [ -x "$HYDRA_ROOT/scripts/intercom-webhook-retire.sh" ]; then
+    # Retirement requested (plan step 6): re-prove on EVERY deploy and retire
+    # only when the proof holds. Three outcomes, never two — and "could not
+    # measure" is NOT "0 hits".
+    iw_proof_rc=0
+    "$HYDRA_ROOT/scripts/intercom-webhook-retire.sh" --check || iw_proof_rc=$?
+    case "$iw_proof_rc" in
+      0) "$HYDRA_ROOT/scripts/intercom-webhook-retire.sh" --retire \
+           || log "WARN: intercom-webhook retirement failed — see the lines above; the receiver is left installed" ;;
+      1) log "WARN: retirement requested but the receiver is still taking traffic — NOT retiring (nothing routes to :18792; investigate)" ;;
+      *) log "WARN: cannot measure the receiver's traffic — NOT retiring. 'Could not measure' is not '0 hits'." ;;
+    esac
+    iw_retired_marker="$(find "$iw_retire_dir" -maxdepth 1 -name 'RETIRED-*.json' -type f 2>/dev/null | head -1 || true)"
+  fi
+  if [ -n "$iw_retired_marker" ]; then
+    # Durable switch (three-places rule: this marker, the RUNBOOK, this block).
+    # A deploy must never resurrect a retired endpoint.
+    log "  intercom-webhook: RETIRED ($(basename "$iw_retired_marker")) — not reinstalling; delete the marker + restore from $iw_retire_dir/retired/ to bring it back"
+  else
+  iw_render_rc=0
+  "$HYDRA_ROOT/scripts/intercom-webhook-env.sh" render || iw_render_rc=$?
+  case "$iw_render_rc" in
+    0)
+      install -d -m 700 "$iw_retire_dir"
+      # Preserve the hand-placed unit before replacing it (revert path). A failed
+      # backup ABORTS the cutover: the RUNBOOK documents "restore the pre-T13
+      # unit" as the revert, so overwriting a unit we failed to back up destroys
+      # the only copy exactly when a rollback may be needed. Failing here leaves
+      # the live unit and its plaintext drop-ins exactly as they are (a working
+      # receiver) and makes the deploy report failure instead of a false success.
+      if [ -f "$iw_unit" ] && ! grep -q "^# Managed by scripts/install-aux-units.sh" "$iw_unit"; then
+        install -m 600 "$iw_unit" "$iw_retire_dir/intercom-webhook.service.pre-t13" \
+          || fail "could not back up the pre-T13 unit to $iw_retire_dir/intercom-webhook.service.pre-t13 — refusing to overwrite the live unit without a revert copy. Fix permissions/space on $iw_retire_dir and re-deploy; unit and drop-ins LEFT AS THEY WERE."
+      fi
+      cat > "$iw_unit" << IWSVC
+# Managed by scripts/install-aux-units.sh — reference shape in
+# scripts/aux-units/intercom-webhook.service. Secrets come ONLY from the
+# root-only EnvironmentFile rendered by scripts/intercom-webhook-env.sh;
+# never add an Environment= line carrying a secret (CI gate:
+# scripts/check-no-plaintext-unit-secrets.sh).
+[Unit]
+Description=Intercom Webhook Receiver
+After=network.target openclaw-gateway-main.service
+
+[Service]
+Type=simple
+EnvironmentFile=-$iw_env_file
+Environment=INTERCOM_WEBHOOK_PORT=18792
+Environment=OPENCLAW_URL=http://localhost:18789
+Environment=DISPATCH_TIMEOUT_MS=30000
+ExecStart=/usr/bin/node $HYDRA_ROOT/scripts/intercom-webhook.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+IWSVC
+      # Retire the plaintext drop-ins BEFORE the reload, so systemd loads the
+      # new definition without them in one step. `.bak.prod` is not parsed by
+      # systemd (it does not end in .conf) but it is the same secrets, so it
+      # leaves /etc with them.
+      if [ -d "$iw_dropin_dir" ]; then
+        for iw_f in env.conf env.conf.bak.prod; do
+          [ -f "$iw_dropin_dir/$iw_f" ] || continue
+          if mv "$iw_dropin_dir/$iw_f" "$iw_retire_dir/$iw_f.retired-$(date -u +%Y%m%dT%H%M%SZ)"; then
+            log "  intercom-webhook: retired plaintext drop-in $iw_f → $iw_retire_dir/ (0600, outside systemd's scan path)"
+          else
+            fail "could not retire $iw_dropin_dir/$iw_f — plaintext secrets still loaded; refusing to report a clean cutover"
+          fi
+        done
+        rmdir "$iw_dropin_dir" 2>/dev/null || true
+      fi
+      systemctl daemon-reload
+      systemctl enable intercom-webhook >/dev/null 2>&1 || log "WARN: could not enable intercom-webhook.service"
+      # Restart only when the effective inputs changed, so a routine deploy does
+      # not bounce a receiver for no reason. The hash covers the unit bytes and
+      # the rendered env file, i.e. exactly what systemd loads.
+      iw_stamp=$( { cat "$iw_unit"; cat "$iw_env_file"; } | sha256sum | cut -d' ' -f1 )
+      iw_prev=$(cat "$iw_retire_dir/deployed.sha256" 2>/dev/null || echo none)
+      if [ "$iw_prev" != "$iw_stamp" ] || [ "$(systemctl is-active intercom-webhook 2>/dev/null || true)" != "active" ]; then
+        systemctl restart intercom-webhook || fail "intercom-webhook failed to start with the EnvironmentFile — see: journalctl -u intercom-webhook -n 50"
+        printf '%s' "$iw_stamp" > "$iw_retire_dir/deployed.sha256"
+        chmod 600 "$iw_retire_dir/deployed.sha256"
+        log "  intercom-webhook: restarted with the EnvironmentFile (was: ${iw_prev:0:12})"
+      fi
+      log "  intercom-webhook: $(systemctl is-active intercom-webhook 2>/dev/null || echo unknown), listening on 127.0.0.1:18792"
+      # The acceptance proof, AFTER the cutover: no installed unit file carries
+      # an inline secret, the env file is root-only, every required key is
+      # present, and systemd's loaded definition references the EnvironmentFile.
+      # Fails the deploy, because by now the plaintext source is gone.
+      "$HYDRA_ROOT/scripts/intercom-webhook-env.sh" check \
+        || fail "intercom-webhook still carries an inline secret or has no usable secret source (T13 invariant) — see the FAIL lines above"
+      ;;
+    3)
+      # NOT the cutover, so the legacy drop-in is still the live secret source.
+      # That is the pre-T13 status quo, and it must not block deploys of
+      # unrelated work on an idle loopback receiver — but it must never be
+      # described as fixed. The check still runs and still reports.
+      log "WARN: intercom-webhook secrets could not be fully resolved — unit and legacy drop-in LEFT AS THEY WERE."
+      log "WARN: T13 INVARIANT NOT SATISFIED on this host: the receiver still loads its tokens from plaintext Environment= lines."
+      log "WARN: add the missing keys to the ESO Secret (Vault k8s/hydra/intercom-webhook) and re-deploy."
+      "$HYDRA_ROOT/scripts/intercom-webhook-env.sh" check || true
+      ;;
+    *)
+      fail "intercom-webhook-env.sh render exited $iw_render_rc — refusing to continue with an unproven secret source"
+      ;;
+  esac
+  fi
+else
+  fail "scripts/intercom-webhook-env.sh missing or not executable — intercom-webhook would fall back to hand-placed secrets"
+fi
 
 # ─── Retire the keyword Intercom data-complaint watchdog (replaced 2026-06-25) ──
 # The every-10m KEYWORD watchdog (coarse data-noun + complaint-signal buckets)
@@ -3604,6 +3768,7 @@ AUX_ONFAILURE_UNITS=(
   hydra-weekly-cleanup.service
   intercom-intake-watchdog.service
   intercom-legal-unanswered-watchdog.service
+  intercom-webhook.service
   intercom-rights-holder-watchdog.service
   merge-outcome-notify.service
   overdue-verification-notifier.service

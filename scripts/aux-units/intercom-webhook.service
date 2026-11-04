@@ -1,0 +1,45 @@
+# Reference template for /etc/systemd/system/intercom-webhook.service.
+#
+# Installed by scripts/install-aux-units.sh (which writes the unit inline so it
+# can substitute $HYDRA_ROOT) — keep this file and that heredoc in step.
+#
+# T13 (node8-to-pods plan, 2026-10-27): this unit used to get its Intercom
+# token, Intercom webhook signing secret, OpenClaw gateway token and Notion
+# token as plaintext `Environment=` lines in
+# intercom-webhook.service.d/env.conf. systemd's Environment= is not a secret
+# store — `systemctl show -p Environment`, `systemd-analyze dump`,
+# /proc/<pid>/environ and every /etc backup expose it. The secrets now come
+# from a root-only EnvironmentFile rendered out of the ESO-synced Secret
+# hydra/intercom-webhook by scripts/intercom-webhook-env.sh.
+#
+# This unit carries a POSITIVE allow-list on top of the general rule: the ONLY
+# `Environment=` names permitted here are INTERCOM_WEBHOOK_PORT, OPENCLAW_URL and
+# DISPATCH_TIMEOUT_MS (SDENV_INTERCOM_WEBHOOK_ALLOWED_ENV in
+# scripts/lib/systemd-env-assignments.sh). Anything else fails CI and fails the
+# deploy, whatever the value looks like — widening what this production unit may
+# load from its own file is a one-line, reviewed PR, not an ops-time surprise.
+#
+# Therefore: this file MAY name a secret (an EnvironmentFile is a path) and
+# must NEVER hold one. scripts/check-no-plaintext-unit-secrets.sh fails CI on
+# an inline secret here, and the deploy runs
+# `scripts/intercom-webhook-env.sh check` against the INSTALLED unit.
+#
+# [Unit] After= names openclaw-gateway-main.service, not the historical
+# `openclaw-gateway.service` (no such unit exists — the ordering directive was
+# inert). The receiver only dispatches into :18789, so ordering is advisory.
+[Unit]
+Description=Intercom Webhook Receiver
+After=network.target openclaw-gateway-main.service
+
+[Service]
+Type=simple
+EnvironmentFile=-/etc/hydra/intercom-webhook.env
+Environment=INTERCOM_WEBHOOK_PORT=18792
+Environment=OPENCLAW_URL=http://localhost:18789
+Environment=DISPATCH_TIMEOUT_MS=30000
+ExecStart=/usr/bin/node /opt/hydra/scripts/intercom-webhook.js
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

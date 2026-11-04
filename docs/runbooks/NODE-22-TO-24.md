@@ -55,10 +55,12 @@ If `apt holds` lists `nodejs`, run `apt-mark unhold nodejs` before §2.
 **Host-enumeration step (catches host-only units).** Diff the capture against
 §5/§6: any running service or `/etc/cron.d` file that is not named there is
 host-only and unreviewed — list it on the card before you continue. Known
-host-only facts at `origin/main`: `muso-mcp-gate` exists nowhere in the repo;
-`intercom-webhook` has no unit in the repo (only `scripts/intercom-webhook.js`
-and the monitor label at `k8s/prod/monitoring/webhook-health-monitor.yaml:45`).
-Both may run as node on the host. Find them with the "units whose ExecStart
+host-only facts at `origin/main`: `muso-mcp-gate` exists nowhere in the repo.
+(`intercom-webhook` was one too until T13 2026-10-27; it is now installed by
+`scripts/install-aux-units.sh` from `scripts/aux-units/intercom-webhook.service`
+— its secrets come from `/etc/hydra/intercom-webhook.env`, see RUNBOOK
+§ intercom-webhook secrets.)
+It may run as node on the host. Find them with the "units whose ExecStart
 names node" and "procs on a node binary" lines above and add them to the §5
 restart list with the same verify (service `active`, no `ERR_DLOPEN_FAILED` in
 `journalctl -u <unit> --since -5m`).
@@ -164,7 +166,8 @@ Node. Host fact to confirm: `file "$(command -v muso)"` says `ELF`. It also mean
 | `openclaw-gateway-main` | `migrate-to-multi-gateway.sh:96` | `systemctl restart openclaw-gateway-main` | `systemctl is-active` = `active`; `openclaw --profile main gateway call health` ok; `journalctl -u openclaw-gateway-main --since -2m \| grep -cE 'ERR_DLOPEN\|NODE_MODULE_VERSION'` = `0` |
 | `openclaw-gateway-edge` | `migrate-to-multi-gateway.sh:124` | `systemctl restart openclaw-gateway-edge` | same with `--profile edge` and `-u openclaw-gateway-edge` |
 | `muso-mcp-gate` native rebuild (**before** its restart) | `/opt/muso-mcp-gate/app` has its own `node_modules`, installed 1 Jul under Node 22 and never rebuilt (`engines: node >=24`) | `cd /opt/muso-mcp-gate/app/node_modules/better-sqlite3 && cp -n build/Release/better_sqlite3.node build/Release/better_sqlite3.node.abi127.bak && PATH=/opt/muso-mcp-gate/app/node_modules/.bin:$PATH prebuild-install` (the `cd` is load-bearing: run from the app dir, `prebuild-install` throws a CJS loader error; from inside the package it works). Do not append `\|\| node-gyp rebuild --release`: better-sqlite3's own `scripts.install` has that, but npm injects its bundled node-gyp onto PATH for lifecycle scripts and `app/node_modules/.bin` has no `node-gyp`, so a bare call dies `command not found` and leaves the ABI-127 binary in place. | `node -e "const D=require('better-sqlite3');console.log(new D(':memory:').prepare('select 1 x').get().x,'\| ABI',process.versions.modules)"` → `1 \| ABI 137`; unit `active` on `127.0.0.1:9000`. Skipping this crash-loops the unit: `better_sqlite3.node ... NODE_MODULE_VERSION 127 ... requires 137` (the one genuine breakage of the 21 Oct window). |
-| host-only node units from §1 (`intercom-webhook`, `muso-mcp-gate` if present; **`muso-mcp-gate` only after the rebuild row above has verified ABI 137**) | not in repo | `systemctl restart <unit>` | `active`, no DLOPEN in journal |
+| `intercom-webhook` (T13: installed by `scripts/install-aux-units.sh`; secrets in `/etc/hydra/intercom-webhook.env`) | `scripts/intercom-webhook.js` | `systemctl restart intercom-webhook` | `active`, no DLOPEN in journal; `/opt/hydra/scripts/intercom-webhook-env.sh check` exits 0 |
+| host-only node units from §1 (`muso-mcp-gate` if present) | not in repo | `systemctl restart <unit>` | `active`, no DLOPEN in journal |
 | `hydra-main-prune-restart.timer` → `.service` (`install-aux-units.sh:2548-2585` at `origin/main`, not the base above) | `scripts/main-prune-restart.sh:8-9` → `openclaw sessions cleanup --enforce` (offline) → start main | **No manual restart.** The timer stops and starts `openclaw-gateway-main` itself, nightly **02:30 UTC**. Verify on the first run: `systemctl show hydra-main-prune-restart.service -p Result -p ExecMainStatus` → `Result=success` `ExecMainStatus=0`; `systemctl is-active openclaw-gateway-main` = `active`; `openclaw --profile main gateway call health` ok. |
 
 Rule: after the apt change, every host-only unit with its **own** `node_modules` needs its native deps rebuilt, not just restarted. `muso-mcp-gate` (better-sqlite3) is the known one.

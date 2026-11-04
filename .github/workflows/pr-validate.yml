@@ -873,6 +873,23 @@ jobs:
           bash scripts/check-cred-location-doctrine.sh
           echo "::endgroup::"
 
+      - name: No plaintext unit secrets — units NAME secrets, never hold them
+        # T13 (node8-to-pods 2026-10-27): intercom-webhook.service carried the
+        # Intercom token, the Intercom webhook signing secret, the OpenClaw
+        # gateway token and a Notion token as plaintext `Environment=` lines in
+        # a systemd drop-in (plus a copy as env.conf.bak.prod). systemd's
+        # Environment= is not a secret store — `systemctl show -p Environment`,
+        # `systemd-analyze dump`, /proc/<pid>/environ and every /etc backup
+        # expose it. install-aux-units.sh writes ~40 units on every deploy, so
+        # one pasted heredoc line reaches node-8 automatically and lives in git
+        # forever. This gate fails the PR instead; the deploy-side twin
+        # (scripts/intercom-webhook-env.sh check) proves the same invariant
+        # against the INSTALLED unit files.
+        run: |
+          echo "::group::No plaintext unit secrets"
+          bash scripts/check-no-plaintext-unit-secrets.sh
+          echo "::endgroup::"
+
       - name: Egress allowlist check — no unauthorized additions
         run: |
           echo "::group::Checking egress allowlist changes"
