@@ -924,7 +924,55 @@ test_scout_teardown_removes_orca_worktree_via_helper() {
   assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-teardown'$'\x1f''--force'$'\x1f''--json' \
     "teardown did not remove the Orca worktree through orca worktree rm"
   assert_absent "$state/$id.meta" "teardown should remove task metadata"
+  if git -C "$proj" rev-parse --verify "refs/heads/fm/$id" >/dev/null 2>&1; then
+    fail "teardown should drop the task branch ref once the Orca worktree removal succeeded"
+  fi
   pass "fm-teardown.sh backend=orca: scout report gate then helper-backed worktree removal"
+}
+
+test_scout_teardown_keeps_task_branch_when_orca_removal_fails() {
+  local proj wt data state config id out rc neutral
+  id="orcateardownkeep1"
+  proj="$TMP_ROOT/teardown-keep-project"
+  wt="$TMP_ROOT/teardown-keep-wt"
+  data="$TMP_ROOT/teardown-keep-data"
+  state="$TMP_ROOT/teardown-keep-state"
+  config="$TMP_ROOT/teardown-keep-config"
+  fm_git_worktree "$proj" "$wt" "fm/$id"
+  mkdir -p "$data/$id" "$state" "$config"
+  printf 'report\n' > "$data/$id/report.md"
+  touch "$state/.last-watcher-beat"
+  fm_write_meta "$state/$id.meta" \
+    "window=fm-$id" "endpoint_task_id=$id" "terminal=term-keep" "worktree=$wt" "project=$proj" \
+    "harness=claude" "kind=scout" "mode=no-mistakes" "yolo=off" \
+    "backend=orca" "orca_worktree_id=wt-keep" \
+    "decisions_reviewed=1" "decision_keys="
+  orca_case teardown-keep
+  cat > "$FB/orca" <<SH
+#!/usr/bin/env bash
+set -u
+{ printf 'orca'; for a in "\$@"; do printf '\x1f%s' "\$a"; done; printf '\n'; } >> "\${FM_ORCA_LOG:?}"
+case "\${1:-} \${2:-}" in
+  "status --json") printf '{"ok":true,"result":{"runtime":{"reachable":true,"state":"ready"}}}\n' ;;
+  "worktree show") printf '{"ok":true,"result":{"worktree":{"id":"wt-keep","path":"%s"}}}\n' "$wt" ;;
+  "worktree rm") printf '{"ok":false,"error":{"code":"worktree_remove_failed","message":"pool slot locked"}}\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$FB/orca"
+  neutral=$(neutral_fm_root "$CASE_DIR/neutral")
+  set +e
+  out=$( PATH="$FB:$PATH" FM_ORCA_LOG="$LOG" \
+    FM_ROOT_OVERRIDE="$neutral" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" FM_CONFIG_OVERRIDE="$config" \
+    "$ROOT/bin/fm-teardown.sh" "$id" 2>&1 )
+  rc=$?
+  set -e
+  assert_contains "$(cat "$LOG")" $'orca\x1f''worktree'$'\x1f''rm'$'\x1f''--worktree'$'\x1f''id:wt-keep' \
+    "teardown did not attempt the Orca worktree removal before dropping the branch"
+  git -C "$proj" rev-parse --verify "refs/heads/fm/$id" >/dev/null 2>&1 \
+    || fail "teardown dropped the task branch ref even though the Orca removal failed (rc=$rc): $out"
+  [ -d "$wt" ] || fail "teardown removed the worktree even though the Orca removal failed"
+  pass "fm-teardown.sh backend=orca: failed worktree removal keeps the task branch and worktree"
 }
 
 # Orca 1.4.197 returns "<repo id>::<absolute path>" worktree ids
@@ -1523,6 +1571,7 @@ test_peek_send_and_crew_state_route_through_orca_meta
 test_peek_and_crew_state_fail_closed_on_orca_error_json
 test_target_exists_rejects_orca_error_json
 test_scout_teardown_removes_orca_worktree_via_helper
+test_scout_teardown_keeps_task_branch_when_orca_removal_fails
 test_scout_teardown_removes_orca_worktree_with_composite_id
 test_teardown_refuses_malformed_orca_composite_id
 test_scout_teardown_refuses_orca_id_path_mismatch
