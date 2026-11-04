@@ -1,0 +1,24 @@
+{
+  "purpose": "The words the captain's 30-minute queue report pages for a lane HELD BY HIS ORDER (scripts/verification-queue-report.py held_lane). Edit a line here when a blocker, owner or date changes; where the true blocker can be read from the box (account gate wired, approval kill switch, claim send locks), the script derives the sentence from live state and ignores the reason here.",
+  "updated": "2026-10-27 (firstmate 038/039: account gate live since 06:30Z; doc reader go-live plan Fable-approved 17:25Z)",
+  "lanes": {
+    "credits_docs_in": {
+      "reason": "no paperwork asks until a returned document can be accepted: the returned-document reader is not live yet",
+      "unblock": "doc-verify-build-b1 takes the reader live (go-live plan Fable-approved 2026-10-27 17:25Z), then the backfill reads the waiting documents",
+      "owner": "user-decisions-fable-d1 (review) + doc-verify-build-b1 (reader go-live)",
+      "eta": "backfill the night of 2026-10-27"
+    },
+    "claims_untouched": {
+      "owner": "claim-lane-resume-c2",
+      "unblock_after_status": "doc-verify-build-b1 takes the returned-document reader live"
+    },
+    "fable_decider": {
+      "owner": "ops-completeness-fable-o1"
+    },
+    "intercom_customer_last": {
+      "owner": "cs-systemic-c3",
+      "reason": "no new customer copy",
+      "unblock": "approved copy for each class (cs-systemic-c3 inbound plan)"
+    }
+  }
+}

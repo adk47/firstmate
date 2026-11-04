@@ -152,6 +152,12 @@
 #     support@ inbox and the read-only replica. Moved off the captain's Mac
 #     2026-10-26 (docs/runbooks/ops-to-ovh-inventory.md). Kill switch
 #     /etc/hydra/cs-proof-feed.disabled; logs journalctl -t hydra-cs-proof-feed.
+#   /etc/cron.d/verification-queue-report
+#     Schedules scripts/verification-queue-report.py every 30 minutes to DM the
+#     captain how many open credit requests and profile claims sit in each queue
+#     bucket, with the change since the previous report. Read-only apart from the
+#     DM and its arrows state file; kill switch
+#     /etc/hydra/verification-queue-report.disabled.
 #
 #   /etc/cron.d/stale-ticket-watchdog
 #     Schedules scripts/stale-ticket-watchdog.sh daily to post a
@@ -391,6 +397,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/cs-proof-feed.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/stale-ticket-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/stale-ticket-watchdog.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/verification-queue-report.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/verification-queue-report.py missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/ads-inquiry-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/ads-inquiry-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/intercom-rights-holder-watchdog.py" ]] \
@@ -2299,6 +2307,36 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 21 * * * * root systemd-cat -t hydra-cs-proof-feed $HYDRA_ROOT/scripts/cs-proof-feed.sh
 CSPROOFFEED
 chmod 644 /etc/cron.d/hydra-cs-proof-feed
+# ─── Verification queue report to the captain, every 30 min ────
+# Captain 2026-10-26 ~20:40Z: "i want a report every 30 min in slack how many
+# credits and profile verification are open by group". Two tables — CREDITS
+# (credit_requests) and PROFILE CLAIMS (claiming) — each partitioned into the
+# buckets he named (not touched by us / approved last 24h / needs documents,
+# told vs never told / documents back, we owe a look / sitting with a person /
+# held for fraud / muted / declined last 24h) plus total open, the oldest age in
+# each bucket and the change since the previous report.
+#
+# Read-only: the Trino replica for the queue shape, the hydra ledger (mode=ro)
+# for who we have already touched, the proof-on-file feed and the fraud
+# watchlist for the holds. Its only writes are ONE Slack DM (the captain's IM,
+# via the devops bot) and /var/lib/hydra/verification-queue-report/last.json,
+# which is what makes the arrows. Runtime is ~35s measured on node-8, so a
+# 30-min cadence has ~50x headroom; flock keeps an overlapping manual run from
+# double-posting. Kill switch: touch /etc/hydra/verification-queue-report.disabled
+# (a plain `touch`, no unit to mask — `--dry-run` still works for diagnosis).
+# Captain 2026-10-26 21:05Z, same job: "no backlog should ever form from here on out
+# for anything that is waiting on us! if it does get me involved immediately". The
+# --light tick is the sentinel's fast half (2.3s: carries the credits/claims sets,
+# re-reads merges + the Intercom delta) so a lane that starts to back up pages within
+# five minutes instead of thirty. It NEVER posts the report.
+cat > /etc/cron.d/verification-queue-report << VERIFQUEUERPT
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+*/30 * * * * root flock -n /run/lock/verification-queue-report.lock python3 $HYDRA_ROOT/scripts/verification-queue-report.py --post >> /var/log/verification-queue-report.log 2>&1
+*/5 * * * * root flock -n /run/lock/verification-queue-report-light.lock python3 $HYDRA_ROOT/scripts/verification-queue-report.py --light --post >> /var/log/verification-queue-report.log 2>&1
+VERIFQUEUERPT
+chmod 644 /etc/cron.d/verification-queue-report
+mkdir -p /var/lib/hydra/verification-queue-report /var/lib/hydra/backlog-sentinel
 
 # ─── Mercury token watchdog, daily ────────────────────────────
 # Pages #clio_devops (C0ADV2W76G4) when the Finance agent's read-only Mercury
