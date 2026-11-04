@@ -3992,6 +3992,96 @@ EOF
   pass "OpenCode close during a held wake prompt arms its successor within the delivery"
 }
 
+# A successor armed inside a held-delivery window that finds another healthy
+# watcher owns delivery cannot take over, and its own close is dropped by the
+# delivery window. Silence there would leave the condition unreported while the
+# ordinary close path types the same state as a failure.
+test_opencode_external_successor_during_delivery_is_reported() {
+  local plugin repo home log stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-external-during-delivery-root"
+  home="$TMP_ROOT/opencode-external-during-delivery-home"
+  log="$TMP_ROOT/opencode-external-during-delivery.log"
+  stop="$TMP_ROOT/opencode-external-during-delivery.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+  sleep 0.3
+  printf 'signal: original wake\n'
+  exit 0
+fi
+if [ "$count" -eq 2 ]; then
+  printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+  sleep 0.5
+  printf 'signal: held-delivery wake\n'
+  exit 0
+fi
+printf 'watcher: healthy\n'
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let releasePrompt = () => {};
+const promptBlocked = new Promise((resolve) => {
+  releasePrompt = resolve;
+});
+const prompts = [];
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      prompts.push(request.body.parts[0].text);
+      if (prompts.length === 1) await promptBlocked;
+    },
+  },
+};
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+const startedAt = Date.now();
+for (let i = 0; i < 100; i += 1) {
+  if (prompts.length >= 2) break;
+  await new Promise((resolve) => setTimeout(resolve, 50));
+}
+const failure = prompts.find((text) => text.includes("could not arm the successor"));
+if (!failure) {
+  throw new Error(`an external successor inside the delivery window reported nothing (${Date.now() - startedAt}ms, ${JSON.stringify(prompts)})`);
+}
+if (!failure.includes("external")) throw new Error(`external successor failure omitted its status: ${failure}`);
+if (prompts.filter((text) => text.includes("signal: original wake")).length !== 1) {
+  throw new Error(`the held wake was delivered ${prompts.length} times: ${JSON.stringify(prompts)}`);
+}
+await new Promise((resolve) => setTimeout(resolve, 200));
+if (prompts.length !== 2) throw new Error(`delivery continuity reported ${prompts.length} prompts: ${JSON.stringify(prompts)}`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+releasePrompt();
+await new Promise((resolve) => setTimeout(resolve, 100));
+EOF
+  )
+  status=$?
+  [ "$status" -eq 0 ] || fail "OpenCode must report a successor that cannot take over delivery: $out"
+  [ -z "$out" ] || fail "OpenCode external-successor test printed output: $out"
+  pass "OpenCode reports a successor that finds an external healthy watcher during delivery"
+}
+
 test_opencode_pre_ready_actionable_close_preserves_its_successor() {
   local plugin repo home log release retired stop out status
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -4690,6 +4780,7 @@ test_opencode_primary_watch_plugin_requires_session_lock
 test_opencode_watch_arm_coordinator_respects_primary_scope
 test_opencode_primary_watch_plugin_rearms_after_wake
 test_opencode_close_during_held_wake_prompt_arms_successor
+test_opencode_external_successor_during_delivery_is_reported
 test_opencode_pre_ready_actionable_close_preserves_its_successor
 test_opencode_hung_successor_falls_back_to_typed_wake
 test_opencode_unretired_successor_falls_back_without_retry

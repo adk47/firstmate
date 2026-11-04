@@ -406,7 +406,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
             // A quiet skip is not a failure: away mode and an unmet supervision
             // need legitimately arm nothing, and a retry or an existing child
             // already owns continuity.
-            if (!["not-primary", "read-only", "failed", "timeout"].includes(status)) return;
+            if (["armed", "wake", "existing", "retrying", "not-needed", "skipped"].includes(status)) return;
             surfaceFailure(paths, client, sessionID, `watcher: FAILED - OpenCode could not arm the successor for a wake that arrived while an earlier one was still being delivered (${status})`);
           });
         }
