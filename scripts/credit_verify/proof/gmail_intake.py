@@ -40,8 +40,44 @@ from .email_in import ACCEPTED_TYPES, MAX_ATTACHMENT_BYTES, attachments, authent
 from .store import ProofStore
 
 ACCOUNT = "support@muso.ai"
+# ONE support@ Gmail consumer at a time (2026-10-31). The proof-on-file scan (cs_proof_feed/gmail_scan.sh),
+# this intake and any manual run all spend support@'s per-user Gmail quota; running them together is what
+# turned a 429 into five hours of a stale feed and 89 blocked paid asks. The scan holds
+# /run/hydra/gmail-support.lock for its whole run; this module takes the same lock around its fetch loop, so
+# the two queue instead of compounding. It is taken per call and released at once, so the pacing below still
+# governs the rate.
+SUPPORT_GMAIL_LOCK = "/run/hydra/gmail-support.lock"
 AUTHSERV = "mx.google.com"
 PREFIX = "gmail:"
+
+def _support_gmail_lock(wait_s: float = 60.0):
+    """The shared support@ Gmail lock, or None when that one path is unusable (the caller refuses).
+
+    Waiting is bounded: this is a read loop, so it is better to fail one message than to hold a caller for the
+    scan's whole run. There is NO private fallback: if the one shared lock cannot be taken, the answer is None and
+    the caller refuses. A second path would be a different inode, so a scan and a document fetch could both
+    believe they held "the" lock while writing different files - which is exactly the concurrency the lock exists
+    to stop (r5).
+    """
+    import fcntl
+    import os
+    path = SUPPORT_GMAIL_LOCK
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        fh = open(path, "w")
+    except OSError:
+        return None                       # unusable shared lock -> no lock at all, and the caller refuses
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return fh
+        except OSError:
+            if time.monotonic() >= deadline:
+                fh.close()
+                raise RuntimeError("another support@ Gmail consumer holds %s" % path)
+            time.sleep(0.5)
+
 
 RawFetch = Callable[[str], bytes]                          # message id -> RFC 822 bytes
 Lookup = Callable[[str], list[dict[str, Any]]]             # email_in.admin_user_lookup(admin)
@@ -50,15 +86,25 @@ OpenRows = Callable[[list[int]], dict[int, list[dict[str, Any]]]]
 
 def gog_raw(message_id: str, *, account: str = ACCOUNT, min_interval: float = 1.0,
             _last: list[float] = [0.0]) -> bytes:  # noqa: B006 - the pacing clock, shared on purpose
-    """One message as RFC 822 bytes through gog (read-only `get --format raw`), paced."""
+    """One message as RFC 822 bytes through gog (read-only `get --format raw`), paced.
+
+    Takes the shared support@ Gmail lock for the call. A caller that cannot get it raises rather than
+    adding a second consumer: the point is that the two of us never spend the quota at once.
+    """
     if not message_id or not all(c.isalnum() for c in message_id):
         raise ValueError("not a Gmail message id")
     wait = min_interval - (time.monotonic() - _last[0])
     if wait > 0:
         time.sleep(wait)
     _last[0] = time.monotonic()
-    p = subprocess.run(["gog", "gmail", "get", message_id, "--account", account, "--format", "raw", "--json",
-                        "--no-input"], capture_output=True, text=True, timeout=120, check=False)
+    lock = _support_gmail_lock()
+    if lock is None:  # no lock available at all: refuse rather than read as a second consumer
+        raise RuntimeError("cannot take %s: refusing to read support@ mail unlocked" % SUPPORT_GMAIL_LOCK)
+    try:
+        p = subprocess.run(["gog", "gmail", "get", message_id, "--account", account, "--format", "raw",
+                            "--json", "--no-input"], capture_output=True, text=True, timeout=120, check=False)
+    finally:
+        lock.close()
     if p.returncode != 0:
         raise RuntimeError(f"gog rc={p.returncode}: {p.stderr.strip()[-200:]}")
     d = json.loads(p.stdout)

@@ -2081,6 +2081,10 @@ jobs:
           # replica passthrough, ledger read-only, atomic install, gmail merge. Stdlib
           # only; Trino is faked, ledger/target are temp files.
           python3 scripts/tests/test_cs_proof_feed.py
+          # The proof-feed scan's own guard suite (stdlib unittest since 2026-10-31): the retry-after
+          # budget vs the callers' 1500 s kill, exit 4 vs DONE (a stale part must never look fresh),
+          # the never-shorten shared backoff, and the one support@ lock (GET, SEARCH and the intake).
+          python3 scripts/tests/test_gmail_scan_quota.py
           # The captain's every-30-minutes DM (scripts/verification-queue-report.py):
           # the bucket classifier, the partition invariant and the arrows. Stdlib only,
           # no Trino/ledger/Slack: the script is imported and fed fixtures.

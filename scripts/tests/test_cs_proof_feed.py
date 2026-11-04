@@ -688,25 +688,30 @@ class GmailScanPages(unittest.TestCase):
     SCAN = os.path.join(LIB, "gmail_scan.sh")
 
     def scan(self, gog_body):
-        d = tempfile.mkdtemp()
-        bindir, gdir = os.path.join(d, "bin"), os.path.join(d, "g")
+        # The scan's gates are CONSTANTS now (r5): the only seam is CS_PROOF_FEED_TEST_SEAM, which this harness
+        # sets and which holds everything the run touches - state, lock, backoff and the stand-in gog itself.
+        # BATS_TEST_TMPDIR is NOT read by the scan: it is inherited from any parent shell (QA on a2d87a1c9).
+        d = tempfile.mkdtemp(prefix="bats-cs-proof-feed-")
+        bindir, gdir = os.path.join(d, "bin"), os.path.join(d, "state", "gmail")
         os.makedirs(bindir)
-        gog = os.path.join(bindir, "gog")
+        os.makedirs(gdir)
+        gog = os.path.join(d, "gog")                     # where the seam looks for the binary
         with open(gog, "w") as fh:
             fh.write('#!/bin/bash\ntouch "$(dirname "$0")/called"\n' + gog_body + "\n")
         os.chmod(gog, 0o755)
-        empty_env = os.path.join(d, "empty.env")
-        open(empty_env, "w").close()
-        # Isolation: the CI runner can be a host that holds the real env file and a real gog.
-        # An empty env file + an absolute fake gog mean this test can never reach a real mailbox.
-        env = dict(os.environ, PATH=bindir + os.pathsep + os.environ["PATH"], CS_PROOF_GMAIL_DIR=gdir,
-                   CS_PROOF_ENV=empty_env, CS_PROOF_GOG=gog,
-                   CS_PROOF_GMAIL_BACKOFF="0", CS_PROOF_GMAIL_PAGE_PAUSE="0")
+        open(os.path.join(d, "empty.env"), "w").close()
+        # Isolation: the CI runner can be a host that holds the real env file and a real gog. The seam points
+        # every path at this temp dir and ENV_FILE at /dev/null, so this test cannot reach a real mailbox.
+        env = dict(os.environ, PATH=bindir + os.pathsep + os.environ["PATH"], CS_PROOF_FEED_TEST_SEAM=d)
+        env.pop("BATS_TEST_TMPDIR", None)
+        for k in ("CS_PROOF_GMAIL_DIR", "CS_PROOF_ENV", "CS_PROOF_GOG", "CS_PROOF_GMAIL_BACKOFF",
+                  "CS_PROOF_GMAIL_PAGE_PAUSE", "CS_PROOF_GMAIL_BUDGET"):
+            env.pop(k, None)
         p = subprocess.run(["bash", self.SCAN, "atti", "newer_than:2d"], env=env, capture_output=True,
                            text=True, timeout=60)
         log = open(os.path.join(gdir, "atti.log")).read()
         pages = sorted(f for f in os.listdir(gdir) if f.startswith("atti-") and f.endswith(".json"))
-        self.assertTrue(os.path.exists(os.path.join(bindir, "called")), "the fake gog was not the one that ran")
+        self.assertTrue(os.path.exists(os.path.join(d, "called")), "the fake gog was not the one that ran")
         return p.returncode, log, pages, gdir
 
     def test_failed_gog_with_json_error_is_never_a_page(self):

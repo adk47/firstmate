@@ -76,7 +76,11 @@ class OtherSupportReadersTests(unittest.TestCase):
 
     def setUp(self):
         self.td = tempfile.TemporaryDirectory()
-        self.kill = os.path.join(self.td.name, "gmail-readers.disabled")
+        # The scan's one seam points at a directory it can only accept as a bats temp root; the kill file a
+        # case writes must live INSIDE it, because the seam owns that path (a hostile env cannot pick another).
+        self.seam = os.path.join(self.td.name, "bats-gmail-kill")
+        os.makedirs(self.seam)
+        self.kill = os.path.join(self.seam, "gmail-readers.disabled")
         bindir = os.path.join(self.td.name, "bin")
         os.makedirs(bindir)
         self.gog = os.path.join(bindir, "gog")
@@ -99,9 +103,20 @@ class OtherSupportReadersTests(unittest.TestCase):
         return p
 
     def run_scan(self):
-        env = dict(os.environ, CS_PROOF_ENV=self.empty_env, CS_PROOF_GOG=self.gog,
-                   CS_PROOF_GMAIL_DIR=os.path.join(self.td.name, "g"), CS_PROOF_GMAIL_BACKOFF="0",
-                   CS_PROOF_GMAIL_PAGE_PAUSE="0", CS_PROOF_LOCK_DIR=self.td.name)
+        # The scan's gates are CONSTANTS (r5 on #1558): the only seam is CS_PROOF_FEED_TEST_SEAM, which holds the
+        # state, the lock dir and the stand-in gog. CS_PROOF_* no longer moves anything, and BATS_TEST_TMPDIR is
+        # deliberately NOT a seam - it is inherited from a parent shell (QA on a2d87a1c9 withdrew GO over it).
+        d = self.seam
+        os.makedirs(os.path.join(d, "state", "gmail"), exist_ok=True)
+        stand_in = os.path.join(d, "gog")
+        if not os.path.exists(stand_in):
+            Path(stand_in).write_text(Path(self.gog).read_text())
+            os.chmod(stand_in, 0o755)
+        env = dict(os.environ, CS_PROOF_FEED_TEST_SEAM=d,
+                   CS_PROOF_ENV=self.empty_env, CS_PROOF_GOG=self.gog,
+                   CS_PROOF_GMAIL_DIR=os.path.join(d, "g"), CS_PROOF_GMAIL_BACKOFF="0",
+                   CS_PROOF_GMAIL_PAGE_PAUSE="0", CS_PROOF_LOCK_DIR=d)
+        env.pop("BATS_TEST_TMPDIR", None)
         return subprocess.run(["bash", self.scan_copy(), "atti", "newer_than:2d"], env=env, capture_output=True,
                               text=True, timeout=60)
 
@@ -111,7 +126,7 @@ class OtherSupportReadersTests(unittest.TestCase):
         self.assertEqual(p.returncode, 4)
         self.assertIn("support@ Gmail readers disabled", p.stderr)
         self.assertFalse(os.path.exists(self.calls))
-        self.assertFalse(os.path.exists(os.path.join(self.td.name, "g", "atti.log")))   # no DONE, feed stays stale
+        self.assertFalse(os.path.exists(os.path.join(self.td.name, "state", "gmail", "atti.log")))   # no DONE, feed stays stale
 
     def test_the_proof_on_file_scan_runs_without_the_file(self):
         p = self.run_scan()

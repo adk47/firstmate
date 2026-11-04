@@ -61,9 +61,14 @@ def recent_conversations(search: Search, since: float) -> tuple[list[str], bool]
 
 def gog_search(account: str = "support@muso.ai") -> GmailSearch:
     def run(query: str, page: str) -> dict[str, Any]:
+        # The SEARCH is a Gmail request too, and it runs once per page BEFORE any gog_raw call, so it was the
+        # one support@ path with no lock: the hourly file-recent intake could page through searches while the
+        # proof scan was mid-run, which is the concurrency the lock exists to stop (QA on #1558).
         argv = ["gog", "gmail", "messages", "search", "--account", account, query, "--max", "100", "--json",
                 "--no-input"] + (["--page", page] if page else [])
-        p = subprocess.run(argv, capture_output=True, text=True, timeout=120, check=False)
+        from .support_intake_lock import hold_support_gmail_lock
+        p = hold_support_gmail_lock(lambda: subprocess.run(argv, capture_output=True, text=True, timeout=120,
+                                                          check=False))
         if p.returncode != 0:
             raise RuntimeError(f"gog rc={p.returncode}: {p.stderr.strip()[-200:]}")
         return json.loads(p.stdout)
