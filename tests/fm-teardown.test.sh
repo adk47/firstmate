@@ -59,7 +59,8 @@
 #   (ab) the pool does not hold a registered linked worktree  -> guarded plain
 #        git release
 #   (ac) the pool does not hold it and plain git cannot remove -> REFUSE before
-#        the kill (locked registration, or a dirty tree even under --force)
+#        the kill (locked registration, a dirty tree even under --force, or an
+#        initialized submodule)
 #   (ad) the pool listing names ~ paths this HOME cannot resolve -> REFUSE
 #        before the kill, since membership is unproven
 set -u
@@ -3716,6 +3717,97 @@ test_plain_git_release_refuses_locked_worktree() {
   pass "a locked unpooled worktree refuses before the agent is killed and stays intact"
 }
 
+# A clean, unlocked worktree holding an initialized submodule is still one git
+# refuses to remove ("working trees containing submodules cannot be moved or
+# removed"), so the gate must refuse before the kill rather than prove success
+# and then fail after the agent is dead.
+test_plain_git_release_refuses_initialized_submodule() {
+  local case_dir rc branch pid sub_state
+  case_dir=$(make_case plain-git-submodule)
+  write_meta "$case_dir" no-mistakes ship
+  git init -q "$case_dir/sub"
+  git -C "$case_dir/sub" -c user.email=t@t -c user.name=t \
+    commit -q --allow-empty -m sub
+  git -C "$case_dir/wt" -c protocol.file.allow=always \
+    -c user.email=t@t -c user.name=t \
+    submodule add -q "$case_dir/sub" deps/sub
+  git -C "$case_dir/wt" -c user.email=t@t -c user.name=t \
+    commit -q -m "add the dependency submodule"
+  land_shippable_commit "$case_dir"
+  git -C "$case_dir/wt" -c protocol.file.allow=always submodule update --init -q
+  branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  add_unlisted_pool_treehouse "$case_dir"
+  seed_backlog_in_flight "$case_dir"
+  # Fixture precondition: the submodule is initialized, so git would refuse it.
+  sub_state=$(git -C "$case_dir/wt" submodule status)
+  case "$sub_state" in
+    ' '* | +* | U*) ;;
+    *) fail "plain-git-submodule: fixture submodule is not initialized" ;;
+  esac
+  [ -z "$(git -C "$case_dir/wt" status --porcelain)" ] \
+    || fail "plain-git-submodule: fixture worktree is not clean"
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "plain-git-submodule: setup sleeper did not start"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "plain-git-submodule: an unpooled worktree holding an initialized submodule must refuse before the endpoint kill"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'no worktree-return path is available' "$case_dir/stderr" \
+    "plain-git-submodule: refusal did not report the missing return path"
+  assert_grep 'holds an initialized submodule' "$case_dir/stderr" \
+    "plain-git-submodule: refusal did not name the initialized submodule as the blocker"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "plain-git-submodule: the crew process was killed before the release was proven"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "plain-git-submodule: a refused release left a replayable backlog-close record"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "plain-git-submodule: the backlog row was closed despite the refusal"
+  assert_present "$case_dir/wt/deps/sub" \
+    "plain-git-submodule: the initialized submodule checkout was discarded"
+  git -C "$case_dir/wt" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    || fail "plain-git-submodule: the task branch ref was dropped despite the refusal"
+  pass "a worktree holding an initialized submodule refuses before the agent is killed"
+}
+
+# The pool probe merges an external tool's stdout and stderr, so a whitespace-only
+# row is possible input. It must be classified - not expanded as an unset array,
+# which stock-macOS bash 3.2 under `set -u` treats as unbound - so the held slot
+# below is still found and released through treehouse.
+test_whitespace_only_pool_listing_row_is_classified() {
+  local case_dir rc branch
+  case_dir=$(make_case pool-blank-row)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  status)
+    printf '   \n\t\n'
+    printf '1  leased  %s\n' "$FM_FAKE_POOL_WT"
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_FAKE_POOL_WT="$case_dir/wt" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "pool-blank-row: a whitespace-only listing row must not abort the probe"$'\n'"$(cat "$case_dir/stderr")"
+  assert_no_grep "unbound variable" "$case_dir/stderr" \
+    "pool-blank-row: the probe aborted on the whitespace-only listing row"
+  git -C "$case_dir/project" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    && fail "pool-blank-row: the held slot was not released, so the listing row was misread"
+  pass "a whitespace-only pool listing row is classified and the held slot still releases"
+}
+
 # A pool listing that names home-relative paths this host's HOME cannot resolve
 # speaks for some other home: membership is unproven, so teardown refuses before
 # the kill instead of concluding "not held" and running a plain git release over
@@ -4053,6 +4145,8 @@ test_missing_return_tool_refuses_before_killing_the_agent
 test_plain_git_release_removes_clean_registered_worktree
 test_plain_git_release_refuses_dirty_worktree
 test_plain_git_release_refuses_locked_worktree
+test_plain_git_release_refuses_initialized_submodule
+test_whitespace_only_pool_listing_row_is_classified
 test_pool_listing_does_not_claim_a_longer_sibling_path
 test_unresolvable_home_relative_pool_listing_refuses_before_killing_the_agent
 test_unpooled_unregistered_worktree_refuses_before_killing_the_agent
