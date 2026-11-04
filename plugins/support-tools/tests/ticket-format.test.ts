@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
 import {
+  MAX_TICKET_DESCRIPTION_CHARS,
   buildTicketTitle,
   buildTicketMarkdown,
   buildFollowupComment,
@@ -340,6 +341,46 @@ describe("customerSlaFor (no human-review timeframe on credit/claim/merge reques
     for (const a of ["subscription-refund", "billing-issue", "support-general", "order-fulfillment", "dispute"]) {
       expect(outcomeChannelFor(a)).toBe("conversation_email");
     }
+  });
+});
+
+describe("description size bound (ClickUp truncates text_content last)", () => {
+  const base = {
+    summary: "a question",
+    actionType: "support-general",
+    tier: 1 as const,
+    customerEmail: "x@example.com",
+    conversationSummary: "Cap reached after 30 exchanges. Ask: a question",
+    sessionId: "sess-1",
+    gist: "Escalation: a question",
+    sla: "2 business days",
+  };
+  const parseBlock = (md: string) => {
+    const start = md.indexOf("---ACTION-REQUEST---");
+    const end = md.indexOf("---END-ACTION-REQUEST---");
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    return JSON.parse(md.slice(start + "---ACTION-REQUEST---".length, end));
+  };
+
+  it("shortens the duplicated excerpt instead of letting the machine block be cut", () => {
+    const huge = "customer sentence ".repeat(500);
+    const md = buildTicketMarkdown({ ...base, details: { conversation_excerpt: huge, escalation_reason: "turn_count_cap" } });
+    expect(md.length).toBeLessThanOrEqual(MAX_TICKET_DESCRIPTION_CHARS);
+    const json = parseBlock(md);
+    // The block is intact and readable; only the excerpt was shortened.
+    expect(json.details.escalation_reason).toBe("turn_count_cap");
+    expect(json.details.conversation_excerpt.length).toBeLessThan(huge.length);
+    expect(json.details.conversation_excerpt.endsWith("…")).toBe(true);
+    // The ask and the excerpt both still sit ABOVE the machine block.
+    expect(md.indexOf("**Request:**")).toBeLessThan(md.indexOf("---ACTION-REQUEST---"));
+    expect(md.indexOf("conversation_excerpt")).toBeLessThan(md.indexOf("---ACTION-REQUEST---"));
+  });
+
+  it("leaves a normal body untouched", () => {
+    const md = buildTicketMarkdown({ ...base, details: { original_ask: "credits missing" } });
+    expect(md.length).toBeLessThanOrEqual(MAX_TICKET_DESCRIPTION_CHARS);
+    expect(parseBlock(md).details.original_ask).toBe("credits missing");
   });
 });
 

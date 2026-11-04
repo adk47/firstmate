@@ -163,14 +163,37 @@ function detailBullets(details: Record<string, unknown> | undefined): string[] {
   return ["**Details:**", ...bullets, ""];
 }
 
-export function buildTicketMarkdown(
-  params: TicketContentParams & {
-    gist: string;
-    sla: string;
-    customerName?: string;
-    intercomUrl?: string;
-  },
-): string {
+export type TicketMarkdownParams = TicketContentParams & {
+  gist: string;
+  sla: string;
+  customerName?: string;
+  intercomUrl?: string;
+};
+
+// ClickUp truncates the description it projects as `text_content` (measured
+// 2026-11-04: 333 of 784 tickets are exactly 1,500 bytes long). The
+// ---ACTION-REQUEST--- JSON block sits LAST, so it is where the cut lands — 292
+// of 784 are truncated mid-JSON today, which is why the ops sweep cannot parse
+// them and every escalation hand-off has `details: {}`. The current body is
+// already near that size, so the hand-off fix (a real question + a conversation
+// excerpt, which the JSON must also carry) would push the block further past the
+// cut unless the body is bounded here rather than hoped to be small.
+//
+// Bound the DISPLAY-and-machine duplication — `conversation_excerpt` is the only
+// field that appears both as a bullet and in the JSON — never the machine block
+// and never its position.
+export const MAX_TICKET_DESCRIPTION_CHARS = 3000;
+const EXCERPT_BULLET_MIN_CHARS = 120;
+
+function clipToWordBoundary(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const cut = text.slice(0, Math.max(1, maxChars));
+  const lastSpace = cut.lastIndexOf(" ");
+  if (lastSpace <= 0) return `${cut}…`;
+  return `${cut.slice(0, lastSpace).trimEnd()}…`;
+}
+
+function renderTicketMarkdown(params: TicketMarkdownParams): string {
   const customer = params.customerName
     ? `${params.customerEmail} (${params.customerName})`
     : params.customerEmail;
@@ -190,6 +213,26 @@ export function buildTicketMarkdown(
     "",
     buildJsonBlock(params, "---ACTION-REQUEST---", "---END-ACTION-REQUEST---"),
   ].join("\n");
+}
+
+export function buildTicketMarkdown(params: TicketMarkdownParams): string {
+  let current = params;
+  let body = renderTicketMarkdown(current);
+  // Converges in one or two passes: the value is duplicated, so trimming N chars
+  // from the excerpt shortens the body by about 2N (bullet + JSON).
+  for (let attempt = 0; attempt < 8 && body.length > MAX_TICKET_DESCRIPTION_CHARS; attempt += 1) {
+    const excerpt = current.details?.conversation_excerpt;
+    if (typeof excerpt !== "string" || excerpt.length <= EXCERPT_BULLET_MIN_CHARS) break;
+    const overflow = body.length - MAX_TICKET_DESCRIPTION_CHARS;
+    const target = Math.max(EXCERPT_BULLET_MIN_CHARS, excerpt.length - Math.ceil(overflow / 2) - 40);
+    if (target >= excerpt.length) break;
+    current = {
+      ...current,
+      details: { ...current.details, conversation_excerpt: clipToWordBoundary(excerpt, target) },
+    };
+    body = renderTicketMarkdown(current);
+  }
+  return body;
 }
 
 export function buildFollowupComment(params: TicketContentParams): string {

@@ -1,5 +1,12 @@
 import { describe, it, expect, vi } from "vitest";
-import { executeEscalation } from "../src/escalation-action.js";
+import {
+  executeEscalation,
+  buildEscalationDetails,
+  buildEscalationNarrative,
+  pickOriginalAsk,
+  buildConversationExcerpt,
+} from "../src/escalation-action.js";
+import { buildTicketMarkdown, MAX_TICKET_DESCRIPTION_CHARS, getTierForAction } from "../src/ticket-format.js";
 import type { IntercomSessionState, RiskAssessment, IntercomAccountConfig } from "../src/types.js";
 
 function makeState(): IntercomSessionState {
@@ -414,5 +421,263 @@ describe("executeEscalation", () => {
       postSlack: async () => { throw new Error("slack down"); },
       log: { info: () => {}, warn: () => {}, error: () => {} },
     })).resolves.not.toThrow();
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// turn_count_cap hand-off (firstmate driver 2026-11-04, rank 1)
+//
+// The producer used to write "Rule fired: turn_count_cap. Last user message:
+// <first 400 chars>". By the time a cap fires the last message is "ok", so 312
+// of 383 cap hand-offs carried a fragment with no question in it and `details`
+// was `{}` on every parseable one. These tests pin the documented contract:
+// a real ask, the excerpt, the exchange count, five keys, no reason code in the
+// human fields, and the machine block last and parseable.
+// ---------------------------------------------------------------------------
+
+const capAssessment: RiskAssessment = {
+  triggered: true,
+  source: "rule",
+  reason: "turn_count_cap",
+  matchedPattern: "",
+  suggestedActionType: "support-general",
+  confidence: "medium",
+};
+
+// A 30-exchange thread whose LAST message is "ok" — the exact shape that made
+// the old summary useless. recentParts excludes the current message, as
+// handler.ts builds it.
+function longThread(): { recentParts: { author: "user" | "bot"; body: string }[]; current: string } {
+  const parts: { author: "user" | "bot"; body: string }[] = [
+    { author: "user", body: "I have been charged twice this month and three of my credits are missing from the catalog." },
+    { author: "bot", body: "Sorry about that — can you confirm the email on the account?" },
+    { author: "user", body: "It is support-customer@example.com, and the missing credits are on three tracks." },
+  ];
+  // Fill to 26 previous turns with the degenerate tail a cap actually sees,
+  // then pin the LAST three customer turns so the excerpt assertion is exact:
+  // "why?" / "thanks" / the current "ok".
+  const filler = ["ok", "yes", "👍", "hello", "ok", "thanks"];
+  for (let i = parts.length; i < 26; i += 1) {
+    parts.push({ author: i % 2 === 0 ? "user" : "bot", body: filler[i % filler.length] });
+  }
+  parts.push({ author: "user", body: "why?" });
+  parts.push({ author: "bot", body: "Because the cap counts consecutive customer turns." });
+  parts.push({ author: "user", body: "thanks" });
+  return { recentParts: parts, current: "ok" };
+}
+
+function buildEnclosing(a: RiskAssessment, ask: string, excerpt: string) {
+  return {
+    originalAsk: ask,
+    conversationExcerpt: excerpt,
+    conversationSummary: `Cap reached after 30 exchanges. Ask: ${ask}`,
+    turnCount: 30,
+  };
+}
+
+function captureTicket(state: IntercomSessionState) {
+  const captured: { summary: string; gistSubject?: string; conversationSummary: string; details?: Record<string, unknown> }[] = [];
+  const deps = (assessment: RiskAssessment, currentMessage: string, recentParts?: { author: "user" | "bot"; body: string }[]) => ({
+    state,
+    conversationId: "conv1",
+    assessment,
+    currentMessage,
+    recentParts,
+    account,
+    client: {
+      replyToConversation: async () => ({ messageId: "m1" }),
+      assignConversation: async () => {},
+      getConversation: async () => ({} as never),
+    },
+    saveState: async () => {},
+    createTicket: async (p: { summary: string; gistSubject?: string; conversationSummary: string; details?: Record<string, unknown> }) => {
+      captured.push(p);
+      return { ok: true, ticketId: "T1", sla: "2 business days" };
+    },
+    postSlack: async () => {},
+    log: { info: () => {}, warn: () => {}, error: () => {} },
+  });
+  return { captured, deps };
+}
+
+describe("turn_count_cap hand-off", () => {
+  it("carries the earlier substantive question, not the 'ok' that tripped the cap", async () => {
+    const state = makeState();
+    state.userTurnCount = 30;
+    state.userExchangeCount = 30;
+    const { recentParts, current } = longThread();
+    const { captured, deps } = captureTicket(state);
+    await executeEscalation(deps(capAssessment, current, recentParts) as never);
+    const details = captured[0].details!;
+    expect(details.escalation_reason).toBe("turn_count_cap");
+    expect(String(details.original_ask)).toContain("charged twice this month");
+    expect(String(details.original_ask)).not.toBe("ok");
+    expect(details.turn_count).toBe(30);
+    expect(details.summary_source).toBe("code_rule");
+    // The last three customer turns are in the excerpt, including the tail.
+    expect(String(details.conversation_excerpt)).toContain("why?");
+    expect(String(details.conversation_excerpt)).toContain("ok");
+  });
+
+  it("puts the ask in Request: and never a reason code", async () => {
+    const state = makeState();
+    state.userTurnCount = 30;
+    const { recentParts, current } = longThread();
+    const { captured, deps } = captureTicket(state);
+    await executeEscalation(deps(capAssessment, current, recentParts) as never);
+    expect(captured[0].summary).toContain("charged twice this month");
+    expect(captured[0].summary).not.toContain("turn_count_cap");
+    expect(captured[0].summary).not.toContain("Rule fired");
+    expect(captured[0].conversationSummary).toContain("Cap reached after 30 exchanges.");
+    expect(captured[0].conversationSummary).toContain("Ask:");
+  });
+
+  it("emits exactly the five documented keys", async () => {
+    const state = makeState();
+    const { recentParts, current } = longThread();
+    const { captured, deps } = captureTicket(state);
+    await executeEscalation(deps(capAssessment, current, recentParts) as never);
+    expect(Object.keys(captured[0].details!).sort()).toEqual([
+      "conversation_excerpt",
+      "escalation_reason",
+      "original_ask",
+      "summary_source",
+      "turn_count",
+    ]);
+  });
+
+  it("writes an explicit empty ask when every message is an acknowledgement", async () => {
+    const state = makeState();
+    state.userTurnCount = 6;
+    const recentParts = [
+      { author: "user" as const, body: "ok" },
+      { author: "bot" as const, body: "anything else?" },
+      { author: "user" as const, body: "yes" },
+      { author: "user" as const, body: "thanks" },
+      { author: "user" as const, body: "👍" },
+    ];
+    const { captured, deps } = captureTicket(state);
+    await executeEscalation(deps(capAssessment, "ok", recentParts) as never);
+    const ask = String(captured[0].details!.original_ask);
+    // 4 previous customer messages + the current "ok".
+    expect(ask).toBe("(customer sent no substantive message; 5 short exchanges)");
+    expect(captured[0].summary).toBe(ask);
+  });
+
+  it("keeps the machine block last and parseable, with the ask before it", async () => {
+    const state = makeState();
+    state.userTurnCount = 30;
+    const { recentParts, current } = longThread();
+    const narrative = buildEscalationNarrative({
+      assessment: capAssessment,
+      currentMessage: current,
+      recentParts,
+      turnCount: 30,
+    });
+    const mk = (excerpt: string) =>
+      buildTicketMarkdown({
+        summary: narrative.originalAsk,
+        actionType: "support-general",
+        tier: getTierForAction("support-general"),
+        customerEmail: "support-customer@example.com",
+        details: buildEscalationDetails({
+          assessment: capAssessment,
+          narrative: { ...narrative, conversationExcerpt: excerpt },
+        }),
+        conversationSummary: narrative.conversationSummary,
+        sessionId: "sess-1",
+        gist: `Escalation: ${narrative.originalAsk}`,
+        sla: "2 business days",
+      });
+
+    const body = mk(narrative.conversationExcerpt);
+    const jsonStart = body.indexOf("---ACTION-REQUEST---");
+    const jsonEnd = body.indexOf("---END-ACTION-REQUEST---");
+    expect(jsonStart).toBeGreaterThan(-1);
+    expect(jsonEnd).toBeGreaterThan(jsonStart);
+    expect(body.indexOf("**Request:**")).toBeLessThan(jsonStart);
+    expect(body.indexOf("conversation_excerpt")).toBeLessThan(jsonStart);
+    const json = JSON.parse(body.slice(jsonStart + "---ACTION-REQUEST---".length, jsonEnd));
+    expect(json.details.escalation_reason).toBe("turn_count_cap");
+    expect(json.details.original_ask).toContain("charged twice this month");
+    expect(body.length).toBeLessThanOrEqual(MAX_TICKET_DESCRIPTION_CHARS);
+  });
+
+  it("bounds the whole body even at the ask and excerpt caps, keeping the JSON last", () => {
+    // Worst case the spec allows: a 300-char ask and a 700-char excerpt, both of
+    // which also ride in the JSON block. The body must still be bounded, the
+    // excerpt shortened, and the machine block last and parseable.
+    const ask = ("a".repeat(40) + " ").repeat(8).trim();
+    const excerpt = Array.from({ length: 12 }, (_, i) => `customer turn number ${i} `.repeat(4).trim()).join(" / ");
+    const narrative = buildEnclosing(assessment, ask, excerpt);
+    const body = buildTicketMarkdown({
+      summary: narrative.originalAsk,
+      actionType: "support-general",
+      tier: getTierForAction("support-general"),
+      customerEmail: "support-customer@example.com",
+      details: buildEscalationDetails({ assessment: capAssessment, narrative }),
+      conversationSummary: narrative.conversationSummary,
+      sessionId: "sess-1",
+      gist: `Escalation: ${narrative.originalAsk}`,
+      sla: "2 business days",
+    });
+    expect(body.length).toBeLessThanOrEqual(MAX_TICKET_DESCRIPTION_CHARS);
+    const jsonStart = body.indexOf("---ACTION-REQUEST---");
+    const jsonEnd = body.indexOf("---END-ACTION-REQUEST---");
+    expect(jsonEnd).toBeGreaterThan(jsonStart);
+    expect(() => JSON.parse(body.slice(jsonStart + "---ACTION-REQUEST---".length, jsonEnd))).not.toThrow();
+    expect(body.indexOf("**Request:**")).toBeLessThan(jsonStart);
+  });
+
+  it("applies the same ask to the user_request and judge sources", async () => {
+    for (const source of ["user_request", "judge"] as const) {
+      const narr = buildEscalationNarrative({
+        assessment: { ...capAssessment, source, reason: "customer_requested_human" },
+        currentMessage: "please just get me a person, my credits are still missing",
+        recentParts: [],
+        turnCount: 4,
+      });
+      expect(narr.originalAsk).toContain("please just get me a person");
+      expect(narr.conversationSummary).toContain("Ask:");
+    }
+  });
+});
+
+describe("pickOriginalAsk", () => {
+  it("skips acknowledgements and emoji to find the first real question", () => {
+    expect(pickOriginalAsk(["ok", "👍", "thanks", "where did my three credits go?"])).toBe(
+      "where did my three credits go?",
+    );
+  });
+
+  it("falls back to the longest short message when nothing is substantive", () => {
+    expect(pickOriginalAsk(["ok", "no credits", "yes"])).toBe("no credits");
+  });
+
+  it("says so explicitly when there is nothing at all", () => {
+    expect(pickOriginalAsk(["ok", "yes"])).toBe("(customer sent no substantive message; 2 short exchanges)");
+    expect(pickOriginalAsk([])).toBe("(customer sent no substantive message; 0 short exchanges)");
+  });
+
+  it("bounds the ask without leaving a partial word", () => {
+    const long = "word ".repeat(200).trim();
+    const out = pickOriginalAsk([long]);
+    expect(out.length).toBeLessThanOrEqual(301);
+    expect(out.endsWith("…")).toBe(true);
+    expect(out.slice(0, -1).endsWith("word")).toBe(true);
+  });
+});
+
+describe("buildConversationExcerpt", () => {
+  it("keeps the last three customer turns, verbatim and in order", () => {
+    const out = buildConversationExcerpt(["first question", "second", "third", "fourth", "fifth"]);
+    expect(out).toBe("third / fourth / fifth");
+  });
+
+  it("bounds a long tail at a word boundary", () => {
+    const out = buildConversationExcerpt(["word ".repeat(400)]);
+    expect(out.length).toBeLessThanOrEqual(701);
+    expect(out.endsWith("…")).toBe(true);
   });
 });

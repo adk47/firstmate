@@ -2195,6 +2195,7 @@ export const intercomPlugin = createChatChannelPlugin({
                       conversationId: result.conversationId,
                       assessment: result.assessment,
                       currentMessage: result.body,
+                      recentParts: result.recentParts,
                       account,
                       client,
                       saveState: async () => { await saveSessions(accountSessions); },

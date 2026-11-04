@@ -206,7 +206,16 @@ export type HandlerAction =
   // the channel needs it to build the turn. Dropping it at this hop would put
   // the silent-drop back exactly where it was, one layer down.
   | { action: "dispatch_to_agent"; conversationId: string; body: string; authorId: string; attachments?: ImageAttachmentRef[]; documents?: DocumentAttachmentRef[]; unsupportedAttachments?: UnsupportedAttachmentRef[] }
-  | { action: "escalate"; conversationId: string; assessment: RiskAssessment; body: string }
+  | {
+      action: "escalate";
+      conversationId: string;
+      assessment: RiskAssessment;
+      body: string;
+      // The thread the judge saw, minus the triggering message. Carried so the
+      // hand-off can name the customer's real question: by the time a turn cap
+      // fires the current message is "ok" and says nothing.
+      recentParts?: { author: "user" | "bot"; body: string }[];
+    }
   | { action: "escalate_legacy"; conversationId: string; category: string; matchedPattern: string; body: string }
   // A listed fraud-pull contact (restricted-accounts.ts): never reaches the agent and gets no
   // customer-facing message. `note` is posted as an internal note; reassign: false keeps the
@@ -552,6 +561,7 @@ export async function handleWebhookEvent(
               conversationId: classified.conversationId,
               assessment,
               body: classified.body,
+              recentParts,
             },
             state,
           };
@@ -808,6 +818,7 @@ export async function handleWebhookEvent(
                 conversationId: classified.conversationId,
                 assessment: decision.escalation,
                 body: classified.body,
+                recentParts,
               },
               state,
             };

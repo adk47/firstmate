@@ -56,6 +56,46 @@ describe("createClickupTicket (escalation path, shared ticket format)", () => {
     expect(parsed.cs_session_id).toBe("agent:support:intercom:dwjzhcge:conversation:215473921553266");
   });
 
+  it("renders the ask in Request: and a parseable five-key machine block", async () => {
+    // The turn_count_cap producer's whole point: a human reads the ask at the
+    // top, and the receiving lane reads the SAME facts from the JSON block —
+    // not a 400-char fragment and not an empty `details: {}`.
+    const ask = "I have been charged twice this month and three of my credits are missing from the catalog.";
+    const excerpt = "ok / thanks / ok";
+    const details = {
+      escalation_reason: "turn_count_cap",
+      original_ask: ask,
+      conversation_excerpt: excerpt,
+      turn_count: 30,
+      summary_source: "code_rule",
+    };
+    const fetchImpl = makeFetch();
+    await createClickupTicket({ cfg: CFG, fetchImpl }, {
+      ...PARAMS,
+      actionType: "support-general",
+      summary: ask,
+      gistSubject: ask,
+      conversationSummary: "Cap reached after 30 exchanges. Ask: " + ask,
+      details,
+    });
+    const body = JSON.parse((fetchImpl.mock.calls[0][1] as RequestInit).body as string);
+    const md: string = body.markdown_description;
+    // Request: is the ask, never the reason code.
+    expect(md).toContain("**Request:** " + ask);
+    expect(md).not.toContain("**Request:** turn_count_cap");
+    // The machine block is last and parses.
+    const m = /---ACTION-REQUEST---\s*(\{[\s\S]*?\})\s*---END-ACTION-REQUEST---/.exec(md);
+    expect(m).not.toBeNull();
+    const parsed = JSON.parse(m![1]);
+    expect(parsed.details).toEqual(details);
+    expect(md.indexOf("**Request:**")).toBeLessThan(md.indexOf("---ACTION-REQUEST---"));
+    expect(md.indexOf("conversation_excerpt")).toBeLessThan(md.indexOf("---ACTION-REQUEST---"));
+    expect(md.length).toBeLessThanOrEqual(3000);
+    // The title names the topic, not the reason code.
+    expect(body.name).toContain("charged twice this month");
+    expect(body.name).not.toContain("turn_count_cap");
+  });
+
   it("applies shared tags plus the intercom-auto-handoff marker, priority and due date", async () => {
     const fetchImpl = makeFetch();
     await createClickupTicket({ cfg: CFG, fetchImpl }, PARAMS);

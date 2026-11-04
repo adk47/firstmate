@@ -56,7 +56,10 @@ export async function createClickupTicket(
     customFields.push({ id: cfg.profileIdFieldId, value: params.customerProfileId });
   }
 
-  const gist = `Escalation: ${params.summary}`;
+  // Title subject: the customer's one-line ask when the caller supplies one, so
+  // the title reads "[support] Credits missing on 3 tracks — email" instead of
+  // "[support] Escalation: turn_count_cap — email". A reason code is not a topic.
+  const gist = params.gistSubject?.trim() ? params.gistSubject : `Escalation: ${params.summary}`;
 
   try {
     // Inside the try: buildSessionKey throws on empty/oversized ids, and this
@@ -69,6 +72,11 @@ export async function createClickupTicket(
       tier,
       customerEmail: params.customerEmail,
       customerProfileId: params.customerProfileId,
+      // The escalation path's machine-readable hand-off facts. Without this the
+      // ---ACTION-REQUEST--- block carried `details: {}` on every ticket, so the
+      // ops lanes could not read the customer's question or the reason the
+      // hand-off fired (see buildEscalationDetails in escalation-action.ts).
+      details: params.details,
       conversationSummary: params.conversationSummary,
       sessionId: buildSessionKey(params.workspaceId, params.conversationId),
     };
