@@ -256,6 +256,24 @@
             },
             "contextWindow": 1000000,
             "api": "anthropic-messages"
+          },
+          {
+            "id": "deepseek/deepseek-v4.1-flash-1017",
+            "name": "deepseek/deepseek-v4.1-flash-1017",
+            "input": [
+              "text",
+              "image"
+            ],
+            "maxTokens": 131072,
+            "reasoning": true,
+            "cost": {
+              "input": 0.025,
+              "output": 0.25,
+              "cacheRead": 0.0015,
+              "cacheWrite": 0
+            },
+            "contextWindow": 1048576,
+            "api": "openai-completions"
           }
         ]
       }
@@ -266,8 +284,7 @@
       "model": {
         "primary": "openai/gpt-6-sol",
         "fallbacks": [
-          "openrouter/openai/gpt-6-luna",
-          "openrouter/anthropic/claude-haiku-5.5"
+          "openrouter/deepseek/deepseek-v4.1-flash-1017"
         ]
       },
       "thinkingDefault": "medium",
@@ -340,8 +357,7 @@
         "model": {
           "primary": "openai/gpt-6-sol",
           "fallbacks": [
-            "openrouter/openai/gpt-6-luna",
-            "openrouter/anthropic/claude-haiku-5.5"
+            "openrouter/deepseek/deepseek-v4.1-flash-1017"
           ]
         },
         "thinkingDefault": "high"

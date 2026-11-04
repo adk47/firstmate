@@ -61,9 +61,16 @@ mutate() {
 }
 
 @test "model-refs: openrouter/<vendor>/<model> splits on the FIRST slash only" {
+  # Two vendor-slashed entries so the split is exercised twice. Since the
+  # fleet-wide single-fallback rule (check 6b, captain 2026-11-03) refuses a
+  # two-entry list, this asserts the MODEL-REF verdict: neither ref is reported
+  # as undeclared, and the refusal names the chain rule instead.
   mutate openclaw-edge.json '.agents.list[0].model.fallbacks = ["openrouter/openai/gpt-6-luna","openrouter/google/gemini-3.5-flash"]'
   run "$SCRIPT" "$PROFILE"
-  [ "$status" -eq 0 ]
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"not declared"* ]]
+  [[ "$output" != *"unknown model-ref prefix"* ]]
+  [[ "$output" == *"not the one uniform chain"* ]]
 }
 
 @test "model-refs: two providers claiming agentRuntime.id codex is ambiguous and FAILS" {
@@ -180,9 +187,13 @@ to_entries_shape='.agents.entries = (.agents.list | map({(.id): del(.id)}) | add
 }
 
 @test "model-refs: openai/ is still fine for text model refs (rule is imageModel-only)" {
-  mutate openclaw-edge.json '.agents.defaults.model.fallbacks[0] = "openai/gpt-6-sol"'
+  # A text model.primary is the surface this rule is about: `openai/` stays legal
+  # there. The fallback LIST is now pinned by check 6b, so mutating a fallback
+  # entry would test the chain rule instead of this one.
+  mutate openclaw-edge.json '.agents.list[0].model.primary = "openai/gpt-5.6-sol"'
   run "$SCRIPT" "$PROFILE"
   [ "$status" -eq 0 ]
+  [[ "$output" == *"all checks passed"* ]]
 }
 
 # imageModel provider-key prefix: refuse when the provider declares agentRuntime.id

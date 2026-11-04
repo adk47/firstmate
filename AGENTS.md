@@ -462,6 +462,34 @@ changed). **Detect**: `codex-edge-mirror.sh --check`; **dry-run**: `--dry-run`.
 The runbook's "Option B" (three device logins on edge) is RETIRED: it would have
 created a second refresh chain per account, the exact fan-out topology above.
 
+## One model chain on every user path
+
+Every model call that can decide something about a user goes through
+`scripts/lib/model_chain.py` (docs/model-chain.md). Captain 2026-11-03:
+"primary = the OpenClaw subscription token model; when it runs out, OpenRouter
+deepseek 1017."
+
+- **tier 1** `openai/gpt-6-sol` via `scripts/lib/codex-judge-exec.sh` — tool-less,
+  sandboxed, $0. **tier 2** `openrouter/deepseek/deepseek-v4.1-flash-1017`.
+- **Adding a rung, or any different fallback model, is a SPEND decision.**
+  `validate-config-matrix.sh` check 6b pins every agent and cron fallback list to
+  exactly one DeepSeek entry; a PR that changes it argues the money. (The old
+  luna/haiku hops are gone: they were paid FRONTIER models, so a subscription
+  outage silently upgraded every agent turn onto frontier inference.)
+- **A tier that cannot serve SKIPS with a reason, never answers blind** — e.g.
+  no headless web search on codex-cli 0.156.1 (`reason=web_search_unavailable`).
+- **`unsafe` ABORTS the chain**: a tool or safety violation is never laundered
+  onto a metered model.
+- **Strict structured output**: codex rejects a schema without
+  `additionalProperties: false` (`400 invalid_json_schema`). `strict_schema()`
+  normalizes it for every caller — a live call, not a fake, caught that.
+- **Read it with** `python3 scripts/model-chain-watchdog.py --canary` (>20%
+  tier-2 share in the window, or any exhausted chain, pages #clio_devops; the
+  timer runs `--alert` every 15 min).
+- **The chain is a CLIENT.** It approves nothing: every caller keeps its own
+  caps (`CappedJudge` $25/day + per-run, doc-verify $5/day), gates and
+  fail-closed path, and an exhausted chain makes the caller DEFER/HOLD.
+
 ## Session budgets must exceed each agent's PROTECTED footprint, or crons wedge
 
 `session.maintenance` has two caps, and BOTH silently kill cron surfaces when an

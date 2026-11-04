@@ -27,9 +27,22 @@ from urllib.parse import urlparse
 
 from .roles import fold
 
+# The shared model chain (scripts/lib/model_chain.py): subscription first, then
+# OpenRouter deepseek-v4.1-flash-1017. Captain 2026-11-03: the credit judge must
+# not be the one path that keeps paying a frontier model when the subscription
+# runs out.
+from lib import model_chain
+
 OPENROUTER_URL = os.environ.get("CREDIT_REVIEW_OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
 DEFAULT_KEY_FILE = "/opt/hydra/secrets/llm-provider-keys.json"
-DEFAULT_MODEL = os.environ.get("CREDIT_REVIEW_MODEL", "x-ai/grok-4.3")
+# The metered tier's model. Default = the chain's fallback tier (deepseek).
+# CREDIT_REVIEW_MODEL still pins a different metered model (e.g. the previous
+# default x-ai/grok-4.3) without a code change.
+DEFAULT_MODEL = os.environ.get("CREDIT_REVIEW_MODEL", model_chain.FALLBACK_MODEL)
+# Escape hatch: pin the pre-2026-11 direct-OpenRouter transport (no subscription
+# rung, no tier log). Needed when an operator sets CREDIT_REVIEW_WEB_ENGINE, since
+# the chain's web tier cannot select a search engine.
+LEGACY_TRANSPORT = os.environ.get("CREDIT_REVIEW_LEGACY_TRANSPORT", "0") == "1"
 PROMPT_VERSION = "credit-review-v2"
 
 # Search-junk filter (Fable credit-AI report, 2026-10-14). The web plugin injects
@@ -437,6 +450,16 @@ class Judge:
         self.web_max_results = web_max_results
         self.timeout = timeout
         self._key = key
+        # A pinned search engine only exists on the legacy direct transport.
+        self.legacy = LEGACY_TRANSPORT or bool(self.web_engine)
+        self._chain: model_chain.ModelChain | None = None
+
+    def chain(self) -> model_chain.ModelChain:
+        """The shared tier chain, with this judge's model as the metered tier (an
+        explicit model — e.g. batch_judge's OPENROUTER_MODEL — still wins)."""
+        if self._chain is None:
+            self._chain = model_chain.ModelChain("credit-review", fallback_model=self.model)
+        return self._chain
 
     def payload(self, mode: str, evidence: dict[str, Any]) -> dict[str, Any]:
         body: dict[str, Any] = {
@@ -458,6 +481,8 @@ class Judge:
 
     def _post(self, body: dict[str, Any], res: JudgeResult, timeout: int | None = None) -> dict[str, Any] | None:
         """POST to OpenRouter. Returns the decoded response, or None with res.error set."""
+        if not self.legacy:
+            return self._post_chain(body, res, timeout)
         key = self._key or load_key()
         if not key:
             res.error = "no OpenRouter key"
@@ -479,6 +504,48 @@ class Judge:
         finally:
             res.latency_s = time.monotonic() - t0
         return None
+
+    def _post_chain(self, body: dict[str, Any], res: JudgeResult, timeout: int | None = None) \
+            -> dict[str, Any] | None:
+        """Serve the SAME request through the shared model chain and hand back an
+        OpenRouter-shaped response, so every downstream parser (``interpret``,
+        verdict clamps, citation filtering) is untouched.
+
+        Tier order: the subscription first (skipped automatically for a web
+        request — codex cannot search here), then the metered tier (default
+        OpenRouter deepseek-v4.1-flash-1017) WITH the web plugin. A chain that
+        runs out of tiers returns None, exactly like a transport failure: the
+        caller DEFERS or HOLDS, and never turns a model outage into a support
+        request.
+        """
+        plugin = (body.get("plugins") or [{}])[0] if isinstance(body.get("plugins"), list) else {}
+        r = self.chain().call(
+            messages=body.get("messages") or [], web=bool(body.get("plugins")),
+            max_tokens=int(body.get("max_tokens") or 1200), temperature=0.0,
+            timeout_s=timeout or self.timeout,
+            web_max_results=int(plugin.get("max_results") or self.web_max_results),
+            exclude_domains=plugin.get("exclude_domains") or ())
+        res.latency_s = (r.latency_ms or 0) / 1000.0
+        if not r.ok:
+            res.error = (r.error or "model chain exhausted")[:300]
+            res.provider = "chain"
+            return None
+        res.provider = r.tier
+        # The audit label is what SERVED the answer, never the configured fallback
+        # (QA 2026-11-04): a subscription-served decision recorded as Grok/OpenRouter
+        # is an unauditable decision - and the web-free batch judge runs here.
+        if r.model:
+            res.model = r.model
+        return {
+            "model": r.model,
+            "usage": {"cost": r.cost_usd, "prompt_tokens": r.input_tokens,
+                      "completion_tokens": r.output_tokens},
+            "choices": [{"finish_reason": "stop", "message": {
+                "content": r.text,
+                "annotations": [{"type": "url_citation", "url_citation": {"url": u}}
+                                for u in (r.citations or [])],
+            }}],
+        }
 
     def judge(self, mode: str, evidence: dict[str, Any]) -> JudgeResult:
         res = JudgeResult(ok=False, model=self.model, web_search=self.web, provider="openrouter")
@@ -518,10 +585,12 @@ class Judge:
                 base.error = f"unparseable batch answer: {exc}"[:300]
         share = (base.cost_usd / n) if base.cost_usd is not None else None
         for rid in ids:
-            r = JudgeResult(ok=False, model=self.model, web_search=self.web, cited_urls=list(base.cited_urls),
+            # Model/provider come from the SERVING tier (base), not the configured
+            # default: every id in a batch must be auditable as the one that answered.
+            r = JudgeResult(ok=False, model=base.model, web_search=self.web, cited_urls=list(base.cited_urls),
                             cost_usd=share, prompt_tokens=base.prompt_tokens, completion_tokens=base.completion_tokens,
                             latency_s=base.latency_s, batch_size=n, prompt_sha256=base.prompt_sha256,
-                            provider="openrouter")
+                            provider=base.provider)
             p = parsed.get(rid)
             if p is None:
                 r.error = base.error or "claim missing from the batch answer"

@@ -2110,6 +2110,12 @@ jobs:
           # T01). Stdlib only; codex, Jev, OpenRouter and HTTP are faked, and the
           # bash helper is exercised only via --print-argv / census / quota gate.
           python3 scripts/tests/test_credit_trust_llm.py
+          # The ONE model chain on the user path (captain 2026-11-03): the
+          # subscription tier first, OpenRouter deepseek-v4.1-flash-1017 when it
+          # declines, and the watchdog that pages when the path rides the
+          # fallback tier or runs dry. Hermetic: codex, the OpenRouter opener,
+          # the clock and sleep are faked; the ledger is a temp file.
+          python3 scripts/tests/test_model_chain.py
           # batch-judge (Fable scale-now-openclaw): ONE tool-less judge call per outbound batch, STOP-only, fail closed.
           python3 scripts/tests/test_credit_batch_judge.py
           # b1's coded pre-layer + instructions for it (runs BEFORE judge_batch; a coded stop never reaches the model).

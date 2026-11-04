@@ -613,6 +613,52 @@ systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
 systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
 log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
 
+# ─── Model-chain watchdog (captain 2026-11-03) ──────────────────────────────
+# ONE model chain on every user-request path: the ChatGPT/Codex subscription
+# first, then the metered OpenRouter DeepSeek tier. This watchdog is what makes
+# the metered tier an ALARM instead of a quiet cost of doing business:
+#   * FALLBACK SHARE > 20% of user-path model calls in the window  => page
+#     (the subscription quota is out, or its auth is dead)
+#   * any chain EXHAUSTED (both tiers failed / an agent turn reached next=none)
+#     => page immediately, because those paths DEFER or HOLD and the queue grows
+# Sources: /var/lib/hydra/model-chain/calls.jsonl (scripted paths, written by
+# scripts/lib/model_chain.py) and the gateways' [model-fallback/decision]
+# journal lines (agent turns). Read-only; posts to #clio_devops only when a
+# threshold breaks, 6h repeat suppression per alarm. See
+# scripts/model-chain-watchdog.py and docs/model-chain.md.
+cat > /etc/systemd/system/model-chain-watchdog.service << MODELCHAINSVC
+[Unit]
+Description=Model-chain watchdog (pages when the user path rides the fallback tier)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/main.env
+EnvironmentFile=-/etc/openclaw/edge.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/model-chain-watchdog.py --alert
+Nice=5
+MODELCHAINSVC
+
+cat > /etc/systemd/system/model-chain-watchdog.timer << MODELCHAINTMR
+[Unit]
+Description=Run the model-chain watchdog every 15 min
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Unit=model-chain-watchdog.service
+
+[Install]
+WantedBy=timers.target
+MODELCHAINTMR
+
+systemctl daemon-reload
+wd=model-chain-watchdog.timer
+systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
+systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
+log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
+
 # ─── Intercom rights-holder / urgent inbound watchdog (MUS-6566) ───────────
 # Live tick = no flag (--dry-run is the only mode switch). Token:
 # MUSOAI_INTERCOM_TOKEN from the env files; the Slack token is resolved inside
@@ -3767,6 +3813,7 @@ AUX_ONFAILURE_UNITS=(
   hydra-session-thread-retention@.service
   hydra-weekly-cleanup.service
   intercom-intake-watchdog.service
+  model-chain-watchdog.service
   intercom-legal-unanswered-watchdog.service
   intercom-webhook.service
   intercom-rights-holder-watchdog.service

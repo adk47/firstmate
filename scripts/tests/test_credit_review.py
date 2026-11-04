@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 import unittest
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -563,16 +564,86 @@ class JudgeTests(unittest.TestCase):
 
     def test_no_key_is_an_error_not_a_pass(self):
         import os
+        from lib import model_chain as _mc
         env = dict(os.environ)
+        # BOTH key sources, because the chain transport does not read the legacy
+        # one: CREDIT_REVIEW_KEY_FILE alone let this test reach the host's real key
+        # and make a live paid call (QA 2026-11-03). No network is possible either.
+        saved_key_file = _mc.KEY_FILE
+        saved_open = urllib.request.urlopen
+
+        def no_network(*a, **k):
+            raise AssertionError("this test must never reach the network")
+
+        _mc.KEY_FILE = "/nonexistent"
+        urllib.request.urlopen = no_network
         try:
             os.environ.pop("OPENROUTER_API_KEY", None)
             os.environ["CREDIT_REVIEW_KEY_FILE"] = "/nonexistent"
-            res = Judge("m").judge("audit", {})
+            # A PRICED model, so the missing key is what blocks the call: an
+            # unpriced one is refused earlier for a different reason
+            # (PRICE_USD_PER_TOKEN, QA 2026-11-03).
+            res = Judge(_mc.FALLBACK_MODEL).judge("audit", {})
         finally:
+            _mc.KEY_FILE = saved_key_file
+            urllib.request.urlopen = saved_open
             os.environ.clear()
             os.environ.update(env)
         self.assertFalse(res.ok)
         self.assertIn("no OpenRouter key", res.error)
+
+
+class ChainProvenanceTests(unittest.TestCase):
+    """QA 2026-11-04: a decision must be auditable as the model that ANSWERED it.
+
+    The web-free judge request is served by the subscription tier by default, but
+    `_post_chain` used to set only `res.provider`, and `judge_many` rebuilt every
+    per-claim result as `model=self.model, provider="openrouter"` — so a
+    subscription-authored batch decision was written down as Grok/OpenRouter."""
+
+    ANSWERS = {
+        "single": {"verdict": "CONFIRMED", "confidence": 0.9},
+        "batch": {"claims": [{"claim_id": "c1", "verdict": "CONFIRMED", "confidence": 0.9}]},
+    }
+
+    @classmethod
+    def _chain(cls, tier, model, shape="single"):
+        from lib import model_chain as _mc
+        r = _mc.ChainResult(ok=True, tier=tier, model=model, text=json.dumps(cls.ANSWERS[shape]),
+                            cost_usd=0.001, input_tokens=10, output_tokens=5, latency_ms=3)
+        return lambda *a, **k: r
+
+    def _judge(self, tier, served, shape="single"):
+        from lib import model_chain as _mc
+        j = Judge(_mc.FALLBACK_MODEL)
+        j._chain = type("C", (), {"call": staticmethod(self._chain(tier, served, shape))})()
+        return j
+
+    def test_a_single_decision_names_the_model_that_served_it(self):
+        from lib import model_chain as _mc
+        j = self._judge(_mc.TIER_SUBSCRIPTION, _mc.SUBSCRIPTION_MODEL)
+        saved = j.__class__._post
+        j.__class__._post = lambda self, body, res, timeout=None: j._post_chain(body, res, timeout)
+        try:
+            res = j.judge("audit", {"claim": {}})
+        finally:
+            j.__class__._post = saved
+        self.assertTrue(res.ok, res.error)
+        self.assertEqual(res.model, _mc.SUBSCRIPTION_MODEL)
+        self.assertEqual(res.provider, _mc.TIER_SUBSCRIPTION)
+
+    def test_a_batch_decision_names_the_model_that_served_it(self):
+        from lib import model_chain as _mc
+        j = self._judge(_mc.TIER_SUBSCRIPTION, _mc.SUBSCRIPTION_MODEL, shape="batch")
+        saved = j.__class__._post
+        j.__class__._post = lambda self, body, res, timeout=None: j._post_chain(body, res, timeout)
+        try:
+            out = j.judge_many("audit", [{"claim": {}}], ["c1"])
+        finally:
+            j.__class__._post = saved
+        self.assertTrue(out["c1"].ok, out["c1"].error)
+        self.assertEqual(out["c1"].model, _mc.SUBSCRIPTION_MODEL)
+        self.assertEqual(out["c1"].provider, _mc.TIER_SUBSCRIPTION)
 
 
 class AdminClientTests(unittest.TestCase):

@@ -133,7 +133,11 @@ class Mutations(unittest.TestCase):
                               check=True, capture_output=True, text=True)
 
     def tearDown(self):
-        shutil.rmtree(self.tmp)
+        # `git commit` in this scratch repo can spawn background auto-maintenance
+        # (git >= 2.5x writes .git/maintenance.lock), which raced this rmtree and
+        # failed the suite with FileNotFoundError on CI runner git 2.55. A scratch
+        # temp dir needs no atomicity: an entry vanishing mid-walk is not a failure.
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
     def edit(self, rel, fn):
         p = self.tmp / rel
@@ -371,7 +375,11 @@ class ProbeAnalysis(unittest.TestCase):
         self.seq = 0
 
     def tearDown(self):
-        shutil.rmtree(self.tmp)
+        # `git commit` in this scratch repo can spawn background auto-maintenance
+        # (git >= 2.5x writes .git/maintenance.lock), which raced this rmtree and
+        # failed the suite with FileNotFoundError on CI runner git 2.55. A scratch
+        # temp dir needs no atomicity: an entry vanishing mid-walk is not a failure.
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
     def add(self, sid, msg, ts=2_000):
         self.seq += 1

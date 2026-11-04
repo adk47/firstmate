@@ -61,11 +61,11 @@ write_policy_profile() {
   "agents": {
     "defaults": { "thinkingDefault": "medium",
       "model": { "primary": "openai/gpt-5.6-sol",
-        "fallbacks": ["openrouter/openai/gpt-5.6-luna","openrouter/anthropic/claude-haiku-4.5"] } },
+        "fallbacks": ["openrouter/deepseek/deepseek-v4.1-flash-1017"] } },
     "list": [
       { "id": "$agent_id", "thinkingDefault": "medium",
         "model": { "primary": "openai/gpt-5.6-sol",
-          "fallbacks": ["openrouter/anthropic/claude-haiku-4.5"] }$agent_tools }
+          "fallbacks": ["openrouter/deepseek/deepseek-v4.1-flash-1017"] }$agent_tools }
     ]
   },
   "plugins": { "allow": ["codex"] },
@@ -85,7 +85,7 @@ add_scout_agent() {
   deny=$(jq -c --argjson d "$(jq -c '.agents.list[] | select(.id=="scout") | .tools.deny' "$HYDRA_REPO/openclaw-main.json")" \
     -n "\$d | ${1:-.}")
   jq --argjson deny "$deny" '.agents.list += [{"id":"scout","thinkingDefault":"medium",
-      "model":{"primary":"openai/gpt-5.6-sol","fallbacks":["openrouter/anthropic/claude-haiku-4.5"]},
+      "model":{"primary":"openai/gpt-5.6-sol","fallbacks":["openrouter/deepseek/deepseek-v4.1-flash-1017"]},
       "tools":{"deny":$deny}}]' "$PROFILE" > "$PROFILE.tmp" && mv "$PROFILE.tmp" "$PROFILE"
 }
 
@@ -308,7 +308,7 @@ SUPPORT_DENY='["exec","credits_verify","credit_verification_check","profiles_cla
 {
   "agents": { "defaults": { "thinkingDefault": "medium",
     "model": { "primary": "openai/gpt-5.6-sol",
-      "fallbacks": ["openrouter/openai/gpt-5.6-luna","openrouter/anthropic/claude-haiku-4.5"] } } },
+      "fallbacks": ["openrouter/deepseek/deepseek-v4.1-flash-1017"] } } },
   "plugins": { "allow": ["codex"] },
   "tools": { "exec": { "security": "full" } }
 }
