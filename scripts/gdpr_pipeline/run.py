@@ -680,6 +680,15 @@ class Run:
                     letter = (f"interim letter sent {r['interim_confirm_at'][:10]}, final letter NOT sent")
                 elif send is None and now - due > timedelta(hours=LETTER_GRACE_HOURS):
                     letter = f"no letter sent, {(now - due).days} d past the deadline"
+                if send is None:
+                    # "no letter sent" is true of two very different rows: one waiting on a decision, and one the
+                    # pipeline TRIED to answer and could not route (a mailbox gog cannot write, or a request with no
+                    # reply target at all). Left implicit, 24 of the live rows read as if the pipeline were broken.
+                    tried = self.store.send_record(r["id"], "ask")
+                    if tried and tried.get("state") in ("refused", "failed", "unknown", "sending"):
+                        why = (tried.get("detail") or "").strip()
+                        letter += (f"; the {tried['kind']} letter is {tried['state']}"
+                                   + (f" ({why[:160]}{' …' if len(why) > 160 else ''})" if why else ""))
                 out.append((r["register_no"], f"#{r['register_no']} {r['channel']} received {r['received_at'][:10]}, "
                                               f"written confirmation {state} ({r['due_at'][:10]}); {letter}; "
                                               f"identity {r['identity_verdict'] or '-'}; next: {r['action'] or '-'}"))

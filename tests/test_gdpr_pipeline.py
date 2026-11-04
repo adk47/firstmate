@@ -2489,6 +2489,20 @@ class SendPath(unittest.TestCase):
         self.assertEqual(out["state"], "sent")
         self.assertEqual(self.s.send_record(rid, "confirm")["state"], "sent")
 
+    def test_the_watchdog_names_why_a_letter_never_left(self):
+        """`no letter sent` covers both "waiting on a decision" and "the pipeline tried and the route refused". The
+        second has to say so, or 24 rows read as a broken pipeline and nobody knows the fix is a mailbox."""
+        from gdpr_pipeline import send as _send
+        rid, _ = self.s.upsert({"keys": ["notices:5"], "channel": "notices", "class": "privacy_erasure",
+                                "received_at": "2026-09-01T10:00:00Z", "requester_email": "x@example.com",
+                                "due_at": "2026-10-25T10:00:00Z"})
+        self.s.begin_send(rid, "ask", "mail", "thread-1", _send.body_sha("x"), "U0AN41ZBTRU", state="refused",
+                          detail="notices@ thread t-1 is in a mailbox gog cannot write on this host")
+        line = [ln for _, ln in self.run.watchdog_rows(datetime(2026, 11, 4, tzinfo=timezone.utc)) if f"#{self.s.get(rid)['register_no']} " in ln][0]
+        self.assertIn("no letter sent", line)
+        self.assertIn("the ask letter is refused", line)
+        self.assertIn("mailbox gog cannot write", line)
+
     def test_a_claim_that_never_finished_is_never_retried_by_the_pipeline(self):
         """`sending` means the writer may have reached the customer: only a human may clear it."""
         rid, _ = self.row()
