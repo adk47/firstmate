@@ -4000,6 +4000,32 @@ test_plain_git_release_removes_clean_registered_worktree() {
   pass "an unpooled clean registered worktree releases through guarded plain git"
 }
 
+# A pool with no rows answers `status` the way the pinned treehouse v2.0.1 does:
+# an empty-pool diagnostic on stderr, nothing on stdout, exit 0. That is an
+# answered empty pool, not an unreportable one, so a clean registered worktree it
+# never leased must still release through guarded plain git instead of refusing.
+test_empty_pool_listing_releases_through_guarded_plain_git() {
+  local case_dir rc branch
+  case_dir=$(make_case empty-pool-listing)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  : > "$case_dir/fakebin/fm-fake-treehouse-empty"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "empty-pool-listing: a successful empty status listing must not read as an unreportable pool"$'\n'"$(cat "$case_dir/stderr")"
+  assert_no_grep 'cannot report its pool' "$case_dir/stderr" \
+    "empty-pool-listing: an answered empty pool was read as unreportable"
+  assert_grep 'plain git worktree remove' "$case_dir/stderr" \
+    "empty-pool-listing: teardown did not release through guarded plain git"
+  assert_absent "$case_dir/wt" \
+    "empty-pool-listing: the released worktree directory is still present"
+  git -C "$case_dir/project" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    && fail "empty-pool-listing: the task branch ref survived a successful release"
+  pass "a successful empty treehouse status listing releases through guarded plain git"
+}
+
 # A successful `treehouse status` may print diagnostics on stderr (real
 # treehouse reports unreadable process tables, damaged slots and orphaned pools
 # there) while the pool table goes to stdout. Those diagnostics are not listing
@@ -4703,6 +4729,7 @@ test_running_change_watch_does_not_block_teardown
 test_proven_change_watch_allows_teardown
 test_missing_return_tool_refuses_before_killing_the_agent
 test_plain_git_release_removes_clean_registered_worktree
+test_empty_pool_listing_releases_through_guarded_plain_git
 test_pool_stderr_diagnostic_is_not_pool_membership
 test_plain_git_release_refuses_dirty_worktree
 test_plain_git_release_refuses_locked_worktree
