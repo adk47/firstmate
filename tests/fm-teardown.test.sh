@@ -3583,6 +3583,76 @@ test_missing_return_tool_refuses_before_killing_the_agent() {
   pass "a missing worktree-return tool refuses before the endpoint kill, leaving the agent alive and the branch intact"
 }
 
+# A tmux-era task - a Mac-migrated record whose backend is tmux - has a plain
+# git worktree this host's treehouse never leased. When treehouse is not
+# installed at all there is no pool to corrupt, so the guarded plain git release
+# is its return path instead of a refusal. The worktree must be a registered
+# linked worktree of the recorded project so git can release it safely.
+test_tmux_era_task_without_treehouse_uses_guarded_git_release() {
+  local case_dir rc branch path_no_tools
+  case_dir=$(make_case tmux-era-no-treehouse)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'backend=tmux\n' >> "$case_dir/state/task-x1.meta"
+  land_shippable_commit "$case_dir"
+  branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  path_no_tools=$(make_path_without_worktree_return_tools "$case_dir")
+  rm -f "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH="$path_no_tools" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "tmux-era-no-treehouse: a registered tmux-era worktree must release through guarded plain git when treehouse is absent"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'plain git worktree remove' "$case_dir/stderr" \
+    "tmux-era-no-treehouse: teardown did not name the plain git release mechanism"
+  assert_absent "$case_dir/wt" \
+    "tmux-era-no-treehouse: the released worktree directory is still present"
+  git -C "$case_dir/project" worktree list --porcelain | grep -F "$case_dir/wt" >/dev/null \
+    && fail "tmux-era-no-treehouse: the released worktree is still registered with the project"
+  git -C "$case_dir/project" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    && fail "tmux-era-no-treehouse: the task branch ref survived a successful release"
+  pass "a registered tmux-era worktree releases through guarded plain git when treehouse is absent"
+}
+
+# The same tmux-era task with uncommitted work cannot be released safely: the
+# guarded plain git path refuses a dirty worktree, so verification lands before
+# the endpoint kill and the agent stays alive with its work intact.
+test_tmux_era_task_without_treehouse_refuses_dirty_worktree() {
+  local case_dir rc branch pid path_no_tools
+  case_dir=$(make_case tmux-era-no-treehouse-dirty)
+  write_meta "$case_dir" no-mistakes ship
+  printf 'backend=tmux\n' >> "$case_dir/state/task-x1.meta"
+  land_shippable_commit "$case_dir"
+  branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  printf '%s\n' uncommitted > "$case_dir/wt/dirty.txt"
+  path_no_tools=$(make_path_without_worktree_return_tools "$case_dir")
+  rm -f "$case_dir/fakebin/treehouse"
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "tmux-era-no-treehouse-dirty: setup sleeper did not start"
+
+  rc=0
+  FM_TEARDOWN_TEST_PATH="$path_no_tools" \
+    run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "tmux-era-no-treehouse-dirty: a dirty tmux-era worktree must refuse before the endpoint kill"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'no worktree-return path is available' "$case_dir/stderr" \
+    "tmux-era-no-treehouse-dirty: refusal did not report the missing return path"
+  assert_grep 'holds uncommitted or untracked work' "$case_dir/stderr" \
+    "tmux-era-no-treehouse-dirty: refusal did not name the dirty worktree as the blocker"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "tmux-era-no-treehouse-dirty: the crew process was killed before the release was proven"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  assert_present "$case_dir/wt" \
+    "tmux-era-no-treehouse-dirty: the dirty worktree was removed anyway"
+  assert_present "$case_dir/wt/dirty.txt" \
+    "tmux-era-no-treehouse-dirty: the uncommitted file was discarded"
+  git -C "$case_dir/wt" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    || fail "tmux-era-no-treehouse-dirty: the task branch ref was dropped despite the refusal"
+  pass "a dirty tmux-era worktree refuses before the agent is killed and keeps its work"
+}
+
 # A treehouse that is installed and answers `status` with a pool listing that
 # does not hold the worktree - a base-branch line only, as a real pool with no
 # slot for this repo prints - and refuses `return` outright, so a wrong release
@@ -3916,6 +3986,36 @@ SH
   assert_absent "$wt" \
     "orca-path-miss: the guarded git fallback did not release the worktree"
   pass "an Orca path miss falls back to a guarded plain git release, never a discard"
+}
+
+# An Orca release by path can fail for reasons other than a registry miss: the
+# app is not running, the registry answers ok:false for another reason, or the
+# call times out. None of those prove the worktree is unowned, so a plain git
+# release would delete a worktree Orca may still own while its registry keeps
+# naming it. Teardown must refuse with the concrete Orca error named.
+test_orca_non_selector_failure_refuses_instead_of_plain_git_fallback() {
+  local case_dir rc wt
+  case_dir=$(make_case orca-non-selector-failure)
+  wt=$(write_orca_workspace_case "$case_dir")
+  cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "worktree rm") printf '{"ok":false,"error":{"code":"app_not_running","message":"Orca app is not running"}}\n'; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "orca-non-selector-failure: a non-registry-miss Orca failure must refuse, not fall back to git"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'refusing to fall back to a plain git release' "$case_dir/stderr" \
+    "orca-non-selector-failure: the refusal did not explain why the git fallback was refused"
+  assert_grep 'Orca app is not running' "$case_dir/stderr" \
+    "orca-non-selector-failure: the refusal did not name the concrete Orca error"
+  assert_present "$wt" \
+    "orca-non-selector-failure: the worktree was released despite the refusal"
+  pass "a non-registry-miss Orca failure refuses instead of falling back to a plain git release"
 }
 
 # The pool probe merges an external tool's stdout and stderr, so a whitespace-only
@@ -4403,6 +4503,8 @@ test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
 test_missing_return_tool_refuses_before_killing_the_agent
+test_tmux_era_task_without_treehouse_uses_guarded_git_release
+test_tmux_era_task_without_treehouse_refuses_dirty_worktree
 test_plain_git_release_removes_clean_registered_worktree
 test_empty_pool_listing_releases_through_guarded_plain_git
 test_pool_stderr_diagnostic_is_not_pool_membership
@@ -4411,6 +4513,7 @@ test_plain_git_release_refuses_locked_worktree
 test_plain_git_release_refuses_initialized_submodule
 test_orca_workspace_path_routes_release_to_orca
 test_orca_path_miss_falls_back_to_guarded_git_release
+test_orca_non_selector_failure_refuses_instead_of_plain_git_fallback
 test_whitespace_only_pool_listing_row_is_classified
 test_pool_listing_does_not_claim_a_longer_sibling_path
 test_unresolvable_home_relative_pool_listing_refuses_before_killing_the_agent
