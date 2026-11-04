@@ -89,11 +89,9 @@ make_case() {
 
   # Mocks for the post-check teardown steps. Refuse logic exits before these
   # run; the ALLOW cases need them so the script can complete cleanly.
-  cat > "$fakebin/treehouse" <<'SH'
-#!/usr/bin/env bash
-# `treehouse return --force <wt>`: succeed silently.
-exit 0
-SH
+  # `treehouse status` reports this repo's pool (the pre-kill release probe reads
+  # it) and `treehouse return --force <wt>` succeeds silently.
+  fm_fake_treehouse "$fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
 # tmux kill-window etc.: succeed silently.
@@ -337,6 +335,7 @@ add_lock_aware_treehouse() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+[ "${1:-}" = status ] && exec "$(dirname "$0")/fm-fake-treehouse-status"
 if [ "${1:-}" = return ]; then
   shift
   wt=""
@@ -371,6 +370,7 @@ add_transient_lock_treehouse() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+[ "${1:-}" = status ] && exec "$(dirname "$0")/fm-fake-treehouse-status"
 if [ "${1:-}" = return ]; then
   shift
   wt=""
@@ -416,6 +416,7 @@ add_persistent_lock_treehouse() {
   local case_dir=$1
   cat > "$case_dir/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+[ "${1:-}" = status ] && exec "$(dirname "$0")/fm-fake-treehouse-status"
 if [ "${1:-}" = return ]; then
   shift
   wt=""
@@ -1422,6 +1423,8 @@ test_non_linked_index_lock_path_is_checked_from_worktree() {
 
   add_lock_aware_treehouse "$case_dir"
   add_lsof_no_holder "$case_dir"
+  # The clone is not a linked worktree, so the pool must report holding it.
+  printf '%s\n' "$case_dir/wt" > "$case_dir/fakebin/fm-fake-treehouse-held"
 
   lock=$(git_index_lock_path "$case_dir/wt")
   mkdir -p "$(dirname "$lock")"
@@ -1923,7 +1926,7 @@ test_herdr_flat_teardown_refuses_orphaning_records_then_retry_completes() {
   thlog="$case_dir/treehouse.log"; : > "$thlog"
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
-[ "\${1:-}" = status ] && exit 0
+[ "\${1:-}" = status ] && exec "\$(dirname "\$0")/fm-fake-treehouse-status"
 printf '%s\n' "\$*" >> "$thlog"
 exit 0
 SH
@@ -2020,7 +2023,7 @@ assert_herdr_teardown_preflight_refuses_before_changes() {
   thlog="$case_dir/treehouse.log"; : > "$thlog"
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
-[ "\${1:-}" = status ] && exit 0
+[ "\${1:-}" = status ] && exec "\$(dirname "\$0")/fm-fake-treehouse-status"
 printf '%s\n' "\$*" >> "$thlog"
 exit 0
 SH
@@ -2135,7 +2138,7 @@ test_forced_secondmate_herdr_child_preflight_refuses_before_changes() {
   : > "$log"; : > "$thlog"
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
-[ "\${1:-}" = status ] && exit 0
+[ "\${1:-}" = status ] && exec "\$(dirname "\$0")/fm-fake-treehouse-status"
 printf '%s\n' "\$*" >> "$thlog"
 exit 0
 SH
@@ -2190,7 +2193,7 @@ exit 0
 SH
   cat > "$case_dir/fakebin/treehouse" <<SH
 #!/usr/bin/env bash
-[ "\${1:-}" = status ] && exit 0
+[ "\${1:-}" = status ] && exec "\$(dirname "\$0")/fm-fake-treehouse-status"
 printf '%s\n' "\$*" >> "$case_dir/treehouse.log"
 exit 0
 SH
@@ -3061,7 +3064,7 @@ test_parked_own_run_refuses_when_abort_is_unconfirmed() {
 
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
-[ "\${1:-}" = return ] || exit 0
+[ "\${1:-}" = status ] && exec "\$(dirname "\$0")/fm-fake-treehouse-status"
 printf 'return\n' >> "$case_dir/treehouse.log"
 EOF
   chmod +x "$case_dir/fakebin/treehouse"
@@ -3232,7 +3235,7 @@ exit 1
 SH
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
-[ "\${1:-}" = status ] && exit 0
+[ "\${1:-}" = status ] && exec "\$(dirname "\$0")/fm-fake-treehouse-status"
 printf 'return\n' >> "$case_dir/treehouse.log"
 EOF
   chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/treehouse"
@@ -3459,6 +3462,7 @@ exec "$REAL_PS_FOR_TEST" "$@"
 SH
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
+[ "\${1:-}" = status ] && exec "\$(dirname "\$0")/fm-fake-treehouse-status"
 printf 'returned\n' > "$case_dir/treehouse.log"
 EOF
   chmod +x "$case_dir/fakebin/lsof" "$case_dir/fakebin/ps" "$case_dir/fakebin/treehouse"
@@ -3495,6 +3499,7 @@ test_run_abort_precedes_process_reap_precedes_worktree_removal() {
   # real observed state, not a source-text or line-number correlation.
   cat > "$case_dir/fakebin/treehouse" <<EOF
 #!/usr/bin/env bash
+[ "\${1:-}" = status ] && exec "\$(dirname "\$0")/fm-fake-treehouse-status"
 if [ -s "$abort_log" ]; then echo "abort-already-happened" >> "$case_dir/order.log"; fi
 if ! kill -0 $pid 2>/dev/null; then echo "reap-already-happened" >> "$case_dir/order.log"; fi
 exit 0
@@ -3736,6 +3741,49 @@ test_uninspectable_project_refuses_before_killing_the_agent() {
   pass "an uninspectable project directory refuses before the endpoint kill"
 }
 
+# A host whose treehouse cannot report its pool at all - an installed treehouse
+# older than the `status` subcommand, or a repo whose pool config fails to load -
+# has no proof that the worktree is returnable. Teardown must refuse before the
+# endpoint kill instead of killing first and failing at `treehouse return`.
+test_unreportable_pool_listing_refuses_before_killing_the_agent() {
+  local case_dir rc pid
+  case_dir=$(make_case unreportable-pool)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = status ]; then
+  echo "treehouse: failed to load pool config" >&2
+  exit 1
+fi
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "unreportable-pool: setup sleeper did not start"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "unreportable-pool: teardown should refuse when the pool cannot be reported"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'cannot report its pool' "$case_dir/stderr" \
+    "unreportable-pool: refusal did not name the unreportable pool"
+  assert_grep 'leaving the agent alive and the branch intact' "$case_dir/stderr" \
+    "unreportable-pool: refusal did not report leaving the agent alive and the branch intact"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "unreportable-pool: the crew process was killed although the pool listing was unavailable"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  assert_present "$case_dir/wt" \
+    "unreportable-pool: the worktree was removed despite the refusal"
+  git -C "$case_dir/wt" rev-parse --verify refs/heads/fm/task-x1 >/dev/null 2>&1 \
+    || fail "unreportable-pool: the task branch ref was dropped despite the refusal"
+  pass "an unreportable treehouse pool listing refuses before the endpoint kill"
+}
+
+
 # A treehouse-held worktree releases through treehouse; because the release may
 # reset or detach the slot itself, the task branch is detached first so the
 # post-release ref deletion actually happens rather than silently no-op'ing on a
@@ -3746,9 +3794,9 @@ test_treehouse_return_drops_the_task_branch() {
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
   branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
-  # The default fake treehouse answers no pool listing and its `return` leaves the
-  # worktree untouched - exactly the slot a release must not leave holding the
-  # task branch.
+  # The default fake treehouse reports its pool as holding the worktree and its
+  # `return` leaves the worktree untouched - exactly the slot a release must not
+  # leave holding the task branch.
 
   rc=0
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
@@ -3845,4 +3893,5 @@ test_plain_git_release_removes_clean_registered_worktree
 test_plain_git_release_refuses_dirty_worktree
 test_unpooled_unregistered_worktree_refuses_before_killing_the_agent
 test_uninspectable_project_refuses_before_killing_the_agent
+test_unreportable_pool_listing_refuses_before_killing_the_agent
 test_treehouse_return_drops_the_task_branch

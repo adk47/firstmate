@@ -95,8 +95,8 @@
 # treehouse never leased here, so it releases through guarded_plain_git_release.
 # When no path resolves, teardown refuses while the agent is still alive and the
 # branch still intact, naming the concrete missing requirement. A treehouse that
-# is installed but cannot be asked for its pool listing at all keeps the
-# established treehouse return rather than guessing another release path.
+# cannot report its pool listing at all (no `status` support, a failing status,
+# or no output) refuses too, because lease membership is then unproven.
 # guarded_plain_git_release runs plain `git worktree remove` - git itself refuses
 # a dirty or locked worktree unless --force is passed and this never passes it -
 # so an unlanded worktree is kept rather than discarded. The task branch is
@@ -1398,23 +1398,20 @@ canonical_existing_dir() {
   ( cd "$target" && pwd -P )
 }
 
-# Read-only pool probe: does the pool this host's treehouse resolves from
-# <project> hold <worktree>? Sets TEARDOWN_TREEHOUSE_POOL_UNKNOWN=1 when the tool
-# cannot be asked at all (no `status` support, a failing status, or no output
-# whatsoever), so the caller can keep the established return instead of guessing.
-# Returns 0 only when the listing names that worktree, in either the absolute
-# form or the `~`-abbreviated form treehouse prints for paths under $HOME.
+# Read-only pool probe. Returns 0 when the listing of the pool this host's
+# treehouse resolves from <project> names <worktree> (in either the absolute form
+# or the `~`-abbreviated form treehouse prints for paths under $HOME), 1 when the
+# listing answers and does not name it, and 2 when the pool cannot be reported at
+# all (no `status` support, a failing status, or no output), which is never
+# permission to proceed.
 treehouse_pool_lists_worktree() {  # <project> <worktree>
   local proj=$1 wt=$2 listing line cand rel abs_wt abs_home
   local -a candidates=()
-  TEARDOWN_TREEHOUSE_POOL_UNKNOWN=0
   if ! listing=$( ( cd "$proj" && treehouse status ) 2>&1 ); then
-    TEARDOWN_TREEHOUSE_POOL_UNKNOWN=1
-    return 1
+    return 2
   fi
   if [ -z "$listing" ]; then
-    TEARDOWN_TREEHOUSE_POOL_UNKNOWN=1
-    return 1
+    return 2
   fi
   abs_wt=$(canonical_existing_dir "$wt") || abs_wt=$wt
   candidates=("$wt" "$abs_wt")
@@ -1447,7 +1444,7 @@ EOF
 # or "git") or the concrete missing requirement in TEARDOWN_RELEASE_REFUSAL and
 # returning 1 so the caller leaves the agent alive and the branch intact.
 worktree_release_mode() {  # <backend> <worktree> <project>
-  local backend=$1 wt=$2 proj=$3
+  local backend=$1 wt=$2 proj=$3 probe=0
   TEARDOWN_RELEASE_MODE=
   TEARDOWN_RELEASE_REFUSAL=
   if [ -z "$wt" ] || [ ! -d "$wt" ]; then
@@ -1470,14 +1467,17 @@ worktree_release_mode() {  # <backend> <worktree> <project>
     TEARDOWN_RELEASE_REFUSAL="the recorded project directory ${proj:-<missing>} is not inspectable, so this host's treehouse pool for its worktree cannot be inspected"
     return 1
   fi
-  if treehouse_pool_lists_worktree "$proj" "$wt"; then
-    TEARDOWN_RELEASE_MODE=treehouse
-    return 0
-  fi
-  if [ "$TEARDOWN_TREEHOUSE_POOL_UNKNOWN" = 1 ]; then
-    TEARDOWN_RELEASE_MODE=treehouse
-    return 0
-  fi
+  treehouse_pool_lists_worktree "$proj" "$wt" || probe=$?
+  case "$probe" in
+    0)
+      TEARDOWN_RELEASE_MODE=treehouse
+      return 0
+      ;;
+    2)
+      TEARDOWN_RELEASE_REFUSAL="this host's treehouse cannot report its pool for $proj, so whether it holds $wt cannot be verified"
+      return 1
+      ;;
+  esac
   if worktree_registered_for_project "$proj" "$wt"; then
     TEARDOWN_RELEASE_MODE=git
     return 0
@@ -3099,19 +3099,26 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
     ORCA_PATH_MATCH_VERIFIED=1
   fi
+  branch=HEAD
   if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
-      if git -C "$WT" checkout --detach -q 2>/dev/null; then
-        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-      fi
+      git -C "$WT" checkout --detach -q 2>/dev/null || true
     fi
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
-  fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
+  # Orca owns the release, so the task branch is dropped only once Orca reports
+  # the worktree removed; a failed removal keeps the ref for inspection and retry.
+  if ! fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"; then
+    echo "error: orca worktree removal failed for ${ORCA_WORKTREE_ID:-<missing>}; teardown aborted with the branch and worktree intact" >&2
+    exit 1
+  fi
+  if [ "$branch" != HEAD ]; then
+    git -C "$PROJ" branch -D "$branch" >/dev/null 2>&1 || true
+  fi
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # Capture the branch before the release: returning or removing the worktree
   # makes its HEAD unreadable, but the ref lives in the shared repo.
