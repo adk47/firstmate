@@ -10,7 +10,10 @@
 #   3. An endpoint that cannot be verified is refused only after six hours with
 #      no activity, and that horizon is configurable.
 #   4. --allow-dead records the steer anyway, warns, and leaves an audit line.
-#   5. An idle secondmate is not refused for silence.
+#   5. An idle secondmate is not refused for silence: an idle secondmate endpoint
+#      is healthy and is judged by its routed status rather than pane quiet, and
+#      the secondmate liveness sweep (SECONDMATE_LIVENESS lines in
+#      bin/fm-bootstrap.sh) owns dead-secondmate detection.
 set -u
 
 # shellcheck source=tests/lib.sh

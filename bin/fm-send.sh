@@ -231,16 +231,20 @@
 # 21600, six hours). The message names the time it was last live and says to
 # relaunch first (bin/fm-control.sh <task> relaunch). A verified-alive endpoint
 # is never refused for silence alone, because a worker idle on a decision for
-# hours is still the right place for its answer; a secondmate's silence is
-# never a reason either, since an idle secondmate is healthy. Remote
-# secondmates, explicit backend targets, and --key are not checked here.
+# hours is still the right place for its answer. A secondmate's silence is
+# never a reason either: an idle secondmate endpoint is healthy and is judged by
+# its routed status rather than by pane quiet, and the secondmate liveness sweep
+# (SECONDMATE_LIVENESS lines in bin/fm-bootstrap.sh) owns dead-secondmate
+# detection. Remote secondmates, explicit backend targets, and --key are not
+# checked here.
 # --allow-dead <reason> writes the record anyway, prints a warning, and appends
 # one audit line to state/.fm-send-allow-dead.log so firstmate sees the
 # override. FM_SEND_LIVENESS_BYPASS=1 is a test-harness escape hatch exported
-# only by tests/lib.sh for its stubbed backends, never an operator knob. On the
-# inbox plane exit 3 therefore means "refused, nothing
-# written"; it is distinct from the typed plane's exit 3, which can only follow
-# a live endpoint that passed this check.
+# only by tests/lib.sh for its stubbed backends, never an operator knob. This
+# check runs before the inbox/typed plane is chosen, so the exit 3 it returns
+# means "refused, nothing written" on either local plane; the typed plane's own
+# exit 3 (an unconfirmed submit) only follows a live endpoint that passed this
+# check, and the remote leg's exit 3 means the record may already have landed.
 #
 # After a successful TYPED-plane submit fm-send pauses FM_SEND_SETTLE seconds
 # (default 1, 0 disables) before returning: submit confirmation only proves the
