@@ -1541,8 +1541,6 @@ watch_beat_touch() {
   touch "$STATE/.last-watcher-beat"
   case "$age" in ''|*[!0-9]*) return 0 ;; esac
   [ "$BEAT_LAG_LOG_SECS" -gt 0 ] && [ "$age" -ge "$BEAT_LAG_LOG_SECS" ] || return 0
-  # A beacon this old is not a lag but a watcher that was not running.
-  [ "$age" -lt 86400 ] || return 0
   now=$(date +%s)
   [ $((now - WATCH_BEAT_LAG_LOGGED_AT)) -ge "$BEAT_LAG_LOG_EVERY" ] || return 0
   WATCH_BEAT_LAG_LOGGED_AT=$now

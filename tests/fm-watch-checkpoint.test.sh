@@ -15,6 +15,16 @@ make_home() {
   printf '%s\n' "$home"
 }
 
+set_mtime() { # <epoch> <path>
+  local epoch=$1 path=$2 stamp
+  if stamp=$(date -r "$epoch" +%Y%m%d%H%M.%S 2>/dev/null); then
+    touch -t "$stamp" "$path"
+  else
+    stamp=$(date -d "@$epoch" +%Y%m%d%H%M.%S)
+    touch -t "$stamp" "$path"
+  fi
+}
+
 test_quiet_checkpoint_exits_124_cleanly() {
   local home out err status
   home=$(make_home quiet)
@@ -80,7 +90,7 @@ SH
   cat > "$home/state/b-beat.check.sh" <<'SH'
 #!/usr/bin/env bash
 now=$(date +%s)
-beat=$(stat -f %m "$FM_HOME/state/.last-watcher-beat" 2>/dev/null || stat -c %Y "$FM_HOME/state/.last-watcher-beat")
+beat=$(stat -c %Y "$FM_HOME/state/.last-watcher-beat" 2>/dev/null || stat -f %m "$FM_HOME/state/.last-watcher-beat")
 printf 'beacon age %ss after the slow check\n' "$((now - beat))"
 SH
   chmod 0700 "$home/state/a-slow.check.sh" "$home/state/b-beat.check.sh"
@@ -101,6 +111,28 @@ SH
   assert_contains "$(cat "$home/state/.watch-triage.log")" "watcher beat lagged" "a lagging beacon left no trace in the triage log"
   assert_contains "$(cat "$home/state/.watch-triage.log")" "top CPU: " "the beat-lag line did not name the top CPU consumers"
   pass "a slow check is triage-logged, the beacon advances between checks, and a lag names the top CPU consumers"
+}
+
+test_a_restart_does_not_log_the_previous_watchers_downtime_as_lag() {
+  local home out err status triage
+  home=$(make_home restart-beat)
+  out="$home/out.txt"
+  err="$home/err.txt"
+  # A watcher that stopped two hours ago leaves its last beat behind. Starting a
+  # new one now is downtime, not lag: nothing was running to be lagged, so a
+  # "watcher beat lagged" line would blame processes that never delayed it. The
+  # startup beacon touch ahead of the poll loop is what keeps the previous run's
+  # beat out of the lag check; drop it and this case logs a lag that never was.
+  set_mtime $(( $(date +%s) - 7200 )) "$home/state/.last-watcher-beat"
+  status=0
+  FM_HOME="$home" FM_GUARD_GRACE=2 FM_CHECK_SLOW_LOG_SECS=2 FM_WATCH_BEAT_LAG_LOG_SECS=4 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
+    "$CHECKPOINT" --seconds 2 >"$out" 2>"$err" || status=$?
+  expect_code 124 "$status" "restart checkpoint exit"
+  triage=$(cat "$home/state/.watch-triage.log" 2>/dev/null || true)
+  assert_not_contains "$triage" "watcher beat lagged" \
+    "a restart logged the previous watcher's downtime as lag"
+  pass "a restart does not log the previous watcher's beacon as lag"
 }
 
 test_checks_run_at_low_priority_with_a_worker_cap() {
@@ -143,5 +175,6 @@ test_quiet_checkpoint_exits_124_cleanly
 test_signal_passes_through_and_exits_zero
 test_registered_check_uses_preserved_watcher_environment
 test_slow_check_is_logged_and_the_beacon_advances_between_checks
+test_a_restart_does_not_log_the_previous_watchers_downtime_as_lag
 test_checks_run_at_low_priority_with_a_worker_cap
 test_existing_singleton_watcher_is_not_success
