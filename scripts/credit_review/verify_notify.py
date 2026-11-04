@@ -88,6 +88,15 @@ class Report:
     sent_credits: int = 0
     skipped: int = 0
     deferred_users: int = 0
+    # [key=user-window] the holds the 7-day USER window makes (verify_ledger.claim_cross_check's
+    # 'messaged_7d'): kept apart from deferred_users because it is the one hold a per-CLAIM check
+    # cannot see and a per-USER send always applies - r5 10-31/11-03 on the 4-of-11 paid batch.
+    # TWO counters, because they answer two questions (QA on #1681): held_user_window is every window
+    # hold in the run; window_after_gate is the subset that ALSO landed in deferred_users (the send
+    # refused it). A check-time hold is in the first only, so the generic 'deferred by the gate' line
+    # must subtract window_after_gate, never held_user_window.
+    held_user_window: int = 0
+    window_after_gate: int = 0
     pending_doc_users: int = 0
     support_contact_users: int = 0
     support_contact_credits: int = 0
@@ -994,6 +1003,12 @@ def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pac
         elif res.returncode == 3:
             report.deferred_users += 1
             why = _outcome(report, p, "deferred", out.removeprefix("DEFERRED ") or err)
+            # the 7-day USER window is counted on its own, IN ADDITION: the check measures per claim, the send per user,
+            # so this is the population a signed 'accepted' set overstates. deferred_users stays what every family
+            # already reports; the claim line shows the window separately (deferred_users - held_user_window).
+            if "messaged_7d" in why:
+                report.held_user_window += 1
+                report.window_after_gate += 1        # this one IS in deferred_users above
             report.deferrals.append(f"user {_uid(p)}: {why}"[:200])
         elif res.returncode == 1 and _refused_line(res.stderr):
             # the gate's OWN refusal line (r5 on #1515: the first stderr line can be an info line). A refusal before the

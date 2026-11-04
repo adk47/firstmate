@@ -422,6 +422,61 @@ class ClaimStatusTests(unittest.TestCase):
         self.assertEqual(gate.calls, [])
         self.assertEqual(rep.ask_audience, 1)
 
+    def test_a_status_row_whose_other_claim_was_noted_within_seven_days_is_held_at_check_time(self):
+        """[key=user-window] r5 11-03: the check was per CLAIM (blocked_ids over claim-<id>) and the send is per USER
+        (claim_cross_check's messaged_7d), so a heavy claimant was accepted here and held at send - b19: 34 of 79.
+        The check now makes the send's own read, so 'accepted' is what the send will do."""
+        # user 1 holds two pending claims; claim-1 got a claim-proof-ask note four days ago, claim-2 is new
+        self._sent_note(1, 1, "a@x.com", "2026-10-21")   # three days before NOW
+        q = replica({1: ("pending", 1), 2: ("pending", 1)}, {1: "a@x.com"})
+        rep, gate = self.status(self.lst([claim(1, 1, band="D"), claim(2, 1, band="D")]), q)
+        self.assertEqual(gate.calls, [])                      # nothing goes to the gate
+        self.assertEqual((rep.held_user_window, rep.ask_audience), (1, 1))   # claim-1 is told by the ask
+        self.assertIn("user 1: messaged_7d (the 7-day user window", rep.deferrals[0])
+        out = claim_proof_ask.render(rep, "dry-run", "paid", status=True)
+        self.assertIn("held by the 7-day user window (a note to this user on any claim within 7 days) 1", out)
+
+    def _sent_note_as(self, cid: int, uid: int, email: str, day: str, campaign: str) -> None:
+        db = verify_ledger.connect(self.ledger)
+        c = verify_ledger.claim(db, campaign=campaign, user_key=email, day=day, request_ids=[f"claim-{cid}"],
+                                message_type="email", approved_by="U7RP6HKUZ", approval_ref="ref", user_id=str(uid),
+                                refs=[{"request_id": f"claim-{cid}", "profile_id": "abc"}])
+        self.assertEqual(c["result"], "claimed")
+        verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id=f"91{cid}")
+
+    def test_a_claim_closed_by_an_old_pending_note_does_not_suppress_the_users_other_claim(self):
+        """QA on #1681: `proof_pending_sent` is keyed on THIS claim, so it must not consume the user's slot. With a
+        2026-10-16 claim-proof-pending note on claim-1 (older than the 7-day window) the user's claim-2 is eligible
+        and must reach the gate; the previous fix marked the user seen and skipped it."""
+        self._sent_note_as(1, 1, "a@x.com", "2026-10-16", "claim-proof-pending")
+        claims = [claim(1, 1, band="D"), claim(2, 1, band="D")]
+        q = replica({1: ("pending", 1), 2: ("pending", 1)}, {1: "a@x.com"})
+        rep, gate = self.status(self.lst(claims), q)
+        self.assertEqual(len(gate.calls), 1)
+        self.assertEqual(gate.calls[0][1]["credits"][0]["request_id"], "claim-2")
+        self.assertEqual((rep.ask_audience, rep.second_claim, rep.held_user_window), (1, 0, 0))
+
+    def test_a_heavy_claimant_is_counted_once_not_once_per_claim(self):
+        """r5 on #1681: the window is per USER, so the count must be too - a user with four pending claims and one
+        noted is ONE hold (the paid seven hold 2,2,2,4,3,4,2 claims; counting per claim printed 12 for 7 users)."""
+        self._sent_note(1, 1, "a@x.com", "2026-10-21")
+        claims = [claim(i, 1, band="D") for i in (1, 2, 3, 4)]
+        q = replica({i: ("pending", 1) for i in (1, 2, 3, 4)}, {1: "a@x.com"})
+        rep, gate = self.status(self.lst(claims), q)
+        self.assertEqual((rep.held_user_window, len(rep.deferrals), gate.calls), (1, 1, []))
+        self.assertEqual((rep.ask_audience, rep.second_claim), (1, 2))   # claim-1 ask-told, 3 and 4 'next run'
+
+    def test_the_user_window_ages_out_at_midnight_not_at_a_time_of_day(self):
+        """Day-granular on BOTH sides on purpose (r5's #1666 truncation class): a note on day D-7 holds, D-8 frees."""
+        self._sent_note(1, 1, "a@x.com", "2026-10-17")   # exactly seven days before NOW
+        q = replica({1: ("pending", 1), 2: ("pending", 1)}, {1: "a@x.com"})
+        held, _ = self.status(self.lst([claim(2, 1, band="D")]), q)
+        self.assertEqual(held.held_user_window, 1)             # day D-7 holds
+        self._sent_note(3, 5, "e@x.com", "2026-10-16")         # eight days before NOW, another user
+        q5 = replica({5: ("pending", 5)}, {5: "e@x.com"})
+        free, gate = self.status(self.lst([claim(5, 5, band="D")]), q5)
+        self.assertEqual((free.held_user_window, len(gate.calls)), (0, 1))   # D-8 frees
+
     def test_replica_support_one_per_user_and_segment(self):
         claims = [claim(1, 1, band="D"), claim(2, 1, band="D"), claim(3, 3, band="D"), claim(4, 4, band="D"),
                   claim(5, 5, band="D", paid=False)]
@@ -570,6 +625,29 @@ class GateReasonRecordTest(unittest.TestCase):
         text = claim_proof_ask.render(rep, "apply", "paid")
         self.assertIn("user 1382623: messaged_7d credits=1 (we started a conversation with them in the last 7 days)", text)
         self.assertIn("user 4: (the gate printed no reason)", text)
+        # r5 11-03: the 7-day user window is counted as itself, not folded into 'deferred by the gate' - the tick line
+        # must explain a 4-of-11 in one read, without a select
+        self.assertEqual((rep.held_user_window, rep.deferred_users), (1, 2))   # the window row is in both
+        self.assertIn("held by the 7-day user window (a note to this user on any claim within 7 days) 1", text)
+
+    def test_a_check_time_hold_and_a_send_time_hold_are_counted_separately(self):
+        """QA on #1681: held_user_window mixes a CHECK-time hold (never in deferred_users) with a SEND-time hold
+        (in it), so the generic line must be net of the send-side count only. One of each plus one other send
+        deferral prints held 2 / deferred 1, not held 2 / deferred 0."""
+        from credit_review import claim_proof_ask, verify_notify
+        rep = claim_proof_ask.ClaimReport()
+        rep.held_user_window = 1                       # the check held this user before any gate call
+        p = lambda uid: {"user": {"id": uid}, "credits": [{"request_id": "r"}]}
+        cases = [(p("10"), self.gate(3, "DEFERRED messaged_7d credits=1 (we started a conversation)\n")),
+                 (p("11"), self.gate(3, "DEFERRED support_contact credits=1 (support@)\n"))]
+        for payload, runner in cases:
+            with mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, None)):
+                verify_notify.send_all([payload], rep, mode="apply", runner=runner)
+        self.assertEqual((rep.held_user_window, rep.window_after_gate, rep.deferred_users), (2, 1, 2))
+        text = claim_proof_ask.render(rep, "apply", "paid")
+        self.assertIn("held by the 7-day user window (a note to this user on any claim within 7 days) 2", text)
+        self.assertIn("deferred by the gate 1", text)
+        self.assertNotIn("deferred by the gate 0", text)
 
     def test_the_refused_line_is_the_gates_own_and_a_pre_claim_refusal_is_named_unledgered(self):
         # r5 on #1515 (Lamberto, 10-30 01:52Z): the first stderr line was an info line; the real one came after it

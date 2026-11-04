@@ -110,6 +110,9 @@ class ClaimReport(verify_notify.Report):
     no_profile_id: int = 0
     status_audience: int = 0          # ask run: rows the list routes to the status note instead
     ask_audience: int = 0             # status run: rows that get the proof ask instead
+    held_user_window: int = 0         # held: a note to this USER (any of their claims) within the 7-day window
+    # QA on #1681: the window is counted in TWO places and they must not be mixed - a check-time hold (above)
+    # never enters deferred_users, a send-time hold does (window_after_gate in verify_notify.Report).
     by_reason: dict[str, int] = field(default_factory=dict)
 
 
@@ -489,8 +492,28 @@ def run_status(*, list_path: str, segment: str, mode: str = "dry-run", max_users
         if not acct.get("professional_id"):
             report.no_professional_id += 1
             continue
-        if uid in seen:
-            report.second_claim += 1
+        # [key=user-window] the same read the SEND makes, at the check's own grain: blocked_ids above is keyed per
+        # CLAIM (claim-<id>), so a heavy claimant whose OTHER claim was noted within 7 days is accepted here and held
+        # at send - b19 2026-11-03: 34 of 79 signed users, every one of them noted on 2026-10-27 on another claim.
+        # Holding it here makes 'accepted' mean what the send will do, and counting it says how many were held.
+        # The window is DAY-granular on both sides on purpose (verify_messages.day is written and compared as a day
+        # string), so a note ages out at midnight rather than at a time of day: never mix in an instant here.
+        if uid in seen:                                  # r5 on #1681: ONE hold per USER - the window is per user, so
+            report.second_claim += 1                     # a held claimant's remaining claims are 'next run', not new holds
+            continue
+        cross = verify_ledger.claim_cross_check(db, STATUS_CAMPAIGN, [f"claim-{cid}"],
+                                                user_key=str(acct.get("email") or ""), day=day, user_id=str(uid))
+        if cross == "messaged_7d":
+            report.held_user_window += 1
+            seen.add(uid)
+            report.deferrals.append(f"user {uid}: messaged_7d (the 7-day user window: a note from this gate to this "
+                                    f"user, on any of their claims, within 7 days of {day})"[:200])
+            continue
+        if cross:                                        # told through the proof ask / the pending note
+            # CLAIM-specific, unlike messaged_7d: 'proof_ask_sent' / 'proof_pending_sent' are keyed on this claim's
+            # request id, so they must NOT consume the user's slot - otherwise a claim closed by an old (out-of-
+            # window) pending note would suppress a second, eligible pending claim of the same user (QA on #1681).
+            report.ask_audience += 1
             continue
         if verify_notify.not_signed(mode, uid):          # QA #1611: before the budget slot
             report.outcomes.append({"user": str(uid), "result": "filtered", "reason": "not_in_signed_accepted"})
@@ -642,7 +665,13 @@ def render(report: ClaimReport, mode: str, segment: str, reminders: bool = False
                      ("reminder waits: claim not on today's list", report.not_in_list),
                      ("no professional id (held)", report.no_professional_id),
                      ("no well-formed profile_id on the list (held)", report.no_profile_id), ("skipped by the gate", report.skipped),
-                     ("deferred by the gate", report.deferred_users), ("refused by the gate", report.refused_users),
+                     ("held by the 7-day user window (a note to this user on any claim within 7 days)",
+                      report.held_user_window),
+                     # not folded into the line above: only the SEND-side window holds are in deferred_users, so the
+                     # generic deferral is net of window_after_gate - subtracting held_user_window too subtracted
+                     # check-time holds that were never in it (QA #1681: held 2 / deferred 2 printed 0, not 1)
+                     ("deferred by the gate", max(0, report.deferred_users - getattr(report, "window_after_gate", 0))),
+                     ("refused by the gate", report.refused_users),
                      ("FAILED", report.failed_users)):
         if v:
             parts.append(f"{label} {v}")
