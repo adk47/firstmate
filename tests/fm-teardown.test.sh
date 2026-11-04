@@ -4420,6 +4420,8 @@ test_stale_pool_entry_is_named_with_its_prune_command() {
     "pool-stale-slot: refusal did not name the concrete stale slot path"
   assert_grep 'treehouse prune' "$case_dir/stderr" \
     "pool-stale-slot: refusal did not print the exact prune command"
+  assert_grep "prune it with: ( cd \"$case_dir/project\" && treehouse prune )" "$case_dir/stderr" \
+    "pool-stale-slot: the printed prune command does not quote the project path"
   assert_no_grep 'home-relative paths this host' "$case_dir/stderr" \
     "pool-stale-slot: a stale slot beside a resolvable slot was misread as a foreign HOME"
   if ! kill -0 "$pid" 2>/dev/null; then
