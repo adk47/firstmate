@@ -174,7 +174,7 @@ newest_tick() { printf '%s' "$(newest_out)tick.log"; }
   evil=(HYDRA_ROOT="$E" CVO_ETC="$E/etc" CVO_STATE="$E/state" PY_BIN="$E/py" CVO_RUNNER="$E/r" CVO_OWING="$E/o" CVO_RECEIPTS="$E/rc"
         CVO_HEALTH="$E/h" CVO_ZERO_READ="$E/z" CVO_FRAUD="$E/f" CVO_MAIN_ENV="$E/env" CVO_LEDGER="$E/l.sqlite3" CVO_SCRIPTS="$E/s"
         CVO_RD_SCAN="$E/rd" CVO_RD_CAP=99999 CVO_POLICY="$E/p.json" CVO_CLAIM_LIST="$E/c.json" CVO_CAP=99999 CVO_R1_CAP=99999
-        CVO_CLAIM_CAP=99999 CVO_REFUSAL_SPIKE=1.0 CVO_DOW=9 CVO_NEED_RUNNER="$E/n" CVO_UNSIGNED_ALL=1 CVO_NOW_EPOCH=1 CVO_JUDGE="$E/j" CVO_DEPLOYED_SHA="$E/d" CVO_CHECK_ENTRIES=99999 CVO_TICK_BUDGET_S=999999 CVO_TICK_HARD_S=999999 CVO_CHECK_S_PER_USER=0 CVO_RESERVE_PAD_S=0 CVO_APPLY_S_PER_USER=1 CVO_TICK_ELAPSED0=99 CVO_FULL_CAP_FROM_TEST=uvn-status=2000-01-01T00:00Z CVO_TIMEOUT_BIN="$E/t")
+        CVO_CLAIM_CAP=99999 CVO_REFUSAL_SPIKE=1.0 CVO_DOW=9 CVO_NEED_RUNNER="$E/n" CVO_UNSIGNED_ALL=1 CVO_NOW_EPOCH=1 CVO_JUDGE="$E/j" CVO_DEPLOYED_SHA="$E/d" CVO_CHECK_ENTRIES=99999 CVO_TICK_BUDGET_S=999999 CVO_TICK_HARD_S=999999 CVO_CHECK_S_PER_USER=0 CVO_RESERVE_PAD_S=0 CVO_APPLY_S_PER_USER=1 CVO_TICK_ELAPSED0=99 CVO_FULL_CAP_FROM_TEST=uvn-status=2000-01-01T00:00Z CVO_PER_SEGMENT_FROM_TEST=status-doc-received=2000-01-01T00:00Z CVO_TIMEOUT_BIN="$E/t")
   run -0 env -u BATS_TEST_TMPDIR "${evil[@]}" "$SCRIPT" --print-config
   [[ "$output" != *"$E"* ]]; [[ "$output" != *99999* ]]
   now_line="$(printf '%s\n' "$output" | grep '^NOW_EPOCH=')"; [ "${now_line#NOW_EPOCH=}" -gt 1700000000 ]   # the real clock, never CVO_NOW_EPOCH=1
@@ -219,6 +219,7 @@ RESERVE_PAD_S=300
 APPLY_S_PER_USER=15
 TICK_ELAPSED0=0
 FULL_CAP_FROM_TEST=
+PER_SEGMENT_FROM_TEST=
 TIMEOUT_BIN=/usr/bin/timeout"
   [ "$output" = "$want" ]
   # a BATS_TEST_TMPDIR that is not a directory is not the harness either
@@ -257,6 +258,78 @@ TIMEOUT_BIN=/usr/bin/timeout"
   if grep -q -- "--mode apply" "$CALLS"; then false; fi
 }
 
+@test "outbound tick (h2/p1 713): a SECONDS-form read-back date is honoured by the same reader that arms the family" {
+  # QA #1648 fixed this in the GATE's reached(); the tick had its own minute-only parser, so a date copied from a ledger
+  # row ("2026-11-03T12:56:26Z") parsed as ValueError, exited 1, and the family sat silently SIGNED-only with nothing
+  # logged. One reader for every form the writers produce - and this is the test that fails if it narrows again.
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  sed 's/\[status-doc-received\]="2026-11-03T12:56Z"/[status-doc-received]="2026-11-03T12:56:26Z"/' "$SCRIPT" > "$TEST_TMPDIR/cvo-secs.sh"
+  grep -q 'status-doc-received\]="2026-11-03T12:56:26Z"' "$TEST_TMPDIR/cvo-secs.sh"      # the copy really carries the seconds form
+  STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 run -0 bash "$TEST_TMPDIR/cvo-secs.sh"
+  grep -q -- "--segment paid .*--campaign status-doc-received .*--mode apply" "$CALLS"
+  # and the same date one minute LATER is not reached yet: the seconds form is READ, not rounded up or ignored
+  : > "$CALLS"
+  STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 \
+    CVO_NOW_EPOCH="$(python3 -c 'import datetime as d; print(int(d.datetime(2026,11,3,12,56,20,tzinfo=d.timezone.utc).timestamp()))')" \
+    run -0 bash "$TEST_TMPDIR/cvo-secs.sh"
+  if grep -q "campaign status-doc-received.*--mode apply" "$CALLS"; then false; fi
+}
+
+# r5 19:06Z ruling on #1671 (p1 718): the receipts class's first batch is ONE shared budget of FIRST_CAP=100 per tick
+# across paid + free, paid first, charged by the LEDGER's count of each apply's rows - never 100 per segment.
+r1_apply_cap() { # <segment>: the --max-users of that segment's r1 apply (empty = no apply)
+  grep -- "--segment $1 .*--campaign status-doc-received .*--mode apply" "$CALLS" | grep -o -- "--max-users [0-9]*" | head -1 | awk '{print $2}'
+}
+r1_check_cap() { # <segment>: the --max-users of that segment's r1 recipient check (empty = not checked)
+  grep -- "--segment $1 .*--campaign status-doc-received .*--mode dry-run --max-users [0-9]* --check-recipients" "$CALLS" | grep -o -- "--max-users [0-9]*" | head -1 | awk '{print $2}'
+}
+
+@test "outbound tick (r5 19:06Z): the r1 first batch is ONE shared 100 per tick - paid first, free takes only the remainder" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  # every apply writes 60 ledger rows: r1 paid spends 60 of the shared 100, so r1 free may take at most 40
+  STUB_ROWS=60 CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  [ "$(r1_check_cap paid)" = 100 ]
+  [ "$(r1_apply_cap paid)" = 100 ]
+  [ "$(r1_check_cap free)" = 40 ]
+  [ "$(r1_apply_cap free)" = 40 ]
+  # paid is served first: its apply line precedes free's
+  [ "$(grep -n -- '--campaign status-doc-received .*--mode apply' "$CALLS" | head -1 | grep -c -- '--segment paid')" = 1 ]
+  grep -q "r1-free: shared first-batch budget for status-doc-received: 40 of 100 left this tick (60 sent by earlier segments)" "$CVO_OUT_ROOT"/*/tick.log
+  # the budget is the r1 family's own: uvn-status (60 rows from its paid apply) does not charge it, and keeps its own cap
+  [ "$(grep -- '--segment free .*--campaign uvn-status .*--mode apply' "$CALLS" | grep -o -- '--max-users [0-9]*' | head -1)" = "--max-users 100" ]
+}
+
+@test "outbound tick (r5 19:06Z): once paid has spent the shared 100, the free r1 segment is not checked or applied this tick" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  STUB_ROWS=100 CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  [ "$(r1_apply_cap paid)" = 100 ]
+  [ -z "$(r1_check_cap free)" ]
+  [ -z "$(r1_apply_cap free)" ]
+  grep -q "r1-free: the shared first-batch budget for status-doc-received (100/tick across all segments, r5 19:06Z) was spent by an earlier segment (100 sent)" "$CVO_OUT_ROOT"/*/tick.log
+  # a DRY tick sends nothing, so it charges nothing: both segments are checked at the full shared 100
+  rm -f "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"; : > "$CALLS"
+  STUB_ROWS=100 CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  [ "$(r1_check_cap paid)" = 100 ]
+  [ "$(r1_check_cap free)" = 100 ]
+}
+
+@test "outbound tick (r5 19:06Z ramp): only a dated PER_SEGMENT_FROM line gives 100 per segment, and only FULL_CAP_FROM gives R1_CAP" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  # step 2: per-segment date reached -> free gets its own 100 even after paid wrote 100
+  STUB_ROWS=100 CVO_UNSIGNED_ALL=0 CVO_PER_SEGMENT_FROM_TEST="status-doc-received=2026-11-03T13:00Z" run -0 "$SCRIPT"
+  [ "$(r1_apply_cap paid)" = 100 ]
+  [ "$(r1_apply_cap free)" = 100 ]
+  # ...but a per-segment date in the FUTURE is not reached: still shared
+  : > "$CALLS"
+  STUB_ROWS=100 CVO_UNSIGNED_ALL=0 CVO_PER_SEGMENT_FROM_TEST="status-doc-received=2099-01-01T00:00Z" run -0 "$SCRIPT"
+  [ -z "$(r1_apply_cap free)" ]
+  # step 3: full-cap date reached -> R1_CAP (250) per segment; a full-cap family is never pulled back to a shared 100
+  : > "$CALLS"
+  STUB_ROWS=100 CVO_UNSIGNED_ALL=0 CVO_FULL_CAP_FROM_TEST="status-doc-received=2026-11-03T13:00Z" run -0 "$SCRIPT"
+  [ "$(r1_apply_cap paid)" = 250 ]
+  [ "$(r1_apply_cap free)" = 250 ]
+}
+
 @test "outbound tick ([key=scale-now]): a family with no read-back date in UNSIGNED_FROM is SIGNED-only - checked and sampled, never applied; before v1's sample date it runs at the first cap of 100" {
   touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
   STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
@@ -274,8 +347,20 @@ TIMEOUT_BIN=/usr/bin/timeout"
   # every other family: checked (dry-run --check-recipients) but NO apply
   grep -q "^send --list .*need-asks.json --segment paid --max-entries [0-9]* --start-entry 0 --mode dry-run --max-users 100 --check-recipients" "$CALLS"
   if grep -q "^send .*--mode apply" "$CALLS"; then false; fi
-  if grep -q "campaign status-doc-received.*--mode apply" "$CALLS"; then false; fi
+  # h2 (p1 713, r1-readback-1103 §6): status-doc-received NOW has its read-back date - 2 clean sends on the deployed head
+  # a1e93182 (ledger 7073-7074, no duplicate user, zero-read OK, +60 health), so the receipts class applies in BOTH
+  # segments at FIRST_CAP. That is the 443 free rows becoming sendable at all, not a flood: cap 100 until the sample line.
+  grep -q -- "--segment paid .*--campaign status-doc-received .*--mode apply" "$CALLS"
+  grep -q -- "--segment free .*--campaign status-doc-received .*--mode apply" "$CALLS"
+  [ "$(grep -o -- "--mode apply --max-users [0-9]*" "$CALLS" | grep -c -- "--max-users 100")" -ge 1 ]
   if grep -q "^claim-.*--mode apply" "$CALLS"; then false; fi
+  grep -q "SIGNED-only family" "$(newest_tick)"
+  # and BEFORE its date the receipts class is signed-only like any other - a date in the future must not arm it
+  : > "$CALLS"; STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 CVO_NOW_EPOCH="$(python3 -c 'import datetime as d; print(int(d.datetime(2026,11,3,12,55,tzinfo=d.timezone.utc).timestamp()))')" run -0 "$SCRIPT"
+  if grep -q "campaign status-doc-received.*--mode apply" "$CALLS"; then false; fi
+  # (the family logs its SIGNED-only reason only when it has a non-empty audience; the harness list here is empty, so the
+  # assertion above on the rendered argv is the one that can actually fail - and it does, if the date stops mattering)
+  # #1687: read the NEWEST run's tick.log via its helper, not a glob - this branch first landed before that helper existed.
   grep -q "SIGNED-only family" "$(newest_tick)"
   # 14:3xZ (found on the 14Z live tick): a SIGNED-only family is DONE with the page it checked, so its cursor must
   # advance to where the check stopped. It used to return before advance_cursor, so it re-walked the same first page

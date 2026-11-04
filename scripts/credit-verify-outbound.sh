@@ -110,7 +110,16 @@ declare -A UNSIGNED_FROM=(
   [uvn-status]="2026-10-31T18:02Z"     # AE-send-3: 3/3 = would-send 3, health + zero-read clean (h2 18:05Z, n1 465)
   [status-team-review]="2026-10-31T08:20Z"   # /k-ap 7: 7/7 = the signed set, health + zero-read clean (not a timer family yet)
   [claim-status]="2026-10-31T17:55Z"   # c2 batch 5 FREE 250: ledger 5763-6052 == the checked/signed 250, health + zero-read clean (p1 488)
-  # status-doc-received (r1): UNSET - no r1 batch has read back clean under the strict definition (p1 488)
+  # status-doc-received (r1): the receipts class - "we have the document, it is in the queue", which claims nothing
+  # about the credit, approves nothing and asks for nothing. Armed here on p1's measured read-back (r1-readback-1103.md
+  # §6, re-measured by p1 at 13:00Z, not taken from the sending lane's report): 2 sends on the deployed head a1e93182,
+  # ledger 7073 (marlondisal02@gmail.com) + 7074 (bruehwilermarc@gmail.com), status=sent with NO reason, no user with
+  # two rows that day, zero-read verdict OK (stops/reported/unmeasured all empty), and +60 health api x6 / worker x3 at
+  # 1/1 with 0 restarts. The date is the FIRST send of that batch, so the class is live from the moment the deploy
+  # carries this line. It is paced by the SHARED first-batch budget below (r5 19:06Z): at most FIRST_CAP=100 people
+  # per tick ACROSS paid + free, paid first - so arming it makes the 443 free rows sendable AT ALL (before this line
+  # the free segment was SIGNED-only and every one of them needed a hand-sent batch), never 200 in one tick.
+  [status-doc-received]="2026-11-03T12:56Z"
   # proof-need-ask (E): UNSET (p1 555). First clean coded batch 2026-11-01T03:19:09Z (c2 E batch 1: 3 sent == signed,
   # +60 health + zero-read clean), but it needed two hand-applied /l2 rules (180-d filing, roles) not yet in the
   # renderer - it is dated only from a clean batch on the deployed /l2 renderer
@@ -121,26 +130,51 @@ declare -A FULL_CAP_FROM=()
 # bats only (cfg reads env only under the harness): one dated full-cap entry "family=ISO" to test a REACHED date
 FULL_CAP_FROM_TEST="$(cfg CVO_FULL_CAP_FROM_TEST "")"
 [ -z "$FULL_CAP_FROM_TEST" ] || FULL_CAP_FROM["${FULL_CAP_FROM_TEST%%=*}"]="${FULL_CAP_FROM_TEST#*=}"
+# r5 19:06Z ruling on #1671 (relayed by p1 718): a newly armed family's first batch is ONE budget for the whole tick,
+# not one per segment. Paid and free share the template, the wording, the judge, the row-scoped gate and the ledger
+# semantics, so a copy defect hits whichever people received it - a second hundred buys no new information about the
+# render, it only doubles the number of people who experience a defect the first hundred would have shown.
+# A family LISTED here with an EMPTY date runs every tick on ONE shared FIRST_CAP across all of its segments, charged
+# by the ledger's own count of each apply's sends (FIRST_SPENT), in the order credit_families() calls them - PAID FIRST,
+# free takes the remainder, and a future third segment can only take what is left (never a fresh 100). The ramp, each
+# step a dated line written here by PR after its evidence, never a silent step:
+#   1. listed, no date        -> SHARED FIRST_CAP (100) per tick across all segments
+#   2. PER_SEGMENT_FROM dated -> FIRST_CAP (100) PER SEGMENT per tick (after the first clean monitored tick)
+#   3. FULL_CAP_FROM dated    -> the family's own cap (R1_CAP 250) per segment (after a full monitored day with
+#                                intake-junk = 0 and no gate-refusal spike)
+declare -A PER_SEGMENT_FROM=(
+  [status-doc-received]=""   # r1: SHARED 100 per tick, paid first (r5 19:06Z); dated only after the first clean monitored tick
+)
+# bats only: one "family=ISO" entry to test a REACHED per-segment date
+PER_SEGMENT_FROM_TEST="$(cfg CVO_PER_SEGMENT_FROM_TEST "")"
+[ -z "$PER_SEGMENT_FROM_TEST" ] || PER_SEGMENT_FROM["${PER_SEGMENT_FROM_TEST%%=*}"]="${PER_SEGMENT_FROM_TEST#*=}"
+declare -A FIRST_SPENT=()   # this tick's sends per shared-first family (the ledger's count, never a runner's prose)
 # the bats harness only (cfg's seam): every family unsigned at its full cap, so the family tests exercise the applies
 UNSIGNED_ALL="$(cfg CVO_UNSIGNED_ALL 0)"
 NOW_EPOCH="$(cfg CVO_NOW_EPOCH "$(date -u +%s)")"   # harness-only clock for the date boundaries
 # QA #1587: a dated constant counts only once its UTC time has PASSED (equal = passed); a future or unparseable date
 # is not yet - the family stays signed-only / at the first cap
-reached() { # <YYYY-MM-DDTHH:MMZ>
+reached() { # <YYYY-MM-DDTHH:MMZ | YYYY-MM-DDTHH:MM:SSZ>
+  # QA #1648 (the same defect, one file over): this read ONLY the minute form while every other date reader in the repo
+  # takes both. A date written with seconds - which is what a copied ledger timestamp looks like - parsed as
+  # ValueError, exited 1, and the family sat SILENTLY SIGNED-only with nothing logged: the exact failure the gate's
+  # `reached()` was fixed for, and the same rule applies - one reader for every form the writers produce.
   [ -n "$1" ] || return 1
   py - "$1" "$NOW_EPOCH" <<'PY'
 import sys
 from datetime import datetime, timezone
-try:
-    t = datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%MZ").replace(tzinfo=timezone.utc).timestamp()
-except ValueError:
-    sys.exit(1)
-sys.exit(0 if t <= int(sys.argv[2]) else 1)
+for form in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%MZ"):
+    try:
+        t = datetime.strptime(sys.argv[1], form).replace(tzinfo=timezone.utc).timestamp()
+    except ValueError:
+        continue
+    sys.exit(0 if t <= int(sys.argv[2]) else 1)
+sys.exit(1)
 PY
 }
 if [ "${1:-}" = "--print-config" ]; then
   for v in CVO_HARNESS HYDRA_ROOT KILL KILL2 LIVE_FLAG PAID_FLAG EXCLUDE STATE PY RUNNER OWING RECEIPTS HEALTH ZERO_READ \
-           FRAUD MAIN_ENV LEDGER SCRIPTS_DIR RD_SCAN RD_CAP POLICY CLAIM_LIST CAP R1_CAP CLAIM_CAP DOW REFUSAL_SPIKE NEED_RUNNER FIRST_CAP UNSIGNED_ALL NOW_EPOCH JUDGE DEPLOYED_SHA_FILE CHECK_ENTRIES TICK_BUDGET_S TICK_HARD_S CHECK_S_PER_USER RESERVE_PAD_S APPLY_S_PER_USER TICK_ELAPSED0 FULL_CAP_FROM_TEST TIMEOUT_BIN; do
+           FRAUD MAIN_ENV LEDGER SCRIPTS_DIR RD_SCAN RD_CAP POLICY CLAIM_LIST CAP R1_CAP CLAIM_CAP DOW REFUSAL_SPIKE NEED_RUNNER FIRST_CAP UNSIGNED_ALL NOW_EPOCH JUDGE DEPLOYED_SHA_FILE CHECK_ENTRIES TICK_BUDGET_S TICK_HARD_S CHECK_S_PER_USER RESERVE_PAD_S APPLY_S_PER_USER TICK_ELAPSED0 FULL_CAP_FROM_TEST PER_SEGMENT_FROM_TEST TIMEOUT_BIN; do
     printf '%s=%s\n' "$v" "${!v}"
   done
   exit 0
@@ -442,6 +476,15 @@ family_cap() { # <family> <its cap>
   if [ "$UNSIGNED_ALL" = 1 ] || reached "${FULL_CAP_FROM[$1]:-}"; then echo "$2"
   elif [ "$2" -gt "$FIRST_CAP" ]; then echo "$FIRST_CAP"; else echo "$2"; fi
 }
+# r5 19:06Z: is <family> on the SHARED first-batch budget this tick? Listed in PER_SEGMENT_FROM, its per-segment date
+# not reached, and not past its full-cap line (a full-cap family is never pulled back to a shared 100)
+shared_first() { # <family>
+  [ "$UNSIGNED_ALL" = 1 ] && return 1
+  [[ -v PER_SEGMENT_FROM[$1] ]] || return 1
+  reached "${PER_SEGMENT_FROM[$1]}" && return 1
+  reached "${FULL_CAP_FROM[$1]:-}" && return 1
+  return 0
+}
 
 # QA #1612: the next page's first entry from a run's own page record ({start, end, listed}; end = the first entry that
 # run did not get to), wrapping to 0 at the list's end. Non-zero rc = no page record.
@@ -483,6 +526,17 @@ family() {
   reached "${UNSIGNED_FROM[$fam]:-}" && unsigned="${UNSIGNED_FROM[$fam]}"
   [ "$UNSIGNED_ALL" = 1 ] && unsigned=harness
   cap="$(family_cap "$fam" "$cap")"
+  local shared=0
+  if shared_first "$fam"; then
+    shared=1
+    local left=$(( FIRST_CAP - ${FIRST_SPENT[$fam]:-0} ))
+    if [ "$left" -le 0 ]; then
+      log "$tag: the shared first-batch budget for $fam (${FIRST_CAP}/tick across all segments, r5 19:06Z) was spent by an earlier segment (${FIRST_SPENT[$fam]:-0} sent); this segment waits for the next tick"
+      return 0
+    fi
+    [ "$left" -lt "$cap" ] && cap="$left"
+    log "$tag: shared first-batch budget for $fam: $left of ${FIRST_CAP} left this tick (${FIRST_SPENT[$fam]:-0} sent by earlier segments); cap $cap"
+  fi
   local walk="$cap"; [ "$paged" = 1 ] && [ "$CHECK_ENTRIES" -gt "$cap" ] && walk="$CHECK_ENTRIES"
   local worst=$(( 2 * walk * CHECK_S_PER_USER + RESERVE_PAD_S ))
   if [ $(( $(elapsed) + worst )) -gt "$TICK_HARD_S" ]; then
@@ -564,6 +618,9 @@ print(sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True).execute(
     (int(sys.argv[2]), int(sys.argv[3]), "sent", "attempted")).fetchone()[0])' \
     "$LEDGER" "$lo" "$hi" 2>/dev/null || echo -1)"
   [ "$nsent" -ge 0 ] || { autokill "$tag: ledger unreadable after the apply"; return 1; }
+  # r5 19:06Z: charge the shared first-batch budget with the LEDGER's count (sent + attempted), before any rail below
+  # can return - a later segment must see every row this apply wrote, whatever the verdicts on it
+  [ "$shared" = 1 ] && FIRST_SPENT[$fam]=$(( ${FIRST_SPENT[$fam]:-0} + nsent ))
   # QA #1541 (claim runners print 'sent N', credit runners 'N sent'): the spike reads the LEDGER's own count of this
   # apply's sends - never a grep on a runner's prose, which read 0 for claims and wrote the permanent kill file
   [ "$(spike "$OUT/$tag-apply.json" "$nsent")" = "ok" ] || { autokill "$tag refusal spike (> $REFUSAL_SPIKE of attempts refused)"; return 1; }
