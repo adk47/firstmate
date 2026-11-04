@@ -12,8 +12,11 @@
 #
 # Modes (files, never hand steps):
 #   /etc/hydra/credit-verify-outbound.disabled      kill switch: the whole tick does nothing (written by auto-kill too)
-#   /etc/hydra/credit-verify-outbound.live          absent = DRY-RUN tick (outcomes + bodies, nothing sent)
-#   /etc/hydra/credit-verify-outbound.paid-enabled  absent = paid segments are dry-run even on a live tick
+#   policies/credit-verify-outbound.json armed_families  [key=arm-per-family] {family: {live, paid}} - a family is
+#                                                       armed ONLY by its own row; a family with no row is not armed,
+#                                                       and a malformed/unreadable block arms NOTHING (fail closed).
+#   /etc/hydra/credit-verify-outbound.live          LEGACY (used only while armed_families is absent): absent = DRY-RUN
+#   /etc/hydra/credit-verify-outbound.paid-enabled  LEGACY: absent = paid segments are dry-run even on a live tick
 #                                                   (p1: paid joins after one clean free day)
 #   /etc/hydra/credit-verify-outbound.exclude       user ids held out of every family (one per line; the
 #                                                   transitional hand-exclusions of the pending rule PRs)
@@ -163,13 +166,20 @@ reached() { # <YYYY-MM-DDTHH:MMZ | YYYY-MM-DDTHH:MM:SSZ>
   py - "$1" "$NOW_EPOCH" <<'PY'
 import sys
 from datetime import datetime, timezone
-for form in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%MZ"):
+# QA #1648 finding 3: read_arming() accepts BOTH the minute form and the seconds form, but this parser accepted only the
+# minute form - so a row dated "2026-11-03T15:00:30Z" validated, logged as a valid armed policy, and then never applied
+# (reached() failed, silently), with no malformed page. One validator and one reader, or the pair lies.
+FORMS = ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%MZ")
+t = None
+for fmt in FORMS:
     try:
-        t = datetime.strptime(sys.argv[1], form).replace(tzinfo=timezone.utc).timestamp()
+        t = datetime.strptime(sys.argv[1], fmt).replace(tzinfo=timezone.utc).timestamp()
+        break
     except ValueError:
         continue
-    sys.exit(0 if t <= int(sys.argv[2]) else 1)
-sys.exit(1)
+if t is None:
+    sys.exit(1)
+sys.exit(0 if t <= int(sys.argv[2]) else 1)
 PY
 }
 if [ "${1:-}" = "--print-config" ]; then
@@ -209,15 +219,16 @@ printf '%s %s\n' "$$" "$(date -u +%s)" > "$STATE/tick.holder"
 if [ -r "$MAIN_ENV" ]; then set -a; # shellcheck source=/dev/null
   . "$MAIN_ENV"; set +a; fi
 LIVE=0; [ -e "$LIVE_FLAG" ] && LIVE=1
-# QA #1541: no live send without the zero-read reader deployed - the tick runs DRY instead (and says so), never a
-# first send that can only auto-kill
-if [ "$LIVE" = 1 ] && [ ! -r "$ZERO_READ" ]; then
-  LIVE=0; ZR_MISSING=1
-fi
 PAID_LIVE=0; [ "$LIVE" = 1 ] && [ -e "$PAID_FLAG" ] && PAID_LIVE=1
-EXCL_ARGS=(); [ -s "$EXCLUDE" ] && EXCL_ARGS=(--exclude-users "$EXCLUDE")
-RUN_START="$(date -u +%FT%TZ)"
-log "tick start: live=$LIVE paid_live=$PAID_LIVE cap=$CAP out=$OUT deployed=$(cat "$DEPLOYED_SHA_FILE" 2>/dev/null || echo unreadable)"
+# QA #1541: no live send without the zero-read reader deployed - the tick runs DRY instead (and says so), never a first
+# send that can only auto-kill.
+# QA #1648 CRITICAL: this guard is SAFETY, so it is measured from the READER, never from the legacy live flag. Gating it
+# on `LIVE=1` meant that under policy arming - where the legacy flag file may not exist at all - an armed row could
+# apply with no zero-read reader deployed, i.e. the one send the whole guard exists to prevent.
+ZR_MISSING=0
+if [ ! -r "$ZERO_READ" ]; then
+  LIVE=0; PAID_LIVE=0; ZR_MISSING=1
+fi
 
 notify() { # <text>: 0 only when the notifier ACCEPTED it (missing notifier / a Slack failure = 1)
   # shellcheck source=/dev/null
@@ -568,8 +579,10 @@ family() {
   if [ "$rc" = 3 ]; then log "$tag: the check accepted nobody; no apply this tick (the family is done)"; advance_cursor "$tag" "$cur_file" "$OUT/$tag-check.json" "$cur"; return 0; fi
   [ "$rc" = 0 ] || { log "$tag: the rendered bodies are not the check's accepted set (rc=$rc); no apply, tick stops"; return 1; }
   judge_shadow "$tag"
-  local live="$LIVE"; [ "$seg" = "paid" ] && live="$PAID_LIVE"
-  if [ "$live" != 1 ]; then log "$tag: DRY-RUN tick (no send)"; advance_cursor "$tag" "$cur_file" "$OUT/$tag-check.json" "$cur"; return 0; fi
+  # [key=arm-per-family]: armed by THIS family's own policy row (or, before armed_families exists, by the two global
+  # files); the check already ran, so a dry family proves its readiness and simply does not apply
+  local live; live="$(family_armed "$name" "$seg")"
+  if [ "$live" != 1 ]; then log "$tag: DRY-RUN tick (no send): arming=$ARMING $name=$([ "$live" = 1 ] && echo armed || echo "not armed")"; advance_cursor "$tag" "$cur_file" "$OUT/$tag-check.json" "$cur"; return 0; fi
   if [ -z "$unsigned" ]; then
     # 14:3xZ (found on the 14Z tick): this branch used to return WITHOUT advancing, so a signed-only family re-walked
     # the SAME first page on every tick for ever - it never reached entry 201, and it re-paid the page's check work every
@@ -690,6 +703,134 @@ py "$OWING" --out "$OUT/owing.json" --class-out "uvn=$OUT/owing-uvn.json" > "$OU
 py "$RECEIPTS" --out-dir "$OUT/receipts" > "$OUT/receipts.out" 2>&1 || { log "receipts builder failed: $(tail -c 300 "$OUT/receipts.out")"; exit 1; }
 log "owing classes: $(tail -1 "$OUT/owing.out" | py -c 'import json,sys; print(json.dumps(json.loads(sys.stdin.read() or "{}").get("classes", {})))' 2>/dev/null) -> uvn-status family gets the uvn class (owing-uvn.json, built by the builder)"
 log "audiences: owing $(head -c 300 "$OUT/owing.out"); receipts $(head -c 300 "$OUT/receipts.out")"
+
+# [key=arm-per-family] (l1 ruling 2026-11-02, ruling-never-a-bottleneck-1102.md): arming is PER FAMILY, read from the
+# policy file's armed_families, so a proven class moves along without arming everything - the defect was that two GLOBAL
+# files meant ONE decision for six families, so "move claim-status along" needed every other family armed too, and the
+# arming itself became a Muso-side review wait (Aaron's standing rule: waiting is a defect). Three sources, named in the
+# log and never inferred:
+#   policy    - armed_families is present: a family is armed ONLY by its own row; a family with no row is NOT armed.
+#   legacy    - the key is absent: the two global files decide, so writing them still arms everything (the 00Z GO holds).
+#   malformed - armed_families (or one of its rows) is malformed: NOTHING is armed (fail closed) and the tick PAGES;
+#                it keeps checking, because a config typo must not cost the night's read-only work.
+#   unreadable - the policy FILE cannot be read: the tick stops and kills, exactly as an unreadable cap read always has
+#                (QA #1541) - a policy we cannot read is an operational failure, not an exhausted cap.
+# A dry-run family still CHECKS (that is how it proves readiness); arming gates the APPLY only.
+ARMING="legacy"; ARMED_LIST=""
+declare -A ARMED_LIVE=() ARMED_PAID=()
+read_arming() { # <policy path>: prints "<source>" then "<family> <live> <paid> <unsigned_from|->" lines
+  # every python subprocess of the tick runs under the ONE deadline wrapper (b1 560) - no exceptions
+  py -I -c 'import json, sys
+try:
+    doc = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, ValueError):
+    print("unreadable"); raise SystemExit(0)
+if not isinstance(doc, dict):
+    print("unreadable"); raise SystemExit(0)
+if "armed_families" not in doc:
+    print("legacy"); raise SystemExit(0)
+armed = doc["armed_families"]
+if not isinstance(armed, dict) or not armed:
+    print("malformed"); raise SystemExit(0)
+import datetime as _dt
+# QA #1648 finding 1: SEMANTIC errors have to reach the malformed path too. A type check is not a value check, and a
+# typo that only logs arms nothing while the tick reports a healthy policy - the family then stalls indefinitely with
+# no page, which is the opposite of what "malformed pages" promises. Both checks below run BEFORE the source line is
+# printed, so a typo arms NOTHING and pages instead of being read as "policy mode, family dry".
+KNOWN = {"r1", "status-doc-received", "uvn-status", "claim-status", "claim-proof-ask", "proof-need-ask", "reply-due"}
+def _instant(v):
+    for fmt in ("%Y-%m-%dT%H:%MZ", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            _dt.datetime.strptime(v, fmt)
+            return True
+        except ValueError:
+            pass
+    return False
+# QA #1648 finding 2 (the alias collision): two spellings of ONE family both parse, and sorted iteration then decides
+# the outcome by STRING ORDER - `r1: {live:false}` plus `status-doc-received: {live:true}` disarms in one line and arms
+# in the next, so an operator who disarmed a family can still have it apply. Canonicalise FIRST and refuse the whole
+# policy when a family is named twice: a policy we cannot read unambiguously arms NOTHING and pages.
+CANON = {"status-doc-received": "r1"}
+def _canon(fam):
+    return CANON.get(fam, fam)
+rows, claim = [], {}
+dupes = []
+for fam, row in sorted(armed.items()):
+    if not isinstance(row, dict) or not isinstance(row.get("live"), bool) or not isinstance(row.get("paid"), bool):
+        print("malformed"); raise SystemExit(0)
+    if fam not in KNOWN:
+        print("malformed"); raise SystemExit(0)        # a misspelled family would arm nothing in silence
+    _c = _canon(fam)
+    if _c in claim:
+        dupes.append("%s and %s both arm the %s family" % (claim[_c], fam, _c))
+    else:
+        claim[_c] = fam
+    uf = row.get("unsigned_from")
+    if uf is not None and not isinstance(uf, str):
+        print("malformed"); raise SystemExit(0)        # a malformed date is never a quiet SIGNED-only
+    if uf is not None and not _instant(uf):
+        print("malformed"); raise SystemExit(0)        # "tomorrow" would arm, never apply, and never page
+    rows.append("%s %d %d %s" % (fam, 1 if row["live"] else 0, 1 if row["paid"] else 0, uf or "-"))
+if dupes:
+    print("malformed")
+    print("; ".join(dupes))                            # the page names the rows, so the operator knows which pair
+    raise SystemExit(0)
+print("policy")
+for r in rows: print(r)' "$1" 2>/dev/null || echo "unreadable"
+}
+ARMING_ROWS="$(read_arming "$POLICY")"
+ARMING="$(printf '%s\n' "$ARMING_ROWS" | head -1)"
+if [ "$ARMING" = "policy" ]; then
+  while read -r _fam _live _paid _ufrom; do
+    case "$_fam" in ""|policy) continue ;; esac
+    # QA #1648 finding 2: the tick names one family differently from its campaign - the r1 receipt IS the
+    # status-doc-received campaign. Keyed naively, a row called `status-doc-received` armed nothing (family_armed is
+    # asked for `r1`) and a row called `r1` dated nothing (UNSIGNED_FROM is read as `status-doc-received`): a silent
+    # miss either way. Both spellings are accepted and mapped to the key EACH reader actually uses.
+    _key="$_fam"; _datekey="$_fam"
+    case "$_fam" in
+      r1|status-doc-received) _key="r1"; _datekey="status-doc-received" ;;
+      uvn-status|claim-status|claim-proof-ask|proof-need-ask|reply-due) ;;
+      *) log "ARMING ROW IGNORED: '$_fam' is not a family this tick runs (r1|status-doc-received, uvn-status, claim-status, claim-proof-ask, proof-need-ask); it arms nothing"
+         continue ;;   # read_arming() already fails such a row closed; this is the belt to its braces
+    esac
+    ARMED_LIVE["$_key"]="$_live"; ARMED_PAID["$_key"]="$_paid"
+    # [key=dated-windows-are-data]: the family's unsigned date is DATA too, so arming a family is ONE reviewed row and
+    # not "a policy flag plus a code date".
+    # QA #1648 finding 2 (the default): a row with NO date must CLEAR the code's built-in date, not inherit it. Inheriting
+    # meant "live:true and no date" could still apply on a date the operator never saw in the row they reviewed - the
+    # opposite of what the row says. This ASSIGNMENT is the point: it is the one place the row overrides the code.
+    case "$_ufrom" in
+      ""|-) UNSIGNED_FROM["$_datekey"]="" ;;
+      *) UNSIGNED_FROM["$_datekey"]="$_ufrom" ;;
+    esac
+    _dating=""; case "$_ufrom" in ""|-) _dating=" (SIGNED-only: the row sets no unsigned_from)" ;; *) _dating=" from $_ufrom" ;; esac
+    ARMED_LIST="${ARMED_LIST:+$ARMED_LIST, }${_key}=$([ "$_live" = 1 ] && echo live || echo dry)/$([ "$_paid" = 1 ] && echo paid || echo dry)$_dating"
+  done <<< "$ARMING_ROWS"
+  [ -n "$ARMED_LIST" ] || ARMED_LIST="(none)"
+fi
+# <family> <segment> -> 1 armed (may apply) | 0 not armed (check only). The zero-read guard is safety, not arming: no
+# live send anywhere without the reader deployed (QA #1541).
+family_armed() {
+  local v
+  case "$ARMING" in
+    policy) v="${ARMED_LIVE[$1]:-0}"; [ "$2" = "paid" ] && v="${ARMED_PAID[$1]:-0}" ;;
+    legacy) v="$LIVE"; [ "$2" = "paid" ] && v="$PAID_LIVE" ;;
+    malformed|*) v=0 ;;
+  esac
+  [ "${ZR_MISSING:-0}" = 1 ] && v=0
+  printf '%s' "$v"
+}
+EXCL_ARGS=(); [ -s "$EXCLUDE" ] && EXCL_ARGS=(--exclude-users "$EXCLUDE")
+RUN_START="$(date -u +%FT%TZ)"
+log "tick start: live=$LIVE paid_live=$PAID_LIVE arming=$ARMING${ARMED_LIST:+ armed: $ARMED_LIST} cap=$CAP out=$OUT deployed=$(cat "$DEPLOYED_SHA_FILE" 2>/dev/null || echo unreadable)"
+if [ "$ARMING" = "unreadable" ]; then
+  autokill "cap source unreadable ($POLICY): the arming read cannot open it"; exit 1
+elif [ "$ARMING" = "malformed" ]; then
+  ARMING_WHY="$(printf '%s\n' "$ARMING_ROWS" | tail -n +2 | head -1)"
+  log "ARMING MALFORMED: $POLICY armed_families (or a row of it) is malformed${ARMING_WHY:+ - $ARMING_WHY}; NOTHING is armed this tick - every family checks, none applies"
+  page "credit-verify-outbound: armed_families malformed in $POLICY${ARMING_WHY:+ ($ARMING_WHY)} - nothing armed (fail closed)"
+fi
 
 # ---- the families, in p1's order (paid first; a family whose builder/runner is not deployed is logged) ---------
 log "uvn-reminder-7: no deployed audience builder/runner on this tree yet (rides its PR); skipped"

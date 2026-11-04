@@ -506,6 +506,216 @@ PY
   if grep -q -- "reply-due" "$CALLS"; then false; fi
 }
 
+@test "[key=arm-per-family] a family is armed by its OWN policy row: uvn-status applies while a family with no row (or live:false) checks and never applies - and the two GLOBAL files cannot arm it" {
+  # l1 ruling 2026-11-02 (ruling-never-a-bottleneck-1102.md): the defect was that two GLOBAL files made arming one
+  # decision for six families, so moving a proven class along needed everything else armed too.
+  jq '.armed_families = {"uvn-status": {"live": true, "paid": false}}' \
+    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"
+  export CVO_POLICY="$TEST_TMPDIR/p.json"
+  run -0 "$SCRIPT"
+  out="$(ls -d "$CVO_OUT_ROOT"/*)"
+  grep -q "arming=policy armed: uvn-status=live/dry" "$out/tick.log"
+  grep -q -- "--segment free .*--campaign uvn-status .*--mode apply" "$CALLS"   # its own row arms it
+  if grep -q -- "--campaign status-doc-received .*--mode apply" "$CALLS"; then false; fi   # no row = not armed
+  grep -q "r1-paid: DRY-RUN tick (no send): arming=policy r1=not armed" "$out/tick.log"
+  # THE POINT: writing the two legacy files changes nothing once armed_families exists
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  : > "$CALLS"; run -0 "$SCRIPT"
+  if grep -q -- "--campaign status-doc-received .*--mode apply" "$CALLS"; then false; fi
+  if grep -q -- "--segment paid .*--mode apply" "$CALLS"; then false; fi            # paid:false is paid:false
+}
+
+@test "[key=arm-per-family] live and paid are per family, and the unsigned date rides the same row - a future date keeps that family SIGNED-only while a reached one applies" {
+  jq '.armed_families = {"uvn-status": {"live": true, "paid": true, "unsigned_from": "2099-01-01T00:00Z"},
+                         "r1": {"live": true, "paid": true}}' \
+    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"
+  export CVO_POLICY="$TEST_TMPDIR/p.json" CVO_UNSIGNED_ALL=0      # let the dates decide, as production does
+  run -0 "$SCRIPT"
+  out="$(ls -d "$CVO_OUT_ROOT"/*)"
+  grep -q "uvn-status=live/paid from 2099-01-01T00:00Z" "$out/tick.log"
+  # uvn-status: armed but its date has not passed -> checked, never applied
+  if grep -q -- "--campaign uvn-status .*--mode apply" "$CALLS"; then false; fi
+  grep -q "uvn-status-paid: SIGNED-only family (no read-back date in UNSIGNED_FROM): checked, not applied" "$out/tick.log"
+  # r1: armed by its row and the row carries its own date... which it does not, so it too is SIGNED-only - a live row
+  # with no date is never an apply
+  if grep -q -- "--campaign status-doc-received .*--mode apply" "$CALLS"; then false; fi
+}
+
+@test "[key=arm-per-family] (QA #1648 CRITICAL) the zero-read guard is measured from the READER, so an armed policy row cannot apply when the reader is not deployed - the legacy flag file's absence must not disarm the safety check" {
+  # the guard exists because a send with no zero-read reader can only auto-kill. It was gated on LIVE, which under policy
+  # arming can be 0 with no legacy flag file at all - so an armed row applied with the guard never evaluated.
+  jq '.armed_families = {"uvn-status": {"live": true, "paid": false, "unsigned_from": "2020-01-01T00:00Z"}}' \
+    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"
+  export CVO_POLICY="$TEST_TMPDIR/p.json" CVO_UNSIGNED_ALL=0
+  [ ! -e "$CVO_ETC/credit-verify-outbound.live" ]     # policy mode: the legacy flag file need not exist
+  CVO_ZERO_READ="$TEST_TMPDIR/not-deployed.py" run -0 "$SCRIPT"
+  out="$(ls -d "$CVO_OUT_ROOT"/*)"
+  grep -q "LIVE REFUSED: the zero-read reader" "$out/tick.log"
+  grep -q "uvn-status-paid: DRY-RUN tick (no send): arming=policy uvn-status=not armed" "$out/tick.log"
+  if grep -q -- "--mode apply" "$CALLS"; then false; fi
+  # the same row WITH the reader deployed applies: the guard is the only difference
+  : > "$CALLS"; rm -rf "$CVO_OUT_ROOT"
+  run -0 "$SCRIPT"
+  grep -q -- "--campaign uvn-status .*--mode apply" "$CALLS"
+}
+
+@test "[key=arm-per-family] (QA #1648 finding 2) the r1 receipt is armed by EITHER spelling - the tick's family name or its campaign name - because each reader asks for a different key" {
+  # family_armed is asked for "r1"; UNSIGNED_FROM is read as "status-doc-received". A row using one spelling armed
+  # nothing and dated nothing: a silent miss with no log line to blame.
+  jq '.armed_families = {"status-doc-received": {"live": true, "paid": true, "unsigned_from": "2020-01-01T00:00Z"}}' \
+    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"
+  export CVO_POLICY="$TEST_TMPDIR/p.json" CVO_UNSIGNED_ALL=0
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  run -0 "$SCRIPT"
+  out="$(ls -d "$CVO_OUT_ROOT"/*)"
+  grep -q "r1=live/paid from 2020-01-01T00:00Z" "$out/tick.log"
+  grep -q -- "--campaign status-doc-received .*--mode apply" "$CALLS"
+  # and the same row spelled with the tick's own name behaves identically
+  : > "$CALLS"; rm -rf "$CVO_OUT_ROOT"
+  jq '.armed_families = {"r1": {"live": true, "paid": true, "unsigned_from": "2020-01-01T00:00Z"}}' \
+    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"
+  run -0 "$SCRIPT"
+  grep -q -- "--campaign status-doc-received .*--mode apply" "$CALLS"
+}
+
+@test "[key=arm-per-family] (QA #1648 findings 1+2) a row with NO unsigned_from CLEARS the code's built-in date instead of inheriting it, and a misspelled family key is MALFORMED - nothing armed, paged" {
+  # "live:true and no date" must mean SIGNED-only: inheriting the code date would apply on a date the reviewer never saw
+  # in the row they signed - the opposite of what the row says.
+  jq '.armed_families = {"uvn-status": {"live": true, "paid": true}}' \
+    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"
+  export CVO_POLICY="$TEST_TMPDIR/p.json" CVO_UNSIGNED_ALL=0      # production: the dates decide
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  run -0 "$SCRIPT"
+  out="$(ls -d "$CVO_OUT_ROOT"/*)"
+  # uvn-status HAS a built-in code date in the past; the row clears it
+  grep -q "uvn-status=live/paid (SIGNED-only: the row sets no unsigned_from)" "$out/tick.log"
+  grep -q "uvn-status-paid: SIGNED-only family (no read-back date in UNSIGNED_FROM): checked, not applied" "$out/tick.log"
+  if grep -q -- "--campaign uvn-status .*--mode apply" "$CALLS"; then false; fi
+  # a misspelled family key is a SEMANTIC error (QA #1648 finding 1), so it is malformed in its own right - not
+  # "policy mode, that row ignored" while the family the operator meant stays dry for ever
+  rm -rf "$CVO_OUT_ROOT"; : > "$CALLS"
+  jq '.armed_families = {"uvn-status": {"live": true, "paid": true}, "uvn_status": {"live": true, "paid": true}}' \
+    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"
+  run -0 "$SCRIPT"
+  out="$(ls -d "$CVO_OUT_ROOT"/*)"
+  grep -q "arming=malformed" "$out/tick.log"
+  grep -q "ARMING MALFORMED: .*armed_families (or a row of it) is malformed; NOTHING is armed this tick" "$out/tick.log"
+}
+
+@test "[key=arm-per-family] (QA #1648 finding 1) a date the calendar cannot produce is MALFORMED and pages, not a silent SIGNED-only stall - the same for a value that is not a date at all" {
+  # "tomorrow" is a string, so the type check passed; reached() then failed, the family stayed dry for ever, and the
+  # malformed page the operator was promised never fired. A typo must be loud on an unattended tick.
+  jq '.armed_families = {"r1": {"live": true, "paid": true, "unsigned_from": "tomorrow"}}' \
+    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"
+  export CVO_POLICY="$TEST_TMPDIR/p.json"
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  run -0 "$SCRIPT"
+  out="$(ls -d "$CVO_OUT_ROOT"/*)"
+  grep -q "arming=malformed" "$out/tick.log"
+  grep -q "ARMING MALFORMED" "$out/tick.log"
+  [ "$(applies)" -eq 0 ]
+  # an impossible calendar date (Feb 30) and a bad hour are the same failure, not "a date in the future"
+  for bad in "2026-02-30T00:00Z" "2026-11-03T25:00Z" "2026-13-01T00:00Z"; do
+    rm -rf "$CVO_OUT_ROOT"; : > "$CALLS"
+    jq --arg d "$bad" '.armed_families = {"r1": {"live": true, "paid": true, "unsigned_from": $d}}' \
+      "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"
+    run -0 "$SCRIPT"
+    out="$(ls -d "$CVO_OUT_ROOT"/*)"
+    grep -q "arming=malformed" "$out/tick.log"
+    [ "$(applies)" -eq 0 ]
+  done
+  # and a well-formed instant still arms: the check rejects typos, not dates
+  rm -rf "$CVO_OUT_ROOT"; : > "$CALLS"
+  jq '.armed_families = {"r1": {"live": true, "paid": true, "unsigned_from": "2020-01-01T00:00Z"}}' \
+    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"
+  run -0 "$SCRIPT"
+  grep -q -- "--campaign status-doc-received .*--mode apply" "$CALLS"
+}
+
+@test "[key=arm-per-family] a malformed armed_families block arms NOTHING (fail closed, paged, tick continues) while an unreadable policy FILE stops and kills" {
+  jq '.armed_families = {"uvn-status": {"live": true}}' \
+    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p.json"   # no "paid"
+  export CVO_POLICY="$TEST_TMPDIR/p.json"
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"  # must not matter
+  run -0 "$SCRIPT"
+  out="$(ls -d "$CVO_OUT_ROOT"/*)"
+  grep -q "arming=malformed" "$out/tick.log"
+  grep -q "ARMING MALFORMED: .*armed_families (or a row of it) is malformed; NOTHING is armed this tick" "$out/tick.log"
+  [ "$(applies)" -eq 0 ]
+  # an UNREADABLE policy file is not the same state: a policy we cannot read is an operational failure, so the tick
+  # stops and kills (QA #1541's rule for the cap read), never a silent dry run
+  rm -f "$CVO_ETC/credit-verify-outbound.disabled"; : > "$TEST_TMPDIR/p.json"; : > "$CALLS"
+  rm -rf "$CVO_OUT_ROOT"; run -1 "$SCRIPT"
+  [ "$(applies)" -eq 0 ]
+  grep -q "cap source unreadable" "$CVO_ETC/credit-verify-outbound.disabled"
+}
+
+@test "[key=arm-per-family] a SECONDS-form unsigned_from is read by the same parser that validated it - the family applies once the date passes" {
+  # QA #1648 finding 3: read_arming() accepted "%Y-%m-%dT%H:%M:%SZ" AND "%Y-%m-%dT%H:%MZ", but reached() parsed only the
+  # minute form. So a seconds-dated row validated, logged "armed ... from 2020-01-01T00:00:30Z", and then never applied -
+  # a silent SIGNED-only with no malformed page, which is the exact failure the semantic checks were added to prevent.
+  jq '.armed_families = {"uvn-status": {"live": true, "paid": true, "unsigned_from": "2020-01-01T00:00:30Z"}}' \
+    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p-sec.json"
+  export CVO_POLICY="$TEST_TMPDIR/p-sec.json" CVO_UNSIGNED_ALL=0   # the harness default forces unsigned; the DATE is the question here
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  run -0 "$SCRIPT"
+  out="$(ls -d "$CVO_OUT_ROOT"/*)"
+  grep -q "arming=policy" "$out/tick.log"
+  grep -q -- "--mode apply" "$CALLS"        # a date in 2020 is past: the row must APPLY, not sit dry forever
+  # and the minute form still works - the fix is a wider reader, not a different one
+  jq '.armed_families = {"uvn-status": {"live": true, "paid": true, "unsigned_from": "2020-01-01T00:00Z"}}' \
+    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p-min.json"
+  rm -f "$CVO_ETC/credit-verify-outbound.disabled"; : > "$CALLS"; rm -rf "$CVO_OUT_ROOT"
+  export CVO_POLICY="$TEST_TMPDIR/p-min.json"
+  run -0 "$SCRIPT"
+  grep -q -- "--mode apply" "$CALLS"
+  # a FUTURE seconds-form date is still SIGNED-only: the widening must not turn every date into "reached"
+  jq '.armed_families = {"uvn-status": {"live": true, "paid": true, "unsigned_from": "2099-01-01T00:00:30Z"}}' \
+    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p-fut.json"
+  rm -f "$CVO_ETC/credit-verify-outbound.disabled"; : > "$CALLS"; rm -rf "$CVO_OUT_ROOT"
+  export CVO_POLICY="$TEST_TMPDIR/p-fut.json"
+  run -0 "$SCRIPT"
+  # SIGNED-only, not silent: the row still applies, but only under the two-seat signature. Before the fix this looked
+  # identical to the past date, because `reached()` could never answer yes at all.
+  grep -q "uvn-status-paid: SIGNED-only family (no read-back date in UNSIGNED_FROM): checked, not applied" \
+    "$CVO_OUT_ROOT"/*/tick.log
+}
+
+@test "[key=arm-per-family] two rows that name ONE family by different spellings are MALFORMED - a disarm cannot be overruled by string order" {
+  # QA #1648 finding 2 (the alias collision): `r1` and `status-doc-received` are the same family. Both parse, and sorted
+  # iteration mapped both to ARMED_LIVE[r1] - so `r1: {live:false}` followed by `status-doc-received: {live:true}`
+  # re-armed a family a human had explicitly disarmed, decided by STRING ORDER of two names for one thing.
+  jq '.armed_families = {"r1": {"live": false, "paid": false},
+                         "status-doc-received": {"live": true, "paid": true, "unsigned_from": "2020-01-01T00:00Z"}}' \
+    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p-dupe.json"
+  export CVO_POLICY="$TEST_TMPDIR/p-dupe.json"
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  run -0 "$SCRIPT"
+  out="$(ls -d "$CVO_OUT_ROOT"/*)"
+  grep -q "arming=malformed" "$out/tick.log"                                  # fail closed, nothing armed
+  grep -q "r1 and status-doc-received both arm the r1 family" "$out/tick.log"  # and the operator is told WHICH pair
+  [ "$(applies)" -eq 0 ]
+  # order-independence: the other way round is the SAME policy with the same outcome, so the test cannot encode one order
+  jq '.armed_families = {"status-doc-received": {"live": true, "paid": true, "unsigned_from": "2020-01-01T00:00Z"},
+                         "r1": {"live": false, "paid": false}}' \
+    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p-dupe2.json"
+  rm -f "$CVO_ETC/credit-verify-outbound.disabled"; : > "$CALLS"; rm -rf "$CVO_OUT_ROOT"
+  export CVO_POLICY="$TEST_TMPDIR/p-dupe2.json"
+  run -0 "$SCRIPT"
+  out="$(ls -d "$CVO_OUT_ROOT"/*)"
+  grep -q "arming=malformed" "$out/tick.log"
+  [ "$(applies)" -eq 0 ]
+  # a policy naming each family ONCE still arms: this is a rejection of ambiguity, not of the alias
+  jq '.armed_families = {"status-doc-received": {"live": true, "paid": true, "unsigned_from": "2020-01-01T00:00Z"},
+                         "uvn-status": {"live": true, "paid": true, "unsigned_from": "2020-01-01T00:00Z"}}' \
+    "$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json" > "$TEST_TMPDIR/p-one.json"
+  rm -f "$CVO_ETC/credit-verify-outbound.disabled"; : > "$CALLS"; rm -rf "$CVO_OUT_ROOT"
+  export CVO_POLICY="$TEST_TMPDIR/p-one.json"
+  run -0 "$SCRIPT"
+  out="$(ls -d "$CVO_OUT_ROOT"/*)"
+  grep -q "arming=policy" "$out/tick.log"
+}
+
 @test "outbound tick: LIVE applies the FREE segments only; paid needs its own flag (p1: paid after one clean free day)" {
   touch "$CVO_ETC/credit-verify-outbound.live"
   run -0 "$SCRIPT"
