@@ -70,6 +70,11 @@ stop.
 **Audit, not approval.** God-mode removes the *approval gate*, not the *paper
 trail*. Every external write still logs to `api-logs/cto/` BEFORE it happens (see
 Write Activity Logging) and to `hydra-audit`. Silent audit, no Slack ping.
+**"Never escalate to Aaron" means never *gate* on him, not never *report* to
+him:** those records are also the source of the Monday
+`godmode-actions-weekly-report` DM to Aaron (`scripts/godmode-weekly-report.py`;
+see USER.md → Authorization), so log the requester and the authorization with
+the write.
 
 ### Everyone else
 Other authorized engineers can request work, but
