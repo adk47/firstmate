@@ -2503,6 +2503,25 @@ class SendPath(unittest.TestCase):
         self.assertIn("the ask letter is refused", line)
         self.assertIn("mailbox gog cannot write", line)
 
+    def test_the_watchdog_names_a_row_with_no_route_before_anything_is_attempted(self):
+        """The 24 unroutable rows have no ledger record yet (nothing has ever been sent). The route check runs first,
+        so the page names the blocker on day one instead of after a failed attempt."""
+        rid, _ = self.s.upsert({"keys": ["notices:6"], "channel": "notices", "class": "privacy_erasure",
+                                "received_at": "2026-09-01T10:00:00Z", "requester_email": "x@example.com",
+                                "gmail_thread": "t-9", "due_at": "2026-10-25T10:00:00Z"})
+        self.assertIsNone(self.s.send_record(rid, "ask"))
+        line = [ln for _, ln in self.run.watchdog_rows(datetime(2026, 11, 4, tzinfo=timezone.utc)) if f"#{self.s.get(rid)['register_no']} " in ln][0]
+        self.assertIn("no route for a letter", line)
+        self.assertIn("mailbox gog cannot write", line)
+
+    def test_a_row_with_a_route_still_reads_as_plain_no_letter_sent(self):
+        rid, _ = self.s.upsert({"keys": ["intercom:77"], "channel": "intercom", "class": "privacy_erasure",
+                                "received_at": "2026-09-01T10:00:00Z", "conversation_id": "215476650395999",
+                                "due_at": "2026-10-25T10:00:00Z"})
+        line = [ln for _, ln in self.run.watchdog_rows(datetime(2026, 11, 4, tzinfo=timezone.utc)) if f"#{self.s.get(rid)['register_no']} " in ln][0]
+        self.assertIn("no letter sent", line)
+        self.assertNotIn("no route for a letter", line)
+
     def test_a_claim_that_never_finished_is_never_retried_by_the_pipeline(self):
         """`sending` means the writer may have reached the customer: only a human may clear it."""
         rid, _ = self.row()

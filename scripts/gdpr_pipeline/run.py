@@ -7,6 +7,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from gdpr_pipeline import copy, identity, intake, sources
+from gdpr_pipeline import send as letter_send     # 'send' is a local in watchdog_rows: the ledger record for a row
 from gdpr_pipeline.store import Store, _dedupe_pages, now_iso, parse_iso
 
 SLACK_CHANNEL = "C0BBTAVP44X"       # #cs_priority (same channel + bot as legal-intake and the legal watchdog)
@@ -681,14 +682,23 @@ class Run:
                 elif send is None and now - due > timedelta(hours=LETTER_GRACE_HOURS):
                     letter = f"no letter sent, {(now - due).days} d past the deadline"
                 if send is None:
-                    # "no letter sent" is true of two very different rows: one waiting on a decision, and one the
-                    # pipeline TRIED to answer and could not route (a mailbox gog cannot write, or a request with no
-                    # reply target at all). Left implicit, 24 of the live rows read as if the pipeline were broken.
+                    # "no letter sent" is true of two very different rows: one waiting on a decision, and one that
+                    # cannot be answered at all (a mailbox gog cannot write, or no reply target on file). Left
+                    # implicit, 24 of the live rows read like a broken pipeline when the fix is a mailbox auth or a
+                    # ruling. Two sources, cheapest first: an attempt already in the ledger, then the route itself.
                     tried = self.store.send_record(r["id"], "ask")
                     if tried and tried.get("state") in ("refused", "failed", "unknown", "sending"):
                         why = (tried.get("detail") or "").strip()
                         letter += (f"; the {tried['kind']} letter is {tried['state']}"
                                    + (f" ({why[:160]}{' …' if len(why) > 160 else ''})" if why else ""))
+                    elif tried is None:
+                        try:
+                            letter_send.route(r)    # pure: a capability check on this host, no network
+                        except letter_send.Unknown as e:
+                            why = str(e).strip()
+                            letter += f"; no route for a letter ({why[:160]}{' …' if len(why) > 160 else ''})"
+                        except Exception:               # a route() defect must never break the page
+                            pass
                 out.append((r["register_no"], f"#{r['register_no']} {r['channel']} received {r['received_at'][:10]}, "
                                               f"written confirmation {state} ({r['due_at'][:10]}); {letter}; "
                                               f"identity {r['identity_verdict'] or '-'}; next: {r['action'] or '-'}"))
