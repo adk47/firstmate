@@ -18,6 +18,35 @@ on:
     branches: [main]
     types: [opened, edited, synchronize, reopened]
 
+# 2026-11-04 (H-DevOps CI-bottleneck lane, firstmate 075). A superseded title check
+# SUPERSEDES the run it replaces instead of queueing behind it.
+#
+# What it fixes, measured: this workflow had no concurrency block at all, so duplicates
+# piled up per branch while the `ovh-hydra` pool sat saturated at 24/24 runners. At
+# 2026-11-04T00:00Z `fm/gdpr-pipeline-g1` held SIX queued PR Title Check runs,
+# `fm/drainer-bulk-credit-change` four, and three more branches two to three — 10
+# (workflow, branch) pairs with more than one queued run. Every duplicate is a queue
+# slot spent on a verdict that cannot change: a title check on the same head is
+# idempotent, so re-running it tells us what the previous run already said.
+#
+# Keyed like the H-DevOps ruling shape (Muso-AI/H-DevOps#4702): `github.ref` separates
+# PRs (refs/pull/N/merge), `github.event_name` stops this from ever cancelling a run of
+# a different event, and the literal `true` means a superseded run is CANCELLED rather
+# than queued. Cancelling is safe for THIS check specifically because it has no side
+# effect — no Slack page, no cluster mutation, no artifact: the newest run contains
+# every commit the older one had, so no verdict is skipped, only a stale one dropped.
+#
+# `edited` is the event this workflow exists for (a fixed title must re-check, see the
+# header above) and it is unaffected: an edit starts a NEW run in the same group, which
+# cancels the older one and evaluates the new title. If anything, this makes the
+# `edited` path faster, because the run it supersedes stops holding a runner.
+#
+# Rollback: delete this block. Same objections as the 2026-11-03 H-DevOps ruling — a
+# superseded run holding a runner to completion is what put the queue at ~830 runs.
+concurrency:
+  group: pr-title-check-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
 jobs:
   pr-title:
     # 2026-10-27: the in-cluster `ovh-hydra` ARC fleet, off node-8 (see the note above
