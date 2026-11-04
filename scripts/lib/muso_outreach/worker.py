@@ -230,6 +230,19 @@ def process_draft(draft_id: str, account: str, adapters) -> ProcessResult:
             fallback_tag="metadata-warning",
         )
 
+    # Human approval gate for NEW drafts. Runs before any NocoDB / Sheets /
+    # Gmail-thread read so an unapproved draft costs no lookups and no send.
+    approved = gates.gate_initial_approved(draft, meta)
+    if not approved.passed:
+        _safe_slack(
+            adapters.slack.post_sales_alert,
+            f":no_entry: Draft `{draft_id}` ({meta.kind.value}) blocked: "
+            f"{approved.reason_code} - {approved.reason_human}",
+            fallback_tag="gate-blocked",
+        )
+        return ProcessResult(draft_id, False,
+                             approved.reason_code, approved.reason_human)
+
     thread = _fetch_thread(meta, adapters)
     noco = _fetch_noco(meta, adapters)
     contact_row = _fetch_contact_row(meta, adapters, noco)

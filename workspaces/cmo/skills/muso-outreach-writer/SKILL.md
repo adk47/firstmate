@@ -266,3 +266,7 @@ also apply the full set of `muso-meta/*` labels described in
 
 Omitting either the comment or the labels will cause the sender worker
 to block the draft at send time.
+
+A NEW draft also sends only after a human (Nick, Aaron, or McLaren within
+his USER.md scope) reviews it and applies the Gmail label
+`B2B - Ads/initial-approved`. CMO never applies that label itself.

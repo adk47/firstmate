@@ -5,6 +5,7 @@ from scripts.lib.muso_outreach.gates import (
     RECIPIENT_MISMATCH,
     RECIPIENT_SOURCE_MISSING,
     gate_a_recipient_match,
+    gate_initial_approved,
 )
 from scripts.lib.muso_outreach.types import Kind
 from tests.conftest import (
@@ -416,3 +417,36 @@ def test_gate_b_subdomain_spoofed_sender_not_treated_as_muso(monkeypatch):
     # contact reply and gate B must block.
     assert not result.passed
     assert result.reason_code == "CONTACT_REPLIED"
+
+
+# -------- Gate: initial-approved (kind=new needs a human-applied label) --------
+
+def test_initial_approved_new_without_label_blocks():
+    result = gate_initial_approved(make_draft(labels=("B2B - Ads",)),
+                                   make_metadata(kind=Kind.NEW))
+    assert not result.passed
+    assert result.reason_code == "INITIAL_NOT_APPROVED"
+
+
+def test_initial_approved_new_with_label_passes():
+    draft = make_draft(labels=("B2B - Ads", "B2B - Ads/initial-approved"))
+    assert gate_initial_approved(draft, make_metadata(kind=Kind.NEW)).passed
+
+
+def test_initial_approved_legacy_sheet_new_without_label_blocks():
+    meta = make_metadata(kind=Kind.NEW, sheet_row_id=1234)
+    assert meta.nocodb_id is None
+    result = gate_initial_approved(make_draft(labels=("B2B - Ads",)), meta)
+    assert result.reason_code == "INITIAL_NOT_APPROVED"
+
+
+def test_initial_approved_followup_without_label_passes():
+    meta = make_metadata(kind=Kind.FOLLOWUP, original_thread_id="t1")
+    assert gate_initial_approved(make_draft(labels=("B2B - Ads",)), meta).passed
+
+
+def test_initial_approved_override_label_does_not_stand_in():
+    draft = make_draft(labels=("B2B - Ads", "B2B - Ads/override-approved"))
+    result = gate_initial_approved(draft, make_metadata(kind=Kind.NEW))
+    assert not result.passed
+    assert result.reason_code == "INITIAL_NOT_APPROVED"

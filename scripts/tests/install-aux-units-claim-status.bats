@@ -56,3 +56,136 @@ _render() { # the `cat > /etc/cron.d/hydra-claim-status << TAG` block, written i
   [ "$status" -eq 1 ]
   [[ "$output" == *"unreadable: nothing sent"* ]]
 }
+
+# r5 on #1741: this path DID NOT PAGE. `_page` was called here but defined ~3 lines below, so bash answered
+# "command not found" on stderr, the run still exited 1, and the assertion above passed - a test that survives
+# deletion of the feature's code. The page is now asserted, so the ordering cannot regress silently.
+@test "the main.env-unreadable exit PAGES (the night that builds no list at all must not be silent)" {
+  mkdir -p "$TEST_TMPDIR/root/scripts"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/pages"\n' "$TEST_TMPDIR" > "$TEST_TMPDIR/root/notify.sh"
+  chmod +x "$TEST_TMPDIR/root/notify.sh"
+  mkdir -p "$TEST_TMPDIR/s"
+  run env MODE=dry-run STATE_ROOT="$TEST_TMPDIR/s" MAIN_ENV="$TEST_TMPDIR/missing.env" \
+    HYDRA_ROOT="$TEST_TMPDIR/nohydra" CLAIM_STATUS_NOTIFY_BIN="$TEST_TMPDIR/root/notify.sh" \
+    bash "$HYDRA_REPO/scripts/claim-status-daily.sh"
+  [ "$status" -eq 1 ]
+  [ -s "$TEST_TMPDIR/pages" ]                       # the page went, rather than 'command not found' on stderr
+  grep -q 'rc=1' "$TEST_TMPDIR/pages"
+  grep -q 'unreadable' "$TEST_TMPDIR/pages"
+  ! [[ "$output" == *"command not found"* ]]
+}
+
+@test "a bad MODE pages (a misconfigured cron is a standstill, not a no-op)" {
+  mkdir -p "$TEST_TMPDIR/root"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/pages"\n' "$TEST_TMPDIR" > "$TEST_TMPDIR/root/notify.sh"
+  chmod +x "$TEST_TMPDIR/root/notify.sh"
+  mkdir -p "$TEST_TMPDIR/s"
+  run env MODE=send STATE_ROOT="$TEST_TMPDIR/s" MAIN_ENV=/nonexistent HYDRA_ROOT="$TEST_TMPDIR/nohydra" \
+    CLAIM_STATUS_NOTIFY_BIN="$TEST_TMPDIR/root/notify.sh" bash "$HYDRA_REPO/scripts/claim-status-daily.sh"
+  [ "$status" -eq 2 ]                               # the refusal still exits 2, before any secret is read
+  [ -s "$TEST_TMPDIR/pages" ]
+  grep -q 'rc=2' "$TEST_TMPDIR/pages"
+  grep -q "MODE='send'" "$TEST_TMPDIR/pages"
+}
+
+# ── c2 follow-up (Fable driver 11-04 08:4xZ): rc != 0 PAGES; rc = 0 does not ────────────────────────────
+_stub_tree() { # a HYDRA_ROOT whose credit-review.py exits $1, plus a notifier that records its argv
+  local rc="$1"
+  mkdir -p "$TEST_TMPDIR/root/scripts"
+  printf '#!/usr/bin/env python3\nimport sys\nprint("AUDIT would_send 0")\nsys.exit(%s)\n' "$rc" \
+    > "$TEST_TMPDIR/root/scripts/credit-review.py"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/pages"\nexit "${STUB_NOTIFY_RC:-0}"\n' "$TEST_TMPDIR" \
+    > "$TEST_TMPDIR/root/notify.sh"
+  chmod +x "$TEST_TMPDIR/root/notify.sh"
+  mkdir -p "$TEST_TMPDIR/s"
+  : > "$TEST_TMPDIR/main.env"
+}
+
+@test "a failed run pages once, with its rc and the run.log line, and keeps its own exit code" {
+  _stub_tree 3
+  echo 'claim-status-daily AUDIT {"unreadable_systemic_ratio": 0.71}' > "$TEST_TMPDIR/s/run.log"
+  run env MODE=dry-run HYDRA_ROOT="$TEST_TMPDIR/root" STATE_ROOT="$TEST_TMPDIR/s" MAIN_ENV="$TEST_TMPDIR/main.env" \
+    CLAIM_STATUS_NOTIFY_BIN="$TEST_TMPDIR/root/notify.sh" bash "$HYDRA_REPO/scripts/claim-status-daily.sh"
+  [ "$status" -eq 3 ]                                  # the run's rc survives the page
+  [ -s "$TEST_TMPDIR/pages" ]                          # the page actually went
+  [ "$(wc -l < "$TEST_TMPDIR/pages")" = "1" ]          # ONE page per failed run
+  grep -q '^critical' "$TEST_TMPDIR/pages"
+  grep -q 'rc=3' "$TEST_TMPDIR/pages"
+  grep -q 'unreadable_systemic_ratio' "$TEST_TMPDIR/pages"   # the reason travels, not just the code
+  [[ "$output" == *"paged critical: rc=3"* ]]
+}
+
+@test "a clean run pages nobody (and the pager being absent is not the reason)" {
+  _stub_tree 0
+  run env MODE=dry-run HYDRA_ROOT="$TEST_TMPDIR/root" STATE_ROOT="$TEST_TMPDIR/s" MAIN_ENV="$TEST_TMPDIR/main.env" \
+    CLAIM_STATUS_NOTIFY_BIN="$TEST_TMPDIR/root/notify.sh" bash "$HYDRA_REPO/scripts/claim-status-daily.sh"
+  [ "$status" -eq 0 ]
+  [ ! -e "$TEST_TMPDIR/pages" ]
+  # the notifier is present and executable here, so 'no pages' means 'nothing to page', not 'no pager installed'
+  [ -x "$TEST_TMPDIR/root/notify.sh" ]
+  [[ "$output" != *"PAGE NOT SENT"* ]]
+}
+
+@test "a page that cannot be delivered is stated, never silent, and never rewrites the run's rc" {
+  _stub_tree 1
+  run env MODE=dry-run HYDRA_ROOT="$TEST_TMPDIR/root" STATE_ROOT="$TEST_TMPDIR/s" MAIN_ENV="$TEST_TMPDIR/main.env" \
+    CLAIM_STATUS_NOTIFY_BIN="$TEST_TMPDIR/root/notify.sh" STUB_NOTIFY_RC=1 \
+    bash "$HYDRA_REPO/scripts/claim-status-daily.sh"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"PAGE NOT DELIVERED"* ]]
+  [[ "$output" == *"rc=1 stands"* ]]
+}
+
+@test "no notifier at all is a stated non-page, not a crash" {
+  _stub_tree 1
+  run env MODE=dry-run HYDRA_ROOT="$TEST_TMPDIR/root" STATE_ROOT="$TEST_TMPDIR/s" MAIN_ENV="$TEST_TMPDIR/main.env" \
+    CLAIM_STATUS_NOTIFY_BIN="$TEST_TMPDIR/root/absent.sh" bash "$HYDRA_REPO/scripts/claim-status-daily.sh"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"PAGE NOT SENT (no notifier at"* ]]
+}
+
+@test "the one-sender cron line is untouched by the pager (a page is not a send)" {
+  _render
+  grep -qx '15 1 \* \* \* root MODE=dry-run /opt/hydra/scripts/claim-status-daily.sh >> /var/lib/hydra/credit-review/claim-status-daily.log 2>&1' "$TEST_TMPDIR/hydra-claim-status"
+  ! grep -q 'MODE=apply' "$TEST_TMPDIR/hydra-claim-status"
+}
+
+# r5 on #1741 / QA's Important: an UNOPENABLE lock reported "another run holds it" and exited 0 - the audit did not
+# run and the signal described a benign peer hold. Two cases, not one: without the second, the next fix inverts them
+# and nothing notices.
+_lock_notifier() {
+  mkdir -p "$TEST_TMPDIR/root"
+  printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "%s/pages"\n' "$TEST_TMPDIR" > "$TEST_TMPDIR/root/notify.sh"
+  chmod +x "$TEST_TMPDIR/root/notify.sh"
+  mkdir -p "$TEST_TMPDIR/s"
+}
+
+@test "an unopenable lock is a PAGED failure, not 'another run holds it'" {
+  _lock_notifier
+  mkdir -p "$TEST_TMPDIR/s/claim-status-daily.lock"        # the lock path is a directory: exec 9> cannot open it
+  echo "runs:$(ls -d "$TEST_TMPDIR/s/claim-status-daily.lock" | wc -l)" > "$TEST_TMPDIR/root/marker"
+  run env MODE=dry-run STATE_ROOT="$TEST_TMPDIR/s" MAIN_ENV="$TEST_TMPDIR/missing.env" \
+    HYDRA_ROOT="$TEST_TMPDIR/nohydra" CLAIM_STATUS_NOTIFY_BIN="$TEST_TMPDIR/root/notify.sh" \
+    bash "$HYDRA_REPO/scripts/claim-status-daily.sh"
+  [ "$status" -eq 1 ]                                      # standing condition: it must NOT look like a clean run
+  [ ! -e "$TEST_TMPDIR/root/credit-review.py" ]
+  [[ "$output" == *"cannot open the lock"* ]]
+  [[ "$output" != *"another claim-status-daily run holds"* ]]   # the false sentence is gone
+  grep -q '^critical' "$TEST_TMPDIR/pages"
+  grep -q 'unopenable' "$TEST_TMPDIR/pages"
+}
+
+@test "a lock that is genuinely HELD stays silent and exits 0 (it is benign and self-clearing)" {
+  _lock_notifier
+  : > "$TEST_TMPDIR/s/claim-status-daily.lock"
+  flock -x "$TEST_TMPDIR/s/claim-status-daily.lock" -c 'sleep 3' &
+  holder=$!
+  sleep 0.5
+  run env MODE=dry-run STATE_ROOT="$TEST_TMPDIR/s" MAIN_ENV="$TEST_TMPDIR/missing.env" \
+    HYDRA_ROOT="$TEST_TMPDIR/nohydra" CLAIM_STATUS_NOTIFY_BIN="$TEST_TMPDIR/root/notify.sh" \
+    bash "$HYDRA_REPO/scripts/claim-status-daily.sh"
+  wait "$holder" 2>/dev/null || true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"another claim-status-daily run holds"* ]]
+  [ ! -e "$TEST_TMPDIR/pages" ]                            # a peer hold pages NOBODY
+}

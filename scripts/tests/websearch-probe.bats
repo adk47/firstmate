@@ -142,19 +142,19 @@ STUB
   echo "$output" | grep -qx 'VERDICT=inconclusive'
 }
 
-@test "websearch_probe_attempt: break signature with NONZERO exit still fails (FINDING 1 — no clobber)" {
+@test "websearch_probe_attempt: provider signature with NONZERO exit is still classified (FINDING 1 — no clobber)" {
   _stub_openclaw 1 "[tools] web_search failed: Reconnecting... 2/5" none
   run websearch_probe_attempt main "probe prompt"
   [ "$status" -eq 0 ]
-  echo "$output" | grep -qx 'VERDICT=fail'
+  echo "$output" | grep -qx 'VERDICT=unavailable'
   echo "$output" | grep -qi '^DETAIL=.*Reconnecting'
 }
 
-@test "websearch_probe_attempt: break signature with EXIT ZERO also fails (break wins regardless of rc)" {
+@test "websearch_probe_attempt: provider signature with EXIT ZERO is classified too (signature wins regardless of rc)" {
   _stub_openclaw 0 "web_search provider reconnection failed" none
   run websearch_probe_attempt main "probe prompt"
   [ "$status" -eq 0 ]
-  echo "$output" | grep -qx 'VERDICT=fail'
+  echo "$output" | grep -qx 'VERDICT=unavailable'
 }
 
 @test "websearch_probe_attempt: NO rollout files survives set -euo pipefail (FINDING 3 — no ls-abort)" {
@@ -178,12 +178,44 @@ STUB
   [ "$output" = "pass" ]
 }
 
-@test "_websearch_probe_verdict: break signature with real_call_ran=0 -> fail" {
+@test "_websearch_probe_verdict: PROVIDER signatures with real_call_ran=0 -> unavailable (page-and-warn, not a deploy block)" {
+  # 2026-11-04: these three used to return `fail`, which rolled back every
+  # deploy while the fault was entirely provider-side (the runtime throws
+  # "disabled or no provider is available" from resolveWebSearchCandidates()
+  # when the candidate list is EMPTY — no request is made, so no 429/timeout/
+  # entitlement rejection exists to read). A rollback cannot register a
+  # provider; it only blocks the payload that is ready.
   run _websearch_probe_verdict "Reconnecting... 2/5" 0
   [ "$status" -eq 0 ]
-  [ "$output" = "fail" ]
+  [ "$output" = "unavailable" ]
   run _websearch_probe_verdict "web_search is disabled or no provider is available." 0
+  [ "$output" = "unavailable" ]
+  run _websearch_probe_verdict "provider reconnection failed" 0
+  [ "$output" = "unavailable" ]
+}
+
+@test "_websearch_probe_verdict: a POLICY refusal is still a hard fail (config regression keeps blocking)" {
+  # The ruling keeps hard-fail for a policy/config regression. A tool refused
+  # by policy is exactly that, and must never be softened into a WARN.
+  run _websearch_probe_verdict "web_search is not allowed by tool policy for this agent" 0
+  [ "$status" -eq 0 ]
   [ "$output" = "fail" ]
+  run _websearch_probe_verdict "tool web_search is not permitted in this workspace" 0
+  [ "$output" = "fail" ]
+}
+
+@test "websearch_probe_attempt: the turn timeout is enforced BY THE GATEWAY (--timeout), never by killing the client" {
+  # 2026-11-04: `timeout 150 openclaw agent …` killed the CLI while the RUN
+  # kept going; an abandoned run is permanent "active work", so the gateway
+  # looped `[admission] closed: suspend phase` / `host thaw channel restart
+  # deferred: gateway still has active work` and stopped serving ANY agent
+  # turn until restarted. Two or three abandoned probes were enough. The
+  # gateway-side bound is what cancels the run.
+  _stub_openclaw 0 "SEARCH_STATUS: ok" append
+  run websearch_probe_attempt main "probe" scout
+  [ "$status" -eq 0 ]
+  grep -qx -- "--timeout" "$TEST_TMPDIR/openclaw.args"
+  grep -qx -- "150" "$TEST_TMPDIR/openclaw.args"
 }
 
 @test "_websearch_probe_verdict: real_call_ran=1 with clean text -> pass" {
@@ -450,10 +482,13 @@ mk_cfg() {
 # scout: pass | fail | inconclusive
 # restriction: "" (none attributable) | named
 #
-# RULES: a failed deny-free reference is a global outage (fail, always). WARN
-# requires ref == pass — POSITIVE evidence — AND a named restriction. Every other
-# broken-scout cell fails closed. With scout not broken, only a passing reference
-# yields pass; anything else is inconclusive.
+# RULES: a failed deny-free reference is a global outage (fail, always). A
+# PROVIDER-UNAVAILABLE reference (no candidate registered / reconnecting) is
+# provider-side and yields WARN in every cell — page-and-warn, deploy proceeds
+# (2026-11-04 ruling). WARN also requires ref == pass — POSITIVE evidence — AND
+# a named restriction. Every other broken-scout cell fails closed. With scout
+# not broken, only a passing reference yields pass; anything else is
+# inconclusive.
 # ──────────────────────────────────────────────────────────────
 
 assert_verdict() { # <ref> <scout> <restriction> <expected>
@@ -465,15 +500,32 @@ assert_verdict() { # <ref> <scout> <restriction> <expected>
 }
 
 @test "matrix: ref=fail is a global outage in EVERY cell" {
-  for sc in pass fail inconclusive; do
+  for sc in pass fail unavailable inconclusive; do
     assert_verdict fail "$sc" ""      fail
     assert_verdict fail "$sc" "named" fail
+  done
+}
+
+@test "matrix: ref=unavailable is PROVIDER-SIDE => WARN in every cell (page-and-warn, deploy proceeds)" {
+  # No candidate was registered, so no request was made: nothing about the
+  # payload, the policy or the config is implicated and a rollback cannot fix
+  # it. This is the 2026-11-04 ruling.
+  for sc in pass fail unavailable inconclusive; do
+    assert_verdict unavailable "$sc" ""      warn
+    assert_verdict unavailable "$sc" "named" warn
   done
 }
 
 @test "matrix: ref=pass, scout=fail — WARN only with a named restriction" {
   assert_verdict pass fail "named" warn
   assert_verdict pass fail ""      fail
+}
+
+@test "matrix: ref=pass, scout=unavailable — WARN either way (provider-side, no request was made)" {
+  # b1's NO-GO on #1745: `unavailable` means the candidate list was EMPTY, so no request was made and nothing about
+  # the payload, the policy or the config is implicated. A restriction is not required to say so.
+  assert_verdict pass unavailable "named" warn
+  assert_verdict pass unavailable ""      warn
 }
 
 @test "matrix: ref=pass, scout not broken => pass" {
@@ -483,11 +535,30 @@ assert_verdict() { # <ref> <scout> <restriction> <expected>
   done
 }
 
-@test "matrix: ref=inconclusive NEVER yields WARN (QA #933 round 2)" {
+@test "matrix: ref=inconclusive + scout FAIL never yields WARN (QA #933 round 2)" {
   # The reported hole. An unproven reference is not evidence the fleet is fine,
-  # so a broken scout must not be downgraded on it however well-named the policy.
+  # so a scout that genuinely FAILED must not be downgraded on it however well-named the policy.
   assert_verdict inconclusive fail "named" fail
   assert_verdict inconclusive fail ""      fail
+}
+
+@test "matrix: ref=inconclusive + scout UNAVAILABLE yields WARN (b1 NO-GO on #1745 - today's exact cell)" {
+  # This is the cell that failed today's deploy twice: the reference probe was inconclusive and scout answered
+  # `disabled or no provider is available`. `unavailable` is provider-side (empty candidate list, no request made),
+  # so it is not a payload/policy/config regression and a rollback cannot fix it. WARN + page, deploy proceeds.
+  assert_verdict inconclusive unavailable "named" warn
+  assert_verdict inconclusive unavailable ""      warn
+}
+
+@test "replay: today's two failed rounds (ref inconclusive, scout provider-unavailable) end WARN, not FAIL" {
+  # The literal strings the 10:16:50Z and 10:54:08Z rounds produced, replayed through the classifier and the
+  # scoped verdict. Both must end WARN with a page; a FAIL here is what rolled the deploy back.
+  local scout_out ref_out
+  scout_out="$(_websearch_probe_verdict "disabled or no provider is available" 0)"
+  ref_out="$(_websearch_probe_verdict "no confirmed tool call" 0)"
+  [ "$scout_out" = "unavailable" ]
+  [ "$ref_out" = "inconclusive" ]
+  [ "$(websearch_scoped_verdict "$ref_out" "$scout_out" "")" = "warn" ]
 }
 
 @test "matrix: ref=inconclusive, scout not broken => inconclusive" {
@@ -500,6 +571,8 @@ assert_verdict() { # <ref> <scout> <restriction> <expected>
 @test "matrix: no reference agent at all NEVER yields WARN" {
   assert_verdict "" fail "named" fail
   assert_verdict "" fail ""      fail
+  assert_verdict "" unavailable "named" fail
+  assert_verdict "" unavailable ""      fail
 }
 
 @test "matrix: no reference agent, scout not broken => inconclusive" {
@@ -509,12 +582,16 @@ assert_verdict() { # <ref> <scout> <restriction> <expected>
   done
 }
 
-@test "matrix: WARN is reachable from EXACTLY ONE of the 24 cells" {
+@test "matrix: WARN is reachable from EXACTLY THIRTEEN of the 40 cells, and every one of them is named" {
   # Guards against a future loosening that quietly widens the deploy-proceeds
-  # path: count every cell and assert exactly one warn.
+  # path: count every cell and assert the exact warn set. The thirteen are:
+  #   ref=unavailable × 4 scout verdicts × 2 restrictions = 8 (provider-side)
+  #   ref=pass,         scout=fail,        named          = 1 (per-agent policy)
+  #   ref=pass,         scout=unavailable, named + ""     = 2 (provider-side, b1 #1745)
+  #   ref=inconclusive, scout=unavailable, named + ""     = 2 (provider-side, b1 #1745 - today's cell)
   local warns=0 total=0 v
-  for r in pass fail inconclusive ""; do
-    for sc in pass fail inconclusive; do
+  for r in pass fail unavailable inconclusive ""; do
+    for sc in pass fail unavailable inconclusive; do
       for rest in "" "named"; do
         v="$(websearch_scoped_verdict "$r" "$sc" "$rest")"
         total=$((total + 1))
@@ -522,8 +599,8 @@ assert_verdict() { # <ref> <scout> <restriction> <expected>
       done
     done
   done
-  [ "$total" -eq 24 ]
-  [ "$warns" -eq 1 ]
+  [ "$total" -eq 40 ]
+  [ "$warns" -eq 13 ]
 }
 
 @test "defaults: a restrictive agents.defaults is SHADOWED by an agent-level tools:{} (QA #933 r3)" {

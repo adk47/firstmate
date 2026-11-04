@@ -148,6 +148,13 @@ Slack event handler) reads every draft under label `B2B - Ads` with
 only the valid drafts. The worker owns Gmail send + logbook append +
 GHL `Emailed` stage set + Slack notification as one atomic step.
 
+A NEW (`kind-new`) draft sends only after a human (Nick, Aaron, or McLaren
+within his USER.md scope) reviews it and applies the Gmail label
+`B2B - Ads/initial-approved`. CMO never applies that label itself, and
+`override-approved` does not stand in for it. Without it the worker blocks
+the draft with `INITIAL_NOT_APPROVED`, on every send path including
+`--draft-id`. Follow-ups keep `auto-fu-approved`.
+
 Blocked drafts appear in `#sales-alerts` with a machine-readable
 reason code. Fix and re-approve; do NOT bypass.
 

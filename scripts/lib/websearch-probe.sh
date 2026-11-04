@@ -170,21 +170,47 @@ _websearch_real_call_ran() {
 # outage: the openclaw `web_search` tool errors and native never fires).
 # Anything else is "inconclusive" — callers retry once, then warn; this
 # function never returns fail on an inconclusive read.
+#
+# 2026-11-04: PROVIDER-UNAVAILABLE is its own verdict, not `fail`.
+#
+# WHY: on 2026-11-04 every hydra deploy rolled back on this check while the
+# fault was entirely on the provider side. The installed runtime throws
+# `web_search is disabled or no provider is available.` from
+# `resolveWebSearchCandidates()` when the candidate list is EMPTY — i.e. no
+# request is ever made, so there is no 429, no timeout and no entitlement
+# rejection to read. On this box the cause was the codex harness host
+# capability going inactive (`[agent/embedded] agent cleanup failed: …
+# step=codex-trajectory-flush error=agent harness host capability is no
+# longer active`), which unregisters the native search tool. Nothing about
+# the deploy payload, the tool policy or the config caused it, and a rollback
+# cannot fix it — it only blocks the payload that IS ready (the Gmail readers
+# fix) behind a vendor-side capability.
+#
+# So the three provider signatures now return `unavailable`, which the scoped
+# verdict downgrades to WARN + page. A POLICY signature (a tool refused by
+# policy) still returns `fail` and still blocks: that is a config regression
+# we can fix, and the ruling keeps hard-fail for exactly that case.
 _websearch_probe_verdict() {
   local response="$1" real_call_ran="$2"
   if [ "${real_call_ran:-0}" -eq 1 ]; then
     echo pass
     return
   fi
-  if echo "$response" | grep -qiE 'Reconnecting|disabled or no provider is available|provider reconnection failed'; then
+  # A policy refusal is a config regression: hard fail, never softened.
+  if echo "$response" | grep -qiE 'not allowed by (tool )?policy|denied by (tool )?policy|blocked by (tool )?policy|tool .{0,40}is not permitted'; then
     echo fail
+    return
+  fi
+  # Provider-side: no candidate registered, or the provider is reconnecting.
+  if echo "$response" | grep -qiE 'Reconnecting|disabled or no provider is available|provider reconnection failed'; then
+    echo unavailable
     return
   fi
   echo inconclusive
 }
 
 # websearch_probe_attempt <profile> <prompt> — runs ONE real probe attempt
-# and echoes exactly two lines: `VERDICT=<fail|pass|inconclusive>` and
+# and echoes exactly two lines: `VERDICT=<fail|unavailable|pass|inconclusive>` and
 # `DETAIL=<diagnostic text>` (the matched break signature on fail, a short
 # rollout-evidence note on pass, or the raw exit code + reason on
 # inconclusive). Snapshots the agent's newest rollout + its search-event
@@ -210,7 +236,23 @@ websearch_probe_attempt() {
   fi
   session_id="websearch-probe-$(date +%s)-$$"
 
-  if response=$(timeout 150 openclaw --profile "$profile" agent --agent "$agent" --session-id "$session_id" --json --message "$prompt" 2>&1); then
+  # 2026-11-04: the turn timeout must be enforced BY THE GATEWAY, not by
+  # killing the client. `timeout 150 openclaw agent …` kills the CLI process
+  # while the RUN keeps going server-side, and an abandoned run is permanent
+  # "active work": the gateway then loops
+  #   [admission] closed: suspend phase
+  #   [health] host thaw channel restart deferred: gateway still has active work
+  # every 30 s and stops serving ANY agent turn (`Opening handshake has timed
+  # out` for every agent on the profile) until it is restarted. Two or three
+  # abandoned probes are enough. That is how this check took the fleet's agent
+  # control plane down on 2026-11-04 and made the post-rollback smoke fail
+  # identically — the alarm cost the thing it measures.
+  #
+  # `--timeout` is the gateway-side bound (openclaw agent --help: "Override
+  # agent command timeout (seconds)"), so the run is cancelled properly. The
+  # outer `timeout` is a belt-and-braces bound on the CLI itself and is set
+  # ABOVE the gateway bound so it never wins the race.
+  if response=$(timeout 200 openclaw --profile "$profile" agent --agent "$agent" --session-id "$session_id" --timeout 150 --json --message "$prompt" 2>&1); then
     rc=0
   else
     rc=$?
@@ -225,6 +267,9 @@ websearch_probe_attempt() {
 
   case "$verdict" in
     fail)
+      detail="$(echo "$response" | grep -ioE 'not allowed by (tool )?policy[^"]*|denied by (tool )?policy[^"]*|blocked by (tool )?policy[^"]*|tool [^"]{0,40}is not permitted' | head -1)"
+      ;;
+    unavailable)
       detail="$(echo "$response" | grep -ioE 'Reconnecting[^"]*|disabled or no provider is available|provider reconnection failed' | head -1)"
       ;;
     pass)
@@ -377,7 +422,9 @@ websearch_reference_agent() {
 #           or scout is broken with NO usable reference (fail closed: we
 #           cannot attribute it, so we must not downgrade it)
 #   warn  — scout broken but the deny-free reference works => per-agent
-#           restriction, named, deploy proceeds with it visible
+#           restriction, named, deploy proceeds with it visible; OR the
+#           provider is UNAVAILABLE (no candidate registered / reconnecting)
+#           on the deny-free reference => provider-side, page and proceed
 #   pass  — reference confirmed a real search event in its rollout
 #   inconclusive — nothing proven either way; caller retries then warns
 websearch_scoped_verdict() {
@@ -387,7 +434,25 @@ websearch_scoped_verdict() {
   # before anything else can soften it.
   if [ "$ref" = "fail" ]; then echo fail; return; fi
 
-  if [ "$scout" = "fail" ]; then
+  # PROVIDER-UNAVAILABLE on the deny-free reference: the provider list is empty
+  # or the provider is reconnecting. No request was made, so nothing about the
+  # payload, the policy or the config is implicated, and a rollback cannot fix
+  # it. WARN + page (the caller pages); the deploy proceeds. A policy refusal
+  # never reaches here — it is `fail` above.
+  if [ "$ref" = "unavailable" ]; then echo warn; return; fi
+
+  # PROVIDER-UNAVAILABLE on SCOUT, with a reference that is not itself broken: the provider list was empty (or the
+  # provider is reconnecting), so NO REQUEST WAS MADE. That is the same provider-side condition as the arm above, and
+  # it is not attributable to the payload, the policy or the config - a rollback cannot fix it. b1's NO-GO on #1745
+  # (2026-11-04) is exactly this cell: the two rounds that failed today's deploy were reference INCONCLUSIVE + scout
+  # provider-unavailable, and mapping that to FAIL rolled back a deploy for a condition the deploy did not cause.
+  # A reference that is ABSENT is NOT this case - that is a config regression (no deny-free agent exists) and stays
+  # fail-closed below, as does a scout that genuinely FAILED with no positive reference evidence.
+  if [ "$scout" = "unavailable" ] && { [ "$ref" = "pass" ] || [ "$ref" = "inconclusive" ]; }; then
+    echo warn; return
+  fi
+
+  if [ "$scout" = "fail" ] || [ "$scout" = "unavailable" ]; then
     # WARN requires ref == "pass" — POSITIVE evidence, not merely "not failed".
     # The contract is "a deny-free agent searches fine, so this is a per-agent
     # policy"; only a pass carries that, because a pass is the one verdict backed

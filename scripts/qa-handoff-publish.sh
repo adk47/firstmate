@@ -30,16 +30,24 @@ set -euo pipefail
 #             3 a report was unreadable / malformed / described a different
 #               head, and was therefore NOT published (the guard fails closed on
 #               that kind) | 4 the encoded payload exceeds a PR comment's size
-#               limit (nothing posted) | 5 the GitHub call failed
+#               limit (nothing posted) | 5 a GitHub call failed, and the read-back
+#               after it could not prove the hand-off landed
 #
 # Env (mainly for tests): GH  the gh binary (default gh); QA_HANDOFF_AUTHORS as
 # for the reader (the publisher ONLY reuses comments from a trusted author —
 # overwriting an untrusted look-alike would let it shadow the real hand-off).
 #
-# Advisory by design, like the analyzers: pr-validate.yml swallows a non-zero
-# exit into an ::warning:: so a publish failure never fails CI. It must not:
-# the guards are the fail-closed consumers, and a red CI on every PR would be a
-# far worse failure than "QA auto-approval is unavailable, review it by hand".
+# NOT advisory on exit status, and this header used to claim the opposite. The
+# reports' CONTENT is advisory (the guards, not CI, are its fail-closed
+# consumers); a publish FAILURE is a red PR Validation job — pr-validate.yml
+# invokes this script bare, with no `|| echo` ("A failure here must be RED" on
+# that step). The reason is the same one that makes the invalidate step fatal: a
+# hand-off that could not be withdrawn would let Guard 6 vouch for a previous
+# run's evidence for this same head, and a green CI is what makes that
+# invisible. The old text ("pr-validate.yml swallows a non-zero exit into an
+# ::warning:: so a publish failure never fails CI") was never true of the
+# workflow, and a script that believes its failures are swallowed stops being
+# careful about them.
 
 _here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/qa-handoff.sh
@@ -230,7 +238,40 @@ jq -n --arg body "$body" '{body: $body}' >"$tmp"
 
 "$GH_BIN" api --method POST \
   "repos/$repo/issues/$pr/comments" --input "$tmp" --jq '.id' >/dev/null \
-  || die 5 "could not create the hand-off comment; this head now has NO hand-off (fail closed)"
+  || {
+    # A POST can LAND and still look like a failure. `--jq '.id'` makes the exit
+    # status depend on gh READING THE RESPONSE, not on the write, so a created
+    # comment is reported as a failed create whenever the response is unreadable
+    # (truncated, non-JSON, a proxy's error page). hydra#1681 is that shape:
+    # comment 6617916594 existed on the PR with the matching head_sha while this
+    # step died "this head now has NO hand-off" — a false negative that turned a
+    # successful publish into a red job AND told the next reader a lie about what
+    # the PR holds. So never claim "NO hand-off" from the exit status alone:
+    # re-read the PR, and fail only when this head really has none.
+    ours_generated_at="$(jq -r '.generated_at // ""' <<<"$payload")"
+    # NOT a command substitution: QA_HANDOFF_READ_RC is a global set by the read,
+    # and a subshell would discard it (same reason invalidate_head does this).
+    # shellcheck disable=SC2034  # consumed by scripts/lib/qa-handoff.sh
+    QA_HANDOFF_GH=("$GH_BIN")
+    qa_handoff_payloads "$repo" "$pr" >"$bundle_dir/post-readback.ndjson" 2>/dev/null || true
+    # "non-older" = generated_at >= ours, which is what identifies the comment
+    # THIS run created: invalidate_head already withdrew every older same-head
+    # hand-off, so a same-head comment older than our own payload cannot be ours
+    # and is not proof. Both sides come from jq's `now|todate` — fixed-width UTC,
+    # so a string compare IS a time compare. A comment id alone is NOT enough:
+    # a stale one left behind would then hide a real publish failure.
+    readback_id="$(jq -rs --arg repo "$repo" --arg pr "$pr" --arg head "$head_sha" \
+        --arg ours "$ours_generated_at" '
+        map(select(.repo == $repo and .pr == $pr and .head_sha == $head))
+        | map(select((.generated_at // "") >= $ours))
+        | sort_by(.created_at) | last | (.comment_id // "")' \
+        "$bundle_dir/post-readback.ndjson" 2>/dev/null || true)"
+    if [ -n "$readback_id" ]; then
+      echo "::warning::qa-handoff-publish: the create call's response could not be read, but the re-read found hand-off comment $readback_id for ${head_sha:0:7} with generated_at >= ${ours_generated_at:-unknown} — the hand-off WAS posted, so this is not a publish failure."
+    else
+      die 5 "the create call failed and its response could not be read; the re-read found no hand-off for ${head_sha:0:7} (fail closed)"
+    fi
+  }
 action="posted a comment"
 [ -z "$prior_ids" ] || action="replaced $(printf '%s\n' "$prior_ids" | grep -c .) previous hand-off / posted a comment"
 

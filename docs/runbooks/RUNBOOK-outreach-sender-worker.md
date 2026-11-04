@@ -17,12 +17,23 @@ CMO agent creates drafts; this worker sends them.
   label for that batch.
 - **Monday cron:** `0 9 * * 1` UTC — processes drafts under
   `B2B - Ads/auto-fu-approved`.
-- **Manual:** SSH to node-8 and run:
+- **Manual:** SSH to node-8 and load the env first:
+
+      . /opt/hydra/scripts/lib/muso-outreach-env.sh && muso_outreach_load_env
+
+  Run that first in the same shell. It loads `NOCODB_API_TOKEN` from
+  `/etc/openclaw/main.env`. Without it the run fails with
+  `NOCODB_API_TOKEN env var not set`.
+
+  Then run:
 
       /opt/hydra/scripts/muso-outreach-sender-worker.py \
         --label "B2B - Ads/auto-fu-approved" --account a@muso.ai
 
-- **Check a draft's metadata without sending:** pass its labels to the
+- **Check a draft's metadata without sending:** load the env first (same
+  `. /opt/hydra/scripts/lib/muso-outreach-env.sh && muso_outreach_load_env`
+  as above; without it the dry run fails with
+  `NOCODB_API_TOKEN env var not set`), then pass its labels to the
   dry run. It parses them, looks the NocoDB contact up (read-only) and
   prints `contact_found`, `row_id_match`, `email_present` and the
   follow-up `prior`. It sends, logs and alerts nothing, and never prints
@@ -46,6 +57,7 @@ draft ID and reason code.
 |------|---------------|-----|
 | `METADATA_MISSING` | Labels not set; draft was edited in Gmail or created outside the agent | Delete the draft and re-create from the agent |
 | `METADATA_LABEL_DISAGREE` | Labels and JSON comment say different things | Re-create from the agent |
+| `INITIAL_NOT_APPROVED` | A NEW draft has no `B2B - Ads/initial-approved` label (blocked before any NocoDB or Sheets read) | A human reviews the draft and applies the label in Gmail. `override-approved` does not count. Follow-ups are not affected |
 | `RECIPIENT_MISMATCH` | Draft `To:` differs from original thread / sheet value | Agent hallucinated; re-create |
 | `RECIPIENT_SOURCE_MISSING` | Sheet email blank, or thread has no outgoing muso message | Fix the sheet row, or check the thread |
 | `CONTACT_REPLIED` | The contact has already replied | Move GHL opp to Replied manually |

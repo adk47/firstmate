@@ -6,7 +6,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
-from .config import OVERRIDE_APPROVED_LABEL
+from .config import INITIAL_APPROVED_LABEL, OVERRIDE_APPROVED_LABEL
 from .types import ContactRow, Draft, GateResult, Kind, Metadata, Thread
 
 RECIPIENT_MISMATCH = "RECIPIENT_MISMATCH"
@@ -42,6 +42,28 @@ def _contact_ref(meta) -> str:
     if meta.nocodb_id is not None:
         return f"NocoDB contact Id {meta.nocodb_id} (Row ID {meta.row_id})"
     return f"Sheet row {meta.sheet_row_id}"
+
+
+INITIAL_NOT_APPROVED = "INITIAL_NOT_APPROVED"
+
+
+def gate_initial_approved(draft: Draft, meta: Metadata) -> GateResult:
+    """A NEW (first-touch) draft sends only after a human applied
+    INITIAL_APPROVED_LABEL in Gmail. Covers NocoDB-keyed and legacy
+    sheet-keyed drafts alike. Follow-ups pass: their approval is
+    AUTO_FU_APPROVED_LABEL, selected by --label. OVERRIDE_APPROVED_LABEL
+    is a gate-A escape hatch only and does not stand in for this one.
+    """
+    if meta.kind is not Kind.NEW or INITIAL_APPROVED_LABEL in draft.labels:
+        return GateResult(passed=True)
+    return GateResult(
+        passed=False,
+        reason_code=INITIAL_NOT_APPROVED,
+        reason_human=(
+            f"NEW draft has no `{INITIAL_APPROVED_LABEL}` label. A human "
+            "reviews the draft and applies it in Gmail."
+        ),
+    )
 
 
 def gate_a_recipient_match(

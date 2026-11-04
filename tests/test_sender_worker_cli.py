@@ -9,7 +9,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from tests.conftest import make_noco_contact
+from tests.conftest import make_draft, make_noco_contact
 
 _PATH = os.path.join(os.path.dirname(__file__), "..", "scripts",
                      "muso-outreach-sender-worker.py")
@@ -92,3 +92,14 @@ def test_real_run_still_requires_account_and_target(cli):
     mod, _ = cli
     with pytest.raises(SystemExit):
         mod.main(["--account", "a@muso.ai"])
+
+
+def test_draft_id_on_unlabelled_new_draft_is_blocked_and_nothing_sent(cli, capsys):
+    mod, a = cli
+    a.gmail.fetch_draft.return_value = make_draft(
+        labels=("B2B - Ads", *_LABELS.split(",")))
+    assert mod.main(["--draft-id", "r1", "--account", "a@muso.ai"]) == 1
+    assert "INITIAL_NOT_APPROVED" in capsys.readouterr().out
+    a.gmail.send_draft.assert_not_called()
+    a.nocodb.get_contact.assert_not_called()
+    a.sheets.append_logbook_row.assert_not_called()
