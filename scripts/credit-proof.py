@@ -273,10 +273,16 @@ def cmd_stage2(args: argparse.Namespace) -> int:
     stats = stage2.run(ProofStore(args.store), fetch=intercom.make_fetch(tok), max_users=args.max_users,
                        workers=args.workers, log=log)
     log("stage2 " + json.dumps({k: stats[k] for k in ("run_id", "held_unjudged", "users", "rows", "documents",
-                                                       "skipped_not_held", "retry_users", "outcomes")}))
+                                                       "skipped_not_held", "skipped_partial_lookup", "retry_users",
+                                                       "trino_batches_skipped", "outcomes")}))
     for e in stats["errors"][:10]:
         log(f"stage2 error: {e}")
     print("NO_REPLY")
+    if stats.get("trino_unavailable"):
+        # Judging nothing must never look like a clean run: exit non-zero so the cron goes red.
+        log(f"stage2: TRINO UNAVAILABLE ({stats['trino_unavailable']} lookups answered no batch, "
+            f"{stats['trino_batches_skipped']} batch(es) skipped); exit 1")
+        return 1
     return 1 if stats["intercom_unavailable"] else 0
 
 

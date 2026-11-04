@@ -14,8 +14,11 @@ Inputs, all read-only:
   - the decider ledger (`decisions`): the held rows, paid-first priority;
   - Trino (`postgresql_core` / `postgresql_catalog`): request status, track,
     artists, ISRC, claimed roles, popularity, account and profile names. One
-    batched SELECT per 300 ids with a query time limit; never the admin API
-    (firstmate 033: no bulk paging of prod admin APIs);
+    batched SELECT per 100 ids with a query time limit; never the admin API
+    (firstmate 033: no bulk paging of prod admin APIs). A batch that fails is
+    skipped and its requests wait for the next run, but a lookup no batch of
+    which answers at all is a Trino outage: nothing is judged and the CLI exits
+    non-zero, so an empty pass never looks clean;
   - the proof-on-file export: which Intercom conversations hold the user's
     documents;
   - Intercom: one GET per conversation (attachment list + contact), then the
@@ -107,7 +110,10 @@ HELD = ("unverified", "user_verification_needed")
 MAX_CONVERSATIONS = 8        # most recent conversations per user
 MAX_FILES = 24               # per user
 MAX_TRACKS = 60              # claimed tracks checked per user per run (oldest first)
-TRINO_BATCH = 300
+# Measured on node-8 2026-10-21: the IN-list lookups cost superlinearly in the
+# list size (100 ids ~2 s, 300 ids 17 s for the status query and 57.5 s for the
+# request join, at the 60 s limit), and 11 of 16 hourly runs died on it.
+TRINO_BATCH = 100
 TRINO_TIMEOUT_S = 60
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
@@ -325,31 +331,69 @@ def _pg_array(v: str) -> list[str]:
     return [x.strip().strip('"') for x in next(csv.reader([v]), []) if x.strip().strip('"')] if v else []
 
 
-def statuses(ids: list[str], trino: Trino = trino_query) -> dict[str, str]:
-    """request id -> current status (a light primary-key lookup per 300 ids),
-    so users are picked only from rows that are still held."""
-    out: dict[str, str] = {}
+def _batch_count(ids: list[str]) -> int:
+    """How many batches _batches() actually attempts for these ids."""
+    n = sum(1 for x in ids if UUID.match(x))
+    return -(-n // TRINO_BATCH) if n else 0
+
+
+def _trino_outage(run_id: str, failures: list[str], what: str) -> dict[str, Any]:
+    """Stats for a run that judged nothing because Trino answered no batch at all.
+    `trino_unavailable` names which lookup went dark, so the caller can exit non-zero."""
+    return {"run_id": run_id, "held_unjudged": 0, "users": 0, "rows": 0, "skipped_not_held": 0,
+            "skipped_partial_lookup": 0, "documents": 0, "errors": failures[:5], "retry_users": 0,
+            "intercom_unavailable": False, "outcomes": defaultdict(int),
+            "trino_batches_skipped": len(failures), "trino_unavailable": what}
+
+
+def _batches(ids: list[str], trino: Trino, sql_for: Callable[[str], str],
+             failures: list[str] | None, failed_ids: set[str] | None = None) -> Iterable[list[str]]:
+    """CSV rows of each batch's query. ONE attempt per batch: trino_query already
+    retries a query-time-limit error once, so a second retry here would spend four
+    60 s subprocess calls on one dead batch instead of two (QA r1 finding 1). A
+    batch that fails is skipped and recorded in `failures`: its requests are simply
+    not judged this run (they come back next run), and the other batches still go
+    through. One slow batch never kills the run. `failed_ids`, when given, collects
+    every id of a skipped batch: its answer is UNKNOWN, which is not the same as
+    "Trino returned no row for it" (QA r2)."""
     for i in range(0, len(ids), TRINO_BATCH):
         batch = [x for x in ids[i:i + TRINO_BATCH] if UUID.match(x)]
         if not batch:
             continue
         inlist = ",".join(f"uuid '{x}'" for x in batch)
-        for r in csv.reader(io.StringIO(trino(
-                "SELECT cast(id as varchar), status FROM postgresql_core.public.credit_requests "
-                f"WHERE id IN ({inlist}) AND deletedat IS NULL"))):
+        try:
+            text = trino(sql_for(inlist))
+        except (RuntimeError, subprocess.TimeoutExpired) as exc:
+            if failures is None:
+                raise
+            failures.append(f"trino batch of {len(batch)} skipped: {str(exc)[-120:]}")
+            if failed_ids is not None:
+                failed_ids.update(batch)
+            continue
+        yield list(csv.reader(io.StringIO(text)))
+
+
+def statuses(ids: list[str], trino: Trino = trino_query, failures: list[str] | None = None,
+             unknown: set[str] | None = None) -> dict[str, str]:
+    """request id -> current status (a light primary-key lookup per TRINO_BATCH ids),
+    so users are picked only from rows that are still held. Ids of a skipped batch go
+    into `unknown` (when given): their status was never read."""
+    out: dict[str, str] = {}
+    sql = ("SELECT cast(id as varchar), status FROM postgresql_core.public.credit_requests "
+           "WHERE id IN ({}) AND deletedat IS NULL").format
+    for rows in _batches(ids, trino, sql, failures, unknown):
+        for r in rows:
             if len(r) == 2 and UUID.match(r[0]):
                 out[r[0]] = r[1]
     return out
 
 
-def requests(ids: list[str], trino: Trino = trino_query) -> dict[str, Request]:
+def requests(ids: list[str], trino: Trino = trino_query,
+             failures: list[str] | None = None) -> dict[str, Request]:
     out: dict[str, Request] = {}
-    for i in range(0, len(ids), TRINO_BATCH):
-        batch = [x for x in ids[i:i + TRINO_BATCH] if UUID.match(x)]
-        if not batch:
-            continue
-        inlist = ",".join(f"uuid '{x}'" for x in batch)
-        sql = ("SELECT cast(cr.id as varchar), cr.status, cr.credits, cr.spotifytracktitle, "
+
+    def sql_for(inlist: str) -> str:
+        return ("SELECT cast(cr.id as varchar), cr.status, cr.credits, cr.spotifytracktitle, "
                "json_format(cr.spotifytrackartists), cr.spotifypopularity, cast(cr.trackid as varchar), "
                "json_extract_scalar(cr.metadata, '$.isrc'), json_extract_scalar(cr.metadata, '$.releaseDate'), "
                "cr.userid, cast(cr.createdat as varchar), u.fullname, u.firstname, u.lastname, p.name "
@@ -357,7 +401,8 @@ def requests(ids: list[str], trino: Trino = trino_query) -> dict[str, Request]:
                "LEFT JOIN postgresql_core.public.users u ON u.id = cr.userid "
                "LEFT JOIN postgresql_catalog.public.catalog_profile p ON p.profile_id = cast(cr.profileid as varchar) "
                f"WHERE cr.id IN ({inlist}) AND cr.deletedat IS NULL")
-        for r in csv.reader(io.StringIO(trino(sql))):
+    for rows in _batches(ids, trino, sql_for, failures):
+        for r in rows:
             if len(r) < 15 or not UUID.match(r[0]):
                 continue          # header, CLI warnings
             try:
@@ -661,18 +706,48 @@ def run(store: ProofStore, *, fetch: Fetch, trino: Trino = trino_query, runner: 
     db = store.db
     ensure_schema(db)
     unjudged = [h for h in held_rows(ledger_path) if not judged(db, h.request_id)]
-    st = statuses([h.request_id for h in unjudged], trino)
-    held = [h for h in unjudged if st.get(h.request_id) in HELD]
+    lookup_failures: list[str] = []
+    status_ids = [h.request_id for h in unjudged]
+    status_batches = _batch_count(status_ids)
+    status_unknown: set[str] = set()
+    st = statuses(status_ids, trino, lookup_failures, status_unknown)
+    if status_batches and len(lookup_failures) >= status_batches:
+        # No status batch answered: that is a Trino outage, not an empty queue. Returning
+        # normally would label every pending request skipped_not_held and leave the cron
+        # green while judging nothing (QA r1 finding 2).
+        log(f"stage2: TRINO UNAVAILABLE - all {status_batches} status batch(es) failed; nothing judged")
+        return _trino_outage(run_id, lookup_failures, "status")
+    # A user with ANY request whose status batch failed is skipped whole this run (QA r2): the
+    # request-completeness check below compares against the held set, so a request dropped
+    # from that set by a failed status batch would otherwise go unnoticed and the user would
+    # be judged on part of their requests. Unknown-status rows are never called not-held.
+    unknown_users = {h.user_id for h in unjudged if h.request_id in status_unknown}
+    not_held = [h for h in unjudged if h.request_id not in status_unknown and st.get(h.request_id) not in HELD]
+    partial_status = [h for h in unjudged if h.user_id in unknown_users
+                      and (h.request_id in status_unknown or st.get(h.request_id) in HELD)]
+    held = [h for h in unjudged if st.get(h.request_id) in HELD and h.user_id not in unknown_users]
+    if partial_status:
+        log(f"stage2: {len(unknown_users)} user(s) skipped whole: a status batch failed for "
+            f"{len(status_unknown & {h.request_id for h in unjudged})} of their request(s)")
     convs = proof_conversations(proof_path)
     org = org_affiliation(org_path)
     users: dict[int, list[Held]] = {}
     for h in held:                       # keeps the paid-first, oldest-first order
         users.setdefault(h.user_id, []).append(h)
     picked = list(users.items())[:max_users]
-    reqs = requests([h.request_id for _, hs in picked for h in hs], trino)
+    req_ids = [h.request_id for _, hs in picked for h in hs]
+    req_batches = _batch_count(req_ids)
+    failures_before = len(lookup_failures)
+    reqs = requests(req_ids, trino, lookup_failures)
+    if req_batches and len(lookup_failures) - failures_before >= req_batches:
+        log(f"stage2: TRINO UNAVAILABLE - all {req_batches} request batch(es) failed; nothing judged")
+        return _trino_outage(run_id, lookup_failures, "requests")
     stats: dict[str, Any] = {"run_id": run_id, "held_unjudged": len(held), "users": len(picked), "rows": 0,
-                             "skipped_not_held": len(unjudged) - len(held), "documents": 0, "errors": [],
-                             "retry_users": 0, "intercom_unavailable": False, "outcomes": defaultdict(int)}
+                             "skipped_not_held": len(not_held), "documents": 0, "errors": [],
+                             "retry_users": 0, "intercom_unavailable": False, "outcomes": defaultdict(int),
+                             "trino_batches_skipped": len(lookup_failures), "trino_unavailable": None,
+                             "skipped_partial_lookup": len(partial_status)}
+    stats["errors"] += lookup_failures[:5]
     buffered: list[tuple[Any, ...]] = []
     up = failed = False
 
@@ -688,8 +763,13 @@ def run(store: ProofStore, *, fetch: Fetch, trino: Trino = trino_query, runner: 
 
     for uid, hs in picked:
         mine = [reqs[h.request_id] for h in hs if h.request_id in reqs and reqs[h.request_id].status in HELD]
-        stats["skipped_not_held"] += len(hs) - len(mine)
-        if not mine:
+        if len(mine) < len(hs):
+            # A request of this user's was not answered by the request lookup: its batch failed, or
+            # it left the held set between the two queries. Judge NOTHING for the user this run -
+            # a judgment on part of their requests could approve what the full set would not - and
+            # count it apart from genuinely-not-held rows so the summary stays honest. Next run.
+            # skipped_partial_lookup counts every request left unjudged by an incomplete lookup.
+            stats["skipped_partial_lookup"] += len(hs)
             continue
         paid = {h.request_id: h.paid for h in hs}
         tmp = tempfile.mkdtemp(prefix="cvstage2-", dir="/dev/shm" if os.path.isdir("/dev/shm") else None)

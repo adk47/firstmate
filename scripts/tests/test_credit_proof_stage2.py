@@ -552,6 +552,66 @@ class RunTests(unittest.TestCase):
         self.assertIn("| 1 | `" + RA + "`", md)
         self.assertEqual(stage2.summary(self.store.db)["approve"], {"paid": 1, "free": 0})
 
+    def test_a_total_trino_outage_fails_the_run_and_writes_nothing(self):
+        """QA r1 f2: when no status batch answers, the run must say so instead of labelling
+        every pending request skipped_not_held and reporting a clean hourly run."""
+        def dead(sql):
+            raise RuntimeError("Query exceeded the maximum execution time limit of 60.00s")
+        self.trino = dead
+        stats = self.go()
+        self.assertEqual(stats["trino_unavailable"], "status")
+        self.assertEqual(stats["trino_batches_skipped"], 1)
+        self.assertEqual(stats["rows"], 0)
+        self.assertEqual(stats["skipped_not_held"], 0)          # NOT every request called not-held
+        self.assertEqual(self.store.db.execute("SELECT COUNT(*) FROM stage2_shadow").fetchone()[0], 0)
+
+    def test_a_partial_request_lookup_judges_none_of_that_users_requests(self):
+        """The PR's promise: a user whose request set came back incomplete is judged NOT AT ALL
+        this run (a judgment on part of their requests could approve what the full set would not)."""
+        whole = self.trino
+
+        def partial(sql):
+            text = whole(sql)
+            if "u.fullname" in sql and RB in sql:      # the request lookup silently omits RB
+                text = "\n".join(ln for ln in text.splitlines() if RB not in ln)
+            return text
+        self.trino = partial
+        stats = self.go()
+        self.assertEqual(stats["skipped_partial_lookup"], 2)          # user 7 skipped whole: RA + RB
+        judged = {rid for (rid, _role) in self.outcomes()}
+        self.assertNotIn(RA, judged)                                  # RA was looked up fine
+        self.assertNotIn(RB, judged)                                  # but its user was not judged
+        self.assertIn(RC, judged)                                     # user 8 is unaffected
+
+    def test_a_failed_status_batch_skips_the_whole_user_across_batches(self):
+        """QA r2: user 7's RA and RB land in different status batches; RA's answers, RB's times
+        out. RB must not silently drop out of the held set (the request-completeness check would
+        then see only RA and judge user 7 on part of their requests), and its unknown status
+        must not be counted as not-held."""
+        whole = self.trino
+        calls = {"status": 0}
+
+        def flaky(sql):
+            if "u.fullname" not in sql:
+                calls["status"] += 1
+                if RB in sql:
+                    raise RuntimeError("Query exceeded the maximum execution time limit of 60.00s")
+            return whole(sql)
+        self.trino = flaky
+        with mock.patch.object(stage2, "TRINO_BATCH", 1):
+            stats = self.go()
+        self.assertEqual(calls["status"], 5)                          # one batch per id, RB's failed once
+        self.assertIsNone(stats["trino_unavailable"])                 # a partial failure is not an outage
+        self.assertEqual(stats["trino_batches_skipped"], 1)
+        judged = {rid for (rid, _role) in self.outcomes()}
+        self.assertNotIn(RA, judged)                                  # its status batch answered fine
+        self.assertNotIn(RB, judged)
+        self.assertIn(RC, judged)                                     # users 8 and 9 are unaffected
+        self.assertIn(RD, judged)
+        self.assertEqual(stats["skipped_partial_lookup"], 2)          # RA (held) + RB (unknown)
+        self.assertEqual(stats["skipped_not_held"], 1)                # only RE, known approved
+        self.assertFalse(any(RA in s and "u.fullname" in s for s in self.sql))   # never looked up
+
 
 class ClaimVerdictTests(unittest.TestCase):
     def pr(self, *names):
@@ -634,10 +694,11 @@ class CliTests(unittest.TestCase):
         spec.loader.exec_module(cli)
         with tempfile.TemporaryDirectory() as d:
             cli.KILL_SWITCH = str(Path(d) / "absent")
-            for down, rc in ((True, 1), (False, 0)):
+            for down, outage, rc in ((True, None, 1), (False, None, 0), (False, "status", 1)):
                 stats = {"run_id": "r", "held_unjudged": 1, "users": 1, "rows": 0 if down else 1, "documents": 0,
                          "skipped_not_held": 0, "retry_users": 1, "outcomes": {}, "errors": [],
-                         "intercom_unavailable": down}
+                         "trino_batches_skipped": 0, "trino_unavailable": outage,
+                         "skipped_partial_lookup": 0, "intercom_unavailable": down}
                 with mock.patch("credit_verify.proof.intercom.intercom_token", return_value="tok"), \
                         mock.patch("credit_verify.proof.stage2.run", return_value=stats), \
                         redirect_stdout(io.StringIO()):
@@ -910,6 +971,82 @@ class HeldRowsJudgeMode(unittest.TestCase):
             db.close()
             got = {h.request_id for h in stage2.held_rows(path)}
             self.assertEqual(got, {ids[0], ids[1], ids[4]})
+
+
+class TrinoBatchTests(unittest.TestCase):
+    """2026-10-21: 11 of 16 hourly runs died on one Trino batch hitting the 60 s
+    limit (IN-list cost is superlinear: 300 ids 57.5 s, 100 ids ~2 s)."""
+
+    def ids(self, n):
+        return [f"{i:08x}-0000-0000-0000-000000000000" for i in range(n)]
+
+    def test_batches_are_at_most_100_ids(self):
+        sizes = []
+
+        def trino(sql):
+            sizes.append(sql.count("uuid '"))
+            return ""
+        stage2.statuses(self.ids(250), trino)
+        self.assertEqual(sizes, [100, 100, 50])
+
+    def test_a_failing_batch_is_skipped_after_one_attempt_and_the_rest_still_run(self):
+        calls = []
+
+        def trino(sql):
+            first = sql.split("uuid '")[1][:8]
+            calls.append(first)
+            if first == "00000064":           # the second batch always times out
+                raise RuntimeError("Query exceeded the maximum execution time limit of 60.00s")
+            return "\n".join(f'"{x}","unverified"' for x in self.ids(300)
+                             if f"uuid '{x}'" in sql) + "\n"
+        failures = []
+        got = stage2.statuses(self.ids(300), trino, failures)
+        self.assertEqual(calls.count("00000064"), 1)          # ONE attempt in this layer
+        self.assertEqual(len(got), 200)                        # batches 1 and 3 still answered
+        self.assertEqual(len(failures), 1)
+        self.assertIn("skipped", failures[0])
+
+    def test_the_timeout_retry_lives_in_one_layer_only(self):
+        """QA r1 f1: the batch layer must not stack a second retry on trino_query's own
+        retry, or one dead batch costs four 60 s subprocess calls instead of two."""
+        class P:
+            returncode = 1
+            stdout = ""
+            stderr = "Query exceeded the maximum execution time limit of 60.00s"
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(kw.get("input"))
+            return P()
+        with self.assertRaises(RuntimeError):
+            stage2.trino_query("SELECT 1", sleep=lambda s: None, run=run)
+        self.assertEqual(len(calls), 2)                        # trino_query retries once, then gives up
+
+        def dead(sql):                                         # the batch layer adds no attempt of its own
+            raise RuntimeError("Query exceeded the maximum execution time limit of 60.00s")
+        failures = []
+        stage2.statuses(self.ids(5), dead, failures)
+        self.assertEqual(len(failures), 1)                     # one attempt -> one skip record
+
+    def test_a_transient_batch_failure_is_skipped_not_fatal(self):
+        n = {"x": 0}
+
+        def trino(sql):
+            n["x"] += 1
+            if n["x"] == 1:
+                raise RuntimeError("transient")
+            return "\n".join(f'"{x}","unverified"' for x in self.ids(10)) + "\n"
+        failures = []
+        self.assertEqual(stage2.statuses(self.ids(10), trino, failures), {})   # skipped this run
+        self.assertEqual(len(failures), 1)
+        self.assertEqual(stage2.statuses(self.ids(10), trino, failures).keys() & set(self.ids(10)),
+                         set(self.ids(10)))                                   # back next run
+
+    def test_without_a_failures_list_an_error_still_raises(self):
+        def trino(sql):
+            raise RuntimeError("down")
+        with self.assertRaises(RuntimeError):
+            stage2.statuses(self.ids(5), trino)
 
 
 if __name__ == "__main__":
