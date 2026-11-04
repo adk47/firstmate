@@ -22,6 +22,9 @@ CONTACTS_NOCODB_TABLE = "m9vsbijhrr9ddeu"
 OUTREACH_LABEL = "B2B - Ads"
 AUTO_FU_APPROVED_LABEL = "B2B - Ads/auto-fu-approved"
 OVERRIDE_APPROVED_LABEL = "B2B - Ads/override-approved"
+# Human-applied after reviewing a NEW (first-touch) draft; follow-ups use
+# AUTO_FU_APPROVED_LABEL instead. override-approved does not stand in for it.
+INITIAL_APPROVED_LABEL = "B2B - Ads/initial-approved"
 META_LABEL_PREFIX = "muso-meta/"
 
 # Production-safe outreach accounts (only a@muso.ai for now, per

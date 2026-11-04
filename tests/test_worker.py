@@ -34,7 +34,7 @@ class Adapters:
         self.ghl = MagicMock()
 
 
-def _labels_for(meta):
+def _labels_for(meta, approved=True):
     kind_label = f"muso-meta/kind-{meta.kind.value}"
     sender_label = f"muso-meta/sender-{meta.sender.replace('@', '_at_')}"
     key_labels = (
@@ -49,6 +49,8 @@ def _labels_for(meta):
         labels.append(f"muso-meta/opp-{meta.opp_id}")
     if meta.kind is Kind.FOLLOWUP:
         labels.append(f"muso-meta/thread-{meta.original_thread_id}")
+    if approved and meta.kind is Kind.NEW:
+        labels.append("B2B - Ads/initial-approved")  # human-applied in Gmail
     return tuple(labels)
 
 
@@ -273,9 +275,10 @@ def _noco_meta(kind=Kind.NEW, **kw):
                          original_thread_id=None if kind is Kind.NEW else "t1", **kw)
 
 
-def _noco_new(a, record=None, to=("ow@larsenstrings.com",)):
+def _noco_new(a, record=None, to=("ow@larsenstrings.com",), approved=True):
     meta = _noco_meta()
-    a.gmail.fetch_draft.return_value = make_draft(labels=_labels_for(meta), to=to)
+    a.gmail.fetch_draft.return_value = make_draft(
+        labels=_labels_for(meta, approved=approved), to=to)
     a.gmail.search_inbound_from.return_value = ()
     a.gmail.send_draft.return_value = "sent-msg-id"
     a.nocodb.get_contact.return_value = record or make_noco_contact()
@@ -430,3 +433,65 @@ def test_nocodb_followup_with_matching_record_still_sends(monkeypatch):
     _noco_followup_record(a, make_noco_contact(status="Follow Up 1"))
     monkeypatch.setattr(worker, "NOW_EPOCH", lambda: 1776096000)
     assert worker.process_draft("r1", "a@muso.ai", a).sent
+
+
+# --- initial-approved gate (NEW drafts need a human-applied label) ---------
+
+def _assert_nothing_read_or_sent(a):
+    a.gmail.send_draft.assert_not_called()
+    a.nocodb.get_contact.assert_not_called()
+    a.sheets.get_contact_by_row_id.assert_not_called()
+    a.gmail.fetch_thread.assert_not_called()
+    a.sheets.append_logbook_row.assert_not_called()
+
+
+def test_nocodb_new_without_initial_approved_is_blocked_before_any_read(monkeypatch):
+    a = Adapters()
+    _noco_new(a, approved=False)
+    monkeypatch.setattr(worker, "NOW_EPOCH", lambda: 1776096000)
+    result = worker.process_draft("r1", "a@muso.ai", a)
+    assert not result.sent
+    assert result.reason_code == "INITIAL_NOT_APPROVED"
+    _assert_nothing_read_or_sent(a)
+    msg = a.slack.post_sales_alert.call_args.args[0]  # last alert = the block
+    assert msg.startswith(":no_entry:") and "INITIAL_NOT_APPROVED" in msg
+
+
+def test_legacy_sheet_new_without_initial_approved_is_blocked_before_any_read(monkeypatch):
+    a = Adapters()
+    meta = make_metadata(kind=Kind.NEW, original_thread_id=None, template="PrivateInvite")
+    a.gmail.fetch_draft.return_value = make_draft(
+        labels=_labels_for(meta, approved=False))
+    monkeypatch.setattr(worker, "NOW_EPOCH", lambda: 1776096000)
+    result = worker.process_draft("r1", "a@muso.ai", a)
+    assert not result.sent
+    assert result.reason_code == "INITIAL_NOT_APPROVED"
+    _assert_nothing_read_or_sent(a)
+
+
+def test_override_approved_does_not_stand_in_for_initial_approved(monkeypatch):
+    a = Adapters()
+    meta = _noco_meta()
+    a.gmail.fetch_draft.return_value = make_draft(
+        labels=(*_labels_for(meta, approved=False), "B2B - Ads/override-approved"))
+    result = worker.process_draft("r1", "a@muso.ai", a)
+    assert result.reason_code == "INITIAL_NOT_APPROVED"
+    _assert_nothing_read_or_sent(a)
+
+
+def test_nocodb_new_with_initial_approved_runs_gates_and_sends(monkeypatch):
+    a = Adapters()
+    _noco_new(a, approved=True)
+    monkeypatch.setattr(worker, "NOW_EPOCH", lambda: 1776096000)
+    assert worker.process_draft("r1", "a@muso.ai", a).sent
+    a.nocodb.get_contact.assert_called_once_with(2)
+    a.gmail.send_draft.assert_called_once()
+
+
+def test_initial_approved_does_not_skip_the_other_gates(monkeypatch):
+    a = Adapters()
+    _noco_new(a, approved=True, to=("ow@lfrequencies.com",))
+    monkeypatch.setattr(worker, "NOW_EPOCH", lambda: 1776096000)
+    result = worker.process_draft("r1", "a@muso.ai", a)
+    assert result.reason_code == "RECIPIENT_MISMATCH"
+    a.gmail.send_draft.assert_not_called()

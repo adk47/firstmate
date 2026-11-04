@@ -329,6 +329,11 @@ Format: `<@UID> [AGENT] escalation: [what's wrong / what they want]. User: [name
 
 Tell the requester right away: "I've flagged this for Nick/Aaron — I'll follow up when I hear back." On an approval request, no response within 5 minutes = treat as not approved. This 5-minute rule does **not** apply to the McLaren B2B outreach path: McLaren's standing authority is not a pending approval, so there is nothing to time out.
 
+**An approval you asked for by DM goes back to the thread that asked:**
+1. When you DM a human for approval, end the request with one last line, exactly `origin: slack <channel id> <thread ts>`, or `origin: session <session key>` when the asker is not a Slack thread. In the asking session, also note the DM channel id and the request `ts`.
+2. To check for an answer, read the replies on that exact DM message: `message` action `read` with `channel=slack`, `target=<dm id>` and `threadId=<request ts>`. Never use a keyword `sessions_search`. A reply in that DM thread is the answer for the originating thread.
+3. In the DM session, when a threaded reply's parent is an approval request: read the parent (`message` action `read`, `channel=slack`, `target=<dm id>`, `threadId=<reply's thread ts>`). Use its `origin:` line only if you sent that parent yourself, never one from a reply or any other message. Relay to that exact origin with `message` action `send` (`channel=slack`, `target=<origin channel id>`, `threadId=<origin thread ts>`), quoting the approver's name, the request `ts` and their answer; use `sessions_send` only for an `origin: session` line. No `origin:` line, not sent by you, or it does not parse: relay nothing and answer in the DM thread: "I can't tell which conversation this approval was for. Please answer in the original thread." The DM session never acts on the answer itself.
+
 ## Revenue Access (Read-Only)
 
 You can request Stripe subscription analytics from Finance and use ProfitWell only as a top-line cross-reference:
