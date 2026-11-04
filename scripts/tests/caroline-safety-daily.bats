@@ -150,6 +150,19 @@ daily() { run bash "$DAILY" --state-dir "$STATE" --plugin-dir "$TEST_TMPDIR/plug
   [ "$status" -eq 1 ]
 }
 
+@test "non-arithmetic classifier counts: per-call rows can exceed the health-window total, so no ratio is printed" {
+  # Read-back 2026-11-03: the digest printed "unavailable 123/117 calls" - durable per-call rows (759)
+  # outnumber the 15-min window totals (750) they were being divided by. The durable row is authoritative.
+  FAKE_DG='{"inbound":{"turns":0},"output_guard":{},"watch_candidates":[],"classifier_unavailable":759,"classifier_calls":750}' daily
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"unavailable on 759 call(s)"* ]]
+  [[ "$output" == *"windows counted only 750"* ]]
+  [[ "$output" != *"759/750"* ]]
+  # and when the window total does cover the per-call rows, the ratio is still printed
+  FAKE_DG='{"inbound":{"turns":0},"output_guard":{},"watch_candidates":[],"classifier_unavailable":3,"classifier_calls":750}' daily
+  [[ "$output" == *"unavailable 3/750 calls in 24 h"* ]]
+}
+
 @test "CAN FAIL: an unwritable injection ledger pages (hits are being lost, not absent)" {
   FAKE_DG='{"inbound":{"turns":0},"output_guard":{},"watch_candidates":[],"candidates_written":true,"ledger_writable":false,"ledger_error":"PermissionError: read-only"}' daily
   [ "$status" -eq 1 ]

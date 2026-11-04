@@ -66,8 +66,18 @@ if [ "$dg_rc" -ne 0 ] || ! jq -e 'type == "object" and has("inbound")' <<<"$dg" 
 fi
 
 summary="$( [ "$record_rc" -eq 0 ] && jq -r '
-  "Caroline safety daily \(.day): red-team \(((.caroline.cases // 0) - (.caroline.failed // 0)))/\(.caroline.cases // "?") (guard \(.caroline.guard_version // "?") \(.caroline.guard_mode // "?"), bank \(.caroline.bank_version // "?")), doc-verify \(((.docverify.cases // 0) - (.docverify.failed // 0)))/\(.docverify.cases // "?")."
-  + "\nLast 24 h: inbound injection hit-turns \(.digest.inbound.turns // "?") \(.digest.inbound.by_severity // {} | tostring), by source \(.digest.inbound.by_source // {} | tostring); output guard blocked \(.digest.output_guard.blocked // "?") \(.digest.output_guard.by_rule // {} | tostring); paraphrased bank lines \(.digest.output_guard.notes // {} | tostring); classifier=\(.classifier) now, unavailable \(.digest.classifier_unavailable // "?")/\(.digest.classifier_calls // "?") calls in 24 h; watch candidates \(.digest.watch_candidates // [] | length)."
+  (.digest.classifier_unavailable) as $u
+  | (.digest.classifier_calls) as $c
+  | "Caroline safety daily \(.day): red-team \(((.caroline.cases // 0) - (.caroline.failed // 0)))/\(.caroline.cases // "?") (guard \(.caroline.guard_version // "?") \(.caroline.guard_mode // "?"), bank \(.caroline.bank_version // "?")), doc-verify \(((.docverify.cases // 0) - (.docverify.failed // 0)))/\(.docverify.cases // "?")."
+  + "\nLast 24 h: inbound injection hit-turns \(.digest.inbound.turns // "?") \(.digest.inbound.by_severity // {} | tostring), by source \(.digest.inbound.by_source // {} | tostring); output guard blocked \(.digest.output_guard.blocked // "?") \(.digest.output_guard.by_rule // {} | tostring); paraphrased bank lines \(.digest.output_guard.notes // {} | tostring); "
+  # The unavailable count is per-call DURABLE rows; calls comes from 15-min window rows, which can
+  # count fewer (restart/idle gaps). Printing "123/117 calls" (read-back 2026-11-03) is arithmetic the
+  # data cannot support, so the durable rows stay authoritative and no ratio is printed when they disagree.
+  + (if ($u | type) != "number" then "classifier=\(.classifier) now, unavailable calls NOT REPORTED by the digest; "
+     elif ($c | type) != "number" then "classifier=\(.classifier) now, unavailable \($u) call(s) in 24 h (per-call rows; the health windows reported no total); "
+     elif $u > $c then "classifier=\(.classifier) now, unavailable on \($u) call(s) in 24 h (per-call rows are authoritative; the 15-min health windows counted only \($c), so no ratio is printed); "
+     else "classifier=\(.classifier) now, unavailable \($u)/\($c) calls in 24 h; " end)
+  + "watch candidates \(.digest.watch_candidates // [] | length)."
 ' "$out")" || { summary="Caroline safety daily $today: NO SUMMARY (day record unreadable)."; regress+="summary unreadable. "; }
 # Ledger health (QA on #1628): an unwritable ledger means injection hits are being lost, not that there were none.
 if jq -e '.ledger_writable == false' <<<"$dg" >/dev/null 2>&1; then

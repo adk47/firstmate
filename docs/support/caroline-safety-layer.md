@@ -51,3 +51,15 @@ node /opt/hydra/scripts/caroline-redteam.mjs
 
 A block on a reply that was actually fine is a false positive. To fix it, add the reply as a `safe_reply` case in
 the corpus and narrow the rule. Do not widen the masking.
+
+A `REASSIGNMENT FAILED ... STILL ASSIGNED TO THE BOT` page means the hand-off target really was not reached. An
+`IntercomAssignmentConflictError` naming the target (Intercom code `conversation_already_assigned_to_assignee`) is the
+OPPOSITE: the conversation is already with that admin — a human picked it up — so the ledger records
+`assignment="already_assigned"` and the page says so. A conflict naming the BOT stays `FAILED`. Both hand-off
+paths share one predicate, `isHandoffConflict` in `outbound.ts` (QA on #1673: the dropped-reply path honoured a
+conflict naming the bot and told supervision a human held a conversation the bot still owned). It counts a conflict
+only when the target is CONFIGURED and is not the bot, so an unset/`"0"` target (Intercom's Unassign) or a
+`defaultInboxId` misconfigured to `botAdminId` never reads as a completed hand-off. The digest's
+`classifier_unavailable` count is per-call durable rows while `classifier_calls` comes from 15-minute windows that
+can count fewer, so the summary prints a ratio only when the window total covers the rows and otherwise says
+"per-call rows are authoritative".

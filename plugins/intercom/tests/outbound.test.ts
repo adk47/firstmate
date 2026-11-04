@@ -14,6 +14,8 @@ import {
   REPLY_MAX_BACKOFF_MS,
   REPLY_BASE_BACKOFF_MS,
   REPLY_MAX_TOTAL_WAIT_MS,
+  IntercomAssignmentConflictError,
+  isHandoffConflict,
 } from "../src/outbound.js";
 import type { IntercomClient, IntercomConversation } from "../src/types.js";
 
@@ -1068,5 +1070,29 @@ describe("SanitizingIntercomClient help-centre link gate", () => {
     let loads = 0;
     await send("Plain, see help.muso.ai.", () => { loads++; return null; });
     expect(loads).toBe(0);
+  });
+});
+
+describe("isHandoffConflict (one rule for both hand-off paths)", () => {
+  const conflict = (assigneeId: string) => new IntercomAssignmentConflictError(`already ${assigneeId}`, assigneeId);
+  it("counts a conflict naming a configured, non-bot target", () => {
+    expect(isHandoffConflict(conflict("inbox_7"), { botAdminId: "bot", defaultInboxId: "inbox_7" })).toBe(true);
+  });
+  it("counts a conflict with no reported id when the target itself is a real hand-off target", () => {
+    expect(isHandoffConflict(conflict(""), { botAdminId: "bot", defaultInboxId: "inbox_7" })).toBe(true);
+  });
+  it("never counts a conflict naming the BOT (the conversation really is bot-owned)", () => {
+    expect(isHandoffConflict(conflict("bot"), { botAdminId: "bot", defaultInboxId: "bot" })).toBe(false);
+  });
+  it("never counts unset or '0' as a hand-off target (Intercom's Unassign)", () => {
+    expect(isHandoffConflict(conflict("0"), { botAdminId: "bot" })).toBe(false);
+    expect(isHandoffConflict(conflict("0"), { botAdminId: "bot", defaultInboxId: "" })).toBe(false);
+  });
+  it("ignores errors that are not assignment conflicts", () => {
+    expect(isHandoffConflict(new Error("boom"), { botAdminId: "bot", defaultInboxId: "inbox_7" })).toBe(false);
+    expect(isHandoffConflict(null, { botAdminId: "bot", defaultInboxId: "inbox_7" })).toBe(false);
+  });
+  it("ignores a conflict on a DIFFERENT assignee than the one we asked for", () => {
+    expect(isHandoffConflict(conflict("someone_else"), { botAdminId: "bot", defaultInboxId: "inbox_7" })).toBe(false);
   });
 });

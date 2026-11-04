@@ -12,6 +12,7 @@
  *     failure in any side effect (ledger, tag, page) never turns a block into a pass.
  */
 import { guardCarolineReply, OUTPUT_GUARD_MODE, type GuardResult } from "./caroline-output-guard.js";
+import { isHandoffConflict } from "./outbound.js";
 import {
   INJECTION_TAG,
   INJECTION_WATCH_VERSION,
@@ -258,7 +259,7 @@ export interface OutboundGuardOutcome {
   result: GuardResult;
   classifier: ClassifierResult;
   /** Blocked + enforced only: where the conversation actually ended up. */
-  assignment?: "team_inbox" | "unassigned" | "FAILED" | "not_enforced";
+  assignment?: "team_inbox" | "already_assigned" | "unassigned" | "FAILED" | "not_enforced";
 }
 
 export async function guardOutbound(p: OutboundGuardParams): Promise<OutboundGuardOutcome> {
@@ -313,10 +314,17 @@ export async function guardOutbound(p: OutboundGuardParams): Promise<OutboundGua
   // The fallback says a teammate takes it from here: make that true before it is posted. One retry;
   // the ACTUAL outcome is what the ledger row and the page report (QA on #1628: a failed reassign
   // must never be reported as "with the team inbox").
-  let assignment: "team_inbox" | "unassigned" | "FAILED" | "not_enforced" = "not_enforced";
+  let assignment: "team_inbox" | "already_assigned" | "unassigned" | "FAILED" | "not_enforced" = "not_enforced";
   if (enforced) {
     const assigneeId = p.account.defaultInboxId || "0";
+    // A conflict naming the NON-BOT assignee we asked for is the desired end state, not a failure
+    // (read-back 2026-11-03: conv 215476670359602 paged "STILL ASSIGNED TO THE BOT" while a human,
+    // admin 5465657, already held it). Same rule escalation-action.ts already applies to conflicts.
+    // A conflict naming the BOT is NOT a hand-off: that conversation really is still bot-owned.
+    // Only a REAL hand-off target counts (configured, and not the bot): see isHandoffConflict.
+    const alreadyWithTarget = (e: unknown) => isHandoffConflict(e, p.account);
     let lastErr: unknown = null;
+    let already = false;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         await p.client.assignConversation({ conversationId: p.conversationId, adminId: p.account.botAdminId, assigneeId });
@@ -324,11 +332,26 @@ export async function guardOutbound(p: OutboundGuardParams): Promise<OutboundGua
         break;
       } catch (e) {
         lastErr = e;
+        if (alreadyWithTarget(e)) {
+          already = true;
+          lastErr = null;
+          break;
+        }
       }
     }
-    assignment = lastErr ? "FAILED" : p.account.defaultInboxId ? "team_inbox" : "unassigned";
+    assignment = lastErr
+      ? "FAILED"
+      : already
+        ? "already_assigned"
+        : p.account.defaultInboxId
+          ? "team_inbox"
+          : "unassigned";
     if (lastErr) {
       p.log?.error?.(`[intercom:ALERT] [${p.tag}] output-guard reassignment FAILED twice conv=${p.conversationId}: ${lastErr}`);
+    } else if (already) {
+      p.log?.info?.(
+        `[intercom:output-guard] [${p.tag}] conv=${p.conversationId} already assigned to ${assigneeId}: hand-off already held, no reassignment needed`,
+      );
     }
   }
 
@@ -351,7 +374,9 @@ export async function guardOutbound(p: OutboundGuardParams): Promise<OutboundGua
   const where =
     assignment === "team_inbox"
       ? "The conversation is now with the team inbox: please answer it."
-      : assignment === "unassigned"
+      : assignment === "already_assigned"
+        ? "The conversation was ALREADY assigned to the hand-off target: a human already holds it, nothing to do."
+        : assignment === "unassigned"
         ? "The conversation is now UNASSIGNED (no defaultInboxId configured): please pick it up from Unassigned."
         : "REASSIGNMENT FAILED: the conversation is STILL ASSIGNED TO THE BOT, so no human queue holds it. " +
           "Assign it to yourself in Intercom now and answer it.";

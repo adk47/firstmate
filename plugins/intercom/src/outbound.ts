@@ -361,6 +361,7 @@ export class RealIntercomClient implements IntercomClient {
         if (code === "conversation_already_assigned_to_assignee") {
           throw new IntercomAssignmentConflictError(
             `${params.conversationId} already assigned to ${params.assigneeId}`,
+            params.assigneeId,
           );
         }
       } catch (err) {
@@ -806,10 +807,33 @@ export class IntercomServerError extends Error {
  * not an error — callers should catch it and sync local state.
  */
 export class IntercomAssignmentConflictError extends Error {
-  constructor(message: string) {
+  /** The assignee id Intercom reports the conversation is ALREADY assigned to (the requested one). */
+  readonly assigneeId: string;
+  constructor(message: string, assigneeId = "") {
     super(message);
     this.name = "IntercomAssignmentConflictError";
+    this.assigneeId = assigneeId;
   }
+}
+
+/**
+ * Does this error mean a HUMAN already holds the conversation at the target we asked for?
+ *
+ * One predicate, both hand-off paths (guardOutbound and handleDroppedReply), because they drifted once (QA on
+ * #1673): the dropped-reply path honoured a conflict naming the BOT and reported it as a completed hand-off, so
+ * supervision was told a human had it while the bot still owned it.
+ *
+ * A conflict only counts when the target is CONFIGURED and is NOT the bot: `"0"`/unset is Intercom's Unassign
+ * (no "already assigned to" meaning), and a target equal to the bot is not a hand-off at all.
+ */
+export function isHandoffConflict(
+  err: unknown,
+  account: { botAdminId: string; defaultInboxId?: string },
+): boolean {
+  if (!(err instanceof IntercomAssignmentConflictError)) return false;
+  const target = account.defaultInboxId || "";
+  if (!target || target === account.botAdminId) return false;
+  return (err.assigneeId || target) === target;
 }
 
 export function trackOutboundMessageId(messageId: string, outboundIds: string[]): void {

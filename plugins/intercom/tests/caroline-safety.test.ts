@@ -16,6 +16,7 @@ import { SAFETY_LEDGER_PATH, emailSha256 } from "../src/safety-ledger.js";
 import { classifyText, classifierBlocksOutbound, SAFETY_CLASSIFIER_URL } from "../src/safety-classifier.js";
 import { ANSWER_BANK, BANK_VERSION, HANDOFF_LINE } from "../src/answer-bank.js";
 import { MERGE_PARAGRAPH, HANDOFF_LINE as MERGE_HANDOFF } from "../src/merge-reply-guard.js";
+import { IntercomAssignmentConflictError } from "../src/outbound.js";
 
 function fakeClient() {
   return {
@@ -228,6 +229,57 @@ describe("guardOutbound", () => {
     expect(pages[0]).toMatch(/REASSIGNMENT FAILED/);
     expect(pages[0]).toMatch(/STILL ASSIGNED TO THE BOT/);
     expect(pages[0]).not.toMatch(/now with the team inbox/);
+  });
+  it("a conflict naming the hand-off target is a hand-off, not a FAILED page (read-back conv 215476670359602)", async () => {
+    // Intercom answers conversation_already_assigned_to_assignee when the conversation is ALREADY with
+    // the target admin. On 2026-11-02 that was a human (5465657) and the guard paged "STILL ASSIGNED TO
+    // THE BOT", an alarm that was simply false.
+    const client = {
+      addTag: vi.fn(async () => {}),
+      assignConversation: vi.fn(async ({ conversationId, assigneeId }: { conversationId: string; assigneeId: string }) => {
+        throw new IntercomAssignmentConflictError(`${conversationId} already assigned to ${assigneeId}`, assigneeId);
+      }),
+    };
+    const { rows, pages, d } = deps();
+    const o = await guardOutbound({ client, account, conversationId: "c10", reply: "I've approved your credit.", customerText: "", tag: "t", deps: d });
+    expect(o.blocked).toBe(true);
+    expect(o.assignment).toBe("already_assigned");
+    expect(client.assignConversation).toHaveBeenCalledTimes(1);
+    expect(rows[0]).toMatchObject({ kind: "output_guard", assignment: "already_assigned" });
+    expect(pages[0]).toMatch(/ALREADY assigned to the hand-off target/);
+    expect(pages[0]).not.toMatch(/STILL ASSIGNED TO THE BOT/);
+    expect(pages[0]).not.toMatch(/REASSIGNMENT FAILED/);
+  });
+  it("a conflict naming the BOT as the hand-off target is a failure (QA on #1673)", async () => {
+    // A misconfigured defaultInboxId equal to the bot must not turn a bot-owned conversation into a hand-off.
+    const client = {
+      addTag: vi.fn(async () => {}),
+      assignConversation: vi.fn(async ({ conversationId, assigneeId }: { conversationId: string; assigneeId: string }) => {
+        throw new IntercomAssignmentConflictError(`${conversationId} already assigned to ${assigneeId}`, assigneeId);
+      }),
+    };
+    const { rows, pages, d } = deps();
+    const o = await guardOutbound({
+      client, account: { ...account, defaultInboxId: account.botAdminId }, conversationId: "c12",
+      reply: "I've approved your credit.", customerText: "", tag: "t", deps: d,
+    });
+    expect(o.assignment).toBe("FAILED");
+    expect(rows[0]).toMatchObject({ kind: "output_guard", assignment: "FAILED" });
+    expect(pages[0]).toMatch(/STILL ASSIGNED TO THE BOT/);
+    expect(pages[0]).not.toMatch(/ALREADY assigned to the hand-off target/);
+  });
+  it("a conflict naming the BOT is still a failure: that conversation really is bot-owned", async () => {
+    const client = {
+      addTag: vi.fn(async () => {}),
+      assignConversation: vi.fn(async () => {
+        throw new IntercomAssignmentConflictError("c11 already assigned to bot", "bot");
+      }),
+    };
+    const { rows, pages, d } = deps();
+    const o = await guardOutbound({ client, account, conversationId: "c11", reply: "I've approved your credit.", customerText: "", tag: "t", deps: d });
+    expect(o.assignment).toBe("FAILED");
+    expect(rows[0]).toMatchObject({ assignment: "FAILED" });
+    expect(pages[0]).toMatch(/STILL ASSIGNED TO THE BOT/);
   });
   it("a retry that succeeds reports the team inbox", async () => {
     let n = 0;

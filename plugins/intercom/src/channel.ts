@@ -14,6 +14,7 @@ import {
   createIntercomClient,
   trackOutboundMessageId,
   IntercomAssignmentConflictError,
+  isHandoffConflict,
 } from "./outbound.js";
 import { sanitizeReasoningLeak } from "./sanitize-reasoning-leak.js";
 import { prepareMergeReply } from "./merge-reply-guard.js";
@@ -468,7 +469,17 @@ export async function handleDroppedReply(params: {
     handedOff = true;
     log?.info?.(`[${tag}] reassigned conv=${conversationId} to ${account.defaultInboxId || "Unassigned"} (reply dropped by help-link gate)`);
   } catch (err) {
-    log?.error?.(`[intercom:ALERT] [${tag}] dropped-reply reassignment failed conv=${conversationId}: ${err}`);
+    // Already assigned to the target is the desired end state (a human holds it), not a failure:
+    // reporting "still bot-owned" there is how a false alarm page gets invented (read-back 2026-11-03).
+    // The SAME predicate as guardOutbound: only a configured, non-bot target counts, so a conflict naming the
+    // bot is never reported as a completed hand-off (QA on #1673).
+    if (isHandoffConflict(err, account)) {
+      const assigneeId = err instanceof IntercomAssignmentConflictError ? err.assigneeId : "";
+      handedOff = true;
+      log?.info?.(`[${tag}] conv=${conversationId} already assigned to ${assigneeId}: hand-off already held (reply dropped by help-link gate)`);
+    } else {
+      log?.error?.(`[intercom:ALERT] [${tag}] dropped-reply reassignment failed conv=${conversationId}: ${err}`);
+    }
   }
   let notified = false;
   if (account.fallbackSlackSupervisionChannel) {

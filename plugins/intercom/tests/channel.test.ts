@@ -22,7 +22,7 @@ import {
   jevShadowRunnerConfig,
 } from "../src/channel.js";
 import { decide, type JevActionsConfig, type JevAnswers, type JevBands } from "../src/jev-router.js";
-import { MockIntercomClient } from "../src/outbound.js";
+import { IntercomAssignmentConflictError, MockIntercomClient } from "../src/outbound.js";
 import { readFileSync } from "node:fs";
 import { HANDOFF_LINE } from "../src/answer-bank.js";
 import { canAgentReply } from "../src/handoff.js";
@@ -359,6 +359,53 @@ describe("handleDroppedReply (a dropped reply is handed to a human, durably)", (
     expect(errors.some((m) => m.startsWith("[intercom:ALERT] [intercom:acct_1] dropped-reply reassignment failed conv=conv_1"))).toBe(true);
     expect(texts[0]).toContain("still bot-owned");
     expect(texts[0]).not.toContain("handed to a human");
+  });
+  it("a conflict naming the target inbox is a hand-off, never 'still bot-owned'", async () => {
+    const client = new MockIntercomClient();
+    client.assignConversation = async ({ conversationId, assigneeId }: { conversationId: string; assigneeId: string }) => {
+      throw new IntercomAssignmentConflictError(`${conversationId} already assigned to ${assigneeId}`, assigneeId);
+    };
+    const errors: string[] = [];
+    const texts: string[] = [];
+    const r = await handleDroppedReply({
+      ...base, client, account, log: { error: (m) => errors.push(m) },
+      fetchImpl: (async (_u: string, init: { body: string }) => { texts.push(JSON.parse(init.body).text); return new Response("ok"); }) as never,
+    });
+    expect(r).toEqual({ handedOff: true, notified: true });
+    expect(errors).toEqual([]);
+    expect(texts[0]).toContain("handed to a human");
+    expect(texts[0]).not.toContain("still bot-owned");
+  });
+  it("a conflict naming the BOT is never a hand-off, even when the target is misconfigured to the bot", async () => {
+    // QA on #1673: with defaultInboxId === botAdminId a conflict on that id used to be reported as a completed
+    // hand-off, so supervision was told a human held a conversation the bot still owned.
+    const client = new MockIntercomClient();
+    client.assignConversation = async ({ conversationId, assigneeId }: { conversationId: string; assigneeId: string }) => {
+      throw new IntercomAssignmentConflictError(`${conversationId} already assigned to ${assigneeId}`, assigneeId);
+    };
+    const errors: string[] = [];
+    const texts: string[] = [];
+    const r = await handleDroppedReply({
+      ...base, client, account: { ...account, defaultInboxId: "bot_1" }, log: { error: (m) => errors.push(m) },
+      fetchImpl: (async (_u: string, init: { body: string }) => { texts.push(JSON.parse(init.body).text); return new Response("ok"); }) as never,
+    });
+    expect(r).toEqual({ handedOff: false, notified: true });
+    expect(errors.some((m) => m.includes("dropped-reply reassignment failed"))).toBe(true);
+    expect(texts[0]).toContain("still bot-owned");
+    expect(texts[0]).not.toContain("handed to a human");
+  });
+  it("a conflict with no configured inbox is not a hand-off: '0' is Intercom's Unassign", async () => {
+    const client = new MockIntercomClient();
+    client.assignConversation = async ({ conversationId, assigneeId }: { conversationId: string; assigneeId: string }) => {
+      throw new IntercomAssignmentConflictError(`${conversationId} already assigned to ${assigneeId}`, assigneeId);
+    };
+    const texts: string[] = [];
+    const r = await handleDroppedReply({
+      ...base, client, account: { ...account, defaultInboxId: "" },
+      fetchImpl: (async (_u: string, init: { body: string }) => { texts.push(JSON.parse(init.body).text); return new Response("ok"); }) as never,
+    });
+    expect(r.handedOff).toBe(false);
+    expect(texts[0]).toContain("still bot-owned");
   });
   it("skips the webhook when none is configured", async () => {
     const client = new MockIntercomClient();
