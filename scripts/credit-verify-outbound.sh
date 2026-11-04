@@ -133,6 +133,13 @@ declare -A FULL_CAP_FROM=()
 # bats only (cfg reads env only under the harness): one dated full-cap entry "family=ISO" to test a REACHED date
 FULL_CAP_FROM_TEST="$(cfg CVO_FULL_CAP_FROM_TEST "")"
 [ -z "$FULL_CAP_FROM_TEST" ] || FULL_CAP_FROM["${FULL_CAP_FROM_TEST%%=*}"]="${FULL_CAP_FROM_TEST#*=}"
+# FirstMate ruling 2 (3 Nov): the missing-document ask (proof-need-ask) goes to FREE users first; its PAID segment does
+# not run at all until a date is set HERE (one clean monitored UTC day + Jan's review). Independent of .paid-enabled.
+# Unset = held. Constants only - a date moves by PR, never by env or a state file. [key=family]=ISO, same format as above.
+declare -A PAID_FROM=()
+# bats only (same seam as FULL_CAP_FROM_TEST): one dated entry "family=ISO" to test a REACHED / future paid date
+PAID_FROM_TEST="$(cfg CVO_PAID_FROM_TEST "")"
+[ -z "$PAID_FROM_TEST" ] || PAID_FROM["${PAID_FROM_TEST%%=*}"]="${PAID_FROM_TEST#*=}"
 # r5 19:06Z ruling on #1671 (relayed by p1 718): a newly armed family's first batch is ONE budget for the whole tick,
 # not one per segment. Paid and free share the template, the wording, the judge, the row-scoped gate and the ledger
 # semantics, so a copy defect hits whichever people received it - a second hundred buys no new information about the
@@ -184,7 +191,7 @@ PY
 }
 if [ "${1:-}" = "--print-config" ]; then
   for v in CVO_HARNESS HYDRA_ROOT KILL KILL2 LIVE_FLAG PAID_FLAG EXCLUDE STATE PY RUNNER OWING RECEIPTS HEALTH ZERO_READ \
-           FRAUD MAIN_ENV LEDGER SCRIPTS_DIR RD_SCAN RD_CAP POLICY CLAIM_LIST CAP R1_CAP CLAIM_CAP DOW REFUSAL_SPIKE NEED_RUNNER FIRST_CAP UNSIGNED_ALL NOW_EPOCH JUDGE DEPLOYED_SHA_FILE CHECK_ENTRIES TICK_BUDGET_S TICK_HARD_S CHECK_S_PER_USER RESERVE_PAD_S APPLY_S_PER_USER TICK_ELAPSED0 FULL_CAP_FROM_TEST PER_SEGMENT_FROM_TEST TIMEOUT_BIN; do
+           FRAUD MAIN_ENV LEDGER SCRIPTS_DIR RD_SCAN RD_CAP POLICY CLAIM_LIST CAP R1_CAP CLAIM_CAP DOW REFUSAL_SPIKE NEED_RUNNER FIRST_CAP UNSIGNED_ALL NOW_EPOCH JUDGE DEPLOYED_SHA_FILE CHECK_ENTRIES TICK_BUDGET_S TICK_HARD_S CHECK_S_PER_USER RESERVE_PAD_S APPLY_S_PER_USER TICK_ELAPSED0 FULL_CAP_FROM_TEST PER_SEGMENT_FROM_TEST PAID_FROM_TEST TIMEOUT_BIN; do
     printf '%s=%s\n' "$v" "${!v}"
   done
   exit 0
@@ -871,6 +878,24 @@ if [ -r "$RD_SCAN" ]; then
 else
   log "reply_due: no deployed audience builder ($RD_SCAN) on this tree yet (rides its PR); skipped"
 fi
+# [key=proof-need-ask-family] (b1 / Fable 17:5xZ): the per-need ask (E) - need_asks.py, --check-recipients (#1582);
+# SIGNED-only until E's first clean coded batch sets UNSIGNED_FROM[proof-need-ask]. QA #1587: a deployed runner that
+# predates #1582 (no --check-recipients) cannot be checked - logged and skipped, never a failed tick.
+# Ruling 2 (3 Nov): free before paid; paid is held in code until PAID_FROM[proof-need-ask] is reached. Runs LAST in every
+# tick (CTO MUS-27638: one need-ask segment measured ~85 min / ~50 s per recipient on node-8, reviewer 13:41Z, and free is
+# checked-only until UNSIGNED_FROM is dated - first would spend the tick on zero sends and starve the paid families)
+need_families() {
+  if grep -q -- '"--check-recipients"' "$NEED_RUNNER" 2>/dev/null; then
+    family proof-need-ask free "$NEED_LIST" "$CAP" need-send || return 1
+    if reached "${PAID_FROM[proof-need-ask]:-}"; then
+      family proof-need-ask paid "$NEED_LIST" "$CAP" need-send || return 1
+    else
+      log "proof-need-ask paid: held until PAID_FROM[proof-need-ask] is set (ruling 2: free first); skipped"
+    fi
+  else
+    log "proof-need-ask: the deployed need_asks.py has no --check-recipients (#1582 not deployed); skipped"
+  fi
+}
 credit_families() {
   if [ -n "$RD_LIST" ]; then
     family reply-due paid "$RD_LIST" "$RD_CAP" uvn-status --campaign uvn-status || return 1
@@ -881,15 +906,6 @@ credit_families() {
   family r1 paid "$OUT/receipts/receipts-received.json" "$R1_CAP" uvn-status --campaign status-doc-received --wording received || return 1
   family uvn-status free "$OUT/owing-uvn.json" "$CAP" uvn-status --campaign uvn-status "${c2[@]}" || return 1
   family r1 free "$OUT/receipts/receipts-received.json" "$R1_CAP" uvn-status --campaign status-doc-received --wording received || return 1
-  # [key=proof-need-ask-family] (b1 / Fable 17:5xZ): the per-need ask (E) - need_asks.py, --check-recipients (#1582);
-  # SIGNED-only until E's first clean coded batch sets UNSIGNED_FROM[proof-need-ask]. QA #1587: a deployed runner that
-  # predates #1582 (no --check-recipients) cannot be checked - logged and skipped, never a failed tick
-  if grep -q -- '"--check-recipients"' "$NEED_RUNNER" 2>/dev/null; then
-    family proof-need-ask paid "$NEED_LIST" "$CAP" need-send || return 1
-    family proof-need-ask free "$NEED_LIST" "$CAP" need-send || return 1
-  else
-    log "proof-need-ask: the deployed need_asks.py has no --check-recipients (#1582 not deployed); skipped"
-  fi
 }
 claim_families() {
   if [ ! -s "$CLAIM_LIST" ]; then log "claim families: no claim list at $CLAIM_LIST (the claim lane drops it); skipped"; return 0; fi
@@ -945,9 +961,11 @@ if [ "$DOW" = 6 ] || [ "$DOW" = 7 ]; then   # Fable 10-30: claims prioritised Sa
   log "weekend: claim families first"
   claim_families || exit 1
   credit_families || exit 1
+  need_families || exit 1
 else
   credit_families || exit 1
   claim_families || exit 1
+  need_families || exit 1
 fi
 log "tick done"
 exit 0

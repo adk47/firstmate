@@ -174,7 +174,7 @@ newest_tick() { printf '%s' "$(newest_out)tick.log"; }
   evil=(HYDRA_ROOT="$E" CVO_ETC="$E/etc" CVO_STATE="$E/state" PY_BIN="$E/py" CVO_RUNNER="$E/r" CVO_OWING="$E/o" CVO_RECEIPTS="$E/rc"
         CVO_HEALTH="$E/h" CVO_ZERO_READ="$E/z" CVO_FRAUD="$E/f" CVO_MAIN_ENV="$E/env" CVO_LEDGER="$E/l.sqlite3" CVO_SCRIPTS="$E/s"
         CVO_RD_SCAN="$E/rd" CVO_RD_CAP=99999 CVO_POLICY="$E/p.json" CVO_CLAIM_LIST="$E/c.json" CVO_CAP=99999 CVO_R1_CAP=99999
-        CVO_CLAIM_CAP=99999 CVO_REFUSAL_SPIKE=1.0 CVO_DOW=9 CVO_NEED_RUNNER="$E/n" CVO_UNSIGNED_ALL=1 CVO_NOW_EPOCH=1 CVO_JUDGE="$E/j" CVO_DEPLOYED_SHA="$E/d" CVO_CHECK_ENTRIES=99999 CVO_TICK_BUDGET_S=999999 CVO_TICK_HARD_S=999999 CVO_CHECK_S_PER_USER=0 CVO_RESERVE_PAD_S=0 CVO_APPLY_S_PER_USER=1 CVO_TICK_ELAPSED0=99 CVO_FULL_CAP_FROM_TEST=uvn-status=2000-01-01T00:00Z CVO_PER_SEGMENT_FROM_TEST=status-doc-received=2000-01-01T00:00Z CVO_TIMEOUT_BIN="$E/t")
+        CVO_CLAIM_CAP=99999 CVO_REFUSAL_SPIKE=1.0 CVO_DOW=9 CVO_NEED_RUNNER="$E/n" CVO_UNSIGNED_ALL=1 CVO_NOW_EPOCH=1 CVO_JUDGE="$E/j" CVO_DEPLOYED_SHA="$E/d" CVO_CHECK_ENTRIES=99999 CVO_TICK_BUDGET_S=999999 CVO_TICK_HARD_S=999999 CVO_CHECK_S_PER_USER=0 CVO_RESERVE_PAD_S=0 CVO_APPLY_S_PER_USER=1 CVO_TICK_ELAPSED0=99 CVO_FULL_CAP_FROM_TEST=uvn-status=2000-01-01T00:00Z CVO_PER_SEGMENT_FROM_TEST=status-doc-received=2000-01-01T00:00Z CVO_PAID_FROM_TEST=proof-need-ask=2000-01-01T00:00Z CVO_TIMEOUT_BIN="$E/t")
   run -0 env -u BATS_TEST_TMPDIR "${evil[@]}" "$SCRIPT" --print-config
   [[ "$output" != *"$E"* ]]; [[ "$output" != *99999* ]]
   now_line="$(printf '%s\n' "$output" | grep '^NOW_EPOCH=')"; [ "${now_line#NOW_EPOCH=}" -gt 1700000000 ]   # the real clock, never CVO_NOW_EPOCH=1
@@ -220,6 +220,7 @@ APPLY_S_PER_USER=15
 TICK_ELAPSED0=0
 FULL_CAP_FROM_TEST=
 PER_SEGMENT_FROM_TEST=
+PAID_FROM_TEST=
 TIMEOUT_BIN=/usr/bin/timeout"
   [ "$output" = "$want" ]
   # a BATS_TEST_TMPDIR that is not a directory is not the harness either
@@ -234,7 +235,7 @@ TIMEOUT_BIN=/usr/bin/timeout"
 
 @test "outbound tick ([key=proof-need-ask-family]): the per-need ask runs as a family - built each tick, checked with --check-recipients, applied as proof-need-ask under the credit group cap" {
   touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
-  export STUB_NEED_USERS=1
+  export STUB_NEED_USERS=1 CVO_PAID_FROM_TEST="proof-need-ask=2026-01-01T00:00Z"   # ruling 2: paid runs only from a dated PAID_FROM
   printf '7\n' > "$CVO_ETC/credit-verify-outbound.exclude"     # another lane messages user 7 today
   run -0 "$SCRIPT"
   grep -q "^need-build" "$CALLS.need"
@@ -345,7 +346,8 @@ r1_check_cap() { # <segment>: the --max-users of that segment's r1 recipient che
   if grep -q -- "^claim-.*--max-entries" "$CALLS"; then false; fi
   grep -q "^uvn-status --list .*owing-uvn.json --segment paid --campaign uvn-status .*--mode dry-run --max-users 100 --check-recipients" "$CALLS"
   # every other family: checked (dry-run --check-recipients) but NO apply
-  grep -q "^send --list .*need-asks.json --segment paid --max-entries [0-9]* --start-entry 0 --mode dry-run --max-users 100 --check-recipients" "$CALLS"
+  # (ruling 2: the paid need ask is held; the free one is the checked-never-applied proof)
+  grep -q "^send --list .*need-asks.json --segment free --max-entries [0-9]* --start-entry 0 --mode dry-run --max-users 100 --check-recipients" "$CALLS"
   if grep -q "^send .*--mode apply" "$CALLS"; then false; fi
   # h2 (p1 713, r1-readback-1103 §6): status-doc-received NOW has its read-back date - 2 clean sends on the deployed head
   # a1e93182 (ledger 7073-7074, no duplicate user, zero-read OK, +60 health), so the receipts class applies in BOTH
@@ -366,7 +368,8 @@ r1_check_cap() { # <segment>: the --max-users of that segment's r1 recipient che
   # advance to where the check stopped. It used to return before advance_cursor, so it re-walked the same first page
   # every tick for ever (cursor-r1-free stayed 0 while every unsigned family moved to 200) and never saw entry 201.
   grep -q "next tick starts at" "$(newest_tick)"
-  [ "$(cat "$CVO_STATE/cursor-proof-need-ask-paid" 2>/dev/null || echo 0)" -gt 0 ]
+  # (ruling 2: the paid need-ask is held in code, so the signed-only cursor advance is proven on the FREE segment)
+  [ "$(cat "$CVO_STATE/cursor-proof-need-ask-free" 2>/dev/null || echo 0)" -gt 0 ]
   # QA #1587: the dates are TIMES - before uvn-status's date it is signed-only too; at / after it, it applies
   : > "$CALLS"; STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 CVO_NOW_EPOCH="$(python3 -c 'import datetime as d; print(int(d.datetime(2026,10,31,18,1,tzinfo=d.timezone.utc).timestamp()))')" run -0 "$SCRIPT"
   if grep -q -- "--mode apply" "$CALLS"; then false; fi
@@ -504,6 +507,80 @@ PY
   # the families not deployed on this tree are logged, never silently missing
   grep -q "reply_due: no deployed audience builder" "$out/tick.log"
   if grep -q -- "reply-due" "$CALLS"; then false; fi
+}
+
+# FirstMate ruling 2 (3 Nov) + CTO MUS-27638: the missing-document ask runs LAST in every tick, free then paid; paid is held in code
+first_line() { grep -n -m1 -- "$1" "$CVO_OUT_ROOT"/*/tick.log | cut -d: -f1; }
+
+@test "outbound tick (ruling 2): proof-need-ask free runs AFTER every uvn-status / r1 / reply-due / claim-* family on a weekday tick and on a weekend tick, and free comes before paid" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  export STUB_NEED_USERS=1 CVO_PAID_FROM_TEST="proof-need-ask=2020-01-01T00:00Z"
+  printf '%s\n' "$DEP" > "$CVO_DEPLOYED_SHA"
+  printf '{"generated_at": "x", "signed_on": "%s", "claims": [{"claim_id": 1, "user_id": 5}]}' "$DEP" > "$CVO_STATE.claims.json"
+  export CVO_CLAIM_LIST="$CVO_STATE.claims.json"
+  for dow in 3 6; do
+    : > "$CALLS"; rm -rf "$CVO_OUT_ROOT" "$CVO_STATE.d" "$CVO_LEDGER.segments.jsonl"
+    CVO_DOW=$dow run -0 "$SCRIPT"
+    log="$(ls "$CVO_OUT_ROOT"/*/tick.log)"
+    need="$(first_line 'proof-need-ask-free check (rc=0)')"; [ -n "$need" ]
+    seen=0
+    for fam in uvn-status r1 reply-due claim-proof-ask claim-status; do
+      line="$(grep -n -E -- "(^|[ ])$fam-(paid|free)( |:)" "$log" | tail -1 | cut -d: -f1 || true)"
+      if [ -n "$line" ]; then seen=$((seen+1)); [ "$line" -lt "$need" ]; fi
+    done
+    [ "$seen" -ge 2 ]                                       # the loop is not vacuous: earlier families really ran
+    # argv, not only the log: every other family's runner call precedes the need ask, and free precedes paid
+    f="$(grep -n -m1 -- "need-asks.json --segment free " "$CALLS" | cut -d: -f1)"
+    p="$(grep -n -m1 -- "need-asks.json --segment paid " "$CALLS" | cut -d: -f1)"
+    [ -n "$f" ] && [ -n "$p" ] && [ "$f" -lt "$p" ]
+    [ "$(grep -n -v -- "need-asks.json" "$CALLS" | tail -1 | cut -d: -f1)" -lt "$f" ]
+  done
+}
+
+@test "outbound tick (ruling 2): production-equivalent (CVO_UNSIGNED_ALL=0, no UNSIGNED_FROM date) - the free need ask is checked (last) and never applied; no need ask is sent until a separate dated PR" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  export STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0
+  run -0 "$SCRIPT"
+  grep -q -- "need-asks.json --segment free .*--mode dry-run .*--check-recipients" "$CALLS"
+  grep -q "proof-need-ask-free check (rc=0)" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "proof-need-ask-free: SIGNED-only family (no read-back date in UNSIGNED_FROM): checked, not applied" "$CVO_OUT_ROOT"/*/tick.log
+  if grep -q -- "need-asks.json .*--mode apply" "$CALLS"; then false; fi    # argv: no need-ask apply, free or paid
+  if grep -q -- "need-asks.json --segment paid" "$CALLS"; then false; fi
+}
+
+@test "outbound tick (ruling 2): with PAID_FROM[proof-need-ask] unset the PAID need ask is never invoked - even with .paid-enabled present; the hold is logged and free still applies" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  export STUB_NEED_USERS=1
+  unset CVO_PAID_FROM_TEST
+  run -0 "$SCRIPT"
+  if grep -q -- "need-asks.json --segment paid" "$CALLS"; then false; fi     # the runner argv is the proof
+  grep -q -- "need-asks.json --segment free .*--mode apply" "$CALLS"
+  grep -q "proof-need-ask paid: held until PAID_FROM\[proof-need-ask\] is set (ruling 2: free first); skipped" "$CVO_OUT_ROOT"/*/tick.log
+  # the other paid families are unchanged by the hold
+  grep -q -- "--segment paid .*--mode apply" "$CALLS"
+}
+
+@test "outbound tick (ruling 2): a REACHED PAID_FROM date runs paid need ask after free; a FUTURE date holds it" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  export STUB_NEED_USERS=1
+  CVO_PAID_FROM_TEST="proof-need-ask=2020-01-01T00:00Z" run -0 "$SCRIPT"
+  f="$(grep -n -m1 -- "need-asks.json --segment free .*--mode apply" "$CALLS" | cut -d: -f1)"
+  p="$(grep -n -m1 -- "need-asks.json --segment paid .*--mode apply" "$CALLS" | cut -d: -f1)"
+  [ -n "$f" ] && [ -n "$p" ] && [ "$f" -lt "$p" ]
+  if grep -q "proof-need-ask paid: held" "$CVO_OUT_ROOT"/*/tick.log; then false; fi
+  : > "$CALLS"; rm -rf "$CVO_OUT_ROOT"; rm -f "$CVO_LEDGER.segments.jsonl"
+  CVO_PAID_FROM_TEST="proof-need-ask=2099-01-01T00:00Z" run -0 "$SCRIPT"
+  if grep -q -- "need-asks.json --segment paid" "$CALLS"; then false; fi
+  grep -q "proof-need-ask paid: held until PAID_FROM" "$CVO_OUT_ROOT"/*/tick.log
+}
+
+@test "outbound tick (ruling 2): a spent budget stops every family, the last-running need ask included - it logs waits-for-the-next-tick and its runner is never invoked" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  export STUB_NEED_USERS=1
+  CVO_TICK_ELAPSED0=100 CVO_TICK_BUDGET_S=50 run -0 "$SCRIPT"
+  grep -q "proof-need-ask-free: tick budget 50s reached; this family waits for the next tick" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "uvn-status-paid: tick budget 50s reached; this family waits for the next tick" "$CVO_OUT_ROOT"/*/tick.log
+  if grep -q -- "--mode" "$CALLS"; then false; fi
 }
 
 @test "[key=arm-per-family] a family is armed by its OWN policy row: uvn-status applies while a family with no row (or live:false) checks and never applies - and the two GLOBAL files cannot arm it" {
