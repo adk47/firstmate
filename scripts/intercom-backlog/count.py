@@ -15,6 +15,13 @@ veto first, then its own topic, else the opening's) is credit / claim / merge, O
 credit-like / merge-like / removal-like, AND the latest text carries no billing words (the families
 verify-program-lead-fable-l1 drains via reply_due; the removal-like are c3's). Everything else is counted by bucket.
 
+`unread` is a THIRD state, never a synonym for "other" (QA 11-04, Important): a thread whose detail GET fails is
+unmeasured, so it must not land in `other_topics` (which used to be every owed thread minus credit/claim/merge, so
+a failed read of a credit thread silently depressed the credit count and inflated "other"). It is counted on its
+own, and when any thread is unread the snapshot is INCOMPLETE: the line says so, the previous good
+backlog-count.json is left in place (never replaced by a split we could not measure), and the exit is non-zero so
+the cron surfaces it instead of publishing a number nobody can trust.
+
 Usage (node-8): set -a; . /etc/openclaw/main.env; set +a; python3 count.py [--min-hours 48]
 """
 import argparse
@@ -53,6 +60,26 @@ def waiting(c, now):
     tags = [t.get("name", "") for t in ((c.get("tags") or {}).get("tags") or [])]
     text = census.TAG_RE.sub(" ", (src.get("subject") or "") + " " + (src.get("body") or ""))
     return ws, text + " " + " ".join(t for t in tags if t not in census.NEUTRAL_TAGS)
+
+
+def families(owed, got):
+    """Pure: family -> count for the owed threads. owed = [(conversation id, waiting_since, opening topic)];
+    got = {conversation id: buckets.customer_text(...) or None when the read failed}."""
+    fam = collections.Counter()
+    for cid, _ws, opening in owed:
+        g = got.get(cid)
+        # a read thread whose bucket is empty is 'unclassified', never a nameless key
+        fam[classify(opening, g, buckets.bucket_of(g[1], g[0]) if g else None) or "unclassified"] += 1
+    return fam
+
+
+def split(fam, owed_n):
+    """Pure: the numbers that get published. `unread` is subtracted from `other_topics` (a failed read is
+    unmeasured, not "other"), and `complete` is False the moment one thread could not be read."""
+    credit = fam.get("credit-claim-merge", 0)
+    unread = fam.get("unread", 0)
+    return {"credit_claim_merge": credit, "unread": unread,
+            "other_topics": owed_n - credit - unread, "complete": unread == 0}
 
 
 def classify(opening_topic, latest, last_bucket):
@@ -98,23 +125,31 @@ def main():
     with ThreadPoolExecutor(max_workers=6) as ex:
         for cid, g in zip(todo, ex.map(lambda c: buckets.customer_text(token, c), todo)):
             got[cid] = g
-    fam = collections.Counter(
-        classify(t, got[cid] if got.get(cid) else None,
-                 buckets.bucket_of(got[cid][1], got[cid][0]) if got.get(cid) else None)
-        for cid, _, t in owed)
+    fam = families(owed, got)
+    parts = split(fam, len(owed))
     ages = sorted((now - ws) / 86400 for _, ws, _ in owed)
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     doc = {"at": stamp, "min_hours": a.min_hours, "open": open_n, "owed_gt": len(owed),
-           "credit_claim_merge": fam.get("credit-claim-merge", 0),
-           "other_topics": len(owed) - fam.get("credit-claim-merge", 0),
+           "credit_claim_merge": parts["credit_claim_merge"], "unread": parts["unread"],
+           "other_topics": parts["other_topics"], "complete": parts["complete"],
            "le30d": sum(1 for x in ages if x <= 30), "oldest_days": round(ages[-1]) if ages else 0,
            "by_bucket": dict(sorted(fam.items(), key=lambda kv: -kv[1]))}
     os.makedirs(OUT_DIR, mode=0o755, exist_ok=True)
+    history = os.path.join(OUT_DIR, "backlog-count-history.jsonl")
+    if not doc["complete"]:
+        # INCOMPLETE: say so, keep the last good snapshot (never replace it with a split we could not measure),
+        # record the attempt, and exit non-zero so the cron surfaces it instead of publishing a false split.
+        with open(history, "a") as f:
+            f.write(json.dumps(doc) + "\n")
+        print(f"backlog {stamp}: INCOMPLETE — {doc['unread']} of {doc['owed_gt']} owed threads could not be read "
+              f"(Intercom detail GET failed), so the credit/other split is NOT published; the previous "
+              f"backlog-count.json is unchanged")
+        return 2
     tmp = os.path.join(OUT_DIR, ".backlog-count.json.tmp")
     with open(tmp, "w") as f:
         json.dump(doc, f, indent=1)
     os.replace(tmp, os.path.join(OUT_DIR, "backlog-count.json"))
-    with open(os.path.join(OUT_DIR, "backlog-count-history.jsonl"), "a") as f:
+    with open(history, "a") as f:
         f.write(json.dumps(doc) + "\n")
     print(f"backlog {stamp}: customer-last > {a.min_hours:g} h {doc['owed_gt']} (credit/claim/merge "
           f"{doc['credit_claim_merge']}, other topics {doc['other_topics']}; <= 30 d {doc['le30d']}, "

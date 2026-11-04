@@ -7,6 +7,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIR = os.path.join(ROOT, "scripts", "intercom-backlog")
@@ -84,6 +85,37 @@ class LatestMessageTopic(unittest.TestCase):
         self.assertEqual(count.classify("credit", "where is my credit request?", "credit-like"), "credit-claim-merge")
         self.assertEqual(count.classify("credit", None, None), "unread")
         self.assertEqual(count.classify("other", "my attorney", "other"), "legal")
+
+    def test_failed_detail_read_is_unread_never_other(self):
+        """QA 11-04 (Important): a failed detail GET on a CREDIT thread must not be counted as "other topics".
+        The old `other_topics = len(owed) - credit_claim_merge` did exactly that: the unread credit thread
+        depressed the credit count AND inflated other, and the 2-hour production line presented the split as
+        complete. unread is now its own number, subtracted from other, and it marks the snapshot INCOMPLETE."""
+        owed = [("1", 0, "credit"), ("2", 0, "other"), ("3", 0, "credit")]
+        got = {"1": ("my credit is wrong", "my credit is wrong"), "2": ("thanks", "thanks"), "3": None}
+        fam = count.families(owed, got)
+        parts = count.split(fam, len(owed))
+        self.assertEqual(parts["credit_claim_merge"], 1)
+        self.assertEqual(parts["unread"], 1)
+        self.assertEqual(parts["other_topics"], 1, "unread must not be folded into other topics")
+        self.assertFalse(parts["complete"])
+        # the three published numbers reconcile with the population, so a reader can see the gap
+        self.assertEqual(parts["credit_claim_merge"] + parts["unread"] + parts["other_topics"], len(owed))
+
+    def test_complete_run_says_complete(self):
+        fam = count.families([("1", 0, "credit"), ("2", 0, "stats")],
+                             {"1": ("my credit", "my credit"), "2": ("how many streams", "how many streams")})
+        parts = count.split(fam, 2)
+        self.assertEqual((parts["unread"], parts["complete"]), (0, True))
+        self.assertEqual(parts["other_topics"], 1)
+
+    def test_an_empty_bucket_is_named_unclassified(self):
+        """A thread we DID read but whose classifier returned nothing must not become a nameless key in
+        by_bucket (json would write it as "null" and the reader would lose the row)."""
+        with unittest.mock.patch.object(count, "classify", return_value=""):
+            fam = count.families([("1", 0, "other")], {"1": ("something", "something")})
+        self.assertEqual(dict(fam), {"unclassified": 1})
+        self.assertNotIn("unread", fam)
 
 
 def doc(*customer_msgs, opening="Issue with my profile", admin_after_first=True):
