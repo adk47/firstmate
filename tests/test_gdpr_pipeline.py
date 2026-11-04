@@ -3454,6 +3454,28 @@ class FrozenBatchManifest(unittest.TestCase):
         path = self.pinned([one, one])
         self.assertEqual(len(cli.select_batch(self.args(manifest=path), "ask", [one])), 1)
 
+    def test_a_batch_document_verifies_its_own_recorded_digest(self):
+        # the pinned file names the ruling and the digest it was cut for; the run checks its own rendering against
+        # that claim instead of trusting the filename
+        cli = _cli()
+        import hashlib, tempfile
+        frozen = [self.live(329, "2025-10-20", "letter A"), self.live(58, "2026-09-01", "letter B")]
+        entries = [{"request_id": x["row"], "register_no": x["register_no"],
+                    "body_sha": hashlib.sha256(x["text"].encode()).hexdigest()} for x in frozen]
+        doc = {"ruling": "fable-ruling-1103-d2/gdpr-identity-ask", "kind": "ask", "letters": 2,
+               "digest": approval.digest("ask", cli.select_batch(self.args(), "ask", frozen)), "entries": entries}
+        f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump(doc, f); f.close(); self.addCleanup(os.unlink, f.name)
+        got = cli.select_batch(self.args(manifest=f.name), "ask", frozen)
+        self.assertEqual([x["register_no"] for x in got], [329, 58])
+        # a file whose recorded digest does not match what it renders is refused, not silently sent
+        doc["digest"] = "0" * 16
+        f2 = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump(doc, f2); f2.close(); self.addCleanup(os.unlink, f2.name)
+        with self.assertRaises(SystemExit) as e:
+            cli.select_batch(self.args(manifest=f2.name), "ask", frozen)
+        self.assertEqual(e.exception.code, 1)
+
     def test_both_send_commands_accept_a_manifest(self):
         src = open(os.path.join(HERE, "gdpr-pipeline.py")).read()
         self.assertIn('select_batch(a, "ask", run.asks(now))', src)

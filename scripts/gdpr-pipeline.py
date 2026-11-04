@@ -318,8 +318,13 @@ def select_batch(a, kind: str, items: list[dict]) -> list[dict]:
     except OSError as exc:
         print(f"REFUSED: cannot read the manifest {a.manifest}: {exc}")
         raise SystemExit(1)
+    claimed = ""
     try:
         wanted = json.loads(raw)
+        if isinstance(wanted, dict) and isinstance(wanted.get("entries"), list):
+            # the pinned FILE form: the batch document records which ruling and digest it was cut for, and the run
+            # checks its own rendering against that claim below rather than trusting the file's name
+            wanted, claimed = wanted["entries"], str(wanted.get("digest") or "")
         if not isinstance(wanted, list):
             raise ValueError("not a JSON list")
     except ValueError:
@@ -368,8 +373,15 @@ def select_batch(a, kind: str, items: list[dict]) -> list[dict]:
                   f"{' …' if len(changed) > 5 else ''}) since the batch was pinned. Copy is approved per body, so a "
                   f"changed body needs a FRESH approval - it is not a re-cut.")
             raise SystemExit(1)
-        picked = [by_row[r] for r in sorted(set(rows))]
-        return oldest_first(picked)
+        picked = oldest_first([by_row[r] for r in sorted(set(rows))])
+        if claimed:
+            got = approval.digest(kind, picked)
+            if got != claimed:
+                print(f"REFUSED: the batch file records digest {claimed} but these rows render {got} now. The pin and "
+                      f"the register disagree, so the file is not describing the batch it names - re-pin and get a "
+                      f"fresh approval rather than sending under the old one.")
+                raise SystemExit(1)
+        return picked
     want = set(nums)
     have = {x["register_no"]: x for x in items}
     missing = sorted(want - set(have))
