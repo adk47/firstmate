@@ -214,8 +214,9 @@ function replacementCoordinatorFor(handoff: string): ReplacementCoordinator {
 const replacementCoordinator = replacementCoordinatorFor(actionableHandoff);
 const armReadiness = new WeakMap<ChildProcess, Promise<boolean>>();
 const armClose = new WeakMap<ChildProcess, Promise<void>>();
-// Children the extension itself asked to exit; their close is not a failure
-// of the successor and never earns a deferred retry.
+// Children the extension itself asked to exit; their close is restoration
+// bookkeeping rather than a supervision gap, so it never earns a retry of its
+// own. Inside a delivery the restoration's own bounded retry answers it.
 const armRetired = new WeakSet<ChildProcess>();
 // Children a restoration is actively waiting on; their close is answered by
 // that restoration's own bounded retry, not by a second one.
