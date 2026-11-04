@@ -305,6 +305,57 @@ class Mutations(unittest.TestCase):
         finally:
             shutil.rmtree(live)
 
+    # A partial deploy (deploy.sh --target main|edge) must not be blocked by the profile it never touches, so
+    # --live-profile scopes the LIVE comparison. Scoping must never WEAKEN the check for the profile it names:
+    # that is how a `--target edge` deploy would stop noticing scout.
+    def test_live_profile_scoping_ignores_an_untargeted_profile(self):
+        live = Path(tempfile.mkdtemp())
+        try:
+            for p in chk.LIVE_CONFIG:
+                shutil.copy(self.tmp / p, live / p)
+            p = live / "openclaw-edge.json"
+            c = json.loads(p.read_text())
+            self.agent(c, "support")["tools"]["deny"].remove("dedupe_check")
+            p.write_text(json.dumps(c))
+            rc, errors, _ = self.run_check(live=True, live_profiles=["main"],
+                                          live_paths={k: str(live / k) for k in chk.LIVE_CONFIG})
+            self.assertEqual(rc, 0, errors)
+            rc, errors, _ = self.run_check(live=True, live_profiles=["edge"],
+                                          live_paths={k: str(live / k) for k in chk.LIVE_CONFIG})
+            self.assertEqual(rc, 1)
+            self.assertTrue(any("dedupe_check" in e for e in errors), errors)
+        finally:
+            shutil.rmtree(live)
+
+    def test_live_profile_drift_in_the_named_profile_still_fails(self):
+        live = Path(tempfile.mkdtemp())
+        try:
+            for p in chk.LIVE_CONFIG:
+                shutil.copy(self.tmp / p, live / p)
+            p = live / "openclaw-main.json"
+            c = json.loads(p.read_text())
+            self.agent(c, "scout")["tools"]["deny"].remove("exec")  # the H1 regression, on the live file only
+            p.write_text(json.dumps(c))
+            rc, errors, _ = self.run_check(live=True, live_profiles=["main"],
+                                          live_paths={k: str(live / k) for k in chk.LIVE_CONFIG})
+            self.assertEqual(rc, 1)
+            self.assertTrue(any("scout: live tools.deny (5) != repo (6)" in e for e in errors), errors)
+            # ... and the LIVE posture is re-checked against the RULES, not just parity, even when scoped
+            self.assertTrue(any(e.startswith("LIVE ") and "scout" in e for e in errors), errors)
+        finally:
+            shutil.rmtree(live)
+
+    def test_live_profile_accepts_the_config_filename_too(self):
+        rc, errors, _ = self.run_check(live_profiles=["openclaw-main.json"],
+                                      live_paths={k: str(ROOT / k) for k in chk.LIVE_CONFIG})
+        self.assertEqual(rc, 0, errors)
+
+    def test_an_unknown_live_profile_is_exit_2_never_a_pass(self):
+        rc, errors, _ = self.run_check(live_profiles=["staging"],
+                                      live_paths={k: str(ROOT / k) for k in chk.LIVE_CONFIG})
+        self.assertEqual(rc, 2)
+        self.assertTrue(any("no live path constant" in e for e in errors), errors)
+
 
 class ProbeAnalysis(unittest.TestCase):
     """scripts/redteam/exec_injection_probe.py verdict logic against fixture transcripts (no gateway needed)."""

@@ -9,8 +9,19 @@ the RULES are the constants below, so a PR cannot widen a rule by editing data.
   python3 scripts/check-agent-exec-policy.py                    repo configs vs the registry (deploy, local)
   python3 scripts/check-agent-exec-policy.py --base origin/main  + the re-grant / new-agent / extension rules (PR CI)
   python3 scripts/check-agent-exec-policy.py --live              node-8 live configs vs the repo (post-deploy)
+  python3 scripts/check-agent-exec-policy.py --live --live-profile main   only the profiles being deployed
 
 Exit 0 = clean; 1 = a violation (each named on stdout); 2 = a config or registry could not be read (never a pass).
+
+TWO CALL SITES, both in scripts/deploy.sh, plus the daily watchdog tick (scripts/cron-health-watchdog.sh) so a
+quiet week still pages once an exception's expiry date passes:
+  - Step 1, pre-sync, repo copy only      -> a repo tree hand-edited on node-8 after review cannot ship a shell
+  - Step 4d.5b, post-sync, --live         -> a partial rsync / a live file that never took cannot silently keep a
+                                             root shell (the smoke test cannot see this), still BEFORE Step 6's
+                                             restart so a failing deploy never reloads the gateway on it
+  - cron-health-watchdog, every tick      -> --live, deduped to one page per day
+Skipping the post-deploy check is how the H1 exposure could come back unnoticed: the CI gate only ever sees the
+repo copy at PR time.
 """
 from __future__ import annotations
 
@@ -310,9 +321,18 @@ def git_show(ref: str, rel: str, root: Path):
 
 
 def run(root: Path = REPO, base: str | None = None, live: bool = False, today: dt.date | None = None,
-        live_paths: dict | None = None) -> tuple[int, list, list]:
+        live_paths: dict | None = None, live_profiles=None) -> tuple[int, list, list]:
     today = today or dt.datetime.now(dt.timezone.utc).date()
     errors, notes = [], []
+    # A partial deploy (--target main|edge) must not be blocked by a profile it never touched: `live_profiles`
+    # scopes the LIVE comparison only. Every other rule still runs for every profile.
+    scope = None if live_profiles is None else {
+        p if p.endswith(".json") else f"openclaw-{p}.json" for p in live_profiles}
+    if scope is not None:
+        unknown = sorted(scope - set(LIVE_CONFIG))
+        if unknown:
+            return 2, [f"--live-profile: no live path constant for {unknown} (known: {sorted(LIVE_CONFIG)})"], notes
+        live = True
     try:
         registry = load(root / REGISTRY)
         if registry.get("version") != 1 or not isinstance(registry.get("profiles"), dict):
@@ -335,7 +355,7 @@ def run(root: Path = REPO, base: str | None = None, live: bool = False, today: d
             if base:
                 check_base(profile, cfg, reg, git_show(base, profile, root),
                            ((base_reg or {}).get("profiles") or {}).get(profile), errors, notes)
-            if live:
+            if live and (scope is None or profile in scope):
                 live_cfg = load(Path((live_paths or LIVE_CONFIG)[profile]))
                 check_live(profile, cfg, live_cfg, errors, notes)
                 # The posture rules must also hold on what node-8 actually runs, not only on the repo copy.
@@ -352,8 +372,11 @@ def main(argv=None) -> int:
     ap.add_argument("--base", help="git ref to compare against (PR CI: origin/main). An unreadable ref exits 2, "
                                     "never 0 - the guard cannot silently skip its base comparison")
     ap.add_argument("--live", action="store_true", help="also compare node-8 live configs (post-deploy)")
+    ap.add_argument("--live-profile", action="append", metavar="main|edge",
+                    help="limit the --live comparison to these profiles (a partial deploy must not be blocked "
+                         "by a profile it does not target); implies --live")
     args = ap.parse_args(argv)
-    rc, errors, notes = run(base=args.base, live=args.live)
+    rc, errors, notes = run(base=args.base, live=args.live, live_profiles=args.live_profile)
     for n in notes:
         print(f"ok   {n}" if not n.startswith("::") else n)
     for e in errors:

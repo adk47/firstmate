@@ -629,8 +629,18 @@ violations must be 0; nightly board in `/var/lib/hydra/verifier-eval/latest/`):
 ## Agent shell (exec) posture: who can run commands as root on node-8
 
 Every agent's posture (`denied`, or `full` with a reason, exit plan and expiry no more than 31 days out) is in
-`policies/agent-exec-policy.json`. The rules are constants in `scripts/check-agent-exec-policy.py`, which runs in PR CI
-(`--base origin/main`) and post-deploy on node-8 (`--live`). Three traps on openclaw 2026.8.35, all verified in code:
+`policies/agent-exec-policy.json`. The rules are constants in `scripts/check-agent-exec-policy.py`. It runs at **three**
+call sites, and PR CI alone is not enough — it only ever sees the repo copy at review time, so a hot edit, a partial
+rsync or a hand-reverted live file could drop scout's deny and ship clean: PR CI (`--base origin/main`), `deploy.sh`
+Step 1 pre-sync (repo tree, no `--live` — a pre-sync `--live` would deadlock every deploy that legitimately changes a
+posture) and Step 4d.5b post-sync (`--live --live-profile <target>`, before the Step 6 restart, so a failing deploy
+never reloads the gateway onto an unreviewed shell posture), plus a tick in `cron-health-watchdog.sh` so a `full`
+exception whose **expiry date passes** during a deploy-free week still pages. That tick dedupes per FINDING (the stamp
+carries the findings' sha, so an unchanged violation is quiet while a new one pages at once, and a clean tick clears
+the stamp), pages when the checker itself has gone missing, and stamps only after Slack CONFIRMS the post — an
+undelivered security page must never buy 24h of silence. Pinned by
+`scripts/tests/deploy-exec-policy-gate.bats` (wiring + both blocks) and the watchdog's own bats cases. Three traps on
+openclaw 2026.8.35, all verified in code:
 - **Never set `tools.exec.security`/`mode` to `deny` or `allowlist` on a codex agent** (all main agents are codex):
   `@openclaw/codex` refuses the turn and the fallback runner silently moves it to openrouter. Lock a shell with
   `tools.deny` instead.

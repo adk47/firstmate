@@ -2024,6 +2024,13 @@ log "Step 1/8: Validating config files..."
 if needs_target "main"; then
   python3 -m json.tool "$HYDRA_ROOT/openclaw-main.json" >/dev/null 2>&1 || fail "openclaw-main.json is not valid JSON"
   log "  openclaw-main.json is valid JSON."
+  # Agent exec posture (guardrails-1101 gap 2 / H1): policies/agent-exec-policy.json records each agent's
+  # posture, the RULES are constants in check-agent-exec-policy.py, and PR CI runs this same check against
+  # origin/main. Here it validates the REPO TREE BEING DEPLOYED — the case CI cannot see, because a hot edit
+  # made on node-8 after review (or a merge that lost a conflict resolution) ships whatever is in /opt/hydra.
+  # Post-sync the LIVE file is checked too (Step 4d.5b); this one fails before anything is written.
+  python3 "$SCRIPT_DIR/check-agent-exec-policy.py" || fail "agent exec posture: the repo configs violate policies/agent-exec-policy.json (named above); refusing to deploy a shell posture that was never reviewed"  # hydra-hook: reviewed-indirection reviewed-argv (repo script by path)
+  log "  Agent exec posture: repo configs match policies/agent-exec-policy.json."
 fi
 if needs_target "edge"; then
   python3 -m json.tool "$HYDRA_ROOT/openclaw-edge.json" >/dev/null 2>&1 || fail "openclaw-edge.json is not valid JSON"
@@ -2933,6 +2940,26 @@ if [ -x "$LINT_OPENCLAW_CFG" ]; then
       || fail "openclaw config lint failed on live config — see preceding stderr for the profile + server name; rewrite with \`openclaw --profile <p> mcp set\` to transport: \"streamable-http\""  # hydra-hook: reviewed-indirection reviewed-argv (repo linter by path)
     log "  Live openclaw configs free of mcp-remote stdio entries."
   fi
+fi
+
+# -------------------------------------------------------------------
+# Step 4d.5b: Post-sync agent exec posture gate (guardrails-1101 gap 2 / H1)
+# -------------------------------------------------------------------
+# sync_profile_config replaces every field but `.mcp.servers`, so after it runs the LIVE file must equal the repo's
+# posture. When it does not — a partial rsync, a live file hand-edited after the last deploy, a merge-preserve that
+# dropped an agent's `tools` block — node-8 runs a posture nobody reviewed, and if that posture hands an agent back
+# its root shell the SMOKE TEST cannot tell (it counts agents, cron rows and HTTP; it never reads tools.deny).
+# Checked against the LIVE FILES, after the sync and BEFORE the Step 6 restart, so a failing deploy never reloads the
+# gateway onto an unreviewed shell posture. Step 1's repo-only check cannot see any of this: it reads the same tree
+# that is about to be written, not what node-8 actually holds.
+# Scoped to the profiles this deploy targets: a `--target edge` run must not be blocked by a stale main live config
+# it never touches (same rationale as the live lint block above).
+_exec_live_args=()
+needs_target "main" && _exec_live_args+=(--live-profile main)
+needs_target "edge" && _exec_live_args+=(--live-profile edge)
+if (( ${#_exec_live_args[@]} > 0 )); then
+  python3 "$SCRIPT_DIR/check-agent-exec-policy.py" --live "${_exec_live_args[@]}" || fail "agent exec posture: node-8's LIVE configs do not match policies/agent-exec-policy.json (named above) — a partial rsync or a hand edit left an unreviewed shell posture on disk. Nothing has restarted onto it: fix /opt/hydra or the live config and re-run."  # hydra-hook: reviewed-indirection reviewed-argv (repo script by path)
+  log "  Agent exec posture: live configs match the repo and the registry."
 fi
 
 # -------------------------------------------------------------------

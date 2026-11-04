@@ -81,6 +81,14 @@ STUB
   # their own stub.
   export CRON_HEALTH_SESSION_BUDGET_CHECK="$TEST_TMPDIR/no-session-budget-check"
   export CRON_HEALTH_SESSION_BUDGET_STATE="$TEST_TMPDIR/session-budget-last-alert"
+  # Same hermeticity rule for the agent exec-posture block: CI runs on the LIVE node-8 host, where
+  # /opt/hydra/scripts/check-agent-exec-policy.py and /root/.openclaw-*/openclaw.json really exist. Left at its
+  # default the block would read the live posture every test AND stamp the production 24h dedupe file, silencing a
+  # real page. Disarm by default with the EXPLICIT empty seam (an absent non-empty path is no longer a skip — it
+  # pages as "checker MISSING", which is the point of the missing-checker test below); the tests that exercise the
+  # block install their own stub.
+  export CRON_HEALTH_EXEC_POLICY_CHECK=""
+  export CRON_HEALTH_EXEC_POLICY_STATE="$TEST_TMPDIR/exec-policy-last-alert"
   # Hermeticity: never scan the LIVE /var/lib/hydra/unit-failed-unpaged on CI.
   export CRON_HEALTH_UNIT_FAILED_MARKER_DIR="$TEST_TMPDIR/unit-failed-unpaged"
   export CRON_HEALTH_STATE_FILE="$TEST_TMPDIR/state.json"
@@ -521,6 +529,166 @@ STUB
   rm -f "$CRON_HEALTH_SESSION_BUDGET_CHECK"
   run bash "$WD"
   [ "$status" -eq 0 ]
+}
+
+# ──────────────────────────────────────────────────────────────
+# Agent exec posture (guardrails-1101 gap 2 / H1)
+# deploy.sh checks the posture per deploy; an exception whose EXPIRY DATE has passed
+# needs a clock instead, so this watchdog tick is that clock. One page per 24h.
+# ──────────────────────────────────────────────────────────────
+
+# _stub_policy_check <exit-code> [output] — the real check runs under `python3`, so the stub must be python.
+_stub_policy_check() {
+  local rc="$1"
+  local out="${2:-FAIL openclaw-main.json:qa: posture=full EXPIRED on 2026-11-08 - deny exec, or renew with a new ruling}"
+  export CRON_HEALTH_EXEC_POLICY_CHECK="$TEST_TMPDIR/exec-policy-check.py"   # the seam starts EMPTY (disarmed)
+  cat > "$CRON_HEALTH_EXEC_POLICY_CHECK" <<STUB
+import sys
+print("""$out""")
+sys.exit($rc)
+STUB
+}
+
+@test "agent exec posture: a violation pages with the finding AND the fix named" {
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _stub_policy_check 1
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "agent exec posture alert" <<< "$output"
+  # The page must reach the (stubbed) Slack sender and name the H1 cause + the lever, not just "something is wrong".
+  grep -q "EXPIRED on 2026-11-08" "$TEST_TMPDIR/last-text"
+  grep -q "ROOT on node-8" "$TEST_TMPDIR/last-text"
+  grep -q "Posture rules" "$TEST_TMPDIR/last-text"
+}
+
+@test "agent exec posture: repeat ticks inside 24h do NOT re-page" {
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _stub_policy_check 1
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  local first
+  first="$(grep -c . "$STUB_CALLS")"
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "UNCHANGED and already paged" <<< "$output"
+  [ "$(grep -c . "$STUB_CALLS")" -eq "$first" ]
+}
+
+@test "agent exec posture: a DIFFERENT violation inside 24h pages immediately (dedupe is keyed to the finding)" {
+  # One alert must not buy silence for every other posture failure in the next 24h: a restored root shell is not
+  # "the thing we already told you about".
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _stub_policy_check 1 "FAIL scout: posture=denied but tools.deny lacks ['exec']"
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "Posted agent exec posture alert" <<< "$output"
+  # Same finding again: suppressed.
+  run bash "$WD"
+  grep -q "UNCHANGED and already paged" <<< "$output"
+  # A DIFFERENT finding one tick later, well inside the 24h window: it must page.
+  _stub_policy_check 1 "FAIL qa: posture=full EXPIRED on 2026-11-08"
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "Posted agent exec posture alert" <<< "$output"
+  grep -q "EXPIRED on 2026-11-08" "$TEST_TMPDIR/last-text"
+}
+
+@test "agent exec posture: a CLEAN tick clears the dedupe stamp, so the next regression pages at once" {
+  # alert -> clean -> regression inside 24h: inheriting the first alert's window would hide the regression.
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _stub_policy_check 3 "MISSING CHECKER: /opt/hydra/scripts/check-agent-exec-policy.py"
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  [ -f "$CRON_HEALTH_EXEC_POLICY_STATE" ]
+  _stub_policy_check 0 "agent exec policy: clean"
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "cleared the dedupe stamp" <<< "$output"
+  [ ! -f "$CRON_HEALTH_EXEC_POLICY_STATE" ]
+  # The checker is back and a live deny was removed in the same day: this must page, not wait 23h.
+  _stub_policy_check 1 "FAIL scout: posture=denied but tools.deny lacks ['exec']"
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "Posted agent exec posture alert" <<< "$output"
+  grep -q "tools.deny lacks" "$TEST_TMPDIR/last-text"
+}
+
+@test "agent exec posture: re-pages once the 24h interval has elapsed (a quiet week still pages)" {
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _stub_policy_check 1
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  printf '%s' "$(( $(date -u +%s) - 86401 ))" > "$CRON_HEALTH_EXEC_POLICY_STATE"
+  run bash "$WD"
+  grep -q "Posted agent exec posture alert" <<< "$output"
+}
+
+@test "agent exec posture: a clean check pages nothing" {
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _stub_policy_check 0 "ok   openclaw-main.json:scout: denied (6 deny entries)
+agent exec policy: clean"
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  [ ! -s "$STUB_CALLS" ]
+  [ ! -f "$CRON_HEALTH_EXEC_POLICY_STATE" ]
+}
+
+@test "agent exec posture: an unreadable config (exit 2) pages as CANNOT EVALUATE, never as all-clear" {
+  # Exit 2 = "could not evaluate". For the cron detector that is a don't-page (an unreachable gateway already pages
+  # elsewhere), but an unreadable shell posture is exactly the state a bad edit leaves behind: silence would read
+  # as "the fleet is locked down" when nobody knows.
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _stub_policy_check 2 "cannot read /root/.openclaw-main/openclaw.json: No such file or directory"
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "CANNOT EVALUATE" "$TEST_TMPDIR/last-text"
+  grep -q "No such file or directory" "$TEST_TMPDIR/last-text"
+}
+
+@test "agent exec posture: --dry-run never posts and never stamps the dedupe file" {
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _stub_policy_check 1
+  run bash "$WD" --dry-run
+  [ "$status" -eq 0 ]
+  grep -q "DRY-RUN: agent exec posture" <<< "$output"
+  [ ! -s "$STUB_CALLS" ]
+  [ ! -f "$CRON_HEALTH_EXEC_POLICY_STATE" ]
+}
+
+@test "agent exec posture: the block is off only when the seam is EMPTY (there is no implicit skip)" {
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"agent exec posture"* ]]
+}
+
+@test "agent exec posture: an ABSENT checker pages as CHECKER MISSING, never a silent skip" {
+  # A partial sync (or a host edit) that removes scripts/check-agent-exec-policy.py used to disable the alarm
+  # entirely: no page, no finding, forever, while the tick looked healthy. The absence itself is the finding.
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  export CRON_HEALTH_EXEC_POLICY_CHECK="$TEST_TMPDIR/gone/check-agent-exec-policy.py"
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "checker MISSING" "$TEST_TMPDIR/last-text"
+  grep -q "CANNOT EVALUATE" "$TEST_TMPDIR/last-text"
+  grep -q "gone/check-agent-exec-policy.py" "$TEST_TMPDIR/last-text"
+  [ -f "$CRON_HEALTH_EXEC_POLICY_STATE" ]        # a delivered page DOES stamp (the alert was real)
+}
+
+@test "agent exec posture: a page that could not be DELIVERED does not stamp the 24h window (retries next tick)" {
+  # slack_notify_critical is best-effort and returns 0 when Slack is unreachable, so stamping on it would buy 24h of
+  # silence for a page nobody received — on the H1 alert. The stamp is written only after Slack confirms delivery.
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _stub_policy_check 1
+  STUB_MUSO_RC=1 run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "page delivery FAILED" <<< "$output"
+  [ ! -f "$CRON_HEALTH_EXEC_POLICY_STATE" ]       # NOT stamped: the window did not advance
+  # Next tick, Slack is back: the same finding pages again (a stamp from the failed attempt would have suppressed it).
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "Posted agent exec posture alert" <<< "$output"
+  grep -q "EXPIRED on 2026-11-08" "$TEST_TMPDIR/last-text"
+  [ -f "$CRON_HEALTH_EXEC_POLICY_STATE" ]
 }
 
 # ──────────────────────────────────────────────────────────────

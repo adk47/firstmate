@@ -179,6 +179,101 @@ if [ -x "$SESSION_BUDGET_CHECK" ]; then
 fi
 
 # ──────────────────────────────────────────────────────────────
+# Agent exec posture (guardrails-1101 gap 2 / H1): policies/agent-exec-policy.json + the RULES in
+# scripts/check-agent-exec-policy.py.
+#
+# deploy.sh checks the posture twice per deploy (pre-sync repo, post-sync --live), but a deploy can be days apart and
+# MOST of the ways this goes wrong are silent: a non-ops agent's dated `full` exception PASSES its expiry date with
+# no deploy to notice it, and a hot edit or a hand-reverted live file restores a root shell until someone looks. The
+# expiry case is the one that needs a clock rather than a deploy, so this tick is that clock.
+#
+# Deduped to ONE page per 24h PER FINDING: the watchdog ticks every 5 min, and a posture that nobody has fixed would
+# otherwise post 288 times a day and train everyone to ignore the very alert that matters. The stamp carries the
+# findings' identity (sha) alongside the timestamp, so an UNCHANGED violation is quiet while a NEW one pages at once,
+# and a clean tick clears the stamp so recovery re-arms it.
+#
+# Nothing here may fail SILENT, which is why the two states a naive version of this block gets wrong both page:
+#   - the CHECKER itself is missing (partial sync, moved file, host edit): that is rc=3 and it pages. Absence of the
+#     checker is not a reason to skip the alarm, it IS the alarm — the file that catches a restored root shell would
+#     then never run again while this tick looked healthy forever;
+#   - the page could not be DELIVERED: the dedupe stamp is written ONLY after Slack confirms the post, so a failed
+#     delivery retries on the next tick instead of buying 24h of silence with a page nobody received. That is why this
+#     uses slack_notify_payload_file_status (real status) and not slack_notify_critical (best-effort, always 0).
+# Exit 2 (config or registry unreadable) is likewise NOT a pass and NOT a plain violation — it pages, with its own
+# wording, because "cannot evaluate the shell posture" is exactly the state an attacker-supplied config would create.
+# CRON_HEALTH_EXEC_POLICY_CHECK="" is the explicit off switch (tests use it); there is no implicit skip.
+# See docs/lessons/working-in-hydra.md and AGENTS.md "Agent shell (exec) posture".
+# ──────────────────────────────────────────────────────────────
+EXEC_POLICY_CHECK="${CRON_HEALTH_EXEC_POLICY_CHECK-$_WATCHDOG_DIR/check-agent-exec-policy.py}"   # `-`, not `:-`: "" must be expressible
+EXEC_POLICY_ALERT_STATE="${CRON_HEALTH_EXEC_POLICY_STATE:-/var/lib/cron-health-watchdog/exec-policy-last-alert}"
+EXEC_POLICY_ALERT_INTERVAL="${CRON_HEALTH_EXEC_POLICY_INTERVAL:-86400}"  # 24h
+
+if [ -n "$EXEC_POLICY_CHECK" ]; then
+  _ep_out=""; _ep_rc=0
+  if [ ! -f "$EXEC_POLICY_CHECK" ]; then
+    _ep_rc=3
+    _ep_out="MISSING CHECKER: ${EXEC_POLICY_CHECK} is not on this host, so this tick cannot evaluate the shell posture"
+  else
+    _ep_out="$(python3 "$EXEC_POLICY_CHECK" --live 2>&1)" || _ep_rc=$?
+  fi
+  if [ "$_ep_rc" -ne 0 ]; then
+    case "$_ep_rc" in
+      (3) _ep_head=":rotating_light: *Agent exec posture: CANNOT EVALUATE (checker MISSING)* — \`scripts/check-agent-exec-policy.py\` is not on node-8 at the path this tick runs. Deploys and this clock are the only things that catch a restored root shell, so a missing checker means the posture has been UNVERIFIED since that file went away. Nothing about that is benign.\n\n\`\`\`$_ep_out\`\`\`\n\nRestore it from the repo (\`ls -l /opt/hydra/scripts/check-agent-exec-policy.py\`) and re-deploy, then run \`python3 /opt/hydra/scripts/check-agent-exec-policy.py --live\` by hand and confirm it is clean. Posture rules: \`AGENTS.md\` §\"Agent shell (exec) posture\"." ;;
+      (2) _ep_head=":rotating_light: *Agent exec posture: CANNOT EVALUATE* — \`scripts/check-agent-exec-policy.py --live\` exited 2, meaning a config or the registry could not be read. That is not an all-clear: an unreadable \`openclaw-{main,edge}.json\` is exactly the state a bad edit leaves behind, so the fleet's shell posture is UNKNOWN right now.\n\n\`\`\`$_ep_out\`\`\`\n\nCheck \`/opt/hydra/openclaw-main.json\`, \`/root/.openclaw-main/openclaw.json\` and \`policies/agent-exec-policy.json\` are readable valid JSON, then run \`python3 /opt/hydra/scripts/check-agent-exec-policy.py --live\` by hand." ;;
+      (*) _ep_head=":no_entry: *Agent exec posture violated* — \`scripts/check-agent-exec-policy.py --live\` found a node-8 shell posture the repo does not declare, or an exception that has run out. Every main agent with \`tools.exec security=full\` runs as ROOT on node-8, so this is the H1 surface: a prompt-injected Slack thread, fetched page or PR body becomes \`curl ... | sh\`.\n\n\`\`\`$_ep_out\`\`\`\n\nFix the finding it names: \`deny\` the agent (\`tools.deny: [\"exec\",\"process\",\"lobster\",\"nodes\",\"computer\",\"terminal\"]\` in \`openclaw-{main,edge}.json\`, plus its row in \`policies/agent-exec-policy.json\`), or RENEW its dated \`full\` exception with a new ruling. Land it as a PR — CI re-checks the same rules — and never restore a posture on the live file by hand, which is what this check exists to catch. Posture rules: \`AGENTS.md\` §\"Agent shell (exec) posture\"." ;;
+    esac
+    _ep_now="$(date -u +%s)"
+    # Dedupe by FINDING IDENTITY, not only by the clock. The stamp records "<epoch> <sha of the findings that were
+    # actually delivered>": the same finding inside the interval stays quiet, but a DIFFERENT one pages immediately.
+    # Otherwise one alert at 01:00 buys silence until 01:00 tomorrow for every other posture failure in between — a
+    # restored root shell is not "the thing we already told you about". A clean tick clears the stamp outright (see
+    # the else branch below), so recovery re-arms the alarm.
+    _ep_sig="$(printf '%s\nrc=%s' "$_ep_out" "$_ep_rc" | sha256sum | cut -c1-16)"
+    _ep_last=0; _ep_last_sig=""
+    if [ -r "$EXEC_POLICY_ALERT_STATE" ]; then read -r _ep_last _ep_last_sig < "$EXEC_POLICY_ALERT_STATE" || true; fi
+    case "$_ep_last" in (*[!0-9]*|"") _ep_last=0 ;; esac
+    _ep_last_sig="${_ep_last_sig:-}"
+    if [ "$DRY_RUN" -eq 1 ]; then
+      log "DRY-RUN: agent exec posture rc=${_ep_rc} (would page ${SLACK_CHANNEL}):"
+      printf '%s\n' "$_ep_out"
+    elif [ $((_ep_now - _ep_last)) -ge "$EXEC_POLICY_ALERT_INTERVAL" ] || [ "$_ep_sig" != "$_ep_last_sig" ]; then
+      _ep_send_rc=1; _ep_payload=""
+      _ep_payload="$(mktemp 2>/dev/null)" && {
+        if jq -n --arg c "$SLACK_CHANNEL" \
+             --arg n "<@${SLACK_UID_NICK}> <@${SLACK_UID_AARON}>" \
+             --arg h "$_ep_head" \
+             '{channel:$c, text:($n + " " + $h)}' > "$_ep_payload" 2>/dev/null; then
+          _ep_send_rc=0
+          slack_notify_payload_file_status "$_ep_payload" || _ep_send_rc=$?
+        else
+          log "WARN: could not build the agent exec posture page"
+        fi
+        rm -f "$_ep_payload"
+      }
+      if [ "$_ep_send_rc" -eq 0 ]; then
+        log "Posted agent exec posture alert to ${SLACK_CHANNEL} (rc=${_ep_rc})."
+        printf '%s\n' "$_ep_out"
+        mkdir -p "$(dirname "$EXEC_POLICY_ALERT_STATE")" 2>/dev/null || true
+        printf '%s %s' "$_ep_now" "$_ep_sig" > "$EXEC_POLICY_ALERT_STATE" 2>/dev/null || true
+      else
+        # NO STAMP: the next tick tries again. A security page nobody received must never buy silence.
+        log "agent exec posture page delivery FAILED (send rc=${_ep_send_rc}, posture rc=${_ep_rc}) — NOT stamped, retried next tick"
+        printf '%s\n' "$_ep_out"
+      fi
+    else
+      log "agent exec posture violation UNCHANGED and already paged $((_ep_now - _ep_last))s ago (rc=${_ep_rc}) — suppressed"
+    fi
+  else
+    # CLEAN tick: drop the dedupe stamp, so a posture regression that appears after recovery pages immediately
+    # instead of inheriting the previous alert's 24h window.
+    if [ -e "$EXEC_POLICY_ALERT_STATE" ]; then
+      rm -f "$EXEC_POLICY_ALERT_STATE" 2>/dev/null || true
+      log "agent exec posture clean: cleared the dedupe stamp (a later regression pages immediately)"
+    fi
+  fi
+fi
+
+# ──────────────────────────────────────────────────────────────
 # Unpaged unit-failure spool (scripts/notify-unit-failed.sh, codex-edge-mirror.sh)
 # hydra-unit-failed@.service is the OnFailure= target for timer-driven oneshots
 # (codex-edge-mirror.service first) and the mirror pages for itself. When a
