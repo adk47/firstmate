@@ -3476,8 +3476,32 @@ class FrozenBatchManifest(unittest.TestCase):
             cli.select_batch(self.args(manifest=f2.name), "ask", frozen)
         self.assertEqual(e.exception.code, 1)
 
+    def test_a_partially_sent_batch_says_so_instead_of_just_refusing(self):
+        # the operator has to be able to tell "a send died at letter N" from "the register moved": the first is
+        # benign-but-needs-a-re-pin, the second means the approval no longer names anything
+        import io, contextlib, tempfile, sqlite3
+        from gdpr_pipeline.store import Store
+        cli = _cli()
+        td = tempfile.mkdtemp()
+        store = Store(os.path.join(td, "e.sqlite"))
+        rid, _ = store.upsert({"keys": ["intercom:9"], "channel": "intercom", "class": "privacy_erasure",
+                               "received_at": "2026-09-01T10:00:00Z", "conversation_id": "215476650395415",
+                               "requester_name": "Arpad Laczkovszki", "due_at": "2026-10-01T10:00:00Z"})
+        store.begin_send(rid, "ask", "intercom", "1", "sha", "U0AN41ZBTRU", state="sending")
+        store.finish_send(rid, "ask", "sent", detail="ok")
+        run = Run(store)
+        path = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump([{"request_id": str(rid), "register_no": 1, "body_sha": "0" * 64}], path)
+        path.close()
+        self.addCleanup(os.unlink, path.name)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            cli.select_batch(self.args(manifest=path.name), "ask", [], run)
+        self.assertIn("already carry a ledger record", out.getvalue())
+        self.assertIn("re-pin the unsent rows", out.getvalue())
+
     def test_both_send_commands_accept_a_manifest(self):
         src = open(os.path.join(HERE, "gdpr-pipeline.py")).read()
-        self.assertIn('select_batch(a, "ask", run.asks(now))', src)
-        self.assertIn('select_batch(a, "confirm", run.confirmations(now, m_result=m_result))', src)
+        self.assertIn('select_batch(a, "ask", run.asks(now), run)', src)
+        self.assertIn('select_batch(a, "confirm", run.confirmations(now, m_result=m_result), run)', src)
         self.assertIn('p.add_argument("--manifest"', src)

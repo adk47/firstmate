@@ -288,7 +288,7 @@ def oldest_first(items: list[dict]) -> list[dict]:
     return sorted(items, key=lambda x: (x.get("due_at") or "", x.get("register_no") or 0))
 
 
-def select_batch(a, kind: str, items: list[dict]) -> list[dict]:
+def select_batch(a, kind: str, items: list[dict], run=None) -> list[dict]:
     """The approved batch is FROZEN, and a manifest is how it stays frozen (firstmate ruling 2026-11-04).
 
     `--limit N` is a moving selector: it takes the oldest N of *whatever is open now*, so the next intake re-cuts the
@@ -359,9 +359,28 @@ def select_batch(a, kind: str, items: list[dict]) -> list[dict]:
         by_row = {str(x["row"]): x for x in items}   # the store's row id may be an int; a JSON file says str
         missing_rows = [r for r in rows if r not in by_row]
         if missing_rows:
+            # Say WHICH reason the batch no longer matches, because one of them is benign and one is not: rows that
+            # already carry a ledger record for this kind mean an earlier run of the same batch got part-way (a send
+            # that died at letter N), and the remainder then needs a fresh pin+approval under the "no removals" rule.
+            # Rows that left for any other reason mean the register moved under an approval that no longer names it.
+            sent = []
+            if run is not None:
+                for rid in missing_rows:
+                    try:
+                        rec = run.store.send_record(int(rid), kind)
+                    except (TypeError, ValueError):
+                        rec = None
+                    if rec and rec.get("state") in ("sent", "sending", "unknown"):
+                        sent.append(str(rid))
+            detail = ""
+            if sent:
+                detail = (f" {len(sent)} of them already carry a ledger record for a {kind} letter "
+                          f"({', '.join(sent[:5])}{' …' if len(sent) > 5 else ''}), so an earlier run of THIS batch "
+                          f"got part-way. The remainder is a removal from the approved set: re-pin the unsent rows and "
+                          f"get a fresh approval rather than resuming under the old one.")
             print(f"REFUSED: {len(missing_rows)} request(s) in the manifest are not in the {kind} set now "
                   f"({', '.join(missing_rows[:5])}{' …' if len(missing_rows) > 5 else ''}). Sending the rest would be "
-                  f"a different batch than the one that was approved - re-cut and get a fresh approval.")
+                  f"a different batch than the one that was approved - re-cut and get a fresh approval.{detail}")
             raise SystemExit(1)
         changed = []
         for rid, want_sha in shas.items():
@@ -573,7 +592,7 @@ def main() -> int:
     elif a.cmd == "mark-hidden":
         run.mark_hidden()
     elif a.cmd == "ask":
-        items = select_batch(a, "ask", run.asks(now))
+        items = select_batch(a, "ask", run.asks(now), run)
         refuse_send(a, "ask", items)
         for x in items:
             print(f"#{x['register_no']} {x['channel']} -> {x['to']} [{x['kind']}]\n  {x['text']}\n")
@@ -589,7 +608,7 @@ def main() -> int:
                 m_result = checks.sitemap_absent(ids)
             except sources.Unknown as exc:
                 run.fail("M sitemap walk", exc)
-        items = select_batch(a, "confirm", run.confirmations(now, m_result=m_result))
+        items = select_batch(a, "confirm", run.confirmations(now, m_result=m_result), run)
         refuse_send(a, "confirm", items)
         for x in items:
             print(f"===== #{x['register_no']} due {x['due_at'][:10]} -> {x['to']} S={x['S']} P={x['P']} M={x['M']}"
