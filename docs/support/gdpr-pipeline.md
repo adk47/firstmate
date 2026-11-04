@@ -175,7 +175,14 @@ gdpr-pipeline.py ask --manifest batch-1104.json --send --approved-by U0AN41ZBTRU
 - in the pinned form, a letter whose **body** no longer hashes to the pinned `body_sha` also refuses: copy is
   approved per body, so a copy edit is a fresh approval and never a re-cut;
 - an empty, unreadable or unparseable manifest refuses, as does `--manifest` together with `--limit` (two selectors,
-  no defined winner).
+  no defined winner);
+- **a file that MIXES the two entry forms refuses.** They guarantee different things: a bare register number is not
+  copy-checked, so it cannot ride an approval whose other rows are pinned by body hash. Before this was caught, a
+  manifest naming `250` *and* a `request_id` rendered only the `request_id` one — a silently short list under a
+  longer approval, which is exactly the failure the pinned form exists to prevent;
+- **a `request_id` entry without `body_sha` refuses too**, for the same reason: it looks pinned but would skip the
+  copy-change check, so an edit after the GO would ride the old digest. Pin every row or name every request by
+  register number — not part of each.
 
 **The re-cut rule the approver gave (2026-11-04), now enforced here rather than remembered:** a batch whose digest
 changes only because *intake added rows* (no removals, no body change, same kind, same copy ref) carries the existing

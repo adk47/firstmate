@@ -338,11 +338,19 @@ def select_batch(a, kind: str, items: list[dict], run=None) -> list[dict]:
             if not rid:
                 print(f"REFUSED: manifest entry {x!r} has no request_id")
                 raise SystemExit(1)
+            if not x.get("body_sha"):
+                # Same failure family as the mixed form: a row-shaped entry with no body_sha looks pinned but skips
+                # the copy-change proof entirely, so a rewording after the GO would go out under the old approval.
+                # A list of rows is a supported form; a list of HALF-pinned rows is not.
+                print(f"REFUSED: manifest entry {rid!r} is in the pinned (row) form but carries no body_sha. Without "
+                      f"it the run cannot prove the copy did not change after the GO, which is the whole point of "
+                      f"pinning. Add body_sha, or name the requests by register number instead.")
+                raise SystemExit(1)
             rows.append(str(rid))
-            if x.get("body_sha"):
-                shas[rid] = str(x["body_sha"]).strip().lower()
-            if x.get("register_no") is not None:
-                nums.append(int(x["register_no"]))
+            shas[rid] = str(x["body_sha"]).strip().lower()
+            # NOTE: `register_no` is deliberately NOT added to `nums` here. It is documentation for a human reading
+            # the file (the selection is by row id, because a register number can be renumbered); folding it into
+            # `nums` would make every valid pinned manifest look like a MIXED one and trip the refusal below.
             continue
         if isinstance(x, bool) or not isinstance(x, (int, str)):
             print(f"REFUSED: manifest entry {x!r} is not a register number")
@@ -354,6 +362,17 @@ def select_batch(a, kind: str, items: list[dict], run=None) -> list[dict]:
         nums.append(int(s_))
     if not nums and not rows:
         print(f"REFUSED: the manifest {a.manifest} names no requests")
+        raise SystemExit(1)
+    if nums and rows:
+        # The two forms carry DIFFERENT guarantees, so a file that mixes them cannot be one approval. A bare register
+        # number has no body_sha, so the row/body check below cannot speak for it; letting the pinned rows win (the
+        # old behaviour) silently DROPPED the bare ones - a manifest naming #329 and row-58 selected only row-58, and
+        # an operator could approve the digest of an incomplete batch. Refuse instead of guessing which form was
+        # meant: dropping a named request is exactly the silent-removal failure the pin exists to prevent.
+        print(f"REFUSED: the manifest {a.manifest} mixes the two entry forms - {len(nums)} bare register number(s) and "
+              f"{len(rows)} pinned row(s). They guarantee different things: a bare number is not copy-checked, so it "
+              f"cannot ride an approval whose other rows were pinned by body_sha. Use ONE form for the whole file "
+              f"(pin every row with request_id + body_sha, or name every request by register number).")
         raise SystemExit(1)
     if rows:                                                    # row ids win: a register number can be renumbered
         by_row = {str(x["row"]): x for x in items}   # the store's row id may be an int; a JSON file says str

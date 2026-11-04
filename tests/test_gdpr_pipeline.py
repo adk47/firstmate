@@ -3420,6 +3420,54 @@ class FrozenBatchManifest(unittest.TestCase):
         return {"register_no": no, "row": f"row-{no}", "due_at": due, "kind": "ask", "text": text,
                 "to": f"user{no}@example.com"}
 
+    def test_a_manifest_that_mixes_the_two_forms_is_refused_not_silently_shortened(self):
+        # QA r1 on #1738: a file naming #329 AND {"request_id": "row-58", ...} populated both `nums` and `rows`, and
+        # the row branch discarded `nums`, so the rendered batch contained only row-58. An operator could then approve
+        # the digest of an INCOMPLETE batch while having named #329 in the file. Dropping a named request is the
+        # silent-removal failure the pin exists to prevent, so the mixed form is refused by name.
+        import io, contextlib, json, tempfile
+        cli = _cli()
+        items = [self.live(329, "2025-10-20", "letter A"), self.live(58, "2026-09-01", "letter B")]
+        sha_b = __import__("hashlib").sha256(b"letter B").hexdigest()
+        path = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump([329, {"request_id": "row-58", "register_no": 58, "body_sha": sha_b}], path)
+        path.close()
+        self.addCleanup(os.unlink, path.name)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as e:
+            cli.select_batch(self.args(manifest=path.name), "ask", items)
+        self.assertEqual(e.exception.code, 1)
+        msg = out.getvalue()
+        self.assertIn("mixes the two entry forms", msg)
+        self.assertIn("1 bare register number", msg)
+        self.assertIn("Use ONE form", msg)
+
+    def test_a_row_form_entry_without_body_sha_is_refused(self):
+        # Same failure family: a row-shaped entry that carries no body_sha LOOKS pinned but skips the copy-change
+        # proof, so a rewording after the GO would ride the old approval. A list of rows is supported; a list of
+        # half-pinned rows is not.
+        import io, contextlib, json, tempfile
+        cli = _cli()
+        items = [self.live(329, "2025-10-20", "letter A")]
+        path = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump([{"request_id": "row-329", "register_no": 329}], path)
+        path.close()
+        self.addCleanup(os.unlink, path.name)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as e:
+            cli.select_batch(self.args(manifest=path.name), "ask", items)
+        self.assertEqual(e.exception.code, 1)
+        self.assertIn("carries no body_sha", out.getvalue())
+        self.assertIn("Add body_sha", out.getvalue())
+
+    def test_the_pinned_form_register_no_does_not_count_as_a_bare_number(self):
+        # the diptych risk of the fix: a pinned entry carries `register_no` for the human reading the file, and
+        # folding it into the bare-number list would make EVERY valid pinned manifest look mixed.
+        cli = _cli()
+        frozen = [self.live(329, "2025-10-20", "letter A"), self.live(58, "2026-09-01", "letter B")]
+        got = cli.select_batch(self.args(manifest=self.pinned(frozen)), "ask", frozen)
+        self.assertEqual([x["register_no"] for x in got], [329, 58])
+
     def test_a_pinned_batch_file_selects_by_row_and_body_and_survives_intake(self):
         # firstmate ruling 2026-11-04: the GO names the frozen set; the file carries the row AND the body it was
         # approved with, so the run - not a person - can tell an intake addition from a copy change
