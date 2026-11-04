@@ -103,6 +103,14 @@ FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 FM_CLASSIFY_PAUSE_UNTIL_RE='[Uu][Nn][Tt][Ii][Ll][[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2}[T[:space:]])?[0-2][0-9]:[0-5][0-9][[:space:]]*(Z|UTC)'
 FM_CLASSIFY_TIMELESS_PAUSE_PREFIX='paused without a wake time (needs until HH:MMZ): '
 
+# One declared wait is exempt from needing a wake time: firstmate's own gateway
+# keep-alive declares its external wait as `paused [key=gateway-503]: ...` with
+# no wake time, because the wait ends when the account pool recovers and the
+# ladder's own `resolved [key=gateway-503]` closes it. docs/gateway-keepalive.md
+# owns that shape, so that exact key stays a declared wait; every other
+# time-less pause still folds as blocked.
+FM_CLASSIFY_PAUSED_DECLARED_WAIT_KEY='gateway-503'
+
 # Bounded re-surface cadence for a declared pause or a verified captain hold.
 # Far longer than the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), it
 # avoids nagging a deliberate wait while ensuring a forgotten hold cannot rot
@@ -633,9 +641,11 @@ _fm_fold_line_state() {  # <open-set> <status-line> <resolve-verb> <held-verb>
   _fm_decision_key_transition_allowed "$key" "$note" || { _FM_FOLD_OPEN=$open; return 0; }
   _FM_FOLD_KEY=$key
   # A time-less pause opens like blocked: (FM_CLASSIFY_PAUSE_UNTIL_RE), and the
-  # entry it opened closes on the key's next line that is not itself one.
+  # entry it opened closes on the key's next line that is not itself one. The one
+  # exception is the documented gateway keep-alive declaration, which names no
+  # wake time by design (docs/gateway-keepalive.md).
   if [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]; then
-    if status_pause_has_wake_time "$note"; then
+    if status_pause_has_wake_time "$note" || [ "$key" = "$FM_CLASSIFY_PAUSED_DECLARED_WAIT_KEY" ]; then
       verb=working
     else
       # A time-less pause is a weaker statement than the blocked: or
@@ -821,9 +831,11 @@ EOF
 #
 # Correctness invariant (unchanged from the whole-file fold): an open decision
 # is dropped ONLY by an explicit resolved/captain-held line for its exact key,
-# never by cursor advancement, age, or being buried under later appends - the
-# persisted open-set carries every still-open key forward across calls
-# regardless of how much new unrelated log content has since been folded in.
+# or - for an entry opened by a time-less pause - by that key's next line that
+# is not itself a time-less pause, never by cursor advancement, age, or being
+# buried under later appends - the persisted open-set carries every still-open
+# key forward across calls regardless of how much new unrelated log content has
+# since been folded in.
 #
 # The cursor format is `version`, `offset`, `ident`, then the folded open set.
 # FM_OPEN_DECISIONS_FOLD_VERSION must be bumped whenever
@@ -907,9 +919,10 @@ _fm_status_read_text_var() {  # <file> <output-variable>
 # such lines as ordinary status and would keep their decisions invisible
 # forever, so it must be discarded and rebuilt from byte 0.
 # 7: a time-less `paused:` line now opens like `blocked:` for its key instead of
-# waiting silently, so a line that folded as ordinary status becomes an open. A
-# cursor persisted under the older reading has already consumed that wait, so it
-# must be discarded and rebuilt from byte 0.
+# waiting silently, so a line that folded as ordinary status becomes an open
+# (the documented gateway-503 declared wait excepted). A cursor persisted under
+# the older reading has already consumed that wait, so it must be discarded and
+# rebuilt from byte 0.
 FM_OPEN_DECISIONS_FOLD_VERSION=7
 
 # The host OS name, resolved once and EXPORTED so the many $(...) subshells that

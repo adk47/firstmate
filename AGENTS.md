@@ -155,6 +155,7 @@ state/               runtime records and signals; gitignored
   .hash-* .count-* .stale-* .stale-since-* .churn-since-* .paused-* .wedge-escalations-* .wedge-alarmed-* .writing-* .gw-busy-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .watchdog-worker.json .watchdog-worker.lock  fleet watchdog record (boot identity, per-task pane shape and stall/inbox ladder stages, connection strikes, per-unit restart history, last reported backlog difference) and its pass lock, both owned by bin/fm-watchdog-worker.sh
+  .fm-send-allow-dead.log  fm-send's append-only `--allow-dead` audit trail (UTC stamp, task, why it was not live, the override reason); read it to see steers written to a task whose endpoint was not live, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes) and between a slow poll's stages; guard scripts read it
   .chair-source .chair-flip-at .chair-alarm .chair-fable-unknown-ticks   firstmate chair sentinel records: the lock holder's bound token source, the flip hysteresis stamp, the no-tank alarm, and the consecutive Fable-unmeasured count; bin/fm-chair-flip.sh and bin/fm-chair-sentinel.sh own the formats; never touch
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch

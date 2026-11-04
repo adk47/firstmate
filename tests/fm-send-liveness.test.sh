@@ -93,6 +93,7 @@ test_a_gone_window_is_refused_before_anything_is_written() {
   expect_code 3 "$rc" "a steer to a gone window"
   assert_contains "$(cat "$err")" "target not live since 20" "the refusal did not name when the worker was last live"
   assert_contains "$(cat "$err")" "relaunch first" "the refusal did not say to relaunch"
+  assert_contains "$(cat "$err")" "bin/fm-control.sh t1 relaunch --note" "the refusal did not give a relaunch command that runs for a ship"
   assert_contains "$(cat "$err")" "endpoint sess:fm-t1 is missing" "the refusal did not say why"
   [ ! -e "$dir/home/state/t1.inbox/001.msg" ] || fail "a refused steer still wrote an inbox record"
   pass "a steer to a gone window is refused with exit 3 and nothing is written"
