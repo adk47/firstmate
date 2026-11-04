@@ -11,6 +11,9 @@ metadata:
 # Captain-hold lifecycle
 
 A decision is not a separate thing: it is simply a task waiting on the captain.
+Who answers is `decision-routing`.
+Only a Class B question becomes a task waiting on the captain.
+Anything else is a Fable ruling, and `fm-captain-hold.sh hold --class fable` records it without putting it on his board.
 The one primitive is an ordinary backlog task held for the captain through `bin/fm-captain-hold.sh hold`; its identity is the task id, and that wrapper owns the deterministic mechanics this policy relies on.
 The agent performs the semantic inventory because scripts must not infer captain calls from report prose, visual-review artifacts, terminal output, or chat.
 

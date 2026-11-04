@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # fm-captain-hold.sh - deterministic mechanics for tasks held for the captain.
 #
-# The semantic policy is owned once by
-# .agents/skills/captain-hold-lifecycle/SKILL.md. This script never reads
+# The completion policy is owned once by
+# .agents/skills/captain-hold-lifecycle/SKILL.md, and who answers is owned
+# once by .agents/skills/decision-routing/SKILL.md. This script never reads
 # report, visual-review, chat, or terminal prose to guess whether the captain
 # owes an answer. The invoking agent decides what is genuinely waiting on the
 # captain; this script supplies guarded creation, a durable record of what the
@@ -21,7 +22,8 @@
 #
 # Usage:
 #   fm-captain-hold.sh hold <task-id> --reason <reason> \
-#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD]
+#     [--title <title>] [--repo <repo>] [--origin <origin-id>] [--until YYYY-MM-DD] \
+#     [--class fable|b]
 #   fm-captain-hold.sh answer <task-id> --decision-file <path> [--release]
 #   fm-captain-hold.sh answers [<legacy-origin> | --any-origin] --source <provenance>   (keyed answers on stdin)
 #   fm-captain-hold.sh bind <source-id> [<legacy-origin> | --any-origin]
@@ -42,6 +44,12 @@
 # A task already closed is refused rather than reopened. `--until` records the
 # captain's own deferral date through `tasks-axi hold --until`, so a "revisit
 # later" answer is stored as a date instead of a live card.
+# `--class` records who already decided the question.
+# Omitted records `Decision class: b` and stays on his board.
+# Only an explicit `--class fable` records `Decision class: fable` and skips
+# the parent needs-decision publish.
+# A present `config/decisions-to-aaron` records b and publishes anyway.
+# The script does not choose the class.
 #
 # `answer` records the captain's exact words and closes the call in the same
 # act. It requires a non-empty captain decision file of at most 8192 bytes and
@@ -152,7 +160,8 @@
 #
 # Parent channel: inside a secondmate home a task held for the captain, and its
 # answer, are captain-facing facts the moment they are recorded, so `hold`
-# publishes `needs-decision [key=captain-hold-<task>-<n>]` and `answer` (and
+# publishes `needs-decision [key=captain-hold-<task>-<n>]` unless the recorded
+# class is fable, and `answer` (and
 # `answers`) the matching `resolved` line on the parent channel through
 # bin/fm-parent-channel-lib.sh, whether or not the mate model appends anything.
 # <n> is the count of resolution records the body already carries plus one, so
@@ -169,6 +178,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
 # shellcheck source=bin/fm-classify-lib.sh
 # shellcheck disable=SC1091
@@ -703,9 +713,51 @@ write_hold_set_stamp() {  # <task-id> <shown-body> <timestamp> <preserve-existin
   rm -f -- "$tmp"
 }
 
+# Record the class the caller already chose.
+# A re-hold replaces any earlier Decision class line, so omitting the flag
+# puts a previously fable-class task back on the captain's board.
+write_decision_class() {  # <task-id> <class>
+  local id=$1 class_value=$2 show body hold_set rest new_body tmp
+  show=$(task_show "$id") || fail "task $id disappeared before recording its decision class"
+  body=$(decode_shown_value "$(show_field "$show" body)") \
+    || fail "could not decode the existing body for $id"
+  body=$(printf '%s\n' "$body" | awk '
+    $0 == "Decision class: fable" || $0 == "Decision class: b" { next }
+    { print }
+  ')
+  body=${body%$'\n'}
+  hold_set=$(body_hold_set_timestamp "$body")
+  if [ -n "$hold_set" ]; then
+    rest=${body#"Captain hold set: $hold_set"}
+    case "$rest" in
+      $'\n\n'*) rest=${rest#$'\n\n'} ;;
+      $'\n'*) rest=${rest#$'\n'} ;;
+    esac
+    new_body=$(printf 'Captain hold set: %s\nDecision class: %s' "$hold_set" "$class_value")
+    if [ -n "$rest" ]; then
+      new_body=$(printf '%s\n\n%s' "$new_body" "$rest")
+    fi
+  elif [ -n "$body" ]; then
+    new_body=$(printf '%s\nDecision class: %s' "$body" "$class_value")
+  else
+    new_body=$(printf 'Decision class: %s' "$class_value")
+  fi
+  tmp=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-captain-hold-class.XXXXXX") \
+    || fail "cannot stage the decision class"
+  if ! printf '%s\n' "$new_body" > "$tmp"; then
+    rm -f -- "$tmp"
+    fail "cannot stage the decision class for $id"
+  fi
+  if ! tasks_axi update "$id" --body-file "$tmp" >/dev/null; then
+    rm -f -- "$tmp"
+    fail "could not record the decision class on $id"
+  fi
+  rm -f -- "$tmp"
+}
+
 command_hold() {
   local id=${1:-} title='' reason='' repo='' origin='' until='' show state existing_title body='' hold_kind hold_set occurrence
-  local existing_hold_kind='' existing_held='' preserve_hold_set=0
+  local existing_hold_kind='' existing_held='' preserve_hold_set=0 class_value=''
   [ "$#" -ge 1 ] || { usage >&2; exit 2; }
   shift
   while [ "$#" -gt 0 ]; do
@@ -715,6 +767,15 @@ command_hold() {
       --repo) shift; repo=${1:-} ;;
       --origin) shift; origin=${1:-} ;;
       --until) shift; until=${1:-} ;;
+      --class)
+        shift
+        [ -z "$class_value" ] || { usage >&2; exit 2; }
+        class_value=${1:-}
+        case "$class_value" in
+          fable|b) ;;
+          *) usage >&2; exit 2 ;;
+        esac
+        ;;
       *) usage >&2; exit 2 ;;
     esac
     shift
@@ -730,6 +791,10 @@ command_hold() {
       [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) : ;;
       *) fail "--until must be a YYYY-MM-DD date: $until" ;;
     esac
+  fi
+  class_value=${class_value:-b}
+  if [ -e "$CONFIG/decisions-to-aaron" ]; then
+    class_value=b
   fi
   hold_set=${FM_CAPTAIN_HOLD_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
   case "$hold_set" in
@@ -791,7 +856,10 @@ command_hold() {
   occurrence=$(( $(resolution_record_count "$(show_field "$show" body)") + 1 ))
   [ -n "$(body_hold_set_timestamp "$(show_field_value "$show" body)")" ] \
     || fail "task $id lost its hold-set stamp while being held"
-  publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
+  write_decision_class "$id" "$class_value"
+  if [ "$class_value" != fable ]; then
+    publish_parent_hold "$id" "$occurrence" needs-decision "$reason"
+  fi
   printf '%s\n' "$id"
 }
 
