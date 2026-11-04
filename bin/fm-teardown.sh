@@ -1687,14 +1687,25 @@ restore_worktree_branch() {  # <worktree> <branch>
 # Remove an Orca-managed worktree when only its current path is known. Orca's
 # registry may still carry a stale path for a worktree that moved between hosts,
 # so a path selector can miss; callers fall back to a guarded plain git release.
+# An ok:false answer prints the error code and the rendered error on two stdout
+# lines so the caller can branch on the parsed code, never on the prose message.
 fm_backend_orca_remove_worktree_by_path() {  # <worktree>
-  local wt=${1:-}
+  local wt=${1:-} out code msg
   [ -n "$wt" ] || {
     echo "error: missing worktree path; cannot remove Orca worktree" >&2
     return 1
   }
   fm_backend_source orca >/dev/null 2>&1 || return 1
-  fm_backend_orca_run_json orca worktree rm --worktree "path:$wt" --force --json
+  out=$(orca worktree rm --worktree "path:$wt" --force --json 2>/dev/null) || {
+    echo "error: orca worktree rm exited nonzero for $wt" >&2
+    return 1
+  }
+  if msg=$(printf '%s' "$out" | fm_backend_orca_json_ok 2>&1); then
+    return 0
+  fi
+  code=$(printf '%s' "$out" | fm_backend_orca_json_error_code 2>/dev/null || true)
+  printf '%s\n%s\n' "$code" "$msg"
+  return 1
 }
 
 retry_wait_secs_is_valid() {
@@ -3301,10 +3312,13 @@ if { [ "$TEARDOWN_RELEASE_MODE" = orca ] || [ "$BACKEND" = orca ]; } && [ "$KIND
     # reason, timeout) must refuse with the concrete error named, because a bare
     # git remove would delete a worktree Orca still owns while its registry keeps
     # naming it.
-    orca_rm_err=
-    if ! orca_rm_err=$(fm_backend_orca_remove_worktree_by_path "$WT" 2>&1); then
-      case "$orca_rm_err" in
-        *selector_not_found*)
+    orca_rm_out=
+    if ! orca_rm_out=$(fm_backend_orca_remove_worktree_by_path "$WT" 2>&1); then
+      orca_rm_code=${orca_rm_out%%$'\n'*}
+      orca_rm_err=${orca_rm_out#*$'\n'}
+      [ "$orca_rm_err" != "$orca_rm_out" ] || orca_rm_err=
+      case "$orca_rm_code" in
+        selector_not_found)
           echo "teardown: orca reported selector_not_found for $WT; attempting a guarded plain git release" >&2
           guarded_plain_git_release "$WT" "$PROJ" || {
             restore_worktree_branch "$WT" "$branch"
@@ -3314,7 +3328,7 @@ if { [ "$TEARDOWN_RELEASE_MODE" = orca ] || [ "$BACKEND" = orca ]; } && [ "$KIND
           ;;
         *)
           restore_worktree_branch "$WT" "$branch"
-          echo "error: orca worktree removal failed for $WT with: ${orca_rm_err:-<no output>}; refusing to fall back to a plain git release because this is not a proven registry miss. Teardown aborted with the branch and worktree intact" >&2
+          echo "error: orca worktree removal failed for $WT with: ${orca_rm_err:-${orca_rm_code:-<no output>}}; refusing to fall back to a plain git release because this is not a proven registry miss. Teardown aborted with the branch and worktree intact" >&2
           exit 1
           ;;
       esac
