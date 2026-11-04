@@ -670,7 +670,7 @@ def _uvn_status(args: argparse.Namespace) -> int:
                             check_recipients=args.check_recipients, segment_daily_cap=args.segment_daily_cap,
                             gmail_fallback_o=args.gmail_fallback_o,
                             no_correction=args.no_correction, max_entries=args.max_entries,
-                            start_entry=args.start_entry)
+                            start_entry=args.start_entry, inapp_overflow=args.inapp_overflow)
     log("uvn-status " + json.dumps({k: v for k, v in vars(report).items() if not isinstance(v, (list, dict))}))
     werr = write_outcomes(args, report)
     print(uvn_status.render(report, args.mode, args.segment) + (f" OUTCOMES NOT WRITTEN: {werr}." if werr else ""))
@@ -1147,6 +1147,9 @@ def parser() -> argparse.ArgumentParser:
                          "need_more) instead of a list")
     us.add_argument("--proof-store", default=None, metavar="FILE",
                     help="the stage-2 proof store (default /var/lib/hydra-credit-verify/proof.sqlite)")
+    us.add_argument("--inapp-overflow", action="store_true",
+                    help="the daily cap paces EMAIL only (captain 2026-10-26 16:05Z): once it is spent, notes go "
+                         "in-app (open conversation, else an Intercom in-app message), up to 5,000 a day")
     us.add_argument("--exclude-users", default=None, metavar="FILE",
                     help="user ids (one per line) another lane messages today: left for a later run")
     us.set_defaults(fn=cmd_uvn_status)

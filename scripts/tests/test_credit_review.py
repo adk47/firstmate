@@ -1511,8 +1511,11 @@ class CronContractTests(unittest.TestCase):
             self.assertTrue(all(isinstance(a, str) and a for a in argv), "cron argv must not contain empty strings")
             # verify-notify writes no credit-request status either: it sends the
             # captain-approved verify note through intercom-verify-request.sh.
+            # uvn-status (the stage-2 gap-ask / uvn-status crons) writes no credit-request status
+            # either: it sends a fixed note through intercom-verify-request.sh.
             self.assertIn(argv[2], ("audit", "review", "digest", "metrics", "decide", "verify-notify", "verify-wave",
-                                    "removal-notice", "score-approve", "removal-audit", "provisional-tracker"))
+                                    "removal-notice", "score-approve", "removal-audit", "provisional-tracker",
+                                    "uvn-status"))
             if argv[2] == "score-approve":
                 # The second writing subcommand: only as the registered, captain-approved
                 # credit-trust-score-approve automation (captain 2026-10-20 "approve low risk credits").

@@ -134,6 +134,13 @@ case "$method $path" in
     if [ -n "${STUB_MESSAGE_RESPONSE:-}" ]; then printf '%s' "$STUB_MESSAGE_RESPONSE"; exit 0; fi
     n=$(( $(cat "$CURL_STUB_COUNTER" 2>/dev/null || echo 1000) + 1 )); echo "$n" > "$CURL_STUB_COUNTER"
     mt="$(printf '%s' "$payload" | jq -r '.message_type')"
+    # QA #1370: echo the request back and a wrong request enum is invisible. Intercom 2.11 accepts "in_app" (and
+    # "inapp") for create-a-message and ALWAYS answers "inapp"; anything else is a 400 error.list.
+    case "$mt" in
+      email) : ;;
+      in_app|inapp) mt=inapp ;;
+      *) printf '{"type":"error.list","request_id":"stub","errors":[{"code":"parameter_invalid","field":"message_type"}]}'; exit 22 ;;
+    esac
     printf '{"type":"admin_message","id":"%s","created_at":1760570000,"message_type":"%s","conversation_id":null}' "$n" "$mt" ;;
   "POST /conversations/search")
     if [ "$(printf '%s' "$payload" | jq -r '.query.field')" = "contact_ids" ]; then
@@ -1957,6 +1964,121 @@ db.execute("INSERT INTO verify_messages (campaign, kind, user_key, account_id, d
   run -0 "$LOCKED" send --campaign withdrawal-confirm --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == "POSTED"* ]]
   if [ -f "$TEST_TMPDIR/comm-state-args" ] && grep -q -- "--nothing-needed-body" "$TEST_TMPDIR/comm-state-args"; then false; fi
+}
+
+@test "--channel inapp (captain 16:05Z, inbox 010): no open conversation -> an Intercom in-app message, never email; an open one -> in-thread" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  run -0 "$LOCKED" send --campaign uvn-status --channel inapp --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == "DRY-RUN uvn-status initial inapp credits=1"* ]]
+  [ "$(rendered .message_type)" = "in_app" ]
+  [ "$(rendered '.subject // "none"')" = "none" ]
+  # QA #1370 round 2: the in-app route now checks eligibility for the SELECTED route, so the contact must be one the
+  # messenger has seen (the default fixture has no last_seen_at - it is a never-seen user)
+  seen='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000,"last_seen_at":1760000000}'
+  STUB_CONTACT_GET="$seen" run -0 "$LOCKED" send --campaign uvn-status --channel inapp --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED inapp message=1001 credits=1" ]]
+  [ "$(msg .message_type)" = "in_app" ]          # the REQUEST enum; the ledger records Intercom's "inapp"
+  [ "$(sql "select message_type, status from verify_messages")" = "inapp|sent" ]
+  # Once per user ever still holds; an open conversation still takes the note in-thread.
+  credits "$TEST_TMPDIR/c.json" Jane "u2:Mixing:Song B:Big Star"
+  STUB_CONTACT_GET="$seen" run -0 "$LOCKED" send --campaign uvn-status --channel inapp --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "SKIPPED already_sent"* ]]
+  now=$(date -u +%s)
+  jq '.user.email = "two@example.com" | .user.id = "43" | .credits[0].request_id = "u3"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/t.json"
+  STUB_OPEN_CONVS="{\"conversations\":[{\"id\":\"777\",\"state\":\"open\",\"updated_at\":$((now - 86400))}],\"total_count\":1}" \
+  STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]')" \
+    run -0 "$LOCKED" send --campaign uvn-status --channel inapp --credits-file "$TEST_TMPDIR/t.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED comment conversation=777"* ]]
+  [ "$(posts)" -eq 1 ]
+  # Never for the email-only or non-status campaigns, nor a follow-up.
+  run -1 "$LOCKED" send --campaign retro-past --channel inapp --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"--channel inapp applies to"* ]]
+  run -1 "$LOCKED" send --campaign uvn-status --channel sms --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+}
+
+@test "R9 x --channel inapp (QA #1370): an off-topic thread never turns a requested in-app note into an email" {
+  # QA #1370 (Important): the auto-picked-thread branch restored --channel inapp when it fell back, but the R9
+  # (off-topic) branch set MESSAGE_TYPE=email unconditionally - so a user past the email cap, whose only open thread
+  # was a refund thread, silently got an EMAIL: it spent the email budget the overflow exists to protect and it was
+  # never the channel the caller asked for.
+  now=$(date -u +%s)
+  open="{\"conversations\":[{\"id\":\"777\",\"state\":\"open\",\"updated_at\":$((now - 86400))}],\"total_count\":1}"
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  seen='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000,"last_seen_at":1760000000}'
+  STUB_CONTACT_GET="$seen" STUB_OPEN_CONVS="$open" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]' ',"title":"Your receipt from Muso.AI - refund?"')" \
+    run -0 "$UVN" send --campaign uvn-status --channel inapp --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"R9: conversation 777 is not about credits"* ]]
+  [[ "$output" == *"delivering in-app (the requested channel)"* ]]
+  [[ "$output" == *"POSTED inapp message="* ]]
+  [ "$(replies)" -eq 0 ]; [ "$(posts)" -eq 1 ]
+  [ "$(msg .message_type)" = "in_app" ]         # the same /messages endpoint as email: the TYPE is what differs
+  [ "$(sql "select message_type, status from verify_messages")" = "inapp|sent" ]
+  # and the control: the same thread WITHOUT --channel inapp still goes by email (R9, Fable 166)
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+  credits "$TEST_TMPDIR/c.json" Jane "u2:Mixing:Song B:Big Star"
+  STUB_OPEN_CONVS="$open" STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]' ',"title":"Your receipt from Muso.AI - refund?"')" \
+    run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"delivering by email"* ]]
+  [[ "$output" == *"POSTED email message=1002 credits=1"* ]]
+  [ "$(replies)" -eq 0 ]; [ "$(posts)" -eq 1 ]      # the log was reset above: one post, and it is the email
+}
+
+@test "--channel inapp + an unreachable email (QA #1370): the request itself arms the in-app route, no --inapp-fallback" {
+  # QA #1370 (Important): --channel inapp IS the caller asking for the in-app route, but the reachability block still
+  # demanded --inapp-fallback before it would use it - so a hard-bounced or unsubscribed contact (exactly the ones
+  # the in-app route exists for) got DEFERRED inapp_not_armed and nothing at all, every day, while the driver kept
+  # choosing that channel for them once the day's email budget was spent.
+  seen='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000,"has_hard_bounced":true,"last_seen_at":1760000000}'
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  STUB_CONTACT_GET="$seen" run -0 "$LOCKED" send --campaign uvn-status --channel inapp --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --check-recipient
+  [[ "$output" == *"RECIPIENT OK"* ]]; [ "$(posts)" -eq 0 ]
+  STUB_CONTACT_GET="$seen" run -0 "$LOCKED" send --campaign uvn-status --channel inapp --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED inapp message="* ]]
+  [ "$(posts)" -eq 1 ]; [ "$(replies)" -eq 0 ]
+  [ "$(msg .message_type)" = "in_app" ]
+  [ "$(sql "select message_type, status from verify_messages")" = "inapp|sent" ]
+  # unsubscribed from email is the same case, and an in-app ineligible contact (never seen by the messenger) is a
+  # RECORDED no_channel refusal rather than a deferral that never resolves
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+  unsub='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000,"unsubscribed_from_emails":true,"last_seen_at":1760000000}'
+  STUB_CONTACT_GET="$unsub" run -0 "$LOCKED" send --campaign uvn-status --channel inapp --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED inapp message="* ]]; [ "$(msg .message_type)" = "in_app" ]
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
+  unseen='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000,"has_hard_bounced":true}'
+  STUB_CONTACT_GET="$unseen" run -1 "$LOCKED" send --campaign uvn-status --channel inapp --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"in-app not deliverable (the messenger has never seen this contact)"* ]]
+  [ "$(posts)" -eq 0 ]
+}
+
+@test "--channel inapp + an EMAIL-REACHABLE but in-app-ineligible contact (QA #1370): eligibility is checked for the selected route, and the user is DEFERRED, never posted an undeliverable note" {
+  # QA #1370 (Important, round 2): the eligibility checks (account 15, role == user, a messenger last_seen_at) lived
+  # inside the email-UNREACHABLE branch, so an explicit --channel inapp on a reachable contact posted an in_app note to a
+  # lead, a never-seen contact, or account 15. Intercom accepts it, the ledger records `sent`, the user receives nothing
+  # and is never retried. The route is in-app, so the eligibility check must run for it too.
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  # a lead never reaches the channel choice at all: G4 refuses a non-user recipient first (unchanged, and the reason
+  # the eligibility predicate's role arm is a belt-and-braces check rather than the only guard)
+  lead='{"type":"contact","id":"6650aa01","role":"lead","created_at":1700000000,"last_seen_at":1760000000}'
+  STUB_CONTACT_GET="$lead" run -1 "$LOCKED" send --campaign uvn-status --channel inapp --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"G4: the recipient contact is not an Intercom user"* ]]
+  [ "$(posts)" -eq 0 ]
+  # a user the messenger has never seen
+  rm -f "$CURL_STUB_LOG"
+  unseen='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000}'
+  STUB_CONTACT_GET="$unseen" run -3 "$LOCKED" send --campaign uvn-status --channel inapp --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"in-app not deliverable (the messenger has never seen this contact)"* ]]
+  [ "$(posts)" -eq 0 ]
+  # account 15 never gets an in-app message, whatever the contact says
+  rm -f "$CURL_STUB_LOG"
+  seen='{"type":"contact","id":"6650aa01","role":"user","created_at":1700000000,"last_seen_at":1760000000}'
+  jq '.user.id = "15"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c15.json"
+  STUB_CONTACT_GET="$seen" run -3 "$LOCKED" send --campaign uvn-status --channel inapp --credits-file "$TEST_TMPDIR/c15.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"account 15 never gets an in-app message"* ]]
+  [ "$(posts)" -eq 0 ]
+  # the control: the same reachable, eligible contact still posts in-app
+  rm -f "$CURL_STUB_LOG"
+  STUB_CONTACT_GET="$seen" run -0 "$LOCKED" send --campaign uvn-status --channel inapp --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == "POSTED inapp message="* ]]; [ "$(msg .message_type)" = "in_app" ]
 }
 
 @test "withdrawal-confirm: the approved fixed text with role + title, one request per message, sent once" {
@@ -3927,7 +4049,7 @@ vl.finalize(db, message_row=c['message_row'], status='sent', message_id='9001')"
   rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
   STUB_CONTACT_GET="$seen" run -0 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --inapp-fallback
   [[ "$output" == "POSTED inapp message="* ]]; [ "$(posts)" -eq 1 ]; [ "$(replies)" -eq 0 ]
-  [ "$(msg .message_type)" = "inapp" ]; [ "$(msg .to.id)" = "6650aa01" ]; [ "$(msg .from.id)" = "5763097" ]
+  [ "$(msg .message_type)" = "in_app" ]; [ "$(msg .to.id)" = "6650aa01" ]; [ "$(msg .from.id)" = "5763097" ]
   [ "$(msg '.subject // "none"')" = "none" ]; [ "$(msg '.template // "none"')" = "none" ]
   inapp_body="$(msg .body)"
   [ "$(sql "SELECT status || ':' || message_type FROM verify_messages")" = "sent:inapp" ]

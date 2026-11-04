@@ -1684,9 +1684,18 @@ def nothing_needed_overlap(db: sqlite3.Connection, user_id: str, request_ids: li
     return {"overlap": sorted(overlap), "conversations": sorted(convs), "by_email": by_email, "message_ids": sorted(mids)}
 
 
-def sent_today(db: sqlite3.Connection, *, campaign: str, day: str, kind: str = "initial") -> int:
-    return int(db.execute("SELECT COUNT(*) FROM verify_messages WHERE campaign=? AND kind=? AND day=? "
-                          "AND status IN ('attempted','sent')", (campaign, kind, day)).fetchone()[0])
+def sent_today(db: sqlite3.Connection, *, campaign: str, day: str, kind: str = "initial",
+               message_type: str | None = None) -> int:
+    """Notes of `campaign` claimed on `day` (attempted or sent); only those of `message_type`
+    (email | comment | inapp) when given: the email-only cap (captain 2026-10-26 16:05Z)."""
+    q = ("SELECT COUNT(*) FROM verify_messages WHERE campaign=? AND kind=? AND day=? "
+         "AND status IN ('attempted','sent')")
+    params: tuple[Any, ...] = (campaign, kind, day)
+    if message_type:
+        q += " AND message_type=?"
+        params += (message_type,)
+    return int(db.execute(q, params).fetchone()[0])
+
 
 
 def messages_today(db: sqlite3.Connection, *, campaign: str, day: str) -> int:

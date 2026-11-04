@@ -94,7 +94,8 @@ set -euo pipefail
 #       [--campaign verify-live|retro-past|removal-notice|takeback-notice|uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-proof-ask|claim-status|gap-ask|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask] [--kind initial|reminder-14|reminder-25 \
 #        --parent-message-id <id>] [--copy v1|windowed (verify-live preview only) | queued|received (status-doc-received) | no-ask|count (status-team-review)] \
 #       [--conversation <id> (uvn-status, withdrawal-confirm, status notes, claim-status, email-changed, gap-ask, merge-pending,
-#        credit-hold-status, claim-proof-pending, proof-need-ask)] [--inapp-fallback] [--dry-run|--validate|--doc-check|--check-recipient]
+#        credit-hold-status, claim-proof-pending, proof-need-ask)] [--inapp-fallback] [--channel inapp (uvn-status, status notes,
+#        claim-status, gap-ask: never email; see In-app delivery)] [--dry-run|--validate|--doc-check|--check-recipient]
 #   intercom-verify-request.sh tag-proof --message-id <id> [--dry-run]
 #
 # In-thread delivery (firstmate 063): uvn-status and withdrawal-confirm reply IN the user's
@@ -520,12 +521,21 @@ esac
 # user's inbox and the reply lands in the same conversation. The one other channel is a
 # Caroline comment in the user's own conversation (in-thread delivery, above).
 CREDITS_FILE="" APPROVED_BY="" MESSAGE_ID="" ACTION="post" THREAD="" THREAD_AUTO=0 REPLY_DUE="" GMO=0 NO_CORRECTION=0
-MESSAGE_TYPE="email" INAPP_FALLBACK=0 ROUTE_WHY=""
-readonly REQ_TYPE="email" EXPECT_TYPE="email"
+MESSAGE_TYPE="email" CHANNEL="" INAPP_FALLBACK=0 ROUTE_WHY=""
+# In-app delivery (captain 2026-10-26 16:05Z: "Caps may pace email only; the in-app message goes to
+# everyone", relayed by firstmate inbox 010): with --channel inapp an initial status-like note goes
+# in the user's own open conversation when there is one (as always), otherwise as an Intercom
+# in-app message (POST /messages message_type in_app), never by email. The driver uses it once
+# the day's email budget is spent, so nobody waits for the email cap. Same copy, same ledger.
+# NOT readonly: set_inapp() moves them with the channel (the post-send assertion reads them).
+REQ_TYPE="email" EXPECT_TYPE="email"
+# The in-app payload is built by payload()'s own branch (request message_type "in_app", body only, no subject);
+# MESSAGE_TYPE/EXPECT_TYPE stay "inapp", the value Intercom returns and this repo records (QA #1370).
+set_inapp() { MESSAGE_TYPE="inapp"; EXPECT_TYPE="inapp"; }
 CAMPAIGN="verify-live" KIND="initial" PARENT_ID="" CAMPAIGN_SET=0 KIND_SET=0 COPY_ARG=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --credits-file|--approved-by|--message-id|--campaign|--kind|--parent-message-id|--copy|--conversation|--reply-due)
+    --credits-file|--approved-by|--message-id|--campaign|--kind|--parent-message-id|--copy|--conversation|--reply-due|--channel)
       [ $# -ge 2 ] || { usage; die "$1 needs a value"; }
       case "$1" in
         --credits-file)      CREDITS_FILE="$2" ;;
@@ -537,6 +547,7 @@ while [ $# -gt 0 ]; do
         --copy)              COPY_ARG="$2" ;;
         --conversation)      THREAD="$2" ;;
         --reply-due)         REPLY_DUE="$2" ;;
+        --channel)           CHANNEL="$2" ;;
       esac
       shift 2 ;;
     --dry-run)  ACTION="dry-run"; shift ;;
@@ -975,6 +986,17 @@ if [ -n "$THREAD" ]; then
     || refuse "--conversation must be the numeric Intercom conversation id (got '$THREAD')."
   MESSAGE_TYPE="comment"
 fi
+case "$CHANNEL" in
+  "") ;;
+  inapp)
+    case "$CAMPAIGN" in
+      uvn-status|status-doc-received|status-team-review|claim-status|gap-ask) ;;
+      *) refuse "--channel inapp applies to uvn-status, the status notes, claim-status and gap-ask only." ;;
+    esac
+    [ "$KIND" = "initial" ] || refuse "--channel inapp applies to an initial note."
+    if [ -z "$THREAD" ]; then set_inapp; fi ;;
+  *) refuse "--channel must be inapp (got '$CHANNEL'); without it the note goes in-thread or by email." ;;
+esac
 if [ "$ACTION" = "thread-contact" ]; then
   case "$CAMPAIGN" in
     withdrawal-confirm|email-changed|email-changed-dup) ;;
@@ -2283,13 +2305,16 @@ payload() { # <rendered-json> <contact-id>
   if [ "$MESSAGE_TYPE" = "inapp" ]; then
     # fable-copy-1030-r5/h: the SAME approved body, byte-identical, as an Intercom in-app message
     # (no subject or email template: in-app messages carry the body only).
+    # QA #1370: the REQUEST enum is "in_app" - the value Intercom 2.11 documents for create-a-message (and the one
+    # its own example uses); "inapp" is the RESPONSE/spelling every reader in this repo records. A stub that echoed
+    # the request back could not tell these apart, which is how "inapp" survived in the POST body.
     printf '%s' "$1" | "$JQ_BIN" -c --arg admin "$INTERCOM_ADMIN_ID" --arg to "$2" \
-      '{message_type: "inapp", from: {type: "admin", id: $admin}, to: {type: "user", id: $to}, body: .html}'
+      '{message_type: "in_app", from: {type: "admin", id: $admin}, to: {type: "user", id: $to}, body: .html}'
     return
   fi
   printf '%s' "$1" | "$JQ_BIN" -c --arg mt "$REQ_TYPE" --arg admin "$INTERCOM_ADMIN_ID" --arg to "$2" \
     '{message_type: $mt, template: "personal", from: {type: "admin", id: $admin}, to: {type: "user", id: $to}, body: .html}
-     + {subject: .subject}'
+     + (if $mt == "email" then {subject: .subject} else {} end)'
 }
 
 case "$ACTION" in
@@ -2920,13 +2945,23 @@ if [ -n "$THREAD" ] && [ "$LIVE" = "1" ]; then
       # r5 19:0xZ: a thread waiting on the customer gets no automated line, by thread or as an email beside it
       printf 'HELD waiting_on_customer credits=%s last_admin_question_at=%s (%s); nothing was sent or claimed\n' "$N" "$THREAD_WAIT" "${THREAD_WHY:0:200}"; exit 3
     elif [ "$THREAD_OFFTOPIC" = "1" ]; then
-      # R9: never into an unrelated thread; by email instead (every campaign, R1 included - p1 165 / Fable 166)
-      printf 'R9 %s; delivering by email\n' "$THREAD_WHY" >&2
-      THREAD=""; MESSAGE_TYPE="email"; R1_THREAD=0
+      # R9: never into an unrelated thread; by email instead (every campaign, R1 included - p1 165 / Fable 166) -
+      # unless --channel inapp was asked for, in which case the note still never goes by email (QA #1370: the
+      # auto-selected-thread branch above restored the channel and this one silently spent the email budget)
+      THREAD=""; R1_THREAD=0
+      if [ "$CHANNEL" = "inapp" ]; then
+        printf 'R9 %s; delivering in-app (the requested channel)\n' "$THREAD_WHY" >&2
+        set_inapp
+      else
+        printf 'R9 %s; delivering by email\n' "$THREAD_WHY" >&2
+        MESSAGE_TYPE="email"
+      fi
     elif [ "$R1_THREAD" = "1" ]; then
       printf 'HELD r1_filing_thread credits=%s (%s); nothing was sent or claimed\n' "$N" "${THREAD_WHY:0:300}"; exit 3
     elif [ "$THREAD_AUTO" = "1" ]; then
       THREAD=""; MESSAGE_TYPE="email"; CONTACT_ID="$CANON_CONTACT_ID"
+      # --channel inapp: the auto thread is unusable, but the note still never goes by email
+      [ "$CHANNEL" != "inapp" ] || set_inapp
     elif [ "$THREAD_UNREAD" = "1" ]; then
       printf 'THREAD CHECK NOT VERIFIED; nothing was sent or claimed: %s\n' "$THREAD_WHY" >&2; exit 4
     else
@@ -2939,12 +2974,31 @@ fi
 # was selected, and an unreachable route moves to the NEXT channel in this fixed order:
 #   1. in-thread Caroline comment (an open conversation) - already chosen above; email reachability is moot;
 #   2. email (POST /messages, message_type email) - only when Intercom will email this contact;
-#   3. Intercom in-app (POST /messages, message_type inapp, the same approved body) - only with --inapp-fallback
-#      (armed after the signed first-batch dry run) and only for a USER contact the messenger has seen
+#   3. Intercom in-app (POST /messages, request message_type in_app, the same approved body) - only with
+#      --inapp-fallback or an explicit --channel inapp, and only for a USER contact the messenger has seen
 #      (web, iOS or Android last_seen_at);
 #   4. push, 5. bell - hydra has no sender for either yet (core #11075 dark), so they are named in the reason only;
 #   none left: refused and RECORDED as no_channel (terminal, never a send row; the next run skips the user and the
 #   outbound tick's no-channel tray carries it). Only a readable contact object for THIS contact proves anything.
+# QA #1370 (Important, round 2): in-app ELIGIBILITY is a property of the contact, not of the email route. It used to be
+# evaluated only inside the email-unreachable branch, so an explicit --channel inapp on an email-REACHABLE contact posted
+# an in_app note to a lead, a never-seen contact, or account 15 - Intercom accepts it and the ledger records `sent`, so
+# the user receives nothing and is never retried. One predicate, used wherever the selected route is in-app.
+inapp_ineligible() { # <contact json>: the reason this contact cannot receive an in-app note, or empty
+  local c="$1"
+  if [ "$USER_ID" = "15" ]; then
+    printf 'account 15 never gets an in-app message (fable-copy-1030-r5/h)'; return 0
+  fi
+  if [ "$(printf '%s' "$c" | "$JQ_BIN" -r '.role // ""' 2>/dev/null)" != "user" ]; then
+    printf 'in-app goes to Intercom users only (this contact is not a user)'; return 0
+  fi
+  if ! printf '%s' "$c" | "$JQ_BIN" -e '[.last_seen_at, .ios_last_seen_at, .android_last_seen_at]
+      | map(select(type == "number" and . > 0)) | length > 0' >/dev/null 2>&1; then
+    printf 'in-app not deliverable (the messenger has never seen this contact)'; return 0
+  fi
+  return 0
+}
+
 if [ -z "$THREAD" ] && [ "$LIVE" = "1" ]; then
   # QA #1511: reachability is read for the FINAL recipient; the cached G4 contact is reused only when it IS that contact.
   reach="${G_CONTACT:-}"
@@ -2958,18 +3012,17 @@ if [ -z "$THREAD" ] && [ "$LIVE" = "1" ]; then
   unreach="$(printf '%s' "$reach" | "$JQ_BIN" -r 'if .has_hard_bounced == true then "hard_bounced"
     elif .unsubscribed_from_emails == true then "unsubscribed" elif .marked_email_as_spam == true then "marked_spam"
     else "" end' 2>/dev/null)" || unreach="unreadable"
+  inapp_why=""
+  # the selected route is in-app (an explicit --channel inapp, or the email-unreachable fallback below): eligibility is
+  # checked for BOTH, never only for the fallback
+  if [ "$MESSAGE_TYPE" = "inapp" ] || [ -n "$unreach" ]; then inapp_why="$(inapp_ineligible "$reach")"; fi
   if [ -n "$unreach" ]; then
-    inapp_why=""
-    if [ "$USER_ID" = "15" ]; then
-      inapp_why="account 15 never gets an in-app message (fable-copy-1030-r5/h)"
-    elif [ "$(printf '%s' "$reach" | "$JQ_BIN" -r '.role // ""' 2>/dev/null)" != "user" ]; then
-      inapp_why="in-app goes to Intercom users only (this contact is not a user)"
-    elif ! printf '%s' "$reach" | "$JQ_BIN" -e '[.last_seen_at, .ios_last_seen_at, .android_last_seen_at]
-        | map(select(type == "number" and . > 0)) | length > 0' >/dev/null 2>&1; then
-      inapp_why="in-app not deliverable (the messenger has never seen this contact)"
-    elif [ "$INAPP_FALLBACK" != "1" ]; then
+    if [ -z "$inapp_why" ] && [ "$INAPP_FALLBACK" != "1" ] && [ "$CHANNEL" != "inapp" ]; then
       # QA #1511: an in-app route EXISTS but is not armed yet (armed only after the signed first-batch dry run).
       # Not a terminal refusal: nothing is recorded, so the first run with --inapp-fallback still reaches this user.
+      # QA #1370: --channel inapp is itself the arming - the caller asked for in-app and nothing else, so a contact
+      # Intercom will not email is exactly the contact this route exists for. The email-initiated fallback keeps
+      # needing --inapp-fallback; only the explicit request skips it. The eligibility checks above still stand.
       printf 'DEFERRED inapp_not_armed credits=%s (email_unreachable:%s; an in-app route exists, --inapp-fallback not set); nothing was sent or claimed\n' "$N" "$unreach"
       exit 3
     fi
@@ -2978,6 +3031,12 @@ if [ -z "$THREAD" ] && [ "$LIVE" = "1" ]; then
     else
       record_refusal "no_channel: email_unreachable:$unreach (Intercom will not email this contact); $inapp_why; push and bell have no hydra sender yet; nothing was sent"
     fi
+  elif [ -n "$inapp_why" ]; then
+    # the caller asked for in-app and this contact cannot receive it, but Intercom WILL email them: DEFER, never post an
+    # undeliverable note (a `sent` row would suppress the retry) and never record a terminal no_channel refusal for a
+    # user who has a working channel - the next run, or the next day's email budget, reaches them.
+    printf 'DEFERRED inapp_ineligible credits=%s (%s; the email route is open, so this is retried, not refused); nothing was sent or claimed\n' "$N" "$inapp_why"
+    exit 3
   fi
 fi
 if [ "$CAMPAIGN" = "retro-past" ]; then

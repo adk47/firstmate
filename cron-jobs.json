@@ -1747,6 +1747,162 @@
         "cwd": "/opt/hydra",
         "timeoutSeconds": 900
       }
+    },
+    {
+      "id": "1ecad67a-694e-50b6-a13d-c36ff7b40a62",
+      "agentId": "operations",
+      "createdAtMs": 1793059200000,
+      "updatedAtMs": 1793059200000,
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "delivery": {
+        "mode": "none"
+      },
+      "enabled": false,
+      "name": "credit-stage2-gap-ask-paid",
+      "description": "Gap ask, paid users (stage-2 need_more). Stage-2 asks (Fable 2026-10-26 13:23Z GO 2; captain 21:05Z 'no backlog should ever form'; captain 21:15Z 'recurring ops run on OVH'): every user whose held credit stage 2 released to this campaign gets its one note through intercom-verify-request.sh (gate re-reads the verdict, proof-on-file, replica, Intercom 7-day and the ledger before each send; one message per user per UTC day across campaigns). --inapp-overflow: the 400/day cap paces EMAIL only, the rest go in-app (open conversation, else an Intercom in-app message). DISABLED in the repo: firstmate enables it after the first canary (--max-users 3) is verified. Kill switch: /etc/hydra/credit-ops-notes.disabled. Docs: docs/credit-verification/verify-request-notes.md (Stage-2 release; In-app delivery).",
+      "schedule": {
+        "kind": "cron",
+        "expr": "5 0 * * *",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-review.py",
+          "uvn-status",
+          "--from-stage2",
+          "--campaign",
+          "gap-ask",
+          "--segment",
+          "paid",
+          "--mode",
+          "apply",
+          "--max-users",
+          "5000",
+          "--inapp-overflow"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 3300
+      }
+    },
+    {
+      "id": "764b9206-e9d0-5b8e-b44a-896ee722d8eb",
+      "agentId": "operations",
+      "createdAtMs": 1793059200000,
+      "updatedAtMs": 1793059200000,
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "delivery": {
+        "mode": "none"
+      },
+      "enabled": false,
+      "name": "credit-stage2-gap-ask-free",
+      "description": "Gap ask, free users (stage-2 need_more). Stage-2 asks (Fable 2026-10-26 13:23Z GO 2; captain 21:05Z 'no backlog should ever form'; captain 21:15Z 'recurring ops run on OVH'): every user whose held credit stage 2 released to this campaign gets its one note through intercom-verify-request.sh (gate re-reads the verdict, proof-on-file, replica, Intercom 7-day and the ledger before each send; one message per user per UTC day across campaigns). --inapp-overflow: the 400/day cap paces EMAIL only, the rest go in-app (open conversation, else an Intercom in-app message). DISABLED in the repo: firstmate enables it after the first canary (--max-users 3) is verified. Kill switch: /etc/hydra/credit-ops-notes.disabled. Docs: docs/credit-verification/verify-request-notes.md (Stage-2 release; In-app delivery).",
+      "schedule": {
+        "kind": "cron",
+        "expr": "35 0 * * *",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-review.py",
+          "uvn-status",
+          "--from-stage2",
+          "--campaign",
+          "gap-ask",
+          "--segment",
+          "free",
+          "--mode",
+          "apply",
+          "--max-users",
+          "5000",
+          "--inapp-overflow"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 3300
+      }
+    },
+    {
+      "id": "adda912f-ed32-565c-83df-3c4bd5a81b26",
+      "agentId": "operations",
+      "createdAtMs": 1793059200000,
+      "updatedAtMs": 1793059200000,
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "delivery": {
+        "mode": "none"
+      },
+      "enabled": false,
+      "name": "credit-stage2-uvn-paid",
+      "description": "uvn-status ask, paid users (stage-2 no_document, or undetermined after a rerun). Stage-2 asks (Fable 2026-10-26 13:23Z GO 2; captain 21:05Z 'no backlog should ever form'; captain 21:15Z 'recurring ops run on OVH'): every user whose held credit stage 2 released to this campaign gets its one note through intercom-verify-request.sh (gate re-reads the verdict, proof-on-file, replica, Intercom 7-day and the ledger before each send; one message per user per UTC day across campaigns). --inapp-overflow: the 400/day cap paces EMAIL only, the rest go in-app (open conversation, else an Intercom in-app message). DISABLED in the repo: firstmate enables it after the first canary (--max-users 3) is verified. Kill switch: /etc/hydra/credit-ops-notes.disabled. Docs: docs/credit-verification/verify-request-notes.md (Stage-2 release; In-app delivery).",
+      "schedule": {
+        "kind": "cron",
+        "expr": "15 1 * * *",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-review.py",
+          "uvn-status",
+          "--from-stage2",
+          "--campaign",
+          "uvn-status",
+          "--segment",
+          "paid",
+          "--mode",
+          "apply",
+          "--max-users",
+          "5000",
+          "--inapp-overflow"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 3300
+      }
+    },
+    {
+      "id": "69631134-b534-5f73-a9af-ede484dd163a",
+      "agentId": "operations",
+      "createdAtMs": 1793059200000,
+      "updatedAtMs": 1793059200000,
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "delivery": {
+        "mode": "none"
+      },
+      "enabled": false,
+      "name": "credit-stage2-uvn-free",
+      "description": "uvn-status ask, free users (stage-2 no_document, or undetermined after a rerun). Stage-2 asks (Fable 2026-10-26 13:23Z GO 2; captain 21:05Z 'no backlog should ever form'; captain 21:15Z 'recurring ops run on OVH'): every user whose held credit stage 2 released to this campaign gets its one note through intercom-verify-request.sh (gate re-reads the verdict, proof-on-file, replica, Intercom 7-day and the ledger before each send; one message per user per UTC day across campaigns). --inapp-overflow: the 400/day cap paces EMAIL only, the rest go in-app (open conversation, else an Intercom in-app message). DISABLED in the repo: firstmate enables it after the first canary (--max-users 3) is verified. Kill switch: /etc/hydra/credit-ops-notes.disabled. Docs: docs/credit-verification/verify-request-notes.md (Stage-2 release; In-app delivery).",
+      "schedule": {
+        "kind": "cron",
+        "expr": "45 1 * * *",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/credit-review.py",
+          "uvn-status",
+          "--from-stage2",
+          "--campaign",
+          "uvn-status",
+          "--segment",
+          "free",
+          "--mode",
+          "apply",
+          "--max-users",
+          "5000",
+          "--inapp-overflow"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 3300
+      }
     }
   ]
 }
