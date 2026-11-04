@@ -1505,7 +1505,7 @@ EOF
     TEARDOWN_POOL_PROBE_NOTE="this host's treehouse pool listing for $proj names home-relative paths this host's HOME cannot resolve"
     return 3
   fi
-  TEARDOWN_POOL_PROBE_NOTE="this host's treehouse pool for $proj holds a stale slot that this host's HOME cannot resolve: ${unresolved_slots[*]+"${unresolved_slots[*]}"}; prune it with: ( cd $proj && treehouse prune )"
+  TEARDOWN_POOL_PROBE_NOTE="this host's treehouse pool for $proj holds a stale slot that this host's HOME cannot resolve: ${unresolved_slots[*]+"${unresolved_slots[*]}"}; prune it with: ( cd \"$proj\" && treehouse prune )"
   return 3
 }
 

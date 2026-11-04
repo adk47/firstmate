@@ -904,12 +904,10 @@ TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
 # Config-only resolution misses that, so the requirement follows recorded task
 # records too, and reports a missing treehouse exactly like a config-required one.
 treehouse_required_by_recorded_task() {
-  local meta backend
+  local meta
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
-    backend=$(fm_meta_get "$meta" backend)
-    [ -n "$backend" ] || continue
-    [ "$backend" = orca ] && continue
+    [ "$(fm_backend_of_meta "$meta")" = orca ] && continue
     return 0
   done
   return 1
@@ -1448,9 +1446,10 @@ detect_local_tools() {
   for t in $COMMON_TOOLS; do
     command -v "$t" >/dev/null || missing_tool_diagnostic "$t"
   done
-  # The treehouse lease-support upgrade check is only relevant when the resolved
-  # backend actually requires treehouse (every backend except orca, which owns its
-  # own worktrees); an orca home must not be told to upgrade a provider it never uses.
+  # The treehouse lease-support upgrade check is only relevant when TOOLS requires
+  # treehouse - the resolved backend, or a recorded non-orca task under an orca
+  # home; an orca home with no such task must not be told to upgrade a provider it
+  # never uses.
   if fm_backend_list_contains "$TOOLS" treehouse \
     && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
     echo "MISSING: treehouse (install: $(install_cmd treehouse))"

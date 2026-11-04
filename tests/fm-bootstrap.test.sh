@@ -39,24 +39,30 @@ export FM_BACKEND_CMUX_BUNDLE_BIN="$TMP_ROOT/no-bundled-cmux"
 unset TMUX TMUX_PANE HERDR_ENV HERDR_PANE_ID HERDR_SESSION HERDR_SOCKET_PATH \
   CMUX_WORKSPACE_ID CMUX_SURFACE_ID CMUX_SOCKET_PATH CMUX_TAB_ID CMUX_PANEL_ID 2>/dev/null || true
 
-# Build a system PATH that carries the utilities bootstrap itself needs but no
-# `node`, so a case that means "node is absent" stays true even on a host that
-# installs node at /usr/bin. Symlinks every base-path executable except node into
-# <case-dir>/path-without-node and echoes that directory. Args: <case-dir>
-make_path_without_node() {  # <case-dir>
-  local case_dir=$1 path_dir="$1/path-without-node" src f base
+# Build a system PATH that carries the utilities bootstrap itself needs but not
+# one named tool, so a case that means "<tool> is absent" stays true even on a
+# host that installs it in a base path. Symlinks every base-path executable except
+# <tool> into <case-dir>/path-without-<tool> and echoes that directory.
+# Args: <case-dir> <tool>
+make_path_without_tool() {  # <case-dir> <tool>
+  local case_dir=$1 skip=$2 path_dir src f base
+  path_dir="$1/path-without-$2"
   mkdir -p "$path_dir"
   for base in ${BASE_PATH//:/ }; do
     [ -d "$base" ] || continue
     for src in "$base"/*; do
       [ -x "$src" ] && [ ! -d "$src" ] || continue
       f=${src##*/}
-      [ "$f" = node ] && continue
+      [ "$f" = "$skip" ] && continue
       [ -e "$path_dir/$f" ] && continue
       ln -s "$src" "$path_dir/$f" 2>/dev/null || true
     done
   done
   printf '%s\n' "$path_dir"
+}
+
+make_path_without_node() {  # <case-dir>
+  make_path_without_tool "$1" node
 }
 
 # A fake toolchain where every required tool is present and gh is authenticated.
@@ -756,6 +762,30 @@ test_recorded_treehouse_backend_requires_treehouse_under_orca() {
   pass "bootstrap: a recorded non-orca task requires treehouse under an orca home"
 }
 
+# The recorded-task treehouse requirement is about the binary being ON PATH, not
+# only about lease support: a config/backend=orca home holding one default tmux
+# task record (no backend= line, the shape every default-path spawn writes) must
+# still report a missing treehouse even when no treehouse is installed at all.
+test_recorded_default_backend_task_requires_absent_treehouse() {
+  local case_dir home fakebin base_path out
+  case_dir="$TMP_ROOT/orca-recorded-default-task-no-treehouse"
+  home="$case_dir/home"
+  mkdir -p "$home/config" "$home/state"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  printf '%s\n' orca > "$home/config/backend"
+  printf '%s\n' 'window=firstmate:fm-legacy-task' 'kind=ship' \
+    > "$home/state/legacy-task.meta"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/tmux" "$fakebin/treehouse"
+  fm_fake_exit0 "$fakebin" orca
+  base_path=$(make_path_without_tool "$case_dir" treehouse)
+  out=$(PATH="$fakebin:$base_path" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$out" "MISSING: treehouse" \
+    "a recorded default-backend task must require treehouse even when treehouse is not installed"
+  pass "bootstrap: a recorded default-backend task reports an absent treehouse under an orca home"
+}
+
 test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
   local case_dir home fakebin fake_root out
   case_dir="$TMP_ROOT/fleet-timeout-scaled"
@@ -1209,6 +1239,7 @@ test_unknown_backend_reports_invalid_configuration
 test_json_backends_require_jq_not_tmux
 test_treehouse_lease_check_follows_resolved_backend
 test_recorded_treehouse_backend_requires_treehouse_under_orca
+test_recorded_default_backend_task_requires_absent_treehouse
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets
 test_fleet_sync_timeout_explicit_override_wins
