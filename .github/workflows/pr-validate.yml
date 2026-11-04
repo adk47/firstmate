@@ -2161,6 +2161,8 @@ jobs:
           python3 scripts/tests/test_reply_ref_picker.py
           # support@ Gmail readers kill file (/etc/hydra/gmail-readers.disabled; firstmate 10-31).
           python3 scripts/tests/test_gmail_kill.py
+          # support@ Gmail quota guard: shared lock, host-wide Retry-After backoff, hourly budget (firstmate 10-31).
+          python3 scripts/tests/test_gmail_quota.py
           # DSP evidence verifier SHADOW (same-run Spotify+Tidal by-id anchors, contradictions,
           # account gate, big/common/flagged guards, append-only store). Admin API, gate, IDP pod faked.
           python3 scripts/tests/test_dsp_verify.py

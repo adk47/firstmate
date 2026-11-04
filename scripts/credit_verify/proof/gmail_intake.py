@@ -50,6 +50,12 @@ SUPPORT_GMAIL_LOCK = "/run/hydra/gmail-support.lock"
 AUTHSERV = "mx.google.com"
 PREFIX = "gmail:"
 
+class GmailLockBusy(RuntimeError):
+    """The ONE shared support@ Gmail lock could not be taken (held too long, or unopenable). A TYPED failure, so a
+    guard that let the callable take its own lock can still turn it into a clean stop instead of an exception that
+    aborts a search half-way (QA #1567 finding 2)."""
+
+
 def _support_gmail_lock(wait_s: float = 60.0):
     """The shared support@ Gmail lock, or None when that one path is unusable (the caller refuses).
 
@@ -75,7 +81,7 @@ def _support_gmail_lock(wait_s: float = 60.0):
         except OSError:
             if time.monotonic() >= deadline:
                 fh.close()
-                raise RuntimeError("another support@ Gmail consumer holds %s" % path)
+                raise GmailLockBusy("another support@ Gmail consumer holds %s" % path)
             time.sleep(0.5)
 
 
@@ -88,8 +94,17 @@ def gog_raw(message_id: str, *, account: str = ACCOUNT, min_interval: float = 1.
             _last: list[float] = [0.0]) -> bytes:  # noqa: B006 - the pacing clock, shared on purpose
     """One message as RFC 822 bytes through gog (read-only `get --format raw`), paced.
 
-    Takes the shared support@ Gmail lock for the call. A caller that cannot get it raises rather than
-    adding a second consumer: the point is that the two of us never spend the quota at once.
+    Takes the shared support@ Gmail lock for the call, THROUGH `hold_support_gmail_lock` - the one helper that
+    also runs the guard's registered recheck (AFTER_LOCK) the moment the lock is ours. A caller that cannot get
+    the lock raises rather than adding a second consumer: the point is that the two of us never spend the quota
+    at once.
+
+    [key=check-the-backoff-again-under-the-lock] (QA #1567 finding 1, round 2): this function used to take
+    `_support_gmail_lock()` DIRECTLY, so the recheck `gmail_quota.guarded(..., lock=False)` registers was never
+    run for the one callable that actually uses that path in production (`credit-proof.py` wraps `gog_raw` with
+    lock=False). The pre-lock check passed, the fetch then waited up to 60 s for the lock, and a 429 another
+    consumer recorded during that wait was never seen - the request went out inside a window we had just
+    published. Delegating to the helper is what makes the recheck reachable here; do not re-inline the lock.
     """
     if not message_id or not all(c.isalnum() for c in message_id):
         raise ValueError("not a Gmail message id")
@@ -97,14 +112,16 @@ def gog_raw(message_id: str, *, account: str = ACCOUNT, min_interval: float = 1.
     if wait > 0:
         time.sleep(wait)
     _last[0] = time.monotonic()
-    lock = _support_gmail_lock()
-    if lock is None:  # no lock available at all: refuse rather than read as a second consumer
-        raise RuntimeError("cannot take %s: refusing to read support@ mail unlocked" % SUPPORT_GMAIL_LOCK)
-    try:
-        p = subprocess.run(["gog", "gmail", "get", message_id, "--account", account, "--format", "raw",
-                            "--json", "--no-input"], capture_output=True, text=True, timeout=120, check=False)
-    finally:
-        lock.close()
+    # Imported here, not at module scope: support_intake_lock imports THIS module (lazily, inside its own
+    # function), so a module-level import would be a cycle, and this module is also loaded by path in tests.
+    from .support_intake_lock import hold_support_gmail_lock
+
+    def _fetch() -> "subprocess.CompletedProcess[str]":
+        return subprocess.run(["gog", "gmail", "get", message_id, "--account", account, "--format", "raw",
+                               "--json", "--no-input"], capture_output=True, text=True, timeout=120, check=False)
+
+    # Raises GmailLockBusy when no lock can be taken at all - the same refusal as before, from one place.
+    p = hold_support_gmail_lock(_fetch)
     if p.returncode != 0:
         raise RuntimeError(f"gog rc={p.returncode}: {p.stderr.strip()[-200:]}")
     d = json.loads(p.stdout)
@@ -200,9 +217,18 @@ def run(store: ProofStore, *, message_ids: list[str], fetch: RawFetch, lookup: L
             stats["blob_errors"] += 1
             log(f"blob {sha[:12]}: {type(exc).__name__}")
     matched: list[tuple[str, EmailMessage, int, str]] = []
-    for mid in dict.fromkeys(str(m).strip() for m in message_ids if str(m).strip()):
+    from .gmail_quota import GmailStop
+    todo = list(dict.fromkeys(str(m).strip() for m in message_ids if str(m).strip()))
+    for i, mid in enumerate(todo):
         try:
             msg = parse(fetch(mid))
+        except GmailStop as exc:
+            # firstmate 10-31: a backoff, a spent budget or a quota refusal stops the whole loop, never the next
+            # message; this one and every one not tried are fetch errors, so file-recent carries them
+            stats["stopped"] = str(exc)[:200]
+            stats["fetch_errors"] += [f"{m}: GmailStop" for m in todo[i:]]
+            log(f"gmail intake stopped: {exc}")
+            break
         except Exception as exc:  # noqa: BLE001 - counted; the message is retried by a re-run
             stats["fetch_errors"].append(f"{mid}: {type(exc).__name__}")
             continue

@@ -76,10 +76,16 @@ def gog_search(account: str = "support@muso.ai") -> GmailSearch:
 
 
 def recent_messages(search: GmailSearch, since: float) -> tuple[list[str], bool]:
+    from .gmail_quota import GmailStop
     ids: list[str] = []
     page = ""
     for _ in range(MAX_PAGES):
-        out = search(f"has:attachment after:{int(since)}", page)
+        try:
+            out = search(f"has:attachment after:{int(since)}", page)
+        except GmailStop:
+            # backoff / budget / quota refusal (firstmate 10-31): stop searching; incomplete = the window is held,
+            # so the next run searches the same range again
+            return list(dict.fromkeys(ids)), False
         ids += [str(m["id"]) for m in out.get("messages") or [] if m.get("id")]
         page = out.get("nextPageToken") or ""
         if not page:
