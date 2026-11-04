@@ -267,6 +267,16 @@ def _batches(items: list[Any], n: int) -> list[list[Any]]:
     return [items[i:i + n] for i in range(0, len(items), n)]
 
 
+def window_since(now: datetime) -> str:
+    """[key=one-spelling-of-the-window] (r5's notes on #1557): the same-run window bound, spelled ONCE.
+
+    Rows are compared as strings against the capture service's own ISO-8601 `Z` timestamps, so a second spelling of
+    this boundary is equal only while both stay inclusive and the stored format keeps the trailing Z. Expressing one
+    boundary two ways is a silent divergence the day either format changes, so both call sites - the submit-side
+    `requests_verified_since` and the late-read queue - ask this function."""
+    return (now - REVERIFY_AFTER).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def submit(store: Store, deps: Deps, *, max_requests: int = 300, max_pages: int = 20,  # noqa: ARG001
            only: set[str] | None = None) -> Stats:
     """`only`: restrict to these credit request ids (a tray's rows), still read from core as pending."""
@@ -277,7 +287,7 @@ def submit(store: Store, deps: Deps, *, max_requests: int = 300, max_pages: int 
             raise RuntimeError("no request selector (Deps.select): the admin list is never paged unscoped")
         statuses = TRAY_STATUSES if only is not None else ("unverified",)
         skip = store.requests_with_open_capture() | store.requests_verified_since(
-            (deps.now() - REVERIFY_AFTER).strftime("%Y-%m-%dT%H:%M:%SZ"))
+            window_since(deps.now()))
         limit = max_requests if only is None else min(max_requests, len(only))
         seen = store.requests_with_any_verdict()
         try:
@@ -500,8 +510,9 @@ def verify(store: Store, deps: Deps, *, max_groups: int = 200) -> tuple[Stats, l
         # d3 10-31: a source closed as NO_FRESH_CAPTURE can still get its receipt under the ORIGINAL capture request
         # id (re-enqueued on an idle lane). Inside the same-run window (REVERIFY_AFTER) such a capture is read again;
         # it is re-verified only when the late read actually changed one of those sources (no admin cost otherwise).
-        since = (deps.now() - REVERIFY_AFTER).strftime("%Y-%m-%dT%H:%M:%S")
-        late = {c["id"]: c for c in store.late_captures(since)[:max(0, max_groups - len(caps))]}
+        # The rotation states itself in the SQL (`ORDER BY ... LIMIT`, [key=rotating-late-window]): fetching every
+        # matching row and slicing here threw the ordering away and read like a filter, not a schedule (r5 #1557).
+        late = {c["id"]: c for c in store.late_captures(window_since(deps.now()), max(0, max_groups - len(caps)))}
         caps = caps + list(late.values())
         builder = EvidenceBuilder(deps.admin, now=deps.now())
         dups = Duplicates(deps.admin)
@@ -521,14 +532,17 @@ def verify(store: Store, deps: Deps, *, max_groups: int = 200) -> tuple[Stats, l
                 reads.update(res)
         for cap in caps:
             row = reads.get(cap["id"]) or {"error": "not read"}
+            if cap["id"] in late:
+                # [key=rotating-late-window] (QA #1557): the slot is spent whatever the read says. Stamping only
+                # the rows that CHANGED would leave every unchanged row at the front of the queue for ever, which
+                # is the starvation this cursor exists to end. It is stamped BEFORE the error branch on purpose
+                # (r5 #1557, note 2): an errored read was never stamped, so it sorted first for ever and spent one
+                # slot every run - the same starvation shape in a different disguise.
+                store.record_late_attempt(cap["id"])
             if row.get("error"):
                 st.errors.append(f"{cap['key']}: {row['error']}")
                 continue
             if cap["id"] in late:
-                # [key=rotating-late-window] (QA #1557): the slot is spent whatever the read says. Stamping only
-                # the rows that CHANGED would leave every unchanged row at the front of the queue for ever, which
-                # is the starvation this cursor exists to end.
-                store.record_late_attempt(cap["id"])
                 if not late_changed(cap.get("last_read_json"), row):
                     continue                      # nothing landed: no write, no packet reads
                 st.late_receipts += 1

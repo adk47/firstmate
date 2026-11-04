@@ -12,6 +12,7 @@ import dataclasses
 import itertools
 import json
 import os
+import pathlib
 import re
 import sqlite3
 import subprocess
@@ -916,6 +917,64 @@ class RunnerAndStore(unittest.TestCase):
         second = keys_read(1, seen)
         self.assertIn("42#3", second, f"the row past the first slice never got its turn: {second}")
         self.assertEqual(len(second), 2, second)
+
+    def test_an_errored_late_read_still_spends_its_slot(self):
+        """r5's note 2 on #1557: the `row.get("error")` continue sat ABOVE `record_late_at…`, so a candidate whose
+        read always errors was never stamped, sorted first for ever and burned one slot every run - the same
+        starvation shape as the QA finding, hidden behind an error path. The slot is now spent before the branch."""
+        late = {"state": "NO_FRESH_CAPTURE", "helper_verdict": "WAITING"}
+        closed_body = json.dumps({"tracks": {"trk-1|prof-1": {"roles": {"Mixing": {"sources": {
+            "spotify": {"state": "CAPTURED"}, "tidal": {"state": "NO_FRESH_CAPTURE"}}}}}}})
+        tracks = [{"track_id": "trk-1", "profile_id": "prof-1", "roles": ["Mixing"]}]
+        for i in (1, 2):
+            cap_id = self.store.add_capture("run-seed", f"42#{i}", 42, [req(i)["id"]], tracks,
+                                            {"request_id": f"cap-{i}", "requested_at": REQ_AT})
+            self.store.record_read(cap_id, {}, closed=True)
+        self.store.db.execute("UPDATE dsp_captures SET last_read_json=?", (closed_body,))
+        self.store.db.commit()
+
+        class ExplodingPod(FakePod):
+            def __call__(self, mode, items):
+                if mode == "read":
+                    raise RuntimeError("capture service down")
+                return super().__call__(mode, items)
+
+        d = self.deps(FakeAdmin([req(1), req(2)]), ExplodingPod(reading=lambda t: {"spotify": credited(), "tidal": late}))
+        st, _ = runner.verify(self.store, d)
+
+        self.assertEqual(len(st.errors), 2, st.errors)                     # both reads errored
+        unstamped = [r[0] for r in self.store.db.execute(
+            "SELECT COUNT(*) FROM dsp_captures WHERE late_attempt_at IS NULL")]
+        self.assertEqual(unstamped, [0], "an errored late read kept sorting first for ever")
+
+    def test_the_late_queue_states_its_limit_to_the_store(self):
+        """r5's note 3 on #1557: the ORDER BY was in the SQL and the slice in Python, so the fetch was unbounded and
+        the statement looked like a filter. The store takes the limit, and 0 means 0."""
+        closed_body = json.dumps({"tracks": {"trk-1|prof-1": {"roles": {"Mixing": {"sources": {
+            "spotify": {"state": "CAPTURED"}, "tidal": {"state": "NO_FRESH_CAPTURE"}}}}}}})
+        tracks = [{"track_id": "trk-1", "profile_id": "prof-1", "roles": ["Mixing"]}]
+        for i in (1, 2, 3):
+            cap_id = self.store.add_capture("run-seed", f"42#{i}", 42, [req(i)["id"]], tracks,
+                                            {"request_id": f"cap-{i}", "requested_at": REQ_AT})
+            self.store.record_read(cap_id, {}, closed=True)
+        self.store.db.execute("UPDATE dsp_captures SET last_read_json=?", (closed_body,))
+        self.store.db.commit()
+        self.assertEqual(len(self.store.late_captures("2026-10-01T00:00:00Z", 2)), 2)
+        self.assertEqual(self.store.late_captures("2026-10-01T00:00:00Z", 0), [])
+        self.assertEqual([c["key"] for c in self.store.late_captures("2026-10-01T00:00:00Z", 3)],
+                         ["42#1", "42#2", "42#3"])
+        # the ordering the LIMIT slices: an attempted row goes behind a never-attempted one
+        self.store.record_late_attempt(self.store.late_captures("2026-10-01T00:00:00Z", 1)[0]["id"])
+        self.assertEqual([c["key"] for c in self.store.late_captures("2026-10-01T00:00:00Z", 1)], ["42#2"])
+
+    def test_the_same_run_window_is_spelled_once(self):
+        """r5's note 1 on #1557: `...T%H:%M:%S` at the late queue and `...T%H:%M:%SZ` at the submit skip were the same
+        boundary written twice. One helper now, and this test fails if a second spelling comes back."""
+        now = datetime(2026, 10, 29, 4, 0, tzinfo=timezone.utc)
+        self.assertEqual(runner.window_since(now), "2026-10-28T04:00:00Z")
+        src = pathlib.Path(runner.__file__).read_text()
+        spellings = [ln for ln in src.splitlines() if "strftime" in ln and "REVERIFY_AFTER" in ln]
+        self.assertEqual(len(spellings), 1, f"the same-run window is spelled {len(spellings)} times: {spellings}")
 
     def test_a_late_receipt_outside_the_same_run_window_is_never_read(self):
         admin = FakeAdmin([req(1)])

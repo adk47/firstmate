@@ -191,7 +191,7 @@ class Store:
             self.db.execute("UPDATE dsp_captures SET last_read_at=?, last_read_json=?, reads=reads+1, closed=?"
                             " WHERE id=?", (utcnow(), body, 1 if closed else 0, cap_id))
 
-    def late_captures(self, since: str) -> list[dict[str, Any]]:
+    def late_captures(self, since: str, limit: int) -> list[dict[str, Any]]:
         # [key=rotating-late-window] (QA #1557): never-attempted captures first, then the ones attempted
         # longest ago. Ordering by id re-read the same prefix every run, so a row past the slice could pass
         # the 24h cutoff without ever being read and its receipt never reached a verdict.
@@ -201,8 +201,8 @@ class Store:
         try:
             rows = self.db.execute("SELECT * FROM dsp_captures WHERE closed=1 AND capture_request_id IS NOT NULL AND "
                                    "requested_at >= ? AND last_read_json LIKE '%\"NO_FRESH_CAPTURE\"%' "
-                                   "ORDER BY COALESCE(late_attempt_at, '') ASC, id ASC",
-                                   (since,)).fetchall()
+                                   "ORDER BY COALESCE(late_attempt_at, '') ASC, id ASC LIMIT ?",
+                                   (since, max(0, int(limit)))).fetchall()
             return [dict(r) for r in rows]
         finally:
             self.db.row_factory = None
