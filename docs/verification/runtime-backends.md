@@ -1045,7 +1045,8 @@ Observed verdicts across the 126 Orca-backed task records in one home: 107 `aliv
 Each read took about 1-3 seconds at host load 30-140.
 `tests/fm-backend-orca-agent-state.test.sh` pins the classifier against real process trees under a fake Orca CLI.
 
-The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, composite worktree id acceptance, and path-matched release refusal.
+The fake-Orca suite covers readiness, registration, create response parsing, metadata routing, popup-safe submit, composite worktree id acceptance, path-matched release refusal before the endpoint reap, and retention of the task branch while an Orca removal fails.
+`tests/fm-teardown.test.sh` owns the release-path resolver those cases run through: Orca or `*/orca/workspaces/*` provenance with no recorded id, the guarded plain-git fallback when Orca's registry no longer names the path, and refusal before the kill when no return path resolves.
 
 ## cmux
 
