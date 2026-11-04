@@ -163,8 +163,10 @@
 #
 # Schedule: +5m, +15m, +30m, then hourly to +12h. Samples stop at the first
 # regression. On a clean +12h the watch appends one note to the task's status
-# log and records one wiki observation; on a completed-unmeasured +12h it
-# appends one note naming the targets it never read and records nothing else.
+# log and, when that note has no gap to report, records one wiki observation; a
+# clean ending that did leave a metric unmeasured or a rollout unproven says so
+# in the note instead, and on a completed-unmeasured +12h it appends one note
+# naming the targets it never read and records nothing else.
 #
 # Reporting: the first regression appends one
 #   check: change-watch <task-id> <pr-url> <metric> regressed

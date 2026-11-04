@@ -70,7 +70,7 @@ Load `process-event-sources` for the `classify` and `handled` mechanics; the ada
 
 ## What a clean completion still owes
 
-A clean +12h watch appends one `note: change-watch clean for <pr-url>` line to the task's status log and records one wiki observation; clean means every target had at least one scored reading across the schedule, and the note itself names every metric no sample ever scored and any rollout that was never proven, so a thin watch reads as thin.
+A clean +12h watch appends one `note: change-watch clean for <pr-url>` line to the task's status log; clean means every target had at least one scored reading across the schedule, and the note itself names every metric no sample ever scored and any rollout that was never proven, so a thin watch reads as thin. The wiki observation is recorded only when that note has no such gap to name - a thin clean ending is stated in the note and elsewhere nothing.
 A completed-unmeasured watch appends one `note: change-watch completed unmeasured for <pr-url> (never measured: ...)` line and records no wiki observation.
 Neither is captain-facing news, so never surface a completion to the captain on its own.
 The watch is read-only against the cluster; it writes only under the home's `state/change-watch/`, a metric it cannot read is `unmeasured` and skipped rather than scored as a pass, and a relative bar whose baseline was never read is recorded but not scored.
