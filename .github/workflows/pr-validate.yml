@@ -1613,9 +1613,23 @@ jobs:
           # stays so a rollback to node-8 keeps the cap without another edit.
           # `host-systemd` cases drive the real systemd-run, which a pod does not have; they
           # run in the node-8 job instead (node8-handoff), so each case still runs exactly once.
+          out="${RUNNER_TEMP:-/tmp}/bats-shard-${shard}.tap"
           # shellcheck disable=SC2086
           scripts/bats-slot.sh --lock /var/lock/hydra-bats.lock --timeout 2700 -- \
-            bats --jobs 4 --no-parallelize-within-files --filter-tags '!host-systemd' $mine
+            bats --jobs 4 --no-parallelize-within-files --filter-tags '!host-systemd' $mine \
+            | tee "$out"
+          # NO SILENT SKIPS (2026-10-28). The first ovh-hydra run went green with 19
+          # deploy-caddy-bind-gate cases SKIPPED ("caddy not installed") that node-8 had always
+          # run: a skip reads as a pass and proves nothing. A pod runs as non-root with every
+          # tool scripts/ci/arc-toolchain.sh installs, so no case should skip here; the only
+          # reasons tolerated are the root-only ones (they cannot fire as `runner`). A new skip
+          # means a missing tool (add it to the toolchain) or a host-only case (tag it).
+          skips=$(grep -E '^ok [0-9]+ .*# skip' "$out" | grep -vE '# skip ?(\([^)]*\))? *root ' || true)
+          if [ -n "$skips" ]; then
+            echo "::error::$(grep -c . <<<"$skips") bats case(s) SKIPPED on ovh-hydra — install the missing tool in scripts/ci/arc-toolchain.sh or tag the case host-only:"
+            printf '%s\n' "$skips" | sed 's/^/  /'
+            exit 1
+          fi
 
   py-syntax:
     name: Python syntax check (py_compile)

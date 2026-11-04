@@ -9,7 +9,7 @@
 # day of the move, so the suites see the same tools they were written against.
 #
 # Usage: scripts/ci/arc-toolchain.sh <group>...
-#   bats        bats + GNU parallel (bats --jobs needs it) + sqlite3 + node >= 22 + small CLIs
+#   bats        bats + GNU parallel (bats --jobs needs it) + sqlite3 + node >= 22 + caddy + small CLIs
 #   lint        shellcheck
 #   node        node >= 22 (node:sqlite / --experimental-sqlite) + pnpm
 #   python      tesseract + the pinned wheels in scripts/ci/requirements-arc.txt
@@ -21,6 +21,7 @@ set -euo pipefail
 
 NODE_VERSION="${HYDRA_CI_NODE_VERSION:-24.22.1}"   # node-8, 2026-10-27
 PNPM_VERSION="${HYDRA_CI_PNPM_VERSION:-10.33.2}"   # node-8, 2026-10-27
+CADDY_VERSION="${HYDRA_CI_CADDY_VERSION:-2.11.2}"  # node-8, 2026-10-28 (the noble package is 2.6)
 REQS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/requirements-arc.txt"
 
 log() { printf 'arc-toolchain: %s\n' "$*" >&2; }
@@ -72,6 +73,24 @@ ensure_node() {
     publish_path "$dir/bin"
   fi
   node --version
+}
+
+# deploy-caddy-bind-gate.bats drives the REAL `caddy adapt`; without the binary its 19 cases
+# SKIP, which reads as green while proving nothing (seen on the first ovh-hydra run).
+ensure_caddy() {
+  if ! command -v caddy >/dev/null 2>&1; then
+    local arch dir
+    case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) log "unsupported arch $(uname -m)"; return 1 ;; esac
+    dir="$HOME/.cache/hydra-ci/caddy-${CADDY_VERSION}"
+    if [ ! -x "$dir/caddy" ]; then
+      mkdir -p "$dir"
+      log "caddy ${CADDY_VERSION}"
+      curl -fsSL --retry 3 "https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/caddy_${CADDY_VERSION}_linux_${arch}.tar.gz" \
+        | tar -xz -C "$dir" caddy
+    fi
+    publish_path "$dir"
+  fi
+  caddy version | cut -d' ' -f1
 }
 
 ensure_pnpm() {
@@ -126,6 +145,7 @@ for g in "$@"; do
       need_apt bc bc
       apt_install; apt_pkgs=()
       ensure_node
+      ensure_caddy
       bats --version; parallel --version | head -1; sqlite3 --version | cut -c1-20
       ;;
     lint)
