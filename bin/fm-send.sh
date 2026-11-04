@@ -229,7 +229,7 @@
 # backend) and the task has shown no activity - no status line, turn end, busy
 # transition, or metadata change - for FM_SEND_LIVENESS_SILENCE_SECS (default
 # 21600, six hours). The message names the time it was last live and says to
-# relaunch first (bin/fm-control.sh <task> relaunch). A verified-alive endpoint
+# relaunch first (bin/fm-control.sh <task> relaunch --note '<what happened>'). A verified-alive endpoint
 # is never refused for silence alone, because a worker idle on a decision for
 # hours is still the right place for its answer. A secondmate's silence is
 # never a reason either: an idle secondmate endpoint is healthy and is judged by
@@ -649,7 +649,7 @@ fm_send_liveness_gate() {
       "$(printf '%s' "$ALLOW_DEAD_REASON" | tr '\t\n' '  ')" >> "$STATE/.fm-send-allow-dead.log" 2>/dev/null || true
     return 0
   fi
-  echo "error: steer not sent to $id: target not live since $since ($why); relaunch first (bin/fm-control.sh $id relaunch), or pass --allow-dead <reason> to record it anyway" >&2
+  echo "error: steer not sent to $id: target not live since $since ($why); relaunch first (bin/fm-control.sh $id relaunch --note '<what happened>'), or pass --allow-dead <reason> to record it anyway" >&2
   return 3
 }
 

@@ -244,6 +244,36 @@ test_a_pause_without_a_wake_time_is_surfaced_as_blocked() {
   pass "a pause without until HH:MMZ is surfaced as blocked until the lane names its wake time"
 }
 
+test_the_documented_gateway_wait_stays_a_declared_wait() {
+  local dir state out
+  dir=$(make_case gateway-declared-wait)
+  state="$dir/state"
+  out="$dir/drain.out"
+  # The gateway keep-alive's own declaration names no wake time by design
+  # (docs/gateway-keepalive.md), so it stays a declared wait; an ordinary
+  # time-less pause in the same drain still surfaces as blocked.
+  printf 'paused [key=gateway-503]: inference gateway still returning transient errors after 3 continue attempts over 900s; waiting for account pool capacity\n' \
+    > "$state/lane1.status"
+  printf 'paused [key=vendor]: waiting for a reply\n' > "$state/lane2.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on the gateway declaration"
+
+  if grep -F 'lane1' "$out" >/dev/null || grep -F 'gateway-503' "$out" >/dev/null; then
+    fail "the documented gateway declared wait was surfaced as open: $(cat "$out")"
+  fi
+  grep -F 'lane2' "$out" | grep -F '[key=vendor]' | grep -F 'blocked' >/dev/null \
+    || fail "an ordinary time-less pause was exempted with the gateway wait: $(cat "$out")"
+
+  # The gateway ladder's own resolution still closes a key that was opened.
+  printf 'blocked [key=gateway-503]: probe\n' >> "$state/lane1.status"
+  printf 'resolved [key=gateway-503]: the agent is working again after 1200s\n' >> "$state/lane1.status"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed after the gateway resolution"
+  if grep -F 'gateway-503' "$out" >/dev/null; then
+    fail "the gateway key stayed open after its own resolution: $(cat "$out")"
+  fi
+  pass "the documented gateway-503 wait stays declared while other time-less pauses surface as blocked"
+}
+
 test_buried_decision_still_surfaces
 test_over_long_decision_note_is_capped_with_a_marker
 test_explicit_resolution_closes_it
@@ -254,3 +284,4 @@ test_open_decision_surfaces_even_with_an_unrelated_queued_wake
 test_buried_decision_surfaces_on_the_empty_queue_fast_path
 test_status_symlink_is_not_followed
 test_a_pause_without_a_wake_time_is_surfaced_as_blocked
+test_the_documented_gateway_wait_stays_a_declared_wait
