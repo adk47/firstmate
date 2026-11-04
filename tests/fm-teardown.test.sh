@@ -66,6 +66,10 @@
 #        branch detached then dropped
 #   (ab) the pool does not hold a registered linked worktree  -> guarded plain
 #        git release
+#   (ac) the pool does not hold it and plain git cannot remove -> REFUSE before
+#        the kill (locked registration, or a dirty tree even under --force)
+#   (ad) the pool listing names ~ paths this HOME cannot resolve -> REFUSE
+#        before the kill, since membership is unproven
 set -u
 
 # shellcheck source=tests/lib.sh disable=SC1091
@@ -3995,26 +3999,41 @@ test_plain_git_release_removes_clean_registered_worktree() {
   pass "an unpooled clean registered worktree releases through guarded plain git"
 }
 
-# The guarded release never passes --force: git refuses a dirty worktree, so the
-# teardown aborts with the worktree and branch intact instead of discarding
-# uncommitted work. --force on the teardown command must not reach git.
+# The guarded release never passes --force, and the gate proves the release can
+# succeed BEFORE the agent is killed: an unpooled worktree holding uncommitted
+# work refuses pre-kill, even under --force.
 test_plain_git_release_refuses_dirty_worktree() {
-  local case_dir rc branch
+  local case_dir rc branch pid
   case_dir=$(make_case plain-git-dirty)
   write_meta "$case_dir" no-mistakes ship
   land_shippable_commit "$case_dir"
   branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
   add_unlisted_pool_treehouse "$case_dir"
+  seed_backlog_in_flight "$case_dir"
   # Uncommitted work in the worktree: git worktree remove must refuse it.
   printf '%s\n' uncommitted > "$case_dir/wt/dirty.txt"
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "plain-git-dirty: setup sleeper did not start"
 
   rc=0
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
-  expect_code 1 "$rc" "plain-git-dirty: teardown should refuse a dirty worktree without --force"$'\n'"$(cat "$case_dir/stderr")"
-  assert_grep 'plain git release failed' "$case_dir/stderr" \
-    "plain-git-dirty: teardown did not report the plain git release refusal"
-  assert_grep 'branch and worktree intact' "$case_dir/stderr" \
-    "plain-git-dirty: teardown did not report leaving the branch and worktree intact"
+  expect_code 1 "$rc" "plain-git-dirty: an unpooled dirty worktree must refuse before the endpoint kill"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'no worktree-return path is available' "$case_dir/stderr" \
+    "plain-git-dirty: refusal did not report the missing return path"
+  assert_grep 'holds uncommitted or untracked work' "$case_dir/stderr" \
+    "plain-git-dirty: refusal did not name the dirty worktree as the blocker"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "plain-git-dirty: the crew process was killed before the release was proven"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  # Nothing staged a replayable intent to finish this teardown.
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "plain-git-dirty: a refused release left a replayable backlog-close record"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "plain-git-dirty: the backlog row was closed despite the refusal"
   # The dirty worktree, its uncommitted file, and its branch ref are preserved.
   assert_present "$case_dir/wt" \
     "plain-git-dirty: the dirty worktree was removed anyway"
@@ -4022,7 +4041,101 @@ test_plain_git_release_refuses_dirty_worktree() {
     "plain-git-dirty: the uncommitted file was discarded"
   git -C "$case_dir/wt" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
     || fail "plain-git-dirty: the task branch ref was dropped despite the refusal"
-  pass "guarded plain git never forces: a dirty worktree refuses and stays intact"
+  pass "guarded plain git never forces: an unpooled dirty worktree refuses before the agent is killed"
+}
+
+# A locked registration cannot be removed by plain `git worktree remove` without
+# --force either, so the gate refuses before the endpoint kill instead of killing
+# the agent and staging a replayable close first.
+test_plain_git_release_refuses_locked_worktree() {
+  local case_dir rc branch pid
+  case_dir=$(make_case plain-git-locked)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  add_unlisted_pool_treehouse "$case_dir"
+  seed_backlog_in_flight "$case_dir"
+  git -C "$case_dir/project" worktree lock "$case_dir/wt"
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "plain-git-locked: setup sleeper did not start"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "plain-git-locked: a locked unpooled worktree must refuse before the endpoint kill"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'no worktree-return path is available' "$case_dir/stderr" \
+    "plain-git-locked: refusal did not report the missing return path"
+  assert_grep 'registered locked' "$case_dir/stderr" \
+    "plain-git-locked: refusal did not name the locked registration as the blocker"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "plain-git-locked: the crew process was killed before the release was proven"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "plain-git-locked: a refused release left a replayable backlog-close record"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "plain-git-locked: the backlog row was closed despite the refusal"
+  assert_present "$case_dir/wt" \
+    "plain-git-locked: the locked worktree was removed anyway"
+  git -C "$case_dir/project" worktree list --porcelain | grep -F "$case_dir/wt" >/dev/null \
+    || fail "plain-git-locked: the refused worktree lost its registration"
+  git -C "$case_dir/wt" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    || fail "plain-git-locked: the task branch ref was dropped despite the refusal"
+  pass "a locked unpooled worktree refuses before the agent is killed and stays intact"
+}
+
+# A pool listing that names home-relative paths this host's HOME cannot resolve
+# speaks for some other home: membership is unproven, so teardown refuses before
+# the kill instead of concluding "not held" and running a plain git release over
+# a slot treehouse may still lease.
+add_foreign_home_pool_treehouse() {  # <case-dir>
+  local case_dir=$1
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  status) printf '1  leased  ~/other-home/.treehouse/1/repo\n'; exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+test_unresolvable_home_relative_pool_listing_refuses_before_killing_the_agent() {
+  local case_dir rc branch pid
+  case_dir=$(make_case pool-foreign-home)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  add_foreign_home_pool_treehouse "$case_dir"
+  seed_backlog_in_flight "$case_dir"
+  ( cd "$case_dir/wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "pool-foreign-home: setup sleeper did not start"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "pool-foreign-home: a listing this HOME cannot resolve must refuse before the kill"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'home-relative paths' "$case_dir/stderr" \
+    "pool-foreign-home: refusal did not name the unresolvable home-relative listing"
+  assert_grep 'leaving the agent alive and the branch intact' "$case_dir/stderr" \
+    "pool-foreign-home: refusal did not report leaving the agent alive and the branch intact"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "pool-foreign-home: the crew process was killed although pool membership was unproven"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  assert_absent "$case_dir/state/task-x1.backlog-close" \
+    "pool-foreign-home: a refused teardown left a replayable backlog-close record"
+  [ "$(backlog_row_state "$case_dir")" = in_flight ] \
+    || fail "pool-foreign-home: the backlog row was closed despite the refusal"
+  assert_present "$case_dir/wt" \
+    "pool-foreign-home: the worktree a foreign pool may hold was removed"
+  git -C "$case_dir/wt" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    || fail "pool-foreign-home: the task branch ref was dropped despite the refusal"
+  pass "a pool listing this host's HOME cannot resolve refuses before the endpoint kill"
 }
 
 # A pool listing whose only entries are longer paths that merely contain this
@@ -4318,7 +4431,9 @@ test_proven_change_watch_allows_teardown
 test_missing_return_tool_refuses_before_killing_the_agent
 test_plain_git_release_removes_clean_registered_worktree
 test_plain_git_release_refuses_dirty_worktree
+test_plain_git_release_refuses_locked_worktree
 test_pool_listing_does_not_claim_a_longer_sibling_path
+test_unresolvable_home_relative_pool_listing_refuses_before_killing_the_agent
 test_unpooled_unregistered_worktree_refuses_before_killing_the_agent
 test_uninspectable_project_refuses_before_killing_the_agent
 test_unreportable_pool_listing_refuses_before_killing_the_agent
