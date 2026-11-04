@@ -489,6 +489,23 @@ deepseek 1017."
 - **The chain is a CLIENT.** It approves nothing: every caller keeps its own
   caps (`CappedJudge` $25/day + per-run, doc-verify $5/day), gates and
   fail-closed path, and an exhausted chain makes the caller DEFER/HOLD.
+- **Every metered call carries the ONE ZDR block** (captain 2026-11-04: "we need
+  [ZDR] ... only use the fastest cheapest ZDR deepseek models ... protect our
+  code"). `model_chain.ZDR_ROUTING` = `zdr: true`, `data_collection: deny`,
+  `sort: price`, `quantizations: [fp8, bf16, fp16]`, `max_price 0.30/1.20`,
+  `ignore: [Google]`; `validate_routing()` REFUSES anything weaker (no zdr flag,
+  int4/int8/fp4/unknown, uncapped price) and `call_deepseek` sends it on every
+  call — `sensitive=False` cannot opt out. The config half is
+  `scripts/check-zdr-routing.py` (validate-config-matrix check 10): every
+  `openrouter/deepseek|z-ai` ref in the OpenClaw configs needs
+  `compat.openRouterRouting` passing the same guard. Measured 2026-11-04: the
+  block lands on Morph fp8 at $0.032/$0.50 per M (8/8), the same model without
+  it lands on InferenceNet at $0.08/$0.55. **Fireworks is retired from
+  production paths** (6.5x–9.4x the price, account-wide ZDR is an
+  Enterprise-only toggle we cannot verify); its egress rule is gone and
+  `check-zdr-routing.py` fails on any surviving `fireworks/` ref. Claude stays
+  on CLIProxyAPI, never Bedrock. Inventory + retention evidence:
+  `data/zdr-prod-callers-z1/report.md`.
 
 ## Session budgets must exceed each agent's PROTECTED footprint, or crons wedge
 

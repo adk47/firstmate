@@ -600,6 +600,29 @@ if [[ -n "$CRON" && -f "$CRON" ]]; then
   fi
 fi
 
+# 10. ZDR + precision floor on every production DeepSeek/GLM route (captain
+#     2026-11-04: "we need [ZDR] ... only use the fastest cheapest ZDR deepseek
+#     models ... protect our code"). Every openrouter deepseek/z-ai ref must
+#     resolve to a catalog entry whose compat.openRouterRouting is the one ZDR
+#     block (zdr true, data_collection deny, price sort, fp8/bf16/fp16 only,
+#     max_price capped), no fireworks/ ref may survive, and every Python caller
+#     that builds an OpenRouter body must send ZDR_ROUTING. The runtime half of
+#     this rule is model_chain.validate_routing; this is the config half, because
+#     the gateways' routing lives in JSON and a dropped `zdr` flag would
+#     otherwise be invisible until a customer's document hit a lossy host.
+#     Resolved from THIS script's directory, not CWD: the guard must run even
+#     when the matrix is invoked from elsewhere with explicit config paths.
+ZDR_GUARD="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check-zdr-routing.py"
+if [[ -f "$ZDR_GUARD" ]]; then
+  if ! python3 "$ZDR_GUARD" ${PROFILES[@]+${PROFILES[@]}} ${CRON:+"$CRON"}; then
+    echo "ERROR: ZDR routing guard failed (see scripts/check-zdr-routing.py)" >&2
+    fail=1
+  fi
+else
+  echo "ERROR: scripts/check-zdr-routing.py is missing — the ZDR guard cannot run" >&2
+  fail=1
+fi
+
 if (( fail == 0 )); then
   echo "validate-config-matrix: all checks passed"
 fi

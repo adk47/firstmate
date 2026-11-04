@@ -34,11 +34,14 @@ shared:
       destination: 127.0.0.1
       comment: "CLIProxyAPI sidecar — Claude API access. NEVER allow direct api.anthropic.com."
 
-    - name: fireworks-api
-      protocol: tcp
-      port: 443
-      destination: api.fireworks.ai
-      comment: "Fireworks.ai inference API for GLM-5 and Deepseek"
+    # api.fireworks.ai was REMOVED 2026-11-04 (captain: "only use the fastest
+    # cheapest ZDR deepseek models ... fireworks is more expensive should we
+    # remove it"). Every DeepSeek/GLM call now goes to openrouter.ai with the
+    # one ZDR routing block (scripts/lib/model_chain.py:ZDR_ROUTING, enforced by
+    # scripts/check-zdr-routing.py). Fireworks was 6.5x the ZDR price for the
+    # same model ($0.21/$0.84 vs Morph fp8 $0.032/$0.50 per M) and its
+    # account-wide ZDR policy is an Enterprise-only toggle we have no evidence
+    # of. Do not re-add this rule: a direct Fireworks path bypasses the block.
 
     - name: google-oauth
       protocol: tcp

@@ -2116,6 +2116,12 @@ jobs:
           # fallback tier or runs dry. Hermetic: codex, the OpenRouter opener,
           # the clock and sleep are faked; the ledger is a temp file.
           python3 scripts/tests/test_model_chain.py
+          # ZDR + precision floor on every production DeepSeek/GLM route (captain
+          # 2026-11-04): validate_routing refuses a block with no zdr flag or with
+          # int4/int8 allowed, call_deepseek sends the one block on every metered
+          # call, and scripts/check-zdr-routing.py asserts the same for every
+          # OpenClaw config (plus: no fireworks/ ref survives). Hermetic.
+          python3 scripts/tests/test_zdr_routing.py
           # batch-judge (Fable scale-now-openclaw): ONE tool-less judge call per outbound batch, STOP-only, fail closed.
           python3 scripts/tests/test_credit_batch_judge.py
           # b1's coded pre-layer + instructions for it (runs BEFORE judge_batch; a coded stop never reaches the model).

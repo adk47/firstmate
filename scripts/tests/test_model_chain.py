@@ -242,8 +242,12 @@ class TestFallbackServes(ChainBase):
         body = orouter.requests[0]["body"]
         self.assertEqual(body["plugins"][0]["id"], "web")
         self.assertEqual(body["plugins"][0]["exclude_domains"], ["muso.ai", "imdb.com"])
-        # user data must never be trainable: the deny filter rides on every call
-        self.assertEqual(body["provider"], {"data_collection": "deny"})
+        # user data must never be trainable, and never land on an unverified or
+        # lossy-quantized host: the ONE ZDR block rides on every metered call
+        # (captain 2026-11-04).
+        self.assertEqual(body["provider"], mc.ZDR_ROUTING)
+        self.assertIs(body["provider"]["zdr"], True)
+        self.assertEqual(body["provider"]["data_collection"], "deny")
         self.assertEqual(self.rows()[0]["outcome"], "skipped")
         self.assertEqual(self.rows()[0]["kind"], mc.UNAVAILABLE)
 

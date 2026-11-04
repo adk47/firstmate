@@ -39,8 +39,10 @@ The chain is fixed, and the SAME order everywhere:
     tier 2  deepseek      OpenRouter ``deepseek/deepseek-v4.1-flash-1017``
                           (captain's standing rule, metered, cheap), with
                           OpenRouter's ``web`` plugin when the request asked
-                          for web evidence and ``data_collection: deny`` for
-                          user data.
+                          for web evidence, and ALWAYS the one ZDR routing
+                          block (``ZDR_ROUTING``: zdr, data_collection deny,
+                          price sort, fp8/bf16/fp16 only, max_price).
+                          ``validate_routing`` refuses anything weaker.
 
 Failure classes and what each does (``classify``):
 
@@ -93,6 +95,90 @@ FALLBACK_MODEL = os.environ.get("MODEL_CHAIN_FALLBACK_MODEL", "deepseek/deepseek
 TIER_SUBSCRIPTION = "subscription"
 TIER_FALLBACK = "deepseek"
 TIERS = (TIER_SUBSCRIPTION, TIER_FALLBACK)
+
+# ── the ONE ZDR routing block (captain 2026-11-04) ───────────────────────────
+# "we need [ZDR] ... only use the fastest cheapest ZDR deepseek models ... make
+# sure we aren't wasting money and protect our code". Every production
+# DeepSeek/GLM caller sends THIS block, and `validate_routing` refuses anything
+# weaker, so a caller cannot quietly opt out of ZDR or of the precision floor.
+#
+# Measured on ak47 2026-11-04 against OpenRouter: 8 of 8 requests landed on
+# Morph at fp8, $0.032/$0.50 per M. The same model WITHOUT the block landed on
+# InferenceNet (fp8, $0.08/$0.55) - i.e. the block is also the cheap route, not
+# a tax on privacy. The cheapest listed endpoint (Particle AI, $0.025/$0.25) is
+# not ZDR-eligible, which is exactly what `zdr: true` excludes.
+ZDR_ROUTING: dict[str, Any] = {
+    "zdr": True,
+    "data_collection": "deny",
+    "sort": "price",
+    "quantizations": ["fp8", "bf16", "fp16"],
+    "max_price": {"prompt": 0.30, "completion": 1.20},
+    "ignore": ["Google"],
+}
+# The precision floor, as an ALLOWLIST (not a denylist): fp8/bf16/fp16 keep the
+# weights the model was trained at, and anything else - int4, int8, fp4, mxfp4,
+# nf4, awq, gptq, or an endpoint that reports `unknown` - is refused rather than
+# merely deprioritized. A denylist would silently admit the next quantization
+# name OpenRouter adds; an allowlist cannot.
+ALLOWED_QUANTIZATIONS = frozenset({"fp8", "bf16", "fp16"})
+# The price ceiling, as a CEILING and not a "must be positive". `max_price` is
+# what stops a route from picking an expensive host, so a block that says
+# `{prompt: 1000, completion: 1000}` is not a safe block with a high number - it
+# is the same as having no cap, and every guard would call it clean (QA
+# 2026-11-04). These two numbers are the cap; raising them is a spend decision.
+MAX_PROMPT_PRICE = 0.30
+MAX_COMPLETION_PRICE = 1.20
+
+
+class UnsafeRouting(ValueError):
+    """A provider routing block that is not ZDR, or that allows a lossy
+    quantization. Raised BEFORE the request is built, so an unsafe route can
+    never be sent and then discovered in the response metadata."""
+
+
+def validate_routing(block: Any) -> dict[str, Any]:
+    """Refuse a routing block that is not ZDR or that allows int4/int8.
+
+    Returns the block unchanged so a call site can write
+    ``body["provider"] = validate_routing(ZDR_ROUTING)``. Every rule here is a
+    refusal, never a default: a missing ``zdr`` flag is not "probably fine", it
+    is an unverified route, and the captain's ruling is that production traffic
+    does not take unverified routes.
+    """
+    if not isinstance(block, dict):
+        raise UnsafeRouting(f"routing block must be an object, got {type(block).__name__}")
+    if block.get("zdr") is not True:
+        raise UnsafeRouting("routing block has no zdr: true (an unverified route is not ZDR)")
+    if block.get("data_collection") != "deny":
+        raise UnsafeRouting("routing block must set data_collection: deny")
+    quants = block.get("quantizations")
+    if not isinstance(quants, list) or not quants:
+        raise UnsafeRouting("routing block must pin quantizations (an unpinned route may be int4/int8)")
+    bad = [q for q in quants if str(q).lower() not in ALLOWED_QUANTIZATIONS]
+    if bad:
+        raise UnsafeRouting(f"routing block allows a lossy quantization: {bad}")
+    price = block.get("max_price")
+    caps = {"prompt": MAX_PROMPT_PRICE, "completion": MAX_COMPLETION_PRICE}
+    if not isinstance(price, dict) or not all(
+            isinstance(price.get(k), (int, float)) and not isinstance(price.get(k), bool)
+            for k in caps):
+        raise UnsafeRouting("routing block must cap max_price.prompt and max_price.completion")
+    for side, ceiling in caps.items():
+        value = price[side]
+        if value <= 0:
+            raise UnsafeRouting(f"routing block max_price.{side} must be positive, got {value}")
+        if value > ceiling:
+            raise UnsafeRouting(
+                f"routing block max_price.{side} = {value} exceeds the ${ceiling}/M ceiling "
+                "(a cap above it selects the same hosts as no cap at all)")
+    if block.get("sort") != "price":
+        raise UnsafeRouting("routing block must sort by price (cheapest ZDR host wins)")
+    return block
+
+
+# Fail at IMPORT time, not at the first user request: a bad constant here would
+# otherwise be discovered by a customer's document.
+validate_routing(ZDR_ROUTING)
 
 # A new METERED rung needs its own ceiling: before this module the credit paths
 # were either $0 (codex/Jev) or capped by their own caller. DeepSeek is cheap but
@@ -678,8 +764,11 @@ def call_deepseek(messages: Sequence[dict[str, Any]], *, schema: dict[str, Any] 
         if excluded:  # xAI native search accepts at most 5 excluded domains
             plugin["exclude_domains"] = excluded[:5]
         body["plugins"] = [plugin]
-    if sensitive:
-        body["provider"] = {"data_collection": "deny"}
+    # ZDR is not optional and not per-caller: `sensitive` is kept for API
+    # compatibility, but the block is sent on EVERY metered call (captain
+    # 2026-11-04). validate_routing() refuses a block that is not ZDR or that
+    # allows a lossy quantization, so this line cannot be weakened by a caller.
+    body["provider"] = validate_routing(ZDR_ROUTING)
     api_key = key or load_key()
     if not api_key:
         return TierAttempt(TIER_FALLBACK, "skipped", model=model, kind=UNAVAILABLE, reason="no OpenRouter key")

@@ -107,9 +107,43 @@ Callers keep their own narrower caps (`credit_review.decide.CappedJudge`'s
 per-run + $25/day, doc-verify's $5/day) — this chain is a client, never an
 approver.
 
-`call_deepseek` always sends `provider.data_collection: "deny"`; a caller that
-handles customer text also passes `sensitive=True`, which keeps the payload out
-of the log.
+`call_deepseek` always sends the ONE ZDR routing block (`ZDR_ROUTING`), and
+`validate_routing` refuses anything weaker — a block with no `zdr: true`, with
+`data_collection` not `deny`, with an unpinned or lossy `quantizations` list
+(int4/int8/fp4/unknown), without a `max_price` cap, or not sorted by price. The
+price cap is a CEILING, not a positivity check: `max_price` above
+`MAX_PROMPT_PRICE`/`MAX_COMPLETION_PRICE` ($0.30 / $1.20 per M) is refused,
+because a cap above them selects the same hosts as no cap at all.
+Captain 2026-11-04: "we need [ZDR] ... only use the fastest cheapest ZDR
+deepseek models ... protect our code". The block is also the cheap route, not a
+tax on privacy: measured on ak47 2026-11-04, 8 of 8 requests landed on Morph at
+fp8 for $0.032/$0.50 per M, while the same model WITHOUT the block landed on
+InferenceNet at $0.08/$0.55. The cheapest listed endpoint (Particle AI,
+$0.025/$0.25) is not ZDR-eligible, which is exactly what `zdr: true` excludes.
+`sensitive=True` is still accepted for API compatibility but no longer changes
+the provider block: ZDR is not optional per caller.
+
+The config half of the same rule is `scripts/check-zdr-routing.py` (wired into
+`validate-config-matrix.sh` check 10): every `openrouter/deepseek|z-ai` ref in
+the OpenClaw configs must resolve to a catalog entry — **under the same provider
+key** — whose `compat.openRouterRouting` passes `validate_routing`, and no
+`fireworks/` ref may survive. The per-provider keying is load-bearing: a flat
+model-id map let a second provider declaring the same id with a valid block
+overwrite an OpenRouter entry that had lost its routing, so the guard reported
+clean while the live route had no ZDR filter. A model id declared twice inside
+one provider is refused too, because the guard cannot then say which entry the
+runtime resolves. The required profile set is **pinned**, not globbed — a renamed
+production profile is a red job, and an explicitly-named config that does not
+exist is a failure rather than a skip.
+
+The Python callers are **probed, not grepped**: the guard asks
+`call_deepseek`, `extract.request_body` and `Judge.payload` what provider block
+they would actually send, and judges the answer. A grep for the token was
+defeated by deleting the assignment while keeping a comment that mentions
+`ZDR_ROUTING` — the judge's legacy direct transport would then have sent credit
+data with no filter at all, with the guard and its test green.
+`scripts/tests/test_zdr_routing.py` pins all of it, including the mutant where
+the assignment is deleted.
 
 Every attempt logs one line to stderr:
 
@@ -240,8 +274,8 @@ what the watchdog would page:
   recorded, `served_by_fallback` is true;
 - `unsafe` → the chain aborts and tier 2 is **never** called;
 - both tiers dead → `chain_exhausted`, recorded and countable;
-- a web call → tier 1 is skipped, tier 2 gets the `web` plugin and
-  `data_collection: deny`;
+- a web call → tier 1 is skipped, tier 2 gets the `web` plugin and the one ZDR
+  routing block;
 - over the daily cap / no key → a skip, never a spend, never a crash;
 - watchdog: 30% fallback pages, 20% does not, below the minimum is not judged,
   a dead chain pages anyway, journal rows map to tiers, and the default journal

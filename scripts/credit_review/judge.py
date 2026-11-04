@@ -468,6 +468,11 @@ class Judge:
             "temperature": 0,
             "max_tokens": 1200,
             "usage": {"include": True},
+            # The ONE ZDR block (captain 2026-11-04), on BOTH transports: the
+            # chain path re-applies it inside call_deepseek, and the legacy
+            # direct path would otherwise post a credit decision with no
+            # provider filter at all.
+            "provider": model_chain.validate_routing(model_chain.ZDR_ROUTING),
         }
         if self.web:
             plugin: dict[str, Any] = {"id": "web", "max_results": self.web_max_results}

@@ -3,8 +3,10 @@ confidence per field.
 
 Model: OpenRouter `deepseek/deepseek-v4.1-flash-1017` (captain's standing rule
 2026-10-26: AI = OpenRouter deepseek-v4.1-flash-1017). The call is direct HTTP,
-tool-less, temperature 0, JSON-object output, with OpenRouter's
-`data_collection: deny` provider filter. The document text is attacker-
+tool-less, temperature 0, JSON-object output, with the ONE ZDR routing block
+(`model_chain.ZDR_ROUTING`: zdr, data_collection deny, price sort, fp8/bf16/fp16
+only, max_price) - a document a creator sent us is the last thing that should
+land on an unverified or int4 host. The document text is attacker-
 controlled DATA: the prompt says so, the answer is validated field by field,
 and nothing the model writes is executed or followed. Every call (served,
 failed, skipped) is a dv_llm_calls row with the prompt sha256 and its cost; a
@@ -383,6 +385,21 @@ def _post(body: dict[str, Any], key: str, timeout: int) -> dict[str, Any]:
         return json.load(resp)
 
 
+def request_body(model: str, messages: list[dict[str, Any]]) -> dict[str, Any]:
+    """The ONE OpenRouter request this caller sends.
+
+    Factored out so the provider block can be PROBED rather than grepped (QA
+    2026-11-04): a comment mentioning ZDR_ROUTING used to satisfy the config
+    guard even if the assignment was deleted, which would have sent a creator's
+    document to an unfiltered host with every gate green.
+    """
+    return {"model": model, "messages": messages, "temperature": 0, "max_tokens": MAX_TOKENS,
+            "response_format": {"type": "json_object"}, "usage": {"include": True},
+            # The one ZDR block, validated: refuses a route with no zdr flag, with
+            # int4/int8 allowed, or with an uncapped price (captain 2026-11-04).
+            "provider": model_chain.validate_routing(model_chain.ZDR_ROUTING)}
+
+
 def chunks(text: str, size: int = CHUNK_CHARS) -> list[str]:
     """The text cut at line boundaries into pieces of <= `size` chars (a single longer line is cut hard)."""
     out: list[str] = []
@@ -589,9 +606,7 @@ class Extractor:
             self.store.llm_call({**row, "outcome": "skipped", "reason": "no OpenRouter key"})
             self._chain_terminal("free tier declined and there is no OpenRouter key", sha)
             return fallback(text, "no OpenRouter key")
-        body = {"model": self.model, "messages": messages, "temperature": 0, "max_tokens": MAX_TOKENS,
-                "response_format": {"type": "json_object"}, "usage": {"include": True},
-                "provider": {"data_collection": "deny"}}
+        body = request_body(self.model, messages)
         # One in-call retry on an unusable answer (backfill 2026-10-27: 6 of
         # 82 answers did not parse). Every attempt is its own ledger row and
         # counts against the daily cap; a transport/HTTP error is not retried
