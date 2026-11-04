@@ -394,9 +394,24 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     settleReadiness(classification.kind === "actionable" ? "wake" : "failed");
     const predecessor = String(armChild.pid ?? "");
     if (classification.kind === "actionable") {
-      if (restorationInFlight) return;
       retryFailures = 0;
       setArmStatus("wake");
+      if (restorationInFlight) {
+        // Continuity never queues behind delivery: this close would otherwise
+        // leave no watcher alive for the length of the wake prompt's handling
+        // turn. Arm its successor now; the durable row is still re-presented by
+        // whichever cycle picks the wake up (docs/watcher-continuity.md).
+        if (!child && !retryTimer) {
+          void ensureArm(paths, sessionID, client, predecessor).then((status) => {
+            // A quiet skip is not a failure: away mode and an unmet supervision
+            // need legitimately arm nothing, and a retry or an existing child
+            // already owns continuity.
+            if (!["not-primary", "read-only", "failed", "timeout"].includes(status)) return;
+            surfaceFailure(paths, client, sessionID, `watcher: FAILED - OpenCode could not arm the successor for a wake that arrived while an earlier one was still being delivered (${status})`);
+          });
+        }
+        return;
+      }
       const restoration = restoreAfterActionableClose(paths, sessionID, client, predecessor);
       restorationInFlight = restoration;
       void restoration.then(async (result) => {

@@ -31,6 +31,16 @@
 // consumed; after a short grace (FM_PI_WAKE_FOLD_GRACE_MS) the extension
 // releases it without finishing its records, and the pipeline redelivers them
 // as one fresh follow-up.
+//
+// Continuity versus delivery (stated once here):
+// Arming a successor never waits on wake delivery. A branch-eligible wake is
+// delivered only when the branch's own model turn settles, which outlives
+// several watcher cycles, so an actionable close landing mid-delivery arms its
+// successor directly instead of queueing behind the pipeline (docs/watcher-continuity.md).
+// The pipeline adopts that child instead of starting a second one, so the
+// one-child invariant is unchanged. A failing or empty close is still retried
+// with its bounded backoff after delivery, because that path exists to damp a
+// successor that dies on its own rather than to carry a wake.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -1003,6 +1013,20 @@ export default function (pi: ExtensionAPI) {
     owner.retryTimer = timer;
   }
 
+  // Continuity never queues behind delivery. The pipeline holds `restoring`
+  // across a wake's delivery, and a branch settlement can outlive many watcher
+  // cycles, so a close that lands in that window would otherwise arm nothing and
+  // leave supervision dark for the length of the branch's model turn. Arm this
+  // record's successor here; the pipeline then adopts the child through
+  // startArm's ownership report instead of starting a second one. Failures stay
+  // silent here because the pipeline's own restoration of this same record
+  // surfaces the one typed message for them.
+  function armSuccessorWhileDelivering(owner: SessionGeneration, predecessorArmPid: string): void {
+    if (!generationIsLive(owner) || !owner.restoring) return;
+    if (owner.child || owner.retryTimer) return;
+    startArm(owner, predecessorArmPid);
+  }
+
   function startArm(owner: SessionGeneration, predecessorArmPid = ""): ArmResult {
     if (!generationIsLive(owner)) return { ok: false, message: shuttingDownMessage };
     const ownership = lockOwnership();
@@ -1015,10 +1039,17 @@ export default function (pi: ExtensionAPI) {
     }
     markLoaded();
     if (owner.child) {
-      return {
-        ok: true,
-        message: `watcher: unchanged - Pi extension already owns an arm child; no manual re-arm needed; ${repairOnlyHint}`,
-      };
+      // An arm child whose process already exited keeps this handle until its
+      // `close` runs, which a descendant holding the stdio pipes can delay.
+      // Reporting ownership of that dead child would leave supervision dark
+      // while telling the operator to wait, so treat it as gone.
+      if (owner.child.exitCode === null && owner.child.signalCode === null) {
+        return {
+          ok: true,
+          message: `watcher: unchanged - Pi extension already owns an arm child; no manual re-arm needed; ${repairOnlyHint}`,
+        };
+      }
+      owner.child = null;
     }
     if (owner.retryTimer) {
       return {
@@ -1100,6 +1131,7 @@ export default function (pi: ExtensionAPI) {
         enqueuePendingActionable(owner, pending);
         if (!generationIsLive(owner)) return;
         owner.retryFailures = 0;
+        armSuccessorWhileDelivering(owner, predecessor);
         void processPendingActionables(owner);
         return;
       }
