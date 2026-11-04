@@ -546,6 +546,19 @@ deploy pre-flight, the QA hand-off and the dispatch workflows stay on node-8 (he
 a test that truly needs node-8's host (real systemd, live `/opt/hydra`) is tagged
 `# bats test_tags=host-systemd` or belongs in a node-8 job, never silently skipped.
 
+**Read a red PR Validation from the failing JOB, never the run conclusion.** The
+2026-11-03 report "0 of 11 PR Validation runs passed since 20:00Z, hydra CI is BROKEN"
+was wrong: `concurrency: group: pr-validate-${{ github.ref }}` + `cancel-in-progress:
+true` marks every superseded push `cancelled`, so a burst of pushes looks like a total
+outage while the queue simply restarts from the back — 13 of 13 runs in that window
+were CANCELLED, not failed, and `main` was green. Before believing a failure is
+content, confirm the PR touches the failing file (`gh-axi run view <run> --job <id>
+--log-failed`). Two real non-content causes already found: a test reading the wrong
+run's output dir (#1721), and `gh` exiting non-zero when it cannot READ a response it
+already wrote (`scripts/qa-handoff-publish.sh`, which used to report a landed POST as
+"this head now has NO hand-off"). Timing-bound suites also miss deadlines on a 2-CPU
+pod; fix the shard/`--jobs` budget, not the assertion.
+
 ## node-8 `/dev/*`: never a destructive target
 
 - **NEVER make a `/dev/*` path the target of `rm`, `mv`, `cp`, `install`, `sed -i`

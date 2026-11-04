@@ -198,8 +198,17 @@ qa_handoff_comments() {
 
 # qa_handoff_payloads <owner/repo> <pr> — one JSON object per TRUSTED
 # hand-off comment, oldest first:
-#   {"comment_id":"…","created_at":"…","head_sha":"…","repo":"…","pr":"…",
+#   {"comment_id":"…","created_at":"…","generated_at":"…","head_sha":"…",
+#    "repo":"…","pr":"…",
 #    "reports":{"rebase-integrity":{…},"blast-radius":{…}},"missing":[…]}
+#
+# `generated_at` is the payload's OWN timestamp (not the comment's), and the
+# publisher needs it: after a POST whose RESPONSE it could not read, the only way
+# to tell "the comment this run created" from a same-head comment that was
+# already there is whether it is at least as new as the payload we just built.
+# `created_at` cannot answer that — the API stamps it, so a re-published old
+# report looks fresh (the round-3 finding this file's qa_handoff_clear_report
+# exists for).
 # Empty output = no trusted hand-off on this PR (published yet, for this repo, or
 # never). A payload that fails to decode or validate is dropped SILENTLY, which
 # is fail-closed: the guard then sees no report for that head.
@@ -240,7 +249,8 @@ qa_handoff_payloads() {
     printf '%s' "$json" | jq -c --arg id "$cid" --arg created "$created" '
         select(.version == 1)
         | select((.repo // "") != "" and (.head_sha // "") != "")
-        | {comment_id: $id, created_at: $created, head_sha: .head_sha,
+        | {comment_id: $id, created_at: $created,
+           generated_at: (.generated_at // ""), head_sha: .head_sha,
            repo: .repo, pr: ((.pr // "") | tostring),
            reports: (.reports // {}), missing: (.missing // [])}
       ' 2>/dev/null || true
