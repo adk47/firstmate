@@ -109,3 +109,32 @@ teardown() { rm -rf "$T"; }
   [ "$status" -eq 0 ]
   [[ "$output" == *"WARN main: gateway did not settle"* ]]
 }
+
+# ── wiring: smoke-test.sh must call the gate before each profile's first LLM probe ──
+# A refactor that drops or reorders these calls leaves the lib tests green while the
+# 4 Nov rollback loop returns, so pin the call sites in smoke-test.sh itself.
+
+line_of() { grep -n -m1 -F -- "$1" "$BATS_TEST_DIRNAME/../smoke-test.sh" | cut -d: -f1; }
+
+@test "wiring: smoke-test.sh settles main before the mesh gate and check_web_search main" {
+  local g m w
+  g="$(line_of 'wait_gateway_settled main 18789')"
+  m="$(line_of 'recovery_gate main agent:clio:main')"
+  w="$(line_of 'check_web_search main "Main"')"
+  [ -n "$g" ] && [ -n "$m" ] && [ -n "$w" ]
+  [ "$g" -lt "$m" ]
+  [ "$g" -lt "$w" ]
+}
+
+@test "wiring: smoke-test.sh settles edge before ping_agent edge" {
+  local g p
+  g="$(line_of 'wait_gateway_settled edge 18810')"
+  p="$(line_of 'ping_agent edge support')"
+  [ -n "$g" ] && [ -n "$p" ]
+  [ "$g" -lt "$p" ]
+}
+
+@test "wiring: check_web_search fail) arm uses websearch_scoped_fail_message, not the old text" {
+  grep -q 'fail_check "\$label: \$(websearch_scoped_fail_message ' "$BATS_TEST_DIRNAME/../smoke-test.sh"
+  ! grep -q 'NO tool policy explains it' "$BATS_TEST_DIRNAME/../smoke-test.sh"
+}
