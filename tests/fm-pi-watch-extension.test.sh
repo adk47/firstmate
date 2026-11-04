@@ -755,6 +755,143 @@ EOF
   pass "Pi close during held branch delivery arms its successor within the delivery"
 }
 
+# The second shape of the same incident: the successor the restoration verified
+# dies on its own while the branch still owns the delivery of the wake that
+# started it. A failing or empty close is the same turn-ends-blind class as an
+# actionable one, so its bounded retry must start inside the delivery window
+# rather than at settlement.
+test_pi_failed_successor_during_held_delivery_retries() {
+  local repo home plugin log stop out status variant
+  repo="$TMP_ROOT/pi-failed-successor-root"
+  home="$TMP_ROOT/pi-failed-successor-home"
+  log="$TMP_ROOT/pi-failed-successor.log"
+  stop="$TMP_ROOT/pi-failed-successor.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+case "$count" in
+  1)
+    sleep 0.4
+    printf 'signal: branch-delivery synthetic wake\n'
+    exit 0
+    ;;
+  2)
+    # The verified successor dies on its own while the branch still owns the
+    # delivery of the first wake: the incident's second shape.
+    sleep 0.4
+    if [ "${FM_FIXTURE_SUCCESSOR:-fail}" = empty ]; then exit 0; fi
+    printf 'watcher: FAILED - fixture successor exited before arming\n'
+    exit 1
+    ;;
+esac
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  for variant in fail empty; do
+    rm -f "$log" "$stop"
+    out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_FIXTURE_SUCCESSOR="$variant" FM_WATCH_REARM_RETRY_BASE_MS=50 FM_WATCH_REARM_RETRY_MAX_MS=100 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let releaseHeldDelivery = () => {};
+const heldDelivery = new Promise((resolve) => {
+  releaseHeldDelivery = resolve;
+});
+let heldDeliveryReleased = false;
+const offers = [];
+const prompts = [];
+let tool = null;
+const handlers = new Map();
+const bus = {
+  on(channel, handler) {
+    handlers.set(channel, [...(handlers.get(channel) ?? []), handler]);
+    return () => {};
+  },
+  emit(channel, data) {
+    for (const handler of handlers.get(channel) ?? []) handler(data);
+  },
+};
+bus.on("fm-branch-supervision:dispatch", (offer) => {
+  offers.push(offer.message);
+  if (offers.length === 1) offer.accept(heldDelivery);
+  else offer.accept();
+});
+const pi = {
+  on() {},
+  events: bus,
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async (message) => {
+    prompts.push(message);
+  },
+};
+const armCount = () =>
+  existsSync(process.env.FM_ARM_LOG)
+    ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter((row) => row.startsWith("arm=")).length
+    : 0;
+
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+writeFileSync(`${process.env.FM_HOME}/state/branch-delivery.meta`, "project=/projects/approved\nwindow=fm-branch-delivery\n");
+writeFileSync(
+  `${process.env.FM_HOME}/state/.wake-queue`,
+  "1\t1\tsignal\tbranch-delivery.status\tsignal: branch-delivery synthetic wake\n",
+);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-failed-successor", {}, undefined, undefined, {});
+for (let i = 0; i < 400; i += 1) {
+  if (offers.length === 1 && armCount() >= 2) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (offers.length !== 1) throw new Error(`expected one branch offer, got ${offers.length}`);
+if (armCount() !== 2) throw new Error(`expected the verified successor, saw ${armCount()} arm rows`);
+
+// The branch settlement is still outstanding while its own successor dies:
+// continuity owes this record a retry before settlement, not after it.
+const startedAt = Date.now();
+for (let i = 0; i < 100; i += 1) {
+  if (armCount() >= 3) break;
+  await new Promise((resolve) => setTimeout(resolve, 50));
+}
+const waited = Date.now() - startedAt;
+if (armCount() < 3) {
+  throw new Error(`no retry armed within 5s after the successor died under a held delivery (${waited}ms, ${armCount()} arm rows)`);
+}
+if (heldDeliveryReleased) throw new Error("test released the branch settlement before asserting continuity");
+if (offers.length !== 1) throw new Error(`the retry armed at the cost of a second branch offer: ${offers.join(" | ")}`);
+if (prompts.length !== 0) throw new Error(`the retry reached main instead of the chain: ${prompts.join(" | ")}`);
+if (!readFileSync(process.env.FM_ARM_LOG, "utf8").includes("confirmed generation=fixture-generation")) {
+  throw new Error("the handling handoff was never confirmed against the successor");
+}
+await new Promise((resolve) => setTimeout(resolve, 150));
+if (armCount() !== 3) throw new Error(`the deferred path started extra arm work: ${armCount()} arm rows`);
+
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+heldDeliveryReleased = true;
+releaseHeldDelivery();
+await new Promise((resolve) => setTimeout(resolve, 100));
+process.exit(0);
+EOF
+    )
+    status=$?
+    expect_code 0 "$status" "Pi successor failure during a held delivery must retry inside the delivery ($variant)"
+    [ -z "$out" ] || fail "Pi failed-successor delivery retry test printed output ($variant): $out"
+  done
+  pass "Pi successor that fails or empty-closes during a held delivery retries before settlement"
+}
+
 test_pi_branch_offer_flags_heartbeat() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-branch-heartbeat-root"
@@ -3078,9 +3215,9 @@ EOF
 
 # A verified successor can die while the wake it was started for is still
 # being delivered (a branch turn can take minutes). Its failure close arrives
-# while the pipeline is busy, so the ordinary retry path must be deferred to
-# the end of that delivery rather than skipped, or the live generation is left
-# with no watcher and no retry.
+# while the pipeline is busy, so the bounded retry has to start inside that
+# delivery rather than at its end, or the live generation sits with no watcher
+# until the branch answers.
 test_pi_successor_failure_during_delivery_is_retried_after_delivery() {
   local repo home plugin log stop out status
   repo="$TMP_ROOT/pi-successor-dies-mid-delivery-root"
@@ -3112,9 +3249,13 @@ SH
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 
+let branchReleased = false;
 let releaseBranch = () => {};
 const branchSettlement = new Promise((resolve) => {
-  releaseBranch = resolve;
+  releaseBranch = () => {
+    branchReleased = true;
+    resolve();
+  };
 });
 let branchAccepted = false;
 let tool = null;
@@ -3156,22 +3297,23 @@ mod.default(pi);
 await tool.execute("initial-arm", {}, undefined, undefined, {});
 await waitFor(() => branchAccepted, "branch accepted the wake behind a verified successor");
 if (arms() !== 2) throw new Error(`expected the verified successor before delivery, got ${arms()} arms`);
-// The successor dies while the branch still holds the delivery.
+// The successor dies while the branch still holds the delivery, and the retry
+// it owes must exist before that delivery settles.
 await new Promise((resolve) => setTimeout(resolve, 300));
-if (arms() !== 2) throw new Error(`a retry launched while the delivery was still in flight: ${arms()} arms`);
+await waitFor(() => arms() === 3, "a retry watcher inside the delivery");
+if (branchReleased) throw new Error("the test released the branch before the retry was asserted");
 releaseBranch();
-await waitFor(() => arms() === 3, "a retry watcher after the delivery settled");
 await new Promise((resolve) => setTimeout(resolve, 150));
-if (arms() !== 3) throw new Error(`the deferred retry was not single-flight: ${arms()} arms`);
+if (arms() !== 3) throw new Error(`the in-delivery retry was not single-flight: ${arms()} arms`);
 if (prompts.length !== 0) throw new Error(`a bounded retry surfaced a failure prompt: ${prompts.join(" | ")}`);
 writeFileSync(process.env.FM_STOP_FILE, "stop\n");
 process.exit(0);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi must retry a verified successor that failed during wake delivery"
+  expect_code 0 "$status" "Pi must retry a verified successor that failed during wake delivery, before it settles"
   [ -z "$out" ] || fail "Pi successor-dies-mid-delivery test printed output: $out"
-  pass "Pi retries a verified successor that failed during wake delivery once that delivery settles"
+  pass "Pi retries a verified successor that failed during wake delivery, inside that delivery"
 }
 
 test_pi_late_retiring_actionable_reaches_replacement() {
@@ -4082,6 +4224,107 @@ EOF
   pass "OpenCode reports a successor that finds an external healthy watcher during delivery"
 }
 
+# The OpenCode adapter shares the rule: a verified successor that dies while the
+# wake prompt is still unanswered owes its bounded retry inside that delivery.
+test_opencode_failed_successor_during_held_wake_prompt_retries() {
+  local plugin repo home log stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-failed-successor-root"
+  home="$TMP_ROOT/opencode-failed-successor-home"
+  log="$TMP_ROOT/opencode-failed-successor.log"
+  stop="$TMP_ROOT/opencode-failed-successor.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --handling-delivered ]; then
+  printf 'confirmed generation=%s watcher=%s\n' "$2" "$4" >> "${FM_ARM_LOG:?}"
+  exit 0
+fi
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(grep -c '^arm=' "$FM_ARM_LOG")
+printf 'watcher: started pid=%s (beacon fresh) recovery-generation=fixture-generation\n' "$$"
+case "$count" in
+  1)
+    sleep 0.3
+    printf 'signal: held-delivery wake\n'
+    exit 0
+    ;;
+  2)
+    # The verified successor dies on its own while the wake prompt is still
+    # unanswered by the primary's own model turn.
+    sleep 0.4
+    printf 'watcher: FAILED - fixture successor exited before arming\n'
+    exit 1
+    ;;
+esac
+trap 'exit 0' TERM INT
+while [ ! -e "$FM_STOP_FILE" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" FM_WATCH_REARM_RETRY_BASE_MS=50 FM_WATCH_REARM_RETRY_MAX_MS=100 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let releasePrompt = () => {};
+const promptBlocked = new Promise((resolve) => {
+  releasePrompt = resolve;
+});
+const prompts = [];
+const client = {
+  session: {
+    promptAsync: async (request) => {
+      prompts.push(request.body.parts[0].text);
+      if (prompts.length === 1) await promptBlocked;
+    },
+  },
+};
+const armCount = () =>
+  existsSync(process.env.FM_ARM_LOG)
+    ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n").filter((row) => row.startsWith("arm=")).length
+    : 0;
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+for (let i = 0; i < 400; i += 1) {
+  if (armCount() >= 2 && prompts.length >= 1) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+if (armCount() !== 2) throw new Error(`expected the verified successor, saw ${armCount()} arm rows`);
+if (prompts.length !== 1) throw new Error(`expected one held wake prompt, got ${prompts.length}`);
+
+// The wake prompt is still unanswered while its successor dies: continuity owes
+// a retry inside the delivery, not after it.
+const startedAt = Date.now();
+for (let i = 0; i < 100; i += 1) {
+  if (armCount() >= 3) break;
+  await new Promise((resolve) => setTimeout(resolve, 50));
+}
+const waited = Date.now() - startedAt;
+if (armCount() < 3) {
+  throw new Error(`no retry armed within 5s after the successor died under a held wake prompt (${waited}ms, ${armCount()} arm rows)`);
+}
+if (prompts.length !== 1) throw new Error(`the retry surfaced a second prompt instead of the chain: ${JSON.stringify(prompts)}`);
+await new Promise((resolve) => setTimeout(resolve, 150));
+if (armCount() !== 3) throw new Error(`the in-delivery retry started extra arm work: ${armCount()} arm rows`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+releasePrompt();
+await new Promise((resolve) => setTimeout(resolve, 100));
+EOF
+)
+  status=$?
+  [ "$status" -eq 0 ] || fail "OpenCode must retry a successor that died under a held wake prompt: $out"
+  [ -z "$out" ] || fail "OpenCode failed-successor delivery test printed output: $out"
+  pass "OpenCode successor that fails during a held wake prompt retries before settlement"
+}
+
 test_opencode_pre_ready_actionable_close_preserves_its_successor() {
   local plugin repo home log release retired stop out status
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -4743,6 +4986,7 @@ test_pi_arm_child_that_exited_before_close_is_not_reported_as_owned
 test_pi_actionable_close_starts_single_successor_before_delivery
 test_pi_branch_offer_owns_actionable_wake
 test_pi_close_during_held_branch_delivery_arms_successor
+test_pi_failed_successor_during_held_delivery_retries
 test_pi_branch_offer_flags_heartbeat
 test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check
 test_pi_main_only_check_classes_stay_on_main
@@ -4781,6 +5025,7 @@ test_opencode_watch_arm_coordinator_respects_primary_scope
 test_opencode_primary_watch_plugin_rearms_after_wake
 test_opencode_close_during_held_wake_prompt_arms_successor
 test_opencode_external_successor_during_delivery_is_reported
+test_opencode_failed_successor_during_held_wake_prompt_retries
 test_opencode_pre_ready_actionable_close_preserves_its_successor
 test_opencode_hung_successor_falls_back_to_typed_wake
 test_opencode_unretired_successor_falls_back_without_retry

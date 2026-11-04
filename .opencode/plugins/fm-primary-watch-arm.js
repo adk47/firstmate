@@ -24,6 +24,9 @@ let restorationInFlight = null;
 let armClose = new WeakMap();
 let armReadiness = new WeakMap();
 let armRecovery = new WeakMap();
+// Arms this plugin retired itself: their close is restoration bookkeeping, not
+// a supervision gap, so it never owes a retry.
+let armRetired = new WeakSet();
 
 function positiveInteger(name, fallback) {
   const value = Number(process.env[name]);
@@ -268,6 +271,7 @@ function waitForRetry(attempt) {
 
 async function retireArm(armChild) {
   if (!armChild) return true;
+  armRetired.add(armChild);
   armChild.kill("SIGTERM");
   const closed = armClose.get(armChild);
   if (!closed) return false;
@@ -432,10 +436,15 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
       });
       return;
     }
-    if (restorationInFlight) {
+    if (restorationInFlight && armRetired.has(armChild)) {
       setArmStatus("failed");
       return;
     }
+    // A failing or empty close is the same turn-ends-blind class as an
+    // actionable one, so its bounded retry starts here instead of waiting for a
+    // delivery that can outlive many watch cycles. Backoff still damps a child
+    // that keeps dying, so no arm loop appears, and a retired arm's own late
+    // close outside the delivery still resumes supervision.
     void scheduleRetry(paths, sessionID, client, classification.message, predecessor);
   });
   armChild.on("error", (error) => {
@@ -444,10 +453,12 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     resolveClosed();
     releaseChild();
     settleReadiness("failed");
-    if (restorationInFlight) {
+    if (restorationInFlight && armRetired.has(armChild)) {
       setArmStatus("failed");
       return;
     }
+    // A spawn failure is a supervision gap like a failing close, so it takes
+    // the bounded retry during an in-flight delivery too.
     void scheduleRetry(
       paths,
       sessionID,
