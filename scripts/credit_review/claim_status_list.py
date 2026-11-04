@@ -35,7 +35,11 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
-from urllib.parse import urlparse
+
+from claim_verify.bound_pages import (  # noqa: F401 - re-exported: callers and tests use csl.<name>
+    SPOTIFY_ID, _host_path, _on, bound_surfaces, instagram_handle, registrable_host, tiktok_handle, x_handle,
+    youtube_channel_id,
+)
 
 from .uvn_status import Query, trino
 
@@ -46,7 +50,6 @@ COMPETING_PAID_STATUSES = ("active", "trial")
 CHUNK = 400
 PROFILE_URL = "https://credits.muso.ai/profile/{}"
 UUIDISH = re.compile(r"^[A-Za-z0-9-]{1,64}$")
-SPOTIFY_ID = re.compile(r"^[0-9A-Za-z]{22}$")
 # r3 (hydra #1406 @656d44d5): a catalog outage reads every pending profile as unreadable, build() emitted an
 # EMPTY list and the wave exited 0 having told nobody - the durable process silently stopped being durable
 # exactly when it mattered. A single unreadable profile stays a per-claim UNKNOWN (never sends); when the
@@ -94,89 +97,7 @@ def muso_profile(profile_id: str) -> dict[str, Any] | None:
     return doc if isinstance(doc, dict) and doc.get("id") else None
 
 
-# -- core claimProofChallenge.js parsers (hostAndPath / onHost and the four handle parsers), ported 1:1 ---
-
-def _host_path(url: Any) -> tuple[str, str] | None:
-    if not url or not isinstance(url, str):
-        return None
-    raw = url if re.match(r"^[a-z][a-z0-9+.-]*://", url, re.I) else f"https://{url}"
-    try:
-        u = urlparse(raw)
-    except ValueError:
-        return None
-    if u.scheme not in ("http", "https") or u.username or u.password or not u.hostname:
-        return None
-    host = u.hostname.lower()
-    host = host[4:] if host.startswith("www.") else host
-    return host.rstrip("."), (u.path or "/")
-
-
-def _on(hp: tuple[str, str] | None, hosts: tuple[str, ...]) -> bool:
-    return bool(hp) and any(hp[0] == h or hp[0].endswith("." + h) for h in hosts)
-
-
-def registrable_host(url: Any) -> str | None:
-    hp = _host_path(url)
-    return hp[0] or None if hp else None
-
-
-def instagram_handle(url: Any) -> str | None:
-    hp = _host_path(url)
-    if not _on(hp, ("instagram.com",)):
-        return None
-    m = re.match(r"^/@?([A-Za-z0-9_.]+)", re.sub(r"^/instagram\.com/", "/", hp[1], flags=re.I))
-    if not m or m.group(1).lower() in ("p", "reel", "reels", "stories", "explore", "accounts"):
-        return None
-    return m.group(1).lower().rstrip(".")
-
-
-def x_handle(url: Any) -> str | None:
-    hp = _host_path(url)
-    if not _on(hp, ("x.com", "twitter.com")):
-        return None
-    m = re.match(r"^/@?([A-Za-z0-9_]{1,15})(?:[/?#]|$)", hp[1])
-    if not m or m.group(1).lower() in ("i", "home", "search", "explore", "intent", "share"):
-        return None
-    return m.group(1).lower()
-
-
-def tiktok_handle(url: Any) -> str | None:
-    hp = _host_path(url)
-    if not _on(hp, ("tiktok.com",)):
-        return None
-    m = re.match(r"^/@([A-Za-z0-9_.]+)", hp[1])
-    return m.group(1).lower().rstrip(".") if m else None
-
-
-def youtube_channel_id(url: Any) -> str | None:
-    hp = _host_path(url)
-    if not _on(hp, ("youtube.com",)):
-        return None
-    m = re.match(r"^/channel/([A-Za-z0-9_-]{10,})", hp[1])
-    return m.group(1) if m else None
-
-
-def bound_surfaces(profile: dict[str, Any]) -> list[str]:
-    """The catalog-attributed (bound) surfaces of a profile, as core surfacesFor() builds them."""
-    links = profile.get("links") if isinstance(profile.get("links"), dict) else {}
-    out: list[str] = []
-    site = registrable_host(links.get("website"))
-    if site:
-        out += [f"well_known:{site}", f"dns_txt:{site}", f"meta_tag:{site}"]
-    # X / TikTok posts are NOT bindable pages: they can only be read through a post URL the claimant submits,
-    # which never counts (core #10762 UNVERIFIABLE_KINDS; QA on hydra #1406 @68159ae4).
-    for kind, fn, key in (("instagram_bio", instagram_handle, "instagram"), ("youtube_description", youtube_channel_id, "youtube")):
-        h = fn(links.get(key))
-        if h:
-            out.append(f"{kind}:{h}")
-    for r in profile.get("rawProfiles") or []:
-        if not isinstance(r, dict) or not r.get("id"):
-            continue
-        if r.get("source") == "spotify" and SPOTIFY_ID.match(str(r["id"])):
-            out.append(f"spotify_bio:{r['id']}")
-        if r.get("source") == "youtube_music":
-            out.append(f"youtube_description:{r['id']}")
-    return sorted(set(out))
+# -- bound-page detection lives in claim_verify.bound_pages (the one Python statement; imported above) ---
 
 
 # -- live reads (Trino, read-only) ---------------------------------------------------------------------
