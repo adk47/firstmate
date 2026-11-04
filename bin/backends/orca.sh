@@ -106,6 +106,23 @@ if (data.ok === false) {
 '
 }
 
+# Print error.code from an ok:false Orca JSON envelope on stdin; exit 1 when the
+# envelope is not such a failure or names no code. Callers branch on this code
+# rather than on the rendered prose, whose message field wins over the code.
+fm_backend_orca_json_error_code() {
+  node -e '
+const fs = require("fs");
+let data;
+try {
+  data = JSON.parse(fs.readFileSync(0, "utf8"));
+} catch (err) {
+  process.exit(1);
+}
+if (!data || data.ok !== false || !data.error || !data.error.code) process.exit(1);
+process.stdout.write(String(data.error.code));
+'
+}
+
 fm_backend_orca_run_json() {
   local out
   out=$("$@") || return 1

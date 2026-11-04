@@ -4344,7 +4344,7 @@ test_orca_path_miss_falls_back_to_guarded_git_release() {
   cat > "$case_dir/fakebin/orca" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
-  "worktree rm") printf '{"ok":false,"error":{"code":"selector_not_found","message":"selector_not_found"}}\n'; exit 0 ;;
+  "worktree rm") printf '{"ok":false,"error":{"code":"selector_not_found","message":"No worktree matches selector path"}}\n'; exit 0 ;;
 esac
 exit 0
 SH
