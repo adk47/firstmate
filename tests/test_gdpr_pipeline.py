@@ -27,7 +27,7 @@ from gdpr_pipeline import approval, checks, copy, hide_batch, identity, intake, 
 from gdpr_pipeline import run as run_mod  # noqa: E402
 from gdpr_pipeline.identity import Page, Requester  # noqa: E402
 from gdpr_pipeline.run import Run, backfill_table, page_text  # noqa: E402
-from gdpr_pipeline.store import Store, parse_iso  # noqa: E402
+from gdpr_pipeline.store import Store, now_iso, parse_iso  # noqa: E402
 
 ARPAD = "7950a3c4-db2f-49bb-9acf-0d406bfb09ae"
 OTHER = "11111111-2222-3333-4444-555555555555"
@@ -3179,8 +3179,12 @@ class StaleDecisionRevision(unittest.TestCase):
         rid, _ = self.s.upsert({"keys": ["intercom:5"], "channel": "intercom", "class": "privacy_erasure",
                                 "received_at": "2026-09-01T10:00:00Z", "requester_email": "a@b.co",
                                 "pages": [{"entity": "profile", "id": ARPAD}]})
+        # `decided_at` is NOW, never a hardcoded date: `decide_all(stale_hours=20)` compares it against the wall
+        # clock, so a frozen stamp makes these tests EXPIRE - 2026-11-04 16:00Z, exactly 20h after the old
+        # 2026-11-03T20:00:00Z, `test_an_unchanged_row_is_not_re_decided` went red on main and on every branch.
+        # NOW also keeps this row's meaning: it was decided in the SAME SECOND its page arrived.
         self.s.update(rid, "decide", identity_verdict=verdict, action="hide first",
-                      verdict_detail=[{"id": ARPAD, "verdict": verdict, "why": "x"}], decided_at="2026-11-03T20:00:00Z")
+                      verdict_detail=[{"id": ARPAD, "verdict": verdict, "why": "x"}], decided_at=now_iso())
         self.s.mark_decided(rid)
         return rid
 
