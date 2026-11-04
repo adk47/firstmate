@@ -71,11 +71,13 @@ def sha256_file(path: str) -> str:
 
 # -- selection ------------------------------------------------------------------
 KEYING_PER_RUN = 200      # keys per run: one read-only Trino SELECT per filing, no bytes, no download, no model
+KEYING_SYSTEMIC_MIN = 3   # this many keying failures and ZERO keys = the lookup itself is down: fail the run
 
 
 def key_filings(proof_db: sqlite3.Connection, store: DocVerifyStore, deps: Deps, run_id: str,
                 limit: int = KEYING_PER_RUN, *, keep: Callable[[str], bool] | None = None,
                 paying: set[int] | frozenset[int] | None = None,
+                stats: "Stats | None" = None,
                 log: Callable[[str], None] = lambda m: None) -> tuple[dict[str, list[str]], int]:
     """Key the candidate requests of filings that owe a key, INDEPENDENTLY of the read budget.
 
@@ -89,6 +91,12 @@ def key_filings(proof_db: sqlite3.Connection, store: DocVerifyStore, deps: Deps,
     Returns ({intake_id: keys}, how many filings were keyed) and records `intake_keys` per filing with the
     status `ok` (claims to read), `closed` (every candidate request is closed: nothing to read) or `owed`
     (bytes missing: keyed, and the read waits for blob-backfill). It never reads a document.
+
+    A FAILED keying is a run failure, not a quiet skip (QA #1763 finding 1): a filing left unkeyed because the
+    lookup raised is exactly the missing-key condition this pass exists to end, so the error goes into
+    `Stats.errors` (and the run's log) per filing, and when NOTHING in the pass could be keyed and at least
+    KEYING_SYSTEMIC_MIN filings failed, the outage is systemic - the run fails with the last exception instead of
+    reporting `keyed: 0, errors: []` and exiting 0.
     """
     keyed: dict[str, list[str]] = {}
     n = 0
@@ -99,14 +107,20 @@ def key_filings(proof_db: sqlite3.Connection, store: DocVerifyStore, deps: Deps,
     docs = _intake_docs(proof_db, store, deps, limit, keep=keep, paying=paying, require_bytes=False,
                         settled=store.intake_keyed)
     readable = lambda d: not intake_read.needs_backfill(d, deps.blobs, store.blob_registered)  # noqa: E731
+    failed: list[tuple[str, BaseException]] = []
     for doc in docs:
         try:
             keys = intake_keys(doc, deps)
         except ProviderDown:
             raise
         except Exception as exc:  # noqa: BLE001 - one filing must not stop the keying pass
+            err = f"intake_keys {doc.intake_id[:16]}: {type(exc).__name__}: {str(exc)[:300]}"
+            failed.append((err, exc))
+            if stats is not None:
+                stats.errors.append(err)
             store.step(run_id, doc.sha, "intake_keys", "error",
                        {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}, f"intake:{doc.intake_id}")
+            log(f"KEYING FAILED {doc.intake_id[:16]}: {type(exc).__name__}: {str(exc)[:200]}")
             continue
         store.record_intake_keys(doc.intake_id, doc.candidate_ids, keys)
         ready = readable(doc)
@@ -117,6 +131,13 @@ def key_filings(proof_db: sqlite3.Connection, store: DocVerifyStore, deps: Deps,
         n += 1
         log(f"keyed intake {doc.intake_id[:16]}: {len(doc.candidate_ids)} candidate request(s), "
             f"{len(keys)} open claim(s){'' if ready else ', bytes owed'}")
+    if failed and n == 0 and len(failed) >= KEYING_SYSTEMIC_MIN:
+        # Nothing at all could be keyed: the lookup is down, not these filings. Failing the run pages somebody;
+        # a `keyed: 0` with no error is the silent version of the defect this pass was written to fix.
+        raise RuntimeError(f"keying failed for all {len(failed)} filing(s); last error: {failed[-1][0]}"
+                           ) from failed[-1][1]
+    if failed and stats is not None and n:
+        log(f"KEYING: {len(failed)} filing(s) failed to key and stay unkeyed this run")
     return keyed, n
 
 
@@ -520,7 +541,7 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
             # KEYING FIRST, and on its own budget: a filing is keyed on the first tick after it is filed, no
             # matter how full the read budget is or whether its bytes are here at all (Fable 11-04).
             keyed_this_run, stats.keyed = key_filings(proof_db, store, deps, run_id, KEYING_PER_RUN, keep=keep,
-                                                      paying=paying, log=log)
+                                                      paying=paying, stats=stats, log=log)
             if stats.keyed:
                 log(f"keyed {stats.keyed} filing(s) that owed a key (read budget untouched)")
         if intake_from_store:

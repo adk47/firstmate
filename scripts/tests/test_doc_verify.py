@@ -3961,6 +3961,72 @@ class IntakeKeyingIsNotTheReadBudget(unittest.TestCase):
         self.assertEqual(stats.keyed, 1, "max_docs=0 buys no read, and still keys the filing")
         self.assertEqual(stats.intake, 0)
 
+    def test_a_keying_failure_is_in_the_run_stats_not_silently_dropped(self):
+        """QA #1763 finding 1: a filing left unkeyed because the lookup raised is the exact missing-key condition
+        this pass exists to end, so it must appear in the run's errors instead of `keyed: 0, errors: []`."""
+        from credit_verify.docverify.blobs import BlobStore
+        self.deps.blobs = BlobStore(os.path.join(self.td.name, "blobs"))
+
+        def boom(ids):
+            raise RuntimeError("trino: connection refused")
+        self.deps.requests = boom
+        stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path,
+                                 since="2026-10-27T00:00:00Z")
+        self.assertEqual(stats.keyed, 0)
+        self.assertEqual((stats.intake, rows, self.fetches), (0, [], []))
+        self.assertTrue(any("intake_keys" in e and "connection refused" in e for e in stats.errors),
+                        f"the failure must be in the run's errors: {stats.errors}")
+        self.assertIn("connection refused", json.dumps(stats.as_dict()))
+        step = self.store.db.execute("SELECT step, status FROM dv_steps").fetchone()
+        self.assertEqual(tuple(step), ("intake_keys", "error"))
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM dv_intake_keys").fetchone()[0], 0)
+
+    def test_a_systemic_keying_outage_fails_the_run_instead_of_reporting_zero_keyed(self):
+        """One filing failing is that filing; three with zero keys is the lookup being down. Exiting 0 with
+        `keyed: 0` would hide a fleet-wide outage behind the same shape as "nothing was due"."""
+        from credit_verify.docverify.blobs import BlobStore
+        self.deps.blobs = BlobStore(os.path.join(self.td.name, "blobs"))
+        ps = ProofStore(self.proof_path)
+        for i in range(2):                       # three filings in all, each with a candidate request
+            data = f"%PDF-1.4 filing {i}".encode()
+            ps.file_document(file_sha256=hashlib.sha256(data).hexdigest(), user_id=43, conversation_id="gmail:%d" % i,
+                             candidate_request_ids=[RID], received_at="2026-10-27T20:00:00Z",
+                             matched_by="professional_id")
+        ps.close()
+
+        def boom(ids):
+            raise RuntimeError("trino: connection refused")
+        self.deps.requests = boom
+        with self.assertRaises(RuntimeError) as ctx:
+            runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
+        self.assertIn("keying failed for all 3 filing(s)", str(ctx.exception))
+        self.assertIn("connection refused", str(ctx.exception))
+
+    def test_one_filing_failing_to_key_does_not_stop_the_others(self):
+        from credit_verify.docverify.blobs import BlobStore
+        self.deps.blobs = BlobStore(os.path.join(self.td.name, "blobs"))
+        ps = ProofStore(self.proof_path)
+        for i in range(2):
+            data = f"%PDF-1.4 filing b{i}".encode()
+            ps.file_document(file_sha256=hashlib.sha256(data).hexdigest(), user_id=44, conversation_id="gmail:b%d" % i,
+                             candidate_request_ids=[RID], received_at="2026-10-27T20:00:00Z",
+                             matched_by="professional_id")
+        ps.close()
+        good = self.deps.requests
+        calls = {"n": 0}
+
+        def first_call_fails(ids):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("trino: transient")
+            return good(ids)
+        self.deps.requests = first_call_fails
+        stats, _ = runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
+        self.assertEqual(stats.keyed, 2, "the two filings behind the failure are still keyed")
+        self.assertEqual(len(stats.errors), 1, f"the one failure is reported: {stats.errors}")
+        self.assertIn("trino: transient", stats.errors[0])
+        self.assertIsNone(stats.provider_down, "one filing failing is not an account-wide refusal")
+
     def test_an_already_keyed_filing_is_not_keyed_again(self):
         from credit_verify.docverify.blobs import BlobStore
         self.deps.blobs = BlobStore(os.path.join(self.td.name, "blobs"))
