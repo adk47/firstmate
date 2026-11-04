@@ -301,6 +301,10 @@ If no secondmate scope fits, use the main home or discuss creating an appropriat
 For one-off or infrequent operational work, start with the simplest direct end-to-end path.
 Do not build wrappers, control planes, policy layers, custom verifiers, or automation unless the direct path exposes a concrete blocker or repeated need that justifies the added machinery.
 
+Every captain ask, including one relayed from a secondmate or arriving as an inbox note or Relay mention, enters as a Trigger in `bin/fm-ticket-intake.sh` and leaves intake as exactly one ticket carrying an owner and a first-proof due time.
+Record it, decide new ticket or attach to an existing row, then give it an owner; `close <trigger-id> --reason <reason>` records an ask that needs no ticket, and the generated `bin/fm-ticket-intake.sh ledger` is the asks view rather than any hand-kept list.
+The bound behind it - ten minutes without an owner, one hour without a first proof - is a registered check that pages an unowned or untouched ask, so no ask depends on being remembered.
+
 Before commissioning an investigation, consult existing reports and established evidence.
 Classify the deliverable:
 

@@ -109,6 +109,43 @@ A `manual` home owns its backlog file outright: the lifecycle transitions above 
 Absent or `tasks-axi` selects the default tasks-axi backend.
 The file format is unchanged in both modes; tasks-axi and manual edits produce the same `## In flight`, `## Queued`, and `## Done` sections.
 
+## Captain ask intake bound (config/ticket-intake.env)
+
+[`bin/fm-ticket-intake.sh`](../bin/fm-ticket-intake.sh) is the single owner of the record that turns one captain input into one owned ticket with a time bound, and of the generated captain-asks ledger.
+It exists because an ask nobody owns, and an ask an owner never touches, look exactly like an ask that was never made until someone remembers it.
+Its header owns the record fields, the commands, and the exact findings; this section owns the configuration and the operator contract.
+
+An arriving captain input is a Trigger: `bin/fm-ticket-intake.sh trigger --source <src> [--thread <id>] "<text>"` records it and prints its id.
+The router then gives that Trigger exactly one agent-side ticket: `new <trigger-id> --title <title> [--owner <worker>]` creates a backlog row of kind `captain-ask` with the owner, thread, source, and first-proof due mirrored into its body, while `attach <task-id> --trigger <trigger-id>` binds a row that already exists without rewriting its note.
+`owner <task-id> <worker>` restarts that owner's clock, `proof <task-id>` records an explicit first proof, and `close <trigger-id> --reason <reason>` records an ask that needs no ticket, so "answered, no work needed" is durable too.
+A ticket whose row is Done, archived, or held for the captain is never paged, because a closed or captain-owned row has no owner obligation left.
+
+Two conditions page firstmate, which decides what to do about them (assign, reassign, unblock, relaunch); this script never spawns, steers, or closes work:
+
+- unowned: a Trigger with no ticket, or a ticket with no owner, older than `unowned_page_secs` (default 600, ten minutes).
+- first-proof: an owned ticket whose owner shows no first proof by `due_first_proof`, the owner assignment plus `first_proof_secs` (default 3600, one hour).
+
+A first proof is the owner's first status event after it was given the ticket, its turn-end marker moving after that moment, or an explicit `proof`, so proof is evidence in a durable record rather than a claim in a chat message.
+Each condition pages once when it opens, reminds every `remind_secs` (default 1800), and reports recovered when it clears.
+`check` also imports every note still pending in the captain inbox as a Trigger, keeping that note's own source and thread, and skips a note whose body carries `automated, not the captain`, because the captain inbox is the captain's surface rather than a log sink.
+
+`ledger` is the generated captain-asks view, one row per ticket and per unticketed Trigger: arrival, source, thread, the router's decision latency, owner, first-proof due, first proof and its evidence, and row state, ending in a coverage line.
+`ledger --open` hides answered asks and rows that are done or held, and `status` prints the coverage counts and whether the check is armed.
+A hand-kept asks list is evidence at best, never the record.
+
+`config/ticket-intake.env` is optional, local, and gitignored.
+It holds `KEY=value` lines, it is parsed rather than sourced, and a set environment variable of the same name wins.
+
+```sh
+FM_TICKET_INTAKE_UNOWNED_PAGE_SECS=600  # an ask or ticket this long without an owner pages
+FM_TICKET_INTAKE_FIRST_PROOF_SECS=3600  # an owner's first proof is due this long after assignment
+FM_TICKET_INTAKE_REMIND_SECS=1800       # reminder interval while a finding holds
+```
+
+Recording the first Trigger or ticket arms the check, which writes `state/ticket-intake.check.sh` and binds it with `bin/fm-check-register.sh`, so the watcher polls it on its normal slow-poll cadence.
+`bin/fm-ticket-intake.sh arm` and `disarm` are the explicit switches, and `disarm` removes the shim, its trust binding, and `state/.ticket-intake`.
+`FM_TICKET_INTAKE_NOW` pins the clock for a test run.
+
 ## Runtime backend (config/backend / FM_BACKEND)
 
 For spawn-capable adapters, the runtime session-provider backend controls where task windows/endpoints are created, captured, sent to, watched, and killed.

@@ -130,6 +130,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-fable-runway-alert.sh` | The runway check's outward actions: the once-per-episode handoff note, Grok doorbell, and notifications |
 | `fm-fleet-stall-check.sh` | Registered check that wakes firstmate when several live workers stall on the model gateway at once, pages the captain when it persists, and probes the local CLIProxyAPI gateway |
 | `fm-sentry-watch.sh`     | Registered check that watches every Sentry project the API lists, pages on P0/P1/regression, cross-checks the CTO rail, and emits a DARK wake when its own visibility is lost |
+| `fm-ticket-intake.sh`    | Record every captain ask as a Trigger, bind it to one owned ticket with a first-proof due time, page an ask with no owner after ten minutes and an owner with no first proof after an hour, and generate the captain-asks ledger |
 | `fm-pr-lib.sh`           | Own canonical task and PR validation plus private atomic PR-poll publication, merge-notification identity, and retirement |
 | `fm-pr-poll.sh`          | Provide the byte-static watcher program for validated PR/MR-poll sidecars           |
 | `fm-pr-check.sh`         | Record validated `pr=` and `pr_head=` values, then atomically arm a static merge poll |
