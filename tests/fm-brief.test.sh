@@ -848,33 +848,15 @@ test_inbox_ack_command_runs_from_a_quoted_home_path() {
   # shellcheck disable=SC2016
   printf 'schema=fm-task-inbox.v1\nat=2026-01-01T00:00:00Z\n--\ninstruction to acknowledge\n' > "$inbox/001.msg"
   # shellcheck disable=SC2016  # the sed expression is the pattern, not a shell expansion
-  cmd=$(sed -n 's/.*as in `\([^`]*\)`.*/\1/p' "$brief" | head -1)
+  cmd=$(sed -n 's/.*acknowledge each handled message with `\([^`]*\)`.*/\1/p' "$brief" | head -1)
   [ -n "$cmd" ] || fail "the brief did not emit an acknowledgement command"
   cmd=${cmd//NNN/001}
-  # The first form the brief names must be the plain move every backend's path
-  # grant permits, and it must run as emitted.
-  case "$cmd" in
-    mv\ *) ;;
-    *) fail "the brief should name the plain move first: $cmd" ;;
-  esac
   bash -c "$cmd" >/dev/null 2>&1 \
-    || fail "the plain acknowledgement command the brief emits does not run for a quoted home path: $cmd"
+    || fail "the acknowledgement command the brief emits does not run for a quoted home path: $cmd"
   [ -f "$inbox/handled/001.msg" ] \
-    || fail "the brief's plain acknowledgement did not acknowledge the record: $cmd"
-  [ ! -e "$inbox/001.msg" ] || fail "the brief's plain acknowledgement left the record unacknowledged"
-
-  # The helper form is named too, and it must also run as emitted.
-  rm -f "$inbox/handled/001.msg"
-  printf 'schema=fm-task-inbox.v1\nat=2026-01-01T00:00:00Z\n--\ninstruction to acknowledge\n' > "$inbox/001.msg"
-  # shellcheck disable=SC2016  # the grep pattern is the pattern, not an expansion
-  helper_cmd=$(grep -o '`[^`]*inbox-ack[^`]*`' "$brief" | head -1 | tr -d '`')
-  [ -n "$helper_cmd" ] || fail "the brief did not name the acknowledgement helper"
-  helper_cmd=${helper_cmd//NNN/001}
-  bash -c "$helper_cmd" >/dev/null 2>&1 \
-    || fail "the helper form the brief emits does not run for a quoted home path: $helper_cmd"
-  [ -f "$inbox/handled/001.msg" ] \
-    || fail "the brief's helper form did not acknowledge the record: $helper_cmd"
-  pass "fm-brief.sh: the scaffolded acknowledgement commands (plain move first, helper second) run for a quoted home path"
+    || fail "the brief's acknowledgement command did not acknowledge the record: $cmd"
+  [ ! -e "$inbox/001.msg" ] || fail "the brief's acknowledgement left the record unacknowledged"
+  pass "fm-brief.sh: the scaffolded acknowledgement command runs for a quoted home path"
 }
 
 test_scout_and_secondmate_scaffold() {

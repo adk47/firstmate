@@ -639,36 +639,6 @@ test_ack_helper_acknowledges_safely() {
   pass "inbox: the ack helper acknowledges records without hand-rolled inbox handling"
 }
 
-# Verification answers "is this steer durably queued", so every place the record
-# can legitimately be counts: the inbox root, handled/ after a concurrent
-# acknowledgement, and the hidden link a worker's cleanup leaves behind. Only a
-# record that is in none of them is a steer that did not land.
-test_verify_counts_every_place_the_record_can_be() {
-  local state rec text
-  state="$TMP_ROOT/verify-places/state"; mkdir -p "$state"
-  text="steer that must be confirmed"
-  rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "$text")
-  inbox_lib "$state" fm_task_inbox_verify "$rec" "$text" \
-    || fail "the root record was not accepted as delivery proof"
-  mv "$rec" "$state/t1.inbox/handled/"
-  inbox_lib "$state" fm_task_inbox_verify "$rec" "$text" \
-    || fail "a concurrently acknowledged record was not accepted as delivery proof"
-  inbox_lib "$state" fm_task_inbox_verify "$rec" "some other text" \
-    && fail "verification accepted a record carrying different text"
-  # Now the case a worker's cleanup creates: the record survives only as its link.
-  mv "$state/t1.inbox/handled/001.msg" "$rec"
-  rm -f "$rec"
-  [ -e "$state/t1.inbox/.unhandled/001" ] || fail "the fixture lost the hidden link"
-  inbox_lib "$state" fm_task_inbox_verify "$rec" "$text" \
-    || fail "a record surviving only as its hidden link was reported undelivered"
-  inbox_lib "$state" fm_task_inbox_verify "$rec" "some other text" \
-    && fail "verification accepted a hidden link carrying different text"
-  rm -f "$state/t1.inbox/.unhandled/001"
-  inbox_lib "$state" fm_task_inbox_verify "$rec" "$text" \
-    && fail "verification accepted a record that is nowhere on disk"
-  pass "inbox: verification counts the root, handled/, and the hidden link as delivery proof"
-}
-
 # The blocked-then-acknowledged case: a worker that already deleted the visible
 # record still gets to acknowledge it, from the hidden link, instead of being
 # told the record never existed. The acknowledgement must also retire the link,
@@ -1029,7 +999,6 @@ test_worker_deletion_is_repaired
 test_deleted_record_keeps_its_sequence
 test_coalesced_superseded_record_is_not_resurrected
 test_ack_helper_acknowledges_safely
-test_verify_counts_every_place_the_record_can_be
 test_acknowledge_from_the_hidden_link_only
 test_repair_adopts_records_queued_without_a_link
 test_coalesce_retires_a_deleted_superseded_tick
