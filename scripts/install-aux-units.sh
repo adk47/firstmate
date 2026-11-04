@@ -2003,6 +2003,27 @@ CRONVERIFIEREVAL
 chmod 644 /etc/cron.d/hydra-verifier-eval
 for _ve in credits claims merges; do install -d -m 750 "/var/lib/hydra/verifier-eval/inbox/$_ve"; done
 
+# ─── Claim-status daily AUDIT (claim-lane-resume-c2) ───────────
+# ONE SENDER PER FAMILY (Fable driver 11-03 20:2xZ, G7 follow-up): the cron line runs MODE=dry-run. This wave
+# builds the audience and audits the catalog at 01:15Z; it sends NOTHING. The claim-status SENDS come from the
+# daily signed list only (credit-verify-outbound's claim family, a list signed on the deployed head - #1590),
+# and the audience (claim_status_list.build(): pending holds and organizations with a bindable page, WS2 lead /
+# firstmate 042; band B/C persons wait for the proof ask) is ONE definition, which the daily signed rebuild
+# (#1634) resolves from the same module over the deployed decider's dry-run lines. A parallel 01:15Z apply would be a second sender for one family and would
+# publish sends whose audience/policy predates the head - the discipline this lane upheld on 11-03.
+# Consequence, stated so nobody reads the counts as delivery: the run.log line is labelled AUDIT ("would send"
+# per segment), a catalog outage still fails closed with rc=3 and no list (r3 #1406), and until #1634 lands a
+# qualifying claimant gets NO note from this wave - audit-only is the scope of this change, not an unfinished wire.
+# scripts/claim-status-daily.sh; runbook in its header. MODE=apply still exists for a human one-off with a
+# wired code, never from cron. Stop switches: touch /etc/hydra/claim-status-daily.disabled (this wave) or
+# /etc/hydra/credit-ops-notes.disabled (all notes).
+cat > /etc/cron.d/hydra-claim-status << CRONCLAIMSTATUS
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+15 1 * * * root MODE=dry-run $HYDRA_ROOT/scripts/claim-status-daily.sh >> /var/lib/hydra/credit-review/claim-status-daily.log 2>&1
+CRONCLAIMSTATUS
+chmod 644 /etc/cron.d/hydra-claim-status
+
 # ─── Codex OAuth keepalive at 15-min cadence ──────────────────
 # PROACTIVE complement to the watchdog: openclaw-watchdog.sh pages REACTIVELY
 # (journal 401 signature, after the fleet is already on the mini fallback);

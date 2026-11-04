@@ -121,6 +121,7 @@ from credit_review import verify_ledger  # noqa: E402
 from credit_review import uvn_status  # noqa: E402
 from credit_review import withdrawal_confirm  # noqa: E402
 from credit_review import claim_proof_ask  # noqa: E402
+from credit_review import claim_status_list  # noqa: E402
 from credit_review import verify_notify  # noqa: E402
 from credit_review.evidence import EvidenceBuilder, parse_ts  # noqa: E402
 from credit_review.judge import DEFAULT_MIN_BALANCE_USD, Judge, account_balance_usd  # noqa: E402
@@ -704,6 +705,82 @@ def cmd_claim_proof_ask(args: argparse.Namespace) -> int:
     return 1 if report.failed or werr else 0
 
 
+CLAIM_STATUS_DAILY_KILL_SWITCH = Path(os.environ.get("CLAIM_STATUS_DAILY_KILL_SWITCH", "/etc/hydra/claim-status-daily.disabled"))
+CLAIM_STATUS_DAILY_LIST = Path(os.environ.get("CLAIM_STATUS_DAILY_LIST", "/var/lib/hydra/credit-review/claim-status-list.json"))
+HEALTH_CHECK = Path(os.environ.get("CLAIM_STATUS_HEALTH_CHECK", str(Path(__file__).resolve().parent / "paid-status" / "health_check.py")))
+
+
+def _claim_status_health(since: str) -> tuple[int, str]:
+    """p2's warm-up health guard over every Intercom note sent since `since` (exit 0 healthy, 3 stop, 2 could
+    not check). Anything but 0 stops the run: a check that cannot complete is a stop, never a pass."""
+    import subprocess
+    try:
+        out = subprocess.run([sys.executable, str(HEALTH_CHECK), "--since", since], capture_output=True, text=True,
+                             timeout=900, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return 2, f"health check did not run ({type(exc).__name__})"
+    return out.returncode, (out.stdout or out.stderr).strip()[-400:]
+
+
+def cmd_claim_status_daily(args: argparse.Namespace) -> int:
+    """The durable claim-status AUDIT (node-8 cron.d hydra-claim-status; claim_status_list module docstring):
+    build the list from live reads and render it per segment, sending nothing - the cron runs MODE=dry-run, and
+    the claim-status SENDS come from the daily signed list only (#1634's rebuild -> credit-verify-outbound's
+    claim family, signed on the deployed head). The run.log line is therefore labelled AUDIT: its counts are
+    "would send", never delivery (QA on #1406: scheduled delivery is wired by #1634, not by this command).
+    MODE=apply exists for a human one-off with a wired code and is never what cron runs."""
+    for ks in (CLAIM_STATUS_DAILY_KILL_SWITCH, CREDIT_OPS_NOTES_KILL_SWITCH):
+        if ks.exists():
+            log(f"claim-status-daily: kill switch present at {ks}; nothing built or sent")
+            print("NO_REPLY")
+            return 0
+    started = datetime.now(timezone.utc)
+    try:
+        doc = claim_status_list.build()
+    except claim_status_list.CatalogUnreadable as exc:  # r3 #1406: a catalog outage is a FAILED run, not an empty one
+        log(f"claim-status-daily: CATALOG_UNREADABLE {json.dumps(exc.counts, sort_keys=True)}; nothing sent")
+        print(f"CLAIM STATUS DAILY: nothing sent; {exc}.")
+        return 3
+    except Exception as exc:  # a list that cannot be built sends nothing, loudly
+        log(f"claim-status-daily: list build FAILED ({type(exc).__name__}: {str(exc)[:200]}); nothing sent")
+        print(f"CLAIM STATUS DAILY: nothing sent; the list could not be built ({type(exc).__name__}).")
+        return 1
+    path = Path(args.list or CLAIM_STATUS_DAILY_LIST)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(doc), encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    line: dict = {"mode": args.mode, "list": doc["counts"], "segments": {}}
+    failed = False
+    for seg in args.segments:
+        if CLAIM_STATUS_DAILY_KILL_SWITCH.exists() or CREDIT_OPS_NOTES_KILL_SWITCH.exists():
+            line["stopped"] = "kill switch"
+            break
+        rep = claim_proof_ask.run_status(list_path=str(path), segment=seg, mode=args.mode, max_users=args.max_users)
+        # QA on #1406 @4493585c: in a dry-run the gate VALIDATES the note and accepts the recipient; sent_notes stays 0,
+        # so logging only sent_notes wrote "sent: 0" on the audit's own headline number. The audit's number is the would-be
+        # send count, kept in its own field so it can never be read as delivery.
+        line["segments"][seg] = {"sent": rep.sent_notes,
+                                 "would_send": rep.validated + rep.recipient_ok if args.mode != "apply" else 0,
+                                 "refused": rep.refused_users, "failed": rep.failed_users,
+                                 "already_told": rep.already_asked, "support_hold": rep.support_hold,
+                                 "second_claim": rep.second_claim, "over_cap": rep.over_daily_max,
+                                 "not_pending": rep.not_pending, "deferred": rep.deferred_users,
+                                 "halted": rep.halted or ""}
+        print(claim_proof_ask.render(rep, args.mode, seg, status=True))
+        failed = failed or bool(rep.failed_users) or bool(rep.halted)
+        if args.mode == "apply" and rep.sent_notes:
+            rc, out = _claim_status_health(started.strftime("%Y-%m-%dT%H:%M"))
+            line["segments"][seg]["health"] = {"rc": rc, "out": out[-200:]}
+            if rc != 0:
+                line["stopped"] = f"health guard rc={rc}"
+                failed = True
+                break
+    log("claim-status-daily AUDIT " + json.dumps(line, sort_keys=True))
+    return 1 if failed else 0
+
+
 def cmd_claim_status(args: argparse.Namespace) -> int:
     if CREDIT_OPS_NOTES_KILL_SWITCH.exists():
         log(f"credit-ops-notes kill switch present at {CREDIT_OPS_NOTES_KILL_SWITCH}; nothing sent")
@@ -1097,6 +1174,16 @@ def parser() -> argparse.ArgumentParser:
                          "(t01b 584: a deferred user takes no render and no slot)")
     cp.set_defaults(fn=cmd_claim_proof_ask)
 
+    csd = sub.add_parser("claim-status-daily", help="the durable claim-status wave (node-8 cron.d hydra-claim-status): "
+                         "build the list from live reads (holds + organizations with a bindable page), send paid then free")
+    csd.add_argument("--mode", choices=["apply", "dry-run"], default="dry-run")
+    csd.add_argument("--segments", nargs="+", choices=["paid", "free"], default=["paid", "free"])
+    # One cap source (hydra #1617 / #1541): the policy's shared_daily_cap.claim, read through the runner's own
+    # accessor - a runner-local constant never bounds the day. Unreadable policy -> 0 -> nothing sends.
+    csd.add_argument("--max-users", type=int, default=claim_proof_ask.claim_daily_cap(),
+                     help="per segment; the policy's shared_daily_cap.claim (claim-proof-ask and claim-status share it) bounds the day")
+    csd.add_argument("--list", default="", help="where to write the built list (default /var/lib/hydra/credit-review/claim-status-list.json)")
+    csd.set_defaults(fn=cmd_claim_status_daily)
     cs = sub.add_parser("claim-status", help="no-ask status note to pending claimants who get no proof ask "
                                              "(Fable 1023 ruling 3; send-locked in the gate until firstmate's GO)")
     cs.add_argument("--list", required=True, help="the claim list (<= 30 h old); rows with audience 'status', or not B/C / no readable surface")

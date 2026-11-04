@@ -415,6 +415,14 @@ def is_status_audience(c: dict[str, Any]) -> bool:
     return band not in BANDS or str(c.get("platform") or "").strip().lower() not in READABLE
 
 
+def _priority(c: dict[str, Any]) -> int:
+    """The list's send order key (lower first); a missing or malformed one sorts with the rest (1)."""
+    try:
+        return int(c.get("priority", 1))
+    except (TypeError, ValueError):
+        return 1
+
+
 def run_status(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int = 50,
                preview_dir: str | None = None, query: Query = trino, wrapper: str = verify_notify.WRAPPER,
                runner: verify_notify.Runner = verify_notify._run, ledger_path: str | None = None,
@@ -440,7 +448,10 @@ def run_status(*, list_path: str, segment: str, mode: str = "dry-run", max_users
     report.listed = len(by_id)
     db = verify_ledger.connect(ledger_path or verify_ledger.DEFAULT_PATH)
     day = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
-    offered = sorted((c for c in by_id.values() if bool(c.get("paid")) is want_paid), key=lambda c: int(c["claim_id"]))
+    # A list may carry a `priority` (claim_status_list: 0 = paying with a churn signal, Fable [key=pro-at-risk]);
+    # the order only, never the rules. Without one every row ties and the order is the old oldest-claim-first.
+    offered = sorted((c for c in by_id.values() if bool(c.get("paid")) is want_paid),
+                     key=lambda c: (_priority(c), int(c["claim_id"])))
     keys = [f"claim-{int(c['claim_id'])}" for c in offered]
     done = verify_ledger.blocked_ids(db, keys, STATUS_CAMPAIGN)
     asked = verify_ledger.blocked_ids(db, keys, CAMPAIGN)
