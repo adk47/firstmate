@@ -101,6 +101,10 @@ class ClaimReport(verify_notify.Report):
     not_pending: int = 0
     no_email: int = 0
     support_hold: int = 0
+    # [key=per-user-counters] 'another claim of the same user (next run)': any claim of a user this run has
+    # already accounted for - queued for a note, held by the 7-day window, filtered as not-signed, over today's
+    # cap, or missing an email/professional id. One slot per user is consumed at whichever branch they reached, so
+    # the user-level counters above count PEOPLE; this is the claims left over behind them. Nothing alerts on it.
     second_claim: int = 0
     already_asked: int = 0
     over_daily_max: int = 0
@@ -377,24 +381,38 @@ def run(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int =
         if st is None or st[0] != "pending" or st[1] != uid:
             report.not_pending += 1
             continue
+        # [key=per-user-counters] the per-user dedupe sits ABOVE the account checks, because those counters are
+        # user-level too (an account is the user's): below them, a claimant with three claims was counted three
+        # times for the same missing email, since nothing had consumed their slot yet.
+        if uid in seen:
+            report.second_claim += 1
+            continue
         if str(uid) in support_contacts:
             _support_held(report, uid, scoped, bool(c.get("paid")))
             continue
         acct = accts.get(uid) or {}
         if not acct.get("email"):
-            report.no_email += 1
+            report.no_email += 1             # [key=per-user-counters]: the account is the user's, so ONE per user
+            seen.add(uid)
             continue
         if not acct.get("professional_id"):
             report.no_professional_id += 1   # Intercom identity unverifiable: held, never to the gate
+            seen.add(uid)                    # [key=per-user-counters]: likewise ONE per user
             continue
-        if uid in seen:
-            report.second_claim += 1
-            continue
+        # [key=per-user-counters] a counter beside a user-level line is per USER (r5's rule on #1681, applied to the
+        # rest of the class; c2 follow-up, Fable driver 11-04 08:4xZ). Both of these are properties of the USER, not
+        # of the claim - one message per user - but the loop runs per claim, so a claimant with three eligible pending
+        # claims used to be counted three times and the line read "3 held / over cap" for one person who would have
+        # received one note. Consuming the slot here makes the number true and, because it is the same `seen` set the
+        # duplicate check consults, sends their remaining claims to 'another claim of the same user (next run)' where
+        # they belong. It changes no send: the slot was never going to be spent twice.
         if verify_notify.not_signed(mode, uid):          # QA #1611: before the budget slot
             report.outcomes.append({"user": str(uid), "result": "filtered", "reason": "not_in_signed_accepted"})
+            seen.add(uid)                                # [key=per-user-counters]: ONE row per user, not per claim
             continue
         if len(payloads) >= budget:
-            report.over_daily_max += 1
+            report.over_daily_max += 1                   # [key=per-user-counters]: ONE per user
+            seen.add(uid)
             continue
         seen.add(uid)
         payloads.append(_payload(c, acct))
@@ -482,15 +500,23 @@ def run_status(*, list_path: str, segment: str, mode: str = "dry-run", max_users
         if st is None or st[0] != "pending" or st[1] != uid:
             report.not_pending += 1
             continue
+        # r5 on #1681: ONE hold per USER - the window is per user, so a held claimant's remaining claims are
+        # 'next run', not new holds. It sits above the account checks for the same reason they had to move: an
+        # account is the user's, so no_email/no_professional_id are user-level counters too (r5 on #1742).
+        if uid in seen:
+            report.second_claim += 1
+            continue
         if str(uid) in support_contacts:
             _support_held(report, uid, scoped, bool(c.get("paid")))
             continue
         acct = accts.get(uid) or {}
         if not acct.get("email"):
-            report.no_email += 1
+            report.no_email += 1             # [key=per-user-counters]: the account is the user's, so ONE per user
+            seen.add(uid)
             continue
         if not acct.get("professional_id"):
-            report.no_professional_id += 1
+            report.no_professional_id += 1   # Intercom identity unverifiable: held, never to the gate
+            seen.add(uid)                    # [key=per-user-counters]: likewise ONE per user
             continue
         # [key=user-window] the same read the SEND makes, at the check's own grain: blocked_ids above is keyed per
         # CLAIM (claim-<id>), so a heavy claimant whose OTHER claim was noted within 7 days is accepted here and held
@@ -498,9 +524,6 @@ def run_status(*, list_path: str, segment: str, mode: str = "dry-run", max_users
         # Holding it here makes 'accepted' mean what the send will do, and counting it says how many were held.
         # The window is DAY-granular on both sides on purpose (verify_messages.day is written and compared as a day
         # string), so a note ages out at midnight rather than at a time of day: never mix in an instant here.
-        if uid in seen:                                  # r5 on #1681: ONE hold per USER - the window is per user, so
-            report.second_claim += 1                     # a held claimant's remaining claims are 'next run', not new holds
-            continue
         cross = verify_ledger.claim_cross_check(db, STATUS_CAMPAIGN, [f"claim-{cid}"],
                                                 user_key=str(acct.get("email") or ""), day=day, user_id=str(uid))
         if cross == "messaged_7d":
@@ -515,11 +538,20 @@ def run_status(*, list_path: str, segment: str, mode: str = "dry-run", max_users
             # window) pending note would suppress a second, eligible pending claim of the same user (QA on #1681).
             report.ask_audience += 1
             continue
+        # [key=per-user-counters] a counter beside a user-level line is per USER (r5's rule on #1681, applied to the
+        # rest of the class; c2 follow-up, Fable driver 11-04 08:4xZ). Both of these are properties of the USER, not
+        # of the claim - one message per user - but the loop runs per claim, so a claimant with three eligible pending
+        # claims used to be counted three times and the line read "3 held / over cap" for one person who would have
+        # received one note. Consuming the slot here makes the number true and, because it is the same `seen` set the
+        # duplicate check consults, sends their remaining claims to 'another claim of the same user (next run)' where
+        # they belong. It changes no send: the slot was never going to be spent twice.
         if verify_notify.not_signed(mode, uid):          # QA #1611: before the budget slot
             report.outcomes.append({"user": str(uid), "result": "filtered", "reason": "not_in_signed_accepted"})
+            seen.add(uid)                                # [key=per-user-counters]: ONE row per user, not per claim
             continue
         if len(payloads) >= budget:
-            report.over_daily_max += 1
+            report.over_daily_max += 1                   # [key=per-user-counters]: ONE per user
+            seen.add(uid)
             continue
         seen.add(uid)
         p = _payload(c, acct)
@@ -622,6 +654,13 @@ def _reminders(report: ClaimReport, by_id: dict[int, dict[str, Any]], *, db: Any
         if verify_notify.not_signed(mode, c["user_id"]):     # QA #1611: before the budget slot
             report.outcomes.append({"user": str(c["user_id"]), "result": "filtered", "reason": "not_in_signed_accepted"})
             continue
+        # THIS LOOP HAS NO PER-USER SEEN SET, unlike the two note loops, and these three counters are therefore per
+        # DUE REMINDER. That is only safe because of an invariant in another module: verify_ledger.claim() refuses a
+        # second note to one user on one day, and a reminder is due at note_day + 7, so a second due reminder for the
+        # same user cannot pass the gate and cannot be counted twice (r5 on #1742 proved it by trying: the second
+        # attempt reports 'claimed', not a send). Nothing here says so - hence this comment. IF THAT CAP IS EVER
+        # RELAXED, this loop must gain a per-user set at the same time, or it becomes both a double send and a
+        # per-reminder count in one change.
         if len(payloads) >= budget:
             report.over_daily_max += 1
             continue
@@ -656,7 +695,7 @@ def render(report: ClaimReport, mode: str, segment: str, reminders: bool = False
                      ("held: emailed support@ in 90 days", report.support_hold),
                      (f"held: {STALE_GMAIL_REASON} (cs-gmail could vouch for them)", report.stale_source_hold),
                      ("no account email", report.no_email),
-                     ("second claim of the same user (next run)", report.second_claim),
+                     ("another claim of the same user (next run)", report.second_claim),
                      ("over today's cap (next run)", report.over_daily_max),
                      ("already asked (earlier run)", report.already_asked),
                      ("routed to the claim-status note", report.status_audience),

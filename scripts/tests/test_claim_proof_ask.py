@@ -125,6 +125,56 @@ class ClaimProofAskTests(unittest.TestCase):
         self.assertIn("old", rep.halted)
         self.assertEqual(gate.calls, [])
 
+    def test_the_over_cap_counter_is_per_user_not_per_claim(self):
+        """[key=per-user-counters] c2 follow-up (Fable driver 11-04): one message per user, so a claimant who fills
+        the cap with another user first and then holds three eligible pending claims is ONE held message, not three.
+        Before this, every one of their claims re-hit the cap branch and the audit line read 'over today's cap 3'
+        for a single person (each such claim re-ran the check instead of consuming the user's slot)."""
+        q = replica({1: ("pending", 8), 2: ("pending", 7), 3: ("pending", 7), 4: ("pending", 7)},
+                    {7: "u7@x.com", 8: "u8@x.com"})
+        rep, gate = self.go(self.lst([claim(1, 8), claim(2, 7), claim(3, 7), claim(4, 7)]), q, max_users=1)
+        self.assertEqual(len(gate.calls), 1)                       # the slot went to user 8
+        self.assertEqual(rep.over_daily_max, 1)                    # ONE user over the cap, not the other two claims
+        self.assertEqual(rep.second_claim, 2)                      # their remaining claims say 'next run', as they are
+
+    def test_the_not_signed_filter_is_one_row_and_one_count_per_user(self):
+        """The signed check is per USER, so a claimant outside the signed set produces one filtered row whatever
+        number of claims they hold - the row carries no claim id, so per-claim rows were literally the same row."""
+        import unittest.mock
+        q = replica({c: ("pending", 7) for c in (1, 2, 3)}, {7: "u7@x.com"})
+        with unittest.mock.patch.object(claim_proof_ask.verify_notify, "APPLY_ONLY", frozenset()):
+            rep, gate = self.go(self.lst([claim(1, 7), claim(2, 7), claim(3, 7)]), q)
+        self.assertEqual(gate.calls, [])
+        self.assertEqual([o["user"] for o in rep.outcomes if o.get("reason") == "not_in_signed_accepted"], ["7"])
+        self.assertEqual(rep.second_claim, 2)
+
+    def test_no_email_and_no_professional_id_are_per_user_too(self):
+        """r5 on #1742: the boundary was two counters short. Both are read from the USER's account and printed in the
+        same render() list as the cap line, so 'no account email 3' for one claimant with three claims was the same
+        error as the cap double count - and the reader is reading a count of people, not deduplicating claims."""
+        claims = [claim(1, 7), claim(2, 7), claim(3, 7), claim(4, 8), claim(5, 8)]
+        states = {c["claim_id"]: ("pending", c["user_id"]) for c in claims}
+        accounts = {7: ("", ""), 8: ("u8@x.com", "")}       # 7 has no email; 8 has an email but no professional id
+
+        def q(sql):
+            if "public.claiming" in sql:
+                return [[str(c), s, str(u)] for c, (s, u) in states.items()]
+            return [[str(u), e, "Jane", pro, ""] for u, (e, pro) in accounts.items()]
+        rep, gate = self.go(self.lst(claims), q)
+        self.assertEqual(gate.calls, [])
+        self.assertEqual(rep.no_email, 1)                   # ONE user, not three claims
+        self.assertEqual(rep.no_professional_id, 1)         # ONE user, not two claims
+        self.assertEqual(rep.second_claim, 3)               # their leftover claims report as 'another claim'
+
+    def test_two_users_over_the_cap_are_two(self):
+        """The fix must not flatten different users into one: the counter still counts people."""
+        q = replica({1: ("pending", 9), 2: ("pending", 7), 3: ("pending", 8), 4: ("pending", 7)},
+                    {7: "u7@x.com", 8: "u8@x.com", 9: "u9@x.com"})
+        rep, gate = self.go(self.lst([claim(1, 9), claim(2, 7), claim(3, 8), claim(4, 7)]), q, max_users=1)
+        self.assertEqual(len(gate.calls), 1)
+        self.assertEqual(rep.over_daily_max, 2)                     # two people over the cap
+        self.assertEqual(rep.second_claim, 1)                       # user 7's second claim is 'next run' 
+
     def test_one_claim_per_user_paid_first_bands_b_c_only_never_a_found_code(self):
         claims = [claim(1, 7), claim(2, 7), claim(3, 8, band="A"), claim(4, 9, code_found=True),
                   claim(5, 10, paid=False), claim(6, 11, band="c")]
@@ -385,6 +435,34 @@ class ClaimStatusTests(unittest.TestCase):
                                          ledger_path=self.ledger, support_contacts=kw.pop("support", frozenset()),
                                          now=kw.pop("now", NOW), **kw)
         return rep, gate
+
+    def test_the_status_account_counters_are_per_user_too(self):
+        """The same rule on the claim-status loop: 'no account email' is a fact about the person, who would get one
+        note, so three of their claims must read 1 - and this only holds if the per-user dedupe sits above the
+        account checks (moving it below them leaves this test red)."""
+        claims = [claim(1, 7, band="D"), claim(2, 7, band="D"), claim(3, 7, band="D")]
+        states = {c["claim_id"]: ("pending", 7) for c in claims}
+        accounts = {7: ("", "")}
+
+        def q(sql):
+            if "public.claiming" in sql:
+                return [[str(c), s, str(u)] for c, (s, u) in states.items()]
+            return [[str(u), e, "Jane", pro, ""] for u, (e, pro) in accounts.items()]
+        rep, gate = self.status(self.lst(claims), q)
+        self.assertEqual(gate.calls, [])
+        self.assertEqual(rep.no_email, 1)
+        self.assertEqual(rep.second_claim, 2)
+
+    def test_the_status_over_cap_counter_is_per_user_not_per_claim(self):
+        """Same rule on the claim-status note ([key=per-user-counters]): the 7-day window is per user, the cap is one
+        message per user, so the over-cap count must be per user too - r5's finding on #1681, closed for this class."""
+        q = replica({1: ("pending", 8), 2: ("pending", 7), 3: ("pending", 7), 4: ("pending", 7)},
+                    {7: "u7@x.com", 8: "u8@x.com"})
+        rep, gate = self.status(self.lst([claim(1, 8, band="D"), claim(2, 7, band="D"), claim(3, 7, band="D"),
+                                          claim(4, 7, band="D")]), q, max_users=1)
+        self.assertEqual(len(gate.calls), 1)
+        self.assertEqual(rep.over_daily_max, 1)
+        self.assertEqual(rep.second_claim, 2)
 
     def test_audience_holds_orgs_unreadable_and_explicit_status_rows_only(self):
         claims = [claim(1, 1, band="D"),                        # hold -> status
