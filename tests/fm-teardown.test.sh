@@ -4025,6 +4025,54 @@ test_plain_git_release_refuses_dirty_worktree() {
   pass "guarded plain git never forces: a dirty worktree refuses and stays intact"
 }
 
+# A pool listing whose only entries are longer paths that merely contain this
+# worktree's path: a prefix sibling (`<wt>2`) and a path whose tail ends with it.
+# Neither is this worktree's lease, so membership must not be claimed for them -
+# claiming it would route an unheld worktree through `treehouse return`, which
+# refuses outright here.
+add_longer_sibling_pool_treehouse() {  # <case-dir> <worktree>
+  local case_dir=$1 wt=$2
+  {
+    printf '%s\n' '#!/usr/bin/env bash' 'set -u'
+    printf 'wt=%q\n' "$wt"
+    cat <<'SH'
+case "${1:-}" in
+  status)
+    printf '1  leased  %s2  busy\n' "$wt"
+    printf '2  leased  z%s  busy\n' "$wt"
+    exit 0
+    ;;
+  return)
+    echo "treehouse: no such worktree in this pool" >&2
+    exit 1
+    ;;
+esac
+exit 0
+SH
+  } > "$case_dir/fakebin/treehouse"
+  chmod +x "$case_dir/fakebin/treehouse"
+}
+
+test_pool_listing_does_not_claim_a_longer_sibling_path() {
+  local case_dir rc branch
+  case_dir=$(make_case pool-longer-sibling)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  add_longer_sibling_pool_treehouse "$case_dir" "$case_dir/wt"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "pool-longer-sibling: teardown should release through guarded plain git"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'plain git worktree remove' "$case_dir/stderr" \
+    "pool-longer-sibling: a longer pool path was claimed as this worktree's lease"
+  assert_absent "$case_dir/wt" \
+    "pool-longer-sibling: the released worktree directory is still present"
+  git -C "$case_dir/project" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    && fail "pool-longer-sibling: the task branch ref survived a successful release"
+  pass "pool membership is matched per listing field, so a longer sibling path is not this worktree's lease"
+}
+
 # A worktree this host's treehouse pool provably does not hold and that is not a
 # registered linked worktree of its project has no verifiable release path. The
 # refusal must land before the agent is killed AND before the pending backlog
@@ -4270,6 +4318,7 @@ test_proven_change_watch_allows_teardown
 test_missing_return_tool_refuses_before_killing_the_agent
 test_plain_git_release_removes_clean_registered_worktree
 test_plain_git_release_refuses_dirty_worktree
+test_pool_listing_does_not_claim_a_longer_sibling_path
 test_unpooled_unregistered_worktree_refuses_before_killing_the_agent
 test_uninspectable_project_refuses_before_killing_the_agent
 test_unreportable_pool_listing_refuses_before_killing_the_agent
