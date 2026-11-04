@@ -222,6 +222,48 @@ SH
   done
 }
 
+# fm_fake_treehouse_status <fakebin>
+# Drops the `fm-fake-treehouse-status` shim a fake treehouse delegates
+# `treehouse status` to: the base-branch banner line the real tool always prints,
+# then one leased row per linked worktree of the repo in $PWD other than its main
+# checkout - the listing a pool that holds those worktrees reports. A fixture
+# whose worktree is not a linked worktree of that repo adds its path to
+# <fakebin>/fm-fake-treehouse-held, one per line, to have the pool report it held.
+fm_fake_treehouse_status() {
+  local fakebin=$1
+  cat > "$fakebin/fm-fake-treehouse-status" <<'SH'
+#!/usr/bin/env bash
+held="$(dirname "$0")/fm-fake-treehouse-held"
+printf 'main\n'
+if top=$(git rev-parse --show-toplevel 2>/dev/null); then
+  git worktree list --porcelain | sed -n 's/^worktree //p' |
+    while IFS= read -r path; do
+      [ "$path" != "$top" ] || continue
+      printf '1  leased  %s\n' "$path"
+    done
+fi
+[ ! -f "$held" ] || while IFS= read -r path; do
+  [ -n "$path" ] || continue
+  printf '1  leased  %s\n' "$path"
+done < "$held"
+SH
+  chmod +x "$fakebin/fm-fake-treehouse-status"
+}
+
+# fm_fake_treehouse <fakebin>
+# A fake treehouse that reports this repo's pool through the shared status shim
+# and succeeds silently at everything else, including `return --force <wt>`.
+fm_fake_treehouse() {
+  local fakebin=$1
+  fm_fake_treehouse_status "$fakebin"
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = status ]; then exec "$(dirname "$0")/fm-fake-treehouse-status"; fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+}
+
 # fm_fake_crash_injector <fakebin>
 # Drops an `fm-crash-inject <pid>` shim that a PATH fake calls to simulate a
 # hard crash of the process under test. It SIGKILLs <pid> and then returns only
