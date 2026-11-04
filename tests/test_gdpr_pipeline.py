@@ -3406,6 +3406,54 @@ class FrozenBatchManifest(unittest.TestCase):
                                [self.item(329, "2025-10-20"), self.item(58, "2026-09-01")])
         self.assertEqual([x["register_no"] for x in got], [329, 58])
 
+    def pinned(self, items):
+        import hashlib, tempfile
+        f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump([{"request_id": x["row"], "register_no": x["register_no"],
+                    "body_sha": hashlib.sha256((x["text"] or "").encode()).hexdigest()} for x in items],
+                  f)
+        f.close()
+        self.addCleanup(os.unlink, f.name)
+        return f.name
+
+    def live(self, no, due, text):
+        return {"register_no": no, "row": f"row-{no}", "due_at": due, "kind": "ask", "text": text,
+                "to": f"user{no}@example.com"}
+
+    def test_a_pinned_batch_file_selects_by_row_and_body_and_survives_intake(self):
+        # firstmate ruling 2026-11-04: the GO names the frozen set; the file carries the row AND the body it was
+        # approved with, so the run - not a person - can tell an intake addition from a copy change
+        cli = _cli()
+        frozen = [self.live(329, "2025-10-20", "letter A"), self.live(58, "2026-09-01", "letter B")]
+        path = self.pinned(frozen)
+        got = cli.select_batch(self.args(manifest=path), "ask", frozen)
+        self.assertEqual([x["register_no"] for x in got], [329, 58])
+        digest = approval.digest("ask", got)
+        added = frozen + [self.live(381, "2026-12-04", "letter C")]         # the hourly tick creates a request
+        self.assertEqual(approval.digest("ask", cli.select_batch(self.args(manifest=path), "ask", added)), digest)
+
+    def test_a_changed_body_refuses_because_copy_is_approved_per_body(self):
+        cli = _cli()
+        frozen = [self.live(329, "2025-10-20", "letter A")]
+        path = self.pinned(frozen)
+        edited = [self.live(329, "2025-10-20", "letter A, reworded after the GO")]
+        with self.assertRaises(SystemExit) as e:
+            cli.select_batch(self.args(manifest=path), "ask", edited)
+        self.assertEqual(e.exception.code, 1)
+
+    def test_a_pinned_row_that_is_gone_refuses(self):
+        cli = _cli()
+        path = self.pinned([self.live(329, "2025-10-20", "letter A")])
+        with self.assertRaises(SystemExit) as e:
+            cli.select_batch(self.args(manifest=path), "ask", [self.live(58, "2026-09-01", "letter B")])
+        self.assertEqual(e.exception.code, 1)
+
+    def test_a_pinned_row_named_twice_still_renders_one_letter(self):
+        cli = _cli()
+        one = self.live(329, "2025-10-20", "letter A")
+        path = self.pinned([one, one])
+        self.assertEqual(len(cli.select_batch(self.args(manifest=path), "ask", [one])), 1)
+
     def test_both_send_commands_accept_a_manifest(self):
         src = open(os.path.join(HERE, "gdpr-pipeline.py")).read()
         self.assertIn('select_batch(a, "ask", run.asks(now))', src)

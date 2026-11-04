@@ -153,7 +153,15 @@ That is not theoretical. On 2026-11-04 a 141-letter ask batch was approved as `2
 142 letters with digest `9f402f38a26acb2f`. The approval no longer named anything sendable and the send refused —
 correctly, and the correct response was NOT to re-approve whatever was open.
 
-`--manifest FILE` (JSON list of register numbers, or one per line, `#` allowed) names the rows instead:
+`--manifest FILE` names the rows instead. Two entry forms:
+
+```
+[329, 323, 58]                                                  register numbers, cut from a dry run
+[{"request_id": "<row>", "register_no": 329, "body_sha": "…"}]   a PINNED batch file: row + the exact body it was
+                                                                approved with
+```
+
+and one register number per line also works (`#` comments allowed).
 
 ```
 gdpr-pipeline.py ask --manifest batch-1104.json          # dry run: digest only, as always
@@ -161,11 +169,18 @@ gdpr-pipeline.py ask --manifest batch-1104.json --send --approved-by U0AN41ZBTRU
 ```
 
 - the digest is computed over **exactly those rows**, so intake after the approval lands in the next batch;
-- order is still statutory (`oldest_first`); a register number named twice still renders one letter;
+- order is still statutory (`oldest_first`); a row named twice still renders one letter;
 - **it fails closed, exit 2**, if any manifest row is not in the sendable set now (closed, already sent, verdict
   changed, or a typo). Sending the remainder would be a *different* batch under the same approval;
+- in the pinned form, a letter whose **body** no longer hashes to the pinned `body_sha` also refuses: copy is
+  approved per body, so a copy edit is a fresh approval and never a re-cut;
 - an empty, unreadable or unparseable manifest refuses, as does `--manifest` together with `--limit` (two selectors,
   no defined winner).
+
+**The re-cut rule the approver gave (2026-11-04), now enforced here rather than remembered:** a batch whose digest
+changes only because *intake added rows* (no removals, no body change, same kind, same copy ref) carries the existing
+GO once the delta and the new digest are posted; **any removal or body change needs a fresh approval**. Pin the batch
+you were granted and the rule never has to be applied by hand.
 
 Cut a manifest from a dry run, and re-render immediately before sending: `--manifest` is what makes that safe, so the
 digest to quote to the approver is the one the manifest produces, never the one an unfiltered run produces.
