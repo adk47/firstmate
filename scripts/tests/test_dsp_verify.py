@@ -1427,11 +1427,210 @@ class D5b(unittest.TestCase):
         self.assertIn("admin=PacedAdmin(admin_api.AdminClient())", src)
 
 
+class MergeCandidates(unittest.TestCase):
+    """Fable 178 / p1 179: duplicate profiles from needs_profile_link verdicts -> decider ledger proposals (shadow)."""
+    ME, LINKED, OTHER = ("aaaaaaaa-0000-0000-0000-000000000001", "bbbbbbbb-0000-0000-0000-000000000002",
+                         "cccccccc-0000-0000-0000-000000000003")
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.dsp = os.path.join(self.tmp, "dsp.sqlite")
+        self.ledger = os.path.join(self.tmp, "ledger.sqlite3")
+        self.store = Store(self.dsp)
+        self.n = 0
+
+    def reading(self, credited, state="CAPTURED", at=FRESH):
+        return {"state": state, "helper_verdict": "UNKNOWN", "helper_reason": "person_not_linked_on_spotify",
+                "claimant_name_match": True, "captured_at": at, "capture_ids": ["sp-1"], "credited_in_family": credited}
+
+    def verdict(self, sources, reason_class="needs_profile_link", rid=None, kind="verify"):
+        self.n += 1
+        rid = rid or f"11111111-1111-1111-1111-{self.n:012d}"
+        p = packet(request_id=rid, profile_id=self.ME, profile_name="Jane Mixer",
+                   capture={"request_id": "cap-1", "requested_at": REQ_AT, "person_name": "Jane Mixer",
+                            "roles": {"Mixing": {"sources": sources}}})
+        run = f"dsp-{kind}-{self.n}"
+        self.store.start_run(run, kind)
+        v = {"request_id": rid, "user_id": 42, "profile_id": self.ME, "track_id": "trk-1", "verdict": "WAIT",
+             "reason_class": reason_class, "reason": reason_class + ": x", "need": "link_profile", "confidence": 0.5,
+             "anchor": "none", "approve_roles": [], "decline_roles": [], "role_edit_roles": [], "blockers": [],
+             "signals": [], "evidence": {"capture_request_id": "cap-1"}, "roles": []}
+        self.store.add_verdict(run, v, p, True)
+        return rid
+
+    def query(self, claims):
+        def q(sql):
+            self.sql = sql
+            return "\n".join(f'"{p}","{u}","{s}"' for p, u, s in claims)
+        return q
+
+    def test_a_duplicate_profile_becomes_one_shadow_candidate_and_another_accounts_claim_is_contested(self):
+        from credit_verify.dspverify import merge_candidates as mc
+        held = lambda holder, name="Jane Mixer", cid="spotify:jane": [[name, "mixer", False, cid, holder]]  # noqa: E731
+        r1 = self.verdict({"spotify": self.reading(held(self.LINKED))})                       # candidate
+        r2 = self.verdict({"spotify": self.reading(held(self.OTHER, cid="spotify:jane2"))})    # contested
+        self.verdict({"spotify": self.reading(held(None))})                                    # unheld id: link case
+        self.verdict({"spotify": self.reading(held(self.ME))})                                 # its own profile
+        self.verdict({"spotify": self.reading(held(self.LINKED, name="Jane Mixxer"))})          # not the exact name
+        self.verdict({"spotify": self.reading(held(self.LINKED), at="2026-10-27T00:00:00Z")})  # stale capture
+        self.verdict({"spotify": self.reading(held(self.LINKED), state="WAITING")})            # not captured
+        self.verdict({"spotify": self.reading(held(self.LINKED))}, reason_class="person_not_linked")
+        self.verdict({"spotify": self.reading(held(self.LINKED))}, kind="packets")             # supplied packet
+        q = self.query([(self.ME, "42", "processed"), (self.OTHER, "77", "processed"),
+                        (self.LINKED, "99", "rejected")])                                       # rejected: not live
+        rep = mc.run(dsp_path=self.dsp, ledger_path=self.ledger, query=q)
+        self.assertEqual((rep["candidates"], rep["contested"], rep["written"]), (1, 1, 0))     # dry run: nothing
+        self.assertFalse(os.path.exists(self.ledger))
+        got = {r["request_id"]: r for r in rep["rows"]}
+        self.assertEqual(set(got), {r1, r2})
+        self.assertEqual((got[r1]["class"], got[r1]["profile_linked"], got[r1]["claimed_by"]["linked"]),
+                         ("candidate", self.LINKED, []))
+        self.assertEqual(got[r2]["class"], "contested")
+        self.assertIn("deletedat IS NULL", self.sql)
+        rep = mc.run(dsp_path=self.dsp, ledger_path=self.ledger, query=q, apply=True)
+        self.assertEqual(rep["written"], 2)
+        self.assertEqual(mc.run(dsp_path=self.dsp, ledger_path=self.ledger, query=q, apply=True)["written"], 0)  # once
+        db = sqlite3.connect(self.ledger)
+        rows = db.execute("SELECT kind, class, mode, rule_version, profile_presented, profile_linked, dsp, "
+                          "contributor_id, source_ref FROM proposals ORDER BY id").fetchall()
+        self.assertEqual([r[:3] for r in rows], [("merge_candidate", "candidate", "shadow"),
+                                                 ("merge_candidate", "contested", "shadow")])
+        self.assertTrue(rows[0][3].startswith("merge-candidate/1+"))
+        self.assertTrue(rows[0][8].startswith("dsp_verdicts:"))
+        for sql in ("UPDATE proposals SET class='candidate'", "DELETE FROM proposals"):
+            with self.assertRaises(sqlite3.DatabaseError):
+                db.execute(sql)
+        with self.assertRaises(sqlite3.DatabaseError):
+            db.execute("INSERT INTO proposals (run_id, decided_at, kind, class, mode, rule_version, request_id, "
+                       "profile_presented, dsp, contributor_id, claimed_by, evidence, source_ref, reason) "
+                       "VALUES ('r','t','merge_candidate','candidate','apply','v','x','p','spotify','c','{}','{}','s','r')")
+        self.assertFalse(db.execute("SELECT name FROM sqlite_master WHERE name='decisions'").fetchone())  # never there
+
+    def test_same_account_claim_is_a_candidate_and_an_unreadable_claim_table_writes_nothing(self):
+        from credit_verify.dspverify import merge_candidates as mc
+        self.verdict({"spotify": self.reading([["Jane Mixer", "mixer", False, "spotify:jane", self.LINKED]])})
+        rep = mc.run(dsp_path=self.dsp, ledger_path=self.ledger, query=self.query([(self.LINKED, "42", "pending")]))
+        self.assertEqual(rep["rows"][0]["class"], "candidate")                     # the same account (42)
+
+        def down(sql):
+            raise RuntimeError("trino down")
+        with self.assertRaises(RuntimeError):
+            mc.run(dsp_path=self.dsp, ledger_path=self.ledger, query=down, apply=True)
+        self.assertFalse(os.path.exists(self.ledger))
+
+
+    # -- QA #1520 r2 finding 2: a malformed claim row must not become "unclaimed" -------------------------
+    def test_a_malformed_linked_claim_row_is_unreadable_and_writes_nothing(self):
+        """The dangerous direction: an unparseable row used to be SKIPPED, so the linked profile looked unclaimed and
+        --apply recorded an owner-confirmed `candidate` (a merge) while another account may hold a live claim."""
+        from credit_verify.dspverify import merge_candidates as mc
+        self.verdict({"spotify": self.reading([["Jane Mixer", "mixer", False, "spotify:jane", self.LINKED]])})
+        for bad in (f'"{self.LINKED}","77"',                      # status column missing entirely
+                    f'"{self.LINKED}","77",""',                   # status present but empty
+                    f'"{self.LINKED}","nobody","processed"',      # user id is not a number
+                    f'"dddddddd-0000-0000-0000-000000000009","77","processed"'):   # a profile we never asked about
+            with self.subTest(row=bad):
+                with self.assertRaises(RuntimeError):
+                    mc.run(dsp_path=self.dsp, ledger_path=self.ledger, query=lambda sql, bad=bad: bad, apply=True)
+                if os.path.exists(self.ledger):
+                    db = sqlite3.connect(self.ledger)
+                    self.assertEqual(db.execute("SELECT count(*) FROM proposals").fetchone()[0], 0,
+                                     "an unreadable claim table must write NOTHING")
+                    db.close()
+                    os.unlink(self.ledger)
+
+    def test_a_blank_line_and_a_rejected_claim_are_still_not_errors(self):
+        """Fail-closed must not become fail-on-noise: the Trino CSV ends with a newline and `rejected` is a dead
+        claim by rule - only a row that cannot be PARSED is unreadable."""
+        from credit_verify.dspverify import merge_candidates as mc
+        self.verdict({"spotify": self.reading([["Jane Mixer", "mixer", False, "spotify:jane", self.LINKED]])})
+        q = lambda sql: f'\n\n"{self.LINKED}","99","rejected"\n\n'   # noqa: E731
+        rep = mc.run(dsp_path=self.dsp, ledger_path=self.ledger, query=q, apply=True)
+        self.assertEqual((rep["rows"][0]["class"], rep["written"]), ("candidate", 1))
+
+    def test_one_row_per_fact_even_when_two_apply_runs_overlap(self):
+        """The pre-read can always lose a race: it is a SELECT that another --apply can commit past. The ledger's own
+        unique index + conflict-safe insert is what makes the second run a no-op instead of a permanent double count
+        (the table is append-only by trigger, so a duplicate could never be removed)."""
+        from credit_verify.dspverify import merge_candidates as mc
+        from credit_review import proposals
+        self.verdict({"spotify": self.reading([["Jane Mixer", "mixer", False, "spotify:jane", self.LINKED]])})
+        q = self.query([(self.LINKED, "99", "pending")])
+        self.assertEqual(mc.run(dsp_path=self.dsp, ledger_path=self.ledger, query=q, apply=True)["written"], 1)
+        real = proposals.written_sources
+        try:
+            proposals.written_sources = lambda db, kind: set()          # the racing run's view: the pair looks absent
+            rep = mc.run(dsp_path=self.dsp, ledger_path=self.ledger, query=q, apply=True)
+        finally:
+            proposals.written_sources = real
+        self.assertEqual(rep["written"], 0, "a duplicate must not be counted as written")
+        db = sqlite3.connect(self.ledger)
+        self.assertEqual(db.execute("SELECT count(*) FROM proposals").fetchone()[0], 1)
+        self.assertEqual(db.execute("SELECT name FROM sqlite_master WHERE name='proposals_once'").fetchone(),
+                         ("proposals_once",))
+        db.close()
+
+    def test_the_proposals_table_itself_refuses_a_second_row_for_the_same_fact(self):
+        from credit_review import proposals
+        row = {"kind": "merge_candidate", "class": "candidate", "rule_version": "v", "request_id": "r",
+               "profile_presented": "p", "profile_linked": "l", "dsp": "spotify", "contributor_id": "spotify:x",
+               "claimed_by": {}, "evidence": {}, "source_ref": "dsp_verdicts:1", "reason": "why"}
+        a = sqlite3.connect(self.ledger, timeout=30)
+        proposals.ensure(a)
+        self.assertEqual(proposals.add(a, "run-a", row, decided_at="2026-10-30T00:00:00Z"), 1)
+        a.commit()                                                     # run-a finished and released the ledger
+        b = sqlite3.connect(self.ledger, timeout=30)                   # a second process, same ledger
+        proposals.ensure(b)
+        self.assertEqual(proposals.add(b, "run-b", row, decided_at="2026-10-30T00:00:01Z"), 0)
+        self.assertEqual((a.execute("SELECT count(*), count(DISTINCT run_id) FROM proposals").fetchone()), (1, 1))
+        a.close()
+        b.close()
+
+    def test_a_ledger_that_already_holds_duplicates_fails_loudly_with_the_remedy(self):
+        """Creating the unique index on a duplicated table cannot succeed - and must never be skipped silently, or the
+        one-row guarantee would be absent exactly where it is needed."""
+        from credit_review import proposals
+        db = sqlite3.connect(self.ledger)
+        db.executescript(proposals.SCHEMA)
+        db.execute("DROP TRIGGER proposals_no_update")
+        for _ in range(2):
+            db.execute("INSERT INTO proposals (run_id, decided_at, kind, class, mode, rule_version, request_id, "
+                       "profile_presented, dsp, contributor_id, claimed_by, evidence, source_ref, reason) "
+                       "VALUES ('r','t','merge_candidate','candidate','shadow','v','q','p','spotify','spotify:x',"
+                       "'{}','{}','dsp_verdicts:1','why')")
+        db.commit()
+        db.close()
+        db = sqlite3.connect(self.ledger)
+        with self.assertRaises(RuntimeError) as ctx:
+            proposals.ensure(db)
+        self.assertIn("duplicate", str(ctx.exception))
+        self.assertIn("GROUP BY 1,2,3", str(ctx.exception))
+        db.close()
+
 class PodDriverSource(unittest.TestCase):
     def test_claimant_holder_carries_the_request_profile_id(self):
         # core #11010 claimantMatch: a linked holder matches only when its profile_id is the request's profileId.
         src = (Path(__file__).resolve().parents[1] / "credit_verify/dspverify/pod_driver.py").read_text()
         self.assertIn('t["profile_id"] if mine_id else catalog_of(p[0])', src)
+
+    def test_a_merged_away_holder_resolves_to_its_survivor(self):
+        # self-merge-core-b1 2026-10-30: Sissi's Tidal holder b55a327a was merged away; the packet named the loser.
+        from types import SimpleNamespace as NS
+
+        from credit_verify.dspverify import pod_driver as pd
+        live = lambda pk, deleted=False: NS(pk=pk, deleted=NS(is_deleted=deleted))   # noqa: E731
+        survivors = {"loser": live("survivor"), "survivor": live("survivor"), "gone": live("gone", True),
+                     "other": live("other")}
+        follow = survivors.get
+        self.assertEqual(pd.live_holder([NS(pk="loser")], follow), "survivor")              # merged away -> survivor
+        self.assertEqual(pd.live_holder([NS(pk="loser"), NS(pk="survivor")], follow), "survivor")   # same person
+        self.assertIsNone(pd.live_holder([NS(pk="gone")], follow))                           # deleted: no holder
+        self.assertIsNone(pd.live_holder([NS(pk="nobody")], follow))                         # not served
+        self.assertIsNone(pd.live_holder([NS(pk="loser"), NS(pk="other")], follow))          # two people: unknown
+        self.assertIsNone(pd.live_holder([], follow))
+        src = (Path(__file__).resolve().parents[1] / "credit_verify/dspverify/pod_driver.py").read_text()
+        self.assertIn("lambda pk: fc._follow_merges(CatalogProfile, pk)", src)
+        self.assertNotIn('.only("raw_profile_ids").first()', src)
 
 if __name__ == "__main__":
     unittest.main()

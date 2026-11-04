@@ -49,6 +49,21 @@ def fold_name(x):
     return " ".join(re.sub(r"[^0-9a-zA-Z]+", " ", x).lower().split())
 
 
+def live_holder(holders, follow):
+    """The ONE live catalog profile holding a raw DSP id, or None (self-merge-core-b1, 2026-10-30: Sissi's Tidal
+    holder b55a327a was MERGED AWAY and the packet still named it). `holders`: every catalog profile document holding
+    the raw id; `follow(pk)`: the surviving document after merges (fc._follow_merges), or None. A merged-away holder
+    resolves to its survivor, a deleted one drops; two different survivors are ambiguous -> None (unknown identity:
+    never a contradiction, never a merge candidate)."""
+    alive = set()
+    for h in holders:
+        s = follow(str(getattr(h, "pk", "") or ""))
+        if s is None or getattr(getattr(s, "deleted", None), "is_deleted", False):
+            continue
+        alive.add(str(s.pk))
+    return next(iter(alive)) if len(alive) == 1 else None
+
+
 def count_collisions(search, profile_id, name, cap=None):
     """Other live catalog profiles whose folded name equals `name`: the "$name" text index phrase
     search (`search(phrase, limit)` -> profile docs), then an exact folded compare; deleted and
@@ -169,11 +184,12 @@ def main(payload):
         pcat = {}
 
         def catalog_of(pid):
-            """The catalog profile holding this raw profile id (identity across DSPs), or None."""
+            """The LIVE catalog profile holding this raw profile id (identity across DSPs), followed through
+            merges (live_holder), or None."""
             if pid not in pcat:
                 try:
-                    c = CatalogProfile.objects(raw_profile_ids=pid).only("raw_profile_ids").first()
-                    pcat[pid] = str(c.pk) if c is not None else None
+                    pcat[pid] = live_holder(list(CatalogProfile.objects(raw_profile_ids=pid).only("id")),
+                                            lambda pk: fc._follow_merges(CatalogProfile, pk))
                 except Exception:  # noqa: BLE001 - unknown identity, never a contradiction
                     pcat[pid] = None
             return pcat[pid]

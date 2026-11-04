@@ -25,12 +25,18 @@ Subcommands:
                    (dspverify/link_proposal.py); rows go to `link_proposals` in the decider ledger. Never core.
   link-queue       The shadow proposals as a blind JSONL queue for verifier-eval-v1 (no basis, no confidence).
   link-score       Score verifier-eval-v1's labels ({proposal_id: correct|wrong|unsure}) against the bar.
+  merge-candidates Duplicate-profile merge candidates (Fable 178): a needs_profile_link verdict whose capture credits
+                   the claimant's exact name under a contributor id ANOTHER Muso profile holds -> one shadow row
+                   (kind merge_candidate, class candidate | contested) in the decider ledger's `proposals` table.
+                   Dry run unless --apply. Never links, merges or approves; the executor never reads proposals.
   export           The standing (latest) verdict per request as JSONL on stdout.
   summary          Counts of the standing verdicts (by verdict, class, need, anchor, paid).
 
-Writes only its own store (/var/lib/hydra-credit-verify/dsp-verify.sqlite). Never writes to core,
-never messages anyone, never approves / declines / merges: there is no apply mode. The only side
-effect outside the store is the fresh capture itself (a raw refresh, like any capture).
+Writes only its own store (/var/lib/hydra-credit-verify/dsp-verify.sqlite) and shadow rows in the decider
+ledger's append-only `proposals` / `link_proposals` tables (link-proposals: unless --dry-run;
+merge-candidates: only with --apply). Never writes to core, never messages anyone, never approves /
+declines / links / merges: nothing it writes changes a credit or a profile. The only side effect
+outside the store is the fresh capture itself (a raw refresh, like any capture).
 Kill switches: /etc/hydra/credit-dsp-verify.disabled, and the shared /etc/hydra/credit-verify.disabled.
 """
 
@@ -152,6 +158,24 @@ def cmd_d5b(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_merge_candidates(args: argparse.Namespace) -> int:
+    """Fable 178 / p1 179: duplicate-profile merge candidates -> the decider ledger's `proposals` (shadow)."""
+    from credit_verify.dspverify import merge_candidates
+    from credit_verify.dspverify.store import DEFAULT_PATH
+    from credit_verify.proof.stage2 import trino_query
+    if (k := killed()):
+        log(f"kill switch present at {k}; no merge candidates")
+        return 0
+    rep = merge_candidates.run(dsp_path=args.store or DEFAULT_PATH, ledger_path=args.ledger, query=trino_query,
+                               apply=args.apply)
+    rows = rep.pop("rows")
+    print(json.dumps(rep, sort_keys=True))
+    if args.json:
+        for r in rows:
+            print(json.dumps(r, sort_keys=True, default=str))
+    return 0
+
+
 def read_packets(path: str) -> list[dict]:
     text = sys.stdin.read() if path == "-" else Path(path).read_text(encoding="utf-8")
     text = text.strip()
@@ -258,6 +282,12 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--max-requests", type=int, default=300)
     s.add_argument("--max-groups", type=int, default=200)
     s.set_defaults(fn=cmd_d5b)
+    s = sub.add_parser("merge-candidates", help="duplicate-profile merge candidates -> decider ledger proposals "
+                                                 "(shadow; dry run unless --apply)")
+    s.add_argument("--ledger", default="/var/lib/hydra/credit-review/ledger.sqlite3")
+    s.add_argument("--apply", action="store_true", help="append the shadow rows (otherwise print only)")
+    s.add_argument("--json", action="store_true", help="also print every row")
+    s.set_defaults(fn=cmd_merge_candidates)
     s = sub.add_parser("verify-packets")
     s.add_argument("packets", help="JSON list or JSONL file of packets, or '-' for stdin")
     s.add_argument("--log", action="store_true", help="also log the verdicts to the shadow store")
