@@ -319,3 +319,13 @@ PY
   [[ "$output" == *"Q14 the hide carries no day count"* ]]
   [[ "$output" == *"Q14 no name-match sufficiency promise"* ]]
 }
+
+@test "CAN FAIL: cs-health 2026-11-01 - dropping the no-profile line or the one-page claim-code line is caught" {
+  FAQ_MD="$FAKE/workspaces/support/reference/faq.md"
+  sed -i.bak -e 's/claim or create your profile first, then add the credit\./add the credit./' \
+             -e 's/Yes, the code on one page you control is enough\./Yes./' "$FAQ_MD"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no-profile users get claim/create first"* ]]
+  [[ "$output" == *"claim-code: the code on one page is enough"* ]]
+}

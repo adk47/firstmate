@@ -13,7 +13,11 @@ Visit app.muso.ai and sign up with your email. The Lite plan is free forever.
 <!-- approved: caroline-instructions-1029 §2.3 -->
 Claims are confirmed by something only the profile's owner can do, so nobody can claim a profile that isn't theirs. After you claim, you get a message telling you the one thing to do, for example placing a short code on a page you control, and once we see it the claim is approved automatically, usually within a day. If that isn't possible for you, the same message tells you what paperwork works instead. We never ask for ID.
 
-(Agent note: Caroline never issues a code, never names a surface for one and never reads a claim's state; the claim lane sends that message. A claim that was closed: answer with the decline paragraph in `credits-and-profiles.md`, "A declined request". Anything about THEIR claim: `verification-handoff`.)
+**"Is the code on one page enough?"** (they placed the code and ask whether it covers every platform or profile link):
+<!-- approved: cs-health-1101 action 5 (c) -->
+Yes, the code on one page you control is enough.
+
+(Agent note: Caroline never issues a code, never names a surface for one and never reads a claim's state; the claim lane sends that message. The one-page line answers only the "is one enough / do I need it everywhere" question; it never says the claim went through. A claim that was closed: answer with the decline paragraph in `credits-and-profiles.md`, "A declined request". Anything about THEIR claim: `verification-handoff`.)
 
 ### Can I merge duplicate profiles?
 <!-- approved: caroline-instructions-1029 §2.4 -->
@@ -38,6 +42,12 @@ Use the GDPR acknowledgement in `gdpr-erasure-requests.md` ("Approved acknowledg
 ## Credits
 
 ### How do I add a missing credit?
+**No profile yet** (they want to add a first credit and have no Muso profile, or can't see "Add Missing Credits" / "Add Credits" because of that):
+<!-- approved: cs-health-1101 action 5 (b) -->
+You need a Muso profile before you can add a credit: claim or create your profile first, then add the credit.
+
+(Agent note: then the claim how-to above, "How do I claim my profile?", if they ask how. Never the credit-process paragraph to someone who has no profile yet.)
+
 1. Log in to your account
 2. Web: open your profile and click "Add Credits" at the top right of the Summary panel, then search for the track or paste its Spotify link. App: open the track or album and tap "Add Missing Credits"
 3. Specify your role (producer, songwriter, engineer, etc.)

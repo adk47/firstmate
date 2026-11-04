@@ -265,6 +265,10 @@ require "$CV" "unmerge hand-off maps the other profile or artist" "\`details.sus
 require "$AGENTS" "timeframe ban exempts the approved GDPR + claim sentences" "the GDPR acknowledgement's \"within one month of today\" and the claim paragraph's \"usually within a day\""
 require "$SOUL" "timeframe ban exempts the approved GDPR + claim sentences" "Only exceptions, verbatim: the GDPR ack's \"within one month of today\", the claim paragraph's \"usually within a day\"."
 
+# --- cs-health 2026-11-01 action 5: two answers Caroline was missing (Fable o1 §6) ----
+require "$FAQ" "no-profile users get claim/create first, not the credit process" "You need a Muso profile before you can add a credit: claim or create your profile first, then add the credit."
+require "$FAQ" "claim-code: the code on one page is enough" "Yes, the code on one page you control is enough."
+
 # --- Q14 "Delete my profile under GDPR" (GDPR acknowledgement v2, ruled 2026-11-01) ----
 GDPR="$WS/reference/gdpr-erasure-requests.md"
 # The FULL acknowledgement is pinned, not fragments (QA + r5 on #1619: a fragment gate let "All credit records on

@@ -637,3 +637,39 @@ PYEOF
   [ "$status" -eq 0 ]
   echo "$output" | grep -qx ok
 }
+
+@test "cs-health 2026-11-01: a proof thread (customer owes or offered proof) is suppressed; the sweep copy carries no barred clause" {
+  run python3 - <<'PYEOF'
+import os
+from importlib import util
+spec = util.spec_from_file_location('n', os.environ['NOTIFY'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+B = mod.CAROLINE_ADMIN_ID
+def conv(parts, src_body="hi", src_att=None):
+    return {"source": {"author": {"type": "user", "email": "a@b.com"}, "body": src_body, "attachments": src_att or []},
+            "state": "open", "conversation_parts": {"conversation_parts": parts + [{"author": {"type": "admin", "id": B}, "body": "ok"}]}}
+U = lambda body, att=None: {"author": {"type": "user"}, "body": body, "attachments": att or []}
+A = lambda body: {"author": {"type": "admin", "id": B}, "body": body}
+cases = {
+  "asks where to send proof (215476537576655)": conv([U("where do I send the proof for these credits?")]),
+  "just attached a PDF (215476537922292)": conv([U("here you go", [{"type": "upload", "name": "evidence.pdf"}])]),
+  "Spanish claim with a photo in the source (215476540587247)": conv([], "quiero reclamar mis creditos", [{"type": "upload", "name": "img.jpg"}]),
+  "Spanish words only": conv([U("les mando el contrato y las pruebas")]),
+  "we asked for proof (uvn-status ask)": conv([A("it's waiting on one thing from you, something that shows your Producer credit")]),
+  "claim code owed": conv([A("To confirm it's you, please add the code MUSO-N26B to your Spotify artist bio")]),
+  "doc thank-you sent": conv([A("Thank you. Everything you send here is recorded against your account and your open requests")]),
+}
+for name, c in cases.items():
+    assert mod.conversation_suppressed(c, "a@b.com", B) == "proof-thread", name
+# a plain overdue thread with no proof in it still gets the (trimmed) note
+assert mod.conversation_suppressed(conv([U("any news on my analytics?")]), "a@b.com", B) is None
+# no false hit on ordinary words
+assert not mod.proof_thread(conv([U("I documented nothing, the screen is blank, see my profile")]))
+m = mod.MESSAGE.lower()
+for bad in ("nothing needed", "nothing is needed", "flagged", "priority", "business day"):
+    assert bad not in m, bad
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qx ok
+}

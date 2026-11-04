@@ -3489,9 +3489,12 @@ rd_locked() { sed 's/^readonly REPLY_DUE_CORRECTION_APPROVED=1$/readonly REPLY_D
 Thank you,
 Caroline, Muso Support" ]
   run -0 "$LOCKED" send --campaign reply-ref --copy w --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ --dry-run
-  # r5 504 / c1 (19:4xZ): /w IS the captain-approved faq §2.4 paragraph (faq.md line 20) VERBATIM, first letter lowercased
+  # r5 504 / c1 (19:4xZ): /w IS the captain-approved faq §2.4 paragraph VERBATIM, first letter lowercased
   # after the greeting - one merge wording for the gate and Caroline (#1530 / #1592); the 18:4xZ wording is withdrawn
-  P24="$(sed -n 20p "$HYDRA_REPO/workspaces/support/reference/faq.md")"
+  # QA #1623: find the paragraph by its own first line, never by a line number - an inserted FAQ answer moved it and
+  # broke this (and the merge-claim-first byte check) with copy that had not changed at all
+  P24="$(grep -m1 '^Merges work like this:' "$HYDRA_REPO/workspaces/support/reference/faq.md")"
+  [ -n "$P24" ]
   [[ "$P24" == "Merges work like this:"* ]]
   [ "$(rendered .body | plain)" = "Hi Jane, m${P24:1}"$'\n''Thank you,'$'\n''Caroline, Muso Support' ]
   if rendered .body | plain | grep -q "done on our side once every profile is claimed"; then false; fi
@@ -4788,9 +4791,11 @@ mcffile() {
           credits:[{request_id:"mcf-1380289"}]}' | jq -c "${2:-.}" > "$1"
 }
 
-@test "merge-claim-first: r5's e1 verbatim, the faq.md line 20 paragraph byte-identical, one-line sign-off in both modes" {
+@test "merge-claim-first: r5's e1 verbatim, the faq merge paragraph byte-identical, one-line sign-off in both modes" {
   grep -qx "readonly MERGE_CLAIM_FIRST_COPY_APPROVED=1" "$REAL_SCRIPT"
-  P24="$(sed -n 20p "$HYDRA_REPO/workspaces/support/reference/faq.md")"
+  # QA #1623: by content, not line number (see the reply-ref /w case)
+  P24="$(grep -m1 '^Merges work like this:' "$HYDRA_REPO/workspaces/support/reference/faq.md")"
+  [ -n "$P24" ]
   [[ "$P24" == "Merges work like this:"* ]]
   E1="Hi Agustin, the credits you asked about are listed on another Muso profile with your name, the one linked to the Spotify artist page for these tracks: https://credits.muso.ai/profile/e85fad75-1fcf-4c5c-b450-e8a33a10117a. If that profile is also you, claim it first and tell me which one should be the main profile."
   mcffile "$TEST_TMPDIR/m.json"
@@ -4847,7 +4852,9 @@ ACK="We have the documents you sent for these credits on file."
   # produce a body that drops it.
   E1="Hi Agustin, the credits you asked about are listed on another Muso profile with your name, the one linked to the Spotify artist page for these tracks: https://credits.muso.ai/profile/e85fad75-1fcf-4c5c-b450-e8a33a10117a. If that profile is also you, claim it first and tell me which one should be the main profile."
   E1_ACK="We have the documents you sent for these credits on file. The credits you asked about are listed on another Muso profile with your name, the one linked to the Spotify artist page for these tracks: https://credits.muso.ai/profile/e85fad75-1fcf-4c5c-b450-e8a33a10117a. If that profile is also you, claim it first and tell me which one should be the main profile."
-  P24="$(sed -n 20p "$HYDRA_REPO/workspaces/support/reference/faq.md")"
+  # QA #1623: by content, not line number - an inserted FAQ answer must not break this
+  P24="$(grep -m1 '^Merges work like this:' "$HYDRA_REPO/workspaces/support/reference/faq.md")"
+  [ -n "$P24" ]
   mcffile "$TEST_TMPDIR/m.json"
   # no document on file: the approved e1, byte for byte, and never a word about documents
   run -0 "$LOCKED" send --campaign merge-claim-first --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ --dry-run

@@ -6,7 +6,7 @@ verification follow-ups — customers return after a promised review with no
 update." Today the stale-ticket-watchdog tells OPS the queue is overdue, but
 the customer is never told, so they come back frustrated. This sends ONE
 in-app Intercom reply per overdue verification ticket: "this has taken longer
-than it should, we've flagged it, nothing needed from you."
+than it should, we'll follow up right here" (never on a proof thread).
 
 This is CUSTOMER-FACING OUTBOUND, so the design is safety-first. It must never
 message the wrong person, the same person twice, or about already-finished
@@ -35,7 +35,8 @@ Eligibility (every gate must pass; any fail -> skip + count the reason):
        - suppress if the last part is a human admin reply, or is from the
          customer (they just spoke), or the conversation is assigned to a
          non-bot human, or its state != open (snoozed/closed -> never reopen),
-         or it carries a social / abuse-block tag.
+         or it carries a social / abuse-block tag, or it is a proof thread
+         (the customer owes or has offered proof; cs-health 2026-11-01).
 
 Cold-start: on the FIRST run (no, or empty, state file), seed ALL currently-
 eligible tickets+conversations as already-seen and send NOTHING. Thereafter
@@ -126,12 +127,44 @@ SLACK_API = "https://slack.com/api/chat.postMessage"
 # DISTINCT opening from her reactive SLA-breach reply ("you're right that this
 # has taken longer than it should") so a rare race can't double-send the same
 # words.
+#
+# cs-health 2026-11-01 (Fable o1 §6 / action 5): two clauses are RETIRED, cut, never reworded:
+# "i've flagged it for a priority look" claims an action nothing takes (captain 10-28: never claim an
+# action), and "nothing needed from you in the meantime" is the barred promise of inaction (captain
+# 10-29) - 3 of 20 sampled replies sent it to a user who owed or had just sent proof. The proof-thread
+# gate (conversation_suppressed -> "proof-thread") keeps the rest off those threads too.
 MESSAGE = (
     "hi! quick update on your request with us: it's taken longer than it "
-    "should have on our side. i've flagged it for a priority look, and we'll "
-    "follow up right here as soon as it's sorted. nothing needed from you in "
-    "the meantime."
+    "should have on our side. we'll follow up right here as soon as it's sorted."
 )
+
+# A thread where the customer OWES proof (we asked for something that shows their role, or a claim
+# code) or has OFFERED it (an attachment, a document named in their words) is a proof thread: the
+# sweep copy says nothing true there, so it never goes (cs-health 2026-11-01, 3 of 20 misdirected).
+# Read over every visible part, both sides; a match on either suppresses. English plus the
+# Spanish / Portuguese / French words seen in the queue.
+PROOF_THREAD_RE = re.compile(
+    r"\b(?:proofs?|evidence|documents?|documentation|screenshots?|pdfs?|contracts?|split[ -]?sheets?|"
+    r"invoices?|attach(?:ed|ment|ments)?|where (?:do|can|should) i send|"
+    r"something that shows your|waiting on one thing from you|recorded against your account|"
+    r"claim code|add the code|muso-[a-z0-9]{4}|"
+    r"pruebas?|documentos?|comprobantes?|capturas?|contratos?|comprovantes?|preuves?)\b",
+    re.IGNORECASE,
+)
+
+
+def proof_thread(conv):
+    """True when the customer owes or has offered proof in this conversation (see PROOF_THREAD_RE)."""
+    parts = [conv.get("source") or {}] + list(
+        (conv.get("conversation_parts") or {}).get("conversation_parts") or [])
+    for p in parts:
+        a = (p.get("author") or {}).get("type")
+        if a in ("user", "lead", "contact") and p.get("attachments"):
+            return True
+        body = re.sub(r"<[^>]+>", " ", p.get("body") or "")
+        if body and PROOF_THREAD_RE.search(body):
+            return True
+    return False
 
 
 # --------------------------------------------------------------------------
@@ -353,6 +386,8 @@ def conversation_suppressed(conv, ticket_email, bot_admin_id):
             for t in (conv.get("tags") or {}).get("tags", [])}
     if tags & BLOCKED_CONV_TAGS:
         return "blocked-tag"
+    if proof_thread(conv):
+        return "proof-thread"
     parts = (conv.get("conversation_parts") or {}).get("conversation_parts") or []
     if parts:
         last = parts[-1]

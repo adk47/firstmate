@@ -1975,8 +1975,10 @@ def claim_status_note($fn; $c):
 def merge_pending($fn; $m):
   { subject: "Your Muso merge request",
     segs: [ {p: "Hi \($fn), a quick update on your request to merge \([ $m.profiles[] ] | andjoin): it's in our review queue, nothing has been changed yet, and we will message you here when it has been checked."} ] };
-# merge-claim-first (r5 fable-copy-1030-r5/e1, verbatim): the ask, the approved §2.4 merge paragraph (faq.md line 20,
-# verbatim; a test pins the two equal) and r5's one-line sign-off, in BOTH delivery modes.
+# merge-claim-first (r5 fable-copy-1030-r5/e1, verbatim): the ask, the approved §2.4 merge paragraph (the faq's own
+# "Merges work like this:" paragraph, verbatim; the tests pin the two equal by that opening line, never by a line
+# number, because an inserted FAQ answer moved it once and reded tests whose copy had not changed) and r5's one-line
+# sign-off, in BOTH delivery modes.
 # r5 fable-copy-1103-r5/mcf-proof-ack quotes the amended paragraph as the acknowledgement sentence followed directly by
 # "The credits you asked about are listed ...": the greeting is REPLACED by the acknowledgement, not kept behind it. So the
 # paragraph is written once, and only its opening varies - that keeps one copy of the copy, so the two renderings cannot
