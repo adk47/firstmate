@@ -2193,17 +2193,23 @@ class IntakeD2Tests(unittest.TestCase):
         self.assertTrue(self.store.blob_registered(self.sha))
 
     def test_an_emailed_document_without_stored_bytes_is_not_selected_until_backfill(self):
-        # No blob: the reader neither reads nor retries it (no step, no outcome, no network); blob-backfill
+        # No blob: the reader neither reads nor retries it (no outcome, no network) - but its CLAIMS ARE KEYED,
+        # because a key needs no bytes (Fable 11-04: 246 filings sat unkeyed behind the read budget); blob-backfill
         # restores the bytes from one paced Gmail fetch, and the next run reads it.
         from datetime import datetime, timezone
         from credit_verify.docverify import backfill
         from credit_verify.docverify.blobs import BlobStore
         raw = self._gmail_filing()
         self.deps.blobs = BlobStore(os.path.join(self.td.name, "blobs"))
-        for _ in range(3):
+        for i in range(3):
             stats, rows = self._run()
             self.assertEqual((stats.intake, rows, self.fetches), (0, [], []))
-        self.assertEqual(self.store.db.execute("SELECT count(*) FROM dv_steps").fetchone()[0], 0)
+            self.assertEqual(stats.keyed, 1 if i == 0 else 0,
+                             "keyed on the FIRST tick, without waiting for the bytes, and only once")
+        steps = self.store.db.execute("SELECT step, status FROM dv_steps ORDER BY id").fetchall()
+        self.assertEqual([tuple(x) for x in steps], [("intake_keys", "owed")],
+                         "keyed and marked owed: no locate, no extract, no H3, no outcome")
+        self.assertEqual(self.store.db.execute("SELECT count(*) FROM dv_outcomes").fetchone()[0], 0)
         asked = []
         proof_db = sqlite3.connect(self.proof_path)
         st = backfill.backfill(proof_db, self.store, self.deps.blobs, fetch_raw=lambda mid: asked.append(mid) or raw,
@@ -3894,3 +3900,71 @@ class SandboxTextTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)
+
+
+class IntakeKeyingIsNotTheReadBudget(unittest.TestCase):
+    """Fable 11-04 CLEAN DEFECT: 246 proof_intake filings carried candidate request ids and had no
+    `dv_intake_keys`, no step and no outcome at any version - matched, eligible, skipped.
+
+    The cause was structural, not a filter: the key was cut INSIDE the read loop, so a filing got its key only
+    when the reader happened to spend one of its `max_docs` slots on it. A filing whose bytes are owed (a
+    support@ email before blob-backfill) could therefore never be keyed at all, and a busy read queue put every
+    other filing hours behind. Keying needs no bytes and no model - one read-only SELECT for the roles of the
+    request ids the filing already carries - so it now runs first, on its own budget, for filings the reader may
+    not touch this run at all."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        d = self.td.name
+        self.data = b"%PDF-1.4 a filed document"
+        self.sha = hashlib.sha256(self.data).hexdigest()
+        self.proof_path = os.path.join(d, "proof.sqlite")
+        ps = ProofStore(self.proof_path)
+        self.intake_id = ps.file_document(file_sha256=self.sha, user_id=42, conversation_id="gmail:18f00aa",
+                                          candidate_request_ids=[RID], received_at="2026-10-27T20:00:00Z",
+                                          matched_by="professional_id")
+        ps.close()
+        self.store = DocVerifyStore(os.path.join(d, "dv.sqlite"))
+        self.reqs = {RID: IntakeReq()}
+        self.fetches = []
+        self.h3_calls = []
+        self.deps = runner.Deps(
+            sandbox=lambda *a, **k: {"doc_text": "x", "mime": "application/pdf", "kind": "contract", "facts": {}},
+            extractor=None, net=FakeNet(), raw_credits=lambda tid: [],
+            requests=lambda ids: {i: self.reqs[i] for i in ids if i in self.reqs},
+            cache_root=os.path.join(d, "cache"), fetch=lambda cid: self.fetches.append(cid) or {},
+            dl=lambda u, dest: 1, shadow_store=object())
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def test_a_filing_whose_bytes_are_owed_is_keyed_anyway(self):
+        from credit_verify.docverify.blobs import BlobStore
+        self.deps.blobs = BlobStore(os.path.join(self.td.name, "blobs"))
+        stats, rows = runner.run(self.store, self.deps, proof_store=self.proof_path,
+                                 since="2026-10-27T00:00:00Z", max_docs=30)
+        self.assertEqual(stats.keyed, 1)
+        rec = self.store.intake_keys_recorded(self.intake_id)
+        self.assertEqual(rec["candidates"], [RID])
+        self.assertEqual(rec["keys"], [f"{RID}#Mixing"], "the open claim is known before any byte is fetched")
+        self.assertEqual((stats.intake, rows, self.fetches), (0, [], []), "keyed, never read, never fetched")
+        step = self.store.db.execute("SELECT step, status, request_id FROM dv_steps").fetchone()
+        self.assertEqual(tuple(step), ("intake_keys", "owed", f"intake:{self.intake_id}"))
+
+    def test_keying_is_not_capped_by_the_read_budget(self):
+        """The read budget may be ZERO and the key is still cut: that is what makes a filing keyed on the first
+        tick after it is filed, whatever the reader is doing."""
+        from credit_verify.docverify.blobs import BlobStore
+        self.deps.blobs = BlobStore(os.path.join(self.td.name, "blobs"))
+        stats, _ = runner.run(self.store, self.deps, proof_store=self.proof_path,
+                              since="2026-10-27T00:00:00Z", max_docs=0)
+        self.assertEqual(stats.keyed, 1, "max_docs=0 buys no read, and still keys the filing")
+        self.assertEqual(stats.intake, 0)
+
+    def test_an_already_keyed_filing_is_not_keyed_again(self):
+        from credit_verify.docverify.blobs import BlobStore
+        self.deps.blobs = BlobStore(os.path.join(self.td.name, "blobs"))
+        for _ in range(3):
+            runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
+        n = self.store.db.execute("SELECT COUNT(*) FROM dv_steps WHERE step='intake_keys'").fetchone()[0]
+        self.assertEqual(n, 1, "one key, one step: a filing is not re-keyed until its candidates change")

@@ -70,17 +70,69 @@ def sha256_file(path: str) -> str:
 
 
 # -- selection ------------------------------------------------------------------
+KEYING_PER_RUN = 200      # keys per run: one read-only Trino SELECT per filing, no bytes, no download, no model
+
+
+def key_filings(proof_db: sqlite3.Connection, store: DocVerifyStore, deps: Deps, run_id: str,
+                limit: int = KEYING_PER_RUN, *, keep: Callable[[str], bool] | None = None,
+                paying: set[int] | frozenset[int] | None = None,
+                log: Callable[[str], None] = lambda m: None) -> tuple[dict[str, list[str]], int]:
+    """Key the candidate requests of filings that owe a key, INDEPENDENTLY of the read budget.
+
+    (Fable 11-04, CLEAN DEFECT): the key was cut inside the read loop, so which filings were keyed was decided
+    by how busy the READER was - a filing waited for a 40-doc/hour read budget it might not need (its bytes may
+    be missing entirely, and keying needs none). Measured that morning: 246 filings had candidate request ids
+    and no `dv_intake_keys`, no step and no outcome at any version: matched, eligible, skipped. Keying is cheap
+    (one read-only Trino SELECT for the roles of the request ids it already carries) so it gets its own bound
+    and runs before the reads, which means a filing is keyed on the first tick after it is filed.
+
+    Returns ({intake_id: keys}, how many filings were keyed) and records `intake_keys` per filing with the
+    status `ok` (claims to read), `closed` (every candidate request is closed: nothing to read) or `owed`
+    (bytes missing: keyed, and the read waits for blob-backfill). It never reads a document.
+    """
+    keyed: dict[str, list[str]] = {}
+    n = 0
+    if limit <= 0:
+        return keyed, n
+    # readable=None: a filing whose bytes are owed still gets keyed. `settled` still filters: a filing already
+    # keyed under this version with the same candidates owes nothing.
+    docs = _intake_docs(proof_db, store, deps, limit, keep=keep, paying=paying, require_bytes=False,
+                        settled=store.intake_keyed)
+    readable = lambda d: not intake_read.needs_backfill(d, deps.blobs, store.blob_registered)  # noqa: E731
+    for doc in docs:
+        try:
+            keys = intake_keys(doc, deps)
+        except ProviderDown:
+            raise
+        except Exception as exc:  # noqa: BLE001 - one filing must not stop the keying pass
+            store.step(run_id, doc.sha, "intake_keys", "error",
+                       {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}, f"intake:{doc.intake_id}")
+            continue
+        store.record_intake_keys(doc.intake_id, doc.candidate_ids, keys)
+        ready = readable(doc)
+        store.step(run_id, doc.sha, "intake_keys", "ok" if keys and ready else ("owed" if keys else "closed"),
+                   {"candidates": len(doc.candidate_ids), "keys": len(keys), "first_keys": keys[:20],
+                    "bytes": "stored" if ready else "owed by blob-backfill"}, f"intake:{doc.intake_id}")
+        keyed[doc.intake_id] = keys
+        n += 1
+        log(f"keyed intake {doc.intake_id[:16]}: {len(doc.candidate_ids)} candidate request(s), "
+            f"{len(keys)} open claim(s){'' if ready else ', bytes owed'}")
+    return keyed, n
+
+
 def _intake_docs(proof_db: sqlite3.Connection, store: DocVerifyStore, deps: Deps, limit: int, *,
                  keep: Callable[[str], bool] | None = None,
                  paying: set[int] | frozenset[int] | None = None,
-                 settled: Callable[[str, list[str]], bool] | None = None) -> list:
+                 settled: Callable[[str, list[str]], bool] | None = None,
+                 require_bytes: bool = True) -> list:
     """Filed credit documents that still owe a read, best first (paid, then oldest). A document whose
     bytes are still owed to blob-backfill is skipped here: it cannot be read yet, and spending a slot on
     it is how a readable document behind it starves."""
     from credit_verify.docverify import intake_read
     if limit <= 0:
         return []
-    readable = lambda d: not intake_read.needs_backfill(d, deps.blobs, store.blob_registered)  # noqa: E731
+    readable = (lambda d: not intake_read.needs_backfill(d, deps.blobs, store.blob_registered)) \
+        if require_bytes else None
     return intake_read.intake_docs(proof_db, settled or store.intake_settled, limit, keep=keep, paying=paying,
                                    readable=readable)
 
@@ -189,11 +241,13 @@ class Stats:
     errors: list[str] = field(default_factory=list)
     provider_down: str | None = None          # the account-wide refusal that stopped this run (a FAILED run)
     blob_owed: int = 0                        # filings whose bytes only blob-backfill restores (never read here)
+    keyed: int = 0                            # filings whose candidate requests were keyed this run (no read)
 
     def as_dict(self) -> dict[str, Any]:
         return {"run_id": self.run_id, "documents": self.documents, "pairs": self.pairs, "retry": self.retry,
                 "superseded": self.superseded, "intake": self.intake,
                 "outcomes": dict(self.outcomes), "errors": self.errors[:10], "blob_owed": self.blob_owed,
+                "keyed": self.keyed,
                 **({"provider_down": self.provider_down} if self.provider_down else {})}
 
 
@@ -461,6 +515,14 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
         held = store.held_users()
         for uid in sorted(held):           # belt and braces: no held account keeps a standing `verified`
             stats.superseded += store.supersede_verified(run_id, uid, "account on hold")
+        keyed_this_run: dict[str, list[str]] = {}
+        if intake_from_store and not reread_carried:
+            # KEYING FIRST, and on its own budget: a filing is keyed on the first tick after it is filed, no
+            # matter how full the read budget is or whether its bytes are here at all (Fable 11-04).
+            keyed_this_run, stats.keyed = key_filings(proof_db, store, deps, run_id, KEYING_PER_RUN, keep=keep,
+                                                      paying=paying, log=log)
+            if stats.keyed:
+                log(f"keyed {stats.keyed} filing(s) that owed a key (read budget untouched)")
         if intake_from_store:
             room = max(0, max_docs - stats.documents)
             docs = pre_docs[:room] if pre_docs else _intake_docs(proof_db, store, deps, room, keep=keep,
@@ -475,11 +537,13 @@ def run(store: DocVerifyStore, deps: Deps, *, proof_store: str = PROOF_STORE, si
                 stats.documents += 1
                 stats.intake += 1
                 try:
-                    keys = intake_keys(doc, deps)        # every open claim, uncapped
-                    store.record_intake_keys(doc.intake_id, doc.candidate_ids, keys)
-                    store.step(run_id, doc.sha, "intake_keys", "ok" if keys else "closed",
-                               {"candidates": len(doc.candidate_ids), "keys": len(keys), "first_keys": keys[:20]},
-                               f"intake:{doc.intake_id}")
+                    keys = keyed_this_run.get(doc.intake_id)
+                    if keys is None:                     # not keyed by this run's keying pass
+                        keys = intake_keys(doc, deps)    # every open claim, uncapped
+                        store.record_intake_keys(doc.intake_id, doc.candidate_ids, keys)
+                        store.step(run_id, doc.sha, "intake_keys", "ok" if keys else "closed",
+                                   {"candidates": len(doc.candidate_ids), "keys": len(keys),
+                                    "first_keys": keys[:20]}, f"intake:{doc.intake_id}")
                     finished = store.intake_finished_keys(doc.intake_id)
                     if reread_carried:
                         finished -= store.intake_carried_keys(doc.intake_id)    # carried = not read under this rule
