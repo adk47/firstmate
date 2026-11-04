@@ -1625,7 +1625,11 @@ worktree_release_mode() {  # <backend> <worktree> <project> [<orca-worktree-id>]
       return 1
       ;;
     3)
-      TEARDOWN_RELEASE_REFUSAL="${TEARDOWN_POOL_PROBE_NOTE:-this host's treehouse pool listing for $proj names home-relative paths this host's HOME cannot resolve}, so whether it holds $wt cannot be verified"
+      local pool_note="$TEARDOWN_POOL_PROBE_NOTE"
+      if [ -z "$pool_note" ]; then
+        pool_note="this host's treehouse pool listing for $proj names home-relative paths this host's HOME cannot resolve"
+      fi
+      TEARDOWN_RELEASE_REFUSAL="$pool_note, so whether it holds $wt cannot be verified"
       return 1
       ;;
   esac
