@@ -627,6 +627,10 @@ fm_task_inbox_acknowledge() {  # <state-dir> <task-id> <record>...
         else
           divert="$hdest.dup-$(_fm_task_inbox_short_hash "$src")"
           if mv -f "$src" "$divert" 2>/dev/null; then
+            # The diverted copy is this record's proof of handling, so its link
+            # retires now; a surviving link would re-deliver a record the worker
+            # already acknowledged.
+            _fm_task_inbox_retire_link_if_handled "$shadow/$base" "$divert"
             printf 'acknowledged: %s (a different record already held %s.msg)\n' "$divert" "$base"
           else
             printf 'fm-task-inbox: could not move %s beside %s\n' "$src" "$hdest" >&2
@@ -831,7 +835,11 @@ fm_task_inbox_restore_unhandled() {  # <state-dir> <task-id>
       rm -f "$s"
       continue
     fi
-    if [ ! -e "$handled" ] && cmp -s "$s" "$visible"; then
+    # A record that is already visible under its own bytes needs no repair,
+    # whatever a same-named handled/ copy carries: the worker can read and
+    # acknowledge it as it stands. Re-delivering it here would hand the worker
+    # the same instruction twice.
+    if cmp -s "$s" "$visible"; then
       continue
     fi
     # The name was reused: keep the other writer's record where it is and

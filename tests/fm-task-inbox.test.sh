@@ -510,7 +510,7 @@ SH
 # waiting". The hidden second link must bring the instruction back, with its age
 # intact so it still rings and escalates.
 test_worker_deletion_is_repaired() {
-  local state rec rec2 gone action
+  local state rec rec2 action
   state="$TMP_ROOT/worker-deletes/state"; mkdir -p "$state"
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "instruction one")
   rec2=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "instruction two")
@@ -696,6 +696,52 @@ test_ack_never_overwrites_a_reused_sequence() {
   grep -qF 'somebody else' "$dir/handled/001.msg.dup-"* \
     || fail "the diverted copy does not carry the reused record's content"
   pass "inbox: acknowledgement never overwrites a record whose sequence was reused"
+}
+
+# The repair pass must not duplicate a reused name's record when the worker has
+# not acknowledged it yet. Sequence: 001 published and acknowledged; another
+# writer reuses 001 with different bytes; the repair pass runs BEFORE the worker
+# acknowledges the newcomer. Adopting the newcomer's own bytes needs no repair,
+# so it stays a single visible record and is not re-delivered as 002, and
+# acknowledging it diverts beside the handled record and retires its link so a
+# later pass cannot re-deliver it.
+test_repair_before_ack_keeps_one_copy_of_a_reused_record() {
+  local state dir foreign acked out action delivered re
+  state="$TMP_ROOT/repair-before-ack/state"; mkdir -p "$state"
+  dir="$state/t1.inbox"
+  inbox_lib "$state" fm_task_inbox_write "$state" t1 "the real instruction" >/dev/null
+  "$ROOT/bin/fm-inbox-ack.sh" "$state" t1 001 >/dev/null 2>&1 \
+    || fail "the fixture could not acknowledge the original record"
+  acked="$dir/handled/001.msg"
+  grep -qF 'the real instruction' "$acked" || fail "the acknowledged copy lost its content"
+  # A writer outside the library reuses the acknowledged sequence with different
+  # content by rename, then the repair pass runs before any acknowledgement.
+  foreign="$dir/001.msg"
+  printf 'schema=fm-task-inbox.v1\nat=2026-01-01T00:05:00Z\n--\nsomebody else\n' > "$dir/.incoming"
+  mv "$dir/.incoming" "$foreign"
+  inbox_lib "$state" fm_task_inbox_restore_unhandled "$state" t1 >/dev/null 2>&1
+  delivered=0
+  for re in "$dir"/*.msg; do
+    [ -e "$re" ] && delivered=$((delivered + 1))
+  done
+  [ "$delivered" = 1 ] \
+    || fail "the repair pass duplicated a reused record the worker had not acknowledged yet ($delivered visible copies)"
+  [ ! -e "$dir/002.msg" ] || fail "the repair pass re-delivered a visible reused record under a new sequence"
+  grep -qF 'somebody else' "$foreign" || fail "the repair pass replaced the reused record"
+  # Acknowledging it diverts beside the handled copy and retires its link, so a
+  # second repair cannot re-deliver it.
+  out=$("$ROOT/bin/fm-inbox-ack.sh" "$state" t1 001) \
+    || fail "a reused sequence made the ack helper refuse instead of diverting"
+  [ "$(find "$dir/handled" -name '001.msg.dup-*' | wc -l)" = 1 ] \
+    || fail "the ack helper did not divert the reused record"$'\n'"$(ls -la "$dir/handled")"
+  [ ! -e "$dir/.unhandled/001" ] \
+    || fail "acknowledging the diverted record left its hidden link behind"
+  inbox_lib "$state" fm_task_inbox_restore_unhandled "$state" t1 >/dev/null 2>&1
+  [ ! -e "$dir/002.msg" ] \
+    || fail "the repair pass re-delivered a record whose diverted copy was already acknowledged"
+  action=$(inbox_lib "$state" fm_task_inbox_due_action "$state" t1)
+  [ "$action" = quiet ] || fail "an acknowledged reused record should leave the inbox quiet, got: $action"
+  pass "inbox: a reused record stays one copy when the repair pass runs before its acknowledgement"
 }
 
 test_ack_helper_acknowledges_safely() {
@@ -1085,6 +1131,7 @@ test_coalesced_superseded_record_is_not_resurrected
 test_ack_helper_acknowledges_safely
 test_reused_sequence_is_redelivered_not_lost
 test_ack_never_overwrites_a_reused_sequence
+test_repair_before_ack_keeps_one_copy_of_a_reused_record
 test_acknowledge_from_the_hidden_link_only
 test_repair_adopts_records_queued_without_a_link
 test_coalesce_retires_a_deleted_superseded_tick
