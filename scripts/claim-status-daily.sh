@@ -34,22 +34,74 @@
 # Exit codes: 0 clean, 1 a list that could not be built / a segment failed or the health guard stopped,
 # 2 bad MODE, and 3 CATALOG_UNREADABLE - the catalog answered for at most half the pending profiles, so the
 # wave is a FAILED run and must page, never a clean run that told nobody (r3 on hydra #1406).
+# EVERY NON-ZERO EXIT PAGES (c2 follow-up, Fable driver 11-04 08:4xZ). "must page" was a claim about a code
+# path, not a delivery: cron keeps no exit code, so a night that failed to build - or built a list from half
+# an unreachable catalog - left a log line nobody reads and looked exactly like a clean night. Delivery goes
+# through scripts/lib/deploy-notify.sh, which RETURNS Slack's own status (slack_notify swallows it and returns
+# 0, so a rejected post would otherwise be a silent non-page). A page that cannot be delivered is written as
+# PAGE NOT DELIVERED plus the reason, and the run's own exit code is never changed by it: rc is the operating
+# signal, the page is the human one. There is no cooldown because the cadence is once a day - a standing
+# failure is one page a day, which is the actionable rate (notify-unit-failed.sh's 24h argument).
 set -uo pipefail
 HYDRA_ROOT="${HYDRA_ROOT:-/opt/hydra}"
 MODE="${MODE:-dry-run}"
 MAIN_ENV="${MAIN_ENV:-/etc/openclaw/main.env}"
 STATE_ROOT="${STATE_ROOT:-/var/lib/hydra/credit-review}"
 LOCK="$STATE_ROOT/claim-status-daily.lock"
-install -d -m 700 "$STATE_ROOT"
-exec 9>"$LOCK"; flock -n 9 || { echo "$(date -u +%FT%TZ) another claim-status-daily run holds $LOCK; exit"; exit 0; }
-case "$MODE" in apply|dry-run) ;; *) echo "$(date -u +%FT%TZ) MODE must be apply or dry-run (got '$MODE')"; exit 2 ;; esac
+# _page <rc> <why> - one page per failed run; never changes the run's exit code (see the header).
+_page() {
+  local rc="$1" why="$2"
+  local notifier="${CLAIM_STATUS_NOTIFY_BIN:-$HYDRA_ROOT/scripts/lib/deploy-notify.sh}"
+  local msg
+  msg="claim-status-daily MODE=$MODE FAILED rc=$rc on $(hostname -s 2>/dev/null || echo node): $why"
+  local out
+  if [ ! -r "$notifier" ]; then
+    echo "$(date -u +%FT%TZ) PAGE NOT SENT (no notifier at $notifier); rc=$rc stands"
+    return 0
+  fi
+  if out="$(bash "$notifier" critical "$msg" 2>&1)"; then
+    echo "$(date -u +%FT%TZ) paged critical: rc=$rc"
+  else
+    echo "$(date -u +%FT%TZ) PAGE NOT DELIVERED: $(printf '%s' "$out" | tail -2 | tr '\n' ' ' | cut -c1-300); rc=$rc stands"
+  fi
+}
+
+# The lock comes AFTER the pager, and every way it can FAIL pages. r5 on #1741 (QA's Important): with the lock path
+# unopenable - a directory, a read-only state root - the redirect printed "Is a directory", flock said "Bad file
+# descriptor", and the script reported "another claim-status-daily run holds it" and exited 0: the audit did not run,
+# and the one signal said a peer hold it while the truth was a standing condition needing a human. A state reported
+# as healthy because the code could not reach the line that reports. A lock that is genuinely HELD stays silent and
+# exits 0 below - that one is benign and self-clearing, and it must not page.
+if ! install -d -m 700 "$STATE_ROOT"; then
+  echo "$(date -u +%FT%TZ) cannot create the state root $STATE_ROOT: nothing was built or sent"
+  _page 1 "cannot create the state root $STATE_ROOT (the lock and the run log live there)"
+  exit 1
+fi
+if ! exec 9>"$LOCK"; then
+  echo "$(date -u +%FT%TZ) cannot open the lock $LOCK: nothing was built or sent"
+  _page 1 "cannot open the lock $LOCK: unopenable, so no run can start until it is fixed"
+  exit 1
+fi
+flock -n 9 || { echo "$(date -u +%FT%TZ) another claim-status-daily run holds $LOCK; exit"; exit 0; }
+case "$MODE" in
+  apply|dry-run) ;;
+  # A misconfigured cron is a standstill - the wave will not run again until someone reads this - which is exactly
+  # the case a page is for (r5 on #1741: exit 2 paged nobody because it preceded the pager). It is paged as rc=2
+  # with the bad value named, so the fix is one edit away instead of one investigation away.
+  *) echo "$(date -u +%FT%TZ) MODE must be apply or dry-run (got '$MODE')"
+     _page 2 "MODE='$MODE': the cron will not run the wave until this is corrected"
+     exit 2 ;;
+esac
 # The Intercom token and the warm-up settings live in main.env on node-8 (secrets; not in the repo).
 set -a
 # shellcheck source=/dev/null
-. "$MAIN_ENV" || { echo "$(date -u +%FT%TZ) $MAIN_ENV unreadable: nothing sent (fail closed)"; exit 1; }
+. "$MAIN_ENV" || { echo "$(date -u +%FT%TZ) $MAIN_ENV unreadable: nothing sent (fail closed)"; _page 1 "$MAIN_ENV unreadable: nothing was built and nothing was sent"; exit 1; }
 set +a
 echo "== $(date -u +%FT%TZ) claim-status-daily MODE=$MODE"
 python3 "$HYDRA_ROOT/scripts/credit-review.py" claim-status-daily --mode "$MODE"
 rc=$?
 echo "== $(date -u +%FT%TZ) done rc=$rc"
+if [ "$rc" -ne 0 ]; then
+  _page "$rc" "$(tail -1 "$STATE_ROOT/run.log" 2>/dev/null | cut -c1-400)"
+fi
 exit "$rc"
