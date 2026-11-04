@@ -571,9 +571,9 @@ class WindowAndPastLedgerTests(unittest.TestCase):
         self.assertEqual(self.held(), [("r1", verify_ledger.HELD_NOT_TOLD)], "never removed before the user is told why")
         self.assertEqual(self.remind("reminder-25", "2026-11-10")["result"], "done",
                          "no 'we haven't received a document' reminder after a rejection")
-        self.assertEqual([(m, k) for m, k, _ in verify_ledger.reminders_due(self.db, campaign="verify-live",
-                                                                            day="2026-11-10")],
-                         [("500", verify_ledger.AFTER_REJECTION)])
+        self.assertEqual(verify_ledger.reminders_due(self.db, campaign="verify-live", day="2026-11-10"), [],
+                         "no follow-up after a rejection: the after-rejection kind is deleted from the "
+                         "sender (2026-11-04) and the ledger no longer offers it")
         self.assertEqual(verify_ledger.awaiting_proof(self.db), ["500"], "the sweep watches for a new attachment")
         c = self.tell("2026-11-10", ["r1"])
         self.assertEqual((c["due_day"], c["removal_day"]), ("2026-11-17", "2026-11-18"),
@@ -611,8 +611,8 @@ class WindowAndPastLedgerTests(unittest.TestCase):
         self.review(["r3"], "rejected")
         self.assertEqual(self.due_ids(), ["r2"], "r3 is never removed before the user is told about it")
         self.assertEqual(self.held(), [("r3", verify_ledger.HELD_NOT_TOLD)])
-        self.assertEqual(verify_ledger.reminders_due(self.db, campaign="verify-live", day="2026-11-10")[0][1],
-                         verify_ledger.AFTER_REJECTION, "no day-14 / day-25 reminder about a reviewed credit")
+        self.assertEqual(verify_ledger.reminders_due(self.db, campaign="verify-live", day="2026-11-10"), [],
+                         "no day-14 / day-25 reminder about a reviewed credit, and no after-rejection note")
 
     def test_a_credit_rejected_after_the_first_after_rejection_note_gets_its_own(self):
         self.note(ids=("r1", "r2", "r3"), day="2026-10-01")
@@ -976,7 +976,12 @@ class RunTests(unittest.TestCase):
                                 sweep=False)
         self.assertEqual((rep.removal_due, rep.held_for_human), (0, 1))
 
-    def test_a_rejected_credit_gets_the_after_rejection_follow_up(self):
+    def test_a_rejected_credit_gets_no_follow_up_from_the_sender(self):
+        """The after-rejection note is DELETED (Fable ruling-79 denial 2026-11-04, dispatch
+        decline-copy.md, Aaron 2026-10-29 wording rule): its copy named which check failed.
+        A rejected credit therefore sends nothing from this script, and the credit stays held
+        for a human - never removed before the user is told why, and the tell is now the
+        `decline` campaign's single approved sentence."""
         db = verify_ledger.connect(self.path)
         self.addCleanup(db.close)
         c = windowed_note(db)
@@ -984,15 +989,19 @@ class RunTests(unittest.TestCase):
         verify_ledger.mark_tagged(db, message_id="500", conversation_id="5", attachments=1)
         verify_ledger.record_proof_review(db, message_id="500", request_ids=["r1"], outcome="rejected", reviewer="x",
                                           reason="other_role")
+        self.assertEqual(verify_ledger.reminders_due(db, campaign="verify-live", day="2026-10-20"), [],
+                         "the ledger no longer offers the deleted kind")
         fake, rep = Fake(), Report()
         verify_notify.send_followups(db, FakeAdmin([req("r1", track="t1"), req("r2", track="t2")]), rep, verdicts=verify_notify.affiliation.read(AFFILIATION_FILE),
                                      campaign="verify-live", day="2026-10-20",
                                      documented=verify_notify.load_proof_on_file(PROOF_FILE), limit=150,
                                      pace_seconds=0, wrapper="/w", runner=fake)
-        self.assertEqual([[c["request_id"] for c in p["credits"]] for p in fake.payloads], [["r1"]])
-        argv = fake.argv[0]
-        self.assertEqual(argv[argv.index("--kind") + 1], verify_ledger.AFTER_REJECTION)
-        self.assertEqual(rep.reminders_sent, 1)
+        self.assertEqual(fake.payloads, [], "nothing named a reason: the rejected credit sends no note")
+        self.assertEqual(rep.reminders_sent, 0)
+        self.assertEqual([(h["request_id"], h["reason"]) for h in verify_ledger.held_for_human(db, day="2026-11-20")],
+                         [("r1", verify_ledger.HELD_NOT_TOLD), ("r2", verify_ledger.HELD_AWAITING_REVIEW)],
+                         "a rejected credit is never removed before the user is told why; the "
+                         "unreviewed one still awaits review")
 
 
 WAVE_HEADER = "tier,credit_request_id,user_id,profile_id,track_id,role,pop_now,paid,claim_date\n"

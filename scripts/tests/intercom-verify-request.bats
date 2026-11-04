@@ -828,6 +828,17 @@ rcredits() { # like credits, with role_families taken from a 5th field
   jq -n --arg fn "$fn" --argjson c "$items" '{user:{email:"Jane.Doe@Example.com", id:"42", professional_id:"9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64", auth_id:"auth0|9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64", first_name:$fn}, credits:$c}' > "$f"
 }
 rendered() { printf '%s\n' "$output" | tail -n +2 | jq -r "$1"; }
+# The retired after-rejection copy: the five reason words and the two sentences that named the failing
+# check. Prints every one found in FILE (empty = clean), so the caller fails on any hit - and the caller
+# also runs it against a mutated copy, because a detector that finds nothing is only good news if it works.
+forbidden_reason_words() {
+  local f="$1" w
+  for w in doesnt_name_you other_track other_role not_a_document "we couldn't read it"; do
+    if grep -q -- "$w" "$f"; then printf '%s ' "$w"; fi
+  done
+  if grep -q "thanks for sending your document" "$f"; then printf '%s ' "thanks for sending your document"; fi
+  if grep -q "didn't confirm" "$f"; then printf '%s ' "didn't confirm"; fi
+}
 
 @test "as committed (firstmate 090): every verify-live note is v1; the windowed note and every follow-up are send-locked" {
   rcredits "$TEST_TMPDIR/c.json" Jane "r1:Producer:Song A:Big Star:producer"
@@ -843,7 +854,7 @@ rendered() { printf '%s\n' "$output" | tail -n +2 | jq -r "$1"; }
   [[ "$output" == "VALID verify-live initial email credits=1 copy=v1" ]]
   run -1 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --copy windowed
   [[ "$output" == *"no verify-live message may name a deadline or say a credit will be removed"* ]]
-  for k in reminder-14 reminder-25 after-rejection; do
+  for k in reminder-14 reminder-25; do
     run -1 "$LOCKED" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --kind "$k" --parent-message-id 1001
     [[ "$output" == *"no verify-live message may name a deadline"* ]]
   done
@@ -1086,7 +1097,7 @@ PY
   run -1 send --campaign everything
   [[ "$output" == *"--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status, gap-ask, merge-pending, merge-claim-first, credit-hold-status, claim-proof-pending or proof-need-ask"* ]]
   run -1 send --kind final-notice --parent-message-id 1
-  [[ "$output" == *"--kind must be initial, reminder-14, reminder-25, after-rejection or reminder-7"* ]]
+  [[ "$output" == *"--kind must be initial, reminder-14, reminder-25 or reminder-7"* ]]
 }
 
 # --- never ask someone who already sent documents (captain standing order) ---------------
@@ -1287,93 +1298,42 @@ rmcredits() { # <file> <id:role:title:artist:reason:url>...
   [[ "$body" != *"union session contract"* ]]
 }
 
-@test "after a rejected document: ONE after-rejection note with the reviewer's reason and a fresh date, never 'not received'" {
+@test "the after-rejection note is DELETED: the kind is refused and no reason can reach a message" {
+  # Fable ruling-79 denial 2026-11-04 + dispatch decline-copy.md + Aaron 2026-10-29: the old
+  # copy named ONE of five reasons ("it doesn't name you", "it is for a different track", "it
+  # shows a different role", "we couldn't read it", "it isn't one of the documents we can
+  # accept") - i.e. it told a forger which check failed - so the kind, the copy and the reason
+  # list are gone. A decline is the `decline` campaign's single approved sentence.
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
   INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 send
   [[ "$output" == "POSTED email message=1001 credits=1" ]]
+  # A rejection is recorded for humans (the ledger keeps the reviewer's reason) and sends nothing:
+  # the python suite proves the notify driver now offers no follow-up for it.
   INTERCOM_VERIFY_TEST_DAY=2026-10-20 run -0 "$SCRIPT" tag-proof --message-id 1001
-  ar() { "$SCRIPT" send --copy windowed --kind after-rejection --parent-message-id 1001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ; }
-  INTERCOM_VERIFY_TEST_DAY=2026-11-12 run -3 ar
-  [[ "$output" == "NOT DUE after-rejection message=1001" ]]
   run -0 python3 "$HYDRA_REPO/scripts/credit-review.py" --ledger "$INTERCOM_VERIFY_TEST_LEDGER" verify-notify \
     --proof-review 1001 --request-ids r1 --outcome rejected --reason other_track --reviewer ops-doc-step
-  # The caller cannot choose the reason: the reviewer's recorded one is the only one shown.
-  jq '.credits[0].reason = "doesnt_name_you" | .credits[0].received = "reply"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json" && mv "$TEST_TMPDIR/c2.json" "$TEST_TMPDIR/c.json"
-  INTERCOM_VERIFY_TEST_DAY=2026-11-12 run -0 ar
-  [[ "$output" == "POSTED after-rejection email message=1002 credits=1" ]]
-  [ "$(msg .to.id)" = "6650aa01" ]
-  body="$(msg .body | plain | tr '\n' ' ' | tr -s ' ' | sed 's/ $//')"
-  [ "$body" = 'Hi Jane, thanks for sending your document. It didn'"'"'t confirm your Mixing credit on "Song A" by Big Star because it is for a different track. If you have something else, such as a split sheet, a label or publisher statement or a session invoice, reply to this message with it by November 19. Thank you, Caroline, Muso Support' ]
-  [[ "$body" != *"haven't received"* ]]
-  [[ "$body" != *"split.pdf"* ]]
-  [ "$(sql "select due_day, removal_day from verify_messages where message_id='1002'")" = "2026-11-19|2026-11-20" ]
-  INTERCOM_VERIFY_TEST_DAY=2026-11-13 run -0 "$SCRIPT" send --copy windowed --kind reminder-25 --parent-message-id 1001 \
+  # The kind no longer exists for any campaign, dry-run included: it cannot be previewed, so it
+  # cannot be sent, so no copy can creep back in behind a preview.
+  run -1 "$SCRIPT" send --copy windowed --kind after-rejection --parent-message-id 1001 \
     --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
-  [[ "$output" == "SKIPPED reminder-25-done message=1001" ]]
-  INTERCOM_VERIFY_TEST_DAY=2026-11-14 run -0 ar
-  [[ "$output" == "SKIPPED after-rejection-done message=1001" ]]
-  [ "$(posts)" -eq 2 ]
-}
-
-@test "after-rejection: verify-live only, send-locked, and never without a reason from the fixed list" {
-  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
-  run -1 send --kind after-rejection --parent-message-id 1 --dry-run
-  [[ "$output" == *"do not say what was received"* ]]
-  jq '.credits[0].reason = "looks fake" | .credits[0].received = "document"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/bad.json"
-  run -1 "$SCRIPT" send --copy windowed --kind after-rejection --parent-message-id 1 --credits-file "$TEST_TMPDIR/bad.json" \
-    --approved-by U7RP6HKUZ --dry-run
-  [[ "$output" == *"lack a rejection reason from the fixed list (doesnt_name_you, other_track, other_role, unreadable, not_a_document)"* ]]
-  jq '.credits[0].reason = "unreadable" | .credits[0].received = "document"' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/r.json"
-  INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 "$SCRIPT" send --copy windowed --kind after-rejection --parent-message-id 1 \
-    --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ --dry-run
-  [[ "$(rendered .body | plain)" == *"because we couldn't read it."* ]]
-  # Unlocked as committed (Fable 2026-10-17): without a sent note in the ledger it is still refused.
-  run -1 "$LOCKED" send --kind after-rejection --parent-message-id 1 --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ
-  [[ "$output" != *"not approved for sending yet"* ]]
-  run -1 "$SCRIPT" send --campaign retro-past --kind after-rejection --parent-message-id 1 \
-    --credits-file "$TEST_TMPDIR/r.json" --approved-by U7RP6HKUZ --dry-run
-  [[ "$output" == *"no follow-ups"* ]]
-  [ "$(calls)" -eq 0 ]
-}
-
-@test "after a text-only reply: the after-rejection note says we still need a document, with no reason" {
-  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
-  INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 send
-  text_only='{"id":"777","source":{"id":"1001"},"conversation_parts":{"conversation_parts":[{"author":{"type":"user","id":"6650aa01"},"attachments":[],"created_at":1760000000}]}}'
-  STUB_CONVERSATION="$text_only" run -3 "$SCRIPT" tag-proof --message-id 1001
-  [[ "$output" == "REPLY RECORDED message=1001"* ]]
-  rev() { python3 "$HYDRA_REPO/scripts/credit-review.py" --ledger "$INTERCOM_VERIFY_TEST_LEDGER" verify-notify \
-    --proof-review 1001 --request-ids r1 --outcome rejected --reviewer ops-doc-step "$@"; }
-  run -2 rev --reason not_a_document
-  [[ "$output" == *"no document was received on this note"* ]]
-  run -0 rev
-  ar() { "$SCRIPT" send --copy windowed --kind after-rejection --parent-message-id 1001 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ; }
-  INTERCOM_VERIFY_TEST_DAY=2026-11-12 run -0 ar
-  [[ "$output" == "POSTED after-rejection email message=1002 credits=1" ]]
-  [ "$(msg .subject)" = 'About your Mixing credit on "Song A"' ]
-  body="$(msg .body | plain | tr '\n' ' ' | tr -s ' ' | sed 's/ $//')"
-  [ "$body" = 'Hi Jane, thanks for your reply. We still need a document that shows your Mixing credit on "Song A" by Big Star. If you have one, such as a split sheet, a label or publisher statement or a session invoice, reply to this message with it by November 19. Thank you, Caroline, Muso Support' ]
-  [[ "$body" != *"thanks for sending your document"* ]]
-}
-
-@test "after-rejection multi: credits with a document get their reason, reply-only ones the still-need ask" {
-  jq -n '{user:{email:"jane@example.com", id:"42", professional_id:"9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64", auth_id:"auth0|9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64", first_name:"Jane"}, credits:[
-    {request_id:"r1", role:"Mixing", track_title:"Song A", artist_name:"Big Star", received:"document", reason:"other_role"},
-    {request_id:"r2", role:"Producer", track_title:"Song B", artist_name:"Big Star", received:"reply"}]}' > "$TEST_TMPDIR/m.json"
-  INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 "$SCRIPT" send --copy windowed --kind after-rejection --parent-message-id 1 \
-    --credits-file "$TEST_TMPDIR/m.json" --approved-by U7RP6HKUZ --dry-run
-  body="$(rendered .body | plain)"
-  [[ "$body" == *"thanks for sending your documents. They didn't confirm these credits:"* ]]
-  [[ "$body" == *'Mixing on "Song A" by Big Star: it shows a different role'* ]]
-  [[ "$body" == *"We also still need a document that shows each of these credits:"* ]]
-  [[ "$body" == *'Producer on "Song B" by Big Star'* ]]
-  [[ "$body" == *"If you have something else, such as a split sheet"* ]]
-  jq '.credits |= map(.received = "reply" | del(.reason))' "$TEST_TMPDIR/m.json" > "$TEST_TMPDIR/m2.json"
-  INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 "$SCRIPT" send --copy windowed --kind after-rejection --parent-message-id 1 \
-    --credits-file "$TEST_TMPDIR/m2.json" --approved-by U7RP6HKUZ --dry-run
-  body="$(rendered .body | plain)"
-  [[ "$body" == *"thanks for your reply. We still need a document that shows each of these 2 credits:"* ]]
-  [[ "$body" != *"didn't confirm"* ]]
+  [[ "$output" == *"--kind must be initial, reminder-14, reminder-25 or reminder-7"* ]]
+  run -1 "$SCRIPT" send --campaign retro-past --kind after-rejection --parent-message-id 1001 \
+    --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"--kind must be initial, reminder-14, reminder-25 or reminder-7"* ]]
+  # And the copy itself is gone from the script: the five reason words a message could have
+  # shown, and the reject-specific sentences, appear nowhere in it.
+  # QA r6 on #1727: `! grep` is a NEGATED command and bash exempts those from `set -e`, so a
+  # forbidden word coming BACK left this test green (r6 reproduced it). Negatives are now
+  # `if grep -q ...; then false; fi`, and the detector is self-tested against a MUTATED copy, so
+  # "found nothing" cannot be a broken check reporting success.
+  found="$(forbidden_reason_words "$SCRIPT")"
+  [ -z "$found" ] || { echo "the retired reason copy is back: $found"; false; }
+  cp "$SCRIPT" "$TEST_TMPDIR/mutated.sh"
+  printf '\n# other_role\nThanks for sending your document - it didn\x27t confirm your credit because\n' >> "$TEST_TMPDIR/mutated.sh"
+  control="$(forbidden_reason_words "$TEST_TMPDIR/mutated.sh")"
+  case "$control" in *other_role*) ;; *)
+    echo "CONTROL FAILED: the detector cannot see a forbidden word it was given ($control)"; false ;; esac
+  [ "$(posts)" -eq 1 ]
 }
 
 @test "tag-proof records each newer user reply by its own time, not once per note" {

@@ -170,6 +170,9 @@ UVN_NEW_ROWS = "uvn-new-rows"
 # an uvn-new-rows note IS an ask (its rows are never asked again by any ask), but it is never the user's one-ask-ever:
 # it exists because the user was already asked (prior_uvn_ask)
 ASK_CAMPAIGNS = ("verify-live", "retro-past", "uvn-status", GAP_ASK, PROOF_NEED_ASK, UVN_NEW_ROWS)
+# Historical only (deleted from the sender 2026-11-04): rows of this kind stay readable in
+# the ledger, and `reminders_due` no longer offers it. Do not re-add it to a sender campaign
+# without a new copy ruling - the old copy named which check failed.
 AFTER_REJECTION = "after-rejection"
 KINDS = ("initial", "reminder-14", "reminder-25", AFTER_REJECTION, CLAIM_REMINDER)
 # Days after a WINDOWED note (reminder-14/25) or a claim-proof-ask note (reminder-7) at which each
@@ -1603,15 +1606,17 @@ def mark_checked(db: sqlite3.Connection, *, message_id: str, now: datetime | Non
 
 def reminders_due(db: sqlite3.Connection, *, campaign: str, day: str) -> list[tuple[str, str, list[dict[str, Any]]]]:
     """(parent message id, kind, refs) for every follow-up due on `day`, oldest note
-    first, at most one per note: the after-rejection note first (it may be due while other
-    credits on the note still await review), else a reminder. When both reminders are due
-    (day 25 came before day 14 went out) only the later one is offered: two reminders a few
-    days apart add nothing."""
+    first, at most one per note: a reminder. When both reminders are due (day 25 came before
+    day 14 went out) only the later one is offered: two reminders a few days apart add nothing.
+    The after-rejection note is NOT offered any more (Fable ruling-79 denial 2026-11-04,
+    dispatch `decline-copy.md`): the sender no longer has that kind, and a decline is the
+    `decline` campaign's single approved sentence. `reminder_state` still understands the
+    historical kind so old `verify_messages` rows stay readable; nothing asks for it."""
     out: list[tuple[str, str, list[dict[str, Any]]]] = []
     rows = db.execute("SELECT * FROM verify_messages WHERE campaign=? AND kind='initial' AND status='sent' "
                       "AND removal_day IS NOT NULL AND message_id IS NOT NULL ORDER BY id", (campaign,)).fetchall()
     for r in rows:
-        for kind in (AFTER_REJECTION, "reminder-25", "reminder-14"):
+        for kind in ("reminder-25", "reminder-14"):
             st = reminder_state(db, parent_message_id=str(r["message_id"]), kind=kind, day=day)
             if st["result"] == "due":
                 keep = set(st["request_ids"])

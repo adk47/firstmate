@@ -1,6 +1,6 @@
 # Trust yet verify: the "please help us verify it" note
 
-> **firstmate 090 (2026-10-19 23:27Z): every verify-live note is the no-threat `v1` copy.** The captain dropped auto-removal (Fable ruling 4 as amended), so no message may name a deadline or say a credit will be removed. The gate sends `v1` for every new credit's note, but only when every credit is a server-confirmed decider approval (`verify_ledger v1-eligible`). The note records no `due_day` and no `removal_day`, so nothing is ever removal-due. `LIVE_WINDOWED_COPY_APPROVED=0` send-locks the windowed note and all of its follow-ups (day-14/25 reminders, after-rejection). The windowed rows in this document describe that locked path, kept for `--dry-run` previews only. The bats test "no sendable message carries removal or deadline language" fails if any sendable message, in any campaign, names a deadline or a removal. Unconfirmed credits go to the day-30 Ops review list (`credit-review.py provisional-review`, #1275); they are never removed automatically.
+> **firstmate 090 (2026-10-19 23:27Z): every verify-live note is the no-threat `v1` copy.** The captain dropped auto-removal (Fable ruling 4 as amended), so no message may name a deadline or say a credit will be removed. The gate sends `v1` for every new credit's note, but only when every credit is a server-confirmed decider approval (`verify_ledger v1-eligible`). The note records no `due_day` and no `removal_day`, so nothing is ever removal-due. `LIVE_WINDOWED_COPY_APPROVED=0` send-locks the windowed note and all of its follow-ups (day-14/25 reminders). The windowed rows in this document describe that locked path, kept for `--dry-run` previews only. The bats test "no sendable message carries removal or deadline language" fails if any sendable message, in any campaign, names a deadline or a removal. Unconfirmed credits go to the day-30 Ops review list (`credit-review.py provisional-review`, #1275); they are never removed automatically.
 
 Captain, 2026-10-15 22:12Z (verbatim): "i want AI live now - we have too many credits to
 approve and to get supporting data for - let users know where there was a credit given and
@@ -101,8 +101,8 @@ says so. A reply carrying attachments also gets the `credit-proof` tag (a claim-
 reply gets `claim-proof` instead; see the claim proof ask section below). A tagged thread is
 never re-tagged (`ALREADY TAGGED`), but while its windowed note still has a credit no
 accepted review cleared (awaiting review, or rejected) the sweep keeps reading it and
-recording new replies, so a reply after an after-rejection note in any thread of the note
-holds that credit's removal for a human. Nothing else
+recording new replies, so a reply after any note in the thread holds that credit's removal
+for a human. Nothing else
 happens: no reply, no decision, no credit change. The Ops
 document step (T07) picks tagged conversations up later.
 
@@ -287,7 +287,7 @@ notes.
 | | NEW provisional approvals (`verify-live`) | PAST credits (`retro-past`) |
 |---|---|---|
 | Copy | `windowed`, the only copy ever sent: Fable's v1 with ONE date, the reply-by date 30 days out ("Reply to this message by {reply_by} (30 days from today)", "If we can't verify this credit by {reply_by}, it will be removed from your profile that day"), and a restore line ("If you send a valid document after that, we'll review it and can restore the credit"). The ledger stores `due_day` = reply-by and `removal_day` = the day after it, so nothing is ever removed before the date the note named. The day-25 reminder adds "If you need more time, tell us which credit and why, and we will keep the request open." (Fable copy review 2026-10-17, pack 1). `v1` (no date) is preview-only | Fable's GO'd role drafts: routine review, one document per credit, **no deadline, no removal language** |
-| Follow-ups | day 14 and day 25 (the second says it is the last), only for credits no review has ruled on; one `after-rejection` note after a rejected document. A follow-up with nothing left to send (every credit documented, approved by a person or no longer approved) is closed as `skipped`; one whose user is waiting on a pending document stays due. Only follow-ups actually sent count against `--max-users` | **none**: one message per user, ever, and never to a user who already sent proof |
+| Follow-ups | day 14 and day 25 (the second says it is the last), only for credits no review has ruled on. A **rejection sends nothing from this script** (see below). A follow-up with nothing left to send (every credit documented, approved by a person or no longer approved) is closed as `skipped`; one whose user is waiting on a pending document stays due. Only follow-ups actually sent count against `--max-users` | **none**: one message per user, ever, and never to a user who already sent proof |
 | No reply | windowed: `credit-review.py verify-notify --removal-due FILE` lists the credits from their `removal_day` (00:00Z after the reply-by date ends; a reply on the reply-by date is never already in the export), minus any with their own proof-on-file entry (any kind) or a human approval. Credits whose user replied to the note are held for a human and written separately to `FILE.held`, never to FILE. A missing or stale proof-on-file list exports nothing and exits non-zero | the credit stays; `credit-review.py verify-wave --unverified FILE` lists it as `unverified` for the board / valuation basis after 30 days |
 | Send lock | `LIVE_WINDOWED_COPY_APPROVED=0`: every real verify-live send is refused, and the cron ships disabled | `RETRO_COPY_APPROVED=0`; cron ships disabled |
 
@@ -303,33 +303,31 @@ notes.
   [--reason R] --reviewer <who>` (`verify_proof_reviews`, keyed by the note and the request
   id). **Only an accepted document clears a credit.** When a document (attachment) was received on
   the note, a rejection needs `--reason`, one of `doesnt_name_you`, `other_track`,
-  `other_role`, `unreadable`, `not_a_document`; it is the only "why" the user ever sees (never
-  the file name). After a reply with no document a rejection takes no reason. Once every credit on the note is
+  `other_role`, `unreadable`, `not_a_document`; the reason is for humans - it stays in
+  `verify_proof_reviews` and the audit file and **reaches the user in no message** (never the
+  file name, never a reason). After a reply with no document a rejection takes no reason. Once every credit on the note is
   reviewed and any was rejected, the note goes back to "no proof" and the sweep re-tags it
   only when a NEW attachment arrives (which puts every rejected credit back under review).
   A reviewed credit never gets a day-14 / day-25 reminder ("We haven't received a document
   yet" would be false).
-- **After a rejection** each rejected credit gets ONE `after-rejection` note of its own
-  (verify-live only, same gate and send lock). A later rejection on the same note sends
-  another note for the newly rejected credits only (batched per user, one message per user
-  per UTC day). The copy depends on what was received on the note: after a document,
-  "thanks for sending your document. It didn't confirm your {role} credit on ... because
-  {reason}. If you have something else, ... reply to this message with it by {reply_by}";
-  after a reply with no document (no `--reason`), "thanks for your reply. We still need a
-  document that shows your {role} credit on ... If you have one, ... reply to this message
-  with it by {reply_by}". `{reply_by}` is the note's reply-by date, but never earlier than 7
-  days after this note is sent; a rejected credit is removal-due only from the day after the
-  date ITS after-rejection note named.
-- **A reply after an after-rejection note** (text or attachment; the latest user reply's
-  own time is recorded per message, `last_reply_at`) holds the credits that note named for a
-  human until a review rules on them again.
+- **After a rejection NOTHING is sent by this script** (deleted 2026-11-04, Fable ruling-79
+  denial + dispatch `decline-copy.md` + Aaron 2026-10-29 wording rule). The kind, its copy and
+  its five fixed reasons (`doesnt_name_you`, `other_track`, `other_role`, `unreadable`,
+  `not_a_document`) are gone from `intercom-verify-request.sh`; `--kind after-rejection` is
+  refused. The old copy named ONE of those five, i.e. it told a forger exactly which check
+  failed and over-communicated on a decline. The decline is the single approved sentence in the
+  `decline` campaign (its own PR), sent once per decision, with no reason, no deadline and no
+  list of accepted documents. `verify_ledger` keeps the historical kind for reading old rows
+  but `reminders_due` no longer offers it.
+- **A reply after a note** (text or attachment; the latest user reply's own time is recorded
+  per message, `last_reply_at`) holds the credits that note named for a human until a review
+  rules on them again.
 - **Held for a human** (`FILE.held`, counted in the run summary, never in FILE), each with its
   reason: a credit past its date whose document still awaits review (`document awaiting
   review`, including a credit the reviewer never ruled on), a credit whose user replied to the
   note in any way and no review has ruled on (`extension_requested_at`; the run summary also
-  reports each newly recorded reply), and a rejected credit whose after-rejection note has not
-  gone out, and a rejected credit whose user replied after its after-rejection note. A human
-  picks them up with `--proof-review`.
+  reports each newly recorded reply), and a rejected credit whose user replied after the note.
+  A human picks them up with `--proof-review`.
 - The removal export removes nothing. The removal step (a guarded server soft-remove with a
   restore path) must re-check each credit and never remove one that was confirmed
   meanwhile.

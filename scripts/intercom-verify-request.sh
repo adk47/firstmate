@@ -70,8 +70,7 @@ set -euo pipefail
 #     exact Intercom contact search that must return exactly one user, never from anything a
 #     user wrote; a follow-up goes to the contact its note went to;
 #   - one message per user per UTC day across campaigns, each credit request id gets a
-#     campaign's note at most once, each reminder at most once per note, and each credit at
-#     most one after-rejection note. All enforced in
+#     campaign's note at most once, and each reminder at most once per note. All enforced in
 #     the decider ledger (credit_review/verify_ledger.py) with a claim written BEFORE the
 #     POST, so a timeout can never produce a second message. Only a note that NAMED a
 #     removal date can ever be removal-due (the ledger records it);
@@ -92,7 +91,7 @@ set -euo pipefail
 #
 # Usage:
 #   intercom-verify-request.sh send --credits-file FILE --approved-by <SlackUID> \
-#       [--campaign verify-live|retro-past|removal-notice|takeback-notice|uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-proof-ask|claim-status|gap-ask|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask] [--kind initial|reminder-14|reminder-25|after-rejection \
+#       [--campaign verify-live|retro-past|removal-notice|takeback-notice|uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-proof-ask|claim-status|gap-ask|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask] [--kind initial|reminder-14|reminder-25 \
 #        --parent-message-id <id>] [--copy v1|windowed (verify-live preview only) | queued|received (status-doc-received) | no-ask|count (status-team-review)] \
 #       [--conversation <id> (uvn-status, withdrawal-confirm, status notes, claim-status, email-changed, gap-ask, merge-pending,
 #        credit-hold-status, claim-proof-pending, proof-need-ask)] [--inapp-fallback] [--dry-run|--validate|--doc-check|--check-recipient]
@@ -199,8 +198,8 @@ readonly TESTABLE=0
 #   LIVE_WINDOWED_COPY_APPROVED  verify-live: the windowed copy (a reply-by date and "will be removed").
 #                                LOCKED (firstmate 090, 2026-10-19 23:27Z: the captain dropped
 #                                auto-removal, Fable ruling 4 as amended: NO message may say a credit
-#                                will be removed). Its follow-ups (day-14/25 reminders, after-rejection)
-#                                follow only a windowed note, so none can be sent either. Kept for
+#                                will be removed). Its follow-ups (day-14/25 reminders) follow
+#                                only a windowed note, so none can be sent either. Kept for
 #                                --dry-run previews only; the no-removal-language test fails if any
 #                                sendable message carries removal or deadline wording.
 #   RETRO_COPY_APPROVED          the retro-past no-threat ask.
@@ -654,8 +653,8 @@ if [ "$MODE" = "tag-proof" ]; then
   convo="$(printf '%s' "$convo" | "$JQ_BIN" -c --argjson from "$FROM" '.conversation_parts.conversation_parts = ((.conversation_parts.conversation_parts // [])[$from:])')"
   # ANY reply authored by the contact we wrote to (text or attachment; only the author is
   # looked at, never the text) holds the note's removal for a human: the user may be asking
-  # for more time. The latest reply's own time is recorded per message, so a reply after an
-  # after-rejection note is seen too.
+  # for more time. The latest reply's own time is recorded per message, so a reply after any
+  # note in the thread is seen too.
   n_replies="$(printf '%s' "$convo" | "$JQ_BIN" -r --arg c "$CONTACT_ID" \
     '[(.conversation_parts.conversation_parts // [])[] | select(.author.type == "user" and (.author.id|tostring) == $c)] | length')"
   REPLIED_AT="$(printf '%s' "$convo" | "$JQ_BIN" -r --arg c "$CONTACT_ID" \
@@ -715,8 +714,8 @@ fi
 [ -z "$MESSAGE_ID" ] || refuse "--message-id applies to tag-proof only."
 [ "$ACTION" != "doc-check" ] || [ "$KIND" = "initial" ] || refuse "--doc-check applies to an initial note."
 case "$KIND" in
-  initial|reminder-14|reminder-25|after-rejection|reminder-7) ;;
-  *) refuse "--kind must be initial, reminder-14, reminder-25, after-rejection or reminder-7 (got '$KIND')." ;;
+  initial|reminder-14|reminder-25|reminder-7) ;;
+  *) refuse "--kind must be initial, reminder-14, reminder-25 or reminder-7 (got '$KIND')." ;;
 esac
 if [ "$CAMPAIGN" = "claim-proof-ask" ]; then
   case "$KIND" in initial|reminder-7) ;; *) refuse "claim-proof-ask has one follow-up, --kind reminder-7." ;; esac
@@ -1570,12 +1569,9 @@ if [ "$LIVE" = "1" ]; then
     INPUT="$(keep_ids "$INPUT" "$(printf '%s' "$st" | "$JQ_BIN" -c '.request_ids')")"
     [ "$(printf '%s' "$INPUT" | "$JQ_BIN" -r '.credits | length')" -ge 1 ] \
       || refuse "none of these credits were in note $PARENT_ID; a follow-up lists only that note's credits."
-    if [ "$KIND" = "after-rejection" ]; then
-      # The reason is the reviewer's, recorded with the rejection; never the caller's.
-      INPUT="$(printf '%s' "$INPUT" | "$JQ_BIN" -c --argjson r "$(printf '%s' "$st" | "$JQ_BIN" -c '.reasons // {}')" \
-        --argjson v "$(printf '%s' "$st" | "$JQ_BIN" -c '.received // {}')" \
-        '.credits |= map(.reason = ($r[.request_id] // "") | .received = ($v[.request_id] // ""))')"
-    fi
+    # A follow-up never takes a reason from the caller and never names one: the reviewer's
+    # recorded reason is evidence for a human, not input to a message (Aaron 2026-10-29:
+    # a decline never states a reason, and no copy teaches what we check).
     CONTACT_ID="$(printf '%s' "$st" | "$JQ_BIN" -r '.contact_id // empty')"
     DUE_DAY="$(printf '%s' "$st" | "$JQ_BIN" -r '.due_day // empty')"
     REMOVAL_DAY="$(printf '%s' "$st" | "$JQ_BIN" -r '.removal_day // empty')"
@@ -1641,20 +1637,14 @@ DUE_LABEL=""
 if [ -n "$DUE_DAY" ]; then
   DUE_LABEL="$(due_label "$DUE_DAY")"
 fi
-# The reviewer's rejection reasons and the ONLY words an after-rejection note uses for them.
-REJECTION_TEXT=""
-IFS= read -r -d '' REJECTION_TEXT <<'JSON' || true
-{"doesnt_name_you": "it doesn't name you", "other_track": "it is for a different track",
- "other_role": "it shows a different role", "unreadable": "we couldn't read it",
- "not_a_document": "it isn't one of the documents we can accept"}
-JSON
-readonly REJECTION_TEXT
-if [ "$KIND" = "after-rejection" ]; then
-  badrej="$(printf '%s' "$INPUT" | "$JQ_BIN" -r --argjson t "$REJECTION_TEXT" '[.credits[] | select(
-    (.received == "document" and (.reason as $r | $t | has($r) | not)) or (.received == "reply" and .reason != "")
-    or (.received | IN("document","reply") | not))] | length')"
-  [ "$badrej" -eq 0 ] || refuse "$badrej credit(s) do not say what was received (document | reply), lack a rejection reason from the fixed list ($(printf '%s' "$REJECTION_TEXT" | "$JQ_BIN" -r 'keys_unsorted | join(", ")')) for a document, or carry a reason for a reply with no document; an after-rejection note only ever names the reviewer's recorded reason."
-fi
+# NO after-rejection note exists any more (Fable ruling 79 denial, 2026-11-04; dispatch
+# decline-copy.md; Aaron 2026-10-29 wording rule). The deleted copy named ONE of five reasons
+# ("it doesn't name you", "it is for a different track", "it is for a different role", "we
+# couldn't read it", "it isn't one of the documents we can accept") - a specification of which
+# check failed, which is the lesson a forged document learns from, and over-communication on a
+# decline. A decline is now the `decline` campaign's single approved sentence, in PR 2 of this
+# pair (intercom-verify-request.sh `decline`), and nothing here may name a reason again: the
+# reason stays in the decider ledger and the audit file for humans.
 ALL_IDS="$(ids_csv "$INPUT")"
 
 # ---------------------------------------------------------------------------------------
@@ -1784,39 +1774,6 @@ def live_followup($fn; $c; $maxl; $kind; $due):
   | .segs += [ {p: "Nothing has been removed yet: \(it1($n; "the credit stays"; "the credits stay")) on your profile. If we can't verify \(it1($n; "it"; "a credit")) by \($due), \(it1($n; "it"; "that credit")) will be removed from your profile that day. Reply to this message with any one of the documents from my earlier note and we'll pick it up right away."} ]
   | .segs += (if $kind == "reminder-25" then [ {p: "This is my last reminder about this review. If you need more time, tell us which credit and why, and we will keep the request open."} ] else [] end)
   | .segs += sig;
-def rejection_text: $rt[.reason];
-def after_rejection($fn; $c; $maxl; $due):
-  ($c | length) as $n
-  | [ $c[] | select(.received == "document") ] as $d
-  | [ $c[] | select(.received != "document") ] as $r
-  | (if ($d|length) > 0 then "If you have something else, such as a split sheet, a label or publisher statement or a session invoice, reply to this message with it by \($due)."
-     else "If you have one, such as a split sheet, a label or publisher statement or a session invoice, reply to this message with it by \($due)." end) as $ask
-  | if $n == 1 and ($d|length) == 1 then
-      $c[0] as $x
-      | { subject: "About the document for your \($x.role) credit on \($x.track_title | qt)",
-          segs: ([ {p: "Hi \($fn), thanks for sending your document. It didn't confirm your \($x.role) credit on \($x.track_title | qt) by \($x.artist_name) because \($x | rejection_text). \($ask)"} ] + sig) }
-    elif $n == 1 then
-      $c[0] as $x
-      | { subject: "About your \($x.role) credit on \($x.track_title | qt)",
-          segs: ([ {p: "Hi \($fn), thanks for your reply. We still need a document that shows your \($x.role) credit on \($x.track_title | qt) by \($x.artist_name). \($ask)"} ] + sig) }
-    elif ($r|length) == 0 then
-      { subject: "About the documents for \($n) of your credits on Muso",
-        segs: ([ {p: "Hi \($fn), thanks for sending your documents. They didn't confirm these \($n) credits:"},
-                 {ul: ([ $c[0:$maxl][] | "\(line): \(rejection_text)" ] + (if $n > $maxl then ["and \($n - $maxl) more"] else [] end))},
-                 {p: $ask} ] + sig) }
-    elif ($d|length) == 0 then
-      { subject: "About \($n) of your credits on Muso",
-        segs: ([ {p: "Hi \($fn), thanks for your reply. We still need a document that shows each of these \($n) credits:"},
-                 {ul: listed($c; $maxl)},
-                 {p: $ask} ] + sig) }
-    else
-      { subject: "About the documents for \($n) of your credits on Muso",
-        segs: ([ {p: "Hi \($fn), thanks for sending your documents. They didn't confirm these credits:"},
-                 {ul: ([ $d[0:$maxl][] | "\(line): \(rejection_text)" ] + (if ($d|length) > $maxl then ["and \(($d|length) - $maxl) more"] else [] end))},
-                 {p: "We also still need a document that shows each of these credits:"},
-                 {ul: listed($r; $maxl)},
-                 {p: $ask} ] + sig) }
-    end;
 def past_initial($fn; $c; $maxl):
   ($c | length) as $n
   | (["mix_master","producer","writer","engineer","musician","studio_org","anr","other"] - (["mix_master","producer","writer","engineer","musician","studio_org","anr","other"] - [$c[].role_families[]])) as $fams
@@ -2135,7 +2092,6 @@ def gap_ask($fn; $c; $maxl):
    elif $copy == "removal" then removal_notice($fn; .credits; $maxl)
    elif $copy == "past" then
      past_initial($fn; .credits; $maxl)
-   elif $kind == "after-rejection" then after_rejection($fn; .credits; $maxl; $due)
    elif $kind == "initial" then live_initial($fn; .credits; $maxl; $copy == "windowed"; $due)
    else live_followup($fn; .credits; $maxl; $kind; $due) end)
 # Status notes carry the approved "Muso Support" sign-off on email only (the handoff copy, firstmate
@@ -2151,7 +2107,7 @@ readonly RENDER_JQ
 render() { # <input-json> -> {subject, text, html}
   printf '%s' "$1" | "$JQ_BIN" -c --argjson maxl "$MAX_LISTED" --arg copy "$COPY" --arg kind "$KIND" \
     --arg ack "$MERGE_CLAIM_FIRST_PROOF_ACK" --argjson mcfproof "${MCF_PROOF:-null}" \
-    --arg due "$DUE_LABEL" --argjson rt "$REJECTION_TEXT" --arg mtype "$MESSAGE_TYPE" --arg day "$DAY" "$RENDER_JQ"
+    --arg due "$DUE_LABEL" --arg mtype "$MESSAGE_TYPE" --arg day "$DAY" "$RENDER_JQ"
 }
 
 # leak_reason <rendered-json>: empty when clean. Same patterns as a customer-facing
