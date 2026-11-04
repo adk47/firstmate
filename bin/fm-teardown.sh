@@ -91,11 +91,13 @@
 # Orca worktree id proven to resolve to that exact path. Every other
 # worktree needs treehouse installed on this host plus an inspectable recorded
 # project directory, and the treehouse pool the project resolves is asked (read
-# only) whether it holds that exact worktree: a held slot returns through
-# treehouse, and a path this host's pool provably does not hold is a worktree
-# treehouse never leased here, so it releases through guarded_plain_git_release
-# only once that release is proven to succeed - an unlocked registration, a tree
-# holding no uncommitted or untracked work, and no initialized submodule.
+# only) whether it holds that exact worktree - judged from the `status` stdout
+# listing alone, never from the diagnostics real treehouse keeps on stderr: a
+# held slot returns through treehouse, and a path this host's pool provably does
+# not hold is a worktree treehouse never leased here, so it releases through
+# guarded_plain_git_release only once that release is proven to succeed - an
+# unlocked registration, a tree holding no uncommitted or untracked work, and no
+# initialized submodule.
 # When no path resolves, teardown refuses while the agent is still alive and the
 # branch still intact, naming the concrete missing requirement. A treehouse that
 # cannot report its pool listing at all (no `status` support, a failing status,
@@ -1410,11 +1412,21 @@ canonical_existing_dir() {
 # output); and 3 when the listing names `~`-prefixed paths this host's HOME
 # cannot resolve, which means the listing speaks for some other home. 2 and 3
 # are never permission to proceed.
+#
+# The listing is `treehouse status`'s STDOUT only. Real treehouse keeps
+# diagnostics on stderr even when `status` succeeds (unreadable process tables,
+# damaged or orphaned slots), so merging stderr in would turn a diagnostic that
+# merely mentions a path into a listing row: a warning naming this worktree would
+# read as "held" and route the release through `treehouse return` after the
+# endpoint kill, and a warning naming an unrelated dead slot would read as an
+# unresolvable home-relative path and refuse a worktree the pool never held.
+# Diagnostics are therefore discarded, not parsed. A status that fails still
+# returns 2 through its exit code, whether or not it wrote to stderr.
 treehouse_pool_lists_worktree() {  # <project> <worktree>
   local proj=$1 wt=$2 listing line cand rel abs_wt abs_home field
   local -a candidates=() fields=()
   local unresolved=0
-  if ! listing=$( ( cd "$proj" && treehouse status ) 2>&1 ); then
+  if ! listing=$( ( cd "$proj" && treehouse status ) 2>/dev/null ); then
     return 2
   fi
   if [ -z "$listing" ]; then

@@ -3630,6 +3630,56 @@ test_plain_git_release_removes_clean_registered_worktree() {
   pass "an unpooled clean registered worktree releases through guarded plain git"
 }
 
+# A successful `treehouse status` may print diagnostics on stderr (real
+# treehouse reports unreadable process tables, damaged slots and orphaned pools
+# there) while the pool table goes to stdout. Those diagnostics are not listing
+# rows: a warning that merely names this worktree must not read as "the pool
+# holds it" - that would route the release through `treehouse return`, which
+# fails after the endpoint kill and leaves the agent dead with the teardown half
+# done. Membership is decided from the stdout listing alone, so this worktree the
+# pool does not hold releases through guarded plain git instead.
+test_pool_stderr_diagnostic_is_not_pool_membership() {
+  local case_dir rc branch
+  case_dir=$(make_case pool-stderr-diagnostic)
+  write_meta "$case_dir" no-mistakes ship
+  land_shippable_commit "$case_dir"
+  branch=$(git -C "$case_dir/wt" rev-parse --abbrev-ref HEAD)
+  cat > "$case_dir/fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  status)
+    # Succeeds, keeps its diagnostics on stderr, and its stdout table does NOT
+    # name this worktree.
+    echo "warning: prune skipped $FM_FAKE_POOL_WT (unlanded HEAD)" >&2
+    printf 'main\n'
+    printf '1  available  %s\n' "$FM_FAKE_OTHER_WT"
+    exit 0
+    ;;
+  return)
+    echo "treehouse: no such worktree in this pool" >&2
+    exit 1
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/treehouse"
+
+  rc=0
+  FM_FAKE_POOL_WT="$case_dir/wt" FM_FAKE_OTHER_WT="$case_dir/other-slot" \
+    run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 0 "$rc" "pool-stderr-diagnostic: a stderr diagnostic naming the worktree must not read as pool membership"$'\n'"$(cat "$case_dir/stderr")"
+  # The release went through plain git, never through the failing treehouse return.
+  assert_grep 'plain git worktree remove' "$case_dir/stderr" \
+    "pool-stderr-diagnostic: teardown did not release through guarded plain git"
+  assert_no_grep 'treehouse return failed' "$case_dir/stderr" \
+    "pool-stderr-diagnostic: a stderr diagnostic was read as a held pool slot"
+  assert_absent "$case_dir/wt" \
+    "pool-stderr-diagnostic: the released worktree directory is still present"
+  git -C "$case_dir/project" rev-parse --verify "refs/heads/$branch" >/dev/null 2>&1 \
+    && fail "pool-stderr-diagnostic: the task branch ref survived a successful release"
+  pass "a stderr diagnostic naming the worktree is not pool membership; the worktree releases through guarded plain git"
+}
+
 # The guarded release never passes --force, and the gate proves the release can
 # succeed BEFORE the agent is killed: an unpooled worktree holding uncommitted
 # work refuses pre-kill, even under --force.
@@ -4143,6 +4193,7 @@ test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
 test_missing_return_tool_refuses_before_killing_the_agent
 test_plain_git_release_removes_clean_registered_worktree
+test_pool_stderr_diagnostic_is_not_pool_membership
 test_plain_git_release_refuses_dirty_worktree
 test_plain_git_release_refuses_locked_worktree
 test_plain_git_release_refuses_initialized_submodule
