@@ -19,7 +19,28 @@
  * only by a reviewed PR.
  */
 
-export const INJECTION_WATCH_VERSION = "iw-2026-11-01.1";
+export const INJECTION_WATCH_VERSION = "iw-2026-11-04.6";
+
+/**
+ * How long a ledger row lives. The daily run (`scripts/injection-watch.py prune`) enforces it; this copy exists so
+ * the parity test can pin both sides to the same number. A HIGH hit's masked context is the only customer-derived
+ * text the ledger holds (Fable s1 on #1665), and text at rest with no lifetime is how a defensible design rots.
+ */
+export const LEDGER_RETENTION_DAYS = 30;
+
+/**
+ * The retention prune and every ledger writer serialize on ONE lock: an atomic directory create next to the ledger
+ * (`ledger.jsonl.ledger.lock`). A delete cannot be made safe against an appender with a timestamp check alone, so the
+ * two take turns instead (QA on #1665). Same constant on the Python side; the parity test pins them equal.
+ *
+ * This lock is the FAST path, not the guarantee: the prune independently refuses to unlink any generation whose inode
+ * is still held open by a live process, so a stolen lock or a bypassed append can cost ordering but never a row.
+ * `LEDGER_LOCK_STALE_MS` is long because the holder heartbeats the lock while it works, so "no heartbeat for this
+ * long" means the holder died -- not that it is slow.
+ */
+export const LEDGER_LOCK_SUFFIX = ".ledger.lock";
+export const LEDGER_LOCK_STALE_MS = 300_000;
+export const LEDGER_LOCK_WAIT_MS = 5_000;
 export const INJECTION_LEDGER_PATH = "/var/lib/hydra/injection-watch/ledger.jsonl";
 export const INJECTION_TAG = "ai:injection-watch";
 /** Fleet-wide: this many hit-turns inside BURST_WINDOW_MS pages once per window. */
@@ -131,9 +152,108 @@ export interface InjectionHit {
   severity: Severity;
   /** The matched text, cut to 120 chars (ledger only). */
   excerpt: string;
+  /**
+   * HIGH hits only: a short MASKED window around the match, so a hit can be reviewed after the fact
+   * (the bare match text of `role_marker` is just "Assistant:" - no signal). PII is redacted, the
+   * length is bounded, and this is derived from the customer's text, never acted on.
+   */
+  context?: string;
 }
 
 const COMPILED = INJECTION_RULES.map((r) => ({ ...r, re: new RegExp(r.source, r.flags) }));
+
+// Masked context window for HIGH hits: bounded, PII-redacted, one line. Constants, never env switches.
+export const CONTEXT_RADIUS = 60;
+export const CONTEXT_MAX = 160;
+export const CONTEXT_SNAP = 32;
+const MASK_EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
+// A phone has an international prefix or real separators: a bare digit run is an order/credit id, not a phone.
+const MASK_PHONE = /\+\d[\d\s().-]{6,}\d|\(?\d{2,4}\)?[\s.-]\d{2,4}[\s.-]\d{2,4}/g;
+// No word boundary: an ORDER-123456789 or AB123456789 keeps its digits inside a token (QA on #1665).
+const MASK_LONG_NUMBER = /\d{6,}/g;
+// A claim code carries no long digit run at all (XK4F7Q), so it needs its own pass: any 6+ character token with
+// both a digit and a capital is treated as a code (Fable s1 on #1665). Over-redacting a review excerpt is safe.
+const MASK_CODE_TOKEN = /[A-Za-z0-9][A-Za-z0-9_-]*/g;
+
+function maskCode(tok: string): string {
+  return tok.length >= 6 && /\d/.test(tok) && /[A-Z]/.test(tok) ? "[code]" : tok;
+}
+
+/**
+ * Redact the identifiers a hit may carry: emails, phone-like runs, any 6+ digit run, then claim-code-shaped
+ * tokens (6+ chars with a digit and a capital: XK4F7Q). Deterministic; over-redacting is the safe direction.
+ */
+/**
+ * A redaction of EXACTLY `len` characters: the tag plus fillers, or just fillers when the span is too short to name.
+ * Keeping the length is what makes a window taken over masked text line up with the original offsets, so a slice can
+ * never cut an identifier in half (QA on #1665, phone fragment at the left edge).
+ */
+function padMask(kind: string, len: number): string {
+  const tag = `[${kind}]`;
+  if (len >= tag.length) return tag + "#".repeat(len - tag.length);
+  return "#".repeat(len);
+}
+
+/**
+ * Redact the identifiers a hit may carry: emails, phone-like runs, any 6+ digit run, then claim-code-shaped
+ * tokens (6+ chars with a digit and a capital: XK4F7Q). Deterministic; over-redacting is the safe direction.
+ *
+ * The output is the SAME LENGTH as the input: masking runs over the whole text BEFORE any window is taken, so a
+ * fragment of a phone that starts outside the window cannot survive (QA on #1665). Same rule on the Python side.
+ */
+export function maskPii(s: string): string {
+  return (s || "")
+    .replace(MASK_EMAIL, (m) => padMask("email", m.length))
+    .replace(MASK_PHONE, (m) => padMask("phone", m.length))
+    .replace(MASK_LONG_NUMBER, (m) => padMask("number", m.length))
+    .replace(MASK_CODE_TOKEN, (tok) => (maskCode(tok) === "[code]" ? padMask("code", tok.length) : tok));
+}
+
+/**
+ * Cut to CONTEXT_MAX on a WORD boundary, then drop a trailing digit run: a hard character cut can split
+ * "…or +1 (555)" out of a masked phone and leak a fragment of it into the ledger.
+ */
+function boundContext(body: string): string {
+  if (body.length <= CONTEXT_MAX) return body;
+  return `${body
+    .slice(0, CONTEXT_MAX - 3)
+    .replace(/\s+\S*$/, "")
+    .replace(/[\s(]*[+\d][\d().\s-]*$/, "")}...`;
+}
+
+/** Widen a window to word boundaries (at most CONTEXT_SNAP chars): slicing mid-token can cut a phone. */
+function snapWindow(text: string, from: number, to: number, index: number, end: number): [number, number] {
+  const floor = Math.max(0, index - CONTEXT_RADIUS - CONTEXT_SNAP);
+  let f = from;
+  while (f > floor && !/\s/.test(text[f - 1])) f--;
+  const ceiling = Math.min(text.length, end + CONTEXT_RADIUS + CONTEXT_SNAP);
+  let t = to;
+  while (t < ceiling && t < text.length && !/\s/.test(text[t - 1])) t++;
+  return [f, t];
+}
+
+/** The masked window around a match at `index` (length `len`), masked, bounded, one line. */
+export function maskedContext(text: string, index: number, len: number): string {
+  // Mask the WHOLE text first, then window the masked string. Masking after the slice is what let a phone that
+  // started before the window survive as a fragment ("010-9999") in the 30-day ledger (QA on #1665); masking first
+  // makes that impossible, and maskPii is length-preserving so these offsets are still the original ones.
+  const masked = maskPii(text);
+  const [from, to] = snapWindow(
+    masked,
+    Math.max(0, index - CONTEXT_RADIUS),
+    Math.min(masked.length, index + len + CONTEXT_RADIUS),
+    index,
+    index + len,
+  );
+  const body = masked.slice(from, to).replace(/\s+/g, " ").trim();
+  // Belt and braces at BOTH edges: a fragment of a digit run must never be the first or last thing kept.
+  const safe =
+    body
+      .replace(/[\s(]*[+\d][\d().\s-]*$/, "")
+      .replace(/^[\s()]*[+\d][\d().\s-]*(?=\s|$)/, "")
+      .trim() || body;
+  return `${from > 0 ? "..." : ""}${boundContext(safe)}${to < text.length ? "..." : ""}`;
+}
 
 function cut(s: string, n = 120): string {
   const t = s.replace(/\s+/g, " ").trim();
@@ -162,7 +282,11 @@ export function scanForInjection(text: string): InjectionHit[] {
       const decoded = decodeBase64(m[0]);
       if (decoded && COMPILED.some((x) => x.rule !== "base64_blob" && x.severity === "high" && x.re.test(decoded))) severity = "high";
     }
-    hits.push({ rule: r.rule, severity, excerpt: cut(m[0]) });
+    const hit: InjectionHit = { rule: r.rule, severity, excerpt: cut(m[0]) };
+    // Only HIGH hits get context: the ledger is otherwise deliberately text-free, and review needs a
+    // sentence, not a bare "Assistant:" (firstmate decision 2026-11-03).
+    if (severity === "high") hit.context = maskedContext(t, m.index ?? 0, m[0].length);
+    hits.push(hit);
   }
   const zw = t.match(ZERO_WIDTH);
   if (zw && zw.length >= ZERO_WIDTH_MIN) hits.push({ rule: "zero_width_run", severity: "low", excerpt: `${zw.length} zero-width chars` });

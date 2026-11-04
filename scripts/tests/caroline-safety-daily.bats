@@ -51,8 +51,15 @@ case "$1" in
     if [ -n "${FAKE_PY:-}" ]; then printf '%s\n' "$FAKE_PY"; else cat "$TEST_TMPDIR/py.default"; echo; fi
     exit "${FAKE_PY_RC:-0}" ;;
   *injection-watch.py)
-    if [ -n "${FAKE_DG:-}" ]; then printf '%s\n' "$FAKE_DG"; exit "${FAKE_DG_RC:-0}"; fi
-    printf '%s\n' '{"inbound":{"turns":2,"by_severity":{"high":1},"by_source":{"intercom":2}},"output_guard":{"blocked":1,"by_rule":{"promise/timeframe_within":1},"notes":{}},"classifier_unavailable":3,"watch_candidates":[]}' ;;
+    printf '%s\n' "$*" >> "$TEST_TMPDIR/iw.argv"
+    case "$*" in
+      *prune*)
+        if [ -n "${FAKE_PP:-}" ]; then printf '%s\n' "$FAKE_PP"; exit "${FAKE_PP_RC:-0}"; fi
+        printf '%s\n' '{"dropped":4,"kept":11,"days":30,"sealed":"ledger.jsonl.sealed-20261103T061000Z","files_dropped":1,"files_kept":1}' ;;
+      *)
+        if [ -n "${FAKE_DG:-}" ]; then printf '%s\n' "$FAKE_DG"; exit "${FAKE_DG_RC:-0}"; fi
+        printf '%s\n' '{"inbound":{"turns":2,"by_severity":{"high":1},"by_source":{"intercom":2}},"output_guard":{"blocked":1,"by_rule":{"promise/timeframe_within":1},"notes":{}},"classifier_unavailable":3,"watch_candidates":[]}' ;;
+    esac ;;
 esac
 SH
   cat > "$STUB/mv" <<'SH'
@@ -97,6 +104,80 @@ daily() { run bash "$DAILY" --state-dir "$STATE" --plugin-dir "$TEST_TMPDIR/plug
   grep -q ":shield: Caroline safety daily" "$TEST_TMPDIR/slack.log"
   run grep -q "<@" "$TEST_TMPDIR/slack.log"
   [ "$status" -eq 1 ]
+}
+
+@test "the daily run prunes the ledger and states the retention result (s1 on #1665: text at rest must expire)" {
+  daily
+  [ "$status" -eq 0 ]
+  grep -q "prune" "$TEST_TMPDIR/iw.argv"                       # it ran at all
+  grep -q "\-\-ledger" "$TEST_TMPDIR/iw.argv"                 # against the ledger the digest reads
+  [[ "$output" == *"Ledger retention 30d: 1 old generation(s) deleted (4 row(s)), 1 generation(s) kept holding 11 row(s)."* ]]
+  [ "$(jq -r '.retention.dropped' "$STATE/$(date -u +%F).json")" = "4" ]
+  [ "$(jq -r '.retention_rc' "$STATE/$(date -u +%F).json")" = "0" ]
+  grep -q ":shield: Caroline safety daily" "$TEST_TMPDIR/slack.log"
+}
+
+@test "a prune that could not run pages: rows older than the window are still at rest" {
+  FAKE_PP='prune FAILED on /var/lib/hydra/injection-watch/ledger.jsonl: PermissionError: denied' FAKE_PP_RC=3 daily
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"REGRESSION"* ]]
+  [[ "$output" == *"RETENTION PRUNE FAILED"* ]]
+  grep -q ":rotating_light:" "$TEST_TMPDIR/slack.log"
+  run grep -q ":shield: Caroline safety daily" "$TEST_TMPDIR/slack.log"
+  [ "$status" -eq 1 ]   # never a green post on a run that could not enforce retention
+}
+
+@test "a prune that could not take the writer lock pages: retention was skipped, not silently forgotten" {
+  # The pruner raises instead of unlinking without the shared lock (QA on #1665), so a stuck holder surfaces like any
+  # other failed prune: a critical page and exit 1, never a green report that claims 30d is enforced.
+  FAKE_PP='prune FAILED on /var/lib/hydra/injection-watch/ledger.jsonl: TimeoutError: ledger lock ledger.jsonl.ledger.lock is held after 30s; retention NOT enforced' \
+    FAKE_PP_RC=3 daily
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"REGRESSION"* ]]
+  [[ "$output" == *"RETENTION PRUNE FAILED"* ]]
+  [[ "$output" == *"retention NOT enforced"* ]]
+  grep -q ":rotating_light:" "$TEST_TMPDIR/slack.log"
+}
+
+@test "a prune that could not check for live descriptors pages: retention NOT enforced" {
+  # "I could not read /proc, so I kept every candidate" must never look like a successful prune (QA on #1665,
+  # finding 3). The CLI exits 3 for it; the field is checked too so a zero exit cannot hide it.
+  FAKE_PP='{"dropped":0,"kept":12,"days":30,"sealed":null,"files_dropped":0,"files_kept":1,"held_open_files":0,"unverified_files":1}' \
+    FAKE_PP_RC=0 daily
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"retention UNVERIFIED"* ]]
+  [[ "$output" == *"retention NOT enforced"* ]]
+  grep -q ":rotating_light:" "$TEST_TMPDIR/slack.log"
+}
+
+@test "a generation kept because a writer still holds it is reported, and does NOT page" {
+  # An in-flight append keeping a generation alive for one run is normal operation, not a regression.
+  FAKE_PP='{"dropped":0,"kept":12,"days":30,"sealed":"ledger.jsonl.sealed-20260101T000000Z","files_dropped":0,"files_kept":1,"held_open_files":1,"unverified_files":0}' \
+    FAKE_PP_RC=0 daily
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"held open by a live writer"* ]]
+  [[ "$output" != *"REGRESSION"* ]]
+  ! grep -q ":rotating_light:" "$TEST_TMPDIR/slack.log"
+}
+
+@test "an UNREADABLE ledger generation pages: an unknown day is never a quiet one" {
+  # The digest reports ledger_error with NO numbers (never zeros) when a sealed generation cannot be read, and exits 1
+  # (QA on #1665, finding 2): the day must not look green with HIGH hits nobody can review.
+  FAKE_DG='{"window_hours":24,"ledger_writable":false,"ledger_error":"OSError: cannot read ledger generation ledger.jsonl.sealed-20260101T000000Z"}' \
+    FAKE_DG_RC=1 daily
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"REGRESSION"* ]]
+  [[ "$output" == *"cannot read ledger generation"* ]]
+  # numbers are UNKNOWN here, never 0: an unreadable ledger must not print a quiet day
+  [[ "$output" == *"inbound injection hit-turns ?"* ]]
+  [[ "$output" != *"inbound injection hit-turns 0"* ]]
+  grep -q ":rotating_light:" "$TEST_TMPDIR/slack.log"
+}
+
+@test "an empty ledger path override reaches both the prune and the digest (test seam, not an env switch)" {
+  run bash "$DAILY" --state-dir "$STATE" --plugin-dir "$TEST_TMPDIR/plugin" --ledger "$TEST_TMPDIR/my-ledger.jsonl"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c "\-\-ledger $TEST_TMPDIR/my-ledger.jsonl" "$TEST_TMPDIR/iw.argv")" = "2" ]
 }
 
 @test "the digest always states classifier availability (s1: absence never looks like 0 hits)" {
