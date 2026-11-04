@@ -42,6 +42,10 @@ source "$_SMOKE_DIR/lib/credit-gate-probe.sh"
 # Step 6b convergence heal so the two can never disagree (see lib/cron-store.sh).
 # shellcheck source=lib/cron-store.sh
 source "$_SMOKE_DIR/lib/cron-store.sh"
+# wait_gateway_settled — hold the LLM probes until the post-start freeze is over
+# (MUS-28729; see lib/gateway-settle.sh).
+# shellcheck source=lib/gateway-settle.sh
+source "$_SMOKE_DIR/lib/gateway-settle.sh"
 # shellcheck source=lib/mesh-probe.sh
 source "$_SMOKE_DIR/lib/mesh-probe.sh"
 # slack_probe_* — gate that every Slack account in openclaw-main.json came
@@ -344,7 +348,7 @@ PYEOF
 
   case "$(websearch_scoped_verdict "$ref_verdict" "$scout_verdict" "$restriction")" in
     fail)
-      fail_check "$label: web_search BROKEN for scout (${scout_detail}) and NO tool policy explains it — not attributable to a restriction"
+      fail_check "$label: $(websearch_scoped_fail_message "$scout_detail" "$restriction" "$reference" "$ref_verdict" "$ref_detail")"
       ;;
     warn)
       warn_check "$label: web_search is RESTRICTED for agent 'scout' by ${restriction} — deny-free agent '${reference}' searches fine, so this is a per-agent policy, not an outage. Deploy proceeds with the restriction visible. See validate-config-matrix.sh check #8."
@@ -523,6 +527,7 @@ if needs_target "main"; then
   # into agent:cto:main; a restart-recovery replay on EITHER key rejects it
   # (all 3 attempts failed in ~1s each at 14:44:22-24Z on 2026-09-11 while
   # clio's key was held). Gate both keys like ping_agent.
+  wait_gateway_settled main 18789
   MESH_GATED=0
   recovery_gate main agent:clio:main,agent:cto:main "Main" || MESH_GATED=1
   for attempt in 1 2 3; do
@@ -678,6 +683,7 @@ if needs_target "edge"; then
   check_agent_count edge "Edge"
   check_channel_health edge "Edge"
   # Targeted ping for the customer-facing support agent.
+  wait_gateway_settled edge 18810
   ping_agent edge support "Edge"
 fi
 

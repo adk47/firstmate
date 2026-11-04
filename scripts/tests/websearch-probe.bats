@@ -551,3 +551,25 @@ assert_verdict() { # <ref> <scout> <restriction> <expected>
   [[ "$output" == *"sentry__*"* ]]
   [ "$(websearch_reference_agent main)" = "cto" ]
 }
+
+# ──────────────────────────────────────────────────────────────
+# websearch_scoped_fail_message (MUS-28729): the fail arm must not claim
+# "NO tool policy explains it" when scout HAS a restriction and the reference
+# merely never proved itself.
+# ──────────────────────────────────────────────────────────────
+
+@test "fail message: (inconclusive, fail, restriction) names the reference, not a missing policy" {
+  run websearch_scoped_fail_message "disabled" "tools.deny" "qa" "inconclusive" "no rollout evidence"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"deny-free reference 'qa' was inconclusive (no rollout evidence)"* ]]
+  [[ "$output" == *"scout's tools.deny cannot be confirmed as the cause"* ]]
+  [[ "$output" != *"NO tool policy explains it"* ]]
+  # the verdict this message belongs to is unchanged
+  [ "$(websearch_scoped_verdict inconclusive fail tools.deny)" = "fail" ]
+}
+
+@test "fail message: (pass, fail, no restriction) keeps the original text" {
+  run websearch_scoped_fail_message "disabled" "" "qa" "pass" "ok"
+  [[ "$output" == *"NO tool policy explains it"* ]]
+  [ "$(websearch_scoped_verdict pass fail '')" = "fail" ]
+}

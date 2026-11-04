@@ -1,0 +1,111 @@
+#!/usr/bin/env bats
+# Tests for scripts/lib/gateway-settle.sh (MUS-28729). systemctl, ps, journalctl,
+# curl and sleep are PATH stubs; no live gateway is touched.
+#   (i)   fast /health from t=0 but no timing-gap line and uptime < min -> NOT settled
+#         until the gap line appears
+#   (ii)  gap line present, reads 000,000,200,200,200 -> settles after the 3rd fast read
+#   (iii) budget exhausted -> warn line, return 0
+#   (iv)  uptime >= min with no gap line -> settles on fast reads
+
+setup() {
+  T="$(mktemp -d)"; mkdir -p "$T/bin"; export T
+  LIB="$BATS_TEST_DIRNAME/../lib/gateway-settle.sh"
+  cat > "$T/bin/systemctl" <<'S'
+#!/bin/sh
+echo 4242
+S
+  cat > "$T/bin/ps" <<'S'
+#!/bin/sh
+echo "${STUB_UPTIME:-100}"
+S
+  cat > "$T/bin/sleep" <<'S'
+#!/bin/sh
+exit 0
+S
+  # journalctl: prints the gap line from call number $STUB_GAP_AT onward (0 = never)
+  cat > "$T/bin/journalctl" <<'S'
+#!/bin/sh
+n=$(cat "$T/jn" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$T/jn"
+if [ "${STUB_GAP_AT:-0}" -gt 0 ] && [ "$n" -ge "$STUB_GAP_AT" ]; then
+  echo "[health] host timing gap detected: process was frozen ~300000ms"
+fi
+exit 0
+S
+  # curl: next line of $T/reads ("000 0.0" / "200 0.4"); last line repeats
+  cat > "$T/bin/curl" <<'S'
+#!/bin/sh
+n=$(cat "$T/cn" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$T/cn"
+l=$(sed -n "${n}p" "$T/reads"); [ -n "$l" ] || l=$(tail -n 1 "$T/reads")
+printf '%s' "$l"
+S
+  chmod +x "$T"/bin/*
+  export PATH="$T/bin:$PATH"
+  log() { echo "LOG $*"; }
+  warn_check() { echo "WARN $*"; }
+  # shellcheck disable=SC1090
+  source "$LIB"
+}
+teardown() { rm -rf "$T"; }
+
+@test "(i) fast health but no gap line and short uptime: not settled until the gap line appears" {
+  echo "200 0.2" > "$T/reads"
+  export STUB_GAP_AT=4 STUB_UPTIME=100
+  run wait_gateway_settled main 18789
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"gateway settled"*"arm a: gap"* ]]
+  # journalctl was polled 4 times: three misses (no curl allowed yet), then the gap
+  [ "$(cat "$T/jn")" -eq 4 ]
+  [ "$(cat "$T/cn")" -eq 3 ]
+}
+
+@test "(i) fast health alone never settles while the gap line never appears" {
+  echo "200 0.2" > "$T/reads"
+  export STUB_GAP_AT=0 STUB_UPTIME=100 SMOKE_SETTLE_BUDGET_S=50
+  run wait_gateway_settled main 18789
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARN main: gateway did not settle within 50s (condition a"* ]]
+  [ ! -e "$T/cn" ]
+}
+
+@test "(ii) gap present; 000,000,200,200,200 settles after the third fast read" {
+  printf '000 0.0\n000 0.0\n200 0.3\n200 0.3\n200 0.3\n' > "$T/reads"
+  export STUB_GAP_AT=1 STUB_UPTIME=100
+  run wait_gateway_settled main 18789
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"gateway settled after 40s"* ]]
+  [ "$(cat "$T/cn")" -eq 5 ]
+}
+
+@test "(ii) a slow or failed read resets the consecutive count" {
+  printf '200 0.3\n200 0.3\n200 2.5\n200 0.3\n200 0.3\n200 0.3\n' > "$T/reads"
+  export STUB_GAP_AT=1
+  run wait_gateway_settled main 18789
+  [[ "$output" == *"gateway settled after 50s"* ]]
+  [ "$(cat "$T/cn")" -eq 6 ]
+}
+
+@test "(iii) budget runs out: warn line, return 0" {
+  echo "000 0.0" > "$T/reads"
+  export STUB_GAP_AT=1 SMOKE_SETTLE_BUDGET_S=30
+  run wait_gateway_settled edge 18810
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARN edge: gateway did not settle within 30s (condition b: 0/3"* ]]
+  [[ "$output" == *"probing anyway"* ]]
+}
+
+@test "(iv) uptime >= min with no gap line settles on fast reads" {
+  echo "200 0.2" > "$T/reads"
+  export STUB_GAP_AT=0 STUB_UPTIME=1000
+  run wait_gateway_settled main 18789
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"arm a: uptime"* ]]
+}
+
+@test "unreadable MainPID is not settled (budget warn, never a failure)" {
+  printf '#!/bin/sh\necho 0\n' > "$T/bin/systemctl"
+  echo "200 0.2" > "$T/reads"
+  export SMOKE_SETTLE_BUDGET_S=20
+  run wait_gateway_settled main 18789
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARN main: gateway did not settle"* ]]
+}

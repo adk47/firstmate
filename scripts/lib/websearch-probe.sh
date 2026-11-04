@@ -408,3 +408,18 @@ websearch_scoped_verdict() {
   if [ "$ref" = "pass" ]; then echo pass; return; fi
   echo inconclusive
 }
+
+# websearch_scoped_fail_message <scout_detail> <restriction> <reference> <ref_verdict> <ref_detail>
+# Text for the `fail` arm of websearch_scoped_verdict (smoke-test.sh prefixes the
+# label). The verdict is unchanged; only the blame is. With a restriction present
+# and a reference that did not pass, the old "NO tool policy explains it" was
+# false — scout's tools.deny exists, it just cannot be confirmed as the cause
+# because the deny-free reference never produced search evidence (MUS-28729).
+websearch_scoped_fail_message() {
+  local scout_detail="$1" restriction="$2" reference="$3" ref_verdict="$4" ref_detail="$5"
+  if [ -n "$restriction" ] && [ "$ref_verdict" != "pass" ]; then
+    echo "web_search BROKEN for scout (${scout_detail}) and deny-free reference '${reference}' was ${ref_verdict} (${ref_detail}) — scout's ${restriction} cannot be confirmed as the cause"
+  else
+    echo "web_search BROKEN for scout (${scout_detail}) and NO tool policy explains it — not attributable to a restriction"
+  fi
+}
