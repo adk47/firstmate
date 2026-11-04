@@ -1,0 +1,37 @@
+{
+  "_comment": [
+    "Copy rulings that authorize a customer-facing GDPR letter, one record per ruling. This file is the ONLY source the",
+    "send gate trusts for a ruling id: adding one is a reviewed commit, never an edit on a host. `kind` must match the",
+    "letter being sent (ask|confirm), `expires` bounds it, and `source` says where the ruling was issued so a reader can",
+    "check the words rather than our summary of them."
+  ],
+  "rulings": [
+    {
+      "id": "fable-ruling-1103-d2/gdpr-identity-ask",
+      "kind": "ask",
+      "copy_ref": "copy.ASK[ASK_LINK|ASK_IDENTITY|ASK_AUTH]",
+      "approved_by": "verify-sla-driver-fable-d2",
+      "approved_at": "2026-11-03T23:40:00Z",
+      "expires": "2026-12-03T23:40:00Z",
+      "source": "firstmate inbox 027 (Fable driver, single sender seat), ruling against gdpr-ruling-for-jan s1-2 + gdpr-ack-v2 s2 step 1"
+    },
+    {
+      "id": "fable-ruling-1103-d2/gdpr-progress-line",
+      "kind": "ask",
+      "copy_ref": "copy.PROGRESS_LINE",
+      "approved_by": "verify-sla-driver-fable-d2",
+      "approved_at": "2026-11-03T23:40:00Z",
+      "expires": "2026-12-03T23:40:00Z",
+      "source": "firstmate inbox 027: 'APPROVED AS WRITTEN, approval id fable-ruling-1103-d2/gdpr-progress-line'"
+    },
+    {
+      "id": "fable-ruling-1103-b3/gdpr-confirmation",
+      "kind": "confirm",
+      "copy_ref": "copy.CONFIRM_HEAD + LINE_S/P/M/D_NO + LINE_P_PENDING",
+      "approved_by": "verify-sla-driver-fable-d2",
+      "approved_at": "2026-11-03T20:10:00Z",
+      "expires": "2026-12-03T20:10:00Z",
+      "source": "Fable ruling B3 (data/verify-sla-driver-fable-d2/rulings-blockers-1103-20Z.md): wire confirm/ask through the approved sender adapter; copy = the already-approved erasure-confirmation template (firstmate 943) + gdpr-ack-v2 s2, verbatim"
+    }
+  ]
+}

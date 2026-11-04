@@ -691,6 +691,53 @@ systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
 systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
 log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
 
+# ─── GDPR erasure pipeline (register + identity + 410 read-back + due-date watchdog) ─
+# Hourly. scripts/gdpr-pipeline.py tick: intake (open data-deletion / data-export tickets
+# + their Intercom conversations, the notices@/legal@ + support@ ledgers, Intercom last 3 h)
+# into /var/lib/hydra-gdpr/erasure.sqlite, identity per gdpr-ack-v2 §3, the 410 + noindex
+# read-back that sets hidden_at, and the watchdog: pages #cs_priority (Jan) at most once a
+# day when a request reaches due_at - 3 d without a written confirmation. It never hides
+# (the hide batch is a separate, human-merged PR) and never deletes. The tick NEVER
+# messages a customer: sends are a separate `ask --send` / `confirm --send` run that needs an
+# approval record posted by an allowlisted human or the approved sender seat (an exact
+# `APPROVE gdpr <kind> <digest> ruling=<id>` message, gdpr_pipeline/approval.py); the tick
+# has no way to supply one, so it cannot send. Kill: /etc/hydra/gdpr-pipeline.disabled.
+# HOME=/root so `gh api` (the read of the two hide lists) finds root's gh config.
+[[ -x "$HYDRA_ROOT/scripts/gdpr-pipeline.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/gdpr-pipeline.py missing or not executable"
+cat > /etc/systemd/system/gdpr-pipeline-tick.service << GDPRTICKSVC
+[Unit]
+Description=GDPR erasure pipeline tick (register intake, identity, 410 read-back, due-date watchdog)
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=HOME=/root
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/main.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/gdpr-pipeline.py tick --page
+TimeoutStartSec=3000
+GDPRTICKSVC
+
+cat > /etc/systemd/system/gdpr-pipeline-tick.timer << GDPRTICKTMR
+[Unit]
+Description=Run the GDPR erasure pipeline tick hourly
+
+[Timer]
+OnBootSec=20min
+OnUnitActiveSec=60min
+Unit=gdpr-pipeline-tick.service
+
+[Install]
+WantedBy=timers.target
+GDPRTICKTMR
+
+systemctl daemon-reload
+gt=gdpr-pipeline-tick.timer
+systemctl enable "$gt" >/dev/null 2>&1 || log "WARN: could not enable $gt"
+systemctl start "$gt" >/dev/null 2>&1 || log "WARN: could not start $gt"
+log "  $gt: $(systemctl is-active "$gt" 2>/dev/null || echo unknown)"
+
 # ─── Retire the keyword Intercom data-complaint watchdog (replaced 2026-06-25) ──
 # The every-10m KEYWORD watchdog (coarse data-noun + complaint-signal buckets)
 # produced false "systemic" pages — three unrelated credit gripes grouped as one
@@ -3542,6 +3589,7 @@ AUX_ONFAILURE_UNITS=(
   cs-selfserve-backlog.service
   cs-sla-report.service
   cto-nightly-driver.service
+  gdpr-pipeline-tick.service
   hydra-company-finder-cache-refresh.service
   hydra-codex-home-prune.service
   hydra-daily-audit.service

@@ -650,6 +650,15 @@ openclaw 2026.8.35, all verified in code:
   via `tools.alsoAllow`, so a denied agent must deny `lobster` too.
 Runtime proof per agent: `scripts/redteam/exec_injection_probe.py --agent <id>` (post-deploy, sends one injected turn).
 
+## GDPR erasure: the register is `erasure_requests`, and nothing is ever deleted
+
+Erasure / takedown / Art. 15 requests from every channel live in ONE machine register
+(`scripts/gdpr-pipeline.py`, store `/var/lib/hydra-gdpr/erasure.sqlite`; `docs/support/gdpr-pipeline.md`).
+Identity is decided by code per gdpr-ack-v2 paths A-E (a claim is one path, never a requirement); request text
+never selects a hide. The pipeline only PREPARES the reversible hide PRs (H-DevOps `HIDDEN_ENTITY_IDS` + PDP
+sitemap `LEGAL_HIDDEN_ENTITY_IDS`); a person merges. Never `DELETE /api/v3/admin/profile` or muso-cli delete
+(legal hold 1350). Customer sends stay locked until Fable's GO lands in a PR.
+
 ## Picking the right extension mechanism
 
 Before writing new code in this repo, walk this decision tree top-down and stop at

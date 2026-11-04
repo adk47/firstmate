@@ -1,0 +1,395 @@
+"""Read-only I/O for the pipeline: ClickUp, Intercom, the core replica (Trino), the admin catalog, the hide lists.
+
+Every read FAILS CLOSED (c3 design §3): a failed read raises `Unknown`; the caller records nothing for that row
+and exits non-zero. A green run that silently covered nothing is the failure this forbids. Nothing here writes.
+"""
+from __future__ import annotations
+
+import csv
+import html
+import io
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parents[1]          # scripts/
+sys.path.insert(0, str(HERE))
+
+from gdpr_pipeline.identity import Page             # noqa: E402
+
+TRINO = os.environ.get("GDPR_TRINO", "/opt/hydra/scripts/trino-query.sh")
+INTERCOM = "https://api.intercom.io"
+CLICKUP_LIST = "901000600160"
+HDEVOPS_REPO = "Muso-AI/H-DevOps"
+HDEVOPS_FILES = ("k8s/prod/core-services/deployments.yaml", "k8s/dev/dev-deployments.yaml")
+PDP_REPO = "Muso-AI/platform-data-processing"
+PDP_LIST = "src/tools/jobs/industry_processing/drivers/calc/sitemap/legal_hidden.py"
+PDP_TEST = "tests/unit/test_sitemap_legal_hidden.py"
+UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+class Unknown(RuntimeError):
+    """A read that did not complete. Never a verdict."""
+
+
+# ---- core replica
+
+def trino(sql: str) -> list[list[str]]:
+    try:
+        p = subprocess.run([TRINO], input=sql, capture_output=True, text=True, timeout=300, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise Unknown(f"replica read did not run: {type(exc).__name__}") from exc
+    if p.returncode:
+        raise Unknown(f"replica read failed: {p.stderr.strip()[-200:]}")
+    return list(csv.reader(io.StringIO("\n".join(ln for ln in p.stdout.splitlines() if ln.startswith('"')))))
+
+
+def _q(xs) -> str:
+    return ",".join("'" + str(x).replace("'", "''") + "'" for x in xs)
+
+
+def processed_claims(profile_ids: list[str]) -> dict[str, set[int]]:
+    """{profile id: accounts holding a PROCESSED, not deleted claim}, whether the target is the claim's main profile
+    or one of its `extraprofileids`. A claim that carries the target only as an extra still means the requester owns
+    that page; dropping it would send a rightful claim down the ASK_IDENTITY road."""
+    ids = sorted({p for p in profile_ids if UUID_RE.fullmatch(p)})
+    out: dict[str, set[int]] = {p: set() for p in ids}
+    for i in range(0, len(ids), 150):
+        chunk = ids[i:i + 150]
+        # extraprofileids is a varchar whose exact shape (JSON array, comma list, brace list) is not guaranteed, so
+        # match with strpos on the raw text and confirm the uuid in Python rather than trusting a cast.
+        extra = " OR ".join(f"strpos(lower(CAST(extraprofileids AS varchar)), '{p.lower()}') > 0" for p in chunk)
+        for pid, uid, ex in trino(
+                "SELECT CAST(profileid AS varchar), CAST(userid AS varchar), CAST(extraprofileids AS varchar) "
+                "FROM postgresql_core.public.claiming "
+                f"WHERE (CAST(profileid AS varchar) IN ({_q(chunk)}) OR {extra}) AND userid IS NOT NULL "
+                "AND deletedat IS NULL AND lower(CAST(status AS varchar)) = 'processed'"):
+            if not uid.isdigit():
+                continue
+            if pid in out:
+                out[pid].add(int(uid))
+            low = (ex or "").lower()
+            for target in chunk:
+                if target.lower() in low and target in out:
+                    out[target].add(int(uid))
+    return out
+
+
+def account_names(uids: list[int]) -> dict[int, tuple[str, ...]]:
+    ids = sorted({int(u) for u in uids})
+    out: dict[int, tuple[str, ...]] = {}
+    for i in range(0, len(ids), 500):
+        for uid, fn, ln, full in trino("SELECT CAST(id AS varchar), firstname, lastname, fullname FROM "
+                                       f"postgresql_core.public.users WHERE id IN ({','.join(map(str, ids[i:i+500]))})"):
+            names = tuple(n for n in {f"{fn or ''} {ln or ''}".strip(), (full or "").strip()} if n)
+            out[int(uid)] = names
+    return out
+
+
+def accounts_by_email(email: str) -> list[int]:
+    if not email:
+        return []
+    return sorted({int(u) for (u,) in trino("SELECT CAST(id AS varchar) FROM postgresql_core.public.users "
+                                             f"WHERE lower(email) = {_q([email.lower()])}") if u.isdigit()})
+
+
+def resolve_account(external_id: str, email: str, email_trusted: bool) -> tuple[int | None, str]:
+    """(account id, how) -- identity_resolver r5 on the contact's external_id first (the one resolver the verify
+    gate uses); else, only when the address was delivered by mail or is an identified Intercom user, the ONE
+    account whose sign-in email it is. Two accounts or none -> None (never a guess)."""
+    from credit_review import identity_resolver
+    if external_id:
+        res = identity_resolver.resolve([external_id], trino).get(external_id)
+        if res and res.account_id is not None:
+            return res.account_id, f"external_id ({res.matched_by})"
+    if email and email_trusted:
+        acc = accounts_by_email(email)
+        if len(acc) == 1:
+            return acc[0], "account email"
+    return None, ""
+
+
+# ---- catalog
+
+def profile_doc(pid: str) -> dict | None:
+    """The admin profile (GET only). None on 404 (which core also answers on a failed catalog read)."""
+    from credit_review import admin
+    try:
+        return admin.profile(admin.AdminClient(), pid)
+    except admin.NotFound:
+        return None
+    except admin.AdminError as exc:
+        raise Unknown(f"admin profile {pid}: {exc}") from exc
+
+
+def public_status(entity: str, pid: str) -> int:
+    """The public status code. 404 is an ANSWER; 5xx (and 429) are NOT: a page we could not read must never read
+    as "not found" and settle as gone/UNKNOWN, so they raise and the run exits 2."""
+    req = urllib.request.Request(f"https://muso.ai/{entity}/{pid}", headers={"User-Agent": "muso-gdpr-pipeline"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            if r.status >= 500:
+                raise Unknown(f"public GET {entity}/{pid}: HTTP {r.status}")
+            return r.status
+    except urllib.error.HTTPError as exc:
+        if exc.code >= 500 or exc.code == 429:
+            raise Unknown(f"public GET {entity}/{pid}: HTTP {exc.code}")
+        return exc.code
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise Unknown(f"public GET {entity}/{pid}: {exc}") from exc
+
+
+def resolve_prefixes(prefixes: list[str]) -> dict[str, str]:
+    """{8-char prefix: full profile id} for prefixes that match EXACTLY one catalog profile (legal-intake and the
+    markdown register keep prefixes only). Ambiguous or absent prefixes are left out (-> UNKNOWN, never a guess)."""
+    pre = sorted({p for p in prefixes if re.fullmatch(r"[0-9a-f]{8}", p)})
+    hits: dict[str, set[str]] = {p: set() for p in pre}
+    for i in range(0, len(pre), 60):
+        cond = " OR ".join(f"CAST(profile_id AS varchar) LIKE '{p}%'" for p in pre[i:i + 60])
+        for (pid,) in trino(f"SELECT CAST(profile_id AS varchar) FROM postgresql_catalog.public.catalog_profile WHERE {cond}"):
+            if pid[:8] in hits:
+                hits[pid[:8]].add(pid.lower())
+    return {p: next(iter(v)) for p, v in hits.items() if len(v) == 1}
+
+
+def _is_number(v) -> bool:
+    """A JSON number, and NOT a bool (bool is an int subclass: `True` would have read as 1 credit)."""
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def page_facts(pages: list[dict], hidden: set[str], claims: dict[str, set[int]]) -> list[Page]:
+    out = []
+    for p in pages:
+        pid, ent = p["id"], p.get("entity") or "profile"
+        if ent != "profile" or pid in hidden:
+            out.append(Page(pid, ent, hidden=pid in hidden))
+            continue
+        if not UUID_RE.fullmatch(pid):
+            out.append(Page(pid, ent, found=False))     # an 8-char prefix: the full id must be read from the thread
+            continue
+        doc = profile_doc(pid)
+        if not doc:
+            # core answers 404 on a failed catalog read too: only a public 404 as well makes it "gone"
+            gone = public_status("profile", pid) == 404
+            out.append(Page(pid, ent, found=gone, gone=gone))
+            continue
+        links = doc.get("links") if isinstance(doc.get("links"), dict) else {}
+        # isClaimed / popularity / creditCount are SAFETY fields: they decide whether path C may pass and whether the
+        # page is a big name that goes to Jan. A missing or wrong-typed field is NOT false/0 - coercing absence made
+        # an unclaimed big-name page auto-hide on facts the catalog never stated (QA on a3e68886a). Measured before
+        # shipping the stricter rule: 32 of 32 live admin answers that were not 404 carry all three, correctly typed,
+        # so this changes no current verdict and only refuses the answers that never established them.
+        bad = [name for name, ok in (("isClaimed", isinstance(doc.get("isClaimed"), bool)),
+                                     ("popularity", _is_number(doc.get("popularity"))),
+                                     ("creditCount", _is_number(doc.get("creditCount")))) if not ok]
+        if bad:
+            out.append(Page(pid, ent, True, str(doc.get("name") or ""), facts_unknown=",".join(bad),
+                            hidden=pid in hidden))
+            continue
+        out.append(Page(pid, ent, True, str(doc.get("name") or ""), doc.get("isClaimed") is True,
+                        frozenset(claims.get(pid, set())), float(doc.get("popularity")),
+                        int(doc.get("creditCount")), str(links.get("website") or ""), pid in hidden))
+    return out
+
+
+# ---- the two hide lists (both must hold an id for it to count as hidden)
+
+def gh_raw(repo: str, path: str, ref: str = "main") -> str:
+    p = subprocess.run(["gh", "api", "-H", "Accept: application/vnd.github.raw",
+                        f"repos/{repo}/contents/{path}?ref={ref}"], capture_output=True, text=True, timeout=120)
+    if p.returncode:
+        raise Unknown(f"gh read {repo}:{path}: {p.stderr.strip()[-200:]}")
+    return p.stdout
+
+
+def hidden_ids_from_yaml(text: str) -> set[str]:
+    m = re.search(r"name: HIDDEN_ENTITY_IDS\s*\n\s*value:\s*\"([^\"]*)\"", text)
+    if not m:
+        raise Unknown("HIDDEN_ENTITY_IDS not found")
+    return {x.strip().lower() for x in m.group(1).split(",") if x.strip()}
+
+
+def legal_hidden_from_py(text: str) -> set[str]:
+    return {m.lower() for m in re.findall(r'^\s*"(' + UUID_RE.pattern + r')":\s*\(', text, re.M)}
+
+
+def hidden_lists() -> tuple[set[str], set[str]]:
+    """(H-DevOps prod HIDDEN_ENTITY_IDS on main, PDP LEGAL_HIDDEN_ENTITY_IDS on main)."""
+    return hidden_ids_from_yaml(gh_raw(HDEVOPS_REPO, HDEVOPS_FILES[0])), legal_hidden_from_py(gh_raw(PDP_REPO, PDP_LIST))
+
+
+# ---- Intercom
+
+def intercom(method: str, path: str, body: dict | None = None) -> dict:
+    tok = os.environ.get("MUSOAI_INTERCOM_TOKEN", "")
+    if not tok:
+        raise Unknown("no Intercom token (MUSOAI_INTERCOM_TOKEN)")
+    data = json.dumps(body).encode() if body is not None else None
+    for attempt in range(5):
+        req = urllib.request.Request(INTERCOM + path, data=data, method=method, headers={
+            "Authorization": f"Bearer {tok}", "Accept": "application/json", "Content-Type": "application/json",
+            "Intercom-Version": "2.11"})
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as exc:
+            if exc.code in (429, 500, 502, 503, 504) and attempt < 4:
+                time.sleep(3 * (attempt + 1))
+                continue
+            raise Unknown(f"Intercom {method} {path}: HTTP {exc.code}") from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            if attempt < 4:
+                time.sleep(3 * (attempt + 1))
+                continue
+            raise Unknown(f"Intercom {method} {path}: {exc}") from exc
+    raise Unknown(f"Intercom {method} {path}: retries exhausted")
+
+
+def _plain(s: str) -> str:
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", s or ""))).strip()
+
+
+MAX_PARTS_IN_RESPONSE = 500      # Intercom 2.11 returns at most the 500 most recent conversation parts
+
+_CONV_CACHE: dict[str, dict] = {}
+
+
+def conversation(conv_id: str) -> dict:
+    """Cached per run (intake and decide read the same conversation)."""
+    if conv_id not in _CONV_CACHE:
+        _CONV_CACHE[conv_id] = _conversation(conv_id)
+    return _CONV_CACHE[conv_id]
+
+
+def _conversation(conv_id: str) -> dict:
+    """The facts the identity rules may use, plus the CUSTOMER's own words (for class + page ids only).
+
+    Two shapes that would otherwise turn OUR words into the customer's request, both failed closed:
+      - an admin-initiated conversation (`source.author.type` = admin/teammate/bot): its source body is OUR message,
+        so it never enters `parts`/`customer_text` and the admin's name/email never become the requester's. Only a
+        customer-authored source is a customer statement (Intercom allows admins to open a thread, and an outbound
+        "we will delete your profile <link>" would otherwise register as an erasure request and could reach a hide
+        batch with nobody having asked);
+      - a conversation with more parts than the API returns (the 2.11 retrieval cap, 500): a partial history cannot
+        prove the customer's request is absent, so the read fails closed instead of being dated from what survived.
+    """
+    cv = intercom("GET", f"/conversations/{conv_id}?display_as=plaintext")
+    src = cv.get("source") or {}
+    author = src.get("author") or {}
+    contacts = ((cv.get("contacts") or {}).get("contacts") or [])
+    ct = intercom("GET", f"/contacts/{contacts[0]['id']}") if contacts else {}
+    parts_obj = cv.get("conversation_parts") or {}
+    raw_parts = parts_obj.get("conversation_parts") or []
+    # The documented cap is 500 parts, and `total_count` counts the parts IN THE RESPONSE, so it cannot reveal that a
+    # thread was truncated: a 600-part conversation comes back as exactly 500 parts with total_count=500. The only
+    # detectable signal is the response sitting AT the cap, which therefore fails closed - an older part may hold the
+    # erasure request itself, and dating the row from the surviving parts (then advancing the search cursor) would
+    # drop it silently.
+    if len(raw_parts) >= MAX_PARTS_IN_RESPONSE:
+        raise Unknown(f"Intercom conversation {conv_id}: came back at the API's {MAX_PARTS_IN_RESPONSE}-part retrieval "
+                      f"cap, so older parts (and any request in them) cannot be seen or dated - reconcile by hand")
+    total = parts_obj.get("total_count")
+    if isinstance(total, int) and total > len(raw_parts):
+        raise Unknown(f"Intercom conversation {conv_id}: {len(raw_parts)} of {total} parts came back, so the history "
+                      f"is incomplete - reconcile by hand")
+    customer_author = str(author.get("type") or "").strip() in ("user", "lead", "contact")
+    parts = [{"at": int(cv.get("created_at") or 0), "text": _plain(src.get("body") or "")}] if customer_author else []
+    for p in raw_parts:
+        if (p.get("author") or {}).get("type") in ("user", "lead", "contact") and p.get("body"):
+            parts.append({"at": int(p.get("created_at") or cv.get("created_at") or 0), "text": _plain(p["body"])})
+    return {
+        "conversation_id": str(conv_id), "created_at": int(cv.get("created_at") or 0),
+        "parts": [x for x in parts if x["text"]],
+        "source_type": src.get("type") or "",
+        # The SUBJECT drives `classify()`, so it is customer-authored text or nothing: an admin-opened thread titled
+        # "Delete my profile" would otherwise classify a thread the customer only replied to with a URL.
+        "subject": _plain(src.get("subject") or "") if customer_author else "",
+        "author_name": (author.get("name") or "") if customer_author else "",
+        "author_email": (author.get("email") or "").strip() if customer_author else "",
+        "source_author_type": str(author.get("type") or ""),
+        "contact_id": ct.get("id") or "", "external_id": str(ct.get("external_id") or ""),
+        "contact_email": (ct.get("email") or "").strip(), "contact_name": ct.get("name") or "",
+        "contact_role": ct.get("role") or "",
+        "customer_text": "\n".join(x["text"] for x in parts if x["text"]),
+        "state": cv.get("state") or "",
+    }
+
+
+def _search_page(field: str, since_epoch: int, cursor: str | None) -> tuple[list[str], str | None]:
+    """One validated page of the Intercom conversation search: ([ids], next cursor or None).
+
+    A 200 with no `conversations` list is NOT an empty final page: treating it as one ends the walk with a success,
+    the caller advances its cursor, and every request in that window is silently lost. The response shape is part of
+    the read, so a malformed page raises `Unknown` exactly like a 5xx does."""
+    body = {"query": {"field": field, "operator": ">", "value": int(since_epoch)},
+            "pagination": {"per_page": 150, **({"starting_after": cursor} if cursor else {})}}
+    r = intercom("POST", "/conversations/search", body)
+    if not isinstance(r, dict):
+        raise Unknown(f"Intercom search ({field}): response is not an object")
+    convs = r.get("conversations")
+    if not isinstance(convs, list):
+        raise Unknown(f"Intercom search ({field}): response has no conversations list "
+                      f"(keys: {sorted(r) if isinstance(r, dict) else type(r).__name__})")
+    ids = []
+    for c in convs:
+        if not isinstance(c, dict) or not str(c.get("id") or "").strip():
+            raise Unknown(f"Intercom search ({field}): a conversation has no id")
+        ids.append(str(c["id"]))
+    # The pagination object is part of the read: without it nothing proves this is the LAST page, and guessing
+    # "no next cursor means done" is exactly how a truncated response ends the walk with a success.
+    pages = r.get("pages")
+    if not isinstance(pages, dict):
+        raise Unknown(f"Intercom search ({field}): response has no pages object, so the last page cannot be proven")
+    nxt = pages.get("next")
+    if nxt is not None and not isinstance(nxt, dict):
+        raise Unknown(f"Intercom search ({field}): malformed pages.next")
+    nxt_cursor = str((nxt or {}).get("starting_after") or "").strip()
+    if nxt_cursor:
+        if nxt_cursor == cursor:
+            raise Unknown(f"Intercom search ({field}): pagination cursor did not advance")
+        return ids, nxt_cursor
+    page, total = pages.get("page"), pages.get("total_pages")
+    if not isinstance(page, int) or not isinstance(total, int) or page < total:
+        raise Unknown(f"Intercom search ({field}): no next cursor and page {page!r} of {total!r} does not prove "
+                      f"the last page")
+    return ids, None
+
+
+def search_conversations(since_epoch: int) -> list[str]:
+    """Conversation ids CREATED since `since_epoch` OR UPDATED since it (every page; raises on a failed page).
+
+    Both fields matter: a customer who replies to an old thread today ("please delete my data") changes an
+    existing conversation, and a created_at-only search would never return it — the request would never reach
+    the register or the due-date watchdog unless Caroline happened to file a ticket. Updated_at also catches
+    newly-filed tickets' conversations. The union is deduplicated; a failure on either field fails the read.
+    """
+    out: dict[str, None] = {}
+    for field in ("created_at", "updated_at"):
+        cursor = None
+        while True:
+            ids, cursor = _search_page(field, since_epoch, cursor)
+            for cid in ids:
+                out.setdefault(cid, None)
+            if not cursor:
+                break
+    return list(out)
+
+
+# ---- ClickUp
+
+def clickup_tasks(action_type: str) -> list[dict]:
+    from lib import clickup_client
+    key = os.environ.get("CLICKUP_API_KEY") or os.environ.get("MUSOAI_CLICKUP_API_KEY") or ""
+    if not key:
+        raise Unknown("no ClickUp key")
+    try:
+        return clickup_client.shared(key).list_tasks(
+            CLICKUP_LIST, [("tags[]", f"action:{action_type}"), ("include_closed", "true"), ("subtasks", "true")], 60)
+    except Exception as exc:  # noqa: BLE001 -- any failed page is an incomplete scan
+        raise Unknown(f"ClickUp {action_type}: {exc}") from exc

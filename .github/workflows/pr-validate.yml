@@ -1832,6 +1832,16 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_legal_intake
+      - name: Run GDPR erasure pipeline tests
+        # scripts/gdpr-pipeline.py decides identity for erasure requests (gdpr-ack-v2 paths A-E) and
+        # prepares reversible-hide PRs. These lock: a claim is one path not a requirement, a
+        # mismatched name / someone else's claim = ASK (request text never selects a hide), big-name
+        # pages go to Jan, one register row per request (key = idempotence test, due dates only move
+        # earlier), the hide editors only append ids and extend the strict PDP test, no DELETE path,
+        # sends locked, letters carry only verified lines. Stdlib unittest, targeted by name.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_gdpr_pipeline
       - name: Run legal-unanswered watchdog tests
         # scripts/intercom-legal-unanswered-watchdog.py PAGES #cs_priority (Jan) when a
         # legal/privacy request has no HUMAN reply for 24h. These lock the watch set,
