@@ -20,6 +20,9 @@ echo "${STUB_UPTIME:-100}"
 S
   cat > "$T/bin/sleep" <<'S'
 #!/bin/sh
+# STUB_RESTART_AT_SLEEP=n: the gateway restarts (new MainPID) during sleep n
+n=$(cat "$T/sn" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$T/sn"
+if [ -n "${STUB_RESTART_AT_SLEEP:-}" ] && [ "$n" -eq "$STUB_RESTART_AT_SLEEP" ]; then echo 5555 > "$T/pid"; fi
 exit 0
 S
   # journalctl: prints the gap line from call number $STUB_GAP_AT onward (0 = never)
@@ -131,6 +134,28 @@ teardown() { rm -rf "$T"; }
   [[ "$output" == *"gateway settled"*"arm a: gap"* ]]
   # 2 reads on the old PID (the 2nd discarded), then 3 fresh ones on the new PID
   [ "$(cat "$T/cn")" -eq 5 ]
+}
+
+@test "a restart during the FINAL fast read does not settle (pins the post-read PID reset)" {
+  echo "200 0.2" > "$T/reads"
+  export STUB_GAP_AT=1 STUB_GAP_PID=4242 STUB_RESTART_AT_CURL=3 SMOKE_SETTLE_BUDGET_S=50
+  run wait_gateway_settled main 18789
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"gateway settled"* ]]
+  [[ "$output" == *"WARN main: gateway did not settle within 50s (condition a"* ]]
+  # reads 1-3 on the old PID; the new PID never logs a gap, so no read follows
+  [ "$(cat "$T/cn")" -eq 3 ]
+}
+
+@test "a restart during sleep: no read is counted on the new PID before its own gap line (pins the top-of-loop PID reset)" {
+  echo "200 0.2" > "$T/reads"
+  export STUB_GAP_AT=1 STUB_GAP_PID=4242 STUB_RESTART_AT_SLEEP=1 SMOKE_SETTLE_BUDGET_S=50
+  run wait_gateway_settled main 18789
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"gateway settled"* ]]
+  [[ "$output" == *"WARN main: gateway did not settle within 50s (condition a"* ]]
+  # one read on the old PID, then none: the new PID has no arm
+  [ "$(cat "$T/cn")" -eq 1 ]
 }
 
 # ── wiring: smoke-test.sh must call the gate before each profile's first LLM probe ──
