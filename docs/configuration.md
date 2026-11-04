@@ -732,12 +732,16 @@ Arm it once per home with `bin/fm-cliproxy-expiry-check.sh arm`, which writes `s
 The registry is local and gitignored, like every other `config/` file, and is not shipped.
 Start one by copying whatever record the pool already has, or let the first re-login create it.
 
-`bin/cliproxy-relogin.sh` is the one re-login session for the whole pool.
-It walks the accounts in registry order, starts `claude setup-token` for each, relays the approval URL, waits for the token, and writes `<email>`'s setup-token credential into the auth dir by rename, mode 0600, never printing the token.
-After the first account it sends exactly one real request through the proxy and stops before the remaining accounts if that request fails, because nine more human approvals spent on an unproven credential path is the failure worth avoiding; the unverified credential is archived rather than left in the pool, and the 30-day credentials stay untouched.
+`bin/cliproxy-relogin.sh` runs the one re-login session for the whole pool, and it is a handoff rather than a walk: Anthropic logins are human OAuth, so each account's approval belongs to the person who owns that account.
+`start` mints one approval URL per account, prints every handoff, and - with `FM_CLIPROXY_DM_CMD` configured - sends one message per owner naming only that owner's accounts; `urls` resends what is still open, `status` shows per-account state and verification, `submit <email> <code>` finishes one account with the code its owner sent back, and `verify <email>` re-runs the one-request verification.
+The URL cannot be regenerated later: `claude setup-token` holds the OAuth state and PKCE verifier in its own process, so [`bin/cliproxy-setup-token-session.py`](../bin/cliproxy-setup-token-session.py) keeps one such process alive per account behind a pseudo-terminal - the command prints nothing without a terminal - and hands the owner's code to the process that issued the URL.
+Each finished account is written into the auth dir by rename at mode 0600 with the token never printed, verified with exactly one real request through the proxy, and its login date recorded; a credential that fails verification is archived instead of left in the pool, and its 30-day predecessor is left untouched.
 Round-robin routing means that one request proves the proxy still serves and the new credential did not break it, not that this exact account answered; this deployment has no per-credential endpoint to ask.
-`--dry-run` prints the plan and changes nothing, `--accounts` walks an explicit subset, and `--add codex` hands the Codex OAuth flow to CLIProxyAPI's own `-codex-login`, which writes its credential itself.
+`add-codex` hands the Codex OAuth flow to CLIProxyAPI's own `-codex-login`, which writes its credential itself, and the Codex login is Aaron's.
 A superseded 30-day credential is moved to `<archive-root>/<date>/`, never deleted.
+`config/cliproxy-accounts.json` is local and gitignored and maps an account to its owner and delivery target, `{"steve@muso.ai": {"owner": "steve", "dm": "U0123ABCD"}}`; an account it does not name is handed to its own address, so a missing entry never silently skips an account.
+`FM_CLIPROXY_DM_CMD` is invoked as `$FM_CLIPROXY_DM_CMD <dm-target>` with the message on standard input, bounded at 30 seconds; with no command configured the handoff is printed and the run says nothing was sent.
+Session records live in `state/cliproxy-relogin/<account>/` (`url`, `status`, `verified`, `credential`, `completed`, `log`), and a log never keeps a token or a pasted code.
 
 `bin/cliproxy-retire-legacy.sh` carries Step 2 of the same investigation: `plan` reports, `apply` disables `fm-ccflare-access-sync.timer` and archives the retired credential copies out of the auth directory.
 The timer is a permanent no-op whose keys no longer match the auth files, and worse, a live one would race CLIProxyAPI on the same refresh-token family, which is how accounts were lost early in the previous wave.

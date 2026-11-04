@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# tests/cliproxy-relogin.test.sh - the re-login helper must walk accounts in
-# order, write each credential atomically without ever printing the token, prove
-# the first account with one real request before spending nine more approvals,
-# archive the superseded 30-day credential instead of deleting it, and record the
-# login date the age alarm measures.
+# tests/cliproxy-relogin.test.sh - the re-login helper hands one account each to
+# its owner: it mints a real approval URL through a pseudo-terminal (the Claude
+# CLI prints nothing without one), holds that sign-in open, finishes it with the
+# owner's pasted code, writes the credential without ever printing the token,
+# verifies the account with one real request, archives the superseded 30-day
+# credential, and records the login date the expiry alarm measures.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -18,14 +19,32 @@ TODAY=$(date -u +%Y-%m-%d)
 home() {  # <name>
   local dir="$TMP_ROOT/$1"
   mkdir -p "$dir/auth" "$dir/config" "$dir/archive" "$dir/fakebin" "$dir/log"
+  # The Claude CLI refuses to run outside a terminal, so the fixture asserts the
+  # terminal too: a helper that pipes this process cannot pass this suite.
   cat > "$dir/fakebin/claude" <<SH
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >> "$dir/log/claude"
-printf '%s\n' 'Browser didn'"'"'t open? Open this URL:'
-printf '%s\n' 'https://claude.ai/oauth/authorize?code=fixture&state=fixture'
-sleep 1
-printf '%s\n' 'Long-lived token created successfully'
-printf '%s\n' '$FIXTURE_TOKEN'
+if [ ! -t 1 ]; then
+  printf '%s\n' 'setup-token needs a terminal' >&2
+  exit 3
+fi
+printf '%s\n' 'Browser did not open. Open this URL to approve:'
+printf '%s\n' 'https://claude.ai/oauth/authorize?code=fixture123&state=fixture'
+tries=0
+while [ "\$tries" -lt 3 ]; do
+  printf '%s\n' 'Paste the code shown after approving:'
+  if ! IFS= read -r line; then exit 1; fi
+  case "\$line" in
+    CODE-WRONG*) printf '%s\n' 'That code is not from this sign-in.' ;;
+    *)
+      printf '%s\n' 'Long-lived token created'
+      printf '%s\n' '$FIXTURE_TOKEN'
+      exit 0
+      ;;
+  esac
+  tries=\$((tries + 1))
+done
+exit 1
 SH
   chmod 0755 "$dir/fakebin/claude"
   cat > "$dir/fakebin/curl" <<SH
@@ -42,19 +61,38 @@ printf '%s' '{"error":"fixture"}' > "\${out:-/dev/null}"
 printf '%s' "\${CURL_CODE:-200}"
 SH
   chmod 0755 "$dir/fakebin/curl"
+  cat > "$dir/fakebin/dm.sh" <<SH
+#!/usr/bin/env bash
+{ printf 'TARGET=%s\n' "\$1"; cat; printf '%s\n' '---'; } >> "$dir/log/dm"
+SH
+  chmod 0755 "$dir/fakebin/dm.sh"
   cat > "$dir/config/cliproxy-login-registry.json" <<'SH'
 {"_note":"human login date per Claude account","a@x.com":"2026-10-21","b@y.com":"2026-10-21"}
+SH
+  cat > "$dir/config/cliproxy-accounts.json" <<'SH'
+{"a@x.com":{"owner":"aaron","dm":"aaron"},"b@y.com":{"owner":"steve","dm":"steve"}}
 SH
   printf '%s\n' "$dir"
 }
 
-# An existing 30-day credential for each account, with a refresh token, so the
-# helper has something real to supersede.
 seed_oauth() {  # <dir>
   printf '%s\n' '{"email":"a@x.com","last_refresh":"2026-11-04T10:00:00Z","expired":"2026-11-04T18:00:00Z","refresh_token":"r-a"}' \
     > "$1/auth/claude-1111-a@x.com.json"
   printf '%s\n' '{"email":"b@y.com","last_refresh":"2026-11-04T10:00:00Z","expired":"2026-11-04T18:00:00Z","refresh_token":"r-b"}' \
     > "$1/auth/claude-2222-b@y.com.json"
+}
+
+run_helper() {  # <dir> [args...]
+  local dir=$1
+  shift
+  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir" \
+    FM_CLIPROXY_ARCHIVE_ROOT="$dir/archive" \
+    FM_CLIPROXY_AUTH_DIR="$dir/auth" \
+    FM_CLIPROXY_LOGIN_REGISTRY="$dir/config/cliproxy-login-registry.json" \
+    FM_CLIPROXY_OWNER_MAP="$dir/config/cliproxy-accounts.json" \
+    FM_CLIPROXY_CLAUDE_BIN="$dir/fakebin/claude" \
+    FM_CLIPROXY_DM_CMD="$dir/fakebin/dm.sh" \
+    "$HELPER" "$@"
 }
 
 registry_date() {  # <dir> <email>
@@ -67,89 +105,136 @@ with open(sys.argv[1]) as handle:
 PY
 }
 
-run_helper() {  # <dir> [args...]
+kill_sessions() {  # <dir>: stop any handoff this suite left open
   local dir=$1
-  shift
-  env PATH="$dir/fakebin:$PATH" FM_HOME="$dir" \
-    FM_CLIPROXY_ARCHIVE_ROOT="$dir/archive" \
-    FM_CLIPROXY_AUTH_DIR="$dir/auth" \
-    FM_CLIPROXY_LOGIN_REGISTRY="$dir/config/cliproxy-login-registry.json" \
-    FM_CLIPROXY_TIMEOUT_SECS=20 \
-    "$HELPER" "$@"
+  pkill -f "cliproxy-setup-token-session.py --dir $dir/state/cliproxy-relogin/" 2>/dev/null || true
 }
 
-# --- the happy path: two accounts, verified first, archived, recorded -------
+field() {  # <dir> <email> <field>
+  local slug=${2//[^A-Za-z0-9.@_-]/-}
+  head -1 -- "$1/state/cliproxy-relogin/$slug/$3" 2>/dev/null
+}
 
-DIR=$(home happy)
+# --- start hands each account to its own owner ------------------------------
+
+DIR=$(home start)
 seed_oauth "$DIR"
-out=$(run_helper "$DIR" --api-key fixture-key --accounts a@x.com,b@y.com 2>&1) \
-  || fail "the helper must succeed on a verified pool: $out"
+out=$(run_helper "$DIR" start --timeout 120 2>&1) || fail "start must mint a URL per account: $out"
+assert_contains "$out" "https://claude.ai/oauth/authorize?code=fixture123" "a real approval URL is printed"
+assert_contains "$out" "Claude pool re-login for aaron" "Aaron's handoff is addressed to him"
+assert_contains "$out" "Claude pool re-login for steve" "the staff account's handoff is addressed to its owner"
+assert_contains "$out" "Account: a@x.com" "the handoff names the account"
+assert_contains "$out" "sent the aaron handoff to aaron" "the owner is DMed when a transport is configured"
+assert_contains "$out" "sent the steve handoff to steve" "each owner is DMed separately"
+assert_not_contains "$out" "$FIXTURE_TOKEN" "no token is printed"
+[ "$(field "$DIR" a@x.com status)" = waiting ] || fail "the first account must be waiting for its code"
+[ "$(field "$DIR" b@y.com status)" = waiting ] || fail "the second account must be waiting for its code"
+assert_present "$DIR/state/cliproxy-relogin/a@x.com/url" "the account's URL is kept for a resend"
+# Each owner's DM names only that owner's accounts.
+dm_aaron=$(awk '/TARGET=aaron/,/^---$/' "$DIR/log/dm")
+dm_steve=$(awk '/TARGET=steve/,/^---$/' "$DIR/log/dm")
+assert_contains "$dm_aaron" "a@x.com" "Aaron's DM names his account"
+assert_not_contains "$dm_aaron" "b@y.com" "Aaron's DM never names someone else's account"
+assert_contains "$dm_steve" "b@y.com" "Steve's DM names his account"
+assert_not_contains "$dm_steve" "a@x.com" "Steve's DM never names someone else's account"
+assert_not_contains "$(cat "$DIR/log/dm")" "$FIXTURE_TOKEN" "no DM carries a token"
+pass "start mints one URL per account and hands each to its owner"
 
-assert_contains "$out" "[1/2] a@x.com" "the first account runs first"
-assert_contains "$out" "[2/2] b@y.com" "the second account runs after it"
-assert_contains "$out" "https://claude.ai/oauth/authorize?code=fixture" "the approval URL is printed"
-assert_contains "$out" "answered 200" "the first account is verified with one real request"
-assert_not_contains "$out" "$FIXTURE_TOKEN" "the token is never printed"
-assert_not_contains "$out" "sk-ant-oat01-" "no part of the token reaches standard output"
+# --- status tracks completion per account ----------------------------------
 
-for account in a@x.com b@y.com; do
-  file="$DIR/auth/claude-setup-$account.json"
-  assert_present "$file" "the credential for $account is written"
-  mode=$(stat -c %a "$file" 2>/dev/null || stat -f %Lp "$file" 2>/dev/null)
-  [ "$mode" = 600 ] || fail "the credential for $account must be mode 600, got $mode"
-  body=$(cat "$file")
-  assert_contains "$body" '"is_setup_token": true' "the credential for $account is marked a setup token"
-  assert_contains "$body" "\"expired\": \"$NEXT_YEAR" "the credential for $account expires in one year"
-  assert_not_contains "$body" 'refresh_token' "the credential for $account carries no refresh token"
-  assert_contains "$body" "\"email\": \"$account\"" "the credential for $account names its account"
-done
+out=$(run_helper "$DIR" status 2>&1) || fail "status must run: $out"
+assert_contains "$out" "waiting" "status reports the open handoffs"
+assert_contains "$out" "a@x.com" "status lists every account"
+assert_contains "$out" "steve" "status names each owner"
+pass "status tracks each account separately"
+
+# --- submit finishes one account, verified, archived, recorded -------------
+
+out=$(run_helper "$DIR" submit a@x.com CODE-GOOD 2>&1) || fail "submit must finish a verified account: $out"
+assert_contains "$out" "verification request answered 200" "the account is verified with one real request"
+assert_contains "$out" "complete" "the account reports complete"
+assert_not_contains "$out" "$FIXTURE_TOKEN" "submitting never prints the token"
+assert_contains "$out" "archived the superseded credential" "the 30-day credential is archived"
+credential="$DIR/auth/claude-setup-a@x.com.json"
+assert_present "$credential" "the credential is written"
+mode=$(stat -c %a "$credential" 2>/dev/null || stat -f %Lp "$credential" 2>/dev/null)
+[ "$mode" = 600 ] || fail "the credential must be mode 600, got $mode"
+body=$(cat "$credential")
+assert_contains "$body" '"is_setup_token": true' "the credential is marked a setup token"
+assert_contains "$body" "\"expired\": \"$NEXT_YEAR" "the credential expires in one year"
+assert_not_contains "$body" 'refresh_token' "the credential carries no refresh token"
 assert_present "$DIR/archive/$(date -u +%Y-%m-%d)/claude-1111-a@x.com.json" \
-  "the superseded 30-day credential is archived, not deleted"
+  "the superseded credential is archived rather than deleted"
 assert_absent "$DIR/auth/claude-1111-a@x.com.json" "the superseded credential leaves the auth dir"
-assert_absent "$DIR/auth/claude-2222-b@y.com.json" "every superseded credential leaves the auth dir"
+[ "$(registry_date "$DIR" a@x.com)" = "$TODAY" ] || fail "the login date is recorded for the finished account"
+[ "$(registry_date "$DIR" b@y.com)" = 2026-10-21 ] || fail "the other account's login date is untouched"
+assert_absent "$DIR/state/cliproxy-relogin/a@x.com/token" "the token file is consumed"
+pass "submit writes, verifies, archives, and records one account"
 
-registry=$(cat "$DIR/config/cliproxy-login-registry.json")
-assert_contains "$registry" "\"a@x.com\": \"$TODAY\"" "the login date is recorded for the first account"
-assert_contains "$registry" "\"b@y.com\": \"$TODAY\"" "the login date is recorded for the second account"
-assert_contains "$registry" '"_note"' "the registry keeps its existing keys"
-[ "$(wc -l < "$DIR/log/claude" | tr -d '[:space:]')" = 2 ] \
-  || fail "both accounts must be attempted"
-pass "re-login walks the pool, verifies the first, archives, and records"
+# --- a rejected code is retryable, and the wrong account state is harmless --
 
-# --- a failed first verification stops before the remaining approvals -------
+set +e
+out=$(run_helper "$DIR" submit b@y.com CODE-WRONG-1 2>&1)
+status=$?
+set -e
+[ "$status" -ne 0 ] || fail "a rejected code must not report success"
+assert_contains "$out" "rejected that code" "the failure says the code was rejected, not that the session died"
+assert_not_contains "$out" "$FIXTURE_TOKEN" "a rejected code prints no token"
+assert_absent "$DIR/auth/claude-setup-b@y.com.json" "a rejected code writes no credential"
+out=$(run_helper "$DIR" submit b@y.com CODE-GOOD 2>&1) || fail "a second code must be accepted: $out"
+assert_contains "$out" "complete" "the retried account completes"
+assert_present "$DIR/auth/claude-setup-b@y.com.json" "the retried credential is written"
+pass "a rejected code stays retryable"
+
+# --- verify re-checks a completed account without touching it ---------------
+
+out=$(run_helper "$DIR" verify a@x.com 2>&1) || fail "verify must succeed for a good pool: $out"
+assert_contains "$out" "answered 200" "verify sends one real request"
+assert_present "$DIR/auth/claude-setup-a@x.com.json" "verify leaves the credential in place"
+pass "verify re-checks one account"
+
+# --- a second start leaves finished accounts alone -------------------------
+
+out=$(run_helper "$DIR" start --accounts a@x.com,b@y.com --timeout 60 2>&1) \
+  || fail "a second start must succeed: $out"
+assert_contains "$out" "a@x.com: already complete" "a finished account is not re-minted"
+assert_contains "$out" "b@y.com: already complete" "every finished account is left alone"
+assert_present "$DIR/auth/claude-setup-a@x.com.json" "the finished credential stays in place"
+pass "a second start leaves finished accounts alone"
+
+# --- a failed verification archives the new credential, keeps the old one ---
 
 DIR=$(home unverified)
 seed_oauth "$DIR"
+run_helper "$DIR" start --accounts a@x.com --timeout 120 >/dev/null 2>&1 \
+  || fail "start must mint a URL"
 set +e
-out=$(CURL_CODE=401 run_helper "$DIR" --api-key fixture-key --accounts a@x.com,b@y.com 2>&1)
+out=$(CURL_CODE=401 run_helper "$DIR" submit a@x.com CODE-GOOD 2>&1)
 status=$?
 set -e
-[ "$status" -ne 0 ] || fail "a failed first verification must stop the run"
-assert_contains "$out" "stopped after the first account" "the run says why it stopped"
-[ "$(wc -l < "$DIR/log/claude" | tr -d '[:space:]')" = 1 ] \
-  || fail "the remaining accounts must not be attempted after a failed verification"
-assert_present "$DIR/auth/claude-1111-a@x.com.json" \
-  "the working 30-day credential is untouched when the replacement is unproven"
-assert_absent "$DIR/auth/claude-setup-a@x.com.json" \
-  "the unverified setup credential does not stay in the pool"
-[ "$(registry_date "$DIR" a@x.com)" = 2026-10-21 ] \
-  || fail "an unverified account's login date must not be recorded"
-pass "an unproven setup token stops the run before the other accounts"
+[ "$status" -ne 0 ] || fail "a failed verification must not report success"
+assert_contains "$out" "did not pass one real request" "the failure names the verification"
+assert_absent "$DIR/auth/claude-setup-a@x.com.json" "the unverified credential does not stay in the pool"
+assert_present "$DIR/auth/claude-1111-a@x.com.json" "the working 30-day credential is untouched"
+[ "$(registry_date "$DIR" a@x.com)" = 2026-10-21 ] || fail "an unverified account's login date is not recorded"
+pass "a failed verification archives the new credential and keeps the old one"
 
-# --- dry run changes nothing -----------------------------------------------
+# --- dry run and --no-dm change nothing ------------------------------------
 
 DIR=$(home dry)
 seed_oauth "$DIR"
-out=$(run_helper "$DIR" --dry-run --api-key fixture-key --accounts a@x.com 2>&1) \
-  || fail "a dry run must succeed: $out"
-assert_contains "$out" "would write: $DIR/auth/claude-setup-a@x.com.json" "the dry run names the credential it would write"
-assert_contains "$out" "nothing changed" "the dry run says nothing changed"
-assert_absent "$DIR/auth/claude-setup-a@x.com.json" "the dry run writes no credential"
-assert_present "$DIR/auth/claude-1111-a@x.com.json" "the dry run archives nothing"
-assert_absent "$DIR/log/claude" "the dry run starts no login"
-[ "$(registry_date "$DIR" a@x.com)" = 2026-10-21 ] \
-  || fail "the dry run must record no login date"
-pass "dry run plans without touching anything"
+out=$(run_helper "$DIR" start --dry-run --timeout 60 2>&1) || fail "a dry run must succeed: $out"
+assert_contains "$out" "would start a setup-token session" "the dry run says what it would start"
+assert_contains "$out" "would write: $DIR/auth/claude-setup-a@x.com.json" "the dry run names the credential"
+assert_absent "$DIR/log/claude" "the dry run starts no sign-in"
+assert_absent "$DIR/log/dm" "the dry run sends no DM"
+assert_absent "$DIR/state/cliproxy-relogin" "the dry run opens no session"
+
+out=$(run_helper "$DIR" start --no-dm --timeout 60 2>&1) || fail "--no-dm must still mint a URL: $out"
+assert_contains "$out" "handoff was printed and not sent" "--no-dm says nothing was sent"
+assert_absent "$DIR/log/dm" "--no-dm sends no DM"
+kill_sessions "$DIR"
+pass "dry run and --no-dm change nothing they should not"
 
 # --- the Codex login is delegated to CLIProxyAPI itself --------------------
 
@@ -162,14 +247,14 @@ chmod 0755 "$DIR/fakebin/fake-proxy"
 printf '%s\n' 'auth-dir: stub' > "$DIR/config/cliproxyapi.yaml"
 
 out=$(env PATH="$DIR/fakebin:$PATH" FM_HOME="$DIR" FM_CLIPROXY_BIN="$DIR/fakebin/fake-proxy" \
-  FM_CLIPROXY_CONFIG="$DIR/config/cliproxyapi.yaml" "$HELPER" --add codex --dry-run 2>&1) \
+  FM_CLIPROXY_CONFIG="$DIR/config/cliproxyapi.yaml" "$HELPER" add-codex --dry-run 2>&1) \
   || fail "a Codex dry run must succeed: $out"
 assert_contains "$out" "-codex-login -no-browser -config $DIR/config/cliproxyapi.yaml" \
   "the Codex dry run names the exact command"
 assert_absent "$DIR/log/codex" "the Codex dry run starts nothing"
 
 out=$(env PATH="$DIR/fakebin:$PATH" FM_HOME="$DIR" FM_CLIPROXY_BIN="$DIR/fakebin/fake-proxy" \
-  FM_CLIPROXY_CONFIG="$DIR/config/cliproxyapi.yaml" "$HELPER" --add codex 2>&1) \
+  FM_CLIPROXY_CONFIG="$DIR/config/cliproxyapi.yaml" "$HELPER" add-codex 2>&1) \
   || fail "the Codex login must run: $out"
 assert_contains "$(cat "$DIR/log/codex")" "-codex-login -no-browser -config $DIR/config/cliproxyapi.yaml" \
   "the Codex login hands the flow to CLIProxyAPI"
