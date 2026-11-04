@@ -1293,8 +1293,7 @@ is_fable_decider_approval() {
     [[ "${MUSO_ADMIN_IDENTITY:-}" == "fable" ]] || return 1
     [[ "$method" == "PUT" ]] || return 1
     [[ "$path" == "/admin/credit-requests/conditional-status" ]] || return 1
-    if [[ -e "$FABLE_DECIDER_KILL_FILE" ]]; then
-        echo "fable_decider: kill file $FABLE_DECIDER_KILL_FILE present - refusing" >&2
+    if _fable_decider_killed; then
         return 1
     fi
     [[ "${FABLE_RULING_ID:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._:\|-]{2,120}$ ]] || {
@@ -1706,15 +1705,23 @@ EOF
 #   + <=100 unique UUIDs + a Fable ruling id in FABLE_RULING_ID
 #   + the registry entry approved (approved_by + approval_ref) + kill file absent.
 # Any near miss falls through to the human-confirmation requirement unchanged.
-FABLE_DECIDER_KILL_FILE="${FABLE_DECIDER_KILL_FILE:-/etc/hydra/fable-decider.disabled}"
+# [key=fable-trays] (Fable switch-on-plan row 4, firstmate 751): the file is named for the per-item TRAY input that is
+# off, not the executor (the executor stays live on coded output). The legacy path is still honoured: a rename that has
+# not reached node-8 yet must never open this refusal.
+FABLE_DECIDER_KILL_FILE="${FABLE_DECIDER_KILL_FILE:-/etc/hydra/fable-trays.disabled}"
+FABLE_DECIDER_KILL_FILE_LEGACY="${FABLE_DECIDER_KILL_FILE_LEGACY:-/etc/hydra/fable-decider.disabled}"
+_fable_decider_killed() {
+    [[ -e "$FABLE_DECIDER_KILL_FILE" ]] && { echo "fable_decider: kill file $FABLE_DECIDER_KILL_FILE present - refusing" >&2; return 0; }
+    [[ -e "$FABLE_DECIDER_KILL_FILE_LEGACY" ]] && { echo "fable_decider: kill file $FABLE_DECIDER_KILL_FILE_LEGACY present (deprecated name; rename to $FABLE_DECIDER_KILL_FILE) - refusing" >&2; return 0; }
+    return 1
+}
 is_fable_decider_close() {
     local method="$1" path="$2" body="$3"
     [[ "${FABLE_DECIDER:-0}" == "1" ]] || return 1
     [[ "${REQUESTER_EMAIL:-}" == "fable-decider@hydra-ops" ]] || return 1
     [[ "$method" == "PUT" ]] || return 1
     [[ "$path" == "/admin/credit-requests/conditional-status" ]] || return 1
-    if [[ -e "$FABLE_DECIDER_KILL_FILE" ]]; then
-        echo "fable_decider: kill file $FABLE_DECIDER_KILL_FILE present - refusing" >&2
+    if _fable_decider_killed; then
         return 1
     fi
     [[ "${FABLE_RULING_ID:-}" =~ ^[A-Za-z0-9][A-Za-z0-9._:\|-]{2,120}$ ]] || {
