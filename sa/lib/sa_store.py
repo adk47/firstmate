@@ -215,11 +215,13 @@ def _payload(event: dict) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
-def _ensure_ticket(state: dict, event: dict) -> dict | None:
-    """Return the ticket row for ``event``, creating a stub when absent."""
-    tid = event.get("ticket")
-    if tid is None:
-        return None
+def ticket_id_for(seq: int) -> str:
+    """Return the ticket id a ``ticket.created`` event at ``seq`` creates."""
+    return f"T-{seq:04d}"
+
+
+def _ticket_row(state: dict, tid: str, event: dict) -> dict:
+    """Return the ticket row for ``tid``, creating a stub when absent."""
     row = state["tickets"].get(tid)
     if row is None:
         row = {
@@ -238,11 +240,21 @@ def _ensure_ticket(state: dict, event: dict) -> dict | None:
     return row
 
 
+def _ensure_ticket(state: dict, event: dict) -> dict | None:
+    """Return the ticket row for ``event``, creating a stub when absent."""
+    tid = event.get("ticket")
+    if tid is None:
+        return None
+    return _ticket_row(state, tid, event)
+
+
 def _on_ticket_created(state: dict, event: dict) -> None:
     payload = _payload(event)
-    row = _ensure_ticket(state, event)
-    if row is None:
-        return
+    # The Engine owns ``seq``, so it owns the ticket id derived from it. A
+    # creator that cannot know the seq yet omits the envelope ticket and the
+    # fold names the ticket here, under the same lock that assigned the seq.
+    tid = event.get("ticket") or ticket_id_for(event["seq"])
+    row = _ticket_row(state, tid, event)
     row["title"] = payload.get("title")
     row["body"] = payload.get("body")
     row["requester"] = payload.get("requester")

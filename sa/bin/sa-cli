@@ -102,27 +102,13 @@ def _canonical(obj):
     return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def _next_seq():
-    """The seq the Engine will assign to the next append (design.md section 3)."""
-    data = state("events")
-    seqs = []
-    if isinstance(data, dict):
-        rows = data.values()
-    elif isinstance(data, list):
-        rows = data
-    else:
-        rows = []
-    for row in rows:
-        if isinstance(row, dict) and isinstance(row.get("seq"), int):
-            seqs.append(row["seq"])
-    return (max(seqs) + 1) if seqs else 1
-
-
 def _ticket_from_event(event_id):
     """Ticket id derived from the creating event's seq.
 
     The envelope id is `ev-` + zero-padded 16-digit seq (design.md section 3), and
     ticket ids are `T-` + the creating event's seq (design.md section 8 uses T-0001).
+    The Engine assigns the seq under its own lock, so the id is read back from the
+    event the Engine actually wrote rather than predicted before the append.
     """
     try:
         seq = int(event_id.split("-", 1)[1])
@@ -143,15 +129,12 @@ def cmd_ticket(args):
             sys.stderr.write("sa-cli: --acceptance must be JSON\n")
             return 2
 
-    # The ticket id is `T-` + the creating event's seq. The Engine assigns the seq,
-    # so the id is computed from the next seq and carried on the envelope's `ticket`
-    # field: a fold that keys the ticket off the envelope and a fold that derives it
-    # from the seq both land on the same id.
-    before = _ids("tickets")
-    ticket = "T-%04d" % _next_seq()
+    # The Engine assigns the seq under its own lock and names the ticket from it,
+    # so the envelope carries no ticket id: predicting one here would race a
+    # concurrent creator and collide two tickets onto one id.
     event_id = append(
         "ticket.created",
-        ticket,
+        None,
         {
             "title": args.title,
             "body": args.body,
@@ -159,12 +142,7 @@ def cmd_ticket(args):
             "acceptance": acceptance,
         },
     )
-    after = _ids("tickets")
-
-    if ticket not in after:
-        new = sorted(after - before)
-        ticket = new[0] if len(new) == 1 else _ticket_from_event(event_id)
-    print(ticket)
+    print(_ticket_from_event(event_id))
     return 0
 
 

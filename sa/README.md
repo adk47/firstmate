@@ -1,17 +1,19 @@
-# SA store (SA-01)
+# SA package: store (SA-01) and router (SA-02)
 
-The foundation of the Super-agent spine: an append-only event log, a pure fold into ten
-tables, and a CLI. The interface contract is
-`data/thread2-sa-build/design.md` §0–§6; this package implements it and renames nothing.
+The foundation of the Super-agent spine: an append-only event log, a pure fold into ten tables, and two CLIs.
+The store is the Engine's only write path; the router is the only surface a Router session can reach.
+The interface contract is `data/thread2-sa-build/design.md` §0–§6; this package implements it and renames nothing.
 
 ```
 sa/
-  README.md            this file
-  lib/sa_paths.py      SA_HOME resolution + canonical JSON helpers
-  lib/sa_store.py      event log, fold, projections, schema
-  bin/sa-store         the store CLI (the Engine's only write path)
-  tests/test_store.py  unittest, stdlib only
-  .gitignore           ignores sa/var/
+  README.md                this file
+  lib/sa_paths.py          SA_HOME resolution + canonical JSON helpers
+  lib/sa_store.py          event log, fold, projections, schema
+  bin/sa-store             the store CLI (the Engine's only write path)
+  bin/sa-cli               the router CLI (five verbs, no shell, no file access)
+  extensions/sa-router.ts  the Router's five-tool Pi extension
+  tests/test_store.py      unittest, stdlib only
+  .gitignore               ignores sa/var/
 ```
 
 ## Non-negotiables
@@ -82,6 +84,10 @@ error. That keeps the log forward-compatible.
 
 Fold details worth knowing when reading state:
 
+- `ticket.created` may omit the envelope `ticket`; the fold then names the ticket
+  `T-` + the event's `seq`. The Engine owns `seq`, so it owns ticket ids: a creator that
+  cannot know the seq yet never has to predict one, and two concurrent creators cannot
+  collide onto one id.
 - `ticket.assigned` updates the ticket's `owner`/`state`; `assignment.created` writes the
   `assignments` row. They are separate events with separate tables.
 - `usage.recorded` accumulates into `by_tier[tier]` and `total_tokens`. A usage event with
@@ -111,6 +117,33 @@ returns rows in numeric `seq` order; every other table is key-ordered.
 event type, folds the log twice, asserts `sha256(A) == sha256(B)`, asserts all ten tables
 are present, and prints both hashes plus `PASS` (exit 0) or the diff (exit 1).
 
+## Router surface (SA-02)
+
+`sa/bin/sa-cli` is the only thing a Router session can reach, and it has exactly five verbs:
+
+```
+sa-cli ticket   --title T --body B --requester R [--acceptance JSON]  -> ticket id
+sa-cli assign   --ticket T --owner O --reason R
+sa-cli reply    --ticket T --text X
+sa-cli rule     --ticket T --ruling X --rationale R
+sa-cli escalate --ticket T --to X --why Y
+```
+
+There is no bash, sh, exec, read, cat, edit, or write verb: a verb that ran arbitrary input or touched a file directly would break the premise.
+Every verb appends through `sa-store append`, so the store stays the sole writer.
+Exit codes are `0` success, `2` unknown command (with the verb list on stderr), and `3` the store is missing or refused the append.
+
+`sa/extensions/sa-router.ts` registers exactly five tools - `sa_ticket`, `sa_assign`, `sa_reply`, `sa_rule`, `sa_escalate` - and no commands and no event hooks.
+Each tool is a thin wrapper over `python3 sa/bin/sa-cli <verb> ...` run through `pi.exec` with an argv array, so no shell is involved.
+A Router session launched with `--no-builtin-tools --no-mcp --tools sa_ticket,sa_assign,sa_reply,sa_rule,sa_escalate` therefore has those five tools and cannot reach a shell, a file read, or an edit.
+
+Two router behaviours worth knowing:
+
+- `ticket` sends no envelope ticket and prints the id the Engine assigned, read back from the appended event's `seq` (`T-` plus the zero-padded seq).
+  Predicting the id before the append would race a concurrent creator and collide two tickets onto one id.
+- `escalate` records `ticket.escalated`, which is not one of the store's event types, so it lands in `events` and folds into no projection.
+  Query it with `sa-store query --table events --where type=ticket.escalated`.
+
 ## Reproduce
 
 From a clean clone at the repo root:
@@ -119,6 +152,7 @@ From a clean clone at the repo root:
 sa/bin/sa-store selftest
 sa/bin/sa-store tables
 python3 -m unittest discover -s sa/tests -v
+tests/sa-router.test.sh
 ```
 
 No install step, no environment variables required. `SA_HOME` defaults to `sa/var`, which

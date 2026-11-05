@@ -212,6 +212,14 @@ class FoldTest(TempHomeCase):
         self.assertEqual(row["created_at"], "2026-11-05T02:00:00Z")
         self.assertEqual(row["updated_at"], "2026-11-05T02:00:00Z")
 
+    def test_ticket_created_without_envelope_ticket_is_named_from_seq(self):
+        self.append("ticket.created", payload={"title": "first"})
+        self.append("ticket.created", payload={"title": "second"})
+        tickets = snapshot(self.home)["tickets"]
+        self.assertEqual(sorted(tickets), ["T-0001", "T-0002"])
+        self.assertEqual(tickets["T-0001"]["title"], "first")
+        self.assertEqual(tickets["T-0002"]["title"], "second")
+
     def test_ticket_refused_sets_state(self):
         self.append("ticket.created", ticket="T-1", payload={"title": "a"})
         self.append("ticket.refused", actor="engine", ticket="T-1",
