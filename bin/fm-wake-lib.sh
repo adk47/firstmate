@@ -1683,25 +1683,21 @@ fm_wake_append() {
   # that). But the SAME key with the SAME payload already pending is a re-fire, not a second
   # actor: the watcher re-appends a turn-ended signal on every poll while the marker persists,
   # which produced 19 rows for 8 keys. Identical (key, payload) is therefore skipped outright.
+  # `signal` wakes are PER-ACTOR: a branch and main may legitimately hold the same key, and the
+  # drain gives each actor its own row (tests/fm-wake-queue.test.sh pins exactly that). So a
+  # signal row is never deleted or merged by key — that would starve one actor.
+  #
+  # What a re-firing watcher CAN do is stack unbounded duplicates: 103 rows for 55 keys, 7 copies
+  # of one key, which woke the chair in a loop. The correct control is backpressure, not
+  # coalescing: cap the pending rows per key. Two actors need two rows; a third is already a
+  # re-fire, and the drain re-reads the status files anyway, so the extra rows carry no new
+  # information.
   if [ "$kind" = signal ]; then
-    # A `.turn-ended` signal is a NOTIFICATION that a lane's turn ended: the payload is display
-    # data, so one pending row per key is enough and the newest payload wins. Without this the
-    # watcher re-appended on every poll and the queue reached 240 rows with 22 copies of one key,
-    # which woke the chair in a loop. `.status` signals stay per-actor (branch vs main) and are
-    # never coalesced by key alone; tests/fm-wake-queue.test.sh pins that.
-    case "$clean_key" in
-      *.turn-ended)
-        if awk -F '\t' -v k="$clean_key" 'NF >= 5 && $4 == k { found = 1; exit } END { exit !found }' "$FM_WAKE_QUEUE" 2>/dev/null; then
-          coalesce=1
-        fi
-        ;;
-      *)
-        if awk -F '\t' -v k="$clean_key" -v p="$clean_payload" 'NF >= 5 && $4 == k && $5 == p { found = 1; exit } END { exit !found }' "$FM_WAKE_QUEUE" 2>/dev/null; then
-          fm_lock_release "$FM_WAKE_QUEUE_LOCK"
-          return 0
-        fi
-        ;;
-    esac
+    pending=$(awk -F '\t' -v k="$clean_key" 'NF >= 5 && $4 == k { n++ } END { print n + 0 }' "$FM_WAKE_QUEUE" 2>/dev/null)
+    if [ "${pending:-0}" -ge 3 ]; then
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      return 0
+    fi
   fi
   if [ "$kind" = check ]; then
     case "$clean_key" in
