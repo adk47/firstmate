@@ -21,7 +21,7 @@ These columns are filled in manually by the team. If you replace/overwrite the s
 9. Also update data columns for existing users if their profile data changed (popularity, credits, etc.) — but NEVER touch columns AI-AN
 
 ## Account
-- Google Sheets: a@muso.ai (GOG_KEYRING_PASSWORD from ~/.zshrc env var — do NOT hardcode)
+- Google Sheets: a@muso.ai (GOG_KEYRING_PASSWORD from the gateway env, /etc/openclaw/main.env — do NOT hardcode)
 - Athena: default profile, workgroup clio-agent, region us-west-2
 
 ## Tracking Columns (AI-AN) — NEVER OVERWRITE

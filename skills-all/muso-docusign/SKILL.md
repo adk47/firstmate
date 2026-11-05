@@ -24,7 +24,7 @@ Check `sender_id` from inbound metadata. If anyone else asks, decline and tell t
 
 JWT Grant flow via scripts. Tokens are cached in `/tmp/docusign_token.json` (1hr TTL).
 
-Required env vars (set in `~/.zshrc`):
+Required env vars (in `/etc/openclaw/main.env`, loaded as a systemd `EnvironmentFile` by `openclaw-gateway-main.service`; not `~/.zshrc`; `DOCUSIGN_RSA_KEY_FILE` is not found there, report to DevOps if unset):
 - `DOCUSIGN_INTEGRATION_KEY` — App's Integration Key (client ID)
 - `DOCUSIGN_USER_ID` — `30e67e2d-a68d-4633-9956-d702ed7b615d`
 - `DOCUSIGN_ACCOUNT_ID` — `10d725ac-6f47-4a57-8acf-ea29b26e0448`

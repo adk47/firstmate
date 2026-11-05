@@ -27,7 +27,7 @@ _Load this file when working with any of these systems. Core configs (Stripe, GH
 
 ## DocuSign
 
-- Auth: JWT Grant | Keys in `~/.zshrc`: `DOCUSIGN_USER_ID`, `DOCUSIGN_ACCOUNT_ID`, `DOCUSIGN_BASE_URI`, `DOCUSIGN_INTEGRATION_KEY`
+- Auth: JWT Grant | Keys in `/etc/openclaw/main.env` (gateway env, not `~/.zshrc`): `DOCUSIGN_USER_ID`, `DOCUSIGN_ACCOUNT_ID`, `DOCUSIGN_BASE_URI`, `DOCUSIGN_INTEGRATION_KEY`
 - RSA keypair: `~/.docusign/` | Currently SANDBOX
 - Access: Aaron + Nick only.
 
@@ -57,10 +57,7 @@ _Load this file when working with any of these systems. Core configs (Stripe, GH
 ## n8n
 
 - Key: `N8N_API_KEY` | Base: `https://musoai.app.n8n.cloud/api/v1` | Auth: `X-N8N-API-KEY`
-- ⚠️ `N8N_API_KEY` **expired 2026-03-31**. Assume every n8n call fails until a human
-  re-mints it; do not report an n8n failure as an outage. MCP registered as `n8n`.
-  _(corrected 2026-08-26: was "Key expires: 2026-03-31." — written as a future date, it
-  has read as "still valid" ever since it lapsed.)_
+- `N8N_API_KEY` is live (verified 3 Nov 2026: 200 on `/api/v1/workflows`, 401 without the key). The MCP key is not provisioned; use the REST API.
 - Write: Aaron + Nick.
 
 ## Orshot (Dynamic Images)

@@ -16,14 +16,13 @@ Manage n8n workflows, executions, credentials, and more via the n8n Public REST 
 ## Authentication
 
 ### REST API
-- API Key: `$N8N_API_KEY` env var in `~/.zshrc`
-- Base URL: `$N8N_BASE_URL` env var in `~/.zshrc` → `https://musoai.app.n8n.cloud`
+- API Key: `$N8N_API_KEY` env var in `/etc/openclaw/main.env` (loaded as a systemd `EnvironmentFile` by `openclaw-gateway-main.service`; not `~/.zshrc`)
+- Base URL: `$N8N_BASE_URL` env var in `/etc/openclaw/main.env` (not `~/.zshrc`) → `https://musoai.app.n8n.cloud`
 - Auth header: `X-N8N-API-KEY: $N8N_API_KEY`
 - API version: v1 (base path: `/api/v1`)
-- Key expires: 2026-03-31 (exp claim in JWT)
 
 ### MCP Server
-- MCP Key: `$N8N_MCP_KEY` env var in `~/.zshrc` (separate key, aud: `mcp-server-api`)
+- MCP Key: `$N8N_MCP_KEY` is not provisioned (in no gateway env file); use the REST API above instead (CoS decision, 3 Nov 2026)
 - Endpoint: `https://musoai.app.n8n.cloud/mcp-server/http` (Streamable HTTP transport)
 - Auth: `Authorization: Bearer $N8N_MCP_KEY`
 - Registered in mcporter as `n8n`

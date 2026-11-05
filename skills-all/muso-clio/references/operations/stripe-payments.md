@@ -140,4 +140,4 @@ stripecharges list -d "created[gte]=TIMESTAMP" -d "created[lt]=TIMESTAMP"
 
 ## Environment
 
-The `MUSOAI_STRIPE_API_KEY` is a restricted key (rk_live_*) configured in ~/.zshrc. It has read-only access to production Stripe data.
+The `MUSOAI_STRIPE_API_KEY` is a restricted key (rk_live_*) configured in `/etc/openclaw/main.env` (gateway env; not `~/.zshrc`). It has read-only access to production Stripe data.

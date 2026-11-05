@@ -13,7 +13,7 @@ curl -s -X POST "$MUSO_API_URL/w/admin/user/login" \
   | jq -r '.data.user.token'
 ```
 
-Environment variables required (in `~/.zshrc`):
+Environment variables required (in `/etc/openclaw/main.env`, loaded as a systemd `EnvironmentFile` by `openclaw-gateway-main.service`; not `~/.zshrc`):
 - `MUSO_API_URL` — prod API base URL (e.g. `https://api.muso.ai`)
 - `MUSO_ADMIN_EMAIL` — admin user email
 - `MUSO_ADMIN_PASSWORD` — admin user password

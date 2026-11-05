@@ -21,7 +21,7 @@ Deel is Muso.AI's contractor payroll platform. All team members are hired as con
 ## API Configuration
 
 - **Base URL:** `https://api.letsdeel.com/rest/v2`
-- **Auth:** Bearer token (`DEEL_API_TOKEN` env var in `~/.zshrc`)
+- **Auth:** Bearer token (`DEEL_API_TOKEN` env var; report to DevOps if unset)
 - **Token type:** Personal Access Token (JWT) with full scopes
 - **Organization ID:** 34076
 - **Legal entity:** Muso.AI Inc (`6a11cd03-963b-45bb-ab8b-d087e1f6ea11`)
@@ -32,7 +32,7 @@ Deel is Muso.AI's contractor payroll platform. All team members are hired as con
 bash ${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/skills/muso-deel/scripts/deel-api.sh <METHOD> <endpoint> [json_body]
 ```
 
-Source `~/.zshrc` before calling to ensure `DEEL_API_TOKEN` is set.
+`DEEL_API_TOKEN` is not found in any gateway env file; if it is unset, report to DevOps.
 
 ## Key Endpoints (verified working)
 

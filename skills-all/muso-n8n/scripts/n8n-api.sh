@@ -14,12 +14,12 @@ BODY="${3:-}"
 
 # Validate env vars
 if [[ -z "${N8N_API_KEY:-}" ]]; then
-  echo "ERROR: N8N_API_KEY not set. Add it to ~/.zshrc" >&2
+  echo "ERROR: N8N_API_KEY not set. It comes from the gateway env (/etc/openclaw/main.env, openclaw-gateway-main). Tell DevOps which variable is missing; do not request it." >&2
   exit 1
 fi
 
 if [[ -z "${N8N_BASE_URL:-}" ]]; then
-  echo "ERROR: N8N_BASE_URL not set. Add it to ~/.zshrc (e.g. https://n8n.muso.ai)" >&2
+  echo "ERROR: N8N_BASE_URL not set. It comes from the gateway env (/etc/openclaw/main.env, openclaw-gateway-main). Tell DevOps which variable is missing; do not request it." >&2
   exit 1
 fi
 

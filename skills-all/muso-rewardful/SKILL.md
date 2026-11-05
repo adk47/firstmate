@@ -23,7 +23,7 @@ Rewardful affiliate/referral program management for Muso.AI.
 
 ## Authentication
 
-- API Secret: `$REWARDFUL_API_SECRET` env var in `~/.zshrc`
+- API Secret: `$REWARDFUL_API_SECRET` env var in `/etc/openclaw/main.env` (loaded as a systemd `EnvironmentFile` by `openclaw-gateway-main.service`; not `~/.zshrc`)
 - API Key: `$REWARDFUL_API_KEY` env var (used for JS snippet, not REST API)
 - Auth method: HTTP Basic Auth — API Secret as username, no password
 - Base URL: `https://api.getrewardful.com/v1`
