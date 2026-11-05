@@ -70,7 +70,8 @@ Before release, cleanup resolves the release path from how the worktree was crea
 When a recorded Orca worktree id exists it must resolve to the recorded worktree path; a missing, unreadable, or mismatched id preserves metadata and stops rather than deleting anything.
 These checks run before the endpoint kill, so a worktree with no proven release path leaves the agent alive and the branch intact.
 After those checks, Firstmate closes the exact terminal and releases the exact worktree with Orca's worktree command, by recorded id when one exists and otherwise by the worktree's current path.
-Only when Orca's registry no longer names that path does release fall back to a guarded plain `git worktree remove`, which refuses a locked, dirty, or submodule-holding worktree and never forces.
+Only a proven registry miss - Orca answering `selector_not_found` for that path - falls back to a guarded plain `git worktree remove`, which refuses a locked, dirty, or submodule-holding worktree and never forces.
+Every other Orca failure refuses with the concrete Orca error named, including one the CLI reports only on stderr, because a bare git remove would delete a worktree Orca still owns.
 Firstmate never raw-deletes an Orca worktree Orca still names.
 
 A task migrated from the Mac-era Orca backend keeps only `orca_worktree_id_prior=` (a `/Users/<user>/orca/workspaces/...` path) and no `orca_worktree_id=`, so its backend reads as tmux and its worktree is not in Treehouse's pool.
