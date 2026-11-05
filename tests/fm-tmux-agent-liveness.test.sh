@@ -151,7 +151,10 @@ assert_sources_disagree() {  # <target> <label>
 # version-string case below owns the cross-platform divergence assertion.
 
 new_window agent "$LAB/bin/claude-link" 900
-wait_for_state "$SESSION:agent" alive \
+# A loaded CI runner can still be inside the window's own shell when the first
+# poll runs (the observed failure read title=bash), so this waits for the
+# process to exist rather than for the classifier to be fast.
+wait_for_state "$SESSION:agent" alive 300 \
   || fail "a running harness-named foreground process must classify alive"
 pass "tmux liveness: a harness-named foreground process classifies alive"
 
@@ -161,7 +164,7 @@ pass "tmux liveness: a harness-named foreground process classifies alive"
 # fix from being a substring match that claims unrelated programs.
 
 new_window muse "$LAB/bin/muse-bin-0.1.0-R708.1" 900
-wait_for_state "$SESSION:muse" alive \
+wait_for_state "$SESSION:muse" alive 300 \
   || fail "muse's version-suffixed binary name must classify alive"
 pass "tmux liveness: muse's version-suffixed muse-bin-<version> classifies alive"
 
