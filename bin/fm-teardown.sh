@@ -1691,15 +1691,22 @@ restore_worktree_branch() {  # <worktree> <branch>
 # lines so the caller can branch on the parsed code, never on the prose message.
 # Orca prints that envelope on stdout while exiting nonzero, so stdout is captured
 # regardless of exit status and only the envelope decides the outcome; empty or
-# unparseable output is a failure, never an implicit successful removal.
+# unparseable stdout is a failure, never an implicit successful removal, and the
+# CLI's stderr is kept so a failure reported only there is still named concretely.
 fm_backend_orca_remove_worktree_by_path() {  # <worktree>
-  local wt=${1:-} out code msg=
+  local wt=${1:-} out code msg= err= errfile
   [ -n "$wt" ] || {
     echo "error: missing worktree path; cannot remove Orca worktree" >&2
     return 1
   }
   fm_backend_source orca >/dev/null 2>&1 || return 1
-  out=$(orca worktree rm --worktree "path:$wt" --force --json 2>/dev/null || true)
+  errfile=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-orca-rm.XXXXXX") || {
+    echo "error: cannot create a temp file to capture orca worktree rm output" >&2
+    return 1
+  }
+  out=$(orca worktree rm --worktree "path:$wt" --force --json 2>"$errfile" || true)
+  err=$(cat "$errfile" 2>/dev/null || true)
+  rm -f "$errfile"
   case "$out" in
     *[![:space:]]*) ;;
     *) out= ;;
@@ -1708,7 +1715,12 @@ fm_backend_orca_remove_worktree_by_path() {  # <worktree>
     return 0
   fi
   code=$(printf '%s' "$out" | fm_backend_orca_json_error_code 2>/dev/null || true)
-  [ -n "$msg" ] || msg="orca worktree rm for $wt returned ${out:-no output}"
+  if [ -z "$msg" ]; then
+    case "$err" in
+      *[![:space:]]*) msg=$err ;;
+      *) msg="orca worktree rm for $wt returned ${out:-no output}" ;;
+    esac
+  fi
   printf '%s\n%s\n' "$code" "$msg"
   return 1
 }

@@ -4074,6 +4074,38 @@ SH
   pass "a whitespace-only Orca failure refuses instead of counting as a successful removal"
 }
 
+# A CLI that fails with nothing on stdout and the concrete reason on stderr still
+# names that reason; only the JSON envelope may decide success, but the refusal
+# must not hide the real error behind a generic "no output" line.
+test_orca_stderr_only_failure_names_the_concrete_error() {
+  local case_dir rc wt
+  case_dir=$(make_case orca-stderr-output)
+  wt=$(write_orca_workspace_case "$case_dir")
+  cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "worktree rm") printf '%s\n' 'orca: Orca is no longer installed at /opt/Orca/resources/bin/orca-ide.' >&2; exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "orca-stderr-output: an Orca failure must refuse"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'refusing to fall back to a plain git release' "$case_dir/stderr" \
+    "orca-stderr-output: the refusal did not explain why the git fallback was refused"
+  assert_grep 'Orca is no longer installed' "$case_dir/stderr" \
+    "orca-stderr-output: the refusal did not name the concrete Orca error"
+  assert_no_grep 'returned no output' "$case_dir/stderr" \
+    "orca-stderr-output: the refusal replaced the concrete Orca error with a generic line"
+  assert_present "$wt" \
+    "orca-stderr-output: the worktree was released despite the failed Orca call"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "orca-stderr-output: the task records were deleted despite the failed Orca call"
+  pass "an Orca failure reported only on stderr names the concrete error"
+}
+
 # The pool probe merges an external tool's stdout and stderr, so a whitespace-only
 # row is possible input. It must be classified - not expanded as an unset array,
 # which stock-macOS bash 3.2 under `set -u` treats as unbound - so the held slot
@@ -4572,6 +4604,7 @@ test_orca_path_miss_falls_back_to_guarded_git_release
 test_orca_non_selector_failure_refuses_instead_of_plain_git_fallback
 test_orca_empty_failure_output_refuses_instead_of_success
 test_orca_whitespace_failure_output_refuses_instead_of_success
+test_orca_stderr_only_failure_names_the_concrete_error
 test_whitespace_only_pool_listing_row_is_classified
 test_pool_listing_does_not_claim_a_longer_sibling_path
 test_unresolvable_home_relative_pool_listing_refuses_before_killing_the_agent
