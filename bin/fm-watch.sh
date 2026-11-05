@@ -94,8 +94,10 @@
 # A pane whose endpoint is gone has lost the only writer that could ever settle
 # its busy-state record, so that record is retired on the same poll that observes
 # the death (retire_dead_busy_state). This is silent residue cleanup, never a
-# wake: classification already reports a gone endpoint as dead, and the record
-# would otherwise outlive every worker that exits without a teardown.
+# wake: the recovery-grade agent-state verdict reports the endpoint as missing or
+# dead, and the record would otherwise outlive every worker that exits without a
+# teardown. A merely unreadable backend never retires anything, so a transient
+# outage cannot wipe every live task's busy state.
 # An idle pane whose last output is a transient inference-gateway error is
 # absorbed instead, and re-rung with a bounded continue instruction through the
 # same steering inbox (gateway_stall_check; bin/fm-gateway-retry-lib.sh owns the
@@ -369,22 +371,30 @@ window_is_busy() {  # <window> <tail40>
   [ "${verdict%% *}" = busy ]
 }
 
+# busy_gen_of: the task's armed busy-state generation, read from its sidecar or
+# its meta. Callers capture this BEFORE classifying liveness, so a relaunch that
+# arms a fresh incarnation in between is refused rather than retired.
+busy_gen_of() {  # <task>
+  local task=$1 gen
+  gen=$(cat "$STATE/$task.busy-gen" 2>/dev/null || true)
+  [ -n "$gen" ] || gen=$(fm_meta_get "$STATE/$task.meta" busy_gen 2>/dev/null || true)
+  printf '%s' "$gen"
+}
+
 # retire_dead_busy_state: drop a task's busy-state record once its endpoint is
 # gone. The record's only writer is the agent's own adapter wiring, so a worker
 # process that exits without a teardown leaves one stale incarnation behind that
-# nothing can ever clear - classification already reports dead endpoint-gone, so
-# the record is pure residue. Retiring it on the poll that observes the death is
-# what keeps a home from accumulating one per exited worker. The gen is read
-# first and passed explicitly, so a relaunch that armed a fresh incarnation
-# between the liveness read and this call is refused rather than retired
-# (bin/fm-busy-lib.sh owns the record contract; bin/fm-busy-event.sh is the only
-# writer).
-retire_dead_busy_state() {  # <task>
-  local task=$1 gen
+# nothing can ever clear - the recovery-grade agent-state verdict reports the
+# endpoint as missing or dead, so the record is pure residue. Retiring it on the
+# poll that observes the death is what keeps a home from accumulating one per
+# exited worker. <gen> is the generation captured before the liveness read and
+# passed explicitly, so a relaunch that armed a fresh incarnation in between is
+# refused rather than retired (bin/fm-busy-lib.sh owns the record contract;
+# bin/fm-busy-event.sh is the only writer).
+retire_dead_busy_state() {  # <task> <gen>
+  local task=$1 gen=$2
   [ -n "$task" ] || return 0
   [ -e "$STATE/$task.busy-state" ] || [ -e "$STATE/$task.busy-gen" ] || return 0
-  gen=$(cat "$STATE/$task.busy-gen" 2>/dev/null || true)
-  [ -n "$gen" ] || gen=$(fm_meta_get "$STATE/$task.meta" busy_gen 2>/dev/null || true)
   if [ -n "$gen" ]; then
     "$SCRIPT_DIR/fm-busy-event.sh" retire "$STATE" "$task" --gen "$gen" >/dev/null 2>&1 || true
   else
@@ -2558,10 +2568,20 @@ EOF
     # strength of an empty pane.
     if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
       if [ -n "$task" ]; then
+        gen=$(busy_gen_of "$task")
         verdict=$(fm_busy_classify_live "$(window_backend "$w")" "$w" "$(window_harness "$w")" "$task" "$STATE" "$(window_label "$w")")
         # A gone endpoint means the worker process exited, so its busy-state
-        # record can never be settled by its own writer again.
-        case "$verdict" in dead*) retire_dead_busy_state "$task" ;; esac
+        # record can never be settled by its own writer again. Only the
+        # recovery-grade verdict licenses that: the cheap existence probe also
+        # fails when the backend is merely unreachable, and retiring on that
+        # would wipe every live task's busy state from one transient outage.
+        case "$verdict" in
+          dead*)
+            case "$(fm_backend_agent_state "$(window_backend "$w")" "$w")" in
+              missing|dead) retire_dead_busy_state "$task" "$gen" ;;
+            esac
+            ;;
+        esac
         if [ "${verdict%% *}" = busy ]; then busy_now=0; else busy_now=1; fi
         inbox_steer_check "$w" "$task" "$busy_now"
       fi

@@ -28,9 +28,10 @@
 #     clone's.
 #   - origin/main is the last fetched value of that ref. This check never
 #     fetches: a fetch from a watcher poll would race the fleet sync that owns
-#     clone refresh, and a network blip must never read as drift. Fleet sync
-#     refreshes origin/main at every session start, so the comparison is against
-#     a ref current to within one session.
+#     clone refresh, and a network blip must never read as drift. Bootstrap
+#     refreshes the chair's own origin/main at every session start, alongside
+#     fleet sync, so the comparison is against a ref current to within one
+#     session.
 #   - A difference in either direction is drift: a chair behind origin/main runs
 #     stale code, and a chair ahead of it runs code nobody else has.
 #   - Nothing is repaired here. The line names the update path; the operator or
@@ -40,10 +41,13 @@
 # gate) so an hourly comparison does not re-read git on every watcher poll.
 #
 # Drift is an EPISODE, not a poll result: state/.drift records the first poll
-# that saw this exact (head, origin) pair, and the line is printed once per
-# episode, when that pair has held for longer than the page threshold. A pair
-# that changes starts a new episode, so a chair that drifts, is updated, and
-# drifts again is reported again. A chair that catches up clears the record.
+# that saw this HEAD while it differed from origin/main, and the line is printed
+# once per episode, when that HEAD has differed for longer than the page
+# threshold. A HEAD that changes starts a new episode, so a chair that drifts,
+# is updated, and drifts again is reported again. An advance of origin/main
+# while HEAD is unchanged does NOT restart the clock: a chair sitting still
+# while the repository moves on is exactly the drift this catches. A chair that
+# catches up clears the record.
 #
 # Test seams: FM_DRIFT_NOW overrides the clock (epoch seconds) and
 # FM_DRIFT_INTERVAL=0 disables the probe gate, so a test can drive 23h and 25h of
@@ -190,8 +194,7 @@ action_check() {
   fi
   since=$(record_field "$RECORD" since)
   paged=$(record_field "$RECORD" paged)
-  if [ "$(record_field "$RECORD" head)" != "$head" ] \
-    || [ "$(record_field "$RECORD" origin)" != "$origin" ]; then
+  if [ "$(record_field "$RECORD" head)" != "$head" ]; then
     since=$now
     paged=0
   fi
