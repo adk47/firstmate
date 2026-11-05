@@ -4416,6 +4416,34 @@ SH
   pass "an Orca failure with empty output refuses instead of counting as a successful removal"
 }
 
+# Whitespace-only output is not an Orca JSON envelope either: the CLI's own JSON
+# guard trims to empty and reports success, so relying on non-empty output alone
+# would let a failed release delete the records and drop the task branch.
+test_orca_whitespace_failure_output_refuses_instead_of_success() {
+  local case_dir rc wt
+  case_dir=$(make_case orca-whitespace-output)
+  wt=$(write_orca_workspace_case "$case_dir")
+  cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "worktree rm") printf ' \n\t\n'; exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "orca-whitespace-output: a whitespace-only Orca failure must refuse"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'refusing to fall back to a plain git release' "$case_dir/stderr" \
+    "orca-whitespace-output: the refusal did not explain why the git fallback was refused"
+  assert_present "$wt" \
+    "orca-whitespace-output: the worktree was released despite the failed Orca call"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "orca-whitespace-output: the task records were deleted despite the failed Orca call"
+  pass "a whitespace-only Orca failure refuses instead of counting as a successful removal"
+}
+
 # The pool probe merges an external tool's stdout and stderr, so a whitespace-only
 # row is possible input. It must be classified - not expanded as an unset array,
 # which stock-macOS bash 3.2 under `set -u` treats as unbound - so the held slot
@@ -4922,6 +4950,7 @@ test_orca_workspace_path_routes_release_to_orca
 test_orca_path_miss_falls_back_to_guarded_git_release
 test_orca_non_selector_failure_refuses_instead_of_plain_git_fallback
 test_orca_empty_failure_output_refuses_instead_of_success
+test_orca_whitespace_failure_output_refuses_instead_of_success
 test_whitespace_only_pool_listing_row_is_classified
 test_pool_listing_does_not_claim_a_longer_sibling_path
 test_unresolvable_home_relative_pool_listing_refuses_before_killing_the_agent
