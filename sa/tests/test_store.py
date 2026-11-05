@@ -144,6 +144,33 @@ class AppendTest(TempHomeCase):
         append_event("ticket.created", "router", ticket="T-1", home=nested)
         self.assertTrue((nested / "events.jsonl").exists())
 
+    def test_rejects_string_scope_paths(self):
+        with self.assertRaises(StoreError):
+            self.append("mandate.issued", actor="engine", ticket="T-1",
+                        payload={"scope_paths": "sa/", "rules_in_force": ["no-delete"]})
+        self.assertEqual(read_events(self.home), [])
+
+    def test_rejects_string_rules_in_force(self):
+        with self.assertRaises(StoreError):
+            self.append("mandate.issued", actor="engine", ticket="T-1",
+                        payload={"scope_paths": ["sa/"], "rules_in_force": "no-delete"})
+        self.assertEqual(read_events(self.home), [])
+
+    def test_rejects_non_numeric_usage_counts(self):
+        for payload in ({"tier": "t1", "tokens": "1200", "calls": 3},
+                        {"tier": "t1", "tokens": 1200, "calls": "3"},
+                        {"tier": "t1", "tokens": True, "calls": 3}):
+            with self.assertRaises(StoreError):
+                self.append("usage.recorded", actor="worker", ticket="T-1", payload=payload)
+        self.assertEqual(read_events(self.home), [])
+
+    def test_rejects_non_string_key_fields(self):
+        for type_, key in (("thread.opened", "thread"), ("sub.spawned", "sub"),
+                           ("outbox.enqueued", "event_id"), ("usage.recorded", "tier")):
+            with self.assertRaises(StoreError):
+                self.append(type_, actor="engine", ticket="T-1", payload={key: ["x"]})
+        self.assertEqual(read_events(self.home), [])
+
 
 class FoldTest(TempHomeCase):
     def test_all_ten_tables_exist_on_empty_log(self):
@@ -306,6 +333,26 @@ class FoldTest(TempHomeCase):
         self.assertEqual(query(state, "tickets", ["state=assigned", "owner=w1"]), rows)
         self.assertEqual(query(state, "tickets", ["state=nope"]), [])
 
+    def test_query_compares_json_typed_values(self):
+        self.append("mandate.issued", actor="engine", ticket="T-1",
+                    payload={"scope_paths": ["sa/"]})
+        self.append("mandate.issued", actor="engine", ticket="T-2",
+                    payload={"scope_paths": ["sa/"]})
+        self.append("mandate.revoked", actor="engine", ticket="T-2", payload={})
+        state = snapshot(self.home)
+        self.assertEqual([r["ticket"] for r in query(state, "mandates", ["revoked=false"])],
+                         ["T-1"])
+        self.assertEqual([r["ticket"] for r in query(state, "mandates", ["revoked=true"])],
+                         ["T-2"])
+        self.assertEqual(query(state, "mandates", ["requester=None"]), [])
+        self.assertEqual(len(query(state, "mandates", ["requester=null"])), 2)
+
+    def test_query_returns_events_in_sequence_order(self):
+        for _ in range(12):
+            self.append("ticket.created", ticket="T-1", payload={"title": "a"})
+        rows = query(snapshot(self.home), "events")
+        self.assertEqual([r["seq"] for r in rows], list(range(1, 13)))
+
     def test_query_rejects_unknown_table_and_bad_where(self):
         state = snapshot(self.home)
         with self.assertRaises(StoreError):
@@ -354,6 +401,25 @@ class CliTest(TempHomeCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["id"], "T-1")
         self.assertEqual(proc.stdout.strip(), canonical(rows))
+
+    def test_query_where_boolean_filter_selects_the_row(self):
+        run_cli(["append", "--type", "mandate.issued", "--actor", "engine",
+                 "--ticket", "T-1", "--payload", '{"scope_paths":["sa/"]}'], self.home)
+        proc = run_cli(["query", "--table", "mandates", "--where", "revoked=false"],
+                       self.home)
+        rows = json.loads(proc.stdout)
+        self.assertEqual([r["ticket"] for r in rows], ["T-1"])
+        self.assertEqual(json.loads(run_cli(
+            ["query", "--table", "mandates", "--where", "revoked=true"],
+            self.home).stdout), [])
+
+    def test_append_rejects_string_scope_paths(self):
+        proc = run_cli(["append", "--type", "mandate.issued", "--actor", "engine",
+                        "--ticket", "T-1",
+                        "--payload", '{"scope_paths":"sa/"}'], self.home, check=False)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("scope_paths", proc.stderr)
+        self.assertEqual(run_cli(["log"], self.home).stdout, "")
 
     def test_log_prints_raw_lines(self):
         run_cli(["append", "--type", "ticket.created", "--actor", "router",

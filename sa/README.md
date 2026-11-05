@@ -43,7 +43,10 @@ sa/
   to `Z`; a naive or unparseable timestamp is rejected rather than logged.
 - `actor` — one of `router`, `engine`, `code`, `worker`, `human`.
 - `ticket` — a ticket id or `null`.
-- `payload` — object; shape is per event type.
+- `payload` — object; shape is per event type. The append path rejects a payload the fold
+  cannot represent (a non-list `scope_paths`/`rules_in_force`, a non-numeric `tokens`/`calls`,
+  a non-string table key such as `thread`, `sub`, `event_id`, `id`, or `tier`) rather than
+  logging it, because the log is append-only.
 
 ## Ten tables
 
@@ -98,6 +101,11 @@ sa-store query --table NAME [--where k=v]...                                  ->
 sa-store selftest                                                             -> PASS/FAIL + hashes
 sa-store log                                                                  -> raw events.jsonl
 ```
+
+`query --where k=v` compares the right-hand side as JSON when it parses (`false`, `true`,
+`null`, numbers) and as a plain string otherwise, so `--where revoked=false` selects the
+false-valued rows and `--where owner=null` selects the null ones. `query --table events`
+returns rows in numeric `seq` order; every other table is key-ordered.
 
 `selftest` builds a fresh temp `SA_HOME`, appends a deterministic fixture covering every
 event type, folds the log twice, asserts `sha256(A) == sha256(B)`, asserts all ten tables

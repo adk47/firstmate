@@ -49,48 +49,6 @@ TABLE_KEYS = {
     "claims": "id",
 }
 
-#: Field list per table (design.md §4). ``events`` is the envelope itself.
-TABLE_FIELDS = {
-    "events": ("actor", "at", "id", "payload", "seq", "ticket", "type"),
-    "tickets": (
-        "id",
-        "title",
-        "body",
-        "requester",
-        "state",
-        "class",
-        "acceptance",
-        "owner",
-        "created_at",
-        "updated_at",
-    ),
-    "mandates": (
-        "ticket",
-        "requester",
-        "scope_paths",
-        "rules_in_force",
-        "issued_at",
-        "expires_at",
-        "revoked",
-    ),
-    "threads": ("id", "ticket", "opened_at", "messages"),
-    "subs": ("id", "ticket", "parent", "role", "state", "created_at"),
-    "assignments": ("ticket", "owner", "reason", "assigned_at"),
-    "outbox": (
-        "event_id",
-        "ticket",
-        "owner",
-        "state",
-        "attempts",
-        "enqueued_at",
-        "delivered_at",
-        "last_error",
-    ),
-    "rulings": ("id", "ticket", "ruling", "rationale", "actor", "at"),
-    "usage": ("ticket", "by_tier", "total_tokens"),
-    "claims": ("id", "ticket", "claim", "evidence_command", "at"),
-}
-
 #: The five legal actors (design.md §3).
 ACTORS = ("router", "engine", "code", "worker", "human")
 
@@ -121,6 +79,50 @@ UNASSIGNED = "unassigned"
 
 class StoreError(Exception):
     """A caller error the CLI reports and exits non-zero on."""
+
+
+#: Payload fields the fold uses as table keys; they must be strings when present.
+_PAYLOAD_KEY_FIELDS = {
+    "thread.opened": ("thread",),
+    "thread.message": ("thread",),
+    "sub.spawned": ("sub",),
+    "outbox.enqueued": ("event_id",),
+    "outbox.delivered": ("event_id",),
+    "outbox.failed": ("event_id",),
+    "ruling.recorded": ("id",),
+    "claim.recorded": ("id",),
+    "usage.recorded": ("tier",),
+}
+
+#: Payload fields the fold stores as lists of strings.
+_PAYLOAD_STR_LIST_FIELDS = {
+    "mandate.issued": ("scope_paths", "rules_in_force"),
+}
+
+#: Payload fields the fold sums; they must be numbers.
+_PAYLOAD_NUMBER_FIELDS = {
+    "usage.recorded": ("tokens", "calls"),
+}
+
+
+def _validate_payload(type: str, payload: dict) -> None:
+    """Reject a payload the fold cannot represent, before it reaches the log."""
+    for key in _PAYLOAD_KEY_FIELDS.get(type, ()):
+        value = payload.get(key)
+        if value is not None and not isinstance(value, str):
+            raise StoreError(f"{type}: payload.{key} must be a string")
+    for key in _PAYLOAD_STR_LIST_FIELDS.get(type, ()):
+        value = payload.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+            raise StoreError(f"{type}: payload.{key} must be a list of strings")
+    for key in _PAYLOAD_NUMBER_FIELDS.get(type, ()):
+        value = payload.get(key)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise StoreError(f"{type}: payload.{key} must be a number")
 
 
 # --------------------------------------------------------------------------
@@ -172,6 +174,7 @@ def append_event(
         payload = {}
     if not isinstance(payload, dict):
         raise StoreError("payload must be a JSON object")
+    _validate_payload(type, payload)
     stamp = parse_at(at) if at is not None else utc_now()
 
     root = home or sa_home()
@@ -546,18 +549,27 @@ def table(state: dict, name: str) -> dict:
     return state[name]
 
 
+def _where_value(text: str):
+    """Return the JSON-typed value of a ``--where`` right-hand side."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+
 def query(state: dict, name: str, where: list[str] | None = None) -> list[dict]:
-    """Return the rows of ``name`` matching every ``k=v`` filter, key-ordered."""
+    """Return the rows of ``name`` matching every ``k=v`` filter, in key order."""
     rows = table(state, name)
     filters = []
     for clause in where or []:
         if "=" not in clause:
             raise StoreError(f"--where expects k=v: got {clause!r}")
         key, value = clause.split("=", 1)
-        filters.append((key, value))
+        filters.append((key, _where_value(value)))
+    keys = sorted(rows, key=int) if name == "events" else sorted(rows)
     selected = []
-    for key in sorted(rows):
+    for key in keys:
         row = rows[key]
-        if all(str(row.get(k)) == v for k, v in filters):
+        if all(row.get(k) == v for k, v in filters):
             selected.append(row)
     return selected
