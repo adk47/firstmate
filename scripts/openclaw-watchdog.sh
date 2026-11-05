@@ -1156,6 +1156,35 @@ MSG_COUNT=${MSG_COUNT:-0}
 
 log "Check: ${SUCCESS_COUNT} successes, ${ERROR_COUNT} errors, ${MSG_COUNT} agent runs in last ${CHECK_WINDOW_MIN}min"
 
+# --- Unanswered @mention scan + page (MUS-29979) ---
+# Runs BEFORE the idle exit below: a dropped mention is exactly what a quiet
+# gateway looks like (5 Nov: 402/409 ticks exited idle, incl. the whole freeze
+# in which an app_mention was lost). Scan + page only; the auto-retrigger stays
+# after the idle exit. scan-unanswered.py applies the grace window, thread-reply
+# check and once-per-mention dedup; a scan failure is logged loudly, never a restart.
+UNANSWERED_RC=0
+# Bounded: it now runs ahead of the STUCK/restart decision, and a degraded Slack
+# (10 s per call, many channels) must not delay that decision. rc 124 = timed out.
+UNANSWERED_SCAN_TIMEOUT="${UNANSWERED_SCAN_TIMEOUT:-90}"
+UNANSWERED=$(timeout "$UNANSWERED_SCAN_TIMEOUT" python3 /opt/hydra/scripts/scan-unanswered.py 2>/dev/null) || UNANSWERED_RC=$?
+if [ "$UNANSWERED_RC" -ne 0 ]; then
+  log "UNANSWERED SCAN FAILED rc=${UNANSWERED_RC}"
+  UNANSWERED=""
+fi
+UNANSWERED_COUNT=$(echo "$UNANSWERED" | grep -c '•' 2>/dev/null || true)
+UNANSWERED_COUNT=${UNANSWERED_COUNT:-0}
+if [ "$UNANSWERED_COUNT" -gt 0 ]; then
+  log "UNANSWERED: ${UNANSWERED_COUNT} messages waiting for agent response"
+  # Advance the page-once state only after Slack confirmed the post: a failed send
+  # must be retried next tick, not lost (slack_notify itself swallows failures).
+  if slack_notify_status ":warning: *${UNANSWERED_COUNT} unanswered @mentions detected*\n${UNANSWERED}"; then
+    UNANSWERED_COMMIT_ERR=$(python3 /opt/hydra/scripts/scan-unanswered.py --commit 2>&1) \
+      || log "UNANSWERED COMMIT FAILED (will re-page): ${UNANSWERED_COMMIT_ERR}"
+  else
+    log "UNANSWERED PAGE NOT DELIVERED — will retry next tick"
+  fi
+fi
+
 # If there are no agent runs at all, system might just be idle — don't restart
 if [ "$MSG_COUNT" -eq 0 ]; then
   log "No agent activity — system idle, no action needed"
@@ -1242,7 +1271,9 @@ if [ "$SUCCESS_COUNT" -eq 0 ] && [ "$MSG_COUNT" -ge "$MIN_RUNS_FOR_STUCK" ]; the
     sleep 10
 
     # Scan for unanswered messages and build impact report
-    AFFECTED=$(python3 /opt/hydra/scripts/scan-unanswered.py 2>/dev/null || echo "")
+    # --no-dedup: the outage report lists everything still unanswered, even
+    # mentions already paged this tick, and leaves the page-once state alone.
+    AFFECTED=$(timeout "$UNANSWERED_SCAN_TIMEOUT" python3 /opt/hydra/scripts/scan-unanswered.py --no-dedup 2>/dev/null || echo "")
 
     NOTIFY_MSG=":warning: *OpenClaw Watchdog* — Auto-restarted gateway. ${MSG_COUNT} agent runs with 0 successes in last ${CHECK_WINDOW_MIN}min.\nLast error: \`${LAST_ERROR}\`\nStatus: back online :white_check_mark:"
     if [ -n "$AFFECTED" ]; then
@@ -1273,18 +1304,19 @@ if [ "$TIMEOUT_COUNT" -gt 5 ]; then
   slack_notify ":warning: *Agent Timeout Alert* — ${TIMEOUT_COUNT} timeouts in last ${CHECK_WINDOW_MIN}min. Agents may be acking but not responding.\n${TIMEOUT_AGENTS}"
 fi
 
-# --- Unanswered message scan + auto-retrigger ---
-UNANSWERED=$(python3 /opt/hydra/scripts/scan-unanswered.py 2>/dev/null || echo "")
-UNANSWERED_COUNT=$(echo "$UNANSWERED" | grep -c '•' 2>/dev/null || true)
-UNANSWERED_COUNT=${UNANSWERED_COUNT:-0}
-if [ "$UNANSWERED_COUNT" -gt 0 ]; then
-  log "UNANSWERED: ${UNANSWERED_COUNT} messages waiting for agent response"
-  slack_notify ":warning: *${UNANSWERED_COUNT} unanswered @mentions detected*\n${UNANSWERED}"
-
+# --- Auto-retrigger of unanswered messages ---
+# The scan + page happen before the idle exit (MUS-29979); only the retrigger,
+# which invokes agents, stays here. It gates on an UN-deduped scan: the page-once
+# state must not decide whether a mention is retriggered (a mention paged on an
+# idle tick, or a retrigger that failed, would otherwise never be retried).
+RETRIGGER_SCAN=$(timeout "$UNANSWERED_SCAN_TIMEOUT" python3 /opt/hydra/scripts/scan-unanswered.py --no-dedup 2>/dev/null || true)
+RETRIGGER_COUNT=$(echo "$RETRIGGER_SCAN" | grep -c '•' 2>/dev/null || true)
+RETRIGGER_COUNT=${RETRIGGER_COUNT:-0}
+if [ "$RETRIGGER_COUNT" -gt 0 ]; then
   # Auto-retrigger unanswered messages via chat completions API
   GW_TOKEN=$(python3 -c "import json; print(json.load(open('${OPENCLAW_CONFIG}')).get('gateway',{}).get('auth',{}).get('token',''))" 2>/dev/null || true)
   if [ -n "$GW_TOKEN" ]; then
-    log "Retriggering ${UNANSWERED_COUNT} unanswered requests..."
+    log "Retriggering ${RETRIGGER_COUNT} unanswered requests..."
     python3 /opt/hydra/scripts/retrigger-unanswered.py "auto-heal" 2>/dev/null || true
   fi
 fi

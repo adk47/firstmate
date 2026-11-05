@@ -116,6 +116,18 @@ slack_notify() {
     --requester "$(_slack_requester)" >/dev/null 2>&1 || true
 }
 
+# slack_notify_status <msg>: slack_notify that RETURNS the real delivery status (0 only when `muso slack send`
+# succeeded) and pings nobody. For callers that advance dedupe state only after a confirmed page (MUS-29979).
+slack_notify_status() {
+  local msg="$1"
+  msg="${msg//\\n/$'\n'}"
+  _slack_refuse_installed_muso && return 1
+  slack_load_env "$SLACK_NOTIFY_BOT" || return 1
+  "$MUSO_BIN" slack send --bot "$SLACK_NOTIFY_BOT" \
+    --channel "$SLACK_CHANNEL" --text "$msg" \
+    --requester "$(_slack_requester)" >/dev/null 2>&1
+}
+
 # slack_notify_critical_status <msg>: the same critical page as slack_notify_critical, but RETURNING the real
 # delivery status (0 only when Slack confirmed the post). For callers that dedupe on a watermark: a caller that
 # advances its watermark after a silent failure has lost that page forever, so best-effort is the wrong contract there.

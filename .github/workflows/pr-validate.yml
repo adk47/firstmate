@@ -1921,6 +1921,13 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_godmode_weekly_report
+      - name: Run scan-unanswered tests
+        # scripts/scan-unanswered.py is the watchdog's missed-@mention detector
+        # (MUS-29979): 10-min grace, thread replies count as answered, page once.
+        # Stdlib unittest, targeted by name (no network).
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_scan_unanswered
       - name: Run fallback-local-error-report tests
         # scripts/fallback-local-error-report.py counts model fallbacks that a LOCAL
         # runtime error caused (MUS-6727). These lock the structural classifier (no

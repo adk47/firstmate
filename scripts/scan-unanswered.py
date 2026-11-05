@@ -1,16 +1,81 @@
 #!/usr/bin/env python3
 """
 Scan all HYDRA agent channels and DMs for unanswered @mentions.
-Called by openclaw-watchdog.sh after auto-restart.
+Called by openclaw-watchdog.sh every tick (before its idle exit).
 Outputs one line per unanswered message for Slack notification.
+
+A mention counts as unanswered when it is at least GRACE_MIN old, no bot posted
+a later top-level message, the scanned bot's own id is not in the parent's
+reply_users (agents answer in thread; another bot's reply does not count), and
+it has not been reported before (STATE_PATH).
+
+The scan only PRINTS and records the keys it printed in STATE_PATH.pending; it
+never advances STATE_PATH itself, because the caller's Slack send can fail
+silently and a mention marked paged before delivery is lost for good. The
+watchdog runs `scan-unanswered.py --commit` after a confirmed send.
+
+`--no-dedup` lists every currently-unanswered mention (grace and thread-reply
+rules still apply) without consulting or writing the page-once state; the
+auto-retrigger and the post-restart report use it so that having been paged
+does not hide a mention from them.
 """
 import json
+import os
 import urllib.request
 import time
 import sys
 
 CONFIG_PATH = "/root/.openclaw/openclaw.json"
 LOOKBACK_HOURS = 2  # How far back to scan for unanswered messages
+GRACE_MIN = 10  # Younger mentions may still be in flight; don't page on them
+STATE_PATH = os.environ.get("UNANSWERED_STATE_PATH", "/var/lib/openclaw-watchdog/unanswered-paged.json")
+
+
+def load_paged(now):
+    """Return {"channel:ts": paged_epoch}, pruned to LOOKBACK_HOURS. Corrupt -> {}."""
+    try:
+        with open(STATE_PATH) as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("state is not an object")
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        print("unanswered-paged state unreadable (%s): starting empty" % e, file=sys.stderr)
+        return {}
+    cutoff = now - LOOKBACK_HOURS * 3600
+    return {k: v for k, v in data.items() if isinstance(k, str) and ":" in k
+            and _ts_of(k) >= cutoff}
+
+
+def _ts_of(key):
+    try:
+        return float(key.rsplit(":", 1)[1])
+    except ValueError:
+        return 0.0
+
+
+def _write_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f)
+    os.replace(tmp, path)
+
+
+def commit():
+    """Mark the keys of the last scan as paged. Call only after the page was delivered."""
+    pending_path = STATE_PATH + ".pending"
+    try:
+        with open(pending_path) as f:
+            pending = json.load(f)
+    except FileNotFoundError:
+        return
+    paged = load_paged(time.time())
+    paged.update(pending)
+    _write_json(STATE_PATH, paged)
+    os.remove(pending_path)
+
 
 def load_config():
     with open(CONFIG_PATH) as f:
@@ -42,7 +107,11 @@ def get_user_name(token, uid, cache):
 def main():
     config = load_config()
     accounts = ["clio", "ceo", "cmo", "cto", "qa", "finance", "operations", "devops", "scout"]
-    oldest = str(int(time.time()) - LOOKBACK_HOURS * 3600)
+    now = time.time()
+    oldest = str(int(now) - LOOKBACK_HOURS * 3600)
+    no_dedup = "--no-dedup" in sys.argv[1:]
+    paged = {} if no_dedup else load_paged(now)
+    pending = {}
     user_cache = {}
 
     # Collect all bot user IDs
@@ -115,14 +184,22 @@ def main():
 
                     # Check if this message mentions the bot
                     if my_bot_id and ("<@" + my_bot_id + ">" in text):
-                        # Check if bot replied after
-                        bot_replied = False
+                        msg_ts = float(msg.get("ts", 0))
+                        if now - msg_ts < GRACE_MIN * 60:
+                            continue
+                        # Agents reply in thread: THIS bot in reply_users answered it
+                        # (another bot replying to a shared mention must not mask it)
+                        bot_replied = my_bot_id in msg.get("reply_users", [])
                         for j in range(i + 1, len(msgs_chrono)):
                             later = msgs_chrono[j]
                             if later.get("user") == my_bot_id or later.get("user") in bot_ids:
                                 bot_replied = True
                                 break
                         if not bot_replied:
+                            page_key = ch_id + ":" + str(msg.get("ts", ""))
+                            if page_key in paged:
+                                continue
+                            pending[page_key] = now
                             ts = time.strftime("%H:%M", time.gmtime(float(msg.get("ts", 0))))
                             name = get_user_name(token, sender, user_cache)
                             snippet = text[:80].replace("\n", " ")
@@ -136,6 +213,20 @@ def main():
     # Output for the watchdog to include in Slack message
     for line in unanswered:
         print(line)
+    if no_dedup:
+        return
+    # Overwrite every run: the pending set is exactly what this run printed.
+    try:
+        if pending:
+            _write_json(STATE_PATH + ".pending", pending)
+        elif os.path.exists(STATE_PATH + ".pending"):
+            os.remove(STATE_PATH + ".pending")
+    except OSError as e:
+        print("cannot write unanswered pending state: %s" % e, file=sys.stderr)
+
 
 if __name__ == "__main__":
-    main()
+    if "--commit" in sys.argv[1:]:
+        commit()
+    else:
+        main()
