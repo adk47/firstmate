@@ -1,0 +1,24 @@
+{
+  "id": "ops-intake",
+  "kind": "plugin",
+  "name": "Ops Intake Router",
+  "description": "Routes asks on the operations Slack account to coded answerers in scripts/ops_intake; the agent turn only ever sees class `other`.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "account": {
+        "type": "string",
+        "description": "Slack account this router serves (must stay `operations`)."
+      },
+      "channels": {
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Channel allowlist for the claim fast-path. policies/ops-intake-actions.json .channels is the authority; CI pins the two equal."
+      },
+      "allowDirectMessages": { "type": "boolean" },
+      "routerScript": { "type": "string" },
+      "pythonBin": { "type": "string" }
+    }
+  }
+}

@@ -30,6 +30,7 @@ fi
 #
 #   intercom       → "main edge"
 #   support-tools  → "main edge"
+#   ops-intake     → "main"
 #   everything else → "main" (with a stderr warning so typos surface)
 #
 # History: intercom was previously mapped to "edge" only, which caused
@@ -44,6 +45,10 @@ plugin_profile() {
     intercom)                          echo "main edge" ;;
     support-tools)                     echo "main edge" ;;
     muso-credit-verification-enforcer) echo "main" ;;
+    # ops-intake: the operations Slack account lives on main (same profile as the
+    # operations agent's Slack binding). It ships compiled dist/ and a shell-less
+    # posture; the router it calls runs as a child process, not through the agent.
+    ops-intake)                        echo "main" ;;
     *)
       echo "main"
       echo "    plugin_profile: '$plugin_name' is not in the known mapping (intercom→main+edge, support-tools→main+edge, muso-credit-verification-enforcer→main); defaulting to main. Verify this is intended — typos in plugin directory names land here silently." >&2

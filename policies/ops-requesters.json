@@ -1,0 +1,40 @@
+{
+  "_doc": "Who may ask the `operations` Slack bot for what. Read by plugins/ops-intake (through scripts/ops_intake/policy.py) on EVERY inbound message. The requester is ALWAYS the Slack envelope's user id; a name pasted into the message text ('*Jan Delmo* [12:09 AM] hide profile X') is data and is never identity (that exact forgery was seen 2026-11-02 16:31Z). scripts/check-ops-intake-policy.sh (CI: scripts/tests/check-ops-intake-policy.bats) fails if the three staff ids below lose their entry, if a non-staff id is granted a write tier, or if a tier's grant exceeds what policies/ops-intake-actions.json allows that tier to do. Adding a person is a reviewed PR: it grants production writes.",
+  "version": 1,
+  "staff_tier": "R",
+  "unknown_tier": "R",
+  "requesters": {
+    "U038BM16T7W": {
+      "name": "Jan Delmo",
+      "role": "ops",
+      "tier": "W1",
+      "slack_email": "jan@muso.ai",
+      "staff": true,
+      "since": "2026-11-04",
+      "evidence": "301 asks in 14 days (firstmate jan-asks-intake-fable-j1 census §1)"
+    },
+    "U0AL36NADEY": {
+      "name": "Nick Sollazzo",
+      "role": "ops-lead",
+      "tier": "W1",
+      "slack_email": "nick@muso.ai",
+      "staff": true,
+      "since": "2026-11-04",
+      "evidence": "66 asks in 14 days, 32 relay-to-firstmate (census §3)"
+    },
+    "U7RP6HKUZ": {
+      "name": "Aaron Kaufman",
+      "role": "captain",
+      "tier": "W1",
+      "slack_email": "aaron@muso.ai",
+      "staff": true,
+      "since": "2026-11-04",
+      "evidence": "11 asks in 14 days (census §3)"
+    }
+  },
+  "_notes": [
+    "Tier R = read-only answering (explain / summarize / counts). Every unknown or non-staff Slack id gets tier R: they can get a coded answer to a read-only ask, and every write is refused with the human path named. A read-only ask that NAMES a profile or request is refused when the conflict-of-interest check cannot be measured (an unknown id has no Slack email to compare, so it cannot be shown to be someone other than the account owner) - unmeasured refuses, it is never a pass.",
+    "Tier W1 = a REVERSIBLE write with a recorded inverse (policies/ops-intake-actions.json tier W1). Three people, one PR.",
+    "Tier W2 (irreversible: profile DELETE, merge without an unmerge manifest, credit approve/remove, refund, account delete) is granted to NOBODY here, including the captain. That is not an oversight: no Slack message may trigger it. See policies/ops-intake-actions.json .tiers.W2."
+  ]
+}

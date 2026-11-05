@@ -684,6 +684,47 @@ frozen labelled sets in `scripts/verifier_eval/sets/` (false-approve, approve-on
 violations must be 0; nightly board in `/var/lib/hydra/verifier-eval/latest/`):
 `docs/credit-verification/verifier-eval.md`.
 
+## The Ops bot's staff asks are routed, not answered by an agent turn
+
+Every message on the `operations` Slack account is intercepted by
+`plugins/ops-intake` (`inbound_claim`) and routed to coded answerers in
+`scripts/ops_intake/` **before** any agent turn. Only the class `other` reaches
+the agent — and not when the text is a HIGH injection hit. The agent turn never
+judges a credit, never hides, never merges, never refunds on an ask.
+
+- **Identity is `event.user` from the Slack envelope.** A pasted
+  `*Jan Delmo* [12:09 AM] …` (seen 11-02 16:31Z) is text; it never resolves a
+  requester. Tiers live in `policies/ops-requesters.json`, actions/caps in
+  `policies/ops-intake-actions.json`.
+- **W2 (irreversible: `DELETE /admin/profile`, merge without an unmerge manifest,
+  credit approve/remove, refund, account delete) is granted to NOBODY**, including
+  the captain: the reply names the human path. W1 (note, answer-bank reply,
+  ClickUp status move, rename, request→UVN, register row, hide-PR open) is the
+  three staff ids only, each write one ledger row WITH its inverse
+  (`/var/lib/hydra/ops-intake/actions.sqlite`, the #1702 shape).
+- **Unmeasured is a refusal, not a pass.** Fraud lens (band/holds, reused-document
+  H3 F2, requester-linked account) plus register identity verdict before any W1;
+  a lens that cannot be measured refuses the write.
+- **No inverse, no write.** `ledger.plan()` raises before executing; `revert()` runs
+  the recorded inverse only.
+- **The reply is one contract line** (`class · ask_id · verdict · evidence ·
+  next · ledger`); `answer.render()` REFUSES "queued" without a due time, any
+  credit judgement whose source is not coded, any "Firstmate" attribution without
+  a ruling file, and any unmeasured claim. `queued` must name `due_at` — the row,
+  not a sentence, is the queue (the census found ≥24 phantom "queued for
+  Firstmate" replies).
+- **W1 execution is OFF by config** (`OPS_INTAKE_WRITES`); plans are recorded with
+  their inverse and the reply says so. Enabling it is a captain decision —
+  `docs/support/ops-intake-router.md` §"Enabling W1 execution".
+- **Guards**: `scripts/check-ops-intake-policy.sh` (CI + bats mutations: W2
+  reachable from Slack, W1 without inverse, zeroed caps), the 8-case red-team
+  corpus replayed in CI and daily (`ops-intake-redteam.timer`, pages on
+  regression), `tests/test_ops_intake.py` (classifier ≥95% on the 269-row census
+  fixture with the residual pinned by name).
+- The overdue escalation tick belongs to firstmate lane `jan-asks-watch-w1`;
+  `ops-intake-digest.timer` reports `open-past-due` so an unowned tick cannot hide.
+  Full doc: `docs/support/ops-intake-router.md`.
+
 ## Agent shell (exec) posture: who can run commands as root on node-8
 
 Every agent's posture (`denied`, or `full` with a reason, exit plan and expiry no more than 31 days out) is in

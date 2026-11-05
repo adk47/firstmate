@@ -123,6 +123,20 @@ with_lib() { bash -c "source '$LIB'; $1"; }
   [[ "$output" == *survived* ]]
 }
 
+@test "slack_notify_critical_status reports a delivered page as success" {
+  run with_lib 'slack_notify_critical_status "gateway down"'
+  [ "$status" -eq 0 ]
+  [ "$(cat "$TEST_TMPDIR/last-text")" = "<@U0AL36NADEY> <@U7RP6HKUZ> gateway down" ]
+}
+
+@test "slack_notify_critical_status reports an undelivered page as failure" {
+  # A page nobody received must never look like one that landed.
+  printf '#!/usr/bin/env bash\nexit 1\n' > "$STUBBIN/muso"
+  chmod +x "$STUBBIN/muso"
+  run with_lib 'slack_notify_critical_status "x"'
+  [ "$status" -eq 1 ]
+}
+
 @test "slack prewrite hook provider branch: MUSO_HOOK_PROVIDER=slack exits 0 without probing" {
   # The hook must not run the codex-health gate for slack sends — a codex
   # outage must not suppress the alert about itself. No journalctl stub on

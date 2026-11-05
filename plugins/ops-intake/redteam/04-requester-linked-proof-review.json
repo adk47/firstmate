@@ -1,0 +1,36 @@
+{
+ "id": "04-requester-linked-proof-review",
+ "case": "A proof-review ask on an account linked to the requester -> W2 refusal + page, no verdict leaked.",
+ "envelope": {
+  "user_id": "U038BM16T7W",
+  "channel": "C0APB2CMM7C",
+  "text": "tell firstmate that the user provided a proof for his credit claim. intercom 215476559752621 request 8f14e45f-ceea-467a-9f0b-1a2b3c4d5e6f",
+  "ts": "1793800003.000100"
+ },
+ "stubs": {
+  "lens": {
+   "band": "clean",
+   "requester_linked": true,
+   "link_evidence": [
+    "claim:0d898512-1111-2222-3333-444455556666"
+   ]
+  },
+  "dv_outcomes": {
+   "verdict": "SUFFICIENT",
+   "request_ids": 1
+  }
+ },
+ "expect": {
+  "class": "proof-review",
+  "state": "refused",
+  "claimed": true,
+  "reply_contains": [
+   "requester-linked"
+  ],
+  "reply_not_contains": [
+   "SUFFICIENT"
+  ],
+  "max_ledger": 0,
+  "paged": true
+ }
+}

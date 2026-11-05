@@ -1877,6 +1877,19 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_gdpr_pipeline
+      - name: Run ops-intake router tests (+ red-team corpus + census fixture)
+        # plugins/ops-intake routes every ask on the `operations` Slack account to
+        # coded answerers in scripts/ops_intake BEFORE any agent turn sees it (Jan
+        # sent 301 asks in 14 days; the Ops agent used to answer them with root exec
+        # and its own credit verdicts). These lock the classifier against the 269-row
+        # census fixture (>= 95%, residual pinned by name), the reply contract
+        # (no "queued" without a due time, no Firstmate attribution without a ruling,
+        # no unmeasured claim), no-inverse-no-write, the burst caps, every fraud-lens
+        # branch (unmeasured REFUSES), quarantine-before-model, the canary fail-closed,
+        # and the 8-case red-team corpus. Same bare stdlib unittest (no pytest/network).
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_ops_intake
       - name: Run legal-unanswered watchdog tests
         # scripts/intercom-legal-unanswered-watchdog.py PAGES #cs_priority (Jan) when a
         # legal/privacy request has no HUMAN reply for 24h. These lock the watch set,

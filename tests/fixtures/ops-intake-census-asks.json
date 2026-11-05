@@ -1,0 +1,2430 @@
+{
+ "_doc": "The 2026-11-04 Jan-asks census (firstmate lane jan-asks-intake-fable-j1), measured 2026-10-21T21:51Z..2026-11-04T22:45Z from 155 Slack conversations the bots can read. One row per classified Jan ask (269 rows: the census's 301 excludes the 88 #cs_priority triage acks and the unclassified tail). `text` is the census's own trimmed rendering, i.e. the exact bytes the census classifier saw - the fixture pins scripts/ops_intake/classes.py to the classifier the census used, not to a re-typed approximation. `census_class` is the census label verbatim; `expected_class` maps the census's extra labels onto the router's ten classes (relay-to-firstmate -> relay, process-question -> other). Provenance: /home/aaron/Projects/firstmate/data/jan-asks-intake-fable-j1/census-appendix.md. scripts/ops_intake/classes.py must score >= 95% on `expected_class` (tests/test_ops_intake.py::CensusAgreement). Labels encode the census classifier's own choices; the residual is listed in that test so a regression cannot hide inside the 5%.",
+ "measured_window": {
+  "start": "2026-10-21T21:51Z",
+  "end": "2026-11-04T22:45Z"
+ },
+ "rows": [
+  {
+   "when": "10-22 13:59",
+   "who": "Jan",
+   "channel": "DM",
+   "census_class": "other",
+   "expected_class": "other",
+   "text": "can you send it to my email <mailto:jan@muso.ai/jan@muso.ai?",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/D0AN63WQAGJ/p1792677595277939)"
+  },
+  {
+   "when": "10-22 14:32",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "gdpr-hide",
+   "expected_class": "gdpr-hide",
+   "text": "hide profile: profile 7127c801\u2026 profile 12519691\u2026 https://muso.ai/pro",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792679575712129)"
+  },
+  {
+   "when": "10-22 14:35",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "gdpr-hide",
+   "expected_class": "gdpr-hide",
+   "text": "hide track from public: track 38a3e715\u2026 Reason: the track was already removed from spotify",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792679707967529)"
+  },
+  {
+   "when": "10-22 14:39",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "ask firstmate to help you resolve this to ask aarons approval",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792679945027129)"
+  },
+  {
+   "when": "10-22 15:02",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476444480749",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792681342509599)"
+  },
+  {
+   "when": "10-22 15:03",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476442707610",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792681384354969)"
+  },
+  {
+   "when": "10-22 15:05",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "profile-edit",
+   "expected_class": "profile-edit",
+   "text": "change profile name to Franki Love profile c99ad6be\u2026",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792681530609539)"
+  },
+  {
+   "when": "10-22 15:09",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792681753800259)"
+  },
+  {
+   "when": "10-22 15:09",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user help here to fix",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792681766124269)"
+  },
+  {
+   "when": "10-22 15:10",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user intercom 215476445878514",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792681832257259)"
+  },
+  {
+   "when": "10-22 15:11",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user intercom 215476452931946",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792681891975729)"
+  },
+  {
+   "when": "10-22 15:11",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user intercom 215476452707879",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792681916322659)"
+  },
+  {
+   "when": "10-22 15:12",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user intercom 215476455244334",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792681959653179)"
+  },
+  {
+   "when": "10-22 15:13",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user intercom 215476457377770",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792681992797619)"
+  },
+  {
+   "when": "10-22 16:42",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user intercom 215476440713009",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792687320204779)"
+  },
+  {
+   "when": "10-22 19:00",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "gdpr-hide",
+   "expected_class": "gdpr-hide",
+   "text": "hide profile: profile 0092c828\u2026 reason: He explicitly invoked Articles 17 and 21 GDPR and explained that he ob",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792695609612179)"
+  },
+  {
+   "when": "10-22 20:20",
+   "who": "Jan",
+   "channel": "DM",
+   "census_class": "fraud-scan",
+   "expected_class": "fraud-scan",
+   "text": "Declined, this guy is a fraud. the credits should be removed from the profile and reject new credit request",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/D0AN63WQAGJ/p1792700426456529)"
+  },
+  {
+   "when": "10-23 13:36",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "fraud-scan",
+   "expected_class": "fraud-scan",
+   "text": "fraud scan profile 576e3c2d\u2026 \u2022 this guy, was captured before as fraudsters.",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792762610069589)"
+  },
+  {
+   "when": "10-23 13:41",
+   "who": "Jan",
+   "channel": "DM",
+   "census_class": "fraud-scan",
+   "expected_class": "fraud-scan",
+   "text": "This guy is a fraudster. i already reverted his profile claim.",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/D0AN63WQAGJ/p1792762881028129)"
+  },
+  {
+   "when": "10-23 14:12",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "billing",
+   "expected_class": "billing",
+   "text": "can you help trace this transaction. user said that her card was used frequently and used to subscribed to mus",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792764771176849)"
+  },
+  {
+   "when": "10-23 14:23",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "billing",
+   "expected_class": "billing",
+   "text": "can you send me the details, the workspace id, email address that the transaction was used",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792765412400889)"
+  },
+  {
+   "when": "10-23 14:30",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476442560395",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792765853476739)"
+  },
+  {
+   "when": "10-23 15:02",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476497521129",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792767726008599)"
+  },
+  {
+   "when": "10-23 15:03",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "gdpr-hide",
+   "expected_class": "gdpr-hide",
+   "text": "hide profile: profile 8cf938bc\u2026 reason: GDPR case",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792767823771359)"
+  },
+  {
+   "when": "10-23 15:12",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476458672948",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792768350185889)"
+  },
+  {
+   "when": "10-23 15:13",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476487150031",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792768392511189)"
+  },
+  {
+   "when": "10-23 15:14",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476355020609",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792768488471709)"
+  },
+  {
+   "when": "10-23 15:15",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "try offering 50% discount",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792768523399879)"
+  },
+  {
+   "when": "10-23 15:17",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution and update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792768658750129)"
+  },
+  {
+   "when": "10-23 15:17",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "cancel and prorate the refund",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792768678549889)"
+  },
+  {
+   "when": "10-23 16:31",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "process-question",
+   "expected_class": "other",
+   "text": "why does it needs aaron approval?",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792773114573859)"
+  },
+  {
+   "when": "10-23 16:34",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "yes refund it",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792773259787009)"
+  },
+  {
+   "when": "10-23 16:47",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "fraud-scan",
+   "expected_class": "fraud-scan",
+   "text": "this is fraudster. reject all credit claims from this profile including the ones approved",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792774070596389)"
+  },
+  {
+   "when": "10-23 18:00",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792778415753719)"
+  },
+  {
+   "when": "10-23 18:00",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476480690475",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792778456721869)"
+  },
+  {
+   "when": "10-23 18:07",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476449457299",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792778821572649)"
+  },
+  {
+   "when": "10-23 18:08",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "cancel the subscription till the end of cycle. inform the user that we will not issue a refund and he can use",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792778927809369)"
+  },
+  {
+   "when": "10-24 14:22",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "clickup-categorize",
+   "expected_class": "clickup-categorize",
+   "text": "read through clickup to do list dated from October 12 onwards and identify the users that has issues with anal",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792851734829799)"
+  },
+  {
+   "when": "10-24 14:52",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "clickup-categorize",
+   "expected_class": "clickup-categorize",
+   "text": "<http://Muso.AI/Muso.AI Ops \u2014 ClickUp Issue Investigation, Resolution, and Reporting Objective Review all Clic",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1792853578510369)"
+  },
+  {
+   "when": "10-26 12:43",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "status-report",
+   "expected_class": "status-report",
+   "text": "can you try to resolve it and if you cant bring CTO to resolve the issue. Give me the breakdown of the details",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793018593634919)"
+  },
+  {
+   "when": "10-26 13:00",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "status-report",
+   "expected_class": "status-report",
+   "text": "give me the number of cases per category",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793019633823719)"
+  },
+  {
+   "when": "10-26 13:41",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "status-report",
+   "expected_class": "status-report",
+   "text": "prepare detailed report for aaron about the stream counts. send it to me first for me to approve it",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793022072868529)"
+  },
+  {
+   "when": "10-26 13:49",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "status-report",
+   "expected_class": "status-report",
+   "text": "the detailed report for aaron should include the profile id, email, name and the specific details of the issue",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793022572445859)"
+  },
+  {
+   "when": "10-26 13:59",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "gdpr-hide",
+   "expected_class": "gdpr-hide",
+   "text": "hide profile: profile 61f4087f\u2026 profile 8e60c590\u2026 reason: the user exp",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793023142331769)"
+  },
+  {
+   "when": "10-26 14:02",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "gdpr-hide",
+   "expected_class": "gdpr-hide",
+   "text": "hide profile: profile fe69b1a2\u2026 profile 8d96238f\u2026 Reason: the songs we",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793023334725429)"
+  },
+  {
+   "when": "10-26 14:52",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "update the user in intercom that we are working already with their issues or update the user if the concern wa",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793026350436199)"
+  },
+  {
+   "when": "10-26 15:01",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "gdpr-hide",
+   "expected_class": "gdpr-hide",
+   "text": "hide profile and tracks: Artist Name: SLO9E Song Title: *SLO9E , profile 3fa84e1d\u2026/Han - Hnan Ma Phyue Par Nae",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793026894824039)"
+  },
+  {
+   "when": "10-26 15:03",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "gdpr-hide",
+   "expected_class": "gdpr-hide",
+   "text": "hide profile and tracks: profile 61b02cb9\u2026/muso.ai/profile/\u2026 reason: the tracks were removed already from musi",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793027030038629)"
+  },
+  {
+   "when": "10-26 15:09",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "is there update from firstmate?",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793027396388349)"
+  },
+  {
+   "when": "10-26 15:50",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "ask firstmate of the update of intercom 215476462656341",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793029802742949)"
+  },
+  {
+   "when": "10-26 16:01",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "clickup-categorize",
+   "expected_class": "clickup-categorize",
+   "text": "update the clickup status on in progress if firstmate is working on it already",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793030485878189)"
+  },
+  {
+   "when": "10-26 17:04",
+   "who": "Jan",
+   "channel": "DM",
+   "census_class": "other",
+   "expected_class": "other",
+   "text": "I approve.",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/D0AP0C2GBFS/p1793034246661029)"
+  },
+  {
+   "when": "10-26 17:08",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "clickup-categorize",
+   "expected_class": "clickup-categorize",
+   "text": "move it to waiting instead since we are waiting for the update from firstmate",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793034528154429)"
+  },
+  {
+   "when": "10-26 17:26",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "clickup-categorize",
+   "expected_class": "clickup-categorize",
+   "text": "read through clickup to do list dated from October 22 onwards and identify the users that has issues with anal",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793035593329299)"
+  },
+  {
+   "when": "10-26 17:31",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "clickup-categorize",
+   "expected_class": "clickup-categorize",
+   "text": "put back to to-do status if its related to erasure request or data deletion or GDPR for profile and tracks",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793035875969339)"
+  },
+  {
+   "when": "10-26 17:33",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "clickup-categorize",
+   "expected_class": "clickup-categorize",
+   "text": "put back to to-do status if its related to erasure request or data deletion or GDPR for profile and tracks",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793036002931269)"
+  },
+  {
+   "when": "10-26 17:41",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "clickup-categorize",
+   "expected_class": "clickup-categorize",
+   "text": "put back to to-do status if its related to refunds and cancellation",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793036478197189)"
+  },
+  {
+   "when": "10-26 17:54",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "read through the intercom and identify the detailed issues of the user. try to resolve the concern and bring C",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793037250422699)"
+  },
+  {
+   "when": "10-26 18:18",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "ask firstmate why i am receiving clio messages related to i need to review a credit claim. it should be automa",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793038729797799)"
+  },
+  {
+   "when": "10-26 18:23",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "ask firstmate to fix or resolved the cases that the users already submitted their proof for their credit claim",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793039017056689)"
+  },
+  {
+   "when": "10-26 18:23",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "ask firstmate to fix or resolved the cases that the users already submitted their proof for their credit claim",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793039030417679)"
+  },
+  {
+   "when": "10-26 18:25",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "clickup-categorize",
+   "expected_class": "clickup-categorize",
+   "text": "in clickup, move the status to waiting since we are waiting for firstmate to fix the unresolved issues. except",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793039143241959)"
+  },
+  {
+   "when": "10-26 18:36",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "any update of the other cases that was handed over to firstmate?",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793039777610009)"
+  },
+  {
+   "when": "10-26 18:48",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "ask firstmate if it was reported to aaron",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793040495560149)"
+  },
+  {
+   "when": "10-26 18:54",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "ask firstmate to give aaron all the details of the issues/cases that needs his attention to resolve it.",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793040854759639)"
+  },
+  {
+   "when": "10-26 19:09",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "clickup-categorize",
+   "expected_class": "clickup-categorize",
+   "text": "Please review the ClickUp To-Do list and read each corresponding Intercom conversation to understand the user'",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793041761562519)"
+  },
+  {
+   "when": "10-27 13:58",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "billing",
+   "expected_class": "billing",
+   "text": "can you check in prodigi how many order are still paused",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793109483610979)"
+  },
+  {
+   "when": "10-27 14:06",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "status-report",
+   "expected_class": "status-report",
+   "text": "check with firstmate if the message was sent to aaron. Also, identify if how many are now resolved vs not reso",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793109974798639)"
+  },
+  {
+   "when": "10-27 14:06",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "status-report",
+   "expected_class": "status-report",
+   "text": "check with firstmate if the message was sent to aaron. Also, identify if how many are now resolved vs not reso",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793109991712429)"
+  },
+  {
+   "when": "10-27 14:13",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "identify the issues of these \"without a verified fix\" and do triage and attempt to resolve it. If you cannot r",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793110414983249)"
+  },
+  {
+   "when": "10-27 14:14",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "identify the issues of these \"without a verified fix\" and do triage and attempt to resolve it. If you cannot r",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793110464836419)"
+  },
+  {
+   "when": "10-27 14:52",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "inform firstmate that users received proofs from the users about their credit claims. ask the firstmate if its",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793112723029059)"
+  },
+  {
+   "when": "10-27 15:14",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "tell firstmate, these are some examples: intercom 215476439192870",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793114060409629)"
+  },
+  {
+   "when": "10-27 15:24",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "fraud-scan",
+   "expected_class": "fraud-scan",
+   "text": "tell firstmate that this profile is fraud profile 576e3c2d\u2026. Aaron already know about this user/profile mixed",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793114688549909)"
+  },
+  {
+   "when": "10-27 15:44",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "fraud-scan",
+   "expected_class": "fraud-scan",
+   "text": "ask firstmate to remove all the credits from this profile",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793115845784279)"
+  },
+  {
+   "when": "10-27 18:22",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "clickup-categorize",
+   "expected_class": "clickup-categorize",
+   "text": "read through clickup to do list dated from October 26 onwards and identify the users that has issues with anal",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793125341669709)"
+  },
+  {
+   "when": "10-27 18:26",
+   "who": "Jan",
+   "channel": "cs_priority",
+   "census_class": "gdpr-hide",
+   "expected_class": "gdpr-hide",
+   "text": "- hide profile, tracks were removed already from spotify profile 799687e8\u2026",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0BBTAVP44X/p1793125606930269)"
+  },
+  {
+   "when": "10-27 18:33",
+   "who": "Jan",
+   "channel": "cs_priority",
+   "census_class": "gdpr-hide",
+   "expected_class": "gdpr-hide",
+   "text": "hide profile: profile a4b530fb\u2026 &amp; profile 0bbbde19\u2026 &amp; <https:/",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0BBTAVP44X/p1793126023068149)"
+  },
+  {
+   "when": "10-27 18:54",
+   "who": "Jan",
+   "channel": "cs_priority",
+   "census_class": "gdpr-hide",
+   "expected_class": "gdpr-hide",
+   "text": "hide track, song was removed from spotify track 38a3e715\u2026",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0BBTAVP44X/p1793127250733289)"
+  },
+  {
+   "when": "10-27 19:05",
+   "who": "Jan",
+   "channel": "cs_priority",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user intercom 215476552555030",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0BBTAVP44X/p1793127933363779)"
+  },
+  {
+   "when": "10-27 19:07",
+   "who": "Jan",
+   "channel": "cs_priority",
+   "census_class": "gdpr-hide",
+   "expected_class": "gdpr-hide",
+   "text": "hide profile. profile 603e75d6\u2026",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0BBTAVP44X/p1793128061345489)"
+  },
+  {
+   "when": "10-27 19:09",
+   "who": "Jan",
+   "channel": "cs_priority",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user intercom 215476566208497",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0BBTAVP44X/p1793128146747449)"
+  },
+  {
+   "when": "10-27 19:11",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476548800791",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793128277580999)"
+  },
+  {
+   "when": "10-28 15:11",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476571808224",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793200283770549)"
+  },
+  {
+   "when": "10-28 15:13",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476567477922",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793200386454359)"
+  },
+  {
+   "when": "10-28 15:14",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215471306255424",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793200484735289)"
+  },
+  {
+   "when": "10-28 15:15",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793200503783889)"
+  },
+  {
+   "when": "10-28 15:18",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793200721898829)"
+  },
+  {
+   "when": "10-28 15:18",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793200726765709)"
+  },
+  {
+   "when": "10-28 15:24",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "help here to fix it. if not, communicate with firstmate on the issues that need its attention and ask it to re",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793201084406359)"
+  },
+  {
+   "when": "10-28 15:29",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "status-report",
+   "expected_class": "status-report",
+   "text": "can you tell me how many credits that were rejected, accepted and moved to verification needed. i noticed that",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793201350442259)"
+  },
+  {
+   "when": "10-28 15:34",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "help here to fix it. if not, communicate with firstmate on the issues that need its attention and ask it to re",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793201675878789)"
+  },
+  {
+   "when": "10-28 15:40",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "clickup-categorize",
+   "expected_class": "clickup-categorize",
+   "text": "Please review the ClickUp To-Do list and read each corresponding Intercom conversation. Identify and categoriz",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793202044575239)"
+  },
+  {
+   "when": "10-28 15:42",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "status-report",
+   "expected_class": "status-report",
+   "text": "check the movements from 48hrs",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793202145517329)"
+  },
+  {
+   "when": "10-28 16:05",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "Please reach out to Firstmate to clarify the proper process for handling cases involving users who request dat",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793203504276199)"
+  },
+  {
+   "when": "10-28 16:07",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "Please reach out to Firstmate to clarify the proper process for handling cases involving users who request dat",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793203633640309)"
+  },
+  {
+   "when": "10-28 16:29",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "profile-edit",
+   "expected_class": "profile-edit",
+   "text": "create profile and source https://open.spotify.com/artist/5VdUGAlOk1IvxbwoiAujAS?si=JhDVeDqwRDe1MyJ2YuC7UQ",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793204981899829)"
+  },
+  {
+   "when": "10-28 17:05",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "clickup-categorize",
+   "expected_class": "clickup-categorize",
+   "text": "after the sweep, move the clickup tickets to waiting",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793207138001099)"
+  },
+  {
+   "when": "10-28 17:19",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "ask firstmate on what should be done next. the user provided proof of their credit claims. example: https://ap",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793207945477479)"
+  },
+  {
+   "when": "10-28 17:26",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "status-report",
+   "expected_class": "status-report",
+   "text": "create a detailed report for aaron about this. send it here first",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793208384722809)"
+  },
+  {
+   "when": "10-28 17:34",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user intercom 215476240393401",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793208865704639)"
+  },
+  {
+   "when": "10-28 17:48",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "gdpr-hide",
+   "expected_class": "gdpr-hide",
+   "text": "hide from public: profile 88e759e2\u2026/muso.ai/profile/\u2026",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793209715559809)"
+  },
+  {
+   "when": "10-28 17:48",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "ask firstmate assistance to resolve the issue. update here of the result. then update the user that we are sti",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793209738530729)"
+  },
+  {
+   "when": "10-28 17:57",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476450028170",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793210228746119)"
+  },
+  {
+   "when": "10-28 18:05",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "ask firstmate assistance to resolve the issue. update here of the result. then update the user that we are sti",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793210703960069)"
+  },
+  {
+   "when": "10-28 18:05",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user intercom 215476452521252",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793210727314219)"
+  },
+  {
+   "when": "10-28 18:06",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476454598715",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793210767234329)"
+  },
+  {
+   "when": "10-28 18:07",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476462969917",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793210821529929)"
+  },
+  {
+   "when": "10-28 18:07",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476456099500",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793210842354629)"
+  },
+  {
+   "when": "10-28 18:12",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476487425813",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793211145756109)"
+  },
+  {
+   "when": "10-28 18:12",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "ask firstmate assistance to resolve the issue. update here of the result. then update the user that we are sti",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793211168185079)"
+  },
+  {
+   "when": "10-28 18:13",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793211202672649)"
+  },
+  {
+   "when": "10-28 18:13",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793211212344049)"
+  },
+  {
+   "when": "10-28 18:13",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "ask firstmate assistance to resolve the issue. update here of the result. then update the user that we are sti",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793211220428229)"
+  },
+  {
+   "when": "10-28 18:50",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793213450366579)"
+  },
+  {
+   "when": "10-28 18:51",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793213500299969)"
+  },
+  {
+   "when": "10-28 19:13",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476502258121",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793214833387299)"
+  },
+  {
+   "when": "10-28 19:14",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476449884373",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793214857240739)"
+  },
+  {
+   "when": "10-28 19:15",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476523049450",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793214912934039)"
+  },
+  {
+   "when": "10-28 19:15",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476529421937",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793214938818309)"
+  },
+  {
+   "when": "10-28 19:20",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "ask firstmate assistance to resolve the issue. update here of the result. then update the user that we are sti",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793215225692959)"
+  },
+  {
+   "when": "10-28 19:20",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "ask firstmate assistance to resolve the issue. update here of the result. then update the user that we are sti",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793215235789739)"
+  },
+  {
+   "when": "10-28 19:20",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "ask firstmate assistance to resolve the issue. update here of the result. then update the user that we are sti",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793215245592089)"
+  },
+  {
+   "when": "10-28 19:20",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "ask firstmate assistance to resolve the issue. update here of the result. then update the user that we are sti",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793215252655349)"
+  },
+  {
+   "when": "10-28 19:20",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "ask firstmate assistance to resolve the issue. update here of the result. then update the user that we are sti",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793215256738699)"
+  },
+  {
+   "when": "10-28 19:37",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user intercom 215476540854500",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793216233616459)"
+  },
+  {
+   "when": "10-28 19:37",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user intercom 215476431736252",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793216255406209)"
+  },
+  {
+   "when": "10-28 19:38",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476470559837",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793216305449359)"
+  },
+  {
+   "when": "10-29 14:30",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "clickup-categorize",
+   "expected_class": "clickup-categorize",
+   "text": "Please review the ClickUp To-Do list and read each corresponding Intercom conversation to understand the user'",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793284243882229)"
+  },
+  {
+   "when": "10-29 14:52",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "tell firstmate that the user provided a proof for his credit claim. intercom 215476559752621",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793285531575939)"
+  },
+  {
+   "when": "10-29 14:57",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476442761518",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793285850607159)"
+  },
+  {
+   "when": "10-29 15:01",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793286116610029)"
+  },
+  {
+   "when": "10-29 15:37",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "process-question",
+   "expected_class": "other",
+   "text": "what's the next step here?",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793288222602429)"
+  },
+  {
+   "when": "10-29 17:22",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "status-report",
+   "expected_class": "status-report",
+   "text": "give me the breakdown per category. what are ongoing fixes and what are resolved",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793294521827069)"
+  },
+  {
+   "when": "10-29 18:04",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "clickup-categorize",
+   "expected_class": "clickup-categorize",
+   "text": "is there an investigation already happening with the analytics issue? if yes, then move the ticket to waiting.",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793297042698949)"
+  },
+  {
+   "when": "10-29 18:18",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "report it to firstmate and have firstmate resolve it",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793297921274079)"
+  },
+  {
+   "when": "10-29 18:29",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "clickup-categorize",
+   "expected_class": "clickup-categorize",
+   "text": "Please review the ClickUp To-Do list and read each corresponding Intercom conversation to understand the user'",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793298597946059)"
+  },
+  {
+   "when": "10-30 14:34",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "clickup-categorize",
+   "expected_class": "clickup-categorize",
+   "text": "update the clickup status to resolved its closed.. do you have update from firstmate? Give me the breakdown pe",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793370870062679)"
+  },
+  {
+   "when": "10-30 15:28",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "clickup-categorize",
+   "expected_class": "clickup-categorize",
+   "text": "move the tickets to waiting if we are waiting for firstmate to fix it.",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793374111410209)"
+  },
+  {
+   "when": "10-30 16:00",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "gdpr-hide",
+   "expected_class": "gdpr-hide",
+   "text": "hide profile: profile 0d898512\u2026/muso.ai/profile/\u2026 reason: tracks were removed from spotify",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793376053796469)"
+  },
+  {
+   "when": "10-30 16:07",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user intercom 215476454960195",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793376464460739)"
+  },
+  {
+   "when": "10-30 19:51",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "any update from firstmate?",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793389902565149)"
+  },
+  {
+   "when": "10-30 20:10",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "tell firstmate that he should be able to resolve the cases",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793391057993089)"
+  },
+  {
+   "when": "11-02 15:28",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "ask firstmate to review the proof of the user provided for his/her credit claim. here's the intercom conversat",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793633307291669)"
+  },
+  {
+   "when": "11-02 15:34",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "update the user,",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793633647313479)"
+  },
+  {
+   "when": "11-02 15:49",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "ask firstmate to review the proof of the user provided for his/her credit claim. here's the intercom conversat",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793634598777149)"
+  },
+  {
+   "when": "11-02 15:55",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "ask firstmate to review the proof of the user provided for his/her credit claim. here's the intercom conversat",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793634945471009)"
+  },
+  {
+   "when": "11-02 15:56",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476519350882",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793634971833169)"
+  },
+  {
+   "when": "11-02 16:02",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "can you setup a process for Caroline when it received a proof for Credit Claim/Verify. If we received proof, C",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793635376417899)"
+  },
+  {
+   "when": "11-02 16:07",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793635677523699)"
+  },
+  {
+   "when": "11-02 16:08",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793635703140239)"
+  },
+  {
+   "when": "11-02 16:09",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "ask firstmate to review the proof of the user provided for his/her credit claim. here's the intercom conversat",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793635782128759)"
+  },
+  {
+   "when": "11-02 16:28",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476563305166",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793636911189259)"
+  },
+  {
+   "when": "11-02 16:29",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476407140826",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793636976868579)"
+  },
+  {
+   "when": "11-02 16:30",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793637019944019)"
+  },
+  {
+   "when": "11-02 16:31",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "*Jan Delmo* [12:09 AM] ask firstmate to review the proof of the user provided for his/her credit claim. here's",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793637075646499)"
+  },
+  {
+   "when": "11-02 17:11",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793639462839099)"
+  },
+  {
+   "when": "11-02 17:11",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793639466441689)"
+  },
+  {
+   "when": "11-02 17:11",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793639502231949)"
+  },
+  {
+   "when": "11-02 17:13",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "clickup-categorize",
+   "expected_class": "clickup-categorize",
+   "text": "Please review the ClickUp To-Do list and read each corresponding Intercom conversation to understand the user'",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793639590478469)"
+  },
+  {
+   "when": "11-02 17:15",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476595567217",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793639719651729)"
+  },
+  {
+   "when": "11-02 17:18",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793639902436899)"
+  },
+  {
+   "when": "11-02 17:21",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "ask firstmate help to resolve this issue. provide the details to firstmate.",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793640087355649)"
+  },
+  {
+   "when": "11-02 17:24",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476604427939",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793640246470399)"
+  },
+  {
+   "when": "11-02 17:26",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "ask the user again for proofs for the credit claims: intercom 215476604798515",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793640361645719)"
+  },
+  {
+   "when": "11-02 17:27",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793640444417869)"
+  },
+  {
+   "when": "11-02 17:29",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476540730710",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793640581367979)"
+  },
+  {
+   "when": "11-02 17:32",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "ask Firstmate for help to resolve this issue",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793640746524539)"
+  },
+  {
+   "when": "11-02 17:33",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "ask firstmate to review the proof of the user provided for his/her credit claim. here's the intercom conversat",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793640782726329)"
+  },
+  {
+   "when": "11-02 17:33",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "ask firstmate to review the proof of the user provided for his/her credit claim. here's the intercom conversat",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793640802968859)"
+  },
+  {
+   "when": "11-02 17:40",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793641228395909)"
+  },
+  {
+   "when": "11-02 17:40",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476624683863",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793641255443349)"
+  },
+  {
+   "when": "11-02 17:41",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476573033138",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793641297400989)"
+  },
+  {
+   "when": "11-02 17:41",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "the user responded give me summary and resolution then do resolution and update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793641315977529)"
+  },
+  {
+   "when": "11-02 17:43",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "ask firstmate to review the proof of the user provided for his/her credit claim. here's the intercom conversat",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793641386228999)"
+  },
+  {
+   "when": "11-02 17:48",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "ask Firstmate to do the recommendation",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793641732020439)"
+  },
+  {
+   "when": "11-02 17:51",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "ask firstmate to help us resolve the issue of the user intercom 215476435852604",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793641892750319)"
+  },
+  {
+   "when": "11-02 17:51",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793641905763679)"
+  },
+  {
+   "when": "11-02 17:52",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "update the user, ask for proofs",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793641937150629)"
+  },
+  {
+   "when": "11-02 17:57",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "ask firstmate to review the proof of the user provided for his/her credit claim. here's the intercom conversat",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793642250867909)"
+  },
+  {
+   "when": "11-02 17:58",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "ask firstmate to help us resolve the issue of the user intercom 215476449610220",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793642325958919)"
+  },
+  {
+   "when": "11-02 17:59",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "ask firstmate to help us resolve the issue of the user intercom 215476624975737",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793642386166989)"
+  },
+  {
+   "when": "11-02 18:02",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "gdpr-hide",
+   "expected_class": "gdpr-hide",
+   "text": "hide the following from public. it has been removed from the public already \u2013 profile 153a79ef\u2026/muso.ai/profil",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793642556499849)"
+  },
+  {
+   "when": "11-02 18:13",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793643205206029)"
+  },
+  {
+   "when": "11-02 18:13",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "ask firstmate to complete the remaining issues to resolve",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793643224650029)"
+  },
+  {
+   "when": "11-02 18:55",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "clickup-categorize",
+   "expected_class": "clickup-categorize",
+   "text": "move the ticket to resolved if its fixed. For those not fixed, have Firstmate resolve it and ask firstmate for",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793645742846229)"
+  },
+  {
+   "when": "11-02 19:02",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "tell firstmate that the owner is Firstmate because he/she should resolve the issues for us",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793646135717369)"
+  },
+  {
+   "when": "11-02 19:05",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "ask for update from Firstmate every 2 hours then update here in the thread",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793646358228999)"
+  },
+  {
+   "when": "11-02 19:51",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "clickup-categorize",
+   "expected_class": "clickup-categorize",
+   "text": "is it safe to move the tickets to waiting now since firstmate accepted it?",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793649104281279)"
+  },
+  {
+   "when": "11-02 19:52",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "ask update from firstmate",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793649137553669)"
+  },
+  {
+   "when": "11-03 16:04",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "ask firstmate for update",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793721864117449)"
+  },
+  {
+   "when": "11-03 16:14",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and resolution intercom 215476615962851",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793722479361789)"
+  },
+  {
+   "when": "11-03 16:15",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "ask firstmate why there is no confirmed active resolution and what is needed for it",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793722529555169)"
+  },
+  {
+   "when": "11-03 16:21",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "tell firstmate that he/she should be the one who will work on the issues and resolve it",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793722898699859)"
+  },
+  {
+   "when": "11-03 16:41",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "tell firstmate for credit verification, he/she should be able to identify if the documents are sufficient to a",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793724101098339)"
+  },
+  {
+   "when": "11-03 16:46",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "also, tell firstmate for Technical/data, he/she should be able to resolve it also. why does it needs to send i",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793724391475129)"
+  },
+  {
+   "when": "11-03 18:03",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "process-question",
+   "expected_class": "other",
+   "text": "why does it need for human reviewer?",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793729016006919)"
+  },
+  {
+   "when": "11-03 18:09",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "so firstmate cannot approve?",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793729357848799)"
+  },
+  {
+   "when": "11-03 18:09",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "can you confirm this to firstmate",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793729389008189)"
+  },
+  {
+   "when": "11-03 18:22",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "ask firstmate for update",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793730127084559)"
+  },
+  {
+   "when": "11-03 18:22",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "ask update from firstmate",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793730152273359)"
+  },
+  {
+   "when": "11-03 18:28",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "for technical/data issues, tell firstmate that he/she should be able to resolve it",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793730509743199)"
+  },
+  {
+   "when": "11-03 18:38",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "ask firstmate to resolve this then update you what is the resolution and if needs to update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793731130625349)"
+  },
+  {
+   "when": "11-03 18:44",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "what is the update from firstmate?",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793731497184409)"
+  },
+  {
+   "when": "11-03 18:49",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "update from firstmate?",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793731763961529)"
+  },
+  {
+   "when": "11-03 18:49",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "ask firstmate for update",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793731774055569)"
+  },
+  {
+   "when": "11-03 18:50",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "update from firstmate?",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793731802280379)"
+  },
+  {
+   "when": "11-03 18:50",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "ask update from firstmate",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793731846422429)"
+  },
+  {
+   "when": "11-03 18:51",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "what is the update of firstmate about the credit verification cases",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793731884694929)"
+  },
+  {
+   "when": "11-03 18:58",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "if it needs more proof then update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793732317777879)"
+  },
+  {
+   "when": "11-03 19:00",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "clickup-categorize",
+   "expected_class": "clickup-categorize",
+   "text": "Please review the ClickUp To-Do list and read each corresponding Intercom conversation. Identify and categoriz",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793732430346549)"
+  },
+  {
+   "when": "11-03 20:19",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "hand it all to Firstmate to review all the cases and solve it. tell firstmate to resolve all cases and update",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793737149269529)"
+  },
+  {
+   "when": "11-03 20:31",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "Firstmate should be the reviewer and resolve it and after the decision or suggested, Ops will send update to t",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793737882531539)"
+  },
+  {
+   "when": "11-03 20:37",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "clickup-categorize",
+   "expected_class": "clickup-categorize",
+   "text": "is it safe to move the cases to waiting?",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793738271523199)"
+  },
+  {
+   "when": "11-03 20:48",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "ask Firstmate What analytics lane is not working",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793738887054919)"
+  },
+  {
+   "when": "11-03 20:53",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "ask firstmate to create a report that is specific that i can tell Aaron about the issues with analytics",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793739187015729)"
+  },
+  {
+   "when": "11-03 21:27",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "status-report",
+   "expected_class": "status-report",
+   "text": "send a prepared report to aaron for the analytics issue",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793741262334919)"
+  },
+  {
+   "when": "11-04 15:52",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "ask updates from Firstmate",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793807547986639)"
+  },
+  {
+   "when": "11-04 15:58",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "tell firstmate that he/she should be able to resolve the issue",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793807880653429)"
+  },
+  {
+   "when": "11-04 16:00",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "clickup-categorize",
+   "expected_class": "clickup-categorize",
+   "text": "Please review the ClickUp Waiting list and read each corresponding Intercom conversation. Identify and categor",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793808036356019)"
+  },
+  {
+   "when": "11-04 16:08",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and suggest a resolution intercom 215476692845876",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793808520488599)"
+  },
+  {
+   "when": "11-04 16:10",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do the suggested resolution and update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793808652479039)"
+  },
+  {
+   "when": "11-04 16:13",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "ask firstmate for his verdict of the provded proof. if the user needs to provide more proof then tell the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793808796044279)"
+  },
+  {
+   "when": "11-04 16:40",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "clickup-categorize",
+   "expected_class": "clickup-categorize",
+   "text": "how many tickets related to credit verification/claims?",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793810448418809)"
+  },
+  {
+   "when": "11-04 16:43",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "include it and have Firstmate decide whether the proofs provided by the user is enough or not. If its enough,",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793810592403709)"
+  },
+  {
+   "when": "11-04 17:31",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "tell firstmate he/she should do the decision for the credit related issues",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793813512349769)"
+  },
+  {
+   "when": "11-04 17:35",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "ask firstmate to review the proof of the user provided for his/her credit claim. here's the intercom conversat",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793813701959109)"
+  },
+  {
+   "when": "11-04 17:35",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "ask firstmate to review the proof of the user provided for his/her credit claim. here's the intercom conversat",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793813733464139)"
+  },
+  {
+   "when": "11-04 17:36",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and suggest a resolution intercom 215476655393133",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793813777305979)"
+  },
+  {
+   "when": "11-04 17:36",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and suggest a resolution intercom 215476655514599",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793813814209959)"
+  },
+  {
+   "when": "11-04 17:39",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do the suggested resolution.",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793813988190899)"
+  },
+  {
+   "when": "11-04 17:40",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "tell firstmate to resolve it",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793814054670199)"
+  },
+  {
+   "when": "11-04 17:41",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do resolution then update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793814113858609)"
+  },
+  {
+   "when": "11-04 17:42",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "ask firstmate to review the proof of the user provided for his/her credit claim. here's the intercom conversat",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793814170148969)"
+  },
+  {
+   "when": "11-04 17:51",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "tell firstmate that he/she should be able to approve, and advice us that we need to ask more proof from the us",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793814677837279)"
+  },
+  {
+   "when": "11-04 17:54",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "ask firstmate to review the proof of the user provided for his/her credit claim. here's the intercom conversat",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793814857679099)"
+  },
+  {
+   "when": "11-04 17:54",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and suggest a resolution intercom 215476532010370",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793814874631089)"
+  },
+  {
+   "when": "11-04 17:55",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "ask firstmate to review the proof of the user provided for his/her credit claim. here's the intercom conversat",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793814914035459)"
+  },
+  {
+   "when": "11-04 18:00",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "ask the user for proofs",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793815241901709)"
+  },
+  {
+   "when": "11-04 18:03",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "ask user for proof",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793815392625919)"
+  },
+  {
+   "when": "11-04 18:05",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and suggest a resolution intercom 215476645780169",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793815514561529)"
+  },
+  {
+   "when": "11-04 18:05",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "ask firstmate to review the proof of the user provided for his/her credit claim. here's the intercom conversat",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793815550722929)"
+  },
+  {
+   "when": "11-04 18:10",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "gdpr-hide",
+   "expected_class": "gdpr-hide",
+   "text": "hide the following profiles from public. reason is GDPR and Data protection request profile 7871c617\u2026 https://",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793815815065669)"
+  },
+  {
+   "when": "11-04 18:13",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "ask firstmate to review the proof of the user provided for his/her credit claim",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793816008235579)"
+  },
+  {
+   "when": "11-04 18:19",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and suggest a resolution intercom 215476643387284",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793816375127049)"
+  },
+  {
+   "when": "11-04 18:20",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "ask firstmate to review the proof of the user provided for his/her credit claim. here's the intercom conversat",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793816411627039)"
+  },
+  {
+   "when": "11-04 18:20",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and suggest a resolution intercom 215476629852399",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793816438052909)"
+  },
+  {
+   "when": "11-04 18:24",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "ask firstmate to review the proof of the user provided for his/her credit claim. here's the intercom conversat",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793816662187799)"
+  },
+  {
+   "when": "11-04 18:24",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and suggest a resolution intercom 215476663415658",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793816679692189)"
+  },
+  {
+   "when": "11-04 19:21",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "ask firstmate to review the proof of the user provided for his/her credit claim.",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793820065939279)"
+  },
+  {
+   "when": "11-04 19:21",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "ask for clearer proof",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793820079951159)"
+  },
+  {
+   "when": "11-04 19:41",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do the suggested resolution",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793821296663169)"
+  },
+  {
+   "when": "11-04 19:42",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "tell firstmate to approved the credits if its sufficient if not, then send a message to the user asking for mo",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793821372514759)"
+  },
+  {
+   "when": "11-04 19:43",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "do the suggested resoltuion",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793821400020869)"
+  },
+  {
+   "when": "11-04 19:43",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "tell firstmate to approved the credits if its sufficient if not, then send a message to the user asking for mo",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793821426334489)"
+  },
+  {
+   "when": "11-04 19:43",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "tell firstmate to approved the credits if its sufficient if not, then send a message to the user asking for mo",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793821435012349)"
+  },
+  {
+   "when": "11-04 19:52",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793821974476489)"
+  },
+  {
+   "when": "11-04 19:54",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "ask firstmate to review the proof of the user provided for his/her credit claim.",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793822055470039)"
+  },
+  {
+   "when": "11-04 19:54",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "ask firstmate to review the proof of the user provided for his/her credit claim.",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793822072951489)"
+  },
+  {
+   "when": "11-04 19:55",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "ask user for the proof",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793822105097949)"
+  },
+  {
+   "when": "11-04 20:03",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "ask firstmate to review the proof of the user provided for his/her credit claim. here's the intercom conversat",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793822623712199)"
+  },
+  {
+   "when": "11-04 20:12",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "ask firstmate to review the proof of the user provided for his/her credit claim. here's the intercom conversat",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793823144081469)"
+  },
+  {
+   "when": "11-04 20:13",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "tell Firstmate to review the case and do the resolution",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793823202344449)"
+  },
+  {
+   "when": "11-04 20:16",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "relay-to-firstmate",
+   "expected_class": "relay",
+   "text": "tell Firstmate to review the case and do the resolution",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793823401804919)"
+  },
+  {
+   "when": "11-04 20:24",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and suggest a resolution intercom 215476639065927",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793823899994839)"
+  },
+  {
+   "when": "11-04 20:28",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "gdpr-hide",
+   "expected_class": "gdpr-hide",
+   "text": "hide the profile from public",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793824084874159)"
+  },
+  {
+   "when": "11-04 20:37",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "give me summary and suggest a resolution intercom 215476656386897",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793824650469739)"
+  },
+  {
+   "when": "11-04 20:37",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "summarize-resolve",
+   "expected_class": "summarize-resolve",
+   "text": "update the user",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793824676141439)"
+  },
+  {
+   "when": "11-04 20:38",
+   "who": "Jan",
+   "channel": "credit-verification",
+   "census_class": "proof-review",
+   "expected_class": "proof-review",
+   "text": "ask firstmate to review the proof of the user provided for his/her credit claim. here's the intercom conversat",
+   "link": "[\u2197](https://muso-ai.slack.com/archives/C0APB2CMM7C/p1793824709431389)"
+  }
+ ]
+}

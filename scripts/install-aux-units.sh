@@ -484,6 +484,12 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/caroline-behavior-digest.py missing"
 [[ -x "$HYDRA_ROOT/scripts/caroline-safety-daily.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/caroline-safety-daily.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/ops-intake-redteam-daily.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/ops-intake-redteam-daily.sh missing or not executable"
+[[ -f "$HYDRA_ROOT/scripts/ops_intake/router.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/ops_intake/router.py missing"
+[[ -f "$HYDRA_ROOT/scripts/ops_intake/watcher.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/ops_intake/watcher.py missing"
 [[ -f "$HYDRA_ROOT/scripts/support-changelog-sync.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/support-changelog-sync.sh missing"
 [[ -f "$HYDRA_ROOT/scripts/sync-platform-llms.sh" ]] \
@@ -1752,6 +1758,83 @@ csd=caroline-safety-daily.timer
 systemctl enable "$csd" >/dev/null 2>&1 || log "WARN: could not enable $csd"
 systemctl start "$csd" >/dev/null 2>&1 || log "WARN: could not start $csd"
 log "  $csd: $(systemctl is-active "$csd" 2>/dev/null || echo unknown)"
+
+# ─── ops-intake: daily red-team replay + register digest (firstmate j2 / j-w1) ──
+# The operations Slack account's asks are routed by plugins/ops-intake to coded
+# answerers in scripts/ops_intake (no agent turn, no model verdict). Two timers
+# keep that honest:
+#   ops-intake-redteam.timer (06:40 UTC) replays plugins/ops-intake/redteam/*
+#     against the DEPLOYED code and PAGES on any failing case or a lower pass
+#     count than yesterday (scripts/ops-intake-redteam-daily.sh).
+#   ops-intake-digest.timer (07:00 UTC) posts the register digest - asks by class,
+#     answered-by-code, escalated, held, quarantined, refused, open-past-due.
+# DELIBERATELY NOT INSTALLED HERE: the 10-minute overdue ESCALATION tick, which
+# belongs to firstmate lane jan-asks-watch-w1 (scripts/ops_intake/watcher.py
+# overdue). The digest reports open-past-due, so an unowned tick cannot hide.
+install -d -m 700 /var/lib/hydra/ops-intake
+install -d -m 700 /var/lib/hydra/ops-intake-redteam
+
+cat > /etc/systemd/system/ops-intake-redteam.service << OPSINTRTSVC
+[Unit]
+Description=ops-intake daily red-team replay (#clio_devops; pages on regression)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/main.env
+Environment=MUSO_BIN=/usr/local/bin/muso
+ExecStart=/bin/bash $HYDRA_ROOT/scripts/ops-intake-redteam-daily.sh
+OPSINTRTSVC
+
+cat > /etc/systemd/system/ops-intake-redteam.timer << OPSINTRTTMR
+[Unit]
+Description=Daily — ops-intake red-team replay at 06:40 UTC
+
+[Timer]
+OnCalendar=*-*-* 06:40:00 UTC
+Persistent=true
+RandomizedDelaySec=120
+Unit=ops-intake-redteam.service
+
+[Install]
+WantedBy=timers.target
+OPSINTRTTMR
+
+cat > /etc/systemd/system/ops-intake-digest.service << OPSINTDIGSVC
+[Unit]
+Description=ops-intake register digest (#clio_devops; asks by class/state)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/main.env
+Environment=MUSO_BIN=/usr/local/bin/muso
+Environment=PYTHONPATH=$HYDRA_ROOT/scripts
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/ops_intake/watcher.py digest --post
+OPSINTDIGSVC
+
+cat > /etc/systemd/system/ops-intake-digest.timer << OPSINTDIGTMR
+[Unit]
+Description=Daily — ops-intake register digest at 07:00 UTC
+
+[Timer]
+OnCalendar=*-*-* 07:00:00 UTC
+Persistent=true
+RandomizedDelaySec=120
+Unit=ops-intake-digest.service
+
+[Install]
+WantedBy=timers.target
+OPSINTDIGTMR
+
+systemctl daemon-reload
+for tmr in ops-intake-redteam.timer ops-intake-digest.timer; do
+  systemctl enable "$tmr" >/dev/null 2>&1 || log "WARN: could not enable $tmr"
+  systemctl start "$tmr" >/dev/null 2>&1 || log "WARN: could not start $tmr"
+  log "  $tmr: $(systemctl is-active "$tmr" 2>/dev/null || echo unknown)"
+done
 
 # ─── Caroline shipped-work feed (daily 05:30 UTC) ─────────────────────────
 # Renders customer-visible product changes into
@@ -3912,6 +3995,8 @@ log "  $qart: $(systemctl is-active "$qart" 2>/dev/null || echo unknown)"
 AUX_ONFAILURE_UNITS=(
   caroline-behavior-digest.service
   caroline-safety-daily.service
+  ops-intake-digest.service
+  ops-intake-redteam.service
   clickup-sla-digest.service
   clickup-todo-dedupe.service
   close-duplicate-conversations.service

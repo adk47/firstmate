@@ -1,0 +1,238 @@
+{
+  "_doc": "What the ops-intake router may do on whose word. This file is the model: scripts/ops_intake/policy.py reads it on every ask, and scripts/check-ops-intake-policy.sh (CI: scripts/tests/check-ops-intake-policy.bats) fails the PR that makes it unsafe - a W2 action reachable from the Slack surface, a W1 action with no recorded inverse, a class with no action plan, or a cap that is missing/zero. Same posture as policies/credit-approval-automation.json: the registry must say what the code does, and the guard proves it.",
+  "version": 1,
+  "tiers": {
+    "R": {
+      "label": "read-only",
+      "description": "Explain, summarize, count, report, relay into an ask row. Never writes to a customer system.",
+      "actions": [
+        "explain",
+        "summarize_intercom_conversation",
+        "count_register_rows",
+        "status_report",
+        "relay_to_queue",
+        "fraud_scan_report",
+        "proof_review_verdict"
+      ],
+      "granted_by": "every requester in policies/ops-requesters.json, staff or not (staff_tier / unknown_tier)"
+    },
+    "W1": {
+      "label": "reversible write",
+      "description": "A single write that records an inverse the router can execute. Each write is one action-ledger row (#1702 shape, scripts/ops_intake/ledger.py) carrying that inverse; a W1 action whose inverse recipe is missing is refused by code, not by policy prose.",
+      "granted_by": "policies/ops-requesters.json .requesters[*].tier == 'W1' (three people today)",
+      "actions": {
+        "intercom_internal_note": {
+          "description": "Post an internal note on the Intercom conversation the ask names.",
+          "inverse": "delete_intercom_note",
+          "inverse_detail": "DELETE /conversations/{id}/parts/{part_id} (Intercom internal note); recorded on the ledger row as the note part id."
+        },
+        "intercom_customer_reply": {
+          "description": "Reply to the customer with a line from plugins/intercom/src/answer-bank.ts.",
+          "inverse": "annotate_intercom_reply",
+          "inverse_detail": "the reply can be retracted by a following admin note naming the ledger row; the customer-visible text never changes, which is why this is W1 only for answer-bank lines and W2 for anything composed."
+        },
+        "clickup_status_move": {
+          "description": "Move one ClickUp task to another status/list.",
+          "inverse": "clickup_status_move_back",
+          "inverse_detail": "PUT /task/{id} with the previous status recorded on the ledger row."
+        },
+        "profile_rename": {
+          "description": "PUT /admin/profile/{id} displayName to a value the ask names verbatim.",
+          "inverse": "profile_rename_back",
+          "inverse_detail": "PUT the previous displayName captured immediately before the write."
+        },
+        "request_status_uvn": {
+          "description": "Move a credit request to user_verification_needed (the ask-for-proof state).",
+          "inverse": "request_status_restore",
+          "inverse_detail": "PUT the request back to the status recorded on the ledger row before the write."
+        },
+        "register_row": {
+          "description": "Append a row to a hydra register (erasure_requests, asks).",
+          "inverse": "register_row_delete",
+          "inverse_detail": "the register's own delete path keyed by the row id on the ledger row."
+        },
+        "hide_pr_open": {
+          "description": "Open the reversible hide PR (H-DevOps HIDDEN_ENTITY_IDS + PDP sitemap). A person merges; the router never merges.",
+          "inverse": "hide_pr_close",
+          "inverse_detail": "close the PR named on the ledger row - nothing is hidden until a human merges."
+        }
+      }
+    },
+    "W2": {
+      "label": "irreversible / not-yet-invertible",
+      "description": "NEVER from a Slack message, for anyone, including the captain. The reply names the human path instead. A W2 action appearing in any tier's action list fails CI.",
+      "requesters": [],
+      "actions": {
+        "admin_profile_delete": {
+          "endpoint": "DELETE /api/v3/admin/profile/{id}",
+          "why": "Not reversible and NOT the legal path: AGENTS.md forbids it (legal hold 1350), the erasure register classifies the result as removed_outside_process, and the 2026-11-04 Gene Flores read-back showed 431 -> 0 served credits. 17 'hide profile' asks in 14 days took this path.",
+          "human_path": "scripts/gdpr-pipeline.py prepare (erasure register) -> H-DevOps hide PR -> a named human merges",
+          "triggers": [
+            "\\bdelete (?:the )?profile\\b",
+            "\\bpermanent(?:ly)? (?:delete|remove)\\b",
+            "\\bpurge (?:the )?profile\\b"
+          ]
+        },
+        "profile_merge": {
+          "endpoint": "POST /api/v3/admin/profiles/merge",
+          "why": "No unmerge manifest exists today, so a merge cannot be inverted.",
+          "human_path": "a named human session with an unmerge manifest (scripts/merge-verify.py names the command)",
+          "triggers": [
+            "\\bmerge (?:the )?profiles?\\b",
+            "\\bmerge (?:them|these|those)\\b",
+            "\\bconsolidate (?:the )?profiles?\\b"
+          ]
+        },
+        "credit_approve": {
+          "endpoint": "conditional admin credit transition",
+          "why": "Captain decision. Codex/QA verdicts inside an agent turn already produced misattributed 'Firstmate' verdicts (census \u00a77).",
+          "human_path": "scripts/credit-review.py decide (approval-gated, policies/credit-approval-automation.json)",
+          "triggers": [
+            "\\bapprove (?:the |all )?(?:credit|credits|claim|claims|request|requests)\\b",
+            "\\bapproved the credits\\b",
+            "\\bapprove if sufficient\\b"
+          ]
+        },
+        "credit_removal": {
+          "endpoint": "admin credit delete / approved -> unverified take-back",
+          "why": "core-backend #10310 refuses every agent/API token on these routes.",
+          "human_path": "scripts/credit-retro.py from a named human's own session",
+          "triggers": [
+            "\\breject all credit claims\\b",
+            "\\bremove all the credits\\b",
+            "\\brevert (?:the )?approved\\b",
+            "\\btake ?back (?:the )?credits?\\b"
+          ]
+        },
+        "refund": {
+          "endpoint": "Stripe refund",
+          "why": "Money. Needs a human approver recorded.",
+          "human_path": "billing owner in a named human session",
+          "triggers": [
+            "\\brefund\\b",
+            "\\bcancel and prorate\\b"
+          ]
+        },
+        "account_delete": {
+          "endpoint": "muso-cli delete / account erasure",
+          "why": "Irreversible.",
+          "human_path": "scripts/gdpr-pipeline.py (register) + captain",
+          "triggers": [
+            "\\bdelete (?:the )?account\\b",
+            "\\berase (?:the )?account\\b"
+          ]
+        }
+      },
+      "_triggers_doc": "Each W2 action carries the phrases that request it. scripts/ops_intake/policy.py compiles these and the router refuses the whole ask (state=refused) when a W2 trigger fires, naming the human path - a W1 note or a status move must never ride in on a sentence that also asks for an irreversible write."
+    }
+  },
+  "classes": {
+    "proof-review": {
+      "action": "proof_review_verdict",
+      "tier": "R",
+      "verdict_source": "dv_outcomes",
+      "write_action": "intercom_internal_note",
+      "notes": "Verdict comes ONLY from scripts/credit-review.py's coded outcomes (proof.sqlite / doc-verify.sqlite). No model judges a credit on this surface; a missing verdict is reported as pending with a due time, never guessed."
+    },
+    "summarize-resolve": {
+      "action": "summarize_intercom_conversation",
+      "tier": "R",
+      "write_action": "intercom_internal_note",
+      "notes": "The summary is read-only. 'Do the resolution' may request W1 (note / answer-bank reply / status->UVN). Refund, merge, approve and delete inside the same sentence are refused as W2 with the human path named."
+    },
+    "gdpr-hide": {
+      "action": "hide_pr_open",
+      "tier": "W1",
+      "write_action": "hide_pr_open",
+      "requires_register_verdict": [
+        "PASS_A",
+        "PASS_B",
+        "PASS_C",
+        "PASS_D",
+        "LEGAL_HIDE_FIRST"
+      ],
+      "notes": "The ONLY hide path is the reversible HIDDEN_ENTITY_IDS PR, and only for a page the register itself calls hide-eligible (gdpr_pipeline.identity.HIDE_ELIGIBLE: PASS_A-D, LEGAL_HIDE_FIRST). A page with NO register row, an UNKNOWN verdict, or any ASK_* verdict gets state=ask (no write) - the 2026-11-04 census found a hide executed while the register identity was UNKNOWN."
+    },
+    "clickup-categorize": {
+      "action": "count_register_rows",
+      "tier": "R",
+      "write_action": "clickup_status_move",
+      "notes": "Counts are produced and reconciled by code (scripts/clickup-todo-dedupe.py header documents the failure of moving tickets to 'waiting' by hand)."
+    },
+    "status-report": {
+      "action": "status_report",
+      "tier": "R",
+      "notes": "Numbers come from a coded query or are reported as unavailable. Never from an agent's recollection."
+    },
+    "fraud-scan": {
+      "action": "fraud_scan_report",
+      "tier": "R",
+      "notes": "Reports the fraud lens band/holds only. 'Reject all credit claims including approved ones' is credit_removal = W2 (scripts/credit-retro.py, named human)."
+    },
+    "billing": {
+      "action": "explain",
+      "tier": "R",
+      "notes": "Read/trace only. A refund is W2."
+    },
+    "profile-edit": {
+      "action": "explain",
+      "tier": "R",
+      "write_action": "profile_rename",
+      "notes": "Renaming is W1 with the previous name as inverse. Creating a profile or a source link is refused to the agent (needs a human)."
+    },
+    "relay": {
+      "action": "relay_to_queue",
+      "tier": "R",
+      "notes": "The ask row IS the queue (#1702 ledger + ops_asks). 'Queued' is only ever said with the row id and a due time that the watcher escalates."
+    },
+    "other": {
+      "action": null,
+      "tier": "R",
+      "agent_handles": true,
+      "notes": "The only class the agent turn still sees: free-form process questions. It still gets an ask row."
+    }
+  },
+  "caps": {
+    "_doc": "Burst caps, counted from the action ledger. Over a cap the ask is HELD (state=held) and paged - never silently executed and never silently dropped.",
+    "w1_per_requester_per_hour": 20,
+    "writes_per_target_per_day": 3,
+    "over_cap_state": "held"
+  },
+  "fraud_lens": {
+    "_doc": "Required before ANY W1 that touches a profile or a request. A lens result of unknown/unmeasurable is NOT consent: the write is refused and the reply says what could not be measured.",
+    "required_for_write_classes": [
+      "summarize-resolve",
+      "gdpr-hide",
+      "clickup-categorize",
+      "profile-edit",
+      "fraud-scan",
+      "billing"
+    ],
+    "requester_linked_decision": "refuse_w2",
+    "held_band_decision": "hold",
+    "reused_document_decision": "hold",
+    "unmeasurable_decision": "refuse"
+  },
+  "quarantine": {
+    "_doc": "Inputs are data. A HIGH injection-watch hit in anything fetched for an ask quarantines it: the model never sees it, state=quarantined, page.",
+    "severity": "high",
+    "state": "quarantined"
+  },
+  "canary": {
+    "_doc": "Every tool-less prompt carries a canary token; its appearance in an output fails the ask closed.",
+    "on_leak": "fail_closed",
+    "fail_closed_state": "failed"
+  },
+  "reply": {
+    "_doc": "One format for every class (spec j2 item 5).",
+    "format": "{class} \u00b7 {ask_id} \u00b7 {verdict_or_state} \u00b7 {evidence} \u00b7 {next_step} \u00b7 {ledger_row}",
+    "forbid_unmeasured": true,
+    "pending_requires_due_at": true,
+    "forbid_firstmate_attribution_without_ruling": true
+  },
+  "channels": {
+    "_doc": "Channels the operations account answer-routes. Must stay a subset of the channels the `operations` Slack account is bound to in openclaw-main.json (CI-checked).",
+    "C0APB2CMM7C": "#credit-verification",
+    "DMs": true
+  }
+}

@@ -1,0 +1,35 @@
+{
+ "id": "06-burst-caps",
+ "case": "25 write-bearing asks from Jan in ten minutes, each on a DIFFERENT profile (so the per-target cap cannot fire first) -> the requester-hour cap holds the burst at 20.",
+ "increment_ts": true,
+ "repeat": 25,
+ "envelope": {
+  "user_id": "U038BM16T7W",
+  "channel": "C0APB2CMM7C",
+  "text": null,
+  "ts": null
+ },
+ "stubs": {
+  "lens": {
+   "band": "clean",
+   "requester_linked": false
+  },
+  "writer": {
+   "ok": true
+  },
+  "profile_name": "Franki Love"
+ },
+ "expect": {
+  "class": "profile-edit",
+  "state": "held",
+  "claimed": true,
+  "reply_contains": [
+   "cap"
+  ],
+  "writes_applied": 20,
+  "ledger_full": 20,
+  "ledger_has_inverse": true,
+  "paged": true
+ },
+ "text_template": "change profile name to Franki Love profile 0d898512-aaaa-bbbb-cccc-{seq:012d}"
+}

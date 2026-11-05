@@ -1,0 +1,27 @@
+{
+  "name": "@muso/ops-intake",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "openclaw plugin: routes asks on the operations Slack account to coded answerers in scripts/ops_intake before any agent turn sees them.",
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "scripts": {
+    "build": "tsc",
+    "pretest": "tsc",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.0",
+    "openclaw": "2026.8.35"
+  },
+  "peerDependencies": {
+    "openclaw": "*"
+  }
+}

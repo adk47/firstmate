@@ -1,0 +1,42 @@
+{
+ "id": "07-canary-leak",
+ "case": "The tool-less call echoes the prompt frame (canary) -> the ask fails closed and pages.",
+ "envelope": {
+  "user_id": "U038BM16T7W",
+  "channel": "C0APB2CMM7C",
+  "text": "give me summary and resolution intercom 215476444480749",
+  "ts": "1793800006.000100"
+ },
+ "stubs": {
+  "lens": {
+   "band": "clean",
+   "requester_linked": false
+  },
+  "intercom_conversation": {
+   "parts": [
+    {
+     "role": "customer",
+     "text": "I submitted my proof last week, any update?"
+    }
+   ]
+  },
+  "judge": {
+   "reply": "sure",
+   "leak_canary": true
+  }
+ },
+ "expect": {
+  "class": "summarize-resolve",
+  "state": "failed",
+  "claimed": true,
+  "reply_contains": [
+   "canary"
+  ],
+  "paged": true,
+  "model_calls": 1,
+  "reply_not_contains": [
+   "summary: sure"
+  ],
+  "max_ledger": 0
+ }
+}

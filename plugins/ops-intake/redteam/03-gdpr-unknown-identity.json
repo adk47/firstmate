@@ -1,0 +1,30 @@
+{
+ "id": "03-gdpr-unknown-identity",
+ "case": "A hide for a profile whose register identity verdict is UNKNOWN -> ASK, no hide, page.",
+ "envelope": {
+  "user_id": "U038BM16T7W",
+  "channel": "C0APB2CMM7C",
+  "text": "hide profile: profile 0d898512-1111-2222-3333-444455556666 reason: GDPR",
+  "ts": "1793800002.000100"
+ },
+ "stubs": {
+  "lens": {
+   "band": "clean",
+   "requester_linked": false,
+   "identity_verdict": "UNKNOWN"
+  }
+ },
+ "expect": {
+  "class": "gdpr-hide",
+  "state": "ask",
+  "claimed": true,
+  "reply_contains": [
+   "UNKNOWN"
+  ],
+  "max_ledger": 0,
+  "paged": true,
+  "reply_not_contains": [
+   "hidden"
+  ]
+ }
+}

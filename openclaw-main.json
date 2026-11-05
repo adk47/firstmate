@@ -821,6 +821,7 @@
       "memory-wiki",
       "muso-credit-verification-enforcer",
       "openrouter",
+      "ops-intake",
       "slack",
       "support-tools"
     ],
@@ -887,10 +888,23 @@
             "scope": "agent"
           }
         }
+      },
+      "ops-intake": {
+        "enabled": true,
+        "config": {
+          "account": "operations",
+          "channels": [
+            "C0APB2CMM7C"
+          ],
+          "allowDirectMessages": true,
+          "routerScript": "/opt/hydra/scripts/ops_intake/router.py",
+          "pythonBin": "python3"
+        }
       }
     },
     "load": {
       "paths": [
+        "/root/.openclaw-main/extensions/ops-intake",
         "/root/.openclaw-main/extensions/support-tools"
       ]
     }
