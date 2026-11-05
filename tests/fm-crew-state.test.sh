@@ -154,7 +154,10 @@ SH
 make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
   local dir=$1 tb="$1/notimeoutbin" tool real
   mkdir -p "$tb"
-  for tool in bash git grep sed head cut tail dirname perl; do
+  # ps and lsof are here because the busy-record corroboration
+  # (bin/fm-lane-liveness-lib.sh) needs them: without them the verdict is
+  # correctly undeterminable, which is not what this case is about.
+  for tool in bash git grep sed head cut tail dirname perl ps lsof; do
     real=$(command -v "$tool" || true)
     [ -n "$real" ] || fail "missing tool for no-timeout path: $tool"
     ln -s "$real" "$tb/$tool"
@@ -179,6 +182,21 @@ arm_idle_record() {  # <state-dir> <id>
   gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" "$id")
   "$ROOT/bin/fm-busy-event.sh" apply "$state" "$id" idle --gen "$gen" \
     --source claude-hook --event stop
+}
+
+# A live process whose cwd is <worktree> and whose process name classifies as
+# an agent (bin/backends/tmux.sh's shared vocabulary). A record-sourced busy
+# verdict is only evidence of what the agent last REPORTED, so fm-crew-state
+# corroborates it against exactly this (bin/fm-lane-liveness-lib.sh). The
+# fixture is a copy of `sleep` named `pi`, so `ps -o comm=` reports an agent
+# name rather than a shell; fm_test_cleanup reaps it with the temp root.
+spawn_live_agent() {  # <case-dir> <worktree>
+  local d=$1 wt=$2 bin="$1/agentbin/pi"
+  mkdir -p "$1/agentbin"
+  cp "$(command -v sleep)" "$bin" || return 1
+  chmod +x "$bin" || return 1
+  ( cd "$wt" && exec "$bin" 300 ) &
+  printf '%s\n' "$!"
 }
 
 # Clear the fake-driver vars and (re-)mark them exported, so the per-test plain
@@ -919,7 +937,8 @@ EOF
   pass "another branch's run is ignored, falls back"
 }
 
-# (f) no run for this crew + a busy pane -> working via pane
+# (f) no run for this crew + a busy pane + a live agent in the worktree ->
+# working via pane
 test_no_run_busy_pane() {
   reset_fakes
   local d; d=$(new_case busy)
@@ -934,11 +953,61 @@ test_no_run_busy_pane() {
   local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-h)
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-h busy --gen "$gen" \
     --source claude-hook --event user-prompt-submit
+  # The record is corroborated against a live agent process in the worktree, so
+  # the fixture must actually have one.
+  spawn_live_agent "$d" "$d/wt" >/dev/null || fail "could not spawn the live agent fixture"
   local out; out=$(run_crew_state "$d" feat-h)
-  assert_contains "$out" "state: working" "busy record -> working"
+  assert_contains "$out" "state: working" "busy record + live agent -> working"
   assert_contains "$out" "source: pane" "busy record -> pane source"
   assert_contains "$out" "claude-hook" "the working verdict names its semantic source"
-  pass "no run + a busy semantic record reads working, attributed to its source"
+  pass "no run + a busy semantic record with a live agent reads working, attributed to its source"
+}
+
+# The 2026-11-05 failure, pinned: a busy-state record survives a hard kill, so a
+# dead lane kept reporting working and the fleet was counted 11, then 15, then
+# 27 dead in three successive reads. A record with no live agent process in the
+# worktree must read unknown/stale, never working.
+test_no_run_busy_record_without_live_agent_is_stale() {
+  reset_fakes
+  local d; d=$(new_case busy-stale)
+  make_repo_on_branch "$d/wt" fm/feat-h-stale
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-h-stale.meta" "window=fm:fm-feat-h-stale" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-h-stale)
+  "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-h-stale busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
+  # No live agent process anywhere in the worktree: the agent was hard-killed
+  # and only its record survived.
+  local out; out=$(run_crew_state "$d" feat-h-stale)
+  assert_not_contains "$out" "state: working" "a busy record with no live agent must not read working"
+  assert_contains "$out" "state: unknown" "a stale busy record reads unknown"
+  assert_contains "$out" "stale" "the verdict says the record is stale"
+  assert_contains "$out" "claude-hook" "the verdict still names the record's source"
+  pass "a busy record with no live agent process reads unknown/stale, never working"
+}
+
+# The corroboration must not fire for a live PULL source: grok's rendered tail
+# is re-read from the pane on every call, so it cannot go stale the way a
+# record does, and a grok lane with no process in the worktree still reads
+# working from its own verified signature.
+test_no_run_grok_pull_source_needs_no_corroboration() {
+  reset_fakes
+  local d; d=$(new_case busy-grok-pull)
+  make_repo_on_branch "$d/wt" fm/feat-h-pull
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-h-pull.meta" "window=fm:fm-feat-h-pull" "worktree=$d/wt" "kind=ship" "harness=grok"
+  FM_FAKE_AXI_STATUS=""
+  FM_FAKE_RUNS_LIST=""
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT='Ctrl+c:cancel'
+  export FM_FAKE_BUSY_TEXT
+  local out; out=$(run_crew_state "$d" feat-h-pull)
+  assert_contains "$out" "state: working" "a live pull source needs no process corroboration"
+  assert_contains "$out" "grok-regex" "the verdict names the pull source"
+  pass "a live pull source reads working without a process corroboration"
 }
 
 # A converted adapter must NOT read working from rendered footer text: the
@@ -1116,6 +1185,9 @@ test_no_run_herdr_idle_agent_status_outranked_by_record() {
   local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-herdr-idle)
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-herdr-idle busy --gen "$gen" \
     --source claude-hook --event user-prompt-submit
+  # A record-sourced busy verdict is corroborated against a live agent process
+  # in the worktree, so the fixture must actually have one.
+  spawn_live_agent "$d" "$d/wt" >/dev/null || fail "could not spawn the live agent fixture"
   local out; out=$(run_crew_state "$d" feat-herdr-idle)
   assert_contains "$out" "state: working" "a busy record with herdr idle agent_status -> working"
   assert_contains "$out" "claude-hook" "the record's source outranks herdr's narrower native verdict"
@@ -1359,6 +1431,9 @@ SH
   local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-timeout)
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-timeout busy --gen "$gen" \
     --source claude-hook --event user-prompt-submit
+  # A record-sourced busy verdict is corroborated against a live agent process
+  # in the worktree, so the fixture must actually have one.
+  spawn_live_agent "$d" "$d/wt" >/dev/null || fail "could not spawn the live agent fixture"
   start=$SECONDS
   out=$(FM_FAKE_NM_CALLS="$calls_file" PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_NM_TIMEOUT=1 "$CREW_STATE" feat-timeout)
   elapsed=$((SECONDS - start))
@@ -1769,6 +1844,9 @@ EOF
   local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-f10g)
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-f10g busy --gen "$gen" \
     --source claude-hook --event user-prompt-submit
+  # A record-sourced busy verdict is corroborated against a live agent process
+  # in the worktree, so the fixture must actually have one.
+  spawn_live_agent "$d" "$d/wt" >/dev/null || fail "could not spawn the live agent fixture"
   local out; out=$(run_crew_state "$d" feat-f10g)
   assert_not_contains "$out" "state: failed" "a mismatched anchor must not fall to the older failed row"
   assert_not_contains "$out" "source: run-step" "unknown attribution must not bind a run"
@@ -2228,6 +2306,8 @@ test_cross_branch_attribution_picks_most_recent_row
 test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_no_run_busy_pane
+test_no_run_busy_record_without_live_agent_is_stale
+test_no_run_grok_pull_source_needs_no_corroboration
 test_no_run_footer_text_alone_is_not_working
 test_no_run_grok_uses_isolated_fallback
 test_no_run_herdr_unknown_uses_backend_capture

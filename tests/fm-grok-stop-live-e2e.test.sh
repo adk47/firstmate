@@ -14,6 +14,8 @@ fi
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/tmux-test-safety.sh
+. "$ROOT/tests/tmux-test-safety.sh"
 
 NATIVE_BIN=${FM_GROK_NATIVE_BIN:-}
 LEGACY_BIN=${FM_GROK_LEGACY_BIN:-}
@@ -64,8 +66,12 @@ cleanup_exact_cell() {
     echo "blocked: exact target survived cleanup; preserving $lab" >&2
     return 1
   }
-  FM_E2E_TMUX_SOCKET_ID="$lab/dedicated.sock" PATH="$lab/bin:$PATH" \
-    env -u TMUX -u TMUX_PANE "$lab/bin/tmux" kill-server || return 1
+  # The dedicated socket is named EXPLICITLY here, and the shared guard proves
+  # it before the call runs. This line used to be a bare `kill-server` through
+  # the wrapper, which is how a test reached the DEFAULT tmux server and took
+  # the live fleet down on 2026-11-05 (tests/tmux-test-safety.sh owns the rule).
+  fm_test_tmux_refuse_default_socket -S "$lab/dedicated.sock" kill-server || return 1
+  env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$lab/dedicated.sock" kill-server || return 1
   rm -rf -- "$lab"
   ACTIVE_LAB=
 }

@@ -206,6 +206,23 @@ fm_busy_sources_for_harness() {  # <harness>
   printf '%s fm-spawn fm-interrupt fm-recovery' "$adapter"
 }
 
+# fm_busy_source_is_record: 0 when <source> is a stored state/<id>.busy-state
+# RECORD - written by a harness hook or by firstmate - rather than a live pull
+# of the harness's own durable log. The distinction is load-bearing for
+# liveness: a record survives a hard kill (SIGKILL, an OOM kill, a lost tmux
+# server) and keeps reporting its last state forever, so a caller that needs
+# CURRENT truth must corroborate a record-sourced verdict against a live
+# process (bin/fm-lane-liveness-lib.sh). A pull source (grok-regex,
+# rovo-regex, muse-session-log, cursor-transcript, herdr-native) is re-read
+# from the harness's own live artifact on every call and needs no
+# corroboration.
+fm_busy_source_is_record() {  # <source>
+  case "${1:-}" in
+    claude-hook|pi-ext|opencode-plugin|gemini-hook|codex-hook|codex-appserver|kimi-wire|kimi-hook|fm-spawn|fm-interrupt|fm-recovery) return 0 ;;
+  esac
+  return 1
+}
+
 fm_busy_source_trusted() {  # <harness> <source>
   local trusted
   trusted=$(fm_busy_sources_for_harness "$1")

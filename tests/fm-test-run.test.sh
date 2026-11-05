@@ -1403,6 +1403,75 @@ assert len(doc["scripts"])==3
   pass "aggregate-json merges lane timing artifacts"
 }
 
+# The re-entry sentinel: a test may invoke the runner (this file does), but a
+# run may never select a script that is already running in its own process
+# ancestry. On 2026-11-05 a run was observed recursing three deep this way,
+# each level re-selecting the suite that contains the test that invokes the
+# runner.
+test_reentry_sentinel_refuses_self_selection() {
+  local tmp repo rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-reentry.XXXXXX")
+  repo="$tmp/repo"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  # A test that re-invokes the runner selecting ITSELF: the exact recursion.
+  cat >"$repo/tests/fm-self.test.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+root=$(cd "$(dirname "$0")/.." && pwd)
+"$root/bin/fm-test-run.sh" tests/fm-self.test.sh
+SH
+  chmod +x "$repo/tests/fm-self.test.sh"
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh tests/fm-self.test.sh) \
+    >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "a run that selects a script already running in its ancestry must be refused"; }
+  grep -Fq 're-entry refused' "$tmp/out" "$tmp/err" \
+    || { rm -rf "$tmp"; fail "the refusal must name re-entry: $(cat "$tmp/out" "$tmp/err")"; }
+  grep -Fq 'tests/fm-self.test.sh' "$tmp/out" "$tmp/err" \
+    || { rm -rf "$tmp"; fail "the refusal must name the offending script"; }
+  rm -rf "$tmp"
+  pass "the re-entry sentinel refuses a run that would select itself"
+}
+
+# The complement: a test invoking the runner for a DIFFERENT script is
+# legitimate and must still work, so the sentinel is not a blanket refusal of
+# nested runs.
+test_reentry_sentinel_allows_a_different_script() {
+  local tmp repo rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-reentry-ok.XXXXXX")
+  repo="$tmp/repo"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cat >"$repo/tests/fm-other.test.sh" <<'SH'
+#!/usr/bin/env bash
+echo "ok - other fixture"
+exit 0
+SH
+  chmod +x "$repo/tests/fm-other.test.sh"
+  cat >"$repo/tests/fm-nested.test.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+root=$(cd "$(dirname "$0")/.." && pwd)
+"$root/bin/fm-test-run.sh" tests/fm-other.test.sh
+SH
+  chmod +x "$repo/tests/fm-nested.test.sh"
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh tests/fm-nested.test.sh) \
+    >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || { rm -rf "$tmp"; fail "a nested run for a different script must be allowed, got $rc: $(cat "$tmp/out" "$tmp/err")"; }
+  grep -Fq 'FM_TEST_SUMMARY total=1 failed=0' "$tmp/out" \
+    || { rm -rf "$tmp"; fail "the nested run did not report its own green summary: $(cat "$tmp/out")"; }
+  rm -rf "$tmp"
+  pass "the re-entry sentinel allows a nested run for a different script"
+}
+
 test_list_all_exact_suite_coverage
 test_family_selection
 test_single_script_selection
@@ -1416,6 +1485,8 @@ test_family_proofs_run_in_separate_concurrent_phases
 test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_aggregate_exit_behavior
+test_reentry_sentinel_refuses_self_selection
+test_reentry_sentinel_allows_a_different_script
 test_gate_skip_accounting
 test_fail_on_gate_skip_token
 test_exclude_family

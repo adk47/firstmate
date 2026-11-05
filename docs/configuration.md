@@ -784,6 +784,21 @@ FM_BOARD_REMIND_SECS=1800        # reminder interval while an unchanged verdict 
 Arm the check once per home with `bin/fm-board-audit.sh arm`, which writes `state/board-audit.check.sh` and binds it with `bin/fm-check-register.sh`, so the watcher polls it on its normal slow-poll cadence.
 `bin/fm-board-audit.sh status` prints the current verdict without recording anything, and `bin/fm-board-audit.sh disarm` removes the shim, its trust binding, and `state/.board-audit`.
 
+## Fleet integrity check
+
+[`bin/fm-fleet-integrity-check.sh`](../bin/fm-fleet-integrity-check.sh) is a registered watcher check that notices a lane whose agent process is gone while its worktree and records remain.
+It exists because on 2026-11-05 the default tmux server was lost and the fleet lost roughly 27 lanes, and the same fleet was then counted as 11 dead, then 15, then 27 in three successive reads - wrong in both directions - because the liveness read trusted a `state/<id>.busy-state` record that never settles when an agent is hard-killed.
+[`bin/fm-crew-state.sh`](../bin/fm-crew-state.sh) now corroborates a record-sourced busy verdict per lane; this check is the fleet-wide backstop that notices the whole dead set on its own, with no firstmate turn and no one asking.
+
+It walks every `state/*.meta` whose recorded worktree still exists and whose endpoint is local, and answers for all of them from one bounded read-only `lsof -a -d cwd` scan matched only against those recorded worktree paths - never a per-lane process scan and never a walk of a worktree's file tree.
+[`bin/fm-lane-liveness-lib.sh`](../bin/fm-lane-liveness-lib.sh) owns the rule, including why a pane's idle shell does not count as a live agent.
+It prints one line, only when the dead set is non-empty, naming every dead lane; silence is the healthy answer and the common one.
+A lane is reported dead only on positive evidence - its worktree holds nothing but shells, or nothing at all - so a worktree holding a process the shared vocabulary cannot classify is left alone, and a scan that cannot be trusted is silent, because a false dead verdict is what launches a duplicate agent onto a live worktree.
+
+Arm the check once per home with `bin/fm-fleet-integrity-check.sh arm`, which writes `state/fleet-integrity.check.sh` and binds it with `bin/fm-check-register.sh`, so the watcher polls it on its normal slow-poll cadence.
+`FM_FLEET_INTEGRITY_INTERVAL` (default 300 seconds) sets the self-throttle, and `bin/fm-fleet-integrity-check.sh status` prints the last recorded verdict.
+`bin/fm-fleet-integrity-check.sh disarm` removes the shim, its trust binding, the record, and the stamp.
+
 ## Fleet watchdog (config/watchdog.env)
 
 [`bin/fm-watchdog-worker.sh`](../bin/fm-watchdog-worker.sh) is the fleet's watchdog: a systemd user timer runs one bounded pass every five minutes, outside the firstmate session, and that pass needs no model and no firstmate turn to act.

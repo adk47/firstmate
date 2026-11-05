@@ -79,7 +79,13 @@
 #   4. No run for this crew (pre-validation, or kind=scout): fall back to the
 #      recorded backend's pane busy state, then the status log's last line only
 #      when its verb maps to a recognized run-state. Decision-only events such as
-#      `resolved` never become current state or detail.
+#      `resolved` never become current state or detail. A busy verdict whose
+#      only evidence is a stored state/<id>.busy-state record is corroborated
+#      against a live agent process in the recorded worktree
+#      (bin/fm-lane-liveness-lib.sh) before it may read working: the record
+#      survives a hard kill, so on its own it reports a corpse as working. No
+#      such process reads unknown/stale, and an unreadable process table reads
+#      unknown rather than dead.
 #   5. Missing meta or torn-down worktree: report unknown · none. If no run is
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log. On tmux and herdr, which own a
@@ -121,6 +127,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-busy-lib.sh
 . "$SCRIPT_DIR/fm-busy-lib.sh"
+# shellcheck source=bin/fm-lane-liveness-lib.sh
+. "$SCRIPT_DIR/fm-lane-liveness-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
 # shellcheck source=bin/fm-agent-proc-lib.sh
@@ -833,8 +841,19 @@ fi
 BUSY_VERDICT=''
 if [ "$KIND" != secondmate ] && [ "$HAVE_TARGET" = 1 ]; then
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
+  BUSY_SOURCE=${BUSY_VERDICT#* }
   case "${BUSY_VERDICT%% *}" in
-    busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
+    busy)
+      if fm_busy_source_is_record "$BUSY_SOURCE"; then
+        fm_lane_agent_live_in_worktree "$WT"
+        case $? in
+          0) emit working pane "harness busy ($BUSY_SOURCE)" ;;
+          1) emit unknown pane "busy record with no live agent process in the worktree (stale: $BUSY_SOURCE)" ;;
+          *) emit unknown pane "busy record unconfirmed: cannot read process working directories ($BUSY_SOURCE)" ;;
+        esac
+      fi
+      emit working pane "harness busy ($BUSY_SOURCE)"
+      ;;
     idle) ;;
     *)
       resolve_liveness
