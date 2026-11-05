@@ -15,8 +15,7 @@ whole name, when it has no window part, matches ``firstmate``, ``fm-`` or
 ``ak47-anchor``. A ``session:window`` endpoint is additionally refused unless
 its session is the SA worker session (``SA_TMUX_SESSION``, default
 ``sa-workers``), so a registry row can never reach into firstmate's own tmux
-session even if it were written by hand. The registry ``id`` is checked against
-the same protected patterns.
+session even if it were written by hand.
 
 WHAT IT STOPS. A bare endpoint is a tmux session and is killed with
 ``tmux kill-session -t =<name>``. A ``session:window`` endpoint is one tmux
@@ -108,8 +107,6 @@ def check_row(row: dict) -> tuple[str, str, str]:
     endpoint = str(row.get("endpoint") or "").strip()
     if not worker_id or not backend or not endpoint:
         raise KillError(f"registry row is missing id/backend/endpoint: {canonical(row)}")
-    if is_protected(worker_id):
-        raise KillError(f"refusing worker id {worker_id!r}: it names firstmate or an anchor")
     if backend != "tmux":
         raise KillError(f"refusing worker {worker_id}: unsupported backend {backend!r}")
     if ":" in endpoint:

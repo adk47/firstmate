@@ -1187,6 +1187,12 @@ families_for_changed_path() {
       # resolution in the caller; emit a marker family of __script__
       printf '%s\n' "__script__:$(basename "$path")"
       ;;
+    sa/*)
+      # The SA package's proof lives beside the code it proves
+      # (sa/tests/test_dispatch.sh); tests/sa-dispatch.test.sh is the runner's
+      # discovery entry point for it.
+      printf '%s\n' "__script__:sa-dispatch.test.sh"
+      ;;
     bin/fm-test-run.sh|bin/fm-test-isolation-proof.sh|bin/fm-test-reap-lib.sh)
       # Deliberately the WHOLE family, not just the two contract tests. This
       # runner executes every pure-contract-unit script, so a change to it is
