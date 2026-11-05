@@ -200,6 +200,15 @@ S
   [[ "$output" == *"gateway settled after 20s"*"3 consecutive fast"* ]]
 }
 
+@test "non-numeric min uptime falls back to 900 and does not settle early on uptime alone (pins the min= fallback)" {
+  _runaway_guard
+  printf '200 0.3\n' > "$T/reads"   # health is fast from t=0: only arm (a) can hold the gate
+  export STUB_GAP_AT=0 STUB_UPTIME=100 SMOKE_SETTLE_BUDGET_S=50
+  SMOKE_SETTLE_MIN_UPTIME_S=x run wait_gateway_settled main 18789
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"did not settle within 50s"* ]]
+}
+
 @test "wiring: smoke-test.sh settles main before the mesh gate and check_web_search main" {
   local g m w
   g="$(line_of 'wait_gateway_settled main 18789')"
