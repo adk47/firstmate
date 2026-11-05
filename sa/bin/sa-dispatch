@@ -19,8 +19,8 @@ and a ``mandate.issued`` event carrying ``requester``, ``scope_paths``,
 ``rules_in_force`` and ``expires_at``. ``--dry-run`` performs the gate and prints
 the plan without creating anything. A ticket that already holds a live mandate
 is refused rather than dispatched twice; a ticket whose mandate was revoked (a
-failed attempt) can be retried, because the failed attempt's brief is moved
-aside before the mandate is revoked.
+failed attempt) or has expired can be retried, because the previous attempt's
+brief is moved aside before a fresh one is scaffolded.
 
 MACHINERY. This is a gate in front of firstmate's existing dispatch machinery,
 not a second one: ``bin/fm-brief.sh`` scaffolds the brief and
@@ -249,6 +249,27 @@ def expires_at(hours: float) -> str:
     return moment.strftime(AT_FORMAT)
 
 
+def mandate_deadline(row: dict, ticket: str) -> datetime | None:
+    """Return a mandate's expiry, or None when it carries none."""
+    expires = row.get("expires_at")
+    if not expires:
+        return None
+    try:
+        return parse_at(str(expires))
+    except ValueError as exc:
+        raise DispatchError(
+            f"mandate for {ticket} has a malformed expires_at: {exc}"
+        ) from exc
+
+
+def mandate_is_live(row: dict, ticket: str) -> bool:
+    """True when a mandate is neither revoked nor expired."""
+    if row.get("revoked"):
+        return False
+    deadline = mandate_deadline(row, ticket)
+    return deadline is None or utc_now() <= deadline
+
+
 def build_mandate(ticket_row: dict, scope: list[str], rules: list[str], ttl: float) -> dict:
     """Return the mandate payload design.md §5 gives ``mandate.issued``."""
     return {
@@ -383,11 +404,16 @@ def require_worker_endpoint(endpoint: str) -> None:
         )
 
 
-def quarantine_brief(brief: Path, reason_id: str) -> None:
-    """Move a failed attempt's brief aside so a retry can scaffold a fresh one."""
+def quarantine_brief(brief: Path, reason: str) -> None:
+    """Move a previous attempt's brief aside so a retry can scaffold a fresh one."""
     if not brief.is_file():
         return
-    os.replace(brief, brief.with_name(f"{brief.name}.{reason_id}"))
+    target = brief.with_name(f"{brief.name}.{reason}")
+    index = 1
+    while target.exists():
+        target = brief.with_name(f"{brief.name}.{reason}.{index}")
+        index += 1
+    os.replace(brief, target)
 
 
 def spawn_worker(ticket: str, mode: str, yolo: str, harness: str | None) -> dict:
@@ -460,7 +486,7 @@ def cmd_intake(args: argparse.Namespace) -> int:
         return refuse(ticket, MISSING_REQUESTER, "names no requester")
 
     existing = table("mandates").get(ticket)
-    if isinstance(existing, dict) and not existing.get("revoked"):
+    if isinstance(existing, dict) and mandate_is_live(existing, ticket):
         raise DispatchError(
             f"ticket {ticket} already holds a live mandate issued at "
             f"{existing.get('issued_at')}; refusing to dispatch it twice"
@@ -485,16 +511,21 @@ def cmd_intake(args: argparse.Namespace) -> int:
         print("  dry run: nothing created")
         return EXIT_OK
 
+    if isinstance(existing, dict):
+        quarantine_brief(brief, "superseded")
     brief_path = scaffold_brief(ticket, ticket_row, args.mode, mandate)
     mandate_id = append_event("mandate.issued", ticket, mandate)
     try:
         handles = spawn_worker(ticket, args.mode, args.yolo, args.harness)
         endpoint = handles["window"]
         require_worker_endpoint(endpoint)
-    except DispatchError as exc:
-        revoked = append_event("mandate.revoked", ticket, {"reason": str(exc)})
+    except (DispatchError, OSError, subprocess.SubprocessError) as exc:
+        reason = str(exc) or exc.__class__.__name__
+        revoked = append_event("mandate.revoked", ticket, {"reason": reason})
         quarantine_brief(brief_path, revoked)
-        raise
+        if isinstance(exc, DispatchError):
+            raise
+        raise DispatchError(f"dispatch of {ticket} failed: {reason}") from exc
 
     worktree = handles["worktree"]
     register_worker(ticket, "tmux", endpoint)
@@ -543,17 +574,10 @@ def cmd_check_scope(args: argparse.Namespace) -> int:
     if row.get("revoked"):
         print(f"REVOKED: the mandate for {args.ticket} was revoked")
         return EXIT_OUT_OF_SCOPE
-    expires = row.get("expires_at")
-    if expires:
-        try:
-            deadline = parse_at(str(expires))
-        except ValueError as exc:
-            raise DispatchError(
-                f"mandate for {args.ticket} has a malformed expires_at: {exc}"
-            ) from exc
-        if utc_now() > deadline:
-            print(f"EXPIRED: the mandate for {args.ticket} expired at {deadline}")
-            return EXIT_OUT_OF_SCOPE
+    deadline = mandate_deadline(row, args.ticket)
+    if deadline is not None and utc_now() > deadline:
+        print(f"EXPIRED: the mandate for {args.ticket} expired at {deadline}")
+        return EXIT_OUT_OF_SCOPE
 
     scope = row.get("scope_paths") or []
     if not isinstance(scope, list):

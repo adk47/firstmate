@@ -129,8 +129,8 @@ sa-dispatch check-scope --ticket T --path P            -> exit 0 allowed / exit 
 matching `^(exit|file|grep|http):`, and a ticket that names no `requester`. A refusal
 appends `ticket.refused` carrying the missing question and exits 3. A ticket that already
 holds a live mandate is refused rather than dispatched twice; a ticket whose mandate was
-revoked (a failed attempt) can be retried, because the failed attempt's brief is moved
-aside before the mandate is revoked.
+revoked (a failed attempt) or has expired can be retried, because the previous attempt's
+brief is moved aside before a fresh one is scaffolded.
 
 On pass, one run scaffolds one brief with `bin/fm-brief.sh`, creates one git worktree and
 one worker with `bin/fm-spawn.sh --backend tmux`, and appends `mandate.issued` carrying
@@ -148,7 +148,7 @@ sa-kill [--dry-run] [--registry PATH]                  -> stop every registered 
 ```
 
 `sa-kill` reads `$SA_HOME/workers.json` (the rows `sa-dispatch` writes) and stops each
-registered tmux endpoint by exact name. It refuses any endpoint or id naming `firstmate`,
+registered tmux endpoint by exact name. It refuses any endpoint naming `firstmate`,
 `fm-`, or `ak47-anchor`, and any `session:window` endpoint outside the SA worker session,
 so it can never reach firstmate's own windows. An endpoint that is already gone counts as
 stopped, so the switch is idempotent. Exit codes: 0 all stopped, 2 usage/registry error,
@@ -162,6 +162,7 @@ From a clean clone at the repo root:
 sa/bin/sa-store selftest
 sa/bin/sa-store tables
 python3 -m unittest discover -s sa/tests -v
+sa/tests/test_dispatch.sh
 ```
 
 No install step, no environment variables required. `SA_HOME` defaults to `sa/var`, which

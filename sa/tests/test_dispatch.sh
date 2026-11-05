@@ -106,6 +106,7 @@ FM_SESSION_OWNED=0
 cleanup() {
   tmux kill-session -t "=$SA_TMUX_SESSION" 2>/dev/null || true
   tmux kill-session -t "=sa-test-worker-$$" 2>/dev/null || true
+  tmux kill-session -t "=sa-test-id-$$" 2>/dev/null || true
   if [ "$FM_SESSION_OWNED" = 1 ]; then
     tmux kill-session -t "=firstmate" 2>/dev/null || true
   fi
@@ -262,6 +263,16 @@ assert_exit 4 "check-scope refuses an expired mandate" \
 out=$OUT
 assert_contains "$out" "EXPIRED:" "the expiry refusal is reported"
 
+assert_exit 0 "an expired mandate can be re-dispatched" \
+  "$DISPATCH" intake --ticket T-0031
+out=$OUT
+assert_contains "$out" "DISPATCHED: ticket T-0031" "the re-dispatch reports the ticket"
+[ -f "$SA_HOME/data/T-0031/brief.md.superseded" ] \
+  && ok "the expired attempt's brief was moved aside" \
+  || bad "the expired attempt's brief was moved aside"
+assert_exit 0 "check-scope allows the re-issued mandate" \
+  "$DISPATCH" check-scope --ticket T-0031 --path sa/bin
+
 # ---------------------------------------------------------------------------
 # A failed dispatch revokes its mandate and can be retried.
 # ---------------------------------------------------------------------------
@@ -302,6 +313,21 @@ assert_exit 2 "re-dispatching a live ticket is refused" "$DISPATCH" intake --tic
 out=$OUT
 assert_contains "$out" "already holds a live mandate" \
   "the re-dispatch refusal names the live mandate"
+
+# A spawner that exists but cannot be executed raises OSError, not
+# DispatchError; the mandate must still be revoked so the ticket is retryable.
+NOEXEC="$WORK/noexec-spawn.sh"
+printf '#!/bin/sh\nexit 0\n' >"$NOEXEC"
+chmod -x "$NOEXEC"
+ticket T-0060 '{"command":"echo hello","scope_paths":["sa/bin"]}'
+SA_SPAWN_CMD="$NOEXEC" assert_exit 2 "an unexecutable spawner fails the dispatch" \
+  "$DISPATCH" intake --ticket T-0060
+assert_exit 4 "the unexecutable-spawner failure revoked the mandate" \
+  "$DISPATCH" check-scope --ticket T-0060 --path sa/bin
+out=$OUT
+assert_contains "$out" "REVOKED:" "the revocation is reported after an OSError"
+SA_SPAWN_CMD="$STUB" assert_exit 0 "the ticket is retryable after an OSError" \
+  "$DISPATCH" intake --ticket T-0060
 
 # ---------------------------------------------------------------------------
 section "the kill switch stops SA workers and never touches firstmate"
@@ -346,6 +372,18 @@ for protected in firstmate fm-something ak47-anchor; do
   out=$OUT
   assert_contains "$out" "REFUSED:" "the refusal is reported for '$protected'"
 done
+
+# The registry id is a label, not a safety boundary: a ticket whose id looks
+# protected is still an SA worker when its endpoint is in the SA session.
+id_dummy="sa-test-id-$$"
+tmux new-session -d -s "$id_dummy" || bad "could not create the id-check tmux session"
+printf '[{"id":"fm-spawn-fix","backend":"tmux","endpoint":"%s"}]\n' "$id_dummy" \
+  >"$SA_HOME/workers.json"
+assert_exit 0 "sa-kill stops a worker whose id looks protected" "$KILL"
+out=$OUT
+assert_contains "$out" "STOPPED: fm-spawn-fix" "the protected-looking id is stopped, not refused"
+tmux has-session -t "=$id_dummy" 2>/dev/null && bad "the id-check dummy is gone" \
+  || ok "the id-check dummy is gone"
 
 printf '[{"id":"x","backend":"tmux","endpoint":"firstmate:fm-abc"}]\n' >"$SA_HOME/workers.json"
 assert_exit 6 "sa-kill refuses a window inside firstmate's session" "$KILL"
