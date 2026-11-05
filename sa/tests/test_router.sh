@@ -147,7 +147,8 @@ if [ ! -x "$STORE" ] && [ ! -f "$STORE" ]; then
   store_ok=0
 else
   store_ok=1
-  export SA_HOME="$(mktemp -d)"
+  SA_HOME="$(mktemp -d)"
+  export SA_HOME
   trap 'rm -rf "$SA_HOME"' EXIT
 
   tid="$("$CLI" ticket --title "Router smoke" --body "prove the router can open a ticket" \
