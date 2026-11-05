@@ -1188,6 +1188,7 @@ RAW_LAUNCH=0
 # validation teardown uses, so a malformed, ambiguous, or foreign record
 # refuses here exactly as it refuses there.
 RELAUNCH_PRIOR_HARNESS=
+RELAUNCH_PRIOR_TASK_TMP=
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "${#POS[@]}" -eq 1 ] || {
     echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
@@ -1247,6 +1248,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
+  # A relaunch keeps the temp root the task already recorded, so a task spawned
+  # before the cache-directory move keeps the root its own teardown will remove
+  # instead of stranding it and starting a second one.
+  RELAUNCH_PRIOR_TASK_TMP=$(fm_meta_get "$RELAUNCH_META" tasktmp)
+  case "$RELAUNCH_PRIOR_TASK_TMP" in /*) ;; *) RELAUNCH_PRIOR_TASK_TMP= ;; esac
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
@@ -2920,12 +2926,18 @@ if [ "$KIND" != secondmate ]; then
   esac
 fi
 
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
-# create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
-# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
-# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
-# targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
-TASK_TMP="/tmp/fm-$ID"
+# Per-task temp root: ${XDG_CACHE_HOME:-$HOME/.cache}/fm/<id>/ with Go's build
+# temp nested at gotmp/. It lives under the user's cache directory rather than
+# /tmp because /tmp is wiped at boot, which destroys a live task's scratch
+# mid-run, and on many hosts it is a small tmpfs that a fleet's lane scratch can
+# fill. Go won't create GOTMPDIR, so mkdir before it is used; fm-teardown removes
+# the whole root through the tasktmp= record, so a task spawned before this
+# change keeps cleaning up the /tmp path it recorded, and a relaunch reuses that
+# recorded root rather than stranding it. Nested (not a bare
+# .../gotmp) so other per-task temp can live alongside later, and teardown cleans
+# one deterministic path. GOTMPDIR (not TMPDIR) is the targeted knob: TMPDIR is
+# too broad (affects every program's temp, not just Go's).
+TASK_TMP="${RELAUNCH_PRIOR_TASK_TMP:-${XDG_CACHE_HOME:-$HOME/.cache}/fm/$ID}"
 mkdir -p "$TASK_TMP/gotmp"
 
 # Per-harness turn-end hook where enabled: a file that touches
