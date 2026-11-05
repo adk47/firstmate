@@ -85,6 +85,11 @@
 # away mode alike, so a dead terminal the captain chose to leave dead never
 # re-alarms. Its status log is still read by the signal path, because a line it
 # appends is a genuine state change.
+# A pane whose endpoint is gone has lost the only writer that could ever settle
+# its busy-state record, so that record is retired on the same poll that observes
+# the death (retire_dead_busy_state). This is silent residue cleanup, never a
+# wake: classification already reports a gone endpoint as dead, and the record
+# would otherwise outlive every worker that exits without a teardown.
 # An idle pane whose last output is a transient inference-gateway error is
 # absorbed instead, and re-rung with a bounded continue instruction through the
 # same steering inbox (gateway_stall_check; bin/fm-gateway-retry-lib.sh owns the
@@ -321,6 +326,30 @@ window_is_busy() {  # <window> <tail40>
       "${task:-unknown}" "$STATE" "$tail40")
   fi
   [ "${verdict%% *}" = busy ]
+}
+
+# retire_dead_busy_state: drop a task's busy-state record once its endpoint is
+# gone. The record's only writer is the agent's own adapter wiring, so a worker
+# process that exits without a teardown leaves one stale incarnation behind that
+# nothing can ever clear - classification already reports dead endpoint-gone, so
+# the record is pure residue. Retiring it on the poll that observes the death is
+# what keeps a home from accumulating one per exited worker. The gen is read
+# first and passed explicitly, so a relaunch that armed a fresh incarnation
+# between the liveness read and this call is refused rather than retired
+# (bin/fm-busy-lib.sh owns the record contract; bin/fm-busy-event.sh is the only
+# writer).
+retire_dead_busy_state() {  # <task>
+  local task=$1 gen
+  [ -n "$task" ] || return 0
+  [ -e "$STATE/$task.busy-state" ] || [ -e "$STATE/$task.busy-gen" ] || return 0
+  gen=$(cat "$STATE/$task.busy-gen" 2>/dev/null || true)
+  [ -n "$gen" ] || gen=$(fm_meta_get "$STATE/$task.meta" busy_gen 2>/dev/null || true)
+  if [ -n "$gen" ]; then
+    "$SCRIPT_DIR/fm-busy-event.sh" retire "$STATE" "$task" --gen "$gen" >/dev/null 2>&1 || true
+  else
+    "$SCRIPT_DIR/fm-busy-event.sh" retire "$STATE" "$task" --current-gen >/dev/null 2>&1 || true
+  fi
+  return 0
 }
 
 window_kind() {
@@ -2214,6 +2243,9 @@ EOF
     if ! tail40=$(fm_backend_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" 2>/dev/null); then
       if [ -n "$task" ]; then
         verdict=$(fm_busy_classify_live "$(window_backend "$w")" "$w" "$(window_harness "$w")" "$task" "$STATE" "$(window_label "$w")")
+        # A gone endpoint means the worker process exited, so its busy-state
+        # record can never be settled by its own writer again.
+        case "$verdict" in dead*) retire_dead_busy_state "$task" ;; esac
         if [ "${verdict%% *}" = busy ]; then busy_now=0; else busy_now=1; fi
         inbox_steer_check "$w" "$task" "$busy_now"
       fi
