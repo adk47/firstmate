@@ -9,6 +9,8 @@ setup() {
   mkdir -p "$CVO_ETC" "$HYDRA_ROOT/scripts/lib"
   cat > "$HYDRA_ROOT/scripts/lib/slack-notify.sh" <<'SH'
 slack_notify_critical() { printf '%s\n' "$*" >> "$CALLS.page"; return ${STUB_SLACK_RC:-0}; }
+# the status-returning variant the stale-page marker must use: 0 only on a CONFIRMED post (QA #1796)
+slack_notify_critical_status() { printf '%s\n' "$*" >> "$CALLS.page-confirmed"; return ${STUB_SLACK_CONFIRM_RC:-0}; }
 # the real lib's on-call mention IDs (they live there, so the fixture carries them too)
 SLACK_UID_NICK="U0AL36NADEY"; SLACK_UID_AARON="U7RP6HKUZ"
 # the status-aware poster the reader alarm must use: 0 only on a CONFIRMED post (QA #1758)
@@ -1458,6 +1460,46 @@ EOF
   printf '%s\n' "$DEP" > "$CVO_DEPLOYED_SHA"; : > "$CALLS"; rm -rf "$CVO_OUT_ROOT"
   run -0 "$SCRIPT"
   grep -q "^claim-status .*--check-recipients" "$CALLS"
+}
+
+@test "outbound tick (Fable driver 2026-11-05 14:33Z): a stale claim list pages ONCE per (signed_on, deployed) pair, and a fresh list clears the marker" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  printf '%s\n' "$DEP" > "$CVO_DEPLOYED_SHA"
+  export CVO_CLAIM_LIST="$CVO_STATE.claims.json"
+  rm -f "$CVO_STATE/claim-list-stale-paged" "$CALLS.page-confirmed"
+  stale() { printf '{"generated_at": "x", "signed_on": "%s", "claims": [{"claim_id": 1, "user_id": 5}]}' "$1" > "$CVO_CLAIM_LIST"; }
+  stale "$(printf 'e%.0s' $(seq 40))"
+  run -0 "$SCRIPT"
+  [ "$(grep -c 'list_signed_on_stale' "$CALLS.page-confirmed")" -eq 1 ]  # first tick: one confirmed page
+  : > "$CALLS.page-confirmed"
+  run -0 "$SCRIPT"
+  [ ! -s "$CALLS.page-confirmed" ]                                      # same pair: no second page
+  grep -q "already paged for this pair" "$(newest_tick)"
+  stale "$(printf 'D%.0s' $(seq 40))"
+  run -0 "$SCRIPT"
+  [ "$(grep -c 'list_signed_on_stale' "$CALLS.page-confirmed")" -eq 1 ]  # a different pair pages again
+  stale "$DEP"
+  run -0 "$SCRIPT"
+  [ ! -e "$CVO_STATE/claim-list-stale-paged" ]                          # fresh list clears the marker
+  stale "$(printf 'e%.0s' $(seq 40))"
+  : > "$CALLS.page-confirmed"
+  run -0 "$SCRIPT"
+  [ "$(grep -c 'list_signed_on_stale' "$CALLS.page-confirmed")" -eq 1 ]  # the next stale event pages again
+}
+
+@test "outbound tick (QA #1796 Important 1): a stale-list page Slack did NOT confirm writes no marker and is retried next tick" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  printf '%s\n' "$DEP" > "$CVO_DEPLOYED_SHA"
+  export CVO_CLAIM_LIST="$CVO_STATE.claims.json"
+  rm -f "$CVO_STATE/claim-list-stale-paged" "$CALLS.page-confirmed"
+  printf '{"generated_at": "x", "signed_on": "%s", "claims": [{"claim_id": 1, "user_id": 5}]}' "$(printf 'e%.0s' $(seq 40))" > "$CVO_CLAIM_LIST"
+  STUB_SLACK_CONFIRM_RC=1 run -0 "$SCRIPT"
+  [ ! -e "$CVO_STATE/claim-list-stale-paged" ]                          # a refused post is NOT a page
+  grep -q "page NOT DELIVERED" "$(newest_tick)"
+  : > "$CALLS.page-confirmed"
+  run -0 "$SCRIPT"
+  [ "$(grep -c 'list_signed_on_stale' "$CALLS.page-confirmed")" -eq 1 ]  # the next tick pages again
+  [ -e "$CVO_STATE/claim-list-stale-paged" ]                            # and only then writes the marker
 }
 
 @test "outbound tick (QA #1541): the exclude file holds claimants out of the claim families too; an unreadable claim list kills" {

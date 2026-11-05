@@ -273,6 +273,22 @@ page_confirmed() { # <text>: 0 only when Slack CONFIRMED the post; 1 for a refus
   [ "$rc" = 0 ] || PAGE_WHY="Slack rejected the post (rc=$rc)"
   return "$rc"
 }
+# notify_confirmed <text>: 0 only when Slack CONFIRMED the post. `notify` cannot report a failed page (its last
+# command is the lib's slack_notify_critical, and slack_notify ends `|| true`), so a caller that DEDUPES on a
+# watermark must not use it: a marker written after a silent failure loses that page forever. This asks the lib's
+# status-returning variant and treats an older lib without it as NOT delivered (fail closed). notify() itself is
+# deliberately unchanged in this PR: making it accurate would also change the zero-read page path, which today
+# never takes its "page not delivered -> persist a retry marker" branch - that is a real behaviour change and
+# deserves its own PR and review (Fable driver 2026-11-05 15:51Z).
+notify_confirmed() { # <text>: 0 only on a confirmed post; 1 for a refusal, no credentials, or an older lib
+  local helper="$HYDRA_ROOT/scripts/lib/slack-notify.sh"
+  [ -r "$helper" ] || { PAGE_WHY="no $helper on this host"; return 1; }
+  # shellcheck source=/dev/null
+  . "$helper" || { PAGE_WHY="could not source $helper"; return 1; }
+  declare -F slack_notify_critical_status >/dev/null \
+    || { PAGE_WHY="$helper has no slack_notify_critical_status (delivery unknown)"; return 1; }
+  slack_notify_critical_status "credit-verify-outbound: $*" || { PAGE_WHY="Slack did not confirm the post"; return 1; }
+}
 elapsed() { echo $(( $(date -u +%s) - TICK_T0 )); }
 # QA #1587: every subprocess of a started family runs under the deadline - `bounded` gives it the seconds left before
 # TICK_HARD_S (at least 1) and SIGTERMs it there (SIGKILL 30 s later); rc 124/137 = it hit the deadline
@@ -1155,9 +1171,26 @@ PY
   dep_sha="$(cat "$DEPLOYED_SHA_FILE" 2>/dev/null)" || dep_sha=""
   if ! [[ "$dep_sha" =~ ^[0-9a-f]{40}$ ]] || [ "$cl_signed" != "$dep_sha" ]; then
     log "claim families: list_signed_on_stale - $CLAIM_LIST is signed on ${cl_signed:-(none)}, deployed ${dep_sha:-(unreadable)}; not checked this tick (the claim lane rebuilds it on the deployed head)"
-    page "claim families: list_signed_on_stale (signed on ${cl_signed:0:12}, deployed ${dep_sha:0:12}) - claim list not checked; rebuild it on the deployed head"
+    # Page ONCE per stale pair (signed_on, deployed), not every tick: a list rebuilt 20 minutes later is still
+    # announced, but a head that stays stale for three ticks is one page, not three (Fable driver 2026-11-05
+    # 14:33Z). The marker is written ONLY on a CONFIRMED delivery: `notify` cannot report a failed page (its last
+    # command is the lib's slack_notify_critical, and slack_notify ends `|| true`), so this uses notify_confirmed -
+    # slack_notify_critical_status, the one path that returns 0 only on a post Slack confirmed - and an older lib
+    # without it is NOT delivered. (page_confirmed is the payload-file variant, used by the reader alarm; the two
+    # are legitimately different and both stay.)
+    # A failed page is retried next tick rather than silenced; the marker is cleared the moment the list is fresh
+    # again, so the next stale event pages again (QA on #1796, Important 1).
+    stale_pair="${cl_signed:-(none)} ${dep_sha:-(unreadable)}"
+    if [ "$(cat "$STATE/claim-list-stale-paged" 2>/dev/null)" = "$stale_pair" ]; then
+      log "claim families: list_signed_on_stale already paged for this pair; not paging again"
+    elif notify_confirmed "claim families: list_signed_on_stale (signed on ${cl_signed:0:12}, deployed ${dep_sha:0:12}) - claim list not checked; rebuild it on the deployed head"; then
+      printf '%s\n' "$stale_pair" > "$STATE/claim-list-stale-paged" 2>/dev/null || true
+    else
+      log "claim families: list_signed_on_stale page NOT DELIVERED (${PAGE_WHY:-unknown}); will page again next tick"
+    fi
     return 0
   fi
+  rm -f "$STATE/claim-list-stale-paged" 2>/dev/null || true
   family claim-proof-ask paid "$cl" "$CLAIM_CAP" claim-proof-ask || return 1
   family claim-status paid "$cl" "$CLAIM_CAP" claim-status || return 1
   family claim-proof-ask free "$cl" "$CLAIM_CAP" claim-proof-ask || return 1
