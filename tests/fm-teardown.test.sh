@@ -3974,7 +3974,7 @@ test_orca_path_miss_falls_back_to_guarded_git_release() {
   cat > "$case_dir/fakebin/orca" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
-  "worktree rm") printf '{"ok":false,"error":{"code":"selector_not_found","message":"No worktree matches selector path"}}\n'; exit 0 ;;
+  "worktree rm") printf '{"ok":false,"error":{"code":"selector_not_found","message":"No worktree matches selector path"}}\n'; exit 1 ;;
 esac
 exit 0
 SH
@@ -4000,7 +4000,7 @@ test_orca_non_selector_failure_refuses_instead_of_plain_git_fallback() {
   cat > "$case_dir/fakebin/orca" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
-  "worktree rm") printf '{"ok":false,"error":{"code":"app_not_running","message":"Orca app is not running"}}\n'; exit 0 ;;
+  "worktree rm") printf '{"ok":false,"error":{"code":"app_not_running","message":"Orca app is not running"}}\n'; exit 1 ;;
 esac
 exit 0
 SH
@@ -4016,6 +4016,34 @@ SH
   assert_present "$wt" \
     "orca-non-selector-failure: the worktree was released despite the refusal"
   pass "a non-registry-miss Orca failure refuses instead of falling back to a plain git release"
+}
+
+# A failed Orca call that prints nothing is not proof of removal. Treating empty
+# output as success would drop the branch and the records for a worktree Orca
+# never released, so it must refuse like any other unproven failure.
+test_orca_empty_failure_output_refuses_instead_of_success() {
+  local case_dir rc wt
+  case_dir=$(make_case orca-empty-output)
+  wt=$(write_orca_workspace_case "$case_dir")
+  cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "worktree rm") exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "orca-empty-output: an Orca failure with no output must refuse"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'refusing to fall back to a plain git release' "$case_dir/stderr" \
+    "orca-empty-output: the refusal did not explain why the git fallback was refused"
+  assert_grep 'returned no output' "$case_dir/stderr" \
+    "orca-empty-output: the refusal did not name the empty output"
+  assert_present "$wt" \
+    "orca-empty-output: the worktree was released despite the failed Orca call"
+  pass "an Orca failure with empty output refuses instead of counting as a successful removal"
 }
 
 # The pool probe merges an external tool's stdout and stderr, so a whitespace-only
@@ -4514,6 +4542,7 @@ test_plain_git_release_refuses_initialized_submodule
 test_orca_workspace_path_routes_release_to_orca
 test_orca_path_miss_falls_back_to_guarded_git_release
 test_orca_non_selector_failure_refuses_instead_of_plain_git_fallback
+test_orca_empty_failure_output_refuses_instead_of_success
 test_whitespace_only_pool_listing_row_is_classified
 test_pool_listing_does_not_claim_a_longer_sibling_path
 test_unresolvable_home_relative_pool_listing_refuses_before_killing_the_agent

@@ -1689,21 +1689,22 @@ restore_worktree_branch() {  # <worktree> <branch>
 # so a path selector can miss; callers fall back to a guarded plain git release.
 # An ok:false answer prints the error code and the rendered error on two stdout
 # lines so the caller can branch on the parsed code, never on the prose message.
+# Orca prints that envelope on stdout while exiting nonzero, so stdout is captured
+# regardless of exit status and only the envelope decides the outcome; empty or
+# unparseable output is a failure, never an implicit successful removal.
 fm_backend_orca_remove_worktree_by_path() {  # <worktree>
-  local wt=${1:-} out code msg
+  local wt=${1:-} out code msg=
   [ -n "$wt" ] || {
     echo "error: missing worktree path; cannot remove Orca worktree" >&2
     return 1
   }
   fm_backend_source orca >/dev/null 2>&1 || return 1
-  out=$(orca worktree rm --worktree "path:$wt" --force --json 2>/dev/null) || {
-    echo "error: orca worktree rm exited nonzero for $wt" >&2
-    return 1
-  }
-  if msg=$(printf '%s' "$out" | fm_backend_orca_json_ok 2>&1); then
+  out=$(orca worktree rm --worktree "path:$wt" --force --json 2>/dev/null || true)
+  if [ -n "$out" ] && msg=$(printf '%s' "$out" | fm_backend_orca_json_ok 2>&1); then
     return 0
   fi
   code=$(printf '%s' "$out" | fm_backend_orca_json_error_code 2>/dev/null || true)
+  [ -n "$msg" ] || msg="orca worktree rm for $wt returned ${out:-no output}"
   printf '%s\n%s\n' "$code" "$msg"
   return 1
 }
