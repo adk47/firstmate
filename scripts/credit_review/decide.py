@@ -96,6 +96,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from . import account_gate, doc_approve
 from . import admin as admin_api
 from . import dsp_gate, proof_parts
 from .evidence import (
@@ -123,6 +124,14 @@ from .roles import ONE_PERSON_FAMILIES, editorial_terms, family_of, is_editorial
 from .runner import log
 
 AUTOMATION = "credit-trust-decide"
+# [key=doc-approval-doctrine] Fable 2026-11-03 19:3xZ (under Aaron's 11-03 delegation): a dv-4
+# forged-checked document may approve a T0/T1 credit without a DSP anchor. That class is a SEPARATE
+# registry entry, because it is narrower than this automation (which stays approved=false): apply
+# mode may therefore run on the doc class alone, and then ONLY doc-verified rows may write.
+DOC_AUTOMATION = "doc-verified-t0t1"
+DOC_STORE = Path(os.environ.get("CREDIT_DOC_VERIFY_STORE", doc_approve.DEFAULT_DOC_STORE))
+DOC_PROOF_STORE = Path(os.environ.get("CREDIT_PROOF_STORE", doc_approve.DEFAULT_PROOF_STORE))
+DOC_APPROVE_KILL = Path(os.environ.get("CREDIT_DOC_APPROVE_KILL_SWITCH", "/etc/hydra/doc-approve.disabled"))
 REQUESTER = "credit-trust-decide@hydra-ops"
 ADMIN_IDENTITY = "credit-decider"     # muso-admin-api.sh MUSO_ADMIN_IDENTITY: this automation's own admin login
 CONDITIONAL_PATH = "/admin/credit-requests/conditional-status"
@@ -215,6 +224,35 @@ class Policy:
                    max_rows_per_run=int(d.get("max_rows_per_run") or 500),
                    max_approvals_per_user_per_day=int(d.get("max_approvals_per_user_per_day") or 200),
                    max_ask_users_per_day=_nonneg_int(d.get("max_ask_users_per_day", 100), "max_ask_users_per_day"))
+
+
+def doc_class_approved(path: Path | None = None) -> tuple[bool, str]:
+    """(approved, why) for the doc-verified T0/T1 class only [key=doc-approval-doctrine]."""
+    path = path or REGISTRY
+    try:
+        entry = json.loads(Path(path).read_text(encoding="utf-8"))["automations"][DOC_AUTOMATION]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return False, f"registry unreadable or has no {DOC_AUTOMATION} entry: {exc}"
+    if entry.get("approved") is not True:
+        return False, f"{DOC_AUTOMATION} is approved=false in {path}"
+    if not str(entry.get("approved_by") or "").strip() or not str(entry.get("approval_ref") or "").strip():
+        return False, f"{DOC_AUTOMATION} has no approved_by / approval_ref"
+    return True, f"approved by {entry['approved_by']}"
+
+
+def doc_class_active(path: Path | None = None, kill: Path | None = None) -> tuple[bool, str]:
+    """(may-this-run-consider-a-document, why) - the ONE place the class turns on.
+
+    Dormant unless the captain's approval is ON FILE for `doc-verified-t0t1` (PR B) and the kill switch is absent.
+    Dormant means: the doc-verify stores are not opened, no log line claims the class is on, no row is written - so a
+    repo state without the registry entry behaves exactly as it did before this code existed."""
+    ok, why = doc_class_approved(path)
+    if not ok:
+        return False, why
+    kill = kill or DOC_APPROVE_KILL
+    if Path(kill).exists():
+        return False, f"kill switch {kill}"
+    return True, why
 
 
 def registry_approved(path: Path | None = None) -> tuple[bool, str]:
@@ -1007,6 +1045,30 @@ def provisional_cap_at_write(db: sqlite3.Connection, res: "RunResult", ids: list
     return keep
 
 
+def _ledger_owners(db: sqlite3.Connection, request_ids: list[str]) -> dict[str, Any]:
+    """request id -> the account the ledger last decided it for (bound requests OUTSIDE this batch).
+
+    `gate_one_request` needs the owner of every request a document binds, and a per-user rollover puts
+    yesterday's 25 approvals outside today's batch: building `req_users` from the batch alone made the
+    survivor's bindings look ownerless and refused it for ever. The ledger recorded core's account for
+    each of them on the day it was decided, so it is the authoritative filler; an id with no row stays
+    unknown, which the gate fails closed on.
+    """
+    ids = [i for i in request_ids if i]
+    if not ids:
+        return {}
+    out: dict[str, Any] = {}
+    try:
+        rows = db.execute("SELECT request_id, user_id FROM decisions WHERE LOWER(request_id) IN (%s)"
+                          " ORDER BY id" % ",".join("?" * len(ids)), ids).fetchall()
+    except sqlite3.Error:
+        return out
+    for rid, uid in rows:
+        if uid is not None:
+            out[str(rid).lower()] = uid
+    return out
+
+
 def order_rows(rows: list[dict[str, Any]], paying: frozenset[int] | None,
                now: datetime | None = None) -> list[dict[str, Any]]:
     """PAID > 24h, then PAID < 24h, then FREE; oldest-created first inside each (Fable
@@ -1197,6 +1259,59 @@ def write_chunk(writer: Writer, readback: Readback, status: str, chunk: list[str
         return {rid: status if rid in committed else f"{prefix}{err}"[:200] for rid in chunk}, err
 
 
+def group_by_user(ids: list[str], user_of: dict[str, int]) -> list[str]:
+    """The same ids with each user's requests ADJACENT (first-seen user order preserved).
+
+    QA #1684 round 7, finding 2: the doc pass planned in the ruling's user order, but the write list was
+    rebuilt from the request-sorted `decisions`, so one person's credits could be separated - and the
+    requester notice is emitted per conditional PUT. A user whose credits straddled a chunk boundary was
+    told TWICE. Grouping here means the notice can list them together, as the ruling requires.
+    """
+    order: list[int] = []
+    buckets: dict[int, list[str]] = {}
+    for rid in ids:
+        u = user_of.get(rid) if isinstance(user_of, dict) else None
+        u = id(u) if u is None else u
+        if u not in buckets:
+            buckets[u] = []
+            order.append(u)
+        buckets[u].append(rid)
+    return [rid for u in order for rid in buckets[u]]
+
+
+def chunks_by_user(ids: list[str], user_of: dict[str, int], size: int) -> list[list[str]]:
+    """Cut an id list into PUT-sized chunks that NEVER split a user's run (unless it alone exceeds `size`).
+
+    The reason is the same one: core's requester notice is grouped per PUT, so a split run is a second
+    notice to the same person. A user block that does not fit the current chunk starts the next one.
+    """
+    out: list[list[str]] = []
+    cur: list[str] = []
+    for u, block in _runs(ids, user_of):
+        if cur and len(cur) + len(block) > size:
+            out.append(cur)
+            cur = []
+        if len(block) > size:                       # a single user over the PUT size: split it
+            out.extend(block[i:i + size] for i in range(0, len(block), size))
+            continue
+        cur.extend(block)
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _runs(ids: list[str], user_of: dict[str, int]) -> list[tuple[Any, list[str]]]:
+    runs: list[tuple[Any, list[str]]] = []
+    for rid in ids:
+        u = user_of.get(rid) if isinstance(user_of, dict) else None
+        u = id(u) if u is None else u
+        if runs and runs[-1][0] == u:
+            runs[-1][1].append(rid)
+        else:
+            runs.append((u, [rid]))
+    return runs
+
+
 def outcomes_of(body: dict[str, Any], ids: list[str], status: str) -> dict[str, str]:
     data = body.get("data") if isinstance(body.get("data"), dict) else body
     updated = set(data.get("updatedIds") or [])
@@ -1243,6 +1358,9 @@ class RunResult:
     paid_calls: int = 0
     jev_calls: int = 0
     held: int = 0
+    doc_approved: int = 0
+    doc_indeterminate: int = 0        # core may have committed; counted, not proof, a human reconciles
+    doc_refused_by_core: int = 0      # eligible documents whose row core's own agent guard would refuse
     support_candidates: int = 0
     held_proof: int = 0
     held_stage2_ask: int = 0
@@ -1274,6 +1392,10 @@ class RunResult:
                 f"{self.deferred_window} deferred for the per-user 24h window, {self.deferred_ask_cap} deferred by the "
                 f"daily ask cap, {self.deferred_proof_unknown} deferred "
                 f"(proof status unknown), {self.support} {'would be sent' if self.mode in ('shadow', 'judge') else 'sent'}."
+                + (f" {self.doc_approved} approved by a dv-4 verified document (provisional "
+                   f"{doc_approve.PROVISIONAL_DAYS}d)." if self.doc_approved else "")
+                + (f" {self.doc_indeterminate} doc approval(s) INDETERMINATE (core may have committed; "
+                   "reconcile before releasing)." if self.doc_indeterminate else "")
                 + (f" {self.note}" if self.note else "")
                 + (f" WRITE ERRORS: {'; '.join(self.write_errors)[:400]}" if self.write_errors else ""))
 
@@ -1322,11 +1444,29 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
     now = now or datetime.now(timezone.utc)
     t0 = time.monotonic()
     res = RunResult(run_id=now.strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6], mode=mode)
+    doc_only = False
     if mode == "apply":
         ok, why = registry_approved()
         if not ok:
-            res.mode, res.note = "shadow", f"APPLY REFUSED ({why}): ran as shadow, nothing written."
-            mode = "shadow"
+            dok, dwhy = doc_class_active()          # a killed class does not license a doc-only apply either
+            if dok:
+                # Narrower class only: apply, but every non-doc-verify approval is held below.
+                doc_only = True
+                res.note = (f"apply: only {DOC_AUTOMATION} rows may write ({dwhy}); {AUTOMATION}: {why}.")
+                log(f"decide: {res.note}")
+            else:
+                res.mode, res.note = "shadow", f"APPLY REFUSED ({why}): ran as shadow, nothing written."
+                mode = "shadow"
+    # [key=doc-approval-doctrine] The class is DORMANT until the captain's approval is on file for it: no store
+    # read, no log line, no row. A registry with no `doc-verified-t0t1` entry (every repo state before PR B, and
+    # every test that runs the decider without one) therefore behaves exactly as it did before this code existed -
+    # which is what keeps the existing "the decider says nothing on this path" assertions true.
+    doc_enabled, doc_why = doc_class_active()
+    if doc_enabled and mode in ("shadow", "apply", "judge"):
+        log(f"decide: doc-approve class on ({doc_why}): dv-4 verified documents may approve T0/T1 credits "
+            "without a DSP anchor (Fable 2026-11-03)")
+    elif doc_enabled is False and "kill switch" in doc_why and mode == "apply":
+        log(f"decide: doc-approve class OFF (kill switch {DOC_APPROVE_KILL}): no document may approve this run")
     skip = skipped_this_run(db, now, mode)
     paying, unknown_why = paying_users(now=now)
     if unknown_why:
@@ -1438,9 +1578,136 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
                                             paying, now), str((req_by_id.get(d.request_id) or {}).get("createdAt") or "")))
 
     needs_proof = doc_required_ids(db)
+    # [key=doc-approval-doctrine] the documents that may approve without a DSP anchor: only the ones
+    # whose standing dv-4 verdict is verified and which a filing attributes to EXACTLY ONE request.
+    doc_docs: dict[str, tuple[doc_approve.Doc, ...]] = {}
+    doc_refs: dict[str, str] = {}
+    doc_gate = account_gate.Cached()
+    if doc_enabled:
+        try:
+            doc_approve.ensure_schema(db)
+            doc_docs = {rid: tuple(ds) for rid, ds in doc_approve.verified_docs(DOC_STORE, DOC_PROOF_STORE).items()}
+            doc_refs = doc_approve.approved_refs(db, doc_store=DOC_STORE, now=now)
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            # never an approval on an unreadable store: the class simply does not fire this run
+            doc_docs, doc_refs = {}, {}
+            res.note = (res.note + " " if res.note else "") + f"doc-approve store unreadable: {str(exc)[:160]}"
+            log(f"decide: {res.note}")
+    hold_users = set(policy.deny_user_ids) | set(policy.deny_profile_ids)
+
+    def _doc_holds(d: Decision) -> tuple[list[str], list[Any]]:
+        return ([d.request_id.lower()] if d.user_id in hold_users else [],
+                [d.user_id] if d.user_id in hold_users else [])
+
+    # PHASE A: WHICH requests a verified document may re-decide - and NOTHING is written here (QA #1684
+    # findings 1+2). Two shapes only, both of which the ruling covers:
+    #   (a) the decider WANTED to approve and the request is documentation-required, so the document IS
+    #       the documentation; and
+    #   (b) the web check found nothing either way (NOT_FOUND) - the "no same-run DSP anchor" case. Such a
+    #       row is a `support` ask today, so evaluating documents only after `decision == "approve"` meant
+    #       document-only approval could never fire at all.
+    # A row refused by a pre-model rule (deny list, big track, validator conflict, red flag) never carries
+    # web_verdict NOT_FOUND; a CONTRADICTED verdict is NOT_FOUND's opposite and is never convertible.
+    doc_pending: dict[str, tuple[doc_approve.Candidate, doc_approve.Approval, Decision]] = {}
+    if doc_enabled:
+        # `paid_first_oldest` AT THE USER GRANULARITY (QA #1684 round 5, finding 1): iterating `decisions`
+        # sorts each request by ITS OWN age, so a person's second credit sits behind someone else and the
+        # 50th slot can go to that someone. A user sorts by their OLDEST waiting request, so a person's
+        # credits are adjacent and are approved together - which is also what makes the told-once notice
+        # true - and their remaining credits can still spend the slot already counted for them.
+        oldest: dict[Any, str] = {}
+        created: dict[str, str] = {}
+        for d in decisions:
+            cr = str((req_by_id.get(d.request_id) or {}).get("createdAt") or "")
+            created[d.request_id.lower()] = cr
+            cur = oldest.get(d.user_id)
+            if cur is None or (cr and cr < cur):
+                oldest[d.user_id] = cr
+        doc_order = sorted(
+            (d for d in decisions if d.request_id.lower() in doc_docs),
+            key=lambda d: (doc_approve.order_key(d.user_id, oldest.get(d.user_id),
+                                                 paid_tier=lambda u, c: paid_tier(u, c, paying, now)),
+                           created.get(d.request_id.lower(), ""), d.request_id.lower()))
+        # QA #1684 round 8, finding 1: `gate_one_request` needs the owner of EVERY request a document
+        # binds, not just the ones in THIS batch. Building it from `req_by_id` alone wedged the rollover:
+        # a filing binding 26 requests for one user spends 25 today, and tomorrow's batch no longer
+        # contains those 25, so the remaining request's bindings looked ownerless and were refused for
+        # ever. The doc store judged every one of those requests and recorded its account, so it is the
+        # authoritative filler; a binding with no owner anywhere is still an unknown owner and still
+        # fails closed.
+        by_lower = {str(r).lower(): u for r, u in req_by_id.items()}
+        owners: dict[str, Any] = {r: (u or {}).get("userId") for r, u in by_lower.items()}
+        bound = {str(i).lower() for docs in doc_docs.values() for doc in docs for i in doc.candidate_ids}
+        missing = sorted(b for b in bound if owners.get(b) is None)
+        if missing:
+            # the ledger already decided every one of these requests on some earlier day, and its
+            # `decisions` row carries the account core reported; the doc store is the second source
+            try:
+                owners.update(_ledger_owners(db, missing))
+            except Exception as exc:  # noqa: BLE001 - unreadable owners stay unknown: fail closed
+                log(f"decide: doc-approve could not read bound-request owners from the ledger ({exc})")
+            still = sorted(b for b in missing if owners.get(b) is None)
+            if still:
+                try:
+                    owners.update(doc_approve.owners_in_store(DOC_STORE, still))
+                except Exception as exc:  # noqa: BLE001 - unreadable owners stay unknown: fail closed
+                    log(f"decide: doc-approve could not read bound-request owners ({exc}): those bindings "
+                        "fail closed")
+        for d in doc_order:
+            rid = d.request_id.lower()
+            if rid not in doc_docs:
+                continue
+            if not ((d.decision == "approve" and rid in needs_proof)
+                    or (d.decision == "support" and d.web_verdict == "NOT_FOUND")):
+                continue
+            c = doc_approve.Candidate(rid, d.user_id, d.popularity, doc_docs[rid])
+            hids, husers = _doc_holds(d)
+            # the ruling's `paid_first_oldest`: a person's own requests are adjacent, so the 50 user
+            # slots are spent on paid, longest-waiting accounts first - and a person's several credits
+            # are approved in one pass.
+            ap, answers = doc_approve.plan(c, db, doc_store=DOC_STORE, gate=doc_gate, hold_ids=hids,
+                                           hold_users=husers, now=now,
+                                           req_users=owners)
+            if ap is None:
+                refusal = answers[-1] if answers else None
+                log(f"decide: doc-approve {d.request_id} refused by "
+                    f"{getattr(refusal, 'name', 'no gate')}: {getattr(refusal, 'why', '')}")
+                continue
+            # QA #1684 round 8, finding 2: the mirror of core's agent guard is the authority on what an
+            # approval PUT may write, and a document does not change core's answer - the ref lives in our
+            # ledger, never in core, and the PUT carries no proof. Planning an approval the mirror refuses
+            # only demoted it later, so the class's claim and the run report both overstated coverage.
+            # Refuse it HERE, by name, and leave the row to the guard that already explains it.
+            core_refusal = server_approval_refusal(by_lower.get(rid) or {})
+            if core_refusal:
+                res.doc_refused_by_core += 1
+                # QA #1684 round 9: the class must not CLAIM what core will not accept. The row is held
+                # with the document and the refusal both named, so the ledger says why a verified
+                # document did not become a credit - and nobody is asked for a document they already
+                # sent (a `support` ask here would be exactly that).
+                _set(d, "hold", f"a dv-4 verified document ({ap.ref}) exists, but core's agent guard would "
+                     f"refuse this approval ({','.join(core_refusal)}): the document is recorded in our "
+                     "ledger, not in core, so a human decides")
+                log(f"decide: doc-approve {d.request_id} not planned: core's agent guard would refuse this "
+                    f"approval ({','.join(core_refusal)}) - the document is recorded in our ledger, not in core")
+                continue
+            doc_pending[rid] = (c, ap, d)
+            _set(d, "approve", f"dv-4 verified document {ap.ref} (popularity {ap.popularity}, {ap.tier}): "
+                 f"no same-run DSP anchor needed for a T0/T1 credit (Fable 2026-11-03)")
+            d.evidence_kind = doc_approve.DOC_KIND
+            d.proof_id = ap.ref
+            log(f"decide: doc-approve {d.request_id} planned ({ap.tier}, popularity {ap.popularity}, "
+                f"{ap.intake_id}) - dv-4 verified document, provisional {doc_approve.PROVISIONAL_DAYS} days")
+
     for d in decisions:
         if d.decision == "approve" and d.request_id.lower() in needs_proof:
-            ref = proof.approved_refs.get(d.request_id.lower()) if proof is not None else None
+            rid = d.request_id.lower()
+            if rid in doc_pending:
+                continue              # a document is about to approve this: nothing to hold for proof
+            ref = proof.approved_refs.get(rid) if proof is not None else None
+            if not ref and rid in doc_refs:
+                ref = doc_refs[rid]
+                d.evidence_kind = d.evidence_kind or doc_approve.DOC_KIND
             if ref:
                 d.proof_id = ref
             elif proof is None:
@@ -1481,6 +1748,16 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
             else:
                 counts[d.user_id] = counts.get(d.user_id, 0) + 1
 
+    if doc_only:
+        # The doc class is the ONLY approved writer: everything else this run wanted to WRITE is held for
+        # a human, in the ledger, before any write. QA #1684 finding 3: that includes the `support` asks -
+        # leaving them intact meant an unrelated NOT_FOUND user still received a document ask under a
+        # grant that only authorises doc-verify approvals.
+        for d in decisions:
+            if d.decision in ("approve", "support") and not (
+                    d.decision == "approve" and d.evidence_kind == doc_approve.DOC_KIND):
+                _set(d, "hold", f"{AUTOMATION} is approved=false and only {DOC_AUTOMATION} rows may write: "
+                     f"a {d.decision} is held for a human")
     filter_support(db, decisions, res, proof, proof_why, now, policy.max_ask_users_per_day)
     if mode != "apply":
         for d in decisions:
@@ -1488,6 +1765,25 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
     transition = proof_status_transition(db, mode, proof_why)
     if transition:
         res.note = (res.note + " " if res.note else "") + transition
+
+    # PHASE B: COMMIT the doc approvals that survived EVERY guard above (server refusal, per-user cap,
+    # doc-only hold). The row is written before the core PUT because the ref is what that PUT relies on;
+    # if the PUT does not confirm, `write_ids` RELEASES the row again (QA #1684 finding 2), so no phantom
+    # approval can stand in for a credit that was never approved.
+    for rid, (c, ap, d) in doc_pending.items():
+        if d.decision != "approve" or d.evidence_kind != doc_approve.DOC_KIND:
+            log(f"decide: doc-approve {d.request_id} not committed: a later guard set {d.decision}")
+            continue
+        hids, husers = _doc_holds(d)
+        got, answers = doc_approve.approve(c, db, doc_store=DOC_STORE, gate=doc_gate, hold_ids=hids,
+                                           hold_users=husers, now=now, mode=mode)
+        if got is None:
+            refusal = answers[-1] if answers else None
+            _set(d, "hold", f"doc approval refused at the write boundary "
+                 f"({getattr(refusal, 'name', 'no gate')}: {getattr(refusal, 'why', '')}): human review")
+            log(f"decide: doc-approve {d.request_id} refused at commit")
+            continue
+        res.doc_approved += 1
 
     # Ledger BEFORE any write.
     for d in decisions:
@@ -1526,14 +1822,48 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
             elif out.startswith("skipped:"):
                 k = out.split(":", 1)[1]
                 res.skipped_by_server[k] = res.skipped_by_server.get(k, 0) + 1
+            if action == "approve" and out != status and rid.lower() in doc_pending:
+                if out.startswith("error:unverified:"):
+                    # QA #1684 round 7, finding 1: the PUT failed AND the readback failed, so core may
+                    # have COMMITTED this credit. Releasing would delete the only record standing behind
+                    # a live credit and hand the slot back for a second approval, so the row is held as
+                    # `indeterminate` - still counted, no longer served as proof - for a human to
+                    # reconcile against core's status.
+                    if doc_approve.mark_indeterminate(db, rid.lower(),
+                                                      reason=f"core write outcome unknown ({out}); "
+                                                             "reconcile against core before releasing"):
+                        res.doc_approved -= 1     # it is reported as indeterminate, never double-counted
+                        res.doc_indeterminate += 1
+                        log(f"decide: doc-approve {rid} is INDETERMINATE: the core write outcome is unknown ({out})")
+                # the credit was NOT approved: give the doc slot back rather than leave a phantom row
+                elif doc_approve.release(db, rid.lower(), reason=f"core write did not confirm ({out})"[:300]):
+                    res.doc_approved -= 1
+                    log(f"decide: doc-approve {rid} released: the core write did not confirm ({out})")
+        # a chunk that failed before the server named any row: nothing was confirmed, so nothing stands
+        for rid in chunk:
+            if rid.lower() in doc_pending and rid not in outs:
+                if err and "readback failed" in str(err):
+                    # same indeterminacy one level up: the batch never named a row and the readback that
+                    # would have settled it also failed, so this row's outcome is UNKNOWN, not a refusal
+                    if doc_approve.mark_indeterminate(db, rid.lower(),
+                                                      reason=f"core write outcome unknown ({err}); "
+                                                             "reconcile against core before releasing"):
+                        res.doc_approved -= 1
+                        res.doc_indeterminate += 1
+                        log(f"decide: doc-approve {rid} is INDETERMINATE: outcome unknown ({err})")
+                elif doc_approve.release(db, rid.lower(), reason=f"no write outcome for this row ({err})"[:300]):
+                    res.doc_approved -= 1
+                    log(f"decide: doc-approve {rid} released: the write confirmed nothing ({err})")
 
     provisional = {d.request_id for d in decisions if d.decision == "approve" and d.evidence_kind == PROVISIONAL_KIND}
     with write_lock():
         # The per-user provisional cap is re-checked here, under the lock, against what is
         # already WRITTEN on the UTC day of each batch (approvals booked by any run).
-        pending_ap = list(approve_ids)
+        # QA #1684 round 7, finding 2: one person's credits are adjacent AND stay in ONE PUT, because
+        # core's requester notice groups per PUT - the ruling says the requester is told ONCE, listing them.
+        pending_ap = list(chunks_by_user(group_by_user(approve_ids, user_of), user_of, BATCH))
         while pending_ap:
-            chunk, pending_ap = pending_ap[:BATCH], pending_ap[BATCH:]
+            chunk, pending_ap = pending_ap[0], pending_ap[1:]
             chunk = provisional_cap_at_write(db, res, chunk, user_of, provisional, clock())
             if chunk:
                 write_ids("approve", APPROVED, chunk)

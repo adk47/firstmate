@@ -400,6 +400,27 @@ def cmd_provisional_review(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_doc_approvals(args: argparse.Namespace) -> int:
+    """[key=doc-approval-doctrine] the doc-verified approval class: the read-back Fable asked for
+    before the executor runs the next request, plus the 7-day provisional sweep. Never approves
+    anything itself - decide.py is the only writer of a doc approval."""
+    from credit_review import decide, doc_approve
+    db = Ledger(args.ledger).db
+    doc_approve.ensure_schema(db)
+    if args.pull:
+        for t in doc_approve.sweep(db, doc_store=decide.DOC_STORE):
+            print(json.dumps({"request_id": t.request_id, "user_id": t.user_id, "intake_id": t.intake_id,
+                              "was": t.was, "now": t.now, "reason": t.reason}, ensure_ascii=False))
+        if not args.list:
+            return 0
+    rows = doc_approve.rows_for(db, args.user)
+    for row in rows:
+        print(json.dumps(row, ensure_ascii=False, default=str))
+    log(f"doc-approvals: {len(rows)} row(s)" + (f" for user {args.user}" if args.user else "")
+        + f"; class registry: {decide.doc_class_approved()[1]}")
+    return 0
+
+
 def cmd_provisional_tracker(args: argparse.Namespace) -> int:
     """Daily: every provisional credit's backup clock (7 days from the delivered ask), due/overdue,
     the day-N route, and the backup_ask_undelivered watchdog (credit_review/provisional_tracker.py;
@@ -1059,6 +1080,14 @@ def parser() -> argparse.ArgumentParser:
     ex = sub.add_parser("explain", help="every decision + server outcome for one credit request")
     ex.add_argument("request_id")
     ex.set_defaults(fn=cmd_explain)
+
+    da = sub.add_parser("doc-approvals", help="[key=doc-approval-doctrine] doc-verified T0/T1 approvals: "
+                                               "the read-back + the 7-day provisional sweep (never approves)")
+    da.add_argument("--user", type=int, default=None, help="only this account's rows")
+    da.add_argument("--pull", action="store_true", help="sweep the provisional clock (confirm at day 7, pull a "
+                                                        "contradicted/forged verdict)")
+    da.add_argument("--list", action="store_true", help="list the rows too (default with --pull)")
+    da.set_defaults(fn=cmd_doc_approvals)
 
     pr = sub.add_parser("provisional-review",
                         help="Ops review list: paid provisional approvals unconfirmed after N days (read-only)")

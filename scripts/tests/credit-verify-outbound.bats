@@ -9,6 +9,10 @@ setup() {
   mkdir -p "$CVO_ETC" "$HYDRA_ROOT/scripts/lib"
   cat > "$HYDRA_ROOT/scripts/lib/slack-notify.sh" <<'SH'
 slack_notify_critical() { printf '%s\n' "$*" >> "$CALLS.page"; return ${STUB_SLACK_RC:-0}; }
+# the real lib's on-call mention IDs (they live there, so the fixture carries them too)
+SLACK_UID_NICK="U0AL36NADEY"; SLACK_UID_AARON="U7RP6HKUZ"
+# the status-aware poster the reader alarm must use: 0 only on a CONFIRMED post (QA #1758)
+slack_notify_payload_file_status() { cat "$1" >> "$CALLS.page-confirmed"; return ${STUB_SLACK_CONFIRM_RC:-0}; }
 SH
   export CALLS="$TEST_TMPDIR/calls.log"; : > "$CALLS"
   export CVO_TICK_HARD_S=999999 CVO_CHECK_S_PER_USER=0 CVO_RESERVE_PAD_S=0   # the deadline rails have their own tests
@@ -184,7 +188,8 @@ newest_tick() { printf '%s' "$(newest_out)tick.log"; }
   evil=(HYDRA_ROOT="$E" CVO_ETC="$E/etc" CVO_STATE="$E/state" PY_BIN="$E/py" CVO_RUNNER="$E/r" CVO_OWING="$E/o" CVO_RECEIPTS="$E/rc"
         CVO_HEALTH="$E/h" CVO_ZERO_READ="$E/z" CVO_FRAUD="$E/f" CVO_MAIN_ENV="$E/env" CVO_LEDGER="$E/l.sqlite3" CVO_SCRIPTS="$E/s"
         CVO_RD_SCAN="$E/rd" CVO_RD_CAP=99999 CVO_POLICY="$E/p.json" CVO_CLAIM_LIST="$E/c.json" CVO_CAP=99999 CVO_R1_CAP=99999
-        CVO_CLAIM_CAP=99999 CVO_REFUSAL_SPIKE=1.0 CVO_DOW=9 CVO_NEED_RUNNER="$E/n" CVO_UNSIGNED_ALL=1 CVO_NOW_EPOCH=1 CVO_JUDGE="$E/j" CVO_DEPLOYED_SHA="$E/d" CVO_CHECK_ENTRIES=99999 CVO_TICK_BUDGET_S=999999 CVO_TICK_HARD_S=999999 CVO_CHECK_S_PER_USER=0 CVO_RESERVE_PAD_S=0 CVO_APPLY_S_PER_USER=1 CVO_TICK_ELAPSED0=99 CVO_FULL_CAP_FROM_TEST=uvn-status=2000-01-01T00:00Z CVO_PER_SEGMENT_FROM_TEST=status-doc-received=2000-01-01T00:00Z CVO_PAID_FROM_TEST=proof-need-ask=2000-01-01T00:00Z CVO_TIMEOUT_BIN="$E/t")
+        CVO_CLAIM_CAP=99999 CVO_REFUSAL_SPIKE=1.0 CVO_DOW=9 CVO_NEED_RUNNER="$E/n" CVO_UNSIGNED_ALL=1 CVO_NOW_EPOCH=1 CVO_JUDGE="$E/j" CVO_DEPLOYED_SHA="$E/d" CVO_CHECK_ENTRIES=99999 CVO_TICK_BUDGET_S=999999 CVO_TICK_HARD_S=999999 CVO_CHECK_S_PER_USER=0 CVO_RESERVE_PAD_S=0 CVO_APPLY_S_PER_USER=1 CVO_TICK_ELAPSED0=99 CVO_FULL_CAP_FROM_TEST=uvn-status=2000-01-01T00:00Z CVO_PER_SEGMENT_FROM_TEST=status-doc-received=2000-01-01T00:00Z CVO_PAID_FROM_TEST=proof-need-ask=2000-01-01T00:00Z CVO_TIMEOUT_BIN="$E/t"
+        CVO_CLAIM_PROOF_STATE="$E/cpc" CVO_CLAIM_PROOF_LIMIT_H=999 CVO_CLAIM_PROOF_UNREAD_H=999 CVO_CLAIM_PROOF_REPEAT_MIN=999)
   run -0 env -u BATS_TEST_TMPDIR "${evil[@]}" "$SCRIPT" --print-config
   [[ "$output" != *"$E"* ]]; [[ "$output" != *99999* ]]
   now_line="$(printf '%s\n' "$output" | grep '^NOW_EPOCH=')"; [ "${now_line#NOW_EPOCH=}" -gt 1700000000 ]   # the real clock, never CVO_NOW_EPOCH=1
@@ -231,7 +236,11 @@ TICK_ELAPSED0=0
 FULL_CAP_FROM_TEST=
 PER_SEGMENT_FROM_TEST=
 PAID_FROM_TEST=
-TIMEOUT_BIN=/usr/bin/timeout"
+TIMEOUT_BIN=/usr/bin/timeout
+CLAIM_PROOF_STATE=/var/lib/claim-proof-check
+CLAIM_PROOF_LIMIT_H=30
+CLAIM_PROOF_UNREAD_H=24
+CLAIM_PROOF_REPEAT_MIN=360"
   [ "$output" = "$want" ]
   # a BATS_TEST_TMPDIR that is not a directory is not the harness either
   run -0 env BATS_TEST_TMPDIR=/nonexistent/x "${evil[@]}" "$SCRIPT" --print-config
@@ -1344,6 +1353,88 @@ J
   if grep -q -- "^claim-proof-ask .*--mode apply" "$CALLS"; then false; fi
   grep -q -- "^claim-proof-ask --list .*--mode dry-run .*--check-recipients" "$CALLS"
   grep -q "claim-proof-ask-free: SIGNED-only" "$(newest_tick)"
+}
+
+@test "outbound tick (QA #1758 Important 1): two consecutive ticks of ONE reader outage carry the SAME cooldown key - the key is the watchdog's SIGNATURE, not a hash of text whose ages move" {
+  # THE DEFECT: claim_proof_check_alarm hashed the watchdog's whole output. That text carries elapsed ages and counts,
+  # so a persistent outage produced a NEW digest every two hours and paged every tick despite
+  # CLAIM_PROOF_REPEAT_MIN=360 - a cooldown that never applied to the case it exists for.
+  # The bats harness never pages by design (CVO_HARNESS=1, CI has no Slack), so this test proves the property the
+  # cooldown rests on, end to end through the real watchdog: same outage + different ages => same signature.
+  export CVO_CLAIM_PROOF_STATE="$TEST_TMPDIR/cpc" CVO_CLAIM_PROOF_LIMIT_H=30 CVO_CLAIM_PROOF_UNREAD_H=24 CVO_CLAIM_PROOF_REPEAT_MIN=360
+  mkdir -p "$CVO_STATE" "$CVO_CLAIM_PROOF_STATE"
+  # the shared fixture ledger has only the cap columns; the reader alarm reads request_ids_json/sent_at, and an
+  # unreadable ledger would make every tick "cannot measure" (exit 2) and hide the signature this test is about
+  export CVO_LEDGER="$TEST_TMPDIR/alarm.sqlite3"
+  python3 -c "import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.execute('CREATE TABLE verify_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, campaign TEXT, day TEXT, status TEXT, account_id TEXT, request_ids_json TEXT, sent_at TEXT)'); d.commit()" "$CVO_LEDGER"
+  rm -f "$CVO_STATE/claim-proof-check-alarm.log"
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  age_fixture() {   # $1 = hours ago for both artefacts; the alarm CATEGORIES and identities never change
+    python3 - "$CVO_CLAIM_PROOF_STATE" "$1" <<'PY'
+import datetime, json, os, sys
+state, hours = sys.argv[1], float(sys.argv[2])
+stamp = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+json.dump({"owner": "claim-lane-resume-c2", "last_run_at": stamp, "asked": 262}, open(os.path.join(state, "last-run.json"), "w"))
+json.dump({"batch": "proof-check-2026-11-04", "generatedAt": stamp, "asked": 0, "claims": []},
+          open(os.path.join(state, "proof-check-2026-11-04-digest.json"), "w"))
+PY
+  }
+  sig_of() { sed -n 's/.*SIGNATURE \([0-9a-f]\{16\}\).*/\1/p' "$CVO_STATE/claim-proof-check-alarm.log" | tail -1; }
+  age_fixture 31
+  run -0 "$SCRIPT"
+  sig1="$(sig_of)"; [ -n "$sig1" ]
+  grep -q 'ALARM stale: the daily code check last ran 31.0h ago' "$CVO_STATE/claim-proof-check-alarm.log"
+  age_fixture 32                                                  # one hour older, SAME outage, same alarm set
+  run -0 "$SCRIPT"
+  sig2="$(sig_of)"
+  grep -q 'ALARM stale: the daily code check last ran 32.0h ago' "$CVO_STATE/claim-proof-check-alarm.log"   # the text MOVED
+  [ "$sig1" = "$sig2" ]                                           # ... and the key did NOT: this is the cooldown
+  # a CHANGED alarm set is a changed key, so a worsening reader still pages at once rather than waiting out the window
+  python3 - "$CVO_CLAIM_PROOF_STATE" <<'PY'
+import json, os, sys
+p = os.path.join(sys.argv[1], "proof-check-2026-11-04-digest.json")
+d = json.load(open(p)); d["claims"] = [{"id": 900001, "status": "not_found"}]; d["asked"] = 1
+json.dump(d, open(p, "w"))
+PY
+  run -0 "$SCRIPT"
+  sig3="$(sig_of)"
+  [ -n "$sig3" ]; [ "$sig3" != "$sig1" ]
+  # and the tick reads that key, not the text: the marker digest comes from the SIGNATURE line
+  grep -q 's/^SIGNATURE //p' "$SCRIPT"
+}
+
+@test "outbound tick (QA #1758 Important 2): a reader page Slack REFUSED does not start the repeat window - the tick says so and pages again next tick" {
+  # THE DEFECT: the alarm keyed its cooldown on `if notify ...`, but notify cannot report a failed page - its last
+  # command is the lib's best-effort slack_notify (`|| true`). So a rejected post (or missing credentials) read as
+  # DELIVERED: the marker was written and CLAIM_PROOF_REPEAT_MIN silenced the reader outage for six hours.
+  export CVO_CLAIM_PROOF_STATE="$TEST_TMPDIR/cpc" CVO_CLAIM_PROOF_LIMIT_H=30 CVO_CLAIM_PROOF_UNREAD_H=24 CVO_CLAIM_PROOF_REPEAT_MIN=360
+  export CVO_ALARM_PAGE_IN_HARNESS=1
+  mkdir -p "$CVO_STATE" "$CVO_CLAIM_PROOF_STATE"
+  export CVO_LEDGER="$TEST_TMPDIR/alarm.sqlite3"
+  python3 -c "import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.execute('CREATE TABLE verify_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, campaign TEXT, day TEXT, status TEXT, account_id TEXT, request_ids_json TEXT, sent_at TEXT)'); d.commit()" "$CVO_LEDGER"
+  python3 - "$CVO_CLAIM_PROOF_STATE" <<'EOF'
+import datetime, json, os, sys
+state = sys.argv[1]
+stamp = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=31)).strftime("%Y-%m-%dT%H:%M:%SZ")
+json.dump({"owner": "claim-lane-resume-c2", "last_run_at": stamp, "asked": 262}, open(os.path.join(state, "last-run.json"), "w"))
+json.dump({"batch": "proof-check-2026-11-04", "generatedAt": stamp, "asked": 0, "claims": []},
+          open(os.path.join(state, "proof-check-2026-11-04-digest.json"), "w"))
+EOF
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  rm -f "$CVO_STATE/claim-proof-check.page" "$CVO_STATE/claim-proof-check-alarm.log" "$CALLS.page-confirmed"
+  # (1) Slack refuses the post: stated, and NO marker - the next tick must page again rather than wait out the window
+  STUB_SLACK_CONFIRM_RC=1 run -0 "$SCRIPT"
+  grep -q "PAGE NOT DELIVERED (reader alarm): Slack rejected the post" "$CVO_STATE/claim-proof-check-alarm.log"
+  [ ! -e "$CVO_STATE/claim-proof-check.page" ]
+  # (2) the SAME outage, delivered this time: the page carries the on-call mentions and the window starts
+  run -0 "$SCRIPT"
+  grep -q '<@U0AL36NADEY> <@U7RP6HKUZ>' "$CALLS.page-confirmed"
+  [ -s "$CVO_STATE/claim-proof-check.page" ]
+  # (3) same signature inside the window: no second page (the cooldown the marker exists for)
+  : > "$CALLS.page-confirmed"
+  run -0 "$SCRIPT"
+  [ ! -s "$CALLS.page-confirmed" ]
+  unset CVO_ALARM_PAGE_IN_HARNESS
 }
 
 @test "outbound tick (p1 638 / r5 639): a claim list not signed on EXACTLY the deployed head is never checked - list_signed_on_stale, loud; the credit families still run" {

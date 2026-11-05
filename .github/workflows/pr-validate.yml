@@ -1757,6 +1757,17 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_detect_store_only_crons
+      - name: Run claim-proof-ask reader alarm tests
+        # scripts/claim-proof-check-watchdog.py is why claim-proof-ask may carry a send date at all (p1 rule 8 /
+        # #1758 Important 1): the 30h freshness gate refuses NEW asks when the daily code check is stale and says
+        # nothing about the asks already out. These lock its decisions - healthy, missing heartbeat, stale
+        # heartbeat, stale digest, a digest that names nothing, asks the reader never looked at, held rows that are
+        # not asks, and "cannot measure" instead of a false healthy. Run by FILE PATH, like its sibling
+        # scripts/tests/test_claim_proof_ask.py: these tests live under scripts/, whose `tests` dir is not the
+        # repo-root `tests` package this job's other steps target by module name.
+        run: |
+          set -euo pipefail
+          python3 scripts/tests/test_claim_proof_check_watchdog.py
       - name: Run close-resolved-conversations predicate tests
         # The unattended daily close job (scripts/close-resolved-conversations.py)
         # silently closes customer conversations; these lock its is_eligible
@@ -2129,6 +2140,9 @@ jobs:
           # credit-trust-decide (trust-yet-verify decider): server-mirror conflict
           # predicate, big tracks never approved, never re-ask, ledger before PUT.
           python3 scripts/tests/test_credit_trust_decide.py
+          # doc-verified T0/T1 (Fable [key=doc-approval-doctrine] 2026-11-03, caps in USERS 2026-11-04):
+          # one CAN-FAIL test per gate, the provisional 7-day row and its revert, the atomic slot.
+          python3 scripts/tests/test_doc_approve.py
           # L12 executor (fable-decider closes): tray validation, every write-boundary guard (each with a
           # red mutant), daily cap, kill file, registry re-check, read-back, audit. Hermetic.
           python3 scripts/tests/test_credit_fable_executor.py

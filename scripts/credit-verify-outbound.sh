@@ -104,6 +104,15 @@ APPLY_S_PER_USER="$(cfg CVO_APPLY_S_PER_USER 15)"
 TICK_ELAPSED0="$(cfg CVO_TICK_ELAPSED0 0)"     # bats only: the tick started this many seconds ago
 TICK_CADENCE_S=7200
 TIMEOUT_BIN="$(cfg CVO_TIMEOUT_BIN /usr/bin/timeout)"   # QA #1587: every stage of a started family runs under the deadline
+# The READER alarm for the armed claim-proof-ask family (p1 rule 8 / QA #1758 Important 1 / driver 17:5xZ). The 30h
+# freshness gate refuses NEW asks when the daily code check is stale; it says nothing about the asks already out, whose
+# replies then go unread with no page. These are the alarm's own knobs, never a send's: the limit matches
+# claim_proof_ask.DAILY_CHECK_MAX_AGE_H, the unread window is a day (the class's own dwell), and the repeat is 6h so a
+# reader that stays down is not 12 pages a day but is never silent (model-chain's watchdog precedent).
+CLAIM_PROOF_STATE="$(cfg CVO_CLAIM_PROOF_STATE /var/lib/claim-proof-check)"
+CLAIM_PROOF_LIMIT_H="$(cfg CVO_CLAIM_PROOF_LIMIT_H 30)"
+CLAIM_PROOF_UNREAD_H="$(cfg CVO_CLAIM_PROOF_UNREAD_H 24)"
+CLAIM_PROOF_REPEAT_MIN="$(cfg CVO_CLAIM_PROOF_REPEAT_MIN 360)"
 # [key=scale-now] FINAL (Fable + p1 + r5, 10-31 17:5xZ): a family APPLIES on this unattended timer only from the date
 # p1's read-back line set for it HERE - its first batch read back clean (ledger sent set == the check-recipients
 # would-send set, health + zero-read clean). Unset = SIGNED-only: the tick still checks it and writes its bodies,
@@ -123,6 +132,34 @@ declare -A UNSIGNED_FROM=(
   # per tick ACROSS paid + free, paid first - so arming it makes the 443 free rows sendable AT ALL (before this line
   # the free segment was SIGNED-only and every one of them needed a hand-sent batch), never 200 in one tick.
   [status-doc-received]="2026-11-03T12:56Z"
+  # claim-proof-ask: the ask that carries the claimant's own MUSO code. Armed on p1's measured read-back (p1 262),
+  # not on the sending lane's report: b19 free-ask 17/17 rc=0 against the b19 list signed 6b643ed7, on the script
+  # deployed at that moment - the SAME sha, because the guard below refuses a list whose signed_on is not the deployed
+  # head (:955-958), so "the list signed 6b643ed7" and "the deployed tree then" are one statement, not two.
+  # ledger 7105-7121 = exactly
+  # 17 rows, campaign claim-proof-ask, every one status=sent with NO reason, first 18:58:17Z and last 19:02:36Z - so the
+  # date is the FIRST SEND of that batch (18:58Z), the same convention as claim-status (ledger 5763-6052) and
+  # status-doc-received. The b20 dry run of 2026-11-04 (42 would-send: 41 free + 1 paid) is NOT the evidence and is not
+  # dated here: it never sent, and a date must be the first send of a batch that actually went out.
+  # KNOWN EXCEPTION, CLOSED BY THIS PR: the alarm spec's item 8 says no date is written on a class whose reader has
+  # no alarm. When this date was written (2026-11-03) no alarm existed on this class's reader - the daily code check,
+  # where nothing paged on a stale daily_check - and it was armed anyway because that reader is coupled STRUCTURALLY,
+  # not by monitoring: claim_proof_ask.py:70 DAILY_CHECK_MAX_AGE_H = 30 and load_list(require_daily_check=True)
+  # refuses the WHOLE list when the check is stale or unnamed, so the asks stop within 30h of the check stopping.
+  # THE ALARM NOW EXISTS: claim_proof_check_alarm() above (scripts/claim-proof-check-watchdog.py) pages when that
+  # reader's heartbeat or its newest digest goes stale, when a digest names no asks, and when an ask goes unread past
+  # its window - and it runs ABOVE the kill gate, so the tick that stops the sender still pages about the reader. The
+  # residual harm this exception stated ("an ask sent while the check is fresh, the check then dies, that claimant
+  # reaches their close day with the code never read, and nobody is paged") is now paged instead of owed.
+  # THE COUPLING IS THIS FAMILY'S ONLY - do not reuse the exception: claim-STATUS calls load_list with
+  # require_daily_check=False (claim_proof_ask.py:455), so the status family is NOT tied to the daily check and this
+  # rule-8 exception says nothing about it.
+  # WHAT THE VALUE DOES: `unsigned` holds this date string and is read only for PRESENCE (`[ -z "$unsigned" ]`), and
+  # reached() has already parsed it as %Y-%m-%dT%H:%MZ - so any past stamp arms the family identically, and the stamp's
+  # only further job is to tell the next reader which batch justified the arming.
+  # PULL-CONDITIONS, in advance: if DAILY_CHECK_MAX_AGE_H is ever raised above 30, or if the close path can close a
+  # claim without a code read, this date comes off and the family returns to SIGNED-only (fail-closed, not fail-silent).
+  [claim-proof-ask]="2026-11-03T18:58Z"
   # proof-need-ask (E): UNSET (p1 555). First clean coded batch 2026-11-01T03:19:09Z (c2 E batch 1: 3 sent == signed,
   # +60 health + zero-read clean), but it needed two hand-applied /l2 rules (180-d filing, roles) not yet in the
   # renderer - it is dated only from a clean batch on the deployed /l2 renderer
@@ -191,7 +228,8 @@ PY
 }
 if [ "${1:-}" = "--print-config" ]; then
   for v in CVO_HARNESS HYDRA_ROOT KILL KILL2 LIVE_FLAG PAID_FLAG EXCLUDE STATE PY RUNNER OWING RECEIPTS HEALTH ZERO_READ \
-           FRAUD MAIN_ENV LEDGER SCRIPTS_DIR RD_SCAN RD_CAP POLICY CLAIM_LIST CAP R1_CAP CLAIM_CAP DOW REFUSAL_SPIKE NEED_RUNNER FIRST_CAP UNSIGNED_ALL NOW_EPOCH JUDGE DEPLOYED_SHA_FILE CHECK_ENTRIES TICK_BUDGET_S TICK_HARD_S CHECK_S_PER_USER RESERVE_PAD_S APPLY_S_PER_USER TICK_ELAPSED0 FULL_CAP_FROM_TEST PER_SEGMENT_FROM_TEST PAID_FROM_TEST TIMEOUT_BIN; do
+           FRAUD MAIN_ENV LEDGER SCRIPTS_DIR RD_SCAN RD_CAP POLICY CLAIM_LIST CAP R1_CAP CLAIM_CAP DOW REFUSAL_SPIKE NEED_RUNNER FIRST_CAP UNSIGNED_ALL NOW_EPOCH JUDGE DEPLOYED_SHA_FILE CHECK_ENTRIES TICK_BUDGET_S TICK_HARD_S CHECK_S_PER_USER RESERVE_PAD_S APPLY_S_PER_USER TICK_ELAPSED0 FULL_CAP_FROM_TEST PER_SEGMENT_FROM_TEST PAID_FROM_TEST TIMEOUT_BIN \
+           CLAIM_PROOF_STATE CLAIM_PROOF_LIMIT_H CLAIM_PROOF_UNREAD_H CLAIM_PROOF_REPEAT_MIN; do
     printf '%s=%s\n' "$v" "${!v}"
   done
   exit 0
@@ -202,6 +240,94 @@ TICK_T0="$(( $(date -u +%s) - TICK_ELAPSED0 ))"
 OUT="$OUT_ROOT/$STAMP"
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" | tee -a "$OUT/tick.log"; }
 killed() { [ -e "$KILL" ] || [ -e "$KILL2" ]; }
+notify() { # <text>: 0 only when the notifier ACCEPTED it (missing notifier / a Slack failure = 1)
+  # shellcheck source=/dev/null
+  [ -r "$HYDRA_ROOT/scripts/lib/slack-notify.sh" ] && . "$HYDRA_ROOT/scripts/lib/slack-notify.sh" \
+    && declare -F slack_notify_critical >/dev/null && slack_notify_critical "credit-verify-outbound: $*" >/dev/null 2>&1
+}
+page() { # best effort: the kill file is the guarantee, the page is the notice (call sites keep this contract)
+  notify "$@" || { log "page not delivered: $*"; return 0; }
+}
+# [key=reader-alarm-delivered] (QA #1758 Important, second round): `notify` CANNOT report a failed page. Its last
+# command is the lib's slack_notify_critical, and slack_notify ends `|| true` - "best effort, never fails the caller" -
+# so `if notify ...` is TRUE even when Slack rejected the post or carried no credentials. The reader alarm may only
+# start its repeat window on a page that was DELIVERED, so it asks the one function in the lib that returns 0 only on a
+# confirmed post (slack_notify_payload_file_status), and treats an older lib without it as NOT delivered: the state line
+# and the owed page are then retried next tick instead of being silenced for CLAIM_PROOF_REPEAT_MIN. Fails closed.
+page_confirmed() { # <text>: 0 only when Slack CONFIRMED the post; 1 for a refusal, no credentials, or an older lib
+  local helper="$HYDRA_ROOT/scripts/lib/slack-notify.sh" payload rc
+  [ -r "$helper" ] || { PAGE_WHY="no $helper on this host"; return 1; }
+  # shellcheck source=/dev/null
+  . "$helper" || { PAGE_WHY="could not source $helper"; return 1; }
+  declare -F slack_notify_payload_file_status >/dev/null \
+    || { PAGE_WHY="$helper has no slack_notify_payload_file_status (delivery unknown)"; return 1; }
+  payload="$(umask 077; mktemp "${TMPDIR:-/tmp}/cvo-page.XXXXXX")" || { PAGE_WHY="no temp file"; return 1; }
+  # under the ONE deadline wrapper like every other python subprocess of the tick (b1 560, and the bats structural
+  # test enforces it): a hung interpreter here must not hold the tick past TICK_HARD_S
+  if ! py -c 'import json,sys; print(json.dumps({"channel": sys.argv[1], "text": sys.argv[2]}))' \
+        "${SLACK_CHANNEL:-}" "<@${SLACK_UID_NICK:-}> <@${SLACK_UID_AARON:-}> $*" > "$payload"; then
+    rm -f "$payload"; PAGE_WHY="could not build the payload"; return 1
+  fi
+  slack_notify_payload_file_status "$payload"; rc=$?
+  rm -f "$payload"
+  [ "$rc" = 0 ] || PAGE_WHY="Slack rejected the post (rc=$rc)"
+  return "$rc"
+}
+elapsed() { echo $(( $(date -u +%s) - TICK_T0 )); }
+# QA #1587: every subprocess of a started family runs under the deadline - `bounded` gives it the seconds left before
+# TICK_HARD_S (at least 1) and SIGTERMs it there (SIGKILL 30 s later); rc 124/137 = it hit the deadline
+bounded() { local left=$(( TICK_HARD_S - $(elapsed) )); [ "$left" -ge 1 ] || left=1
+  "$TIMEOUT_BIN" --kill-after=30 "${left}s" "$@"; }
+deadline_rc() { [ "$1" = 124 ] || [ "$1" = 137 ]; }
+# b1 560: EVERY python subprocess of the tick - builders, filters, cap reads, checks, renders, the judge, the apply and
+# the post-send health / ledger / zero-read reads - runs under the one deadline wrapper; no exceptions
+py() { bounded "$PY" "$@"; }
+# THE READER ALARM - defined and INVOKED above the kill gate on purpose. A kill file stops the SENDER; a stale reader
+# is exactly when the asks already out stop being read, so the one tick that must still page about the reader is the one
+# that then exits. Claim-proof-ask may carry a date only because this is live (p1 rule 8); it is read-only, it writes a
+# state line every run and pages when its verdict is an alarm, and it never changes this tick's rc or its own state.
+claim_proof_check_alarm() {
+  local out rc marker last now digest
+  out="$(py "$SCRIPTS_DIR/claim-proof-check-watchdog.py" --state-dir "$CLAIM_PROOF_STATE" \
+        --ledger "$LEDGER" --limit-h "$CLAIM_PROOF_LIMIT_H" --unread-h "$CLAIM_PROOF_UNREAD_H" 2>&1)"; rc=$?
+  # the state line is written EVERY tick, page or not: a tick that cannot say what the reader did is not a healthy tick
+  printf '%s rc=%s %s\n' "$(date -u +%FT%TZ)" "$rc" "$(printf '%s' "$out" | tr '\n' ' ')" \
+    >> "$STATE/claim-proof-check-alarm.log" 2>/dev/null \
+    || log "reader alarm: could not append to $STATE/claim-proof-check-alarm.log: $out"
+  if [ "$rc" = 0 ]; then rm -f "$STATE/claim-proof-check.page" 2>/dev/null; return 0; fi
+  # the harness never pages: CI has no Slack, and a harness tick's rc and output must stay deterministic. The one
+  # exception is a test that has to prove the DELIVERY branch (a refused post must not start the repeat window), which
+  # opts in and gets its answer from the fixture lib's slack_notify_payload_file_status.
+  [ "${CVO_HARNESS:-0}" = 1 ] && [ "${CVO_ALARM_PAGE_IN_HARNESS:-0}" != 1 ] && return 0
+  # repeat-limited, but a CHANGED verdict pages at once: a worsening state must not wait out the window.
+  # The digest is the watchdog's own SIGNATURE line - the alarm categories plus the identity of each affected ask -
+  # NOT a hash of the text: the text carries elapsed ages and counts, so it changed on every tick of an UNCHANGED
+  # outage and made CLAIM_PROOF_REPEAT_MIN dead (QA #1758 Important 1: a persistent reader outage paged every two
+  # hours despite a 360m window). An older watchdog with no SIGNATURE line still degrades to the text hash.
+  marker="$STATE/claim-proof-check.page"
+  digest="$(printf '%s\n' "$out" | sed -n 's/^SIGNATURE //p' | tail -1)"
+  [ -n "$digest" ] || digest="$(printf '%s' "$out" | sha256sum | cut -c1-16)"
+  last="$(cat "$marker" 2>/dev/null || true)"
+  now="$(date -u +%s)"
+  if [ "${last%% *}" = "$digest" ] && [ "$(( now - ${last##* } ))" -lt "$(( CLAIM_PROOF_REPEAT_MIN * 60 ))" ] 2>/dev/null; then
+    log "reader alarm still open (same verdict paged $(( (now - ${last##* }) / 60 ))m ago, repeat ${CLAIM_PROOF_REPEAT_MIN}m): $out"
+    return 0
+  fi
+  # the repeat window starts ONLY on a confirmed page: a failed page is stated and retried next tick, never swallowed.
+  # The verdict is appended to the alarm's own log as well as logged: this runs ABOVE the kill gate and before $OUT
+  # exists, so the tick log's tee can be the one thing missing when a page fails.
+  if page_confirmed "$out"; then
+    printf '%s %s\n' "$digest" "$now" > "$marker" 2>/dev/null || log "reader alarm: paged but could not record it in $marker"
+    printf '%s page delivered (digest %s)\n' "$(date -u +%FT%TZ)" "$digest" >> "$STATE/claim-proof-check-alarm.log" 2>/dev/null || true
+  else
+    local why="${PAGE_WHY:-unknown}"
+    log "PAGE NOT DELIVERED (reader alarm): $why; next tick pages it again: $out"
+    printf '%s PAGE NOT DELIVERED (reader alarm): %s\n' "$(date -u +%FT%TZ)" "$why" \
+      >> "$STATE/claim-proof-check-alarm.log" 2>/dev/null || true
+  fi
+  return 0
+}
+claim_proof_check_alarm
 
 killed && { echo "$(date -u +%FT%TZ) credit-verify-outbound: kill file $KILL or $KILL2 present; nothing runs"; exit 0; }
 # a tick that could not stop itself never starts: one of the two kill-file locations must be writable
@@ -237,14 +363,6 @@ if [ ! -r "$ZERO_READ" ]; then
   LIVE=0; PAID_LIVE=0; ZR_MISSING=1
 fi
 
-notify() { # <text>: 0 only when the notifier ACCEPTED it (missing notifier / a Slack failure = 1)
-  # shellcheck source=/dev/null
-  [ -r "$HYDRA_ROOT/scripts/lib/slack-notify.sh" ] && . "$HYDRA_ROOT/scripts/lib/slack-notify.sh" \
-    && declare -F slack_notify_critical >/dev/null && slack_notify_critical "credit-verify-outbound: $*" >/dev/null 2>&1
-}
-page() { # best effort: the kill file is the guarantee, the page is the notice (call sites keep this contract)
-  notify "$@" || { log "page not delivered: $*"; return 0; }
-}
 autokill() { # <why>
   local where="$KILL"
   if ! printf 'auto-kill %s: %s\n' "$STAMP" "$1" > "$KILL" 2>/dev/null; then
@@ -494,15 +612,6 @@ PY
   return 0
 }
 
-elapsed() { echo $(( $(date -u +%s) - TICK_T0 )); }
-# QA #1587: every subprocess of a started family runs under the deadline - `bounded` gives it the seconds left before
-# TICK_HARD_S (at least 1) and SIGTERMs it there (SIGKILL 30 s later); rc 124/137 = it hit the deadline
-bounded() { local left=$(( TICK_HARD_S - $(elapsed) )); [ "$left" -ge 1 ] || left=1
-  "$TIMEOUT_BIN" --kill-after=30 "${left}s" "$@"; }
-deadline_rc() { [ "$1" = 124 ] || [ "$1" = 137 ]; }
-# b1 560: EVERY python subprocess of the tick - builders, filters, cap reads, checks, renders, the judge, the apply and
-# the post-send health / ledger / zero-read reads - runs under the one deadline wrapper; no exceptions
-py() { bounded "$PY" "$@"; }
 # QA #1587 / b1 546: ONE cap rule - past the family's dated full-cap line its own cap, before it at most FIRST_CAP
 family_cap() { # <family> <its cap>
   if [ "$UNSIGNED_ALL" = 1 ] || reached "${FULL_CAP_FROM[$1]:-}"; then echo "$2"
