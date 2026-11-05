@@ -238,8 +238,10 @@ def live_credit_pending(uid, query=None, presented=None):
     presented = presented.get(str(uid), [])
     where = [f"userid = {int(uid)}"]
     if presented:
+        # profileid is a UUID column: compare as varchar or Trino refuses the IN list outright
+        # ("IN value and list items must be the same type"), which would refuse every row.
         ids = ",".join("'" + p.replace("'", "''") + "'" for p in presented)
-        where.append(f"profileid in ({ids})")
+        where.append(f"cast(profileid as varchar) in ({ids})")
     rows = query("select cast(count(*) as varchar) from postgresql_core.public.credit_requests where deletedat is null "
                  "and status in ('unverified','processing','user_verification_needed') and (" + " or ".join(where) + ")")
     if not rows or not rows[0] or not str(rows[0][0]).strip().isdigit():

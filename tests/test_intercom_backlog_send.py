@@ -414,7 +414,7 @@ class R25CreditLines(unittest.TestCase):
 
         self.assertEqual(ib_send.live_credit_pending(7, q), 2)
         self.assertIn("userid = 7", seen[0])
-        self.assertIn("profileid in ('prof-a','prof-b')", seen[0])
+        self.assertIn("cast(profileid as varchar) in ('prof-a','prof-b')", seen[0])
         self.assertIn("user_verification_needed", seen[0])
 
     def test_live_credit_pending_refuses_an_unreadable_count(self):
