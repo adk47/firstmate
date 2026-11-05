@@ -1657,6 +1657,14 @@ fm_wake_append() {
 
   clean_key=$(printf '%s' "$key" | fm_wake_clean_field)
   clean_payload=$(printf '%s' "$payload" | fm_wake_clean_field)
+  # Bound the payload. A signal wake lists every changed status path, and with ~250 lanes that
+  # reached 24 KB per row; the drain prints rows and the session-start digest prints the drain,
+  # so a handful of rows made the startup digest 9.9 MB and the chair appeared to hang ingesting
+  # it. The payload is display data — the drain re-reads the files it names — so a bounded prefix
+  # is enough, and the count of the rest is kept.
+  if [ "${#clean_payload}" -gt 500 ]; then
+    clean_payload="${clean_payload:0:500} …(truncated)"
+  fi
   epoch=$(date +%s)
   seq_file="$STATE/.wake-queue.seq"
   recovery_marker="$STATE/.watcher-down"
