@@ -1,0 +1,303 @@
+#!/usr/bin/env python3
+"""sa-cli - the router-facing CLI.
+
+Exactly five verbs, and nothing else:
+
+    sa-cli ticket   --title T --body B --requester R [--acceptance JSON]  -> ticket id
+    sa-cli assign   --ticket T --owner O --reason R
+    sa-cli reply    --ticket T --text X
+    sa-cli rule     --ticket T --ruling X --rationale R
+    sa-cli escalate --ticket T --to X --why Y
+
+There is no bash, sh, exec, read, cat, edit, or write verb. Ever. This CLI is the
+only thing a Router session can reach, so it must never grow a verb that runs
+arbitrary input or touches a file directly.
+
+The Engine is the sole writer (design.md section 0.2): every verb appends its event
+through `sa/bin/sa-store append`. This file never opens the event log directly.
+
+Exit codes:
+    0  success
+    2  unknown command (prints `unknown command: <verb>` plus the verb list)
+    3  the store is missing or refused the append
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+
+VERBS = ("ticket", "assign", "reply", "rule", "escalate")
+
+SA_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SA_STORE = os.path.join(SA_DIR, "bin", "sa-store")
+
+ACTOR = "router"
+
+
+# --------------------------------------------------------------------------- store
+
+
+def _store(argv):
+    """Run the store CLI. The store is the only external command this file runs."""
+    if not os.path.exists(SA_STORE):
+        sys.stderr.write(
+            "sa-cli: sa-store not found at %s (SA-01 owns it; see design.md section 6)\n"
+            % SA_STORE
+        )
+        raise SystemExit(3)
+    proc = subprocess.run(
+        [sys.executable, SA_STORE] + argv,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        sys.stderr.write(
+            "sa-cli: sa-store %s failed (exit %d): %s\n"
+            % (argv[0] if argv else "", proc.returncode, proc.stderr.strip())
+        )
+        raise SystemExit(3)
+    return proc.stdout
+
+
+def append(event_type, ticket, payload):
+    """Append one event through the Engine and return its event id."""
+    argv = [
+        "append",
+        "--type",
+        event_type,
+        "--actor",
+        ACTOR,
+        "--payload",
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False),
+    ]
+    if ticket is not None:
+        argv += ["--ticket", ticket]
+    return _store(argv).strip()
+
+
+def state(table):
+    """Read one projection table. Returns {} when the store cannot answer."""
+    try:
+        out = _store(["state", "--table", table])
+    except SystemExit:
+        return {}
+    try:
+        return json.loads(out)
+    except ValueError:
+        return {}
+
+
+def _ids(table):
+    data = state(table)
+    if isinstance(data, dict):
+        return set(data.keys())
+    if isinstance(data, list):
+        return {row.get("id") for row in data if isinstance(row, dict) and row.get("id")}
+    return set()
+
+
+def _canonical(obj):
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _next_seq():
+    """The seq the Engine will assign to the next append (design.md section 3)."""
+    data = state("events")
+    seqs = []
+    if isinstance(data, dict):
+        rows = data.values()
+    elif isinstance(data, list):
+        rows = data
+    else:
+        rows = []
+    for row in rows:
+        if isinstance(row, dict) and isinstance(row.get("seq"), int):
+            seqs.append(row["seq"])
+    return (max(seqs) + 1) if seqs else 1
+
+
+def _ticket_from_event(event_id):
+    """Ticket id derived from the creating event's seq.
+
+    The envelope id is `ev-` + zero-padded 16-digit seq (design.md section 3), and
+    ticket ids are `T-` + the creating event's seq (design.md section 8 uses T-0001).
+    """
+    try:
+        seq = int(event_id.split("-", 1)[1])
+    except (IndexError, ValueError):
+        return event_id
+    return "T-%04d" % seq
+
+
+# --------------------------------------------------------------------------- verbs
+
+
+def cmd_ticket(args):
+    acceptance = None
+    if args.acceptance is not None:
+        try:
+            acceptance = json.loads(args.acceptance)
+        except ValueError:
+            sys.stderr.write("sa-cli: --acceptance must be JSON\n")
+            return 2
+
+    # The ticket id is `T-` + the creating event's seq. The Engine assigns the seq,
+    # so the id is computed from the next seq and carried on the envelope's `ticket`
+    # field: a fold that keys the ticket off the envelope and a fold that derives it
+    # from the seq both land on the same id.
+    before = _ids("tickets")
+    ticket = "T-%04d" % _next_seq()
+    event_id = append(
+        "ticket.created",
+        ticket,
+        {
+            "title": args.title,
+            "body": args.body,
+            "requester": args.requester,
+            "acceptance": acceptance,
+        },
+    )
+    after = _ids("tickets")
+
+    if ticket not in after:
+        new = sorted(after - before)
+        ticket = new[0] if len(new) == 1 else _ticket_from_event(event_id)
+    print(ticket)
+    return 0
+
+
+def cmd_assign(args):
+    payload = {"owner": args.owner, "reason": args.reason}
+    # `ticket.assigned` moves the ticket; `assignment.created` is the assignments
+    # projection's own producer (design.md section 5). Both are SA-02 events.
+    append("ticket.assigned", args.ticket, payload)
+    append("assignment.created", args.ticket, payload)
+    print(_canonical({"verb": "assign", "ticket": args.ticket, "owner": args.owner}))
+    return 0
+
+
+def cmd_reply(args):
+    thread = "TH-" + args.ticket
+    if thread not in _ids("threads"):
+        append("thread.opened", args.ticket, {"thread": thread})
+    append(
+        "thread.message",
+        args.ticket,
+        {"thread": thread, "text": args.text, "actor": ACTOR},
+    )
+    print(_canonical({"verb": "reply", "ticket": args.ticket, "thread": thread}))
+    return 0
+
+
+def cmd_rule(args):
+    append(
+        "ruling.recorded",
+        args.ticket,
+        {"ruling": args.ruling, "rationale": args.rationale},
+    )
+    print(_canonical({"verb": "rule", "ticket": args.ticket, "ruling": args.ruling}))
+    return 0
+
+
+def cmd_escalate(args):
+    # design.md section 5 has no escalation event type. Section 5 also says unknown
+    # event types are recorded in `events` and ignored by projections, never an
+    # error - so escalation is recorded forward-compatibly rather than invented
+    # into another package's fold.
+    append("ticket.escalated", args.ticket, {"to": args.to, "why": args.why})
+    print(_canonical({"verb": "escalate", "ticket": args.ticket, "to": args.to}))
+    return 0
+
+
+# --------------------------------------------------------------------------- cli
+
+
+def verb_list():
+    return "\n".join("  " + v for v in VERBS)
+
+
+def print_help(stream=sys.stdout):
+    stream.write(
+        "usage: sa-cli <verb> [options]\n"
+        "\n"
+        "The router-facing CLI. Five verbs, no shell, no file read, no file edit.\n"
+        "\n"
+        "verbs:\n"
+        "%s\n"
+        "\n"
+        "  ticket   --title T --body B --requester R [--acceptance JSON]  -> ticket id\n"
+        "  assign   --ticket T --owner O --reason R\n"
+        "  reply    --ticket T --text X\n"
+        "  rule     --ticket T --ruling X --rationale R\n"
+        "  escalate --ticket T --to X --why Y\n" % verb_list()
+    )
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(prog="sa-cli", add_help=False)
+    sub = parser.add_subparsers(dest="verb")
+
+    p = sub.add_parser("ticket", add_help=False)
+    p.add_argument("--title", required=True)
+    p.add_argument("--body", required=True)
+    p.add_argument("--requester", required=True)
+    p.add_argument("--acceptance", default=None)
+    p.set_defaults(func=cmd_ticket)
+
+    p = sub.add_parser("assign", add_help=False)
+    p.add_argument("--ticket", required=True)
+    p.add_argument("--owner", required=True)
+    p.add_argument("--reason", required=True)
+    p.set_defaults(func=cmd_assign)
+
+    p = sub.add_parser("reply", add_help=False)
+    p.add_argument("--ticket", required=True)
+    p.add_argument("--text", required=True)
+    p.set_defaults(func=cmd_reply)
+
+    p = sub.add_parser("rule", add_help=False)
+    p.add_argument("--ticket", required=True)
+    p.add_argument("--ruling", required=True)
+    p.add_argument("--rationale", required=True)
+    p.set_defaults(func=cmd_rule)
+
+    p = sub.add_parser("escalate", add_help=False)
+    p.add_argument("--ticket", required=True)
+    p.add_argument("--to", required=True)
+    p.add_argument("--why", required=True)
+    p.set_defaults(func=cmd_escalate)
+
+    return parser
+
+
+def main(argv):
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print_help()
+        return 0
+
+    verb = argv[0]
+    if verb not in VERBS:
+        sys.stderr.write("unknown command: %s\n" % verb)
+        sys.stderr.write("sa-cli verbs:\n%s\n" % verb_list())
+        return 2
+
+    parser = build_parser()
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        # argparse exits 2 on a bad flag; keep the verb list visible.
+        sys.stderr.write("sa-cli verbs:\n%s\n" % verb_list())
+        return exc.code if isinstance(exc.code, int) else 2
+
+    if not getattr(args, "func", None):
+        sys.stderr.write("unknown command: %s\n" % verb)
+        sys.stderr.write("sa-cli verbs:\n%s\n" % verb_list())
+        return 2
+
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
