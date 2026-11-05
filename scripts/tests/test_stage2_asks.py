@@ -49,12 +49,12 @@ class Store:
         db.close()
 
     def add(self, rid, uid, outcome, *, role="Mixing", paid=1, kind="contract", proof_id="p1", lists=(),
-            reason="r", version=FORENSICS_VERSION):
+            reason="r", version=FORENSICS_VERSION, run="run"):
         db = sqlite3.connect(self.path)
         db.execute("INSERT INTO stage2_shadow (run_id, judged_at, request_id, role, user_id, paid, outcome, reason,"
                    " proof_id, doc_kind, documents, detail_json, analyzer_version) VALUES"
-                   " ('run','2026-10-26T12:00:00Z',?,?,?,?,?,?,?,?,1,?,?)",
-                   (rid, role, uid, paid, outcome, reason, proof_id, kind,
+                   " (?,'2026-10-26T12:00:00Z',?,?,?,?,?,?,?,?,1,?,?)",
+                   (run, rid, role, uid, paid, outcome, reason, proof_id, kind,
                     json.dumps([{"proof_id": proof_id, "lists": list(lists)}]), version))
         db.commit()
         db.close()
@@ -85,6 +85,27 @@ class VerdictTests(unittest.TestCase):
         self.assertEqual(stage2_verdicts.held_accounts(v), {2, 3})
         pop = stage2_verdicts.population("need_more", path=s.path)
         self.assertEqual(pop, [{"user_id": 1, "paid": True, "skip": None, "request_ids": ["a1", "a3"]}])
+
+    def test_undetermined_is_asked_as_no_document_only_after_a_rerun(self):
+        # firstmate inbox 010: "undetermined -> rerun once then ask".
+        self.s.add("u1", 1, "undetermined", run="r1")
+        self.assertEqual(stage2_verdicts.released(stage2_verdicts.load(self.s.path), "no_document"), set())
+        self.s.add("u1", 1, "undetermined", run="r2")
+        self.assertEqual(stage2_verdicts.released(stage2_verdicts.load(self.s.path), "no_document"), {"u1"})
+        self.assertTrue(stage2_verdicts.gap_credits(["u1"], outcome="no_document", user_id="1", path=self.s.path)["eligible"])
+        self.assertFalse(stage2_verdicts.gap_credits(["u1"], user_id="1", path=self.s.path)["eligible"], "never a gap ask")
+        # a rerun that found something replaces it (the latest row stands) ...
+        self.s.add("u1", 1, "review", run="r3")
+        self.assertEqual(stage2_verdicts.released(stage2_verdicts.load(self.s.path), "no_document"), set())
+        # ... and resets the rerun count: a new undetermined spell needs its own rerun (QA on 794e735).
+        self.s.add("u1", 1, "undetermined", run="r4")
+        self.assertEqual(stage2_verdicts.released(stage2_verdicts.load(self.s.path), "no_document"), set())
+        self.s.add("u1", 1, "undetermined", run="r5")
+        self.assertEqual(stage2_verdicts.released(stage2_verdicts.load(self.s.path), "no_document"), {"u1"})
+        # several rows of one run are one judgement
+        self.s.add("u2", 1, "undetermined", run="r1")
+        self.s.add("u2", 1, "undetermined", run="r1")
+        self.assertNotIn("u2", stage2_verdicts.released(stage2_verdicts.load(self.s.path), "no_document"))
 
     def test_gap_credits_reads_the_verdict_for_this_account_only(self):
         s = self.s
@@ -306,6 +327,130 @@ class RunnerTests(unittest.TestCase):
         rep, gate = self.go("gap-ask", replica([1], status={1: "unverified"}), mode="dry-run")
         self.assertEqual(self.sent(gate), {"1": ["r1"]})
         self.assertIn("--validate", gate.calls[0][0])  # the gate checks the verdict, posts nothing
+
+
+def _policy_cap(test: unittest.TestCase, shared: int, email_cap: int = 2) -> None:
+    """The two numbers the overflow path reads: DAILY_MAX paces EMAIL (the per-campaign cap the run takes), and
+    policy_credit_cap() is the SHARED day contract it re-reads before every send. Gridable only because they can be
+    pinned apart here; in the deployed configuration they are the same number."""
+    saved_fn, saved_max = uvn_status.policy_credit_cap, uvn_status.DAILY_MAX
+    uvn_status.policy_credit_cap = lambda *a, **k: shared
+    uvn_status.DAILY_MAX = email_cap
+    test.addCleanup(setattr, uvn_status, "policy_credit_cap", saved_fn)
+    test.addCleanup(setattr, uvn_status, "DAILY_MAX", saved_max)
+
+
+class InappOverflowTests(unittest.TestCase):
+    """captain 2026-10-26 16:05Z (firstmate inbox 010): the cap paces EMAIL only; past it the
+    note goes in-app (gate --channel inapp), one note per user still."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="inapp-"))
+        self.list = self.dir / "list.json"
+        self.ledger = str(self.dir / "ledger.sqlite3")
+        self.proof = self.dir / "proof.json"
+        proof(self.proof)
+        users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 6)]
+        self.list.write_text(json.dumps({"generated_at": (NOW - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                         "users": users}))
+        self._cap = uvn_status.DAILY_MAX
+        uvn_status.DAILY_MAX = 2
+        self.addCleanup(setattr, uvn_status, "DAILY_MAX", self._cap)
+
+    def gate(self):
+        ledger = self.ledger
+
+        class ChannelGate(FakeGate):
+            def __call__(self, argv):
+                super().__call__(argv)
+                payload = self.calls[-1][1]
+                mt = "inapp" if "--channel" in argv else "email"
+                db = verify_ledger.connect(ledger)
+                try:
+                    c = verify_ledger.claim(db, campaign="uvn-status", user_key=payload["user"]["email"],
+                                            day=NOW.strftime("%Y-%m-%d"),
+                                            request_ids=[r["request_id"] for r in payload["credits"]], message_type=mt,
+                                            approved_by="U7RP6HKUZ", approval_ref="ref", now=NOW,
+                                            user_id=payload["user"]["id"])
+                    verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id=str(len(self.calls)))
+                finally:
+                    db.close()
+                import subprocess
+                return subprocess.CompletedProcess(argv, 0, f"POSTED {mt} message={len(self.calls)} credits=1", "")
+        return ChannelGate()
+
+    def gate_file(self) -> str:
+        """The gate script the runner reads its locks from (main 10-28): a real apply halts before any gate call while
+        `readonly UVN_STATUS_COPY_APPROVED` reads 0, so the stub must read 1 - this class is about the CHANNEL, not
+        about the copy lock (test_uvn_status covers that)."""
+        p = self.dir / "gate.sh"
+        p.write_text("readonly UVN_STATUS_COPY_APPROVED=1\nreadonly CREDIT_HOLD_STATUS_COPY_APPROVED=0\n")
+        return str(p)
+
+    def go(self, **kw):
+        gate = self.gate()
+        rep = uvn_status.run(list_path=str(self.list), segment="paid", mode="apply", max_users=50,
+                             ledger_path=self.ledger, proof_path=str(self.proof), query=replica(range(1, 6)), runner=gate,
+                             wrapper=self.gate_file(), now=NOW, pace_seconds=0, lens=lambda ids: {i: __import__(
+                                 "credit_review.fraud_lens", fromlist=["Verdict"]).Verdict() for i in ids}, **kw)
+        return rep, gate
+
+    def test_without_overflow_the_cap_still_bounds_every_note(self):
+        rep, gate = self.go()
+        self.assertEqual((len(gate.calls), rep.sent_notes), (2, 2))
+        self.assertTrue(all("--channel" not in a for a, _ in gate.calls))
+
+    def test_with_overflow_email_stops_at_the_cap_and_everyone_else_gets_the_in_app_note(self):
+        rep, gate = self.go(inapp_overflow=True)
+        self.assertEqual(rep.sent_notes, 5)
+        self.assertEqual(["--channel" in a for a, _ in gate.calls], [False, False, True, True, True])
+        db = verify_ledger.connect(self.ledger)
+        self.assertEqual(verify_ledger.sent_today(db, campaign="uvn-status", day=NOW.strftime("%Y-%m-%d"),
+                                                  message_type="email"), 2)
+        self.assertEqual(verify_ledger.sent_today(db, campaign="uvn-status", day=NOW.strftime("%Y-%m-%d")), 5)
+
+
+    def test_QA1370_the_equal_cap_case_still_reaches_every_user_in_app(self):
+        """QA #1370 (Important): the deployed configuration is cap == DAILY_MAX == the policy number. Counting the in-app
+        notes against the shared cap made the overflow INERT there - the 2,501st user was deferred before `--channel
+        inapp` was chosen. The caps pace EMAIL (captain 2026-10-26 16:05Z), so at the equal cap 2 emails go out and
+        every remaining user still gets the in-app note."""
+        _policy_cap(self, 2, email_cap=2)      # equal: the deployed configuration
+        rep, gate = self.go(inapp_overflow=True)
+        self.assertEqual(["--channel" in a for a, _ in gate.calls], [False, False, True, True, True])
+        self.assertEqual(rep.sent_notes, 5)
+        db = verify_ledger.connect(self.ledger)
+        today = NOW.strftime("%Y-%m-%d")
+        self.assertEqual(verify_ledger.sent_today(db, campaign="uvn-status", day=today, message_type="email"), 2)
+        self.assertEqual(verify_ledger.sent_today(db, campaign="uvn-status", day=today, message_type="inapp"), 3)
+
+    def test_QA1370_an_in_app_note_never_spends_another_campaigns_email_budget(self):
+        """The other half of the same rule: the shared credit cap is spent by EMAIL notes only, so the in-app notes this
+        run sends must leave the other credit campaigns' email room intact (QA #1370)."""
+        _policy_cap(self, 2, email_cap=2)
+        db = verify_ledger.connect(self.ledger)
+        try:                                    # another credit campaign already sent 1 of the day's 2 emails
+            c = verify_ledger.claim(db, campaign="proof-need-ask", user_key="someone@example.com",
+                                    day=NOW.strftime("%Y-%m-%d"), request_ids=["z1"], message_type="email",
+                                    approved_by="U7RP6HKUZ", approval_ref="ref", now=NOW, user_id=999)
+            verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id="x")
+        finally:
+            db.close()
+        self.assertEqual(uvn_status.credit_group_left(self.ledger, NOW.strftime("%Y-%m-%d")), 1)
+        rep, gate = self.go(inapp_overflow=True)
+        # one email of room left -> one email, then every remaining user is in-app, and the room is now spent by EMAIL
+        self.assertEqual(["--channel" in a for a, _ in gate.calls], [False, True, True, True, True])
+        self.assertEqual(rep.sent_notes, 5)
+        db = verify_ledger.connect(self.ledger)
+        try:
+            today = NOW.strftime("%Y-%m-%d")
+            self.assertEqual(sum(verify_ledger.sent_today(db, campaign=c, day=today, message_type="email")
+                                 for c in uvn_status.CREDIT_GROUP), 2, "email budget spent by emails, 1+1")
+            self.assertEqual(verify_ledger.sent_today(db, campaign="uvn-status", day=today, message_type="inapp"), 4)
+        finally:
+            db.close()
+        # and the proof-need-ask campaign can no longer email anyone today: the 2 email slots are used
+        self.assertEqual(uvn_status.credit_group_left(self.ledger, NOW.strftime("%Y-%m-%d")), 0)
 
 
 class CountCopyTests(unittest.TestCase):

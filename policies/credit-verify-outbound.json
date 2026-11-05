@@ -37,6 +37,12 @@
     "credit": 2500,
     "claim": 500
   },
+  "tick_cap": {
+    "_doc": "Per-family per-tick cap. A family+segment listed here may ACCEPT at most this many users in ONE tick, whatever its daily row, its FIRST_CAP line or the global CVO_CAP says. The clamp only ever LOWERS a cap - a value above the family's own cap changes nothing, so this key can never widen a blast radius. Absent family/segment = exactly the behavior before this key existed. Added 2026-11-04 on the Fable driver's ruling: the free uvn-status apply sends until its Intercom-note step hits the subprocess timeout at ~55-60 min / ~80 users and then loses its outcomes artefact entirely (#1756, twice in one afternoon: 39 sends at 15:05Z, 79 at 17:24Z). A per-FAMILY cap was needed rather than CVO_CAP because that knob is ONE global value: setting it to 60 would also have narrowed r1, claim-status and the approved 70-send claim install.",
+    "uvn-status": {
+      "free": 60
+    }
+  },
   "holds": {
     "gmail": {
       "waiting_on": "third_party:gmail",

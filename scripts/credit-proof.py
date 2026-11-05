@@ -212,11 +212,20 @@ def cmd_file_recent(args: argparse.Namespace) -> int:
     if args.links:
         from credit_verify.proof import links
         link_policy, link_fetch = links.load_policy(), links.fetch      # raises on a missing/empty policy
+    # firstmate 10-31: every support@ Gmail call of this cron behind the shared lock, the host-wide backoff
+    # (Retry-After) and this caller's hourly budget (search pages + message gets together)
+    from credit_verify.proof import gmail_quota
+    # lock=False: recent.gog_search now takes the shared lock itself, per search page (QA on #1558).
+    # flock is per open file description, so guarding it here as well would have the process wait on
+    # its own lock for the whole scan budget and then raise.
+    g_search = gmail_quota.guarded("file-recent", recent.gog_search(), lock=False)
+    # gog_raw takes the same lock itself (#1558); flock twice in one process would wait on us
+    g_fetch = gmail_quota.guarded("file-recent", gmail_intake.gog_raw, lock=False)
     try:
         res = recent.run(
             state_path=args.state or recent.STATE, hours=args.hours, apply=args.apply,
             conv_search=recent.intercom_search(tok),
-            gmail_search=None if no_gmail else recent.gog_search(),
+            gmail_search=None if no_gmail else g_search,
             max_messages=args.max_fetches,          # the same per-run cap for support@ (the rest is carried)
             order=lambda convs: recent.paid_first(convs, export, paying),
             # unresolved conversations go to the tray inside the pass, before the window is saved (QA #1481)
@@ -229,7 +238,7 @@ def cmd_file_recent(args: argparse.Namespace) -> int:
                 identity=intake.strict_identity(contact_fetch=Pacer("intercom", 1.0).paced(make_contact_fetch(tok)),
                                                 lookup=intake.professional_lookup)), UNRESOLVED, args.apply),
             file_messages=lambda ids: gmail_intake.run(
-                store, message_ids=ids, fetch=gmail_intake.gog_raw, lookup=admin_lookup,
+                store, message_ids=ids, fetch=g_fetch, lookup=admin_lookup,
                 open_rows=intake.open_rows_trino, apply=args.apply, log=log, blobs=_blob_put()),
             log=log)
     except recent.Busy as exc:

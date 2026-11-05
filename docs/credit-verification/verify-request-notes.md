@@ -46,8 +46,18 @@ missing, the contract is broken: the run fails loud and sends nothing.
 A copy of the `intercom-ops-write.sh` gate for `POST /messages`:
 
 - Caroline (`5763097`) is pinned, and test seams are refused on a deployed copy.
-- `--approved-by` must be the captain (`U7RP6HKUZ`). The `approval_ref` (his 22:12Z words)
-  is pinned and recorded with every send.
+- `--approved-by` is either the captain (`U7RP6HKUZ`) or — since 2026-11-03, at his word ("users
+  aren't in the dark ... no human reviews is the goal") — a **Fable ruling id**
+  (`fable-ruling-YYYYMMDD-N`, e.g. `fable-ruling-1103-103`) for exactly the campaign+copy pairs
+  that ruling pre-approved in `policies/fable-rulings.json`. Every other send, and every
+  free-form reply (`intercom-ops-write.sh`), still needs a human Slack id: a script name is not
+  an approver. The registry is data, so widening a class is a reviewed edit; an unreadable or
+  malformed registry refuses rather than opens. The `approval_ref` (his 22:12Z words) is pinned
+  and recorded with every send, and each claim is stamped with `approver_kind` +
+  `approval_id` + the template identity hash (`campaign|kind|copy|variant`), so
+  "who authorized this note, and which template did it render?" is answered by the ledger
+  alone. `scripts/audit-approval-stamps.sh` (every 15 min, #clio_devops) pages when a send from
+  2026-11-04 on lacks a stamp it can verify; it never repairs and never deletes evidence.
 - The copy is fixed (Fable's final copy, single and multi-credit variants). The caller
   passes only first name, role, track title and artist name, in a JSON file so the email
   never shows up on argv. Every field is HTML-escaped. The rendered text gets the same leak
@@ -394,6 +404,14 @@ notes.
 - **The decider** keeps released requests held (never a support write: its Knock notice is a generic re-ask outside this ledger's one-message-per-day rule) and labels them `proof on file: stage 2 judged the document (<outcome>): the user is asked through intercom-verify-request.sh --campaign <campaign>`, counted as "handed to the stage-2 ask" in its run line.
 - **Driver:** `credit-review.py uvn-status --from-stage2 --campaign gap-ask|uvn-status --segment paid|free --mode dry-run|apply --max-users N [--exclude-users FILE]`. `--from-stage2` builds the population live from the store (no list, no list-age gate), and a note names ONLY released requests (an unjudged request of the same user is never named). For uvn-status it also reaches released requests still `unverified` (held with us). In the gate, uvn-status's Intercom documents skip yields only when the gate itself reads `no_document` for every credit of the note for this account (same helper as gap-ask); otherwise, or with the store unreadable, the skip stands. `--exclude-users` leaves out ids another lane messages today (they are offered again on a later run). Everything else is the uvn-status runner: the replica, proof-on-file and stage-2 release are re-read right before each send, ask cap 400 per campaign per UTC day, kill switch `/etc/hydra/credit-ops-notes.disabled`.
 - **The gate** (`gap-ask`): reads the verdicts itself (`stage2_verdicts.py gap-credits`, pinned to `/var/lib/hydra-credit-verify/proof.sqlite`): every credit must be released to `need_more` for THIS account (`user.id` required) and every role the caller names must be a judged role, else it refuses. The paragraph is Fable's, verbatim except its last sentence, which reads "Your request stays open while we look." (decision B, inbox 005: the asked rows are pending, not live). `<doc summary>` comes from the verdict's best document: its kind (a fixed label: split sheet, contract, invoice, letter of direction, PRO registration, distributor screenshot, streaming-dashboard screenshot, session screenshot, credits page; else "document") and up to two OTHER held titles it names (catalog titles, never document text); several documents read "documents" (or the plural label when they are all one kind). `<track> as <role>`: up to 3 pairs joined with ", " and " or ", then "(and N more of your credits)". The caller cannot supply any of it. Once per credit; not blocked by an earlier ask about the same credit or by a proof reply (that reply is what stage 2 judged); never skipped for documents in Intercom; one message per user per UTC day across campaigns; none within 7 days of another note from us (ledger and Intercom) EXCEPT the user's status-doc-received notes, the follow-up they promised ("we'll message you here as soon as it's checked"; firstmate, verify-ask-wiring-h2 inbox 003). A gap ask counts as an ask for the other campaigns (their once-per-credit and 90-day locks). In-thread delivery as uvn-status. No follow-ups.
+
+## In-app delivery past the email cap (`--channel inapp`, `--inapp-overflow`)
+
+**Authority.** Captain 2026-10-26 16:05Z, relayed by firstmate (verify-ask-wiring-h2 inbox 010): "Caps may pace email only; the in-app message goes to everyone."
+
+- **Gate:** `--channel inapp` (uvn-status, the status notes, claim-status, gap-ask; initial notes only) never sends email. The note goes into the user's own open conversation when the gate finds one, exactly as without the flag, otherwise as an Intercom in-app message: `POST /messages` with `message_type: in_app`, Caroline as sender, the same HTML body and no subject. The request enum is the documented `in_app`; the response must be an `admin_message` of message_type `inapp` (Intercom's response spelling, which is also what the ledger records), or the claim is left `attempted`. The ledger records the note as message_type `inapp`, and every rule stays: once per user/credit, one message per user per UTC day across campaigns, 7 days, 90-day ask lock, recipient identity.
+- **Driver:** `credit-review.py uvn-status ... --inapp-overflow` counts the campaign's daily cap (400 for the asks, 1,000 for the status notes) against EMAIL notes only. Once the day's email budget is spent, every further note is sent with `--channel inapp`. The run is then bounded by a 5,000-per-campaign-per-day sanity cap instead. Without the flag nothing changes.
+- **Stage-2 undetermined** (same inbox, "undetermined -> rerun once then ask"): a role stage 2 judged `undetermined` in two runs (the first and one rerun, current analyzer) is read as `no_document`, so the request goes to the uvn-status ask (and the gate's Intercom documents skip yields to it). A single undetermined judgement keeps the hold; a later run that finds something replaces it.
 
 ## In-thread legacy-id match (firstmate 089)
 

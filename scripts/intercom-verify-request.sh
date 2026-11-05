@@ -64,8 +64,12 @@ set -euo pipefail
 #     set that pick the document lists); every field is HTML-escaped, and the rendered text
 #     goes through the same leak check as a customer-facing ops reply. There is no free-text
 #     body argument at all;
-#   - the approval is the captain's: --approved-by must be his Slack id (U7RP6HKUZ), and the
-#     approval_ref recorded with every send is pinned below;
+#   - the approval is the captain's Slack id (U7RP6HKUZ) OR - for a template class a Fable ruling
+#     pre-approved in writing - that ruling's id (fable-ruling-YYYYMMDD-N, e.g. fable-ruling-1103-103).
+#     A ruling id is accepted ONLY for the exact campaign+copy pairs policies/fable-rulings.json lists
+#     under it; every other send, and every free-form reply, still needs the captain's id. The
+#     approval_ref recorded with every send is pinned below, and every send is stamped in the ledger
+#     with which kind of approval authorized it and the template identity hash it rendered;
 #   - the recipient is resolved from the ACCOUNT email (the credit request's user), through an
 #     exact Intercom contact search that must return exactly one user, never from anything a
 #     user wrote; a follow-up goes to the contact its note went to;
@@ -90,11 +94,12 @@ set -euo pipefail
 # to this script.
 #
 # Usage:
-#   intercom-verify-request.sh send --credits-file FILE --approved-by <SlackUID> \
+#   intercom-verify-request.sh send --credits-file FILE --approved-by <SlackUID|fable-ruling-YYYYMMDD-N> \
 #       [--campaign verify-live|retro-past|removal-notice|takeback-notice|uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-proof-ask|claim-status|gap-ask|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask] [--kind initial|reminder-14|reminder-25 \
 #        --parent-message-id <id>] [--copy v1|windowed (verify-live preview only) | queued|received (status-doc-received) | no-ask|count (status-team-review)] \
 #       [--conversation <id> (uvn-status, withdrawal-confirm, status notes, claim-status, email-changed, gap-ask, merge-pending,
-#        credit-hold-status, claim-proof-pending, proof-need-ask)] [--inapp-fallback] [--dry-run|--validate|--doc-check|--check-recipient]
+#        credit-hold-status, claim-proof-pending, proof-need-ask)] [--inapp-fallback] [--channel inapp (uvn-status, status notes,
+#        claim-status, gap-ask: never email; see In-app delivery)] [--dry-run|--validate|--doc-check|--check-recipient]
 #   intercom-verify-request.sh tag-proof --message-id <id> [--dry-run]
 #
 # In-thread delivery (firstmate 063): uvn-status and withdrawal-confirm reply IN the user's
@@ -371,6 +376,18 @@ readonly PROD_COMM_STATE_HELPER="/opt/hydra/scripts/credit_review/comm_state.py"
 readonly PROD_PROOF_DB="/var/lib/hydra-credit-verify/proof.sqlite"
 # [key=dated-windows-are-data]: the policy file holds the dated windows (holds.gmail: the /o clause and the Gmail hold).
 readonly PROD_POLICY="/opt/hydra/policies/credit-verify-outbound.json"
+# The Fable ruling ids that may stand in for the captain's Slack id, and the exact template classes each one
+# pre-approved. Fail closed: an id this file does not list, for a class it does not list, still needs the captain.
+readonly PROD_FABLE_RULINGS="/opt/hydra/policies/fable-rulings.json"
+# QA 2026-11-04 finding 1: a refund note is a financial statement, so its facts are READ FROM THE PROCESSOR at send
+# time, never taken from the caller's file. The credential comes from the gateway env file (the same file the runtime
+# already trusts for MUSOAI_INTERCOM_TOKEN); a refund-confirm that cannot reach Stripe is refused, not rendered.
+# QA 2026-11-04 round 3 finding 2: the credential FILE is a seam in a test copy only. A deployed copy reads the
+# gateway env file and nothing else; a test copy may point it at an empty fixture so "there is no key" is a fact the
+# test controls, not a property of whichever host happens to run it (/etc/openclaw/main.env exists on node-8).
+readonly STRIPE_ENV_FILE_PROD="/etc/openclaw/main.env"
+readonly STRIPE_KEY_VAR="MUSOAI_STRIPE_API_KEY"
+readonly STRIPE_API_BASE_PROD="https://api.stripe.com"
 # l1 [key=l11c-email-filed]: the identities that prove an email-filed document is the account's (= receipts.STRONG_MATCH)
 readonly EMAIL_FILED_STRONG_MATCH="professional_id authenticated_email session"
 readonly PROOF_TAG="credit-proof"
@@ -420,6 +437,11 @@ readonly APPROVAL_REF_MERGE_PENDING="captain 2026-10-28 12:4xZ: \"go live today 
 readonly APPROVAL_REF_OWING_PROOF="captain U7RP6HKUZ 2026-10-27 20:1xZ: \"are you sure all users that need to be communicated have been already? If not get on it - make this a durable process that does not rely on my computer; do this all on OVH.\"; copy = Fable verify-program-lead-fable-l1 copy-owing-proof-1027 (20:2xZ), sent only on the captain's yes (L14a S1 credit-hold-status / L14b S2 claim-proof-pending)"
 readonly APPROVAL_REF_PROOF_NEED_ASK="captain 2026-10-27 21:5xZ: every user who owes proof is told exactly what we need (proof-loop-lead-fable-p1 plan section 1); copy = proof-loop captain card L11c (22:5xZ), verbatim per need code; sent only on the captain's yes"
 readonly APPROVAL_REF_REMOVAL="firstmate 2026-10-16 15:14Z, captain-driven: owners of credits WE removed must be told which credit and role, why, and how to dispute by replying with a document (support measured 35 owners never told). Fraud removals stay silent by captain order (firstmate 2026-10-16 15:48Z)."
+# Ruling refund-confirm-1103 (Fable d2, 2026-11-03 22:0xZ, relayed to this lane as firstmate inbox 109): customers
+# whose money ALREADY moved are told so without waiting on a human Slack id. The copy is the ruling's own text; the
+# subject is the one customer support staged for d2's read (the ruling names only the body), and every fact is read
+# from Stripe/core rather than typed (the ruling: "every placeholder from Stripe/core, never typed by hand").
+readonly APPROVAL_REF_REFUND_CONFIRM="Fable d2 ruling refund-confirm-1103 (2026-11-03 22:0xZ, firstmate 109): 'confirming your refund of {amount} issued on {date} to the card ending {last4}. {one factual sentence on what changed} Nothing more is needed from you.' - --approved-by fable-ruling-1103-d2/refund-confirm; no human Slack id needed under firstmate 097"
 readonly APPROVAL_REF_PAST="captain U7RP6HKUZ 2026-10-15 23:35Z: \"im referring to before when nick made changes and did a trust verify flow and now we have a lotnof credits to verify with documents and give people 30 days to send something in for the ones missing documents\"; 2026-10-16 00:35Z: \"how many credits were approved without documentstion i dont want to lose users unless its obvious fraud feom tbe past\""
 # Caroline's outbound sanitizer word list, IDENTICAL to intercom-ops-write.sh's
 # SANITIZER_WORDS (which CI compares to plugins/intercom/src/sanitize-tool-leak.ts);
@@ -467,7 +489,7 @@ refuse() { printf 'REFUSED: %s\n' "$*" >&2; exit 1; }
 if [ "$TESTABLE" != "1" ]; then
   for v in INTERCOM_VERIFY_TEST_LOG_DIR INTERCOM_VERIFY_TEST_CURL_BIN INTERCOM_VERIFY_TEST_TIMEOUT_BIN \
            INTERCOM_VERIFY_TEST_LEDGER INTERCOM_VERIFY_TEST_LEDGER_HELPER INTERCOM_VERIFY_TEST_DAY \
-           INTERCOM_VERIFY_TEST_PROOF_DB INTERCOM_VERIFY_TEST_STAGE2_HELPER INTERCOM_VERIFY_TEST_CORE_NOTICE_HELPER INTERCOM_VERIFY_TEST_NOW INTERCOM_VERIFY_TEST_DISABLED_DIR INTERCOM_VERIFY_TEST_COMM_STATE_HELPER INTERCOM_VERIFY_TEST_GMO INTERCOM_VERIFY_TEST_POLICY; do
+           INTERCOM_VERIFY_TEST_PROOF_DB INTERCOM_VERIFY_TEST_STAGE2_HELPER INTERCOM_VERIFY_TEST_CORE_NOTICE_HELPER INTERCOM_VERIFY_TEST_NOW INTERCOM_VERIFY_TEST_DISABLED_DIR INTERCOM_VERIFY_TEST_COMM_STATE_HELPER INTERCOM_VERIFY_TEST_GMO INTERCOM_VERIFY_TEST_POLICY INTERCOM_VERIFY_TEST_FABLE_RULINGS INTERCOM_VERIFY_TEST_STRIPE_BASE INTERCOM_VERIFY_TEST_JQ_LIB INTERCOM_VERIFY_TEST_STRIPE_ENV_FILE; do
     [ -z "${!v:-}" ] || die "$v is not settable on a deployed copy of this script. The log, the ledger, the client and the clock are not parameters: a caller-selectable one is a send nobody can audit."
   done
   LOG_DIR="$PROD_LOG_DIR"
@@ -479,10 +501,17 @@ if [ "$TESTABLE" != "1" ]; then
   COMM_STATE_HELPER="$PROD_COMM_STATE_HELPER"
   PROOF_DB="$PROD_PROOF_DB"
   POLICY_JSON="$PROD_POLICY"
+  FABLE_RULINGS_FILE="$PROD_FABLE_RULINGS"
+  STRIPE_ENV_FILE="$STRIPE_ENV_FILE_PROD"
   CURL_BIN="/usr/bin/curl"
   JQ_BIN="/usr/bin/jq"
+  # the jq modules that travel WITH the gate (deploy rsyncs scripts/ including scripts/lib/). A deployed copy resolves
+  # them from its own directory, never from the environment: a caller-selectable formatter is a caller-selectable
+  # number in a customer's refund note.
+  JQ_LIB_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib"
   TIMEOUT_BIN="/usr/bin/timeout"
   PY_BIN="/usr/bin/python3"
+  STRIPE_API_BASE="$STRIPE_API_BASE_PROD"
   DAY="$(date -u +%Y-%m-%d)"
 else
   LOG_DIR="${INTERCOM_VERIFY_TEST_LOG_DIR:-$PROD_LOG_DIR}"
@@ -494,13 +523,18 @@ else
   COMM_STATE_HELPER="${INTERCOM_VERIFY_TEST_COMM_STATE_HELPER:-$PROD_COMM_STATE_HELPER}"
   PROOF_DB="${INTERCOM_VERIFY_TEST_PROOF_DB:-$PROD_PROOF_DB}"
   POLICY_JSON="${INTERCOM_VERIFY_TEST_POLICY:-$PROD_POLICY}"
+  FABLE_RULINGS_FILE="${INTERCOM_VERIFY_TEST_FABLE_RULINGS:-$PROD_FABLE_RULINGS}"
+  STRIPE_ENV_FILE="${INTERCOM_VERIFY_TEST_STRIPE_ENV_FILE:-$STRIPE_ENV_FILE_PROD}"
   CURL_BIN="${INTERCOM_VERIFY_TEST_CURL_BIN:-$(command -v curl || echo /usr/bin/curl)}"
   JQ_BIN="$(command -v jq || echo /usr/bin/jq)"
+  JQ_LIB_DIR="${INTERCOM_VERIFY_TEST_JQ_LIB:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib}"
   TIMEOUT_BIN="${INTERCOM_VERIFY_TEST_TIMEOUT_BIN:-$(command -v timeout || command -v gtimeout || echo /usr/bin/timeout)}"
   PY_BIN="$(command -v python3 || echo /usr/bin/python3)"
+  STRIPE_API_BASE="${INTERCOM_VERIFY_TEST_STRIPE_BASE:-$STRIPE_API_BASE_PROD}"
   DAY="${INTERCOM_VERIFY_TEST_DAY:-$(date -u +%Y-%m-%d)}"
 fi
-readonly LOG_DIR LEDGER LEDGER_HELPER STAGE2_HELPER CORE_NOTICE_HELPER PROOF_DB POLICY_JSON CURL_BIN JQ_BIN TIMEOUT_BIN PY_BIN DAY
+readonly LOG_DIR LEDGER LEDGER_HELPER STAGE2_HELPER CORE_NOTICE_HELPER PROOF_DB POLICY_JSON FABLE_RULINGS_FILE \
+  CURL_BIN JQ_BIN TIMEOUT_BIN PY_BIN STRIPE_API_BASE DAY STRIPE_ENV_FILE
 
 # ---------------------------------------------------------------------------------------
 # Arguments
@@ -520,12 +554,21 @@ esac
 # user's inbox and the reply lands in the same conversation. The one other channel is a
 # Caroline comment in the user's own conversation (in-thread delivery, above).
 CREDITS_FILE="" APPROVED_BY="" MESSAGE_ID="" ACTION="post" THREAD="" THREAD_AUTO=0 REPLY_DUE="" GMO=0 NO_CORRECTION=0
-MESSAGE_TYPE="email" INAPP_FALLBACK=0 ROUTE_WHY=""
-readonly REQ_TYPE="email" EXPECT_TYPE="email"
+MESSAGE_TYPE="email" CHANNEL="" INAPP_FALLBACK=0 ROUTE_WHY=""
+# In-app delivery (captain 2026-10-26 16:05Z: "Caps may pace email only; the in-app message goes to
+# everyone", relayed by firstmate inbox 010): with --channel inapp an initial status-like note goes
+# in the user's own open conversation when there is one (as always), otherwise as an Intercom
+# in-app message (POST /messages message_type in_app), never by email. The driver uses it once
+# the day's email budget is spent, so nobody waits for the email cap. Same copy, same ledger.
+# NOT readonly: set_inapp() moves them with the channel (the post-send assertion reads them).
+REQ_TYPE="email" EXPECT_TYPE="email"
+# The in-app payload is built by payload()'s own branch (request message_type "in_app", body only, no subject);
+# MESSAGE_TYPE/EXPECT_TYPE stay "inapp", the value Intercom returns and this repo records (QA #1370).
+set_inapp() { MESSAGE_TYPE="inapp"; EXPECT_TYPE="inapp"; }
 CAMPAIGN="verify-live" KIND="initial" PARENT_ID="" CAMPAIGN_SET=0 KIND_SET=0 COPY_ARG=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --credits-file|--approved-by|--message-id|--campaign|--kind|--parent-message-id|--copy|--conversation|--reply-due)
+    --credits-file|--approved-by|--message-id|--campaign|--kind|--parent-message-id|--copy|--conversation|--reply-due|--channel)
       [ $# -ge 2 ] || { usage; die "$1 needs a value"; }
       case "$1" in
         --credits-file)      CREDITS_FILE="$2" ;;
@@ -537,6 +580,7 @@ while [ $# -gt 0 ]; do
         --copy)              COPY_ARG="$2" ;;
         --conversation)      THREAD="$2" ;;
         --reply-due)         REPLY_DUE="$2" ;;
+        --channel)           CHANNEL="$2" ;;
       esac
       shift 2 ;;
     --dry-run)  ACTION="dry-run"; shift ;;
@@ -593,6 +637,118 @@ api() {
       -H "Content-Type: application/json" -H "Intercom-Version: $API_VERSION" \
       --data @- "$API_BASE$path" 2>&1
   fi
+}
+
+# stripe_key / stripe_get / verified_refund_facts --------------------------------------------------------------
+# QA 2026-11-04 finding 1: a refund note is a FINANCIAL statement, so its facts are read from the processor at send
+# time. Shape checks on a caller-supplied file can describe a real refund id with a wrong amount, card, date or state,
+# and the note would then say something untrue about money that actually moved.
+# The key is read here and nowhere else - never echoed, never an argv (no ps, no shell history).
+stripe_key() {
+  if [ -n "${MUSOAI_STRIPE_API_KEY:-}" ]; then printf '%s' "$MUSOAI_STRIPE_API_KEY"; return 0; fi
+  [ -r "$STRIPE_ENV_FILE" ] || return 1
+  grep -E "^${STRIPE_KEY_VAR}=" "$STRIPE_ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d "\"'" | tr -d '\r'
+}
+stripe_get() { # <path>: the response body on stdout, non-zero when the call itself failed
+  # QA r5 2026-11-04 finding 3: the key must NEVER be an argv element - `curl -H "Authorization: Bearer sk_..."`
+  # is visible to any local `ps` / /proc/<pid>/cmdline. curl reads its config from stdin (-K -), so the secret
+  # travels on a pipe: it appears in no argv and in no file on disk.
+  local key
+  key="$(stripe_key)" || return 2
+  [ -n "$key" ] || return 2
+  printf '%s' "$key" | grep -qE '^[A-Za-z0-9_]+$' \
+    || { echo "STRIPE KEY CONTAINS UNEXPECTED CHARACTERS; refusing to pass it to curl" >&2; return 2; }
+  # QA 2026-11-04 (the "invalid to curl" finding): curl parses [] and {} in a URL as GLOBS, so an expand[] parameter
+  # can be rewritten or rejected ("bad range in URL") depending on what is inside the brackets - the charge read below
+  # asks for expand[]=invoice.subscription, and a globbed query is a query Stripe never answered. -g (--globoff) turns
+  # that off, so the URL reaches Stripe exactly as written.
+  printf 'header = "Authorization: Bearer %s"\nheader = "Accept: application/json"\nurl = "%s%s"\n' \
+      "$key" "$STRIPE_API_BASE" "$1" \
+    | "$TIMEOUT_BIN" 45 "$CURL_BIN" -sS -g -K - 2>&1
+}
+# verified_refund_facts <refund id>: the refund, its charge and its subscription, straight from Stripe, as one JSON
+# object. exit 4 = the processor could not be read / did not agree the object exists: never renders, never sends.
+verified_refund_facts() {
+  local rid="$1" key refund charge
+  key="$(stripe_key)" || { echo "STRIPE KEY UNAVAILABLE" >&2; return 4; }
+  [ -n "$key" ] || { echo "STRIPE KEY MISSING ($STRIPE_KEY_VAR in $STRIPE_ENV_FILE)" >&2; return 4; }
+  refund="$(stripe_get "/v1/refunds/$rid")" || { echo "REFUND READ FAILED: $(printf '%s' "$refund" | head -c 200)" >&2; return 4; }
+  printf '%s' "$refund" | "$JQ_BIN" -e '.id != null and .amount != null and .currency != null and .charge != null' >/dev/null 2>&1 \
+    || { echo "REFUND NOT VERIFIED: $(printf '%s' "$refund" | head -c 200)" >&2; return 4; }
+  charge="$(stripe_get "/v1/charges/$(printf '%s' "$refund" | "$JQ_BIN" -r '.charge')?expand[]=invoice.subscription")" \
+    || { echo "CHARGE READ FAILED: $(printf '%s' "$charge" | head -c 200)" >&2; return 4; }
+  printf '%s' "$charge" | "$JQ_BIN" -e '.id != null and .amount != null and .created != null' >/dev/null 2>&1 \
+    || { echo "CHARGE NOT VERIFIED: $(printf '%s' "$charge" | head -c 200)" >&2; return 4; }
+  # The subscription sentence comes from Stripe's object (cancel_at_period_end + current_period_end, or status), never
+  # from a caller's opinion of it.
+  "$JQ_BIN" -n --argjson r "$refund" --argjson c "$charge" '
+    ($c.invoice) as $inv
+    | (if ($inv | type) == "object" then $inv.subscription else null end) as $sub
+    | { refund_id: $r.id, amount: $r.amount, currency: $r.currency, refund_status: ($r.status // ""),
+        refund_created: $r.created, charge_id: $c.id, charge_amount: $c.amount, charge_created: $c.created,
+        card_last4: ($c.payment_method_details.card.last4 // ""),
+        card_brand: ($c.payment_method_details.card.brand // ""),
+        charge_email: ($c.billing_details.email // ""),
+        subscription: (if ($sub | type) == "object"
+                       then { id: $sub.id, status: ($sub.status // ""),
+                              cancel_at_period_end: ($sub.cancel_at_period_end == true),
+                              current_period_end: ($sub.current_period_end // 0) }
+                       else null end) }'
+}
+
+# bind_refund_to_processor <input-json>: prints the input with `.refund` REPLACED by what Stripe says, or refuses.
+# QA 2026-11-04 finding 1: validation alone is not binding - the note must render the processor's numbers, so a
+# structurally valid file with a real refund id and a wrong amount cannot produce a false confirmation. Every field the
+# copy uses is compared first (a disagreement is named, never silently corrected) and then overwritten from Stripe.
+bind_refund_to_processor() {
+  local input="$1" rid facts why uemail
+  rid="$(printf '%s' "$input" | "$JQ_BIN" -r '.refund.refund_id // ""')"
+  # r5 2026-11-04 finding 1 (critical): binding the refund to its FACTS is not binding it to its RECIPIENT. A file whose
+  # user is one customer and whose refund belongs to another rendered one customer's money to the other (235578/Pancho
+  # describing 228568's $210.72, card 2009, 2027-09-06) and exited 0. The charge carries the payer's billing email, so
+  # the note can only be built when Stripe's payer is the person this file addresses - and an ABSENT or unreadable
+  # (e.g. encrypted) address is a refusal, never a default yes.
+  uemail="$(printf '%s' "$input" | "$JQ_BIN" -r '.user.email // "" | ascii_downcase')"
+  facts="$(verified_refund_facts "$rid")" || refuse "refund-confirm: the refund facts could not be read from Stripe ($(printf '%s' "$facts" | head -c 200)). Nothing was sent or claimed; a refund note never renders an unverified fact."
+  why="$(printf '%s' "$facts" | "$JQ_BIN" -L "$JQ_LIB_DIR" -r --argjson in "$(printf '%s' "$input" | "$JQ_BIN" -c '.refund')" --arg uemail "$uemail" '
+    include "refund-money";
+    def d2: todate | .[0:10];
+    # QA r5 2026-11-04 finding 2: `pending` is money on its way, not money that arrived - a note saying "confirming
+    # your refund ... issued on <date>" about a refund that can still fail is premature, so only `succeeded` renders.
+    (if (.charge_email | ascii_downcase) == "" then "recipient: Stripe records no billing email for this charge (absent or encrypted), so the refund cannot be tied to \($uemail)" else empty end),
+    (if (.charge_email | ascii_downcase) != "" and (.charge_email | ascii_downcase) != $uemail
+     then "recipient: the refund on \(.refund_id) belongs to \(.charge_email | ascii_downcase), the file addresses \($uemail)" else empty end),
+    (if .refund_status != "succeeded" then "refund status is \(.refund_status), not a completed refund" else empty end),
+    (if refund_money(.amount; .currency) != $in.amount then "amount: Stripe says \(refund_money(.amount; .currency)) \(.currency), the file says \($in.amount)" else empty end),
+    (if .currency != $in.currency then "currency: Stripe says \(.currency), the file says \($in.currency)" else empty end),
+    (if (.refund_created | d2) != $in.issued_on then "issued_on: Stripe says the refund was issued \(.refund_created | d2), the file says \($in.issued_on)" else empty end),
+    (if .card_last4 != $in.card_last4 then "card_last4: Stripe says \(.card_last4), the file says \($in.card_last4)" else empty end),
+    (if .subscription == null then "the charge has no subscription on it, so no subscription sentence can be true" else empty end),
+    (if .subscription != null and (if .subscription.status == "canceled" or .subscription.status == "incomplete_expired"
+         then "cancelled"
+         elif (.subscription.cancel_at_period_end and (.subscription.status == "active" or .subscription.status == "trialing"))
+         then "cancel_at_period_end"
+         elif .subscription.status == "active" or .subscription.status == "trialing" then "active"
+         else "unknown:" + .subscription.status end) != $in.subscription_state
+     then "subscription_state: Stripe says \(if .subscription.status == "canceled" or .subscription.status == "incomplete_expired" then "cancelled" elif (.subscription.cancel_at_period_end and (.subscription.status == "active" or .subscription.status == "trialing")) then "cancel_at_period_end" elif .subscription.status == "active" or .subscription.status == "trialing" then "active" else "unknown:" + .subscription.status end), the file says \($in.subscription_state)" else empty end),
+    (if .subscription != null and .subscription.cancel_at_period_end
+        and (.subscription.current_period_end | d2) != ($in.active_until // "") and $in.subscription_state == "cancel_at_period_end"
+     then "active_until: Stripe says \(.subscription.current_period_end | d2), the file says \($in.active_until // "")" else empty end)
+  ' 2>&1)"
+  [ -z "$why" ] || refuse "refund-confirm: the file and Stripe disagree, so nothing was sent or claimed. $why"
+  printf '%s' "$input" | "$JQ_BIN" -L "$JQ_LIB_DIR" -c --argjson f "$facts" '
+    include "refund-money";
+    def d2: todate | .[0:10];
+    .refund = { refund_id: $f.refund_id, amount: refund_money($f.amount; $f.currency), currency: $f.currency,
+                issued_on: ($f.refund_created | d2), card_last4: $f.card_last4,
+                subscription_state: (if $f.subscription.status == "canceled" or $f.subscription.status == "incomplete_expired"
+                                     then "cancelled"
+                                     elif ($f.subscription.cancel_at_period_end and ($f.subscription.status == "active" or $f.subscription.status == "trialing"))
+                                     then "cancel_at_period_end"
+                                     elif $f.subscription.status == "active" or $f.subscription.status == "trialing" then "active"
+                                     else "unknown:" + $f.subscription.status end),
+                active_until: (if $f.subscription != null and $f.subscription.cancel_at_period_end
+                               then ($f.subscription.current_period_end | d2) else null end) }'
 }
 
 new_log_file() { # <kind> <target>
@@ -794,6 +950,14 @@ case "$CAMPAIGN" in
     [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live."
     [ "$KIND" = "initial" ] || refuse "withdrawal-confirm has no follow-ups."
     ;;
+  refund-confirm)
+    # Ruling refund-confirm-1103 (Fable d2 2026-11-03 22:0xZ, firstmate 109): confirming refunds that ALREADY happened.
+    # One note per REFUND (the Stripe refund id is the request id), never a follow-up: money that moved needs one tell,
+    # not a sequence. Facts come from Stripe/core and are validated below; the body is the ruling's copy, byte-exact.
+    MAX_CREDITS=1; MAX_LISTED=1; COPY="refundconfirm"; APPROVAL_REF="$APPROVAL_REF_REFUND_CONFIRM"
+    [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live; refund-confirm has one copy, the ruling's."
+    [ "$KIND" = "initial" ] || refuse "refund-confirm has no follow-ups: one note per refund, ever."
+    ;;
   status-doc-received|status-team-review)
     # No-ask status notes (firstmate 070/071): one per user, ever; up to 3 titles.
     MAX_CREDITS=1000; MAX_LISTED=3; APPROVAL_REF="$APPROVAL_REF_STATUS"
@@ -975,6 +1139,17 @@ if [ -n "$THREAD" ]; then
     || refuse "--conversation must be the numeric Intercom conversation id (got '$THREAD')."
   MESSAGE_TYPE="comment"
 fi
+case "$CHANNEL" in
+  "") ;;
+  inapp)
+    case "$CAMPAIGN" in
+      uvn-status|status-doc-received|status-team-review|claim-status|gap-ask) ;;
+      *) refuse "--channel inapp applies to uvn-status, the status notes, claim-status and gap-ask only." ;;
+    esac
+    [ "$KIND" = "initial" ] || refuse "--channel inapp applies to an initial note."
+    if [ -z "$THREAD" ]; then set_inapp; fi ;;
+  *) refuse "--channel must be inapp (got '$CHANNEL'); without it the note goes in-thread or by email." ;;
+esac
 if [ "$ACTION" = "thread-contact" ]; then
   case "$CAMPAIGN" in
     withdrawal-confirm|email-changed|email-changed-dup) ;;
@@ -991,11 +1166,49 @@ else
   printf '%s' "$PARENT_ID" | grep -qE '^[0-9]{1,24}$' \
     || refuse "a follow-up needs --parent-message-id, the numeric Intercom id of the note it follows up (got '${PARENT_ID:-<empty>}')."
 fi
-[ -n "$APPROVED_BY" ] || refuse "--approved-by <SlackUID> is required: the captain approved these campaigns (U7RP6HKUZ)."
-printf '%s' "$APPROVED_BY" | grep -qE '^U[A-Z0-9]{8,12}$' \
-  || refuse "--approved-by must be a human's Slack USER ID; '$APPROVED_BY' is not one. Agent identities and self-approval never authorize a message to a customer."
-[ "$APPROVED_BY" = "$CAPTAIN_UID" ] \
-  || refuse "$APPROVED_BY did not approve the verify-request campaigns. Only the captain ($CAPTAIN_UID) did; any other customer message goes through intercom-ops-write.sh."
+[ -n "$APPROVED_BY" ] || refuse "--approved-by is required: the captain's Slack id (U7RP6HKUZ), or a Fable ruling id (fable-ruling-YYYYMMDD-N) for a template class that ruling pre-approved."
+# ---------------------------------------------------------------------------------------------
+# WHO authorized this send (captain 2026-11-03: "users aren't in the dark ... no human reviews is the
+# goal"). Two legal answers, and nothing else:
+#   captain-slack  a human's Slack id, still only the captain's, for every campaign;
+#   fable-ruling   a ruling id from policies/fable-rulings.json, accepted ONLY for the exact campaign+copy
+#                  pair that ruling lists. The registry is data, so widening a class is a reviewed edit; and
+#                  an unreadable registry refuses rather than opens.
+# Free-form replies (intercom-ops-write.sh) are untouched: they still need a human Slack id.
+APPROVER_KIND=""; APPROVAL_ID=""; TEMPLATE_SHA=""
+if printf '%s' "$APPROVED_BY" | grep -qE '^U[A-Z0-9]{8,12}$'; then
+  [ "$APPROVED_BY" = "$CAPTAIN_UID" ] \
+    || refuse "$APPROVED_BY did not approve the verify-request campaigns. Only the captain ($CAPTAIN_UID) did, or a Fable ruling id for a class it pre-approved; any other customer message goes through intercom-ops-write.sh."
+  APPROVER_KIND="captain-slack"; APPROVAL_ID="$APPROVED_BY"
+elif printf '%s' "$APPROVED_BY" | grep -qE '^fable-ruling-[0-9]{4}-[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)?$'; then
+  [ -r "$FABLE_RULINGS_FILE" ] \
+    || refuse "--approved-by '$APPROVED_BY' is a ruling id and the registry '$FABLE_RULINGS_FILE' is not readable; refusing rather than guessing what a ruling covers."
+  RULING_VERDICT="$("$JQ_BIN" -r --arg id "$APPROVED_BY" --arg camp "$CAMPAIGN" --arg copy "$COPY" '
+    if (.rulings | type) != "object" then "malformed"
+    elif (.rulings[$id] // null) == null then "unknown"
+    else
+      ((.rulings[$id].classes // {}) | if type != "object" then "malformed" else . end) as $c
+      | if ($c | type) != "object" then "malformed"
+        # r5 2026-11-04 finding 2: a class value must be an ARRAY of copy tokens. An OBJECT value used to be ACCEPTED
+        # (`.[]` iterated its values, so {"why":"x","c":"refundconfirm"} approved refundconfirm) while a STRING value
+        # was refused only by accident (`.[]` errored into the `|| malformed` fallback). Both are now explicit.
+        elif ($c[$camp]? // [] | type) != "array" then "malformed"
+        else
+          ([$c[$camp] // [] | .[] | select(. == $copy)] | length) as $hit
+          | if $hit > 0 then "approved" else "class: " + (($c | keys) | join(", ")) end
+        end
+    end' "$FABLE_RULINGS_FILE" 2>/dev/null || printf 'malformed')"
+  case "$RULING_VERDICT" in
+    approved) APPROVER_KIND="fable-ruling"; APPROVAL_ID="$APPROVED_BY" ;;
+    unknown) refuse "--approved-by '$APPROVED_BY' is not in $FABLE_RULINGS_FILE. A ruling id is accepted only once a reviewed registry row names it AND the template classes it pre-approves; until then the captain's Slack id is the only approver." ;;
+    malformed) refuse "$FABLE_RULINGS_FILE is malformed; refusing rather than treating an unreadable registry as approval." ;;
+    class:*) refuse "--approved-by '$APPROVED_BY' pre-approves template classes ${RULING_VERDICT#class: }, not '$COPY' of campaign '$CAMPAIGN'. Every other send, and every free-form reply, still needs the captain's Slack id ($CAPTAIN_UID)." ;;
+    *) refuse "$FABLE_RULINGS_FILE could not be read for '$APPROVED_BY'; refusing rather than guessing." ;;
+  esac
+else
+  refuse "--approved-by must be a human's Slack USER ID or a Fable ruling id (fable-ruling-YYYYMMDD-N); '$APPROVED_BY' is neither. Agent identities and self-approval never authorize a message to a customer."
+fi
+readonly APPROVER_KIND APPROVAL_ID
 [ -n "$CREDITS_FILE" ] || refuse "--credits-file FILE is required (see Usage)."
 [ -r "$CREDITS_FILE" ] || die "--credits-file '$CREDITS_FILE' is not readable."
 "$JQ_BIN" -e 'type == "object" and (.user|type) == "object" and (.credits|type) == "array"' "$CREDITS_FILE" >/dev/null 2>&1 \
@@ -1026,6 +1239,13 @@ INPUT="$("$JQ_BIN" -c '
                              doc_shas: ([(.doc_shas // [])[]? | strings | select(test("^[0-9a-f]{64}$"))] | unique | .[0:20]),
                              doc_map: ((.doc_map // {}) | if type == "object" then with_entries(select((.key | test("^[A-Za-z0-9-]{1,64}$")) and ((.value | type) == "string") and (.value | test("^[0-9a-f]{64}$")))) else {} end),
                              doc_intakes: ((.doc_intakes // {}) | if type == "object" then with_entries(select((.key | test("^[0-9a-f]{64}$")) and ((.value | type) == "string") and (.value | test("^[A-Za-z0-9:._-]{1,80}$")))) else {} end) }),
+    refund: ((.refund // {}) | { refund_id: ((.refund_id // "") | clean), amount: ((.amount // "") | clean),
+                               currency: ((.currency // "") | clean | ascii_downcase), issued_on: ((.issued_on // "") | clean),
+                               card_last4: ((.card_last4 // "") | clean),
+                               subscription_state: ((.subscription_state // "") | clean | ascii_downcase),
+                               # d2 2026-11-04: the cancel-at-period-end sentence needs the date access runs to, and it
+                               # is a Stripe fact (current_period_end), never a typed date.
+                               active_until: ((.active_until // "") | clean) }),
     credits: [ .credits[] | { request_id: ((.request_id // "") | clean), role: ((.role // "") | clean),
                               track_title: ((.track_title // "") | clean), artist_name: ((.artist_name // "") | clean),
                               role_families: ([(.role_families // [])[] | clean] | if length == 0 then ["other"] else . end),
@@ -1255,6 +1475,34 @@ case "$CAMPAIGN" in
     printf '%s' "$INPUT" | "$JQ_BIN" -e '.credits[0].request_id | test("^[A-Za-z0-9-]{1,64}$")' >/dev/null \
       || refuse "reply-ref needs one entry whose request_id is the reply's key (the decided request for /y)."
     INPUT="$(printf '%s' "$INPUT" | "$JQ_BIN" -c '.credits[0] += {role: "-", track_title: "-", artist_name: "-"}')" ;;
+  refund-confirm)
+    # The facts ARE the message (firstmate 109: "every placeholder from Stripe/core, never typed by hand"), so a refund
+    # note exists only when Stripe's own refund object is present and self-consistent. jq -e fails closed on a missing key.
+    # The entry's request id IS the Stripe refund id (re_...): one note per REFUND, ever, and the ledger only ever treats
+    # it as an opaque key (which is why the shared shape check below admits the underscore Stripe puts in every id).
+    printf '%s' "$INPUT" | "$JQ_BIN" -e '
+      (.credits[0].request_id | test("^re_[A-Za-z0-9]{8,64}$"))
+      and (.refund.refund_id == .credits[0].request_id)
+      # the amount is stated in MAJOR units, in the currency of the refund: 12.50 usd, 500 jpy, 1.234 kwd. The shape
+      # accepts 0-3 decimals and the processor binding then refuses anything that is not the canonical form for that
+      # currency (refund-money.jq), so a "5.00" for a 500 JPY refund can never reach a customer.
+      and (.refund.amount | test("^[0-9]{1,9}(\\.[0-9]{1,3})?$"))
+      and (.refund.currency | test("^[a-z]{3}$"))
+      and (.refund.issued_on | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$"))
+      and (.refund.card_last4 | test("^[0-9]{4}$"))
+      and (.refund.subscription_state | IN("cancelled", "active", "cancel_at_period_end"))
+      and (if .refund.subscription_state == "cancel_at_period_end"
+           then (.refund.active_until | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")) else true end)' >/dev/null \
+      || refuse "refund-confirm needs the refund facts in the credits file: refund_id (equal to the entry's request_id), amount as a decimal (12.50), currency, issued_on (YYYY-MM-DD), card_last4 (four digits) and subscription_state (cancelled, active, or cancel_at_period_end with active_until). Nothing was sent or claimed."
+    # QA 2026-11-04 finding 1: the shape is only the SHAPE. Every fact is then read from the processor and compared; a
+    # file that disagrees with Stripe is refused by name, and the render uses Stripe's values, never the file's.
+    # every path that can render or send binds to the processor; only --validate (shape only) does not
+    case "$ACTION" in
+      validate) ;;
+      *) INPUT="$(bind_refund_to_processor "$INPUT")" ;;
+    esac
+    INPUT="$(printf '%s' "$INPUT" | "$JQ_BIN" -c '.credits[0] += {role: "-", track_title: "-", artist_name: "-"}') "
+    INPUT="${INPUT% }" ;;
   email-changed|email-changed-dup)
     [ -n "$THREAD" ] || refuse "$CAMPAIGN is a threaded reply only: --conversation <id> (the requester's own conversation) is required."
     printf '%s' "$INPUT" | "$JQ_BIN" -e '.credits[0].request_id | test("^[A-Za-z0-9-]{1,64}$")' >/dev/null \
@@ -1319,7 +1567,7 @@ if [ "$COPY" = "teamreviewcount" ]; then
     | (if (.track_id | test("^[A-Za-z0-9-]{0,64}$")) then . else .track_id = "" end))
     | .user.pending_count = ([(.user.pending_count // 0), (.credits | length)] | max)')"
 fi
-bad="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '[.credits[] | select((.request_id | test("^[A-Za-z0-9-]{1,64}$") | not)
+bad="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '[.credits[] | select((.request_id | test("^[A-Za-z0-9_-]{1,64}$") | not)
   or (.role|length) == 0 or (.role|length) > 120 or (.track_title|length) == 0 or (.track_title|length) > 200
   or (.artist_name|length) == 0 or (.artist_name|length) > 200
   or ((.profile_id|length) > 0 and (.profile_id | test("^[A-Za-z0-9-]{1,64}$") | not))
@@ -1861,6 +2109,32 @@ def withdrawal_confirm($c):
   $c[0] as $x
   | { subject: "Your Muso credit request for \($x.track_title | qt)",
       segs: [ {p: "Hi! We've withdrawn your credit request for \($x.role) on \($x.track_title | qt), as you asked. Nothing else changes on your profile. If you need anything else, just reply here."} ] };
+# fable-copy-1103-d2/refund-confirm (Fable d2 2026-11-03 22:0xZ, firstmate 109) - BYTE-EXACT, one sentence, no ask, no
+# offer, no promise about future work. Only the placeholders change, and every one of them is a fact read from
+# Stripe/core and validated before this runs: the amount (with its currency, never a bare number), the day the refund
+# was issued, the card's last four digits, and which of the TWO ruled subscription sentences is true. The day is rendered
+# the way this gate renders every other customer-facing day (3 November 2026), because the ruling names a date
+# placeholder and a raw ISO string is not customer copy.
+#   The closing "Nothing more is needed from you" is the ruling's own wording to a customer whose money already moved,
+# and it is safe there BECAUSE nothing is owed. It is never available to someone who still owes us proof: the
+# owes-nothing body guard below (NIE_BODY) holds any note carrying that promise for a user comm_state shows owes
+# proof, so this sentence cannot ride out over an open ask.
+def refund_confirm($fn; $r):
+  ([ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" ]) as $months
+  | ($r.issued_on | split("-") | map(tonumber)) as $d
+  | ([ "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December" ][$d[1] - 1]) as $mon
+  | ($r.active_until // "" | split("-") | map(tonumber)) as $u
+  | ({cancelled: "Your subscription is now cancelled and will not renew.",
+      active: "Your subscription stays active.",
+      cancel_at_period_end: (if ($u | length) == 3 then
+        "Your subscription stays active until \($u[2]) \($months[$u[1] - 1]) \($u[0]) and will not renew."
+        else "" end)}[$r.subscription_state]) as $what
+  | (if $r.currency == "usd" then "$" + $r.amount else $r.amount + " " + ($r.currency | ascii_upcase) end) as $amt
+  # d2 2026-11-04 04:1xZ: a customer with no personal first name on file is greeted "Hi there," - never a typed name,
+  # never a business name in a person's slot ("Hi PT," for the account 'PT Houston' was rendered but not sent).
+  | (if ($fn // "") == "" then "Hi there," else "Hi \($fn)," end) as $hello
+  | { subject: "Your refund is on its way (Muso)",
+      segs: [ {p: "\($hello) confirming your refund of \($amt) issued on \($d[2]) \($mon) \($d[0]) to the card ending \($r.card_last4). \($what) Nothing more is needed from you."} ] };
 # Status notes (firstmate 070 verbatim; 071 as credit-trust-llm-t01 drafted). Not asks.
 def req_s($n): if $n == 1 then "request" else "requests" end;
 def titles($c; $maxl):
@@ -2081,10 +2355,11 @@ def gap_ask($fn; $c; $maxl):
    elif $copy == "claimpending" then claim_proof_pending($fn; .claim)
    elif $copy == "credithold" then credit_hold_status($fn; .credits; $maxl)
    elif $copy == "teamreviewcount" then status_team_review_count($fn; (.user.pending_count // (.credits | length)))
-   elif ($copy | startswith("ref")) then reply_ref($fn; $copy[3:])
+   elif ($copy | test("^ref[a-y]$")) then reply_ref($fn; $copy[3:])
    elif $copy == "emailchg" then email_changed(false)
    elif $copy == "emailchgdup" then email_changed(true)
    elif $copy == "withdrawal" then withdrawal_confirm(.credits)
+   elif $copy == "refundconfirm" then refund_confirm($fn; .refund)
    elif $copy == "uvn" then uvn_status($fn; .credits; $maxl)
    elif $copy == "gap" then gap_ask($fn; .credits; $maxl)
    elif $copy == "proofneed" then proof_need_ask($fn; .credits; .need; $maxl)
@@ -2283,13 +2558,16 @@ payload() { # <rendered-json> <contact-id>
   if [ "$MESSAGE_TYPE" = "inapp" ]; then
     # fable-copy-1030-r5/h: the SAME approved body, byte-identical, as an Intercom in-app message
     # (no subject or email template: in-app messages carry the body only).
+    # QA #1370: the REQUEST enum is "in_app" - the value Intercom 2.11 documents for create-a-message (and the one
+    # its own example uses); "inapp" is the RESPONSE/spelling every reader in this repo records. A stub that echoed
+    # the request back could not tell these apart, which is how "inapp" survived in the POST body.
     printf '%s' "$1" | "$JQ_BIN" -c --arg admin "$INTERCOM_ADMIN_ID" --arg to "$2" \
-      '{message_type: "inapp", from: {type: "admin", id: $admin}, to: {type: "user", id: $to}, body: .html}'
+      '{message_type: "in_app", from: {type: "admin", id: $admin}, to: {type: "user", id: $to}, body: .html}'
     return
   fi
   printf '%s' "$1" | "$JQ_BIN" -c --arg mt "$REQ_TYPE" --arg admin "$INTERCOM_ADMIN_ID" --arg to "$2" \
     '{message_type: $mt, template: "personal", from: {type: "admin", id: $admin}, to: {type: "user", id: $to}, body: .html}
-     + {subject: .subject}'
+     + (if $mt == "email" then {subject: .subject} else {} end)'
 }
 
 case "$ACTION" in
@@ -2622,7 +2900,7 @@ case "$CAMPAIGN:$COPY" in status-team-review:*|claim-status:*|status-doc-receive
 # whose text says nothing (else) is needed / no need to send anything is held for a user who still owes proof
 NIE_BODY=0
 NIE_PHRASE="$(printf '%s' "$RENDERED" | "$JQ_BIN" -r '(.subject // "") + " " + (.text // "") + " " + (.html // "")' 2>/dev/null \
-     | grep -oiE 'nothing( else)? is needed|no need to (send|resend)' | head -1 || true)"
+     | grep -oiE 'nothing( else)? is needed|nothing more is needed|no need to (send|resend)' | head -1 || true)"
 if [ -n "$NIE_PHRASE" ]; then
   NIE=1; NIE_BODY=1
 fi
@@ -2920,13 +3198,23 @@ if [ -n "$THREAD" ] && [ "$LIVE" = "1" ]; then
       # r5 19:0xZ: a thread waiting on the customer gets no automated line, by thread or as an email beside it
       printf 'HELD waiting_on_customer credits=%s last_admin_question_at=%s (%s); nothing was sent or claimed\n' "$N" "$THREAD_WAIT" "${THREAD_WHY:0:200}"; exit 3
     elif [ "$THREAD_OFFTOPIC" = "1" ]; then
-      # R9: never into an unrelated thread; by email instead (every campaign, R1 included - p1 165 / Fable 166)
-      printf 'R9 %s; delivering by email\n' "$THREAD_WHY" >&2
-      THREAD=""; MESSAGE_TYPE="email"; R1_THREAD=0
+      # R9: never into an unrelated thread; by email instead (every campaign, R1 included - p1 165 / Fable 166) -
+      # unless --channel inapp was asked for, in which case the note still never goes by email (QA #1370: the
+      # auto-selected-thread branch above restored the channel and this one silently spent the email budget)
+      THREAD=""; R1_THREAD=0
+      if [ "$CHANNEL" = "inapp" ]; then
+        printf 'R9 %s; delivering in-app (the requested channel)\n' "$THREAD_WHY" >&2
+        set_inapp
+      else
+        printf 'R9 %s; delivering by email\n' "$THREAD_WHY" >&2
+        MESSAGE_TYPE="email"
+      fi
     elif [ "$R1_THREAD" = "1" ]; then
       printf 'HELD r1_filing_thread credits=%s (%s); nothing was sent or claimed\n' "$N" "${THREAD_WHY:0:300}"; exit 3
     elif [ "$THREAD_AUTO" = "1" ]; then
       THREAD=""; MESSAGE_TYPE="email"; CONTACT_ID="$CANON_CONTACT_ID"
+      # --channel inapp: the auto thread is unusable, but the note still never goes by email
+      [ "$CHANNEL" != "inapp" ] || set_inapp
     elif [ "$THREAD_UNREAD" = "1" ]; then
       printf 'THREAD CHECK NOT VERIFIED; nothing was sent or claimed: %s\n' "$THREAD_WHY" >&2; exit 4
     else
@@ -2939,12 +3227,31 @@ fi
 # was selected, and an unreachable route moves to the NEXT channel in this fixed order:
 #   1. in-thread Caroline comment (an open conversation) - already chosen above; email reachability is moot;
 #   2. email (POST /messages, message_type email) - only when Intercom will email this contact;
-#   3. Intercom in-app (POST /messages, message_type inapp, the same approved body) - only with --inapp-fallback
-#      (armed after the signed first-batch dry run) and only for a USER contact the messenger has seen
+#   3. Intercom in-app (POST /messages, request message_type in_app, the same approved body) - only with
+#      --inapp-fallback or an explicit --channel inapp, and only for a USER contact the messenger has seen
 #      (web, iOS or Android last_seen_at);
 #   4. push, 5. bell - hydra has no sender for either yet (core #11075 dark), so they are named in the reason only;
 #   none left: refused and RECORDED as no_channel (terminal, never a send row; the next run skips the user and the
 #   outbound tick's no-channel tray carries it). Only a readable contact object for THIS contact proves anything.
+# QA #1370 (Important, round 2): in-app ELIGIBILITY is a property of the contact, not of the email route. It used to be
+# evaluated only inside the email-unreachable branch, so an explicit --channel inapp on an email-REACHABLE contact posted
+# an in_app note to a lead, a never-seen contact, or account 15 - Intercom accepts it and the ledger records `sent`, so
+# the user receives nothing and is never retried. One predicate, used wherever the selected route is in-app.
+inapp_ineligible() { # <contact json>: the reason this contact cannot receive an in-app note, or empty
+  local c="$1"
+  if [ "$USER_ID" = "15" ]; then
+    printf 'account 15 never gets an in-app message (fable-copy-1030-r5/h)'; return 0
+  fi
+  if [ "$(printf '%s' "$c" | "$JQ_BIN" -r '.role // ""' 2>/dev/null)" != "user" ]; then
+    printf 'in-app goes to Intercom users only (this contact is not a user)'; return 0
+  fi
+  if ! printf '%s' "$c" | "$JQ_BIN" -e '[.last_seen_at, .ios_last_seen_at, .android_last_seen_at]
+      | map(select(type == "number" and . > 0)) | length > 0' >/dev/null 2>&1; then
+    printf 'in-app not deliverable (the messenger has never seen this contact)'; return 0
+  fi
+  return 0
+}
+
 if [ -z "$THREAD" ] && [ "$LIVE" = "1" ]; then
   # QA #1511: reachability is read for the FINAL recipient; the cached G4 contact is reused only when it IS that contact.
   reach="${G_CONTACT:-}"
@@ -2958,18 +3265,17 @@ if [ -z "$THREAD" ] && [ "$LIVE" = "1" ]; then
   unreach="$(printf '%s' "$reach" | "$JQ_BIN" -r 'if .has_hard_bounced == true then "hard_bounced"
     elif .unsubscribed_from_emails == true then "unsubscribed" elif .marked_email_as_spam == true then "marked_spam"
     else "" end' 2>/dev/null)" || unreach="unreadable"
+  inapp_why=""
+  # the selected route is in-app (an explicit --channel inapp, or the email-unreachable fallback below): eligibility is
+  # checked for BOTH, never only for the fallback
+  if [ "$MESSAGE_TYPE" = "inapp" ] || [ -n "$unreach" ]; then inapp_why="$(inapp_ineligible "$reach")"; fi
   if [ -n "$unreach" ]; then
-    inapp_why=""
-    if [ "$USER_ID" = "15" ]; then
-      inapp_why="account 15 never gets an in-app message (fable-copy-1030-r5/h)"
-    elif [ "$(printf '%s' "$reach" | "$JQ_BIN" -r '.role // ""' 2>/dev/null)" != "user" ]; then
-      inapp_why="in-app goes to Intercom users only (this contact is not a user)"
-    elif ! printf '%s' "$reach" | "$JQ_BIN" -e '[.last_seen_at, .ios_last_seen_at, .android_last_seen_at]
-        | map(select(type == "number" and . > 0)) | length > 0' >/dev/null 2>&1; then
-      inapp_why="in-app not deliverable (the messenger has never seen this contact)"
-    elif [ "$INAPP_FALLBACK" != "1" ]; then
+    if [ -z "$inapp_why" ] && [ "$INAPP_FALLBACK" != "1" ] && [ "$CHANNEL" != "inapp" ]; then
       # QA #1511: an in-app route EXISTS but is not armed yet (armed only after the signed first-batch dry run).
       # Not a terminal refusal: nothing is recorded, so the first run with --inapp-fallback still reaches this user.
+      # QA #1370: --channel inapp is itself the arming - the caller asked for in-app and nothing else, so a contact
+      # Intercom will not email is exactly the contact this route exists for. The email-initiated fallback keeps
+      # needing --inapp-fallback; only the explicit request skips it. The eligibility checks above still stand.
       printf 'DEFERRED inapp_not_armed credits=%s (email_unreachable:%s; an in-app route exists, --inapp-fallback not set); nothing was sent or claimed\n' "$N" "$unreach"
       exit 3
     fi
@@ -2978,6 +3284,12 @@ if [ -z "$THREAD" ] && [ "$LIVE" = "1" ]; then
     else
       record_refusal "no_channel: email_unreachable:$unreach (Intercom will not email this contact); $inapp_why; push and bell have no hydra sender yet; nothing was sent"
     fi
+  elif [ -n "$inapp_why" ]; then
+    # the caller asked for in-app and this contact cannot receive it, but Intercom WILL email them: DEFER, never post an
+    # undeliverable note (a `sent` row would suppress the retry) and never record a terminal no_channel refusal for a
+    # user who has a working channel - the next run, or the next day's email budget, reaches them.
+    printf 'DEFERRED inapp_ineligible credits=%s (%s; the email route is open, so this is retried, not refused); nothing was sent or claimed\n' "$N" "$inapp_why"
+    exit 3
   fi
 fi
 if [ "$CAMPAIGN" = "retro-past" ]; then
@@ -3152,6 +3464,10 @@ fi
 if [ -n "$REPLY_DUE" ] && [ "$ACTION" = "post" ]; then rd_final_read; fi
 # p1 615: the copy this note renders and its openers/prefixes go on the ledger row (audits read the ledger)
 NOTE_VARIANT="$( { [ "${C2:-0}" = "1" ] && echo c2; [ "${RD_PREFIX:-0}" = "1" ] && echo reply_due_correction; [ -n "${APPROVAL_REF_SUFFIX_O:-}" ] && echo o; true; } | paste -sd, -)"
+# The template identity this send renders, hashed: campaign|kind|copy|variant. Stamped on the ledger row with the
+# approval kind and id, so an audit can tell which approved template a note used without reading a log (the exact
+# bytes are separately pinned by body_sha256 at finalize).
+TEMPLATE_SHA="$(printf '%s' "$CAMPAIGN|$KIND|$COPY|$NOTE_VARIANT" | sha256sum | awk '{print $1}')"
 if [ "$KIND" = "initial" ]; then
   REFS_FILE="$(mktemp)"
   trap 'rm -f "$REFS_FILE"' EXIT
@@ -3162,12 +3478,14 @@ if [ "$KIND" = "initial" ]; then
     --approval-ref "$APPROVAL_REF$(if [ "$RD_PREFIX" = "1" ]; then printf '; correction %s' "$REPLY_DUE_CORRECTION_REF"; fi)${C2_SUFFIX:-}${APPROVAL_REF_SUFFIX_O:-}" \
     --contact-id "$CONTACT_ID" --refs-file "$REFS_FILE" ${WINDOWED_FLAG:+"$WINDOWED_FLAG"} \
     ${REPLY_DUE:+--reply-due "$REPLY_DUE" --conversation "$THREAD"} --copy-ref "$COPY" --variant "$NOTE_VARIANT" \
+    --approver-kind "$APPROVER_KIND" --approval-id "$APPROVAL_ID" --template-sha256 "$TEMPLATE_SHA" \
     ${PICK_ID:+--pick-id "$PICK_ID"})" \
     || die "the ledger claim failed; refusing to send without the idempotency record."
 else
   CLAIM="$(ledger claim-reminder --parent-message-id "$PARENT_ID" --kind "$KIND" --user-key "$EMAIL" --day "$DAY" \
     --request-ids "$ALL_IDS" --approved-by "$APPROVED_BY" --approval-ref "$APPROVAL_REF${C2_SUFFIX:-}" \
-    --copy-ref "$COPY" --variant "$NOTE_VARIANT")" \
+    --copy-ref "$COPY" --variant "$NOTE_VARIANT" \
+    --approver-kind "$APPROVER_KIND" --approval-id "$APPROVAL_ID" --template-sha256 "$TEMPLATE_SHA")" \
     || die "the ledger claim failed; refusing to send without the idempotency record."
 fi
 case "$(printf '%s' "$CLAIM" | "$JQ_BIN" -r 'if .result == "recent" and .reason == "recently_asked" then .reason else .result end')" in

@@ -66,9 +66,10 @@ BACKOFF_DIR=/var/lib/hydra/gmail-support
 GOG=gog
 ACCOUNT=support@muso.ai
 BUDGET=1200         # total scan budget, under the callers' 1500 s kill (gmail_proof.py, cs-proof-feed.sh)
+RETRY_MIN_S=60      # floor for a published window: a Retry-after already in the past must still silence a stampede
 LOCK_WAIT=600       # capped at half the budget below, so a run that cannot lock still has time to scan
-RETRY_CAP=900       # no single honoured Retry-after sleeps longer than this
-FALLBACK_BACKOFF=45 # 45 s x try when a 429 carries no parseable timestamp
+FALLBACK_BACKOFF=45 # 45 s x try when a 429 carries no parseable timestamp AND nothing was published
+DEFAULT_BACKOFF_S=900  # the window a quota refusal publishes when Google names no Retry-after (gmail_quota's default)
 PAGE_PAUSE=20       # between pages, also budgeted
 if [ "$TEST_SEAM" = 1 ]; then
   STATE_DIR="$SEAM_ROOT/state"
@@ -82,7 +83,10 @@ if [ "$TEST_SEAM" = 1 ]; then
   FALLBACK_BACKOFF=0   # no waiting at all in tests: the failure paths must be exercised, not slept through
   PAGE_PAUSE=0
   BUDGET=20          # so a long retry-after still exceeds "the remaining budget" and exercises exit 4
-  RETRY_CAP=25
+  # The floor is shrunk with the rest of the pacing: production clamps every published window to at least
+  # 60 s (a matching stampede guard), but no test can wait a minute per case, and a case that cannot wait
+  # cannot exercise the wait path at all - it would exit 4 for the wrong reason and pass anyway.
+  RETRY_MIN_S=0
 fi
 if [ "$REPORT_PATHS" = 1 ]; then
   printf 'env=%s\nkill=%s\nstate=%s\ngmail=%s\nlock=%s\nbackoff=%s\ngog=%s\n' \
@@ -121,6 +125,18 @@ rm -f "$O/$P"-*.json; echo "$(date -u +%FT%TZ) start $P (lock held) env=$ENV_FIL
 # honours {until} before it spends a request, so one caller's 429 teaches the others instead of each
 # discovering the window with its own rejected call. Written below when we see a 429.
 BACKOFF="${BACKOFF_DIR}/backoff.json"
+# [key=sleep-the-window-you-published] (QA #1567 finding 3): a published window is a promise to EVERY support@
+# consumer, this scan included. Reading it back is the only way to be sure the wait below covers what was written
+# (the writer may keep an older, longer window, and the no-timestamp path publishes a DEFAULT it never named).
+published_wait() {
+  python3 -c 'import datetime as dt, json, sys
+try:
+    until = json.load(open(sys.argv[1])).get("until") or ""
+    when = dt.datetime.strptime(until[:19].replace("Z", ""), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=dt.timezone.utc)
+    print(max(0, int((when - dt.datetime.now(dt.timezone.utc)).total_seconds()) + 5))
+except Exception:
+    print(0)' "$BACKOFF" 2>/dev/null || echo 0
+}
 backoff_wait=$(python3 -c 'import datetime as dt, json, sys
 try:
     until = json.load(open(sys.argv[1])).get("until") or ""
@@ -133,9 +149,10 @@ publish_backoff() {
   # hydra #1567's locked writer (gmail_quota.note_refusal) when it is importable; the local fallback keeps the
   # never-shorten rule. Called on EVERY refusal path, including the ones that exit 4 before scanning - a window
   # we do not publish is a request the next support@ consumer spends to rediscover it.
-  python3 - "$O/$P.err" "$BACKOFF_DIR" <<'NOTE_EOF' || true
+  python3 - "$O/$P.err" "$BACKOFF_DIR" "$DEFAULT_BACKOFF_S" "$RETRY_MIN_S" <<'NOTE_EOF' || true
 import datetime as dt, json, os, re, sys
 err, state_dir = sys.argv[1], sys.argv[2]
+default_s, min_s = int(sys.argv[3]), int(sys.argv[4])
 raw = ""
 try:
     raw = open(err, errors="replace").read()
@@ -157,8 +174,8 @@ now = dt.datetime.now(dt.timezone.utc)
 #     left alone, and every log reads quiet and correct. It is capped at 6 hours.
 # The cap lives HERE, at the only place this scan can publish a window, and it is applied to the text the
 # shared writer parses - so #1567's locked writer still owns the file and still never shortens a window.
-RETRY_DEFAULT_S = 900        # 15 min: no Retry-after header at all
-RETRY_MIN_S = 60             # 1 min: a header that is already in the past still stops a stampede
+RETRY_DEFAULT_S = default_s  # 15 min: no Retry-after header at all
+RETRY_MIN_S = min_s          # 1 min in production: a header already in the past still stops a stampede
 RETRY_MAX_S = 6 * 3600       # 6 h: the longest silence a single refusal may ask of every consumer
 m = re.search(r"Retry after (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})", raw)
 if m:
@@ -181,7 +198,9 @@ else:
 try:  # hydra #1567: the ONE backoff writer - locked, and it never shortens a standing window
     sys.path.insert(0, "/opt/hydra/scripts")
     from credit_verify.proof.gmail_quota import note_refusal
-    note_refusal(evidence, "cs-proof-feed/gmail_scan.sh", now, state_dir)
+    # ...and pass OUR floor through: this scan already clamped the window above, and under the test
+    # seam that floor is 0 - re-applying the module default (60 s) here would override the seam.
+    note_refusal(evidence, "cs-proof-feed/gmail_scan.sh", now, state_dir, RETRY_MIN_S)
 except Exception:
     os.makedirs(state_dir, exist_ok=True)
     path = os.path.join(state_dir, "backoff.json")
@@ -237,35 +256,41 @@ if m:
     when = dt.datetime.strptime(m.group(1), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=dt.timezone.utc)
     print(max(1, int((when - dt.datetime.now(dt.timezone.utc)).total_seconds()) + 5))' "$O/$P.err" 2>/dev/null)
     if [ -n "${wait_s:-0}" ] && [ "${wait_s:-0}" -gt 0 ] 2>/dev/null; then
-      left=$(( BUDGET - ( $(date -u +%s) - START_AT ) ))
-      cap=$RETRY_CAP
-      [ "$wait_s" -gt "$cap" ] && wait_s=$cap
-      if [ "$left" -le 0 ] || [ "$wait_s" -ge "$left" ]; then
-        # Publish the window FIRST: exiting without it would leave the next support@ consumer to discover the
-        # same 429 with its own request, which is the compounding this file exists to stop.
-        publish_backoff
-        # Exiting 4 (not 1) says "the quota is saturated, nothing was scanned": the stamp stays where it
-        # was, no page file is written, and the feed never records freshness it did not earn.
-        echo "$(date -u +%FT%TZ) QUOTA SATURATED after ${try} attempt(s); retry-after ${wait_s}s exceeds the remaining budget ${left}s - exiting without touching the stamp" >> "$O/$P.log"
-        exit 4
-      fi
       # Publish even when the wait FITS: other support@ callers must learn the window now, not only when this
       # scan gives up (babysit-b1 on #1567).
       publish_backoff
-      echo "$(date -u +%FT%TZ) retry $try (gog rc=$grc): 429 retry-after honoured, sleeping ${wait_s}s: $(head -c 100 "$O/$P.err")" >> "$O/$P.log"
-      sleep "$wait_s"
+      # The wait is the PUBLISHED window, never the parse capped at a constant: capping slept 900 s of a
+      # 30-minute window and sent the next request 15 minutes inside it.
+      need=$(published_wait)
+      [ "${need:-0}" -gt 0 ] 2>/dev/null || need=$wait_s
+      left=$(( BUDGET - ( $(date -u +%s) - START_AT ) ))
+      if [ "$left" -le 0 ] || [ "$need" -ge "$left" ]; then
+        # Exiting 4 (not 1) says "the quota is saturated, nothing was scanned": the stamp stays where it
+        # was, no page file is written, and the feed never records freshness it did not earn.
+        echo "$(date -u +%FT%TZ) QUOTA SATURATED after ${try} attempt(s); retry-after ${need}s exceeds the remaining budget ${left}s - exiting without touching the stamp" >> "$O/$P.log"
+        exit 4
+      fi
+      echo "$(date -u +%FT%TZ) retry $try (gog rc=$grc): 429 retry-after honoured, sleeping ${need}s: $(head -c 100 "$O/$P.err")" >> "$O/$P.log"
+      sleep "$need"
     else
       # The fallback path must respect the same budget: six 429s without a parseable Retry-after cost
       # 45*(1+..+6) = 945 s, and with a 600 s lock wait that reaches 1545 s against a 1500 s outer kill.
-      fb=$((FALLBACK_BACKOFF*try))
+      # A 429 with no parseable timestamp still PUBLISHES a window (gmail_quota's DEFAULT_BACKOFF_S). Retrying after
+      # 45 s x try ignored that window four times over, so the wait is now the published window itself.
+      publish_backoff
+      fb=$(published_wait)
+      if [ "${fb:-0}" -le 0 ] 2>/dev/null; then
+        # No window was written (a non-quota 429 shape): fall back to the bounded backoff, and start it over.
+        publish_backoff
+        fb=$((FALLBACK_BACKOFF*try))
+        [ "$fb" -gt 0 ] || fb=$FALLBACK_BACKOFF
+      fi
       left=$(( BUDGET - ( $(date -u +%s) - START_AT ) ))
       if [ "$left" -le 0 ] || [ "$fb" -ge "$left" ]; then
-        publish_backoff
-        echo "$(date -u +%FT%TZ) QUOTA SATURATED after ${try} attempt(s) with no Retry-after; fallback sleep ${fb}s exceeds the remaining budget ${left}s - exiting without touching the stamp" >> "$O/$P.log"
+        echo "$(date -u +%FT%TZ) QUOTA SATURATED after ${try} attempt(s) with no Retry-after; the published window ${fb}s exceeds the remaining budget ${left}s - exiting without touching the stamp" >> "$O/$P.log"
         exit 4
       fi
-      publish_backoff
-      echo "$(date -u +%FT%TZ) retry $try (gog rc=$grc): $(head -c 120 "$O/$P.err")" >> "$O/$P.log"
+      echo "$(date -u +%FT%TZ) retry $try (gog rc=$grc): sleeping the published window ${fb}s: $(head -c 120 "$O/$P.err")" >> "$O/$P.log"
       sleep "$fb"
     fi
   done

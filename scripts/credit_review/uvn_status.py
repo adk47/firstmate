@@ -201,10 +201,15 @@ def group_lock_path(ledger: str, campaign: str) -> str:
 
 
 def credit_group_left(ledger: str, day: str) -> int:
-    """QA #1617: what is left today of the policy's shared credit cap, counted over EVERY credit campaign's sends."""
+    """QA #1617: what is left today of the policy's shared credit cap, counted over EVERY credit campaign's sends.
+
+    QA #1370: EMAIL notes only. The caps pace email (captain 2026-10-26 16:05Z: "caps may pace email only; the in-app
+    message goes to everyone"), so an in-app note must never spend a credit campaign's email budget - it is bounded on
+    its own by INAPP_DAILY_MAX and the segment cap."""
     db = verify_ledger.connect(ledger)
     try:
-        return DAILY_MAX - sum(verify_ledger.sent_today(db, campaign=c, day=day) for c in CREDIT_GROUP)
+        return DAILY_MAX - sum(verify_ledger.sent_today(db, campaign=c, day=day, message_type="email")
+                               for c in CREDIT_GROUP)
     finally:
         db.close()
 POLICY_OK = _POLICY is not None     # QA #1617: an unreadable policy is a REFUSAL, never a silent cap of 0
@@ -216,6 +221,10 @@ CREDIT_GROUP = tuple(dict.fromkeys((_POLICY[1] if _POLICY else ()) + ("uvn-statu
 
 
 STATUS_DAILY_MAX = policy_credit_cap()  # the no-ask status notes
+# With --inapp-overflow the per-campaign cap (DAILY_MAX / STATUS_DAILY_MAX) paces EMAIL notes only; once it is spent
+# the note goes in-app (gate --channel inapp: the user's open conversation, else an Intercom in-app message, never
+# email). This is the sanity bound on all of a day's notes - it never lifts the shared credit cap above.
+INAPP_DAILY_MAX = 5000
 LIST_MAX_AGE_H = 30
 # (campaign, wording) pairs the gate takes as --copy; LOCKED_WORDINGS name the gate lock each one waits on.
 WORDINGS = (("status-doc-received", "queued"), ("status-doc-received", "received"), ("status-doc-received", "queued-neutral"),
@@ -812,7 +821,8 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
         exclude_users: set[str] | frozenset[str] = frozenset(), lens: fraud_lens.LensFn | None = None,
         watchlist_path: str | None = None, holds_path: str | None = None,
         segment_daily_cap: int | None = None, gmail_fallback_o: bool = False,
-        no_correction: bool = False, max_entries: int | None = None, start_entry: int = 0) -> UvnReport:
+        no_correction: bool = False, max_entries: int | None = None, start_entry: int = 0,
+        inapp_overflow: bool = False) -> UvnReport:
     if campaign not in CAMPAIGNS:
         raise ValueError(f"unknown campaign {campaign!r}")
     if wording and (campaign, wording) not in WORDINGS:
@@ -1128,21 +1138,53 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
             return report
 
     def ledger_left() -> int:
+        # QA #1370: EMAIL notes only - the caps pace email (captain 2026-10-26 16:05Z). Counting the in-app notes here
+        # too is what made --inapp-overflow inert in the deployed configuration (cap == the shared policy number).
         db = verify_ledger.connect(path)
         try:
             group = CREDIT_GROUP if campaign in CREDIT_GROUP else (campaign,)
-            return cap - sum(verify_ledger.sent_today(db, campaign=c, day=day) for c in group)
+            return cap - sum(verify_ledger.sent_today(db, campaign=c, day=day, message_type="email") for c in group)
         finally:
             db.close()
 
+    def segment_left() -> int:
+        if segment_daily_cap is None:
+            return 1 << 60
+        # QA #1541: the per-SEGMENT daily policy cap, re-read under this run's lock before every send (atomic with
+        # the send) and counted from the runner's own segment record (the list's paid flag at send time - the
+        # same source that chose the segment), never from a separate paying export
+        return segment_daily_cap - segment_used_today(path, campaign, segment, day)
+
     def remaining_cap() -> int:
-        left = ledger_left()
-        if segment_daily_cap is not None:
-            # QA #1541: the per-SEGMENT daily policy cap, re-read under this run's lock before every send (atomic with
-            # the send) and counted from the runner's own segment record (the list's paid flag at send time - the
-            # same source that chose the segment), never from a separate paying export
-            left = min(left, segment_daily_cap - segment_used_today(path, campaign, segment, day))
-        return left
+        """What is left of today's bound. With --inapp-overflow the caps pace EMAIL only (captain 2026-10-26 16:05Z:
+        "caps may pace email only; the in-app message goes to everyone"), so the run's total is bounded by the in-app
+        sanity bound and the segment cap, and by the SHARED credit cap counted over EMAIL notes only.
+
+        QA #1370: counting the in-app notes against the shared cap made the overflow inert in the deployed
+        configuration, where the per-campaign `cap` and the shared policy cap are the SAME number (both `DAILY_MAX`):
+        the 2,501st user was deferred in `email_left()`'s shadow, before `--channel inapp` was ever chosen, and
+        INAPP_DAILY_MAX (5,000) was unreachable. Pacing is about how much EMAIL we send a day; the in-app note is the
+        channel that exists for the users email could not reach, and it is bounded on its own (INAPP_DAILY_MAX minus
+        what this campaign already sent today) plus the segment cap."""
+        if not inapp_overflow:
+            return min(ledger_left(), segment_left())
+        # Overflow: the caps pace EMAIL only (`email_left()` below enforces the per-campaign one; `ledger_left()` the
+        # shared one, both over EMAIL notes), so neither may bound this run's total. What bounds it is the in-app sanity
+        # bound minus what this campaign already sent today, plus the segment cap.
+        db = verify_ledger.connect(path)
+        try:
+            return min(INAPP_DAILY_MAX - verify_ledger.sent_today(db, campaign=campaign, day=day), segment_left())
+        finally:
+            db.close()
+
+    def email_left() -> int:
+        """EMAIL notes left today: what decides the channel switch (the cap paces email only)."""
+        db = verify_ledger.connect(path)
+        try:
+            return min(cap - verify_ledger.sent_today(db, campaign=campaign, day=day, message_type="email"),
+                       ledger_left(), segment_left())
+        finally:
+            db.close()
 
     # Notes sent (or, on a dry run, that the gate would send) use the budget, and so does a gate
     # call that left its claim in the ledger without a verified post (outcome unknown: it may have
@@ -1298,7 +1340,8 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                 verify_notify.send_all([p], report, mode=mode, wrapper=wrapper, runner=runner,
                                        extra=["--campaign", campaign] + (["--copy", wording] if wording else [])
                                        + (["--gmail-fallback-o"] if gmail_fallback_o else [])
-                                       + (["--no-correction"] if no_correction else []),
+                                       + (["--no-correction"] if no_correction else [])
+                                       + (["--channel", "inapp"] if inapp_overflow and email_left() <= 0 else []),
                                        pace_seconds=0, preview_dir=preview_dir,
                                        check_recipients=check_recipients and mode != "apply")
                 calls += 1

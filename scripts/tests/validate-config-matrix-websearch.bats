@@ -50,10 +50,10 @@ write_ws_profile() {
   "agents": {
     "defaults": { "thinkingDefault": "medium",
       "model": { "primary": "openai/gpt-5.5",
-        "fallbacks": ["openrouter/openai/gpt-5.4-mini","openrouter/anthropic/claude-4.6-sonnet-20260217"] } },
+        "fallbacks": ["openrouter/deepseek/deepseek-v4.1-flash-1017"] } },
     "list": [
       { "id": "x", "thinkingDefault": "medium",
-        "model": { "primary": "openai/gpt-5.5", "fallbacks": ["openrouter/anthropic/claude-4.6-sonnet-20260217"] },
+        "model": { "primary": "openai/gpt-5.5", "fallbacks": ["openrouter/deepseek/deepseek-v4.1-flash-1017"] },
         "imageModel": { "primary": "codex/gpt-5.5", "fallbacks": ["openrouter/anthropic/claude-haiku-4.5"] } }
     ]
   },

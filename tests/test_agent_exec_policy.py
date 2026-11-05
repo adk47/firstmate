@@ -13,13 +13,17 @@ Stdlib unittest only (no pytest, no network) - run by name in pr-validate.yml:
   python3 -m unittest -v tests.test_agent_exec_policy
 """
 import datetime as dt
+import contextlib
 import importlib.util
+import io
 import json
 import shutil
 import sqlite3
 import subprocess
 import tempfile
+import time
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -133,7 +137,11 @@ class Mutations(unittest.TestCase):
                               check=True, capture_output=True, text=True)
 
     def tearDown(self):
-        shutil.rmtree(self.tmp)
+        # `git commit` in this scratch repo can spawn background auto-maintenance
+        # (git >= 2.5x writes .git/maintenance.lock), which raced this rmtree and
+        # failed the suite with FileNotFoundError on CI runner git 2.55. A scratch
+        # temp dir needs no atomicity: an entry vanishing mid-walk is not a failure.
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
     def edit(self, rel, fn):
         p = self.tmp / rel
@@ -371,7 +379,11 @@ class ProbeAnalysis(unittest.TestCase):
         self.seq = 0
 
     def tearDown(self):
-        shutil.rmtree(self.tmp)
+        # `git commit` in this scratch repo can spawn background auto-maintenance
+        # (git >= 2.5x writes .git/maintenance.lock), which raced this rmtree and
+        # failed the suite with FileNotFoundError on CI runner git 2.55. A scratch
+        # temp dir needs no atomicity: an entry vanishing mid-walk is not a failure.
+        shutil.rmtree(self.tmp, ignore_errors=True)
 
     def add(self, sid, msg, ts=2_000):
         self.seq += 1
@@ -451,7 +463,7 @@ class ProbeAnalysis(unittest.TestCase):
         self.assistant("s1", ("web_search", {"query": "x"}))
         self.result("s1", "web_search", True)
         v = probe.analyse(self.db, "N9", since_ms=1_000, canary_exists=False)
-        self.assertEqual(v["web_search"], {"calls": 1, "ok": 0, "errors": 1})
+        self.assertEqual(v["web_search"]["managed"], {"calls": 1, "ok": 0, "errors": 1})
 
     def test_a_successful_search_is_not_reported_as_unavailable(self):
         """qa-review 4455377804: real transcripts key results by toolCallId, so a name-only lookup read a
@@ -460,7 +472,7 @@ class ProbeAnalysis(unittest.TestCase):
         self.assistant("s1", ("web_search", {"query": "x"}))
         self.result_by_id("s1", "c0", "web_search", False)
         v = probe.analyse(self.db, "N10", since_ms=1_000, canary_exists=False)
-        self.assertEqual(v["web_search"], {"calls": 1, "ok": 1, "errors": 0})
+        self.assertEqual(v["web_search"]["managed"], {"calls": 1, "ok": 1, "errors": 0})
         self.assertEqual(v["exit"], 0)
 
     def test_mixed_search_outcomes_count_per_call(self):
@@ -469,7 +481,159 @@ class ProbeAnalysis(unittest.TestCase):
         self.result_by_id("s1", "c0", "web_search", True)
         self.result_by_id("s1", "c1", "web_search", False)
         v = probe.analyse(self.db, "N11", since_ms=1_000, canary_exists=False)
-        self.assertEqual(v["web_search"], {"calls": 2, "ok": 1, "errors": 1})
+        self.assertEqual(v["web_search"]["managed"], {"calls": 2, "ok": 1, "errors": 1})
+
+
+class CheckSearchExit(unittest.TestCase):
+    """`--check-search` end to end through main(): the openclaw SQLite transcript carries the managed `web_search`
+    tool, the codex rollout carries codex-native hosted search (item_completed / Extension / kind web.search -
+    shape taken from a 2 Nov Scout rollout, queries and results stripped). exit 0 = search ok AND shell refused."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.agent_dir = self.tmp / "agents" / "scout" / "agent"
+        self.sessions = self.agent_dir / "codex-home" / "sessions" / "2026" / "11" / "04"
+        self.sessions.mkdir(parents=True)
+        con = sqlite3.connect(self.agent_dir / "openclaw-agent.sqlite")
+        con.execute("CREATE TABLE transcript_events (session_id TEXT, seq INTEGER, event_json TEXT, "
+                    "created_at INTEGER)")
+        con.commit()
+        con.close()
+        self.seq = 0
+        self.scenario = {}
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _event(self, sid, msg):
+        self.seq += 1
+        con = sqlite3.connect(self.agent_dir / "openclaw-agent.sqlite")
+        con.execute("INSERT INTO transcript_events VALUES (?,?,?,?)",
+                    (sid, self.seq, json.dumps({"type": "message", "message": msg}),
+                     int(time.time() * 1000) + 50))
+        con.commit()
+        con.close()
+
+    @staticmethod
+    def _user(nonce):
+        return {"type": "UserMessage", "content": [{"type": "text", "text": f"Quick check, ref {nonce}: web_search"}]}
+
+    def _rollout(self, name, nonce, items, earlier=()):
+        """`earlier`: items of a previous turn, written before this nonce's UserMessage."""
+        lines = [{"type": "event_msg", "payload": {"type": "item_completed", "item": i}} for i in earlier]
+        lines += [{"type": "event_msg", "payload": {"type": "item_completed", "item": self._user(nonce)}}]
+        lines += [{"type": "event_msg", "payload": {"type": "item_completed", "item": i}} for i in items]
+        (self.sessions / f"rollout-{name}.jsonl").write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+
+    @staticmethod
+    def native_search(results=1):
+        return {"type": "Extension", "kind": "web.search", "id": "exec-x", "query": "q",
+                "action": {"type": "search", "query": "q", "queries": None},
+                "results": [{"type": "text_result", "domain": "example.com"}] * results}
+
+    def fake_turn(self, profile, agent, nonce, body, timeout):
+        """Stands in for `openclaw agent`: writes what that turn would have recorded for its own nonce."""
+        kind = "search" if body.startswith("Quick check") else "inject"
+        sc = self.scenario[kind]
+        if sc.get("no_transcript"):
+            return 0
+        self._event(f"s-{nonce}", {"role": "user", "content": [{"type": "text", "text": f"ref {nonce}"}]})
+        calls = [{"type": "toolCall", "id": f"c{i}", "name": n, "arguments": {}} for i, n in enumerate(sc.get("calls", []))]
+        self._event(f"s-{nonce}", {"role": "assistant", "provider": "openai",
+                                   "content": calls + [{"type": "text", "text": "done"}]})
+        for i, (n, err) in enumerate(sc.get("results", [])):
+            self._event(f"s-{nonce}", {"role": "toolResult", "toolCallId": f"c{i}", "toolName": n, "isError": err,
+                                       "content": []})
+        if "rollout" in sc:
+            self._rollout(f"{kind}-{nonce}", nonce, sc["rollout"], sc.get("earlier_turn", ()))
+        if "other_nonce_rollout" in sc:
+            self._rollout(f"other-{kind}", "0000000000000000", sc["other_nonce_rollout"])
+        return 0
+
+    def run_probe(self, inject=None, search=None):
+        self.scenario = {"inject": inject or {}, "search": search or {}}
+        out = io.StringIO()
+        with mock.patch.object(probe, "STATE_DIR", {"main": str(self.tmp), "edge": str(self.tmp)}), \
+                mock.patch.object(probe, "_turn", self.fake_turn), contextlib.redirect_stdout(out):
+            rc = probe.main(["--agent", "scout", "--check-search"])
+        return rc, json.loads(out.getvalue())
+
+    def test_native_search_only_exits_0(self):
+        """(a) a working codex-native search used to read as "no search" (exit 3)."""
+        rc, rep = self.run_probe(search={"rollout": [self.native_search()]})
+        self.assertEqual(rc, 0, rep)
+        self.assertEqual(rep["search_check"]["web_search"],
+                         {"managed": {"calls": 0, "ok": 0, "errors": 0}, "native": {"calls": 1, "ok": 1}})
+
+    def test_no_search_of_either_kind_exits_3(self):
+        """(b)"""
+        self.assertEqual(self.run_probe()[0], 3)
+
+    def test_a_native_search_with_no_results_is_not_ok(self):
+        rc, rep = self.run_probe(search={"rollout": [self.native_search(results=0)]})
+        self.assertEqual(rc, 3, rep)
+        self.assertEqual(rep["search_check"]["web_search"]["native"], {"calls": 1, "ok": 0})
+
+    def test_exec_executed_wins_over_a_working_search(self):
+        """(c)"""
+        rc, _ = self.run_probe(inject={"calls": ["bash"], "results": [("bash", False)]},
+                               search={"rollout": [self.native_search()]})
+        self.assertEqual(rc, 1)
+
+    def test_a_shell_run_in_the_search_turn_wins_too(self):
+        rc, _ = self.run_probe(search={"calls": ["bash"], "results": [("bash", False)],
+                                       "rollout": [self.native_search()]})
+        self.assertEqual(rc, 1)
+
+    def test_managed_search_ok_still_exits_0(self):
+        """(d) no regression of qa-review 4455377804."""
+        rc, rep = self.run_probe(search={"calls": ["web_search"], "results": [("web_search", False)]})
+        self.assertEqual(rc, 0, rep)
+        self.assertEqual(rep["search_check"]["web_search"]["managed"], {"calls": 1, "ok": 1, "errors": 0})
+
+    def test_a_rollout_that_only_mentions_web_search_in_text_counts_nothing(self):
+        """(e) every Scout rollout carries the literal "web_search" in its prompt; only the event counts."""
+        mention = {"type": "AgentMessage", "content": [{"type": "Text", "text": "I will use web_search web.search"}]}
+        rc, rep = self.run_probe(search={"rollout": [mention]})
+        self.assertEqual(rep["search_check"]["web_search"]["native"], {"calls": 0, "ok": 0})
+        self.assertEqual(rc, 3)
+
+    def test_a_rollout_for_another_nonce_is_ignored(self):
+        """(f)"""
+        rc, rep = self.run_probe(search={"other_nonce_rollout": [self.native_search()]})
+        self.assertEqual(rep["search_check"]["web_search"]["native"], {"calls": 0, "ok": 0})
+        self.assertEqual(rc, 3)
+
+    def test_a_search_from_an_earlier_turn_in_the_same_rollout_is_not_counted(self):
+        """qa-bot: a rollout with an earlier turn's successful search, then this nonce's turn with none, read as ok."""
+        rc, rep = self.run_probe(search={"earlier_turn": [self.native_search()], "rollout": []})
+        self.assertEqual(rep["search_check"]["web_search"]["native"], {"calls": 0, "ok": 0})
+        self.assertEqual(rc, 3)
+
+    def test_a_search_in_a_later_turn_after_the_probe_turn_is_not_counted(self):
+        later = {"type": "UserMessage", "content": [{"type": "text", "text": "unrelated follow-up"}]}
+        rc, rep = self.run_probe(search={"rollout": [later, self.native_search()]})
+        self.assertEqual(rep["search_check"]["web_search"]["native"], {"calls": 0, "ok": 0})
+        self.assertEqual(rc, 3)
+
+    def test_a_search_turn_with_no_transcript_is_indeterminate_not_3(self):
+        """qa-bot: analyse() exit 2 (no turn/transcript) must reach the exit code, never read as a search verdict."""
+        rc, rep = self.run_probe(search={"no_transcript": True})
+        self.assertEqual(rc, 2, rep)
+        self.assertEqual(rep["search_check"]["verdict"], "indeterminate")
+
+    def test_an_indeterminate_search_turn_stays_2_even_with_a_native_event_on_disk(self):
+        rc, _ = self.run_probe(search={"no_transcript": True, "other_nonce_rollout": [self.native_search()]})
+        self.assertEqual(rc, 2)
+
+    def test_without_check_search_a_native_search_changes_nothing(self):
+        self.scenario = {"inject": {}, "search": {}}
+        out = io.StringIO()
+        with mock.patch.object(probe, "STATE_DIR", {"main": str(self.tmp), "edge": str(self.tmp)}), \
+                mock.patch.object(probe, "_turn", self.fake_turn), contextlib.redirect_stdout(out):
+            rc = probe.main(["--agent", "scout"])
+        self.assertEqual(rc, 0)
+        self.assertNotIn("search_check", json.loads(out.getvalue()))
 
 
 if __name__ == "__main__":

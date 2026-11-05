@@ -261,15 +261,29 @@ autokill() { # <why>
 
 [ "${ZR_MISSING:-0}" = 1 ] && { log "LIVE REFUSED: the zero-read reader $ZERO_READ is not deployed; this tick runs DRY"; page "live tick refused: $ZERO_READ missing (tick ran dry)"; }
 
-# refusal spike of one apply's outcomes JSON: refused / (sent + refused) > REFUSAL_SPIKE
+# refusal spike of one apply's outcomes JSON: refused / (sent + refused) > REFUSAL_SPIKE.
+# Prints exactly one of: ok | spike | unmeasured <why>.
+# "unmeasured" exists because ABSENCE HAS NO RATIO (l1, 2026-11-04 15:05Z, in production): the free family applied,
+# sent 39 real emails, then died inside the Intercom note with TimeoutExpired - so credit-review.py returned rc=1 and
+# NEVER WROTE the outcomes artefact. The old spike() printed "unreadable", the caller accepted only "ok", and the tick
+# killed with the label "refusal spike (> 0.20 of attempts refused)" - a statement about the world, when there was
+# nothing to count. The kill was right (39 sends, no artefact = outcome_unknown, fail closed); the LABEL was false, and
+# the label is the only part of an incident that a human still reads the next morning. An absent or unparseable
+# artefact can yield neither a spike NOR a clean read: it is its own verdict, it stops the family, and it names the
+# path it could not read so the next reader does not have to guess which file went missing.
 spike() { # <outcomes json> <sent>
   py - "$1" "$2" "$REFUSAL_SPIKE" <<'PY'
-import json, sys
+import json, sys, os
+path = sys.argv[1]
 try:
-    d = json.load(open(sys.argv[1]))
-except (OSError, ValueError):
-    print("unreadable"); sys.exit(0)
+    d = json.load(open(path))
+except FileNotFoundError:
+    print("unmeasured %s was never written (the apply did not reach its outcome write)" % path); sys.exit(0)
+except (OSError, ValueError) as exc:
+    print("unmeasured %s is unreadable (%s)" % (path, type(exc).__name__)); sys.exit(0)
 o = d.get("outcomes", d) if isinstance(d, dict) else d
+if not isinstance(o, list):
+    print("unmeasured %s carries no outcomes list (got %s)" % (path, type(o).__name__)); sys.exit(0)
 refused = sum(1 for x in o if str(x.get("result", "")).startswith("refused"))
 sent = int(sys.argv[2] or 0)
 n = sent + refused
@@ -494,6 +508,70 @@ family_cap() { # <family> <its cap>
   if [ "$UNSIGNED_ALL" = 1 ] || reached "${FULL_CAP_FROM[$1]:-}"; then echo "$2"
   elif [ "$2" -gt "$FIRST_CAP" ]; then echo "$FIRST_CAP"; else echo "$2"; fi
 }
+# Per-family per-tick cap (policy `tick_cap`). Prints the cap this family+segment may use, or "" to mean "no opinion,
+# use what you were given". THREE rules, and the order matters:
+#   1. no key for this family/segment            -> "" (no opinion; the existing cap stands untouched)
+#   2. a readable integer, or a clamps-to list   -> the SMALLEST of the value and the cap handed in. This key can only
+#      ever LOWER a cap: a policy value above the family's own cap is inert, so a typo in the policy can slow a family
+#      down but can never widen its blast radius.
+#   3. an UNREADABLE policy when a tick_cap key was expected -> the FLOOR (1). A cap that grows because a file could not
+#      be parsed is the fail-open version of this control; 1 user is ugly and correct, and the log says so.
+tick_cap_for() { # <family> <segment> <cap>
+  local fam="$1" seg="$2" cap="$3" out
+  # QA #1770 (2): the COMPARISON lives in Python, not in `[`. A JSON integer Bash cannot hold (9223372036854775808)
+  # passed the type check, failed both Bash comparisons and was emitted AS the cap - a policy edit could RAISE a bound.
+  # Python compares at arbitrary precision and prints only: "" (no opinion / inert), an integer in [1, cap), or a word.
+  out="$(py - "$POLICY" "$fam" "$seg" "$cap" <<'PYC' 2>&1
+import json, sys
+path, fam, seg, cap = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+try:
+    doc = json.load(open(path))
+except Exception as exc:                                   # noqa: BLE001 - the caller decides, this only reports
+    print("UNREADABLE %s" % type(exc).__name__); raise SystemExit(0)
+if not isinstance(doc, dict) or "tick_cap" not in doc:
+    raise SystemExit(0)                                   # rule 1: no key at all -> no opinion
+tc = doc["tick_cap"]
+if not isinstance(tc, dict):
+    print("MALFORMED_TOP"); raise SystemExit(0)           # QA #1770 (1): PRESENT but not an object is not "absent"
+if fam not in tc:
+    raise SystemExit(0)                                   # rule 1: no opinion for this family
+row = tc.get(fam)
+if isinstance(row, dict):
+    if seg not in row:
+        raise SystemExit(0)                               # no opinion for this segment
+    val = row[seg]
+else:
+    val = row                                          # a plain number applies to every segment
+if not isinstance(val, int) or isinstance(val, bool) or val < 0:
+    print("MALFORMED"); raise SystemExit(0)
+if val >= cap:
+    raise SystemExit(0)                                   # rule 2: never widen - a value at or above the cap is inert
+print(max(val, 1))                                     # 0 is the floor (1): --max-users 0 is not "nobody"
+PYC
+)"
+  # NOTE the `>&2`: log() TEES to stdout as well as $OUT/tick.log, so a diagnostic written from inside a $( ) capture
+  # becomes part of the captured VALUE. That is exactly how this control would have failed open - "2026-… tick_cap: …
+  # \n1" is not a number, and the arithmetic test that follows it is not a comparison any more. Diagnostics go to
+  # stderr (still tee'd into the tick log), and stdout carries the answer alone.
+  case "$out" in
+    "") return 0 ;;                                       # rule 1
+    UNREADABLE*) log "tick_cap: the policy $POLICY could not be read ($out) - holding $fam/$seg at 1 user, not at $cap" >&2
+                 echo 1; return 0 ;;
+    MALFORMED_TOP) log "tick_cap: the policy's top-level tick_cap is present but not an object - holding $fam/$seg at 1 user (every capped family reads this key)" >&2
+                 echo 1; return 0 ;;
+    MALFORMED) log "tick_cap: policy tick_cap[$fam][$seg] is not a non-negative integer - holding $fam/$seg at 1 user" >&2
+                 echo 1; return 0 ;;
+    *[!0-9]*) log "tick_cap: unexpected policy answer '$out' for $fam/$seg - holding it at 1 user" >&2
+                 echo 1; return 0 ;;
+  esac
+  # belt to Python's braces: the answer is 1..9 digits and below the cap, or this function has a bug and holds at 1
+  if [ "${#out}" -gt 9 ] || [ "$out" -ge "$cap" ] || [ "$out" -lt 1 ]; then
+    log "tick_cap: the policy reader answered '$out' against cap $cap for $fam/$seg, which it must never do - holding it at 1 user" >&2
+    echo 1; return 0
+  fi
+  echo "$out"
+}
+
 # r5 19:06Z: is <family> on the SHARED first-batch budget this tick? Listed in PER_SEGMENT_FROM, its per-segment date
 # not reached, and not past its full-cap line (a full-cap family is never pulled back to a shared 100)
 shared_first() { # <family>
@@ -544,6 +622,17 @@ family() {
   reached "${UNSIGNED_FROM[$fam]:-}" && unsigned="${UNSIGNED_FROM[$fam]}"
   [ "$UNSIGNED_ALL" = 1 ] && unsigned=harness
   cap="$(family_cap "$fam" "$cap")"
+  # per-FAMILY per-tick cap (policy tick_cap, 2026-11-04): a clamp that only ever LOWERS what the lines above allow.
+  # Why this exists as its own key: CVO_CAP (an env knob) is ONE value for every family+segment, so using it to slow the
+  # free uvn-status batch to 60 would also have slowed r1, claim-status AND c2's approved 70-send claim install. A knob
+  # that cannot name one family is not a knob, it is a change to all of them. Absent key = exactly today's behaviour;
+  # a value the policy cannot be read for CLAMPS TO THE FLOOR rather than silently widening, because the one thing a
+  # cap must never do on a read failure is get bigger.
+  local tc; tc="$(tick_cap_for "$fam" "$seg" "$cap")"
+  if [ -n "$tc" ] && [ "$tc" != "$cap" ]; then
+    log "$tag: per-family tick cap: policy tick_cap[$fam][$seg] holds this segment at $tc (it would otherwise have taken $cap)"
+    cap="$tc"
+  fi
   local shared=0
   if shared_first "$fam"; then
     shared=1
@@ -643,7 +732,17 @@ print(sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True).execute(
   [ "$shared" = 1 ] && FIRST_SPENT[$fam]=$(( ${FIRST_SPENT[$fam]:-0} + nsent ))
   # QA #1541 (claim runners print 'sent N', credit runners 'N sent'): the spike reads the LEDGER's own count of this
   # apply's sends - never a grep on a runner's prose, which read 0 for claims and wrote the permanent kill file
-  [ "$(spike "$OUT/$tag-apply.json" "$nsent")" = "ok" ] || { autokill "$tag refusal spike (> $REFUSAL_SPIKE of attempts refused)"; return 1; }
+  # Two different facts, two different sentences. A SPIKE is a measurement of the run and says so with its numbers.
+  # An ABSENT/UNREADABLE artefact is the absence of a measurement: it still stops the family (fail closed), but it
+  # must never be reported as a spike - "the artefact is missing" and "too many users were refused" send a reader to
+  # two completely different investigations, and naming the wrong one is how 2026-11-04's false label happened.
+  local sv; sv="$(spike "$OUT/$tag-apply.json" "$nsent")"
+  case "$sv" in
+    ok) ;;
+    spike) autokill "$tag refusal spike: $((nsent)) sent and the run's own outcomes refused more than $(printf '%.0f' "$(awk -v t="$REFUSAL_SPIKE" 'BEGIN{print t*100}')")% of attempts (ledger $((lo + 1))-$hi)"; return 1 ;;
+    unmeasured*) autokill "$tag OUTCOMES UNMEASURED after $nsent send(s) (ledger $((lo + 1))-$hi): ${sv#unmeasured }; no ratio can be computed from an artefact that does not exist, so this is not a spike - read the sends back before lifting"; return 1 ;;
+    *) autokill "$tag spike() answered '$sv' - an unexpected verdict is not a pass (ledger $((lo + 1))-$hi)"; return 1 ;;
+  esac
   if [ "$nsent" -gt 0 ]; then
     local fh; fh="$(fraudhit "$lo" "$hi")"
     log "$tag fraud re-check ledger $((lo + 1))-$hi: ${fh:0:300}"
@@ -655,14 +754,26 @@ print(sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True).execute(
     # lines below - so a transient Trino/kubectl timeout would write the global kill file as if a credit-class message
     # had been observed. The reader prints exactly one verdict line (OK:/STOP:/UNMEASURED:); anything else is a crash,
     # i.e. a source we could not read, and UNMEASURED is the honest reading of it.
+    # qa Critical on #1747 (d2 17:1xZ): zero_read emits a COMBINED verdict `STOP+UNMEASURED:` with exit 1 when a
+    # confirmed stop AND an unread source exist in the same batch. This case listed only OK*/STOP*/UNMEASURED*, so the
+    # combined word matched NOTHING, fell into the catch-all below, was rewritten to `UNMEASURED: ... no verdict` and
+    # forced zrc=2 - which BYPASSED the stop arm entirely, exactly when both a stop and an unread source existed. The
+    # lesson is the same one that produced the bug this branch fixes: a status word that means two things, gated by a
+    # pattern that can only see one of them. A STOP of ANY form is a STOP, and it WINS over UNMEASURED.
     case "${zr:-}" in
-      OK|OK:*|STOP|STOP:*|UNMEASURED|UNMEASURED:*) ;;
+      OK|OK:*|UNMEASURED|UNMEASURED:*) ;;
+      STOP|STOP:*|STOP+UNMEASURED|STOP+UNMEASURED:*) zrc=1 ;;   # never let a STOP be re-read as a mere unmeasured
       *) zr="UNMEASURED: the zero-read printed no verdict (a crash is not a STOP): ${zr:0:200}"; zrc=2 ;;
     esac
     log "$tag zero-read ledger $((lo + 1))-$hi (rc=$zrc): ${zr:0:300}"
     if [ "$zrc" = 1 ]; then
-      # STOP: an unexplained credit-class message - the auto-kill for the whole run (unchanged)
-      autokill "$tag zero-read STOP for ledger $((lo + 1))-$hi: ${zr:0:200}"; return 1
+      # STOP: an unexplained credit-class message - the auto-kill for the whole run (unchanged).
+      # The combined verdict says something extra that the plain STOP does not: the batch had sources NOBODY read, so
+      # the stops below do not account for every source. Same kill, honest sentence.
+      case "${zr:-}" in
+        STOP+UNMEASURED*) autokill "$tag zero-read STOP+UNMEASURED for ledger $((lo + 1))-$hi (a confirmed stop AND sources that were never read - the stops below do NOT account for every source): ${zr:0:240}"; return 1 ;;
+        *) autokill "$tag zero-read STOP for ledger $((lo + 1))-$hi: ${zr:0:200}"; return 1 ;;
+      esac
     fi
     if [ "$zrc" != 0 ]; then
       # (B) UNMEASURED never wedges the tick: rows so the batch's outcomes balance, a page the same minute, this

@@ -32,6 +32,7 @@ from credit_review import judge as cr_judge  # noqa: E402
 from credit_review.policy import R_APPROVE, combine, facts_from_record  # noqa: E402
 from credit_trust import credibility, llm, websearch  # noqa: E402
 from credit_trust.ledger import Ledger  # noqa: E402
+from lib import model_chain as mc  # noqa: E402
 
 HELPER = SCRIPTS / "lib" / "codex-judge-exec.sh"
 SCHEMA = {"type": "object", "additionalProperties": False, "required": ["answer"],
@@ -79,6 +80,29 @@ class FakeCodex:
 
 def provider(tmp, runner, **kw):
     return llm.Provider(Ledger(str(Path(tmp) / "ledger.sqlite3")), runner=runner, **kw)
+
+
+# Every test in this file must be network-free AND must never touch the host's
+# shared chain ledger (/var/lib/hydra/model-chain/calls.jsonl). QA 2026-11-03:
+# the ladder tests left `_deepseek` real, so on a host with an OpenRouter key they
+# made live paid calls (and 3/48 failed when the answer came back). Both are
+# pinned here once so no individual test can forget.
+_REAL = ()
+
+
+def setUpModule():                                    # noqa: N802 - unittest hook
+    global _REAL
+    tmp = tempfile.mkdtemp(prefix="credit-trust-chain.")
+    os.environ["MODEL_CHAIN_LEDGER_PATH"] = str(Path(tmp) / "calls.jsonl")
+    _REAL = (mc.call_deepseek, mc.load_key)
+    mc.call_deepseek = lambda *a, **k: mc.TierAttempt(
+        mc.TIER_FALLBACK, "skipped", model=mc.FALLBACK_MODEL, kind=mc.UNAVAILABLE,
+        reason="no OpenRouter key (test stub)")
+    mc.load_key = lambda *a, **k: None
+
+
+def tearDownModule():                                # noqa: N802 - unittest hook
+    mc.call_deepseek, mc.load_key = _REAL
 
 
 class CodexEventParsing(unittest.TestCase):
@@ -149,21 +173,29 @@ class Ladder(unittest.TestCase):
         self.assertEqual((row["provider"], row["outcome"], row["cost_usd"]), ("codex", "ok", 0.0))
         self.assertEqual(row["prompt_sha256"], hashlib.sha256(b"hello").hexdigest())
 
-    def test_quota_guard_skips_codex_and_no_paid_rung_runs(self):
+    def test_quota_guard_skips_codex_and_the_paid_rung_is_last_and_skipped(self):
+        # The captain's order (2026-11-03) puts the metered OpenRouter tier LAST,
+        # so a quota skip now names it too - as a SKIP when there is no key, which
+        # is what must never accidentally become spend.
         fake = FakeCodex([(3, "", "[codex-judge-exec] provider_skipped=codex reason=quota account=a state/load=healthy 85")])
         r = provider(self.tmp, fake).judge("q", SCHEMA)
         self.assertFalse(r.ok)
-        self.assertEqual([(a["provider"], a["outcome"], a["reason"]) for a in r.attempts],
-                         [("codex", "skipped", "quota"), ("jev", "skipped", "not_applicable")])
+        self.assertEqual([(a["provider"], a["outcome"]) for a in r.attempts],
+                         [("codex", "skipped"), ("jev", "skipped"), ("deepseek", "skipped")])
+        self.assertEqual(r.attempts[0]["reason"], "quota")
+        self.assertEqual(r.attempts[-1]["outcome"], "skipped", "a capped/no-key paid tier must not spend")
         self.assertEqual(len(fake.calls), 1, "a quota skip must not try the fallback model")
         self.assertEqual(Ledger(str(Path(self.tmp) / "ledger.sqlite3")).cost_since("2000-01-01"), 0)
 
-    def test_codex_error_is_reported_not_paid_around(self):
+    def test_codex_error_is_reported_and_only_the_last_rung_may_pay(self):
         fake = FakeCodex([(1, events(""), "codex exec failed")])
         r = provider(self.tmp, fake, codex_fallback_model=None).judge("q", SCHEMA)
         self.assertFalse(r.ok)
         self.assertTrue(r.error.startswith("codex: codex_failed"), r.error)
-        self.assertEqual([a["provider"] for a in r.attempts], ["codex", "jev"])
+        # codex -> jev -> deepseek: the paid rung is reached only after BOTH free
+        # ones declined, and its failure never overwrites the real first cause.
+        self.assertEqual([a["provider"] for a in r.attempts], ["codex", "jev", "deepseek"])
+        self.assertEqual(r.attempts[-1]["outcome"], "skipped")
         r2 = provider(self.tmp, FakeCodex([(3, "", "kill switch present")])).judge("q", SCHEMA)
         self.assertEqual(r2.attempts[0]["reason"], "kill_switch")
         self.assertIn("no provider served the request", r2.error)
@@ -180,11 +212,43 @@ class Ladder(unittest.TestCase):
         self.assertEqual(r2.attempts[0]["reason"], "model_unsupported_recently")
         self.assertEqual(len(fake.calls), 3, "the refused model is not retried inside the memory window")
 
+    def test_the_paid_rung_is_under_the_shared_cap_and_leaves_a_chain_ledger_row(self):
+        """QA 2026-11-03: routing through plain `call_deepseek` skipped the shared
+        $10/day cap AND the ledger, so trust spending during an outage was neither
+        bounded nor visible to the watchdog. It now goes through ModelChain."""
+        from lib import model_chain as mc
+        ledger = Path(self.tmp) / "chain-calls.jsonl"
+        saved = (mc.call_deepseek, mc.load_key, os.environ.get("MODEL_CHAIN_LEDGER_PATH"))
+
+        def restore():
+            mc.call_deepseek, mc.load_key = saved[0], saved[1]
+            if saved[2] is None:
+                os.environ.pop("MODEL_CHAIN_LEDGER_PATH", None)
+            else:
+                os.environ["MODEL_CHAIN_LEDGER_PATH"] = saved[2]
+        self.addCleanup(restore)
+        os.environ["MODEL_CHAIN_LEDGER_PATH"] = str(ledger)
+        mc.load_key = lambda *a, **k: "k"
+        mc.call_deepseek = lambda *a, **k: mc.TierAttempt(
+            mc.TIER_FALLBACK, "ok", model=mc.FALLBACK_MODEL, text='{"answer":"y"}', json={"answer": "y"},
+            cost_usd=0.0004, input_tokens=11, output_tokens=3, latency_ms=7)
+        fake = FakeCodex([(3, "", "reason=quota")])
+        r = provider(self.tmp, fake).judge("q", SCHEMA)
+        self.assertEqual((r.attempts[-1]["provider"], r.attempts[-1]["outcome"]), ("deepseek", "ok"))
+        rows = [json.loads(line) for line in ledger.read_text().splitlines() if line.strip()]
+        # reserve -> call -> settle, all three carrying this surface and step, so
+        # the metered rung is under the cap AND visible to the watchdog (QA 11-03).
+        self.assertEqual([x["outcome"] for x in rows], ["reserve", "ok", "settle"])
+        self.assertTrue(all((x["surface"], x["tier"], x["step"]) == ("credit-trust", "deepseek", "trust")
+                            for x in rows))
+        self.assertGreater([x["cost_usd"] for x in rows if x["outcome"] == "ok"][0], 0)
+
     def test_web_request_skips_codex_until_headless_search_exists(self):
         fake = FakeCodex([(0, events('{"answer":"x"}'), "")])
         r = provider(self.tmp, fake).judge("q", SCHEMA, web=True)
         self.assertFalse(r.ok)
-        self.assertEqual([a["reason"] for a in r.attempts], ["web_search_unavailable", "no_web_search"])
+        self.assertEqual([a["reason"] for a in r.attempts],
+                         ["web_search_unavailable", "no_web_search", "web_search_not_used_here"])
         self.assertEqual(fake.calls, [])
 
     def test_tool_and_safety_violations_discard_the_answer(self):
@@ -194,6 +258,44 @@ class Ladder(unittest.TestCase):
             self.assertFalse(r.ok)
             self.assertEqual(r.attempts[0]["reason"], reason)
             self.assertIsNone(r.json)
+
+    def test_a_safety_refusal_aborts_the_ladder_instead_of_buying_a_second_opinion(self):
+        """QA 2026-11-03 (CRITICAL): rc 4/9 recorded an error and the ladder carried
+        on, so the DeepSeek rung could answer a request the tool-less subscription
+        refused - a refusal laundered onto paid inference."""
+        paid: list = []
+        saved = mc.call_deepseek
+        self.addCleanup(lambda: setattr(mc, "call_deepseek", saved))
+        mc.call_deepseek = lambda *a, **k: paid.append(k) or mc.TierAttempt(
+            mc.TIER_FALLBACK, "ok", model=mc.FALLBACK_MODEL, text='{"answer":"laundered"}',
+            json={"answer": "laundered"}, cost_usd=0.0003)
+        for rc, reason in ((4, "tool_violation"), (9, "safety_violation")):
+            fake = FakeCodex([(rc, events('{"answer":"x"}'), "")])
+            r = provider(self.tmp, fake).judge("q", SCHEMA)
+            self.assertFalse(r.ok, f"rc {rc} must not be answered by a later rung")
+            self.assertIsNone(r.json)
+            self.assertEqual([a["provider"] for a in r.attempts], ["codex"],
+                             "the refusal ends the ladder - no jev, no paid rung")
+            self.assertEqual(paid, [])
+            self.assertEqual(r.meta.get("aborted"), reason)
+            self.assertEqual(Ledger(str(Path(self.tmp) / "ledger.sqlite3")).cost_since("2000-01-01"), 0)
+
+    def test_a_subscription_success_lands_in_the_shared_share_ledger(self):
+        """QA 2026-11-03: codex successes went only to the SQLite llm_calls ledger,
+        so the shared share saw paid fallbacks with no subscription denominator -
+        1,000 free successes plus 5 paid fallbacks read as 100% fallback."""
+        toml = Path(self.tmp) / "chain.jsonl"
+        old = os.environ.get("MODEL_CHAIN_LEDGER_PATH")
+        os.environ["MODEL_CHAIN_LEDGER_PATH"] = str(toml)
+        self.addCleanup(lambda: os.environ.__setitem__("MODEL_CHAIN_LEDGER_PATH", old) if old is not None
+                        else os.environ.pop("MODEL_CHAIN_LEDGER_PATH", None))
+        provider(self.tmp, FakeCodex([(0, events('{"answer":"x"}'), "")]), codex_fallback_model=None
+                 ).judge("q", SCHEMA)
+        rows = [json.loads(x) for x in toml.read_text().splitlines() if x.strip()]
+        self.assertEqual([(r["surface"], r["tier"], r["outcome"]) for r in rows],
+                         [("credit-trust", mc.TIER_SUBSCRIPTION, "ok")])
+        share, denom = mc.fallback_share(rows)
+        self.assertEqual((share, denom), (0.0, 1))
 
     def test_schema_mismatch_is_an_error(self):
         fake = FakeCodex([(0, events('{"other":"x"}'), "")])

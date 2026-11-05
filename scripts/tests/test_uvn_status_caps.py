@@ -71,7 +71,7 @@ class CapsTest(unittest.TestCase):
         ns = argparse.Namespace(preview=None, wording="", campaign="uvn-status", from_stage2=False, list="x", exclude_users=None,
                                 mode="apply", segment="paid", max_users=5, ledger=None, proof_on_file=None, proof_store=None,
                                 check_recipients=False, segment_daily_cap=None, gmail_fallback_o=False, no_correction=False,
-                                max_entries=None, start_entry=0, outcomes_json=None)
+                                max_entries=None, start_entry=0, outcomes_json=None, inapp_overflow=False)
         with mock.patch.object(cli.uvn_status, "run", lambda **kw: rep), mock.patch.object(cli, "preflight_outcomes", lambda a: ""):
             self.assertEqual(cli._uvn_status(ns), 2)
 
@@ -84,7 +84,7 @@ class CapsTest(unittest.TestCase):
         ns = argparse.Namespace(preview=None, wording="", campaign="uvn-status", from_stage2=False, list="x", exclude_users=None,
                                 mode="apply", segment="paid", max_users=5, ledger=None, proof_on_file=None, proof_store=None,
                                 check_recipients=False, segment_daily_cap=None, gmail_fallback_o=False, no_correction=False,
-                                max_entries=None, start_entry=0, outcomes_json=None)
+                                max_entries=None, start_entry=0, outcomes_json=None, inapp_overflow=False)
         with mock.patch.object(cli.uvn_status, "run", lambda **kw: rep), mock.patch.object(cli, "preflight_outcomes", lambda a: ""):
             self.assertEqual(cli._uvn_status(ns), 3)
 

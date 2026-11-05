@@ -2110,6 +2110,18 @@ jobs:
           # T01). Stdlib only; codex, Jev, OpenRouter and HTTP are faked, and the
           # bash helper is exercised only via --print-argv / census / quota gate.
           python3 scripts/tests/test_credit_trust_llm.py
+          # The ONE model chain on the user path (captain 2026-11-03): the
+          # subscription tier first, OpenRouter deepseek-v4.1-flash-1017 when it
+          # declines, and the watchdog that pages when the path rides the
+          # fallback tier or runs dry. Hermetic: codex, the OpenRouter opener,
+          # the clock and sleep are faked; the ledger is a temp file.
+          python3 scripts/tests/test_model_chain.py
+          # ZDR + precision floor on every production DeepSeek/GLM route (captain
+          # 2026-11-04): validate_routing refuses a block with no zdr flag or with
+          # int4/int8 allowed, call_deepseek sends the one block on every metered
+          # call, and scripts/check-zdr-routing.py asserts the same for every
+          # OpenClaw config (plus: no fireworks/ ref survives). Hermetic.
+          python3 scripts/tests/test_zdr_routing.py
           # batch-judge (Fable scale-now-openclaw): ONE tool-less judge call per outbound batch, STOP-only, fail closed.
           python3 scripts/tests/test_credit_batch_judge.py
           # b1's coded pre-layer + instructions for it (runs BEFORE judge_batch; a coded stop never reaches the model).
@@ -2155,6 +2167,8 @@ jobs:
           python3 scripts/tests/test_reply_ref_picker.py
           # support@ Gmail readers kill file (/etc/hydra/gmail-readers.disabled; firstmate 10-31).
           python3 scripts/tests/test_gmail_kill.py
+          # support@ Gmail quota guard: shared lock, host-wide Retry-After backoff, hourly budget (firstmate 10-31).
+          python3 scripts/tests/test_gmail_quota.py
           # DSP evidence verifier SHADOW (same-run Spotify+Tidal by-id anchors, contradictions,
           # account gate, big/common/flagged guards, append-only store). Admin API, gate, IDP pod faked.
           python3 scripts/tests/test_dsp_verify.py
@@ -2179,6 +2193,14 @@ jobs:
           # professional id / Auth0 / processed claim / representation profile; reverted claims and
           # ambiguity refuse; pinned on the x2 census shape (synthetic ids). Trino faked. Stdlib only.
           python3 scripts/tests/test_identity_resolver.py
+          # Churn-risk signal (firstmate churn-risk-signal-prevent-p1, captain 2026-11-03): the report's
+          # stage rules and tier precedence, the support-state store round trip, the risk.json classes
+          # and the fail-CLOSED publisher (never a fresh timestamp over a stale sweep), the reader's
+          # fail-OPEN order (missing / stale / kill file / unreadable policy = no override, and a reorder
+          # never invalidates a signed audience), the cancel alert's join + dedup + commit-after-post,
+          # and the weekly line's window math. Every store, policy and risk file is in a temp dir; no
+          # network, no Trino, no Intercom, no ClickUp. Stdlib unittest, run directly.
+          python3 scripts/tests/test_churn_risk.py
 
   plugin-tests:
     name: Plugin tests (vitest)

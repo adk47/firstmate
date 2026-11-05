@@ -3,8 +3,10 @@ confidence per field.
 
 Model: OpenRouter `deepseek/deepseek-v4.1-flash-1017` (captain's standing rule
 2026-10-26: AI = OpenRouter deepseek-v4.1-flash-1017). The call is direct HTTP,
-tool-less, temperature 0, JSON-object output, with OpenRouter's
-`data_collection: deny` provider filter. The document text is attacker-
+tool-less, temperature 0, JSON-object output, with the ONE ZDR routing block
+(`model_chain.ZDR_ROUTING`: zdr, data_collection deny, price sort, fp8/bf16/fp16
+only, max_price) - a document a creator sent us is the last thing that should
+land on an unverified or int4 host. The document text is attacker-
 controlled DATA: the prompt says so, the answer is validated field by field,
 and nothing the model writes is executed or followed. Every call (served,
 failed, skipped) is a dv_llm_calls row with the prompt sha256 and its cost; a
@@ -31,8 +33,12 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from credit_review.judge import load_key
+from lib import model_chain
 
 MODEL = os.environ.get("CREDIT_DOC_VERIFY_MODEL", "deepseek/deepseek-v4.1-flash-1017")
+# Escape hatch to the pre-2026-11 direct-OpenRouter transport (no subscription
+# rung, no tier log).
+LEGACY_TRANSPORT = os.environ.get("CREDIT_DOC_VERIFY_LEGACY_TRANSPORT", "0") == "1"
 URL = os.environ.get("CREDIT_DOC_VERIFY_OPENROUTER_URL", "https://openrouter.ai/api/v1/chat/completions")
 DAILY_USD = float(os.environ.get("CREDIT_DOC_VERIFY_DAILY_USD", "5"))
 TIMEOUT_S = int(os.environ.get("CREDIT_DOC_VERIFY_LLM_TIMEOUT_S", "90"))
@@ -293,11 +299,105 @@ def fallback(text: str, error: str) -> Extraction:
 Post = Callable[[dict[str, Any], str, int], dict[str, Any]]
 
 
+class UnsafeAbort(RuntimeError):
+    """The subscription tier answered with a tool/safety violation. The chain
+    forbids laundering that onto another model (model_chain.ABORT_CHAIN), so the
+    extraction aborts here instead of falling through to the metered tier."""
+
+
+class ChainTransport(RuntimeError):
+    """The shared model chain had no tier left to serve this call."""
+
+
+SURFACE = "doc-verify"
+
+
+def _free_chain() -> Any:
+    """The $0 tier ALONE. Going through the chain (rather than calling
+    `call_subscription` directly) is what puts a ledger row and a
+    `[model-chain] tier=subscription` line behind every free answer - without it
+    hundreds of doc-verify subscription successes are invisible while the few
+    metered rows are, which reads as a 100% fallback share and pages falsely
+    (QA 2026-11-03)."""
+    return model_chain.ModelChain(SURFACE, tiers=(model_chain.TIER_SUBSCRIPTION,))
+
+
+def _paid_chain(key: str | None, model: str | None = None) -> Any:
+    """The metered tier ALONE: `_free_tier` has already asked the subscription
+    for this document, so re-asking it here would be a second $0 attempt for an
+    answer we already know it declined (QA 2026-11-03).
+
+    ``model`` is the model the CALLER asked for (``CREDIT_DOC_VERIFY_MODEL`` or
+    ``Extractor(model=...)``) and the one the cache and the audit trail are keyed
+    by, so the metered tier must run it rather than silently substituting the
+    default (QA 2026-11-03). An unpriced pin is refused by the chain with a reason
+    naming the fix, which surfaces here as a chain failure, not a wrong model."""
+    return model_chain.ModelChain(SURFACE, tiers=(model_chain.TIER_FALLBACK,), key=key,
+                                  fallback_model=model or MODEL)
+
+
+def chain_post(body: dict[str, Any], key: str, timeout: int) -> dict[str, Any]:
+    """The same request, served by the shared tier order (captain 2026-11-03):
+    the ChatGPT/Codex subscription first at $0, then OpenRouter deepseek-v4.1-
+    flash-1017. Tool-less and web-free on both tiers (a document IS the
+    evidence), and the answer comes back in OpenRouter's shape so every
+    validator, cache rule and ledger row below is unchanged.
+
+    A dead chain raises ChainTransport, which the caller turns into the same
+    fail-closed `fallback()` it already uses for a transport failure."""
+    # record_exhausted=False: this chain is one RUNG of doc-verify's ladder, and a
+    # truncated answer still has a bounded recovery below (chunk, or retry with a
+    # penalty). The terminal "user got no answer" marker belongs at the end of the
+    # ladder, which this function does not own (QA 2026-11-03).
+    r = _paid_chain(key, body.get("model")).call_fallback(
+        messages=body.get("messages") or [], web=False, schema=None,
+        max_tokens=int(body.get("max_tokens") or MAX_TOKENS),
+        temperature=0.0, timeout_s=timeout, sensitive=True, step="extract",
+        record_exhausted=False, frequency_penalty=body.get("frequency_penalty"))
+    if not r.ok:
+        if r.finish_reason == "length":
+            # A TRUNCATED answer is not a transport failure: it is a capped answer,
+            # and this caller owns the bounded recovery for it (read a long document
+            # in chunks, or retry once with an anti-repetition penalty). It is
+            # passed on as `finish_reason: length` so `_extract` runs that path and
+            # still never accepts or caches the partial answer (QA 2026-11-03).
+            return {"model": r.model_reported,
+                    "usage": {"prompt_tokens": r.input_tokens, "completion_tokens": r.output_tokens,
+                              "cost": r.cost_usd},
+                    "choices": [{"finish_reason": "length", "message": {"content": r.text or ""}}]}
+        # No recovery left on THIS rung, so the path really did get no answer.
+        model_chain.record_chain_exhausted(SURFACE, step="extract", reason=r.error or "model chain exhausted",
+                                          prompt_sha256=r.prompt_sha256, attempts=r.attempts)
+        raise ChainTransport(r.error or "model chain exhausted")
+    # `r.model` falls back to the REQUESTED id when the provider reports none;
+    # provenance must not be invented, so only a real report is passed through and
+    # the cache guard below stays honest (QA 2026-11-03).
+    return {"model": r.model_reported,
+            "usage": {"prompt_tokens": r.input_tokens, "completion_tokens": r.output_tokens,
+                      "cost": r.cost_usd},
+            "choices": [{"finish_reason": "stop", "message": {"content": r.text or ""}}]}
+
+
 def _post(body: dict[str, Any], key: str, timeout: int) -> dict[str, Any]:
     req = urllib.request.Request(URL, data=json.dumps(body).encode(), headers={
         "Authorization": f"Bearer {key}", "Content-Type": "application/json", "X-Title": "hydra credit doc-verify"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.load(resp)
+
+
+def request_body(model: str, messages: list[dict[str, Any]]) -> dict[str, Any]:
+    """The ONE OpenRouter request this caller sends.
+
+    Factored out so the provider block can be PROBED rather than grepped (QA
+    2026-11-04): a comment mentioning ZDR_ROUTING used to satisfy the config
+    guard even if the assignment was deleted, which would have sent a creator's
+    document to an unfiltered host with every gate green.
+    """
+    return {"model": model, "messages": messages, "temperature": 0, "max_tokens": MAX_TOKENS,
+            "response_format": {"type": "json_object"}, "usage": {"include": True},
+            # The one ZDR block, validated: refuses a route with no zdr flag, with
+            # int4/int8 allowed, or with an uncapped price (captain 2026-11-04).
+            "provider": model_chain.validate_routing(model_chain.ZDR_ROUTING)}
 
 
 def chunks(text: str, size: int = CHUNK_CHARS) -> list[str]:
@@ -375,18 +475,31 @@ class Extractor:
         self.store = store
         self.model = model
         self.key = key
-        self.post = post or _post
+        self.post = post or (_post if LEGACY_TRANSPORT else chain_post)
         self.daily_usd = daily_usd
 
     def extract(self, text: str, meta: dict[str, Any], proof_id: str) -> Extraction:
         _watch_injection(text, proof_id)
         return self._extract(text, meta, proof_id, chunk_ok=True)
 
+    def _chain_terminal(self, reason: str, sha: str | None = None) -> None:
+        """Record the terminal `chain_exhausted` marker ONLY when the shared chain
+        is what ran. On the legacy transport (CREDIT_DOC_VERIFY_LEGACY_TRANSPORT=1)
+        or an injected `post=`, neither ModelChain tier was called, so marking it
+        would make the watchdog page "both tiers failed" about a path that never
+        used them (QA 2026-11-04).
+        """
+        if self.post is not chain_post:
+            return
+        model_chain.record_chain_exhausted(SURFACE, step="extract", reason=reason,
+                                          prompt_sha256=sha or "")
+
     def _extract_chunked(self, text: str, meta: dict[str, Any], proof_id: str) -> Extraction:
         """A long document whose answer was truncated, read in <= MAX_CHUNKS pieces and merged. Fail closed: a
         document longer than MAX_CHUNKS pieces, or any piece that does not give a usable answer, is unusable."""
         parts_text = chunks(text)
         if len(parts_text) > MAX_CHUNKS:
+            self._chain_terminal(f"truncated answer and {len(parts_text)} chunks > {MAX_CHUNKS}: recovery gave nothing")
             return fallback(text, f"unusable model answer: {len(parts_text)} chunks > {MAX_CHUNKS}")
         parts, ids = [], []
         for i, piece in enumerate(parts_text):
@@ -394,12 +507,59 @@ class Extractor:
             if not ex.ok:
                 # a degenerate chunk keeps that classification; any other failure stays a tooling error (retried)
                 head = DEGENERATE if str(ex.error or "").startswith(DEGENERATE) else "unusable model answer"
+                self._chain_terminal(f"truncation recovery failed at chunk {i + 1}/{len(parts_text)}")
                 return fallback(text, f"{head} (chunk {i + 1}/{len(parts_text)}: {ex.error})")
             parts.append(ex)
             ids.append(proof_id)
         out = merge(parts, ids)
         out.model = parts[0].model if parts else self.model
         return out
+
+    def _free_tier(self, messages: list[dict[str, Any]], sha: str, row: dict[str, Any]) -> Extraction | None:
+        """One tool-less call on the ChatGPT/Codex subscription. Returns None to fall
+        through to the metered tier; never raises. The ledger row is written either
+        way, so an outage shows up in dv_llm_calls instead of vanishing."""
+        # record_exhausted=False: a decline here is NOT the end of the path - the
+        # metered tier gets the document next, and `chain_post` records the
+        # terminal row if that one fails too (QA 2026-11-03).
+        # defer_served_row: the answer is only SERVED once validate() accepts it. A
+        # success row written here would count an unusable free answer as a
+        # subscription success and understate the fallback share (QA 2026-11-03).
+        r = _free_chain().call(model_chain.messages_text(messages), timeout_s=TIMEOUT_S,
+                               sensitive=True, step="free", record_exhausted=False,
+                               defer_served_row=True)
+        last = (r.attempts[-1] if r.attempts else {})
+        if not r.ok:
+            why = f"free tier: {last.get('kind') or last.get('outcome')}" + (
+                f" ({last.get('reason')})" if last.get("reason") else "")
+            self.store.llm_call({**row, "model": model_chain.SUBSCRIPTION_MODEL,
+                                 "outcome": "skipped" if last.get("outcome") == "skipped" else "error",
+                                 "cost_usd": 0, "reason": why})
+            if last.get("kind") == model_chain.UNSAFE:
+                # A tool/safety violation is not a decline: the question must not be
+                # re-asked of the subscription (chain_post would) and must never be
+                # laundered onto the metered tier. Abort the whole extraction.
+                raise UnsafeAbort(last.get("reason") or "tool/safety violation")
+            return None
+        try:
+            content = r.text or ""
+            m = re.search(r"\{.*\}", content, re.S)
+            ex = validate(json.loads(m.group(0) if m else content))
+        except (ValueError, TypeError, AttributeError, IndexError) as exc:
+            self.store.llm_call({**row, "model": r.model or model_chain.SUBSCRIPTION_MODEL,
+                                 "outcome": "error", "cost_usd": 0,
+                                 "reason": f"free tier unusable answer: {type(exc).__name__}"})
+            return None
+        ex.model = r.model or model_chain.SUBSCRIPTION_MODEL
+        # No cache write: the cache is keyed by self.model (the metered tier), and an
+        # answer from another tier must never be replayed as if that tier had given it.
+        self.store.llm_call({**row, "model": ex.model, "outcome": "ok", "cost_usd": 0,
+                             "latency_ms": r.latency_ms})
+        # NOW the answer is served: a validated free answer counts in the share's
+        # denominator, and only validated ones do.
+        model_chain.record_served(SURFACE, tier=model_chain.TIER_SUBSCRIPTION, step="free",
+                                  model=ex.model, latency_ms=r.latency_ms)
+        return ex
 
     def _extract(self, text: str, meta: dict[str, Any], proof_id: str, *, chunk_ok: bool) -> Extraction:
         if not (text or "").strip():
@@ -420,16 +580,33 @@ class Extractor:
                                      "reason": f"same prompt answered by call {call_id} {age / 60:.0f} min ago"})
                 ex.model = self.model
                 return ex
+        if self.post is chain_post:
+            # Tier order (captain 2026-11-03): the subscription answers FIRST, at
+            # $0, before the spend cap and before the OpenRouter key gate - a
+            # quota or key outage must not stop work that costs nothing. Only the
+            # default (chain) transport does this; an injected `post=` (every
+            # unit test) stays exactly as it was.
+            try:
+                ex = self._free_tier(messages, sha, row)
+            except UnsafeAbort as exc:
+                self.store.llm_call({**row, "outcome": "error", "cost_usd": 0,
+                                     "reason": f"unsafe model answer: {exc}"})
+                return fallback(text, f"unsafe model answer: {exc}")
+            if ex is not None:
+                return ex
         if self.store.spent_today_usd() >= self.daily_usd:
             self.store.llm_call({**row, "outcome": "skipped", "reason": f"daily cap ${self.daily_usd:.2f} reached"})
+            # The free tier already declined and the cap is the last gate: this
+            # request gets no answer at all, so the watchdog must be able to page
+            # (QA 2026-11-03).
+            self._chain_terminal(f"free tier declined and the daily cap ${self.daily_usd:.2f} was reached", sha)
             return fallback(text, "daily model spend cap reached")
         key = self.key or load_key()
         if not key:
             self.store.llm_call({**row, "outcome": "skipped", "reason": "no OpenRouter key"})
+            self._chain_terminal("free tier declined and there is no OpenRouter key", sha)
             return fallback(text, "no OpenRouter key")
-        body = {"model": self.model, "messages": messages, "temperature": 0, "max_tokens": MAX_TOKENS,
-                "response_format": {"type": "json_object"}, "usage": {"include": True},
-                "provider": {"data_collection": "deny"}}
+        body = request_body(self.model, messages)
         # One in-call retry on an unusable answer (backfill 2026-10-27: 6 of
         # 82 answers did not parse). Every attempt is its own ledger row and
         # counts against the daily cap; a transport/HTTP error is not retried
@@ -438,11 +615,20 @@ class Extractor:
         for attempt in range(1 + UNUSABLE_RETRIES):
             if attempt and self.store.spent_today_usd() >= self.daily_usd:
                 self.store.llm_call({**row, "outcome": "skipped", "reason": "daily cap reached before the retry"})
+                # The first paid attempt was charged, unusable, and filled the cap;
+                # the retry cannot run. No extraction reaches the user, so this is
+                # the end of the ladder and it must page (QA 2026-11-04).
+                self._chain_terminal(
+                    "the retried answer was unusable and its charge reached the daily cap", sha)
                 return fallback(text, "daily model spend cap reached")
             att = dict(row)
             t0 = time.monotonic()
             try:
                 data = self.post(body, key, TIMEOUT_S)
+            except ChainTransport as exc:
+                # both tiers are exhausted; the chain already logged which one and why
+                err = f"model chain exhausted: {exc}"
+                data = None
             except urllib.error.HTTPError as exc:
                 err = f"http {exc.code}"
                 data = None
@@ -490,8 +676,18 @@ class Extractor:
         else:
             if truncated == 1 + UNUSABLE_RETRIES:
                 # truncated at the output cap on every attempt, the last one with the anti-repetition penalty
+                # Truncation on every attempt: the bounded recovery ran out, so the
+                # user path really did get no answer - only NOW is it terminal.
+                self._chain_terminal(f"{DEGENERATE}: hit the {MAX_TOKENS}-token cap on every attempt")
                 return fallback(text, f"{DEGENERATE} (the model ran to the {MAX_TOKENS}-token cap on every attempt, "
                                       "the last with an anti-repetition penalty)")
+            if truncated:
+                self._chain_terminal(f"{DEGENERATE}: truncated on every attempt")
+            else:
+                # Two malformed completions (finish_reason=stop, unparseable or
+                # schema-invalid) leave no extraction at all: that IS a dead user
+                # path, and the watchdog must be able to page on it (QA 2026-11-03).
+                self._chain_terminal(f"unusable answers after retries: {1 + UNUSABLE_RETRIES} attempts")
             return fallback(text, "unusable model answer")
         ex.model = row["model"]
         reported_model = row.pop("_reported_model", None)

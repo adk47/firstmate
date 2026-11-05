@@ -209,6 +209,19 @@
 #     from EnvironmentFile (a 644 cron.d line would expose it) and the
 #     service is in AUX_ONFAILURE_UNITS so a failing run pages.
 #
+#   /etc/systemd/system/hydra-refund-confirm-audit.{service,timer}
+#     Runs scripts/audit-refund-confirmations.sh every 30 min (oneshot, read-only).
+#     Pages #clio_devops when a refund the processor issued is older than 24 h
+#     and no refund-confirm note is recorded as sent (captain 2026-11-03 20:04Z
+#     building rule; Fable d2 ruling refund-confirm-1103). Pages ONE page per
+#     refund id; a feed it cannot read pages "could not run" instead of clean.
+#
+#   /etc/systemd/system/hydra-approval-stamps-audit.{service,timer}
+#     Runs scripts/audit-approval-stamps.sh every 15 min (oneshot, read-only).
+#     Pages #clio_devops when a send in the verify ledger lacks a valid approval
+#     stamp (captain 2026-11-03: ruling ids may authorize pre-approved template
+#     classes, so "who authorized this note?" must be answerable from the ledger).
+#
 #   /root/fmc1-intake/intake.py
 #     The legal@ mailbox intake (DMCA / takedown notices -> #cs_priority page),
 #     installed from scripts/legal-intake.py. It is NOT a unit: a 15-min cron on
@@ -341,9 +354,27 @@
 set -euo pipefail
 
 HYDRA_ROOT="${1:-/opt/hydra}"
+# Children must see the tree this invocation was given. A plain assignment is invisible
+# to a child process, which then falls back to its own /opt/hydra default - that is how
+# a staging install ends up writing cron entries that point at the wrong checkout
+# (2026-11-04). Exported once, here, so every child (scripts/churn/install-cron.sh and
+# the aux scripts that honour HYDRA_ROOT) resolves the same tree.
+export HYDRA_ROOT
 
 log() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] install-aux-units: $*"; }
 fail() { log "FATAL: $*"; exit 1; }
+
+# TEST SEAM (HYDRA_STOP_AFTER=churn-cron): install ONLY the churn cron file and exit.
+# The churn suite has to prove that THIS script's argv decides which tree the cron
+# lines name (`install-aux-units.sh /srv/hydra-staging` must not write /opt/hydra
+# paths), and that seam is only reachable by running the installer. Everything else
+# this script does needs root (systemd unit writes), so without a stop point the test
+# could only grep source text - which firstmate ruled out on 2026-11-04. The branch is
+# read-only beyond the one cron file and exits before any unit write.
+if [ "${HYDRA_STOP_AFTER:-}" = "churn-cron" ]; then
+  bash "$HYDRA_ROOT/scripts/churn/install-cron.sh"
+  exit 0
+fi
 
 # Runtime-aware install gate: on openclaw >= 2026.8 the codex-token-refresh
 # timer below must NOT be installed (see its own block for why). Resolve
@@ -399,6 +430,10 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/prod-log-alert-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/sentry-issue-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/sentry-issue-watchdog.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/audit-approval-stamps.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/audit-approval-stamps.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/audit-refund-confirmations.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/audit-refund-confirmations.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/release-digest.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/release-digest.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/clickup-sla-digest.sh" ]] \
@@ -613,6 +648,52 @@ systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
 systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
 log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
 
+# ─── Model-chain watchdog (captain 2026-11-03) ──────────────────────────────
+# ONE model chain on every user-request path: the ChatGPT/Codex subscription
+# first, then the metered OpenRouter DeepSeek tier. This watchdog is what makes
+# the metered tier an ALARM instead of a quiet cost of doing business:
+#   * FALLBACK SHARE > 20% of user-path model calls in the window  => page
+#     (the subscription quota is out, or its auth is dead)
+#   * any chain EXHAUSTED (both tiers failed / an agent turn reached next=none)
+#     => page immediately, because those paths DEFER or HOLD and the queue grows
+# Sources: /var/lib/hydra/model-chain/calls.jsonl (scripted paths, written by
+# scripts/lib/model_chain.py) and the gateways' [model-fallback/decision]
+# journal lines (agent turns). Read-only; posts to #clio_devops only when a
+# threshold breaks, 6h repeat suppression per alarm. See
+# scripts/model-chain-watchdog.py and docs/model-chain.md.
+cat > /etc/systemd/system/model-chain-watchdog.service << MODELCHAINSVC
+[Unit]
+Description=Model-chain watchdog (pages when the user path rides the fallback tier)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/main.env
+EnvironmentFile=-/etc/openclaw/edge.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/model-chain-watchdog.py --alert
+Nice=5
+MODELCHAINSVC
+
+cat > /etc/systemd/system/model-chain-watchdog.timer << MODELCHAINTMR
+[Unit]
+Description=Run the model-chain watchdog every 15 min
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Unit=model-chain-watchdog.service
+
+[Install]
+WantedBy=timers.target
+MODELCHAINTMR
+
+systemctl daemon-reload
+wd=model-chain-watchdog.timer
+systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
+systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
+log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
+
 # ─── Intercom rights-holder / urgent inbound watchdog (MUS-6566) ───────────
 # Live tick = no flag (--dry-run is the only mode switch). Token:
 # MUSOAI_INTERCOM_TOKEN from the env files; the Slack token is resolved inside
@@ -645,6 +726,80 @@ RIGHTSHOLDERWDTMR
 
 systemctl daemon-reload
 wd=intercom-rights-holder-watchdog.timer
+systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
+systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
+log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
+
+# ─── approval-stamp audit (scripts/audit-approval-stamps.sh) ──────────
+# Every 15 min. Captain 2026-11-03: "users aren't in the dark ... no human reviews is the goal" - the gate now accepts
+# a Fable ruling id for template classes a ruling pre-approved. A stamp nobody checks is decoration, so this pages
+# #clio_devops when any customer note in the verify ledger lacks an authorizer we can name. Read-only on the ledger.
+cat > /etc/systemd/system/hydra-approval-stamps-audit.service << APPROVALSTAMPSVC
+[Unit]
+Description=Verify-ledger approval-stamp audit (pages when a customer note has no valid approver)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+ExecStart=/bin/bash $HYDRA_ROOT/scripts/audit-approval-stamps.sh
+APPROVALSTAMPSVC
+
+cat > /etc/systemd/system/hydra-approval-stamps-audit.timer << APPROVALSTAMPTMR
+[Unit]
+Description=Audit verify-ledger approval stamps every 15 min
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=15min
+Unit=hydra-approval-stamps-audit.service
+
+[Install]
+WantedBy=timers.target
+APPROVALSTAMPTMR
+
+systemctl daemon-reload
+wd=hydra-approval-stamps-audit.timer
+systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
+systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
+log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
+
+# ─── refund-confirmation audit (scripts/audit-refund-confirmations.sh) ─────────
+# Every 30 min. Captain 2026-11-03 20:04Z building rule + Fable d2 ruling refund-confirm-1103: a refund is money that
+# already moved, so "refunded and not told" has to page by itself. Derives the refund feed from Stripe (read-only, the
+# same credential the verify gate uses - see scripts/lib/refund-feed-from-stripe.sh) and compares it with the verify
+# ledger; pages #clio_devops once per refund id, and pages "could not run" (rather than reporting clean) when Stripe or
+# the ledger cannot be read. No file to be written by anyone: the unit depends on nobody's producer, because QA
+# 2026-11-04 showed that a feed nobody writes is an alert that can never see its subject. The AUDIT keeps the cursor at
+# /var/lib/hydra/credit-review/refund-feed-state.json: it records the last instant a comparison was actually made and
+# every untold refund id, so a ledger outage causes re-coverage instead of a silent hole, an already-paged refund keeps
+# the run red until a note is sent, and a gap older than 60 days is paged rather than papered over.
+cat > /etc/systemd/system/hydra-refund-confirm-audit.service << REFUNDAUDITSVC
+[Unit]
+Description=Refund-confirmation audit (pages when a refund older than 24h has no confirmation note)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+ExecStart=/bin/bash $HYDRA_ROOT/scripts/audit-refund-confirmations.sh
+REFUNDAUDITSVC
+
+cat > /etc/systemd/system/hydra-refund-confirm-audit.timer << REFUNDAUDITTMR
+[Unit]
+Description=Audit refund confirmations every 30 min
+
+[Timer]
+OnBootSec=30min
+OnUnitActiveSec=30min
+Unit=hydra-refund-confirm-audit.service
+
+[Install]
+WantedBy=timers.target
+REFUNDAUDITTMR
+
+systemctl daemon-reload
+wd=hydra-refund-confirm-audit.timer
 systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
 systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
 log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
@@ -2206,6 +2361,23 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 CRONCVOUTBOUND
 chmod 644 /etc/cron.d/credit-verify-outbound
 install -d -m 700 /var/lib/hydra/credit-verify-outbound
+
+# ─── Churn risk: support-state store, risk file, cancel page, weekly line ─────
+# firstmate churn-risk-signal-prevent-p1 (captain 2026-11-03 ~21:10Z "we may be
+# losing some users on subscriptions because we are not handling support properly").
+# 16.3% of 60-day paying churn ($5,371 list MRR) carried an unhandled support state.
+# 04:15Z: nightly support-state sweep (paying = who is waiting on us now, churned
+# 30d = R4's 30-day paid priority), and the same run publishes risk.json once both
+# sweeps finish.
+# Hourly :20: page ops when a paying user cancels or asks to cancel with an open
+# issue, and write the lane intake row with `churned:<date>`. Monday 08:00Z: the
+# churned-with-open-issue line. Kill switch /etc/hydra/churn-risk.disabled stops
+# the page and the consumers' sort override, NOT the store (history keeps building).
+# risk_reader.py is the one reader; see its header for the fail-open posture.
+# The cron file has ONE author: scripts/churn/install-cron.sh. It is executed here
+# (not copied as a heredoc) so the churn suite can install it into a temp root and
+# assert the RESULT rather than grepping this file's text.
+bash "$HYDRA_ROOT/scripts/churn/install-cron.sh"
 # ─── Verifier eval, nightly (verifier-eval-v1) ───────────────────────────
 # The shared SHADOW evaluation of every credits / claims / merges verifier: replays each
 # registered verifier over the frozen labelled sets (scripts/verifier_eval/sets/) plus every
@@ -3767,6 +3939,7 @@ AUX_ONFAILURE_UNITS=(
   hydra-session-thread-retention@.service
   hydra-weekly-cleanup.service
   intercom-intake-watchdog.service
+  model-chain-watchdog.service
   intercom-legal-unanswered-watchdog.service
   intercom-webhook.service
   intercom-rights-holder-watchdog.service

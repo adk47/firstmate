@@ -116,6 +116,28 @@ slack_notify() {
     --requester "$(_slack_requester)" >/dev/null 2>&1 || true
 }
 
+# slack_notify_critical_status <msg>: the same critical page as slack_notify_critical, but RETURNING the real
+# delivery status (0 only when Slack confirmed the post). For callers that dedupe on a watermark: a caller that
+# advances its watermark after a silent failure has lost that page forever, so best-effort is the wrong contract there.
+# Every other caller keeps slack_notify_critical's never-fail semantics.
+slack_notify_critical_status() {
+  local msg="$1" dir file rc=0
+  msg="${msg//\\n/$'\n'}"
+  _slack_refuse_installed_muso && return 1
+  slack_load_env "$SLACK_NOTIFY_BOT" || return 1
+  [ -n "${SLACK_CHANNEL:-}" ] || return 1
+  # mktemp-ok: every path here removes the dir before returning; an EXIT trap would outlive the function.
+  dir="$(mktemp -d "${SCRATCH_DIR:-${TMPDIR:-/var/tmp}}/slack-notify.XXXXXX" 2>/dev/null)" || return 1
+  file="$dir/payload.json"
+  if ! jq -nc --arg ch "$SLACK_CHANNEL" \
+       --arg t "<@${SLACK_UID_NICK}> <@${SLACK_UID_AARON}> $msg" '{channel:$ch, text:$t}' > "$file" 2>/dev/null; then
+    rm -rf "$dir"; return 1
+  fi
+  _slack_post_payload "$file" || rc=1
+  rm -rf "$dir"
+  return "$rc"
+}
+
 # _slack_post_payload <path-to-json>  (internal)
 # Posts the chat.postMessage-shaped payload at <path> ({channel, text, blocks,
 # thread_ts} — same shape callers always built) via `muso slack send` and

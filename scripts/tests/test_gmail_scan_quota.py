@@ -149,6 +149,53 @@ class GmailScanQuota(unittest.TestCase):
         self.assertIn("SHARED BACKOFF honoured", log)
         self.assertNotIn("DONE", log)
 
+    def test_a_long_retry_after_is_never_quietly_shrunk_to_a_sleep_cap(self):
+        """QA #1567 finding 3: a 30-minute Retry-after was capped at 900 s for the SLEEP while 1800 s was published
+        to every other consumer, so the retry went out inside a window this file had just promised. The reported
+        window must be the true one (the published window), and it stops rather than sleeping short."""
+        import datetime as dt
+        gog = pathlib.Path(self.dir) / "gog"
+        when = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=1000)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        gog.write_text("#!/bin/bash\n"
+                       "echo 'Google API error (429 rateLimitExceeded): User-rate limit exceeded. "
+                       "Retry after %s' >&2\n"
+                       "exit 7\n" % when)
+        gog.chmod(0o755)
+        r = run_scan(self.dir, gog)
+        log = self.log()
+        self.assertEqual(r.returncode, 4, log)
+        self.assertRegex(log, r"retry-after 1\d{3}s exceeds the remaining budget")   # the TRUE window, not 900
+        self.assertNotIn("retry-after 9", log)
+        self.assertNotIn("DONE", log)
+
+    def test_a_429_without_a_timestamp_never_retries_inside_the_published_window(self):
+        """QA #1567 finding 3: the guard publishes a DEFAULT window when Google names no Retry-after, and the scan
+        used to wait 45 s x try (0 s in tests) while that window stood - four retries inside a promise it had just
+        made to every other support@ consumer. It now sleeps the published window or stops; either way it must not
+        send a second request inside the window it published."""
+        counter = pathlib.Path(self.dir) / "calls"
+        gog = pathlib.Path(self.dir) / "gog"
+        gog.write_text("\n".join([
+            "#!/bin/bash",
+            "n=0",
+            'if [ -f "%s" ]; then n=$(cat "%s"); fi' % (counter, counter),
+            "n=$((n+1))",
+            'echo $n > "%s"' % counter,
+            "echo 'Google API error (429 rateLimitExceeded): User-rate limit exceeded.' >&2",
+            "exit 7",
+            "",
+        ]))
+        gog.chmod(0o755)
+        r = run_scan(self.dir, gog)
+        log = self.log()
+        self.assertEqual(r.returncode, 4, log)                  # a clean saturated stop, never six wasted attempts
+        self.assertEqual(counter.read_text().strip(), "1", log)  # not one retry inside the published window
+        self.assertIn("published window", log)
+        self.assertNotIn("DONE", log)
+        self.assertNotIn("FAILED page", log)
+        published = json.loads((pathlib.Path(self.dir) / "backoff" / "backoff.json").read_text())
+        self.assertIn("until", published)
+
     def test_a_saturated_exit_still_publishes_the_shared_window(self):
         """Exiting 4 must still publish backoff.json, or the next consumer spends a request rediscovering it."""
         gog = fake_gog(self.dir, "429")
@@ -204,11 +251,14 @@ class GmailScanQuota(unittest.TestCase):
         state = pathlib.Path(self.dir) / "backoff"
         run_scan(self.dir, gog)
         published = json.loads((state / "backoff.json").read_text())
-        # The guarantee this test protects is "a fitting 429 still publishes a window", not the literal stamp:
-        # the comment at gmail_scan.sh's publisher now clamps every published window into [now+60 s, now+6 h],
-        # because a verbatim far-future stamp is what taught the fleet a decades-long silence.
+        # The guarantee this test protects is "a fitting 429 still publishes a window", not the literal stamp.
+        # It cannot be a post-run horizon any more: with the seam's floor at 0 the scan WAITS the window out
+        # and then succeeds, so by the time the test reads the file the horizon is spent by design (a floor of
+        # 60 s made it un-waitable, which is why this was the only case that ever saw a positive horizon).
+        # What must still hold: the file EXISTS - the bug was that nothing was written at all on a fitting
+        # 429 - it names this scan, and a far-future stamp is still bounded, not stored verbatim.
+        self.assertEqual(published.get("by"), "cs-proof-feed/gmail_scan.sh", published)
         horizon = (iso(published["until"]) - now_utc()).total_seconds()
-        self.assertGreater(horizon, 0, published)
         self.assertLessEqual(horizon, RETRY_MAX_S + 120, published)
 
 

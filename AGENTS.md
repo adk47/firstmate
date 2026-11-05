@@ -462,6 +462,51 @@ changed). **Detect**: `codex-edge-mirror.sh --check`; **dry-run**: `--dry-run`.
 The runbook's "Option B" (three device logins on edge) is RETIRED: it would have
 created a second refresh chain per account, the exact fan-out topology above.
 
+## One model chain on every user path
+
+Every model call that can decide something about a user goes through
+`scripts/lib/model_chain.py` (docs/model-chain.md). Captain 2026-11-03:
+"primary = the OpenClaw subscription token model; when it runs out, OpenRouter
+deepseek 1017."
+
+- **tier 1** `openai/gpt-6-sol` via `scripts/lib/codex-judge-exec.sh` — tool-less,
+  sandboxed, $0. **tier 2** `openrouter/deepseek/deepseek-v4.1-flash-1017`.
+- **Adding a rung, or any different fallback model, is a SPEND decision.**
+  `validate-config-matrix.sh` check 6b pins every agent and cron fallback list to
+  exactly one DeepSeek entry; a PR that changes it argues the money. (The old
+  luna/haiku hops are gone: they were paid FRONTIER models, so a subscription
+  outage silently upgraded every agent turn onto frontier inference.)
+- **A tier that cannot serve SKIPS with a reason, never answers blind** — e.g.
+  no headless web search on codex-cli 0.156.1 (`reason=web_search_unavailable`).
+- **`unsafe` ABORTS the chain**: a tool or safety violation is never laundered
+  onto a metered model.
+- **Strict structured output**: codex rejects a schema without
+  `additionalProperties: false` (`400 invalid_json_schema`). `strict_schema()`
+  normalizes it for every caller — a live call, not a fake, caught that.
+- **Read it with** `python3 scripts/model-chain-watchdog.py --canary` (>20%
+  tier-2 share in the window, or any exhausted chain, pages #clio_devops; the
+  timer runs `--alert` every 15 min).
+- **The chain is a CLIENT.** It approves nothing: every caller keeps its own
+  caps (`CappedJudge` $25/day + per-run, doc-verify $5/day), gates and
+  fail-closed path, and an exhausted chain makes the caller DEFER/HOLD.
+- **Every metered call carries the ONE ZDR block** (captain 2026-11-04: "we need
+  [ZDR] ... only use the fastest cheapest ZDR deepseek models ... protect our
+  code"). `model_chain.ZDR_ROUTING` = `zdr: true`, `data_collection: deny`,
+  `sort: price`, `quantizations: [fp8, bf16, fp16]`, `max_price 0.30/1.20`,
+  `ignore: [Google]`; `validate_routing()` REFUSES anything weaker (no zdr flag,
+  int4/int8/fp4/unknown, uncapped price) and `call_deepseek` sends it on every
+  call — `sensitive=False` cannot opt out. The config half is
+  `scripts/check-zdr-routing.py` (validate-config-matrix check 10): every
+  `openrouter/deepseek|z-ai` ref in the OpenClaw configs needs
+  `compat.openRouterRouting` passing the same guard. Measured 2026-11-04: the
+  block lands on Morph fp8 at $0.032/$0.50 per M (8/8), the same model without
+  it lands on InferenceNet at $0.08/$0.55. **Fireworks is retired from
+  production paths** (6.5x–9.4x the price, account-wide ZDR is an
+  Enterprise-only toggle we cannot verify); its egress rule is gone and
+  `check-zdr-routing.py` fails on any surviving `fireworks/` ref. Claude stays
+  on CLIProxyAPI, never Bedrock. Inventory + retention evidence:
+  `data/zdr-prod-callers-z1/report.md`.
+
 ## Session budgets must exceed each agent's PROTECTED footprint, or crons wedge
 
 `session.maintenance` has two caps, and BOTH silently kill cron surfaces when an

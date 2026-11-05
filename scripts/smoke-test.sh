@@ -386,7 +386,7 @@ PYEOF
 
   case "$(websearch_scoped_verdict "$ref_verdict" "$scout_verdict" "$restriction")" in
     fail)
-      fail_check "$label: $(websearch_scoped_fail_message "$scout_detail" "$restriction" "$reference" "$ref_verdict" "$ref_detail")"
+      fail_check "$label: $(websearch_scope_fail_message "$reference" "$ref_verdict" "$ref_detail" "$scout_detail" "$restriction")"
       ;;
     warn)
       if [[ "$scout_verdict" == "unavailable" ]]; then

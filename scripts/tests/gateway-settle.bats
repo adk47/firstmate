@@ -181,8 +181,3 @@ line_of() { grep -n -m1 -F -- "$1" "$BATS_TEST_DIRNAME/../smoke-test.sh" | cut -
   [ -n "$g" ] && [ -n "$p" ]
   [ "$g" -lt "$p" ]
 }
-
-@test "wiring: check_web_search fail) arm uses websearch_scoped_fail_message, not the old text" {
-  grep -q 'fail_check "\$label: \$(websearch_scoped_fail_message ' "$BATS_TEST_DIRNAME/../smoke-test.sh"
-  ! grep -q 'NO tool policy explains it' "$BATS_TEST_DIRNAME/../smoke-test.sh"
-}

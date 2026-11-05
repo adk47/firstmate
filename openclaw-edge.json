@@ -205,6 +205,43 @@
             },
             "contextWindow": 1000000,
             "api": "anthropic-messages"
+          },
+          {
+            "id": "deepseek/deepseek-v4.1-flash-1017",
+            "name": "deepseek/deepseek-v4.1-flash-1017",
+            "input": [
+              "text",
+              "image"
+            ],
+            "maxTokens": 131072,
+            "reasoning": true,
+            "cost": {
+              "input": 0.032,
+              "output": 0.5,
+              "cacheRead": 0.0015,
+              "cacheWrite": 0
+            },
+            "contextWindow": 1048576,
+            "api": "openai-completions",
+            "compat": {
+              "openRouterRouting": {
+                "zdr": true,
+                "data_collection": "deny",
+                "sort": "price",
+                "quantizations": [
+                  "fp8",
+                  "bf16",
+                  "fp16"
+                ],
+                "max_price": {
+                  "prompt": 0.3,
+                  "completion": 1.2
+                },
+                "ignore": [
+                  "Google"
+                ]
+              }
+            }
           }
         ]
       }
@@ -215,8 +252,7 @@
       "model": {
         "primary": "openai/gpt-6-sol",
         "fallbacks": [
-          "openrouter/openai/gpt-6-luna",
-          "openrouter/anthropic/claude-haiku-5.5"
+          "openrouter/deepseek/deepseek-v4.1-flash-1017"
         ]
       },
       "imageModel": {
@@ -253,8 +289,7 @@
         "model": {
           "primary": "openai/gpt-6-sol",
           "fallbacks": [
-            "openrouter/openai/gpt-6-luna",
-            "openrouter/anthropic/claude-haiku-5.5"
+            "openrouter/deepseek/deepseek-v4.1-flash-1017"
           ]
         },
         "thinkingDefault": "medium",
@@ -418,7 +453,9 @@
               "silence": false,
               "escalate": false
             },
-            "shadowVersions": ["v2"]
+            "shadowVersions": [
+              "v2"
+            ]
           },
           "clickup": {
             "apiKey": {

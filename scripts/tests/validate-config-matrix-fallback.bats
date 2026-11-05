@@ -40,7 +40,7 @@ write_profile() {
     "defaults": {
       "thinkingDefault": "medium",
       "model": { "primary": "openai/gpt-5.5",
-        "fallbacks": ["openrouter/openai/gpt-5.4-mini","openrouter/anthropic/claude-4.6-sonnet-20260217"] }
+        "fallbacks": ["openrouter/deepseek/deepseek-v4.1-flash-1017"] }
     },
     "list": [
       { "id": "x", "thinkingDefault": "medium",
@@ -63,11 +63,25 @@ write_cron() {
 JSON
 }
 
-@test "check6: gpt-5.4-mini mid-fallback passes" {
+# NOTE (2026-11-04): every agent turn now carries EXACTLY ONE fallback (check 6b,
+# the captain's one-chain ruling), so a two-entry list is refused by that rule
+# whatever its family. The cases below therefore assert CHECK 6's own verdict —
+# "no non-final fallback complaint" — instead of the whole run's exit status; the
+# refusal they do get must come from check 6b, which each case also proves.
+@test "check6b: an agent chain with two entries FAILS (one uniform chain)" {
   write_profile '["openrouter/openai/gpt-5.4-mini","openrouter/anthropic/claude-4.6-sonnet-20260217"]'
   run "$SCRIPT" "$PROFILE"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"all checks passed"* ]]
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"not the one uniform chain"* ]]
+  [[ "$output" == *"openrouter/deepseek/deepseek-v4.1-flash-1017"* ]]
+}
+
+@test "check6: gpt-5.4-mini mid-fallback is not flagged by check 6 (check 6b refuses the list)" {
+  write_profile '["openrouter/openai/gpt-5.4-mini","openrouter/anthropic/claude-4.6-sonnet-20260217"]'
+  run "$SCRIPT" "$PROFILE"
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"non-final fallback position"* ]]
+  [[ "$output" == *"not the one uniform chain"* ]]
 }
 
 @test "check6: non-GPT-5 (gemini) mid-fallback FAILS" {
@@ -85,38 +99,49 @@ JSON
   [[ "$output" == *"non-final fallback position"* ]]
 }
 
-@test "check6: non-GPT-5 only in LAST position passes (sonnet last)" {
+@test "check6: non-GPT-5 in LAST position is not flagged (sonnet last)" {
   write_profile '["openrouter/openai/gpt-5.4-mini","openrouter/anthropic/claude-4.6-sonnet-20260217"]'
   run "$SCRIPT" "$PROFILE"
-  [ "$status" -eq 0 ]
+  [[ "$output" != *"non-final fallback position"* ]]
 }
 
-@test "check6: single-entry fallback (non-gpt5) passes (nothing to swallow)" {
-  write_profile '["openrouter/anthropic/claude-4.6-sonnet-20260217"]'
+@test "check6: single-entry fallback passes (nothing to swallow)" {
+  # The fleet chain itself: one entry, so there is no non-final position at all.
+  write_profile '["openrouter/deepseek/deepseek-v4.1-flash-1017"]'
   run "$SCRIPT" "$PROFILE"
   [ "$status" -eq 0 ]
+  [[ "$output" == *"all checks passed"* ]]
 }
 
 @test "check6: imageModel is OUT OF SCOPE — non-gpt5 mid imageModel passes" {
-  # agent model chain is safe; imageModel has a non-gpt5 mid entry → must NOT fail.
+  # agent model chain is the fleet chain; imageModel has a non-gpt5 mid entry →
+  # neither check 6 nor check 6b (agent model.fallbacks only) may complain.
   write_profile \
-    '["openrouter/openai/gpt-5.4-mini","openrouter/anthropic/claude-4.6-sonnet-20260217"]' \
+    '["openrouter/deepseek/deepseek-v4.1-flash-1017"]' \
     '["openrouter/google/gemini-3.5-flash","openrouter/anthropic/claude-haiku-4.5"]'
   run "$SCRIPT" "$PROFILE"
   [ "$status" -eq 0 ]
 }
 
-@test "check5: cron with gpt-6-luna first fallback passes" {
-  write_cron '["openrouter/openai/gpt-6-luna","openrouter/anthropic/claude-haiku-5.5"]'
+@test "check5: cron with the one uniform fallback passes" {
+  write_cron '["openrouter/deepseek/deepseek-v4.1-flash-1017"]'
   run "$SCRIPT" "$CRON"
   [ "$status" -eq 0 ]
+  [[ "$output" == *"all checks passed"* ]]
+}
+
+@test "check5: cron still on the old gpt-6-luna/haiku chain FAILS" {
+  write_cron '["openrouter/openai/gpt-6-luna","openrouter/anthropic/claude-haiku-5.5"]'
+  run "$SCRIPT" "$CRON"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"deepseek-v4.1-flash-1017"* ]]
 }
 
 @test "check5: cron with old gemini first fallback now FAILS" {
   write_cron '["openrouter/google/gemini-3.5-flash","openrouter/anthropic/claude-haiku-5.5"]'
   run "$SCRIPT" "$CRON"
   [ "$status" -eq 1 ]
-  [[ "$output" == *"gpt-6-luna"* ]]
+  [[ "$output" == *"deepseek-v4.1-flash-1017"* ]]
 }
 
 @test "check5: cron still on old gpt-5.5/mini/sonnet chain now FAILS" {
@@ -127,10 +152,10 @@ JSON
   [[ "$output" == *"must be on openai/gpt-6-sol"* ]]
 }
 
-@test "check6: gpt-6-luna mid-fallback passes (classifier has no model-id gate on the pinned build)" {
+@test "check6: gpt-6-luna mid-fallback is not flagged by check 6 (classifier has no model-id gate)" {
   write_profile '["openrouter/openai/gpt-6-luna","openrouter/anthropic/claude-haiku-5.5"]'
   run "$SCRIPT" "$PROFILE"
-  [ "$status" -eq 0 ]
+  [[ "$output" != *"non-final fallback position"* ]]
 }
 
 @test "check6: gpt-7 mid-fallback still FAILS (only gpt-5/gpt-6 families are accepted)" {

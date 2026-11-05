@@ -33,6 +33,7 @@ from credit_verify.docverify.forensics import H3  # noqa: E402
 from credit_verify.docverify.store import DocVerifyStore  # noqa: E402
 from credit_verify.proof import FORENSICS_VERSION  # noqa: E402
 from credit_verify.proof.store import ProofStore  # noqa: E402
+from lib import model_chain  # noqa: E402
 
 RID = "11111111-2222-3333-4444-555555555555"
 KEY = f"{RID}#Mixing"
@@ -231,7 +232,11 @@ class ExtractTests(unittest.TestCase):
             self.assertTrue(ex.ok)
             body = sent[0]
             self.assertEqual(body["model"], "deepseek/deepseek-v4.1-flash-1017")
-            self.assertEqual(body["provider"], {"data_collection": "deny"})
+            # The ONE ZDR block (captain 2026-11-04): a document a creator sent us
+            # never lands on an unverified or int4/int8 host.
+            self.assertEqual(body["provider"], model_chain.ZDR_ROUTING)
+            self.assertIs(body["provider"]["zdr"], True)
+            self.assertEqual(body["provider"]["quantizations"], ["fp8", "bf16", "fp16"])
             self.assertNotIn("tools", body)
             self.assertIn("DATA", body["messages"][0]["content"])
             row = store.db.execute("SELECT outcome, prompt_sha256, cost_usd, input_tokens FROM dv_llm_calls").fetchone()

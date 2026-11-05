@@ -46,7 +46,8 @@ log() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] $*"; }
 fail() { log "FATAL: $*"; notify_slack ":rotating_light: HYDRA ROLLBACK FAILED: $*. <@U0AL36NADEY> <@U7RP6HKUZ> manual intervention required."; exit 1; }
 
 # Notification path. HYDRA_SLACK_WEBHOOK has never been set on this repo
-# (`gh secret list` shows only ANTHROPIC_API_KEY and FIREWORKS_API_KEY), so the
+# (`gh secret list` shows only ANTHROPIC_API_KEY and OPENROUTER_API_KEY since
+# Fireworks was retired from production paths on 2026-11-04), so the
 # raw-curl branch below has always been a silent no-op — every rollback since
 # this script was written notified nobody. The working path is the same one the
 # watchdogs use: `muso slack send --bot devops`, tokens from

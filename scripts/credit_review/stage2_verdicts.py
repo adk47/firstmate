@@ -13,7 +13,11 @@ verdicts into a message:
                (intercom-verify-request.sh --campaign gap-ask, Fable's paragraph);
   no_document  nothing readable is on file for it: the already-approved uvn-status copy.
 
-Every other verdict (review, reject_hold, human, undetermined, approve) stays with a human, and
+  undetermined after a rerun (UNDETERMINED_RERUNS judgements, all undetermined: the documents
+               could not be read twice): treated as no_document, the uvn-status ask
+               (firstmate inbox 010, 2026-10-26: "undetermined -> rerun once then ask").
+
+Every other verdict (review, reject_hold, human, a first undetermined, approve) stays with a human, and
 a request with no verdict keeps the hold: mere entry existence is never read as "documents
 covered it", and no verdict is never read as "nothing on file" (when in doubt, no ask).
 
@@ -76,6 +80,9 @@ def not_forged(path: str | None = None) -> dict[str, dict[str, Any]]:
             out[e["proof_id"]] = e
     return out
 
+# A role judged undetermined in this many runs (the first + one rerun) is asked as no_document.
+UNDETERMINED_RERUNS = 2
+
 
 class Stage2Error(RuntimeError):
     pass
@@ -107,6 +114,14 @@ class Verdict:
     proof_id: str
     lists: tuple[str, ...]      # held catalog titles the best document names (never document text)
     judged_at: str
+    undetermined_runs: int = 0  # consecutive latest runs (this analyzer version) judging this role undetermined
+
+    @property
+    def effective(self) -> str:
+        """The outcome a campaign reads: an undetermined role rerun at least once is no_document."""
+        if self.outcome == "undetermined" and self.undetermined_runs >= UNDETERMINED_RERUNS:
+            return NO_DOCUMENT
+        return self.outcome
 
 
 def _connect(path: str | None) -> sqlite3.Connection:
@@ -150,6 +165,20 @@ def load(path: str | None = None, *, request_ids: Iterable[str] | None = None,
     ruled = not_forged()
     try:
         def take(where: str, params: list[Any]) -> None:
+            # The CURRENT run of undetermined judgements per role: distinct runs since the last
+            # decisive (non-undetermined) one, so an earlier undetermined spell that a decisive
+            # verdict ended never counts toward the rerun (QA on 794e735).
+            reruns: dict[tuple[str, str], int] = {}
+            streak: dict[tuple[str, str], set[str]] = {}
+            for rid, role, run, outcome in db.execute(
+                    "SELECT lower(request_id), role, run_id, outcome FROM stage2_shadow WHERE analyzer_version = ? "
+                    f"{where} ORDER BY id", [version, *params]):
+                key = (str(rid).strip(), str(role))
+                if outcome == "undetermined":
+                    streak.setdefault(key, set()).add(str(run))
+                else:
+                    streak[key] = set()
+            reruns = {k: len(v) for k, v in streak.items()}
             for r in db.execute(LATEST.format(where=where), [version, *params]):
                 rid = str(r["request_id"]).strip().lower()
                 outcome, reason = str(r["outcome"]), str(r["reason"] or "")
@@ -162,7 +191,7 @@ def load(path: str | None = None, *, request_ids: Iterable[str] | None = None,
                     request_id=rid, role=str(r["role"]), user_id=r["user_id"], paid=r["paid"],
                     outcome=outcome, reason=reason, doc_kind=str(r["doc_kind"] or ""),
                     proof_id=str(r["proof_id"] or ""), lists=_lists(r["detail_json"], r["proof_id"]),
-                    judged_at=str(r["judged_at"] or ""))
+                    judged_at=str(r["judged_at"] or ""), undetermined_runs=reruns.get((rid, str(r["role"])), 0))
         if request_ids is None and user_ids is None:
             take("", [])
         for key, col in ((request_ids, "request_id"), (user_ids, "user_id")):
@@ -181,10 +210,11 @@ def load(path: str | None = None, *, request_ids: Iterable[str] | None = None,
 
 
 def outcome_of(roles: dict[str, Verdict] | None) -> str:
-    """The request's outcome when every role agrees, '' when it has none, 'mixed' otherwise."""
+    """The request's outcome (each role's `effective` one) when every role agrees, '' when it
+    has none, 'mixed' otherwise."""
     if not roles:
         return ""
-    got = {v.outcome for v in roles.values()}
+    got = {v.effective for v in roles.values()}
     return got.pop() if len(got) == 1 else "mixed"
 
 

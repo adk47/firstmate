@@ -60,6 +60,9 @@ AGENT_THINKING_LEVELS='["minimal","low","medium","high","xhigh","adaptive"]'
 fail=0
 # ${PROFILES[@]+...} guard: PROFILES may be empty (e.g. cron-jobs.json passed
 # alone) and bash 3.2 errors on "${empty[@]}" under `set -u`.
+# The one metered fallback every surface uses (see checks 5 and 6b).
+REQUIRED_AGENT_FALLBACK="${REQUIRED_AGENT_FALLBACK:-openrouter/deepseek/deepseek-v4.1-flash-1017}"
+
 for cfg in ${PROFILES[@]+"${PROFILES[@]}"}; do
   if [[ ! -f "$cfg" ]]; then
     echo "validate-config-matrix: skip (not found): $cfg" >&2
@@ -162,6 +165,34 @@ for cfg in ${PROFILES[@]+"${PROFILES[@]}"}; do
   if [[ -n "$bad" ]]; then
     while IFS= read -r line; do
       echo "ERROR: $cfg non-GPT-5 model in a non-final fallback position (empty completions will NOT cascade — openclaw isGpt5ModelId gate): $line" >&2
+    done <<< "$bad"
+    fail=1
+  fi
+
+  # 6b. ONE model chain, fleet-wide (captain 2026-11-03): every agent turn —
+  #     agents.defaults and every agents.list[] override — gets the subscription
+  #     first and EXACTLY ONE metered fallback, the same shared DeepSeek tier
+  #     scripts/lib/model_chain.py uses. Anything else re-opens the pre-2026-11
+  #     behaviour where a subscription outage silently upgraded agent turns onto
+  #     paid OpenRouter frontier models (gpt-6-luna, then claude-haiku).
+  #     Enforced as an exact match on purpose: a "better" fallback added here is a
+  #     spend decision, not a config tweak, so it must fail CI and be argued for.
+  #     The PRIMARY is left free (ceo/cmo/scout run luna by choice); only the
+  #     fallback list is pinned. model-chain-watchdog pages when the fleet
+  #     actually rides this tier, so a uniform config never means silent unbounded
+  #     spend.
+  bad=$(jq -r --arg fb "$REQUIRED_AGENT_FALLBACK" '
+    ( [ {id: "agents.defaults", fb: (.agents.defaults.model.fallbacks // [])} ]
+      + [ (if (.agents.entries | type) == "object"
+           then (.agents.entries | to_entries[] | {id: .key, fb: (.value.model.fallbacks // [])})
+           else ((.agents.list // [])[] | {id: (.id // "<no-id>"), fb: (.model.fallbacks // [])}) end) ] )
+    | .[]
+    | select((.fb | length) != 1 or .fb[0] != $fb)
+    | .id + " fallbacks=" + (.fb | tojson)
+  ' "$cfg")
+  if [[ -n "$bad" ]]; then
+    while IFS= read -r line; do
+      echo "ERROR: $cfg agent model chain is not the one uniform chain (primary = the subscription, fallbacks = [\"$REQUIRED_AGENT_FALLBACK\"] only): $line" >&2
     done <<< "$bad"
     fail=1
   fi
@@ -517,49 +548,79 @@ if [[ -n "$CRON" && -f "$CRON" ]]; then
       fail=1
     fi
 
-    # 5. Every cron payload must run on codex (openai/gpt-6-sol) with the full
-    #    intended fallback chain: gpt-6-luna first (GPT-5-family hop — same
-    #    brain via the OpenRouter api-key route when codex OAuth is down), then
-    #    claude-haiku as the last-resort non-OpenAI backstop. Pins the 2026-06
-    #    cutover that moved all crons off Opus/Haiku onto codex, plus the
-    #    2026-06-08 fix that swapped the cheap first hop gemini-3.5-flash →
-    #    gpt-5-family (then mini, now luna).
-    #    Rationale for the swap: openclaw only treats an empty/0-token completion
-    #    as a failure-that-cascades for GPT-5-family models (isGpt5ModelId gate
-    #    in result-fallback-classifier). A non-GPT-5 first hop (gemini) that
-    #    returns an empty completion counts as candidate_succeeded and STOPS the
-    #    chain — never reaching the sonnet backstop (the 2026-06-08 @CMO incident,
-    #    PR #450). gpt-6-luna is in the GPT-5/6 family so its empties cascade.
-    #    A future cron with any other primary silently re-introduces OpenRouter
-    #    Opus spend, a non-GPT-5 first fallback re-introduces the swallow bug,
-    #    and dropping the haiku second fallback removes the non-OpenAI backstop
-    #    the money-touching crons rely on when OpenAI is down entirely.
+    # 5. Every cron payload must run on codex (openai/gpt-6-sol) with EXACTLY ONE
+    #    fallback: the metered DeepSeek tier. This pins the captain's 2026-11-03
+    #    model-chain ruling on the scheduled surface as well, and it supersedes
+    #    the pre-2026-11 chain (gpt-6-luna hop, then claude-haiku backstop):
+    #
+    #      primary   openai/gpt-6-sol        the ChatGPT/Codex subscription, $0
+    #      fallback  openrouter/deepseek/deepseek-v4.1-flash-1017
+    #
+    #    Why the old two-hop chain had to go: gpt-6-luna and claude-haiku are
+    #    OpenRouter FRONTIER models, so a subscription outage silently upgraded
+    #    every cron (and every agent turn) onto paid frontier inference — the
+    #    exact spend the ruling exists to stop. DeepSeek 1017 is ~100x cheaper and
+    #    is the tier the scripted user paths already use
+    #    (scripts/lib/model_chain.py), so one order now holds fleet-wide.
+    #
+    #    Why a single non-GPT-5 fallback is safe HERE: check 6's GPT-5-family rule
+    #    exists because openclaw scores a non-GPT-5 model's empty completion as
+    #    candidate_succeeded, which stops the chain BEFORE a stronger model behind
+    #    it. That failure mode needs a model BEHIND the non-GPT one. DeepSeek is
+    #    the final entry, so nothing is lost: an empty completion from it is a
+    #    dead end either way, and model-chain-watchdog pages on next=none.
+    #    (On @openclaw/codex 2026.8.35 every empty result cascades regardless —
+    #    MUS-5128 — so the family gate is a belt, not the mechanism.)
+    #
+    #    A cron on any other model, or with a longer/other chain, has silently
+    #    re-opened paid frontier spend: fail loud instead.
     REQUIRED_CRON_MODEL="openai/gpt-6-sol"
-    REQUIRED_CRON_FALLBACK1="openrouter/openai/gpt-6-luna"
-    REQUIRED_CRON_FALLBACK2="openrouter/anthropic/claude-haiku-5.5"
+    REQUIRED_CRON_FALLBACK1="openrouter/deepseek/deepseek-v4.1-flash-1017"
     #    Applies ONLY to agentTurn crons (the ones that invoke a model). A
     #    deterministic `command`/`script` cron runs an argv with no model call
     #    (payload.model is absent by design), so the fallback-chain rule is N/A;
     #    exempt anything whose payload.kind is not agentTurn. Missing kind is
     #    treated as agentTurn so a real model cron that forgets its model is
     #    still caught.
-    bad=$(jq -r --arg m "$REQUIRED_CRON_MODEL" --arg fb1 "$REQUIRED_CRON_FALLBACK1" --arg fb2 "$REQUIRED_CRON_FALLBACK2" '
+    bad=$(jq -r --arg m "$REQUIRED_CRON_MODEL" --arg fb1 "$REQUIRED_CRON_FALLBACK1" '
       .jobs // []
       | .[]
       | select((.payload.kind // "agentTurn") == "agentTurn")
       | (.payload.model // "MISSING") as $model
-      | (.payload.fallbacks[0] // "MISSING") as $f1
-      | (.payload.fallbacks[1] // "MISSING") as $f2
-      | select($model != $m or $f1 != $fb1 or $f2 != $fb2)
-      | .name + " (model=" + ($model | tostring) + ", fallbacks=[" + ($f1 | tostring) + ", " + ($f2 | tostring) + "])"
+      | (.payload.fallbacks // []) as $fbs
+      | select($model != $m or $fbs != [$fb1])
+      | .name + " (model=" + ($model | tostring) + ", fallbacks=" + ($fbs | tojson) + ")"
     ' "$CRON")
     if [[ -n "$bad" ]]; then
       while IFS= read -r line; do
-        echo "ERROR: $CRON cron job must be on $REQUIRED_CRON_MODEL with fallbacks [$REQUIRED_CRON_FALLBACK1, $REQUIRED_CRON_FALLBACK2] (gpt-6-luna hop first, haiku backstop): $line" >&2
+        echo "ERROR: $CRON cron job must be on $REQUIRED_CRON_MODEL with fallbacks=[\"$REQUIRED_CRON_FALLBACK1\"] and nothing else (one uniform model chain; see check 5's comment): $line" >&2
       done <<< "$bad"
       fail=1
     fi
   fi
+fi
+
+# 10. ZDR + precision floor on every production DeepSeek/GLM route (captain
+#     2026-11-04: "we need [ZDR] ... only use the fastest cheapest ZDR deepseek
+#     models ... protect our code"). Every openrouter deepseek/z-ai ref must
+#     resolve to a catalog entry whose compat.openRouterRouting is the one ZDR
+#     block (zdr true, data_collection deny, price sort, fp8/bf16/fp16 only,
+#     max_price capped), no fireworks/ ref may survive, and every Python caller
+#     that builds an OpenRouter body must send ZDR_ROUTING. The runtime half of
+#     this rule is model_chain.validate_routing; this is the config half, because
+#     the gateways' routing lives in JSON and a dropped `zdr` flag would
+#     otherwise be invisible until a customer's document hit a lossy host.
+#     Resolved from THIS script's directory, not CWD: the guard must run even
+#     when the matrix is invoked from elsewhere with explicit config paths.
+ZDR_GUARD="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/check-zdr-routing.py"
+if [[ -f "$ZDR_GUARD" ]]; then
+  if ! python3 "$ZDR_GUARD" ${PROFILES[@]+${PROFILES[@]}} ${CRON:+"$CRON"}; then
+    echo "ERROR: ZDR routing guard failed (see scripts/check-zdr-routing.py)" >&2
+    fail=1
+  fi
+else
+  echo "ERROR: scripts/check-zdr-routing.py is missing — the ZDR guard cannot run" >&2
+  fail=1
 fi
 
 if (( fail == 0 )); then
