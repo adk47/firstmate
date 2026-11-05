@@ -1,17 +1,21 @@
-# SA store (SA-01)
+# SA store, dispatch gate, and kill switch (SA-01, SA-03)
 
 The foundation of the Super-agent spine: an append-only event log, a pure fold into ten
-tables, and a CLI. The interface contract is
-`data/thread2-sa-build/design.md` §0–§6; this package implements it and renames nothing.
+tables, and a CLI (SA-01), plus the DoD gate, dispatch, Mandate, and kill switch (SA-03).
+The interface contract is `data/thread2-sa-build/design.md` §0–§10; this package
+implements it and renames nothing.
 
 ```
 sa/
-  README.md            this file
-  lib/sa_paths.py      SA_HOME resolution + canonical JSON helpers
-  lib/sa_store.py      event log, fold, projections, schema
-  bin/sa-store         the store CLI (the Engine's only write path)
-  tests/test_store.py  unittest, stdlib only
-  .gitignore           ignores sa/var/
+  README.md              this file
+  lib/sa_paths.py        SA_HOME resolution + canonical JSON helpers
+  lib/sa_store.py        event log, fold, projections, schema
+  bin/sa-store           the store CLI (the Engine's only write path)
+  bin/sa-dispatch        the DoD gate, dispatch, and Mandate (SA-03)
+  bin/sa-kill            the kill switch: stops only registered SA workers
+  tests/test_store.py    unittest, stdlib only
+  tests/test_dispatch.sh the gate, dispatch, Mandate, and kill-switch proof
+  .gitignore             ignores sa/var/
 ```
 
 ## Non-negotiables
@@ -110,6 +114,45 @@ returns rows in numeric `seq` order; every other table is key-ordered.
 `selftest` builds a fresh temp `SA_HOME`, appends a deterministic fixture covering every
 event type, folds the log twice, asserts `sha256(A) == sha256(B)`, asserts all ten tables
 are present, and prints both hashes plus `PASS` (exit 0) or the diff (exit 1).
+
+## Dispatch gate and Mandate (SA-03)
+
+```
+sa-dispatch intake --ticket T [--dry-run] [--mode M] [--yolo on|off] [--harness H]
+                          [--scope PATH]... [--rule RULE]... [--ttl-hours N]
+                                                       -> gate result; on pass, dispatch
+sa-dispatch mandate --ticket T                         -> canonical JSON mandate
+sa-dispatch check-scope --ticket T --path P            -> exit 0 allowed / exit 4 not allowed
+```
+
+`intake` refuses a ticket whose `acceptance` has no non-empty `command` and no `signal`
+matching `^(exit|file|grep|http):`, and a ticket that names no `requester`. A refusal
+appends `ticket.refused` carrying the missing question and exits 3. A ticket that already
+holds a live mandate is refused rather than dispatched twice; a ticket whose mandate was
+revoked (a failed attempt) can be retried, because the failed attempt's brief is moved
+aside before the mandate is revoked.
+
+On pass, one run scaffolds one brief with `bin/fm-brief.sh`, creates one git worktree and
+one worker with `bin/fm-spawn.sh --backend tmux`, and appends `mandate.issued` carrying
+`requester`, `scope_paths`, `rules_in_force`, and `expires_at`. Both helpers run with
+`FM_HOME=$SA_HOME`, so nothing lands in firstmate's home. Workers live in their own tmux
+session (`SA_TMUX_SESSION`, default `sa-workers`), never in firstmate's. `--dry-run`
+performs the gate and prints the plan without creating anything.
+
+`check-scope` refuses a revoked or expired mandate as well as a path outside the scope.
+
+## Kill switch (SA-03)
+
+```
+sa-kill [--dry-run] [--registry PATH]                  -> stop every registered SA worker
+```
+
+`sa-kill` reads `$SA_HOME/workers.json` (the rows `sa-dispatch` writes) and stops each
+registered tmux endpoint by exact name. It refuses any endpoint or id naming `firstmate`,
+`fm-`, or `ak47-anchor`, and any `session:window` endpoint outside the SA worker session,
+so it can never reach firstmate's own windows. An endpoint that is already gone counts as
+stopped, so the switch is idempotent. Exit codes: 0 all stopped, 2 usage/registry error,
+6 at least one worker could not be stopped or was refused.
 
 ## Reproduce
 

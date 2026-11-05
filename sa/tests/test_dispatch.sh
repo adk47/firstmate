@@ -102,9 +102,13 @@ STUB_EOF
 chmod +x "$STUB"
 export SA_SPAWN_CMD="$STUB"
 
+FM_SESSION_OWNED=0
 cleanup() {
-  tmux kill-session -t "$SA_TMUX_SESSION" 2>/dev/null || true
-  tmux kill-session -t "sa-test-worker-$$" 2>/dev/null || true
+  tmux kill-session -t "=$SA_TMUX_SESSION" 2>/dev/null || true
+  tmux kill-session -t "=sa-test-worker-$$" 2>/dev/null || true
+  if [ "$FM_SESSION_OWNED" = 1 ]; then
+    tmux kill-session -t "=firstmate" 2>/dev/null || true
+  fi
   rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -137,6 +141,16 @@ assert_exit 3 "intake T-0004 (signal 'EXIT:0' is not the documented shape) is re
 
 ticket T-0005 '{"note":"it works, trust me"}'
 assert_exit 3 "intake T-0005 (prose acceptance) is refused" "$DISPATCH" intake --ticket T-0005
+
+"$STORE" append --type ticket.created --actor router --ticket T-0006 \
+  --payload '{"title":"no requester","acceptance":{"command":"true"}}' >/dev/null
+assert_exit 3 "intake T-0006 (no requester) is refused" "$DISPATCH" intake --ticket T-0006
+out=$OUT
+assert_contains "$out" 'Missing question: "Who is requesting this ticket?"' \
+  "the requester refusal names the missing question"
+no_requester=$("$STORE" query --table events --where type=ticket.refused)
+assert_contains "$no_requester" '"missing_question":"Who is requesting this ticket?"' \
+  "ticket.refused carries the missing requester question"
 
 assert_exit 2 "intake of an unknown ticket exits 2" "$DISPATCH" intake --ticket T-9999
 
@@ -240,15 +254,69 @@ assert_exit 4 "a sibling prefix is not inside the scope" \
 assert_exit 2 "check-scope without a mandate exits 2" \
   "$DISPATCH" check-scope --ticket T-0001 --path sa/bin
 
+ticket T-0031 '{"command":"echo hello","scope_paths":["sa/bin"]}'
+assert_exit 0 "intake T-0031 with an already-past expiry dispatches" \
+  "$DISPATCH" intake --ticket T-0031 --ttl-hours -1
+assert_exit 4 "check-scope refuses an expired mandate" \
+  "$DISPATCH" check-scope --ticket T-0031 --path sa/bin
+out=$OUT
+assert_contains "$out" "EXPIRED:" "the expiry refusal is reported"
+
+# ---------------------------------------------------------------------------
+# A failed dispatch revokes its mandate and can be retried.
+# ---------------------------------------------------------------------------
+section "a failed dispatch can be retried"
+FAILSTUB="$WORK/fail-once-spawn.sh"
+cat >"$FAILSTUB" <<'STUB_EOF'
+#!/bin/sh
+if [ ! -e "$SA_HOME/failed-once" ]; then
+  : >"$SA_HOME/failed-once"
+  echo "error: simulated spawn failure" >&2
+  exit 1
+fi
+printf 'spawned %s harness=stub kind=ship mode=direct-PR yolo=off window=%s:fm-%s worktree=%s\n' \
+  "$1" "${SA_TMUX_SESSION:-sa-workers}" "$1" "$SA_HOME/stub-worktree/$1"
+STUB_EOF
+chmod +x "$FAILSTUB"
+
+ticket T-0050 '{"command":"echo hello","scope_paths":["sa/bin"]}'
+SA_SPAWN_CMD="$FAILSTUB" assert_exit 2 "a failing spawner fails the dispatch" \
+  "$DISPATCH" intake --ticket T-0050
+mandates=$("$STORE" state --table mandates)
+assert_contains "$mandates" '"revoked":true' "the failed dispatch revoked its mandate"
+assert_exit 4 "check-scope refuses a revoked mandate" \
+  "$DISPATCH" check-scope --ticket T-0050 --path sa/bin
+out=$OUT
+assert_contains "$out" "REVOKED:" "the revocation refusal is reported"
+
+SA_SPAWN_CMD="$FAILSTUB" assert_exit 0 "the retry dispatches" \
+  "$DISPATCH" intake --ticket T-0050
+out=$OUT
+assert_contains "$out" "DISPATCHED: ticket T-0050" "the retry reports the dispatch"
+[ -f "$SA_HOME/data/T-0050/brief.md" ] && ok "the retry scaffolded a fresh brief" \
+  || bad "the retry scaffolded a fresh brief"
+assert_exit 0 "check-scope allows the retried mandate" \
+  "$DISPATCH" check-scope --ticket T-0050 --path sa/bin
+
+assert_exit 2 "re-dispatching a live ticket is refused" "$DISPATCH" intake --ticket T-0050
+out=$OUT
+assert_contains "$out" "already holds a live mandate" \
+  "the re-dispatch refusal names the live mandate"
+
 # ---------------------------------------------------------------------------
 section "the kill switch stops SA workers and never touches firstmate"
 # ---------------------------------------------------------------------------
 dummy="sa-test-worker-$$"
 tmux new-session -d -s "$dummy" || bad "could not create the dummy tmux session"
-tmux has-session -t "$dummy" 2>/dev/null && ok "the dummy tmux session exists" \
+tmux has-session -t "=$dummy" 2>/dev/null && ok "the dummy tmux session exists" \
   || bad "the dummy tmux session exists"
-tmux has-session -t firstmate 2>/dev/null && ok "the firstmate tmux session exists" \
-  || bad "the firstmate tmux session exists"
+if tmux has-session -t "=firstmate" 2>/dev/null; then
+  ok "a firstmate tmux session is present (using the live one)"
+else
+  tmux new-session -d -s firstmate && FM_SESSION_OWNED=1
+  tmux has-session -t "=firstmate" 2>/dev/null && ok "the test created a firstmate tmux session" \
+    || bad "the test created a firstmate tmux session"
+fi
 
 printf '[{"id":"%s","backend":"tmux","endpoint":"%s"}]\n' "$dummy" "$dummy" >"$SA_HOME/workers.json"
 
@@ -256,15 +324,15 @@ assert_exit 0 "sa-kill --dry-run exits 0" "$KILL" --dry-run
 out=$OUT
 assert_contains "$out" "WOULD STOP: $dummy" "the dry run lists the dummy"
 assert_contains "$out" "nothing stopped" "the dry run stops nothing"
-tmux has-session -t "$dummy" 2>/dev/null && ok "the dry run left the dummy alive" \
+tmux has-session -t "=$dummy" 2>/dev/null && ok "the dry run left the dummy alive" \
   || bad "the dry run left the dummy alive"
 
 assert_exit 0 "sa-kill exits 0" "$KILL"
 out=$OUT
 assert_contains "$out" "STOPPED: $dummy" "sa-kill reports the dummy stopped"
-tmux has-session -t "$dummy" 2>/dev/null && bad "the dummy tmux session is gone" \
+tmux has-session -t "=$dummy" 2>/dev/null && bad "the dummy tmux session is gone" \
   || ok "the dummy tmux session is gone"
-tmux has-session -t firstmate 2>/dev/null && ok "the firstmate tmux session is still alive" \
+tmux has-session -t "=firstmate" 2>/dev/null && ok "the firstmate tmux session is still alive" \
   || bad "the firstmate tmux session is still alive"
 
 assert_exit 0 "sa-kill is idempotent" "$KILL"
@@ -283,7 +351,7 @@ printf '[{"id":"x","backend":"tmux","endpoint":"firstmate:fm-abc"}]\n' >"$SA_HOM
 assert_exit 6 "sa-kill refuses a window inside firstmate's session" "$KILL"
 out=$OUT
 assert_contains "$out" "REFUSED:" "the firstmate-session refusal is reported"
-tmux has-session -t firstmate 2>/dev/null && ok "firstmate survived the refusal" \
+tmux has-session -t "=firstmate" 2>/dev/null && ok "firstmate survived the refusal" \
   || bad "firstmate survived the refusal"
 
 printf '[{"id":"x","backend":"tmux","endpoint":"other-session:fm-abc"}]\n' >"$SA_HOME/workers.json"
@@ -303,22 +371,59 @@ out=$OUT
 assert_contains "$out" "no SA workers registered" "an empty registry is reported, not an error"
 
 # ---------------------------------------------------------------------------
-section "nothing in sa/ writes into firstmate's home"
+section "sa/ writes only inside SA_HOME, through the Engine"
 # ---------------------------------------------------------------------------
-if grep -rn 'Projects/firstmate' "$REPO/sa/bin" >/dev/null 2>&1; then
-  bad "no sa/ path names firstmate's home"
+FM_SENTINEL="$WORK/firstmate-home"
+mkdir -p "$FM_SENTINEL"
+ticket T-0040 '{"command":"echo hello","scope_paths":["sa/bin"]}'
+assert_exit 0 "intake T-0040 dispatches with FM_HOME pointed at firstmate's home" \
+  env FM_HOME="$FM_SENTINEL" "$DISPATCH" intake --ticket T-0040
+if [ -z "$(find "$FM_SENTINEL" -mindepth 1 -print -quit)" ]; then
+  ok "the dispatch wrote nothing into firstmate's home"
 else
-  ok "no sa/ path names firstmate's home"
+  bad "the dispatch wrote nothing into firstmate's home"
+  find "$FM_SENTINEL" -mindepth 1 | sed 's/^/      | /'
 fi
-if grep -q 'events_path\|sa_store' "$DISPATCH"; then
-  bad "sa-dispatch never opens the event log itself"
+[ -f "$SA_HOME/data/T-0040/brief.md" ] && ok "the brief landed in SA_HOME" \
+  || bad "the brief landed in SA_HOME"
+
+assert_exit 0 "sa-kill runs with FM_HOME pointed at firstmate's home" \
+  env FM_HOME="$FM_SENTINEL" "$KILL" --dry-run
+if [ -z "$(find "$FM_SENTINEL" -mindepth 1 -print -quit)" ]; then
+  ok "sa-kill wrote nothing into firstmate's home"
 else
-  ok "sa-dispatch never opens the event log itself"
+  bad "sa-kill wrote nothing into firstmate's home"
 fi
-if grep -q 'events_path\|sa_store' "$KILL"; then
-  bad "sa-kill never opens the event log itself"
+
+# The event log is the Engine's byte contract: every line is canonical JSON and
+# every seq/id pair is the one sa-store assigns, so no other writer touched it.
+if python3 - "$SA_HOME/events.jsonl" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+rows = []
+with open(path, encoding="utf-8") as handle:
+    for line in handle:
+        line = line.rstrip("\n")
+        if not line:
+            continue
+        row = json.loads(line)
+        assert line == json.dumps(
+            row, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ), f"non-canonical line: {line}"
+        rows.append(row)
+assert [row["seq"] for row in rows] == list(range(1, len(rows) + 1)), "seq gap"
+for row in rows:
+    assert row["id"] == f"ev-{row['seq']:016d}", f"id/seq mismatch: {row['id']}"
+types = [row["type"] for row in rows]
+for wanted in ("mandate.issued", "ticket.dispatched", "sub.spawned"):
+    assert wanted in types, f"missing {wanted}"
+PY
+then
+  ok "the event log is a contiguous, canonical Engine-written log"
 else
-  ok "sa-kill never opens the event log itself"
+  bad "the event log is a contiguous, canonical Engine-written log"
 fi
 
 # ---------------------------------------------------------------------------

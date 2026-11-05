@@ -5,18 +5,22 @@ Implements design.md §8 (and the SA-03 rows of §5, §10):
 
     sa-dispatch intake --ticket T [--dry-run]     -> gate result; on pass, dispatch
     sa-dispatch mandate --ticket T                -> canonical JSON mandate
-    sa-dispatch check-scope --ticket T --path P   -> exit 0 allowed / exit 4 out of scope
+    sa-dispatch check-scope --ticket T --path P   -> exit 0 allowed / exit 4 not allowed
 
 THE GATE. A ticket's acceptance is *checkable* iff its ``acceptance`` object has a
 non-empty ``command`` string, or a ``signal`` string matching
-``^(exit|file|grep|http):``. Anything else is refused with exit 3 and a
-``ticket.refused`` event carrying the missing question. A ticket with no
-checkable acceptance signal never reaches a worker.
+``^(exit|file|grep|http):``. A ticket must also name a ``requester``. Anything
+else is refused with exit 3 and a ``ticket.refused`` event carrying the missing
+question. A ticket with no checkable acceptance signal, or no requester, never
+reaches a worker.
 
 ON PASS, one run produces one git worktree, one brief file, one spawned worker,
 and a ``mandate.issued`` event carrying ``requester``, ``scope_paths``,
 ``rules_in_force`` and ``expires_at``. ``--dry-run`` performs the gate and prints
-the plan without creating anything.
+the plan without creating anything. A ticket that already holds a live mandate
+is refused rather than dispatched twice; a ticket whose mandate was revoked (a
+failed attempt) can be retried, because the failed attempt's brief is moved
+aside before the mandate is revoked.
 
 MACHINERY. This is a gate in front of firstmate's existing dispatch machinery,
 not a second one: ``bin/fm-brief.sh`` scaffolds the brief and
@@ -53,7 +57,7 @@ REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "sa" / "lib"))
 
 try:
-    from sa_paths import AT_FORMAT, canonical, sa_home, utc_now  # noqa: E402
+    from sa_paths import AT_FORMAT, canonical, parse_at, sa_home, utc_now  # noqa: E402
 except ImportError:  # pragma: no cover - dependency gate, not a code path
     sys.stderr.write(
         "error: sa/lib/sa_paths.py is missing; sa-dispatch needs the SA-01 store "
@@ -69,8 +73,9 @@ STORE = REPO / "sa" / "bin" / "sa-store"
 BRIEF = Path(os.environ.get("SA_BRIEF_CMD") or REPO / "bin" / "fm-brief.sh")
 SPAWN = Path(os.environ.get("SA_SPAWN_CMD") or REPO / "bin" / "fm-spawn.sh")
 
-#: The one question a refused ticket is missing the answer to (design.md §8).
+#: The questions a refused ticket is missing the answer to (design.md §8).
 MISSING_QUESTION = "What command proves this ticket is done?"
+MISSING_REQUESTER = "Who is requesting this ticket?"
 
 #: A ``signal`` acceptance is checkable only in one of these shapes.
 SIGNAL_RE = re.compile(r"^(exit|file|grep|http):")
@@ -189,11 +194,11 @@ def describe_acceptance(acceptance) -> str:
     return "none"
 
 
-def refuse(ticket: str) -> int:
-    """Refuse a ticket with no checkable acceptance signal (design.md §8)."""
-    append_event("ticket.refused", ticket, {"missing_question": MISSING_QUESTION})
-    print(f"REFUSED: ticket {ticket} has no checkable acceptance signal.")
-    print(f'Missing question: "{MISSING_QUESTION}"')
+def refuse(ticket: str, question: str, reason: str) -> int:
+    """Refuse a ticket that cannot be dispatched, naming the missing answer."""
+    append_event("ticket.refused", ticket, {"missing_question": question})
+    print(f"REFUSED: ticket {ticket} {reason}.")
+    print(f'Missing question: "{question}"')
     return EXIT_REFUSED
 
 
@@ -209,14 +214,11 @@ def resolve_scope(ticket_row: dict, cli_scope: list[str]) -> list[str]:
     if cli_scope:
         candidates = list(cli_scope)
     elif isinstance(acceptance, dict):
-        for key in ("scope_paths", "scope"):
-            value = acceptance.get(key)
-            if isinstance(value, str) and value.strip():
-                candidates = [value.strip()]
-                break
-            if isinstance(value, list) and value:
-                candidates = [str(item) for item in value if str(item).strip()]
-                break
+        value = acceptance.get("scope_paths")
+        if isinstance(value, str) and value.strip():
+            candidates = [value.strip()]
+        elif isinstance(value, list) and value:
+            candidates = [str(item) for item in value if str(item).strip()]
     if not candidates:
         candidates = ["."]
     seen: list[str] = []
@@ -233,7 +235,7 @@ def resolve_rules(ticket_row: dict, cli_rules: list[str]) -> list[str]:
         return list(cli_rules)
     acceptance = ticket_row.get("acceptance")
     if isinstance(acceptance, dict):
-        value = acceptance.get("rules_in_force", acceptance.get("rules"))
+        value = acceptance.get("rules_in_force")
         if isinstance(value, str) and value.strip():
             return [value.strip()]
         if isinstance(value, list) and value:
@@ -282,7 +284,7 @@ def ensure_worker_session() -> str:
     """Create the SA worker tmux session if absent and return its pane id."""
     session = tmux_session()
     probe = subprocess.run(
-        ["tmux", "has-session", "-t", session], capture_output=True, text=True
+        ["tmux", "has-session", "-t", f"={session}"], capture_output=True, text=True
     )
     if probe.returncode != 0:
         created = subprocess.run(
@@ -294,7 +296,7 @@ def ensure_worker_session() -> str:
                 f"{(created.stderr or created.stdout).strip()}"
             )
     panes = subprocess.run(
-        ["tmux", "list-panes", "-t", session, "-F", "#{pane_id}"],
+        ["tmux", "list-panes", "-t", f"={session}", "-F", "#{pane_id}"],
         capture_output=True,
         text=True,
     )
@@ -359,6 +361,35 @@ def scaffold_brief(ticket: str, ticket_row: dict, mode: str, mandate: dict) -> P
     return brief
 
 
+def parse_handles(line: str) -> dict[str, str]:
+    """Parse ``key=value`` handles from a spawn line, keeping spaces in values."""
+    handles: dict[str, str] = {}
+    matches = list(re.finditer(r"(?:^|\s)([a-z_]+)=", line))
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(line)
+        handles[match.group(1)] = line[start:end].strip()
+    return handles
+
+
+def require_worker_endpoint(endpoint: str) -> None:
+    """Refuse an endpoint outside the SA worker session the kill switch targets."""
+    session = endpoint.split(":", 1)[0]
+    if session != tmux_session():
+        raise DispatchError(
+            f"fm-spawn.sh launched the worker in tmux session {session!r}, not the SA "
+            f"worker session {tmux_session()!r}; refusing to register an endpoint "
+            "sa-kill cannot stop"
+        )
+
+
+def quarantine_brief(brief: Path, reason_id: str) -> None:
+    """Move a failed attempt's brief aside so a retry can scaffold a fresh one."""
+    if not brief.is_file():
+        return
+    os.replace(brief, brief.with_name(f"{brief.name}.{reason_id}"))
+
+
 def spawn_worker(ticket: str, mode: str, yolo: str, harness: str | None) -> dict:
     """Launch the worker through firstmate's spawner and return its handles."""
     if not SPAWN.is_file():
@@ -369,7 +400,7 @@ def spawn_worker(ticket: str, mode: str, yolo: str, harness: str | None) -> dict
     identity = tmux_identity()
     if identity:
         env["TMUX"] = identity
-    argv = [str(SPAWN), ticket, str(REPO), "--mode", mode, "--yolo", yolo]
+    argv = [str(SPAWN), ticket, str(REPO), "--mode", mode, "--yolo", yolo, "--backend", "tmux"]
     if harness:
         argv += ["--harness", harness]
     proc = subprocess.run(argv, capture_output=True, text=True, env=env, cwd=str(REPO))
@@ -382,10 +413,7 @@ def spawn_worker(ticket: str, mode: str, yolo: str, harness: str | None) -> dict
     for line in proc.stdout.splitlines():
         if not line.startswith("spawned "):
             continue
-        for token in line.split():
-            if "=" in token:
-                key, _, value = token.partition("=")
-                handles[key] = value
+        handles = parse_handles(line)
     if not handles.get("window") or not handles.get("worktree"):
         raise DispatchError(
             "fm-spawn.sh reported success but printed no window/worktree handle: "
@@ -427,7 +455,16 @@ def cmd_intake(args: argparse.Namespace) -> int:
     acceptance = ticket_row.get("acceptance")
 
     if not acceptance_is_checkable(acceptance):
-        return refuse(ticket)
+        return refuse(ticket, MISSING_QUESTION, "has no checkable acceptance signal")
+    if not str(ticket_row.get("requester") or "").strip():
+        return refuse(ticket, MISSING_REQUESTER, "names no requester")
+
+    existing = table("mandates").get(ticket)
+    if isinstance(existing, dict) and not existing.get("revoked"):
+        raise DispatchError(
+            f"ticket {ticket} already holds a live mandate issued at "
+            f"{existing.get('issued_at')}; refusing to dispatch it twice"
+        )
 
     scope = resolve_scope(ticket_row, args.scope)
     rules = resolve_rules(ticket_row, args.rule)
@@ -448,15 +485,17 @@ def cmd_intake(args: argparse.Namespace) -> int:
         print("  dry run: nothing created")
         return EXIT_OK
 
+    brief_path = scaffold_brief(ticket, ticket_row, args.mode, mandate)
     mandate_id = append_event("mandate.issued", ticket, mandate)
     try:
-        brief_path = scaffold_brief(ticket, ticket_row, args.mode, mandate)
         handles = spawn_worker(ticket, args.mode, args.yolo, args.harness)
+        endpoint = handles["window"]
+        require_worker_endpoint(endpoint)
     except DispatchError as exc:
-        append_event("mandate.revoked", ticket, {"reason": str(exc)})
+        revoked = append_event("mandate.revoked", ticket, {"reason": str(exc)})
+        quarantine_brief(brief_path, revoked)
         raise
 
-    endpoint = handles["window"]
     worktree = handles["worktree"]
     register_worker(ticket, "tmux", endpoint)
     append_event(
@@ -501,6 +540,21 @@ def cmd_check_scope(args: argparse.Namespace) -> int:
     row = mandates.get(args.ticket)
     if not isinstance(row, dict):
         raise DispatchError(f"no mandate for ticket {args.ticket}")
+    if row.get("revoked"):
+        print(f"REVOKED: the mandate for {args.ticket} was revoked")
+        return EXIT_OUT_OF_SCOPE
+    expires = row.get("expires_at")
+    if expires:
+        try:
+            deadline = parse_at(str(expires))
+        except ValueError as exc:
+            raise DispatchError(
+                f"mandate for {args.ticket} has a malformed expires_at: {exc}"
+            ) from exc
+        if utc_now() > deadline:
+            print(f"EXPIRED: the mandate for {args.ticket} expired at {deadline}")
+            return EXIT_OUT_OF_SCOPE
+
     scope = row.get("scope_paths") or []
     if not isinstance(scope, list):
         raise DispatchError(f"mandate for {args.ticket} has a malformed scope_paths")
@@ -544,7 +598,7 @@ def build_parser() -> argparse.ArgumentParser:
     mandate.add_argument("--ticket", required=True)
     mandate.set_defaults(func=cmd_mandate)
 
-    check = sub.add_parser("check-scope", help="exit 0 allowed / exit 4 out of scope")
+    check = sub.add_parser("check-scope", help="exit 0 allowed / exit 4 not allowed")
     check.add_argument("--ticket", required=True)
     check.add_argument("--path", required=True)
     check.set_defaults(func=cmd_check_scope)
