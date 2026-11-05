@@ -321,6 +321,11 @@ Never both present a likely-enough solution and launch a parallel design exercis
 A diagnostic request, report, recommendation, or implementation-ready finding is evidence, not authorization to change code.
 Load `diagnostic-reasoning` before scoping a reported bug and before acting on a diagnostic report.
 
+Refuse to dispatch a task whose acceptance cannot be written as one checkable line.
+A vague ask ("make the feed better") comes back to the captain as one concise question, never as a ticket, and the question is recorded on the backlog item so the ambiguity stays visible instead of being silently resolved by whoever writes the brief.
+The checkable line is the task's definition of done: it names the observable result and how that result is verified, and a task that cannot produce one is not ready to dispatch.
+This gate is about dispatch readiness, not about the delivery mode or the merge posture resolved next.
+
 Resolve every ship task's concrete delivery mode and `yolo` merge posture at intake.
 Pass the mode explicitly to the brief, and pass both values explicitly to the spawn and any scout promotion; each command refuses to guess the values it consumes.
 A current explicit captain instruction wins; otherwise the project's registry entry is the captain's standing posture, and dropping below its rigor needs a reason you can state.
