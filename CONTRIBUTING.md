@@ -15,6 +15,45 @@ It evaluates every PR opening and body edit independently, reruns after head syn
 GitHub Actions and Dependabot are exempt so their automation keeps working, but other contributor PRs that do not satisfy the attestation contract will not be reviewed or merged.
 A gate-version upgrade is evaluated against this repo's own gate contract before it is applied, and each evaluation is recorded under [`docs/tool-updates/`](docs/tool-updates/).
 
+## The required check
+
+`PR must be raised via no-mistakes` is a **required status check** on `main`, not an advisory workflow.
+Branch protection lists it in `required_status_checks`, so a pull request that fails it cannot be merged through the normal path.
+Administrators are not exempt from that list: `enforce_admins` is on, so an administrator's ordinary merge is held to the same check as anyone else's.
+
+The one bypass is the administrator merge, a deliberate and recorded escape hatch rather than a second policy:
+
+```sh
+gh pr merge <number> --admin
+```
+
+`--admin` bypasses branch protection for a repository administrator.
+Use it for a pull request opened before the check became required, or for an emergency, and say why in a comment on the pull request so the bypass is never silent.
+It is not a way to land a change that failed review, test, or lint: the pipeline's own steps are the gate, and this check only certifies that they ran.
+
+The protection is reproducible from this payload, which is the whole contract:
+
+```sh
+gh api -X PUT repos/<owner>/<repo>/branches/main/protection --input - <<'JSON'
+{
+  "required_status_checks": {
+    "strict": false,
+    "contexts": ["PR must be raised via no-mistakes"]
+  },
+  "enforce_admins": true,
+  "required_pull_request_reviews": null,
+  "restrictions": null,
+  "allow_force_pushes": false,
+  "allow_deletions": false
+}
+JSON
+```
+
+The job name in [`.github/workflows/no-mistakes-required.yml`](.github/workflows/no-mistakes-required.yml) must stay exactly `PR must be raised via no-mistakes`, because branch protection matches the context by that string.
+Renaming the job leaves the required check permanently expected, which blocks every merge rather than opening one.
+
+The unattended merge queue ([`docs/merge-queue.md`](docs/merge-queue.md)) is a separate opt-in step, and it is only worth arming once this check is required.
+
 ## Workflow
 
 1. Fork the repo, then clone the parent repo or set your local `origin` back to the parent (`git@github.com:kunchenguid/firstmate.git`).
