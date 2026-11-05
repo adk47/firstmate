@@ -73,13 +73,15 @@ def load_ledger(run: Run, path: str) -> dict:
     return data
 
 
-def hidden_now(run: Run) -> set[str]:
+def hidden_now(run: Run) -> tuple[set[str], dict[str, str]]:
+    """(ids on BOTH lists, {id: the one list that holds it}) — a hide needs both, and the halves ship in separate
+    PRs, so the second half of the answer is what stops a half-applied hide being filed as somebody else's deletion."""
     try:
         hd, pdp = sources.hidden_lists()
     except sources.Unknown as exc:
         run.fail("hide lists", exc)
         raise SystemExit(2)
-    return hd & pdp
+    return hd & pdp, sources.half_hidden(hd, pdp)
 
 
 INTERCOM_MAX_LOOKBACK_DAYS = 30
@@ -207,7 +209,12 @@ def cmd_intake(run: Run, a) -> int:
         if how != "unchanged":
             run.log(f"{c['keys'][0]}: {how} (row {rid})")
     if rows and not getattr(a, "no_decide", False):
-        run.decide_rows([r for _, how, r in rows if how != "unchanged"], hidden_now(run))
+        # `hidden_now()` returns (ids on BOTH lists, {id: the one list that holds it}). Unpacking it straight into the
+        # call put the half-hide MAP into `conv_reader`, so a pushed candidate with a conversation_id raised
+        # `TypeError: 'dict' object is not callable` and one without it silently lost the map and could keep GONE
+        # (QA finding on #1736). Named, so the two can never be swapped again.
+        hidden, half = hidden_now(run)
+        run.decide_rows([r for _, how, r in rows if how != "unchanged"], hidden, half=half)
         for rid, how, _ in rows:
             r = run.store.get(rid)
             print(f"  {rid}: id={r['identity_verdict'] or '-'} action={r['action'] or '-'}"
@@ -398,7 +405,8 @@ def main() -> int:
         # backfill is the bootstrap: it searches the WHOLE lookback (a first run has no cursor, so a 3-hour window
         # would silently leave every older Intercom-only request unregistered).
         do_intake(run, a, intercom_hours=INTERCOM_MAX_LOOKBACK_DAYS * 24 if a.cmd == "backfill" else 3, now=now)
-        run.decide_all(hidden_now(run), stale_hours=0 if a.cmd == "backfill" else 20)
+        both, half = hidden_now(run)
+        run.decide_all(both, stale_hours=0 if a.cmd == "backfill" else 20, half=half)
         if a.cmd == "tick":
             run.mark_hidden()
             watchdog(run, a.page)
@@ -416,7 +424,8 @@ def main() -> int:
         elif not pairs:
             print("no duplicate post-confirmation rows")
     elif a.cmd == "decide":
-        run.decide_all(hidden_now(run))
+        both, half = hidden_now(run)
+        run.decide_all(both, half=half)
     elif a.cmd == "report":
         t = backfill_table(run.store.all("open"), now)
         Path(a.out).write_text(t + "\n") if a.out else print(t)

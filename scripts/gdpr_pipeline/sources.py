@@ -163,21 +163,33 @@ def _is_number(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
-def page_facts(pages: list[dict], hidden: set[str], claims: dict[str, set[int]]) -> list[Page]:
+def half_hidden(hd: set[str], pdp: set[str]) -> dict[str, str]:
+    """{id: "hd"|"pdp"} for ids that exactly ONE of the two hide lists holds.
+
+    A hide needs both (the app-side hide and the sitemap 410), and they ship in separate PRs, so this map names the
+    window in which a hide is half applied. Without it the page reads as 404 everywhere and the identity pass files it
+    as GONE - "deleted outside the hide process" - which is our own unfinished work, not somebody else's deletion.
+    """
+    return {**{i: "hd" for i in hd - pdp}, **{i: "pdp" for i in pdp - hd}}
+
+
+def page_facts(pages: list[dict], hidden: set[str], claims: dict[str, set[int]],
+               half: dict[str, str] | None = None) -> list[Page]:
+    half = half or {}
     out = []
     for p in pages:
         pid, ent = p["id"], p.get("entity") or "profile"
         if ent != "profile" or pid in hidden:
-            out.append(Page(pid, ent, hidden=pid in hidden))
+            out.append(Page(pid, ent, hidden=pid in hidden, half_hidden=half.get(pid, "")))
             continue
         if not UUID_RE.fullmatch(pid):
-            out.append(Page(pid, ent, found=False))     # an 8-char prefix: the full id must be read from the thread
+            out.append(Page(pid, ent, found=False, half_hidden=half.get(pid, "")))   # an 8-char prefix
             continue
         doc = profile_doc(pid)
         if not doc:
             # core answers 404 on a failed catalog read too: only a public 404 as well makes it "gone"
             gone = public_status("profile", pid) == 404
-            out.append(Page(pid, ent, found=gone, gone=gone))
+            out.append(Page(pid, ent, found=gone, gone=gone, half_hidden=half.get(pid, "")))
             continue
         links = doc.get("links") if isinstance(doc.get("links"), dict) else {}
         # isClaimed / popularity / creditCount are SAFETY fields: they decide whether path C may pass and whether the
@@ -190,11 +202,12 @@ def page_facts(pages: list[dict], hidden: set[str], claims: dict[str, set[int]])
                                      ("creditCount", _is_number(doc.get("creditCount")))) if not ok]
         if bad:
             out.append(Page(pid, ent, True, str(doc.get("name") or ""), facts_unknown=",".join(bad),
-                            hidden=pid in hidden))
+                            hidden=pid in hidden, half_hidden=half.get(pid, "")))
             continue
         out.append(Page(pid, ent, True, str(doc.get("name") or ""), doc.get("isClaimed") is True,
                         frozenset(claims.get(pid, set())), float(doc.get("popularity")),
-                        int(doc.get("creditCount")), str(links.get("website") or ""), pid in hidden))
+                        int(doc.get("creditCount")), str(links.get("website") or ""), pid in hidden,
+                        half_hidden=half.get(pid, "")))
     return out
 
 

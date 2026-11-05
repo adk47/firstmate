@@ -422,7 +422,7 @@ class Run:
 
     # ---------------------------------------------------------------- identity
     def decide_all(self, hidden: set[str], conv_reader=None, stale_hours: float = 0,
-                   prefix_resolver=None) -> None:
+                   prefix_resolver=None, half: dict[str, str] | None = None) -> None:
         """Decide every open row (stale_hours=0), or only rows never decided, UNKNOWN, changed since their last
         decision, or decided more than `stale_hours` ago (the hourly tick)."""
         conv_reader = conv_reader or sources.conversation
@@ -446,11 +446,12 @@ class Run:
                 self.fail("prefix resolution", exc)
         for r in rows:
             try:
-                self.decide_row(r, hidden, resolved, conv_reader, stale_hours)
+                self.decide_row(r, hidden, resolved, conv_reader, stale_hours, half)
             except sources.Unknown as exc:
                 self.fail(f"decide row {r['id']} (#{r['register_no']})", exc)
 
-    def decide_rows(self, rows: list[dict], hidden: set[str], conv_reader=None, prefix_resolver=None) -> None:
+    def decide_rows(self, rows: list[dict], hidden: set[str], conv_reader=None, prefix_resolver=None,
+                    half: dict[str, str] | None = None) -> None:
         """Decide exactly these rows (a pushed intake candidate), not the whole open register: an `intake` call must
         not re-write 374 unrelated decisions as a side effect of recording one request."""
         conv_reader = conv_reader or sources.conversation
@@ -464,12 +465,12 @@ class Run:
                 self.fail("prefix resolution", exc)
         for r in rows:
             try:
-                self.decide_row(self.store.get(r["id"]) or r, hidden, resolved, conv_reader)
+                self.decide_row(self.store.get(r["id"]) or r, hidden, resolved, conv_reader, half=half)
             except sources.Unknown as exc:
                 self.fail(f"decide row {r['id']} (#{r['register_no']})", exc)
 
     def decide_row(self, r: dict, hidden: set[str], resolved: dict[str, str], conv_reader,
-                   stale_hours: float = 0) -> None:
+                   stale_hours: float = 0, half: dict[str, str] | None = None) -> None:
         cls = r["class"]
         pages, seen = [], set()
         for p in r["pages"]:
@@ -498,7 +499,7 @@ class Run:
             names = sources.account_names([acc]).get(acc, ()) if acc is not None else ()
             prof_ids = [p["id"] for p in pages if p.get("entity", "profile") == "profile" and len(p["id"]) == 36]
             claims = sources.processed_claims(prof_ids) if prof_ids else {}
-            facts = sources.page_facts(pages, hidden, claims)
+            facts = sources.page_facts(pages, hidden, claims, half)
             req = identity.Requester(name=name, email=email, account_id=acc, account_names=names, representative=rep,
                                      verified=bool(trusted))
             dec = identity.decide(facts, req, cls)

@@ -132,8 +132,87 @@ class Identity(unittest.TestCase):
 
     def test_gone_and_hidden(self):
         self.assertEqual(identity.decide([page(gone=True)], Requester(), "privacy_erasure").verdict, "GONE")
+        # a page we hid answers 404 to the catalog read as well, so "gone" and "hidden" are both true for OUR OWN
+        # hides: the id on the hide list is the stronger, checkable fact and must win (found live 2026-11-04 - 9
+        # overdue rows were parked in the GONE pile instead of the confirmation queue)
+        both = identity.decide([page(gone=True, hidden=True)], Requester(), "privacy_erasure")
+        self.assertEqual(both.verdict, "ALREADY_HIDDEN", "our own hide must never be read as an outside deletion")
         self.assertEqual(identity.decide([page(hidden=True)], Requester(), "privacy_erasure").verdict,
                          "ALREADY_HIDDEN")
+
+    def test_half_a_hide_is_not_gone_and_not_hidden(self):
+        """A hide needs BOTH lists and they ship in separate PRs. In that window the page answers 404 everywhere, so
+        reading it as GONE hands Jan a deletion to explain that was our own half-finished work; reading it as
+        ALREADY_HIDDEN claims a hide that has not happened. Live 2026-11-04: 9 open rows, all PDP-only."""
+        d = identity.decide([page(gone=True, half_hidden="pdp")], Requester(), "privacy_erasure")
+        self.assertEqual(d.verdict, "HIDDEN_PENDING")
+        why = d.pages[0].why
+        self.assertIn("PDP sitemap legal_hidden", why, "the message must name the list that holds it")
+        self.assertIn("H-DevOps HIDDEN_ENTITY_IDS", why, "and the one that must still be merged")
+        self.assertNotEqual(d.verdict, "GONE")
+        self.assertEqual(identity.decide([page(half_hidden="hd")], Requester(), "privacy_erasure").verdict,
+                         "HIDDEN_PENDING")
+        self.assertIn("H-DevOps HIDDEN_ENTITY_IDS", identity.decide(
+            [page(half_hidden="hd")], Requester(), "privacy_erasure").pages[0].why)
+
+    def test_intake_passes_the_half_hide_map_as_half_not_as_the_conversation_reader(self):
+        """QA finding on #1736, the call-site half: `hidden_now()` returns (ids on BOTH lists, {id: the one list that
+        holds it}) and the CLI unpacked it straight into `decide_rows(rows, *hidden_now(run))`, so the MAP landed in
+        `conv_reader`. A pushed candidate with a conversation_id then raised `TypeError: 'dict' object is not
+        callable`, and one without it silently lost the map and could keep GONE. Driven through the real CLI function,
+        because the unit-level predicate was already right - the wiring was not."""
+        import tempfile
+        cli = _cli_module()
+        d = tempfile.mkdtemp()
+        store = os.path.join(d, "erasure.sqlite")
+        cand = os.path.join(d, "cand.json")
+        with open(cand, "w") as f:
+            json.dump({"keys": ["intercom:215476650395415"], "channel": "intercom", "class": "privacy_erasure",
+                       "received_at": "2026-11-04T01:39:22Z", "conversation_id": "215476650395415",
+                       "pages": [{"entity": "profile", "id": ARPAD}]}, f)
+        a = type("A", (), {"candidate": cand, "no_decide": False, "store": store})()
+        run = Run(Store(store), log=lambda *_: None)
+        seen = {}
+
+        def fake_decide_rows(self, rows, hidden, conv_reader=None, prefix_resolver=None, half=None):
+            seen.update(hidden=hidden, conv_reader=conv_reader, half=half)
+
+        with mock.patch.object(cli, "hidden_now", lambda r: ({"a" * 36}, {"b" * 36: "hd"})), \
+                mock.patch.object(cli.sources, "conversation", lambda cid: {}), \
+                mock.patch.object(cli.sources, "resolve_prefixes", lambda ids: {}), \
+                mock.patch.object(cli.sources, "processed_claims", lambda ids: {}), \
+                mock.patch.object(cli.sources, "resolve_account", lambda *a, **k: (None, "")), \
+                mock.patch.object(cli.sources, "page_facts", lambda *a, **k: []), \
+                mock.patch.object(Run, "decide_rows", fake_decide_rows), \
+                mock.patch("builtins.print", lambda *x, **k: None):
+            cli.cmd_intake(run, a)
+        self.assertEqual(seen.get("half"), {"b" * 36: "hd"},
+                         "the half-hide map must reach decide_rows as `half`")
+        self.assertIsNone(seen.get("conv_reader"),
+                          "and must never be handed over as the conversation reader")
+
+    def test_a_half_hide_the_catalog_cannot_read_is_still_a_half_hide(self):
+        """QA finding on #1736: `page_facts` sets `found=False` when the catalog 404s and the public page does NOT,
+        which is exactly the half-hidden shape - so the not-found fallback was swallowing the state the half-hide
+        branch exists to name, and a half-applied hide was filed as UNKNOWN instead of HIDDEN_PENDING."""
+        d = identity.decide([page(found=False, half_hidden="hd")], Requester(), "privacy_erasure")
+        self.assertEqual(d.verdict, "HIDDEN_PENDING",
+                         "a half-applied hide must not be reported as an unreadable page")
+        self.assertIn("H-DevOps HIDDEN_ENTITY_IDS", d.pages[0].why)
+        # and the fallback still does its own job for a page that is NOT on either list
+        self.assertEqual(identity.decide([page(found=False)], Requester(), "privacy_erasure").verdict, "UNKNOWN")
+
+    def test_a_row_that_still_needs_a_letter_is_not_downgraded_by_a_pending_page(self):
+        d = identity.decide([page(half_hidden="pdp"), page(entity_id=OTHER, found=False)],
+                            Requester(name="Arpad Laczkovszki", verified=True), "privacy_erasure")
+        self.assertEqual(d.verdict, "UNKNOWN", "the most restrictive page still wins the row")
+
+    def test_half_hidden_says_which_list_is_missing(self):
+        hd = {"1" * 36}
+        pdp = {"2" * 36}
+        self.assertEqual(sources.half_hidden(hd, pdp), {"1" * 36: "hd", "2" * 36: "pdp"})
+        self.assertEqual(sources.half_hidden(hd, hd), {}, "both lists -> fully hidden, not pending")
+        self.assertEqual(sources.half_hidden(set(), pdp), {"2" * 36: "pdp"})
 
     def test_mixed_row_keeps_per_page_verdicts(self):
         d = identity.decide([page(), page(entity_id=OTHER, name="Somebody Else")],
@@ -752,7 +831,7 @@ class SilentFailures(unittest.TestCase):
         dec = ident.Decision("GONE", "", [ident.PageVerdict(ARPAD, "GONE", "404 in catalog + public, no merge")])
         with mock.patch.object(ident, "decide", lambda pages, req, cls: dec), \
                 mock.patch("gdpr_pipeline.sources.resolve_account", lambda *a, **k: (None, "")), \
-                mock.patch("gdpr_pipeline.sources.page_facts", lambda pages, hidden, claims: {ARPAD: fact}), \
+                mock.patch("gdpr_pipeline.sources.page_facts", lambda pages, hidden, claims, half=None: {ARPAD: fact}), \
                 mock.patch("gdpr_pipeline.sources.processed_claims", lambda ids: {}):
             run.decide_row(s.get(rid), set(), {}, lambda c: {})
         self.assertEqual(s.get(rid)["removed_outside_process"], [ARPAD])
@@ -3222,7 +3301,7 @@ class StaleDecisionRevision(unittest.TestCase):
         dec = ident.Decision("PASS_A", "claim", [ident.PageVerdict(ARPAD, "PASS_A", "claim")])
         with mock.patch.object(ident, "decide", lambda pages, req, cls: dec), \
                 mock.patch("gdpr_pipeline.sources.resolve_account", lambda *a, **k: (None, "")), \
-                mock.patch("gdpr_pipeline.sources.page_facts", lambda pages, hidden, claims: {ARPAD: fact}), \
+                mock.patch("gdpr_pipeline.sources.page_facts", lambda pages, hidden, claims, half=None: {ARPAD: fact}), \
                 mock.patch("gdpr_pipeline.sources.processed_claims", lambda ids: {}):
             self.run.decide_row(self.s.get(rid), set(), {}, lambda cid: {}, stale_hours=20)
         self.assertGreater(parse_iso(self.s.get(rid)["decided_at"]), parse_iso(old),
@@ -3239,7 +3318,7 @@ class StaleDecisionRevision(unittest.TestCase):
         dec = ident.Decision("PASS_A", "claim", [ident.PageVerdict(ARPAD, "PASS_A", "claim")])
         with mock.patch.object(ident, "decide", lambda pages, req, cls: dec), \
                 mock.patch("gdpr_pipeline.sources.resolve_account", lambda *a, **k: (None, "")), \
-                mock.patch("gdpr_pipeline.sources.page_facts", lambda pages, hidden, claims: {ARPAD: fact}), \
+                mock.patch("gdpr_pipeline.sources.page_facts", lambda pages, hidden, claims, half=None: {ARPAD: fact}), \
                 mock.patch("gdpr_pipeline.sources.processed_claims", lambda ids: {}):
             self.run.decide_row(self.s.get(rid), set(), {}, lambda cid: {})
         kinds = [e["kind"] for e in self.s.events(rid)]
@@ -3249,7 +3328,7 @@ class StaleDecisionRevision(unittest.TestCase):
         self.s.db.commit()
         with mock.patch.object(ident, "decide", lambda pages, req, cls: dec), \
                 mock.patch("gdpr_pipeline.sources.resolve_account", lambda *a, **k: (None, "")), \
-                mock.patch("gdpr_pipeline.sources.page_facts", lambda pages, hidden, claims: {ARPAD: fact}), \
+                mock.patch("gdpr_pipeline.sources.page_facts", lambda pages, hidden, claims, half=None: {ARPAD: fact}), \
                 mock.patch("gdpr_pipeline.sources.processed_claims", lambda ids: {}):
             self.run.decide_row(self.s.get(rid), set(), {}, lambda cid: {}, stale_hours=20)
         self.assertIn("refresh", [e["kind"] for e in self.s.events(rid)])
@@ -3266,7 +3345,7 @@ class StaleDecisionRevision(unittest.TestCase):
         dec = ident.Decision("PASS_A", "claim", [ident.PageVerdict(ARPAD, "PASS_A", "claim")])
         with mock.patch.object(ident, "decide", lambda pages, req, cls: dec), \
                 mock.patch("gdpr_pipeline.sources.resolve_account", lambda *a, **k: (None, "")), \
-                mock.patch("gdpr_pipeline.sources.page_facts", lambda pages, hidden, claims: {ARPAD: fact}), \
+                mock.patch("gdpr_pipeline.sources.page_facts", lambda pages, hidden, claims, half=None: {ARPAD: fact}), \
                 mock.patch("gdpr_pipeline.sources.processed_claims", lambda ids: {}):
             self.run.decide_row(self.s.get(rid), set(), {}, lambda cid: {})
         self.assertEqual(self.s.get(rid)["decided_rev"], self.s.get(rid)["rev"])

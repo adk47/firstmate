@@ -34,7 +34,8 @@ BIG_CREDITS = 50
 # Verdicts per page. PASS_* and LEGAL_HIDE_FIRST make the page hide-eligible; everything else does not.
 PASS_A, PASS_B, PASS_C, PASS_D = "PASS_A", "PASS_B", "PASS_C", "PASS_D"
 LEGAL_HIDE_FIRST = "LEGAL_HIDE_FIRST"
-ALREADY_HIDDEN = "ALREADY_HIDDEN"
+ALREADY_HIDDEN = "ALREADY_HIDDEN"      # the id is on BOTH hide lists - the hide is complete in config
+HIDDEN_PENDING = "HIDDEN_PENDING"      # the id is on exactly ONE hide list - half a hide, and never "gone"
 ASK_LINK, ASK_IDENTITY, ASK_AUTH = "ASK_LINK", "ASK_IDENTITY", "ASK_AUTH"
 JAN_BIGNAME, JAN_REVIEW = "JAN_BIGNAME", "JAN_REVIEW"
 DMCA_REVIEW = "DMCA_REVIEW"
@@ -63,6 +64,7 @@ class Page:
     credit_count: int = 0
     website: str = ""
     hidden: bool = False                    # already in HIDDEN_ENTITY_IDS AND the sitemap legal_hidden list
+    half_hidden: str = ""                   # "hd" or "pdp": the ONE list that holds it, when the other does not
     gone: bool = False                      # the catalog AND the public page both answer 404 (deleted / merged)
     facts_unknown: str = ""                 # comma-joined SAFETY fields the catalog did not state (isClaimed, …):
                                             # absence is not "unclaimed and small", so no path may pass
@@ -149,16 +151,37 @@ def decide_page(p: Page, r: Requester, cls: str) -> PageVerdict:
     def v(verdict: str, why: str) -> PageVerdict:
         return PageVerdict(p.entity_id, verdict, why)
 
+    # Order matters for what can never be true at the same time: `hidden` and `half_hidden` are decided from the two
+    # config lists BEFORE any fetch, so a hidden page is never asked the catalog and never carries `gone`. Checking
+    # these two list states ahead of `gone` therefore keeps the property "an id on a hide list is never reported as an
+    # outside deletion", whatever a later refactor does to the fetch.
+    if p.hidden:
+        return v(ALREADY_HIDDEN, "already in HIDDEN_ENTITY_IDS and the sitemap legal_hidden list")
+    # HALF A HIDE IS ITS OWN STATE, and it is the opposite of GONE. A hide is real only when the id is on BOTH lists
+    # (H-DevOps HIDDEN_ENTITY_IDS drives the app-side hide, the PDP sitemap legal_hidden drives the 410), and the two
+    # land in separate PRs. So there is a window - normally hours, but indefinitely when one PR is stalled - where the
+    # page answers 404 to the catalog and the public read because its sitemap entry is already in, while the app hide
+    # is not. Reading that as GONE ("removed outside the hide process") sent those rows to Jan to explain a deletion
+    # that was OUR OWN half-finished work. Measured live 2026-11-04: 9 open rows, all PDP-only, all real requests
+    # waiting on the H-DevOps counterpart PR - not one belonged in the GONE pile.
+    #
+    # It is checked BEFORE the not-found fallback (QA finding on #1736): `page_facts` sets `found=False` when the
+    # catalog 404s and the public page does not, which is exactly the half-hidden shape, so the fallback was swallowing
+    # the state this branch exists to name and filing a half-applied hide as UNKNOWN.
+    if p.half_hidden:
+        other = "H-DevOps HIDDEN_ENTITY_IDS" if p.half_hidden == "pdp" else "PDP sitemap legal_hidden"
+        held = "the PDP sitemap legal_hidden list" if p.half_hidden == "pdp" else "H-DevOps HIDDEN_ENTITY_IDS"
+        return v(HIDDEN_PENDING, f"half a hide: the id is on {held} but not {other}, so no letter is owed and the "
+                                 f"hide is not finished - merge the {other} change, then verify S/P/M")
     if not p.found:
         if len(p.entity_id) == 8:
             return v(UNKNOWN, "only an 8-char id prefix is on file and no catalog profile matches it uniquely: the "
                               "full link must be read from the mail thread")
         return v(UNKNOWN, "catalog read failed or the page was not found: re-read next run, never assumed absent")
     if p.gone:
-        return v(GONE, "the catalog and the public page both answer 404: removed outside the hide process "
-                       "(deleted or merged); a person confirms what happened before any letter")
-    if p.hidden:
-        return v(ALREADY_HIDDEN, "already in HIDDEN_ENTITY_IDS and the sitemap legal_hidden list")
+        return v(GONE, "the catalog and the public page both answer 404 and this id was never on a hide list: "
+                       "removed outside the hide process (deleted or merged); a person confirms what happened "
+                       "before any letter")
     if p.entity != "profile":
         return v(JAN_REVIEW, f"a {p.entity} page: identity paths A-D are about profiles; Jan decides the scope")
     if p.facts_unknown:
@@ -211,7 +234,7 @@ def decide_page(p: Page, r: Requester, cls: str) -> PageVerdict:
 # Row verdict: the most restrictive page wins, so a PASS page never carries an ASK page with it in the row
 # summary. The hide batch still takes every hide-eligible PAGE of a mixed row (decide per page, act per page).
 ROW_ORDER = (UNKNOWN, NOT_ERASURE, ASK_LINK, JAN_BIGNAME, JAN_REVIEW, GONE, DMCA_REVIEW, ASK_AUTH, ASK_IDENTITY,
-             LEGAL_HIDE_FIRST, PASS_A, PASS_B, PASS_D, PASS_C, ALREADY_HIDDEN)
+             LEGAL_HIDE_FIRST, PASS_A, PASS_B, PASS_D, PASS_C, HIDDEN_PENDING, ALREADY_HIDDEN)
 BASIS = {PASS_A: "A", PASS_B: "B", PASS_C: "C", PASS_D: "D", LEGAL_HIDE_FIRST: "legal"}
 
 
@@ -239,6 +262,7 @@ ACTION = {
     GONE: "Jan: page already 404 (deleted/merged outside the hide process) - confirm what was done, then the letter",
     LEGAL_HIDE_FIRST: "captain: legal threat, hide first (hide-batch --include-legal), identity after",
     PASS_A: "hide batch", PASS_B: "hide batch", PASS_C: "hide batch", PASS_D: "hide batch",
+    HIDDEN_PENDING: "half a hide: merge the other list's change, then verify S/P/M and confirm by due date",
     ALREADY_HIDDEN: "verify S/P/M, confirm by due date",
 }
 
