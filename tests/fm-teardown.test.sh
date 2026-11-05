@@ -4106,6 +4106,41 @@ SH
   pass "an Orca failure reported only on stderr names the concrete error"
 }
 
+# A stdout fragment that is not an Orca envelope is a failure, and the CLI's own
+# stderr reason is more concrete than the parser's complaint about the fragment.
+test_orca_unparseable_stdout_names_the_concrete_stderr_error() {
+  local case_dir rc wt
+  case_dir=$(make_case orca-unparseable-output)
+  wt=$(write_orca_workspace_case "$case_dir")
+  cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "worktree rm")
+    printf 'not-an-envelope-partial-write'
+    printf '%s\n' 'orca: worktree rm crashed: runtime schema mismatch' >&2
+    exit 1
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "orca-unparseable-output: an Orca failure must refuse"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'refusing to fall back to a plain git release' "$case_dir/stderr" \
+    "orca-unparseable-output: the refusal did not explain why the git fallback was refused"
+  assert_grep 'runtime schema mismatch' "$case_dir/stderr" \
+    "orca-unparseable-output: the refusal did not name the concrete Orca error"
+  assert_no_grep 'invalid Orca JSON' "$case_dir/stderr" \
+    "orca-unparseable-output: the refusal replaced the concrete Orca error with the parse error"
+  assert_present "$wt" \
+    "orca-unparseable-output: the worktree was released despite the failed Orca call"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "orca-unparseable-output: the task records were deleted despite the failed Orca call"
+  pass "an unparseable Orca stdout refuses with the concrete stderr error named"
+}
+
 # The pool probe merges an external tool's stdout and stderr, so a whitespace-only
 # row is possible input. It must be classified - not expanded as an unset array,
 # which stock-macOS bash 3.2 under `set -u` treats as unbound - so the held slot
@@ -4605,6 +4640,7 @@ test_orca_non_selector_failure_refuses_instead_of_plain_git_fallback
 test_orca_empty_failure_output_refuses_instead_of_success
 test_orca_whitespace_failure_output_refuses_instead_of_success
 test_orca_stderr_only_failure_names_the_concrete_error
+test_orca_unparseable_stdout_names_the_concrete_stderr_error
 test_whitespace_only_pool_listing_row_is_classified
 test_pool_listing_does_not_claim_a_longer_sibling_path
 test_unresolvable_home_relative_pool_listing_refuses_before_killing_the_agent

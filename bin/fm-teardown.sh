@@ -1694,7 +1694,7 @@ restore_worktree_branch() {  # <worktree> <branch>
 # unparseable stdout is a failure, never an implicit successful removal, and the
 # CLI's stderr is kept so a failure reported only there is still named concretely.
 fm_backend_orca_remove_worktree_by_path() {  # <worktree>
-  local wt=${1:-} out code msg= err= errfile
+  local wt=${1:-} out code msg='' err='' errfile
   [ -n "$wt" ] || {
     echo "error: missing worktree path; cannot remove Orca worktree" >&2
     return 1
@@ -1715,10 +1715,10 @@ fm_backend_orca_remove_worktree_by_path() {  # <worktree>
     return 0
   fi
   code=$(printf '%s' "$out" | fm_backend_orca_json_error_code 2>/dev/null || true)
-  if [ -z "$msg" ]; then
+  if [ -z "$code" ] || [ -z "$msg" ]; then
     case "$err" in
       *[![:space:]]*) msg=$err ;;
-      *) msg="orca worktree rm for $wt returned ${out:-no output}" ;;
+      *) [ -n "$msg" ] || msg="orca worktree rm for $wt returned ${out:-no output}" ;;
     esac
   fi
   printf '%s\n%s\n' "$code" "$msg"
