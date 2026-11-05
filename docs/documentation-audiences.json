@@ -525,6 +525,10 @@
       "audience": "operator-current"
     },
     {
+      "path": "sa/README.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "skills/stow/SKILL.md",
       "audience": "public-product"
     }
