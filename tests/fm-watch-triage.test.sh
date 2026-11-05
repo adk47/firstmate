@@ -2387,6 +2387,41 @@ test_uncapturable_busy_window_is_waited_on() {
   pass "a live busy crew whose capture failed is waited on: no doorbell, no attempt charged, no wake"
 }
 
+# --- a dead endpoint's busy-state record is retired, not left behind ---
+# The record's only writer is the agent's own adapter wiring, so a worker that
+# exits without a teardown leaves one stale incarnation that nothing can ever
+# clear. The watcher retires it on the poll that observes the death, which is
+# what keeps a home from accumulating one per exited worker.
+
+test_dead_endpoint_busy_state_is_retired() {
+  local dir state fakebin out window pid i
+  dir=$(make_case dead-endpoint-busy); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-exited"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/exited.meta"
+  record_pi_busy "$state" exited
+  assert_present "$state/exited.busy-state" "fixture did not arm a busy-state record"
+  assert_present "$state/exited.busy-gen" "fixture did not arm a busy-state generation"
+  # The pane is gone: capture fails and the endpoint read reports it dead.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$dir/capture.count" FM_FAKE_TMUX_CAPTURE_FAIL_AFTER=0 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    [ ! -e "$state/exited.busy-state" ] && [ ! -e "$state/exited.busy-gen" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  reap "$pid"
+  assert_absent "$state/exited.busy-state" "a dead endpoint's busy-state record was left behind"
+  assert_absent "$state/exited.busy-gen" "a dead endpoint's busy-state generation was left behind"
+  pass "the watcher retires a dead endpoint's busy-state record on the poll that observes the exit"
+}
+
 # --- non-terminal stale, crew provably working: absorbed, then wedge-escalated ---
 # A provably-working crew (an actively-running pipeline) legitimately sits on a
 # static pane (e.g. waiting on CI), so a non-terminal stale is absorbed and only
@@ -5103,6 +5138,7 @@ test_gateway_stalled_secondmate_is_not_re_rung
 test_ordinary_steer_is_held_quiet_while_the_gateway_stall_is_open
 test_uncapturable_window_still_escalates_its_unread_steer
 test_uncapturable_busy_window_is_waited_on
+test_dead_endpoint_busy_state_is_retired
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
