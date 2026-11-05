@@ -71,22 +71,30 @@ PROSE_LINE='{"timestamp":"2026-09-11T10:00:00.000Z","type":"response_item","payl
 
 # _stub_openclaw <exit_code> <output> <rollout_action> — writes a PATH stub
 # for `openclaw` that prints $output and exits $exit_code, and records its
-# argv in $TEST_TMPDIR/openclaw.args. rollout_action is "append" (simulate a
+# argv (appended per call) in $TEST_TMPDIR/openclaw.args. $4 is optional extra
+# shell run after the rollout write (e.g. a concurrent session's file). rollout_action is "append" (simulate a
 # real legacy web_search_end event being written during the turn),
 # "append-extension" (the codex 0.151.0 item_completed/Extension shape),
 # "append-prose" (a message that merely TALKS about the event) or "none"
 # (simulate the model replying without ever calling the tool).
 _stub_openclaw() {
-  local exit_code="$1" output="$2" rollout_action="$3"
+  local exit_code="$1" output="$2" rollout_action="$3" extra="${4:-}"
   cat > "$TEST_TMPDIR/bin/openclaw" <<STUB
 #!/usr/bin/env bash
-printf '%s\n' "\$@" > "$TEST_TMPDIR/openclaw.args"
+printf '%s\n' "\$@" >> "$TEST_TMPDIR/openclaw.args"
+# codex persists the user turn (our --message, nonce included) into the
+# session rollout BEFORE any tool event; reproduce that shape.
+msg=""; prev=""
+for a in "\$@"; do [ "\$prev" = "--message" ] && msg="\$a"; prev="\$a"; done
+msg="\${msg//\$'\\n'/ }"
+printf '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"%s"}]}}\n' "\$msg" >> "$TEST_TMPDIR/rollouts/rollout-during.jsonl"
 STUB
   case "$rollout_action" in
     append) printf 'echo %q >> %q\n' "$LEGACY_HIT" "$TEST_TMPDIR/rollouts/rollout-during.jsonl" >> "$TEST_TMPDIR/bin/openclaw" ;;
     append-extension) printf 'echo %q >> %q\n' "$EXTENSION_HIT" "$TEST_TMPDIR/rollouts/rollout-during.jsonl" >> "$TEST_TMPDIR/bin/openclaw" ;;
     append-prose) printf 'echo %q >> %q\n' "$PROSE_LINE" "$TEST_TMPDIR/rollouts/rollout-during.jsonl" >> "$TEST_TMPDIR/bin/openclaw" ;;
   esac
+  printf '%s\n' "$extra" >> "$TEST_TMPDIR/bin/openclaw"
   cat >> "$TEST_TMPDIR/bin/openclaw" <<STUB
 printf '%s\n' "$output"
 exit $exit_code
@@ -339,21 +347,91 @@ JQ
 
 @test "_websearch_real_call_ran: a counter failure propagates as nonzero instead of echoing 0" {
   _stub_no_jq_env
-  printf '%s\n' "$EXTENSION_HIT" > "$TEST_TMPDIR/rollouts/rollout-fresh.jsonl"
-  run env PATH="$TEST_TMPDIR/nojq" WEBSEARCH_PROBE_ROLLOUT_GLOB="$WEBSEARCH_PROBE_ROLLOUT_GLOB" "$BASH" -c "source '$LIB'; _websearch_real_call_ran main scout '' 0"
+  marker="$TEST_TMPDIR/marker"; : > "$marker"; sleep 0.05
+  printf '%s\n' "nonce-1" "$EXTENSION_HIT" > "$TEST_TMPDIR/rollouts/rollout-fresh.jsonl"
+  run env PATH="$TEST_TMPDIR/nojq" WEBSEARCH_PROBE_ROLLOUT_GLOB="$WEBSEARCH_PROBE_ROLLOUT_GLOB" "$BASH" -c "source '$LIB'; _websearch_real_call_ran main scout nonce-1 '$marker'"
   [ "$status" -ne 0 ]
   [ "$output" != "0" ]
   [ "$output" != "1" ]
 }
 
-@test "_websearch_real_call_ran: brand-new rollout file with a hit counts as a real call" {
-  run _websearch_real_call_ran main scout "" 0
+@test "_websearch_real_call_ran: a new file carrying the nonce and a hit counts; no candidates is 0" {
+  marker="$TEST_TMPDIR/marker"; : > "$marker"; sleep 0.05
+  run _websearch_real_call_ran main scout nonce-1 "$marker"
   [ "$status" -eq 0 ]
   [ "$output" = "0" ]
-  printf '%s\n' "$EXTENSION_HIT" > "$TEST_TMPDIR/rollouts/rollout-fresh.jsonl"
-  run _websearch_real_call_ran main scout "" 0
+  printf '%s\n' "nonce-1" "$EXTENSION_HIT" > "$TEST_TMPDIR/rollouts/rollout-fresh.jsonl"
+  run _websearch_real_call_ran main scout nonce-1 "$marker"
   [ "$status" -eq 0 ]
   [ "$output" = "1" ]
+}
+
+@test "_websearch_real_call_ran: a file OLDER than the marker is never read, even with the nonce and a hit" {
+  printf '%s\n' "nonce-1" "$EXTENSION_HIT" > "$TEST_TMPDIR/rollouts/rollout-old.jsonl"
+  sleep 0.05; marker="$TEST_TMPDIR/marker"; : > "$marker"
+  run _websearch_real_call_ran main scout nonce-1 "$marker"
+  [ "$status" -eq 0 ]
+  [ "$output" = "0" ]
+}
+
+# ── MUS-28685: attribute the probe's OWN rollout by nonce, not newest mtime ──
+# The reference agent (qa) is the QA bot and runs many sessions at once, so the
+# newest rollout under its glob is usually somebody else's review session.
+
+OTHER_USER_LINE='{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"review PR 1234"}]}}'
+
+@test "T1 busy agent: a concurrent rollout NEWER by mtime (no nonce, 0 hits) does not hide the probe's own hit -> pass" {
+  _stub_openclaw 0 "SEARCH_STATUS: ok" append-extension \
+    "sleep 0.05; echo '$OTHER_USER_LINE' > '$TEST_TMPDIR/rollouts/rollout-other.jsonl'"
+  run websearch_probe_attempt main "probe prompt" qa
+  [ "$status" -eq 0 ]
+  [ "$TEST_TMPDIR/rollouts/rollout-other.jsonl" -nt "$TEST_TMPDIR/rollouts/rollout-during.jsonl" ]
+  echo "$output" | grep -qx 'VERDICT=pass'
+}
+
+@test "T2 identity: a concurrent file WITH a hit but WITHOUT the nonce is not evidence -> inconclusive" {
+  _stub_openclaw 0 "SEARCH_STATUS: ok" none \
+    "sleep 0.05; echo '$OTHER_USER_LINE' > '$TEST_TMPDIR/rollouts/rollout-other.jsonl'; echo '$EXTENSION_HIT' >> '$TEST_TMPDIR/rollouts/rollout-other.jsonl'"
+  run websearch_probe_attempt main "probe prompt" qa
+  [ "$status" -eq 0 ]
+  [ "$(_websearch_rollout_hits "$TEST_TMPDIR/rollouts/rollout-other.jsonl")" = "1" ]
+  echo "$output" | grep -qx 'VERDICT=inconclusive'
+}
+
+@test "T3 two attempts in the same second carry different session ids / nonces, and the nonce is in the message" {
+  _stub_openclaw 0 "SEARCH_STATUS: ok" none
+  websearch_probe_attempt main "probe prompt" qa >/dev/null
+  websearch_probe_attempt main "probe prompt" qa >/dev/null
+  [ "$(grep -cE '^websearch-probe-[0-9]+-' "$TEST_TMPDIR/openclaw.args")" -eq 2 ]
+  [ "$(grep -E '^websearch-probe-[0-9]+-' "$TEST_TMPDIR/openclaw.args" | sort -u | wc -l | tr -d ' ')" -eq 2 ]
+  n1="$(grep -E '^websearch-probe-[0-9]+-' "$TEST_TMPDIR/openclaw.args" | sed -n 1p)"
+  grep -qF "(probe id: ${n1})" "$TEST_TMPDIR/openclaw.args"
+}
+
+@test "T3b the marker file is removed on every exit path (normal and jq-missing early fail)" {
+  _stub_openclaw 0 "SEARCH_STATUS: ok" none
+  export TMPDIR="$TEST_TMPDIR/tmp"; mkdir -p "$TMPDIR"
+  websearch_probe_attempt main "probe prompt" qa >/dev/null
+  [ -z "$(ls "$TMPDIR")" ]
+  _stub_no_jq_env
+  run env PATH="$TEST_TMPDIR/nojq" TMPDIR="$TMPDIR" WEBSEARCH_PROBE_ROLLOUT_GLOB="$WEBSEARCH_PROBE_ROLLOUT_GLOB" "$BASH" -c "source '$LIB'; websearch_probe_attempt main 'probe prompt' scout"
+  [ -z "$(ls "$TMPDIR")" ]
+}
+
+@test "T4 websearch_scope_fail_message: restricted scout + inconclusive reference says cannot attribute, never 'NO tool policy explains it'" {
+  run websearch_scope_fail_message qa inconclusive "rc=0, no confirmed tool call" "scout broke" 'agents.list[id=scout].tools.deny = ["sentry__*"]'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF 'agents.list[id=scout].tools.deny'
+  echo "$output" | grep -qF 'cannot attribute'
+  echo "$output" | grep -qF "'qa' was inconclusive"
+  ! echo "$output" | grep -qF 'NO tool policy explains it'
+}
+
+@test "T4b websearch_scope_fail_message: empty restriction keeps today's text" {
+  run websearch_scope_fail_message qa pass "d" "scout broke" ""
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qF 'NO tool policy explains it'
+  echo "$output" | grep -qF 'web_search BROKEN for scout (scout broke)'
 }
 
 # ──────────────────────────────────────────────────────────────

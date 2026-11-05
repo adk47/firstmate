@@ -382,7 +382,7 @@ PYEOF
 
   case "$(websearch_scoped_verdict "$ref_verdict" "$scout_verdict" "$restriction")" in
     fail)
-      fail_check "$label: web_search BROKEN for scout (${scout_detail}) and NO tool policy explains it — not attributable to a restriction"
+      fail_check "$label: $(websearch_scope_fail_message "$reference" "$ref_verdict" "$ref_detail" "$scout_detail" "$restriction")"
       ;;
     warn)
       if [[ "$scout_verdict" == "unavailable" ]]; then

@@ -69,22 +69,6 @@ _websearch_rollout_glob() {
   echo "${WEBSEARCH_PROBE_ROLLOUT_GLOB:-/root/.openclaw-${profile}/agents/${agent}/agent/codex-home/sessions/*/*/*/rollout-*.jsonl}"
 }
 
-# _websearch_newest_rollout <glob> — path of the most-recently-modified file
-# matching glob, or empty if none match. `ls -t` (not GNU-only `find
-# -newer`) so this stays portable across the bats host (macOS) and node-8.
-_websearch_newest_rollout() {
-  local glob="$1"
-  # No-match MUST return success with empty output: `ls -t` on an unmatched
-  # glob exits non-zero, and under the caller's `set -euo pipefail` a non-zero
-  # command substitution (baseline_path=$(...)) would abort the whole smoke
-  # test before the probe reaches its retry-then-warn path. The trailing
-  # `|| true` (with `2>/dev/null` swallowing the ls error) makes the empty
-  # case a clean, empty success — no prior rollout is a valid state (fresh
-  # host, or a scout that has never searched).
-  # shellcheck disable=SC2086  # intentional glob expansion, not quoting
-  ls -t $glob 2>/dev/null | head -n1 || true
-}
-
 # _websearch_rollout_hits <path> — count of persisted search events in the
 # given rollout file, in EITHER shape (legacy `web_search_end` event, or the
 # codex >= 0.151.0 `item_completed` Extension `web.search` item), matched by
@@ -118,34 +102,41 @@ _websearch_rollout_hits() {
   echo "${n:-0}"
 }
 
-# _websearch_real_call_ran <profile> <baseline_path> <baseline_hits> —
-# echoes 1 iff the newest rollout of that agent gained a search event since
-# the pre-probe baseline (a brand-new rollout file counts as "gained" if it
-# carries >=1 hit); echoes 0 otherwise, including "nothing changed" — the
-# "model replied without actually calling the tool" case FINDING 2 (PR #704
-# QA review) exists to catch. Returns NONZERO (echoing nothing) when the
-# counter itself failed — the caller must not read that as "0 real calls".
+# _websearch_real_call_ran <profile> <agent> <nonce> <marker> — echoes 1 iff
+# THIS probe's own rollout carries a search event; 0 otherwise (including "no
+# rollout of ours found") — the "model replied without actually calling the
+# tool" case FINDING 2 (PR #704 QA review) exists to catch.
+#
+# The probe's rollout is identified by its nonce, which websearch_probe_attempt
+# put in the prompt (codex persists the user turn into the session rollout; an
+# openclaw --session-id is NOT persisted there). It is NOT "the newest rollout
+# under the glob": the reference agent (qa) is the QA bot and runs many
+# sessions at once, so the newest file is usually another review session with
+# 0 search events (MUS-28685: 2 of 3 deploys on 4 Nov failed that way).
+#
+# The scan is bounded: only files not older than <marker> (a file touched just
+# before the turn) are grepped for the nonce, so qa's ~12k-file / 14G store is
+# never read. `! marker -nt f` rather than `f -nt marker` so a coarse (1s)
+# filesystem timestamp cannot drop the probe's own file; the nonce filter, not
+# the mtime, is what attributes a file to this probe.
+#
+# Returns NONZERO (echoing nothing) when the counter itself failed — the
+# caller must not read that as "0 real calls".
 _websearch_real_call_ran() {
-  local profile="$1" agent="$2" baseline_path="$3" baseline_hits="$4"
-  local glob after_path after_hits
+  local profile="$1" agent="$2" nonce="$3" marker="$4"
+  local glob f n total=0
   glob="$(_websearch_rollout_glob "$profile" "$agent")"
-  after_path="$(_websearch_newest_rollout "$glob")"
-  if ! after_hits="$(_websearch_rollout_hits "$after_path")"; then
-    return 2
-  fi
-  if [ "$after_path" != "$baseline_path" ]; then
-    if [ "${after_hits:-0}" -gt 0 ]; then
-      echo 1
-    else
-      echo 0
+  # shellcheck disable=SC2086  # intentional glob expansion, not quoting
+  for f in $glob; do
+    [ -f "$f" ] || continue
+    [ "$marker" -nt "$f" ] && continue
+    grep -qF -- "$nonce" "$f" 2>/dev/null || continue
+    if ! n="$(_websearch_rollout_hits "$f")"; then
+      return 2
     fi
-    return
-  fi
-  if [ "${after_hits:-0}" -gt "${baseline_hits:-0}" ]; then
-    echo 1
-  else
-    echo 0
-  fi
+    total=$((total + ${n:-0}))
+  done
+  if [ "$total" -gt 0 ]; then echo 1; else echo 0; fi
 }
 
 # _websearch_probe_verdict <response_text> <real_call_ran:0|1> — pure
@@ -209,32 +200,39 @@ _websearch_probe_verdict() {
   echo inconclusive
 }
 
-# websearch_probe_attempt <profile> <prompt> — runs ONE real probe attempt
-# and echoes exactly two lines: `VERDICT=<fail|unavailable|pass|inconclusive>` and
+# websearch_probe_attempt <profile> <prompt> [agent] — runs ONE real probe
+# attempt and echoes exactly two lines: `VERDICT=<fail|unavailable|pass|inconclusive>` and
 # `DETAIL=<diagnostic text>` (the matched break signature on fail, a short
 # rollout-evidence note on pass, or the raw exit code + reason on
-# inconclusive). Snapshots the agent's newest rollout + its search-event
-# count BEFORE invoking openclaw (the baseline), invokes the agent turn in a
-# FRESH session (so the agent's persistent `main` history cannot poison the
-# hosted search summariser — see header) WITHOUT clobbering the captured
-# output on a nonzero exit (FINDING 1), then classifies via
-# _websearch_probe_verdict.
+# inconclusive). Stamps a marker file and a per-attempt nonce BEFORE invoking
+# openclaw, invokes the agent turn in a FRESH session (so the agent's
+# persistent `main` history cannot poison the hosted search summariser — see
+# header) with the nonce appended to the prompt, WITHOUT clobbering the
+# captured output on a nonzero exit (FINDING 1), then reads the search verdict
+# from the rollout that carries the nonce (_websearch_real_call_ran) and
+# classifies via _websearch_probe_verdict.
 websearch_probe_attempt() {
   local profile="$1" prompt="$2" agent="${3:-scout}"
-  local glob baseline_path baseline_hits response rc real_ran verdict detail session_id
-  glob="$(_websearch_rollout_glob "$profile" "$agent")"
-  baseline_path="$(_websearch_newest_rollout "$glob")"
+  local response rc real_ran verdict detail nonce marker out
   # A counter that cannot run (no jq) is a BLOCKING verdict at this boundary,
   # not an inconclusive one: the dispatcher reads only the VERDICT line, and a
   # bare `x="$(...)"` would discard the helper's nonzero status and let Step 7
   # retry, warn and deploy with nothing measured (QA #937). Fail closed here,
-  # before spending an agent turn.
-  if ! baseline_hits="$(_websearch_rollout_hits "$baseline_path" 2>&1)"; then
+  # before spending an agent turn. (`""` takes the guard before the empty-path
+  # shortcut in _websearch_rollout_hits.)
+  if ! out="$(_websearch_rollout_hits "" 2>&1)"; then
     echo "VERDICT=fail"
-    echo "DETAIL=probe cannot measure rollout evidence, failing closed: ${baseline_hits}"
+    echo "DETAIL=probe cannot measure rollout evidence, failing closed: ${out}"
     return 0
   fi
-  session_id="websearch-probe-$(date +%s)-$$"
+  # mktemp's random suffix keeps two attempts in the same second distinct, and
+  # unlike $$/$BASHPID/$RANDOM it is the same in a subshell.
+  marker="$(mktemp "${TMPDIR:-/tmp}/websearch-probe.XXXXXXXX")" || {
+    echo "VERDICT=fail"
+    echo "DETAIL=probe cannot create its marker file, failing closed"
+    return 0
+  }
+  nonce="websearch-probe-$(date +%s)-${marker##*.}"
 
   # 2026-11-04: the turn timeout must be enforced BY THE GATEWAY, not by
   # killing the client. `timeout 150 openclaw agent …` kills the CLI process
@@ -252,17 +250,19 @@ websearch_probe_attempt() {
   # agent command timeout (seconds)"), so the run is cancelled properly. The
   # outer `timeout` is a belt-and-braces bound on the CLI itself and is set
   # ABOVE the gateway bound so it never wins the race.
-  if response=$(timeout 200 openclaw --profile "$profile" agent --agent "$agent" --session-id "$session_id" --timeout 150 --json --message "$prompt" 2>&1); then
+  if response=$(timeout 200 openclaw --profile "$profile" agent --agent "$agent" --session-id "$nonce" --timeout 150 --json --message "$prompt"$'\n\n'"(probe id: ${nonce})" 2>&1); then
     rc=0
   else
     rc=$?
   fi
 
-  if ! real_ran="$(_websearch_real_call_ran "$profile" "$agent" "$baseline_path" "$baseline_hits" 2>&1)"; then
+  if ! real_ran="$(_websearch_real_call_ran "$profile" "$agent" "$nonce" "$marker" 2>&1)"; then
+    rm -f "$marker"
     echo "VERDICT=fail"
     echo "DETAIL=probe cannot measure rollout evidence, failing closed: ${real_ran}"
     return 0
   fi
+  rm -f "$marker"
   verdict="$(_websearch_probe_verdict "$response" "$real_ran")"
 
   case "$verdict" in
@@ -472,4 +472,19 @@ websearch_scoped_verdict() {
 
   if [ "$ref" = "pass" ]; then echo pass; return; fi
   echo inconclusive
+}
+
+# websearch_scope_fail_message <reference> <ref_verdict> <ref_detail>
+# <scout_detail> <restriction> — the words for the Step-7 `fail` arm of
+# websearch_scoped_verdict. The VERDICT is unchanged (fail closed); only the
+# text is honest: a scout restriction that WAS found must not be reported as
+# "no tool policy explains it". It is a fail-closed because the deny-free
+# reference did not pass, so the restriction cannot be told apart from an outage.
+websearch_scope_fail_message() {
+  local reference="$1" ref_verdict="$2" ref_detail="$3" scout_detail="$4" restriction="$5"
+  if [ -z "$restriction" ]; then
+    echo "web_search BROKEN for scout (${scout_detail}) and NO tool policy explains it — not attributable to a restriction"
+  else
+    echo "web_search failed for scout (${scout_detail}); scout IS restricted by ${restriction}, but deny-free reference '${reference}' was ${ref_verdict} (${ref_detail}) — cannot attribute, failing closed"
+  fi
 }
