@@ -248,11 +248,18 @@ JSON, and durably records stdin/stdout/stderr/exit status before returning.
 
 ### Step 3: LinkedIn evidence (fetched, not recalled)
 
-For each survivor, `web_fetch` its LinkedIn company page and attach a dated
-evidence line:
+For each survivor, find the LinkedIn company page in this order, and stop at the first hit:
+
+1. `web_fetch` the company's own homepage and take its `linkedin.com/company/<slug>` link.
+2. No link there → run at most one search for the URL.
+3. Still none → `web_fetch` at most 2 guessed `https://www.linkedin.com/company/<slug>` URLs, built from the company name and the domain stem.
+
+`web_fetch` the page you found and attach a dated evidence line:
 `LinkedIn: …/company/<slug> — live, last post <date>, fetched <today>`.
-No fetchable LinkedIn page → it becomes a terminal reject `NO_LINKEDIN`. A
-LinkedIn URL recalled without a fetch is not evidence.
+
+`NO_LINKEDIN` (terminal reject, never a silent drop) only when none of 1-3 gives a page for this company.
+Its evidence line lists what was tried: `homepage: no link / search: no company URL / slug fetches: <urls> → <status or other company>`.
+A search that returns no company page is never a `NO_LINKEDIN` by itself. A URL recalled without a fetch is not evidence.
 
 ### Step 4: Rollup, tier, score, select
 
