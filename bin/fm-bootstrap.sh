@@ -74,6 +74,10 @@
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
+#          Alongside fleet sync, bootstrap refreshes the chair's own
+#          refs/remotes/origin/main (bounded, best-effort) so the running-chair
+#          drift check compares HEAD against a current reference rather than one
+#          frozen at the last /updatefirstmate.
 #          Fleet sync fetches, fast-forwards safe default-branch states, reports
 #          recovered and STUCK clone drift, and prunes gone local branches; it is
 #          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT when it is a non-empty
@@ -183,6 +187,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # deferred network stage sets, so an ordinary bootstrap run records nothing.
 # shellcheck source=bin/fm-timing-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-timing-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 # Network-phase selection (see the header). An unrecognized value resolves to
 # `all` so a malformed override runs every step rather than silently dropping a
@@ -309,6 +315,21 @@ fleet_sync_relay_all_output() {
     [ -n "$line" ] || continue
     echo "FLEET_SYNC: $line"
   done < "$tmp"
+}
+
+# chair_origin_refresh: refresh this home's own refs/remotes/origin/main, the
+# reference the running-chair drift check compares HEAD against. Fleet sync only
+# fetches project clones, so without this the chair's own ref stays frozen at the
+# last /updatefirstmate and the drift check compares against a stale reference.
+# Best-effort and bounded: a fetch failure leaves the previous ref in place,
+# which the drift check already treats as a comparison it can make.
+chair_origin_refresh() {
+  local root=$FM_ROOT
+  [ -n "$root" ] || return 0
+  git -C "$root" rev-parse --git-dir >/dev/null 2>&1 || return 0
+  git -C "$root" remote get-url origin >/dev/null 2>&1 || return 0
+  fm_run_timed 10 git -C "$root" fetch --quiet --no-tags origin \
+    '+refs/heads/main:refs/remotes/origin/main' >/dev/null 2>&1 || true
 }
 
 fleet_sync() {
@@ -1578,11 +1599,17 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
     if [ -n "$fleet_sync_out" ]; then
       (
         __fm_timing_stamp=$(fm_timing_now_ms)
+        chair_origin_refresh
+        fm_timing_record phase chair-origin-refresh "$__fm_timing_stamp"
+        __fm_timing_stamp=$(fm_timing_now_ms)
         fleet_sync
         fm_timing_record phase fleet-sync "$__fm_timing_stamp"
       ) >"$fleet_sync_out" 2>&1 &
       fleet_sync_pid=$!
     else
+      __fm_timing_stamp=$(fm_timing_now_ms)
+      chair_origin_refresh
+      fm_timing_record phase chair-origin-refresh "$__fm_timing_stamp"
       __fm_timing_stamp=$(fm_timing_now_ms)
       fleet_sync
       fm_timing_record phase fleet-sync "$__fm_timing_stamp"

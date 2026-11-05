@@ -548,12 +548,14 @@ It compares the running code root's own `HEAD` with `refs/remotes/origin/main` a
 A difference in either direction is drift: behind means the chair runs stale code, ahead means it runs code nobody else has, and the line names which.
 
 The comparison is read-only.
-The check never fetches and never moves `HEAD`, because a fetch from a watcher poll would race the fleet sync that owns clone refresh and a network blip must never read as drift; `origin/main` is whatever the last fetch left, and fleet sync refreshes it at every session start.
+The check never fetches and never moves `HEAD`, because a fetch from a watcher poll would race the fleet sync that owns clone refresh and a network blip must never read as drift; `origin/main` is whatever the last fetch left, and bootstrap refreshes the chair's own `origin/main` at every session start, alongside fleet sync.
 A code root that is not a git checkout, or one whose `origin/main` has never been fetched, proves nothing and stays silent rather than paging on a comparison that was never made.
 
 Drift is an episode, not a poll result.
-`state/.drift` records the first poll that saw this exact `HEAD`/`origin/main` pair, and the line is printed once per episode, when that pair has held past the threshold.
-A pair that changes starts a new episode, so a chair that drifts, is updated, and drifts again is reported again, and a chair that catches up clears the record.
+`state/.drift` records the first poll that saw this `HEAD` while it differed from `origin/main`, and the line is printed once per episode, when that `HEAD` has differed past the threshold.
+A `HEAD` that changes starts a new episode, so a chair that drifts, is updated, and drifts again is reported again.
+An advance of `origin/main` while `HEAD` is unchanged does not restart the clock, because a chair sitting still while the repository moves on is exactly the drift this catches.
+A chair that catches up clears the record.
 The probe itself is gated to once per `FM_DRIFT_INTERVAL` (default 3600 seconds, `0` to probe on every run) so an hourly comparison does not re-read git on every watcher poll; `state/.drift.beat` holds the last probe time.
 
 Bootstrap arms the check in every home as one of its local mutating sweeps, because a detector nobody armed is exactly the blind spot it exists to close.

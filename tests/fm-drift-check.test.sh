@@ -99,6 +99,34 @@ test_catching_up_clears_the_episode_and_a_new_drift_reports_again() {
   pass "catching up clears the episode, and a later drift is reported as a new episode"
 }
 
+# An advance of origin/main while the chair sits on the same HEAD is exactly the
+# "chair running stale code while PRs merge" case this check exists for, so it
+# must not restart the episode clock. Keying the episode on the (HEAD, origin)
+# pair would reset it on every upstream merge and the page would never land.
+test_origin_advance_does_not_restart_the_episode() {
+  local repo state out
+  repo=$(make_drifted_repo origin-advance)
+  state="$TMP_ROOT/origin-advance/state"
+  mkdir -p "$state"
+  out=$(run_check "$repo" "$state" 6000000)
+  [ -z "$out" ] || fail "the first poll of a drift episode must be silent, got: $out"
+  # origin/main advances to a new commit while HEAD stays put.
+  git -C "$repo" checkout -q -b upstream HEAD~1 || fail "could not create the upstream branch"
+  printf 'three\n' >> "$repo/file" || fail "could not write the upstream commit"
+  git -C "$repo" commit -qam three || fail "could not commit upstream"
+  git -C "$repo" update-ref refs/remotes/origin/main HEAD || fail "could not advance origin/main"
+  git -C "$repo" checkout -q - || fail "could not return to the chair's branch"
+  # 12h in: still inside the page threshold, and the origin advance must not
+  # have restarted the clock.
+  out=$(run_check "$repo" "$state" $((6000000 + 43200)))
+  [ -z "$out" ] || fail "12h of drift must stay silent, got: $out"
+  # 25h after the episode opened: the page still lands on the original schedule.
+  out=$(run_check "$repo" "$state" $((6000000 + 90000)))
+  [ -n "$out" ] || fail "an origin/main advance restarted the drift episode clock"
+  assert_contains "$out" "for 25h" "the drift line did not keep the original episode start"
+  pass "an origin/main advance while HEAD is unchanged does not restart the drift episode"
+}
+
 test_probe_gate_keeps_a_poll_inside_the_interval_silent() {
   local repo state out
   repo=$(make_drifted_repo gate)
@@ -161,6 +189,7 @@ test_arm_and_disarm_manage_every_artifact() {
 
 test_short_drift_is_silent_and_a_day_pages_once
 test_catching_up_clears_the_episode_and_a_new_drift_reports_again
+test_origin_advance_does_not_restart_the_episode
 test_probe_gate_keeps_a_poll_inside_the_interval_silent
 test_missing_origin_main_never_pages
 test_arm_and_disarm_manage_every_artifact
