@@ -175,10 +175,51 @@ class AuditFindsEveryWayAStampCanBeWrongTests(unittest.TestCase):
         self.assertIn("does not match the row's own identity", self.why(db4)[0])
 
     def test_a_send_with_no_stamp_is_a_finding(self):
+        # A row with no stamp whose approved_by is NOT the captain: nothing authorised it, so it is a finding.
         db = ledger()
-        self.seed(db, approver_kind=None, approval_id=None, template_sha256=None)
+        self.seed(db, approver_kind=None, approval_id=None, template_sha256=None, approved_by="U0SOMEONEELSE")
         self.assertEqual(len(self.audit(db)["problems"]), 1)
         self.assertIn("no approver stamp", self.why(db)[0])
+
+    def test_a_pre_stamp_row_authorised_by_the_captain_is_history_not_a_finding(self):
+        # QA 2026-11-05 / Fable r6: the stamp columns did not exist before this audit shipped, so every row written
+        # before it has a NULL approver_kind. Those rows were authorised by the OLD gate, which accepted exactly one
+        # approver - the captain's Slack user id. Reporting them forever made the audit page 677 false findings and
+        # left hydra-approval-stamps-audit.service in systemd 'failed' every 15 minutes.
+        db = ledger()
+        self.seed(db, approver_kind=None, approval_id=None, template_sha256=None, approved_by=CAPTAIN,
+                  created_at="2026-11-04T10:00:00Z")          # genuinely BEFORE the stamped gate went live
+        self.assertEqual(self.audit(db)["problems"], [])
+        # ... and it is the CAPTAIN id that makes it history, not the absence of a stamp: a pre-stamp row naming
+        # anyone else is still a finding, and so is a row that names the captain but carries a WRONG stamp.
+        db2 = ledger()
+        self.seed(db2, approver_kind=None, approval_id=None, template_sha256=None, approved_by="U0SOMEONEELSE",
+                  created_at="2026-11-04T10:00:00Z")
+        self.assertIn("no approver stamp", self.why(db2)[0])
+        db3 = ledger()
+        self.seed(db3, approver_kind=vl.APPROVER_CAPTAIN, approval_id="U0SOMEONEELSE", approved_by=CAPTAIN)
+        self.assertIn("the stamp names U0SOMEONEELSE but approved_by is", self.why(db3)[0])
+
+    def test_an_unstamped_row_AFTER_the_cutover_is_a_finding_even_for_the_captain(self):
+        # QA 2026-11-05 round 6 finding 2: the absence of a stamp is not the evidence. The stamped gate always writes
+        # one, so an unstamped captain-attributed row appearing AFTER the cutover is exactly what this audit exists to
+        # catch - accepting it on approved_by alone was a false green.
+        db = ledger()
+        self.seed(db, approver_kind=None, approval_id=None, template_sha256=None, approved_by=CAPTAIN,
+                  created_at="2026-11-05T13:00:00Z")          # AFTER the stamped gate went live
+        self.assertEqual(len(self.audit(db)["problems"]), 1)
+        self.assertIn("not before the stamped gate went live", self.why(db)[0])
+        # the boundary itself is a finding: the cutover instant is the deploy START, and a row written while the
+        # deploy was still running is ambiguous, so the fail-closed answer is "finding"
+        db2 = ledger()
+        self.seed(db2, approver_kind=None, approval_id=None, template_sha256=None, approved_by=CAPTAIN,
+                  created_at=vl.STAMP_CUTOVER)
+        self.assertEqual(len(self.audit(db2)["problems"]), 1)
+        # ... and a row with NO created_at at all cannot prove its provenance, so it is a finding too
+        db3 = ledger()
+        self.seed(db3, approver_kind=None, approval_id=None, template_sha256=None, approved_by=CAPTAIN,
+                  created_at="")
+        self.assertEqual(len(self.audit(db3)["problems"]), 1)
 
     def test_a_send_before_the_cutover_day_is_history_not_a_finding(self):
         db = ledger()
@@ -187,7 +228,8 @@ class AuditFindsEveryWayAStampCanBeWrongTests(unittest.TestCase):
 
     def test_attempted_rows_count_too_so_a_held_send_cannot_hide(self):
         db = ledger()
-        self.seed(db, status="attempted", approver_kind=None, approval_id=None, template_sha256=None)
+        self.seed(db, status="attempted", approver_kind=None, approval_id=None, template_sha256=None,
+                  approved_by="U0SOMEONEELSE")
         self.assertEqual(len(self.audit(db)["problems"]), 1)
 
     def test_refused_and_deferred_rows_are_not_sends(self):

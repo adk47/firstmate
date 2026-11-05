@@ -397,6 +397,16 @@ def _check(campaign: str, kind: str = "initial") -> None:
 # exact template class (policies/fable-rulings.json). Which one it was, and the template it rendered, is stamped on the
 # row so an audit answers "who authorized this send?" from the ledger alone - never from a log, a chat or a promise.
 APPROVER_CAPTAIN = "captain-slack"
+# The captain's Slack user id: the ONLY approver the pre-stamp gate accepted. A row with no approver_kind whose
+# approved_by is this id was authorised by that gate, before the stamp columns existed (see stamp_problem).
+CAPTAIN_UID = "U7RP6HKUZ"
+# When the STAMPED gate went live: the deploy that shipped the stamp columns (hydra deploy run 42021981460, started
+# 2026-11-05T11:48:49Z). A row created BEFORE this instant cannot have been written by the stamped gate, so a NULL
+# approver_kind on it is history. A row created AFTER it must carry a stamp - the gate always writes one - so a NULL
+# kind there is a finding no matter who approved_by names. The deploy START is used, not its completion, because a row
+# written while the deploy was still running is ambiguous and the fail-closed answer is "finding".
+# Move this forward only with a deploy that changes the stamp; STAMP_CUTOVER_OVERRIDE exists for tests.
+STAMP_CUTOVER = "2026-11-05T11:48:49Z"
 APPROVER_RULING = "fable-ruling"
 APPROVER_KINDS = (APPROVER_CAPTAIN, APPROVER_RULING)
 SLACK_UID_RE = re.compile(r"^U[A-Z0-9]{8,12}$")
@@ -1908,7 +1918,23 @@ def stamp_problem(row: Any, rulings: dict[str, Any]) -> str:
     kind, approval_id, template_sha256 = row[6], row[7], row[8]
     approved_by, campaign, copy_ref = row[9], row[1], row[5]
     variant = row[10] if len(row) > 10 else ""
+    created_at = row[11] if len(row) > 11 else ""
     if not kind:
+        # A row written BEFORE the stamped gate went live cannot carry a stamp, and the old gate accepted exactly one
+        # approver - the captain's Slack user id - so such a row that names it is history, not a finding. (Without
+        # this the audit reports every pre-stamp row forever and the unit sits in systemd 'failed' every 15 minutes
+        # over 677 sends that were all legitimately authorised.)
+        #
+        # QA 2026-11-05 round 6 finding 2: the absence of a stamp is NOT the evidence. A row written AFTER the cutover
+        # with no stamp is a finding whoever approved_by names, because the stamped gate always writes one - so an
+        # unstamped captain-attributed row appearing tomorrow is exactly the thing this audit exists to catch. The
+        # provenance is a POSITIVE fact (created_at before the cutover), never an inference from the gate's behaviour.
+        if str(approved_by) == CAPTAIN_UID and str(created_at or "") and str(created_at) < STAMP_CUTOVER:
+            return ""
+        if str(approved_by) == CAPTAIN_UID:
+            return (f"no approver stamp on a row created {created_at or 'at an unknown time'}, which is not before the "
+                    f"stamped gate went live ({STAMP_CUTOVER}) - an unstamped send after the cutover is a finding "
+                    f"whoever approved_by names")
         return "no approver stamp (a send that did not come through the stamped gate path)"
     if kind not in APPROVER_KINDS:
         return f"unknown approver kind {kind!r}"
@@ -1948,7 +1974,7 @@ def audit_stamps(db: sqlite3.Connection, *, since_day: str, registry: str | Path
     can page: an unauthorized customer message is the one failure this ledger exists to make impossible to hide."""
     rulings = load_rulings(registry)
     q = ("SELECT id, campaign, status, day, kind, copy_ref, approver_kind, approval_id, template_sha256, approved_by, "
-         "variant FROM verify_messages WHERE status IN ('attempted','sent') AND day >= ? ORDER BY id")
+         "variant, created_at FROM verify_messages WHERE status IN ('attempted','sent') AND day >= ? ORDER BY id")
     rows = db.execute(q, (since_day,)).fetchall()
     problems = []
     for row in rows:
