@@ -508,6 +508,70 @@ family_cap() { # <family> <its cap>
   if [ "$UNSIGNED_ALL" = 1 ] || reached "${FULL_CAP_FROM[$1]:-}"; then echo "$2"
   elif [ "$2" -gt "$FIRST_CAP" ]; then echo "$FIRST_CAP"; else echo "$2"; fi
 }
+# Per-family per-tick cap (policy `tick_cap`). Prints the cap this family+segment may use, or "" to mean "no opinion,
+# use what you were given". THREE rules, and the order matters:
+#   1. no key for this family/segment            -> "" (no opinion; the existing cap stands untouched)
+#   2. a readable integer, or a clamps-to list   -> the SMALLEST of the value and the cap handed in. This key can only
+#      ever LOWER a cap: a policy value above the family's own cap is inert, so a typo in the policy can slow a family
+#      down but can never widen its blast radius.
+#   3. an UNREADABLE policy when a tick_cap key was expected -> the FLOOR (1). A cap that grows because a file could not
+#      be parsed is the fail-open version of this control; 1 user is ugly and correct, and the log says so.
+tick_cap_for() { # <family> <segment> <cap>
+  local fam="$1" seg="$2" cap="$3" out
+  # QA #1770 (2): the COMPARISON lives in Python, not in `[`. A JSON integer Bash cannot hold (9223372036854775808)
+  # passed the type check, failed both Bash comparisons and was emitted AS the cap - a policy edit could RAISE a bound.
+  # Python compares at arbitrary precision and prints only: "" (no opinion / inert), an integer in [1, cap), or a word.
+  out="$(py - "$POLICY" "$fam" "$seg" "$cap" <<'PYC' 2>&1
+import json, sys
+path, fam, seg, cap = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
+try:
+    doc = json.load(open(path))
+except Exception as exc:                                   # noqa: BLE001 - the caller decides, this only reports
+    print("UNREADABLE %s" % type(exc).__name__); raise SystemExit(0)
+if not isinstance(doc, dict) or "tick_cap" not in doc:
+    raise SystemExit(0)                                   # rule 1: no key at all -> no opinion
+tc = doc["tick_cap"]
+if not isinstance(tc, dict):
+    print("MALFORMED_TOP"); raise SystemExit(0)           # QA #1770 (1): PRESENT but not an object is not "absent"
+if fam not in tc:
+    raise SystemExit(0)                                   # rule 1: no opinion for this family
+row = tc.get(fam)
+if isinstance(row, dict):
+    if seg not in row:
+        raise SystemExit(0)                               # no opinion for this segment
+    val = row[seg]
+else:
+    val = row                                          # a plain number applies to every segment
+if not isinstance(val, int) or isinstance(val, bool) or val < 0:
+    print("MALFORMED"); raise SystemExit(0)
+if val >= cap:
+    raise SystemExit(0)                                   # rule 2: never widen - a value at or above the cap is inert
+print(max(val, 1))                                     # 0 is the floor (1): --max-users 0 is not "nobody"
+PYC
+)"
+  # NOTE the `>&2`: log() TEES to stdout as well as $OUT/tick.log, so a diagnostic written from inside a $( ) capture
+  # becomes part of the captured VALUE. That is exactly how this control would have failed open - "2026-… tick_cap: …
+  # \n1" is not a number, and the arithmetic test that follows it is not a comparison any more. Diagnostics go to
+  # stderr (still tee'd into the tick log), and stdout carries the answer alone.
+  case "$out" in
+    "") return 0 ;;                                       # rule 1
+    UNREADABLE*) log "tick_cap: the policy $POLICY could not be read ($out) - holding $fam/$seg at 1 user, not at $cap" >&2
+                 echo 1; return 0 ;;
+    MALFORMED_TOP) log "tick_cap: the policy's top-level tick_cap is present but not an object - holding $fam/$seg at 1 user (every capped family reads this key)" >&2
+                 echo 1; return 0 ;;
+    MALFORMED) log "tick_cap: policy tick_cap[$fam][$seg] is not a non-negative integer - holding $fam/$seg at 1 user" >&2
+                 echo 1; return 0 ;;
+    *[!0-9]*) log "tick_cap: unexpected policy answer '$out' for $fam/$seg - holding it at 1 user" >&2
+                 echo 1; return 0 ;;
+  esac
+  # belt to Python's braces: the answer is 1..9 digits and below the cap, or this function has a bug and holds at 1
+  if [ "${#out}" -gt 9 ] || [ "$out" -ge "$cap" ] || [ "$out" -lt 1 ]; then
+    log "tick_cap: the policy reader answered '$out' against cap $cap for $fam/$seg, which it must never do - holding it at 1 user" >&2
+    echo 1; return 0
+  fi
+  echo "$out"
+}
+
 # r5 19:06Z: is <family> on the SHARED first-batch budget this tick? Listed in PER_SEGMENT_FROM, its per-segment date
 # not reached, and not past its full-cap line (a full-cap family is never pulled back to a shared 100)
 shared_first() { # <family>
@@ -558,6 +622,17 @@ family() {
   reached "${UNSIGNED_FROM[$fam]:-}" && unsigned="${UNSIGNED_FROM[$fam]}"
   [ "$UNSIGNED_ALL" = 1 ] && unsigned=harness
   cap="$(family_cap "$fam" "$cap")"
+  # per-FAMILY per-tick cap (policy tick_cap, 2026-11-04): a clamp that only ever LOWERS what the lines above allow.
+  # Why this exists as its own key: CVO_CAP (an env knob) is ONE value for every family+segment, so using it to slow the
+  # free uvn-status batch to 60 would also have slowed r1, claim-status AND c2's approved 70-send claim install. A knob
+  # that cannot name one family is not a knob, it is a change to all of them. Absent key = exactly today's behaviour;
+  # a value the policy cannot be read for CLAMPS TO THE FLOOR rather than silently widening, because the one thing a
+  # cap must never do on a read failure is get bigger.
+  local tc; tc="$(tick_cap_for "$fam" "$seg" "$cap")"
+  if [ -n "$tc" ] && [ "$tc" != "$cap" ]; then
+    log "$tag: per-family tick cap: policy tick_cap[$fam][$seg] holds this segment at $tc (it would otherwise have taken $cap)"
+    cap="$tc"
+  fi
   local shared=0
   if shared_first "$fam"; then
     shared=1

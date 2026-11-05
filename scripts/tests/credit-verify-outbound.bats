@@ -306,8 +306,11 @@ r1_check_cap() { # <segment>: the --max-users of that segment's r1 recipient che
   # paid is served first: its apply line precedes free's
   [ "$(grep -n -- '--campaign status-doc-received .*--mode apply' "$CALLS" | head -1 | grep -c -- '--segment paid')" = 1 ]
   grep -q "r1-free: shared first-batch budget for status-doc-received: 40 of 100 left this tick (60 sent by earlier segments)" "$CVO_OUT_ROOT"/*/tick.log
-  # the budget is the r1 family's own: uvn-status (60 rows from its paid apply) does not charge it, and keeps its own cap
-  [ "$(grep -- '--segment free .*--campaign uvn-status .*--mode apply' "$CALLS" | grep -o -- '--max-users [0-9]*' | head -1)" = "--max-users 100" ]
+  # the budget is the r1 family's own: uvn-status (60 rows from its paid apply) does not charge it, and keeps its own
+  # cap - which is now the POLICY's per-family tick_cap (uvn-status/free = 60, 2026-11-04), not FIRST_CAP=100: the free
+  # uvn apply was losing its outcomes artefact at ~80 users when its Intercom-note step hit the subprocess timeout, and
+  # the cap is the only lever that fits inside the tick until #1756 lands.
+  [ "$(grep -- '--segment free .*--campaign uvn-status .*--mode apply' "$CALLS" | grep -o -- '--max-users [0-9]*' | head -1)" = "--max-users 60" ]
 }
 
 @test "outbound tick (r5 19:06Z): once paid has spent the shared 100, the free r1 segment is not checked or applied this tick" {
@@ -457,15 +460,31 @@ PY
 @test "outbound tick (QA #1587): a started family is bounded in TIME - none starts without its reserve before the deadline, and the apply is cut to what fits" {
   touch "$CVO_ETC/credit-verify-outbound.live"
   # 5000 s in, cap 250 x 2 x 4 s + 300 s = 2300 s worst case > the 6900 s deadline: no family starts
-  CVO_TICK_ELAPSED0=5000 CVO_CHECK_S_PER_USER=4 CVO_RESERVE_PAD_S=300 CVO_TICK_HARD_S=6900 run -0 "$SCRIPT"
+  # RE-CALIBRATED 2026-11-04 with the per-family tick cap: at CHECK_S_PER_USER=4 the worst case for the capped
+  # uvn-status-free segment fell to 2*60*4+300 = 780 s, which FITS in the remaining 1900 s - so the fixture stopped
+  # exercising a family that cannot start and started asserting the opposite. The property under test is unchanged;
+  # the arithmetic that expresses it is now 2*60*60+300 = 7500 s at 60 s/user, which cannot fit and must not start.
+  CVO_TICK_ELAPSED0=5000 CVO_CHECK_S_PER_USER=60 CVO_RESERVE_PAD_S=300 CVO_TICK_HARD_S=6900 run -0 "$SCRIPT"
   if grep -q -- "--check-recipients" "$CALLS"; then false; fi
-  grep -q "its worst case is 2300s (cap 250); it does not fit before the 6900s deadline; this family waits for the next tick" "$(newest_tick)"
-  # 30 s before the deadline at 15 s a user: a started family applies at most 2
+  grep -q "it does not fit before the 6900s deadline; this family waits for the next tick" "$(newest_tick)"
+  # THE FLAKE THIS FIXTURE WAS (b1/c3 2026-11-04: `Bats (1/2)` red three times on three heads of the SAME tree).
+  # This half used CVO_TICK_ELAPSED0=6870 against a 6900 s deadline - THIRTY real seconds for the rest of the tick - and
+  # asserted the exact `--max-users` that fits. `elapsed()` reads the WALL CLOCK, so the asserted number is a function
+  # of how long the shard took: at 6870 it is 2 or 1 or nothing; at 6600 it is 20 or 19 (I measured 19 on the very run
+  # that "should" have said 20). Widening the margin does not fix that - it only moves which integer drifts. A fixture
+  # that asserts an exact value derived from the wall clock measures the SHARD, not the code (the same class as the
+  # absolute-date bomb in tests/test_gdpr_pipeline.py:3183).
+  # So this asserts the INVARIANT that actually matters, with no clock in it: the batch never exceeds what fits in the
+  # remaining budget (300 s / 15 s a user = 20), it is at least one, and the "apply cut from N to M" line names the
+  # SAME M the runner was called with - so a mutant that always cuts to 1, or one that never cuts, both go red.
   : > "$CALLS"; rm -f "$CVO_LEDGER.segments.jsonl"
-  CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6870 CVO_CHECK_S_PER_USER=0 CVO_RESERVE_PAD_S=0 CVO_TICK_HARD_S=6900 CVO_APPLY_S_PER_USER=15 run -0 "$SCRIPT"
-  grep -q -- "--mode apply --max-users [12] " "$CALLS"
-  if grep -E -- "--mode apply --max-users ([3-9]|[1-9][0-9]+) " "$CALLS"; then false; fi
-  grep -qE "apply cut from [0-9]+ to [12] \(what fits before the 6900s deadline\)" "$CVO_OUT_ROOT"/*/tick.log
+  CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6600 CVO_CHECK_S_PER_USER=0 CVO_RESERVE_PAD_S=0 CVO_TICK_HARD_S=6900 CVO_APPLY_S_PER_USER=15 run -0 "$SCRIPT"
+  cut="$(grep -oE -- "--mode apply --max-users [0-9]+" "$CALLS" | head -1 | grep -oE "[0-9]+$")"
+  [ -n "$cut" ]
+  [ "$cut" -ge 1 ] && [ "$cut" -le 20 ]                      # never more than 300 s / 15 s can hold
+  grep -qE "apply cut from [0-9]+ to ${cut} \(what fits before the 6900s deadline\)" "$(newest_tick)"
+  # and not one single apply anywhere in the run may exceed the budget
+  ! grep -qE -- "--mode apply --max-users (2[1-9]|[3-9][0-9]|[1-9][0-9][0-9]+) " "$CALLS"
 }
 
 @test "outbound tick (QA #1587): every subprocess runs under the deadline - a slow read-only check is stopped there and the tick ends (lock released); a slow APPLY cut at the deadline writes the kill file" {
@@ -887,6 +906,106 @@ first_line() { grep -n -m1 -- "$1" "$CVO_OUT_ROOT"/*/tick.log | cut -d: -f1; }
   grep -q "do NOT account for every source" "$CVO_ETC/credit-verify-outbound.disabled"
   # and it must never wear the "printed no verdict" rewriting, which is what happened before the fix
   ! grep -q "printed no verdict" "$CVO_ETC/credit-verify-outbound.disabled"
+}
+
+@test "outbound tick (2026-11-04 Fable ruling): the per-family per-tick cap LOWERS one segment and leaves every other family alone" {
+  # Why this key exists at all: the free uvn-status apply sends until its Intercom-note step hits the subprocess
+  # timeout (~55-60 min, ~80 users), dies with rc=1 and never writes its outcomes artefact - twice in one afternoon
+  # (39 sends at 15:05Z, 79 at 17:24Z). CVO_CAP is ONE global value, so using it to slow this family would also have
+  # slowed r1, claim-status and c2's approved 70-send claim install. This drives the real call site for all three.
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  # the capped segment: 60, not FIRST_CAP's 100
+  [ "$(grep -- '--segment free .*--campaign uvn-status .*--max-users [0-9]*' "$CALLS" | grep -o -- '--max-users [0-9]*' | head -1)" = "--max-users 60" ]
+  grep -q "per-family tick cap: policy tick_cap\[uvn-status\]\[free\] holds this segment at 60" "$(newest_tick)"
+  # the sibling segment of the SAME family is untouched (no tick_cap[uvn-status][paid])
+  [ "$(grep -- '--segment paid .*--campaign uvn-status .*--max-users [0-9]*' "$CALLS" | grep -o -- '--max-users [0-9]*' | head -1)" != "--max-users 60" ]
+  # and another family is untouched: claim-status keeps its own cap
+  ! grep -q "policy tick_cap\[claim-status\]" "$(newest_tick)"
+}
+
+@test "outbound tick: the per-family tick cap can only LOWER a cap - a policy value above the family's own cap is inert" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  # a tick_cap that tries to RAISE free uvn-status to 9999 must change nothing: 9999 > the cap it was handed
+  cp "$CVO_POLICY" "$TEST_TMPDIR/p-raise.json"        # a COPY: the policy file is shared by every case in this file
+  python3 - "$TEST_TMPDIR/p-raise.json" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p)); d["tick_cap"]["uvn-status"]["free"] = 9999
+json.dump(d, open(p, "w"))
+PY
+  CVO_POLICY="$TEST_TMPDIR/p-raise.json" CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  ! grep -q "9999" "$(newest_tick)"
+  [ "$(grep -- '--segment free .*--campaign uvn-status .*--max-users [0-9]*' "$CALLS" | grep -o -- '--max-users [0-9]*' | head -1)" = "--max-users 100" ]
+}
+
+@test "outbound tick: a MALFORMED tick_cap value holds the capped family at one user - a cap must never grow because a value could not be parsed" {
+  # Reachable case: the policy is valid JSON (so the tick's own arming read succeeds) but the tick_cap value is junk.
+  # A control that silently falls back to the BIGGER cap when its knob is unreadable is the fail-open form of itself.
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  cp "$CVO_POLICY" "$TEST_TMPDIR/p-bad.json"
+  python3 - "$TEST_TMPDIR/p-bad.json" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p)); d["tick_cap"]["uvn-status"]["free"] = "sixty"
+json.dump(d, open(p, "w"))
+PY
+  CVO_POLICY="$TEST_TMPDIR/p-bad.json" CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  grep -q "policy tick_cap\[uvn-status\]\[free\] is not a non-negative integer" "$(newest_tick)"
+  grep -q "per-family tick cap: policy tick_cap\[uvn-status\]\[free\] holds this segment at 1" "$(newest_tick)"
+}
+
+@test "outbound tick (QA #1770 finding 1): a PRESENT but non-object top-level tick_cap is MALFORMED, never 'absent' - every family holds at one user" {
+  # "tick_cap": "sixty" is valid JSON, so the arming read passes; the old reader treated it exactly like a missing key
+  # and free uvn-status ran at 100 instead of the documented floor. Present-and-unreadable is the fail-closed case.
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  for junk in '"sixty"' 'null' '[60]'; do
+    cp "$CVO_POLICY" "$TEST_TMPDIR/p-top.json"
+    python3 - "$TEST_TMPDIR/p-top.json" "$junk" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p)); d["tick_cap"] = json.loads(sys.argv[2])
+json.dump(d, open(p, "w"))
+PY
+    rm -rf "$CVO_OUT_ROOT"; : > "$CALLS"
+    CVO_POLICY="$TEST_TMPDIR/p-top.json" CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+    grep -q "top-level tick_cap is present but not an object - holding uvn-status/free at 1 user" "$(newest_tick)"
+    [ "$(grep -- '--segment free .*--campaign uvn-status .*--max-users [0-9]*' "$CALLS" | grep -o -- '--max-users [0-9]*' | head -1)" = "--max-users 1" ]
+    # and it is EVERY family, not just the one with a row: a key nobody can read holds all of them (r1 has no row)
+    grep -q "holding status-doc-received/paid at 1 user" "$(newest_tick)"
+    grep -q "r1-free: per-family tick cap: policy tick_cap\[status-doc-received\]\[free\] holds this segment at 1" "$(newest_tick)"
+  done
+}
+
+@test "outbound tick (QA #1770 finding 2): an integer Bash cannot hold is still ONLY ever a lower bound - the comparison is Python's, not '['" {
+  # 9223372036854775808 passes isinstance(int), failed BOTH Bash comparisons (`[` cannot parse it), and the old code
+  # then emitted the value itself as the cap: an edited policy could RAISE a bound. Above the cap it must be inert.
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  cp "$CVO_POLICY" "$TEST_TMPDIR/p-huge.json"
+  python3 - "$TEST_TMPDIR/p-huge.json" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p)); d["tick_cap"]["uvn-status"]["free"] = 9223372036854775808
+json.dump(d, open(p, "w"))
+PY
+  CVO_POLICY="$TEST_TMPDIR/p-huge.json" CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  ! grep -q "9223372036854775808" "$CALLS"
+  [ "$(grep -- '--segment free .*--campaign uvn-status .*--max-users [0-9]*' "$CALLS" | grep -o -- '--max-users [0-9]*' | head -1)" = "--max-users 100" ]
+  # the same value one digit SHORT of the cap-handed-in boundary: 99 < 100 lowers to 99 (the ordinary path still works)
+  python3 - "$TEST_TMPDIR/p-huge.json" <<'PY'
+import json, sys
+p = sys.argv[1]; d = json.load(open(p)); d["tick_cap"]["uvn-status"]["free"] = 99
+json.dump(d, open(p, "w"))
+PY
+  rm -rf "$CVO_OUT_ROOT"; : > "$CALLS"
+  CVO_POLICY="$TEST_TMPDIR/p-huge.json" CVO_UNSIGNED_ALL=0 run -0 "$SCRIPT"
+  [ "$(grep -- '--segment free .*--campaign uvn-status .*--max-users [0-9]*' "$CALLS" | grep -o -- '--max-users [0-9]*' | head -1)" = "--max-users 99" ]
+}
+
+@test "outbound tick: a WHOLLY unreadable policy never reaches a family - the arming read kills the tick first (fail closed)" {
+  # The deeper fail-closed path already existed and is asserted here so nobody later "simplifies" it away: an
+  # unparseable policy at the arming read writes the kill file before any family is considered.
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  printf '{not json' > "$TEST_TMPDIR/p-junk.json"
+  CVO_POLICY="$TEST_TMPDIR/p-junk.json" CVO_UNSIGNED_ALL=0 run -1 "$SCRIPT"
+  grep -qi "cap source unreadable" "$CVO_ETC/credit-verify-outbound.disabled"   # the FILE says "auto-kill ...", the LOG says "AUTO-KILL: ..."
+  [ "$(applies)" -eq 0 ]
 }
 
 @test "outbound tick: the exclude file rides every runner call; one tick at a time" {
@@ -1315,7 +1434,11 @@ PY
   STUB_RUNNER_CAP_MODEL=1 run -0 "$SCRIPT"
   # r5 626: no env-moved cap - the runner reads the policy file itself, so the 401st message of the day still goes
   [ "$(sort -u "$CALLS.env")" = "- -" ]
-  grep -q "uvn-status-free APPLY (rc=0): UVN STATUS: 250 sent" "$(newest_tick)"
+  # 60, not 250: TWO caps now bound this apply and the SMALLER wins - the runner's own daily row from the policy file
+  # (2500/day, still read in code and never passed through the environment, which is what this test is for) and the
+  # per-family per-tick tick_cap introduced 2026-11-04 (uvn-status/free = 60). If the tick cap ever stops being
+  # consulted this line goes back to 250 and says so.
+  grep -q "uvn-status-free APPLY (rc=0): UVN STATUS: 60 sent" "$(newest_tick)"
 }
 
 @test "outbound tick (p1 579): the bodies and the judge's items are the check's ACCEPTED set, never the rendered cap; every artefact names the deploy head" {
