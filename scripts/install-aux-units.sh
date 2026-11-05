@@ -354,9 +354,27 @@
 set -euo pipefail
 
 HYDRA_ROOT="${1:-/opt/hydra}"
+# Children must see the tree this invocation was given. A plain assignment is invisible
+# to a child process, which then falls back to its own /opt/hydra default - that is how
+# a staging install ends up writing cron entries that point at the wrong checkout
+# (2026-11-04). Exported once, here, so every child (scripts/churn/install-cron.sh and
+# the aux scripts that honour HYDRA_ROOT) resolves the same tree.
+export HYDRA_ROOT
 
 log() { echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] install-aux-units: $*"; }
 fail() { log "FATAL: $*"; exit 1; }
+
+# TEST SEAM (HYDRA_STOP_AFTER=churn-cron): install ONLY the churn cron file and exit.
+# The churn suite has to prove that THIS script's argv decides which tree the cron
+# lines name (`install-aux-units.sh /srv/hydra-staging` must not write /opt/hydra
+# paths), and that seam is only reachable by running the installer. Everything else
+# this script does needs root (systemd unit writes), so without a stop point the test
+# could only grep source text - which firstmate ruled out on 2026-11-04. The branch is
+# read-only beyond the one cron file and exits before any unit write.
+if [ "${HYDRA_STOP_AFTER:-}" = "churn-cron" ]; then
+  bash "$HYDRA_ROOT/scripts/churn/install-cron.sh"
+  exit 0
+fi
 
 # Runtime-aware install gate: on openclaw >= 2026.8 the codex-token-refresh
 # timer below must NOT be installed (see its own block for why). Resolve
@@ -2343,6 +2361,23 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 CRONCVOUTBOUND
 chmod 644 /etc/cron.d/credit-verify-outbound
 install -d -m 700 /var/lib/hydra/credit-verify-outbound
+
+# ─── Churn risk: support-state store, risk file, cancel page, weekly line ─────
+# firstmate churn-risk-signal-prevent-p1 (captain 2026-11-03 ~21:10Z "we may be
+# losing some users on subscriptions because we are not handling support properly").
+# 16.3% of 60-day paying churn ($5,371 list MRR) carried an unhandled support state.
+# 04:15Z: nightly support-state sweep (paying = who is waiting on us now, churned
+# 30d = R4's 30-day paid priority), and the same run publishes risk.json once both
+# sweeps finish.
+# Hourly :20: page ops when a paying user cancels or asks to cancel with an open
+# issue, and write the lane intake row with `churned:<date>`. Monday 08:00Z: the
+# churned-with-open-issue line. Kill switch /etc/hydra/churn-risk.disabled stops
+# the page and the consumers' sort override, NOT the store (history keeps building).
+# risk_reader.py is the one reader; see its header for the fail-open posture.
+# The cron file has ONE author: scripts/churn/install-cron.sh. It is executed here
+# (not copied as a heredoc) so the churn suite can install it into a temp root and
+# assert the RESULT rather than grepping this file's text.
+bash "$HYDRA_ROOT/scripts/churn/install-cron.sh"
 # ─── Verifier eval, nightly (verifier-eval-v1) ───────────────────────────
 # The shared SHADOW evaluation of every credits / claims / merges verifier: replays each
 # registered verifier over the frozen labelled sets (scripts/verifier_eval/sets/) plus every

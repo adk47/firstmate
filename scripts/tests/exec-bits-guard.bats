@@ -37,6 +37,11 @@ setup() {
   echo "$targets" | grep -qx "scripts/hydra-daily-audit.py"
   echo "$targets" | grep -qx "scripts/openclaw-watchdog.sh"
   echo "$targets" | grep -qx "scripts/qa-review-reconcile.sh"
+  # the churn signal's cron file has its own writer (scripts/churn/install-cron.sh,
+  # which the installer executes), so its cron targets must still be discovered from
+  # THERE and not silently dropped from this guard (2026-11-04)
+  echo "$targets" | grep -qx "scripts/churn/nightly.sh"
+  echo "$targets" | grep -qx "scripts/churn/cancel_with_open_issue.sh"
   # install-aux-units.sh:2452 -- ExecStart=/usr/bin/bash -lc '... exec
   # $HYDRA_ROOT/scripts/company-finder/refresh-dedupe-cache.sh': the
   # interpreter (`bash -lc`) is only opening a login shell; that shell's

@@ -2193,6 +2193,14 @@ jobs:
           # professional id / Auth0 / processed claim / representation profile; reverted claims and
           # ambiguity refuse; pinned on the x2 census shape (synthetic ids). Trino faked. Stdlib only.
           python3 scripts/tests/test_identity_resolver.py
+          # Churn-risk signal (firstmate churn-risk-signal-prevent-p1, captain 2026-11-03): the report's
+          # stage rules and tier precedence, the support-state store round trip, the risk.json classes
+          # and the fail-CLOSED publisher (never a fresh timestamp over a stale sweep), the reader's
+          # fail-OPEN order (missing / stale / kill file / unreadable policy = no override, and a reorder
+          # never invalidates a signed audience), the cancel alert's join + dedup + commit-after-post,
+          # and the weekly line's window math. Every store, policy and risk file is in a temp dir; no
+          # network, no Trino, no Intercom, no ClickUp. Stdlib unittest, run directly.
+          python3 scripts/tests/test_churn_risk.py
 
   plugin-tests:
     name: Plugin tests (vitest)

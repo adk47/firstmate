@@ -1,0 +1,110 @@
+{
+  "_doc": "Churn-risk signal (Fable report 2026-11-03, data/support-churn-winback-fable-c1/report.md sections 0 and 4; firstmate spec churn-risk-signal-prevent-p1). ONE policy for the prevent signal: the thresholds that decide who is 'waiting on us', the store paths, the kill file, the lane a cancelled user's issue routes to, the immediate-page survey answers, and the list of queues that must sort risk-first within paid. Read by scripts/churn/support_state.py (the nightly sweeps), scripts/churn/risk.py (writer), scripts/churn/weekly_line.py, scripts/churn/risk_reader.py (every consumer) and scripts/churn/cancel_with_open_issue.sh (the alert). Thresholds are DATA on purpose: a threshold moves by PR, never by env, and the reader re-reads the file on every run so a change needs no deploy. Kill file /etc/hydra/churn-risk.disabled stops the consumers' sort override and the alert; the store keeps building (the weekly line and the 60-day baseline stay measurable while a sort is off).",
+  "store": {
+    "dir": "/var/lib/hydra/churn",
+    "support_state": "/var/lib/hydra/churn/support-state.sqlite",
+    "risk": "/var/lib/hydra/churn/risk.json",
+    "intake": "/var/lib/hydra/churn/intake.jsonl",
+    "cancel_watermark": "/var/lib/hydra/churn/cancel-alert.watermark",
+    "cancel_sent": "/var/lib/hydra/churn/cancel-alert.sent.json"
+  },
+  "kill_file": "/etc/hydra/churn-risk.disabled",
+  "thresholds": {
+    "customer_last_hours": 24,
+    "request_pending_hours": 48,
+    "promise_no_followup_hours": 48,
+    "thread_min_age_days": 2,
+    "churned_paid_priority_days": 30,
+    "thread_lookback_days": 120,
+    "risk_max_age_hours": 36,
+    "open_thread_recent_days": 45
+  },
+  "priority": {
+    "churn_risk": {
+      "enabled": true,
+      "_doc": "Consumers' sort override. disabled or stale (older than thresholds.risk_max_age_hours) risk.json is NOT a licence to reorder: an absent override leaves each queue's own order in place, which is always safe."
+    }
+  },
+  "risk": {
+    "_doc": "Which stage kinds make a paying user a risk in risk.json (the spec's three classes; proof-with-nothing-sent counts under the pending class because we owe them either way). told_to_wait is NOT here: a user we told to wait is not being dropped, and it stays in the store for the weekly line and the 60-day baseline.",
+    "kinds": [
+      "customer_last",
+      "promise_no_followup",
+      "request_pending",
+      "proof_no_update"
+    ]
+  },
+  "mrr": {
+    "_doc": "List price per plan, USD per month (annual / 12) - report section 0's table. Cash MRR runs ~10% lower on 50% regional/offer coupons; the signal ranks on LIST price so a coupon never hides a Business plan behind a discounted Pro.",
+    "plan_list_usd": {
+      "muso_team_pro_graduated_monthly": 12.5,
+      "muso_team_pro_graduated_annual": 10.0,
+      "muso_team_business_graduated_monthly": 49.0,
+      "muso_team_business_graduated_annual": 40.0,
+      "muso_individual_pro_monthly_notrial": 12.5,
+      "muso_individual_pro_monthly": 12.5,
+      "muso_individual_pro_annual": 10.0,
+      "muso_individual_proplus_annual": 20.0,
+      "muso_individual_proplus_monthly_notrial": 24.0,
+      "muso_individual_proplus_monthly": 24.0,
+      "boomer": 12.5
+    },
+    "default_usd": 12.5
+  },
+  "survey_immediate": [
+    "customer_service",
+    "low_quality"
+  ],
+  "alert": {
+    "_doc": "The hourly cancel-with-open-issue page (spec item 4). Dedup is per user for dedup_days so a cancel-request page and the cancel itself do not double-page, and so a re-subscribe-then-cancel does not re-page the same open issue. on_demand_max bounds the per-run cost of classifying a canceller the nightly sweep has not seen.",
+    "dedup_days": 30,
+    "on_demand_max": 25
+  },
+  "lanes": {
+    "_doc": "cause class -> the lane that owns the fix (report section 3.1 item 2). The alert names this lane in its page and tags the intake row with it; it never contacts the user.",
+    "credits_not_approved": "credit-review",
+    "proof_sent_no_update": "credit-review",
+    "merge_claim_stuck": "merge-queue",
+    "billing_confusion": "refund-judge",
+    "analytics_stale_wrong": "analytics-followup",
+    "login_access": "caroline-backlog",
+    "other": "caroline-backlog"
+  },
+  "consumers": [
+    {
+      "key": "credit-verify-outbound",
+      "file": "scripts/credit-verify-outbound.sh",
+      "state": "follow-up-pr",
+      "how": "FOLLOW-UP PR, not this one (scope ruling 2026-11-04 17:16Z: even a 'gated on a missing file' edit is a change to the credit-send path and needs its own review; d2 + Fable review it). The change is one helper and four call sites: churn_order() reorders each finished audience before its check walks it (owing-uvn, receipts-received, need-asks, reply-due, and the filtered claim list). The lists' signing headers hash a SORTED list of per-user facts, so a reorder cannot invalidate a build; the tick never edits a list's membership."
+    },
+    {
+      "key": "credit-review-held-rows",
+      "file": "scripts/credit_review/decide.py",
+      "state": "follow-up-pr",
+      "how": "FOLLOW-UP PR, not this one (same scope ruling). order_rows() prepends risk.sort_key() to the paid/oldest key so it applies to every mode that reads the held queue (judge and, when the writer is on, apply). The import must stay lazy and defensive: a missing churn module or an unreadable policy leaves the old order and stops nothing. The same key orders the day's asks through the same function."
+    },
+    {
+      "key": "claim-proof-check-c2",
+      "file": "claim lane's list builder (claim-lane-resume-c2, not in this repo)",
+      "state": "pending-lane",
+      "how": "one line before signing the built list: python3 /opt/hydra/scripts/churn/risk_reader.py order --file <list.json>. Exit is always 0 (fail-open); the signed_on/facts header survives a reorder by design."
+    },
+    {
+      "key": "merge-queue-clear-q1",
+      "file": "merge intake reader (merge-queue-clear-q1, not in this repo)",
+      "state": "pending-lane",
+      "how": "python3 /opt/hydra/scripts/churn/risk_reader.py order --file <intake.json> --array <array-key> before taking the day's work, or import churn.risk_reader and sort with risk.sort_key(row['user_id'])."
+    },
+    {
+      "key": "caroline-backlog-drain",
+      "file": "paid-threads-answer-a1 / intercom-backlog-i1 (not in this repo)",
+      "state": "pending-lane",
+      "how": "same one line on the drain list: risk-first inside paid, renews-soonest first. Never a filter: the reader can only move someone earlier."
+    }
+  ],
+  "slack": {
+    "channel": "C0ADV2W76G4",
+    "weekly_line": "churned with open support issue: {n} users / ${mrr} (T1 {t1} / T2 {t2} / T3 {t3}) \u2014 prev week {prev}",
+    "alert_line": "paying user cancelled with an open {class} issue ({age}d, ${mrr}): route -> {lane} (user {user_id}, {tier}{extra})"
+  }
+}
