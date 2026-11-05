@@ -394,7 +394,7 @@ class R25CreditLines(unittest.TestCase):
         rows = [row("1", "draft-merge")]
         with self.assertRaises(ib_send.Refused) as cm:
             ib_send.select_rows(rows, "recent", {"1": "credit-request"}, NO_OV)
-        self.assertIn("dynamic line", str(cm.exception))
+        self.assertIn("does not own", str(cm.exception))
 
     def test_plan_accepts_the_dynamic_key_on_the_credit_action(self):
         rows = [row("1", "draft-credit")]
@@ -490,3 +490,76 @@ class Stage2Hold(unittest.TestCase):
     def test_unreadable_proof_store_fails_closed(self):
         ib_send.PROOF_STORE = os.path.join(self.tmp.name, "absent.sqlite")
         self.assertIn("proof store unreadable", ib_send.stage2_hold(self.db, "a@x.io", "7", "100", self.DAY))
+
+
+class PerLineApproval(unittest.TestCase):
+    """QA @23:13Z on 6c430dbad: flipping COPY_APPROVED for R25 must not unlock the older lines, which were
+    never approved. LINE_APPROVED is the per-line authority."""
+
+    def test_only_the_two_r25_lines_are_approved(self):
+        self.assertEqual(ib_send.COPY_APPROVED, 1)
+        self.assertEqual(set(ib_send.LINE_APPROVED), {"credit-request-none", "credit-request-pending"})
+        for key in ("generic", "merge", "removal", "claim-none", "credit-none"):
+            with self.subTest(line=key):
+                self.assertNotIn(key, ib_send.LINE_APPROVED)
+
+    def test_a_tail_run_skips_every_unapproved_line(self):
+        # The exact QA case: --band tail accepts a draft-other row and would post the generic line.
+        rows = [row("1", "draft-other", band="gt30d"), row("2", "draft-merge", band="gt30d")]
+        got = ib_send.select_rows(rows, "tail", {}, NO_OV)
+        self.assertEqual([r["id"] for r in got], ["1", "2"])  # selection is unchanged...
+        for r in got:  # ...but neither line carries an approval ref
+            self.assertNotIn(ib_send.ACTION_LINE[r["action"]], ib_send.LINE_APPROVED)
+
+    def test_a_static_credit_key_in_a_plan_is_refused(self):
+        # QA: naming the literal key skips the live pending-count read entirely.
+        for key in ("credit-request-none", "credit-request-pending"):
+            with self.subTest(key=key):
+                with self.assertRaises(ib_send.Refused) as cm:
+                    ib_send.select_rows([row("1", "draft-credit")], "recent", {"1": key}, NO_OV)
+                self.assertIn("does not own", str(cm.exception))
+
+    def test_a_plan_may_not_swap_one_actions_line_for_another(self):
+        with self.assertRaises(ib_send.Refused) as cm:
+            ib_send.select_rows([row("1", "draft-merge")], "recent", {"1": "removal"}, NO_OV)
+        self.assertIn("does not own", str(cm.exception))
+
+
+class StickyResolverFailure(unittest.TestCase):
+    """QA @23:13Z on 6c430dbad: a failed presented-profile resolver must refuse EVERY credit row, not just
+    the one that hit the error. Caching {} let the next row count by userid only and post the zero-pending
+    line to an account whose presented profile has a pending request."""
+
+    def setUp(self):
+        from credit_review import identity_resolver
+        self.ir = identity_resolver
+        self._orig = identity_resolver.presented_ids
+        self.addCleanup(setattr, identity_resolver, "presented_ids", self._orig)
+
+    def test_a_failed_resolver_returns_the_false_sentinel_not_an_empty_map(self):
+        def boom(uids, q):
+            raise RuntimeError("trino down")
+        self.ir.presented_ids = boom
+        got = ib_send.resolve_presented([{"user_id": 7}, {"user_id": 8}])
+        self.assertIs(got, False)
+        self.assertNotIsInstance(got, dict)  # {} would be read as "no presented profiles"
+
+    def test_a_good_resolver_returns_the_map(self):
+        self.ir.presented_ids = lambda uids, q: {str(u): ["p1"] for u in uids}
+        self.assertEqual(ib_send.resolve_presented([{"user_id": 7}]), {"7": ["p1"]})
+
+    def test_the_sentinel_is_sticky_across_rows(self):
+        # The loop resolves ONCE and reuses the result; False must never be replaced by a later success.
+        calls = []
+
+        def boom(uids, q):
+            calls.append(uids)
+            raise RuntimeError("trino down")
+        self.ir.presented_ids = boom
+        presented_map = None
+        rows = [{"user_id": 7}, {"user_id": 8}]
+        for _ in rows:
+            if presented_map is None:
+                presented_map = ib_send.resolve_presented(rows)
+            self.assertIs(presented_map, False)
+        self.assertEqual(len(calls), 1, "the resolver must be called once, not retried per row")

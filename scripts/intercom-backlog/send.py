@@ -54,8 +54,15 @@ from credit_review import verify_ledger  # noqa: E402  the shared message ledger
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import overrides  # noqa: E402  the ONE captain-overrides loader (lists.py uses it too)
 
-COPY_APPROVED = 1          # Fable R25 (inbox 057, 2026-11-05T21:28Z): both credit lines approved, OPTION A
+COPY_APPROVED = 1          # the copy lock is LIFTED, but only for lines that carry their own approval below
 COPY_APPROVAL_REF = "Fable R25"
+# line key -> the approval ref that unlocks it. EMPTY ENTRY = that line can never be sent. Fable R25 (inbox
+# 057, 2026-11-05T21:28Z) approved the TWO credit lines and nothing else, so flipping COPY_APPROVED must not
+# unlock the older generic/merge/removal/claim lines: they were never approved and are absent here on purpose.
+LINE_APPROVED = {
+    "credit-request-none": "Fable R25",
+    "credit-request-pending": "Fable R25",
+}
 CLOSE_APPROVED = 0         # Fable D4
 APPROVER = "U7RP6HKUZ"     # the captain; the fleet's standing customer-reply approval
 OPS_WRITE = "/opt/hydra/scripts/intercom-ops-write.sh"
@@ -224,6 +231,19 @@ def live_pending(uid, query=None):
     k = query("select cast(count(*) as varchar) from postgresql_core.public.claiming where deletedat is null "
               f"and status = 'pending' and userid = {q}")
     return int(c[0][0]) if c else 0, int(k[0][0]) if k else 0
+
+
+def resolve_presented(rows, query=None):
+    """{user id: [presented profile ids]} for the whole run, or False when the resolver FAILED.
+    False is sticky on purpose: a failed resolver must never degrade to "count by userid only" for the
+    next row, which would post the zero-pending line to an account whose presented profile has a pending
+    request. The caller refuses every credit row while it is False."""
+    from credit_review import identity_resolver  # noqa: E402  the ONE identity resolver
+    try:
+        return identity_resolver.presented_ids(
+            sorted({x["user_id"] for x in rows if x.get("user_id")}), query or trino)
+    except Exception:
+        return False
 
 
 def live_credit_pending(uid, query=None, presented=None):
@@ -416,13 +436,14 @@ def select_rows(rows, band, plan, ov, ids=(), bucket=None):
         forbidden = sorted(f"{k}={by_id[k].get('action')}" for k in plan if not eligible(by_id[k]))
         if forbidden:
             raise Refused(f"plan names conversations whose action is not send-eligible: {forbidden}")
-        # A dynamic key is only ever resolved for the action that owns it: a plan cannot ask for the R25
-        # credit lines on a merge/removal/generic row (the live core read would then pick copy for the
-        # wrong question).
+        # ACTION-TO-LINE OWNERSHIP. A plan may only name the line its row's action owns, so a plan can
+        # never pick copy for a different question. In particular the R25 credit lines are reachable ONLY
+        # through the dynamic key: naming "credit-request-none" literally would skip the live pending-count
+        # read and post "we don't have an open credit request" to an account that has one.
         wrong = sorted(f"{k}={v}" for k, v in plan.items()
-                       if v in DYNAMIC_LINES and ACTION_LINE.get(by_id[k].get("action")) != v)
+                       if v != ACTION_LINE.get(by_id[k].get("action")))
         if wrong:
-            raise Refused(f"plan names a dynamic line for an action that does not own it: {wrong}")
+            raise Refused(f"plan names a line the row's action does not own: {wrong}")
         tail = sorted(k for k in plan if by_id[k].get("band") == "gt30d")
         if tail:
             raise Refused(f"plan names > 30 d conversations; use --band tail: {tail}")
@@ -475,6 +496,8 @@ def _main():
             sys.exit("REFUSED: bucket mode never closes.")
     elif a.apply and COPY_APPROVED != 1:
         sys.exit("REFUSED: COPY_APPROVED=0. The copy needs Fable's D1 GO, landed in a PR that flips the lock.")
+    elif a.apply and not LINE_APPROVED:
+        sys.exit("REFUSED: no line carries an approval ref (LINE_APPROVED is empty).")
     if a.close and (CLOSE_APPROVED != 1 or a.band != "tail"):
         sys.exit("REFUSED: --close needs CLOSE_APPROVED=1 (Fable D4) and --band tail.")
     token = os.environ.get("MUSOAI_INTERCOM_TOKEN")
@@ -499,7 +522,7 @@ def _main():
         stats["skipped"][reason] = stats["skipped"].get(reason, 0) + 1
 
     done = 0
-    presented_map = None
+    presented_map = None   # None = not resolved yet; False = the resolver FAILED (refuse every credit row)
     for r in rows:
         if done >= a.max:
             break
@@ -528,20 +551,21 @@ def _main():
             # The presented-profile map is resolved ONCE for the whole run (it is the expensive part);
             # the pending COUNT itself is still read per account, here, at send time.
             if presented_map is None:
-                from credit_review import identity_resolver  # noqa: E402
-                try:
-                    presented_map = identity_resolver.presented_ids(
-                        sorted({x["user_id"] for x in rows if x.get("user_id")}), trino)
-                except Exception:
-                    presented_map = {}
-                    stats["skipped_zero_nonzero"] += 1
-                    skip("credit state unreadable (R25: refuse, never guess)"); continue
+                presented_map = resolve_presented(rows)
+            if presented_map is False:
+                stats["skipped_zero_nonzero"] += 1
+                skip("credit state unreadable (R25: refuse, never guess)"); continue
             try:
                 pending = live_credit_pending(uid, presented=presented_map)
             except Exception:
                 stats["skipped_zero_nonzero"] += 1
                 skip("credit state unreadable (R25: refuse, never guess)"); continue
             line_key = credit_line(pending)
+        # Per-line approval (QA): COPY_APPROVED lifts the lock, LINE_APPROVED says WHICH lines that
+        # approval covers. A line with no entry is never sent, in dry run or apply, so a tail run that
+        # mixes classes cannot smuggle an unapproved generic/merge/removal line out behind R25.
+        if line_key not in LINE_APPROVED:
+            skip(f"line {line_key} has no approval ref (LINE_APPROVED)"); continue
         why = stage2_hold(db, key, uid or "", r["id"], today)
         if why:
             if why.startswith("stage-2 guard"):
