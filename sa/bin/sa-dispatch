@@ -1,0 +1,565 @@
+#!/usr/bin/env python3
+"""sa-dispatch - the DoD gate, dispatch, and Mandate (SA-03).
+
+Implements design.md §8 (and the SA-03 rows of §5, §10):
+
+    sa-dispatch intake --ticket T [--dry-run]     -> gate result; on pass, dispatch
+    sa-dispatch mandate --ticket T                -> canonical JSON mandate
+    sa-dispatch check-scope --ticket T --path P   -> exit 0 allowed / exit 4 out of scope
+
+THE GATE. A ticket's acceptance is *checkable* iff its ``acceptance`` object has a
+non-empty ``command`` string, or a ``signal`` string matching
+``^(exit|file|grep|http):``. Anything else is refused with exit 3 and a
+``ticket.refused`` event carrying the missing question. A ticket with no
+checkable acceptance signal never reaches a worker.
+
+ON PASS, one run produces one git worktree, one brief file, one spawned worker,
+and a ``mandate.issued`` event carrying ``requester``, ``scope_paths``,
+``rules_in_force`` and ``expires_at``. ``--dry-run`` performs the gate and prints
+the plan without creating anything.
+
+MACHINERY. This is a gate in front of firstmate's existing dispatch machinery,
+not a second one: ``bin/fm-brief.sh`` scaffolds the brief and
+``bin/fm-spawn.sh`` creates the worktree and launches the worker. Both are run
+with ``FM_HOME=$SA_HOME`` so nothing in ``sa/`` writes into firstmate's home
+(design.md §0.3). The Engine stays the sole writer: every event is appended by
+shelling out to ``sa/bin/sa-store append``; this script never opens
+``events.jsonl``.
+
+WORKER SESSION. SA workers live in their own tmux session (``SA_TMUX_SESSION``,
+default ``sa-workers``) rather than in firstmate's ``firstmate`` session, so
+``sa-kill`` can stop them by exact name without ever being able to reach
+firstmate's own windows. The session is created only on a real dispatch, never
+on ``--dry-run``.
+
+Exit codes: 0 ok, 2 usage/unknown ticket/missing mandate, 3 refused by the gate,
+4 out of scope, 5 a required dependency (``sa-store``) is absent.
+
+Python 3 stdlib only.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "sa" / "lib"))
+
+try:
+    from sa_paths import AT_FORMAT, canonical, sa_home, utc_now  # noqa: E402
+except ImportError:  # pragma: no cover - dependency gate, not a code path
+    sys.stderr.write(
+        "error: sa/lib/sa_paths.py is missing; sa-dispatch needs the SA-01 store "
+        "package (sa/bin/sa-store) on this branch\n"
+    )
+    raise SystemExit(5)
+
+STORE = REPO / "sa" / "bin" / "sa-store"
+
+#: The firstmate helpers this gate drives. ``SA_BRIEF_CMD`` and ``SA_SPAWN_CMD``
+#: exist so ``sa/tests/test_dispatch.sh`` can prove the dispatch path without
+#: launching a real agent; production always uses the two defaults.
+BRIEF = Path(os.environ.get("SA_BRIEF_CMD") or REPO / "bin" / "fm-brief.sh")
+SPAWN = Path(os.environ.get("SA_SPAWN_CMD") or REPO / "bin" / "fm-spawn.sh")
+
+#: The one question a refused ticket is missing the answer to (design.md §8).
+MISSING_QUESTION = "What command proves this ticket is done?"
+
+#: A ``signal`` acceptance is checkable only in one of these shapes.
+SIGNAL_RE = re.compile(r"^(exit|file|grep|http):")
+
+#: Default mandate lifetime, in hours.
+DEFAULT_TTL_HOURS = 24
+
+#: Rules a mandate carries when the ticket names none of its own. These are the
+#: design.md §0 non-negotiables that bind every SA worker.
+DEFAULT_RULES = [
+    "engine-is-sole-writer",
+    "no-writes-to-firstmate-home",
+    "python3-stdlib-only",
+    "move-files-never-delete",
+]
+
+#: The tmux session SA workers are launched into (never firstmate's own).
+DEFAULT_TMUX_SESSION = "sa-workers"
+
+EXIT_OK = 0
+EXIT_USAGE = 2
+EXIT_REFUSED = 3
+EXIT_OUT_OF_SCOPE = 4
+EXIT_DEPENDENCY = 5
+
+
+class DispatchError(Exception):
+    """A refusal or failure that ends the run with a specific exit code."""
+
+    def __init__(self, message: str, code: int = EXIT_USAGE) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+# --------------------------------------------------------------------------
+# The Engine's only write path, and the documented read surface (design.md §6)
+# --------------------------------------------------------------------------
+
+
+def _store(*args: str) -> str:
+    """Run ``sa-store`` with ``args`` and return its stdout."""
+    if not STORE.is_file():
+        raise DispatchError(
+            f"sa-store is missing at {STORE}; the SA-01 store package must be on "
+            "this branch before a ticket can be gated",
+            EXIT_DEPENDENCY,
+        )
+    proc = subprocess.run(
+        [sys.executable, str(STORE), *args],
+        capture_output=True,
+        text=True,
+        cwd=str(REPO),
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip() or f"exit {proc.returncode}"
+        raise DispatchError(f"sa-store {' '.join(args)} failed: {detail}")
+    return proc.stdout
+
+
+def append_event(event_type: str, ticket: str | None, payload: dict) -> str:
+    """Append one event through the Engine and return its event id."""
+    args = ["append", "--type", event_type, "--actor", "engine"]
+    if ticket is not None:
+        args += ["--ticket", ticket]
+    args += ["--payload", canonical(payload)]
+    return _store(*args).strip()
+
+
+def table(name: str) -> dict:
+    """Return one projected table as a dict keyed by its primary key."""
+    raw = _store("state", "--table", name).strip()
+    if not raw:
+        return {}
+    parsed = json.loads(raw)
+    if not isinstance(parsed, dict):
+        raise DispatchError(f"sa-store state --table {name} did not return an object")
+    return parsed
+
+
+def load_ticket(ticket: str) -> dict:
+    """Return the ticket row, or refuse when the store has no such ticket."""
+    rows = table("tickets")
+    row = rows.get(ticket)
+    if not isinstance(row, dict):
+        raise DispatchError(f"unknown ticket: {ticket} (no ticket.created event in this SA_HOME)")
+    return row
+
+
+# --------------------------------------------------------------------------
+# The DoD gate
+# --------------------------------------------------------------------------
+
+
+def acceptance_is_checkable(acceptance) -> bool:
+    """True iff ``acceptance`` carries a command or a recognised signal."""
+    if not isinstance(acceptance, dict):
+        return False
+    command = acceptance.get("command")
+    if isinstance(command, str) and command.strip():
+        return True
+    signal = acceptance.get("signal")
+    if isinstance(signal, str) and SIGNAL_RE.match(signal):
+        return True
+    return False
+
+
+def describe_acceptance(acceptance) -> str:
+    """Return a one-line human description of a checkable acceptance."""
+    if isinstance(acceptance, dict):
+        command = acceptance.get("command")
+        if isinstance(command, str) and command.strip():
+            return f'command = "{command.strip()}"'
+        signal = acceptance.get("signal")
+        if isinstance(signal, str) and SIGNAL_RE.match(signal):
+            return f'signal = "{signal}"'
+    return "none"
+
+
+def refuse(ticket: str) -> int:
+    """Refuse a ticket with no checkable acceptance signal (design.md §8)."""
+    append_event("ticket.refused", ticket, {"missing_question": MISSING_QUESTION})
+    print(f"REFUSED: ticket {ticket} has no checkable acceptance signal.")
+    print(f'Missing question: "{MISSING_QUESTION}"')
+    return EXIT_REFUSED
+
+
+# --------------------------------------------------------------------------
+# Mandate
+# --------------------------------------------------------------------------
+
+
+def resolve_scope(ticket_row: dict, cli_scope: list[str]) -> list[str]:
+    """Resolve the mandate's scope paths: CLI flags, then the ticket, then '.'."""
+    acceptance = ticket_row.get("acceptance")
+    candidates: list[str] = []
+    if cli_scope:
+        candidates = list(cli_scope)
+    elif isinstance(acceptance, dict):
+        for key in ("scope_paths", "scope"):
+            value = acceptance.get(key)
+            if isinstance(value, str) and value.strip():
+                candidates = [value.strip()]
+                break
+            if isinstance(value, list) and value:
+                candidates = [str(item) for item in value if str(item).strip()]
+                break
+    if not candidates:
+        candidates = ["."]
+    seen: list[str] = []
+    for item in candidates:
+        normalized = os.path.normpath(item)
+        if normalized not in seen:
+            seen.append(normalized)
+    return seen
+
+
+def resolve_rules(ticket_row: dict, cli_rules: list[str]) -> list[str]:
+    """Resolve the mandate's rules in force: CLI flags, then the ticket, then defaults."""
+    if cli_rules:
+        return list(cli_rules)
+    acceptance = ticket_row.get("acceptance")
+    if isinstance(acceptance, dict):
+        value = acceptance.get("rules_in_force", acceptance.get("rules"))
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+        if isinstance(value, list) and value:
+            return [str(item) for item in value if str(item).strip()]
+    return list(DEFAULT_RULES)
+
+
+def expires_at(hours: float) -> str:
+    """Return the mandate expiry as ISO-8601 UTC seconds."""
+    moment = datetime.now(timezone.utc) + timedelta(hours=hours)
+    return moment.strftime(AT_FORMAT)
+
+
+def build_mandate(ticket_row: dict, scope: list[str], rules: list[str], ttl: float) -> dict:
+    """Return the mandate payload design.md §5 gives ``mandate.issued``."""
+    return {
+        "requester": ticket_row.get("requester"),
+        "scope_paths": scope,
+        "rules_in_force": rules,
+        "expires_at": expires_at(ttl),
+    }
+
+
+# --------------------------------------------------------------------------
+# Dispatch: brief, worktree, worker
+# --------------------------------------------------------------------------
+
+
+def sa_env() -> dict:
+    """Return the environment every firstmate helper runs under.
+
+    ``FM_HOME=$SA_HOME`` is what keeps design.md §0.3 true: the brief and the
+    task record land inside the SA root, never in firstmate's home.
+    """
+    env = dict(os.environ)
+    env["FM_HOME"] = str(sa_home())
+    return env
+
+
+def tmux_session() -> str:
+    """Return the tmux session SA workers are launched into."""
+    return os.environ.get("SA_TMUX_SESSION") or DEFAULT_TMUX_SESSION
+
+
+def ensure_worker_session() -> str:
+    """Create the SA worker tmux session if absent and return its pane id."""
+    session = tmux_session()
+    probe = subprocess.run(
+        ["tmux", "has-session", "-t", session], capture_output=True, text=True
+    )
+    if probe.returncode != 0:
+        created = subprocess.run(
+            ["tmux", "new-session", "-d", "-s", session], capture_output=True, text=True
+        )
+        if created.returncode != 0:
+            raise DispatchError(
+                f"could not create the SA worker tmux session {session}: "
+                f"{(created.stderr or created.stdout).strip()}"
+            )
+    panes = subprocess.run(
+        ["tmux", "list-panes", "-t", session, "-F", "#{pane_id}"],
+        capture_output=True,
+        text=True,
+    )
+    pane = panes.stdout.strip().splitlines()[0] if panes.stdout.strip() else ""
+    if not pane:
+        raise DispatchError(f"tmux session {session} has no pane to launch from")
+    return pane
+
+
+def tmux_identity() -> str:
+    """Return a ``TMUX``-shaped value for the running tmux server."""
+    probe = subprocess.run(
+        ["tmux", "display-message", "-p", "#{socket_path},#{pid},0"],
+        capture_output=True,
+        text=True,
+    )
+    return probe.stdout.strip()
+
+
+def scaffold_brief(ticket: str, ticket_row: dict, mode: str, mandate: dict) -> Path:
+    """Scaffold the brief with firstmate's own scaffolder and fill it in."""
+    if not BRIEF.is_file():
+        raise DispatchError(f"fm-brief.sh is missing at {BRIEF}", EXIT_DEPENDENCY)
+    proc = subprocess.run(
+        [str(BRIEF), ticket, REPO.name, "--mode", mode],
+        capture_output=True,
+        text=True,
+        env=sa_env(),
+        cwd=str(REPO),
+    )
+    if proc.returncode != 0:
+        raise DispatchError(
+            f"fm-brief.sh refused to scaffold {ticket}: "
+            f"{(proc.stderr or proc.stdout).strip()}"
+        )
+    brief = sa_home() / "data" / ticket / "brief.md"
+    if not brief.is_file():
+        raise DispatchError(f"fm-brief.sh reported success but {brief} is missing")
+
+    title = str(ticket_row.get("title") or "").strip()
+    body = str(ticket_row.get("body") or "").strip()
+    requester = str(ticket_row.get("requester") or "").strip()
+    intent = "\n\n".join(part for part in (title, body) if part)
+    if requester:
+        intent = f"{intent}\n\nRequester: {requester}"
+
+    spec = "\n".join(
+        [
+            f"Acceptance (checkable): {describe_acceptance(ticket_row.get('acceptance'))}",
+            f"Scope paths: {', '.join(mandate['scope_paths'])}",
+            f"Rules in force: {', '.join(mandate['rules_in_force'])}",
+            f"Mandate expires: {mandate['expires_at']}",
+            "",
+            "Stay inside the scope paths above. Report status through the status "
+            "file the brief names, and stop rather than widening the mandate.",
+        ]
+    )
+
+    text = brief.read_text(encoding="utf-8")
+    text = text.replace("{TASK}", intent).replace("{FIRSTMATE_SPEC}", spec)
+    brief.write_text(text, encoding="utf-8")
+    return brief
+
+
+def spawn_worker(ticket: str, mode: str, yolo: str, harness: str | None) -> dict:
+    """Launch the worker through firstmate's spawner and return its handles."""
+    if not SPAWN.is_file():
+        raise DispatchError(f"fm-spawn.sh is missing at {SPAWN}", EXIT_DEPENDENCY)
+    pane = ensure_worker_session()
+    env = sa_env()
+    env["TMUX_PANE"] = pane
+    identity = tmux_identity()
+    if identity:
+        env["TMUX"] = identity
+    argv = [str(SPAWN), ticket, str(REPO), "--mode", mode, "--yolo", yolo]
+    if harness:
+        argv += ["--harness", harness]
+    proc = subprocess.run(argv, capture_output=True, text=True, env=env, cwd=str(REPO))
+    if proc.returncode != 0:
+        raise DispatchError(
+            f"fm-spawn.sh refused to launch {ticket}: "
+            f"{(proc.stderr or proc.stdout).strip()}"
+        )
+    handles: dict[str, str] = {}
+    for line in proc.stdout.splitlines():
+        if not line.startswith("spawned "):
+            continue
+        for token in line.split():
+            if "=" in token:
+                key, _, value = token.partition("=")
+                handles[key] = value
+    if not handles.get("window") or not handles.get("worktree"):
+        raise DispatchError(
+            "fm-spawn.sh reported success but printed no window/worktree handle: "
+            f"{proc.stdout.strip()}"
+        )
+    return handles
+
+
+def register_worker(ticket: str, backend: str, endpoint: str) -> Path:
+    """Record the worker in ``$SA_HOME/workers.json`` for the kill switch."""
+    home = sa_home()
+    home.mkdir(parents=True, exist_ok=True)
+    path = home / "workers.json"
+    workers: list[dict] = []
+    if path.is_file():
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8") or "[]")
+        except json.JSONDecodeError as exc:
+            raise DispatchError(f"{path} is not valid JSON: {exc}") from exc
+        if isinstance(loaded, list):
+            workers = [row for row in loaded if isinstance(row, dict)]
+    workers = [row for row in workers if row.get("id") != ticket]
+    workers.append({"id": ticket, "backend": backend, "endpoint": endpoint})
+    workers.sort(key=lambda row: str(row.get("id")))
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(canonical(workers) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+    return path
+
+
+# --------------------------------------------------------------------------
+# Verbs
+# --------------------------------------------------------------------------
+
+
+def cmd_intake(args: argparse.Namespace) -> int:
+    ticket = args.ticket
+    ticket_row = load_ticket(ticket)
+    acceptance = ticket_row.get("acceptance")
+
+    if not acceptance_is_checkable(acceptance):
+        return refuse(ticket)
+
+    scope = resolve_scope(ticket_row, args.scope)
+    rules = resolve_rules(ticket_row, args.rule)
+    mandate = build_mandate(ticket_row, scope, rules, args.ttl_hours)
+    brief = sa_home() / "data" / ticket / "brief.md"
+    endpoint = f"{tmux_session()}:fm-{ticket}"
+
+    if args.dry_run:
+        print(f"PLAN: ticket {ticket}")
+        print(f"  gate: PASS ({describe_acceptance(acceptance)})")
+        print(f"  requester: {mandate['requester']}")
+        print(f"  scope_paths: {canonical(mandate['scope_paths'])}")
+        print(f"  rules_in_force: {canonical(mandate['rules_in_force'])}")
+        print(f"  expires_at: {mandate['expires_at']}")
+        print(f"  brief: {brief}")
+        print(f"  worktree: allocated by fm-spawn.sh from {REPO}")
+        print(f"  worker: harness={args.harness or 'default'} backend=tmux endpoint={endpoint}")
+        print("  dry run: nothing created")
+        return EXIT_OK
+
+    mandate_id = append_event("mandate.issued", ticket, mandate)
+    try:
+        brief_path = scaffold_brief(ticket, ticket_row, args.mode, mandate)
+        handles = spawn_worker(ticket, args.mode, args.yolo, args.harness)
+    except DispatchError as exc:
+        append_event("mandate.revoked", ticket, {"reason": str(exc)})
+        raise
+
+    endpoint = handles["window"]
+    worktree = handles["worktree"]
+    register_worker(ticket, "tmux", endpoint)
+    append_event(
+        "ticket.dispatched",
+        ticket,
+        {
+            "worktree": worktree,
+            "brief": str(brief_path),
+            "worker": endpoint,
+            "mandate": mandate_id,
+        },
+    )
+    append_event(
+        "sub.spawned",
+        ticket,
+        {"sub": endpoint, "parent": ticket, "role": "worker"},
+    )
+
+    print(f"DISPATCHED: ticket {ticket}")
+    print(f"  mandate: {mandate_id}")
+    print(f"  requester: {mandate['requester']}")
+    print(f"  scope_paths: {canonical(mandate['scope_paths'])}")
+    print(f"  rules_in_force: {canonical(mandate['rules_in_force'])}")
+    print(f"  expires_at: {mandate['expires_at']}")
+    print(f"  brief: {brief_path}")
+    print(f"  worktree: {worktree}")
+    print(f"  worker: {endpoint}")
+    return EXIT_OK
+
+
+def cmd_mandate(args: argparse.Namespace) -> int:
+    mandates = table("mandates")
+    row = mandates.get(args.ticket)
+    if not isinstance(row, dict):
+        raise DispatchError(f"no mandate for ticket {args.ticket}")
+    print(canonical(row))
+    return EXIT_OK
+
+
+def cmd_check_scope(args: argparse.Namespace) -> int:
+    mandates = table("mandates")
+    row = mandates.get(args.ticket)
+    if not isinstance(row, dict):
+        raise DispatchError(f"no mandate for ticket {args.ticket}")
+    scope = row.get("scope_paths") or []
+    if not isinstance(scope, list):
+        raise DispatchError(f"mandate for {args.ticket} has a malformed scope_paths")
+
+    target = Path(args.path).expanduser()
+    if not target.is_absolute():
+        target = REPO / target
+    target = Path(os.path.normpath(str(target)))
+
+    for entry in scope:
+        base = Path(str(entry)).expanduser()
+        if not base.is_absolute():
+            base = REPO / base
+        base = Path(os.path.normpath(str(base)))
+        if target == base or base in target.parents:
+            print(f"ALLOWED: {args.path} is inside {entry}")
+            return EXIT_OK
+    print(f"OUT OF SCOPE: {args.path} is not inside {canonical(scope)}")
+    return EXIT_OUT_OF_SCOPE
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="sa-dispatch",
+        description="SA-03: the DoD gate, dispatch, and Mandate.",
+    )
+    sub = parser.add_subparsers(dest="verb", required=True)
+
+    intake = sub.add_parser("intake", help="gate a ticket; on pass, dispatch it")
+    intake.add_argument("--ticket", required=True)
+    intake.add_argument("--dry-run", action="store_true", help="gate and print the plan only")
+    intake.add_argument("--mode", default="direct-PR", choices=["no-mistakes", "direct-PR", "local-only"])
+    intake.add_argument("--yolo", default="off", choices=["on", "off"])
+    intake.add_argument("--harness", default=None)
+    intake.add_argument("--scope", action="append", default=[], metavar="PATH")
+    intake.add_argument("--rule", action="append", default=[], metavar="RULE")
+    intake.add_argument("--ttl-hours", type=float, default=DEFAULT_TTL_HOURS)
+    intake.set_defaults(func=cmd_intake)
+
+    mandate = sub.add_parser("mandate", help="print the canonical JSON mandate")
+    mandate.add_argument("--ticket", required=True)
+    mandate.set_defaults(func=cmd_mandate)
+
+    check = sub.add_parser("check-scope", help="exit 0 allowed / exit 4 out of scope")
+    check.add_argument("--ticket", required=True)
+    check.add_argument("--path", required=True)
+    check.set_defaults(func=cmd_check_scope)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        return args.func(args)
+    except DispatchError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return exc.code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+"""sa-kill - the SA kill switch (SA-03, design.md §10).
+
+One command stops every SA worker and touches nothing of firstmate's.
+
+    sa-kill [--dry-run] [--registry PATH]
+
+WHAT IT READS. The SA worker registry ``$SA_HOME/workers.json``, a JSON array of
+``{id, backend, endpoint}`` rows written by ``sa-dispatch`` when it launches a
+worker. The registry is the only authority: an endpoint that is not in it is
+never acted on.
+
+WHAT IT REFUSES. Any endpoint whose session (the part before ``:``) or whose
+whole name, when it has no window part, matches ``firstmate``, ``fm-`` or
+``ak47-anchor``. A ``session:window`` endpoint is additionally refused unless
+its session is the SA worker session (``SA_TMUX_SESSION``, default
+``sa-workers``), so a registry row can never reach into firstmate's own tmux
+session even if it were written by hand. The registry ``id`` is checked against
+the same protected patterns.
+
+WHAT IT STOPS. A bare endpoint is a tmux session and is killed with
+``tmux kill-session -t =<name>``. A ``session:window`` endpoint is one tmux
+window and is killed with ``tmux kill-window -t =<session>:<window>``. An
+``orca`` backend endpoint is a terminal name, resolved to its runtime handle
+through ``orca terminal list --json`` and closed with ``orca terminal close``.
+An endpoint that is already gone counts as stopped, so the switch is idempotent.
+
+``--dry-run`` lists what it would stop and changes nothing.
+
+Exit codes: 0 every registered worker is stopped (or was already gone),
+2 usage/registry error, 6 at least one worker could not be stopped or was
+refused.
+
+Python 3 stdlib only.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / "sa" / "lib"))
+
+try:
+    from sa_paths import canonical, sa_home  # noqa: E402
+except ImportError:  # pragma: no cover - dependency gate, not a code path
+    sys.stderr.write(
+        "error: sa/lib/sa_paths.py is missing; sa-kill needs the SA-01 store "
+        "package on this branch\n"
+    )
+    raise SystemExit(5)
+
+#: Names sa-kill must never act on, whatever the registry says.
+PROTECTED_PREFIXES = ("firstmate", "fm-", "ak47-anchor")
+
+#: The tmux session SA workers live in; a window outside it is not ours.
+DEFAULT_TMUX_SESSION = "sa-workers"
+
+EXIT_OK = 0
+EXIT_USAGE = 2
+EXIT_FAILED = 6
+
+
+class KillError(Exception):
+    """A refusal or failure that ends the run with a specific exit code."""
+
+    def __init__(self, message: str, code: int = EXIT_USAGE) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def worker_session() -> str:
+    """Return the tmux session SA workers are allowed to live in."""
+    return os.environ.get("SA_TMUX_SESSION") or DEFAULT_TMUX_SESSION
+
+
+def is_protected(name: str) -> bool:
+    """True when ``name`` names firstmate or one of its anchors."""
+    lowered = name.strip().lower()
+    return any(lowered.startswith(prefix) for prefix in PROTECTED_PREFIXES)
+
+
+def load_registry(path: Path) -> list[dict]:
+    """Return the registry rows, or an empty list when the file is absent."""
+    if not path.is_file():
+        return []
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8") or "[]")
+    except json.JSONDecodeError as exc:
+        raise KillError(f"{path} is not valid JSON: {exc}") from exc
+    if not isinstance(loaded, list):
+        raise KillError(f"{path} must hold a JSON array of {{id, backend, endpoint}} rows")
+    rows = []
+    for row in loaded:
+        if not isinstance(row, dict):
+            raise KillError(f"{path} holds a non-object row: {canonical(row)}")
+        rows.append(row)
+    return rows
+
+
+def check_row(row: dict) -> tuple[str, str, str]:
+    """Validate one registry row and return ``(id, backend, endpoint)``."""
+    worker_id = str(row.get("id") or "").strip()
+    backend = str(row.get("backend") or "").strip()
+    endpoint = str(row.get("endpoint") or "").strip()
+    if not worker_id or not backend or not endpoint:
+        raise KillError(f"registry row is missing id/backend/endpoint: {canonical(row)}")
+    if is_protected(worker_id):
+        raise KillError(f"refusing worker id {worker_id!r}: it names firstmate or an anchor")
+    if backend not in ("tmux", "orca"):
+        raise KillError(f"refusing worker {worker_id}: unsupported backend {backend!r}")
+    if ":" in endpoint:
+        session = endpoint.split(":", 1)[0]
+        if is_protected(session):
+            raise KillError(
+                f"refusing endpoint {endpoint!r}: session {session!r} names firstmate or an anchor"
+            )
+        if backend == "tmux" and session != worker_session():
+            raise KillError(
+                f"refusing endpoint {endpoint!r}: it is not in the SA worker session "
+                f"{worker_session()!r}"
+            )
+    elif is_protected(endpoint):
+        raise KillError(
+            f"refusing endpoint {endpoint!r}: it names firstmate or an anchor"
+        )
+    return worker_id, backend, endpoint
+
+
+def tmux_running() -> bool:
+    """True when a tmux server is reachable."""
+    return subprocess.run(
+        ["tmux", "list-sessions"], capture_output=True, text=True
+    ).returncode == 0
+
+
+def tmux_session_exists(name: str) -> bool:
+    """True when a tmux session with exactly ``name`` exists."""
+    return subprocess.run(
+        ["tmux", "has-session", "-t", f"={name}"], capture_output=True, text=True
+    ).returncode == 0
+
+
+def tmux_window_exists(session: str, window: str) -> bool:
+    """True when ``session:window`` exists."""
+    probe = subprocess.run(
+        ["tmux", "list-windows", "-t", f"={session}", "-F", "#{window_name}"],
+        capture_output=True,
+        text=True,
+    )
+    if probe.returncode != 0:
+        return False
+    return window in probe.stdout.splitlines()
+
+
+def stop_tmux(endpoint: str) -> str:
+    """Stop one tmux endpoint and return a one-word outcome."""
+    if ":" in endpoint:
+        session, _, window = endpoint.partition(":")
+        if not tmux_window_exists(session, window):
+            return "already-gone"
+        proc = subprocess.run(
+            ["tmux", "kill-window", "-t", f"={session}:={window}"],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            raise KillError(
+                f"tmux kill-window {endpoint} failed: "
+                f"{(proc.stderr or proc.stdout).strip()}",
+                EXIT_FAILED,
+            )
+        return "stopped"
+    if not tmux_session_exists(endpoint):
+        return "already-gone"
+    proc = subprocess.run(
+        ["tmux", "kill-session", "-t", f"={endpoint}"], capture_output=True, text=True
+    )
+    if proc.returncode != 0:
+        raise KillError(
+            f"tmux kill-session {endpoint} failed: {(proc.stderr or proc.stdout).strip()}",
+            EXIT_FAILED,
+        )
+    return "stopped"
+
+
+def orca_terminals() -> list[dict]:
+    """Return the live Orca terminals, or an empty list when Orca is unreachable."""
+    proc = subprocess.run(
+        ["orca", "terminal", "list", "--json"], capture_output=True, text=True
+    )
+    if proc.returncode != 0:
+        return []
+    try:
+        loaded = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError:
+        return []
+    if isinstance(loaded, dict):
+        for key in ("terminals", "items", "data"):
+            if isinstance(loaded.get(key), list):
+                return [row for row in loaded[key] if isinstance(row, dict)]
+        return []
+    return [row for row in loaded if isinstance(row, dict)] if isinstance(loaded, list) else []
+
+
+def stop_orca(endpoint: str) -> str:
+    """Stop one Orca terminal by exact name and return a one-word outcome."""
+    for row in orca_terminals():
+        names = {str(row.get(key) or "") for key in ("name", "title", "label")}
+        if endpoint not in names:
+            continue
+        handle = str(row.get("id") or row.get("handle") or "").strip()
+        if not handle:
+            raise KillError(f"orca terminal {endpoint!r} has no handle to close", EXIT_FAILED)
+        proc = subprocess.run(
+            ["orca", "terminal", "close", "--terminal", handle],
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            raise KillError(
+                f"orca terminal close {endpoint} failed: "
+                f"{(proc.stderr or proc.stdout).strip()}",
+                EXIT_FAILED,
+            )
+        return "stopped"
+    return "already-gone"
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="sa-kill", description="Stop every SA worker; touch nothing of firstmate's."
+    )
+    parser.add_argument("--dry-run", action="store_true", help="list what would be stopped")
+    parser.add_argument(
+        "--registry",
+        default=None,
+        help="registry path (default: $SA_HOME/workers.json)",
+    )
+    args = parser.parse_args(argv)
+
+    registry = Path(args.registry).expanduser() if args.registry else sa_home() / "workers.json"
+    try:
+        rows = load_registry(registry)
+        if not rows:
+            print(f"sa-kill: no SA workers registered in {registry}")
+            return EXIT_OK
+
+        failures = 0
+        for row in rows:
+            try:
+                worker_id, backend, endpoint = check_row(row)
+            except KillError as exc:
+                print(f"REFUSED: {exc}")
+                failures += 1
+                continue
+            if args.dry_run:
+                print(f"WOULD STOP: {worker_id} backend={backend} endpoint={endpoint}")
+                continue
+            try:
+                outcome = stop_tmux(endpoint) if backend == "tmux" else stop_orca(endpoint)
+            except KillError as exc:
+                print(f"FAILED: {worker_id} {endpoint}: {exc}")
+                failures += 1
+                continue
+            print(f"{outcome.upper()}: {worker_id} backend={backend} endpoint={endpoint}")
+
+        if args.dry_run:
+            print(f"sa-kill: dry run, {len(rows)} registered worker(s), nothing stopped")
+            return EXIT_OK
+        if failures:
+            print(f"sa-kill: {failures} worker(s) not stopped")
+            return EXIT_FAILED
+        print(f"sa-kill: {len(rows)} registered worker(s) stopped")
+        return EXIT_OK
+    except KillError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return exc.code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
