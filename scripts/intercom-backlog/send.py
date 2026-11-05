@@ -4,7 +4,8 @@
 /opt/hydra/scripts/intercom-ops-write.sh reply. DRY-RUN BY DEFAULT.
 
 Safety, in order, re-checked per conversation right before each send:
-  1. COPY_APPROVED below must be 1 (flipped only in a PR that records Fable's GO ref).
+  1. COPY_APPROVED below must be 1 (flipped only in a PR that records Fable's GO ref; it is 1 against
+     'Fable R25' for the two credit lines, and every other line still needs its own approval).
   2. The row's action must map to a template (captain-*, gate-*, claim-pending, ledger-today
      and ambiguous identities are never sent by this tool: other owners or the captain).
   3. Live Intercom read: the conversation is still open and the customer still spoke last
@@ -14,7 +15,11 @@ Safety, in order, re-checked per conversation right before each send:
      claimed atomically BEFORE the post (verify_ledger.claim: daily cap any campaign, one reply
      per conversation ever) and finalized after it, so every campaign sees it the same day.
   5. The body is rendered from fixed text plus server facts only (first name from the core
-     replica). Customer text is never copied into a reply.
+     replica). Customer text is never copied into a reply. The R25 credit lines are sent VERBATIM
+     (assert_approved: byte-identical to the approved text, pluralisation the only variable), and the
+     zero-vs-nonzero split is a LIVE core read per account at send time, never the census field.
+  5b. Stage-2 hold (R25): a thread with an open proof ask, or a document on file in the last 30 days,
+     gets nothing from here; an unreadable ledger or proof store refuses the row.
   6. intercom-ops-write.sh --validate first, then the real post; its POSTED line is the proof.
 Bucket mode (--band bucket --bucket NAME; captain 10-29 "is everyone waiting on us being answered?",
 docs/intercom-backlog/unanswered-1029.md): one topic bucket from buckets.py --out per run, answered with that
@@ -49,8 +54,8 @@ from credit_review import verify_ledger  # noqa: E402  the shared message ledger
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import overrides  # noqa: E402  the ONE captain-overrides loader (lists.py uses it too)
 
-COPY_APPROVED = 0          # HELD: captain 23:30Z "no new customer copy"; flip only for wording approved later
-COPY_APPROVAL_REF = ""
+COPY_APPROVED = 1          # Fable R25 (inbox 057, 2026-11-05T21:28Z): both credit lines approved, OPTION A
+COPY_APPROVAL_REF = "Fable R25"
 CLOSE_APPROVED = 0         # Fable D4
 APPROVER = "U7RP6HKUZ"     # the captain; the fleet's standing customer-reply approval
 OPS_WRITE = "/opt/hydra/scripts/intercom-ops-write.sh"
@@ -60,7 +65,23 @@ API = "https://api.intercom.io"
 OPEN_RECENT = "Hi {name}, thanks for your patience with this."
 OPEN_TAIL = "Hi {name}, I'm sorry we didn't get back to you sooner."
 CLOSER = "If you still need help with this, just reply here and it will come straight back to our team."
+# ---- Fable R25 (inbox 057): the credit class, TWO lines, chosen by a LIVE core read at send time ----------
+# Verbatim. The ONLY substitution is the pluralisation of {s}/{is|are} from the real pending count; no
+# opener, no closer, no first name, no dates, no timing promises (R25: "Those are the ONLY variables").
+# NOTE for the copy owner: inbox 056 (verify-sla-driver-fable-d2, 2026-11-05T03:43Z) approved a DIFFERENT pair
+# for this class and deliberately DROPPED the "open the track, tap Add credit" affordance as unverified by eye.
+# R25 is the later ruling and is what ships here; the affordance claim is flagged in the PR body, not silently
+# resolved. If the affordance is wrong, R25's line (a) needs a fresh approval - do not edit the text here.
+R25_CREDIT_NONE = ("Thanks for reaching out. We don't have an open credit request from you on this, so the fastest "
+                   "way to get it added is to request it from the track page in the Muso app or on muso.ai - open "
+                   "the track, tap Add credit, choose your role, and it goes straight to our verification team. If "
+                   "you already sent us a document, reply here and we'll match it up.")
+R25_CREDIT_PENDING = ("Thanks - your credit request{s} {is|are} with our verification team now. You can follow each "
+                      "one on your profile under Credits in the app or on muso.ai; we'll tell you there and by "
+                      "email the moment anything changes or if we need something from you.")
 LINES = {
+    "credit-request-none": R25_CREDIT_NONE,
+    "credit-request-pending": R25_CREDIT_PENDING,
     "credit-none": "Every credit request on your account has now been reviewed, and you can see each credit's status on your profile.",
     "claim-none": "There is no profile claim waiting on your account right now. If you still want to claim a profile, open it on muso.ai and start a claim from there.",
     "merge": "We can merge profiles once every profile involved is claimed, verified and in your workspace. If that is already the case, reply here with the profile links and we will take it from there.",
@@ -90,15 +111,22 @@ NEVER_ACTIONS = ("captain-", overrides.HOLD_READ, "gate-", "claim-", "ledger-tod
 
 # triage action -> status line key. Anything absent here is never sent by this tool.
 ACTION_LINE = {
-    "draft-credit": "credit-none",
+    # R25: the credit class is ONE dynamic key, resolved at send time by a live core read (0 pending ->
+    # credit-request-none, >=1 -> credit-request-pending, unreadable -> REFUSE). Never from the census.
+    "draft-credit": "credit-request",
     "draft-claim": "generic",       # a no-pending-claim message is often a dispute: no claim advice
     "draft-merge": "merge",
     "draft-removal": "removal",
     "draft-account": "generic",
     "draft-stats": "generic",
     "draft-other": "generic",
-    "no-identity": "generic",
+    # R25 standing guard: "a thread whose account the identity resolver cannot resolve gets NOTHING and is
+    # counted". no-identity used to fall through to the generic line; it is now deliberately absent, so
+    # eligible() refuses it and the run reports it as unresolved_identity.
 }
+# Line keys a --plan may name that are NOT literal LINES entries: resolved per row at send time.
+DYNAMIC_LINES = {"credit-request"}
+UNRESOLVED_ACTIONS = ("no-identity", "ambiguous-identity")
 
 
 def first_word(first_name):
@@ -115,6 +143,34 @@ def render(row, first_name, line_key):
     name = first_word(first_name)
     opener = (OPEN_TAIL if row["band"] == "gt30d" else OPEN_RECENT).format(name=name)
     return f"{opener} {LINES[line_key]} {CLOSER}"
+
+
+def credit_line(pending):
+    """R25: the line is chosen by the LIVE pending count, never by the census field."""
+    return "credit-request-pending" if pending else "credit-request-none"
+
+
+def render_credit(line_key, pending):
+    """R25's two lines are complete messages: sent VERBATIM, with the pluralisation as the only variable.
+    No opener, no closer, no name - wrapping them would be an altered approved line."""
+    if line_key == "credit-request-none":
+        return R25_CREDIT_NONE
+    if line_key == "credit-request-pending":
+        n = int(pending)
+        return (R25_CREDIT_PENDING.replace("{s}", "" if n == 1 else "s")
+                .replace("{is|are}", "is" if n == 1 else "are"))
+    raise Refused(f"{line_key!r} is not an R25 credit line")
+
+
+def assert_approved(body, line_key, pending=None):
+    """The mechanical form of "the Caroline output guard runs on every send": for the R25 class the body must
+    be BYTE-IDENTICAL to the approved text rendered with the only allowed substitution, so no unapproved
+    sentence can ever reach a customer through this path. Anything else is refused, never sent."""
+    if line_key not in ("credit-request-none", "credit-request-pending"):
+        return
+    want = render_credit(line_key, pending)
+    if body != want:
+        raise Refused(f"body is not the approved R25 text for {line_key}")
 
 
 def trino(sql):
@@ -170,13 +226,71 @@ def live_pending(uid, query=None):
     return int(c[0][0]) if c else 0, int(k[0][0]) if k else 0
 
 
+def live_credit_pending(uid, query=None):
+    """R25: the pending-credit count for EVERY profile the account presents, read from core at send time.
+    Raises on any read failure - the caller REFUSES, it never falls back to the census field."""
+    query = query or trino
+    from credit_review import identity_resolver  # noqa: E402  the ONE identity resolver
+    presented = identity_resolver.presented_ids([uid], query).get(str(uid), [])
+    where = [f"userid = {int(uid)}"]
+    if presented:
+        ids = ",".join("'" + p.replace("'", "''") + "'" for p in presented)
+        where.append(f"profileid in ({ids})")
+    rows = query("select cast(count(*) as varchar) from postgresql_core.public.credit_requests where deletedat is null "
+                 "and status in ('unverified','processing','user_verification_needed') and (" + " or ".join(where) + ")")
+    if not rows or not rows[0] or not str(rows[0][0]).strip().isdigit():
+        raise RuntimeError("pending-credit count unreadable")
+    return int(rows[0][0])
+
+
+# R25 standing guard: a thread that already carries an open proof ask, or a document on file in the last 30
+# days, belongs to the stage-2 lane and gets NOTHING from here.
+STAGE2_DAYS = 30
+STAGE2_CAMPAIGNS = tuple(verify_ledger.ASK_CAMPAIGNS) + tuple(verify_ledger.CLAIM_CAMPAIGNS)
+PROOF_STORE = os.environ.get("CREDIT_PROOF_STORE", os.path.join(
+    os.environ.get("CREDIT_VERIFY_STATE_DIR", "/var/lib/hydra-credit-verify"), "proof.sqlite"))
+
+
+def stage2_hold(db, user_key, user_id, conversation_id, day):
+    """'' when this thread may be answered, else the skip reason. FAIL CLOSED: an unreadable ledger or proof
+    store refuses the row (a hold, never a message)."""
+    try:
+        since = (dt.date.fromisoformat(day) - dt.timedelta(days=STAGE2_DAYS)).isoformat()
+    except ValueError:
+        return "stage-2 guard: unreadable day"
+    try:
+        cond, params = verify_ledger._same_user(db, user_key, user_id)  # the ledger's own identity rule
+        q = (f"SELECT 1 FROM verify_messages m WHERE ({cond}) AND m.status IN ('attempted','sent') "
+             f"AND m.campaign IN ({','.join('?' * len(STAGE2_CAMPAIGNS))}) AND m.day >= ? LIMIT 1")
+        if db.execute(q, (*params, *STAGE2_CAMPAIGNS, since)).fetchone():
+            return "stage-2 guard: open proof ask in the last 30 days"
+    except Exception:
+        return "stage-2 guard: ledger unreadable"
+    try:
+        pdb = sqlite3.connect(f"file:{PROOF_STORE}?mode=ro", uri=True)
+        try:
+            hit = pdb.execute("SELECT 1 FROM proof_intake WHERE (user_id = ? OR conversation_id = ?) "
+                              "AND received_at >= ? LIMIT 1",
+                              (int(user_id or 0), str(conversation_id), since)).fetchone()
+        finally:
+            pdb.close()
+    except Exception:
+        return "stage-2 guard: proof store unreadable"
+    if hit:
+        return "stage-2 guard: document on file in the last 30 days"
+    return ""
+
+
 def live_state_ok(row, query=None):
-    """'' when the live core facts still justify the row's line, else the skip reason. Every line this tool
-    sends was chosen because the account had NOTHING pending (triage: gate-* / claim-pending rows are other
-    owners'), so any pending credit row or claim now means the snapshot is stale."""
+    """'' when the live core facts still justify the row's line, else the skip reason. For the R25 credit
+    class the pending count SELECTS the line instead of refusing (see credit_line); every other line was
+    chosen because the account had NOTHING pending (triage: gate-* / claim-pending rows are other owners'),
+    so any pending credit row or claim now means the snapshot is stale."""
     uid = row.get("user_id")
     if not uid:
         return ""  # no account: no credit/claim state to contradict the line
+    if ACTION_LINE.get(row.get("action")) == "credit-request":
+        return ""  # the credit class is decided by live_credit_pending, not by a refusal
     try:
         credits, claims = live_pending(uid, query)
     except Exception:
@@ -286,7 +400,7 @@ def select_rows(rows, band, plan, ov, ids=(), bucket=None):
         if not plan:
             raise Refused("the recent band is answered from a per-conversation --plan (read each), "
                           "never from the keyword topic.")
-        bad = {k: v for k, v in plan.items() if v not in LINES}
+        bad = {k: v for k, v in plan.items() if v not in LINES and v not in DYNAMIC_LINES}
         if bad:
             raise Refused(f"plan names lines that do not exist: {bad}")
         by_id = {r["id"]: r for r in rows}
@@ -296,6 +410,13 @@ def select_rows(rows, band, plan, ov, ids=(), bucket=None):
         forbidden = sorted(f"{k}={by_id[k].get('action')}" for k in plan if not eligible(by_id[k]))
         if forbidden:
             raise Refused(f"plan names conversations whose action is not send-eligible: {forbidden}")
+        # A dynamic key is only ever resolved for the action that owns it: a plan cannot ask for the R25
+        # credit lines on a merge/removal/generic row (the live core read would then pick copy for the
+        # wrong question).
+        wrong = sorted(f"{k}={v}" for k, v in plan.items()
+                       if v in DYNAMIC_LINES and ACTION_LINE.get(by_id[k].get("action")) != v)
+        if wrong:
+            raise Refused(f"plan names a dynamic line for an action that does not own it: {wrong}")
         tail = sorted(k for k in plan if by_id[k].get("band") == "gt30d")
         if tail:
             raise Refused(f"plan names > 30 d conversations; use --band tail: {tail}")
@@ -335,7 +456,8 @@ def _main():
         ov = overrides.load(a.overrides)
     except overrides.OverridesError as e:
         raise Refused(str(e))
-    rows = select_rows([json.loads(l) for l in open(a.triage)], a.band, plan, ov, ids, bucket=a.bucket)
+    all_rows = [json.loads(l) for l in open(a.triage)]
+    rows = select_rows(all_rows, a.band, plan, ov, ids, bucket=a.bucket)
     approval_ref = ""
     if a.band == "bucket":
         line = BUCKET_LINE[a.bucket]
@@ -361,7 +483,11 @@ def _main():
             names[uid], emails[uid] = fn, em
     # Dry runs only READ the shared ledger; apply opens it read-write (claim + finalize).
     db = verify_ledger.connect(LEDGER) if a.apply else ledger_ro(LEDGER)
-    stats = {"sent": 0, "closed": 0, "skipped": {}, "dry": 0, "failed": 0}
+    stats = {"sent": 0, "closed": 0, "skipped": {}, "dry": 0, "failed": 0,
+             # R25 report fields: the first batch must say what each guard did.
+             "credit_none_sent": 0, "credit_pending_sent": 0,
+             "skipped_zero_nonzero": 0, "skipped_doc_guard": 0,
+             "unresolved_identity": sum(1 for r in all_rows if r.get("action") in UNRESOLVED_ACTIONS)}
 
     def skip(reason):
         stats["skipped"][reason] = stats["skipped"].get(reason, 0) + 1
@@ -388,10 +514,28 @@ def _main():
         why = live_state_ok(r)
         if why:
             skip(why); continue
+        line_key = plan.get(r["id"]) or ACTION_LINE[r["action"]]
+        pending = None
+        if line_key == "credit-request":
+            # R25: the zero-vs-nonzero split is a LIVE core read, per account, right before the send.
+            try:
+                pending = live_credit_pending(uid)
+            except Exception:
+                stats["skipped_zero_nonzero"] += 1
+                skip("credit state unreadable (R25: refuse, never guess)"); continue
+            line_key = credit_line(pending)
+        why = stage2_hold(db, key, uid or "", r["id"], today)
+        if why:
+            if why.startswith("stage-2 guard"):
+                stats["skipped_doc_guard"] += 1
+            skip(why); continue
         if a.band == "bucket":
             body = render_bucket(r, names.get(uid or "", ""))
+        elif line_key in ("credit-request-none", "credit-request-pending"):
+            body = render_credit(line_key, pending)
         else:
-            body = render(r, names.get(uid or "", ""), plan.get(r["id"]) or ACTION_LINE[r["action"]])
+            body = render(r, names.get(uid or "", ""), line_key)
+        assert_approved(body, line_key, pending)
         with tempfile.NamedTemporaryFile("w", delete=False, suffix=".txt") as f:
             f.write(body)
             bf = f.name
@@ -404,7 +548,7 @@ def _main():
         done += 1
         if not a.apply:
             stats["dry"] += 1
-            print(f"DRY {r['id']} {r.get('bucket') or r['action']} {r['band']} :: {body}")
+            print(f"DRY {r['id']} {r.get('bucket') or line_key} {r['band']} :: {body}")
             os.unlink(bf); continue
         # Claim BEFORE the post, atomically: the shared one-message-per-user-per-UTC-day cap and
         # one reply per conversation are decided by verify_ledger.claim, the same code every
@@ -420,6 +564,10 @@ def _main():
             stats["failed"] += 1
             print(f"FAILED {r['id']}: rc={p.returncode} {p.stderr.strip()[:200]}"); continue
         stats["sent"] += 1
+        if line_key == "credit-request-none":
+            stats["credit_none_sent"] += 1
+        elif line_key == "credit-request-pending":
+            stats["credit_pending_sent"] += 1
         print(p.stdout.strip())
         time.sleep(0.5)
     print(json.dumps(stats))

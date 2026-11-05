@@ -280,7 +280,8 @@ class BucketAllowlist(unittest.TestCase):
                          "waiting_since": 1}]
                 self.assertEqual(send.select_rows(rows, "bucket", {}, {"add": {}, "remove": {}}, bucket="stats"), [])
         self.assertTrue(send.bucket_eligible({"bucket": "stats", "action": "draft-other"}))
-        self.assertTrue(send.bucket_eligible({"bucket": "stats", "action": "no-identity"}))
+        # Fable R25: an unresolved identity gets NOTHING (it used to fall through to the generic line).
+        self.assertFalse(send.bucket_eligible({"bucket": "stats", "action": "no-identity"}))
 
 
 class SecondMessageSinceSnapshot(unittest.TestCase):

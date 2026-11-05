@@ -71,13 +71,25 @@ class SelectRows(unittest.TestCase):
             ib_send.select_rows([row("1", "draft-merge", band="gt30d")], "tail", {"1": "merge"}, NO_OV)
 
     def test_eligible_recent_plan_selected_paid_first(self):
-        rows = [row("a", "draft-merge", waiting=1), row("b", "no-identity", paid=True, waiting=5)]
+        rows = [row("a", "draft-merge", waiting=1), row("b", "draft-other", paid=True, waiting=5)]
         got = ib_send.select_rows(rows, "recent", {"a": "merge", "b": "generic"}, NO_OV)
         self.assertEqual([r["id"] for r in got], ["b", "a"])
 
-    def test_sender_stays_locked(self):
-        self.assertEqual(ib_send.COPY_APPROVED, 0)
+    def test_unresolved_identity_is_never_send_eligible(self):
+        # R25 standing guard: a thread the identity resolver cannot resolve gets NOTHING.
+        for act in ib_send.UNRESOLVED_ACTIONS:
+            with self.subTest(action=act):
+                self.assertNotIn(act, ib_send.ACTION_LINE)
+                self.assertFalse(ib_send.eligible(row("1", act)))
+                with self.assertRaises(ib_send.Refused):
+                    ib_send.select_rows([row("1", act)], "recent", {"1": "generic"}, NO_OV)
+
+    def test_sender_is_unlocked_only_against_fable_r25(self):
+        # R25 (inbox 057) approved the two credit lines; closing and the bucket lines stay locked.
+        self.assertEqual(ib_send.COPY_APPROVED, 1)
+        self.assertEqual(ib_send.COPY_APPROVAL_REF, "Fable R25")
         self.assertEqual(ib_send.CLOSE_APPROVED, 0)
+        self.assertEqual(ib_send.BUCKET_APPROVED, {})
 
 
 class Cli(unittest.TestCase):
@@ -142,9 +154,9 @@ class Cli(unittest.TestCase):
                            capture_output=True, text=True, env=self.env, timeout=30)
         self.assertRefused(p, "cannot read captain overrides")
 
-    def test_cli_apply_refused_while_locked(self):
-        p = self.run_cli([row("1", "draft-merge")], {"1": "merge"}, "--apply")
-        self.assertRefused(p, "COPY_APPROVED=0")
+    def test_cli_apply_refused_while_closing_locked(self):
+        p = self.run_cli([row("1", "draft-merge")], {"1": "merge"}, "--apply", "--close")
+        self.assertRefused(p, "CLOSE_APPROVED=1")
 
 
 class Overrides(unittest.TestCase):
@@ -345,3 +357,136 @@ class SharedLedger(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class R25CreditLines(unittest.TestCase):
+    """Fable R25 (inbox 057): the credit class is TWO approved lines, chosen by a LIVE core read at send
+    time, sent verbatim, and never to a thread the stage-2 lane owns."""
+
+    def test_zero_vs_nonzero_picks_the_line(self):
+        self.assertEqual(ib_send.credit_line(0), "credit-request-none")
+        self.assertEqual(ib_send.credit_line(1), "credit-request-pending")
+        self.assertEqual(ib_send.credit_line(7), "credit-request-pending")
+
+    def test_lines_are_verbatim_and_pluralise_from_the_real_count(self):
+        self.assertEqual(ib_send.render_credit("credit-request-none", 0), ib_send.R25_CREDIT_NONE)
+        one = ib_send.render_credit("credit-request-pending", 1)
+        many = ib_send.render_credit("credit-request-pending", 3)
+        self.assertIn("your credit request is with our verification team", one)
+        self.assertIn("your credit requests are with our verification team", many)
+        for body in (one, many):
+            self.assertNotIn("{s}", body)
+            self.assertNotIn("{is|are}", body)
+            # R25: no dates, no timing promises, no first name, no opener/closer wrapper.
+            self.assertNotIn("Hi ", body)
+            self.assertNotIn("reply here and it will come straight back", body)
+
+    def test_assert_approved_refuses_any_edit(self):
+        good = ib_send.render_credit("credit-request-pending", 2)
+        ib_send.assert_approved(good, "credit-request-pending", 2)  # no raise
+        for bad in (good + " We'll have it done by Friday.", good.replace("now", "soon"),
+                    ib_send.render_credit("credit-request-pending", 1)):
+            with self.subTest(bad=bad[:40]):
+                with self.assertRaises(ib_send.Refused):
+                    ib_send.assert_approved(bad, "credit-request-pending", 2)
+
+    def test_plan_cannot_borrow_the_credit_lines_for_another_action(self):
+        rows = [row("1", "draft-merge")]
+        with self.assertRaises(ib_send.Refused) as cm:
+            ib_send.select_rows(rows, "recent", {"1": "credit-request"}, NO_OV)
+        self.assertIn("dynamic line", str(cm.exception))
+
+    def test_plan_accepts_the_dynamic_key_on_the_credit_action(self):
+        rows = [row("1", "draft-credit")]
+        got = ib_send.select_rows(rows, "recent", {"1": "credit-request"}, NO_OV)
+        self.assertEqual([r["id"] for r in got], ["1"])
+
+    def test_live_credit_pending_counts_every_presented_profile(self):
+        from credit_review import identity_resolver
+        seen = []
+        orig = identity_resolver.presented_ids
+        identity_resolver.presented_ids = lambda uids, q: {str(u): ["prof-a", "prof-b"] for u in uids}
+        self.addCleanup(setattr, identity_resolver, "presented_ids", orig)
+
+        def q(sql):
+            seen.append(sql)
+            return [["2"]]
+
+        self.assertEqual(ib_send.live_credit_pending(7, q), 2)
+        self.assertIn("userid = 7", seen[0])
+        self.assertIn("profileid in ('prof-a','prof-b')", seen[0])
+        self.assertIn("user_verification_needed", seen[0])
+
+    def test_live_credit_pending_refuses_an_unreadable_count(self):
+        from credit_review import identity_resolver
+        orig = identity_resolver.presented_ids
+        identity_resolver.presented_ids = lambda uids, q: {str(u): [] for u in uids}
+        self.addCleanup(setattr, identity_resolver, "presented_ids", orig)
+        for bad in ([], [[""]], [["nope"]]):
+            with self.subTest(bad=bad):
+                with self.assertRaises(Exception):
+                    ib_send.live_credit_pending(7, lambda sql, b=bad: b)
+
+
+class Stage2Hold(unittest.TestCase):
+    """R25 standing guard: an open proof ask, or a document on file in the last 30 days, belongs to the
+    stage-2 lane. Unreadable ledger or proof store REFUSES (a hold, never a message)."""
+
+    DAY = "2026-11-05"
+
+    def setUp(self):
+        self.db = ib_send.verify_ledger.connect(":memory:")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.store = os.path.join(self.tmp.name, "proof.sqlite")
+        self._orig = ib_send.PROOF_STORE
+        ib_send.PROOF_STORE = self.store
+        self.addCleanup(setattr, ib_send, "PROOF_STORE", self._orig)
+        import sqlite3
+        pdb = sqlite3.connect(self.store)
+        pdb.execute("CREATE TABLE proof_intake (intake_id TEXT PRIMARY KEY, user_id INTEGER, subject TEXT, "
+                    "conversation_id TEXT, received_at TEXT)")
+        pdb.commit()
+        pdb.close()
+
+    def add_doc(self, user_id, conversation_id, received_at):
+        import sqlite3
+        pdb = sqlite3.connect(self.store)
+        pdb.execute("INSERT INTO proof_intake VALUES (?,?,?,?,?)",
+                    (f"{user_id}:{received_at}", user_id, "credit", conversation_id, received_at))
+        pdb.commit()
+        pdb.close()
+
+    def test_clean_thread_may_be_answered(self):
+        self.assertEqual(ib_send.stage2_hold(self.db, "a@x.io", "7", "100", self.DAY), "")
+
+    def test_open_proof_ask_holds(self):
+        ib_send.verify_ledger.claim(self.db, user_key="a@x.io", day="2026-11-01", request_ids=["r1"],
+                                    message_type="email", approved_by="U7RP6HKUZ", approval_ref="test",
+                                    campaign=ib_send.verify_ledger.PROOF_NEED_ASK)
+        self.assertIn("open proof ask", ib_send.stage2_hold(self.db, "a@x.io", "7", "100", self.DAY))
+
+    def test_claim_ask_holds(self):
+        ib_send.verify_ledger.claim(self.db, user_key="a@x.io", day="2026-11-01", request_ids=["r1"],
+                                    message_type="email", approved_by="U7RP6HKUZ", approval_ref="test",
+                                    campaign=ib_send.verify_ledger.CLAIM_CAMPAIGN)
+        self.assertIn("open proof ask", ib_send.stage2_hold(self.db, "a@x.io", "7", "100", self.DAY))
+
+    def test_old_ask_outside_the_window_does_not_hold(self):
+        ib_send.verify_ledger.claim(self.db, user_key="a@x.io", day="2026-09-01", request_ids=["r1"],
+                                    message_type="email", approved_by="U7RP6HKUZ", approval_ref="test",
+                                    campaign=ib_send.verify_ledger.PROOF_NEED_ASK)
+        self.assertEqual(ib_send.stage2_hold(self.db, "a@x.io", "7", "100", self.DAY), "")
+
+    def test_document_on_file_holds_by_user_and_by_conversation(self):
+        self.add_doc(7, "999", "2026-10-20")
+        self.assertIn("document on file", ib_send.stage2_hold(self.db, "a@x.io", "7", "100", self.DAY))
+        self.assertIn("document on file", ib_send.stage2_hold(self.db, "b@x.io", "8", "999", self.DAY))
+
+    def test_old_document_outside_the_window_does_not_hold(self):
+        self.add_doc(7, "999", "2026-09-01")
+        self.assertEqual(ib_send.stage2_hold(self.db, "a@x.io", "7", "100", self.DAY), "")
+
+    def test_unreadable_proof_store_fails_closed(self):
+        ib_send.PROOF_STORE = os.path.join(self.tmp.name, "absent.sqlite")
+        self.assertIn("proof store unreadable", ib_send.stage2_hold(self.db, "a@x.io", "7", "100", self.DAY))
