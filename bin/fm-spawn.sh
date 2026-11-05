@@ -1191,6 +1191,7 @@ RAW_LAUNCH=0
 # validation teardown uses, so a malformed, ambiguous, or foreign record
 # refuses here exactly as it refuses there.
 RELAUNCH_PRIOR_HARNESS=
+RELAUNCH_PRIOR_TASK_TMP=
 if [ "$RELAUNCH" -eq 1 ]; then
   [ "${#POS[@]}" -eq 1 ] || {
     echo "error: --relaunch takes the task id only; its project or home comes from the task's own record" >&2
@@ -1250,6 +1251,11 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
+  # A relaunch keeps the temp root the task already recorded, so a task spawned
+  # before the cache-directory move keeps the root its own teardown will remove
+  # instead of stranding it and starting a second one.
+  RELAUNCH_PRIOR_TASK_TMP=$(fm_meta_get "$RELAUNCH_META" tasktmp)
+  case "$RELAUNCH_PRIOR_TASK_TMP" in /*) ;; *) RELAUNCH_PRIOR_TASK_TMP= ;; esac
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
@@ -2927,9 +2933,15 @@ if [ "$KIND" != secondmate ]; then
   esac
 fi
 
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/ and
-# every other program's temp nested at tmp/. Go won't create GOTMPDIR, so mkdir
-# before it is used; fm-teardown removes the whole root.
+# Per-task temp root: ${XDG_CACHE_HOME:-$HOME/.cache}/fm/<id>/ with Go's build
+# temp nested at gotmp/ and every other program's temp nested at tmp/. It lives
+# under the user's cache directory rather than /tmp because /tmp is wiped at
+# boot, which destroys a live task's scratch mid-run, and on many hosts it is a
+# small tmpfs that a fleet's lane scratch can fill. Go won't create GOTMPDIR, so
+# mkdir before it is used; fm-teardown removes the whole root through the
+# tasktmp= record, so a task spawned before this move still cleans up the /tmp
+# root it actually created, and a relaunch reuses that recorded root rather
+# than stranding it.
 #
 # TMPDIR is exported too, and that is deliberate. The earlier note here said
 # TMPDIR was "too broad (affects every program's temp, not just Go's)" and set
@@ -2937,11 +2949,10 @@ fi
 # what is needed: /tmp held 950,700 entries, 831,000 of them the default temp
 # directory of a Python or shell test suite that never removed it. A leak that
 # lands in $TASK_TMP/tmp is removed by teardown; a leak that lands in /tmp is
-# removed by nobody. The path stays short because unix socket paths are capped
-# at 108 bytes and some suites put a socket under TMPDIR.
+# removed by nobody.
 #
 # Opt out with config/task-tmpdir containing "off" (docs/configuration.md).
-TASK_TMP="/tmp/fm-$ID"
+TASK_TMP="${RELAUNCH_PRIOR_TASK_TMP:-${XDG_CACHE_HOME:-$HOME/.cache}/fm/$ID}"
 mkdir -p "$TASK_TMP/gotmp" "$TASK_TMP/tmp"
 TASK_TMPDIR_ENABLED=1
 if [ -f "$CONFIG/task-tmpdir" ] && [ "$(tr -d '[:space:]' <"$CONFIG/task-tmpdir" 2>/dev/null)" = off ]; then
