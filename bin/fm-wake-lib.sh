@@ -1663,6 +1663,27 @@ fm_wake_append() {
   status=0
 
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  # One pending wake per key. A machine source that re-fires the same key (a process-event
+  # watcher, a lane tick) used to append a duplicate row every poll: 30 copies of one key
+  # were observed in the queue, which turns the chair's queue into a flood and buries the
+  # real wakes. A key already pending is already going to be delivered, so a second row
+  # adds nothing. The check runs under the lock so two writers cannot both pass it.
+  # Coalesce, do not drop: a repeated key keeps ONE row carrying the LATEST payload, so a
+  # re-fired process-event or lane tick updates the pending wake instead of stacking a
+  # duplicate. 30 copies of one key were observed in the queue, which floods the chair.
+  # Scope: only machine `check` wakes whose key is a process-event key. `signal` rows are
+  # per-actor (a branch and main may legitimately hold the same key) and must never be
+  # coalesced; tests/fm-wake-queue.test.sh pins that.
+  if [ "$kind" = check ] && case "$clean_key" in procevent:*) true ;; *) false ;; esac; then
+  if awk -F '\t' -v k="$clean_key" 'NF >= 5 && $4 == k { found = 1; exit } END { exit !found }' "$FM_WAKE_QUEUE" 2>/dev/null; then
+    _fm_wake_coalesce_tmp="$FM_WAKE_QUEUE.coalesce.$$"
+    if awk -F '\t' -v k="$clean_key" 'NF >= 5 && $4 == k { next } { print }' "$FM_WAKE_QUEUE" > "$_fm_wake_coalesce_tmp" 2>/dev/null; then
+      mv "$_fm_wake_coalesce_tmp" "$FM_WAKE_QUEUE" 2>/dev/null || rm -f "$_fm_wake_coalesce_tmp"
+    else
+      rm -f "$_fm_wake_coalesce_tmp"
+    fi
+  fi
+  fi
   _fm_recovery_marker_publish "$recovery_marker" downtime || status=$?
   if [ "$status" -eq 0 ]; then
     seq=$(cat "$seq_file" 2>/dev/null || echo 0)
