@@ -77,10 +77,17 @@ test_slow_check_is_logged_and_the_beacon_advances_between_checks() {
 #!/usr/bin/env bash
 sleep 6
 SH
+  # GNU first, BSD second. The reverse order is a trap on GNU coreutils, where
+  # `-f` is *filesystem* stat: it consumes the format string as a path, prints a
+  # "  File: ..." report on stdout, and still exits non-zero, so the fallback
+  # runs but the captured value is the report plus the timestamp. The following
+  # arithmetic then fails and the check emits nothing at all, which starves the
+  # sweep of the very observation this case asserts on. tests/fm-busy-state.test.sh
+  # carries the same regression for issue #2625.
   cat > "$home/state/b-beat.check.sh" <<'SH'
 #!/usr/bin/env bash
 now=$(date +%s)
-beat=$(stat -f %m "$FM_HOME/state/.last-watcher-beat" 2>/dev/null || stat -c %Y "$FM_HOME/state/.last-watcher-beat")
+beat=$(stat -c %Y "$FM_HOME/state/.last-watcher-beat" 2>/dev/null || stat -f %m "$FM_HOME/state/.last-watcher-beat")
 printf 'beacon age %ss after the slow check\n' "$((now - beat))"
 SH
   chmod 0700 "$home/state/a-slow.check.sh" "$home/state/b-beat.check.sh"
