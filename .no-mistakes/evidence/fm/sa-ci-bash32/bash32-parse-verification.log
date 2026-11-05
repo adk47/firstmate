@@ -1,0 +1,57 @@
+# Bash 3.2 parse verification: tests/fm-pi-watch-extension.test.sh
+
+Change under test: 3587605 (comment rewording only, 3 lines, all // comments inside JS heredoc bodies)
+Base: f49ebc4
+
+## 1. Minimal reproduction of the defect mechanism (bash 3.2.57)
+```
+$ cat minimal.sh
+# Minimal reproduction of the Bash 3.2 defect: an apostrophe inside a comment
+# in a $( ... <<'EOF' ... EOF ) heredoc body is parsed as shell code.
+out=$(node --input-type=module 2>&1 <<'EOF'
+// the branch's model turn
+console.log("hi");
+EOF
+)
+printf '%s\n' "$out"
+
+$ docker run --rm -v /w bash:3.2 -c "bash -n /w/minimal.sh"
+/w/minimal.sh: line 8: unexpected EOF while looking for matching `''
+/w/minimal.sh: line 9: syntax error: unexpected end of file
+exit=2
+```
+
+## 2. CI macos-stock-bash parse sweep, PRE-FIX file (base commit f49ebc4)
+```
+$ git show f49ebc4:tests/fm-pi-watch-extension.test.sh > base.sh
+$ docker run --rm -v /w bash:3.2 -c "bash -n /w/base.sh"
+/w/base.sh: line 921: syntax error near unexpected token `;;'
+/w/base.sh: line 921: `    ;;'
+exit=2  <-- CI job 'Stock macOS Bash snapshot compatibility' fails here
+```
+
+## 3. CI macos-stock-bash parse sweep, POST-FIX file (target commit 3587605)
+The CI step is: bin/fm-lint.sh --list-files | while read f; do /bin/bash -n \"\$f\"; done
+```
+$ bin/fm-lint.sh --list-files
+tests/fm-pi-watch-extension.test.sh
+
+$ docker run --rm -v /repo:ro -v /w bash:3.2 -c "<CI parse sweep>"
+GNU bash, version 3.2.57(1)-release (x86_64-pc-linux-musl)
+checking tests/fm-pi-watch-extension.test.sh
+parse_fail=0
+```
+
+## 4. Test behavior unchanged: full test file under bash 5.2
+```
+$ bash tests/fm-pi-watch-extension.test.sh
+exit=0, 59 'ok -' assertions, 0 'not ok'
+
+--- tail ---
+ok - OpenCode late unretired closes resume classified supervision
+ok - OpenCode clean empty close triggers a bounded continuity retry
+ok - OpenCode established clean closes stop at the configured retry limit
+ok - OpenCode close handler verifies session-lock ownership before successor launch
+ok - OpenCode watcher plugin coordinates with the turn-end guard
+ok - OpenCode healthy arm output does not suppress the turn-end guard
+```
