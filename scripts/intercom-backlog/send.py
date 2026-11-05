@@ -226,12 +226,16 @@ def live_pending(uid, query=None):
     return int(c[0][0]) if c else 0, int(k[0][0]) if k else 0
 
 
-def live_credit_pending(uid, query=None):
+def live_credit_pending(uid, query=None, presented=None):
     """R25: the pending-credit count for EVERY profile the account presents, read from core at send time.
-    Raises on any read failure - the caller REFUSES, it never falls back to the census field."""
+    Raises on any read failure - the caller REFUSES, it never falls back to the census field.
+    `presented` is the pre-resolved {user id: [profile ids]} map (one batched resolver call per run);
+    when it is None the resolver is called for this account alone."""
     query = query or trino
-    from credit_review import identity_resolver  # noqa: E402  the ONE identity resolver
-    presented = identity_resolver.presented_ids([uid], query).get(str(uid), [])
+    if presented is None:
+        from credit_review import identity_resolver  # noqa: E402  the ONE identity resolver
+        presented = identity_resolver.presented_ids([uid], query)
+    presented = presented.get(str(uid), [])
     where = [f"userid = {int(uid)}"]
     if presented:
         ids = ",".join("'" + p.replace("'", "''") + "'" for p in presented)
@@ -493,6 +497,7 @@ def _main():
         stats["skipped"][reason] = stats["skipped"].get(reason, 0) + 1
 
     done = 0
+    presented_map = None
     for r in rows:
         if done >= a.max:
             break
@@ -518,8 +523,19 @@ def _main():
         pending = None
         if line_key == "credit-request":
             # R25: the zero-vs-nonzero split is a LIVE core read, per account, right before the send.
+            # The presented-profile map is resolved ONCE for the whole run (it is the expensive part);
+            # the pending COUNT itself is still read per account, here, at send time.
+            if presented_map is None:
+                from credit_review import identity_resolver  # noqa: E402
+                try:
+                    presented_map = identity_resolver.presented_ids(
+                        sorted({x["user_id"] for x in rows if x.get("user_id")}), trino)
+                except Exception:
+                    presented_map = {}
+                    stats["skipped_zero_nonzero"] += 1
+                    skip("credit state unreadable (R25: refuse, never guess)"); continue
             try:
-                pending = live_credit_pending(uid)
+                pending = live_credit_pending(uid, presented=presented_map)
             except Exception:
                 stats["skipped_zero_nonzero"] += 1
                 skip("credit state unreadable (R25: refuse, never guess)"); continue
