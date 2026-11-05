@@ -7,7 +7,9 @@
 #   * sa-cli never writes the event log itself; the store is the sole writer
 #   * all five verbs round-trip into the store's projections
 #   * concurrent ticket creation keeps distinct ids and both tickets
-#   * the extension registers exactly five tools, no commands, no event hooks
+#   * the store's own unit suite passes
+#   * the extension registers exactly five tools, no commands, no event hooks,
+#     and its sa_ticket reaches the CLI without a shell
 #
 # The live Pi session probe is development-only evaluation: set SA_LIVE_PI=1 to
 # run it. It is not part of the deterministic CI proof.
@@ -162,57 +164,136 @@ test_concurrent_tickets_keep_distinct_ids() {
 }
 
 # --------------------------------------------------------------------------- 7
-test_extension_registers_five_tools() {
-  local pkg typebox fixture out
-  command -v node >/dev/null 2>&1 || { note "node not found - extension surface proof not run"; return 0; }
-  pkg=${FM_PI_PACKAGE_DIR:-}
-  if [ -z "$pkg" ] && command -v npm >/dev/null 2>&1; then
-    pkg="$(npm root -g 2>/dev/null)/@earendil-works/pi-coding-agent"
-  fi
-  if [ ! -f "$pkg/package.json" ] && command -v pi >/dev/null 2>&1; then
-    pkg=$(python3 -c 'import os,sys; print(os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(sys.argv[1])))))' "$(command -v pi)")
-  fi
-  [ -f "$pkg/package.json" ] || { note "installed pi package not found - extension surface proof not run"; return 0; }
-  typebox="$pkg/node_modules/typebox"
-  [ -d "$typebox" ] || { note "typebox not found - extension surface proof not run"; return 0; }
-
-  fixture="$TMP_ROOT/ext"
-  mkdir -p "$fixture/node_modules/@earendil-works/pi-coding-agent"
-  printf '{"name":"@earendil-works/pi-coding-agent","version":"0.0.0","type":"module","main":"index.js"}\n' \
-    >"$fixture/node_modules/@earendil-works/pi-coding-agent/package.json"
-  printf 'export {};\n' >"$fixture/node_modules/@earendil-works/pi-coding-agent/index.js"
-  ln -s "$typebox" "$fixture/node_modules/typebox"
-  printf '{"type":"module"}\n' >"$fixture/package.json"
-  printf 'const n: number = 1;\nconsole.log(n);\n' >"$fixture/probe.ts"
-  node "$fixture/probe.ts" >/dev/null 2>&1 \
-    || { note "node cannot run TypeScript - extension surface proof not run"; return 0; }
-  cp "$EXT" "$fixture/sa-router.ts"
-
-  out=$(cd "$fixture" && node --input-type=module 2>&1 <<'JS'
-const mod = await import("./sa-router.ts");
-const tools = [];
-const commands = [];
-const hooks = [];
-const pi = {
-  registerTool(tool) { tools.push(tool.name); },
-  registerCommand(name) { commands.push(name); },
-  on(event) { hooks.push(event); },
-  exec: async () => ({ code: 0, stdout: "", stderr: "" }),
-};
-mod.default(pi);
-console.log(JSON.stringify({ tools, commands, hooks }));
-JS
-)
-  printf '%s' "$out" | grep -q '"tools":\["sa_ticket","sa_assign","sa_reply","sa_rule","sa_escalate"\]' \
-    || fail "extension did not register exactly the five sa_* tools: $out"
-  printf '%s' "$out" | grep -q '"commands":\[\]' \
-    || fail "extension registered a command: $out"
-  printf '%s' "$out" | grep -q '"hooks":\[\]' \
-    || fail "extension registered an event hook: $out"
-  pass "extension registers exactly the five sa_* tools, no commands, no hooks"
+test_store_unit_suite() {
+  local out
+  out=$(cd "$ROOT" && python3 -m unittest discover -s sa/tests 2>&1) \
+    || fail "the SA store unit suite failed: $out"
+  pass "the SA store unit suite passes"
 }
 
 # --------------------------------------------------------------------------- 8
+test_extension_registers_five_tools() {
+  local fixture out problems tid
+  command -v node >/dev/null 2>&1 || { note "node not found - extension surface proof not run"; return 0; }
+
+  # A stub Pi SDK and a stub typebox: the extension only needs registerTool,
+  # registerCommand, on, and exec, plus Type.Object/String/Optional. Building
+  # them here keeps the proof deterministic instead of depending on whatever
+  # happens to be installed on the machine.
+  fixture="$TMP_ROOT/ext"
+  mkdir -p "$fixture/sa/extensions" \
+    "$fixture/node_modules/@earendil-works/pi-coding-agent" \
+    "$fixture/node_modules/typebox"
+  ln -s "$ROOT/sa/bin" "$fixture/sa/bin"
+  ln -s "$ROOT/sa/lib" "$fixture/sa/lib"
+  cp "$EXT" "$fixture/sa/extensions/sa-router.ts"
+  printf '{"type":"module"}\n' >"$fixture/package.json"
+  printf '{"name":"@earendil-works/pi-coding-agent","version":"0.0.0","type":"module","exports":"./index.js"}\n' \
+    >"$fixture/node_modules/@earendil-works/pi-coding-agent/package.json"
+  printf 'export {};\n' >"$fixture/node_modules/@earendil-works/pi-coding-agent/index.js"
+  printf '{"name":"typebox","version":"0.0.0","type":"module","exports":"./index.js"}\n' \
+    >"$fixture/node_modules/typebox/package.json"
+  cat >"$fixture/node_modules/typebox/index.js" <<'JS'
+export const Type = {
+  Object: (properties) => ({ type: "object", properties }),
+  String: (options = {}) => ({ type: "string", ...options }),
+  Optional: (schema) => schema,
+};
+JS
+
+  out=$(cd "$fixture" && node --input-type=module 2>&1 <<'JS'
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const run = promisify(execFile);
+const mod = await import("./sa/extensions/sa-router.ts");
+const tools = [];
+const commands = [];
+const hooks = [];
+const execs = [];
+const pi = {
+  registerTool(tool) { tools.push(tool); },
+  registerCommand(name) { commands.push(name); },
+  on(event) { hooks.push(event); },
+  async exec(cmd, args, opts) {
+    execs.push({ cmd, args, shell: opts?.shell ?? null });
+    try {
+      const { stdout, stderr } = await run(cmd, args, { env: process.env });
+      return { code: 0, stdout, stderr };
+    } catch (error) {
+      return {
+        code: error.code ?? 1,
+        stdout: error.stdout ?? "",
+        stderr: error.stderr ?? "",
+      };
+    }
+  },
+};
+mod.default(pi);
+const ticket = tools.find((tool) => tool.name === "sa_ticket");
+const result = await ticket.execute(
+  "call-1",
+  { title: "ext ticket", body: "via the extension", requester: "sa-router.test.sh" },
+  undefined,
+);
+console.log(
+  JSON.stringify({
+    tools: tools.map((tool) => tool.name),
+    commands,
+    hooks,
+    execs,
+    text: result.content[0].text,
+  }),
+);
+JS
+)
+
+  problems=$(printf '%s' "$out" | python3 -c '
+import json, sys
+
+data = json.load(sys.stdin)
+expected = ["sa_ticket", "sa_assign", "sa_reply", "sa_rule", "sa_escalate"]
+problems = []
+if data["tools"] != expected:
+    problems.append("tools are %r, expected %r" % (data["tools"], expected))
+if data["commands"]:
+    problems.append("registered commands: %r" % (data["commands"],))
+if data["hooks"]:
+    problems.append("registered event hooks: %r" % (data["hooks"],))
+if len(data["execs"]) != 1:
+    problems.append("sa_ticket made %d exec calls" % len(data["execs"]))
+else:
+    call = data["execs"][0]
+    if call["cmd"] != "python3":
+        problems.append("sa_ticket ran %r, not python3" % (call["cmd"],))
+    if not call["args"][0].endswith("/sa/bin/sa-cli"):
+        problems.append("sa_ticket ran %r, not the sa-cli" % (call["args"][0],))
+    if call["args"][1:] != [
+        "ticket",
+        "--title",
+        "ext ticket",
+        "--body",
+        "via the extension",
+        "--requester",
+        "sa-router.test.sh",
+    ]:
+        problems.append("sa_ticket argv is %r" % (call["args"][1:],))
+    if call["shell"] is not None:
+        problems.append("sa_ticket exec used a shell: %r" % (call["shell"],))
+if not data["text"].startswith("T-"):
+    problems.append("sa_ticket returned %r" % (data["text"],))
+if problems:
+    print("; ".join(problems))
+    sys.exit(1)
+' 2>&1) || fail "extension surface proof failed: $problems"
+
+  tid=$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["text"])')
+  [ "$(ticket_field "$tid" title)" = "ext ticket" ] \
+    || fail "the extension's sa_ticket did not reach the store: $out"
+  pass "extension registers exactly the five sa_* tools, no commands, no hooks, and sa_ticket reaches the CLI"
+}
+
+# --------------------------------------------------------------------------- 9
 test_live_router_session() {
   local tools_out got neg_out
   if [ "${SA_LIVE_PI:-0}" != "1" ]; then
@@ -244,6 +325,7 @@ test_argv_is_never_shell_interpreted
 test_cli_never_writes_the_log
 test_five_verbs_round_trip
 test_concurrent_tickets_keep_distinct_ids
+test_store_unit_suite
 test_extension_registers_five_tools
 test_live_router_session
 
