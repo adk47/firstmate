@@ -2129,6 +2129,9 @@ jobs:
           # credit-trust-decide (trust-yet-verify decider): server-mirror conflict
           # predicate, big tracks never approved, never re-ask, ledger before PUT.
           python3 scripts/tests/test_credit_trust_decide.py
+          # doc-verified T0/T1 (Fable [key=doc-approval-doctrine] 2026-11-03, caps in USERS 2026-11-04):
+          # one CAN-FAIL test per gate, the provisional 7-day row and its revert, the atomic slot.
+          python3 scripts/tests/test_doc_approve.py
           # L12 executor (fable-decider closes): tray validation, every write-boundary guard (each with a
           # red mutant), daily cap, kill file, registry re-check, read-back, audit. Hermetic.
           python3 scripts/tests/test_credit_fable_executor.py

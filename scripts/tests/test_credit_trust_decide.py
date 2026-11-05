@@ -36,7 +36,7 @@ from credit_review.ledger import Ledger  # noqa: E402
 PID_CLAIMANT_A = "ff7a7b1c-0000-4000-8000-000000000015"
 PROFILES = {**T.PROFILES,
             PID_CLAIMANT_A: {"name": "Claimant A", "rawProfiles": [{"id": "TJ", "source": "tidal"}], "knownAsNames": []}}
-TRACKS = {**T.TRACKS, "small": T.track(20), "nopop": T.track(None), "mid": T.track(40),
+TRACKS = {**T.TRACKS, "zero": T.track(0), "small": T.track(20), "nopop": T.track(None), "mid": T.track(40),
           "artless": T.track(20, artists=("art-unreadable",)), "starry": T.track(20, artists=(T.ART_STAR,)),
           "artnopop": T.track(20, artists=("art-nopop",)),
           "art404": T.track(20, artists=("art-deleted",)), "flaky": T.track(20), "p12a": T.track(12), "p12b": T.track(12), "p12c": T.track(12)}
@@ -1606,6 +1606,378 @@ class ServerAgentGuardMirror(Base):
         self.assertTrue(outs[uuid_of(320)].startswith("skipped:agent_cannot_approve_declined"))
         self.assertTrue(outs[uuid_of(321)].startswith("error:"), "one retry only; then it is an error")
         self.assertIsNotNone(err)
+
+
+class _Answering:
+    """A judge that returns one prepared JudgeResult for every claim (the decider calls .judge)."""
+
+    def __init__(self, result):
+        self.result, self.calls = result, 0
+
+    def judge(self, mode, evidence):
+        self.calls += 1
+        return self.result
+
+    def judge_many(self, mode, evidences, ids):
+        return {i: self.result for i in ids}
+
+
+class DocApprovalDispatcher(Base):
+    """QA #1684 findings 1-3 at the DISPATCHER, not at the gates: a verified document must be able to
+    change a `support` ask into an approval, must never leave a phantom row when a later guard or the
+    core write refuses it, and a doc-only apply must hold the asks it does not authorise."""
+
+    RAWS = {"small": [T.raw("Real Engineer", "mixer")], "t1": [T.raw("Real Engineer", "mixer")]}
+
+    def setUp(self):
+        super().setUp()
+        from credit_review import account_gate
+        # both classes approved: the doc class may approve, and the wider automation is NOT doc-only
+        Path(decide.REGISTRY).write_text(json.dumps({"automations": {
+            decide.AUTOMATION: {"approved": True, "approved_by": "captain", "approval_ref": "r0"},
+            decide.DOC_AUTOMATION: {"approved": True, "approved_by": "Fable", "approval_ref": "doc-approval-doctrine"}}}))
+        self._doc_store, self._doc_proof = decide.DOC_STORE, decide.DOC_PROOF_STORE
+        self._doc_kill = decide.DOC_APPROVE_KILL
+        decide.DOC_STORE = Path(self.tmp) / "doc-verify.sqlite"
+        decide.DOC_PROOF_STORE = Path(self.tmp) / "doc-intake.sqlite"
+        decide.DOC_APPROVE_KILL = Path(self.tmp) / "no-kill-file"
+        self.addCleanup(setattr, decide, "DOC_STORE", self._doc_store)
+        self.addCleanup(setattr, decide, "DOC_PROOF_STORE", self._doc_proof)
+        self.addCleanup(setattr, decide, "DOC_APPROVE_KILL", self._doc_kill)
+        # the account gate shells out in production; here it is an allow (its own suite covers HOLD/UNKNOWN)
+        self._patches = [unittest.mock.patch.object(
+            account_gate, "check", lambda uid, runner=None: account_gate.GateResult(account_gate.ALLOW, ()))]
+        for p in self._patches:
+            p.start()
+            self.addCleanup(p.stop)
+        d = sqlite3.connect(decide.DOC_STORE)
+        d.executescript("""
+            CREATE TABLE dv_outcomes (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL, at TEXT NOT NULL,
+              proof_id TEXT NOT NULL, request_id TEXT NOT NULL, role TEXT NOT NULL, user_id INTEGER,
+              source_ref TEXT, h3_verdict TEXT, outcome TEXT NOT NULL, reason TEXT NOT NULL, need TEXT,
+              account_hold INTEGER NOT NULL DEFAULT 0, detail_json TEXT NOT NULL, version TEXT NOT NULL,
+              intake_id TEXT);""")
+        d.commit()
+        d.close()
+        p = sqlite3.connect(decide.DOC_PROOF_STORE)
+        p.executescript(STAGE2_SCHEMA)
+        p.commit()
+        p.close()
+        self.doc_rid = uuid_of(400)
+        self.file_doc(self.doc_rid, user_id=900)
+        # a judge that answers the same way for every claim: NEEDS-HUMAN with no citation is NOT_FOUND
+        self.NOT_FOUND = _Answering(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, provider="codex"))
+        contradicted = JudgeResult(ok=True, verdict="CONTRADICTED", confidence=0.9, provider="codex")
+        contradicted.findings = [{"source_url": "https://label.example/press", "quote": "credited to another writer",
+                                  "effect": "contradicts", "confidence": 0.9}]
+        contradicted.cited_urls = ["https://label.example/press"]
+        self.CONTRADICTED = _Answering(contradicted)
+
+    def file_doc(self, request_id, *, user_id=900, outcome="verified", version="dv-4", at="2026-10-31T12:26:32Z",
+                 sha="a4205f34", intake_id=None):
+        intake = intake_id or "145833:a4205f34"
+        d = sqlite3.connect(decide.DOC_STORE)
+        for role in ("Lyricist", "Composer"):
+            d.execute("INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, user_id, h3_verdict, outcome,"
+                      " reason, account_hold, detail_json, version, intake_id) VALUES ('r1',?,'sha',?,?,?,"
+                      " 'PLAUSIBLE',?,'because',0,'{}',?,?)",
+                      (at, request_id, role, user_id, outcome, version, intake))
+        d.commit()
+        d.close()
+        p = sqlite3.connect(decide.DOC_PROOF_STORE)
+        p.execute("INSERT OR REPLACE INTO proof_intake (intake_id, user_id, subject, candidate_request_ids_json,"
+                  " conversation_id, source, file_sha256, received_at, filed_by) VALUES (?,?,'credit',?,'777',"
+                  "'intercom',?,'2026-10-24T06:49:57Z','proof_intake')",
+                  (intake, user_id, json.dumps([request_id]), sha))
+        p.commit()
+        p.close()
+
+    def approve_writes(self, w):
+        return [i for c in w.calls if c["status"] == decide.APPROVED for i in c["ids"]]
+
+    def doc_rows(self):
+        return [dict(zip(("request_id", "state", "ref"), r)) for r in
+                sqlite3.connect(decide.DOC_STORE).execute("SELECT 1").fetchall()] if False else [
+            {"request_id": r[0], "state": r[1], "ref": r[2]} for r in
+            self.db.execute("SELECT request_id, state, ref FROM doc_approvals")]
+
+    # ── round 8, finding 1: a bound request OUTSIDE this batch still has a known owner ──────────
+    def test_the_rollover_works_when_a_document_binds_more_requests_than_the_per_user_cap(self):
+        """25 today, 1 tomorrow - and tomorrow's batch does NOT contain the 25 already approved.
+
+        `req_users` was built from this run's rows alone, so the survivor's document looked as if it
+        bound requests with unknown owners and `gate_one_request` refused it for ever. The doc store
+        judged all 26 requests and recorded the account, so it is the authoritative filler; a binding
+        nobody can attribute is still unknown and still fails closed.
+        """
+        rids = [uuid_of(600 + i) for i in range(26)]
+        # a real filing writes one dv_outcomes row per BOUND request (that is what makes a document
+        # multi-binding), so the store can attribute every binding on the day of the filing
+        self.file_multi(rids, user_id=900, intake_id="145833:many", sha="s600")
+        res1, w1 = self.go([req(r, uid=900, track="small") for r in rids[:25]], {}, judge=self.NOT_FOUND)
+        self.assertEqual(len(self.approve_writes(w1)), 25, "the cap spent the whole day on one person")
+        self.assertEqual(res1.doc_approved, 25)
+        # tomorrow: only the SURVIVOR is a candidate - the other 25 bindings are not in this batch
+        admin = T.FakeAdmin([], {}, PROFILES, TRACKS)
+        admin.unreadable = {"art-unreadable", "flaky"}
+        w2 = Writer(self.db)
+        res2 = decide.run(admin, self.db, self.NOT_FOUND, mode="apply", policy=POLICY, writer=w2,
+                          readback=lambda status, ids: set(), now=T.NOW + timedelta(days=1),
+                          rows=[req(rids[25], uid=900, track="small")])
+        self.assertIn(rids[25].lower(), [str(i).lower() for i in self.approve_writes(w2)],
+                      "the rolled-over request is approved, not refused as an unknown owner")
+        self.assertEqual(res2.doc_refused_by_core, 0)
+
+    def file_multi(self, rids, *, user_id=900, intake_id="145833:many", sha="s600"):
+        d = sqlite3.connect(decide.DOC_STORE)
+        for rid in rids:
+            for role in ("Lyricist", "Composer"):
+                d.execute("INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, user_id,"
+                          " h3_verdict, outcome, reason, account_hold, detail_json, version, intake_id)"
+                          " VALUES ('r1','2026-10-31T12:26:32Z','sha',?,?,?,'PLAUSIBLE','verified','because',"
+                          " 0,'{}','dv-4',?)", (rid, role, user_id, intake_id))
+        d.commit()
+        d.close()
+        p = sqlite3.connect(decide.DOC_PROOF_STORE)
+        p.execute("INSERT OR REPLACE INTO proof_intake (intake_id, user_id, subject,"
+                  " candidate_request_ids_json, conversation_id, source, file_sha256, received_at, filed_by)"
+                  " VALUES (?,?,'credit',?,'777','intercom',?,'2026-10-24T06:49:57Z','proof_intake')",
+                  (intake_id, user_id, json.dumps(list(rids)), sha))
+        p.commit()
+        p.close()
+
+    def test_a_bound_owner_the_store_never_judged_still_fails_closed(self):
+        rid = uuid_of(700)
+        self.file_doc(rid, user_id=900)
+        p = sqlite3.connect(decide.DOC_PROOF_STORE)
+        p.execute("UPDATE proof_intake SET candidate_request_ids_json = ? WHERE intake_id = '145833:a4205f34'",
+                  (json.dumps([rid, uuid_of(701)]),))
+        p.commit()
+        p.close()
+        res, w = self.go([req(rid, uid=900, track="small")], {}, judge=self.NOT_FOUND)
+        self.assertEqual(self.approve_writes(w), [], "an unattributable co-binding is never an approval")
+        self.assertEqual(self.decisions()[rid]["decision"], "support",
+                         "…and the row keeps the decision it had: the document changed nothing")
+
+    # ── round 8, finding 2: the document lives in OUR ledger, so core's guard still decides ──────
+    def test_a_document_never_plans_an_approval_CORES_guard_would_refuse(self):
+        """A popularity of 0 passes `gate_tier` (known and small, T0) but core's agent guard refuses a
+        zero-popularity approval as `popularity_unattributable` - the document is recorded in our
+        ledger, never in core, and the PUT carries no proof. Planning it anyway only demoted it later,
+        which made both the class's claim and the run report overstate coverage. It is now refused by
+        name at plan time and the row keeps the guard that already explains it."""
+        rid = self.doc_rid
+        self.file_doc(rid, user_id=900)
+        res, w = self.go([req(rid, uid=900, track="zero")], {}, judge=self.NOT_FOUND)
+        self.assertEqual(self.approve_writes(w), [], "core would refuse it, so nothing is written")
+        self.assertEqual(res.doc_refused_by_core, 1)
+        row = self.db.execute("SELECT state FROM doc_approvals WHERE request_id = ?", (rid,)).fetchone()
+        self.assertIsNone(row, "no doc_approvals row is recorded for an approval core refuses")
+        d = self.decisions()[rid]
+        self.assertEqual(d["decision"], "hold", "the class never claims what core will not accept")
+        self.assertIn("dv-4 verified document", d["reason"])
+        self.assertIn("popularity_unattributable", d["reason"])
+
+    def test_a_high_risk_row_with_a_verified_document_is_HELD_not_asked_for_another_document(self):
+        """The same rule for core's other refusal: a `proof_required` row (risk 100) that already has a
+        verified document must not be sent a document ask - the user already sent one. It is held, with
+        the document and the refusal named."""
+        rid = self.doc_rid
+        self.file_doc(rid, user_id=900)
+        row = req(rid, uid=900, track="small")
+        row["verificationData"]["total_risk_percent"] = 100
+        res, w = self.go([row], {}, judge=self.NOT_FOUND)
+        self.assertEqual(self.approve_writes(w), [])
+        self.assertEqual([c["status"] for c in w.calls], [], "no ask and no approval")
+        self.assertEqual(res.doc_refused_by_core, 1)
+        d = self.decisions()[rid]
+        self.assertEqual(d["decision"], "hold", d["reason"])
+        self.assertIn("proof_required", d["reason"])
+
+    # ── round 5, finding 1: `paid_first_oldest` sorts USERS, so a person's credits are adjacent ──
+    def test_the_doc_pass_visits_a_persons_requests_TOGETHER_in_the_rulings_order(self):
+        """The ruling approves a person's requests together (told ONCE, and "the rest roll to the next
+        day, same user first"), so the plan must visit a user's requests adjacently, oldest user first.
+        Pinned on the order the planner sees, because that adjacency is the property, not the outcome."""
+        a_old, a_new, b = uuid_of(420), uuid_of(421), uuid_of(422)
+        for rid, uid, sha in ((a_old, 900, "s420"), (a_new, 900, "s421"), (b, 901, "s422")):
+            self.file_doc(rid, user_id=uid, intake_id=f"i-{rid}", sha=sha)
+        seen = []
+        real = decide.doc_approve.plan
+
+        def spy(c, *a, **kw):
+            seen.append(c.request_id)
+            return real(c, *a, **kw)
+
+        rows = [req(a_old, uid=900, track="small", created="2026-10-01T00:00:00Z"),
+                req(b, uid=901, track="small", created="2026-11-01T00:00:00Z"),
+                req(a_new, uid=900, track="small", created="2026-11-02T00:00:00Z")]
+        with unittest.mock.patch.object(decide.doc_approve, "plan", spy):
+            self.go(rows, {}, judge=self.NOT_FOUND)
+        self.assertEqual(seen, [a_old, a_new, b],
+                         "user A's two credits are adjacent and A waits longer than B")
+
+    def test_a_user_already_counted_today_never_loses_their_own_remaining_credits(self):
+        """The reason the ordering above cannot cost a person anything: the fleet cap counts PEOPLE, so
+        once a user's slot is spent their other credits do not need another one. (This is what makes
+        QA's "B takes the final slot" interleaving harmless - so the ordering is for the told-once
+        notice and next-day-first rolling, which are the ruling's other two requirements.)"""
+        a_old, a_new, b = uuid_of(430), uuid_of(431), uuid_of(432)
+        for rid, uid, sha in ((a_old, 900, "s430"), (a_new, 900, "s431"), (b, 901, "s432")):
+            self.file_doc(rid, user_id=uid, intake_id=f"i-{rid}", sha=sha)
+        decide.doc_approve.ensure_schema(self.db)
+        for i in range(49):        # exactly ONE fleet slot is left
+            self.db.execute("INSERT INTO doc_approvals (request_id, user_id, intake_id, proof_id, ref,"
+                            " popularity, tier, approved_at, expires_at, state)"
+                            " VALUES (?,?,'i','s','r',3,'T0','2026-11-03T07:00:00Z',"
+                            "'2026-11-10T07:00:00Z','provisional')", (f"filler-{i}", 5000 + i))
+        self.db.commit()
+        rows = [req(a_old, uid=900, track="small", created="2026-10-01T00:00:00Z"),
+                req(b, uid=901, track="small", created="2026-11-01T00:00:00Z"),
+                req(a_new, uid=900, track="small", created="2026-11-02T00:00:00Z")]
+        res, w = self.go(rows, {}, judge=self.NOT_FOUND)
+        approved = set(self.approve_writes(w))
+        self.assertIn(a_old, approved)
+        self.assertIn(a_new, approved, "the user's own second credit rides the slot already spent on them")
+        self.assertNotIn(b, approved, "the user who was already waiting keeps the last slot")
+
+    # ── round 7, finding 1: an UNKNOWN write outcome is not a refusal ──
+    class _BrokenWriter:
+        def __init__(self, committed=frozenset()):
+            self.calls, self.committed = [], set(committed)
+
+        def __call__(self, status, ids, expected):
+            self.calls.append((status, list(ids)))
+            raise decide.admin_api.AdminError("502 from core after the PUT was accepted")
+
+    def test_an_INDETERMINATE_write_neither_releases_the_row_nor_frees_its_slot(self):
+        """QA #1684 round 7, finding 1: `write_chunk` answers `error:unverified:` when the PUT failed AND
+        the readback failed - core may have COMMITTED the credit. Releasing on it took away the only
+        record behind a live credit and gave the slot back for a second approval."""
+        def dead_readback(status, ids):
+            raise decide.admin_api.AdminError("status readback also failed")
+
+        w = self._BrokenWriter()
+        admin = T.FakeAdmin([], {}, PROFILES, TRACKS)
+        res = decide.run(admin, self.db, self.NOT_FOUND, mode="apply", policy=POLICY,
+                         writer=w, readback=dead_readback, now=T.NOW,
+                         rows=[req(self.doc_rid, uid=900, track="small")])
+        row = self.db.execute("SELECT state FROM doc_approvals WHERE request_id = ?", (self.doc_rid,)).fetchone()
+        self.assertEqual(row[0], "indeterminate", "the row stands, for a human to reconcile")
+        self.assertEqual(res.doc_indeterminate, 1)
+        self.assertEqual(res.doc_approved, 0)
+        self.assertEqual(decide.doc_approve.approved_refs(self.db), {},
+                         "an unknown outcome is never served as proof")
+        # the slot stayed spent: a second approval of the same request is refused, not re-counted
+        def dead_readback2(status, ids):
+            raise decide.admin_api.AdminError("nope")
+        w2 = self._BrokenWriter()
+        res2 = decide.run(admin, self.db, self.NOT_FOUND, mode="apply", policy=POLICY,
+                          writer=w2, readback=dead_readback2, now=T.NOW,
+                          rows=[req(self.doc_rid, uid=900, track="small")])
+        self.assertEqual([c for c in w2.calls if c[0] == decide.APPROVED], [],
+                         "no second APPROVAL PUT while the slot is indeterminate")
+        self.assertEqual(self.db.execute("SELECT state FROM doc_approvals WHERE request_id = ?",
+                                         (self.doc_rid,)).fetchone()[0], "indeterminate")
+        self.assertEqual(res2.doc_indeterminate, 0)
+
+    # ── round 7, finding 2: one person's credits reach core in ONE PUT ──
+    def test_a_users_credits_are_never_split_across_PUTs_so_the_notice_is_sent_once(self):
+        """The ruling tells the requester ONCE, listing their credits, and core's notice groups per PUT -
+        so a user's run must not straddle a chunk boundary."""
+        a1, a2, b = uuid_of(440), uuid_of(441), uuid_of(442)
+        for rid, uid, sha in ((a1, 900, "s440"), (a2, 900, "s441"), (b, 901, "s442")):
+            self.file_doc(rid, user_id=uid, intake_id=f"i-{rid}", sha=sha)
+        rows = [req(a1, uid=900, track="small", created="2026-10-01T00:00:00Z"),
+                req(b, uid=901, track="small", created="2026-10-02T00:00:00Z"),
+                req(a2, uid=900, track="small", created="2026-10-03T00:00:00Z")]
+        with unittest.mock.patch.object(decide, "BATCH", 2):
+            res, w = self.go(rows, {}, judge=self.NOT_FOUND)
+        puts = [c["ids"] for c in w.calls if c["status"] == decide.APPROVED]
+        self.assertEqual(len(puts), 2, puts)
+        self.assertEqual(sorted(puts[0]), sorted([a1, a2]), "A's two credits share ONE PUT")
+        self.assertEqual(puts[1], [b])
+
+    # ── finding 1: a NOT_FOUND small track is exactly the case the ruling is about ──
+    def test_a_not_found_small_track_is_approved_by_a_verified_document(self):
+        res, w = self.go([req(self.doc_rid, uid=900, track="small")], {}, judge=self.NOT_FOUND)
+        d = self.decisions()[self.doc_rid]
+        self.assertEqual(d["decision"], "approve", d["reason"])
+        self.assertEqual(d["evidence_kind"], "doc_verified")
+        self.assertEqual(self.approve_writes(w), [self.doc_rid])
+        rows = self.doc_rows()
+        self.assertEqual([(r["request_id"], r["state"]) for r in rows], [(self.doc_rid, "provisional")])
+        self.assertEqual(res.doc_approved, 1)
+
+    def test_a_contradicted_verdict_is_never_converted_by_a_document(self):
+        res, w = self.go([req(self.doc_rid, uid=900, track="small")], {}, judge=self.CONTRADICTED)
+        d = self.decisions()[self.doc_rid]
+        self.assertEqual(d["decision"], "support", "a document never overrides a contradiction")
+        self.assertEqual(self.approve_writes(w), [])
+        self.assertEqual(self.doc_rows(), [])
+
+    def test_a_big_track_document_is_not_converted_and_stays_an_ask(self):
+        """A T2/T3 row never reaches the document path at all: the pre-model big-track rule asks for the
+        DSP credit before any web check, so the ruling's T0/T1 bound is enforced by the ask path itself."""
+        res, w = self.go([req(self.doc_rid, uid=900, track="t1")], {}, judge=self.NOT_FOUND)  # pop 88
+        d = self.decisions()[self.doc_rid]
+        self.assertEqual(d["decision"], "support")
+        self.assertEqual(self.doc_rows(), [])
+        self.assertFalse([line for line in self.logged if "doc-approve planned" in line])
+
+    def test_a_forged_document_is_never_even_a_candidate(self):
+        """`verified_docs()` is the universe, so the newest forged verdict removes the request before any
+        gate runs: it cannot be planned, never mind approved."""
+        self.file_doc(self.doc_rid, outcome="forged")
+        from credit_review import doc_approve
+        self.assertEqual(doc_approve.verified_docs(decide.DOC_STORE, decide.DOC_PROOF_STORE), {})
+        res, w = self.go([req(self.doc_rid, uid=900, track="small")], {}, judge=self.NOT_FOUND)
+        self.assertEqual(self.decisions()[self.doc_rid]["decision"], "support", "the ask stands")
+        self.assertEqual(self.doc_rows(), [])
+
+    # ── finding 2: a later guard refuses -> NO row (no phantom, no spent slot) ──
+    def test_a_later_guard_that_refuses_the_approval_leaves_no_document_row(self):
+        policy = dataclasses.replace(POLICY, max_approvals_per_user_per_day=1)
+        other = uuid_of(401)
+        self.file_doc(other, user_id=900, sha="bbbb", intake_id="145833:bbbb")
+        rows = [req(self.doc_rid, uid=900, track="small"), req(other, uid=900, track="small")]
+        res, w = self.go(rows, {}, judge=self.NOT_FOUND, policy=policy)
+        approved = [r for r in self.decisions().values() if r["decision"] == "approve"]
+        self.assertEqual(len(approved), 1)
+        self.assertEqual(len(self.doc_rows()), 1, "only the request that was actually approved holds a row")
+        self.assertEqual(len(self.approve_writes(w)), 1)
+
+    def test_a_core_write_that_does_not_confirm_releases_the_document_row(self):
+        w = Writer(self.db, {self.doc_rid: "refused_by_human_review"})
+        admin = T.FakeAdmin([], {}, PROFILES, TRACKS)
+        res = decide.run(admin, self.db, self.NOT_FOUND, mode="apply", policy=POLICY, writer=w, now=T.NOW,
+                         rows=[req(self.doc_rid, uid=900, track="small")])
+        self.assertEqual(self.approve_writes(w), [self.doc_rid])
+        rows = self.doc_rows()
+        self.assertEqual([(r["request_id"], r["state"]) for r in rows], [(self.doc_rid, "released")])
+        self.assertEqual(res.doc_approved, 0, "a released row is not an approval and must not be counted")
+        from credit_review import doc_approve
+        self.assertEqual(doc_approve.approved_refs(self.db, doc_store=decide.DOC_STORE, now=T.NOW), {})
+        self.assertTrue(doc_approve.gate_one_per_request(
+            doc_approve.Candidate(self.doc_rid, 900, 20, tuple(
+                doc_approve.verified_docs(decide.DOC_STORE, decide.DOC_PROOF_STORE)[self.doc_rid])),
+            self.db).ok, "the slot was given back: a later run may approve this request")
+
+    # ── finding 3: a doc-only apply holds everything that is not a doc approval ──
+    def test_doc_only_apply_holds_the_support_asks_it_does_not_authorise(self):
+        Path(decide.REGISTRY).write_text(json.dumps({"automations": {
+            decide.AUTOMATION: {"approved": False},
+            decide.DOC_AUTOMATION: {"approved": True, "approved_by": "Fable", "approval_ref": "d"}}}))
+        unproven = uuid_of(402)
+        res, w = self.go([req(self.doc_rid, uid=900, track="small"), req(unproven, uid=901, track="small")],
+                         {}, judge=self.NOT_FOUND)
+        d = self.decisions()
+        self.assertEqual(d[self.doc_rid]["decision"], "approve", "the doc class still writes")
+        self.assertEqual(d[unproven]["decision"], "hold", d[unproven]["reason"])
+        self.assertIn("only doc-verified-t0t1", d[unproven]["reason"])
+        self.assertEqual([i for c in w.calls if c["status"] == decide.UVN for i in c["ids"]], [],
+                         "no ask goes out under a grant that only authorises doc approvals")
+        self.assertEqual(self.approve_writes(w), [self.doc_rid])
 
 
 if __name__ == "__main__":
