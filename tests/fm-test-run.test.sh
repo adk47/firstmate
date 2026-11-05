@@ -761,7 +761,7 @@ test_portable_shard_union_and_coverage_guard() {
   herdr=$("$RUNNER" --list --family real-herdr-gated)
   [ -n "$s1" ] && [ -n "$s2" ] || fail "portable parallel shards must be non-empty"
   # Shards disjoint.
-  overlap=$(comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
+  overlap=$(LC_ALL=C comm -12 <(printf '%s\n' "$s1" | LC_ALL=C sort) <(printf '%s\n' "$s2" | LC_ALL=C sort) || true)
   [ -z "$overlap" ] || fail "portable parallel shards overlap: $overlap"
   # Union of shards equals proven-isolated.
   [ "$(printf '%s\n' "$s1" "$s2" | LC_ALL=C sort -u)" = \
@@ -1298,10 +1298,9 @@ test_herdr_ci_family_run_has_a_step_timeout() {
   # The required Herdr lane's hang tripwire is the family-run *step* bound, not
   # the 75-minute job cap. Parse the workflow as YAML so nested `with.name`
   # artifact keys cannot masquerade as the step contract.
-  command -v ruby >/dev/null 2>&1 \
-    || fail "ruby is required to parse .github/workflows/ci.yml as YAML"
   local json job_timeout step_timeout
-  json=$(ruby -ryaml -rjson -e '
+  if command -v ruby >/dev/null 2>&1; then
+    json=$(ruby -ryaml -rjson -e '
 doc = YAML.load_file(ARGV[0])
 job = doc.fetch("jobs").fetch("tests-herdr")
 step = job.fetch("steps").find { |s|
@@ -1314,7 +1313,22 @@ puts JSON.generate(
   "step_timeout" => step.fetch("timeout-minutes")
 )
 ' "$ROOT/.github/workflows/ci.yml") \
-    || fail "could not parse tests-herdr timeouts from ci.yml"
+      || fail "could not parse tests-herdr timeouts from ci.yml"
+  else
+    command -v python3 >/dev/null 2>&1 \
+      || fail "ruby or python3 is required to parse .github/workflows/ci.yml as YAML"
+    json=$(python3 - "$ROOT/.github/workflows/ci.yml" <<'PY'
+import json, sys, yaml
+with open(sys.argv[1]) as handle:
+    doc = yaml.safe_load(handle)
+job = doc["jobs"]["tests-herdr"]
+step = next(s for s in job["steps"]
+            if isinstance(s, dict) and s.get("name") == "Run real-Herdr family (serial, required)")
+print(json.dumps({"job_timeout": job["timeout-minutes"],
+                  "step_timeout": step["timeout-minutes"]}))
+PY
+) || fail "could not parse tests-herdr timeouts from ci.yml"
+  fi
   job_timeout=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["job_timeout"])' <<<"$json") \
     || fail "could not read job timeout from parsed workflow"
   step_timeout=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["step_timeout"])' <<<"$json") \
