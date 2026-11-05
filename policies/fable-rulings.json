@@ -1,0 +1,60 @@
+{
+  "doc": [
+    "Fable ruling ids that may stand in for a human Slack id in intercom-verify-request.sh --approved-by, and the ONLY",
+    "template classes each one authorizes. The gate and the ledger's audit-stamps read this file; nothing else does. Fail",
+    "closed: an id that is not here, or a class/copy this file does not list for it, still needs the captain's Slack id",
+    "(U7RP6HKUZ).",
+    "",
+    "WHY THIS EXISTS: every campaign send used to require a human's Slack id as the approver, so anything an agent sends",
+    "on its own - the reply-ref class picker, any future unattended runner - was refused at the door even when the copy",
+    "was already approved. The captain (2026-11-03: 'users aren't in the dark ... no human reviews is the goal') had",
+    "Fable pre-approve classes instead, so the approval is a RULING + the exact template, not a live human click.",
+    "",
+    "WHAT AN ENTRY PROVES, EXACTLY: that a Fable ruling exists, in writing, naming this class. It never claims the prose",
+    "is right - the prose is pinned by the gate's byte-exact copy tests and by the ruled copy pack named below. Every",
+    "send made through a ruling id is stamped in the verify ledger with approver_kind=fable-ruling, the ruling id, and",
+    "the template identity hash (scripts/credit_review/verify_ledger.py, audit-stamps), so an audit can tell a",
+    "captain-approved send from a ruled one without reading any log.",
+    "",
+    "ADDING A CLASS IS A REVIEWED EDIT, and needs all of: (1) a written Fable ruling naming the class and the copy, in",
+    "the ruling owner's own record; (2) the copy itself landed in the gate with byte-exact tests; (3) a line here naming",
+    "the ruling id, the campaign and the exact gate copy tokens - never a wildcard. Remove the line to withdraw the",
+    "class. The tokens are the GATE's own COPY values (what the ledger's copy_ref records: reply-ref renders 'refq' for",
+    "--copy q, status-doc-received renders 'docrecvn' for --copy queued-neutral), not the --copy words a caller types.",
+    "",
+    "SLOTS THE CAPTAIN NAMED ON 2026-11-03 (enabled / not yet enabled):",
+    "  refund-confirmation  - ENABLED below (ruling fable-ruling-1103-d2/refund-confirm, gate campaign",
+    "                         refund-confirm, copy token 'refundconfirm'). d2's ruling writes the body; the EMAIL",
+    "                         SUBJECT ('Your refund is on its way (Muso)') is the one customer support staged for that",
+    "                         read (data/cs-systemic-c3/refund-confirmations-ready-1103.md) because the ruling names only",
+    "                         a body - d2 reads the rendered note before either send, so the subject is read too.",
+    "  status-update        - the status copies that read as an update (status-team-review, status-doc-received /i and",
+    "                         R1, uvn-status) each end by telling the user we will message them again. That forward",
+    "                         promise is outside ruling 103's 'no dates, no promises, no money', so enabling them on a",
+    "                         ruling id needs its own ruling. They keep the captain-id path until then. This includes",
+    "                         the picker's OTHER approved ref, fable-copy-1030-r5/i (reply-refs gate_copy",
+    "                         'queued-neutral', campaign status-doc-received): r5 approved its prose, but 103 does not",
+    "                         cover its closing promise, so it is not listed here and the gate refuses it.",
+    "  claim-status         - same shape (claimstatus ends with the same forward promise); not enabled here."
+  ],
+  "rulings": {
+    "fable-ruling-1103-103": {
+      "date": "2026-11-03",
+      "issued_by": "verify-sla-driver-fable-d2 (Fable), under Aaron's 2026-11-03 18:35Z delegation; id written the way that driver's own execution sheet writes them (data/verify-sla-driver-fable-d2/rulings-exec-1103.md: 'each executor writes with an audit row fable-ruling-1103-<n>'), not re-minted per send",
+      "source": "data/factory-autonomy-fable-a1/decisions-1103.md item 103 (caroline-standing-replies); its dry-run precondition closed by the same file's worker sheet [key=product-dispute-refs]",
+      "sentence": "YES standing OK: Caroline sends factual status replies (no dates, no promises, no money) to every paying customer waiting >48 h, logged - ACTION: caroline-operator-c1 enables it.",
+      "classes": {
+        "reply-ref": ["refq", "refr", "refs", "reft", "refu", "refv", "refw", "refx", "refy"]
+      }
+    },
+    "fable-ruling-1103-d2/refund-confirm": {
+      "date": "2026-11-03",
+      "issued_by": "verify-sla-driver-fable-d2 (Fable), single sender seat, 22:0xZ - the driver's own ruling id, relayed to this lane as firstmate inbox 109",
+      "source": "firstmate inbox 109 (2026-11-03T21:58:32Z), ruling refund-confirm-1103; users 228568 and 235578 were refunded in Stripe that night and not told",
+      "sentence": "RULING refund-confirm-1103, execute tonight: SEND each ONE refund confirmation, ledgered, --approved-by 'fable-ruling-1103-d2/refund-confirm' (my ruling id; no human Slack id needed under firstmate 097): copy ref fable-copy-1103-d2/refund-confirm = 'Hi {first_name}, confirming your refund of {amount} issued on {date} to the card ending {last4}. {one factual sentence on what changed} Nothing more is needed from you.' - every placeholder from Stripe/core, never typed by hand.",
+      "classes": {
+        "refund-confirm": ["refundconfirm"]
+      }
+    }
+  }
+}

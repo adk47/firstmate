@@ -46,8 +46,18 @@ missing, the contract is broken: the run fails loud and sends nothing.
 A copy of the `intercom-ops-write.sh` gate for `POST /messages`:
 
 - Caroline (`5763097`) is pinned, and test seams are refused on a deployed copy.
-- `--approved-by` must be the captain (`U7RP6HKUZ`). The `approval_ref` (his 22:12Z words)
-  is pinned and recorded with every send.
+- `--approved-by` is either the captain (`U7RP6HKUZ`) or — since 2026-11-03, at his word ("users
+  aren't in the dark ... no human reviews is the goal") — a **Fable ruling id**
+  (`fable-ruling-YYYYMMDD-N`, e.g. `fable-ruling-1103-103`) for exactly the campaign+copy pairs
+  that ruling pre-approved in `policies/fable-rulings.json`. Every other send, and every
+  free-form reply (`intercom-ops-write.sh`), still needs a human Slack id: a script name is not
+  an approver. The registry is data, so widening a class is a reviewed edit; an unreadable or
+  malformed registry refuses rather than opens. The `approval_ref` (his 22:12Z words) is pinned
+  and recorded with every send, and each claim is stamped with `approver_kind` +
+  `approval_id` + the template identity hash (`campaign|kind|copy|variant`), so
+  "who authorized this note, and which template did it render?" is answered by the ledger
+  alone. `scripts/audit-approval-stamps.sh` (every 15 min, #clio_devops) pages when a send from
+  2026-11-04 on lacks a stamp it can verify; it never repairs and never deletes evidence.
 - The copy is fixed (Fable's final copy, single and multi-credit variants). The caller
   passes only first name, role, track title and artist name, in a JSON file so the email
   never shows up on argv. Every field is HTML-escaped. The rendered text gets the same leak

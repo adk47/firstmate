@@ -209,6 +209,19 @@
 #     from EnvironmentFile (a 644 cron.d line would expose it) and the
 #     service is in AUX_ONFAILURE_UNITS so a failing run pages.
 #
+#   /etc/systemd/system/hydra-refund-confirm-audit.{service,timer}
+#     Runs scripts/audit-refund-confirmations.sh every 30 min (oneshot, read-only).
+#     Pages #clio_devops when a refund the processor issued is older than 24 h
+#     and no refund-confirm note is recorded as sent (captain 2026-11-03 20:04Z
+#     building rule; Fable d2 ruling refund-confirm-1103). Pages ONE page per
+#     refund id; a feed it cannot read pages "could not run" instead of clean.
+#
+#   /etc/systemd/system/hydra-approval-stamps-audit.{service,timer}
+#     Runs scripts/audit-approval-stamps.sh every 15 min (oneshot, read-only).
+#     Pages #clio_devops when a send in the verify ledger lacks a valid approval
+#     stamp (captain 2026-11-03: ruling ids may authorize pre-approved template
+#     classes, so "who authorized this note?" must be answerable from the ledger).
+#
 #   /root/fmc1-intake/intake.py
 #     The legal@ mailbox intake (DMCA / takedown notices -> #cs_priority page),
 #     installed from scripts/legal-intake.py. It is NOT a unit: a 15-min cron on
@@ -399,6 +412,10 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/prod-log-alert-watchdog.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/sentry-issue-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/sentry-issue-watchdog.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/audit-approval-stamps.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/audit-approval-stamps.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/audit-refund-confirmations.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/audit-refund-confirmations.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/release-digest.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/release-digest.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/clickup-sla-digest.sh" ]] \
@@ -691,6 +708,80 @@ RIGHTSHOLDERWDTMR
 
 systemctl daemon-reload
 wd=intercom-rights-holder-watchdog.timer
+systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
+systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
+log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
+
+# ─── approval-stamp audit (scripts/audit-approval-stamps.sh) ──────────
+# Every 15 min. Captain 2026-11-03: "users aren't in the dark ... no human reviews is the goal" - the gate now accepts
+# a Fable ruling id for template classes a ruling pre-approved. A stamp nobody checks is decoration, so this pages
+# #clio_devops when any customer note in the verify ledger lacks an authorizer we can name. Read-only on the ledger.
+cat > /etc/systemd/system/hydra-approval-stamps-audit.service << APPROVALSTAMPSVC
+[Unit]
+Description=Verify-ledger approval-stamp audit (pages when a customer note has no valid approver)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+ExecStart=/bin/bash $HYDRA_ROOT/scripts/audit-approval-stamps.sh
+APPROVALSTAMPSVC
+
+cat > /etc/systemd/system/hydra-approval-stamps-audit.timer << APPROVALSTAMPTMR
+[Unit]
+Description=Audit verify-ledger approval stamps every 15 min
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=15min
+Unit=hydra-approval-stamps-audit.service
+
+[Install]
+WantedBy=timers.target
+APPROVALSTAMPTMR
+
+systemctl daemon-reload
+wd=hydra-approval-stamps-audit.timer
+systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
+systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
+log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
+
+# ─── refund-confirmation audit (scripts/audit-refund-confirmations.sh) ─────────
+# Every 30 min. Captain 2026-11-03 20:04Z building rule + Fable d2 ruling refund-confirm-1103: a refund is money that
+# already moved, so "refunded and not told" has to page by itself. Derives the refund feed from Stripe (read-only, the
+# same credential the verify gate uses - see scripts/lib/refund-feed-from-stripe.sh) and compares it with the verify
+# ledger; pages #clio_devops once per refund id, and pages "could not run" (rather than reporting clean) when Stripe or
+# the ledger cannot be read. No file to be written by anyone: the unit depends on nobody's producer, because QA
+# 2026-11-04 showed that a feed nobody writes is an alert that can never see its subject. The AUDIT keeps the cursor at
+# /var/lib/hydra/credit-review/refund-feed-state.json: it records the last instant a comparison was actually made and
+# every untold refund id, so a ledger outage causes re-coverage instead of a silent hole, an already-paged refund keeps
+# the run red until a note is sent, and a gap older than 60 days is paged rather than papered over.
+cat > /etc/systemd/system/hydra-refund-confirm-audit.service << REFUNDAUDITSVC
+[Unit]
+Description=Refund-confirmation audit (pages when a refund older than 24h has no confirmation note)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+ExecStart=/bin/bash $HYDRA_ROOT/scripts/audit-refund-confirmations.sh
+REFUNDAUDITSVC
+
+cat > /etc/systemd/system/hydra-refund-confirm-audit.timer << REFUNDAUDITTMR
+[Unit]
+Description=Audit refund confirmations every 30 min
+
+[Timer]
+OnBootSec=30min
+OnUnitActiveSec=30min
+Unit=hydra-refund-confirm-audit.service
+
+[Install]
+WantedBy=timers.target
+REFUNDAUDITTMR
+
+systemctl daemon-reload
+wd=hydra-refund-confirm-audit.timer
 systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
 systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
 log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"

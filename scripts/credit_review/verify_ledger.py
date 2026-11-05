@@ -84,6 +84,7 @@ The wrapper calls this as a CLI (one op per call, JSON on stdout). The driver
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -103,6 +104,7 @@ CAMPAIGNS = ("verify-live", "retro-past", "removal-notice", "takeback-notice", "
              "claim-proof-ask", "claim-status", "gap-ask", "merge-pending", "credit-hold-status", "claim-proof-pending", "proof-need-ask",
              "merge-claim-first",
              "reply-ref",   # [key=product-dispute-refs]: r5's approved reply set, reply_due answers only
+             "refund-confirm",   # fable-copy-1103-d2/refund-confirm: a refund that ALREADY happened, told once per refund id
              "uvn-new-rows")   # fable-copy-1101-r5/n1: a told user's owed rows no ask named (one message per row ever)
 # claim-proof-ask (steers-1830 #5, firstmate 125/126): a dated ask to the claimant of a pending
 # profile CLAIM (band B/C) to put the claim's bound-proof code in one platform bio. Its "request
@@ -219,7 +221,10 @@ CREATE TABLE IF NOT EXISTS verify_messages (
   extension_requested_at TEXT,       -- initial note: the user replied (text or attachment); removal held for a human
   last_reply_at TEXT,                -- this message: time of the latest user reply seen in its conversation
   copy_ref TEXT,                     -- p1 615: the gate's copy token this note rendered (uvn, docrecvr, refq, ...)
-  variant TEXT                       -- p1 615: the openers/prefixes it carried, comma-joined (c2, reply_due_correction, o)
+  variant TEXT,                      -- p1 615: the openers/prefixes it carried, comma-joined (c2, reply_due_correction, o)
+  approver_kind TEXT,                -- captain-slack | fable-ruling; NULL only on rows written before 2026-11-03
+  approval_id TEXT,                  -- the Slack UID, or the fable-ruling-YYYYMMDD-N id, that authorizes this send
+  template_sha256 TEXT               -- sha256 of the template identity it rendered (campaign|kind|copy|variant)
 );
 CREATE TABLE IF NOT EXISTS verify_proof_reviews (
   family INTEGER NOT NULL,           -- verify_messages.id of the initial note
@@ -384,6 +389,51 @@ def _check(campaign: str, kind: str = "initial") -> None:
         raise ValueError(f"unknown campaign {campaign!r}")
     if kind not in KINDS:
         raise ValueError(f"unknown kind {kind!r}")
+
+
+# ---------------------------------------------------------------------------------------
+# The approval stamp (captain 2026-11-03: "users aren't in the dark ... no human reviews is the goal").
+# A send is authorized either by a human's Slack id (the original path) or by a Fable ruling that pre-approved the
+# exact template class (policies/fable-rulings.json). Which one it was, and the template it rendered, is stamped on the
+# row so an audit answers "who authorized this send?" from the ledger alone - never from a log, a chat or a promise.
+APPROVER_CAPTAIN = "captain-slack"
+APPROVER_RULING = "fable-ruling"
+APPROVER_KINDS = (APPROVER_CAPTAIN, APPROVER_RULING)
+SLACK_UID_RE = re.compile(r"^U[A-Z0-9]{8,12}$")
+RULING_ID_RE = re.compile(r"^fable-ruling-[0-9]{4}-[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)?$")
+TEMPLATE_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def approval_stamp(kind: str = "", approval_id: str = "", template_sha256: str = "",
+                   approved_by: str = "") -> tuple[str | None, str | None, str | None]:
+    """Validate and normalise one approval stamp. An absent kind is legal (a caller that predates the stamp), but a
+    kind without a usable id is always a bug: a half stamp reads as authorized to everyone downstream."""
+    if not kind:
+        if approval_id or template_sha256:
+            raise ValueError("an approval id or template hash without its approver kind is not a stamp")
+        return None, None, None
+    if kind not in APPROVER_KINDS:
+        raise ValueError(f"unknown approver kind {kind!r} (one of {', '.join(APPROVER_KINDS)})")
+    if not approval_id:
+        raise ValueError("an approval stamp needs an approval id (a Slack user id or a ruling id)")
+    if kind == APPROVER_CAPTAIN and not SLACK_UID_RE.match(approval_id):
+        raise ValueError(f"captain-slack approval id {approval_id!r} is not a human's Slack user id")
+    if kind == APPROVER_RULING and not RULING_ID_RE.match(approval_id):
+        raise ValueError(f"fable-ruling approval id {approval_id!r} is not a fable-ruling-YYYYMMDD-N id")
+    if template_sha256 and not TEMPLATE_SHA_RE.match(template_sha256):
+        raise ValueError("the template hash must be 64 lowercase hex characters")
+    if approved_by and approved_by != approval_id:
+        raise ValueError(f"the stamp names {approval_id} but approved_by is {approved_by!r}: an audit cannot tell "
+                         "which one authorized the send")
+    return kind, approval_id, template_sha256 or None
+
+
+def template_identity_sha256(*, campaign: str, kind: str, copy_ref: str, variant: str = "") -> str:
+    """The template identity hash the gate stamps: campaign|kind|copy|variant. It pins WHICH approved template a note
+    rendered (so a send of an unregistered copy token is visible in the ledger); the prose itself is pinned by the
+    gate's byte-exact copy tests and by body_sha256, which the finalize step records for the exact bytes sent."""
+    identity = "|".join((campaign, kind, copy_ref, variant or ""))
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
 
 def _plus(day: str, n: int) -> str:
@@ -705,11 +755,14 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
           approved_by: str, approval_ref: str, contact_id: str = "", campaign: str = "verify-live",
           refs: list[dict[str, Any]] | None = None, windowed: bool = False, now: datetime | None = None,
           enforce_cap: bool = True, user_id: str = "", reply_due: str = "", conversation: str = "", copy_ref: str = "",
-          variant: str = "", pick_id: str = "") -> dict[str, Any]:
+          variant: str = "", pick_id: str = "", approver_kind: str = "", approval_id: str = "",
+          template_sha256: str = "") -> dict[str, Any]:
     """Atomically claim an initial note. One transaction (BEGIN IMMEDIATE) so two
     concurrent runs cannot both claim the same user-day or request id. A claim-proof-ask note
     records its close day (claim_close_day) as due_day."""
     _check(campaign)
+    approver_kind, approval_id, template_sha256 = approval_stamp(approver_kind, approval_id, template_sha256,
+                                                                 approved_by)
     if windowed and campaign != "verify-live":
         raise ValueError("only verify-live (new provisional approvals) notes carry a removal date")
     ts = stamp(now)
@@ -818,10 +871,11 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
         cur = db.execute(
             "INSERT INTO verify_messages (campaign, kind, user_key, account_id, day, due_day, removal_day, status, "
             "message_type, contact_id, request_ids_json, refs_json, n_credits, approved_by, approval_ref, created_at, "
-            "updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "updated_at, approver_kind, approval_id, template_sha256) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (campaign, "initial", user_key, str(user_id or "").strip() or None, day, due, removal, "attempted",
              message_type, contact_id or None,
-             json.dumps(fresh), json.dumps(keep) if keep else None, len(fresh), approved_by, approval_ref, ts, ts))
+             json.dumps(fresh), json.dumps(keep) if keep else None, len(fresh), approved_by, approval_ref, ts, ts,
+             approver_kind, approval_id, template_sha256))
         row = int(cur.lastrowid)
         # p1 615: what the note rendered, on the row - audits read the ledger, never a preview dir
         db.execute("UPDATE verify_messages SET copy_ref = ?, variant = ? WHERE id = ?",
@@ -961,9 +1015,12 @@ def close_reminder(db: sqlite3.Connection, *, parent_message_id: str, kind: str,
 
 def claim_reminder(db: sqlite3.Connection, *, parent_message_id: str, kind: str, user_key: str, day: str,
                    request_ids: list[str], approved_by: str, approval_ref: str,
-                   now: datetime | None = None, copy_ref: str = "", variant: str = "") -> dict[str, Any]:
+                   now: datetime | None = None, copy_ref: str = "", variant: str = "",
+                   approver_kind: str = "", approval_id: str = "", template_sha256: str = "") -> dict[str, Any]:
     """Atomically claim follow-up `kind` of a sent note. The listed credits must be
     a subset of the note's credits; the user must be the note's user."""
+    approver_kind, approval_id, template_sha256 = approval_stamp(approver_kind, approval_id, template_sha256,
+                                                                 approved_by)
     ts = stamp(now)
     db.execute("BEGIN IMMEDIATE")
     try:
@@ -995,11 +1052,12 @@ def claim_reminder(db: sqlite3.Connection, *, parent_message_id: str, kind: str,
         cur = db.execute(
             "INSERT INTO verify_messages (campaign, kind, parent_row, user_key, account_id, day, due_day, removal_day, "
             "status, message_type, contact_id, request_ids_json, n_credits, approved_by, approval_ref, attempts, "
-            "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "created_at, updated_at, approver_kind, approval_id, template_sha256) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (st["campaign"], kind, st["parent_row"], user_key, st.get("account_id"), day, st["due_day"],
              st["removal_day"], "attempted",
              st["message_type"], st["contact_id"], json.dumps(keep), len(keep), approved_by, approval_ref, attempts,
-             ts, ts))
+             ts, ts, approver_kind, approval_id, template_sha256))
         db.execute("UPDATE verify_messages SET copy_ref = ?, variant = ? WHERE id = ?",
                    (copy_ref or None, variant or None, int(cur.lastrowid)))
         db.execute("COMMIT")
@@ -1753,6 +1811,155 @@ def _ids(s: str) -> list[str]:
     return [x for x in s.split(",") if x]
 
 
+def load_rulings(path: str | Path) -> dict[str, Any]:
+    """The Fable ruling registry (policies/fable-rulings.json) as {ruling id: entry}. An unreadable or malformed file
+    raises: a registry nobody can read must never mean 'everything is approved'."""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    rulings = data.get("rulings")
+    if not isinstance(rulings, dict):
+        raise ValueError(f"{path}: no 'rulings' object")
+    for rid, entry in rulings.items():
+        if not RULING_ID_RE.match(str(rid)):
+            raise ValueError(f"{path}: ruling id {rid!r} is not a fable-ruling-YYYYMMDD-N id")
+        classes = entry.get("classes") if isinstance(entry, dict) else None
+        if not isinstance(classes, dict):
+            raise ValueError(f"{path}: ruling {rid!r} has no 'classes' object")
+        for campaign, copies in classes.items():
+            if campaign not in CAMPAIGNS:
+                raise ValueError(f"{path}: ruling {rid!r} names unknown campaign {campaign!r}")
+            if not isinstance(copies, list) or not all(isinstance(c, str) and c for c in copies):
+                raise ValueError(f"{path}: ruling {rid!r} class {campaign!r} must be a list of copy tokens")
+    return rulings
+
+
+REFUND_ID_RE = re.compile(r"^re_[A-Za-z0-9]{8,64}$")
+
+
+def refund_unconfirmed(db: sqlite3.Connection, *, feed: str | Path, hours: float,
+                       now: str | None = None) -> dict[str, Any]:
+    """Refunds the payment processor issued that NO refund-confirm note has told the customer about (captain
+    2026-11-03 20:04Z building rule; Fable d2 ruling refund-confirm-1103): 'refund issued with no confirmation > N h'.
+
+    The feed is the processor facts (one JSON object per line: refund_id, user_key, issued_at), written by whoever
+    reads Stripe; this check never guesses a refund into existence. An unreadable or malformed feed RAISES - a
+    watchdog must page 'cannot check', never report clean - and a refund whose issued_at cannot be parsed is a
+    finding, not silence. Confirmed means a refund-confirm verify_messages row with status 'sent' names that refund
+    id; anything else (attempted-but-stuck, refused, deferred, never touched) is worth a human's attention."""
+    from datetime import datetime, timezone
+    path = Path(feed)
+    text = path.read_text(encoding="utf-8")   # missing/unreadable -> raises
+    now_dt = (datetime.strptime(now, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc) if now
+              else datetime.now(timezone.utc))
+    rows = db.execute("SELECT request_ids_json, status FROM verify_messages WHERE campaign = 'refund-confirm'"
+                      " AND status = 'sent'").fetchall()
+    told: set[str] = set()
+    for refs, _status in rows:
+        try:
+            for ref in json.loads(refs or "[]"):
+                # a ref is either {"request_id": ...} or the bare id string (older rows and the claim helpers)
+                rid = str(ref.get("request_id") or "") if isinstance(ref, dict) else str(ref or "")
+                if rid:
+                    told.add(rid)
+        except (ValueError, TypeError):
+            continue          # an unreadable refs cell cannot confirm anything; it never confirms a refund
+    seen: set[str] = set()
+    unconfirmed = []
+    for n, line in enumerate(text.splitlines(), 1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError as exc:
+            raise ValueError(f"{path}:{n}: not JSON ({exc})") from exc
+        if not isinstance(rec, dict):
+            raise ValueError(f"{path}:{n}: not a JSON object")
+        rid = str(rec.get("refund_id") or "")
+        if not REFUND_ID_RE.match(rid):
+            raise ValueError(f"{path}:{n}: refund_id {rid!r} is not a Stripe refund id (re_...)")
+        if rid in seen:
+            continue
+        seen.add(rid)
+        if rid in told:
+            continue
+        issued_raw = str(rec.get("issued_at") or "")
+        try:
+            issued = datetime.strptime(issued_raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except ValueError:
+            unconfirmed.append({"refund_id": rid, "user_key": str(rec.get("user_key") or ""),
+                                "issued_at": issued_raw, "age_hours": None,
+                                "why": "issued_at is not a canonical UTC timestamp, so the age cannot be measured"})
+            continue
+        age_h = (now_dt - issued).total_seconds() / 3600.0
+        if age_h >= hours:
+            unconfirmed.append({"refund_id": rid, "user_key": str(rec.get("user_key") or ""),
+                                "issued_at": issued_raw, "age_hours": round(age_h, 1),
+                                "why": f"refunded {age_h:.1f} h ago and no refund-confirm note has been sent"})
+    return {"feed": str(path), "hours": hours, "checked": len(seen), "unconfirmed": unconfirmed,
+            "ok": not unconfirmed}
+
+
+def stamp_problem(row: Any, rulings: dict[str, Any]) -> str:
+    """Why this row is not a validly-authorized send ('' when it is). Reads the stamp only: the ledger, never a log.
+
+    QA 2026-11-04 finding 2: the template hash is RECOMPUTED from the row's own campaign|kind|copy|variant, not merely
+    checked for being non-empty. A fabricated-but-well-shaped digest is worse than a missing one: it makes the audit
+    that exists to prove which template rendered the note report clean on a note no template produced."""
+    kind, approval_id, template_sha256 = row[6], row[7], row[8]
+    approved_by, campaign, copy_ref = row[9], row[1], row[5]
+    variant = row[10] if len(row) > 10 else ""
+    if not kind:
+        return "no approver stamp (a send that did not come through the stamped gate path)"
+    if kind not in APPROVER_KINDS:
+        return f"unknown approver kind {kind!r}"
+    if not approval_id:
+        return "no approval id"
+    if kind == APPROVER_CAPTAIN:
+        if not SLACK_UID_RE.match(str(approval_id)):
+            return f"captain-slack approval id {approval_id!r} is not a Slack user id"
+        if str(approved_by) != str(approval_id):
+            return f"the stamp names {approval_id} but approved_by is {approved_by}"
+    else:
+        if not RULING_ID_RE.match(str(approval_id)):
+            return f"fable-ruling approval id {approval_id!r} is not a ruling id"
+        if str(approved_by) != str(approval_id):
+            return f"the stamp names {approval_id} but approved_by is {approved_by}"
+        entry = rulings.get(str(approval_id))
+        if entry is None:
+            return f"ruling {approval_id} is not in the registry (policies/fable-rulings.json)"
+        allowed = (entry.get("classes") or {}).get(str(campaign)) or []
+        if str(copy_ref or "") not in allowed:
+            return (f"ruling {approval_id} does not pre-approve copy {copy_ref!r} for campaign {campaign!r} "
+                    f"(it lists {allowed or 'nothing'})")
+    if not template_sha256:
+        return "no template hash"
+    if not TEMPLATE_SHA_RE.match(str(template_sha256)):
+        return f"template hash {str(template_sha256)[:16]}... is not a sha256 digest"
+    want = template_identity_sha256(campaign=str(campaign or ""), kind=str(row[4] or ""),
+                                    copy_ref=str(copy_ref or ""), variant=str(variant or ""))
+    if str(template_sha256) != want:
+        return (f"template hash {str(template_sha256)[:16]}... does not match the row's own identity "
+                f"(campaign={campaign!r} kind={row[4]!r} copy={copy_ref!r} variant={variant!r} -> {want[:16]}...)")
+    return ""
+
+
+def audit_stamps(db: sqlite3.Connection, *, since_day: str, registry: str | Path) -> dict[str, Any]:
+    """Every send from `since_day` on must carry a usable approval stamp. Returns the rows that do not, so a watchdog
+    can page: an unauthorized customer message is the one failure this ledger exists to make impossible to hide."""
+    rulings = load_rulings(registry)
+    q = ("SELECT id, campaign, status, day, kind, copy_ref, approver_kind, approval_id, template_sha256, approved_by, "
+         "variant FROM verify_messages WHERE status IN ('attempted','sent') AND day >= ? ORDER BY id")
+    rows = db.execute(q, (since_day,)).fetchall()
+    problems = []
+    for row in rows:
+        why = stamp_problem(row, rulings)
+        if why:
+            problems.append({"id": row[0], "campaign": row[1], "status": row[2], "day": row[3], "copy_ref": row[5],
+                             "approver_kind": row[6], "approval_id": row[7], "why": why})
+    return {"since": since_day, "checked": len(rows), "problems": problems,
+            "rulings": sorted(rulings), "ok": not problems}
+
+
 def _main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="verify-request ledger ops (JSON on stdout)")
     p.add_argument("--db", default=DEFAULT_PATH)
@@ -1780,6 +1987,12 @@ def _main(argv: list[str] | None = None) -> int:
         s.add_argument("--copy-ref", default="", help="p1 615: the gate's copy token this note renders")
         s.add_argument("--variant", default="", help="p1 615: its openers/prefixes, comma-joined (c2, o, ...)")
         s.add_argument("--pick-id", default="", help="QA #1615: reply-ref - the pick the gate matched (re-checked here)")
+        if name == "claim":
+            # the approval stamp (captain 2026-11-03): who authorized this send, and which template it rendered
+            s.add_argument("--approver-kind", default="", choices=("", *APPROVER_KINDS),
+                           help="captain-slack | fable-ruling; empty only for callers that predate the stamp")
+            s.add_argument("--approval-id", default="", help="the Slack user id, or the fable-ruling-YYYYMMDD-N id")
+            s.add_argument("--template-sha256", default="", help="sha256 of the template identity rendered")
     ld = sub.add_parser("log-deferral", help="a note held back for an outside reason: logged, never a lock")
     ld.add_argument("--campaign", required=True, choices=CAMPAIGNS)
     ld.add_argument("--user-key", required=True)
@@ -1805,6 +2018,9 @@ def _main(argv: list[str] | None = None) -> int:
     cr = sub.add_parser("claim-reminder")
     cr.add_argument("--copy-ref", default="")
     cr.add_argument("--variant", default="")
+    cr.add_argument("--approver-kind", default="", choices=("", *APPROVER_KINDS))
+    cr.add_argument("--approval-id", default="")
+    cr.add_argument("--template-sha256", default="")
     cr.add_argument("--parent-message-id", required=True)
     cr.add_argument("--kind", required=True, choices=KINDS[1:])
     cr.add_argument("--user-key", required=True)
@@ -1872,6 +2088,17 @@ def _main(argv: list[str] | None = None) -> int:
     c = sub.add_parser("set-conversation")
     c.add_argument("--message-id", required=True)
     c.add_argument("--conversation-id", required=True)
+    at = sub.add_parser("audit-stamps", help="every send from --since on must carry a usable approval stamp; the rows "
+                        "that do not are the alert (scripts/audit-approval-stamps.sh pages on them)")
+    at.add_argument("--since", required=True, help="UTC day YYYY-MM-DD: audit sends from this day on")
+    at.add_argument("--registry", required=True, help="policies/fable-rulings.json (the ruling ids an audit accepts)")
+    ru = sub.add_parser("refund-unconfirmed", help="refunds the processor issued that no refund-confirm note has told "
+                        "the customer about (the 'refund issued with no confirmation > N h' alert; "
+                        "scripts/audit-refund-confirmations.sh pages on them)")
+    ru.add_argument("--feed", required=True, help="processor refund facts, one JSON object per line (refund_id, "
+                     "user_key, issued_at)")
+    ru.add_argument("--hours", type=float, default=24.0, help="age at which a silent refund is a finding (default 24)")
+    ru.add_argument("--now", default="", help="evaluate the age at this UTC timestamp (tests: YYYY-MM-DDTHH:MM:SSZ)")
     a = p.parse_args(argv)
     try:
         db = connect_ro(a.db) if a.readonly else connect(a.db)
@@ -1889,7 +2116,8 @@ def _main(argv: list[str] | None = None) -> int:
         if a.op == "claim":
             out = claim(db, contact_id=a.contact_id, refs=refs, windowed=a.windowed, user_id=a.user_id,
                         reply_due=a.reply_due, conversation=a.conversation, copy_ref=a.copy_ref, variant=a.variant,
-                        pick_id=a.pick_id, **kw)
+                        pick_id=a.pick_id, approver_kind=a.approver_kind, approval_id=a.approval_id,
+                        template_sha256=a.template_sha256, **kw)
         else:
             out = refuse(db, reason=a.reason, user_id=a.user_id, **kw)
     elif a.op == "log-deferral":
@@ -1912,7 +2140,12 @@ def _main(argv: list[str] | None = None) -> int:
     elif a.op == "claim-reminder":
         out = claim_reminder(db, parent_message_id=a.parent_message_id, kind=a.kind, user_key=a.user_key, day=a.day,
                              request_ids=_ids(a.request_ids), approved_by=a.approved_by, approval_ref=a.approval_ref,
-                             copy_ref=a.copy_ref, variant=a.variant)
+                             copy_ref=a.copy_ref, variant=a.variant, approver_kind=a.approver_kind,
+                             approval_id=a.approval_id, template_sha256=a.template_sha256)
+    elif a.op == "audit-stamps":
+        out = audit_stamps(db, since_day=a.since, registry=a.registry)
+    elif a.op == "refund-unconfirmed":
+        out = refund_unconfirmed(db, feed=a.feed, hours=a.hours, now=(a.now or None))
     elif a.op == "finalize":
         finalize(db, message_row=a.message_row, status=a.status, message_id=a.message_id,
                  conversation_id=a.conversation_id, reason=a.reason, body_sha256=a.body_sha256, api_log=a.api_log)

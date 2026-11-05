@@ -38,6 +38,9 @@ setup() {
   export INTERCOM_VERIFY_TEST_LOG_DIR="$TEST_TMPDIR/api-logs"
   export INTERCOM_VERIFY_TEST_LEDGER="$TEST_TMPDIR/ledger.sqlite3"
   export INTERCOM_VERIFY_TEST_LEDGER_HELPER="$HYDRA_REPO/scripts/credit_review/verify_ledger.py"
+  # the jq modules that ship beside the gate (refund-money.jq): the copies under test live in TEST_TMPDIR, so the
+  # library dir is pointed at the repo - the same one-way seam rule as every other override
+  export INTERCOM_VERIFY_TEST_JQ_LIB="$HYDRA_REPO/scripts/lib"
   export INTERCOM_VERIFY_TEST_DAY="2026-10-15"
   # gap-ask reads stage-2 verdicts from a proof store (stage2() below writes them).
   export INTERCOM_VERIFY_TEST_PROOF_DB="$TEST_TMPDIR/proof.sqlite"
@@ -86,6 +89,9 @@ PY
   export INTERCOM_VERIFY_TEST_COMM_STATE_HELPER="$TEST_TMPDIR/comm_state.py"
   # [key=dated-windows-are-data]: the /o window is read from the policy, so the suite reads the REPO policy by default
   export INTERCOM_VERIFY_TEST_POLICY="$HYDRA_REPO/policies/credit-verify-outbound.json"
+  # The Fable ruling registry: the ONLY file that can authorize an approver other than the captain (2026-11-03).
+  # The captain path never reads it; the ruling tests below point it at throwaway files when they need a bad one.
+  export INTERCOM_VERIFY_TEST_FABLE_RULINGS="$HYDRA_REPO/policies/fable-rulings.json"
   mkdir -p "$INTERCOM_VERIFY_TEST_LOG_DIR"
 
   # curl stub: answers like Intercom per (method, path). Every call is logged as
@@ -103,7 +109,23 @@ PY
   export CURL_STUB_REPLY="$TEST_TMPDIR/reply-payload.json"
   cat > "$STUB_DIR/curl" <<'STUB'
 #!/usr/bin/env bash
-payload="" url="" method="GET"
+payload="" url="" method="GET" argc_note=""
+# the gate hands the Stripe key to curl on STDIN (`-K -`), never in argv: a stub that only reads argv would want it
+# there, so this stub reads the config the same way curl does, and records any argv element that carries the secret.
+for a in "$@"; do case "$a" in *Bearer*|*sk_live*|*sk_test*) echo "ARGV_KEY_LEAK $a" >> "${CURL_STUB_LOG%/*}/argv-leak.log" ;; esac; done
+cfg_stdin=0 prev=""
+for a in "$@"; do
+  case "$a" in --config|-K) prev=cfg ;;
+    -) [ "$prev" = cfg ] && cfg_stdin=1 ;;
+    *) prev="" ;;
+  esac
+done
+if [ "$cfg_stdin" -eq 1 ]; then
+  cfg="$(cat)"
+  url="$(printf '%s\n' "$cfg" | sed -n 's/^url = "\(.*\)"$/\1/p')"
+  printf '%s\n' "$cfg" | grep -q '^header = "Authorization: Bearer ' || { echo "CONFIG_KEY_MISSING"; exit 3; }
+  set --   # the config carried the request: nothing left to parse from argv
+fi
 while [ $# -gt 0 ]; do
   case "$1" in
     -X) method="$2"; shift 2 ;;
@@ -122,6 +144,37 @@ fi
 echo "$method $url" >> "$CURL_STUB_LOG"
 [ -z "$payload" ] || printf '%s\n' "$payload" >> "$CURL_STUB_PAYLOADS"
 path="${url#https://api.intercom.io}"
+# QA 2026-11-04 finding 1: the gate reads refund facts from the PROCESSOR, so the stub answers Stripe too. The fixtures are
+# env vars per object, and the default refund/charge/subscription agree with rf_credits() so the ruled copy still renders.
+case "$url" in
+  https://api.stripe.test/*)
+    spath="${url#https://api.stripe.test}"
+    case "$spath" in
+      /v1/refunds/*)
+        rid="${spath#/v1/refunds/}"; rid="${rid%%\?*}"
+        if [ -n "${STUB_STRIPE_REFUND:-}" ]; then printf '%s' "$STUB_STRIPE_REFUND"; exit 0; fi
+        printf '{"id":"%s","object":"refund","amount":%s,"currency":"usd","charge":"ch_test_charge","status":"%s","created":%s}' \
+          "$rid" "${STUB_STRIPE_AMOUNT:-1250}" "${STUB_STRIPE_REFUND_STATUS:-succeeded}" \
+          "${STUB_STRIPE_REFUND_CREATED:-1793742227}" ;;
+      /v1/charges/*)
+        if [ -n "${STUB_STRIPE_CHARGE:-}" ]; then printf '%s' "$STUB_STRIPE_CHARGE"; exit 0; fi
+        # r5 2026-11-04 finding 1: the payer's billing email is what binds a refund to its recipient. Default agrees with
+        # rf_credits(); STUB_STRIPE_CHARGE_EMAIL="-" omits the field entirely (an absent/encrypted address, which the gate
+        # must refuse) and any other value states a different payer.
+        if [ "${STUB_STRIPE_CHARGE_EMAIL-pancho95jandro@gmail.com}" = "-" ]; then
+          printf '{"id":"ch_test_charge","object":"charge","amount":%s,"created":%s,"payment_method_details":{"card":{"brand":"mastercard","last4":"%s"}},"invoice":{"subscription":%s}}' \
+            "${STUB_STRIPE_CHARGE_AMOUNT:-1250}" "${STUB_STRIPE_CHARGE_CREATED:-1793723102}" "${STUB_STRIPE_LAST4:-4049}" \
+            "${STUB_STRIPE_SUB:-${DEFAULT_SUB}}"
+        else
+          printf '{"id":"ch_test_charge","object":"charge","amount":%s,"created":%s,"billing_details":{"email":"%s"},"payment_method_details":{"card":{"brand":"mastercard","last4":"%s"}},"invoice":{"subscription":%s}}' \
+            "${STUB_STRIPE_CHARGE_AMOUNT:-1250}" "${STUB_STRIPE_CHARGE_CREATED:-1793723102}" "${STUB_STRIPE_CHARGE_EMAIL-pancho95jandro@gmail.com}" "${STUB_STRIPE_LAST4:-4049}" \
+            "${STUB_STRIPE_SUB:-${DEFAULT_SUB}}"
+        fi
+        ;;
+      *) printf '{"error":{"type":"invalid_request_error","message":"no stub for %s"}}' "$spath"; exit 0 ;;
+    esac
+    exit 0 ;;
+esac
 case "$method $path" in
   "POST /contacts/search")
     if [ -n "${STUB_CONTACTS:-}" ]; then printf '%s' "$STUB_CONTACTS"; exit 0; fi
@@ -204,6 +257,11 @@ STUB
   export INTERCOM_VERIFY_TEST_CURL_BIN="$STUB_DIR/curl"
   INTERCOM_VERIFY_TEST_TIMEOUT_BIN="$(command -v timeout || command -v gtimeout)"
   export INTERCOM_VERIFY_TEST_TIMEOUT_BIN
+  # the gate's processor read goes through the same curl seam, so it is stubbed and pointed at a test base
+  export INTERCOM_VERIFY_TEST_STRIPE_BASE="https://api.stripe.test"
+  export MUSOAI_STRIPE_API_KEY="sk_test_stub"
+  # active, not cancelling, period ends 2026-12-03 (the two refund fixtures' subscription)
+  export DEFAULT_SUB='{"id":"sub_test","object":"subscription","status":"active","cancel_at_period_end":false,"current_period_end":1796256000}'
 }
 
 teardown() { rm -rf "$TEST_TMPDIR"; }
@@ -3658,6 +3716,40 @@ Caroline, Muso Support" ]
   [ -z "$(sql "SELECT * FROM verify_messages WHERE campaign='reply-ref'")" ]    # held BEFORE the claim (the final read)
 }
 
+@test "approved-by: a Fable ruling id authorizes ONLY the template classes its registry entry lists, stamps the ledger, and is never an agent identity (captain 2026-11-03)" {
+  credits "$TEST_TMPDIR/r.json" Jane "reply-57000000001:-:-:-"
+  unlocked_gate replyref   # the shipped reply-ref gate (unlocked under ruling 103), copied to $GATE
+  export STUB_CONVERSATION="$(rd_thread null)"
+  pick() { python3 "$INTERCOM_VERIFY_TEST_LEDGER_HELPER" --db "$INTERCOM_VERIFY_TEST_LEDGER" record-pick --conversation 777 --part 57000000001 "$@" >/dev/null; }
+  python3 "$INTERCOM_VERIFY_TEST_LEDGER_HELPER" --db "$INTERCOM_VERIFY_TEST_LEDGER" migrate >/dev/null
+  pick --ref fable-copy-1031-r5/r --reason mapped --llm-call-id 41
+  # A script name is still not an approver: the ruling path does not loosen that (2026-08-31 self-approval incident)
+  run -1 "$GATE" send --campaign reply-ref --copy r --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by caroline-ref-picker --dry-run
+  [[ "$output" == *"must be a human's Slack USER ID or a Fable ruling id"* ]]
+  # a ruling id the registry does not name: refused, and the message says what would make it legal
+  run -1 "$GATE" send --campaign reply-ref --copy r --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by fable-ruling-1103-999 --dry-run
+  [[ "$output" == *"is not in"* ]] && [[ "$output" == *"a reviewed registry row"* ]]
+  # a REAL ruling id still does not cover a class it does not list: 103 pre-approves reply-ref, not the /i status line
+  run -1 "$GATE" send --campaign status-doc-received --copy queued-neutral --conversation 777 --credits-file "$TEST_TMPDIR/r.json" --approved-by fable-ruling-1103-103 --dry-run
+  [[ "$output" == *"pre-approves template classes reply-ref, not 'docrecvn' of campaign 'status-doc-received'"* ]]
+  # an unreadable or malformed registry refuses rather than opening: no registry = no ruling approver
+  INTERCOM_VERIFY_TEST_FABLE_RULINGS="$TEST_TMPDIR/no-such-registry.json" run -1 "$GATE" send --campaign reply-ref --copy r --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by fable-ruling-1103-103 --dry-run
+  [[ "$output" == *"is not readable"* ]]
+  printf '{"rulings": []}\n' > "$TEST_TMPDIR/bad-registry.json"
+  INTERCOM_VERIFY_TEST_FABLE_RULINGS="$TEST_TMPDIR/bad-registry.json" run -1 "$GATE" send --campaign reply-ref --copy r --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by fable-ruling-1103-103 --dry-run
+  [[ "$output" == *"is malformed"* ]]
+  [ "$(replies)" -eq 0 ]; [ "$(posts)" -eq 0 ]
+  [ -z "$(sql "SELECT * FROM verify_messages WHERE campaign='reply-ref'")" ]
+  # the same send under the ruling id runs the whole path and POSTS, stamped: who authorized it and which template
+  STUB_COMM_STATE_JSON="$(rd_cs "" null)" run -0 "$GATE" send --campaign reply-ref --copy r --conversation 777 --reply-due 57000000001 --credits-file "$TEST_TMPDIR/r.json" --approved-by fable-ruling-1103-103
+  [[ "$output" == *"POSTED comment conversation=777"* ]]
+  [ "$(replies)" -eq 1 ]
+  [ "$(sql "SELECT approver_kind||'|'||approval_id||'|'||approved_by FROM verify_messages WHERE campaign='reply-ref' AND status='sent'")" = "fable-ruling|fable-ruling-1103-103|fable-ruling-1103-103" ]
+  # the template identity hash of the copy that rendered (refr), 64 hex chars, the SAME one the audit recomputes
+  want="$(printf '%s' 'reply-ref|initial|refr|' | sha256sum | awk '{print $1}')"
+  [ "$(sql "SELECT template_sha256 FROM verify_messages WHERE campaign='reply-ref' AND status='sent'")" = "$want" ]
+}
+
 @test "reply_due G2: an admin-opened thread is answered ONLY under --reply-due with comm_state's verified trigger; without it G2 still refuses" {
   credits "$TEST_TMPDIR/c.json" Jane "u1:A&R:La Flor:Lerica"
   export STUB_CONVERSATION="$(rd_thread null)"
@@ -5064,3 +5156,376 @@ Thank you, Caroline, Muso Support" ]
   [ "$(replies)" -eq 0 ]
 }
 
+
+# --- refund-confirm: ruling refund-confirm-1103 (Fable d2 2026-11-03 22:0xZ, firstmate 109) ----------------------
+# Money that ALREADY moved is told once per refund, under d2's own ruling id, with every fact read from Stripe/core.
+# The copy is the ruling's text byte-exact; the class is listed in policies/fable-rulings.json and nowhere else.
+rf_credits() { # <state> <amount> <refund id>
+  printf '{"user":{"email":"pancho95jandro@gmail.com","first_name":"Pancho","id":"235578","professional_id":"9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64"},"credits":[{"request_id":"%s"}],"refund":{"refund_id":"%s","amount":"%s","currency":"usd","issued_on":"2026-11-03","card_last4":"4049","subscription_state":"%s"}}\n' \
+    "$3" "$3" "$2" "$1" > "$TEST_TMPDIR/rf.json"
+  # the processor's answer for the same refund: the gate reads Stripe and compares, so the stub has to agree (a test
+  # that wants a DISAGREEMENT overrides these on the same line as `run`)
+  STUB_STRIPE_AMOUNT="$(printf '%s' "$2" | awk -F. '{ printf "%d", ($1 * 100) + ($2 == "" ? 0 : $2) }')"
+  export STUB_STRIPE_AMOUNT
+  export STUB_STRIPE_SUB="$(rf_sub "$1")"
+}
+rf_sub() { # <subscription_state>: the subscription object Stripe would return for that state
+  case "$1" in
+    cancelled) printf '{"id":"sub_test","status":"canceled","cancel_at_period_end":false,"current_period_end":1796256000}' ;;
+    cancel_at_period_end) printf '{"id":"sub_test","status":"active","cancel_at_period_end":true,"current_period_end":1796256000}' ;;
+    *) printf '{"id":"sub_test","status":"active","cancel_at_period_end":false,"current_period_end":1796256000}' ;;
+  esac
+}
+
+@test "refund-confirm renders d2's refund copy byte-exact, one note per refund id, and only under a ruling id that lists the class" {
+  rf_credits active 12.50 re_3UXkW8LsjTo3Ar3l0cunpPeE
+  RGATE="$TEST_TMPDIR/rfg.sh"
+  cp "$UVN" "$RGATE"   # $UVN is the same script copied with its test seams open
+  export INTERCOM_VERIFY_TEST_FABLE_RULINGS="$HYDRA_REPO/policies/fable-rulings.json"
+  # the two ruled subscription sentences, byte-exact, from Stripe facts only (amount, day, card, state)
+  run -0 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain)" = "Hi Pancho, confirming your refund of \$12.50 issued on 3 November 2026 to the card ending 4049. Your subscription stays active. Nothing more is needed from you." ]
+  [ "$(rendered .subject)" = "Your refund is on its way (Muso)" ]
+  rf_credits cancelled 210.72 re_3UClHTLsjTo3Ar3l1c7IAjbJ
+  run -0 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain)" = "Hi Pancho, confirming your refund of \$210.72 issued on 3 November 2026 to the card ending 4049. Your subscription is now cancelled and will not renew. Nothing more is needed from you." ]
+  # an unlisted state, a non-Stripe id, an amount that is not money, a bad card, and a refund_id that disagrees with
+  # the entry's request id: each a refusal, nothing sent or claimed
+  rf_credits paused 12.50 re_3UXkW8LsjTo3Ar3l0cunpPeE
+  run -1 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"refund facts in the credits file"* ]]
+  # 12.5 is not the canonical form of this refund's amount: the shape admits 0-3 decimals (jpy, kwd), so the refusal
+  # comes from the processor binding, by name - the money is never silently re-formatted into something sendable
+  rf_credits active 12.5 re_3UXkW8LsjTo3Ar3l0cunpPeE
+  run -1 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"amount: Stripe says "*"usd, the file says 12.5"* ]]
+  rf_credits active 12.50 12345
+  run -1 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"refund facts in the credits file"* ]]
+  # the ruling id that covers this class is the only one that authorizes it; the reply-ref ruling does not
+  rf_credits active 12.50 re_3UXkW8LsjTo3Ar3l0cunpPeE
+  run -1 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by fable-ruling-1103-103 --dry-run
+  [[ "$output" == *"does not pre-approve"* ]] || [[ "$output" == *"pre-approves template classes reply-ref"* ]]
+  # ... and under it the whole path runs and POSTS, stamped with the approving ruling and this exact template
+  STUB_COMM_STATE_JSON='{"hold":false,"state":"asked","reasons":[]}' run -0 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by fable-ruling-1103-d2/refund-confirm
+  [[ "$output" == *"POSTED"* ]]
+  [ "$(posts)" -eq 1 ]
+  [ "$(sql "SELECT approver_kind||'|'||approval_id FROM verify_messages WHERE campaign='refund-confirm' AND status='sent'")" = "fable-ruling|fable-ruling-1103-d2/refund-confirm" ]
+  [ "$(sql "SELECT template_sha256 FROM verify_messages WHERE campaign='refund-confirm' AND status='sent'")" = "$(printf '%s' 'refund-confirm|initial|refundconfirm|' | sha256sum | awk '{print $1}')" ]
+  # one note per REFUND, ever: the same refund id cannot be told twice
+  STUB_COMM_STATE_JSON='{"hold":false,"state":"asked","reasons":[]}' run -0 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by fable-ruling-1103-d2/refund-confirm
+  [[ "$output" == *"already"* || "$output" == *"SKIPPED"* ]]
+  [ "$(posts)" -eq 1 ]
+  # and it is a one-shot notice: no follow-up kind, no --copy
+  run -1 "$RGATE" send --campaign refund-confirm --kind reminder-14 --credits-file "$TEST_TMPDIR/rf.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"no follow-ups"* ]]
+  run -1 "$RGATE" send --campaign refund-confirm --copy queued --credits-file "$TEST_TMPDIR/rf.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"one copy, the ruling's"* ]]
+}
+
+@test "refund-confirm: d2's 2026-11-04 approved variants - the cancel-at-period-end date sentence and 'Hi there,' with no personal name" {
+  RGATE="$TEST_TMPDIR/rfg3.sh"
+  cp "$UVN" "$RGATE"   # $UVN is the same script copied with its test seams open
+  export INTERCOM_VERIFY_TEST_FABLE_RULINGS="$HYDRA_REPO/policies/fable-rulings.json"
+  # cancel_at_period_end is a Stripe fact with a Stripe date: the sentence is only valid WITH active_until, and the date
+  # comes from the file (current_period_end), never from a person. "stays active" was the fallback d2 named if the date
+  # could not be sourced; here it can, so the exact variant must render.
+  printf '{"user":{"email":"pancho95jandro@gmail.com","first_name":"Pancho","id":"235578","professional_id":"%s"},"credits":[{"request_id":"re_3UXkW8LsjTo3Ar3l0cunpPeE"}],"refund":{"refund_id":"re_3UXkW8LsjTo3Ar3l0cunpPeE","amount":"12.50","currency":"usd","issued_on":"2026-11-03","card_last4":"4049","subscription_state":"cancel_at_period_end","active_until":"2026-12-03"}}\n' \
+    "$STUB_EXT_ID" > "$TEST_TMPDIR/rf2.json"
+  export STUB_STRIPE_SUB="$(rf_sub cancel_at_period_end)"
+  run -0 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf2.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain)" = "Hi Pancho, confirming your refund of \$12.50 issued on 3 November 2026 to the card ending 4049. Your subscription stays active until 3 December 2026 and will not renew. Nothing more is needed from you." ]
+  # ... and without the date it is not sendable at all: no guessed date, no silent fallback to another sentence
+  jq 'del(.refund.active_until)' "$TEST_TMPDIR/rf2.json" > "$TEST_TMPDIR/rf3.json"
+  run -1 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf3.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"refund facts in the credits file"* ]]
+  # no personal first name on file (a business account) = "Hi there,", never a typed name and never the business name
+  # 228568 is the charge-date != refund-date case, and the difference is not cosmetic: the charge was paid 6 September
+  # 2026 but the refund was issued 3 November 2026 (QA r5 2026-11-04 finding 1). "issued on" is the REFUND's date.
+  printf '{"user":{"email":"offtherow@gmail.com","first_name":"","id":"228568","professional_id":"%s"},"credits":[{"request_id":"re_3UClHTLsjTo3Ar3l1c7IAjbJ"}],"refund":{"refund_id":"re_3UClHTLsjTo3Ar3l1c7IAjbJ","amount":"210.72","currency":"usd","issued_on":"2026-11-03","card_last4":"2009","subscription_state":"cancel_at_period_end","active_until":"2027-09-06"}}\n' \
+    "$STUB_EXT_ID" > "$TEST_TMPDIR/rf4.json"
+  export STUB_STRIPE_AMOUNT=21072 STUB_STRIPE_LAST4=2009 STUB_STRIPE_CHARGE_CREATED=1788721149
+  # r5 2026-11-04 finding 1: Stripe must name THIS file's user as the payer, or the note would be refused - the 228568
+  # charge's billing email, as live Stripe carries it.
+  export STUB_STRIPE_CHARGE_EMAIL=offtherow@gmail.com
+  # Stripe's own period end for THIS subscription (sub_1RzLhgLsjTo3Ar3l1GX4SlLU, 2027-09-06), not the shared fixture
+  export STUB_STRIPE_SUB='{"id":"sub_1RzLhgLsjTo3Ar3l1GX4SlLU","status":"active","cancel_at_period_end":true,"current_period_end":1820188800}'
+  run -0 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf4.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain)" = "Hi there, confirming your refund of \$210.72 issued on 3 November 2026 to the card ending 2009. Your subscription stays active until 6 September 2027 and will not renew. Nothing more is needed from you." ]
+  # and the charge date is not a substitute: a file that carries it is refused, naming the day the refund was issued
+  jq '.refund.issued_on = "2026-09-06"' "$TEST_TMPDIR/rf4.json" > "$TEST_TMPDIR/rf5.json"
+  run -1 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf5.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"issued_on: Stripe says the refund was issued 2026-11-03, the file says 2026-09-06"* ]]
+}
+
+# --- QA 2026-11-04 finding 1: the facts are BOUND to the processor ------------------------------------------------
+# A structurally valid credits file is not evidence. Each field the note renders is read from Stripe and compared, and a
+# disagreement is a refusal that NAMES the field - never a silent correction, never a rendered guess. The render then uses
+# Stripe's values, so even a file that guessed right cannot change what the customer is told.
+@test "refund-confirm (QA 2026-11-04 finding 1): a shape-valid file that disagrees with Stripe sends nothing" {
+  RGATE="$TEST_TMPDIR/rfb.sh"
+  cp "$UVN" "$RGATE"
+  export INTERCOM_VERIFY_TEST_FABLE_RULINGS="$HYDRA_REPO/policies/fable-rulings.json"
+  ruled() { STUB_COMM_STATE_JSON='{"hold":false,"state":"asked","reasons":[]}' "$@" "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by fable-ruling-1103-d2/refund-confirm; }
+  rf_credits active 12.50 re_3UXkW8LsjTo3Ar3l0cunpPeE
+  # the amount: the file says $12.50, Stripe says $210.72
+  STUB_STRIPE_AMOUNT=21072 STUB_COMM_STATE_JSON='{"hold":false,"state":"asked","reasons":[]}' run -1 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by fable-ruling-1103-d2/refund-confirm
+  [[ "$output" == *"amount: Stripe says 210.72 usd, the file says 12.50"* ]]
+  [ "$(posts)" -eq 0 ]
+  # the card: a different card is a different customer's fact
+  STUB_STRIPE_LAST4=9999 STUB_COMM_STATE_JSON='{"hold":false,"state":"asked","reasons":[]}' run -1 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by fable-ruling-1103-d2/refund-confirm
+  [[ "$output" == *"card_last4: Stripe says 9999, the file says 4049"* ]]
+  # the day is the day the REFUND was issued: the charge date is a different fact and is never a substitute
+  STUB_STRIPE_REFUND_CREATED=1788721149 STUB_COMM_STATE_JSON='{"hold":false,"state":"asked","reasons":[]}' run -1 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by fable-ruling-1103-d2/refund-confirm
+  [[ "$output" == *"issued_on: Stripe says the refund was issued 2026-09-06, the file says 2026-11-03"* ]]
+  # ... and a charge whose date differs from the refund's renders the REFUND date (the 228568 shape), not the charge's
+  STUB_STRIPE_CHARGE_CREATED=1788721149 STUB_COMM_STATE_JSON='{"hold":false,"state":"asked","reasons":[]}' run -0 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by fable-ruling-1103-d2/refund-confirm --dry-run
+  [ "$(rendered .body | plain)" = "Hi Pancho, confirming your refund of \$12.50 issued on 3 November 2026 to the card ending 4049. Your subscription stays active. Nothing more is needed from you." ]
+  # the state: the file claims the subscription was cancelled while Stripe says it is still active
+  rf_credits cancelled 12.50 re_3UXkW8LsjTo3Ar3l0cunpPeE
+  export STUB_STRIPE_SUB="$(rf_sub active)"
+  STUB_COMM_STATE_JSON='{"hold":false,"state":"asked","reasons":[]}' run -1 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by fable-ruling-1103-d2/refund-confirm
+  [[ "$output" == *"subscription_state: Stripe says active, the file says cancelled"* ]]
+  [ "$(posts)" -eq 0 ]
+  # ... and with Stripe agreeing it is cancelled, the note posts once and every rendered fact is Stripe's
+  rf_credits cancelled 12.50 re_3UXkW8LsjTo3Ar3l0cunpPeE
+  STUB_STRIPE_SUB='{"id":"sub_test","status":"canceled","cancel_at_period_end":false,"current_period_end":1796256000}' \
+    STUB_COMM_STATE_JSON='{"hold":false,"state":"asked","reasons":[]}' run -0 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by fable-ruling-1103-d2/refund-confirm
+  [[ "$output" == *"POSTED"* ]]
+  [ "$(jq -r '.body | tostring' "$CURL_STUB_MESSAGE" 2>/dev/null | grep -c 'now cancelled and will not renew')" -eq 1 ]
+}
+
+@test "refund-confirm (QA 2026-11-04 finding 1): the render uses STRIPE's numbers even when the file's agree, and an unreadable processor is a refusal" {
+  RGATE="$TEST_TMPDIR/rfb2.sh"
+  cp "$UVN" "$RGATE"
+  export INTERCOM_VERIFY_TEST_FABLE_RULINGS="$HYDRA_REPO/policies/fable-rulings.json"
+  rf_credits active 12.50 re_3UXkW8LsjTo3Ar3l0cunpPeE
+  # Stripe's amount carries cents from the processor (1250 = $12.50); a file claiming 12.50 is confirmed, not trusted
+  run -0 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain)" = "Hi Pancho, confirming your refund of \$12.50 issued on 3 November 2026 to the card ending 4049. Your subscription stays active. Nothing more is needed from you." ]
+  # no key at all: nothing renders, nothing is claimed. The env-file fallback points at an EMPTY fixture: on a host that
+  # has /etc/openclaw/main.env (node-8) clearing only the variable would still find the real key, and the test would be
+  # measuring the host, not the gate (QA 2026-11-04 round 3 finding 2).
+  : > "$TEST_TMPDIR/no-key.env"
+  MUSOAI_STRIPE_API_KEY= INTERCOM_VERIFY_TEST_STRIPE_ENV_FILE="$TEST_TMPDIR/no-key.env" run -1 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"could not be read from Stripe"* ]]
+  # ... and the seam points WHERE the gate reads, so a key in that file is used: the test is not merely blind to the host,
+  # it still proves the env-file path works (both directions, or the isolation could hide a broken fallback)
+  printf 'MUSOAI_STRIPE_API_KEY=sk_from_env_file\n' > "$TEST_TMPDIR/with-key.env"
+  MUSOAI_STRIPE_API_KEY= INTERCOM_VERIFY_TEST_STRIPE_ENV_FILE="$TEST_TMPDIR/with-key.env" run -0 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain)" = "Hi Pancho, confirming your refund of \$12.50 issued on 3 November 2026 to the card ending 4049. Your subscription stays active. Nothing more is needed from you." ]
+  # a refund the processor does not know (an error body, not an object)
+  STUB_STRIPE_REFUND='{"error":{"type":"invalid_request_error","message":"No such refund"}}' run -1 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"could not be read from Stripe"* ]]
+  # a refund that has not SETTLED is not a refund we can confirm: `pending` is money on its way, and the note says
+  # "confirming your refund ... issued on <date>" (QA r5 2026-11-04 finding 2, refusal is the honest default)
+  for st in failed pending; do
+    STUB_STRIPE_REFUND="{\"id\":\"re_3UXkW8LsjTo3Ar3l0cunpPeE\",\"amount\":1250,\"currency\":\"usd\",\"charge\":\"ch_test_charge\",\"status\":\"$st\",\"created\":1793742227}" \
+      run -1 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by U7RP6HKUZ --dry-run
+    [[ "$output" == *"refund status is $st, not a completed refund"* ]]
+  done
+  # a charge with no subscription on it: no subscription sentence can be true, so the note is refused
+  STUB_STRIPE_CHARGE='{"id":"ch_test_charge","amount":1250,"created":1793723102,"payment_method_details":{"card":{"brand":"mastercard","last4":"4049"}},"invoice":null}' \
+    run -1 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"no subscription on it"* ]]
+}
+
+# --- QA r5 2026-11-04 finding 3: the Stripe key must never be an argv element -------------------------------
+# `curl -H "Authorization: Bearer sk_..."` puts the live secret in /proc/<pid>/cmdline for any local `ps`. The gate
+# reads its curl config from STDIN instead (`-K -`), so the secret travels on a pipe: no argv, no file on disk.
+@test "refund-confirm (QA r5 2026-11-04 finding 3): the Stripe key never appears in curl's argv" {
+  RGATE="$TEST_TMPDIR/rfk.sh"
+  cp "$UVN" "$RGATE"
+  export INTERCOM_VERIFY_TEST_FABLE_RULINGS="$HYDRA_REPO/policies/fable-rulings.json"
+  rf_credits active 12.50 re_3UXkW8LsjTo3Ar3l0cunpPeE
+  rm -f "$TEST_TMPDIR/argv-leak.log"
+  run -0 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by U7RP6HKUZ --dry-run
+  [ -e "$TEST_TMPDIR/argv-leak.log" ] && { echo "the key was in argv:"; cat "$TEST_TMPDIR/argv-leak.log"; false; }
+  # the request still carried the credential: it arrives on the config pipe, so nothing was silently stripped
+  grep -q 'GET https://api.stripe.test/v1/refunds/re_3UXkW8LsjTo3Ar3l0cunpPeE' "$CURL_STUB_LOG"
+  # a source-level pin, so reverting to `-H "Authorization: Bearer $key"` goes red even if a stub gutter softens it
+  ! grep -qE 'Authorization: Bearer \$key' "$HYDRA_REPO/scripts/intercom-verify-request.sh"
+  grep -q -- '-K -' "$HYDRA_REPO/scripts/intercom-verify-request.sh"
+}
+
+@test "refund-confirm's 'nothing more is needed' is held for a user who still owes proof (the promise is never sent over an open ask)" {
+  rf_credits active 12.50 re_3UXkW8LsjTo3Ar3l0cunpPeE
+  RGATE="$TEST_TMPDIR/rfg2.sh"
+  cp "$UVN" "$RGATE"   # $UVN is the same script copied with its test seams open
+  export INTERCOM_VERIFY_TEST_FABLE_RULINGS="$HYDRA_REPO/policies/fable-rulings.json"
+  STUB_COMM_STATE=hold run -3 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"HELD comm_state"* ]]
+  [[ "$output" == *'owes-nothing check by body: the rendered note says "Nothing more is needed"'* ]]   # the promise is named
+  grep -q -- "--nothing-needed-body" "$TEST_TMPDIR/comm-state-args"
+  [ "$(posts)" -eq 0 ]
+}
+
+# --- QA r5 2026-11-04 finding 1 (CRITICAL): the refund is bound to its RECIPIENT -------------------------------
+# Binding the facts is not binding the person. A file whose `user` is one customer and whose refund belongs to another
+# used to be accepted (exit 0) and rendered customer B's money to customer A. Stripe's charge names the payer, so the
+# note is only built when that payer IS the address this file speaks to - an absent or encrypted address refuses.
+@test "refund-confirm (QA r5 2026-11-04 finding 1, critical): another customer's refund is refused, naming both addresses" {
+  RGATE="$TEST_TMPDIR/rfr.sh"
+  cp "$UVN" "$RGATE"
+  export INTERCOM_VERIFY_TEST_FABLE_RULINGS="$HYDRA_REPO/policies/fable-rulings.json"
+  # EXACTLY r5's runnable fixture: pancho95jandro@gmail.com / 235578 presenting 228568's refund (re_3UClHTLsjTo3Ar3l1c7IAjbJ)
+  printf '{"user":{"email":"pancho95jandro@gmail.com","first_name":"Pancho","id":"235578","professional_id":"%s"},"credits":[{"request_id":"re_3UClHTLsjTo3Ar3l1c7IAjbJ"}],"refund":{"refund_id":"re_3UClHTLsjTo3Ar3l1c7IAjbJ","amount":"210.72","currency":"usd","issued_on":"2026-11-03","card_last4":"2009","subscription_state":"cancel_at_period_end","active_until":"2027-09-06"}}\n' \
+    "$STUB_EXT_ID" > "$TEST_TMPDIR/rf-cross.json"
+  # Stripe says the payer is the OTHER account's billing email (live: offtherow@gmail.com on that charge)
+  STUB_STRIPE_AMOUNT=21072 STUB_STRIPE_LAST4=2009 STUB_STRIPE_CHARGE_CREATED=1788721149 STUB_STRIPE_CHARGE_EMAIL=offtherow@gmail.com \
+    run -1 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf-cross.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"recipient: the refund on re_3UClHTLsjTo3Ar3l1c7IAjbJ belongs to offtherow@gmail.com, the file addresses pancho95jandro@gmail.com"* ]]
+  [ "$(posts)" -eq 0 ]
+  # ...and the SAME fixture becomes sendable the moment Stripe names ITS user as the payer, so the refusal is about the
+  # person and not about the refund facts: nothing else in the file changed.
+  STUB_STRIPE_AMOUNT=21072 STUB_STRIPE_LAST4=2009 STUB_STRIPE_CHARGE_CREATED=1788721149 STUB_STRIPE_CHARGE_EMAIL=pancho95jandro@gmail.com \
+  STUB_STRIPE_SUB='{"id":"sub_1RzLhgLsjTo3Ar3l1GX4SlLU","status":"active","cancel_at_period_end":true,"current_period_end":1820188800}' \
+    run -0 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf-cross.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain)" = "Hi Pancho, confirming your refund of \$210.72 issued on 3 November 2026 to the card ending 2009. Your subscription stays active until 6 September 2027 and will not renew. Nothing more is needed from you." ]
+}
+
+@test "refund-confirm (QA r5 2026-11-04 finding 1, critical): an absent or encrypted payer email is a refusal, never a pass" {
+  RGATE="$TEST_TMPDIR/rfr2.sh"
+  cp "$UVN" "$RGATE"
+  export INTERCOM_VERIFY_TEST_FABLE_RULINGS="$HYDRA_REPO/policies/fable-rulings.json"
+  rf_credits active 12.50 re_3UXkW8LsjTo3Ar3l0cunpPeE
+  STUB_STRIPE_CHARGE_EMAIL="-" run -1 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"recipient: Stripe records no billing email for this charge (absent or encrypted)"* ]]
+  [ "$(posts)" -eq 0 ]
+  # a file that names nobody cannot reach the processor binding at all: the account-email shape check refuses first, so
+  # there is no path where an emailless file gets as far as a Stripe read. Pinned so that stays true.
+  jq 'del(.user.email)' "$TEST_TMPDIR/rf.json" > "$TEST_TMPDIR/rf-noemail.json"
+  run -1 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf-noemail.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"user.email must be the credit request's account email"* ]]
+  [ "$(posts)" -eq 0 ]
+  ! grep -q 'v1/refunds' "$CURL_STUB_LOG" || true
+}
+
+# --- QA r5 2026-11-04 finding 2: a ruling's class value must be an ARRAY of copy tokens ----------------------
+# An OBJECT value was ACCEPTED, because `.[]` iterated the object's values - so {"why":"x","c":"refundconfirm"}
+# pre-approved refundconfirm without ever listing it. A STRING value was refused only by accident (jq errored into the
+# `|| malformed` fallback). Both shapes are now explicit, and both are pinned here.
+@test "ruling (QA r5 2026-11-04 finding 2): a class value that is not an array of tokens is refused, not obeyed" {
+  RGATE="$TEST_TMPDIR/rul.sh"
+  cp "$UVN" "$RGATE"
+  rf_credits active 12.50 re_3UXkW8LsjTo3Ar3l0cunpPeE
+  printf '%s\n' '{"rulings":{"fable-ruling-1103-d2/refund-confirm":{"classes":{"refund-confirm":{"why":"x","c":"refundconfirm"}}}}}' > "$TEST_TMPDIR/rul-obj.json"
+  INTERCOM_VERIFY_TEST_FABLE_RULINGS="$TEST_TMPDIR/rul-obj.json" run -1 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by fable-ruling-1103-d2/refund-confirm --dry-run
+  [[ "$output" == *"is malformed"* ]]
+  [ "$(posts)" -eq 0 ]
+  printf '%s\n' '{"rulings":{"fable-ruling-1103-d2/refund-confirm":{"classes":{"refund-confirm":"refundconfirm"}}}}' > "$TEST_TMPDIR/rul-str.json"
+  INTERCOM_VERIFY_TEST_FABLE_RULINGS="$TEST_TMPDIR/rul-str.json" run -1 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by fable-ruling-1103-d2/refund-confirm --dry-run
+  [[ "$output" == *"is malformed"* ]]
+  [ "$(posts)" -eq 0 ]
+  # the ARRAY form in the same position still authorizes the class, so the guard is about the type and nothing else
+  printf '%s\n' '{"rulings":{"fable-ruling-1103-d2/refund-confirm":{"classes":{"refund-confirm":["refundconfirm"]}}}}' > "$TEST_TMPDIR/rul-ok.json"
+  INTERCOM_VERIFY_TEST_FABLE_RULINGS="$TEST_TMPDIR/rul-ok.json" run -0 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by fable-ruling-1103-d2/refund-confirm --dry-run
+}
+
+# --- QA 2026-11-04: the minor unit belongs to the CURRENCY, not to money in general ------------------------------
+# Stripe amounts are minor units and "currencies are two-decimal unless otherwise specified". The send path divided
+# every amount by 100, so a 500 JPY refund would have been stated to the customer as "5.00 JPY" - a false financial
+# confirmation, produced by our code, with the ledger recording it as processor-verified. The one formatter lives in
+# scripts/lib/refund-money.jq and both jq programs include it, so the refusal and the sentence cannot drift apart.
+@test "refund-confirm (QA 2026-11-04): a zero-decimal currency renders its real amount, never minor/100" {
+  RGATE="$TEST_TMPDIR/rfj.sh"
+  cp "$UVN" "$RGATE"
+  export INTERCOM_VERIFY_TEST_FABLE_RULINGS="$HYDRA_REPO/policies/fable-rulings.json"
+  # 500 JPY is five hundred yen. Stripe's charge, refund and the credits file all say 500.
+  cat > "$TEST_TMPDIR/rfj.json" <<'JSON'
+{"user":{"email":"pancho95jandro@gmail.com","first_name":"Pancho","id":"235578"},"credits":[{"request_id":"re_3UXkW8LsjTo3Ar3l0cunpPeE"}],"refund":{"refund_id":"re_3UXkW8LsjTo3Ar3l0cunpPeE","amount":"500","currency":"jpy","issued_on":"2026-11-03","card_last4":"4049","subscription_state":"active"}}
+JSON
+  STUB_STRIPE_AMOUNT=500 STUB_STRIPE_REFUND='{"id":"re_3UXkW8LsjTo3Ar3l0cunpPeE","object":"refund","amount":500,"currency":"jpy","charge":"ch_test_charge","status":"succeeded","created":1793742227}' \
+  STUB_STRIPE_CHARGE='{"id":"ch_test_charge","object":"charge","amount":500,"currency":"jpy","created":1793723102,"billing_details":{"email":"pancho95jandro@gmail.com"},"payment_method_details":{"card":{"brand":"visa","last4":"4049"}},"invoice":{"subscription":{"id":"sub_test","status":"active","cancel_at_period_end":false,"current_period_end":1796256000}}}' \
+    run -0 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rfj.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain)" = "Hi Pancho, confirming your refund of 500 JPY issued on 3 November 2026 to the card ending 4049. Your subscription stays active. Nothing more is needed from you." ]
+  # ... and the same refund stated as 5.00 (the old bug's answer) is refused by name, not corrected silently
+  jq '.refund.amount = "5.00"' "$TEST_TMPDIR/rfj.json" > "$TEST_TMPDIR/rfj-bad.json"
+  STUB_STRIPE_AMOUNT=500 STUB_STRIPE_REFUND='{"id":"re_3UXkW8LsjTo3Ar3l0cunpPeE","object":"refund","amount":500,"currency":"jpy","charge":"ch_test_charge","status":"succeeded","created":1793742227}' \
+  STUB_STRIPE_CHARGE='{"id":"ch_test_charge","object":"charge","amount":500,"currency":"jpy","created":1793723102,"billing_details":{"email":"pancho95jandro@gmail.com"},"payment_method_details":{"card":{"brand":"visa","last4":"4049"}},"invoice":{"subscription":{"id":"sub_test","status":"active","cancel_at_period_end":false,"current_period_end":1796256000}}}' \
+    run -1 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rfj-bad.json" --approved-by U7RP6HKUZ --dry-run
+  [[ "$output" == *"amount: Stripe says 500 jpy, the file says 5.00"* ]]
+  [ "$(posts)" -eq 0 ]
+  # the two-decimal case, the sub-unit case, and a three-decimal currency: the formatter is the only place money is
+  # turned into a number, so these are pinned directly too
+  [ "$(jq -rn -L "$HYDRA_REPO/scripts/lib" 'include "refund-money"; refund_money(1250; "usd")')" = "12.50" ]
+  [ "$(jq -rn -L "$HYDRA_REPO/scripts/lib" 'include "refund-money"; refund_money(5; "usd")')" = "0.05" ]
+  [ "$(jq -rn -L "$HYDRA_REPO/scripts/lib" 'include "refund-money"; refund_money(1234; "kwd")')" = "1.234" ]
+  [ "$(jq -rn -L "$HYDRA_REPO/scripts/lib" 'include "refund-money"; refund_money(0; "usd")')" = "0.00" ]
+  [ "$(jq -rn -L "$HYDRA_REPO/scripts/lib" 'include "refund-money"; refund_money(100; "isk")')" = "1.00" ]   # two-decimal representation on purpose
+}
+
+# --- QA 2026-11-04: the processor query has to survive REAL curl ----------------------------------------------
+# The suite hands the gate a curl STUB, and a stub that consumes stdin never parses a URL - which is how a query curl
+# refuses to send ("curl: (3) bad range in URL" on a bracketed parameter) can pass a whole round of green tests. This
+# test routes only the processor leg to the REAL curl (Intercom stays stubbed, so nothing leaves the machine) and asserts
+# the query that arrives at a real local server: `expand[]=invoice.subscription` intact.
+@test "refund-confirm (QA 2026-11-04): the charge query survives real curl, expand[] intact" {
+  RGATE="$TEST_TMPDIR/rfr.sh"
+  cp "$UVN" "$RGATE"
+  export INTERCOM_VERIFY_TEST_FABLE_RULINGS="$HYDRA_REPO/policies/fable-rulings.json"
+  mkdir -p "$TEST_TMPDIR/srv"
+  cat > "$TEST_TMPDIR/srv/refund.json" <<'JSON'
+{"id":"re_3UXkW8LsjTo3Ar3l0cunpPeE","object":"refund","amount":1250,"currency":"usd","charge":"ch_test_charge","status":"succeeded","created":1793742227}
+JSON
+  cat > "$TEST_TMPDIR/srv/charge.json" <<'JSON'
+{"id":"ch_test_charge","object":"charge","amount":1250,"created":1793723102,"billing_details":{"email":"pancho95jandro@gmail.com"},"payment_method_details":{"card":{"brand":"mastercard","last4":"4049"}},"invoice":{"subscription":{"id":"sub_test","status":"active","cancel_at_period_end":false,"current_period_end":1796256000}}}
+JSON
+  cat > "$TEST_TMPDIR/srv/srv.py" <<'PYSRV'
+import http.server, socketserver, sys, os
+root = sys.argv[1]
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        with open(os.path.join(root, "requests.log"), "a") as fh:
+            fh.write(self.path + "\n")
+        name = "charge.json" if self.path.startswith("/v1/charges") else "refund.json"
+        body = open(os.path.join(root, name), "rb").read()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a):
+        pass
+socketserver.TCPServer.allow_reuse_address = True
+srv = socketserver.TCPServer(("127.0.0.1", 0), H)
+with open(os.path.join(root, "port"), "w") as fh:
+    fh.write(str(srv.server_address[1]))
+srv.serve_forever()
+PYSRV
+  python3 "$TEST_TMPDIR/srv/srv.py" "$TEST_TMPDIR/srv" > "$TEST_TMPDIR/srv/srv.out" 2>&1 &
+  srv_pid=$!
+  i=0
+  while [ ! -s "$TEST_TMPDIR/srv/port" ] && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+  port="$(cat "$TEST_TMPDIR/srv/port")"
+  # a hybrid curl: the REAL binary for the local processor, the existing stub for Intercom. The gate's own argv is passed
+  # through untouched, so a missing -g is a real-curl error and the send is refused.
+  cat > "$TEST_TMPDIR/curl-hybrid" <<HYBRID
+#!/bin/sh
+cfg="\$(mktemp)"
+printf '%s\\n' "\$*" >> "$TEST_TMPDIR/srv/argv.log"
+cat > "\$cfg"
+if grep -q '127\\.0\\.0\\.1:$port' "\$cfg"; then
+  /usr/bin/curl "\$@" < "\$cfg"; rc=\$?
+else
+  "$TEST_TMPDIR/curl-stub-wrapper" "\$@" < "\$cfg"; rc=\$?
+fi
+rm -f "\$cfg"
+exit \$rc
+HYBRID
+  chmod +x "$TEST_TMPDIR/curl-hybrid"
+  # the suite's stub is installed as CURL_BIN by setup(); re-point the hybrid at it
+  printf '#!/bin/sh\nexec "%s" "$@"\n' "${INTERCOM_VERIFY_TEST_CURL_BIN}" > "$TEST_TMPDIR/curl-stub-wrapper"
+  chmod +x "$TEST_TMPDIR/curl-stub-wrapper"
+  rf_credits active 12.50 re_3UXkW8LsjTo3Ar3l0cunpPeE
+  INTERCOM_VERIFY_TEST_STRIPE_BASE="http://127.0.0.1:$port" INTERCOM_VERIFY_TEST_CURL_BIN="$TEST_TMPDIR/curl-hybrid" \
+    MUSOAI_STRIPE_API_KEY=sk_stub_never_sent \
+    run -0 "$RGATE" send --campaign refund-confirm --credits-file "$TEST_TMPDIR/rf.json" --approved-by U7RP6HKUZ --dry-run
+  [ "$(rendered .body | plain)" = "Hi Pancho, confirming your refund of \$12.50 issued on 3 November 2026 to the card ending 4049. Your subscription stays active. Nothing more is needed from you." ]
+  grep -q '^/v1/refunds/re_3UXkW8LsjTo3Ar3l0cunpPeE$' "$TEST_TMPDIR/srv/requests.log"
+  grep -q 'expand\[\]=invoice.subscription' "$TEST_TMPDIR/srv/requests.log"
+  # --globoff is pinned by argument, not just by outcome: curl tolerates an EMPTY bracket group today, so an outcome-only
+  # assertion would silently lose the guard the day someone adds a bracketed parameter with content (created[gte], [0]).
+  grep -q -- '-g' "$TEST_TMPDIR/srv/argv.log"
+  kill "$srv_pid" 2>/dev/null || true
+}
