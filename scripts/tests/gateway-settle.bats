@@ -164,6 +164,42 @@ teardown() { rm -rf "$T"; }
 
 line_of() { grep -n -m1 -F -- "$1" "$BATS_TEST_DIRNAME/../smoke-test.sh" | cut -d: -f1; }
 
+# Bot NO-GO 5 Nov (hydra#1746 @090dd6bcf): SMOKE_SETTLE_INTERVAL_S=0 made `elapsed` never
+# advance, so the budget was never reached and the deploy smoke hung. A runaway loop is
+# cut off by the sleep stub (500 sleeps) so a regression fails instead of hanging bats.
+_runaway_guard() {
+  cat > "$T/bin/sleep" <<'S'
+#!/bin/sh
+n=$(cat "$T/sn" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "$T/sn"
+if [ "$n" -gt 500 ]; then echo RUNAWAY >&2; kill -TERM "$PPID"; fi
+exit 0
+S
+  chmod +x "$T/bin/sleep"
+}
+
+@test "a non-positive or non-numeric poll interval falls back to 10s and the budget still ends the gate" {
+  _runaway_guard
+  echo "200 0.2" > "$T/reads"
+  export STUB_GAP_AT=0 STUB_UPTIME=100 SMOKE_SETTLE_BUDGET_S=50
+  local bad
+  for bad in 0 -5 abc "" 1.5; do
+    rm -f "$T/sn"
+    SMOKE_SETTLE_INTERVAL_S="$bad" run wait_gateway_settled main 18789
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WARN main: gateway did not settle within 50s"* ]]
+    [ "$(cat "$T/sn")" -eq 5 ]   # 50s budget / 10s default interval
+  done
+}
+
+@test "non-numeric budget, fast-read count or min uptime fall back to their defaults" {
+  _runaway_guard
+  printf '200 0.3\n' > "$T/reads"
+  export STUB_GAP_AT=1 STUB_UPTIME=100
+  SMOKE_SETTLE_FAST_READS=abc SMOKE_SETTLE_BUDGET_S=zzz SMOKE_SETTLE_MIN_UPTIME_S=x run wait_gateway_settled main 18789
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"gateway settled after 20s"*"3 consecutive fast"* ]]
+}
+
 @test "wiring: smoke-test.sh settles main before the mesh gate and check_web_search main" {
   local g m w
   g="$(line_of 'wait_gateway_settled main 18789')"

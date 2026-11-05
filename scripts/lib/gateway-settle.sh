@@ -20,7 +20,15 @@
 #   SMOKE_SETTLE_MIN_UPTIME_S  900   MainPID uptime that counts as settled without a gap line
 #   SMOKE_SETTLE_FAST_READS    3     consecutive fast /health reads required
 #   SMOKE_SETTLE_BUDGET_S      1200  overall budget; elapsed = time slept between polls
-#   SMOKE_SETTLE_INTERVAL_S    10    poll interval
+#   SMOKE_SETTLE_INTERVAL_S    10    poll interval (>= 1)
+# Each must be a whole number (FAST_READS and INTERVAL >= 1); anything else falls back to the default.
+
+# _settle_num <value> <default> <min> -> prints value when it is an integer >= min,
+# else the default. A bad override (0 interval, "abc", "1.5", negative) must never
+# stall the loop: interval 0 would keep `elapsed` at 0 and the budget unreachable.
+_settle_num() {
+  if [[ "$1" =~ ^[0-9]+$ ]] && [[ "$1" -ge "$3" ]]; then echo "$1"; else echo "$2"; fi
+}
 
 # _settle_pid <unit> -> prints the unit's current MainPID ("" when unreadable).
 _settle_pid() {
@@ -33,7 +41,8 @@ _settle_pid() {
 # _settle_arm_a <pid> -> prints "gap" | "uptime" and returns 0 when arm (a)
 # holds for that process; returns 1 otherwise (including when it cannot be read).
 _settle_arm_a() {
-  local pid="$1" up start min="${SMOKE_SETTLE_MIN_UPTIME_S:-900}" n
+  local pid="$1" up start min n
+  min="$(_settle_num "${SMOKE_SETTLE_MIN_UPTIME_S:-}" 900 0)"
   [[ -n "$pid" ]] || return 1
   up="$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ' || true)"
   [[ "$up" =~ ^[0-9]+$ ]] || return 1
@@ -56,8 +65,11 @@ _settle_fast_read() {
 # Always returns 0. Needs log()/warn_check() from the caller (smoke-test.sh).
 wait_gateway_settled() {
   local profile="$1" port="$2" unit="openclaw-gateway-$1.service"
-  local need="${SMOKE_SETTLE_FAST_READS:-3}" budget="${SMOKE_SETTLE_BUDGET_S:-1200}"
-  local interval="${SMOKE_SETTLE_INTERVAL_S:-10}" elapsed=0 fast=0 arm="" a pid="" cur
+  local need budget interval minup elapsed=0 fast=0 arm="" a pid="" cur
+  need="$(_settle_num "${SMOKE_SETTLE_FAST_READS:-}" 3 1)"
+  budget="$(_settle_num "${SMOKE_SETTLE_BUDGET_S:-}" 1200 0)"
+  interval="$(_settle_num "${SMOKE_SETTLE_INTERVAL_S:-}" 10 1)"
+  minup="$(_settle_num "${SMOKE_SETTLE_MIN_UPTIME_S:-}" 900 0)"
 
   while :; do
     # A restart mid-gate gives a fresh process with its own post-start freeze
@@ -79,7 +91,7 @@ wait_gateway_settled() {
     fi
     if [[ "$elapsed" -ge "$budget" ]]; then
       if [[ -z "$arm" ]]; then
-        warn_check "$profile: gateway did not settle within ${budget}s (condition a: no post-start timing-gap line yet and uptime < ${SMOKE_SETTLE_MIN_UPTIME_S:-900}s) — probing anyway"
+        warn_check "$profile: gateway did not settle within ${budget}s (condition a: no post-start timing-gap line yet and uptime < ${minup}s) — probing anyway"
       else
         warn_check "$profile: gateway did not settle within ${budget}s (condition b: ${fast}/${need} consecutive fast /health reads, arm a: $arm) — probing anyway"
       fi
