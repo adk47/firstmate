@@ -21,9 +21,7 @@ the same protected patterns.
 WHAT IT STOPS. A bare endpoint is a tmux session and is killed with
 ``tmux kill-session -t =<name>``. A ``session:window`` endpoint is one tmux
 window and is killed with ``tmux kill-window -t =<session>:<window>``. An
-``orca`` backend endpoint is a terminal name, resolved to its runtime handle
-through ``orca terminal list --json`` and closed with ``orca terminal close``.
-An endpoint that is already gone counts as stopped, so the switch is idempotent.
+endpoint that is already gone counts as stopped, so the switch is idempotent.
 
 ``--dry-run`` lists what it would stop and changes nothing.
 
@@ -112,7 +110,7 @@ def check_row(row: dict) -> tuple[str, str, str]:
         raise KillError(f"registry row is missing id/backend/endpoint: {canonical(row)}")
     if is_protected(worker_id):
         raise KillError(f"refusing worker id {worker_id!r}: it names firstmate or an anchor")
-    if backend not in ("tmux", "orca"):
+    if backend != "tmux":
         raise KillError(f"refusing worker {worker_id}: unsupported backend {backend!r}")
     if ":" in endpoint:
         session = endpoint.split(":", 1)[0]
@@ -120,7 +118,7 @@ def check_row(row: dict) -> tuple[str, str, str]:
             raise KillError(
                 f"refusing endpoint {endpoint!r}: session {session!r} names firstmate or an anchor"
             )
-        if backend == "tmux" and session != worker_session():
+        if session != worker_session():
             raise KillError(
                 f"refusing endpoint {endpoint!r}: it is not in the SA worker session "
                 f"{worker_session()!r}"
@@ -130,13 +128,6 @@ def check_row(row: dict) -> tuple[str, str, str]:
             f"refusing endpoint {endpoint!r}: it names firstmate or an anchor"
         )
     return worker_id, backend, endpoint
-
-
-def tmux_running() -> bool:
-    """True when a tmux server is reachable."""
-    return subprocess.run(
-        ["tmux", "list-sessions"], capture_output=True, text=True
-    ).returncode == 0
 
 
 def tmux_session_exists(name: str) -> bool:
@@ -189,49 +180,6 @@ def stop_tmux(endpoint: str) -> str:
     return "stopped"
 
 
-def orca_terminals() -> list[dict]:
-    """Return the live Orca terminals, or an empty list when Orca is unreachable."""
-    proc = subprocess.run(
-        ["orca", "terminal", "list", "--json"], capture_output=True, text=True
-    )
-    if proc.returncode != 0:
-        return []
-    try:
-        loaded = json.loads(proc.stdout or "[]")
-    except json.JSONDecodeError:
-        return []
-    if isinstance(loaded, dict):
-        for key in ("terminals", "items", "data"):
-            if isinstance(loaded.get(key), list):
-                return [row for row in loaded[key] if isinstance(row, dict)]
-        return []
-    return [row for row in loaded if isinstance(row, dict)] if isinstance(loaded, list) else []
-
-
-def stop_orca(endpoint: str) -> str:
-    """Stop one Orca terminal by exact name and return a one-word outcome."""
-    for row in orca_terminals():
-        names = {str(row.get(key) or "") for key in ("name", "title", "label")}
-        if endpoint not in names:
-            continue
-        handle = str(row.get("id") or row.get("handle") or "").strip()
-        if not handle:
-            raise KillError(f"orca terminal {endpoint!r} has no handle to close", EXIT_FAILED)
-        proc = subprocess.run(
-            ["orca", "terminal", "close", "--terminal", handle],
-            capture_output=True,
-            text=True,
-        )
-        if proc.returncode != 0:
-            raise KillError(
-                f"orca terminal close {endpoint} failed: "
-                f"{(proc.stderr or proc.stdout).strip()}",
-                EXIT_FAILED,
-            )
-        return "stopped"
-    return "already-gone"
-
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="sa-kill", description="Stop every SA worker; touch nothing of firstmate's."
@@ -263,7 +211,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"WOULD STOP: {worker_id} backend={backend} endpoint={endpoint}")
                 continue
             try:
-                outcome = stop_tmux(endpoint) if backend == "tmux" else stop_orca(endpoint)
+                outcome = stop_tmux(endpoint)
             except KillError as exc:
                 print(f"FAILED: {worker_id} {endpoint}: {exc}")
                 failures += 1
