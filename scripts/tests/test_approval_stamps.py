@@ -221,6 +221,33 @@ class AuditFindsEveryWayAStampCanBeWrongTests(unittest.TestCase):
                   created_at="")
         self.assertEqual(len(self.audit(db3)["problems"]), 1)
 
+    def test_an_UNREADABLE_created_at_fails_closed(self):
+        # QA 2026-11-05 round 7 follow-up: the provenance check compared created_at to the cutover as STRINGS, which is
+        # a format predicate, not a time predicate. Every value below sorts BEFORE "2026-11-05T11:48:49Z"
+        # lexicographically, so each was silently exempted - an unreadable value read as a pass.
+        for bad in ("1793843252",                      # an epoch integer: "1" < "2"
+                    "2026-11-05 11:00:00",             # space instead of T: " " < "T"
+                    "2026-11-05",                      # a bare day: shorter, so it sorts first
+                    "2026-11-05T11:00:00+00:00",       # an offset form the writer never emits
+                    "not a date at all",
+                    "2026-13-45T99:99:99Z",           # right shape, impossible values
+                    # QA 2026-11-05 round 8: strptime TOLERATES a non-zero-padded value under this format, so these
+                    # parsed and were exempted even after the strict parse - a value read as the writer's own when it
+                    # is only something the parser accepts. The round-trip check is what makes it a finding.
+                    "2026-1-5T1:2:3Z",
+                    "2026-11-5T11:00:00Z",
+                    "2026-11-05T1:00:00Z"):
+            db = ledger()
+            self.seed(db, approver_kind=None, approval_id=None, template_sha256=None, approved_by=CAPTAIN,
+                      created_at=bad)
+            self.assertEqual(len(self.audit(db)["problems"]), 1, f"{bad!r} was exempted")
+            self.assertIn("cannot be read as", self.why(db)[0], f"{bad!r} was not named as unreadable")
+        # the well-formed pre-cutover value is still history - the strict parse must not refuse the real rows
+        db = ledger()
+        self.seed(db, approver_kind=None, approval_id=None, template_sha256=None, approved_by=CAPTAIN,
+                  created_at="2026-11-05T03:44:05Z")
+        self.assertEqual(self.audit(db)["problems"], [])
+
     def test_a_send_before_the_cutover_day_is_history_not_a_finding(self):
         db = ledger()
         self.seed(db, day="2026-11-02", approver_kind=None, approval_id=None, template_sha256=None)

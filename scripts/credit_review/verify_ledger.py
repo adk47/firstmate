@@ -407,6 +407,32 @@ CAPTAIN_UID = "U7RP6HKUZ"
 # written while the deploy was still running is ambiguous and the fail-closed answer is "finding".
 # Move this forward only with a deploy that changes the stamp; STAMP_CUTOVER_OVERRIDE exists for tests.
 STAMP_CUTOVER = "2026-11-05T11:48:49Z"
+STAMP_TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+def stamp_ts(value: Any) -> datetime | None:
+    """A ledger timestamp as a datetime, or None when it is not exactly the format the writer emits.
+
+    QA 2026-11-05 round 7 follow-up: the provenance check compared created_at to the cutover as STRINGS, which is a
+    format predicate, not a time predicate. An epoch integer ("1793843252") or a space-separated stamp
+    ("2026-11-05 11:00:00") sorts BEFORE "2026-11-05T11:48:49Z" lexicographically, so an unreadable value was
+    silently exempted - the same defect class as an absent one: an unreadable value read as a pass. Parsing strictly
+    and returning None on failure makes the caller fail closed.
+
+    QA 2026-11-05 round 8: and it must ROUND-TRIP. strptime accepts a non-zero-padded value ("2026-1-5T1:2:3Z") under
+    this format even though the writer never emits one, so a parseable-but-noncanonical stamp would have been exempted
+    again - the same defect one level down: a value read as the writer's own when it is only something the parser
+    tolerates. Requiring strftime to reproduce the input byte for byte makes "is this the writer's format" a fact
+    about the value rather than an assumption about the parser."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.strptime(value, STAMP_TS_FORMAT)
+    except (TypeError, ValueError):
+        return None
+    if parsed.strftime(STAMP_TS_FORMAT) != value:
+        return None
+    return parsed.replace(tzinfo=timezone.utc)
 APPROVER_RULING = "fable-ruling"
 APPROVER_KINDS = (APPROVER_CAPTAIN, APPROVER_RULING)
 SLACK_UID_RE = re.compile(r"^U[A-Z0-9]{8,12}$")
@@ -1929,12 +1955,20 @@ def stamp_problem(row: Any, rulings: dict[str, Any]) -> str:
         # with no stamp is a finding whoever approved_by names, because the stamped gate always writes one - so an
         # unstamped captain-attributed row appearing tomorrow is exactly the thing this audit exists to catch. The
         # provenance is a POSITIVE fact (created_at before the cutover), never an inference from the gate's behaviour.
-        if str(approved_by) == CAPTAIN_UID and str(created_at or "") and str(created_at) < STAMP_CUTOVER:
-            return ""
         if str(approved_by) == CAPTAIN_UID:
-            return (f"no approver stamp on a row created {created_at or 'at an unknown time'}, which is not before the "
-                    f"stamped gate went live ({STAMP_CUTOVER}) - an unstamped send after the cutover is a finding "
-                    f"whoever approved_by names")
+            # FAIL CLOSED on an unreadable timestamp: a value that does not parse is a finding, exactly like a missing
+            # one. Comparing the strings would have exempted an epoch integer or a space-separated stamp, because both
+            # sort before the cutover lexicographically (QA 2026-11-05 round 7 follow-up).
+            made = stamp_ts(created_at)
+            cutover = stamp_ts(STAMP_CUTOVER)
+            if made is not None and cutover is not None and made < cutover:
+                return ""
+            if made is None:
+                return (f"no approver stamp on a row whose created_at {created_at!r} cannot be read as "
+                        f"{STAMP_TS_FORMAT} - an unreadable timestamp cannot prove the row predates the stamped gate "
+                        f"({STAMP_CUTOVER}), so it is a finding")
+            return (f"no approver stamp on a row created {created_at}, which is not before the stamped gate went live "
+                    f"({STAMP_CUTOVER}) - an unstamped send after the cutover is a finding whoever approved_by names")
         return "no approver stamp (a send that did not come through the stamped gate path)"
     if kind not in APPROVER_KINDS:
         return f"unknown approver kind {kind!r}"
