@@ -1,0 +1,14 @@
+=== sa-store state --table tickets ===
+{"T-0001":{"acceptance":null,"body":"prove the five tools work","class":null,"created_at":"2026-11-05T05:49:51Z","id":"T-0001","owner":"sa-worker-1","requester":"captain","state":"assigned","title":"Router end-to-end","updated_at":"2026-11-05T05:49:53Z"}}
+
+=== sa-store state --table assignments ===
+{"T-0001":{"assigned_at":"2026-11-05T05:49:53Z","owner":"sa-worker-1","reason":"only worker with the scope","ticket":"T-0001"}}
+
+=== sa-store state --table threads ===
+{"TH-T-0001":{"id":"TH-T-0001","messages":[{"actor":"router","at":"2026-11-05T05:49:55Z","text":"on it"}],"opened_at":"2026-11-05T05:49:55Z","ticket":"T-0001"}}
+
+=== sa-store state --table rulings ===
+{"rul-0000000000000006":{"actor":"router","at":"2026-11-05T05:49:57Z","id":"rul-0000000000000006","rationale":"checkable acceptance","ruling":"accept","ticket":"T-0001"}}
+
+=== sa-store query --table events --where type=ticket.escalated ===
+[{"actor":"router","at":"2026-11-05T05:50:00Z","id":"ev-0000000000000007","payload":{"to":"human","why":"needs a product call"},"seq":7,"ticket":"T-0001","type":"ticket.escalated"}]

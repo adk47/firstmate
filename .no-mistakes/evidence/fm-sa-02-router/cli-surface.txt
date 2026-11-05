@@ -1,0 +1,29 @@
+=== sa-cli --help ===
+usage: sa-cli <verb> [options]
+
+The router-facing CLI. Five verbs, no shell, no file read, no file edit.
+
+verbs:
+  ticket
+  assign
+  reply
+  rule
+  escalate
+
+  ticket   --title T --body B --requester R [--acceptance JSON]  -> ticket id
+  assign   --ticket T --owner O --reason R
+  reply    --ticket T --text X
+  rule     --ticket T --ruling X --rationale R
+  escalate --ticket T --to X --why Y
+
+=== forbidden verbs (expect exit 2, no log written) ===
+sa-cli bash   -> exit 2 | unknown command: bash
+sa-cli sh     -> exit 2 | unknown command: sh
+sa-cli exec   -> exit 2 | unknown command: exec
+sa-cli read   -> exit 2 | unknown command: read
+sa-cli cat    -> exit 2 | unknown command: cat
+sa-cli edit   -> exit 2 | unknown command: edit
+sa-cli write  -> exit 2 | unknown command: write
+
+=== events.jsonl written by refused verbs? ===
+absent (correct)

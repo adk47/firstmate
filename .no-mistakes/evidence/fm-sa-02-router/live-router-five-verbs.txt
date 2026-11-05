@@ -1,0 +1,13 @@
+=== command ===
+pi --no-builtin-tools --no-mcp --tools sa_ticket,... -e sa/extensions/sa-router.ts -p "Open a ticket titled ... then assign it to sa-worker-1 ... then reply ... then rule ... then escalate ..."
+
+=== output ===
+Aaron, all five steps ran clean on **T-0001**:
+
+1. Opened — "Router end-to-end" / "prove the five tools work" / requester `captain`
+2. Assigned to `sa-worker-1` — "only worker with the scope"
+3. Replied "on it" (thread `TH-T-0001`)
+4. Ruled `accept` — "checkable acceptance"
+5. Escalated to `human` — "needs a product call"
+
+Ticket id: **T-0001**.

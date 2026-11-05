@@ -1,0 +1,7 @@
+{"actor":"router","at":"2026-11-05T05:49:51Z","id":"ev-0000000000000001","payload":{"acceptance":null,"body":"prove the five tools work","requester":"captain","title":"Router end-to-end"},"seq":1,"ticket":null,"type":"ticket.created"}
+{"actor":"router","at":"2026-11-05T05:49:53Z","id":"ev-0000000000000002","payload":{"owner":"sa-worker-1","reason":"only worker with the scope"},"seq":2,"ticket":"T-0001","type":"ticket.assigned"}
+{"actor":"router","at":"2026-11-05T05:49:53Z","id":"ev-0000000000000003","payload":{"owner":"sa-worker-1","reason":"only worker with the scope"},"seq":3,"ticket":"T-0001","type":"assignment.created"}
+{"actor":"router","at":"2026-11-05T05:49:55Z","id":"ev-0000000000000004","payload":{"thread":"TH-T-0001"},"seq":4,"ticket":"T-0001","type":"thread.opened"}
+{"actor":"router","at":"2026-11-05T05:49:55Z","id":"ev-0000000000000005","payload":{"actor":"router","text":"on it","thread":"TH-T-0001"},"seq":5,"ticket":"T-0001","type":"thread.message"}
+{"actor":"router","at":"2026-11-05T05:49:57Z","id":"ev-0000000000000006","payload":{"rationale":"checkable acceptance","ruling":"accept"},"seq":6,"ticket":"T-0001","type":"ruling.recorded"}
+{"actor":"router","at":"2026-11-05T05:50:00Z","id":"ev-0000000000000007","payload":{"to":"human","why":"needs a product call"},"seq":7,"ticket":"T-0001","type":"ticket.escalated"}

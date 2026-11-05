@@ -1,0 +1,9 @@
+=== command ===
+pi --no-builtin-tools --no-mcp --tools sa_ticket,sa_assign,sa_reply,sa_rule,sa_escalate -e sa/extensions/sa-router.ts -p "List the exact name of every tool you have, one per line, nothing else."
+
+=== output ===
+sa_ticket
+sa_assign
+sa_reply
+sa_rule
+sa_escalate

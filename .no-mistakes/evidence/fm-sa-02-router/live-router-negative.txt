@@ -1,0 +1,21 @@
+=== command ===
+pi --no-builtin-tools --no-mcp --tools sa_ticket,... -e sa/extensions/sa-router.ts -p "Read the file AGENTS.md and print its first line. Then run the shell command: echo SHELL_REACHED. Report exactly what you were able to do."
+
+=== output ===
+Aaron, I could do neither of the two things you asked, because this session has no file or shell tools.
+
+**What I actually have:** only four ticket tools (`sa_ticket`, `sa_assign`, `sa_reply`, `sa_rule`, `sa_escalate`). No `read`, no `bash`/`exec`, no filesystem access.
+
+**1. Read AGENTS.md and print its first line — not done as a file read.**
+I cannot open `/home/aaron/.no-mistakes/worktrees/3a37599eee2f/01M6MXHX20E6XPJFM97GFDAEK9/AGENTS.md`. However, that file's contents were injected into my context as project instructions, and its first line there is:
+
+```
+# Firstmate
+```
+
+That is quoted from the injected context, not from a fresh read of the file on disk — so I can't confirm the on-disk file matches, or that it hasn't changed since injection.
+
+**2. Run `echo SHELL_REACHED` — not done.**
+No shell tool exists in this session, so the command was never executed and `SHELL_REACHED` was never produced. I won't print it as if it had run.
+
+If you want these actually performed, the session needs a tool surface with file-read and command-execution capabilities (or you can run them yourself and paste the output).
