@@ -60,6 +60,12 @@ On [PR 1495](https://github.com/kunchenguid/firstmate/pull/1495), its main step 
 `portable-serial-<k>of<n>` splits it across `n` separate CI runners.
 Each shard is still strictly serial in itself, and separate runners mean no two of these stateful scripts ever share a machine, so the split needs no concurrency isolation proof.
 
+`n` is 8.
+It was 5 until 2026-11-05, when the remainder had grown to ~98 minutes of serial work and each of five runners carried ~20 minutes of heavy subprocess work on a 2-core box.
+At that load the lane's concurrency and timing assertions started failing on runner contention rather than on any defect: `the first drain over a 5272019-byte log took 114.821s, over the 60s bound`, `slow check checkpoint exit: expected exit 0, got 124`, `concurrent append/drain subprocess failed`, `concurrent sequence claims were not unique and monotonic`, `a fast scan should compute one signature per file and check the beacon once`, and `the tmux task shell did not become ready`.
+Different shards failed on each run, which is the signature of contention rather than a defect, and the same scripts passed when run alone.
+Eight shards put ~12.5 minutes on each runner without changing the total work or any assertion.
+
 `bin/fm-test-run.sh` owns `n` and refuses any lane whose `of<n>` disagrees with it.
 `.github/workflows/ci.yml` derives the same `n` from `strategy.job-total` rather than a literal, so changing the shard count in either file without the other fails the lane loudly instead of leaving part of the required suite unrun.
 
@@ -79,17 +85,21 @@ Refresh the hints whenever the serial lane gains scripts, rather than waiting fo
 
 | Lane | Script count | Estimated duration |
 |---|---:|---:|
-| `portable-serial-1of5` | 30 | 1183309 ms (~19.72 min) |
-| `portable-serial-2of5` | 34 | 1183307 ms (~19.72 min) |
-| `portable-serial-3of5` | 34 | 1183305 ms (~19.72 min) |
-| `portable-serial-4of5` | 36 | 1176323 ms (~19.61 min) |
-| `portable-serial-5of5` | 35 | 1183310 ms (~19.72 min) |
-| imbalance | | 6987 ms |
+| `portable-serial-1of8` | 12 | 752690 ms (~12.54 min) |
+| `portable-serial-2of8` | 20 | 752695 ms (~12.54 min) |
+| `portable-serial-3of8` | 22 | 752693 ms (~12.54 min) |
+| `portable-serial-4of8` | 23 | 752693 ms (~12.54 min) |
+| `portable-serial-5of8` | 23 | 752693 ms (~12.54 min) |
+| `portable-serial-6of8` | 23 | 752690 ms (~12.54 min) |
+| `portable-serial-7of8` | 23 | 752706 ms (~12.55 min) |
+| `portable-serial-8of8` | 23 | 752694 ms (~12.54 min) |
+| imbalance | | 16 ms |
 
 The current table is generated from the runner's retained maxima plus its default for the sixteen unhinted scripts.
-The 2026-11-05 refresh puts the partition's worst shard at 19.72 min, 49% of the 40-minute job cap.
+The 2026-11-05 refresh puts the partition's worst shard at 12.55 min, 31% of the 40-minute job cap.
 
-That balanced load is why the cap is 40 minutes rather than 20: a 20-minute cap sat below the balanced shard weight itself, so a healthy shard could be cancelled, and a cancelled shard is not a passing shard.
+That balanced load is why the cap is 40 minutes rather than 20: at five shards a 20-minute cap sat below the balanced shard weight itself, so a healthy shard could be cancelled, and a cancelled shard is not a passing shard.
+The cap stays at 40 as the hang tripwire now that eight shards carry the load.
 
 A single script is the floor for any shard count, and it is now `tests/fm-watch-triage.test.sh` at 663532 ms.
 
@@ -130,7 +140,7 @@ Portable shards, each portable serial shard, and the Herdr lane upload runner-ge
 | Lane | Bound | Rationale |
 |---|---|---|
 | portable parallel 1/2 | job `timeout-minutes: 10` | The measured shard sums are about three minutes and the timeout is a hang tripwire. |
-| portable serial 1-5 | job `timeout-minutes: 40` | Each balanced shard carries about 19.72 minutes of conservative assignment weight, leaving roughly 2x hang-tripwire margin for job setup and runner-speed spread. |
+| portable serial 1-8 | job `timeout-minutes: 40` | Each balanced shard carries about 12.55 minutes of conservative assignment weight, leaving over 3x hang-tripwire margin for job setup and runner-speed spread. |
 | Herdr | family-run step `timeout-minutes: 20`; job `timeout-minutes: 75` backstop | Healthy runs finished around 7 minutes before this lane gained `fm-backend-herdr-focus-flash-e2e`, which measures about 2 minutes against a real lab locally, so the step bound is still the hang tripwire (cleanup and timing artifacts still upload) while the job cap stays a last-resort backstop. Refresh this figure from the lane's uploaded timing artifact. |
 
 Timeouts are hang tripwires rather than expected healthy durations.

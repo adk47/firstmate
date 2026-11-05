@@ -163,7 +163,12 @@ CHANGED_DEFAULT_TIMEOUT_SECS=1800
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
-PORTABLE_SERIAL_SHARDS=5
+# Eight rather than five because the remainder grew from ~63 to ~98 minutes of
+# serial work: at five shards each runner carried ~20 minutes of heavy
+# subprocess work on a 2-core box, and the concurrency and timing assertions in
+# that work started failing on runner contention rather than on any defect.
+# Eight shards put ~12 minutes on each runner without changing the total work.
+PORTABLE_SERIAL_SHARDS=8
 
 # Balance hint for a portable-serial script with no measured duration, close to
 # the measured per-script mean so a newly added test neither starves nor
