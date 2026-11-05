@@ -1,0 +1,429 @@
+#!/usr/bin/env python3
+"""sa-events - event delivery and outbox (SA-04).
+
+Implements design.md sections 2, 3, 4, 5 and 9:
+
+    sa-events emit --type T --ticket X --payload JSON   -> event id
+    sa-events deliver [--event-id E]                    -> delivery receipts
+    sa-events outbox [--state pending|delivered|failed] -> canonical JSON
+    sa-events retry                                     -> re-attempt failed deliveries
+
+Delivery is pure code. No model is loaded and no router verb is invoked anywhere
+in this path: the only external process is ``sa/bin/sa-store``, because the
+Engine is the sole writer of the event log (design.md section 0.2). This file
+never opens that log itself.
+
+Delivery target is the ticket's assigned owner, resolved from the ``assignments``
+projection. The message is the event envelope, written to
+``$SA_HOME/inbox/<owner>/<event_id>.json`` with ``O_EXCL`` (no-clobber), then an
+``outbox.delivered`` event carrying a ``{path, sha256, at}`` receipt is appended.
+
+Idempotency has two independent layers:
+
+* ``emit`` is content-idempotent. An event's identity is the sha256 of its
+  canonical ``{type, ticket, payload}``; emitting the same event twice returns
+  the first event's id instead of appending a second one.
+* ``deliver`` is receipt-idempotent. If an ``outbox.delivered`` receipt already
+  exists for an event id, delivery is skipped, so replaying a delivery is a
+  no-op even when the caller asks for it explicitly.
+
+A delivery failure appends ``outbox.failed`` with the attempt number and the
+error; ``sa-events retry`` re-attempts those and succeeds once the target is
+writable.
+
+Python 3 stdlib only.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+SA_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = SA_DIR.parent
+STORE = SA_DIR / "bin" / "sa-store"
+
+sys.path.insert(0, str(SA_DIR / "lib"))
+
+try:
+    # SA-01 owns SA_HOME resolution and the canonical JSON byte form (design.md
+    # section 2). Importing it keeps one owner instead of a second copy.
+    from sa_paths import canonical, sa_home, utc_now  # noqa: E402
+except ImportError:  # pragma: no cover - dependency guard
+    sys.stderr.write(
+        "sa-events: sa/lib/sa_paths.py not found - the SA-01 store package is "
+        "required (design.md section 6)\n"
+    )
+    raise SystemExit(1)
+
+#: The actor this package appends as (design.md section 3).
+ACTOR = "code"
+
+#: Outbox states a caller may filter on.
+OUTBOX_STATES = ("pending", "delivered", "failed")
+
+
+class StoreError(Exception):
+    """The store CLI is missing or refused a call."""
+
+
+class DeliveryError(Exception):
+    """One delivery attempt failed; the message is the recorded error."""
+
+
+# --------------------------------------------------------------------------
+# store access - the Engine is the sole writer
+# --------------------------------------------------------------------------
+
+
+def _store(*args: str) -> str:
+    """Run ``sa-store`` and return its stdout, or raise :class:`StoreError`."""
+    if not STORE.exists():
+        raise StoreError(
+            f"sa-store not found at {STORE} (SA-01, design.md section 6)"
+        )
+    proc = subprocess.run(
+        [sys.executable, str(STORE), *args],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip()
+        raise StoreError(f"sa-store {' '.join(args)} exited {proc.returncode}: {detail}")
+    return proc.stdout
+
+
+def read_table(name: str) -> dict:
+    """Return one folded projection table."""
+    return json.loads(_store("state", "--table", name))
+
+
+def append_event(type_: str, ticket: str | None, payload: dict) -> str:
+    """Append one event through the Engine and return its id."""
+    args = ["append", "--type", type_, "--actor", ACTOR]
+    if ticket is not None:
+        args += ["--ticket", ticket]
+    args += ["--payload", canonical(payload)]
+    return _store(*args).strip()
+
+
+# --------------------------------------------------------------------------
+# identity and projections
+# --------------------------------------------------------------------------
+
+
+def event_identity(type_: str, ticket: str | None, payload: dict) -> str:
+    """Return the content identity of an event (what makes emit idempotent)."""
+    body = {"payload": payload, "ticket": ticket, "type": type_}
+    return hashlib.sha256(canonical(body).encode("utf-8")).hexdigest()
+
+
+def index_events(events: dict) -> tuple[dict, dict, dict]:
+    """Return ``(by_id, receipts, failures)`` derived from the events table.
+
+    ``receipts`` maps event id -> the ``{path, sha256, at}`` receipt of its
+    ``outbox.delivered`` event. ``failures`` maps event id -> the list of
+    ``outbox.failed`` payloads, in log order, so the next attempt number is
+    ``len(failures) + 1``.
+    """
+    by_id: dict[str, dict] = {}
+    receipts: dict[str, dict] = {}
+    failures: dict[str, list] = {}
+    for seq in sorted(events, key=lambda key: int(key)):
+        event = events[seq]
+        by_id[event["id"]] = event
+        payload = event.get("payload") or {}
+        eid = payload.get("event_id")
+        if eid is None:
+            continue
+        if event.get("type") == "outbox.delivered":
+            receipt = payload.get("receipt")
+            if isinstance(receipt, dict):
+                receipts[eid] = receipt
+        elif event.get("type") == "outbox.failed":
+            failures.setdefault(eid, []).append(payload)
+    return by_id, receipts, failures
+
+
+def find_existing_event(events: dict, ident: str) -> str | None:
+    """Return the id of the first event whose content identity matches."""
+    for seq in sorted(events, key=lambda key: int(key)):
+        event = events[seq]
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+        if event_identity(event.get("type"), event.get("ticket"), payload) == ident:
+            return event["id"]
+    return None
+
+
+def resolve_owner(ticket: str | None, assignments: dict) -> str | None:
+    """Return the ticket's assigned owner, or ``None`` when unassigned."""
+    if ticket is None:
+        return None
+    row = assignments.get(ticket)
+    if not isinstance(row, dict):
+        return None
+    owner = row.get("owner")
+    return owner if isinstance(owner, str) and owner else None
+
+
+# --------------------------------------------------------------------------
+# delivery
+# --------------------------------------------------------------------------
+
+
+def _write_message(path: Path, data: bytes) -> None:
+    """Write ``data`` to ``path`` with O_EXCL, never clobbering an existing file.
+
+    A file that already exists with byte-identical content is the crash-recovery
+    case (the message landed but the receipt did not): it is accepted so the
+    receipt can be appended. Different content is a real conflict and fails.
+    """
+    parent = path.parent
+    if parent.exists() and not parent.is_dir():
+        raise DeliveryError(f"inbox path is not a directory: {parent}")
+    parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        existing = path.read_bytes()
+        if hashlib.sha256(existing).hexdigest() != hashlib.sha256(data).hexdigest():
+            raise DeliveryError(
+                f"inbox file already exists with different content: {path}"
+            ) from None
+        return
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def deliver_one(
+    event_id: str,
+    outbox: dict,
+    by_id: dict,
+    receipts: dict,
+    failures: dict,
+    assignments: dict,
+) -> dict:
+    """Deliver one event, appending exactly one receipt or one failure event."""
+    if event_id in receipts:
+        return {
+            "event_id": event_id,
+            "receipt": receipts[event_id],
+            "state": "skipped",
+            "reason": "already delivered",
+        }
+
+    envelope = by_id.get(event_id)
+    if envelope is None:
+        raise DeliveryError(f"unknown event id: {event_id}")
+
+    row = outbox.get(event_id) or {}
+    ticket = row.get("ticket") or envelope.get("ticket")
+    owner = resolve_owner(ticket, assignments) or row.get("owner")
+    attempt = len(failures.get(event_id, [])) + 1
+
+    try:
+        if not owner:
+            raise DeliveryError(
+                f"no assigned owner for ticket {ticket!r} (assignments has no row)"
+            )
+        home = sa_home()
+        path = home / "inbox" / owner / f"{event_id}.json"
+        data = (canonical(envelope) + "\n").encode("utf-8")
+        _write_message(path, data)
+        digest = hashlib.sha256(data).hexdigest()
+        at = utc_now()
+        receipt = {"at": at, "path": str(path), "sha256": digest}
+        append_event(
+            "outbox.delivered",
+            ticket,
+            {"event_id": event_id, "owner": owner, "receipt": receipt},
+        )
+    except (DeliveryError, OSError) as exc:
+        error = str(exc) if isinstance(exc, DeliveryError) else _oserror_text(exc)
+        append_event(
+            "outbox.failed",
+            ticket,
+            {
+                "attempt": attempt,
+                "error": error,
+                "event_id": event_id,
+                "owner": owner,
+            },
+        )
+        return {
+            "attempt": attempt,
+            "error": error,
+            "event_id": event_id,
+            "owner": owner,
+            "state": "failed",
+        }
+
+    return {
+        "event_id": event_id,
+        "owner": owner,
+        "receipt": receipt,
+        "state": "delivered",
+    }
+
+
+def _oserror_text(exc: OSError) -> str:
+    """Return a stable one-line description of an OS-level delivery failure."""
+    name = type(exc).__name__
+    detail = exc.strerror or str(exc)
+    if exc.filename:
+        return f"{name}: {detail}: {exc.filename}"
+    return f"{name}: {detail}"
+
+
+def _targets(outbox: dict, states: tuple[str, ...]) -> list[str]:
+    """Return the event ids whose outbox row is in one of ``states``."""
+    return [
+        eid
+        for eid in sorted(outbox)
+        if (outbox[eid] or {}).get("state") in states
+    ]
+
+
+def _run_delivery(event_ids: list[str]) -> int:
+    """Deliver each event id, print one canonical receipt line each, return rc."""
+    outbox = read_table("outbox")
+    by_id, receipts, failures = index_events(read_table("events"))
+    assignments = read_table("assignments")
+
+    failed = 0
+    for event_id in event_ids:
+        try:
+            result = deliver_one(
+                event_id, outbox, by_id, receipts, failures, assignments
+            )
+        except DeliveryError as exc:
+            sys.stderr.write(f"sa-events: {exc}\n")
+            failed += 1
+            continue
+        if result["state"] == "failed":
+            failed += 1
+        sys.stdout.write(canonical(result) + "\n")
+    return 1 if failed else 0
+
+
+# --------------------------------------------------------------------------
+# verbs
+# --------------------------------------------------------------------------
+
+
+def cmd_emit(args) -> int:
+    if not args.type or not args.type.strip():
+        raise StoreError("--type must be a non-empty string")
+    try:
+        payload = json.loads(args.payload) if args.payload is not None else {}
+    except json.JSONDecodeError as exc:
+        raise StoreError(f"--payload is not valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise StoreError("--payload must be a JSON object")
+
+    events = read_table("events")
+    ident = event_identity(args.type, args.ticket, payload)
+    existing = find_existing_event(events, ident)
+    if existing is not None:
+        # Content-idempotent: the same event emitted twice is one event.
+        outbox = read_table("outbox")
+        if existing not in outbox:
+            append_event(
+                "outbox.enqueued",
+                args.ticket,
+                {
+                    "event_id": existing,
+                    "owner": resolve_owner(args.ticket, read_table("assignments")),
+                },
+            )
+        sys.stdout.write(existing + "\n")
+        return 0
+
+    event_id = append_event(args.type, args.ticket, payload)
+    owner = resolve_owner(args.ticket, read_table("assignments"))
+    append_event(
+        "outbox.enqueued",
+        args.ticket,
+        {"event_id": event_id, "owner": owner},
+    )
+    sys.stdout.write(event_id + "\n")
+    return 0
+
+
+def cmd_deliver(args) -> int:
+    outbox = read_table("outbox")
+    if args.event_id:
+        return _run_delivery([args.event_id])
+    return _run_delivery(_targets(outbox, ("pending",)))
+
+
+def cmd_retry(_args) -> int:
+    outbox = read_table("outbox")
+    return _run_delivery(_targets(outbox, ("failed",)))
+
+
+def cmd_outbox(args) -> int:
+    outbox = read_table("outbox")
+    if args.state:
+        outbox = {
+            eid: row
+            for eid, row in outbox.items()
+            if (row or {}).get("state") == args.state
+        }
+    sys.stdout.write(canonical(outbox) + "\n")
+    return 0
+
+
+# --------------------------------------------------------------------------
+# CLI
+# --------------------------------------------------------------------------
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="sa-events",
+        description="SA event delivery and outbox (design.md section 9).",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_emit = sub.add_parser("emit", help="append an event and enqueue it for delivery")
+    p_emit.add_argument("--type", required=True, help="event type, e.g. pr.check_failed")
+    p_emit.add_argument("--ticket", required=True, help="ticket id the event belongs to")
+    p_emit.add_argument("--payload", default=None, help="JSON object")
+    p_emit.set_defaults(func=cmd_emit)
+
+    p_deliver = sub.add_parser("deliver", help="deliver pending events to their owners")
+    p_deliver.add_argument("--event-id", default=None, help="deliver one event only")
+    p_deliver.set_defaults(func=cmd_deliver)
+
+    p_outbox = sub.add_parser("outbox", help="print the outbox as canonical JSON")
+    p_outbox.add_argument("--state", default=None, choices=OUTBOX_STATES)
+    p_outbox.set_defaults(func=cmd_outbox)
+
+    p_retry = sub.add_parser("retry", help="re-attempt failed deliveries")
+    p_retry.set_defaults(func=cmd_retry)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        return args.func(args)
+    except StoreError as exc:
+        sys.stderr.write(f"sa-events: {exc}\n")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
