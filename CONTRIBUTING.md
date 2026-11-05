@@ -125,3 +125,5 @@ The [Herdr backend guide](docs/herdr-backend.md#destructive-lab-safety) owns the
 ## Questions
 
 Open an issue, or talk to me on [Discord](https://discord.gg/Wsy2NpnZDu).
+
+CI baseline note: this branch is origin/main plus this one sentence, and exists only to record a main-content CI run.
