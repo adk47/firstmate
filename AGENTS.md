@@ -299,6 +299,8 @@ The delivery lifecycle is an always-loaded operational contract; referenced scri
 
 ### Intake and authority
 
+**A ticket must be checkable before it is dispatched.** If the request cannot be restated as one acceptance check — a test that passes, a command that returns the expected value, a screenshot diff that matches, a named production signal that holds — it is not a ticket yet. Ask the single question that supplies the missing check, or record the ambiguity in the brief and say which part is unverified. A ticket that cannot be checked cannot be finished; it can only be abandoned late. This applies to every ship and scout spawn, not to answers.
+
 Resolve the project independently for every request.
 An explicit project wins, a clear follow-up inherits its referent, and otherwise match the request against the registry, work under way, and project code or README.
 Proceed on one confident match while naming the project in plain language; ask one concise question when multiple or no projects plausibly match.
