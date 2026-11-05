@@ -799,7 +799,43 @@ class CandidateTests(unittest.TestCase):
         decisions_db(self.path, [dec("old", at="2026-10-01T00:00:00Z"), dec("new", at="2026-10-15T22:00:00Z")])
         db = self.open()
         now = datetime(2026, 10, 15, 23, tzinfo=timezone.utc)
-        self.assertEqual([r for r, _, _ in verify_notify.candidates(db, since_hours=24, now=now)], ["new"])
+        # The WINDOW on its own: firstmate 768's backfill is a separate, bounded rule, so this
+        # test disables it and still pins the outcome-time cut exactly as before.
+        self.assertEqual([r for r, _, _ in verify_notify.candidates(db, since_hours=24, now=now,
+                                                                   never_asked_days=0)], ["new"])
+        # With the default backfill, "old" is inside never_asked_days and no note ever asked
+        # about it, so the window no longer decides whether it may be asked at all.
+        self.assertEqual([r for r, _, _ in verify_notify.candidates(db, since_hours=24, now=now)],
+                         ["old", "new"])
+
+    def test_a_credit_that_aged_out_of_the_window_is_still_askable_if_no_note_ever_asked(self):
+        """firstmate 768: 279 provisional credits (63 accounts) had NO delivered ask after 48 h.
+        The window is a cap on re-reading, never a reason to abandon a credit nobody asked
+        about: a 10-day-old approval with no delivered note is a candidate; the same age WITH a
+        delivered note is not (its own clock runs from that send)."""
+        decisions_db(self.path, [dec("asked", at=_ago(240)), dec("never", at=_ago(240)),
+                                 dec("too_old", at=_ago(24 * 40))])
+        db = self.open()
+        c = verify_ledger.claim(db, user_key="asked@x.com", day="d", request_ids=["asked"], message_type="email",
+                                approved_by=CAPTAIN_UID, approval_ref="ref")
+        verify_ledger.finalize(db, message_row=c["message_row"], status="sent", message_id="1")
+        now = datetime.now(timezone.utc)
+        got = [r for r, _, _ in verify_notify.candidates(db, since_hours=168, now=now)]
+        self.assertEqual(got, ["never"], "the old ask keeps its own clock; the never-asked one is reachable")
+        self.assertEqual([r for r, _, _ in verify_notify.candidates(db, since_hours=168, now=now,
+                                                                   never_asked_days=0)], [],
+                         "0 disables the backfill, so the window is strictly a window")
+        self.assertNotIn("too_old", [r for r, _, _ in verify_notify.candidates(db, since_hours=168, now=now)],
+                         "the backfill is BOUNDED: 40 days back is outside never_asked_days")
+
+    def test_the_backfill_never_reopens_a_credit_the_ledger_already_refused(self):
+        decisions_db(self.path, [dec("refused", at=_ago(240))])
+        db = self.open()
+        c = verify_ledger.claim(db, user_key="r@x.com", day="d", request_ids=["refused"], message_type="email",
+                                approved_by=CAPTAIN_UID, approval_ref="ref")
+        verify_ledger.finalize(db, message_row=c["message_row"], status="refused", message_id="")
+        self.assertEqual(verify_notify.candidates(db, since_hours=168), [],
+                         "a refusal closes the credit for good; the backfill must not re-open it")
 
 
 class RereadAndPlanTests(unittest.TestCase):

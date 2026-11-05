@@ -554,7 +554,8 @@ def cmd_verify_notify(args: argparse.Namespace) -> int:
         report = verify_notify.run(admin_api.AdminClient(), ledger_path=args.ledger, mode=args.mode,
                                    run_id=args.run, since_hours=args.since_hours, max_users=args.max_users,
                                    proof_path=args.proof_on_file, sweep=not args.no_proof_sweep,
-                                   check_recipients=args.check_recipients)
+                                   check_recipients=args.check_recipients,
+                                   never_asked_days=(args.never_asked_days or None))
     except verify_notify.ContractError as exc:
         log(f"verify-notify contract error: {exc}")
         print(f"Verify notes could not run: {exc}. Nothing was sent.")
@@ -1079,6 +1080,9 @@ def parser() -> argparse.ArgumentParser:
                     help="apply sends through intercom-verify-request.sh; dry-run only validates (default)")
     vn.add_argument("--run", default=None, help="only the decider run with this run_id")
     vn.add_argument("--since-hours", type=int, default=168, help="decisions newer than this (when decided_at exists)")
+    vn.add_argument("--never-asked-days", type=int, default=verify_notify.NEVER_ASKED_DAYS,
+                    help="re-read this far back for credits NO delivered ask ever covered (0 disables): the window "
+                         "bounds re-reading, never who may be asked (firstmate 768)")
     vn.add_argument("--max-users", type=int, default=150, help="accounts messaged per run")
     vn.add_argument("--no-proof-sweep", action="store_true", help="skip tagging proof replies")
     vn.add_argument("--check-recipients", action="store_true",

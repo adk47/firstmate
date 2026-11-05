@@ -87,6 +87,48 @@ class Tracker(unittest.TestCase):
         self.assertEqual(len(t.undelivered()), 1)
         self.assertTrue(any("backup_ask_undelivered: 1" in f for f in t.findings()))
 
+    def band_a(self, rid):
+        """The decider recorded a trusted-anchor (band A) approval for `rid`."""
+        self.db.execute("CREATE TABLE IF NOT EXISTS decisions (run_id TEXT, decided_at TEXT, request_id TEXT, "
+                        "profile_id TEXT, user_id TEXT, track_id TEXT, big_track INTEGER, decision TEXT, "
+                        "reason TEXT, mode TEXT, evidence_kind TEXT)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS decision_outcomes (run_id TEXT, at TEXT, request_id TEXT, "
+                        "action TEXT, outcome TEXT)")
+        self.db.execute("INSERT INTO decisions (run_id, request_id, profile_id, evidence_kind) VALUES "
+                        "('run-1', ?, 'p', 'validator_low_risk_trusted')", (rid,))
+        self.db.execute("INSERT INTO decision_outcomes (run_id, at, request_id, action, outcome) VALUES "
+                        "('run-1', '2026-10-23T12:00:00Z', ?, 'approve', 'approved')", (rid,))
+
+    def test_a_band_a_approval_is_not_a_missed_ask(self):
+        """firstmate 768: 107 of the 279 "no delivered ask" credits were band A (trusted anchor), which
+        NEVER gets a verify note (Fable 10-22 09:30Z). Counting them as waits inflated the watchdog."""
+        A, B = R["a"].replace("a", "h", 1), R["b"].replace("b", "i", 1)
+        self.band_a(A)
+        rows = [(A, 77, approval()), (B, 78, approval())]
+        t = pt.run(fake(rows), ledger=self.db, proof_path=str(self.proof), now=NOW)
+        st = {r["request_id"]: r["state"] for r in t.rows}
+        self.assertEqual(st[A], "no_ask_needed", "band A: no note is ever sent, so this is expected")
+        self.assertEqual(st[B], "no_ask_yet", "an ordinary provisional credit with no ask IS waiting")
+        self.assertEqual([r["request_id"] for r in t.undelivered()], [B], "the watchdog counts only the real wait")
+        self.assertTrue(any("band A 1" in f for f in t.findings()))
+
+    def test_core_never_shortens_a_deadline_only_extends_it(self):
+        """firstmate 768: NO user may be held to a date earlier than delivered + 7 d. Core stamps
+        approval + 30 d, which is sometimes EARLIER than the ruled date; deadline_at must extend."""
+        C, D = R["c"], R["d"]
+        self.sent([C], "2026-10-28T12:00:00Z")   # delivered 2 days before NOW -> ruled due 2026-11-04
+        self.sent([D], "2026-10-03T12:00:00Z")   # delivered 27 days ago -> due 2026-10-10, core says 11-22
+        rows = [(C, 71, approval(at="2026-10-28T13:00:00Z", due="2026-10-29T00:00:00Z")),   # core EARLIER: reject
+                (D, 72, approval(at="2026-10-01T00:00:00Z", due="2026-12-30T00:00:00Z"))]   # core LATER: keep core
+        t = pt.run(fake(rows), ledger=self.db, proof_path=str(self.proof), now=NOW)
+        st = {r["request_id"]: r for r in t.rows}
+        self.assertTrue(st[C]["core_due_shortens"], "core's date is EARLIER: the case that must never be applied")
+        self.assertEqual(st[C]["core_proof_due_at"], "2026-10-29T00:00Z")
+        self.assertEqual(st[C]["due_at"], "2026-11-04T12:00Z", "the ruled date stands")
+        self.assertEqual(st[C]["deadline_at"], "2026-11-04T12:00Z", "core's earlier date never shortens the user")
+        self.assertEqual(st[D]["deadline_at"], "2026-12-30T00:00Z", "a later core date is kept: extension only")
+        self.assertTrue(any("never a shortening" in f for f in t.findings()))
+
     def test_unreadable_inputs_are_an_error_never_clean(self):
         def boom(sql):
             raise RuntimeError("trino rc=1")
