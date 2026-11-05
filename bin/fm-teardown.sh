@@ -1700,6 +1700,10 @@ fm_backend_orca_remove_worktree_by_path() {  # <worktree>
   }
   fm_backend_source orca >/dev/null 2>&1 || return 1
   out=$(orca worktree rm --worktree "path:$wt" --force --json 2>/dev/null || true)
+  case "$out" in
+    *[![:space:]]*) ;;
+    *) out= ;;
+  esac
   if [ -n "$out" ] && msg=$(printf '%s' "$out" | fm_backend_orca_json_ok 2>&1); then
     return 0
   fi
