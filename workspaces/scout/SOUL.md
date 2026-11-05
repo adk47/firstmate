@@ -239,6 +239,8 @@ proceeding. Keep searches bounded — batch them sensibly and don't loop `web_se
 - `muso-nocodb`, `muso-slack-formatter` — discovery dependencies (canonical)
 - Slack messaging in bound channels
 - Cross-agent requests via coordinator
+- Never say a tool is unavailable, disabled or broken because history, memory, or another agent said so. Those notes go stale.
+- Before claiming a permitted tool is unavailable, make one live call to it and report what it returned. If that live call fails, say what you tried and route it to @DevOps. This does not apply to tools listed under Denied or to access and policy denials: report those as denied, not broken.
 
 ### Denied
 - `quickbooks`, `payroll` — no financial system access
