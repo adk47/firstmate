@@ -55,6 +55,10 @@
 #     Stripe-dashboard path, where all 223 cases in the 2026-09-09 audit
 #     came from; the money gate covers only the agent/CLI path.
 #
+#   /etc/cron.d/slack-freeze-miss-check
+#     Schedules scripts/slack-freeze-miss-check.sh every 5 minutes: flags Slack
+#     @mentions lost while a gateway was frozen (MUS-29976). Flag only, no replay.
+#
 #   /etc/cron.d/cron-health-watchdog
 #     Schedules scripts/cron-health-watchdog.sh every 5 minutes to
 #     alert #clio_devops on any errored cron run (the missing
@@ -420,6 +424,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/lib/codex-oauth-refresh.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/cron-health-watchdog.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/cron-health-watchdog.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/slack-freeze-miss-check.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/slack-freeze-miss-check.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/check-agent-soul-delivery.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/check-agent-soul-delivery.sh missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/fallback-swallow-watchdog.sh" ]] \
@@ -2583,6 +2589,16 @@ cat > /etc/cron.d/cron-health-watchdog << CRONHEALTH
 */5 * * * * root $HYDRA_ROOT/scripts/cron-health-watchdog.sh >> /var/log/cron-health-watchdog.log 2>&1
 CRONHEALTH
 chmod 644 /etc/cron.d/cron-health-watchdog
+
+# ─── Slack freeze-miss check, every 5 min (MUS-29976) ─────────
+# After a gateway "host timing gap" (frozen process) flags Slack @mentions that
+# never reached the bot as an Inbound app_mention. Flag only, no replay. Edit
+# here + re-run install-aux-units.sh, never edit the file on node-8.
+cat > /etc/cron.d/slack-freeze-miss-check << SLACKFREEZE
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+*/5 * * * * root $HYDRA_ROOT/scripts/slack-freeze-miss-check.sh >> /var/log/slack-freeze-miss-check.log 2>&1
+SLACKFREEZE
+chmod 644 /etc/cron.d/slack-freeze-miss-check
 
 # ─── Refund + credit-balance overlap watchdog, daily ──────────
 # Pages #clio_devops when a cash refund and a live customer-balance concession
