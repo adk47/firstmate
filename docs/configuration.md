@@ -553,6 +553,26 @@ The sweep must finish inside `FM_CHECK_TIMEOUT` (default 30), because a run the 
 So a budget larger than that timeout allows is cut down to what fits instead of being refused, and the cut is reported in the report line.
 A budget that is not a whole number from 1 to 120 is still refused outright.
 
+## Running-chair drift check
+
+A chair that keeps running an old checkout supervises the fleet with instructions and scripts that no longer match the repository, and nothing inside that session can see it: every wake, brief, and guard behaves exactly as the stale code says.
+`bin/fm-drift-check.sh` is the one thing that compares what is running against what the repository says should be running.
+It compares the running code root's own `HEAD` with `refs/remotes/origin/main` and prints one line when the two have differed for longer than `FM_DRIFT_PAGE_SECS` (default 86400 seconds, one day).
+A difference in either direction is drift: behind means the chair runs stale code, ahead means it runs code nobody else has, and the line names which.
+
+The comparison is read-only.
+The check never fetches and never moves `HEAD`, because a fetch from a watcher poll would race the fleet sync that owns clone refresh and a network blip must never read as drift; `origin/main` is whatever the last fetch left, and fleet sync refreshes it at every session start.
+A code root that is not a git checkout, or one whose `origin/main` has never been fetched, proves nothing and stays silent rather than paging on a comparison that was never made.
+
+Drift is an episode, not a poll result.
+`state/.drift` records the first poll that saw this exact `HEAD`/`origin/main` pair, and the line is printed once per episode, when that pair has held past the threshold.
+A pair that changes starts a new episode, so a chair that drifts, is updated, and drifts again is reported again, and a chair that catches up clears the record.
+The probe itself is gated to once per `FM_DRIFT_INTERVAL` (default 3600 seconds, `0` to probe on every run) so an hourly comparison does not re-read git on every watcher poll; `state/.drift.beat` holds the last probe time.
+
+Bootstrap arms the check in every home as one of its local mutating sweeps, because a detector nobody armed is exactly the blind spot it exists to close.
+`bin/fm-drift-check.sh arm` is the same arming step, writing `state/drift.check.sh` and binding its bytes with `bin/fm-check-register.sh` so the existing watcher polls it on its normal cadence and turns its one line into a `check:` wake; `bin/fm-drift-check.sh disarm` removes the shim, its trust binding, the episode record, and the probe beat.
+A bootstrap arming failure prints one `DRIFT_CHECK:` line rather than leaving the home quietly blind.
+
 ## Fable runway monitor
 
 The Fable runway monitor watches the two independent runways this home's supervisor depends on and turns a change into a `check:` wake, so the supervisor can move to Grok or offload lanes before Fable capacity runs out.
