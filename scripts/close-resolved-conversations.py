@@ -320,9 +320,10 @@ def build_ticket_index(key, list_id):
     email_states, conv_states, notify_owed = {}, {}, {}
     page = 0
     while page < 200:
-        # Params mirror resolve-notify.py clickup_list_page so both scans see the
-        # same task set + description field (the deeplink fallback in
-        # _notifier_conv_id needs the description).
+        # Same params as resolve-notify.py clickup_list_page EXCEPT its tags[]
+        # filter: this index needs every ticket's Intercom link, so the two scans
+        # intentionally differ. The description field is still needed (the deeplink
+        # fallback in _notifier_conv_id reads it).
         q = urllib.parse.urlencode({"archived": "false", "include_closed": "true",
                                     "subtasks": "false", "order_by": "updated", "page": str(page)})
         data = clickup_get(f"{CLICKUP_API}/list/{list_id}/task?{q}", key)

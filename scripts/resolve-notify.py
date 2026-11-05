@@ -127,6 +127,7 @@ CS_CLOSER_QUESTIONS = {
 
 CAROLINE_ADMIN_ID = "5763097"
 DEFAULT_LIST_ID = "901000600160"
+SERVER_TAG = "customer-outcome:complete"  # required by customer_complete (gate 4 of extract_candidate)
 # "Intercom Link" custom field (#417); value is the conversation deeplink
 # https://app.intercom.com/a/inbox/<ws>/inbox/conversation/<convId>.
 INTERCOM_LINK_FIELD = os.environ.get(
@@ -201,12 +202,21 @@ def clickup_list_page(key, list_id, page):
     # include_closed=true: resolve-notify hunts for RESOLVED tickets, which
     # INCLUDES true closed-type statuses. (The overdue notifier uses false — it
     # wants open/overdue work.) With false here, a ticket that moves to a closed
-    # status would be invisible: never cold-start seeded, never notified. Mirrors
-    # close-resolved-conversations.py, which fetches include_closed=true for the
-    # same reason.
+    # status would be invisible: never cold-start seeded, never notified.
+    #
+    # tags[]=SERVER_TAG: the one server-side filter, taken from a gate
+    # extract_candidate already requires, so it drops only tasks that could never
+    # be candidates (lossless; measured 29 Oct: 5 pages vs 138 unfiltered, same
+    # 17 candidates, vs 111 pages for hydra-action-request). It deliberately differs from
+    # close-resolved-conversations.py, which must see EVERY ticket's Intercom link
+    # for its index. Not a date_updated_gt watermark: the bulk guard needs every
+    # held id in this run's scan, and a windowed cold-start seed would let an old
+    # resolved ticket look new. If the gate in extract_candidate changes, change
+    # SERVER_TAG with it.
     q = urllib.parse.urlencode(
         {"archived": "false", "include_closed": "true",
-         "subtasks": "false", "order_by": "updated", "page": str(page)})
+         "subtasks": "false", "order_by": "updated", "page": str(page),
+         "tags[]": SERVER_TAG})
     s, body = clickup_client.shared(key, CLICKUP_API).request(
         "GET", f"/list/{list_id}/task?{q}")
     if s != 200 or not isinstance(body, dict) or "tasks" not in body:

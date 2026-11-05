@@ -1785,6 +1785,13 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_clickup_client
+      - name: Run resolve-notify server-side tag filter tests
+        # resolve-notify's ClickUp scan sends one tags[] filter that is lossless
+        # only while extract_candidate requires the same tag. Same bare stdlib
+        # unittest, targeted by name (no pytest/network).
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_resolve_notify_filter
       - name: Run customer-outcome contract tests
         # ClickUp workflow status is not customer-visible proof. These tests lock
         # the shared fail-closed outcome predicate and every automated writer's
