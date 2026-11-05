@@ -93,16 +93,22 @@
 # the orca CLI, and when an Orca worktree id is recorded it must resolve to that
 # exact path. A recorded id releases by id; an Orca-created worktree without one
 # releases by its current path, and falls back to a guarded plain git release
-# when Orca's registry no longer names that path - never to a discard. Every other
-# worktree needs treehouse installed on this host plus an inspectable recorded
-# project directory, and the treehouse pool the project resolves is asked (read
-# only) whether it holds that exact worktree - judged from the `status` stdout
-# listing alone, never from the diagnostics real treehouse keeps on stderr: a
-# held slot returns through treehouse, and a path this host's pool provably does
-# not hold is a worktree treehouse never leased here, so it releases through
-# guarded_plain_git_release only once that release is proven to succeed - an
-# unlocked registration, a tree holding no uncommitted or untracked work, and no
-# initialized submodule.
+# only on the proven registry miss - the parsed `selector_not_found` error code -
+# never to a discard. Every other Orca failure refuses with the concrete Orca
+# error named, including one the CLI reports only on stderr, because a bare git
+# remove would delete a worktree Orca still owns.
+# A tmux-era worktree - a Mac-migrated record whose backend is tmux - on a host
+# without treehouse has no pool to corrupt, so it releases through the same
+# guarded plain git release once that release is proven safe, instead of the
+# treehouse refusal. Every other worktree needs treehouse installed on this host
+# plus an inspectable recorded project directory, and the treehouse pool the
+# project resolves is asked (read only) whether it holds that exact worktree -
+# judged from the `status` stdout listing alone, never from the diagnostics real
+# treehouse keeps on stderr: a held slot returns through treehouse, and a path
+# this host's pool provably does not hold is a worktree treehouse never leased
+# here, so it releases through guarded_plain_git_release only once that release
+# is proven to succeed - an unlocked registration, a tree holding no uncommitted
+# or untracked work, and no initialized submodule.
 # When no path resolves, teardown refuses while the agent is still alive and the
 # branch still intact, naming the concrete missing requirement. A treehouse that
 # cannot report its pool listing at all (no `status` support or a failing status)
