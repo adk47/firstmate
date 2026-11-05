@@ -62,6 +62,29 @@ run_hold() { run bash "$LIB" --lock "$LOCK" "$@"; }
   wait "$holder" 2>/dev/null || true
 }
 
+@test "a boundary 9 minutes past with a DELAYED tick is a WAIT (QA #1783 finding 1: the 04:01 deploy, the 04:03 round)" {
+  base=$(( 1762300000 / 7200 * 7200 ))
+  BOUNDARY=$(( base + 7200 ))
+  # The lock file exists (ticks have run before) but its mtime is from the PREVIOUS round: this boundary's tick has
+  # not opened it yet. At 04:01 the next boundary is 7140s away, so the pre-boundary check says GO - the old code
+  # shipped the deploy and the rsync overlapped the 04:03 audience/ledger read. The file's mtime is the evidence
+  # a delayed tick leaves; no evidence means wait out the window and re-check.
+  touch -d @$(( BOUNDARY - 7200 + 30 )) "$LOCK"
+  run_hold --now "$(( BOUNDARY + 60 ))" --cadence 7200 --hold-min 10
+  [ "$status" -eq 3 ]
+  [[ "$output" == *"tick-not-yet-started-for-this-boundary"* ]]
+  [ "${output%% *}" -eq 600 ]             # 540s left of the window + 60s, so the wait is bounded
+  # Past the window we cannot tell a quiet cron from a slow one, and a deploy that never runs is its own failure:
+  # the caller's budget decides. 30 minutes after the boundary is a GO.
+  run_hold --now "$(( BOUNDARY + 1800 ))" --cadence 7200 --hold-min 10
+  [ "$status" -eq 0 ]
+  # And once the delayed tick HAS started inside this window (the flock file touched after the boundary), the same
+  # instant as the first case is a GO: the boundary's tick ran, and its flock is not held.
+  touch -d @$(( BOUNDARY + 120 )) "$LOCK"
+  run_hold --now "$(( BOUNDARY + 130 ))" --cadence 7200 --hold-min 10
+  [ "$status" -eq 0 ]
+}
+
 @test "an absent lock file is a GO (no tick has ever run) and is never created" {
   rm -f "$LOCK"
   base=$(( 1762300000 / 7200 * 7200 ))

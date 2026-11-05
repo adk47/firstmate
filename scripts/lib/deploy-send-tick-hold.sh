@@ -21,6 +21,10 @@
 #                            [--lock <path>]
 #     exit 0  GO      — outside the window, no tick in flight (prints nothing)
 #     exit 3  WAIT    — prints "<seconds> <reason>": the caller sleeps and retries
+#                       reasons: next-tick-in-Ns (the window has not opened yet),
+#                       tick-in-flight (a tick holds the flock), and
+#                       tick-not-yet-started-for-this-boundary (the boundary just
+#                       passed and the delayed tick has left no trace yet)
 #     exit 2  error   — unreadable argument (never a silent GO)
 #
 # The window is measured to the NEXT boundary (a deploy that starts 9 minutes
@@ -73,6 +77,30 @@ if [ "$TO_NEXT" -le "$WINDOW" ]; then
   # be visible before the deploy touches node-8, and the caller's re-check settles it.
   echo "$(( TO_NEXT + 60 )) next-tick-in-${TO_NEXT}s"
   exit 3
+fi
+
+# ── The DELAYED tick (QA #1783 finding 1) ───────────────────────────────────
+# A boundary 9 minutes in the past is NOT proof that its tick ran. Cron can start
+# it minutes late (the 04:00Z round once began at 04:03Z): at 04:01 the next
+# boundary is almost two hours away, no flock is held yet, and the old code said
+# GO — so the rsync would be in flight when that tick began reading the ledger and
+# building its audiences. The only evidence a delayed tick leaves is its flock
+# FILE's mtime, which is written when the tick opens it: if this boundary's tick
+# has not started yet, wait out the window and re-check. Past the window we cannot
+# tell a quiet cron from a slow one, and a deploy that never runs is also a
+# failure — the caller's budget decides, exactly as it does for a long tick.
+if [ "$INTO" -le "$WINDOW" ]; then
+  LAST=$(( NOW - INTO ))
+  STARTED=0
+  if [ -e "$LOCK" ]; then
+    MTIME="$(stat -c %Y "$LOCK" 2>/dev/null || echo 0)"
+    case "$MTIME" in ''|*[!0-9]*) MTIME=0 ;; esac
+    [ "$MTIME" -ge "$LAST" ] && STARTED=1
+  fi
+  if [ "$STARTED" = 0 ]; then
+    echo "$(( WINDOW - INTO + 60 )) tick-not-yet-started-for-this-boundary"
+    exit 3
+  fi
 fi
 
 exit 0

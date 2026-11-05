@@ -355,6 +355,14 @@ def run(query: Query = trino_csv, *, ledger: sqlite3.Connection, proof_path: str
         delivered = _ts(ask[0]) if ask else None
         due = delivered + timedelta(days=window_days) if delivered else None
         core_due = _ts(appr.get("proofDueAt"))
+        # QA #1783 (finding 2): the EFFECTIVE deadline is the only one the tracker and the board may act on.
+        # Core stamps approval + 30 d, which is sometimes EARLIER than the ruled date (a shortening that must
+        # never be applied) and sometimes LATER (an extension the user was promised). Computing it and then
+        # leaving state / days_left / bucket / the board on delivered + window meant an extended user was shown
+        # overdue the day their 7-day window passed - a date nobody ruled. One value, consumed everywhere:
+        # `window_due` stays visible as evidence (the ruled 7-day date), `deadline` is what we act on.
+        window_due = due
+        deadline = (max(core_due, due) if (core_due and due) else (core_due or due)) if (core_due or due) else None
         if r["request_id"] in doc_rids:
             state = "backup_on_file"
         elif r["user_id"] in doc_users:
@@ -364,7 +372,7 @@ def run(query: Query = trino_csv, *, ledger: sqlite3.Connection, proof_path: str
             state = "no_ask_needed"
         elif delivered is None:
             state = "no_ask_yet"
-        elif now >= due:
+        elif now >= deadline:
             state = "due"
         else:
             state = "clock_running"
@@ -376,8 +384,12 @@ def run(query: Query = trino_csv, *, ledger: sqlite3.Connection, proof_path: str
             "hours_since_approval": round((now - approved_at).total_seconds() / 3600, 1) if approved_at else None,
             "ask_delivered_at": delivered.strftime("%Y-%m-%dT%H:%MZ") if delivered else None,
             "ask_campaign": ask[1] if ask else None,
-            "due_at": due.strftime("%Y-%m-%dT%H:%MZ") if due else None,
-            "days_left": (due - now).days if due and now < due else (0 if due else None),
+            # due_at is the EFFECTIVE deadline (QA #1783 finding 2): state, days_left, bucket and the board all
+            # read this one value, so an extension core granted is never rendered as an overdue user. The ruled
+            # 7-day date stays visible beside it as evidence, never as the date we act on.
+            "due_at": deadline.strftime("%Y-%m-%dT%H:%MZ") if deadline else None,
+            "window_due_at": window_due.strftime("%Y-%m-%dT%H:%MZ") if window_due else None,
+            "days_left": (deadline - now).days if deadline and now < deadline else (0 if deadline else None),
             "core_proof_due_at": core_due.strftime("%Y-%m-%dT%H:%MZ") if core_due else None,
             "core_due_mismatch": bool(core_due and (due is None or abs((core_due - due).total_seconds()) > 3600)),
             # firstmate 768: NO user may be held to a date earlier than the ruled one (7 days from
@@ -385,10 +397,9 @@ def run(query: Query = trino_csv, *, ledger: sqlite3.Connection, proof_path: str
             # shortening) - that must extend the user's window, never cut it. `deadline_at` is the
             # date a consumer may act on; core's own value stays visible as evidence, never as a
             # deadline we shorten to.
-            "deadline_at": (max(core_due, due).strftime("%Y-%m-%dT%H:%MZ") if (core_due and due)
-                            else (due or core_due).strftime("%Y-%m-%dT%H:%MZ") if (due or core_due) else None),
+            "deadline_at": deadline.strftime("%Y-%m-%dT%H:%MZ") if deadline else None,
             "core_due_shortens": bool(core_due and due and core_due < due),
-            "bucket": bucket(state, delivered, due, now),
+            "bucket": bucket(state, delivered, deadline, now),
             "reminder_due": bool(delivered and state == "clock_running"
                                  and now >= delivered + timedelta(days=REMINDER_DAY)),
             "day_n_route": {"backup_on_file": "plain_approve", "user_documented": "stage2_document_check",

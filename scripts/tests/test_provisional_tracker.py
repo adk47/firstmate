@@ -30,7 +30,10 @@ def proof_doc(entries, gen="2026-10-30T11:30:00Z", parts=("cs-intercom", "cs-gma
 R = {k: f"{k}0000000-0000-4000-8000-000000000000"[:36] for k in ("a", "b", "c", "d", "e")}
 
 
-def approval(at="2026-10-23T12:00:00Z", due="2026-11-22T12:00:00Z", **kw):
+def approval(at="2026-10-23T12:00:00Z", due=None, **kw):
+    """A core action row. `due` is core's promise (`promised_delivery_date` here); since QA #1396 the provisional
+    clock is the ASK's, and since #1783 the tracker's effective deadline is max(core, delivered + window) - so a
+    fixture that wants the ruled date to be the deadline passes due=None (core promised nothing)."""
     return {"provisional": True, "at": at, "proofDueAt": due, "anchor_kind": "none", **kw}
 
 
@@ -77,7 +80,16 @@ class Tracker(unittest.TestCase):
         self.assertEqual(st[R["c"]]["day_n_route"], "live_dsp_check_then_removal_gate")
         self.assertEqual((st[R["d"]]["state"], st[R["d"]]["days_left"]), ("clock_running", 4))
         self.assertEqual(st[R["e"]]["state"], "no_ask_yet")
-        self.assertTrue(st[R["c"]]["core_due_mismatch"], "core stamped approval + 30 d")
+        # #1783: with no core promise the effective deadline IS the ruled date, so a row that carries core's own
+        # approval + 30 d is the case that must be flagged - and its later date must be the one we act on.
+        self.assertFalse(st[R["c"]]["core_due_mismatch"], "core promised nothing: no mismatch to report")
+        rows_core = [(R["c"], 7, approval(due="2026-11-22T12:00:00Z"))]
+        tc = pt.run(fake(rows_core), ledger=self.db, proof_path=str(self.proof), paying={7}, now=NOW)
+        c = {r["request_id"]: r for r in tc.rows}[R["c"]]
+        self.assertTrue(c["core_due_mismatch"], "core stamped approval + 30 d: flagged as evidence")
+        self.assertEqual((c["state"], c["due_at"]), ("clock_running", "2026-11-22T12:00Z"),
+                         "the later core date is the deadline we act on, never the earlier ruled one")
+        self.assertEqual(c["bucket"], "due_in_7", "and the bucket follows the effective deadline too")
         self.assertEqual(t.rows[0]["request_id"], R["c"], "paid + due first")
 
     def test_backup_ask_undelivered_after_48h(self):
@@ -128,6 +140,31 @@ class Tracker(unittest.TestCase):
         self.assertEqual(st[C]["deadline_at"], "2026-11-04T12:00Z", "core's earlier date never shortens the user")
         self.assertEqual(st[D]["deadline_at"], "2026-12-30T00:00Z", "a later core date is kept: extension only")
         self.assertTrue(any("never a shortening" in f for f in t.findings()))
+
+    def test_the_board_uses_the_extended_deadline_never_the_ruled_one(self):
+        """QA #1783 (finding 2): a user whose ask was delivered 2026-10-03 and whose core date is 2026-12-30 was
+        shown due/overdue on 2026-10-10 - the day their ruled 7-day window passed - even though the extension they
+        were promised runs to December. The tracker AND the board must read the effective deadline; the ruled date
+        stays visible as evidence. This is the later-core-date case the review asked for."""
+        E = R["d"]
+        self.sent([E], "2026-10-03T12:00:00Z")
+        rows = [(E, 72, approval(at="2026-10-01T00:00:00Z", due="2026-12-30T00:00:00Z"))]
+        t = pt.run(fake(rows), ledger=self.db, proof_path=str(self.proof), now=NOW)
+        r = {x["request_id"]: x for x in t.rows}[E]
+        self.assertEqual(r["state"], "clock_running", "an extended user is NOT due: nobody ruled that date")
+        self.assertGreater(r["days_left"], 0)
+        self.assertEqual(r["bucket"], "due_in_7", "the bucket follows the effective deadline")
+        self.assertEqual(r["window_due_at"], "2026-10-10T12:00Z", "the ruled 7-day date stays visible as evidence")
+        self.assertEqual(r["due_at"], "2026-12-30T00:00Z", "and due_at is the date we act on")
+        u = pt.board_payload(t, NOW)["users"][0]
+        self.assertEqual(u["bucket"], "later", "the board buckets by the effective deadline, never 'overdue'")
+        self.assertEqual(u["earliest_due"], "2026-12-30T00:00Z")
+        # and the shortening case is unchanged: core's EARLIER date never pulls the deadline back
+        self.sent([R["c"]], "2026-10-28T12:00:00Z")
+        rows2 = [(R["c"], 71, approval(at="2026-10-28T13:00:00Z", due="2026-10-29T00:00:00Z"))]
+        t2 = pt.run(fake(rows2), ledger=self.db, proof_path=str(self.proof), now=NOW)
+        c = {x["request_id"]: x for x in t2.rows}[R["c"]]
+        self.assertEqual(c["due_at"], "2026-11-04T12:00Z", "a shortening is never applied")
 
     def test_unreadable_inputs_are_an_error_never_clean(self):
         def boom(sql):
