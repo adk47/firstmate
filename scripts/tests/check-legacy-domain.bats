@@ -50,3 +50,19 @@ teardown() { rm -rf "$WORK"; }
   cd "$WORK" && run bash scripts/check-legacy-domain.sh
   [ "$status" -eq 0 ]
 }
+
+@test "an upper-case host outside the allowlist exits 1 and prints the hit" {
+  printf 'link https://CREDITS.%s/profile/x\n' "MUSO.AI" > "$WORK/src.txt"
+  git -C "$WORK" add -A
+  cd "$WORK" && run bash scripts/check-legacy-domain.sh
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"src.txt:1:link https://CREDITS.MUSO.AI/profile/x"* ]]
+}
+
+@test "a mixed-case host outside the allowlist exits 1 and prints the hit" {
+  printf 'link https://Credits.%s/profile/x\n' "Muso.Ai" > "$WORK/src.txt"
+  git -C "$WORK" add -A
+  cd "$WORK" && run bash scripts/check-legacy-domain.sh
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"src.txt:1:link https://Credits.Muso.Ai/profile/x"* ]]
+}
