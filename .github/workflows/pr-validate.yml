@@ -1836,6 +1836,19 @@ jobs:
           python3 -m unittest -v \
             tests.test_customer_outcome \
             tests.test_resolution_writers
+      - name: Run ClickUp data-deletion drainer tests
+        # scripts/clickup_drain/data_deletion.py closes a customer ticket
+        # (`customer-outcome:complete`) on the strength of the GDPR register's
+        # records. These tests lock the two things that are NOT a completion —
+        # `hidden_at` (the page is down, the letter has not gone out) and
+        # `status='closed'` with no `confirmed_at` — plus the two hard vetoes
+        # (legal_threat/dmca_takedown never close on a tag; overdue requests are
+        # reported, never tagged), the read-only register handle, the write cap,
+        # the ledger-driven revert, and the assertion that the module holds no
+        # send capability. Same bare stdlib unittest, targeted by name.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_clickup_drain_data_deletion
       - name: Run Slack botToken SecretRef reader tests
         # openclaw-main.json carries botToken as a SecretRef; scripts that
         # json.load() it must resolve it via scripts/lib/slack_token.py or they

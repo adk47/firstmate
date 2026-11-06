@@ -524,6 +524,12 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/claim_verify/decline_rules.py missing (the drainer imports the coded rules)"
 [[ -f "$HYDRA_ROOT/scripts/lib/intercom_link.py" ]] \
   || fail "$HYDRA_ROOT/scripts/lib/intercom_link.py missing (clickup-todo-dedupe imports it)"
+[[ -x "$HYDRA_ROOT/scripts/clickup_drain/data_deletion.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/clickup_drain/data_deletion.py missing or not executable"
+[[ -f "$HYDRA_ROOT/scripts/lib/clickup_client.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/lib/clickup_client.py missing (clickup_drain/data_deletion.py imports it)"
+[[ -f "$HYDRA_ROOT/scripts/lib/customer_outcome.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/lib/customer_outcome.py missing (the customer-outcome tag contract)"
 [[ -f "$HYDRA_ROOT/scripts/cs-selfserve-backlog.py" ]] \
   || fail "$HYDRA_ROOT/scripts/cs-selfserve-backlog.py missing"
 [[ -f "$HYDRA_ROOT/scripts/cs-ops-drain-candidates.py" ]] \
@@ -1819,6 +1825,69 @@ cdp=clickup-drain-profile-claim.timer
 systemctl enable "$cdp" >/dev/null 2>&1 || log "WARN: could not enable $cdp"
 systemctl start "$cdp" >/dev/null 2>&1 || log "WARN: could not start $cdp"
 log "  $cdp: $(systemctl is-active "$cdp" 2>/dev/null || echo unknown)"
+
+# ─── ClickUp data-deletion drainer (hourly) ───────────────────────────────────
+# Closes an `action:data-deletion` ticket on the GDPR register's WRITTEN
+# CONFIRMATION (`customer-outcome:complete`, then `resolved`), never on the hide,
+# and reports the register's own overdue count in the same line as the board
+# numbers. Dry run by default, 200 writes per run, ledger under
+# /var/lib/hydra/clickup-drain. It holds no send capability (the register's
+# `erasure_sends` confirmation is the customer's only message), creates no
+# register row, and opens the register read-only. Legal-threat / DMCA tickets are
+# never closed on a tag.
+# ROLLBACK: the repo files alone are not enough —
+#   systemctl disable --now clickup-drain-data-deletion.timer
+# See scripts/clickup_drain/data_deletion.py and
+# docs/runbooks/clickup-drain-data-deletion.md.
+#
+# --apply is the default here ON PURPOSE and is safe because of what the module
+# will not do: it writes only the two contract tags plus the close that follows
+# one of them, only on a register confirmation (or a counsel-blocked class), never
+# a message, and every write is ledgered before it lands and read back after. A
+# close is only ever the second half of a `complete` tag that already read back,
+# and it leaves the register row as an internal comment on the ticket.
+install -d -m 700 /var/lib/hydra/clickup-drain
+cat > /etc/systemd/system/clickup-drain-data-deletion.service << CDDDDELETIONSVC
+[Unit]
+Description=Hourly ClickUp data-deletion drainer (close on the register's written confirmation, report the legal clock)
+After=network-online.target
+
+[Service]
+Type=oneshot
+# node-8 SIGTERMs any Type=oneshot unit with no explicit start timeout. The run
+# scans the list, GETs the linked tickets and writes at most 200 tags, so it is
+# bounded but not instant.
+TimeoutStartSec=900
+# Exit 4 = the kill file is present. That is the switch WORKING, not a failure:
+# this unit is in AUX_ONFAILURE_UNITS, so without this line every disabled hourly
+# run would page the very alert the kill switch exists to silence. Every other
+# non-zero exit (2 = a read failed, 5 = a write failed, 6 = an incomplete revert,
+# 7 = the report did not go out) still fails the unit and pages.
+SuccessExitStatus=0 4
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/main.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/clickup_drain/data_deletion.py --apply
+CDDDDELETIONSVC
+
+cat > /etc/systemd/system/clickup-drain-data-deletion.timer << CDDDDELETIONTMR
+[Unit]
+Description=Hourly — ClickUp data-deletion tickets closed on the register confirmation
+
+[Timer]
+OnCalendar=*-*-* *:25:00
+Persistent=true
+RandomizedDelaySec=180
+Unit=clickup-drain-data-deletion.service
+
+[Install]
+WantedBy=timers.target
+CDDDDELETIONTMR
+
+systemctl daemon-reload
+cdd=clickup-drain-data-deletion.timer
+systemctl enable "$cdd" >/dev/null 2>&1 || log "WARN: could not enable $cdd"
+systemctl start "$cdd" >/dev/null 2>&1 || log "WARN: could not start $cdd"
+log "  $cdd: $(systemctl is-active "$cdd" 2>/dev/null || echo unknown)"
 
 # ─── Caroline autonomous-behavior digest (daily 16:00 UTC) ────
 # Read-only daily digest of Caroline's autonomous self-serve activity so we can
@@ -4280,6 +4349,7 @@ AUX_ONFAILURE_UNITS=(
   caroline-safety-daily.service
   ops-intake-digest.service
   ops-intake-redteam.service
+  clickup-drain-data-deletion.service
   clickup-sla-digest.service
   clickup-todo-dedupe.service
   close-duplicate-conversations.service
