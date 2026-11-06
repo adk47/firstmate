@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from credit_review import decide, doc_approve  # noqa: E402
+from credit_review import admin as admin_api, decide, doc_approve  # noqa: E402
 
 # The R22 guard 1-3 evidence a dv-4 run records: forensics PLAUSIBLE with an extracted issuer and
 # signatory, and two independent cross-checks positive (xc_dsp on the track, xc_isrc by ISRC).
@@ -1520,7 +1520,7 @@ class DocApproveQaR13(_CliFixture):
         self.db.commit()
         passed = [(f"req-{i}", 100000 + i, f"prof-{i}",
                    doc_approve.order_key(100000 + i, None, None, self.now)) for i in range(50)]
-        res = doc_approve._plan_caps(self.db, self.now, passed)
+        res = doc_approve.plan_caps(self.db, self.now, passed)
         self.assertEqual(res["spent_users_today"], 49)
         self.assertEqual(res["spent_requests_today"], 49)
         self.assertEqual(res["would_users"], 1, "one fleet slot is left, not fifty")
@@ -1533,14 +1533,14 @@ class DocApproveQaR13(_CliFixture):
         approvals when apply admits at most PER_PROFILE_DAILY_MAX."""
         passed = [(f"req-{i}", 100000 + i, "prof-shared",
                    doc_approve.order_key(100000 + i, None, None, self.now)) for i in range(15)]
-        res = doc_approve._plan_caps(self.db, self.now, passed)
+        res = doc_approve.plan_caps(self.db, self.now, passed)
         self.assertEqual(res["would_requests"], doc_approve.PER_PROFILE_DAILY_MAX)
         self.assertEqual(res["rolled_to_tomorrow"], 15 - doc_approve.PER_PROFILE_DAILY_MAX)
 
     def test_r13_the_cap_plan_respects_the_PER_USER_bound(self):
         passed = [(f"req-{i}", 145833, f"prof-{i}",
                    doc_approve.order_key(145833, None, None, self.now)) for i in range(8)]
-        res = doc_approve._plan_caps(self.db, self.now, passed)
+        res = doc_approve.plan_caps(self.db, self.now, passed)
         self.assertEqual(res["would_requests"], doc_approve.PER_USER_DAILY_MAX)
         self.assertEqual(res["would_users"], 1)
 
@@ -2058,6 +2058,50 @@ class DocApproveQaR19(_CliFixture):
             rc, res = self._dry_run()
         self.assertEqual(rc, 1, "an incomplete census is a refusal, not a successful measurement")
         self.assertIn("INCOMPLETE", res["unreadable"])
+
+
+
+
+class DocApproveQaR5(_CliFixture):
+    """qa-review #1766 r5 finding 2: the arming dry run and the watchdog are ONE measurement.
+
+    The CLI used to orchestrate its own `doc_approve.dry_run`, so on an `AdminError` reading core it
+    substituted `ages={}` and exited 0 with zero eligible rows, while the watchdog reported BLIND on
+    that identical failure. An operator could arm on a plausible number the monitor refuses to stand
+    behind - the worst of both, because the number looks like a measurement.
+    """
+
+    def test_a_core_read_failure_REFUSES_the_arming_measurement(self):
+        self._decide_row(self.RID, 145833)
+        with mock.patch.object(self.cli, "_doc_dry_run_core_ages",
+                               side_effect=admin_api.AdminError("core is down")):
+            rc, out = self._dry_run()
+        self.assertEqual(rc, 1, "a core outage is not a successful measurement")
+        self.assertIn("core could not be read", out["unreadable"])
+        self.assertEqual(out["would_approve"], 0)
+        self.assertEqual(out["rows"], 0, "nothing was measured, so nothing is reported as measured")
+
+    def test_the_CLI_measures_through_the_SHARED_measurement(self):
+        """The contract, pinned: the CLI must not orchestrate its own `doc_approve.dry_run`.
+
+        That is what let the two entrypoints disagree - the CLI answered a core outage with a
+        plausible zero while the watchdog refused to measure. One call, one error contract.
+        """
+        from credit_review import doc_measure
+        self._decide_row(self.RID, 145833)
+        with mock.patch.object(doc_measure, "measure", wraps=doc_measure.measure) as shared:
+            rc, out = self._dry_run()
+        self.assertEqual(rc, 0)
+        self.assertEqual(shared.call_count, 1, "the CLI must ask the shared measurement, once")
+        self.assertEqual(out["would_approve"], 1)
+
+    def test_the_CLI_still_measures_when_core_answers(self):
+        """The positive control: the refusal above must not be a blanket refusal."""
+        self._decide_row(self.RID, 145833)
+        rc, out = self._dry_run()
+        self.assertEqual(rc, 0)
+        self.assertEqual(out["would_approve"], 1)
+        self.assertEqual(out["admitted"], [self.RID])
 
 
 if __name__ == "__main__":

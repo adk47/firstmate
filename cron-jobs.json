@@ -1958,6 +1958,63 @@
       "delivery": {
         "mode": "none"
       }
+    },
+    {
+      "id": "c1d2e3f4-05a6-5b7c-8d9e-0f1a2b3c4d5e",
+      "agentId": "operations",
+      "createdAtMs": 1793836800000,
+      "updatedAtMs": 1793836800000,
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "delivery": {
+        "mode": "none"
+      },
+      "enabled": true,
+      "name": "credit-decide-watchdog-hourly",
+      "description": "[key=doc-approval-doctrine] The two alerts Fable d2 gave the doc-verified T0/T1 class, hourly at :17: (1) the decider approved 0 in the last 6h while eligible > 0, and (2) dv-4 verified single-candidate documents with no approved_refs for over 24h. READ-ONLY: reads the decider ledger (doc_approvals) and the doc-verify/proof stores, approves nothing, reverts nothing, arms nothing, writes no ledger row, does not even run the provisional sweep; it sends no message to a user. Both alerts are gated on the class being ARMED (registry document_small_track approved + no /etc/hydra/doc-approve.disabled), because a dormant class is supposed to approve nothing and paging about the backlog it is deliberately not clearing is how a p3 alert becomes wallpaper; while dormant the numbers go to the cron log. The wrapper scripts/credit-decide-watchdog.sh prints NO_REPLY when quiet and PAGES when the watchdog itself cannot run. Alpha: :17 avoids the decider's :00/:15/:30/:45 runs, the doc-verify reader's :50, the D5b :35 and the profile-link :45.",
+      "schedule": {
+        "kind": "cron",
+        "expr": "17 * * * *",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "bash",
+          "/opt/hydra/scripts/credit-decide-watchdog.sh"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 300
+      }
+    },
+    {
+      "id": "c1d2e3f4-05a6-5b7c-8d9e-0f1a2b3c4d5f",
+      "agentId": "operations",
+      "createdAtMs": 1793836800000,
+      "updatedAtMs": 1793836800000,
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "delivery": {
+        "mode": "none"
+      },
+      "enabled": true,
+      "name": "credit-decide-watchdog-shadow-daily",
+      "description": "[key=doc-approval-doctrine] The SHADOW measurement Fable asked for (2026-11-04 19:1xZ: \"shadow 24h posts would-approve users/requests per day\"): one line a day at 07:17Z while the class is in SHADOW, naming how many USERS and how many REQUESTS the class would approve under the caps (50 users/UTC-day, 25 requests per user per day, paid_first_oldest), how many roll to tomorrow and the largest single holder. READ-ONLY: it computes the number, writes nothing, approves nothing. The moment the class is ARMED it prints NO_REPLY - from then on the two throughput alerts in credit-decide-watchdog-hourly are the measurement.",
+      "schedule": {
+        "kind": "cron",
+        "expr": "17 7 * * *",
+        "tz": "UTC"
+      },
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "bash",
+          "/opt/hydra/scripts/credit-decide-watchdog.sh",
+          "--shadow-report"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 300
+      }
     }
   ]
 }

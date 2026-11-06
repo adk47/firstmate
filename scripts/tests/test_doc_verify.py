@@ -3903,8 +3903,6 @@ class SandboxTextTests(unittest.TestCase):
         self.assertNotIn("doc_text", analyze.extract_bytes(data, "x.pdf", None, ClaimContext()))
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=1)
 
 
 class IntakeKeyingIsNotTheReadBudget(unittest.TestCase):
@@ -4039,3 +4037,7 @@ class IntakeKeyingIsNotTheReadBudget(unittest.TestCase):
             runner.run(self.store, self.deps, proof_store=self.proof_path, since="2026-10-27T00:00:00Z")
         n = self.store.db.execute("SELECT COUNT(*) FROM dv_steps WHERE step='intake_keys'").fetchone()[0]
         self.assertEqual(n, 1, "one key, one step: a filing is not re-keyed until its candidates change")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=1)
