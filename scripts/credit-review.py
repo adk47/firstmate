@@ -131,6 +131,9 @@ from credit_review.runner import (  # noqa: E402
     LOG_PATH, Config, log, profile_burst_alerts, render_digest, render_metrics, run_audit, run_review)
 
 KILL_SWITCH = Path(os.environ.get("CREDIT_REVIEW_KILL_SWITCH", "/etc/hydra/credit-review.disabled"))
+# spec-deploy-lock-deferral-m1: the exit code for a TRANSIENT upstream failure (Trino said "retry in a few minutes").
+# Distinct from 1 (a real failure) so the tick can retry bounded and then DEFER the family instead of stopping the run.
+TRANSIENT_RC = 4
 # The model + web-search judge is OFF unless this file exists (captain decision
 # 2026-10-11: no OpenRouter spend until the account is topped up). Presence of
 # the file is the switch, so it is a deliberate node-8 act that no deploy
@@ -1723,8 +1726,17 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 with verify_notify.apply_session():
                     rc = args.fn(args)
-            except verify_notify.ApplyLockError as exc:
+            except verify_notify.ApplyLockUnopenable as exc:
+                # QA #1799 r12 (carried): a lock that cannot be OPENED is a permissions or I/O fault, not a deploy
+                # holding it. Its own marker, so the tick stops hard instead of retrying and deferring a broken lock.
                 print(f"Credit review {args.cmd}: {exc}")
+                print(f"{verify_notify.APPLY_LOCK_UNOPENABLE_MARKER}: {exc}", file=sys.stderr)
+                return 3
+            except verify_notify.ApplyLockError as exc:
+                # QA #1799 r11: the marker is what tells the tick this rc=3 is a HELD LOCK and not a hard refusal
+                # (cap-short / signed-set mismatch / HEAD_REFUSED, which also exit 3 and must never be retried).
+                print(f"Credit review {args.cmd}: {exc}")
+                print(f"{verify_notify.APPLY_LOCK_MARKER}: {exc}", file=sys.stderr)
                 return 3
         else:
             rc = args.fn(args)
@@ -1736,6 +1748,14 @@ def main(argv: list[str] | None = None) -> int:
                 return 3
         # [key=signed-on-sha]: a user deferred on the sha rail makes the apply exit 3 (nothing sent to them)
         return 3 if verify_notify.HEAD_REFUSED and rc == 0 else rc
+    except verify_notify.TrinoTransientError as exc:
+        # spec-deploy-lock-deferral-m1 addendum (Fable 2026-11-05 14:3xZ): Trino itself said "retry in a few minutes".
+        # A distinct exit code (4) lets the tick retry bounded and then DEFER the family, instead of treating a
+        # transient upstream condition as a terminal failure of the whole run. Nothing was sent by this step.
+        kept = log("transient: " + str(exc))
+        print(f"Credit review {args.cmd}: Trino is transiently unavailable; nothing was sent for this step. "
+              f"{_details(kept)}")
+        return TRANSIENT_RC
     except admin_api.AdminError as exc:
         kept = log(f"admin API unavailable: {exc}")
         print(f"Credit review could not run: the admin API is unavailable. No credits were changed. "
