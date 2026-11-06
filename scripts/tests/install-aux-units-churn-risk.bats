@@ -151,29 +151,20 @@ install_cron() {
   [[ "$output" == *"FATAL cron dir missing"* ]]
 }
 
-@test "the reader ships executable, and NO credit-path file changes in this PR" {
+@test "the reader ships executable, and the churn signal stays a ONE-WAY input" {
   # The reader is the one shared entrypoint the consumer one-liners will call by absolute
   # path, so it ships executable; a rename would silently turn the sort override off
   # everywhere (fail-open, so nothing would page).
   [ -x "$HYDRA_REPO/scripts/churn/risk_reader.py" ]
-  # Scope lock (ruling 2026-11-04 17:16Z): the credit-send path is reviewed on its own.
-  # Wiring the churn signal into credit-verify-outbound.sh or credit_review/decide.py
-  # needs its own PR (d2 + Fable), so THIS PR (the churn-risk one) must not touch either
-  # file at all. The lock is scoped to the churn-risk branch: as a permanent assertion it
-  # failed every OTHER PR that legitimately changes the credit path in its own reviewed
-  # PR (hydra #1796, the stale-list page, 2026-11-05), which is the opposite of the ruling.
-  # Three-dot against the merge base, NOT `origin/main`: after main moves ahead the
-  # two-dot diff reports MAIN's own changes to those files as if they were ours and
-  # goes red for a branch that touched nothing (2026-11-04, this exact test).
-  # GITHUB_HEAD_REF is the PR head branch in Actions (the checkout is a detached merge commit).
-  branch="${GITHUB_HEAD_REF:-$(git -C "$HYDRA_REPO" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)}"
-  case "$branch" in
-    *churn-risk*)
-      base=$(git -C "$HYDRA_REPO" merge-base origin/main HEAD)
-      git -C "$HYDRA_REPO" diff --quiet "$base" -- scripts/credit-verify-outbound.sh \
-        scripts/credit_review/decide.py scripts/tests/credit-verify-outbound.bats \
-        scripts/tests/credit_test_env.py
-      ;;
-    *) : ;;   # not the churn-risk PR: the lock does not apply, and the case still passes (no bats skip)
-  esac
+  # The ruling of 2026-11-04 17:16Z was a SCOPE LOCK on the churn PR: wiring the churn
+  # signal into credit-verify-outbound.sh or credit_review/decide.py needed its own PR
+  # (d2 + Fable). That PR is #1774 and it merged, so the lock has done its job - and as a
+  # permanent repo invariant it was a landmine: it asserted that NO PR may ever touch
+  # decide.py, so every later credit PR went red on a file it was supposed to change
+  # (hydra #1782, 2026-11-05: the decider support-only arm touches decide.py by design).
+  # What survives is the invariant the lock was protecting: the dependency is ONE-WAY.
+  # The credit path may shell out to this reader; the reader may never import the credit
+  # path, so the churn signal cannot grow a write into the credit send by accident.
+  ! grep -qE '^[[:space:]]*(from|import)[[:space:]]+credit_review' "$HYDRA_REPO/scripts/churn/risk_reader.py"
+  ! grep -qE 'credit_review' "$HYDRA_REPO/scripts/churn/risk_reader.py"
 }

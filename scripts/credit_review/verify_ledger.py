@@ -99,6 +99,14 @@ DEFAULT_PATH = os.environ.get("CREDIT_REVIEW_LEDGER", "/var/lib/hydra/credit-rev
 MAX_ATTEMPTS = 3
 BLOCKING = ("attempted", "sent", "refused", "skipped")
 DEFERRED = "deferred_pending_doc"
+# decider-support (Fable d2 [key=decider-support-arm], coordinated with verify-ask-wiring-h2): the credit decider's
+# OWN ask. The support write is `unverified -> user_verification_needed` and the note a user sees for it comes from
+# core (Knock), so no hydra sender posts it - but it IS an ask for the user, so it must be ledgered HERE or the
+# tick's shared per-user locks (asked_within / capped, and the one-sender-per-family rule) cannot see it and a
+# second sender mails the same person the same day. record_external_ask() writes those rows; nothing in this
+# module sends anything for this campaign, and it is deliberately NOT a STATUS_CAMPAIGN and NOT uvn-status
+# (prior_uvn_ask stays False: the decider's in-app note is a different flare than the uvn-status email).
+DECIDER_SUPPORT = "decider-support"
 CAMPAIGNS = ("verify-live", "retro-past", "removal-notice", "takeback-notice", "uvn-status", "withdrawal-confirm",
              "status-doc-received", "status-team-review", "email-changed", "email-changed-dup",
              "claim-proof-ask", "claim-status", "gap-ask", "merge-pending", "credit-hold-status", "claim-proof-pending", "proof-need-ask",
@@ -106,7 +114,8 @@ CAMPAIGNS = ("verify-live", "retro-past", "removal-notice", "takeback-notice", "
              "reply-ref",   # [key=product-dispute-refs]: r5's approved reply set, reply_due answers only
              "refund-confirm",   # fable-copy-1103-d2/refund-confirm: a refund that ALREADY happened, told once per refund id
              "uvn-new-rows",   # fable-copy-1101-r5/n1: a told user's owed rows no ask named (one message per row ever)
-             "backlog-reply")
+             "backlog-reply",
+             DECIDER_SUPPORT)  # Fable d2 [key=decider-support-arm]: the decider's support write is an ask
 # backlog-reply (intercom-backlog-i1, hydra#1379; Fable review @092894d4): a reply in an Intercom
 # conversation where the customer spoke last, sent by scripts/intercom-backlog/send.py through
 # intercom-ops-write.sh. Its "request id" is "conv-<conversation id>" (one reply per conversation,
@@ -186,7 +195,8 @@ MAX_REFUSALS = 3
 UVN_NEW_ROWS = "uvn-new-rows"
 # an uvn-new-rows note IS an ask (its rows are never asked again by any ask), but it is never the user's one-ask-ever:
 # it exists because the user was already asked (prior_uvn_ask)
-ASK_CAMPAIGNS = ("verify-live", "retro-past", "uvn-status", GAP_ASK, PROOF_NEED_ASK, UVN_NEW_ROWS)
+ASK_CAMPAIGNS = ("verify-live", "retro-past", "uvn-status", GAP_ASK, PROOF_NEED_ASK, UVN_NEW_ROWS, DECIDER_SUPPORT)
+
 # Historical only (deleted from the sender 2026-11-04): rows of this kind stay readable in
 # the ledger, and `reminders_due` no longer offers it. Do not re-add it to a sender campaign
 # without a new copy ruling - the old copy named which check failed.
@@ -395,6 +405,13 @@ def connect_ro(path: str, *, must_exist: bool = False) -> sqlite3.Connection:
     finally:
         ref.close()
     return db
+
+
+def ensure_schema(db: sqlite3.Connection) -> None:
+    """Create/migrate this ledger's tables on a connection opened elsewhere (the credit decider's
+    own handle: its asks live in verify_messages in the same file). Idempotent."""
+    db.executescript(SCHEMA)
+    _migrate(db)
 
 
 def _migrate(db: sqlite3.Connection) -> None:
@@ -959,6 +976,53 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
                    (campaign, *params))
         db.execute("COMMIT")
         return {"result": "claimed", "message_row": row, "request_ids": fresh, "due_day": due, "removal_day": removal}
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+
+
+def record_external_ask(db: sqlite3.Connection, *, user_key: str, user_id: str = "", day: str,
+                        request_ids: list[str], approved_by: str, approval_ref: str,
+                        now: datetime | None = None, message_type: str = "inapp") -> dict[str, Any]:
+    """Ledger an ask ANOTHER sender has already sent, so the shared per-user locks see it.
+
+    The credit decider's support write (unverified -> user_verification_needed) is an ask whose note
+    comes from core (Knock): no hydra sender posts it, and until this row exists no gate here knows the
+    user was asked. One sender per family (Fable d2 [key=decider-support-arm]) means the tick's own
+    campaigns must find this row and stand down, so it is written with the campaign that names the
+    sender (DECIDER_SUPPORT) in the same transaction as its per-request rows.
+
+    Deliberately NOT routed through claim(): nothing is claimed or reserved here (the send already
+    happened) and no cap is re-checked (a row per user per run is the caller's business). Returns
+    ``{"result": "recorded", "message_row", "request_ids"}``.
+    """
+    _check(DECIDER_SUPPORT)
+    key = (user_key or "").strip().lower()
+    uid = str(user_id or "").strip()
+    if not (key or uid):
+        raise ValueError("record_external_ask needs a user_key or a user_id: an ask nobody can be matched to")
+    ids = [str(r) for r in dict.fromkeys(request_ids) if str(r or "").strip()]
+    if not ids:
+        raise ValueError("record_external_ask needs at least one request id")
+    ts = stamp(now)
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        cur = db.execute(
+            "INSERT INTO verify_messages (campaign, kind, user_key, account_id, day, status, message_type, "
+            "request_ids_json, n_credits, approved_by, approval_ref, created_at, updated_at, sent_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (DECIDER_SUPPORT, "initial", key or uid, uid or None, day, "sent", message_type,
+             json.dumps(ids), len(ids), approved_by, approval_ref, ts, ts, ts))
+        row = int(cur.lastrowid)
+        for rid in ids:
+            db.execute(
+                "INSERT INTO verify_requests (campaign, request_id, message_row, status, attempts, updated_at) "
+                "VALUES (?,?,?,?,?,?) ON CONFLICT(campaign, request_id) DO UPDATE SET "
+                "message_row=excluded.message_row, status='sent', attempts=verify_requests.attempts+1, "
+                "updated_at=excluded.updated_at",
+                (DECIDER_SUPPORT, rid, row, "sent", 1, ts))
+        db.execute("COMMIT")
+        return {"result": "recorded", "message_row": row, "request_ids": ids}
     except Exception:
         db.execute("ROLLBACK")
         raise

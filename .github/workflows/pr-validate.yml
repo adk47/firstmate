@@ -2181,6 +2181,10 @@ jobs:
           # doc-verified T0/T1 (Fable [key=doc-approval-doctrine] 2026-11-03, caps in USERS 2026-11-04):
           # one CAN-FAIL test per gate, the provisional 7-day row and its revert, the atomic slot.
           python3 scripts/tests/test_doc_approve.py
+          # decider SUPPORT-ONLY arm (Fable d2 [key=decider-support-arm]): approve verdict recorded and
+          # never written, the write-boundary tripwire, the per-run USER cap, the ask ledgered for the
+          # tick's gates, and the read-back gate before a second apply run. Plus the paging alert itself.
+          python3 scripts/tests/test_credit_decider_support_watch.py
           # L12 executor (fable-decider closes): tray validation, every write-boundary guard (each with a
           # red mutant), daily cap, kill file, registry re-check, read-back, audit. Hermetic.
           python3 scripts/tests/test_credit_fable_executor.py

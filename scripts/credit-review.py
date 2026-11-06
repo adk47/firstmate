@@ -343,6 +343,18 @@ def cmd_decide(args: argparse.Namespace) -> int:
     if args.max_rows:
         policy.max_rows_per_run = args.max_rows
     ledger = Ledger(args.ledger)
+    if args.mode == "apply":
+        # d2 condition 5: a read-back after the first apply run BEFORE the second. A run that wrote
+        # asks is cleared only by its own read-back, and the queue waits meanwhile - a wedged apply
+        # path is visible and fixable; a second unread batch is not.
+        decide.ensure_schema(ledger.db)
+        pending = decide.pending_readback(ledger.db)
+        if pending:
+            lines = ", ".join(f"{p.get('run_id')} ({p.get('asks', '?')} ask(s) at {p.get('at', '?')})" for p in pending)
+            log(f"decide: --mode apply REFUSED (read-back owed): {lines}")
+            print(f"credit-trust-decide refused --mode apply: the previous apply run has no read-back yet "
+                  f"({lines}). Read core back first:  python3 scripts/credit-review.py decide-readback --run <id>")
+            return 3
     judge = make_judge(args)
     fb = getattr(judge, "fallback", None)
     if fb is not None and not args.paid_fallback:
@@ -386,6 +398,19 @@ def cmd_decide(args: argparse.Namespace) -> int:
         return 1
     print(res.line() if (res.approved or res.support or res.note) else "NO_REPLY")
     return 0
+
+
+def cmd_decide_readback(args: argparse.Namespace) -> int:
+    """Read core back for one decide apply run's asks (d2 condition 5). Never writes a credit."""
+    from credit_review import decide
+    ledger = Ledger(args.ledger)
+    try:
+        doc = decide.run_readback(ledger.db, args.run)
+    except ValueError as exc:
+        print(json.dumps({"refused": str(exc)}))
+        return 2
+    print(json.dumps(doc, ensure_ascii=False, default=str))
+    return 0 if doc.get("ok") else 1
 
 
 def cmd_provisional_review(args: argparse.Namespace) -> int:
@@ -1089,6 +1114,11 @@ def parser() -> argparse.ArgumentParser:
                                                         "contradicted/forged verdict)")
     da.add_argument("--list", action="store_true", help="list the rows too (default with --pull)")
     da.set_defaults(fn=cmd_doc_approvals)
+
+    dr = sub.add_parser("decide-readback",
+                        help="read core back for a decide apply run's asks (this clears the next apply)")
+    dr.add_argument("--run", required=True)
+    dr.set_defaults(fn=cmd_decide_readback)
 
     pr = sub.add_parser("provisional-review",
                         help="Ops review list: paid provisional approvals unconfirmed after N days (read-only)")

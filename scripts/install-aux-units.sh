@@ -48,6 +48,14 @@
 #     detection lag was the dominant component of the outage's
 #     ops-silent window.
 #
+#   /etc/cron.d/credit-decider-support-watch
+#     Schedules scripts/credit-decider-support-watch.py every 30 minutes to
+#     page #clio_devops when the credit decider's SUPPORT-ONLY writer breaks
+#     (an approval written while the arm is off, an ask that was sent but not
+#     ledgered, a support PUT error, an armed+scheduled arm with unsent
+#     candidates, an apply run overdue on its read-back). Ships with the
+#     writing arm, per Fable d2 [key=decider-support-arm].
+#
 #   /etc/cron.d/refund-credit-overlap-watchdog
 #     Schedules scripts/refund-credit-overlap-watchdog.sh daily to page
 #     #clio_devops when a customer holds BOTH a cash refund and a live
@@ -2714,6 +2722,18 @@ chmod 644 /etc/cron.d/slack-freeze-miss-check
 # requires an allowlisted approver, because zeroing a real customer's balance
 # is a human decision. Same ownership rule: edit here + re-run
 # install-aux-units.sh, never edit the file on node-8.
+cat > /etc/cron.d/credit-decider-support-watch << DECIDERSUPPORT
+# MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
+# Fable d2 [key=decider-support-arm] condition 4: the paging alert for the credit decider's
+# SUPPORT-ONLY writer. Pages #clio_devops when an approval is written while the arm is off (the
+# one thing the scope exists to prevent), when a landed ask could not be ledgered (double-ask
+# risk), when a support PUT errored, when the arm is armed+scheduled and candidates go unsent,
+# or when a run has owed its read-back past the grace window. Detect-and-page only: it never
+# lifts a kill file and never writes a credit. 30 min: the arm's own cron runs every 15.
+*/30 * * * * root python3 $HYDRA_ROOT/scripts/credit-decider-support-watch.py --json >> /var/log/credit-decider-support-watch.log 2>&1
+DECIDERSUPPORT
+chmod 644 /etc/cron.d/credit-decider-support-watch
+
 cat > /etc/cron.d/refund-credit-overlap-watchdog << REFUNDOVERLAP
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
 17 7 * * * root $HYDRA_ROOT/scripts/refund-credit-overlap-watchdog.sh >> /var/log/refund-credit-overlap-watchdog.log 2>&1

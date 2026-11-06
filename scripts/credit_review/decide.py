@@ -144,6 +144,23 @@ ROOT = Path(__file__).resolve().parents[2]
 KILL_SWITCH = Path(os.environ.get("CREDIT_TRUST_DECIDE_KILL_SWITCH", "/etc/hydra/credit-trust-decide.disabled"))
 #: Stops --mode judge only (decider rows, no core write). The writer kill file above never stops judging.
 JUDGE_KILL_SWITCH = Path(os.environ.get("CREDIT_TRUST_JUDGE_KILL_SWITCH", "/etc/hydra/credit-trust-judge.disabled"))
+#: Fable d2 [key=decider-support-arm] (2026-11-04): the decider is re-enabled as a SUPPORT-ONLY writer. This
+#: file turns the APPROVE arm off IN CODE while support keeps writing unverified -> user_verification_needed.
+#: An approve verdict is still recorded in the ledger (the rows are the record stage 2 reads), it is simply
+#: never written: the check lives at the WRITE boundary, not only at the caller, and the run books every
+#: withheld row as APPROVE_ARM_OFF_OUTCOME. The writer kill file above stays the outer gate on both arms -
+#: this switch is defence in depth, never the only gate, and the provisional-paid switch is unchanged.
+APPROVE_SWITCH = Path(os.environ.get("CREDIT_TRUST_DECIDE_APPROVE_DISABLED",
+                                     "/etc/hydra/credit-trust-decide-approve.disabled"))
+APPROVE_ARM_OFF_OUTCOME = "held:approve_arm_disabled"
+#: The ONE sender name for this family's ask. The support write's note is core's Knock message, so this name
+#: is what the ledger row carries (verify_messages.approved_by) and what the tick's gates read; no hydra
+#: sender may post the same family (see verify_ledger.DECIDER_SUPPORT).
+ASK_SENDER = "credit-trust-decide"
+#: Read-back gate (d2 condition 5): every apply run that wrote asks is recorded here, and the NEXT apply
+#: run refuses to start until a read-back of the previous one is recorded under READBACK_PREFIX.
+APPLY_RUN_PREFIX = "support-writer:apply:"
+READBACK_PREFIX = "support-writer:readback:"
 WRITE_LOCK = Path(os.environ.get("CV_CREDIT_WRITE_LOCK_PATH", "/var/lib/hydra/credit-status-writes.lock"))
 PAYING_USERS_FILE = Path(os.environ.get("CREDIT_TRUST_PAYING_USERS_FILE", "/var/lib/credit-trust/paying-users.json"))
 PAYING_USERS_MAX_AGE = timedelta(hours=3)
@@ -196,9 +213,19 @@ class Policy:
     editorial_role_terms: tuple[str, ...]
     max_rows_per_run: int = 500
     max_approvals_per_user_per_day: int = 200
+    #: Fable d2 [key=decider-support-arm]: the ARM ITSELF is a policy fact, not just a kill file. False (the
+    #: default, and what tonight's deploy ships) makes the decider a SUPPORT-ONLY writer in code: approve
+    #: verdicts are recorded and never written, whatever any file on disk says. True is the reviewed way back,
+    #: and even then APPROVE_SWITCH must be absent - the switch is defence in depth, the policy is the gate.
+    approve_arm: bool = False
     # Distinct users who may receive a support request (Knock "more info needed")
     # per UTC day. firstmate 031: 100/day for the first 48h of go-live.
     max_ask_users_per_day: int = 100
+    # Distinct users who may receive a support request in ONE RUN (Fable d2 [key=decider-support-arm]
+    # condition 3: "at most 100 users per run, paid first"). A per-day cap alone sends whatever one run
+    # can decide in 12 minutes; this bounds the blast radius of a single bad run, and the two caps bite
+    # in different places (this one cannot be re-read from the ledger, so it is counted on the run).
+    max_ask_users_per_run: int = 100
 
     @classmethod
     def load(cls, path: Path | None = None) -> "Policy":
@@ -223,7 +250,35 @@ class Policy:
                    editorial_role_terms=editorial_terms(d.get("editorial_role_terms")),
                    max_rows_per_run=int(d.get("max_rows_per_run") or 500),
                    max_approvals_per_user_per_day=int(d.get("max_approvals_per_user_per_day") or 200),
-                   max_ask_users_per_day=_nonneg_int(d.get("max_ask_users_per_day", 100), "max_ask_users_per_day"))
+                   max_ask_users_per_day=_nonneg_int(d.get("max_ask_users_per_day", 100), "max_ask_users_per_day"),
+                   max_ask_users_per_run=_nonneg_int(d.get("max_ask_users_per_run", 100), "max_ask_users_per_run"),
+                   approve_arm=_bool(d.get("approve_arm", False), "approve_arm"))
+
+
+def _bool(v: Any, key: str) -> bool:
+    """A JSON boolean, never a truthy string: bool("false") is True, and this one decides whether
+    the decider may approve a credit."""
+    if not isinstance(v, bool):
+        raise ValueError(f"{key} must be true or false")
+    return v
+
+
+def approve_arm_off(policy: "Policy | None" = None, path: Path | None = None) -> str:
+    """Why the approve arm may not be written ('' when it may). FAIL CLOSED: an unreadable switch, a
+    policy that says nothing, or a policy that says false all refuse. Only an explicitly armed policy
+    AND an absent kill file allow an approval through."""
+    armed = bool(policy is not None and policy.approve_arm is True)
+    if not armed:
+        return ("approve arm is off in code (the policy's approve_arm is not true); this writer is "
+                "support-only (Fable d2 [key=decider-support-arm])")
+    p = Path(path or APPROVE_SWITCH)
+    try:
+        present = p.exists()
+    except OSError as exc:  # noqa: BLE001 - cannot prove the switch is absent
+        return f"approve arm state unreadable ({exc})"
+    if present:
+        return f"approve arm disabled by {p}"
+    return ""
 
 
 def doc_class_approved(path: Path | None = None) -> tuple[bool, str]:
@@ -839,13 +894,21 @@ def _nonneg_int(v: Any, key: str) -> int:
 
 
 ASK_CAP_DEFER = "daily ask cap: "
+RUN_CAP_DEFER = "per-run ask cap: "
 
 
 def filter_support(db: sqlite3.Connection, decisions: list["Decision"], res: "RunResult",
                    proof: ProofOnFile | None, proof_why: str | None, now: datetime,
-                   max_ask_users_per_day: int | None = None) -> None:
+                   max_ask_users_per_day: int | None = None,
+                   max_ask_users_per_run: int | None = None) -> None:
     """Never re-ask: turn support decisions that must not be sent into HOLD or
-    DEFER, counting each reason on the run."""
+    DEFER, counting each reason on the run.
+
+    Two caps, both counted in DISTINCT USERS and both applied to the paid-first decision order:
+    the UTC-day cap (policy, re-read at the write boundary) and the PER-RUN cap (d2 condition 3:
+    "at most 100 users per run, paid first"). A user admitted under either cap takes their whole
+    waiting batch in this run.
+    """
     support = [d for d in decisions if d.decision == "support"]
     res.support_candidates = len(support)
     if proof is None:
@@ -874,7 +937,7 @@ def filter_support(db: sqlite3.Connection, decisions: list["Decision"], res: "Ru
             _set(d, "defer", WINDOW_DEFER + "this user was asked in the last 24h; this row goes out with "
                  "the user's next batch")
             res.deferred_window += 1
-    if max_ask_users_per_day is None:
+    if max_ask_users_per_day is None and max_ask_users_per_run is None:
         return
     # Daily cap on DISTINCT users asked (UTC day): users already asked today count;
     # a user admitted under the cap gets all of their rows in this run (one batch).
@@ -885,8 +948,11 @@ def filter_support(db: sqlite3.Connection, decisions: list["Decision"], res: "Ru
             continue
         if d.user_id in asked_today or d.user_id in admitted:
             continue
-        if len(asked_today) + len(admitted) < max_ask_users_per_day:
-            admitted.add(d.user_id)
+        if max_ask_users_per_run is not None and len(admitted) >= max_ask_users_per_run:
+            continue  # a whole run may not admit another user; their rows fall through below
+        if max_ask_users_per_day is not None and len(asked_today) + len(admitted) >= max_ask_users_per_day:
+            continue
+        admitted.add(d.user_id)
     for d in support:
         if d.decision != "support":
             continue
@@ -895,18 +961,30 @@ def filter_support(db: sqlite3.Connection, decisions: list["Decision"], res: "Ru
             # the cap being reached).
             _set(d, "defer", "no account user id on the request: nobody to ask; decided again when it has one")
             continue
-        if d.user_id not in asked_today and d.user_id not in admitted:
-            _set(d, "defer", ASK_CAP_DEFER + f"{max_ask_users_per_day} users/day already reached; "
-                 "this row goes out on a later day")
-            res.deferred_ask_cap += 1
+        if d.user_id in asked_today or d.user_id in admitted:
+            continue
+        if max_ask_users_per_run is not None and len(admitted) >= max_ask_users_per_run:
+            _set(d, "defer", RUN_CAP_DEFER + f"{max_ask_users_per_run} users/run already reached; "
+                 "this row goes out in a later run")
+            res.deferred_run_cap += 1
+            continue
+        _set(d, "defer", ASK_CAP_DEFER + f"{max_ask_users_per_day} users/day already reached; "
+             "this row goes out on a later day")
+        res.deferred_ask_cap += 1
 
 
 def cap_at_write(db: sqlite3.Connection, res: "RunResult", support_ids: list[str], user_of: dict[str, int | None],
-                 cap: int | None, send_at: datetime) -> list[str]:
-    """Support ids that still fit the day's cap at send time (call under write_lock)."""
-    if cap is None:
+                 cap: int | None, send_at: datetime, run_cap: int | None = None,
+                 admitted_run: set[int] | None = None) -> list[str]:
+    """Support ids that still fit the day's cap AND this run's user cap at send time (call under write_lock).
+
+    ``admitted_run`` is the set of users this run has already admitted in an earlier chunk; it is
+    mutated here so a run that spans several BATCH chunks cannot exceed ``run_cap`` distinct users.
+    """
+    if cap is None and run_cap is None:
         return support_ids
-    asked_today = users_asked_since(db, send_at.strftime("%Y-%m-%dT00:00:00Z"))
+    admitted_run = admitted_run if admitted_run is not None else set()
+    asked_today = users_asked_since(db, send_at.strftime("%Y-%m-%dT00:00:00Z")) if cap is not None else set()
     # A user another run asked since this run decided is now inside their 24h
     # window: this run's rows for them wait for the next batch.
     asked_window = users_asked_since(db, utc(send_at - SUPPORT_WINDOW))
@@ -918,12 +996,26 @@ def cap_at_write(db: sqlite3.Connection, res: "RunResult", support_ids: list[str
             record_outcome(db, res.run_id, rid, "support", "deferred:per_user_window", send_at)
             res.deferred_window += 1
             continue
-        if uid is not None and (uid in admitted or len(asked_today) + len(admitted) < cap):
+        if uid is None:
+            # Unchanged from before the run cap: a row with nobody to ask is booked, never sent.
+            record_outcome(db, res.run_id, rid, "support", "deferred:daily_ask_cap", send_at)
+            res.deferred_ask_cap += 1
+            continue
+        if uid in admitted or uid in admitted_run:
             admitted.add(uid)
             keep.append(rid)
             continue
-        record_outcome(db, res.run_id, rid, "support", "deferred:daily_ask_cap", send_at)
-        res.deferred_ask_cap += 1
+        if run_cap is not None and len(admitted_run) + len(admitted) >= run_cap:
+            record_outcome(db, res.run_id, rid, "support", "deferred:run_cap", send_at)
+            res.deferred_run_cap += 1
+            continue
+        if cap is not None and len(asked_today) + len(admitted) >= cap:
+            record_outcome(db, res.run_id, rid, "support", "deferred:daily_ask_cap", send_at)
+            res.deferred_ask_cap += 1
+            continue
+        admitted.add(uid)
+        keep.append(rid)
+    admitted_run |= admitted
     return keep
 
 
@@ -1342,6 +1434,230 @@ def write_lock(wait_s: float = 600):
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
+# ── the support-only writer's gates (Fable d2 [key=decider-support-arm]) ─────
+class ApproveArmOff(Exception):
+    """An approval reached the WRITE boundary while the approve arm is off (a tripwire: nothing written)."""
+
+
+def _state_get(db: sqlite3.Connection, key: str) -> dict[str, Any] | None:
+    row = db.execute("SELECT v FROM state WHERE k = ?", (key,)).fetchone()
+    if not row:
+        return None
+    try:
+        doc = json.loads(row[0])
+    except (TypeError, ValueError):
+        return {"_unreadable": str(row[0])[:200]}
+    return doc if isinstance(doc, dict) else {"_malformed": str(row[0])[:200]}
+
+
+def _state_put(db: sqlite3.Connection, key: str, doc: dict[str, Any]) -> None:
+    db.execute("INSERT INTO state(k, v) VALUES(?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+               (key, json.dumps(doc, sort_keys=True, default=str)))
+    db.commit()
+
+
+def _state_clear_prefix(db: sqlite3.Connection, prefix: str) -> int:
+    """Delete every state row whose key starts with `prefix`; returns how many went.
+
+    qa-review #1782 (r12) Important: the ask-ledger gap was booked as state and NOTHING ever removed it, so a
+    gap the read-back later reconciled paged every 6h forever. The read-back is the reconciliation, so it is
+    also the discharge: a successful one clears the run's gap rows.
+    """
+    keys = [r[0] for r in db.execute("SELECT k FROM state WHERE substr(k, 1, ?) = ?", (len(prefix), prefix))]
+    for k in keys:
+        db.execute("DELETE FROM state WHERE k = ?", (k,))
+    if keys:
+        db.commit()
+    return len(keys)
+
+
+def record_apply_run(db: sqlite3.Connection, res: "RunResult", at: datetime) -> None:
+    """Record an apply run that WROTE asks, so the next apply run can be held until a read-back.
+
+    Only runs that landed asks are recorded: a run that decided nothing has nothing to read back,
+    and demanding a read-back of it would turn a quiet queue into a wedged one.
+    """
+    # qa-review #1782 (r8) Important: an INDETERMINATE support PUT (`error:unverified` - the write may have
+    # committed and the status read-back also failed) does not increment `res.support`, so this returned without a
+    # state row and the next apply passed `pending_readback()` and wrote another batch without reconciling. An
+    # uncertain ask owes a read-back exactly like a confirmed one.
+    if res.mode != "apply" or not (res.support or res.support_uncertain):
+        return
+    _state_put(db, APPLY_RUN_PREFIX + res.run_id,
+               {"run_id": res.run_id, "at": utc(at), "asks": res.support, "asks_ledgered": res.asks_ledgered,
+                "asks_uncertain": res.support_uncertain,
+                "deferred_run_cap": res.deferred_run_cap, "approve_arm_off": res.held_approve_arm})
+
+
+def pending_readback(db: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Apply runs that wrote asks and have NO recorded read-back yet, oldest first.
+
+    d2 condition 5: "a read-back after the first apply run before the second". A run is cleared
+    only by its OWN read-back key - never by a later run's, and never by counting rows: the
+    read-back is what proves the asks the ledger claims are the asks core shows.
+    """
+    out: list[dict[str, Any]] = []
+    for (key,) in db.execute("SELECT k FROM state WHERE k LIKE ? ORDER BY k", (APPLY_RUN_PREFIX + "%",)):
+        run_id = key[len(APPLY_RUN_PREFIX):]
+        rb = _state_get(db, READBACK_PREFIX + run_id)
+        # A read-back that did NOT confirm every row (missing, or core unreadable) leaves the gate
+        # closed: recording an attempt is not recording a read-back.
+        if rb is not None and rb.get("ok") is True:
+            continue
+        out.append(_state_get(db, key) or {"run_id": run_id})
+    return out
+
+
+def run_readback(db: sqlite3.Connection, run_id: str, *, readback: "Readback | None" = None,
+                 now: datetime | None = None) -> dict[str, Any]:
+    """Read core back for one apply run's asks and record the result (the gate for the next apply).
+
+    ``missing`` is the whole point: an ask the ledger says it wrote that core does NOT show is the
+    failure this gate exists to catch, and it is recorded rather than swallowed (`ok` is False).
+    """
+    ensure_schema(db)
+    at = now or datetime.now(timezone.utc)
+    # qa-review #1782 (r9) Important: only CONFIRMED asks were selected, so a run whose only support PUT was
+    # `error:unverified` (it may have committed, the status read-back failed) raised "wrote no ask to read back" and
+    # the next apply stayed wedged; and a MIXED run read back only the confirmed ids, recorded ok:true, and admitted
+    # the next apply while the uncertain ask was still unreconciled. An uncertain ask is exactly the one that most
+    # needs reading back, so it is included and must be resolved before `ok` can be true.
+    rows = list(db.execute(
+        "SELECT DISTINCT request_id, outcome FROM decision_outcomes WHERE run_id = ? AND action = 'support' "
+        "AND (outcome = ? OR outcome LIKE 'error:%')",
+        (run_id, UVN)))
+    ids = [r[0] for r in rows]
+    if not ids:
+        raise ValueError(f"run {run_id} wrote no ask to read back")
+    uncertain = {r[0] for r in rows if str(r[1]).startswith("error:")}
+    rb = readback or status_readback()
+    try:
+        live = set(rb(UVN, ids))
+    except Exception as exc:  # noqa: BLE001 - an unreadable read-back is a refusal, not a pass
+        doc = {"run_id": run_id, "at": utc(at), "checked": len(ids), "missing": sorted(ids),
+               "ok": False, "error": str(exc)[:300]}
+        _state_put(db, READBACK_PREFIX + run_id, doc)
+        return doc
+    missing = sorted(set(ids) - live)
+    # qa-review #1782 (r10) Important: an UNCERTAIN ask that the read-back now CONFIRMS was never ledgered - the
+    # write path only ledgers what it saw land, and this one landed without being seen. Without a `verify_messages`
+    # row the tick's `asked_within`/`capped` gates cannot see it and can mail the same user another ask. Ledger every
+    # newly confirmed uncertain id, and keep the gate CLOSED if that ledgering fails.
+    recovered = sorted(uncertain & live)
+    ledger_error = ""
+    to_ledger: list[str] = []
+    # qa-review #1782 (r11) Important: a CONFIRMED ask whose `ledger_asks()` failed (SQLite busy, say) is not in
+    # `uncertain`, so it was never re-ledgered either - a successful read-back then recorded ok:true and admitted the
+    # next apply while `verify_messages` still had no ask, and the tick's asked_within/capped gates could send that
+    # user a duplicate. EVERY live id without a ledger row is reconciled here, confirmed or recovered.
+    from . import verify_ledger
+    try:
+        verify_ledger.ensure_schema(db)
+        already: set[str] = set()
+        for (blob,) in db.execute("SELECT request_ids_json FROM verify_messages WHERE campaign = ?",
+                                  (verify_ledger.DECIDER_SUPPORT,)):
+            try:
+                already.update(str(x) for x in json.loads(blob or "[]"))
+            except ValueError:
+                continue
+        to_ledger = [rid for rid in sorted(live) if rid not in already]
+    except Exception as exc:  # noqa: BLE001 - an unreadable ledger is a refusal, not a pass
+        ledger_error = f"the ask ledger could not be read: {exc}"
+    if to_ledger:
+        user_of = {r[0]: r[1] for r in db.execute(
+            "SELECT request_id, user_id FROM decisions WHERE run_id = ?", (run_id,))}
+        day = at.strftime("%Y-%m-%d")
+        by_user: dict[int, list[str]] = {}
+        for rid in to_ledger:
+            uid = user_of.get(rid)
+            if isinstance(uid, int) and not isinstance(uid, bool):
+                by_user.setdefault(uid, []).append(rid)
+        try:
+            for uid, rids in by_user.items():
+                verify_ledger.record_external_ask(
+                    db, user_key="", user_id=str(uid), day=day, request_ids=rids,
+                    approved_by=ASK_SENDER, approval_ref=f"{verify_ledger.DECIDER_SUPPORT}:{run_id}:readback",
+                    now=at)
+        except Exception as exc:  # noqa: BLE001 - an unledgered ask is a refusal, not a pass
+            ledger_error = f"an ask could not be ledgered: {exc}"
+    doc = {"run_id": run_id, "at": utc(at), "checked": len(ids), "confirmed": len(ids) - len(missing),
+           "missing": missing, "recovered_uncertain": recovered, "ledgered": to_ledger,
+           "ok": not missing and not ledger_error}
+    if ledger_error:
+        doc["error"] = ledger_error[:300]
+    # qa-review #1782 (r12) Important: a gap the read-back just reconciled kept paging forever, because the
+    # error state was written and never cleared. A CONFIRMED, LEDGERED ask is no longer a gap, so the run's
+    # gap rows go with it. A missing ask or a failed ledgering keeps them: that gap is still real.
+    if doc["ok"]:
+        doc["cleared_gaps"] = _state_clear_prefix(db, f"support-writer:ask-ledger-error:{run_id}")
+    _state_put(db, READBACK_PREFIX + run_id, doc)
+    return doc
+
+
+def ledger_asks(db: sqlite3.Connection, res: "RunResult", landed: Iterable[str],
+                user_of: dict[str, int | None], at: datetime) -> int:
+    """Ledger the Knock asks a support batch just sent, so ONE sender per family holds.
+
+    The support write's note comes from core. Until this row exists, the tick's own campaigns
+    (uvn-status and friends) cannot see that the user was asked today and would mail the same
+    person the same day. A failure here is booked on the RUN and on the ledger's state so the
+    watchdog pages: the ask already happened, so it can never be silently dropped.
+    """
+    from . import verify_ledger
+    by_user: dict[int, list[str]] = {}
+    for rid in landed:
+        uid = user_of.get(rid)
+        if isinstance(uid, int) and not isinstance(uid, bool):
+            by_user.setdefault(uid, []).append(rid)
+    if not by_user:
+        return 0
+    # qa-review #1782 (r6) Important: the schema setup used to sit OUTSIDE the per-user handler, so a legacy
+    # ledger whose migration fails raised out of this function - past the per-user booking AND past
+    # `record_apply_run()`, which is what records the read-back obligation. The asks had already LANDED, so the
+    # run left no `ask-ledger-error` state and no pending read-back, and a second apply was admitted without
+    # reconciling them. Setup failure is now booked for EVERY user whose ask landed, and this function never
+    # raises: the ask is out, so the gap must be loud, never fatal.
+    setup_error = ""
+    try:   # the same ledger file the ask sender uses; created here if this host predates it
+        db.execute("SELECT 1 FROM verify_messages LIMIT 1")
+    except sqlite3.Error:
+        try:
+            verify_ledger.ensure_schema(db)
+        except Exception as exc:  # noqa: BLE001 - the asks are out; a migration failure must not swallow them
+            setup_error = f"ask ledger schema setup failed: {exc}"
+    if setup_error:
+        res.write_errors.append(setup_error[:200])
+        for uid, rids in by_user.items():
+            # qa-review #1782 (r12) Important: the key was per RUN, so N affected users overwrote each other and
+            # the watchdog reported one gap for a run that stranded five. The user id is part of the key.
+            _state_put(db, f"support-writer:ask-ledger-error:{res.run_id}:{uid}",
+                       {"run_id": res.run_id, "user_id": uid, "at": utc(at), "error": setup_error[:300],
+                        "asks": len(rids)})
+        res.note = ((res.note + " ") if res.note else "") + (
+            f"ASK LEDGER UNAVAILABLE: {len(by_user)} user(s) were asked and could not be ledgered "
+            f"({setup_error[:120]}).")
+        return 0
+    day = at.strftime("%Y-%m-%d")
+    written = 0
+    for uid, rids in by_user.items():
+        try:
+            verify_ledger.record_external_ask(
+                db, user_key="", user_id=str(uid), day=day, request_ids=rids,
+                approved_by=ASK_SENDER, approval_ref=f"{verify_ledger.DECIDER_SUPPORT}:{res.run_id}", now=at)
+            written += 1
+        except Exception as exc:  # noqa: BLE001 - the ask is out; the gap must be loud, not swallowed
+            msg = f"ask ledger for user {uid} ({len(rids)} ask(s)): {exc}"
+            res.write_errors.append(msg[:200])
+            _state_put(db, f"support-writer:ask-ledger-error:{res.run_id}:{uid}",
+                       {"run_id": res.run_id, "user_id": uid, "at": utc(at), "error": str(exc)[:300],
+                        "asks": len(rids)})
+    res.asks_ledgered += written
+    if written < len(by_user):
+        res.note = ((res.note + " ") if res.note else "") + (
+            f"ASK LEDGER INCOMPLETE: {written}/{len(by_user)} user(s) ledgered for the tick's gates.")
+    return written
+
+
 # ── the run ─────────────────────────────────────────────────────────────────
 @dataclass
 class RunResult:
@@ -1361,12 +1677,16 @@ class RunResult:
     doc_approved: int = 0
     doc_indeterminate: int = 0        # core may have committed; counted, not proof, a human reconciles
     doc_refused_by_core: int = 0      # eligible documents whose row core's own agent guard would refuse
+    held_approve_arm: int = 0      # approve verdicts RECORDED and not written (the support-only arm)
+    support_uncertain: int = 0     # support PUTs that MAY have landed (write or read-back failed): they owe a read-back
+    asks_ledgered: int = 0         # distinct users whose Knock ask was ledgered for the tick's gates
     support_candidates: int = 0
     held_proof: int = 0
     held_stage2_ask: int = 0
     held_reasked: int = 0
     deferred_window: int = 0
     deferred_ask_cap: int = 0
+    deferred_run_cap: int = 0
     deferred_proof_unknown: int = 0
     spend_usd: float = 0.0
     n1: int = 0
@@ -1390,12 +1710,14 @@ class RunResult:
                    "uvn-status), " if self.held_stage2_ask else "")
                 + f"{self.held_reasked} held as already asked once, "
                 f"{self.deferred_window} deferred for the per-user 24h window, {self.deferred_ask_cap} deferred by the "
-                f"daily ask cap, {self.deferred_proof_unknown} deferred "
+                f"daily ask cap, {self.deferred_run_cap} deferred by the per-run ask cap, {self.deferred_proof_unknown} deferred "
                 f"(proof status unknown), {self.support} {'would be sent' if self.mode in ('shadow', 'judge') else 'sent'}."
                 + (f" {self.doc_approved} approved by a dv-4 verified document (provisional "
                    f"{doc_approve.PROVISIONAL_DAYS}d)." if self.doc_approved else "")
                 + (f" {self.doc_indeterminate} doc approval(s) INDETERMINATE (core may have committed; "
                    "reconcile before releasing)." if self.doc_indeterminate else "")
+                + (f" {self.held_approve_arm} approve verdict(s) recorded and NOT written (support-only arm)"
+                   if self.held_approve_arm else "")
                 + (f" {self.note}" if self.note else "")
                 + (f" WRITE ERRORS: {'; '.join(self.write_errors)[:400]}" if self.write_errors else ""))
 
@@ -1758,7 +2080,8 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
                     d.decision == "approve" and d.evidence_kind == doc_approve.DOC_KIND):
                 _set(d, "hold", f"{AUTOMATION} is approved=false and only {DOC_AUTOMATION} rows may write: "
                      f"a {d.decision} is held for a human")
-    filter_support(db, decisions, res, proof, proof_why, now, policy.max_ask_users_per_day)
+    filter_support(db, decisions, res, proof, proof_why, now, policy.max_ask_users_per_day,
+                   policy.max_ask_users_per_run)
     if mode != "apply":
         for d in decisions:
             d.doc_required = False
@@ -1770,6 +2093,7 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
     # doc-only hold). The row is written before the core PUT because the ref is what that PUT relies on;
     # if the PUT does not confirm, `write_ids` RELEASES the row again (QA #1684 finding 2), so no phantom
     # approval can stand in for a credit that was never approved.
+    doc_committed: list[str] = []
     for rid, (c, ap, d) in doc_pending.items():
         if d.decision != "approve" or d.evidence_kind != doc_approve.DOC_KIND:
             log(f"decide: doc-approve {d.request_id} not committed: a later guard set {d.decision}")
@@ -1784,6 +2108,7 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
             log(f"decide: doc-approve {d.request_id} refused at commit")
             continue
         res.doc_approved += 1
+        doc_committed.append(d.request_id)
 
     # Ledger BEFORE any write.
     for d in decisions:
@@ -1794,6 +2119,34 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
 
     approve_ids = [d.request_id for d in decisions if d.decision == "approve"]
     support_ids = [d.request_id for d in decisions if d.decision == "support"]
+    # ── the support-only arm (Fable d2 [key=decider-support-arm]) ─────────────────────────────
+    # The approve VERDICT is kept: the decision row above is the record stage 2 and every reader
+    # work from, and it is written before this line for exactly that reason. What stops is the
+    # WRITE. Applied here (before the shadow/judge return) so shadow reports what apply would
+    # really do instead of promising approvals the writer may not make.
+    arm_off = approve_arm_off(policy)
+    if approve_ids and mode == "apply" and arm_off:
+        for rid in approve_ids:
+            record_outcome(db, res.run_id, rid, "approve", APPROVE_ARM_OFF_OUTCOME, now)
+            # qa-review #1782 (r8) Important: a DOC-ONLY apply commits the provisional row (and spends the
+            # one-per-request slot) BEFORE this branch runs, and then the id is dropped from approve_ids - so no
+            # core PUT happens and `doc_approve.release()` was never called. The credit stayed `unverified` while
+            # the ledger said approved and the slot blocked another attempt. Give the slot back.
+            if rid in doc_committed:
+                if doc_approve.release(db, rid.lower(), reason="approve arm is off: no core PUT was made"):
+                    res.doc_approved -= 1
+                    log(f"decide: doc-approve {rid} released: the approve arm is off, so no PUT was made")
+        res.held_approve_arm = len(approve_ids)
+        approve_ids = []
+        res.note = ((res.note + " ") if res.note else "") + (
+            f"APPROVE ARM OFF ({arm_off}): {res.held_approve_arm} approve verdict(s) recorded, none written; "
+            "support is the only arm this run can write.")
+    elif approve_ids and arm_off:
+        # shadow/judge: the count stays a count of VERDICTS (that is what these modes report), but the
+        # note says plainly that none of them would be written tonight.
+        res.note = ((res.note + " ") if res.note else "") + (
+            f"approve arm is off in code ({arm_off}); if this were an apply run all {len(approve_ids)} "
+            "approval verdict(s) would be recorded and NOT written.")
     if mode in ("shadow", "judge"):
         res.approved, res.support = len(approve_ids), len(support_ids)
         for rid in approve_ids + support_ids:
@@ -1803,7 +2156,13 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
     readback = readback or status_readback()
     user_of = {d.request_id: d.user_id for d in decisions}
 
-    def write_ids(action: str, status: str, chunk: list[str]) -> None:
+    def write_ids(action: str, status: str, chunk: list[str]) -> set[str]:
+        # TRIPWIRE, at the boundary rather than at the caller: no path may write an approval
+        # while the arm is off, even a future one added above this function by mistake.
+        if status == APPROVED:
+            why = approve_arm_off(policy)
+            if why:
+                raise ApproveArmOff(f"refused at the write boundary: {why}")
         outs, err = write_chunk(writer, readback, status, chunk, UNVERIFIED)
         # Outcomes are booked at the time the PUT (and its readback) RETURNED, not
         # when it started: a request in flight across UTC midnight counts on the
@@ -1812,9 +2171,11 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
         done_at = clock()
         if err is not None:
             res.write_errors.append(f"{action} batch of {len(chunk)}: {err}"[:200])
+        landed: set[str] = set()
         for rid, out in outs.items():
             record_outcome(db, res.run_id, rid, action, out, done_at)
             if out == status:
+                landed.add(rid)
                 if action == "approve":
                     res.approved += 1
                 else:
@@ -1822,6 +2183,10 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
             elif out.startswith("skipped:"):
                 k = out.split(":", 1)[1]
                 res.skipped_by_server[k] = res.skipped_by_server.get(k, 0) + 1
+            elif action == "support" and out.startswith("error:"):
+                # qa-review #1782 (r8) Important: the PUT may have committed and the status read-back failed, so an
+                # ask we cannot rule out owes a read-back exactly like a confirmed one.
+                res.support_uncertain += 1
             if action == "approve" and out != status and rid.lower() in doc_pending:
                 if out.startswith("error:unverified:"):
                     # QA #1684 round 7, finding 1: the PUT failed AND the readback failed, so core may
@@ -1854,9 +2219,23 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
                 elif doc_approve.release(db, rid.lower(), reason=f"no write outcome for this row ({err})"[:300]):
                     res.doc_approved -= 1
                     log(f"decide: doc-approve {rid} released: the write confirmed nothing ({err})")
+        return landed
 
     provisional = {d.request_id for d in decisions if d.decision == "approve" and d.evidence_kind == PROVISIONAL_KIND}
+    asked_run: set[int] = set()
     with write_lock():
+        # qa-review #1782 (r7) Important: the pending-readback check ran BEFORE this lock, and `record_apply_run()`
+        # ran AFTER it, so two apply processes starting with no pending read-back could both pass - the first wrote
+        # asks, the second wrote another batch without reading the first back. Both halves are now inside the lock:
+        # the check immediately before the first write, and the obligation recorded before the lock is released.
+        owed = pending_readback(db)
+        if owed:
+            lines = ", ".join(f"{p.get('run_id')} ({p.get('asks', '?')} ask(s) at {p.get('at', '?')})" for p in owed)
+            res.errors += 1
+            res.write_errors.append(f"read-back owed (re-checked under the write lock): {lines}"[:300])
+            res.note = ((res.note + " ") if res.note else "") + f"READ-BACK OWED: {lines}"
+            log(f"decide: refusing to write (read-back owed, re-checked under the lock): {lines}")
+            return res
         # The per-user provisional cap is re-checked here, under the lock, against what is
         # already WRITTEN on the UTC day of each batch (approvals booked by any run).
         # QA #1684 round 7, finding 2: one person's credits are adjacent AND stay in ONE PUT, because
@@ -1866,7 +2245,15 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
             chunk, pending_ap = pending_ap[0], pending_ap[1:]
             chunk = provisional_cap_at_write(db, res, chunk, user_of, provisional, clock())
             if chunk:
-                write_ids("approve", APPROVED, chunk)
+                try:
+                    write_ids("approve", APPROVED, chunk)
+                except ApproveArmOff as exc:
+                    # Never a crash mid-run: book the rows and let the support arm finish.
+                    for rid in chunk:
+                        record_outcome(db, res.run_id, rid, "approve", APPROVE_ARM_OFF_OUTCOME, clock())
+                    res.held_approve_arm += len(chunk)
+                    res.write_errors.append(str(exc)[:200])
+                    break
         # The daily ask cap is checked at the SUPPORT-write boundary, under the
         # shared write lock, on the UTC day each support batch is actually sent:
         # the clock is read immediately before every batch, and if the day has
@@ -1881,12 +2268,27 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
             at = clock()
             day = at.strftime("%Y-%m-%d")
             if day != checked_day:
-                pending = cap_at_write(db, res, pending, user_of, policy.max_ask_users_per_day, at)
+                pending = cap_at_write(db, res, pending, user_of, policy.max_ask_users_per_day, at,
+                                       run_cap=policy.max_ask_users_per_run, admitted_run=asked_run)
                 checked_day = day
                 if not pending:
                     break
             chunk, pending = pending[:BATCH], pending[BATCH:]
-            write_ids("support", UVN, chunk)
+            landed = write_ids("support", UVN, chunk)
+            # The ask is ledgered AFTER it landed (never before: a phantom ask would block the
+            # user's real one), so the tick's own campaigns find it and stand down.
+            try:
+                ledger_asks(db, res, landed, user_of, clock())
+            except Exception as exc:  # noqa: BLE001 - the asks are OUT; the read-back must still be recorded
+                # qa-review #1782 (r6) Important: `record_apply_run()` below is what records the read-back
+                # obligation that gates the NEXT apply. An exception here must never skip it, or a landed ask
+                # is admitted again without reconciling. Book it and keep going.
+                res.write_errors.append(f"ask ledger: {exc}"[:200])
+                _state_put(db, f"support-writer:ask-ledger-error:{res.run_id}",
+                           {"run_id": res.run_id, "at": utc(clock()), "error": str(exc)[:300]})
+        # qa-review #1782 (r7) Important: the read-back obligation is recorded BEFORE the lock is released, so a
+        # second apply process cannot acquire it and write another batch while this run's asks are unreconciled.
+        record_apply_run(db, res, clock())
     return res
 
 

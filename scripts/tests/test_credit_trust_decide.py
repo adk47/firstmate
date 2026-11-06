@@ -132,7 +132,8 @@ def stage2_row(path, request_id, role, user_id, outcome, *, reason="r", version=
 
 
 TERMS = decide.Policy.load().editorial_role_terms
-POLICY = decide.Policy(deny_user_ids={666}, deny_profile_ids=set(), editorial_role_terms=TERMS)
+POLICY = decide.Policy(deny_user_ids={666}, deny_profile_ids=set(), editorial_role_terms=TERMS,
+                       approve_arm=True)  # the approve-arm tests: opt in explicitly (the default is OFF)
 
 
 class Base(unittest.TestCase):
@@ -155,6 +156,11 @@ class Base(unittest.TestCase):
         self._prov_switch = decide.PROVISIONAL_PAID_SWITCH
         decide.PROVISIONAL_PAID_SWITCH = Path(self.tmp) / "provisional-paid.disabled"
         self.addCleanup(setattr, decide, "PROVISIONAL_PAID_SWITCH", self._prov_switch)
+        # d2 [key=decider-support-arm]: the approve-arm switch is redirected into the temp dir too
+        # (an /etc/hydra file present on the host must never decide a test outcome).
+        self._approve_switch = decide.APPROVE_SWITCH
+        decide.APPROVE_SWITCH = Path(self.tmp) / "approve.disabled"
+        self.addCleanup(setattr, decide, "APPROVE_SWITCH", self._approve_switch)
         self.proof()
         # The stage-2 verdict store (with_stage2): empty unless a test writes verdicts.
         self._stage2 = decide.STAGE2_STORE
@@ -182,6 +188,15 @@ class Base(unittest.TestCase):
                 {"name": "cs-intercom", "generated_at": generated_at, "stale": False, "count": 0},
                 {"name": "cs-gmail", "generated_at": generated_at, "stale": False, "count": 0}],
             "users": len({e["user_id"] for e in entries}), "entries": entries}))
+
+    def clear_readback(self):
+        """Settle the read-back a previous apply run owes, the way the operator does.
+
+        qa-review #1782 (r7): the pending-read-back check now runs INSIDE the write lock, so a second apply run in the
+        same test is refused until the first is read back - which is the d2 condition, not a test artefact.
+        """
+        for p in decide.pending_readback(self.db):
+            decide.run_readback(self.db, p["run_id"], readback=lambda st, ids: set(ids))
 
     def go(self, rows, raws=None, judge=None, mode="apply", skip=None, policy=POLICY, admin_requests=(),
            transient_404=None, raw_404=(), **kw):
@@ -432,7 +447,7 @@ class Decisions(Base):
     def test_deny_lists_and_daily_cap(self):
         policy = decide.Policy(deny_user_ids={666},
                                deny_profile_ids={T.PID_BAD.lower()}, editorial_role_terms=TERMS,
-                               max_approvals_per_user_per_day=1)
+                               max_approvals_per_user_per_day=1, approve_arm=True)
         rows = [req(uuid_of(20), uid=666, track="t3"), req(uuid_of(21), pid=T.PID_BAD, uid=700, track="t3"),
                 req(uuid_of(22), uid=800, track="t3"), req(uuid_of(23), uid=800, track="t3")]
         res, w = self.go(rows, judge=FakeJudge(credible()), policy=policy)
@@ -950,7 +965,7 @@ class NeverReAsk(Base):
         d = self.decisions()
         self.assertEqual((d[uuid_of(115)]["decision"], d[uuid_of(115)]["mode"]), ("hold", "judge"))
         self.assertTrue(d[uuid_of(115)]["reason"].startswith("proof on file: human review"))
-        self.assertEqual((w.calls, self.support_writes(w)), ([], []))     # the ask for 116 is only "would"
+        self.assertEqual((w.calls, support_ids(w)), ([], []))     # the ask for 116 is only "would"
 
     def test_proof_on_file_holds_the_ask_but_never_blocks_an_approval(self):
         self.proof([{"user_id": 701, "request_id": None, "kind": "pending_doc", "source": "intercom", "ref": "c1"},
@@ -965,7 +980,7 @@ class NeverReAsk(Base):
         self.assertEqual([d[uuid_of(i)]["decision"] for i in (110, 112, 113)], ["hold"] * 3)
         self.assertTrue(all(d[uuid_of(i)]["reason"].startswith("proof on file: human review") for i in (110, 112, 113)))
         self.assertEqual(d[uuid_of(111)]["decision"], "approve", "an approval is not an ask")
-        self.assertEqual(self.support_writes(w), [uuid_of(114)])
+        self.assertEqual(support_ids(w), [uuid_of(114)])
         self.assertEqual((res.support_candidates, res.held_proof, res.support, res.held), (4, 3, 1, 3))
         self.assertIn("4 before filters, 3 held for proof on file", res.line())
         self.assertIn("1 sent", res.line())
@@ -985,7 +1000,7 @@ class NeverReAsk(Base):
         d = self.decisions()
         self.assertEqual(d[older]["decision"], "hold")
         self.assertTrue(d[older]["reason"].startswith("proof on file: human review"))
-        self.assertEqual(self.support_writes(w), [newer], "a request created after the newest proof is not covered")
+        self.assertEqual(support_ids(w), [newer], "a request created after the newest proof is not covered")
 
     def test_anything_not_known_keeps_todays_whole_user_cover(self):
         self.proof([{"user_id": 802, "request_id": None, "kind": "pending_doc", "source": "intercom", "ref": "c1"},
@@ -999,7 +1014,7 @@ class NeverReAsk(Base):
                 req(uuid_of(134), uid=804, track="t1")]                             # request without createdAt
         rows[2].pop("createdAt")
         res, w = self.go(rows, self.RAWS)
-        self.assertEqual(self.support_writes(w), [])
+        self.assertEqual(support_ids(w), [])
         self.assertTrue(all(self.decisions()[uuid_of(i)]["decision"] == "hold" for i in (132, 133, 134)))
 
     def test_request_scoped_entries_and_proof_intake_cover_only_their_requests(self):
@@ -1015,7 +1030,7 @@ class NeverReAsk(Base):
         res, w = self.go(rows, self.RAWS)
         d = self.decisions()
         self.assertEqual([d[uuid_of(i)]["decision"] for i in (135, 137)], ["hold", "hold"])
-        self.assertEqual(sorted(self.support_writes(w)), [uuid_of(136), uuid_of(138)],
+        self.assertEqual(sorted(support_ids(w)), [uuid_of(136), uuid_of(138)],
                          "the user's OTHER requests are not covered by a request-scoped entry or a filing")
 
     def test_an_unreadable_proof_intake_keeps_whole_user_cover_and_says_so(self):
@@ -1029,7 +1044,7 @@ class NeverReAsk(Base):
         db.close()
         rows = [req(uuid_of(140), uid=807, track="t1"), req(uuid_of(141), uid=808, track="t1", created=self.at(-30))]
         res, w = self.go(rows, self.RAWS)
-        self.assertEqual(self.support_writes(w), [], "no scope without proof_intake: nobody newly asked")
+        self.assertEqual(support_ids(w), [], "no scope without proof_intake: nobody newly asked")
         self.assertTrue(any("proof_intake unreadable" in m for m in self.logged), self.logged)
 
     def test_a_non_request_id_entry_is_whole_user(self):
@@ -1064,7 +1079,7 @@ class NeverReAsk(Base):
                                                                   (124, 704))]
         res, w = self.go(rows, self.RAWS)
         d = self.decisions()
-        self.assertEqual(self.support_writes(w), [], "no support write (Knock notice) for anyone with proof on file")
+        self.assertEqual(support_ids(w), [], "no support write (Knock notice) for anyone with proof on file")
         self.assertTrue(all(d[uuid_of(i)]["decision"] == "hold" for i in range(120, 125)))
         self.assertIn("--campaign gap-ask", d[uuid_of(120)]["reason"])
         self.assertIn("--campaign uvn-status", d[uuid_of(121)]["reason"])
@@ -1080,7 +1095,7 @@ class NeverReAsk(Base):
         decide.STAGE2_STORE.write_text("not sqlite")
         res, w = self.go([req(uuid_of(130), uid=701, track="t1")], self.RAWS)
         self.assertTrue(self.decisions()[uuid_of(130)]["reason"].startswith("proof on file: human review"))
-        self.assertEqual((res.held_stage2_ask, res.held_proof, self.support_writes(w)), (0, 1, []))
+        self.assertEqual((res.held_stage2_ask, res.held_proof, support_ids(w)), (0, 1, []))
         self.assertTrue(any("stage-2 verdicts unreadable" in m for m in self.logged))
 
     def test_daily_ask_cap_limits_distinct_users_and_keeps_a_users_batch_whole(self):
@@ -1089,7 +1104,7 @@ class NeverReAsk(Base):
         rows = [req(uuid_of(160), uid=801, track="t1"), req(uuid_of(161), uid=801, track="t9"),
                 req(uuid_of(162), uid=802, track="t1"), req(uuid_of(163), uid=803, track="t1")]
         res, w = self.go(rows, self.RAWS, policy=policy)
-        self.assertEqual(sorted(self.support_writes(w)), sorted([uuid_of(160), uuid_of(161), uuid_of(162)]))
+        self.assertEqual(sorted(support_ids(w)), sorted([uuid_of(160), uuid_of(161), uuid_of(162)]))
         d = self.decisions()
         self.assertEqual(d[uuid_of(163)]["decision"], "defer")
         self.assertTrue(d[uuid_of(163)]["reason"].startswith(decide.ASK_CAP_DEFER))
@@ -1100,7 +1115,7 @@ class NeverReAsk(Base):
         self.proof([])
         policy = dataclasses.replace(POLICY, max_ask_users_per_day=1)
         res, w = self.go([req(uuid_of(170), uid=811, track="t1")], self.RAWS, policy=policy)
-        self.assertEqual(self.support_writes(w), [uuid_of(170)])
+        self.assertEqual(support_ids(w), [uuid_of(170)])
         res2, w2 = self.go([req(uuid_of(171), uid=812, track="t1")], self.RAWS, policy=policy)
         self.assertEqual(self.support_writes(w2), [], "the day's one ask slot is already used")
         self.assertEqual(res2.deferred_ask_cap, 1)
@@ -1206,7 +1221,7 @@ class NeverReAsk(Base):
                 self.proof(generated_at=content)
             self.logged.clear()
             res, w = self.go(rows, self.RAWS)
-            self.assertEqual(self.support_writes(w), [], why)
+            self.assertEqual(support_ids(w), [], why)
             last = {r[0]: (r[1], r[2]) for r in self.db.execute(
                 "SELECT request_id, decision, reason FROM decisions WHERE run_id = ?", (res.run_id,))}
             self.assertEqual(last[uuid_of(120)][0], "defer", why)
@@ -1237,7 +1252,7 @@ class NeverReAsk(Base):
         for n, (why, srcs) in enumerate(cases.items()):
             self.proof(sources=srcs)
             res, w = self.go([req(uuid_of(130 + n), uid=760 + n, track="t1")], self.RAWS)
-            self.assertEqual(self.support_writes(w), [], why)
+            self.assertEqual(support_ids(w), [], why)
             d = self.decisions()[uuid_of(130 + n)]
             self.assertEqual(d["decision"], "defer", why)
             self.assertTrue(d["reason"].startswith("proof_status_unknown"), why)
@@ -1252,7 +1267,7 @@ class NeverReAsk(Base):
         d = self.decisions()
         self.assertEqual(d[uuid_of(160)]["decision"], "hold")
         self.assertIn("emailed support@", d[uuid_of(160)]["reason"])
-        self.assertEqual(self.support_writes(w), [uuid_of(161)])
+        self.assertEqual(support_ids(w), [uuid_of(161)])
 
     def test_a_missing_or_malformed_contact_list_asks_nobody(self):
         for bad in (None, {"user_ids": "x"}, [True], ["abc"]):
@@ -1279,6 +1294,7 @@ class NeverReAsk(Base):
         row = req(uuid_of(140), uid=720, track="t1")
         res1, w1 = self.go([row], self.RAWS)
         self.assertEqual(self.support_writes(w1), [uuid_of(140)])
+        self.clear_readback()
         res2, w2 = self.go([row], self.RAWS, now=T.NOW + decide.timedelta(days=5))
         self.assertEqual(self.support_writes(w2), [])
         last = [r for r in self.db.execute("SELECT decision, reason FROM decisions WHERE run_id = ?", (res2.run_id,))]
@@ -1290,10 +1306,12 @@ class NeverReAsk(Base):
         first = [req(uuid_of(150), uid=730, track="t1"), req(uuid_of(151), uid=730, track="t2")]
         res1, w1 = self.go(first, self.RAWS)
         self.assertEqual(sorted(self.support_writes(w1)), sorted(r["id"] for r in first), "one run = one batch")
+        self.clear_readback()
         later = [req(uuid_of(152), uid=730, track="t1"), req(uuid_of(153), uid=731, track="t1")]
         res2, w2 = self.go(later, self.RAWS, now=T.NOW + decide.timedelta(hours=3))
         self.assertEqual(self.support_writes(w2), [uuid_of(153)])
         self.assertEqual(res2.deferred_window, 1)
+        self.clear_readback()
         res3, w3 = self.go([later[0]], self.RAWS, now=T.NOW + decide.timedelta(hours=25))
         self.assertEqual(self.support_writes(w3), [uuid_of(152)])
 
@@ -1303,13 +1321,14 @@ class NeverReAsk(Base):
         w = Writer(self.db)
         self.proof(generated_at=decide.utc(now - decide.timedelta(minutes=30)))
         res = decide.run(admin, self.db, self.NOT_FOUND, mode="apply", policy=POLICY, writer=w, now=now)
+        self.clear_readback()
         return res, w
 
     def test_a_users_waiting_rows_go_out_together_after_the_window(self):
         h = decide.timedelta(hours=1)
         r1, r2, r3 = (req(uuid_of(160 + i), uid=740, track="t1") for i in range(3))
         _, w = self.run_at(T.NOW, [r1])
-        self.assertEqual(self.support_writes(w), [r1["id"]])
+        self.assertEqual(support_ids(w), [r1["id"]])
         self.run_at(T.NOW + h / 2, [r2])
         self.run_at(T.NOW + 1.25 * h, [r2, r3])
         res, w = self.run_at(T.NOW + 23.25 * h, [r2, r3])
@@ -1345,6 +1364,7 @@ class NeverReAsk(Base):
             else:
                 decide.PROOF_ON_FILE.unlink(missing_ok=True)
             res, w = super().go([req(uuid_of(180 + n), uid=760 + n, track="t1")], self.RAWS, judge=self.NOT_FOUND)
+            self.clear_readback()
             if not present:
                 self.assertEqual((res.support, w.calls), (0, []))
             notes.append(res.note)
@@ -1607,6 +1627,438 @@ class ServerAgentGuardMirror(Base):
         self.assertTrue(outs[uuid_of(321)].startswith("error:"), "one retry only; then it is an error")
         self.assertIsNotNone(err)
 
+# ── the support-only writer (Fable d2 [key=decider-support-arm], 2026-11-04) ────────────────────
+# The decider is re-enabled as a SUPPORT-ONLY writer: support keeps writing unverified ->
+# user_verification_needed, and an approval is RECORDED and NEVER WRITTEN. Each test below is one
+# of d2's six conditions; a condition without a failing-when-removed test is not shipped.
+#   fixture facts (measured, not guessed): track "t3" + a credible judge approves, "t1" asks,
+#   "small" holds. Every class carries its own RAWS.
+APPROVE_RAWS = {"t3": [T.raw("Real Engineer", "mixer")], "t1": [], "small": [], "t9": []}
+BARE_POLICY = {"deny_user_ids": [], "deny_profile_ids": [], "editorial_role_terms": ["editor"]}
+
+
+def support_ids(w):
+    """The ids a run actually wrote user_verification_needed for."""
+    return [i for c in w.calls if c["status"] == decide.UVN for i in c["ids"]]
+
+
+def utc_stamp():
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+class SupportOnlyArm(Base):
+    """Condition 1: support-only enforced in code (the kill file is defence in depth)."""
+
+    RAWS = APPROVE_RAWS
+
+    def approve_calls(self, w):
+        return [c for c in w.calls if c["status"] == decide.APPROVED]
+
+    def test_approve_verdict_is_recorded_and_never_written_when_the_arm_is_off(self):
+        self.proof([])
+        policy = dataclasses.replace(POLICY, approve_arm=False)
+        rows = [req(uuid_of(400), uid=901, track="t3"), req(uuid_of(401), uid=902, track="t3")]
+        res, w = self.go(rows, self.RAWS, judge=FakeJudge(credible()), policy=policy)
+        d = self.decisions()
+        for rid in (uuid_of(400), uuid_of(401)):
+            self.assertEqual(d[rid]["decision"], "approve", "the VERDICT is still recorded: stage 2 reads it")
+            outs = [o["outcome"] for o in decide.explain(self.db, rid)[0]["outcomes"]]
+            self.assertEqual(outs, [decide.APPROVE_ARM_OFF_OUTCOME])
+        self.assertEqual(self.approve_calls(w), [], "the approve arm wrote nothing")
+        self.assertEqual((res.approved, res.held_approve_arm), (0, 2))
+        self.assertIn("APPROVE ARM OFF", res.note)
+        self.assertIn("2 approve verdict(s) recorded and NOT written", res.line())
+
+    def test_support_keeps_writing_while_the_approve_arm_is_off(self):
+        # The whole point of the scope: the same run that withholds an approval still asks.
+        self.proof([])
+        policy = dataclasses.replace(POLICY, approve_arm=False)
+        rows = [req(uuid_of(402), uid=903, track="t3"), req(uuid_of(403), uid=904, track="t1")]
+        res, w = self.go(rows, self.RAWS, judge=FakeJudge(credible()), policy=policy)
+        d = self.decisions()
+        self.assertEqual(d[uuid_of(402)]["decision"], "approve")
+        self.assertEqual(d[uuid_of(403)]["decision"], "support")
+        self.assertEqual(support_ids(w), [uuid_of(403)])
+        self.assertEqual((res.support, res.approved, res.held_approve_arm), (1, 0, 1))
+
+    def test_shadow_says_plainly_that_none_of_them_would_be_written(self):
+        self.proof([])
+        policy = dataclasses.replace(POLICY, approve_arm=False)
+        res, w = self.go([req(uuid_of(407), uid=908, track="t3")], self.RAWS,
+                         judge=FakeJudge(credible()), mode="shadow", policy=policy)
+        self.assertEqual(w.calls, [])
+        self.assertEqual(res.approved, 1, "shadow still counts VERDICTS")
+        self.assertIn("would be recorded and NOT written", res.note)
+
+    def test_the_code_default_is_off_not_a_file_that_may_be_absent(self):
+        self.assertFalse(decide.Policy(deny_user_ids=set(), deny_profile_ids=set(),
+                                       editorial_role_terms=()).approve_arm,
+                         "a policy object that says nothing means the arm is OFF")
+        p = Path(self.tmp) / "policy.json"
+        p.write_text(json.dumps(BARE_POLICY))
+        self.assertFalse(decide.Policy.load(p).approve_arm, "a policy file that omits the key is OFF too")
+        self.assertTrue(decide.approve_arm_off(decide.Policy(deny_user_ids=set(), deny_profile_ids=set(),
+                                                             editorial_role_terms=())))
+
+    def test_a_string_is_not_a_boolean(self):
+        p = Path(self.tmp) / "policy.json"
+        for bad in ("false", 0, "yes", None):
+            p.write_text(json.dumps({**BARE_POLICY, "approve_arm": bad}))
+            with self.assertRaises(ValueError):
+                decide.Policy.load(p)
+
+    def test_the_switch_blocks_an_armed_policy(self):
+        self.proof([])
+        decide.APPROVE_SWITCH.write_text("off")
+        policy = dataclasses.replace(POLICY, approve_arm=True)
+        res, w = self.go([req(uuid_of(404), uid=905, track="t3")], self.RAWS, judge=FakeJudge(credible()),
+                         policy=policy)
+        self.assertEqual(self.approve_calls(w), [])
+        self.assertEqual(res.held_approve_arm, 1)
+        self.assertIn("approve arm disabled by", res.note)
+
+    def test_armed_and_unswitched_writes_the_approval(self):
+        # The control: when a reviewed policy arms the arm and no switch exists, an approval
+        # still writes. Without this test the "off" tests would pass on a writer that can never
+        # approve anything at all.
+        self.proof([])
+        policy = dataclasses.replace(POLICY, approve_arm=True)
+        res, w = self.go([req(uuid_of(405), uid=906, track="t3")], self.RAWS, judge=FakeJudge(credible()),
+                         policy=policy)
+        self.assertEqual([i for c in self.approve_calls(w) for i in c["ids"]], [uuid_of(405)])
+        self.assertEqual((res.approved, res.held_approve_arm), (1, 0))
+
+    def test_an_unreadable_switch_refuses(self):
+        policy = dataclasses.replace(POLICY, approve_arm=True)
+        with mock.patch.object(Path, "exists", side_effect=OSError("EACCES")):
+            why = decide.approve_arm_off(policy)
+        self.assertIn("unreadable", why)
+        self.assertTrue(why, "cannot prove the switch absent => the arm is OFF")
+
+    def test_the_write_boundary_refuses_even_if_a_caller_forgot(self):
+        # The caller check runs before the write loop; the tripwire is inside write_ids(), so a
+        # future caller that re-adds an approve path is refused by the boundary itself. Simulated
+        # by letting the first check pass and the boundary check fail.
+        self.proof([])
+        policy = dataclasses.replace(POLICY, approve_arm=True)
+        with mock.patch.object(decide, "approve_arm_off", side_effect=["", "approve arm disabled by /etc/x"]):
+            res, w = self.go([req(uuid_of(406), uid=907, track="t3")], self.RAWS, judge=FakeJudge(credible()),
+                             policy=policy)
+        self.assertEqual(self.approve_calls(w), [], "refused AT the boundary, not only by the caller")
+        outs = [o["outcome"] for o in decide.explain(self.db, uuid_of(406))[0]["outcomes"]]
+        self.assertEqual(outs, [decide.APPROVE_ARM_OFF_OUTCOME])
+        self.assertTrue(any("write boundary" in e for e in res.write_errors))
+
+
+class PerRunUserCap(Base):
+    """Condition 3: caps in USERS - at most 100 per run, paid first, one move per user per 24h."""
+
+    RAWS = APPROVE_RAWS
+
+    def test_the_default_is_100_users_per_run(self):
+        self.assertEqual(decide.Policy.load().max_ask_users_per_run, 100)
+
+    def test_run_cap_bounds_distinct_users_not_rows(self):
+        self.proof([])
+        policy = dataclasses.replace(POLICY, max_ask_users_per_run=2, max_ask_users_per_day=1000)
+        rows = [req(uuid_of(410), uid=911, track="t1"), req(uuid_of(411), uid=911, track="t1"),
+                req(uuid_of(412), uid=912, track="t1"), req(uuid_of(413), uid=913, track="t1"),
+                req(uuid_of(414), uid=914, track="t1")]
+        res, w = self.go(rows, self.RAWS, policy=policy)
+        sent = sorted(support_ids(w))
+        self.assertEqual(sent, sorted([uuid_of(410), uuid_of(411), uuid_of(412)]),
+                         "two USERS (three rows: a user's batch stays whole), the rest wait")
+        d = self.decisions()
+        for rid in (uuid_of(413), uuid_of(414)):
+            self.assertEqual(d[rid]["decision"], "defer")
+            self.assertTrue(d[rid]["reason"].startswith(decide.RUN_CAP_DEFER))
+        self.assertEqual(res.deferred_run_cap, 2)
+        self.assertIn("2 deferred by the per-run ask cap", res.line())
+
+    def test_run_cap_is_counted_across_chunks_at_the_write_boundary(self):
+        # decide.BATCH chunks a run; a cap counted per chunk would admit BATCH x the users.
+        decide.ensure_schema(self.db)
+        res = decide.RunResult(run_id="run-x", mode="apply")
+        user_of = {"a": 1, "b": 2, "c": 3}
+        admitted: set[int] = set()
+        first = decide.cap_at_write(self.db, res, ["a"], user_of, None, T.NOW, run_cap=2, admitted_run=admitted)
+        second = decide.cap_at_write(self.db, res, ["b"], user_of, None, T.NOW, run_cap=2, admitted_run=admitted)
+        third = decide.cap_at_write(self.db, res, ["c"], user_of, None, T.NOW, run_cap=2, admitted_run=admitted)
+        self.assertEqual((first, second, third), (["a"], ["b"], []))
+        self.assertEqual(res.deferred_run_cap, 1)
+
+
+class AskLedgerClause(Base):
+    """Condition 2: ONE named sender for the Knock ask - the tick's gates must see it."""
+
+    RAWS = APPROVE_RAWS
+
+    def asks(self):
+        return self.db.execute("SELECT campaign, status, approved_by, request_ids_json, account_id,"
+                               " n_credits FROM verify_messages").fetchall()
+
+    def test_a_ledgered_ask_is_visible_to_the_next_tick(self):
+        from credit_review import verify_ledger
+        self.proof([])
+        res, w = self.go([req(uuid_of(420), uid=921, track="t1")], self.RAWS)
+        self.assertEqual(support_ids(w), [uuid_of(420)])
+        rows = self.asks()
+        self.assertEqual(len(rows), 1, "one row per ASKED USER, not per row")
+        self.assertEqual((rows[0][0], rows[0][1], rows[0][2], rows[0][4]),
+                         (verify_ledger.DECIDER_SUPPORT, "sent", decide.ASK_SENDER, "921"))
+        self.assertEqual(json.loads(rows[0][3]), [uuid_of(420)])
+        # The shared per-user locks now know, so a second campaign stands down today.
+        self.assertTrue(verify_ledger.asked_within(self.db, user_key="", user_id="921", day="2020-01-01"))
+        self.assertTrue(verify_ledger.capped(self.db, user_key="", user_id="921", day=T.NOW.strftime("%Y-%m-%d")))
+        self.assertFalse(verify_ledger.prior_uvn_ask(self.db, user_key="", user_id="921"),
+                         "the decider's in-app note is not the uvn-status EMAIL ask")
+        self.assertEqual(res.asks_ledgered, 1)
+
+    def test_one_row_per_user_covering_all_their_rows(self):
+        self.proof([])
+        res, w = self.go([req(uuid_of(421), uid=922, track="t1"), req(uuid_of(422), uid=922, track="t1")],
+                         self.RAWS)
+        self.assertEqual(len(support_ids(w)), 2)
+        rows = self.asks()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(sorted(json.loads(rows[0][3])), sorted([uuid_of(421), uuid_of(422)]))
+        self.assertEqual(rows[0][5], 2)
+
+    def test_a_ledger_failure_is_booked_and_never_silent(self):
+        from credit_review import verify_ledger
+        self.proof([])
+        with mock.patch.object(verify_ledger, "record_external_ask", side_effect=RuntimeError("db is busy")):
+            res, w = self.go([req(uuid_of(423), uid=923, track="t1")], self.RAWS)
+        self.assertEqual(support_ids(w), [uuid_of(423)], "the ask is out; the gap is what we book")
+        self.assertTrue(any("ask ledger for user 923" in e for e in res.write_errors))
+        self.assertIn("ASK LEDGER INCOMPLETE", res.note)
+        keys = [r[0] for r in self.db.execute("SELECT k FROM state").fetchall()]
+        self.assertTrue(any(k.startswith("support-writer:ask-ledger-error:") for k in keys))
+
+    def test_a_failing_ledger_MIGRATION_still_owes_a_readback(self):
+        """qa-review #1782 (r6) Important: the schema setup sat outside the per-user handler.
+
+        A legacy ledger whose migration fails raised out of `ledger_asks()` - past the per-user booking AND past
+        `record_apply_run()`, which is what records the read-back obligation. The asks had already LANDED, so the
+        run left no `ask-ledger-error` state and no pending read-back, and a second apply was admitted without
+        reconciling them. Measured through the apply entrypoint, not the helper.
+        """
+        from credit_review import verify_ledger
+        self.proof([])
+        with mock.patch.object(verify_ledger, "ensure_schema", side_effect=RuntimeError("migration failed")):
+            res, w = self.go([req(uuid_of(426), uid=926, track="t1")], self.RAWS)
+        self.assertEqual(support_ids(w), [uuid_of(426)], "the ask is out; the gap is what we book")
+        self.assertTrue(any("ask ledger schema setup failed" in e for e in res.write_errors), res.write_errors)
+        self.assertIn("ASK LEDGER UNAVAILABLE", res.note)
+        keys = [r[0] for r in self.db.execute("SELECT k FROM state").fetchall()]
+        self.assertTrue(any(k.startswith("support-writer:ask-ledger-error:") for k in keys),
+                        "the watchdog has nothing to page on")
+        pending = decide.pending_readback(self.db)
+        self.assertEqual([p["run_id"] for p in pending], [res.run_id],
+                         "a landed ask with no read-back obligation admits a second apply unreconciled")
+
+    def test_an_unexpected_ledger_exception_still_owes_a_readback(self):
+        """The belt to the braces: even an exception the setup guard does not anticipate must not skip
+        `record_apply_run()`, because that is the only thing standing between a landed ask and a second apply."""
+        from credit_review import verify_ledger
+        self.proof([])
+        with mock.patch.object(verify_ledger, "record_external_ask", side_effect=RuntimeError("db is busy")), \
+                mock.patch.object(decide, "ledger_asks", side_effect=RuntimeError("unexpected")):
+            res, w = self.go([req(uuid_of(427), uid=927, track="t1")], self.RAWS)
+        self.assertEqual(support_ids(w), [uuid_of(427)])
+        self.assertTrue(any("ask ledger: unexpected" in e for e in res.write_errors), res.write_errors)
+        self.assertEqual([p["run_id"] for p in decide.pending_readback(self.db)], [res.run_id])
+
+    def test_deferrals_are_not_ledgered_as_asks(self):
+        self.proof([])
+        policy = dataclasses.replace(POLICY, max_ask_users_per_run=1)
+        res, w = self.go([req(uuid_of(424), uid=924, track="t1"), req(uuid_of(425), uid=925, track="t1")],
+                         self.RAWS, policy=policy)
+        self.assertEqual([r[4] for r in self.asks()], ["924"], "only the row that was actually SENT is an ask")
+
+
+class ReadbackBeforeSecondApply(Base):
+    """Condition 5: a read-back after the first apply run before the second."""
+
+    RAWS = APPROVE_RAWS
+
+    def test_an_apply_run_that_asked_owes_a_readback(self):
+        self.proof([])
+        res, w = self.go([req(uuid_of(430), uid=931, track="t1")], self.RAWS)
+        pending = decide.pending_readback(self.db)
+        self.assertEqual([p["run_id"] for p in pending], [res.run_id])
+        self.assertEqual(pending[0]["asks"], 1)
+
+    def test_a_run_that_sent_nothing_owes_nothing(self):
+        self.proof([])
+        decide.APPROVE_SWITCH.write_text("off")
+        res, w = self.go([req(uuid_of(431), uid=932, track="t3")], self.RAWS, judge=FakeJudge(credible()))
+        self.assertEqual((support_ids(w), res.held_approve_arm), ([], 1))
+        self.assertEqual(decide.pending_readback(self.db), [])
+
+    def test_the_readback_clears_it_only_when_core_confirms_every_row(self):
+        self.proof([])
+        res, w = self.go([req(uuid_of(432), uid=933, track="t1")], self.RAWS)
+        partial = decide.run_readback(self.db, res.run_id, readback=lambda st, ids: set())
+        self.assertFalse(partial["ok"])
+        self.assertEqual(partial["missing"], [uuid_of(432)])
+        self.assertEqual(len(decide.pending_readback(self.db)), 1, "a partial answer does not clear the gate")
+        ok = decide.run_readback(self.db, res.run_id, readback=lambda st, ids: set(ids))
+        self.assertTrue(ok["ok"])
+        self.assertEqual(decide.pending_readback(self.db), [])
+
+    def test_a_readback_that_cannot_read_is_a_refusal(self):
+        self.proof([])
+        res, w = self.go([req(uuid_of(433), uid=934, track="t1")], self.RAWS)
+
+        def boom(status, ids):
+            raise RuntimeError("trino down")
+        doc = decide.run_readback(self.db, res.run_id, readback=boom)
+        self.assertFalse(doc["ok"])
+        self.assertIn("trino down", doc["error"])
+        self.assertEqual(len(decide.pending_readback(self.db)), 1)
+
+    def test_a_second_apply_cannot_start_while_the_first_owes_a_readback(self):
+        """qa-review #1782 (r7) Important: the check ran BEFORE the write lock and the obligation was recorded AFTER
+        it, so two apply processes starting with no pending read-back could both pass - the first wrote asks, the
+        second wrote another batch without reading the first back. Both halves are now inside the lock."""
+        self.proof([])
+        res1, w1 = self.go([req(uuid_of(440), uid=941, track="t1")], self.RAWS)
+        self.assertEqual(support_ids(w1), [uuid_of(440)])
+        res2, w2 = self.go([req(uuid_of(441), uid=942, track="t1")], self.RAWS)
+        self.assertEqual(w2.calls, [], "a second apply wrote while the first owed a read-back")
+        self.assertEqual(support_ids(w2), [])
+        self.assertTrue(any("read-back owed" in e for e in res2.write_errors), res2.write_errors)
+        self.assertIn("READ-BACK OWED", res2.note)
+        # ... and once the first is read back, the second may run
+        self.clear_readback()
+        res3, w3 = self.go([req(uuid_of(442), uid=943, track="t1")], self.RAWS)
+        self.assertEqual(support_ids(w3), [uuid_of(442)])
+
+    def test_an_UNCERTAIN_only_run_can_be_read_back_and_a_MIXED_run_needs_both(self):
+        """qa-review #1782 (r9) Important: `run_readback` selected only `outcome=user_verification_needed`, so an
+        uncertain-only run raised "wrote no ask to read back" (wedged) and a mixed run recorded ok:true while the
+        uncertain ask was unreconciled."""
+        self.proof([])
+        real = decide.write_chunk
+        calls = {"n": 0}
+
+        def mixed(writer, readback, status, chunk, prior):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return ({chunk[0]: "error:unverified: readback failed"}, "readback failed")
+            return ({rid: status for rid in chunk}, None)
+        with mock.patch.object(decide, "write_chunk", side_effect=mixed):
+            res, w = self.go([req(uuid_of(460), uid=961, track="t1"), req(uuid_of(461), uid=962, track="t1")],
+                             self.RAWS)
+        self.assertEqual(1, res.support_uncertain)
+        # the uncertain id is part of the read-back set, so a read-back that only confirms the landed one is NOT ok
+        partial = decide.run_readback(self.db, res.run_id, readback=lambda st, ids: set(ids) - {uuid_of(460)})
+        self.assertFalse(partial["ok"], "a mixed run recorded ok:true while the uncertain ask was unreconciled")
+        self.assertIn(uuid_of(460), partial["missing"])
+        self.assertEqual(len(decide.pending_readback(self.db)), 1, "a partial answer does not clear the gate")
+        ok = decide.run_readback(self.db, res.run_id, readback=lambda st, ids: set(ids))
+        self.assertTrue(ok["ok"])
+        self.assertEqual(decide.pending_readback(self.db), [])
+
+    def test_a_RECOVERED_uncertain_ask_is_ledgered_for_the_shared_gates(self):
+        """qa-review #1782 (r10) Important: an uncertain ask that the read-back CONFIRMS was never ledgered - the write
+        path only ledgers what it saw land. Without a `verify_messages` row the tick's asked_within/capped gates
+        cannot see it and can mail the same user another ask."""
+        from credit_review import verify_ledger
+        self.proof([])
+
+        def uncertain(writer, readback, status, chunk, prior):
+            return ({rid: "error:unverified: readback failed" for rid in chunk}, "readback failed")
+        with mock.patch.object(decide, "write_chunk", side_effect=uncertain):
+            res, w = self.go([req(uuid_of(470), uid=971, track="t1")], self.RAWS)
+        self.assertEqual(1, res.support_uncertain)
+        verify_ledger.ensure_schema(self.db)
+        self.assertFalse(verify_ledger.asked_within(self.db, user_key="", user_id="971",
+                                                    day=T.NOW.strftime("%Y-%m-%d")),
+                         "precondition: the uncertain ask was not ledgered at write time")
+        doc = decide.run_readback(self.db, res.run_id, readback=lambda st, ids: set(ids))
+        self.assertTrue(doc["ok"], doc)
+        self.assertEqual([uuid_of(470)], doc["recovered_uncertain"])
+        self.assertTrue(verify_ledger.asked_within(self.db, user_key="", user_id="971",
+                                                   day=T.NOW.strftime("%Y-%m-%d")),
+                        "the recovered ask was never ledgered, so the tick can mail the user again")
+
+    def test_a_CONFIRMED_ask_whose_ledger_write_failed_is_reconciled_by_the_read_back(self):
+        """qa-review #1782 (r11) Important: a CONFIRMED ask whose ledger_asks() failed (SQLite busy, say) is not in
+        `uncertain`, so it was never re-ledgered either - a successful read-back then recorded ok:true and admitted
+        the next apply while verify_messages still had no ask."""
+        from credit_review import verify_ledger
+        self.proof([])
+        with mock.patch.object(verify_ledger, "record_external_ask", side_effect=RuntimeError("db is busy")):
+            res, w = self.go([req(uuid_of(480), uid=981, track="t1")], self.RAWS)
+        self.assertEqual(1, res.support, "precondition: the PUT was CONFIRMED")
+        verify_ledger.ensure_schema(self.db)
+        self.assertFalse(verify_ledger.asked_within(self.db, user_key="", user_id="981",
+                                                    day=T.NOW.strftime("%Y-%m-%d")),
+                         "precondition: the confirmed ask was not ledgered at write time")
+        doc = decide.run_readback(self.db, res.run_id, readback=lambda st, ids: set(ids))
+        self.assertTrue(doc["ok"], doc)
+        self.assertIn(uuid_of(480), doc["ledgered"])
+        self.assertTrue(verify_ledger.asked_within(self.db, user_key="", user_id="981",
+                                                   day=T.NOW.strftime("%Y-%m-%d")),
+                        "the confirmed-but-unledgered ask was never reconciled")
+
+    def test_a_reconciled_gap_clears_the_state_row_that_pages(self):
+        """qa-review #1782 (r12) Important: the ask-ledger gap was booked as state and NOTHING ever removed it,
+        so a gap the read-back later reconciled paged every 6h forever. The read-back is the reconciliation, so
+        it is also the discharge."""
+        from credit_review import verify_ledger
+        self.proof([])
+        with mock.patch.object(verify_ledger, "record_external_ask", side_effect=RuntimeError("db is busy")):
+            res, w = self.go([req(uuid_of(482), uid=983, track="t1")], self.RAWS)
+        self.assertEqual(1, res.support, "precondition: the PUT was CONFIRMED")
+        gaps = [k for (k,) in self.db.execute(
+            "SELECT k FROM state WHERE k LIKE 'support-writer:ask-ledger-error:%'")]
+        self.assertEqual(1, len(gaps), "precondition: the unledgered ask was booked")
+        self.assertIn(":983", gaps[0], "the key names the USER, so N users cannot overwrite each other")
+        doc = decide.run_readback(self.db, res.run_id, readback=lambda st, ids: set(ids))
+        self.assertTrue(doc["ok"], doc)
+        self.assertEqual(1, doc.get("cleared_gaps"), doc)
+        self.assertEqual([], [k for (k,) in self.db.execute(
+            "SELECT k FROM state WHERE k LIKE 'support-writer:ask-ledger-error:%'")],
+            "a reconciled gap must stop paging")
+
+    def test_a_recovered_ask_that_cannot_be_ledgered_keeps_the_gate_CLOSED(self):
+        from credit_review import verify_ledger
+        self.proof([])
+
+        def uncertain(writer, readback, status, chunk, prior):
+            return ({rid: "error:unverified: readback failed" for rid in chunk}, "readback failed")
+        with mock.patch.object(decide, "write_chunk", side_effect=uncertain):
+            res, w = self.go([req(uuid_of(471), uid=972, track="t1")], self.RAWS)
+        with mock.patch.object(verify_ledger, "record_external_ask", side_effect=RuntimeError("db is busy")):
+            doc = decide.run_readback(self.db, res.run_id, readback=lambda st, ids: set(ids))
+        self.assertFalse(doc["ok"], "an unledgered recovered ask must not clear the gate")
+        self.assertIn("could not be ledgered", doc.get("error", ""))
+        self.assertEqual(len(decide.pending_readback(self.db)), 1)
+
+    def test_an_INDETERMINATE_support_put_owes_a_readback(self):
+        """qa-review #1782 (r8) Important: `write_chunk` returns `error:unverified` for a PUT that may have committed
+        and whose status read-back also failed. That does not increment `res.support`, so `record_apply_run()` wrote
+        no state row and the next apply passed `pending_readback()` and wrote another batch unreconciled."""
+        self.proof([])
+        real = decide.write_chunk
+
+        def uncertain(writer, readback, status, chunk, prior):
+            return ({rid: "error:unverified: readback failed" for rid in chunk}, "readback failed")
+        with mock.patch.object(decide, "write_chunk", side_effect=uncertain):
+            res, w = self.go([req(uuid_of(450), uid=951, track="t1")], self.RAWS)
+        self.assertEqual(res.support, 0, "precondition: nothing was CONFIRMED")
+        self.assertEqual(res.support_uncertain, 1)
+        self.assertEqual([p["run_id"] for p in decide.pending_readback(self.db)], [res.run_id],
+                         "an ask we cannot rule out must owe a read-back")
+
+    def test_a_readback_for_a_run_that_asked_nothing_is_refused(self):
+        with self.assertRaises(ValueError):
+            decide.run_readback(self.db, "no-such-run", readback=lambda s, i: set(i))
+
 
 class _Answering:
     """A judge that returns one prepared JudgeResult for every claim (the decider calls .judge)."""
@@ -1700,6 +2152,40 @@ class DocApprovalDispatcher(Base):
                 sqlite3.connect(decide.DOC_STORE).execute("SELECT 1").fetchall()] if False else [
             {"request_id": r[0], "state": r[1], "ref": r[2]} for r in
             self.db.execute("SELECT request_id, state, ref FROM doc_approvals")]
+
+    def test_a_doc_only_apply_with_the_arm_off_gives_the_slot_back(self):
+        """qa-review #1782 (r8) Important: a DOC-ONLY apply commits the provisional row (and spends the
+        one-per-request slot) BEFORE the arm-off branch runs, and then the id is dropped from approve_ids - so no
+        core PUT happened and `doc_approve.release()` was never called. The credit stayed `unverified` while the
+        ledger said approved and the slot blocked another attempt.
+
+        qa-review #1782 (r12) Important: this test was VACUOUS. It filed no verified document and left the approve
+        arm ON, so `doc_pending` was empty, `doc_approve.approve` never ran, `res.doc_approved` was 0 for the wrong
+        reason, and deleting the `doc_approve.release()` call still left it green. It now files a real document,
+        turns the arm OFF, and asserts the release happened AND the slot is free afterwards."""
+        from credit_review import doc_approve
+        rid = uuid_of(451)
+        self.file_doc(rid, user_id=952)          # a dv-4 verified document: the doc class may approve this row
+        arm_off = decide.Policy(deny_user_ids=set(), deny_profile_ids=set(), editorial_role_terms=TERMS,
+                                approve_arm=False)
+        released = []
+        real_release = doc_approve.release
+
+        def spy_release(db, request_id, **kw):
+            released.append(request_id)
+            return real_release(db, request_id, **kw)
+        # NO raw DSP evidence: with an anchor the row is approved on the anchor and never reaches the doc path,
+        # which is how the first version of this test managed to assert nothing (qa-review #1782 r12).
+        with mock.patch.object(doc_approve, "release", side_effect=spy_release):
+            res, w = self.go([req(rid, uid=952, track="small")], {}, judge=self.NOT_FOUND, policy=arm_off)
+        # The doc row WAS committed and then given back - otherwise this test proves nothing.
+        self.assertEqual([rid.lower()], [r.lower() for r in released],
+                         "the arm-off branch did not give the committed doc slot back")
+        # The slot is free: no provisional/confirmed row stands, so a later attempt is not blocked for ever.
+        self.assertEqual({}, doc_approve.approved_refs(self.db, doc_store=decide.DOC_STORE, now=T.NOW),
+                         "a released doc row still occupies the one-per-request slot")
+        self.assertEqual(0, res.doc_approved, "a released doc row must not be reported as approved")
+        self.assertEqual([], self.approve_writes(w), "the arm is off: no core PUT may be made")
 
     # ── round 8, finding 1: a bound request OUTSIDE this batch still has a known owner ──────────
     def test_the_rollover_works_when_a_document_binds_more_requests_than_the_per_user_cap(self):
