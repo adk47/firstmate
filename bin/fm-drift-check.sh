@@ -29,9 +29,9 @@
 #   - origin/main is the last fetched value of that ref. This check never
 #     fetches: a fetch from a watcher poll would race the fleet sync that owns
 #     clone refresh, and a network blip must never read as drift. Bootstrap
-#     refreshes the chair's own origin/main at every session start, alongside
-#     fleet sync, so the comparison is against a ref current to within one
-#     session.
+#     refreshes the chair's own origin/main in its deferred network stage at
+#     every session start, alongside fleet sync, so the comparison is against a
+#     ref current to within one session.
 #   - A difference in either direction is drift: a chair behind origin/main runs
 #     stale code, and a chair ahead of it runs code nobody else has.
 #   - Nothing is repaired here. The line names the update path; the operator or

@@ -452,7 +452,7 @@ An absent or incompatible `lavish-axi` reports `MISSING: lavish-axi (install: np
 An absent or too-old `quota-axi` reports `MISSING: quota-axi (install: npm install -g quota-axi)`; firstmate cannot resolve a profile array without a compatible binary.
 Bootstrap also reports a `TANGLE:` line when `FM_ROOT` is on a named non-default branch; follow the printed checkout remediation rather than treating it as an installable tool problem.
 In a read-only session that did not get the fleet lock, the same line is advisory and omits the checkout command.
-The locked session-start deferred network stage runs bootstrap's best-effort project clone refresh through `fm-fleet-sync.sh`; [`fm-bootstrap.sh`'s header](../bin/fm-bootstrap.sh) owns the exact clone-refresh overlap, liveness-before-convergence, per-mate concurrency, ordered diagnostic replay, and sequential-fallback contract.
+The locked session-start deferred network stage runs bootstrap's best-effort project clone refresh through `fm-fleet-sync.sh`, and refreshes the chair's own `origin/main` alongside it (see "Running-chair drift check"); [`fm-bootstrap.sh`'s header](../bin/fm-bootstrap.sh) owns the exact clone-refresh overlap, liveness-before-convergence, per-mate concurrency, ordered diagnostic replay, and sequential-fallback contract.
 It emits `FLEET_SYNC:` for skipped refreshes that may matter, recovered self-heals, and `STUCK:` alarms.
 Normal completed runs keep local-only and no-origin skips silent.
 If bootstrap kills a timed-out refresh, it replays any completed `fm-fleet-sync.sh` output before the aggregate timeout skip so no finished result is lost.
@@ -548,7 +548,7 @@ It compares the running code root's own `HEAD` with `refs/remotes/origin/main` a
 A difference in either direction is drift: behind means the chair runs stale code, ahead means it runs code nobody else has, and the line names which.
 
 The comparison is read-only.
-The check never fetches and never moves `HEAD`, because a fetch from a watcher poll would race the fleet sync that owns clone refresh and a network blip must never read as drift; `origin/main` is whatever the last fetch left, and bootstrap refreshes the chair's own `origin/main` at every session start, alongside fleet sync.
+The check never fetches and never moves `HEAD`, because a fetch from a watcher poll would race the fleet sync that owns clone refresh and a network blip must never read as drift; `origin/main` is whatever the last fetch left, and bootstrap refreshes the chair's own `origin/main` in its deferred network stage at every session start, alongside fleet sync.
 A code root that is not a git checkout, or one whose `origin/main` has never been fetched, proves nothing and stays silent rather than paging on a comparison that was never made.
 
 Drift is an episode, not a poll result.
