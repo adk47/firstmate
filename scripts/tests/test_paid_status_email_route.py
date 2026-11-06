@@ -135,7 +135,10 @@ class HealthCheckTest(unittest.TestCase):
         open(site, "w").write(
             "import io, json, urllib.request, urllib.error, time\n"
             "time.sleep = lambda s: None\n"
-            f"C = {json.dumps(contacts)}\n"
+            # json.loads, not a bare literal: json.dumps emits true/false/null, which are not Python names, so a
+            # contact carrying a boolean flag (has_hard_bounced) would NameError inside the stub and read as
+            # unreadable. The empty-dict and None cases happened to be valid Python and hid this.
+            f"C = json.loads({json.dumps(json.dumps(contacts))})\n"
             "class R(io.BytesIO):\n"
             "    def __enter__(self): return self\n"
             "    def __exit__(self, *a): return False\n"
@@ -159,6 +162,64 @@ class HealthCheckTest(unittest.TestCase):
         rc, out = self.run_check(contacts)
         self.assertEqual(rc, 2, out)
         self.assertTrue(out["verdict"].startswith("UNMEASURED"))
+
+    # 2026-11-06: the 14:00Z tick sent 9, read 9, and ONE hard bounce (11.11 %) tripped the 2 % gate and wrote the
+    # kill file - the whole outbound pipeline was dead until a human lifted it. A rate needs a population; one
+    # bounce is never a rate. Both halves are pinned here: the floor must not silence a real spike.
+    def test_one_bounce_in_nine_does_not_stop_the_run(self):
+        contacts = {f"c{i}": {} for i in range(9)}
+        contacts["c0"] = {"has_hard_bounced": True}
+        rc, out = self.run_check(contacts)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["verdict"], "healthy")
+        # counted and reported, never hidden
+        self.assertEqual(out["hard_bounced"], 1)
+        self.assertEqual(out["bounce_pct"], 11.11)
+        self.assertIn("bounce_held", out)
+        self.assertIn("1 of 9 read", out["bounce_held"])
+
+    def test_five_bounces_in_two_hundred_stops_the_run(self):
+        contacts = {f"c{i}": {} for i in range(200)}
+        for i in range(5):
+            contacts[f"c{i}"] = {"has_hard_bounced": True}
+        rc, out = self.run_check(contacts)
+        self.assertEqual(rc, 3, out)
+        self.assertTrue(out["verdict"].startswith("STOP"), out)
+        self.assertIn("2.5%", out["verdict"])
+        # the sample size rides in the message so the kill file says whether it fired on a population
+        self.assertIn("5 of 200 read", out["verdict"])
+
+    # The unsubscribe gate had the identical defect: 1 % against a denominator of 9 means one unsubscribe (11.11 %)
+    # killed the pipeline. Same floor, same reason - and the user is already unsubscribed in Intercom, so the run
+    # continuing costs them nothing.
+    def test_one_unsubscribe_in_nine_does_not_stop_the_run(self):
+        contacts = {f"c{i}": {} for i in range(9)}
+        contacts["c0"] = {"unsubscribed_from_emails": True}
+        rc, out = self.run_check(contacts)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["verdict"], "healthy")
+        self.assertEqual(out["unsubscribed"], 1)
+        self.assertIn("unsub_held", out)
+        self.assertIn("1 of 9 read", out["unsub_held"])
+
+    def test_two_unsubscribes_in_nine_stops_the_run(self):
+        contacts = {f"c{i}": {} for i in range(9)}
+        for i in range(2):
+            contacts[f"c{i}"] = {"unsubscribed_from_emails": True}
+        rc, out = self.run_check(contacts)
+        self.assertEqual(rc, 3, out)
+        self.assertTrue(out["verdict"].startswith("STOP"), out)
+        self.assertIn("2 of 9 read", out["verdict"])
+
+    def test_two_bounces_in_two_hundred_is_under_the_threshold_and_healthy(self):
+        # 2/200 = 1.0 %: over the floor, under the rate. The floor must not turn a clean list into a stop.
+        contacts = {f"c{i}": {} for i in range(200)}
+        for i in range(2):
+            contacts[f"c{i}"] = {"has_hard_bounced": True}
+        rc, out = self.run_check(contacts)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(out["verdict"], "healthy")
+        self.assertNotIn("bounce_held", out)
 
 
 if __name__ == "__main__":
