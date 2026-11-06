@@ -34,6 +34,7 @@ resolve-notify.timer *-*-* 02,08,14,20:25:00 UTC
 merge-outcome-notify.timer *:05/15
 resolution-matcher.timer *-*-* 12:14:00 UTC
 clickup-todo-dedupe.timer *-*-* *:40:00
+clickup-drain-profile-claim.timer *-*-* *:35:00
 clickup-sla-digest.timer *-*-* 08:10:00 America/New_York
 close-merged-tickets.timer *-*-* 07:12:00 UTC
 MAP

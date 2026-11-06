@@ -1803,6 +1803,20 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_resolve_notify_filter
+      - name: Run ClickUp profile-claim drainer tests
+        # scripts/clickup_drain/profile_claim.py decides what 238 open
+        # `action:profile-claim` tickets were told, and the ONLY thing it writes is
+        # a tag that resolve-notify.py turns into a customer message. These lock the
+        # lines that matter: nothing is tagged for a pending claim nobody asked
+        # about, a contradiction is a claim_executor tray row (never a reject
+        # written here), a human's reject is never inferred, the cap holds, a write
+        # that does not read back stops the run, --revert removes only its own tags,
+        # and NO approval path exists in the file at all. Board, Trino and the
+        # account gate are injected; nothing here can reach a live customer. Same
+        # bare stdlib unittest, targeted by name (no pytest/network).
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_clickup_drain_profile_claim
       - name: Run customer-outcome contract tests
         # ClickUp workflow status is not customer-visible proof. These tests lock
         # the shared fail-closed outcome predicate and every automated writer's

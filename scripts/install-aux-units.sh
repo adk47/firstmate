@@ -518,6 +518,10 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/close-duplicate-conversations.py missing"
 [[ -f "$HYDRA_ROOT/scripts/clickup-todo-dedupe.py" ]] \
   || fail "$HYDRA_ROOT/scripts/clickup-todo-dedupe.py missing"
+[[ -x "$HYDRA_ROOT/scripts/clickup_drain/profile_claim.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/clickup_drain/profile_claim.py missing or not executable"
+[[ -f "$HYDRA_ROOT/scripts/claim_verify/decline_rules.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/claim_verify/decline_rules.py missing (the drainer imports the coded rules)"
 [[ -f "$HYDRA_ROOT/scripts/lib/intercom_link.py" ]] \
   || fail "$HYDRA_ROOT/scripts/lib/intercom_link.py missing (clickup-todo-dedupe imports it)"
 [[ -f "$HYDRA_ROOT/scripts/cs-selfserve-backlog.py" ]] \
@@ -1742,6 +1746,79 @@ cud=clickup-todo-dedupe.timer
 systemctl enable "$cud" >/dev/null 2>&1 || log "WARN: could not enable $cud"
 systemctl start "$cud" >/dev/null 2>&1 || log "WARN: could not start $cud"
 log "  $cud: $(systemctl is-active "$cud" 2>/dev/null || echo unknown)"
+
+# ─── ClickUp drainers: action:profile-claim (hourly) ────
+# Captain 2026-11-03 ~22:3xZ: every user ticket cleared by code. 238 open
+# `action:profile-claim` tickets ("I want to claim this profile"); the claim
+# lane's own message is the customer-visible outcome (`app_notification`), so
+# this queue only has to RECORD what already happened.
+#
+# scripts/clickup_drain/profile_claim.py reads the claim rows for the ticket's
+# account+profile out of core (read-only), then writes ONE tag: complete when
+# the claim is `processed` (or was rejected by claim_executor and read back as
+# rejected), `customer-outcome:verification-required` when nothing was submitted
+# and claim_proof_ask actually asked, and `drain:awaiting-user-submission` when
+# the customer never started a claim at all. It NEVER approves (the verify route
+# is a human flow), NEVER writes a reject (a coded contradiction becomes a tray
+# row for claim_executor), and never sends a message or a status —
+# resolve-notify.py and clickup-reconcile.py own those.
+#
+# FIRST LIVE RUN (2026-11-03 23:53Z, dry run on the live board): 238 open ->
+# 117 complete, 89 awaiting-user-submission, 13 with no resolvable account, 12
+# predated claims still in flight, 5 in review, 1 ambiguous, 1 closed. The first
+# applied batch wrote 20 tags, read back, ledgered.
+#
+# BLAST RADIUS of this timer: up to 100 tag writes/hour. A `complete` tag is
+# picked up by resolve-notify.py (profile-claim is in its ALLOWLIST) on its next
+# 02/08/14/20:25 tick, which sends that customer the one approved "it's done"
+# line, and clickup-reconcile.py then moves the ticket to `resolved`. The stop is
+# instant and needs no deploy:
+#   touch /etc/hydra/clickup-drain-profile-claim.disabled
+# :35 is off the dedupe sweep at :40 (same board, same shared token) and the
+# reconcile at :20; RandomizedDelaySec is bounded at 60 so a run cannot drift
+# into :40.
+# ROLLBACK: reverting the repo files alone leaves the installed timer running on
+# node-8 against a script that may no longer exist. A rollback of this surface
+# MUST also run:
+#   systemctl disable --now clickup-drain-profile-claim.timer
+# (and `scripts/clickup_drain/profile_claim.py --revert
+# /var/lib/hydra/clickup-drain/profile-claim.jsonl --apply` to undo its tags).
+cat > /etc/systemd/system/clickup-drain-profile-claim.service << CDRAINPCSVC
+[Unit]
+Description=Hourly ClickUp drain of action:profile-claim (tags the outcome; never approves or sends)
+After=network-online.target
+
+[Service]
+Type=oneshot
+# The board scan plus the read-back after every write; same budget as the dedupe
+# sweep, which reads the same board with the same shared token.
+TimeoutStartSec=900
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/main.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/clickup_drain/profile_claim.py --apply --max-writes 100
+CDRAINPCSVC
+
+cat > /etc/systemd/system/clickup-drain-profile-claim.timer << CDRAINPCTMR
+[Unit]
+Description=Hourly — ClickUp action:profile-claim drain (capped at 100 tag writes/run)
+
+[Timer]
+OnCalendar=*-*-* *:35:00
+Persistent=true
+# 60s, not the 180s a sibling uses: :35 + 180s would land on :40, where the
+# dedupe sweep starts on the same board and the same 100 req/min token.
+RandomizedDelaySec=60
+Unit=clickup-drain-profile-claim.service
+
+[Install]
+WantedBy=timers.target
+CDRAINPCTMR
+
+systemctl daemon-reload
+cdp=clickup-drain-profile-claim.timer
+systemctl enable "$cdp" >/dev/null 2>&1 || log "WARN: could not enable $cdp"
+systemctl start "$cdp" >/dev/null 2>&1 || log "WARN: could not start $cdp"
+log "  $cdp: $(systemctl is-active "$cdp" 2>/dev/null || echo unknown)"
 
 # ─── Caroline autonomous-behavior digest (daily 16:00 UTC) ────
 # Read-only daily digest of Caroline's autonomous self-serve activity so we can
