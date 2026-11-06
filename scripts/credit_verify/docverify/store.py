@@ -686,6 +686,15 @@ class DocVerifyStore:
             return False
         return set(rec.get("keys") or []) <= self.intake_finished_keys(intake_id)
 
+    def intake_keyed(self, intake_id: str, candidates: list[str]) -> bool:
+        """Already keyed under this VERSION with exactly these candidate requests: nothing left to key.
+
+        This is NOT `intake_settled` (QA/Fable 11-04): that one asks whether the claims are FINISHED, which is
+        false for a filing whose bytes are still owed, so keying on it re-keyed the same filing on every tick
+        and wrote a step every time. Keying asks only whether the KEY exists for these candidates."""
+        rec = self.intake_keys_recorded(intake_id)
+        return rec is not None and sorted(rec.get("candidates") or []) == sorted(candidates)
+
     LATEST = ("SELECT o.* FROM dv_outcomes o JOIN (SELECT proof_id, request_id, role, MAX(id) id FROM dv_outcomes "
               "WHERE version=? GROUP BY proof_id, request_id, role) l USING(id)")
 
