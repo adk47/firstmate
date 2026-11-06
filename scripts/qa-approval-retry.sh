@@ -847,7 +847,11 @@ for repo in "${REPOS[@]}"; do
     reviews="[]"; page=1
     while :; do
       qar_spend 1
-      pg="$("$QA_GH" --repo "$repo" api "repos/$repo/pulls/$pr/reviews?per_page=100&page=$page" 2>/dev/null)" || { reviews="__ERR__"; break; }
+      # Hand-paged on purpose so every request is charged to rest_calls
+      # (--paginate counts once however many pages it fetches, hydra#1119).
+      # The loop is complete or loud: it stops only on a short page, and a
+      # page-cap or read failure sets __ERR__, never a silent "no verdict".
+      pg="$("$QA_GH" --repo "$repo" api "repos/$repo/pulls/$pr/reviews?per_page=100&page=$page" 2>/dev/null)" || { reviews="__ERR__"; break; }  # paginated-ok: complete-or-loud hand-paged loop (rest_calls accounting, hydra#1119)
       # The same shape-check the PR list gets: a truncated or non-array body
       # arrives with exit 0, so only this catches it (and must count as a failure).
       if ! printf '%s' "$pg" | jq -e 'type == "array"' >/dev/null 2>&1; then

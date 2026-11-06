@@ -637,6 +637,19 @@ jobs:
           scripts/check-no-tmp-scratch.sh --base "origin/${{ github.event.pull_request.base.ref }}"
           echo "::endgroup::"
 
+      - name: Paginated review reads — no unpaginated reviews/comments read
+        # 2026-11-03: `GET .../pulls/<n>/reviews` pages at 30, OLDEST FIRST, so an
+        # unpaginated read cannot see the newest verdict. Three lanes concluded the
+        # QA bot published a NO-GO with no finding text when the text was in a
+        # page-2 review body they could not see (#1545 review 37/55, #1636 34/40,
+        # #1643 39/39). The readers were prose in skills, and prose is not
+        # enforcement — this gate fails the PR on the pattern instead.
+        run: |
+          echo "::group::Paginated review reads"
+          chmod +x scripts/check-review-reads-paginated.sh
+          scripts/check-review-reads-paginated.sh
+          echo "::endgroup::"
+
       - name: Skill drift check — skills-all/ vs workspaces/*/skills/
         # Per memory `feedback_skill_dual_tree.md` and incident 2026-04-29
         # postmortem: skill fixes have repeatedly landed in skills-all/ but
