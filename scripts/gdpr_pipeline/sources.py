@@ -274,6 +274,30 @@ MAX_PART_PAGES = 20              # a bound on the backwards walk, so a pathologi
 _CONV_CACHE: dict[str, dict] = {}
 
 
+def _oldest(parts: list[dict], conv_id: str) -> int:
+    """The oldest `created_at` in `parts`, refusing a part that carries none.
+
+    `min(int(p.get("created_at") or 0) for p in parts)` reads a MISSING timestamp as 0, and 0 is older than every
+    conversation, so the walk's `before <= created_at` floor test is satisfied on its FIRST iteration and
+    `_all_parts` declares a truncated history complete. That is the exact opposite of what this module promises: a
+    part we cannot date is a part we cannot place in the walk, so it is a refusal, never a floor.
+
+    Reachable in production: Intercom omits `created_at` on some part types, and the 500-part cap means the part
+    holding the customer's request is precisely the one we are walking back to find. Dropping it silently would
+    report "no request" for a conversation that has one.
+    """
+    if not parts:
+        raise Unknown(f"Intercom conversation {conv_id}: the backwards walk got an empty page, so there is no floor "
+                      f"to step to - older parts (and any request in them) cannot be seen or dated - reconcile by hand")
+    undated = sum(1 for p in parts if not p.get("created_at"))
+    if undated:
+        raise Unknown(
+            f"Intercom conversation {conv_id}: {undated} of {len(parts)} part(s) carry no `created_at`, so the "
+            f"backwards walk has no floor to step to - older parts (and any request in them) cannot be seen or "
+            f"dated - reconcile by hand")
+    return min(int(p["created_at"]) for p in parts)
+
+
 def _all_parts(conv_id: str, newest: list[dict], created_at: int) -> list[dict]:
     """Every part of a conversation the API truncated at its 500-part cap, oldest first.
 
@@ -291,7 +315,7 @@ def _all_parts(conv_id: str, newest: list[dict], created_at: int) -> list[dict]:
                       f"cap and the conversation carries no `created_at`, so there is no floor to walk back to")
     seen = {p.get("id") for p in newest}
     out = list(newest)
-    before = min(int(p.get("created_at") or 0) for p in newest)
+    before = _oldest(newest, conv_id)
     complete = False
     for _ in range(MAX_PART_PAGES):
         if before <= created_at:
@@ -321,7 +345,7 @@ def _all_parts(conv_id: str, newest: list[dict], created_at: int) -> list[dict]:
         for p in fresh:
             seen.add(p.get("id"))
         out.extend(fresh)
-        before = min(int(p.get("created_at") or 0) for p in fresh)
+        before = _oldest(fresh, conv_id)
     if not complete:
         raise Unknown(f"Intercom conversation {conv_id}: came back at the API's {MAX_PARTS_IN_RESPONSE}-part retrieval "
                       f"cap and the backwards walk stopped at {before} after {MAX_PART_PAGES} page(s) without reaching "

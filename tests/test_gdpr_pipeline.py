@@ -4516,6 +4516,44 @@ class ConversationReadIntegrity(unittest.TestCase):
             self.read(cv)
         self.assertIn("created_at", str(e.exception))
 
+    def test_a_part_with_no_created_at_is_not_a_floor(self):
+        """A part we cannot date is a part we cannot place in the walk, so it is a refusal - never a floor.
+
+        `min(int(p.get("created_at") or 0) ...)` reads a MISSING timestamp as 0, and 0 is older than every
+        conversation, so the walk's `before <= created_at` test was satisfied on its FIRST iteration and a
+        truncated history was declared complete. Intercom omits `created_at` on some part types, and the 500-part
+        cap means the part holding the request is exactly the one being walked back to - so this dropped the
+        request silently and reported "no request" for a conversation that has one.
+        """
+        cv = self.conv(n_parts=500, total=500)
+        cv["created_at"] = 1_759_000_000          # the thread opened before its oldest surviving part
+        for p in cv["conversation_parts"]["conversation_parts"]:
+            del p["created_at"]                  # the API did not date any of them
+        calls = []
+
+        def pager(before):
+            calls.append(before)
+            return []
+
+        with self.assertRaises(sources.Unknown) as e:
+            self.read(cv, pager=pager)
+        self.assertIn("carry no `created_at`", str(e.exception))
+        self.assertEqual(calls, [], "the walk must refuse BEFORE spending a page on a floor it cannot trust")
+
+    def test_a_fetched_page_with_an_untimestamped_part_is_not_a_floor(self):
+        """The same defect one page in: a walked-back page whose parts are partly undated used to set `before` to 0
+        and stop the walk one page early, so the request in the page beyond it was never read."""
+        cv = self.conv(n_parts=500, total=500)
+        cv["created_at"] = 1_759_000_000
+
+        def pager(before):
+            return [{"id": "old1", "author": {"type": "user"}, "body": "please delete me"},
+                    {"id": "old2", "author": {"type": "user"}, "body": "x", "created_at": 1_759_999_000}]
+
+        with self.assertRaises(sources.Unknown) as e:
+            self.read(cv, pager=pager)
+        self.assertIn("carry no `created_at`", str(e.exception))
+
     def test_just_under_the_cap_reads_normally(self):
         out = self.read(self.conv(n_parts=499, total=499))
         self.assertEqual(len(out["parts"]), 500, "the customer source body + its 499 parts, all readable")
