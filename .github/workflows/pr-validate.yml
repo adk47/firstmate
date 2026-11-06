@@ -342,6 +342,21 @@ jobs:
           python3 scripts/check-agent-exec-policy.py --base "origin/$base"
           echo "::endgroup::"
 
+      - name: Sentinel capability registry (kill files + promotion rulings)
+        # sentinel-demote-s6 / request-sentinel-fable-s1 §2.3: policies/sentinel-capabilities.json
+        # is the repo half of the "three independent stops", and scripts/sentinel/demote.py reads
+        # it on the host every night. --base makes promotion the ONLY direction that needs a
+        # ruling: a row that IMPROVES its rollout state (shadow → canary → live) must cite
+        # `rollout.since` + `rollout.approval_ref`; a demotion needs no approval, because
+        # narrowing is the safe direction. The file does not exist yet (sentinel-core-s0 owns
+        # it) — the check says so and exits 0, so this gate never blocks unrelated PRs.
+        run: |
+          echo "::group::Sentinel capability registry"
+          base="${{ github.event.pull_request.base.ref }}"
+          git rev-parse --verify --quiet "origin/$base" >/dev/null || git fetch --quiet --depth=200 origin "$base"
+          python3 scripts/check-sentinel-registry.py --base "origin/$base"
+          echo "::endgroup::"
+
       - name: SOUL.md check — all workspaces
         run: |
           echo "::group::Checking SOUL.md in all workspaces"
@@ -2296,6 +2311,20 @@ jobs:
           # and the weekly line's window math. Every store, policy and risk file is in a temp dir; no
           # network, no Trino, no Intercom, no ClickUp. Stdlib unittest, run directly.
           python3 scripts/tests/test_churn_risk.py
+
+      - name: Run sentinel-demote tests
+        # scripts/sentinel/demote.py is the ONLY code that narrows a capability's
+        # rollout state on its own, and it runs unattended twice a night and once
+        # an hour. These lock the seeded case the dispatch names (a manipulated,
+        # reverted HIGH action on a `canary` row → `shadow` + kill file + mirror PR
+        # body), and the four ways this engine could hurt us instead: flipping more
+        # than one step, writing a kill file outside /etc/hydra, treating an
+        # unmeasured trigger as healthy, or promoting anything without a ruling.
+        # Every store is a real sqlite/jsonl fixture in a temp dir; no host path,
+        # no network, no Slack. Stdlib unittest, targeted by name (no pytest).
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_sentinel_demote
 
   plugin-tests:
     name: Plugin tests (vitest)

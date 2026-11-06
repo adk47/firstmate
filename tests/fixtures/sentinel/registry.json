@@ -1,0 +1,166 @@
+{
+  "_comment": "TEST FIXTURE \u2014 not the deployed registry. It mirrors the row contract in data/request-sentinel-fable-s1/report.md \u00a72.3 so the demote engine is exercised against the real shape. The live file (policies/sentinel-capabilities.json) is S0's deliverable. credit.add.decide's kill_file is a REAL switched actor (/etc/hydra/credit-trust-decide.disabled, honoured in scripts/credit_trust/) so the harness proves a demotion lands on a switch the fleet already reads; the other three names are invented for lanes that have no actor yet.",
+  "capabilities": [
+    {
+      "id": "credit.remove.self",
+      "class": "R2",
+      "action": {
+        "type": "core_write",
+        "endpoint": "DELETE /workspace/{ws}/profile/{p}/credits",
+        "idempotent": true
+      },
+      "guards": [
+        "session_is_owner",
+        "band_allows"
+      ],
+      "blast_radius": {
+        "per_request_rows": 50,
+        "per_user_day": 300,
+        "per_profile_day": 300,
+        "fleet_day": 5000,
+        "max_target_popularity": null
+      },
+      "reversibility": "reversible_ledgered",
+      "rollout": {
+        "state": "live",
+        "canary_modulo": null,
+        "since": "2026-10-20T00:00:00Z",
+        "approval_ref": "ruling-sentinel-1020"
+      },
+      "demotion": {
+        "reverts_7d": 5,
+        "contradicted_7d": 3,
+        "audit_fail_any": true,
+        "complaints_7d": 10,
+        "overdue_pct": 5,
+        "on_trip": "canary"
+      },
+      "owner": "credit-system-lane",
+      "kill_file": "/etc/hydra/sentinel-credit-remove-self.disabled",
+      "links": {
+        "credit_approval_automation": null
+      }
+    },
+    {
+      "id": "credit.add.decide",
+      "class": "R1",
+      "action": {
+        "type": "hydra_executor",
+        "endpoint": null,
+        "idempotent": true
+      },
+      "attribution": {
+        "action_types": [
+          "credit.approve"
+        ]
+      },
+      "guards": [
+        "band_allows"
+      ],
+      "blast_radius": {
+        "per_request_rows": 1,
+        "per_user_day": 200,
+        "per_profile_day": 50,
+        "fleet_day": 2000,
+        "max_target_popularity": null
+      },
+      "reversibility": "reversible_ledgered",
+      "rollout": {
+        "state": "canary",
+        "canary_modulo": 10,
+        "since": "2026-10-28T00:00:00Z",
+        "approval_ref": "ruling-sentinel-1028"
+      },
+      "demotion": {
+        "reverts_7d": 3,
+        "contradicted_7d": 2,
+        "audit_fail_any": true,
+        "complaints_7d": 10,
+        "overdue_pct": 5,
+        "on_trip": "canary"
+      },
+      "owner": "credit-system-lane",
+      "kill_file": "/etc/hydra/credit-trust-decide.disabled",
+      "links": {
+        "credit_approval_automation": "credit-trust-decide"
+      }
+    },
+    {
+      "id": "support.answer",
+      "class": "R10",
+      "action": {
+        "type": "message_line",
+        "endpoint": null,
+        "idempotent": false
+      },
+      "attribution": {
+        "intercom_tags": [
+          "ai:support-answer"
+        ]
+      },
+      "guards": [
+        "band_allows"
+      ],
+      "blast_radius": {
+        "per_request_rows": 1,
+        "per_user_day": 0,
+        "per_profile_day": 0,
+        "fleet_day": 0,
+        "max_target_popularity": null
+      },
+      "reversibility": "irreversible",
+      "rollout": {
+        "state": "live",
+        "canary_modulo": null,
+        "since": "2026-09-01T00:00:00Z",
+        "approval_ref": "ruling-sentinel-0901"
+      },
+      "demotion": {
+        "complaints_7d": 10,
+        "overdue_pct": 5,
+        "on_trip": "canary"
+      },
+      "owner": "support-lane",
+      "kill_file": "/etc/hydra/sentinel-support-answer.disabled",
+      "links": {
+        "credit_approval_automation": null
+      }
+    },
+    {
+      "id": "profile.edit.self",
+      "class": "R11",
+      "action": {
+        "type": "core_write",
+        "endpoint": "PATCH /workspace/{ws}/profile/{p}",
+        "idempotent": true
+      },
+      "guards": [
+        "band_allows"
+      ],
+      "blast_radius": {
+        "per_request_rows": 1,
+        "per_user_day": 20,
+        "per_profile_day": 20,
+        "fleet_day": 0,
+        "max_target_popularity": null
+      },
+      "reversibility": "reversible",
+      "rollout": {
+        "state": "shadow",
+        "canary_modulo": null,
+        "since": "2026-09-01T00:00:00Z",
+        "approval_ref": "ruling-sentinel-0901"
+      },
+      "demotion": {
+        "reverts_7d": 1,
+        "audit_fail_any": true,
+        "on_trip": "canary"
+      },
+      "owner": "profile-lane",
+      "kill_file": "/etc/hydra/sentinel-profile-edit-self.disabled",
+      "links": {
+        "credit_approval_automation": null
+      }
+    }
+  ]
+}

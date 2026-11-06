@@ -758,6 +758,32 @@ never selects a hide. The pipeline only PREPARES the reversible hide PRs (H-DevO
 sitemap `LEGAL_HIDDEN_ENTITY_IDS`); a person merges. Never `DELETE /api/v3/admin/profile` or muso-cli delete
 (legal hold 1350). Customer sends stay locked until Fable's GO lands in a PR.
 
+## Sentinel demotion: three independent stops, and nothing promotes itself
+
+`scripts/sentinel/demote.py` is the ONLY code that narrows a capability's rollout state on its own
+(`live → canary → shadow`, one step per tick, never more). It runs unattended on `sentinel-demote.timer`
+(nightly 02:30Z) and `sentinel-demote-fast.timer` (hourly, for the `audit_fail_any` / `manipulated`
+triggers). Authoritative doc: `data/sentinel/README.md`; registry `policies/sentinel-capabilities.json`
+(owned by sentinel-core-s0); runtime state `/var/lib/hydra/sentinel/registry-state.json`.
+
+- **Three independent stops, any one stops it**: the runtime state flip, the capability's kill file
+  (`/etc/hydra/<kill_file>` from the registry row), and the actor's own flag in
+  `policies/credit-approval-automation.json`. The demoter writes the first two and opens a mirror PR for
+  the repo copy; the actor flag is left to that PR. A switch in one place is not a switch (10-27).
+- **Promotion is never automatic.** `promote` only renders a parity report (agreement vs the arm it
+  replaces over ≥7 d and ≥200 evaluations, false-act rate on RED/BLACK, cap trips, 0 demotion triggers)
+  for a Fable ruling id; the PR that flips state must cite it (`rollout.since` + `approval_ref`).
+- **"I could not read the evidence" must never render as "the evidence says fine"** — an unmeasured
+  trigger is `unknown`, which blocks promotion, never a healthy zero.
+- **The units are deliberately NOT gated on the registry** (no `ConditionPathExists`): a condition
+  would make a *deleted* registry a silent skip too, leaving demotion blind with no page. `demote.py`
+  tells the two worlds apart with the `registry-seen` marker it writes on every good load — never
+  loaded → exit 2, clean skip; loaded then gone → page + exit 4. Exit 3 (deliberate kill switch) is
+  clean; exit 4 stays a failure. `SuccessExitStatus` is pinned to the exit codes in `demote.py` by a
+  bats test.
+- **Ticks serialize on a host `flock`** across load → evaluate → save → mirror PR; a tick that cannot
+  acquire within `SENTINEL_LOCK_TIMEOUT` exits 0 silently (the other tick is doing the same join).
+
 ## Picking the right extension mechanism
 
 Before writing new code in this repo, walk this decision tree top-down and stop at

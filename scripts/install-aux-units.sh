@@ -4119,7 +4119,7 @@ fi
 # reopened per tick/run, no postrotate signaling exists for them.
 cat > /etc/logrotate.d/hydra << 'HYDRALOGROTATE'
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
-/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-quota-refresh.log /var/log/codex-token-refresh.log /var/log/company-finder-cache-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log /var/log/hydra-jev-shadow-prune.log /var/log/hydra-tmp-reaper.log /var/log/hydra-main-prune-restart.log /var/log/qa-review-reconcile.log /var/log/qa-approval-retry.log /var/log/agent-soul-delivery-guard.log /var/log/hydra-verifier-eval.log {
+/var/log/*-watchdog.log /var/log/codex-keepalive.log /var/log/codex-quota-refresh.log /var/log/codex-token-refresh.log /var/log/company-finder-cache-refresh.log /var/log/hydra-daily-audit.log /var/log/hydra-weekly-cleanup.log /var/log/hydra-jev-shadow-prune.log /var/log/hydra-tmp-reaper.log /var/log/hydra-main-prune-restart.log /var/log/qa-review-reconcile.log /var/log/qa-approval-retry.log /var/log/agent-soul-delivery-guard.log /var/log/hydra-sentinel-demote.log /var/log/hydra-sentinel-propose.log /var/log/hydra-verifier-eval.log {
     weekly
     rotate 4
     compress
@@ -4328,6 +4328,172 @@ systemctl enable "$qart" >/dev/null 2>&1 || log "WARN: could not enable $qart"
 systemctl start "$qart" >/dev/null 2>&1 || log "WARN: could not start $qart"
 log "  $qart: $(systemctl is-active "$qart" 2>/dev/null || echo unknown)"
 
+# ─── sentinel-demote: automatic demotion / kill (sentinel-demote-s6) ─────────
+# The third independent stop, made automatic. A capability whose actions were
+# reverted, whose watcher verdict was `manipulated`, whose decisions a later
+# trusted source contradicted, whose conversations drew Intercom complaints,
+# whose spot sample failed, or which sits on `waiting_on=us` past `due_at` for
+# more than 5 % of a day's rows gets flipped ONE STEP (live → canary → shadow)
+# in /var/lib/hydra/sentinel/registry-state.json, has its kill file dropped, and
+# gets a PR mirroring the demotion into policies/sentinel-capabilities.json.
+#
+# TWO units, on purpose:
+#   sentinel-demote-fast  — hourly, ONLY the audit_fail_any / manipulated
+#                           triggers. A manipulated action is a live incident;
+#                           waiting 24h to notice it defeats the point.
+#   sentinel-demote       — nightly 02:30Z, the full 7-day join plus the
+#                           digest that lists every registered capability.
+# The fast unit is a SUBSET by construction (--fast), so it can never trip on a
+# slow counter and race the nightly tick into a double step.
+#
+# DETECT-AND-NARROW ONLY. Nothing here promotes, and nothing here removes a kill
+# file: promotions are a PR with a Fable ruling id (`demote.py promote` renders
+# the parity report and changes no state), and a human removes the kill file
+# after the ruling. Stop switch: touch /etc/hydra/sentinel-demote.disabled
+# (stops this tick; /etc/hydra/sentinel.disabled stops the whole sentinel).
+# The PR half needs a real git checkout — /opt/hydra has no .git — so the mirror
+# clone lives in /var/lib (never /opt/hydra, which every deploy rsyncs over);
+# a failed mirror is not silent: it pages.
+# Docs: data/sentinel/README.md. Tests: tests/test_sentinel_demote.py.
+install -d -m 750 /var/lib/hydra/sentinel
+if [ ! -d /var/lib/hydra/sentinel/mirror-repo/.git ]; then
+  if command -v gh >/dev/null 2>&1; then
+    # Best effort: a clone failure must not fail the deploy, but it MUST be
+    # visible — without the checkout the mirror PR half of a demotion is dark.
+    if gh repo clone Muso-AI/hydra /var/lib/hydra/sentinel/mirror-repo -- --depth 1 >/dev/null 2>&1; then
+      log "  sentinel mirror-repo: cloned"
+    else
+      log "WARN: could not clone the sentinel mirror-repo — demotions will page instead of opening a PR"
+    fi
+  else
+    log "WARN: gh not installed — sentinel demotions will page instead of opening a PR"
+  fi
+fi
+
+cat > /etc/systemd/system/sentinel-demote.service << SENTINELDEMOTESVC
+[Unit]
+Description=Sentinel — demote/kill manipulated capabilities (nightly 7-day join)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# NO ConditionPathExists here, deliberately. A condition makes a missing registry a
+# silent skip, which is right before sentinel-core-s0 lands it and WRONG afterwards: a
+# deleted or failed-to-deploy registry would leave automatic demotion blind with no page
+# and no failed unit. demote.py distinguishes the two itself — exit 2 (clean skip) when
+# it has never loaded a registry, exit 4 (page + failed unit) when it has and the file is
+# now gone. 2 is in SuccessExitStatus=, so the pre-S0 case still never fails.
+# The 7-day join + kill file + mirror PR outlives systemd's DefaultTimeoutStartSec=90s,
+# and the tick waits up to SENTINEL_LOCK_TIMEOUT (300s) for a sibling tick to finish
+# before skipping. SIGTERM mid-tick is survivable (state writes are atomic and flock is
+# released on exit) but it would abandon a demotion that already landed on the host.
+TimeoutStartSec=900
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/sentinel/demote.py run --nightly --mirror-repo /var/lib/hydra/sentinel/mirror-repo
+# 10 = "tripped and demoted": a normal outcome, not a unit failure (a failure
+# here is a crash, and a crash must page through OnFailure).
+# 2  = "the registry does not exist yet" and this host has NEVER loaded one (S0 not
+#      landed). Also normal. A registry that loaded once and then vanished is 4, not 2.
+# 3  = the global kill switch (/etc/hydra/sentinel.disabled or sentinel-demote.disabled)
+#      is present: a DELIBERATE, log-only stop. Without it here, touching the switch
+#      marks the unit failed and pages through OnFailure hourly/nightly/weekly, which
+#      trains the channel to ignore the very alert that matters.
+# 4 (bad registry / unusable host state) is deliberately NOT listed: that is a
+# real defect and it must stay a failure so OnFailure pages. 1 is not listed either.
+SuccessExitStatus=10 2 3
+StandardOutput=append:/var/log/hydra-sentinel-demote.log
+StandardError=append:/var/log/hydra-sentinel-demote.log
+SENTINELDEMOTESVC
+
+cat > /etc/systemd/system/sentinel-demote.timer << SENTINELDEMOTETMR
+[Unit]
+Description=Nightly 02:30Z — sentinel demotion join + digest
+
+[Timer]
+OnCalendar=*-*-* 02:30:00 UTC
+Persistent=true
+RandomizedDelaySec=120
+Unit=sentinel-demote.service
+
+[Install]
+WantedBy=timers.target
+SENTINELDEMOTETMR
+
+cat > /etc/systemd/system/sentinel-demote-fast.service << SENTINELDEMOTEFASTSVC
+[Unit]
+Description=Sentinel — hourly check of the audit_fail_any and manipulated triggers
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+TimeoutStartSec=900
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/sentinel/demote.py run --fast --mirror-repo /var/lib/hydra/sentinel/mirror-repo
+SuccessExitStatus=10 2 3
+StandardOutput=append:/var/log/hydra-sentinel-demote.log
+StandardError=append:/var/log/hydra-sentinel-demote.log
+SENTINELDEMOTEFASTSVC
+
+cat > /etc/systemd/system/sentinel-demote-fast.timer << SENTINELDEMOTEFASTTMR
+[Unit]
+Description=Hourly — sentinel demotion on manipulated actions / failed audits
+
+[Timer]
+OnBootSec=7min
+OnUnitActiveSec=60min
+RandomizedDelaySec=90s
+Unit=sentinel-demote-fast.service
+
+[Install]
+WantedBy=timers.target
+SENTINELDEMOTEFASTTMR
+
+# Weekly proposal: cluster unhandled + hand-off rows into data/sentinel/proposals/
+# and a `shadow` registry row. Deterministic code only — the clustering model
+# (DeepSeek, closed schema, de-identified features) proposes, code decides, and
+# money/legal/credentials/irreversible classes are forced to `handoff` in code.
+cat > /etc/systemd/system/sentinel-propose.service << SENTINELPROPOSESVC
+[Unit]
+Description=Sentinel — weekly proposal of shadow rows for unhandled classes
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+TimeoutStartSec=900
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/sentinel/demote.py propose --open-pr --mirror-repo /var/lib/hydra/sentinel/mirror-repo
+SuccessExitStatus=10 2 3
+StandardOutput=append:/var/log/hydra-sentinel-propose.log
+StandardError=append:/var/log/hydra-sentinel-propose.log
+SENTINELPROPOSESVC
+
+cat > /etc/systemd/system/sentinel-propose.timer << SENTINELPROPOSETMR
+[Unit]
+Description=Weekly Sun 02:00Z — sentinel shadow-row proposals
+
+[Timer]
+OnCalendar=Sun *-*-* 02:00:00 UTC
+Persistent=true
+RandomizedDelaySec=600
+Unit=sentinel-propose.service
+
+[Install]
+WantedBy=timers.target
+SENTINELPROPOSETMR
+
+systemctl daemon-reload
+for _sd in sentinel-demote.timer sentinel-demote-fast.timer sentinel-propose.timer; do
+  systemctl enable "$_sd" >/dev/null 2>&1 || log "WARN: could not enable $_sd"
+  systemctl start "$_sd" >/dev/null 2>&1 || log "WARN: could not start $_sd"
+  log "  $_sd: $(systemctl is-active "$_sd" 2>/dev/null || echo unknown)"
+done
+
 # ─── OnFailure paging for every timer-driven oneshot ──────────────────────────
 # hydra-unit-failed@.service (written above) is the generic pager for a failing
 # oneshot: without it a failed timer run is only a red line in
@@ -4393,6 +4559,9 @@ AUX_ONFAILURE_UNITS=(
   qa-review-reconcile.service
   resolution-matcher.service
   resolve-notify.service
+  sentinel-demote-fast.service
+  sentinel-demote.service
+  sentinel-propose.service
   support-changelog-sync.service
   sync-app-pricing.service
   sync-platform-llms.service
