@@ -24,6 +24,9 @@ import json, os, sys
 a = sys.argv[1:]
 open(os.environ["CALLS"], "a").write(" ".join(a) + "\n")
 mode = a[a.index("--mode") + 1]
+if os.environ.get("STUB_FAIL_LIST") and "--list" in a and \
+        os.path.basename(a[a.index("--list") + 1]).startswith(os.environ["STUB_FAIL_LIST"]):
+    print("stub: this list's step fails"); sys.exit(1)          # a family whose step fails, by list name
 if os.environ.get("STUB_SLEEP") and mode == os.environ.get("STUB_SLEEP_MODE") and (mode == "apply" or "--check-recipients" in a):
     import time; time.sleep(float(os.environ["STUB_SLEEP"]))
 if mode == "apply":
@@ -134,6 +137,9 @@ PY
   export CVO_NEED_RUNNER="$TEST_TMPDIR/need.py" CVO_UNSIGNED_ALL=1
   export CVO_POLICY="$BATS_TEST_DIRNAME/../../policies/credit-verify-outbound.json"
   export CVO_SCRIPTS="$BATS_TEST_DIRNAME/.."
+  # QA #1574: with reply_due_scan.py in the tree the tick runs the REAL scan (Intercom + replica) - the harness default is
+  # a scan path that does not exist (the tick's "not deployed" branch); the reply_due tests set their own stub
+  export CVO_RD_SCAN="$TEST_TMPDIR/no-reply-due-scan.py"
   export CVO_LEDGER="$TEST_TMPDIR/ledger.sqlite3"
   python3 -c "import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); d.execute('CREATE TABLE verify_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, campaign TEXT, day TEXT, status TEXT, account_id TEXT)'); d.commit()" "$CVO_LEDGER"
   cat > "$TEST_TMPDIR/zero.py" <<'PY'
@@ -216,6 +222,8 @@ LEDGER=/var/lib/hydra/credit-review/ledger.sqlite3
 SCRIPTS_DIR=/opt/hydra/scripts
 RD_SCAN=/opt/hydra/scripts/credit_review/reply_due_scan.py
 RD_CAP=100
+RD_CHECKS=400
+RD_BUDGET=900
 POLICY=/opt/hydra/policies/credit-verify-outbound.json
 CLAIM_LIST=/var/lib/hydra/credit-verify-outbound/claim-list.json
 CAP=250
@@ -1545,6 +1553,245 @@ PY
   CVO_RD_SCAN="$TEST_TMPDIR/rd_scan.py" run -1 "$SCRIPT"
   [ "$(applies)" -eq 0 ]
   grep -q "reply_due builder failed" "$(newest_tick)"
+}
+
+@test "outbound tick (QA #1574): the reply_due scan runs BOUNDED and walks one PAGE of its audience, the cursor carrying over" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  # a scan that records its own arguments and reports a page: 379 due, this run examined entries 0..250 (mostly HELD)
+  cat > "$TEST_TMPDIR/rd_scan.py" <<'PY'
+import json, sys
+argv = sys.argv[1:]
+open(sys.argv[sys.argv.index("--out") + 1] + ".argv", "w").write(" ".join(argv))
+import os
+end = int(os.environ.get("STUB_RD_SCAN_END") or 250)
+json.dump({"generated_at": "x", "page": {"start": int(argv[argv.index("--start-entry") + 1]), "end": end, "listed": 379,
+                                         "end_user": None if end >= 379 else 4242},
+           "users": [{"user_id": "41", "paid": True, "reply_due": {"part": "9", "conversation": "7"}}]},
+          open(sys.argv[sys.argv.index("--out") + 1], "w"))
+print('{"rows": 1, "not_checked_after_checks": 129}')
+PY
+  CVO_RD_SCAN="$TEST_TMPDIR/rd_scan.py" run -0 "$SCRIPT"
+  # the tick bounds the scan BEFORE the checks (the accept cap alone never bounded a mostly-held audience)
+  argv="$(cat "$CVO_OUT_ROOT"/*/reply-due.json.argv)"
+  [[ "$argv" == *"--max-checks 400"* ]]
+  [[ "$argv" == *"--budget-seconds 900"* ]]
+  [[ "$argv" == *"--cap 100"* ]]
+  [[ "$argv" == *"--start-entry 0"* ]]
+  # r5 (1574 finding 1): the SCAN is read-only, the PAGE is not - the cursor moves only after BOTH segments' step for
+  # it is done. Here the family's step IS done (it ran), so the cursor moves to page.end ...
+  [ "$(cat "$CVO_STATE/cursor-reply-due")" = "250" ]
+  grep -q "reply-due page: entries from 0 this tick; next tick starts at 250" "$CVO_OUT_ROOT"/*/tick.log
+  # ... and the NEXT tick starts the scan there instead of re-walking the held head
+  rm -rf "$CVO_OUT_ROOT"; CVO_RD_SCAN="$TEST_TMPDIR/rd_scan.py" run -0 "$SCRIPT"
+  [[ "$(cat "$CVO_OUT_ROOT"/*/reply-due.json.argv)" == *"--start-entry 250"* ]]
+  # a page that reached the end of the list wraps to 0 (page_next), so the walk is a rotation, not a one-way stop
+  rm -rf "$CVO_OUT_ROOT"; STUB_RD_SCAN_END=379 CVO_RD_SCAN="$TEST_TMPDIR/rd_scan.py" run -0 "$SCRIPT"
+  [ "$(cat "$CVO_STATE/cursor-reply-due")" = "0" ]
+  # a scan that fails (rc 3) stops the tick before any send and leaves the cursor where it was
+  echo 250 > "$CVO_STATE/cursor-reply-due"; : > "$CALLS"
+  printf 'import sys; sys.exit(3)\n' > "$TEST_TMPDIR/rd_scan.py"
+  CVO_RD_SCAN="$TEST_TMPDIR/rd_scan.py" run -1 "$SCRIPT"
+  [ "$(cat "$CVO_STATE/cursor-reply-due")" = "250" ]
+  [ "$(applies)" -eq 0 ]
+}
+
+@test "outbound tick (QA #1574 round 7, Important): the cursor is the IDENTITY of the last examined row, not a position" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  # A position is not a resume point in a list that is rebuilt every run: the rows this tick sends are answered and
+  # vanish from the next search, so every position behind them shifts up. page.end_user is the row, and the next tick
+  # resumes after THAT.
+  cat > "$TEST_TMPDIR/rd_scan_anchor.py" <<'PY'
+# --start-after-user
+import json, os, sys
+argv = sys.argv[1:]
+out = sys.argv[sys.argv.index("--out") + 1]
+open(out + ".argv", "w").write(" ".join(argv))
+end = int(os.environ.get("STUB_RD_SCAN_END") or 250)
+json.dump({"generated_at": "x", "page": {"start": 0, "end": end, "listed": 379,
+                                         "end_user": None if end >= 379 else 4242},
+           "users": [{"user_id": "41", "paid": True, "reply_due": {"part": "9", "conversation": "7"}}]}, open(out, "w"))
+PY
+  CVO_RD_SCAN="$TEST_TMPDIR/rd_scan_anchor.py" run -0 "$SCRIPT"
+  # a partial page pins the ROW it reached, alongside the position; the first run has no anchor to pass
+  [ "$(cat "$CVO_STATE/cursor-reply-due-anchor")" = "4242" ]
+  [[ "$(cat "$CVO_OUT_ROOT"/*/reply-due.json.argv)" != *"--start-after-user"* ]]
+  # the next tick resumes AFTER that row (and still passes the position, for a runner that predates the flag)
+  rm -rf "$CVO_OUT_ROOT"; CVO_RD_SCAN="$TEST_TMPDIR/rd_scan_anchor.py" run -0 "$SCRIPT"
+  argv="$(cat "$CVO_OUT_ROOT"/*/reply-due.json.argv)"
+  [[ "$argv" == *"--start-after-user 4242"* ]]
+  [[ "$argv" == *"--start-entry 250"* ]]
+  # a page that reached the end of the list has no row to resume after: the anchor is removed, so the cursor wraps
+  rm -rf "$CVO_OUT_ROOT"; STUB_RD_SCAN_END=379 CVO_RD_SCAN="$TEST_TMPDIR/rd_scan_anchor.py" run -0 "$SCRIPT"
+  [ ! -e "$CVO_STATE/cursor-reply-due-anchor" ]
+  # a scan that does not support the flag gets no flag (never a failed tick), and still writes its own row record
+  rm -rf "$CVO_OUT_ROOT"; echo 4242 > "$CVO_STATE/cursor-reply-due-anchor"
+  cat > "$TEST_TMPDIR/rd_old.py" <<'PY'
+import json, sys
+out = sys.argv[sys.argv.index("--out") + 1]
+json.dump({"generated_at": "x", "page": {"start": 0, "end": 5, "listed": 9, "end_user": 77}, "users": []}, open(out, "w"))
+PY
+  CVO_RD_SCAN="$TEST_TMPDIR/rd_old.py" run -0 "$SCRIPT"
+  argv="$(cat "$CVO_STATE/cursor-reply-due-anchor")"
+  [ "$argv" = "77" ]
+}
+
+@test "outbound tick (QA #1574 round 5, finding 1): a DEFERRED reply-due family does not commit the upstream cursor" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  cat > "$TEST_TMPDIR/rd_scan_up.py" <<'PY'
+# --upstream-resume
+import json, os, sys
+out = sys.argv[sys.argv.index("--out") + 1]
+tok = os.environ.get("STUB_UPSTREAM") or ""
+json.dump({"generated_at": "x", "page": {"start": 0, "end": 0, "listed": 0},
+           "upstream": {"candidates": tok or None, "apology": None},
+           "users": [{"user_id": "41", "paid": True, "reply_due": {"part": "9", "conversation": "7"}}]}, open(out, "w"))
+print('{"rows": 1}')
+PY
+  # the family DEFERS because its worst case cannot fit before the hard deadline (its own "does not fit" path), so
+  # neither segment writes its .done marker - while the scan itself still runs and reports a token to resume from
+  STUB_UPSTREAM="cDlwYWdlMg" CVO_TICK_ELAPSED0=5000 CVO_CHECK_S_PER_USER=40 CVO_RESERVE_PAD_S=300 CVO_TICK_HARD_S=6900     CVO_RD_SCAN="$TEST_TMPDIR/rd_scan_up.py" run -0 "$SCRIPT"
+  out="$(ls -d "$CVO_OUT_ROOT"/*)"
+  # ... and the upstream state must NOT be committed: the rows this walk collected never reached anybody, so resuming
+  # past them next tick would answer nobody about them, ever
+  [ ! -e "$CVO_STATE/cursor-reply-due-upstream.json" ]
+  grep -q "reply-due: the page is NOT done" "$out/tick.log"
+  # the same tick with budget DOES commit it, so this test measures the gate and not the stub
+  rm -rf "$CVO_OUT_ROOT"
+  STUB_UPSTREAM="cDlwYWdlMg" CVO_RD_SCAN="$TEST_TMPDIR/rd_scan_up.py" run -0 "$SCRIPT"
+  [ "$(jq -r .candidates "$CVO_STATE/cursor-reply-due-upstream.json")" = "cDlwYWdlMg" ]
+}
+
+@test "outbound tick (r5 1574 finding 3): a STARVED upstream walk is resumed next tick, and a completed one clears the cursor" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  # a scan that supports --upstream-resume (the flag is IN the file, which is how the tick detects support) and reports
+  # where its walk stopped
+  cat > "$TEST_TMPDIR/rd_scan_up.py" <<'PY'
+# --upstream-resume
+import json, os, sys
+argv = sys.argv[1:]
+out = sys.argv[sys.argv.index("--out") + 1]
+open(out + ".argv", "w").write(" ".join(argv))
+tok = os.environ.get("STUB_UPSTREAM") or ""
+json.dump({"generated_at": "x", "page": {"start": 0, "end": 0, "listed": 0},
+           "upstream": {"candidates": tok or None, "apology": None},
+           "users": [{"user_id": "41", "paid": True, "reply_due": {"part": "9", "conversation": "7"}}]}, open(out, "w"))
+print('{"rows": 1}')
+PY
+  STUB_UPSTREAM="cDlwYWdlMg" CVO_RD_SCAN="$TEST_TMPDIR/rd_scan_up.py" run -0 "$SCRIPT"
+  out="$(ls -d "$CVO_OUT_ROOT"/*)"
+  # the tick passes the cursor file, because this runner advertises support for it
+  # (the rendered argv is made with printf %q, so compare the flag and the basename rather than the joined string)
+  [[ "$(cat "$out/reply-due.json.argv")" == *--upstream-resume*cursor-reply-due-upstream.json* ]]
+  # and persists what the walk returned, so the next tick resumes past the pages this one already read
+  [ "$(jq -r .candidates "$CVO_STATE/cursor-reply-due-upstream.json")" = "cDlwYWdlMg" ]
+  rm -rf "$CVO_OUT_ROOT"; CVO_RD_SCAN="$TEST_TMPDIR/rd_scan_up.py" run -0 "$SCRIPT"
+  [[ "$(cat "$CVO_OUT_ROOT"/*/reply-due.json.argv)" == *"--upstream-resume"* ]]   # still resumed, now from the saved file
+  # a COMPLETE walk reports nulls: the file is removed, so the rotation wraps instead of pinning a stale token
+  rm -rf "$CVO_OUT_ROOT"; STUB_UPSTREAM="" CVO_RD_SCAN="$TEST_TMPDIR/rd_scan_up.py" run -0 "$SCRIPT"
+  if [ -e "$CVO_STATE/cursor-reply-due-upstream.json" ]; then false; fi
+  # a runner that predates the flag is never passed it (its argv has no --upstream-resume), so an older deployed scan
+  # keeps working: it restarts its walk, slower but never wrong
+  cat > "$TEST_TMPDIR/rd_scan_old.py" <<'PY'
+import json, sys
+out = sys.argv[sys.argv.index("--out") + 1]
+open(out + ".argv", "w").write(" ".join(sys.argv[1:]))
+json.dump({"generated_at": "x", "page": {"start": 0, "end": 0, "listed": 0}, "users": []}, open(out, "w"))
+print('{"rows": 0}')
+PY
+  rm -rf "$CVO_OUT_ROOT"; CVO_RD_SCAN="$TEST_TMPDIR/rd_scan_old.py" run -0 "$SCRIPT"
+  if [[ "$(cat "$CVO_OUT_ROOT"/*/reply-due.json.argv)" == *"--upstream-resume"* ]]; then false; fi
+}
+
+@test "outbound tick (QA #1574 round 6): the search token and the start position are ONE pair - the token moves only when the page wrapped, so a partly-walked slice is rebuilt and continued, never skipped" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  # a scan that advertises --upstream-resume, reports a page from the env, and reports the token its walk stopped at
+  cat > "$TEST_TMPDIR/rd_scan_pair.py" <<'PY'
+# --upstream-resume
+import json, os, sys
+argv = sys.argv[1:]
+out = sys.argv[sys.argv.index("--out") + 1]
+open(out + ".argv", "w").write(" ".join(argv))
+st = int(argv[argv.index("--start-entry") + 1])
+end = int(os.environ.get("STUB_PAIR_END") or 0)
+listed = int(os.environ.get("STUB_PAIR_LISTED") or 0)
+tok = os.environ.get("STUB_PAIR_TOKEN") or ""
+json.dump({"generated_at": "x", "page": {"start": st, "end": end, "listed": listed, "unwalked": listed - end},
+           "upstream": {"candidates": tok or None, "apology": None},
+           "users": [{"user_id": "41", "paid": True, "reply_due": {"part": "9", "conversation": "7"}}]}, open(out, "w"))
+print('{"rows": 1}')
+PY
+  rm -rf "$CVO_OUT_ROOT"
+  # --- tick 1: the slice holds 20 rows, this tick walks 0..5. The position (5) is INSIDE the slice the CURRENT token
+  # builds, so the token reported by the walk (C1) must NOT be written: resuming the search at C1 next tick would point
+  # the position 5 into a different slice - the first five users of that slice, and the whole of it when it holds fewer
+  # than five, would never be checked.
+  STUB_PAIR_END=5 STUB_PAIR_LISTED=20 STUB_PAIR_TOKEN="C1" CVO_RD_SCAN="$TEST_TMPDIR/rd_scan_pair.py" run -0 "$SCRIPT"
+  [ "$(cat "$CVO_STATE/cursor-reply-due")" = "5" ]                       # the position did move: real progress
+  if [ -e "$CVO_STATE/cursor-reply-due-upstream.json" ]; then false; fi   # the token was held
+  grep -q "the search token is HELD on this slice" "$(newest_tick)"
+  # --- tick 2: same token, so the SAME slice is rebuilt and the walk continues at the position it stopped at
+  o="$CVO_OUT_ROOT"; rm -rf "$CVO_OUT_ROOT"
+  STUB_PAIR_END=20 STUB_PAIR_LISTED=20 STUB_PAIR_TOKEN="C2" CVO_RD_SCAN="$TEST_TMPDIR/rd_scan_pair.py" run -0 "$SCRIPT"
+  [[ "$(cat "$CVO_OUT_ROOT"/*/reply-due.json.argv)" == *"--start-entry 5"* ]]
+  # --- the slice was walked to its end (end == listed), so the pair wraps together: position 0 AND the new token
+  [ "$(cat "$CVO_STATE/cursor-reply-due")" = "0" ]
+  [ "$(jq -r .candidates "$CVO_STATE/cursor-reply-due-upstream.json")" = "C2" ]
+  # --- a held token is not OVERWRITTEN either: an existing C0 survives a partial page
+  printf '{"candidates":"C0"}' > "$CVO_STATE/cursor-reply-due-upstream.json"
+  echo 3 > "$CVO_STATE/cursor-reply-due"; rm -rf "$CVO_OUT_ROOT"
+  STUB_PAIR_END=9 STUB_PAIR_LISTED=20 STUB_PAIR_TOKEN="C9" CVO_RD_SCAN="$TEST_TMPDIR/rd_scan_pair.py" run -0 "$SCRIPT"
+  [ "$(jq -r .candidates "$CVO_STATE/cursor-reply-due-upstream.json")" = "C0" ]
+  # and the negative control: a WRAPPED page does commit, so this is the pair rule and not a ban on writing
+  rm -rf "$CVO_OUT_ROOT"
+  STUB_PAIR_END=20 STUB_PAIR_LISTED=20 STUB_PAIR_TOKEN="C10" CVO_RD_SCAN="$TEST_TMPDIR/rd_scan_pair.py" run -0 "$SCRIPT"
+  [ "$(jq -r .candidates "$CVO_STATE/cursor-reply-due-upstream.json")" = "C10" ]
+}
+
+@test "outbound tick (r5 1574 finding 1): the reply_due cursor moves only when the family's step for that page is DONE - a starved family leaves it where it was" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  cat > "$TEST_TMPDIR/rd_scan.py" <<'PY'
+import json, sys
+argv = sys.argv[1:]
+json.dump({"generated_at": "x", "page": {"start": int(argv[argv.index("--start-entry") + 1]), "end": 250, "listed": 379},
+           "users": [{"user_id": "41", "paid": True, "reply_due": {"part": "9", "conversation": "7"}}]},
+          open(sys.argv[sys.argv.index("--out") + 1], "w"))
+print('{"rows": 1}')
+PY
+  # the family that owns this page FAILS its step (a check or an apply that did not do the page).
+  # The cursor used to advance the moment the SCAN returned 0, so a failing tick cost the PAGE - every answerable user
+  # on it was skipped by the next tick's start-entry. Scanned is not done.
+  [ ! -e "$CVO_STATE/cursor-reply-due" ]
+  STUB_FAIL_LIST=reply-due.json CVO_RD_SCAN="$TEST_TMPDIR/rd_scan.py" run -1 "$SCRIPT"
+  grep -q "reply-due-paid: check failed; tick stops" "$CVO_OUT_ROOT"/*/tick.log
+  [ ! -e "$CVO_STATE/cursor-reply-due" ]                  # never written: the page is still owed
+  if grep -q "reply-due page: entries from 0 this tick" "$CVO_OUT_ROOT"/*/tick.log; then false; fi
+  # and the negative control: the same scan with a deadline that fits DOES advance, so this is a bound and not a ban
+  rm -rf "$CVO_OUT_ROOT"
+  CVO_RD_SCAN="$TEST_TMPDIR/rd_scan.py" run -0 "$SCRIPT"
+  [ "$(cat "$CVO_STATE/cursor-reply-due")" = "250" ]
+}
+
+@test "outbound tick (r5 1574 finding 1, round 2): a DEFERRED reply_due segment does not move the cursor, because a 0 return is not completion" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  cat > "$TEST_TMPDIR/rd_scan2.py" <<'PY'
+import json, sys
+argv = sys.argv[1:]
+json.dump({"generated_at": "x", "page": {"start": int(argv[argv.index("--start-entry") + 1]), "end": 250, "listed": 379},
+           "users": [{"user_id": "41", "paid": True, "reply_due": {"part": "9", "conversation": "7"}}]},
+          open(sys.argv[sys.argv.index("--out") + 1], "w"))
+print('{"rows": 1}')
+PY
+  [ ! -e "$CVO_STATE/cursor-reply-due" ]
+  # SIGNED-only is a DEFERRAL, not completion: family() logs it and returns 0 without touching the page, so the cursor
+  # must stay put. Before this, "both families returned 0" read as done and the page was skipped for the next tick.
+  CVO_UNSIGNED_ALL=0 CVO_RD_SCAN="$TEST_TMPDIR/rd_scan2.py" run -0 "$SCRIPT"
+  grep -q "reply-due-paid: SIGNED-only family" "$CVO_OUT_ROOT"/*/tick.log
+  grep -q "reply-due: the page is NOT done" "$CVO_OUT_ROOT"/*/tick.log
+  [ ! -e "$CVO_STATE/cursor-reply-due" ]
+  # negative control: the same page with the family armed DOES advance, so this is a bound and not a ban
+  rm -rf "$CVO_OUT_ROOT"
+  CVO_RD_SCAN="$TEST_TMPDIR/rd_scan2.py" run -0 "$SCRIPT"
+  [ "$(cat "$CVO_STATE/cursor-reply-due")" = "250" ]
 }
 
 @test "outbound tick (firstmate 031 cap accounting): reply_due answers charge the SAME uvn-status daily row and the shared credit cap" {

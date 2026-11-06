@@ -80,6 +80,11 @@ LEDGER="$(cfg CVO_LEDGER /var/lib/hydra/credit-review/ledger.sqlite3)"
 SCRIPTS_DIR="$(cfg CVO_SCRIPTS "$HYDRA_ROOT/scripts")"   # credit_review.uvn_status: the runner's own segment record
 RD_SCAN="$(cfg CVO_RD_SCAN "$SCRIPTS_DIR/credit_review/reply_due_scan.py")"   # h2's reply_due audience builder
 RD_CAP="$(cfg CVO_RD_CAP 100)"
+# QA #1574 (Important): the reply_due scan's send-time check is ~35 s per user and it ran UNBOUNDED from this timer -
+# the measured 379 due users under a mostly-HELD audience is ~3.7 h against the tick's 6,900 s. The scan takes a
+# per-run check budget and a wall clock, and walks ONE page of its audience; the cursor in $STATE starts the next
+# tick where this one stopped, so a head of persistently held users is walked PAST, never re-checked for ever.
+RD_CHECKS="$(cfg CVO_RD_CHECKS 400)"; RD_BUDGET="$(cfg CVO_RD_BUDGET 900)"
 POLICY="$(cfg CVO_POLICY "$HYDRA_ROOT/policies/credit-verify-outbound.json")"
 CLAIM_LIST="$(cfg CVO_CLAIM_LIST "$STATE/claim-list.json")"
 CAP="$(cfg CVO_CAP 250)"                 # users per family+segment per tick (l1: 250/run)
@@ -228,7 +233,7 @@ PY
 }
 if [ "${1:-}" = "--print-config" ]; then
   for v in CVO_HARNESS HYDRA_ROOT KILL KILL2 LIVE_FLAG PAID_FLAG EXCLUDE STATE PY RUNNER OWING RECEIPTS HEALTH ZERO_READ \
-           FRAUD MAIN_ENV LEDGER SCRIPTS_DIR RD_SCAN RD_CAP POLICY CLAIM_LIST CAP R1_CAP CLAIM_CAP DOW REFUSAL_SPIKE NEED_RUNNER FIRST_CAP UNSIGNED_ALL NOW_EPOCH JUDGE DEPLOYED_SHA_FILE CHECK_ENTRIES TICK_BUDGET_S TICK_HARD_S CHECK_S_PER_USER RESERVE_PAD_S APPLY_S_PER_USER TICK_ELAPSED0 FULL_CAP_FROM_TEST PER_SEGMENT_FROM_TEST PAID_FROM_TEST TIMEOUT_BIN \
+           FRAUD MAIN_ENV LEDGER SCRIPTS_DIR RD_SCAN RD_CAP RD_CHECKS RD_BUDGET POLICY CLAIM_LIST CAP R1_CAP CLAIM_CAP DOW REFUSAL_SPIKE NEED_RUNNER FIRST_CAP UNSIGNED_ALL NOW_EPOCH JUDGE DEPLOYED_SHA_FILE CHECK_ENTRIES TICK_BUDGET_S TICK_HARD_S CHECK_S_PER_USER RESERVE_PAD_S APPLY_S_PER_USER TICK_ELAPSED0 FULL_CAP_FROM_TEST PER_SEGMENT_FROM_TEST PAID_FROM_TEST TIMEOUT_BIN \
            CLAIM_PROOF_STATE CLAIM_PROOF_LIMIT_H CLAIM_PROOF_UNREAD_H CLAIM_PROOF_REPEAT_MIN; do
     printf '%s=%s\n' "$v" "${!v}"
   done
@@ -710,6 +715,12 @@ shared_first() { # <family>
 # QA #1612: the next page's first entry from a run's own page record ({start, end, listed}; end = the first entry that
 # run did not get to), wrapping to 0 at the list's end. Non-zero rc = no page record.
 page_next() { py -c 'import json,sys; p=json.load(open(sys.argv[1])).get("page") or {}; e,n=int(p["end"]),int(p["listed"]); print(e if e < n else 0)' "$1" 2>/dev/null; }
+# QA r5 #1574 finding 1 (round 2): `family` returns 0 for several things that are NOT completion - the tick budget was
+# reached, its worst case did not fit, the family is SIGNED-only, the daily cap is spent. Those return 0 because they are
+# outcomes, not failures, so a caller cannot tell them from a finished page by the exit code. This marker can: it is
+# written ONLY at the points where the family's step for this page is genuinely done (nothing left to do this tick).
+completed() { : > "$OUT/$1.done" 2>/dev/null || true; }
+
 advance_cursor() { # <tag> <cursor file> <run's outcomes json> <this tick's start>; the paged families only (a cursor file)
   [ -n "$2" ] || return 0
   local nxt; nxt="$(page_next "$3")" || { log "$1: no page record in $(basename "$3"); the cursor stays at $4"; return 0; }
@@ -797,18 +808,25 @@ family() {
   accept_bodies "$tag"; rc=$?
   if deadline_rc "$rc"; then log "$tag: the accepted-bodies step hit the ${TICK_HARD_S}s deadline; no apply, the tick ends"; return 1; fi
   # QA #1610: a check that accepted NOBODY is a no-apply family outcome - never an apply over the original list
-  if [ "$rc" = 3 ]; then log "$tag: the check accepted nobody; no apply this tick (the family is done)"; advance_cursor "$tag" "$cur_file" "$OUT/$tag-check.json" "$cur"; return 0; fi
+  if [ "$rc" = 3 ]; then log "$tag: the check accepted nobody; no apply this tick (the family is done)"; completed "$tag"; advance_cursor "$tag" "$cur_file" "$OUT/$tag-check.json" "$cur"; return 0; fi
   [ "$rc" = 0 ] || { log "$tag: the rendered bodies are not the check's accepted set (rc=$rc); no apply, tick stops"; return 1; }
   judge_shadow "$tag"
   # [key=arm-per-family]: armed by THIS family's own policy row (or, before armed_families exists, by the two global
   # files); the check already ran, so a dry family proves its readiness and simply does not apply
   local live; live="$(family_armed "$name" "$seg")"
-  if [ "$live" != 1 ]; then log "$tag: DRY-RUN tick (no send): arming=$ARMING $name=$([ "$live" = 1 ] && echo armed || echo "not armed")"; advance_cursor "$tag" "$cur_file" "$OUT/$tag-check.json" "$cur"; return 0; fi
+  # QA #1574 finding 1 (round 2): a dry family still FINISHED this segment's step for the page, so it writes the marker
+  # (the reply-due scan cursor keys on it); the SIGNED-only branch below deliberately does not.
+  if [ "$live" != 1 ]; then log "$tag: DRY-RUN tick (no send): arming=$ARMING $name=$([ "$live" = 1 ] && echo armed || echo "not armed")"; completed "$tag"; advance_cursor "$tag" "$cur_file" "$OUT/$tag-check.json" "$cur"; return 0; fi
   if [ -z "$unsigned" ]; then
     # 14:3xZ (found on the 14Z tick): this branch used to return WITHOUT advancing, so a signed-only family re-walked
     # the SAME first page on every tick for ever - it never reached entry 201, and it re-paid the page's check work every
     # two hours (cursor-r1-free stayed 0 while every unsigned family moved to 200). "Checked, not applied" is still a
     # page this family is DONE with: advance to where the CHECK stopped, exactly like the DRY branch above.
+    # QA #1636 finding 1 (main): the FAMILY cursor advances here - the check is done, so re-walking this family page
+    # every tick was the bug. QA #1574 finding 1 round 2 (this branch): the .done marker is NOT written, because that
+    # marker means this segment's step for the page is over and it gates the reply-due SCAN cursor; a SIGNED-only
+    # segment sent nobody, so treating it as done would skip the page for the next tick (the finding's own words:
+    # "a 0 return is not completion"). Two cursors, two meanings - kept apart deliberately.
     log "$tag: SIGNED-only family (no read-back date in UNSIGNED_FROM): checked, not applied"
     advance_cursor "$tag" "$cur_file" "$OUT/$tag-check.json" "$cur"; return 0
   fi
@@ -932,6 +950,7 @@ print(sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True).execute(
     fi
   fi
   [ "$rc" = 0 ] || { log "$tag: apply failed rc=$rc; tick stops"; return 1; }
+  completed "$tag"
   advance_cursor "$tag" "$cur_file" "$OUT/$tag-apply.json" "$cur"
 }
 
@@ -1106,9 +1125,72 @@ else
   log "proof-need-ask builder failed: $(tail -c 300 "$OUT/need-asks.out")"; exit 1
 fi
 RD_LIST=""
+# Persist where the reply-due upstream walk stopped, and the candidates it collected but never finished evaluating.
+# Only called when BOTH family segments are done: a page the family did not answer is re-walked, never skipped.
+persist_reply_due_upstream() { # <scan-doc> <state-file>
+  py - "$1" "$2" <<'PY2' || log "reply-due: the upstream cursor could not be written; the next run restarts its walk"
+import json, os, sys
+doc = json.load(open(sys.argv[1]))
+up = (doc.get("upstream") or {})
+keep = {k: v for k, v in up.items() if v}
+if keep:
+    with open(sys.argv[2] + ".tmp", "w") as fh:
+        json.dump(keep, fh)
+    os.replace(sys.argv[2] + ".tmp", sys.argv[2])
+elif os.path.exists(sys.argv[2]):
+    os.unlink(sys.argv[2])
+PY2
+}
+
+# the cursor's IDENTITY half: the user id the next run resumes after, or a removed file when the page was walked to its
+# end (page.end_user null). A missing/unreadable page leaves the existing anchor untouched - the same fail-closed rule as
+# the position, so a scan that died cannot silently move the cursor past rows nobody examined.
+persist_reply_due_anchor() { # <run's outcomes json> <anchor file>
+  local want
+  want="$(py -c 'import json,sys
+p = (json.load(open(sys.argv[1])).get("page") or {})
+v = p.get("end_user")
+print("" if v is None else int(v))' "$1" 2>/dev/null)" || { log "reply-due: no page record in $(basename "$1"); the anchor stays at $(cat "$2" 2>/dev/null || echo 0)"; return 0; }
+  if [ -n "$want" ]; then
+    printf '%s\n' "$want" > "$2.tmp" && mv -f "$2.tmp" "$2"
+  elif [ -e "$2" ]; then
+    rm -f "$2"
+  fi
+  log "reply-due anchor: the next tick resumes after user ${want:-<none: the page wrapped>}"
+}
+
 if [ -r "$RD_SCAN" ]; then
-  py "$RD_SCAN" --out "$OUT/reply-due.json" > "$OUT/reply-due.out" 2>&1 \
+  RD_CURSOR="$STATE/cursor-reply-due"
+  RD_UPSTREAM="$STATE/cursor-reply-due-upstream.json"
+  rd_cur="$(cat "$RD_CURSOR" 2>/dev/null || echo 0)"; [[ "$rd_cur" =~ ^[0-9]{1,9}$ ]] || rd_cur=0
+  # r5 (1574 finding 3): the audience cursor rotates INSIDE a list preparation has already truncated, so a tick that
+  # starves in the first Intercom search pages (or the first historical apology threads) never reaches the tail - ever.
+  # The scan reports where its upstream walk stopped and the next tick RESUMES there; a completed walk reports nulls and
+  # this file is removed, so the rotation wraps. A runner that predates the flag is not passed it (same rule as the
+  # --check-recipients support check): it simply restarts its walk, slower but never wrong.
+  rd_ups=(); grep -q -- '--upstream-resume' "$RD_SCAN" 2>/dev/null && rd_ups=(--upstream-resume "$RD_UPSTREAM")
+  # QA #1574 (7th round, Important): the cursor is the IDENTITY of the last entry the last run examined, not a position.
+  # A position is not a resume point in a list that is REBUILT every run: the rows this tick sends are answered, so they
+  # vanish from the next search and every position behind them shifts up - "start at 100" of a 300-row list skipped the
+  # next 100 owed replies once the first 100 were gone. `--start-after-user` resumes after that ROW; when it is gone the
+  # scan enters the slice at its head (the next owed reply) and counts the reset. A runner that predates the flag still
+  # gets --start-entry (same rule as --upstream-resume): slower, never wrong.
+  RD_ANCHOR="$STATE/cursor-reply-due-anchor"
+  rd_anchor="$(cat "$RD_ANCHOR" 2>/dev/null || true)"; [[ "$rd_anchor" =~ ^[0-9]{1,12}$ ]] || rd_anchor=""
+  rd_anc=(); if [ -n "$rd_anchor" ] && grep -q -- '--start-after-user' "$RD_SCAN" 2>/dev/null; then rd_anc=(--start-after-user "$rd_anchor"); fi
+  py "$RD_SCAN" --out "$OUT/reply-due.json" --cap "$RD_CAP" --max-checks "$RD_CHECKS" \
+    --budget-seconds "$RD_BUDGET" --start-entry "$rd_cur" "${rd_anc[@]}" "${rd_ups[@]}" > "$OUT/reply-due.out" 2>&1 \
     || { log "reply_due builder failed: $(tail -c 300 "$OUT/reply-due.out")"; exit 1; }
+  # QA #1574 (round 5, finding 1): the upstream state is NOT written here. The search walk stopping early is only half of
+  # "this slice is used" - the rows it collected still have to reach the family, and a deferred family (budget, fit,
+  # sign-off, cap) answers nobody. Committing the token at scan time then resumed PAST users the family never reached.
+  # It is persisted in credit_families(), on the same completion markers the audience cursor uses.
+  rd_ups_ok=0; if [ ${#rd_ups[@]} -gt 0 ]; then rd_ups_ok=1; fi
+  # r5 (1574 finding 1): the SCAN is read-only, the PAGE is not. This cursor used to advance the moment the scan
+  # returned 0, while `family reply-due …` had not run yet - so a deferred or budget-starved family (the
+  # unchecked_budget_starved exit path #1636 added) left every answerable user on the page unsent and the next tick
+  # started PAST them: a starved tick then cost the page, not the cycle. It now advances in credit_families, after
+  # BOTH segments' step for this page returned 0.
   RD_LIST="$OUT/reply-due.json"
   log "audiences: reply_due $(head -c 300 "$OUT/reply-due.out")"
 else
@@ -1136,6 +1218,34 @@ credit_families() {
   if [ -n "$RD_LIST" ]; then
     family reply-due paid "$RD_LIST" "$RD_CAP" uvn-status --campaign uvn-status || return 1
     family reply-due free "$RD_LIST" "$RD_CAP" uvn-status --campaign uvn-status || return 1
+    # r5 (1574 finding 1, round 2): a 0 return is NOT proof of completion - family() also returns 0 when the tick budget
+    # is reached, when its worst case does not fit, when it is SIGNED-only or when the daily cap is spent, and in those
+    # cases it has processed nobody. So the cursor moves only on the marker the family writes when its step for this
+    # page is genuinely done; a deferral leaves the cursor where it was and the next tick re-walks the same page
+    # rather than skipping users we never reached.
+    if [ -f "$OUT/reply-due-paid.done" ] && [ -f "$OUT/reply-due-free.done" ]; then
+      # QA #1574 (round 6, Important): the POSITION and the SEARCH TOKEN are ONE coordinate pair and were being committed
+      # independently. `--start-entry` indexes the list the CURRENT token builds, so writing a new token in the same
+      # breath moved the search to a different slice while the position still pointed into the old one: the next tick
+      # skipped the first N users of the new slice, and skipped NONE of a slice holding fewer than N rows while its
+      # cursor still moved past it. The pair now advances together - the token may only move when the page wrapped to 0,
+      # i.e. when every row the token collected has been walked. Any other position means "still inside the slice the
+      # token on disk builds", so that token is HELD and the next tick rebuilds the same slice and continues there.
+      nxt="$(page_next "$OUT/reply-due.json" 2>/dev/null || true)"
+      advance_cursor reply-due "$RD_CURSOR" "$OUT/reply-due.json" "$rd_cur"
+      # the IDENTITY half of the cursor rides with the position: written from the same page record, at the same points
+      # (a page the family did not finish leaves BOTH where they were, so the next tick re-walks what it never reached).
+      persist_reply_due_anchor "$OUT/reply-due.json" "$RD_ANCHOR"
+      if [ "${rd_ups_ok:-0}" = "1" ]; then
+        if [ "$nxt" = "0" ]; then
+          persist_reply_due_upstream "$OUT/reply-due.json" "$RD_UPSTREAM"
+        else
+          log "reply-due: the search token is HELD on this slice - the page stopped at entry ${nxt} (position ${nxt} is inside the slice the token builds, so the next tick rebuilds it and continues from ${nxt}; a token moved past an unwalked slice would skip every row it had collected)"
+        fi
+      fi
+    else
+      log "reply-due: the page is NOT done (a segment deferred: budget, fit, sign-off or cap); the cursor stays at $rd_cur"
+    fi
   fi
   local c2=(); reached "${UNSIGNED_FROM[uvn-status:c2]:-}" || c2=(--no-correction)
   family uvn-status paid "$OUT/owing-uvn.json" "$CAP" uvn-status --campaign uvn-status "${c2[@]}" || return 1
