@@ -37,7 +37,9 @@ skills-all/muso-verify-profile
 skills-all/report-systemic-data-issues
 skills-all/billion-streams-club/SKILL.md
 skills-all/muso-streams-lookup/SKILL.md
-workspaces
+:(glob)workspaces/**/*.md
+# fastlane.sh usage text names the legacy host because it accepts pasted legacy-host profile URLs
+workspaces/operations/skills/muso-ops-fastlane/scripts/fastlane.sh
 
 # --- This guard names the host in its own message ---
 scripts/check-legacy-domain.sh

@@ -30,3 +30,23 @@ teardown() { rm -rf "$WORK"; }
   cd "$WORK" && run bash scripts/check-legacy-domain.sh
   [ "$status" -eq 2 ]
 }
+
+@test "the real allowlist does not exempt a runnable workspace script" {
+  cp "$REPO/.legacy-domain-allowlist" "$WORK/.legacy-domain-allowlist"
+  rm "$WORK/src.txt"
+  mkdir -p "$WORK/workspaces/ops/skills/x/scripts"
+  printf 'echo https://credits.%s/profile/1\n' "muso.ai" > "$WORK/workspaces/ops/skills/x/scripts/new.sh"
+  git -C "$WORK" add -A
+  cd "$WORK" && run bash scripts/check-legacy-domain.sh
+  [ "$status" -eq 1 ]
+}
+
+@test "the real allowlist still exempts workspace prose" {
+  cp "$REPO/.legacy-domain-allowlist" "$WORK/.legacy-domain-allowlist"
+  rm "$WORK/src.txt"
+  mkdir -p "$WORK/workspaces/ops"
+  printf 'see credits.%s docs\n' "muso.ai" > "$WORK/workspaces/ops/SOUL.md"
+  git -C "$WORK" add -A
+  cd "$WORK" && run bash scripts/check-legacy-domain.sh
+  [ "$status" -eq 0 ]
+}
