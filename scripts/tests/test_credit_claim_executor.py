@@ -156,7 +156,7 @@ class RunTest(unittest.TestCase):
 
     def go(self, t, **kw):
         args = dict(apply=True, facts_fn=self.facts_fn, gate_fn=lambda u: ALLOW, writer=self.writer,
-                    audit_path=self.audit, registry_path=str(self.registry), kill_file=self.kill,
+                    audit_path=self.audit, registry_path=str(self.registry), kill_files=(self.kill,),
                     lock_path=str(self.tmp / "lock"), now=lambda: NOW, sleep=lambda s: None, derive_fn=fresh_ok)
         args.update(kw)
         return cx.run(t, **args)
@@ -221,6 +221,15 @@ class RunTest(unittest.TestCase):
         self.registry.write_text(json.dumps({"automations": {"fable-decider": {"approved": False}}}))
         self.assertIn("not approved", self.go(self.tray()).stopped)
         self.assertEqual(self.calls, [])
+
+    def test_kill_file_stops_on_the_renamed_path_alone(self):
+        """QA #1767: claim declines share the fable kill file, so the rename must stop them at their own pre-check."""
+        new, legacy = self.tmp / "fable-trays.disabled", self.tmp / "fable-decider.disabled"
+        new.write_text("")
+        self.assertFalse(legacy.exists())
+        res = self.go(self.tray(), kill_files=(str(new), str(legacy)))
+        self.assertEqual(self.calls, [])
+        self.assertIn(str(new), res.stopped)
 
     def test_cap_shared_with_credit_closes(self):
         with open(self.audit, "w") as fh:

@@ -44,7 +44,12 @@ BIG_POPULARITY = 60
 LEDGER = os.environ.get("CREDIT_REVIEW_LEDGER", "/var/lib/hydra/credit-review/ledger.sqlite3")
 POLICY = os.environ.get("NO_PROOF_CLOSE_POLICY",
                         str(Path(__file__).resolve().parents[2] / "policies" / "credit-no-proof-close.json"))
-KILL_FILES = ("/etc/hydra/no-proof-close.disabled", "/etc/hydra/fable-decider.disabled")
+# [key=fable-trays] (Fable switch-on-plan row 4, firstmate 751): the file was named after a thing the captain forbade
+# (per-item Fable rulings) and read as if the EXECUTOR were off, when what is off is the per-item TRAY input. New name
+# first; the old path is still honoured so a rename that has not reached node-8 yet can never open this gate silently.
+KILL_FILES = ("/etc/hydra/no-proof-close.disabled",
+              "/etc/hydra/fable-trays.disabled",
+              "/etc/hydra/fable-decider.disabled")
 
 
 

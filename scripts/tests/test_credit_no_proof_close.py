@@ -3,6 +3,7 @@ executor contract (an apply close row admits through the REAL coded-outcome chec
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -467,6 +468,21 @@ class ApplyGateTest(unittest.TestCase):
         d = tempfile.mkdtemp()
         Path(f"{d}/k").write_text("")
         self.assertIn("kill file", npc.apply_refusal(ok, kill_files=(f"{d}/k",)))
+
+    def test_the_renamed_trays_file_and_the_legacy_decider_file_both_still_kill(self):
+        """[key=fable-trays] (firstmate 751): switch-on-plan row 4 renames the file to say what is off (the per-item
+        tray input, not the executor). The rename must never OPEN the gate: the new name is canonical and the old one
+        keeps refusing until node-8's file is renamed by hand."""
+        ok = {"apply_enabled": True, "approved_by": "fable", "approval_ref": "x", "closing_line_campaign": "c"}
+        with tempfile.TemporaryDirectory() as d:
+            new = os.path.join(d, "fable-trays.disabled")
+            old = os.path.join(d, "fable-decider.disabled")
+            Path(new).write_text("")
+            Path(old).write_text("")
+            self.assertEqual(npc.apply_refusal(ok, kill_files=(new,)), f"kill file {new}")
+            self.assertEqual(npc.apply_refusal(ok, kill_files=(old,)), f"kill file {old}")
+            self.assertTrue(any("fable-trays" in k for k in npc.KILL_FILES))
+            self.assertTrue(any("fable-decider" in k for k in npc.KILL_FILES), "the legacy path stays honoured")
 
     def test_the_shipped_policy_is_shadow_only(self):
         self.assertIn("apply_enabled", npc.apply_refusal(npc.policy(), kill_files=()))

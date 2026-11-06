@@ -15,7 +15,7 @@ Every row passes, at write time, against FRESH server facts (Trino on postgresql
   - a reject_* rule the ruling relies on still fires in verificationData (a close never invents a reason);
   - the track is known NOT big: server popularity 1..59 and not client-supplied metadata (unknown = big = refused);
   - the account gate answers allow (hold / unknown / timeout = refused) and the account is not watchlisted;
-  - the kill file is absent and the registry entry is approved (re-read before every write);
+  - NEITHER kill file is present and the registry entry is approved (re-read before every write);
   - the daily cap (100 writes/day, counted from the audit file) is not exhausted.
 Every write goes through muso-admin-api.sh PUT /admin/credit-requests/conditional-status with expectedStatus
 (the compare-and-set fence), is read back from Postgres, and writes one audit line per row (request id, user,
@@ -47,7 +47,15 @@ REQUESTER = "fable-decider@hydra-ops"
 ADMIN_IDENTITY = "credit-decider"          # the automation login the wrapper knows; core binds by header
 CONDITIONAL_PATH = "/admin/credit-requests/conditional-status"
 REGISTRY = os.environ.get("CREDIT_APPROVAL_REGISTRY", "/opt/hydra/policies/credit-approval-automation.json")
-KILL_FILE = os.environ.get("FABLE_DECIDER_KILL_FILE", "/etc/hydra/fable-decider.disabled")
+#: [key=fable-trays] (Fable switch-on-plan row 4, firstmate 751): the file is named for the per-item TRAY input
+#: that is off, not for the executor. BOTH names are honoured, new first, because the executor is the writer the
+#: admin boundary refuses: if it checked only one name, a host rename would leave it reserving a batch and then
+#: failing every PUT at the boundary (QA #1767) instead of stopping cleanly before it reserves anything. A rename
+#: that lands on the host before this code, or a rollback, therefore never silently re-enables the executor.
+KILL_FILES = (
+    os.environ.get("FABLE_DECIDER_KILL_FILE", "/etc/hydra/fable-trays.disabled"),
+    os.environ.get("FABLE_DECIDER_KILL_FILE_LEGACY", "/etc/hydra/fable-decider.disabled"),
+)
 AUDIT_PATH = os.environ.get("FABLE_DECIDER_AUDIT", "/var/lib/hydra/credit-review/fable-decider-audit.jsonl")
 TRINO = os.environ.get("FABLE_DECIDER_TRINO", "/opt/hydra/scripts/trino-query.sh")
 DAILY_CAP = 100
@@ -717,7 +725,7 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
         facts_fn: Callable[[list[str]], dict[str, Facts]] = fetch_facts,
         gate_fn: Callable[[Any], account_gate.GateResult] | None = None,
         writer: Writer | None = None, readback: Readback | None = None,
-        audit_path: str = AUDIT_PATH, registry_path: str = REGISTRY, kill_file: str = KILL_FILE,
+        audit_path: str = AUDIT_PATH, registry_path: str = REGISTRY, kill_files: tuple[str, ...] = KILL_FILES,
         daily_cap: int | None = None, now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         between_batches: Callable[[list[tuple[str, int, str | None]], datetime], str | None] | None = None,
         lock_path: str = WRITE_LOCK,
@@ -799,9 +807,10 @@ def run(tray: Tray, *, apply: bool, limit: int | None = None,
         batch_start = now()
         try:
             with _locked(lock_path):
-                if os.path.exists(kill_file):
-                    res.stopped = f"kill file {kill_file} present"
-                    return res
+                for kill_file in kill_files:
+                    if kill_file and os.path.exists(kill_file):
+                        res.stopped = f"kill file {kill_file} present"
+                        return res
                 if not registry_approved(registry_path):
                     res.stopped = f"registry entry {AUTOMATION_ID} not approved"
                     return res

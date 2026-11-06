@@ -8,7 +8,7 @@
 
 Read-only to core (Trino replica), the V9 store, the account gate and the fraud-lens hold set. Writes no credit status
 and sends nothing: an apply release row feeds the anchor upload + the executor's approve tray, and an ask row feeds the
-standard comm_state ask on the outbound timer. Kill file /etc/hydra/fable-decider.disabled stops apply, not shadow.
+standard comm_state ask on the outbound timer. Kill file /etc/hydra/fable-trays.disabled (or the legacy fable-decider.disabled) stops apply, not shadow.
 """
 from __future__ import annotations
 
@@ -27,7 +27,9 @@ from credit_review import stale_velocity as sv  # noqa: E402
 
 LEDGER = os.environ.get("CREDIT_REVIEW_LEDGER", "/var/lib/hydra/credit-review/ledger.sqlite3")
 DSP_STORE = os.environ.get("CREDIT_DSP_VERIFY_STORE", "/var/lib/hydra-credit-verify/dsp-verify.sqlite")
-KILL = "/etc/hydra/fable-decider.disabled"
+# [key=fable-trays] (Fable switch-on-plan row 4, firstmate 751): renamed; the old path is still honoured so a rename that
+# has not reached node-8 yet can never open this gate silently.
+KILLS = ("/etc/hydra/fable-trays.disabled", "/etc/hydra/fable-decider.disabled")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -41,8 +43,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ledger", default=LEDGER)
     ap.add_argument("--sample", type=int, default=0)
     a = ap.parse_args(argv)
-    if a.apply and (not a.approval_ref or os.path.exists(KILL)):
-        print(json.dumps({"refused": "apply needs --approval-ref (Fable's GO on the shadow) and no kill file " + KILL}))
+    kill = next((k for k in KILLS if os.path.exists(k)), "")
+    if a.apply and (not a.approval_ref or kill):
+        print(json.dumps({"refused": "apply needs --approval-ref (Fable's GO on the shadow) and no kill file "
+                                     + (kill or " / ".join(KILLS))}))
         return 2
 
     from credit_review import account_gate, comm_state, decide
