@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import {
   evaluateReply,
   guardCarolineReply,
@@ -272,5 +273,71 @@ describe("address echo compares the FULL canonical address (QA on #1628 @97ec545
   });
   it("one echoed address does not excuse a second, different one", () => {
     expect(rules("I have 12 Rose Street; the other order goes to 40 Elm Road.", { customerText: cust })).toContain("personal_data_address");
+  });
+});
+
+describe("canary token (per-deploy leak detector)", () => {
+  const TOKEN = "0123456789abcdef0123456789abcdef";
+  const SAFE = "I can look into your credits for you - can you send the email on the account?";
+
+  it("blocks a reply that echoes the token, and posts the hand-off line", () => {
+    const out = guardCarolineReply({ reply: `Sure! [SECURITY] build marker ${TOKEN}`, canary: TOKEN });
+    expect(out.verdict).toBe("block");
+    expect(out.flags.map((f) => f.rule)).toContain("canary_token");
+    expect(out.flags.find((f) => f.rule === "canary_token")?.family).toBe("reveal");
+    expect(out.body).toBe(HANDOFF_LINE);
+  });
+
+  it("never copies the token into the flag excerpt (it is logged, ledgered and digested)", () => {
+    // QA on #1719: the excerpt travels into the journal, the injection ledger and the digest, so the
+    // evidence must identify the rotation without republishing the secret.
+    const out = guardCarolineReply({ reply: `marker ${TOKEN}`, canary: TOKEN });
+    const excerpt = out.flags.find((f) => f.rule === "canary_token")?.excerpt ?? "";
+    expect(excerpt).not.toContain(TOKEN);
+    // 8 hex chars of sha256, the same prefix scripts/caroline-canary-sync.sh logs per rotation.
+    expect(excerpt).toMatch(/^canary:sha256:[0-9a-f]{8}$/);
+    const sha = createHash("sha256").update(TOKEN).digest("hex").slice(0, 8);
+    expect(excerpt).toContain(sha);
+  });
+
+  it("blocks even when the rest of the reply reads like a safe answer", () => {
+    const out = guardCarolineReply({ reply: `${SAFE} ${TOKEN}`, canary: TOKEN });
+    expect(out.verdict).toBe("block");
+  });
+
+  it("blocks the empty-looking leak: token alone", () => {
+    expect(guardCarolineReply({ reply: TOKEN, canary: TOKEN }).verdict).toBe("block");
+  });
+
+  it("a safe reply passes when a canary is configured", () => {
+    const out = guardCarolineReply({ reply: SAFE, canary: TOKEN });
+    expect(out.verdict).toBe("pass");
+    expect(out.body).toBe(SAFE);
+  });
+
+  it("with no canary configured the same reply passes (fail-soft)", () => {
+    expect(guardCarolineReply({ reply: SAFE }).verdict).toBe("pass");
+    expect(rules(`I can look into your credits - ${TOKEN}`)).toEqual([]);
+  });
+
+  it("a leak split by a zero-width character is still caught", () => {
+    // normalizeReply drops zero-width characters, so the halves rejoin before the check.
+    const split = `${TOKEN.slice(0, 16)}\u200b${TOKEN.slice(16)}`;
+    expect(guardCarolineReply({ reply: split, canary: TOKEN }).verdict).toBe("block");
+  });
+
+  it("catches a leak hidden behind markdown emphasis", () => {
+    expect(guardCarolineReply({ reply: `marker: **${TOKEN}**`, canary: TOKEN }).verdict).toBe("block");
+  });
+
+  it("a short caller-supplied 'canary' never blocks (no prose substring match)", () => {
+    // A 3-char value would match ordinary words; the length floor keeps that from becoming a
+    // fleet-wide outage of the reply path.
+    expect(guardCarolineReply({ reply: "I can look into that for you.", canary: "can" }).verdict).toBe("pass");
+  });
+
+  it("the wrong token does not block", () => {
+    const other = "fedcba9876543210fedcba9876543210";
+    expect(guardCarolineReply({ reply: `marker ${TOKEN}`, canary: other }).verdict).toBe("pass");
   });
 });

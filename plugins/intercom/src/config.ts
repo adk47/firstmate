@@ -157,6 +157,16 @@ export function resolveIntercomAccount(
       throw new Error(`intercom: account "${id}" jev.agentInstructionsPath must be a non-empty string`);
     }
   }
+  if (account.safetyClassifier?.mode !== undefined) {
+    // An unrecognised value must fail the config load rather than fall through to a default: a typo
+    // such as "shdow" would otherwise run ENFORCE on a host the operator believed was measuring in
+    // shadow, which is the one direction this knob must never fail in.
+    if (account.safetyClassifier.mode !== "shadow" && account.safetyClassifier.mode !== "enforce") {
+      throw new Error(
+        `intercom: account "${id}" safetyClassifier.mode must be "shadow" or "enforce" (got: ${account.safetyClassifier.mode})`,
+      );
+    }
+  }
 
   return {
     accountId: id,
@@ -177,6 +187,9 @@ export function resolveIntercomAccount(
     // silently dead (the default still applied downstream).
     ...(typeof account.dispatchTimeoutMs === "number" ? { dispatchTimeoutMs: account.dispatchTimeoutMs } : {}),
     ...(typeof account.coalesceDispatch === "boolean" ? { coalesceDispatch: account.coalesceDispatch } : {}),
+    // Passthrough (see dispatchTimeoutMs above): dropping it here would silently pin the lane to the
+    // default and make the config knob dead.
+    ...(account.safetyClassifier ? { safetyClassifier: { mode: account.safetyClassifier.mode } } : {}),
     blockedChannelTags: Array.isArray(account.blockedChannelTags)
       ? account.blockedChannelTags.filter((t): t is string => typeof t === "string" && t.length > 0)
       : [],

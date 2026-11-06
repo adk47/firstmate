@@ -132,6 +132,13 @@ audit-local-backup/
 # Drift baseline (server-managed; written by deploy.sh after each push)
 .deployed-sha
 
+# Per-deploy canary token (scripts/caroline-canary-sync.sh, deploy Step 5d). Both copies are
+# server-generated and rotated every deploy, so neither can ever be committed: the prompt copy
+# lives at the deploy root, and the RAG copy has to sit inside workspaces/support/reference/
+# because that is the only path memory.search.extraPaths indexes.
+.canary-token
+workspaces/support/reference/canary-token.md
+
 # Plugin install artifacts (installed on server, not in repo)
 plugins/*/node_modules/
 plugins/*/package-lock.json

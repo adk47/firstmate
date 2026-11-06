@@ -29,9 +29,23 @@ interface Case {
   inbound_min_severity?: "high" | "medium" | "low";
   bad_reply: string;
   bad_expect_families: string[];
+  /**
+   * Rules the block must name, not just the family. A family is a bucket ("reveal" holds a dozen
+   * rules), so a case that only asserts a family can pass on the WRONG rule and keep claiming a
+   * detector works after it is gone (QA on #1719: RT53's bad_reply said "system prompt", which the
+   * model_or_vendor rule catches by itself).
+   */
+  bad_expect_rules?: string[];
+  /**
+   * Re-run bad_reply with the canary OMITTED and require a pass. This is the differential that
+   * proves the block came from the canary rule and nothing else in the same text.
+   */
+  no_canary_control?: boolean;
   safe_reply: string;
   /** Code-sourced facts the safe reply depends on (e.g. status_chase needs openRequest). */
   safe_facts?: { openRequest?: boolean };
+  /** Fixed per-case canary token, for the canary-leak cases (the live token rotates per deploy). */
+  canary?: string;
 }
 
 const corpus = JSON.parse(
@@ -63,14 +77,30 @@ describe("red-team corpus", () => {
         });
       }
       it("blocks the bad reply", () => {
-        const r = guardCarolineReply({ reply: c.bad_reply, customerText: c.customer });
+        const r = guardCarolineReply({ reply: c.bad_reply, customerText: c.customer, canary: c.canary });
         expect(r.verdict, `${c.id}: ${JSON.stringify(r.flags)}`).toBe("block");
         const fams = new Set(r.flags.map((f) => f.family));
         expect(c.bad_expect_families.some((f) => fams.has(f as never)), `${c.id} families ${[...fams]}`).toBe(true);
+        const rules = new Set(r.flags.map((f) => f.rule));
+        for (const rule of c.bad_expect_rules ?? []) {
+          expect(rules.has(rule), `${c.id} rules ${[...rules]}`).toBe(true);
+        }
         expect(r.body).toBe(BLOCKED_REPLY_FALLBACK);
       });
+      if (c.no_canary_control) {
+        it("blocks on the canary rule alone (the same text without the canary passes)", () => {
+          const r = guardCarolineReply({ reply: c.bad_reply, customerText: c.customer });
+          expect(r.flags, `${c.id} no-canary control: ${JSON.stringify(r.flags)}`).toEqual([]);
+          expect(r.verdict, `${c.id} no-canary control`).toBe("pass");
+        });
+      }
       it("passes the safe (approved) reply", () => {
-        const r = guardCarolineReply({ reply: c.safe_reply, customerText: c.customer, facts: c.safe_facts });
+        const r = guardCarolineReply({
+          reply: c.safe_reply,
+          customerText: c.customer,
+          facts: c.safe_facts,
+          canary: c.canary,
+        });
         expect(r.flags.filter((f) => f.family !== "note"), `${c.id} safe: ${JSON.stringify(r.flags)}`).toEqual([]);
         expect(r.verdict).toBe("pass");
       });

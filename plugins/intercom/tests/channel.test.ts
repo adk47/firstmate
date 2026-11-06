@@ -756,6 +756,36 @@ describe("buildAgentRawBody", () => {
     expect(out.indexOf("[ROUTING]")).toBeLessThan(out.indexOf("[CUSTOMER_MESSAGE]"));
   });
 
+  it("injects the per-deploy canary marker as a bare line ABOVE every block", () => {
+    // canary-token.ts: the marker must not sit inside [KNOWLEDGE_BASE] or [CONVERSATION_CONTEXT],
+    // because both strippers are tag-scoped and run before guardOutbound, so a regurgitated canary
+    // inside either block would never reach the guard. First line = outside both.
+    const token = "0123456789abcdef0123456789abcdef";
+    const out = buildAgentRawBody(
+      "hi",
+      { accountEmail: "x@y.com" },
+      undefined,
+      [{ snippet: "Muso has Lite, Pro, and Business plans." }],
+      undefined,
+      "[ROUTING]\npath: caroline_tool (0.85)\n[/ROUTING]",
+      token,
+    );
+    const lines = out.split("\n");
+    expect(lines[0]).toContain(token);
+    expect(lines[0]).toContain("[SECURITY]");
+    expect(out.match(new RegExp(token, "g"))?.length).toBe(1);
+    // Everything else keeps its existing order.
+    expect(out.indexOf("[KNOWLEDGE_BASE]")).toBeLessThan(out.indexOf("[CONVERSATION_CONTEXT]"));
+    expect(out.indexOf("[ROUTING]")).toBeLessThan(out.indexOf("[CUSTOMER_MESSAGE]"));
+  });
+
+  it("omits the canary line when no token is configured (dev, CI, pre-deploy host)", () => {
+    for (const canary of [undefined, null, "", "short"]) {
+      const out = buildAgentRawBody("hi", {}, undefined, undefined, undefined, undefined, canary as string);
+      expect(out).toBe("hi");
+    }
+  });
+
   it("omits the [ROUTING] block entirely when jevBlock is null/undefined", () => {
     const out = buildAgentRawBody("hi", {}, undefined, undefined, undefined, null);
     expect(out).not.toContain("[ROUTING]");

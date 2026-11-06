@@ -1,3 +1,12 @@
-llamafirewall[promptguard]>=0.2.0,<1.0.0
-fastapi>=0.115.0,<1.0.0
-uvicorn[standard]>=0.34.0,<1.0.0
+# PromptGuard 2 sidecar app deps. Versions are PINNED to the ones the measured latency numbers in
+# the PR were taken with (transformers 4.49.0 / fastapi 0.115.12 / uvicorn 0.34.0 / pydantic
+# 2.11.3), so a rebuild cannot silently change inference behaviour or the response contract.
+#
+# llamafirewall is deliberately GONE. Its PROMPT_GUARD scanner resolves the model by hub repo id
+# (meta-llama/Llama-Prompt-Guard-2-22M, which is gated -> 401 without an HF token) instead of the
+# pinned local directory this image bakes in. See server.py's module docstring.
+fastapi==0.115.12
+uvicorn[standard]==0.34.0
+pydantic==2.11.3
+transformers==4.49.0
+safetensors==0.5.3

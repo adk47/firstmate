@@ -6,8 +6,14 @@
 // (<plugin-dir>/redteam/caroline-redteam-cases.json; NOT under tests/, which deploy.sh rsync excludes), and checks every case exactly as
 // plugins/intercom/tests/redteam.test.ts does in CI:
 //   - the inbound watch raises the expected rules (and flags the injected document text);
-//   - the output guard BLOCKS the bad reply (expected family) and posts the approved fallback;
+//   - the output guard BLOCKS the bad reply (expected family, and every rule in bad_expect_rules)
+//     and posts the approved fallback;
+//   - a case with no_canary_control re-runs its bad_reply with the canary omitted and must PASS,
+//     so the block is provably the canary rule and not another rule firing on the same text;
 //   - the output guard PASSES the safe reply.
+// A case carrying `canary` (the per-deploy leak detector) is run with that FIXED test token, so this
+// replay proves the canary RULE on the deployed build without needing the live deploy token. The live
+// token's rotation and end-to-end injection are verified separately by scripts/caroline-canary-sync.sh --check.
 // Prints one JSON report on stdout; exit 1 when any case fails, 2 when the plugin cannot be loaded.
 // Read-only: it sends nothing, writes nothing, calls no model.
 //
@@ -53,14 +59,24 @@ for (const c of corpus.cases) {
   if (c.inbound_min_severity === "high" && !hits.some((h) => h.severity === "high")) fail(c.id, "inbound severity below high");
   if (c.document_text && scanForInjection(c.document_text).length === 0) fail(c.id, "injected document not flagged");
 
-  const bad = guardCarolineReply({ reply: c.bad_reply, customerText: c.customer });
+  const bad = guardCarolineReply({ reply: c.bad_reply, customerText: c.customer, canary: c.canary });
   if (bad.verdict !== "block") fail(c.id, "bad reply PASSED the output guard");
   else {
     const fams = new Set(bad.flags.map((f) => f.family));
     if (!c.bad_expect_families.some((f) => fams.has(f))) fail(c.id, `blocked under ${[...fams]} not ${c.bad_expect_families}`);
+    const rules = new Set(bad.flags.map((f) => f.rule));
+    for (const rule of c.bad_expect_rules ?? []) {
+      if (!rules.has(rule)) fail(c.id, `blocked under ${[...rules]} not ${rule}`);
+    }
     if (OUTPUT_GUARD_MODE === "enforce" && bad.body !== BLOCKED_REPLY_FALLBACK) fail(c.id, "blocked body is not the approved fallback");
   }
-  const safe = guardCarolineReply({ reply: c.safe_reply, customerText: c.customer, facts: c.safe_facts });
+  if (c.no_canary_control) {
+    const control = guardCarolineReply({ reply: c.bad_reply, customerText: c.customer });
+    if (control.verdict !== "pass" || control.flags.length) {
+      fail(c.id, `no-canary control did not pass: ${control.verdict} ${control.flags.map((f) => f.rule)}`);
+    }
+  }
+  const safe = guardCarolineReply({ reply: c.safe_reply, customerText: c.customer, facts: c.safe_facts, canary: c.canary });
   const safeFlags = safe.flags.filter((f) => f.family !== "note");
   if (safe.verdict !== "pass" || safeFlags.length) fail(c.id, `safe reply blocked: ${safeFlags.map((f) => f.rule)}`);
 }

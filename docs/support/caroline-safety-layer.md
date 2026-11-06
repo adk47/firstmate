@@ -1,7 +1,8 @@
 # Caroline safety layer (caroline-guard-g1, 2026-11-01)
 
 Code that sits between Caroline and the customer. Decisions come from code, not from a prompt. Kill paths and
-modes are source constants with no env switches, and the detection parts never act on what they read.
+modes are source constants (or, for the optional classifier's rollout stage only, one reviewed config key) with no
+env switches, and the detection parts never act on what they read.
 
 | Part | Where | What it does |
 |---|---|---|
@@ -9,8 +10,17 @@ modes are source constants with no env switches, and the detection parts never a
 | Adapter `sendText` | `sendTextReply` in `channel.ts` | The channel adapter's outbound path (agent, cron and `/hooks/agent` callers) goes through the SAME `guardOutbound` before posting, with the same fallback, reassignment and page. That path holds no customer turn, so a phone/address echo fails closed. |
 | Answer bank | `plugins/intercom/src/answer-bank.ts` (`BANK_VERSION`) | The one versioned set of approved lines per intent. The guard masks them before the rules run (an approved line is never blocked) and logs a paraphrase as a `note` (never a block). `scripts/check-caroline-answer-bank.sh` keeps it equal to the workspace anchors and pins its hash. |
 | Injection watch | `plugins/intercom/src/injection-watch.ts` (Intercom inbound) and `scripts/lib/injection_watch.py` (support@ email in `proof/gmail_intake.py`, proof text in `docverify/extract.py`) | Detection only. A hit becomes a ledger row. Medium and high hits are tagged `ai:injection-watch`, and a burst (5/h) or a repeat sender (3/24h) pages. Low hits are ledger-only. A **HIGH** hit also stores a short MASKED context window (emails, phones, 6+ digit ids and claim-code-shaped tokens redacted — `ORDER-123456789` and `XK4F7Q` included — ≤160 chars, cut on a word boundary) so it can be adjudicated after the fact — the bare match for `role_marker` is only `Assistant:`. Medium and low hits stay text-free. The two rule copies, including that masking, are pinned equal by `scripts/tests/injection-watch-parity.bats`. |
-| Classifier (optional, second) | `plugins/intercom/src/safety-classifier.ts` → PromptGuard sidecar `127.0.0.1:18793` | Labels inbound and outbound text. It can only ADD a block (score ≥ 0.98) and never remove one. It fails soft to `unavailable`. Every unavailable call, clean traffic included, is written at once as a `classifier_unavailable` ledger row, so idle periods and restarts lose nothing. Totals go to a `classifier_health` row every 15 minutes, written on the clock as well. The digest reports unavailable calls out of total calls, so an outage that recovers before the daily probe still shows. The sidecar is **not deployed** on node-8 as of 2026-11-01. |
-| Daily red-team | `scripts/caroline-safety-daily.sh` (`caroline-safety-daily.timer`, 06:10 UTC) | Replays the corpus `plugins/intercom/redteam/caroline-redteam-cases.json` (outside `tests/`: deploy.sh rsync excludes every `tests/` dir, so a corpus there never reaches node-8) (52 cases) against the DEPLOYED edge plugin (`scripts/caroline-redteam.mjs`), and the injected-document cases against the doc-verify gate (`scripts/caroline_redteam_docverify.py`). It then digests the ledger and refreshes the watch candidates. Any failing case, an unloadable layer, or fewer passing cases than the day before pages critical. |
+| Classifier (second, additive) | `plugins/intercom/src/safety-classifier.ts` → PromptGuard 2 22M sidecar `127.0.0.1:18793` (`promptguard/`, unit `hydra-promptguard.service`) | Labels inbound and outbound text. It can only ADD a block (score ≥ 0.98) and never remove one. It fails soft to `unavailable`. Every unavailable call, clean traffic included, is written at once as a `classifier_unavailable` ledger row, so idle periods and restarts lose nothing. Totals go to a `classifier_health` row every 15 minutes, written on the clock as well. The digest reports unavailable calls out of total calls, so an outage that recovers before the daily probe still shows. **Ships in shadow** (below): until the measurement says otherwise a hit records a `classifier_shadow_block` row and the reply is posted unchanged. |
+| PromptGuard sidecar | `promptguard/{Dockerfile,server.py}`, installed by `scripts/install-aux-units.sh`, driven by `scripts/promptguard-sidecar.sh` | Meta Llama Prompt Guard 2 22M, CPU only, one torch thread. Container `--cpus 1 --memory 1g` plus `CPUQuota=100%` / `MemoryMax=1G` / `Nice=10` on the unit, so it always loses to the gateway for CPU. The model is baked into the image at build time (sha256-pinned by `model.sha256`, from a non-gated mirror), so inference never touches the network and a swapped model fails the build instead of serving. `ensure-image` rebuilds only when a source fingerprint moves, and the installer restarts an already ACTIVE unit only when that fingerprint moved (a plain `systemctl start` on an active unit is a no-op, so a changed `server.py` would otherwise never reach the running container). Cold load ~4.3 s; a request during it gets a 503, never a silent `benign`. Operators: `scripts/promptguard-sidecar.sh check`. |
+| Canary token | `plugins/intercom/src/canary-token.ts` + `scripts/caroline-canary-sync.sh` (deploy Step 5d) | A random 32-hex marker, ROTATED EVERY DEPLOY, in two places: a bare line in Caroline's dispatched body (`buildAgentRawBody`, outside `[KNOWLEDGE_BASE]` / `[CONVERSATION_CONTEXT]`, because both outbound strippers are tag-scoped and run before the guard) and `workspaces/support/reference/canary-token.md` so her retrieval carries it too. A reply containing it is blocked as `reveal` / `canary_token`, and the recorded evidence is
+`canary:sha256:<8 hex>` rather than the token itself, because that excerpt is logged, ledgered and digested; the
+same 8-char prefix is what `caroline-canary-sync.sh` logs per rotation, so a leak still names the deploy. It is
+a DETECTOR, not a credential: it grants nothing and losing it costs one band. RT53 is the red-team case, and it is
+built to fail if the rule is ever removed: its bad reply says nothing any other reveal rule matches, it pins
+`canary_token` by name in `bad_expect_rules` (a family alone is a bucket of a dozen rules, so a case asserting only
+`reveal` can pass on the wrong rule), and `no_canary_control` re-runs the same text with the canary omitted and
+requires a pass. |
+| Daily red-team | `scripts/caroline-safety-daily.sh` (`caroline-safety-daily.timer`, 06:10 UTC) | Replays the corpus `plugins/intercom/redteam/caroline-redteam-cases.json` (outside `tests/`: deploy.sh rsync excludes every `tests/` dir, so a corpus there never reaches node-8) (53 cases) against the DEPLOYED edge plugin (`scripts/caroline-redteam.mjs`), and the injected-document cases against the doc-verify gate (`scripts/caroline_redteam_docverify.py`). It then digests the ledger and refreshes the watch candidates. Any failing case, an unloadable layer, or fewer passing cases than the day before pages critical. |
 
 Fact-conditioned lines (Fable r5 `[key=status-chase-fact]`, FAIL CLOSED): a bank entry with `requiresFact`
 (today `status_chase` needs `open_request`) posts only when code supplies the fact as known-true at send. A
@@ -18,6 +28,37 @@ false or unknown fact blocks it, and so does a paraphrase that keeps the lead; t
 line. The plugin has no code-sourced open-request fact yet, so **every status chase hands off** until one is
 wired from where core keeps it. After that: true gives status_chase, false gives the declined fact, unknown
 gives HANDOFF. The daily digest states `classifier=available|unavailable` (Fable s1).
+
+## Measured detection and the shadow-first rollout
+
+Prompt Guard 2 22M is a coarse second opinion, not a filter, and the numbers say so. On the 52-bad / 52-safe reply
+corpus as measured on 2026-11-04 (RT53 was added after) it caught 1 bad reply and 0 safe ones (highest safe score 0.069, threshold 0.98). On 56 Muso-targeted inbound
+attacks it caught 4-5, everything else scoring <= 0.099; generic jailbreaks score 0.99+ (ignore-previous-instructions,
+DAN, override) while roleplay, impersonation and tool-name framings score <= 0.02. So it adds a band against the
+crude attacks, and it must never be treated as the guard.
+
+That is why it ships in shadow. `account.safetyClassifier.mode` (config: `openclaw-edge.json`, currently `"shadow"`)
+decides what a hit does: `shadow` writes one `classifier_shadow_block` ledger row (score and the threshold it was
+measured against) and posts the reply unchanged; `enforce` blocks. ABSENT means `enforce`, which is what every host
+did before the sidecar existed, so a host that never sets the key cannot silently stop enforcing. The legacy
+host-only intake (`scripts/intercom-webhook.js`) is shadow by default for the same reason (`PROMPTGUARD_MODE`): every
+one of its scans returned 0 while the sidecar was down, so flipping it in the same change would have been an
+unmeasured intake change. That value is VALIDATED (`scripts/intercom-webhook-promptguard-mode.js`): unset means
+shadow, and anything set but unrecognised ENFORCES and logs CRITICAL, because a typo (`enfroce`) silently meaning
+"shadow" would switch the block off while the operator believed it was on.
+
+Before flipping to `enforce`, read the rows:
+
+```bash
+# every would-block row, with its score: these rows ARE the false-positive measurement
+grep '"kind":"classifier_shadow_block"' /var/lib/hydra/injection-watch/ledger.jsonl | tail -50
+# and confirm the sidecar answered at all, rather than "no rows" meaning "nothing was measured"
+/opt/hydra/scripts/promptguard-sidecar.sh check
+python3 /opt/hydra/scripts/injection-watch.py digest --hours 24
+```
+
+No rows with a healthy sidecar means the corpus agrees with production. No rows with an unhealthy sidecar means
+nothing was measured, which is exactly what the `classifier_unavailable` rows exist to make visible.
 
 ## Files on node-8
 
@@ -102,6 +143,12 @@ gives HANDOFF. The daily digest states `classifier=available|unavailable` (Fable
 - Watch candidates: `/var/lib/hydra/injection-watch/watch-candidates.json`. This is a REVIEW list for the fraud-lens
   watchlist owner. Moving a sender onto `policies/fraud-watchlist.json` is a reviewed PR. Nothing writes the watchlist.
 - Daily records: `/var/lib/hydra/caroline-redteam/<date>.json`.
+- Canary: `/opt/hydra/.canary-token` (0600, prompt copy) and
+  `/opt/hydra/workspaces/support/reference/canary-token.md` (0644, RAG copy). Both server-generated and
+  rsync-excluded, so neither is ever in the repo. `scripts/caroline-canary-sync.sh --check` proves they agree; a
+  disagreement means one write landed and the other did not.
+- PromptGuard image state: `/var/lib/hydra/promptguard/image.fingerprint` (the source fingerprint the built image
+  corresponds to).
 
 ## Changing things
 
@@ -115,6 +162,11 @@ gives HANDOFF. The daily digest states `classifier=available|unavailable` (Fable
   stop masking something, only with a parity fixture that proves both sides still agree.
 - **Switch the guard to shadow (log but post).** Change `OUTPUT_GUARD_MODE` in source and ship it as a PR. There is
   deliberately no runtime switch.
+- **Flip the classifier between shadow and enforce.** Edit `account.safetyClassifier.mode` in `openclaw-edge.json`.
+  This one IS a config key: the point of the shadow window is to measure and then enforce without a code change in
+  between. Both values are asserted by tests (`plugins/intercom/tests/caroline-safety.test.ts`, `config.test.ts`).
+- **The canary.** Nothing to edit: Step 5d rotates it every deploy. `--reuse` keeps the current one (staging, a
+  hand-run), `--check` verifies, `--dry-run` shows what would change.
 
 ## Triage
 

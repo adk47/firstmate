@@ -1,0 +1,19 @@
+# Pinned weights for Meta Llama Prompt Guard 2 22M, served by promptguard/server.py.
+#
+# Source repo:  project-free-llama/Llama-Prompt-Guard-2-22M  (NON-GATED mirror)
+# Revision:     98f241c60b7999ba67eb8603f548461b577b3bc9
+#
+# Meta's canonical repo meta-llama/Llama-Prompt-Guard-2-22M is GATED: an anonymous fetch answers
+# 401, and there is no HF_TOKEN on node-8 or in the deploy environment. This mirror serves the same
+# DebertaV2ForSequenceClassification weights (hidden_size 384, 12 layers, vocab 128100) anonymously.
+# The digests below were computed from a local download of that exact revision; the build FAILS if
+# a single byte differs, so "the model we measured" and "the model in production" cannot diverge.
+#
+# Format is sha256sum's own: `<digest>  <filename>` so `sha256sum -c model.sha256` is the check.
+# `checklist.chk`, `LICENSE`, `MODEL_CARD.md` and `USE_POLICY.md` are not needed to run the model and
+# are deliberately NOT pinned here (fetch-model.sh downloads only what this file lists).
+1dc4742d04507072cafffb7235dc5dba5af9ba126f7a9830b95ed7ec00fd9104  config.json
+5120e30bcd536ce285345d9ec104bea6bd6e8f94365b99a340c764f417ea5fa1  model.safetensors
+9463f61e1b109a8eb4688b829260d7c6b1e6dff04c98ff7269bb89e2b92369b9  special_tokens_map.json
+557b3d33d3f41b81ad769244e506549e98a1857d41dd58160aacd4d98d710b5a  tokenizer_config.json
+6eb983352e73f1697b883a8c3f6b66bdfa336ab3d29dd3687f8316d0ff2789c1  tokenizer.json

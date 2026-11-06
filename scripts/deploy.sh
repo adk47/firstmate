@@ -947,6 +947,15 @@ RSYNC_EXCLUDES=(
   # Pre-swap openclaw runtime version (written by install_openclaw, cleared by
   # Step 6, consumed by rollback.sh Step 1c); same survive-rsync rule.
   --exclude='.pre-deploy-openclaw-version'
+  # Caroline's per-deploy canary token, GENERATED on the server by
+  # scripts/caroline-canary-sync.sh (Step 5d). Unlike .deployed-sha this one must
+  # ALSO survive Step 5d running after the sync: without the exclude, rsync
+  # --delete removes it first and the Step 4a pre-flight then reads it as a
+  # server-only would-delete file and reds every PR until the next deploy. Same
+  # class of failure as .cto-clone-hooks.gitconfig below. Server-owned, random
+  # per deploy, never tracked in the repo. The RAG copy inside
+  # workspaces/support/reference/ carries its own exclude further down.
+  --exclude='.canary-token'
   # Decommissioned CLIProxyAPI sidecar (PR #224). Files no longer in the
   # repo but may still exist on /opt/hydra/ until ops cleanup. Excluded
   # so rsync --delete doesn't trip the deploy pre-flight gate; safe to
@@ -1136,6 +1145,15 @@ RSYNC_EXCLUDES=(
   # KEEP_GLOBS drift guard needs no mirror.
   --exclude='workspaces/support/reference/hc-*.md'
   --exclude='workspaces/support/reference/hc-manifest.json'
+  # Caroline's per-deploy canary marker, GENERATED on the server by
+  # scripts/caroline-canary-sync.sh (Step 5d, immediately before the gateway restart so the new
+  # process loads the new token). The token is random per deploy BY DESIGN -- a fixed value is
+  # learnable, so a leaked marker would be known to every attacker. That also means it can never be
+  # committed. Same shape and same reasoning as the four excludes above: it must live inside
+  # reference/ to be RAG-indexed at all, so rsync --delete would wipe it every deploy and the Step 4a
+  # pre-flight would read it as a would-delete server file and red every PR. Depth-2, so the
+  # KEEP_GLOBS drift guard needs no mirror.
+  --exclude='workspaces/support/reference/canary-token.md'
   # Agent-created backups directory — never in repo, never overwritten.
   --exclude='workspaces/*/backups/'
   # Per-PR QA review state (external-pr-review runs write
@@ -3773,6 +3791,24 @@ if $HYDRA_LOCAL; then  # hydra-hook: reviewed-indirection (boolean flag, not a c
     log "  Aux units installed/refreshed."
   else
     log "  install-aux-units.sh missing or not executable — skipping (laptop deploy?)"
+  fi
+
+  # -------------------------------------------------------------------
+  # Step 5d: Rotate Caroline's canary token
+  # -------------------------------------------------------------------
+  # The prompt copy is read by the gateway at reply time (canary-token.ts), so the rotation has to
+  # land BEFORE Step 6 restarts it: a token written after the restart would be invisible to the
+  # process that just loaded, and the marker line would ship empty for a whole deploy. The RAG copy
+  # is picked up by the next index refresh.
+  #
+  # FAIL-SOFT ON PURPOSE (`|| log WARN`, never `|| fail`). A missing canary weakens one leak-detection
+  # layer; a deploy rolled back over a canary would take every other fix with it. The guard and the
+  # injection watch do not depend on this file existing.
+  if [ -x "$DEPLOY_PATH/scripts/caroline-canary-sync.sh" ]; then
+    "$DEPLOY_PATH/scripts/caroline-canary-sync.sh" --root "$DEPLOY_PATH" \
+      || log "canary rotation FAILED — Caroline will run without a canary marker ($?); see scripts/caroline-canary-sync.sh --check"  # hydra-hook: reviewed-indirection reviewed-argv (deployed script by path)
+  else
+    log "caroline-canary-sync.sh not present; skipping canary rotation"
   fi
 else
   log "Step 5c/8: skipping aux-units install (not running on node-8)"

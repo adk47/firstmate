@@ -207,6 +207,11 @@ required_excludes=(
   "workspaces/*/.wrangler/"
   "workspaces/support/reference/hc-*.md"
   "workspaces/support/reference/hc-manifest.json"
+  # Server-generated per-deploy canary (scripts/caroline-canary-sync.sh). Losing either copy costs
+  # one detection band silently, so removing the exclude must fail the commit like any other
+  # live-state protection.
+  "workspaces/support/reference/canary-token.md"
+  ".canary-token"
   "/scratch/"
   "/.openclaw/"
   "/intercom/"

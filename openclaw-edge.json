@@ -418,6 +418,9 @@
             "sms",
             "abuse-block"
           ],
+          "safetyClassifier": {
+            "mode": "shadow"
+          },
           "personalization": {
             "enabled": true,
             "timeoutMs": 2500

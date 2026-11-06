@@ -14,7 +14,25 @@ const MAX_RETRIES = 3;
 
 // --- PromptGuard injection scanning ---
 const PROMPTGUARD_URL = process.env.PROMPTGUARD_URL || "http://localhost:18793";
-const PROMPTGUARD_TIMEOUT_MS = 50; // hard cap — fail-open if slow
+// Budget, not a guess: PromptGuard 2 22M on one thread measured median 55 ms / p95 150 ms / max 194 ms
+// on node-8-class hardware (promptguard/server.py, 512 tokens). The old 50 ms cap failed open on
+// roughly HALF of all calls, which would make any shadow measurement blind by construction. 300 ms
+// covers p95 at 2x and still hard-bounds the latency this adds to the live intake path.
+const PROMPTGUARD_TIMEOUT_MS = 300; // hard cap: fail-open if slow
+// SHADOW BY DEFAULT (caroline-promptguard-canary-p1, Fable safety lead §5). Bringing the sidecar up
+// must not silently change what this lane DOES: before the sidecar existed every scan returned
+// score 0, so nothing was ever blocked, and flipping the whole lane to "enforce" in the same change
+// would make a classifier rollout into an intake-behavior change nobody measured. "shadow" records
+// the verdict (log + #cs_chats badge) and posts normally; "enforce" restores the blocking behaviour
+// written below. Flip with PROMPTGUARD_MODE=enforce in the unit's environment after the shadow
+// window shows a zero false-positive rate.
+const { resolvePromptguardMode } = require("./intercom-webhook-promptguard-mode.js");
+const PROMPTGUARD = resolvePromptguardMode(process.env.PROMPTGUARD_MODE);
+if (PROMPTGUARD.warning) {
+  console.error(`[intercom-webhook] CRITICAL: ${PROMPTGUARD.warning}`);
+}
+const PROMPTGUARD_MODE = PROMPTGUARD.mode;
+const PROMPTGUARD_ENFORCING = PROMPTGUARD.enforcing;
 const BLOCK_THRESHOLD = parseFloat(process.env.PROMPTGUARD_BLOCK_THRESHOLD || "0.85");
 const FLAG_THRESHOLD = parseFloat(process.env.PROMPTGUARD_FLAG_THRESHOLD || "0.3");
 const OUTPUT_BLOCK_THRESHOLD = parseFloat(process.env.PROMPTGUARD_OUTPUT_BLOCK_THRESHOLD || "0.7");
@@ -363,7 +381,14 @@ const server = http.createServer(async (req, res) => {
 
       // PromptGuard injection scan (input)
       const pgResult = await scanWithPromptGuard(customerBody);
-      if (pgResult.score > BLOCK_THRESHOLD) {
+      // Shadow mode records what ENFORCE would have refused and dispatches anyway. Computed once so
+      // the badge below and the branch here can never disagree about what "would have blocked" means.
+      const pgWouldBlock = pgResult.score > BLOCK_THRESHOLD;
+      if (pgWouldBlock && !PROMPTGUARD_ENFORCING) {
+        console.warn(
+          `[intercom-webhook] SHADOW-WOULD-BLOCK conv=${convId} promptguard=${pgResult.score} label=${pgResult.label} threshold=${BLOCK_THRESHOLD} (dispatched unchanged)`,
+        );
+      } else if (pgWouldBlock) {
         console.warn(`[intercom-webhook] BLOCKED conv=${convId} promptguard=${pgResult.score} label=${pgResult.label}`);
         await replyToIntercom(convId, "I'd be happy to help! Could you rephrase your question about Muso.AI?");
         // Post to #cs_chats — blocked
@@ -400,7 +425,11 @@ const server = http.createServer(async (req, res) => {
 
       // Build badges for Slack notification
       const inboundBadges = [];
-      if (pgFlagged) inboundBadges.push(`:warning: pg=${pgResult.score.toFixed(2)}`);
+      if (pgWouldBlock && !PROMPTGUARD_ENFORCING) {
+        // Visible in #cs_chats during the shadow window: a would-block that never reached a human
+        // would leave the measurement invisible until the daily digest.
+        inboundBadges.push(`:shield: shadow would-block pg=${pgResult.score.toFixed(2)}`);
+      } else if (pgFlagged) inboundBadges.push(`:warning: pg=${pgResult.score.toFixed(2)}`);
       if (quarantineMode === "soft") inboundBadges.push(`:large_yellow_circle: FAQ-only`);
 
       // Post inbound to #cs_chats (async — don't block dispatch)
@@ -417,7 +446,13 @@ const server = http.createServer(async (req, res) => {
         const outputScan = await scanWithPromptGuard(agentReply);
         let finalReply = agentReply;
         let outputBlocked = false;
-        if (outputScan.score > OUTPUT_BLOCK_THRESHOLD) {
+        if (outputScan.score > OUTPUT_BLOCK_THRESHOLD && !PROMPTGUARD_ENFORCING) {
+          // SHADOW: the openclaw plugin's own output guard is the enforced gate on this lane; this
+          // scan only records what the classifier would have added on top of it.
+          console.warn(
+            `[intercom-webhook] SHADOW-WOULD-BLOCK-OUTPUT conv=${convId} promptguard=${outputScan.score} label=${outputScan.label} threshold=${OUTPUT_BLOCK_THRESHOLD} (posted unchanged)`,
+          );
+        } else if (outputScan.score > OUTPUT_BLOCK_THRESHOLD) {
           console.error(`[intercom-webhook] OUTPUT BLOCKED conv=${convId} promptguard=${outputScan.score} label=${outputScan.label}`);
           finalReply = "I apologize, I'm having trouble with that question. Let me create a support ticket so our team can help you directly.";
           outputBlocked = true;

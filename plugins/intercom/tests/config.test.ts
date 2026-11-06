@@ -344,6 +344,24 @@ describe("jev.questionsVersion / jev.shadowVersions config (shadow-only rollout 
     expect(() => resolveIntercomAccount(cfg)).toThrow(/questionsVersion must be "v1" or "v2"/);
   });
 
+  // caroline-promptguard-canary-p1: the classifier rollout stage. Both of these exist because
+  // getting them wrong is silent: a dropped passthrough pins the lane to the default (the
+  // dispatchTimeoutMs bug), and a typo'd mode would otherwise fall through to ENFORCE on a host
+  // whose operator believes it is only measuring.
+  it("passes safetyClassifier.mode through to the resolved account", () => {
+    const cfg = {
+      channels: { intercom: { accounts: { default: { ...base, safetyClassifier: { mode: "shadow" } } } } },
+    };
+    expect(resolveIntercomAccount(cfg).safetyClassifier).toEqual({ mode: "shadow" });
+  });
+
+  it("throws on an unrecognised safetyClassifier.mode", () => {
+    const cfg = {
+      channels: { intercom: { accounts: { default: { ...base, safetyClassifier: { mode: "shdow" } } } } },
+    };
+    expect(() => resolveIntercomAccount(cfg)).toThrow(/safetyClassifier\.mode must be "shadow" or "enforce"/);
+  });
+
   it("throws when shadowVersions is not an array of strings", () => {
     const cfg = {
       channels: { intercom: { accounts: { default: { ...base, jev: { enabled: true, apiKey: "k", shadowVersions: "v2" } } } } },

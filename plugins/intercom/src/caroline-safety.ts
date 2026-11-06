@@ -23,7 +23,7 @@ import {
 } from "./injection-watch.js";
 import { createHash } from "node:crypto";
 import { appendSafetyLedger, emailSha256 } from "./safety-ledger.js";
-import { classifierBlocksOutbound, classifyText, type ClassifierResult } from "./safety-classifier.js";
+import { classifierBlocksOutbound, classifyText, OUTBOUND_BLOCK_SCORE, type ClassifierResult } from "./safety-classifier.js";
 import { BLOCKED_REPLY_FALLBACK } from "./answer-bank.js";
 
 export const OUTPUT_GUARD_TAG = "ai:output-guard";
@@ -43,6 +43,11 @@ export interface SafetyAccount {
   botAdminId: string;
   defaultInboxId?: string;
   fallbackSlackSupervisionChannel?: string;
+  /**
+   * Classifier rollout stage (IntercomAccountConfig.safetyClassifier). Absent = "enforce", the
+   * historical behaviour, so a host that never sets the key keeps exactly what it does today.
+   */
+  safetyClassifier?: { mode?: "shadow" | "enforce" };
 }
 
 export interface SafetyDeps {
@@ -246,6 +251,8 @@ export interface OutboundGuardParams {
   customerEmails?: string[];
   /** Code-sourced facts at send (see GuardInput.facts). */
   facts?: { openRequest?: boolean };
+  /** Per-deploy canary token (see GuardInput.canary). Resolved by the caller, never read from env here. */
+  canary?: string;
   tag: string;
   log?: SafetyLog;
   deps?: SafetyDeps;
@@ -270,15 +277,45 @@ export async function guardOutbound(p: OutboundGuardParams): Promise<OutboundGua
     customerNames: p.customerNames,
     customerEmails: p.customerEmails,
     facts: p.facts,
+    canary: p.canary,
   });
   // Classifier second: only when the rules passed, and it can only ADD a block.
+  // Rollout stage comes from CONFIG, never from the ambient environment (a pinned test asserts this
+  // file never reads an environment variable). Absent or unrecognised = "enforce": the conservative
+  // direction is the one this lane already ships.
+  const classifierMode = p.account.safetyClassifier?.mode === "shadow" ? "shadow" : "enforce";
   let classifier: ClassifierResult = { label: "unavailable", score: null };
   if (result.verdict === "pass") {
     classifier = await classifyCounted(d, p.health ?? sharedHealth, "outbound", p.reply, p.log, p.tag);
     if (classifierBlocksOutbound(classifier)) {
-      result.verdict = "block";
-      result.flags.push({ family: "reveal", rule: `classifier_${classifier.label}`, excerpt: `score=${classifier.score}` });
-      if (OUTPUT_GUARD_MODE === "enforce") result.body = BLOCKED_REPLY_FALLBACK;
+      if (classifierMode === "shadow") {
+        // SHADOW (the 24 h measurement window, Fable safety lead §5): record exactly what ENFORCE
+        // would have blocked, and post the reply unchanged. The ledger row IS the measurement -- the
+        // false-positive rate is computed from these rows, so this must never be folded into
+        // `flags` or `verdict`, where the normal note/block paths would both distort it.
+        p.log?.warn?.(
+          `[intercom:output-guard] [${p.tag}] conv=${p.conversationId} SHADOW-CLASSIFIER-BLOCK label=${classifier.label} score=${classifier.score} threshold=${OUTBOUND_BLOCK_SCORE} (posted unchanged)`,
+        );
+        const shadowErr = await d.appendLedger({
+          ts: new Date(d.now()).toISOString(),
+          kind: "classifier_shadow_block",
+          source: "intercom",
+          direction: "outbound",
+          ref: p.conversationId,
+          label: classifier.label,
+          score: classifier.score,
+          threshold: OUTBOUND_BLOCK_SCORE,
+        });
+        if (shadowErr) {
+          p.log?.error?.(
+            `[intercom:ALERT] [${p.tag}] classifier-shadow ledger append failed conv=${p.conversationId}: ${shadowErr}`,
+          );
+        }
+      } else {
+        result.verdict = "block";
+        result.flags.push({ family: "reveal", rule: `classifier_${classifier.label}`, excerpt: `score=${classifier.score}` });
+        if (OUTPUT_GUARD_MODE === "enforce") result.body = BLOCKED_REPLY_FALLBACK;
+      }
     }
   }
   if (result.verdict === "pass") {

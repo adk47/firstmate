@@ -1,0 +1,4 @@
+# CPU-only torch. Installed FIRST and from the CPU wheel index (see Dockerfile): the default PyPI
+# wheel drags ~2.5 GB of CUDA libraries this sidecar can never use — it is CPU-only by design so it
+# cannot compete with the gateway for the GPU-less host's cores.
+torch==2.6.0

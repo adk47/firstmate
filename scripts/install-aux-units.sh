@@ -1841,6 +1841,105 @@ for tmr in ops-intake-redteam.timer ops-intake-digest.timer; do
   systemctl start "$tmr" >/dev/null 2>&1 || log "WARN: could not start $tmr"
   log "  $tmr: $(systemctl is-active "$tmr" 2>/dev/null || echo unknown)"
 done
+# ─── PromptGuard 2 22M sidecar (Caroline safety classifier, 127.0.0.1:18793) ──
+# caroline-promptguard-canary-p1 (Fable safety lead report §5, "ADOPT now").
+# promptguard/{Dockerfile,server.py} serves Meta Llama Prompt Guard 2 22M to the
+# EXISTING sidecar slot: plugins/intercom/src/safety-classifier.ts already posts
+# to http://127.0.0.1:18793/v1/classify, and never had anything listening — 1,582
+# `classifier_unavailable` ledger rows in 7 days are that gap, not an outage.
+#
+# The image is BUILT LAZILY, NEVER IN THE REQUEST PATH. The model is baked in at
+# build time (promptguard/fetch-model.sh verifies model.sha256, so a swapped
+# model fails the build rather than serving silently), which makes the first
+# build several minutes; `promptguard-sidecar.sh ensure-image` rebuilds only when
+# a source fingerprint changes, and the enable below uses --no-block so a deploy
+# is never held by a container build.
+#
+# IT MUST NOT BE ABLE TO STARVE THE GATEWAY. The sidecar measured 55 ms median /
+# 150 ms p95 for a single short text on one thread. Three independent caps:
+# server.py pins torch to ONE intra-op thread and refuses more than 2
+# (PROMPTGUARD_THREADS), the container is limited to --cpus 1 --memory 1g, and
+# the unit carries CPUQuota=100% / MemoryMax=1G / Nice=10 so it always loses to
+# the gateway for CPU. Health gating is the image HEALTHCHECK plus a 90 s grace
+# period: a cold model load is ~4.3 s measured, and a request that arrives during
+# it gets a 503 (never a silent "benign").
+#
+# SHADOW FIRST. Bringing this up does NOT start blocking anything:
+#   - the plugin reads account.safetyClassifier.mode (openclaw-edge.json: "shadow")
+#     and records classifier_shadow_block rows without refusing to post;
+#   - scripts/intercom-webhook.js is shadow by default (PROMPTGUARD_MODE) — before
+#     the sidecar existed every scan scored 0, so flipping that lane to enforce
+#     here would be an unmeasured intake change.
+# Flip to enforce only after the shadow rows show a zero false-positive rate:
+#   systemctl status hydra-promptguard        # is it up?
+#   scripts/promptguard-sidecar.sh check      # image + unit + /health
+#   scripts/promptguard-sidecar.sh health     # {"status":"ok",...}
+# The whole layer is FAIL-SOFT: a missing image, a failed build or a dead
+# container just leaves `classifier: unavailable` and the deterministic guard
+# remains the guarantee.
+mkdir -p /var/lib/hydra/promptguard
+cat > /etc/systemd/system/hydra-promptguard.service << PGDSVC
+[Unit]
+Description=PromptGuard 2 22M sidecar for Caroline's safety classifier (loopback 18793, CPU, shadow)
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+# A host without the docker CLI skips the unit cleanly instead of entering a
+# restart loop: the classifier is optional, and "unavailable" is a supported state.
+ConditionPathExists=/usr/bin/docker
+
+[Service]
+Type=simple
+# Build (only when the source fingerprint moved), then replace any leftover
+# container from a previous start. Both are non-fatal for the UNIT only in the
+# sense that a failure keeps the unit down; the classifier absorbs that.
+ExecStartPre=/bin/bash $HYDRA_ROOT/scripts/promptguard-sidecar.sh ensure-image
+ExecStartPre=-/bin/bash $HYDRA_ROOT/scripts/promptguard-sidecar.sh cleanup
+ExecStart=/usr/bin/docker run --rm --name hydra-promptguard \
+  --publish 127.0.0.1:18793:18793 \
+  --cpus 1 --memory 1g \
+  --security-opt no-new-privileges \
+  hydra-promptguard:latest
+ExecStopPost=-/bin/bash $HYDRA_ROOT/scripts/promptguard-sidecar.sh cleanup
+Restart=on-failure
+RestartSec=15
+# A cold `docker run` is fast; the build happens in ExecStartPre and gets its own
+# generous budget because the FIRST start downloads torch and the model.
+TimeoutStartSec=3600
+TimeoutStopSec=60
+# The three caps that keep it off the gateway's CPU: cgroup quota, memory ceiling
+# and scheduling priority. Keep all three if you touch this unit.
+CPUQuota=100%
+MemoryMax=1G
+Nice=10
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target
+PGDSVC
+
+systemctl daemon-reload
+systemctl enable hydra-promptguard.service >/dev/null 2>&1 || log "WARN: could not enable hydra-promptguard.service"
+# --no-block on purpose: a first-time build takes minutes and must never hold a deploy open.
+#
+# RESTART, NOT START, WHEN THE UNIT IS ALREADY UP. `systemctl start` is a NO-OP on an active unit,
+# so ExecStartPre (ensure-image) would never run again and a changed server.py, Dockerfile or
+# model pin would sit in the repo without ever reaching the running container (QA finding on
+# #1719). But restarting unconditionally would interrupt the classifier on every deploy, so the
+# decision is made by the helper's own fingerprint test: restart only when a rebuild would
+# actually happen. `needs-build` exits 0 for "a rebuild is due".
+if systemctl is-active --quiet hydra-promptguard.service 2>/dev/null; then
+  if bash "$HYDRA_ROOT/scripts/promptguard-sidecar.sh" needs-build >/dev/null 2>&1; then
+    systemctl restart --no-block hydra-promptguard.service >/dev/null 2>&1 \
+      || log "WARN: could not restart hydra-promptguard.service"
+    log "  hydra-promptguard.service: restarting (source fingerprint changed; the rebuild runs in the background)"
+  else
+    log "  hydra-promptguard.service: active, image already matches the deployed source"
+  fi
+else
+  systemctl start --no-block hydra-promptguard.service >/dev/null 2>&1 \
+    || log "WARN: could not start hydra-promptguard.service"
+  log "  hydra-promptguard.service: $(systemctl is-active hydra-promptguard.service 2>/dev/null || echo unknown) (first start builds the image; see scripts/promptguard-sidecar.sh check)"
+fi
 
 # ─── Caroline shipped-work feed (daily 05:30 UTC) ─────────────────────────
 # Renders customer-visible product changes into

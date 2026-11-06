@@ -18,6 +18,7 @@ import {
 } from "./outbound.js";
 import { sanitizeReasoningLeak } from "./sanitize-reasoning-leak.js";
 import { prepareMergeReply } from "./merge-reply-guard.js";
+import { renderCanaryLine, resolveCanaryToken } from "./canary-token.js";
 import { guardOutbound, watchInbound, type SafetyDeps } from "./caroline-safety.js";
 import { surfaceLinkTargets } from "./filters.js";
 import { initStateStore, loadSessions, saveSessions } from "./state-store.js";
@@ -531,6 +532,7 @@ export async function sendTextReply(params: {
     customerText: params.customerText ?? "",
     customerNames: params.customerNames,
     customerEmails: params.customerEmails,
+    canary: resolveCanaryToken() ?? undefined,
     tag,
     log,
     deps: {
@@ -1108,9 +1110,16 @@ export function buildAgentRawBody(
   kbSnippets?: KbSnippet[],
   unreadable?: UnreadableAttachment[],
   jevBlock?: string | null,
+  canary?: string | null,
 ): string {
   const sanitized = sanitizeCustomerMessage(surfaceLinkTargets(message));
   const kbBlock = renderKnowledgeBaseBlock(kbSnippets ?? []);
+  // Per-deploy canary (canary-token.ts). Emitted as a single BARE marker line outside every other
+  // block. It must sit OUTSIDE
+  // [KNOWLEDGE_BASE] and [CONVERSATION_CONTEXT]: both strippers run before guardOutbound, so a canary
+  // inside either block would be removed from a regurgitated reply before the guard could see it.
+  // Empty string when no token is configured (dev, CI, a fresh host before the deploy step runs).
+  const canaryLine = renderCanaryLine(canary);
   const attachmentBlock = renderAttachmentStatusBlock(unreadable ?? []);
   const lines: string[] = enrichment ? buildEnrichmentLines(enrichment) : [];
   if (!enrichment?.verifiedEmail && facts.accountEmail) {
@@ -1129,8 +1138,9 @@ export function buildAgentRawBody(
   // block (docs/designs/2026-09-22-jev-caroline-router.md §B) goes last,
   // immediately before [CUSTOMER_MESSAGE], so it reads as "…and here is how
   // to handle what follows".
-  if (!kbBlock && !contextBlock && !attachmentBlock && !jevBlock) return sanitized;
+  if (!kbBlock && !contextBlock && !attachmentBlock && !jevBlock && !canaryLine) return sanitized;
   return [
+    ...(canaryLine ? [canaryLine] : []),
     ...(kbBlock ? [kbBlock] : []),
     ...(contextBlock ? [contextBlock] : []),
     ...(attachmentBlock ? [attachmentBlock] : []),
@@ -1524,6 +1534,7 @@ export const intercomPlugin = createChatChannelPlugin({
               state.kbSnippets,
               unreadable,
               resolveJevBlockForDispatch(account.jev?.enabled, state.jev),
+              resolveCanaryToken(),
             ),
             messageId: latest.messageId,
             timestamp: latest.timestamp,
@@ -1763,6 +1774,7 @@ export const intercomPlugin = createChatChannelPlugin({
                   customerText: bodyForDispatch,
                   customerNames: [state.enrichment?.verifiedName ?? ""].filter(Boolean),
                   customerEmails: [state.enrichment?.verifiedEmail ?? "", state.knownFacts?.accountEmail ?? ""].filter(Boolean),
+                  canary: resolveCanaryToken() ?? undefined,
                   tag,
                   log,
                   deps: { page: safetyPage },

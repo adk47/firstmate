@@ -15,7 +15,9 @@
  *       inaction, claims an action she cannot take, states the legal position, or sends an
  *       ALTERED copy of an approved answer-bank line;
  *   (d) LEAVES the topic allowlist (Muso account / credits / claims / merges / billing / privacy /
- *       how-to): code, creative writing, advice outside Muso, or a long reply with no Muso anchor.
+ *       how-to): code, creative writing, advice outside Muso, or a long reply with no Muso anchor;
+ *   (e) CONTAINS THE PER-DEPLOY CANARY TOKEN (canary-token.ts) — internal prompt material the model
+ *       was told never to repeat. See the canary check in evaluateReply.
  *
  * Order: deterministic rules only, here (regex + the answer-bank allowlist). The optional
  * classifier (safety-classifier.ts) runs second, in the channel, and can only ADD a block; it can
@@ -29,9 +31,10 @@
  * replay run it directly.
  */
 
+import { createHash } from "node:crypto";
 import { ANSWER_BANK, BANK_VERSION, BLOCKED_REPLY_FALLBACK } from "./answer-bank.js";
 
-export const OUTPUT_GUARD_VERSION = "g1-2026-11-01.3";
+export const OUTPUT_GUARD_VERSION = "g1-2026-11-04.1";
 
 /**
  * "enforce": a blocked reply is replaced and the conversation handed to a human.
@@ -70,6 +73,14 @@ export interface GuardInput {
   facts?: { openRequest?: boolean };
   /** Audit only (answer-bank self-check): run every rule on the raw text, without masking approved lines. */
   unmasked?: boolean;
+  /**
+   * The per-deploy canary token (canary-token.ts). When set, a reply containing it is BLOCKED: the
+   * token is injected into the prompt as a bare marker line and into the RAG-indexed reference
+   * directory, so its appearance in a customer-facing reply means internal prompt material leaked
+   * (system-prompt regurgitation or a poisoned-document echo). Never read from the ambient
+   * environment here — the channel resolves it and passes it in; this module stays pure.
+   */
+  canary?: string;
 }
 
 export interface GuardResult {
@@ -454,6 +465,24 @@ export function evaluateReply(input: GuardInput): GuardFlag[] {
     if (!flags.some((f) => f.rule === rule && f.excerpt === excerpt(m))) flags.push({ family, rule, excerpt: excerpt(m) });
   };
   const names = nameTokens(input.customerNames);
+
+  // (e) CANARY LEAK. Checked FIRST and independently of the topic allowlist: a leaked internal marker
+  // is the strongest signal of a prompt-injection win, and a short leaked reply would otherwise pass
+  // the off-topic length gate. The token is 32 lowercase hex, so it cannot collide with ordinary prose
+  // or with a masked approved bank line. normalizeReply has already folded whitespace and dropped
+  // zero-width characters, so a leak split across an invisible character is still caught.
+  // CANARY_MIN_CHARS guards against a caller passing a short string: a 3-char "token" would
+  // substring-match ordinary words and block every reply. The resolver only ever returns 32 hex, so
+  // this only ever fires on a caller bug, and it fails safe (no block) rather than into a false block.
+  const CANARY_MIN_LEN = 16;
+  const canary = typeof input.canary === "string" ? input.canary.trim() : "";
+  if (canary.length >= CANARY_MIN_LEN && normalized.includes(canary)) {
+    // NEVER put the token itself in the excerpt (QA on #1719): the excerpt is logged, written to the
+    // injection ledger and surfaced in the digest, so echoing it would copy the very secret this rule
+    // exists to protect into every diagnostic that handles the block. The digest still identifies
+    // WHICH rotation leaked, because caroline-canary-sync.sh logs the same sha256 prefix per deploy.
+    add("reveal", "canary_token", `canary:sha256:${createHash("sha256").update(canary).digest("hex").slice(0, 8)}`);
+  }
 
   for (const r of [...PROMISE_RULES, ...REVEAL_RULES, ...CONTRADICT_RULES, ...OFF_TOPIC_RULES]) {
     // EVERY match, not just the first (QA on #1628): an exempt occurrence ("I can't promise two business

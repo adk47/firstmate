@@ -288,6 +288,18 @@ export interface IntercomAccountConfig {
     minScore?: number;
     agentId?: string;
   };
+  // Rollout stage for the optional PromptGuard 2 sidecar (safety-classifier.ts).
+  //   "shadow"  — call the sidecar, log the verdict and write a ledger row, but NEVER block.
+  //                This is the measurement window: the false-positive rate on real traffic is
+  //                computed from those rows before anything starts refusing to post.
+  //   "enforce" — a non-benign outbound label at >= OUTBOUND_BLOCK_SCORE adds a block
+  //                (safety-classifier.ts), which turns the reply into the approved hand-off line.
+  // Default (absent) = "enforce", the historical behaviour of this lane, so a host that never sets
+  // the key behaves exactly as it does today. Inbound is detection-only in BOTH modes
+  // (watchInbound never changes what is dispatched), so the stage only gates the outbound half.
+  safetyClassifier?: {
+    mode: "shadow" | "enforce";
+  };
   // Jev pre-turn router (docs/designs/2026-09-22-jev-caroline-router.md). One
   // typed-judgment call per turn classifies the customer message against
   // Caroline's real tool/skill inventory; the plugin acts on three of the

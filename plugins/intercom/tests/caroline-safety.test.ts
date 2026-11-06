@@ -390,6 +390,105 @@ describe("guardOutbound", () => {
     const o2 = await guardOutbound({ client, account, conversationId: "c", reply: "Your claim has been approved.", customerText: "", tag: "t", deps: d2 });
     expect(o2.blocked).toBe(true);
   });
+  // caroline-promptguard-canary-p1 (Fable safety lead report §5): the PromptGuard sidecar ships in
+  // SHADOW for 24 h before anyone flips it to enforce. The measurement is the whole point, so both
+  // halves are pinned here: a shadow hit must NOT change what the customer sees, and it must still
+  // leave one countable row behind (that row IS the false-positive rate).
+  it("shadow mode records a would-block and posts the reply UNTOUCHED", async () => {
+    const client = fakeClient();
+    const { rows, pages, d } = deps({ classify: async () => ({ label: "jailbreak" as const, score: 0.99 }) });
+    const reply = "Thanks for confirming - your profile is linked now.";
+    const o = await guardOutbound({
+      client,
+      account: { ...account, safetyClassifier: { mode: "shadow" } },
+      conversationId: "c",
+      reply,
+      customerText: "",
+      tag: "t",
+      deps: d,
+    });
+    expect(o.result.verdict).toBe("pass");
+    expect(o.blocked).toBe(false);
+    expect(o.body).toBe(reply);
+    expect(o.result.flags).toEqual([]);
+    expect(pages).toEqual([]);
+    expect(client.addTag).not.toHaveBeenCalled();
+    expect(client.assignConversation).not.toHaveBeenCalled();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      kind: "classifier_shadow_block",
+      direction: "outbound",
+      ref: "c",
+      label: "jailbreak",
+      score: 0.99,
+    });
+    // The row has to name the threshold it was measured against, or the counts cannot be reconciled
+    // with a later config change.
+    expect(rows[0].threshold).toBe(0.98);
+  });
+  it("enforce mode blocks the same reply shadow mode posted", async () => {
+    const client = fakeClient();
+    const { d } = deps({ classify: async () => ({ label: "jailbreak" as const, score: 0.99 }) });
+    const o = await guardOutbound({
+      client,
+      account: { ...account, safetyClassifier: { mode: "enforce" } },
+      conversationId: "c",
+      reply: "Thanks for confirming - your profile is linked now.",
+      customerText: "",
+      tag: "t",
+      deps: d,
+    });
+    expect(o.blocked).toBe(true);
+    expect(o.body).toBe(HANDOFF_LINE);
+  });
+  it("an ABSENT safetyClassifier config keeps the historical force (enforce), not shadow", async () => {
+    // The direction matters: a host that never sets the key must not silently stop enforcing.
+    const client = fakeClient();
+    const { rows, d } = deps({ classify: async () => ({ label: "injection" as const, score: 0.999 }) });
+    const o = await guardOutbound({
+      client,
+      account,
+      conversationId: "c",
+      reply: "Thanks for confirming - your profile is linked now.",
+      customerText: "",
+      tag: "t",
+      deps: d,
+    });
+    expect(o.blocked).toBe(true);
+    expect(rows.some((r) => r.kind === "classifier_shadow_block")).toBe(false);
+  });
+  it("shadow mode still writes NOTHING when the classifier says benign", async () => {
+    const client = fakeClient();
+    const { rows, d } = deps();
+    const o = await guardOutbound({
+      client,
+      account: { ...account, safetyClassifier: { mode: "shadow" } },
+      conversationId: "c",
+      reply: "Thanks for confirming - your profile is linked now.",
+      customerText: "",
+      tag: "t",
+      deps: d,
+    });
+    expect(o.result.verdict).toBe("pass");
+    expect(rows).toEqual([]);
+  });
+  it("shadow mode cannot soften a DETERMINISTIC block", async () => {
+    // The rollout stage gates the classifier only. A promise the rules caught is still refused, or a
+    // shadow window would become a window for shipping promises.
+    const client = fakeClient();
+    const { d } = deps({ classify: async () => ({ label: "benign" as const, score: 0.01 }) });
+    const o = await guardOutbound({
+      client,
+      account: { ...account, safetyClassifier: { mode: "shadow" } },
+      conversationId: "c",
+      reply: "Your credits will be approved by Friday.",
+      customerText: "",
+      tag: "t",
+      deps: d,
+    });
+    expect(o.blocked).toBe(true);
+    expect(o.body).toBe(HANDOFF_LINE);
+  });
   it("a paraphrased bank line is posted and recorded as a note", async () => {
     const client = fakeClient();
     const { rows, d } = deps();
