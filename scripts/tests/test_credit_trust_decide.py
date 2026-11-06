@@ -10,6 +10,8 @@ faked (fixtures shared with test_credit_review.py). Run:
 from __future__ import annotations
 
 import credit_test_env  # noqa: F401,E402 - first: test logs never reach the production run.log
+import argparse
+import contextlib
 import dataclasses
 from datetime import timedelta
 import json
@@ -146,6 +148,9 @@ POLICY = decide.Policy(deny_user_ids={666}, deny_profile_ids=set(), editorial_ro
                        approve_arm=True)  # the approve-arm tests: opt in explicitly (the default is OFF)
 
 
+HOST_FALLBACK = Path("/var/lib/hydra/credit-review/credit-trust-decide.rearm-failed")
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -160,8 +165,22 @@ class Base(unittest.TestCase):
         self._lock = decide.WRITE_LOCK
         decide.WRITE_LOCK = Path(self.tmp) / "w.lock"
         self._paying, self._log, self._proof = decide.PAYING_USERS_FILE, decide.log, decide.PROOF_ON_FILE
+        # the coded-decider output is a HOST path (/var/lib/hydra/...); a test run must never create or read it
+        self._coded = decide.CODED_DECIDER_OUT
+        decide.CODED_DECIDER_OUT = Path(self.tmp) / "fable-decider.coded-input.json"
+        self.addCleanup(setattr, decide, "CODED_DECIDER_OUT", self._coded)
         decide.PAYING_USERS_FILE = Path(self.tmp) / "paying-users.json"
         decide.PROOF_ON_FILE = Path(self.tmp) / "proof-on-file.json"
+        self._switch_default = decide.KILL_SWITCH
+        # qa-review #1717 (r7) Important: the FAILED-RE-ARM sentinels are host paths too (/var/lib/hydra/...), and the
+        # tests that drive a failed re-arm wrote them for real: the suite left credit-trust-decide.rearm-failed on the
+        # test host, and the tests that ran after it refused (8/137 failed). Point BOTH at the sandbox, default-on, so
+        # no test has to remember.
+        self._rearm_sentinels = (decide.REARM_SENTINEL_SUFFIX, decide.REARM_SENTINEL_FALLBACK)
+        decide.REARM_SENTINEL_FALLBACK = Path(self.tmp) / "rearm-failed.sentinel"
+        decide.KILL_SWITCH = Path(self.tmp) / "credit-trust-decide.disabled"
+        self.addCleanup(setattr, decide, "REARM_SENTINEL_FALLBACK", self._rearm_sentinels[1])
+        self.addCleanup(setattr, decide, "KILL_SWITCH", self._switch_default)
         # firstmate 125: the host's switch file must never leak into a test run (node-8 CI).
         self._prov_switch = decide.PROVISIONAL_PAID_SWITCH
         decide.PROVISIONAL_PAID_SWITCH = Path(self.tmp) / "provisional-paid.disabled"
@@ -517,6 +536,57 @@ class Decisions(Base):
         self.assertEqual(w.calls[0]["status"], "unverified")
         self.assertEqual(w.calls[0]["expected"], "approved")
         self.assertEqual(out["results"][uuid_of(26)], "unverified")
+
+    def test_the_human_revert_is_NOT_gated_by_the_automated_writers_kill_switch(self):
+        """qa-review #1717 (r10) Important: the emergency stop must not disable the emergency undo.
+
+        An operator arms /etc/hydra/credit-trust-decide.disabled to halt automated approvals, then runs
+        `revert --apply` to take back an erroneous one. Gating the compensating revert on the switch that halted the
+        thing being undone left the credit live and the operator with no lever - and `cmd_revert` still exited 0.
+        """
+        res, _ = self.go([req(uuid_of(27), track="t3")], judge=FakeJudge(credible()))
+        decide.KILL_SWITCH.write_text("")
+        self.addCleanup(lambda: decide.KILL_SWITCH.unlink(missing_ok=True))
+        w = Writer(self.db)
+        with mock.patch.object(decide.dsp_gate, "WIRED", True):
+            out = decide.revert(self.db, res.run_id, apply=True, writer=w)
+        self.assertTrue(out["applied"], "the human rollback must still run while the automated writer is stopped")
+        self.assertEqual(w.calls[0]["status"], "unverified")
+        self.assertEqual(out["results"][uuid_of(27)], "unverified")
+        # ... and the automated writer is still stopped by the same switch
+        self.assertIn("kill switch is present", decide.writer_stop_signal(self.db))
+
+    def test_a_failed_revert_write_is_reported_not_swallowed(self):
+        """A rollback whose PUT failed must not read as success: `applied` is false and `error` names the failure."""
+        res, _ = self.go([req(uuid_of(28), track="t3")], judge=FakeJudge(credible()))
+
+        def boom(status, chunk, expected):
+            raise decide.admin_api.AdminError("500 upstream is down")
+        with mock.patch.object(decide.dsp_gate, "WIRED", True):
+            out = decide.revert(self.db, res.run_id, apply=True, writer=boom)
+        self.assertFalse(out["applied"])
+        self.assertIn("upstream is down", out["error"])
+
+    def test_a_SKIPPED_revert_row_is_not_reported_as_applied(self):
+        """qa-review #1717 (r11) Important: a skipped row is not a reverted row.
+
+        `write_chunk` reports a 2xx whose `updatedIds` omits an id as `skipped:<reason>` with NO error,
+        so testing `err` alone let a skipped rollback report `applied: true` and exit 0 while the
+        approval stayed live. The test is the OUTCOME, not the transport.
+        """
+        res, _ = self.go([req(uuid_of(29), track="t3")], judge=FakeJudge(credible()))
+
+        class SkippingWriter(Writer):
+            def __call__(self, status, chunk, expected):
+                # 2xx, nothing updated, the row named in `skipped` - the shape core returns when its
+                # own guard refuses a row it was asked to move.
+                return {"data": {"updatedIds": [], "skipped": [{"id": chunk[0], "reason": "not_approved"}]}}
+
+        with mock.patch.object(decide.dsp_gate, "WIRED", True):
+            out = decide.revert(self.db, res.run_id, apply=True, writer=SkippingWriter(self.db))
+        self.assertFalse(out["applied"], "a skipped rollback must not report applied")
+        self.assertIn("not_approved", out["error"])
+        self.assertEqual(out["results"][uuid_of(29)], "skipped:not_approved")
 
     def test_footprint_from_trusted_confirmations(self):
         for i in range(3):
@@ -2539,6 +2609,889 @@ class DocApprovalDispatcher(Base):
         self.assertEqual([i for c in w.calls if c["status"] == decide.UVN for i in c["ids"]], [],
                          "no ask goes out under a grant that only authorises doc approvals")
         self.assertEqual(self.approve_writes(w), [self.doc_rid])
+
+
+# ── never-lower: the write boundary has no DOWN transition ──────────────────
+# The kill-switch contract's `decider_writer.never_lower` was a bar with no implementation. These lock the two halves a
+# bar needs: the refusal itself, and that a refusal STOPS the run, is COUNTED, and re-places the kill switch - an
+# attempted demotion that passes quietly is worse than no rule, because it reads as compliance.
+
+
+class NeverLowerRule(unittest.TestCase):
+    def test_taking_a_served_credit_away_is_refused(self):
+        with self.assertRaises(decide.NeverLower):
+            decide.assert_never_lower(current="approved", target="unverified")
+
+    def test_a_recorded_removal_is_the_one_way_down(self):
+        decide.assert_never_lower(current="approved", target="unverified", removal_ref="revert run r1")
+
+    def test_the_support_path_is_not_a_lowering(self):
+        """unverified -> user_verification_needed serves nothing either way; a served-number rule must not stop it."""
+        decide.assert_never_lower(current="unverified", target="user_verification_needed")
+        decide.assert_never_lower(current="unverified", target="approved")
+        decide.assert_never_lower(current="approved", target="approved")
+
+    def test_an_unreadable_status_is_not_clean(self):
+        for cur, tgt in ((None, "approved"), ("approved", None), ("weird", "approved")):
+            with self.assertRaises(decide.NeverLower, msg=f"{cur}->{tgt}"):
+                decide.assert_never_lower(current=cur, target=tgt)
+
+    def test_the_message_names_the_rows(self):
+        with self.assertRaises(decide.NeverLower) as cm:
+            decide.assert_never_lower(current="approved", target="unverified", request_ids=["a", "b"])
+        self.assertIn("a, b", str(cm.exception))
+        self.assertIn("no recorded removal", str(cm.exception))
+
+
+class NeverLowerAtTheWriteBoundary(Base):
+    """The rule only matters where writes happen: a SUPPORT batch over a row this ledger already served."""
+
+    def served_row(self, rid, uid=700):
+        self.db.execute("INSERT INTO decision_outcomes (run_id, request_id, action, outcome, at) VALUES "
+                        "('older', ?, 'approve', 'approved', '2026-10-11T00:00:00Z')", (rid,))
+        self.db.commit()
+
+    def test_a_demoting_batch_is_refused_counted_and_re_arms_the_switch(self):
+        rid = uuid_of(300)
+        rows = [req(rid, uid=700)]
+        self.served_row(rid)
+        switch = Path(self.tmp) / "credit-trust-decide.disabled"
+        with unittest.mock.patch.object(decide, "KILL_SWITCH", switch):
+            res, w = self.go(rows, {},
+                             judge=FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5,
+                                                         model="gpt-6-sol")),
+                             policy=dataclasses.replace(POLICY, max_rows_per_run=1))
+        self.assertEqual(w.calls, [], "a refused batch must never reach the writer")
+        self.assertEqual(res.never_lower_refusals, 1)
+        self.assertTrue(switch.exists(), "an attempted demotion must re-place the writer kill switch")
+        self.assertIn("never-lower", switch.read_text())
+        outs = [r[0] for r in self.db.execute("SELECT outcome FROM decision_outcomes WHERE action='support' "
+                                              "AND request_id = ?", (rid,))]
+        self.assertEqual(outs, ["refused:never_lower"])
+        self.assertEqual(res.support, 0)
+
+    def test_an_approving_batch_over_a_served_row_is_not_a_lowering(self):
+        """Re-approving an already-served row is idempotent, not a demotion: the rule must not block it."""
+        rid = uuid_of(301)
+        self.served_row(rid)
+        res, w = self.go([req(rid, uid=701)], {"small": [T.raw("Real Engineer", "mixer")]},
+                         judge=FakeJudge(credible()), policy=dataclasses.replace(POLICY, max_rows_per_run=1))
+        self.assertEqual([c["status"] for c in w.calls], ["approved"])
+        self.assertEqual(res.never_lower_refusals, 0)
+
+
+class NeverLowerWhenTheServerCannotBeRead(Base):
+    """Fable 2026-11-04 (hydra #1717, question 1): the ledger is not the only authority, and the gap is the dangerous bit.
+
+    `served_ids` can only see what THIS ledger recorded. A row that the server has as `approved` while the ledger has no
+    record of it (a manual revert, a re-run, a lost ledger) passes the pre-PUT check - UVN to UVN is not a lowering - and
+    only the server's conditional PUT stops the demotion. Before this round that refusal was booked as a generic error:
+    the protection held, `never_lower_refusals` stayed 0, and nothing turned the writer off or paged. Where the server's
+    answer cannot be read, the doubt now counts against the write.
+    """
+
+    def test_a_support_batch_the_server_refuses_unreadably_counts_and_re_arms(self):
+        rid = uuid_of(302)
+
+        def writer(status, ids, expected):
+            raise decide.WriteFailed("PUT HTTP 409 conflict", {"data": {}})
+
+        def readback(status, ids):
+            raise decide.admin_api.AdminError("readback unavailable")
+        switch = Path(self.tmp) / "credit-trust-decide.disabled"
+        admin = T.FakeAdmin([], {}, PROFILES, TRACKS)
+        with unittest.mock.patch.object(decide, "KILL_SWITCH", switch):
+            res = decide.run(admin, self.db, FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5,
+                                                                  model="gpt-6-sol")),
+                             mode="apply", policy=dataclasses.replace(POLICY, max_rows_per_run=1), writer=writer,
+                             readback=readback, now=T.NOW, rows=[req(rid, uid=702)])
+        self.assertEqual(res.never_lower_refusals, 1, "a CAS refusal we cannot see past is a possible demotion")
+        self.assertEqual(res.cas_unreadable_refusals, 1, "and it is counted apart from a ledger-proved demotion")
+        self.assertTrue(switch.exists(), "the writer must be turned off, exactly as for a proved demotion")
+        self.assertIn("stale ledger", switch.read_text(), "the 4am reader must be told which false positive this is")
+        outs = [r[0] for r in self.db.execute("SELECT outcome FROM decision_outcomes WHERE action='support' "
+                                              "AND request_id = ?", (rid,))]
+        self.assertEqual(outs, ["refused:cas_unreadable"])
+        self.assertEqual(res.support, 0)
+
+    def test_the_coded_output_is_not_executable_after_a_cas_unreadable_refusal(self):
+        rid = uuid_of(303)
+
+        def writer(status, ids, expected):
+            raise decide.WriteFailed("PUT HTTP 409 conflict", {"data": {}})
+        switch = Path(self.tmp) / "credit-trust-decide.disabled"
+        admin = T.FakeAdmin([], {}, PROFILES, TRACKS)
+        with unittest.mock.patch.object(decide, "KILL_SWITCH", switch):
+            res = decide.run(admin, self.db, FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5,
+                                                                  model="gpt-6-sol")),
+                             mode="apply", policy=dataclasses.replace(POLICY, max_rows_per_run=1), writer=writer,
+                             readback=lambda status, ids: set(), now=T.NOW, rows=[req(rid, uid=703)])
+        doc = json.loads(decide.CODED_DECIDER_OUT.read_text())
+        self.assertFalse(doc["executable"], "a run that could not read the server's answer may not be acted on")
+        self.assertEqual(doc["writes"]["never_lower_refusals"], res.never_lower_refusals)
+        self.assertEqual(doc["writes"]["cas_unreadable_refusals"], 1)
+        self.assertIn("CAS-unreadable", res.line())
+
+    def test_a_server_reason_is_not_a_cas_doubt(self):
+        """`skipped:needs_human_review` is a policy answer the server NAMED: it must never re-arm the writer."""
+        rid = uuid_of(304)
+
+        def writer(status, ids, expected):
+            return {"data": {"updatedIds": [], "skipped": [{"id": rid, "reason": "needs_human_review"}]}}
+        switch = Path(self.tmp) / "credit-trust-decide.disabled"
+        admin = T.FakeAdmin([], {}, PROFILES, TRACKS)
+        with unittest.mock.patch.object(decide, "KILL_SWITCH", switch):
+            res = decide.run(admin, self.db, FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5,
+                                                                  model="gpt-6-sol")),
+                             mode="apply", policy=dataclasses.replace(POLICY, max_rows_per_run=1), writer=writer,
+                             readback=lambda status, ids: set(), now=T.NOW, rows=[req(rid, uid=704)])
+        self.assertEqual((res.never_lower_refusals, res.cas_unreadable_refusals), (0, 0))
+        self.assertEqual(res.skipped_by_server.get("needs_human_review"), 1)
+        self.assertFalse(switch.exists(), "an ordinary server refusal must not turn the writer off")
+
+    def test_an_approve_batch_the_server_refuses_unreadably_is_not_a_demotion(self):
+        """The approve direction cannot lower anything: an unreadable refusal there is an error, not a demotion."""
+        rid = uuid_of(305)
+
+        def writer(status, ids, expected):
+            raise decide.WriteFailed("PUT HTTP 500", {"data": {}})
+        switch = Path(self.tmp) / "credit-trust-decide.disabled"
+        admin = T.FakeAdmin([], {}, PROFILES, TRACKS)
+        with unittest.mock.patch.object(decide, "KILL_SWITCH", switch):
+            res = decide.run(admin, self.db, FakeJudge(credible()), mode="apply",
+                             policy=dataclasses.replace(POLICY, max_rows_per_run=1), writer=writer,
+                             readback=lambda status, ids: set(), now=T.NOW,
+                             rows=[req(rid, uid=705)], )
+        self.assertEqual((res.never_lower_refusals, res.cas_unreadable_refusals), (0, 0))
+        self.assertGreaterEqual(len(res.write_errors), 1, "the failure is still booked as a write error")
+        self.assertFalse(switch.exists())
+
+
+class CodedDeciderOutput(Base):
+    """The file the kill-switch contract's `--probe coded-decider-output` reads, and where its honesty lives."""
+
+    def out(self):
+        return json.loads(decide.CODED_DECIDER_OUT.read_text())
+
+    def test_a_judge_run_writes_the_output_and_says_it_is_not_executable(self):
+        res, _ = self.go([req(uuid_of(400), uid=800)], {},
+                         judge=FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5,
+                                                     model="gpt-6-sol")), mode="judge")
+        doc = self.out()
+        self.assertEqual(doc["mode"], "judge")
+        self.assertFalse(doc["executable"], "a judge run measured the decisions and may act on none of them")
+        self.assertEqual(doc["run_id"], res.run_id)
+        self.assertEqual(doc["counts"]["support"], 1)
+        self.assertEqual(doc["counts"]["total"], 1)
+        self.assertFalse(doc["writes"]["acted"], "a judge run requested nothing; its support count is a would-count")
+        self.assertEqual(doc["decisions"][0]["request_id"], uuid_of(400))
+        self.assertEqual(res.coded_out, str(decide.CODED_DECIDER_OUT))
+
+    def test_an_apply_run_is_executable_and_counts_what_it_wrote(self):
+        res, _ = self.go([req(uuid_of(401), uid=801)], {"small": [T.raw("Real Engineer", "mixer")]},
+                         judge=FakeJudge(credible()), policy=dataclasses.replace(POLICY, max_rows_per_run=1))
+        doc = self.out()
+        self.assertEqual(doc["mode"], "apply")
+        self.assertTrue(doc["executable"])
+        self.assertEqual(doc["counts"]["approve"], 1)
+        self.assertEqual(doc["writes"]["approved"], res.approved)
+
+    def test_a_never_lower_refusal_makes_the_file_non_executable(self):
+        rid = uuid_of(402)
+        self.db.execute("INSERT INTO decision_outcomes (run_id, request_id, action, outcome, at) VALUES "
+                        "('older', ?, 'approve', 'approved', '2026-10-11T00:00:00Z')", (rid,))
+        self.db.commit()
+        switch = Path(self.tmp) / "credit-trust-decide.disabled"
+        with unittest.mock.patch.object(decide, "KILL_SWITCH", switch):
+            self.go([req(rid, uid=802)], {},
+                    judge=FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol")),
+                    policy=dataclasses.replace(POLICY, max_rows_per_run=1))
+        doc = self.out()
+        self.assertFalse(doc["executable"])
+        self.assertEqual(doc["writes"]["never_lower_refusals"], 1)
+
+    def test_the_write_is_atomic_and_leaves_no_temp_file(self):
+        res = decide.RunResult(run_id="r1", mode="judge")
+        decide.write_coded_decider_output(res, [])
+        self.assertTrue(decide.CODED_DECIDER_OUT.exists())
+        leftovers = [p.name for p in decide.CODED_DECIDER_OUT.parent.iterdir() if ".tmp" in p.name]
+        self.assertEqual(leftovers, [])
+
+    def test_an_unwritable_path_is_reported_and_never_fatal(self):
+        res = decide.RunResult(run_id="r1", mode="apply")
+        with unittest.mock.patch.object(decide, "CODED_DECIDER_OUT", Path("/proc/nope/out.json")):
+            self.assertFalse(decide.write_coded_decider_output(res, []))
+        self.assertEqual(res.coded_out, "")
+        self.assertTrue(any("coded-decider output" in m for m in self.logged), "a missing file must be said out loud")
+
+
+
+class MixedSupportBatchLosesNothing(Base):
+    """qa-review 2026-11-04 (hydra #1717, finding 1): a stopped batch may not lose the rows that landed.
+
+    The CAS-unreadable branch booked the rows it REFUSED and returned immediately, so every other row in the same
+    batch - the ones the server had already accepted - never reached `decision_outcomes`. The write happened and the
+    ledger said it did not: the next run then re-sends a support ask the user already received, and `explain` cannot
+    tell an operator what actually happened.
+    """
+
+    def test_rows_that_landed_in_a_stopped_batch_are_in_the_ledger(self):
+        rows = [req(uuid_of(320 + i), uid=720 + i) for i in range(3)]
+        landed, unread_a, unread_b = (r["id"] for r in rows)
+
+        def writer(status, ids, expected):
+            # The server committed ONE row and refused the rest in a way we cannot read past.
+            raise decide.WriteFailed("PUT HTTP 409 conflict", {"data": {"updatedIds": [landed]}})
+
+        def readback(status, ids):
+            raise decide.admin_api.AdminError("readback unavailable")
+        switch = Path(self.tmp) / "credit-trust-decide.disabled"
+        admin = T.FakeAdmin([], {}, PROFILES, TRACKS)
+        with mock.patch.object(decide, "KILL_SWITCH", switch):
+            res = decide.run(admin, self.db, FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5,
+                                                                  model="gpt-6-sol")),
+                             mode="apply", policy=POLICY, writer=writer, readback=readback, now=T.NOW, rows=rows)
+        self.assertEqual(res.cas_unreadable_refusals, 1, "the unreadable CAS still counts and still turns the writer off")
+        self.assertTrue(switch.exists(), "a mixed batch that hits an unreadable CAS still re-places the kill switch")
+        self.assertEqual(res.support, 1, "the row the server ACCEPTED is a support write that happened")
+        records = {rid: [row[0] for row in self.db.execute(
+            "SELECT outcome FROM decision_outcomes WHERE action='support' AND request_id = ?", (rid,))] for rid in
+            (landed, unread_a, unread_b)}
+        self.assertEqual(records[landed], [decide.UVN],
+                         "the landed row must be booked BEFORE the run stops - losing it is the finding")
+        self.assertEqual(records[unread_a], ["refused:cas_unreadable"])
+        self.assertEqual(records[unread_b], ["refused:cas_unreadable"])
+
+
+class FailedCodedOutputRefresh(Base):
+    """qa-review 2026-11-04 (hydra #1717, finding 2): a failed refresh may not inherit the previous run's permission.
+
+    `write_coded_decider_output` logged and returned False on OSError, leaving the PREVIOUS document in place - which
+    could say `executable: true` from a run that was allowed to write. Existence was already documented as "never
+    permission"; staleness had the same hole.
+    """
+
+    def _artifact(self):
+        return Path(self.tmp) / "fable-decider.coded-input.json"
+
+    def test_a_failed_refresh_invalidates_a_previous_executable_artifact(self):
+        path = self._artifact()
+        good = decide.RunResult(run_id="run-good", mode="apply")
+        good.approved, good.scanned = 3, 3
+        self.assertTrue(decide.write_coded_decider_output(good, [], path=path))
+        self.assertTrue(json.loads(path.read_text())["executable"], "precondition: the previous artifact may be acted on")
+
+        bad = decide.RunResult(run_id="run-bad", mode="apply")
+        real_replace = os.replace
+
+        def only_the_real_document_fails(src, dst):
+            if "invalid" in str(src):
+                return real_replace(src, dst)
+            raise OSError(28, "No space left on device")
+        with mock.patch.object(decide.os, "replace", side_effect=only_the_real_document_fails):
+            self.assertFalse(decide.write_coded_decider_output(bad, [], path=path))
+        doc = json.loads(path.read_text())
+        self.assertTrue(doc["stale"], "the artifact must SAY it is stale, not merely be old")
+        self.assertFalse(doc["executable"], "a failed refresh may not inherit executable=true")
+        self.assertFalse(doc["writes"]["acted"], "and nothing may act on it")
+        self.assertEqual(doc["decisions"], [])
+        self.assertIn("No space left on device", doc["invalidated_because"])
+        self.assertEqual(bad.coded_out, "", "a refused run must not claim it produced an artifact")
+        self.assertTrue(any("could not be written" in e for e in bad.write_errors))
+
+    def test_a_replace_failure_invalidates_the_existing_file_in_place(self):
+        path = self._artifact()
+        good = decide.RunResult(run_id="run-good", mode="apply")
+        self.assertTrue(decide.write_coded_decider_output(good, [], path=path))
+        with mock.patch("os.replace", side_effect=OSError(28, "No space left on device")):
+            self.assertFalse(decide.write_coded_decider_output(decide.RunResult(run_id="run-bad", mode="apply"), [],
+                                                               path=path))
+        doc = json.loads(path.read_text())
+        self.assertTrue(doc["stale"], "the previous document must SAY it is stale")
+        self.assertFalse(doc["executable"], "a failed refresh may not inherit executable=true")
+
+    def test_a_READ_ONLY_DIRECTORY_still_invalidates_the_previous_artifact(self):
+        """qa-review #1717 r4, the reported failure path.
+
+        A read-only directory breaks BOTH the atomic replace and the unlink, and the previous `executable: true`
+        document then survived for the existence-only probe to read as a pass. Both failures are simulated here
+        (EACCES) rather than produced with chmod, so the case behaves identically when the suite runs as root.
+        """
+        path = self._artifact()
+        good = decide.RunResult(run_id="run-good", mode="apply")
+        self.assertTrue(decide.write_coded_decider_output(good, [], path=path))
+        self.assertTrue(json.loads(path.read_text())["executable"], "precondition")
+        eacces = OSError(13, "Permission denied")
+        with mock.patch("os.replace", side_effect=eacces), \
+                mock.patch.object(type(path), "unlink", side_effect=eacces):
+            self.assertFalse(decide.write_coded_decider_output(decide.RunResult(run_id="run-bad", mode="apply"), [],
+                                                               path=path))
+        doc = json.loads(path.read_text())
+        self.assertTrue(doc["stale"], "the artifact must SAY it is stale, not merely be old")
+        self.assertFalse(doc["executable"], "existence was never permission, and neither is staleness")
+        self.assertTrue(path.exists(), "the in-place write needs no directory write, so the file is still there")
+
+    def test_when_every_write_path_fails_the_run_books_it_and_claims_no_artifact(self):
+        """The last resort: the FILE is unwritable too. Nothing can be done to the bytes, so the RUN must say so."""
+        path = self._artifact()
+        good = decide.RunResult(run_id="run-good", mode="apply")
+        self.assertTrue(decide.write_coded_decider_output(good, [], path=path))
+        eacces = OSError(13, "Permission denied")
+        real_open = open
+
+        def deny_artifact_writes(file, mode="r", *a, **k):
+            if "w" in mode and str(file) == str(path):
+                raise eacces
+            return real_open(file, mode, *a, **k)
+        bad = decide.RunResult(run_id="run-bad", mode="apply")
+        with mock.patch("os.replace", side_effect=eacces), \
+                mock.patch.object(type(path), "unlink", side_effect=eacces), \
+                mock.patch("builtins.open", side_effect=deny_artifact_writes):
+            self.assertFalse(decide.write_coded_decider_output(bad, [], path=path))
+        self.assertEqual(bad.coded_out, "", "a refused run must not claim it produced an artifact")
+        self.assertTrue(any("could not be written" in e for e in bad.write_errors),
+                        "the run must book the failure even when the bytes cannot be changed")
+
+class CodedOutputFreshness(Base):
+    """qa-review hydra#1717 r5 (finding 1): the DOCUMENT cannot prove it is current.
+
+    When every write rung fails the bytes on disk survive - possibly `executable: true` - and existence, mtime and the
+    document's own claims all read as a pass. The independent fail-closed signal is the record the writing run leaves
+    in the ledger, and `coded_output_is_current()` is the only thing a probe or consumer may trust.
+    """
+
+    def _artifact(self):
+        return Path(self.tmp) / "fable-decider.coded-input.json"
+
+    def test_a_successful_write_records_a_current_executable_document(self):
+        path = self._artifact()
+        res = decide.RunResult(run_id="run-ok", mode="apply")
+        self.assertTrue(decide.write_coded_decider_output(res, [], path=path, db=self.db))
+        ok, why = decide.coded_output_is_current(self.db, path=path)
+        self.assertTrue(ok, why)
+        self.assertIn("run-ok", why)
+
+    def test_a_judge_run_is_recorded_and_is_not_a_licence_to_write(self):
+        """qa-review #1717 r8 (finding 1): freshness and permission are TWO questions.
+
+        The judge run's document IS current - it is the document that run produced - and it is NOT executable. The
+        old single answer conflated them, so #1707's `coded-decider-output` probe (which asks the freshness question)
+        refused a perfectly fresh measurement and the judge-run lift path could never reach MET.
+        """
+        path = self._artifact()
+        self.assertTrue(decide.write_coded_decider_output(decide.RunResult(run_id="run-judge", mode="judge"), [],
+                                                          path=path, db=self.db))
+        ok, why = decide.coded_output_is_current(self.db, path=path)
+        self.assertTrue(ok, f"a judge document is CURRENT, it is just not permission: {why}")
+        self.assertIn("run-judge", why)
+        ok_x, why_x = decide.coded_output_is_executable(self.db, path=path)
+        self.assertFalse(ok_x, "a judge document is a measurement, never permission")
+        self.assertIn("not executable", why_x)
+
+    def test_when_every_write_path_fails_the_surviving_bytes_are_NOT_current(self):
+        """The all-fail path: replace, in-place and unlink all refuse, so the previous executable bytes survive."""
+        path = self._artifact()
+        self.assertTrue(decide.write_coded_decider_output(decide.RunResult(run_id="run-good", mode="apply"), [],
+                                                          path=path, db=self.db))
+        self.assertTrue(json.loads(path.read_text())["executable"], "precondition: an executable artifact exists")
+        eacces = OSError(13, "Permission denied")
+        real_open = open
+
+        def deny_artifact_writes(file, mode="r", *a, **k):
+            if "w" in mode and str(file) == str(path):
+                raise eacces
+            return real_open(file, mode, *a, **k)
+        switch = Path(self.tmp) / "credit-trust-decide.disabled"
+        bad = decide.RunResult(run_id="run-bad", mode="apply")
+        with mock.patch("os.replace", side_effect=eacces), \
+                mock.patch.object(type(path), "unlink", side_effect=eacces), \
+                mock.patch("builtins.open", side_effect=deny_artifact_writes), \
+                mock.patch.object(decide, "KILL_SWITCH", switch):
+            self.assertFalse(decide.write_coded_decider_output(bad, [], path=path, db=self.db))
+        # The writer turns ITSELF OFF rather than keep deciding behind an artifact it cannot invalidate.
+        self.assertTrue(switch.exists(), "the writer must stop when the previous document cannot be invalidated")
+        self.assertTrue(any("could NOT be invalidated" in e for e in bad.write_errors), bad.write_errors)
+        # The lie is still on disk - that is exactly why the record has to answer for it.
+        self.assertTrue(path.exists())
+        self.assertTrue(json.loads(path.read_text())["executable"],
+                        "the bytes cannot be changed, so they still claim executable=true")
+        ok, why = decide.coded_output_is_current(self.db, path=path)
+        self.assertFalse(ok, "a surviving executable document from an OLDER run may never read as current")
+        self.assertIn("did not produce a fresh document", why)
+        self.assertIn("run-bad", why)
+
+    def test_a_read_only_directory_that_still_invalidates_in_place_is_recorded_fresh_and_not_executable(self):
+        path = self._artifact()
+        self.assertTrue(decide.write_coded_decider_output(decide.RunResult(run_id="run-good", mode="apply"), [],
+                                                          path=path, db=self.db))
+        eacces = OSError(13, "Permission denied")
+        with mock.patch("os.replace", side_effect=eacces), mock.patch.object(type(path), "unlink", side_effect=eacces):
+            self.assertFalse(decide.write_coded_decider_output(decide.RunResult(run_id="run-bad", mode="apply"), [],
+                                                               path=path, db=self.db))
+        ok, why = decide.coded_output_is_current(self.db, path=path)
+        self.assertFalse(ok)
+        self.assertIn("did not produce a fresh document", why)
+
+    def test_bytes_edited_after_the_write_are_not_current(self):
+        path = self._artifact()
+        self.assertTrue(decide.write_coded_decider_output(decide.RunResult(run_id="run-ok", mode="apply"), [],
+                                                          path=path, db=self.db))
+        doc = json.loads(path.read_text())
+        doc["counts"]["approved"] = 99
+        path.write_text(json.dumps(doc))
+        ok, why = decide.coded_output_is_current(self.db, path=path)
+        self.assertFalse(ok, "the document is not the byte-for-byte artifact the run recorded")
+        self.assertIn("not the bytes the run recorded", why)
+
+    def test_no_record_at_all_is_never_current(self):
+        path = self._artifact()
+        self.assertTrue(decide.write_coded_decider_output(decide.RunResult(run_id="run-ok", mode="apply"), [],
+                                                          path=path))
+        ok, why = decide.coded_output_is_current(self.db, path=path)
+        self.assertFalse(ok, "existence alone is never permission")
+        self.assertIn("no coded-decider output was recorded", why)
+
+    def test_a_run_writes_the_record_for_the_path_it_was_told_to_use(self):
+        res, _ = self.go([req(uuid_of(430), uid=830)], {},
+                         judge=FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5,
+                                                     model="gpt-6-sol")), mode="judge")
+        ok, why = decide.coded_output_is_current(self.db)
+        self.assertTrue(ok, f"the judge run's own record IS current: {why}")
+        ok_x, _why_x = decide.coded_output_is_executable(self.db)
+        self.assertFalse(ok_x, "the judge run's own record is not executable")
+        self.assertEqual(decide._state_get(self.db, decide.CODED_OUTCOME_KEY)["run_id"], res.run_id,
+                         "the run recorded ITSELF, so a stale artifact from an older run can never answer for it")
+
+
+class DurableReArm(Base):
+    """qa-review hydra#1717 r5 (finding 2): a failed kill-switch re-arm must outlive the run that needed it.
+
+    The never-lower refusal stopped THAT run. If /etc/hydra then refuses the switch write, the file stays absent and the
+    next scheduled apply run passes the entrypoint's presence check - the promised persistent shutdown was one run
+    wide. The refusal is now recorded durably and every later writer run refuses until a human restores the switch.
+    """
+
+    def _switch(self):
+        return Path(self.tmp) / "credit-trust-decide.disabled"
+
+    def _refuse_then_fail_the_rearm(self):
+        """Drive the never-lower path with a switch path that cannot be written: returns the run result."""
+        rid = uuid_of(431)
+        self.db.execute("INSERT INTO decision_outcomes (run_id, request_id, action, outcome, at) VALUES "
+                        "('older', ?, 'approve', 'approved', '2026-10-11T00:00:00Z')", (rid,))
+        self.db.commit()
+        blocked = Path(self.tmp) / "no-such-dir" / "deep" / "credit-trust-decide.disabled"
+        with mock.patch.object(decide, "KILL_SWITCH", blocked):
+            res, _ = self.go([req(rid, uid=831)], {},
+                             judge=FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5,
+                                                         model="gpt-6-sol")),
+                             policy=dataclasses.replace(POLICY, max_rows_per_run=1))
+        return res
+
+    def test_a_failed_rearm_is_recorded_and_refuses_the_next_run(self):
+        res = self._refuse_then_fail_the_rearm()
+        self.assertEqual(res.never_lower_refusals, 1, "precondition: the never-lower rule fired")
+        self.assertTrue(any("NOT re-placed" in e for e in res.write_errors))
+        row = decide._state_get(self.db, decide.KILL_ARMED_KEY)
+        self.assertTrue(row, "the failed re-arm must outlive the run")
+        self.assertFalse(row["replaced"])
+        why = decide.kill_armed_refusal(self.db)
+        self.assertIn("could not re-place the writer kill switch", why)
+
+    def test_the_next_write_run_writes_nothing_at_all(self):
+        self._refuse_then_fail_the_rearm()
+        res, w = self.go([req(uuid_of(432), uid=832)], {"small": [T.raw("Real Engineer", "mixer")]},
+                         judge=FakeJudge(credible()))
+        self.assertEqual(w.calls, [], "no PUT may leave the process while the writer is unarmed")
+        self.assertEqual(res.approved + res.support, 0)
+        self.assertTrue(any("writer armed off" in e for e in res.write_errors), res.write_errors)
+        self.assertIn("WRITER OFF", res.note)
+
+    def test_restoring_the_switch_ends_the_refusal(self):
+        """Restoring the switch ends the DURABLE refusal - and the switch itself is then the gate.
+
+        qa-review #1717 (r8): the stop signals are re-read under the write lock, so a present switch now stops the
+        run inside `go()` too, not only at the entrypoint. That is the correct reading: a present switch means the
+        writer is OFF, and the durable refusal is what stops it when the switch is ABSENT.
+        """
+        self._refuse_then_fail_the_rearm()
+        switch = self._switch()
+        switch.write_text("restored by hand\n")
+        patcher = mock.patch.object(decide, "KILL_SWITCH", switch)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.assertEqual(decide.kill_armed_refusal(self.db), "",
+                         "the file is back: the durable refusal is dormant")
+        res, w = self.go([req(uuid_of(433), uid=833)], {},
+                         judge=FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5,
+                                                     model="gpt-6-sol")))
+        self.assertEqual(w.calls, [], "a present switch means the writer is OFF")
+        self.assertTrue(any("kill switch is present" in e for e in res.write_errors), res.write_errors)
+
+    def test_when_NO_durable_record_lands_the_process_stops(self):
+        """qa-review #1717 (r8) Important: this case used to be a CRITICAL log line and nothing else.
+
+        The next run then saw a readable ledger with no refusal row and no sentinel, `kill_armed_refusal()` answered
+        "", and the writer PUT again after a never-lower refusal. A refusal that cannot be recorded must stop the
+        PROCESS, not just the batch.
+        """
+        blocked = Path(self.tmp) / "no-such-dir" / "deep" / "credit-trust-decide.disabled"
+        with mock.patch.object(decide, "KILL_SWITCH", blocked), \
+                mock.patch.object(decide, "_state_put", return_value=False), \
+                mock.patch.object(Path, "write_text", side_effect=OSError("EACCES")):
+            with self.assertRaises(decide.DurableStopUnavailable):
+                decide.rearm_kill_switch("never-lower refusal", db=self.db)
+
+    def test_the_next_invocation_fails_closed_when_nothing_could_be_recorded(self):
+        """qa-review #1717 (r8) Important: `DurableStopUnavailable` stops THIS process but leaves no durable evidence.
+
+        The next scheduled process sees an absent switch, a readable ledger with no refusal row and no sentinel, so
+        `kill_armed_refusal()` answers "". The honest answer is that the all-fail case means the LEDGER is unwritable -
+        and the next run writes its decisions to that same ledger BEFORE any PUT, so it fails closed there. This test
+        pins that: the next invocation raises at the ledger write and no PUT leaves the process.
+        """
+        blocked = Path(self.tmp) / "no-such-dir" / "deep" / "credit-trust-decide.disabled"
+        with mock.patch.object(decide, "KILL_SWITCH", blocked), \
+                mock.patch.object(decide, "_state_put", return_value=False), \
+                mock.patch.object(Path, "write_text", side_effect=OSError("EACCES")):
+            with self.assertRaises(decide.DurableStopUnavailable):
+                decide.rearm_kill_switch("never-lower refusal", db=self.db)
+        # the next invocation: the ledger cannot be written either, so it stops before any PUT
+        with mock.patch.object(decide, "KILL_SWITCH", blocked), \
+                mock.patch.object(decide, "record_decision", side_effect=sqlite3.OperationalError("attempt to write a "
+                                                                                                 "readonly database")):
+            with self.assertRaises(sqlite3.OperationalError):
+                self.go([req(uuid_of(435), uid=835, track="t1")],
+                        {"small": [T.raw("Real Engineer", "mixer")]})
+
+    def test_a_refusal_that_could_not_record_itself_still_stops_the_NEXT_run(self):
+        """qa-review #1717 (r9) Important: the r8 test held the ledger read-only on the next invocation, so it never
+        covered the sequence that actually matters - every re-arm record fails TRANSIENTLY, storage recovers, and the
+        next scheduled run sees an absent switch, a readable ledger with no refusal row and no sentinel.
+
+        The write-in-progress marker is written BEFORE the first batch, while storage is still healthy, and cleared
+        only on a clean finish. A refusal that could not record itself leaves it behind, so the next run refuses.
+        """
+        rid = uuid_of(436)
+        self.db.execute("INSERT INTO decision_outcomes (run_id, request_id, action, outcome, at) VALUES "
+                        "('older', ?, 'approve', 'approved', '2026-10-11T00:00:00Z')", (rid,))
+        self.db.commit()
+        blocked = Path(self.tmp) / "no-such-dir" / "deep" / "credit-trust-decide.disabled"
+        real_put = decide._state_put
+
+        def put(db, key, doc):
+            # The marker LANDS (storage is healthy when the run starts); the refusal record does not.
+            if key == decide.KILL_ARMED_KEY:
+                return False
+            return real_put(db, key, doc)
+        with mock.patch.object(decide, "KILL_SWITCH", blocked), \
+                mock.patch.object(decide, "_state_put", side_effect=put), \
+                mock.patch.object(decide, "_rearm_sentinels",
+                                  return_value=[Path(self.tmp) / "no-such-dir" / "a.rearm-failed",
+                                                Path(self.tmp) / "no-such-dir" / "b.rearm-failed"]):
+            with self.assertRaises(decide.DurableStopUnavailable):
+                self.go([req(rid, uid=836)], {},
+                        judge=FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5,
+                                                    model="gpt-6-sol")),
+                        policy=dataclasses.replace(POLICY, max_rows_per_run=1))
+        # Storage is healthy again: the switch is still absent, and there is no refusal row and no sentinel...
+        self.assertFalse(decide._state_get(self.db, decide.KILL_ARMED_KEY))
+        self.assertTrue(decide._state_get(self.db, decide.WRITE_IN_PROGRESS_KEY),
+                        "the unfinished write phase must outlive the process that saw the refusal")
+        # ...and the next scheduled run still refuses, because the marker says a run never finished.
+        self.assertIn("never finished", decide.kill_armed_refusal(self.db))
+        res, w = self.go([req(uuid_of(437), uid=837)], {"small": [T.raw("Real Engineer", "mixer")]},
+                         judge=FakeJudge(credible()))
+        self.assertEqual(w.calls, [], "no PUT may leave the process while a write phase is unfinished")
+        self.assertIn("WRITER OFF", res.note)
+
+    def test_a_clean_run_clears_the_marker_so_the_next_run_writes(self):
+        """The marker must not wedge the writer: a run that finishes clears it, and the next run writes normally."""
+        res, w = self.go([req(uuid_of(438), uid=838)], {"small": [T.raw("Real Engineer", "mixer")]},
+                         judge=FakeJudge(credible()))
+        self.assertTrue(w.calls, "precondition: the run wrote")
+        self.assertFalse(decide._state_get(self.db, decide.WRITE_IN_PROGRESS_KEY),
+                         "a clean finish must clear the marker")
+        self.assertEqual("", decide.kill_armed_refusal(self.db))
+        res2, w2 = self.go([req(uuid_of(439), uid=839)], {"small": [T.raw("Real Engineer", "mixer")]},
+                           judge=FakeJudge(credible()))
+        self.assertTrue(w2.calls, "the next run must not be blocked by a marker the previous run cleared")
+
+    def test_the_ledger_directory_is_a_third_place_a_refusal_can_land(self):
+        """The switch lives in /etc/hydra and the fallback in /var/lib/hydra; both can be missing on a host where the
+        LEDGER is perfectly writable. If the ledger is readable, its own directory is the place a record is most
+        likely to land - and the next run must refuse on it."""
+        blocked = Path(self.tmp) / "no-such-dir" / "deep" / "credit-trust-decide.disabled"
+        with mock.patch.object(decide, "KILL_SWITCH", blocked), \
+                mock.patch.object(decide, "_state_put", return_value=False), \
+                mock.patch.object(decide, "REARM_SENTINEL_FALLBACK",
+                                  Path(self.tmp) / "no-such-dir" / "fallback.rearm-failed"):
+            self.assertFalse(decide.rearm_kill_switch("never-lower refusal", db=self.db))
+        db_sentinel = Path(self.tmp) / f"credit-trust-decide{decide.REARM_SENTINEL_SUFFIX}"
+        self.assertTrue(db_sentinel.exists(), "the ledger directory was not used as a durable channel")
+        with mock.patch.object(decide, "KILL_SWITCH", blocked), \
+                mock.patch.object(decide, "REARM_SENTINEL_FALLBACK",
+                                  Path(self.tmp) / "no-such-dir" / "fallback.rearm-failed"):
+            self.assertIn("re-arm refusal sentinel", decide.kill_armed_refusal(self.db))
+
+    def test_an_approve_refusal_stops_the_SUPPORT_arm_too(self):
+        """qa-review #1717 (r8) Important: a never-lower refusal `break`s only the approve loop, and the support loop
+        then wrote under the same lock without rechecking the switch the refusal had just armed."""
+        # one APPROVE candidate (paid, anchored, NOT_FOUND) and one SUPPORT candidate (free user)
+        decide.PAYING_USERS_FILE.write_text(json.dumps({
+            "generated_at": "2026-10-11T02:30:00Z", "source": "core.subscriptions",
+            "definition": "active paid plan", "count": 1, "counts_by_basis": {"subscription": 1}, "ids": [900]}))
+        judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
+        rows = [anchored(req(uuid_of(436), uid=900, track="t3")), req(uuid_of(437), uid=501, track="t3")]
+        switch = self._switch()
+        real = decide.assert_never_lower
+
+        def refuse_the_approve_batch(current, target, request_ids, **kw):
+            if target == decide.APPROVED:
+                raise decide.NeverLower("forced for the test: the approve batch is refused")
+            return real(current=current, target=target, request_ids=request_ids, **kw)
+        with mock.patch.object(decide, "KILL_SWITCH", switch), \
+                mock.patch.object(decide, "assert_never_lower", side_effect=refuse_the_approve_batch):
+            res, w = self.go(rows, {}, judge=judge)
+        self.assertEqual(res.never_lower_refusals, 1, "precondition: the never-lower rule fired on the approve batch")
+        self.assertEqual([c for c in w.calls if c["status"] == decide.UVN], [],
+                         "a support ask was sent after the run promised to stop")
+        self.assertIn("WRITE PHASE STOPPED", res.note)
+
+    def test_an_overlapping_run_cannot_write_after_the_other_one_refused(self):
+        """qa-review #1717 (r8) Important: the stop check used to run BEFORE the write lock.
+
+        Run A and run B both pass it while the switch is absent. B waits on WRITE_LOCK; A hits a never-lower refusal
+        and re-arms the switch; B then acquires the lock and PUTs without checking again. The signals are now re-read
+        inside the lock, so B stops.
+        """
+        switch = self._switch()
+        real_lock = decide.write_lock
+
+        @contextlib.contextmanager
+        def lock_after_the_other_run_refused(wait_s: float = 600):
+            # the other run finished while we waited: it re-armed the switch
+            switch.write_text("re-armed by the other run\n")
+            with real_lock(wait_s):
+                yield
+        with mock.patch.object(decide, "KILL_SWITCH", switch), \
+                mock.patch.object(decide, "write_lock", lock_after_the_other_run_refused):
+            res, w = self.go([req(uuid_of(434), uid=834, track="t1")],
+                             {"small": [T.raw("Real Engineer", "mixer")]})
+        self.assertEqual(w.calls, [], "a run that acquired the lock after a refusal must not PUT")
+        self.assertTrue(any("re-checked under the write lock" in e for e in res.write_errors), res.write_errors)
+
+    def test_a_successful_rearm_leaves_no_refusal(self):
+        switch = self._switch()
+        with mock.patch.object(decide, "KILL_SWITCH", switch):
+            self.assertTrue(decide.rearm_kill_switch("test refusal", db=self.db))
+        self.assertTrue(switch.exists())
+        with mock.patch.object(decide, "KILL_SWITCH", switch):
+            self.assertEqual(decide.kill_armed_refusal(self.db), "")
+
+    # ── qa-review #1717 (r7) findings 2 + 3: the suite must not write host paths, and recovery must clear BOTH ────
+    def test_the_suite_never_writes_the_real_host_sentinel(self):
+        """finding 2: driving a failed re-arm used to create /var/lib/hydra/... on the test host and poison later tests."""
+        self.assertNotEqual(decide.REARM_SENTINEL_FALLBACK, HOST_FALLBACK,
+                            "the sandbox must be the default, or a failed-re-arm test writes a host path")
+        self._refuse_then_fail_the_rearm()
+        self.assertTrue(decide.REARM_SENTINEL_FALLBACK.exists(), "precondition: the sandboxed sentinel exists")
+        self.assertFalse(HOST_FALLBACK.exists(), f"the suite wrote {HOST_FALLBACK} on the host")
+
+    def test_clear_reconciles_both_sentinels_so_a_later_re_enable_is_not_refused(self):
+        """finding 3: restore -> decide-rearm --clear -> remove the switch (re-enable) must actually write."""
+        self._refuse_then_fail_the_rearm()
+        switch = self._switch()
+        sentinels = [Path(str(switch) + decide.REARM_SENTINEL_SUFFIX), decide.REARM_SENTINEL_FALLBACK]
+        switch.write_text("restored by hand\n")
+        self.assertTrue(any(p.exists() for p in sentinels), "precondition: a sentinel is on disk")
+        with mock.patch.object(decide, "KILL_SWITCH", switch):
+            self.assertEqual(0, decide.decide_rearm(self.db, clear=True, out=lambda *_: None))
+        self.assertEqual([p for p in sentinels if p.exists()], [],
+                         "a leftover sentinel refuses on its own after the next re-enable")
+        switch.unlink()                                    # the documented way to re-enable the writer
+        with mock.patch.object(decide, "KILL_SWITCH", switch):
+            self.assertEqual("", decide.kill_armed_refusal(self.db),
+                             "recovery must not leave the writer refusing for ever")
+
+    def test_a_clear_that_cannot_remove_a_sentinel_refuses_instead_of_reporting_success(self):
+        self._refuse_then_fail_the_rearm()
+        switch = self._switch()
+        switch.write_text("restored by hand\n")
+        blocked = decide.REARM_SENTINEL_FALLBACK
+        self.assertTrue(blocked.exists(), "precondition: the sentinel is there")
+        out = []
+        with mock.patch.object(decide, "KILL_SWITCH", switch), \
+                mock.patch.object(Path, "unlink", side_effect=OSError("EACCES")):
+            rc = decide.decide_rearm(self.db, clear=True, out=out.append)
+        self.assertEqual(2, rc, "half-recovered is not recovered")
+        self.assertTrue(any("could not be removed" in line for line in out), out)
+
+    # ── qa-review #1717 (r6): the refusal must not depend on the LEDGER write, which is best-effort ─────────
+    def test_the_refusal_survives_a_ledger_that_cannot_record_it(self):
+        """Ledger write fails AND the switch cannot be written: the sentinel beside the switch must carry it."""
+        blocked = Path(self.tmp) / "no-such-dir" / "deep" / "credit-trust-decide.disabled"
+        sentinel_dir = Path(self.tmp) / "sentinel"
+        sentinel_dir.mkdir()          # in production this is the ledger's own directory, which exists
+        fallback = sentinel_dir / "credit-trust-decide.rearm-failed"
+        with mock.patch.object(decide, "KILL_SWITCH", blocked), \
+                mock.patch.object(decide, "REARM_SENTINEL_FALLBACK", fallback), \
+                mock.patch.object(decide, "_state_put", return_value=False):
+            self.assertFalse(decide.rearm_kill_switch("never-lower refusal", db=self.db))
+        self.assertTrue(fallback.exists(), "a refusal that cannot be recorded in the ledger needs a file")
+        with mock.patch.object(decide, "KILL_SWITCH", blocked), \
+                mock.patch.object(decide, "REARM_SENTINEL_FALLBACK", fallback):
+            why = decide.kill_armed_refusal(self.db)
+        self.assertIn(str(fallback), why, "the next run must refuse on the sentinel alone")
+        self.assertIn("unarmed", why)
+
+    def test_an_unreadable_state_store_refuses_instead_of_answering_no_record(self):
+        """A ledger this process cannot read is not a ledger with no refusal: unknown may not read as permission."""
+        switch = Path(self.tmp) / "absent-switch.disabled"
+
+        class Unreadable:
+            def execute(self, *a, **k):
+                raise sqlite3.OperationalError("database disk image is malformed")
+
+        with mock.patch.object(decide, "KILL_SWITCH", switch):
+            why = decide.kill_armed_refusal(Unreadable())
+        self.assertTrue(why, "an unreadable record with no switch present must refuse")
+        self.assertIn("could not be read", why)
+
+    def test_a_fresh_ledger_is_not_an_unreadable_one(self):
+        """A table that has never been created is 'no record yet', or every fresh deploy would refuse."""
+        switch = Path(self.tmp) / "absent-switch.disabled"
+        fresh = sqlite3.connect(os.path.join(self.tmp, "fresh.sqlite3"))
+        self.addCleanup(fresh.close)
+        with mock.patch.object(decide, "KILL_SWITCH", switch), \
+                mock.patch.object(decide, "REARM_SENTINEL_FALLBACK", Path(self.tmp) / "nope"):
+            self.assertEqual(decide.kill_armed_refusal(fresh), "")
+
+
+class CodedCurrentConsumer(Base):
+    """qa-review #1717 (r6) finding 1: the freshness rule needs a CONSUMER, not only tests.
+
+    Existence was never permission; a probe that tests `-f` reads a survivor from a failed refresh as MET however honest
+    the field inside it is. `decide_coded_current()` is that consumer, the writer consumes it on its own output, and the
+    writer-off refusal measures it again so a stale executable document cannot read as a pass.
+    """
+
+    def _path(self):
+        return Path(self.tmp) / "coded.json"
+
+    def test_the_verb_answers_current_for_the_bytes_the_run_wrote(self):
+        p = self._path()
+        self.assertTrue(decide.write_coded_decider_output(
+            decide.RunResult(run_id="run-ok", mode="apply"), [], path=p, db=self.db))
+        out = []
+        self.assertEqual(decide.decide_coded_current(self.db, path=p, out=out.append), 0)
+        self.assertTrue(out[0].startswith("CURRENT"), out)
+
+    def test_the_verb_answers_not_current_for_anything_but_those_bytes(self):
+        p = self._path()
+        decide.write_coded_decider_output(decide.RunResult(run_id="run-ok", mode="apply"), [], path=p, db=self.db)
+        doc = json.loads(p.read_text())
+        doc["run_id"] = "someone-else"
+        p.write_text(json.dumps(doc, indent=1, sort_keys=True) + "\n")
+        out = []
+        self.assertEqual(decide.decide_coded_current(self.db, path=p, out=out.append), 3)
+        self.assertTrue(out[0].startswith("NOT CURRENT"), out)
+        p.unlink()
+        self.assertEqual(decide.decide_coded_current(self.db, path=p, out=out.append), 3,
+                         "a deleted artifact is not current either")
+
+    def test_a_judge_run_reaches_the_probe_as_CURRENT(self):
+        """qa-review #1717 r8 (finding 1), end to end: judge run -> the verb #1707's probe calls -> exit 0.
+
+        The probe is `check-kill-switch-contract.sh --probe coded-decider-output`, which runs
+        `credit-review.py decide-coded-current` and treats 0 as MET. A scheduled judge run is the documented lift
+        path, so it must answer 0 - while the permission question stays NO.
+        """
+        p = self._path()
+        self.assertTrue(decide.write_coded_decider_output(
+            decide.RunResult(run_id="run-judge", mode="judge"), [], path=p, db=self.db))
+        out = []
+        self.assertEqual(decide.decide_coded_current(self.db, path=p, out=out.append), 0,
+                         f"the judge-run lift path must reach MET: {out}")
+        self.assertTrue(out[0].startswith("CURRENT"), out)
+        ok_x, why_x = decide.coded_output_is_executable(self.db, path=p)
+        self.assertFalse(ok_x, "... and it is still not a licence to write")
+        self.assertIn("not executable", why_x)
+
+    def test_the_verb_says_cannot_tell_when_the_record_cannot_be_read(self):
+        class Unreadable:
+            def execute(self, *a, **k):
+                raise sqlite3.OperationalError("database disk image is malformed")
+        out = []
+        self.assertEqual(decide.decide_coded_current(Unreadable(), path=self._path(), out=out.append), 2)
+        self.assertTrue(out[0].startswith("CANNOT TELL"), out)
+
+    def test_the_writer_books_a_document_that_does_not_read_current(self):
+        """The production consumer: the writer measures its OWN artifact instead of assuming it."""
+        p = self._path()
+        res = decide.RunResult(run_id="run-ok", mode="apply")
+        self.assertTrue(decide.write_coded_decider_output(res, [], path=p, db=self.db))
+        self.assertFalse([e for e in res.write_errors if "NOT current" in e],
+                         "a document that reads CURRENT must not be booked as stale")
+        # A CLEAN run (so the document claims executable) whose bytes still do not read CURRENT: the writer must say so
+        # instead of assuming its own write was trustworthy.
+        bad = decide.RunResult(run_id="run-bad", mode="apply")
+        bad.approved, bad.scanned = 1, 1
+        saved = decide.coded_output_is_current
+        try:
+            decide.coded_output_is_current = lambda *a, **k: (False, "forced for the test")
+            # False, and that is the point: the return value of the writer means "the artifact on disk is now the
+            # CURRENT executable document of this run", not "the fopen succeeded".
+            self.assertFalse(decide.write_coded_decider_output(bad, [], path=p, db=self.db))
+            self.assertTrue(any("NOT current" in e for e in bad.write_errors), bad.write_errors)
+        finally:
+            decide.coded_output_is_current = saved
+        # and a document that does NOT claim executable is never booked as a stale one: it is not a licence at all
+        silent = decide.RunResult(run_id="run-quiet", mode="judge")
+        try:
+            decide.coded_output_is_current = lambda *a, **k: (False, "forced for the test")
+            self.assertTrue(decide.write_coded_decider_output(silent, [], path=p, db=self.db))
+        finally:
+            decide.coded_output_is_current = saved
+        self.assertFalse([e for e in silent.write_errors if "NOT current" in e], silent.write_errors)
+
+
+class DecideRearmCli(unittest.TestCase):
+    """credit-review.py decide-rearm: the human recovery path for a failed re-arm (--clear refuses without the file)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.ledger = Path(self.tmp) / "ledger.sqlite3"
+        self.switch = Path(self.tmp) / "credit-trust-decide.disabled"
+        self._saved = decide.KILL_SWITCH, decide.log
+        decide.KILL_SWITCH = self.switch
+        decide.log = lambda *a, **k: None
+        self.db = sqlite3.connect(str(self.ledger))
+        decide.ensure_schema(self.db)
+        decide._state_put(self.db, decide.KILL_ARMED_KEY, {"at": "2026-11-04T09:00:00Z", "path": str(self.switch),
+                                                          "reason": "read-only /etc/hydra", "replaced": False})
+
+    def tearDown(self):
+        decide.KILL_SWITCH, decide.log = self._saved
+        self.db.close()
+
+    def test_clear_is_refused_while_the_switch_is_absent(self):
+        self.assertEqual(decide.decide_rearm(self.db, clear=True, out=lambda *_: None), 2)
+        db = sqlite3.connect(str(self.ledger))
+        self.assertTrue(decide._state_get(db, decide.KILL_ARMED_KEY), "a refusal may not clear the record")
+        db.close()
+
+    def test_clear_drops_the_record_once_the_switch_is_back(self):
+        self.switch.write_text("restored\n")
+        self.assertEqual(decide.decide_rearm(self.db, clear=True, out=lambda *_: None), 0)
+        db = sqlite3.connect(str(self.ledger))
+        self.assertEqual(decide._state_get(db, decide.KILL_ARMED_KEY), {})
+        self.assertEqual(decide.kill_armed_refusal(db), "")
+        db.close()
+
+    def test_the_plain_command_restores_the_switch_and_leaves_the_writer_off(self):
+        self.assertEqual(decide.decide_rearm(self.db, out=lambda *_: None), 0)
+        self.assertTrue(self.switch.exists(), "re-arm writes the switch back")
 
 
 if __name__ == "__main__":

@@ -158,8 +158,8 @@ install_cron() {
   [ -x "$HYDRA_REPO/scripts/churn/risk_reader.py" ]
   # The ruling of 2026-11-04 17:16Z was a SCOPE LOCK on the churn PR: wiring the churn
   # signal into credit-verify-outbound.sh or credit_review/decide.py needed its own PR
-  # (d2 + Fable). That PR is #1774 and it merged, so the lock has done its job - and as a
-  # permanent repo invariant it was a landmine: it asserted that NO PR may ever touch
+  # (d2 + Fable). That PR is #1774 (still OPEN as of 2026-11-05 - qa-review #1717 r9), so the
+  # lock has done its job - and as a permanent repo invariant it was a landmine: it asserted that NO PR may ever touch
   # decide.py, so every later credit PR went red on a file it was supposed to change
   # (hydra #1782, 2026-11-05: the decider support-only arm touches decide.py by design).
   # What survives is the invariant the lock was protecting: the dependency is ONE-WAY.

@@ -356,6 +356,16 @@ def cmd_decide(args: argparse.Namespace) -> int:
             print(f"credit-trust-decide refused --mode apply: the previous apply run has no read-back yet "
                   f"({lines}). Read core back first:  python3 scripts/credit-review.py decide-readback --run <id>")
             return 3
+    if args.mode != "judge":
+        # qa-review hydra#1717 r5 (finding 2): a never-lower refusal whose kill-switch re-arm FAILED (a read-only
+        # /etc/hydra) stopped only that run - the file stayed absent, so the next scheduled apply passed the presence
+        # check above and wrote again. The durable record now refuses every later writer run until a human restores
+        # the switch (decide-rearm). Not judge: judging writes nothing.
+        why_off = decide.kill_armed_refusal(ledger.db)
+        if why_off:
+            log(f"decide: refused --mode {args.mode}: {why_off}")
+            print(f"credit-trust-decide refused --mode {args.mode}: {why_off}. Nothing was decided.")
+            return 3
     judge = make_judge(args)
     fb = getattr(judge, "fallback", None)
     if fb is not None and not args.paid_fallback:
@@ -412,6 +422,18 @@ def cmd_decide_readback(args: argparse.Namespace) -> int:
         return 2
     print(json.dumps(doc, ensure_ascii=False, default=str))
     return 0 if doc.get("ok") else 1
+
+
+def cmd_decide_coded_current(args: argparse.Namespace) -> int:
+    """The consumer a probe calls instead of `test -f`: 0 CURRENT, 3 NOT CURRENT, 2 cannot tell."""
+    from credit_review import decide
+    return decide.decide_coded_current(Ledger(args.ledger).db, path=Path(args.path) if args.path else None)
+
+
+def cmd_decide_rearm(args: argparse.Namespace) -> int:
+    """The human recovery path for a failed kill-switch re-arm (the logic lives in credit_review.decide)."""
+    from credit_review import decide
+    return decide.decide_rearm(Ledger(args.ledger).db, clear=args.clear, reason=args.reason)
 
 
 def cmd_provisional_review(args: argparse.Namespace) -> int:
@@ -747,6 +769,10 @@ def cmd_revert(args: argparse.Namespace) -> int:
     os.environ["MUSO_ADMIN_IDENTITY"] = decide.ADMIN_IDENTITY
     out = decide.revert(Ledger(args.ledger).db, args.run, apply=args.apply)
     print(json.dumps(out, indent=1, default=str))
+    # qa-review #1717 (r10) Important: a refusal must not read as success. `applied: false` with an `error` is a
+    # failed rollback, and a human scripting the incident response needs the exit code to say so.
+    if out.get("error"):
+        return 1
     return 0
 
 
@@ -1309,6 +1335,17 @@ def parser() -> argparse.ArgumentParser:
                     help="shared per-UTC-day cap on metered model spend (audit + decide; captain: $25/day)")
     model_flags(dc)
     dc.set_defaults(fn=cmd_decide, provider="codex", max_model_calls=120, budget_usd=2.0)
+
+    dr = sub.add_parser("decide-rearm", help="restore the credit decider's writer kill switch after a failed re-arm")
+    dr.add_argument("--clear", action="store_true",
+                    help="confirm the switch file exists and drop the durable refusal record")
+    dr.add_argument("--reason", default="manual re-arm", help="recorded in the switch file")
+    dr.set_defaults(fn=cmd_decide_rearm)
+
+    dcc = sub.add_parser("decide-coded-current",
+                         help="does the coded-decider output on disk belong to a CURRENT, executable run?")
+    dcc.add_argument("--path", help="default: the deployed coded-decider output path")
+    dcc.set_defaults(fn=cmd_decide_coded_current)
 
     sa = sub.add_parser("score-approve", help="execute the validator's approve verdict on held low-risk rows "
                                             "(captain 2026-10-20; credit-trust-score-approve)")

@@ -83,6 +83,7 @@ server stays the authority: an approval it refuses comes back
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import json
 import os
 import sqlite3
@@ -94,7 +95,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Sequence
 
 from . import account_gate, doc_approve
 from . import admin as admin_api
@@ -165,6 +166,13 @@ ASK_SENDER = "credit-trust-decide"
 APPLY_RUN_PREFIX = "support-writer:apply:"
 READBACK_PREFIX = "support-writer:readback:"
 WRITE_LOCK = Path(os.environ.get("CV_CREDIT_WRITE_LOCK_PATH", "/var/lib/hydra/credit-status-writes.lock"))
+#: The coded-decider output: every run writes its decisions and counts here, atomically. The kill-switch contract's
+#: `--probe coded-decider-output` reads this path, and the Fable executor's lift condition is "a coded-decider output
+#: exists for the batch the executor would act on" - a file that does not exist is that condition NOT MET, so writing it
+#: from every mode (including judge) is what makes the measurement possible. `executable` inside the document says
+#: whether the run could act: a judge file is a measurement of the decisions, never a licence to write.
+CODED_DECIDER_OUT = Path(os.environ.get("CV_CODED_DECIDER_OUT",
+                                        "/var/lib/hydra/credit-review/fable-decider.coded-input.json"))
 PAYING_USERS_FILE = Path(os.environ.get("CREDIT_TRUST_PAYING_USERS_FILE", "/var/lib/credit-trust/paying-users.json"))
 PAYING_USERS_MAX_AGE = timedelta(hours=3)
 PAYING_USERS_MAX_SKEW = timedelta(minutes=5)
@@ -1566,14 +1574,18 @@ def run_readback(db: sqlite3.Connection, run_id: str, *, readback: "Readback | N
     # the next apply stayed wedged; and a MIXED run read back only the confirmed ids, recorded ok:true, and admitted
     # the next apply while the uncertain ask was still unreconciled. An uncertain ask is exactly the one that most
     # needs reading back, so it is included and must be resolved before `ok` can be true.
+    # `refused:cas_unreadable` is the third shape of the same doubt: the server refused a conditional write and its
+    # status could not be read, so the ask may have landed. It is booked as a refusal (the run's accounting) rather
+    # than as `error:`, so it has to be named here or the gate would open on exactly the ask it exists to catch.
     rows = list(db.execute(
         "SELECT DISTINCT request_id, outcome FROM decision_outcomes WHERE run_id = ? AND action = 'support' "
-        "AND (outcome = ? OR outcome LIKE 'error:%')",
+        "AND (outcome = ? OR outcome LIKE 'error:%' OR outcome = 'refused:cas_unreadable')",
         (run_id, UVN)))
     ids = [r[0] for r in rows]
     if not ids:
         raise ValueError(f"run {run_id} wrote no ask to read back")
-    uncertain = {r[0] for r in rows if str(r[1]).startswith("error:")}
+    uncertain = {r[0] for r in rows
+                 if str(r[1]).startswith("error:") or str(r[1]) == "refused:cas_unreadable"}
     rb = readback or status_readback()
     try:
         live = set(rb(UVN, ids))
@@ -1703,6 +1715,245 @@ def ledger_asks(db: sqlite3.Connection, res: "RunResult", landed: Iterable[str],
 
 
 # ── the run ─────────────────────────────────────────────────────────────────
+# ── never-lower: the write boundary has no DOWN transition ───────────────────
+#: Statuses in which the credit is LIVE on the user's profile (a served number). Everything else - unverified, UVN,
+#: processing - serves nothing, so moving between them changes what we are asking, not what the user HAS.
+SERVED = {APPROVED: 1}
+#: Every status the writer may write or find. A status outside this set is UNREADABLE, and an unreadable current status
+#: could be `approved` for all we know, so it refuses (an unknown that we read as "not served" is the never-lower
+#: version of the ten-hour 401: the measurement that was never taken, taken as good news).
+STATUS_KNOWN = frozenset({APPROVED, UNVERIFIED, UVN, "processing"})
+
+
+class NeverLower(RuntimeError):
+    """A write that would take a served credit away. Never a status code the caller may retry past."""
+
+
+def assert_never_lower(*, current: str | None, target: str | None, removal_ref: str = "",
+                       request_ids: Sequence[str] = ()) -> None:
+    """Refuse any write that lowers a SERVED number without a recorded removal.
+
+    The rule (kill-switch contract, `decider_writer.never_lower`): the writer has no DOWN transition, enforced at the
+    write boundary - not in the prompt, not in the ruling, not in a reviewer's memory. A refusal is counted
+    (`RunResult.never_lower_refusals`) and re-places the writer kill switch, so an attempted demotion cannot pass
+    quietly: it turns the writer off and pages.
+
+    WHICH LAYER IS AUTHORITATIVE, because the answer is different for the two questions this rule asks. For a row's
+    CURRENT STATUS the server is authoritative: the conditional PUT carries `expectedStatus`, so the server refuses a
+    write against a row that moved, and no local belief can overrule that. For "did WE serve this number" the ledger
+    (`served_ids`) is the authority, because it is the only local record of what this writer already asked for - and a
+    demotion is only visible against it. The rule evaluates the ledger before the PUT and lets the server's CAS settle
+    the rest; where the server's answer cannot be read at all (`write_ids` below), the doubt is resolved AGAINST the
+    write and the refusal is counted like any other, because an unread status is exactly the ten-hour-401 shape: a
+    measurement that was never taken, read as good news.
+
+    `removal_ref` is the ONE escape hatch, and it must be a recorded removal - the compensating write a named human
+    performs from their own session (`scripts/credit-retro.py`, role-scoped). The model layer that made a decision may
+    never be the authority that reverts it, which is why an empty ref refuses instead of warning.
+
+    UNMEASURED IS NOT CLEAN: an unknown current or target status refuses, because a status we cannot read is a status
+    we cannot promise not to lower.
+
+    The contract's own prose gives the ladder as `user_verification_needed < (nothing) < approved`, which read literally
+    makes the decider's SUPPORT write (unverified -> user_verification_needed) a lowering and refuses the entire support
+    path. The intent - and the incident behind it - is that automation must never take a credit away, so the ladder here
+    ranks SERVED, not wording, and the support path stays legal. Flagged to the contract's author rather than silently
+    bent: see the PR body.
+    """
+    if current == target:
+        return
+    if target not in STATUS_KNOWN or current not in STATUS_KNOWN:
+        raise NeverLower(f"never-lower: status unreadable (current={current!r}, target={target!r}) - a status we "
+                         "cannot read is one we cannot promise not to lower")
+    down = bool(SERVED.get(current)) and not SERVED.get(target)
+    if not down:
+        return
+    if removal_ref:
+        return
+    ids = f" for {len(request_ids)} row(s): {', '.join(list(request_ids)[:3])}" if request_ids else ""
+    raise NeverLower(f"never-lower: {current} -> {target}{ids} would take a served credit away with no recorded "
+                     "removal (a compensating write by a named human is the only path that may do this)")
+
+
+def served_ids(db: sqlite3.Connection, ids: Sequence[str]) -> set[str]:
+    """Rows this ledger has already recorded as SERVED (an approve action whose outcome was `approved`).
+
+    The server is the authority on a row's status, but the ledger is the local measurement of what WE served, and a
+    demotion attempt is only visible against it: the writer's scan reads held rows, so an approved row can reach a
+    write path only through a widened scan or a mis-wired status constant - exactly the case never-lower exists for.
+    """
+    out: set[str] = set()
+    ids = list(ids)
+    for i in range(0, len(ids), 400):
+        chunk = ids[i:i + 400]
+        q = ",".join("?" * len(chunk))
+        for (rid,) in db.execute(
+                "SELECT DISTINCT request_id FROM decision_outcomes WHERE action = 'approve' AND outcome = 'approved' "
+                f"AND request_id IN ({q})", chunk):
+            out.add(rid)
+    return out
+
+
+#: A never-lower refusal that could NOT re-place the writer kill switch leaves a durable record here. qa-review
+#: hydra#1717 r5 (finding 2): the refusal stopped THAT run, but the file stayed absent, so the next scheduled apply run
+#: passed the entrypoint's presence check and could write again - the promised persistent shutdown was one run wide.
+#: While this record exists and the switch file does not, every writer run refuses (entrypoint AND write path).
+KILL_ARMED_KEY = "decider-writer:kill-armed"
+#: The POSITIVE half of the durable stop (qa-review #1717 r9 Important). Every negative record of a refusal - the
+#: switch, the ledger row, the sentinels - can fail at the moment of the refusal, and then nothing tells the next run
+#: that a refusal happened. So the write phase writes a marker BEFORE it writes anything and clears it only on a clean
+#: finish: a marker that is still there means a run started writing and never finished, which is exactly the state a
+#: never-lower refusal leaves behind when every one of its own records failed. It is written while storage is still
+#: healthy, so it survives the transient failure that defeats the negative records.
+WRITE_IN_PROGRESS_KEY = "decider-writer:write-in-progress"
+
+#: Beside the kill switch, then in the ledger's own directory: the refusal has to survive on the SAME durability class
+#: as the switch itself, because the case that creates it is "the switch could not be written".
+REARM_SENTINEL_SUFFIX = ".rearm-failed"
+REARM_SENTINEL_FALLBACK = Path("/var/lib/hydra/credit-review/credit-trust-decide.rearm-failed")
+
+
+class DurableStopUnavailable(RuntimeError):
+    """A never-lower refusal could not be recorded ANYWHERE, so the writer cannot be proven off.
+
+    qa-review #1717 (r8) Important: this case used to be a CRITICAL log line and nothing else. The next run then saw a
+    readable ledger with no refusal row and no sentinel, `kill_armed_refusal()` answered "", and the writer PUT again
+    after a never-lower refusal. A refusal that cannot be recorded must stop the PROCESS, not just the batch.
+    """
+
+
+def _db_dir(db: sqlite3.Connection | None) -> Path | None:
+    """The directory the ledger file lives in - the third place a refusal can be recorded.
+
+    The switch lives in /etc/hydra and the fallback sentinel in /var/lib/hydra/credit-review; both can be missing or
+    read-only on a host where the LEDGER is perfectly writable. If the ledger is readable, its own directory is the
+    one place a durable record is most likely to land.
+    """
+    if db is None:
+        return None
+    try:
+        for _seq, name, file in db.execute("PRAGMA database_list").fetchall():
+            if name == "main" and file:
+                return Path(file).parent
+    except sqlite3.Error:
+        return None
+    return None
+
+
+def _rearm_sentinels(path: Path | None = None, db: sqlite3.Connection | None = None) -> list[Path]:
+    out = [Path(str(path or KILL_SWITCH) + REARM_SENTINEL_SUFFIX), REARM_SENTINEL_FALLBACK]
+    directory = _db_dir(db)
+    if directory is not None:
+        out.append(directory / f"credit-trust-decide{REARM_SENTINEL_SUFFIX}")
+    return out
+
+
+def rearm_kill_switch(reason: str, *, path: Path | None = None,
+                      db: sqlite3.Connection | None = None) -> bool:
+    """Re-place the writer kill switch after a never-lower attempt (contract: the attempt must turn the writer off).
+
+    The refusal has already stopped the write, and a crash here would lose the count and the ledger row, so this is
+    never fatal. When the file CANNOT be re-placed the refusal has to outlive the run: a durable ledger record
+    (`KILL_ARMED_KEY`) makes `kill_armed_refusal()` refuse every later writer run until a human restores the switch.
+    Returns whether the file is now present.
+    """
+    path = path or KILL_SWITCH
+    try:
+        path.write_text(f"never-lower refusal {datetime.now(timezone.utc).isoformat()}: {reason}\n")
+        try:  # the umask decides a new file's mode; a writer kill switch is not group-writable by accident
+            os.chmod(path, 0o644)
+        except OSError:
+            pass
+        return True
+    except OSError as exc:
+        log(f"decide: WARNING could not re-place the writer kill switch at {path}: {exc}. The writer stays OFF: "
+            f"every run refuses until the switch is restored (credit-review.py decide-rearm).")
+        at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        # The ledger row is the NICEST record; it is not sufficient on its own (qa-review #1717 r5 Important): a state
+        # write that fails and a state read that fails would leave the next run seeing neither a switch nor a refusal.
+        recorded = _state_put(db, KILL_ARMED_KEY, {
+            "at": at, "path": str(path), "reason": reason[:500], "replaced": False})
+        sentinels = []
+        for target in _rearm_sentinels(path, db):
+            try:
+                # No mkdir: the sentinel goes where the switch (or the ledger) already lives. Creating a directory to
+                # hold a refusal is a different, larger change to the operator's filesystem than recording one.
+                target.write_text(json.dumps({"at": at, "path": str(path), "reason": reason[:500]}) + "\n")
+                sentinels.append(str(target))
+            except OSError as serr:
+                log(f"decide: WARNING could not write the re-arm sentinel {target}: {serr}")
+        if not recorded and not sentinels:
+            # qa-review #1717 (r8) Important: a log line is not a stop. Nothing durable landed, so the NEXT run would
+            # see a readable ledger with no refusal row and no sentinel and PUT again. Stop the process instead.
+            log("decide: CRITICAL no durable re-arm record landed (ledger write failed, every sentinel failed) - "
+                "the writer can only be stopped by a human restoring the kill switch NOW")
+            raise DurableStopUnavailable(
+                f"a never-lower refusal could not re-place the kill switch at {path} and no durable record of it "
+                f"landed (ledger write failed, every sentinel failed); restore the switch "
+                f"(install -m 644 /dev/null {path}) before any further run")
+        else:
+            log(f"decide: the refusal is durable ({'ledger' if recorded else 'no ledger record'}; "
+                f"sentinels: {sentinels or 'none'})")
+        return False
+
+
+def kill_armed_refusal(db: sqlite3.Connection, *, path: Path | None = None) -> str:
+    """Why a writer run may not proceed after a refusal that could not re-place the kill switch ('' = it may).
+
+    Fail closed, and deliberately narrow: only a recorded FAILED re-arm refuses, and only while the switch file is
+    still absent. Once the file is back the entrypoint's own presence check stops the writer, so the record is
+    dormant; `decide-rearm --clear` removes it once a human has confirmed the switch is in place.
+    """
+    target = Path(path or KILL_SWITCH)
+    if target.exists():
+        return ""
+    readable, row = _state_read_strict(db, KILL_ARMED_KEY)
+    sentinel = next((str(sp) for sp in _rearm_sentinels(path, db) if sp.exists()), "")
+    # qa-review #1717 (r9) Important: the POSITIVE marker. A run that began writing and never cleared this is a run
+    # that did not finish - and the one way to leave it behind is a refusal whose own records all failed. Refusing
+    # here is what makes that case survive the process that saw it.
+    marker_readable, marker = _state_read_strict(db, WRITE_IN_PROGRESS_KEY)
+    if marker_readable and marker:
+        return (f"a write phase started at {marker.get('at')} (run {marker.get('run_id')}) and never finished, so a "
+                f"never-lower refusal may have gone unrecorded; the writer is unarmed until a human confirms. Restore "
+                f"the switch (install -m 644 /dev/null {target}) and then "
+                f"`python3 scripts/credit-review.py decide-rearm --clear`")
+    if not readable and not sentinel:
+        # We cannot prove the writer is armed and we cannot prove a refusal was recorded. Refusing is the only answer
+        # that cannot silently demote a served credit.
+        return (f"the writer kill-armed record could not be read and no re-arm sentinel exists, so the writer may be "
+                f"unarmed; restore the switch (install -m 644 /dev/null {target}) and then "
+                f"`python3 scripts/credit-review.py decide-rearm --clear`")
+    if not marker_readable:
+        # The marker is the positive half of the stop. If it cannot be read we cannot prove no run is unfinished.
+        return (f"the write-in-progress marker could not be read, so the writer cannot prove no run is unfinished; "
+                f"restore the switch (install -m 644 /dev/null {target}) and then "
+                f"`python3 scripts/credit-review.py decide-rearm --clear`")
+    if sentinel and not row:
+        return (f"a re-arm refusal sentinel exists at {sentinel} and the switch is absent, so the writer is unarmed; "
+                f"restore the switch and then `python3 scripts/credit-review.py decide-rearm --clear`")
+    if not row or row.get("replaced"):
+        return ""
+    return (f"a never-lower refusal at {row.get('at')} could not re-place the writer kill switch at {target} "
+            f"({row.get('reason', '')[:200]}), so the writer is still unarmed; restore the switch "
+            f"(install -m 644 /dev/null {target}) and then `python3 scripts/credit-review.py decide-rearm --clear`")
+
+
+def writer_stop_signal(db: sqlite3.Connection, *, path: Path | None = None) -> str:
+    """Why the writer must not write RIGHT NOW ('' = it may). Re-read UNDER the write lock.
+
+    qa-review #1717 (r8) Important: the entrypoint checked this BEFORE taking WRITE_LOCK, so two overlapping runs
+    could both pass it while the switch was absent. The first then hit a never-lower refusal and re-armed the switch
+    (or recorded a durable refusal), and the second acquired the lock afterwards and PUT anyway - a write after a
+    refusal, which is the one thing the never-lower rule exists to prevent. Both signals are re-read here, inside the
+    lock, immediately before the first batch.
+    """
+    target = Path(path or KILL_SWITCH)
+    if target.exists():
+        return f"the writer kill switch is present at {target}"
+    return kill_armed_refusal(db, path=path)
+
+
 @dataclass
 class RunResult:
     run_id: str
@@ -1736,6 +1987,12 @@ class RunResult:
     spend_usd: float = 0.0
     n1: int = 0
     write_errors: list[str] = field(default_factory=list)
+    never_lower_refusals: int = 0
+    #: Refusals where the ledger did NOT prove a demotion but the server's answer could not be read either - the
+    #: rows are a SUBSET of never_lower_refusals, split out so an operator can tell "the ledger says we served this and
+    #: the writer tried to take it away" from "the server refused and we could not see why".
+    cas_unreadable_refusals: int = 0
+    coded_out: str = ""
     note: str = ""
 
     def line(self) -> str:
@@ -1747,6 +2004,7 @@ class RunResult:
         return (f"credit-trust-decide {self.mode} run {self.run_id}: {self.scanned} held rows decided - "
                 f"{self.approved} {verb}, {self.support} {verb2}, {self.deferred} deferred, {self.held} held for a human, "
                 f"{sk} skipped by the server{f' ({skd})' if skd else ''}, {self.n1} one-person contradictions flagged, "
+                f"{self.cas_unreadable_refusals} CAS-unreadable refusals, "
                 f"{self.web_checked} web-checked ({self.model_calls - self.paid_calls} Codex calls at $0, {self.paid_calls} "
                 f"OpenRouter fallback ${self.spend_usd:.2f}{jev}; the rest had no free source to cite), "
                 f"{self.errors} evidence errors. Support asks: {self.support_candidates} before filters, "
@@ -1794,11 +2052,426 @@ def held_rows(admin: admin_api.Admin, skip: set[str], page_size: int = 200, max_
     return rows
 
 
+def coded_decider_document(res: "RunResult", decisions: Sequence["Decision"], *,
+                           written_at: datetime | None = None) -> dict[str, Any]:
+    """The coded-decider output: this run's decisions and counts, in the shape a consumer (or a probe) can read.
+
+    `executable` is the honest answer to "may anything act on this": only an apply-mode run with no write error and no
+    never-lower refusal may, and a judge/shadow file says so in itself. The kill-switch contract's probe reads this path
+    for EXISTENCE (`--probe coded-decider-output`); the file is written from every mode because the decision content is
+    the same measurement in all three, but existence alone must never be read as permission - that is what this field is
+    for, and why a consumer reads it instead of stat()ing the path.
+    """
+    rows = [{
+        "request_id": d.request_id, "profile_id": d.profile_id, "user_id": d.user_id,
+        "track_id": d.track_id, "track_title": d.track_title,
+        "decision": d.decision, "reason": (d.reason or "")[:200],
+        "evidence_kind": d.evidence_kind, "popularity": d.popularity, "big_track": d.big_track,
+        "paid_priority": d.paid_priority, "n1": d.n1, "doc_required": d.doc_required,
+        "model": d.model, "provider": d.provider, "cost_usd": d.cost_usd, "prompt_sha256": d.prompt_sha256,
+    } for d in decisions]
+    counts = {k: sum(1 for d in decisions if d.decision == k) for k in ("approve", "support", "hold", "defer")}
+    counts["total"] = len(decisions)
+    executable = res.mode == "apply" and not res.write_errors and res.never_lower_refusals == 0
+    return {
+        "producer": "scripts/credit_review/decide.py",
+        "run_id": res.run_id, "mode": res.mode,
+        "written_at": (written_at or datetime.now(timezone.utc)).isoformat().replace("+00:00", "Z"),
+        "executable": executable,
+        "counts": counts,
+        # `acted` is the honest verb: in judge/shadow the approved/support numbers are "would" counts, so a consumer must
+        # read `acted` (and `executable`) before treating any number here as something that happened.
+        "writes": {"acted": res.mode == "apply", "approved": res.approved, "support": res.support, "scanned": res.scanned,
+                   "skipped_by_server": res.skipped_by_server, "errors": len(res.write_errors),
+                   "never_lower_refusals": res.never_lower_refusals,
+                   "cas_unreadable_refusals": res.cas_unreadable_refusals},
+        "decisions": rows,
+    }
+
+
+#: The document a consumer must read as "this artifact may NOT be acted on". A refresh that fails leaves the PREVIOUS
+#: run's document in place unless it is replaced, and the previous document may say `executable: true` (qa-review
+#: 2026-11-04, #1717 finding 2). Nothing reading the path could tell the two apart, so a refused run inherited the last
+#: successful run's permission.
+STALE_DECIDER_OUT = {
+    "producer": "scripts/credit_review/decide.py",
+    "stale": True,
+    "executable": False,
+    "writes": {"acted": False, "approved": 0, "support": 0, "scanned": 0, "errors": 0,
+               "never_lower_refusals": 0, "cas_unreadable_refusals": 0},
+    "counts": {"approve": 0, "support": 0, "hold": 0, "defer": 0, "total": 0},
+    "decisions": [],
+}
+
+
+#: The coded-decider output's own WRITE RECORD, in the ledger (durable, unlike the artifact it describes).
+#: qa-review hydra#1717 r5 (finding 1): when every write rung fails the bytes on disk cannot be changed, so a file
+#: that says `executable: true` survives. The document alone can never prove it is CURRENT - only a record written by
+#: the run that produced it can, and the ledger is the one store this code path always owns. A probe or consumer that
+#: wants "the coded-decider output exists for this batch" MUST ask `coded_output_is_current()`; existence is not
+#: permission, and neither is a fresh-looking mtime.
+CODED_OUTCOME_KEY = "decider-writer:coded-output"
+
+
+def _state_put(db: sqlite3.Connection | None, key: str, doc: dict[str, Any]) -> bool:
+    """Best-effort write of a durable state document; returns whether it LANDED.
+
+    Never fatal (the caller has already booked the failure), but the caller may not assume it worked: qa-review #1717
+    (r5) Important - a re-arm refusal recorded only through here is not durable when the write fails, so
+    `rearm_kill_switch` writes a filesystem sentinel as well and refuses when neither landed.
+    """
+    if db is None:
+        return False
+    try:
+        ensure_schema(db)
+        db.execute("INSERT INTO state (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v",
+                   (key, json.dumps(doc, sort_keys=True, default=str)))
+        db.commit()
+        return True
+    except sqlite3.Error as exc:
+        log(f"decide: WARNING could not record state {key}: {exc}")
+        return False
+
+
+def _state_clear(db: sqlite3.Connection | None, key: str) -> bool:
+    """Delete a durable state document; returns whether the store is now free of it.
+
+    Used for the POSITIVE half of the durable stop (qa-review #1717 r9): the write-in-progress marker is cleared on a
+    clean finish, and a marker that cannot be cleared must be reported rather than assumed gone.
+    """
+    if db is None:
+        return False
+    try:
+        db.execute("DELETE FROM state WHERE k = ?", (key,))
+        db.commit()
+        return True
+    except sqlite3.Error as exc:
+        log(f"decide: WARNING could not clear state {key}: {exc}")
+        return False
+
+
+def _state_read_strict(db: sqlite3.Connection | None, key: str) -> tuple[bool, dict[str, Any]]:
+    """(readable, record). An UNREADABLE state store is (False, {}), never "no record".
+
+    qa-review #1717 (r5) Important: `_state_get` answered `{}` on a read error, so a ledger this process could not read
+    looked like a ledger with no refusal recorded - and combined with a missing kill switch that is fail-OPEN. A table
+    that does not exist yet is not a read error (a fresh ledger has recorded nothing); anything else refuses.
+    """
+    if db is None:
+        # No ledger handle in this context (unit stub, inspection helper). The guarantee does not rest on such a
+        # caller: the write path always holds a real ledger, and it refuses on an unreadable one.
+        return True, {}
+    try:
+        row = db.execute("SELECT v FROM state WHERE k = ?", (key,)).fetchone()
+    except sqlite3.Error as exc:
+        if "no such table" in str(exc).lower():
+            return True, {}
+        log(f"decide: WARNING could not read state {key}: {exc}")
+        return False, {}
+    if not row:
+        return True, {}
+    try:
+        doc = json.loads(row[0])
+    except (TypeError, ValueError):
+        return False, {}
+    return (True, doc) if isinstance(doc, dict) else (False, {})
+
+
+def _state_get(db: sqlite3.Connection | None, key: str) -> dict[str, Any]:
+    """The durable record, or {} when there is none (or no ledger to read one from)."""
+    return _state_read_strict(db, key)[1]
+
+
+def _sha256_file(path: Path) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def coded_output_is_current(db: sqlite3.Connection, *, path: Path | None = None) -> tuple[bool, str]:
+    """Is the coded-decider output on disk the CURRENT document a run recorded?
+
+    The independent fail-closed signal for qa-review hydra#1717 r5 (finding 1): a failed refresh whose three write
+    rungs all fail leaves the previous bytes in place, and those bytes may say `executable: true`. Existence, mtime,
+    and the document's own claims are all consistent with that state, so the only trustworthy witness is the record
+    the writing run left in the ledger:
+
+      * no record at all -> NOT current (a run never produced this file, or the ledger was replaced);
+      * the last record is not FRESH (its refresh failed) -> NOT current, whatever the bytes say;
+      * the bytes' sha256 is not the recorded one -> NOT current (edited, or a stale artifact from an older run);
+      * the document is unparseable, or says stale / a different run_id -> NOT current.
+
+    FRESHNESS IS NOT PERMISSION (qa-review #1717 r8, finding 1). This answers "are the bytes on disk the document the
+    last run produced?" and nothing else. A scheduled JUDGE run writes a fresh document with `executable: false`, and
+    that document IS current - conflating the two made the judge-run lift path unreachable, because #1707's
+    `coded-decider-output` probe asks this question and got NOT CURRENT for a perfectly fresh measurement. Whether
+    anything may ACT on the document is a separate question, answered by `coded_output_is_executable()`.
+    """
+    path = Path(path or CODED_DECIDER_OUT)
+    row = _state_get(db, CODED_OUTCOME_KEY)
+    if not row:
+        return False, ("no coded-decider output was recorded by a run (existence is never permission)"
+                       if path.exists() else f"no coded-decider output at {path}")
+    if str(row.get("path") or "") != str(path):
+        return False, f"the recorded output is {row.get('path')}, not {path}"
+    if not row.get("fresh"):
+        return False, (f"the last attempt (run {row.get('run_id')}) did not produce a fresh document"
+                       f" ({row.get('why') or 'invalidated'}); the bytes on disk are a previous run's")
+    actual = _sha256_file(path)
+    if not actual:
+        return False, f"the output at {path} cannot be read"
+    if actual != row.get("sha256"):
+        return False, "the bytes on disk are not the bytes the run recorded (stale artifact)"
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return False, f"the output at {path} is unparseable: {exc}"
+    if not isinstance(doc, dict) or doc.get("stale"):
+        return False, "the document says it is stale"
+    if doc.get("run_id") != row.get("run_id"):
+        return False, f"the document is run {doc.get('run_id')}, the record is run {row.get('run_id')}"
+    return True, f"current: run {row.get('run_id')} ({row.get('mode')}) recorded at {row.get('at')}"
+
+
+def coded_output_is_executable(db: sqlite3.Connection, *, path: Path | None = None) -> tuple[bool, str]:
+    """Is the CURRENT coded-decider output also a LICENCE TO WRITE?
+
+    The second half of the r5 rule, split out in r8: a document can be current and still not executable (a judge or
+    shadow run measures, it never permits). Only an apply-mode run with no write error and no never-lower refusal
+    records `executable: true`, and both the record and the document must say so.
+    """
+    current, why = coded_output_is_current(db, path=path)
+    if not current:
+        return False, why
+    path = Path(path or CODED_DECIDER_OUT)
+    row = _state_get(db, CODED_OUTCOME_KEY) or {}
+    if row.get("executable") is not True:
+        return False, f"the recorded document is not executable (mode {row.get('mode')})"
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return False, f"the output at {path} is unparseable: {exc}"
+    if not isinstance(doc, dict) or doc.get("executable") is not True:
+        return False, "the document says it is not executable"
+    return True, why
+
+
+def _invalidate_coded_output(path: Path, why: str) -> str:
+    """Make sure a FAILED refresh cannot be read as a fresh one.
+
+    A three-step ladder, because each step covers a failure the previous one cannot:
+
+      1. tmp + replace - atomic, no torn reads, the normal path;
+      2. write THROUGH the existing file - a READ-ONLY DIRECTORY breaks replace AND unlink, but truncating a file
+         that already exists needs no directory write at all (qa-review #1717 r4's reported path);
+      3. unlink - the directory is writable but the write keeps failing.
+
+    A missing file is a NOT-MET the probe answers honestly, while a stale `executable: true` is a lie that reads as a
+    pass. Should all three fail (the file itself is unwritable) the bytes cannot be changed by anyone, so the RUN
+    books the failure: `write_coded_decider_output` returns False, records it in `res.write_errors`, and writes the
+    durable `CODED_OUTCOME_KEY` record that `coded_output_is_current()` refuses.
+
+    Returns which rung worked ("replace", "inplace", "unlink") or "" when every one of them failed - the caller
+    records that in the ledger, because the surviving bytes may still say `executable: true`.
+    """
+    doc = dict(STALE_DECIDER_OUT)
+    doc["written_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    doc["invalidated_because"] = why[:300]
+    tmp = path.with_name(f".{path.name}.invalid{os.getpid()}")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(doc, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+        log(f"decide: the coded-decider output at {path} was INVALIDATED (a failed refresh may not inherit the "
+            f"previous run's permission)")
+        return "replace"
+    except OSError as exc:
+        log(f"decide: WARNING could not replace the coded-decider output at {path}: {exc}")
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        # qa-review #1717 r4: a READ-ONLY DIRECTORY breaks BOTH replace and unlink, so the previous
+        # `executable: true` document survived and the existence-only probe read it as a pass. Writing the stub
+        # THROUGH the existing file needs no directory write at all, so it works exactly where the other two fail.
+        # A torn in-place write is safe: a partial document is unparseable, and the probe treats an unparseable
+        # artifact as NOT MET rather than as permission.
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(doc, indent=1, sort_keys=True) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            log(f"decide: the coded-decider output at {path} was INVALIDATED IN PLACE (the directory refused a "
+                f"replacement and a removal)")
+            return "inplace"
+        except OSError as exc2:
+            log(f"decide: WARNING could not invalidate the coded-decider output at {path} even in place: {exc2}")
+    try:
+        path.unlink()
+        log(f"decide: the previous coded-decider output at {path} was REMOVED - a stale executable document is worse "
+            f"than none")
+        return "unlink"
+    except OSError:
+        return ""
+
+
+def write_coded_decider_output(res: "RunResult", decisions: Sequence["Decision"], *,
+                               path: Path | None = None, written_at: datetime | None = None,
+                               db: sqlite3.Connection | None = None) -> bool:
+    """Write the coded-decider output atomically. Never fatal: a run must not die because an audit file could not be
+    written, and a silently missing file cannot be mistaken for a pass - the probe answers NOT MET, which is true.
+
+    A FAILED refresh INVALIDATES the previous artifact instead of leaving it in place: existence was never permission,
+    and neither is staleness. Every attempt - successful or not - also leaves a record in the ledger (`db`), so a
+    consumer never has to guess whether the bytes on disk are this run's (`coded_output_is_current`).
+    """
+    path = path or CODED_DECIDER_OUT
+    doc = coded_decider_document(res, decisions, written_at=written_at)
+    tmp = path.with_name(f".{path.name}.tmp{os.getpid()}")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(doc, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except OSError as exc:
+        log(f"decide: WARNING could not write the coded-decider output at {path}: {exc}")
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        rung = _invalidate_coded_output(path, str(exc))
+        res.write_errors.append(f"coded-decider output could not be written at {path}: {exc}"[:200])
+        if rung == "":
+            # Nothing could be changed on disk, so the previous document may still say `executable: true`. The writer
+            # turns ITSELF OFF rather than keep producing decisions behind an artifact it cannot invalidate: the file
+            # stops the next run, and the durable record (if even that write fails) stops it too.
+            armed = rearm_kill_switch(
+                f"the coded-decider output at {path} could not be invalidated after a failed refresh ({exc}), so a "
+                f"previous run's executable document may still be readable", db=db)
+            res.write_errors.append(
+                f"coded-decider output could NOT be invalidated (kill switch {'re-placed' if armed else 'NOT re-placed'})"
+                [:200])
+        # qa-review hydra#1717 r5 (finding 1): with rung "" the previous bytes SURVIVE, possibly executable. Record
+        # that a fresh document does not exist, so the probe answers NOT MET instead of reading the survivor as a pass.
+        _state_put(db, CODED_OUTCOME_KEY, {
+            "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "run_id": res.run_id, "mode": res.mode,
+            "path": str(path), "sha256": _sha256_file(path), "fresh": False, "executable": False,
+            "invalidated_by": rung, "survived": bool(rung == ""), "why": str(exc)[:300]})
+        return False
+    res.coded_out = str(path)
+    landed = _state_put(db, CODED_OUTCOME_KEY, {
+        "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"), "run_id": res.run_id, "mode": res.mode,
+        "path": str(path), "sha256": _sha256_file(path), "fresh": True,
+        "executable": doc.get("executable") is True, "why": ""})
+    if db is None:
+        # No ledger to record against (an inspection helper, a unit test): the file write IS the contract here, and
+        # freshness is not measurable. Saying otherwise would be a claim about a record nobody wrote.
+        return True
+    if not landed:
+        res.write_errors.append(
+            "coded-decider output recorded NOWHERE (the ledger state write failed): a consumer will answer "
+            "NOT CURRENT"[:250])
+    # qa-review #1717 (r5) Important: `coded_output_is_current()` existed and only the tests called it, so the tree
+    # still contained a freshness rule nothing acted on. The WRITER now consumes it: a document that claims to be
+    # executable must read CURRENT after the write, and a claim that only holds in a unit test is not a guarantee.
+    if doc.get("executable") is True:
+        # A document that claims to be a licence to write must read CURRENT **and** executable after the write.
+        ok, why_x = coded_output_is_executable(db, path=path)
+        if not ok:
+            res.write_errors.append(f"coded-decider output written at {path} but NOT current: {why_x}"[:250])
+            log(f"decide: WARNING coded-decider output at {path} reads NOT CURRENT after the write: {why_x}")
+        return ok
+    # A judge/shadow document is a measurement, not a licence: the write succeeded, and there is no permission to
+    # verify. Its FRESHNESS is still answerable through `coded_output_is_current()` (qa-review #1717 r8).
+    return True
+
+
+def decide_coded_current(db: sqlite3.Connection, *, path: Path | None = None,
+                         out: Callable[[str], None] = print) -> int:
+    """Answer whether the coded-decider output on disk is the CURRENT one; 0 current, 3 not current, 2 cannot tell.
+
+    This is the consumer the freshness rule needed (qa-review #1717 r5, finding 1): a probe that tests `-f` reads a
+    survivor from a failed refresh as MET, however honest the field inside it is. Exit 2 is separate from 3 on purpose -
+    "I could not read the record" and "the record says no" are different facts, and only one of them is repaired by
+    re-running.
+
+    It answers FRESHNESS, not permission (qa-review #1717 r8, finding 1): a scheduled judge run writes a fresh,
+    non-executable document, and #1707's `coded-decider-output` probe asks exactly this question. Requiring
+    `executable: true` here made the judge-run lift path unreachable - the probe refused a document that was current
+    in every sense it was asking about. `coded_output_is_executable()` is the permission question.
+    """
+    readable, _row = _state_read_strict(db, CODED_OUTCOME_KEY)
+    if not readable:
+        out("CANNOT TELL: the coded-decider output record could not be read, so freshness is unknown")
+        return 2
+    current, why = coded_output_is_current(db, path=path)
+    out(f"{'CURRENT' if current else 'NOT CURRENT'}: {why}")
+    return 0 if current else 3
+
+
+def decide_rearm(db: sqlite3.Connection, *, clear: bool = False, reason: str = "manual re-arm",
+                 path: Path | None = None, out: Callable[[str], None] = print) -> int:
+    """Re-place the writer kill switch, or confirm it is in place and drop the durable refusal record.
+
+    The human recovery path for a never-lower refusal that could not write /etc/hydra: `decide --mode apply` (and the
+    write path itself) refuse while the record exists and the switch does not. `--clear` REFUSES while the switch is
+    absent - clearing the record then would re-arm the writer, which is the exact state the record exists to prevent.
+    Exit 0 done, 2 refused.
+    """
+    switch = Path(path or KILL_SWITCH)
+    if not clear:
+        if rearm_kill_switch(reason, path=switch, db=db):
+            out(f"writer kill switch restored at {switch}; the writer stays off")
+            return 0
+        out(f"could not write {switch}: the writer stays off and every run refuses "
+            f"(fix the directory, then re-run; --clear only once the file exists)")
+        return 2
+    if not switch.exists():
+        out(f"refused: {switch} does not exist, so clearing the record would re-arm the writer. "
+            f"Create it first (install -m 644 /dev/null {switch}), then re-run --clear.")
+        return 2
+    row = _state_get(db, KILL_ARMED_KEY)
+    if row:
+        db.execute("DELETE FROM state WHERE k = ?", (KILL_ARMED_KEY,))
+        db.commit()
+    # qa-review #1717 (r9) Important: the write-in-progress marker refuses on its own, so a human who restored the
+    # switch and cleared the refusal record would still find the writer refusing for ever. Recovery clears both.
+    marker = _state_get(db, WRITE_IN_PROGRESS_KEY)
+    if marker:
+        _state_clear(db, WRITE_IN_PROGRESS_KEY)
+    # qa-review #1717 (r7) Important: clearing the ledger record alone leaves the FALLBACK SENTINEL behind, and that
+    # sentinel refuses on its own. Recovery would then be half-done: a human who confirmed the switch is in place and
+    # later removes it (a deliberate re-enable) would find the writer refusing for ever, with nothing pointing at the
+    # stale file. Reconcile every sentinel while the switch is present - the one case where they are dormant.
+    cleared, stale = [], []
+    for target in _rearm_sentinels(switch, db):
+        if not target.exists():
+            continue
+        try:
+            target.unlink()
+            cleared.append(str(target))
+        except OSError as exc:
+            stale.append(f"{target} ({exc})")
+    out(f"writer kill switch present at {switch}; durable refusal record {'cleared' if row else 'was not set'}"
+        f"{'; unfinished write phase cleared' if marker else ''}"
+        f"{'; sentinels cleared: ' + ', '.join(cleared) if cleared else ''}")
+    if stale:
+        # A sentinel we cannot remove is a refusal that outlives this recovery: say so, and exit nonzero so the operator
+        # does not re-enable the writer believing recovery was complete.
+        out(f"refused: the switch is present but a re-arm sentinel could not be removed: {'; '.join(stale)}. "
+            f"Remove it by hand before re-enabling the writer.")
+        return 2
+    return 0
+
+
 def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str, policy: Policy,
         writer: Writer | None = None, readback: Readback | None = None, now: datetime | None = None,
         max_model_calls: int = 120,
         workers: int = 6, budget_s: int = 720, rows: list[dict[str, Any]] | None = None,
-        clock: Callable[[], datetime] | None = None) -> RunResult:
+        clock: Callable[[], datetime] | None = None,
+        coded_out: Path | None = None) -> RunResult:
     # judge (Fable [key=l11b], 2026-10-27): exactly shadow - no approval PUT, no support/ask write,
     # no provisional approval - but the ledger rows carry mode='judge' so stage 2 (which reads
     # only apply and judge "proof on file" holds) gets input while the approve path stays off.
@@ -2213,59 +2886,143 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
         res.approved, res.support = len(approve_ids), len(support_ids)
         for rid in approve_ids + support_ids:
             record_outcome(db, res.run_id, rid, "approve" if rid in approve_ids else "support", "shadow", now)
+        write_coded_decider_output(res, decisions, path=coded_out, db=db)
+        return res
+    why_armed = kill_armed_refusal(db)
+    if why_armed:
+        # A durable refusal already turned the writer off; this run must not write, and must say why.
+        res.errors += 1
+        res.write_errors.append(f"writer armed off: {why_armed}"[:300])
+        res.note = ((res.note + " ") if res.note else "") + "WRITER OFF: " + why_armed
+        log(f"decide: refusing to write: {why_armed}")
+        write_coded_decider_output(res, decisions, path=coded_out, db=db)
+        # The refusal is the moment a survivor matters most: a previous run's `executable: true` document must not
+        # still read CURRENT while nothing is allowed to write. Measure it, and book it when it does.
+        current, why_out = coded_output_is_executable(db, path=Path(coded_out or CODED_DECIDER_OUT))
+        if current:
+            res.write_errors.append(
+                f"a coded-decider output at {coded_out or CODED_DECIDER_OUT} still reads CURRENT while the writer is "
+                f"armed off ({why_out}) - a consumer would read a stale executable document as a pass"[:250])
         return res
     writer = writer or admin_writer()
     readback = readback or status_readback()
     user_of = {d.request_id: d.user_id for d in decisions}
 
-    def write_ids(action: str, status: str, chunk: list[str]) -> set[str]:
+    def write_ids(action: str, status: str, chunk: list[str]) -> set[str] | None:
+        """One batch. Returns the ids that LANDED, or None when the never-lower rule REFUSED the batch (the run then
+        stops writing).
+
+        Two boundary tripwires live here rather than at the callers, so a future path added above this function by
+        mistake still cannot get past either one: the approve-arm tripwire (#1782) and the never-lower rule (#1707).
+        """
         # TRIPWIRE, at the boundary rather than at the caller: no path may write an approval
         # while the arm is off, even a future one added above this function by mistake.
         if status == APPROVED:
             why = approve_arm_off(policy)
             if why:
                 raise ApproveArmOff(f"refused at the write boundary: {why}")
+        served = served_ids(db, chunk) if action != "approve" else set()
+        try:
+            assert_never_lower(current=APPROVED if served else UNVERIFIED, target=status,
+                               request_ids=sorted(served))
+        except NeverLower as exc:
+            res.never_lower_refusals += 1
+            res.errors += 1
+            armed = rearm_kill_switch(str(exc), db=db)
+            res.write_errors.append(f"never-lower refusal ({action} batch of {len(chunk)}, "
+                                    f"kill switch {'re-placed' if armed else 'NOT re-placed'}): {exc}"[:300])
+            log(f"decide: NEVER-LOWER REFUSED an {action} write of {len(chunk)} row(s): {exc}")
+            for rid in chunk:
+                record_outcome(db, res.run_id, rid, action, "refused:never_lower", clock())
+            return None
         outs, err = write_chunk(writer, readback, status, chunk, UNVERIFIED)
+        # A row whose write did NOT land and whose outcome is an ERROR (not the server NAMING a reason) means the server
+        # refused a CAS we assumed, and we cannot see the status it refused against. On the SUPPORT side that is the
+        # never-lower blind spot: an `approved` row the ledger has never recorded (a manual revert, a re-run, a lost
+        # ledger) is invisible to `served_ids`, so the pre-PUT check reads UVN -> UVN as no lowering and only the
+        # server's CAS stops the demotion. Counting it here is the difference between "protected by CAS, silently"
+        # (Fable 2026-11-04, question 1) and "protected, counted, and the writer turned off". A NAMED server reason
+        # (`skipped:needs_human_review`) is a policy answer, not a doubt, and must never re-arm the writer.
         # Outcomes are booked at the time the PUT (and its readback) RETURNED, not
         # when it started: a request in flight across UTC midnight counts on the
         # later day. The pre-PUT check already fitted it into the earlier day, so
         # neither day can exceed the cap (the later day is counted conservatively).
         done_at = clock()
+
+        def book(outcomes: dict[str, str]) -> set[str]:
+            """Record row outcomes in the ledger and fold them into the run counts. Returns the ids that LANDED.
+
+            EVERY row that reached the server is booked BEFORE this function decides whether to stop the run. A mixed
+            support batch - a few rows landed, one row's CAS could not be read - must not lose the rows that landed
+            (qa-review 2026-11-04, #1717 finding 1): returning on the unreadable row first threw away the writes that
+            happened, and the next run then re-sent a support ask the server had already accepted, or read its own
+            write as one that never happened.
+            """
+            landed: set[str] = set()
+            for rid, out in outcomes.items():
+                record_outcome(db, res.run_id, rid, action, out, done_at)
+                if out == status:
+                    landed.add(rid)
+                    if action == "approve":
+                        res.approved += 1
+                    else:
+                        res.support += 1
+                elif out.startswith("skipped:"):
+                    k = out.split(":", 1)[1]
+                    res.skipped_by_server[k] = res.skipped_by_server.get(k, 0) + 1
+                elif action == "support" and out.startswith("error:"):
+                    # qa-review #1782 (r8) Important: the PUT may have committed and the status read-back failed, so an
+                    # ask we cannot rule out owes a read-back exactly like a confirmed one.
+                    res.support_uncertain += 1
+                if action == "approve" and out != status and rid.lower() in doc_pending:
+                    if out.startswith("error:unverified:"):
+                        # QA #1684 round 7, finding 1: the PUT failed AND the readback failed, so core may
+                        # have COMMITTED this credit. Releasing would delete the only record standing behind
+                        # a live credit and hand the slot back for a second approval, so the row is held as
+                        # `indeterminate` - still counted, no longer served as proof - for a human to
+                        # reconcile against core's status.
+                        if doc_approve.mark_indeterminate(db, rid.lower(),
+                                                          reason=f"core write outcome unknown ({out}); "
+                                                                 "reconcile against core before releasing"):
+                            res.doc_approved -= 1     # it is reported as indeterminate, never double-counted
+                            res.doc_indeterminate += 1
+                            log(f"decide: doc-approve {rid} is INDETERMINATE: the core write outcome is unknown ({out})")
+                    # the credit was NOT approved: give the doc slot back rather than leave a phantom row
+                    elif doc_approve.release(db, rid.lower(), reason=f"core write did not confirm ({out})"[:300]):
+                        res.doc_approved -= 1
+                        log(f"decide: doc-approve {rid} released: the core write did not confirm ({out})")
+            return landed
+
+        if action != "approve":
+            unreadable = [rid for rid, out in outs.items()
+                          if out != status and out.startswith("error:") and rid not in served]
+            if unreadable:
+                res.cas_unreadable_refusals += 1
+                res.never_lower_refusals += 1
+                res.errors += 1
+                armed = rearm_kill_switch(
+                    f"the server refused a conditional write on {len(unreadable)} row(s) and its status could not be "
+                    f"read, so a demotion of a served credit cannot be excluded (row {unreadable[0]}); a stale ledger "
+                    f"reaches this path too - resolve it with credit-retro.py, never by editing the ledger",
+                    db=db)
+                res.write_errors.append(
+                    f"CAS-unreadable refusal ({action} batch of {len(chunk)}, {len(unreadable)} unreadable, "
+                    f"kill switch {'re-placed' if armed else 'NOT re-placed'}): {err or 'no write error recorded'}"[:300])
+                log(f"decide: CAS-UNREADABLE REFUSED an {action} write of {len(unreadable)} row(s): {err}")
+                # qa-review #1782 (r8) Important: an unreadable SUPPORT row is also an ask we cannot rule out - the PUT
+                # may have committed - so it owes a read-back exactly like a confirmed one. Counting it here keeps the
+                # read-back gate closed for it even though the run stops.
+                if action == "support":
+                    res.support_uncertain += len(unreadable)
+                # LEDGER FIRST, THEN STOP. The rows that were NOT unreadable landed (or the server named a reason for
+                # them); booking them here is the difference between "we stopped" and "we stopped and lost the writes".
+                book({rid: out for rid, out in outs.items() if rid not in unreadable})
+                for rid in unreadable:
+                    record_outcome(db, res.run_id, rid, action, "refused:cas_unreadable", done_at)
+                return None
         if err is not None:
             res.write_errors.append(f"{action} batch of {len(chunk)}: {err}"[:200])
-        landed: set[str] = set()
-        for rid, out in outs.items():
-            record_outcome(db, res.run_id, rid, action, out, done_at)
-            if out == status:
-                landed.add(rid)
-                if action == "approve":
-                    res.approved += 1
-                else:
-                    res.support += 1
-            elif out.startswith("skipped:"):
-                k = out.split(":", 1)[1]
-                res.skipped_by_server[k] = res.skipped_by_server.get(k, 0) + 1
-            elif action == "support" and out.startswith("error:"):
-                # qa-review #1782 (r8) Important: the PUT may have committed and the status read-back failed, so an
-                # ask we cannot rule out owes a read-back exactly like a confirmed one.
-                res.support_uncertain += 1
-            if action == "approve" and out != status and rid.lower() in doc_pending:
-                if out.startswith("error:unverified:"):
-                    # QA #1684 round 7, finding 1: the PUT failed AND the readback failed, so core may
-                    # have COMMITTED this credit. Releasing would delete the only record standing behind
-                    # a live credit and hand the slot back for a second approval, so the row is held as
-                    # `indeterminate` - still counted, no longer served as proof - for a human to
-                    # reconcile against core's status.
-                    if doc_approve.mark_indeterminate(db, rid.lower(),
-                                                      reason=f"core write outcome unknown ({out}); "
-                                                             "reconcile against core before releasing"):
-                        res.doc_approved -= 1     # it is reported as indeterminate, never double-counted
-                        res.doc_indeterminate += 1
-                        log(f"decide: doc-approve {rid} is INDETERMINATE: the core write outcome is unknown ({out})")
-                # the credit was NOT approved: give the doc slot back rather than leave a phantom row
-                elif doc_approve.release(db, rid.lower(), reason=f"core write did not confirm ({out})"[:300]):
-                    res.doc_approved -= 1
-                    log(f"decide: doc-approve {rid} released: the core write did not confirm ({out})")
+        landed = book(outs)
         # a chunk that failed before the server named any row: nothing was confirmed, so nothing stands
         for rid in chunk:
             if rid.lower() in doc_pending and rid not in outs:
@@ -2286,6 +3043,17 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
     provisional = {d.request_id for d in decisions if d.decision == "approve" and d.evidence_kind == PROVISIONAL_KIND}
     asked_run: set[int] = set()
     with write_lock():
+        # qa-review #1717 (r8) Important: the stop signals are re-read HERE, under the lock, because the check above
+        # ran before it. An overlapping run that refused and re-armed the switch while this one waited must stop this
+        # one too - otherwise the second run writes after a refusal.
+        stop = writer_stop_signal(db)
+        if stop:
+            res.errors += 1
+            res.write_errors.append(f"writer armed off (re-checked under the write lock): {stop}"[:300])
+            res.note = ((res.note + " ") if res.note else "") + "WRITER OFF: " + stop
+            log(f"decide: refusing to write (re-checked under the lock): {stop}")
+            write_coded_decider_output(res, decisions, path=coded_out, db=db)
+            return res
         # qa-review #1782 (r7) Important: the pending-readback check ran BEFORE this lock, and `record_apply_run()`
         # ran AFTER it, so two apply processes starting with no pending read-back could both pass - the first wrote
         # asks, the second wrote another batch without reading the first back. Both halves are now inside the lock:
@@ -2298,17 +3066,42 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
             res.note = ((res.note + " ") if res.note else "") + f"READ-BACK OWED: {lines}"
             log(f"decide: refusing to write (read-back owed, re-checked under the lock): {lines}")
             return res
+        # qa-review #1717 (r9) Important: the POSITIVE half of the durable stop. Every NEGATIVE record of a refusal
+        # (the switch, the ledger row, the sentinels) can fail at the moment of the refusal, and then nothing tells
+        # the next run that a refusal happened. This marker is written while storage is still healthy and cleared only
+        # on a clean finish, so a marker left behind means a run started writing and never finished - which is exactly
+        # what an unrecordable never-lower refusal leaves. A writer that cannot write this cannot record a refusal
+        # either, so it must not write at all.
+        if not _state_put(db, WRITE_IN_PROGRESS_KEY, {"run_id": res.run_id, "at": utc(clock())}):
+            res.errors += 1
+            res.write_errors.append(
+                "the write-in-progress marker could not be recorded, so a never-lower refusal could not be recorded "
+                "either; nothing was written"[:300])
+            res.note = ((res.note + " ") if res.note else "") + (
+                "WRITER OFF: the write-in-progress marker could not be recorded")
+            log("decide: refusing to write: the write-in-progress marker could not be recorded")
+            write_coded_decider_output(res, decisions, path=coded_out, db=db)
+            return res
+            return res
         # The per-user provisional cap is re-checked here, under the lock, against what is
         # already WRITTEN on the UTC day of each batch (approvals booked by any run).
         # QA #1684 round 7, finding 2: one person's credits are adjacent AND stay in ONE PUT, because
         # core's requester notice groups per PUT - the ruling says the requester is told ONCE, listing them.
         pending_ap = list(chunks_by_user(group_by_user(approve_ids, user_of), user_of, BATCH))
+        # qa-review #1717 (r8) Important: a refusal in the APPROVE loop used to `break` only that loop, and the
+        # support loop then wrote under the same lock without rechecking the switch the refusal had just armed - a
+        # support PUT after the run had promised to stop. One refusal now stops the WHOLE write phase.
+        stopped = False
         while pending_ap:
             chunk, pending_ap = pending_ap[0], pending_ap[1:]
             chunk = provisional_cap_at_write(db, res, chunk, user_of, provisional, clock())
             if chunk:
                 try:
-                    write_ids("approve", APPROVED, chunk)
+                    if write_ids("approve", APPROVED, chunk) is None:
+                        # A never-lower refusal stops the WHOLE write phase, not just this loop: the support arm must
+                        # not write after a refusal either (qa-review #1717 r8).
+                        stopped = True
+                        break
                 except ApproveArmOff as exc:
                     # Never a crash mid-run: book the rows and let the support arm finish.
                     for rid in chunk:
@@ -2324,7 +3117,10 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
         # approval writes that cross midnight can never push a day past the cap.
         # Rows trimmed here get 'deferred:daily_ask_cap' (or
         # 'deferred:per_user_window') and are retried later.
-        pending = list(support_ids)
+        pending = [] if stopped else list(support_ids)
+        if stopped:
+            res.note = ((res.note + " ") if res.note else "") + (
+                "WRITE PHASE STOPPED: an approve batch was refused, so no support ask was sent in this run.")
         checked_day: str | None = None
         while pending:
             at = clock()
@@ -2337,6 +3133,8 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
                     break
             chunk, pending = pending[:BATCH], pending[BATCH:]
             landed = write_ids("support", UVN, chunk)
+            if landed is None:
+                break
             # The ask is ledgered AFTER it landed (never before: a phantom ask would block the
             # user's real one), so the tick's own campaigns find it and stand down.
             try:
@@ -2351,6 +3149,14 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
         # qa-review #1782 (r7) Important: the read-back obligation is recorded BEFORE the lock is released, so a
         # second apply process cannot acquire it and write another batch while this run's asks are unreconciled.
         record_apply_run(db, res, clock())
+        # A clean finish clears the marker. A never-lower refusal that could not record itself raises
+        # DurableStopUnavailable out of write_ids, so the marker survives and the next run refuses - which is the
+        # whole point of writing it before the first batch.
+        if not _state_clear(db, WRITE_IN_PROGRESS_KEY):
+            res.write_errors.append(
+                "the write-in-progress marker could not be cleared, so the next run will refuse until a human "
+                "confirms the writer is armed (`credit-review.py decide-rearm --clear`)"[:300])
+    write_coded_decider_output(res, decisions, path=coded_out, db=db)
     return res
 
 
@@ -2402,16 +3208,41 @@ def revert(db: sqlite3.Connection, run_id: str, *, apply: bool, writer: Writer |
     # approved -> unverified hides the credit: the captain's live Spotify+Tidal rule (2026-10-23,
     # firstmate 104/105/106) applies before any write.
     dsp_gate.require("decider revert (approved -> unverified hides the credit)")
+    # approved -> unverified IS a DOWN transition, and this is the ONE path allowed to make it: a recorded removal (the
+    # run being reverted, whose ids the ledger holds as approved) performed by a named human from their own session -
+    # the agent token is refused per profile by the server (core #10310), and this ref is what makes the refusal the
+    # server's rather than the model's. Never a call the decider makes for itself.
+    assert_never_lower(current=APPROVED, target=UNVERIFIED, removal_ref=f"revert run {run_id}",
+                       request_ids=ids)
     writer = writer or admin_writer()
     readback = readback or status_readback()
     results: dict[str, str] = {}
+    # qa-review #1717 (r10) Important: this is the HUMAN compensating path, so it is NOT gated by the automated
+    # writer's kill switch. `/etc/hydra/credit-trust-decide.disabled` exists to stop the decider approving on its own;
+    # an operator arms it during an incident and then runs `revert --apply` to take back an erroneous approval. Gating
+    # the undo on the stop that halted the thing being undone leaves the credit live and the operator with no lever.
+    # The lock stays (it serializes against the automated writer, which is exactly what we want), and the authority
+    # that makes this legal is its own: the DSP gate above and the recorded removal_ref in `assert_never_lower`.
+    errors: list[str] = []
     with write_lock():
         for i in range(0, len(ids), BATCH):
             chunk = ids[i:i + BATCH]
-            results.update(write_chunk(writer, readback, UNVERIFIED, chunk, APPROVED)[0])
+            outs, err = write_chunk(writer, readback, UNVERIFIED, chunk, APPROVED)
+            results.update(outs)
+            if err:
+                errors.append(err[:300])
     for rid, o in results.items():
         record_outcome(db, f"revert-{run_id}", rid, "revert", o)
-    out.update(applied=True, results=results)
+    # qa-review #1717 (r11) Important: a SKIPPED row is not a reverted row. `write_chunk` reports a 2xx
+    # whose `updatedIds` omits an id as `skipped:<reason>` with NO error, so testing `err` alone let a
+    # skipped rollback report `applied: true` and exit 0 while the approval stayed live. The test is the
+    # OUTCOME, not the transport: applied is true only when every id landed at UNVERIFIED. This also
+    # catches a partial batch, which `err` alone never did.
+    not_reverted = {rid: o for rid, o in results.items() if o != UNVERIFIED}
+    out.update(applied=not not_reverted, results=results)
+    if errors or not_reverted:
+        detail = "; ".join(errors + [f"{rid}: {o}" for rid, o in not_reverted.items()])
+        out.update(applied=False, error=detail[:600])
     return out
 
 

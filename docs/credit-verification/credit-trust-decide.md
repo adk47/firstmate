@@ -208,6 +208,15 @@ gate (#10765/#10767), not live yet, so `revert --apply` now refuses with `live_d
 before any write (`scripts/credit_review/dsp_gate.py`). The listing (`revert --run` without `--apply`)
 is unchanged. The credits stay visible, held for Ops.
 
+**`revert` is NOT gated by the automated writer's kill switch** (qa-review #1717 r10).
+`/etc/hydra/credit-trust-decide.disabled` stops the decider approving on its own; an operator arms it
+during an incident and then runs `revert --apply` to take back an erroneous approval. Gating the undo
+on the stop that halted the thing being undone leaves the credit live and the operator with no lever,
+so the compensating revert keeps its own authority: the DSP gate above and the recorded `removal_ref`
+in `assert_never_lower`. It still takes the write lock (serializing against the automated writer is
+exactly what we want). A rollback whose PUT failed reports `applied: false` with an `error`, and
+`cmd_revert` exits 1 - a refusal must never read as success.
+
 **Kill switches.**
 - `/etc/hydra/credit-trust-decide.disabled`: nothing is decided.
 - `/etc/hydra/credit-review.disabled`: stops this and the audit.
@@ -215,6 +224,18 @@ is unchanged. The credits stay visible, held for Ops.
 - cron `enabled: false` **in a repo PR**. `deploy.sh` re-syncs the live cron file from `cron-jobs.json`
   on every deploy, so a live toggle is reverted by the next deploy; use the kill-switch file for an
   immediate stop.
+
+**The durable stop has a POSITIVE half.** A never-lower refusal re-places the switch; when it cannot, it
+records the refusal in the ledger (`decider-writer:kill-armed`) and in filesystem sentinels, and every
+later run refuses while the switch is absent. But every one of those records is a *negative* fact that
+can fail to write at the exact moment of the refusal — and then nothing tells the next run anything
+happened. So the write phase also writes `decider-writer:write-in-progress` **before its first batch**,
+while storage is still healthy, and clears it only on a clean finish. A marker left behind means a run
+started writing and never finished, which is what an unrecordable refusal leaves; `kill_armed_refusal()`
+refuses on it, and a writer that cannot write the marker does not write at all (it could not record a
+refusal either). Recovery is the same one command: restore the switch, then
+`python3 scripts/credit-review.py decide-rearm --clear`, which clears the refusal record, the marker and
+the sentinels together.
 
 ## Owned elsewhere
 
