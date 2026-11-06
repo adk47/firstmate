@@ -42,7 +42,9 @@ test_signal_passes_through_and_exits_zero() {
   expect_code 0 "$status" "signal checkpoint exit"
   assert_contains "$(cat "$out")" "signal:" "signal wake was not passed through"
   drained=$(FM_HOME="$home" "$ROOT/bin/fm-wake-drain.sh")
-  assert_contains "$drained" $'\tsignal\tdemo.status\t' "signal wake was not queued durably"
+  printf '%s\n' "$drained" | awk -F '\t' -v f="$home/state/demo.status" \
+    '$3 == "signal" && $5 ~ /^signal:/ && index($5, f) { found = 1 } END { exit !found }' \
+    || fail "signal wake was not queued durably"
   pass "checkpoint passes through a real watcher wake and leaves the queue for drain"
 }
 
@@ -80,7 +82,7 @@ SH
   cat > "$home/state/b-beat.check.sh" <<'SH'
 #!/usr/bin/env bash
 now=$(date +%s)
-beat=$(stat -f %m "$FM_HOME/state/.last-watcher-beat" 2>/dev/null || stat -c %Y "$FM_HOME/state/.last-watcher-beat")
+beat=$(stat -c %Y "$FM_HOME/state/.last-watcher-beat" 2>/dev/null || stat -f %m "$FM_HOME/state/.last-watcher-beat")
 printf 'beacon age %ss after the slow check\n' "$((now - beat))"
 SH
   chmod 0700 "$home/state/a-slow.check.sh" "$home/state/b-beat.check.sh"
