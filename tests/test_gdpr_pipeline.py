@@ -2502,6 +2502,69 @@ class SendPath(unittest.TestCase):
         self.assertEqual(out["state"], "sent")
         self.assertEqual(self.s.send_record(rid, "confirm")["state"], "sent")
 
+    def test_the_watchdog_names_why_a_letter_never_left(self):
+        """`no letter sent` covers both "waiting on a decision" and "the pipeline tried and the route refused". The
+        second has to say so, or 24 rows read as a broken pipeline and nobody knows the fix is a mailbox."""
+        from gdpr_pipeline import send as _send
+        rid, _ = self.s.upsert({"keys": ["notices:5"], "channel": "notices", "class": "privacy_erasure",
+                                "received_at": "2026-09-01T10:00:00Z", "requester_email": "x@example.com",
+                                "due_at": "2026-10-25T10:00:00Z"})
+        self.s.begin_send(rid, "ask", "mail", "thread-1", _send.body_sha("x"), "U0AN41ZBTRU", state="refused",
+                          detail="notices@ thread t-1 is in a mailbox gog cannot write on this host")
+        line = [ln for _, ln in self.run.watchdog_rows(datetime(2026, 11, 4, tzinfo=timezone.utc)) if f"#{self.s.get(rid)['register_no']} " in ln][0]
+        self.assertIn("no letter sent", line)
+        self.assertIn("the ask letter is refused", line)
+        self.assertIn("mailbox gog cannot write", line)
+
+    def test_the_watchdog_names_why_a_CONFIRMATION_never_left(self):
+        """The ask branch above only runs when there is NO ledger record. A confirmation that was attempted and
+        refused HAS one, so it took the `letter refused ... via none` path and named no reason at all - the exact
+        rows this change exists to explain (QA 11-05)."""
+        from gdpr_pipeline import send as _send
+        rid, _ = self.s.upsert({"keys": ["notices:7"], "channel": "notices", "class": "privacy_erasure",
+                                "received_at": "2026-09-01T10:00:00Z", "requester_email": "x@example.com",
+                                "due_at": "2026-10-25T10:00:00Z"})
+        self.s.begin_send(rid, "confirm", "none", "", _send.body_sha("x"), "U0AN41ZBTRU", state="refused",
+                          detail="notices@ thread t-1 is in a mailbox gog cannot write on this host")
+        line = [ln for _, ln in self.run.watchdog_rows(datetime(2026, 11, 4, tzinfo=timezone.utc)) if f"#{self.s.get(rid)['register_no']} " in ln][0]
+        self.assertIn("letter refused", line)
+        self.assertIn("mailbox gog cannot write", line)
+        self.assertNotIn("no letter sent", line)
+
+    def test_a_sent_confirmation_does_not_carry_a_stale_reason(self):
+        """The reason belongs to the ATTEMPT, not to the row: once a later attempt lands, the line must not keep
+        quoting the earlier refusal."""
+        from gdpr_pipeline import send as _send
+        rid, _ = self.s.upsert({"keys": ["notices:8"], "channel": "notices", "class": "privacy_erasure",
+                                "received_at": "2026-09-01T10:00:00Z", "requester_email": "x@example.com",
+                                "due_at": "2026-10-25T10:00:00Z"})
+        self.s.begin_send(rid, "confirm", "none", "", _send.body_sha("x"), "U0AN41ZBTRU", state="refused",
+                          detail="mailbox gog cannot write")
+        self.s.claim_send(rid, "confirm", "mail", "t-1", _send.body_sha("x"), "U0AN41ZBTRU")
+        self.s.finish_send(rid, "confirm", "sent", ref="posted")
+        line = [ln for _, ln in self.run.watchdog_rows(datetime(2026, 11, 4, tzinfo=timezone.utc)) if f"#{self.s.get(rid)['register_no']} " in ln][0]
+        self.assertIn("letter sent", line)
+        self.assertNotIn("mailbox gog cannot write", line)
+
+    def test_the_watchdog_names_a_row_with_no_route_before_anything_is_attempted(self):
+        """The 24 unroutable rows have no ledger record yet (nothing has ever been sent). The route check runs first,
+        so the page names the blocker on day one instead of after a failed attempt."""
+        rid, _ = self.s.upsert({"keys": ["notices:6"], "channel": "notices", "class": "privacy_erasure",
+                                "received_at": "2026-09-01T10:00:00Z", "requester_email": "x@example.com",
+                                "gmail_thread": "t-9", "due_at": "2026-10-25T10:00:00Z"})
+        self.assertIsNone(self.s.send_record(rid, "ask"))
+        line = [ln for _, ln in self.run.watchdog_rows(datetime(2026, 11, 4, tzinfo=timezone.utc)) if f"#{self.s.get(rid)['register_no']} " in ln][0]
+        self.assertIn("no route for a letter", line)
+        self.assertIn("mailbox gog cannot write", line)
+
+    def test_a_row_with_a_route_still_reads_as_plain_no_letter_sent(self):
+        rid, _ = self.s.upsert({"keys": ["intercom:77"], "channel": "intercom", "class": "privacy_erasure",
+                                "received_at": "2026-09-01T10:00:00Z", "conversation_id": "215476650395999",
+                                "due_at": "2026-10-25T10:00:00Z"})
+        line = [ln for _, ln in self.run.watchdog_rows(datetime(2026, 11, 4, tzinfo=timezone.utc)) if f"#{self.s.get(rid)['register_no']} " in ln][0]
+        self.assertIn("no letter sent", line)
+        self.assertNotIn("no route for a letter", line)
+
     def test_a_claim_that_never_finished_is_never_retried_by_the_pipeline(self):
         """`sending` means the writer may have reached the customer: only a human may clear it."""
         rid, _ = self.row()

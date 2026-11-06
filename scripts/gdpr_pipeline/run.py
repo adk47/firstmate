@@ -7,6 +7,7 @@ import re
 from datetime import datetime, timedelta, timezone
 
 from gdpr_pipeline import copy, identity, intake, sources
+from gdpr_pipeline import send as letter_send     # 'send' is a local in watchdog_rows: the ledger record for a row
 from gdpr_pipeline.store import Store, _dedupe_pages, now_iso, parse_iso
 
 SLACK_CHANNEL = "C0BBTAVP44X"       # #cs_priority (same channel + bot as legal-intake and the legal watchdog)
@@ -673,13 +674,42 @@ class Run:
                 # with zero letters sent, because `confirm --send` had no adapter. `confirmed_at` is only set by a
                 # send, so a row can sit overdue-and-silent with nothing in the alert saying so.
                 send = self.store.send_record(r["id"], "confirm")
-                letter = "no letter sent" if not send else f"letter {send['state']} {send['at'][:10]} via {send['channel']}"
+                if not send:
+                    letter = "no letter sent"
+                elif send["state"] == "sent":
+                    letter = f"letter sent {send['at'][:10]} via {send['channel']}"
+                else:
+                    # An ATTEMPTED confirmation is neither "no letter sent" nor a letter: the ledger record makes
+                    # `send` non-None, so the no-ledger branch below never runs for it and the page used to read
+                    # "letter refused <date> via none" with no reason and no fix (QA 11-05). The detail is the
+                    # whole point of the record, so it rides the line, bounded like the ask branch's.
+                    why = (send.get("detail") or "").strip()
+                    letter = (f"letter {send['state']} {send['at'][:10]} via {send['channel']}"
+                              + (f" ({why[:160]}{' …' if len(why) > 160 else ''})" if why else ""))
                 if send is None and r.get("interim_confirm_at"):
                     # An interim letter ("the remaining step is in progress") is NOT the confirmation this deadline
                     # is about, but saying "no letter sent" would hide that something already went to the customer.
                     letter = (f"interim letter sent {r['interim_confirm_at'][:10]}, final letter NOT sent")
                 elif send is None and now - due > timedelta(hours=LETTER_GRACE_HOURS):
                     letter = f"no letter sent, {(now - due).days} d past the deadline"
+                if send is None:
+                    # "no letter sent" is true of two very different rows: one waiting on a decision, and one that
+                    # cannot be answered at all (a mailbox gog cannot write, or no reply target on file). Left
+                    # implicit, 24 of the live rows read like a broken pipeline when the fix is a mailbox auth or a
+                    # ruling. Two sources, cheapest first: an attempt already in the ledger, then the route itself.
+                    tried = self.store.send_record(r["id"], "ask")
+                    if tried and tried.get("state") in ("refused", "failed", "unknown", "sending"):
+                        why = (tried.get("detail") or "").strip()
+                        letter += (f"; the {tried['kind']} letter is {tried['state']}"
+                                   + (f" ({why[:160]}{' …' if len(why) > 160 else ''})" if why else ""))
+                    elif tried is None:
+                        try:
+                            letter_send.route(r)    # pure: a capability check on this host, no network
+                        except letter_send.Unknown as e:
+                            why = str(e).strip()
+                            letter += f"; no route for a letter ({why[:160]}{' …' if len(why) > 160 else ''})"
+                        except Exception:               # a route() defect must never break the page
+                            pass
                 out.append((r["register_no"], f"#{r['register_no']} {r['channel']} received {r['received_at'][:10]}, "
                                               f"written confirmation {state} ({r['due_at'][:10]}); {letter}; "
                                               f"identity {r['identity_verdict'] or '-'}; next: {r['action'] or '-'}"))
