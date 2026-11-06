@@ -182,7 +182,8 @@ test_commands_interrupts_and_idle_prompts_pass_through() {
   [ "$(field "$out" '[.results[].action] | unique | join(" ")')" = continue ] \
     || fail "a slash command, a bash line, an urgent interrupt, an idle prompt, an explicit follow-up, an extension prompt, and a blank line must all pass through: $out"
   [ "$(field "$out" '.queued | length')" = 0 ] || fail "nothing passed through may be queued: $out"
-  [ -z "$(ls "$home/state/intake" 2>/dev/null | grep -Ev '^(handled|released)$')" ] || fail "nothing passed through may be recorded"
+  [ -z "$(find "$home/state/intake" -mindepth 1 -maxdepth 1 ! -name handled ! -name released 2>/dev/null)" ] \
+    || fail "nothing passed through may be recorded"
   pass "commands, bash lines, short interrupts, idle prompts, explicit follow-ups, and non-interactive input keep their native lane"
 }
 
