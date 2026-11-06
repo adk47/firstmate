@@ -1135,21 +1135,28 @@ PY
   # #clio_devops is paged, this batch's segment stops, and the tick continues (rc 0) to the next family - the global
   # kill file is NOT written and NO persistent marker wedges the family across ticks.
   rm -f "$CVO_ETC/credit-verify-outbound.disabled" "$CALLS.zero" "$CALLS.page" "$CVO_STATE"/zero-unmeasured-*
+  # Bind the outcomes assertion to THIS run's out dir (r6 on #1687 / #1763): OUT_ROOT is keyed by a
+  # MINUTE-resolution stamp, so three sequential runs can leave two dirs, and reading "the newest by name"
+  # then means reading the PREVIOUS run's file when the run under test wrote none - AssertionError None on a
+  # shard that is otherwise green (it flaked red on #1672 while #1763 passed the same shard). The dir this run
+  # just wrote is the newest by mtime, so take it here, while it is unambiguous.
   STUB_ZERO_RC=2 STUB_ZERO_RC_ONCE=1 run -0 "$SCRIPT"
+  OUT_AFTER="$(newest_out)"
   [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]; [ ! -e "$CVO_STATE/credit-verify-outbound.disabled" ]
   grep -q "zero-read UNMEASURED" "$(newest_tick)"
   grep -q "this segment stops here" "$(newest_tick)"
   grep -q "zero-read UNMEASURED" "$CALLS.page"                    # #clio_devops paged the same minute
   if ls "$CVO_STATE"/zero-unmeasured-* >/dev/null 2>&1; then false; fi   # no persistent marker: no indefinite wedge
-  python3 - "$CVO_OUT_ROOT" <<'PY'
+  python3 - "$OUT_AFTER" <<'PY'
 import glob, json, sys
 # the batch's outcomes balance per user: each user in the batch's ledger range carries the zero-read verdict on their row
 # QA on #1406 / Fable r3 note 2: OUT_ROOT is keyed by a MINUTE-resolution STAMP, and this test runs the script three
 # times in sequence - when a minute boundary falls between them there are two out dirs and the lexicographically first
 # is the STOP run's, which carries no zero_read verdict (the flake: AssertionError None). Read the NEWEST run's.
-app = sorted(glob.glob(sys.argv[1] + "/*/uvn-status-free-apply.json"))
-assert app, "no uvn-status-free apply outcomes"
-d = json.load(open(app[-1]))
+# sys.argv[1] is the out dir the UNMEASURED run wrote (newest by mtime, taken above), never a glob across runs.
+app = glob.glob(sys.argv[1] + "uvn-status-free-apply.json")
+assert app, "the run under test wrote no uvn-status-free apply outcomes in %s" % sys.argv[1]
+d = json.load(open(app[0]))
 rows = d.get("outcomes") or []
 assert d.get("zero_read", {}).get("verdict") == "UNMEASURED", d.get("zero_read")
 assert rows, "no outcome rows"
