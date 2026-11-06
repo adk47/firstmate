@@ -59,6 +59,15 @@ PROFILE="main"
 AGENT="qa"
 TIMEOUT_SECONDS="1200"
 
+# One EXIT trap for every temp file this script creates, installed HERE rather
+# than next to the first `mktemp` that needs it. A second `trap ... EXIT` would
+# silently REPLACE the first and leak the earlier file, so there is exactly one
+# and it is above every branch that can exit. It used to live ~320 lines down,
+# after the broker branch had already created and exited with its own temp file,
+# so every broker dispatch leaked one. Both names are defaulted because this
+# script runs under `set -u` and either branch may never have run.
+trap 'rm -f "${add_err:-}" "${broker_err:-}"' EXIT
+
 die() { echo "qa-dispatch-pr-review: $2" >&2; exit "$1"; }
 
 # --- Gateway target (2026-10-28, node8-to-pods T9) ----------------------------
@@ -119,6 +128,159 @@ REQUESTER_UID="${4:-${QA_REVIEW_REQUESTER_UID:-}}"
 [[ "$REPO" =~ ^Muso-AI/[A-Za-z0-9._-]+$ ]] || die 2 "repo must be Muso-AI/<name>, got '$REPO'."
 [[ "$REQUESTER_UID" =~ ^U[A-Z0-9]+$ ]] || die 2 "requester-uid must be a Slack UID (U...), got '$REQUESTER_UID'."
 
+# --- Broker mode (QA_DISPATCH_MODE=broker) -----------------------------------
+# The default remains "cron": mint a one-shot openclaw job exactly as this script
+# always has. In broker mode the dispatch is instead an ENQUEUE on the durable
+# queue (scripts/lib/qa_broker.py), and a worker pod claims it. Nothing about the
+# key, the dedupe or the review changes — only where "a review is pending" lives.
+#
+# Why this exists: a cron one-shot dies with the gateway and openclaw never
+# re-arms a past-due one-shot (muso-skills#2, core-backend#9243). A queue row
+# survives a restart by construction. The reconciler keeps working either way.
+#
+# Exit codes in broker mode mirror the cron path's contract so no caller needs to
+# change: 0 enqueued | 76 duplicate refused (the broker's own EX_DEDUP_REFUSED,
+# the same value the cron path already returns for its in-flight refusal) |
+# 75 (EX_TEMPFAIL) the broker itself was unreachable — NO review was queued and
+# the attempt did not happen, so the reconciler must not charge it.
+#
+# QA_BROKER_DEDUPE_DONE (default go-only) means a key whose last review was GO is
+# refused as a duplicate, while a failing verdict can be re-reviewed (capped) —
+# see the broker module's header for the full contract.
+QA_DISPATCH_MODE="${QA_DISPATCH_MODE:-cron}"
+if [ "$QA_DISPATCH_MODE" = "broker" ]; then
+  # The temp file must exist BEFORE the redirect below: this script runs under
+  # `set -u`, so expanding an unassigned $broker_err aborts the dispatch and no
+  # review is ever queued.
+  broker_err="$(mktemp)"
+  # The queue lives in the BROKER's database, not in this process's filesystem.
+  # The broker is a single-replica pod with its own PVC, so a dispatcher running
+  # on node-8 or a CI runner that wrote a local SQLite file would return 0 while
+  # the broker's queue stayed empty and no review ever ran. So: POST to the
+  # broker when QA_BROKER_URL is an http(s) URL, and only fall back to the local
+  # CLI when it is explicitly "cli" (tests, and a single-host deployment).
+  BROKER_URL="${QA_BROKER_URL:-http://qa-broker.hydra-qa.svc.cluster.local:8080}"
+  BROKER_PY="${QA_BROKER_SCRIPT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/qa_broker.py}"
+  # Is this sha still the PR's head? The broker cannot see GitHub, and arrival
+  # order is not commit order: a delayed dispatch for an OLDER head arrives after
+  # the current one and would supersede it, leaving the current head with no
+  # review and the stale head as the only claimable job. So the producer, which
+  # CAN see GitHub, asserts it. A failed lookup asserts nothing: the broker then
+  # queues the extra review instead of risking a cancelled one.
+  # ${GH:-gh}, not $GH: GH is assigned further down (the cron path's dedupe
+  # lookup) and this script runs under `set -u`, so a bare $GH here would abort
+  # every broker dispatch with an unbound-variable error.
+  #
+  # The read also returns the PR's `updated_at`, which the broker uses as a
+  # MONOTONIC ordering token. "Is this the current head" is a check-then-act:
+  # this dispatch can verify head A, head B can be pushed, another dispatch can
+  # verify and enqueue B, and only THEN can this one's POST arrive still
+  # claiming current_head. Arrival order cannot break that tie; the verification
+  # order can, and `updated_at` is that order (ISO-8601 UTC sorts
+  # lexicographically, so the broker compares strings and needs no clock).
+  current_head=0
+  head_order=""
+  if head_info="$("${GH:-gh}" api "repos/${REPO}/pulls/${pr}" \
+       --jq '.head.sha + " " + .updated_at' 2>/dev/null)" \
+     && [ -n "$head_info" ]; then
+    head_now="${head_info%% *}"
+    head_order="${head_info#* }"
+    [ "$head_order" = "$head_info" ] && head_order=""
+    if [ "$head_now" != "$sha" ]; then
+      echo "qa-dispatch-pr-review: STALE-HEAD ${REPO}#${pr} @ ${sha} -- the PR head is now ${head_now}; nothing to queue."
+      exit 0
+    fi
+    current_head=1
+  else
+    echo "qa-dispatch-pr-review: head lookup failed for ${REPO}#${pr}; enqueueing without supersede rights." >&2
+  fi
+  if [ "$BROKER_URL" = "cli" ]; then
+    BROKER_ARGS=(--db "${QA_QUEUE_DB:-/var/lib/hydra-qa/queue.sqlite}" enqueue "$REPO" "$pr" "$sha" "$REQUESTER_UID")
+    [ "${QA_BROKER_FORCE:-0}" = "1" ] && BROKER_ARGS+=(--force)
+    [ "$current_head" = "1" ] && BROKER_ARGS+=(--current-head)
+    [ -n "$head_order" ] && BROKER_ARGS+=(--head-order "$head_order")
+    broker_out="$(python3 "$BROKER_PY" "${BROKER_ARGS[@]}" 2>"$broker_err")" && broker_rc=0 || broker_rc=$?
+  else
+    # The broker answers 200 (queued) / 409 (duplicate) with the CLI rc in the
+    # body, so the same case statement below classifies both transports.
+    broker_body="$(printf '{"repo":"%s","pr":%s,"head_sha":"%s","requester_uid":"%s","force":%s,"current_head":%s,"head_order":"%s"}' \
+      "$REPO" "$pr" "$sha" "$REQUESTER_UID" \
+      "$([ "${QA_BROKER_FORCE:-0}" = "1" ] && echo true || echo false)" \
+      "$([ "$current_head" = "1" ] && echo true || echo false)" \
+      "$head_order")"
+    # -w writes the HTTP status on its own line after the body, so a 502 from a
+    # proxy is distinguishable from a 200 from the broker. Without it a proxy
+    # error page (or a JSON error body with no `rc`) looked like a successful
+    # enqueue: curl exits 0, the missing rc defaulted to 0, and the dispatcher
+    # reported "enqueued" for a row that does not exist. The reconciler then
+    # treats the review as dispatched and the PR never gets a verdict.
+    # The broker refuses mutations without its shared token.
+    broker_auth=()
+    [ -n "${QA_BROKER_TOKEN:-}" ] && broker_auth=(-H "X-QA-Broker-Token: $QA_BROKER_TOKEN")
+    broker_out="$(curl -sS --max-time 20 -X POST "${BROKER_URL%/}/enqueue" \
+      -H 'Content-Type: application/json' "${broker_auth[@]}" -d "$broker_body" \
+      -w '\n%{http_code}' 2>"$broker_err")" && broker_rc=0 || broker_rc=$?
+    if [ "$broker_rc" -eq 0 ]; then
+      # The verdict is the body's rc (0 queued, 76 duplicate). An EXPLICIT rc
+      # in the body is authoritative whatever the HTTP status, because the
+      # broker's contract uses the status to carry meaning: a duplicate is
+      # 409 + rc 76, and requiring 2xx here turned every repeat dispatch into
+      # "broker unavailable" (75), which the reconciler then retried forever.
+      # Without an explicit rc, only 2xx counts; anything else is a transport
+      # failure and nothing was queued.
+      broker_rc="$(printf '%s' "$broker_out" | python3 -c '
+import json,sys
+raw = sys.stdin.read()
+body, _, code = raw.rpartition("\n")
+try:
+    http = int(code.strip())
+except ValueError:
+    print(75); raise SystemExit
+try:
+    d = json.loads(body)
+except Exception:
+    print(75); raise SystemExit
+if isinstance(d, dict) and "rc" in d:
+    try:
+        print(int(d["rc"]))
+    except (TypeError, ValueError):
+        print(75)
+    raise SystemExit
+if not (200 <= http < 300):
+    print(75); raise SystemExit
+print(75)
+' 2>/dev/null || echo 75)"
+      # Strip the status line so the echoed body stays valid JSON.
+      broker_out="${broker_out%$'\n'*}"
+    fi
+  fi
+  # Re-emit the diagnostic verbatim; a classification must never swallow it.
+  [ -s "$broker_err" ] && cat "$broker_err" >&2
+  case "$broker_rc" in
+    0)
+      echo "qa-dispatch-pr-review: enqueued ${REPO}#${pr} (${sha}) on the QA broker."
+      echo "$broker_out"
+      exit 0
+      ;;
+    76)
+      # Duplicate/superseded: the key is already queued, running or done. This is
+      # the same "an equivalent review is already in flight" refusal the cron
+      # path's GitHub run-list check produces, so QA_DEDUP_REFUSED_RC callers
+      # treat it identically (no attempt charged).
+      echo "qa-dispatch-pr-review: DEDUP-REFUSED ${REPO}#${pr} @ ${sha} -- the broker already holds this key; no-op."
+      echo "$broker_out"
+      exit "${QA_DEDUP_REFUSED_RC:-76}"
+      ;;
+    *)
+      # A broker we cannot reach is a TRANSPORT failure, not a review failure:
+      # nothing was queued. Exit 75 so the reconciler retries without burning an
+      # attempt, exactly as it does for an unreachable gateway.
+      echo "qa-dispatch-pr-review: BROKER-UNAVAILABLE (rc=$broker_rc) -- no review queued; exiting 75 (not an attempt)." >&2
+      exit 75
+      ;;
+  esac
+fi
+
 # In-flight dedup (MUS-7955): refuse when GitHub already holds an equivalent review.
 # Saves the downstream cost (an openclaw cron + a QA agent run), not runner time.
 # Reads external-pr-review.yml's run-name `qa <repo>#<pr> @ <sha> (<action>)` and
@@ -164,7 +326,6 @@ fi
 # Keep the literal "qa-autoreview-pr-" prefix: the pr-validate orphan-check and
 # the stale-sweep below both match on it, so neither needs to change.
 job_name="qa-autoreview-pr-${REPO//\//-}-${pr}"
-pr_url="https://github.com/${REPO}/pull/${pr}"
 
 # Build the dispatch instruction. The unquoted heredoc expands ${...}; `read -d
 # ''` slurps it into one var (avoids the bash 3.2 command-substitution+heredoc
@@ -172,29 +333,11 @@ pr_url="https://github.com/${REPO}/pull/${pr}"
 # apostrophe/backtick-free for the same reason. The PR URL makes the qa agent
 # run the skill (its MUST-RUN trigger); "AUTO-REVIEW" selects the skill Auto
 # mode section.
-read -r -d '' message <<EOF || true
-AUTO-REVIEW (automated trigger; there is NO human in this thread to approve).
-
-Review this pull request with the muso-github-code-review skill in AUTO MODE:
-${pr_url}  (head commit ${sha})
-
-PR author to keep updated over Slack DM: Slack user ${REQUESTER_UID}.
-
-Follow the skill Auto mode section exactly. In short:
-- FIRST send the author the opening note and KEEP the printed thread-root ts. Use the
-  per-PR thread helper so re-reviews of this PR thread under the first review instead
-  of starting a new top-level DM (it owns the wording and prints the thread-root ts):
-    bash /opt/hydra/scripts/qa-pr-thread-dm.sh ${REPO} ${pr} ${REQUESTER_UID}
-- Skip the Step 5 human gate; post the batched review (Step 6, COMMENT) to GitHub
-  yourself after the audit-log line.
-- Before any GO, carry prior findings forward (skill "Carry forward prior findings"):
-  resolve confirmed-fixed threads, treat any unresolved Critical/Important as a blocker.
-- Approve through scripts/qa-pr-approve.sh (Step 7, requester ${REQUESTER_UID}) whenever
-  the verdict is GO (no Critical, no Important). The wrapper decides CI greenness: advisory
-  checks alert, they do not withhold. Do not gate on CI yourself. Never merge.
-- LAST, DM the author the result as a threaded reply under that opening ts (one line:
-  approved + safe to merge, or not-approved + the reason and finding counts).
-EOF
+# The instruction text lives in one place (scripts/lib/qa-review-prompt.sh) so
+# the broker/worker path sends byte-identical text. See that file's header.
+# shellcheck source=lib/qa-review-prompt.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/qa-review-prompt.sh"
+message="$(qa_review_prompt "$REPO" "$pr" "$sha" "$REQUESTER_UID")"
 
 # Idempotency: a re-push reruns CI and re-dispatches. Drop any still-pending job
 # for this PR so we review the latest SHA, not a stale one. Best-effort — never
@@ -325,7 +468,8 @@ PRE_GATEWAY_SIGNATURES=(
 )
 
 add_err="$(mktemp)"
-trap 'rm -f "$add_err"' EXIT
+# The EXIT trap that removes this file is installed at the top of the script,
+# above every branch that can exit. Do not add a second one here.
 add_rc=0
 "$OPENCLAW" ${OPENCLAW_ARGS[@]+"${OPENCLAW_ARGS[@]}"} cron add \
   --name "$job_name" \

@@ -102,6 +102,12 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           AUTHOR: ${{ github.event.pull_request.user.login }}
           ACTION: ${{ github.event.action }}
+          # This workflow exists to re-review the SAME head after a tier-only
+          # NO-GO, so the broker must be told to reopen the finished key. Without
+          # it the enqueue is a duplicate (76), the red qa-review status stays,
+          # and no review is ever scheduled. Only affects broker mode; the cron
+          # path has no per-key dedupe to override.
+          QA_BROKER_FORCE: "1"
         run: |
           set -euo pipefail
           if ! REQUESTER_UID="$(bash scripts/lib/qa-author-slack-uid.sh "$AUTHOR")"; then

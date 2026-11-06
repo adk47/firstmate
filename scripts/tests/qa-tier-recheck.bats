@@ -171,3 +171,55 @@ PY
   [[ "$output" != *"DEDUP-REFUSED"* ]]
   grep -q "cron add" "$SANDBOX/openclaw.calls"
 }
+
+@test "the dispatch step forces a broker re-review of the same head" {
+  # This workflow exists to re-review the SAME head after a tier-only NO-GO.
+  # In broker mode the key is already `done`, so without QA_BROKER_FORCE=1 the
+  # enqueue is a duplicate (76), the red qa-review status stays, and no review
+  # is ever scheduled. The env is read from the workflow, never retyped.
+  python3 - "$WF" <<'PY'
+import sys, yaml
+steps = yaml.safe_load(open(sys.argv[1]))["jobs"]["dispatch"]["steps"]
+step = next(s for s in steps if "qa-dispatch-pr-review.sh" in (s.get("run") or ""))
+env = step.get("env") or {}
+assert env.get("QA_BROKER_FORCE") == "1", env
+PY
+}
+
+@test "a forced broker dispatch reopens a finished key instead of refusing it" {
+  # The wiring above is only useful if the dispatcher honours it end to end.
+  export QA_QUEUE_DB="$SANDBOX/queue.sqlite"
+  export QA_BROKER_URL=cli
+  export QA_DISPATCH_MODE=broker
+  export QA_BROKER_DEDUPE_DONE=go-only
+  export QA_BROKER_MAX_REVIEWS_PER_KEY=2
+  # The dispatcher verifies the head before enqueueing; stub it so the test
+  # never reaches GitHub.
+  cat > "$SANDBOX/bin/gh-head" <<STUB
+#!/usr/bin/env bash
+printf '%s 2026-11-06T00:00:00Z\\n' "$SHA"
+STUB
+  chmod +x "$SANDBOX/bin/gh-head"
+  export GH="$SANDBOX/bin/gh-head"
+  local broker="$HYDRA_REPO/scripts/lib/qa_broker.py"
+  python3 "$broker" --db "$QA_QUEUE_DB" enqueue Muso-AI/hydra 123 "$SHA" U0AL36NADEY >/dev/null
+  local id
+  id="$(python3 -c "
+import sqlite3
+c=sqlite3.connect('$QA_QUEUE_DB')
+print(c.execute('SELECT id FROM jobs').fetchone()[0])")"
+  python3 "$broker" --db "$QA_QUEUE_DB" claim w1 >/dev/null
+  python3 "$broker" --db "$QA_QUEUE_DB" finish "$id" w1 no_go >/dev/null
+  # Without force: duplicate, nothing queued.
+  run env QA_BROKER_FORCE=0 "$HYDRA_REPO/scripts/qa-dispatch-pr-review.sh" 123 "$SHA" Muso-AI/hydra U0AL36NADEY
+  [ "$status" -eq 76 ]
+  # With force (what the workflow sets): reopened and claimable.
+  run env QA_BROKER_FORCE=1 "$HYDRA_REPO/scripts/qa-dispatch-pr-review.sh" 123 "$SHA" Muso-AI/hydra U0AL36NADEY
+  [ "$status" -eq 0 ]
+  python3 -c "
+import sqlite3
+c=sqlite3.connect('$QA_QUEUE_DB')
+rows=c.execute('SELECT status FROM jobs ORDER BY id').fetchall()
+assert [r[0] for r in rows]==['queued'], rows
+c.close()"
+}

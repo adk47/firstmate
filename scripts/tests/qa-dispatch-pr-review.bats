@@ -57,6 +57,18 @@ STUB
 #!/usr/bin/env bash
 printf '%s\n' "$@" >> "$STUB_GH_ARGV"
 if [ -n "${STUB_GH_FAIL:-}" ]; then echo "gh: HTTP 502" >&2; exit 1; fi
+# `gh api repos/<r>/pulls/<n> --jq .head.sha` is the head-freshness lookup the
+# broker path makes before enqueueing. STUB_HEAD_SHA is the PR's current head;
+# unset means the lookup answers nothing, which the dispatcher treats as
+# "unverified" (enqueue, but no supersede rights).
+if [ "$1" = "api" ]; then
+  # The dispatcher asks for `.head.sha + " " + .updated_at` in ONE read: the
+  # sha is the freshness check, the timestamp is the monotonic ordering token.
+  if [ -n "${STUB_HEAD_SHA:-}" ]; then
+    printf '%s %s\n' "$STUB_HEAD_SHA" "${STUB_HEAD_ORDER:-2026-11-06T00:00:00Z}"
+  fi
+  exit 0
+fi
 if [ -f "${STUB_GH_JSON:-}" ]; then cat "$STUB_GH_JSON"; else echo '[]'; fi
 STUB
   chmod +x "$STUBBIN/gh"
@@ -677,4 +689,313 @@ STACK_PULLS='[
 
 @test "autoreview PR resolution mutation: the old first-open-PR filter picks #1409 (the regression this guards)" {
   [ "$(jq -r '[.[] | select(.state=="open")][0] // empty | .number' <<< "$STACK_PULLS")" = "1409" ]
+}
+
+# ── broker mode (review-bot findings, 2026-11-06) ─────────────────────────
+# The first cut of broker mode referenced $broker_err before assigning it (the
+# script runs under `set -u`, so every broker dispatch aborted) and wrote a
+# node-local SQLite file while the workers claim from the broker pod's own
+# database (so a dispatch returned 0 and no review ever ran). Both are pinned
+# here.
+
+@test "broker mode: a local-CLI enqueue does not abort on an unbound broker_err" {
+  # QA_BROKER_URL=cli keeps the queue in this process's file, which is what the
+  # tests and a single-host deployment use.
+  export QA_BROKER_URL=cli
+  export QA_QUEUE_DB="$TEST_TMPDIR/queue.sqlite"
+  QA_DISPATCH_MODE=broker QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"enqueued Muso-AI/hydra#123"* ]]
+  # Nothing reached the gateway: broker mode never mints a cron job.
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS" || true)" -eq 0 ]
+  python3 -c "
+import sqlite3,sys
+c=sqlite3.connect('$TEST_TMPDIR/queue.sqlite')
+r=c.execute('SELECT repo,pr,status FROM jobs').fetchall()
+assert r==[('Muso-AI/hydra',123,'queued')], r
+c.close()"
+}
+
+@test "broker mode: a duplicate enqueue exits 76 without a cron add" {
+  export QA_BROKER_URL=cli
+  export QA_QUEUE_DB="$TEST_TMPDIR/queue.sqlite"
+  QA_DISPATCH_MODE=broker QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  QA_DISPATCH_MODE=broker QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 76 ]
+  [[ "$output" == *"DEDUP-REFUSED"* ]]
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS" || true)" -eq 0 ]
+}
+
+@test "broker mode: an unreachable broker exits 75 (a transport failure, not an attempt)" {
+  export QA_BROKER_URL="http://127.0.0.1:1"
+  QA_DISPATCH_MODE=broker QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 75 ]
+  [[ "$output" == *"BROKER-UNAVAILABLE"* ]]
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS" || true)" -eq 0 ]
+}
+
+@test "broker mode: an http broker is POSTed to, not written to a local file" {
+  # The queue lives in the broker pod's database. A dispatcher that wrote a
+  # local SQLite file would return 0 while the broker's queue stayed empty.
+  local port=$(( 20000 + RANDOM % 20000 ))
+  # The broker refuses mutations without a token; this test is about the
+  # transport, not the auth gate (which has its own cases in qa-broker.bats).
+  QA_BROKER_ALLOW_UNAUTHENTICATED=1 \
+    python3 "$HYDRA_REPO/scripts/lib/qa_broker.py" --db "$TEST_TMPDIR/broker.sqlite" \
+    serve --host 127.0.0.1 --port "$port" >/dev/null 2>&1 &
+  local pid=$!
+  local i
+  for i in $(seq 1 50); do
+    curl -sf "http://127.0.0.1:$port/healthz" >/dev/null 2>&1 && break
+    sleep 0.1
+  done
+  QA_BROKER_URL="http://127.0.0.1:$port" QA_DISPATCH_MODE=broker \
+    QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  local rc=$status out="$output"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ "$rc" -eq 0 ]
+  [[ "$out" == *"enqueued Muso-AI/hydra#123"* ]]
+  # The job is in the BROKER's database, which is the only one that matters.
+  python3 -c "
+import sqlite3
+c=sqlite3.connect('$TEST_TMPDIR/broker.sqlite')
+r=c.execute('SELECT repo,pr,status FROM jobs').fetchall()
+assert r==[('Muso-AI/hydra',123,'queued')], r
+c.close()"
+  # And no local queue file was created.
+  [ ! -e "$TEST_TMPDIR/queue.sqlite" ]
+}
+
+@test "broker mode: a stale head is not queued at all (STALE-HEAD, exit 0)" {
+  # A delayed dispatch for an OLDER head must not reach the queue: the broker
+  # cannot see GitHub, so if it arrived it would supersede the current head's
+  # queued review and leave the PR's real head unreviewed.
+  export QA_BROKER_URL=cli
+  export QA_QUEUE_DB="$TEST_TMPDIR/queue.sqlite"
+  export STUB_HEAD_SHA="$(printf '%040d' 999)"
+  QA_DISPATCH_MODE=broker QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"STALE-HEAD"* ]]
+  [[ "$output" != *"enqueued"* ]]
+  # Nothing was written to the queue.
+  [ ! -e "$TEST_TMPDIR/queue.sqlite" ] || \
+    [ "$(python3 -c "
+import sqlite3
+c=sqlite3.connect('$TEST_TMPDIR/queue.sqlite')
+print(c.execute('SELECT COUNT(*) FROM jobs').fetchone()[0])")" -eq 0 ]
+}
+
+@test "broker mode: a current head is enqueued WITH supersede rights" {
+  export QA_BROKER_URL=cli
+  export QA_QUEUE_DB="$TEST_TMPDIR/queue.sqlite"
+  export STUB_HEAD_SHA="$GOOD_SHA"
+  QA_DISPATCH_MODE=broker QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"enqueued Muso-AI/hydra#123"* ]]
+  # A second, different head for the same PR supersedes the first: the producer
+  # asserted it is the current head, so the broker is allowed to cancel.
+  export STUB_HEAD_SHA="$(printf '%040d' 7)"
+  # A strictly later verification token: equal tokens do NOT supersede, which
+  # is what makes the check-then-act race safe.
+  export STUB_HEAD_ORDER="2026-11-06T00:05:00Z"
+  QA_DISPATCH_MODE=broker QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$(printf '%040d' 7)"
+  [ "$status" -eq 0 ]
+  python3 -c "
+import sqlite3
+c=sqlite3.connect('$TEST_TMPDIR/queue.sqlite')
+rows=c.execute('SELECT head_sha,status FROM jobs ORDER BY id').fetchall()
+assert rows[0][1]=='superseded', rows
+assert rows[1][1]=='queued', rows
+c.close()"
+}
+
+@test "broker mode: a failed head lookup still enqueues, without supersede rights" {
+  # Fail safe: an unverifiable head must not block the review, and must not
+  # grant the right to cancel someone else's.
+  export QA_BROKER_URL=cli
+  export QA_QUEUE_DB="$TEST_TMPDIR/queue.sqlite"
+  unset STUB_HEAD_SHA
+  QA_DISPATCH_MODE=broker QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"enqueued Muso-AI/hydra#123"* ]]
+  [[ "$output" == *"head lookup failed"* ]]
+  QA_DISPATCH_MODE=broker QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$(printf '%040d' 7)"
+  [ "$status" -eq 0 ]
+  python3 -c "
+import sqlite3
+c=sqlite3.connect('$TEST_TMPDIR/queue.sqlite')
+rows=c.execute('SELECT status FROM jobs ORDER BY id').fetchall()
+assert [r[0] for r in rows]==['queued','queued'], rows
+c.close()"
+}
+
+@test "broker mode: a 502 with a JSON body and no rc is a transport failure, not an enqueue" {
+  # A proxy or a half-up broker can answer 502 with a JSON error body. curl
+  # exits 0, and a missing `rc` used to default to 0, so the dispatcher reported
+  # "enqueued" for a row that does not exist: the reconciler treats the review
+  # as dispatched and the PR never gets a verdict.
+  local port=$(( 20000 + RANDOM % 20000 ))
+  python3 - "$port" <<'PY' &
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = b'{"error":"upstream unavailable"}'
+        self.send_response(502)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PY
+  local pid=$!
+  local i
+  for i in $(seq 1 50); do
+    curl -s -o /dev/null "http://127.0.0.1:$port/" 2>/dev/null && break
+    sleep 0.1
+  done
+  QA_BROKER_URL="http://127.0.0.1:$port" QA_DISPATCH_MODE=broker \
+    QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  local rc=$status out="$output"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ "$rc" -eq 75 ]
+  [[ "$out" == *"BROKER-UNAVAILABLE"* ]]
+  [[ "$out" != *"enqueued"* ]]
+}
+
+@test "broker mode: a 200 with no rc in the body is a transport failure" {
+  local port=$(( 20000 + RANDOM % 20000 ))
+  python3 - "$port" <<'PY' &
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = b'{"ok":true}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PY
+  local pid=$!
+  local i
+  for i in $(seq 1 50); do
+    curl -s -o /dev/null "http://127.0.0.1:$port/" 2>/dev/null && break
+    sleep 0.1
+  done
+  QA_BROKER_URL="http://127.0.0.1:$port" QA_DISPATCH_MODE=broker \
+    QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  local rc=$status out="$output"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ "$rc" -eq 75 ]
+  [[ "$out" != *"enqueued"* ]]
+}
+
+@test "broker mode: a 409 duplicate is deduped (76), not a transport failure" {
+  # The broker's contract uses the HTTP status to carry meaning: a duplicate is
+  # 409 with rc 76 in the body. Requiring 2xx here turned every repeat dispatch
+  # into "broker unavailable" (75), which the reconciler then retried forever.
+  local port=$(( 20000 + RANDOM % 20000 ))
+  python3 - "$port" <<'PY' &
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = b'{"ok":false,"status":"duplicate","rc":76}'
+        self.send_response(409)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PY
+  local pid=$!
+  local i
+  for i in $(seq 1 50); do
+    curl -s -o /dev/null "http://127.0.0.1:$port/" 2>/dev/null && break
+    sleep 0.1
+  done
+  QA_BROKER_URL="http://127.0.0.1:$port" QA_DISPATCH_MODE=broker \
+    QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  local rc=$status out="$output"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ "$rc" -eq 76 ]
+  [[ "$out" != *"BROKER-UNAVAILABLE"* ]]
+}
+
+@test "broker mode: no temp file is leaked on any exit path" {
+  # The EXIT trap used to be installed ~320 lines below the broker branch, so
+  # every broker dispatch created its stderr temp file and exited before the
+  # trap existed. A dispatcher runs on every PR push, so that is an unbounded
+  # leak in /tmp on the runner. TMPDIR is redirected so the count is exact.
+  local tmpd="$TEST_TMPDIR/leakcheck"
+  mkdir -p "$tmpd"
+  local port=$(( 20000 + RANDOM % 20000 ))
+  python3 - "$port" <<'PY' &
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = b'{"ok":true,"status":"queued","id":1,"rc":0}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PY
+  local pid=$!
+  local i
+  for i in $(seq 1 50); do
+    curl -s -o /dev/null "http://127.0.0.1:$port/" 2>/dev/null && break
+    sleep 0.1
+  done
+  TMPDIR="$tmpd" QA_BROKER_URL="http://127.0.0.1:$port" QA_DISPATCH_MODE=broker \
+    QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  local rc=$status
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ "$rc" -eq 0 ]
+  # Nothing left behind: the trap removed the stderr file it created.
+  run bash -c "ls -A '$tmpd' | wc -l"
+  [ "$output" -eq 0 ]
+}
+
+@test "broker mode: a 500 with rc 3 is reported as an internal error, not a dedupe" {
+  # An explicit rc is authoritative whatever the status, so the broker's own
+  # 500+rc:3 (up but broken) must not be flattened into 75 or 76.
+  local port=$(( 20000 + RANDOM % 20000 ))
+  python3 - "$port" <<'PY' &
+import http.server, sys
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = b'{"ok":false,"error":"OperationalError","rc":3}'
+        self.send_response(500)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a): pass
+http.server.HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PY
+  local pid=$!
+  local i
+  for i in $(seq 1 50); do
+    curl -s -o /dev/null "http://127.0.0.1:$port/" 2>/dev/null && break
+    sleep 0.1
+  done
+  QA_BROKER_URL="http://127.0.0.1:$port" QA_DISPATCH_MODE=broker \
+    QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  local rc=$status out="$output"
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  [ "$rc" -ne 0 ]
+  [ "$rc" -ne 76 ]
+  [[ "$out" != *"enqueued"* ]]
 }
