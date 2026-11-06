@@ -29,6 +29,19 @@ from gdpr_pipeline.identity import Page, Requester  # noqa: E402
 from gdpr_pipeline.run import Run, backfill_table, page_text  # noqa: E402
 from gdpr_pipeline.store import Store, now_iso, parse_iso  # noqa: E402
 
+def _cli():
+    """scripts/gdpr-pipeline.py (hyphen, so no plain import). Loading it has no side effects: everything lives under
+    main()."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("gdpr_pipeline_cli", os.path.join(HERE, "gdpr-pipeline.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+HERE = os.path.dirname(os.path.abspath(__file__)) + "/../scripts"
+
+
 ARPAD = "7950a3c4-db2f-49bb-9acf-0d406bfb09ae"
 OTHER = "11111111-2222-3333-4444-555555555555"
 
@@ -3387,3 +3400,239 @@ class DecidedRevMigration(unittest.TestCase):
                          "a decided row is marked changed exactly once, so the next tick re-decides it")
         s.mark_decided(r["id"])
         self.assertEqual(s.get(r["id"])["decided_rev"], 0, "and it pins afterwards, so it is not re-decided forever")
+
+
+class FrozenBatchManifest(unittest.TestCase):
+    """Firstmate ruling 2026-11-04: an approval binds a FROZEN batch, never "whatever is open at send time".
+
+    The live case it was written for: 141 letters were approved (digest 2ac206a275d2b0d2), then the hourly intake
+    created register #381 and the same command rendered 142 letters with a different digest - so the approval no
+    longer named anything sendable. A manifest names the rows, so intake lands in the NEXT batch.
+    """
+
+    def item(self, no, due):
+        return {"register_no": no, "due_at": due, "kind": "ask", "text": f"letter {no}", "to": f"user{no}@example.com"}
+
+    def args(self, **kw):
+        import argparse
+        base = dict(send=False, approved_by="", limit=0, manifest="", sitemap=False)
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    def manifest(self, rows):
+        import tempfile
+        f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump(rows, f)
+        f.close()
+        self.addCleanup(os.unlink, f.name)
+        return f.name
+
+    def test_a_manifest_sends_exactly_the_approved_rows_and_new_intake_cannot_touch_them(self):
+        cli = _cli()
+        old = [self.item(329, "2025-10-20"), self.item(323, "2026-05-05"), self.item(58, "2026-09-01")]
+        path = self.manifest([329, 323, 58])
+        approved = cli.select_batch(self.args(manifest=path), "ask", old)
+        self.assertEqual([x["register_no"] for x in approved], [329, 323, 58])       # oldest deadline first
+        digest = approval.digest("ask", approved)
+        # the hourly tick creates a new request; the full set re-cuts, the manifest does not
+        fresh = old + [self.item(381, "2026-12-04")]
+        self.assertEqual(approval.digest("ask", cli.select_batch(self.args(manifest=path), "ask", fresh)), digest)
+        self.assertNotEqual(approval.digest("ask", cli.select_batch(self.args(), "ask", fresh)), digest)
+        self.assertEqual(len(cli.select_batch(self.args(), "ask", fresh)), 4)      # no manifest = whatever is open
+
+    def test_limit_is_the_moving_selector_this_exists_to_replace(self):
+        cli = _cli()
+        a = [self.item(1, "2026-01-01"), self.item(2, "2026-02-01")]
+        b = a + [self.item(3, "2025-12-01")]                       # an OLDER request arrives than anything approved
+        self.assertEqual([x["register_no"] for x in cli.select_batch(self.args(limit=2), "ask", a)], [1, 2])
+        self.assertEqual([x["register_no"] for x in cli.select_batch(self.args(limit=2), "ask", b)], [3, 1])
+
+    def test_a_manifest_row_that_is_no_longer_sendable_refuses_loudly(self):
+        cli = _cli()
+        path = self.manifest([329, 323, 999])                      # 999 was sent / closed / re-decided since
+        with self.assertRaises(SystemExit) as e:
+            cli.select_batch(self.args(manifest=path), "ask",
+                             [self.item(329, "2025-10-20"), self.item(323, "2026-05-05")])
+        self.assertEqual(e.exception.code, 1)
+
+    def test_two_selectors_are_refused(self):
+        cli = _cli()
+        with self.assertRaises(SystemExit) as e:
+            cli.select_batch(self.args(manifest=self.manifest([1]), limit=5), "ask", [self.item(1, "2026-01-01")])
+        self.assertEqual(e.exception.code, 1)
+
+    def test_an_empty_or_unreadable_manifest_refuses(self):
+        cli = _cli()
+        with self.assertRaises(SystemExit):
+            cli.select_batch(self.args(manifest=self.manifest([])), "ask", [self.item(1, "2026-01-01")])
+        with self.assertRaises(SystemExit):
+            cli.select_batch(self.args(manifest="/nonexistent/manifest.json"), "ask", [self.item(1, "2026-01-01")])
+        bad = os.path.join(os.path.dirname(self.manifest([1])), "bad.json")
+        open(bad, "w").write("329\nnot-a-number\n")
+        self.addCleanup(os.unlink, bad)
+        with self.assertRaises(SystemExit):
+            cli.select_batch(self.args(manifest=bad), "ask", [self.item(329, "2025-10-20")])
+
+    def test_a_plain_text_manifest_is_accepted(self):
+        cli = _cli()
+        f = "/tmp/manifest-plain-{}.txt".format(os.getpid())
+        open(f, "w").write("329\n#323\n\n58\n")
+        self.addCleanup(os.unlink, f)
+        got = cli.select_batch(self.args(manifest=f), "ask",
+                               [self.item(329, "2025-10-20"), self.item(323, "2026-05-05"), self.item(58, "2026-09-01")])
+        self.assertEqual([x["register_no"] for x in got], [329, 323, 58])
+
+    def test_a_register_number_named_twice_still_sends_one_letter(self):
+        # a manifest is a hand-built file; a duplicated line must not become two statutory letters to one person
+        cli = _cli()
+        got = cli.select_batch(self.args(manifest=self.manifest([329, 58, 329])), "ask",
+                               [self.item(329, "2025-10-20"), self.item(58, "2026-09-01")])
+        self.assertEqual([x["register_no"] for x in got], [329, 58])
+
+    def pinned(self, items):
+        import hashlib, tempfile
+        f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump([{"request_id": x["row"], "register_no": x["register_no"],
+                    "body_sha": hashlib.sha256((x["text"] or "").encode()).hexdigest()} for x in items],
+                  f)
+        f.close()
+        self.addCleanup(os.unlink, f.name)
+        return f.name
+
+    def live(self, no, due, text):
+        return {"register_no": no, "row": f"row-{no}", "due_at": due, "kind": "ask", "text": text,
+                "to": f"user{no}@example.com"}
+
+    def test_a_manifest_that_mixes_the_two_forms_is_refused_not_silently_shortened(self):
+        # QA r1 on #1738: a file naming #329 AND {"request_id": "row-58", ...} populated both `nums` and `rows`, and
+        # the row branch discarded `nums`, so the rendered batch contained only row-58. An operator could then approve
+        # the digest of an INCOMPLETE batch while having named #329 in the file. Dropping a named request is the
+        # silent-removal failure the pin exists to prevent, so the mixed form is refused by name.
+        import io, contextlib, json, tempfile
+        cli = _cli()
+        items = [self.live(329, "2025-10-20", "letter A"), self.live(58, "2026-09-01", "letter B")]
+        sha_b = __import__("hashlib").sha256(b"letter B").hexdigest()
+        path = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump([329, {"request_id": "row-58", "register_no": 58, "body_sha": sha_b}], path)
+        path.close()
+        self.addCleanup(os.unlink, path.name)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as e:
+            cli.select_batch(self.args(manifest=path.name), "ask", items)
+        self.assertEqual(e.exception.code, 1)
+        msg = out.getvalue()
+        self.assertIn("mixes the two entry forms", msg)
+        self.assertIn("1 bare register number", msg)
+        self.assertIn("Use ONE form", msg)
+
+    def test_a_row_form_entry_without_body_sha_is_refused(self):
+        # Same failure family: a row-shaped entry that carries no body_sha LOOKS pinned but skips the copy-change
+        # proof, so a rewording after the GO would ride the old approval. A list of rows is supported; a list of
+        # half-pinned rows is not.
+        import io, contextlib, json, tempfile
+        cli = _cli()
+        items = [self.live(329, "2025-10-20", "letter A")]
+        path = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump([{"request_id": "row-329", "register_no": 329}], path)
+        path.close()
+        self.addCleanup(os.unlink, path.name)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit) as e:
+            cli.select_batch(self.args(manifest=path.name), "ask", items)
+        self.assertEqual(e.exception.code, 1)
+        self.assertIn("carries no body_sha", out.getvalue())
+        self.assertIn("Add body_sha", out.getvalue())
+
+    def test_the_pinned_form_register_no_does_not_count_as_a_bare_number(self):
+        # the diptych risk of the fix: a pinned entry carries `register_no` for the human reading the file, and
+        # folding it into the bare-number list would make EVERY valid pinned manifest look mixed.
+        cli = _cli()
+        frozen = [self.live(329, "2025-10-20", "letter A"), self.live(58, "2026-09-01", "letter B")]
+        got = cli.select_batch(self.args(manifest=self.pinned(frozen)), "ask", frozen)
+        self.assertEqual([x["register_no"] for x in got], [329, 58])
+
+    def test_a_pinned_batch_file_selects_by_row_and_body_and_survives_intake(self):
+        # firstmate ruling 2026-11-04: the GO names the frozen set; the file carries the row AND the body it was
+        # approved with, so the run - not a person - can tell an intake addition from a copy change
+        cli = _cli()
+        frozen = [self.live(329, "2025-10-20", "letter A"), self.live(58, "2026-09-01", "letter B")]
+        path = self.pinned(frozen)
+        got = cli.select_batch(self.args(manifest=path), "ask", frozen)
+        self.assertEqual([x["register_no"] for x in got], [329, 58])
+        digest = approval.digest("ask", got)
+        added = frozen + [self.live(381, "2026-12-04", "letter C")]         # the hourly tick creates a request
+        self.assertEqual(approval.digest("ask", cli.select_batch(self.args(manifest=path), "ask", added)), digest)
+
+    def test_a_changed_body_refuses_because_copy_is_approved_per_body(self):
+        cli = _cli()
+        frozen = [self.live(329, "2025-10-20", "letter A")]
+        path = self.pinned(frozen)
+        edited = [self.live(329, "2025-10-20", "letter A, reworded after the GO")]
+        with self.assertRaises(SystemExit) as e:
+            cli.select_batch(self.args(manifest=path), "ask", edited)
+        self.assertEqual(e.exception.code, 1)
+
+    def test_a_pinned_row_that_is_gone_refuses(self):
+        cli = _cli()
+        path = self.pinned([self.live(329, "2025-10-20", "letter A")])
+        with self.assertRaises(SystemExit) as e:
+            cli.select_batch(self.args(manifest=path), "ask", [self.live(58, "2026-09-01", "letter B")])
+        self.assertEqual(e.exception.code, 1)
+
+    def test_a_pinned_row_named_twice_still_renders_one_letter(self):
+        cli = _cli()
+        one = self.live(329, "2025-10-20", "letter A")
+        path = self.pinned([one, one])
+        self.assertEqual(len(cli.select_batch(self.args(manifest=path), "ask", [one])), 1)
+
+    def test_a_batch_document_verifies_its_own_recorded_digest(self):
+        # the pinned file names the ruling and the digest it was cut for; the run checks its own rendering against
+        # that claim instead of trusting the filename
+        cli = _cli()
+        import hashlib, tempfile
+        frozen = [self.live(329, "2025-10-20", "letter A"), self.live(58, "2026-09-01", "letter B")]
+        entries = [{"request_id": x["row"], "register_no": x["register_no"],
+                    "body_sha": hashlib.sha256(x["text"].encode()).hexdigest()} for x in frozen]
+        doc = {"ruling": "fable-ruling-1103-d2/gdpr-identity-ask", "kind": "ask", "letters": 2,
+               "digest": approval.digest("ask", cli.select_batch(self.args(), "ask", frozen)), "entries": entries}
+        f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump(doc, f); f.close(); self.addCleanup(os.unlink, f.name)
+        got = cli.select_batch(self.args(manifest=f.name), "ask", frozen)
+        self.assertEqual([x["register_no"] for x in got], [329, 58])
+        # a file whose recorded digest does not match what it renders is refused, not silently sent
+        doc["digest"] = "0" * 16
+        f2 = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump(doc, f2); f2.close(); self.addCleanup(os.unlink, f2.name)
+        with self.assertRaises(SystemExit) as e:
+            cli.select_batch(self.args(manifest=f2.name), "ask", frozen)
+        self.assertEqual(e.exception.code, 1)
+
+    def test_a_partially_sent_batch_says_so_instead_of_just_refusing(self):
+        # the operator has to be able to tell "a send died at letter N" from "the register moved": the first is
+        # benign-but-needs-a-re-pin, the second means the approval no longer names anything
+        import io, contextlib, tempfile, sqlite3
+        from gdpr_pipeline.store import Store
+        cli = _cli()
+        td = tempfile.mkdtemp()
+        store = Store(os.path.join(td, "e.sqlite"))
+        rid, _ = store.upsert({"keys": ["intercom:9"], "channel": "intercom", "class": "privacy_erasure",
+                               "received_at": "2026-09-01T10:00:00Z", "conversation_id": "215476650395415",
+                               "requester_name": "Arpad Laczkovszki", "due_at": "2026-10-01T10:00:00Z"})
+        store.begin_send(rid, "ask", "intercom", "1", "sha", "U0AN41ZBTRU", state="sending")
+        store.finish_send(rid, "ask", "sent", detail="ok")
+        run = Run(store)
+        path = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        json.dump([{"request_id": str(rid), "register_no": 1, "body_sha": "0" * 64}], path)
+        path.close()
+        self.addCleanup(os.unlink, path.name)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(SystemExit):
+            cli.select_batch(self.args(manifest=path.name), "ask", [], run)
+        self.assertIn("already carry a ledger record", out.getvalue())
+        self.assertIn("re-pin the unsent rows", out.getvalue())
+
+    def test_both_send_commands_accept_a_manifest(self):
+        src = open(os.path.join(HERE, "gdpr-pipeline.py")).read()
+        self.assertIn('select_batch(a, "ask", run.asks(now), run)', src)
+        self.assertIn('select_batch(a, "confirm", run.confirmations(now, m_result=m_result), run)', src)
+        self.assertIn('p.add_argument("--manifest"', src)

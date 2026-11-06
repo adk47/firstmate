@@ -29,6 +29,7 @@ Kill switch: /etc/hydra/gdpr-pipeline.disabled (every step that writes or pages 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -294,6 +295,151 @@ def oldest_first(items: list[dict]) -> list[dict]:
     return sorted(items, key=lambda x: (x.get("due_at") or "", x.get("register_no") or 0))
 
 
+def select_batch(a, kind: str, items: list[dict], run=None) -> list[dict]:
+    """The approved batch is FROZEN, and a manifest is how it stays frozen (firstmate ruling 2026-11-04).
+
+    `--limit N` is a moving selector: it takes the oldest N of *whatever is open now*, so the next intake re-cuts the
+    batch and the digest a human approved no longer names it. `--manifest FILE` names the rows instead, so new intake
+    lands in the NEXT batch and cannot touch this one. Two entry forms, and the pinned one is what a GO names:
+
+      [329, 323, ...]                                            register numbers, cut from a dry run
+      [{"request_id": "…", "register_no": 329, "body_sha": "…"}]  a pinned batch file: row + the exact body it was
+                                                                  approved with, so intake additions and COPY
+                                                                  changes are told apart by the run, not by memory
+
+    It fails closed on every way the manifest can stop being the approved batch:
+      - a row/register number not in the current sendable set (closed, already sent, verdict changed, or a typo):
+        sending the rest would be a DIFFERENT batch under the same approval;
+      - a BODY that no longer hashes to the pinned sha: copy is approved per body, so that is a FRESH GO, never a
+        "re-cut" (firstmate ruling 2026-11-04: additions may carry a GO, a body change may not);
+      - a manifest with no rows, or an unreadable/unparseable file;
+      - `--manifest` together with `--limit`: two selectors with no defined winner.
+    """
+    if not a.manifest:
+        return oldest_first(items)[:a.limit or None]
+    if a.limit:
+        print("REFUSED: --manifest and --limit are two different selectors for one batch; use one")
+        raise SystemExit(1)
+    try:
+        raw = open(a.manifest).read()
+    except OSError as exc:
+        print(f"REFUSED: cannot read the manifest {a.manifest}: {exc}")
+        raise SystemExit(1)
+    claimed = ""
+    try:
+        wanted = json.loads(raw)
+        if isinstance(wanted, dict) and isinstance(wanted.get("entries"), list):
+            # the pinned FILE form: the batch document records which ruling and digest it was cut for, and the run
+            # checks its own rendering against that claim below rather than trusting the file's name
+            wanted, claimed = wanted["entries"], str(wanted.get("digest") or "")
+        if not isinstance(wanted, list):
+            raise ValueError("not a JSON list")
+    except ValueError:
+        wanted = [tok for tok in re.split(r"[\s,]+", raw.strip()) if tok]
+    nums, rows, shas = [], [], {}
+    for x in wanted:
+        if isinstance(x, dict):
+            # the pinned form: a batch file names the ROW and the BODY it was approved with, so "no body change"
+            # (firstmate ruling 2026-11-04) is checked by the run instead of remembered by a person
+            rid = str(x.get("request_id") or x.get("row") or "").strip()
+            if not rid:
+                print(f"REFUSED: manifest entry {x!r} has no request_id")
+                raise SystemExit(1)
+            if not x.get("body_sha"):
+                # Same failure family as the mixed form: a row-shaped entry with no body_sha looks pinned but skips
+                # the copy-change proof entirely, so a rewording after the GO would go out under the old approval.
+                # A list of rows is a supported form; a list of HALF-pinned rows is not.
+                print(f"REFUSED: manifest entry {rid!r} is in the pinned (row) form but carries no body_sha. Without "
+                      f"it the run cannot prove the copy did not change after the GO, which is the whole point of "
+                      f"pinning. Add body_sha, or name the requests by register number instead.")
+                raise SystemExit(1)
+            rows.append(str(rid))
+            shas[rid] = str(x["body_sha"]).strip().lower()
+            # NOTE: `register_no` is deliberately NOT added to `nums` here. It is documentation for a human reading
+            # the file (the selection is by row id, because a register number can be renumbered); folding it into
+            # `nums` would make every valid pinned manifest look like a MIXED one and trip the refusal below.
+            continue
+        if isinstance(x, bool) or not isinstance(x, (int, str)):
+            print(f"REFUSED: manifest entry {x!r} is not a register number")
+            raise SystemExit(1)
+        s_ = str(x).strip().lstrip("#")
+        if not s_.isdigit():
+            print(f"REFUSED: manifest entry {x!r} is not a register number")
+            raise SystemExit(1)
+        nums.append(int(s_))
+    if not nums and not rows:
+        print(f"REFUSED: the manifest {a.manifest} names no requests")
+        raise SystemExit(1)
+    if nums and rows:
+        # The two forms carry DIFFERENT guarantees, so a file that mixes them cannot be one approval. A bare register
+        # number has no body_sha, so the row/body check below cannot speak for it; letting the pinned rows win (the
+        # old behaviour) silently DROPPED the bare ones - a manifest naming #329 and row-58 selected only row-58, and
+        # an operator could approve the digest of an incomplete batch. Refuse instead of guessing which form was
+        # meant: dropping a named request is exactly the silent-removal failure the pin exists to prevent.
+        print(f"REFUSED: the manifest {a.manifest} mixes the two entry forms - {len(nums)} bare register number(s) and "
+              f"{len(rows)} pinned row(s). They guarantee different things: a bare number is not copy-checked, so it "
+              f"cannot ride an approval whose other rows were pinned by body_sha. Use ONE form for the whole file "
+              f"(pin every row with request_id + body_sha, or name every request by register number).")
+        raise SystemExit(1)
+    if rows:                                                    # row ids win: a register number can be renumbered
+        by_row = {str(x["row"]): x for x in items}   # the store's row id may be an int; a JSON file says str
+        missing_rows = [r for r in rows if r not in by_row]
+        if missing_rows:
+            # Say WHICH reason the batch no longer matches, because one of them is benign and one is not: rows that
+            # already carry a ledger record for this kind mean an earlier run of the same batch got part-way (a send
+            # that died at letter N), and the remainder then needs a fresh pin+approval under the "no removals" rule.
+            # Rows that left for any other reason mean the register moved under an approval that no longer names it.
+            sent = []
+            if run is not None:
+                for rid in missing_rows:
+                    try:
+                        rec = run.store.send_record(int(rid), kind)
+                    except (TypeError, ValueError):
+                        rec = None
+                    if rec and rec.get("state") in ("sent", "sending", "unknown"):
+                        sent.append(str(rid))
+            detail = ""
+            if sent:
+                detail = (f" {len(sent)} of them already carry a ledger record for a {kind} letter "
+                          f"({', '.join(sent[:5])}{' …' if len(sent) > 5 else ''}), so an earlier run of THIS batch "
+                          f"got part-way. The remainder is a removal from the approved set: re-pin the unsent rows and "
+                          f"get a fresh approval rather than resuming under the old one.")
+            print(f"REFUSED: {len(missing_rows)} request(s) in the manifest are not in the {kind} set now "
+                  f"({', '.join(missing_rows[:5])}{' …' if len(missing_rows) > 5 else ''}). Sending the rest would be "
+                  f"a different batch than the one that was approved - re-cut and get a fresh approval.{detail}")
+            raise SystemExit(1)
+        changed = []
+        for rid, want_sha in shas.items():
+            got = hashlib.sha256((by_row[rid].get("text") or "").encode()).hexdigest()
+            if got != want_sha:
+                changed.append(rid)
+        if changed:
+            print(f"REFUSED: the letter BODY changed for {len(changed)} request(s) ({', '.join(changed[:5])}"
+                  f"{' …' if len(changed) > 5 else ''}) since the batch was pinned. Copy is approved per body, so a "
+                  f"changed body needs a FRESH approval - it is not a re-cut.")
+            raise SystemExit(1)
+        picked = oldest_first([by_row[r] for r in sorted(set(rows))])
+        if claimed:
+            got = approval.digest(kind, picked)
+            if got != claimed:
+                print(f"REFUSED: the batch file records digest {claimed} but these rows render {got} now. The pin and "
+                      f"the register disagree, so the file is not describing the batch it names - re-pin and get a "
+                      f"fresh approval rather than sending under the old one.")
+                raise SystemExit(1)
+        return picked
+    want = set(nums)
+    have = {x["register_no"]: x for x in items}
+    missing = sorted(want - set(have))
+    if missing:
+        print(f"REFUSED: {len(missing)} request(s) in the manifest are not in the {kind} set now "
+              f"({', '.join('#' + str(n) for n in missing[:20])}{' …' if len(missing) > 20 else ''}). "
+              f"The manifest was cut against a different register state, so sending the rest would be a different "
+              f"batch than the one that was approved - re-cut the manifest and get a fresh approval.")
+        raise SystemExit(1)
+    picked = [have[n] for n in sorted(want)]                 # oldest_first() sorts by deadline below
+    return oldest_first(picked)
+
+
 def refuse_send(a, kind: str, items: list[dict]) -> None:
     """The gate in front of every send. THREE things, and all three are a human's to open:
 
@@ -377,6 +523,11 @@ def main() -> int:
         p.add_argument("--approved-by", default="")
         p.add_argument("--limit", type=int, default=0,
                        help="send at most N letters, OLDEST deadline first (0 = no cap)")
+        p.add_argument("--manifest", default="",
+                       help="send EXACTLY these requests, so later intake cannot re-cut a batch a human already "
+                            "approved: a JSON list of register numbers, of {request_id, register_no, body_sha} "
+                            "objects (the pinned form - a body change then needs a fresh approval), or one "
+                            "register number per line")
         if name == "confirm":
             p.add_argument("--sitemap", action="store_true", help="walk every sitemap file for the M line")
     p = sub.add_parser("watchdog")
@@ -469,7 +620,7 @@ def main() -> int:
     elif a.cmd == "mark-hidden":
         run.mark_hidden()
     elif a.cmd == "ask":
-        items = oldest_first(run.asks(now))[:a.limit or None]
+        items = select_batch(a, "ask", run.asks(now), run)
         refuse_send(a, "ask", items)
         for x in items:
             print(f"#{x['register_no']} {x['channel']} -> {x['to']} [{x['kind']}]\n  {x['text']}\n")
@@ -485,7 +636,7 @@ def main() -> int:
                 m_result = checks.sitemap_absent(ids)
             except sources.Unknown as exc:
                 run.fail("M sitemap walk", exc)
-        items = oldest_first(run.confirmations(now, m_result=m_result))[:a.limit or None]
+        items = select_batch(a, "confirm", run.confirmations(now, m_result=m_result), run)
         refuse_send(a, "confirm", items)
         for x in items:
             print(f"===== #{x['register_no']} due {x['due_at'][:10]} -> {x['to']} S={x['S']} P={x['P']} M={x['M']}"
