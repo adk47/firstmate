@@ -3328,7 +3328,14 @@ class NoStaleLockClaim(unittest.TestCase):
         block = text[text.index("# ─── GDPR erasure pipeline"):text.index("GDPRTICKTMR")]
         self.assertIn("--send", block)
         self.assertRegex(block, r"--send[^\n]*--limit \d+", "a send without a cap sends the whole register at once")
-        self.assertIn("--approved-by $GDPR_SENDER_SEAT", block)
+        # ESCAPED, and that is the whole point: the heredoc is unquoted, so an unescaped `$GDPR_SENDER_SEAT` is
+        # expanded by the INSTALLER's shell at write time. The variable is not set there (it is set by the unit's own
+        # `Environment=` line for systemd to expand), so under `set -u` the write aborted and every deploy refused at
+        # Step 5c on 2026-11-06 - and the truncated 0-byte unit took the live tick down with it.
+        self.assertIn("--approved-by \\$GDPR_SENDER_SEAT", block,
+                      "the seat must survive to the unit for systemd to expand; unescaped it kills the deploy")
+        self.assertNotIn("--approved-by $GDPR_SENDER_SEAT", block,
+                         "an unescaped seat is expanded by the installer, where it is unset")
         self.assertIn("Environment=GDPR_SENDER_SEAT=", block)
 
 

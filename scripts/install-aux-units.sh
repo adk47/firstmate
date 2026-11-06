@@ -929,7 +929,12 @@ Environment=HOME=/root
 Environment=GDPR_SENDER_SEAT=U0AN41ZBTRU
 EnvironmentFile=-/etc/openclaw/shared.env
 EnvironmentFile=-/etc/openclaw/main.env
-ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/gdpr-pipeline.py tick --page --send --limit 25 --approved-by $GDPR_SENDER_SEAT
+# $HYDRA_ROOT is expanded HERE (this heredoc is unquoted, so the shell writes the real path).
+# \$GDPR_SENDER_SEAT is escaped so it survives to the unit and systemd expands it from the
+# Environment= line above at run time. Unescaped, the shell tried to expand it at write time,
+# the variable is not set in the installer's own shell, and `set -u` killed the whole deploy at
+# Step 5c (2026-11-06: every deploy refused with `GDPR_SENDER_SEAT: unbound variable`).
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/gdpr-pipeline.py tick --page --send --limit 25 --approved-by \$GDPR_SENDER_SEAT
 TimeoutStartSec=3000
 GDPRTICKSVC
 
