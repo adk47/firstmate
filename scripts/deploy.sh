@@ -2363,6 +2363,37 @@ else
 fi
 # -- end of the deploy locks: everything below runs under them (QA #1604) --
 
+# firstmate 768 (3), measured 11-04: the credit outbound tick is 2-hourly and a deploy dispatched at 04:00Z ran INTO
+# the 04:03Z round - node-8 was mid-rsync while a tick built its audiences and read the ledger this deploy replaces.
+# The apply lock above cannot help: it protects an apply that has ALREADY started, and it says nothing about a tick
+# that begins 3 minutes after the rsync does. #1756 gives the outbound script deploy-lock awareness; until it lands
+# the deploy side holds the line - no deploy STARTS within HOLD_MIN of a tick boundary, and none starts while a tick
+# holds its flock. We WAIT (bounded) for the window, then fail closed: nothing is changed, a human re-dispatches.
+DEPLOY_TICK_HOLD_MIN="${HYDRA_DEPLOY_TICK_HOLD_MIN:-10}"
+DEPLOY_TICK_HOLD_MAX_S="${HYDRA_DEPLOY_TICK_HOLD_MAX_S:-900}"
+DEPLOY_TICK_CADENCE_S="${HYDRA_DEPLOY_TICK_CADENCE_S:-7200}"
+if [ "${HYDRA_DEPLOY_SKIP_TICK_HOLD:-0}" != "1" ]; then
+  hold_spent=0
+  hold_last=""
+  while :; do
+    hold_out="$(bash "$SCRIPT_DIR/lib/deploy-send-tick-hold.sh" --cadence "$DEPLOY_TICK_CADENCE_S" \
+                  --hold-min "$DEPLOY_TICK_HOLD_MIN" 2>&1)" && break
+    hold_rc=$?
+    if [ "$hold_rc" != 3 ]; then
+      fail "the send-tick guard cannot decide ($hold_out); refusing to deploy without it (nothing was changed)"
+    fi
+    hold_secs="${hold_out%% *}"; hold_last="$hold_out"
+    case "$hold_secs" in ''|*[!0-9]*) hold_secs=300 ;; esac
+    if [ "$(( hold_spent + hold_secs ))" -gt "$DEPLOY_TICK_HOLD_MAX_S" ]; then
+      fail "deploy refused: a credit send tick window is open (${hold_last}) and waiting it out would exceed ${DEPLOY_TICK_HOLD_MAX_S}s. A tick that overruns its cadence - or a window that will not clear - is a human's call. Nothing was changed; re-dispatch outside the window (or HYDRA_DEPLOY_SKIP_TICK_HOLD=1 to override)."
+    fi
+    log "holding ${hold_secs}s for the credit send tick (${hold_last}): a deploy must not start inside a tick's window"
+    sleep "$hold_secs"
+    hold_spent=$(( hold_spent + hold_secs ))
+  done
+fi
+# -- end of the send-tick window hold (firstmate 768) --
+
 # -------------------------------------------------------------------
 # Step 4a.5: pin the muso CLI — BEFORE anything is synced.
 # -------------------------------------------------------------------

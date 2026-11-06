@@ -18,6 +18,11 @@ Per row it computes ``state``:
   user_documented  a whole-user document only    -> never asked (documented user); day N = the stage-2
                                                     document checker decides, not this clock
   no_ask_yet       no delivered ask              -> watchdog backup_ask_undelivered after 48 h
+  no_ask_needed    band A (trusted anchor)        -> NO verify note is ever sent (Fable 10-22 09:30Z: a
+                                                    trusted-source anchor is band A: no provisional window),
+                                                    so an undelivered ask here is not a wait, and counting
+                                                    it as one made the watchdog over-report (firstmate 768:
+                                                    107 of the 279 "undelivered" credits were band A)
   clock_running    delivered, due in N days      -> board "due in N days"
   due              day N reached, no docs        -> day-N close: live Spotify AND Tidal check first
                                                     (DSP credits them = backup, keep), else the
@@ -42,6 +47,10 @@ from typing import Any, Callable
 TRINO = "/opt/hydra/scripts/trino-query.sh"
 WINDOW_DAYS = 7                 # captain 2026-10-23 20:07Z ("i think 30 is too long")
 UNDELIVERED_AFTER_H = 48        # Fable §6: watchdog class backup_ask_undelivered
+# Band A: a trusted-source anchor needs no provisional window and NO verify note (Fable 10-22 09:30Z,
+# applied as `evidence_kind != 'validator_low_risk_trusted'` in verify_notify._decider_approvals). A
+# credit approved that way never gets an ask, so its silence is expected and is not a missed ask.
+BAND_A_EVIDENCE = "validator_low_risk_trusted"
 DUE_SOON_DAYS = 2
 REMINDER_DAY = 4                # Fable §7: one ask on delivery + one reminder on day 4, no other notice
 # Only a note that ASKS for backup on an approved credit starts its clock. Status notes ("we got
@@ -87,6 +96,21 @@ def provisional_rows(query: Query = trino_csv) -> list[dict[str, Any]]:
                     "profile_id": r[2], "track_id": r[3], "title": r[4],
                     "popularity": int(r[5]) if r[5].lstrip("-").isdigit() else None, "approval": appr})
     return out
+
+
+def band_a_requests(db: sqlite3.Connection) -> set[str]:
+    """Request ids the decider approved as BAND A (a trusted-source anchor): no verify note is ever
+    sent for them, by Fable's 10-22 09:30Z ruling. Their silence is expected, so they are NOT
+    "undelivered asks" (firstworld: counting them inflated the watchdog by 107 of 279)."""
+    try:
+        rows = db.execute(
+            "SELECT o.request_id FROM decision_outcomes o JOIN decisions d "
+            "ON d.request_id = o.request_id AND d.run_id = o.run_id "
+            "WHERE o.action = 'approve' AND o.outcome = 'approved' AND d.evidence_kind = ?",
+            (BAND_A_EVIDENCE,)).fetchall()
+    except sqlite3.Error:
+        return set()   # an older ledger without the decider tables: no band-A knowledge, never a crash
+    return {str(r[0]).lower() for r in rows if r and r[0]}
 
 
 def delivered_asks(db: sqlite3.Connection) -> dict[str, tuple[str, str]]:
@@ -301,7 +325,14 @@ class Tracker:
             out.append(f"day-{REMINDER_DAY} reminder due: {rem} credits")
         mism = sum(1 for r in self.rows if r.get("core_due_mismatch"))
         if mism:
-            out.append(f"core proofDueAt differs from delivered + {self.window_days} d on {mism} rows (core stamps from approval)")
+            short = sum(1 for r in self.rows if r.get("core_due_shortens"))
+            out.append(f"core proofDueAt differs from delivered + {self.window_days} d on {mism} rows (core stamps from "
+                       f"approval + 30 d); {short} of them are EARLIER than the ruled date and are never applied "
+                       f"(extension only, never a shortening)")
+        band_a = sum(1 for r in self.rows if r["state"] == "no_ask_needed")
+        if band_a:
+            out.append(f"band A {band_a}: trusted-anchor approvals get NO verify note (Fable 10-22), so their "
+                       f"silence is expected and not a missed ask")
         return out
 
 
@@ -312,6 +343,7 @@ def run(query: Query = trino_csv, *, ledger: sqlite3.Connection, proof_path: str
     try:
         rows = provisional_rows(query)
         asks = delivered_asks(ledger)
+        band_a = band_a_requests(ledger)
         doc_rids, doc_users = documents(proof_path, now=now)
     except (RuntimeError, subprocess.TimeoutExpired, OSError, ValueError, sqlite3.Error) as exc:
         t.error = str(exc)[:200]
@@ -323,13 +355,24 @@ def run(query: Query = trino_csv, *, ledger: sqlite3.Connection, proof_path: str
         delivered = _ts(ask[0]) if ask else None
         due = delivered + timedelta(days=window_days) if delivered else None
         core_due = _ts(appr.get("proofDueAt"))
+        # QA #1783 (finding 2): the EFFECTIVE deadline is the only one the tracker and the board may act on.
+        # Core stamps approval + 30 d, which is sometimes EARLIER than the ruled date (a shortening that must
+        # never be applied) and sometimes LATER (an extension the user was promised). Computing it and then
+        # leaving state / days_left / bucket / the board on delivered + window meant an extended user was shown
+        # overdue the day their 7-day window passed - a date nobody ruled. One value, consumed everywhere:
+        # `window_due` stays visible as evidence (the ruled 7-day date), `deadline` is what we act on.
+        window_due = due
+        deadline = (max(core_due, due) if (core_due and due) else (core_due or due)) if (core_due or due) else None
         if r["request_id"] in doc_rids:
             state = "backup_on_file"
         elif r["user_id"] in doc_users:
             state = "user_documented"
+        elif delivered is None and str(r["request_id"]).lower() in band_a:
+            # Band A: no note is ever sent, so this is not a wait and never a watchdog hit.
+            state = "no_ask_needed"
         elif delivered is None:
             state = "no_ask_yet"
-        elif now >= due:
+        elif now >= deadline:
             state = "due"
         else:
             state = "clock_running"
@@ -341,11 +384,22 @@ def run(query: Query = trino_csv, *, ledger: sqlite3.Connection, proof_path: str
             "hours_since_approval": round((now - approved_at).total_seconds() / 3600, 1) if approved_at else None,
             "ask_delivered_at": delivered.strftime("%Y-%m-%dT%H:%MZ") if delivered else None,
             "ask_campaign": ask[1] if ask else None,
-            "due_at": due.strftime("%Y-%m-%dT%H:%MZ") if due else None,
-            "days_left": (due - now).days if due and now < due else (0 if due else None),
+            # due_at is the EFFECTIVE deadline (QA #1783 finding 2): state, days_left, bucket and the board all
+            # read this one value, so an extension core granted is never rendered as an overdue user. The ruled
+            # 7-day date stays visible beside it as evidence, never as the date we act on.
+            "due_at": deadline.strftime("%Y-%m-%dT%H:%MZ") if deadline else None,
+            "window_due_at": window_due.strftime("%Y-%m-%dT%H:%MZ") if window_due else None,
+            "days_left": (deadline - now).days if deadline and now < deadline else (0 if deadline else None),
             "core_proof_due_at": core_due.strftime("%Y-%m-%dT%H:%MZ") if core_due else None,
             "core_due_mismatch": bool(core_due and (due is None or abs((core_due - due).total_seconds()) > 3600)),
-            "bucket": bucket(state, delivered, due, now),
+            # firstmate 768: NO user may be held to a date earlier than the ruled one (7 days from
+            # the DELIVERED ask). Core stamps approval + 30 d, so its date is sometimes EARLY (a
+            # shortening) - that must extend the user's window, never cut it. `deadline_at` is the
+            # date a consumer may act on; core's own value stays visible as evidence, never as a
+            # deadline we shorten to.
+            "deadline_at": deadline.strftime("%Y-%m-%dT%H:%MZ") if deadline else None,
+            "core_due_shortens": bool(core_due and due and core_due < due),
+            "bucket": bucket(state, delivered, deadline, now),
             "reminder_due": bool(delivered and state == "clock_running"
                                  and now >= delivered + timedelta(days=REMINDER_DAY)),
             "day_n_route": {"backup_on_file": "plain_approve", "user_documented": "stage2_document_check",

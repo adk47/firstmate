@@ -51,6 +51,8 @@ from typing import Any, Callable, Optional
 
 from . import admin as admin_api
 from . import affiliation, proof_parts, verify_ledger
+# delivered_asks: which requests a note actually asked about (firstmate 768 backfill).
+from .provisional_tracker import delivered_asks
 from .roles import family_of
 
 WRAPPER = os.environ.get("CREDIT_VERIFY_NOTIFY_WRAPPER", "/opt/hydra/scripts/intercom-verify-request.sh")
@@ -243,21 +245,51 @@ def _columns(db: sqlite3.Connection, table: str) -> set[str]:
     return {str(r[1]) for r in db.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
+# (firstmate 768) A provisional credit whose ask never left is unreachable by a windowed
+# audience: the default window is 7 days and 279 provisional credits across 63 accounts were
+# approved 9-14 days ago with no delivered ask, so the day they aged out of the window they
+# became unaskable FOREVER - the ledger cannot start a clock that no note ever started, and the
+# tracker reports them as ``backup_ask_undelivered`` every day. The window is a cap on how far
+# back we are willing to re-read, never a reason to abandon a credit that was never asked. This
+# backfill is BOUNDED (never_asked_days) and rides the same gates, ledger dedupe and daily cap.
+NEVER_ASKED_DAYS = 30
+
+
 def candidates(db: sqlite3.Connection, *, run_id: str | None = None, since_hours: int | None = None,
-               now: datetime | None = None) -> list[tuple[str, str, str]]:
+               now: datetime | None = None, never_asked_days: int | None = NEVER_ASKED_DAYS,
+               ) -> list[tuple[str, str, str]]:
     """(request_id, profile_id, track_id) the decider's server re-read confirmed as
     approved, oldest first, minus everything the verify ledger already notified/refused,
-    plus every credit the ledger holds back for a pending document (whatever its age).
+    plus every credit the ledger holds back for a pending document (whatever its age), plus
+    (firstmate 768) every approval in the last ``never_asked_days`` that NO note ever asked
+    about - the window bounds re-reading, not who may be asked.
+
     Read exactly as decide.run_approvals does: decision_outcomes action='approve' AND
     outcome='approved', joined to decisions on (request_id, run_id)."""
     seen: dict[str, tuple[str, str]] = {}
     for rid, pid, tid in _decider_approvals(db, run_id=run_id, since_hours=since_hours, now=now):
         seen.setdefault(rid, (pid, tid))
+    rank: dict[str, int] | None = None
+    if never_asked_days:
+        # A windowed run stops at ``since_hours``, so the backfill re-reads the wider span and
+        # keeps only the credits no delivered note ever covered. Without this, an approval that
+        # aged past the window while its ask was blocked is never asked at all.
+        asked = delivered_asks(db)
+        wide = _decider_approvals(db, run_id=run_id, since_hours=24 * never_asked_days, now=now)
+        # The decider's own order (oldest first) must survive the two passes, or a backfilled
+        # 10-day-old credit would sit behind today's: paid_first() is stable, so order is policy.
+        rank = {rid: i for i, (rid, _, _) in enumerate(wide)}
+        for rid, pid, tid in wide:
+            if str(rid).lower() not in asked:
+                seen.setdefault(rid, (pid, tid))
     for rid, pid, tid in verify_ledger.deferred(db, campaign="verify-live"):
         if pid:
             seen.setdefault(rid, (pid, tid))
     blocked = verify_ledger.blocked_ids(db, list(seen))
-    return [(rid, pid, tid) for rid, (pid, tid) in seen.items() if rid not in blocked]
+    out = [(rid, pid, tid) for rid, (pid, tid) in seen.items() if rid not in blocked]
+    if rank is not None:
+        out.sort(key=lambda x: rank.get(x[0], len(rank)))
+    return out
 
 
 def _decider_approvals(db: sqlite3.Connection, *, run_id: str | None, since_hours: int | None,
@@ -1429,7 +1461,8 @@ def paid_first(payloads: list[dict[str, Any]], paying: frozenset[int] | None) ->
 def run(admin: admin_api.Admin, *, ledger_path: str | None = None, mode: str = "apply", run_id: str | None = None,
         since_hours: int | None = 168, max_users: int = 150, proof_path: str | None = None,
         sweep: bool = True, wrapper: str = WRAPPER, runner: Runner = _run,
-        affiliation_path: str | None = None, check_recipients: bool = False) -> Report:
+        affiliation_path: str | None = None, check_recipients: bool = False,
+        never_asked_days: int | None = NEVER_ASKED_DAYS) -> Report:
     """The whole step, once a day (09:00 Europe/Rome). `max_users` is the day's cap on
     messages, reminders included (they go first: the note promised them). Gates, in order:
     proof on file from any source, the support@ 90-day contacts, org affiliation, the shared
@@ -1461,7 +1494,7 @@ def run(admin: admin_api.Admin, *, ledger_path: str | None = None, mode: str = "
             budget -= send_followups(db, admin, report, campaign="verify-live", day=day, documented=documented,
                                      verdicts=verdicts, limit=budget, pace_seconds=0.0, wrapper=wrapper,
                                      runner=runner)
-        wanted = candidates(db, run_id=run_id, since_hours=since_hours)
+        wanted = candidates(db, run_id=run_id, since_hours=since_hours, never_asked_days=never_asked_days)
         report.candidates = len(wanted)
         if wanted:
             was_held = {rid for rid, _, _ in verify_ledger.deferred(db, campaign="verify-live")}
