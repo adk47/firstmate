@@ -620,7 +620,13 @@ def main() -> int:
     elif a.cmd == "mark-hidden":
         run.mark_hidden()
     elif a.cmd == "ask":
-        items = select_batch(a, "ask", run.asks(now), run)
+        # ORDER MATTERS, and it is the whole point of this pair: materialise FIRST, then narrow+validate.
+        # `select_batch` checks each pinned entry's recorded `body_sha` against the text it is HANDED, so handing it
+        # the pre-materialisation body validates the pin against bytes that are not what leaves - measured on the live
+        # register: 9 pinned rows gained the approved lead line, their sha no longer matched the pin, and the manifest
+        # still accepted them. Materialising first makes the manifest answer for the FINAL letter (lead + subject),
+        # so "a changed body needs a FRESH approval" covers the copy that actually goes out.
+        items = select_batch(a, "ask", send.materialise(run, run.asks(now)), run)
         refuse_send(a, "ask", items)
         for x in items:
             print(f"#{x['register_no']} {x['channel']} -> {x['to']} [{x['kind']}]\n  {x['text']}\n")
@@ -636,7 +642,7 @@ def main() -> int:
                 m_result = checks.sitemap_absent(ids)
             except sources.Unknown as exc:
                 run.fail("M sitemap walk", exc)
-        items = select_batch(a, "confirm", run.confirmations(now, m_result=m_result), run)
+        items = select_batch(a, "confirm", send.materialise(run, run.confirmations(now, m_result=m_result)), run)
         refuse_send(a, "confirm", items)
         for x in items:
             print(f"===== #{x['register_no']} due {x['due_at'][:10]} -> {x['to']} S={x['S']} P={x['P']} M={x['M']}"

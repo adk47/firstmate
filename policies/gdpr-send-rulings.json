@@ -32,6 +32,15 @@
       "approved_at": "2026-11-03T20:10:00Z",
       "expires": "2026-12-03T20:10:00Z",
       "source": "Fable ruling B3 (data/verify-sla-driver-fable-d2/rulings-blockers-1103-20Z.md): wire confirm/ask through the approved sender adapter; copy = the already-approved erasure-confirmation template (firstmate 943) + gdpr-ack-v2 s2, verbatim"
+    },
+    {
+      "id": "gdpr-support-from-1104",
+      "kind": "ask",
+      "copy_ref": "copy.new_thread_lead + copy.new_thread_subject('privacy_erasure') + copy.ASK[ASK_IDENTITY]",
+      "approved_by": "verif-closeout-fable-v2",
+      "approved_at": "2026-11-04T18:40:00Z",
+      "expires": "2026-12-04T18:40:00Z",
+      "source": "firstmate inbox 099/102, Fable close-out ruling [key=gdpr-support-from-1104]: notices@/legal@ requests are answered from support@ as a NEW thread (conditions 1-6), implemented in hydra #1749. SCOPE IS THE MAILBOX ROUTE, NOT THE INTERCOM ONE, and the subject is CLASS-SCOPED: copy.NEW_THREAD_SUBJECT_APPROVED_CLASSES is ('privacy_erasure',), so naming this ruling for an access/correction/objection row does NOT authorize its subject. The one-line lead is its own GO (legal-finalize-fable-k1, 2026-11-04) and its own constant, copy.NEW_THREAD_LEAD_APPROVED."
     }
   ]
 }

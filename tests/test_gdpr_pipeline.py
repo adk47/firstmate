@@ -2290,13 +2290,435 @@ class SendPath(unittest.TestCase):
         self.assertEqual(send.route(r), ("mail", "1a176619567e3fe0"))
 
     def test_a_legal_or_notices_thread_is_refused_with_the_reason(self):
-        """legal@ / notices@ are not authed in gog on node-8, so a letter cannot be threaded there. Naming it is the
-        point: a silent skip would leave the row looking handled while the customer waits."""
+        """legal@ / notices@ are not authed in gog on node-8, so a letter cannot be written FROM that mailbox. The
+        refusal still names the mailbox and the fix, but since 073 it is no longer the end of the road: an unwritable
+        mailbox hands off to option 2 (a new thread from support@), and the mailbox reason is carried INTO that error
+        so nobody has to guess why the thread could not be used. The refusal comes from the HOST's account list, not a
+        hardcoded channel test - so authing the mailbox opens the thread route with no code change."""
         rid, r = self.row(keys=["gmail:legal@muso.ai:t1"], channel="legal", conversation_id="",
                           gmail_thread="1a073f2a93c21a6e")
-        with self.assertRaises(send.Unknown) as e:
-            send.route(r)
-        self.assertIn("support@muso.ai", str(e.exception))
+        # BOTH copy gates are OPEN now (lead 2026-11-04 / subject under ruling gdpr-support-from-1104), so this row
+        # no longer refuses on copy: it HANDS OFF to option 2. The mailbox reason must still be carried into every
+        # refusal this route produces, so pin it on the one that still fires with the gates open - no address -
+        # and then close each gate in turn to prove a refusal never loses the mailbox reason on the way out.
+        with mock.patch.object(send, "_ACCOUNTS_READ", True), \
+                mock.patch.object(send, "_ACCOUNTS", {"support@muso.ai": {"gmail"}}):
+            self.assertEqual(send.route(r), ("mail_new_thread", "a@b.co"),
+                             "an unwritable mailbox hands off to a new thread from support@ once both copy GOs exist")
+            with self.assertRaises(send.Unknown) as e0:
+                send.route({**r, "requester_email": ""})
+        self.assertIn("legal@muso.ai", str(e0.exception))
+        self.assertIn("auth it and the route opens", str(e0.exception))
+        self.assertIn("no requester_email", str(e0.exception))
+        # the subject's own gate, still independent of the lead's: closing it keeps the mailbox reason in the message
+        with mock.patch.object(copy, "NEW_THREAD_SUBJECT_APPROVED", False), \
+                mock.patch.object(send, "_ACCOUNTS_READ", True), \
+                mock.patch.object(send, "_ACCOUNTS", {"support@muso.ai": {"gmail"}}):
+            with self.assertRaises(send.Unknown) as e:
+                send.route(r)
+        msg = str(e.exception)
+        self.assertIn("legal@muso.ai", msg)
+        self.assertIn("auth it and the route opens", msg)
+        self.assertIn("has no GO of its own", msg)
+        self.assertIn("NEW_THREAD_SUBJECT_APPROVED", msg)
+        with mock.patch.object(copy, "NEW_THREAD_LEAD_APPROVED", False), \
+                mock.patch.object(send, "_ACCOUNTS_READ", True), \
+                mock.patch.object(send, "_ACCOUNTS", {"support@muso.ai": {"gmail"}}):
+            with self.assertRaises(send.Unknown) as e2:
+                send.route(r)
+        self.assertIn("one-line lead copy is not approved yet", str(e2.exception),
+                      "an unwritable mailbox must hand off to option 2, not dead-end at the mailbox")
+
+    def test_the_two_copy_gates_are_independent(self):
+        """The lead line's GO named the first line and said nothing about the subject, so one constant must not
+        release the other. Both orders are pinned: subject-open/lead-shut and lead-open/subject-shut."""
+        rid, r = self.row(keys=["register:77"], channel="notices", conversation_id="", gmail_thread="",
+                          requester_email="a@b.co")
+        with mock.patch.object(copy, "NEW_THREAD_LEAD_APPROVED", True), \
+                mock.patch.object(copy, "NEW_THREAD_SUBJECT_APPROVED", False):
+            with self.assertRaises(send.Unknown) as e:
+                send.route(r)
+        self.assertIn("subject line", str(e.exception))
+        with mock.patch.object(copy, "NEW_THREAD_LEAD_APPROVED", False), \
+                mock.patch.object(copy, "NEW_THREAD_SUBJECT_APPROVED", True):
+            with self.assertRaises(send.Unknown) as e:
+                send.route(r)
+        self.assertIn("one-line lead copy", str(e.exception))
+
+    def test_a_class_outside_the_approved_vocabulary_refuses_rather_than_guessing(self):
+        """THE GO'S THIRD GUARD: "the request-type phrase must match what they asked for (deletion / access /
+        correction / objection) - never characterise it beyond their own words". A rights-holder's DMCA takedown is
+        not a deletion request, so it must NOT be described as one. 2 of the rows this route can reach are exactly
+        this, and 1 more is a legal threat."""
+        for cls in ("dmca_takedown", "legal_threat"):
+            rid, r = self.row(**{"keys": [f"register:{cls}"], "channel": "legal", "conversation_id": "",
+                                 "gmail_thread": "", "requester_email": "a@b.co", "class": cls})
+            with self.approved_copy():
+                with self.assertRaises(send.Unknown) as e:
+                    send.route(r)
+            msg = str(e.exception)
+            self.assertIn("no approved request-type phrase", msg)
+            self.assertIn(cls, msg)
+            self.assertNotIn("deletion request", msg,
+                             "the refusal must not itself assert what the person asked for")
+
+    def test_the_approval_digest_covers_the_letter_that_actually_leaves(self):
+        """QA finding on this PR: `digest()` hashed the item's ORIGINAL text while `deliver()` added the lead AFTER the
+        digest was verified. The approver therefore approved one letter and the customer received another. The digest
+        must be computed over the materialised letter, and the bytes sent must be those same bytes."""
+        rid, r = self.row(keys=["register:77"], channel="notices", conversation_id="", gmail_thread="",
+                          requester_email="a@b.co", received_at="2026-09-01T10:00:00Z")
+        bare = "Hello there,\n\nthe approved letter.\n"
+        item = self.item(rid, text=bare, channel="notices")
+        with self.approved_copy():
+            items = send.materialise(self.run, [dict(item)])
+        self.assertTrue(items[0]["text"].startswith("You wrote to us at notices@muso.ai on 1 September 2026"),
+                        "materialise must produce the FINAL letter, lead included")
+        self.assertEqual(items[0]["subject"], "Your Muso.AI data deletion request")
+        # the digest of the final letter is NOT the digest of the bare body: that difference is the whole fix
+        self.assertNotEqual(approval.digest("ask", items), approval.digest("ask", [dict(item)]))
+        seen = {}
+
+        def fake_send(email, text, approved_by, dry_run=False, key="", mailbox="", subject=""):
+            seen.update(text=text, subject=subject)
+            return "gog-msg-1"
+        with self.approved_copy(), mock.patch.object(send, "_mail_send_new_thread", fake_send):
+            out = send.deliver(self.run, items[0], "ask", "U7RP6HKUZ")
+        self.assertEqual(out["state"], "sent")
+        self.assertEqual(seen["text"], items[0]["text"], "the bytes sent must BE the bytes the digest covered")
+        self.assertEqual(seen["subject"], items[0]["subject"])
+
+    def test_an_approval_cannot_leak_across_the_past_due_boundary(self):
+        """The progress line is added by `Run.asks()` once the letter is past due - a CLOCK-dependent body change. So a
+        batch approved at 09:59 and sent at 10:01 is not the batch that was approved. The digest must move, so the old
+        approval refuses instead of releasing a letter nobody read. This is the same class as the date bomb (#1759):
+        the letter's content depends on when you look at it."""
+        from datetime import timedelta
+        rid, r = self.row(keys=["register:90"], gmail_thread="", conversation_id="1")
+        self.s.update(rid, "decide", identity_verdict="ASK_IDENTITY", due_at="2026-11-04T10:00:00Z")
+        before = self.run.asks(datetime(2026, 11, 4, 9, 59, tzinfo=timezone.utc))
+        after = self.run.asks(datetime(2026, 11, 4, 10, 1, tzinfo=timezone.utc))
+        self.assertEqual(len(before), 1); self.assertEqual(len(after), 1)
+        with self.approved_copy():
+            db = approval.digest("ask", send.materialise(self.run, [dict(x) for x in before]))
+            da = approval.digest("ask", send.materialise(self.run, [dict(x) for x in after]))
+        self.assertNotEqual(db, da, "a letter that became past due gained the progress line, so its digest MUST move - "
+                                    "otherwise the earlier approval releases copy nobody approved")
+
+    def test_a_pinned_body_sha_is_checked_against_the_FINAL_letter_not_the_pre_lead_one(self):
+        """The hole that only exists when the manifest pin (#1738) and the option-2 lead line (#1749) meet on main.
+
+        A manifest pins the exact body a human approved. For a notices@/legal@ letter that body is NOT what leaves:
+        `materialise()` prepends the approved lead line ("You wrote to us at legal@muso.ai on ..."). If the pin is
+        checked against the pre-materialisation text, the check passes while the letter that goes out is a different
+        one. Measured on the live register: 9 of the pinned 141 gained the lead, their sha no longer matched the pin,
+        and `ask --manifest` still accepted the batch.
+
+        Driven through the real CLI so it kills the wiring mutant, not just the function: swapping the nesting to
+        `materialise(select_batch(...))` makes the manifest accept the stale pin and this test fails.
+        """
+        import contextlib as _contextlib
+        import hashlib
+        import importlib.util
+        import io as _io
+        spec = importlib.util.spec_from_file_location(
+            "gdpr_cli_order", os.path.join(os.path.dirname(__file__), "..", "scripts", "gdpr-pipeline.py"))
+        cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli)
+
+        rid, r = self.row(keys=["register:91"], channel="legal", conversation_id="", gmail_thread="",
+                          requester_email="a@b.co", received_at="2026-09-01T10:00:00Z")
+        bare = "Bare approved body.\n"
+        item = self.item(rid, text=bare, channel="legal")
+
+        def run_cli(manifest_sha):
+            import tempfile
+            f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+            json.dump({"entries": [{"request_id": str(rid), "register_no": r["register_no"],
+                                    "body_sha": manifest_sha}]}, f)
+            f.close()
+            self.addCleanup(os.unlink, f.name)
+            fake_run = mock.MagicMock()
+            fake_run.asks.return_value = [dict(item)]
+            fake_run.store.get.return_value = r        # materialise() reads the ROW to decide the route
+            fake_run.errors = []
+            out = _io.StringIO()
+            # gog_accounts() caches per process, so a test that ran earlier can leave _ACCOUNTS without legal@ and
+            # make this test order-dependent. Pin the host fact explicitly: this is about the PIN, not about gog.
+            with self.approved_copy(), \
+                    mock.patch.object(send, "_ACCOUNTS",
+                                      {"legal@muso.ai": {"gmail"}, "notices@muso.ai": {"gmail"},
+                                       "support@muso.ai": {"gmail"}}), \
+                    mock.patch.object(send, "_ACCOUNTS_READ", True), \
+                    mock.patch.object(cli, "Store", lambda *a, **k: self.s), \
+                    mock.patch.object(cli, "Run", lambda *a, **k: fake_run), \
+                    mock.patch.object(cli, "hold_lock", lambda *a, **k: mock.MagicMock()), \
+                    mock.patch.object(sys, "argv", ["gdpr-pipeline.py", "--store", ":memory:", "ask", "--send",
+                                                    "--approved-by", "U7RP6HKUZ", "--manifest", f.name]), \
+                    mock.patch.object(approval, "verify", lambda *a, **k: (False, "captured")), \
+                    _contextlib.redirect_stdout(out):
+                try:
+                    cli.main()
+                except SystemExit:
+                    pass
+            return out.getvalue()
+
+        def sha(t):
+            return hashlib.sha256(t.encode()).hexdigest()
+
+        # a manifest pinned to the PRE-lead body: the letter on the wire now differs, so it must refuse
+        refused = run_cli(sha(bare))
+        self.assertIn("the letter BODY changed for 1 request(s)", refused,
+                      "the pin must speak for the FINAL letter; accepting it means 9 changed letters ride an old GO")
+        # ... and the identical manifest pinned to the FINAL body is accepted, which proves the refusal above is
+        # about the lead line and not about the manifest being wrong in some other way.
+        with self.approved_copy():                            # the gates the CLI will run under
+            final_text, subject, _to = send.final_letter(r, bare)  # the exact wire bytes, from the one source of truth
+        self.assertNotEqual(final_text, bare, "precondition: a legal@ letter gains the lead line")
+        # materialise() MUTATES the item it is given, so each run needs its own copy or run two would find
+        # letter_final already set from run one.
+        item = self.item(rid, text=bare, channel="legal")
+        fake_run = None
+        self.assertNotIn("the letter BODY changed", run_cli(sha(final_text)))
+        self.assertIn("captured", run_cli(sha(final_text)))
+
+    def test_the_cli_verifies_the_digest_over_the_MATERIALISED_letters(self):
+        """THE WIRING, not just the function. QA's finding was an ORDERING bug: `refuse_send()` verified a digest over
+        the bare body, and only `deliver()` added the lead. Calling `materialise()` in isolation cannot prove the CLI
+        does it first - a mutant that drops the CLI call leaves every unit test green (verified: it did, 230 passed).
+        So drive the real entrypoint and assert what `approval.verify` was handed."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "gdpr_cli", os.path.join(os.path.dirname(__file__), "..", "scripts", "gdpr-pipeline.py"))
+        cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli)
+
+        rid, r = self.row(keys=["register:77"], channel="notices", conversation_id="", gmail_thread="",
+                          requester_email="a@b.co", received_at="2026-09-01T10:00:00Z")
+        item = self.item(rid, text="Bare body.\n", channel="notices")
+        seen = {}
+
+        fake_run = mock.MagicMock()
+        fake_run.asks.return_value = [item]
+        fake_run.store.get.return_value = r          # materialise() reads the ROW to decide the route
+        fake_run.errors = []
+
+        def fake_verify(kind, items, who, approvers):
+            seen["text"] = items[0]["text"]
+            seen["subject"] = items[0].get("subject")
+            return False, "captured for the test"       # refuse, so nothing is sent
+
+        with self.approved_copy(), \
+                mock.patch.object(cli, "Store", lambda *a, **k: self.s), \
+                mock.patch.object(cli, "Run", lambda *a, **k: fake_run), \
+                mock.patch.object(cli, "hold_lock", lambda *a, **k: mock.MagicMock()), \
+                mock.patch.object(sys, "argv", ["gdpr-pipeline.py", "--store", ":memory:", "ask",
+                                                "--send", "--approved-by", "U7RP6HKUZ"]), \
+                mock.patch.object(cli, "oldest_first", lambda xs: list(xs)), \
+                mock.patch.object(approval, "verify", fake_verify):
+            try:
+                cli.main()
+            except SystemExit:
+                pass
+        self.assertIn("text", seen, "approval.verify must have been reached")
+        self.assertTrue(seen["text"].startswith("You wrote to us at notices@muso.ai on 1 September 2026"),
+                        "the CLI must materialise BEFORE verifying the digest, or the approval covers bytes nobody "
+                        "receives (QA finding on #1749)")
+        self.assertEqual(seen["subject"], "Your Muso.AI data deletion request")
+
+    def test_editing_the_lead_copy_invalidates_a_standing_approval(self):
+        """The lead is customer-facing copy. If its string changes, the letters change, so the digest must change and
+        the old approval must stop matching - that is what makes `NEW_THREAD_LEAD_RULING` load-bearing."""
+        rid, r = self.row(keys=["register:78"], channel="legal", conversation_id="", gmail_thread="",
+                          requester_email="c@d.co", received_at="2026-09-01T10:00:00Z")
+        item = self.item(rid, text="Body.\n", channel="legal")
+        with self.approved_copy():
+            before = approval.digest("ask", send.materialise(self.run, [dict(item)]))
+        with self.approved_copy(), \
+                mock.patch.object(copy, "NEW_THREAD_LEAD", "Hi! We got your note of {date} via {mailbox}. {request_details}."):
+            after = approval.digest("ask", send.materialise(self.run, [dict(item)]))
+        self.assertNotEqual(before, after, "a changed lead line must not keep a standing approval valid")
+
+    def test_editing_the_subject_invalidates_a_standing_approval(self):
+        rid, r = self.row(keys=["register:79"], channel="legal", conversation_id="", gmail_thread="",
+                          requester_email="e@f.co", received_at="2026-09-01T10:00:00Z")
+        item = self.item(rid, text="Body.\n", channel="legal")
+        with self.approved_copy():
+            before = approval.digest("ask", send.materialise(self.run, [dict(item)]))
+        with self.approved_copy(), mock.patch.object(copy, "NEW_THREAD_SUBJECT", "About your Muso.AI request: {request_type}"):
+            after = approval.digest("ask", send.materialise(self.run, [dict(item)]))
+        self.assertNotEqual(before, after, "a changed SUBJECT must not keep a standing approval valid")
+
+    def test_changing_only_the_recipient_invalidates_a_standing_approval(self):
+        """QA finding on #1749: the digest bound kind, row, body and subject but NOT the address a new-thread letter
+        is sent to. `requester_email` is a register field a later intake or a hand-edit can change, so an approval cut
+        for A still authorised the identical letter to B - one person's erasure request, in our words, delivered to
+        somebody else. The body does not change when the address does, so only binding the recipient catches it."""
+        rid, r = self.row(keys=["register:82"], channel="legal", conversation_id="", gmail_thread="",
+                          requester_email="first@example.com", received_at="2026-09-01T10:00:00Z")
+        item = self.item(rid, text="Body.\n", channel="legal")
+        with self.approved_copy():
+            before = approval.digest("ask", send.materialise(self.run, [dict(item)]))
+            self.assertEqual(send.materialise(self.run, [dict(item)])[0]["recipient"], "first@example.com")
+            self.s.update(rid, "ask", requester_email="second@example.com")
+            after = approval.digest("ask", send.materialise(self.run, [dict(item)]))
+        self.assertNotEqual(before, after,
+                            "a changed RECIPIENT must not keep a standing approval valid - the same letter would go "
+                            "to a different person")
+
+    def test_deliver_refuses_a_recipient_the_approval_did_not_name(self):
+        """The digest is only half of it: `deliver()` re-reads the row, so it must also refuse when the address it
+        would send to is not the one the materialised (approved) item carries. Otherwise a row edited between the
+        approval and the send still leaves, and the digest binding would be decoration."""
+        rid, r = self.row(keys=["register:83"], channel="legal", conversation_id="", gmail_thread="",
+                          requester_email="approved@example.com", received_at="2026-09-01T10:00:00Z")
+        item = self.item(rid, text="Body.\n", channel="legal")
+        with self.approved_copy():
+            items = send.materialise(self.run, [dict(item)])
+        self.s.update(rid, "ask", requester_email="swapped@example.com")
+        sent = []
+        with self.approved_copy(), \
+                mock.patch.object(send, "_mail_send_new_thread", lambda *a, **k: sent.append(a) or "gog-msg-3"):
+            out = send.deliver(self.run, items[0], "ask", "U7RP6HKUZ")
+        self.assertEqual(out["state"], "refused")
+        self.assertIn("approved recipient approved@example.com", out["why"])
+        self.assertIn("swapped@example.com", out["why"])
+        self.assertEqual(sent, [], "nothing may reach the writer when the recipient moved after approval")
+
+    def test_a_batch_with_no_new_thread_rows_keeps_its_old_digest(self):
+        """Bound only when present: an in-thread batch must hash exactly as it did before this change, or every
+        standing approval would be silently invalidated by a hardening fix."""
+        rid, r = self.row()          # intercom
+        item = self.item(rid, text="Body.\n")
+        items = send.materialise(self.run, [dict(item)])
+        self.assertEqual(items[0]["subject"], "")
+        # reproduce the OLD digest formula by hand and require equality
+        import hashlib
+        h = hashlib.sha256(); h.update(b"ask")
+        h.update(f"\n{items[0]['register_no']}:{items[0]['row']}:"
+                 f"{hashlib.sha256(items[0]['text'].encode()).hexdigest()}".encode())
+        self.assertEqual(approval.digest("ask", items), h.hexdigest()[:approval.DIGEST_LEN])
+
+    def test_materialise_does_not_double_prepend_on_deliver(self):
+        """`deliver()` applies the lead itself for callers that did not materialise. On an ALREADY materialised item it
+        must not prepend again, or the customer gets the line twice and the body differs from the digest."""
+        rid, r = self.row(keys=["register:80"], channel="notices", conversation_id="", gmail_thread="",
+                          requester_email="g@h.co", received_at="2026-09-01T10:00:00Z")
+        item = self.item(rid, text="Body.\n", channel="notices")
+        with self.approved_copy():
+            items = send.materialise(self.run, [dict(item)])
+        seen = {}
+
+        def fake_send(email, text, approved_by, dry_run=False, key="", mailbox="", subject=""):
+            seen.update(text=text)
+            return "gog-msg-2"
+        with self.approved_copy(), mock.patch.object(send, "_mail_send_new_thread", fake_send):
+            send.deliver(self.run, items[0], "ask", "U7RP6HKUZ")
+        self.assertEqual(seen["text"].count("You wrote to us at notices@muso.ai"), 1,
+                         "the lead must appear exactly once")
+
+    def test_a_refused_row_is_not_given_a_lead_it_cannot_send(self):
+        """A row with no email will be ledgered refused. Binding a lead to it would invent an approval for a letter
+        that can never leave, and would change the digest of a batch whose content did not really change."""
+        rid, r = self.row(keys=["register:81"], channel="notices", conversation_id="", gmail_thread="",
+                          requester_email="", received_at="2026-09-01T10:00:00Z")
+        item = self.item(rid, text="Body.\n", channel="notices")
+        with self.approved_copy():
+            items = send.materialise(self.run, [dict(item)])
+        self.assertEqual(items[0]["text"], "Body.\n")
+        self.assertEqual(items[0]["subject"], "")
+
+    def test_the_request_type_follows_the_class_within_the_approved_vocabulary(self):
+        """deletion / access / correction / objection, and the rendered line names the one the row actually is.
+
+        BUT the approved SUBJECT is the deletion one (ruling gdpr-support-from-1104): the four-class vocabulary
+        supplies the WORD, the GO supplies the right to SAY it. So an access row has a request-type phrase and still
+        refuses - 'stays refused until its own subject is written' - rather than shipping the deletion subject."""
+        self.assertEqual(copy.new_thread_request_type("privacy_erasure"), "your deletion request")
+        self.assertEqual(copy.new_thread_request_type("privacy_access"), "your access request")
+        self.assertEqual(copy.new_thread_subject("privacy_erasure"), "Your Muso.AI data deletion request")
+        with self.assertRaises(copy.NoApprovedSubject) as e:
+            copy.new_thread_subject("privacy_access")
+        self.assertIn("privacy_access", str(e.exception))
+        self.assertIn("gdpr-support-from-1104", str(e.exception))
+        for cls in ("privacy_access", "privacy_correction", "privacy_objection"):
+            rid, r = self.row(**{"keys": [f"register:{cls}"], "channel": "notices", "conversation_id": "",
+                                 "gmail_thread": "", "requester_email": "a@b.co", "class": cls})
+            with self.approved_copy():
+                with self.assertRaises(send.Unknown) as e:
+                    send.route(r)
+            self.assertIn("no approved SUBJECT line", str(e.exception),
+                          f"{cls} must refuse on its SUBJECT, not borrow the deletion one")
+        rid, r = self.row(**{"keys": ["register:del"], "channel": "notices", "conversation_id": "",
+                             "gmail_thread": "", "requester_email": "a@b.co", "class": "privacy_erasure"})
+        with self.approved_copy():
+            self.assertEqual(send.route(r), ("mail_new_thread", "a@b.co"))
+
+    def test_an_unwritable_notices_thread_routes_to_a_new_thread_once_the_lead_is_approved(self):
+        """THE SHAPE THE REGISTER ACTUALLY HAS. On 2026-11-04 every open notices@/legal@ row (48 / 24) carries a
+        gmail_thread and none is threadless, so a rule keyed on "no thread" would have unblocked nobody. The
+        unwritable mailbox itself is what selects option 2."""
+        rid, r = self.row(keys=["gmail:notices@muso.ai:t9"], channel="notices", conversation_id="",
+                          gmail_thread="1a1a436083a51047", requester_email="person@example.com")
+        with mock.patch.object(send, "_ACCOUNTS_READ", True), \
+                mock.patch.object(send, "_ACCOUNTS", {"support@muso.ai": {"gmail"}}), \
+                self.approved_copy():
+            self.assertEqual(send.route(r), ("mail_new_thread", "person@example.com"))
+
+    def test_an_unwritable_notices_thread_with_no_email_names_both_blockers(self):
+        """54 of the 72 notices@/legal@ rows carry no requester_email, so "no address" is the COMMON case, not an
+        edge. It must read as two separate facts - the thread cannot be written and there is nowhere else to write -
+        because the fix for each is different (auth the mailbox vs recover the address from the original message)."""
+        rid, r = self.row(keys=["gmail:notices@muso.ai:t9"], channel="notices", conversation_id="",
+                          gmail_thread="1a1a436083a51047", requester_email="")
+        with mock.patch.object(send, "_ACCOUNTS_READ", True), \
+                mock.patch.object(send, "_ACCOUNTS", {"support@muso.ai": {"gmail"}}), \
+                self.approved_copy():
+            with self.assertRaises(send.Unknown) as e:
+                send.route(r)
+        msg = str(e.exception)
+        self.assertIn("1a1a436083a51047", msg)
+        self.assertIn("no requester_email", msg)
+        self.assertIn("recovered from the original", msg)
+
+    def test_a_writable_thread_still_wins_over_option_2(self):
+        """If the mailbox is ever authed the reply goes in the THREAD, never a new thread. Option 2 is the fallback,
+        not the preferred route - otherwise authing the mailbox would change behaviour it should not."""
+        rid, r = self.row(keys=["gmail:notices@muso.ai:t9"], channel="notices", conversation_id="",
+                          gmail_thread="1a1a436083a51047", requester_email="person@example.com")
+        with mock.patch.object(send, "_ACCOUNTS_READ", True), \
+                mock.patch.object(send, "_ACCOUNTS", {"notices@muso.ai": {"gmail"}}), \
+                mock.patch.object(copy, "NEW_THREAD_LEAD_APPROVED", True):
+            self.assertEqual(send.route(r), ("mail", "1a1a436083a51047"))
+
+    def test_option_2_does_not_spread_to_other_channels_with_an_unwritable_mailbox(self):
+        """Option 2 is ONLY for the two mailboxes 073 named. A third channel keeps the plain mailbox refusal rather
+        than quietly acquiring a new-thread route."""
+        rid, r = self.row(keys=["gmail:register@muso.ai:t1"], channel="register", conversation_id="",
+                          gmail_thread="1a073f2a93c21a6e")
+        with mock.patch.object(send, "_ACCOUNTS_READ", True), \
+                mock.patch.object(send, "_ACCOUNTS", {"support@muso.ai": {"gmail"}}), \
+                mock.patch.object(copy, "NEW_THREAD_LEAD_APPROVED", True):
+            with self.assertRaises(send.Unknown) as e:
+                send.route(r)
+        self.assertIn("no known mailbox", str(e.exception))
+
+    def test_the_same_legal_thread_routes_once_the_mailbox_is_authed(self):
+        rid, r = self.row(keys=["gmail:legal@muso.ai:t1"], channel="legal", conversation_id="",
+                          gmail_thread="1a073f2a93c21a6e")
+        with mock.patch.object(send, "_ACCOUNTS_READ", True), \
+                mock.patch.object(send, "_ACCOUNTS", {"support@muso.ai": {"gmail"}, "legal@muso.ai": {"gmail"}}):
+            self.assertEqual(send.route(r), ("mail", "1a073f2a93c21a6e"))
+            self.assertEqual(send.mailbox_of(r), "legal@muso.ai")
+
+    def test_a_mailbox_in_gog_without_the_gmail_service_is_still_refused(self):
+        rid, r = self.row(keys=["gmail:notices@muso.ai:t9"], channel="notices", conversation_id="",
+                          gmail_thread="1a073f2a93c21a6e", requester_email="")
+        with mock.patch.object(send, "_ACCOUNTS_READ", True), \
+                mock.patch.object(send, "_ACCOUNTS", {"notices@muso.ai": {"calendar", "drive"}}):
+            with self.assertRaises(send.Unknown) as e:
+                send.route(r)
+        self.assertIn("without the gmail service", str(e.exception))
 
     def test_a_row_with_nothing_to_reply_to_is_refused(self):
         rid, r = self.row(keys=["register:77"], channel="register", conversation_id="", gmail_thread="",
@@ -2399,6 +2821,8 @@ class SendPath(unittest.TestCase):
 
         with mock.patch.dict(os.environ, {"GOG_KEYRING_PASSWORD": "x"}), \
                 mock.patch.object(send.shutil, "which", lambda n: "/usr/local/bin/gog"), \
+                mock.patch.object(send, "_ACCOUNTS_READ", True), \
+                mock.patch.object(send, "_ACCOUNTS", {"support@muso.ai": {"gmail"}}), \
                 mock.patch.object(send.subprocess, "run", fake_run):
             first = send.deliver(self.run, self.item(rid), "confirm", "U7RP6HKUZ")
             again = send.deliver(self.run, self.item(rid), "confirm", "U7RP6HKUZ")
@@ -2420,13 +2844,16 @@ class SendPath(unittest.TestCase):
 
         with mock.patch.dict(os.environ, {"GOG_KEYRING_PASSWORD": "x"}), \
                 mock.patch.object(send.shutil, "which", lambda n: "/usr/local/bin/gog"), \
+                mock.patch.object(send, "_ACCOUNTS_READ", True), \
+                mock.patch.object(send, "_ACCOUNTS", {"support@muso.ai": {"gmail"}}), \
                 mock.patch.object(send.subprocess, "run", timing_out):
             out = send.deliver(self.run, self.item(rid), "confirm", "U7RP6HKUZ")
         rec = self.s.send_record(rid, "confirm")
         self.assertEqual(out["state"], "failed", "a read timeout is retryable: nothing left the host")
         self.assertEqual(rec["state"], "failed")
         self.assertIn("nothing was written", rec["detail"])
-        self.assertEqual(len(reads), 1, "and no send was attempted at all")
+        self.assertEqual(len([c for c in reads if "thread" in c]), 1, "and no send was attempted at all")
+        self.assertFalse([c for c in reads if "send" in c], "gog gmail send must not run after a failed read")
 
     def test_a_definite_failure_is_still_retryable(self):
         """The mirror of the test above: when the writer never ran (a missing token), nothing reached the customer, so
@@ -2474,12 +2901,36 @@ class SendPath(unittest.TestCase):
 
     def test_an_unroutable_row_is_ledgered_as_refused_not_silently_skipped(self):
         rid, _ = self.row(keys=["gmail:legal@muso.ai:t1"], channel="legal", conversation_id="",
-                          gmail_thread="1a073f2a93c21a6e")
-        out = send.deliver(self.run, self.item(rid), "confirm", "U7RP6HKUZ")
+                          gmail_thread="1a073f2a93c21a6e", requester_email="")
+        with mock.patch.object(send, "_ACCOUNTS_READ", True), \
+                mock.patch.object(send, "_ACCOUNTS", {"support@muso.ai": {"gmail"}}):
+            out = send.deliver(self.run, self.item(rid), "confirm", "U7RP6HKUZ")
         self.assertEqual(out["state"], "refused")
         rec = self.s.send_record(rid, "confirm")
         self.assertEqual((rec["state"], rec["channel"]), ("refused", "none"))
-        self.assertIn("support@muso.ai", rec["detail"])
+        self.assertIn("legal@muso.ai", rec["detail"])
+        self.assertIn("no requester_email", rec["detail"],
+                      "with both copy GOs open the remaining blocker is the missing address, and it must be named")
+
+    def test_a_legal_reply_leaves_from_the_legal_mailbox_not_from_support(self):
+        """The whole point of the per-mailbox fix: a letter to a legal@ thread must go out FROM legal@. Pinning
+        `mailbox_of` alone would prove the lookup, not the send; this pins the wiring into the adapter, which is what
+        actually leaves the building. A reply from the wrong address is a different letter to a different relationship."""
+        rid, _ = self.row(keys=["gmail:legal@muso.ai:t1"], channel="legal", conversation_id="",
+                          gmail_thread="1a073f2a93c21a6e")
+        seen = {}
+
+        def fake_mail(thread_id, text, approved_by, dry_run=False, key="", mailbox=""):
+            seen.update(thread_id=thread_id, mailbox=mailbox, key=key)
+            return "message 1a17 sent"
+
+        with mock.patch.object(send, "_ACCOUNTS_READ", True), \
+                mock.patch.object(send, "_ACCOUNTS", {"support@muso.ai": {"gmail"}, "legal@muso.ai": {"gmail"}}), \
+                mock.patch.object(send, "_mail_send", fake_mail):
+            out = send.deliver(self.run, self.item(rid), "confirm", "U7RP6HKUZ")
+        self.assertEqual(out["state"], "sent")
+        self.assertEqual(seen["mailbox"], "legal@muso.ai", "the reply leaves from the mailbox that owns the thread")
+        self.assertEqual(seen["thread_id"], "1a073f2a93c21a6e")
 
     def test_a_dry_run_writes_nothing_at_all(self):
         """Nothing left the host, so there is nothing to guard against: a rehearsal must not consume the one send
@@ -2491,15 +2942,30 @@ class SendPath(unittest.TestCase):
         self.assertIsNone(self.s.send_record(rid, "confirm"))
 
     def test_a_refused_route_is_retryable_once_it_is_fixed(self):
+        """A `refused` row is retryable by design, and the fix that unblocks it now is recovering the ADDRESS: with
+        both copy GOs open, an unwritable legal@ thread routes to a new thread from support@ the moment the row has
+        somewhere to send to. That is the same slot reused, not a second letter."""
         rid, _ = self.row(keys=["gmail:legal@muso.ai:t1"], channel="legal", conversation_id="",
-                          gmail_thread="1a073f2a93c21a6e")
-        self.assertEqual(send.deliver(self.run, self.item(rid), "confirm", "U7RP6HKUZ")["state"], "refused")
-        # ... the mailbox gets authed / the row gains a conversation, and the next attempt reuses the slot
-        self.s.db.execute("UPDATE erasure_requests SET conversation_id='215476650395415' WHERE id=?", (rid,))
+                          gmail_thread="1a073f2a93c21a6e", requester_email="")
+        with mock.patch.object(send, "_ACCOUNTS_READ", True), \
+                mock.patch.object(send, "_ACCOUNTS", {"support@muso.ai": {"gmail"}}):
+            self.assertEqual(send.deliver(self.run, self.item(rid), "confirm", "U7RP6HKUZ")["state"], "refused")
+        # ... the address is recovered from the original message, and the next attempt reuses the slot
+        self.s.db.execute("UPDATE erasure_requests SET requester_email='person@example.com' WHERE id=?", (rid,))
         self.s.db.commit()
-        with mock.patch.object(send, "_intercom_send", lambda c, t, a, dry_run=False, key="": "posted"):
+        seen = {}
+
+        def fake_new_thread(email, text, approved_by, dry_run=False, key="", mailbox="", subject=""):
+            seen.update(email=email, subject=subject)
+            return "gog-msg-2"
+
+        with mock.patch.object(send, "_ACCOUNTS_READ", True), \
+                mock.patch.object(send, "_ACCOUNTS", {"support@muso.ai": {"gmail"}}), \
+                mock.patch.object(send, "_mail_send_new_thread", fake_new_thread):
             out = send.deliver(self.run, self.item(rid), "confirm", "U7RP6HKUZ")
         self.assertEqual(out["state"], "sent")
+        self.assertEqual(seen["email"], "person@example.com")
+        self.assertEqual(seen["subject"], "Your Muso.AI data deletion request")
         self.assertEqual(self.s.send_record(rid, "confirm")["state"], "sent")
 
     def test_the_watchdog_names_why_a_letter_never_left(self):
@@ -2547,15 +3013,31 @@ class SendPath(unittest.TestCase):
         self.assertNotIn("mailbox gog cannot write", line)
 
     def test_the_watchdog_names_a_row_with_no_route_before_anything_is_attempted(self):
-        """The 24 unroutable rows have no ledger record yet (nothing has ever been sent). The route check runs first,
-        so the page names the blocker on day one instead of after a failed attempt."""
-        rid, _ = self.s.upsert({"keys": ["notices:6"], "channel": "notices", "class": "privacy_erasure",
+        """A row with neither a conversation nor a thread has no route at all, and nothing has ever been sent, so
+        there is no ledger record to quote. The route check runs first, so the page names the blocker on day one
+        instead of after a failed attempt.
+
+        This used to use a notices@ row whose thread sat in an unwritable mailbox. That row HAS a route now (#1749
+        opens a new thread from support@ for exactly that shape), so the case moved to a channel with no new-thread
+        option - see the companion test below for the row that gained one."""
+        rid, _ = self.s.upsert({"keys": ["support:6"], "channel": "support", "class": "privacy_erasure",
                                 "received_at": "2026-09-01T10:00:00Z", "requester_email": "x@example.com",
-                                "gmail_thread": "t-9", "due_at": "2026-10-25T10:00:00Z"})
+                                "due_at": "2026-10-25T10:00:00Z"})
         self.assertIsNone(self.s.send_record(rid, "ask"))
         line = [ln for _, ln in self.run.watchdog_rows(datetime(2026, 11, 4, tzinfo=timezone.utc)) if f"#{self.s.get(rid)['register_no']} " in ln][0]
         self.assertIn("no route for a letter", line)
-        self.assertIn("mailbox gog cannot write", line)
+        self.assertIn("nothing to reply to", line)
+
+    def test_the_watchdog_does_not_call_a_new_thread_row_unroutable(self):
+        """The other half of the same change: a notices@ row whose thread is in a mailbox this host cannot write is
+        NOT unroutable any more - #1749 opens a new thread from support@. The page must not tell a human to go fix a
+        mailbox that is not the blocker."""
+        rid, _ = self.s.upsert({"keys": ["notices:6"], "channel": "notices", "class": "privacy_erasure",
+                                "received_at": "2026-09-01T10:00:00Z", "requester_email": "x@example.com",
+                                "gmail_thread": "t-9", "due_at": "2026-10-25T10:00:00Z"})
+        line = [ln for _, ln in self.run.watchdog_rows(datetime(2026, 11, 4, tzinfo=timezone.utc)) if f"#{self.s.get(rid)['register_no']} " in ln][0]
+        self.assertNotIn("no route for a letter", line)
+        self.assertIn("no letter sent", line)
 
     def test_a_row_with_a_route_still_reads_as_plain_no_letter_sent(self):
         rid, _ = self.s.upsert({"keys": ["intercom:77"], "channel": "intercom", "class": "privacy_erasure",
@@ -2624,11 +3106,13 @@ class SendPath(unittest.TestCase):
         with mock.patch.dict(os.environ, {"GOG_KEYRING_PASSWORD": "x"}), \
                 mock.patch.object(send.shutil, "which", lambda n: "/usr/local/bin/gog"), \
                 mock.patch.object(send.subprocess, "run", fake_run):
-            ref = send._mail_send("1a176619567e3fe0", copy.ASK["ASK_LINK"], "U7RP6HKUZ", dry_run=False)
+            ref = send._mail_send("1a176619567e3fe0", copy.ASK["ASK_LINK"], "U7RP6HKUZ", dry_run=False,
+                                  mailbox="notices@muso.ai")
         send_cmd = calls[-1]
         self.assertEqual(send_cmd[send_cmd.index("--subject") + 1], "Re: My Muso profile")
         self.assertIn("--reply-all", send_cmd)
-        self.assertEqual(send_cmd[send_cmd.index("--account") + 1], send.MAIL_ACCOUNT)
+        # the reply leaves from the mailbox that OWNS the thread, not from a constant
+        self.assertEqual(send_cmd[send_cmd.index("--account") + 1], "notices@muso.ai")
         self.assertEqual(ref, "message 1a17 sent")
 
     def test_an_unreadable_mail_thread_fails_instead_of_opening_a_new_one(self):
@@ -2703,6 +3187,113 @@ class SendPath(unittest.TestCase):
                  {"due_at": "2026-09-01T00:00:00Z", "register_no": 9},
                  {"due_at": "2026-10-01T00:00:00Z", "register_no": 7}]
         self.assertEqual([x["register_no"] for x in cli.oldest_first(items)], [9, 7, 5])
+
+    def approved_copy(self):
+        """BOTH copy gates open. They are separate constants on purpose (the lead line's GO did not mention the
+        subject), so a test that expects a ROUTE has to open both - and the tests that pin one gate refusing on its
+        own patch only that one, which is what proves they are independent."""
+        return mock.patch.multiple(copy, NEW_THREAD_LEAD_APPROVED=True, NEW_THREAD_SUBJECT_APPROVED=True)
+
+    # ---- option 2: a new thread from support@ (firstmate inbox 073) ------------------------------------------
+    def test_a_notices_row_with_no_thread_is_refused_until_the_lead_is_approved(self):
+        """Option 2: a notices@/legal@ request with no thread opens a new thread from support@, but its mandatory
+        first line is a BODY CHANGE, so it needs its own GO. Until verify-sla-driver-fable-d2 approves the one-line
+        variant, the route REFUSES with the reason instead of sending copy nobody approved."""
+        rid, r = self.row(keys=["register:77"], channel="notices", conversation_id="", gmail_thread="",
+                          requester_email="a@b.co")
+        with mock.patch.object(copy, "NEW_THREAD_LEAD_APPROVED", False):
+            with self.assertRaises(send.Unknown) as e:
+                send.route(r)
+        self.assertIn("one-line lead copy is not approved yet", str(e.exception))
+        self.assertIn("verify-sla-driver-fable-d2", str(e.exception))
+
+    def test_a_notices_row_with_no_thread_routes_once_the_lead_is_approved(self):
+        """The approved one-line variant opens the route: the reply goes to the person's own address, not to a
+        thread that does not exist."""
+        rid, r = self.row(keys=["register:77"], channel="notices", conversation_id="", gmail_thread="",
+                          requester_email="a@b.co")
+        with self.approved_copy():
+            self.assertEqual(send.route(r), ("mail_new_thread", "a@b.co"))
+
+    def test_a_notices_row_with_no_thread_and_no_email_is_refused_even_when_approved(self):
+        rid, r = self.row(keys=["register:77"], channel="notices", conversation_id="", gmail_thread="",
+                          requester_email="")
+        with self.approved_copy():
+            with self.assertRaises(send.Unknown) as e:
+                send.route(r)
+        self.assertIn("there is nowhere to open a new thread to", str(e.exception))
+
+    def test_a_legal_row_with_no_thread_routes_once_the_lead_is_approved(self):
+        """legal@ is the other mailbox the ruling names; it must take the same path as notices@."""
+        rid, r = self.row(keys=["register:78"], channel="legal", conversation_id="", gmail_thread="",
+                          requester_email="c@d.co")
+        with self.approved_copy():
+            self.assertEqual(send.route(r), ("mail_new_thread", "c@d.co"))
+
+    def test_a_register_row_with_no_thread_still_refuses(self):
+        """Option 2 is ONLY for the two mailboxes the ruling names. An unknown channel must not borrow it."""
+        rid, r = self.row(keys=["register:77"], channel="register", conversation_id="", gmail_thread="",
+                          requester_email="a@b.co")
+        with mock.patch.object(copy, "NEW_THREAD_LEAD_APPROVED", True):
+            with self.assertRaises(send.Unknown) as e:
+                send.route(r)
+        self.assertIn("no conversation_id and no gmail_thread", str(e.exception))
+
+    def test_the_lead_is_prepended_to_the_body_before_the_sha_is_taken(self):
+        """A changed body must be a different letter: the lead goes into the text BEFORE body_sha/idem_key, so the
+        ledger records the digest of the text that actually goes out - not the digest of the bare body."""
+        rid, r = self.row(keys=["register:77"], channel="notices", conversation_id="", gmail_thread="",
+                          requester_email="a@b.co", received_at="2026-09-01T10:00:00Z")
+        seen = {}
+
+        def fake_send(email, text, approved_by, dry_run=False, key="", mailbox="", subject=""):
+            seen.update(email=email, text=text, subject=subject, mailbox=mailbox)
+            return "gog-msg-1"
+
+        bare = "Hello there,\n\nthe approved letter.\n"
+        with self.approved_copy(), \
+                mock.patch.object(send, "_mail_send_new_thread", fake_send):
+            out = send.deliver(self.run, self.item(rid, text=bare), "ask", "U7RP6HKUZ")
+        self.assertEqual(out["state"], "sent")
+        self.assertEqual(seen["email"], "a@b.co")
+        self.assertEqual(seen["mailbox"], "support@muso.ai")
+        self.assertTrue(seen["text"].startswith("You wrote to us at notices@muso.ai on 1 September 2026"),
+                        "the lead must be the FIRST line, and it must name the ADDRESS the person wrote to")
+        self.assertEqual(seen["subject"], "Your Muso.AI data deletion request",
+                         "the subject is customer-facing copy, so it comes from copy.py where it can be reviewed - "
+                         "and it follows the SAME vocabulary as the lead, never a fixed 'deletion' on an access row")
+        self.assertTrue(seen["text"].endswith(bare), "the approved body follows the lead unchanged")
+        rec = self.s.send_record(rid, "ask")
+        self.assertEqual(rec["body_sha"], send.body_sha(seen["text"]))
+        self.assertNotEqual(rec["body_sha"], send.body_sha(bare),
+                            "the ledger must not record the bare body's digest for a letter carrying the lead")
+
+    def test_a_new_thread_is_not_replied_all(self):
+        """`--reply-all` is meaningless on a thread that does not exist yet; the new-thread writer must pass --to and
+        must NOT pass --thread-id.
+
+        It also must send as the mailbox it was HANDED. A mutant that hardcodes `--account MAIL_ACCOUNT` here survived
+        every other test in this class, because today's only caller happens to pass support@ anyway - so the parameter
+        is pinned here rather than left to the caller's good behaviour."""
+        seen = {}
+
+        def fake_run(cmd, **kw):
+            seen["cmd"] = cmd
+            return type("R", (), {"returncode": 0, "stdout": "msg-1\n", "stderr": ""})()
+
+        with mock.patch.object(send.shutil, "which", lambda _: "/usr/bin/gog"), \
+                mock.patch.dict(os.environ, {"GOG_KEYRING_PASSWORD": "k"}), \
+                mock.patch.object(send.subprocess, "run", fake_run):
+            send._mail_send_new_thread("a@b.co", "body", "U7RP6HKUZ", dry_run=False,
+                                       mailbox="seat@example.com",
+                                       subject="Your Muso.AI data deletion request")
+        cmd = seen["cmd"]
+        self.assertIn("--to", cmd)
+        self.assertIn("a@b.co", cmd)
+        self.assertNotIn("--thread-id", cmd)
+        self.assertNotIn("--reply-all", cmd)
+        self.assertEqual(cmd[cmd.index("--account") + 1], "seat@example.com",
+                         "the writer must send as the mailbox it was given, not as a module constant")
 
 
 class NoStaleLockClaim(unittest.TestCase):
@@ -3135,10 +3726,28 @@ class SendApproval(unittest.TestCase):
         self.assertIn("fable-ruling-1103-d2/gdpr-identity-ask", led)
         self.assertIn("fable-ruling-1103-d2/gdpr-progress-line", led)
         self.assertIn("fable-ruling-1103-b3/gdpr-confirmation", led)
+        self.assertIn("gdpr-support-from-1104", led, (
+            "the new-thread route's ruling id MUST be in the shipped ledger: the approval line names a ruling id and "
+            "approval.verify looks it up by kind, so a GO that is in the code but not in the ledger refuses every "
+            "send at the last gate - after the merge, after the deploy, and looking exactly like 'the human did not "
+            "approve'"))
         for rid, r in led.items():
             self.assertIn(r["kind"], ("ask", "confirm"), rid)
             self.assertTrue(r.get("source"), f"{rid} must say where the ruling came from")
             self.assertTrue(r.get("expires"), rid)
+
+    def test_the_class_scoped_subject_ruling_resolves_in_the_ledger_for_its_own_class(self):
+        """The subject gate cites a ruling id; that id must exist, be an `ask` ruling and be unexpired, or the GO is
+        decorative. Checked at the ruling's own approved_at so the assertion does not rot on the calendar."""
+        led = approval.rulings(os.path.join(os.path.dirname(__file__), "..", "policies", "gdpr-send-rulings.json"))
+        rec = led.get(copy.NEW_THREAD_SUBJECT_RULING)
+        self.assertIsNotNone(rec, f"{copy.NEW_THREAD_SUBJECT_RULING} is cited by copy.new_thread_subject but absent")
+        self.assertEqual(rec["kind"], "ask")
+        at = datetime.fromisoformat(str(rec["approved_at"]).replace("Z", "+00:00")) + timedelta(minutes=1)
+        self.assertEqual(approval._ruling_ok(rec, "ask", at), "")
+        # and the scope is stated where a human signing an approval would read it
+        self.assertIn("CLASS-SCOPED", rec["source"])
+        self.assertIn("privacy_erasure", rec["source"])
 
     def test_the_dry_run_prints_the_digest_only_never_an_accept_string(self):
         text = approval.note("confirm", self.items())
@@ -3696,6 +4305,12 @@ class FrozenBatchManifest(unittest.TestCase):
 
     def test_both_send_commands_accept_a_manifest(self):
         src = open(os.path.join(HERE, "gdpr-pipeline.py")).read()
-        self.assertIn('select_batch(a, "ask", run.asks(now), run)', src)
-        self.assertIn('select_batch(a, "confirm", run.confirmations(now, m_result=m_result), run)', src)
+        # The ORDER is part of the requirement, not an implementation detail: select_batch checks each pinned
+        # body_sha against the text it is HANDED, so materialise must be its ARGUMENT, never its wrapper. Nesting it
+        # the other way (`send.materialise(run, select_batch(...))`) validates the pin against the pre-lead body and
+        # silently accepts 9 changed letters (measured on the live register). This assertion pins the inside-ness.
+        self.assertIn('select_batch(a, "ask", send.materialise(run, run.asks(now)), run)', src)
+        self.assertIn('select_batch(a, "confirm", send.materialise(run, run.confirmations(now, m_result=m_result)), '
+                      'run)', src)
+        self.assertNotIn('send.materialise(run, select_batch(', src)
         self.assertIn('p.add_argument("--manifest"', src)

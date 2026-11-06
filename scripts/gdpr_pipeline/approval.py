@@ -64,12 +64,32 @@ class Unverifiable(Exception):
 
 
 def digest(kind: str, items: list[dict]) -> str:
-    """The batch's identity: kind + every (register, row, body) it will send, in order."""
+    """The batch's identity: kind + every (register, row, body, subject) it will send, in order.
+
+    The SUBJECT is bound only when an item HAS one, so a batch of in-thread replies hashes byte-identically to before
+    and a standing approval is not disturbed by this change. For a new-thread letter it must be bound: the subject is
+    customer-facing copy, and editing it changes the letter the person receives.
+
+    The RECIPIENT (`recipient`) is bound on the same rule, and for a sharper reason (QA finding on #1749): a new-thread letter
+    is addressed to the row's `requester_email`, which a later intake or a hand-edit can change. Without it in the
+    hash, an approval cut for A still authorised the identical letter to B - one person's erasure request, in our
+    words, delivered to somebody else. Empty for every other route, so in-thread digests are unchanged.
+
+    The caller is responsible for passing the letter that will ACTUALLY be sent (`send.materialise` does that before
+    this is called). Hashing a pre-materialisation body is the hole QA found on #1749: the approval covered bytes
+    nobody was going to receive."""
     h = hashlib.sha256()
     h.update(kind.encode())
     for x in items:
         body = hashlib.sha256((x.get("text") or "").encode()).hexdigest()
-        h.update(f"\n{x.get('register_no')}:{x.get('row')}:{body}".encode())
+        line = f"\n{x.get('register_no')}:{x.get('row')}:{body}"
+        subj = x.get("subject") or ""
+        if subj:
+            line += ":" + hashlib.sha256(subj.encode()).hexdigest()
+        to = x.get("recipient") or ""
+        if to:
+            line += ":" + hashlib.sha256(to.encode()).hexdigest()
+        h.update(line.encode())
     return h.hexdigest()[:DIGEST_LEN]
 
 

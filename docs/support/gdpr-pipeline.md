@@ -51,9 +51,34 @@ big-name / safety cases, and (with the captain) anything irreversible. Runs on n
   which is why there is no negation word-list to get wrong. The `<ruling-id>` must exist in
   `policies/gdpr-send-rulings.json` with the same `kind` and an unexpired `expires` — so a new ruling is a reviewed
   commit, and an approval cannot name copy nobody approved. The `<digest>` is sha256 over the kind and every
-  `(register, row, sha256(body))` about to leave, so one changed letter, row or order invalidates it, and the approval
-  is valid for `TTL_HOURS` (2 h). The dry run prints the **digest only** — never an accept string, because a pipeline
-  that prints what the gate accepts manufactures its own approvals.
+  `(register, row, sha256(body), sha256(subject), sha256(recipient))` about to leave, so one changed letter, row,
+  order or **address** invalidates it, and the approval is valid for `TTL_HOURS` (2 h). The dry run prints the **digest only** — never an accept string,
+  because a pipeline that prints what the gate accepts manufactures its own approvals.
+  - **The digest covers the letter that actually LEAVES, and that is an ordering invariant, not a detail.** A letter's
+    final body and subject are produced by `send.final_letter()`, and the CLI calls `send.materialise()` on the batch
+    **before** `approval.verify()`. Hashing the pre-materialisation body instead would let the lead line and the
+    subject change under a standing approval: the approver would have approved bytes nobody was going to receive.
+    (`#1749` shipped that bug in its first cut; QA caught it.) So opening a copy gate — `NEW_THREAD_LEAD_APPROVED`,
+    `NEW_THREAD_SUBJECT_APPROVED` — **changes the digest of any batch containing those rows, on purpose**, and the old
+    approval stops matching. Measured 2026-11-04: the live 142-letter batch is `9f402f38a26acb2f` while the subject
+    gate is shut, and `3539877f29da3ee0` the moment it opens (9 letters gain the lead line). A batch with no
+    new-thread rows hashes exactly as before, so a hardening change cannot silently invalidate a standing approval.
+  - **The RECIPIENT is part of the approved identity, not just the bytes.** A new-thread letter is addressed to the
+    row's `requester_email`, which a later intake or a hand-edit can change; the body does not change when the address
+    does, so a digest over body+subject alone let an approval cut for A authorise the identical letter to B — one
+    person's erasure request, in our words, delivered to somebody else (QA finding on `#1749`). `send.final_letter()`
+    therefore returns `(body, subject, recipient)`, `materialise()` records it on the item, `approval.digest()` binds
+    it, and `deliver()` re-reads the route and **refuses** when the address it would send to is not the one the
+    materialised item carries. Empty for every other route, so in-thread digests are unchanged — measured on the live
+    store 2026-11-05: 144 letters, `b91c208e8750edc6` before and after, because that batch has no new-thread rows.
+  - **Both copy gates are open as of 2026-11-04, and the subject one is CLASS-SCOPED.** The lead line's GO is
+    `legal-finalize-fable-k1`; the subject's is `gdpr-support-from-1104` (firstmate 099), which approved
+    "Your Muso.AI data deletion request" **for the deletion class only** and said an access/correction/objection row
+    "stays refused until its own subject is written". So `NEW_THREAD_SUBJECT_APPROVED_CLASSES` names the classes whose
+    subject has a GO — `privacy_erasure` alone today — and `copy.new_thread_subject()` raises `NoApprovedSubject` for
+    any other class, naming the ruling it would need. The four-class vocabulary supplies the WORD; the GO supplies the
+    right to SAY it. Widening that tuple releases customer-facing copy, so a class joins it in the PR carrying its
+    ruling, never during a bug fix.
   - Fail-closed list, each with its own sentence: no bot token, no channel (empty = off), unreadable history, a scan
     that reached its cap, no such ruling, a ruling for another kind, an expired ruling, an expired message, a deleted
     message, a reply. The refusal always names what was actually scanned (how many messages, from whom, back to when).
