@@ -43,6 +43,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from gdpr_pipeline import approval, copy, hide_batch, send, sources  # noqa: E402
 from gdpr_pipeline import intake as intake_core  # noqa: E402
 from gdpr_pipeline.run import JAN, Run, backfill_table, page_chunks, page_text, SLACK_CHANNEL  # noqa: E402
+from gdpr_pipeline import store  # noqa: E402
 from gdpr_pipeline.store import DEFAULT_PATH, Store  # noqa: E402
 
 KILL = "/etc/hydra/gdpr-pipeline.disabled"
@@ -666,7 +667,13 @@ def main() -> int:
             print(f"#{drop['register_no']} (row {drop['id']}, {drop['row_key']}) is the same customer event as "
                   f"#{keep['register_no']} (row {keep['id']}, {keep['row_key']})")
             if a.apply:
-                run.store.merge_duplicate(keep, drop)
+                try:
+                    run.store.merge_duplicate(keep, drop)
+                except store.MergeRefused as exc:
+                    # A pair that cannot be folded safely is REPORTED and left open, never half-merged: the keys and
+                    # pages have not moved, so the next run sees the same pair and a person can reconcile it.
+                    print(f"  REFUSED: {exc}")
+                    run.fail(f"dedupe {drop['id']} -> {keep['id']}", exc)
         if pairs and not a.apply:
             print("dry run: nothing written (pass --apply to close the duplicates)")
         elif not pairs:

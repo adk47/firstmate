@@ -25,6 +25,7 @@ try:
 except ImportError:  # pragma: no cover
     import mock  # type: ignore
 from gdpr_pipeline import approval, checks, copy, hide_batch, identity, intake, send, sources  # noqa: E402
+from gdpr_pipeline import store  # noqa: E402
 from gdpr_pipeline import run as run_mod  # noqa: E402
 from gdpr_pipeline.identity import Page, Requester  # noqa: E402
 from gdpr_pipeline.run import Run, backfill_table, page_text  # noqa: E402
@@ -336,15 +337,18 @@ class StoreTests(unittest.TestCase):
 
     def test_reconcile_on_catalog_id_and_email_never_ticket_alone(self):
         rid, _ = self.s.upsert(self.cand())
+        # 60s earlier: the same customer event seen on another channel, inside the same-event window. (It used to be
+        # eleven days earlier, which the symmetric bound now correctly treats as a separate request - see
+        # test_an_earlier_dated_distinct_request_is_a_second_request.)
         rid2, how = self.s.upsert(self.cand(keys=["gmail:notices@muso.ai:abc"], channel="notices",
-                                            received_at="2026-09-20T00:00:00Z"))
+                                            received_at="2026-10-01T09:59:00Z"))
         self.assertEqual((rid2, how), (rid, "merged"))
         r = self.s.get(rid)
-        self.assertEqual(r["due_at"], "2026-10-20T00:00:00Z")   # the earlier receipt brings the due date FORWARD
+        self.assertEqual(r["due_at"], "2026-10-31T09:59:00Z")   # the earlier receipt brings the due date FORWARD
         self.assertIn("gmail:notices@muso.ai:abc", r["keys"])
         # a later receipt never moves it back
         self.s.upsert(self.cand(keys=["clickup:z"], received_at="2026-10-30T00:00:00Z"))
-        self.assertEqual(self.s.get(rid)["due_at"], "2026-10-20T00:00:00Z")
+        self.assertEqual(self.s.get(rid)["due_at"], "2026-10-31T09:59:00Z")
         # same page, different requester, no shared key -> a separate request
         rid3, how3 = self.s.upsert(self.cand(keys=["intercom:2"], requester_email="other@x.co"))
         self.assertNotEqual(rid3, rid)
@@ -363,6 +367,110 @@ class StoreTests(unittest.TestCase):
                                              pages=pages, received_at="2026-10-02T09:00:00Z"))
         self.assertEqual(how3, "created")
         self.assertNotEqual(rid3, rid)
+
+    def test_a_prefix_and_its_full_uuid_are_the_same_page_for_a_merge(self):
+        """Found live 2026-11-04 (register #376/#377): the notices@ ledger keeps an 8-char id, Intercom keeps the full
+        uuid, and the SAME customer event arrived on both channels nine seconds apart. Compared verbatim the page sets
+        never intersected, so one request became two rows - two deadlines, two watchdogs, two letters."""
+        rid, how = self.s.upsert(self.cand(keys=["gmail:notices@muso.ai:t1"], channel="notices",
+                                           requester_email="gertjan@pm.me", received_at="2026-11-04T01:39:22Z",
+                                           pages=[{"entity": "profile", "id": "fc31a861"}]))
+        self.assertEqual(how, "created")
+        rid2, how2 = self.s.upsert(self.cand(keys=["intercom:215476692845876"], channel="intercom",
+                                             requester_email="gertjan@pm.me", received_at="2026-11-04T01:39:31Z",
+                                             pages=[{"entity": "profile",
+                                                     "id": "fc31a861-0297-410d-914b-60e8a02ced76"}]))
+        self.assertEqual((rid2, how2), (rid, "merged"), "one person, one page, one event")
+        # and the row now carries the full uuid, not the prefix: the catalog can decide it
+        self.assertEqual([p["id"] for p in self.s.get(rid)["pages"]], ["fc31a861-0297-410d-914b-60e8a02ced76"])
+
+    def test_the_other_order_merges_too(self):
+        """Which lane runs first is an accident of timing (Intercom searches 3 hours, the mail ledger runs on its own
+        cron), so the match must not depend on the row having been written first with the prefix.
+
+        The two receipts are nine seconds apart, as they were live. They used to be three days apart, which the
+        same-event bound now (correctly) refuses: a receipt that much later is a new request, not the other delivery
+        of this one."""
+        rid, _ = self.s.upsert(self.cand(keys=["intercom:215476692845876"], channel="intercom",
+                                         received_at="2026-11-04T01:39:22Z",
+                                         pages=[{"entity": "profile",
+                                                 "id": "fc31a861-0297-410d-914b-60e8a02ced76"}]))
+        rid2, how2 = self.s.upsert(self.cand(keys=["gmail:notices@muso.ai:t1"], channel="notices",
+                                             received_at="2026-11-04T01:39:31Z",
+                                             pages=[{"entity": "profile", "id": "fc31a861"}]))
+        self.assertEqual((rid2, how2), (rid, "merged"), "the prefix must find the row that already holds the full id")
+
+    def test_a_later_request_from_the_same_sender_is_a_second_request(self):
+        """QA on #1735, reproduced: notices@ `fc31a861` at 01:39 and a fresh Intercom request for the full uuid at
+        06:39 came back (1,'created') then (1,'merged'). A shared page and a shared sender prove the same PERSON, not
+        the same EVENT, so the later request lost its own deadline, its own watchdog and its own reply target."""
+        rid, how = self.s.upsert(self.cand(keys=["gmail:notices@muso.ai:t1"], channel="notices",
+                                           requester_email="gertjan@pm.me", received_at="2026-11-04T01:39:22Z",
+                                           pages=[{"entity": "profile", "id": "fc31a861"}]))
+        self.assertEqual(how, "created")
+        rid2, how2 = self.s.upsert(self.cand(keys=["intercom:215476692845876"], channel="intercom",
+                                             requester_email="gertjan@pm.me", received_at="2026-11-04T06:39:00Z",
+                                             pages=[{"entity": "profile",
+                                                     "id": "fc31a861-0297-410d-914b-60e8a02ced76"}]))
+        self.assertEqual(how2, "created", "five hours later is a new request, not the other delivery of the first")
+        self.assertNotEqual(rid2, rid)
+        self.assertEqual(self.s.get(rid2)["due_at"], "2026-12-04T06:39:00Z", "the new request keeps its own deadline")
+
+    def test_an_earlier_receipt_inside_the_window_merges_and_pulls_the_due_date_forward(self):
+        """The other direction, inside the same-event window: the same customer event found on another channel with a
+        slightly earlier date. Merging brings the due date forward, which makes us answer sooner."""
+        rid, _ = self.s.upsert(self.cand(keys=["intercom:215476692845876"], channel="intercom",
+                                         requester_email="gertjan@pm.me", received_at="2026-11-04T01:39:22Z",
+                                         pages=[{"entity": "profile",
+                                                 "id": "fc31a861-0297-410d-914b-60e8a02ced76"}]))
+        rid2, how2 = self.s.upsert(self.cand(keys=["gmail:notices@muso.ai:t1"], channel="notices",
+                                             requester_email="gertjan@pm.me", received_at="2026-11-04T01:38:40Z",
+                                             pages=[{"entity": "profile", "id": "fc31a861"}]))
+        self.assertEqual((rid2, how2), (rid, "merged"))
+        self.assertEqual(self.s.get(rid)["due_at"], "2026-12-04T01:38:40Z")
+
+    def test_an_earlier_dated_distinct_request_is_a_second_request(self):
+        """QA on #1735, the mirror of the later-request case: a one-sided bound let a NEGATIVE difference always
+        satisfy `<=`, so a distinct request dated two weeks earlier was swallowed into the newer row. Processing order
+        is not evidence of event identity, and moving the due date earlier does not preserve the second request's own
+        reply target or watchdog."""
+        rid, how = self.s.upsert(self.cand(keys=["gmail:notices@muso.ai:t1"], channel="notices",
+                                           requester_email="gertjan@pm.me", received_at="2026-11-04T01:39:22Z",
+                                           pages=[{"entity": "profile", "id": "fc31a861"}]))
+        self.assertEqual(how, "created")
+        rid2, how2 = self.s.upsert(self.cand(keys=["intercom:215476692845876"], channel="intercom",
+                                             requester_email="gertjan@pm.me", received_at="2026-10-20T01:39:22Z",
+                                             pages=[{"entity": "profile",
+                                                     "id": "fc31a861-0297-410d-914b-60e8a02ced76"}]))
+        self.assertEqual(how2, "created", "two weeks earlier is a different request, not the other delivery")
+        self.assertNotEqual(rid2, rid)
+        self.assertEqual(self.s.get(rid2)["due_at"], "2026-11-19T01:39:22Z",
+                         "the earlier request keeps its own, tighter deadline")
+
+    def test_an_earlier_receipt_an_hour_away_is_also_a_second_request(self):
+        """The case that separates a symmetric bound from a one-sided one, and the reason the bound is symmetric: an
+        hour earlier is still a different request. A one-sided `<=` accepts every negative difference, so this merged
+        and the second request lost its own reply target and watchdog."""
+        rid, _ = self.s.upsert(self.cand(keys=["gmail:notices@muso.ai:t1"], channel="notices",
+                                         requester_email="gertjan@pm.me", received_at="2026-11-04T01:39:22Z",
+                                         pages=[{"entity": "profile", "id": "fc31a861"}]))
+        rid2, how2 = self.s.upsert(self.cand(keys=["intercom:215476692845876"], channel="intercom",
+                                             requester_email="gertjan@pm.me", received_at="2026-11-04T00:39:22Z",
+                                             pages=[{"entity": "profile",
+                                                     "id": "fc31a861-0297-410d-914b-60e8a02ced76"}]))
+        self.assertEqual(how2, "created", "an hour earlier is a different request, not the other delivery")
+        self.assertNotEqual(rid2, rid)
+        self.assertEqual(self.s.get(rid)["due_at"], "2026-12-04T01:39:22Z",
+                         "and the later one is not rewritten by it")
+
+    def test_a_different_page_under_the_same_sender_is_still_a_second_request(self):
+        rid, _ = self.s.upsert(self.cand(keys=["gmail:notices@muso.ai:t1"], channel="notices",
+                                         requester_email="x@y.co", pages=[{"entity": "profile", "id": "fc31a861"}]))
+        rid2, how2 = self.s.upsert(self.cand(keys=["intercom:9"], channel="intercom", requester_email="x@y.co",
+                                             pages=[{"entity": "profile",
+                                                     "id": "aaaaaaaa-0000-4000-8000-000000000000"}]))
+        self.assertEqual(how2, "created")
+        self.assertNotEqual(rid, rid2)
 
     def test_two_anonymous_threads_about_one_page_are_two_requests(self):
         """QA a3e68886a, reproduced: two support@ threads about the same profile, no sender on the ledger rows.
@@ -2224,6 +2332,329 @@ class SafetyFieldsMustBeStated(unittest.TestCase):
     def test_a_wrong_typed_isClaimed_is_unknown(self):
         p = self.facts(dict(self.DOC, **{"isClaimed": "false"}))
         self.assertEqual(p.facts_unknown, "isClaimed")
+
+
+class CrossChannelDuplicates(unittest.TestCase):
+    """`dedupe` must also see one event that arrived on TWO channels, not only the `:again:` respellings. These rows
+    are built directly: with the prefix-aware merge in `_match`, `upsert` no longer creates the pair at the front door,
+    so the repair tool has to be tested against the rows a pre-fix tick already wrote."""
+
+    def setUp(self):
+        self.s = Store(":memory:")
+
+    def row(self, key, channel, received, pages, conv="", thread=""):
+        # a distinct placeholder sender per row, so `upsert` cannot merge them for us: these rows stand in for the
+        # historic pairs a pre-fix tick wrote, and `unify` then gives them the one real sender they share.
+        rid, how = self.s.upsert({"keys": [key], "channel": channel, "class": "privacy_erasure",
+                                  "received_at": received, "requester_email": f"{abs(hash(key))}@else.example",
+                                  "pages": pages, "conversation_id": conv, "gmail_thread": thread})
+        self.assertIn(how, ("created", "unchanged"))
+        return rid
+
+    def unify(self, *rids, email="gertjan@pm.me"):
+        for rid in rids:
+            self.s.update(rid, "test", requester_email=email)
+
+    def test_a_fold_keeps_the_more_restrictive_class(self):
+        """QA on #1735: the scanner keeps the row carrying the full uuid, which is not necessarily the row carrying the
+        more restrictive class. A notices@ `legal_threat` and the Intercom `privacy_erasure` about it are one event;
+        folding the first into the second left the only open row an erasure, so legal-threat handling (Jan, hide
+        first, the 24 h deadline) silently disappeared. Same rule as `upsert`: the stricter class wins."""
+        threat = self.row("gmail:notices@muso.ai:t1", "notices", "2026-11-04T01:39:22Z",
+                          [{"entity": "profile", "id": "fc31a861"}], thread="t1")
+        self.s.db.execute("UPDATE erasure_requests SET class='legal_threat' WHERE id=?", (threat,))
+        self.s.db.commit()
+        conv = self.row("intercom:215476692845876", "intercom", "2026-11-04T01:39:31Z",
+                        [{"entity": "profile", "id": "fc31a861-0297-410d-914b-60e8a02ced76"}],
+                        conv="215476692845876")
+        self.unify(threat, conv)
+        keep, drop = self.s.duplicate_events()[0]
+        self.assertEqual(keep["id"], conv, "the row carrying the full uuid is the one we keep")
+        self.assertEqual(keep["class"], "privacy_erasure")
+        self.assertEqual(drop["class"], "legal_threat")
+        self.s.merge_duplicate(keep, drop)
+        self.assertEqual(self.s.get(conv)["class"], "legal_threat",
+                         "the surviving row must keep the stricter class, not the one it happened to be keyed on")
+
+    def test_a_fold_never_downgrades_the_kept_rows_class(self):
+        """The other direction: a stricter kept row must not be relaxed by folding a milder duplicate into it."""
+        threat = self.row("gmail:notices@muso.ai:t1", "notices", "2026-11-04T01:39:22Z",
+                          [{"entity": "profile", "id": "fc31a861"}], thread="t1")
+        self.s.db.execute("UPDATE erasure_requests SET class='legal_threat' WHERE id=?", (threat,))
+        self.s.db.commit()
+        conv = self.row("intercom:215476692845876", "intercom", "2026-11-04T01:39:31Z",
+                        [{"entity": "profile", "id": "fc31a861-0297-410d-914b-60e8a02ced76"}],
+                        conv="215476692845876")
+        self.unify(threat, conv)
+        self.s.merge_duplicate(self.s.get(threat), self.s.get(conv))
+        self.assertEqual(self.s.get(threat)["class"], "legal_threat")
+
+    def test_a_notice_and_the_conversation_about_it_are_one_event(self):
+        thread = self.row("gmail:notices@muso.ai:t1", "notices", "2026-11-04T01:39:22Z",
+                          [{"entity": "profile", "id": "fc31a861"}], thread="t1")
+        conv = self.row("intercom:215476692845876", "intercom", "2026-11-04T01:39:31Z",
+                        [{"entity": "profile", "id": "fc31a861-0297-410d-914b-60e8a02ced76"}],
+                        conv="215476692845876")
+        self.unify(thread, conv)
+        pairs = self.s.duplicate_events()
+        self.assertEqual(len(pairs), 1, "two channels, one event")
+        keep, drop = pairs[0]
+        self.assertEqual(keep["id"], conv, "the row carrying the full uuid is the one we keep")
+        self.assertEqual(drop["id"], thread)
+        self.s.merge_duplicate(keep, drop)
+        self.assertEqual(self.s.get(thread)["status"], "duplicate")
+        self.assertEqual([p["id"] for p in self.s.get(conv)["pages"]],
+                         ["fc31a861-0297-410d-914b-60e8a02ced76"], "the prefix is replaced by its full uuid")
+
+    def test_the_repair_scanner_uses_the_same_page_rule_as_intake(self):
+        """QA on #1735: intake merges on ANY shared page, but the scanner required the two prefix sets to be EQUAL, so
+        a notice naming page A and the Intercom conversation about it naming A and B stayed two open requests with two
+        deadlines and two letters. The repair must read the same overlap rule."""
+        thread = self.row("gmail:notices@muso.ai:t1", "notices", "2026-11-04T01:39:22Z",
+                          [{"entity": "profile", "id": "fc31a861"}], thread="t1")
+        conv = self.row("intercom:215476692845876", "intercom", "2026-11-04T01:39:31Z",
+                        [{"entity": "profile", "id": "fc31a861-0297-410d-914b-60e8a02ced76"},
+                         {"entity": "profile", "id": "0b7d2e14-1111-4222-8333-944455556666"}],
+                        conv="215476692845876")
+        self.unify(thread, conv)
+        pairs = self.s.duplicate_events()
+        self.assertEqual(len(pairs), 1, "a shared page is one event, even when one side names more pages")
+        keep, drop = pairs[0]
+        self.assertEqual(keep["id"], conv, "the row carrying the full uuid is the one we keep")
+        self.assertEqual(drop["id"], thread)
+
+    def test_the_repair_scanner_uses_the_same_window_as_intake(self):
+        """QA on #1735: the scanner allowed 300 s while `_match` allowed 120, so a notice at 01:00 and the Intercom
+        conversation about it at 01:04 were kept as TWO requests by intake and then folded into one by
+        `dedupe --apply` - the fold took away the second request's own reply target and watchdog. A repair may only
+        undo what intake would have merged, so the 121-300 s interval must stay two requests."""
+        self.assertEqual(store.Store.CROSS_CHANNEL_SECONDS, store.SAME_EVENT_SECONDS,
+                         "the repair scanner and intake must share one bound")
+        thread = self.row("gmail:notices@muso.ai:t1", "notices", "2026-11-04T01:00:00Z",
+                          [{"entity": "profile", "id": "fc31a861"}], thread="t1")
+        conv = self.row("intercom:215476692845876", "intercom", "2026-11-04T01:04:00Z",
+                        [{"entity": "profile", "id": "fc31a861-0297-410d-914b-60e8a02ced76"}],
+                        conv="215476692845876")
+        self.unify(thread, conv)
+        self.assertEqual(self.s.duplicate_events(), [],
+                         "four minutes apart is two requests; intake kept them apart and the repair must not fold them")
+
+    def test_merging_folds_the_dropped_rows_pages_into_the_one_we_keep(self):
+        """Belt and braces for the historic pairs: whichever row is kept, the surviving row must end up with the full
+        uuid, because a prefix cannot be looked up in the catalog and would strand the request at UNKNOWN."""
+        prefix = self.row("gmail:notices@muso.ai:t1", "notices", "2026-11-04T01:39:22Z",
+                          [{"entity": "profile", "id": "fc31a861"}], thread="t1")
+        full = self.row("intercom:2", "intercom", "2026-11-04T02:39:22Z",
+                        [{"entity": "profile", "id": "fc31a861-0297-410d-914b-60e8a02ced76"}], conv="2")
+        self.s.merge_duplicate(self.s.get(prefix), self.s.get(full))
+        self.assertEqual([p["id"] for p in self.s.get(prefix)["pages"]],
+                         ["fc31a861-0297-410d-914b-60e8a02ced76"])
+
+    def test_the_earlier_receipt_and_its_deadlines_survive_the_fold(self):
+        """QA finding on #1735: the kept row is chosen by KEY SHAPE (a full uuid beats an 8-char prefix), not by time,
+        so a duplicate that arrived first would hand the customer a LATER statutory deadline. `due_at` and
+        `hide_due_at` are derived from `received_at`, so they move with it - taking the earlier receipt alone would
+        leave the row claiming a deadline its own receipt contradicts."""
+        thread = self.row("gmail:notices@muso.ai:t1", "notices", "2026-11-04T01:39:22Z",
+                          [{"entity": "profile", "id": "fc31a861"}], thread="t1")
+        conv = self.row("intercom:215476692845876", "intercom", "2026-11-04T01:39:31Z",
+                        [{"entity": "profile", "id": "fc31a861-0297-410d-914b-60e8a02ced76"}],
+                        conv="215476692845876")
+        self.unify(thread, conv)
+        keep, drop = self.s.duplicate_events()[0]
+        self.assertEqual(keep["id"], conv, "precondition: the full-uuid row is the one kept")
+        self.s.merge_duplicate(keep, drop)
+        merged = self.s.get(conv)
+        self.assertEqual(merged["received_at"], "2026-11-04T01:39:22Z",
+                         "the surviving row must carry the EARLIEST receipt, not the kept row's later one")
+        self.assertEqual(merged["due_at"], self.s.get(thread)["due_at"],
+                         "the statutory deadline must follow the receipt it is derived from")
+        self.assertEqual(merged["hide_due_at"], self.s.get(thread)["hide_due_at"])
+
+    def test_a_sent_letter_moves_with_the_fold_so_it_cannot_be_sent_twice(self):
+        """QA finding on #1735, the serious one: closing the duplicate without moving its `erasure_sends` row left the
+        kept row with no record of a letter that had already gone out, so `unsent_letters()` returned it and another
+        approved batch could send a SECOND statutory letter for one request."""
+        thread = self.row("gmail:notices@muso.ai:t1", "notices", "2026-11-04T01:39:22Z",
+                          [{"entity": "profile", "id": "fc31a861"}], thread="t1")
+        conv = self.row("intercom:215476692845876", "intercom", "2026-11-04T01:39:31Z",
+                        [{"entity": "profile", "id": "fc31a861-0297-410d-914b-60e8a02ced76"}],
+                        conv="215476692845876")
+        self.unify(thread, conv)
+        self.s.begin_send(thread, "ask", "mail", "t1", "sha", "U7RP6HKUZ", state="sent")
+        keep, drop = self.s.duplicate_events()[0]
+        self.s.merge_duplicate(keep, drop)
+        self.assertIsNotNone(self.s.send_record(conv, "ask"),
+                             "the surviving row must know the letter already went out")
+        self.assertNotIn(conv, self.s.unsent_letters("ask"),
+                         "a row whose letter is already out must never be offered to another batch")
+
+    def test_two_letters_for_one_slot_refuse_the_fold_instead_of_guessing(self):
+        """When BOTH rows carry a record for the same slot and either may have reached the customer, folding them is a
+        person's call: the surviving row must not end up able to send a second statutory letter, and code must not
+        silently pick which letter "counts"."""
+        thread = self.row("gmail:notices@muso.ai:t1", "notices", "2026-11-04T01:39:22Z",
+                          [{"entity": "profile", "id": "fc31a861"}], thread="t1")
+        conv = self.row("intercom:215476692845876", "intercom", "2026-11-04T01:39:31Z",
+                        [{"entity": "profile", "id": "fc31a861-0297-410d-914b-60e8a02ced76"}],
+                        conv="215476692845876")
+        self.unify(thread, conv)
+        self.s.begin_send(thread, "ask", "mail", "t1", "sha", "U7RP6HKUZ", state="sent")
+        self.s.begin_send(conv, "ask", "intercom", "215476692845876", "sha", "U7RP6HKUZ", state="sent")
+        keep, drop = self.s.duplicate_events()[0]
+        with self.assertRaises(store.MergeRefused) as e:
+            self.s.merge_duplicate(keep, drop)
+        self.assertIn("second statutory letter", str(e.exception))
+        self.assertEqual(self.s.get(drop["id"])["status"], "open",
+                         "a refused fold must leave BOTH rows untouched, not half-merged")
+
+    def test_the_sent_stamps_move_with_the_ledger_they_belong_to(self):
+        """QA finding on #1735: `send.deliver` writes `confirmed_at` / `ask_sent_at` / `interim_confirm_at` NEXT TO
+        the ledger row, so a fold that moved the ledger and not the stamp left the surviving row with a `sent`
+        confirmation record and `confirmed_at == ''` - its watchdog stayed armed and a later message from that
+        customer was folded into an already-answered request instead of opening a new one."""
+        thread = self.row("gmail:notices@muso.ai:t1", "notices", "2026-11-04T01:39:22Z",
+                          [{"entity": "profile", "id": "fc31a861"}], thread="t1")
+        conv = self.row("intercom:215476692845876", "intercom", "2026-11-04T01:39:31Z",
+                        [{"entity": "profile", "id": "fc31a861-0297-410d-914b-60e8a02ced76"}],
+                        conv="215476692845876")
+        self.unify(thread, conv)
+        self.s.begin_send(thread, "ask", "mail", "t1", "sha", "U7RP6HKUZ", state="sent")
+        self.s.update(thread, "ask", ask_sent_at="2026-11-04T02:00:00Z", ask_ref="msg-ask")
+        self.s.begin_send(thread, "confirm", "mail", "t1", "sha", "U7RP6HKUZ", state="sent")
+        self.s.update(thread, "confirmed", confirmed_at="2026-11-04T03:00:00Z", confirm_ref="msg-confirm")
+        self.s.begin_send(thread, "confirm-interim", "mail", "t1", "sha", "U7RP6HKUZ", state="sent")
+        self.s.update(thread, "confirmed", interim_confirm_at="2026-11-04T02:30:00Z",
+                      interim_confirm_ref="msg-interim")
+        keep, drop = self.s.duplicate_events()[0]
+        self.assertEqual(keep["id"], conv, "precondition: the full-uuid row is the one kept")
+        self.s.merge_duplicate(keep, drop)
+        merged = self.s.get(conv)
+        self.assertEqual(merged["confirmed_at"], "2026-11-04T03:00:00Z",
+                         "a sent confirmation must take the row out of the watchdog, not just move its ledger row")
+        self.assertEqual(merged["confirm_ref"], "msg-confirm")
+        self.assertEqual(merged["ask_sent_at"], "2026-11-04T02:00:00Z", "the chase clock must survive the fold")
+        self.assertEqual(merged["ask_ref"], "msg-ask")
+        self.assertEqual(merged["interim_confirm_at"], "2026-11-04T02:30:00Z")
+        self.assertEqual(merged["interim_confirm_ref"], "msg-interim")
+
+    def test_the_earliest_stamp_wins_when_both_rows_carry_one(self):
+        """Same doctrine as the earliest receipt: the customer was written to on the FIRST date, and a later stamp
+        must not push the confirmation date (or the chase clock) forward."""
+        thread = self.row("gmail:notices@muso.ai:t1", "notices", "2026-11-04T01:39:22Z",
+                          [{"entity": "profile", "id": "fc31a861"}], thread="t1")
+        conv = self.row("intercom:215476692845876", "intercom", "2026-11-04T01:39:31Z",
+                        [{"entity": "profile", "id": "fc31a861-0297-410d-914b-60e8a02ced76"}],
+                        conv="215476692845876")
+        self.unify(thread, conv)
+        self.s.update(thread, "test", ask_sent_at="2026-11-04T02:00:00Z", ask_ref="early")
+        self.s.update(conv, "test", ask_sent_at="2026-11-04T05:00:00Z", ask_ref="late")
+        keep, drop = self.s.duplicate_events()[0]
+        self.s.merge_duplicate(keep, drop)
+        merged = self.s.get(conv)
+        self.assertEqual((merged["ask_sent_at"], merged["ask_ref"]), ("2026-11-04T02:00:00Z", "early"))
+
+    def test_a_refused_fold_moves_no_ledger_row_at_all(self):
+        """QA finding on #1735: the loop re-pointed `ask` and THEN raised on `confirm`, so a refused fold left the
+        dropped row open with its ask slot gone - the next store update commits that pending move and
+        `unsent_letters('ask')` offers the dropped row for a second letter, while the CLI reports it untouched."""
+        thread = self.row("gmail:notices@muso.ai:t1", "notices", "2026-11-04T01:39:22Z",
+                          [{"entity": "profile", "id": "fc31a861"}], thread="t1")
+        conv = self.row("intercom:215476692845876", "intercom", "2026-11-04T01:39:31Z",
+                        [{"entity": "profile", "id": "fc31a861-0297-410d-914b-60e8a02ced76"}],
+                        conv="215476692845876")
+        self.unify(thread, conv)
+        self.s.begin_send(thread, "ask", "mail", "t1", "sha", "U7RP6HKUZ", state="sent")
+        self.s.begin_send(thread, "confirm", "mail", "t1", "sha", "U7RP6HKUZ", state="sent")
+        self.s.begin_send(conv, "confirm", "intercom", "215476692845876", "sha", "U7RP6HKUZ", state="sent")
+        keep, drop = self.s.duplicate_events()[0]
+        with self.assertRaises(store.MergeRefused):
+            self.s.merge_duplicate(keep, drop)
+        self.assertIsNotNone(self.s.send_record(drop["id"], "ask"),
+                             "a refused fold must not strand the dropped row's ask slot on the kept row")
+        self.assertIsNone(self.s.send_record(keep["id"], "ask"),
+                          "nothing may move before the whole fold is known to be safe")
+        self.assertNotIn(drop["id"], self.s.unsent_letters("ask"),
+                         "the dropped row still has its letter; it must not be offered another")
+
+    def test_a_fold_that_fails_halfway_leaves_no_half_moved_ledger(self):
+        """QA finding on #1735: `_merge_sends` committed on its own and `update` committed again, so a failure
+        between them left the dropped row OPEN with its `ask:sent` record already moved onto the kept row - and
+        `unsent_letters('ask')` then offered the open row for a SECOND statutory letter. The fold is one savepoint
+        now, so a failure anywhere in it moves nothing."""
+        thread = self.row("gmail:notices@muso.ai:t1", "notices", "2026-11-04T01:39:22Z",
+                          [{"entity": "profile", "id": "fc31a861"}], thread="t1")
+        conv = self.row("intercom:215476692845876", "intercom", "2026-11-04T01:39:31Z",
+                        [{"entity": "profile", "id": "fc31a861-0297-410d-914b-60e8a02ced76"}],
+                        conv="215476692845876")
+        self.unify(thread, conv)
+        self.s.begin_send(thread, "ask", "mail", "t1", "sha", "U7RP6HKUZ", state="sent")
+        keep, drop = self.s.duplicate_events()[0]
+        real_update = self.s.update
+
+        def explode(rid, kind, commit=True, **cols):
+            if rid == drop["id"] and cols.get("status") == "duplicate":
+                raise sqlite3.OperationalError("disk I/O error")
+            return real_update(rid, kind, commit=commit, **cols)
+
+        with mock.patch.object(self.s, "update", explode):
+            with self.assertRaises(sqlite3.OperationalError):
+                self.s.merge_duplicate(keep, drop)
+        self.assertEqual(self.s.get(drop["id"])["status"], "open", "a failed fold must not close the dropped row")
+        self.assertIsNotNone(self.s.send_record(drop["id"], "ask"),
+                             "the dropped row must keep the letter it already sent")
+        self.assertIsNone(self.s.send_record(keep["id"], "ask"),
+                          "nothing may move onto the kept row when the fold did not complete")
+        self.assertNotIn(drop["id"], self.s.unsent_letters("ask"),
+                         "the row still has its letter; it must not be offered another")
+
+    def test_applying_every_reported_pair_never_points_a_key_at_a_closed_row(self):
+        """QA finding on #1735: `taken` held `id()` of the dicts from the first `self.all()`, but
+        `_cross_channel_duplicates` calls `self.all()` again and gets FRESH dicts, so the exclusion never matched and
+        one row could appear in two pairs. Applying both left a key pointing at a row the first fold had just
+        closed - a re-ingest of that message would land on a dead request."""
+        a = self.row("intercom:215476692845876:again:2026-11-04T01:39:22Z", "intercom", "2026-11-04T01:39:22Z",
+                     [{"entity": "profile", "id": "fc31a861"}], conv="215476692845876")
+        b = self.row("register:19:again:2026-11-04T01:39:22Z", "intercom", "2026-11-04T01:39:22Z",
+                     [{"entity": "profile", "id": "fc31a861"}], conv="215476692845876")
+        c = self.row("gmail:notices@muso.ai:t1", "notices", "2026-11-04T01:39:31Z",
+                     [{"entity": "profile", "id": "fc31a861-0297-410d-914b-60e8a02ced76"}], thread="t1")
+        self.unify(a, b, c)
+        pairs = self.s.duplicate_events()
+        self.assertTrue(pairs, "precondition: the fixture must produce at least one pair")
+        for keep, drop in pairs:
+            self.assertEqual(self.s.get(keep["id"])["status"], "open",
+                             f"pair ({keep['id']}, {drop['id']}) keeps a row an earlier fold already closed")
+            self.s.merge_duplicate(keep, drop)
+        for rid in (a, b, c):
+            for key in self.s.get(rid)["keys"]:
+                target = self.s.db.execute("SELECT request_id FROM erasure_keys WHERE key=?", (key,)).fetchone()
+                self.assertEqual(self.s.get(target[0])["status"], "open",
+                                 f"key {key} points at a closed request after the folds")
+
+    def test_a_second_message_hours_later_is_not_a_duplicate(self):
+        thread = self.row("gmail:notices@muso.ai:t1", "notices", "2026-11-04T01:39:22Z",
+                          [{"entity": "profile", "id": "fc31a861"}], thread="t1")
+        conv = self.row("intercom:9", "intercom", "2026-11-04T06:39:22Z",
+                        [{"entity": "profile", "id": "fc31a861-0297-410d-914b-60e8a02ced76"}], conv="9")
+        self.unify(thread, conv)
+        self.assertEqual(self.s.duplicate_events(), [], "a later request from the same person is a NEW request")
+
+    def test_two_rows_on_the_same_channel_are_not_treated_as_one(self):
+        a = self.row("intercom:1", "intercom", "2026-11-04T01:39:22Z",
+                     [{"entity": "profile", "id": "fc31a861-0297-410d-914b-60e8a02ced76"}], conv="1")
+        b = self.row("intercom:2", "intercom", "2026-11-04T01:39:30Z",
+                     [{"entity": "profile", "id": "fc31a861-0297-410d-914b-60e8a02ced76"}], conv="2")
+        self.unify(a, b)
+        self.assertEqual(self.s.duplicate_events(), [])
+
+    def test_a_different_page_is_never_a_duplicate(self):
+        a = self.row("intercom:1", "intercom", "2026-11-04T01:39:22Z",
+                     [{"entity": "profile", "id": "fc31a861-0297-410d-914b-60e8a02ced76"}], conv="1")
+        b = self.row("gmail:notices@muso.ai:t1", "notices", "2026-11-04T01:39:25Z",
+                     [{"entity": "profile", "id": "aaaaaaaa"}], thread="t1")
+        self.unify(a, b)
+        self.assertEqual(self.s.duplicate_events(), [])
 
 
 class Migration(unittest.TestCase):
