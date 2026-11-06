@@ -138,24 +138,71 @@ if tuple_assign:
     vals.update(zip(names, [int(n) for n in tuple_assign.group(2).split(",")]))
 for m in re.finditer(r"^(EXIT_[A-Z_]+)\s*=\s*(\d+)$", src, re.M):
     vals[m.group(1)] = int(m.group(2))
-normal = {int(vals["EXIT_OK"]), int(vals["EXIT_NO_REGISTRY"]),
-          int(vals["EXIT_KILLED"]), int(vals["EXIT_TRIPPED"])}
+# 0 is systemd's DEFAULT success code, so a unit never has to list it and its absence from
+# SuccessExitStatus means nothing. Assert that rather than assuming it, then check only the
+# non-zero normal codes, which DO have to be listed or they page.
+assert int(vals["EXIT_OK"]) == 0, "EXIT_OK is no longer 0; the default-success reasoning below is void"
+normal = {int(vals["EXIT_NO_REGISTRY"]), int(vals["EXIT_KILLED"]), int(vals["EXIT_TRIPPED"])}
 must_fail = {int(vals["EXIT_ERROR"]), int(vals["EXIT_BAD_STATE"])}
+
+# ONLY the sentinel units. The installer writes ~40 units and each one's exit codes belong to
+# its own program: clickup-drain-data-deletion legitimately whitelists 4 (its kill file is
+# present), which is demote.py's EXIT_BAD_STATE. Unioning every SuccessExitStatus in the file
+# made that unrelated collision read as "a sentinel defect goes silent" and failed this test on
+# main from the moment #1704 landed. Scoping it to the units this file is about is the fix; the
+# assertion itself is unchanged.
+SENTINEL_UNITS = ("sentinel-demote.service", "sentinel-demote-fast.service", "sentinel-propose.service")
 text = (repo / "scripts/install-aux-units.sh").read_text()
-ok = set()
-for line in re.findall(r"^SuccessExitStatus=(.+)$", text, re.M):
-    ok.update(int(tok) for tok in line.split())
+bodies, seen, lines, i = {}, {}, text.splitlines(), 0
+while i < len(lines):
+    m = re.match(r"^cat > /etc/systemd/system/(\S+) << (\S+)$", lines[i])
+    if m and m.group(1) in SENTINEL_UNITS:
+        unit, tag, start = m.group(1), m.group(2), i + 1
+        seen.setdefault(unit, []).append(start)
+        body, i = [], i + 1
+        while i < len(lines) and lines[i] != tag:
+            body.append(lines[i])
+            i += 1
+        # The LAST heredoc for a unit is the one that ends up on disk, so a test that unions
+        # every definition can pass while the installed unit is wrong: a second declaration
+        # omitting the kill-switch code 3 still inherits 3 from the first. Reject the duplicate
+        # outright rather than silently picking a winner - writing the same unit twice is
+        # itself a defect, and the author is the only one who can say which copy is real.
+        bodies[unit] = body
+    i += 1
+dupes = {u: at for u, at in seen.items() if len(at) > 1}
+if dupes:
+    for unit, at in sorted(dupes.items()):
+        print(f"{unit} is declared {len(at)} times in the installer (lines {', '.join(map(str, at))}); "
+              f"only the last one is installed, so this test cannot say which exit codes are effective",
+              file=sys.stderr)
+    sys.exit(1)
+# A renamed unit would otherwise make this test vacuous: it would find no SuccessExitStatus at
+# all, and `missing` would then fail loudly - but say so directly rather than by accident.
+absent = sorted(set(SENTINEL_UNITS) - set(seen))
+if absent:
+    print(f"sentinel unit(s) {absent} not found in the installer; this test cannot check them", file=sys.stderr)
+    sys.exit(1)
+# PER UNIT, not unioned. Unioning let one unit's SuccessExitStatus cover another's omission: with
+# the union, dropping the kill-switch code 3 from sentinel-demote.service still passed because
+# sentinel-demote-fast.service listed it. Each unit is its own pager, so each is checked alone.
 bad = []
-missing = sorted(normal - ok)
-if missing:
-    bad.append(f"normal exit code(s) {missing} are in no SuccessExitStatus -> a normal outcome pages")
-leaked = sorted(must_fail & ok)
-if leaked:
-    bad.append(f"failure exit code(s) {leaked} ARE whitelisted -> a real defect goes silent")
+for unit in SENTINEL_UNITS:
+    ok = set()
+    for line in bodies[unit]:
+        m = re.match(r"^SuccessExitStatus=(.+)$", line)
+        if m:
+            ok.update(int(tok) for tok in m.group(1).split())
+    missing = sorted(normal - ok)
+    if missing:
+        bad.append(f"{unit}: normal exit code(s) {missing} are in no SuccessExitStatus -> a normal outcome pages")
+    leaked = sorted(must_fail & ok)
+    if leaked:
+        bad.append(f"{unit}: failure exit code(s) {leaked} ARE whitelisted -> a real defect goes silent")
 if bad:
     print("\n".join(bad), file=sys.stderr)
     sys.exit(1)
-print("normal", sorted(normal), "accepted;", sorted(must_fail), "rejected")
+print("normal", sorted(normal), "accepted;", sorted(must_fail), "rejected; per unit:", ", ".join(SENTINEL_UNITS))
 PYEOF
   [ "$status" -eq 0 ] || { echo "$output" >&2; false; }
 }

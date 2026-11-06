@@ -392,9 +392,12 @@ anything, never post the final "ready" message (that is the driver's job).
    ```bash
    gh pr view "$pr" --repo Muso-AI/hydra --json state,mergeable,statusCheckRollup,reviews
    gh pr checks "$pr" --repo Muso-AI/hydra
-   gh api graphql -f query='query($o:String!,$r:String!,$p:Int!){repository(owner:$o,name:$r){pullRequest(number:$p){reviewThreads(first:100){nodes{id isResolved comments(first:1){nodes{databaseId path line body}}}}}}}' \
+   # reviewThreads is capped at first:100, so pageInfo is read too: a truncated
+   # list must say so instead of reading as "no open findings" (same fail-closed
+   # rule the driver's own query applies).
+   gh api graphql -f query='query($o:String!,$r:String!,$p:Int!){repository(owner:$o,name:$r){pullRequest(number:$p){reviewThreads(first:100){pageInfo{hasNextPage} nodes{id isResolved comments(first:1){nodes{databaseId path line body}}}}}}}' \
      -f o=Muso-AI -f r=hydra -F p="$pr" \
-     --jq '.data.repository.pullRequest.reviewThreads.nodes[]|select(.isResolved==false)|"thread=\(.id) cmt=\(.comments.nodes[0].databaseId) \(.comments.nodes[0].path):\(.comments.nodes[0].line)\n\(.comments.nodes[0].body)"'
+     --jq '.data.repository.pullRequest.reviewThreads as $t | ($t.nodes[]|select(.isResolved==false)|"thread=\(.id) cmt=\(.comments.nodes[0].databaseId) \(.comments.nodes[0].path):\(.comments.nodes[0].line)\n\(.comments.nodes[0].body)"), (if $t.pageInfo.hasNextPage then "WARNING: more than 100 review threads - TRUNCATED, do not read this as no open findings" else empty end)'
    ```
 2. **Check out the PR branch in the standing clone** before touching code:
    ```bash
