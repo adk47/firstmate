@@ -1,0 +1,16 @@
+{
+  "_why": "Hand-read corrections to the keyword triage (docs/intercom-backlog/report-1026.md sections 3 and 6). add = money/legal/privacy cases the keywords missed -> action captain-<topic>; remove = keyword misfires off the captain list that are NOT money or legal -> action hold-read (a person reads it first). Loaded ONLY through overrides.py, which lists.py (captain/hold lists) and send.py (eligible) both use; a missing or malformed file stops both.",
+  "remove": {
+    "215475055007096": "credit proof reply (stage-2 proof path)",
+    "215476530302829": "SoundExchange auto-reply",
+    "215476520259268": "sign-in email change on a Pro account",
+    "215476495717959": "profile rename",
+    "215476297067085": "dashboard vs export numbers",
+    "215476540440008": "manager's merge request (attorney-in-fact asks for access + merge): merge rules, not counsel"
+  },
+  "add": {
+    "215476553442968": "privacy",
+    "215476336419274": "billing",
+    "215472661480176": "billing"
+  }
+}

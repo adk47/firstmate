@@ -1930,6 +1930,34 @@
         "channel": "slack",
         "to": "U0AL36NADEY"
       }
+    },
+    {
+      "id": "8b1e2f47-3c9d-4a6e-b5f0-7d2c1a9e4b63",
+      "agentId": "operations",
+      "name": "intercom-backlog-count-2h",
+      "description": "READ-ONLY, PII-free: every 2 h counts open Intercom conversations where the customer spoke last more than 48 h ago (credit/claim/merge vs every other topic bucket, by the customer's last message) for the comms line (Fable order [key=unattended], data/verify-program-lead-fable-l1/unattended-1030.md section 3). Writes /var/lib/intercom-backlog-i1/backlog-count.json (+ history jsonl); no Intercom/core/ledger writes, no text stored, no messages. Owner intercom-backlog-i1.",
+      "enabled": true,
+      "createdAtMs": 1793386800000,
+      "updatedAtMs": 1793386800000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "50 */2 * * *",
+        "tz": "UTC"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/intercom-backlog/count.py"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 1500
+      },
+      "delivery": {
+        "mode": "none"
+      }
     }
   ]
 }
