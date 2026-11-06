@@ -64,6 +64,16 @@ def anchored(r):
 def uuid_of(n):
     return f"00000000-0000-4000-8000-{n:012d}"
 
+# Fable R22 guards 1-3: the evidence a dv-4 run records - forensics PLAUSIBLE with an extracted issuer
+# and signatory, and two independent cross-checks positive (xc_dsp on the track, xc_isrc by ISRC).
+R22_DETAIL = json.dumps({
+    "h3": "PLAUSIBLE",
+    "checks": {"xc_dsp": "positive", "xc_isrc": "positive", "xc_label": "unknown",
+               "xc_domain": "skipped", "xc_signatory": "unknown"},
+    "issuer": {"name": "Label Ltd", "type": "label", "confidence": 0.9},
+    "signatory": {"name": "A Person", "title": "Head of A&R", "confidence": 0.9},
+})
+
 
 class FakeJudge:
     def __init__(self, result=None, raises=None):
@@ -2096,6 +2106,16 @@ class DocApprovalDispatcher(Base):
         self.addCleanup(setattr, decide, "DOC_STORE", self._doc_store)
         self.addCleanup(setattr, decide, "DOC_PROOF_STORE", self._doc_proof)
         self.addCleanup(setattr, decide, "DOC_APPROVE_KILL", self._doc_kill)
+        # R22a D3's reuse gate reads the proof store; point it at this test's, never the host's
+        from credit_review import doc_approve as _da
+        self._proof_default = _da.DEFAULT_PROOF_STORE
+        _da.DEFAULT_PROOF_STORE = str(decide.DOC_PROOF_STORE)
+        self.addCleanup(setattr, _da, "DEFAULT_PROOF_STORE", self._proof_default)
+        # QA #1800 r11 finding 4: the fixture isolated the proof store but not the freeze marker, so a
+        # sweep in one case left the class dormant for the next (and could touch the host's class).
+        self._freeze_default = _da.FREEZE_PATH
+        _da.FREEZE_PATH = Path(self.tmp) / "doc-approve.frozen"
+        self.addCleanup(setattr, _da, "FREEZE_PATH", self._freeze_default)
         # the account gate shells out in production; here it is an allow (its own suite covers HOLD/UNKNOWN)
         self._patches = [unittest.mock.patch.object(
             account_gate, "check", lambda uid, runner=None: account_gate.GateResult(account_gate.ALLOW, ()))]
@@ -2117,6 +2137,15 @@ class DocApprovalDispatcher(Base):
         p.close()
         self.doc_rid = uuid_of(400)
         self.file_doc(self.doc_rid, user_id=900)
+        # R22 guard 4: every fixture account is a CLEAN claimant (60 days of ledger history), so these
+        # tests exercise the dispatcher, not the claimant gate. 952 is the arm-off release test's
+        # account (qa-review #1782 r12); without a history row the R22 claimant gate refuses it before
+        # the doc row is ever committed, and that test would assert a release that never had a slot.
+        for uid in (900, 901, 952):
+            self.db.execute("INSERT INTO decisions (run_id, decided_at, request_id, profile_id, user_id,"
+                            " big_track, decision, reason, mode) VALUES ('r0','2026-09-01T00:00:00Z',?,?,?,0,"
+                            " 'support','fixture','shadow')", (f"fixture-{uid}", T.PID_GOOD, uid))
+        self.db.commit()
         # a judge that answers the same way for every claim: NEEDS-HUMAN with no citation is NOT_FOUND
         self.NOT_FOUND = _Answering(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, provider="codex"))
         contradicted = JudgeResult(ok=True, verdict="CONTRADICTED", confidence=0.9, provider="codex")
@@ -2132,8 +2161,8 @@ class DocApprovalDispatcher(Base):
         for role in ("Lyricist", "Composer"):
             d.execute("INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, user_id, h3_verdict, outcome,"
                       " reason, account_hold, detail_json, version, intake_id) VALUES ('r1',?,'sha',?,?,?,"
-                      " 'PLAUSIBLE',?,'because',0,'{}',?,?)",
-                      (at, request_id, role, user_id, outcome, version, intake))
+                      " 'PLAUSIBLE',?,'because',0,?,'dv-4',?)",
+                      (at, request_id, role, user_id, outcome, R22_DETAIL, intake))
         d.commit()
         d.close()
         p = sqlite3.connect(decide.DOC_PROOF_STORE)
@@ -2189,28 +2218,29 @@ class DocApprovalDispatcher(Base):
 
     # ── round 8, finding 1: a bound request OUTSIDE this batch still has a known owner ──────────
     def test_the_rollover_works_when_a_document_binds_more_requests_than_the_per_user_cap(self):
-        """25 today, 1 tomorrow - and tomorrow's batch does NOT contain the 25 already approved.
+        """5 today, 1 tomorrow (R22 guard 7) - and tomorrow's batch does NOT contain the 5 already
+        approved.
 
         `req_users` was built from this run's rows alone, so the survivor's document looked as if it
         bound requests with unknown owners and `gate_one_request` refused it for ever. The doc store
         judged all 26 requests and recorded the account, so it is the authoritative filler; a binding
         nobody can attribute is still unknown and still fails closed.
         """
-        rids = [uuid_of(600 + i) for i in range(26)]
+        rids = [uuid_of(600 + i) for i in range(6)]
         # a real filing writes one dv_outcomes row per BOUND request (that is what makes a document
         # multi-binding), so the store can attribute every binding on the day of the filing
         self.file_multi(rids, user_id=900, intake_id="145833:many", sha="s600")
-        res1, w1 = self.go([req(r, uid=900, track="small") for r in rids[:25]], {}, judge=self.NOT_FOUND)
-        self.assertEqual(len(self.approve_writes(w1)), 25, "the cap spent the whole day on one person")
-        self.assertEqual(res1.doc_approved, 25)
-        # tomorrow: only the SURVIVOR is a candidate - the other 25 bindings are not in this batch
+        res1, w1 = self.go([req(r, uid=900, track="small") for r in rids[:5]], {}, judge=self.NOT_FOUND)
+        self.assertEqual(len(self.approve_writes(w1)), 5, "the cap spent the whole day on one person")
+        self.assertEqual(res1.doc_approved, 5)
+        # tomorrow: only the SURVIVOR is a candidate - the other 5 bindings are not in this batch
         admin = T.FakeAdmin([], {}, PROFILES, TRACKS)
         admin.unreadable = {"art-unreadable", "flaky"}
         w2 = Writer(self.db)
         res2 = decide.run(admin, self.db, self.NOT_FOUND, mode="apply", policy=POLICY, writer=w2,
                           readback=lambda status, ids: set(), now=T.NOW + timedelta(days=1),
-                          rows=[req(rids[25], uid=900, track="small")])
-        self.assertIn(rids[25].lower(), [str(i).lower() for i in self.approve_writes(w2)],
+                          rows=[req(rids[5], uid=900, track="small")])
+        self.assertIn(rids[5].lower(), [str(i).lower() for i in self.approve_writes(w2)],
                       "the rolled-over request is approved, not refused as an unknown owner")
         self.assertEqual(res2.doc_refused_by_core, 0)
 
@@ -2221,7 +2251,7 @@ class DocApprovalDispatcher(Base):
                 d.execute("INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, user_id,"
                           " h3_verdict, outcome, reason, account_hold, detail_json, version, intake_id)"
                           " VALUES ('r1','2026-10-31T12:26:32Z','sha',?,?,?,'PLAUSIBLE','verified','because',"
-                          " 0,'{}','dv-4',?)", (rid, role, user_id, intake_id))
+                          " 0,?,'dv-4',?)", (rid, role, user_id, R22_DETAIL, intake_id))
         d.commit()
         d.close()
         p = sqlite3.connect(decide.DOC_PROOF_STORE)
@@ -2247,22 +2277,39 @@ class DocApprovalDispatcher(Base):
 
     # ── round 8, finding 2: the document lives in OUR ledger, so core's guard still decides ──────
     def test_a_document_never_plans_an_approval_CORES_guard_would_refuse(self):
-        """A popularity of 0 passes `gate_tier` (known and small, T0) but core's agent guard refuses a
-        zero-popularity approval as `popularity_unattributable` - the document is recorded in our
+        """A small track whose metadata core marks as CLIENT-SOURCED passes every doc gate but core's
+        agent guard refuses the approval (`client_sourced_metadata`) - the document is recorded in our
         ledger, never in core, and the PUT carries no proof. Planning it anyway only demoted it later,
         which made both the class's claim and the run report overstate coverage. It is now refused by
-        name at plan time and the row keeps the guard that already explains it."""
+        name at plan time and the row keeps the guard that already explains it.
+
+        (A popularity of 0 used to be this test's case; Fable R22a D1 now refuses it at `gate_tier`
+        before core is ever asked - see `test_a_zero_popularity_document_is_refused_at_the_TIER_gate`.)
+        """
         rid = self.doc_rid
         self.file_doc(rid, user_id=900)
-        res, w = self.go([req(rid, uid=900, track="zero")], {}, judge=self.NOT_FOUND)
+        row = req(rid, uid=900, track="small")
+        row["metadata"]["source"] = "client"   # core's guard: client_sourced_metadata
+        res, w = self.go([row], {}, judge=self.NOT_FOUND)
         self.assertEqual(self.approve_writes(w), [], "core would refuse it, so nothing is written")
         self.assertEqual(res.doc_refused_by_core, 1)
         row = self.db.execute("SELECT state FROM doc_approvals WHERE request_id = ?", (rid,)).fetchone()
         self.assertIsNone(row, "no doc_approvals row is recorded for an approval core refuses")
         d = self.decisions()[rid]
         self.assertEqual(d["decision"], "hold", "the class never claims what core will not accept")
-        self.assertIn("dv-4 verified document", d["reason"])
-        self.assertIn("popularity_unattributable", d["reason"])
+
+    def test_a_zero_popularity_document_is_refused_at_the_TIER_gate(self):
+        """Fable R22a D1: "Refuse popularity 0 in gate_tier. (d2's popularity-0 question is answered
+        NO.)" A zero is an UNATTRIBUTABLE track, not a small one, so the class never even reaches core's
+        guard - and the row keeps the decision it had."""
+        rid = self.doc_rid
+        self.file_doc(rid, user_id=900)
+        res, w = self.go([req(rid, uid=900, track="zero")], {}, judge=self.NOT_FOUND)
+        self.assertEqual(self.approve_writes(w), [], "a zero-popularity track is never approved")
+        self.assertEqual(res.doc_refused_by_core, 0, "core is never asked: the tier gate refuses first")
+        self.assertIsNone(self.db.execute("SELECT state FROM doc_approvals WHERE request_id = ?",
+                                          (rid,)).fetchone())
+        self.assertEqual(self.decisions()[rid]["decision"], "support")
 
     def test_a_high_risk_row_with_a_verified_document_is_HELD_not_asked_for_another_document(self):
         """The same rule for core's other refusal: a `proof_required` row (risk 100) that already has a
@@ -2313,10 +2360,15 @@ class DocApprovalDispatcher(Base):
             self.file_doc(rid, user_id=uid, intake_id=f"i-{rid}", sha=sha)
         decide.doc_approve.ensure_schema(self.db)
         for i in range(49):        # exactly ONE fleet slot is left
+            # Each filler needs a STANDING verdict: the sweep reads every provisional AND confirmed row,
+            # and a row whose document has no verdict is correctly PULLED - which freezes the class and
+            # is a different test's subject. A filler that cannot be swept is a filler that is real.
+            self.file_doc(f"filler-{i}", user_id=5000 + i, intake_id=f"i-filler-{i}", sha=f"f{i}")
             self.db.execute("INSERT INTO doc_approvals (request_id, user_id, intake_id, proof_id, ref,"
                             " popularity, tier, approved_at, expires_at, state)"
-                            " VALUES (?,?,'i','s','r',3,'T0','2026-11-03T07:00:00Z',"
-                            "'2026-11-10T07:00:00Z','provisional')", (f"filler-{i}", 5000 + i))
+                            " VALUES (?,?,?,'s','r',3,'T0','2026-11-03T07:00:00Z',"
+                            "'2026-11-10T07:00:00Z','confirmed')",
+                            (f"filler-{i}", 5000 + i, f"i-filler-{i}"))
         self.db.commit()
         rows = [req(a_old, uid=900, track="small", created="2026-10-01T00:00:00Z"),
                 req(b, uid=901, track="small", created="2026-11-01T00:00:00Z"),
@@ -2326,6 +2378,29 @@ class DocApprovalDispatcher(Base):
         self.assertIn(a_old, approved)
         self.assertIn(a_new, approved, "the user's own second credit rides the slot already spent on them")
         self.assertNotIn(b, approved, "the user who was already waiting keeps the last slot")
+
+    def test_the_claimant_age_is_the_ACCOUNTS_not_the_claimed_profiles(self):
+        """QA #1800 r11 finding 1 (Critical): a profile is not an account.
+
+        The old code read `/admin/profile/{profile_id}` and took THAT profile's createdAt, so a newly
+        created account claiming an old profile passed the 30-day floor on the profile's age. The only
+        acceptable source is the account's own createdAt, which core carries on the request row's
+        `user`; when core does not supply it the gate falls back to the ledger and NAMES the refusal.
+        """
+        rid = uuid_of(440)
+        self.file_doc(rid, user_id=900, intake_id=f"i-{rid}", sha="s440")
+        decide.doc_approve.ensure_schema(self.db)
+        # the account is 2 days old at core, even though the profile it claims is ancient
+        row = req(rid, uid=900, track="small", created="2026-10-09T00:00:00Z")
+        row["user"] = {"email": "a@x.com", "createdAt": "2026-10-09T00:00:00Z"}
+        res, w = self.go([row], {}, judge=self.NOT_FOUND)
+        self.assertEqual(self.approve_writes(w), [],
+                         "a 2-day-old ACCOUNT is not a clean claimant, whatever profile it claims")
+        self.assertEqual(res.doc_approved, 0)
+        # and the age is read from the account, never from the profile
+        self.assertEqual(decide._account_created_at(row), "2026-10-09T00:00:00Z")
+        self.assertIsNone(decide._account_created_at({"user": {"email": "a@x.com"}}),
+                          "no account createdAt at core is None, never a substitute")
 
     # ── round 7, finding 1: an UNKNOWN write outcome is not a refusal ──
     class _BrokenWriter:
@@ -2460,7 +2535,7 @@ class DocApprovalDispatcher(Base):
         d = self.decisions()
         self.assertEqual(d[self.doc_rid]["decision"], "approve", "the doc class still writes")
         self.assertEqual(d[unproven]["decision"], "hold", d[unproven]["reason"])
-        self.assertIn("only doc-verified-t0t1", d[unproven]["reason"])
+        self.assertIn(f"only {decide.DOC_AUTOMATION}", d[unproven]["reason"])
         self.assertEqual([i for c in w.calls if c["status"] == decide.UVN for i in c["ids"]], [],
                          "no ask goes out under a grant that only authorises doc approvals")
         self.assertEqual(self.approve_writes(w), [self.doc_rid])

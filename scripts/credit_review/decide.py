@@ -128,7 +128,10 @@ AUTOMATION = "credit-trust-decide"
 # forged-checked document may approve a T0/T1 credit without a DSP anchor. That class is a SEPARATE
 # registry entry, because it is narrower than this automation (which stays approved=false): apply
 # mode may therefore run on the doc class alone, and then ONLY doc-verified rows may write.
-DOC_AUTOMATION = "doc-verified-t0t1"
+# Fable R22 guard 5 names the registered automation scope `document_small_track`, so the registry key
+# and the code's scope are ONE string (doc_approve.SCOPE). A rename in one place without the other is a
+# dormant class, not a silent one - `doc_class_approved` simply finds no entry and refuses.
+DOC_AUTOMATION = doc_approve.SCOPE
 DOC_STORE = Path(os.environ.get("CREDIT_DOC_VERIFY_STORE", doc_approve.DEFAULT_DOC_STORE))
 DOC_PROOF_STORE = Path(os.environ.get("CREDIT_PROOF_STORE", doc_approve.DEFAULT_PROOF_STORE))
 DOC_APPROVE_KILL = Path(os.environ.get("CREDIT_DOC_APPROVE_KILL_SWITCH", "/etc/hydra/doc-approve.disabled"))
@@ -295,10 +298,43 @@ def doc_class_approved(path: Path | None = None) -> tuple[bool, str]:
     return True, f"approved by {entry['approved_by']}"
 
 
-def doc_class_active(path: Path | None = None, kill: Path | None = None) -> tuple[bool, str]:
+def _freeze_db() -> sqlite3.Connection | None:
+    """A read-only handle on the ledger for the freeze check, or None when it does not exist yet."""
+    try:
+        p = Path(os.environ.get("CREDIT_REVIEW_LEDGER", "/var/lib/hydra/credit-review/ledger.sqlite3"))
+        if not p.exists():
+            return None
+        return sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+
+
+def _account_created_at(row: dict[str, Any] | None) -> str | None:
+    """R22a D2: the ACCOUNT's createdAt as core reports it on the request row, or None.
+
+    QA #1800 r11 finding 1 (Critical): this used to read `/admin/profile/{profile_id}` and take THAT
+    profile's `createdAt`. A profile is not an account - a newly created account that claims an old
+    profile would have passed the 30-day floor on the profile's age. The claimant gate is about how
+    long the ACCOUNT has existed, so the only acceptable source is the account's own createdAt, which
+    core carries on the request row's `user`. When core does not supply it, this answers None and the
+    gate falls back to the ledger and NAMES the refusal `claimant_no_history` - it never substitutes
+    a different object's age.
+    """
+    if not isinstance(row, dict):
+        return None
+    user = row.get("user")
+    if not isinstance(user, dict):
+        return None
+    raw = user.get("createdAt")
+    return str(raw) if raw else None
+
+
+def doc_class_active(path: Path | None = None, kill: Path | None = None,
+                     db: sqlite3.Connection | None = None) -> tuple[bool, str]:
     """(may-this-run-consider-a-document, why) - the ONE place the class turns on.
 
-    Dormant unless the captain's approval is ON FILE for `doc-verified-t0t1` (PR B) and the kill switch is absent.
+    Dormant unless the captain's approval is ON FILE for `document_small_track` (Fable R22 guard 5) and the
+    kill switch is absent.
     Dormant means: the doc-verify stores are not opened, no log line claims the class is on, no row is written - so a
     repo state without the registry entry behaves exactly as it did before this code existed."""
     ok, why = doc_class_approved(path)
@@ -307,6 +343,14 @@ def doc_class_active(path: Path | None = None, kill: Path | None = None) -> tupl
     kill = kill or DOC_APPROVE_KILL
     if Path(kill).exists():
         return False, f"kill switch {kill}"
+    # R22 guard 8: ONE reversal freezes the class. Checked HERE as well as in the gates, so a frozen
+    # class is dormant (no store opened, no row written) and the run says why - a freeze that only
+    # refused per candidate would still look like a working class in the log. The LEDGER row is
+    # authoritative (QA #1800 finding 1: a marker file that cannot be written must not unfreeze us), so
+    # the ledger is consulted too, read-only, when it exists.
+    if doc_approve.frozen(db if db is not None else _freeze_db()):
+        return False, ("AUTO-FROZEN (a reversal was recorded; a human clears the ledger row and "
+                       f"{doc_approve.FREEZE_PATH})")
     return True, why
 
 
@@ -1676,6 +1720,7 @@ class RunResult:
     held: int = 0
     doc_approved: int = 0
     doc_indeterminate: int = 0        # core may have committed; counted, not proof, a human reconciles
+    doc_audit: str = ""               # R22 guard 8: the 14-day 100% audit window's state
     doc_refused_by_core: int = 0      # eligible documents whose row core's own agent guard would refuse
     held_approve_arm: int = 0      # approve verdicts RECORDED and not written (the support-only arm)
     support_uncertain: int = 0     # support PUTs that MAY have landed (write or read-back failed): they owe a read-back
@@ -1718,6 +1763,7 @@ class RunResult:
                    "reconcile before releasing)." if self.doc_indeterminate else "")
                 + (f" {self.held_approve_arm} approve verdict(s) recorded and NOT written (support-only arm)"
                    if self.held_approve_arm else "")
+                + (f" doc class {self.doc_audit}" if getattr(self, "doc_audit", "") else "")
                 + (f" {self.note}" if self.note else "")
                 + (f" WRITE ERRORS: {'; '.join(self.write_errors)[:400]}" if self.write_errors else ""))
 
@@ -1770,7 +1816,7 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
     if mode == "apply":
         ok, why = registry_approved()
         if not ok:
-            dok, dwhy = doc_class_active()          # a killed class does not license a doc-only apply either
+            dok, dwhy = doc_class_active(db=db)     # a killed class does not license a doc-only apply either
             if dok:
                 # Narrower class only: apply, but every non-doc-verify approval is held below.
                 doc_only = True
@@ -1780,10 +1826,10 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
                 res.mode, res.note = "shadow", f"APPLY REFUSED ({why}): ran as shadow, nothing written."
                 mode = "shadow"
     # [key=doc-approval-doctrine] The class is DORMANT until the captain's approval is on file for it: no store
-    # read, no log line, no row. A registry with no `doc-verified-t0t1` entry (every repo state before PR B, and
+    # read, no log line, no row. A registry with no `document_small_track` entry (every repo state before the row lands, and
     # every test that runs the decider without one) therefore behaves exactly as it did before this code existed -
     # which is what keeps the existing "the decider says nothing on this path" assertions true.
-    doc_enabled, doc_why = doc_class_active()
+    doc_enabled, doc_why = doc_class_active(db=db)
     if doc_enabled and mode in ("shadow", "apply", "judge"):
         log(f"decide: doc-approve class on ({doc_why}): dv-4 verified documents may approve T0/T1 credits "
             "without a DSP anchor (Fable 2026-11-03)")
@@ -1982,12 +2028,21 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
             if not ((d.decision == "approve" and rid in needs_proof)
                     or (d.decision == "support" and d.web_verdict == "NOT_FOUND")):
                 continue
-            c = doc_approve.Candidate(rid, d.user_id, d.popularity, doc_docs[rid])
+            # R22 guards 3 and 7 need the claimed roles and the profile: the role guard refuses
+            # artist/org claims, and the per-profile cap bounds one artist page per day.
+            c = doc_approve.Candidate(rid, d.user_id, d.popularity, doc_docs[rid],
+                                      d.profile_id, tuple(d.claimed_roles), bool(d.big_track),
+                                      _account_created_at(by_lower.get(rid)))
             hids, husers = _doc_holds(d)
             # the ruling's `paid_first_oldest`: a person's own requests are adjacent, so the 50 user
             # slots are spent on paid, longest-waiting accounts first - and a person's several credits
             # are approved in one pass.
-            ap, answers = doc_approve.plan(c, db, doc_store=DOC_STORE, gate=doc_gate, hold_ids=hids,
+            # QA #1800 r16 finding 1: the configured proof store has to reach the gate, or
+            # `gate_doc_reuse` checks the DEFAULT store while the operator believes it checked the
+            # configured one - a file SHA reused across two accounts was refused by the gate and
+            # approved by the plan.
+            ap, answers = doc_approve.plan(c, db, doc_store=DOC_STORE, proof_store=DOC_PROOF_STORE,
+                                           gate=doc_gate, hold_ids=hids,
                                            hold_users=husers, now=now,
                                            req_users=owners)
             if ap is None:
@@ -2099,7 +2154,8 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
             log(f"decide: doc-approve {d.request_id} not committed: a later guard set {d.decision}")
             continue
         hids, husers = _doc_holds(d)
-        got, answers = doc_approve.approve(c, db, doc_store=DOC_STORE, gate=doc_gate, hold_ids=hids,
+        got, answers = doc_approve.approve(c, db, doc_store=DOC_STORE, proof_store=DOC_PROOF_STORE,
+                                           gate=doc_gate, hold_ids=hids,
                                            hold_users=husers, now=now, mode=mode)
         if got is None:
             refusal = answers[-1] if answers else None
@@ -2109,6 +2165,12 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
             continue
         res.doc_approved += 1
         doc_committed.append(d.request_id)
+        # R22 guard 8: report the audit window's state with the approvals it covers, so "100% audit for
+        # 14 days" is a fact in the run note rather than a claim in a doc.
+        try:
+            _open, res.doc_audit = doc_approve.audit_window(db, now)
+        except Exception as exc:  # noqa: BLE001 - a report line must never fail a run
+            res.doc_audit = f"audit state unreadable ({exc})"
 
     # Ledger BEFORE any write.
     for d in decisions:

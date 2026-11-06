@@ -69,7 +69,12 @@ def request(rid, *, pid=PID_BAD, track="t1", roles=("Mixing",), pop=80, status="
         "updatedAt": updated or (NOW - timedelta(minutes=10)).isoformat().replace("+00:00", "Z"),
         "createdAt": created or (NOW - timedelta(minutes=20)).isoformat().replace("+00:00", "Z"),
         "profile": {"name": "stillfloo" if pid == PID_BAD else "Real Engineer"},
-        "user": {"email": "secret@example.com"}, "workspace": {"email": "secret@example.com"},
+        # core always returns the account's own createdAt, and R22 guard 4 ages the claimant from it
+        # (QA #1800 r18 finding 1: the ledger's first sighting is our clock, not the account's age).
+        # A fixture account is therefore a clean claimant unless a test says otherwise.
+        "user": {"email": "secret@example.com",
+                 "createdAt": (NOW - timedelta(days=60)).isoformat().replace("+00:00", "Z")},
+        "workspace": {"email": "secret@example.com"},
     }
 
 
