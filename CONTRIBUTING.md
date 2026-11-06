@@ -52,6 +52,9 @@ JSON
 The job name in [`.github/workflows/no-mistakes-required.yml`](.github/workflows/no-mistakes-required.yml) must stay exactly `PR must be raised via no-mistakes`, because branch protection matches the context by that string.
 Renaming the job leaves the required check permanently expected, which blocks every merge rather than opening one.
 
+The same expected-forever state catches a pull request whose head predates the workflow: the workflow only runs on `opened`, `edited`, `synchronize`, and `reopened`, so a pull request that has never seen one of those events has no check run at all and branch protection reports the context as expected rather than failed.
+Any body edit fires `edited` and produces a real verdict, which is the cheapest way to unstick one; the administrator merge is the other.
+
 The unattended merge queue ([`docs/merge-queue.md`](docs/merge-queue.md)) is a separate opt-in step, and it is only worth arming once this check is required.
 
 ## Workflow
