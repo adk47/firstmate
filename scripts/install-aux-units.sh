@@ -3764,8 +3764,8 @@ ExecStart=$HYDRA_ROOT/scripts/main-prune-restart.sh nightly
 Environment=HOME=/root
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 Environment=HYDRA_MAIN_PRUNE_AFTER=24h
-# Skip when main restarted recently (already fresh).
-Environment=HYDRA_MAIN_MIN_UPTIME_H=4
+# Skip when the last SUCCESSFUL prune is younger than 20h (stamp: /var/lib/hydra/main-prune-last-ok; MUS-30705).
+Environment=HYDRA_MAIN_MIN_PRUNE_AGE_H=20
 Environment=MAINT_SH=$HYDRA_ROOT/scripts/hydra-maintenance.sh
 # Backup + stop + prune (<=20 min) + start + health wait (<=45 min); a kill mid-run would leave main stopped.
 TimeoutStartSec=90min

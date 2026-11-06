@@ -52,7 +52,8 @@ _install() { run bash "$TEST_TMPDIR/block.sh"; }
   grep -q "^ExecStart=$HYDRA_REPO/scripts/main-prune-restart.sh nightly" "$UNITS/hydra-main-prune-restart.service"
   grep -q '^Type=oneshot' "$UNITS/hydra-main-prune-restart.service"
   grep -q '^Environment=HYDRA_MAIN_PRUNE_AFTER=24h' "$UNITS/hydra-main-prune-restart.service"
-  grep -q '^Environment=HYDRA_MAIN_MIN_UPTIME_H=4' "$UNITS/hydra-main-prune-restart.service"
+  grep -q '^Environment=HYDRA_MAIN_MIN_PRUNE_AGE_H=20$' "$UNITS/hydra-main-prune-restart.service"
+  if grep -q 'MIN_UPTIME_H' "$UNITS/hydra-main-prune-restart.service"; then false; fi
   grep -q '^OnCalendar=\*-\*-\* 02:30:00 UTC' "$UNITS/hydra-main-prune-restart.timer"
   grep -q '^Unit=hydra-main-prune-restart.service' "$UNITS/hydra-main-prune-restart.timer"
   grep -q 'systemctl enable hydra-main-prune-restart.timer' "$CALLS"

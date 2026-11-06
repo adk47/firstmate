@@ -30,6 +30,7 @@ c.executemany('insert into session_nodes values (?)',[(i,) for i in range(5)]); 
   export STUB_START_RC=0 HYDRA_PRUNE_PATH="$STUBBIN:$PATH"
   export DEPLOY_PATH="$TEST_TMPDIR/deploy"; mkdir -p "$DEPLOY_PATH"
   export STUB_JOBS="" STUB_PGREP_OUT=""
+  export HYDRA_MAIN_PRUNE_STAMP="$TEST_TMPDIR/stampdir/main-prune-last-ok"   # never the real /var/lib/hydra
 
   # Stateful: a successful stop makes the service inactive until a start.
   cat > "$STUBBIN/systemctl" <<'STUB'
@@ -160,14 +161,80 @@ _count() { grep -c "$1" "$CALLS" || true; }
   [ "$(ls -1d "$BACKUP_ROOT"/*/ | wc -l | tr -d ' ')" -eq 2 ]
 }
 
-@test "nightly mode: a main younger than the uptime floor is skipped, an older one is pruned" {
-  export HYDRA_MAIN_MIN_UPTIME_H=4 HYDRA_MAIN_UPTIME_H=1
+# MUS-30705: only a PRUNE makes main fresh. Process uptime does not (5 Nov: a deploy restart at ~01:40Z made the
+# old uptime floor skip the 02:30Z prune; rows kept growing and the post-start freeze went 292 s -> 1239 s).
+@test "5 Nov regression: a main restarted 0h ago with NO prune stamp is still pruned" {
+  export HYDRA_MAIN_MIN_UPTIME_H=4 HYDRA_MAIN_UPTIME_H=0 HYDRA_MAIN_MIN_PRUNE_AGE_H=20
   _run nightly
-  [[ "$output" == *"already fresh"* ]]
+  [ "$status" -eq 0 ]
+  [ "$(_count 'systemctl stop openclaw-gateway-main')" -eq 1 ]
+  [ "$(_count '^openclaw ')" -eq 1 ]
+  [ "$(_count 'systemctl start openclaw-gateway-main')" -eq 1 ]
+  [ -d "$BACKUP_ROOT" ] && [ -n "$(ls -A "$BACKUP_ROOT")" ]
+}
+
+@test "prune-age skip: a prune that succeeded 2h ago skips and touches nothing" {
+  export HYDRA_MAIN_MIN_PRUNE_AGE_H=20
+  mkdir -p "$TEST_TMPDIR/stampdir"; echo $(( $(date +%s) - 7200 )) > "$HYDRA_MAIN_PRUNE_STAMP"
+  before="$(cat "$HYDRA_MAIN_PRUNE_STAMP")"
+  _run nightly
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"last prune ok 2h ago (< 20h) - skip"* ]]
   [ "$(_count 'systemctl stop')" -eq 0 ]
-  export HYDRA_MAIN_UPTIME_H=9
+  [ "$(_count '^maintenance start')" -eq 0 ]
+  [ ! -e "$BACKUP_ROOT" ] || [ -z "$(ls -A "$BACKUP_ROOT")" ]
+  [ "$(cat "$HYDRA_MAIN_PRUNE_STAMP")" = "$before" ]
+}
+
+@test "prune-age: a stamp older than the floor prunes" {
+  export HYDRA_MAIN_MIN_PRUNE_AGE_H=20
+  mkdir -p "$TEST_TMPDIR/stampdir"; echo $(( $(date +%s) - 30*3600 )) > "$HYDRA_MAIN_PRUNE_STAMP"
   _run nightly
   [ "$(_count 'systemctl start openclaw-gateway-main')" -eq 1 ]
+}
+
+@test "prune-age: a stamp that is non-numeric, empty or in the future never skips" {
+  export HYDRA_MAIN_MIN_PRUNE_AGE_H=20
+  mkdir -p "$TEST_TMPDIR/stampdir"
+  for bad in abc "" "12abc" "-5" "$(( $(date +%s) + 86400 ))"; do
+    : > "$CALLS"; printf '%s\n' "$bad" > "$HYDRA_MAIN_PRUNE_STAMP"
+    _run nightly
+    [ "$status" -eq 0 ]
+    [ "$(_count 'systemctl stop openclaw-gateway-main')" -eq 1 ]
+    [[ "$output" != *"- skip"* ]]
+  done
+}
+
+@test "prune-age: a garbage HYDRA_MAIN_MIN_PRUNE_AGE_H never skips" {
+  export HYDRA_MAIN_MIN_PRUNE_AGE_H=abc
+  mkdir -p "$TEST_TMPDIR/stampdir"; echo "$(date +%s)" > "$HYDRA_MAIN_PRUNE_STAMP"
+  _run nightly
+  [ "$(_count 'systemctl stop openclaw-gateway-main')" -eq 1 ]
+}
+
+@test "stamp: a successful prune writes a fresh epoch stamp (and creates its dir)" {
+  [ ! -e "$HYDRA_MAIN_PRUNE_STAMP" ]
+  _run nightly
+  [ "$status" -eq 0 ]
+  v="$(cat "$HYDRA_MAIN_PRUNE_STAMP")"
+  [[ "$v" =~ ^[0-9]+$ ]]
+  [ $(( $(date +%s) - v )) -lt 120 ]
+}
+
+@test "stamp: a FAILED prune leaves the old stamp untouched, and a FAILED stop too" {
+  mkdir -p "$TEST_TMPDIR/stampdir"; echo 1000 > "$HYDRA_MAIN_PRUNE_STAMP"
+  echo 7 > "$TEST_TMPDIR/openclaw.rc"
+  _run nightly
+  [ "$(cat "$HYDRA_MAIN_PRUNE_STAMP")" = 1000 ]
+  echo 0 > "$TEST_TMPDIR/openclaw.rc"; export STUB_STOP_RC=1
+  _run nightly
+  [ "$(cat "$HYDRA_MAIN_PRUNE_STAMP")" = 1000 ]
+}
+
+@test "stamp: a prune that fails with no prior stamp writes none" {
+  echo 7 > "$TEST_TMPDIR/openclaw.rc"
+  _run nightly
+  [ ! -e "$HYDRA_MAIN_PRUNE_STAMP" ]
 }
 
 @test "a FAILED stop never prunes the live store, and the unit fails so it pages" {

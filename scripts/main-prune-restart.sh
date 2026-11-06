@@ -32,7 +32,8 @@
 # install-aux-units.sh that drops the enable/start of that timer (or reverting the PR that introduced it, #1085).
 # One run at a time: flock on $LOCK_FILE, the SAME lock deploy.sh/rollback.sh take (lib/main-prune-lock.sh).
 # Held from before the pgrep check through `systemctl start`, then released; a second run skips.
-# Usage: main-prune-restart.sh [reason]; HYDRA_MAIN_MIN_UPTIME_H=N skips when main is younger (timer sets 4).
+# Usage: main-prune-restart.sh [reason]; HYDRA_MAIN_MIN_PRUNE_AGE_H=N skips when the last SUCCESSFUL prune is younger
+# than N h (timer sets 20; MUS-30705: only a prune makes main fresh, a deploy restart does not). Stamp: $PRUNE_STAMP.
 # The other env knobs exist so the bats suite can run the real script against stubs.
 set -uo pipefail
 
@@ -46,7 +47,8 @@ HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:18789/health}"
 STABLE_SECS="${STABLE_SECS:-180}"
 MAX_WAIT_SECS="${MAX_WAIT_SECS:-2700}"
 POLL_SECS="${POLL_SECS:-5}"
-MIN_UPTIME_H="${HYDRA_MAIN_MIN_UPTIME_H:-0}"
+MIN_PRUNE_AGE_H="${HYDRA_MAIN_MIN_PRUNE_AGE_H:-0}"
+PRUNE_STAMP="${HYDRA_MAIN_PRUNE_STAMP:-/var/lib/hydra/main-prune-last-ok}"   # epoch of the last rc=0 prune; not /run, survives reboot
 PRUNE_PATH="${HYDRA_PRUNE_PATH:-/usr/bin:/bin}"
 LOCK_FILE="${LOCK_FILE:-/run/lock/hydra-main-prune-restart.lock}"
 # TERM at 1200s, KILL 30s later: a cleanup that ignores TERM must not hold main stopped until systemd's 90 min.
@@ -67,11 +69,15 @@ for db in glob.glob(f"{sys.argv[1]}/agents/*/agent/openclaw-agent.sqlite"):
 print(t)
 PY
 }
-main_uptime_h() {
-  local start now
-  start=$(systemctl show -p ActiveEnterTimestampMonotonic --value "$SVC")
-  now=$(awk '{printf "%d", $1*1000000}' /proc/uptime)
-  echo $(( (now - start) / 3600000000 ))
+# Whole hours since the last successful prune, or empty (= do not skip) when the stamp is missing, unreadable,
+# empty, non-numeric or in the future. Validated before any arithmetic.
+prune_age_h() {
+  local st now
+  st=$(head -n 1 "$PRUNE_STAMP" 2>/dev/null) || return 0
+  [[ "$st" =~ ^[0-9]{1,10}$ ]] || return 0
+  now=$(date +%s); st=$((10#$st))
+  [ "$st" -le "$now" ] || return 0
+  echo $(( (now - st) / 3600 ))
 }
 
 # Someone other than us is mutating node-8 (MUS-8545 round 9 / MUS-8735 residual).
@@ -107,9 +113,9 @@ flock -n 9 || { log "another main-prune-restart run holds $LOCK_FILE - skip"; ex
 if pgrep -f "scripts/(deploy|rollback).sh" >/dev/null; then log "deploy/rollback running - skip"; exit 0; fi
 if deploy_mutating_node8; then log "WARN SKIP deploy-mutation-in-flight: $REASON_MUT - skip (nothing was changed)"; exit 0; fi
 systemctl is-active --quiet "$SVC" || { log "main not active - skip (systemd/watchdog own that)"; exit 0; }
-if [ "$MIN_UPTIME_H" -gt 0 ]; then
-  up_h="${HYDRA_MAIN_UPTIME_H:-$(main_uptime_h)}"
-  if [ "$up_h" -lt "$MIN_UPTIME_H" ]; then log "main up only ${up_h}h (< ${MIN_UPTIME_H}h) - already fresh, skip"; exit 0; fi
+if [[ "$MIN_PRUNE_AGE_H" =~ ^[0-9]{1,4}$ ]] && [ "$((10#$MIN_PRUNE_AGE_H))" -gt 0 ]; then
+  age_h=$(prune_age_h)
+  if [ -n "$age_h" ] && [ "$age_h" -lt "$((10#$MIN_PRUNE_AGE_H))" ]; then log "last prune ok ${age_h}h ago (< $((10#$MIN_PRUNE_AGE_H))h) - skip"; exit 0; fi
 fi
 log "start reason='$REASON' prune=$PRUNE rows_before=$(rows) rss=$(rss_mb)MB"
 "$MAINT_SH" start "main session prune ($PRUNE) + restart: $REASON (MUS-1295)" --ttl 60m --operator hydra-main-prune-restart || log "WARN maintenance flag not set"
@@ -166,6 +172,12 @@ s=$(date +%s)
   > "$LOG_DIR/hydra-main-prune-$TS.json" 2> "$LOG_DIR/hydra-main-prune-$TS.err" || prune_rc=$?
 rm -rf "$TC"
 log "cleanup rc=$prune_rc secs=$(( $(date +%s)-s )) rows_after=$(rows)"
+# Only a completed prune (rc=0) stamps; failed or skipped writes nothing. A stamp that cannot be written only
+# costs a redundant prune next night, so it warns and never fails the unit.
+if [ "$prune_rc" = 0 ]; then
+  { mkdir -p "$(dirname "$PRUNE_STAMP")" && date +%s > "$PRUNE_STAMP.tmp" && mv -f "$PRUNE_STAMP.tmp" "$PRUNE_STAMP"; } 2>/dev/null \
+    || log "WARN could not write prune stamp $PRUNE_STAMP"
+fi
 if [ "$prune_rc" != skipped ] && [ "$prune_rc" -ne 0 ]; then
   # Fail-open (main still starts below), but fail the unit so OnFailure= pages (else rows climb back unnoticed).
   log "WARN prune failed (rc=$prune_rc, see $LOG_DIR/hydra-main-prune-$TS.err) - starting main anyway"
