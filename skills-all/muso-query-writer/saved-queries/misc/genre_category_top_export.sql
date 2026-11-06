@@ -17,8 +17,8 @@ select genre,
 	rank,
 	name,
 	popularity,
-	'https://credits.muso.ai/profile/' || profile_id as muso_url,
-	'https://credits.muso.ai/track/' || top_track_id as top_track_url,
+	'https://muso.ai/profile/' || profile_id as muso_url,
+	'https://muso.ai/track/' || top_track_id as top_track_url,
 	top_original_genres
 	,profile_id
 	,common_credits

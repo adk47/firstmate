@@ -68,7 +68,7 @@ c AS (
 )
 select profile_id,
 	c.*,
-	'https://credits.muso.ai/profile/' || profile_id AS muso_url,
+	'https://muso.ai/profile/' || profile_id AS muso_url,
 	p.name,
 	p.legal_name,
 	p.popularity,

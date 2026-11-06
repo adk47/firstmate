@@ -123,7 +123,7 @@ describe("createSnapshotClient.lookupSnapshot — claiming + team chain", () => 
     expect(snap).toEqual({
       profileId: "abc123de",
       name: "Jane Doe",
-      profileUrl: "https://credits.muso.ai/profile/abc123de",
+      profileUrl: "https://muso.ai/profile/abc123de",
       isClaimed: true,
       primaryRole: "Producer",
       creditsCount: 42,

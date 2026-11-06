@@ -46,7 +46,7 @@ select
     popularity,
     num_recording_engineer_credits,
     credits_count as num_all_credits,
-    'https://credits.muso.ai/profile/' || profile_id as muso_url
+    'https://muso.ai/profile/' || profile_id as muso_url
 from s
 join hive."platform-industry-bi-prod".matvw_catalog_profile as p ON (_id=profile_id)
 order by total_streams desc 

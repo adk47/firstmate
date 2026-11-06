@@ -32,7 +32,7 @@ import {
 // credit_verification_check, which lists private pending data — an
 // unverifiable anchor DEGRADES this tool instead of failing it closed:
 // claim/duplicate/credit-existence facts are exactly what public
-// credits.muso.ai shows, so they are returned with the ownership-derived
+// muso.ai shows, so they are returned with the ownership-derived
 // fields marked owner_undetermined. Ownership-dependent self-serve routing is
 // only ever suggested when the anchor verified.
 
@@ -42,7 +42,7 @@ const MAX_UVN_CREDITS = 100;
 
 const Parameters = Type.Object({
   profile_id: Type.Optional(Type.String({ description: "Bare Muso profile UUID" })),
-  profile_url: Type.Optional(Type.String({ description: "Full https://credits.muso.ai/profile/<uuid> URL" })),
+  profile_url: Type.Optional(Type.String({ description: "Full https://muso.ai/profile/<uuid> URL" })),
   email: Type.Optional(Type.String({ description: "Customer account email — used for lookup, never echoed back" })),
   name: Type.Optional(Type.String({ description: "Profile display name to resolve via search" })),
   target_profile_url: Type.Optional(

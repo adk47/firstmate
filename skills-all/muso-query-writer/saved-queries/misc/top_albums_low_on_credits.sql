@@ -14,7 +14,7 @@ last_exported: 2025-01-31
 
 select *
 from (
-		SELECT 'https://credits.muso.ai/album/' || album_id AS album_url,
+		SELECT 'https://muso.ai/album/' || album_id AS album_url,
 			max_by(r.title, r.popularity) AS title,
 			max_by(
 				array_join(transform(r.artists, a->a.name), ','),

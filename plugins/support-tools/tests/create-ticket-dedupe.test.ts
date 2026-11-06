@@ -981,7 +981,7 @@ describe("create_ticket body, due date and tags", () => {
     const body = (vi.mocked(deps.http.post).mock.calls[0][1] as any).body;
     expect(body.description).toBeUndefined();
     expect(body.markdown_description).toContain("**Customer:** u@example.com");
-    expect(body.markdown_description).toContain("**Profile:** https://credits.muso.ai/profile/prof_1");
+    expect(body.markdown_description).toContain("**Profile:** https://muso.ai/profile/prof_1");
     expect(body.markdown_description).toContain("- track: Song X");
     const m = /---ACTION-REQUEST---\s*(\{[\s\S]*?\})\s*---END-ACTION-REQUEST---/.exec(body.markdown_description);
     expect(m).not.toBeNull();

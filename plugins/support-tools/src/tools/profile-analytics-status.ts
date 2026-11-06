@@ -39,7 +39,7 @@ import { extractProfileIdFromUrl } from "./profile-lookup.js";
 
 const Parameters = Type.Object({
   profile_id: Type.Optional(Type.String({ description: "Bare Muso profile UUID" })),
-  profile_url: Type.Optional(Type.String({ description: "Full https://credits.muso.ai/profile/<uuid> URL" })),
+  profile_url: Type.Optional(Type.String({ description: "Full https://muso.ai/profile/<uuid> URL" })),
   email: Type.Optional(Type.String({ description: "Customer account email — used for lookup, never echoed back" })),
   name: Type.Optional(Type.String({ description: "Profile display name to resolve via autocomplete/search" })),
   source_platform: Type.Optional(Type.String({ description: "Optional platform named by the customer, e.g. spotify, youtube, shazam, tiktok, instagram" })),

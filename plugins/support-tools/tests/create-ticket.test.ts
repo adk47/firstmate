@@ -542,7 +542,7 @@ describe("create-ticket enrichment + tier-2 validation", () => {
     const tool = createCreateTicketTool(makeDeps({ http: makeHttp({ post }), clickupMusoUrlFieldId: "mu" }));
     await tool.execute("c", { actionType: "credit-claim", customerEmail: "u@example.com", customerProfileId: "abc123", summary: "s", conversationSummary: "c" } as any);
     const fields = (post.mock.calls[0][1] as any).body.custom_fields as { id: string; value: string }[];
-    expect(fields).toContainEqual({ id: "mu", value: "https://credits.muso.ai/profile/abc123" });
+    expect(fields).toContainEqual({ id: "mu", value: "https://muso.ai/profile/abc123" });
   });
 
   it("sets the Team field, mapping catalog vs growth actions to distinct options", async () => {

@@ -50,7 +50,7 @@ s as (
 )
 select *
 from (
-		select 'https://credits.muso.ai/track/' || track_id as muso_url,
+		select 'https://muso.ai/track/' || track_id as muso_url,
 			release_date,
 			years_anniversary,
 			title,

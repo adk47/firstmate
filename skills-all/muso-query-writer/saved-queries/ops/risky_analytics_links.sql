@@ -49,7 +49,7 @@ select
     spotify_streams as track_spotify_streams,
     added_by,
     youtube_url,
-    'https://credits.muso.ai/search/tracks?keyword=' || url_encode(name) as search_url,
+    'https://muso.ai/search/tracks?keyword=' || url_encode(name) as search_url,
     '' as CORRECT_TRACK_ID,
     '' as IS_NON_MUSIC_VIDEO
 from (
@@ -100,7 +100,7 @@ from (
         duration,
         action_by as added_by,
         'https://youtube.com/watch?v=' || external_id as youtube_url,
-        'https://credits.muso.ai/track/' || track_id as muso_url,
+        'https://muso.ai/track/' || track_id as muso_url,
         track_id
     from (
         select 

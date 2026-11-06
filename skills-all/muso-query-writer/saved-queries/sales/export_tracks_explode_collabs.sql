@@ -24,7 +24,7 @@ t as (
 	select t._id as track_id,
 		p.name,
 		ccc.role,
-		'https://credits.muso.ai/track/' || t._id as muso_url,
+		'https://muso.ai/track/' || t._id as muso_url,
 		cardinality(profiles) as num_collabs,
 		title as song_name,
 		array_join(transform(artists, a->a.name), ',') as song_artists,
