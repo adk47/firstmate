@@ -1547,6 +1547,59 @@ class CronContractTests(unittest.TestCase):
                 self.assertIn("shadow", argv, "the reviewer ships in shadow (Phase 0)")
 
 
+class MeteredModelPriceCapTests(unittest.TestCase):
+    """Every metered model the credit path can SEND must be inside the routing
+    block's price ceiling.
+
+    The failure this pins (2026-11-04): the audit and shadow-review crons pinned
+    ``--model x-ai/grok-4.3`` at $1.25/$2.50 per M while ``ZDR_ROUTING.max_price``
+    caps the route at $0.30/$1.20 per M, so OpenRouter refused EVERY request - 204
+    credit-review model calls blocked in 24h and those audit checks unverifiable.
+    Nothing was wrong with the cap; the model was 4x over it. A model id that the
+    cap rejects is not a working fallback, so this asserts the price, not the name.
+    """
+
+    def assert_inside_cap(self, model: str, where: str) -> None:
+        from lib import model_chain as mc
+        self.assertIn(model, mc.PRICE_USD_PER_TOKEN,
+                      f"{where} pins {model}, which has no price ceiling in "
+                      "model_chain.PRICE_USD_PER_TOKEN, so no reservation can bound it")
+        price_in, price_out = mc.PRICE_USD_PER_TOKEN[model]
+        self.assertLessEqual(price_in, mc.MAX_PROMPT_PRICE / 1e6,
+                             f"{where} pins {model} at ${price_in * 1e6:.2f}/M prompt, above the "
+                             f"${mc.MAX_PROMPT_PRICE}/M routing cap - OpenRouter would refuse every call")
+        self.assertLessEqual(price_out, mc.MAX_COMPLETION_PRICE / 1e6,
+                             f"{where} pins {model} at ${price_out * 1e6:.2f}/M completion, above the "
+                             f"${mc.MAX_COMPLETION_PRICE}/M routing cap - OpenRouter would refuse every call")
+
+    def test_the_routing_block_is_the_one_that_was_enforced(self):
+        from lib import model_chain as mc
+        self.assertEqual(mc.validate_routing(mc.ZDR_ROUTING), mc.ZDR_ROUTING)
+        self.assertEqual(mc.ZDR_ROUTING["max_price"], {"prompt": mc.MAX_PROMPT_PRICE,
+                                                       "completion": mc.MAX_COMPLETION_PRICE})
+
+    def test_the_judge_default_is_inside_the_cap(self):
+        from credit_review import judge as cr_judge
+        self.assert_inside_cap(cr_judge.DEFAULT_MODEL, "credit_review.judge.DEFAULT_MODEL")
+
+    def test_the_batch_judge_fallback_is_inside_the_cap(self):
+        from credit_review import batch_judge as bj
+        self.assert_inside_cap(bj.OPENROUTER_MODEL, "credit_review.batch_judge.OPENROUTER_MODEL")
+        self.assertIn(bj.OPENROUTER_MODEL, bj.ALLOWED_MODELS)
+
+    def test_every_credit_review_cron_model_is_inside_the_cap(self):
+        jobs = json.loads((Path(__file__).resolve().parents[2] / "cron-jobs.json").read_text())["jobs"]
+        seen = 0
+        for job in jobs:
+            argv = job.get("payload", {}).get("argv") or []
+            if "credit-review.py" not in " ".join(argv) or "--model" not in argv:
+                continue
+            model = argv[argv.index("--model") + 1]
+            self.assert_inside_cap(model, f"cron {job['name']}")
+            seen += 1
+        self.assertGreater(seen, 0, "no credit-review cron pins --model; this test would check nothing")
+
+
 def _audit_row(ledger, rid, pid, verdict, approved_at, name="Zach Miller"):
     ledger.record({"request_id": rid, "mode": "audit", "phase": "live", "verdict": verdict, "confidence": 0.5,
                    "basis": "catalog_only", "big_track": False, "profile_id": pid, "approved_at": approved_at,

@@ -1269,7 +1269,7 @@ def parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def model_flags(sp: argparse.ArgumentParser) -> None:
-        sp.add_argument("--model", default=None, help="OpenRouter model id (default $CREDIT_REVIEW_MODEL or x-ai/grok-4.3)")
+        sp.add_argument("--model", default=None, help="OpenRouter model id (default $CREDIT_REVIEW_MODEL or deepseek/deepseek-v4.1-flash-1017)")
         sp.add_argument("--no-web", action="store_true", help="disable the web-search plugin")
         sp.add_argument("--web-engine", default=None, help="OpenRouter web engine (native|exa); default provider choice")
         sp.add_argument("--max-model-calls", type=int, default=300)

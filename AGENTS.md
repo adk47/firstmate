@@ -476,6 +476,15 @@ deepseek 1017."
   exactly one DeepSeek entry; a PR that changes it argues the money. (The old
   luna/haiku hops are gone: they were paid FRONTIER models, so a subscription
   outage silently upgraded every agent turn onto frontier inference.)
+- **A metered model id must also be inside `ZDR_ROUTING.max_price` ($0.30/$1.20
+  per M), or OpenRouter refuses EVERY call it makes.** The cap is a spend
+  decision and it is not the thing to raise: on 2026-11-04 the credit-review
+  crons pinned `x-ai/grok-4.3` ($1.25/$2.50, 4x the ceiling) and 204 model calls
+  were blocked in 24h with the balance at $289. `MeteredModelPriceCapTests`
+  (`scripts/tests/test_credit_review.py`) now asserts the judge default,
+  `batch_judge.OPENROUTER_MODEL` and every `--model` in `cron-jobs.json` are
+  priced in `PRICE_USD_PER_TOKEN` and under the cap. A cron `--model` beats
+  `CREDIT_REVIEW_MODEL`, so the argv is the pin that matters.
 - **A tier that cannot serve SKIPS with a reason, never answers blind** — e.g.
   no headless web search on codex-cli 0.156.1 (`reason=web_search_unavailable`).
 - **`unsafe` ABORTS the chain**: a tool or safety violation is never laundered
