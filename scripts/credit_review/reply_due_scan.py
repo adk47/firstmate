@@ -54,6 +54,20 @@ NEVER = frozenset({"15"})                 # firstmate standing order: user 15 is
 # and routed users included - the answerable count alone never bounds the work), or this much wall clock.
 CHECK_MAX = 400
 CHECK_BUDGET_S = 900.0
+# firstmate 034 (A): the upstream walks and the reply work shared ONE deadline, so a walk that spent the whole budget
+# left the mapping step with an expired one. 2026-11-06 14:00Z: 2,014 threads walked, 160 due, 0 mapped, 0 sent - the
+# walk spent 903 s and `map_users` then skipped every thread because the deadline had already passed. The walks are
+# RESUMABLE (their un-evaluated rows are carried in `pending` and re-evaluated first next run); the mapping is not, and
+# neither is the check that follows it. So the walks stop at this share of the budget and the reply work always gets the
+# rest. Half is deliberate: a walk that cannot finish in half a tick is a walk that needs a cursor, not more clock.
+#
+# QA #1828 (Important): ONE shared walk deadline let an early walk starve a later one - a search that took 500 s of a
+# 900 s tick left `due_threads` an already-expired deadline, so a tick that previously found due replies produced none.
+# The walks are now handed a bounded SLICE each: what is left of the walk share, divided by the number of walk stages
+# still to run. Every stage gets a turn, no stage can exceed the share, and a stage that finishes early hands its
+# remainder to the next one.
+WALK_SHARE = 0.5
+WALK_STAGES = 4   # apology_rows, due_threads(carried), candidates, due_threads(fresh)
 CUSTOMER = ("user", "lead", "contact")
 FACTS_QUERY = ("SELECT CAST(userid AS varchar), lower(CAST(id AS varchar)), status, "
                "CAST(coalesce(CAST(json_extract(verificationdata, '$.proof_required') AS boolean), false) AS varchar), "
@@ -332,6 +346,7 @@ def classify(u: dict[str, Any], cid: str, checker: Callable[..., dict[str, Any]]
 def build(*, ic: Intercom = comm_state.intercom, query: Query = comm_state.trino, paying_path: str = PAYING,
           dv_store: str = DV_STORE, now: float | None = None, cap: int | None = None,
           max_checks: int | None = CHECK_MAX, budget_seconds: float | None = CHECK_BUDGET_S, start_entry: int = 0,
+          walk_share: float = WALK_SHARE,
           start_after_user: int | None = None,
           checker: Callable[..., dict[str, Any]] = comm_state.check, ledger_path: str | None = None,
           upstream_resume: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -343,10 +358,31 @@ def build(*, ic: Intercom = comm_state.intercom, query: Query = comm_state.trino
     # checks it between pages and fetches. A run whose preparation ate the budget leaves its page un-done (page.end =
     # start), so the cursor does not advance and the next tick re-walks it instead of skipping what it never reached.
     deadline = (time.monotonic() + float(budget_seconds)) if budget_seconds else None
+    # firstmate 034 (A): the walks get a SHARE of the budget, the reply work gets the whole of it. See WALK_SHARE.
+    # QA #1828: and each walk stage gets a bounded slice of that share, so no early walk can starve a later one.
+    walk_end = (time.monotonic() + float(budget_seconds) * float(walk_share)) if budget_seconds else None
+    stages_left = WALK_STAGES
+
+    def walk_slice() -> float | None:
+        """The deadline for the NEXT walk stage: its share of what is left of the walk budget.
+
+        Called once per stage, in order. A stage that finished early leaves more for the ones after it; a stage that
+        overran its slice leaves them the remainder rather than nothing, which is the whole point - the walks are
+        resumable, so a short slice defers work, while an expired deadline silently drops it.
+        """
+        nonlocal stages_left
+        if walk_end is None:
+            return None
+        stages_left -= 1
+        now = time.monotonic()
+        remaining = walk_end - now
+        if remaining <= 0:
+            return now
+        return now + remaining / (stages_left + 1)
     # ap1: the backlog-apology threads first - an unreadable ledger fails the scan (never a silent "nobody replied")
     sent = apology_threads(ledger_path or comm_state.LEDGER)
     resume = dict(upstream_resume or {})
-    ap_rows, ap_unreadable, ap_next = apology_rows(sent, ic, now, counts, deadline=deadline,
+    ap_rows, ap_unreadable, ap_next = apology_rows(sent, ic, now, counts, deadline=walk_slice(),
                                                    resume_after=resume.get("apology"))
     # r5 (1574 finding 4): the resume token alone was WRONG. The search advanced `starting_after` as it paged, but the
     # candidates it collected are only EVALUATED afterwards by due_threads - so a tick that died in a slow search page, or
@@ -520,10 +556,10 @@ def build(*, ic: Intercom = comm_state.intercom, query: Query = comm_state.trino
     upstream: dict[str, Any] = {}
     if pending:
         counts["candidates_resumed"] = len(pending)
-        carried_due, unevaluated = due_threads(pending, ic, now, counts, deadline=deadline)
+        carried_due, unevaluated = due_threads(pending, ic, now, counts, deadline=walk_slice())
         if carried_due:
             prep_and_walk(carried_due, sliced=False)          # owed work first: mapped, facts read, classified
-    cands, cand_next = candidates(ic, now, counts=counts, deadline=deadline,
+    cands, cand_next = candidates(ic, now, counts=counts, deadline=walk_slice(),
                                   resume_after=resume.get("candidates"))
     upstream["candidates"] = cand_next
     upstream["apology"] = ap_next
@@ -531,7 +567,7 @@ def build(*, ic: Intercom = comm_state.intercom, query: Query = comm_state.trino
     routed += [c for c in cands if c["conv"] in sent]
     counts["routed_backlog_apology"] = len(routed)
     cands = [c for c in cands if c["conv"] not in sent]
-    fresh_due, fresh_unevaluated = due_threads(cands, ic, now, counts, deadline=deadline)
+    fresh_due, fresh_unevaluated = due_threads(cands, ic, now, counts, deadline=walk_slice())
     due += fresh_due
     unevaluated += fresh_unevaluated
     counts["threads_due"] = len(due)

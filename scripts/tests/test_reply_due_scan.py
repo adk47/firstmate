@@ -461,6 +461,70 @@ class ReplyDueScanTest(unittest.TestCase):
         self.assertFalse(third["counts"].get("candidates_carried_to_next_run"),
                          "with no budget pressure, nothing may be carried a third time")
 
+    def test_firstmate034_a_walk_that_eats_the_budget_cannot_starve_the_mapping(self):
+        # firstmate 034 (A): the upstream walks and the reply work shared ONE deadline, so a walk that spent the whole
+        # budget left the mapping step with an expired one. 2026-11-06 14:00Z, live: 2,014 threads walked, 160 due,
+        # 0 mapped, 0 sent - due_threads spent 903 s and map_users then skipped every thread because the deadline had
+        # already passed. The walks are RESUMABLE (their un-evaluated rows are carried in `pending`); the mapping is
+        # not, and neither is the check that follows it. The walks now stop at WALK_SHARE of the budget.
+        clock = {"t": 0.0}
+        self.audience(8)
+
+        class SlowThreads(FakeIntercom):
+            def __call__(self, method, path, body=None):
+                if method == "GET" and not path.startswith("/contacts/"):
+                    clock["t"] += 10.0          # every thread read costs 10 s of the 50 s budget
+                return super().__call__(method, path, body)
+        slow = SlowThreads()
+        slow.search, slow.convs, slow.contacts = self.ic.search, self.ic.convs, self.ic.contacts
+        saved = rds.time.monotonic
+        try:
+            rds.time.monotonic = lambda: clock["t"]
+            # no walk share at all: the walks get no clock, so nothing is found and nothing is served
+            clock["t"] = 0.0
+            starved = rds.build(ic=slow, query=self.q, paying_path=str(self.paying), dv_store="/nonexistent",
+                                now=NOW, max_checks=None, budget_seconds=50, walk_share=0.0,
+                                checker=lambda *a, **k: {"hold": False, "reasons": []})
+            # the fix: the walks stop at half the budget and the reply work gets the other half
+            clock["t"] = 0.0
+            fixed = rds.build(ic=slow, query=self.q, paying_path=str(self.paying), dv_store="/nonexistent",
+                              now=NOW, max_checks=None, budget_seconds=50,
+                              checker=lambda *a, **k: {"hold": False, "reasons": []})
+        finally:
+            rds.time.monotonic = saved
+        # the walk share is what feeds the reply work: with none, the walk finds nothing to serve
+        self.assertEqual(starved["counts"]["threads_due"], 0)
+        self.assertEqual(starved["counts"]["checked"], 0)
+        # and with the default share a due thread the walk reached reaches the audience
+        self.assertGreater(fixed["counts"]["checked"], 0,
+                           "the reply work must get the budget the walk did not spend")
+        self.assertGreater(len(fixed["users"]), 0, "a due thread the walk reached must reach the audience")
+
+    def test_qa1828_a_slow_search_cannot_starve_the_thread_walk(self):
+        # QA #1828 (Important): with ONE shared walk deadline, a search that took 500 s of a 900 s tick left due_threads
+        # an already-expired deadline, so a tick that previously found due replies produced none. Each walk stage now
+        # gets a bounded slice of what is left of the walk share, so the thread walk always gets a turn after the search.
+        clock = {"t": 0.0}
+        self.audience(8)
+
+        class SlowSearch(FakeIntercom):
+            def __call__(self, method, path, body=None):
+                if method == "POST":
+                    clock["t"] += 10.0          # every search page costs 10 s of the 50 s budget
+                return super().__call__(method, path, body)
+        slow = SlowSearch()
+        slow.search, slow.convs, slow.contacts = self.ic.search, self.ic.convs, self.ic.contacts
+        saved = rds.time.monotonic
+        try:
+            rds.time.monotonic = lambda: clock["t"]
+            out = rds.build(ic=slow, query=self.q, paying_path=str(self.paying), dv_store="/nonexistent",
+                            now=NOW, max_checks=None, budget_seconds=50,
+                            checker=lambda *a, **k: {"hold": False, "reasons": []})
+        finally:
+            rds.time.monotonic = saved
+        self.assertGreater(out["counts"]["threads_due"], 0,
+                           "the thread walk must get a slice after a search that overran its own")
+
     def test_threads_dropped_by_a_mapping_or_facts_budget_are_carried_not_skipped(self):
         # r5 (1574 finding 6): a due thread that IS evaluated but then loses its mapping/facts chunk to the budget produced
         # no audience row. Committing the search token past it would answer nobody about that reply, ever - so it goes
