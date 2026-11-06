@@ -14,6 +14,7 @@ import os
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 
@@ -3305,8 +3306,30 @@ class NoStaleLockClaim(unittest.TestCase):
         text = open(p).read()
         block = p and text[text.index("# ─── GDPR erasure pipeline"):text.index("GDPRTICKSVC")]
         self.assertNotIn("sends are locked", block)
-        self.assertIn("NEVER\n# messages a customer", block, "it must still say the tick cannot send")
-        self.assertIn("APPROVE gdpr", block, "and say what a send does need")
+        self.assertIn("APPROVE gdpr", block, "and say what a HUMAN send does need")
+
+    def test_the_tick_unit_comment_states_the_one_thing_that_authorises_an_unattended_send(self):
+        """2026-11-04 (Fable decision B26 Q1): the tick now sends, which replaces the old "the tick cannot send" line.
+        The comment must carry the CONDITION instead of a prohibition, because an operator reading "the tick sends on
+        its due dates" without "only under a standing ruling, after the veto window" is the misreading that would get
+        a statutory letter sent by a cron nobody armed on purpose."""
+        p = os.path.join(os.path.dirname(__file__), "..", "scripts", "install-aux-units.sh")
+        block = open(p).read()
+        block = block[block.index("# ─── GDPR erasure pipeline"):block.index("GDPRTICKSVC")]
+        for need in ("standing: true", "not_before", "veto", "verify_standing", "PIPELINE_SENDS_APPROVED"):
+            self.assertIn(need, block, f"the unit comment must state {need}")
+
+    def test_the_tick_unit_send_is_capped_and_named_to_a_resolved_seat(self):
+        """The brake and the identity, structurally: `--send` without `--limit` would send the whole standing set on
+        the first tick, and `--approved-by` typed inline would let a rotated seat edit live in a unit file."""
+        p = os.path.join(os.path.dirname(__file__), "..", "scripts", "install-aux-units.sh")
+        text = open(p).read()
+        # the SERVICE body, not the comment block: the ExecStart line lives past the GDPRTICKSVC heredoc marker
+        block = text[text.index("# ─── GDPR erasure pipeline"):text.index("GDPRTICKTMR")]
+        self.assertIn("--send", block)
+        self.assertRegex(block, r"--send[^\n]*--limit \d+", "a send without a cap sends the whole register at once")
+        self.assertIn("--approved-by $GDPR_SENDER_SEAT", block)
+        self.assertIn("Environment=GDPR_SENDER_SEAT=", block)
 
 
 class WatchdogDistinguishesInterim(unittest.TestCase):
@@ -3756,6 +3779,488 @@ class SendApproval(unittest.TestCase):
         self.assertNotIn("APPROVE gdpr", text.upper())
 
 
+class ScheduledSends(unittest.TestCase):
+    """Fable decision 11-04 B26 Q1 ("unlock both lines; the register sends on its due dates") with Aaron's 24 h veto.
+
+    The unattended path cannot post a 2-hour Slack message per batch, so what authorises it is a REVIEWED LEDGER ENTRY
+    with `standing: true`. Every case below is a way that could quietly become "may send forever": a ruling promoted
+    without the field, a veto window ignored, another identity executing it, a kind borrowed from another letter, an
+    expiry ignored - and the one thing that must NOT change, that the interactive approval is not loosened by any of
+    this.
+    """
+
+    WHO = "U0SEAT1111"
+    OTHER = "U7RP6HKUY"
+    NOW = datetime(2026, 11, 6, 12, 0, tzinfo=timezone.utc)
+
+    def setUp(self):
+        self._tmp = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
+        self._write([])
+        self.addCleanup(lambda: os.remove(self._path))
+
+    @property
+    def _path(self):
+        return self._tmp.name
+
+    def _write(self, rulings):
+        self._tmp.seek(0)
+        self._tmp.truncate()
+        json.dump({"rulings": rulings}, self._tmp)
+        self._tmp.flush()
+
+    def _standing(self, **over):
+        row = {"id": "stand-ask", "kind": "ask", "standing": True, "expires": "2026-12-05T21:30:00Z",
+               "not_before": "2026-11-05T21:30:00Z", "approved_by": self.WHO, "copy_sha": copy.fingerprint(),
+               "classes": ["privacy_erasure"]}
+        row.update(over)
+        return row
+
+    def items(self):
+        return [{"row": 1, "register_no": 271, "text": "an approved letter", "class": "privacy_erasure"}]
+
+    def check(self, kind="ask", who=None, now=None):
+        return approval.verify_standing(kind, self.items(), approved_by=who or self.WHO,
+                                        now=now or self.NOW, path=self._path)
+
+    # ---------------------------------------------------------------- the refusals
+    def test_a_ruling_without_the_standing_field_never_authorises_an_unattended_send(self):
+        """The field is the whole safety property: the three ask/confirm rulings that already exist must not silently
+        become standing ones, so a valid ruling whose ONLY difference is the missing field refuses."""
+        self._write([{"id": "r-ask", "kind": "ask", "expires": "2026-12-05T21:30:00Z"}])
+        ok, why = self.check()
+        self.assertFalse(ok)
+        self.assertIn("standing", why)
+
+    def test_the_veto_window_is_a_clock_and_the_refusal_names_the_instant(self):
+        """Aaron's 24 h veto (decision 11-04) is expressed as `not_before`, not as a human remembering to flip a flag.
+        Before that instant every scheduled send refuses - and says WHEN it starts, so nobody has to guess."""
+        self._write([self._standing()])
+        ok, why = self.check(now=datetime(2026, 11, 5, 21, 0, tzinfo=timezone.utc))
+        self.assertFalse(ok)
+        self.assertIn("2026-11-05T21:30:00+00:00", why)
+        self.assertIn("veto", why)
+
+    def test_the_standing_ruling_binds_the_identity_that_runs_it(self):
+        """A standing ruling is not a blank cheque for whoever runs the unit: it names the approver, and executing it
+        under another (even allowlisted) identity refuses."""
+        self._write([self._standing()])
+        ok, why = self.check(who=self.OTHER)
+        self.assertFalse(ok)
+        self.assertIn(self.WHO, why)
+        self.assertIn(self.OTHER, why)
+
+    def test_a_standing_ruling_is_scoped_to_its_kind(self):
+        """An `ask` authorisation never sends a `confirm`: the two letters make different claims to the customer."""
+        self._write([self._standing()])
+        ok, why = self.check(kind="confirm")
+        self.assertFalse(ok)
+        self.assertIn("confirm", why)
+
+    def test_an_expired_standing_ruling_stops_sending(self):
+        self._write([self._standing(expires="2026-11-01T00:00:00Z")])
+        ok, why = self.check()
+        self.assertFalse(ok)
+        self.assertIn("expired", why)
+
+    def test_a_standing_ruling_with_an_unreadable_not_before_is_not_trusted(self):
+        self._write([self._standing(not_before="soon")])
+        ok, why = self.check()
+        self.assertFalse(ok)
+        self.assertIn("not_before", why)
+
+    def test_a_naive_not_before_is_refused_by_name_instead_of_crashing_the_tick(self):
+        """QA finding on #1779: `datetime.fromisoformat("2026-11-05T21:30:00")` PARSES - it just returns an
+        offset-naive datetime - and comparing that to the tick's UTC-aware `now` raises TypeError. A crash is not a
+        refusal: the hourly unit dies before the letters after it and repeats the same failure every run, so the
+        whole scheduled path stops on a typo in a ledger field. A ruling that does not say WHICH clock it means
+        cannot be relied on, so it is refused by name."""
+        self._write([self._standing(not_before="2026-11-05T21:30:00")])
+        ok, why = self.check()
+        self.assertFalse(ok)
+        self.assertIn("not_before", why)
+        self.assertIn("timezone", why)
+
+    def test_a_naive_expires_is_refused_by_name_instead_of_crashing_the_tick(self):
+        """The same naive/aware comparison sits on `expires` in `_ruling_ok`, which every non-standing ruling goes
+        through - so the crash was reachable from the ordinary approval path too, not just the standing one."""
+        self._write([self._standing(expires="2026-12-05T21:30:00")])
+        ok, why = self.check()
+        self.assertFalse(ok)
+        self.assertIn("expires", why)
+        self.assertIn("timezone", why)
+
+    def test_a_naive_expires_on_an_ordinary_ruling_is_refused_not_raised(self):
+        """`_ruling_ok` is the path a plain (non-standing) ruling takes, and `verify` calls it from the send gate
+        itself - so a TypeError there is an unhandled crash in the unit, not a refusal the operator can read."""
+        why = approval._ruling_ok({"id": "r-ask", "kind": "ask", "expires": "2026-12-05T21:30:00"},
+                                  "ask", self.NOW)
+        self.assertIn("timezone", why)
+        self.assertIn("r-ask", why)
+
+    def test_a_standing_ruling_without_a_veto_window_is_not_trusted(self):
+        """QA finding on #1779: `if nb:` skipped the veto gate when the field was ABSENT, so a standing ruling that
+        simply omitted `not_before` started sending the moment it merged - the 24 h veto silently gone. Absent is a
+        refusal, not "already elapsed"."""
+        row = self._standing()
+        del row["not_before"]
+        self._write([row])
+        ok, why = self.check()
+        self.assertFalse(ok)
+        self.assertIn("not_before", why)
+        self.assertIn("veto", why)
+
+    def test_a_standing_ruling_without_an_approver_is_not_trusted(self):
+        """Same fail-open shape one field over: `if want:` skipped the identity match when `approved_by` was absent,
+        so the grant could be executed by ANY identity - including one that is not allowlisted."""
+        row = self._standing()
+        del row["approved_by"]
+        self._write([row])
+        ok, why = self.check()
+        self.assertFalse(ok)
+        self.assertIn("approved_by", why)
+
+    def test_a_standing_ruling_without_a_copy_identity_is_not_trusted(self):
+        """A month-long unattended grant must name the WORDS it was cut for. Without `copy_sha` it authorises whatever
+        the tree happens to render, so editing an approved sentence would ride the old grant."""
+        row = self._standing()
+        del row["copy_sha"]
+        self._write([row])
+        ok, why = self.check()
+        self.assertFalse(ok)
+        self.assertIn("copy_sha", why)
+
+    def test_editing_approved_copy_invalidates_the_standing_grant(self):
+        """THE finding, end to end: the grant is live, the copy changes, and the scheduled send must REFUSE rather
+        than deliver text nobody approved. Driven through `scheduled_send`, not just the predicate, because the
+        predicate being right is worthless if the tick does not consult it."""
+        cli = self._cli()
+        self._write([self._standing()])
+        a = mock.Mock(send=True, approved_by=self.WHO, limit=0, manifest="")
+        item = {"row": 1, "register_no": 271, "channel": "intercom", "to": "x@example.com", "text": "letter",
+                "class": "privacy_erasure"}
+        run = mock.Mock()
+        run.asks.return_value = [item]
+        run.confirmations.return_value = []
+        out = []
+        with mock.patch.object(copy, "PIPELINE_SENDS_APPROVED", True), \
+                mock.patch.object(copy, "LINK_LINE", "So we act on the right pages, please reply with the link(s)."), \
+                mock.patch.dict(os.environ, {"GDPR_RULINGS_LEDGER": self._path}, clear=True), \
+                mock.patch.object(cli.approval, "seat_id", lambda: self.WHO), \
+                mock.patch.object(cli.send, "materialise", lambda r, items: items), \
+                mock.patch.object(cli.send, "deliver", mock.Mock(side_effect=AssertionError("must not deliver"))), \
+                mock.patch("builtins.print", lambda *x, **k: out.append(" ".join(str(i) for i in x))):
+            cli.scheduled_send(run, a, self.NOW)
+        self.assertTrue(any("REFUSED" in line and "copy" in line for line in out), out)
+
+    def test_the_first_wave_cap_counts_letters_that_reach_a_writer(self):
+        """QA finding on #1779: the cap was applied to the SELECTION, so 25 permanently-refused rows (no address,
+        unapproved copy) occupied the window on every tick and row 26 was never attempted - even past its statutory
+        deadline. The brake is on how many customers get mail, so a refusal must not spend it."""
+        cli = self._cli()
+        self._write([self._standing()])
+        a = mock.Mock(send=True, approved_by=self.WHO, limit=2, manifest="")
+        refused = [{"row": i, "register_no": 100 + i, "channel": "notices", "to": "", "text": "letter",
+                    "class": "privacy_erasure", "refuse": "no requester_email"} for i in range(1, 4)]
+        due = {"row": 9, "register_no": 200, "channel": "intercom", "to": "x@example.com", "text": "letter",
+               "class": "privacy_erasure"}
+        run = mock.Mock()
+        run.asks.return_value = refused + [due]
+        run.confirmations.return_value = []
+        sent = []
+        with mock.patch.object(copy, "PIPELINE_SENDS_APPROVED", True), \
+                mock.patch.dict(os.environ, {"GDPR_RULINGS_LEDGER": self._path}, clear=True), \
+                mock.patch.object(cli.approval, "seat_id", lambda: self.WHO), \
+                mock.patch.object(cli.send, "materialise", lambda r, items: items), \
+                mock.patch.object(cli.send, "deliver",
+                                  lambda r, x, kind, who, slot=None: sent.append(x["register_no"]) or
+                                  {"state": "refused" if x.get("refuse") else "sent", "why": x.get("refuse")}), \
+                mock.patch("builtins.print", lambda *x, **k: None):
+            cli.scheduled_send(run, a, self.NOW)
+        self.assertIn(200, sent, "a refused prefix must not starve the row behind it")
+
+    def test_a_ruling_without_classes_authorises_nothing(self):
+        """QA finding on #1779: a kind-only grant is not enough. `copy.ASK` is erasure copy and a dmca_takedown or
+        legal_threat row reaches the same ASK_LINK verdict, so the grant has to name the REQUESTS it covers."""
+        row = self._standing()
+        del row["classes"]
+        self._write([row])
+        ok, why = self.check()
+        self.assertFalse(ok)
+        self.assertIn("names no `classes`", why)
+
+    def test_a_batch_carrying_a_class_the_ruling_does_not_name_is_refused(self):
+        self._write([self._standing()])
+        ok, why = approval.verify_standing(
+            "ask", [{"row": 1, "register_no": 271, "text": "x", "class": "dmca_takedown"}],
+            approved_by=self.WHO, now=self.NOW, path=self._path)
+        self.assertFalse(ok)
+        self.assertIn("dmca_takedown", why)
+        self.assertIn("no standing ruling covers", why)
+
+    def test_a_future_dated_ruling_does_not_widen_the_selection(self):
+        """QA finding on #1779: `standing_classes` used to union classes from rulings that had not passed their veto
+        window or did not name the running identity. A future-dated `legal_threat` grant then widened the batch, and
+        verification refused the WHOLE thing because no single ruling covered it - so the due erasure letters did not
+        send. Selection and verification now read the same eligibility list."""
+        self._write([self._standing(),
+                     self._standing(id="stand-legal", classes=["legal_threat"],
+                                    not_before="2027-01-01T00:00:00Z")])
+        self.assertEqual(approval.standing_classes("ask", self.WHO, now=self.NOW, path=self._path),
+                         {"privacy_erasure"})
+        ok, why = self.check()
+        self.assertTrue(ok, why)
+
+    def test_two_eligible_rulings_together_authorise_a_mixed_batch(self):
+        """The other half: when BOTH grants are live, a batch carrying both classes is authorised by the pair rather
+        than refused because neither one alone covers it."""
+        self._write([self._standing(), self._standing(id="stand-legal", classes=["legal_threat"])])
+        self.assertEqual(approval.standing_classes("ask", self.WHO, now=self.NOW, path=self._path),
+                         {"privacy_erasure", "legal_threat"})
+        ok, why = approval.verify_standing(
+            "ask", [{"row": 1, "register_no": 271, "text": "x", "class": "privacy_erasure"},
+                    {"row": 2, "register_no": 272, "text": "y", "class": "legal_threat"}],
+            approved_by=self.WHO, now=self.NOW, path=self._path)
+        self.assertTrue(ok, why)
+        self.assertIn("together authorise", why)
+
+    def test_an_overdue_non_erasure_row_never_reaches_the_scheduled_send(self):
+        """The end-to-end shape of the finding: a past-due dmca_takedown row with an ASK_LINK verdict used to be
+        selected by `run.asks` and delivered under the erasure standing grant, so the rights-holder was told "the
+        deletion request you made on {date} is in progress". It must be refused at the letter level AND the batch
+        must not be authorised at the grant level."""
+        cli = self._cli()
+        self._write([self._standing()])
+        a = mock.Mock(send=True, approved_by=self.WHO, limit=0, manifest="")
+        item = {"row": 1, "register_no": 271, "channel": "notices", "to": "legal@example.com",
+                "text": "letter", "class": "dmca_takedown",
+                "refuse": run_mod.ask_refusal("dmca_takedown", True)}
+        self.assertIn("ERASURE copy", item["refuse"])
+        run = mock.Mock()
+        run.asks.return_value = [item]
+        run.confirmations.return_value = []
+        sent, out = [], []
+        with mock.patch.object(copy, "PIPELINE_SENDS_APPROVED", True), \
+                mock.patch.dict(os.environ, {"GDPR_RULINGS_LEDGER": self._path}, clear=True), \
+                mock.patch.object(cli.approval, "seat_id", lambda: self.WHO), \
+                mock.patch.object(cli.send, "materialise", lambda r, items: items), \
+                mock.patch.object(cli.send, "deliver",
+                                  lambda r, x, kind, who, slot=None: sent.append(x["register_no"]) or
+                                  {"state": "refused", "why": x.get("refuse")}), \
+                mock.patch("builtins.print", lambda *x, **k: out.append(" ".join(str(i) for i in x))):
+            cli.scheduled_send(run, a, self.NOW)
+        self.assertEqual(sent, [], "a non-erasure row must not be delivered under the erasure grant")
+        self.assertTrue(any("left out - class not in the standing grant" in line for line in out), out)
+
+    def test_a_mixed_batch_still_sends_the_erasure_letters(self):
+        """The other half of the same fix, and the reason the selection is narrowed instead of the batch refused:
+        refusing everything because a takedown notice shares the batch would leave the statutory breaches unsent."""
+        cli = self._cli()
+        self._write([self._standing()])
+        a = mock.Mock(send=True, approved_by=self.WHO, limit=0, manifest="")
+        erasure = {"row": 1, "register_no": 271, "channel": "intercom", "to": "x@example.com",
+                   "text": "letter", "class": "privacy_erasure"}
+        takedown = {"row": 2, "register_no": 272, "channel": "notices", "to": "legal@example.com",
+                    "text": "letter", "class": "dmca_takedown"}
+        run = mock.Mock()
+        run.asks.return_value = [erasure, takedown]
+        run.confirmations.return_value = []
+        sent = []
+        with mock.patch.object(copy, "PIPELINE_SENDS_APPROVED", True), \
+                mock.patch.dict(os.environ, {"GDPR_RULINGS_LEDGER": self._path}, clear=True), \
+                mock.patch.object(cli.approval, "seat_id", lambda: self.WHO), \
+                mock.patch.object(cli.send, "materialise", lambda r, items: items), \
+                mock.patch.object(cli.send, "deliver",
+                                  lambda r, x, kind, who, slot=None: sent.append(x["register_no"]) or
+                                  {"state": "sent", "ref": "m1"}), \
+                mock.patch("builtins.print", lambda *x, **k: None):
+            cli.scheduled_send(run, a, self.NOW)
+        self.assertEqual(sent, [271], "the erasure letter must still go; only the takedown is left out")
+
+    def test_no_ledger_means_no_scheduled_send(self):
+        ok, why = approval.verify_standing("ask", self.items(), approved_by=self.WHO, now=self.NOW,
+                                           path="/nonexistent/ledger.json")
+        self.assertFalse(ok)
+        self.assertIn("does not exist", why)
+
+    # ---------------------------------------------------------------- the authorisation
+    def test_a_live_standing_ruling_authorises_the_send_it_names(self):
+        self._write([self._standing()])
+        ok, why = self.check()
+        self.assertTrue(ok, why)
+        self.assertIn("stand-ask", why)
+        self.assertIn(approval.digest("ask", self.items()), why)
+
+    def _cli(self):
+        sys.argv = ["gdpr-pipeline.py"]
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "gdpr_cli_sched", os.path.join(os.path.dirname(__file__), "..", "scripts", "gdpr-pipeline.py"))
+        cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli)
+        return cli
+
+    def test_the_scheduled_pass_skips_the_kind_instead_of_killing_the_tick(self):
+        """The tick has already done intake/decide/mark_hidden when the send pass runs, so an unauthorised send must
+        SKIP and say why - raising there would throw away the hour's register work along with the send. Proven by
+        driving the real CLI function with no standing ruling and asserting it returns instead of exiting."""
+        cli = self._cli()
+        a = mock.Mock(send=True, approved_by=self.WHO, limit=0, manifest="")
+        run = mock.Mock()
+        run.asks.return_value = [{"row": 1, "register_no": 271, "channel": "intercom",
+                                 "to": "x@example.com", "text": "letter", "class": "privacy_erasure"}]
+        run.confirmations.return_value = []
+        out = []
+        with mock.patch.object(copy, "PIPELINE_SENDS_APPROVED", True), \
+                mock.patch.dict(os.environ, {"GDPR_RULINGS_LEDGER": self._path}, clear=True), \
+                mock.patch.object(cli.approval, "seat_id", lambda: self.WHO), \
+                mock.patch.object(cli.send, "materialise", lambda r, items: items), \
+                mock.patch.object(cli.send, "deliver", mock.Mock(side_effect=AssertionError("must not deliver"))), \
+                mock.patch("builtins.print", lambda *x, **k: out.append(" ".join(str(i) for i in x))):
+            cli.scheduled_send(run, a, self.NOW)                    # no standing ruling -> skip, no raise
+        self.assertTrue(any("REFUSED" in line and "standing" in line for line in out), out)
+
+    def test_the_scheduled_pass_delivers_under_the_live_standing_ruling(self):
+        cli = self._cli()
+        self._write([self._standing()])
+        a = mock.Mock(send=True, approved_by=self.WHO, limit=0, manifest="")
+        item = {"row": 1, "register_no": 271, "channel": "intercom", "to": "x@example.com", "text": "letter",
+                "class": "privacy_erasure"}
+        run = mock.Mock()
+        run.asks.return_value = [item]
+        run.confirmations.return_value = []
+        sent = []
+        with mock.patch.object(copy, "PIPELINE_SENDS_APPROVED", True), \
+                mock.patch.dict(os.environ, {"GDPR_RULINGS_LEDGER": self._path}, clear=True), \
+                mock.patch.object(cli.approval, "seat_id", lambda: self.WHO), \
+                mock.patch.object(cli.send, "materialise", lambda r, items: items), \
+                mock.patch.object(cli.send, "deliver",
+                                  lambda r, x, kind, who, slot=None: sent.append((kind, who, slot)) or
+                                  {"state": "sent", "ref": "m1"}), \
+                mock.patch("builtins.print", lambda *x, **k: None):
+            cli.scheduled_send(run, a, self.NOW)
+        self.assertEqual(sent, [("ask", self.WHO, None)], "the approved kind must be delivered exactly once")
+
+    def test_a_standing_ruling_never_weakens_the_human_approval_path(self):
+        """The separation that makes the two paths trustworthy: the SAME ledger with a live standing ruling does not
+        let the interactive gate pass without the human's Slack message."""
+        self._write([self._standing()])
+        env = {"GDPR_RULINGS_LEDGER": self._path, "GDPR_APPROVAL_CHANNEL": "C0ADV2W76G4",
+               "MUSO_SLACK_BOT_TOKEN_DEVOPS": "xoxb-test"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            ok, why = approval.verify("ask", self.items(), "U7RP6HKUZ", ("U7RP6HKUZ",),
+                                      history=lambda ch, tok, oldest: [])
+        self.assertFalse(ok)
+        self.assertIn("no message", why)
+
+
+class CopyIdentity(unittest.TestCase):
+    """`copy.fingerprint()` is what a STANDING ruling names, and a standing grant runs unattended for a month.
+
+    So the fingerprint has to cover the whole customer-facing surface, not just the constants somebody remembered to
+    list: the MAPPING the sender reads (`copy.ASK[kind]`) and the RENDERERS that assemble a letter. A grant that
+    survives an edit to either one authorises words nobody approved - the exact failure the digest exists to prevent,
+    one level up (QA finding on #1779).
+    """
+
+    def test_a_mapping_only_edit_moves_the_fingerprint(self):
+        """`run.py` sends `copy.ASK[kind]`, so repointing the mapping changes the outgoing letter while every constant
+        in `_COPY_IDENTITY` stays byte-identical. Before this was covered, the grant still passed."""
+        before = copy.fingerprint()
+        with mock.patch.dict(copy.ASK, {"ASK_LINK": "a different sentence nobody approved"}):
+            self.assertNotEqual(copy.fingerprint(), before, "a mapping-only edit must move the identity")
+        self.assertEqual(copy.fingerprint(), before, "and it must move back when the edit is undone")
+
+    def test_a_mapping_that_points_at_a_new_constant_moves_the_fingerprint(self):
+        """The subtler shape: the constants are untouched and only the mapping's target changes."""
+        before = copy.fingerprint()
+        with mock.patch.dict(copy.ASK, {"ASK_AUTH": copy.LINK_LINE}):
+            self.assertNotEqual(copy.fingerprint(), before)
+
+    def test_a_renderer_edit_moves_the_fingerprint(self):
+        """A constant can be untouched while the function that assembles it into a letter changes what the recipient
+        reads. Hashing the renderers' BEHAVIOUR (bytecode + constants + names) catches that."""
+        before = copy.fingerprint()
+        real = copy.render_confirmation
+
+        def render_confirmation(*a, **kw):
+            return real(*a, **kw) + "\nOne more line nobody approved."
+
+        with mock.patch.object(copy, "render_confirmation", render_confirmation):
+            self.assertNotEqual(copy.fingerprint(), before)
+
+    def test_a_transitive_formatter_moves_the_fingerprint(self):
+        """`human_date` is called by `progress_line`, `new_thread_lead` and `render_confirmation`, so changing its
+        format changes every customer-facing body while the renderers themselves are untouched (QA finding on
+        #1779). It is in `_COPY_RENDERERS` for that reason."""
+        before = copy.fingerprint()
+        with mock.patch.object(copy, "human_date", lambda iso: iso[:10]):
+            self.assertNotEqual(copy.fingerprint(), before)
+
+    def test_the_new_thread_assembler_is_inside_the_fingerprint(self):
+        """QA finding on #1779: the new-thread body used to be assembled in `send.final_letter`, outside this module,
+        so an edit there added a customer-facing line while both standing rulings' `copy_sha` still matched. The
+        assembly now lives in `copy.new_thread_letter`, which `_COPY_RENDERERS` covers."""
+        before = copy.fingerprint()
+        real = copy.new_thread_letter
+
+        def new_thread_letter(*a, **kw):
+            body, subject = real(*a, **kw)
+            return body + "\n\nOne more line nobody approved.", subject
+
+        with mock.patch.object(copy, "new_thread_letter", new_thread_letter):
+            self.assertNotEqual(copy.fingerprint(), before)
+
+    def test_final_letter_adds_no_text_of_its_own(self):
+        """The structural half of the same finding: `send.final_letter` may decide WHETHER to assemble and who the
+        recipient is, but every customer-facing byte must come from `copy.new_thread_letter`. If somebody adds a
+        disclosure line back into the sender, this fails even though the fingerprint would not move."""
+        row = {"channel": "notices", "class": "privacy_erasure", "received_at": "2026-11-03T10:00:00Z",
+               "conversation_id": "", "gmail_thread": "1a11677c51f6533d", "requester_email": "a@example.com"}
+        with mock.patch.object(send, "route", return_value=("mail_new_thread", "a@example.com")):
+            body, subject, to = send.final_letter(row, "the approved ask")
+        want_body, want_subject = copy.new_thread_letter("notices@muso.ai", "2026-11-03T10:00:00Z",
+                                                         "privacy_erasure", "the approved ask")
+        self.assertEqual(body, want_body)
+        self.assertEqual(subject, want_subject)
+        self.assertEqual(to, "a@example.com")
+
+    def test_no_renderer_reaches_a_helper_outside_the_fingerprint(self):
+        """The class of bug, not the instance: a hand-maintained list is how `human_date` was missed, so the list is
+        CHECKED against the renderers' own bytecode. A new helper fails here instead of shipping under a live grant."""
+        self.assertEqual(copy._transitive_helpers(), set(), (
+            "these functions are reached by a renderer but are not in copy._COPY_RENDERERS, so editing one would "
+            "change a customer-facing letter without moving copy.fingerprint()"))
+
+    def test_a_comment_only_edit_does_not_move_the_identity(self):
+        """The other direction, and it matters: if a comment typo forced a re-cut, people would re-cut without
+        reading, which is how a grant stops meaning anything. Behaviour, not text."""
+        def a(x):
+            # one comment
+            return x + 1
+
+        def b(x):
+            # a different comment, and a blank line
+
+            return x + 1
+
+        def c(x):
+            return x + 2
+
+        self.assertEqual(copy._code_identity(a), copy._code_identity(b))
+        self.assertNotEqual(copy._code_identity(a), copy._code_identity(c), "a real change must move it")
+
+    def test_the_shipped_standing_rulings_name_the_copy_this_tree_renders(self):
+        """The ledger is the only thing the send gate trusts, so a stale `copy_sha` there refuses EVERY scheduled
+        letter - and it would look like 'the human did not approve'. Re-cut with `gdpr-pipeline.py copy-sha`."""
+        led = approval.rulings(os.path.join(os.path.dirname(__file__), "..", "policies", "gdpr-send-rulings.json"))
+        standing = {rid: r for rid, r in led.items() if r.get("standing")}
+        self.assertTrue(standing, "the scheduled path has no standing ruling at all")
+        for rid, r in standing.items():
+            self.assertEqual(r.get("copy_sha"), copy.fingerprint(), (
+                f"{rid} names copy_sha {r.get('copy_sha')!r} but this tree renders {copy.fingerprint()!r}; re-cut it "
+                f"with `gdpr-pipeline.py copy-sha` in the same PR that changed the copy"))
+
+
 class PastDueAskCopy(unittest.TestCase):
     """A request already past its statutory date owes the customer an acknowledgement that the erasure is under way,
     plus the ask (23:2xZ delegated ruling item 3). The words are legal copy, so while they are unapproved the letter
@@ -3870,10 +4375,20 @@ class ConversationReadIntegrity(unittest.TestCase):
                 "conversation_parts": obj,
                 "contacts": {"contacts": [{"id": "c1"}]}}
 
-    def read(self, cv, contact=None):
+    def read(self, cv, contact=None, pager=None):
+        """`pager(before)` is the page the API returns for `parts_created_before=<before>`; default is an empty one,
+        which is the floor (nothing older than the oldest part we hold)."""
         contact = {"id": "c1", "external_id": "auth0|abc", "email": "them@example.com", "name": "They"}
-        with mock.patch.object(sources, "intercom",
-                               lambda m, p, b=None: (contact if p.startswith("/contacts/") else cv)):
+
+        def fake(m, p, b=None):
+            if p.startswith("/contacts/"):
+                return contact
+            if "parts_created_before=" in p:
+                before = int(p.split("parts_created_before=")[1])
+                return {"conversation_parts": {"conversation_parts": pager(before) if pager else []}}
+            return cv
+
+        with mock.patch.object(sources, "intercom", fake):
             return sources._conversation("9")
 
     def test_a_customer_authored_source_is_the_customers_words(self):
@@ -3914,12 +4429,92 @@ class ConversationReadIntegrity(unittest.TestCase):
             self.read(self.conv(n_parts=500, total=812))
         self.assertIn("parts", str(e.exception))
 
-    def test_AT_the_cap_is_potentially_truncated_even_when_total_count_agrees(self):
+    def test_a_capped_history_is_walked_back_to_the_opening_message(self):
         """`total_count` counts the parts IN THE RESPONSE, so a 600-part thread arrives as 500 parts with
-        total_count=500. Sitting at the cap is the only signal there is, so it must fail closed."""
+        total_count=500 - sitting at the cap is the only signal there is. It used to fail closed and ask for a human;
+        `parts_created_before` (accepted on the 2.11 we pin, verified against a live 763-part thread) walks back by
+        time window instead, so the request that sat in the dropped part is read rather than lost."""
+        cv = self.conv(n_parts=500, total=500)
+        cv["created_at"] = 1_759_000_000          # the thread opened before its oldest surviving part
+
+        def pager(before):
+            if before == 1_760_000_000:
+                return [{"id": "old1", "author": {"type": "user"}, "body": "please delete me",
+                         "created_at": 1_759_999_000}]
+            return []
+
+        out = self.read(cv, pager=pager)
+        self.assertIn("please delete me", out["customer_text"], "the dropped part held the request")
+        self.assertEqual(len(out["parts"]), 502, "the customer source body + 500 parts + the one walked back to")
+
+    def test_a_conversation_of_exactly_the_cap_reads_normally(self):
+        """The floor: the oldest part we hold IS the conversation's opening, so there is nothing to walk back to and
+        no extra call is made. A 500-part thread is not automatically a truncated one."""
+        out = self.read(self.conv(n_parts=500, total=500))
+        self.assertEqual(len(out["parts"]), 501)
+
+    def test_a_walk_that_never_reaches_the_opening_message_still_fails_closed(self):
+        """The bound is a page count, so a thread that keeps returning fresh parts without reaching its own
+        `created_at` is a refusal - never a silently truncated read dated from what survived."""
+        cv = self.conv(n_parts=500, total=500)
+        cv["created_at"] = 1_000_000_000
+        n = [0]
+
+        def pager(before):
+            n[0] += 1
+            return [{"id": f"p{n[0]}", "author": {"type": "user"}, "body": "x", "created_at": before - 1}]
+
         with self.assertRaises(sources.Unknown) as e:
-            self.read(self.conv(n_parts=500, total=500))
-        self.assertIn("cap", str(e.exception))
+            self.read(cv, pager=pager)
+        self.assertIn("reconcile by hand", str(e.exception))
+        self.assertEqual(n[0], sources.MAX_PART_PAGES, "the walk is bounded, not unbounded")
+
+    def test_a_full_page_of_parts_we_already_hold_is_not_the_floor(self):
+        """QA finding on #1779. `parts_created_before` is INCLUSIVE and returns the 500 most recent parts at or
+        before the instant, so when 500 recent parts share one timestamp the page comes back FULL and adds nothing
+        new. That used to be read as "nothing older exists" and set `complete=True`; with no usable `total_count`
+        the later check could not catch it, so intake advanced from a partial history and a request in the unseen
+        part was dropped. A full page that adds nothing is a refusal, not a floor."""
+        cv = self.conv(n_parts=500, total=500)
+        cv["created_at"] = 1_759_000_000
+        held = cv["conversation_parts"]["conversation_parts"]
+        for i, p in enumerate(held):
+            p["id"] = f"p{i}"
+            p["created_at"] = 1_760_000_000          # every part shares one instant
+        del cv["conversation_parts"]["total_count"]  # and there is no count to fall back on
+
+        def pager(before):
+            # the inclusive window hands back the same 500 parts, sitting at the cap
+            return [dict(p) for p in held]
+
+        with self.assertRaises(sources.Unknown) as e:
+            self.read(cv, pager=pager)
+        self.assertIn("reconcile by hand", str(e.exception))
+
+    def test_a_short_page_that_adds_nothing_is_still_the_floor(self):
+        """The other side of the same test: a page BELOW the cap that adds nothing means the API had nothing older,
+        so the history is complete and the read must not be refused. Without this, the fix above would turn every
+        ordinary capped thread into a manual reconciliation."""
+        cv = self.conv(n_parts=500, total=500)
+        cv["created_at"] = 1_759_000_000
+        held = cv["conversation_parts"]["conversation_parts"]
+        for i, p in enumerate(held):
+            p["id"] = f"p{i}"
+            p["created_at"] = 1_760_000_000
+
+        def pager(before):
+            return [dict(p) for p in held[:3]]      # below the cap: the API has nothing more
+
+        out = self.read(cv, pager=pager)
+        self.assertEqual(len(out["parts"]), 501, "the customer source body + its 500 parts")
+
+    def test_a_capped_conversation_with_no_created_at_fails_closed(self):
+        """No `created_at` means no floor to walk back to, so completeness cannot be proven."""
+        cv = self.conv(n_parts=500, total=500)
+        del cv["created_at"]
+        with self.assertRaises(sources.Unknown) as e:
+            self.read(cv)
+        self.assertIn("created_at", str(e.exception))
 
     def test_just_under_the_cap_reads_normally(self):
         out = self.read(self.conv(n_parts=499, total=499))

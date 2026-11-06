@@ -16,6 +16,9 @@ convention: one letter per (request, kind) in `erasure_sends`, an allowlisted hu
 """
 from __future__ import annotations
 
+import hashlib
+import types
+
 # Flipped by the PR that carries the GO, never edited casually: this constant is the difference between a dry run and
 # a letter to a customer. The gate is TWO locks - this one AND an allowlisted human's --approved-by per run.
 PIPELINE_SENDS_APPROVED = True
@@ -42,6 +45,18 @@ AUTH_LINE = ("Because you are writing on behalf of someone else, please send us 
              "for them.")
 
 ASK = {"ASK_LINK": LINK_LINE, "ASK_IDENTITY": IDENTITY_STEP, "ASK_AUTH": AUTH_LINE}
+
+# The classes the ASK copy was written for. `ASK` is ERASURE copy: LINK_LINE asks for "the Muso page(s) concerned"
+# and PROGRESS_LINE says "The deletion request you made on {received} is in progress". A `dmca_takedown` or
+# `legal_threat` row carries the same `ASK_LINK` verdict, so a kind-only gate sent erasure words to a rights-holder's
+# takedown notice and to a legal threat - and 15 of those rows were already past their date, so the FIRST unattended
+# tick would have said it to them (QA finding on #1779; measured on the live register 2026-11-06: 5 dmca_takedown and
+# 30 legal_threat rows carry ASK_LINK, 15 of them past due).
+#
+# Adding a class here releases customer-facing copy, so it is added in the PR that carries that class's ruling -
+# never in advance, and never by widening the tuple during a bug fix. Same rule as
+# NEW_THREAD_SUBJECT_APPROVED_CLASSES, and for the same reason.
+ASK_APPROVED_CLASSES = ("privacy_erasure",)
 
 # A request that is ALREADY past its statutory date owes the customer one more thing: an acknowledgement that the
 # deletion is under way (not a fresh promise) plus the ask itself (23:2xZ delegated ruling, item 3). APPROVED AS
@@ -180,6 +195,19 @@ def new_thread_lead(mailbox: str, received_iso: str, request_details: str = "you
     return NEW_THREAD_LEAD.format(mailbox=mailbox, date=human_date(received_iso), request_details=request_details)
 
 
+def new_thread_letter(mailbox: str, received_iso: str, cls: str, text: str) -> tuple[str, str]:
+    """(body, subject) for a letter that opens a NEW thread from support@ - the whole customer-facing assembly.
+
+    This lives HERE, not in `send.py`, because `copy.fingerprint()` is what a month-long standing ruling names and it
+    can only cover what this module owns. It used to be assembled in `send.final_letter`, so an edit there could add
+    or change a customer-facing line while both standing rulings' `copy_sha` still matched and the unattended tick
+    sent wording the grant never named (QA finding on #1779, verified by inserting a disclosure line and watching
+    `copy-sha` stay put). `send.final_letter` now only decides WHETHER to assemble and who the recipient is; every
+    byte of the letter is produced here, and `_COPY_RENDERERS` covers this function's behaviour."""
+    lead = new_thread_lead(mailbox, received_iso, new_thread_request_type(cls))
+    return lead + "\n\n" + text, new_thread_subject(cls)
+
+
 def render_confirmation(name: str, received_at: str, links: list[str], s_date: str, p_date: str, m_date: str) -> str:
     """The approved letter with ONLY the verified lines. P missing -> the 'in progress' line instead.
     No verified line at all -> refuse: a letter whose 'What we have done' is empty is not the approved letter."""
@@ -201,3 +229,122 @@ def render_confirmation(name: str, received_at: str, links: list[str], s_date: s
     if hit:
         raise ValueError(f"barred phrase in a rendered letter: {hit}")
     return body
+
+
+# ---------------------------------------------------------------- the copy identity a STANDING ruling binds
+# A standing ruling authorises an UNATTENDED send for a month. The interactive path does not need this: a human reads
+# the digest and approves the batch they can see. A standing grant is cut once and then runs by itself, so it has to
+# name the WORDS it was cut for - otherwise editing any approved sentence (or flipping a copy gate) leaves the grant
+# live and the tick keeps sending text nobody approved, which is the exact failure the digest exists to prevent, one
+# level up (QA finding on #1779).
+#
+# The tuple is the whole customer-facing surface, in a fixed order, and it includes the GATES: flipping
+# NEW_THREAD_LEAD_APPROVED changes what a recipient receives without changing a single string, so a fingerprint over
+# strings alone would miss it. Adding a constant here is part of adding copy.
+_COPY_IDENTITY = (
+    "LINK_LINE",
+    "IDENTITY_STEP",
+    "AUTH_LINE",
+    "PROGRESS_LINE",
+    "CONFIRM_HEAD",
+    "LINE_S",
+    "LINE_P",
+    "LINE_M",
+    "NEXT_HEAD",
+    "LINE_D_NO",
+    "LINE_P_PENDING",
+    "CONFIRM_TAIL",
+    "NEW_THREAD_LEAD",
+    "NEW_THREAD_SUBJECT",
+    "NEW_THREAD_REQUEST_TYPE",
+    "PIPELINE_SENDS_APPROVED",
+    "PROGRESS_LINE_APPROVED",
+    "NEW_THREAD_LEAD_APPROVED",
+    "NEW_THREAD_SUBJECT_APPROVED",
+    "NEW_THREAD_SUBJECT_APPROVED_CLASSES",
+    "ASK_APPROVED_CLASSES",
+    # The MAPPING the sender actually reads, not just the constants it was built from. `run.py` sends
+    # `copy.ASK[kind]`, so a mapping-only edit (repointing ASK["ASK_LINK"] at a different string, or at a new
+    # constant) changes the outgoing letter while every constant above stays byte-identical - the grant would still
+    # pass and send words its `copy_sha` never covered (QA finding on #1779).
+    "ASK",
+)
+
+# The RENDERERS, hashed by BEHAVIOUR rather than by text. A constant can be untouched while the function that
+# assembles it into a letter changes what the recipient reads (a dropped line, a reordered slot, a new default), and
+# that is the same hole one level down. Hashing the source would also move on a comment typo, which trains people to
+# re-cut without reading - the opposite of what the grant is for, so this hashes bytecode + constants + names.
+_COPY_RENDERERS = (
+    "render_confirmation",
+    "progress_line",
+    "new_thread_lead",
+    "new_thread_subject",
+    "new_thread_request_type",
+    "new_thread_letter",
+    # TRANSITIVE, and the reason this list is checked rather than trusted: every letter above formats its dates
+    # through `human_date`, so changing that one function's format changes every customer-facing body while the
+    # renderers themselves are untouched (QA finding on #1779). `_transitive_helpers` walks the renderers' bytecode
+    # so the NEXT helper of this shape fails CI instead of shipping under a live grant.
+    "human_date",
+)
+
+
+def _transitive_helpers() -> set[str]:
+    """The module-level functions a renderer reaches that are NOT already in `_COPY_RENDERERS` - i.e. the gap.
+
+    The fingerprint is only as good as its coverage, and a hand-maintained list is exactly how `human_date` was
+    missed. This is the mechanical answer: walk each renderer's `co_names`, follow anything that resolves to a
+    function defined HERE, and repeat. A test asserts the result is EMPTY, so the next helper of this shape fails CI
+    instead of shipping under a live grant."""
+    seen: set[str] = set()
+    todo = list(_COPY_RENDERERS)
+    while todo:
+        name = todo.pop()
+        fn = globals().get(name)
+        if not isinstance(fn, types.FunctionType):
+            continue
+        for ref in fn.__code__.co_names:
+            target = globals().get(ref)
+            if (isinstance(target, types.FunctionType) and target.__module__ == __name__
+                    and ref not in seen and ref not in _COPY_RENDERERS):
+                seen.add(ref)
+                todo.append(ref)
+    return seen
+
+
+def _code_identity(fn) -> str:
+    """A function's behaviour: its bytecode, names and constants, recursively into nested code objects.
+
+    Comments and whitespace do not move it; anything that could change the rendered words does."""
+    h = hashlib.sha256()
+
+    def walk(code) -> None:
+        h.update(code.co_code)
+        h.update(repr(code.co_names).encode())
+        h.update(repr(code.co_varnames).encode())
+        for const in code.co_consts:
+            if isinstance(const, types.CodeType):
+                walk(const)
+            else:
+                h.update(repr(const).encode())
+
+    walk(fn.__code__)
+    return h.hexdigest()[:16]
+
+
+def fingerprint() -> str:
+    """The identity of the approved copy in THIS tree. A standing ruling records it; a mismatch refuses the send.
+
+    Re-cut it with `gdpr-pipeline.py copy-sha` in the PR that changes any approved sentence, and put the new value in
+    the ruling - which is a reviewed commit, so the words and the grant move together or not at all."""
+    h = hashlib.sha256()
+    for name in _COPY_IDENTITY:
+        # Read the CURRENT module attribute, not a snapshot taken at import: the fingerprint has to answer "what does
+        # this tree render NOW", so a patched or edited constant must move it.
+        value = globals()[name]
+        # A mapping is hashed SORTED: the identity is the mapping, not the order somebody happened to type it in.
+        rendered = repr(sorted(value.items())) if isinstance(value, dict) else repr(value)
+        h.update(f"{name}={rendered}\n".encode())
+    for name in _COPY_RENDERERS:
+        h.update(f"{name}()={_code_identity(globals()[name])}\n".encode())
+    return h.hexdigest()[:16]

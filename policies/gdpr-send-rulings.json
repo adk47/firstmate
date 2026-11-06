@@ -41,6 +41,32 @@
       "approved_at": "2026-11-04T18:40:00Z",
       "expires": "2026-12-04T18:40:00Z",
       "source": "firstmate inbox 099/102, Fable close-out ruling [key=gdpr-support-from-1104]: notices@/legal@ requests are answered from support@ as a NEW thread (conditions 1-6), implemented in hydra #1749. SCOPE IS THE MAILBOX ROUTE, NOT THE INTERCOM ONE, and the subject is CLASS-SCOPED: copy.NEW_THREAD_SUBJECT_APPROVED_CLASSES is ('privacy_erasure',), so naming this ruling for an access/correction/objection row does NOT authorize its subject. The one-line lead is its own GO (legal-finalize-fable-k1, 2026-11-04) and its own constant, copy.NEW_THREAD_LEAD_APPROVED."
+    },
+    {
+      "id": "standing-erase-ask-1104",
+      "kind": "ask",
+      "standing": true,
+      "not_before": "2026-11-05T21:30:00Z",
+      "expires": "2026-12-05T21:30:00Z",
+      "approved_by": "U0AN41ZBTRU",
+      "source": "Fable decisions board 11-04 (Aaron 2026-11-04 ~21:1xZ delegation: 'use fable to make the decisions waiting on me ... stop waiting on me'; data/captain-decisions-fable-d6/decisions-2026-11-04.md) row B26 Q1: 'unlock both lines; the register sends on its due dates (copy already approved in gdpr-ack-v2-and-arpad-1101.md)' and row B27 THREE: 'merge the hide batch and schedule the tick (unlock)'. Marked IRREVERSIBLE (customer-facing legal sends): executes 24h after the board (not_before 2026-11-05T21:30Z) unless Aaron vetoes. STANDING = the scheduled path (gdpr_pipeline.approval.verify_standing) because an hourly tick cannot post a 2h Slack approval per batch; the interactive grammar path is unchanged and this record cannot loosen it.",
+      "copy_sha": "55648ce00d17fd3d",
+      "copy_sha_note": "copy.fingerprint() over every customer-facing constant + the copy gates. A standing grant runs unattended for a month, so it names the words it was cut for: editing any approved sentence or flipping a gate changes this value and the tick REFUSES until a PR re-cuts it. Re-cut with `gdpr-pipeline.py copy-sha`. RE-CUT 2026-11-06 (hydra #1779): the identity now also covers the `ASK` mapping the sender actually reads, the renderers' behaviour and the helpers they reach, and the new-thread assembler itself (which moved out of send.py so this identity can cover it), so the value moved while no approved sentence changed - the words are identical, the grant just names them more precisely.",
+      "classes": ["privacy_erasure"],
+      "classes_note": "The request CLASSES this grant authorises, checked by verify_standing against every item in the batch. A kind-only grant was not enough (QA finding on #1779): `copy.ASK` is ERASURE copy, and a dmca_takedown or legal_threat row reaches the same ASK_LINK verdict, so the first unattended tick would have told a rights-holder that 'the deletion request you made' is in progress. Measured on the live register 2026-11-06: 5 dmca_takedown and 30 legal_threat rows carry ASK_LINK, 15 of them already past due. Widening this list releases customer-facing copy, so it is widened in the PR that carries that class's ruling."
+    },
+    {
+      "id": "standing-erase-confirm-1104",
+      "kind": "confirm",
+      "standing": true,
+      "not_before": "2026-11-05T21:30:00Z",
+      "expires": "2026-12-05T21:30:00Z",
+      "approved_by": "U0AN41ZBTRU",
+      "source": "Fable decisions board 11-04 (Aaron 2026-11-04 ~21:1xZ delegation: 'use fable to make the decisions waiting on me ... stop waiting on me'; data/captain-decisions-fable-d6/decisions-2026-11-04.md) row B26 Q1: 'unlock both lines; the register sends on its due dates (copy already approved in gdpr-ack-v2-and-arpad-1101.md)' and row B27 THREE: 'merge the hide batch and schedule the tick (unlock)'. Marked IRREVERSIBLE (customer-facing legal sends): executes 24h after the board (not_before 2026-11-05T21:30Z) unless Aaron vetoes. STANDING = the scheduled path (gdpr_pipeline.approval.verify_standing) because an hourly tick cannot post a 2h Slack approval per batch; the interactive grammar path is unchanged and this record cannot loosen it.",
+      "copy_sha": "55648ce00d17fd3d",
+      "copy_sha_note": "copy.fingerprint() over every customer-facing constant + the copy gates. A standing grant runs unattended for a month, so it names the words it was cut for: editing any approved sentence or flipping a gate changes this value and the tick REFUSES until a PR re-cuts it. Re-cut with `gdpr-pipeline.py copy-sha`. RE-CUT 2026-11-06 (hydra #1779): the identity now also covers the `ASK` mapping the sender actually reads, the renderers' behaviour and the helpers they reach, and the new-thread assembler itself (which moved out of send.py so this identity can cover it), so the value moved while no approved sentence changed - the words are identical, the grant just names them more precisely.",
+      "classes": ["privacy_erasure"],
+      "classes_note": "The request CLASSES this grant authorises, checked by verify_standing against every item in the batch. A kind-only grant was not enough (QA finding on #1779): `copy.ASK` is ERASURE copy, and a dmca_takedown or legal_threat row reaches the same ASK_LINK verdict, so the first unattended tick would have told a rights-holder that 'the deletion request you made' is in progress. Measured on the live register 2026-11-06: 5 dmca_takedown and 30 legal_threat rows carry ASK_LINK, 15 of them already past due. Widening this list releases customer-facing copy, so it is widened in the PR that carries that class's ruling."
     }
   ]
 }

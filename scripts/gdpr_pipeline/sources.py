@@ -269,8 +269,65 @@ def _plain(s: str) -> str:
 
 
 MAX_PARTS_IN_RESPONSE = 500      # Intercom 2.11 returns at most the 500 most recent conversation parts
+MAX_PART_PAGES = 20              # a bound on the backwards walk, so a pathological thread cannot spin forever
 
 _CONV_CACHE: dict[str, dict] = {}
+
+
+def _all_parts(conv_id: str, newest: list[dict], created_at: int) -> list[dict]:
+    """Every part of a conversation the API truncated at its 500-part cap, oldest first.
+
+    The cap returns the 500 MOST RECENT parts, so the request itself can sit in the part that was dropped - which is
+    why this used to fail closed and ask for a human. The documented way back is the TIME WINDOW: `parts_created_before`
+    (accepted on 2.11, the version we pin - verified against a live 763-part thread) returns the parts at or before an
+    instant, so walking backwards from the oldest part we hold reaches the conversation's opening message.
+
+    It still fails closed if it cannot get there: a partial history cannot prove the customer's request is absent, and
+    dating a row from what survived would drop it silently. The bound is a page count, not a time budget, so a thread
+    that keeps returning fresh parts without reaching its own `created_at` is a refusal, never a truncated read.
+    """
+    if not created_at:
+        raise Unknown(f"Intercom conversation {conv_id}: came back at the API's {MAX_PARTS_IN_RESPONSE}-part retrieval "
+                      f"cap and the conversation carries no `created_at`, so there is no floor to walk back to")
+    seen = {p.get("id") for p in newest}
+    out = list(newest)
+    before = min(int(p.get("created_at") or 0) for p in newest)
+    complete = False
+    for _ in range(MAX_PART_PAGES):
+        if before <= created_at:
+            complete = True
+            break
+        page = intercom("GET", f"/conversations/{conv_id}?display_as=plaintext&parts_created_before={before}")
+        got = (page.get("conversation_parts") or {}).get("conversation_parts") or []
+        # `parts_created_before` is INCLUSIVE, so the boundary part comes back again; dedupe by id rather than
+        # trusting the window to be half-open.
+        fresh = [p for p in got if p.get("id") not in seen]
+        if not fresh:
+            # A page that adds nothing older is the floor ONLY if the API had nothing more to give. A FULL page that
+            # adds nothing is the opposite: `parts_created_before` is inclusive and returns the 500 most recent parts
+            # at or before `before`, so a full page of parts we already hold means there are at least
+            # MAX_PARTS_IN_RESPONSE parts at exactly that instant and anything older sits beyond the page. Treating
+            # that as the floor would accept a partial history and silently drop a request in the part we cannot see
+            # (QA finding on #1779: 500 recent parts sharing one timestamp, no usable `total_count`).
+            if len(got) >= MAX_PARTS_IN_RESPONSE:
+                raise Unknown(
+                    f"Intercom conversation {conv_id}: came back at the API's {MAX_PARTS_IN_RESPONSE}-part retrieval "
+                    f"cap and the backwards walk is stuck at {before} - a full page of parts we already hold, so "
+                    f"older parts (and any request in them) cannot be seen or dated - reconcile by hand")
+            # Not full, so the API had nothing older: the whole history is in hand. This is also the floor for a
+            # conversation of exactly 500 parts, whose oldest part is naturally later than `created_at`.
+            complete = True
+            break
+        for p in fresh:
+            seen.add(p.get("id"))
+        out.extend(fresh)
+        before = min(int(p.get("created_at") or 0) for p in fresh)
+    if not complete:
+        raise Unknown(f"Intercom conversation {conv_id}: came back at the API's {MAX_PARTS_IN_RESPONSE}-part retrieval "
+                      f"cap and the backwards walk stopped at {before} after {MAX_PART_PAGES} page(s) without reaching "
+                      f"the conversation's opening message ({created_at}), so older parts (and any request in them) "
+                      f"cannot be seen or dated - reconcile by hand")
+    return sorted(out, key=lambda p: (int(p.get("created_at") or 0), str(p.get("id") or "")))
 
 
 def conversation(conv_id: str) -> dict:
@@ -291,6 +348,8 @@ def _conversation(conv_id: str) -> dict:
         batch with nobody having asked);
       - a conversation with more parts than the API returns (the 2.11 retrieval cap, 500): a partial history cannot
         prove the customer's request is absent, so the read fails closed instead of being dated from what survived.
+        `_all_parts` walks the rest back by time window, so the cap is no longer a dead end - only a walk that cannot
+        reach the conversation's opening message is.
     """
     cv = intercom("GET", f"/conversations/{conv_id}?display_as=plaintext")
     src = cv.get("source") or {}
@@ -305,8 +364,10 @@ def _conversation(conv_id: str) -> dict:
     # erasure request itself, and dating the row from the surviving parts (then advancing the search cursor) would
     # drop it silently.
     if len(raw_parts) >= MAX_PARTS_IN_RESPONSE:
-        raise Unknown(f"Intercom conversation {conv_id}: came back at the API's {MAX_PARTS_IN_RESPONSE}-part retrieval "
-                      f"cap, so older parts (and any request in them) cannot be seen or dated - reconcile by hand")
+        raw_parts = _all_parts(conv_id, raw_parts, int(cv.get("created_at") or 0))
+    # Belt, not the gate: `total_count` counts the parts IN THE RESPONSE, so it can never exceed what came back and
+    # this can only fire if Intercom ever starts reporting a real total. Completeness is proven by `_all_parts`
+    # reaching the conversation's opening message, never by this number.
     total = parts_obj.get("total_count")
     if isinstance(total, int) and total > len(raw_parts):
         raise Unknown(f"Intercom conversation {conv_id}: {len(raw_parts)} of {total} parts came back, so the history "

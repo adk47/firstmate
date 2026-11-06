@@ -54,6 +54,49 @@ big-name / safety cases, and (with the captain) anything irreversible. Runs on n
   `(register, row, sha256(body), sha256(subject), sha256(recipient))` about to leave, so one changed letter, row,
   order or **address** invalidates it, and the approval is valid for `TTL_HOURS` (2 h). The dry run prints the **digest only** — never an accept string,
   because a pipeline that prints what the gate accepts manufactures its own approvals.
+  - **The SCHEDULED path is a second, separate gate — a reviewed ledger entry, never a flag.** Fable decision 11-04
+    B26 Q1 ("unlock both lines; the register sends on its due dates", under Aaron's 21:1xZ delegation and a 24 h veto)
+    made the hourly tick a sender. A cron cannot post a 2-hour Slack approval per batch, so `tick --send` is
+    authorised by `approval.verify_standing()` instead: a `policies/gdpr-send-rulings.json` entry with
+    **`standing: true`** (an explicit field — a valid interactive ruling is NOT promoted by being valid), the same
+    `kind`, an unexpired `expires`, its `not_before` passed (**that field IS the veto window**: the standing rulings
+    start `2026-11-05T21:30Z`, so a veto is a ledger revert and arming needs no host action), `approved_by` equal to
+    the identity running the tick (the devops seat, still resolved by `auth.test` — an id typed into a unit file is
+    checked, not trusted), **`copy_sha` equal to `copy.fingerprint()`**, and **`classes`** naming the request classes
+    it authorises. Both interactive requirements stay:
+    `copy.PIPELINE_SENDS_APPROVED` and the sender identity. The interactive gate is a different function and the
+    standing one cannot loosen it — a test pins that a live standing ruling still fails `approval.verify()` without
+    the human's Slack message.
+  - **Every one of those fields is REQUIRED, and an absent one refuses.** `not_before` and `approved_by` used to be
+    checked only `if` present, which is the fail-open shape QA found on `#1779`: a standing ruling that simply omitted
+    the veto window started sending the moment it merged, and one that omitted the approver could be executed by any
+    identity. Absent is a refusal, never "already elapsed" or "anyone".
+  - **A standing grant names the WORDS it was cut for.** It runs unattended for a month, so `copy_sha` binds it to
+    `copy.fingerprint()` — a sha over every customer-facing constant in `copy.py` **plus the copy gates** (flipping
+    `NEW_THREAD_LEAD_APPROVED` changes what a recipient receives without changing a string). Editing an approved
+    sentence therefore invalidates the grant and the tick refuses until a PR re-cuts the value, which is printed by
+    `gdpr-pipeline.py copy-sha`. The batch digest cannot do this job: it changes with every row, so it can never be
+    written into a ruling.
+  - **A standing grant names the REQUESTS it covers, not just the letter kind.** `copy.ASK` is erasure copy, and a
+    `dmca_takedown` or `legal_threat` row reaches the same `ASK_LINK` verdict, so a kind-only grant told a
+    rights-holder that "the deletion request you made on {date} is in progress" (QA finding on `#1779`; measured on
+    the live register 2026-11-06: 5 `dmca_takedown` and 30 `legal_threat` rows carry `ASK_LINK`, 15 of them already
+    past due, so the first unattended tick would have said it). Two independent gates now: `run.ask_refusal()`
+    refuses the letter (`copy.ASK_APPROVED_CLASSES`, which is inside `copy.fingerprint()`), and `verify_standing()`
+    refuses a batch carrying a class the ruling does not name. The scheduled pass **selects** by
+    `approval.standing_classes()` before it verifies, so a mixed batch still sends its erasure letters instead of
+    being refused whole — refusing the statutory breaches because a takedown notice shares the batch would be the
+    opposite of fail-closed. Widening `classes` (or `ASK_APPROVED_CLASSES`) releases customer-facing copy, so it
+    happens in the PR that carries that class's ruling, never as a bug fix.
+  - **The scheduled pass is non-fatal by design.** By the time it runs, the tick has already done intake, decide,
+    `mark_hidden` and the watchdog; a missing, not-yet-live or expired ruling skips THAT kind (naming which of the
+    five conditions failed) rather than exiting and throwing away the hour's register work with it. `--limit` is a
+    first-wave brake in the unit (25) and it counts **letters that reach a writer**, not rows examined: applying it to
+    the selection let 25 permanently-refused rows (no `requester_email`, unapproved copy) occupy the window on every
+    tick while row 26 was never attempted, even past its statutory deadline. A refusal or a skip does not spend the
+    brake and stays in the queue, so the tick retries it the moment its cause is fixed. A sent letter keeps the same
+    invariants as any other send: claimed
+    `sending` before the writer runs, `sent` is final, an ambiguous failure is never retried.
   - **The digest covers the letter that actually LEAVES, and that is an ordering invariant, not a detail.** A letter's
     final body and subject are produced by `send.final_letter()`, and the CLI calls `send.materialise()` on the batch
     **before** `approval.verify()`. Hashing the pre-materialisation body instead would let the lead line and the

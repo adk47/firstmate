@@ -38,6 +38,8 @@ import re
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
+from . import copy
+
 CHANNEL_ENV = "GDPR_APPROVAL_CHANNEL"
 LEDGER_ENV = "GDPR_RULINGS_LEDGER"
 BOT_ENVS = ("MUSO_SLACK_BOT_TOKEN_OPERATIONS", "MUSO_SLACK_BOT_TOKEN_DEVOPS", "MUSO_SLACK_BOT_TOKEN_DEFAULT")
@@ -161,19 +163,177 @@ def rulings(path: str | None = None) -> dict[str, dict]:
     return {str(r.get("id")): r for r in (data.get("rulings") or [])}
 
 
+def _instant(value, field: str, rid) -> tuple[datetime | None, str]:
+    """(the instant, "" if fine else WHY not). An offset-NAIVE timestamp is REFUSED, never coerced.
+
+    `datetime.fromisoformat("2026-11-05T21:30:00")` returns a naive datetime, and comparing it to the tick's
+    UTC-aware `now` raises TypeError - which is not a refusal, it is a CRASH: the hourly unit dies before the
+    letters after it and repeats the same failure every run, so the whole scheduled path stops on a typo in a
+    ledger field. A ruling that does not say WHICH clock it means cannot be relied on, so it is refused by name
+    (QA finding on #1779)."""
+    try:
+        got = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None, f"ruling {rid} has no readable `{field}`"
+    if got.tzinfo is None:
+        return None, (f"ruling {rid} `{field}` {value!r} carries no timezone offset, so it does not say which "
+                      f"clock it means; write it as UTC (e.g. 2026-11-05T21:30:00Z)")
+    return got, ""
+
+
 def _ruling_ok(r: dict | None, kind: str, now: datetime, path: str | None = None) -> str:
     """("" if fine, else the reason). A ruling authorizes ONE kind of letter and it expires."""
     if r is None:
         return f"no such ruling id in {path or os.environ.get(LEDGER_ENV) or DEFAULT_LEDGER}"
     if str(r.get("kind") or "") != kind:
         return f"ruling {r.get('id')} approves {r.get('kind')!r}, not {kind!r}"
-    try:
-        exp = datetime.fromisoformat(str(r.get("expires")).replace("Z", "+00:00"))
-    except (TypeError, ValueError):
-        return f"ruling {r.get('id')} has no readable `expires`, so it cannot be relied on"
+    exp, bad = _instant(r.get("expires"), "expires", r.get("id"))
+    if bad:
+        return f"{bad}, so it cannot be relied on"
     if exp <= now:
         return f"ruling {r.get('id')} expired at {exp.isoformat()}"
     return ""
+
+
+# ------------------------------------------------------------------ the scheduled path
+def _eligible_standing(kind: str, approved_by: str = "", now: datetime | None = None,
+                       path: str | None = None) -> tuple[list[dict], list[str]]:
+    """(the standing rulings that are FULLY eligible for this kind right now, why each other one is not).
+
+    ONE predicate, used by BOTH the selection (`standing_classes`) and the verification (`verify_standing`). They
+    disagreed once and it cost the erasure letters: selection unioned `classes` from rulings that had not passed
+    their veto window and did not name the running identity, so a future-dated `legal_threat` ruling widened the
+    batch, and verification then refused the WHOLE batch because no single ruling covered it - the statutory
+    breaches did not send (QA finding on #1779). Selection and verification now read the same list, so they cannot
+    disagree about which classes are authorised."""
+    path = path or os.environ.get(LEDGER_ENV) or DEFAULT_LEDGER
+    now = now or datetime.now(timezone.utc)
+    try:
+        ledger = rulings(path)
+    except Unverifiable as exc:
+        return [], [str(exc)]
+    standing = [r for r in ledger.values() if r.get("standing") is True]
+    if not standing:
+        return [], [f"no standing ruling in {path}: the scheduled path needs one with `standing: true` "
+                    f"(the interactive approval path is unaffected)"]
+    ok, tried = [], []
+    for r in standing:
+        bad = _ruling_ok(r, kind, now, path)
+        if bad:
+            tried.append(bad)
+            continue
+        nb = r.get("not_before")
+        if not nb:
+            tried.append(f"standing ruling {r.get('id')} has no `not_before`: the veto window is a stated "
+                         f"prerequisite, so an absent one is not 'already elapsed'")
+            continue
+        starts, bad = _instant(nb, "not_before", r.get("id"))
+        if bad:
+            tried.append(bad)
+            continue
+        if starts > now:
+            tried.append(f"standing ruling {r.get('id')} does not start until {starts.isoformat()} "
+                         f"(the veto window has not elapsed)")
+            continue
+        want = str(r.get("approved_by") or "")
+        if not want:
+            tried.append(f"standing ruling {r.get('id')} names no `approved_by`, so it cannot be bound to the "
+                         f"identity running the tick")
+            continue
+        if want != (approved_by or ""):
+            tried.append(f"standing ruling {r.get('id')} names approver {want!r}, not {approved_by!r}")
+            continue
+        want_copy = str(r.get("copy_sha") or "")
+        if not want_copy:
+            tried.append(f"standing ruling {r.get('id')} names no `copy_sha`, so it does not say which approved "
+                         f"words it authorises (re-cut it with `gdpr-pipeline.py copy-sha`)")
+            continue
+        got_copy = copy.fingerprint()
+        if want_copy != got_copy:
+            tried.append(f"standing ruling {r.get('id')} was cut for copy {want_copy}, but this tree renders "
+                         f"{got_copy}: the approved words changed, so the standing grant no longer covers what "
+                         f"would be sent")
+            continue
+        want_classes = r.get("classes")
+        if not isinstance(want_classes, list) or not want_classes:
+            tried.append(f"standing ruling {r.get('id')} names no `classes`, so it does not say which request "
+                         f"classes it authorises (a kind-only grant sent erasure words to a dmca_takedown row)")
+            continue
+        ok.append(r)
+    return ok, tried
+
+
+def standing_classes(kind: str, approved_by: str = "", now: datetime | None = None,
+                     path: str | None = None) -> set[str]:
+    """The request CLASSES the FULLY ELIGIBLE standing rulings for `kind` authorise, or an empty set.
+
+    The scheduled path SELECTS with this before it verifies. Without it a batch that mixes classes is refused WHOLE,
+    and refusing the erasure letters because a `dmca_takedown` row happens to share the batch would leave the
+    statutory breaches unsent - the opposite of fail-closed. Selection narrows the batch; `verify_standing` still
+    checks the result, and both read `_eligible_standing`, so they cannot disagree about which classes are covered.
+
+    An empty set means "no live grant says anything", and the caller must NOT read that as "nothing is allowed":
+    `verify_standing` is what refuses, and it names the missing field."""
+    ok, _ = _eligible_standing(kind, approved_by, now, path)
+    out: set[str] = set()
+    for r in ok:
+        out.update(str(c) for c in r["classes"])
+    return out
+
+
+def verify_standing(kind: str, items: list[dict], approved_by: str = "", now: datetime | None = None,
+                    path: str | None = None) -> tuple[bool, str]:
+    """("" if the pipeline may send, else WHY not) for the SCHEDULED path - the hourly tick, with no human in the loop.
+
+    Fable decision 11-04 B26 Q1 (Aaron's 21:1xZ delegation, `data/captain-decisions-fable-d6/`): "unlock both lines;
+    the register sends on its due dates". A tick cannot post a 2-hour Slack approval per batch, so the approval for
+    this path is a REVIEWED LEDGER ENTRY instead of a chat message - `policies/gdpr-send-rulings.json` is PR-reviewed,
+    so a standing ruling is a reviewed commit, and every refusal below names the field that was wrong.
+
+    It is a SEPARATE function on purpose. The interactive `verify` above is unchanged and stays the default; nothing
+    here can loosen it, and a ruling that is merely valid does NOT become a standing one. What is required:
+
+      - `standing: true` - an explicit field. A ruling without it authorises NOTHING on this path, so no existing or
+        future ask/confirm approval is silently promoted into "may send unattended forever";
+      - `kind` equal to the letter being sent (an `ask` ruling never sends a `confirm`);
+      - unexpired (`expires`) - the same clock the interactive path uses;
+      - `not_before` REQUIRED and passed: the veto window. Decision 11-04 carries a 24 h veto, so a standing ruling
+        says WHEN it starts instead of a human remembering to flip it; before that instant this refuses and names it.
+        An ABSENT field is a refusal, not "already elapsed" (QA finding on #1779): the veto is a stated prerequisite,
+        so a ruling that omits it would start sending the moment it merged;
+      - `approved_by` REQUIRED and equal to the identity running the tick, so a standing ruling cannot be executed
+        under somebody else's name. Absent is a refusal for the same reason;
+      - `copy_sha` REQUIRED and equal to `copy.fingerprint()`: the grant names the WORDS it was cut for. A standing
+        ruling runs unattended for a month, so editing an approved sentence (or flipping a copy gate) must invalidate
+        it - otherwise the tick keeps sending text nobody approved, which is the failure the batch digest prevents
+        one level down (QA finding on #1779);
+      - `classes` REQUIRED and a superset of every item's class: the grant names the REQUESTS it authorises, not
+        just the letter kind. `copy.ASK` is erasure copy and a `dmca_takedown` or `legal_threat` row reaches the same
+        `ASK_LINK` verdict, so a kind-only grant would have told a rights-holder that "the deletion request you made"
+        is in progress (QA finding on #1779). `run.ask_refusal` refuses those rows at the letter level too, so this
+        is the second of two independent gates rather than the only one.
+
+    The batch digest is still computed and returned to the caller, which ledgers it per letter (`erasure_sends.body_sha`
+    plus the digest in `detail`): "the letter that left is a letter the approved copy renders" stays auditable even
+    though no human approved this particular batch."""
+    eligible, tried = _eligible_standing(kind, approved_by, now, path)
+    if not eligible:
+        return False, "; ".join(tried) if tried else f"no standing ruling authorises {kind!r}"
+    want = {str(i.get("class") or "") for i in items}
+    covered, names = set(), []
+    for r in eligible:
+        allowed = {str(c) for c in r["classes"]}
+        if want <= allowed:
+            return True, (f"standing ruling {r.get('id')} authorises {kind} batch {digest(kind, items)} "
+                          f"(copy {copy.fingerprint()}, classes {sorted(allowed)})")
+        covered |= allowed
+        names.append(r.get("id"))
+    outside = sorted(want - covered)
+    if outside:
+        return False, (f"no standing ruling covers {outside}: the eligible grants "
+                       f"({', '.join(str(n) for n in names)}) name {sorted(covered)}")
+    return True, (f"standing rulings {', '.join(str(n) for n in names)} together authorise {kind} batch "
+                  f"{digest(kind, items)} (copy {copy.fingerprint()}, classes {sorted(covered)})")
 
 
 # ------------------------------------------------------------------ the gate

@@ -440,6 +440,94 @@ def select_batch(a, kind: str, items: list[dict], run=None) -> list[dict]:
     return oldest_first(picked)
 
 
+def approved_identity(approved_by: str) -> tuple[str, str]:
+    """(identity, "") when `approved_by` is an allowlisted human or the resolved sender seat, else ("", WHY).
+
+    Split out so the SCHEDULED path (the hourly tick, Fable 11-04 B26 Q1) can carry the SAME authenticated-identity
+    rule without inheriting `refuse_send`'s SystemExit: a tick that died on a missing bot token would stop doing the
+    intake and hide work it is also responsible for. The seat is Slack's `auth.test` on the devops bot, never a name,
+    so an id typed into a unit file is still checked against the token we actually hold."""
+    if approved_by in APPROVERS:
+        return approved_by, ""
+    try:
+        seat = approval.seat_id()
+    except approval.Unverifiable as exc:
+        return "", str(exc)
+    if approved_by != seat:
+        return "", (f"--approved-by must be an allowlisted human (Aaron / Jan / Nick Slack id) or the sender seat "
+                    f"({seat})")
+    return approved_by, ""
+
+
+def scheduled_send(store_or_none, a, now) -> None:
+    """The UNLOCKED, UNATTENDED path: one approved letter per erratum, on its own due date, with no human in the loop.
+
+    Decision `gdpr-owner` (B26 Q1) put this here. It is deliberately NOT a flag on the interactive path: that one still
+    demands a 2-hour Slack message naming the batch digest, and nothing below can satisfy it. What authorises a send
+    here is a REVIEWED LEDGER ENTRY with `standing: true` (policies/gdpr-send-rulings.json is PR-reviewed), the
+    compiled unlock, and the invoking identity matching the ruling - all three, every run.
+
+    NON-FATAL on purpose. The tick has already done intake, decide and mark_hidden by the time it gets here; a missing
+    or not-yet-live ruling must skip the kind it cannot authorise and let the rest of the hour's work stand, instead of
+    failing the unit and losing that work with it. Every skip says WHICH of the three things was wrong.
+    """
+    run = store_or_none
+    who, bad = approved_identity(a.approved_by)
+    if bad:
+        print(f"tick send: REFUSED - {bad}")
+        return
+    if not copy.PIPELINE_SENDS_APPROVED:
+        print("tick send: REFUSED - pipeline sends are LOCKED (copy.PIPELINE_SENDS_APPROVED = False)")
+        return
+    # THE CAP COUNTS LETTERS THAT REACH A WRITER, NOT ROWS EXAMINED (QA finding on #1779). `--limit` is a first-wave
+    # brake on how many customers get mail in one hour. Applying it to the SELECTION instead let a permanently-refused
+    # prefix starve everything behind it: `Run.asks()` keeps returning an unsent row, so 25 rows that can never send
+    # (no requester_email, unapproved copy) occupied the window on every tick and row 26 was never attempted, even
+    # after its statutory deadline. So the selection is unlimited and the brake is applied below, to attempts.
+    # Only the two fields `select_batch` reads, named explicitly: a `vars(a)` copy would depend on how the caller built
+    # its namespace, and a missing `limit` there is an AttributeError in the middle of the send pass.
+    unlimited = argparse.Namespace(manifest=getattr(a, "manifest", ""), limit=None)
+    for kind in ("ask", "confirm"):
+        if kind == "ask":
+            items = select_batch(unlimited, "ask", send.materialise(run, run.asks(now)), run)
+        else:
+            items = select_batch(unlimited, "confirm", send.materialise(run, run.confirmations(now)), run)
+        if not items:
+            print(f"tick send {kind}: nothing ready")
+            continue
+        # SELECT BY THE GRANT'S CLASSES BEFORE VERIFYING (QA finding on #1779). `copy.ASK` is erasure copy and a
+        # dmca_takedown or legal_threat row reaches the same ASK_LINK verdict, so a mixed batch would be refused
+        # WHOLE - and refusing the erasure letters because a takedown notice shares the batch would leave the
+        # statutory breaches unsent, which is the opposite of fail-closed. Narrowing here keeps the erasure letters
+        # moving; `verify_standing` below still checks the result, so the two have to agree.
+        allowed = approval.standing_classes(kind, a.approved_by, now=now)
+        if allowed:
+            kept = [x for x in items if str(x.get("class") or "") in allowed]
+            if len(kept) != len(items):
+                print(f"tick send {kind}: {len(items) - len(kept)} row(s) left out - class not in the standing "
+                      f"grant {sorted(allowed)}")
+            items = kept
+        if not items:
+            print(f"tick send {kind}: nothing the standing grant covers")
+            continue
+        ok, why = approval.verify_standing(kind, items, a.approved_by, now=now)
+        print(f"tick send {kind}: {len(items)} letter(s) -> " + ("approved: " if ok else "REFUSED: ") + why)
+        if not ok:
+            continue
+        cap = a.limit or 0
+        attempted = 0
+        for i, x in enumerate(items):
+            if cap and attempted >= cap:
+                print(f"  {len(items) - i} letter(s) left for the next tick (--limit {cap})")
+                break
+            r = send.deliver(run, x, kind, a.approved_by, slot=x.get("slot"))
+            # A refusal or a skip never reached a writer, so it does not spend the brake - and it stays in the queue,
+            # so the tick retries it the moment its cause is fixed (a mailbox authed, an address recovered).
+            if r["state"] in ("sent", "unknown", "failed"):
+                attempted += 1
+            print(f"  #{x['register_no']} -> {r['state']} {r.get('why') or r.get('ref') or ''}")
+
+
 def refuse_send(a, kind: str, items: list[dict]) -> None:
     """The gate in front of every send. THREE things, and all three are a human's to open:
 
@@ -460,16 +548,10 @@ def refuse_send(a, kind: str, items: list[dict]) -> None:
     # The allowlist is the three humans OR the one approved sender seat (029/031: the seat posts through the devops
     # bot, and its user id is Slack's `auth.test`, never a name). A pre-check that only knew the humans refused the
     # seat before `verify` - which accepts it - could ever run.
-    if a.approved_by not in APPROVERS:
-        try:
-            seat = approval.seat_id()
-        except approval.Unverifiable as exc:
-            print(f"REFUSED: {exc}")
-            raise SystemExit(1) from exc
-        if a.approved_by != seat:
-            print(f"REFUSED: --approved-by must be an allowlisted human (Aaron / Jan / Nick Slack id) or the sender "
-                  f"seat ({seat})")
-            raise SystemExit(1)
+    who, bad = approved_identity(a.approved_by)
+    if bad:
+        print(f"REFUSED: {bad}")
+        raise SystemExit(1)
     ok, why = approval.verify(kind, items, a.approved_by, APPROVERS)
     print(("approved: " if ok else "REFUSED: ") + why)
     if not ok:
@@ -505,6 +587,16 @@ def main() -> int:
         p.add_argument("--register", required=(name == "backfill"))
         p.add_argument("--gmail-ledger", default=GMAIL_LEDGER)
         p.add_argument("--support-ledger", default=SUPPORT_LEDGER)
+        if name == "tick":
+            # The scheduled send path (Fable 11-04 B26 Q1). Off unless asked for: the tick's default behaviour is
+            # unchanged, so an install that does not pass --send can never message a customer.
+            p.add_argument("--send", action="store_true",
+                           help="also deliver the letters that are ready, under a standing ruling (default: no sends)")
+            p.add_argument("--approved-by", default="")
+            p.add_argument("--limit", type=int, default=0,
+                           help="send at most N letters per kind, OLDEST deadline first (0 = no cap)")
+            p.add_argument("--manifest", default="",
+                           help="send EXACTLY these requests (the pinned batch file), instead of oldest-first")
         p.add_argument("--out")
         p.add_argument("--page", action="store_true")
     p = sub.add_parser("intake", help="record one request pushed by another pipeline (ids only, no bodies)")
@@ -517,6 +609,7 @@ def main() -> int:
     p.add_argument("--open-prs", action="store_true")
     p.add_argument("--include-legal", action="store_true", help="add legal hide-first pages (captain's call)")
     sub.add_parser("mark-hidden")
+    sub.add_parser("copy-sha", help="print the copy identity a STANDING ruling must record (copy.fingerprint())")
     for name in ("ask", "confirm"):
         p = sub.add_parser(name)
         p.add_argument("--send", action="store_true", help="actually deliver (default is a dry run)")
@@ -561,6 +654,10 @@ def main() -> int:
         if a.cmd == "tick":
             run.mark_hidden()
             watchdog(run, a.page)
+            # AFTER the read-back: `mark_hidden` is what turns a landed hide into hidden_at, so a confirmation
+            # materialised before it would miss the rows this tick just landed. A send never changes that ordering.
+            if getattr(a, "send", False):
+                scheduled_send(run, a, now)
         if a.out:
             Path(a.out).write_text(backfill_table(run.store.all("open"), now) + "\n")
     elif a.cmd == "dedupe":
@@ -619,6 +716,10 @@ def main() -> int:
                 print(json.dumps({k: res[k] for k in opened}, indent=1))
     elif a.cmd == "mark-hidden":
         run.mark_hidden()
+    elif a.cmd == "copy-sha":
+        # The value a standing ruling's `copy_sha` must carry. Printed rather than hand-computed: a grant that names
+        # the wrong words refuses every send, and a human re-typing a hash is how that happens.
+        print(copy.fingerprint())
     elif a.cmd == "ask":
         # ORDER MATTERS, and it is the whole point of this pair: materialise FIRST, then narrow+validate.
         # `select_batch` checks each pinned entry's recorded `body_sha` against the text it is HANDED, so handing it

@@ -884,11 +884,24 @@ log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
 # into /var/lib/hydra-gdpr/erasure.sqlite, identity per gdpr-ack-v2 §3, the 410 + noindex
 # read-back that sets hidden_at, and the watchdog: pages #cs_priority (Jan) at most once a
 # day when a request reaches due_at - 3 d without a written confirmation. It never hides
-# (the hide batch is a separate, human-merged PR) and never deletes. The tick NEVER
-# messages a customer: sends are a separate `ask --send` / `confirm --send` run that needs an
-# approval record posted by an allowlisted human or the approved sender seat (an exact
-# `APPROVE gdpr <kind> <digest> ruling=<id>` message, gdpr_pipeline/approval.py); the tick
-# has no way to supply one, so it cannot send. Kill: /etc/hydra/gdpr-pipeline.disabled.
+# (the hide batch is a separate, human-merged PR) and never deletes. UNTIL 2026-11-04 THE TICK
+# NEVER MESSAGED A CUSTOMER, because a send needed a Slack approval message a cron cannot post.
+# Fable decision 11-04 B26 Q1 (Aaron's delegation, 24 h veto) changed that: "unlock both lines;
+# the register sends on its due dates". The tick now carries --send, and what authorises a
+# letter is a REVIEWED LEDGER ENTRY with `standing: true` in policies/gdpr-send-rulings.json
+# (`gdpr_pipeline.approval.verify_standing`) - never a message, and never a flag alone. Four
+# things must all hold, every run, and each refusal names the one that failed: the compiled
+# unlock (copy.PIPELINE_SENDS_APPROVED), a standing ruling for THIS kind, its `not_before`
+# passed (that field IS the veto window: 2026-11-05T21:30Z, so a veto is a ledger revert) and
+# not expired, and the invoking identity equal to the ruling's `approved_by` (the devops seat,
+# resolved by auth.test, never a name typed here). The interactive `ask --send` /
+# `confirm --send` path still demands the exact `APPROVE gdpr <kind> <digest> ruling=<id>`
+# message from an allowlisted human or the seat; the two paths are separate functions, and the
+# standing one cannot loosen the human one.
+# --limit 25 is a deliberate first-wave brake, not a design limit: the standing set is 143 ask
+# letters and 8 confirmations, and the first ticks should be watched before the cap is raised
+# (a one-line PR). Raise it only after reading the first waves' erasure_sends rows.
+# Kill: /etc/hydra/gdpr-pipeline.disabled.
 # HOME=/root so `gh api` (the read of the two hide lists) finds root's gh config.
 [[ -x "$HYDRA_ROOT/scripts/gdpr-pipeline.py" ]] \
   || fail "$HYDRA_ROOT/scripts/gdpr-pipeline.py missing or not executable"
@@ -900,9 +913,13 @@ After=network-online.target
 [Service]
 Type=oneshot
 Environment=HOME=/root
+# The seat is an ID, so it is resolved against the devops bot token by auth.test before any send: an id that no
+# longer resolves refuses the send instead of sending under a name. It stays OUT of the unit body so rotating the
+# seat does not mean editing a unit file.
+Environment=GDPR_SENDER_SEAT=U0AN41ZBTRU
 EnvironmentFile=-/etc/openclaw/shared.env
 EnvironmentFile=-/etc/openclaw/main.env
-ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/gdpr-pipeline.py tick --page
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/gdpr-pipeline.py tick --page --send --limit 25 --approved-by $GDPR_SENDER_SEAT
 TimeoutStartSec=3000
 GDPRTICKSVC
 
@@ -924,6 +941,60 @@ gt=gdpr-pipeline-tick.timer
 systemctl enable "$gt" >/dev/null 2>&1 || log "WARN: could not enable $gt"
 systemctl start "$gt" >/dev/null 2>&1 || log "WARN: could not start $gt"
 log "  $gt: $(systemctl is-active "$gt" 2>/dev/null || echo unknown)"
+
+# Daily. scripts/gdpr-pipeline.py hide-batch --open-prs: the reversible-hide batch, generated from the
+# identity-PASS rows and opened as ONE H-DevOps PR (`HIDDEN_ENTITY_IDS`, prod + dev: 410 + noindex) and ONE
+# platform-data-processing PR (`LEGAL_HIDDEN_ENTITY_IDS` + the strict-equality test's `ERASURE_PROFILES`).
+# It OPENS PRs and merges nothing - a person merges, per the ruling - and it never deletes: the only write to a
+# profile is the reversible hide, and `DELETE /api/v3/admin/profile` is not reachable from this pipeline at all.
+# The brief's step 3 is "daily hide batch PR", and until this timer existed the command was manual, so a PASS row
+# waited on somebody remembering to run it.
+#
+# Safe to run daily BECAUSE of two guards that already exist, not because of the schedule:
+#   - one batch pair at a time: while one of the pipeline's own `gdpr-pipeline/hide-*` PRs is unmerged, the run
+#     DEFERS and says which PR it is waiting for (both PRs of a batch insert at the same point in the same list
+#     file, so a second pair could only conflict against ids nobody has reviewed). The waiting ids stay un-hidden
+#     and the next tick retries them, so a daily timer on a pending batch is a no-op, not a pile-up;
+#   - the run lock: `--open-prs` counts as a write, so it takes the same flock as the tick and exits 0 having done
+#     nothing if a tick is mid-run.
+# An empty batch prints and exits without opening anything.
+# NOT --include-legal: legal_threat rows are a separate captain call ("legal threat, hide first"), and folding them
+# into the routine batch would hide pages on a rule nobody re-approved here.
+# Kill: /etc/hydra/gdpr-pipeline.disabled (the CLI checks it for every writing run).
+cat > /etc/systemd/system/gdpr-hide-batch.service << GDPRHIDESVC
+[Unit]
+Description=GDPR erasure hide batch (opens the reversible-hide PRs; a person merges)
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=HOME=/root
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/main.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/gdpr-pipeline.py hide-batch --open-prs
+TimeoutStartSec=1800
+GDPRHIDESVC
+
+cat > /etc/systemd/system/gdpr-hide-batch.timer << GDPRHIDETMR
+[Unit]
+Description=Open the GDPR erasure hide batch daily
+
+[Timer]
+# A fixed wall-clock time, not OnUnitActiveSec: the batch is a review artefact, so it should land at a predictable
+# hour rather than drift with the last run. Persistent=true catches up after a reboot instead of skipping a day.
+OnCalendar=*-*-* 06:20:00 UTC
+Persistent=true
+Unit=gdpr-hide-batch.service
+
+[Install]
+WantedBy=timers.target
+GDPRHIDETMR
+
+systemctl daemon-reload
+ht=gdpr-hide-batch.timer
+systemctl enable "$ht" >/dev/null 2>&1 || log "WARN: could not enable $ht"
+systemctl start "$ht" >/dev/null 2>&1 || log "WARN: could not start $ht"
+log "  $ht: $(systemctl is-active "$ht" 2>/dev/null || echo unknown)"
 # ─── intercom-webhook: secrets OUT of the unit, into a root-only file (T13) ──
 # Before this, intercom-webhook.service got its Intercom token, Intercom webhook
 # signing secret, OpenClaw gateway token and Notion token from plaintext
@@ -4146,6 +4217,7 @@ AUX_ONFAILURE_UNITS=(
   cs-sla-report.service
   cto-nightly-driver.service
   gdpr-pipeline-tick.service
+  gdpr-hide-batch.service
   hydra-company-finder-cache-refresh.service
   hydra-codex-home-prune.service
   hydra-daily-audit.service

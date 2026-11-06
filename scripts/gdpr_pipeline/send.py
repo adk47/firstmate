@@ -371,7 +371,13 @@ def final_letter(row: dict, text: str) -> tuple[str, str, str]:
 
     A row whose route REFUSES gets its text back unchanged with no subject and no recipient: it will be ledgered
     `refused` at send time, and binding a lead to a letter that cannot leave would only invent an approval for
-    nothing."""
+    nothing.
+
+    This function decides WHETHER to assemble and WHO the recipient is. It assembles NOTHING: every customer-facing
+    byte comes from `copy.new_thread_letter`, because `copy.fingerprint()` is what a month-long standing ruling names
+    and it can only cover what `copy.py` owns. Assembling here meant an edit to this function could add a line while
+    both standing rulings' `copy_sha` still matched (QA finding on #1779). `test_final_letter_adds_no_text_of_its_own`
+    pins that."""
     try:
         channel, target = route(row)
     except Unknown:
@@ -379,9 +385,8 @@ def final_letter(row: dict, text: str) -> tuple[str, str, str]:
     if channel != "mail_new_thread":
         return text, "", ""
     written_to = MAILBOX_BY_CHANNEL.get(row.get("channel"), row.get("channel") or "")
-    cls = row.get("class") or ""
-    lead = copy.new_thread_lead(written_to, row.get("received_at", ""), copy.new_thread_request_type(cls))
-    return lead + "\n\n" + text, copy.new_thread_subject(cls), target
+    body, subject = copy.new_thread_letter(written_to, row.get("received_at", ""), row.get("class") or "", text)
+    return body, subject, target
 
 
 def materialise(run, items: list[dict]) -> list[dict]:

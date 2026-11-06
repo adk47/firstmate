@@ -20,6 +20,24 @@ LETTER_GRACE_HOURS = 24      # a letter the register has NOT sent, this long pas
 ERASURE_FAMILY = ("privacy_erasure", "legal_threat")
 
 
+def ask_refusal(cls: str, past_due: bool) -> str:
+    """Why this row's identity ask must NOT leave, or "" when it may.
+
+    Two independent reasons, and the class one is checked FIRST because it is the one that would otherwise be
+    invisible: `copy.ASK` is erasure copy, so a `dmca_takedown` or `legal_threat` row that reaches the same
+    `ASK_LINK` verdict would be told "the deletion request you made on {date} is in progress" - a statement about a
+    request the person never made. The class gate is `copy.ASK_APPROVED_CLASSES`, which is part of
+    `copy.fingerprint()`, so widening it without a ruling also invalidates the standing grant."""
+    if cls not in copy.ASK_APPROVED_CLASSES:
+        return (f"the identity-ask copy is ERASURE copy and class {cls!r} has no approved ask of its own "
+                f"(copy.ASK_APPROVED_CLASSES = {list(copy.ASK_APPROVED_CLASSES)}): the letter would tell them about "
+                f"a deletion request they did not make, so it needs its own approved words and its own ruling")
+    if past_due and not copy.PROGRESS_LINE_APPROVED:
+        return ("past-due ask copy is not approved yet (copy.PROGRESS_LINE_APPROVED = False): the ruling requires "
+                "the letter to say the erasure is in progress, and those words are Fable's to approve")
+    return ""
+
+
 def conversation_request_at(conv: dict, cls: str) -> int:
     """The epoch of the FIRST customer part whose own words ask for the removal (the request's date).
 
@@ -593,7 +611,12 @@ class Run:
     def asks(self, now: datetime | None = None) -> list[dict]:
         """The identity asks owed, one per row. A row past its statutory date carries the past-due opening line as
         well (the ruling requires it); while that copy is not approved the item carries a `refuse` reason, so the
-        letter is REFUSED and ledgered rather than sent without the sentence the ruling says it must have."""
+        letter is REFUSED and ledgered rather than sent without the sentence the ruling says it must have.
+
+        A row whose CLASS the ask copy was not written for carries a `refuse` reason too, and for the same reason:
+        `copy.ASK` is erasure copy, and a `dmca_takedown` or `legal_threat` row reaches the same `ASK_LINK` verdict.
+        Sending it would tell a rights-holder that "the deletion request you made" is in progress (QA finding on
+        #1779). Refused, not dropped: the ledger records why, and the row stays visible in the batch."""
         now = now or datetime.now(timezone.utc)
         out = []
         for r in self.store.all("open"):
@@ -606,11 +629,8 @@ class Run:
                 out.append({"row": r["id"], "register_no": r["register_no"], "channel": r["channel"],
                             "to": r["conversation_id"] or r["requester_email"] or r["gmail_thread"], "kind": kind,
                             "text": text, "due_at": r["due_at"], "received_at": r["received_at"],
-                            "past_due": past_due,
-                            "refuse": ("" if (not past_due or copy.PROGRESS_LINE_APPROVED) else
-                                       "past-due ask copy is not approved yet (copy.PROGRESS_LINE_APPROVED = False): "
-                                       "the ruling requires the letter to say the erasure is in progress, and those "
-                                       "words are Fable's to approve")})
+                            "class": r["class"], "past_due": past_due,
+                            "refuse": ask_refusal(r["class"], past_due)})
         return out
 
     def confirmations(self, now: datetime, horizon_days: int = WARN_DAYS, s_check=None, p_check=None,
@@ -650,6 +670,7 @@ class Run:
             out.append({"row": r["id"], "register_no": r["register_no"], "due_at": r["due_at"], "S": s, "P": p,
                         "M": m, "to": r["conversation_id"] or r["requester_email"] or r["gmail_thread"],
                         "channel": r["channel"], "received_at": r["received_at"], "text": text,
+                        "class": r["class"],
                         "slot": "confirm" if p else "confirm-interim"})
         return out
 
