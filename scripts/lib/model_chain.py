@@ -9,10 +9,11 @@ about the DeepSeek tier:
                                     subscription rung in front of it. Its
                                     DEFAULT becomes this chain's tier 2 (deepseek
                                     1017); a caller that pins a model - e.g.
-                                    ``batch_judge``'s evaluated ``x-ai/grok-4.3``
-                                    for outbound copy, or ``CREDIT_REVIEW_MODEL``
-                                    - keeps that model AS tier 2, with tier 1 in
-                                    front of it;
+                                    ``CREDIT_REVIEW_MODEL`` - keeps that model AS
+                                    tier 2, with tier 1 in front of it. A pin
+                                    must be PRICED here and inside the routing
+                                    block's ``max_price``, or OpenRouter refuses
+                                    every call (grok-4.3 was 4x the ceiling);
   * ``credit_verify/docverify/extract.py``  OpenRouter deepseek, no
                                     subscription rung in front of it;
   * ``credit_trust/llm.py``         codex -> Jev, no metered rung at all, so a
@@ -196,7 +197,10 @@ RESERVATION_USD = float(os.environ.get("MODEL_CHAIN_RESERVATION_USD", "0.05"))
 # tokens.
 PRICE_USD_PER_TOKEN = {
     FALLBACK_MODEL: (3.0e-7, 1.2e-6),
-    "x-ai/grok-4.3": (2.5e-6, 5.0e-6),          # batch_judge's evaluated pin
+    # A pin an operator can still set. Priced so a pin is BOUNDED, not so it is
+    # admitted: this model is 4x the routing block's max_price, so OpenRouter
+    # refuses every call it makes (2026-11-04, 204 blocked credit-review calls).
+    "x-ai/grok-4.3": (2.5e-6, 5.0e-6),
     "openai/gpt-6-luna": (2.0e-7, 7.5e-7),      # agent primary; reachable via a pin
 }
 # OpenRouter bills web search PER RESULT, and the fee differs per model.

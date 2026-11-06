@@ -727,11 +727,32 @@ verdict_state=success                       # NO-GO -> failure; CANNOT REVIEW ->
 verdict_desc="GO — 0 blocking findings"     # NO-GO -> "NO-GO — <N> blocking finding(s)"
                                             # CANNOT REVIEW -> "CANNOT REVIEW: <reason>"
 bash /opt/hydra/scripts/qa-review-status.sh "$OWNER/$REPO" "<pr.headRefOid>" \
-  "$verdict_state" "$verdict_desc" "https://github.com/$OWNER/$REPO/pull/$PR/files"
+  "$verdict_state" "$verdict_desc" "${review_html_url:-https://github.com/$OWNER/$REPO/pull/$PR/files}"
 ```
 
 Always pass the 5th arg — it becomes the check's "Details" link, and on a gated
 repo it is the operator's only in-UI route to why `qa-review` is red.
+
+**That link MUST be the permalink of the review you just posted** — the
+`html_url` in the batched-POST response (parse it from the same JSON as the
+review id) — and only fall back to `.../files` when no review landed at all.
+`.../files` is the diff: it is the right target for pushback and inline threads,
+and it is **empty of findings when the findings are in the review body**, so on
+a PR whose verdict carries no inline comments that link takes the operator to a
+page that says nothing. Combined with the fact that `pulls/<n>/reviews` pages at
+30 oldest-first (so a body-only verdict on a 39-review PR is not even on the
+first page), that is exactly how hydra#1643 published two `NO-GO — 2 blocking
+findings` statuses on 2026-11-03 that three separate readers concluded had no
+finding text anywhere. A NO-GO whose text cannot be reached from the red check
+is not a review; it is a stop sign with the reason painted over.
+
+**Never publish a terminal status without first confirming the finding text
+landed.** If the review POST failed, re-post it body-only (drop the inline
+`comments` and keep every finding in `body`), and if that fails too post the
+findings as ONE PR comment (`POST .../issues/<n>/comments`) and point the status
+at its `html_url`. Only if none of those land may you publish the status — and
+then the description must say so and name where the text is, because the
+operator can no longer read it from GitHub.
 
 Always via `qa-review-status.sh`, never bare `gh api .../statuses/` —
 `qa-review` is App-pinned on gated repos; missing = merge block on
@@ -742,7 +763,13 @@ Always via `qa-review-status.sh`, never bare `gh api .../statuses/` —
 A fresh 0/0 pass isn't enough — GO also requires clearing every still-open
 finding from earlier rounds (PR #287 was wrongly approved otherwise).
 `bundle.threads[]` (refresh via `muso gh threads "$PR" --repo
-"$OWNER/$REPO"` after a push) lists unresolved threads. Own prior tagged
+"$OWNER/$REPO"` after a push) lists unresolved threads. When you read prior
+rounds any other way — a raw `pulls/<n>/reviews`, `pulls/<n>/comments` or
+`issues/<n>/comments` call — pass **`--paginate`** and `?per_page=100`: every
+one of those lists is paginated oldest-first (reviews at 30/page), so an
+unpaginated read silently omits the newest rounds and makes carried-forward
+findings look absent (`scripts/check-review-reads-paginated.sh` gates this in
+CI). Own prior tagged
 finding, now fixed: resolve it — never resolve one unconfirmed. There is no
 `muso gh` verb for this, so use the mutation directly:
 

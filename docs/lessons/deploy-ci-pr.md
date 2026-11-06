@@ -149,6 +149,27 @@ Use the here-string (`grep ... <<<"$BODY"`), not `printf | grep`: under `pipefai
 
 **A real NO-GO does NOT auto-re-review after you fix it; re-request the reviewer.** When the bot posts a blocking finding, GitHub removes adk47 from `reviewRequests` (a submitted review fulfills the request), so a later push re-runs CI but the bot stays silent. Nudge with `gh api repos/Muso-AI/hydra/pulls/<N>/requested_reviewers -X POST -f 'reviewers[]=adk47'`. Also check `review.commit_id == HEAD` before reacting to a finding; a stale COMMENTED review on a prior commit can re-flag something already fixed.
 
+**A QA NO-GO's finding text lives in the REVIEW BODY, and `pulls/<n>/reviews` is
+paginated 30-per-page OLDEST FIRST — so on a long PR the newest verdict is not on
+page 1, and an unpaginated read reports "no review, no body, no findings."** On
+2026-11-03 three lanes hit this on the same day and all three concluded the bot
+had dropped the text (hydra#1545 06:37Z = review 37 of 55; hydra#1636 12:12Z =
+review 34 of 40; hydra#1643 15:06Z and 15:42Z = reviews 38 and 39 of 39). Every
+one of those verdicts was complete, with the findings spelled out at
+`file:line`. The tell is arithmetic, not grep: `gh api --paginate
+"repos/<o>/<r>/pulls/<n>/reviews?per_page=100" | jq -s 'add|length'` > 30 means
+your unpaginated read is blind to everything since. (Pipe into local `jq -s` —
+do NOT add `--jq` to the paginated call: gh applies `--jq` per PAGE, so with
+`?per_page=5` `--jq length` prints 5,5,5,5,5,5,5,5,1 and any `max_by(.id)` you
+run that way answers per page, not for the whole list.) Read findings with
+`scripts/qa-findings.sh <owner/repo> <pr>` (paginated, prints the page the text
+is on and the permalink), never with a bare `gh api .../reviews`. A review that
+files no inline comments leaves `pulls/<n>/comments` empty too, and a commit
+status has no body field, so those two surfaces are genuinely empty while the
+text exists — "I checked everywhere" is only true if one of those checks
+paginated. `scripts/check-review-reads-paginated.sh` (CI) gates the pattern in
+skills, scripts and agent docs.
+
 **`workflow_run` reports the run's headSha as main's tip, not your PR head.** So `gh run list --workflow qa-autoreview.yml` rows never match your PR commit by sha, and the run name/sha look like a different PR. Do NOT conclude "it didn't fire for me" from the sha; verify via the `qa-review` commit status on your head or the posted review's `commit_id`.
 
 **The QA bot reviews AS the adk47 account, which is the CODEOWNER, so its APPROVED clears CODEOWNERS.** hydra `plugins/*` (and other paths) are CODEOWNERS-gated to adk47, but the bot's APPROVED satisfies that gate and flips `reviewDecision` to APPROVED with no human click. So babysit/ship CAN drive a CODEOWNERS-gated PR to APPROVED autonomously by addressing the bot's findings (a human still merges under ship's no-`--merge` default).

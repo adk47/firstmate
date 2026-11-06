@@ -654,6 +654,14 @@ class Run:
                 p = all(p_check("profile", i) for i in ids)
                 names = {}
                 s = all(s_check(i, names.get(i) or self._page_name(i)) for i in ids)
+            except checks.Unmeasurable as exc:
+                # NOT a run error. This row cannot be checked here and no retry will change that (no page name, or
+                # a name with more matches than the autocomplete cap can show), so counting it as a failed read made
+                # the tick exit 2 and page every day for a condition that can never clear. The row is still not
+                # confirmed: it drops out of this batch and `watchdog_rows` keeps naming it, which is the queue a
+                # person works. A genuinely unreadable row still goes through `fail` below.
+                self.log(f"row {r['id']} #{r['register_no']}: not confirmable here ({exc})")
+                continue
             except sources.Unknown as exc:
                 self.fail(f"S/P read-back row {r['id']}", exc)
                 continue

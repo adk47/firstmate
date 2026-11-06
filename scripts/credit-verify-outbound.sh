@@ -102,6 +102,27 @@ FIRST_CAP=100                          # [key=scale-now]: a family's first unsig
 #  - the bodies are skipped once TICK_HARD_S is passed; the apply is cut to what fits before it at APPLY_S_PER_USER.
 TICK_BUDGET_S="$(cfg CVO_TICK_BUDGET_S 6000)"
 TICK_HARD_S="$(cfg CVO_TICK_HARD_S 6900)"
+# spec-deploy-lock-deferral-m1 (Fable 2026-11-05 12:4xZ + addenda 14:3xZ/14:4xZ): a TRANSIENT condition is not a
+# terminal failure of the run. Three ticks in one day lost the claim families (the only family with a real send queue)
+# because an earlier family's failure ended the tick before claim_families() ran. The two transient classes are:
+#   - a deploy holds /var/lib/hydra/credit-review/apply.lock EXCLUSIVE for its whole sync -> the runner exits 3 with
+#     NOTHING attempted (the ledger's max(id) is unchanged);
+#   - Trino answers "under too much load ... please retry" -> the runner exits 4 (verify_notify.TrinoTransientError).
+# Both are retried bounded and then DEFERRED: no kill file, no refusal-ratio operand, no cursor move. A family that
+# defers returns 2, the group stops there, the tick CONTINUES to the next group and exits 2 at the end.
+APPLY_LOCK_RC=3
+# QA #1799 r11: the marker credit-review.py prints on stderr ONLY when the apply lock is genuinely held/unopenable.
+# Kept in step with verify_notify.APPLY_LOCK_MARKER by scripts/tests/credit-verify-outbound.bats.
+APPLY_LOCK_MARKER="APPLY_LOCK_HELD"
+# QA #1799 r12: a lock that could not be OPENED is a permissions/I-O fault, never contention - its own marker, so the
+# tick can stop hard instead of retrying and deferring a broken lock as if a deploy held it.
+APPLY_LOCK_UNOPENABLE_MARKER="APPLY_LOCK_UNOPENABLE"                        # credit-review.py: ApplyLockError (nothing sent)
+TRANSIENT_RC=4                         # credit-review.py: TrinoTransientError (nothing sent)
+# The schedules are constants; the bats harness may shrink them (cfg is harness-only) so the arms run in seconds.
+read -r -a APPLY_RETRY_SLEEPS <<<"$(cfg CVO_APPLY_RETRY_SLEEPS '15 30 60 60 120')"   # 6 apply attempts, ~4.75 min
+APPLY_RETRY_CAP_S="$(cfg CVO_APPLY_RETRY_CAP_S 600)"   # hard cap from the first transient rc, whatever the budget
+read -r -a TRANSIENT_RETRY_SLEEPS <<<"$(cfg CVO_TRANSIENT_RETRY_SLEEPS '30 60 120')"  # 4 read-only attempts
+DEFERRED=0                             # 1 once any family deferred: the tick then exits 2, never 0
 CHECK_ENTRIES="$(cfg CVO_CHECK_ENTRIES 200)"   # p1 599 / r5 598: a uvn family walks at most this many LIST ENTRIES a tick
 CHECK_S_PER_USER="$(cfg CVO_CHECK_S_PER_USER 4)"   # ~10-15 s a live-gate check on 4 read-only workers (#1596)
 RESERVE_PAD_S="$(cfg CVO_RESERVE_PAD_S 300)"      # + the replica read (~86 s) and the health / zero-read rails
@@ -303,6 +324,43 @@ deadline_rc() { [ "$1" = 124 ] || [ "$1" = 137 ]; }
 # b1 560: EVERY python subprocess of the tick - builders, filters, cap reads, checks, renders, the judge, the apply and
 # the post-send health / ledger / zero-read reads - runs under the one deadline wrapper; no exceptions
 py() { bounded "$PY" "$@"; }
+# run_transient <tag> <what> <outfile> <cmd...>: run ONE read-only step, retrying a TRANSIENT rc (Trino said "retry in a
+# few minutes") TRANSIENT_RETRY_SLEEPS apart, never past the tick budget. Sets RC to the step's own rc. Returns 0 = the
+# step ran (RC is its verdict), 2 = DEFERRED (transient after the window: no kill file, no refusal, no cursor move).
+RC=0
+run_transient() {
+  local tag="$1" what="$2" out="$3"; shift 3
+  local attempt=0 wait left cost t0
+  while :; do
+    t0="$(date -u +%s)"
+    "$@" > "$out" 2>&1; RC=$?
+    cost=$(( $(date -u +%s) - t0 ))
+    [ "$RC" = "$TRANSIENT_RC" ] || return 0
+    if [ "$attempt" -ge "${#TRANSIENT_RETRY_SLEEPS[@]}" ] || [ "$(elapsed)" -ge "$TICK_BUDGET_S" ]; then
+      log "$tag: $what deferred - Trino is transiently unavailable (rc=$RC after $attempt retries); this family and the rest of the tick defer to the next tick (no kill file, no refusal, no cursor move)"
+      page "$tag: $what deferred - Trino transiently unavailable; nothing was sent and nothing was refused"
+      return 2
+    fi
+    # QA #1799 r13 (Important): the sleep is clipped to the remaining tick BUDGET, not the hard deadline. A transient
+    # arriving just under TICK_BUDGET_S used to sleep past it, and every later family then skipped on its own budget
+    # check - recreating exactly the starvation this PR exists to prevent. A retry that does not FIT is not a retry:
+    # defer now, so the rest of the tick still has the budget it was promised.
+    # QA #1799 r14 (Important): `wait > left` let a retry that only just fits through, and ignored the cost of the
+    # retry itself. Sleeping `wait` and then running the step AGAIN lands at elapsed + wait + cost, which is past the
+    # budget whenever wait == left, and past it by the step's own duration even when wait < left. Require the WHOLE
+    # retry - the sleep plus a repeat of the attempt we just measured - to finish strictly inside the budget.
+    left=$(( TICK_BUDGET_S - $(elapsed) ))
+    wait="${TRANSIENT_RETRY_SLEEPS[$attempt]}"
+    if [ "$left" -le 0 ] || [ "$(( wait + cost ))" -ge "$left" ]; then
+      log "$tag: $what deferred - a ${wait}s retry does not fit in the ${left}s left of the ${TICK_BUDGET_S}s budget (the step itself just took ${cost}s, so the retry would finish at or past it); this family and the rest of the tick defer to the next tick (no kill file, no refusal, no cursor move)"
+      page "$tag: $what deferred - Trino transiently unavailable and no retry fits the tick budget; nothing was sent and nothing was refused"
+      return 2
+    fi
+    attempt=$(( attempt + 1 ))
+    log "$tag: $what Trino transient (rc=$RC); retry $attempt/${#TRANSIENT_RETRY_SLEEPS[@]} in ${wait}s"
+    [ "$wait" -ge 1 ] && sleep "$wait"
+  done
+}
 # THE READER ALARM - defined and INVOKED above the kill gate on purpose. A kill file stops the SENDER; a stale reader
 # is exactly when the asks already out stop being read, so the one tick that must still page about the reader is the one
 # that then exits. Claim-proof-ask may carry a date only because this is live (p1 rule 8); it is read-only, it writes a
@@ -356,6 +414,30 @@ killed && { echo "$(date -u +%FT%TZ) credit-verify-outbound: kill file $KILL or 
   || { [ ! -e "$STATE" ] && [ -d "$(dirname "$STATE")" ] && [ -w "$(dirname "$STATE")" ]; }; } \
   || { echo "$(date -u +%FT%TZ) credit-verify-outbound: neither $ETC nor $STATE is writable for a kill file; nothing runs" >&2; exit 2; }
 install -d -m 700 "$STATE" "$OUT_ROOT" "$OUT" || exit 2
+# autokill is defined HERE (before the tick lock) so the pre-lock ledger migration can use it: an
+# unreadable/unmigratable ledger is an operational failure that must leave the durable kill file, exactly like the
+# cap read that used to be the first thing to notice it.
+autokill() { # <why>
+  local where="$KILL"
+  if ! printf 'auto-kill %s: %s\n' "$STAMP" "$1" > "$KILL" 2>/dev/null; then
+    where="$KILL2"
+    if ! printf 'auto-kill %s: %s\n' "$STAMP" "$1" > "$KILL2" 2>/dev/null; then
+      log "AUTO-KILL: $1 - BOTH kill-file writes FAILED ($KILL, $KILL2); this tick stops here"
+      page "AUTO-KILL $STAMP FAILED TO PERSIST: $1. Neither $KILL nor $KILL2 could be written - the next tick will refuse to start only if a location stays unwritable; a human must stop the timer now."
+      exit 3
+    fi
+  fi
+  log "AUTO-KILL: $1 (wrote $where)"
+  page "AUTO-KILL $STAMP: $1. Nothing more runs until a human reads $OUT and removes $where."
+}
+
+# verify-outbound-migration-race-m1 (Fable 2026-11-05 12:2xZ): migrate the ledger ONCE, BEFORE the tick lock, so no
+# reader can race a migration a family started mid-tick. At 11:49:02Z the live tick was mid-ALTER while another lane's
+# read-only check ran: 89 FAILED "verify ledger needs a migration", rc=1, and the tick stopped with zero sends. The
+# migration itself is now atomic (verify_ledger._migrate: one BEGIN IMMEDIATE), and this call makes the schema current
+# before any family, check or apply runs. A ledger that cannot be migrated is not a ledger to send against: loud, stop.
+py -c 'import sys; sys.path.insert(0, sys.argv[1]); from credit_review import verify_ledger; verify_ledger.connect(sys.argv[2]).close()' \
+  "$SCRIPTS_DIR" "$LEDGER" || { autokill "ledger migration failed (the ledger cannot be opened or migrated); tick stops"; exit 1; }
 exec 9>>"$STATE/tick.lock"
 if ! flock -n 9; then
   # the measured reason (b1 518 / p1 519 (2)): who holds it and for how long. A held flock is a LIVE tick (it dies with its
@@ -383,20 +465,6 @@ ZR_MISSING=0
 if [ ! -r "$ZERO_READ" ]; then
   LIVE=0; PAID_LIVE=0; ZR_MISSING=1
 fi
-
-autokill() { # <why>
-  local where="$KILL"
-  if ! printf 'auto-kill %s: %s\n' "$STAMP" "$1" > "$KILL" 2>/dev/null; then
-    where="$KILL2"
-    if ! printf 'auto-kill %s: %s\n' "$STAMP" "$1" > "$KILL2" 2>/dev/null; then
-      log "AUTO-KILL: $1 - BOTH kill-file writes FAILED ($KILL, $KILL2); this tick stops here"
-      page "AUTO-KILL $STAMP FAILED TO PERSIST: $1. Neither $KILL nor $KILL2 could be written - the next tick will refuse to start only if a location stays unwritable; a human must stop the timer now."
-      exit 3
-    fi
-  fi
-  log "AUTO-KILL: $1 (wrote $where)"
-  page "AUTO-KILL $STAMP: $1. Nothing more runs until a human reads $OUT and removes $where."
-}
 
 [ "${ZR_MISSING:-0}" = 1 ] && { log "LIVE REFUSED: the zero-read reader $ZERO_READ is not deployed; this tick runs DRY"; page "live tick refused: $ZERO_READ missing (tick ran dry)"; }
 
@@ -786,8 +854,11 @@ family() {
     log "$tag: $(elapsed)s into the tick and its worst case is ${worst}s (cap $cap); it does not fit before the ${TICK_HARD_S}s deadline; this family waits for the next tick"
     return 0
   fi
-  py "$runner" "$sub" --list "$list" --segment "$seg" "$@" "${excl[@]}" "${pg[@]}" --mode dry-run --max-users "$cap" \
-    --check-recipients --outcomes-json "$OUT/$tag-check.json" > "$OUT/$tag-check.out" 2>&1; rc=$?
+  run_transient "$tag" check "$OUT/$tag-check.out" \
+    py "$runner" "$sub" --list "$list" --segment "$seg" "$@" "${excl[@]}" "${pg[@]}" --mode dry-run --max-users "$cap" \
+    --check-recipients --outcomes-json "$OUT/$tag-check.json"; rc=$?
+  [ "$rc" = 2 ] && return 2
+  rc="$RC"
   log "$tag check (rc=$rc): $(head -c 600 "$OUT/$tag-check.out")"
   if deadline_rc "$rc"; then log "$tag: check hit the ${TICK_HARD_S}s deadline (read-only, stopped); the tick ends"; return 1; fi
   [ "$rc" = 0 ] || { log "$tag: check failed; tick stops"; return 1; }
@@ -801,8 +872,11 @@ family() {
   install -d -m 700 "$OUT/$tag-bodies"
   # r5: the bodies ARE the after-the-fact review sample - no sample, no send (the tick stops). [key=scale-now-openclaw]:
   # the WHOLE batch is rendered (not 5), each body with the renderer's facts beside it - the batch judge's items
-  py "$runner" "$sub" --list "$list" --segment "$seg" "$@" "${excl[@]}" "${pg[@]}" --mode dry-run --max-users "$cap" \
-    --preview "$OUT/$tag-bodies" --preview-accepted "$OUT/$tag-check.json" > "$OUT/$tag-bodies.out" 2>&1; rc=$?
+  run_transient "$tag" bodies "$OUT/$tag-bodies.out" \
+    py "$runner" "$sub" --list "$list" --segment "$seg" "$@" "${excl[@]}" "${pg[@]}" --mode dry-run --max-users "$cap" \
+    --preview "$OUT/$tag-bodies" --preview-accepted "$OUT/$tag-check.json"; rc=$?
+  [ "$rc" = 2 ] && return 2
+  rc="$RC"
   if deadline_rc "$rc"; then log "$tag: bodies hit the ${TICK_HARD_S}s deadline (read-only, stopped); no apply, the tick ends"; return 1; fi
   [ "$rc" = 0 ] || { log "$tag: body sample failed; no apply, tick stops: $(head -c 300 "$OUT/$tag-bodies.out")"; return 1; }
   accept_bodies "$tag"; rc=$?
@@ -851,10 +925,83 @@ family() {
   # passes no cap through the environment (no env-moved gate input)
   # [key=apply-sized-to-list]: the apply sends only this tick's own check's accepted set (--signed-accepted); the
   # tick pages that set by its caps and deadline by design (--page: a subset, never a user outside it)
-  py "$runner" "$sub" --list "$list" --segment "$seg" "$@" "${excl[@]}" "${pg[@]}" --mode apply --max-users "$n" "${capargs[@]}" \
-    --signed-accepted "$OUT/$tag-check.json" --page \
-    --outcomes-json "$OUT/$tag-apply.json" > "$OUT/$tag-apply.out" 2>&1; rc=$?
-  log "$tag APPLY (rc=$rc): $(head -c 600 "$OUT/$tag-apply.out")"
+  # spec-deploy-lock-deferral-m1: a deploy holding the apply lock (rc=3) and a Trino transient (rc=4) are NOT terminal.
+  # The precondition for a retry is NOT ATTEMPTED, proved by the LEDGER POSITION (max(id) unchanged) - never by the exit
+  # code alone, because the same rc=3 also follows a real partial send. A changed ledger is a partial send and the
+  # existing rails below own it. On expiry the family DEFERS: no kill file, no refusal operand, no cursor move.
+  local attempt=0 first_at=0 deferred=0 wait left hi cost t0
+  while :; do
+    t0="$(date -u +%s)"
+    py "$runner" "$sub" --list "$list" --segment "$seg" "$@" "${excl[@]}" "${pg[@]}" --mode apply --max-users "$n" "${capargs[@]}" \
+      --signed-accepted "$OUT/$tag-check.json" --page \
+      --outcomes-json "$OUT/$tag-apply.json" > "$OUT/$tag-apply.out" 2>&1; rc=$?
+    cost=$(( $(date -u +%s) - t0 ))
+    log "$tag APPLY (rc=$rc): $(head -c 600 "$OUT/$tag-apply.out")"
+    case "$rc" in "$APPLY_LOCK_RC"|"$TRANSIENT_RC") ;; *) break ;; esac
+    # QA #1799 r11: rc=3 is NOT only a held lock. credit-review.py also exits 3 for a cap-short, a signed-set mismatch
+    # and HEAD_REFUSED, and ApplyLockError covers a lock that could not be OPENED. Retrying those mislabelled a HARD
+    # REFUSAL as "a deploy holds the apply lock", then let the tick continue into later groups and exit 2 instead of
+    # preserving the hard stop. The lock path prints APPLY_LOCK_HELD on stderr; without it, rc=3 is terminal here.
+    # rc=4 has exactly one producer (TrinoTransientError) and needs no marker.
+    if [ "$rc" = "$APPLY_LOCK_RC" ] && grep -q "$APPLY_LOCK_UNOPENABLE_MARKER" "$OUT/$tag-apply.out" 2>/dev/null; then
+      # QA #1799 r12 (carried): ApplyLockError covered BOTH contention and a lock that could not be OPENED, so a
+      # permissions or I/O fault was reported as "a deploy holds the lock", retried, deferred, and the tick went on
+      # into later groups. An unopenable lock is a hard stop with its own line - never a retry, never a deferral.
+      log "$tag: the apply lock could not be OPENED - a permissions or I/O fault, not a deploy; nothing was attempted"
+      log "$tag: apply failed rc=$rc; tick stops"
+      return 1
+    fi
+    if [ "$rc" = "$APPLY_LOCK_RC" ] && ! grep -q "$APPLY_LOCK_MARKER" "$OUT/$tag-apply.out" 2>/dev/null; then
+      # QA #1799 r12 (Critical): the discriminator is the LEDGER, not the return. rc=3 without the marker is NOT only
+      # pre-send - credit-review.py returns 3 for a signed-set mismatch and for HEAD_REFUSED AFTER args.fn() has
+      # already sent, so an early return here skipped the partial-send detection and every rail below it (health,
+      # zero-read, refusal spike, fraud, sample) - the rails that exist to catch an unsafe partial send.
+      hi="$(maxid)"
+      if [ "$hi" != "$lo" ]; then
+        log "$tag: apply rc=3 WITHOUT the held-lock marker AND a CHANGED ledger ($lo -> $hi) - a partial send; the post-send rails own it"
+        break
+      fi
+      # An UNCHANGED ledger proves nothing was attempted, so this is a HARD STOP: no retry, no deferral, no kill file,
+      # and no later family group. Returning here (rather than falling through to the health/spike rails) keeps it a
+      # clean stop - the rails would read the absent outcomes artefact as UNMEASURED and write a kill file for a run
+      # that never attempted a send.
+      log "$tag: apply rc=3 WITHOUT the held-lock marker and an UNCHANGED ledger - a hard refusal (cap-short, signed-set mismatch or HEAD_REFUSED), not a deploy lock"
+      log "$tag: apply failed rc=$rc; tick stops"
+      return 1
+    fi
+    hi="$(maxid)"
+    if [ "$hi" != "$lo" ]; then
+      log "$tag: apply rc=$rc with a CHANGED ledger ($lo -> $hi) - a partial send is never a clean family; the tick stops"
+      break
+    fi
+    [ "$first_at" = 0 ] && first_at="$(date -u +%s)"
+    local held=$(( $(date -u +%s) - first_at ))
+    local why="a deploy holds the apply lock"; [ "$rc" = "$TRANSIENT_RC" ] && why="Trino is transiently unavailable"
+    if [ "$attempt" -ge "${#APPLY_RETRY_SLEEPS[@]}" ] || [ "$held" -ge "$APPLY_RETRY_CAP_S" ] \
+       || [ "$(elapsed)" -ge "$TICK_BUDGET_S" ]; then
+      log "$tag: apply deferred - $why for ${held}s (${attempt} retries, ledger unchanged at $lo); this family and the rest of the tick defer to the next tick (no kill file, no refusal, no cursor move)"
+      page "$tag: apply deferred after ${held}s - $why; nothing was sent and nothing was refused"
+      deferred=1; break
+    fi
+    # QA #1799 r13 (Important): same clip as run_transient, against the remaining tick BUDGET and the remaining
+    # APPLY_RETRY_CAP_S window. A retry that does not fit is not a retry: defer now rather than sleep past the budget
+    # and starve every family behind this one.
+    left=$(( TICK_BUDGET_S - $(elapsed) ))
+    local cap_left=$(( APPLY_RETRY_CAP_S - held ))
+    [ "$cap_left" -lt "$left" ] && left="$cap_left"
+    wait="${APPLY_RETRY_SLEEPS[$attempt]}"
+    # QA #1799 r14 (Important): the same whole-retry fit as run_transient - the sleep PLUS a repeat of the attempt we
+    # just measured must finish strictly inside the budget and the retry window, or the retry is not a retry.
+    if [ "$left" -le 0 ] || [ "$(( wait + cost ))" -ge "$left" ]; then
+      log "$tag: apply deferred - a ${wait}s retry does not fit in the ${left}s left of the tick budget/retry window (the attempt itself just took ${cost}s, so the retry would finish at or past it); $why; this family and the rest of the tick defer to the next tick (no kill file, no refusal, no cursor move)"
+      page "$tag: apply deferred - $why and no retry fits the tick budget; nothing was sent and nothing was refused"
+      deferred=1; break
+    fi
+    attempt=$(( attempt + 1 ))
+    log "$tag: apply lock busy/transient ($why); retry $attempt/${#APPLY_RETRY_SLEEPS[@]} in ${wait}s"
+    [ "$wait" -ge 1 ] && sleep "$wait"
+  done
+  [ "$deferred" = 1 ] && return 2
   # a SEND cut at the deadline: whatever it sent is in the ledger, but the read-back is incomplete - a human looks first
   if deadline_rc "$rc"; then autokill "$tag: the apply hit the ${TICK_HARD_S}s deadline mid-run (ledger $((lo + 1))-…); read back by hand before re-arming"; return 1; fi
   local h hrc; h="$(py "$HEALTH" --since "$RUN_START" --bounce-max-pct 2 --unsub-max-pct 2 --spam-max-pct 2 2>&1 | tail -1)"; hrc=$?
@@ -1204,9 +1351,9 @@ fi
 # checked-only until UNSIGNED_FROM is dated - first would spend the tick on zero sends and starve the paid families)
 need_families() {
   if grep -q -- '"--check-recipients"' "$NEED_RUNNER" 2>/dev/null; then
-    family proof-need-ask free "$NEED_LIST" "$CAP" need-send || return 1
+    family proof-need-ask free "$NEED_LIST" "$CAP" need-send || return $?
     if reached "${PAID_FROM[proof-need-ask]:-}"; then
-      family proof-need-ask paid "$NEED_LIST" "$CAP" need-send || return 1
+      family proof-need-ask paid "$NEED_LIST" "$CAP" need-send || return $?
     else
       log "proof-need-ask paid: held until PAID_FROM[proof-need-ask] is set (ruling 2: free first); skipped"
     fi
@@ -1216,8 +1363,8 @@ need_families() {
 }
 credit_families() {
   if [ -n "$RD_LIST" ]; then
-    family reply-due paid "$RD_LIST" "$RD_CAP" uvn-status --campaign uvn-status || return 1
-    family reply-due free "$RD_LIST" "$RD_CAP" uvn-status --campaign uvn-status || return 1
+    family reply-due paid "$RD_LIST" "$RD_CAP" uvn-status --campaign uvn-status || return $?
+    family reply-due free "$RD_LIST" "$RD_CAP" uvn-status --campaign uvn-status || return $?
     # r5 (1574 finding 1, round 2): a 0 return is NOT proof of completion - family() also returns 0 when the tick budget
     # is reached, when its worst case does not fit, when it is SIGNED-only or when the daily cap is spent, and in those
     # cases it has processed nobody. So the cursor moves only on the marker the family writes when its step for this
@@ -1248,10 +1395,10 @@ credit_families() {
     fi
   fi
   local c2=(); reached "${UNSIGNED_FROM[uvn-status:c2]:-}" || c2=(--no-correction)
-  family uvn-status paid "$OUT/owing-uvn.json" "$CAP" uvn-status --campaign uvn-status "${c2[@]}" || return 1
-  family r1 paid "$OUT/receipts/receipts-received.json" "$R1_CAP" uvn-status --campaign status-doc-received --wording received || return 1
-  family uvn-status free "$OUT/owing-uvn.json" "$CAP" uvn-status --campaign uvn-status "${c2[@]}" || return 1
-  family r1 free "$OUT/receipts/receipts-received.json" "$R1_CAP" uvn-status --campaign status-doc-received --wording received || return 1
+  family uvn-status paid "$OUT/owing-uvn.json" "$CAP" uvn-status --campaign uvn-status "${c2[@]}" || return $?
+  family r1 paid "$OUT/receipts/receipts-received.json" "$R1_CAP" uvn-status --campaign status-doc-received --wording received || return $?
+  family uvn-status free "$OUT/owing-uvn.json" "$CAP" uvn-status --campaign uvn-status "${c2[@]}" || return $?
+  family r1 free "$OUT/receipts/receipts-received.json" "$R1_CAP" uvn-status --campaign status-doc-received --wording received || return $?
 }
 claim_families() {
   if [ ! -s "$CLAIM_LIST" ]; then log "claim families: no claim list at $CLAIM_LIST (the claim lane drops it); skipped"; return 0; fi
@@ -1301,10 +1448,10 @@ PY
     return 0
   fi
   rm -f "$STATE/claim-list-stale-paged" 2>/dev/null || true
-  family claim-proof-ask paid "$cl" "$CLAIM_CAP" claim-proof-ask || return 1
-  family claim-status paid "$cl" "$CLAIM_CAP" claim-status || return 1
-  family claim-proof-ask free "$cl" "$CLAIM_CAP" claim-proof-ask || return 1
-  family claim-status free "$cl" "$CLAIM_CAP" claim-status || return 1
+  family claim-proof-ask paid "$cl" "$CLAIM_CAP" claim-proof-ask || return $?
+  family claim-status paid "$cl" "$CLAIM_CAP" claim-status || return $?
+  family claim-proof-ask free "$cl" "$CLAIM_CAP" claim-proof-ask || return $?
+  family claim-status free "$cl" "$CLAIM_CAP" claim-status || return $?
 }
 # ruling B: an UNMEASURED tick whose page could not be delivered left a durable marker. Retry it at the top of every
 # tick; a marker that still cannot be delivered fails this tick closed (the outage is never only a log line).
@@ -1320,15 +1467,33 @@ for m in "$STATE"/zero-unmeasured-undelivered-*; do
   fi
 done
 
+# spec-deploy-lock-deferral-m1 addendum 2 (Fable 2026-11-05 14:4xZ): the ORDER is the 10-30 ruling and does not change.
+# What changes is that a TRANSIENT family failure (rc=2: deploy lock, Trino transient) stops THAT GROUP and the tick
+# CONTINUES to the next one, instead of `exit 1` starving every family behind it. A hard failure (rc=1: kill file,
+# partial send, zero-read unmeasured, a real SQL/auth error) still exits 1 immediately. A deferred tick exits 2, so it is
+# visible in the exit code and the log without having cost the families behind it.
+run_group() { # <label> <group fn>: 0 = done, 1 = hard stop (exit 1), 2 = deferred (continue, DEFERRED=1)
+  local label="$1" rc; shift
+  "$@"; rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    2) DEFERRED=1; log "$label: deferred (transient); continuing to the next family group"; return 0 ;;
+    *) return 1 ;;
+  esac
+}
 if [ "$DOW" = 6 ] || [ "$DOW" = 7 ]; then   # Fable 10-30: claims prioritised Sat-Sun
   log "weekend: claim families first"
-  claim_families || exit 1
-  credit_families || exit 1
-  need_families || exit 1
+  run_group "claim families" claim_families || exit 1
+  run_group "credit families" credit_families || exit 1
+  run_group "need families" need_families || exit 1
 else
-  credit_families || exit 1
-  claim_families || exit 1
-  need_families || exit 1
+  run_group "credit families" credit_families || exit 1
+  run_group "claim families" claim_families || exit 1
+  run_group "need families" need_families || exit 1
 fi
 log "tick done"
+if [ "$DEFERRED" = 1 ]; then
+  log "tick deferred: a transient condition (deploy lock / Trino) deferred at least one family; nothing was refused and no kill file was written"
+  exit 2
+fi
 exit 0

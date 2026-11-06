@@ -724,12 +724,41 @@ TRINO = "/opt/hydra/scripts/trino-query.sh"
 AUTH_LOOKUP_CMD = os.environ.get("CREDIT_VERIFY_AUTH_LOOKUP_CMD", TRINO)
 
 
+class TrinoTransientError(RuntimeError):
+    """Trino itself said "retry in a few minutes" (verify-outbound-migration-race-m1 addendum, 2026-11-05 14:25:53Z).
+
+    A transient condition is NOT a terminal failure of the run: the caller retries it bounded and then DEFERS the
+    family, instead of stopping the tick and starving every family behind it. Everything else stays a bare
+    RuntimeError - a SQL error, a missing table, an auth failure must still be terminal."""
+
+
+# Trino's own words for "this is not your query's fault". Matched case-insensitively against the stderr tail.
+TRINO_TRANSIENT_MARKERS = (
+    "under too much load",
+    "transient issue",
+    "please retry",
+    "updating task",
+    "error 503",
+    "error 502",
+    "503 service unavailable",
+    "502 bad gateway",
+)
+
+
+def trino_transient(stderr: str) -> bool:
+    """True when Trino's own stderr says the failure is transient (retryable), False for a real query failure."""
+    low = (stderr or "").lower()
+    return any(m in low for m in TRINO_TRANSIENT_MARKERS)
+
+
 def trino(sql: str, cmd: str | None = None) -> list[list[str]]:
     """Read-only query against the core replica (Trino)."""
     import csv
     import io
     p = subprocess.run([cmd or TRINO], input=sql, capture_output=True, text=True, timeout=900, check=False)
     if p.returncode:
+        if trino_transient(p.stderr):
+            raise TrinoTransientError(f"trino transient: {p.stderr[-300:]}")
         raise RuntimeError(f"trino failed: {p.stderr[-300:]}")
     lines = [ln for ln in p.stdout.splitlines() if ln.startswith('"')]
     return list(csv.reader(io.StringIO("\n".join(lines))))
@@ -831,6 +860,25 @@ class ApplyLockError(RuntimeError):
     pass
 
 
+class ApplyLockUnopenable(ApplyLockError):
+    """QA #1799 r12 (carried): the lock could not be OPENED at all - a permissions or I/O fault, not contention.
+
+    It subclasses ApplyLockError so every existing caller keeps its contract (exit 3, nothing sent), but the tick can
+    tell the two apart: a broken lock is a HARD STOP, never "a deploy holds the lock" retried and deferred."""
+
+
+# QA #1799 r11: exit 3 is NOT synonymous with a held deploy lock. credit-review.py also exits 3 for a cap-short, a
+# signed-set mismatch and HEAD_REFUSED, and ApplyLockError itself covers a lock that could not be OPENED. The tick used
+# to retry every rc=3 with an unchanged ledger, so a hard refusal was mislabelled "a deploy holds the apply lock",
+# retried, and then let the tick continue into later groups and exit 2 instead of preserving the hard stop. The lock
+# path now prints this marker on stderr; the tick retries rc=3 ONLY when it sees it. Nothing else changes contract:
+# the exit code stays 3 for every caller, and a hard refusal simply never prints the marker.
+APPLY_LOCK_MARKER = "APPLY_LOCK_HELD"
+# QA #1799 r12: a lock that could not be OPENED is a permissions/I-O fault, never contention - its own marker, so the
+# tick stops hard instead of retrying and deferring a broken lock as if a deploy held it.
+APPLY_LOCK_UNOPENABLE_MARKER = "APPLY_LOCK_UNOPENABLE"
+
+
 _SESSION_LOCK: Any = None              # the apply lock held for a whole outer apply run (apply_session)
 
 
@@ -862,7 +910,7 @@ def _apply_lock() -> Any:
         os.makedirs(os.path.dirname(APPLY_LOCK_PATH), mode=0o700, exist_ok=True)
         fh = open(APPLY_LOCK_PATH, "a+")
     except OSError as exc:
-        raise ApplyLockError(f"the apply lock {APPLY_LOCK_PATH} cannot be opened ({exc}); nothing sent") from exc
+        raise ApplyLockUnopenable(f"the apply lock {APPLY_LOCK_PATH} cannot be opened ({exc}); nothing sent") from exc
     try:
         fcntl.flock(fh.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
     except OSError as exc:

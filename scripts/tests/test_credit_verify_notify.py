@@ -2130,6 +2130,41 @@ class SignedHeadTests(unittest.TestCase):
             self.assertEqual(cli.main([]), 3)
         self.assertEqual(called, [])
 
+    def test_the_cli_prints_a_DIFFERENT_marker_for_an_unopenable_lock_than_for_a_held_one(self):
+        """QA #1799 r12 (carried): ApplyLockError covered BOTH contention and a lock that could not be OPENED, so a
+        permissions/I-O fault was reported as "a deploy holds the lock", retried, deferred, and the tick went on into
+        later groups. The two now carry different markers, and the tick stops hard on the unopenable one."""
+        import argparse, importlib.util, io, contextlib
+        spec = importlib.util.spec_from_file_location("credit_review_cli_unopenable",
+                                                      str(ROOT / "scripts" / "credit-review.py"))
+        cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(cli)
+        ns = argparse.Namespace(cmd="uvn-status", mode="apply", fn=lambda a: 0)
+
+        def run_with(exc):
+            err = io.StringIO()
+            with unittest.mock.patch.object(cli, "parser") as par, \
+                    unittest.mock.patch.object(verify_notify, "apply_session",
+                                               side_effect=lambda: contextlib.nullcontext()):
+                par.return_value.parse_args.return_value = ns
+                with unittest.mock.patch.object(verify_notify, "apply_session") as sess:
+                    sess.return_value.__enter__.side_effect = exc
+                    sess.return_value.__exit__.return_value = False
+                    with contextlib.redirect_stderr(err):
+                        rc = cli.main([])
+            return rc, err.getvalue()
+
+        rc, err = run_with(verify_notify.ApplyLockUnopenable("the apply lock /x cannot be opened (PermissionError)"))
+        self.assertEqual(rc, 3, "the exit code contract is unchanged for every caller")
+        self.assertIn(verify_notify.APPLY_LOCK_UNOPENABLE_MARKER, err)
+        self.assertNotIn(verify_notify.APPLY_LOCK_MARKER + ":", err,
+                         "an unopenable lock must never be reported as a held one")
+        rc, err = run_with(verify_notify.ApplyLockError("a deploy holds the apply lock /x"))
+        self.assertEqual(rc, 3)
+        self.assertIn(verify_notify.APPLY_LOCK_MARKER, err)
+        self.assertNotIn(verify_notify.APPLY_LOCK_UNOPENABLE_MARKER, err)
+        # and the subclass relationship is what keeps every existing caller working
+        self.assertTrue(issubclass(verify_notify.ApplyLockUnopenable, verify_notify.ApplyLockError))
+
     def test_the_builders_record_signed_on_and_the_loaders_bind_it(self):
         self.sha.write_text("c" * 40 + "\n")
         self.assertEqual(verify_notify.deployed_head(), "c" * 40)

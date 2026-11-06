@@ -8,7 +8,7 @@ description: |
   green". Never merges — a human does that.
 license: MIT
 metadata:
-  version: "2.2.0"
+  version: "2.3.0"
 argument-hint: "<PR number> [owner/repo]"
 ---
 
@@ -60,8 +60,25 @@ gh pr view "$PR" --repo "$REPO" --json reviewDecision,mergeable,state,headRefNam
 gh pr checks "$PR" --repo "$REPO"
 # latest review from a non-self author (your own reply-comments surface as reviews — exclude them):
 # NOTE: gh's --jq takes a single filter string and has no --arg; interpolate $ME via the shell instead.
-gh api "repos/$REPO/pulls/$PR/reviews" --jq "[.[]|select(.user.login!=\"$ME\")]|max_by(.id)|{id,user:.user.login,state}"
+gh api --paginate "repos/$REPO/pulls/$PR/reviews?per_page=100" \
+  | jq -s --arg me "$ME" 'add | [.[] | select(.user.login != $me)] | max_by(.id) | {id,user:.user.login,state,html_url}'
+# NOTE: do NOT combine --paginate with --jq here. gh applies --jq to EACH PAGE
+# (verified: `?per_page=5 --paginate --jq length` prints 5,5,5,5,5,5,5,5,1), so a
+# max_by(.id) filter would return one candidate per page and the caller reads the
+# first. Pipe the pages into a local `jq -s 'add|…'` instead — that is the only
+# form that provably sees every page.
 ```
+
+> **`--paginate` is load-bearing, not decoration.** `GET .../pulls/<n>/reviews`
+> returns 30 reviews per page **oldest first**, and an unpaginated call silently
+> returns only the first page. Past 30 reviews — routine on a long-lived PR —
+> `max_by(.id)` then picks the newest review *of the oldest 30*, i.e. a stale one,
+> and the fresh verdict looks like it does not exist. That cost three lanes on
+> 2026-11-03 (hydra#1545 06:37Z = review 37, hydra#1636 12:12Z = review 34,
+> hydra#1643 15:42Z = review 39 — all on "page 2", all read as "no body, no
+> review, findings missing"). If a NO-GO seems to have no text, re-read it with
+> `--paginate` (or run `/opt/hydra/scripts/qa-findings.sh <owner/repo> <pr>`)
+> before concluding the text was never posted.
 
 1. **Is there a new review or unaddressed finding** since your last pass (a non-self review
    with id greater than the last you handled, or any open 🔴/🟡 thread)? If yes → run the
@@ -85,8 +102,10 @@ gh api "repos/$REPO/pulls/$PR/reviews" --jq "[.[]|select(.user.login!=\"$ME\")]|
 1. **Fetch** the review body + its unresolved inline comments:
    ```bash
    gh api "repos/$REPO/pulls/$PR/reviews/<REVIEW_ID>" --jq '.body'
-   gh api graphql -f query='query($o:String!,$r:String!,$p:Int!){repository(owner:$o,name:$r){pullRequest(number:$p){reviewThreads(first:100){nodes{id isResolved comments(first:1){nodes{databaseId path line body}}}}}}}' -f o="${REPO%/*}" -f r="${REPO#*/}" -F p="$PR" \
-     --jq '.data.repository.pullRequest.reviewThreads.nodes[]|select(.isResolved==false)|"thread=\(.id) cmt=\(.comments.nodes[0].databaseId) \(.comments.nodes[0].path):\(.comments.nodes[0].line)\n\(.comments.nodes[0].body)"'
+   # NOTE: first:100 caps the thread list. hasNextPage is read as well so a
+   # >100-thread PR fails LOUD instead of silently hiding the unresolved tail.
+   gh api graphql -f query='query($o:String!,$r:String!,$p:Int!){repository(owner:$o,name:$r){pullRequest(number:$p){reviewThreads(first:100){pageInfo{hasNextPage} nodes{id isResolved comments(first:1){nodes{databaseId path line body}}}}}}}' -f o="${REPO%/*}" -f r="${REPO#*/}" -F p="$PR" \
+     --jq '.data.repository.pullRequest.reviewThreads.pageInfo.hasNextPage as $more | (.data.repository.pullRequest.reviewThreads.nodes[]|select(.isResolved==false)|"thread=\(.id) cmt=\(.comments.nodes[0].databaseId) \(.comments.nodes[0].path):\(.comments.nodes[0].line)\n\(.comments.nodes[0].body)"), (if $more then "WARNING: more than 100 review threads; this list is TRUNCATED - do not conclude there are no open findings" else empty end)'
    ```
 2. **Verify each finding** by reading the actual code at the cited file:line — real bug, or
    false positive? **When a review carries several findings, verify them in parallel

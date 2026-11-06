@@ -1137,8 +1137,9 @@ def dry_run(db: sqlite3.Connection, *, doc_store: str | Path = DEFAULT_DOC_STORE
         docs, verified = document_universe(doc_store, proof_store or DEFAULT_PROOF_STORE)
     except (OSError, sqlite3.Error) as exc:
         return {"unreadable": f"the doc-verify store could not be read ({exc})", "per_guard": {},
-                "would_approve": 0, "rows": 0}
+                "verdicts": {}, "would_approve": 0, "rows": 0}
     per_guard: dict[str, int] = {}
+    verdicts: dict[str, str] = {}                    # request id -> the gate that refused it first
     passed: list[tuple[str, Any, Any, tuple]] = []   # (request_id, user_id, profile_id, order key)
     for rid, ds in sorted(docs.items()):
         # QA #1800 r17: the measurement covers the whole filed backlog. A request no VERIFIED document
@@ -1146,11 +1147,13 @@ def dry_run(db: sqlite3.Connection, *, doc_store: str | Path = DEFAULT_DOC_STORE
         # already-verified rows reports a complete pass over a backlog it never looked at.
         if rid not in verified:
             per_guard["dv4_verified"] = per_guard.get("dv4_verified", 0) + 1
+            verdicts[rid] = "dv4_verified"
             continue
         ds = verified[rid]
         r = rows.get(rid.lower())
         if r is None:
             per_guard["no_ledger_row"] = per_guard.get("no_ledger_row", 0) + 1
+            verdicts[rid] = "no_ledger_row"
             continue
         c = Candidate(rid, r.get("user_id"), r.get("popularity"), tuple(ds),
                       r.get("profile_id"), tuple(r.get("roles") or ()), bool(r.get("big_track")),
@@ -1159,6 +1162,7 @@ def dry_run(db: sqlite3.Connection, *, doc_store: str | Path = DEFAULT_DOC_STORE
                                hold_ids=hold_ids, hold_users=hold_users, now=now,
                                req_users=req_users)
         per_guard[verdict] = per_guard.get(verdict, 0) + 1
+        verdicts[rid] = verdict
         if verdict == "would_approve":
             passed.append((rid, c.user_id, c.profile_id,
                            order_key(c.user_id, r.get("created_at"), None, now)))
@@ -1167,16 +1171,17 @@ def dry_run(db: sqlite3.Connection, *, doc_store: str | Path = DEFAULT_DOC_STORE
     # users when 49 were already approved, ignored the per-profile bound entirely, and dropped the
     # users past the fleet cap out of `rolled_to_tomorrow` instead of counting them.
     try:
-        plan = _plan_caps(db, now, passed)
+        plan = plan_caps(db, now, passed)
     except sqlite3.Error as exc:
         # the same rule as the doc store above: a ledger that cannot answer is an ERROR, never a
         # clean zero. `_spent_today` deliberately raises rather than reporting an empty day.
         return {"unreadable": f"the ledger could not be read for today's spent slots ({exc})",
-                "per_guard": per_guard, "would_approve": 0, "rows": len(docs)}
-    return {"unreadable": "", "per_guard": per_guard, "rows": len(docs),
+                "per_guard": per_guard, "verdicts": verdicts, "would_approve": 0, "rows": len(docs)}
+    return {"unreadable": "", "per_guard": per_guard, "verdicts": verdicts, "rows": len(docs),
             "would_approve": per_guard.get("would_approve", 0),
             "eligible_users": plan["eligible_users"], "would_users": plan["would_users"],
             "would_requests": plan["would_requests"],
+            "admitted": plan["admitted"],
             "rolled_to_tomorrow": plan["rolled_to_tomorrow"],
             "spent_users_today": plan["spent_users_today"],
             "spent_requests_today": plan["spent_requests_today"],
@@ -1203,13 +1208,17 @@ def _spent_today(db: sqlite3.Connection, day_start: str) -> tuple[dict[str, int]
     return users, profiles
 
 
-def _plan_caps(db: sqlite3.Connection, now: datetime,
-               passed: list[tuple[str, Any, Any, tuple]]) -> dict[str, int]:
+def plan_caps(db: sqlite3.Connection, now: datetime,
+               passed: list[tuple[str, Any, Any, tuple]]) -> dict[str, Any]:
     """The cap plan: walk the surviving rows in `paid_first_oldest` order and apply the SAME three
     bounds `_cap_refusal` applies at the write boundary, against a simulated copy of today's ledger.
 
     A request the caps would refuse today is counted in `rolled_to_tomorrow` - including the ones
     past the fleet cap, which the old plan silently dropped.
+
+    `admitted` names the requests the caps would actually let through TODAY. QA #1766 r3 finding 1:
+    a caller that counts pre-cap `would_approve` rows as "approvable work" pages a stalled decider
+    when every daily slot is already spent, although zero approvals is then the correct answer.
     """
     day_start = now.strftime("%Y-%m-%dT00:00:00Z")
     spent_users, spent_profiles = _spent_today(db, day_start)
@@ -1218,6 +1227,7 @@ def _plan_caps(db: sqlite3.Connection, now: datetime,
     spent_requests = sum(spent_users.values())
     eligible = {uid for _rid, uid, _pid, _k in passed if uid is not None}
     approved_users: set[Any] = set()
+    admitted: list[str] = []
     would_requests = 0
     rolled = 0
     for _rid, uid, pid, _k in sorted(passed, key=lambda t: t[3]):
@@ -1238,10 +1248,12 @@ def _plan_caps(db: sqlite3.Connection, now: datetime,
         if pid:
             profiles[str(pid)] = profiles.get(str(pid), 0) + 1
         approved_users.add(uid)
+        admitted.append(_rid)
         would_requests += 1
     return {"eligible_users": len(eligible), "would_users": len(approved_users),
             "would_requests": would_requests, "rolled_to_tomorrow": rolled,
-            "spent_users_today": len(spent_users), "spent_requests_today": spent_requests}
+            "spent_users_today": len(spent_users), "spent_requests_today": spent_requests,
+            "admitted": admitted}
 
 
 def _row_verdict(c: Candidate, db: sqlite3.Connection, *, doc_store: str | Path,

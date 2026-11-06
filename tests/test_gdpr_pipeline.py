@@ -779,6 +779,25 @@ class Checks(unittest.TestCase):
         self.assertTrue(checks.search_absent(ARPAD, "Aaron", fetch=lambda q: body(cap - 1)))   # short page: real absence
         self.assertFalse(checks.search_absent(ARPAD, "Aaron", fetch=lambda q: body(cap, include=True)))  # found = present
 
+    def test_a_full_page_is_unmeasurable_not_a_failed_read(self):
+        """A full page and a missing name are PERMANENT: no retry will ever change them. They must be
+        `Unmeasurable` (still an `Unknown`, so no line is ever filled) and not the plain `Unknown` that makes the
+        tick exit 2 and page. Measured on node-8 2026-11-06: 31 such rows every tick, 16 tick failures in a day."""
+        def body(n):
+            items = [{"id": f"00000000-0000-4000-8000-{i:012d}", "name": "Robert"} for i in range(n)]
+            return (200, {}, json.dumps({"result": "ok", "code": 200, "data": {"items": items}}).encode())
+
+        with self.assertRaises(checks.Unmeasurable):
+            checks.search_absent(ARPAD, "Robert", fetch=lambda q: body(checks.AUTOCOMPLETE_CAP))
+        with self.assertRaises(checks.Unmeasurable):
+            checks.search_absent(ARPAD, "   ", fetch=lambda q: body(0))
+        # A transient read failure stays a plain Unknown, so the tick still reports it and retries.
+        with self.assertRaises(checks.Unknown) as e:
+            checks.search_absent(ARPAD, "Robert", fetch=lambda q: (502, {}, b"{}"))
+        self.assertNotIsInstance(e.exception, checks.Unmeasurable)
+        # Unmeasurable IS an Unknown, so every existing `except Unknown` keeps refusing to fill a line.
+        self.assertTrue(issubclass(checks.Unmeasurable, checks.Unknown))
+
 
 class Watchdog(unittest.TestCase):
     def test_pages_three_days_before_due_without_confirmation(self):
@@ -3975,6 +3994,34 @@ class TwoConfirmationLetters(unittest.TestCase):
         self.assertEqual([x["slot"] for x in items], ["confirm-interim"],
                          "the final letter is not ready while the pages are still public")
         self.assertEqual(items[0]["P"], False)
+
+    def test_an_unmeasurable_row_is_not_a_run_error_but_a_transient_one_is(self):
+        """The tick exits 2 (and pages) on `run.errors`. A row that can never be checked here must not be one of
+        them, or the page fires every day for ever and a real failure hides behind it. It must still not be
+        confirmed: it drops out of the batch and the watchdog keeps naming it."""
+        rid = self.row()
+        now = datetime(2026, 10, 2, tzinfo=timezone.utc)
+
+        def boom(*_a):
+            raise checks.Unmeasurable("S check: 'Robert' returned the full autocomplete page (30 items, cap 30)")
+
+        with mock.patch("gdpr_pipeline.checks.public_gone", lambda e, i: True), \
+                mock.patch("gdpr_pipeline.checks.search_absent", boom), \
+                mock.patch.object(self.run, "_page_name", lambda i: "Robert"):
+            items = self.run.confirmations(now, m_result={})
+        self.assertEqual(items, [], "an unmeasurable row is never confirmed")
+        self.assertEqual(self.run.errors, [], "and it is not a failed read")
+
+        def transient(*_a):
+            raise checks.Unknown("S check: autocomplete HTTP 502")
+
+        with mock.patch("gdpr_pipeline.checks.public_gone", lambda e, i: True), \
+                mock.patch("gdpr_pipeline.checks.search_absent", transient), \
+                mock.patch.object(self.run, "_page_name", lambda i: "Robert"):
+            self.run.confirmations(now, m_result={})
+        self.assertEqual(len(self.run.errors), 1, "a genuinely unreadable row still fails the run")
+        self.assertIn("S/P read-back", self.run.errors[0])
+
 
 class SendApproval(unittest.TestCase):
     """Fable r5 + 030: a digest MENTION is not an approval. The approval is a structured record - one top-level Slack

@@ -41,7 +41,7 @@ Ledger: `/var/lib/hydra/credit-review/ledger.sqlite3`. Tables:
    - Every role trusted-confirmed → **CONFIRMED**.
 2. **Model + web search (behind a flag).** For undecided approvals: every big track plus a stable 10% sample of the rest.
    - Big comes from catalog data only, never the request's client-sourced `spotifyPopularity`: catalog track popularity ≥ 60 (`BIG_TRACK_POPULARITY`), or a *linked* track artist (one that links a catalog profile) with catalog popularity ≥ 90 (`BIG_ARTIST_POPULARITY`), the IDP's `_is_big_track` rule. Unknown track popularity, or an unreadable linked artist, counts as big; a track with no linked artist is decided by its own popularity. Velocity's big-track share uses the same rule.
-   - Tool-less OpenRouter calls (`x-ai/grok-4.3`, `web` plugin): one call per big-track request; non-big requests of one profile share a call (profile batching, under *Cost controls*).
+   - Tool-less OpenRouter calls (`deepseek/deepseek-v4.1-flash-1017`, `web` plugin): one call per big-track request; non-big requests of one profile share a call (profile batching, under *Cost controls*).
    - `--provider codex` ($0, credit-trust T01): the server fetches free sources itself (MusicBrainz by ISRC, Wikipedia) and tool-less Codex on the ChatGPT subscription judges them; a finding counts only if its quoted passage is verbatim in the fetched snapshot. The OpenRouter judge above, with all its switches, is the fallback when nothing can be fetched or Codex is unavailable. See [credit-trust-llm.md](credit-trust-llm.md).
    - Only real search citations count, and only on independent domains, counted once per registrable domain (two subdomains of one site = 1). Never independent: `muso.ai`; any domain in the claimant profile's `links` / `socials` / `rawProfiles[].url` (so a claimant with a Discogs raw profile gets no Discogs confirmation); any host with a label that is the claimant's name ("Real Engineer" → `realengineer.com`, `realengineer.wixsite.com`); user-generated hosting and social platforms (Wix, Blogspot, WordPress.com, Linktree, Instagram, X/Twitter, Facebook, TikTok, YouTube, SoundCloud, Bandcamp, SoundBetter, where a claimant's own page only repeats the claim).
 3. **Policy clamps** (`credit_review/policy.py`).
@@ -69,7 +69,7 @@ python3 /opt/hydra/scripts/credit-review.py digest --hours 24
 sqlite3 /var/lib/hydra/credit-review/ledger.sqlite3 \
   "select reviewed_at, verdict, track_title, claimed_roles from reviews where mode='audit' and verdict!='CONFIRMED' order by id desc limit 20"
 # Labelled-set precision (spends model credit; refuses below the balance floor):
-python3 /opt/hydra/scripts/credit-review.py eval --mode audit --models x-ai/grok-4.3 --out /tmp/cr-eval
+python3 /opt/hydra/scripts/credit-review.py eval --mode audit --models deepseek/deepseek-v4.1-flash-1017 --out /tmp/cr-eval
 # Same eval at $0: server-fetched sources judged by tool-less Codex (run as root on node-8):
 python3 /opt/hydra/scripts/credit-review.py eval --mode audit --provider codex --models gpt-6.1-sol --out /tmp/cr-eval-codex
 # Re-apply the current policy to stored eval ledgers (no API or model calls):

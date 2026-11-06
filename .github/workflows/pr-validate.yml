@@ -637,6 +637,19 @@ jobs:
           scripts/check-no-tmp-scratch.sh --base "origin/${{ github.event.pull_request.base.ref }}"
           echo "::endgroup::"
 
+      - name: Paginated review reads — no unpaginated reviews/comments read
+        # 2026-11-03: `GET .../pulls/<n>/reviews` pages at 30, OLDEST FIRST, so an
+        # unpaginated read cannot see the newest verdict. Three lanes concluded the
+        # QA bot published a NO-GO with no finding text when the text was in a
+        # page-2 review body they could not see (#1545 review 37/55, #1636 34/40,
+        # #1643 39/39). The readers were prose in skills, and prose is not
+        # enforcement — this gate fails the PR on the pattern instead.
+        run: |
+          echo "::group::Paginated review reads"
+          chmod +x scripts/check-review-reads-paginated.sh
+          scripts/check-review-reads-paginated.sh
+          echo "::endgroup::"
+
       - name: Skill drift check — skills-all/ vs workspaces/*/skills/
         # Per memory `feedback_skill_dual_tree.md` and incident 2026-04-29
         # postmortem: skill fixes have repeatedly landed in skills-all/ but
@@ -2239,6 +2252,11 @@ jobs:
           # never written, the write-boundary tripwire, the per-run USER cap, the ask ledgered for the
           # tick's gates, and the read-back gate before a second apply run. Plus the paging alert itself.
           python3 scripts/tests/test_credit_decider_support_watch.py
+          # the class's two ruled alerts + the shadow would-approve line (read-only, dormant-aware).
+          python3 scripts/tests/test_credit_decide_watchdog.py
+          # every test file this workflow runs with `python3 <file>` must RUN every test in it: a class
+          # defined below `unittest.main()` is invisible to direct invocation (qa-review #1766 r7).
+          python3 scripts/tests/test_ci_test_discovery.py
           # L12 executor (fable-decider closes): tray validation, every write-boundary guard (each with a
           # red mutant), daily cap, kill file, registry re-check, read-back, audit. Hermetic.
           python3 scripts/tests/test_credit_fable_executor.py

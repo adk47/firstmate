@@ -115,6 +115,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from credit_review import admin as admin_api  # noqa: E402
+from credit_review import doc_measure  # noqa: E402
 from credit_review import evaluate  # noqa: E402
 from credit_review import fraud_lens  # noqa: E402
 from credit_review import intercom_reconcile  # noqa: E402
@@ -131,6 +132,9 @@ from credit_review.runner import (  # noqa: E402
     LOG_PATH, Config, log, profile_burst_alerts, render_digest, render_metrics, run_audit, run_review)
 
 KILL_SWITCH = Path(os.environ.get("CREDIT_REVIEW_KILL_SWITCH", "/etc/hydra/credit-review.disabled"))
+# spec-deploy-lock-deferral-m1: the exit code for a TRANSIENT upstream failure (Trino said "retry in a few minutes").
+# Distinct from 1 (a real failure) so the tick can retry bounded and then DEFER the family instead of stopping the run.
+TRANSIENT_RC = 4
 # The model + web-search judge is OFF unless this file exists (captain decision
 # 2026-10-11: no OpenRouter spend until the account is topped up). Presence of
 # the file is the switch, so it is a deliberate node-8 act that no deploy
@@ -448,130 +452,27 @@ def cmd_provisional_review(args: argparse.Namespace) -> int:
     return 0
 
 
-# A safety bound on the core pager, not a measurement limit: 1000 pages of 200 is 200,000 held
-# requests. Reaching it is an INCOMPLETE census, never a successful one (QA #1800 r19, r20).
-_CORE_AGE_MAX_PAGES = 1000
-
-
-class CoreCensusIncomplete(RuntimeError):
-    """The core pager hit its safety ceiling with account ages still unread.
-
-    QA #1800 r20: the pager fixed the old 8,000-row limit but still RETURNED the partial map and
-    exited 0, so a document-backed request past the ceiling measured as `claimant_no_history` and the
-    census printed as complete. A measurement that could not finish is not a measurement.
-    """
-
-
-class LedgerUnreadable(RuntimeError):
-    """The ledger could not be read, so a dry run cannot report a number.
-
-    QA #1800 r13 finding 4: `_doc_dry_run_rows` caught every query error and returned `{}`, so an
-    older ledger (no `claimed_roles`) or a failed read made `--dry-run` classify every document as
-    `no_ledger_row`, print a successful 0-eligible result and exit 0. The arming measurement would
-    have been silently false, which is the one thing a measurement must never be.
-    """
+# The measurement itself lives in `credit_review/doc_measure.py`, because the watchdog asks the
+# SAME question and the two answers must not drift (qa-review #1766 r1 finding 4). These names stay
+# here so the CLI's own tests and callers keep working.
+_CORE_AGE_MAX_PAGES = doc_measure.CORE_AGE_MAX_PAGES
+LedgerUnreadable = doc_measure.LedgerUnreadable
+CoreCensusIncomplete = doc_measure.CoreCensusIncomplete
 
 
 def _doc_dry_run_rows(db) -> dict:
-    """The ledger facts the doc gates need, per request: the NEWEST decision row for each.
-
-    Read-only. A request the ledger has never decided is absent, and the dry run counts it as
-    `no_ledger_row` rather than inventing a popularity or an owner. A ledger that cannot be READ
-    raises `LedgerUnreadable` - it never reads as an empty ledger.
-    """
-    out: dict = {}
-    try:
-        cur = db.execute(
-            "SELECT request_id, user_id, profile_id, popularity, big_track, claimed_roles, decided_at"
-            " FROM decisions WHERE id IN (SELECT MAX(id) FROM decisions GROUP BY request_id)")
-        fetched = cur.fetchall()
-    except Exception as exc:  # noqa: BLE001 - any read failure is an unreadable ledger, never an empty one
-        raise LedgerUnreadable(f"the ledger could not be read ({exc})") from exc
-    for rid, uid, pid, pop, big, roles, decided in fetched:
-        # QA #1800 r11 finding 2: `record_decision` persists claimed_roles COMMA-JOINED, not as JSON.
-        # Parsing it as JSON raised ValueError, became (), and every row was then falsely counted as a
-        # `role` refusal - the arming dry run would have reported zero eligible rows.
-        if isinstance(roles, str):
-            role_list = tuple(r.strip() for r in roles.split(",") if r.strip())
-        else:
-            role_list = tuple(roles or ())
-        out[str(rid).lower()] = {"user_id": uid, "profile_id": pid, "popularity": pop,
-                                 "big_track": bool(big), "roles": tuple(role_list or ()),
-                                 # the ledger has no request createdAt; the decision time is the
-                                 # oldest-waiting proxy, and it only ever LOSES priority
-                                 "created_at": decided}
-    return out
+    """The ledger facts the doc gates need, per request: the NEWEST decision row for each."""
+    return doc_measure.rows(db)
 
 
 def _doc_dry_run_owners(db, rows: dict, doc_store) -> dict:
-    """request id -> the account that owns it, for EVERY request a verified document binds.
-
-    QA #1800 r13 finding 2: the dry run passed no `req_users`, so `gate_one_request` skipped the
-    cross-account binding check entirely and a document bound to accounts A and B was reported
-    `would_approve` although apply refuses it. This builds the SAME owner map decide.py builds: the
-    ledger's own decision rows first, then the doc store for requests the ledger never decided. A
-    binding with no owner anywhere stays absent, which the gate fails closed on.
-    """
-    from credit_review import decide, doc_approve
-    owners: dict = {rid: r.get("user_id") for rid, r in rows.items()}
-    try:
-        docs = doc_approve.verified_docs(doc_store, decide.DOC_PROOF_STORE)
-    except (OSError, sqlite3.Error) as exc:
-        log(f"doc-approvals --dry-run: the doc store could not be read for owners ({exc}); "
-            "bindings without an owner fail closed")
-        return owners
-    bound = {str(i).lower() for ds in docs.values() for d in ds for i in d.candidate_ids}
-    missing = sorted(b for b in bound if owners.get(b) is None)
-    if missing:
-        try:
-            owners.update(decide._ledger_owners(db, missing))
-        except Exception as exc:  # noqa: BLE001 - unreadable owners stay unknown: fail closed
-            log(f"doc-approvals --dry-run: bound-request owners unreadable from the ledger ({exc})")
-        still = sorted(b for b in missing if owners.get(b) is None)
-        if still:
-            try:
-                owners.update(doc_approve.owners_in_store(doc_store, still))
-            except Exception as exc:  # noqa: BLE001 - unreadable owners stay unknown: fail closed
-                log(f"doc-approvals --dry-run: bound-request owners unreadable from the doc store ({exc})")
-    return owners
+    """request id -> the account that owns it, for EVERY request a verified document binds."""
+    return doc_measure.owners(db, rows, doc_store)
 
 
 def _doc_dry_run_core_ages(admin, rows: dict) -> dict:
-    """request id -> core's own `user.createdAt`, for the rows the claimant gate has to age.
-
-    QA #1800 r18 finding 1: the claimant gate no longer accepts the ledger's first sighting as an
-    account age - the ledger is OUR clock, and an account created five days ago whose first
-    `decisions` row is forty days old would pass a 30-day floor it never earned. R22a D2 says a
-    missing core `createdAt` is `claimant_no_history`, so a measurement that never asks core reports
-    every row as unverifiable and the arming number is structurally 0.
-
-    This reads the SAME population the decider reads (`status=unverified`) and only ever READS. A
-    request core does not return keeps no age, which the gate fails closed on.
-
-    QA #1800 r19 finding 1: it used `decide.held_rows`, which stops after 40 pages of 200. Past 8,000
-    held requests a document-backed row outside those pages has a real core `createdAt` but measured
-    as `claimant_no_history`, understating `would_approve` on exactly the backlog this class exists
-    for. This pages until the population is exhausted OR every measured request has been found, and
-    says so when it stops at the safety bound instead of reporting a short census as complete.
-    """
-    from credit_review import admin as admin_api, decide
-    if not rows:
-        return {}
-    want = set(rows)
-    out: dict = {}
-    page_size = 200
-    for page in range(1, _CORE_AGE_MAX_PAGES + 1):
-        items = admin_api.list_requests(admin, status=decide.UNVERIFIED, limit=page_size, page=page)
-        for req in items:
-            rid = str(req.get("id") or "").lower()
-            if rid in want:
-                out[rid] = decide._account_created_at(req)
-        if len(items) < page_size or len(out) == len(want):
-            return out
-    raise CoreCensusIncomplete(
-        f"core pagination stopped at the {_CORE_AGE_MAX_PAGES}-page safety bound with"
-        f" {len(out)}/{len(want)} account ages read: the census is INCOMPLETE, and a partial census"
-        " reported as complete is the one thing a measurement must never be")
+    """request id -> core's own `user.createdAt`, for the rows the claimant gate has to age."""
+    return doc_measure.core_ages(admin, rows, max_pages=_CORE_AGE_MAX_PAGES)
 
 
 def _doc_dry_run(args: argparse.Namespace) -> int:
@@ -590,8 +491,14 @@ def _doc_dry_run(args: argparse.Namespace) -> int:
     the file and five tables, and against an older ledger created the tables it lacked - the arming
     measurement mutated production state before reporting anything. This opens the file read-only
     (`doc_approve._ro`, WAL-aware) and refuses a path that does not exist rather than creating it.
+
+    QA #1766 r5 finding 2: the measurement itself is `doc_measure.measure`, the SAME call the
+    watchdog makes. This used to orchestrate its own `doc_approve.dry_run`, so on an `AdminError`
+    reading core it substituted `ages={}` and exited 0 with zero eligible rows while the watchdog
+    reported BLIND on that identical failure - an operator could arm on a plausible number the
+    monitor refuses to stand behind. One measurement, one error contract.
     """
-    from credit_review import account_gate, decide, doc_approve, ledger as _ledger
+    from credit_review import decide, doc_approve, ledger as _ledger
     path = Path(args.ledger or _ledger.DEFAULT_PATH)
 
     def _refuse(why: str) -> int:
@@ -615,16 +522,9 @@ def _doc_dry_run(args: argparse.Namespace) -> int:
             rows = _doc_dry_run_rows(db)
         except LedgerUnreadable as exc:
             return _refuse(str(exc))
-        # the SAME hold inputs apply uses (QA #1800 r13 finding 2): an empty hold set let a document
-        # filed by a held account be reported `would_approve` although apply refuses it.
-        try:
-            policy = decide.Policy.load()
-        except (OSError, ValueError) as exc:
-            return _refuse(f"the deny/hold policy could not be read ({exc})")
-        hold_users = set(policy.deny_user_ids) | set(policy.deny_profile_ids)
-        hold_ids = [rid for rid, r in rows.items() if r.get("user_id") in hold_users]
         # the claimant gate's input (QA #1800 r18 finding 1). Without it every row measures as
         # `claimant_no_history`; with it the measurement matches what apply would decide.
+        ages: dict = {}
         if getattr(args, "offline", False):
             log("doc-approvals --dry-run: --offline, so no core age is read and every row measures as"
                 " claimant_no_history")
@@ -636,18 +536,17 @@ def _doc_dry_run(args: argparse.Namespace) -> int:
                 # print a partial map as a successful measurement.
                 return _refuse(str(exc))
             except admin_api.AdminError as exc:
-                ages = {}
-                log(f"doc-approvals --dry-run: core could not be read for account ages ({exc});"
-                    " every row measures as claimant_no_history")
-            for rid, r in rows.items():
-                r["account_created_at"] = ages.get(rid)
-        # the SAME account gate apply uses (QA #1800 r13 finding 2, same class): with no gate the
-        # `account` gate fell back to an uncached live check per row and refused every one of them, so
-        # the arming number was structurally 0 whatever the documents said.
-        res = doc_approve.dry_run(db, doc_store=decide.DOC_STORE, proof_store=decide.DOC_PROOF_STORE,
-                                  now=datetime.now(timezone.utc), gate=account_gate.Cached(),
-                                  rows=rows, req_users=_doc_dry_run_owners(db, rows, decide.DOC_STORE),
-                                  hold_ids=hold_ids, hold_users=hold_users)
+                # QA #1766 r5 finding 2: the watchdog reports BLIND on this same failure, so the
+                # arming measurement must not answer with a plausible zero instead.
+                return _refuse(f"core could not be read for account ages ({exc})")
+        # the SAME measurement the watchdog makes, so the number an operator arms on and the number
+        # the alerts page on cannot drift. It supplies the hold sets from the policy (QA #1800 r13
+        # finding 2) and the account gate apply uses (QA #1800 r13 finding 2, same class: with no
+        # gate the `account` gate fell back to an uncached live check per row and refused every one).
+        res = doc_measure.measure(db, doc_store=decide.DOC_STORE, proof_store=decide.DOC_PROOF_STORE,
+                                  now=datetime.now(timezone.utc), ages=ages)
+    except doc_measure.PolicyUnreadable as exc:
+        return _refuse(str(exc))
     finally:
         db.close()
     if res.get("unreadable"):
@@ -1269,7 +1168,7 @@ def parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def model_flags(sp: argparse.ArgumentParser) -> None:
-        sp.add_argument("--model", default=None, help="OpenRouter model id (default $CREDIT_REVIEW_MODEL or x-ai/grok-4.3)")
+        sp.add_argument("--model", default=None, help="OpenRouter model id (default $CREDIT_REVIEW_MODEL or deepseek/deepseek-v4.1-flash-1017)")
         sp.add_argument("--no-web", action="store_true", help="disable the web-search plugin")
         sp.add_argument("--web-engine", default=None, help="OpenRouter web engine (native|exa); default provider choice")
         sp.add_argument("--max-model-calls", type=int, default=300)
@@ -1723,8 +1622,17 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 with verify_notify.apply_session():
                     rc = args.fn(args)
-            except verify_notify.ApplyLockError as exc:
+            except verify_notify.ApplyLockUnopenable as exc:
+                # QA #1799 r12 (carried): a lock that cannot be OPENED is a permissions or I/O fault, not a deploy
+                # holding it. Its own marker, so the tick stops hard instead of retrying and deferring a broken lock.
                 print(f"Credit review {args.cmd}: {exc}")
+                print(f"{verify_notify.APPLY_LOCK_UNOPENABLE_MARKER}: {exc}", file=sys.stderr)
+                return 3
+            except verify_notify.ApplyLockError as exc:
+                # QA #1799 r11: the marker is what tells the tick this rc=3 is a HELD LOCK and not a hard refusal
+                # (cap-short / signed-set mismatch / HEAD_REFUSED, which also exit 3 and must never be retried).
+                print(f"Credit review {args.cmd}: {exc}")
+                print(f"{verify_notify.APPLY_LOCK_MARKER}: {exc}", file=sys.stderr)
                 return 3
         else:
             rc = args.fn(args)
@@ -1736,6 +1644,14 @@ def main(argv: list[str] | None = None) -> int:
                 return 3
         # [key=signed-on-sha]: a user deferred on the sha rail makes the apply exit 3 (nothing sent to them)
         return 3 if verify_notify.HEAD_REFUSED and rc == 0 else rc
+    except verify_notify.TrinoTransientError as exc:
+        # spec-deploy-lock-deferral-m1 addendum (Fable 2026-11-05 14:3xZ): Trino itself said "retry in a few minutes".
+        # A distinct exit code (4) lets the tick retry bounded and then DEFER the family, instead of treating a
+        # transient upstream condition as a terminal failure of the whole run. Nothing was sent by this step.
+        kept = log("transient: " + str(exc))
+        print(f"Credit review {args.cmd}: Trino is transiently unavailable; nothing was sent for this step. "
+              f"{_details(kept)}")
+        return TRANSIENT_RC
     except admin_api.AdminError as exc:
         kept = log(f"admin API unavailable: {exc}")
         print(f"Credit review could not run: the admin API is unavailable. No credits were changed. "

@@ -18,6 +18,8 @@ slack_notify_payload_file_status() { cat "$1" >> "$CALLS.page-confirmed"; return
 SH
   export CALLS="$TEST_TMPDIR/calls.log"; : > "$CALLS"
   export CVO_TICK_HARD_S=999999 CVO_CHECK_S_PER_USER=0 CVO_RESERVE_PAD_S=0   # the deadline rails have their own tests
+  # spec-deploy-lock-deferral-m1: the retry schedules are constants in production; the arms shrink them to 0 s
+  export CVO_APPLY_RETRY_SLEEPS="0 0 0 0 0" CVO_TRANSIENT_RETRY_SLEEPS="0 0 0"
   export CVO_TIMEOUT_BIN="$(command -v timeout)"
   cat > "$TEST_TMPDIR/runner.py" <<'PY'
 import json, os, sys
@@ -29,6 +31,32 @@ if os.environ.get("STUB_FAIL_LIST") and "--list" in a and \
     print("stub: this list's step fails"); sys.exit(1)          # a family whose step fails, by list name
 if os.environ.get("STUB_SLEEP") and mode == os.environ.get("STUB_SLEEP_MODE") and (mode == "apply" or "--check-recipients" in a):
     import time; time.sleep(float(os.environ["STUB_SLEEP"]))
+if mode != "apply" and os.environ.get("STUB_CHECK_RC") and (
+        not os.environ.get("STUB_CHECK_RC_SUB") or a[0] == os.environ["STUB_CHECK_RC_SUB"]):
+    # QA #1799 r14: a check that COSTS time. The retry-fit test needs a step whose own duration is measurable, because
+    # the property under test is "the sleep PLUS a repeat of the step fits", not "the sleep fits".
+    if os.environ.get("STUB_CHECK_SLEEP"):
+        import time; time.sleep(float(os.environ["STUB_CHECK_SLEEP"]))
+    # spec-deploy-lock-deferral-m1: the runner's TRANSIENT exit (Trino said "retry in a few minutes") is rc=4
+    print("Credit review uvn-status: Trino is transiently unavailable; nothing was sent for this step.")
+    sys.exit(int(os.environ["STUB_CHECK_RC"]))
+if mode == "apply" and os.environ.get("STUB_APPLY_LOCK_TIMES") and (
+        not os.environ.get("STUB_APPLY_LOCK_SUB") or a[0] == os.environ["STUB_APPLY_LOCK_SUB"]):
+    # a deploy holds the apply lock EXCLUSIVE: the runner exits 3 with NOTHING attempted - no rows, no outcomes file
+    _f = os.environ["CALLS"] + ".lockn"
+    _n = int(open(_f).read()) if os.path.exists(_f) else 0
+    open(_f, "w").write(str(_n + 1))
+    if _n < int(os.environ["STUB_APPLY_LOCK_TIMES"]):
+        print("Credit review uvn-status: a deploy holds the apply lock; nothing sent (re-run after it)")
+        # QA #1799 r11: the real runner prints this marker on stderr ONLY for a genuinely held/unopenable lock
+        print("APPLY_LOCK_HELD: a deploy holds the apply lock", file=sys.stderr)
+        sys.exit(3)
+if mode == "apply" and os.environ.get("STUB_APPLY_HARD_RC3") and (
+        not os.environ.get("STUB_APPLY_LOCK_SUB") or a[0] == os.environ["STUB_APPLY_LOCK_SUB"]):
+    # QA #1799 r11: the OTHER rc=3 - a hard refusal (cap-short / signed-set mismatch / HEAD_REFUSED). Nothing was
+    # attempted, the ledger is unchanged, and there is NO held-lock marker. It must never be retried or deferred.
+    print("Credit review uvn-status: the sent set is not the signed accepted set; nothing sent")
+    sys.exit(3)
 if mode == "apply":
     open(os.environ["CALLS"] + ".env", "a").write(f"{os.environ.get('CREDIT_UVN_DAILY_MAX', '-')} {os.environ.get('CREDIT_STATUS_DAILY_MAX', '-')}\n")
 if mode == "apply" and os.environ.get("STUB_RUNNER_CAP_MODEL"):
@@ -89,6 +117,19 @@ else:
     print(f"UVN STATUS: {os.environ.get('STUB_SENT', '3')} sent." if mode == "apply" else "UVN STATUS (dry run): 3 would be messaged.")
 if mode == "apply" and os.environ.get("STUB_APPLY_RC"):
     sys.exit(int(os.environ["STUB_APPLY_RC"]))   # rows were written above; the run then FAILS (a partial send)
+if mode == "apply" and os.environ.get("STUB_APPLY_RC3_AFTER_SEND") and (
+        not os.environ.get("STUB_APPLY_LOCK_SUB") or a[0] == os.environ["STUB_APPLY_LOCK_SUB"]):
+    # QA #1799 r12 (Critical): credit-review.py returns 3 for a signed-set mismatch and for HEAD_REFUSED AFTER
+    # args.fn() has already sent. Rows were written above, the ledger MOVED, and there is NO held-lock marker.
+    print("Credit review uvn-status: the sent set is not the signed accepted set; nothing sent")
+    sys.exit(3)
+if mode == "apply" and os.environ.get("STUB_APPLY_LOCK_UNOPENABLE") and (
+        not os.environ.get("STUB_APPLY_LOCK_SUB") or a[0] == os.environ["STUB_APPLY_LOCK_SUB"]):
+    # QA #1799 r12 (carried): the lock could not be OPENED at all - a permissions/I-O fault, not contention.
+    print("Credit review uvn-status: the apply lock /var/lock/x cannot be opened (PermissionError); nothing sent")
+    print("APPLY_LOCK_UNOPENABLE: the apply lock /var/lock/x cannot be opened (PermissionError); nothing sent",
+          file=sys.stderr)
+    sys.exit(3)
 PY
   cat > "$TEST_TMPDIR/owing.py" <<'PY'
 import os as _o, time as _t
@@ -1344,7 +1385,10 @@ J
   mkdir -p "$TEST_TMPDIR/ledger-is-a-dir"
   CVO_LEDGER="$TEST_TMPDIR/ledger-is-a-dir" run -1 "$SCRIPT"
   [ "$(applies)" -eq 0 ]
-  grep -q "cap source unreadable" "$CVO_ETC/credit-verify-outbound.disabled"
+  # verify-outbound-migration-race-m1: the pre-lock migration now notices an unopenable ledger FIRST, so the kill file
+  # names the migration rather than the later cap read. The contract this test pins is unchanged: a durable kill file,
+  # never a silent stall.
+  grep -q "ledger" "$CVO_ETC/credit-verify-outbound.disabled"
 }
 
 @test "outbound tick (QA #1541): a v1 sample pointer that cannot be written after a send kills the tick before the next family" {
@@ -1876,4 +1920,235 @@ PY
   # a step failing after the check (the body sample) leaves the page un-done: the cursor does not move
   echo 200 > "$CVO_STATE/cursor-uvn-status-paid"; rm -rf "$CVO_OUT_ROOT"
   STUB_PREVIEW_FAIL=1 run "$SCRIPT"; [ "$(cat "$CVO_STATE/cursor-uvn-status-paid")" = "200" ]
+}
+
+# ---- spec-deploy-lock-deferral-m1 (Fable 2026-11-05 12:4xZ + addenda 14:3xZ / 14:4xZ) -------------------------
+# Three ticks in one day lost the claim families - the only family with a real send queue - because an earlier family's
+# failure ended the tick before claim_families() ran. A TRANSIENT condition (a deploy holding the apply lock, Trino
+# saying "retry in a few minutes") must cost that family, never the families behind it.
+
+claim_list() {   # a claim list signed on the deployed head, so the claim families actually run
+  printf '%s\n' "$DEP" > "$CVO_DEPLOYED_SHA"
+  printf '{"generated_at": "x", "signed_on": "%s", "claims": [{"claim_id": 1, "user_id": 5}]}' "$DEP" > "$CVO_STATE.claims.json"
+  export CVO_CLAIM_LIST="$CVO_STATE.claims.json"
+}
+
+@test "outbound tick (spec-deploy-lock-deferral-m1, the 12:29:37Z shape): an apply that meets a held lock released 90 s later SENDS the family and completes - it does not stop the tick" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  rm -f "$CVO_ETC/credit-verify-outbound.disabled" "$CALLS.lockn"
+  # the deploy held the lock for the FIRST attempt only; the retry finds it free. Before the fix the first rc=3 was
+  # terminal: "apply failed rc=3; tick stops", 0 sent, and every family behind it starved.
+  STUB_APPLY_LOCK_TIMES=1 run -0 "$SCRIPT"
+  grep -q "apply lock busy/transient (a deploy holds the apply lock); retry 1/5" "$(newest_tick)"
+  grep -q "APPLY (rc=0)" "$(newest_tick)"
+  [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]
+  grep -q "tick done" "$(newest_tick)"
+  if grep -q "tick deferred" "$(newest_tick)"; then false; fi
+}
+
+@test "outbound tick (spec-deploy-lock-deferral-m1): a lock held past the window DEFERS cleanly - exit 2, no kill file, no refusal, no cursor move, and the claim families still run" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  claim_list
+  rm -f "$CVO_ETC/credit-verify-outbound.disabled" "$CALLS.lockn" "$CVO_STATE"/cursor-*
+  # every attempt meets the deploy's exclusive hold: the family defers, the tick continues to the claims and exits 2
+  STUB_APPLY_LOCK_TIMES=99 STUB_APPLY_LOCK_SUB=uvn-status run -2 "$SCRIPT"
+  grep -q "apply deferred - a deploy holds the apply lock" "$(newest_tick)"
+  grep -q "credit families: deferred (transient); continuing to the next family group" "$(newest_tick)"
+  grep -q "tick deferred: a transient condition" "$(newest_tick)"
+  [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]          # a deferral is never a kill
+  [ ! -e "$CVO_STATE/credit-verify-outbound.disabled" ]
+  if grep -q "refusal spike" "$(newest_tick)"; then false; fi   # and never a refusal-ratio operand
+  [ ! -e "$CVO_STATE/cursor-uvn-status-free" ]                  # the DEFERRED family's page is not done: no cursor move
+  grep -q -- "^claim-proof-ask .*--mode apply" "$CALLS"         # the families behind it still ran
+  grep -q -- "^claim-status .*--mode apply" "$CALLS"
+}
+
+@test "outbound tick (QA #1799 r11): an unchanged-ledger rc=3 WITHOUT the held-lock marker is a HARD REFUSAL - no retry, no deferral, the tick stops" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  claim_list
+  rm -f "$CVO_ETC/credit-verify-outbound.disabled" "$CALLS.lockn"
+  # cap-short / signed-set mismatch / HEAD_REFUSED: rc=3, nothing attempted, ledger unchanged, no marker. Before the
+  # fix this was retried as "a deploy holds the apply lock", then deferred, and the tick went on to later groups and
+  # exited 2 - a hard refusal laundered into a transient one.
+  STUB_APPLY_HARD_RC3=1 STUB_APPLY_LOCK_SUB=uvn-status run -1 "$SCRIPT"
+  grep -q "apply rc=3 WITHOUT the held-lock marker" "$(newest_tick)"
+  grep -q "apply failed rc=3; tick stops" "$(newest_tick)"
+  if grep -q "apply lock busy/transient" "$(newest_tick)"; then false; fi   # never retried
+  if grep -q "apply deferred" "$(newest_tick)"; then false; fi              # never deferred
+  if grep -q "tick deferred" "$(newest_tick)"; then false; fi
+  if grep -q -- "^claim-" "$CALLS"; then false; fi                          # the hard stop is preserved
+  [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]
+}
+
+@test "outbound tick (QA #1799 r12 Critical): rc=3 without the marker but a CHANGED ledger is a PARTIAL SEND - the post-send rails run" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  claim_list
+  rm -f "$CVO_ETC/credit-verify-outbound.disabled" "$CALLS.lockn" "$CALLS.health"
+  cat > "$TEST_TMPDIR/health.py" <<'PY'
+import os, sys
+open(os.environ["CALLS"] + ".health", "a").write(" ".join(sys.argv[1:]) + "\n")
+print('{"verdict": "healthy"}')
+PY
+  # signed-set mismatch / HEAD_REFUSED fire AFTER the sends, so the ledger moved and no marker was printed. An early
+  # return here skipped the partial-send detection and every rail below it - the rails that exist to catch exactly this.
+  STUB_APPLY_RC3_AFTER_SEND=1 STUB_APPLY_LOCK_SUB=uvn-status run -1 "$SCRIPT"
+  grep -q "apply rc=3 WITHOUT the held-lock marker AND a CHANGED ledger" "$(newest_tick)"
+  grep -q "a partial send; the post-send rails own it" "$(newest_tick)"
+  [ -s "$CALLS.health" ] || false          # the health rail RAN: the early return is gone
+  if grep -q -- "^claim-" "$CALLS"; then false; fi
+}
+
+@test "outbound tick (QA #1799 r12 carried): an UNOPENABLE apply lock is a hard stop - never retried, never deferred" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  claim_list
+  rm -f "$CVO_ETC/credit-verify-outbound.disabled" "$CALLS.lockn"
+  # ApplyLockError covered BOTH contention and a lock that could not be opened, so a permissions/I-O fault was
+  # reported as "a deploy holds the lock", retried, deferred, and the tick went on into later groups.
+  STUB_APPLY_LOCK_UNOPENABLE=1 STUB_APPLY_LOCK_SUB=uvn-status run -1 "$SCRIPT"
+  grep -q "the apply lock could not be OPENED" "$(newest_tick)"
+  grep -q "apply failed rc=3; tick stops" "$(newest_tick)"
+  if grep -q "apply lock busy/transient" "$(newest_tick)"; then false; fi
+  if grep -q "apply deferred" "$(newest_tick)"; then false; fi
+  if grep -q "tick deferred" "$(newest_tick)"; then false; fi
+  if grep -q -- "^claim-" "$CALLS"; then false; fi
+  [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]
+}
+
+@test "outbound tick (QA #1799 r12): the unopenable-lock marker is the runner's too" {
+  local tick_marker runner_marker
+  tick_marker="$(grep -m1 '^APPLY_LOCK_UNOPENABLE_MARKER=' "$SCRIPT" | cut -d'"' -f2)"
+  runner_marker="$(grep -m1 '^APPLY_LOCK_UNOPENABLE_MARKER = ' "$BATS_TEST_DIRNAME/../credit_review/verify_notify.py" | cut -d'"' -f2)"
+  [ -n "$tick_marker" ]
+  [ "$tick_marker" = "$runner_marker" ]
+}
+
+@test "outbound tick (QA #1799 r11): the tick's marker constant is the runner's - a rename on one side cannot silently disable the retry" {
+  # the tick greps for APPLY_LOCK_MARKER; the runner prints verify_notify.APPLY_LOCK_MARKER. If they drift, every held
+  # lock becomes a hard stop (loud, but a lost family) - so pin them equal here rather than discovering it in prod.
+  local tick_marker runner_marker
+  tick_marker="$(grep -m1 '^APPLY_LOCK_MARKER=' "$SCRIPT" | cut -d'"' -f2)"
+  runner_marker="$(grep -m1 '^APPLY_LOCK_MARKER = ' "$BATS_TEST_DIRNAME/../credit_review/verify_notify.py" | cut -d'"' -f2)"
+  [ -n "$tick_marker" ]
+  [ "$tick_marker" = "$runner_marker" ]
+}
+
+@test "outbound tick (spec-deploy-lock-deferral-m1): a REAL failed apply (rc!=0 with a CHANGED ledger) still stops the tick before the claims" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  claim_list
+  rm -f "$CVO_ETC/credit-verify-outbound.disabled" "$CALLS.lockn"
+  # the runner wrote rows and THEN failed: the ledger moved, so this is a partial send, not a deferral
+  STUB_APPLY_RC=1 run -1 "$SCRIPT"
+  grep -q "apply failed rc=1; tick stops" "$(newest_tick)"
+  if grep -q -- "^claim-" "$CALLS"; then false; fi
+  if grep -q "tick deferred" "$(newest_tick)"; then false; fi
+}
+
+@test "outbound tick (spec-deploy-lock-deferral-m1): the wait is BOUNDED - the retry cap stops the loop, it never runs past it" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  rm -f "$CVO_ETC/credit-verify-outbound.disabled" "$CALLS.lockn"
+  # a 0 s cap: the first rc=3 is already past it, so exactly ONE apply attempt is made and the family defers
+  CVO_APPLY_RETRY_CAP_S=0 STUB_APPLY_LOCK_TIMES=99 STUB_APPLY_LOCK_SUB=uvn-status run -2 "$SCRIPT"
+  [ "$(grep -c -- "^uvn-status .*--mode apply" "$CALLS")" = 1 ]
+  grep -q "apply deferred" "$(newest_tick)"
+}
+
+@test "outbound tick (spec-deploy-lock-deferral-m1 addendum, the 14:25:53Z shape): a Trino transient in uvn-status-free still lets the claim families run and send" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  claim_list
+  rm -f "$CVO_ETC/credit-verify-outbound.disabled" "$CALLS.lockn"
+  # Trino answers "retry in a few minutes" (rc=4) for the uvn-status family's check, every attempt
+  STUB_CHECK_RC=4 STUB_CHECK_RC_SUB=uvn-status run -2 "$SCRIPT"
+  grep -q "check deferred - Trino is transiently unavailable" "$(newest_tick)"
+  grep -q "credit families: deferred (transient); continuing to the next family group" "$(newest_tick)"
+  grep -q -- "^claim-proof-ask .*--mode apply" "$CALLS"          # the claims ran and sent
+  grep -q -- "^claim-status .*--mode apply" "$CALLS"
+  [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]
+  if grep -q "refusal spike" "$(newest_tick)"; then false; fi
+}
+
+@test "outbound tick (QA #1799 r13): a transient retry that does not FIT the tick budget defers at once - it never sleeps past the budget and starves the families behind it" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  claim_list
+  rm -f "$CVO_ETC/credit-verify-outbound.disabled" "$CALLS.lockn"
+  # The retry is LONGER THAN THE WHOLE BUDGET, so it cannot fit no matter how much of the budget is left. Clipping the
+  # sleep to TICK_HARD_S (the old behaviour) let it sleep past TICK_BUDGET_S, and every later family then skipped on its
+  # own budget check - the exact starvation this PR exists to prevent. A retry that does not fit is not a retry: defer
+  # now, and the claims still run.
+  # The budget is left WHOLE (ELAPSED0=0) on purpose: an earlier version spent all but 5s of it, which made the claim
+  # assertions below depend on the runner reaching them within 5 real seconds. That is a wall-clock race, not the
+  # property under test - on a slow CI box every family logged "tick budget 300s reached" and the test went red.
+  STUB_CHECK_RC=4 STUB_CHECK_RC_SUB=uvn-status CVO_TRANSIENT_RETRY_SLEEPS="400 600 1200" \
+    CVO_TICK_BUDGET_S=300 CVO_TICK_ELAPSED0=0 CVO_TICK_HARD_S=6900 run -2 "$SCRIPT"
+  grep -q "a 400s retry does not fit in the" "$(newest_tick)"
+  grep -q "left of the 300s budget" "$(newest_tick)"
+  if grep -q "Trino transient (rc=4); retry 1/3" "$(newest_tick)"; then false; fi   # never slept
+  grep -q -- "^claim-proof-ask .*--mode apply" "$CALLS"          # the claims still ran
+  grep -q -- "^claim-status .*--mode apply" "$CALLS"
+  [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]
+}
+
+@test "outbound tick (QA #1799 r14): a retry that only just fits the SLEEP but not the retry itself defers - the step's own cost is part of the fit" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  claim_list
+  rm -f "$CVO_ETC/credit-verify-outbound.disabled" "$CALLS.lockn"
+  # The exact boundary QA asked for. The step costs 10s and the next retry sleep is 30s, with ~35s of budget left: the
+  # SLEEP alone fits (30 < 35), so the old `wait > left` check retried - and the retry then finished at 30+10 = 40s,
+  # past the budget, so every family behind it skipped. The whole retry (sleep + a repeat of the step) does not fit.
+  STUB_CHECK_RC=4 STUB_CHECK_RC_SUB=uvn-status STUB_CHECK_SLEEP=10 CVO_TRANSIENT_RETRY_SLEEPS="30 60 120" \
+    CVO_TICK_BUDGET_S=300 CVO_TICK_ELAPSED0=253 CVO_TICK_HARD_S=6900 run -2 "$SCRIPT"
+  grep -q "a 30s retry does not fit in the" "$(newest_tick)"
+  grep -q "the step itself just took 10s" "$(newest_tick)"
+  if grep -q "Trino transient (rc=4); retry 1/3" "$(newest_tick)"; then false; fi   # never slept, never retried
+  grep -q -- "^claim-proof-ask .*--mode apply" "$CALLS"          # the claims still ran
+  grep -q -- "^claim-status .*--mode apply" "$CALLS"
+  [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]
+}
+
+@test "outbound tick (QA #1799 r13): an apply retry that does not FIT the tick budget defers at once too" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  claim_list
+  rm -f "$CVO_ETC/credit-verify-outbound.disabled" "$CALLS.lockn"
+  # the same clip on the apply loop, and the same reason for leaving the budget whole: a retry longer than the whole
+  # budget cannot fit whatever is left of it, so the deferral is deterministic and nothing depends on runner speed.
+  STUB_APPLY_LOCK_TIMES=5 STUB_APPLY_LOCK_SUB=uvn-status CVO_APPLY_RETRY_SLEEPS="400 600 1200" \
+    CVO_TICK_BUDGET_S=300 CVO_TICK_ELAPSED0=0 CVO_TICK_HARD_S=6900 run -2 "$SCRIPT"
+  grep -q "a 400s retry does not fit in the" "$(newest_tick)"
+  grep -q "apply deferred - a deploy holds the apply lock and no retry fits the tick budget" "$CALLS.page"
+  if grep -q "apply lock busy/transient" "$(newest_tick)"; then false; fi   # never slept
+  [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]
+}
+
+@test "outbound tick (QA #1799 r14): the apply loop counts the attempt's own cost in the fit too" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  claim_list
+  rm -f "$CVO_ETC/credit-verify-outbound.disabled" "$CALLS.lockn"
+  # Same boundary on the apply loop: the attempt costs 10s and the next retry sleep is 15s with ~20s of budget left, so
+  # the SLEEP alone fits (15 < 20) and the old check retried - finishing at 15+10 = 25s, past the budget.
+  STUB_SLEEP_MODE=apply STUB_SLEEP=10 STUB_APPLY_LOCK_TIMES=5 STUB_APPLY_LOCK_SUB=uvn-status \
+    CVO_APPLY_RETRY_SLEEPS="15 30 60 60 120" CVO_TICK_BUDGET_S=300 CVO_TICK_ELAPSED0=268 CVO_TICK_HARD_S=6900 \
+    run -2 "$SCRIPT"
+  grep -q "a 15s retry does not fit in the" "$(newest_tick)"
+  grep -q "the attempt itself just took 10s" "$(newest_tick)"
+  if grep -q "apply lock busy/transient" "$(newest_tick)"; then false; fi   # never slept, never retried
+  [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]
+}
+
+@test "outbound tick (spec-deploy-lock-deferral-m1 addendum 2): the weekday/weekend ORDER is unchanged - a deferral never reorders the groups" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  claim_list
+  rm -f "$CVO_ETC/credit-verify-outbound.disabled" "$CALLS.lockn"
+  STUB_CHECK_RC=4 STUB_CHECK_RC_SUB=uvn-status run -2 "$SCRIPT"
+  first="$(grep -m1 -- "--mode apply" "$CALLS" | cut -d' ' -f1)"; [ "$first" = "claim-proof-ask" ]   # credit deferred, claims next
+  : > "$CALLS"; rm -rf "$CVO_OUT_ROOT"
+  CVO_DOW=6 STUB_CHECK_RC=4 STUB_CHECK_RC_SUB=claim-proof-ask run -2 "$SCRIPT"
+  grep -q "weekend: claim families first" "$(newest_tick)"
+  first="$(grep -m1 -- "--mode apply" "$CALLS" | cut -d' ' -f1)"; [ "$first" = "uvn-status" ]        # claims deferred, credit next
+}
+
+@test "outbound tick (verify-outbound-migration-race-m1): the ledger is migrated ONCE, BEFORE the tick lock - a reader can never race a migration a family started mid-tick" {
+  # the ordering is the fix: a migration inside the tick (after flock) is exactly the 11:49:02Z race
+  mig="$(grep -n 'verify_ledger.connect(sys.argv\[2\]).close()' "$SCRIPT" | head -1 | cut -d: -f1)"
+  lock="$(grep -n 'exec 9>>"\$STATE/tick.lock"' "$SCRIPT" | head -1 | cut -d: -f1)"
+  [ -n "$mig" ] && [ -n "$lock" ] && [ "$mig" -lt "$lock" ]
+  grep -q "ledger migration failed" "$SCRIPT"
 }

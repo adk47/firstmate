@@ -89,6 +89,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 import urllib.parse
 import sys
 from datetime import date, datetime, timedelta, timezone
@@ -364,12 +365,40 @@ class ReadOnlyLedgerError(RuntimeError):
     """A read-only open is impossible without writing (the ledger is missing or needs a migration)."""
 
 
+# verify-outbound-migration-race-m1 (Fable 2026-11-05 12:2xZ): a reader that opens between two of _migrate()'s ALTERs
+# sees a PARTIAL schema and refuses - correct for a genuinely stale ledger, wrong for a migration that is mid-flight.
+# Part 1 makes the migration atomic (one transaction, so a reader sees pre- or post-, never partial); part 3 gives the
+# reader a bounded wait for the additive case only. A genuinely un-migrated ledger still raises, loudly.
+RO_RETRY_ATTEMPTS = 3
+RO_RETRY_SLEEP_S = 2.0
+
+
+def _schema_gap(db: sqlite3.Connection, ref: sqlite3.Connection) -> list[str]:
+    """What connect() would CREATE / ALTER that this ledger lacks - the ADDITIVE difference only. Anything else (a
+    missing file, a corrupt file, a schema that differs in some other way) is not this function's business: the caller
+    raises on it immediately."""
+    q = "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
+    missing = sorted({(str(t), str(n)) for t, n in ref.execute(q)} - {(str(t), str(n)) for t, n in db.execute(q)})
+    out = [f"{t} {n}" for t, n in missing]
+    for table in TABLES:
+        have = {str(r[1]) for r in db.execute(f"PRAGMA table_info({table})").fetchall()}
+        want = {str(r[1]) for r in ref.execute(f"PRAGMA table_info({table})").fetchall()}
+        if want - have:
+            out.append(f"{table}: {sorted(want - have)[:3]}")
+    return out
+
+
 def connect_ro(path: str, *, must_exist: bool = False) -> sqlite3.Connection:
     """QA #1564: the ledger opened READ-ONLY (mode=ro) - never created, never migrated. A missing ledger, or one whose
     schema lacks any table, index, trigger, view or column connect() would add (it would CREATE / ALTER), raises: the caller that must not
     write (a dry run under the credit-ops-notes kill, the gate's --check-recipient) then refuses instead.
     A ledger that does not exist yet reads as an EMPTY one (an in-memory copy of the schema: nothing was ever sent, so
-    nothing is recorded) and no file is created; `must_exist` makes a missing ledger an error instead."""
+    nothing is recorded) and no file is created; `must_exist` makes a missing ledger an error instead.
+
+    verify-outbound-migration-race-m1: when the ONLY difference is something _migrate() would add, the check is retried
+    RO_RETRY_ATTEMPTS times RO_RETRY_SLEEP_S apart before raising - a live tick's migration is a few ALTERs, and a
+    reader that lands inside it must not report 89 FAILED. After the window it raises exactly as before: the tolerance
+    is for a race, never for a deploy gap."""
     if path == ":memory:" or not Path(path).exists():
         if must_exist:
             raise ReadOnlyLedgerError(f"verify ledger {path} does not exist (a read-only run never creates it)")
@@ -378,33 +407,34 @@ def connect_ro(path: str, *, must_exist: bool = False) -> sqlite3.Connection:
         mem.executescript(SCHEMA)
         mem.executescript(INDEXES)
         return mem
-    # QA #1564: the path is PERCENT-ENCODED into the URI - a raw '?' (or '#') in it would end the path early and open a
-    # different, writable file without mode=ro
-    db = sqlite3.connect(f"file:{urllib.parse.quote(str(Path(path).resolve()))}?mode=ro", uri=True, timeout=30,
-                         isolation_level=None)
-    db.row_factory = sqlite3.Row
     ref = sqlite3.connect(":memory:")
     try:
         # QA #1564 (round 2): EVERYTHING connect() could write is checked - every table, index, trigger and view that
         # SCHEMA + INDEXES create (a missing index = CREATE INDEX = a schema write), and every column (_migrate)
         ref.executescript(SCHEMA)
         ref.executescript(INDEXES)
-        q = "SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'"
-        missing = sorted({(str(t), str(n)) for t, n in ref.execute(q)} - {(str(t), str(n)) for t, n in db.execute(q)})
-        if missing:
-            db.close()
-            raise ReadOnlyLedgerError(f"verify ledger {path} needs a migration (missing {missing[:3]}); "
-                                      "a read-only run never migrates it")
-        for table in TABLES:
-            have = {str(r[1]) for r in db.execute(f"PRAGMA table_info({table})").fetchall()}
-            want = {str(r[1]) for r in ref.execute(f"PRAGMA table_info({table})").fetchall()}
-            if want - have:
+        gap: list[str] = []
+        for attempt in range(1, RO_RETRY_ATTEMPTS + 1):
+            # QA #1564: the path is PERCENT-ENCODED into the URI - a raw '?' (or '#') in it would end the path early and
+            # open a different, writable file without mode=ro. Re-opened per attempt: a schema change made by the
+            # migrating writer is only guaranteed visible to a fresh read.
+            db = sqlite3.connect(f"file:{urllib.parse.quote(str(Path(path).resolve()))}?mode=ro", uri=True,
+                                 timeout=30, isolation_level=None)
+            db.row_factory = sqlite3.Row
+            try:
+                gap = _schema_gap(db, ref)
+            except sqlite3.DatabaseError as exc:      # corrupt / not a database: never a race, never retried
                 db.close()
-                raise ReadOnlyLedgerError(f"verify ledger {path} needs a migration ({table}: {sorted(want - have)[:3]}); "
-                                          "a read-only run never migrates it")
+                raise ReadOnlyLedgerError(f"verify ledger {path} cannot be read ({exc})") from exc
+            if not gap:
+                return db
+            db.close()
+            if attempt < RO_RETRY_ATTEMPTS:
+                time.sleep(RO_RETRY_SLEEP_S)
+        raise ReadOnlyLedgerError(f"verify ledger {path} needs a migration (missing {gap[:3]}); "
+                                  "a read-only run never migrates it")
     finally:
         ref.close()
-    return db
 
 
 def ensure_schema(db: sqlite3.Connection) -> None:
@@ -416,21 +446,45 @@ def ensure_schema(db: sqlite3.Connection) -> None:
 
 def _migrate(db: sqlite3.Connection) -> None:
     """Add every column SCHEMA has that an existing (older) table lacks, so a ledger
-    created by an earlier version of this module keeps working."""
+    created by an earlier version of this module keeps working.
+
+    verify-outbound-migration-race-m1: the whole column set is ONE transaction (BEGIN IMMEDIATE / COMMIT, ROLLBACK on
+    error). SQLite DDL is transactional, so a concurrent reader sees the pre-migration schema or the post-migration
+    schema - never the partial one that produced 89 FAILED at 11:49:02Z.
+
+    QA #1799 r10: the gap is derived UNDER the write lock, not before it. Deriving it first let two migrators read the
+    same pre-migration schema; the loser then acquired the lock after the winner had committed, executed its now-stale
+    ALTER list and died on "duplicate column name" - and the pre-tick migration path turns that into a killed tick over
+    a ledger that is already current. BEGIN IMMEDIATE serialises the readers of the gap as well as the writers of it."""
     ref = sqlite3.connect(":memory:")
     try:
         ref.executescript(SCHEMA)
-        for table in TABLES:
-            have = {str(r[1]) for r in db.execute(f"PRAGMA table_info({table})").fetchall()}
-            for _, name, typ, notnull, default, _ in ref.execute(f"PRAGMA table_info({table})").fetchall():
-                if name in have:
-                    continue
-                decl = f"{name} {typ}"
-                if default is not None:
-                    decl += f"{' NOT NULL' if notnull else ''} DEFAULT {default}"
-                db.execute(f"ALTER TABLE {table} ADD COLUMN {decl}")
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            for stmt in _alters(db, ref):
+                db.execute(stmt)
+            db.execute("COMMIT")
+        except Exception:
+            db.execute("ROLLBACK")
+            raise
     finally:
         ref.close()
+
+
+def _alters(db: sqlite3.Connection, ref: sqlite3.Connection) -> list[str]:
+    """The ALTER statements that bring ``db`` up to ``ref``'s column set. MUST be called inside the write transaction
+    (see _migrate): the answer is only true while nobody else can migrate."""
+    alters: list[str] = []
+    for table in TABLES:
+        have = {str(r[1]) for r in db.execute(f"PRAGMA table_info({table})").fetchall()}
+        for _, name, typ, notnull, default, _ in ref.execute(f"PRAGMA table_info({table})").fetchall():
+            if name in have:
+                continue
+            decl = f"{name} {typ}"
+            if default is not None:
+                decl += f"{' NOT NULL' if notnull else ''} DEFAULT {default}"
+            alters.append(f"ALTER TABLE {table} ADD COLUMN {decl}")
+    return alters
 
 
 def _check(campaign: str, kind: str = "initial") -> None:
