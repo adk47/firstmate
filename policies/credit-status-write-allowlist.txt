@@ -1,0 +1,5 @@
+# Files allowed to write a credit status outside core's PUT, or to send a notify:false move
+# (scripts/check-credit-status-writes.sh). One repo-relative path per line, with a reason in a comment.
+# Every entry needs r5's review. EMPTY by design (Fable GO 2026-10-31, [key=decided-not-told-531]):
+# direct credit-status writes are banned in hydra, and a silent move goes through core's re-drive
+# marker, which owes exactly one notice (core #11088/#11089).
