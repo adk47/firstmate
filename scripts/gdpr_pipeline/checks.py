@@ -22,6 +22,25 @@ import urllib.request
 
 from gdpr_pipeline.sources import Unknown
 
+
+class Unmeasurable(Unknown):
+    """This row cannot be checked HERE, and no retry will change that.
+
+    A subclass of `Unknown` on purpose: it is still never a verdict, so every existing `except Unknown` keeps
+    refusing to fill a line. What it adds is a distinction the tick needs. `Unknown` covers two different things:
+
+    - **unreadable** - an HTTP 500, a non-JSON body, a schema change. The next tick may well succeed, so the run
+      must report it and the caller must keep its window open.
+    - **unmeasurable** - the row has no page name to search for, or its name matches more pages than the
+      autocomplete cap can show. Measured on node-8 on 2026-11-06: 31 rows of the second kind, every tick, for
+      ever. Retrying is not a plan; a person confirming in the app search is.
+
+    Conflating them made the tick exit 2 sixteen times in one day and page #clio_devops daily for a condition that
+    can never clear, which is how a real failure gets missed. An unmeasurable row is still NOT confirmed - it drops
+    out of the confirmation batch and the watchdog keeps naming it, which is the human's queue.
+    """
+
+
 UA = "Mozilla/5.0 (muso-gdpr-pipeline read-back)"
 AUTOCOMPLETE = "https://api.muso.ai/api/v5/search/autocomplete?q={q}&limit=20"
 # The endpoint ignores limit/offset/page/cursor and returns at most its own cap; a full page is NOT exhaustive.
@@ -57,7 +76,7 @@ def search_absent(pid: str, name: str, fetch=_get) -> bool:
     """S: the id is not among the suggestions for its exact, lowercase or prefix name, and the answer was not a
     truncated page (the endpoint cannot page, so a full page proves nothing about what it left out)."""
     if not name.strip():
-        raise Unknown("S check: no page name to search for")
+        raise Unmeasurable("S check: no page name to search for")
     prefix = name.strip()[:max(3, (len(name.strip()) * 3) // 5)]
     for q in {name.strip(), name.strip().lower(), prefix}:
         status, _, body = fetch(AUTOCOMPLETE.format(q=urllib.parse.quote(q)))
@@ -80,9 +99,9 @@ def search_absent(pid: str, name: str, fetch=_get) -> bool:
         # a name with more matches than the cap can hide the target below the cut. Absence must never be guessed —
         # it is the S line of a customer letter.
         if len(items) >= AUTOCOMPLETE_CAP:
-            raise Unknown(f"S check: '{q}' returned the full autocomplete page ({len(items)} items, cap "
-                          f"{AUTOCOMPLETE_CAP}) without the id; a name with more matches than the cap cannot be "
-                          f"checked here - confirm in the app search")
+            raise Unmeasurable(f"S check: '{q}' returned the full autocomplete page ({len(items)} items, cap "
+                               f"{AUTOCOMPLETE_CAP}) without the id; a name with more matches than the cap cannot "
+                               f"be checked here - confirm in the app search")
     return True
 
 
