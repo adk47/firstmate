@@ -34,6 +34,15 @@ The `/calm` command replaces the file atomically before changing live presentati
 The extension reloads this preference on every Pi `session_start`, including startup, new, resume, fork, and reload reasons.
 This preference is local to each Firstmate home and is not part of secondmate inherited configuration.
 
+## Decisions back to the captain
+
+`config/decisions-to-aaron` is a presence file and is not inherited.
+While the file exists, every decision reaches the captain, the way it did before decision routing.
+While it is absent, `.agents/skills/decision-routing/SKILL.md` applies.
+Class B reaches him and Fable rules everything else.
+He adds the file and he removes it.
+The chair does not.
+
 ## Pi supervision branch
 
 On a Pi primary, an in-process supervision branch handles eligible task-local wake rows and selected heartbeat reviews while keeping main-only rows on the captain-facing path; [docs/pi-supervision-branch.md](pi-supervision-branch.md) owns its conversation lifecycle, row eligibility, mixed-queue dispatch, heartbeat routing, and pre-drain recheck.
