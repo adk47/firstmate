@@ -674,7 +674,18 @@ class Run:
                 # with zero letters sent, because `confirm --send` had no adapter. `confirmed_at` is only set by a
                 # send, so a row can sit overdue-and-silent with nothing in the alert saying so.
                 send = self.store.send_record(r["id"], "confirm")
-                letter = "no letter sent" if not send else f"letter {send['state']} {send['at'][:10]} via {send['channel']}"
+                if not send:
+                    letter = "no letter sent"
+                elif send["state"] == "sent":
+                    letter = f"letter sent {send['at'][:10]} via {send['channel']}"
+                else:
+                    # An ATTEMPTED confirmation is neither "no letter sent" nor a letter: the ledger record makes
+                    # `send` non-None, so the no-ledger branch below never runs for it and the page used to read
+                    # "letter refused <date> via none" with no reason and no fix (QA 11-05). The detail is the
+                    # whole point of the record, so it rides the line, bounded like the ask branch's.
+                    why = (send.get("detail") or "").strip()
+                    letter = (f"letter {send['state']} {send['at'][:10]} via {send['channel']}"
+                              + (f" ({why[:160]}{' …' if len(why) > 160 else ''})" if why else ""))
                 if send is None and r.get("interim_confirm_at"):
                     # An interim letter ("the remaining step is in progress") is NOT the confirmation this deadline
                     # is about, but saying "no letter sent" would hide that something already went to the customer.

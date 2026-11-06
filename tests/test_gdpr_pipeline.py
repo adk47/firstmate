@@ -2503,6 +2503,36 @@ class SendPath(unittest.TestCase):
         self.assertIn("the ask letter is refused", line)
         self.assertIn("mailbox gog cannot write", line)
 
+    def test_the_watchdog_names_why_a_CONFIRMATION_never_left(self):
+        """The ask branch above only runs when there is NO ledger record. A confirmation that was attempted and
+        refused HAS one, so it took the `letter refused ... via none` path and named no reason at all - the exact
+        rows this change exists to explain (QA 11-05)."""
+        from gdpr_pipeline import send as _send
+        rid, _ = self.s.upsert({"keys": ["notices:7"], "channel": "notices", "class": "privacy_erasure",
+                                "received_at": "2026-09-01T10:00:00Z", "requester_email": "x@example.com",
+                                "due_at": "2026-10-25T10:00:00Z"})
+        self.s.begin_send(rid, "confirm", "none", "", _send.body_sha("x"), "U0AN41ZBTRU", state="refused",
+                          detail="notices@ thread t-1 is in a mailbox gog cannot write on this host")
+        line = [ln for _, ln in self.run.watchdog_rows(datetime(2026, 11, 4, tzinfo=timezone.utc)) if f"#{self.s.get(rid)['register_no']} " in ln][0]
+        self.assertIn("letter refused", line)
+        self.assertIn("mailbox gog cannot write", line)
+        self.assertNotIn("no letter sent", line)
+
+    def test_a_sent_confirmation_does_not_carry_a_stale_reason(self):
+        """The reason belongs to the ATTEMPT, not to the row: once a later attempt lands, the line must not keep
+        quoting the earlier refusal."""
+        from gdpr_pipeline import send as _send
+        rid, _ = self.s.upsert({"keys": ["notices:8"], "channel": "notices", "class": "privacy_erasure",
+                                "received_at": "2026-09-01T10:00:00Z", "requester_email": "x@example.com",
+                                "due_at": "2026-10-25T10:00:00Z"})
+        self.s.begin_send(rid, "confirm", "none", "", _send.body_sha("x"), "U0AN41ZBTRU", state="refused",
+                          detail="mailbox gog cannot write")
+        self.s.claim_send(rid, "confirm", "mail", "t-1", _send.body_sha("x"), "U0AN41ZBTRU")
+        self.s.finish_send(rid, "confirm", "sent", ref="posted")
+        line = [ln for _, ln in self.run.watchdog_rows(datetime(2026, 11, 4, tzinfo=timezone.utc)) if f"#{self.s.get(rid)['register_no']} " in ln][0]
+        self.assertIn("letter sent", line)
+        self.assertNotIn("mailbox gog cannot write", line)
+
     def test_the_watchdog_names_a_row_with_no_route_before_anything_is_attempted(self):
         """The 24 unroutable rows have no ledger record yet (nothing has ever been sent). The route check runs first,
         so the page names the blocker on day one instead of after a failed attempt."""
