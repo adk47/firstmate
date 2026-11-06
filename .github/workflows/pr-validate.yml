@@ -2109,6 +2109,8 @@ jobs:
           # Profile-merge verifier, shadow (scripts/merge_verify, merge-verify.py): rule order, UNKNOWN
           # never approves, guards, the m1 235-ticket regression, no executor reachable. Stdlib only.
           python3 scripts/tests/test_merge_verify.py
+          # dup-dsp-absorb rule + the eligible-only merge executor (ruling l7-1030; faked, nothing merges)
+          python3 scripts/tests/test_merge_execute.py
           # uvn-status reminder runner + withdrawal-confirm (credit_review/uvn_status.py,
           # withdrawal_confirm.py): gate and Trino faked. Stdlib only.
           python3 scripts/tests/test_uvn_status.py
