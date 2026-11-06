@@ -665,8 +665,8 @@ jobs:
           scripts/check-caroline-inventory.sh
           echo "::endgroup::"
 
-      - name: Legacy domain guard — credits.muso.ai only where .legacy-domain-allowlist says so
-        # Customer-facing profile links are https://muso.ai/<path>. The credits.muso.ai host
+      - name: Legacy domain guard — old credits subdomain only where .legacy-domain-allowlist says so
+        # Customer-facing profile links are https://muso.ai/<path>. The old credits subdomain
         # still resolves (301), but nothing new may hardcode it. Fails when git grep finds the
         # host outside .legacy-domain-allowlist (frozen, KEEP, tests, docs). MUS-31227.
         run: |
