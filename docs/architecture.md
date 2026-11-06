@@ -322,6 +322,11 @@ On GitHub an outcome that is neither merged nor queued is refused loudly and non
 When the forge already accepted exactly those flags and the pull request still has not entered the queue, that refusal points at the queue state to re-check instead of echoing back the flags the caller just ran.
 An auto-merge request is held to the same standard: `--auto` that leaves the pull request neither merged nor queued is refused rather than reported as success.
 Every GitHub refusal states what it could not observe as plainly as what it did, so an unreadable branch-rule response, an unrecognised queue method, and a merge queue no available read can see are each named rather than left to look like a base branch with no queue at all.
+Before any GitHub merge, `bin/fm-merge-gate-lib.sh` decides whether the pull request's review verdict and check state authorize it, and `bin/fm-pr-merge.sh` refuses the whole command when they do not.
+It refuses a `qa-review` verdict on the current head that is not success, an absent verdict on a repository that runs the workflow, a head that moved off the commit the verdict was read on, any red check other than adk47's by-design `credit-approval-guard`, and a master/main twin whose develop/beta counterpart is unmerged.
+A read that cannot be completed refuses too, because silence is not a GO.
+`bin/fm-go-queue-run.sh` merges only through `bin/fm-pr-merge.sh`, so a queue-driven merge cannot bypass the gate.
+`--override-gate <reason>` is the only escape, and it records the reason, the operator, and the timestamp in the task's metadata before the merge is attempted.
 A confirmed merge leaves a durable role-routed outcome instead of living only in the merging agent's memory, and [`bin/fm-merge-outcome-lib.sh`](../bin/fm-merge-outcome-lib.sh)'s header owns its destination, shape, identity, normal-case deduplication, and at-least-once recovery.
 The same emitter handles a merge firstmate performed and one its poll detected, while the watcher immediately delivers the emitter's local actionable poll row.
 Teardown is fail-closed for ship worktrees: dirty worktrees refuse, and committed work must be landed before the worktree is returned.

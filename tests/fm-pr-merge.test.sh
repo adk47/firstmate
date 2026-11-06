@@ -138,9 +138,23 @@ printf '%s\n' "\$*" >> "\$FM_TEST_GH_LOG"
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
+      *statusCheckRollup*)
+        printf '%s\n' \
+          'head=$head' \
+          'author=someone' \
+          'base=main' \
+          'headref=feature' \
+          'state=OPEN' \
+          'merged_at=' \
+          'body=' \
+          'check=qa-review|SUCCESS' \
+          'check=build|SUCCESS'
+        exit 0
+        ;;
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
     esac
     ;;
+  "pr list") exit 0 ;;
   "api graphql")
     cat "\$FM_TEST_GH_OUTCOME"
     exit 0
@@ -171,6 +185,24 @@ SH
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
+  "pr view")
+    case " $* " in
+      *statusCheckRollup*)
+        printf '%s\n' \
+          'head=0000000000000000000000000000000000000000' \
+          'author=someone' \
+          'base=main' \
+          'headref=feature' \
+          'state=OPEN' \
+          'merged_at=' \
+          'body=' \
+          'check=qa-review|SUCCESS' \
+          'check=build|SUCCESS'
+        exit 0
+        ;;
+    esac
+    ;;
+  "pr list") exit 0 ;;
   "api graphql")
     cat "$FM_TEST_GH_OUTCOME"
     exit 0
@@ -196,9 +228,23 @@ printf '%s\n' "\$*" >> "\$FM_TEST_GH_LOG"
 case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
+      *statusCheckRollup*)
+        printf '%s\n' \
+          'head=$head' \
+          'author=someone' \
+          'base=main' \
+          'headref=feature' \
+          'state=OPEN' \
+          'merged_at=' \
+          'body=' \
+          'check=qa-review|SUCCESS' \
+          'check=build|SUCCESS'
+        exit 0
+        ;;
       *headRefOid*) printf '%s\n' '$head' ; exit 0 ;;
     esac
     ;;
+  "pr list") exit 0 ;;
   "api graphql")
     echo 'error: could not reach the GitHub API' >&2
     exit 1
@@ -809,14 +855,33 @@ printf '%s\n' "$*" >> "$FM_TEST_GH_LOG"
 case "${1:-} ${2:-}" in
   "pr view")
     case " $* " in
+      *statusCheckRollup*)
+        printf '%s\n' \
+          'head=8484848484848484848484848484848484848484' \
+          'author=someone' \
+          'base=main' \
+          'headref=feature' \
+          'state=OPEN' \
+          'merged_at=' \
+          'body=' \
+          'check=qa-review|SUCCESS' \
+          'check=build|SUCCESS'
+        exit 0
+        ;;
       *headRefOid*) printf '%s\n' 8484848484848484848484848484848484848484 ; exit 0 ;;
     esac
     ;;
+  "pr list") exit 0 ;;
   "api graphql")
     cat "$FM_TEST_GH_OUTCOME"
     exit 0
     ;;
-  api\ *) exit 1 ;;
+  api\ *)
+    case " $* " in
+      *contents/.github/workflows*) exit 0 ;;
+    esac
+    exit 1
+    ;;
 esac
 exit 0
 SH
@@ -883,8 +948,12 @@ SH
   : > "$case_dir/gh-axi.log"
 
   set +e
+  # The gate cannot read a verdict without gh, so this case states the
+  # override the captain's explicit word would supply and then exercises the
+  # gh-absent outcome path it is about.
   PATH="$ghless_path" run_pr_merge "$case_dir" task-x1 \
-    https://github.com/example/repo/pull/73 -- --auto --merge \
+    https://github.com/example/repo/pull/73 --override-gate 'test: gh absent' \
+    -- --auto --merge \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
@@ -1013,7 +1082,7 @@ test_github_without_gh_still_uses_gh_axi_merge() {
 
   set +e
   PATH="$ghless_path" run_pr_merge "$case_dir" task-x1 \
-    https://github.com/example/repo/pull/60 \
+    https://github.com/example/repo/pull/60 --override-gate 'test: gh absent' \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
@@ -1026,6 +1095,36 @@ test_github_without_gh_still_uses_gh_axi_merge() {
   assert_grep 'verified: https://github.com/example/repo/pull/60 is merged' \
     "$case_dir/stdout" "github-without-gh: the fallback did not report the proven merge"
   pass "fm-pr-merge reaches and verifies the gh-axi merge path without gh"
+}
+
+# The gate reads the verdict through gh, so a gh-absent merge has no verdict to
+# read. Silence is not a GO: without an explicit override the merge is refused
+# before anything is recorded or attempted.
+test_github_without_gh_refuses_without_an_override() {
+  local case_dir ghless_path rc
+  case_dir=$(make_case github-without-gh-no-override)
+  mkdir -p "$case_dir/wt"
+  add_gh_mocks "$case_dir" 4242424242424242424242424242424242424242
+  rm "$case_dir/fakebin/gh"
+  ghless_path="$case_dir/path-without-gh"
+  mirror_path_without "$ghless_path" gh "$case_dir/fakebin"
+  : > "$case_dir/gh-axi.log"
+
+  set +e
+  PATH="$ghless_path" run_pr_merge "$case_dir" task-x1 \
+    https://github.com/example/repo/pull/62 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "github-without-gh-no-override: an unread verdict must refuse"
+  assert_grep 'the review verdict and check state on the current head could not be read' \
+    "$case_dir/stderr" "github-without-gh-no-override: the refusal did not name the unread verdict"
+  assert_no_grep 'pr merge' "$case_dir/gh-axi.log" \
+    "github-without-gh-no-override: the merge was attempted without a verdict"
+  assert_no_grep 'pr=https://github.com/example/repo/pull/62' "$case_dir/state/task-x1.meta" \
+    "github-without-gh-no-override: a refused merge recorded its PR reference"
+  pass "fm-pr-merge refuses a gh-absent merge with no verdict and no override"
 }
 
 test_github_without_gh_failed_read_keeps_bookkeeping() {
@@ -1048,7 +1147,7 @@ SH
 
   set +e
   PATH="$ghless_path" run_pr_merge "$case_dir" task-x1 \
-    https://github.com/example/repo/pull/61 \
+    https://github.com/example/repo/pull/61 --override-gate 'test: gh absent' \
     > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
@@ -2105,6 +2204,7 @@ test_github_failed_merge_with_queue_flags_never_claims_acceptance
 test_github_failed_gh_read_falls_back_to_gh_axi
 test_github_failed_merge_names_an_observed_landed_state
 test_github_without_gh_still_uses_gh_axi_merge
+test_github_without_gh_refuses_without_an_override
 test_github_without_gh_failed_read_keeps_bookkeeping
 test_github_merged_outcome_is_verified
 test_github_verified_merge_requires_poll_recording

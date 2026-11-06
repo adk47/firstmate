@@ -34,9 +34,13 @@
 # Usage (sourced): fm_merge_gate <owner/repo> <pr-number> <expected-head> \
 #                    [--allow-red <check-name>]... [--recorded-head <sha>]
 # Usage (direct):  fm-merge-gate-lib.sh <owner/repo> <pr-number> <expected-head> \
-#                    [--allow-red <check-name>]... [--recorded-head <sha>]
-# The direct form is the check-only mode used to audit past merges; it never
-# merges anything.
+#                    [--allow-red <check-name>]... [--recorded-head <sha>] \
+#                    [--check-only]
+# The direct form is the audit entry point; it never merges anything.
+# --check-only evaluates the verdict and checks even on a pull request that is
+# already merged, which is what a backfill over past merges needs: the ordinary
+# path short-circuits an already-merged pull request because the merge call
+# itself will report it as merged.
 
 # The standing allow: the adk47 self-authorship credit-approval-guard is the one
 # admin-bypassed red the captain named (2026-11-03 12:2xZ), and only for adk47's
@@ -253,7 +257,7 @@ fm_merge_gate() {
   local repo='' number='' expected='' recorded=''
   local allow_reds='' arg
   local refusals='' allowed='' qa='' qa_required=0 qa_rc=0
-  local line name conclusion twin=''
+  local line name conclusion twin='' check_only=false
 
   if [ "$#" -lt 3 ]; then
     echo "error: merge gate needs <owner/repo> <pr-number> <expected-head>" >&2
@@ -287,7 +291,9 @@ fm_merge_gate() {
         shift
         ;;
       --check-only)
-        # The gate never merges; the flag exists so an audit run reads as one.
+        # The gate never merges; the flag makes an audit of an already-merged
+        # pull request evaluate its verdict instead of short-circuiting.
+        check_only=true
         shift
         ;;
       *)
@@ -312,8 +318,9 @@ fm_merge_gate() {
   fi
 
   # An already-merged pull request needs no authorization; the merge call itself
-  # will report it as merged.
-  if [ "$FM_MERGE_GATE_STATE" = MERGED ] || [ -n "$FM_MERGE_GATE_MERGED_AT" ]; then
+  # will report it as merged. A check-only audit still evaluates the verdict.
+  if [ "$check_only" != true ] \
+    && { [ "$FM_MERGE_GATE_STATE" = MERGED ] || [ -n "$FM_MERGE_GATE_MERGED_AT" ]; }; then
     printf 'merge gate: %s#%s is already merged at head %s\n' \
       "$repo" "$number" "$FM_MERGE_GATE_HEAD"
     return 0

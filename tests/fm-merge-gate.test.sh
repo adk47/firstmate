@@ -413,6 +413,31 @@ test_gate_allows_named_red_check() {
   pass "an explicitly named red check may be allowed, and is reported"
 }
 
+# A backfill over past merges needs the verdict of a pull request that already
+# merged, so --check-only evaluates it instead of short-circuiting.
+test_gate_check_only_audits_a_merged_pull_request() {
+  local case_dir rc
+  case_dir=$(make_case check-only-merged)
+  write_workflows "$case_dir" qa-review.yml
+  write_pr_view "$case_dir" state=MERGED merged_at='"2026-11-03T12:00:00Z"' \
+    checks='qa-review:FAILURE,unit-tests:SUCCESS'
+
+  set +e
+  run_gate "$case_dir" "$REPO" 9 "$HEAD"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "an already-merged pull request must short-circuit without --check-only"
+
+  set +e
+  run_gate "$case_dir" "$REPO" 9 "$HEAD" --check-only
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "--check-only must evaluate a merged pull request's verdict"
+  assert_contains "$(cat "$case_dir/err")" "the qa-review verdict on head $HEAD is FAILURE" \
+    "--check-only must name the verdict it refused"
+  pass "--check-only audits an already-merged pull request instead of short-circuiting"
+}
+
 # --- (m) fm-pr-merge.sh refuses before the merge call ----------------------
 
 # A gh-axi mock that records every call, so a test can prove the merge call was
@@ -638,6 +663,7 @@ test_gate_refuses_moved_head
 test_gate_refuses_unreadable_verdict
 test_gate_passes_green_with_qa_go
 test_gate_allows_named_red_check
+test_gate_check_only_audits_a_merged_pull_request
 test_pr_merge_refuses_before_merge_call
 test_pr_merge_override_records_and_merges
 test_go_queue_refuses_row_and_continues
