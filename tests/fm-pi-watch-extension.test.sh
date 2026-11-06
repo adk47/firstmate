@@ -686,7 +686,7 @@ const bus = {
   },
 };
 // The branch accepts the first wake and holds its settlement: that promise is
-// the branch's model turn, which no watcher cycle can shorten.
+// the model turn of the branch, which no watcher cycle can shorten.
 bus.on("fm-branch-supervision:dispatch", (offer) => {
   offers.push(offer.message);
   if (offers.length === 1) offer.accept(heldDelivery);
@@ -2703,8 +2703,8 @@ if (previous.prompts.length !== 0) {
   throw new Error(`accepted old-session branch wake reached main: ${previous.prompts.join(" | ")}`);
 }
 await waitFor(() => liveArms().length === 1 && armRows().length >= 2, "old-session successor");
-// Continuity never waits on delivery: this successor's own actionable close
-// lands while the old session's branch settlement is still outstanding, so it
+// Continuity never waits on delivery: the own actionable close of this successor
+// lands while the branch settlement of the old session is still outstanding, so it
 // arms the next successor immediately instead of leaving the chain dark until
 // that delivery settles.
 writeFileSync(process.env.FM_TRIGGER_FILE, "replacement-successor actionable outcome\n");
@@ -4541,7 +4541,7 @@ for (let i = 0; i < 400; i += 1) {
   if (prompts.length >= 1 && armCount() >= 3) break;
   await new Promise((resolve) => setTimeout(resolve, 10));
 }
-if (armCount() !== 3) throw new Error(`expected the restoration's own retry chain, saw ${armCount()} arm rows`);
+if (armCount() !== 3) throw new Error(`expected the restoration\u0027s own retry chain, saw ${armCount()} arm rows`);
 if (prompts.length !== 1) throw new Error(`expected one wake prompt, got ${prompts.length}: ${JSON.stringify(prompts)}`);
 await new Promise((resolve) => setTimeout(resolve, 200));
 if (prompts.length !== 1) throw new Error(`a competing retry surfaced an extra prompt: ${JSON.stringify(prompts)}`);
