@@ -661,6 +661,20 @@ No single call may exceed a fixed 5-second cap, nor a quarter of what is left of
 None of those bounds is tunable: an override could only weaken the bound it exists to enforce.
 `quota-axi` needs its one-time Keychain approval (run `quota-axi --allow-keychain-prompt` once by hand); the monitor itself reads strictly, with `--no-credential-refresh`, and never prompts.
 
+## Decider seat routing (config/decider-task)
+
+[`bin/fm-decider-route.sh`](../bin/fm-decider-route.sh) routes a worker's open `needs-decision` key to a persistent Decider seat when the key matches one of the captain's standing orders, so most worker questions are answered without a captain or supervisor turn.
+[`docs/decider-worker.md`](decider-worker.md) owns the seat's charter, its standing orders, and its definition of done; this section owns only the one configuration file.
+
+`config/decider-task` is a local, gitignored file containing the seat's task id on its first non-empty, non-comment line.
+`FM_DECIDER_TASK` overrides it for one invocation, and `FM_DECIDER_CONFIG_OVERRIDE` relocates the file.
+An absent or empty file means no seat is configured: nothing is routed, and every decision keeps its previous path through ordinary supervision.
+A malformed id is reported as a routing defect rather than silently ignored.
+The file is not inherited into secondmate homes: a seat is a task in one home, and a ruling closes that home's own decision ledger, so each home that wants routing configures its own seat.
+
+The seat is an ordinary persistent task in the same home, so it must already have a `state/<id>.meta` record before `bin/fm-decider-route.sh arm` will bind the routing check.
+Routing is idempotent per decision episode, requires no per-key state beyond `state/decider-ledger.tsv`, and prints a wake only for a delivery failure, a decision that outlived the ruling window, or a configuration that cannot route.
+
 ## Fleet stall watch (config/fleet-stall.env)
 
 [`bin/fm-fleet-stall-check.sh`](../bin/fm-fleet-stall-check.sh) is a registered watcher check that wakes firstmate when several live workers stall on the model gateway at the same time, and pages the captain when the stall persists.
@@ -1326,6 +1340,13 @@ FM_TOOL_UPDATE_BUDGET_SECS=24   # 1..120 seconds allowed for a whole watched-too
 FM_TOOL_UPDATE_NOW=     # test override for the watched-tool sweep clock; the sweep budget still uses real time
 FM_SENTRY_WATCH_BUDGET_SECS=   # when set, overrides config/sentry-watch.json fetch.budget_secs (default 25): seconds allowed for one whole Sentry watch poll; must end inside FM_CHECK_TIMEOUT
 FM_SENTRY_WATCH_HTTP_TIMEOUT=  # when set, overrides fetch.http_timeout_secs (default 8): seconds allowed for one Sentry API read
+FM_DECIDER_TASK=        # optional Decider seat task id, overriding config/decider-task for one invocation (docs/decider-worker.md)
+FM_DECIDER_CONFIG_OVERRIDE=   # alternate location for config/decider-task, mainly for tests
+FM_DECIDER_REFUND_CAP=150   # dollars a single refund must stay below for the seat to rule on it; every other money decision stays with the captain
+FM_DECIDER_RULING_WINDOW=7200   # seconds a routed decision may stay unruled before one sweep surfaces it
+FM_DECIDER_SCAN_TIMEOUT=20   # seconds allowed for one sweep's open-decision read before routing defers to the next poll
+FM_DECIDER_METRICS_MIN_ROUTED=5   # routed decisions below which the definition-of-done report reads as insufficient data rather than a pass or fail
+FM_DECIDER_NOW=         # test override for the routing and report clock
 FM_PROCEVENT_MAX_OUTPUT_BYTES=1048576   # bound on one captured process-to-event result
 FM_PROCEVENT_CLAIM_ROOT=                # machine-wide source claim root; default $XDG_STATE_HOME/firstmate/procevent-claims
 FM_WHEN_OUTPUT_TAIL_BYTES=8192          # bound on the command-output tail inside one condition->action outcome document
