@@ -39,6 +39,7 @@ from __future__ import annotations
 import collections
 import concurrent.futures
 import json
+import math
 import os
 import re
 import sqlite3
@@ -111,6 +112,19 @@ class Report:
     pending_doc_credits: int = 0
     refused_users: int = 0
     failed_users: int = 0
+    # r5 / firstmate 764 (2026-11-04, the 22Z round): ONE user's failed send-time read holds THAT USER. A single
+    # unreadable account (a Trino read that failed) made the whole r1 family - and with it every claim family behind it -
+    # stop for the night. The round is not the unit of failure; the user is. Each entry is {user, reason, user_key}.
+    failed_held: list = field(default_factory=list)
+    # ... and the batch stops only when the failures are SYSTEMIC: FAIL_STOP_MIN users or FAIL_STOP_SHARE of the users
+    # walked, whichever is larger. This is a stop, never a kill file: it ends the run, it does not arm anything.
+    stopped_on_failures: int = 0
+    # ... and a read that keeps failing across ticks is not a fluke: three in a row pages a human (Fable 769).
+    read_failure_pages: list = field(default_factory=list)
+    # r5 (firstmate 770) (1): a POST that failed is an UNKNOWN outcome, not a held read - see _failed().
+    post_failed: int = 0
+    post_rejected: int = 0             # Intercom refused the POST (nothing delivered, retried later) - a deferral
+    post_failures: list = field(default_factory=list)
     proof_tagged: int = 0
     claim_proof_tagged: int = 0        # claim-proof-ask replies (any reply) tagged claim-proof (a separate queue)
     claim_replies: int = 0             # claimant replies to a claim-proof-ask note (its reminder withheld)
@@ -151,7 +165,17 @@ class Report:
 
     @property
     def failed(self) -> bool:
-        return bool(self.failed_users or self.proof_failed or self.halted or self.flag_failures)
+        # r5 / firstmate 764: `failed_users` alone is NOT a failed run any more - a user whose own read failed is HELD
+        # (recorded, held, skipped by the next run) while the rest of the round goes on. Only a SYSTEMIC stop
+        # (stopped_on_failures) or one of the run-level failures above fails the exit code.
+        #
+        # QA #1780 (Critical, 03:07Z): a POST failure is the ONE per-user outcome that is ALWAYS fatal to the run, at
+        # any count. The read succeeded and the send did not land, so the outcome is UNKNOWN and the message may
+        # already be delivered: a run that exits 0 over it reports success for a delivery it cannot prove, and the
+        # next tick may send the same note again. It is never auto-resent (the gate leaves the row CLAIMED) and it is
+        # never a read hold - but the exit code must say so.
+        return bool(self.stopped_on_failures or self.proof_failed or self.halted or self.flag_failures
+                    or self.post_failed)
 
     def render(self, mode: str, title: str = "VERIFY NOTES") -> str:
         if self.halted:
@@ -160,11 +184,12 @@ class Report:
         # A daily-cap deferral alone is not news (it recurs every run until tomorrow's note); any OTHER gate deferral
         # is (C11, QA #1515: the reason must reach the summary). Held-for-human users are news too (once a day).
         news_defer = [d for d in self.deferrals if "daily-cap" not in d]
-        if not (self.sent_notes or self.refused_users or self.failed_users or self.reminders_sent or news_defer
+        if not (self.sent_notes or self.refused_users or self.failed_held or self.post_failed or self.reminders_sent
+                or news_defer
                 or self.proof_tagged or self.proof_failed or self.extension_requests
                 or self.claim_proof_tagged or self.claim_replies
                 or self.affiliation_held or self.documented_users or self.support_contact_users
-                or self.paying_hold or self.no_professional_id) and mode == "apply":
+                or self.paying_hold or self.no_professional_id or self.read_failure_pages) and mode == "apply":
             return "NO_REPLY"
         head = f"{title} (dry run, nothing sent)" if mode != "apply" else title
         parts = [f"{head}: {self.sent_notes} note(s) sent covering {self.sent_credits} provisionally approved credit(s)"
@@ -183,6 +208,14 @@ class Report:
         if self.mixed_v1_users:
             parts.append(f"{self.mixed_v1_users} account(s) got one no-deadline note covering a paid provisional "
                          "credit and other new credits (one note per user; no removal date)")
+        if self.post_failed:
+            parts.append(f"{self.post_failed} send(s) FAILED at the POST (unknown outcome: may already be delivered; "
+                         "left claimed and never re-sent automatically): "
+                         + "; ".join(f"user {h['user']}: {h['reason'][:120]}" for h in self.post_failures[:3]))
+        if self.read_failure_pages:
+            parts.append(f"{len(self.read_failure_pages)} account(s) have failed their own read on "
+                         f"{verify_ledger.READ_FAILURES_TO_PAGE} consecutive ticks (a pattern, not a fluke): "
+                         + "; ".join(self.read_failure_pages))
         if self.deferred_users:
             # the label comes from the gate's own reasons (QA #1515), never a fixed 'already had today's note'
             parts.append(f"{self.deferred_users} account(s) deferred by the gate"
@@ -236,8 +269,26 @@ class Report:
                          "reminder; with a person")
         if self.claim_proof_tagged:
             parts.append(f"{self.claim_proof_tagged} claim repl(ies) tagged claim-proof for a person")
-        if self.failed_users or self.proof_failed:
-            parts.append(f"FAILED: {self.failed_users} send(s), {self.proof_failed} proof tag(s): " + "; ".join(self.failures[:5]))
+        if self.failed_held or self.post_failed or self.proof_failed:
+            # r5 / firstmate 764: FAILED stays the word a replay greps; the OUTCOME is a hold - that user was not
+            # messaged, was not closed, and the rest of the round went on.
+            #
+            # QA #1780 (Important, 02:12Z): `failed_users` counts BOTH a held read and an unknown POST, so keying the
+            # "held, not messaged" sentence off it told the operator the opposite of the actual delivery state for a
+            # POST failure - the one outcome where the note may ALREADY be delivered. The two are now rendered from
+            # their own counts, and the held sentence is emitted only when a read hold actually exists.
+            bits = []
+            if self.failed_held:
+                bits.append(f"{len(self.failed_held)} send(s) held, not messaged, not retried this run")
+            if self.post_failed:
+                bits.append(f"{self.post_failed} send(s) with an UNKNOWN outcome (the POST was attempted and we cannot "
+                            "prove it was not delivered; the ledger row stays claimed and is never re-sent "
+                            "automatically)")
+            if self.stopped_on_failures:
+                bits.append(f"SYSTEMIC at {self.stopped_on_failures}: the run stopped")
+            if self.proof_failed:
+                bits.append(f"{self.proof_failed} proof tag(s)")
+            parts.append("FAILED: " + "; ".join(bits) + ": " + "; ".join(self.failures[:5]))
         return ". ".join(parts) + "."
 
 
@@ -698,6 +749,18 @@ def _first_line(text: str) -> str:
 # send (apply) is always serial: one writer for claims, caps and pacing.
 CHECK_WORKERS = 4
 
+# Fable r5's ruled bar (firstmate 764, restated in 765): a run of failed users becomes a systemic stop at
+# max(3, 2% of the users walked) - NOT 5%, which was my reading and r5's ruling corrects. Below the bar every failed
+# user is HELD and the round continues; at or above it the run stops and says so, because at that point the failures
+# are a statement about the environment, not about one account.
+FAIL_STOP_MIN = 3
+FAIL_STOP_SHARE = 0.02
+
+
+def fail_stop_after(walked: int) -> int:
+    """How many failed users make a run systemic (>= max(FAIL_STOP_MIN, FAIL_STOP_SHARE of the users walked))."""
+    return max(FAIL_STOP_MIN, math.ceil(FAIL_STOP_SHARE * max(1, int(walked))))
+
 # Fable [key=signed-on-sha] (r5 747, the 04:21Z C p3 stop: a deploy landed between signing and apply): a signature is
 # for ONE deploy head. Every list builder records signed_on = the deployed sha at build / dry-run time; a list-driven
 # apply re-reads /opt/hydra/.deployed-sha before EVERY user and defers that user (sha_mismatch, nothing sent, no claim)
@@ -923,7 +986,12 @@ def load_preview_accepted(path: str) -> frozenset[str]:
 def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
              wrapper: str = WRAPPER, runner: Runner = _run, extra: list[str] | None = None,
              pace_seconds: float = 0.0, preview_dir: str | None = None, reminder: bool = False,
-             check_recipients: bool = False, workers: int | None = None) -> None:
+             check_recipients: bool = False, workers: int | None = None,
+             walked: int | None = None, ledger_path: str | None = None,
+             campaign: str = "") -> None:
+    """``ledger_path`` + ``campaign`` turn on the read-failure hold for this lane (Fable r5 2026-11-06 00:53Z): a user
+    whose own send-time read failed on an earlier tick is SKIPPED until the hold expires, and a read that works clears
+    the streak. Both are apply-only; a dry run neither honours nor writes a hold."""
     if PREVIEW_ONLY is not None and preview_dir and mode != "apply" and not check_recipients:
         payloads = [p for p in payloads if _uid(p) in PREVIEW_ONLY]          # never a gate call for the rest
     if APPLY_ONLY is not None and mode == "apply":
@@ -971,7 +1039,8 @@ def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
             return
     try:
         _send_loop(payloads, report, mode=mode, pace_seconds=pace_seconds, pre=pre, gate=gate, extra=extra,
-                   preview_dir=preview_dir, reminder=reminder)
+                   preview_dir=preview_dir, reminder=reminder, walked=walked, ledger_path=ledger_path,
+                   campaign=campaign)
     finally:
         if lock is not None:
             lock.close()
@@ -979,7 +1048,12 @@ def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
 
 def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pace_seconds: float, pre: Any,
                gate: Callable[[dict[str, Any]], Any], extra: list[str] | None, preview_dir: str | None,
-               reminder: bool) -> None:
+               reminder: bool, walked: int | None = None, ledger_path: str | None = None,
+               campaign: str = "") -> None:
+    # r5 (firstmate 770) (3): `walked` is the POPULATION the run walks, never len(payloads). uvn_status sends one user
+    # per send_all() call, so len(payloads) was 1 and the systemic bar became max(3, 2% of 1) = 3 threshold against a
+    # denominator of 1 - and a family that stopped at 3 of 8 kept walking all 8 because the outer loop never looked.
+    walked = len(payloads) if walked is None else max(int(walked), len(payloads))
     for i, p in enumerate(payloads):
         if i and pace_seconds and mode == "apply":
             time.sleep(pace_seconds)
@@ -992,6 +1066,19 @@ def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pac
                 why = _outcome(report, p, "deferred", hm)
                 report.deferrals.append(f"user {_uid(p)}: {why}"[:200])
                 continue
+        # Fable r5 2026-11-06 00:53Z: the hold is HONOURED by every lane, not only by UVN. A user whose own read failed
+        # on an earlier tick is skipped with a named deferral until it expires, so the consecutive count can reach the
+        # page instead of the same unreadable read being walked every run with no memory of it.
+        hold_ukey = str((p.get("user") or {}).get("email") or "").strip().lower()
+        if mode == "apply" and ledger_path and campaign:
+            hold_until = read_hold_until(ledger_path, campaign, hold_ukey)
+            if hold_until:
+                report.deferred_users += 1
+                report.outcomes.append({"user": _uid(p), "result": "deferred",
+                                        "reason": f"read_failed_hold until {hold_until}"})
+                report.deferrals.append(f"user {_uid(p)}: read failed on an earlier tick; retry after {hold_until}")
+                continue
+        fh0 = len(report.failed_held)
         res = pre[i] if pre is not None else gate(p)
         if preview_dir and mode != "apply" and res.returncode == 0:
             uid = re.sub(r"[^A-Za-z0-9-]", "", str(p["user"].get("id") or ""))[:64]
@@ -1051,13 +1138,188 @@ def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pac
             _outcome(report, p, "refused_unledgered" if "nothing was sent or claimed" in why else "refused", why)
         elif res.returncode == 1:
             # rc 1 with no REFUSED line: the gate stopped abnormally - a failure, never a silent 'refused'
-            report.failed_users += 1
-            report.failures.append(f"rc=1 without a REFUSED line: {err or out}"[:200])
-            _outcome(report, p, "failed", f"rc=1 without a REFUSED line: {err or out}")
+            _failed(report, p, f"rc=1 without a REFUSED line: {_failure_text(res, err or out)}", walked)
+        elif res.returncode == POST_FAILED_RC or _post_failed_line(res.stderr) or _post_failed_line(res.stdout):
+            # (1): the gate's OWN line is the authority for WHAT failed. rc 4 is its documented contract for this
+            # (scripts/intercom-verify-request.sh) but an rc alone must never relabel a failed READ as a failed POST:
+            # a read that failed under rc 4 would then escape the hold that retries it next tick.
+            _failed(report, p, f"rc={res.returncode} {_failure_text(res, err or out)}", walked, kind="post")
+        elif _post_rejected_line(res.stderr) or _post_rejected_line(res.stdout):
+            # QA #1780 (Important, 03:07Z): Intercom's error.list answers rc=4 with "POST REJECTED by Intercom (nothing
+            # delivered; retried on a later run)" AFTER the reads succeeded. That is not an unreadable read: counting
+            # three of them as three consecutive read failures pages a human for the wrong condition and holds a user
+            # whose account was perfectly readable. Nothing was delivered, so it is a DEFERRAL (the gate retries it),
+            # never a failure and never a read hold.
+            why = _post_rejected_line(res.stderr) or _post_rejected_line(res.stdout)
+            report.post_rejected += 1
+            report.deferred_users += 1
+            report.deferrals.append(f"user {_uid(p)}: {why}"[:200])
+            _outcome(report, p, "post_rejected", why)
         else:
-            report.failed_users += 1
-            report.failures.append(f"rc={res.returncode} {err or out}"[:200])
-            _outcome(report, p, "failed", f"rc={res.returncode} {err or out}")
+            _failed(report, p, f"rc={res.returncode} {_failure_text(res, err or out)}", walked)
+        # The read worked for this user iff no per-user read hold was recorded for them: a refusal, a deferral or a
+        # rejected POST is not a failed read, so the consecutive counter starts over (QA #1780, r8 771 (4)).
+        if mode == "apply" and ledger_path and campaign and len(report.failed_held) == fh0:
+            clear_read_hold(ledger_path, campaign, hold_ukey)
+        if report.stopped_on_failures:
+            return
+
+
+# r8 (firstmate 771) (2): the gate's exit codes are distinct facts. 4 = NOTHING WAS SENT (a pre-send check failed),
+# 5 = ATTEMPTED, OUTCOME UNKNOWN (posted, transport failed or the answer could not be verified; row left CLAIMED).
+POST_FAILED_RC = 5
+
+
+def _failed(report: Report, p: dict[str, Any], why: str, walked: int, *, kind: str = "read") -> None:
+    """One user's own read or POST failed. Record it PER USER, keep walking, and stop the run only once the failures are
+    systemic (r5 / firstmate 764). A held user is a KNOWN outcome; a stopped round is not.
+
+    r5 (firstmate 770) (1): a POST failure is NOT a failed read. The read succeeded and the send did not land - the gate
+    exited 4, logged the row and left it CLAIMED, so the outcome is UNKNOWN and the message may already be delivered. It
+    is counted (a burst of them is systemic) and rendered, but it never becomes a "read failed" hold: retrying the read
+    next tick would be a lie about what failed, and a hold that says "unreadable read" would hide a possible double
+    send."""
+    report.failed_users += 1
+    report.failures.append(why[:300])
+    if kind == "post":
+        report.post_failed += 1
+        report.post_failures.append({"user": _uid(p), "reason": why[:300],
+                                     "user_key": str((p.get("user") or {}).get("email") or "").strip().lower()})
+        _outcome(report, p, "post_failed", why)
+    else:
+        report.failed_held.append({"user": _uid(p), "reason": why[:300],
+                                   "user_key": str((p.get("user") or {}).get("email") or "").strip().lower()})
+        _outcome(report, p, "failed", why)
+    stop = fail_stop_after(walked)
+    if report.failed_users >= stop and not report.stopped_on_failures:
+        report.stopped_on_failures = report.failed_users
+        report.failures.append((f"SYSTEMIC: {report.failed_users} of {walked} user(s) failed "
+                                f"(>= max({FAIL_STOP_MIN}, {int(FAIL_STOP_SHARE * 100)}%) = {stop}); the run stopped "
+                                "here, the users after this one were not walked")[:300])
+
+
+_ENC_QUERY = re.compile(r"\S*%[0-9A-Fa-f]{2}\S*")          # a URL-encoded query is not an error message
+
+
+_ERR_HINT = re.compile(r"(FAILED|ERROR|refused|no readable|not set|timed out|Traceback|rc=\d+)", re.I)
+
+
+def _failure_text(res: Any, fallback: str = "") -> str:
+    """The gate's OWN error sentence, never a SQL fragment (r5 / firstmate 764).
+
+    The 22Z tick recorded 'trino rc=1: AS+varchar%29+FROM+postgresql_core.public.claiming+WHERE+userid+IN+%28310729%29
+    +AND+updatedat...' - the QUERY, URL-encoded, and the server's answer - the only part a human can act on - was cut
+    off at 200 characters by the old first-line-only rule. So: read the whole stderr, keep the line that talks about
+    the FAILURE (not an embedded query), and elide any percent-encoded blob. A reader must be able to tell what broke."""
+    lines = [ln.strip() for ln in str(getattr(res, "stderr", "") or "").splitlines() if ln.strip()]
+    if not lines:
+        text = " ".join(str(fallback or getattr(res, "stdout", "") or "").split())
+        if not text:
+            return f"rc={getattr(res, 'returncode', '?')} with no message"
+        return _ENC_QUERY.sub("[query elided]", text)[:300]
+    pick = next((ln for ln in lines if _ERR_HINT.search(ln) and not _ENC_QUERY.search(ln)), None) \
+        or next((ln for ln in lines if _ERR_HINT.search(ln)), None) or lines[-1]
+    return _ENC_QUERY.sub("[query elided]", " ".join(pick.split()))[:300]
+
+
+def hold_failed_users(db: Any, report: Report, campaign: str, *, now: Any = None) -> int:
+    """Record every user whose own send-time read failed (r5 / firstmate 764), so the next tick RETRIES them.
+
+    Fable 2026-11-05 00:1xZ (firstmate 769) replaced the first cut of this: a failed read used to write the
+    7-day *refusal* hold, which was wrong twice - an unreadable read is not the user refusing anything, and a
+    week-long hold would starve the account over one bad query. The hold now expires at the NEXT TICK
+    (``verify_ledger.READ_RETRY_H``), the failure is counted as CONSECUTIVE across ticks, and the third in a
+    row pages a human (``READ_FAILURES_TO_PAGE``). Best effort per user: a record that cannot be written is
+    reported (flag_failures), never fatal, because the round has already happened."""
+    n = 0
+    for h in report.failed_held:
+        uid = str(h.get("user") or "")
+        if not uid.isdigit():
+            continue
+        key = h.get("user_key") or f"user:{uid}"
+        try:
+            rec = verify_ledger.record_read_failure(db, campaign=campaign, user_key=key,
+                                                    reason=f"read failed: {h.get('reason') or ''}"[:500],
+                                                    user_id=uid, now=now)
+            n += 1
+            if rec.get("page") and verify_ledger.mark_read_failure_paged(db, campaign=campaign, user_key=key, now=now):
+                report.read_failure_pages.append(f"user {uid}: {rec['failures']} consecutive failed reads, "
+                                                 f"first {rec['first_failed_at']}")
+        except Exception as exc:  # noqa: BLE001 - a failed record is reported, never a reason to lose the report
+            report.flag_failures.append(f"hold user {uid} failed: {str(exc)[:160]}")
+    return n
+
+
+def read_hold_until(path: str, campaign: str, user_key: str, *, now: Any = None) -> str:
+    """The read-failure hold the walk writes is only worth writing if the next walk HONOURS it (r8 / firstmate 771).
+    Returns the retry time while the hold is open, "" when there is none - an unreadable ledger is "no hold" (the send
+    path re-reads everything anyway), never a reason to stop the walk.
+
+    Fable r5 2026-11-06 00:53Z: this lives HERE, beside ``hold_failed_users``, because the hold is written by every
+    runner that calls ``send_all`` and must be honoured by every one of them - not by the UVN lane alone."""
+    if not user_key:
+        return ""
+    try:
+        db = verify_ledger.connect(path)
+        try:
+            row = verify_ledger.read_failure(db, campaign=campaign, user_key=user_key, now=now)
+        finally:
+            db.close()
+    except sqlite3.Error:
+        return ""
+    return str(row.get("next_retry_at") or "")
+
+
+def clear_read_hold(path: str, campaign: str, user_key: str) -> None:
+    """A SUCCESSFUL read resets the count, so "three CONSECUTIVE failed reads" means three - without this the count
+    only ever grew and a flaky account paged on failures from days apart (r8 / firstmate 771)."""
+    if not user_key:
+        return
+    try:
+        db = verify_ledger.connect(path)
+        try:
+            db.execute("DELETE FROM verify_read_failures WHERE campaign=? AND user_key=?", (campaign, user_key))
+        finally:
+            db.close()
+    except sqlite3.Error:
+        pass
+
+
+def finish_failed_reads(db: Any, report: Report, campaign: str, *, mode: str, now: Any = None) -> int:
+    """Record every user whose own send-time read failed, for EVERY runner that calls ``send_all``.
+
+    Fable r5 2026-11-06 00:53Z (QA #1780's carried finding): ``hold_failed_users`` had exactly one caller - the UVN
+    lane - so on the two daily lanes (``verify-live`` and ``retro-past``) a failed send-time read exited 0, printed
+    "held", wrote no ``verify_read_failures`` row, was re-walked by the next run with no consecutive count, and the
+    ``READ_FAILURES_TO_PAGE`` page could never fire. The word was false and the alarm was absent.
+
+    APPLY ONLY: a dry run is a read, so it never writes a hold row (Fable 769). Best effort: a record that cannot be
+    written is reported (``flag_failures``), never fatal, because the round has already happened."""
+    if mode != "apply" or not report.failed_held:
+        return 0
+    n = hold_failed_users(db, report, campaign, now=now)
+    # ``note()`` is the UVN report's by-reason tally; this module's Report has no such counter, so the call is
+    # conditional rather than a second Report shape (the hold itself is the record that matters).
+    note = getattr(report, "note", None)
+    if n and callable(note):
+        note("failed_held")
+    return n
+
+
+def _post_failed_line(stderr: str) -> bool:
+    """The gate's POST FAILED marker, independent of the exit code (defence in depth: rc 4 is the contract)."""
+    return any(ln.strip().startswith("POST FAILED") for ln in (stderr or "").splitlines())
+
+
+def _post_rejected_line(stderr: str) -> str:
+    """The gate's POST REJECTED marker (Intercom refused the POST; NOTHING was delivered), or ''.
+
+    QA #1780: this shares rc=4 with a pre-send check failure, so the LINE - not the code - is what tells a rejected
+    POST (a deferral, retried later) from a failed read (a per-user hold)."""
+    for ln in (stderr or "").splitlines():
+        if ln.strip().startswith("POST REJECTED"):
+            return ln.strip()[:200]
+    return ""
 
 
 def _refused_line(stderr: str) -> str:
@@ -1539,7 +1801,11 @@ def run(admin: admin_api.Admin, *, ledger_path: str | None = None, mode: str = "
             if mode == "apply" and held:
                 verify_ledger.defer(db, campaign="verify-live", refs=held)
             report.users = len(payloads)
-            send_all(payloads, report, mode=mode, wrapper=wrapper, runner=runner, check_recipients=check_recipients)
+            send_all(payloads, report, mode=mode, wrapper=wrapper, runner=runner, check_recipients=check_recipients,
+                     ledger_path=ledger_path or verify_ledger.DEFAULT_PATH, campaign="verify-live")
+            # Fable r5 2026-11-06 00:53Z: this lane holds its own failed reads too. Without this a failed send-time
+            # read exited 0, printed "held", wrote no row and could never page - the exact defect class #1780 closes.
+            finish_failed_reads(db, report, "verify-live", mode=mode)
         if sweep and mode == "apply":
             sweep_proofs(db, report, days=45, wrapper=wrapper, runner=runner)
         if mode == "apply":
@@ -1701,7 +1967,10 @@ def run_wave(admin: admin_api.Admin, *, wave_path: str, ledger_path: str | None 
                                 runner=runner)
             else:
                 send_all(payloads, report, mode=mode, wrapper=wrapper, runner=runner,
-                         extra=["--campaign", CAMPAIGN_RETRO], pace_seconds=pace_seconds, preview_dir=preview_dir)
+                         extra=["--campaign", CAMPAIGN_RETRO], pace_seconds=pace_seconds, preview_dir=preview_dir,
+                         ledger_path=ledger_path or verify_ledger.DEFAULT_PATH, campaign=CAMPAIGN_RETRO)
+                # Fable r5 2026-11-06 00:53Z: the retro lane holds its own failed reads, same as verify-live.
+                finish_failed_reads(db, report, CAMPAIGN_RETRO, mode=mode)
         if sweep and mode == "apply":
             sweep_proofs(db, report, days=45, wrapper=wrapper, runner=runner)
         report.unverified = len(verify_ledger.unverified_past(db, day=day))

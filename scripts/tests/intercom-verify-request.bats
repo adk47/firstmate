@@ -690,7 +690,7 @@ PY
 
 @test "a response that is not an admin_message of the requested type is NOT VERIFIED and never re-sent" {
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
-  STUB_MESSAGE_RESPONSE='{"type":"user_message","id":"5","message_type":"email"}' run -4 send
+  STUB_MESSAGE_RESPONSE='{"type":"user_message","id":"5","message_type":"email"}' run -5 send
   [[ "$output" == *"POST NOT VERIFIED"* ]]
   [ "$(sql "select status from verify_requests where request_id='r1'")" = "attempted" ]
   INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 send
@@ -700,7 +700,8 @@ PY
 
 @test "a curl failure leaves the claim in place (outcome unknown): no automatic second note" {
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
-  STUB_CURL_FAIL=1 run -4 send
+  # r8 771 (2): rc 5 = attempted, outcome unknown - distinct from rc 4 ("nothing was sent")
+  STUB_CURL_FAIL=1 run -5 send
   [[ "$output" == *"POST FAILED"* ]]
   INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 send
   [[ "$output" == "SKIPPED already-notified credits=1" ]]
@@ -2220,7 +2221,7 @@ thread() { # <contacts-json-array> [extra conversation fields]
   credits "$TEST_TMPDIR/c.json" Jane "w1:Mastering:Nowhere Fast:Somebody"
   STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]')" \
   STUB_REPLY_RESPONSE='{"type":"conversation","id":"777","conversation_parts":{"conversation_parts":[{"id":"88001","part_type":"note","author":{"type":"admin","id":"5763097"}}]}}' \
-    run -4 "$LOCKED" send --campaign withdrawal-confirm --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+    run -5 "$LOCKED" send --campaign withdrawal-confirm --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
   [[ "$output" == *"POST NOT VERIFIED"* ]]
   [ "$(sql "SELECT status FROM verify_messages")" = "attempted" ]
 }
@@ -2242,7 +2243,7 @@ thread() { # <contacts-json-array> [extra conversation fields]
   for r in "$(resp "<p>Hi Jane, something else.</p>" 5763097)" "$(resp "$stored" 111)"; do
     rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
     STUB_CONVERSATION="$(thread '[{"type":"contact","id":"6650aa01"}]')" STUB_REPLY_RESPONSE="$r" \
-      run -4 "$LOCKED" send --campaign withdrawal-confirm --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+      run -5 "$LOCKED" send --campaign withdrawal-confirm --conversation 777 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
     [[ "$output" == *"POST NOT VERIFIED"* ]]
     [ "$(sql "SELECT status FROM verify_messages")" = "attempted" ]
   done
@@ -4203,7 +4204,7 @@ vl.finalize(db, message_row=c['message_row'], status='sent', message_id='9001')"
   # 7. Intercom answering an in-app send with an EMAIL message is NOT VERIFIED (left claimed, never re-sent)
   rm -f "$INTERCOM_VERIFY_TEST_LEDGER" "$CURL_STUB_LOG"
   STUB_MESSAGE_RESPONSE='{"type":"admin_message","id":"5001","message_type":"email","conversation_id":null}' \
-    STUB_CONTACT_GET="$seen" run -4 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --inapp-fallback
+    STUB_CONTACT_GET="$seen" run -5 "$UVN" send --campaign uvn-status --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --inapp-fallback
   [[ "$output" == *'POST NOT VERIFIED: expected an admin_message of type "inapp"'* ]]
   [ "$(sql "SELECT status FROM verify_messages")" = "attempted" ]
 }

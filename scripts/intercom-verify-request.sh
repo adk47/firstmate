@@ -1831,6 +1831,11 @@ fi
 # verify_messages as status 'deferred': nothing is claimed, refused or closed, so the note is offered again
 # once the window passes. Unreadable, or nothing to check
 # (no user id and no valid email) -> nothing sent (exit 4), never "clear".
+#
+# EXIT CODES (r8 771 (2)): 0 = sent/verified, 3 = deferred by a gate, 4 = NOTHING WAS SENT (any pre-send check failed,
+# or Intercom rejected the post before delivering), 5 = SENT AND ATTEMPTED BUT UNKNOWN (the request was claimed and
+# posted, and either the transport failed or the answer could not be verified - the row is left CLAIMED and is never
+# re-sent automatically). Callers that decide what to retry must key on 5, never on prose.
 if [ "$LIVE" = "1" ] && [ -n "$REPLY_DUE" ]; then
   # [key=reply-due]: the core-notice cooldown governs our UNSOLICITED notes, never answering the user (comm_state
   # verifies the trigger before anything is claimed or sent)
@@ -3599,10 +3604,15 @@ RESPONSE="$(printf '%s' "$PAYLOAD" | api POST "$POST_PATH")"
 rc=$?
 set -e
 if [ "$rc" -ne 0 ]; then
+  # r8 (firstmate 771) (2): a SEND that may have landed must not share an exit code with a PRE-SEND check failure.
+  # rc 4 has always meant "nothing was sent" (every check above it fails before claiming); a POST that failed or that we
+  # cannot verify is a DIFFERENT fact - the body may already be in the customer's inbox - so it exits 5. A caller that
+  # merely tests "non-zero" still stops; a caller that decides what to retry can now tell the two apart without reading
+  # prose.
   ledger finalize --message-row "$ROW_ID" --status attempted --reason "curl rc=$rc; outcome unknown" --api-log "$LOG_FILE" >/dev/null || true
   printf 'POST FAILED (curl rc=%s); logged at %s and left CLAIMED (outcome unknown, so it is never re-sent automatically). Response:\n%s\n' \
     "$rc" "$LOG_FILE" "$RESPONSE" >&2
-  exit 4
+  exit 5
 fi
 R_TYPE="$(printf '%s' "$RESPONSE" | "$JQ_BIN" -r '.type // empty' 2>/dev/null || true)"
 if [ -n "$THREAD" ]; then
@@ -3633,14 +3643,14 @@ if [ -n "$THREAD" ]; then
     ledger finalize --message-row "$ROW_ID" --status attempted --reason "unverified reply type=${R_TYPE:-none} part=${R_PART:-none}" --api-log "$LOG_FILE" >/dev/null || true
     printf 'POST NOT VERIFIED: expected a Caroline comment in conversation %s, Intercom answered type "%s" last part "%s". Logged at %s; left CLAIMED. Response:\n%s\n' \
       "$THREAD" "${R_TYPE:-<none>}" "${R_PART:-<none>}" "$LOG_FILE" "$RESPONSE" >&2
-    exit 4
+    exit 5     # rc 5: attempted, outcome unknown (rc 4 = nothing was sent)
   fi
 elif [ "$R_TYPE" != "admin_message" ] || [ "$R_MT" != "$(if [ "$MESSAGE_TYPE" = "inapp" ]; then echo inapp; else echo "$EXPECT_TYPE"; fi)" ] \
      || ! printf '%s' "$R_ID" | grep -qE '^[0-9]+$'; then
   ledger finalize --message-row "$ROW_ID" --status attempted --reason "unverified response type=${R_TYPE:-none} message_type=${R_MT:-none}" --api-log "$LOG_FILE" >/dev/null || true
   printf 'POST NOT VERIFIED: expected an admin_message of type "%s", Intercom answered type "%s" message_type "%s". Logged at %s; left CLAIMED. Response:\n%s\n' \
     "$(if [ "$MESSAGE_TYPE" = "inapp" ]; then echo inapp; else echo "$EXPECT_TYPE"; fi)" "${R_TYPE:-<none>}" "${R_MT:-<none>}" "$LOG_FILE" "$RESPONSE" >&2
-  exit 4
+  exit 5     # rc 5: attempted, outcome unknown (rc 4 = nothing was sent)
 fi
 ledger finalize --message-row "$ROW_ID" --status sent --message-id "$R_ID" --conversation-id "$R_CONV" \
   --body-sha256 "$BODY_SHA" --api-log "$LOG_FILE" ${LEGACY_MATCH:+--reason "in-thread-legacy-id $LEGACY_MATCH"} >/dev/null

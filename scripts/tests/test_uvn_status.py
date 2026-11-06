@@ -247,7 +247,7 @@ class UvnStatusTests(unittest.TestCase):
         rep = uvn_status.run(list_path=str(self.list), segment=kw.pop("segment", "paid"), mode=kw.pop("mode", "apply"),
                              max_users=kw.pop("max_users", 10), ledger_path=self.ledger, proof_path=str(self.proof),
                              query=kw.pop("query", self.q), runner=gate, wrapper=kw.pop("wrapper", self.gate_file()),
-                             now=NOW, pace_seconds=0, **kw)
+                             now=kw.pop("now", NOW), pace_seconds=0, **kw)
         return rep, gate
 
     def gate_file(self, uvn: int = 1) -> str:
@@ -320,15 +320,22 @@ class UvnStatusTests(unittest.TestCase):
             db.close()
 
     def test_a_canary_of_3_stops_after_3_posts_whose_outcome_is_unknown(self):
+        """The canary is the systemic bar: max(3, 2% of the population walked). r5 (firstmate 770) (3) fixed the
+        denominator - this walk sends ONE user per send_all() call, so `walked` was 1 and the stop was computed against
+        one; the walk then carried on past it (the probe measured 8 of 8 after SYSTEMIC at 3). The stop is the round's,
+        so the FOURTH user is never walked. `max_users` is deliberately above the bar: what stops the walk here is the
+        canary, not the run-size cap."""
         self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 11)]
         self.write_list()
         script = {str(u): "unknown" for u in range(1, 11)}
         script["1"] = "lookup"
         gate = ScriptedGate(self.ledger, script)
-        rep, _ = self.run_(gate=gate, max_users=3, query=replica(range(1, 11)))
-        self.assertEqual([p["user"]["id"] for _, p in gate.calls], ["1", "2", "3", "4"])
-        self.assertEqual((rep.sent_notes, rep.outcome_unknown, rep.failed_users, rep.users), (0, 3, 4, 0))
-        self.assertIn("3 post(s) not verified (outcome unknown", uvn_status.render(rep, "apply", "paid"))
+        rep, _ = self.run_(gate=gate, max_users=10, query=replica(range(1, 11)))
+        self.assertEqual([p["user"]["id"] for _, p in gate.calls], ["1", "2", "3"],
+                         "the canary stopped the family at three: the fourth user was NOT walked")
+        self.assertEqual((rep.sent_notes, rep.outcome_unknown, rep.failed_users, rep.users), (0, 2, 3, 0))
+        self.assertEqual(rep.stopped_on_failures, 3)
+        self.assertIn("2 post(s) not verified (outcome unknown", uvn_status.render(rep, "apply", "paid"))
 
     def test_a_status_note_request_resolved_before_its_send_is_reported_not_pending(self):
         self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in (1, 2)]
@@ -840,7 +847,11 @@ class UvnStatusTests(unittest.TestCase):
                     self.calls.append((argv, payload))
                 uid = int(payload["user"]["id"])
                 if uid in (1, 2, 3):                                  # the gate defers the first three
-                    return subprocess.CompletedProcess(argv, 1, "DEFERRED messaged_7d", "")
+                    # rc=3, the gate's deferral code (intercom-verify-request.sh prints 'DEFERRED ...' and exits 3).
+                    # The stub said rc=1, which the runner has to read as a FAILURE (rc 1 with no REFUSED line); under
+                    # r5's systemic-failure rule (firstmate 764) that mislabel stopped the walk at the third "failure".
+                    # The stub now speaks the gate's contract.
+                    return subprocess.CompletedProcess(argv, 3, "DEFERRED messaged_7d", "")
                 return subprocess.CompletedProcess(argv, 0, "RECIPIENT OK uvn-status initial email credits=1", "")
         g = Checks()
         rep, _ = self.run_(mode="dry-run", gate=g, query=replica(range(1, 16)), check_recipients=True, max_users=4,
@@ -2019,6 +2030,161 @@ class DryRunEqualsApplyTest(UvnStatusTests):
         got = self.run_both([{"user_id": 7, "request_id": None, "kind": "pending_doc", "source": "intercom",
                               "ref": "x", "proof_at": "2026-10-20T00:00:00Z"}])
         self.assertEqual(got, {"dry-run": [], "apply": []})
+
+
+class FailedReadHoldTest(UvnStatusTests):
+    """Fable 2026-11-05 00:1xZ (firstmate 769), the two lines that amended #1780: (1) the failed-read hold is
+    APPLY ONLY, so a dry run never writes it; (2) it expires at the NEXT TICK with reason "read failed: ...", and
+    never becomes the 7-day refusal hold."""
+
+    def test_a_user_under_an_open_read_failure_hold_is_not_walked_until_it_expires(self):
+        """r8 (firstmate 771) (3): writing the hold was never the fix - HONOURING it is. A user whose read failed on the
+        previous tick is skipped with a named deferral, and is walked again once the hold expires (READ_RETRY_H)."""
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in (1, 4)]
+        self.write_list()
+        q = replica([1, 4], rows={"r1": {"created": "2026-10-15 07:21:38.896000 UTC"},
+                                  "r4": {"created": "2026-10-15 07:21:38.896000 UTC"}})
+        db = verify_ledger.connect(self.ledger)
+        try:
+            verify_ledger.record_read_failure(db, campaign="uvn-status", user_key="u1@x.com",
+                                              reason="read failed: trino rc=1", user_id="1", now=NOW)
+        finally:
+            db.close()
+        rep, gate = self.run_(mode="apply", gate=FakeGate(), query=q)
+        self.assertEqual([p["user"]["id"] for _, p in gate.calls], ["4"], "user 1 is held: not walked, not sent")
+        self.assertTrue(any(o["user"] == "1" and "read_failed_hold" in str(o["reason"]) for o in rep.outcomes))
+        self.assertIn("retry after", uvn_status.render(rep, "apply", "paid"))
+        # the hold expires inside the cadence: the next tick after it walks the user again
+        later = NOW + timedelta(hours=verify_ledger.READ_RETRY_H + 1)
+        rep2, gate2 = self.run_(mode="apply", gate=FakeGate(), query=q, now=later)
+        self.assertEqual([p["user"]["id"] for _, p in gate2.calls], ["1", "4"])
+
+    def test_a_successful_send_resets_the_consecutive_read_failures(self):
+        """r8 (firstmate 771) (4): without a reset the counter only grew, so "three consecutive failed reads" was
+        reachable with failures days apart. A read that works starts the count over."""
+        self.users = [{"user_id": 1, "paid": True, "skip": None, "request_ids": ["r1"]}]
+        self.write_list()
+        q = replica([1], rows={"r1": {"created": "2026-10-15 07:21:38.896000 UTC"}})
+        db = verify_ledger.connect(self.ledger)
+        try:
+            verify_ledger.record_read_failure(db, campaign="uvn-status", user_key="u1@x.com",
+                                              reason="read failed: two ticks ago", user_id="1", now=NOW - timedelta(hours=5))
+            verify_ledger.record_read_failure(db, campaign="uvn-status", user_key="u1@x.com",
+                                              reason="read failed: last tick", user_id="1", now=NOW - timedelta(hours=3))
+            n = db.execute("SELECT failures FROM verify_read_failures WHERE campaign='uvn-status' "
+                           "AND user_key='u1@x.com'").fetchone()
+        finally:
+            db.close()
+        self.assertEqual(n[0] if n else None, 2, "two consecutive failures before the successful read")
+        rep, gate = self.run_(mode="apply", gate=FakeGate(), query=q)
+        self.assertEqual(len(gate.calls), 1, "the expired hold did not block the send")
+        self.assertEqual(rep.sent_notes, 1)
+        db = verify_ledger.connect(self.ledger)
+        try:
+            self.assertEqual(verify_ledger.read_failure(db, campaign="uvn-status", user_key="u1@x.com", now=NOW), {},
+                             "the success cleared the count: the next failure starts at one")
+        finally:
+            db.close()
+
+    def test_a_dry_run_never_clears_the_read_failure_streak(self):
+        """QA #1780 (Important, 03:07Z): a successful dry-run/recipient check used to increment `reached` and call
+        clear_read_hold, which opens a WRITABLE ledger and DELETES failure history - a preview after two failed ticks
+        silently reset the streak. A dry run is a read: it must leave the row exactly as it found it."""
+        self.users = [{"user_id": 1, "paid": True, "skip": None, "request_ids": ["r1"]}]
+        self.write_list()
+        q = replica([1], rows={"r1": {"created": "2026-10-15 07:21:38.896000 UTC"}})
+        db = verify_ledger.connect(self.ledger)
+        try:
+            for hours in (5, 3):
+                verify_ledger.record_read_failure(db, campaign="uvn-status", user_key="u1@x.com",
+                                                  reason="read failed: earlier tick", user_id="1",
+                                                  now=NOW - timedelta(hours=hours))
+        finally:
+            db.close()
+        rep, gate = self.run_(mode="dry-run", gate=FakeGate(), query=q)
+        self.assertTrue(gate.calls, "the dry run did check the user")
+        db = verify_ledger.connect(self.ledger)
+        try:
+            n = db.execute("SELECT failures FROM verify_read_failures WHERE campaign='uvn-status' "
+                           "AND user_key='u1@x.com'").fetchone()
+        finally:
+            db.close()
+        self.assertEqual(n[0] if n else None, 2, "a dry run never deletes failure history")
+
+    def test_a_successful_read_that_does_not_send_still_resets_the_streak(self):
+        """QA #1780 (Important, 03:07Z): the streak reset only when `reached` incremented, i.e. only on a SEND. A user
+        who read fine and was then REFUSED has not failed to read, so leaving the prior failures in the ledger makes
+        the next failed read page a human for NONCONSECUTIVE failures."""
+        self.users = [{"user_id": 1, "paid": True, "skip": None, "request_ids": ["r1"]}]
+        self.write_list()
+        q = replica([1], rows={"r1": {"created": "2026-10-15 07:21:38.896000 UTC"}})
+        db = verify_ledger.connect(self.ledger)
+        try:
+            for hours in (5, 3):
+                verify_ledger.record_read_failure(db, campaign="uvn-status", user_key="u1@x.com",
+                                                  reason="read failed: earlier tick", user_id="1",
+                                                  now=NOW - timedelta(hours=hours))
+        finally:
+            db.close()
+        # the read succeeds and the gate REFUSES: nothing is sent, but nothing was unreadable either. The gate's
+        # REFUSED line goes to STDERR (that is where the real gate writes it).
+        class RefusingGate(FakeGate):
+            def __call__(self, argv):
+                super().__call__(argv)
+                return subprocess.CompletedProcess(argv, 1, "",
+                                                   "REFUSED: the account email matches 0 Intercom users "
+                                                   "(need exactly 1); not sending.\n")
+        rep, gate = self.run_(mode="apply", gate=RefusingGate(), query=q)
+        self.assertEqual(rep.sent_notes, 0, "the gate refused: nothing was sent")
+        self.assertEqual(rep.failed_held, [], "a refusal is not a failed read")
+        db = verify_ledger.connect(self.ledger)
+        try:
+            self.assertEqual(verify_ledger.read_failure(db, campaign="uvn-status", user_key="u1@x.com", now=NOW), {},
+                             "the successful READ cleared the count: the next failure starts at one")
+        finally:
+            db.close()
+
+    def test_a_systemic_stop_stops_the_family_not_just_the_exit_code(self):
+        """r5 (firstmate 770) (3): the outer walk sends ONE user per send_all() call, so `walked` was len(payloads) = 1
+        and the stop was computed against a denominator of one; the probe then walked 8 of 8 after SYSTEMIC at 3. The
+        stop is the ROUND's, so the round must break - and the bar must be measured against the population walked."""
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 9)]
+        self.write_list()
+        q = replica(range(1, 9), rows={f"r{u}": {"created": "2026-10-15 07:21:38.896000 UTC"} for u in range(1, 9)})
+        rep, gate = self.run_(mode="apply", gate=FakeGate(rc=4, out=""), query=q, max_users=8)
+        self.assertEqual(len(gate.calls), 3,
+                         "max(3, 2% of 8) = 3: the stop lands on the third failure and the other five are NOT walked")
+        self.assertEqual(rep.stopped_on_failures, 3)
+        self.assertTrue(rep.failed)
+        self.assertIn("SYSTEMIC", rep.render("apply"))
+
+    def test_a_dry_run_never_writes_a_hold_and_an_apply_does(self):
+        for mode in ("dry-run", "apply"):
+            Path(self.ledger).unlink(missing_ok=True)
+            rep, gate = self.run_(mode=mode, gate=FakeGate(rc=1, out=""))
+            self.assertTrue(gate.calls, "the gate was called in both modes")
+            self.assertEqual(rep.failed_users, len(gate.calls), "every send-time read failed on this stub")
+            db = verify_ledger.connect(self.ledger)
+            try:
+                held = db.execute("SELECT campaign, user_key, failures, reason, next_retry_at "
+                                  "FROM verify_read_failures").fetchall()
+                refuses = db.execute("SELECT count(*) FROM verify_refusal_holds").fetchone()[0]
+            finally:
+                db.close()
+            if mode == "dry-run":
+                self.assertEqual(list(held), [], "a dry run is a READ: it never writes a hold row (Fable 769, line 1)")
+                continue
+            self.assertEqual(rep.flag_failures, [], "the record failed to write: " + str(rep.flag_failures))
+            self.assertTrue(held, "the apply records the failure so the next tick retries that account")
+            camp, key, failures, reason, nxt = held[0]
+            self.assertEqual(camp, "uvn-status", "the record names the campaign the read failed in")
+            self.assertTrue(str(reason).startswith("read failed:"), "the reason names the failure, not a refusal")
+            self.assertEqual(failures, 1, "one tick, one failure")
+            self.assertEqual(refuses, 0, "never the 7-day refusal hold: an unreadable read is not a refusal")
+            expected = (NOW + timedelta(hours=verify_ledger.READ_RETRY_H)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            self.assertEqual(str(nxt), expected,
+                             "the hold expires INSIDE the tick cadence (r5 770 (2)), never after days")
+            self.assertLess(verify_ledger.READ_RETRY_H * 3600, 7200, "shorter than the 2-hourly tick")
 
 
 class ReplyDueListTest(unittest.TestCase):

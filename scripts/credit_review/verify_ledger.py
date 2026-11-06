@@ -171,6 +171,14 @@ NOTICE_CAMPAIGNS = ("takeback-notice", "withdrawal-confirm", "status-doc-receive
 RECHECKABLE_REFUSALS = ("status-doc-received", "status-team-review", "email-changed", "email-changed-dup",
                         CREDIT_HOLD_CAMPAIGN)
 RECHECK_DAYS = 7
+# r5 770 (2): the retry horizon must be SHORTER than the tick cadence, not equal to it. At exactly 2 h against a
+# 2-hourly tick the hold written mid-tick (say 04:20) was still live when the 06:03 tick ran (06:03 < 06:20:00), so that
+# tick counted the SAME failure again and the count only advanced on every OTHER tick - the 3-tick page landed on tick 5.
+# 1 h is inside the cadence with room for a tick that starts later than its boundary: the very next tick always sees an
+# expired hold and counts a new, consecutive failure.
+READ_RETRY_H = 1
+# ... and three consecutive failed reads across ticks is a pattern, not a fluke: it pages a human.
+READ_FAILURES_TO_PAGE = 3
 MAX_REFUSALS = 3
 # The campaigns that ASK the user for something. Only these count as "already asked";
 # notices and confirmations (removal-notice, takeback-notice, withdrawal-confirm) never close
@@ -264,6 +272,23 @@ CREATE TABLE IF NOT EXISTS verify_refusal_holds (
   next_recheck_at TEXT NOT NULL,     -- the user is skipped until this time
   flagged_at TEXT,                   -- posted to #cs_priority after MAX_REFUSALS: blocked from then on
   updated_at TEXT NOT NULL,
+  PRIMARY KEY (campaign, user_key)
+);
+-- Fable 2026-11-05 00:1xZ (firstmate 769), amending #1780: a user whose own send-time READ failed is held
+-- until the NEXT TICK (2 h), never for the 7-day refusal window - an unreadable read is not a refusal, and
+-- suppressing the account for a week because one query failed is exactly the starvation #1780 exists to end.
+-- Separate table on purpose: the refusal counters must never be polluted by read failures, and a read
+-- failure must be visible (and pageable) for campaigns that do not honour refusal holds at all.
+CREATE TABLE IF NOT EXISTS verify_read_failures (
+  campaign TEXT NOT NULL,
+  user_key TEXT NOT NULL,            -- lower-cased user key (user:<id> for uvn-status)
+  user_id TEXT,
+  failures INTEGER NOT NULL DEFAULT 1,  -- CONSECUTIVE failures; 3 across ticks pages (firstmate 769)
+  reason TEXT,
+  next_retry_at TEXT NOT NULL,       -- now + READ_RETRY_H: the next tick retries, nothing longer
+  first_failed_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  paged_at TEXT,                     -- set once when it was reported for a human
   PRIMARY KEY (campaign, user_key)
 );
 CREATE TABLE IF NOT EXISTS verify_channel_clears (
@@ -1271,6 +1296,66 @@ def refuse(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list
     if c["result"] == "claimed":
         finalize(db, message_row=c["message_row"], status="refused", reason=reason, now=now)
     return c
+
+
+def record_read_failure(db: sqlite3.Connection, *, campaign: str, user_key: str, reason: str,
+                        user_id: str = "", now: datetime | None = None) -> dict[str, Any]:
+    """Fable 769: ONE user's send-time read failed. Hold that user only until the NEXT TICK
+    (``READ_RETRY_H``, not RECHECK_DAYS), count it as a consecutive failure, and report whether this is the
+    third in a row (which pages a human).
+
+    Deliberately NOT ``record_refusal``/``recheck_refusal``: an unreadable read is not the user refusing
+    anything, and a 7-day refusal hold would starve the account for a week over one bad query.
+    """
+    now = now or utcnow()
+    ts = stamp(now)
+    retry_at = stamp((now + timedelta(hours=READ_RETRY_H)))
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        old = db.execute("SELECT failures, next_retry_at, first_failed_at FROM verify_read_failures "
+                         "WHERE campaign=? AND user_key=?", (campaign, user_key)).fetchone()
+        if old is None:
+            failures, first, nxt = 1, ts, retry_at
+        elif str(old["next_retry_at"]) > ts:
+            # Still inside the SAME hold: the same tick failing again is one failure, not two - and it must
+            # not push the retry horizon out, or two failures a minute apart would look like one forever.
+            failures, first, nxt = int(old["failures"]), str(old["first_failed_at"]), str(old["next_retry_at"])
+        else:
+            nxt = retry_at
+            # A new tick failed the same read again: consecutive, so the count carries on.
+            failures, first = int(old["failures"]) + 1, str(old["first_failed_at"])
+        db.execute(
+            "INSERT INTO verify_read_failures (campaign, user_key, user_id, failures, reason, next_retry_at, "
+            "first_failed_at, updated_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(campaign, user_key) DO UPDATE SET "
+            "failures=excluded.failures, reason=excluded.reason, next_retry_at=excluded.next_retry_at, "
+            "first_failed_at=excluded.first_failed_at, updated_at=excluded.updated_at, "
+            "user_id=COALESCE(excluded.user_id, verify_read_failures.user_id)",
+            (campaign, user_key, user_id or None, failures, reason[:500], nxt, first, ts))
+        db.execute("COMMIT")
+    except Exception:
+        db.execute("ROLLBACK")
+        raise
+    return {"failures": failures, "next_retry_at": nxt, "first_failed_at": first,
+            "page": failures >= READ_FAILURES_TO_PAGE}
+
+
+def read_failure(db: sqlite3.Connection, *, campaign: str, user_key: str,
+                 now: datetime | None = None) -> dict[str, Any]:
+    """This user's open read-failure hold: {} when there is none or its retry time has passed."""
+    row = db.execute("SELECT failures, reason, next_retry_at, updated_at FROM verify_read_failures "
+                     "WHERE campaign=? AND user_key=?", (campaign, user_key)).fetchone()
+    if row is None or str(row["next_retry_at"]) <= stamp(now):
+        return {}
+    return {"failures": int(row["failures"]), "reason": str(row["reason"] or ""),
+            "next_retry_at": str(row["next_retry_at"])}
+
+
+def mark_read_failure_paged(db: sqlite3.Connection, *, campaign: str, user_key: str,
+                            now: datetime | None = None) -> bool:
+    """Set paged_at once, so a standing failure pages on the tick it crosses the line and not every tick."""
+    cur = db.execute("UPDATE verify_read_failures SET paged_at=?, updated_at=? WHERE campaign=? AND user_key=? "
+                     "AND paged_at IS NULL", (stamp(now), stamp(now), campaign, user_key))
+    return cur.rowcount > 0
 
 
 def recheck_refusal(db: sqlite3.Connection, *, campaign: str, user_key: str, reason: str,

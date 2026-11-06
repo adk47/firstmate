@@ -1329,6 +1329,16 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                         report.proof_on_file += 1
                         report.note("documents_on_file")
                         continue
+                    # r8 (firstmate 771) (3): a user whose own read failed on a previous tick is HELD - the walk does not
+                    # walk into the same unreadable read again until the hold expires (READ_RETRY_H inside the cadence).
+                    hold_ukey = str(p["user"].get("email") or "").strip().lower()
+                    hold_until = read_hold_until(path, campaign, hold_ukey, now=now) if mode == "apply" else ""
+                    if hold_until:
+                        report.deferred_users += 1
+                        report.outcomes.append({"user": str(uid), "result": "deferred",
+                                                "reason": f"read_failed_hold until {hold_until}"})
+                        report.deferrals.append(f"user {uid}: read failed on an earlier tick; retry after {hold_until}")
+                        continue
                     acct = {k: p["user"].get(k, "") for k in ("email", "professional_id", "auth_id", "first_name")}
                     # rebuilt from a fresh replica read: the answer's gate args (reply_due) carry over (QA #1509)
                     p = with_reply_due(with_filing(note_payload(acct, uid, live, as_count, total, created_of(fresh, live)),
@@ -1337,17 +1347,31 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                         time.sleep(pace_seconds)
                 before = report.sent_notes if mode == "apply" else report.validated + report.recipient_ok
                 l0 = ledger_left() if mode == "apply" else 0
+                # QA #1780 (Important): the read-failure streak resets on a VERIFIED SUCCESSFUL READ, not only on a
+                # send. A user who read fine and was then refused or deferred has not failed to read, so leaving the
+                # prior failures in the ledger makes the next failed read page a human for NONCONSECUTIVE failures.
+                # The read failed for THIS user iff send_all recorded a per-user read hold for them.
+                fh0 = len(report.failed_held)
                 verify_notify.send_all([p], report, mode=mode, wrapper=wrapper, runner=runner,
                                        extra=["--campaign", campaign] + (["--copy", wording] if wording else [])
                                        + (["--gmail-fallback-o"] if gmail_fallback_o else [])
                                        + (["--no-correction"] if no_correction else [])
                                        + (["--channel", "inapp"] if inapp_overflow and email_left() <= 0 else []),
                                        pace_seconds=0, preview_dir=preview_dir,
-                                       check_recipients=check_recipients and mode != "apply")
+                                       check_recipients=check_recipients and mode != "apply",
+                                       # r5 (firstmate 770) (3): the POPULATION this walk covers, so a systemic stop is
+                                       # measured against the family it stopped, not against one payload.
+                                       walked=len(cands))
                 calls += 1
                 reached = (report.sent_notes if mode == "apply" else report.validated + report.recipient_ok) - before
                 report.users += reached
                 counted += reached
+                read_failed = any(str(e.get("user")) == str(uid) for e in report.failed_held[fh0:])
+                if mode == "apply" and not read_failed:
+                    # r8 (firstmate 771) (4): the read worked this time - the consecutive counter starts over.
+                    # QA #1780 (Important): APPLY ONLY. A dry run is a read, so it must never open a writable ledger
+                    # to DELETE failure history - a preview after two failed ticks used to reset the streak silently.
+                    clear_read_hold(path, campaign, hold_ukey)
                 if reached and dropped:
                     report.rows_held += dropped
                     report.note("rows_left_out")
@@ -1360,7 +1384,12 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                         record_segment(path, campaign, segment, day, str(uid), reached + unknown)
                 if report.halted:
                     break
-            if report.halted:
+                if report.stopped_on_failures:
+                    # r5 (firstmate 770) (3): the systemic stop is the ROUND's, and this loop is the round. Without this
+                    # the probe walked 8 of 8 after stopping at 3: send_all() returned, the walk carried on, and the stop
+                    # only coloured the exit code.
+                    break
+            if report.halted or report.stopped_on_failures:
                 break
     finally:
         if lock_fh is not None:
@@ -1390,9 +1419,33 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
     if mode == "apply" and isinstance(_cap_end, int) and report.page.get("end", 0) > _cap_end:
         report.page["end"] = _cap_end
         report.not_walked = n_listed - (report.page["end"] - report.page["start"])
+    # r5 / firstmate 764, amended by Fable 2026-11-05 00:1xZ (firstmate 769): a user whose own send-time read
+    # failed is recorded here, once, at the end of the walk - a hold that expires at the NEXT TICK (2 h), never the
+    # 7-day refusal window, because an unreadable read is not the user refusing anything and a week-long suppression
+    # over one bad query is the starvation #1780 exists to end. Three consecutive failed reads page a human.
+    # APPLY ONLY (Fable 769): a dry run is a read, so it never writes a hold row. Empty unless something failed, so
+    # it costs nothing on a clean run. Best effort: hold_failed_users reports a record it could not write
+    # (flag_failures) and never loses the report.
+    # Fable 2026-11-05 00:1xZ (firstmate 769): recording a failure is a WRITE, so a dry run never does it.
+    if mode == "apply" and report.failed_held:
+        # A FRESH connection: the walk's ledger handle is closed by the time the walk ends, and a record that
+        # silently fails on a closed database is a hold that exists only in the report (found by the 769 test).
+        # Fable r5 2026-11-06 00:53Z: ONE implementation (verify_notify.finish_failed_reads) for every runner that
+        # calls send_all - this lane, verify-live and retro-past - so the three cannot drift apart again.
+        hold_db = verify_ledger.connect(path)
+        try:
+            verify_notify.finish_failed_reads(hold_db, report, campaign, mode=mode, now=now)
+        finally:
+            hold_db.close()
     if mode == "apply" and campaign in verify_ledger.RECHECKABLE_REFUSALS:
         verify_notify.flag_refusals(report, ledger_path=path, campaigns=[campaign], post=post, now=now)
     return report
+
+
+# r8 (firstmate 771) (3)/(4): the hold's read and clear sides live in verify_notify beside the writer, so every lane
+# that calls send_all shares ONE implementation (Fable r5 2026-11-06 00:53Z). Re-exported here for this module's callers.
+read_hold_until = verify_notify.read_hold_until
+clear_read_hold = verify_notify.clear_read_hold
 
 
 def _segments_path(ledger: str) -> str:
@@ -1500,13 +1553,28 @@ def render(report: UvnReport, mode: str, segment: str) -> str:
         parts.append(f"{report.refused_recheck} refused, re-check after {report.recheck_after}")
     if report.flagged:
         parts.append(f"{report.flagged} refused {verify_ledger.MAX_REFUSALS} times, flagged to #cs_priority for a human")
+    if report.post_failed:
+        # r5 (firstmate 770) (1): a failed POST is an UNKNOWN outcome - the message may already be delivered, so it is
+        # left claimed and never re-sent automatically. It is never rendered as a held read.
+        parts.append(f"{report.post_failed} send(s) FAILED at the POST (unknown outcome: may already be delivered; left "
+                     "claimed and never re-sent automatically): "
+                     + "; ".join(f"user {h['user']}: {h['reason'][:120]}" for h in report.post_failures[:3]))
     if report.flag_failures:
         parts.append("FLAG FAILED: " + "; ".join(report.flag_failures[:3]))
     if report.outcome_unknown:
         parts.append(f"{report.outcome_unknown} post(s) not verified (outcome unknown: may have been delivered, "
                      "left claimed and never re-sent automatically; counted toward the run size and daily cap)")
-    if report.failed_users:
-        parts.append(f"FAILED {report.failed_users}: " + "; ".join(report.failures[:3]))
+    if report.failed_held:
+        # r5 / firstmate 764: the word a replay greps stays FAILED, but the OUTCOME is a hold - the user was not messaged,
+        # was not closed, and the rest of the round went on. A systemic stop says so in the same sentence.
+        #
+        # QA #1780 (Important, 02:12Z): this sentence is keyed off `failed_held`, NOT `failed_users`. `failed_users`
+        # also counts an unknown POST, whose note may ALREADY be delivered - rendering that as "held, not messaged"
+        # told the operator the opposite of the actual delivery state. The POST case has its own sentence above.
+        parts.append(f"FAILED {len(report.failed_held)} (held, not messaged, not retried this run"
+                     + (f"; SYSTEMIC at {report.stopped_on_failures}: the run stopped"
+                        if report.stopped_on_failures else "")
+                     + "): " + "; ".join(report.failures[:3]))
     for r in report.reply_due_rows:                                   # every row (QA #1517): the reviewer reads them all
         pn, a = r.get("prior_note"), r.get("assignee")
         parts.append(f"reply_due user {r['user']} part {r['part']} conversation {r['conversation']}: prior_note "

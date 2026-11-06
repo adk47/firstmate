@@ -939,8 +939,220 @@ class RunTests(unittest.TestCase):
                      "c@example.com": (4, "", "POST FAILED (curl rc=28)")})
         rep = verify_notify.run(admin, ledger_path=self.path, mode="apply", runner=fake, wrapper="/w")
         self.assertEqual((rep.deferred_users, rep.refused_users, rep.failed_users), (1, 1, 1))
-        self.assertTrue(rep.failed)
+        # r5 / firstmate 764 CHANGED this on purpose: one failed READ is HELD, not a failed run. The refusal is still a
+        # refusal and still speaks. r5 770 (1) then split the two kinds: the POST failure is NOT a held read.
+        # QA #1780 (Critical, 03:07Z) CHANGED the exit code back: an uncertain POST is the ONE per-user outcome that is
+        # ALWAYS fatal to the run - the message may already be delivered, so a run that exits 0 over it reports success
+        # for a delivery it cannot prove.
+        self.assertTrue(rep.failed, "an uncertain POST is fatal to the run's exit code, at any count")
+        self.assertEqual(rep.failed_held, [], "a POST FAILED is not a failed READ: nothing was unreadable")
+        self.assertEqual([h["user"] for h in rep.post_failures], ["7"], "it is recorded as an unknown-outcome send")
+        self.assertIn("unknown outcome", rep.render("apply"))
         self.assertIn("matches 0 Intercom users", rep.render("apply"))
+        self.assertIn("POST FAILED (curl rc=28)", rep.render("apply"))
+
+    def test_a_rejected_post_is_a_deferral_never_a_failed_read(self):
+        """QA #1780 (Important, 03:07Z): Intercom's error.list answers rc=4 with "POST REJECTED by Intercom (nothing
+        delivered; retried on a later run)" AFTER the reads succeeded. Counting three of those as three consecutive
+        unreadable reads paged a human for the wrong condition and held a user whose account was perfectly readable."""
+        decisions_db(self.path, [dec("r1")])
+        admin = FakeAdmin([req("r1")])
+        fake = Fake({"jane@example.com": (4, "", "POST REJECTED by Intercom (nothing delivered; retried on a later "
+                                                 "run). Logged at /tmp/x. Response:\n{}")})
+        rep = verify_notify.run(admin, ledger_path=self.path, mode="apply", runner=fake, wrapper="/w")
+        self.assertEqual((rep.post_rejected, rep.failed_users, rep.deferred_users), (1, 0, 1))
+        self.assertEqual(rep.failed_held, [], "a rejected POST is not a failed READ: nothing was unreadable")
+        self.assertEqual(rep.post_failures, [], "and it is not an unknown-outcome send either: nothing was delivered")
+        self.assertFalse(rep.failed, "nothing was delivered and the gate retries it: a deferral, not a failed run")
+        self.assertIn("POST REJECTED", rep.render("apply"))
+        self.assertEqual(verify_notify._post_rejected_line("POST REJECTED by Intercom"), "POST REJECTED by Intercom")
+        self.assertEqual(verify_notify._post_rejected_line("POST FAILED (curl rc=28)"), "")
+
+    def test_one_users_failed_read_holds_that_user_and_the_round_goes_on(self):
+        """r5 / firstmate 764 - the 22Z round: ONE user's core read failed (a Trino query, recorded as a URL-encoded SQL
+        fragment) and the r1 family - plus every claim family behind it - stopped for the night. The user is the unit of
+        failure: they are HELD, the rest of the round goes on, and the run does not fail its exit code."""
+        decisions_db(self.path, [dec("r1"), dec("r2", pid=PID2), dec("r3", pid=PID2, track="t3")])
+        admin = FakeAdmin([req("r1"), req("r2", pid=PID2, email="b@example.com"),
+                           req("r3", pid=PID2, email="c@example.com", track="t3")])
+        # the exact shape the tick recorded: trino rc=1, then the query URL-encoded instead of the server's answer
+        sql = ("trino rc=1: AS+varchar%29+FROM+postgresql_core.public.claiming+WHERE+userid+IN+%28310729%29"
+               "+AND+updatedat+>+CAST")
+        fake = Fake({"jane@example.com": (4, "", "CORE NOTICE CHECK FAILED (rc=2); nothing was sent or claimed: "
+                                               + json.dumps({'hold': None, 'reasons': [f"trino rc=1: {sql}"]})),
+                     "b@example.com": (0, "VALID email credits=1", "")})
+        rep = verify_notify.run(admin, ledger_path=self.path, mode="dry-run", runner=fake, wrapper="/w")
+        self.assertEqual(rep.failed_users, 1)
+        self.assertEqual([h["user"] for h in rep.failed_held], [str(_uid_of("jane@example.com"))])
+        self.assertEqual(rep.stopped_on_failures, 0)
+        self.assertFalse(rep.failed, "one held user is not a failed run: the round continues")
+        self.assertEqual(rep.validated, 1, "the user after the failed one was still checked")
+        self.assertIn("held, not messaged", rep.render("dry-run"))
+        self.assertNotIn("%29", rep.render("dry-run"), "a URL-encoded query is never the error a reader sees")
+        self.assertIn("[query elided]", rep.render("dry-run"))
+
+    def test_a_post_failure_is_never_rendered_as_held_and_not_messaged(self):
+        """QA #1780 (Important, 02:12Z): `failed_users` counts BOTH a held read and an unknown POST, so the
+        "held, not messaged" sentence keyed off it told the operator the opposite of the actual delivery state for the
+        one outcome where the note may ALREADY be delivered. The two are rendered from their own counts."""
+        decisions_db(self.path, [dec("r1"), dec("r2", pid=PID2)])
+        admin = FakeAdmin([req("r1"), req("r2", pid=PID2, email="b@example.com")])
+        # rc=5 = ATTEMPTED, OUTCOME UNKNOWN (the gate posted, then the transport failed and the row was left CLAIMED)
+        fake = Fake({"jane@example.com": (5, "", "POST FAILED (curl rc=28); logged at /x and left CLAIMED"),
+                     "b@example.com": (0, "POSTED email message=1 credits=1", "")})
+        rep = verify_notify.run(admin, ledger_path=self.path, mode="apply", runner=fake, wrapper="/w")
+        self.assertEqual((rep.post_failed, len(rep.failed_held)), (1, 0))
+        out = rep.render("apply")
+        self.assertIn("FAILED", out, "the word a replay greps stays")
+        self.assertIn("UNKNOWN outcome", out)
+        self.assertNotIn("held, not messaged", out,
+                         "a POST failure may already be delivered: it is never rendered as a held read")
+
+    def test_a_held_read_and_an_unknown_post_are_rendered_as_two_different_outcomes(self):
+        """Both in one run: the held user is named as held, the POST user as unknown, and neither count absorbs the
+        other."""
+        decisions_db(self.path, [dec("r1"), dec("r2", pid=PID2), dec("r3", pid=PID2, track="t3")])
+        admin = FakeAdmin([req("r1"), req("r2", pid=PID2, email="b@example.com"),
+                           req("r3", pid=PID2, email="c@example.com", track="t3")])
+        fake = Fake({"jane@example.com": (4, "", "CORE NOTICE CHECK FAILED (rc=2); nothing was sent or claimed"),
+                     "b@example.com": (5, "", "POST FAILED (curl rc=28); logged at /x and left CLAIMED"),
+                     "c@example.com": (0, "POSTED email message=1 credits=1", "")})
+        rep = verify_notify.run(admin, ledger_path=self.path, mode="apply", runner=fake, wrapper="/w")
+        self.assertEqual((len(rep.failed_held), rep.post_failed), (1, 1))
+        out = rep.render("apply")
+        self.assertIn("1 send(s) held, not messaged, not retried this run", out)
+        self.assertIn("1 send(s) with an UNKNOWN outcome", out)
+
+    def test_the_batch_stops_only_when_the_failures_are_systemic(self):
+        """max(3, 5% of the users walked): below it every failed user is held and the round continues; at it the run stops
+        and says so - because at that point the failure is a statement about the environment."""
+        rows = [dec(f"r{i}") for i in range(1, 9)]
+        decisions_db(self.path, rows)
+        admin = FakeAdmin([req("r1")] + [req(f"r{i}", email=f"u{i}@example.com", track=f"t{i}")
+                                        for i in range(2, 9)])
+        fake = Fake({f"u{i}@example.com": (4, "", "CORE NOTICE CHECK FAILED (rc=2)") for i in (2, 3, 4)})
+        rep = verify_notify.run(admin, ledger_path=self.path, mode="dry-run", runner=fake, wrapper="/w",
+                                max_users=8)
+        self.assertEqual(rep.failed_users, 3)
+        self.assertEqual(rep.stopped_on_failures, 3)
+        self.assertTrue(rep.failed, "three failures is systemic: the run fails and the tick must stop")
+        self.assertIn("SYSTEMIC", rep.render("dry-run"))
+        # r5's bar, at the boundary: max(3, 2% of walked)
+        self.assertEqual(verify_notify.fail_stop_after(100), 3, "2% of 100 is 2, floored at 3")
+        self.assertEqual(verify_notify.fail_stop_after(200), 4, "2% of 200 is 4")
+        self.assertEqual(verify_notify.fail_stop_after(8), 3)
+        self.assertEqual(verify_notify.fail_stop_after(2), 3, "a tiny batch still needs 3")
+
+    def test_the_systemic_boundary_on_a_hundred_user_family_is_three_not_two(self):
+        """Fable r5's bar as a BOUNDARY (firstmate 765): on a 100-user family max(3, 2% of 100) = 3, so TWO failed
+        users are two per-user holds and the round runs to the end, and THREE are a systemic stop."""
+        decisions_db(self.path, [dec("r1"), dec("r2"), dec("r3")])
+        admin = FakeAdmin([req("r1", email="u1@example.com"), req("r2", email="u2@example.com", track="t2"),
+                           req("r3", email="u3@example.com", track="t3")])
+
+        def run_with(failing):
+            fake = Fake({f"u{i}@example.com": (4, "", "CORE NOTICE CHECK FAILED (rc=2)") for i in failing})
+            return verify_notify.run(admin, ledger_path=self.path, mode="dry-run", runner=fake, wrapper="/w",
+                                     max_users=100), fake
+
+        rep, fake = run_with((1, 2))
+        self.assertEqual((rep.failed_users, rep.stopped_on_failures), (2, 0), "two of 100 is below the bar")
+        self.assertFalse(rep.failed)
+        self.assertEqual(len(rep.failed_held), 2)
+        self.assertEqual(len(fake.payloads), 3, "the third user was still walked: two holds did not stop the round")
+
+        rep, fake = run_with((1, 2, 3))
+        self.assertEqual((rep.failed_users, rep.stopped_on_failures), (3, 3), "three of 100 is the bar")
+        self.assertTrue(rep.failed)
+        self.assertIn("SYSTEMIC", rep.render("dry-run"))
+
+    def test_a_failed_read_holds_the_user_until_the_next_tick_and_pages_on_the_third(self):
+        """Fable 769 + r5 770 (2): an unreadable read is NOT a refusal. The hold expires before the NEXT tick (never the
+        7-day refusal window, and never AT the cadence - see the boundary test below), the third consecutive failed read
+        pages a human, and a repeat inside the same hold is one failure."""
+        decisions_db(self.path, [dec("r1")])
+        admin = FakeAdmin([req("r1")])
+        fake = Fake({"jane@example.com": (4, "", "CORE NOTICE CHECK FAILED (rc=2)")})
+        rep = verify_notify.run(admin, ledger_path=self.path, mode="dry-run", runner=fake, wrapper="/w")
+        db = verify_ledger.connect(self.path)
+        uid = str(_uid_of("jane@example.com"))
+        t0 = datetime(2026, 11, 5, 0, 30, tzinfo=timezone.utc)
+        self.assertEqual(verify_notify.hold_failed_users(db, rep, "uvn-status-paid", now=t0), 1)
+        row = verify_ledger.read_failure(db, campaign="uvn-status-paid", user_key="jane@example.com", now=t0)
+        self.assertEqual(row["failures"], 1)
+        self.assertEqual(row["next_retry_at"], "2026-11-05T01:30:00Z",
+                         "READ_RETRY_H is 1 h: inside the 2-hourly cadence, so the NEXT tick always retries")
+        self.assertLess(verify_ledger.READ_RETRY_H * 3600, 7200,
+                        "a horizon equal to the cadence skips every other tick (r5 770 (2))")
+        self.assertTrue(row["reason"].startswith("read failed:"), "the reason names the failure, not a refusal")
+        self.assertEqual(verify_ledger.refusal_hold(db, "uvn-status-paid", "jane@example.com", None, uid), {},
+                         "no refusal hold: a failed read must never suppress an account for RECHECK_DAYS")
+        self.assertEqual(verify_ledger.refusal_hold(db, "status-doc-received", "jane@example.com", None, uid), {},
+                         "and not for a campaign that honours refusal holds either")
+        # The same tick failing again is ONE failure; the next tick failing again is the second.
+        verify_notify.hold_failed_users(db, rep, "uvn-status-paid", now=t0 + timedelta(minutes=5))
+        self.assertEqual(verify_ledger.read_failure(db, campaign="uvn-status-paid", user_key="jane@example.com",
+                                                    now=t0 + timedelta(minutes=6))["failures"], 1)
+        self.assertEqual(verify_ledger.read_failure(db, campaign="uvn-status-paid", user_key="jane@example.com",
+                                                    now=t0 + timedelta(hours=3)),
+                         {}, "the hold has expired: the next tick retries the account")
+        rep2 = verify_notify.Report()
+        rep2.failed_held = list(rep.failed_held)
+        verify_notify.hold_failed_users(db, rep2, "uvn-status-paid", now=t0 + timedelta(hours=2, minutes=1))
+        self.assertEqual(rep2.read_failure_pages, [], "two is not a pattern yet")
+        rep3 = verify_notify.Report()
+        rep3.failed_held = list(rep.failed_held)
+        verify_notify.hold_failed_users(db, rep3, "uvn-status-paid", now=t0 + timedelta(hours=4, minutes=2))
+        self.assertEqual(len(rep3.read_failure_pages), 1, "three consecutive failed reads is a pattern: page")
+        self.assertIn("3 consecutive ticks", rep3.render("apply"), "the page reaches the summary a human reads")
+        self.assertEqual(len(rep2.read_failure_pages), 0, "two in a row is not a page")
+
+    def test_a_post_failure_is_never_held_as_a_failed_read(self):
+        """r5 (firstmate 770) (1): the gate exits 4 with POST FAILED and leaves the row CLAIMED - the message may already
+        be delivered. Filing it as a failed read would both mislabel what failed and promise a retry that could double
+        send, so it is an UNKNOWN OUTCOME: counted, rendered, never held."""
+        decisions_db(self.path, [dec("r1")])
+        rep = verify_notify.run(FakeAdmin([req("r1")]), ledger_path=self.path, mode="apply", wrapper="/w",
+                                runner=Fake({"jane@example.com": (4, "", "POST FAILED (curl rc=28); left CLAIMED")}))
+        self.assertEqual((rep.failed_users, rep.post_failed), (1, 1))
+        self.assertEqual(rep.failed_held, [], "no read hold, so the next tick does not 'retry the read'")
+        db = verify_ledger.connect(self.path)
+        self.assertEqual(db.execute("SELECT count(*) FROM verify_read_failures").fetchone()[0], 0,
+                         "and nothing is written to the read-failure table")
+        self.assertEqual(len(rep.post_failures), 1)
+        self.assertTrue(any("never re-sent" in ln for ln in [rep.render("apply")]), "the summary says so out loud")
+
+    def test_rc_four_without_the_gates_post_line_is_still_a_failed_read(self):
+        """Defence in depth: rc 4 is the POST contract, but the GATE'S OWN LINE decides what failed - an rc alone must
+        never relabel a failed read as a failed post, because a read failure is the one that must be retried."""
+        decisions_db(self.path, [dec("r1")])
+        rep = verify_notify.run(FakeAdmin([req("r1")]), ledger_path=self.path, mode="apply", wrapper="/w",
+                                runner=Fake({"jane@example.com": (4, "", "CORE NOTICE CHECK FAILED (rc=2)")}))
+        self.assertEqual((rep.post_failed, len(rep.failed_held)), (0, 1))
+
+    def test_the_three_tick_page_lands_on_the_third_tick_not_the_fifth(self):
+        """r5 770 (2), the measured defect: the 2-hourly tick fails at 04:20, 06:03, 08:03, 10:03, 12:03. With a horizon
+        equal to the cadence the 06:03 tick found a still-live hold (06:03 < 06:20:00), counted the same failure and the
+        count only advanced every OTHER tick - the page landed at 12:03, tick FIVE. A human waiting for a page about a
+        persistently broken read waits half a day instead of four hours."""
+        decisions_db(self.path, [dec("r1")])
+        fake = Fake({"jane@example.com": (4, "", "CORE NOTICE CHECK FAILED (rc=2)")})
+        rep0 = verify_notify.run(FakeAdmin([req("r1")]), ledger_path=self.path, mode="dry-run", runner=fake, wrapper="/w")
+        db = verify_ledger.connect(self.path)
+        for_hold = lambda: (lambda r: (setattr(r, "failed_held", list(rep0.failed_held)), r)[1])(verify_notify.Report())
+        paged = []
+        # the tick times the probed collisions actually used: an 04:03 boundary, a failure mid-tick, then every 2 h
+        for tick, at in enumerate([datetime(2026, 11, 5, 4, 20, tzinfo=timezone.utc),
+                                   datetime(2026, 11, 5, 6, 3, tzinfo=timezone.utc),
+                                   datetime(2026, 11, 5, 8, 3, tzinfo=timezone.utc),
+                                   datetime(2026, 11, 5, 10, 3, tzinfo=timezone.utc),
+                                   datetime(2026, 11, 5, 12, 3, tzinfo=timezone.utc)]):
+            r = for_hold()
+            verify_notify.hold_failed_users(db, r, "uvn-status", now=at)
+            if r.read_failure_pages:
+                paged.append(tick + 1)
+        self.assertEqual(paged, [3], "the page lands on the THIRD consecutive tick: with a horizon == the cadence it "
+                                     "lands on a later tick (4 here, 5 in the probed collision)")
 
     def test_deferred_accounts_alone_are_not_announced(self):
         decisions_db(self.path, [dec("r1")])
@@ -954,6 +1166,91 @@ class RunTests(unittest.TestCase):
         rep = verify_notify.run(FakeAdmin([]), ledger_path=self.path, mode="apply", runner=Fake(), wrapper="/w")
         self.assertEqual(rep.render("apply"), "NO_REPLY")
         self.assertFalse(rep.failed)
+
+
+class FailedReadHoldEveryLaneTests(unittest.TestCase):
+    """Fable r5 2026-11-06 00:53Z (QA #1780's carried finding): the per-user read hold had exactly ONE caller - the UVN
+    lane - so on the two daily lanes a failed send-time read exited 0, printed "held", wrote no ``verify_read_failures``
+    row, was re-walked by the next run with no consecutive count, and the ``READ_FAILURES_TO_PAGE`` page could never
+    fire. The word was false and the alarm was absent.
+
+    These are ENTRYPOINT tests: they go through ``run()`` / ``run_wave()``, never through ``hold_failed_users()``, so
+    deleting the ``finish_failed_reads()`` call in either entrypoint turns them red on the MISSING ROW."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.path = os.path.join(self.tmp, "ledger.sqlite3")
+        self.wave = os.path.join(self.tmp, "wave.csv")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def _rows(self, campaign):
+        db = verify_ledger.connect(self.path)
+        try:
+            return [tuple(r) for r in db.execute(
+                "SELECT campaign, user_key, failures FROM verify_read_failures WHERE campaign=?", (campaign,))]
+        finally:
+            db.close()
+
+    def test_verify_live_holds_its_own_failed_read_and_the_next_run_skips_the_user(self):
+        decisions_db(self.path, [dec("r1")])
+        admin = FakeAdmin([req("r1")])
+        rep = verify_notify.run(admin, ledger_path=self.path, mode="apply", wrapper="/w",
+                                runner=Fake({"jane@example.com": (4, "", "CORE NOTICE CHECK FAILED (rc=2)")}))
+        self.assertEqual(len(rep.failed_held), 1)
+        self.assertEqual(self._rows("verify-live"), [("verify-live", "jane@example.com", 1)],
+                         "the entrypoint writes the hold for its OWN campaign: without the finish_failed_reads() call "
+                         "in run() this is [] and the user is never held")
+        # The next run HONOURS it: the user is skipped with a named deferral and the gate is never called again.
+        second = Fake()
+        rep2 = verify_notify.run(admin, ledger_path=self.path, mode="apply", runner=second, wrapper="/w")
+        self.assertEqual([a for a in second.argv if a[1] == "send"], [], "a held user is not walked again")
+        self.assertTrue(any("read failed on an earlier tick" in d for d in rep2.deferrals), rep2.deferrals)
+        self.assertFalse(rep2.failed, "a held user is a KNOWN outcome, not a failed round")
+
+    def test_verify_live_dry_run_writes_no_hold(self):
+        decisions_db(self.path, [dec("r1")])
+        verify_notify.run(FakeAdmin([req("r1")]), ledger_path=self.path, mode="dry-run", wrapper="/w",
+                          runner=Fake({"jane@example.com": (4, "", "CORE NOTICE CHECK FAILED (rc=2)")}))
+        self.assertEqual(self._rows("verify-live"), [], "a dry run is a read: it never writes a hold row")
+
+    def test_retro_past_holds_its_own_failed_read_and_the_next_run_skips_the_user(self):
+        wave_file(self.wave, [("HOLD", "r1", "42", PID, "t1", "Mixing", 10, 0, "2026-09-02")])
+        admin = FakeAdmin([req("r1")])
+        rep = verify_notify.run_wave(admin, wave_path=self.wave, ledger_path=self.path, mode="apply", max_users=10,
+                                     pace_seconds=0, wrapper="/w", today="2026-10-16",
+                                     runner=Fake({"jane@example.com": (4, "", "CORE NOTICE CHECK FAILED (rc=2)")}))
+        self.assertEqual(len(rep.failed_held), 1)
+        self.assertEqual(self._rows("retro-past"), [("retro-past", "jane@example.com", 1)],
+                         "the retro entrypoint writes the hold for its OWN campaign")
+        second = Fake()
+        rep2 = verify_notify.run_wave(admin, wave_path=self.wave, ledger_path=self.path, mode="apply", max_users=10,
+                                      pace_seconds=0, runner=second, wrapper="/w", today="2026-10-16")
+        self.assertEqual([a for a in second.argv if a[1] == "send"], [], "a held user is not walked again")
+        self.assertTrue(any("read failed on an earlier tick" in d for d in rep2.deferrals), rep2.deferrals)
+
+    def test_retro_past_dry_run_writes_no_hold(self):
+        wave_file(self.wave, [("HOLD", "r1", "42", PID, "t1", "Mixing", 10, 0, "2026-09-02")])
+        verify_notify.run_wave(FakeAdmin([req("r1")]), wave_path=self.wave, ledger_path=self.path, mode="dry-run",
+                               max_users=10, pace_seconds=0, wrapper="/w", today="2026-10-16",
+                               runner=Fake({"jane@example.com": (4, "", "CORE NOTICE CHECK FAILED (rc=2)")}))
+        self.assertEqual(self._rows("retro-past"), [], "a dry run is a read: it never writes a hold row")
+
+    def test_a_successful_read_clears_the_streak_on_the_daily_lane(self):
+        """The counter is CONSECUTIVE: a read that works deletes the row, so three failures days apart never page."""
+        decisions_db(self.path, [dec("r1")])
+        admin = FakeAdmin([req("r1")])
+        verify_notify.run(admin, ledger_path=self.path, mode="apply", wrapper="/w",
+                          runner=Fake({"jane@example.com": (4, "", "CORE NOTICE CHECK FAILED (rc=2)")}))
+        self.assertEqual(len(self._rows("verify-live")), 1)
+        db = verify_ledger.connect(self.path)
+        try:
+            db.execute("UPDATE verify_read_failures SET next_retry_at='2000-01-01T00:00:00Z'")
+        finally:
+            db.close()
+        verify_notify.run(admin, ledger_path=self.path, mode="apply", wrapper="/w", runner=Fake())
+        self.assertEqual(self._rows("verify-live"), [], "a verified successful read resets the consecutive count")
 
     def test_proof_sweep_tags_only_sent_untagged_notes(self):
         db = verify_ledger.connect(self.path)
@@ -2140,7 +2437,11 @@ class WiringTests(unittest.TestCase):
         os.environ["STUB_REJECT"] = reject
         self.addCleanup(os.environ.pop, "STUB_REJECT", None)
         first = tick("2026-10-26", [])
-        self.assertEqual((first.sent_notes, first.failed_users), (0, 1))
+        # QA #1780 (Important): Intercom's error.list is a REJECTED POST - nothing was delivered and the gate retries it
+        # on a later run. It is a deferral, never a failed read: counting three of them as three unreadable reads paged a
+        # human for the wrong condition and held a user whose account was perfectly readable.
+        self.assertEqual((first.sent_notes, first.failed_users, first.post_rejected), (0, 0, 1))
+        self.assertEqual(first.failed_held, [], "a rejected POST is not a failed READ")
         retry = tick("2026-10-26", [])
         self.assertEqual((retry.candidates, retry.sent_notes), (1, 1))
         self.assertEqual(tick("2026-10-27", []).candidates, 0)
