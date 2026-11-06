@@ -693,7 +693,7 @@ FM_FLEET_STALL_REFRESH_GRACE_SECS=900   # time an account may sit in that window
 FM_FLEET_STALL_ERROR_WINDOW_SECS=300    # gateway log window for the error rate
 FM_FLEET_STALL_ERROR_MIN=30             # error count that can raise the error-rate condition
 FM_FLEET_STALL_ERROR_RATE_PCT=50        # error percentage that raises it
-FM_FLEET_STALL_CAPTURE_JOBS=16          # pane captures run at once
+FM_FLEET_STALL_CAPTURE_JOBS=16          # pane captures run at once, capped by FM_LOCAL_JOB_WORKERS
 FM_FLEET_STALL_CCFLARE_DB=~/.config/better-ccflare/better-ccflare.db   # empty = judge auth from the CLIProxyAPI inventory files
 FM_FLEET_STALL_ACCESS_SYNC_LOG=~/Library/Logs/ccflare-access-sync.log # the access-sync agent's log; its .err sits beside it; empty = not watched
 FM_FLEET_STALL_ACCESS_SYNC_STALE_SECS=600  # an access-sync log this old is a condition
@@ -1382,7 +1382,7 @@ FM_WEDGE_REALARM_SECS=86400        # seconds after the ladder's last delivered e
 FM_WORKTREE_WRITE_PRUNE='.git node_modules .venv venv __pycache__ .mypy_cache .pytest_cache .ruff_cache .tox target dist build .next .cache vendor'   # directory names the wedge detector's task-worktree write probe skips; the default keeps .git out so a supervisor's own read-only git command can never look like crew progress; set it to the empty string to prune nothing, which widens the probe to the whole depth-bounded tree rather than disabling it
 FM_WORKTREE_WRITE_MAXDEPTH=6       # depth that same probe walks below the recorded worktree; it runs only at the moment a wedge escalation would otherwise fire, never on every poll; no probe knob applies to a secondmate, whose recorded worktree is a provisioned home the probe skips entirely
 FM_WORKTREE_WRITE_TIMEOUT=10       # wall-clock seconds that one walk may take, so a worktree on a hung mount cannot stall the watcher poll that started it; hitting the bound reads as no write evidence, which leaves the escalation schedule exactly as it was; a value that is not a positive integer falls back to the default
-FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
+FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
 FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh treats a leftover worktree git index.lock as provably stale
