@@ -127,7 +127,7 @@ class FraudDenyPassthroughTest(unittest.TestCase):
                                                                        "approval_ref": "x"}}}))
         fx.run(tray, apply=True, facts_fn=lambda ids: {RID: facts(rules={})}, gate_fn=lambda u: ALLOW,
                writer=lambda ids, e, r, run, tp: {"updatedIds": ids}, readback=lambda s, ids: set(ids),
-               audit_path=str(tmp / "a.jsonl"), registry_path=str(reg), kill_file=str(tmp / "k"), now=lambda: NOW,
+               audit_path=str(tmp / "a.jsonl"), registry_path=str(reg), kill_files=(str(tmp / "k"),), now=lambda: NOW,
                lock_path=str(tmp / "lock"))
         line = [json.loads(l) for l in (tmp / "a.jsonl").read_text().splitlines()][-1]
         self.assertEqual(line["fraud_pair"], pair)
@@ -208,9 +208,10 @@ class RunTest(unittest.TestCase):
             self.assertEqual(status, "rejected")
             return set(ids) if landed is None else set(ids) & landed
         kw.setdefault("sleep", lambda s: None)          # read-back retries never sleep in tests
+        kw.setdefault("kill_files", (self.kill,))       # a test may pass its own pair (both names)
         return fx.run(tray, apply=apply, facts_fn=lambda ids: {i: fm[i] for i in ids if i in fm},
                       gate_fn=lambda u: gate, writer=writer or write, readback=kw.pop("readback", readback),
-                      audit_path=self.audit, registry_path=self.registry, kill_file=self.kill,
+                      audit_path=self.audit, registry_path=self.registry,
                       now=lambda: NOW, lock_path=str(self.tmp / "lock"), **kw)
 
     def audit_lines(self):
@@ -244,6 +245,30 @@ class RunTest(unittest.TestCase):
         res = self.go(self.tray())
         self.assertEqual(self.calls, [])
         self.assertIn("kill file", res.stopped)
+
+    def test_kill_file_stops_on_the_renamed_path_alone(self):
+        """QA #1767: the host rename must stop the executor at its OWN pre-check, not at the admin boundary.
+
+        The executor is the writer the admin API refuses, so if it only knew the legacy name a renamed host
+        would let it reserve a batch and then fail every PUT - a reservation with no write.
+        """
+        new, legacy = self.tmp / "fable-trays.disabled", self.tmp / "fable-decider.disabled"
+        new.write_text("stop")
+        self.assertFalse(legacy.exists())
+        res = self.go(self.tray(), kill_files=(str(new), str(legacy)))
+        self.assertEqual(self.calls, [])
+        self.assertIn(str(new), res.stopped)
+
+    def test_kill_file_stops_on_the_legacy_path_alone(self):
+        new, legacy = self.tmp / "fable-trays.disabled", self.tmp / "fable-decider.disabled"
+        legacy.write_text("stop")
+        self.assertFalse(new.exists())
+        res = self.go(self.tray(), kill_files=(str(new), str(legacy)))
+        self.assertEqual(self.calls, [])
+        self.assertIn(str(legacy), res.stopped)
+
+    def test_default_kill_files_honour_both_names_new_first(self):
+        self.assertEqual(fx.KILL_FILES, ("/etc/hydra/fable-trays.disabled", "/etc/hydra/fable-decider.disabled"))
 
     def test_registry_not_approved_stops_before_any_write(self):
         self.set_registry(False)
@@ -375,7 +400,7 @@ class QaFixTest(RunTest):
                         else facts(user_id=uid[i])) for i in ids}
         res = fx.run(t, apply=True, facts_fn=facts_fn, gate_fn=lambda u: ALLOW,
                      writer=lambda ids, e, r, run, tp: {"updatedIds": ids}, readback=lambda s_, ids: set(ids),
-                     audit_path=self.audit, registry_path=self.registry, kill_file=self.kill, now=lambda: NOW,
+                     audit_path=self.audit, registry_path=self.registry, kill_files=(self.kill,), now=lambda: NOW,
                      lock_path=str(self.tmp / "lock"))
         self.assertGreaterEqual(calls["facts"], 2)
         self.assertEqual(res.refused, {"big_or_unknown_popularity": 1})
@@ -831,7 +856,7 @@ class ApproveRunTest(RunTest):
         t = self.approve_tray()
         res = fx.run(t, apply=True, facts_fn=lambda ids: {i: facts() for i in ids}, gate_fn=lambda u: ALLOW,
                      writer=write, readback=readback, audit_path=self.audit, registry_path=self.registry,
-                     kill_file=self.kill, now=lambda: NOW, lock_path=str(self.tmp / "lock"), sleep=lambda s: None)
+                     kill_files=(self.kill,), now=lambda: NOW, lock_path=str(self.tmp / "lock"), sleep=lambda s: None)
         self.assertEqual((res.written, seen["status"], seen["rb"]), (2, "approved", "approved"))
         lines = self.audit_lines()
         self.assertTrue(all(l["action"] == "approve" for l in lines))
@@ -854,7 +879,7 @@ class ApproveRunTest(RunTest):
             return {"updatedIds": ids}
         res = fx.run(t, apply=True, facts_fn=lambda ids: {i: facts() for i in ids}, gate_fn=lambda u: ALLOW,
                      writer=write, readback=lambda s, ids: set(ids), audit_path=self.audit,
-                     registry_path=self.registry, kill_file=self.kill, now=lambda: NOW,
+                     registry_path=self.registry, kill_files=(self.kill,), now=lambda: NOW,
                      lock_path=str(self.tmp / "lock"), sleep=lambda s: None)
         self.assertEqual(sum(len(c) for c in self.calls), 1)
         self.assertIn("daily cap", res.stopped)

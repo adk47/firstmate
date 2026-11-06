@@ -301,7 +301,7 @@ def run(tray: ClaimTray, *, apply: bool, limit: int | None = None,
         facts_fn: Callable[[Iterable[int]], dict[int, ClaimFacts]] = fetch_claim_facts,
         gate_fn: Callable[[Any], account_gate.GateResult] | None = None,
         writer: ClaimWriter | None = None,
-        audit_path: str = fx.AUDIT_PATH, registry_path: str = fx.REGISTRY, kill_file: str = fx.KILL_FILE,
+        audit_path: str = fx.AUDIT_PATH, registry_path: str = fx.REGISTRY, kill_files: tuple[str, ...] = fx.KILL_FILES,
         lock_path: str = fx.WRITE_LOCK, now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         readback_tries: int = 6, readback_wait_s: float = 5.0,
         after_batch: Callable[[list[tuple[int, int]], datetime], str | None] | None = None,
@@ -329,8 +329,9 @@ def run(tray: ClaimTray, *, apply: bool, limit: int | None = None,
     try:
         for r in rows:
             with fx._locked(lock_path):
-                if os.path.exists(kill_file):
-                    res.stopped = f"kill file {kill_file} present"
+                killed = next((p for p in kill_files if p and os.path.exists(p)), None)
+                if killed:
+                    res.stopped = f"kill file {killed} present"
                     break
                 if not fx.registry_approved(registry_path):
                     res.stopped = f"registry entry {fx.AUTOMATION_ID} not approved"
