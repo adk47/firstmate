@@ -866,6 +866,10 @@ test_overdue_liveness_policy() {
 setup_watch_case() {  # <name> -> echoes case dir; state in <dir>/state
   local name=$1 dir
   dir="$TMP_ROOT/$name"
+  # Start from a clean case dir: a library-level test may have used the same
+  # name for its own state, and leftover inbox records would make the watcher
+  # surface an older message than the one this case just wrote.
+  rm -rf "$dir"
   mkdir -p "$dir/state"
   make_watch_stubs "$dir" >/dev/null
   fm_write_meta "$dir/state/t1.meta" "window=sess:fm-t1" "kind=ship" "harness=grok"
