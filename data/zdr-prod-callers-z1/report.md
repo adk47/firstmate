@@ -64,11 +64,12 @@ change)? **Key source**: env var / file / Vault path name only.
 | B5 | 29 `agentTurn` crons | `openai/gpt-6-sol` + `openrouter/deepseek/deepseek-v4.1-flash-1017` | codex / OpenRouter | **no** | same | 12 enabled |
 | B6 | QA review gateway (`pods/qa-review-gateway/openclaw-qa.json`) | same chain as B1/B2 | codex / OpenRouter | **no** | its own capped `OPENROUTER_API_KEY` (Vault `k8s/hydra/qa-review`) | QA only |
 
-**Live drift found:** node-8's `/opt/hydra/openclaw-main.json` (mtime 11-04
-10:54) still carries the *old* paid-frontier fallback chain and has **no
-deepseek model entry at all**. The repo at HEAD has the deepseek chain (#1693).
-So the money leak the captain is asking about is live right now: 48 fallbacks
-in 24h onto `gpt-6-luna`/`haiku-5.5`. Deploying this branch closes it.
+**Live drift found (2026-11-04, now RESOLVED — see §7):** node-8's
+`/opt/hydra/openclaw-main.json` (mtime 11-04 10:54) still carried the *old*
+paid-frontier fallback chain and had **no deepseek model entry at all**. The
+repo at HEAD has the deepseek chain (#1693). So the money leak the captain was
+asking about was live at inventory time: 48 fallbacks in 24h onto
+`gpt-6-luna`/`haiku-5.5`. The 2026-11-05 deploy of this branch closed it.
 
 ### C. core-backend / core-ai
 
@@ -203,7 +204,8 @@ new block once this branch is deployed to node-8. The read is
 `journalctl -u openclaw-gateway-main --since -15m | grep -c 'model-fallback/decision'`
 plus `python3 scripts/model-chain-watchdog.py --canary` and the doc-verify
 `dv_llm_calls` error rate (`outcome='error'` share, 849/36,535 = 2.3% baseline
-over 8 days).
+over 8 days). **The deploy has since landed — see §7 for what was verified and
+what still needs a node-8 shell.**
 
 ## 5. Follow-ups this worktree cannot do (different repos)
 
@@ -241,3 +243,44 @@ now unreferenced by any production path), `CREDIT_DOC_VERIFY_MODEL`,
 `DR_MODEL`, `DR_OPENROUTER_KEY_FILE`, `PROD_LOG_ALERT_MODEL`,
 `PROD_LOG_ALERT_KEY_FILE`, `JEV_EVAL_LABEL_MODEL`, `JEV_EVAL_LABEL_KEY_FILE`,
 `MODEL_PRIMARY`, `MODEL_FALLBACK` (core-ai).
+
+## 7. Post-deploy verification (2026-11-05)
+
+The change is **live on node-8**. Evidence is the deploy run itself, not an
+inference from the merge:
+
+| fact | value |
+| --- | --- |
+| PR | https://github.com/Muso-AI/hydra/pull/1750 — merged 2026-11-04T21:52:52Z as `bbde288e1` |
+| deploy run | `41965490673` (`Deploy HYDRA`, `event: schedule`), **success**, started 2026-11-05T04:04:26Z, finished 04:39:03Z |
+| deployed sha | `9206d49989f69f5669c62d9b8a0aaa056a4e92e8` — `git merge-base --is-ancestor bbde288e1 9206d499` = true |
+| drift delta | 22 changed, 0 removed since the previous baseline `e671731b` |
+| new on the server | `scripts/check-zdr-routing.py`, `data/zdr-prod-callers-z1/report.md` (both "absent on the server" before) |
+| configs synced | `openclaw-main.json`, `openclaw-edge.json`, `pods/qa-review-gateway/openclaw-qa.json` (the 25-line `compat.openRouterRouting` + cost correction each) |
+| gateway restart | main `pid 2305207 -> 2194786` (340s drain), edge `pid 1971382 -> 2126831` (5s), 2026-11-05T04:11Z |
+| smoke test | **PASSED** — 0 failed, 1 warning (edge `support` PONG timeout, unrelated) |
+| OpenRouter reachability | `PASS: OpenRouter /api/v1/models returned 200` |
+| agents bound | main 9/9, edge 1/1; clio/cmo/operations PONG in 7s/8s/15s |
+| cron set | 59 jobs loaded, matches repo |
+| drift baseline | `.deployed-sha` advanced to `9206d499` |
+
+A second successful deploy (`42021981460`, `event: workflow_dispatch`,
+2026-11-05T11:48:49Z, sha `78c4b751`) also contains `bbde288e1`, so the change
+has survived a further deploy cycle. Both trigger values are read from the
+runs API (`gh api repos/Muso-AI/hydra/actions/runs/<id> --jq .event`), not
+assumed: the first deploy was the scheduled one, the second was dispatched.
+
+**What this closes:** the B2 live-drift finding above. node-8 now runs the
+repo's deepseek fallback chain with the ZDR block, so the 48 fallbacks/24h onto
+paid frontier (`gpt-6-luna` / `haiku-5.5`) stop being the fallback target.
+
+**What is still open — the +15m error-rate read.** It needs a shell on node-8
+(`journalctl -u openclaw-gateway-main`, `scripts/model-chain-watchdog.py
+--canary`, the `dv_llm_calls` error share). From ak47 after the 2026-11-05
+movebox the OVH private network is unreachable (`ssh root@10.0.0.1` →
+connection refused; `muso-ovh-dr.kubeconfig` → `10.0.0.2:6443 no route to
+host`), so this read could not be taken from the worktree. The deploy's own
+smoke test covers the immediate post-restart window (04:34–04:36Z, ~23 min
+after the restart) and passed; the 15-minute error-rate window itself is the
+one measurement still owed, and it is a read-only check any operator can run
+from a node-8 shell.
