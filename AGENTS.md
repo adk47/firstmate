@@ -613,6 +613,28 @@ already wrote (`scripts/qa-handoff-publish.sh`, which used to report a landed PO
 "this head now has NO hand-off"). Timing-bound suites also miss deadlines on a 2-CPU
 pod; fix the shard/`--jobs` budget, not the assertion.
 
+**A test class defined below `unittest.main()` never runs in CI.** PR Validation invokes most
+Python suites as `python3 scripts/tests/<file>.py`, and `unittest.main()` discovers only the
+classes that exist when it is called — so a class appended after the `__main__` block is
+invisible on the path CI uses, while `pytest` (which collects the whole module) still runs it.
+Found 2026-11-06 on #1766: `test_credit_decide_watchdog.py` ran 38 of 52, `test_doc_approve.py`
+122 of 125, `test_doc_verify.py` 209 of 215 — all reporting OK. Keep the `__main__` block the
+LAST statement; `scripts/tests/test_ci_test_discovery.py` (wired into PR Validation) scans every
+file the workflow invokes that way and fails if anything follows it or if direct invocation runs
+fewer tests than pytest collects.
+
+**A base retarget does not re-trigger PR Validation.** `pr-validate.yml` listens on
+`pull_request: branches: [main]` with the DEFAULT activity types (`opened, synchronize,
+reopened`). A push made while the base is another branch fires `synchronize` and the
+`branches: [main]` filter drops it; `gh pr edit --base main` fires `edited`, which is not a
+default type. `gh pr close <n> && gh pr reopen <n>` fires `reopened` and starts the run.
+
+**Before concluding a rebase erased base work, check the base first.**
+`git rev-list --left-right --count origin/main...HEAD` — a stale base makes `main`'s newer work
+look like deletions in `git diff origin/main`, and "restoring" it with
+`git checkout origin/main -- <file>` then breaks the branch against its own older `decide.py`
+(`AttributeError: module ... has no attribute ...`). Rebase, then re-read the diff.
+
 ## node-8 `/dev/*`: never a destructive target
 
 - **NEVER make a `/dev/*` path the target of `rm`, `mv`, `cp`, `install`, `sed -i`
