@@ -146,3 +146,64 @@ policy() { printf '%s' "$1" > "$TEST_TMPDIR/policy.json"; export QA_APPROVAL_POL
   run "$SHIM" --repo
   [ "$status" -eq 2 ]
 }
+
+# ---------------------------------------------------------------------------
+# Empty review payloads are refused at the one write surface (2026-11-06:
+# hydra#1820 @ 086158df carried bodiless COMMENTED reviews that read as "the
+# bot reviewed this" while saying nothing). Exit 6, reason named, nothing sent.
+# ---------------------------------------------------------------------------
+
+review_payload() { printf '%s' "$1" > "$TEST_TMPDIR/payload.json"; echo "$TEST_TMPDIR/payload.json"; }
+
+@test "empty review: no body and no comments → exit 6, gh never called, reason names the path" {
+  p="$(review_payload '{"commit_id":"abc","event":"COMMENT","body":"","comments":[]}')"
+  run "$SHIM" --repo Muso-AI/hydra api repos/Muso-AI/hydra/pulls/1820/reviews --method POST --input "$p"
+  [ "$status" -eq 6 ]
+  [[ "$output" != *"ARGS="* ]]
+  [[ "$output" == *"EMPTY review"* ]]
+  [[ "$output" == *"repos/Muso-AI/hydra/pulls/1820/reviews"* ]]
+  [[ "$output" == *"no body and no inline comments"* ]]
+}
+
+@test "empty review: whitespace-only body with absent comments is still empty; -X POST form too" {
+  p="$(review_payload '{"commit_id":"abc","event":"COMMENT","body":"  \n\t "}')"
+  run "$SHIM" api repos/Muso-AI/hydra/pulls/1820/reviews -X POST --input "$p"
+  [ "$status" -eq 6 ]
+}
+
+@test "empty review: --input - (stdin) is NOT inspected -- passed through, nothing spooled to disk" {
+  run bash -c "printf '%s' '{\"body\":\"\",\"comments\":[]}' | \"$SHIM\" api repos/Muso-AI/hydra/pulls/1820/reviews --method POST --input -"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'ARGS=api repos/Muso-AI/hydra/pulls/1820/reviews --method POST --input -'
+}
+
+@test "verdict body passes through untouched (the verdict is never reformatted)" {
+  p="$(review_payload '{"commit_id":"abc","event":"COMMENT","body":"✅ **Verdict: GO** — 0 unresolved Critical","comments":[]}')"
+  run "$SHIM" --repo Muso-AI/hydra api repos/Muso-AI/hydra/pulls/1820/reviews --method POST --input "$p"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "ARGS=api repos/Muso-AI/hydra/pulls/1820/reviews --method POST --input $p"
+}
+
+@test "comment-only review (carry-forward thread reply) passes: body empty but comments non-empty" {
+  p="$(review_payload '{"commit_id":"abc","event":"COMMENT","body":"","comments":[{"path":"a.py","line":1,"body":"Confirmed fixed"}]}')"
+  run "$SHIM" api repos/Muso-AI/hydra/pulls/1820/reviews --method POST --input "$p"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'ARGS=api'
+}
+
+@test "the guard is scoped: a GET on /reviews, a POST elsewhere, and non-api calls are untouched" {
+  p="$(review_payload '{}')"
+  run "$SHIM" api repos/Muso-AI/hydra/pulls/1820/reviews --input "$p"
+  [ "$status" -eq 0 ]
+  run "$SHIM" api repos/Muso-AI/hydra/issues/1820/comments --method POST --input "$p"
+  [ "$status" -eq 0 ]
+  run "$SHIM" pr comment 1820 --body ""
+  [ "$status" -eq 0 ]
+}
+
+@test "unparseable payload is left to gh (it 400s loudly), not swallowed by the guard" {
+  printf 'not json' > "$TEST_TMPDIR/bad.json"
+  run "$SHIM" api repos/Muso-AI/hydra/pulls/1820/reviews --method POST --input "$TEST_TMPDIR/bad.json"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'ARGS=api'
+}

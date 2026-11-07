@@ -37,9 +37,10 @@ set -euo pipefail
 # Note there is deliberately no "post only if absent" mode: the workflow's seed
 # SHOULD re-arm `pending` when it re-fires, because a re-fire means a fresh
 # review is running and the previous verdict is stale.
-# The one refused write is narrow and is NOT that mode: a `CANNOT REVIEW: ` failure
-# over a same-sha `success` GO (see the no-clobber guard below). `pending` re-arm and
-# NO-GO overwrite are unchanged.
+# The one refused write is narrow and is NOT that mode: a no-information failure
+# (`CANNOT REVIEW: ` or `QA review could not be dispatched`) over a same-sha
+# `success` GO (see the no-clobber guard below). `pending` re-arm and NO-GO
+# overwrite are unchanged.
 #
 # Exit codes: 0 ok (including "posted, unverified" when the read-back itself
 #             fails) | 2 usage | 3 post failed, or posted but the read-back
@@ -111,21 +112,29 @@ if [ "$gate_rc" -eq 0 ]; then
   [ "$app_rc" -eq 0 ] || die 3 "$repo is in .merge_gate_repos but NOT in .identity.app_repos — the status would be posted by the host account and could never satisfy an app-pinned required check. Add it to app_repos first."
 fi
 
-# No-clobber for tool failures (MUS-7698). A CANNOT REVIEW carries no information
-# about the code: it says the review did not run. The sha is immutable, so a GO
-# already recorded on it still describes this exact code, and overwriting it would
-# turn a quota blip into an unmergeable sha. Only the CANNOT REVIEW prefix is
-# guarded: a NO-GO is a finding and always overwrites. If the lookup fails, post as
-# before: we cannot prove a GO exists, so we must not suppress. The GO must also be
-# the CURRENT verdict: a `pending` re-arm after it makes it stale, so the newest
-# non-CANNOT row has to be that GO itself, not merely some GO in the history.
-if [ "$state" = failure ] && [[ "$description" == "CANNOT REVIEW: "* ]]; then
+# No-clobber for no-information failures (MUS-7698). A CANNOT REVIEW carries no
+# information about the code: it says the review did not run. The sha is
+# immutable, so a GO already recorded on it still describes this exact code, and
+# overwriting it would turn a quota blip into an unmergeable sha. The
+# un-dispatched failure qa-autoreview.yml posts when the gateway never took the
+# job (2026-11-06) is the same kind of row -- it says even less -- and lands in
+# the same re-run shape (PR Validation re-run on a GO'd sha, gateway down), so it
+# is guarded by the same rule. Only these prefixes are guarded: a NO-GO is a
+# finding and always overwrites. If the lookup fails, post as before: we cannot
+# prove a GO exists, so we must not suppress. The GO must also be the CURRENT
+# verdict: a `pending` re-arm after it makes it stale, so the newest informative
+# row (neither prefix) has to be that GO itself, not merely some GO in history.
+NO_INFO_PREFIXES=("CANNOT REVIEW: " "QA review could not be dispatched")
+no_info_description() {   # <description> -> rc 0 when it starts with a guarded prefix
+  local p; for p in "${NO_INFO_PREFIXES[@]}"; do [[ "$1" == "$p"* ]] && return 0; done; return 1
+}
+if [ "$state" = failure ] && no_info_description "$description"; then
   go_at="$("$QA_GH" --repo "$repo" api "repos/$repo/statuses/$sha?per_page=100" 2>/dev/null \
-    | jq -r '[ .[]? | select(.context == "qa-review"
-        and ((.description // "") | startswith("CANNOT REVIEW: ") | not)) ] | first
-        | select(. != null and .state == "success") | .created_at' 2>/dev/null)" || go_at=""
+    | jq -r --args '[ .[]? | select(.context == "qa-review"
+        and ((.description // "") as $d | any($ARGS.positional[]; . as $p | $d | startswith($p)) | not)) ] | first
+        | select(. != null and .state == "success") | .created_at' "${NO_INFO_PREFIXES[@]}" 2>/dev/null)" || go_at=""
   if [ -n "$go_at" ]; then
-    echo "qa-review-status: $repo@${sha:0:7} $CONTEXT=failure NOT posted — a GO recorded at $go_at stands on this sha; a tool failure does not overwrite it."
+    echo "qa-review-status: $repo@${sha:0:7} $CONTEXT=failure NOT posted — a GO recorded at $go_at stands on this sha; a no-information failure ('${description:0:40}…') does not overwrite it."
     exit 0
   fi
 fi

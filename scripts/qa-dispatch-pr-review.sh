@@ -53,6 +53,26 @@ set -euo pipefail
 # review was queued and the attempt did not happen -- the reconciler must not
 # count it. Any other openclaw failure keeps openclaw's own rc (reached the
 # gateway and was rejected: a real attempt).
+#
+# A transport failure is retried IN PLACE before 75 is returned (see
+# QA_DISPATCH_TRANSPORT_ATTEMPTS below). 2026-11-06: hydra#1820 @ 086158df, run
+# 42282917209 attempt 1 died on one `Opening handshake has timed out`, the
+# workflow went red, and the review only happened because a human re-ran the job
+# 11 minutes later -- the reconciler that is meant to catch exit 75 was not
+# completing its ticks. A handshake timeout on a gateway that is merely busy
+# clears in seconds; a few bounded, logged attempts are what that class is for.
+#   QA_DISPATCH_TRANSPORT_ATTEMPTS  total `cron add` attempts on a transport
+#                                   failure (default 3; 1 = the old behaviour)
+#   QA_DISPATCH_RETRY_BACKOFF_S     space-separated sleeps between attempts
+#                                   (default "10 30"; the last value repeats)
+# ONLY a PROVABLY pre-gateway transport failure is retried (see
+# RETRYABLE_SIGNATURES). A `cron add` the gateway rejected reached it and is a
+# real attempt (never retried), and nothing here ever re-runs a review that was
+# queued: a retry mints the cron only after the previous attempt provably never
+# did. An AMBIGUOUS transport failure -- the socket died after the request may
+# have been written, so a one-shot may already exist -- is never retried; it
+# exits 75 and the reconciler re-dispatches, which sweeps any pending job for
+# this PR first.
 
 OPENCLAW="${OPENCLAW:-openclaw}"
 PROFILE="main"
@@ -453,6 +473,10 @@ fi
 # (the CLI equivalent of a `"mode": "none"` job). Verified: openclaw 2026.5.27.
 # Transport-failure signatures that mean the request never reached the gateway.
 # The ONE list; matched fixed-string + case-insensitive against openclaw's stderr.
+# ECONNRESET / socket hang up / fetch failed are in it because they are transport
+# failures, but they are NOT proof the request was never received: the socket can
+# die after the request was written and the one-shot created. They are therefore
+# classified here (exit 75) and deliberately absent from RETRYABLE_SIGNATURES.
 PRE_GATEWAY_SIGNATURES=(
   "Opening handshake has timed out"
   "ECONNREFUSED"
@@ -467,30 +491,88 @@ PRE_GATEWAY_SIGNATURES=(
   "EAI_AGAIN"
 )
 
+# The subset that PROVES the connection was never established, so no one-shot
+# can exist and a retry cannot duplicate one. Every entry is a connect/handshake
+# failure; nothing here can be produced after a request was accepted.
+RETRYABLE_SIGNATURES=(
+  "Opening handshake has timed out"
+  "ECONNREFUSED"
+  "connect ETIMEDOUT"
+  "ENOTFOUND"
+  "EHOSTUNREACH"
+  "ENETUNREACH"
+  "EAI_AGAIN"
+)
+
+# transport_signature <stderr-file> [retryable] -- echoes the first matching
+# signature, rc 1 if none. With "retryable", only the provably pre-gateway
+# subset is considered.
+transport_signature() {
+  local sig list
+  if [ "${2:-}" = "retryable" ]; then
+    list=("${RETRYABLE_SIGNATURES[@]}")
+  else
+    list=("${PRE_GATEWAY_SIGNATURES[@]}")
+  fi
+  for sig in "${list[@]}"; do
+    if grep -Fqi -- "$sig" "$1"; then printf '%s' "$sig"; return 0; fi
+  done
+  return 1
+}
+
+# Bounded in-place retry on a transport failure (header: "A transport failure is
+# retried IN PLACE"). Malformed overrides fall back to the defaults rather than
+# aborting under set -u/-e before the dispatch.
+max_attempts="${QA_DISPATCH_TRANSPORT_ATTEMPTS:-3}"
+[[ "$max_attempts" =~ ^[1-9][0-9]*$ ]] || max_attempts=3
+read -r -a backoffs <<<"${QA_DISPATCH_RETRY_BACKOFF_S:-10 30}"
+[ "${#backoffs[@]}" -gt 0 ] || backoffs=(10 30)
+for b in "${backoffs[@]}"; do [[ "$b" =~ ^[0-9]+$ ]] || { backoffs=(10 30); break; }; done
+
 add_err="$(mktemp)"
 # The EXIT trap that removes this file is installed at the top of the script,
 # above every branch that can exit. Do not add a second one here.
-add_rc=0
-"$OPENCLAW" ${OPENCLAW_ARGS[@]+"${OPENCLAW_ARGS[@]}"} cron add \
-  --name "$job_name" \
-  --at "+5s" \
-  --agent "$AGENT" \
-  --session isolated \
-  --message "$message" \
-  --timeout-seconds "$TIMEOUT_SECONDS" \
-  --no-deliver \
-  --delete-after-run \
-  --json 2>"$add_err" || add_rc=$?
-# Re-emit verbatim: classification must never swallow the diagnostic.
-cat "$add_err" >&2
-if [ "$add_rc" -ne 0 ]; then
-  for sig in "${PRE_GATEWAY_SIGNATURES[@]}"; do
-    if grep -Fqi -- "$sig" "$add_err"; then
-      echo "qa-dispatch-pr-review: gateway unreachable ('$sig') -- no review queued; exiting 75 (not an attempt)." >&2
-      exit 75
-    fi
-  done
-  exit "$add_rc"
-fi
+attempt=0
+last_sig=""
+while :; do
+  attempt=$((attempt + 1))
+  add_rc=0
+  : >"$add_err"
+  "$OPENCLAW" ${OPENCLAW_ARGS[@]+"${OPENCLAW_ARGS[@]}"} cron add \
+    --name "$job_name" \
+    --at "+5s" \
+    --agent "$AGENT" \
+    --session isolated \
+    --message "$message" \
+    --timeout-seconds "$TIMEOUT_SECONDS" \
+    --no-deliver \
+    --delete-after-run \
+    --json 2>"$add_err" || add_rc=$?
+  # Re-emit verbatim: classification must never swallow the diagnostic.
+  cat "$add_err" >&2
+  [ "$add_rc" -ne 0 ] || break
+  # Not a transport failure: the gateway answered and rejected it. A real
+  # attempt -- openclaw's own rc, no retry.
+  last_sig="$(transport_signature "$add_err")" || exit "$add_rc"
+  # Ambiguous: the request may have been received before the socket died, so a
+  # retry could mint a SECOND one-shot for this PR (two concurrent reviews, two
+  # DMs, a second qa-review status). Not retried; the reconciler re-dispatches.
+  if ! transport_signature "$add_err" retryable >/dev/null; then
+    echo "qa-dispatch-pr-review: gateway transport failure ('$last_sig') is ambiguous -- the request may have been received, so it is NOT retried; exiting 75 (not an attempt)." >&2
+    exit 75
+  fi
+  if [ "$attempt" -ge "$max_attempts" ]; then
+    echo "qa-dispatch-pr-review: gateway unreachable ('$last_sig') after ${attempt}/${max_attempts} attempts -- no review queued; exiting 75 (not an attempt)." >&2
+    exit 75
+  fi
+  idx=$((attempt - 1)); [ "$idx" -lt "${#backoffs[@]}" ] || idx=$(( ${#backoffs[@]} - 1 ))
+  delay="${backoffs[$idx]}"
+  echo "qa-dispatch-pr-review: gateway unreachable ('$last_sig') on attempt ${attempt}/${max_attempts} -- no review queued yet; retrying in ${delay}s." >&2
+  sleep "$delay"
+done
 
-echo "qa-dispatch-pr-review: dispatched auto-review of ${REPO}#${pr} (${sha}) -> agent ${AGENT} (${GATEWAY_TARGET})."
+if [ "$attempt" -gt 1 ]; then
+  echo "qa-dispatch-pr-review: dispatched auto-review of ${REPO}#${pr} (${sha}) -> agent ${AGENT} (${GATEWAY_TARGET}) on attempt ${attempt}/${max_attempts} (earlier attempts: gateway unreachable '${last_sig}')."
+else
+  echo "qa-dispatch-pr-review: dispatched auto-review of ${REPO}#${pr} (${sha}) -> agent ${AGENT} (${GATEWAY_TARGET})."
+fi

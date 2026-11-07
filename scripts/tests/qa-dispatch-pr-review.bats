@@ -44,8 +44,13 @@ case "$sub" in
   add)
     echo "cron-add" >> "$STUB_CALLS"
     # STUB_ADD_ERR/STUB_ADD_RC simulate a failing `cron add` (stderr text + exit code).
-    if [ -n "${STUB_ADD_ERR:-}" ]; then echo "$STUB_ADD_ERR" >&2; fi
-    if [ -n "${STUB_ADD_RC:-}" ]; then exit "$STUB_ADD_RC"; fi
+    # STUB_ADD_FAIL_TIMES=N makes only the first N adds fail that way (a gateway
+    # that is unreachable for a while and then answers); later adds succeed.
+    n="$(grep -c '^cron-add$' "$STUB_CALLS")"
+    if [ -n "${STUB_ADD_ERR:-}" ] && { [ -z "${STUB_ADD_FAIL_TIMES:-}" ] || [ "$n" -le "${STUB_ADD_FAIL_TIMES}" ]; }; then
+      echo "$STUB_ADD_ERR" >&2
+      if [ -n "${STUB_ADD_RC:-}" ]; then exit "$STUB_ADD_RC"; fi
+    fi
     echo '{"ok":true}' ;;
   rm)   echo "cron-rm"  >> "$STUB_CALLS" ;;
 esac
@@ -75,6 +80,9 @@ STUB
   export STUB_GH_ARGV="$TEST_TMPDIR/gh_argv"; : > "$STUB_GH_ARGV"
   export PATH="$STUBBIN:$PATH"
   export OPENCLAW="openclaw"   # resolve via the stubbed PATH
+  # Transport retries sleep between attempts; the suite must not. Attempts
+  # keep their default (3) so every exit-75 test below exercises the real loop.
+  export QA_DISPATCH_RETRY_BACKOFF_S="0"
 }
 teardown() { rm -rf "$TEST_TMPDIR"; }
 
@@ -375,6 +383,87 @@ JSON
     QA_REVIEW_REQUESTER_UID="$NICK" run --separate-stderr "$SCRIPT" 123 "$GOOD_SHA"
   [ "$status" -eq 75 ]
   [[ "$stderr" == *"Opening handshake has timed out"* ]]
+}
+
+# --- bounded in-place retry on a transport failure (2026-11-06, hydra#1820 @ 086158df) ---
+
+@test "retry: a persistent handshake timeout is attempted 3 times, each attempt named, then exit 75 says so" {
+  STUB_ADD_ERR="Error: Opening handshake has timed out" STUB_ADD_RC=1 \
+    QA_REVIEW_REQUESTER_UID="$NICK" run --separate-stderr "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 75 ]
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 3 ]
+  [[ "$stderr" == *"attempt 1/3"* ]]
+  [[ "$stderr" == *"attempt 2/3"* ]]
+  [[ "$stderr" == *"after 3/3 attempts"* ]]
+  [[ "$stderr" == *"exiting 75 (not an attempt)"* ]]
+}
+
+@test "retry: a gateway that answers on the 2nd attempt dispatches exactly one cron and exits 0, naming the retry" {
+  STUB_ADD_ERR="Error: Opening handshake has timed out" STUB_ADD_RC=1 STUB_ADD_FAIL_TIMES=1 \
+    QA_REVIEW_REQUESTER_UID="$NICK" run --separate-stderr "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  # 2 calls: one refused by transport, one that minted the job. The failed call
+  # never queued anything, so exactly ONE review is dispatched, never two.
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 2 ]
+  [[ "$output" == *"dispatched auto-review of Muso-AI/hydra#123"* ]]
+  [[ "$output" == *"on attempt 2/3"* ]]
+  [[ "$stderr" == *"attempt 1/3"* ]]
+}
+
+@test "retry: a gateway REJECTION (non-transport failure) is never retried -- one attempt, openclaw's own rc" {
+  STUB_ADD_ERR="Error: invalid --at value" STUB_ADD_RC=1 \
+    QA_REVIEW_REQUESTER_UID="$NICK" run --separate-stderr "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 1 ]
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+  [[ "$stderr" != *"retrying"* ]]
+}
+
+@test "retry: QA_DISPATCH_TRANSPORT_ATTEMPTS=1 restores the single-shot behaviour" {
+  QA_DISPATCH_TRANSPORT_ATTEMPTS=1 STUB_ADD_ERR="ECONNREFUSED" STUB_ADD_RC=1 \
+    QA_REVIEW_REQUESTER_UID="$NICK" run --separate-stderr "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 75 ]
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+  [[ "$stderr" == *"after 1/1 attempts"* ]]
+}
+
+@test "retry: the backoff schedule is honoured (last value repeats) and a malformed override falls back" {
+  # 3 attempts, schedule "1" -> two sleeps of 1s: measurable, bounded.
+  start=$(date +%s)
+  QA_DISPATCH_RETRY_BACKOFF_S="1" STUB_ADD_ERR="ECONNREFUSED" STUB_ADD_RC=1 \
+    QA_REVIEW_REQUESTER_UID="$NICK" run --separate-stderr "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 75 ]
+  [ $(( $(date +%s) - start )) -ge 2 ]
+  [[ "$stderr" == *"retrying in 1s"* ]]
+}
+
+@test "retry: malformed overrides fall back to the defaults instead of aborting before the dispatch" {
+  # Attempts "lots" -> default 3 (backoff 0 from setup keeps it instant).
+  QA_DISPATCH_TRANSPORT_ATTEMPTS="lots" STUB_ADD_ERR="ECONNREFUSED" STUB_ADD_RC=1 \
+    QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 75 ]
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 3 ]
+  # Backoff "soon" with a single attempt: no sleep is ever reached, and the
+  # malformed value must not trip set -u/-e on the way to the dispatch.
+  : > "$STUB_CALLS"
+  QA_DISPATCH_TRANSPORT_ATTEMPTS=1 QA_DISPATCH_RETRY_BACKOFF_S="soon" \
+    QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
+  [ "$status" -eq 0 ]
+  [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+}
+
+@test "retry: an AMBIGUOUS transport failure is never retried -- one attempt, exit 75, no second one-shot" {
+  # ECONNRESET / socket hang up / fetch failed can be produced AFTER the request
+  # was written, so a one-shot may already exist. Retrying would mint a second
+  # job for the same PR (two concurrent reviews, two DMs, a second status).
+  for sig in "read ECONNRESET" "socket hang up" "TypeError: fetch failed"; do
+    : > "$STUB_CALLS"
+    STUB_ADD_ERR="$sig" STUB_ADD_RC=1 \
+      QA_REVIEW_REQUESTER_UID="$NICK" run --separate-stderr "$SCRIPT" 123 "$GOOD_SHA"
+    [ "$status" -eq 75 ]
+    [ "$(grep -c '^cron-add$' "$STUB_CALLS")" -eq 1 ]
+    [[ "$stderr" == *"ambiguous"* ]]
+    [[ "$stderr" != *"retrying"* ]]
+  done
 }
 
 @test "each pre-gateway transport signature maps to exit 75, case-insensitively" {
@@ -998,4 +1087,82 @@ PY
   [ "$rc" -ne 0 ]
   [ "$rc" -ne 76 ]
   [[ "$out" != *"enqueued"* ]]
+}
+
+# --- 2026-11-06 (hydra#1820 @ 086158df, run 42282917209): a failed dispatch must be ---
+# --- visible ON THE PR even on an ungated repo -------------------------------------
+# Executes the SHIPPED step script from qa-autoreview.yml in a scratch checkout where
+# gh, the dispatcher and the status writer are stubs. The scratch policy is written
+# explicitly with .merge_gate_repos empty, so these tests pin the UNGATED step behavior
+# they claim to and do not move when hydra is added to the live gate list. Ungated is
+# the shape that mattered: before this fix the dispatch-failure say_status posted
+# NOTHING and the red workflow_run (not attached to the PR's checks) was the only trace.
+autoreview_step_script() {
+  python3 - "$AUTOREVIEW" <<'PY'
+import yaml, sys
+wf = yaml.safe_load(open(sys.argv[1]))
+steps = wf["jobs"]["dispatch"]["steps"]
+step = [s for s in steps if s.get("name", "").startswith("Resolve PR")][0]
+print(step["run"])
+PY
+}
+autoreview_scratch() {   # <dispatcher-rc> -> scratch checkout dir with stubs
+  local d="$TEST_TMPDIR/autoreview"; mkdir -p "$d/scripts/lib" "$d/policies"
+  cp "$HYDRA_REPO/scripts/lib/qa-policy.sh" "$HYDRA_REPO/scripts/lib/qa-author-slack-uid.sh" "$d/scripts/lib/"
+  printf '{"merge_gate_repos":[],"identity":{"app_repos":[]}}\n' > "$d/policies/qa-approval-policy.json"
+  printf '#!/usr/bin/env bash\necho "dispatch $*" >> "%s/calls"\nexit %s\n' "$d" "$1" > "$d/scripts/qa-dispatch-pr-review.sh"
+  printf '#!/usr/bin/env bash\necho "status $*" >> "%s/calls"\n' "$d" > "$d/scripts/qa-review-status.sh"
+  # gh stub: the PR lookup for the head (one open main-based PR by adk47).
+  cat > "$STUBBIN/gh" <<'STUB'
+#!/usr/bin/env bash
+case "$1 $2" in
+  "api repos/Muso-AI/hydra/commits/"*) echo '{"number":1820,"user":{"login":"adk47"},"draft":false,"base":{"ref":"main"}}' ;;
+  *) echo "unexpected gh $*" >&2; exit 1 ;;
+esac
+STUB
+  chmod +x "$STUBBIN/gh"
+  autoreview_step_script > "$d/step.sh"
+  echo "$d"
+}
+autoreview_run_step() {   # <dir>
+  ( cd "$1" && REPO=Muso-AI/hydra HEAD_SHA=086158dfc76ea0be043d3a7fb95b92ea5f240947 \
+      GITHUB_SERVER_URL=https://github.com GITHUB_RUN_ID=42282917209 bash step.sh )
+}
+
+@test "autoreview step: dispatcher exit 75 on an ungated repo -> red step, ::error names the reason, qa-review=failure IS posted" {
+  d="$(autoreview_scratch 75)"
+  run autoreview_run_step "$d"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"::error::NO QA REVIEW QUEUED for PR #1820 @ 086158d: gateway unreachable; review not confirmed queued."* ]]
+  [[ "$output" == *"actions/runs/42282917209"* ]]
+  grep -q '^dispatch 1820 086158dfc76ea0be043d3a7fb95b92ea5f240947 Muso-AI/hydra U7RP6HKUZ$' "$d/calls"
+  grep -q '^status Muso-AI/hydra 086158dfc76ea0be043d3a7fb95b92ea5f240947 failure QA review could not be dispatched — gateway unreachable; review not confirmed queued (run 42282917209)$' "$d/calls"
+  # The gated pending stays gated: the only status written off the gate is the failure.
+  [ "$(grep -c '^status ' "$d/calls")" -eq 1 ]
+}
+
+@test "autoreview step: a non-75 dispatcher failure is red and posted too, with the rc named" {
+  d="$(autoreview_scratch 1)"
+  run autoreview_run_step "$d"
+  [ "$status" -eq 1 ]
+  grep -q '^status .* failure QA review could not be dispatched — dispatcher exited 1 (run 42282917209)$' "$d/calls"
+}
+
+@test "autoreview step: a successful dispatch on an ungated repo posts NO status (nothing changes on the happy path)" {
+  d="$(autoreview_scratch 0)"
+  run autoreview_run_step "$d"
+  [ "$status" -eq 0 ]
+  grep -q '^dispatch 1820 ' "$d/calls"
+  ! grep -q '^status ' "$d/calls"
+}
+
+@test "autoreview step: the dispatch-failure description is classified by the reconciler as infrastructure, not a verdict" {
+  # The posted description must START with the QAR_INFRA_STATUS_MARKERS prefix so the
+  # reconciler re-dispatches instead of parking the head as "reviewed".
+  d="$(autoreview_scratch 75)"
+  autoreview_run_step "$d" >/dev/null 2>&1 || true
+  desc="$(sed -n 's/^status Muso-AI\/hydra [0-9a-f]* failure //p' "$d/calls")"
+  [ -n "$desc" ]
+  source "$HYDRA_REPO/scripts/lib/qa-reconcile.sh"
+  [ "$(qar_classify_verdict 0 failure 0 "$desc")" = "candidate" ]
 }

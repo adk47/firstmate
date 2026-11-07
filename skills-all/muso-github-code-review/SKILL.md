@@ -698,6 +698,13 @@ otherwise under the qa workspace's `tmp/` (`/opt/hydra/workspaces/qa/tmp`, TTL-s
 nothing outlives it. Clone into the same root, never `/tmp`.
 `scripts/check-no-tmp-scratch.sh` fails a PR that adds a hard-coded tmp path here.
 
+**`rc=6` from that POST is `qa-gh.sh` refusing an EMPTY review** — a payload with
+no `body` and no inline `comments`. GitHub would accept it and record a bodiless
+`COMMENTED` review that every downstream reader counts as "reviewed" while it
+says nothing, so the shim refuses it at the write surface. It is not a transport
+failure: fix the payload (post the verdict body), never retry it as-is. A
+comment-only review still passes — the carry-forward thread wrapper is legitimate.
+
 **NEVER inline PR/diff text via `-f body='...'`** — always heredoc +
 `--input <file>` (backticks/`$(...)` re-parse through your shell; PR #287
 wrote a stray file this way — a code-exec vector). `COMMENT` only, never

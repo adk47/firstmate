@@ -45,7 +45,20 @@ set -euo pipefail
 # simultaneously break the deploy/release paths that legitimately need the host
 # account's admin scopes. Per-process injection here is the only clean seam.
 #
+# ── Empty review payloads are refused (exit 6) ──────────────────────────────
+# The reviewer posts its verdict as `api repos/<o>/<r>/pulls/<n>/reviews --method
+# POST --input <file>` (skill Step 6). GitHub accepts a payload with no body and
+# no inline comments and renders it as a bodiless `COMMENTED` review -- which
+# every reader downstream (the reconciler's qar_has_bot_review, a human on the
+# PR) counts as "the bot reviewed this" while it says NOTHING. A reviewer that
+# can succeed with no output cannot gate merges, so that one shape is refused
+# here, at the single write surface, with the reason named. A review with a
+# body, or with at least one inline comment (the carry-forward thread replies
+# legitimately post body-less, comment-only reviews), passes untouched: this
+# never decides or reformats a verdict, it only refuses the absence of one.
+#
 # Exit codes: passes through gh's exit code. 2 usage. 5 token mint failed.
+#             6 empty review payload refused (see above).
 #
 # Env (mainly for tests):
 #   QA_GH_HOST_FLAG         kill-switch path (default /var/lib/hydra/qa-gh-host-identity)
@@ -70,6 +83,40 @@ if [ "${1:-}" = "--repo" ]; then
   shift 2
 fi
 [ "$#" -gt 0 ] || die 2 "usage: qa-gh.sh [--repo <owner/name>] <gh args...>"
+
+# ── refuse an empty review POST ──────────────────────────────────────────────
+# Recognised shape: `api <path ending in /pulls/<n>/reviews> ... --input <file>`
+# with `--method POST` / `-X POST` -- the one shape the reviewer skill uses
+# (Step 6 always passes a file). Any other call passes straight through,
+# including `--input -`: inspecting stdin would mean spooling the review body to
+# disk before the token paths below can still die, so it is deliberately not
+# inspected. A payload jq cannot parse is left to gh (it 400s loudly on its
+# own); only a PARSEABLE payload that is provably content-free is refused.
+review_post_payload_check() {
+  local is_post=0 is_reviews=0 input="" i a
+  [ "${1:-}" = "api" ] || return 0
+  for ((i = 1; i <= $#; i++)); do
+    a="${!i}"
+    case "$a" in
+      --method|-X) i=$((i + 1)); [ "${!i:-}" = "POST" ] && is_post=1 ;;
+      --method=POST|-XPOST) is_post=1 ;;
+      --input) i=$((i + 1)); input="${!i:-}" ;;
+      --input=*) input="${a#--input=}" ;;
+      */pulls/[0-9]*/reviews|*/pulls/[0-9]*/reviews/) is_reviews=1; REVIEWS_PATH="$a" ;;
+    esac
+  done
+  [ "$is_post" = 1 ] && [ "$is_reviews" = 1 ] && [ -n "$input" ] && [ "$input" != "-" ] || return 0
+  [ -r "$input" ] || return 0
+  local verdict
+  verdict="$(jq -r '
+    if type != "object" then "pass"
+    elif ((.body // "") | tostring | gsub("\\s"; "") | length) > 0 then "pass"
+    elif ((.comments // []) | if type == "array" then length else 0 end) > 0 then "pass"
+    else "empty" end' "$input" 2>/dev/null)" || return 0
+  [ "$verdict" != "empty" ] || die 6 "refusing to POST an EMPTY review to ${REVIEWS_PATH}: the payload has no body and no inline comments, so GitHub would record a bodiless COMMENTED review that reads as a verdict while saying nothing. Post the verdict body (GO / NO-GO / CANNOT REVIEW with the reason) -- a review that says nothing is a missing review, not a review."
+}
+REVIEWS_PATH=""
+review_post_payload_check "$@"
 
 # ── resolve identity ────────────────────────────────────────────────────────
 # Fail-safe reads throughout: an unreadable or malformed policy resolves to the

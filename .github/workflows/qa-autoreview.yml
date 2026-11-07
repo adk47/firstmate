@@ -98,8 +98,11 @@ jobs:
           fi
           gated=0
           [ "$_rc" -eq 0 ] && gated=1
-          say_status() {  # <state> <description> — best-effort, never aborts
-            [ "$gated" = 1 ] || return 0
+          say_status() {  # <state> <description> [always] — best-effort, never aborts
+            # Gated repos only, EXCEPT a caller that passes `always`: the one
+            # write that must land on an ungated repo too (the dispatch-failure
+            # red below). Everything else stays silent off the gate.
+            [ "$gated" = 1 ] || [ "${3:-}" = always ] || return 0
             bash scripts/qa-review-status.sh "$REPO" "$HEAD_SHA" "$1" "$2" \
               || echo "::warning::could not post qa-review=$1 for ${HEAD_SHA:0:7}"
           }
@@ -169,7 +172,38 @@ jobs:
           # the stale-pending watchdog is a hard prerequisite for adding any repo
           # to .merge_gate_repos (it does not exist yet; see that field's
           # _field_notes). Without it, a lost dispatch has no recovery path.
-          if ! bash scripts/qa-dispatch-pr-review.sh "$PR" "$HEAD_SHA" "$REPO" "$REQUESTER_UID"; then
-            say_status failure "QA review could not be dispatched — see the qa-autoreview workflow run"
+          # A failed dispatch must be VISIBLE ON THE PR, gated or not. This is a
+          # workflow_run job, so a red run here is not attached to the PR's checks
+          # at all; with .merge_gate_repos empty the gated say_status above posts
+          # nothing, and the PR shows exactly what an un-dispatched review shows:
+          # no status, no review -- "not yet reviewed", forever, unless a human
+          # notices the Actions tab or the reconciler completes a tick (2026-11-06:
+          # hydra#1820 @ 086158df, run 42282917209 attempt 1 exited 75 on a gateway
+          # handshake timeout and was recovered only by a hand re-run). So this
+          # one failure status is posted UNCONDITIONALLY: it is not a verdict and
+          # never blocks on an ungated repo (the check is not required there), the
+          # reconciler already classifies its "QA review could not be dispatched"
+          # prefix as infrastructure (lib/qa-reconcile.sh QAR_INFRA_STATUS_MARKERS
+          # -> candidate, so it still re-dispatches), and the real verdict's status
+          # overwrites it when the review lands. The prefix is load-bearing.
+          _drc=0
+          bash scripts/qa-dispatch-pr-review.sh "$PR" "$HEAD_SHA" "$REPO" "$REQUESTER_UID" || _drc=$?
+          if [ "$_drc" -ne 0 ]; then
+            if [ "$_drc" -eq 75 ]; then
+              # Short on purpose: the status description is capped at 140 chars
+              # and the run id must survive the cut. Exit 75 covers BOTH the
+              # exhausted-retry path and the ambiguous one (a socket that died
+              # after the request may have been received, so a one-shot may
+              # exist), so this must not assert a queue state the dispatcher
+              # cannot prove.
+              why="gateway unreachable; review not confirmed queued"
+            else
+              why="dispatcher exited ${_drc}"
+            fi
+            run_url="${GITHUB_SERVER_URL}/${REPO}/actions/runs/${GITHUB_RUN_ID}"
+            echo "::error::NO QA REVIEW QUEUED for PR #${PR} @ ${HEAD_SHA:0:7}: ${why}. Re-run this job once the gateway answers; the reconciler also retries. ${run_url}"
+            # Keep this literal on ONE line: scripts/tests/qa-review-reconcile.bats
+            # reads the description out of this file to pin it as non-verdict.
+            say_status failure "QA review could not be dispatched — ${why} (run ${GITHUB_RUN_ID})" always
             exit 1
           fi

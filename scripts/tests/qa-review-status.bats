@@ -291,6 +291,40 @@ CANNOT_ROW='{"context":"qa-review","state":"failure","description":"CANNOT REVIE
   grep -q 'state=pending' "$QA_GH_LOG"
 }
 
+# 2026-11-06: the un-dispatched failure (gateway never took the job) is the same
+# no-information row. Re-run shape: PR Validation re-run on a GO'd sha, gateway down.
+UNDISPATCHED="QA review could not be dispatched — gateway unreachable; review not confirmed queued (run 42282917209)"
+UNDISPATCHED_ROW='{"context":"qa-review","state":"failure","description":"QA review could not be dispatched — gateway unreachable; review not confirmed queued (run 1)","created_at":"2026-10-12T18:50:00Z"}'
+
+@test "an un-dispatched failure does not overwrite a standing same-sha GO (the exact re-run shape)" {
+  STUB_STATUSES_JSON="[$GO_ROW]" run "$SCRIPT" Muso-AI/hydra "$SHA" failure "$UNDISPATCHED"
+  [ "$status" -eq 0 ]
+  if grep -q -- '--method POST' "$QA_GH_LOG"; then false; fi
+  echo "$output" | grep -q '2026-10-12T18:26:51Z'
+}
+
+@test "an un-dispatched failure with no prior same-sha GO still posts failure (the fail-open fix stays loud)" {
+  STUB_STATUSES_JSON="[]" run "$SCRIPT" Muso-AI/hydra "$SHA" failure "$UNDISPATCHED"
+  [ "$status" -eq 0 ]
+  grep -q -- '--method POST' "$QA_GH_LOG"
+  grep -q 'state=failure' "$QA_GH_LOG"
+}
+
+@test "earlier no-information rows of EITHER prefix are skipped when finding the current verdict" {
+  # newest: un-dispatched, then CANNOT REVIEW, then the GO -> the GO is still current.
+  STUB_STATUSES_JSON="[$UNDISPATCHED_ROW,$CANNOT_ROW,$GO_ROW]" \
+    run "$SCRIPT" Muso-AI/hydra "$SHA" failure "CANNOT REVIEW: GitHub API rate limit blocked the review bundle"
+  [ "$status" -eq 0 ]
+  if grep -q -- '--method POST' "$QA_GH_LOG"; then false; fi
+}
+
+@test "an un-dispatched failure after a pending re-arm of a same-sha GO still posts (gated-repo shape)" {
+  PENDING_ROW='{"context":"qa-review","state":"pending","description":"QA review queued for 0123456","created_at":"2026-10-12T19:00:00Z"}'
+  STUB_STATUSES_JSON="[$PENDING_ROW,$GO_ROW]" run "$SCRIPT" Muso-AI/hydra "$SHA" failure "$UNDISPATCHED"
+  [ "$status" -eq 0 ]
+  grep -q -- '--method POST' "$QA_GH_LOG"
+}
+
 @test "CANNOT REVIEW after a pending re-arm of a same-sha GO still posts (the GO is no longer the current verdict)" {
   # The re-arm supersedes the GO even though the GO row is still in history. The
   # newest non-CANNOT row is the pending one, so the standing GO is not current.
