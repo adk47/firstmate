@@ -326,10 +326,10 @@ export default function (pi: ExtensionAPI) {
     }
   };
 
-  const release = (seq: number, ctx: IntakeContext | undefined, why = "the abort") => {
+  const release = (seq: number, ctx: IntakeContext | undefined, message = "was returned to your editor by the abort") => {
     inFlight.delete(seq);
     if (moveRecord(seq, releasedDir)) {
-      notify(ctx, `intake #${seq} was returned to your editor by ${why}; it is kept at state/intake/released/${seq}.prompt and is not re-sent`, "warning");
+      notify(ctx, `intake #${seq} ${message}; it is kept at state/intake/released/${seq}.prompt and is not re-sent`, "warning");
     }
   };
 
@@ -422,7 +422,7 @@ export default function (pi: ExtensionAPI) {
     clearResendTimer();
     if (typeof ctx.hasPendingMessages === "function") {
       if (!ctx.hasPendingMessages()) {
-        for (const seq of settledSeqs) release(seq, ctx as IntakeContext, "dequeue");
+        for (const seq of settledSeqs) release(seq, ctx as IntakeContext, "was released because Pi no longer had it queued (dequeue or queue clear)");
         refreshStatus(ctx as IntakeContext);
       }
       return;
