@@ -92,11 +92,11 @@ SH
 }
 
 # worker <home> <id> <state> [kind]: one recorded task and its endpoint state.
-worker() {  # <home> <id> <state> [kind]
-  local home=$1 id=$2 state=$3 kind=${4:-ship}
+worker() {  # <home> <id> <state> [kind] [harness]
+  local home=$1 id=$2 state=$3 kind=${4:-ship} harness=${5:-pi}
   fm_write_meta "$home/state/$id.meta" \
     "window=firstmate:$id" "endpoint_task_id=$id" "worktree=$home/wt-$id" \
-    "project=p" "harness=pi" "kind=$kind" "mode=no-mistakes" "yolo=off"
+    "project=p" "harness=$harness" "kind=$kind" "mode=no-mistakes" "yolo=off"
   printf '%s\n' "$state" > "$home/fix/$id.state"
 }
 
@@ -469,7 +469,9 @@ test_an_unread_steer_is_interrupted_then_relaunched_once_each() {
 test_a_connection_error_lane_is_continued_then_relaunched_on_the_fallback_model() {
   local home now out
   home=$(make_home conn); fake_tools "$home"
-  worker "$home" w1 alive ship
+  # A Claude Code lane is the only harness a /model switch can reach, so this is
+  # the only fixture where the fallback-model path is reachable at all.
+  worker "$home" w1 alive ship claude
   pane "$home" w1 idle 'Error: Connection error. Retrying...'
   now=$(start_clock)
   tick "$home" "$now" >/dev/null
@@ -494,7 +496,7 @@ test_a_connection_error_lane_is_continued_then_relaunched_on_the_fallback_model(
   # A lane that owns scheduled ticks refuses the gateway repoint; it still comes
   # back, on its own model, and the refusal is reported rather than swallowed.
   home=$(make_home conn-refuse); fake_tools "$home"
-  worker "$home" w9 alive ship
+  worker "$home" w9 alive ship claude
   pane "$home" w9 idle 'Error: Connection reset by peer'
   : > "$home/units/lane-switch-refuses"
   now=$(start_clock)
@@ -509,6 +511,30 @@ test_a_connection_error_lane_is_continued_then_relaunched_on_the_fallback_model(
   assert_contains "$(wakes "$home")" 'could not move w9' \
     "a refused repoint was not reported to firstmate"
   pass "a lane frozen on a connection error is continued, then relaunched onto the fallback worker model"
+}
+
+# A pi lane cannot be repointed by typing /model into its pane, so attempting the
+# switch is not a failed action - it is an impossible one. Waking firstmate for it
+# every cycle trains the reader to skip the watchdog-model line, which is the one
+# line that would matter if a Claude lane ever genuinely failed to move.
+test_a_non_claude_lane_is_never_reported_as_a_failed_model_switch() {
+  local home now
+  home=$(make_home conn-pi); fake_tools "$home"
+  worker "$home" w1 alive ship pi
+  pane "$home" w1 idle 'Error: Connection reset by peer'
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  tick "$home" "$((now + 700))" >/dev/null
+  tick "$home" "$((now + 710))" >/dev/null
+  tick "$home" "$((now + 720))" >/dev/null
+  tick "$home" "$((now + 730))" >/dev/null
+  assert_contains "$(cat "$home/calls")" 'control w1 relaunch' \
+    "a pi lane frozen on a connection error was never relaunched"
+  grep -q -- '--model' "$home/calls" \
+    && fail "a pi lane was relaunched onto a model its harness cannot be switched to"
+  assert_eq "$(wakes "$home" | grep -c 'could not move')" "0" \
+    "a pi lane reported an impossible model switch as a failure firstmate must act on"
+  pass "a non-Claude lane is relaunched on its own model and never reported as a failed switch"
 }
 
 test_a_review_seat_keeps_its_model_and_a_permanent_error_is_never_retried() {
@@ -592,6 +618,7 @@ test_a_dry_run_reports_every_lane_and_changes_nothing() {
 test_a_dead_worker_comes_back_in_one_pass_with_no_wake
 test_an_unread_steer_is_interrupted_then_relaunched_once_each
 test_a_connection_error_lane_is_continued_then_relaunched_on_the_fallback_model
+test_a_non_claude_lane_is_never_reported_as_a_failed_model_switch
 test_a_review_seat_keeps_its_model_and_a_permanent_error_is_never_retried
 test_in_flight_backlog_items_without_a_record_are_reported_once
 test_a_dry_run_reports_every_lane_and_changes_nothing

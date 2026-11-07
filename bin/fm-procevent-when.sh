@@ -478,7 +478,19 @@ cmd_terminal() {
 cmd_retire() {
   local name=${1-} sid captured=0 result
   when_name_valid "$name" || die "name must be path-safe and at most 59 characters: ${name-}"
+  # Accept BOTH the bare name and the printed `when-<name>` form. retire prints
+  # "retired: when-<name>", so re-feeding that output is the natural next call - and
+  # before this, it silently built `when-when-<name>`, retired a source that does not
+  # exist, rm -f'd nothing, and printed success while the real watch kept firing.
+  # A retire that reports an outcome it did not produce is worse than a refusal.
+  case $name in
+    when-?*) name=${name#when-} ;;
+  esac
+  when_name_valid "$name" || die "name must be path-safe and at most 59 characters: ${name-}"
   sid="when-$name"
+  if [ ! -e "$(spec_file "$sid")" ] && [ ! -e "$(trust_file "$sid")" ]; then
+    die "no such watch: $sid (nothing to retire; refusing rather than reporting success)"
+  fi
   if [ -e "$(fired_file "$sid")" ]; then
     for result in "$(fm_procevent_inbox_dir "$STATE")/$sid".*.result; do
       [ -e "$result" ] && captured=1
@@ -490,6 +502,22 @@ cmd_retire() {
   "$SCRIPT_DIR/fm-procevent.sh" retire "$sid" || die "cannot retire the watch source: $sid"
   rm -f -- "$(spec_file "$sid")" "$(trust_file "$sid")" "$(fired_file "$sid")"
   printf 'retired: %s\n' "$sid"
+  # Retiring the SPEC does not clear a result the watch already captured. An
+  # unhandled result keeps re-presenting its wake until it is acknowledged, so a
+  # retire alone looks like it did nothing (observed 2026-11-07: a retired watch
+  # kept waking the fleet). Do not silently clear them - a captured result can
+  # hold information the operator still needs - but say exactly what remains and
+  # how to acknowledge it, or the retire reads as a no-op.
+  local pending=0 seq f
+  for f in "$(fm_procevent_inbox_dir "$STATE")/$sid".*.result; do
+    [ -e "$f" ] || continue
+    [ -e "${f%.result}.handled" ] && continue
+    seq=${f##*/}; seq=${seq#"$sid".}; seq=${seq%.result}
+    pending=$((pending + 1))
+    printf 'pending result still unacknowledged: %s %s\n  acknowledge after reading it: %s handled %s %s\n' \
+      "$sid" "$seq" "$SCRIPT_DIR/fm-procevent.sh" "$sid" "$seq"
+  done
+  [ "$pending" -eq 0 ] || printf 'note: %s captured result(s) remain; the wake repeats until each is acknowledged\n' "$pending"
 }
 
 case "${1-}" in
