@@ -359,14 +359,21 @@ def route(*, envelope: Envelope, policy: policy_mod.Policy | None = None,
     ledger_id = None
     if ans.write is not None:
         write = ans.write
+        # The answerer's verdict is the ANSWER (the facts card and the mapped suggestion); step 9's
+        # text is the WRITE OUTCOME. Replacing one with the other would hide the card from the
+        # requester, so every step-9 answer carries both.
+        base = ans.verdict
         ok, why = policy.may_write(requester, write.action)
         if not ok:
+            # `page=ans.page` again: a read-only or unknown requester asking for a resolution
+            # still gets a hand-off page from the answerer, and dropping it here means the case
+            # reaches nobody. The refusal is about the WRITE, not about the hand-off.
             ans = answer_mod.Answer(
                 state="refused",
-                verdict=f"write {write.action} refused for this requester ({why})",
+                verdict=f"{base} · write {write.action} refused for this requester ({why})",
                 verdict_source="coded", evidence=extracted.evidence(),
                 next_step="a W1 requester (Jan / Nick / Aaron) or a named human",
-                due_at=due_at, lens=ans.lens)
+                due_at=due_at, lens=ans.lens, page=ans.page)
             return finish(ans)
 
         if frame is None and backends.lens is not None:
@@ -388,7 +395,8 @@ def route(*, envelope: Envelope, policy: policy_mod.Policy | None = None,
             state = {"hold": "held", "ask": "ask"}.get(lens.decision, "refused")
             ans = answer_mod.Answer(
                 state=state,
-                verdict=f"write blocked by fraud lens ({','.join(lens.reasons) or lens.decision})",
+                verdict=(f"{base} · write blocked by fraud lens "
+                         f"({','.join(lens.reasons) or lens.decision})"),
                 verdict_source="fraud-lens", evidence=extracted.evidence(),
                 next_step="human review of the lens result; no write performed",
                 due_at=due_at, lens=lens,
@@ -401,7 +409,7 @@ def route(*, envelope: Envelope, policy: policy_mod.Policy | None = None,
         if not allowed:
             ans = answer_mod.Answer(
                 state="held",
-                verdict=f"write held by burst cap ({cap_reason})",
+                verdict=f"{base} · write held by burst cap ({cap_reason})",
                 verdict_source="coded", evidence=extracted.evidence(),
                 next_step="page: a human decides whether the burst is real work",
                 due_at=due_at, lens=lens)
@@ -416,7 +424,8 @@ def route(*, envelope: Envelope, policy: policy_mod.Policy | None = None,
         except ledger_mod.LedgerError as exc:
             ans = answer_mod.Answer(
                 state="refused",
-                verdict=f"{write.action} not performed: its inverse is not executable ({exc})",
+                verdict=(f"{base} · {write.action} not performed: its inverse is not "
+                         f"executable ({exc})"),
                 verdict_source="coded", evidence=extracted.evidence(),
                 next_step="no inverse, no write: a human decides, or the answerer records one",
                 due_at=due_at, lens=lens)
@@ -426,13 +435,17 @@ def route(*, envelope: Envelope, policy: policy_mod.Policy | None = None,
         if writer is None:
             reason = f"no writer wired for {write.action}"
             ledger.mark_failed(ledger_id, undo_state="n/a", detail=f"{reason}; nothing executed")
+            # `page=ans.page` is load-bearing: `_production_writers()` is empty by captain
+            # decision, so this is the branch EVERY production ask takes. Dropping the page here
+            # discarded the answerer's hand-off page and left the case with the bot while the
+            # customer had been told someone would follow up.
             ans = answer_mod.Answer(
                 state="answered",
-                verdict=f"{write.action} recorded with its inverse; {reason}, nothing executed",
+                verdict=f"{base} · {write.action} recorded with its inverse; {reason}, nothing executed",
                 verdict_source="coded", evidence=extracted.evidence(),
                 next_step=(f"captain decision: wire a writer for {write.action} and set "
                            f"{WRITES_ENABLED_ENV}=1; the ledger row is the plan"),
-                due_at=due_at, lens=lens)
+                due_at=due_at, lens=lens, page=ans.page)
         else:
             try:
                 result = writer(write.params)
@@ -440,7 +453,7 @@ def route(*, envelope: Envelope, policy: policy_mod.Policy | None = None,
                 ledger.mark_failed(ledger_id, detail=f"write failed: {exc}")
                 ans = answer_mod.Answer(
                     state="failed",
-                    verdict=f"{write.action} failed ({type(exc).__name__}); inverse not needed",
+                    verdict=f"{base} · {write.action} failed ({type(exc).__name__}); inverse not needed",
                     verdict_source="coded", evidence=extracted.evidence(),
                     next_step="page: write failure with a ledger row", due_at=due_at,
                     lens=lens, page=f"ops-intake: write failed on ask {ask_id}")
@@ -455,7 +468,8 @@ def route(*, envelope: Envelope, policy: policy_mod.Policy | None = None,
                             f"the writer result: {json.dumps(result, sort_keys=True)[:500]}"))
                 ans = answer_mod.Answer(
                     state="failed",
-                    verdict=f"{write.action} applied but the inverse handle was not returned - undo is unavailable",
+                    verdict=(f"{base} · {write.action} applied but the inverse handle was not "
+                             f"returned - undo is unavailable"),
                     verdict_source="coded", evidence=extracted.evidence(),
                     next_step="page: a human must undo this write by hand", due_at=due_at,
                     lens=lens)
@@ -477,9 +491,14 @@ def _answer_for(*, cls: str, ask: dict[str, Any], extracted: ids_mod.ExtractedId
         return answer_mod.answer_proof_review(ask=ask, ids=extracted, backends=backends,
                                               due_at=due_at)
     if cls == "summarize-resolve":
-        return answer_mod.answer_summarize_resolve(ask=ask, ids=extracted, backends=backends,
-                                                   due_at=due_at, policy=policy,
-                                                   guardobj=guardobj)
+        # The card's account state depends on WHO asked (a requester-linked account is a refusal),
+        # so the requester travels with the ask. `text` is the requester's own message: it is the
+        # only place a rename's target name may come from.
+        return answer_mod.answer_summarize_resolve(
+            ask=ask, ids=extracted, backends=backends, due_at=due_at, policy=policy,
+            guardobj=guardobj,
+            requester_email=requester.slack_email,
+            requester_ids=(requester.user_id,), text=text)
     if cls == "gdpr-hide":
         lens = fraud.evaluate(frame, require_identity_verdict=(
             policy.actions["classes"]["gdpr-hide"].get("requires_register_verdict") or ())
@@ -796,12 +815,13 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def production_guard() -> guard.Guard:
-    """The tool-less judge for the ONE optional model step (conversation summary).
+    """The tool-less judge for the ONE optional model step (the intent label).
 
     ``credit_trust/llm.py`` is the repo's only sanctioned tool-less ladder; the
     Ops agent turn is not in this path. Every call is an ``llm_calls`` row.
     ``answer_summarize_resolve`` screens the fetched text first, delimits it as
-    data, and checks the canary on the way out.
+    data, and calls through ``guard.Guard.call`` so the canary is checked on the
+    way out.
     """
 
     def _judge(prompt: str, schema: dict[str, Any] | None):

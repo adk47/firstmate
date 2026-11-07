@@ -727,6 +727,27 @@ process contradictions, off-topic -> approved hand-off line + reassignment). App
 text pass the detection-only injection watch (TS + Python copies pinned equal). Changing a rule = add a red-team
 case (`plugins/intercom/redteam/`); a case that gets through fails CI and the daily replay pages. See
 `docs/support/caroline-safety-layer.md`.
+
+**The Ops bot's summarize/resolve asks are code now, and the same guard covers them.**
+`scripts/ops_intake/summarize.py <conversation_id>` prints a facts card built only from code reads
+(account r5, request statuses, claims, merges, erasure row, verify ledger, subscription, ClickUp) with
+at most one tool-less 40-word intent label; the suggested resolution is a LOOKUP in
+`policies/ops-resolutions.json`, never a judgement, and the card prints the RULE KEY so a wrong
+mapping is a one-line PR. The card and the lookup are wired into the router's `summarize-resolve`
+answerer (`answer.answer_summarize_resolve`), which **executes nothing**: it returns a `WriteRequest`
+and the router's step 9 is the only executor (tier → fraud lens → caps → `ledger.plan` with the
+inverse → writer). Do not add a second executor — `router._production_writers()` returns `{}` by
+captain decision, so a direct write would perform behind a gate a human closed. An UNREADABLE fact is
+`unknown` and falls through to the hand-off — "0 open requests" and "could not read the requests" map
+to different actions, so never coerce one to the other. The intent label goes through
+`guard.Guard.call`, not the raw judge: `call` is what raises `CanaryLeak` when the model echoes the
+prompt frame, and a leak fails the ask closed. Every customer reply leaves as an answer-bank line
+through the REAL `caroline-output-guard.ts` (a Python caller shells out to it; never port it) and then
+`scripts/intercom-ops-write.sh reply --customer-facing --approved-by <requester>` (pinned identity,
+leak refusal, api-log before POST) — never a hand-composed `/conversations/{id}/reply`. A guard that
+cannot run sends nothing. `docs/support/ops-summarize-resolve.md`; pinned by
+`tests/test_ops_intake_*.py`, `scripts/tests/ops-intake-guard.bats` and
+`scripts/check-ops-resolutions.sh` (CI: the lookup stays closed).
 Profile merges are judged in shadow by `scripts/merge-verify.py` (verdict + the exact command for a
 named human; no executor, no agent confirmer): `docs/credit-verification/merge-verify.md`.
 Every credits / claims / merges verifier is scored in shadow by `scripts/verifier-eval.py` over the

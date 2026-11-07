@@ -103,34 +103,53 @@ def dv_outcome(extracted, *, store_path: str | Path | None = None) -> dict[str, 
     return out
 
 
-def _parts_from_doc(doc: dict[str, Any]) -> list[dict[str, str]]:
+def _parts_from_doc(doc: dict[str, Any]) -> list[dict[str, Any]]:
     """Flatten an Intercom conversation document into ordered parts.
 
     ``author.type`` is ``user`` for the customer, ``admin``/``bot`` otherwise -
     the summary counts customer messages, and the injection screen sees all of
-    it because the customer's text is the untrusted part.
+    it because the customer's text is the untrusted part. ``created_at`` is
+    carried through so the card can measure how long ago each side spoke.
     """
-    parts: list[dict[str, str]] = []
+    parts: list[dict[str, Any]] = []
 
-    def add(author: dict[str, Any] | None, body: str | None) -> None:
-        text = (body or "").strip()
+    def add(part: dict[str, Any]) -> None:
+        body = part.get("body")
+        text = (body or "").strip() if isinstance(body, str) else ""
         if not text:
             return
-        kind = str((author or {}).get("type") or "unknown")
-        parts.append({"role": "customer" if kind == "user" else "admin", "text": text})
+        author = part.get("author") or {}
+        kind = str(author.get("type") or "unknown")
+        parts.append({"role": "customer" if kind == "user" else "admin",
+                      "text": text, "created_at": part.get("created_at")})
 
     source = doc.get("source") or {}
-    add(source.get("author"), source.get("body"))
+    add(source)
     container = doc.get("conversation_parts") or {}
     for part in container.get("conversation_parts") or []:
-        add(part.get("author"), part.get("body"))
+        add(part)
     if not parts:
         # Some payloads hand back a plain text body only; keep it, never drop it.
         for key in ("body", "text"):
             if isinstance(doc.get(key), str) and doc[key].strip():
-                parts.append({"role": "customer", "text": doc[key].strip()})
+                parts.append({"role": "customer", "text": doc[key].strip(),
+                              "created_at": doc.get("created_at")})
                 break
     return parts
+
+
+def _contact_from_doc(doc: dict[str, Any]) -> dict[str, Any] | None:
+    """The customer contact the conversation belongs to, as the existence proof for identity."""
+    customers = list((doc.get("contacts") or {}).get("contacts") or [])
+    if not customers:
+        author = (doc.get("source") or {}).get("author") or {}
+        if str(author.get("type") or "").lower() == "user":
+            customers = [author]
+    if not customers:
+        return None
+    c = customers[0] or {}
+    return {"id": c.get("id"), "external_id": c.get("external_id") or None,
+            "email": c.get("email") or None}
 
 
 def intercom_conversation(conv_id: str, *, fetch=None,
@@ -146,9 +165,12 @@ def intercom_conversation(conv_id: str, *, fetch=None,
     doc = fetch(str(conv_id))
     if not doc:
         raise RuntimeError(f"intercom conversation {conv_id} not readable")
-    return {"conversation_id": str(conv_id), "parts": _parts_from_doc(doc)}
+    return {"conversation_id": str(conv_id), "parts": _parts_from_doc(doc),
+            "contact": _contact_from_doc(doc)}
 
 
 def conversation_from_json(path: str | Path) -> dict[str, Any]:
     """Test/offline helper: build the answerer's shape from a saved payload."""
-    return {"conversation_id": str(path), "parts": _parts_from_doc(json.loads(Path(path).read_text()))}
+    doc = json.loads(Path(path).read_text())
+    return {"conversation_id": str(path), "parts": _parts_from_doc(doc),
+            "contact": _contact_from_doc(doc)}

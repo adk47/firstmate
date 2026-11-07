@@ -43,11 +43,13 @@ from typing import Any
 if __package__ in (None, ""):  # `python3 scripts/ops_intake/redteam.py`
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from ops_intake import answer as answer_mod  # noqa: E402
+    from ops_intake import facts as facts_mod  # noqa: E402
     from ops_intake import fraud, guard, ledger as ledger_mod  # noqa: E402
     from ops_intake import policy as policy_mod, router as router_mod  # noqa: E402
     from ops_intake import store as store_mod  # noqa: E402
 else:
     from . import answer as answer_mod
+    from . import facts as facts_mod
     from . import fraud, guard, ledger as ledger_mod
     from . import policy as policy_mod, router as router_mod
     from . import store as store_mod
@@ -93,9 +95,28 @@ class StubLens:
             unmeasured=tuple(spec.get("unmeasured") or ()))
 
 
+def replay_readers() -> facts_mod.Readers:
+    """Every fact seam stubbed: a replay reads no Trino, no store, no ClickUp."""
+    return facts_mod.Readers(
+        conversation=lambda _cid: None,
+        query=lambda _sql: [],
+        account=lambda _cid, _q: {},
+        requests=lambda _aid, _q: [],
+        claims=lambda _aid, _q: 0,
+        erasure=lambda _cid, _contact: {"status": "none"},
+        verify=lambda _aid: {},
+        tickets=lambda _aid, _q: 0,
+        merges=lambda _aid, _q: 0,
+        subscription=lambda _aid, _q: None,
+        popular=lambda _aid, _q: None,
+        profile_popular=lambda _pid, _q: None,
+    )
+
+
 def build_backends(case: dict[str, Any], rec: Recorder) -> answer_mod.Backends:
     stubs = case.get("stubs") or {}
-    backends = answer_mod.Backends(poster=rec.poster, pager=rec.pager)
+    backends = answer_mod.Backends(poster=rec.poster, pager=rec.pager,
+                                   readers=replay_readers())
     if "lens" in stubs:
         backends.lens = StubLens(stubs["lens"])  # type: ignore[assignment]
     if "dv_outcomes" in stubs:
@@ -135,13 +156,13 @@ def build_backends(case: dict[str, Any], rec: Recorder) -> answer_mod.Backends:
     return backends
 
 
-def build_guard(case: dict[str, Any], rec: Recorder) -> guard.Guard | None:
+def build_guard(case: dict[str, Any], rec: Recorder) -> guard.Guard:
     spec = (case.get("stubs") or {}).get("judge")
-    if spec is None:
-        return None
 
     def _judge(prompt: str, schema: dict[str, Any] | None, spec=spec, rec=rec):
         rec.model_calls.append(prompt)
+        if spec is None:
+            return {"text": "", "data": None}
         text = spec.get("reply", "")
         if spec.get("leak_canary"):
             # Behave like a model that obeyed the text instead of the frame.

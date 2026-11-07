@@ -1,0 +1,434 @@
+{
+  "version": "r1-2026-11-05.1",
+  "_why": "The Ops bot's 'give me a summary and suggest a resolution <intercom>' asks are 112 of the 301 asks Jan sent in 14 days, and each is followed by 'do resolution then update the user'. Today that resolution is an LLM-chosen production write in an agent turn. This file replaces the judgement with a LOOKUP: a closed intent vocabulary intersected with a closed fact pattern maps to exactly one action key, and an unmapped pair is 'unknown' (hand-off), never an improvised write. The suggestion a card prints NAMES the rule key below, so a wrong mapping is a one-line PR against this file, reviewable on its own.",
+  "_consumers": [
+    "scripts/ops_intake/resolutions.py (the only reader; CI-checked by scripts/check-ops-resolutions.sh)",
+    "scripts/ops_intake/summarize.py (prints `suggested: <key> -> <action>`)",
+    "scripts/ops_intake/answer.py (turns a mapped W1 action into a WriteRequest; the router's step 9 is the only executor)"
+  ],
+  "_editing": "Adding an intent label or a fact predicate means adding it to INTENT_LABELS / PREDICATES in scripts/ops_intake/resolutions.py in the same PR — the loader fails closed on an unknown name, it never silently ignores a rule.",
+  "default_action": "unknown",
+  "intent_labels": [
+    "where_is_my_request",
+    "nobody_answered",
+    "how_credits_work",
+    "credit_timing",
+    "how_do_you_verify",
+    "document_sent",
+    "did_you_get_it",
+    "how_claims_work",
+    "claim_timing",
+    "merge_profiles",
+    "credit_removed",
+    "credit_not_mine",
+    "why_rejected",
+    "claim_rejected",
+    "gdpr_erasure",
+    "delete_my_data",
+    "remove_my_profile",
+    "will_my_page_come_back",
+    "when_will_i_hear",
+    "billing_or_refund",
+    "rename_profile",
+    "data_error",
+    "reports_fraud",
+    "other"
+  ],
+  "actions": {
+    "proof-review": {
+      "tier": "handoff",
+      "executes_here": false,
+      "handoff": "j-p1 (coded proof review)",
+      "describe": "the document/claim proof verdict is decided by code (dv_outcomes), never here: hand the conversation to the proof-review lane",
+      "page": true
+    },
+    "status-line": {
+      "tier": "W1",
+      "executes_here": true,
+      "line": "status_chase",
+      "requires_fact": "open_request",
+      "describe": "post ONE answer-bank status line to the customer in the thread; it is a W1 write because it is a recorded, answer-bank-verbatim reply",
+      "inverse": "annotate_intercom_reply"
+    },
+    "gap-ask": {
+      "tier": "W1",
+      "executes_here": false,
+      "handoff": "credit-review.py claim-proof-ask",
+      "describe": "the dated proof ask has ONE sender; this surface hands the ask over instead of sending a second one",
+      "page": true
+    },
+    "uvn-status": {
+      "tier": "W1",
+      "executes_here": false,
+      "handoff": "credit-review.py uvn-status",
+      "describe": "the user_verification_needed status line has ONE sender; hand over, never send a second",
+      "page": true
+    },
+    "erasure": {
+      "tier": "handoff",
+      "executes_here": false,
+      "handoff": "j-g1 (GDPR register)",
+      "describe": "an erasure/takedown ask becomes a register row in the GDPR pipeline; this surface NEVER hides anything",
+      "page": true
+    },
+    "erasure-store-missing": {
+      "tier": "handoff",
+      "executes_here": false,
+      "handoff": "cannot check: the erasure store is not on this host - a human restores it; the customer is not asked again",
+      "describe": "the GDPR register could not be read, so whether this person was erased is UNKNOWN; a staff line names the host and path, and no customer ask is sent",
+      "page": true
+    },
+    "merge-candidate": {
+      "tier": "human",
+      "executes_here": false,
+      "handoff": "merge-verify.py + a named human",
+      "describe": "run merge-verify.py in shadow, print its verdict and the exact command it recommends, and hand it to a named human; this surface never executes a merge",
+      "page": true
+    },
+    "rename": {
+      "tier": "W1",
+      "executes_here": true,
+      "inverse": "profile_rename_back",
+      "describe": "rename the profile the Intercom contact OWNS (r5) to the name the customer asked for; the inverse is the previous name, recorded on the ledger row before the write"
+    },
+    "billing": {
+      "tier": "W2",
+      "executes_here": false,
+      "handoff": "read-only Stripe card + the refund line for a named human",
+      "describe": "no refund and no cancellation leave this surface; the card shows the subscription state and the approved refund copy for a human",
+      "page": true
+    },
+    "data-issue": {
+      "tier": "handoff",
+      "executes_here": false,
+      "handoff": "j-k1 (ClickUp categorize)",
+      "describe": "file/route the ClickUp ticket with a category; the ticket write is j-k1's",
+      "page": true
+    },
+    "fraud-lens-ticket": {
+      "tier": "handoff",
+      "executes_here": false,
+      "handoff": "fraud lens hold + ClickUp ticket",
+      "describe": "a 'this person is a fraudster, reject everything' report becomes a fraud-lens ticket and a hold review; NEVER a bulk status write",
+      "page": true
+    },
+    "unknown": {
+      "tier": "handoff",
+      "executes_here": false,
+      "handoff": "human queue",
+      "line": "handoff_line",
+      "describe": "no rule matched: post the approved hand-off line and page a human with the conversation id. The conversation is NOT reassigned from this surface - no reassignment writer is wired (router._production_writers() is empty by captain decision), so the page is what stops the case going unattended",
+      "page": true
+    },
+    "requester-linked-refusal": {
+      "tier": "handoff",
+      "executes_here": false,
+      "handoff": "refuse and page: the target account is the requester's own, so every write here would be self-approval",
+      "line": "",
+      "page": true,
+      "refuse": true,
+      "describe": "refuse the ask and page a human; no customer reply and no write"
+    }
+  },
+  "rules": [
+    {
+      "key": "requester-linked-refusal",
+      "why": "the target account is the requester's own: every write here would be self-approval, so refuse and page - never a customer reply",
+      "intents": [
+        "*"
+      ],
+      "when": {
+        "account": "requester_linked"
+      },
+      "action": "requester-linked-refusal"
+    },
+    {
+      "key": "fraud-report-not-a-bulk-reject",
+      "why": "2026-10-23 'Mixed by Big Boy': 'they are a fraudster, reject everything' must never become a bulk status write",
+      "intents": [
+        "reports_fraud"
+      ],
+      "when": {},
+      "action": "fraud-lens-ticket"
+    },
+    {
+      "key": "erasure-open-row",
+      "why": "a register row already exists and is open: the GDPR lane owns the next letter",
+      "intents": [
+        "gdpr_erasure",
+        "delete_my_data",
+        "remove_my_profile"
+      ],
+      "when": {
+        "erasure": "open"
+      },
+      "action": "erasure"
+    },
+    {
+      "key": "erasure-store-missing",
+      "why": "the register is not on this host, so erasure is UNKNOWN: a human restores the store; asking the customer to prove their erasure again would make our failure their work",
+      "intents": [
+        "gdpr_erasure",
+        "delete_my_data",
+        "remove_my_profile"
+      ],
+      "when": {
+        "erasure": "unknown"
+      },
+      "action": "erasure-store-missing"
+    },
+    {
+      "key": "erasure-new-ask",
+      "why": "no register row yet: the ask is a new GDPR row, and this surface never hides anything",
+      "intents": [
+        "gdpr_erasure",
+        "delete_my_data",
+        "remove_my_profile"
+      ],
+      "when": {
+        "erasure": "none"
+      },
+      "action": "erasure"
+    },
+    {
+      "key": "erasure-closed-row",
+      "why": "the row is closed; a closed row is re-read by the GDPR lane, not re-opened here",
+      "intents": [
+        "gdpr_erasure",
+        "delete_my_data",
+        "remove_my_profile"
+      ],
+      "when": {
+        "erasure": "closed"
+      },
+      "action": "erasure"
+    },
+    {
+      "key": "hidden-page-stays",
+      "why": "the erasure register holds a CLOSED row for this account, so the page really is hidden; the answer is the hidden_stays bank line and no new hide is due",
+      "intents": [
+        "will_my_page_come_back"
+      ],
+      "when": {
+        "erasure": "closed"
+      },
+      "action": "status-line",
+      "line": "hidden_stays"
+    },
+    {
+      "key": "hidden-page-unmeasured",
+      "why": "no CLOSED erasure row was measured, so 'your page stays hidden' is a claim the register does not support: hand off instead of asserting it",
+      "intents": [
+        "will_my_page_come_back"
+      ],
+      "when": {},
+      "action": "unknown"
+    },
+    {
+      "key": "uvn-single-sender",
+      "why": "user_verification_needed already has ONE sender (credit-review.py uvn-status); a second message is the double-send bug",
+      "intents": [
+        "where_is_my_request",
+        "nobody_answered",
+        "when_will_i_hear"
+      ],
+      "when": {
+        "open_status": "user_verification_needed"
+      },
+      "action": "uvn-status"
+    },
+    {
+      "key": "status-chase-open-request",
+      "why": "the customer asks where the request is and code measures an open request: the answer-bank status line is true",
+      "intents": [
+        "where_is_my_request",
+        "nobody_answered",
+        "when_will_i_hear"
+      ],
+      "when": {
+        "open_requests": ">0"
+      },
+      "action": "status-line",
+      "line": "status_chase"
+    },
+    {
+      "key": "status-chase-no-open-request",
+      "why": "no open request is measured, so a status line would be a promise about nothing: hand off",
+      "intents": [
+        "where_is_my_request",
+        "nobody_answered",
+        "when_will_i_hear"
+      ],
+      "when": {
+        "open_requests": "==0"
+      },
+      "action": "unknown"
+    },
+    {
+      "key": "proof-already-on-file",
+      "why": "a document is on file for an open request: the decision belongs to the proof lane",
+      "intents": [
+        "document_sent",
+        "did_you_get_it"
+      ],
+      "when": {
+        "proof_on_file": "yes"
+      },
+      "action": "proof-review"
+    },
+    {
+      "key": "proof-ask-owed",
+      "why": "no document is on file and the request is open: the dated ask has one sender",
+      "intents": [
+        "document_sent",
+        "did_you_get_it"
+      ],
+      "when": {
+        "proof_on_file": "no",
+        "open_requests": ">0"
+      },
+      "action": "gap-ask"
+    },
+    {
+      "key": "declare-already-declined",
+      "why": "code measured a decline verdict: the answer is the approved decline line, never a fresh reason",
+      "intents": [
+        "why_rejected",
+        "claim_rejected"
+      ],
+      "when": {
+        "dv_outcome": "rejected"
+      },
+      "action": "status-line",
+      "line": "declined"
+    },
+    {
+      "key": "decline-asks-are-proof-review",
+      "why": "no decline is measured: 'why was I rejected' is a proof/decision question",
+      "intents": [
+        "why_rejected",
+        "claim_rejected"
+      ],
+      "when": {},
+      "action": "proof-review"
+    },
+    {
+      "key": "how-credits-work",
+      "why": "process question with an approved answer",
+      "intents": [
+        "how_credits_work",
+        "credit_timing",
+        "how_do_you_verify"
+      ],
+      "when": {},
+      "action": "status-line",
+      "line": "credit_how"
+    },
+    {
+      "key": "how-claims-work",
+      "why": "process question with an approved answer",
+      "intents": [
+        "how_claims_work",
+        "claim_timing"
+      ],
+      "when": {},
+      "action": "status-line",
+      "line": "claim_how"
+    },
+    {
+      "key": "credit-removed",
+      "why": "process question with an approved answer",
+      "intents": [
+        "credit_removed",
+        "credit_not_mine"
+      ],
+      "when": {},
+      "action": "status-line",
+      "line": "removal_how"
+    },
+    {
+      "key": "rename-owned-profile",
+      "why": "the contact owns the profile per r5, so the rename is the customer's own name change",
+      "intents": [
+        "rename_profile"
+      ],
+      "when": {
+        "account": "resolved",
+        "target_popular": "no"
+      },
+      "action": "rename"
+    },
+    {
+      "key": "rename-popular-profile-is-W2",
+      "why": "catalog pop >= 60 or >= 50 credits: a popular-profile rename is an impersonation surface, so a human does it",
+      "intents": [
+        "rename_profile"
+      ],
+      "when": {
+        "target_popular": "yes"
+      },
+      "action": "unknown"
+    },
+    {
+      "key": "rename-ownership-unknown",
+      "why": "r5 does not resolve exactly one owning account: the rename is refused",
+      "intents": [
+        "rename_profile"
+      ],
+      "when": {
+        "account": "unresolved"
+      },
+      "action": "unknown"
+    },
+    {
+      "key": "merge-ask-no-pair",
+      "why": "no duplicate pair is measured for this account: nothing to verify yet",
+      "intents": [
+        "merge_profiles"
+      ],
+      "when": {
+        "merges": "==0"
+      },
+      "action": "status-line",
+      "line": "merge_how"
+    },
+    {
+      "key": "merge-ask-with-candidate",
+      "why": "code measures a duplicate pair: merge-verify.py judges it and prints the command for a named human",
+      "intents": [
+        "merge_profiles"
+      ],
+      "when": {
+        "merges": ">0"
+      },
+      "action": "merge-candidate"
+    },
+    {
+      "key": "billing-always-human",
+      "why": "no refund and no cancellation leave this surface",
+      "intents": [
+        "billing_or_refund"
+      ],
+      "when": {},
+      "action": "billing"
+    },
+    {
+      "key": "data-error-is-a-ticket",
+      "why": "a wrong credit/name/metadata on the page is a data issue, not a status change",
+      "intents": [
+        "data_error"
+      ],
+      "when": {},
+      "action": "data-issue"
+    },
+    {
+      "key": "fallthrough",
+      "why": "every other intent, or an unmeasured fact pattern: the approved hand-off line, then a human",
+      "intents": [
+        "*"
+      ],
+      "when": {},
+      "action": "unknown"
+    }
+  ]
+}

@@ -25,7 +25,7 @@ sentence.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Protocol
 
 from . import fraud, guard, ids as ids_mod, policy as policy_mod
@@ -211,6 +211,8 @@ class Backends:
     dv_outcomes: Callable[[ids_mod.ExtractedIds], dict[str, Any] | None] | None = None
     # summarize-resolve: the Intercom conversation parts, read-only.
     intercom_conversation: Callable[[str], dict[str, Any] | None] | None = None
+    # summarize-resolve: the non-conversation fact seams. None = the real readers.
+    readers: Any = None
     # profile-edit: the CURRENT display name, read before a rename so the inverse
     # can restore it. Absent = no rename, because no inverse, no write.
     profile_name: Callable[[str], str | None] | None = None
@@ -280,94 +282,402 @@ def answer_proof_review(*, ask: dict[str, Any], ids: ids_mod.ExtractedIds,
         due_at=due_at)
 
 
-SUMMARY_SCHEMA = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["summary"],
-    "properties": {"summary": {"type": "string",
-                               "description": "one paragraph, from the conversation text only"}},
-}
+def _intercom_document(got: Any) -> Any:
+    """The raw Intercom document `facts.collect` reads, from the router's flattened adapter.
+
+    The adapter returns ordered `{role, text, created_at}` parts plus the contact; the card reads
+    the raw document (`source`, `conversation_parts`, `contacts`). Converting here keeps ONE
+    conversation read and stops the two sides drifting into different shapes.
+    """
+    if not isinstance(got, dict):
+        return got
+    if any(k in got for k in ("source", "conversation_parts", "contacts")):
+        return got
+
+    def part(p: dict[str, Any]) -> dict[str, Any]:
+        return {"author": {"type": "user" if p.get("role") == "customer" else "admin"},
+                "body": p.get("text"), "created_at": p.get("created_at")}
+
+    parts = [p for p in (got.get("parts") or []) if isinstance(p, dict)]
+    doc: dict[str, Any] = {"id": got.get("conversation_id"),
+                           "conversation_parts": {"conversation_parts": [part(p) for p in parts[1:]]}}
+    if parts:
+        doc["source"] = part(parts[0])
+    contact = got.get("contact")
+    if isinstance(contact, dict) and contact:
+        doc["contacts"] = {"contacts": [contact]}
+    return doc
+
+
+def _card_readers(backends: Backends, base: Any = None) -> Any:
+    """The card's readers, with the router's own Intercom adapter when it has one.
+
+    Sharing the adapter is the point: the card and the router must not disagree about what the
+    conversation says, and a second Intercom client here would be a second thing to keep in step.
+    `base` supplies the other seams (production keeps the real defaults; a test injects stubs).
+    """
+    from . import facts as facts_mod  # noqa: PLC0415
+
+    base = base if base is not None else facts_mod.Readers()
+    if backends.intercom_conversation is None:
+        return base
+    return replace(
+        base, conversation=lambda cid: _intercom_document(backends.intercom_conversation(cid)))
+
+
+@dataclass(frozen=True)
+class _Proposal:
+    """What the mapped action becomes on this surface: a W1 write request, or a named reason."""
+
+    write: WriteRequest | None = None
+    reason: str = ""
+    page: str = ""
+
+    @property
+    def executable(self) -> bool:
+        return self.write is not None
+
+
+def _reply_request(card: Any, conversation_id: str, line_id: str) -> _Proposal:
+    """One answer-bank line, guard-checked, as a W1 `intercom_customer_reply` request.
+
+    The line is resolved VERBATIM from the plugin's own answer bank and then run through the real
+    Caroline output guard (`output_guard`, which shells out to `caroline-output-guard.ts`). A guard
+    that cannot run, or that blocks, means NOTHING is proposed - the Ops bot's replies bypassed
+    this guard for 34 messages in the census, and "the guard was down so we sent it anyway" is the
+    same bug with a better excuse.
+    """
+    from . import output_guard  # noqa: PLC0415
+
+    open_request = bool(card.facts.value("requests") or [])
+    try:
+        text = output_guard.line(line_id, open_request=open_request)
+        outcome = output_guard.check(text, customer_text=card.quoted.text or "",
+                                     open_request=open_request)
+    except output_guard.LineRefused as exc:
+        return _Proposal(reason=f"answer-bank line {line_id!r} refused: {exc}")
+    except output_guard.GuardUnavailable as exc:
+        return _Proposal(reason=f"output guard unavailable, so nothing may be sent: {exc}",
+                         page="ops-intake: output guard unavailable on a summarize/resolve reply")
+    if outcome.blocked:
+        flags = ",".join(f"{f.get('family')}/{f.get('rule')}" for f in outcome.flags) or "no rule"
+        return _Proposal(reason=f"output guard blocked the reply ({flags})",
+                         page=f"ops-intake: output guard blocked a reply ({flags})")
+    return _Proposal(write=WriteRequest(
+        action="intercom_customer_reply",
+        target=conversation_id,
+        params={"conversation_id": conversation_id, "body": outcome.body or text,
+                "line_id": line_id, "guard_version": outcome.guard_version,
+                "bank_version": outcome.bank_version},
+        inverse_action="annotate_intercom_reply",
+        inverse_params={}))
+
+
+# A rename's target name is a REQUESTER-supplied field, never something read out of the customer's
+# message. Only an explicit, labelled form counts; anything else leaves the name unset, and an
+# unset name means no write (the answerer says so rather than guessing).
+# `\Z`, not `$`: with re.MULTILINE, `$` matches the end of ANY line, so
+# `rename to "Jane"\nand "John"` matched on line 1 and produced a W1 plan for one of two
+# requested names. The quoted name must be the whole remainder of the MESSAGE; `\s*` still
+# tolerates trailing whitespace and newlines, but any further content refuses.
+_NEW_NAME = re.compile(
+    r"(?:new\s+name|rename\s+(?:it\s+)?to|change\s+(?:the\s+)?name\s+to)\s*[:=]?\s*"
+    r"(?:\"(?P<dq>[^\"\n]{1,120})\"|`(?P<bq>[^`\n]{1,120})`|'(?P<sq>[^\n]{1,120})')"
+    r"\s*\Z",
+    re.IGNORECASE)
+
+
+def _requested_new_name(text: str | None) -> str:
+    """The name the REQUESTER quoted, or "" when they did not quote one explicitly."""
+    if not text:
+        return ""
+    got = _NEW_NAME.search(text)
+    if got is None:
+        return ""
+    for key in ("dq", "bq", "sq"):
+        value = (got.group(key) or "").strip()
+        if not value:
+            continue
+        if key == "sq" and any(ch == "'" and i and value[i - 1].isspace()
+                               for i, ch in enumerate(value)):
+            return ""
+        return value
+    return ""
+
+
+def _page_for(action: Any, conversation_id: str) -> str:
+    """The staff page a hand-off needs, naming the conversation so a human can pick it up.
+
+    Every action that does not execute here pages. Nothing on this surface can reassign an
+    Intercom conversation, so the page is the only thing that actually reaches a human - a
+    hand-off that posts a line and pages nobody leaves the case with the bot.
+    """
+    if action.refuse:
+        return (f"ops-intake: {action.key} on conversation {conversation_id} - refused, "
+                "no customer reply and no write")
+    where = action.handoff or "a named human"
+    return (f"ops-intake: {action.key} on conversation {conversation_id} handed off to {where} - "
+            "a human must pick it up; the conversation is not reassigned from this surface")
+
+
+def _single_profile(card: Any) -> str:
+    """The profile a rename acts on: the account's OWN open request, when there is exactly one.
+
+    Several candidates means no target is chosen automatically - picking one would be exactly the
+    improvised decision this surface exists to remove.
+    """
+    ids = {str(r.get("profile_id") or "").strip() for r in (card.facts.requests or [])}
+    ids.discard("")
+    return ids.pop() if len(ids) == 1 else ""
+
+
+def _propose_write(card: Any, *, conversation_id: str, new_name: str | None,
+                   profile_id: str, backends: Backends) -> _Proposal:
+    """Turn the mapped action into a W1 write request, or say why it is not one.
+
+    Nothing here executes. The router's step 9 owns tier -> fraud lens -> caps -> ledger plan ->
+    writer, and its writers are gated off by captain decision (`OPS_INTAKE_WRITES`). A second
+    executor in this module would be a second place to get that ordering wrong.
+    """
+    action = card.suggestion.action
+    line_id = card.suggestion.line_id or action.line
+
+    # A hand-off that names an approved line still SENDS that line. "We handed it off" with
+    # nothing in the thread is the failure the census found: the customer is left in the dark.
+    # The page that makes the hand-off real is attached by the caller from `action.page`.
+    if action.key == "unknown" and line_id:
+        return _reply_request(card, conversation_id, line_id)
+
+    if not action.executes_here or action.tier != "W1":
+        return _Proposal(reason=(f"{card.suggestion.rule_key or 'unmapped'} maps to {action.key} "
+                                 f"(tier {action.tier}): "
+                                 f"{action.handoff or 'a named human takes it from here'}"))
+
+    if action.key == "status-line":
+        if not line_id:
+            return _Proposal(reason="the mapped status line has no answer-bank entry")
+        return _reply_request(card, conversation_id, line_id)
+
+    if action.key == "rename":
+        target = (profile_id or "").strip() or _single_profile(card)
+        if not target:
+            return _Proposal(reason="rename: no single profile could be measured for this account")
+        name = (new_name or "").strip()
+        if not name:
+            return _Proposal(reason=("rename: the requester must quote the new name in double "
+                                     "quotes, single quotes, or backticks"))
+        if backends.profile_name is None:
+            return _Proposal(reason="rename: no profile-name reader is wired, so there is no inverse")
+        try:
+            previous = backends.profile_name(target)
+        except Exception as exc:  # noqa: BLE001 - no before-image, no write
+            return _Proposal(reason=f"rename: the previous name could not be read "
+                                    f"({type(exc).__name__}: {exc})")
+        if not previous:
+            return _Proposal(reason="rename: no previous name measured, so there is no inverse")
+        return _Proposal(write=WriteRequest(
+            action="profile_rename", target=target,
+            params={"profile_id": target, "display_name": name},
+            inverse_action="profile_rename_back",
+            inverse_params={"profile_id": target, "previous_display_name": previous}))
+
+    return _Proposal(reason=f"{action.key} is W1 but this surface has no writer for it")
 
 
 def answer_summarize_resolve(*, ask: dict[str, Any], ids: ids_mod.ExtractedIds,
                              backends: Backends, due_at: str,
                              policy: policy_mod.Policy,
-                             guardobj: "guard.Guard | None" = None) -> Answer:
-    """Summarize from the conversation itself; a resolution write is proposed, never assumed."""
-    conv = None
-    if ids.intercom and backends.intercom_conversation is not None:
-        try:
-            conv = backends.intercom_conversation(ids.intercom[0])
-        except Exception as exc:  # noqa: BLE001
-            return Answer(state="failed",
-                          verdict=f"conversation unreadable ({type(exc).__name__})",
-                          verdict_source="coded", evidence=_ids_evidence(ids),
-                          next_step="page: intercom read failed", due_at=due_at,
-                          page="ops-intake: intercom read failed")
-    if conv is None:
-        return Answer(state="open",
-                      verdict="no coded conversation summary available for this ask",
-                      verdict_source="coded", evidence=_ids_evidence(ids),
-                      next_step="attach the intercom conversation id; watcher escalates at due",
-                      due_at=due_at, notes=("pending:conversation",))
-    parts = conv.get("parts") or []
-    customer = [p for p in parts if p.get("role") == "customer"]
-    text = "\n".join(str(p.get("text") or "") for p in parts)
+                             guardobj: "guard.Guard | None" = None,
+                             requester_email: str | None = None,
+                             requester_ids: tuple[str, ...] = (),
+                             intent_override: str | None = None,
+                             new_name: str | None = None,
+                             profile_id: str = "",
+                             text: str | None = None,
+                             card_policy: Any = None,
+                             readers: Any = None,
+                             judge: Callable[..., Any] | None = None,
+                             scan: Callable[[str], list[dict[str, str]]] | None = None,
+                             record: Callable[..., Any] | None = None) -> Answer:
+    """The facts card, then the ONE action `policies/ops-resolutions.json` maps it to.
 
-    # Fetched text is data on every path, model or not: a HIGH hit quarantines
-    # before it can be echoed into the thread the agent reads. ``text`` already
-    # holds every part, so it is screened once.
-    fetched = guard.screen(text)
-    if fetched.quarantine:
-        rules = ",".join(sorted({str(h.get("rule")) for h in fetched.hits})) or "unknown"
+    Spec §1: the card is built from code reads only - contact -> account (resolver r5), open
+    requests by status, claims, merges, the erasure register row, the verify ledger, the Stripe
+    subscription, ClickUp tickets, and the age of the last customer and staff messages. The
+    customer's own text is quoted at most once, delimited, and only after the injection watch; a
+    HIGH hit quarantines it and the card says so.
+
+    Spec §2: the suggestion is a LOOKUP, not a judgement. The card prints the RULE KEY that
+    produced it, so a wrong mapping is a one-line PR against the policy file rather than an
+    argument about a model's reasoning. An unmapped ask is `unknown`, which is a hand-off.
+
+    Spec §3: this answerer EXECUTES NOTHING. When the mapped action is a W1 write it returns a
+    `WriteRequest` and the router's step 9 runs tier -> fraud lens -> caps -> ledger plan ->
+    writer. That is the only write path on this surface, and its writers are gated off by captain
+    decision (`OPS_INTAKE_WRITES`), so a plan is recorded with its inverse and marked as not
+    executed rather than performed behind a gate nobody opened.
+
+    `policy` is the router's tier table (the W1/W2 gate); the resolution LOOKUP is `card_policy`.
+    Passing `policy` does not select the lookup.
+    """
+    from . import intent as intent_mod  # noqa: PLC0415
+    from . import resolutions as res_mod  # noqa: PLC0415
+    from . import summarize as summarize_mod  # noqa: PLC0415
+
+    conversation_id = ids.intercom[0] if ids.intercom else ""
+    if not conversation_id:
+        return Answer(state="ask", verdict="no intercom conversation id in the ask",
+                      verdict_source="coded", evidence=_ids_evidence(ids),
+                      next_step="ask the requester for the intercom conversation id",
+                      due_at=due_at, notes=("reask:missing-id",))
+
+    if card_policy is None:
+        try:
+            card_policy = summarize_mod.load_policy()
+        except res_mod.PolicyError as exc:
+            return Answer(state="failed",
+                          verdict=f"resolution policy unusable ({exc}) - nothing done",
+                          verdict_source="coded", evidence=_ids_evidence(ids),
+                          next_step="page: policies/ops-resolutions.json is not loadable",
+                          due_at=due_at,
+                          page="ops-intake: resolution policy unusable")
+
+    card_readers = (readers if readers is not None
+                    else _card_readers(backends, base=backends.readers))
+    try:
+        card = summarize_mod.build_card(
+            conversation_id, ask_id=str(ask.get("ask_id") or ""), policy=card_policy,
+            readers=card_readers,
+            # The label goes through the router's `guard.Guard`: `Guard.call` is what wraps the
+            # customer text in a nonce and raises `CanaryLeak` when the model echoes the frame
+            # back. `judge` stays for a caller that has no guard (the CLI, the tests).
+            judge=judge, guard=guardobj, scan=scan, record=record,
+            requester_email=requester_email,
+            requester_ids=requester_ids, intent_override=intent_override)
+    except res_mod.PolicyError as exc:
+        return Answer(state="failed",
+                      verdict=f"resolution policy unusable ({exc}) - nothing done",
+                      verdict_source="coded", evidence=_ids_evidence(ids),
+                      next_step="page: policies/ops-resolutions.json is not loadable",
+                      due_at=due_at, page="ops-intake: resolution policy unusable")
+    except guard.CanaryLeak:
+        # The tool-less call echoed the prompt frame: it obeyed the text instead of the frame, so
+        # nothing it produced can be trusted and nothing is done.
+        return Answer(state="failed",
+                      verdict=("canary leak: the tool-less call echoed the prompt frame, so the "
+                               "intent label is untrusted and nothing was done"),
+                      verdict_source="coded", evidence=_ids_evidence(ids),
+                      next_step="human review of the ask; the model output is discarded",
+                      due_at=due_at,
+                      page="ops-intake: canary leak on a summarize/resolve ask")
+    except Exception as exc:  # noqa: BLE001 - a card that cannot be built is not an answer
+        return Answer(state="failed",
+                      verdict=f"facts card failed ({type(exc).__name__}) - nothing done",
+                      verdict_source="coded", evidence=_ids_evidence(ids),
+                      next_step="page: the facts card raised", due_at=due_at,
+                      page=f"ops-intake: facts card failed ({type(exc).__name__})")
+
+    if card.quoted.quarantined:
+        rules = ",".join(sorted({str(h.get("rule")) for h in card.quoted.hits})) or "unknown"
         return Answer(state="quarantined",
-                      verdict=(f"input quarantine: HIGH injection hit ({rules}) in the "
-                               "fetched conversation; nothing was summarised"),
+                      verdict=(f"input quarantine: HIGH injection hit ({rules}) in the fetched "
+                               "conversation; nothing was summarised and nothing was resolved"),
                       verdict_source="coded", evidence=_ids_evidence(ids),
                       next_step="human review of the quarantined ask", due_at=due_at,
                       page=f"ops-intake: quarantined fetched input (intercom, rules={rules})")
 
-    # A model is OPTIONAL here and, when wired, is the tool-less ladder behind
-    # scripts/ops_intake/guard.py: screened first, delimited as data,
-    # canary-checked on the way out.
-    if guardobj is not None and getattr(guardobj, "judge", None) is not None:
-        try:
-            guarded = guardobj.call(
-                question=("Summarize the customer's issue in one paragraph, using only the "
-                          "data block. Do not decide, approve or promise anything."),
-                blocks=[("intercom_conversation", text)],
-                schema=SUMMARY_SCHEMA)
-        except Exception as exc:  # imported lazily to avoid a cycle at module load
-            from . import guard as guard_mod  # noqa: PLC0415
+    if card.intent.label == "rename_profile":
+        named_ids = [p.strip() for p in ids.profile if p.strip()]
+        if len(named_ids) > 1:
+            return Answer(
+                state="refused",
+                verdict=(f"rename: the requester named {len(named_ids)} profiles "
+                         f"({', '.join(named_ids)}) - a rename target must be exactly one"),
+                verdict_source="coded", evidence=_ids_evidence(ids),
+                next_step=("page: a rename ask named more than one profile; "
+                           "no rename is planned"),
+                due_at=due_at,
+                page="ops-intake: rename names more than one profile")
+        named = (profile_id or "").strip() or (named_ids[0] if named_ids else "")
+        owned = {str(r.get("profile_id") or "").strip().lower()
+                 for r in (card.facts.requests or [])}
+        owned.discard("")
+        if named and named.lower() not in owned:
+            return Answer(
+                state="refused",
+                verdict=(f"rename: profile {named} is not one of this account's profiles "
+                         f"({len(owned)} measured) - nothing done"),
+                verdict_source="coded", evidence=_ids_evidence(ids),
+                next_step=("page: a requester named a profile the resolved account does not own; "
+                           "no rename is planned"),
+                due_at=due_at,
+                page="ops-intake: rename target is not the account's profile")
+        target = named or _single_profile(card)
+        pop, measured = None, False
+        if target:
+            try:
+                pop = card_readers.profile_popular(target, card_readers.query)
+                measured = True
+            except Exception:  # noqa: BLE001 - an unmeasured target is not a "not popular"
+                measured = False
+        if not measured or pop != card.facts.value("target_popular"):
+            card.facts.put("target_popular", pop if measured else None,
+                           "credit_requests popularity / count (target profile)",
+                           measured=measured)
+            card = replace(card, suggestion=res_mod.suggest_for(
+                card.facts, card.intent.label, card_policy,
+                requester_email=requester_email, requester_ids=requester_ids,
+                quarantined=card.quoted.quarantined))
 
-            if isinstance(exc, guard_mod.Quarantined):
-                return Answer(state="quarantined",
-                              verdict=("input quarantine: HIGH injection hit in the fetched "
-                                       "conversation; no model saw it"),
-                              verdict_source="coded", evidence=_ids_evidence(ids),
-                              next_step="human review of the quarantined ask", due_at=due_at,
-                              page="ops-intake: quarantined fetched input (intercom)")
-            if isinstance(exc, guard_mod.CanaryLeak):
-                return Answer(state="failed",
-                              verdict="canary leak: the model echoed the prompt frame - ask failed closed",
-                              verdict_source="coded", evidence=_ids_evidence(ids),
-                              next_step="page: canary leak on a tool-less call", due_at=due_at,
-                              page="ops-intake: canary leak (fail closed)")
-            raise
-        summary = (guarded.text or "").strip() if guarded.data is None else \
-            str(guarded.data.get("summary") or guarded.text or "").strip()
-        return Answer(state="answered", verdict=f"summary: {summary[:400]}",
-                      verdict_source="coded", evidence=_ids_evidence(ids),
-                      next_step="resolve via the coded path named in the reply, not a free-form write",
-                      due_at=due_at)
+    action = card.suggestion.action
+    verdict = (f"facts: {card.facts.counts_line()} · "
+               f"intent: {intent_mod.bounded_label(card.intent.label) or 'unknown'} · "
+               f"suggested: {card.suggestion.render()}")
+    if action.key == "erasure-store-missing":
+        detail = next((e for e in card.facts.errors if e.startswith("erasure:")), "")
+        if detail:
+            verdict = f"{verdict} · {detail}"
 
-    summary = (f"{len(parts)} parts / {len(customer)} customer messages"
-               + (f", last: {str(customer[-1].get('text', ''))[:120]!r}" if customer else ""))
-    return Answer(
-        state="answered", verdict=f"summary: {summary}", verdict_source="coded",
-        evidence=_ids_evidence(ids),
-        next_step="resolve via the coded path named in the reply, not a free-form write",
-        due_at=due_at)
+    if new_name is None:
+        new_name = _requested_new_name(text)
+    if not profile_id and len(ids.profile) == 1:
+        profile_id = ids.profile[0]
+
+    try:
+        proposal = _propose_write(card, conversation_id=conversation_id, new_name=new_name,
+                                  profile_id=profile_id, backends=backends)
+    except Exception as exc:  # noqa: BLE001 - a proposal that cannot be built is not a write
+        proposal = _Proposal(reason=f"the mapped action could not be prepared "
+                                    f"({type(exc).__name__}: {exc})")
+
+    evidence = f"{_ids_evidence(ids)} acct={card.facts.account_hash()}"
+    notes = (f"rule={card.suggestion.rule_key or 'unmapped'}",
+             f"policy={card.policy_version}")
+
+    # A hand-off only reaches a human if it PAGES. Nothing on this surface can reassign an
+    # Intercom conversation (the router's writers are empty by captain decision), so a hand-off
+    # that posts the line and pages nobody leaves the case with the bot while the customer has
+    # been told someone will follow up. The page names the conversation so a human can pick it up.
+    page = proposal.page or None
+    if page is None and action.page:
+        page = _page_for(action, conversation_id)
+
+    if proposal.executable:
+        return Answer(
+            state="answered", verdict=verdict, verdict_source="coded", evidence=evidence,
+            next_step=(f"router step 9 executes {proposal.write.action} under the W1 gate "
+                       f"(tier -> fraud lens -> caps -> ledger plan -> writer)"),
+            write=proposal.write, due_at=due_at, page=page, notes=notes)
+
+    # Not executable here. A mapped W1 action that could not be prepared is a REFUSAL (something
+    # was supposed to happen and did not), and so is an action that declares `refuse` - a
+    # requester-linked account must never get a customer reply. A plain hand-off tier is an
+    # ANSWER (the card plus the human path is the whole answer).
+    state = ("refused" if (action.refuse or (action.executes_here and action.tier == "W1"))
+             else "answered")
+    return Answer(state=state, verdict=verdict, verdict_source="coded", evidence=evidence,
+                  next_step=proposal.reason or action.handoff or "a named human takes it from here",
+                  due_at=due_at, page=page, notes=notes)
 
 
 def answer_gdpr_hide(*, ask: dict[str, Any], ids: ids_mod.ExtractedIds,

@@ -2008,6 +2008,35 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_intercom_legal_unanswered_watchdog
+      - name: Run Ops summarize/resolve surface tests
+        # scripts/ops_intake/ is the first coded path for the Ops bot's 112 "summarize + suggest a
+        # resolution" asks per 14 days, each followed by "do resolution then update the user". The
+        # card must be built from code reads only (an UNREADABLE fact must never read as a zero,
+        # because "0 open requests" and "could not read the requests" map to different actions),
+        # a HIGH injection hit must force a hand-off, the lookup must be closed (a typo'd action,
+        # intent, predicate or answer-bank line is a PolicyError, not a silent skip), and the
+        # answerer must EXECUTE NOTHING: it returns a WriteRequest and the router's step 9 is the
+        # only executor, so the tier gate, the fraud lens, the caps and the ledger plan cannot be
+        # skipped by a second write path. A customer reply is answer-bank copy through the real
+        # output guard, and a guard that cannot run sends nothing. Fixtures only: every reader,
+        # the fraud lens, the guard and the ledger are injected; no network, no store, no model.
+        # Same bare stdlib unittest, targeted by name.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_ops_intake_summarize tests.test_ops_intake_summarize_resolve
+      - name: Check the Ops resolution policy stays closed and safe
+        # policies/ops-resolutions.json is the LOOKUP that replaced an LLM-chosen production write.
+        # It is only safer than the judgement it replaced if it stays closed: an unmapped pair must
+        # fall to `unknown` (a hand-off), every `executes_here` action must be W1 with a recorded
+        # inverse, no merge / erasure / refund may execute here, every hand-off must page (nothing
+        # on this surface can reassign an Intercom conversation, so a hand-off that pages nobody
+        # reaches no human), a refusing action must carry no customer copy, and every answer-bank
+        # line it names must exist. A single edited line turns the guardrail into decoration while
+        # the tests pass. The negative half — each of those mutations actually failing the checker —
+        # is scripts/tests/check-ops-resolutions.bats, discovered by the bats job.
+        run: |
+          set -euo pipefail
+          bash scripts/check-ops-resolutions.sh
       - name: Run resolution-matcher tests
         # scripts/resolution-matcher.py runs UNATTENDED daily (--apply) and both
         # MESSAGES customers and CLOSES their conversations/tickets on the strength

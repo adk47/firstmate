@@ -66,7 +66,7 @@ caps, lens, quarantine, reply contract).
 | class | answerer | notes |
 |---|---|---|
 | `proof-review` | `answer_proof_review` | verdict from coded `dv_outcomes` ONLY; no verdict = `open` with a due time |
-| `summarize-resolve` | `answer_summarize_resolve` | summary from the conversation; a model is OPTIONAL and, when wired, goes through `guard.py` |
+| `summarize-resolve` | `answer_summarize_resolve` | a facts card from code reads plus a LOOKUP in `policies/ops-resolutions.json`; executes nothing (returns a `WriteRequest`) — see `docs/support/ops-summarize-resolve.md` |
 | `gdpr-hide` | `answer_gdpr_hide` | only the reversible HIDDEN_ENTITY_IDS PR, only on a register-hide-eligible page |
 | `clickup-categorize` | `answer_clickup` | counts from code; status moves are W1 |
 | `status-report` | `answer_status_report` | measured counts or "no coded count" |
