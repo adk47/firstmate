@@ -1,0 +1,33 @@
+Merge-queue Fable GO grammar: end-to-end verdicts against the real bin/fm-merge-queue.sh
+Green head: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab; qa-review pass; build pass
+
+ROW PROVENANCE COMMENT               VERDICT    MERGE ARGUMENT
+----------------------------------------------------------------------------------------------------
+# fable-go=ok                        MERGED     task-a https://github.com/acme/widgets/pull/12 -- --squash --admin --match-head-commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab
+# Fable GO=ok                        MERGED     task-a https://github.com/acme/widgets/pull/12 -- --squash --admin --match-head-commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab
+# fable-go@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab MERGED     task-a https://github.com/acme/widgets/pull/12 -- --squash --admin --match-head-commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab
+# FABLE_GO@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab MERGED     task-a https://github.com/acme/widgets/pull/12 -- --squash --admin --match-head-commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab
+# Fable GO                           HELD       <none>
+# no Fable GO                        HELD       <none>
+# awaiting Fable GO                  HELD       <none>
+# Fable GO pending                   HELD       <none>
+# Fable GO - no go                   HELD       <none>
+# fable-go@bbbbbbb                   HELD       <none>
+
+Persisted queue state and ledger from the accepted fable-go=ok run:
+  queue: merged acme/widgets#12 https://github.com/acme/widgets/pull/12
+  queue: summary: check: merge queue 2026-11-07 - merged 1, retired 0 since the last summary; detail: /tmp/tmp.KytAVcCBZT/final/state/merge-queue/daily-2026-11-07.txt
+  queue: run: merged 1, retired 0, still queued/skipped 0, held for a Fable GO 0
+  go-queue.txt after run:
+    # owner: acme
+  ledger.tsv:
+    1794039118	acme/widgets#12@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab	merged	squash	https://github.com/acme/widgets/pull/12
+
+Rejected bare phrase 'Fable GO' leaves the row queued:
+  queue: keep acme/widgets#12 no Fable GO recorded for head aaaaaaaaaaaa
+  queue: summary: check: merge queue 2026-11-07 - merged 0, retired 0 since the last summary; detail: /tmp/tmp.KytAVcCBZT/rejected/state/merge-queue/daily-2026-11-07.txt
+  queue: run: merged 0, retired 0, still queued/skipped 1, held for a Fable GO 1
+  go-queue.txt after run:
+    # owner: acme
+    widgets 12 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab task-a squash # Fable GO
+  merge attempts: 0
