@@ -77,14 +77,12 @@
 # protections it bypassed (the review requirement, and any by-design check that
 # was not passing) on its own line, in the ledger, and in the daily detail file.
 #
-# THE BY-DESIGN LIST. Two checks are exempt from the required-check proof because
-# they are red or absent by design on the changes they guard:
+# THE BY-DESIGN LIST. One check is exempt from the required-check proof because
+# it is red or absent by design on the changes it guards:
 #   credit-approval-guard  red by design on a credit-impact change, where the
 #                          credit review itself is the real gate. A guard that
 #                          has not finished still holds the row, and a failing
 #                          instance anywhere in the list is the waiver.
-#   actor                  the actor-identity check, which is not registered on
-#                          every base branch and is not a merge gate.
 # Every merge that relied on an exemption says so on its own line and in the
 # daily detail file, so the waiver is never silent.
 #
@@ -500,7 +498,7 @@ fable_go_for() {
   rest=$(printf '%s' "$comment" | sed 's/^[[:space:]]*#*[[:space:]]*//')
   printf '%s' "$rest" | grep -qiE '^fable[ _-]?go([^[:alnum:]]|$)' || return 1
   rest=$(printf '%s' "$rest" | sed -E 's/^[Ff][Aa][Bb][Ll][Ee][ _-]?[Gg][Oo]//')
-  printf '%s' "$rest" | grep -qiE '^[[:space:]]*(pending|awaiting|not|no|without)([^[:alnum:]]|$)' && return 1
+  printf '%s' "$rest" | grep -qiE '(^|[^[:alnum:]])(pending|awaiting|not|no|without)([^[:alnum:]]|$)' && return 1
   sha=$(printf '%s' "$rest" | grep -oiE '[0-9a-f]{7,40}' | head -1)
   [ -n "$sha" ] || return 0
   head=$(printf '%s' "$head" | tr '[:upper:]' '[:lower:]')

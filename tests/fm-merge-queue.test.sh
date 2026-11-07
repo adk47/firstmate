@@ -980,7 +980,8 @@ case_an() {
   dir=$(make_case an)
   green_head
   for comment in 'awaiting Fable GO' 'no Fable GO yet' 'Fable GO pending' \
-    'without Fable GO' 'Fable GO not yet'; do
+    'without Fable GO' 'Fable GO not yet' 'Fable GO (pending)' \
+    'Fable GO - pending' 'Fable GO: pending'; do
     printf '# owner: acme\nwidgets 12 %s task-a squash # %s\n' "$HEAD_A" "$comment" \
       >"$dir/data/go-queue.txt"
     out=$(run_queue "$dir" run)
