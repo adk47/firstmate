@@ -44,7 +44,7 @@
 #   (ak) a by-design check is exempt and named in the admin-bypass record
 #   (al) an unreadable required-check registration keeps the row queued
 #   (am) a sixth field that is not a comment is still an unusable row
-#   (an) a negated or pending Fable GO is not a GO
+#   (an) a bare or negated Fable GO phrase is not a GO
 #   (ao) a Fable GO that names a commit must name this head
 #   (ap) a changes-requested review is named in the admin-bypass record
 #   (aq) a slashed base branch is addressed as one encoded path segment
@@ -177,7 +177,7 @@ clear_head() {
 case_a() {
   local dir out
   dir=$(make_case a)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   green_head
   out=$(run_queue "$dir" run)
   expect_code 0 "$?" "(a) run exits 0"
@@ -195,7 +195,7 @@ case_a() {
 case_b() {
   local dir out
   dir=$(make_case b)
-  printf '# owner: acme\nwidgets 12 bbbbbbb task-a squash # Fable GO\n' >"$dir/data/go-queue.txt"
+  printf '# owner: acme\nwidgets 12 bbbbbbb task-a squash # fable-go=ok\n' >"$dir/data/go-queue.txt"
   green_head
   out=$(run_queue "$dir" run)
   assert_contains "$out" "head moved" "(b) the moved head is reported"
@@ -210,7 +210,7 @@ case_b() {
 case_c() {
   local dir out
   dir=$(make_case c)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   export FM_TEST_HEAD=$HEAD_A
   export FM_TEST_CHECKS=$'qa-review\tpass\nbuild\tfail'
   out=$(run_queue "$dir" run)
@@ -226,7 +226,7 @@ case_c() {
 case_d() {
   local dir out
   dir=$(make_case d)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   export FM_TEST_HEAD=$HEAD_A
   export FM_TEST_CHECKS=$'build\tpass'
   out=$(run_queue "$dir" run)
@@ -242,7 +242,7 @@ case_d() {
 case_e() {
   local dir out
   dir=$(make_case e)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   export FM_TEST_HEAD=$HEAD_A
   export FM_TEST_CHECKS=$'build\tpass'
   # A home that used to be able to switch the QA gate off cannot any more.
@@ -259,7 +259,7 @@ case_e() {
 case_f() {
   local dir out
   dir=$(make_case f)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   green_head
   export FM_TEST_LABELS="money customer-copy"
   out=$(run_queue "$dir" run)
@@ -275,7 +275,7 @@ case_f() {
 case_g() {
   local dir out
   dir=$(make_case g)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   green_head
   write_gh_mock "$dir" MERGED
   out=$(run_queue "$dir" run)
@@ -291,7 +291,7 @@ case_g() {
 case_h() {
   local dir out
   dir=$(make_case h)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   green_head
   export FM_TEST_MERGE_FAIL='pr= metadata missing'
   export FM_MERGE_QUEUE_MAX_ATTEMPTS=1
@@ -313,7 +313,7 @@ case_h() {
 case_i() {
   local dir out attempts
   dir=$(make_case i)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" "$HEAD_A" \
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" "$HEAD_A" \
     >"$dir/data/go-queue.txt"
   green_head
   out=$(run_queue "$dir" run)
@@ -330,7 +330,7 @@ case_i() {
 case_j() {
   local dir out
   dir=$(make_case j)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   printf '#!/usr/bin/env bash\nexit 1\n' >"$dir/fakebin/gh"
   chmod +x "$dir/fakebin/gh"
   export FM_MERGE_QUEUE_MAX_ATTEMPTS=1
@@ -347,7 +347,7 @@ case_j() {
 case_k() {
   local dir out
   dir=$(make_case k)
-  printf 'widgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  printf 'widgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   out=$(run_queue "$dir" run)
   assert_contains "$out" "no repository owner for widgets" "(k) the missing owner is reported"
   assert_contains "$out" "unusable" "(k) the row reads as unusable"
@@ -362,7 +362,7 @@ case_k() {
 case_l() {
   local dir out
   dir=$(make_case l)
-  printf '# owner: acme\n# a note from the captain\n\nwidgets 12 %s task-a squash # Fable GO\n\nwidgets 13 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab task-b squash # Fable GO\n' \
+  printf '# owner: acme\n# a note from the captain\n\nwidgets 12 %s task-a squash # fable-go=ok\n\nwidgets 13 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab task-b squash # fable-go=ok\n' \
     "$HEAD_A" >"$dir/data/go-queue.txt"
   chmod 0640 "$dir/data/go-queue.txt"
   printf 'qa-review\tpass\nbuild\tfail\n' >"$dir/checks/13"
@@ -370,7 +370,7 @@ case_l() {
   out=$(run_queue "$dir" run)
   assert_grep "# a note from the captain" "$dir/data/go-queue.txt" "(l) comments survive the rewrite"
   assert_grep "# owner: acme" "$dir/data/go-queue.txt" "(l) the owner directive survives"
-  assert_grep "widgets 13 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab task-b squash # Fable GO" "$dir/data/go-queue.txt" "(l) untouched rows survive"
+  assert_grep "widgets 13 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab task-b squash # fable-go=ok" "$dir/data/go-queue.txt" "(l) untouched rows survive"
   assert_no_grep "widgets 12" "$dir/data/go-queue.txt" "(l) the retired row is gone"
   assert_contains "$out" "run: merged 1" "(l) one merge is reported"
   expect_code 640 "$(stat -c %a "$dir/data/go-queue.txt" 2>/dev/null || stat -f %Lp "$dir/data/go-queue.txt")" \
@@ -384,7 +384,7 @@ case_l() {
 case_m() {
   local dir out before
   dir=$(make_case m)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   before=$(cat "$dir/data/go-queue.txt")
   green_head
   out=$(run_queue "$dir" run --dry-run)
@@ -403,7 +403,7 @@ case_m() {
 case_n() {
   local dir out lines detail
   dir=$(make_case n)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   green_head
   out=$(run_queue "$dir" run)
   assert_contains "$out" "summary: check: merge queue" "(n) the first run of the day emits the daily line"
@@ -430,7 +430,7 @@ case_n() {
 case_o() {
   local dir out
   dir=$(make_case o)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   green_head
   run_queue "$dir" run >/dev/null
   : >"$dir/gh.log"
@@ -463,7 +463,7 @@ case_p() {
 case_q() {
   local dir out detail
   dir=$(make_case q)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   export FM_TEST_HEAD=$HEAD_A
   export FM_TEST_CHECKS=$'qa-review\tpass\nbuild\tpass\ncredit-approval-guard\tfail'
   out=$(run_queue "$dir" run)
@@ -484,7 +484,7 @@ case_q() {
 case_r() {
   local dir out attempts
   dir=$(make_case r)
-  printf 'acme/widgets 12 %s task-a squash # Fable GO\nbeta/widgets 12 %s task-b squash # Fable GO\n' "$HEAD_A" "$HEAD_A" \
+  printf 'acme/widgets 12 %s task-a squash # fable-go=ok\nbeta/widgets 12 %s task-b squash # fable-go=ok\n' "$HEAD_A" "$HEAD_A" \
     >"$dir/data/go-queue.txt"
   green_head
   out=$(run_queue "$dir" run)
@@ -502,7 +502,7 @@ case_r() {
 case_s() {
   local dir out
   dir=$(make_case s)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB" \
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB" \
     >"$dir/data/go-queue.txt"
   green_head
   out=$(run_queue "$dir" run)
@@ -517,7 +517,7 @@ case_s() {
 case_t() {
   local dir out
   dir=$(make_case t)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   export FM_TEST_HEAD=$HEAD_A
   export FM_TEST_CHECKS=$'qa-review\tfail\nqa-review\tpass'
   out=$(run_queue "$dir" run)
@@ -533,7 +533,7 @@ case_t() {
 case_u() {
   local dir out
   dir=$(make_case u)
-  printf '# owner: acme\nwidgets 12 %s task-typo squash # Fable GO\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  printf '# owner: acme\nwidgets 12 %s task-typo squash # fable-go=ok\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   green_head
   export FM_MERGE_QUEUE_MAX_ATTEMPTS=1
   out=$(run_queue "$dir" run)
@@ -552,7 +552,7 @@ case_u() {
 case_v() {
   local dir out shell_bin
   dir=$(make_case v)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   green_head
   # Resolve the shell before the PATH is emptied, so only the forge tools are
   # missing from the run's own PATH.
@@ -573,21 +573,21 @@ case_v() {
 case_w() {
   local dir out
   dir=$(make_case w)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   green_head
   export FM_TEST_LABELS="secrets"
   out=$(run_queue "$dir" run)
   assert_contains "$out" "fenced for a decider: secrets" "(w) a plural label spelling is fenced"
   [ ! -s "$dir/merge.log" ] || fail "(w) a secrets label must never merge unattended"
 
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   : >"$dir/merge.log"
   export FM_TEST_LABELS="customer copy"
   out=$(run_queue "$dir" run)
   assert_contains "$out" "fenced for a decider: customercopy" "(w) a two-word label is fenced"
   [ ! -s "$dir/merge.log" ] || fail "(w) customer copy must never merge unattended"
 
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   : >"$dir/merge.log"
   unset FM_TEST_LABELS
   export FM_TEST_BODY="This ships the production DDL for the new table."
@@ -605,7 +605,7 @@ case_x() {
   dir=$(make_case x)
   # Exactly the re-queue the docs prescribe after a push: the stale row is still
   # in the file when the row for the new head is added.
-  printf '# owner: acme\nwidgets 12 bbbbbbb task-a squash # Fable GO\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" \
+  printf '# owner: acme\nwidgets 12 bbbbbbb task-a squash # fable-go=ok\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" \
     >"$dir/data/go-queue.txt"
   green_head
   out=$(run_queue "$dir" run)
@@ -624,7 +624,7 @@ case_x() {
 
   # A row this home cannot read is a configuration mistake, not a newer head:
   # it stays queued for the operator and never supersedes a readable row.
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\nwidgets 12 cccccccccccccccccccccccccccccccccccccc task-typo squash # Fable GO\n' \
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\nwidgets 12 cccccccccccccccccccccccccccccccccccccc task-typo squash # fable-go=ok\n' \
     "$HEAD_A" >"$dir/data/go-queue.txt"
   : >"$dir/merge.log"
   out=$(run_queue "$dir" run)
@@ -640,7 +640,7 @@ case_x() {
 case_y() {
   local dir out
   dir=$(make_case y)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   green_head
   export FM_TEST_BODY=$'A one-line summary.\n\nThis change ships the production DDL for the orders table.\n'
   out=$(run_queue "$dir" run)
@@ -655,7 +655,7 @@ case_y() {
 case_z() {
   local dir out
   dir=$(make_case z)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   export FM_TEST_HEAD=$HEAD_A
   export FM_TEST_CHECKS=$'qa-review\tpass\nbuild\tpass\ncredit-approval-guard\tpending'
   out=$(run_queue "$dir" run)
@@ -680,7 +680,7 @@ case_z() {
 case_aa() {
   local dir out
   dir=$(make_case aa)
-  printf '# owner: acme\nwidgets 12, %s task-a squash # Fable GO\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  printf '# owner: acme\nwidgets 12, %s task-a squash # fable-go=ok\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   green_head
   out=$(run_queue "$dir" run)
   assert_contains "$out" "unusable row" "(aa) the pasted number is classified unusable"
@@ -698,7 +698,7 @@ case_aa() {
 case_ab() {
   local dir out before mode
   dir=$(make_case ab)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   chmod 0640 "$dir/data/go-queue.txt"
   before=$(cat "$dir/data/go-queue.txt")
   green_head
@@ -722,7 +722,7 @@ case_ab() {
 case_ac() {
   local dir out
   dir=$(make_case ac)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   green_head
   # The captain hand-edits the queue while a tick is held by the merge call.
   cat >"$dir/bin/fm-pr-merge.sh" <<SH
@@ -736,7 +736,7 @@ SH
   assert_contains "$out" "changed during this run" "(ac) the deferred rewrite is reported"
   assert_grep "# a note added by hand" "$dir/data/go-queue.txt" \
     "(ac) the hand-edit survives the run"
-  assert_grep "widgets 12 $HEAD_A task-a squash # Fable GO" "$dir/data/go-queue.txt" \
+  assert_grep "widgets 12 $HEAD_A task-a squash # fable-go=ok" "$dir/data/go-queue.txt" \
     "(ac) nothing is published over the edited queue"
   clear_head
   pass "a hand-edit during a run is never overwritten by the rewrite"
@@ -769,7 +769,7 @@ case_ad() {
 case_ae() {
   local dir out
   dir=$(make_case ae)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   green_head
   # A merge call can hold a tick for minutes, and the timer fires every ten, so
   # two ticks really can overlap: the second must decide nothing at all.
@@ -791,7 +791,7 @@ case_ae() {
 case_af() {
   local dir out dead
   dir=$(make_case af)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" >"$dir/data/go-queue.txt"
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" >"$dir/data/go-queue.txt"
   green_head
   # A run killed mid-merge (a reboot, or systemd stopping the unit) leaves its
   # lock behind. Without recovery every later tick would skip forever.
@@ -815,7 +815,7 @@ case_ag() {
   dir=$(make_case ag)
   # Exactly the shape the real queue uses: the row carries its provenance, and
   # the Fable GO for this head, as a trailing comment.
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO 23:39Z (997)\n' "$HEAD_A" \
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok 23:39Z (997)\n' "$HEAD_A" \
     >"$dir/data/go-queue.txt"
   green_head
   out=$(run_queue "$dir" run)
@@ -851,7 +851,7 @@ case_ah() {
 case_ai() {
   local dir out
   dir=$(make_case ai)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO @bbbbbbb\n' "$HEAD_A" \
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go@bbbbbbb\n' "$HEAD_A" \
     >"$dir/data/go-queue.txt"
   green_head
   out=$(run_queue "$dir" run)
@@ -862,7 +862,7 @@ case_ai() {
 
   # The same marker naming this head does count, so the check is about the head
   # and not about the marker's presence.
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO @%s\n' "$HEAD_A" "$HEAD_A" \
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go@%s\n' "$HEAD_A" "$HEAD_A" \
     >"$dir/data/go-queue.txt"
   out=$(run_queue "$dir" run)
   assert_contains "$out" "merged acme/widgets#12" "(ai) a GO naming this head merges"
@@ -875,7 +875,7 @@ case_ai() {
 case_aj() {
   local dir out
   dir=$(make_case aj)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" \
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" \
     >"$dir/data/go-queue.txt"
   green_head
   export FM_TEST_REQUIRED=$'qa-review\nbuild\nsecurity-scan'
@@ -902,7 +902,7 @@ case_aj() {
 case_ak() {
   local dir out detail
   dir=$(make_case ak)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" \
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" \
     >"$dir/data/go-queue.txt"
   green_head
   export FM_TEST_REQUIRED=$'qa-review\nbuild\ncredit-approval-guard'
@@ -920,7 +920,7 @@ case_ak() {
   # actor is not on the by-design list, so a base branch that registers it
   # requires it to be passing before an admin merge.
   dir=$(make_case ak-actor)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" \
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" \
     >"$dir/data/go-queue.txt"
   green_head
   export FM_TEST_REQUIRED=$'qa-review\nbuild\nactor'
@@ -938,7 +938,7 @@ case_ak() {
 case_al() {
   local dir out
   dir=$(make_case al)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" \
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" \
     >"$dir/data/go-queue.txt"
   green_head
   export FM_TEST_REQUIRED_RC=1
@@ -974,16 +974,15 @@ case_am() {
 }
 
 
-# --- (an) a negated or pending Fable GO is not a GO ----------------------
+# --- (an) a bare or negated Fable GO phrase is not a GO ------------------
 
 case_an() {
   local dir out comment
   dir=$(make_case an)
   green_head
-  for comment in 'awaiting Fable GO' 'no Fable GO yet' 'Fable GO pending' \
-    'without Fable GO' 'Fable GO not yet' 'Fable GO (pending)' \
-    'Fable GO - pending' 'Fable GO: pending' 'Fable GO - no-go' \
-    'Fable GO - not ready' 'Fable GO - not confirmed'; do
+  for comment in 'Fable GO' 'no Fable GO' 'awaiting Fable GO' \
+    'Fable GO pending' 'Fable GO - no go' 'tbd Fable GO' \
+    'not-ready Fable GO'; do
     printf '# owner: acme\nwidgets 12 %s task-a squash # %s\n' "$HEAD_A" "$comment" \
       >"$dir/data/go-queue.txt"
     out=$(run_queue "$dir" run)
@@ -993,7 +992,7 @@ case_an() {
     expect_code 1 "$(queue_rows "$dir")" "(an) '$comment' keeps the row queued"
   done
   clear_head
-  pass "a negated or pending Fable GO is not a GO"
+  pass "a bare or negated Fable GO phrase is not a GO"
 }
 
 # --- (ao) a Fable GO that names a commit must name this head -------------
@@ -1002,7 +1001,7 @@ case_ao() {
   local dir out comment
   dir=$(make_case ao)
   green_head
-  for comment in 'Fable GO @bbbbbbb' 'fable-go@bbbbbbb' 'FABLE_GO=bbbbbbb'; do
+  for comment in 'fable-go@bbbbbbb' 'FABLE_GO=bbbbbbb'; do
     printf '# owner: acme\nwidgets 12 %s task-a squash # %s\n' "$HEAD_A" "$comment" \
       >"$dir/data/go-queue.txt"
     out=$(run_queue "$dir" run)
@@ -1011,7 +1010,7 @@ case_ao() {
     [ ! -s "$dir/merge.log" ] || fail "(ao) '$comment' must never merge"
     expect_code 1 "$(queue_rows "$dir")" "(ao) '$comment' keeps the row queued"
   done
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO @%s\n' "$HEAD_A" "$HEAD_A" \
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go@%s\n' "$HEAD_A" "$HEAD_A" \
     >"$dir/data/go-queue.txt"
   out=$(run_queue "$dir" run)
   assert_contains "$out" "merged acme/widgets#12" "(ao) a GO naming this head merges"
@@ -1024,7 +1023,7 @@ case_ao() {
 case_ap() {
   local dir out
   dir=$(make_case ap)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" \
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" \
     >"$dir/data/go-queue.txt"
   green_head
   export FM_TEST_REVIEW_DECISION=CHANGES_REQUESTED
@@ -1043,7 +1042,7 @@ case_ap() {
 case_aq() {
   local dir out
   dir=$(make_case aq)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" \
+  printf '# owner: acme\nwidgets 12 %s task-a squash # fable-go=ok\n' "$HEAD_A" \
     >"$dir/data/go-queue.txt"
   green_head
   export FM_TEST_BASE=release/2026
@@ -1059,15 +1058,14 @@ case_aq() {
 }
 
 
-# --- (ar) affirmative prose and numeric provenance do not void a GO ------
+# --- (ar) explicit affirmative GO forms are accepted ---------------------
 
 case_ar() {
   local dir out comment
   dir=$(make_case ar)
   green_head
-  for comment in 'Fable GO - no blockers' 'Fable GO 1762483200' \
-    'Fable GO 20261107T023205Z' 'Fable GO - acceded' \
-    'Fable GO - feedback addressed' 'Fable GO - not-ready blockers'; do
+  for comment in 'fable-go=ok' 'Fable GO=ok' \
+    "fable-go@$HEAD_A" "FABLE_GO@$HEAD_A"; do
     printf '# owner: acme\nwidgets 12 %s task-a squash # %s\n' "$HEAD_A" "$comment" \
       >"$dir/data/go-queue.txt"
     out=$(run_queue "$dir" run)
@@ -1075,7 +1073,7 @@ case_ar() {
       "(ar) '$comment' is an affirmative GO"
   done
   clear_head
-  pass "affirmative prose and numeric provenance do not void a Fable GO"
+  pass "explicit affirmative GO forms are accepted"
 }
 
 case_a
