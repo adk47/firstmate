@@ -23,7 +23,12 @@
 //     "stop" or "cancel" keep the native steer, because those are exactly the
 //     prompts that must interrupt;
 //   - a prompt that already carries this extension's header (one Pi returned
-//     to the editor on Escape and the captain resubmitted) is not re-wrapped.
+//     to the editor on Escape or by dequeue and the captain resubmitted) is
+//     not re-wrapped; a resubmitted header also marks that record handled so
+//     the settle grace cannot deliver it a second time.
+//
+// KNOWN LIMITATION. An image pasted with a captured prompt is not stored in
+// the record; only the text is re-delivered.
 //
 // THE RECORD. state/intake/<seq>.prompt holds the verbatim captain text behind
 // a small header (schema, seq, at, session); seq is monotonic per home. A
@@ -43,10 +48,15 @@
 // before_agent_start. A record still pending at agent_settled will never be
 // consumed from the queue: if the run was aborted Pi has already returned the
 // queue to the editor (interactive Escape), so the record is RELEASED rather
-// than re-sent; otherwise it is re-sent after a short grace. A record still
+// than re-sent. The same is true when Pi reports no pending messages after a
+// settle: the captain dequeued the follow-up back into the editor (alt+up),
+// so it is RELEASED rather than re-sent. Only a runtime that cannot report
+// its queue falls back to re-sending after a short grace. A record still
 // pending at session_start belongs to a session that was replaced or crashed
-// and is re-sent into the new one. Every transition is announced in one line
-// through ctx.ui.notify, and the status line shows how many are queued.
+// and is re-sent into the new one, except on a reload: Pi keeps its queues
+// across a reload, so the new runtime re-attaches to those records without
+// re-sending them. Every transition is announced in one line through
+// ctx.ui.notify, and the status line shows how many are queued.
 //
 // MAIN-SIDE CONTRACT. The wrapped follow-up leads with one plain line naming
 // the intake number and the time it was typed, then the captain's verbatim
@@ -74,6 +84,7 @@ type NotifyUi = {
 type IntakeContext = {
   ui?: NotifyUi;
   isIdle?: () => boolean;
+  hasPendingMessages?: () => boolean;
 };
 
 const extensionFile = fileURLToPath(import.meta.url);
@@ -138,6 +149,13 @@ export function shouldCapture(event: {
   if (trimmed.startsWith(INTAKE_HEADER_PREFIX)) return false;
   if (isUrgentInterrupt(trimmed)) return false;
   return true;
+}
+
+export function restoredIntakeSeq(text: string): number | undefined {
+  const match = /^Firstmate intake #(\d+) /u.exec(text);
+  if (!match) return undefined;
+  const seq = Number.parseInt(match[1], 10);
+  return Number.isFinite(seq) ? seq : undefined;
 }
 
 export function wrapIntake(record: IntakeRecord): string {
@@ -308,10 +326,10 @@ export default function (pi: ExtensionAPI) {
     }
   };
 
-  const release = (seq: number, ctx: IntakeContext | undefined) => {
+  const release = (seq: number, ctx: IntakeContext | undefined, why = "the abort") => {
     inFlight.delete(seq);
     if (moveRecord(seq, releasedDir)) {
-      notify(ctx, `intake #${seq} was returned to your editor by the abort; it is kept at state/intake/released/${seq}.prompt and is not re-sent`, "warning");
+      notify(ctx, `intake #${seq} was returned to your editor by ${why}; it is kept at state/intake/released/${seq}.prompt and is not re-sent`, "warning");
     }
   };
 
@@ -329,13 +347,22 @@ export default function (pi: ExtensionAPI) {
     resendTimer = null;
   };
 
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     clearResendTimer();
     inFlight.clear();
     sessionId = ctx.sessionManager?.getSessionId?.() ?? "";
     if (!intakeEnabled()) return;
     ensureDirs();
-    if (listPendingSeqs().length > 0) await resendPending(ctx as IntakeContext, "left pending by the previous session");
+    const pending = listPendingSeqs();
+    if (event.reason === "reload") {
+      for (const seq of pending) {
+        const record = readRecord(seq);
+        if (record) inFlight.set(seq, wrapIntake(record));
+      }
+      refreshStatus(ctx as IntakeContext);
+      return;
+    }
+    if (pending.length > 0) await resendPending(ctx as IntakeContext, "left pending by the previous session");
     refreshStatus(ctx as IntakeContext);
   });
 
@@ -344,6 +371,13 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("input", async (event, ctx) => {
+    const restoredSeq = restoredIntakeSeq(event.text);
+    if (restoredSeq !== undefined && inFlight.has(restoredSeq)) {
+      inFlight.delete(restoredSeq);
+      moveRecord(restoredSeq, handledDir);
+      refreshStatus(ctx as IntakeContext);
+      return { action: "continue" as const };
+    }
     if (!intakeEnabled()) return { action: "continue" as const };
     if (!shouldCapture(event)) return { action: "continue" as const };
     const record: IntakeRecord = { seq: nextSeq(), at: new Date().toISOString(), body: event.text };
@@ -386,6 +420,13 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     clearResendTimer();
+    if (typeof ctx.hasPendingMessages === "function") {
+      if (!ctx.hasPendingMessages()) {
+        for (const seq of settledSeqs) release(seq, ctx as IntakeContext, "dequeue");
+        refreshStatus(ctx as IntakeContext);
+      }
+      return;
+    }
     resendTimer = setTimeout(() => {
       resendTimer = null;
       const still = settledSeqs.filter((seq) => inFlight.has(seq));

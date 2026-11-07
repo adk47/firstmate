@@ -122,7 +122,7 @@ Note the SDK message begins with the status and carries no `Error:` prefix; Pi a
 
 Driven on a pseudo-terminal: `/model` then Enter, the picker left open, then Escape.
 While the picker was open the record was unchanged (`state=busy source=fm-spawn event=launch-brief`, the spawn seed): `ui_prompt_start` wraps only `ctx.ui.select|confirm|input|editor|custom` calls made by extensions (`core/extensions/runner.js` `wrapUIPromptContext`), and the model selector is an interactive-mode overlay (`showModelSelector`) outside that wrapper.
-The screen at that moment rendered all three rows the reader is written against, each on its own line:
+The screen at that moment rendered the picker's hint row and a model list row (the provider badge), which are the two signals the reader requires. The three rows quoted below include the hint row; the Model Name and provider-scope rows are context, not load-bearing:
 
 ```
 Only showing models from configured providers. Use /login to add providers.

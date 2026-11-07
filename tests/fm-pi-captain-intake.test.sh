@@ -32,6 +32,7 @@ drive() {
   shift
   FM_HOME="$home" FM_INTAKE_RESEND_GRACE_MS="${FM_INTAKE_RESEND_GRACE_MS:-20}" EXT_PATH="$EXT" \
     node --input-type=module - "$@" 2>&1 <<'EOF'
+import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 const [scenario, ...args] = process.argv.slice(2);
 const handlers = {};
@@ -54,6 +55,7 @@ const ctx = {
     setStatus(key, text) { statuses.push({ key, text: text === undefined ? null : text }); },
   },
   sessionManager: { getSessionId: () => "sess-" + scenario },
+  hasPendingMessages: scenario === "dequeue-clears-queue" ? () => false : undefined,
 };
 const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
 mod.default(pi);
@@ -63,7 +65,7 @@ const settle = async (aborted) => {
   await handlers.agent_settled({ type: "agent_settled", aborted }, ctx);
   await new Promise((resolve) => setTimeout(resolve, 80));
 };
-await handlers.session_start({ type: "session_start", reason: "startup" }, ctx);
+await handlers.session_start({ type: "session_start", reason: scenario.startsWith("reload") ? "reload" : "startup" }, ctx);
 switch (scenario) {
   case "steer": results.push(await input(args[0])); break;
   case "three":
@@ -105,6 +107,22 @@ switch (scenario) {
     await handlers.message_start({ type: "message_start", message: { role: "user", content: queued[0].text } }, ctx);
     await settle(false);
     break;
+  case "dequeue":
+    results.push(await input(args[0]));
+    results.push(await input(queued[0].text));
+    await settle(false);
+    break;
+  case "dequeue-clears-queue":
+    results.push(await input(args[0]));
+    await settle(false);
+    break;
+  case "reload":
+    break;
+  case "reload-consume": {
+    const record = mod.parseRecord(readFileSync(`${process.env.FM_HOME}/state/intake/4.prompt`, "utf8"));
+    await handlers.message_start({ type: "message_start", message: { role: "user", content: [{ type: "text", text: mod.wrapIntake(record) }] } }, ctx);
+    break;
+  }
   case "queue-refused":
     failQueue = true;
     results.push(await input(args[0]));
@@ -231,6 +249,40 @@ test_unconsumed_settle_resends_after_grace() {
   pass "a record Pi accepted but never consumed is re-sent after the settle grace, while a consumed one is not"
 }
 
+test_dequeue_restored_message_is_not_resent() {
+  local home out
+  home=$(new_home dequeue)
+  out=$(drive "$home" dequeue "fix the footer") || fail "drive failed: $out"
+  [ "$(field "$out" '.queued | length')" = 1 ] || fail "a message restored by dequeue and resubmitted must not be re-sent at settle: $out"
+  [ "$(field "$out" '.results[1].action')" = continue ] || fail "the restored resubmission keeps its native lane: $out"
+  [ -f "$home/state/intake/handled/1.prompt" ] || fail "the dequeued record is marked handled when the captain resubmits it"
+  [ ! -f "$home/state/intake/1.prompt" ] || fail "a dequeued record must not stay pending"
+  pass "a follow-up restored by Pi dequeue and resubmitted is not re-sent at settle"
+}
+
+test_dequeue_cleared_queue_is_released_not_resent() {
+  local home out
+  home=$(new_home dequeue-clears-queue)
+  out=$(drive "$home" dequeue-clears-queue "fix the footer") || fail "drive failed: $out"
+  [ "$(field "$out" '.queued | length')" = 1 ] || fail "a follow-up Pi reports as no longer queued must not be re-sent: $out"
+  [ -f "$home/state/intake/released/1.prompt" ] || fail "a dequeued record is released, not left pending"
+  [ ! -f "$home/state/intake/1.prompt" ] || fail "a dequeued record must not stay pending"
+  pass "a follow-up Pi reports as dequeued is released instead of re-sent at settle"
+}
+
+test_session_start_reload_does_not_resend() {
+  local home out
+  home=$(new_home reload)
+  mkdir -p "$home/state/intake/handled"
+  printf 'schema=fm-captain-intake.v1\nseq=4\nat=2026-10-26T14:02:11.000Z\nsession=old\n--\nfinish the review\n' > "$home/state/intake/4.prompt"
+  out=$(drive "$home" reload) || fail "drive failed: $out"
+  [ "$(field "$out" '.queued | length')" = 0 ] || fail "a reload must not re-send a record Pi still has queued: $out"
+  [ -f "$home/state/intake/4.prompt" ] || fail "a reloaded record stays pending until consumed"
+  out=$(drive "$home" reload-consume) || fail "drive failed: $out"
+  [ -f "$home/state/intake/handled/4.prompt" ] || fail "a reloaded runtime must still recognise the queued follow-up when it is consumed"
+  pass "a reload re-attaches to pending records without re-sending them, and consumption still moves them to handled"
+}
+
 test_session_start_resends_what_a_previous_session_left() {
   local home out
   home=$(new_home session-start)
@@ -275,6 +327,9 @@ test_commands_interrupts_and_idle_prompts_pass_through
 test_consumption_moves_the_record_to_handled
 test_abort_releases_rather_than_resends
 test_unconsumed_settle_resends_after_grace
+test_dequeue_restored_message_is_not_resent
+test_dequeue_cleared_queue_is_released_not_resent
+test_session_start_reload_does_not_resend
 test_session_start_resends_what_a_previous_session_left
 test_queue_refusal_falls_back_to_the_native_steer
 test_intake_command_lists_state
