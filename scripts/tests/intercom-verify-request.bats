@@ -42,6 +42,8 @@ setup() {
   # library dir is pointed at the repo - the same one-way seam rule as every other override
   export INTERCOM_VERIFY_TEST_JQ_LIB="$HYDRA_REPO/scripts/lib"
   export INTERCOM_VERIFY_TEST_DAY="2026-10-15"
+  # QA #1799 r13: the retry sleeps are a seam so a retry test does not spend 7 real seconds; the COUNT is not.
+  export INTERCOM_VERIFY_TEST_API_RETRY_SLEEPS="0 0"
   # gap-ask reads stage-2 verdicts from a proof store (stage2() below writes them).
   export INTERCOM_VERIFY_TEST_PROOF_DB="$TEST_TMPDIR/proof.sqlite"
   export INTERCOM_VERIFY_TEST_STAGE2_HELPER="$HYDRA_REPO/scripts/credit_review/stage2_verdicts.py"
@@ -143,6 +145,22 @@ if [ "$(printf '%s' "$payload" | jq -r '.message_type? // empty' 2>/dev/null)" =
 fi
 echo "$method $url" >> "$CURL_STUB_LOG"
 [ -z "$payload" ] || printf '%s\n' "$payload" >> "$CURL_STUB_PAYLOADS"
+# QA #1799 r13: a TRANSPORT failure - the request never reached a decision. STUB_TRANSPORT_FAIL_MATCH is a URL
+# substring, STUB_TRANSPORT_FAIL_N how many matching calls fail before one succeeds, STUB_TRANSPORT_FAIL_RC the curl
+# rc (default 28 = timeout). The counter is per match string, so a test can fail the READ and let the WRITE through.
+if [ -n "${STUB_TRANSPORT_FAIL_MATCH:-}" ] && [ -n "${STUB_TRANSPORT_FAIL_N:-}" ]; then
+  case "$url" in
+    *"$STUB_TRANSPORT_FAIL_MATCH"*)
+      tf="$CURL_STUB_LOG.transport-fails"
+      n="$(cat "$tf" 2>/dev/null || echo 0)"
+      if [ "$n" -lt "$STUB_TRANSPORT_FAIL_N" ]; then
+        echo $((n + 1)) > "$tf"
+        echo "curl: (${STUB_TRANSPORT_FAIL_RC:-28}) transport failure" >&2
+        exit "${STUB_TRANSPORT_FAIL_RC:-28}"
+      fi
+      ;;
+  esac
+fi
 path="${url#https://api.intercom.io}"
 # QA 2026-11-04 finding 1: the gate reads refund facts from the PROCESSOR, so the stub answers Stripe too. The fixtures are
 # env vars per object, and the default refund/charge/subscription agree with rf_credits() so the ruled copy still renders.
@@ -696,6 +714,49 @@ PY
   INTERCOM_VERIFY_TEST_DAY=2026-10-16 run -0 send
   [[ "$output" == "SKIPPED already-notified credits=1" ]]
   [ "$(posts)" -eq 1 ]
+}
+
+@test "a TRANSPORT failure on a READ is retried, and the send still lands (QA #1799 r13)" {
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
+  # the recipient lookup is a POST that only READS, so a timeout there cannot duplicate anything: two failures then a
+  # success must still produce exactly one note.
+  STUB_TRANSPORT_FAIL_MATCH="/contacts/search" STUB_TRANSPORT_FAIL_N=2 run -0 send
+  [[ "$output" == *"POSTED email"* ]]
+  [ "$(posts)" -eq 1 ]
+  [ "$(grep -c '^POST https://api.intercom.io/contacts/search$' "$CURL_STUB_LOG")" -eq 3 ]
+  [[ "$output" == *"transport failure (rc=28); retry 1/2"* ]]
+  [[ "$output" == *"transport failure (rc=28); retry 2/2"* ]]
+}
+
+@test "a TRANSPORT failure on a WRITE is NEVER retried - the POST may already have been applied (QA #1799 r13)" {
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
+  # /messages is the customer note. A retry here could deliver it twice, which is worse than a stopped tick, so the
+  # gate must fail exactly as it did before this change: one attempt, POST FAILED, the claim left in place.
+  # a POST FAILED is rc 5 on current main (the #1780 change): the POST was attempted and we cannot prove it was not
+  # delivered, so the claim stays and the note is never re-sent automatically.
+  STUB_TRANSPORT_FAIL_MATCH="/messages" STUB_TRANSPORT_FAIL_N=2 run -5 send
+  [[ "$output" == *"POST FAILED"* ]]
+  [[ "$output" != *"retry"* ]]
+  [ "$(grep -c '^POST https://api.intercom.io/messages$' "$CURL_STUB_LOG")" -eq 1 ]
+  [ "$(sql "select status from verify_requests where request_id='r1'")" = "attempted" ]
+}
+
+@test "an HTTP error body is NOT a transport failure, so a read is not retried (QA #1799 r13)" {
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
+  # curl without -f exits 0 on a 4xx/5xx body, so the retry predicate must not fire: a rejected request is a decision,
+  # not a blip, and retrying it would hammer Intercom with a request it already refused.
+  STUB_CONTACTS='{"type":"error.list","errors":[{"code":"rate_limit_exceeded"}]}' run -4 send
+  [ "$(grep -c '^POST https://api.intercom.io/contacts/search$' "$CURL_STUB_LOG")" -eq 1 ]
+  [[ "$output" != *"retry"* ]]
+}
+
+@test "a curl failure that is NOT transport-level is not retried either (QA #1799 r13)" {
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
+  # rc 3 is a malformed URL: a bug in the call, not a blip. Retrying it would just repeat the same bug three times and
+  # turn one clear failure into three. Only the transport allowlist (6 7 18 28 35 52 55 56 124) may retry.
+  STUB_TRANSPORT_FAIL_MATCH="/contacts/search" STUB_TRANSPORT_FAIL_N=2 STUB_TRANSPORT_FAIL_RC=3 run -4 send
+  [ "$(grep -c '^POST https://api.intercom.io/contacts/search$' "$CURL_STUB_LOG")" -eq 1 ]
+  [[ "$output" != *"retry"* ]]
 }
 
 @test "a curl failure leaves the claim in place (outcome unknown): no automatic second note" {

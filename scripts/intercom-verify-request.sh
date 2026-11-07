@@ -363,6 +363,14 @@ readonly DISTRIBUTOR_COPY_APPROVED="captain 2026-10-29 19:0xZ; fable-copy-1030-r
 readonly INTERCOM_ADMIN_ID="5763097"
 readonly API_BASE="https://api.intercom.io"
 readonly API_VERSION="2.11"
+# A tick makes 100+ Intercom calls per family, so ONE transient network blip used to stop the whole tick: three of the
+# five tick kills between 11-02 and 11-06 were transport failures (a 45s timeout, a connection reset), not logic
+# failures. A bounded retry is allowed ONLY where a retry cannot duplicate a side effect:
+#   - the call is a READ (GET, or Intercom's POST /conversations/search and /contacts/search, which only read), and
+#   - the failure is TRANSPORT-level (the request never reached a decision), never a 4xx/5xx body.
+# A write is NEVER retried: the POST may already have been applied, and a duplicate customer note is worse than a
+# stopped tick. The caller's existing rc handling is unchanged - a retried read that still fails returns its rc.
+# The values are assigned per branch below (a deployed copy pins them; a test copy may shorten the sleeps).
 readonly PROD_LOG_DIR="/opt/hydra/workspaces/operations/api-logs"
 readonly PROD_LEDGER="/var/lib/hydra/credit-review/ledger.sqlite3"
 readonly PROD_LEDGER_HELPER="/opt/hydra/scripts/credit_review/verify_ledger.py"
@@ -489,7 +497,7 @@ refuse() { printf 'REFUSED: %s\n' "$*" >&2; exit 1; }
 if [ "$TESTABLE" != "1" ]; then
   for v in INTERCOM_VERIFY_TEST_LOG_DIR INTERCOM_VERIFY_TEST_CURL_BIN INTERCOM_VERIFY_TEST_TIMEOUT_BIN \
            INTERCOM_VERIFY_TEST_LEDGER INTERCOM_VERIFY_TEST_LEDGER_HELPER INTERCOM_VERIFY_TEST_DAY \
-           INTERCOM_VERIFY_TEST_PROOF_DB INTERCOM_VERIFY_TEST_STAGE2_HELPER INTERCOM_VERIFY_TEST_CORE_NOTICE_HELPER INTERCOM_VERIFY_TEST_NOW INTERCOM_VERIFY_TEST_DISABLED_DIR INTERCOM_VERIFY_TEST_COMM_STATE_HELPER INTERCOM_VERIFY_TEST_GMO INTERCOM_VERIFY_TEST_POLICY INTERCOM_VERIFY_TEST_FABLE_RULINGS INTERCOM_VERIFY_TEST_STRIPE_BASE INTERCOM_VERIFY_TEST_JQ_LIB INTERCOM_VERIFY_TEST_STRIPE_ENV_FILE; do
+           INTERCOM_VERIFY_TEST_PROOF_DB INTERCOM_VERIFY_TEST_STAGE2_HELPER INTERCOM_VERIFY_TEST_CORE_NOTICE_HELPER INTERCOM_VERIFY_TEST_NOW INTERCOM_VERIFY_TEST_DISABLED_DIR INTERCOM_VERIFY_TEST_COMM_STATE_HELPER INTERCOM_VERIFY_TEST_GMO INTERCOM_VERIFY_TEST_POLICY INTERCOM_VERIFY_TEST_FABLE_RULINGS INTERCOM_VERIFY_TEST_STRIPE_BASE INTERCOM_VERIFY_TEST_JQ_LIB INTERCOM_VERIFY_TEST_STRIPE_ENV_FILE INTERCOM_VERIFY_TEST_API_RETRY_SLEEPS; do
     [ -z "${!v:-}" ] || die "$v is not settable on a deployed copy of this script. The log, the ledger, the client and the clock are not parameters: a caller-selectable one is a send nobody can audit."
   done
   LOG_DIR="$PROD_LOG_DIR"
@@ -512,6 +520,8 @@ if [ "$TESTABLE" != "1" ]; then
   TIMEOUT_BIN="/usr/bin/timeout"
   PY_BIN="/usr/bin/python3"
   STRIPE_API_BASE="$STRIPE_API_BASE_PROD"
+  API_RETRIES=2
+  API_RETRY_SLEEPS="2 5"
   DAY="$(date -u +%Y-%m-%d)"
 else
   LOG_DIR="${INTERCOM_VERIFY_TEST_LOG_DIR:-$PROD_LOG_DIR}"
@@ -531,10 +541,14 @@ else
   TIMEOUT_BIN="${INTERCOM_VERIFY_TEST_TIMEOUT_BIN:-$(command -v timeout || command -v gtimeout || echo /usr/bin/timeout)}"
   PY_BIN="$(command -v python3 || echo /usr/bin/python3)"
   STRIPE_API_BASE="${INTERCOM_VERIFY_TEST_STRIPE_BASE:-$STRIPE_API_BASE_PROD}"
+  # the retry COUNT is never a seam (a caller-selectable retry count is a caller-selectable load on Intercom); only the
+  # sleeps are, so a test does not spend 7 real seconds proving a retry happened.
+  API_RETRIES=2
+  API_RETRY_SLEEPS="${INTERCOM_VERIFY_TEST_API_RETRY_SLEEPS:-2 5}"
   DAY="${INTERCOM_VERIFY_TEST_DAY:-$(date -u +%Y-%m-%d)}"
 fi
 readonly LOG_DIR LEDGER LEDGER_HELPER STAGE2_HELPER CORE_NOTICE_HELPER PROOF_DB POLICY_JSON FABLE_RULINGS_FILE \
-  CURL_BIN JQ_BIN TIMEOUT_BIN PY_BIN STRIPE_API_BASE DAY STRIPE_ENV_FILE
+  CURL_BIN JQ_BIN TIMEOUT_BIN PY_BIN STRIPE_API_BASE DAY STRIPE_ENV_FILE API_RETRIES API_RETRY_SLEEPS
 
 # ---------------------------------------------------------------------------------------
 # Arguments
@@ -623,20 +637,60 @@ ledger() {
   esac
 }
 
+# _api_is_read METHOD PATH: true when the call cannot have been APPLIED, so a retry cannot duplicate a side effect.
+# Intercom's searches are POSTs that only read; every other non-GET is a write and is never retried.
+_api_is_read() {
+  case "$1" in GET|HEAD) return 0 ;; esac
+  case "$2" in */search|*/search\?*) return 0 ;; esac
+  return 1
+}
+
+# _api_transport_rc RC: true when curl failed BEFORE the request reached a decision. A 4xx/5xx body is rc 0 here (curl
+# without -f), so an HTTP error is never retried. 124 is `timeout` killing the call.
+_api_transport_rc() {
+  case "$1" in 6|7|18|28|35|52|55|56|124) return 0 ;; esac
+  return 1
+}
+
+# _api_backoff ATTEMPT: the sleep before retry ATTEMPT (1-based), from API_RETRY_SLEEPS.
+_api_backoff() {
+  local n="$1" i=0 s=2
+  for s in $API_RETRY_SLEEPS; do
+    i=$((i + 1))
+    if [ "$i" -ge "$n" ]; then printf '%s' "$s"; return 0; fi
+  done
+  printf '%s' "$s"
+}
+
 # api METHOD PATH [payload-on-stdin]: the response body on stdout, curl rc as the status.
 # The payload travels through STDIN, never argv (MAX_ARG_STRLEN; see intercom-ops-write.sh).
+# A READ is retried up to API_RETRIES times on a TRANSPORT failure only (see API_RETRIES above). The payload is read
+# into a variable first so every attempt sends the same bytes; only the FINAL attempt's body reaches stdout, so a
+# retried call never emits two bodies to a caller that parses one.
 api() {
-  local method="$1" path="$2"
-  if [ "$method" = "GET" ]; then
-    "$TIMEOUT_BIN" 45 "$CURL_BIN" -sS -X GET \
-      -H "Authorization: Bearer $MUSOAI_INTERCOM_TOKEN" -H "Accept: application/json" \
-      -H "Intercom-Version: $API_VERSION" "$API_BASE$path" 2>&1
-  else
-    "$TIMEOUT_BIN" 45 "$CURL_BIN" -sS -X "$method" \
-      -H "Authorization: Bearer $MUSOAI_INTERCOM_TOKEN" -H "Accept: application/json" \
-      -H "Content-Type: application/json" -H "Intercom-Version: $API_VERSION" \
-      --data @- "$API_BASE$path" 2>&1
-  fi
+  local method="$1" path="$2" payload="" out="" rc=0 attempt=0 max=0
+  if [ "$method" != "GET" ]; then payload="$(cat)"; fi
+  if _api_is_read "$method" "$path"; then max="$API_RETRIES"; fi
+  while :; do
+    if [ "$method" = "GET" ]; then
+      out="$("$TIMEOUT_BIN" 45 "$CURL_BIN" -sS -X GET \
+        -H "Authorization: Bearer $MUSOAI_INTERCOM_TOKEN" -H "Accept: application/json" \
+        -H "Intercom-Version: $API_VERSION" "$API_BASE$path" 2>&1)" && rc=0 || rc=$?
+    else
+      out="$(printf '%s' "$payload" | "$TIMEOUT_BIN" 45 "$CURL_BIN" -sS -X "$method" \
+        -H "Authorization: Bearer $MUSOAI_INTERCOM_TOKEN" -H "Accept: application/json" \
+        -H "Content-Type: application/json" -H "Intercom-Version: $API_VERSION" \
+        --data @- "$API_BASE$path" 2>&1)" && rc=0 || rc=$?
+    fi
+    if [ "$rc" -eq 0 ] || [ "$attempt" -ge "$max" ] || ! _api_transport_rc "$rc"; then break; fi
+    attempt=$((attempt + 1))
+    local wait_s; wait_s="$(_api_backoff "$attempt")"
+    printf 'api: %s %s transport failure (rc=%s); retry %s/%s in %ss\n' \
+      "$method" "$path" "$rc" "$attempt" "$max" "$wait_s" >&2
+    sleep "$wait_s"
+  done
+  printf '%s' "$out"
+  return "$rc"
 }
 
 # stripe_key / stripe_get / verified_refund_facts --------------------------------------------------------------
