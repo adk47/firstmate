@@ -888,21 +888,19 @@ fm_busy_grok_tail_busy() {
 # fires for it (verified live on Pi 1.4.0, docs/verification/gateway-keepalive.md)
 # and the screen is the only source. It is never a busy/idle signal - a crew
 # with the picker open is BLOCKED, whichever side of a run it opened on - and
-# fm-crew-state.sh is its only consumer. Three independent signals the picker
-# renders are read and any one carries the verdict, so no single vendor string
-# is load-bearing: the hint row's connectives (`to select ·` ... `to set as
-# default ·` ... `to cancel`, keybinding-agnostic because Pi substitutes the
-# bound keys), the `Model Name:` detail row, and the provider-scope hint
-# (`models from configured providers`). tests/fm-pi-model-picker-live-e2e.test.sh
-# is the live guard that fails naming the Pi version when none of them renders.
+# fm-crew-state.sh is its only consumer. The verdict needs the picker's hint
+# row (`to select ·` ... `to set as default ·` ... `to cancel`, keybinding-
+# agnostic because Pi substitutes the bound keys) AND a rendered model list row
+# (the provider badge) or the no-matching-models row. A document that merely
+# quotes the picker's hint, Model Name, or provider-scope text therefore does
+# not read as the picker. tests/fm-pi-model-picker-live-e2e.test.sh is the live
+# guard that fails naming the Pi version when the picker's rows change.
 fm_busy_pi_tail_model_picker() {
   local t
   t=$(grep -v '^[[:space:]]*$' | tail -24)
   [ -n "$t" ] || return 1
-  printf '%s\n' "$t" | grep -qE 'to select · .* to set as default · .* to cancel' && return 0
-  printf '%s\n' "$t" | grep -qE '^[[:space:]]*Model Name: ' && return 0
-  printf '%s\n' "$t" | grep -qE 'models from configured providers' && return 0
-  return 1
+  printf '%s\n' "$t" | grep -qE 'to select · .* to set as default · .* to cancel' || return 1
+  printf '%s\n' "$t" | grep -qE '\[[A-Za-z0-9._-]+\]|^[[:space:]]*No matching models$'
 }
 
 # fm_busy_rovo_tail_busy: the Rovo-only temporary rendered-tail fallback.

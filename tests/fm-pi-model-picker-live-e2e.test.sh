@@ -130,16 +130,14 @@ case "$record_open" in
   '') fail "no busy record was readable while the picker was open on Pi $PI_VERSION" ;;
 esac
 
-# 2. The real picker is recognised, through each of its rows independently so
-#    a vendor change to one row is reported by name.
+# 2. The real picker is recognised from its hint row plus a rendered model
+#    list row, so a vendor change to either is reported by name.
 printf '%s\n' "$screen" | fm_busy_pi_tail_model_picker \
   || fail "Pi $PI_VERSION's /model picker was not recognised by fm_busy_pi_tail_model_picker; its rows changed"
 printf '%s\n' "$screen" | grep -qE 'to select · .* to set as default · .* to cancel' \
-  || echo "warn: Pi $PI_VERSION no longer renders the picker hint row; the verdict rests on the other signals"
-printf '%s\n' "$screen" | grep -qE 'Model Name: ' \
-  || echo "warn: Pi $PI_VERSION no longer renders the Model Name row; the verdict rests on the other signals"
-printf '%s\n' "$screen" | grep -qE 'models from configured providers' \
-  || echo "warn: Pi $PI_VERSION no longer renders the provider-scope hint; the verdict rests on the other signals"
+  || echo "warn: Pi $PI_VERSION no longer renders the picker hint row"
+printf '%s\n' "$screen" | grep -qE '\[[A-Za-z0-9._-]+\]|^[[:space:]]*No matching models$' \
+  || echo "warn: Pi $PI_VERSION no longer renders a model list row"
 
 # 3. An ordinary idle Pi prompt (the screen before the picker opened) is not one.
 printf '%s\n' "$idle_screen" | fm_busy_pi_tail_model_picker \

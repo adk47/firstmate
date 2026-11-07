@@ -987,9 +987,10 @@ test_no_run_blocking_dialog_reads_blocked() {
 }
 
 # (f3) Pi's built-in /model picker is an overlay the per-task extension cannot
-# observe, so a Pi crew showing it is read from the rendered tail: any one of
-# the picker's three independent rows carries the blocked verdict, an ordinary
-# idle pane carries none, and a non-Pi crew never reads it.
+# observe, so a Pi crew showing it is read from the rendered tail: the picker's
+# hint row together with a rendered model list row carries the blocked verdict,
+# a document quoting the picker's rows does not, an ordinary idle pane carries
+# none, and a non-Pi crew never reads it.
 test_pi_model_picker_on_screen_reads_blocked() {
   reset_fakes
   local d sig out
@@ -1002,17 +1003,30 @@ test_pi_model_picker_on_screen_reads_blocked() {
   printf 'working: implementing the fix\n' > "$d/state/feat-pick.status"
   local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$d/state" feat-pick)
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-pick idle --gen "$gen" --source pi-ext --event agent-settled
-  # The three rows exactly as Pi 1.4.0 rendered them live (the hint row's keys
-  # are whatever Pi has bound, so the connectives are what is read).
+  # The rows exactly as Pi 1.4.0 rendered them live (the hint row's keys are
+  # whatever Pi has bound, so the connectives are what is read).
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT=$'  → ✓claude-opus-5-5 (Claude Opus 5.5) [anthropic]\n  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel'
+  out=$(run_crew_state "$d" feat-pick)
+  assert_contains "$out" "state: blocked" "the picker's hint row and a model list row carry the verdict"
+  assert_contains "$out" "/model picker" "the verdict names the picker"
+  assert_contains "$out" "exit and respawn" "the verdict names the documented recovery"
+
+  FM_FAKE_BUSY_TEXT=$'  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel\n  No matching models'
+  out=$(run_crew_state "$d" feat-pick)
+  assert_contains "$out" "state: blocked" "the picker's hint row and its no-matching-models row carry the verdict"
+
+  # A document that quotes the picker's rows is not the picker: the hint row
+  # alone, the Model Name row alone, the provider-scope hint alone, and all
+  # three quoted together without a rendered list row must all stay unblocked.
   for sig in \
     '  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel' \
     '  Model Name: TOKEN POOL · Claude Opus 5.5' \
-    'Only showing models from configured providers. Use /login to add providers.'; do
-    FM_FAKE_BUSY=1 FM_FAKE_BUSY_TEXT="$sig"
+    'Only showing models from configured providers. Use /login to add providers.' \
+    $'Only showing models from configured providers. Use /login to add providers.\n  Model Name: TOKEN POOL · Claude Opus 5.5\n  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel'; do
+    FM_FAKE_BUSY_TEXT="$sig"
     out=$(run_crew_state "$d" feat-pick)
-    assert_contains "$out" "state: blocked" "a picker row alone carries the verdict: $sig"
-    assert_contains "$out" "/model picker" "the verdict names the picker: $sig"
-    assert_contains "$out" "exit and respawn" "the verdict names the documented recovery"
+    assert_not_contains "$out" "state: blocked" "quoted picker text without a rendered list row is not the picker: $sig"
   done
   FM_FAKE_BUSY=0
   out=$(run_crew_state "$d" feat-pick)
@@ -1021,10 +1035,11 @@ test_pi_model_picker_on_screen_reads_blocked() {
 
   fm_write_meta "$d/state/feat-pick.meta" "window=fm:fm-feat-pick" "worktree=$d/wt" "kind=ship" "harness=claude"
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-pick idle --gen "$gen" --source claude-hook --event stop
-  FM_FAKE_BUSY=1 FM_FAKE_BUSY_TEXT='  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel'
+  FM_FAKE_BUSY=1
+  FM_FAKE_BUSY_TEXT=$'  → ✓claude-opus-5-5 (Claude Opus 5.5) [anthropic]\n  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel'
   out=$(run_crew_state "$d" feat-pick)
   assert_not_contains "$out" "state: blocked" "the picker read is scoped to the Pi harness"
-  pass "a Pi crew showing its /model picker reads blocked from any one of the picker's rows, with the recovery named, and only for Pi"
+  pass "a Pi crew showing its /model picker reads blocked from its hint row plus a list row, while quoted picker text does not, and only for Pi"
 }
 
 # A converted adapter must NOT read working from rendered footer text: the
