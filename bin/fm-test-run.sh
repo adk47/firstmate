@@ -2146,6 +2146,26 @@ cleanup_run() {
 
 trap cleanup_run EXIT
 
+# Every launched test gets a PATH shim that refuses a tmux invocation which
+# would reach the default server. The shim is installed once per run and
+# forwards to the real binary when the test names its own socket.
+if [ -r "$ROOT/tests/tmux-test-safety.sh" ]; then
+  # shellcheck source=tests/tmux-test-safety.sh
+  . "$ROOT/tests/tmux-test-safety.sh"
+  REAL_TMUX=$(command -v tmux 2>/dev/null || true)
+  if [ -n "$REAL_TMUX" ] && [ -x "$REAL_TMUX" ]; then
+    FM_TEST_TMUX_SHIM_DIR="$RUN_TMP/tmux-shim"
+    if fm_test_tmux_guard_install "$FM_TEST_TMUX_SHIM_DIR" "$REAL_TMUX" >/dev/null; then
+      FM_TEST_TMUX_REAL=$REAL_TMUX
+      export FM_TEST_TMUX_SHIM_DIR FM_TEST_TMUX_REAL
+      PATH="$FM_TEST_TMUX_SHIM_DIR:$PATH"
+      export PATH
+    else
+      FM_TEST_TMUX_SHIM_DIR=
+    fi
+  fi
+fi
+
 RUN_ID="fm-test-run-${RUN_STARTED_MS}-$$"
 TOTAL=0
 FAILED=0
@@ -2224,8 +2244,10 @@ record_script_result() {
 # because an unbounded suite is what silently outruns its caller's budget.
 run_script_bounded() {  # <script> <out> <stream> <id>
   local script=$1 out=$2 stream=$3 id=$4
-  local rc child_ancestors
+  local rc child_ancestors refusal_log
   : "$id"
+  refusal_log="$RUN_TMP/tmux-refusal.$id"
+  rm -f "$refusal_log"
   # The re-entry sentinel's chain (see the selection-time check above): every
   # child inherits the scripts already running above it, so a nested run can
   # refuse to select one of them.
@@ -2236,25 +2258,38 @@ run_script_bounded() {  # <script> <out> <stream> <id>
       # Expansion is intentionally deferred to the child bash passed to -c.
       # shellcheck disable=SC2016
       FM_TEST_RUN_ANCESTORS="$child_ancestors" \
+        FM_TEST_TMUX_TEST_LABEL="$script" \
+        FM_TEST_TMUX_REFUSAL_LOG="$refusal_log" \
         fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash -c \
         'bash "$1" 2>&1 | tee "$2"; exit "${PIPESTATUS[0]}"' _ "$script" "$out"
       rc=$?
     else
-      FM_TEST_RUN_ANCESTORS="$child_ancestors" bash "$script" 2>&1 | tee "$out"
+      FM_TEST_RUN_ANCESTORS="$child_ancestors" FM_TEST_TMUX_TEST_LABEL="$script" \
+        FM_TEST_TMUX_REFUSAL_LOG="$refusal_log" \
+        bash "$script" 2>&1 | tee "$out"
       rc=${PIPESTATUS[0]}
     fi
   elif [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ]; then
-    FM_TEST_RUN_ANCESTORS="$child_ancestors" \
+    FM_TEST_RUN_ANCESTORS="$child_ancestors" FM_TEST_TMUX_TEST_LABEL="$script" \
+      FM_TEST_TMUX_REFUSAL_LOG="$refusal_log" \
       fm_run_timed "$PER_SCRIPT_TIMEOUT_SECS" bash "$script" >"$out" 2>&1
     rc=$?
   else
-    FM_TEST_RUN_ANCESTORS="$child_ancestors" bash "$script" >"$out" 2>&1
+    FM_TEST_RUN_ANCESTORS="$child_ancestors" FM_TEST_TMUX_TEST_LABEL="$script" \
+      FM_TEST_TMUX_REFUSAL_LOG="$refusal_log" \
+      bash "$script" >"$out" 2>&1
     rc=$?
   fi
   if [ "$PER_SCRIPT_TIMEOUT_SECS" -gt 0 ] && [ "$rc" -eq 124 ]; then
     printf 'not ok - %s exceeded the per-script bound of %ss and was terminated\n' \
       "$script" "$PER_SCRIPT_TIMEOUT_SECS" >>"$out"
     [ "$stream" -eq 1 ] && tail -1 "$out"
+  fi
+  if [ -s "$refusal_log" ]; then
+    printf 'not ok - %s invoked tmux without naming its own socket; the safety guard refused it\n' \
+      "$script" >>"$out"
+    [ "$stream" -eq 1 ] && tail -1 "$out"
+    [ "$rc" -ne 0 ] || rc=1
   fi
   return "$rc"
 }

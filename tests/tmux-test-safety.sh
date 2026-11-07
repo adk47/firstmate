@@ -14,6 +14,11 @@
 # that did break it has a shared guard to route through instead of a private
 # convention.
 #
+# ENFORCEMENT. bin/fm-test-run.sh installs the PATH shim below for every test
+# it launches, so a test cannot opt out by forgetting to call the guard.
+# tests/lib.sh installs the same shim when a test file is run by hand. The
+# explicit functions remain for tests that want to prove the rule directly.
+#
 # THREE WAYS TO USE IT, in increasing strength:
 #   fm_test_tmux_refuse_default_socket <args...>
 #       the rule itself: refuse (stderr + non-zero) an argv that names no
@@ -68,6 +73,7 @@ fm_test_tmux_refuse_default_socket() {
 # fm_test_tmux_guard_install: write a `tmux` shim into <dir> that enforces the
 # rule for every invocation and then execs <real-tmux>. Echoes the shim path.
 # <real-tmux> defaults to the first tmux on PATH that is not the shim itself.
+# The shim names the test from FM_TEST_TMUX_TEST_LABEL when the caller sets it.
 fm_test_tmux_guard_install() {  # <dir> [<real-tmux>]
   local dir=$1 real=${2:-} shim guard
   [ -n "$dir" ] || return 1
@@ -84,7 +90,13 @@ fm_test_tmux_guard_install() {  # <dir> [<real-tmux>]
 # invocation from inside a test, then execs the real binary.
 set -u
 . $(printf '%q' "$guard")
-fm_test_tmux_refuse_default_socket "\$@" || exit 1
+if ! fm_test_tmux_refuse_default_socket "\$@"; then
+  printf 'tmux test safety guard: test %s\n' "\${FM_TEST_TMUX_TEST_LABEL:-unknown}" >&2
+  if [ -n "\${FM_TEST_TMUX_REFUSAL_LOG:-}" ]; then
+    printf '%s\t%s\n' "\${FM_TEST_TMUX_TEST_LABEL:-unknown}" "\$*" >>"\$FM_TEST_TMUX_REFUSAL_LOG"
+  fi
+  exit 1
+fi
 exec $(printf '%q' "$real") "\$@"
 EOF
   chmod +x "$shim" || return 1

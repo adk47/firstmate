@@ -1471,6 +1471,41 @@ SH
   pass "the re-entry sentinel refuses a differently-spelled self-selection"
 }
 
+test_runner_refuses_bare_tmux_from_a_test() {
+  local tmp repo fakebin rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-tmux-guard.XXXXXX")
+  repo="$tmp/repo"
+  fakebin="$tmp/fakebin"
+  mkdir -p "$repo/bin" "$repo/tests" "$fakebin"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cp "$ROOT/tests/tmux-test-safety.sh" "$repo/tests/tmux-test-safety.sh"
+  cat >"$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$FM_FAKE_TMUX_LOG"
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  cat >"$repo/tests/fm-bare-tmux.test.sh" <<'SH'
+#!/usr/bin/env bash
+tmux kill-server
+echo "ok - bare tmux returned"
+SH
+  chmod +x "$repo/tests/fm-bare-tmux.test.sh"
+  set +e
+  (cd "$repo" && PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$tmp/contacted" \
+    bin/fm-test-run.sh tests/fm-bare-tmux.test.sh) >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "the runner must refuse a bare tmux kill-server from a test"; }
+  grep -Fq 'tmux test safety guard' "$tmp/out" "$tmp/err" \
+    || { rm -rf "$tmp"; fail "the runner refusal must name the tmux safety guard: $(cat "$tmp/out" "$tmp/err")"; }
+  [ ! -e "$tmp/contacted" ] \
+    || { rm -rf "$tmp"; fail "the runner shim forwarded a default-socket tmux call to the real binary"; }
+  rm -rf "$tmp"
+  pass "the runner refuses a bare tmux kill-server from a test"
+}
+
 # The complement: a test invoking the runner for a DIFFERENT script is
 # legitimate and must still work, so the sentinel is not a blanket refusal of
 # nested runs.
@@ -1522,6 +1557,7 @@ test_aggregate_exit_behavior
 test_reentry_sentinel_refuses_self_selection
 test_reentry_sentinel_refuses_differently_spelled_self_selection
 test_reentry_sentinel_allows_a_different_script
+test_runner_refuses_bare_tmux_from_a_test
 test_gate_skip_accounting
 test_fail_on_gate_skip_token
 test_exclude_family

@@ -87,6 +87,37 @@ pass() {
 FM_TEST_CLEANUP_DIRS=()
 FM_TEST_CLEANUP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-cleanup.$$.XXXXXX") || return 1
 
+# A hand-run test file gets the same tmux PATH shim the runner installs, so
+# running one file directly cannot reach the default server either.
+if [ -r "$ROOT/tests/tmux-test-safety.sh" ]; then
+  # shellcheck source=tests/tmux-test-safety.sh
+  . "$ROOT/tests/tmux-test-safety.sh"
+  if [ -n "${FM_TEST_TMUX_SHIM_DIR:-}" ] && [ -x "$FM_TEST_TMUX_SHIM_DIR/tmux" ]; then
+    case ":$PATH:" in
+      *":$FM_TEST_TMUX_SHIM_DIR:"*) ;;
+      *) PATH="$FM_TEST_TMUX_SHIM_DIR:$PATH" ;;
+    esac
+    export PATH
+  else
+    _fm_test_real_tmux=$(command -v tmux 2>/dev/null || true)
+    if [ -n "$_fm_test_real_tmux" ] && [ -x "$_fm_test_real_tmux" ]; then
+      _fm_test_shim_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-tmux-shim.XXXXXX")
+      if fm_test_tmux_guard_install "$_fm_test_shim_dir" "$_fm_test_real_tmux" >/dev/null; then
+        FM_TEST_TMUX_SHIM_DIR=$_fm_test_shim_dir
+        FM_TEST_TMUX_REAL=$_fm_test_real_tmux
+        export FM_TEST_TMUX_SHIM_DIR FM_TEST_TMUX_REAL
+        PATH="$FM_TEST_TMUX_SHIM_DIR:$PATH"
+        export PATH
+        FM_TEST_CLEANUP_DIRS+=("$_fm_test_shim_dir")
+      else
+        rm -rf "$_fm_test_shim_dir"
+      fi
+    fi
+    unset _fm_test_real_tmux _fm_test_shim_dir
+  fi
+  export FM_TEST_TMUX_TEST_LABEL=${FM_TEST_TMUX_TEST_LABEL:-$(basename "$0")}
+fi
+
 fm_test_pid_identity() {
   local pid=$1
   FM_STATE_OVERRIDE="${TMPDIR:-/tmp}" bash -c \
