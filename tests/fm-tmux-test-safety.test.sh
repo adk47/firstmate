@@ -67,6 +67,15 @@ test_rule_refuses_other_default_socket_commands() {
   pass "the guard refuses every default-socket command, not only kill-server"
 }
 
+test_rule_refuses_command_option_socket_lookalike() {
+  local out rc
+  out=$(fm_test_tmux_refuse_default_socket capture-pane -S -100 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a command-specific -S (capture-pane scrollback) must not count as a socket"
+  assert_contains "$out" "refusing" "the refusal names itself"
+  pass "the guard refuses a command-specific -S that names no socket"
+}
+
 # --- the PATH shim ----------------------------------------------------------
 
 test_guard_install_refuses_and_forwards() {
@@ -86,6 +95,12 @@ test_guard_install_refuses_and_forwards() {
     || fail "the installed shim must forward a named-socket call"
   assert_contains "$(cat "$d/forwarded.log")" "-L fm-test-socket kill-server" \
     "the forwarded argv reaches the real binary unchanged"
+
+  rm -f -- "$d/forwarded.log"
+  FM_FAKE_TMUX_LOG="$d/forwarded.log" out=$("$shim" capture-pane -S -100 2>&1)
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "the installed shim must refuse a command-specific -S with no socket"
+  assert_absent "$d/forwarded.log" "a refused command-option call must never reach the real binary"
   pass "the installed PATH shim refuses a default-socket call and forwards a named one"
 }
 
@@ -108,11 +123,17 @@ test_wrapper_pins_socket_and_refuses_caller_socket() {
   rc=$?
   [ "$rc" -ne 0 ] || fail "the wrapper must refuse a caller that chooses its own socket"
   assert_contains "$out" "refusing" "the wrapper's refusal is the shared guard's"
+
+  FM_FAKE_TMUX_LOG="$d/forwarded.log" "$wrapper" capture-pane -S -100 \
+    || fail "the wrapper must allow a command-specific -S that is not a socket"
+  assert_contains "$(cat "$d/forwarded.log")" "-S $d/dedicated.sock capture-pane -S -100" \
+    "the wrapper pins its socket and leaves the command option alone"
   pass "the socket-pinning wrapper supplies its own socket and refuses a caller-chosen one"
 }
 
 test_rule_refuses_default_socket
 test_rule_passes_named_socket
 test_rule_refuses_other_default_socket_commands
+test_rule_refuses_command_option_socket_lookalike
 test_guard_install_refuses_and_forwards
 test_wrapper_pins_socket_and_refuses_caller_socket

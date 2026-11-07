@@ -43,9 +43,8 @@ spawn_shell_in() {  # <cwd>
 }
 
 # A home with one IN-FLIGHT lane per <id>:<worktree> pair - a task record plus a
-# busy-state record that claims the lane is working, which is what puts it in
-# the check's lane set - plus a stamp that is already due so the self-throttle
-# does not swallow the poll.
+# busy-state record - plus a stamp that is already due so the self-throttle does
+# not swallow the poll. The busy-state record is a claim, not the lane filter.
 make_home() {  # <case-dir> <id>:<worktree>...
   local d=$1 spec id wt gen
   shift
@@ -62,7 +61,7 @@ make_home() {  # <case-dir> <id>:<worktree>...
 }
 
 # A lane that is NOT claiming to be working: a task record with an idle busy
-# record. It must never be walked, however dead its worktree looks.
+# record. It is still walked, because a lane between turns can still be dead.
 make_idle_lane() {  # <case-dir> <id> <worktree>
   local d=$1 id=$2 wt=$3 gen
   fm_write_meta "$d/state/$id.meta" "window=fm:fm-$id" "worktree=$wt" "kind=ship" "harness=claude"
@@ -111,19 +110,60 @@ test_names_exactly_the_dead_lanes() {
   pass "the check prints one line naming exactly the dead lanes"
 }
 
-# --- a lane that is not claiming to be working is not walked ---------------
+# --- a lane between turns is still walked ----------------------------------
 
-test_idle_lane_is_not_walked() {
+test_idle_lane_is_walked() {
   local d out
   d="$TMP_ROOT/idle"
   mkdir -p "$d/idle-a"
   mkdir -p "$d/state"
   make_idle_lane "$d" "lane-idle" "$d/idle-a"
+  spawn_shell_in "$d/idle-a" >/dev/null || fail "could not spawn lane-idle's shell"
+  printf '0\n' > "$d/state/.fleet-integrity.last"
+  sleep 0.2
+  out=$(run_check "$d")
+  assert_contains "$out" "lane-idle" \
+    "a lane whose busy record reads idle is still walked and its dead worktree is reported"
+  pass "a lane between turns is still walked"
+}
+
+# --- a non-working claim that disagrees with the worktree is reported ------
+
+test_done_claim_with_uncommitted_work_is_reported() {
+  local d out
+  d="$TMP_ROOT/done-dirty"
+  mkdir -p "$d/done-a"
+  make_home "$d" "lane-done:$d/done-a"
+  git -C "$d/done-a" init -q || fail "could not init the lane worktree"
+  printf 'uncommitted\n' > "$d/done-a/leftover.txt"
+  printf 'done: finished the task\n' > "$d/state/lane-done.status"
+  spawn_named_process "$d/bin" pi "$d/done-a" >/dev/null || fail "could not spawn lane-done's agent"
+  sleep 0.2
+  out=$(run_check "$d")
+  assert_contains "$out" "lane-done" "a done lane still holding uncommitted work must be reported"
+  assert_contains "$out" "claims done" "the report names the lane's claim"
+  assert_contains "$out" "uncommitted" "the report names the worktree's uncommitted work"
+  pass "a non-working claim that disagrees with the worktree is reported"
+}
+
+# --- a cleared condition clears the recorded verdict -----------------------
+
+test_cleared_condition_clears_the_record() {
+  local d out
+  d="$TMP_ROOT/cleared"
+  mkdir -p "$d/dead-a"
+  make_home "$d" "lane-a:$d/dead-a"
+  spawn_shell_in "$d/dead-a" >/dev/null || fail "could not spawn lane-a's shell"
+  sleep 0.2
+  out=$(run_check "$d")
+  assert_contains "$out" "lane-a" "the dead lane is reported first"
+  assert_present "$d/state/.fleet-integrity" "the verdict is recorded"
+  rm -rf -- "$d/dead-a"
   printf '0\n' > "$d/state/.fleet-integrity.last"
   out=$(run_check "$d")
-  [ -z "$out" ] \
-    || fail "a lane whose record reads idle is not claiming to be working and must not be walked, got: $out"
-  pass "a lane that is not claiming to be working is not walked"
+  [ -z "$out" ] || fail "a cleared lane set must be silent, got: $out"
+  assert_absent "$d/state/.fleet-integrity" "a cleared condition must clear the recorded verdict"
+  pass "a cleared condition clears the recorded verdict"
 }
 
 # --- a remote secondmate is not probed locally -----------------------------
@@ -192,7 +232,9 @@ test_arm_writes_and_binds_the_shim() {
 
 test_silent_when_every_lane_is_live
 test_names_exactly_the_dead_lanes
-test_idle_lane_is_not_walked
+test_idle_lane_is_walked
+test_done_claim_with_uncommitted_work_is_reported
+test_cleared_condition_clears_the_record
 test_remote_secondmate_is_skipped
 test_torn_down_worktree_is_skipped
 test_self_throttles_on_the_stamp

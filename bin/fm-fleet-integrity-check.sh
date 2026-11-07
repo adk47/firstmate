@@ -20,33 +20,37 @@
 # firstmate turn and without anyone asking.
 #
 # WHAT IT READS. Every IN-FLIGHT lane: a state/<id>.meta whose recorded
-# worktree still exists, whose endpoint is local (a remote secondmate's worktree
-# is a path on ITS host, so a local probe proves nothing for it), and whose
-# state/<id>.busy-state record reads `busy` - the lane is claiming to be working
-# right now. That is the defect class exactly: a lane that says it is working
-# while its agent process is gone. A lane whose record reads idle, or that has
-# no record at all, is not claiming anything and is left alone; a lane whose
+# worktree still exists and whose endpoint is local (a remote secondmate's
+# worktree is a path on ITS host, so a local probe proves nothing for it). The
+# busy-state record is a CLAIM, not a filter: a lane between turns, or one whose
+# record never settled, still has a worktree and can still be dead. A lane whose
 # endpoint is gone is the watchdog's business, not this check's.
 # For each in-flight lane, one bounded read-only `lsof -a -d cwd` scan answers
 # whether a live process sits in that worktree and classifies as an agent -
 # bin/fm-lane-liveness-lib.sh owns that rule, including why a pane's idle shell
 # does not count. The scan is matched only against the recorded worktree paths;
-# nothing here walks a worktree's file tree, signals a process, or writes
-# anything but its own stamp and record.
+# nothing here signals a process or writes anything but its own stamp and
+# record; the claim comparison adds only local `git status` and `git rev-list`
+# reads inside each recorded worktree.
+# The lane's last status-log line is its CLAIM. When that claim is not working
+# and the worktree still holds uncommitted files or unlanded commits, the claim
+# and the worktree disagree and the lane is reported. A working claim is not
+# compared: work in progress is expected to hold work.
 #
-# WHAT IT SAYS. One line, only when the dead set is non-empty, naming every dead
-# lane. Silence is the healthy answer and the common one. A lane is reported
-# dead only on positive evidence - its worktree holds nothing but shells, or
-# nothing at all - so a worktree holding a process the shared vocabulary cannot
-# classify is left alone rather than reported, because a false dead verdict is
-# what launches a duplicate agent onto a live worktree. A scan that cannot be
-# trusted (no lsof, or lsof failed) is silent for the same reason: a broken
-# probe is not evidence that the fleet is dead.
+# WHAT IT SAYS. One line naming every dead lane, only when the dead set is
+# non-empty, plus one line per lane whose non-working claim disagrees with the
+# work its worktree still holds. Silence is the healthy answer and the common
+# one. A lane is reported dead only on positive evidence - its worktree holds
+# nothing but shells, or nothing at all - so a worktree holding a process the
+# shared vocabulary cannot classify is left alone rather than reported, because
+# a false dead verdict is what launches a duplicate agent onto a live worktree.
+# A scan that cannot be trusted (no lsof, or lsof failed) is silent for the same
+# reason: a broken probe is not evidence that the fleet is dead.
 #
 # SELF-THROTTLED. A stamp file keeps the scan off every watcher poll; the
 # default cadence is 300s and FM_FLEET_INTEGRITY_INTERVAL overrides it. The
-# whole poll is one lsof scan plus one `ps` per matching process, well inside
-# the watcher's FM_CHECK_TIMEOUT.
+# whole poll is one lsof scan, one `ps` per matching process, and one local
+# git read per lane, well inside the watcher's FM_CHECK_TIMEOUT.
 set -u
 export LC_ALL=C
 
@@ -65,6 +69,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-lane-liveness-lib.sh
 . "$SCRIPT_DIR/fm-lane-liveness-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 CHECK_ID='fleet-integrity'
 STAMP="$STATE/.fleet-integrity.last"
@@ -95,13 +101,36 @@ interval_secs() {
   printf '%s\n' "$v"
 }
 
-# lane_worktrees: the recorded worktree of every in-flight local lane, one per
-# line as "<id>\t<worktree>". In-flight means the lane's own busy-state record
-# reads `busy` - it is claiming to be working - and its worktree still exists.
+# lane_claim: the lane's last status-log state, or `unknown` when it has no
+# readable claim. bin/fm-classify-lib.sh owns the bounded tail read and the
+# verb vocabulary, so this check does not grow a second status parser.
+lane_claim() {  # <id>
+  local log="$STATE/$1.status" line verb
+  line=$(last_status_line "$log")
+  [ -n "$line" ] || { printf 'unknown'; return 0; }
+  if status_is_paused "$line"; then
+    printf 'paused'
+    return 0
+  fi
+  verb=$(status_line_verb "$line")
+  case "$verb" in
+    working) printf 'working' ;;
+    needs-decision) printf 'parked' ;;
+    blocked) printf 'blocked' ;;
+    done) printf 'done' ;;
+    failed) printf 'failed' ;;
+    *) printf 'unknown' ;;
+  esac
+}
+
+# lane_worktrees: the recorded worktree and status-log claim of every in-flight
+# local lane, one per line as "<id>\t<worktree>\t<claim>". In-flight means the
+# lane has a meta record and its worktree still exists; the busy-state record is
+# deliberately not a filter, because a lane between turns can still be dead.
 # A remote secondmate is skipped: its worktree path names a directory on another
 # host, so a local cwd scan proves nothing about it.
 lane_worktrees() {
-  local meta id wt remote record
+  local meta id wt remote claim
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] && [ ! -L "$meta" ] || continue
     id=$(basename "$meta" .meta)
@@ -110,14 +139,25 @@ lane_worktrees() {
     [ -z "$remote" ] || continue
     wt=$(fm_meta_get "$meta" worktree)
     [ -n "$wt" ] && [ -d "$wt" ] || continue
-    record=$(fm_busy_record_read "$STATE" "$id" 2>/dev/null) || continue
-    [ "${record%% *}" = busy ] || continue
-    printf '%s\t%s\n' "$id" "$wt"
+    claim=$(lane_claim "$id")
+    printf '%s\t%s\t%s\n' "$id" "$wt" "$claim"
   done
 }
 
+# lane_worktree_work: "<uncommitted-files>\t<unlanded-commits>" for a worktree.
+# Local git reads only: no fetch, no network, no write. A worktree that is not a
+# git checkout, or a git read that fails, contributes zero rather than a guess.
+lane_worktree_work() {  # <worktree>
+  local wt=$1 dirty unlanded
+  dirty=$(git -C "$wt" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+  case "$dirty" in ''|*[!0-9]*) dirty=0 ;; esac
+  unlanded=$(git -C "$wt" rev-list --count HEAD --not --remotes 2>/dev/null) || unlanded=0
+  case "$unlanded" in ''|*[!0-9]*) unlanded=0 ;; esac
+  printf '%s\t%s\n' "$dirty" "$unlanded"
+}
+
 action_check() {
-  local now stamp interval rows dead ids wt id line
+  local now stamp interval rows dead ids wt id claim line findings dirty unlanded
   now=$(now_epoch)
   interval=$(interval_secs)
   if [ -f "$STAMP" ] && [ ! -L "$STAMP" ]; then
@@ -131,37 +171,50 @@ action_check() {
   printf '%s\n' "$now" > "$STAMP" 2>/dev/null || true
 
   rows=$(lane_worktrees) || return 0
-  [ -n "$rows" ] || return 0
+  [ -n "$rows" ] || { rm -f -- "$RECORD" 2>/dev/null; return 0; }
 
   local -a worktrees=()
-  while IFS=$'\t' read -r id wt; do
+  while IFS=$'\t' read -r id wt claim; do
     [ -n "$wt" ] || continue
     worktrees+=("$wt")
   done <<EOF
 $rows
 EOF
-  [ "${#worktrees[@]}" -gt 0 ] || return 0
+  [ "${#worktrees[@]}" -gt 0 ] || { rm -f -- "$RECORD" 2>/dev/null; return 0; }
 
   # One scan for the whole fleet. A scan that cannot be trusted is silent: a
   # broken probe is not evidence that every lane is dead.
   dead=$(fm_lane_dead_worktrees "${worktrees[@]}") || return 0
-  [ -n "$dead" ] || { rm -f -- "$RECORD" 2>/dev/null; return 0; }
 
   ids=
-  while IFS=$'\t' read -r id wt; do
+  findings=
+  while IFS=$'\t' read -r id wt claim; do
     [ -n "$wt" ] || continue
-    if printf '%s\n' "$dead" | grep -Fqx -- "$wt"; then
+    if [ -n "$dead" ] && printf '%s\n' "$dead" | grep -Fqx -- "$wt"; then
       ids="${ids:+$ids,}$id"
     fi
+    [ "$claim" = working ] && continue
+    IFS=$'\t' read -r dirty unlanded <<EOF
+$(lane_worktree_work "$wt")
+EOF
+    [ "$dirty" -gt 0 ] || [ "$unlanded" -gt 0 ] || continue
+    line="fleet-integrity: lane $id claims $claim and its worktree $wt has $dirty uncommitted file(s) / $unlanded unlanded commit(s) - the claim and the worktree disagree; read it with bin/fm-crew-state.sh $id, then land, relaunch, or tear it down"
+    line=$(printf '%s' "$line" | cut -c1-"$MAX_LINE")
+    findings="${findings:+$findings$'\n'}$line"
   done <<EOF
 $rows
 EOF
-  [ -n "$ids" ] || return 0
 
-  line="fleet-integrity: no live agent process in the worktree of $ids - each is a dead lane still holding its worktree; read it with bin/fm-crew-state.sh <id>, then relaunch or tear it down"
-  line=$(printf '%s' "$line" | cut -c1-"$MAX_LINE")
-  printf '%s\n' "$line" > "$RECORD" 2>/dev/null || true
-  printf '%s\n' "$line"
+  if [ -n "$ids" ]; then
+    line="fleet-integrity: no live agent process in the worktree of $ids - each is a dead lane still holding its worktree; read it with bin/fm-crew-state.sh <id>, then relaunch or tear it down"
+    line=$(printf '%s' "$line" | cut -c1-"$MAX_LINE")
+    findings="${line}${findings:+$'\n'$findings}"
+  fi
+
+  [ -n "$findings" ] || { rm -f -- "$RECORD" 2>/dev/null; return 0; }
+
+  printf '%s\n' "$findings" > "$RECORD" 2>/dev/null || true
+  printf '%s\n' "$findings"
 }
 
 action_status() {
