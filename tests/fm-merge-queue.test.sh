@@ -851,7 +851,7 @@ case_ah() {
 case_ai() {
   local dir out
   dir=$(make_case ai)
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO bbbbbbb\n' "$HEAD_A" \
+  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO @bbbbbbb\n' "$HEAD_A" \
     >"$dir/data/go-queue.txt"
   green_head
   out=$(run_queue "$dir" run)
@@ -862,7 +862,7 @@ case_ai() {
 
   # The same marker naming this head does count, so the check is about the head
   # and not about the marker's presence.
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO %s\n' "$HEAD_A" "$HEAD_A" \
+  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO @%s\n' "$HEAD_A" "$HEAD_A" \
     >"$dir/data/go-queue.txt"
   out=$(run_queue "$dir" run)
   assert_contains "$out" "merged acme/widgets#12" "(ai) a GO naming this head merges"
@@ -982,7 +982,8 @@ case_an() {
   green_head
   for comment in 'awaiting Fable GO' 'no Fable GO yet' 'Fable GO pending' \
     'without Fable GO' 'Fable GO not yet' 'Fable GO (pending)' \
-    'Fable GO - pending' 'Fable GO: pending'; do
+    'Fable GO - pending' 'Fable GO: pending' 'Fable GO - no-go' \
+    'Fable GO - not ready' 'Fable GO - not confirmed'; do
     printf '# owner: acme\nwidgets 12 %s task-a squash # %s\n' "$HEAD_A" "$comment" \
       >"$dir/data/go-queue.txt"
     out=$(run_queue "$dir" run)
@@ -1001,7 +1002,7 @@ case_ao() {
   local dir out comment
   dir=$(make_case ao)
   green_head
-  for comment in 'Fable GO on bbbbbbb' 'fable-go: bbbbbbb' 'Fable GO (bbbbbbb)'; do
+  for comment in 'Fable GO @bbbbbbb' 'fable-go@bbbbbbb' 'FABLE_GO=bbbbbbb'; do
     printf '# owner: acme\nwidgets 12 %s task-a squash # %s\n' "$HEAD_A" "$comment" \
       >"$dir/data/go-queue.txt"
     out=$(run_queue "$dir" run)
@@ -1010,7 +1011,7 @@ case_ao() {
     [ ! -s "$dir/merge.log" ] || fail "(ao) '$comment' must never merge"
     expect_code 1 "$(queue_rows "$dir")" "(ao) '$comment' keeps the row queued"
   done
-  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO on %s\n' "$HEAD_A" "$HEAD_A" \
+  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO @%s\n' "$HEAD_A" "$HEAD_A" \
     >"$dir/data/go-queue.txt"
   out=$(run_queue "$dir" run)
   assert_contains "$out" "merged acme/widgets#12" "(ao) a GO naming this head merges"
@@ -1065,7 +1066,8 @@ case_ar() {
   dir=$(make_case ar)
   green_head
   for comment in 'Fable GO - no blockers' 'Fable GO 1762483200' \
-    'Fable GO 20261107T023205Z'; do
+    'Fable GO 20261107T023205Z' 'Fable GO - acceded' \
+    'Fable GO - feedback addressed' 'Fable GO - not-ready blockers'; do
     printf '# owner: acme\nwidgets 12 %s task-a squash # %s\n' "$HEAD_A" "$comment" \
       >"$dir/data/go-queue.txt"
     out=$(run_queue "$dir" run)

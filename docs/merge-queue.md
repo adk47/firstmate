@@ -72,9 +72,12 @@ The merge is handed to `bin/fm-pr-merge.sh` with `--admin`, which bypasses the f
 That is deliberate: the account cannot approve its own pull requests, so the queue proves the three things that replace a human approval before it uses the bypass, and records what it bypassed.
 
 1. A `qa-review` check passing on the exact head, with no configuration switch.
-2. A Fable GO recorded on the row for this head, as a `Fable GO` marker at the start of the row's trailing comment.
-   The marker is read case- and separator-insensitively, and a marker that names a commit must name this head, so a GO written for an older head does not carry over a push.
-   A negated or pending form such as `awaiting Fable GO` or `Fable GO pending` is not a GO.
+2. A Fable GO recorded on the row for this head, as a `fable-go` marker in the row's trailing comment.
+   The marker is read case-insensitively with `-`, `_`, or a single space as the separator.
+   A GO binds to a head only when written `Fable GO @<sha>` or `Fable GO =<sha>`, and that sha must prefix this head, so a GO written for an older head does not carry over a push.
+   Any other text after the marker is provenance prose the queue does not interpret.
+   A negated or pending form such as `awaiting Fable GO`, `Fable GO pending`, or `Fable GO - no-go` is not a GO.
+   Negation is read only from the marker's immediate neighbours, so `Fable GO - no blockers` is still a GO.
 3. Every required status check the base branch registers, present and passing, from both classic branch protection and repository rulesets.
 
 Anything unproven keeps the row queued and spends no attempt budget, because an unproven gate is not a refused merge.

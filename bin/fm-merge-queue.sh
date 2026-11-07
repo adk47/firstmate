@@ -66,9 +66,11 @@
 # things the captain's 2026-11-03 ruling names, and records what it bypassed:
 #
 #   1. a passing qa-review on the exact head (above, and never configurable);
-#   2. a Fable GO recorded on this row for this head, as a "Fable GO" marker in
-#      the row's trailing comment. A marker that names a commit must name this
-#      head, so a GO written for an older head does not carry over a push;
+#   2. a Fable GO recorded on this row for this head, as a fable-go marker in
+#      the row's trailing comment. A GO binds to a head only as
+#      fable-go@<sha> or fable-go=<sha>, and that sha must prefix this head, so
+#      a GO written for an older head does not carry over a push. Other text
+#      after the marker is provenance prose the queue does not interpret;
 #   3. every required status check the base branch registers, present and
 #      passing, except the named by-design list below.
 #
@@ -490,22 +492,34 @@ is_by_design_check() {
 }
 
 # fable_go_for <comment> <head>: whether this row records a Fable GO for this
-# head. The marker is "Fable GO" in any case and with any separator, and a
-# marker that names a commit must name this head, so a GO written for an older
-# head does not carry over a push.
+# head. The marker is fable-go with -, _, or a single space as the separator.
+# A GO binds to a head only as <marker>@<sha> or <marker>=<sha>; any other text
+# after the marker is prose the queue does not interpret. Negation is read only
+# from the marker's immediate neighbours.
 fable_go_for() {
-  local comment=$1 head=$2 rest sha
+  local comment=$1 head=$2 rest full pre prefix before after prev next sha
   rest=$(printf '%s' "$comment" | sed 's/^[[:space:]]*#*[[:space:]]*//')
-  printf '%s' "$rest" | grep -qiE '^fable[ _-]?go([^[:alnum:]]|$)' || return 1
-  rest=$(printf '%s' "$rest" | sed -E 's/^[Ff][Aa][Bb][Ll][Ee][ _-]?[Gg][Oo]//')
-  printf '%s' "$rest" | grep -qiE '(^|[^[:alnum:]])(pending|awaiting|without|not[[:space:]]+(yet|approved|given)|no[[:space:]]+fable[ _-]?go)([^[:alnum:]]|$)' && return 1
-  sha=$(printf '%s' "$rest" \
-    | grep -oiE '(^|[^[:alnum:]])(on|at|for|head)[[:space:]]*:?[[:space:]]*[0-9a-f]{7,40}|[:(][[:space:]]*[0-9a-f]{7,40}' \
-    | grep -oE '[0-9a-fA-F]{7,40}$' | head -1)
-  if [ -z "$sha" ]; then
-    sha=$(printf '%s' "$rest" | grep -oiE '[0-9a-f]{7,40}' | grep -iE '[a-f]' | head -1)
+  [[ $rest =~ (^|[^[:alnum:]_-])([Ff][Aa][Bb][Ll][Ee][-_ ][Gg][Oo])([^[:alnum:]_-]|$) ]] || return 1
+  full=${BASH_REMATCH[0]}
+  pre=${BASH_REMATCH[1]}
+  prefix=${rest%%"$full"*}
+  before=${rest:0:${#prefix}+${#pre}}
+  after=${rest:${#prefix}+${#full}}
+  case "$full" in *[@=]) after="${full: -1}$after" ;; esac
+  prev=$(printf '%s' "$before" | tr -cs '[:alnum:]_-' '\n' | tail -1 | tr '[:upper:]' '[:lower:]')
+  case "$prev" in
+    no|not|awaiting|pending|without|unconfirmed) return 1 ;;
+  esac
+  if [[ $after =~ ^[@=]([0-9a-fA-F]{7,40})([^[:alnum:]]|$) ]]; then
+    sha=${BASH_REMATCH[1]}
+  else
+    next=$(printf '%s' "$after" | sed -E 's/^[^[:alnum:]]+//' \
+      | grep -oiE '^[[:alnum:]_-]+' | tr '[:upper:]' '[:lower:]')
+    case "$next" in
+      pending|not|no-go|nogo|awaiting|tbd|todo|unconfirmed) return 1 ;;
+    esac
+    return 0
   fi
-  [ -n "$sha" ] || return 0
   head=$(printf '%s' "$head" | tr '[:upper:]' '[:lower:]')
   sha=$(printf '%s' "$sha" | tr '[:upper:]' '[:lower:]')
   case "$head" in
