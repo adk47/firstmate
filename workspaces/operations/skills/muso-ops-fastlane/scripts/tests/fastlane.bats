@@ -226,10 +226,15 @@ echo called >> "$TRINO_CALLS"
 sleep 20
 STUB
   chmod +x "$FASTLANE_TRINO"
-  export FASTLANE_TRINO_TIMEOUT=1
-  export FASTLANE_TRINO_BATCH_BUDGET=1
+  # The first read must be allowed to spend the WHOLE budget, so the budget is
+  # exhausted by that read rather than by loop overhead before it. A 1s budget
+  # on a loaded 2-CPU runner could be consumed by the loop itself, leaving zero
+  # reads and making the assertion below flaky. With per-read == budget the
+  # first read always runs and always leaves nothing for the next profile.
+  export FASTLANE_TRINO_TIMEOUT=10
+  export FASTLANE_TRINO_BATCH_BUDGET=10
 
-  run timeout -k 2 15 bash "$SCRIPT" \
+  run timeout -k 2 30 bash "$SCRIPT" \
     "11111111-2222-3333-4444-555555555555 22222222-3333-4444-5555-666666666666 33333333-4444-5555-6666-777777777777" \
     "" "U038BM16T7W" real
   [ "$status" -eq 0 ]

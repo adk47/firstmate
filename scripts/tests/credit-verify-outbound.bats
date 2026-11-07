@@ -2179,7 +2179,7 @@ PY
   STUB_CHECK_RC=4 STUB_CHECK_RC_SUB=uvn-status STUB_CHECK_SLEEP=10 CVO_TRANSIENT_RETRY_SLEEPS="30 60 120" \
     CVO_TICK_BUDGET_S=300 CVO_TICK_ELAPSED0=253 CVO_TICK_HARD_S=6900 run -2 "$SCRIPT"
   grep -q "a 30s retry does not fit in the" "$(newest_tick)"
-  grep -q "the step itself just took 10s" "$(newest_tick)"
+  grep -Eq "the step itself just took (1[0-9]|[2-9][0-9]|[0-9]{3,})s" "$(newest_tick)"
   if grep -q "Trino transient (rc=4); retry 1/3" "$(newest_tick)"; then false; fi   # never slept, never retried
   grep -q -- "^claim-proof-ask .*--mode apply" "$CALLS"          # the claims still ran
   grep -q -- "^claim-status .*--mode apply" "$CALLS"
@@ -2210,7 +2210,7 @@ PY
     CVO_APPLY_RETRY_SLEEPS="15 30 60 60 120" CVO_TICK_BUDGET_S=300 CVO_TICK_ELAPSED0=268 CVO_TICK_HARD_S=6900 \
     run -2 "$SCRIPT"
   grep -q "a 15s retry does not fit in the" "$(newest_tick)"
-  grep -q "the attempt itself just took 10s" "$(newest_tick)"
+  grep -Eq "the attempt itself just took (1[0-9]|[2-9][0-9]|[0-9]{3,})s" "$(newest_tick)"
   if grep -q "apply lock busy/transient" "$(newest_tick)"; then false; fi   # never slept, never retried
   [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]
 }

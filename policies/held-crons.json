@@ -1,0 +1,49 @@
+{
+  "_doc": [
+    "Crons that are HELD: a kill file is present on node-8 under /etc/hydra, placed by a human for a reason the",
+    "file itself states. scripts/check-held-cron-guard.py (pre-commit + PR Validation) refuses any diff that",
+    "sets enabled:true on one of these, changes its schedule or payload, or deletes its row - and refuses any",
+    "added code line that deletes a .disabled sentinel. The only way a held cron moves is the recorded step:",
+    "a PR that removes its entry here AND cites the step's evidence key ([key=kill-lift-MMDD-HHMM], written",
+    "by scripts/credit-approve-hold-lift.sh) on a commit-message line naming that cron, or",
+    "HELD_CRON_LIFT_KEY=kill-lift-MMDD-HHMM:<cron-name> at commit time, AND commits the executed step's",
+    "record at data/kill-lift/<key>.evidence; the rules (R1-R6) are the guard's docstring. Why: on 2026-11-07 an automated review fix flipped",
+    "credit-trust-score-approve-15m to enabled:true inside a print-only PR (hydra#1832, dd40d67e9); it was",
+    "caught by a human and reverted. A pin on the value catches today's file; this registry plus the guard",
+    "refuses the change at the gate. On a host where /etc/hydra exists the guard ALSO treats every cron whose",
+    "description names a present kill file as held, so an entry missing here is a warning, not a loophole.",
+    "Measured on node-8 2026-11-07T03:30Z (firstmate) and 2026-11-07T02:1xZ (ls /etc/hydra/*.disabled)."
+  ],
+  "held": [
+    {
+      "name": "credit-trust-score-approve-15m",
+      "kill_file": "/etc/hydra/credit-trust-score-approve.disabled",
+      "since": "2026-11-06T08:19Z",
+      "why": "firstmate re-armed deliberately: both switches come off together, in one recorded step, only after the coded-decider invalidation path is proved (run twice, second invalidates first, no Errno 13); the scheduler row is the first stop and is the captain's decision (docs/credit-verification/score-approve-switch-decision-brief.md)"
+    },
+    {
+      "name": "credit-trust-decide-15m",
+      "kill_file": "/etc/hydra/credit-trust-decide.disabled",
+      "since": "2026-11-05T02:55Z",
+      "why": "never-lower refusal: the coded-decider output could not be invalidated after a failed refresh ([Errno 13] Permission denied); lifted only with credit-trust-score-approve.disabled in the same recorded step"
+    },
+    {
+      "name": "credit-trust-verify-notify-15m",
+      "kill_file": "/etc/hydra/credit-verify-notify.disabled",
+      "since": "2026-10-20T07:19Z",
+      "why": "the verify-request sender is retired (docs/credit-verification/verify-request-notes.md); its row stays disabled"
+    },
+    {
+      "name": "credit-past-verify-wave-15m",
+      "kill_file": "/etc/hydra/credit-verify-notify.disabled",
+      "since": "2026-10-20T07:19Z",
+      "why": "same sender, same kill file as credit-trust-verify-notify-15m"
+    },
+    {
+      "name": "uvn-ticket-popularity-under30",
+      "kill_file": "/etc/hydra/uvn-under30-cron.disabled",
+      "since": "2026-10-27T00:59Z",
+      "why": "held on the host; its row stays disabled until the kill file's owner lifts it"
+    }
+  ]
+}

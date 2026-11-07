@@ -342,6 +342,22 @@ jobs:
           python3 scripts/check-agent-exec-policy.py --base "origin/$base"
           echo "::endgroup::"
 
+      - name: Held crons — a kill-filed cron is armed only by the recorded step
+        # verification-blackout-fable-f1 [key=invalidation-proof], firstmate inbox 005 2026-11-07. On 2026-11-07 an
+        # automated review fix inside a print-only PR (#1832, dd40d67e9) flipped credit-trust-score-approve-15m to
+        # enabled:true "so the lift restores approvals"; a human caught it. policies/held-crons.json names every cron
+        # whose /etc/hydra kill file is present; this refuses enabled false->true, a schedule or payload change, a
+        # deleted row, a registry entry removed without [key=kill-lift-MMDD-HHMM] in a commit message, and any added
+        # code line that deletes a .disabled sentinel. Exit 2 (unreadable input) is a failure, never a pass.
+        # This pod cannot see node-8, so a cited lift is a CLAIM here; the node-8 hand-off job runs the same guard
+        # with --host and is the check that confirms it (kill file absent, host record byte-identical).
+        run: |
+          echo "::group::Held crons"
+          base="${{ github.event.pull_request.base.ref }}"
+          git rev-parse --verify --quiet "origin/$base" >/dev/null || git fetch --quiet --depth=200 origin "$base"
+          python3 scripts/check-held-cron-guard.py --base "origin/$base"
+          echo "::endgroup::"
+
       - name: Sentinel capability registry (kill files + promotion rulings)
         # sentinel-demote-s6 / request-sentinel-fable-s1 §2.3: policies/sentinel-capabilities.json
         # is the repo half of the "three independent stops", and scripts/sentinel/demote.py reads
@@ -1014,6 +1030,19 @@ jobs:
           fetch-depth: 0
       - name: Host preflight — /dev/null must be a char device
         run: bash scripts/assert-host-devnull.sh
+
+      - name: Held crons — the host confirms a cited lift (kill file gone, step record byte-identical)
+        # The ARC-pod run of this guard (repo-only job above) cannot see node-8, so a PR that commits a
+        # data/kill-lift/<key>.evidence record and cites its key is only a CLAIM there. This run is on node-8: a cited
+        # lift passes only if /etc/hydra/<kill_file> is absent AND /var/lib/hydra/credit-review/<key>.evidence (root
+        # 750, written only by the step run as root) is byte-identical to the committed copy. A fabricated record is
+        # red here. QA on hydra#1832 (2026-11-07): "bind the exemption to independently verifiable completion".
+        run: |
+          echo "::group::Held crons (host confirmation)"
+          base="${{ github.event.pull_request.base.ref }}"
+          git rev-parse --verify --quiet "origin/$base" >/dev/null || git fetch --quiet --depth=200 origin "$base"
+          python3 scripts/check-held-cron-guard.py --base "origin/$base" --host
+          echo "::endgroup::"
 
       - name: Rebase integrity check (advisory — warns, never blocks)
         # Companion to the staleness gate above: that gate forces a rebase when

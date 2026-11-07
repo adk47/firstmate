@@ -652,7 +652,16 @@ look like deletions in `git diff origin/main`, and "restoring" it with
 Any automation that can APPROVE a Muso credit request is listed in
 `policies/credit-approval-automation.json`. CI (`scripts/check-credit-approval-automation.sh`)
 fails if a cron runs one unregistered, or enabled without `approved: true` +
-`approved_by` + `approval_ref`. The Lobster batch also re-checks that flag at
+`approved_by` + `approval_ref`. A cron whose `/etc/hydra` kill file is present is
+HELD: `policies/held-crons.json` + `scripts/check-held-cron-guard.py` (pre-commit
+`--staged`, PR Validation `--base`) refuse a diff that flips its `enabled` to true,
+changes its schedule or payload, deletes its row, or drops its registry entry
+without the recorded step's `[key=kill-lift-MMDD-HHMM]` on a line naming that cron
+plus the executed step's record at `data/kill-lift/<key>.evidence` (which the node-8
+hand-off job's `--host` run confirms against the host: kill file gone, record
+byte-identical), or adds a code line that deletes a literal `.disabled` path; the lift itself is
+`scripts/credit-approve-hold-lift.sh` (print-only) and the rules (R1-R6) live in the
+guard's docstring. The Lobster batch also re-checks that flag at
 dispatch and at the write boundary. Why: from 05-18 to 10-11 the batch approved
 validator-DECLINED credits through an inverted rule (`approve_owning_track == 100`
 means the shortcut did NOT fire). Approvals are audited read-only by

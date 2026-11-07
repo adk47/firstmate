@@ -1590,6 +1590,18 @@ else
   printf '%s\n' "$tmp_out"
 fi
 
+# verification-blackout-fable-f1: a held cron (kill file present on node-8, policies/held-crons.json) is armed only by
+# the recorded step. 2026-11-07: a review-agent commit flipped the approver cron to enabled:true inside a print-only PR.
+echo "▸ held crons stay held"
+if [[ ! -f scripts/check-held-cron-guard.py ]]; then
+  ok "no held-cron guard in this tree (synthetic fixture repo)"
+elif held_out=$(python3 scripts/check-held-cron-guard.py --staged 2>&1); then
+  ok "no held cron armed, rescheduled or deleted; no sentinel-deleting code added"
+else
+  fail "held cron touched outside the recorded step (remove its policies/held-crons.json entry, commit the executed step's record at data/kill-lift/<key>.evidence and set HELD_CRON_LIFT_KEY=kill-lift-MMDD-HHMM:<cron-name>, or '# held-cron-guard: <reason>' on a code line)"
+  printf '%s\n' "$held_out"
+fi
+
 echo
 if (( fail_count > 0 )); then
   red "✗ pre-commit failed ($fail_count check(s) failed)"

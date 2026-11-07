@@ -1,0 +1,21 @@
+{
+  "_what": "The ONE named fixture scripts/prove-coded-decider-invalidation.py runs the coded decider on, twice. It is a held request row in the shape admin_api.list_requests returns. The validator reject rule below makes decide.run() HOLD it before any catalog or model call (decide.py: validator_rejected_rules runs before EvidenceBuilder.build), so the run touches no admin endpoint, no judge, and no live store - it only exercises the run -> write_coded_decider_output -> ledger-record path the hold condition names.",
+  "_never": "Never a real request: the id is the nil-UUID family, the user is 0, and the rule name says so.",
+  "rows": [
+    {
+      "id": "00000000-0000-4000-8000-0000000c0ded",
+      "userId": 0,
+      "profileId": "fixture-profile-never-real",
+      "trackId": "fixture-track-never-real",
+      "spotifyTrackTitle": "coded-decider invalidation fixture",
+      "credits": ["Mixing"],
+      "createdAt": "2026-11-06T00:00:00Z",
+      "status": "user_verification_needed",
+      "verificationData": {
+        "rule_risk_percent": {
+          "reject_fixture_row_never_a_real_request": 100
+        }
+      }
+    }
+  ]
+}

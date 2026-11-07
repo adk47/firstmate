@@ -225,6 +225,60 @@ exactly what we want). A rollback whose PUT failed reports `applied: false` with
   on every deploy, so a live toggle is reverted by the next deploy; use the kill-switch file for an
   immediate stop.
 
+**Lifting a hold is a recorded step, and the proof comes first.** A switch written with its own resume
+condition (e.g. `/etc/hydra/credit-trust-score-approve.disabled`, firstmate 2026-11-06) is lifted only by
+the step that condition names: `scripts/prove-coded-decider-invalidation.py` produces the proof (the
+coded-decider output run twice in a sandbox, the second invalidating the first, no `Errno 13`) and, with
+`--host-probe`, the leg the sandbox cannot stand in for: the hold was armed by a permission failure, and
+permissions belong to the real directory and the real user, so the probe performs the writer's ladder
+(create by tmp+replace, replace over an existing file, the tree's own `_invalidate_coded_output`, unlink)
+as the decider's service user (`--service-user`, root: the cron runs inside the gateway) on PROBE-NAMED
+files in the live output directory (`/var/lib/hydra/credit-review`), reads the live document's owner, mode
+and `os.access` without ever writing it, and fails the proof on any `Errno 13`, the wrong user or a missing
+directory. `scripts/credit-approve-hold-lift.sh` is the print-only planner that RUNS that proof itself
+against `--tree` (default: its own tree, `/opt/hydra` on node-8; the fixture lives at the deployed path
+`scripts/credit_review/fixtures/`) with both legs, refuses unless it exits 0 with a `PROOF: PASS` verdict
+line that names the host probe as PASS AND both switches are present, backs up both, records one `kill-lift-<MMDD-HHMM>.evidence` entry and prints the one-line step
+for a human to run: `bash <state>/kill-lift-<key>.lift-step.sh`, a sha-pinned script the planner writes
+(mode 0700, quoted verbatim in the evidence entry with its sha256). The script appends `lifting`, then
+TAKES each switch with an atomic `mv -n` to an aside path and verifies the taken bytes against the sha256 the
+plan recorded — take-then-verify, because the decider's `rearm_kill_switch()` writes a new `.disabled`
+outside its own write lock, so a check-then-`rm` window cannot be closed by taking that lock; a switch that
+changed is put back only if the path is still empty, and a switch re-armed meanwhile is left as found with
+its new reason. Only after BOTH takes verify AND neither path has been re-armed meanwhile does it append
+`lifted` — the LAST record line of a completed step, written while the aside copies still exist — and only
+then discard them. Any other outcome restores every taken switch and appends `ROLLED BACK` with what it
+actually observed — restored, `re-armed meanwhile, left as found`, or `RESTORE FAILED, switches may be
+absent` — so the record never claims a restore that did not happen, and nothing is ever written after
+`lifted`. The planner serializes
+the whole plan on a lock, so two planners in the same minute yield one plan and one refusal, never a
+truncated record. It has no `--execute`, accepts no handed-in transcript (`--proof` is refused), and one
+switch present is a refusal, not a half-lift. The
+two files are the second and third stops: the first is the scheduler row's `enabled` flag
+(`credit-trust-score-approve-15m`, `enabled: false` in
+`cron-jobs.json` and `enabled=0` in the live store since 2026-10-15), which the planner reads (never
+writes) and reports as enabled / DISABLED / unknown, so the plan never promises a tick it has not seen
+enabled. Re-enabling that row is a `cron-jobs.json` PR, not part of the recorded step — and that PR is
+gated: `policies/held-crons.json` names every cron whose `/etc/hydra` kill file is present, and
+`scripts/check-held-cron-guard.py` (pre-commit `--staged`, PR Validation `--base origin/main` on the ARC
+pod, and `--base origin/main --host` in the node-8 hand-off job) refuses a diff that flips a held cron's `enabled` false→true, changes its schedule or payload, deletes its row, removes
+its registry entry without `[key=kill-lift-MMDD-HHMM]` on a commit-message line that names that cron (or
+`HELD_CRON_LIFT_KEY=kill-lift-MMDD-HHMM:<cron-name>` at commit time; a key is bound to the cron it names and never
+lifts a second entry) AND the executed step's record committed alongside at `data/kill-lift/<key>.evidence`
+— the planner's evidence file whose FINAL step record is the human's run's `lifted [key=...]` line and which
+names that cron's kill file; a plan that was only planned, a run that rolled back or was re-armed after `lifted`,
+an edited (not removed) entry, or a record for another switch, is refused. A committed record is still a
+CLAIM, and the ARC-pod run says so (`NOTE ... cannot see the host`): the node-8 run with `--host` is the
+check that confirms it — `/etc/hydra/<kill_file>` must be absent there and the step's own record at
+`/var/lib/hydra/credit-review/<key>.evidence` (root 750, written only by the step run as root) must be
+byte-identical to the committed copy, so a fabricated or edited record is red on the host — or adds a code
+line that deletes a literal `.disabled` path. Why a gate and not a pin: on
+2026-11-07 an automated review fix inside the print-only planner PR (#1832, commit `dd40d67e9`) flipped
+`credit-trust-score-approve-15m` to `enabled: true` "so the lift restores approvals"; a human caught and
+reverted it. The guard makes the reviewer structurally unable to commit that again. The audit-sample pause
+(`/var/lib/hydra/credit-review/score-approve.paused`) is not one of those switches: its owner clears it
+with `credit-review.py score-approve --resume`.
+
 **The durable stop has a POSITIVE half.** A never-lower refusal re-places the switch; when it cannot, it
 records the refusal in the ledger (`decider-writer:kill-armed`) and in filesystem sentinels, and every
 later run refuses while the switch is absent. But every one of those records is a *negative* fact that
