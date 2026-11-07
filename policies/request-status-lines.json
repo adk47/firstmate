@@ -1,0 +1,247 @@
+{
+  "_doc": "The ONE source of every automatic request status line. Read by scripts/request_comms/ (driver.py, lines.py) and enforced in PR Validation by scripts/check-request-status-lines.py. Rules, all mechanically checked: one fixed sentence or two per (request type, state) that says WHERE THE REQUEST IS and nothing else; band-invariant (no per-user variables, so the same state is the same bytes for everyone); never a reason, score, band, flag or rule name; never a date promise; never a promise about the outcome; nothing customer- or agent-authored can be interpolated. Lines already approved verbatim elsewhere are CARRIED, naming their source, and the guard compares them byte for byte: the decline line from plugins/intercom/src/answer-bank.ts (`declined`, decline-copy-ruling §1) and the erasure acknowledgement from workspaces/support/reference/gdpr-erasure-requests.md (<!-- approved: gdpr-ack-v2-1101 -->, ruled 2026-11-01). A line is sent only when `enabled` is true AND `approval_ref` is non-empty; everything else is held, visibly, as `line_locked`. The driver itself is off (`enabled: false`) and a live tick additionally needs /etc/hydra/request-comms.live on node-8.",
+  "version": 1,
+  "enabled": false,
+  "_enabled_note": "the driver's own switch. false = every tick is a dry run that records `would_send` rows and sends nothing, even if the live file exists on a host.",
+  "review": {
+    "state": "partial",
+    "_note": "only the carried-verbatim lines are approved. Every other line is pending Fable r5 on this exact file, which is why it ships enabled:false."
+  },
+  "channels": {
+    "_note": "The ladder is bell -> intercom -> email. The bell is attempted first for every state it has a kind for (it needs no identity and no copy of ours); intercom only when the contact resolves to THIS account by scripts/credit_review/identity_resolver.py (r5); email only when there is no Intercom identity, through the send-gateway with one template per type.",
+    "bell": {
+      "enabled": true,
+      "_note": "The bell's WORDS are not in this repo: each kind's copy lives in notify-gateway (services/notify-gateway/workflows/catalog.ts, `statusBell(...)`, written from the approved copy in muso-messaging #66 and pinned by that repo's tests + scripts/ops/status-bell-check.sh). So the bell is the one rung that can go out while OUR lines are still pending review: a locked line is sent as a bell-only message, and never as text of ours on another channel. workflow_keys is an optional RESTRICTION (type/state -> one of the ten kinds); empty means the driver's own pinned map decides. Ten kinds exist in both Novu environments today and NOTIFY_STATUS_BELLS=on (verified live 2026-11-03): credit_status_in_review, credit_status_needs_proof, credit_status_doc_received, credit_status_approved, credit_status_declined, claim_status_in_review, claim_documents_needed, claim_approved, profile_merge_queued, profile_merge_done. A trigger answers {workflow_run_id, visibility}; visibility.<uid> carries one flag per delivery surface (feed, knock, push) and ALL-FALSE means the item reached nobody, so any true leg is a confirmed delivery and the driver stops there. A 5xx without a run id is `uncertain`, never `rejected`: the gateway can fail after enqueueing, and calling that a non-delivery would send the same update twice.",
+      "workflow_keys": {},
+      "_trigger": {
+        "call": "POST /v1/workflows/:key/trigger",
+        "body": {
+          "recipients": [
+            "<user id>"
+          ],
+          "data": {
+            "profile": {
+              "name": "your profile"
+            },
+            "count": 1
+          }
+        },
+        "auth": "Authorization: Bearer $NOTIFY_SERVICE_TOKEN (notify-gateway's single onRequest hook)",
+        "idempotency": "Idempotency-Key: request-status:<type>:<id>:<state>:<cycle> — <cycle> is the last ATTEMPT at this request (confirmed send, or a `sending`/`uncertain`/`rejected` row), so a retry inside one tick reuses the key while the next 48 h cycle gets a fresh one. A state-only key let the gateway dedupe a reminder whose earlier reply was lost."
+      }
+    },
+    "intercom": {
+      "enabled": false,
+      "message_type": "email",
+      "subject": "Your Muso request",
+      "_note": "message_type email reaches the customer off-platform (the status chases we owe people are mostly on quiet threads); inapp stays on-platform only."
+    },
+    "email": {
+      "enabled": false,
+      "template_keys": {
+        "credit": "",
+        "claim": "",
+        "merge": "",
+        "erasure": "",
+        "refund": ""
+      },
+      "_note": "send-gateway template key per request type. A type with no key gets no email rung (it is reported, never silently dropped to a different channel). The gateway renders the TEMPLATE, so each key must be registered with a body of `{{event.status_line}}` (the approved line travels in `data.event.status_line`); `template_uses_line_text` is the promise that they do, and enabling this rung without it is a policy error.",
+      "template_uses_line_text": false
+    }
+  },
+  "sources": {
+    "_note": "ticket-backed request types need a ticket -> Muso account identity resolver before they can be messaged (a ClickUp task carries no user id, and a name or an email string is not an identity). Until then the driver reports them as `unconfigured` and sends them nothing.",
+    "clickup": {
+      "list_id": "901000600160"
+    },
+    "refund": {
+      "tags": []
+    },
+    "window": {
+      "open_active_days": 30,
+      "decided_days": 14,
+      "_note": "Which rows a STATUS feed is responsible for. 100,938 credit requests are open today (49,039 waiting on the user, 11,864 unverified) and 62,268 of them have not moved in 91-365 days; a year-old abandoned request hearing 'still with our team' is a product decision, not a driver default, so an OPEN row is in scope while it moved within open_active_days and a DECIDED one for decided_days. Rows outside the window are counted, never hidden: `request-comms report` shows stale_open. Widening it is these two numbers."
+    }
+  },
+  "lines": {
+    "credit": {
+      "received": {
+        "text": "We have your credit request. It's with our verification team.",
+        "enabled": false,
+        "review": "pending-fable-r5",
+        "approval_ref": ""
+      },
+      "verifying": {
+        "text": "Your credit request is still with our verification team. Nothing has changed and nothing is needed from you right now.",
+        "enabled": false,
+        "review": "pending-fable-r5",
+        "approval_ref": ""
+      },
+      "need_you": {
+        "text": "We need one more thing to finish your credit request. Please reply here, or to the email we sent about it, and it can keep moving.",
+        "enabled": false,
+        "review": "pending-fable-r5",
+        "approval_ref": ""
+      },
+      "decided": {
+        "text": "A request is closed when the supporting information we received wasn't enough to confirm the credit. You can submit it again with your supporting documents and a fresh review starts from the beginning. I can't see the review itself, so I can't tell you more than that.",
+        "enabled": false,
+        "review": "carried: answer-bank declined (decline-copy-ruling §1)",
+        "approval_ref": "answer-bank:declined",
+        "source": "plugins/intercom/src/answer-bank.ts#id=declined",
+        "verbatim": true,
+        "gap_fill": false,
+        "_note": "gap_fill: core tells users about an APPROVED credit itself (metadata.approvedNotice.noticeSentAt, the S1/S2 senders). This line exists for the requests core never told (the 1,774 of 2,236 measured on 2026-11-03). It stays off until a review confirms a rejected request cannot already have received core's credits_rejected email, so the driver holds every decision core owns."
+      },
+      "waiting": {
+        "text": "Your credit request is still open with our team. We'll write again as soon as something changes.",
+        "enabled": false,
+        "review": "pending-fable-r5",
+        "approval_ref": ""
+      }
+    },
+    "claim": {
+      "received": {
+        "text": "We have your profile claim. Your profile stays as it is until a person has reviewed it.",
+        "enabled": false,
+        "review": "pending-fable-r5",
+        "approval_ref": ""
+      },
+      "verifying": {
+        "text": "A person is reviewing your profile claim. Nothing is needed from you right now.",
+        "enabled": false,
+        "review": "pending-fable-r5",
+        "approval_ref": ""
+      },
+      "need_you": {
+        "text": "We need something from you to keep your profile claim moving. Please reply here.",
+        "enabled": false,
+        "review": "pending-fable-r5",
+        "approval_ref": ""
+      },
+      "decided": {
+        "text": "Your profile claim has been reviewed and closed. If you think the outcome is wrong, reply here and a person will look again.",
+        "enabled": false,
+        "review": "pending-fable-r5",
+        "approval_ref": ""
+      },
+      "waiting": {
+        "text": "Your profile claim is still open with our team. We'll write again as soon as something changes.",
+        "enabled": false,
+        "review": "pending-fable-r5",
+        "approval_ref": ""
+      }
+    },
+    "merge": {
+      "received": {
+        "text": "We have your merge request and a person is reviewing it.",
+        "enabled": false,
+        "review": "pending-fable-r5",
+        "approval_ref": ""
+      },
+      "verifying": {
+        "text": "A person is still reviewing your merge request. Nothing is needed from you right now.",
+        "enabled": false,
+        "review": "pending-fable-r5",
+        "approval_ref": ""
+      },
+      "need_you": {
+        "text": "We need something from you to keep your merge request moving. Please reply here.",
+        "enabled": false,
+        "review": "pending-fable-r5",
+        "approval_ref": ""
+      },
+      "decided": {
+        "text": "Your merge request has been reviewed and closed. The outcome is on this thread.",
+        "enabled": false,
+        "review": "carried: merge-outcome-notify owns the outcome (S5)",
+        "approval_ref": "s5:merge-outcome-notify",
+        "gap_fill": false
+      },
+      "waiting": {
+        "text": "Your merge request is still open with our team. We'll write again as soon as something changes.",
+        "enabled": false,
+        "review": "pending-fable-r5",
+        "approval_ref": ""
+      }
+    },
+    "erasure": {
+      "received": {
+        "text": "Thank you, we have your request to remove your personal data from Muso, received {date}. Here is how it works.\n\n**1. Confirm it's you.** The quickest way: open the page in the Muso app and claim it, that proves it on the spot. Or reply from the email address on your Muso account, if you have one. If neither applies, send the link to the page and your name as it appears on your ID. If you are writing for someone else, send their written authorisation.\n\n**2. We hide the page.** As soon as we've confirmed it's you, the page comes out of Muso search and public view. If your request raises a legal matter, we hide it immediately.\n\n**3. Written confirmation on this thread**, within one month of today, listing exactly what was done. Any account you hold is closed and taken out of use on request; what has been deleted is stated in that confirmation.\n\nCredit records on published works go through a separate formal review, and the written response covers them.",
+        "enabled": true,
+        "review": "approved: gdpr acknowledgement v2 (ruled 2026-11-01)",
+        "approval_ref": "gdpr-ack-v2-1101",
+        "source": "workspaces/support/reference/gdpr-erasure-requests.md#approved: gdpr-ack-v2-1101",
+        "verbatim": true,
+        "slot_required": true,
+        "slots": {
+          "no_page_link": "To get started, reply with the link to the Muso page."
+        },
+        "_note": "The ack is approved as a WHOLE, including its fixed slots; a partial ack is never sent. `slot_required` means the driver must know which slot applies (today: pages is empty -> no_page_link; a page in the message needs the page's name and the sender's name, which the register does not carry, so the driver holds until the GDPR lane reports the slot)."
+      },
+      "verifying": {
+        "text": "Your data request is still open with the team. The written confirmation comes on this thread.",
+        "enabled": false,
+        "review": "pending-fable-r5",
+        "approval_ref": ""
+      },
+      "need_you": {
+        "text": "We need to confirm it's you before we go further with your data request. Please reply here.",
+        "enabled": false,
+        "review": "pending-fable-r5",
+        "approval_ref": ""
+      },
+      "decided": {
+        "text": "The team's written confirmation about your data request is on this thread.",
+        "enabled": false,
+        "review": "carried: the written legal confirmation is the team's letter, never an automatic line",
+        "approval_ref": "legal-handoff",
+        "gap_fill": false
+      },
+      "waiting": {
+        "text": "Your data request is still open with the team. The written confirmation will come on this thread.",
+        "enabled": false,
+        "review": "pending-fable-r5",
+        "approval_ref": ""
+      }
+    },
+    "refund": {
+      "received": {
+        "text": "We have your refund request and it is being looked at.",
+        "enabled": false,
+        "review": "pending-fable-r5",
+        "approval_ref": ""
+      },
+      "verifying": {
+        "text": "Your refund request is still being looked at. Nothing is needed from you right now.",
+        "enabled": false,
+        "review": "pending-fable-r5",
+        "approval_ref": ""
+      },
+      "need_you": {
+        "text": "We need something from you to keep your refund request moving. Please reply here.",
+        "enabled": false,
+        "review": "pending-fable-r5",
+        "approval_ref": ""
+      },
+      "decided": {
+        "text": "Your refund request has been decided. The outcome is in the message we sent about it, and it is on this thread.",
+        "enabled": false,
+        "review": "pending-fable-r5",
+        "approval_ref": ""
+      },
+      "waiting": {
+        "text": "Your refund request is still open with our team. We'll write again as soon as something changes.",
+        "enabled": false,
+        "review": "pending-fable-r5",
+        "approval_ref": ""
+      }
+    },
+    "digest": {
+      "text": "You have more than one request open with us, and they are all still open. Nothing is needed from you right now. We'll write again when something changes on any of them.",
+      "enabled": false,
+      "review": "pending-fable-r5",
+      "approval_ref": ""
+    }
+  }
+}

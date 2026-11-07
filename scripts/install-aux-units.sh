@@ -492,6 +492,10 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/resolve-notify.py missing"
 [[ -f "$HYDRA_ROOT/scripts/merge-outcome-notify.py" ]] \
   || fail "$HYDRA_ROOT/scripts/merge-outcome-notify.py missing"
+[[ -f "$HYDRA_ROOT/scripts/request-comms.py" && -f "$HYDRA_ROOT/policies/request-status-lines.json" ]] \
+  || fail "$HYDRA_ROOT/scripts/request-comms.py or its copy policy is missing"
+[[ -f "$HYDRA_ROOT/scripts/check-request-status-lines.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/check-request-status-lines.py missing"
 [[ -f "$HYDRA_ROOT/scripts/resolution-matcher.py" ]] \
   || fail "$HYDRA_ROOT/scripts/resolution-matcher.py missing"
 [[ -f "$HYDRA_ROOT/scripts/caroline-behavior-digest.py" ]] \
@@ -1402,6 +1406,55 @@ mon=merge-outcome-notify.timer
 systemctl enable "$mon" >/dev/null 2>&1 || log "WARN: could not enable $mon"
 systemctl start "$mon" >/dev/null 2>&1 || log "WARN: could not start $mon"
 log "  $mon: $(systemctl is-active "$mon" 2>/dev/null || echo unknown)"
+
+# ─── Request status feed (hourly) ─────────────────────
+# Every open request (credit, claim, merge, erasure, refund) hears from its user at each state
+# change and at least every 48 h, on the best channel we can actually reach them on. The unit
+# runs `request-comms.py tick --live`, which is NOT the switch that sends: with the policy
+# disabled or the live file absent the tick is a dry run (it records `would_send` rows and the
+# 24/48 h breach counts) and sends NOTHING. Three independent things gate a real send, and none
+# is a deploy: policies/request-status-lines.json must have `enabled: true` AND the individual
+# line an `approval_ref` (only the erasure ack v2 has one today), and
+# /etc/hydra/request-comms.live must exist on this host. Kill switch
+# /etc/hydra/request-comms.disabled. Ledger + report snapshots in /var/lib/hydra/request-comms
+# (NOT /opt/hydra, which the deploy rsync overwrites); `request-comms.py report` prints
+# time-to-first-message and the gap between messages per request type.
+install -d -m 700 /var/lib/hydra/request-comms
+cat > /etc/systemd/system/request-comms.service << REQUESTCOMMSSVC
+[Unit]
+Description=Request status feed tick (dry-run unless the live file and approved copy say otherwise)
+After=network-online.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=900
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/main.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/request-comms.py tick --live --json
+REQUESTCOMMSSVC
+
+cat > /etc/systemd/system/request-comms.timer << REQUESTCOMMSTMR
+[Unit]
+Description=Hourly — tell users where their open requests are (48 h floor)
+
+[Timer]
+OnCalendar=*:40
+Persistent=true
+RandomizedDelaySec=120
+Unit=request-comms.service
+
+[Install]
+WantedBy=timers.target
+REQUESTCOMMSTMR
+
+systemctl daemon-reload
+mon=request-comms.timer
+systemctl enable "$mon" >/dev/null 2>&1 || log "WARN: could not enable $mon"
+systemctl start "$mon" >/dev/null 2>&1 || log "WARN: could not start $mon"
+# `--live` here is NOT the switch: the tick is still a dry run until the policy is `enabled: true`
+# AND /etc/hydra/request-comms.live exists (and stays one while the kill file does). Without the
+# flag the two switches could never take effect and this timer would be a device that looks live.
+log "  $mon: $(systemctl is-active "$mon" 2>/dev/null || echo unknown) (live only when the policy and the live file say so)"
 
 # ─── Resolution matcher (daily 12:14 UTC) ─────────────────────
 # The RESOLUTION counterpart to the systemic-data-issue REPORT: that report pages

@@ -722,6 +722,29 @@ jobs:
           bash scripts/check-caroline-claims-doctrine.sh
           echo "::endgroup::"
 
+      - name: Request status line copy-policy guard
+        # policies/request-status-lines.json is the ONE source of every automatic request
+        # status line (scripts/request_comms/). These lines go to people who already think
+        # we forgot them, so the guard fails on: a missing (type, state) line, an enabled
+        # line with no approval_ref or a still-pending review, banned wording (a reason, a
+        # score, a band, a flag, a deadline, a promise), an unapproved placeholder, and any
+        # DRIFT between a carried-verbatim line and its own approved source (the decline
+        # line vs answer-bank.ts, the erasure ack vs gdpr-erasure-requests.md).
+        run: |
+          echo "::group::Request status line copy-policy guard"
+          python3 scripts/check-request-status-lines.py
+          echo "::endgroup::"
+
+      - name: Run request status feed tests
+        # scripts/request_comms/ is CUSTOMER-FACING: it decides who hears from us about an
+        # open request and what they are told. These lock the failure modes, each of which is
+        # a user-visible incident: a double send, a message to a banned account, a message
+        # while a source is unreadable, a message from half-approved copy, and a "clean" run
+        # that silently told nobody. Same bare stdlib unittest, targeted by name.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_request_comms
+
       - name: "Ops-skill safety-clause doctrine check (#1047 silent-deletion regression class)"
         # PR #1047 silently deleted 7 safety clauses from the customer-data-resolution
         # and subscription-refund-reconciliation @Ops skills and every CI gate stayed
