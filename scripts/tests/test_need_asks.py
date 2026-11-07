@@ -1128,5 +1128,51 @@ class DistributorVoidTest(unittest.TestCase):
         self.assertEqual((voided, rep.sent_notes), ([], 1))
 
 
+class BuildSubcommandBudgetTest(unittest.TestCase):
+    """[key=note-step-budget] --apply-budget-s is declared on the SEND subparser only.
+
+    The outbound tick runs `need_asks.py build`, which shares the same parser. Reading a.apply_budget_s
+    unconditionally raised AttributeError on every tick's proof-need-ask build, so the tick aborted before
+    the apply step and never wrote its outcome file. This pins the build path, which no test exercised.
+    """
+
+    def test_build_subcommand_does_not_require_apply_budget_s(self):
+        d = Path(tempfile.mkdtemp())
+        out = d / "need-asks.json"
+        res = {"generated_at": "2026-11-07T14:00:00Z", "counts": {"listed": 0, "would_send_users": 0}}
+        with unittest.mock.patch.object(na, "build", return_value=res), \
+                unittest.mock.patch.object(na.verify_notify, "set_apply_budget") as budget:
+            rc = na._main(["build", "--out", str(out)])
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(out.read_text()), res)
+        budget.assert_called_once_with(None)
+
+    def test_verify_facts_subcommand_does_not_require_apply_budget_s(self):
+        """The same parser is shared by every subcommand, so the same read must be safe on all of them."""
+        d = Path(tempfile.mkdtemp())
+        lst = d / "l.json"
+        lst.write_text(json.dumps({"users": []}))
+        with unittest.mock.patch.object(na, "verify_facts", return_value=0), \
+                unittest.mock.patch.object(na.verify_notify, "set_apply_budget") as budget:
+            rc = na._main(["verify-facts", "--list", str(lst)])
+        self.assertEqual(rc, 0)
+        budget.assert_called_once_with(None)
+
+    def test_send_subcommand_still_hands_the_share_through(self):
+        """The fix must not stop the flag reaching the send loop: a send that names a share still sets it.
+
+        The send path is inline in _main, so this stops it at the first refusal (--check-recipients is a dry-run
+        check) - the point is the value that reached set_apply_budget, not the send itself.
+        """
+        d = Path(tempfile.mkdtemp())
+        lst = d / "l.json"
+        lst.write_text(json.dumps({"users": []}))
+        with unittest.mock.patch.object(na.verify_notify, "set_apply_budget") as budget:
+            rc = na._main(["send", "--list", str(lst), "--segment", "paid", "--mode", "apply",
+                           "--check-recipients", "--apply-budget-s", "900"])
+        self.assertEqual(rc, 2, "--check-recipients with --mode apply is refused before anything is sent")
+        budget.assert_called_once_with(900.0)
+
+
 if __name__ == "__main__":
     unittest.main()

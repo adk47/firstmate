@@ -710,7 +710,11 @@ def _main(argv: list[str] | None = None) -> int:
     s.add_argument("--apply-budget-s", type=float, default=None, metavar="SECONDS",
                    help="the tick's remaining share; the send loop never STARTS a user whose worst case would not fit")
     a = ap.parse_args(argv)
-    verify_notify.set_apply_budget(a.apply_budget_s)
+    # [key=note-step-budget] --apply-budget-s is declared on the SEND subparser only, but this line runs for every
+    # subcommand. The outbound tick runs `need_asks.py build`, whose namespace has no such attribute, so reading it
+    # unconditionally raised AttributeError on every tick's proof-need-ask build: the tick aborted before the apply
+    # step and never wrote its outcome file. Same shape as credit-review.py's own read of the flag.
+    verify_notify.set_apply_budget(getattr(a, "apply_budget_s", None))
     if a.op == "send" and a.preview_accepted:
         # t01b 584: the preview renders exactly the check's accepted set, walking the whole list
         if not a.preview or a.mode != "dry-run" or a.check_recipients:
