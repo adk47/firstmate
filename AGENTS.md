@@ -851,7 +851,11 @@ triggers). Authoritative doc: `data/sentinel/README.md`; registry `policies/sent
   tells the two worlds apart with the `registry-seen` marker it writes on every good load — never
   loaded → exit 2, clean skip; loaded then gone → page + exit 4. Exit 3 (deliberate kill switch) is
   clean; exit 4 stays a failure. `SuccessExitStatus` is pinned to the exit codes in `demote.py` by a
-  bats test.
+  bats test. **The marker is a map of `path -> last-loaded-at`, not a timestamp and not one slot**: a
+  `--registry` scratch run (a QA review tree, a fixture) must never vouch for the live path, and must
+  never evict it either — `registry.REGISTRY_DEFAULT` is pinned outside the 20-entry cap, because the
+  live path is the one whose loss actually blinds us. Both mistakes shipped and both paged
+  `#clio_devops` hourly about a registry nobody had deployed (#1838).
 - **Ticks serialize on a host `flock`** across load → evaluate → save → mirror PR; a tick that cannot
   acquire within `SENTINEL_LOCK_TIMEOUT` exits 0 silently (the other tick is doing the same join).
 

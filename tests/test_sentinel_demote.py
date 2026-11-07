@@ -672,6 +672,95 @@ class RegistryContract(Base):
         self.assertTrue(self.pages, "a vanished registry must page")
         self.assertIn("disappeared after a successful load", self.pages[0][0])
 
+    def test_a_scratch_registry_does_not_vouch_for_the_live_path(self):
+        """Live regression (2026-11-07): the marker recorded only a timestamp, so a run
+        against a scratch copy — a QA review tree, a fixture, a test — marked the host as
+        "has loaded a registry", and the real path being absent then read as a LOSS. The
+        fast unit paged #clio_devops every hour about a file sentinel-core-s0 had not
+        landed yet. The marker must name the path, and only that path going missing is a
+        loss."""
+        scratch = self.tmp / "scratch-registry.json"
+        scratch.write_text(self.registry_path.read_text(encoding="utf-8"), encoding="utf-8")
+        # A good tick against the SCRATCH copy records the scratch path. Built by hand
+        # because run_tick appends the live --registry last, which argparse would win.
+        args = demote.build_parser().parse_args([
+            "run", "--nightly", "--registry", str(scratch),
+            "--runtime-state", str(self.runtime_path),
+            "--paths-json", json.dumps(self.fakes.paths),
+        ])
+        self.assertEqual(demote.cmd_run(args, now=NOW), demote.EXIT_OK)
+        self.assertIn(str(scratch), (self.tmp / "registry-seen").read_text(encoding="utf-8"))
+        # The live path was never loaded, so its absence is still "not landed yet".
+        self.registry_path.unlink()
+        self.pages.clear()
+        self.assertEqual(self.run_tick("run", "--nightly"), demote.EXIT_NO_REGISTRY)
+        self.assertEqual(self.pages, [], "a scratch run must not make the live path page")
+
+    def test_a_scratch_run_does_not_erase_the_live_paths_evidence(self):
+        """QA r2: the marker was a single slot, so live → scratch → live-missing lost the
+        evidence. The live tick wrote the live path, a later `--registry` scratch tick
+        overwrote it, and when the live registry then vanished `_registry_seen_path()` no
+        longer matched — so the tick returned 2 quietly while automatic demotion was
+        blind. The marker must accumulate paths, not replace them."""
+        scratch = self.tmp / "scratch-registry.json"
+        scratch.write_text(self.registry_path.read_text(encoding="utf-8"), encoding="utf-8")
+        # 1. A good LIVE tick records the live path.
+        self.assertEqual(self.run_tick("run", "--nightly"), demote.EXIT_OK)
+        # 2. A good SCRATCH tick must not erase it.
+        args = demote.build_parser().parse_args([
+            "run", "--nightly", "--registry", str(scratch),
+            "--runtime-state", str(self.runtime_path),
+            "--paths-json", json.dumps(self.fakes.paths),
+        ])
+        self.assertEqual(demote.cmd_run(args, now=NOW), demote.EXIT_OK)
+        seen = json.loads((self.tmp / "registry-seen").read_text(encoding="utf-8"))["paths"]
+        self.assertIn(str(self.registry_path), seen, "the live path must survive a scratch run")
+        self.assertIn(str(scratch), seen)
+        # 3. The live registry vanishes: that is still a LOSS, and it must page.
+        self.registry_path.unlink()
+        self.pages.clear()
+        self.assertEqual(self.run_tick("run", "--nightly"), demote.EXIT_BAD_STATE)
+        self.assertTrue(self.pages, "a live registry lost after a scratch run must still page")
+        self.assertIn("disappeared after a successful load", self.pages[0][0])
+
+    def test_the_seen_path_map_is_bounded(self):
+        """A host that runs scratch copies must not grow the marker without bound."""
+        for i in range(demote.SEEN_PATHS_MAX + 5):
+            demote._mark_registry_seen(f"/tmp/scratch-{i}.json")
+        seen = json.loads((self.tmp / "registry-seen").read_text(encoding="utf-8"))["paths"]
+        self.assertEqual(len(seen), demote.SEEN_PATHS_MAX)
+        self.assertIn(f"/tmp/scratch-{demote.SEEN_PATHS_MAX + 4}.json", seen, "newest wins")
+        self.assertNotIn("/tmp/scratch-0.json", seen, "oldest is dropped")
+
+    def test_the_cap_never_evicts_the_live_path(self):
+        """QA r3: a cap that can drop the live path reintroduces the bug it bounds. A live
+        load followed by 20+ distinct scratch loads evicted the live path, so a later live
+        loss exited 2 without a page. The live path is pinned outside eviction."""
+        # The pinned path is the LIVE one, i.e. the default the units read with no
+        # --registry flag. Point that at the fixture so the test exercises the real rule.
+        with mock.patch.object(demote.registry, "REGISTRY_DEFAULT", self.registry_path):
+            self.assertEqual(self.run_tick("run", "--nightly"), demote.EXIT_OK)
+            for i in range(demote.SEEN_PATHS_MAX + 5):
+                demote._mark_registry_seen(f"/tmp/scratch-{i}.json")
+            seen = json.loads((self.tmp / "registry-seen").read_text(encoding="utf-8"))["paths"]
+            self.assertIn(str(self.registry_path), seen,
+                          "the live path must survive any number of scratch loads")
+            self.assertLessEqual(len(seen), demote.SEEN_PATHS_MAX)
+            # And the loss still pages after all that churn.
+            self.registry_path.unlink()
+            self.pages.clear()
+            self.assertEqual(self.run_tick("run", "--nightly"), demote.EXIT_BAD_STATE)
+            self.assertTrue(self.pages, "a live loss after 25 scratch loads must still page")
+
+    def test_a_marker_without_a_path_cannot_prove_a_loss(self):
+        """The older bare-timestamp marker names no path, so it cannot prove the path now
+        missing is the one that was loaded. Quiet beats a false hourly page."""
+        (self.tmp / "registry-seen").write_text("2026-11-06T17:50:11Z\n", encoding="utf-8")
+        self.registry_path.unlink()
+        self.pages.clear()
+        self.assertEqual(self.run_tick("run", "--nightly"), demote.EXIT_NO_REGISTRY)
+        self.assertEqual(self.pages, [])
+
     def test_a_registry_that_exists_but_is_unusable_pages_and_exits_4(self):
         bad = self.tmp / "bad-registry.json"
         bad.write_text('{"capabilities": [{"id": ""}]}', encoding="utf-8")

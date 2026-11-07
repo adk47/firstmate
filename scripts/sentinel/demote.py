@@ -60,12 +60,15 @@ DEMOTE_KILL_FILE = Path(os.environ.get("SENTINEL_DEMOTE_KILL_FILE", "/etc/hydra/
 SENTINEL_KILL_FILE = Path(os.environ.get("SENTINEL_KILL_FILE", "/etc/hydra/sentinel.disabled"))
 DEMOTION_LOG = Path(os.environ.get("SENTINEL_DEMOTION_LOG", "/var/lib/hydra/sentinel/demotions.jsonl"))
 BLIND_PAGE_STATE = Path(os.environ.get("SENTINEL_BLIND_PAGE_STATE", "/var/lib/hydra/sentinel/blind-page.json"))
-# "I have successfully loaded a registry at least once." Written on every good load, so a
-# registry that DISAPPEARS later is distinguishable from one that has not landed yet: the
-# first is a post-deployment loss that leaves automatic demotion blind (page, exit 4), the
-# second is the expected pre-S0 state (clean skip, exit 2). Without the marker both look
-# identical, and a deleted or failed-to-deploy registry would skip silently forever.
+# "I have successfully loaded a registry at least once, from THESE paths." Written on every
+# good load, so a registry that DISAPPEARS later is distinguishable from one that has not
+# landed yet: the first is a post-deployment loss that leaves automatic demotion blind
+# (page, exit 4), the second is the expected pre-S0 state (clean skip, exit 2). Without the
+# marker both look identical, and a deleted or failed-to-deploy registry would skip
+# silently forever. It holds a SET of paths, not one: a scratch `--registry` run must not
+# erase the live path's evidence (see `_mark_registry_seen`).
 REGISTRY_SEEN = Path(os.environ.get("SENTINEL_REGISTRY_SEEN", "/var/lib/hydra/sentinel/registry-seen"))
+SEEN_PATHS_MAX = 20
 # ONE lock for every sentinel unit. The hourly --fast and the nightly ticks both load,
 # mutate and save the whole runtime file and both use the same mirror checkout, so two
 # overlapping runs lose data: fast loads {}, nightly demotes B and saves, fast then saves
@@ -448,10 +451,15 @@ def _run_locked(a, *, now: datetime, at: str) -> int:
         #   - seen before, gone now: a deleted or failed-to-deploy registry. Automatic
         #     demotion is BLIND and nothing else would say so, so this pages and exits 4.
         print(f"[demote] {exc}", file=sys.stderr)
-        if REGISTRY_SEEN.exists():
-            print("[demote] FATAL: this host has loaded a registry before, so it is not "
-                  "'not landed yet' — the registry is GONE. Automatic demotion is blind "
-                  "until it is restored.", file=sys.stderr)
+        # WHICH registry was seen matters. A run against a scratch copy (`--registry`
+        # pointed at a QA review tree, a fixture, a test) used to mark the host as
+        # "has loaded a registry", and then the real path being absent read as a LOSS —
+        # paging hourly about a file sentinel-core-s0 had not landed yet. The marker
+        # records the path, and only the SAME path going missing is a loss.
+        if _registry_path(a) in _registry_seen_paths():
+            print("[demote] FATAL: this host has loaded a registry from this path before, so "
+                  "it is not 'not landed yet' — the registry is GONE. Automatic demotion is "
+                  "blind until it is restored.", file=sys.stderr)
             if not a.no_page:
                 _page_missing_registry_once(now, f"registry disappeared after a successful "
                                             f"load: {exc}", enabled=True)
@@ -479,7 +487,7 @@ def _run_locked(a, *, now: datetime, at: str) -> int:
         if not a.no_page:
             _page_missing_registry_once(now, f"host runtime state unusable: {exc}", enabled=True)
         return EXIT_BAD_STATE
-    _mark_registry_seen()
+    _mark_registry_seen(_registry_path(a))
     attribution = registry.attribution_map(rows)
     paths = dict(outcomes.DEFAULT_PATHS)
     if a.paths_json:
@@ -623,14 +631,68 @@ def _open_mirror_pr(a, trips: Sequence[Trip], at: str) -> Optional[str]:
         return None
 
 
-def _mark_registry_seen() -> None:
-    """Record that a registry loaded. Best effort: a marker we cannot write must never
-    stop a demotion, and the worst case is the old behaviour (a loss reads as pre-S0)."""
+def _registry_path(a) -> str:
+    """The registry path this run actually reads, resolved the same way `registry.load` does."""
+    p = getattr(a, "registry", None)
+    return str(Path(p) if p is not None else registry.REGISTRY_DEFAULT)
+
+
+def _mark_registry_seen(path: str) -> None:
+    """Record that a registry loaded, and from WHERE — keeping every path already seen.
+
+    A single slot is not enough. A live tick writes the live path, then a `--registry`
+    scratch tick (a QA review tree, a fixture) overwrites it, and if the live registry
+    then vanishes the marker no longer names it — so the tick returns 2 quietly while
+    automatic demotion is blind. That is the same class of bug as the timestamp-only
+    marker, one level down: the evidence has to survive a later, unrelated run.
+
+    Best effort: a marker we cannot write must never stop a demotion, and the worst case
+    is the old behaviour (a loss reads as pre-S0).
+    """
+    seen = _registry_seen_paths()
+    seen[path] = outcomes.utc(datetime.now(timezone.utc))
+    if len(seen) > SEEN_PATHS_MAX:
+        # Newest wins, EXCEPT the live path, which is never evicted. A cap that can drop
+        # the live path reintroduces the bug it was added to bound: 20 scratch loads and
+        # the production loss evidence is gone, so the demoter exits 2 without a page.
+        # The live path is the one whose loss actually blinds us; scratch paths are not.
+        live = str(registry.REGISTRY_DEFAULT)
+        pinned = {live: seen[live]} if live in seen else {}
+        rest = {k: v for k, v in seen.items() if k != live}
+        keep = SEEN_PATHS_MAX - len(pinned)
+        rest = dict(sorted(rest.items(), key=lambda kv: kv[1])[-keep:]) if keep > 0 else {}
+        seen = {**rest, **pinned}
     try:
         REGISTRY_SEEN.parent.mkdir(parents=True, exist_ok=True)
-        REGISTRY_SEEN.write_text(outcomes.utc(datetime.now(timezone.utc)) + "\n", encoding="utf-8")
+        REGISTRY_SEEN.write_text(json.dumps({"paths": seen}) + "\n", encoding="utf-8")
     except OSError:
         pass
+
+
+def _registry_seen_paths() -> Dict[str, str]:
+    """Every path this host has successfully loaded, mapped to when it last did.
+
+    Empty when we cannot attribute anything. A marker in the older bare-timestamp form
+    names no path, so it cannot prove that the path now missing is the one that was
+    loaded; staying quiet there beats paging on a guess, because a false hourly page is
+    worse than one missed loss on a host whose marker predates this field.
+    """
+    try:
+        raw = REGISTRY_SEEN.read_text(encoding="utf-8").strip()
+    except OSError:
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    paths = data.get("paths")
+    if isinstance(paths, dict):
+        return {str(k): str(v) for k, v in paths.items() if k}
+    # A marker written by the first cut of this fix names exactly one path.
+    one = data.get("path")
+    return {str(one): str(data.get("at") or "")} if one else {}
 
 
 def _page_missing_registry_once(now: datetime, detail: str, *, enabled: bool) -> None:
