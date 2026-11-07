@@ -35,7 +35,7 @@ import sys
 import time
 
 ASK_RE = re.compile(r'\[ask ([^\]]+)\]')
-RESOLVED_RE = re.compile(r'\[resolved ([^\]]+)\]')
+RESOLVED_RE = re.compile(r'^\s*-\s+\d{4}-\d{2}-\d{2} \d{2}:\d{2}Z \[resolved ([^\]]+)\]')
 # A free-form resolution line: it must OPEN the line (a list bullet is fine),
 # so the ledger's own header prose about resolved: records never closes one.
 BARE_RESOLVED_RE = re.compile(r'^\s*(?:-\s+)?resolved\b[:\s]', re.I)

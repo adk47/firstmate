@@ -45,8 +45,11 @@ message with replies inside the scan window, one conversations.replies call is
 made, so the work grows with new threads rather than channel history and
 --max-secs bounds it.  A thread that cannot be read is reported in `gaps` with
 its channel and thread timestamp, and the firstmate side records it in the
-audit log instead of skipping it silently; the cursor does not advance past a
-failed read, so the next poll retries it.
+audit log instead of skipping it silently.  The history page was still read, so
+the channel cursor advances; the failed thread stays tracked and is retried on
+later polls, up to THREAD_FAIL_LIMIT consecutive failures.  After that it is
+left as a recorded gap and no longer retried.  A history page that did not
+fully read does not advance the cursor.
 
 A thread whose parent is behind the cursor is never returned by history again,
 so every thread that has been read is tracked in `state['threads']` and its
@@ -99,6 +102,8 @@ DEFAULT_EMIT_COOLDOWN = 6 * 3600
 # Tracked threads re-read per poll, so a busy channel cannot spend the whole
 # budget re-reading old threads instead of reading new messages.
 THREAD_RECHECK_LIMIT = 50
+# Consecutive failed re-reads before a tracked thread is left as a recorded gap.
+THREAD_FAIL_LIMIT = 3
 
 # Ordered: the first matching rule classifies the message. Keep the specific
 # asks ahead of the general ones; `triage-ack` is a statement, not an ask.
@@ -577,7 +582,6 @@ def read_surface(state, cfg, surfaces, now, started):
         if oldest:
             params['oldest'] = '%.6f' % oldest
         latest = None
-        failed = False
         read_threads = set()
         status = {'complete': False}
         for msg in paged(token, 'conversations.history', 'messages', status=status, **params):
@@ -603,12 +607,15 @@ def read_surface(state, cfg, surfaces, now, started):
                 break
             thread_ts = msg.get('thread_ts') or msg['ts']
             read_threads.add(thread_ts)
+            key = cid + ':' + thread_ts
             replies, error = thread_replies(token, cid, thread_ts)
             if error:
                 gaps.append({'channel': cid, 'thread_ts': thread_ts, 'error': error})
-                failed = True
+                entry = threads.setdefault(key, {'read_ts': now, 'failures': 0})
+                entry['failures'] = entry.get('failures', 0) + 1
+                entry['read_ts'] = now
                 continue
-            threads[cid + ':' + thread_ts] = {'read_ts': now}
+            threads[key] = {'read_ts': now, 'failures': 0}
             if record is not None:
                 coded = note_replies(record, replies)
                 record['checked_ts'] = now
@@ -625,6 +632,9 @@ def read_surface(state, cfg, surfaces, now, started):
             thread_ts = key.split(':', 1)[1]
             if thread_ts in read_threads:
                 continue
+            entry = threads[key]
+            if entry.get('failures', 0) >= THREAD_FAIL_LIMIT:
+                continue
             if rechecked >= THREAD_RECHECK_LIMIT:
                 break
             if time.time() - started > cfg.max_secs:
@@ -634,14 +644,17 @@ def read_surface(state, cfg, surfaces, now, started):
             replies, error = thread_replies(token, cid, thread_ts)
             if error:
                 gaps.append({'channel': cid, 'thread_ts': thread_ts, 'error': error})
-                failed = True
+                entry['failures'] = entry.get('failures', 0) + 1
+                entry['read_ts'] = now
                 continue
-            threads[key]['read_ts'] = now
+            entry['read_ts'] = now
+            entry['failures'] = 0
             scan_replies(state, cfg, cid, label, replies, now, new_asks, new_other)
-        # A page that did not fully read, or a thread that could not be read,
-        # must not move the cursor past the unread tail: leave it where it was
-        # so the next poll re-reads it.  A read failure is not progress.
-        if status['complete'] and not failed:
+        # A history page that did not fully read must not move the cursor past
+        # the unread tail: leave it where it was so the next poll re-reads it.
+        # A failed thread re-read is not a history failure; that thread stays
+        # tracked and is retried separately.
+        if status['complete']:
             state['scanned'][cid] = now
             if latest is not None:
                 state['cursors'][cid] = '%.6f' % latest

@@ -409,9 +409,9 @@ gap_scan = jw.scan(gap_cfg, gap_state, time.time())
 assert gap_scan['gaps'] == [{'channel': channel, 'thread_ts': parent_ts,
                              'error': 'missing_scope'}], gap_scan['gaps']
 
-# --- a failed thread read must not advance the cursor past it --------------
-# A read failure is not progress: the cursor is a claim that everything before
-# it was read, so it stays put and the next poll re-reads the thread.
+# --- a failed thread read is retried without pinning the channel -----------
+# The history page was fully read, so the cursor advances; the failed thread
+# stays tracked and is retried on the next poll.
 fail_calls = {'n': 0}
 
 
@@ -444,9 +444,42 @@ fail_state['cursors'][channel] = old_cursor
 first_fail = jw.scan(fail_cfg, fail_state, time.time())
 assert first_fail['gaps'] == [{'channel': channel, 'thread_ts': parent_ts,
                                'error': 'missing_scope'}], first_fail['gaps']
-assert fail_state['cursors'][channel] == old_cursor, fail_state['cursors']
+assert fail_state['cursors'][channel] == parent_ts, fail_state['cursors']
+assert fail_state['threads']['%s:%s' % (channel, parent_ts)]['failures'] == 1, fail_state['threads']
 second_fail = jw.scan(fail_cfg, fail_state, time.time())
 assert [r['ask_id'] for r in second_fail['queue']] == ['%s:%s' % (channel, reply_ts)], second_fail['queue']
+assert fail_state['threads']['%s:%s' % (channel, parent_ts)]['failures'] == 0, fail_state['threads']
+
+# --- a permanently unreadable thread is retried a bounded number of times --
+always_calls = {'n': 0}
+
+
+def always_fail_api(token, method, timeout=20, **params):
+    if method in ('conversations.list', 'users.conversations'):
+        return {'ok': True, 'channels': [{'id': channel, 'name': 'credit-verification'}]}
+    if method == 'conversations.history':
+        return {'ok': True, 'messages': [{'ts': parent_ts, 'user': 'U0NOTSTAFF',
+                                          'reply_count': 1, 'text': 'here is the proof'}]}
+    if method == 'conversations.replies':
+        always_calls['n'] += 1
+        return {'ok': False, 'error': 'thread_not_found'}
+    return {'ok': True}
+
+
+jw.api = always_fail_api
+bounded_cfg = jw.build_config(jw.parse_args(['--env-file', env,
+                                             '--state', os.path.join(tmp, 'bounded'),
+                                             '--channels', 'credit-verification',
+                                             '--grace-min', '30']))
+bounded_state = jw.load_state(bounded_cfg.state)
+for _ in range(jw.THREAD_FAIL_LIMIT):
+    bounded = jw.scan(bounded_cfg, bounded_state, time.time())
+    assert bounded['gaps'] == [{'channel': channel, 'thread_ts': parent_ts,
+                                'error': 'thread_not_found'}], bounded['gaps']
+after_limit = jw.scan(bounded_cfg, bounded_state, time.time())
+assert after_limit['gaps'] == [], after_limit['gaps']
+assert always_calls['n'] == jw.THREAD_FAIL_LIMIT, always_calls
+assert bounded_state['threads']['%s:%s' % (channel, parent_ts)]['failures'] == jw.THREAD_FAIL_LIMIT
 
 # --- a new reply in a thread older than the cursor is still read -----------
 # conversations.history never returns a reply, and the parent is behind the
@@ -530,6 +563,13 @@ assert order == [ask_id], order
 closed = jl.resolve_line(ask_id, 'coded card in thread', 1793826000)
 opened, resolved, order = jl.parse_ledger([line, closed])
 assert ask_id in resolved, resolved
+assert order == [ask_id], order
+
+# An ask whose staff text quotes a prior resolution is still an opened ask.
+quoted = jl.ask_line(dict(record, text='see [resolved %s] for context' % ask_id), 1793825000)
+opened, resolved, order = jl.parse_ledger([quoted])
+assert list(opened) == [ask_id], opened
+assert resolved == {}, resolved
 assert order == [ask_id], order
 
 # "filed today" counts the ledger stamp, not the ask's Slack arrival: an ask
