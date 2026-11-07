@@ -140,17 +140,36 @@ busy_record() {  # <id> <state> <source> [gen-in-record]
     > "$STATE/$1.busy-state"
 }
 
+# A live process whose cwd is <worktree> and whose name classifies as an agent,
+# so a record-backed busy verdict is corroborated by fm-crew-state.sh.
+spawn_live_agent() {  # <dir> <worktree>
+  local dir=$1 wt=$2 bin="$1/agentbin/pi" i=0
+  mkdir -p "$1/agentbin"
+  cp "$(command -v sleep)" "$bin" || return 1
+  chmod +x "$bin" || return 1
+  ( cd "$wt" && exec "$bin" 300 ) >/dev/null 2>&1 &
+  while [ "$i" -lt 50 ]; do
+    [ -d "/proc/$!" ] && return 0
+    i=$((i + 1))
+    sleep 0.02
+  done
+  return 0
+}
+
 : > "$FAKE/orca-live"
 WT_SCOUT=$(add_worktree scout fm/scout)
 WT_SHIP=$(add_worktree ship fm/ship-native)
 WT_RUN=$(add_worktree run fm/run-branch)
 WT_OLD=$(add_worktree old fm/old-run)
 WT_DETACHED=$(add_worktree detached fm/detached)
+WT_DEAD=$(add_worktree dead fm/dead)
 git -C "$WT_SCOUT" checkout -q --detach
 git -C "$WT_DETACHED" checkout -q --detach
 
 orca_task busy pi scout "$WT_SCOUT"
 busy_record busy busy pi-ext
+orca_task busydead pi scout "$WT_DEAD"
+busy_record busydead busy pi-ext
 orca_task idle pi ship "$WT_SHIP" "pr=https://github.com/example/repo/pull/7"
 busy_record idle idle pi-ext
 printf 'working: first\n2026-10-16T01:02Z done: PR https://github.com/example/repo/pull/9 checks green\n\n' \
@@ -199,6 +218,8 @@ fm_write_meta "$STATE/far.meta" "window=fm-far" "endpoint_task_id=far" "worktree
   "remote_backend=tmux" "remote_target=fmses:fm-far" "home=/srv/fm/far"
 printf 'done: remote mate idle\n' > "$STATE/far.status"
 
+spawn_live_agent "$TMP_ROOT" "$WT_SCOUT" || fail "could not spawn the live agent fixture"
+
 RUN_SHA=$(git -C "$WT_RUN" rev-parse --short HEAD)
 printf 'completed fm/run-branch %s 2026-10-15 10:00 https://github.com/example/repo/pull/3\n' "$RUN_SHA" \
   > "$FAKE/runs"
@@ -234,7 +255,7 @@ test_parity_json_and_home_summary() {
   # The fixture must really exercise the paths it claims, or parity is vacuous.
   local states
   states=$(jq -r '.tasks[] | "\(.id)=\(.current_state.state)/\(.current_state.source)"' "$TMP_ROOT/python--json.json")
-  for want in busy=working/pane idle=done/status-log keyed=paused/status-log \
+  for want in busy=working/pane busydead=unknown/pane idle=done/status-log keyed=paused/status-log \
     malformed=unknown/pane stalegen=unknown/pane untrusted=unknown/pane norecord=unknown/pane \
     resolvedonly=unknown/none gone=unknown/none shipgone=unknown/none detached=done/status-log \
     wtgone=unknown/none notarget=unknown/none \

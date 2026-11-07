@@ -745,7 +745,7 @@ class Snapshot:
             verdict = busy_verdict(self.state, t["id"], harness)
             state = verdict.split(" ", 1)[0]
             if state == "busy":
-                return crew("working", "pane", "harness busy (%s)" % verdict.split(" ", 1)[1])
+                return None
             if state != "idle":
                 return None
         line = last_status_line(t["status_capture"]) if os.path.isfile(t["status_capture"]) else ""
