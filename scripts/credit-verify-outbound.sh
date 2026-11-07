@@ -126,7 +126,17 @@ DEFERRED=0                             # 1 once any family deferred: the tick th
 CHECK_ENTRIES="$(cfg CVO_CHECK_ENTRIES 200)"   # p1 599 / r5 598: a uvn family walks at most this many LIST ENTRIES a tick
 CHECK_S_PER_USER="$(cfg CVO_CHECK_S_PER_USER 4)"   # ~10-15 s a live-gate check on 4 read-only workers (#1596)
 RESERVE_PAD_S="$(cfg CVO_RESERVE_PAD_S 300)"      # + the replica read (~86 s) and the health / zero-read rails
-APPLY_S_PER_USER="$(cfg CVO_APPLY_S_PER_USER 15)"
+# [key=note-step-timeout] / [key=note-step-budget] (d2 r5 750, amended by Fable 753): TWO numbers, not one.
+#   APPLY_S_PER_USER  - the EXPECTED cost of one user (a note step measured at ~40 s). It sizes the apply: fit =
+#                       remaining / 40, i.e. ~165 users a tick for a 6,600 s remainder.
+#   APPLY_USER_WORST_S - the WORST case one user can cost: the note step's retry budget in
+#                       scripts/credit_review/verify_notify.py, NOTE_ATTEMPTS x NOTE_TIMEOUT_S + sum(NOTE_BACKOFF_S)
+#                       = 3 x 55 + 35 = 200 s. It is NOT the sizing number (fit = remaining / 200 cut throughput 3x to
+#                       budget a 1-in-80 event); instead the runner's send loop refuses to START a user whose worst case
+#                       would not fit the share we hand it (--apply-budget-s), so one slow user overruns by at most one
+#                       retry budget, and only the last one. Change a number here, change the other side's.
+APPLY_S_PER_USER="$(cfg CVO_APPLY_S_PER_USER 40)"
+APPLY_USER_WORST_S="$(cfg CVO_APPLY_USER_WORST_S 200)"
 TICK_ELAPSED0="$(cfg CVO_TICK_ELAPSED0 0)"     # bats only: the tick started this many seconds ago
 TICK_CADENCE_S=7200
 TIMEOUT_BIN="$(cfg CVO_TIMEOUT_BIN /usr/bin/timeout)"   # QA #1587: every stage of a started family runs under the deadline
@@ -254,7 +264,7 @@ PY
 }
 if [ "${1:-}" = "--print-config" ]; then
   for v in CVO_HARNESS HYDRA_ROOT KILL KILL2 LIVE_FLAG PAID_FLAG EXCLUDE STATE PY RUNNER OWING RECEIPTS HEALTH ZERO_READ \
-           FRAUD MAIN_ENV LEDGER SCRIPTS_DIR RD_SCAN RD_CAP RD_CHECKS RD_BUDGET POLICY CLAIM_LIST CAP R1_CAP CLAIM_CAP DOW REFUSAL_SPIKE NEED_RUNNER FIRST_CAP UNSIGNED_ALL NOW_EPOCH JUDGE DEPLOYED_SHA_FILE CHECK_ENTRIES TICK_BUDGET_S TICK_HARD_S CHECK_S_PER_USER RESERVE_PAD_S APPLY_S_PER_USER TICK_ELAPSED0 FULL_CAP_FROM_TEST PER_SEGMENT_FROM_TEST PAID_FROM_TEST TIMEOUT_BIN \
+           FRAUD MAIN_ENV LEDGER SCRIPTS_DIR RD_SCAN RD_CAP RD_CHECKS RD_BUDGET POLICY CLAIM_LIST CAP R1_CAP CLAIM_CAP DOW REFUSAL_SPIKE NEED_RUNNER FIRST_CAP UNSIGNED_ALL NOW_EPOCH JUDGE DEPLOYED_SHA_FILE CHECK_ENTRIES TICK_BUDGET_S TICK_HARD_S CHECK_S_PER_USER RESERVE_PAD_S APPLY_S_PER_USER APPLY_USER_WORST_S TICK_ELAPSED0 FULL_CAP_FROM_TEST PER_SEGMENT_FROM_TEST PAID_FROM_TEST TIMEOUT_BIN \
            CLAIM_PROOF_STATE CLAIM_PROOF_LIMIT_H CLAIM_PROOF_UNREAD_H CLAIM_PROOF_REPEAT_MIN; do
     printf '%s=%s\n' "$v" "${!v}"
   done
@@ -491,6 +501,16 @@ except (OSError, ValueError) as exc:
 o = d.get("outcomes", d) if isinstance(d, dict) else d
 if not isinstance(o, list):
     print("unmeasured %s carries no outcomes list (got %s)" % (path, type(o).__name__)); sys.exit(0)
+# [key=post-failed-unknown] (Fable driver 2026-11-05 02:2xZ): a row whose result is `post_failed` is an ATTEMPTED send
+# whose outcome nobody can prove - the gate printed POST FAILED and left the row CLAIMED (scripts/intercom-verify-
+# request.sh exits 5 for exactly this). It is neither a refusal (so it must never be counted into the refusal ratio,
+# which would blame the users) nor a delivery. It is outcome-unknown, and unknown KILLS on its own terms, whatever the
+# sent/refused ratio says: one note that may or may not have reached a customer is a stop, not a statistic.
+post_failed = [x for x in o if str((x or {}).get("result", "")).startswith("post_failed")]
+if post_failed:
+    users = ", ".join(str((x or {}).get("user", "?")) for x in post_failed[:10])
+    print("unmeasured %d post(s) with an UNKNOWN outcome (POST FAILED: attempted, and we cannot prove it was not "
+          "delivered; users %s%s)" % (len(post_failed), users, ", ..." if len(post_failed) > 10 else "")); sys.exit(0)
 refused = sum(1 for x in o if str(x.get("result", "")).startswith("refused"))
 sent = int(sys.argv[2] or 0)
 n = sent + refused
@@ -929,11 +949,25 @@ family() {
   # The precondition for a retry is NOT ATTEMPTED, proved by the LEDGER POSITION (max(id) unchanged) - never by the exit
   # code alone, because the same rc=3 also follows a real partial send. A changed ledger is a partial send and the
   # existing rails below own it. On expiry the family DEFERS: no kill file, no refusal operand, no cursor move.
+  # [key=note-step-budget] (Fable 753): the send loop is handed the seconds it may spend and will not START a user whose
+  # worst case (one note's whole retry budget, 200 s) would not fit - so it stops ~200 s before the deadline instead of
+  # running the family past it. The deadline wrapper stays EXACTLY what it was (QA #1587): an apply that still reaches
+  # TICK_HARD_S is a partial send and must fail closed, and a kill there is the one kill that stays real.
+  # It is computed ONCE, outside the retry loop: a retry re-enters the same runner, and re-deriving the share from the
+  # clock each attempt would hand every attempt a fresh budget (the overrun this key exists to prevent).
+  local abudget=$(( TICK_HARD_S - $(elapsed) ))
+  [ "$abudget" -ge 0 ] || abudget=0
+  # [key=note-step-budget]: not even one user's worst case left -> the send loop would defer every user it was handed and
+  # we would have paid for a subprocess to say so. Nothing is owed differently: the tick says it and the next one starts.
+  if [ "$abudget" -lt "$APPLY_USER_WORST_S" ]; then
+    log "$tag: $abudget s left before the ${TICK_HARD_S}s deadline is less than one user's worst case ($APPLY_USER_WORST_S s); no apply this tick"
+    return 0
+  fi
   local attempt=0 first_at=0 deferred=0 wait left hi cost t0
   while :; do
     t0="$(date -u +%s)"
     py "$runner" "$sub" --list "$list" --segment "$seg" "$@" "${excl[@]}" "${pg[@]}" --mode apply --max-users "$n" "${capargs[@]}" \
-      --signed-accepted "$OUT/$tag-check.json" --page \
+      --apply-budget-s "$abudget" --signed-accepted "$OUT/$tag-check.json" --page \
       --outcomes-json "$OUT/$tag-apply.json" > "$OUT/$tag-apply.out" 2>&1; rc=$?
     cost=$(( $(date -u +%s) - t0 ))
     log "$tag APPLY (rc=$rc): $(head -c 600 "$OUT/$tag-apply.out")"

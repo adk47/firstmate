@@ -162,6 +162,20 @@ class Report:
     deferrals: list[str] = field(default_factory=list)
     outcomes: list[dict[str, str]] = field(default_factory=list)
     flag_failures: list[str] = field(default_factory=list)
+    # [key=note-step-timeout] (firstmate 748, the 15:05Z auto-kill): a note step that TIMED OUT or raised leaves the
+    # outcome UNKNOWN (the POST may have landed; the gate's claim is written before it, so a retry can never double-send).
+    # Counted on their own: the run still reports on every other user, and the tick must never score these as refusals.
+    timeout_users: int = 0
+    error_users: int = 0
+    # [key=post-failed-unknown] (QA #1756 Important 2): the gate printed POST FAILED and exited 4 - the POST was
+    # ATTEMPTED and nobody can prove it did not land. Neither a refusal (it must never enter the refusal ratio, which
+    # would blame the user) nor a delivery. The tick's own post_failed arm reads this row; before this counter existed
+    # the loop recorded every such return as a plain `failed`, so that arm could never fire and one unknown POST was
+    # scored as an ordinary failure instead of an outcome-unknown stop.
+    post_failed_users: int = 0
+    # [key=note-step-budget] (Fable 753): deferred because ONE MORE worst-case note would not fit the share left. A
+    # deferral, never a refusal: the user keeps no claim, stays owed, and the next tick starts them.
+    budget_deferred_users: int = 0
 
     @property
     def failed(self) -> bool:
@@ -174,8 +188,13 @@ class Report:
         # already be delivered: a run that exits 0 over it reports success for a delivery it cannot prove, and the
         # next tick may send the same note again. It is never auto-resent (the gate leaves the row CLAIMED) and it is
         # never a read hold - but the exit code must say so.
+        #
+        # [key=post-failed-unknown] BOTH counters are fatal, and they are not the same fact: `post_failed_users` is
+        # raised by the gate's POST FAILED LINE (checked before the generic branches, so it is the one that fires for
+        # the real gate), `post_failed` by the rc=4/5 code path in _failed(kind="post"). Either one means a note may
+        # or may not have reached a customer, so the caller must never exit 0 on it.
         return bool(self.stopped_on_failures or self.proof_failed or self.halted or self.flag_failures
-                    or self.post_failed)
+                    or self.post_failed or self.post_failed_users)
 
     def render(self, mode: str, title: str = "VERIFY NOTES") -> str:
         if self.halted:
@@ -184,8 +203,11 @@ class Report:
         # A daily-cap deferral alone is not news (it recurs every run until tomorrow's note); any OTHER gate deferral
         # is (C11, QA #1515: the reason must reach the summary). Held-for-human users are news too (once a day).
         news_defer = [d for d in self.deferrals if "daily-cap" not in d]
-        if not (self.sent_notes or self.refused_users or self.failed_held or self.post_failed or self.reminders_sent
-                or news_defer
+        # QA #1756 finding 2: an UNMEASURED note is news in its own right. Without these two counters a run whose every
+        # selected user timed out rendered NO_REPLY - the one summary that most needs to be read was the silent one.
+        if not (self.sent_notes or self.refused_users or self.failed_users or self.failed_held or self.post_failed
+                or self.reminders_sent or news_defer or self.timeout_users or self.error_users
+                or self.post_failed_users
                 or self.proof_tagged or self.proof_failed or self.extension_requests
                 or self.claim_proof_tagged or self.claim_replies
                 or self.affiliation_held or self.documented_users or self.support_contact_users
@@ -222,6 +244,21 @@ class Report:
                          + (": " + "; ".join(self.deferrals[:20]) if self.deferrals else " (no reason recorded)"))
         if self.refused_users:
             parts.append(f"{self.refused_users} refused by the gate: " + "; ".join(self.refusals[:5]))
+        if self.budget_deferred_users:
+            parts.append(f"{self.budget_deferred_users} account(s) not started this run: one more note's worst case "
+                         f"({WORST_USER_S:.0f}s) would not have fitted the budget left; they stay owed for the next tick")
+        if self.post_failed_users:
+            parts.append(f"{self.post_failed_users} note(s) with an UNKNOWN outcome (the gate printed POST FAILED: the "
+                         "POST was attempted and we cannot prove it was not delivered; the ledger row stays claimed and "
+                         "is never re-sent automatically)")
+        if self.timeout_users or self.error_users:
+            lacking = []
+            if self.timeout_users:
+                lacking.append(f"{self.timeout_users} timed out after {NOTE_ATTEMPTS} attempts")
+            if self.error_users:
+                lacking.append(f"{self.error_users} raised inside the gate")
+            parts.append("UNMEASURED (outcome unknown, not a refusal - the ledger row stays claimed and is never "
+                         "re-sent automatically): " + ", ".join(lacking))
         if self.not_approved_now:
             parts.append(f"{self.not_approved_now} no longer approved on the server (not announced)")
         if self.proof_on_file:
@@ -768,8 +805,95 @@ def trino(sql: str, cmd: str | None = None) -> list[list[str]]:
     return list(csv.reader(io.StringIO("\n".join(lines))))
 
 
+# [key=note-step-timeout] (firstmate 748, re-answered for 750): one stalled note step aborted the WHOLE run - the
+# 15:05Z apply died on a 180 s TimeoutExpired, wrote no outcomes file, and the tick read the missing artefact as a
+# refusal spike and killed itself. A timeout is retried because it is the ONE failure whose outcome is unknown, and a
+# retry can add nothing a first attempt did not already commit to: the gate writes its CLAIM (keyed on the user and the
+# day) BEFORE it posts, so a re-run of the same user finds the claim and answers without a second note. The 7-day
+# per-user window is the backstop across midnight, not the mechanism.
+#
+# THE BUDGET IS THE POINT (d2 r5, amended 751/753). A run of slow users must not eat the family's share, or the family
+# DEFERS every tick (the 11-02 "tick budget reached; this family waits" livelock) - a quieter failure than the crash, not
+# a better one. TWO numbers, and they are different things (Fable 753):
+#   - the EXPECTED cost of one user (APPLY_S_PER_USER in the tick) sizes the apply: 40 s, what a note step measured;
+#   - the WORST case one user can cost is NOTE_ATTEMPTS x NOTE_TIMEOUT_S + sum(NOTE_BACKOFF_S) = 3 x 55 + (10 + 25)
+#     = 200 s (APPLY_USER_WORST_S in the tick). Sizing the apply at the WORST case to survive a 1-in-80 event cut
+#     throughput 3x (fit = budget/200 = ~25 users a tick), so instead the SEND LOOP refuses to START a user whose worst
+#     case would not fit in the share it was given: one slow user can then overrun by at most one retry budget, and only
+#     the last one. Change a number here, change the tick's.
+NOTE_TIMEOUT_S = 55
+NOTE_ATTEMPTS = 3
+NOTE_BACKOFF_S = (10.0, 25.0)          # between attempts 1->2 and 2->3
+WORST_USER_S = NOTE_ATTEMPTS * NOTE_TIMEOUT_S + sum(NOTE_BACKOFF_S)   # 200: what the send loop guards against
+
+# A read-only gate call (--check-recipient / --validate / --dry-run) is NEVER retried: CHECK_WORKERS of them run in
+# parallel, so a retry there multiplies across threads, and none of them posts anything. One short attempt (~2x the ~10 s
+# a live-gate check costs), then NoteTimeout - the run sends nothing this tick, which is the safe direction.
+READ_TIMEOUT_S = 20
+
+# Everything else that goes through the runner (tag-proof, the proof sweep) keeps main's single 180 s attempt: it is not
+# a note POST, so it has neither the double-send protection nor the retry.
+OTHER_TIMEOUT_S = 180
+
+_READ_ONLY_FLAGS = ("--check-recipient", "--validate", "--dry-run")
+
+# [key=note-step-budget] (Fable 753): the seconds this run may spend, handed in by the tick that owns the clock. None = no
+# guard (a hand-run apply is bounded by --max-users and a human watching it). Run-scoped, like APPLY_ONLY below.
+APPLY_BUDGET_S: float | None = None
+
+
+def set_apply_budget(seconds: float | None) -> None:
+    """One place (credit-review.py main) hands the tick's remaining share to every family's send loop."""
+    global APPLY_BUDGET_S  # noqa: PLW0603 - a run-scoped switch, exactly like APPLY_ONLY/PREVIEW_ONLY
+    APPLY_BUDGET_S = (float(seconds) if seconds and float(seconds) > 0 else None)
+
+
+def budget_exhausted() -> bool:
+    """[key=note-step-budget] (QA #1756 Important): would the send loop refuse to START another user right now?
+
+    The loop's own guard is the authority; this is the same predicate exposed so a caller that does work BEFORE the
+    send (need_asks mints a distributor's F9 code, then sends) can ask it first. Without this, a distributor user whose
+    share was already spent still had a code minted and then deferred - a code issued for a note that was never sent.
+    """
+    if APPLY_BUDGET_S is None:
+        return False
+    started = _SESSION_STARTED if _SESSION_STARTED is not None else time.monotonic()
+    return (time.monotonic() - started) + WORST_USER_S > APPLY_BUDGET_S
+
+
+class NoteTimeout(RuntimeError):
+    """The note step exhausted its attempts: the outcome is UNKNOWN, never a refusal and never a send."""
+
+
+def _note_post(argv: list[str]) -> bool:
+    """The one call a retry is safe for: `send` with no read-only flag (see the claim-before-POST note above)."""
+    return "send" in argv and not any(f in argv for f in _READ_ONLY_FLAGS)
+
+
 def _run(argv: list[str]) -> "subprocess.CompletedProcess[str]":
-    return subprocess.run(argv, capture_output=True, text=True, timeout=180, check=False)
+    post = _note_post(argv)
+    attempts = NOTE_ATTEMPTS if post else 1
+    timeout = (NOTE_TIMEOUT_S if post else
+               READ_TIMEOUT_S if any(f in argv for f in _READ_ONLY_FLAGS) else OTHER_TIMEOUT_S)
+    timed_out = 0
+    for attempt in range(1, attempts + 1):
+        try:
+            res = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=False)
+        except subprocess.TimeoutExpired:
+            timed_out += 1
+            if attempt >= attempts:
+                raise NoteTimeout(f"{'the note step' if post else 'a gate call'} timed out after "
+                                  f"{attempts} attempt(s) of {timeout}s") from None
+            time.sleep(NOTE_BACKOFF_S[min(attempt, len(NOTE_BACKOFF_S)) - 1])
+            continue
+        if timed_out:
+            # [key=note-step-timeout] (QA #1756 Important 2): the EARLIER attempt's outcome is unknown - the gate claims
+            # the user BEFORE it posts, so the retry can answer "already claimed/notified" whether the timed-out POST
+            # landed or died before it. The answer alone cannot settle that, so it must not erase the timeout: the
+            # caller reads this flag and records the user as UNMEASURED instead of as a skip.
+            setattr(res, "after_timeout", timed_out)
+        return res
+    raise NoteTimeout("the note step was never attempted")          # unreachable: the loop returns or raises
 
 
 def _first_line(text: str) -> str:
@@ -884,6 +1008,11 @@ APPLY_LOCK_UNOPENABLE_MARKER = "APPLY_LOCK_UNOPENABLE"
 
 
 _SESSION_LOCK: Any = None              # the apply lock held for a whole outer apply run (apply_session)
+# [key=note-step-budget] (QA #1756 Critical): the monotonic start of the OUTER apply run, set by apply_session. The
+# budget is a RUN share handed in by the tick, but a caller that sends one user per send_all call (uvn_status.run does
+# exactly that) restarted the clock on every user, so several slow notes could together overrun the share and hit the
+# tick's hard deadline mid-apply - a partial send, then the auto-kill. One clock per run, not one per call.
+_SESSION_STARTED: float | None = None
 
 
 class apply_session:  # noqa: N801 - used as `with verify_notify.apply_session():`
@@ -892,17 +1021,22 @@ class apply_session:  # noqa: N801 - used as `with verify_notify.apply_session()
     does not take or release the lock itself. Raises ApplyLockError when the lock cannot be taken (nothing is sent)."""
 
     def __enter__(self) -> "apply_session":
-        global _SESSION_LOCK
+        global _SESSION_LOCK, _SESSION_STARTED  # noqa: PLW0603 - one run-scoped clock with the one run-scoped lock
         self.outer = _SESSION_LOCK is None
         if self.outer:
             _SESSION_LOCK = _apply_lock()
+            # the budget's clock starts with the LOCK, i.e. with the run: everything the share must pay for (the per-user
+            # planning between sends included) is inside it, and no per-user send_all call can reset it
+            _SESSION_STARTED = time.monotonic()
         return self
 
     def __exit__(self, *exc: Any) -> None:
-        global _SESSION_LOCK
+        global _SESSION_LOCK, _SESSION_STARTED
         if self.outer and _SESSION_LOCK is not None:
             _SESSION_LOCK.close()
             _SESSION_LOCK = None
+        if self.outer:
+            _SESSION_STARTED = None
 
 
 def _apply_lock() -> Any:
@@ -1106,7 +1240,25 @@ def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pac
     # per send_all() call, so len(payloads) was 1 and the systemic bar became max(3, 2% of 1) = 3 threshold against a
     # denominator of 1 - and a family that stopped at 3 of 8 kept walking all 8 because the outer loop never looked.
     walked = len(payloads) if walked is None else max(int(walked), len(payloads))
+    # the run's clock when there IS a run (apply_session): QA #1756 Critical. Without it this loop measured the budget
+    # from its own call, so N per-user calls each got the whole share and the family overran the tick by N times.
+    started = _SESSION_STARTED if (mode == "apply" and _SESSION_STARTED is not None) else time.monotonic()
     for i, p in enumerate(payloads):
+        # [key=note-step-budget] (Fable 753): never START a user whose WORST case (the whole retry budget) would not fit
+        # in the share this run was given. The rest keep no row at all - they stay owed and unsent, exactly like a user
+        # the page never reached - so nothing here is a refusal and nothing is lost; the next tick starts them again.
+        # This is what lets the tick size an apply at the EXPECTED cost (40 s) instead of the worst case (200 s): one
+        # slow user can overrun the share by at most one retry budget, and only the last one started.
+        if mode == "apply" and APPLY_BUDGET_S is not None:
+            spent = time.monotonic() - started
+            if spent + WORST_USER_S > APPLY_BUDGET_S:
+                for rest in payloads[i:]:
+                    report.deferred_users += 1
+                    report.budget_deferred_users += 1
+                    _outcome(report, rest, "deferred",
+                             f"apply_budget: {spent:.0f}s of {APPLY_BUDGET_S:.0f}s spent and one note can cost up to "
+                             f"{WORST_USER_S:.0f}s; not started, stays owed for the next tick")
+                break
         if i and pace_seconds and mode == "apply":
             time.sleep(pace_seconds)
         if mode == "apply":
@@ -1131,7 +1283,22 @@ def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pac
                 report.deferrals.append(f"user {_uid(p)}: read failed on an earlier tick; retry after {hold_until}")
                 continue
         fh0 = len(report.failed_held)
-        res = pre[i] if pre is not None else gate(p)
+        # [key=note-step-timeout] (firstmate 748, the 15:05Z auto-kill): ONE note step that timed out or raised used to
+        # propagate out of this loop and abort the run before its outcomes file was written - so the tick saw a missing
+        # artefact (and the deployed tick scored that as a refusal spike) and killed itself over a single stall, while
+        # the notes it never reached stayed owed. An unknown outcome is now recorded PER USER and the loop continues:
+        # the artefact always exists, it names success / timeout / error for every user it touched, and the users it
+        # never reached keep no row at all, which the tick reads as UNMEASURED (never as a refusal).
+        try:
+            res = pre[i] if pre is not None else gate(p)
+        except NoteTimeout as exc:
+            report.timeout_users += 1
+            _outcome(report, p, "timeout", f"{exc}; outcome unknown, never scored as a refusal")
+            continue
+        except Exception as exc:  # noqa: BLE001 - one user's crash must not cost the batch its artefact
+            report.error_users += 1
+            _outcome(report, p, "error", f"the gate raised {type(exc).__name__}: {exc}"[:180])
+            continue
         if preview_dir and mode != "apply" and res.returncode == 0:
             uid = re.sub(r"[^A-Za-z0-9-]", "", str(p["user"].get("id") or ""))[:64]
             out_path = os.path.join(preview_dir, f"{uid or f'{i + 1:05d}'}.txt")
@@ -1168,6 +1335,19 @@ def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pac
                 report.sent_credits += int(out.rsplit("credits=", 1)[1].split()[0])
             except (IndexError, ValueError):
                 report.sent_credits += len(p["credits"])
+        elif getattr(res, "after_timeout", 0) and not _post_failed_line(res.stderr):
+            # QA #1756 Important 2 (r12): a timeout was followed by a NON-POSTED answer - and that is every answer but
+            # a proven POSTED, not just rc=0. The claim is written before the POST, so "already notified" (rc=0),
+            # "REFUSED" (rc=1) and "DEFERRED" (rc=3) can each mean "the timed-out attempt landed" or "it died after
+            # claiming"; the run cannot tell them apart. UNMEASURED, never a skip and NEVER a refusal: scoring the
+            # rc=1 case as a refusal blames the user for our timeout and can trip the refusal-spike kill, and scoring
+            # the rc=3 case as a known deferral asserts a certainty we do not have. The one exception is the gate's
+            # explicit POST FAILED line, which is its own unknown (post_failed) and is classified below.
+            report.timeout_users += 1
+            _outcome(report, p, "timeout",
+                     f"a POST attempt timed out and the retry answered rc={res.returncode} {out!r}; the claim may "
+                     f"have landed without a note, so the outcome is unknown and it is never scored as a skip or a "
+                     f"refusal")
         elif res.returncode == 0:
             report.skipped += 1
             _outcome(report, p, "skipped", out)
@@ -1181,6 +1361,18 @@ def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pac
                 report.held_user_window += 1
                 report.window_after_gate += 1        # this one IS in deferred_users above
             report.deferrals.append(f"user {_uid(p)}: {why}"[:200])
+        elif _post_failed_line(res.stderr):
+            # [key=post-failed-unknown] (QA #1756 Important 2): the gate's POST FAILED line, checked BEFORE the generic
+            # failure branches. The real gate prints it and exits 4 (scripts/intercom-verify-request.sh:3603-3606);
+            # every other rc=4 is a pre-POST "nothing was sent or claimed" and stays a plain failure. Classifying by
+            # the LINE, not the code, is what makes the tick's post_failed arm reachable at all.
+            #
+            # ONE classification, TWO counters: `_failed(kind="post")` is the single place that records an unknown
+            # POST (failed_users, post_failed, post_failures, the `post_failed` outcome row), and
+            # `post_failed_users` is the line-level count the tick's arm reads. Bumping only one of them is how the
+            # two surfaces drifted apart in the first place.
+            report.post_failed_users += 1
+            _failed(report, p, _post_failed_line(res.stderr), walked, kind="post")
         elif res.returncode == 1 and _refused_line(res.stderr):
             # the gate's OWN refusal line (r5 on #1515: the first stderr line can be an info line). A refusal before the
             # claim ('nothing was sent or claimed', e.g. G1-G5) has no ledger row by design: recorded as such, by user
@@ -1195,6 +1387,9 @@ def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pac
             # (1): the gate's OWN line is the authority for WHAT failed. rc 4 is its documented contract for this
             # (scripts/intercom-verify-request.sh) but an rc alone must never relabel a failed READ as a failed POST:
             # a read that failed under rc 4 would then escape the hold that retries it next tick.
+            # the same unknown-POST fact, reached by the CODE (rc=5, or the line on stdout) rather than the stderr
+            # line above: the tick's arm reads post_failed_users, so it is bumped here too - never one surface only.
+            report.post_failed_users += 1
             _failed(report, p, f"rc={res.returncode} {_failure_text(res, err or out)}", walked, kind="post")
         elif _post_rejected_line(res.stderr) or _post_rejected_line(res.stdout):
             # QA #1780 (Important, 03:07Z): Intercom's error.list answers rc=4 with "POST REJECTED by Intercom (nothing
@@ -1371,6 +1566,18 @@ def _post_rejected_line(stderr: str) -> str:
     for ln in (stderr or "").splitlines():
         if ln.strip().startswith("POST REJECTED"):
             return ln.strip()[:200]
+    return ""
+
+
+def _post_failed_line(stderr: str) -> str:
+    """The gate's 'POST FAILED ...' line (anywhere in its stderr), without the prefix; '' when there is none.
+
+    [key=post-failed-unknown] The gate writes this ONLY after the POST was attempted and its outcome is unknown
+    (scripts/intercom-verify-request.sh:3603). It is the one signal that separates an outcome-unknown send from a
+    pre-POST failure, and the tick's post_failed arm keys on the row this produces."""
+    for ln in (stderr or "").splitlines():
+        if ln.startswith("POST FAILED"):
+            return ln.strip()
     return ""
 
 

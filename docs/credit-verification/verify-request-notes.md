@@ -688,4 +688,47 @@ ledger only), `credit-review.py decide` writes the account users of every verify
 candidate to `/var/lib/credit-trust/inputs/org-affiliation-priority-credit-trust-llm-t01.json`
 (`{"user_ids": [...]}`); the producer's next hourly run checks them with coverage `full`.
 
+## A note step that times out is UNMEASURED, never a refusal (firstmate 748, the 15:05Z auto-kill)
+
+The gate call is the one place where a run's outcome can be genuinely unknown: the POST may have landed. A retry is
+safe because the gate writes its CLAIM before it posts, and that claim is keyed on the user AND the day - so a re-run
+of the same user finds the claim and answers without a second note. (The 7-day per-user window is the backstop across
+midnight, not the mechanism.)
+
+- **Bounded retry with backoff, on the note POST only** (`NOTE_ATTEMPTS=3`, `NOTE_TIMEOUT_S=55`, `NOTE_BACKOFF_S=(10,
+  25)`): a timeout is retried, then raised as `NoteTimeout`.
+- **The retry budget is charged to the tick, and the tick sizes an apply by the EXPECTED cost, not the worst case.**
+  The worst case one user can cost is `3 x 55 + 35 = 200 s` (`WORST_USER_S`). `scripts/credit-verify-outbound.sh`
+  sizes the apply at `APPLY_S_PER_USER=40` - a note step measured at ~40 s, the EXPECTED cost (`APPLY_USER_WORST_S=200`
+  guards the worst case separately) - because sizing at the worst case would cut the page by 3x: at the old 15 s a slow
+  run ate the hard deadline and the family then deferred every tick (the 11-02 "tick budget reached; this family
+  waits" livelock), and sizing at 200 s would have deferred most of a page that fits. What pays for the difference is
+  the guard below.
+- **The budget is ONE RUN clock, not one clock per send.** `[key=note-step-budget]` (QA #1756): the per-user caller
+  (`uvn_status.run()` calls `send_all([p])` once per user) used to restart the clock on every user, so N slow notes
+  could together overrun the share the tick gave the family and hit its hard deadline mid-apply - a partial send, then
+  the auto-kill. The clock is the apply SESSION's (one lock, one start, `APPLY_BUDGET_S` measured from it), so the
+  share is spent once however many `send_all` calls the run makes.
+- **A user whose whole retry budget does not fit what is left is DEFERRED, never started** (`spent + WORST_USER_S >
+  APPLY_BUDGET_S`): no row, no claim, still owed, reported as `apply_budget` - so one slow user can overrun the share
+  by at most one retry budget, and only the last one started.
+- **A timeout is not erased by the retry's answer.** The gate claims the user BEFORE it posts, so when the first POST
+  times out and a retry answers `SKIPPED already-notified`, the run cannot tell "the timed-out POST landed" from "it
+  died after claiming". That user is `timeout` (UNMEASURED), never `skipped`: a skip asserts we know nothing went out.
+- **Read-only gate calls are never retried** (`READ_TIMEOUT_S=20`, one attempt): `--check-recipient` / `--validate` /
+  `--dry-run` run on `CHECK_WORKERS=4` threads, so a retry there multiplies across threads, and none of them posts.
+  Everything else through the runner keeps main's single `OTHER_TIMEOUT_S=180` attempt.
+- **One user's unknown outcome never costs the batch.** `NoteTimeout` (and any exception raised inside the gate) is
+  recorded on that user's own outcome row as `timeout` / `error` and the loop continues. The outcomes artefact is
+  therefore ALWAYS written, and it names success / timeout / error for every user the run touched; users it never
+  reached keep no row at all.
+- **A `timeout` / `error` row is never a refusal.** The tick's refusal ratio counts only `result` values that start
+  with `refused`; an UNMEASURED note adds no refusal, so a run whose note steps timed out does not read as a spike.
+- **The missing-artefact policy is not this one.** An apply that sends rows and leaves no artefact at all is
+  `#1747`'s contract: it stops the family and KILLS, naming the artefact, so a human reads the rows back before the
+  family runs again. This change only guarantees the artefact exists.
+- Why: at 15:05Z a note step hit the 180 s timeout, the exception escaped the send loop, the runner died before
+  writing its artefact, and the tick read the missing file as "a refusal spike" - it auto-killed every family while
+  nothing had been refused and the rest of the batch was still owed.
+
 <!-- Reviewed baseline: deploy overwrites - 2026-10-27 (claim-lane-resume-c2, firstmate 035): node-8 holds the #1377-era text of this file, copied outside a deploy at 00:36:52Z; main is the reviewed text (proof ask and gap ask locked, claim status on). -->

@@ -561,6 +561,85 @@ class NeedAsksTest(unittest.TestCase):
         self.assertEqual((got["max_entries"], got["start_entry"]), (200, 200))
         self.assertEqual(json.loads(out.read_text())["page"], {"start": 200, "end": 260, "listed": 450})
 
+    def test_the_cursor_stops_at_the_user_the_apply_budget_deferred(self):
+        """QA #1756 Important, the proof-need-ask half: `_send` computes page.end from the batch BEFORE the send loop
+        runs, so a user the loop refused to START (no room left in the tick's share) still counted as examined and the
+        cursor walked past them - they waited a whole rotation of the list instead of the next tick."""
+        users = [{"user_id": u, "paid": True, "asks": [{"request_id": f"r{u}"}]} for u in range(1, 6)]
+        lst = self.d / "lst.json"
+        lst.write_text(json.dumps({"users": users}))
+        clock = {"t": 0.0}
+        def payloads(us, q, asked, held=None, filtered=None):
+            return [{"user": {"id": u["user_id"]}, "credits": [{"request_id": u["asks"][0]["request_id"]}],
+                     "need": {"code": "x"}} for u in us]
+        real = na.verify_notify.send_all
+        def slow_send(ps, rep, **kw):
+            def gate(argv):
+                clock["t"] += float(getattr(gate, "cost", 120.0))
+                return type("R", (), {"returncode": 0, "stdout": "POSTED email message=1 credits=1\n", "stderr": ""})()
+            with unittest.mock.patch.object(na.verify_notify.time, "monotonic", lambda: clock["t"]), \
+                    unittest.mock.patch.object(na.verify_notify.time, "sleep", lambda s: None), \
+                    unittest.mock.patch.object(na.verify_notify, "attach_identities", lambda ps_, r: (ps_, [])):
+                kw.pop("runner", None)
+                return real(ps, rep, runner=gate, **kw)
+        try:
+            na.verify_notify.set_apply_budget(200)         # room for exactly ONE worst-case user
+            na.verify_notify._SESSION_STARTED = 0.0        # apply_session's run clock (the CLI wraps the whole apply)
+            with unittest.mock.patch.object(na, "payloads", payloads), \
+                    unittest.mock.patch.object(na, "_GROUP_LOCKED", {str(self.d / "ledger.sqlite3"): True}), \
+                    unittest.mock.patch.object(na.uvn_status, "campaign_lock_open", lambda w, lk: True), \
+                    unittest.mock.patch.object(na.verify_notify, "send_all", slow_send):
+                rep = na.send(list_path=str(lst), segment="paid", mode="apply", max_users=5, query=lambda sql: [],
+                              ledger_path=str(self.d / "ledger.sqlite3"), max_entries=5)
+        finally:
+            na.verify_notify.set_apply_budget(None)
+            na.verify_notify._SESSION_STARTED = None
+        self.assertEqual((rep.halted, rep.sent_notes, rep.page["end"]), ("", 1, 1))
+        deferred = [o["user"] for o in rep.outcomes if o["result"] == "deferred" and "apply_budget" in o["reason"]]
+        self.assertEqual(deferred, ["2", "3", "4", "5"], "every user the share left owes a row")
+        # the next tick, starting at that cursor, leads with the deferred user instead of skipping a rotation
+        clock["t"] = 0.0
+        try:
+            na.verify_notify.set_apply_budget(200)
+            na.verify_notify._SESSION_STARTED = 0.0
+            with unittest.mock.patch.object(na, "payloads", payloads), \
+                    unittest.mock.patch.object(na, "_GROUP_LOCKED", {str(self.d / "ledger.sqlite3"): True}), \
+                    unittest.mock.patch.object(na.uvn_status, "campaign_lock_open", lambda w, lk: True), \
+                    unittest.mock.patch.object(na.verify_notify, "send_all", slow_send):
+                rep2 = na.send(list_path=str(lst), segment="paid", mode="apply", max_users=5, query=lambda sql: [],
+                               ledger_path=str(self.d / "ledger.sqlite3"), max_entries=5,
+                               start_entry=rep.page["end"])
+        finally:
+            na.verify_notify.set_apply_budget(None)
+            na.verify_notify._SESSION_STARTED = None
+        self.assertEqual(rep2.page["start"], 1)
+
+    def test_the_cli_accepts_the_tick_apply_budget_and_hands_it_to_the_send_loop(self):
+        """QA #1756 Critical: the outbound tick passes --apply-budget-s to EVERY family it applies
+        (credit-verify-outbound.sh family()), and proof-need-ask runs this parser. Without the flag an armed need-ask
+        apply died at argparse with rc=2 before writing its outcomes file, which the tick reads as UNMEASURED and
+        answers with a kill - a family taken out by a flag, not by a refusal."""
+        import contextlib, io
+        lst = self.d / "list.json"
+        lst.write_text(json.dumps(self.build()))
+        chk = self.d / "check.json"
+        chk.write_text(json.dumps({"accepted": [], "max_users": 5}))
+        seen = []
+        def send(**kw):
+            seen.append(na.verify_notify.APPLY_BUDGET_S)
+            return na.verify_notify.Report()
+        try:
+            with unittest.mock.patch.object(na, "send", send), \
+                    unittest.mock.patch.object(na.verify_notify, "APPLY_ONLY", None), \
+                    unittest.mock.patch.object(na.verify_notify, "APPLY_PAGE", None), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                rc = na._main(["send", "--list", str(lst), "--segment", "paid", "--mode", "apply",
+                               "--signed-accepted", str(chk), "--page", "--apply-budget-s", "900"])
+        finally:
+            na.verify_notify.set_apply_budget(None)
+        self.assertNotEqual(rc, 2, "the tick's own argv shape must parse (2 is argparse/policy, before any send)")
+        self.assertEqual(seen, [900.0], "the share reaches the send loop, which is what enforces it")
+
     def test_the_cli_pages_a_signed_apply_only_with_page(self):
         # QA #1617: the tick's signed apply (--page) sends what fits today's room; a hand signed apply is whole-or-nothing
         import contextlib, io
@@ -836,6 +915,95 @@ class DistributorIssueOrderTest(unittest.TestCase):
                     ledger_path=str(d / "ledger.sqlite3"),
                     issuer=lambda rid, uid: events.append(f"issue:{uid}") or {"code": "MUSO-AB12", "expires_at": "2099-01-01T00:00:00Z"})
         self.assertEqual(events, ["check:1", "issue:1", "send:1", "check:2", "issue:2", "send:2"])
+
+    def test_a_distributor_user_the_budget_deferred_gets_no_code_and_the_cursor_stops_at_them(self):
+        """QA #1756 Important (carried): the budget clamp ran between the plain batch and the distributor phase, and
+        with_codes() minted an F9 code BEFORE the send loop's budget guard. So a distributor user reaching the loop
+        after the share was spent got a code issued for a note that was then deferred, and the cursor - clamped before
+        the distributor phase - stepped PAST them, so they waited a whole rotation instead of the next tick."""
+        from unittest import mock
+        d = Path(tempfile.mkdtemp())
+        lst = d / "l.json"
+        lst.write_text(json.dumps({"users": [{"user_id": str(u), "paid": True, "asks": [{"request_id": f"r{u}"}]}
+                                   for u in (1, 2, 3)]}))
+        ps = [{"user": {"id": str(u)}, "credits": [{"request_id": f"r{u}"}], "need": {"code": na.DISTRIBUTOR}}
+              for u in (1, 2, 3)]
+        issued, sent = [], []
+        clock = {"t": 0.0}
+
+        def gate(argv):
+            if "--check-recipient" in argv:
+                return type("R", (), {"returncode": 0, "stdout": "RECIPIENT OK contact=c\n", "stderr": ""})()
+            sent.append(json.load(open(argv[argv.index("--credits-file") + 1]))["user"]["id"])
+            clock["t"] += na.verify_notify.WORST_USER_S      # one note costs its whole worst case
+            return type("R", (), {"returncode": 0, "stdout": "POSTED email message=1 credits=1\n", "stderr": ""})()
+
+        # the share fits exactly ONE worst-case note: user 1 sends, users 2 and 3 must be deferred WITHOUT a code
+        try:
+            na.verify_notify.set_apply_budget(na.verify_notify.WORST_USER_S + 1)
+            na.verify_notify._SESSION_STARTED = 0.0
+            with mock.patch.object(na, "payloads", lambda users, q, asked, held=None, filtered=None: ps), \
+                    mock.patch.object(na.verify_notify, "attach_identities", lambda ps_, r: (ps_, None)), \
+                    mock.patch.object(na.verify_notify, "head_mismatch", lambda: ""), \
+                    mock.patch.object(na.verify_notify.time, "monotonic", lambda: clock["t"]), \
+                    mock.patch.object(na.verify_notify.time, "sleep", lambda s: None), \
+                    mock.patch.object(na.uvn_status, "campaign_lock_open", lambda w, lk: True):
+                rep = na.send(list_path=str(lst), segment="paid", mode="apply", query=lambda sql: [], runner=gate,
+                              ledger_path=str(d / "ledger.sqlite3"), max_users=3,
+                              issuer=lambda rid, uid: issued.append(uid) or {
+                                  "code": "MUSO-AB12", "expires_at": "2099-01-01T00:00:00Z", "new": True})
+        finally:
+            na.verify_notify.set_apply_budget(None)
+            na.verify_notify._SESSION_STARTED = None
+        self.assertEqual(sent, ["1"])
+        self.assertEqual(issued, ["1"], "a deferred distributor user must never have a code minted for them")
+        deferred = [o["user"] for o in rep.outcomes if o["result"] == "deferred" and "apply_budget" in o["reason"]]
+        self.assertEqual(deferred, ["2", "3"], "every distributor user the share left owes a row")
+        self.assertEqual(rep.page["end"], 1, "the cursor stops at the first deferred distributor user, not past them")
+
+    def test_a_preflight_that_crosses_the_budget_boundary_mints_no_code(self):
+        """QA #1756 Important 2 (r12): the budget guard ran BEFORE the preflight, and the preflight is a real gate call
+        (up to ~20s). With 200-219s left the guard passed, the preflight ate the margin, and with_codes() minted an F9
+        code for a note the send loop then deferred - a code issued for nothing, and if retiring it failed the next
+        tick saw a non-fresh active code and held the owed user until it expired. The loop's own predicate is re-asked
+        immediately before minting, so the preflight is the only work between the two reads."""
+        from unittest import mock
+        d = Path(tempfile.mkdtemp())
+        lst = d / "l.json"
+        lst.write_text(json.dumps({"users": [{"user_id": str(u), "paid": True, "asks": [{"request_id": f"r{u}"}]}
+                                   for u in (1, 2)]}))
+        ps = [{"user": {"id": str(u)}, "credits": [{"request_id": f"r{u}"}], "need": {"code": na.DISTRIBUTOR}}
+              for u in (1, 2)]
+        issued, sent = [], []
+        clock = {"t": 0.0}
+
+        def gate(argv):
+            if "--check-recipient" in argv:
+                clock["t"] += na.verify_notify.WORST_USER_S   # the preflight alone eats the whole margin
+                return type("R", (), {"returncode": 0, "stdout": "RECIPIENT OK contact=c\n", "stderr": ""})()
+            sent.append(json.load(open(argv[argv.index("--credits-file") + 1]))["user"]["id"])
+            return type("R", (), {"returncode": 0, "stdout": "POSTED email message=1 credits=1\n", "stderr": ""})()
+
+        try:
+            na.verify_notify.set_apply_budget(na.verify_notify.WORST_USER_S + 1)
+            na.verify_notify._SESSION_STARTED = 0.0
+            with mock.patch.object(na, "payloads", lambda users, q, asked, held=None, filtered=None: ps), \
+                    mock.patch.object(na.verify_notify, "attach_identities", lambda ps_, r: (ps_, None)), \
+                    mock.patch.object(na.verify_notify, "head_mismatch", lambda: ""), \
+                    mock.patch.object(na.verify_notify.time, "monotonic", lambda: clock["t"]), \
+                    mock.patch.object(na.verify_notify.time, "sleep", lambda s: None), \
+                    mock.patch.object(na.uvn_status, "campaign_lock_open", lambda w, lk: True):
+                rep = na.send(list_path=str(lst), segment="paid", mode="apply", query=lambda sql: [], runner=gate,
+                              ledger_path=str(d / "ledger.sqlite3"), max_users=2,
+                              issuer=lambda rid, uid: issued.append(uid) or {
+                                  "code": "MUSO-AB12", "expires_at": "2099-01-01T00:00:00Z", "new": True})
+        finally:
+            na.verify_notify.set_apply_budget(None)
+            na.verify_notify._SESSION_STARTED = None
+        self.assertEqual(issued, [], "a preflight that spent the margin must not mint a code")
+        self.assertEqual(sent, [])
+        deferred = [o["user"] for o in rep.outcomes if o["result"] == "deferred" and "apply_budget" in o["reason"]]
+        self.assertEqual(deferred, ["1", "2"], "the user whose preflight crossed the boundary owes a row too")
 
     def test_a_signed_apply_drops_unsigned_users_before_the_slice_the_preflight_and_the_code(self):
         # QA #1611: (1) an unsigned F9 user gets NO preflight, NO code, NO void; (2) a paged apply (--max-users 1) after

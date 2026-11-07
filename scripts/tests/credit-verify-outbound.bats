@@ -83,6 +83,25 @@ elif "--outcomes-json" in a:
         doc["page"] = {"start": st, "end": int((os.environ.get("STUB_APPLY_PAGE_END") if mode == "apply" else "") or os.environ.get("STUB_PAGE_END") or min(listed, st + me)), "listed": listed}
     if mode != "apply" and not os.environ.get("STUB_NO_ACCEPTED"):     # the runner's accepted set (#1600)
         doc["accepted"] = [{"user": u} for u in os.environ.get("STUB_ACCEPTED", "1").split(",") if u]
+    # [key=note-step-timeout]: a note step whose outcome is UNKNOWN rides the user's own row - never a refusal
+    for res in ([("timeout", "the note step timed out; outcome unknown")] * int(os.environ.get("STUB_TIMEOUTS", "0"))
+                + [("error", "the gate raised RuntimeError")] * int(os.environ.get("STUB_ERRORS", "0"))
+                # [key=post-failed-unknown]: the gate's POST FAILED - attempted, outcome unknown (rc 5 from the gate)
+                + [("post_failed", "POST FAILED (curl rc=28)")] * int(os.environ.get("STUB_POST_FAILED", "0"))):
+        doc["outcomes"].append({"user": "z" + str(len(doc["outcomes"])), "result": res[0], "reason": res[1]})
+    if mode == "apply" and os.environ.get("STUB_REAL_POST_FAILED"):
+        # QA #1756 Important 2: drive the REAL classifier (verify_notify._send_loop) with a gate that answers exactly
+        # as scripts/intercom-verify-request.sh does after an ATTEMPTED post: rc=4 and "POST FAILED" on stderr. The row
+        # this writes is what the tick's spike() must read - no synthetic post_failed row anywhere in this arm.
+        sys.path.insert(0, os.environ["STUB_SCRIPTS"])
+        from credit_review import verify_notify as vn
+        _rep = vn.Report()
+        def _gate(argv):
+            return type("R", (), {"returncode": 4, "stdout": "",
+                                  "stderr": "POST FAILED (curl rc=28); logged at /x and left CLAIMED\n"})()
+        vn._send_loop([{"user": {"id": "z1"}, "credits": [{"request_id": "r1"}]}], _rep, mode="apply",
+                      pace_seconds=0.0, pre=None, gate=_gate, extra=None, preview_dir=None, reminder=False)
+        doc["outcomes"].extend(_rep.outcomes)
     json.dump(doc, open(p, "w"))
 if "--preview" in a and os.environ.get("STUB_PREVIEW_FAIL"):
     print("preview failed"); sys.exit(1)
@@ -97,6 +116,10 @@ if "--preview" in a:
         json.dump({"class": "ask", "owes_proof": True, "distinct_tracks": 1, "source": "renderer"}, open(os.path.join(d, f"{u}.facts.json"), "w"))
     if os.environ.get("STUB_KILL_DURING"):
         open(os.environ["STUB_KILL_DURING"], "w").write("killed by a human mid-tick\n")
+if mode == "apply" and os.environ.get("STUB_APPLY_LOCK"):
+    # the real runner's deploy-lock path: it exits 3 BEFORE the first send, so NO rows and NO outcomes file are written
+    print("Credit review uvn-status: a deploy holds the apply lock /var/lib/hydra/credit-review/apply.lock; nothing sent (re-run after it)")
+    sys.exit(3)
 if mode == "apply" and os.environ.get("STUB_BREAK_LEDGER"):
     import sqlite3
     d = sqlite3.connect(os.environ["CVO_LEDGER"]); d.execute("DROP TABLE verify_messages"); d.commit()
@@ -115,6 +138,10 @@ if mode == "apply" and os.environ.get("STUB_CLAIM_PROSE"):
     print(f"CLAIM PROOF ASK (paid): sent {os.environ.get('STUB_SENT', '3')}, refused {os.environ.get('STUB_REFUSED', '0')}.")
 else:
     print(f"UVN STATUS: {os.environ.get('STUB_SENT', '3')} sent." if mode == "apply" else "UVN STATUS (dry run): 3 would be messaged.")
+if mode == "apply" and os.environ.get("STUB_APPLY_LOCK_AFTER_ROWS"):
+    # rc=3 AND the lock prose AND rows already written: the lock word must not launder a partial send into a deferral
+    print("Credit review uvn-status: a deploy holds the apply lock /var/lib/hydra/credit-review/apply.lock; nothing sent (re-run after it)")
+    sys.exit(3)
 if mode == "apply" and os.environ.get("STUB_APPLY_RC"):
     sys.exit(int(os.environ["STUB_APPLY_RC"]))   # rows were written above; the run then FAILS (a partial send)
 if mode == "apply" and os.environ.get("STUB_APPLY_RC3_AFTER_SEND") and (
@@ -282,7 +309,8 @@ TICK_BUDGET_S=6000
 TICK_HARD_S=6900
 CHECK_S_PER_USER=4
 RESERVE_PAD_S=300
-APPLY_S_PER_USER=15
+APPLY_S_PER_USER=40
+APPLY_USER_WORST_S=200
 TICK_ELAPSED0=0
 FULL_CAP_FROM_TEST=
 PER_SEGMENT_FROM_TEST=
@@ -549,10 +577,20 @@ PY
 
 @test "outbound tick (QA #1587): every subprocess runs under the deadline - a slow read-only check is stopped there and the tick ends (lock released); a slow APPLY cut at the deadline writes the kill file" {
   touch "$CVO_ETC/credit-verify-outbound.live"
-  # 3 s before the deadline, a check that would take 30 s: stopped at ~3 s, the tick ends, nothing applied, no kill
+  # 20 s before the deadline, a check that would take 120 s: stopped at ~20 s, the tick ends, nothing applied, no kill
+  #
+  # THE FLAKE THIS FIXTURE WAS (b1 2026-11-07, PR Validation run 42312173001, `Bats (2/2)` red on a tree whose only
+  # change was 12 new tests in this file): this half used CVO_TICK_ELAPSED0=6897 against a 6900 s deadline - THREE real
+  # seconds of headroom - and `elapsed()` reads the WALL CLOCK from TICK_T0, which is stamped at the top of the script
+  # (credit-verify-outbound.sh:275) BEFORE the ledger migration, the plan build and the audience reads. On the 2-CPU
+  # ARC pod that startup took 4 s, so the first family was reached at `6901s into the tick` and every family was
+  # skipped as "does not fit before the 6900s deadline" - the tick exited 0 and the `run -1` assertion failed. The
+  # code was right; the fixture measured the SHARD's startup time, not the deadline wrapper (the same class as the
+  # wall-clock `--max-users` assertion in the test above, and the absolute-date bomb in tests/test_gdpr_pipeline.py).
+  # 20 s of headroom is 5x the observed CI startup and still finishes well inside the duration bound below.
   t0=$(date +%s)
-  STUB_SLEEP_MODE=dry-run STUB_SLEEP=30 CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6897 CVO_TICK_HARD_S=6900 run -1 "$SCRIPT"
-  [ $(( $(date +%s) - t0 )) -lt 25 ]
+  STUB_SLEEP_MODE=dry-run STUB_SLEEP=120 CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6880 CVO_TICK_HARD_S=6900 run -1 "$SCRIPT"
+  [ $(( $(date +%s) - t0 )) -lt 45 ]
   grep -q "check hit the 6900s deadline (read-only, stopped); the tick ends" "$(newest_tick)"
   [ "$(applies)" -eq 0 ]; [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]
   # the lock is released: the next tick runs at once
@@ -560,7 +598,7 @@ PY
   if grep -q "another tick holds" "$(newest_tick)"; then false; fi
   # an apply that runs past the deadline: stopped there, and the kill file is written (a human reads it back)
   : > "$CALLS"; rm -f "$CVO_LEDGER.segments.jsonl"
-  STUB_SLEEP_MODE=apply STUB_SLEEP=30 CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6880 CVO_TICK_HARD_S=6900 CVO_APPLY_S_PER_USER=1 run -1 "$SCRIPT"
+  STUB_SLEEP_MODE=apply STUB_SLEEP=30 CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6880 CVO_TICK_HARD_S=6900 CVO_APPLY_S_PER_USER=1 CVO_APPLY_USER_WORST_S=1 run -1 "$SCRIPT"
   grep -q "the apply hit the 6900s deadline mid-run" "$CVO_ETC/credit-verify-outbound.disabled"
 }
 
@@ -930,6 +968,35 @@ first_line() { grep -n -m1 -- "$1" "$CVO_OUT_ROOT"/*/tick.log | cut -d: -f1; }
   grep -q "refusal spike" "$CVO_ETC/credit-verify-outbound.disabled"
 }
 
+@test "outbound tick ([key=post-failed-unknown], Fable driver 02:2xZ): a POST FAILED row stops the family as OUTCOME-UNKNOWN, never as a refusal spike" {
+  # intercom-verify-request.sh exits 5 when it ATTEMPTED the post and cannot prove it was not delivered, and the runner
+  # records that user's row as post_failed. That row is neither a delivery nor a refusal: counting it as a refusal would
+  # blame the users, and ignoring it would let a note that may have reached a customer pass as a clean run. One such row
+  # is enough - unknown has no ratio, and the kill names the users it cannot vouch for.
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  STUB_ROWS=3 STUB_POST_FAILED=2 run -1 "$SCRIPT"
+  [ -e "$CVO_ETC/credit-verify-outbound.disabled" ]
+  # the label says what happened: never "refusal spike", and it names the count it cannot verify.
+  # NOT a bare `! grep`: bats takes the FINAL command's status and `!` is exempt from errexit, so a
+  # non-final `! grep` cannot fail the test - a reason carrying BOTH labels would stay green.
+  if grep -q "refusal spike" "$CVO_ETC/credit-verify-outbound.disabled"; then false; fi
+  grep -q "UNKNOWN outcome" "$CVO_ETC/credit-verify-outbound.disabled"
+}
+
+@test "outbound tick (QA #1756 Important 2): the REAL runner classifies the gate's POST FAILED as post_failed, and the tick's spike() reads that row" {
+  # The arm above injects the row. This one drives the real classifier: verify_notify._send_loop is handed a gate that
+  # answers exactly as scripts/intercom-verify-request.sh does after an attempted POST (rc=4, "POST FAILED" on stderr),
+  # and the outcomes file it writes is the one the tick reads. Before the fix the loop recorded that return as a plain
+  # `failed`, so the tick's post_failed arm could never fire and one unknown POST was scored as an ordinary failure.
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  STUB_ROWS=3 STUB_REAL_POST_FAILED=1 STUB_SCRIPTS="$CVO_SCRIPTS" run -1 "$SCRIPT"
+  [ -e "$CVO_ETC/credit-verify-outbound.disabled" ]
+  # same trap as the arm above: a non-final `! grep` is exempt from errexit and cannot fail the test
+  if grep -q "refusal spike" "$CVO_ETC/credit-verify-outbound.disabled"; then false; fi
+  grep -q "UNKNOWN outcome" "$CVO_ETC/credit-verify-outbound.disabled"
+  grep -q "POST FAILED" "$CVO_ETC/credit-verify-outbound.disabled"
+}
+
 @test "outbound tick (production 15:05Z): an ABSENT outcomes artefact after real sends is UNMEASURED, never a 'refusal spike'" {
   # On 2026-11-04 the free family sent 39 emails, died inside the Intercom note (TimeoutExpired), returned rc=1 and
   # never wrote its outcomes artefact. spike() answered "unreadable", the caller accepted only "ok", and the kill file
@@ -1066,6 +1133,21 @@ PY
   CVO_POLICY="$TEST_TMPDIR/p-junk.json" CVO_UNSIGNED_ALL=0 run -1 "$SCRIPT"
   grep -qi "cap source unreadable" "$CVO_ETC/credit-verify-outbound.disabled"   # the FILE says "auto-kill ...", the LOG says "AUTO-KILL: ..."
   [ "$(applies)" -eq 0 ]
+}
+
+@test "outbound tick ([key=note-step-timeout]): a per-user timeout/error outcome is NOT a refusal in the spike ratio" {
+  # The Python half of 749/d2: the note step records an unknown outcome on the user's OWN row ("timeout" / "error"),
+  # never as a refusal - so a run whose note steps timed out must not read as a refusal spike. The ledger rows it wrote
+  # still count as attempts, and the ratio is refused / (sent + refused): 0 refused of 12 attempts is a healthy run.
+  # (The MISSING-artefact policy belongs to #1747: kill, naming the artefact. This arm is only about the ratio.)
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  : > "$CALLS.page"
+  STUB_ROWS=12 STUB_TIMEOUTS=5 STUB_ERRORS=2 run -0 "$SCRIPT"
+  if grep -q "refusal spike" "$(newest_tick)"; then false; fi
+  [ ! -e "$CVO_ETC/credit-verify-outbound.disabled" ]
+  # the positive control: the same 12 attempts WITH refusals above the ratio still kills, so this measures the ratio
+  STUB_ROWS=12 STUB_REFUSED=9 STUB_TIMEOUTS=2 run -1 "$SCRIPT"
+  grep -q "refusal spike" "$CVO_ETC/credit-verify-outbound.disabled"
 }
 
 @test "outbound tick: the exclude file rides every runner call; one tick at a time" {

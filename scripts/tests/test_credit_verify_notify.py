@@ -19,6 +19,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import pathlib
 import unittest
 import unittest.mock
 from datetime import datetime, timedelta, timezone
@@ -1135,6 +1136,308 @@ class RunTests(unittest.TestCase):
         self.assertEqual((rep.sent_notes, rep.sent_credits), (2, 3))
         self.assertTrue(rep.render("apply").startswith("VERIFY NOTES: 2 note(s) sent covering 3 provisionally approved credit(s)."))
 
+    def test_a_timed_out_note_step_is_UNMEASURED_and_never_aborts_the_batch(self):
+        """firstmate 748 / the 15:05Z auto-kill: one note step hit a 180 s timeout inside the gate call, the exception
+        escaped the send loop, and the run died before writing its outcomes file - the tick then read the missing
+        artefact as a refusal spike and killed itself while every note it had not reached stayed owed. A timeout is now
+        an outcome the report carries (UNMEASURED, never a refusal), so the file is always written and the batch goes on.
+        """
+        decisions_db(self.path, [dec("r1"), dec("r2", pid=PID2)])
+        admin = FakeAdmin([req("r1"), req("r2", pid=PID2, email="bob@example.com")])
+
+        class OneTimesOut(Fake):
+            def __call__(self, args):
+                if args[1] == "send":
+                    who = json.loads(Path(args[args.index("--credits-file") + 1]).read_text())["user"]["email"]
+                    if who == "jane@example.com":
+                        raise verify_notify.NoteTimeout("the note step timed out after 3 attempt(s) of 180s")
+                return super().__call__(args)
+
+        rep = verify_notify.run(admin, ledger_path=self.path, mode="apply", runner=OneTimesOut(), wrapper="/w")
+        self.assertEqual(rep.timeout_users, 1)
+        self.assertEqual(rep.sent_notes, 1)                      # the other account was still served
+        self.assertFalse(rep.failed, "an unknown outcome is not a failed run: the artefact must still be written")
+        self.assertEqual([o for o in rep.outcomes if o["result"].startswith("refused")], [])
+        timed = [o for o in rep.outcomes if o["result"] == "timeout"]
+        self.assertEqual(len(timed), 1)
+        self.assertIn("outcome unknown", timed[0]["reason"])
+        self.assertIn("UNMEASURED", rep.render("apply"))          # the summary says it, so the operator sees it
+        self.assertNotIn("refused by the gate", rep.render("apply"))
+
+    @staticmethod
+    def _timeout_then(rc, out, err=""):
+        """A real `_run` whose FIRST attempt times out and whose retry answers (rc, out, err)."""
+        calls = {"n": 0}
+
+        def fake_run(argv, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise subprocess.TimeoutExpired(argv, kw.get("timeout") or 1)
+            return subprocess.CompletedProcess(argv, rc, out + "\n", err)
+
+        return fake_run
+
+    def test_a_timeout_then_a_REFUSED_retry_is_UNMEASURED_never_a_refusal(self):
+        """QA #1756 Important 1 (r12): `after_timeout` was read only on rc=0, so a timed-out POST whose retry answered
+        rc=1 REFUSED was scored as a REFUSAL - blaming the user for our timeout, and able to trip the refusal-spike
+        kill on a run where nothing was refused. The gate claims the user BEFORE it posts, so the retry's REFUSED
+        cannot settle whether the first attempt landed. UNMEASURED, and the run is not failed."""
+        decisions_db(self.path, [dec("r1")])
+        admin = FakeAdmin([req("r1")])
+        with unittest.mock.patch.object(verify_notify.subprocess, "run",
+                                        self._timeout_then(1, "", "REFUSED user already messaged in the last 7 days")), \
+             unittest.mock.patch.object(verify_notify.time, "sleep", lambda *_: None):
+            rep = verify_notify.run(admin, ledger_path=self.path, mode="apply", wrapper="/w")
+        self.assertEqual((rep.timeout_users, rep.refused_users, rep.sent_notes), (1, 0, 0))
+        self.assertEqual([o["result"] for o in rep.outcomes], ["timeout"])
+        self.assertIn("rc=1", rep.outcomes[0]["reason"])
+        self.assertFalse(rep.failed, "an unknown outcome is not a failed run: the artefact must still be written")
+        self.assertIn("UNMEASURED", rep.render("apply"))
+
+    def test_a_timeout_then_a_DEFERRED_retry_is_UNMEASURED_never_a_known_deferral(self):
+        """QA #1756 Important 1 (r12), the rc=3 half: a timed-out POST whose retry answered DEFERRED was recorded as a
+        KNOWN deferral, which asserts a certainty the run does not have - the first attempt may have landed. Same
+        classification as the rc=1 case: UNMEASURED."""
+        decisions_db(self.path, [dec("r1")])
+        admin = FakeAdmin([req("r1")])
+        with unittest.mock.patch.object(verify_notify.subprocess, "run",
+                                        self._timeout_then(3, "DEFERRED messaged_7d")), \
+             unittest.mock.patch.object(verify_notify.time, "sleep", lambda *_: None):
+            rep = verify_notify.run(admin, ledger_path=self.path, mode="apply", wrapper="/w")
+        self.assertEqual((rep.timeout_users, rep.deferred_users, rep.sent_notes), (1, 0, 0))
+        self.assertEqual([o["result"] for o in rep.outcomes], ["timeout"])
+        self.assertIn("rc=3", rep.outcomes[0]["reason"])
+        self.assertFalse(rep.failed)
+
+    def test_a_timeout_then_a_POST_FAILED_retry_stays_post_failed(self):
+        """The one exception: the gate's explicit POST FAILED line is its own unknown (post_failed), which the tick's
+        arm reads to kill. A timeout before it must not reclassify it into the quieter `timeout` bucket."""
+        decisions_db(self.path, [dec("r1")])
+        admin = FakeAdmin([req("r1")])
+        with unittest.mock.patch.object(verify_notify.subprocess, "run",
+                                        self._timeout_then(4, "", "POST FAILED: the note may or may not have landed")), \
+             unittest.mock.patch.object(verify_notify.time, "sleep", lambda *_: None):
+            rep = verify_notify.run(admin, ledger_path=self.path, mode="apply", wrapper="/w")
+        self.assertEqual((rep.post_failed_users, rep.timeout_users), (1, 0))
+        self.assertEqual([o["result"] for o in rep.outcomes], ["post_failed"])
+        self.assertTrue(rep.failed)
+
+    def test_a_gate_that_raises_is_recorded_per_user_and_never_costs_the_artefact(self):
+        decisions_db(self.path, [dec("r1"), dec("r2", pid=PID2)])
+        admin = FakeAdmin([req("r1"), req("r2", pid=PID2, email="bob@example.com")])
+
+        class OneExplodes(Fake):
+            def __call__(self, args):
+                if args[1] == "send":
+                    who = json.loads(Path(args[args.index("--credits-file") + 1]).read_text())["user"]["email"]
+                    if who == "jane@example.com":
+                        raise RuntimeError("subprocess died in an unexpected way")
+                return super().__call__(args)
+
+        rep = verify_notify.run(admin, ledger_path=self.path, mode="apply", runner=OneExplodes(), wrapper="/w")
+        self.assertEqual(rep.error_users, 1)
+        self.assertEqual(rep.sent_notes, 1)
+        self.assertEqual([o["result"] for o in rep.outcomes], ["error"])
+        self.assertIn("RuntimeError", rep.outcomes[0]["reason"])
+        self.assertFalse(rep.failed)
+
+    def test_a_run_of_only_unknown_outcomes_still_reports(self):
+        """QA #1756 finding 2: render() returned NO_REPLY before it reached the UNMEASURED clause, so the one run that
+        most needs a human - every selected user timed out or crashed - was the silent one."""
+        class AllUnknown(Fake):
+            def __call__(self, args):
+                if args[1] == "send":
+                    raise verify_notify.NoteTimeout("the note step timed out after 3 attempt(s) of 180s")
+                return super().__call__(args)
+
+        decisions_db(self.path, [dec("r1")])
+        rep = verify_notify.run(FakeAdmin([req("r1")]), ledger_path=self.path, mode="apply",
+                                runner=AllUnknown(), wrapper="/w")
+        self.assertEqual((rep.sent_notes, rep.timeout_users), (0, 1))
+        out = rep.render("apply")
+        self.assertNotEqual(out, "NO_REPLY", "an all-unknown run must say so")
+        self.assertIn("UNMEASURED", out)
+        # the negative control: an apply that did nothing at all is still quiet (the early return is not disabled)
+        self.assertEqual(verify_notify.Report().render("apply"), "NO_REPLY")
+        self.assertNotEqual(verify_notify.Report(error_users=1).render("apply"), "NO_REPLY")
+        self.assertNotEqual(verify_notify.Report(timeout_users=1).render("apply"), "NO_REPLY")
+
+    def test_the_send_loop_never_starts_a_user_whose_worst_case_would_not_fit_the_budget(self):
+        """[key=note-step-budget] (Fable 753): the amendment that pays for APPLY_S_PER_USER being the EXPECTED cost.
+
+        3 x 55 + 35 = 200 s worst case per user. With a 40 s expected cost the tick sizes an apply at ~165 users; without
+        a guard, a run of slow users would carry the family past its share and it would defer every tick (the 11-02
+        livelock). The loop therefore refuses to START a user whose whole retry budget does not fit what is left, and the
+        users it never started are DEFERRED - they keep no claim, stay owed, and are never scored as refusals."""
+        payloads = [{"user": {"id": str(i), "email": f"u{i}@x.com"}, "credits": [{"request_id": f"r{i}"}]}
+                    for i in range(5)]
+        clock = {"t": 0.0}
+        started = []
+
+        def run(argv):
+            started.append(argv[argv.index("--credits-file") + 1])
+            clock["t"] += 120.0                      # one user eats most of a 200 s share
+            return subprocess.CompletedProcess(argv, 0, "POSTED email message=1 credits=1\n", "")
+
+        rep = verify_notify.Report()
+        with unittest.mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, [])), \
+             unittest.mock.patch.object(verify_notify.time, "monotonic", lambda: clock["t"]), \
+             unittest.mock.patch.object(verify_notify.time, "sleep", lambda s: None):
+            try:
+                verify_notify.set_apply_budget(200)  # room for ONE worst-case user, never two
+                verify_notify.send_all(payloads, rep, mode="apply", runner=run, extra=["--campaign", "uvn-status"])
+            finally:
+                verify_notify.set_apply_budget(None)
+        self.assertEqual(len(started), 1, "only the user the budget could fit was started")
+        self.assertEqual(rep.budget_deferred_users, 4)
+        self.assertEqual(rep.deferred_users, 4)
+        self.assertEqual(rep.refused_users, 0, "a budget deferral is never a refusal")
+        deferred = [o for o in rep.outcomes if o["result"] == "deferred"]
+        self.assertEqual(len(deferred), 4)
+        self.assertTrue(all("apply_budget" in o["reason"] for o in deferred))
+        self.assertIn("not started this run", rep.render("apply"))
+        # negative control: no budget set (a hand-run apply) -> no guard, every user is attempted
+        rep2 = verify_notify.Report()
+        with unittest.mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, [])), \
+             unittest.mock.patch.object(verify_notify.time, "sleep", lambda s: None):
+            verify_notify.send_all(payloads[:3], rep2, mode="apply", runner=run, extra=["--campaign", "uvn-status"])
+        self.assertEqual((rep2.deferred_users, rep2.budget_deferred_users), (0, 0))
+
+    def test_the_apply_budget_is_ONE_run_clock_not_reset_by_every_per_user_call(self):
+        """QA #1756 Critical: uvn_status.run() calls send_all([p]) once per USER, and the loop measured the budget from
+        its own call - so N per-user calls each got the whole share, a run of slow notes overran the tick's share by N
+        times and hit its hard deadline mid-apply (a partial send, then the 15:05Z auto-kill). The clock is the apply
+        SESSION's: one run, whatever number of send_all calls it makes."""
+        clock = {"t": 1000.0}
+        started = []
+        payloads = [{"user": {"id": str(i), "email": f"u{i}@x.com"}, "credits": [{"request_id": f"r{i}"}]}
+                    for i in range(3)]
+
+        def run(argv):
+            started.append(argv[argv.index("--credits-file") + 1])
+            clock["t"] += 60.0                       # each user eats 60 s of a 300 s run share
+            return subprocess.CompletedProcess(argv, 0, "POSTED email message=1 credits=1\n", "")
+
+        rep = verify_notify.Report()
+        with unittest.mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, [])), \
+             unittest.mock.patch.object(verify_notify.time, "monotonic", lambda: clock["t"]), \
+             unittest.mock.patch.object(verify_notify.time, "sleep", lambda s: None), \
+             unittest.mock.patch.object(verify_notify, "_apply_lock", lambda: unittest.mock.MagicMock()), \
+             verify_notify.apply_session():
+            try:
+                verify_notify.set_apply_budget(300)
+                for p_ in payloads:                  # exactly the real caller's shape: one send_all per user
+                    verify_notify.send_all([p_], rep, mode="apply", runner=run, extra=["--campaign", "uvn-status"])
+            finally:
+                verify_notify.set_apply_budget(None)
+        # 60 s per user from ONE clock, 200 s worst case each: user 1 starts at 0 s, user 2 at 60 s (260 of 300),
+        # user 3 at 120 s (320 of 300) does not fit. Before the fix every call restarted the clock at 0, so all THREE
+        # started and the family could overrun the tick's share by one whole budget per extra user.
+        self.assertEqual(len(started), 2, "the third user's worst case does not fit the RUN's remaining share")
+        self.assertEqual(rep.sent_notes, 2)
+        self.assertEqual(rep.budget_deferred_users, 1)
+        self.assertEqual(rep.refused_users, 0)
+        deferred = [o for o in rep.outcomes if o["result"] == "deferred"]
+        self.assertEqual(len(deferred), 1)
+        self.assertIn("apply_budget", deferred[0]["reason"])
+
+    def test_a_timeout_followed_by_an_already_notified_retry_stays_UNMEASURED_and_is_never_a_skip(self):
+        """QA #1756 Important 2: the gate claims the user BEFORE it posts, so when the first POST times out and the
+        retry answers 'already notified', the run cannot tell 'the timed-out POST landed' from 'it died after
+        claiming'. Recording that as `skipped` asserts we know nothing went out - we do not."""
+        import subprocess as sp
+        calls = []
+
+        def fake_run(argv, **kw):
+            calls.append(argv)
+            if len(calls) == 1:
+                raise sp.TimeoutExpired(argv, verify_notify.NOTE_TIMEOUT_S)
+            return sp.CompletedProcess(argv, 0, "SKIPPED already-notified user=5\n", "")
+
+        rep = verify_notify.Report()
+        p = {"user": {"id": "5", "email": "u5@x.com"}, "credits": [{"request_id": "r5"}]}
+        with unittest.mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, [])), \
+             unittest.mock.patch.object(verify_notify.time, "sleep", lambda s: None), \
+             unittest.mock.patch.object(verify_notify.subprocess, "run", side_effect=fake_run):
+            verify_notify.send_all([p], rep, mode="apply", extra=["--campaign", "uvn-status"])
+        self.assertEqual(len(calls), 2, "a note POST is retried once after a timeout")
+        self.assertEqual((rep.skipped, rep.timeout_users, rep.sent_notes), (0, 1, 0))
+        unknown = [o for o in rep.outcomes if o["result"] == "timeout"]
+        self.assertEqual(len(unknown), 1)
+        self.assertIn("never scored as a skip", unknown[0]["reason"])
+        # negative control: an already-notified answer with NO earlier timeout is still an ordinary skip
+        rep2 = verify_notify.Report()
+        with unittest.mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, [])), \
+             unittest.mock.patch.object(verify_notify.subprocess, "run",
+                                        side_effect=lambda argv, **kw: sp.CompletedProcess(argv, 0, "SKIPPED already-notified\n", "")):
+            verify_notify.send_all([p], rep2, mode="apply", extra=["--campaign", "uvn-status"])
+        self.assertEqual((rep2.skipped, rep2.timeout_users), (1, 0))
+
+    def test_the_note_step_retries_a_timeout_with_backoff_then_gives_up(self):
+        """Bounded retry with backoff on the ONE failure whose outcome is unknown. Safe because the gate writes its claim
+        BEFORE it posts: a re-run of the same user finds the claim and never posts a second note."""
+        import subprocess as sp
+        sleeps = []
+        real_sleep = verify_notify.time.sleep
+        verify_notify.time.sleep = lambda s: sleeps.append(s)
+        try:
+            with unittest.mock.patch.object(verify_notify.subprocess, "run",
+                                            side_effect=sp.TimeoutExpired("x", verify_notify.NOTE_TIMEOUT_S)) as run:
+                with self.assertRaises(verify_notify.NoteTimeout):
+                    verify_notify._run(["/opt/hydra/scripts/intercom-verify-request.sh", "send"])
+        finally:
+            verify_notify.time.sleep = real_sleep
+        self.assertEqual(run.call_count, verify_notify.NOTE_ATTEMPTS)
+        self.assertEqual(run.call_args.kwargs["timeout"], verify_notify.NOTE_TIMEOUT_S)
+        self.assertEqual(sleeps, list(verify_notify.NOTE_BACKOFF_S))    # one backoff per gap, then give up
+
+    def test_the_tick_models_the_expected_cost_and_the_loop_guards_the_worst_case(self):
+        """d2 r5 (750), amended by Fable 753: TWO numbers, pinned to the code that owns each.
+
+        APPLY_S_PER_USER is the EXPECTED cost and it is what sizes the apply (fit = remaining / expected). Sizing the
+        apply at the WORST case to survive a 1-in-80 event cut throughput 3x (fit = remaining / 200 = ~25 users a tick),
+        so the worst case is bounded by the SEND LOOP instead: it will not START a user whose whole retry budget would
+        not fit the share it was handed. This test holds both sides: the tick's expected cost is the smaller number, and
+        the tick's APPLY_USER_WORST_S equals this module's derived worst case, so neither can drift silently."""
+        worst = verify_notify.NOTE_ATTEMPTS * verify_notify.NOTE_TIMEOUT_S + sum(verify_notify.NOTE_BACKOFF_S)
+        self.assertEqual(worst, verify_notify.WORST_USER_S, "WORST_USER_S must be derived, never a second literal")
+        src = (pathlib.Path(__file__).resolve().parents[2] / "scripts" / "credit-verify-outbound.sh").read_text()
+        exp = re.search(r'APPLY_S_PER_USER="\$\(cfg CVO_APPLY_S_PER_USER (\d+)\)"', src)
+        got = re.search(r'APPLY_USER_WORST_S="\$\(cfg CVO_APPLY_USER_WORST_S (\d+)\)"', src)
+        self.assertIsNotNone(exp, "APPLY_S_PER_USER must be a literal default the tick can be held to")
+        self.assertIsNotNone(got, "APPLY_USER_WORST_S must be a literal default the tick can be held to")
+        self.assertEqual(int(got.group(1)), worst,
+                         f"the tick guards {got.group(1)}s per user but one slow user can cost {worst}s")
+        self.assertLess(int(exp.group(1)), worst,
+                        "the sizing number is the EXPECTED cost; guarding at the worst case sizes the apply 3x too small")
+        self.assertIn("--apply-budget-s", src, "the apply must hand the loop the share it may spend")
+
+    def test_a_read_only_gate_call_is_never_retried_and_caps_short(self):
+        """d2 r5 (750): CHECK_WORKERS read-only calls run in parallel, so a retry there multiplies across threads and no
+        read-only call posts anything. One short attempt, then NoteTimeout."""
+        import subprocess as sp
+        sleeps = []
+        real_sleep = verify_notify.time.sleep
+        verify_notify.time.sleep = lambda s: sleeps.append(s)
+        try:
+            for flag in ("--check-recipient", "--validate", "--dry-run"):
+                with unittest.mock.patch.object(verify_notify.subprocess, "run",
+                                                side_effect=sp.TimeoutExpired("x", 1)) as run:
+                    with self.assertRaises(verify_notify.NoteTimeout):
+                        verify_notify._run(["/opt/hydra/scripts/intercom-verify-request.sh", "send", flag])
+                self.assertEqual(run.call_count, 1, flag)
+                self.assertEqual(run.call_args.kwargs["timeout"], verify_notify.READ_TIMEOUT_S, flag)
+            # a mutation that is not a note POST keeps main's single 180 s attempt and is not retried either
+            with unittest.mock.patch.object(verify_notify.subprocess, "run",
+                                            side_effect=sp.TimeoutExpired("x", 1)) as run:
+                with self.assertRaises(verify_notify.NoteTimeout):
+                    verify_notify._run(["/opt/hydra/scripts/intercom-verify-request.sh", "tag-proof", "--message-id", "m"])
+            self.assertEqual(run.call_count, 1)
+            self.assertEqual(run.call_args.kwargs["timeout"], verify_notify.OTHER_TIMEOUT_S)
+        finally:
+            verify_notify.time.sleep = real_sleep
+        self.assertEqual(sleeps, [], "nothing outside the note POST may sleep-and-retry")
+
     def test_dry_run_only_validates(self):
         decisions_db(self.path, [dec("r1")])
         fake = Fake({"jane@example.com": (0, "VALID email credits=1", "")})
@@ -1157,6 +1460,10 @@ class RunTests(unittest.TestCase):
         # QA #1780 (Critical, 03:07Z) CHANGED the exit code back: an uncertain POST is the ONE per-user outcome that is
         # ALWAYS fatal to the run - the message may already be delivered, so a run that exits 0 over it reports success
         # for a delivery it cannot prove.
+        # QA #1756 Important 2: it is ALSO counted on its own (post_failed_users), which is the counter the tick's
+        # post_failed arm reads. One classification, two counters - the user is still a failed_users entry, because
+        # `_failed(kind="post")` is the single place that records an unknown POST.
+        self.assertEqual(rep.post_failed_users, 1, "the tick's post_failed arm reads this counter")
         self.assertTrue(rep.failed, "an uncertain POST is fatal to the run's exit code, at any count")
         self.assertEqual(rep.failed_held, [], "a POST FAILED is not a failed READ: nothing was unreadable")
         self.assertEqual([h["user"] for h in rep.post_failures], ["7"], "it is recorded as an unknown-outcome send")
@@ -1366,6 +1673,41 @@ class RunTests(unittest.TestCase):
                 paged.append(tick + 1)
         self.assertEqual(paged, [3], "the page lands on the THIRD consecutive tick: with a horizon == the cadence it "
                                      "lands on a later tick (4 here, 5 in the probed collision)")
+
+    def test_a_post_failed_row_is_outcome_unknown_never_a_refusal_and_never_a_plain_failure(self):
+        """QA #1756 Important 2: the real gate prints `POST FAILED (curl rc=..)` and exits 4 after the POST was
+        ATTEMPTED (scripts/intercom-verify-request.sh:3603-3606). The loop recorded every such return as `failed`, so
+        the tick's post_failed arm - which keys on the outcome row - could never fire, and one note that may or may not
+        have reached a customer was scored as an ordinary failure. Classified by the LINE, not the code: every other
+        rc=4 is a pre-POST "nothing was sent or claimed" and stays a plain failure."""
+        decisions_db(self.path, [dec("r1"), dec("r2", pid=PID2), dec("r3", pid=PID2, track="t3")])
+        admin = FakeAdmin([req("r1"), req("r2", pid=PID2, email="b@example.com"),
+                           req("r3", pid=PID2, email="c@example.com", track="t3")])
+        fake = Fake({"jane@example.com": (4, "", "POST FAILED (curl rc=28); logged at /x and left CLAIMED"),
+                     "b@example.com": (4, "", "CORE NOTICE CHECK FAILED (rc=1); nothing was sent or claimed"),
+                     "c@example.com": (0, "POSTED email message=1 credits=1", "")})
+        rep = verify_notify.run(admin, ledger_path=self.path, mode="apply", runner=fake, wrapper="/w")
+        by_result = {o["result"]: o for o in rep.outcomes}
+        self.assertIn("POST FAILED", by_result["post_failed"]["reason"])
+        # the pre-POST rc=4 is NOT a post failure: nothing was attempted, so it stays a plain failure
+        self.assertIn("CORE NOTICE CHECK FAILED", by_result["failed"]["reason"])
+        # TWO failed_users, and that is the point: the pre-POST rc=4 above is a plain failure, and the POST FAILED
+        # user is recorded through the SAME `_failed(kind="post")` path (failed_users + post_failed + post_failures +
+        # the `post_failed` outcome row) with `post_failed_users` bumped alongside it. One classification, two
+        # counters - the tick's arm reads post_failed_users, the summary reads failed_users/post_failures.
+        self.assertEqual((rep.post_failed_users, rep.failed_users, rep.refused_users), (1, 2, 0))
+        self.assertTrue(rep.failed)
+        self.assertIn("UNKNOWN outcome", rep.render("apply"))
+
+    def test_a_post_failed_row_alone_still_fails_the_run_and_is_never_no_reply(self):
+        """The one summary that most needs reading must not be the silent one: a run whose only event was an unknown
+        POST renders a line and exits non-zero."""
+        decisions_db(self.path, [dec("r1")])
+        fake = Fake({"jane@example.com": (4, "", "POST FAILED (curl rc=28)")})
+        rep = verify_notify.run(FakeAdmin([req("r1")]), ledger_path=self.path, mode="apply", runner=fake, wrapper="/w")
+        self.assertEqual(rep.post_failed_users, 1)
+        self.assertTrue(rep.failed)
+        self.assertNotEqual(rep.render("apply"), "NO_REPLY")
 
     def test_deferred_accounts_alone_are_not_announced(self):
         decisions_db(self.path, [dec("r1")])

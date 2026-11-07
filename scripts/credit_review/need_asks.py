@@ -470,6 +470,21 @@ def send(*, mode: str = "dry-run", ledger_path: str | None = None, **kw: Any) ->
             fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
 
+def _page_ends_at_budget_stop(report: verify_notify.Report, page_users: list[str]) -> None:
+    """[key=note-step-budget] (QA #1756 Important): the tick's share can end INSIDE the batch - the send loop refuses to
+    START a user whose worst case would not fit and records them `deferred / apply_budget`. Those users are already in
+    `taken` above (page.end was computed from the batch), so without this clamp the cursor would step PAST them and they
+    would wait a whole rotation of the list instead of the next tick. The page ends at the FIRST user the loop deferred,
+    which is exactly what the cap stop and `--max-users` already do for the users they never reached."""
+    if not getattr(report, "budget_deferred_users", 0):
+        return
+    deferred = {str(o.get("user")) for o in report.outcomes
+                if o.get("result") == "deferred" and str(o.get("reason", "")).startswith("apply_budget")}
+    first = next((j for j, uid in enumerate(page_users) if uid in deferred), None)
+    if first is not None and report.page["start"] + first < report.page["end"]:
+        report.page["end"] = report.page["start"] + first
+
+
 def _send(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int = 25, preview_dir: str | None = None,
           max_entries: int | None = None, start_entry: int = 0,
          query: uvn_status.Query | None = None, wrapper: str = verify_notify.WRAPPER,
@@ -562,11 +577,26 @@ def _send(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int
     verify_notify.send_all(plain, report, mode=mode, wrapper=wrapper, runner=runner, extra=["--campaign", CAMPAIGN],
                            pace_seconds=1.0, preview_dir=preview_dir,
                            check_recipients=check_recipients and mode != "apply")
-    for p in ps:
+    for j, p in enumerate(ps):
         if p["need"]["code"] != DISTRIBUTOR:
             continue
+        # QA #1756 Important: the budget guard must run BEFORE the code is minted, not only inside the send loop.
+        # with_codes() issues the F9 code for this payload, so a distributor user reaching here after the shared share
+        # was spent got a code minted for a note that was then deferred - a code issued for nothing. Ask the send
+        # loop's own predicate first, and defer this user and every distributor behind them exactly as the loop does.
+        if mode == "apply" and verify_notify.budget_exhausted():
+            _defer_distributors_from(ps, j, report)
+            break
         if mode == "apply" and not preflight_ok(p, report, wrapper, runner):
             continue                         # QA #1513: the gate would not send it now -> no code is minted
+        # QA #1756 Important 2 (r12): the guard above runs BEFORE the preflight, and the preflight is a real gate call
+        # (up to ~20s). With 200-219s left the guard passed, the preflight ate the margin, and with_codes() minted an
+        # F9 code for a note the send loop then deferred - a code issued for nothing, and if retiring it failed the
+        # next tick saw a non-fresh active code and held the user until it expired. Re-ask the loop's own predicate
+        # IMMEDIATELY before minting: the preflight is the only work between the two reads.
+        if mode == "apply" and verify_notify.budget_exhausted():
+            _defer_distributors_from(ps, j, report)
+            break
         coded = with_codes([p], mode, report, issuer)
         before, n_out = report.sent_notes, len(report.outcomes)
         verify_notify.send_all(coded, report, mode=mode, wrapper=wrapper, runner=runner,
@@ -584,7 +614,25 @@ def _send(*, list_path: str, segment: str, mode: str = "dry-run", max_users: int
                 # r5 (QA #1513): a failure / ambiguous result may have reached the POST - the code is NEVER voided on it
                 # (the user may hold it); it lapses on its own and is reported
                 report.refusals.append(f"distributor_code_kept_ambiguous:{rid}")
+    # QA #1756 Important: the clamp runs AFTER the distributor phase, not between the two phases. A distributor user
+    # deferred on the budget is in `taken` (page.end was computed from the whole batch), so clamping only after the
+    # plain batch let the cursor step PAST them and they waited a whole rotation instead of the next tick.
+    _page_ends_at_budget_stop(report, page_users)
     return report
+
+
+def _defer_distributors_from(ps: list[dict[str, Any]], j: int, report: verify_notify.Report) -> None:
+    """Defer this distributor and every distributor behind them on the spent apply budget, exactly as the send loop
+    would (QA #1756): the loop's own predicate is the authority, and a user it would not start must not have a code
+    minted for them either."""
+    for rest in ps[j:]:
+        if rest["need"]["code"] != DISTRIBUTOR:
+            continue
+        report.deferred_users += 1
+        report.budget_deferred_users += 1
+        verify_notify._outcome(report, rest, "deferred",
+                               "apply_budget: the run's share is spent and one note can cost up to "
+                               f"{verify_notify.WORST_USER_S:.0f}s; not started, stays owed for the next tick")
 
 
 def preflight_ok(p: dict[str, Any], report: verify_notify.Report, wrapper: str, runner: verify_notify.Runner) -> bool:
@@ -654,7 +702,15 @@ def _main(argv: list[str] | None = None) -> int:
     s.add_argument("--check-recipients", action="store_true",
                    help="dry run: the gate's live --check-recipient for every user (the signable would-send set)")
     s.add_argument("--outcomes-json", default=None, help="write every non-send gate answer {user, result, reason} (0600)")
+    # [key=note-step-budget] (QA #1756 Critical): the outbound tick hands every family the seconds it has left before
+    # TICK_HARD_S (family(), credit-verify-outbound.sh). proof-need-ask runs THIS parser, so without the flag an armed
+    # need-ask apply exited 2 at argparse before writing a single thing - and the tick reads a missing outcomes file as
+    # UNMEASURED and kills itself, with nothing refused and nothing sent. Declared here; the send loop reads it through
+    # verify_notify.APPLY_BUDGET_S, exactly as the other families' CLIs do.
+    s.add_argument("--apply-budget-s", type=float, default=None, metavar="SECONDS",
+                   help="the tick's remaining share; the send loop never STARTS a user whose worst case would not fit")
     a = ap.parse_args(argv)
+    verify_notify.set_apply_budget(a.apply_budget_s)
     if a.op == "send" and a.preview_accepted:
         # t01b 584: the preview renders exactly the check's accepted set, walking the whole list
         if not a.preview or a.mode != "dry-run" or a.check_recipients:

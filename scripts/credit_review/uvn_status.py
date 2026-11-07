@@ -1215,8 +1215,9 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                 fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
                 lock_fh.close()
             return report
+    budget_stop = False
     try:
-        while (want := room()[0]) > 0:
+        while (want := room()[0]) > 0 and not budget_stop:
             batch = next_batch(want)
             if not batch:
                 break
@@ -1346,6 +1347,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                     if calls and pace_seconds:
                         time.sleep(pace_seconds)
                 before = report.sent_notes if mode == "apply" else report.validated + report.recipient_ok
+                before_budget = report.budget_deferred_users
                 l0 = ledger_left() if mode == "apply" else 0
                 # QA #1780 (Important): the read-failure streak resets on a VERIFIED SUCCESSFUL READ, not only on a
                 # send. A user who read fine and was then refused or deferred has not failed to read, so leaving the
@@ -1389,7 +1391,21 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                     # the probe walked 8 of 8 after stopping at 3: send_all() returned, the walk carried on, and the stop
                     # only coloured the exit code.
                     break
-            if report.halted or report.stopped_on_failures:
+                if report.budget_deferred_users > before_budget:
+                    # [key=note-step-budget] (QA #1756 Important): the run's share ended AT THIS user - the send loop
+                    # refuses to START one whose worst case (the whole retry budget) would not fit and records them
+                    # `deferred / apply_budget`. This user IS in `examined` (picked before the send), so the page clamp
+                    # at the end of this function would step PAST them: they - and every user after them in the batch -
+                    # would wait a whole ROTATION of the list instead of the next tick. Mirror the cap stop exactly:
+                    # an outcome row each, drop them from `examined` (which is what moves page.end), and stop.
+                    report.outcomes += [{"user": str(b[1]["user"]["id"]), "result": "deferred",
+                                         "reason": "apply_budget: the tick's apply share ended before this user; "
+                                                   "never started, stays owed for the next tick"}
+                                        for b in batch[i + 1:]]
+                    examined.difference_update(str(b[1]["user"]["id"]) for b in batch[i:])
+                    budget_stop = True
+                    break
+            if report.halted or report.stopped_on_failures or budget_stop:
                 break
     finally:
         if lock_fh is not None:

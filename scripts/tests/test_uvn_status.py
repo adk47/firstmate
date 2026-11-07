@@ -920,6 +920,55 @@ class UvnStatusTests(unittest.TestCase):
         # is skipped for good
         self.assertEqual((rep.page["start"], rep.page["end"]), (0, 301))
 
+    def test_the_cursor_stops_at_the_user_the_apply_budget_deferred(self):
+        """QA #1756 Important: the tick's share can end INSIDE a page. The send loop then refuses to START the user whose
+        worst case would not fit and records them `deferred / apply_budget` - but that user was already PICKED, so they
+        sat in `examined`, and the cursor (page.end = the first entry this run did not get to) walked PAST them. On a
+        250-entry page an owed user then waited a whole ROTATION instead of the next tick. The page now ends at the first
+        deferred user, exactly as a cap stop does, and the next run starts there."""
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, 7)]
+        self.write_list()
+        clock = {"t": 0.0}
+        class Slow(FakeGate):
+            def __call__(self, argv):
+                res = super().__call__(argv)
+                clock["t"] += 120.0                      # each send eats most of the share
+                return res
+        gate = Slow(out="POSTED email message=1 credits=1")
+        # the CLI wraps the whole apply in apply_session(), which is what makes the budget ONE run clock (QA #1756
+        # Critical); uvn_status.run() is called directly here, so the session clock is what we stand in for
+        try:
+            verify_notify.set_apply_budget(200)          # room for exactly ONE worst-case user
+            verify_notify._SESSION_STARTED = 0.0
+            with unittest.mock.patch.object(verify_notify.time, "monotonic", lambda: clock["t"]), \
+                 unittest.mock.patch.object(verify_notify.time, "sleep", lambda s: None):
+                rep, _ = self.run_(gate=gate, mode="apply", max_users=10, max_entries=6,
+                                   query=replica(range(1, 7)))
+        finally:
+            verify_notify.set_apply_budget(None)
+            verify_notify._SESSION_STARTED = None
+        self.assertEqual(rep.budget_deferred_users, 1)
+        # the SECOND user is the one the share could not fit: the cursor stops AT them (raw index 1), not past them
+        self.assertEqual(rep.page["end"], 1)
+        deferred = [o for o in rep.outcomes if o["result"] == "deferred" and "apply_budget" in o["reason"]]
+        self.assertEqual(deferred[0]["user"], "2", "the first user it could not start")
+        self.assertEqual([o["user"] for o in deferred], ["2", "3", "4", "5", "6"],
+                         "every user the share left owes a row, so the run balances")
+        # ... and the next tick, starting at that cursor, reaches them rather than skipping a rotation
+        clock["t"] = 0.0
+        try:
+            verify_notify.set_apply_budget(200)
+            verify_notify._SESSION_STARTED = 0.0
+            with unittest.mock.patch.object(verify_notify.time, "monotonic", lambda: clock["t"]), \
+                 unittest.mock.patch.object(verify_notify.time, "sleep", lambda s: None):
+                rep2, g2 = self.run_(gate=Slow(out="POSTED email message=1 credits=1"), mode="apply", max_users=10,
+                                     max_entries=6, start_entry=rep.page["end"], query=replica(range(1, 7)))
+        finally:
+            verify_notify.set_apply_budget(None)
+            verify_notify._SESSION_STARTED = None
+        self.assertEqual(rep2.page["start"], 1)
+        self.assertEqual([str(p["user"]["id"]) for _, p in g2.calls][:1], ["2"], "the deferred user leads the next run")
+
     def test_an_apply_clamps_its_cursor_to_the_raw_page_its_CHECK_examined(self):
         # QA #1662 finding 1: the candidate page is REBUILT for the apply. If eligibility drifts between the check and
         # the apply - here entries 1-5 become excluded after the check - the apply's candidate window grows into raw

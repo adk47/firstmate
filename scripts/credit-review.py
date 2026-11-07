@@ -1364,6 +1364,9 @@ def parser() -> argparse.ArgumentParser:
                          "from its attempt cap; the sent set must equal it or the run exits 3 ([key=apply-sized-to-list])")
     us.add_argument("--page", action="store_true",
                     help="with --signed-accepted: the run may send a subset (the outbound tick pages by design)")
+    us.add_argument("--apply-budget-s", type=int, default=None, metavar="SECONDS",
+                    help="[key=note-step-budget] the seconds this apply may spend (the tick's remaining share); the send "
+                         "loop will not START a user whose worst case (one note's whole retry budget) would not fit")
     us.add_argument("--preview-accepted", default="", metavar="CHECK_JSON",
                     help="with --preview: render exactly the users this --check-recipients outcomes file accepted "
                          "(t01b 584: a deferred user takes no render and no slot)")
@@ -1398,6 +1401,8 @@ def parser() -> argparse.ArgumentParser:
                          "from its attempt cap; the sent set must equal it or the run exits 3 ([key=apply-sized-to-list])")
     cp.add_argument("--page", action="store_true",
                     help="with --signed-accepted: the run may send a subset (the outbound tick pages by design)")
+    cp.add_argument("--apply-budget-s", type=int, default=None, metavar="SECONDS",
+                    help="[key=note-step-budget] the seconds this apply may spend (the tick's remaining share)")
     cp.add_argument("--preview-accepted", default="", metavar="CHECK_JSON",
                     help="with --preview: render exactly the users this --check-recipients outcomes file accepted "
                          "(t01b 584: a deferred user takes no render and no slot)")
@@ -1430,6 +1435,8 @@ def parser() -> argparse.ArgumentParser:
                          "from its attempt cap; the sent set must equal it or the run exits 3 ([key=apply-sized-to-list])")
     cs.add_argument("--page", action="store_true",
                     help="with --signed-accepted: the run may send a subset (the outbound tick pages by design)")
+    cs.add_argument("--apply-budget-s", type=int, default=None, metavar="SECONDS",
+                    help="[key=note-step-budget] the seconds this apply may spend (the tick's remaining share)")
     cs.add_argument("--preview-accepted", default="", metavar="CHECK_JSON",
                     help="with --preview: render exactly the users this --check-recipients outcomes file accepted "
                          "(t01b 584: a deferred user takes no render and no slot)")
@@ -1607,6 +1614,9 @@ def main(argv: list[str] | None = None) -> int:
     # cron's stderr to Slack next to its stdout.
     warnings.showwarning = _warning_to_log
     args = parser().parse_args(argv)
+    # [key=note-step-budget] (Fable 753): ONE place hands the tick's remaining share to every family's send loop, so a
+    # slow user can overrun it by at most one retry budget instead of making the family defer every tick.
+    verify_notify.set_apply_budget(getattr(args, "apply_budget_s", None))
     if args.cmd in ("audit", "review", "digest", "metrics", "decide") and KILL_SWITCH.exists():
         log(f"kill switch present at {KILL_SWITCH}; nothing reviewed")
         print("NO_REPLY")
