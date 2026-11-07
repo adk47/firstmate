@@ -11,7 +11,7 @@
 #
 # THE QUEUE FILE. One row per pull request, whitespace separated:
 #
-#   <repo> <number> <expected-head> <task-id> <squash|merge|rebase>
+#   <repo> <number> <expected-head> <task-id> <squash|merge|rebase> [# provenance]
 #
 # <repo>      "owner/repo", or a bare repository name, which then uses the owner
 #             named by a "# owner: <login>" directive in the same file, or
@@ -25,6 +25,11 @@
 #             metadata and the landed-work check keep working.
 # <method>    the merge method handed to the forge.
 #
+# A row may end with a trailing comment, which is its provenance and is kept
+# exactly as written: everything from the first "#" after <method> to the end
+# of the line. Any other sixth field makes the row unusable, because a row this
+# home cannot read must never be guessed at.
+#
 # Comment (#) and blank lines are preserved exactly as they are written.
 # Default queue: <FM_HOME>/data/go-queue.txt. With no queue file this home has
 # not opted in, and `run` does nothing at all.
@@ -36,10 +41,11 @@
 # A row that is merely not ready - checks not green, the QA review not posted on
 # this head, or the forge unreadable - stays queued and is retried on the next
 # tick, and so does a row this home cannot read at all (no repository owner, an
-# unknown merge method, too many fields): a configuration mistake must never
-# delete the queue it was given, so such a row is kept and the daily line reports
-# how many rows need the file fixed. Every row is read live on every tick; nothing in the queue file is
-# trusted as current. A row is identified by its pull request AND the head it
+# unknown merge method, a sixth field that is not a comment): a configuration
+# mistake must never delete the queue it was given, so such a row is kept and the
+# daily line reports how many rows need the file fixed.
+# Every row is read live on every tick; nothing in the queue file is trusted as
+# current. A row is identified by its pull request AND the head it
 # was written against, so re-queueing after a push is a new row rather than a
 # duplicate: the newest row for a pull request supersedes the older-head row,
 # which is recorded with its own verdict instead of being dropped, and an exact
@@ -54,19 +60,41 @@
 # decider rather than an unattended timer. A passing qa-review on the exact
 # head is always required, so no home can turn it off by configuration.
 #
-# THE ONE EXEMPTION. A check named credit-approval-guard is red by design on a
-# credit-impact change, where the credit review itself is the real gate, so a
-# failing instance of that one check does not block. A guard that has not
-# finished holds the row, and a failing instance anywhere in the list is the
-# waiver. Every merge that relied on that exemption says so on its own line and
-# in the daily detail file, so the waiver is never silent.
+# THE ADMIN BYPASS IS PROVEN, NOT ASSUMED. The merge is handed to
+# bin/fm-pr-merge.sh with --admin, which bypasses the forge's own review and
+# required-check gates. Before that bypass is used, this script proves the three
+# things the captain's 2026-11-03 ruling names, and records what it bypassed:
+#
+#   1. a passing qa-review on the exact head (above, and never configurable);
+#   2. a Fable GO recorded on this row for this head, written fable-go=ok,
+#      fable-go@<sha>, or fable-go=<sha> in the row's trailing comment. A bound
+#      GO's sha must prefix this head, so a GO written for an older head does
+#      not carry over a push. A bare fable-go phrase is provenance prose, not a
+#      GO;
+#   3. every required status check the base branch registers, present and
+#      passing, except the named by-design list below.
+#
+# Anything unproven keeps the row queued and spends no attempt budget, because
+# an unproven gate is not a refused merge. Every admin merge then records the
+# protections it bypassed (the review requirement, and any by-design check that
+# was not passing) on its own line, in the ledger, and in the daily detail file.
+#
+# THE BY-DESIGN LIST. One check is exempt from the required-check proof because
+# it is red or absent by design on the changes it guards:
+#   credit-approval-guard  red by design on a credit-impact change, where the
+#                          credit review itself is the real gate. A guard that
+#                          has not finished still holds the row, and a failing
+#                          instance anywhere in the list is the waiver.
+# Every merge that relied on an exemption says so on its own line and in the
+# daily detail file, so the waiver is never silent.
 #
 # RECORDS, all under <FM_HOME>/state/merge-queue/:
 #   ledger.tsv   one line per verdict:
 #                <epoch> <owner/repo#number@head> <verdict> <reason> <url>
 #   daily-<day>.txt  every merged and retired row of the summary window, one
 #                line each with its full pull request URL and verdict
-#   last-run     the verdict counts of the most recent run
+#   last-run     the verdict counts of the most recent run, including how many
+#                rows were held for a missing Fable GO
 #   .summary     the day of the last daily line and the epoch it covered from
 #   .lock/       single-instance lock, so two ticks never merge at once
 #
@@ -145,6 +173,11 @@ FENCE_WORDS="monies money credentials credential secrets secret cloudflare custo
 # stands for is the real gate on a credit-impact change.
 CREDIT_GUARD_CHECK="credit-approval-guard"
 
+# Checks that are exempt from the required-check proof: they are red or absent by
+# design on the changes they guard, and each one is named in the admin-bypass
+# record of every merge that relied on it.
+BY_DESIGN_CHECKS="$CREDIT_GUARD_CHECK"
+
 CHECK_TIMEOUT_SECS=60
 MERGE_TIMEOUT_SECS=240
 
@@ -202,8 +235,8 @@ format_epoch() {  # <epoch>
     || printf '%s' "$1"
 }
 
-write_last_run() {  # <merged> <retired> <skipped> <queued>
-  printf '%s\t%s\t%s\t%s\t%s\n' "$(now_epoch)" "$1" "$2" "$3" "$4" \
+write_last_run() {  # <merged> <retired> <skipped> <queued> <held-for-fable-go>
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(now_epoch)" "$1" "$2" "$3" "$4" "${5:-0}" \
     >"$LAST_RUN.tmp" 2>/dev/null && mv -f "$LAST_RUN.tmp" "$LAST_RUN" 2>/dev/null
   return 0
 }
@@ -286,6 +319,16 @@ valid_pr_number() {
   [ "${#1}" -le 12 ]
 }
 
+# row_comment_ok <sixth-field>: a row may carry a trailing comment, which is its
+# provenance, but no other sixth field. A pasted extra column is a broken row the
+# daily line reports rather than a pull request the forge is asked about.
+row_comment_ok() {
+  case "$1" in
+    ''|'#'*) return 0 ;;
+  esac
+  return 1
+}
+
 # row_key <owner> <repo> <number>: one identity per row. The owner is part of
 # it, so acme/widgets#12 and beta/widgets#12 are two rows that dedupe and retire
 # independently instead of one silently absorbing the other.
@@ -343,7 +386,7 @@ supersede_map() {
       *) owner_name=$owner ;;
     esac
     slug=${repo##*/}
-    [ -z "$extra" ] || continue
+    row_comment_ok "$extra" || continue
     valid_owner "$owner_name" || continue
     valid_repo_name "$slug" || continue
     valid_pr_number "$number" || continue
@@ -386,7 +429,7 @@ queue_unusable_count() {
         ;;
       *) owner_name=$owner ;;
     esac
-    if [ -n "$extra" ] || ! valid_sha_prefix "$expected" \
+    if ! row_comment_ok "$extra" || ! valid_sha_prefix "$expected" \
       || ! valid_owner "$owner_name" || ! valid_repo_name "$repo" \
       || ! valid_pr_number "$number" || ! task_usable "$task"; then
       count=$((count + 1))
@@ -402,7 +445,8 @@ queue_unusable_count() {
 
 # --- forge reads ---------------------------------------------------------
 
-# read_pr <url>: one line of "<state>\x1f<head>\x1f<labels>\x1f<title and body>".
+# read_pr <url>: one line of
+# "<state>\x1f<head>\x1f<labels>\x1f<base>\x1f<review-decision>\x1f<title and body>".
 # The fields are separated by the unit separator rather than a tab, because a
 # tab is IFS whitespace and an empty label list would silently shift the body
 # into the labels.
@@ -410,8 +454,8 @@ queue_unusable_count() {
 # unreadable rather than as a verdict about the pull request.
 read_pr() {
   fm_run_timed "$CHECK_TIMEOUT_SECS" gh pr view "$1" \
-    --json state,isDraft,headRefOid,labels,title,body \
-    --jq '[ (if .isDraft then "DRAFT" else .state end), .headRefOid, ([.labels[].name] | join("\u001f")), ((.title // "") + " " + (.body // "")) ] | join("\u001f")' \
+    --json state,isDraft,headRefOid,labels,baseRefName,reviewDecision,title,body \
+    --jq '[ (if .isDraft then "DRAFT" else .state end), .headRefOid, ([.labels[].name] | join("\u001f")), (.baseRefName // ""), (.reviewDecision // ""), ((.title // "") + " " + (.body // "")) ] | join("\u001f")' \
     2>/dev/null
 }
 
@@ -420,6 +464,91 @@ read_pr() {
 read_checks() {
   fm_run_timed "$CHECK_TIMEOUT_SECS" gh pr checks "$1" \
     --json name,bucket --jq '.[] | [.name, .bucket] | @tsv' 2>/dev/null
+}
+
+# check_bucket <checks> <name>: the bucket of one check in a read_checks listing.
+# Two checks may share a name, so a failing instance wins over a passing one and
+# the listing order never decides the verdict. Nothing is printed when the name
+# is absent, which the caller reports as not proven.
+check_bucket() {
+  printf '%s\n' "$1" | awk -F '\t' -v want="$2" '
+    $1 != want { next }
+    $2 == "fail" { bad = 1; next }
+    { if (seen == "") seen = $2 }
+    END {
+      if (bad) print "fail"
+      else if (seen != "") print seen
+    }
+  '
+}
+
+# is_by_design_check <name>: whether a required check is exempt from the
+# required-check proof, and so named in the admin-bypass record when it is used.
+is_by_design_check() {
+  case " $BY_DESIGN_CHECKS " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
+# fable_go_for <comment> <head>: whether this row records a Fable GO for this
+# head. The only accepted forms are fable-go=ok, a GO for the head the row
+# names, and fable-go@<sha> or fable-go=<sha>, a GO bound to that commit. The
+# marker is case-insensitive with -, _, or a single space as the separator. A
+# bare fable-go phrase is provenance prose, not a GO.
+fable_go_for() {
+  local comment=$1 head=$2 rest sha
+  rest=$(printf '%s' "$comment" | sed 's/^[[:space:]]*#*[[:space:]]*//')
+  if [[ $rest =~ (^|[^[:alnum:]_-])([Ff][Aa][Bb][Ll][Ee][-_ ][Gg][Oo])=[Oo][Kk]([^[:alnum:]_-]|$) ]]; then
+    return 0
+  fi
+  if [[ $rest =~ (^|[^[:alnum:]_-])([Ff][Aa][Bb][Ll][Ee][-_ ][Gg][Oo])[@=]([0-9a-fA-F]{7,40})([^[:alnum:]]|$) ]]; then
+    sha=${BASH_REMATCH[3]}
+  else
+    return 1
+  fi
+  head=$(printf '%s' "$head" | tr '[:upper:]' '[:lower:]')
+  sha=$(printf '%s' "$sha" | tr '[:upper:]' '[:lower:]')
+  case "$head" in
+    "$sha"*) return 0 ;;
+  esac
+  return 1
+}
+
+# read_required_checks <owner> <repo> <base>: one required status check name per
+# line for the base branch, from both the classic branch protection and the
+# repository rulesets, because a branch may be guarded by either. An unprotected
+# branch has none, which is a successful read of "nothing required"; a read that
+# fails for any other reason is reported as unreadable, so the row stays queued
+# instead of merging on an unproven gate.
+read_required_checks() {
+  local owner=$1 repo=$2 base=$3 out rc branch_path
+  branch_path=$(github_urlencode_path_segment "$base")
+  out=$(fm_run_timed "$CHECK_TIMEOUT_SECS" gh api \
+    "repos/$owner/$repo/branches/$branch_path/protection/required_status_checks" \
+    --jq '.contexts[]?' 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    case "$out" in
+      *404*|*"Branch not protected"*) ;;
+      *) return 1 ;;
+    esac
+  else
+    printf '%s\n' "$out" | sed '/^[[:space:]]*$/d'
+  fi
+  out=$(fm_run_timed "$CHECK_TIMEOUT_SECS" gh api --paginate \
+    "repos/$owner/$repo/rules/branches/$branch_path" \
+    --jq '.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context' \
+    2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    case "$out" in
+      *404*|*"Not Found"*) return 0 ;;
+      *) return 1 ;;
+    esac
+  fi
+  printf '%s\n' "$out" | sed '/^[[:space:]]*$/d'
+  return 0
 }
 
 # fenced_reason <labels> <title-and-body>: print the fence label that keeps this
@@ -445,17 +574,19 @@ fenced_reason() {
 
 # --- one row -------------------------------------------------------------
 
-# process_row <repo> <number> <expected-head> <task> <method> <owner> <dry-run>
+# process_row <repo> <number> <expected-head> <task> <method> <owner> <dry-run> <comment>
 # Prints one line and sets ROW_VERDICT to a ledger verdict: "keep" means the row
-# stays queued, anything else retires it.
+# stays queued, anything else retires it. <comment> is the row's trailing
+# provenance comment, which is where a Fable GO for this head is recorded.
 ROW_VERDICT=keep
 ROW_REASON=
 
 process_row() {
-  local repo=$1 number=$2 expected=$3 task=$4 method=$5 owner=$6 dry_run=$7
-  local owner_name slug url key fields state head labels body
+  local repo=$1 number=$2 expected=$3 task=$4 method=$5 owner=$6 dry_run=$7 comment=${8:-}
+  local owner_name slug url key fields state head labels body base review_decision
   local fenced checks name bucket bad qa_line qa_fail out rc last
   local credit_hold waived expected_lc head_lc
+  local required missing exempted bypassed notes
 
   ROW_VERDICT=keep
   ROW_REASON=
@@ -522,7 +653,7 @@ process_row() {
   # a title or body that names production DDL on a later line must reach the
   # fence, and not just its first line.
   fields=$(printf '%s' "$fields" | tr '\n\r' '  ')
-  IFS=$'\x1f' read -r state head labels body <<<"$fields"
+  IFS=$'\x1f' read -r state head labels base review_decision body <<<"$fields"
 
   case "$state" in
     MERGED)
@@ -631,10 +762,64 @@ process_row() {
     return 0
   fi
 
+  # --- the admin bypass is proven, not assumed ----------------------------
+  # The merge below is handed to fm-pr-merge.sh with --admin, which bypasses the
+  # forge's own review and required-check gates. The captain's 2026-11-03 ruling
+  # is that the queue proves the three things that replace a human approval
+  # before it uses that bypass, and records what it bypassed. Anything unproven
+  # keeps the row queued and spends no attempt budget, because an unproven gate
+  # is not a refused merge.
+
+  # (1) a Fable GO recorded on this row, for this head.
+  if ! fable_go_for "$comment" "$head"; then
+    ROW_REASON="no Fable GO recorded for head ${head:0:12}"
+    printf 'keep %s %s\n' "$key" "$ROW_REASON"
+    return 0
+  fi
+
+  # (2) every required check the base branch registers, present and passing,
+  # except the named by-design list. An unreadable registration is not proof.
+  if ! required=$(read_required_checks "$owner_name" "$slug" "$base"); then
+    printf 'keep %s required checks unreadable for %s\n' "$key" "${base:-the base branch}"
+    return 0
+  fi
+  missing=
+  exempted=
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    bucket=$(check_bucket "$checks" "$name")
+    case "$bucket" in
+      pass|skipping) continue ;;
+    esac
+    if is_by_design_check "$name"; then
+      exempted="$exempted $name"
+      continue
+    fi
+    missing="$missing $name=${bucket:-absent}"
+  done <<<"$required"
+  if [ -n "$missing" ]; then
+    printf 'keep %s required checks not proven:%s\n' "$key" "$missing"
+    return 0
+  fi
+
+  # (3) what this merge bypasses, recorded on its own line, in the ledger, and
+  # in the daily detail file, so the bypass is never silent.
+  bypassed=
+  case "$review_decision" in
+    REVIEW_REQUIRED) bypassed="review-required" ;;
+    CHANGES_REQUESTED) bypassed="changes-requested" ;;
+  esac
+  for name in $exempted; do
+    bypassed="${bypassed:+$bypassed,}$name"
+  done
+  notes=
+  [ "$waived" = 1 ] && notes="credit-guard waived"
+  [ -n "$bypassed" ] && notes="${notes:+$notes; }admin bypassed: $bypassed"
+
   if [ "$dry_run" = 1 ]; then
-    if [ "$waived" = 1 ]; then
-      printf 'merge %s %s (%s, head %s, credit-guard waived)\n' \
-        "$key" "$url" "$method" "${head:0:12}"
+    if [ -n "$notes" ]; then
+      printf 'merge %s %s (%s, head %s, %s)\n' \
+        "$key" "$url" "$method" "${head:0:12}" "$notes"
     else
       printf 'merge %s %s (%s, head %s)\n' "$key" "$url" "$method" "${head:0:12}"
     fi
@@ -647,9 +832,9 @@ process_row() {
 
   if [ "$rc" -eq 0 ]; then
     ROW_VERDICT=merged
-    if [ "$waived" = 1 ]; then
-      ROW_REASON="$method (credit-guard waived)"
-      printf 'merged %s %s (credit-guard waived)\n' "$key" "$url"
+    if [ -n "$notes" ]; then
+      ROW_REASON="$method ($notes)"
+      printf 'merged %s %s (%s)\n' "$key" "$url" "$notes"
     else
       ROW_REASON=$method
       printf 'merged %s %s\n' "$key" "$url"
@@ -778,7 +963,7 @@ cmd_run() {
 
   local owner tmp keep seen gone newest queue_before line repo number expected task method extra
   local owner_name key ident superseded_by unmergeable row_url
-  local merged=0 retired=0 skipped=0 queued=0
+  local merged=0 retired=0 skipped=0 queued=0 unproven=0
   owner=$(queue_owner "$queue")
   # The rewrite is published over the file the operator hand-edits, so remember
   # what the file held when this tick read it: a row added mid-tick must never be
@@ -831,7 +1016,7 @@ cmd_run() {
     fi
 
     unmergeable=
-    [ -z "$extra" ] || unmergeable=1
+    row_comment_ok "$extra" || unmergeable=1
     valid_pr_number "$number" || unmergeable=1
     valid_sha_prefix "$expected" || unmergeable=1
     valid_repo_name "${repo##*/}" || unmergeable=1
@@ -879,7 +1064,7 @@ cmd_run() {
     fi
     printf '%s\n' "$ident" >>"$seen"
 
-    process_row "$repo" "$number" "$expected" "$task" "$method" "$owner" "$dry_run"
+    process_row "$repo" "$number" "$expected" "$task" "$method" "$owner" "$dry_run" "$extra"
 
     if [ "$dry_run" = 1 ]; then
       continue
@@ -888,6 +1073,12 @@ cmd_run() {
     case "$ROW_VERDICT" in
       keep)
         skipped=$((skipped + 1))
+        # A row held only for a missing Fable GO is counted apart from the rest:
+        # it is waiting on a decision, not on the forge, and the daily line says
+        # so rather than leaving the operator to guess why nothing merged.
+        case "$ROW_REASON" in
+          'no Fable GO'*) unproven=$((unproven + 1)) ;;
+        esac
         printf '%s\n' "$line" >>"$keep"
         ;;
       'merge-refused')
@@ -947,14 +1138,15 @@ cmd_run() {
     fi
   fi
 
-  write_last_run "$merged" "$retired" "$skipped" "$queued"
+  write_last_run "$merged" "$retired" "$skipped" "$queued" "$unproven"
   maybe_emit_daily "$queue"
-  printf 'run: merged %s, retired %s, still queued/skipped %s\n' "$merged" "$retired" "$skipped"
+  printf 'run: merged %s, retired %s, still queued/skipped %s, held for a Fable GO %s\n' \
+    "$merged" "$retired" "$skipped" "$unproven"
   return 0
 }
 
 cmd_status() {
-  local queue=$DEFAULT_QUEUE queued=0 line when merged retired skipped queued_at_end unusable
+  local queue=$DEFAULT_QUEUE queued=0 line when merged retired skipped queued_at_end unusable unproven
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --queue)
@@ -980,12 +1172,12 @@ cmd_status() {
     *) printf 'unusable rows: %s (kept in the queue; the file needs fixing)\n' "$unusable" ;;
   esac
   if [ -f "$LAST_RUN" ]; then
-    IFS=$'\t' read -r when merged retired skipped queued_at_end <<<"$(cat "$LAST_RUN" 2>/dev/null)" || true
+    IFS=$'\t' read -r when merged retired skipped queued_at_end unproven <<<"$(cat "$LAST_RUN" 2>/dev/null)" || true
     case "${when:-}" in
       ''|*[!0-9]*) ;;
-      *) printf 'last run: %s - merged %s, retired %s, skipped %s, %s left queued\n' \
+      *) printf 'last run: %s - merged %s, retired %s, skipped %s, %s left queued, %s held for a Fable GO\n' \
         "$(format_epoch "$when")" \
-        "${merged:-0}" "${retired:-0}" "${skipped:-0}" "${queued_at_end:-0}" ;;
+        "${merged:-0}" "${retired:-0}" "${skipped:-0}" "${queued_at_end:-0}" "${unproven:-0}" ;;
     esac
   else
     printf 'last run: none recorded\n'

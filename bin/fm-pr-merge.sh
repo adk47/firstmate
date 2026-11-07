@@ -413,24 +413,6 @@ github_read_outcome() {
   return 1
 }
 
-github_urlencode_path_segment() {
-  local LC_ALL=C input=$1 encoded='' char octet hex
-  while [ -n "$input" ]; do
-    char=${input%"${input#?}"}
-    input=${input#?}
-    case "$char" in
-      [-._~a-zA-Z0-9]) encoded=$encoded$char ;;
-      *)
-        printf -v octet '%d' "'$char"
-        [ "$octet" -ge 0 ] || octet=$((octet + 256))
-        printf -v hex '%02X' "$octet"
-        encoded=$encoded%$hex
-        ;;
-    esac
-  done
-  printf '%s' "$encoded"
-}
-
 # Read the effective merge-queue method for the observed base branch. The four
 # situations the refusal has to keep apart - no queue rule, a rules response
 # that could not be read, several rules that disagree, and a rule whose method
