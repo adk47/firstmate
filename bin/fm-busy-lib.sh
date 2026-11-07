@@ -888,23 +888,25 @@ fm_busy_grok_tail_busy() {
 # fires for it (verified live on Pi 1.4.0, docs/verification/gateway-keepalive.md)
 # and the screen is the only source. It is never a busy/idle signal - a crew
 # with the picker open is BLOCKED, whichever side of a run it opened on - and
-# fm-crew-state.sh is its only consumer. The verdict needs the picker's hint
-# row (`to select ·` ... `to set as default ·` ... `to cancel`, keybinding-
-# agnostic because Pi substitutes the bound keys) as the FINAL non-blank line,
-# plus a rendered model list row (the provider badge at the end of the row) or
-# the no-matching-models row above it. A document that merely quotes the
-# picker's hint, Model Name, or provider-scope text therefore does not read as
-# the picker. tests/fm-pi-model-picker-live-e2e.test.sh is the live guard that
-# fails naming the Pi version when the picker's rows change.
+# fm-crew-state.sh is its only consumer. The verdict needs a rendered model
+# list row (the full row shape: model id, display name, provider badge) or the
+# no-matching-models row, and the picker's hint row (`to select ·` ... `to set
+# as default ·` ... `to cancel`, keybinding-agnostic because Pi substitutes the
+# bound keys) within the next 12 non-blank lines. Pi mounts its own footer
+# below the picker, so the hint row is not the last line. A document that
+# merely quotes the picker's hint, Model Name, or provider-scope text does not
+# read as the picker. tests/fm-pi-model-picker-live-e2e.test.sh is the live
+# guard that fails naming the Pi version when the picker's rows change.
 fm_busy_pi_tail_model_picker() {
-  local t last body
+  local t
   t=$(grep -v '^[[:space:]]*$' | tail -24)
   [ -n "$t" ] || return 1
-  last=${t##*$'\n'}
-  printf '%s\n' "$last" | grep -qE 'to select · .* to set as default · .* to cancel' || return 1
-  body=${t%$'\n'*}
-  [ "$body" != "$t" ] || return 1
-  printf '%s\n' "$body" | grep -qE '^[[:space:]]*(→[[:space:]]+)?(✓[[:space:]]+)?[^[:space:]#].*\[[A-Za-z0-9._-]+\]([[:space:]]+·[[:space:]]+default)?[[:space:]]*$|^[[:space:]]*No matching models$'
+  printf '%s\n' "$t" | awk '
+    /^[[:space:]]*((→|✓|✔)[[:space:]]*)*[A-Za-z0-9._\/-]+ (\([^)]*\))? \[[A-Za-z0-9._-]+\]([[:space:]]+·[[:space:]]+default)?[[:space:]]*$/ { anchor=NR }
+    /^[[:space:]]*No matching models[[:space:]]*$/ { anchor=NR }
+    /to select · .* to set as default · .* to cancel/ { if (anchor && NR>anchor && NR<=anchor+12) found=1 }
+    END { exit found ? 0 : 1 }
+  '
 }
 
 # fm_busy_rovo_tail_busy: the Rovo-only temporary rendered-tail fallback.
