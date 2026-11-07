@@ -180,6 +180,27 @@ set -euo pipefail
 #                                     cap and a page after TICK_FAIL_THRESHOLD
 #                                     all-unreachable ticks bound those
 #   QA_RECONCILE_GLOBAL_CAP          re-dispatches per tick (default 3)
+#   QA_RECONCILE_TICK_BUDGET_S       wall budget for the read/dispatch loops
+#                                     (default 1200, must stay below the unit's
+#                                     TimeoutStartSec=1800). At the budget the
+#                                     tick stops issuing reads, still prunes and
+#                                     writes its state, logs ONE BUDGET line and
+#                                     exits 0. Each repo gets a fair share of the
+#                                     time left (floor QA_RECONCILE_REPO_MIN_S,
+#                                     default 60) so one big repo cannot starve
+#                                     the ones after it; a PR not read this tick
+#                                     keeps its state key and is read next tick.
+#   QA_RECONCILE_CALL_MAX_S          wall cap per gh call (default 120, via
+#                                     timeout/gtimeout), further capped at the
+#                                     repo's remaining fair share and at the
+#                                     tick's remaining budget (call_cap_s). So
+#                                     a hung read cannot outlast either: the
+#                                     tick ends at about TICK_BUDGET_S, not
+#                                     TICK_BUDGET_S + this, still below
+#                                     TimeoutStartSec. A timeout at the full
+#                                     cap is a READ-FAILURE (no prune of that
+#                                     repo); one at the share/budget cap is a
+#                                     budget cut (BUDGET line, state kept).
 #   QA_RECONCILE_PAGE_CAP             exhaustion pages + red-status calls per
 #                                     tick (default 3) — bounds the actuator
 #                                     a systematic false positive walks to N
@@ -244,6 +265,54 @@ GRACE_S="${QA_RECONCILE_GRACE_S:-1800}"
 COOLDOWN_S="${QA_RECONCILE_COOLDOWN_S:-1800}"
 MAX_ATTEMPTS="${QA_RECONCILE_MAX_ATTEMPTS:-2}"
 GLOBAL_CAP="${QA_RECONCILE_GLOBAL_CAP:-3}"
+# Bash SECONDS (immune to QA_RECONCILE_NOW_EPOCH overrides).
+TICK_START_S=$SECONDS
+TICK_BUDGET_S="${QA_RECONCILE_TICK_BUDGET_S:-1200}"
+REPO_MIN_S="${QA_RECONCILE_REPO_MIN_S:-60}"
+{ [[ "$TICK_BUDGET_S" =~ ^[0-9]+$ ]] && [ "$TICK_BUDGET_S" -gt 0 ]; } || TICK_BUDGET_S=1200
+[[ "$REPO_MIN_S" =~ ^[0-9]+$ ]] || REPO_MIN_S=60
+budget_left() { echo $(( TICK_BUDGET_S - (SECONDS - TICK_START_S) )); }
+# Every gh call is capped, so the budget check between calls is not the only
+# bound: a hung listing or rollup read would otherwise run into systemd's
+# TimeoutStartSec before the end-of-tick state write. The cap is ONE function,
+# call_cap_s: min(CALL_MAX_S, the repo's remaining fair share, the tick's
+# remaining budget), so the tick ends at about TICK_BUDGET_S. A cap <= 0 makes
+# no call (rc 125). A timeout (rc 124) at the full CALL_MAX_S is the existing
+# read-failure path (a failed listing leaves the repo out of repo_listed_ok, so
+# its state keys are not pruned); one that hit the share or the budget is a
+# budget cut, see repo_cut_now.
+CALL_MAX_S="${QA_RECONCILE_CALL_MAX_S:-120}"
+{ [[ "$CALL_MAX_S" =~ ^[0-9]+$ ]] && [ "$CALL_MAX_S" -gt 0 ]; } || CALL_MAX_S=120
+TIMEOUT_BIN="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
+# repo_deadline_s is set per repo inside the loop; in_repo_loop gates its use so
+# calls outside the loop (none today besides the rate-limit probe) keep CALL_MAX_S.
+in_repo_loop=0
+repo_deadline_s=0
+call_cap_s() {
+  local cap="$CALL_MAX_S" left share
+  left="$(budget_left)"
+  [ "$left" -ge "$cap" ] || cap="$left"
+  if [ "$in_repo_loop" -eq 1 ]; then
+    share=$(( repo_deadline_s - SECONDS ))
+    [ "$share" -ge "$cap" ] || cap="$share"
+  fi
+  echo "$cap"
+}
+# True once the repo's share or the tick budget is used up.
+repo_cut_now() {
+  [ "$in_repo_loop" -eq 1 ] && { [ "$SECONDS" -ge "$repo_deadline_s" ] || [ "$(budget_left)" -le 0 ]; }
+}
+gh_bounded() {
+  local cap
+  cap="$(call_cap_s)"
+  [ "$cap" -gt 0 ] || return 125
+  if [ -n "$TIMEOUT_BIN" ]; then "$TIMEOUT_BIN" "$cap" "$GH" "$@"; else "$GH" "$@"; fi
+}
+# Fixed-cap variant for the one probe that is not part of a repo's reads.
+gh_probe() {
+  if [ -n "$TIMEOUT_BIN" ]; then "$TIMEOUT_BIN" "$CALL_MAX_S" "$GH" "$@"; else "$GH" "$@"; fi
+}
+budget_cut_repos=""
 PAGE_CAP="${QA_RECONCILE_PAGE_CAP:-3}"
 CRON_STALE_S="${QA_RECONCILE_CRON_STALE_S:-1800}"
 AGE_CEILING_S="${QA_RECONCILE_AGE_CEILING_S:-1209600}"
@@ -575,6 +644,9 @@ declare -A repo_truncated=()
 # bare 403 is also how a scope problem reads, so the text decides).
 GH_ERR_DETAIL=""
 GH_ERR_RATE_LIMITED=0
+# 1 when the last failed gh_read failed because the repo's share / the tick
+# budget ran out (not because of gh): a budget cut, never a READ-FAILURE.
+GH_CUT=0
 # Assigned via printf -v in gh_read; declared so shellcheck sees the assignment.
 commit_json="" timeline_json="" reviews_json="" status_json=""
 gh_read() {
@@ -583,10 +655,12 @@ gh_read() {
   : > "$gh_err_file"
   GH_ERR_DETAIL=""
   GH_ERR_RATE_LIMITED=0
-  if __body="$("$GH" "$@" 2>"$gh_err_file")"; then
+  GH_CUT=0
+  if __body="$(gh_bounded "$@" 2>"$gh_err_file")"; then
     printf -v "$__outvar" '%s' "$__body"
     return 0
   fi
+  if repo_cut_now; then GH_CUT=1; return 1; fi
   # `head` MUST read straight from the file and run before `tr`: with
   # pipefail, `tr < file | head -c 300` SIGPIPEs `tr` on a large stderr and the
   # 141 trips `set -e`, killing the tick (see release-watch.sh).
@@ -609,7 +683,7 @@ report_gh_read_failure() {
     if [ -z "$rate_limit_probe" ]; then
       # `gh api rate_limit` is not counted against the bucket.
       rate_limit_probe="unknown"
-      if core="$("$GH" api rate_limit 2>/dev/null | jq -re '.resources.core | "\(.remaining) \(.limit) \(.reset)"' 2>/dev/null)"; then
+      if core="$(gh_probe api rate_limit 2>/dev/null | jq -re '.resources.core | "\(.remaining) \(.limit) \(.reset)"' 2>/dev/null)"; then
         read -r remaining limit reset <<<"$core"
         if [[ "$remaining" =~ ^[0-9]+$ && "$limit" =~ ^[0-9]+$ && "$reset" =~ ^[0-9]+$ ]]; then
           reset_iso="$(date -u -d "@$reset" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -r "$reset" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" || reset_iso="unknown"
@@ -628,7 +702,24 @@ open_pr_keys_file="$(mktemp)"
 gh_err_file="$(mktemp)"
 trap 'rm -f "$open_pr_keys_file" "$open_pr_keys_file".* "$gh_err_file"' EXIT
 
+repo_idx=0
 for repo in "${REPOS[@]}"; do
+  # Tick budget: past it, no further repo is read. Unvisited repos are absent
+  # from repo_listed_ok, so the prune below leaves their state keys alone.
+  budget_left_s="$(budget_left)"
+  if [ "$budget_left_s" -le 0 ]; then
+    rest_repos="${REPOS[*]:$repo_idx}"
+    budget_cut_repos="${budget_cut_repos:+$budget_cut_repos,}${rest_repos// /,}"
+    break
+  fi
+  # Fair share of what is left; the floor keeps a late repo from getting 0 but
+  # never exceeds the tick budget.
+  repo_share_s=$(( budget_left_s / (total_repo_count - repo_idx) ))
+  [ "$repo_share_s" -ge "$REPO_MIN_S" ] || repo_share_s=$(( REPO_MIN_S < budget_left_s ? REPO_MIN_S : budget_left_s ))
+  repo_deadline_s=$(( SECONDS + repo_share_s ))
+  in_repo_loop=1
+  repo_idx=$((repo_idx + 1))
+  repo_cut=0
   # Per-repo candidate-level (per-PR) read-failure tracking for this tick —
   # counts individual gh api attempts (commit/timeline/reviews/status), not
   # PRs. See the __meta__.candidate_read_failures block after this repo's PR
@@ -651,9 +742,15 @@ for repo in "${REPOS[@]}"; do
   # LISTING (authoritative): drives everything below — trigger scope, the
   # truncation guard, and the prune keep-set. Its failure is a real
   # READ-FAILURE. See "why statusCheckRollup is NOT requested here" below.
-  if ! prs_json="$("$GH" pr list --repo "$repo" --state open \
+  if ! prs_json="$(gh_bounded pr list --repo "$repo" --state open \
         --json number,headRefOid,baseRefName,isDraft,author,updatedAt,createdAt,url \
         --limit "$PRLIST_LIMIT" 2>/dev/null)" || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$prs_json"; then
+    if repo_cut_now; then
+      # The share / tick budget ran out during (or before) the listing: a budget
+      # cut, not a gh failure. Unlisted, so its state keys are kept.
+      budget_cut_repos="${budget_cut_repos:+$budget_cut_repos,}$repo"
+      continue
+    fi
     log "READ-FAILURE: could not list open PRs for $repo — counted, not treated as 'no verdict'."
     failed_repo_count=$((failed_repo_count + 1))
     # Per-repo consecutive-failure tracking: a partial-fleet failure (e.g.
@@ -687,7 +784,7 @@ for repo in "${REPOS[@]}"; do
   # exactly the fail-safe direction the short-circuit's own comment above
   # already documents for a rollup shape change.
   rollup_call_ok=1
-  if ! rollup_json="$("$GH" pr list --repo "$repo" --state open \
+  if ! rollup_json="$(gh_bounded pr list --repo "$repo" --state open \
         --search "updated:>=$ROLLUP_SEARCH_DATE" \
         --json number,statusCheckRollup \
         --limit "$PRLIST_LIMIT" 2>/dev/null)" || ! jq -e 'type == "array"' >/dev/null 2>&1 <<<"$rollup_json"; then
@@ -700,6 +797,7 @@ for repo in "${REPOS[@]}"; do
     prs_json="$merged_prs_json"
   else
     rollup_degraded_count=$((rollup_degraded_count + 1))
+    # (If the share ran out, the PR loop below cuts at once and reads nothing.)
     log "ROLLUP-DEGRADED: statusCheckRollup unavailable for $repo this tick — terminal-status short-circuit disabled, every in-scope PR falls through to the per-PR reads (costs reads, never a missed recovery)."
     prs_json="$(jq -c 'map(.statusCheckRollup = [])' <<<"$prs_json" 2>/dev/null || printf '%s' "$prs_json")"
   fi
@@ -728,6 +826,10 @@ for repo in "${REPOS[@]}"; do
     [ "$repo_reads_failed" -le "$pr_fail_mark" ] || repo_pr_read_failures=$((repo_pr_read_failures + 1))
     pr_fail_mark="$repo_reads_failed"
     [ -n "$pr_json" ] || continue
+    if [ "$SECONDS" -ge "$repo_deadline_s" ] || [ "$(budget_left)" -le 0 ]; then
+      repo_cut=1
+      break
+    fi
     pr="$(jq -r '.number' <<<"$pr_json")"
     head_sha="$(jq -r '.headRefOid' <<<"$pr_json")"
     base="$(jq -r '.baseRefName' <<<"$pr_json")"
@@ -807,7 +909,7 @@ for repo in "${REPOS[@]}"; do
         continue
         ;;
       failure|error)
-        if rollup_status_json="$("$GH" api "repos/$repo/commits/$head_sha/status?per_page=100" 2>/dev/null)" \
+        if rollup_status_json="$(gh_bounded api "repos/$repo/commits/$head_sha/status?per_page=100" 2>/dev/null)" \
            && rollup_desc="$(qar_qa_review_status_field "$rollup_status_json" description)" \
            && ! qar_status_is_infra "$rollup_desc"; then
           terminal_skipped=$((terminal_skipped + 1))
@@ -821,6 +923,7 @@ for repo in "${REPOS[@]}"; do
     repo_reads_attempted=$((repo_reads_attempted + 1))
     stage_attempted[commit]=$((stage_attempted[commit] + 1))
     if ! gh_read commit_json api "repos/$repo/commits/$head_sha"; then
+      if [ "$GH_CUT" -eq 1 ]; then repo_cut=1; repo_reads_attempted=$((repo_reads_attempted - 1)); stage_attempted[commit]=$((stage_attempted[commit] - 1)); break; fi
       report_gh_read_failure "READ-FAILURE: could not fetch commit $repo@${head_sha:0:7} — counted, not treated as 'no verdict'."
       repo_reads_failed=$((repo_reads_failed + 1))
       repo_failed_classes="${repo_failed_classes:+$repo_failed_classes,}commit"
@@ -890,6 +993,7 @@ for repo in "${REPOS[@]}"; do
             ready_epoch=""
           fi
         else
+          if [ "$GH_CUT" -eq 1 ]; then repo_cut=1; repo_reads_attempted=$((repo_reads_attempted - 1)); stage_attempted[timeline]=$((stage_attempted[timeline] - 1)); break; fi
           report_gh_read_failure "READ-FAILURE: could not fetch timeline for $repo#$pr — treating as no ready_for_review signal this tick (safe direction: exclusion, never inclusion, under a read failure here)."
           repo_reads_failed=$((repo_reads_failed + 1))
           repo_failed_classes="${repo_failed_classes:+$repo_failed_classes,}timeline"
@@ -917,6 +1021,7 @@ for repo in "${REPOS[@]}"; do
     repo_reads_attempted=$((repo_reads_attempted + 1))
     stage_attempted[reviews]=$((stage_attempted[reviews] + 1))
     if ! gh_read reviews_json api --paginate "repos/$repo/pulls/$pr/reviews?per_page=100"; then
+      if [ "$GH_CUT" -eq 1 ]; then repo_cut=1; repo_reads_attempted=$((repo_reads_attempted - 1)); stage_attempted[reviews]=$((stage_attempted[reviews] - 1)); break; fi
       report_gh_read_failure "READ-FAILURE: could not fetch reviews for $repo#$pr — counted, not treated as 'no verdict'."
       repo_reads_failed=$((repo_reads_failed + 1))
       repo_failed_classes="${repo_failed_classes:+$repo_failed_classes,}reviews"
@@ -929,6 +1034,7 @@ for repo in "${REPOS[@]}"; do
     repo_reads_attempted=$((repo_reads_attempted + 1))
     stage_attempted[status]=$((stage_attempted[status] + 1))
     if ! gh_read status_json api "repos/$repo/commits/$head_sha/status?per_page=100"; then
+      if [ "$GH_CUT" -eq 1 ]; then repo_cut=1; repo_reads_attempted=$((repo_reads_attempted - 1)); stage_attempted[status]=$((stage_attempted[status] - 1)); break; fi
       report_gh_read_failure "READ-FAILURE: could not fetch combined status for $repo@${head_sha:0:7} — counted, not treated as 'no verdict'."
       repo_reads_failed=$((repo_reads_failed + 1))
       repo_failed_classes="${repo_failed_classes:+$repo_failed_classes,}status"
@@ -1081,6 +1187,13 @@ for repo in "${REPOS[@]}"; do
     fi
     dispatched_this_tick=$((dispatched_this_tick + 1))
   done < <(jq -c '.[]' <<<"$prs_json")
+  if [ "$repo_cut" -eq 1 ]; then
+    # Only part of this repo's PR list was read: its open-PR key file is
+    # incomplete, so it must not drive pruning (that would wipe the attempt
+    # state of every PR not reached). Unlisting it keeps all its keys.
+    unset "repo_listed_ok[$repo]"
+    budget_cut_repos="${budget_cut_repos:+$budget_cut_repos,}$repo(partial)"
+  fi
   [ "$repo_reads_failed" -le "$pr_fail_mark" ] || repo_pr_read_failures=$((repo_pr_read_failures + 1))
 
   # PRs whose head already showed a terminal qa-review status this tick —
@@ -1110,6 +1223,10 @@ for repo in "${REPOS[@]}"; do
         "qa-review-reconcile: $repo — every per-PR read (classes: $repo_failed_classes) has failed for $cand_fail_n consecutive ticks. Reviews for this repo may be silently unclassifiable — this is the invisible-loss class this reconciler exists to kill."
       cand_supp="$PRF_SUPPRESS_NOTE"
     fi
+  elif [ "$repo_cut" -eq 1 ] && [ "$repo_reads_attempted" -eq 0 ]; then
+    # Budget cut before the first per-PR read: no evidence either way, so keep
+    # the durable streak and alert stamp (same rule as the per-stage watchdog).
+    :
   else
     state_json="$(qar_state_set_repo_candidate_failure_count "$state_json" "$repo" 0)"
     # Recovery clears the suppression window too: a repo that breaks, recovers,
@@ -1193,6 +1310,11 @@ for repo in "${REPOS[@]}"; do
     done
   fi
 done
+in_repo_loop=0
+
+if [ -n "$budget_cut_repos" ]; then
+  log "BUDGET: tick budget ${TICK_BUDGET_S}s (used $((SECONDS - TICK_START_S))s) — stopped reading; not fully read this tick: $budget_cut_repos. State is still written; unread PRs keep their state and are read next tick."
+fi
 
 # One tick-level line for the whole rate-limit cause (never one per PR/repo).
 if [ "$rate_limit_failed_reads" -gt 0 ]; then

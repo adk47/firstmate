@@ -637,6 +637,9 @@ if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
       exit 0
       ;;
   esac
+  if [ -n "${STUB_PRLIST_HANG_REPOS:-}" ] && printf '%s\n' "$STUB_PRLIST_HANG_REPOS" | grep -qxF "$repo"; then
+    exec sleep "${STUB_PRLIST_HANG_S:-30}"
+  fi
   if [ -n "${STUB_PRLIST_FAIL_REPOS:-}" ] && printf '%s\n' "$STUB_PRLIST_FAIL_REPOS" | grep -qxF "$repo"; then
     exit 1
   fi
@@ -664,6 +667,7 @@ if [ "$1" = "api" ]; then
   case "$path_no_query" in
     repos/*/pulls/*/reviews)
       [ -n "${STUB_REVIEWS_FAIL:-}" ] && exit 1
+      [ -n "${STUB_REVIEWS_SLEEP_S:-}" ] && sleep "$STUB_REVIEWS_SLEEP_S"
       repo="$(printf '%s' "$path_no_query" | sed -E 's#repos/([^/]+/[^/]+)/pulls/.*#\1#')"
       pr="$(printf '%s' "$path_no_query" | sed -E 's#repos/[^/]+/[^/]+/pulls/([0-9]+)/.*#\1#')"
       f="$FIX/reviews/$(key "$repo")-$pr.json"
@@ -672,6 +676,7 @@ if [ "$1" = "api" ]; then
       ;;
     repos/*/commits/*/status)
       [ -n "${STUB_STATUS_FAIL:-}" ] && exit 1
+      [ -n "${STUB_STATUS_SLEEP_S:-}" ] && sleep "$STUB_STATUS_SLEEP_S"
       [ -n "${STUB_STATUS_MALFORMED:-}" ] && { echo 'not json'; exit 0; }
       repo="$(printf '%s' "$path_no_query" | sed -E 's#repos/([^/]+/[^/]+)/commits/.*#\1#')"
       sha="$(printf '%s' "$path_no_query" | sed -E 's#repos/[^/]+/[^/]+/commits/([^/]+)/status#\1#')"
@@ -681,6 +686,7 @@ if [ "$1" = "api" ]; then
       ;;
     repos/*/issues/*/timeline)
       [ -n "${STUB_TIMELINE_FAIL:-}" ] && exit 1
+      [ -n "${STUB_TIMELINE_SLEEP_S:-}" ] && sleep "$STUB_TIMELINE_SLEEP_S"
       repo="$(printf '%s' "$path_no_query" | sed -E 's#repos/([^/]+/[^/]+)/issues/.*#\1#')"
       pr="$(printf '%s' "$path_no_query" | sed -E 's#repos/[^/]+/[^/]+/issues/([0-9]+)/.*#\1#')"
       f="$FIX/timeline/$(key "$repo")-$pr.json"
@@ -693,6 +699,7 @@ if [ "$1" = "api" ]; then
       ;;
     repos/*/commits/*)
       [ -n "${STUB_COMMIT_FAIL:-}" ] && exit 1
+      [ -n "${STUB_COMMIT_SLEEP_S:-}" ] && sleep "$STUB_COMMIT_SLEEP_S"
       repo="$(printf '%s' "$path_no_query" | sed -E 's#repos/([^/]+/[^/]+)/commits/.*#\1#')"
       sha="$(printf '%s' "$path_no_query" | sed -E 's#repos/[^/]+/[^/]+/commits/([^/]+)#\1#')"
       # STUB_COMMIT_ERR_DIR/<sha>: stderr text to emit with exit 1 for that sha.
@@ -833,7 +840,7 @@ JSON
   export QA_RECONCILE_CRON_STALE_S=1800
   export QA_RECONCILE_AGE_CEILING_S=1209600
   export QA_RECONCILE_TICK_FAIL_THRESHOLD=3
-  unset STUB_SLACK_FAIL_ONCE STUB_SLACK_FAIL_ALWAYS STUB_REVIEWS_FAIL STUB_STATUS_FAIL STUB_STATUS_MALFORMED STUB_TIMELINE_FAIL STUB_COMMIT_FAIL STUB_COMMIT_ERR_DIR STUB_COMMIT_OK_STDERR STUB_RL_REMAINING STUB_CRON_JSON STUB_CRON_FAIL STUB_ALLOWLIST_REPOS STUB_DEFAULT_COMMIT_DATE STUB_AUTHOR_FAIL_RC STUB_PRLIST_FAIL_REPOS STUB_GH_STATUS_FAIL STUB_GH_STATUS_BODY STUB_ROLLUP_FAIL STUB_ROLLUP_MALFORMED
+  unset STUB_SLACK_FAIL_ONCE STUB_SLACK_FAIL_ALWAYS STUB_REVIEWS_FAIL STUB_STATUS_FAIL STUB_STATUS_MALFORMED STUB_TIMELINE_FAIL STUB_COMMIT_FAIL STUB_COMMIT_ERR_DIR STUB_COMMIT_OK_STDERR STUB_RL_REMAINING STUB_CRON_JSON STUB_CRON_FAIL STUB_ALLOWLIST_REPOS STUB_DEFAULT_COMMIT_DATE STUB_AUTHOR_FAIL_RC STUB_PRLIST_FAIL_REPOS STUB_GH_STATUS_FAIL STUB_GH_STATUS_BODY STUB_ROLLUP_FAIL STUB_ROLLUP_MALFORMED STUB_COMMIT_SLEEP_S STUB_REVIEWS_SLEEP_S STUB_STATUS_SLEEP_S STUB_TIMELINE_SLEEP_S STUB_PRLIST_HANG_REPOS STUB_PRLIST_HANG_S QA_RECONCILE_CALL_MAX_S QA_RECONCILE_TICK_BUDGET_S QA_RECONCILE_REPO_MIN_S
   # Long enough that every pre-existing test keeps its single-page semantics
   # (each seeds a fresh state dir, so nothing is ever suppressed by inheritance);
   # the dedupe tests below set their own value.
@@ -2674,4 +2681,232 @@ t9_candidate() {
   [ ! -s "$DISPATCH_CALLS" ]
   [ ! -s "$STUB_PEER_LOG" ]
   [[ "$output" == *"no gateway token"* ]]
+}
+
+# MUS-31591: every tick since 5 Nov was killed at TimeoutStartSec=1800 before
+# its single end-of-run state write. A tick past its wall budget must stop
+# reading, still persist attempts/last_attempt_epoch, log one BUDGET line, exit 0.
+@test "e2e budget: a tick whose repo loop runs past the budget still writes state, exits 0, logs one BUDGET line, reads no further PR" {
+  repo="Muso-AI/core-backend"
+  seed_epoch_state "$repo"
+  s1="shabudget1000000000000000000000000000001"; s2="shabudget2000000000000000000000000000002"; s3="shabudget3000000000000000000000000000003"
+  cat > "$FIX/prlist/Muso-AI-core-backend.json" <<JSON
+[{"number": 10, "headRefOid": "$s1", "baseRefName": "main", "isDraft": false, "author": {"login": "nsollazzo"}, "updatedAt": "2026-01-01T00:00:00Z", "createdAt": "2026-01-01T00:00:00Z", "url": "https://github.com/$repo/pull/10"},
+ {"number": 11, "headRefOid": "$s2", "baseRefName": "main", "isDraft": false, "author": {"login": "nsollazzo"}, "updatedAt": "2026-01-01T00:00:00Z", "createdAt": "2026-01-01T00:00:00Z", "url": "https://github.com/$repo/pull/11"},
+ {"number": 12, "headRefOid": "$s3", "baseRefName": "main", "isDraft": false, "author": {"login": "nsollazzo"}, "updatedAt": "2026-01-01T00:00:00Z", "createdAt": "2026-01-01T00:00:00Z", "url": "https://github.com/$repo/pull/12"}]
+JSON
+  for s in "$s1" "$s2" "$s3"; do mk_commit "$repo" "$s" "2026-01-01T00:00:00Z"; done
+  QA_RECONCILE_NOW_EPOCH=$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))
+  export QA_RECONCILE_NOW_EPOCH
+  # Each commit read takes 6 s; the budget is 10 s: PR 10 is read and
+  # dispatched (it has 4 s of slack for startup and per-PR forks on a loaded
+  # CI runner; 3 s vs 5 s lost that race, bats 2/2 on cc695aa51), PR 11's
+  # read is cut by the ~4 s left (per-call cap), PR 12 is never reached.
+  export STUB_COMMIT_SLEEP_S=6 QA_RECONCILE_TICK_BUDGET_S=10
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'BUDGET:' <<<"$output")" -eq 1 ]
+  # PR 10 was read and dispatched before the budget; PRs 11/12 were not read.
+  [ "$(wc -l < "$DISPATCH_CALLS" | tr -d ' ')" -eq 1 ]
+  grep -q "^10 $s1 " "$DISPATCH_CALLS"
+  if grep -qF "commits/$s3" "$GH_LOG"; then false; fi
+  # State was written despite the cut: the dispatched PR carries its attempt.
+  [ "$(jq -r --arg k "$repo#10@$s1" '.[$k].attempts' "$QA_RECONCILE_STATE_FILE")" -eq 1 ]
+  [ "$(jq -r --arg k "$repo#10@$s1" '.[$k].last_attempt_epoch' "$QA_RECONCILE_STATE_FILE")" != "null" ]
+}
+
+@test "e2e budget: a repo cut mid-list is not pruned (its open-PR list was only partly read)" {
+  repo="Muso-AI/core-backend"
+  s1="shabudget1000000000000000000000000000001"; s2="shabudget2000000000000000000000000000002"
+  jq -n --arg r "$repo" --arg k "$repo#13@shaunreached00000000000000000000000000" \
+    '{"__repo_epochs__": {($r): 1}, ($k): {"attempts": 1, "last_attempt_epoch": 1999990000}}' > "$QA_RECONCILE_STATE_FILE"
+  cat > "$FIX/prlist/Muso-AI-core-backend.json" <<JSON
+[{"number": 10, "headRefOid": "$s1", "baseRefName": "main", "isDraft": false, "author": {"login": "nsollazzo"}, "updatedAt": "2026-01-01T00:00:00Z", "createdAt": "2026-01-01T00:00:00Z", "url": "https://github.com/$repo/pull/10"},
+ {"number": 11, "headRefOid": "$s2", "baseRefName": "main", "isDraft": false, "author": {"login": "nsollazzo"}, "updatedAt": "2026-01-01T00:00:00Z", "createdAt": "2026-01-01T00:00:00Z", "url": "https://github.com/$repo/pull/11"},
+ {"number": 12, "headRefOid": "shaunreached00000000000000000000000000", "baseRefName": "main", "isDraft": false, "author": {"login": "nsollazzo"}, "updatedAt": "2026-01-01T00:00:00Z", "createdAt": "2026-01-01T00:00:00Z", "url": "https://github.com/$repo/pull/12"}]
+JSON
+  mk_commit "$repo" "$s1" "2026-01-01T00:00:00Z"; mk_commit "$repo" "$s2" "2026-01-01T00:00:00Z"
+  # PR 13 is not in the (partly read) list: a full read would prune its key,
+  # a cut read must keep it.
+  export STUB_COMMIT_SLEEP_S=3 QA_RECONCILE_TICK_BUDGET_S=5
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  jq -e --arg k "$repo#13@shaunreached00000000000000000000000000" 'has($k)' "$QA_RECONCILE_STATE_FILE"
+}
+
+# MUS-31637 finding 1 (reworked for the round-3 dynamic cap): pin the per-repo
+# fair share. Repos are read in sorted order: core-backend, hydra,
+# web-credits-next. Budget 20 s, 1.5 s per commit read, floor 1 s:
+# core-backend (six PRs, well over 9 s of reads) gets a ~6.7 s share, so PR 10
+# is read and dispatched and the repo is cut before PR 15 (how many in between
+# fit is not pinned: per-PR overhead varies) (a budget cut, not a
+# READ-FAILURE); the share then protects hydra and web-credits-next, which are
+# both still read. The sleep is never within 0.5 s of a cap, so no boundary race.
+@test "e2e budget: repo 1 is capped to its share and cut mid-list, repos 2 and 3 are still read" {
+  A="Muso-AI/core-backend"; H="Muso-AI/hydra"; W="Muso-AI/web-credits-next"
+  export STUB_ALLOWLIST_REPOS="$A
+$H
+$W"
+  jq -n --arg a "$A" --arg h "$H" --arg w "$W" \
+    '{"__repo_epochs__": {($a):1,($h):1,($w):1}}' > "$QA_RECONCILE_STATE_FILE"
+  mkpr() { printf '{"number": %s, "headRefOid": "%s", "baseRefName": "main", "isDraft": false, "author": {"login": "nsollazzo"}, "updatedAt": "2026-01-01T00:00:00Z", "createdAt": "2026-01-01T00:00:00Z", "url": "https://github.com/%s/pull/%s"}' "$2" "$3" "$1" "$2"; }
+  a1="shaa1000000000000000000000000000000001"; a2="shaa2000000000000000000000000000000002"; a3="shaa3000000000000000000000000000000003"; a4="shaa4000000000000000000000000000000004"; a5="shaa5000000000000000000000000000000005"; a6="shaa6000000000000000000000000000000006"
+  h1="shah1000000000000000000000000000000001"; w1="shaw1000000000000000000000000000000001"
+  echo "[$(mkpr $A 10 $a1),$(mkpr $A 11 $a2),$(mkpr $A 12 $a3),$(mkpr $A 13 $a4),$(mkpr $A 14 $a5),$(mkpr $A 15 $a6)]" > "$FIX/prlist/Muso-AI-core-backend.json"
+  echo "[$(mkpr $H 30 $h1)]" > "$FIX/prlist/Muso-AI-hydra.json"
+  echo "[$(mkpr $W 20 $w1)]" > "$FIX/prlist/Muso-AI-web-credits-next.json"
+  for s in $a1 $a2 $a3 $a4 $a5 $a6; do mk_commit "$A" "$s" "2026-01-01T00:00:00Z"; done
+  mk_commit "$H" "$h1" "2026-01-01T00:00:00Z"; mk_commit "$W" "$w1" "2026-01-01T00:00:00Z"
+  QA_RECONCILE_NOW_EPOCH=$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))
+  export QA_RECONCILE_NOW_EPOCH
+  export STUB_COMMIT_SLEEP_S=1.5 QA_RECONCILE_TICK_BUDGET_S=20 QA_RECONCILE_REPO_MIN_S=1 QA_RECONCILE_GLOBAL_CAP=50  # the global dispatch cap (3) must not mask the read order
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'BUDGET:' <<<"$output")" -eq 1 ]
+  # repo 1: PR 10 dispatched, the last of its six PRs never (cut by the share)
+  grep -q "^10 $a1 " "$DISPATCH_CALLS"
+  if grep -q "^15 $a6 " "$DISPATCH_CALLS"; then false; fi
+  grep -F 'BUDGET:' <<<"$output" | grep -qF "$A(partial)"
+  if grep -qF "READ-FAILURE" <<<"$output"; then false; fi
+  # repos 2 and 3 were not starved by repo 1
+  grep -q "^30 $h1 " "$DISPATCH_CALLS"
+  grep -q "^20 $w1 " "$DISPATCH_CALLS"
+}
+
+# MUS-31591 bot finding 1: the budget check sits between gh calls, so a HUNG
+# listing must be bounded by the per-call cap, else the tick runs into
+# TimeoutStartSec before its one state write.
+@test "e2e budget: a hung PR listing is cut by the per-call cap, the tick finishes, the repo keeps its state, the next repo is read" {
+  A="Muso-AI/core-backend"; H="Muso-AI/hydra"
+  export STUB_ALLOWLIST_REPOS="$A
+$H"
+  ka="$A#9@shakeptA0000000000000000000000000000000"
+  jq -n --arg a "$A" --arg h "$H" --arg k "$ka" \
+    '{"__repo_epochs__": {($a):1,($h):1}, ($k): {"attempts": 1, "last_attempt_epoch": 1999990000}}' > "$QA_RECONCILE_STATE_FILE"
+  h1="shah1000000000000000000000000000000001"
+  printf '[{"number": 30, "headRefOid": "%s", "baseRefName": "main", "isDraft": false, "author": {"login": "nsollazzo"}, "updatedAt": "2026-01-01T00:00:00Z", "createdAt": "2026-01-01T00:00:00Z", "url": "https://github.com/%s/pull/30"}]' "$h1" "$H" > "$FIX/prlist/Muso-AI-hydra.json"
+  mk_commit "$H" "$h1" "2026-01-01T00:00:00Z"
+  QA_RECONCILE_NOW_EPOCH=$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))
+  export QA_RECONCILE_NOW_EPOCH
+  # The stub hangs 30 s on core-backend's listing; the cap is 2 s.
+  export STUB_PRLIST_HANG_REPOS="$A" QA_RECONCILE_CALL_MAX_S=2
+  start_s=$SECONDS
+  run "$SCRIPT" --once
+  elapsed=$(( SECONDS - start_s ))
+  [ "$status" -eq 0 ]
+  [ "$elapsed" -lt 20 ]
+  [[ "$output" == *"READ-FAILURE: could not list open PRs for $A"* ]]
+  # a failed listing is not a full read: the repo's state key is NOT pruned
+  jq -e --arg k "$ka" 'has($k)' "$QA_RECONCILE_STATE_FILE"
+  # the next repo was still read and dispatched
+  grep -q "^30 $h1 " "$DISPATCH_CALLS"
+}
+
+# MUS-31591 round 3 (CTO ruling on MUS-31758): the per-call cap is
+# min(CALL_MAX_S, the repo's remaining share, the tick's remaining budget). A
+# fixed CALL_MAX_S let several slow EARLY listings use the whole tick budget
+# before a later repo was read.
+@test "e2e budget: slow early listings are cut at their share, the last repo is still read, the tick ends in budget, cuts are not READ-FAILURE" {
+  A="Muso-AI/core-backend"; B="Muso-AI/web-credits-next"; C="Muso-AI/muso-docs"; H="Muso-AI/hydra"
+  export STUB_ALLOWLIST_REPOS="$A
+$B
+$C
+$H"
+  ka="$A#9@shakeptA0000000000000000000000000000000"
+  jq -n --arg a "$A" --arg b "$B" --arg c "$C" --arg h "$H" --arg k "$ka" \
+    '{"__repo_epochs__": {($a):1,($b):1,($c):1,($h):1}, ($k): {"attempts": 1, "last_attempt_epoch": 1999990000}}' > "$QA_RECONCILE_STATE_FILE"
+  h1="shah1000000000000000000000000000000001"
+  printf '[{"number": 30, "headRefOid": "%s", "baseRefName": "main", "isDraft": false, "author": {"login": "nsollazzo"}, "updatedAt": "2026-01-01T00:00:00Z", "createdAt": "2026-01-01T00:00:00Z", "url": "https://github.com/%s/pull/30"}]' "$h1" "$H" > "$FIX/prlist/Muso-AI-hydra.json"
+  mk_commit "$H" "$h1" "2026-01-01T00:00:00Z"
+  QA_RECONCILE_NOW_EPOCH=$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))
+  export QA_RECONCILE_NOW_EPOCH
+  # Three early listings hang 15 s; budget 8 s over 4 repos (2 s share each);
+  # the per-call cap is left at its 120 s default.
+  export STUB_PRLIST_HANG_REPOS="$A
+$B
+$C" STUB_PRLIST_HANG_S=15 QA_RECONCILE_TICK_BUDGET_S=8 QA_RECONCILE_REPO_MIN_S=1
+  start_s=$SECONDS
+  run "$SCRIPT" --once
+  elapsed=$(( SECONDS - start_s ))
+  [ "$status" -eq 0 ]
+  # (b) ends within budget + slack, far below the 3 x 15 s a fixed cap would take
+  [ "$elapsed" -lt 14 ]
+  # (a) the last repo's listing started and its PR was dispatched
+  grep -qF "pr list --repo $H" "$GH_LOG"
+  grep -q "^30 $h1 " "$DISPATCH_CALLS"
+  # (d) the early repos are budget cuts, not READ-FAILURE
+  [ "$(grep -c 'BUDGET:' <<<"$output")" -eq 1 ]
+  for r in "$A" "$B" "$C"; do grep -F 'BUDGET:' <<<"$output" | grep -qF "$r"; done
+  if grep -qF "READ-FAILURE: could not list open PRs" <<<"$output"; then false; fi
+  # (c) state is written, the early repo keeps its key
+  jq -e --arg k "$ka" 'has($k)' "$QA_RECONCILE_STATE_FILE"
+}
+
+# MUS-31591 round 3 bot finding (QA MUS-31769): a read cut MID-PR (commit /
+# timeline / reviews / status) must be a budget cut: no READ-FAILURE line, no
+# change to the durable per-stage failure streak (a cut read is not an
+# attempt: counting it as a success would reset the streak, counting it as a
+# failure would page). The streak is seeded at 2 (threshold 3) so either
+# miscount is visible: reset -> 0, failure -> 3 and a page.
+midpr_cut() {
+  local stage="$1" epoch=1
+  local repo="Muso-AI/core-backend" sha="shamidpr000000000000000000000000000001"
+  if [ "$stage" = timeline ]; then
+    # repo epoch later than the push: the head is out of scope, so the lazy
+    # ready_for_review (timeline) read is issued before the reviews read.
+    epoch=$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3000 ))
+  fi
+  jq -n --arg r "$repo" --arg s "$stage" --argjson e "$epoch" \
+    '{"__repo_epochs__": {($r): $e}, "__meta__": {"stage_failures": {($r): {($s): 2}}, "candidate_read_failures": {($r): 2}}}' > "$QA_RECONCILE_STATE_FILE"
+  printf '[{"number": 10, "headRefOid": "%s", "baseRefName": "main", "isDraft": false, "author": {"login": "nsollazzo"}, "updatedAt": "2026-01-01T00:00:00Z", "createdAt": "2026-01-01T00:00:00Z", "url": "https://github.com/%s/pull/10"}]' "$sha" "$repo" > "$FIX/prlist/Muso-AI-core-backend.json"
+  mk_commit "$repo" "$sha" "2026-01-01T00:00:00Z"
+  QA_RECONCILE_NOW_EPOCH=$(( $(date -u -d "2026-01-01T00:00:00Z" +%s 2>/dev/null || date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "2026-01-01T00:00:00Z" +%s) + 3600 ))
+  export QA_RECONCILE_NOW_EPOCH
+  # the stage's read hangs 8 s; the tick budget (and so the call cap) is 4 s
+  case "$stage" in
+    commit) export STUB_COMMIT_SLEEP_S=8 ;;
+    timeline) export STUB_TIMELINE_SLEEP_S=8 ;;
+    reviews) export STUB_REVIEWS_SLEEP_S=8 ;;
+    status) export STUB_STATUS_SLEEP_S=8 ;;
+  esac
+  export QA_RECONCILE_TICK_BUDGET_S=4
+  run "$SCRIPT" --once
+  [ "$status" -eq 0 ]
+  [ "$(grep -c 'BUDGET:' <<<"$output")" -eq 1 ]
+  if grep -qF "READ-FAILURE" <<<"$output"; then false; fi
+  if grep -qF "STAGE READ FAILURE" <<<"$output"; then false; fi
+  # the cut stage was really reached (its read started)
+  case "$stage" in
+    commit) grep -qF "commits/$sha" "$GH_LOG" ;;
+    timeline) grep -qF "issues/10/timeline" "$GH_LOG" ;;
+    reviews) grep -qF "pulls/10/reviews" "$GH_LOG" ;;
+    status) grep -qF "commits/$sha/status" "$GH_LOG" ;;
+  esac
+  [ "$(jq -r --arg r "$repo" --arg s "$stage" '.__meta__.stage_failures[$r][$s] // 0' "$QA_RECONCILE_STATE_FILE")" -eq 2 ]
+  # Zero reads were attempted when the commit read was the cut one: that is no
+  # evidence of recovery, so the durable candidate streak (seeded 2) must
+  # survive; resetting it would stop the next all-failed tick paging at the
+  # threshold (bot finding, hydra#1834 @5d6202649). Later stages only get here
+  # after a successful read, where a reset is correct.
+  if [ "$stage" = commit ]; then
+    [ "$(jq -r --arg r "$repo" '.__meta__.candidate_read_failures[$r] // 0' "$QA_RECONCILE_STATE_FILE")" -eq 2 ]
+  fi
+  # nothing was dispatched: the verdict was never reached
+  [ ! -s "$DISPATCH_CALLS" ]
+}
+
+@test "e2e budget: a commit read cut mid-PR is not a READ-FAILURE and leaves the stage streak unchanged" {
+  midpr_cut commit
+}
+
+@test "e2e budget: a timeline read cut mid-PR is not a READ-FAILURE and leaves the stage streak unchanged" {
+  midpr_cut timeline
+}
+
+@test "e2e budget: a reviews read cut mid-PR is not a READ-FAILURE and leaves the stage streak unchanged" {
+  midpr_cut reviews
+}
+
+@test "e2e budget: a status read cut mid-PR is not a READ-FAILURE and leaves the stage streak unchanged" {
+  midpr_cut status
 }
