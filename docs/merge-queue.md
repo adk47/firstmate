@@ -72,7 +72,7 @@ The merge is handed to `bin/fm-pr-merge.sh` with `--admin`, which bypasses the f
 That is deliberate: the account cannot approve its own pull requests, so the queue proves the three things that replace a human approval before it uses the bypass, and records what it bypassed.
 
 1. A `qa-review` check passing on the exact head, with no configuration switch.
-2. A Fable GO recorded on the row for this head, written `fable-go=ok` or `fable-go@<sha>` in the row's trailing comment.
+2. A Fable GO recorded on the row for this head, written `fable-go=ok`, `fable-go@<sha>`, or `fable-go=<sha>` in the row's trailing comment.
    The marker is read case-insensitively with `-`, `_`, or a single space as the separator, so `Fable GO=ok` and `FABLE_GO@<sha>` are the same forms.
    A bound GO's sha must prefix this head, so a GO written for an older head does not carry over a push.
    A bare `Fable GO` phrase is provenance prose, not a GO, and the queue does not interpret any other trailing text.

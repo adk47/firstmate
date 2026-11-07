@@ -66,10 +66,11 @@
 # things the captain's 2026-11-03 ruling names, and records what it bypassed:
 #
 #   1. a passing qa-review on the exact head (above, and never configurable);
-#   2. a Fable GO recorded on this row for this head, written fable-go=ok or
-#      fable-go@<sha> in the row's trailing comment. A bound GO's sha must
-#      prefix this head, so a GO written for an older head does not carry over
-#      a push. A bare fable-go phrase is provenance prose, not a GO;
+#   2. a Fable GO recorded on this row for this head, written fable-go=ok,
+#      fable-go@<sha>, or fable-go=<sha> in the row's trailing comment. A bound
+#      GO's sha must prefix this head, so a GO written for an older head does
+#      not carry over a push. A bare fable-go phrase is provenance prose, not a
+#      GO;
 #   3. every required status check the base branch registers, present and
 #      passing, except the named by-design list below.
 #
@@ -491,10 +492,10 @@ is_by_design_check() {
 }
 
 # fable_go_for <comment> <head>: whether this row records a Fable GO for this
-# head. The only accepted forms are fable-go=ok, an unqualified GO, and
-# fable-go@<sha> or fable-go=<sha>, a GO bound to that commit. The marker is
-# case-insensitive with -, _, or a single space as the separator. A bare
-# fable-go phrase is provenance prose, not a GO.
+# head. The only accepted forms are fable-go=ok, a GO for the head the row
+# names, and fable-go@<sha> or fable-go=<sha>, a GO bound to that commit. The
+# marker is case-insensitive with -, _, or a single space as the separator. A
+# bare fable-go phrase is provenance prose, not a GO.
 fable_go_for() {
   local comment=$1 head=$2 rest sha
   rest=$(printf '%s' "$comment" | sed 's/^[[:space:]]*#*[[:space:]]*//')
