@@ -1100,6 +1100,7 @@ all_repo_tests() {
 normalize_script_path() {
   local p=$1
   case "$p" in
+    "$ROOT"/*) printf '%s\n' "${p#"$ROOT"/}" ;;
     /*) printf '%s\n' "$p" ;;
     tests/*|./tests/*)
       p=${p#./}
@@ -1837,7 +1838,7 @@ while [ "$#" -gt 0 ]; do
     --)
       shift
       while [ "$#" -gt 0 ]; do
-        SCRIPTS+=("$1")
+        add_script "$1"
         shift
       done
       ;;
@@ -1846,10 +1847,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     *)
       if [ "${MODE:-}" = "aggregate" ]; then
-        SCRIPTS+=("$1")
+        add_script "$1"
       elif [ -z "$MODE" ] || [ "$MODE" = scripts ]; then
         MODE=scripts
-        SCRIPTS+=("$1")
+        add_script "$1"
       else
         die "script paths cannot be combined with --$MODE"
       fi

@@ -852,7 +852,6 @@ if [ "$KIND" != secondmate ] && [ "$HAVE_TARGET" = 1 ]; then
           *) emit unknown pane "busy record unconfirmed: cannot read process working directories ($BUSY_SOURCE)" ;;
         esac
       fi
-      emit working pane "harness busy ($BUSY_SOURCE)"
       ;;
     idle) ;;
     *)

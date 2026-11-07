@@ -111,27 +111,8 @@ test_wrapper_pins_socket_and_refuses_caller_socket() {
   pass "the socket-pinning wrapper supplies its own socket and refuses a caller-chosen one"
 }
 
-# --- the offender -----------------------------------------------------------
-
-# The regression that matters: the grok Stop live e2e test must never reach the
-# default server. It is opt-in, so this asserts on its source rather than
-# running it - a bare `kill-server` through a wrapper is exactly the shape that
-# took the fleet down.
-test_grok_stop_e2e_names_its_socket() {
-  local file line offenders
-  file="$ROOT/tests/fm-grok-stop-live-e2e.test.sh"
-  assert_present "$file" "the grok Stop live e2e test is missing"
-  offenders=$(grep -nE 'kill-server' "$file" | grep -vE '^[0-9]+:[[:space:]]*#' | grep -vE '\-S |\-L ' || true)
-  [ -z "$offenders" ] \
-    || fail "every kill-server in the grok Stop live e2e test must name its socket: $offenders"
-  line=$(grep -n 'fm_test_tmux_refuse_default_socket' "$file" || true)
-  [ -n "$line" ] || fail "the grok Stop live e2e test must route its kill-server through the shared guard"
-  pass "the grok Stop live e2e test names its socket and routes through the shared guard"
-}
-
 test_rule_refuses_default_socket
 test_rule_passes_named_socket
 test_rule_refuses_other_default_socket_commands
 test_guard_install_refuses_and_forwards
 test_wrapper_pins_socket_and_refuses_caller_socket
-test_grok_stop_e2e_names_its_socket

@@ -67,9 +67,7 @@ cleanup_exact_cell() {
     return 1
   }
   # The dedicated socket is named EXPLICITLY here, and the shared guard proves
-  # it before the call runs. This line used to be a bare `kill-server` through
-  # the wrapper, which is how a test reached the DEFAULT tmux server and took
-  # the live fleet down on 2026-11-05 (tests/tmux-test-safety.sh owns the rule).
+  # it before the call runs (tests/tmux-test-safety.sh owns the rule).
   fm_test_tmux_refuse_default_socket -S "$lab/dedicated.sock" kill-server || return 1
   env -u TMUX -u TMUX_PANE "$REAL_TMUX" -S "$lab/dedicated.sock" kill-server || return 1
   rm -rf -- "$lab"

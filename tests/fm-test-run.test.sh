@@ -1437,6 +1437,40 @@ SH
   pass "the re-entry sentinel refuses a run that would select itself"
 }
 
+# The same recursion, but the outer run spells the path differently from the
+# nested selection. Both sides must normalize to the same script, or the
+# sentinel misses and the script runs a second time before the next level
+# catches it.
+test_reentry_sentinel_refuses_differently_spelled_self_selection() {
+  local tmp repo rc runs
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-reentry-spelling.XXXXXX")
+  repo="$tmp/repo"
+  mkdir -p "$repo/bin" "$repo/tests"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cat >"$repo/tests/fm-self.test.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+root=$(cd "$(dirname "$0")/.." && pwd)
+printf 'ran\n' >>"$root/ran.log"
+"$root/bin/fm-test-run.sh" tests/fm-self.test.sh
+SH
+  chmod +x "$repo/tests/fm-self.test.sh"
+  set +e
+  (cd "$repo" && bin/fm-test-run.sh ./tests/fm-self.test.sh) \
+    >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || { rm -rf "$tmp"; fail "a differently-spelled self-selection must be refused"; }
+  grep -Fq 're-entry refused' "$tmp/out" "$tmp/err" \
+    || { rm -rf "$tmp"; fail "the refusal must name re-entry: $(cat "$tmp/out" "$tmp/err")"; }
+  runs=$(wc -l <"$repo/ran.log" 2>/dev/null || echo 0)
+  [ "$runs" -eq 1 ] \
+    || { rm -rf "$tmp"; fail "the differently-spelled self-selection must be refused before the script runs again (ran $runs times)"; }
+  rm -rf "$tmp"
+  pass "the re-entry sentinel refuses a differently-spelled self-selection"
+}
+
 # The complement: a test invoking the runner for a DIFFERENT script is
 # legitimate and must still work, so the sentinel is not a blanket refusal of
 # nested runs.
@@ -1486,6 +1520,7 @@ test_empty_selection_emits_summary
 test_timing_markers_and_json
 test_aggregate_exit_behavior
 test_reentry_sentinel_refuses_self_selection
+test_reentry_sentinel_refuses_differently_spelled_self_selection
 test_reentry_sentinel_allows_a_different_script
 test_gate_skip_accounting
 test_fail_on_gate_skip_token

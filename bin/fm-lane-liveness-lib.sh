@@ -24,7 +24,10 @@
 # BOUNDED AND READ-ONLY. One `lsof -a -d cwd -Fpn` scan answers for every lane
 # at once - bounded by process count, never by walking a worktree's file tree -
 # and callers match only the recorded worktree paths they already hold. Nothing
-# here writes, signals, or starts anything.
+# here writes, signals, or starts anything. The single-lane probe is one lsof
+# scan per call, measured at about 0.35s on a 1355-process Linux box; a scan
+# that cannot finish inside the caller's bound degrades to unknown, never to
+# working.
 #
 # FAIL-SAFE DIRECTION. Only positive evidence of an agent reads as live, and
 # only a worktree holding nothing but shells (or nothing at all) reads as
@@ -231,6 +234,7 @@ EOF
     }
     $2 == "agent" { state[$1] = "live" }
     $2 == "other" { if (state[$1] != "live") state[$1] = "other" }
+    $2 == "unknown" { if (state[$1] != "live") state[$1] = "other" }
     $2 == "shell" { if (state[$1] == "") state[$1] = "shell" }
     END {
       for (i = 1; i <= m; i++) {

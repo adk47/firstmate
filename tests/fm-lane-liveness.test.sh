@@ -170,6 +170,38 @@ test_dead_worktrees_names_only_the_dead_ones() {
   pass "the fleet view names only the provably dead worktrees"
 }
 
+test_dead_worktrees_never_names_an_unknown_class_dead() {
+  local d live dead toolbin real ps_real pid out
+  d="$TMP_ROOT/fleet-unknown"
+  live="$d/live"
+  dead="$d/dead"
+  toolbin="$d/toolbin"
+  mkdir -p "$live" "$dead" "$toolbin"
+  pid=$(spawn_named_process "$d/bin" pi "$live") || fail "could not spawn the agent fixture"
+  spawn_shell_in "$dead" >/dev/null || fail "could not spawn the shell fixture"
+  sleep 0.2
+  for tool in lsof cut grep sort paste awk sed cat bash; do
+    real=$(command -v "$tool" || true)
+    [ -n "$real" ] || continue
+    ln -s "$real" "$toolbin/$tool"
+  done
+  # A pid that exits between the lsof scan and the ps snapshot is unknown, not
+  # dead. Drop only the live pid from the snapshot so the shell-only worktree
+  # still classifies normally.
+  ps_real=$(command -v ps)
+  cat >"$toolbin/ps" <<EOF
+#!/bin/bash
+"$ps_real" "\$@" | grep -v '^ *$pid '
+EOF
+  chmod +x "$toolbin/ps"
+  out=$(PATH="$toolbin" fm_lane_dead_worktrees "$live" "$dead") \
+    || fail "the fleet scan must succeed"
+  assert_not_contains "$out" "$live" \
+    "a worktree whose process cannot be classified must never be reported dead"
+  assert_contains "$out" "$dead" "a genuinely dead worktree must still be reported dead"
+  pass "the fleet view never names an unknown-class worktree dead"
+}
+
 test_live_agent_in_worktree
 test_live_agent_in_subdirectory_counts
 test_shell_only_worktree_is_dead
@@ -177,5 +209,6 @@ test_empty_worktree_is_dead
 test_unclassifiable_process_is_undeterminable
 test_missing_lsof_is_undeterminable
 test_dead_worktrees_names_only_the_dead_ones
+test_dead_worktrees_never_names_an_unknown_class_dead
 
 echo "all fm-lane-liveness tests passed"
