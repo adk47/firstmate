@@ -1971,8 +1971,11 @@ test_interrupted_cleanup_keeps_the_captain_call_recoverable() {
     || fail "could not hold the cleanup-failure fixture"
   run_captain "$home" complete "$id" "$id" >/dev/null \
     || fail "completion gate failed for the cleanup-failure fixture"
+  fm_fake_treehouse_status "$home/fakebin"
+  printf '%s\n' "$wt" > "$home/fakebin/fm-fake-treehouse-held"
   cat > "$home/fakebin/treehouse" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = status ]; then exec "$(dirname "$0")/fm-fake-treehouse-status"; fi
 exit 1
 SH
   chmod +x "$home/fakebin/treehouse"

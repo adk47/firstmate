@@ -898,6 +898,23 @@ if ! BACKEND_TOOLS=$(fm_backend_required_tools "$BACKEND"); then
   BACKEND_TOOLS=""
 fi
 TOOLS="$BACKEND_TOOLS $COMMON_TOOLS"
+# A recorded task or spawn path can use a non-orca backend even when this home's
+# resolved backend is orca: every non-orca backend leases its worktree through
+# treehouse, so treehouse must be present for those tasks to spawn or tear down.
+# Config-only resolution misses that, so the requirement follows recorded task
+# records too, and reports a missing treehouse exactly like a config-required one.
+treehouse_required_by_recorded_task() {
+  local meta
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] || continue
+    [ "$(fm_backend_of_meta "$meta")" = orca ] && continue
+    return 0
+  done
+  return 1
+}
+if ! fm_backend_list_contains "$TOOLS" treehouse && treehouse_required_by_recorded_task; then
+  TOOLS="$TOOLS treehouse"
+fi
 NO_MISTAKES_MIN=1.46.0
 # AXI-FAMILY FLOOR POLICY. Every axi-family floor is the CURRENT LATEST published
 # version of that tool, captain-bumped periodically to keep the whole fleet on the
@@ -1420,12 +1437,19 @@ detect_local_tools() {
     fm_backend_required_tool_available "$BACKEND" "$t" \
       || missing_tool_diagnostic "$t"
   done
+  # A recorded task can require treehouse even when this home's resolved backend
+  # does not; TOOLS carries that requirement, so check its presence directly.
+  if ! fm_backend_list_contains "$BACKEND_TOOLS" treehouse \
+    && fm_backend_list_contains "$TOOLS" treehouse; then
+    command -v treehouse >/dev/null 2>&1 || missing_tool_diagnostic treehouse
+  fi
   for t in $COMMON_TOOLS; do
     command -v "$t" >/dev/null || missing_tool_diagnostic "$t"
   done
-  # The treehouse lease-support upgrade check is only relevant when the resolved
-  # backend actually requires treehouse (every backend except orca, which owns its
-  # own worktrees); an orca home must not be told to upgrade a provider it never uses.
+  # The treehouse lease-support upgrade check is only relevant when TOOLS requires
+  # treehouse - the resolved backend, or a recorded non-orca task under an orca
+  # home; an orca home with no such task must not be told to upgrade a provider it
+  # never uses.
   if fm_backend_list_contains "$TOOLS" treehouse \
     && command -v treehouse >/dev/null 2>&1 && ! treehouse_supports_lease; then
     echo "MISSING: treehouse (install: $(install_cmd treehouse))"

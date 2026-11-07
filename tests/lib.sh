@@ -216,6 +216,67 @@ SH
   done
 }
 
+# fm_fake_treehouse_status <fakebin>
+# Drops the `fm-fake-treehouse-status` shim a fake treehouse delegates
+# `treehouse status` to, shaped like the pinned treehouse v2.0.1: the
+# base-branch banner line followed by one leased row per linked worktree of the
+# repo in $PWD other than its main checkout - the listing a pool that holds those
+# worktrees reports - and, when the pool has no rows, only an empty-pool
+# diagnostic on stderr with nothing on stdout, which is what v2.0.1 writes. A
+# fixture whose worktree is not a linked worktree of that repo adds its path to
+# <fakebin>/fm-fake-treehouse-held, one per line, to have the pool report it
+# held; one that needs the answered-empty-pool shape explicitly creates
+# <fakebin>/fm-fake-treehouse-empty.
+fm_fake_treehouse_status() {
+  local fakebin=$1
+  cat > "$fakebin/fm-fake-treehouse-status" <<'SH'
+#!/usr/bin/env bash
+here="$(dirname "$0")"
+held="$here/fm-fake-treehouse-held"
+if [ -f "$here/fm-fake-treehouse-empty" ]; then
+  echo "treehouse: no worktrees in pool" >&2
+  exit 0
+fi
+rows=
+if top=$(git rev-parse --show-toplevel 2>/dev/null); then
+  listed=$(git worktree list --porcelain | sed -n 's/^worktree //p')
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    [ "$path" != "$top" ] || continue
+    rows="${rows}1  leased  ${path}"$'\n'
+  done <<EOF
+$listed
+EOF
+fi
+if [ -f "$held" ]; then
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    rows="${rows}1  leased  ${path}"$'\n'
+  done < "$held"
+fi
+if [ -n "$rows" ]; then
+  printf 'main\n%s' "$rows"
+else
+  echo "treehouse: no worktrees in pool" >&2
+fi
+SH
+  chmod +x "$fakebin/fm-fake-treehouse-status"
+}
+
+# fm_fake_treehouse <fakebin>
+# A fake treehouse that reports this repo's pool through the shared status shim
+# and succeeds silently at everything else, including `return --force <wt>`.
+fm_fake_treehouse() {
+  local fakebin=$1
+  fm_fake_treehouse_status "$fakebin"
+  cat > "$fakebin/treehouse" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = status ]; then exec "$(dirname "$0")/fm-fake-treehouse-status"; fi
+exit 0
+SH
+  chmod +x "$fakebin/treehouse"
+}
+
 # fm_fake_crash_injector <fakebin>
 # Drops an `fm-crash-inject <pid>` shim that a PATH fake calls to simulate a
 # hard crash of the process under test. It SIGKILLs <pid> and then returns only

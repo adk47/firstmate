@@ -83,6 +83,52 @@
 # releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
+#
+# Return tool verified before the endpoint kill: worktree_release_mode resolves
+# the release path (orca, treehouse, or guarded plain git) for a task worktree
+# BEFORE the endpoint kill kills its agent, and refuses before the pending-close
+# record is staged. An Orca-created worktree - backend=orca, a recorded Orca
+# worktree id, or a path under an Orca workspace tree, so a worktree whose task
+# record predates the backend field still routes by creation provenance - needs
+# the orca CLI, and when an Orca worktree id is recorded it must resolve to that
+# exact path. A recorded id releases by id; an Orca-created worktree without one
+# releases by its current path, and falls back to a guarded plain git release
+# only on the proven registry miss - the parsed `selector_not_found` error code -
+# never to a discard. Every other Orca failure refuses with the concrete Orca
+# error named, including one the CLI reports only on stderr, because a bare git
+# remove would delete a worktree Orca still owns.
+# A tmux-era worktree - a Mac-migrated record whose backend is tmux - on a host
+# without treehouse has no pool to corrupt, so it releases through the same
+# guarded plain git release once that release is proven safe, instead of the
+# treehouse refusal. Every other worktree needs treehouse installed on this host
+# plus an inspectable recorded project directory, and the treehouse pool the
+# project resolves is asked (read only) whether it holds that exact worktree -
+# judged from the `status` stdout listing alone, never from the diagnostics real
+# treehouse keeps on stderr: a held slot returns through treehouse, and a path
+# this host's pool provably does not hold is a worktree treehouse never leased
+# here, so it releases through guarded_plain_git_release only once that release
+# is proven to succeed - an unlocked registration, a tree holding no uncommitted
+# or untracked work, and no initialized submodule.
+# When no path resolves, teardown refuses while the agent is still alive and the
+# branch still intact, naming the concrete missing requirement. A treehouse that
+# cannot report its pool listing at all (no `status` support or a failing status)
+# refuses too, while a successful `status` whose stdout listing is empty is an
+# answered empty pool - the pinned v2.0.1 writes its empty-pool diagnostic to
+# stderr and nothing to stdout - so the worktree is one it never leased here.
+# So does a listing that names home-relative
+# paths this host's HOME cannot resolve, because lease membership is then
+# unproven either way. A listing that resolves at least one `~` path speaks for
+# this HOME, so an unresolvable slot beside it is a stale pool entry rather than
+# a foreign HOME: the refusal names that slot and the exact prune command, and
+# still refuses before the kill rather than discarding a slot treehouse may
+# still lease.
+# guarded_plain_git_release runs plain `git worktree remove` - git itself refuses
+# a dirty or locked worktree unless --force is passed and this never passes it -
+# so an unlanded worktree is kept rather than discarded. The task branch is
+# detached before the release and dropped only after the release succeeds; a
+# failed return or release re-attaches that branch, so the worktree, the branch
+# ref, and the branch checkout all survive intact for a retry that can still
+# identify and drop the ref.
 # Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks, and discards secondmate child work for kind=secondmate. Only use it
@@ -834,7 +880,6 @@ if [ -z "$BUSY_GEN" ]; then
   BUSY_GEN=$(cat "$STATE/$ID.busy-gen" 2>/dev/null || true)
 fi
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
-ORCA_PATH_MATCH_VERIFIED=0
 CLEANUP_RECOVERY=$TEARDOWN_CLEANUP_RECOVERY
 
 KIND=$TEARDOWN_META_KIND
@@ -1377,6 +1422,313 @@ canonical_existing_dir() {
   [ -n "$target" ] || return 1
   [ -d "$target" ] || return 1
   ( cd "$target" && pwd -P )
+}
+
+# True when <worktree> lives in an Orca workspace tree, which is how Orca-created
+# worktrees are laid out even when the task meta records no backend or id. This is
+# creation provenance: "not managed by treehouse" for such a path routes to Orca
+# release, never to a discard.
+orca_workspace_path() {  # <worktree>
+  case "$1" in
+    */orca/workspaces/*) return 0 ;;
+  esac
+  return 1
+}
+
+# Read-only pool probe. Returns 0 when the listing of the pool this host's
+# treehouse resolves from <project> names <worktree> as a whole listing field, in
+# either the absolute form or the `~`-abbreviated form treehouse prints for paths
+# under $HOME; 1 when the listing answers and does not name it, including an
+# empty stdout listing from a successful `status`; 2 when the pool cannot be
+# reported at all (no `status` support or a failing status); and 3 when the
+# listing names `~`-prefixed paths this host's HOME cannot resolve, which means
+# the listing speaks for some other home. 2 and 3 are never permission to
+# proceed.
+#
+# The listing is `treehouse status`'s STDOUT only. Real treehouse keeps
+# diagnostics on stderr even when `status` succeeds (unreadable process tables,
+# damaged or orphaned slots), so merging stderr in would turn a diagnostic that
+# merely mentions a path into a listing row: a warning naming this worktree would
+# read as "held" and route the release through `treehouse return` after the
+# endpoint kill, and a warning naming an unrelated dead slot would read as an
+# unresolvable home-relative path and refuse a worktree the pool never held.
+# Diagnostics are therefore discarded, not parsed. A status that fails still
+# returns 2 through its exit code, whether or not it wrote to stderr.
+treehouse_pool_lists_worktree() {  # <project> <worktree>
+  local proj=$1 wt=$2 listing line cand rel abs_wt abs_home field
+  local -a candidates=() fields=() unresolved_slots=()
+  local unresolved=0 resolved_home_paths=0
+  TEARDOWN_POOL_PROBE_NOTE=
+  if ! listing=$( ( cd "$proj" && treehouse status ) 2>/dev/null ); then
+    return 2
+  fi
+  if [ -z "$listing" ]; then
+    return 1
+  fi
+  abs_wt=$(canonical_existing_dir "$wt") || abs_wt=$wt
+  candidates=("$wt" "$abs_wt")
+  abs_home=$(canonical_existing_dir "${HOME:-/nonexistent}" 2>/dev/null) || abs_home=
+  if [ -n "$abs_home" ]; then
+    for cand in "$wt" "$abs_wt"; do
+      case "$cand" in
+        "$abs_home"/*)
+          rel=${cand#"$abs_home"}
+          candidates+=("~$rel")
+          ;;
+      esac
+    done
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    for cand in "${candidates[@]}"; do
+      case " $line " in
+        *[[:space:]]"$cand"[[:space:]]*) return 0 ;;
+      esac
+    done
+    read -r -a fields <<<"$line"
+    for field in ${fields[@]+"${fields[@]}"}; do
+      case "$field" in
+        '~'/*)
+          if [ -z "$abs_home" ] || [ ! -e "$abs_home/${field#'~/'}" ]; then
+            unresolved=1
+            unresolved_slots+=("$field")
+          else
+            resolved_home_paths=$((resolved_home_paths + 1))
+          fi
+          ;;
+      esac
+    done
+  done <<EOF
+$listing
+EOF
+  if [ "$unresolved" = 0 ]; then
+    return 1
+  fi
+  # Distinguish a foreign HOME from a stale slot in THIS home's pool. A listing
+  # that resolves at least one `~` path speaks for this HOME; an unresolvable
+  # slot beside it is a stale entry whose directory was removed out of band, not
+  # proof of HOME divergence. Only a listing with NO resolvable `~` path (or a
+  # host with no `$HOME/.treehouse` at all) speaks for a different home.
+  if [ -z "$abs_home" ] || [ ! -d "${HOME:-/nonexistent}/.treehouse" ] || [ "$resolved_home_paths" -eq 0 ]; then
+    TEARDOWN_POOL_PROBE_NOTE="this host's treehouse pool listing for $proj names home-relative paths this host's HOME cannot resolve"
+    return 3
+  fi
+  TEARDOWN_POOL_PROBE_NOTE="this host's treehouse pool for $proj holds a stale slot that this host's HOME cannot resolve: ${unresolved_slots[*]+"${unresolved_slots[*]}"}; prune it with: ( cd \"$proj\" && treehouse prune )"
+  return 3
+}
+
+# Proof that a plain `git worktree remove` - which never receives --force - will
+# succeed for this worktree: an unlocked registration of a tree holding no
+# uncommitted or untracked work and no initialized submodule. Prints the concrete
+# blocker when it cannot prove that and returns 1.
+plain_git_remove_would_succeed() {  # <project> <worktree>
+  local proj=$1 wt=$2 listing line abs_wt dirty=
+  local current='' locked=0 submodules=''
+  abs_wt=$(removal_target_abs_path "$wt" 2>/dev/null) || abs_wt=$wt
+  listing=$(git -C "$proj" -c core.quotePath=false worktree list --porcelain 2>/dev/null) || {
+    printf 'git cannot list the worktrees of %s\n' "$proj"
+    return 1
+  }
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *) current=$(removal_target_abs_path "${line#worktree }" 2>/dev/null || true) ;;
+      locked*) [ "$current" = "$abs_wt" ] && locked=1 ;;
+    esac
+  done <<EOF
+$listing
+EOF
+  if [ "$locked" = 1 ]; then
+    printf '%s is registered locked, so git worktree remove refuses it without --force\n' "$wt"
+    return 1
+  fi
+  if ! dirty=$(git -C "$wt" status --porcelain 2>/dev/null); then
+    printf 'git cannot report whether %s holds uncommitted work\n' "$wt"
+    return 1
+  fi
+  if [ -n "$dirty" ]; then
+    printf '%s holds uncommitted or untracked work, so git worktree remove refuses it without --force\n' "$wt"
+    return 1
+  fi
+  if ! submodules=$(git -C "$wt" submodule status 2>/dev/null); then
+    printf 'git cannot report whether %s holds submodules\n' "$wt"
+    return 1
+  fi
+  while IFS= read -r line; do
+    case "$line" in
+      '' | -*) continue ;;
+    esac
+    printf '%s holds an initialized submodule, so git worktree remove refuses working trees containing submodules\n' "$wt"
+    return 1
+  done <<EOF
+$submodules
+EOF
+  return 0
+}
+
+# Resolve how this task's worktree can be released BEFORE any destructive
+# endpoint kill, storing the mode in TEARDOWN_RELEASE_MODE ("orca", "treehouse",
+# or "git") or the concrete missing requirement in TEARDOWN_RELEASE_REFUSAL and
+# returning 1 so the caller leaves the agent alive and the branch intact.
+worktree_release_mode() {  # <backend> <worktree> <project> [<orca-worktree-id>]
+  local backend=$1 wt=$2 proj=$3 orca_id=${4:-} probe=0 reason=
+  TEARDOWN_RELEASE_MODE=
+  TEARDOWN_RELEASE_REFUSAL=
+  if [ -z "$wt" ] || [ ! -d "$wt" ]; then
+    TEARDOWN_RELEASE_REFUSAL="the worktree ${wt:-<missing>} does not exist"
+    return 1
+  fi
+  # Creation provenance: a backend=orca task, a recorded Orca worktree id, or a
+  # worktree under an Orca workspace tree all mean Orca created this worktree.
+  # "not managed by treehouse" for such a path routes to Orca release, never to a
+  # discard.
+  if [ "$backend" = orca ] || [ -n "$orca_id" ] || orca_workspace_path "$wt"; then
+    if ! command -v orca >/dev/null 2>&1; then
+      TEARDOWN_RELEASE_REFUSAL="an Orca-created worktree is released only through orca, and the orca CLI is not installed on this host"
+      return 1
+    fi
+    if [ -n "$orca_id" ]; then
+      require_orca_worktree_path_match "$orca_id" "$wt" || {
+        TEARDOWN_RELEASE_REFUSAL="Orca worktree id ${orca_id} does not resolve to $wt, so removing it through Orca would discard work nobody inspected"
+        return 1
+      }
+    fi
+    TEARDOWN_RELEASE_MODE=orca
+    return 0
+  fi
+  # tmux-era provenance: a Mac-migrated task whose record says backend=tmux has a
+  # plain git worktree this host's treehouse never leased. A host WITHOUT
+  # treehouse therefore has no pool to corrupt, so the guarded plain git release
+  # is its return path instead of the treehouse refusal below. A host WITH
+  # treehouse keeps the ordinary path, so a pool that really holds the worktree is
+  # still returned through treehouse and a pool-owned slot is never deleted out
+  # from under the pool.
+  if [ "$backend" = tmux ] && ! command -v treehouse >/dev/null 2>&1; then
+    if [ -n "$proj" ] && [ -d "$proj" ] && worktree_registered_for_project "$proj" "$wt"; then
+      if reason=$(plain_git_remove_would_succeed "$proj" "$wt"); then
+        TEARDOWN_RELEASE_MODE=git
+        return 0
+      fi
+      TEARDOWN_RELEASE_REFUSAL="this tmux-era task's worktree $wt is not leased by treehouse (treehouse is not installed on this host), and a plain git release cannot be proven safe: $reason"
+      return 1
+    fi
+    TEARDOWN_RELEASE_REFUSAL="treehouse is not installed on this host, so a treehouse lease cannot be verified or returned (install it with bin/fm-install-treehouse.sh), and $wt is not a registered linked worktree of ${proj:-<missing>} that a guarded plain git release could verify"
+    return 1
+  fi
+  if ! command -v treehouse >/dev/null 2>&1; then
+    TEARDOWN_RELEASE_REFUSAL="treehouse is not installed on this host, so a treehouse lease cannot be verified or returned (install it with bin/fm-install-treehouse.sh)"
+    return 1
+  fi
+  if [ -z "$proj" ] || [ ! -d "$proj" ]; then
+    TEARDOWN_RELEASE_REFUSAL="the recorded project directory ${proj:-<missing>} is not inspectable, so this host's treehouse pool for its worktree cannot be inspected"
+    return 1
+  fi
+  treehouse_pool_lists_worktree "$proj" "$wt" || probe=$?
+  case "$probe" in
+    0)
+      TEARDOWN_RELEASE_MODE=treehouse
+      return 0
+      ;;
+    2)
+      TEARDOWN_RELEASE_REFUSAL="this host's treehouse cannot report its pool for $proj, so whether it holds $wt cannot be verified"
+      return 1
+      ;;
+    3)
+      local pool_note="$TEARDOWN_POOL_PROBE_NOTE"
+      if [ -z "$pool_note" ]; then
+        pool_note="this host's treehouse pool listing for $proj names home-relative paths this host's HOME cannot resolve"
+      fi
+      TEARDOWN_RELEASE_REFUSAL="$pool_note, so whether it holds $wt cannot be verified"
+      return 1
+      ;;
+  esac
+  if worktree_registered_for_project "$proj" "$wt"; then
+    if reason=$(plain_git_remove_would_succeed "$proj" "$wt"); then
+      TEARDOWN_RELEASE_MODE=git
+      return 0
+    fi
+    TEARDOWN_RELEASE_REFUSAL="this host's treehouse pool does not hold $wt, and this host cannot prove a plain git release would succeed: $reason"
+    return 1
+  fi
+  TEARDOWN_RELEASE_REFUSAL="this host's treehouse pool does not hold $wt and it is not a registered linked worktree of $proj, so neither treehouse return nor a guarded plain git release can verify it"
+  return 1
+}
+
+# Guarded plain-git release for a worktree treehouse never leased on this host:
+# plain `git worktree remove` only - git itself refuses a dirty or locked
+# worktree unless --force is passed, and this never passes it. The caller has
+# already run the ordinary landed/dirty checks. Echoes nothing on success;
+# prints a concrete refusal on failure and leaves the worktree intact.
+guarded_plain_git_release() {  # <worktree> <project>
+  local wt=$1 proj=$2 out
+  [ -n "$wt" ] && [ -d "$wt" ] || return 0
+  [ -n "$proj" ] && [ -d "$proj" ] || {
+    echo "teardown: cannot plain-git-release $wt; project dir ${proj:-<missing>} is not inspectable" >&2
+    return 1
+  }
+  if ! worktree_registered_for_project "$proj" "$wt"; then
+    echo "teardown: cannot plain-git-release $wt; it is not a registered worktree of $proj" >&2
+    return 1
+  fi
+  if out=$( ( cd "$proj" && git worktree remove "$wt" ) 2>&1 ); then
+    [ -n "$out" ] && printf '%s\n' "$out"
+    echo "teardown: released worktree $wt with plain git worktree remove (treehouse not installed or lease not held here)" >&2
+    return 0
+  fi
+  [ -n "$out" ] && printf '%s\n' "$out" >&2
+  echo "teardown: plain git worktree remove refused for $wt; worktree kept intact" >&2
+  return 1
+}
+
+# Re-attach the task branch a release block detached before a failed release,
+# best-effort. A retry learns the branch to drop from the worktree's HEAD, so a
+# release that aborts after the detach must leave the worktree on its branch again
+# rather than detached, or the retry's successful release could never retire it.
+restore_worktree_branch() {  # <worktree> <branch>
+  local wt=${1:-} branch=${2:-}
+  [ -n "$wt" ] && [ -d "$wt" ] || return 0
+  [ -n "$branch" ] && [ "$branch" != HEAD ] || return 0
+  git -C "$wt" checkout -q "$branch" 2>/dev/null || true
+}
+
+# Remove an Orca-managed worktree when only its current path is known. Orca's
+# registry may still carry a stale path for a worktree that moved between hosts,
+# so a path selector can miss; callers fall back to a guarded plain git release.
+# An ok:false answer prints the error code and the rendered error on two stdout
+# lines so the caller can branch on the parsed code, never on the prose message.
+# Orca prints that envelope on stdout while exiting nonzero, so stdout is captured
+# regardless of exit status and only the envelope decides the outcome; empty or
+# unparseable stdout is a failure, never an implicit successful removal, and the
+# CLI's stderr is kept so a failure reported only there is still named concretely.
+fm_backend_orca_remove_worktree_by_path() {  # <worktree>
+  local wt=${1:-} out code msg='' err='' errfile
+  [ -n "$wt" ] || {
+    echo "error: missing worktree path; cannot remove Orca worktree" >&2
+    return 1
+  }
+  fm_backend_source orca >/dev/null 2>&1 || return 1
+  errfile=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-orca-rm.XXXXXX") || {
+    echo "error: cannot create a temp file to capture orca worktree rm output" >&2
+    return 1
+  }
+  out=$(orca worktree rm --worktree "path:$wt" --force --json 2>"$errfile" || true)
+  err=$(cat "$errfile" 2>/dev/null || true)
+  rm -f "$errfile"
+  case "$out" in
+    *[![:space:]]*) ;;
+    *) out= ;;
+  esac
+  if [ -n "$out" ] && msg=$(printf '%s' "$out" | fm_backend_orca_json_ok 2>&1); then
+    return 0
+  fi
+  code=$(printf '%s' "$out" | fm_backend_orca_json_error_code 2>/dev/null || true)
+  if [ -z "$code" ] || [ -z "$msg" ]; then
+    case "$err" in
+      *[![:space:]]*) msg=$err ;;
+      *) [ -n "$msg" ] || msg="orca worktree rm for $wt returned ${out:-no output}" ;;
+    esac
+  fi
+  printf '%s\n%s\n' "$code" "$msg"
+  return 1
 }
 
 retry_wait_secs_is_valid() {
@@ -1964,12 +2316,6 @@ require_orca_worktree_path_match() {
     echo "Cannot verify dirty or unlanded work for the worktree Orca would remove; preserving metadata." >&2
     return 1
   fi
-}
-
-require_orca_worktree_path_match_if_present() {
-  local worktree_id=$1 inspected=$2
-  [ -n "$inspected" ] && [ -e "$inspected" ] || return 0
-  require_orca_worktree_path_match "$worktree_id" "$inspected"
 }
 
 firstmate_home_has_treehouse_slot() {
@@ -2816,8 +3162,6 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
     echo "Cannot verify dirty or unlanded work; restore the worktree path or get explicit OK to discard, then --force." >&2
     exit 1
   fi
-  require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$WT" || exit 1
-  ORCA_PATH_MATCH_VERIFIED=1
 fi
 
 if [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
@@ -2854,6 +3198,22 @@ BACKLOG_CLOSED=0
 BACKLOG_TRANSITION=$TEARDOWN_BACKLOG_TRANSITION
 BACKLOG_TRANSITION_FLAGS=()
 [ "$BACKLOG_TRANSITION" = close ] || BACKLOG_TRANSITION_FLAGS=(--retain)
+# Resolve the worktree's release path BEFORE anything below stages a durable
+# intent to finish this teardown: a refusal here must leave no replayable
+# pending-close record behind, so a later replay cannot retire a task whose
+# agent is still alive. For backend=orca that includes proving the recorded
+# Orca worktree id resolves to this exact path. Not for kind=secondmate: a
+# secondmate home's own runtime lifecycle is owned by the dedicated
+# process-event and firstmate-home removal machinery further below, not by
+# task-worktree cleanup.
+TEARDOWN_RELEASE_MODE=
+if [ "$KIND" != secondmate ] && [ -n "$WT" ] && [ -d "$WT" ]; then
+  if ! worktree_release_mode "$BACKEND" "$WT" "$PROJ" "$ORCA_WORKTREE_ID"; then
+    echo "error: no worktree-return path is available for $WT (backend=${BACKEND:-unset}): $TEARDOWN_RELEASE_REFUSAL; leaving the agent alive and the branch intact" >&2
+    exit 1
+  fi
+fi
+
 BACKLOG_SKIP_REASON=
 if [ "$TEARDOWN_BACKLOG_APPLIES" = 1 ]; then
   backlog_done_args || {
@@ -2937,6 +3297,8 @@ fi
 # not by task-worktree cleanup.
 if [ "$KIND" != secondmate ]; then
   conclude_task_no_mistakes_run "$WT"
+  # TEARDOWN_RELEASE_MODE was verified above, before the pending-close record was
+  # staged: the endpoint kill below only runs on a worktree with a return path.
   reap_task_worktree_processes worktree "$WT" "$TASK_TMP"
 fi
 
@@ -2945,46 +3307,104 @@ fi
 "$SCRIPT_DIR/fm-remote-job-reap-orphans.sh" >&2 || true
 
 # Best-effort: drop the local task branch so the shared repo does not accumulate refs.
-if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
-  if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
-    require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
-    ORCA_PATH_MATCH_VERIFIED=1
-  fi
+if { [ "$TEARDOWN_RELEASE_MODE" = orca ] || [ "$BACKEND" = orca ]; } && [ "$KIND" != secondmate ]; then
+  branch=HEAD
   if [ -d "$WT" ]; then
     branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
     if [ "$branch" != "HEAD" ]; then
-      if git -C "$WT" checkout --detach -q 2>/dev/null; then
-        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-      fi
+      git -C "$WT" checkout --detach -q 2>/dev/null || true
     fi
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
   fi
-  [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
-  fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
-elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
-  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-  if [ "$branch" != "HEAD" ]; then
-    if git -C "$WT" checkout --detach -q 2>/dev/null; then
-      git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
+  [ -z "$T_ORCA" ] || fm_backend_kill "orca" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+  # Orca owns the release, so the task branch is dropped only once Orca reports
+  # the worktree removed; a failed removal keeps the ref for inspection and retry.
+  if [ -n "$ORCA_WORKTREE_ID" ]; then
+    if ! fm_backend_remove_worktree "orca" "$ORCA_WORKTREE_ID"; then
+      restore_worktree_branch "$WT" "$branch"
+      echo "error: orca worktree removal failed for ${ORCA_WORKTREE_ID}; teardown aborted with the branch and worktree intact" >&2
+      exit 1
     fi
+  else
+    # A path selector can miss only because Orca's registry still names a stale
+    # path for a worktree that moved between hosts. That proven registry miss -
+    # the selector_not_found error - is the ONLY failure a plain git release may
+    # cover. Every other Orca failure (app not running, ok:false for another
+    # reason, timeout) must refuse with the concrete error named, because a bare
+    # git remove would delete a worktree Orca still owns while its registry keeps
+    # naming it.
+    orca_rm_out=
+    if ! orca_rm_out=$(fm_backend_orca_remove_worktree_by_path "$WT" 2>&1); then
+      orca_rm_code=${orca_rm_out%%$'\n'*}
+      orca_rm_err=${orca_rm_out#*$'\n'}
+      [ "$orca_rm_err" != "$orca_rm_out" ] || orca_rm_err=
+      case "$orca_rm_code" in
+        selector_not_found)
+          echo "teardown: orca reported selector_not_found for $WT; attempting a guarded plain git release" >&2
+          guarded_plain_git_release "$WT" "$PROJ" || {
+            restore_worktree_branch "$WT" "$branch"
+            echo "error: orca reported selector_not_found for $WT and a guarded plain git release could not prove it safe; teardown aborted with the branch and worktree intact" >&2
+            exit 1
+          }
+          ;;
+        *)
+          restore_worktree_branch "$WT" "$branch"
+          echo "error: orca worktree removal failed for $WT with: ${orca_rm_err:-${orca_rm_code:-<no output>}}; refusing to fall back to a plain git release because this is not a proven registry miss. Teardown aborted with the branch and worktree intact" >&2
+          exit 1
+          ;;
+      esac
+    fi
+  fi
+  if [ "$branch" != HEAD ]; then
+    git -C "$PROJ" branch -D "$branch" >/dev/null 2>&1 || true
+  fi
+elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
+  # Capture the branch before the release: returning or removing the worktree
+  # makes its HEAD unreadable, but the ref lives in the shared repo.
+  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+  # Detach before the release so a pool slot this release returns never keeps the
+  # task branch as its HEAD, which would make the post-release ref deletion a
+  # silent no-op.
+  if [ "$branch" != HEAD ]; then
+    git -C "$WT" checkout --detach -q 2>/dev/null || true
   fi
   # Remove our hook file so a reused pool worktree cannot fire signals for a dead task.
   rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
     "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
-  # Kills remaining processes in the worktree (including the agent), resets, returns
-  # to pool. treehouse resolves the pool from the working directory, so run it from
-  # the project. teardown_treehouse_return tolerates transient and stale git locks
+  # Release the worktree BEFORE dropping the task branch. A failed release must
+  # leave the branch ref and the worktree intact so the lease can be inspected
+  # and retried; only a successful release may retire the local branch.
+  # treehouse resolves the pool from the working directory, so run it from the
+  # project. teardown_treehouse_return tolerates transient and stale git locks
   # left by a killed crew process; see the script header for retry and stale-lock proof.
   post_lock_cleanup_check=
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
-  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
-    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
-    exit 1
-  }
+  if [ "$TEARDOWN_RELEASE_MODE" = git ]; then
+    # Guarded plain-git release for a worktree treehouse never leased on this
+    # host: plain `git worktree remove`, which git itself refuses on a dirty
+    # worktree unless --force is passed - and this never passes it.
+    guarded_plain_git_release "$WT" "$PROJ" || {
+      restore_worktree_branch "$WT" "$branch"
+      echo "error: plain git release failed for worktree $WT; teardown aborted with the branch and worktree intact" >&2
+      exit 1
+    }
+  else
+    teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+      restore_worktree_branch "$WT" "$branch"
+      echo "error: treehouse return failed for worktree $WT; teardown aborted with the branch and worktree intact" >&2
+      exit 1
+    }
+  fi
+  # Release succeeded: drop the local task branch from the shared repo so it
+  # does not accumulate refs. Best effort - a branch still checked out in
+  # another worktree stays put rather than failing the teardown.
+  if [ "$branch" != "HEAD" ]; then
+    git -C "$PROJ" branch -D "$branch" >/dev/null 2>&1 || true
+  fi
 fi
 
 HERDR_PRESENTATION_JOURNAL="$STATE/$ID.herdr-presentation"

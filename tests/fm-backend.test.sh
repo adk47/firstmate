@@ -935,9 +935,11 @@ set -u
 { printf 'tmux'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_TMUX_LOG:?}"
 exit 0
 SH
+  fm_fake_treehouse_status "$fb"
   cat > "$fb/treehouse" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ "${1:-}" = status ]; then exec "$(dirname "$0")/fm-fake-treehouse-status"; fi
 { printf 'treehouse'; for a in "$@"; do printf '\x1f%s' "$a"; done; printf '\n'; } >> "${FM_TMUX_LOG:?}"
 exit 0
 SH
