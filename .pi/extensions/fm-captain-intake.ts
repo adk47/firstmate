@@ -36,8 +36,9 @@
 //   state/intake/<seq>.prompt     pending: accepted by Pi's queue, not yet
 //                                 consumed by a run (or awaiting delivery)
 //   state/intake/handled/         consumed: Pi started or joined a run with it
-//   state/intake/released/        returned to the captain's editor by Escape,
-//                                 so re-sending it would deliver it twice
+//   state/intake/released/        released by an abort or a queue clear, so
+//                                 re-sending it could deliver it twice; the
+//                                 text may be back in the editor or discarded
 // This file is the only writer and the only owner of that layout; the
 // /intake command lists it for the captain.
 //
@@ -49,8 +50,8 @@
 // consumed from the queue: if the run was aborted Pi has already returned the
 // queue to the editor (interactive Escape), so the record is RELEASED rather
 // than re-sent. The same is true when Pi reports no pending messages after a
-// settle: the captain dequeued the follow-up back into the editor (alt+up),
-// so it is RELEASED rather than re-sent. Only a runtime that cannot report
+// settle: the follow-up was dequeued back into the editor (alt+up) or dropped
+// by a clearQueue path, so it is RELEASED rather than re-sent. Only a runtime that cannot report
 // its queue falls back to re-sending after a short grace. A record still
 // pending at session_start belongs to a session that was replaced or crashed
 // and is re-sent into the new one, except on a reload: Pi keeps its queues

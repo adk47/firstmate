@@ -122,11 +122,10 @@ Note the SDK message begins with the status and carries no `Error:` prefix; Pi a
 
 Driven on a pseudo-terminal: `/model` then Enter, the picker left open, then Escape.
 While the picker was open the record was unchanged (`state=busy source=fm-spawn event=launch-brief`, the spawn seed): `ui_prompt_start` wraps only `ctx.ui.select|confirm|input|editor|custom` calls made by extensions (`core/extensions/runner.js` `wrapUIPromptContext`), and the model selector is an interactive-mode overlay (`showModelSelector`) outside that wrapper.
-The screen at that moment rendered the picker's hint row and a model list row (the provider badge), which are the two signals the reader requires. The three rows quoted below include the hint row; the Model Name and provider-scope rows are context, not load-bearing:
+The screen at that moment rendered a model list row (model id, display name, provider badge) followed by the picker's hint row, which are the two signals the reader requires: the list row anchors the block and the hint row must follow within 12 non-blank lines. Pi mounts its own footer below the picker, so the hint row is not the last line. The rows quoted below are the list row and the hint row; the Model Name and provider-scope rows are context, not load-bearing, and a document quoting them without a rendered list row does not read as the picker:
 
 ```
-Only showing models from configured providers. Use /login to add providers.
-  Model Name: TOKEN POOL · Claude Opus 5.5
+  → ✓claude-opus-5-5 (Claude Opus 5.5) [anthropic]
   Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel
 ```
 
