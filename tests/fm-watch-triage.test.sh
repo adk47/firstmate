@@ -2358,6 +2358,126 @@ test_uncapturable_busy_window_is_waited_on() {
   pass "a live busy crew whose capture failed is waited on: no doorbell, no attempt charged, no wake"
 }
 
+# --- a dead endpoint's busy-state record is retired, not left behind ---
+# The record's only writer is the agent's own adapter wiring, so a worker that
+# exits without a teardown leaves one stale incarnation that nothing can ever
+# clear. The watcher retires it on the poll that observes the death, which is
+# what keeps a home from accumulating one per exited worker.
+
+test_dead_endpoint_busy_state_is_retired() {
+  local dir state fakebin out window pid i
+  dir=$(make_case dead-endpoint-busy); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-exited"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/exited.meta"
+  record_pi_busy "$state" exited
+  assert_present "$state/exited.busy-state" "fixture did not arm a busy-state record"
+  assert_present "$state/exited.busy-gen" "fixture did not arm a busy-state generation"
+  # The pane is gone: capture fails, the cheap existence probe fails, and the
+  # recovery-grade inventory omits the recorded window, so the endpoint is
+  # authoritatively missing.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOWS="test:other" \
+    FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$dir/capture.count" FM_FAKE_TMUX_CAPTURE_FAIL_AFTER=0 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    [ ! -e "$state/exited.busy-state" ] && [ ! -e "$state/exited.busy-gen" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  reap "$pid"
+  assert_absent "$state/exited.busy-state" "a dead endpoint's busy-state record was left behind"
+  assert_absent "$state/exited.busy-gen" "a dead endpoint's busy-state generation was left behind"
+  pass "the watcher retires a dead endpoint's busy-state record on the poll that observes the exit"
+}
+
+# A transient backend outage makes the cheap existence probe fail exactly like a
+# gone endpoint, but the recovery-grade verdict is only unreadable. Retiring on
+# that would wipe every live task's busy state fleet-wide from one outage, and
+# the adapter's later events carry the old gen, so nothing would re-arm until a
+# relaunch.
+test_unreadable_backend_does_not_retire_busy_state() {
+  local dir state fakebin out window pid i
+  dir=$(make_case unreadable-endpoint-busy); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-unreadable"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/unreadable.meta"
+  record_pi_busy "$state" unreadable
+  assert_present "$state/unreadable.busy-state" "fixture did not arm a busy-state record"
+  # The window is still in the inventory, but the pane read cannot attribute an
+  # agent, so the recovery-grade verdict is unreadable rather than missing/dead.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" \
+    FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$dir/capture.count" FM_FAKE_TMUX_CAPTURE_FAIL_AFTER=0 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    [ -s "$dir/capture.count" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  sleep 0.3
+  reap "$pid"
+  assert_present "$state/unreadable.busy-state" "an unreadable backend retired a live task's busy-state record"
+  assert_present "$state/unreadable.busy-gen" "an unreadable backend retired a live task's busy-state generation"
+  pass "an unreadable backend never retires a live task's busy-state record"
+}
+
+# A relaunch can arm a fresh incarnation between the liveness read and the
+# retire. The gen must be captured BEFORE that read and passed explicitly, or
+# the retire reads the new gen, matches the fresh incarnation, and retires it.
+test_relaunch_between_liveness_and_retire_is_refused() {
+  local dir state fakebin out window pid i
+  dir=$(make_case relaunch-race); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-raced"
+  printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/raced.meta"
+  record_pi_busy "$state" raced
+  # The liveness read arms a fresh incarnation, exactly as a relaunch would
+  # between the classification and the retire.
+  mv "$fakebin/tmux" "$fakebin/tmux.real"
+  cat > "$fakebin/tmux" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = display-message ]; then
+  case "\$*" in
+    *pane_id*)
+      "$fakebin/tmux.real" "\$@"
+      rc=\$?
+      "$ROOT/bin/fm-busy-event.sh" arm "\${FM_STATE_OVERRIDE:-}" raced >/dev/null 2>&1 || true
+      exit "\$rc"
+      ;;
+  esac
+fi
+exec "$fakebin/tmux.real" "\$@"
+SH
+  chmod +x "$fakebin/tmux"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOWS="test:other" \
+    FM_FAKE_TMUX_CAPTURE_COUNT_FILE="$dir/capture.count" FM_FAKE_TMUX_CAPTURE_FAIL_AFTER=0 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 100 ]; do
+    [ -s "$dir/capture.count" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+  done
+  sleep 0.3
+  reap "$pid"
+  assert_present "$state/raced.busy-state" "a relaunch armed between the liveness read and the retire was retired"
+  assert_present "$state/raced.busy-gen" "a relaunch armed between the liveness read and the retire lost its generation"
+  pass "a relaunch armed between the liveness read and the retire is refused"
+}
+
 # --- non-terminal stale, crew provably working: absorbed, then wedge-escalated ---
 # A provably-working crew (an actively-running pipeline) legitimately sits on a
 # static pane (e.g. waiting on CI), so a non-terminal stale is absorbed and only
@@ -5073,6 +5193,9 @@ test_gateway_stalled_secondmate_is_not_re_rung
 test_ordinary_steer_is_held_quiet_while_the_gateway_stall_is_open
 test_uncapturable_window_still_escalates_its_unread_steer
 test_uncapturable_busy_window_is_waited_on
+test_dead_endpoint_busy_state_is_retired
+test_unreadable_backend_does_not_retire_busy_state
+test_relaunch_between_liveness_and_retire_is_refused
 test_nonterminal_stale_provably_working_absorbed_then_escalated
 test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active

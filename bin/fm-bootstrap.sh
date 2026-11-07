@@ -20,6 +20,7 @@
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed after <cause>: <reason>",
 #                 "SECONDMATE_HANDOFF: secondmate <id>: pending delivery: <n> item(s)",
+#                 "DRIFT_CHECK: <why the running-chair drift detector is not armed>",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...".
 #          When a RUNNING secondmate home is fast-forwarded, its target is
 #          firstmate's own current default-branch commit. A local worktree uses
@@ -73,6 +74,10 @@
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
+#          Alongside fleet sync, bootstrap refreshes the chair's own
+#          refs/remotes/origin/main (bounded, best-effort) so the running-chair
+#          drift check compares HEAD against a current reference rather than one
+#          frozen at the last /updatefirstmate.
 #          Fleet sync fetches, fast-forwards safe default-branch states, reports
 #          recovered and STUCK clone drift, and prunes gone local branches; it is
 #          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT when it is a non-empty
@@ -94,19 +99,19 @@
 #          reads or writes another home; the fleet snapshot's classifier and
 #          bin/fm-secondmate-reconcile.sh's nudge stay as backstops. Replayed
 #          transitions and restored In-flight rows print BOOTSTRAP_INFO facts.
-#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the six MUTATING sweeps
+#          Set FM_BOOTSTRAP_DETECT_ONLY=1 to skip the seven MUTATING sweeps
 #          (backlog_record_reconcile, secondmate_sync,
 #          secondmate_liveness_sweep, secondmate_handoff_resume, x_mode_setup,
-#          fleet_sync) while still
+#          drift_check_arm, fleet_sync) while still
 #          printing every read-only detect line
 #          above; the TANGLE line switches to advisory-only wording with no
 #          checkout command. Used by
 #          fm-session-start.sh's read-only path when another live session holds
 #          the fleet lock, so a second concurrent session never race-mutates
 #          secondmate homes, pending handoff outboxes,
-#          X-mode artifacts, project clones, or
+#          X-mode artifacts, the drift check, project clones, or
 #          repair instructions.
-#          Unset/0 (the default) runs all six sweeps - this flag is purely
+#          Unset/0 (the default) runs all seven sweeps - this flag is purely
 #          additive.
 #          Set FM_BOOTSTRAP_NETWORK to split this run by whether a step talks to
 #          the network, so a session start can print its digest from local reads
@@ -116,11 +121,12 @@
 #                 must never silently skip a safety sweep.
 #            skip - every LOCAL step, and none of the network ones. Skips
 #                 `gh auth status`, secondmate_liveness_sweep, secondmate_sync,
-#                 secondmate_handoff_resume, and fleet_sync.
+#                 secondmate_handoff_resume, fleet_sync, and the chair's own
+#                 origin/main refresh that runs with it.
 #            only - ONLY those network steps and nothing else. No tool detection,
 #                 no version floors, no tangle check, no backlog
-#                 reconciliation, and no x_mode_setup: those already ran on the
-#                 local pass.
+#                 reconciliation, no x_mode_setup, and no drift_check_arm: those
+#                 already ran on the local pass.
 #          FM_BOOTSTRAP_DETECT_ONLY composes with it unchanged, so `only` plus
 #          detect-only is the read-only `gh auth status` probe on its own.
 #          bin/fm-startup-network.sh owns the deferral: it runs the `only` phase
@@ -182,6 +188,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 # deferred network stage sets, so an ordinary bootstrap run records nothing.
 # shellcheck source=bin/fm-timing-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-timing-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 # Network-phase selection (see the header). An unrecognized value resolves to
 # `all` so a malformed override runs every step rather than silently dropping a
@@ -308,6 +316,21 @@ fleet_sync_relay_all_output() {
     [ -n "$line" ] || continue
     echo "FLEET_SYNC: $line"
   done < "$tmp"
+}
+
+# chair_origin_refresh: refresh this home's own refs/remotes/origin/main, the
+# reference the running-chair drift check compares HEAD against. Fleet sync only
+# fetches project clones, so without this the chair's own ref stays frozen at the
+# last /updatefirstmate and the drift check compares against a stale reference.
+# Best-effort and bounded: a fetch failure leaves the previous ref in place,
+# which the drift check already treats as a comparison it can make.
+chair_origin_refresh() {
+  local root=$FM_ROOT
+  [ -n "$root" ] || return 0
+  git -C "$root" rev-parse --git-dir >/dev/null 2>&1 || return 0
+  git -C "$root" remote get-url origin >/dev/null 2>&1 || return 0
+  fm_run_timed 10 git -C "$root" fetch --quiet --no-tags origin \
+    '+refs/heads/main:refs/remotes/origin/main' >/dev/null 2>&1 || true
 }
 
 fleet_sync() {
@@ -990,6 +1013,20 @@ x_mode_remove_artifact() {
   ! x_mode_artifact_present "$artifact"
 }
 
+# drift_check_arm: keep the running-chair drift detector armed in this home.
+# A detector nobody armed is exactly the blind spot it exists to close, because a
+# chair running stale code cannot be relied on to notice it is stale, so this is
+# armed here rather than by hand. Idempotent and silent when already armed; a
+# failure prints one actionable line instead of leaving the home quietly blind.
+# bin/fm-drift-check.sh owns the check, its thresholds, and its record.
+drift_check_arm() {
+  local out
+  if out=$("$SCRIPT_DIR/fm-drift-check.sh" arm 2>&1); then
+    return 0
+  fi
+  printf 'DRIFT_CHECK: %s\n' "${out:-could not arm the running-chair drift detector}"
+}
+
 # X mode (opt-in): when this home's .env carries a non-empty FMX_PAIRING_TOKEN,
 # wire the relay poll into the existing authenticated watcher dispatch.
 # Drops two idempotent, gitignored artifacts:
@@ -1563,11 +1600,17 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
     if [ -n "$fleet_sync_out" ]; then
       (
         __fm_timing_stamp=$(fm_timing_now_ms)
+        chair_origin_refresh
+        fm_timing_record phase chair-origin-refresh "$__fm_timing_stamp"
+        __fm_timing_stamp=$(fm_timing_now_ms)
         fleet_sync
         fm_timing_record phase fleet-sync "$__fm_timing_stamp"
       ) >"$fleet_sync_out" 2>&1 &
       fleet_sync_pid=$!
     else
+      __fm_timing_stamp=$(fm_timing_now_ms)
+      chair_origin_refresh
+      fm_timing_record phase chair-origin-refresh "$__fm_timing_stamp"
       __fm_timing_stamp=$(fm_timing_now_ms)
       fleet_sync
       fm_timing_record phase fleet-sync "$__fm_timing_stamp"
@@ -1592,6 +1635,8 @@ if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   fi
   # x_mode_setup writes local Relay artifacts only and never leaves the machine.
   local_phase && x_mode_setup
+  # The drift detector is armed locally and reads only this home's own git refs.
+  local_phase && drift_check_arm
   if [ -n "$fleet_sync_pid" ]; then
     wait "$fleet_sync_pid" || true
     cat "$fleet_sync_out"

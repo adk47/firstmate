@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Behavior tests for per-task GOTMPDIR support (fm-gotmp).
 #
-# fm-spawn gives each task a temp root /tmp/fm-<id>/ with Go's build temp nested at
-# gotmp/, exports GOTMPDIR into the crewmate pane, and records tasktmp= in the task's
-# meta. fm-teardown reads tasktmp= and removes the whole root on cleanup.
+# fm-spawn gives each task a temp root ${XDG_CACHE_HOME:-$HOME/.cache}/fm/<id>/ with
+# Go's build temp nested at gotmp/, exports GOTMPDIR into the crewmate pane, and
+# records tasktmp= in the task's meta. fm-teardown reads tasktmp= and removes the
+# whole root on cleanup, whatever path the record names, so a task spawned before
+# the move off /tmp still cleans up the root it actually created.
 #
 # These tests exercise fm-teardown directly as a subprocess against a fake FM_HOME/FM_ROOT
 # built so the real script resolves into it, with stub helper scripts.
