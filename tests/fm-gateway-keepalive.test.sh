@@ -360,12 +360,110 @@ test_a_wrapped_rendered_error_still_enters_the_ladder() {
   pass "the rendered error still opens the ladder when the pane wraps it, word wrapped and hard wrapped"
 }
 
+# The exact text Pi renders for the upstream failures this fleet's Pi workers
+# actually hit: `Error: <message>`, the message being the gateway's typed error
+# with the transport's own words (the live census of 2026-10-26), the Anthropic
+# SDK's `<status> <body>` for an HTTP failure, and pi-ai's own stream-drop text.
+PI_RESET='Error: api_error read tcp 10.0.0.103->160.79.104.10:443: connection reset by peer'
+PI_503='Error: 503 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}'
+# The pooled gateway's 503 exactly as Pi 1.4.0 recorded it live on 2026-10-26
+# (docs/verification/gateway-keepalive.md): the SDK message carries the status
+# and the body with no prefix of its own, bounded by the detail writer.
+PI_POOL_DETAIL='503 {"type":"error","error":{"type":"pool_exhausted","message":"All accounts are temporarily unavailable","next_available_at":null,"accounts":[{"name":"aaron-muso","reason":"requires_reauth","available_at":null},{"name":"nina-muso","reason"'
+PI_FETCH='Error: fetch failed'
+PI_STREAM='Error: Anthropic stream ended before message_stop'
+PI_401='Error: 401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}'
+PI_NOKEY='Error: No API key for provider: anthropic'
+# The idle Pi screen below a turn-ending error: the error, the composer, and
+# Pi's status footer.
+PI_IDLE_FOOTER=$(printf '\n┌──────────────────────────────┐\n│ >                            │\n└──────────────────────────────┘\n  claude-opus-4 · 12%% · ? for help')
+
+test_text_classifier_accepts_the_errors_pi_renders() {
+  local t
+  for t in "$PI_RESET" "$PI_503" "$PI_FETCH" "$PI_STREAM"; do
+    fm_gateway_text_is_transient "$t" \
+      || fail "the text classifier missed a transient error as Pi renders it: ${t:0:50}"
+    fm_gateway_text_is_transient "$(printf '%s\n%s' "$t" "$PI_IDLE_FOOTER")" \
+      || fail "the classifier missed a Pi-rendered transient error above the idle composer and footer: ${t:0:50}"
+  done
+  for t in "$PI_401" "$PI_NOKEY" "$E_REFUSED"; do
+    fm_gateway_text_is_transient "$t" \
+      && fail "a non-retryable failure as Pi renders it was classified transient: ${t:0:50}"
+  done
+  pass "text classifier accepts the transient errors Pi renders and refuses Pi's credential, key, and unreachable-gateway failures"
+}
+
+# Record one API-error turn end exactly as the per-task Pi extension writes it:
+# the same writer, source pi-ext, event stop-failure, and the upstream error
+# text as the detail.
+record_pi_error_turn_end() {  # <state-dir> <task> <error-text>
+  local st=$1 task=$2 text=$3 gen
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$st" "$task") || return 1
+  "$ROOT/bin/fm-busy-event.sh" apply "$st" "$task" idle --gen "$gen" \
+    --source pi-ext --event stop-failure --detail "$text" >/dev/null
+}
+
+test_a_pi_crew_is_classified_on_its_own_recorded_error() {
+  # The Pi extension records the error text that ended the turn, so a Pi crew
+  # whose screen no longer shows the error (scrolled, wrapped, or covered by a
+  # taller footer) is still classified on its own words - and a permanent
+  # failure in the record is not rescued by a transient phrase on screen.
+  local st quiet
+  st=$(new_state pi-detail)
+  quiet=$(printf '%s\n%s' "$(ordinary_lines 12)" "$PI_IDLE_FOOTER")
+
+  record_pi_error_turn_end "$st" task-pi-reset "${PI_RESET#Error: }" \
+    || fail "could not record a Pi API-error turn end"
+  fm_gateway_stalled_now "$st" task-pi-reset "$quiet" \
+    || fail "a Pi crew whose record names the connection reset did not enter the ladder when the pane no longer showed it"
+  fm_gateway_stall_open "$st" task-pi-reset || fail "entering the ladder must open the durable record"
+
+  record_pi_error_turn_end "$st" task-pi-pool "$PI_POOL_DETAIL" \
+    || fail "could not record the live pooled-gateway 503"
+  fm_gateway_stalled_now "$st" task-pi-pool "$quiet" \
+    || fail "the pooled gateway's 503 as Pi records it (status first, no Error: prefix) did not enter the ladder"
+
+  record_pi_error_turn_end "$st" task-pi-auth "${PI_401#Error: }" \
+    || fail "could not record a Pi credential failure"
+  fm_gateway_stalled_now "$st" task-pi-auth "$(printf '%s\n%s' "$PI_RESET" "$PI_IDLE_FOOTER")" \
+    && fail "a Pi crew whose record names a credential failure was re-rung because an older transient error sat on its screen"
+  fm_gateway_stall_open "$st" task-pi-auth && fail "a credential failure must open no record"
+
+  # The exit is Pi's normal settle: the crew takes the continue and settles
+  # without an error, which drops the record on the next idle poll.
+  fm_gateway_record_attempt "$st" task-pi-reset || fail "could not charge an attempt"
+  "$ROOT/bin/fm-busy-event.sh" apply "$st" task-pi-reset idle --current-gen \
+    --source pi-ext --event agent-settled >/dev/null || fail "could not record the recovering settle"
+  fm_gateway_stalled_now "$st" task-pi-reset "$(printf '%s\n%s' "$PI_RESET" "$PI_IDLE_FOOTER")" \
+    && fail "a Pi crew that settled normally is still read as stalled while its old error is on screen"
+  fm_gateway_stall_open "$st" task-pi-reset \
+    && fail "a normal settle must drop the record so a later stall starts fresh"
+  pass "a Pi crew enters the ladder on its own recorded error, a recorded permanent failure keeps it out, and a normal settle ends it"
+}
+
+test_a_crew_waiting_in_a_dialog_is_never_re_rung() {
+  # A blocking dialog (the /model picker) is recorded as dialog-open, not as an
+  # API-error turn end; a continue typed into that dialog could never be read,
+  # so the ladder refuses it whatever the screen says, and it stays with
+  # fm-crew-state.sh's exit-and-respawn route.
+  local st gen
+  st=$(new_state pi-dialog)
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$st" task-dialog) || fail "could not arm"
+  "$ROOT/bin/fm-busy-event.sh" apply "$st" task-dialog idle --gen "$gen" \
+    --source pi-ext --event dialog-open --detail 'select: Select model' >/dev/null \
+    || fail "could not record the dialog"
+  fm_gateway_stalled_now "$st" task-dialog "$(printf '%s\n%s' "$PI_RESET" "$PI_IDLE_FOOTER")" \
+    && fail "a crew waiting in a blocking dialog entered the ladder"
+  fm_gateway_stall_open "$st" task-dialog && fail "a dialog must open no stall record"
+  pass "a crew recorded as waiting in a blocking dialog is never re-rung by the ladder"
+}
+
 test_an_unreadable_turn_end_keeps_a_task_out_of_the_ladder() {
   # The documented limit of this keep-alive. `stop-failure` is written in
-  # exactly one place, the claude arm of bin/fm-spawn.sh's busy wiring, so a
-  # task with no record, with an event no claude hook writes, or with a record
-  # whose incarnation can no longer be read is deliberately NOT re-rung on the
-  # strength of pane text alone - it is left to ordinary triage.
+  # exactly two places, the claude and pi arms of bin/fm-spawn.sh's busy
+  # wiring, so a task with no record, with an event neither writes, or with a
+  # record whose incarnation can no longer be read is deliberately NOT re-rung
+  # on the strength of pane text alone - it is left to ordinary triage.
   local st pane
   st=$(new_state unreadable-event)
   pane=$(printf '%s\n%s' "$E503_ACCOUNTS" "$IDLE_FOOTER")
@@ -385,7 +483,7 @@ test_an_unreadable_turn_end_keeps_a_task_out_of_the_ladder() {
   fm_gateway_stalled_now "$st" task-orphan "$pane" \
     && fail "a record whose incarnation cannot be read entered the ladder"
   fm_gateway_stall_open "$st" task-orphan && fail "an unreadable record must open no record"
-  pass "no record, an event no claude hook writes, and an unreadable record all stay out of the ladder"
+  pass "no record, an event neither harness writes, and an unreadable record all stay out of the ladder"
 }
 
 test_spent_budget_declares_an_external_wait_not_a_wedge() {
@@ -446,6 +544,9 @@ test_a_recovered_agent_with_the_old_error_in_scrollback_is_not_stalled
 test_repository_text_naming_the_errors_is_not_a_stall
 test_the_recorded_turn_end_gates_the_ladder
 test_a_wrapped_rendered_error_still_enters_the_ladder
+test_text_classifier_accepts_the_errors_pi_renders
+test_a_pi_crew_is_classified_on_its_own_recorded_error
+test_a_crew_waiting_in_a_dialog_is_never_re_rung
 test_an_unreadable_turn_end_keeps_a_task_out_of_the_ladder
 test_a_gateway_that_is_simply_down_is_not_retried
 test_ladder_is_bounded_by_attempts

@@ -3126,22 +3126,61 @@ EOF
 // continue automatically - auto-retries, auto-compaction retries, tool
 // loops, and queued continuations all keep the run un-settled, and a settle
 // that raced another extension's fresh run keeps state busy via isIdle().
-// "turn_end" fires at every inner turn boundary (one LLM response plus its
-// tool calls) and stays a wake NOTIFICATION touch for the watcher, never
-// current-state truth.
+// A settle whose run ended on an assistant stopReason of "error" (Pi's own
+// turn-lifecycle verdict, the same fact Claude's StopFailure hook reports)
+// records event stop-failure with the upstream error text as the detail,
+// so the keep-alive ladder (bin/fm-gateway-retry-lib.sh) can re-ring it;
+// every agent_start forgets the last error because a retry or continuation
+// is a new run. "ui_prompt_start"/"ui_prompt_end" bracket a blocking Pi
+// dialog (select, confirm, input, editor, custom - the /model picker is a
+// select) as dialog-open / dialog-closed carrying kind and title, on
+// whichever side of a run the dialog opened; a dialog closing on an idle
+// run that had ended on an error restores stop-failure so the stall stays
+// recorded. "turn_end" fires at every inner turn boundary (one LLM response
+// plus its tool calls) and stays a wake NOTIFICATION touch for the watcher,
+// never current-state truth.
 import { execFile } from "node:child_process";
-const busyEvent = (state: string, event: string) =>
+const busyEvent = (state: string, event: string, detail?: string) =>
   new Promise<void>((resolve) => {
-    execFile("$FM_ROOT/bin/fm-busy-event.sh", [
+    const args = [
       "apply", "$STATE_REAL", "$ID", state,
       "--gen", "$BUSY_GEN", "--source", "pi-ext", "--event", event,
-    ], () => resolve());
+    ];
+    if (detail) args.push("--detail", detail);
+    execFile("$FM_ROOT/bin/fm-busy-event.sh", args, () => resolve());
   });
+const isIdle = (ctx: any) => !(ctx && typeof ctx.isIdle === "function" && !ctx.isIdle());
+const dialogDetail = (event: any) => {
+  const kind = event && typeof event.kind === "string" ? event.kind : "unknown";
+  const title = event && typeof event.title === "string" ? event.title : "";
+  return title ? kind + ": " + title : kind;
+};
 export default function (pi: any) {
-  pi.on("agent_start", () => busyEvent("busy", "agent-start"));
+  let lastError: string | null = null;
+  pi.on("agent_start", () => {
+    lastError = null;
+    return busyEvent("busy", "agent-start");
+  });
+  pi.on("message_end", (event: any) => {
+    const message = event && event.message;
+    if (!message || message.role !== "assistant") return;
+    if (message.stopReason === "error") {
+      lastError = typeof message.errorMessage === "string" && message.errorMessage
+        ? message.errorMessage
+        : "unknown error";
+    }
+  });
   pi.on("agent_settled", (_event: any, ctx: any) => {
-    if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
+    if (!isIdle(ctx)) return;
+    if (lastError !== null) return busyEvent("idle", "stop-failure", lastError);
     return busyEvent("idle", "agent-settled");
+  });
+  pi.on("ui_prompt_start", (event: any, ctx: any) =>
+    busyEvent(isIdle(ctx) ? "idle" : "busy", "dialog-open", dialogDetail(event)));
+  pi.on("ui_prompt_end", (event: any, ctx: any) => {
+    if (!isIdle(ctx)) return busyEvent("busy", "dialog-closed", dialogDetail(event));
+    if (lastError !== null) return busyEvent("idle", "stop-failure", lastError);
+    return busyEvent("idle", "dialog-closed", dialogDetail(event));
   });
   pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
 }
