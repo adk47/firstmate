@@ -48,6 +48,7 @@
 #   (ao) a Fable GO that names a commit must name this head
 #   (ap) a changes-requested review is named in the admin-bypass record
 #   (aq) a slashed base branch is addressed as one encoded path segment
+#   (ar) affirmative prose and numeric provenance do not void a Fable GO
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -1056,6 +1057,25 @@ case_aq() {
   pass "a slashed base branch is addressed as one encoded path segment"
 }
 
+
+# --- (ar) affirmative prose and numeric provenance do not void a GO ------
+
+case_ar() {
+  local dir out comment
+  dir=$(make_case ar)
+  green_head
+  for comment in 'Fable GO - no blockers' 'Fable GO 1762483200' \
+    'Fable GO 20261107T023205Z'; do
+    printf '# owner: acme\nwidgets 12 %s task-a squash # %s\n' "$HEAD_A" "$comment" \
+      >"$dir/data/go-queue.txt"
+    out=$(run_queue "$dir" run)
+    assert_contains "$out" "merged acme/widgets#12" \
+      "(ar) '$comment' is an affirmative GO"
+  done
+  clear_head
+  pass "affirmative prose and numeric provenance do not void a Fable GO"
+}
+
 case_a
 case_b
 case_c
@@ -1099,5 +1119,6 @@ case_an
 case_ao
 case_ap
 case_aq
+case_ar
 
 printf 'ok - fm-merge-queue suite complete\n'

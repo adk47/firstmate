@@ -498,8 +498,13 @@ fable_go_for() {
   rest=$(printf '%s' "$comment" | sed 's/^[[:space:]]*#*[[:space:]]*//')
   printf '%s' "$rest" | grep -qiE '^fable[ _-]?go([^[:alnum:]]|$)' || return 1
   rest=$(printf '%s' "$rest" | sed -E 's/^[Ff][Aa][Bb][Ll][Ee][ _-]?[Gg][Oo]//')
-  printf '%s' "$rest" | grep -qiE '(^|[^[:alnum:]])(pending|awaiting|not|no|without)([^[:alnum:]]|$)' && return 1
-  sha=$(printf '%s' "$rest" | grep -oiE '[0-9a-f]{7,40}' | head -1)
+  printf '%s' "$rest" | grep -qiE '(^|[^[:alnum:]])(pending|awaiting|without|not[[:space:]]+(yet|approved|given)|no[[:space:]]+fable[ _-]?go)([^[:alnum:]]|$)' && return 1
+  sha=$(printf '%s' "$rest" \
+    | grep -oiE '(^|[^[:alnum:]])(on|at|for|head)[[:space:]]*:?[[:space:]]*[0-9a-f]{7,40}|[:(][[:space:]]*[0-9a-f]{7,40}' \
+    | grep -oE '[0-9a-fA-F]{7,40}$' | head -1)
+  if [ -z "$sha" ]; then
+    sha=$(printf '%s' "$rest" | grep -oiE '[0-9a-f]{7,40}' | grep -iE '[a-f]' | head -1)
+  fi
   [ -n "$sha" ] || return 0
   head=$(printf '%s' "$head" | tr '[:upper:]' '[:lower:]')
   sha=$(printf '%s' "$sha" | tr '[:upper:]' '[:lower:]')
