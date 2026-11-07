@@ -616,6 +616,25 @@ task_conn_relaunch() {  # <id> <kind> <minutes> <strikes>
     esac
   fi
   if [ -n "$model" ] && [ "$DRY_RUN" != 1 ] && [ ! -f "$STATE/$id.gateway.env" ]; then
+    # Only a Claude Code lane can be repointed by typing /model into its pane.
+    # Every other harness refuses structurally, so attempting the switch on them
+    # is not a failed action - it is an impossible one, and waking firstmate for
+    # it trains the reader to skip the watchdog-model line. Check the harness
+    # BEFORE the attempt; a non-Claude lane simply relaunches on its own model.
+    # Skip only when the harness is POSITIVELY known to be non-Claude. An
+    # unrecorded harness keeps the old attempt-and-fall-back behaviour, because
+    # absence of a recorded harness is not evidence that the lane is not Claude.
+    lane_harness=$(fm_meta_get "$STATE/$id.meta" harness)
+    case "$lane_harness" in
+      ''|claude|claude-*) ;;
+      *)
+        printf 'watchdog: %s runs harness %s, which no /model switch can reach; relaunching it on its own model\n' \
+          "$id" "$lane_harness"
+        model=''
+        ;;
+    esac
+  fi
+  if [ -n "$model" ] && [ "$DRY_RUN" != 1 ] && [ ! -f "$STATE/$id.gateway.env" ]; then
     out=$(fm_run_timed "$READ_TIMEOUT_SECS" "$LANE_SWITCH_BIN" "$id" gateway 2>&1)
     rc=$?
     if [ "$rc" -ne 0 ]; then
