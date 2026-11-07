@@ -577,21 +577,25 @@ def _documented_ids(documented: ProofOnFile) -> set[str]:
 
 
 def undocumented_removal_due(db: sqlite3.Connection, documented: ProofOnFile, *, day: str,
-                             held: bool = False) -> list[dict[str, Any]]:
+                             held: bool = False, core_told: Any = None) -> list[dict[str, Any]]:
     """The ledger's removal-due credits (held=True: the ones held for a human, see
     verify_ledger.held_for_human) minus any credit with its own proof-on-file entry (any kind: a document
-    waiting for review is not a missing one). Ledger only."""
+    waiting for review is not a missing one). Ledger only.
+
+    `core_told` answers "did CORE's own decline email tell this user" (QA #1718, 2026-11-06): with core's route on,
+    hydra writes no `decline` row, so without it every rejected credit is held as never-told forever."""
     own = _documented_ids(documented)
-    rows = verify_ledger.held_for_human(db, day=day) if held else verify_ledger.removal_due(db, day=day)
+    rows = (verify_ledger.held_for_human(db, day=day, core_told=core_told) if held
+            else verify_ledger.removal_due(db, day=day, core_told=core_told))
     return [r for r in rows if r["request_id"] not in own]
 
 
 def removal_due(db: sqlite3.Connection, admin: admin_api.Admin, documented: ProofOnFile, *,
-                day: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+                day: str, core_told: Any = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """The removal export: (removal-due credits, credits held for a human), each from undocumented_removal_due minus any credit a person approved
     (re-read from the admin API). The remover still re-checks each one."""
-    due = undocumented_removal_due(db, documented, day=day)
-    held = undocumented_removal_due(db, documented, day=day, held=True)
+    due = undocumented_removal_due(db, documented, day=day, core_told=core_told)
+    held = undocumented_removal_due(db, documented, day=day, held=True, core_told=core_told)
     wanted = [(r["request_id"], str(r["profile_id"]), str(r["track_id"] or "")) for r in due + held if r["profile_id"]]
     live, _ = reread(admin, wanted) if wanted else ({}, set())
     by_person = {rid for rid, req in live.items() if human_approved(req)}

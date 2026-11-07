@@ -44,6 +44,14 @@ setup() {
   export INTERCOM_VERIFY_TEST_DAY="2026-10-15"
   # QA #1799 r13: the retry sleeps are a seam so a retry test does not spend 7 real seconds; the COUNT is not.
   export INTERCOM_VERIFY_TEST_API_RETRY_SLEEPS="0 0"
+  # The decline's ACTIVATION lock: hydra's campaign is the fallback for a user whose core route is OFF, and core's
+  # own credits_rejected email carries the same approved text. Tests that exercise the send path open it the way an
+  # operator would; the one test below pins that the committed script refuses every real send without it.
+  export INTERCOM_VERIFY_TEST_DECLINE_CORE_ROUTE_OFF=1
+  # ...and the window the per-user read is asked over is the CLOSE of these credits. In production the gate reads it
+  # from the ledger (`close-since`, covered by test_credit_verify_notify.py); the payloads here never had a note, so
+  # these tests give it the close time and the one test below proves the gate HOLDS when it has none.
+  export INTERCOM_VERIFY_TEST_DECLINE_SINCE="2026-11-01T00:00:00Z"
   # gap-ask reads stage-2 verdicts from a proof store (stage2() below writes them).
   export INTERCOM_VERIFY_TEST_PROOF_DB="$TEST_TMPDIR/proof.sqlite"
   export INTERCOM_VERIFY_TEST_STAGE2_HELPER="$HYDRA_REPO/scripts/credit_review/stage2_verdicts.py"
@@ -59,6 +67,20 @@ if m == "fail":
 print(json.dumps({"hold": False, "reasons": []}))
 PY
   export INTERCOM_VERIFY_TEST_CORE_NOTICE_HELPER="$TEST_TMPDIR/core_notice.py"
+  # decline_close.py stand-in (the per-user "who tells them" read; STUB_DECLINE_CLOSE=core_email|hold|unreadable|fail).
+  cat > "$TEST_TMPDIR/decline_close.py" <<'STUB'
+import json, os, sys
+open(os.path.join(os.path.dirname(__file__), "decline-close-args"), "w").write(" ".join(sys.argv[1:]))
+m = os.environ.get("STUB_DECLINE_CLOSE", "")
+if m == "unreadable":
+    print("not json at all"); sys.exit(0)
+if m == "fail":
+    sys.stderr.write("route read exploded\n"); sys.exit(2)
+if m:
+    print(json.dumps({"decision": m, "why": "stub says " + m})); sys.exit(0 if m == "hydra_decline" else 3)
+print(json.dumps({"decision": "hydra_decline", "why": "route off, no core note"})); sys.exit(0)
+STUB
+  export INTERCOM_VERIFY_TEST_DECLINE_CLOSE_HELPER="$TEST_TMPDIR/decline_close.py"
   # comm_state.py stand-in (STUB_COMM_STATE=hold|fail; its rules: test_comm_state.py). Records its argv.
   cat > "$TEST_TMPDIR/comm_state.py" <<'PY'
 import json, os, sys
@@ -322,6 +344,20 @@ plain() { python3 -c 'import html,re,sys; print(html.unescape(re.sub(r"</p>|</li
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
   run -2 "$REAL_SCRIPT" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --validate
   [[ "$output" == *"not settable on a deployed copy"* ]]
+}
+
+@test "a deployed copy refuses the decline activation lock, so no caller can open it" {
+  # QA #1718 round 6 (2026-11-06): DECLINE_CORE_ROUTE_OFF read INTERCOM_VERIFY_TEST_DECLINE_CORE_ROUTE_OFF even on a
+  # deployed copy, and that name was missing from the denylist - so a production caller that inherited it would pass
+  # the activation lock and send real declines. The lock is an OPERATOR decision, never a caller's.
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
+  # the suite's own seams are exported, so clear them: the deployed copy dies on the FIRST one it sees and this
+  # test is about the activation lock, not about which name happens to come first in the denylist
+  run -2 env -i PATH="$PATH" INTERCOM_VERIFY_TEST_DECLINE_CORE_ROUTE_OFF=1 \
+    "$REAL_SCRIPT" send --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --validate
+  [[ "$output" == *"INTERCOM_VERIFY_TEST_DECLINE_CORE_ROUTE_OFF is not settable on a deployed copy"* ]]
+  # and the deployed copy pins the lock shut whatever the environment says
+  grep -q '^  DECLINE_CORE_ROUTE_OFF=0$' "$REAL_SCRIPT"
 }
 
 @test "every word Caroline's sanitizer redacts is refused by this gate exactly as by intercom-ops-write.sh" {
@@ -1222,9 +1258,13 @@ PY
 @test "unknown campaigns and kinds are refused" {
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
   run -1 send --campaign everything
-  [[ "$output" == *"--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status, gap-ask, merge-pending, merge-claim-first, credit-hold-status, claim-proof-pending or proof-need-ask"* ]]
+  [[ "$output" == *"--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status, gap-ask, decline, merge-pending, merge-claim-first, credit-hold-status, claim-proof-pending or proof-need-ask"* ]]
   run -1 send --kind final-notice --parent-message-id 1
   [[ "$output" == *"--kind must be initial, reminder-14, reminder-25 or reminder-7"* ]]
+  # the retired after-rejection note fails closed, and says where a closed request goes now
+  run -1 send --kind after-rejection --parent-message-id 1
+  [[ "$output" == *"The after-rejection note is retired"* ]]
+  [[ "$output" == *"decline"* ]]
 }
 
 # --- never ask someone who already sent documents (captain standing order) ---------------
@@ -1461,6 +1501,195 @@ rmcredits() { # <file> <id:role:title:artist:reason:url>...
   case "$control" in *other_role*) ;; *)
     echo "CONTROL FAILED: the detector cannot see a forbidden word it was given ($control)"; false ;; esac
   [ "$(posts)" -eq 1 ]
+}
+
+@test "the decline: the ONE approved sentence, verbatim, for a single credit" {
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" "r1:Mixing:Song A:Big Star"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -0 send --campaign decline
+  [[ "$output" == "POSTED email message=1001 credits=1"* ]]
+  [ "$(msg .subject)" = "Your credit request on Muso" ]
+  expected="Hi Jane,
+Thanks for your request. The supporting information we received wasn't enough to confirm this credit, so we've closed the request.
+If you'd like us to look again, submit the credit again with your supporting documents and a fresh review will start.
+Muso.AI"
+  [ "$(msg .body | plain)" = "$expected" ]
+  # the same words, byte for byte, as the ruling's approved text
+  [[ "$(msg .body | plain)" == *"The supporting information we received wasn't enough to confirm this credit, so we've closed the request."* ]]
+  [[ "$(msg .body | plain)" == *"If you'd like us to look again, submit the credit again with your supporting documents and a fresh review will start."* ]]
+  # no reason, no deadline, no document list, no hand-off, no Caroline sign-off
+  # `! grep` would NOT fail this test (bats ignores errexit on an inverted command, so a later passing assertion
+  # keeps it green — QA #1718 5): the branch body is what aborts.
+  if msg .body | plain | grep -qiE 'because|didn.t name|different track|different role|unreadable|couldn.t read|not a document|fraud|forged|doctored|suspicious|support team|business day|within|split sheet|invoice|Caroline'; then
+    false
+  fi
+  [ "$(sql "select campaign||'|'||kind||'|'||coalesce(due_day,'NULL')||'|'||coalesce(removal_day,'NULL')||'|'||coalesce(copy_ref,'') from verify_messages where message_id='1001'")" = "decline|initial|NULL|NULL|decline" ]
+  [[ "$(sql "select approval_ref from verify_messages where message_id='1001'")" == *"decline-copy-ruling.md"* ]]
+  [[ "$(sql "select approval_ref from verify_messages where message_id='1001'")" == *"2026-10-29 13:2xZ"* ]]
+}
+
+@test "the decline: several credits get the N-credits sentence and the plain title list, never a per-line reason" {
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star" "r2:Producer:Song B:Other Band"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -0 send --campaign decline
+  [[ "$output" == "POSTED email message=1001 credits=2"* ]]
+  [ "$(msg .subject)" = "Your credit request on Muso" ]
+  body="$(msg .body | plain)"
+  [[ "$body" == *"wasn't enough to confirm these 2 credits, so we've closed the requests."* ]]
+  [[ "$body" == *"submit them again with your supporting documents and a fresh review will start."* ]]
+  [[ "$body" == *'Mixing on "Song A" by Big Star'* ]]
+  [[ "$body" == *'Producer on "Song B" by Other Band'* ]]
+  [ "$(msg .body | grep -o '<li>' | wc -l | tr -d ' ')" -eq 2 ]
+  [[ "$body" != *'Song A" by Big Star:'* ]]
+  [[ "$(msg .body)" != *"because"* ]]
+}
+
+@test "the decline: a profile claim gets the claim sentence and the profile-page next step" {
+  jq -n '{user:{email:"jane@example.com", id:"42", professional_id:"9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64", auth_id:"auth0|9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64", first_name:"Jane"},
+    credits:[{request_id:"claim-1234", profile_id:"p1"}]}' > "$TEST_TMPDIR/c.json"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -0 send --campaign decline
+  [[ "$output" == "POSTED email message=1001 credits=1"* ]]
+  [ "$(msg .subject)" = "Your profile claim on Muso" ]
+  body="$(msg .body | plain)"
+  [[ "$body" == *"wasn't enough to confirm this profile claim, so we've closed the request."* ]]
+  [[ "$body" == *"submit the claim again from the profile page and a fresh review will start."* ]]
+  [[ "$body" != *"these 1 credits"* ]]
+  [ "$(sql "select copy_ref||'|'||coalesce(variant,'') from verify_messages where message_id='1001'")" = "decline|" ]
+  # QA #1718 (2026-11-06): a claim is declined by core's OWN claim template, so the who-tells-them read must ask
+  # about `profile_claim_rejected`. Asking about `credits_rejected` would read "core emails credits" as "core told
+  # this claimant" and the claimant would never get the decline the copy promises.
+  [[ "$(cat "$TEST_TMPDIR/decline-close-args")" == *"--template profile_claim_rejected"* ]]
+}
+
+@test "the decline asks about the CREDIT template for a credit, and the CLAIM template for a claim" {
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" "r1:Mixing:Song A:Big Star"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -0 send --campaign decline
+  [[ "$output" == "POSTED email message=1001 credits=1"* ]]
+  [[ "$(cat "$TEST_TMPDIR/decline-close-args")" == *"--template credits_rejected"* ]]
+  [[ "$(cat "$TEST_TMPDIR/decline-close-args")" != *"profile_claim_rejected"* ]]
+}
+
+@test "the decline takes no reason: a payload carrying one is refused, and nothing is claimed" {
+  jq -n '{user:{email:"jane@example.com", id:"42", professional_id:"9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64", auth_id:"auth0|9b2f6c1e-4d3a-4e8b-a1c7-5f0e2d8b3a64", first_name:"Jane"},
+    credits:[{request_id:"r1", role:"Mixing", track_title:"Song A", artist_name:"Big Star", reason:"doesnt_name_you"}]}' > "$TEST_TMPDIR/c.json"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -1 send --campaign decline
+  [[ "$output" == *"carry a reason/received field"* ]]
+  jq '.credits[0] |= (del(.reason) + {received:"document"})' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/c2.json" && mv "$TEST_TMPDIR/c2.json" "$TEST_TMPDIR/c.json"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -1 send --campaign decline
+  [[ "$output" == *"carry a reason/received field"* ]]
+  [ "$(posts)" -eq 0 ]
+  [ ! -f "$INTERCOM_VERIFY_TEST_LEDGER" ] || [ -z "$(sql 'select * from verify_messages')" ]
+}
+
+@test "the decline sends NOTHING until core's own decline route is measured off" {
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" "r1:Mixing:Song A:Big Star"
+  # the committed lock, read as shipped: no operator has measured core's route off, so the campaign is silent.
+  unset INTERCOM_VERIFY_TEST_DECLINE_CORE_ROUTE_OFF
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -1 send --campaign decline
+  [[ "$output" == *"core's own credits_rejected email is the decline"* ]]
+  [[ "$output" == *"decline_close.py"* ]]
+  [[ "$output" != *"POSTED"* ]]
+  # nothing was claimed and no ledger row was written: the later run (lock open) sends the ONE decline.
+  export INTERCOM_VERIFY_TEST_DECLINE_CORE_ROUTE_OFF=1
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -0 send --campaign decline
+  [[ "$output" == "POSTED email message=1001 credits=1"* ]]
+  [ "$(sql "select count(*) from verify_messages")" -eq 1 ]
+}
+
+@test "the decline asks WHO TELLS THIS USER before it claims anything, and only hydra proceeds" {
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" "r1:Mixing:Song A:Big Star"
+  # core's own email is the decline for this user: hydra must not add a second one
+  STUB_DECLINE_CLOSE=core_email INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -3 send --campaign decline
+  [[ "$output" == *"HELD decline_core_email credits=1"* ]]
+  [[ "$output" == *"stub says core_email"* ]]
+  # the route is unreadable: silence, not a guess (a missed decline is visible, a duplicate is not)
+  STUB_DECLINE_CLOSE=unreadable INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -3 send --campaign decline
+  [[ "$output" == *"HELD decline_hold"* ]]
+  STUB_DECLINE_CLOSE=fail INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -3 send --campaign decline
+  [[ "$output" == *"HELD decline_hold"* ]]
+  # nothing was claimed by any of the three, so the real send still goes, once
+  [ "$([[ -f "$INTERCOM_VERIFY_TEST_LEDGER" ]] && sql "select count(*) from verify_messages" || echo 0)" -eq 0 ]
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -0 send --campaign decline
+  [[ "$output" == "POSTED email message=1001 credits=1"* ]]
+  # the per-user read names the user it is deciding for
+  [[ "$(cat "$TEST_TMPDIR/decline-close-args")" == *"--user-id 42"* ]]
+}
+
+@test "the decline holds when it cannot say WHEN these credits were closed" {
+  credits "$TEST_TMPDIR/c.json" "Jane Doe" "r1:Mixing:Song A:Big Star"
+  # no seam and no ledger trace: "did anyone email them lately" cannot attribute a close, so the decline does not send
+  # (a missed decline is visible to a person; a duplicate is not)
+  unset INTERCOM_VERIFY_TEST_DECLINE_SINCE
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -3 send --campaign decline
+  [[ "$output" == *"HELD decline_hold credits=1 (no close time"* ]]
+  [ -z "$(sql 'select * from verify_messages' 2>/dev/null || true)" ]
+}
+
+@test "the decline has one copy, no follow-up, no in-thread delivery, and one shape per message" {
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
+  run -1 send --campaign decline --kind reminder-14 --parent-message-id 1
+  [[ "$output" == *"decline has no follow-ups"* ]]
+  run -1 send --campaign decline --copy v1
+  [[ "$output" == *"decline has ONE copy"* ]]
+  run -1 send --campaign decline --conversation 12345
+  [[ "$output" == *"in-thread delivery"* ]]
+  jq -n '{user:{email:"jane@example.com", id:"42", first_name:"Jane"}, credits:[
+    {request_id:"r1", role:"Mixing", track_title:"Song A", artist_name:"Big Star"},
+    {request_id:"claim-9", profile_id:"p1"}]}' > "$TEST_TMPDIR/c.json"
+  run -1 send --campaign decline
+  [[ "$output" == *"mix claim keys"* ]]
+  [ "$(posts)" -eq 0 ]
+}
+
+@test "the decline: once per request id ever, and the 7-day cooldown (stricter than one per UTC day) defers the rest" {
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star" "r2:Producer:Song B:Big Star"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -0 send --campaign decline
+  [[ "$output" == "POSTED email message=1001 credits=2" ]]
+  [ "$(posts)" -eq 1 ]
+  # the same day, a new request: one message per user per UTC day, so it is deferred, not lost
+  credits "$TEST_TMPDIR/c.json" Jane "r3:Mastering:Song C:Big Star"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -3 send --campaign decline
+  [[ "$output" == "DEFERRED messaged_7d credits=1"* ]]
+  # the next day, still inside the 7-day cooldown of the first note: deferred, nothing closed
+  INTERCOM_VERIFY_TEST_DAY=2026-11-05 run -3 send --campaign decline
+  [[ "$output" == "DEFERRED messaged_7d credits=1"* ]]
+  [ "$(posts)" -eq 1 ]
+  # a request the decline already named is never named again
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-12 run -0 send --campaign decline
+  [[ "$output" == "SKIPPED already-notified credits=1" ]]
+  [ "$(posts)" -eq 1 ]
+}
+
+@test "the decline is a notice: it holds no lock on a later credit, and a later note does not repeat it" {
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -0 send --campaign decline
+  [[ "$output" == "POSTED email message=1001 credits=1" ]]
+  # a different credit, past the 7-day cooldown, still gets its own normal note: the decline is not a hold
+  credits "$TEST_TMPDIR/c.json" Jane "r9:Mixing:Song Nine:Big Star"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-20 run -0 send
+  [[ "$output" == "POSTED email message=1002 credits=1" ]]
+  # and r1, already DECLINED, is never named in a later decline: the lane offers only r7
+  pend="$(python3 "$HYDRA_REPO/scripts/credit_review/verify_ledger.py" --db "$INTERCOM_VERIFY_TEST_LEDGER" \
+    pending --campaign decline --user-key jane@example.com --user-id 42 --request-ids r1,r7)"
+  [ "$(printf '%s' "$pend" | jq -c .request_ids)" = '["r7"]' ]
+  [ "$(sql "select request_ids_json from verify_messages where message_id='1001'" | jq -c .)" = '["r1"]' ]
+}
+
+@test "the decline's forbidden-word assertion refuses to send, and records the refusal" {
+  credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
+  # a derived gate whose decline copy names a reason: the guard must catch it before the claim is POSTed
+  sed "s/so we've closed the request./because it did not name you, so we've closed the request./" "$SCRIPT" > "$TEST_TMPDIR/leaky.sh"
+  chmod +x "$TEST_TMPDIR/leaky.sh"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -1 "$TEST_TMPDIR/leaky.sh" send --credits-file "$TEST_TMPDIR/c.json" \
+    --approved-by U7RP6HKUZ --campaign decline
+  [[ "$output" == *"decline_copy_reason_word"* ]]
+  [ "$(posts)" -eq 0 ]
+  # a deadline/removal sentence is refused too
+  sed "s/and a fresh review will start./within 30 days, before removal./" "$SCRIPT" > "$TEST_TMPDIR/deadline.sh"
+  chmod +x "$TEST_TMPDIR/deadline.sh"
+  INTERCOM_VERIFY_TEST_DAY=2026-11-04 run -1 "$TEST_TMPDIR/deadline.sh" send --credits-file "$TEST_TMPDIR/c.json" \
+    --approved-by U7RP6HKUZ --campaign decline
+  [ "$(posts)" -eq 0 ]
+  [[ "$output" == *"decline_"* ]]
 }
 
 @test "tag-proof records each newer user reply by its own time, not once per note" {
@@ -2008,7 +2237,7 @@ db.execute("INSERT INTO verify_messages (campaign, kind, user_key, account_id, d
   body="$(rendered .body | plain)"
   [[ "$body" == *"we will finish the check. Your request stays open while we look."$'\n'"Thank you,"* ]]
   [[ "$body" != *"live"* ]]
-  ! grep -q "stays live while we look" "$REAL_SCRIPT"
+  if grep -q "stays live while we look" "$REAL_SCRIPT"; then false; fi   # `!` is inert under bats' errexit
 }
 
 @test "status-team-review --copy count (inbox 005): no titles, the total count, any request may be in it; signed on email only" {

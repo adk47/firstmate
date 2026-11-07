@@ -46,6 +46,15 @@ set -euo pipefail
 #   uvn-status / withdrawal-confirm: approved under the captain's 2026-10-19 standing order
 #       (UVN_STATUS_COPY_APPROVED, WITHDRAWAL_COPY_APPROVED below; in-thread delivery below).
 #       docs/credit-verification/verify-request-notes.md owns the details.
+#   decline: the ONE decline (captain 2026-10-29 13:2xZ, decline-copy-ruling.md). A request we closed is
+#       told, in one sentence, that the supporting information we received was not enough to confirm it and
+#       that submitting it again with documents starts a fresh review. NO reason, no document list, no
+#       deadline, no fraud wording - the reviewer's code stays on the row and in the audit file, never in the
+#       copy, and a fraud deny and an ordinary shortfall read identically to the user by design. One per
+#       request id, ever; one message per user per UTC day; none within 7 days of another note. A NOTICE (it
+#       asks for nothing). FILE: the usual credits entries (claim shape: one entry keyed claim-<claiming.id>
+#       with profile_id). It exists for the window where core's own credits_rejected email is NOT routed to the
+#       user (MESSAGING_EMAIL_ROUTES); when core's email goes out, core's is the single decline.
 #   gap-ask: the stage-2 gap ask (Fable 2026-10-26 13:23Z, GAP_ASK_COPY_APPROVED below): a user
 #       whose document on file does not cover a held credit (stage-2 verdict need_more) is told,
 #       in Fable's exact paragraph, what the document shows and which track and role it does not
@@ -74,7 +83,8 @@ set -euo pipefail
 #     exact Intercom contact search that must return exactly one user, never from anything a
 #     user wrote; a follow-up goes to the contact its note went to;
 #   - one message per user per UTC day across campaigns, each credit request id gets a
-#     campaign's note at most once, and each reminder at most once per note. All enforced in
+#     campaign's note at most once, each reminder at most once per note, and each credit at
+#     most one decline. All enforced in
 #     the decider ledger (credit_review/verify_ledger.py) with a claim written BEFORE the
 #     POST, so a timeout can never produce a second message. Only a note that NAMED a
 #     removal date can ever be removal-due (the ledger records it);
@@ -95,7 +105,7 @@ set -euo pipefail
 #
 # Usage:
 #   intercom-verify-request.sh send --credits-file FILE --approved-by <SlackUID|fable-ruling-YYYYMMDD-N> \
-#       [--campaign verify-live|retro-past|removal-notice|takeback-notice|uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-proof-ask|claim-status|gap-ask|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask] [--kind initial|reminder-14|reminder-25 \
+#       [--campaign verify-live|retro-past|removal-notice|takeback-notice|uvn-status|withdrawal-confirm|status-doc-received|status-team-review|email-changed|email-changed-dup|claim-proof-ask|claim-status|gap-ask|decline|merge-pending|merge-claim-first|credit-hold-status|claim-proof-pending|proof-need-ask] [--kind initial|reminder-14|reminder-25 \
 #        --parent-message-id <id>] [--copy v1|windowed (verify-live preview only) | queued|received (status-doc-received) | no-ask|count (status-team-review)] \
 #       [--conversation <id> (uvn-status, withdrawal-confirm, status notes, claim-status, email-changed, gap-ask, merge-pending,
 #        credit-hold-status, claim-proof-pending, proof-need-ask)] [--inapp-fallback] [--channel inapp (uvn-status, status notes,
@@ -203,10 +213,20 @@ readonly TESTABLE=0
 #   LIVE_WINDOWED_COPY_APPROVED  verify-live: the windowed copy (a reply-by date and "will be removed").
 #                                LOCKED (firstmate 090, 2026-10-19 23:27Z: the captain dropped
 #                                auto-removal, Fable ruling 4 as amended: NO message may say a credit
-#                                will be removed). Its follow-ups (day-14/25 reminders) follow
-#                                only a windowed note, so none can be sent either. Kept for
-#                                --dry-run previews only; the no-removal-language test fails if any
-#                                sendable message carries removal or deadline wording.
+#                                will be removed). Its follow-ups (day-14/25 reminders) follow only a
+#                                windowed note, so none can be sent either. Kept for --dry-run
+#                                previews only; the no-removal-language test fails if any sendable
+#                                message carries removal or deadline wording.
+#   DECLINE_COPY_APPROVED        the `decline` campaign: the ONE reason-free decline (captain
+#                                2026-10-29 13:2xZ, ruling decline-copy-ruling.md). APPROVED in the
+#                                same PR that adds the campaign, per items 1 and 3 of the ruling.
+readonly DECLINE_COPY_APPROVED=1
+# Activation lock (decline-copy-ruling.md 2.2/3.2): core already sends its own `credits_rejected` email on a
+# rejection, and after the muso messaging template change that email carries the SAME approved text — so the two
+# must never both speak. hydra's campaign is the fallback for the window where core's route is off, and only an
+# operator who has MEASURED that (credit_review/decline_close.py reports routed/off/unknown per user) flips this
+# to 1. 0 = silent: every real decline send refuses, and --dry-run still renders exactly what would be sent.
+DECLINE_CORE_ROUTE_OFF="${INTERCOM_VERIFY_TEST_DECLINE_CORE_ROUTE_OFF:-0}"
 #   RETRO_COPY_APPROVED          the retro-past no-threat ask.
 readonly LIVE_WINDOWED_COPY_APPROVED=0
 #   LIVE_V1_COPY_APPROVED        verify-live: Fable's no-deadline v1 copy, the ONLY copy a new credit's
@@ -376,6 +396,9 @@ readonly PROD_LEDGER="/var/lib/hydra/credit-review/ledger.sqlite3"
 readonly PROD_LEDGER_HELPER="/opt/hydra/scripts/credit_review/verify_ledger.py"
 # gap-ask reads the stage-2 verdicts (read-only) from the proof store through this helper.
 readonly PROD_STAGE2_HELPER="/opt/hydra/scripts/credit_review/stage2_verdicts.py"
+# Who tells a closed request (core's own credits_rejected email or hydra's decline) - the per-user read the
+# decline campaign makes before every real send (QA #1718 3).
+readonly PROD_DECLINE_CLOSE_HELPER="/opt/hydra/scripts/credit_review/decline_close.py"
 # Every real send first asks core whether IT told this user something lately (core_notice.py; Fable sender map
 # 2026-10-27 item 2): a core notice within 7 days or a status change today defers the note.
 readonly PROD_CORE_NOTICE_HELPER="/opt/hydra/scripts/credit_review/core_notice.py"
@@ -450,6 +473,13 @@ readonly APPROVAL_REF_REMOVAL="firstmate 2026-10-16 15:14Z, captain-driven: owne
 # subject is the one customer support staged for d2's read (the ruling names only the body), and every fact is read
 # from Stripe/core rather than typed (the ruling: "every placeholder from Stripe/core, never typed by hand").
 readonly APPROVAL_REF_REFUND_CONFIRM="Fable d2 ruling refund-confirm-1103 (2026-11-03 22:0xZ, firstmate 109): 'confirming your refund of {amount} issued on {date} to the card ending {last4}. {one factual sentence on what changed} Nothing more is needed from you.' - --approved-by fable-ruling-1103-d2/refund-confirm; no human Slack id needed under firstmate 097"
+# The ONE decline (captain 2026-10-29 13:2xZ verbatim: "It feels like we are over-communicating when we deny a credit: we
+# could just say supporting information was not provided adequate enough to earn the credit, and if they want to submit
+# something they can submit something again to start the process again"). Ruling: decline-copy-ruling.md (ops-humans-off
+# -fable-o1, 2026-10-29) items 1 and 3. It replaces the retired after-rejection note (which named ONE of five reasons -
+# exactly the lesson a forged document learns from) and it is the SAME sentence for a fraud-deny and for an ordinary
+# shortfall, by design: nothing about which check failed ever reaches the user.
+readonly APPROVAL_REF_DECLINE="captain U7RP6HKUZ 2026-10-29 13:2xZ (verbatim in this script's DECLINE lock comment); copy = decline-copy-ruling.md item 1 (ops-humans-off-fable-o1, 2026-10-29), byte-for-byte; replaces the retired after-rejection note and its five reason strings; firstmate brief decline-copy"
 readonly APPROVAL_REF_PAST="captain U7RP6HKUZ 2026-10-15 23:35Z: \"im referring to before when nick made changes and did a trust verify flow and now we have a lotnof credits to verify with documents and give people 30 days to send something in for the ones missing documents\"; 2026-10-16 00:35Z: \"how many credits were approved without documentstion i dont want to lose users unless its obvious fraud feom tbe past\""
 # Caroline's outbound sanitizer word list, IDENTICAL to intercom-ops-write.sh's
 # SANITIZER_WORDS (which CI compares to plugins/intercom/src/sanitize-tool-leak.ts);
@@ -458,6 +488,16 @@ readonly APPROVAL_REF_PAST="captain U7RP6HKUZ 2026-10-15 23:35Z: \"im referring 
 # resolution-matcher.py); an in-thread note is never posted into a conversation carrying one.
 readonly BLOCKED_CONV_TAGS="abuse-block instagram facebook twitter x whatsapp messenger tiktok sms"
 readonly SANITIZER_WORDS="profile_status|profile_lookup|credits_search|create_ticket|subscription_status|remove_credits|dedupe_check|credit_verification_check|profiles_claim_self|credits_verify|profiles_consolidate|order_lookup|order_address_update|founding_status|founding_buyback_link|support_action_router|memory_search|memory_get|profile_analytics_status|profile_credits_status|profile_claim_status|retention_offer_check|retention_offer_apply|cancel_subscription|billing_status|track_analytics_status|analytics_refresh_request|analytics_recheck|subscription_cancel|refund_policy_check|refund_create|catalog_status|track_lookup|metadata_capture_request|artwork_refresh_request|catalog_recheck|user_status|resend_verification|email_delivery_status|login_recovery_packet|profile_change_packet|profile_merge_check|account_merge_preflight|email_change_preflight|profile_removal_preflight|ticket|tool failed|error fetching|unable to look up|the system says|my system|there was an issue with|ClickUp|openclaw|HYDRA|platform-data-processing"
+# The decline copy's OWN forbidden list (decline-copy-ruling.md item 1: "no reason, no list of what was missing or
+# wrong, no deadline, no removal language, no fraud/forged/doctored/suspicious, no speak-to-support, no threshold, no
+# popularity word, no list of accepted document types"). It is asserted on the COPY PARAGRAPHS only, never on the
+# track list: "Because", "Within" and "Fraud" are all real song titles and a decline still has to go out about them.
+# A match is a build defect: the note is refused before anything is claimed or sent.
+# A claim-shaped decline (the entry's request_id is claim-<claiming.id>) renders the profile-claim sentence instead of
+# the credit one. COPY is readonly by the time the payload's shape is known (the file is read later), so the shape rides
+# its own flag: COPY stays the copy token the ledger records, DECLINE_CLAIM says which of its two shapes rendered.
+DECLINE_CLAIM=0
+readonly DECLINE_FORBIDDEN='because|didn.t name|different track|different role|unreadable|couldn.t read|not a document|fraud|forged|doctored|suspicious|support team|business day|within|popular|speak to|resubmit|we check|we look at|threshold'
 
 # QA #1603: the gate's number / roles checks count TRACKS with the renderer's own identity (tkey: track_id, else the
 # normalised title + artist) - two different tracks both called "Home" are two tracks. Byte-identical to RENDER_JQ's defs.
@@ -497,13 +537,17 @@ refuse() { printf 'REFUSED: %s\n' "$*" >&2; exit 1; }
 if [ "$TESTABLE" != "1" ]; then
   for v in INTERCOM_VERIFY_TEST_LOG_DIR INTERCOM_VERIFY_TEST_CURL_BIN INTERCOM_VERIFY_TEST_TIMEOUT_BIN \
            INTERCOM_VERIFY_TEST_LEDGER INTERCOM_VERIFY_TEST_LEDGER_HELPER INTERCOM_VERIFY_TEST_DAY \
-           INTERCOM_VERIFY_TEST_PROOF_DB INTERCOM_VERIFY_TEST_STAGE2_HELPER INTERCOM_VERIFY_TEST_CORE_NOTICE_HELPER INTERCOM_VERIFY_TEST_NOW INTERCOM_VERIFY_TEST_DISABLED_DIR INTERCOM_VERIFY_TEST_COMM_STATE_HELPER INTERCOM_VERIFY_TEST_GMO INTERCOM_VERIFY_TEST_POLICY INTERCOM_VERIFY_TEST_FABLE_RULINGS INTERCOM_VERIFY_TEST_STRIPE_BASE INTERCOM_VERIFY_TEST_JQ_LIB INTERCOM_VERIFY_TEST_STRIPE_ENV_FILE INTERCOM_VERIFY_TEST_API_RETRY_SLEEPS; do
+           INTERCOM_VERIFY_TEST_PROOF_DB INTERCOM_VERIFY_TEST_STAGE2_HELPER INTERCOM_VERIFY_TEST_CORE_NOTICE_HELPER INTERCOM_VERIFY_TEST_NOW INTERCOM_VERIFY_TEST_DISABLED_DIR INTERCOM_VERIFY_TEST_COMM_STATE_HELPER INTERCOM_VERIFY_TEST_GMO INTERCOM_VERIFY_TEST_POLICY INTERCOM_VERIFY_TEST_FABLE_RULINGS INTERCOM_VERIFY_TEST_STRIPE_BASE INTERCOM_VERIFY_TEST_JQ_LIB INTERCOM_VERIFY_TEST_STRIPE_ENV_FILE INTERCOM_VERIFY_TEST_API_RETRY_SLEEPS DECLINE_CLOSE_HELPER INTERCOM_VERIFY_TEST_DECLINE_SINCE INTERCOM_VERIFY_TEST_DECLINE_CORE_ROUTE_OFF; do
     [ -z "${!v:-}" ] || die "$v is not settable on a deployed copy of this script. The log, the ledger, the client and the clock are not parameters: a caller-selectable one is a send nobody can audit."
   done
   LOG_DIR="$PROD_LOG_DIR"
   LEDGER="$PROD_LEDGER"
   LEDGER_HELPER="$PROD_LEDGER_HELPER"
   STAGE2_HELPER="$PROD_STAGE2_HELPER"
+  DECLINE_CLOSE_HELPER="$PROD_DECLINE_CLOSE_HELPER"
+  # the activation lock is an OPERATOR decision, never a caller's: a deployed copy is silent whatever the
+  # environment says (QA #1718 round 6, 2026-11-06 - the test seam above was reachable in production)
+  DECLINE_CORE_ROUTE_OFF=0
   DISABLED_DIR="/etc/hydra"
   CORE_NOTICE_HELPER="$PROD_CORE_NOTICE_HELPER"
   COMM_STATE_HELPER="$PROD_COMM_STATE_HELPER"
@@ -528,6 +572,7 @@ else
   LEDGER="${INTERCOM_VERIFY_TEST_LEDGER:-$PROD_LEDGER}"
   LEDGER_HELPER="${INTERCOM_VERIFY_TEST_LEDGER_HELPER:-$PROD_LEDGER_HELPER}"
   STAGE2_HELPER="${INTERCOM_VERIFY_TEST_STAGE2_HELPER:-$PROD_STAGE2_HELPER}"
+  DECLINE_CLOSE_HELPER="${INTERCOM_VERIFY_TEST_DECLINE_CLOSE_HELPER:-$PROD_DECLINE_CLOSE_HELPER}"
   DISABLED_DIR="${INTERCOM_VERIFY_TEST_DISABLED_DIR:-/etc/hydra}"
   CORE_NOTICE_HELPER="${INTERCOM_VERIFY_TEST_CORE_NOTICE_HELPER:-$PROD_CORE_NOTICE_HELPER}"
   COMM_STATE_HELPER="${INTERCOM_VERIFY_TEST_COMM_STATE_HELPER:-$PROD_COMM_STATE_HELPER}"
@@ -863,8 +908,8 @@ if [ "$MODE" = "tag-proof" ]; then
   convo="$(printf '%s' "$convo" | "$JQ_BIN" -c --argjson from "$FROM" '.conversation_parts.conversation_parts = ((.conversation_parts.conversation_parts // [])[$from:])')"
   # ANY reply authored by the contact we wrote to (text or attachment; only the author is
   # looked at, never the text) holds the note's removal for a human: the user may be asking
-  # for more time. The latest reply's own time is recorded per message, so a reply after any
-  # note in the thread is seen too.
+  # for more time. The latest reply's own time is recorded per message, so a reply to the
+  # decline is seen too.
   n_replies="$(printf '%s' "$convo" | "$JQ_BIN" -r --arg c "$CONTACT_ID" \
     '[(.conversation_parts.conversation_parts // [])[] | select(.author.type == "user" and (.author.id|tostring) == $c)] | length')"
   REPLIED_AT="$(printf '%s' "$convo" | "$JQ_BIN" -r --arg c "$CONTACT_ID" \
@@ -925,7 +970,7 @@ fi
 [ "$ACTION" != "doc-check" ] || [ "$KIND" = "initial" ] || refuse "--doc-check applies to an initial note."
 case "$KIND" in
   initial|reminder-14|reminder-25|reminder-7) ;;
-  *) refuse "--kind must be initial, reminder-14, reminder-25 or reminder-7 (got '$KIND')." ;;
+  *) refuse "--kind must be initial, reminder-14, reminder-25 or reminder-7 (got '$KIND'). The after-rejection note is retired: a closed request gets the `decline` campaign (captain 2026-10-29 13:2xZ), which states no reason and has no follow-up." ;;
 esac
 if [ "$CAMPAIGN" = "claim-proof-ask" ]; then
   case "$KIND" in initial|reminder-7) ;; *) refuse "claim-proof-ask has one follow-up, --kind reminder-7." ;; esac
@@ -1148,7 +1193,19 @@ case "$CAMPAIGN" in
       refuse "gap_plural_uncoded: this gap ask names 2 or more tracks, and the plural gap text is not approved yet (r5 /l on number). Nothing was sent or claimed."
     fi
     ;;
-  *) refuse "--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status, gap-ask, merge-pending, merge-claim-first, credit-hold-status, claim-proof-pending or proof-need-ask (got '$CAMPAIGN'). Each campaign is pinned in this script; there is no other." ;;
+  decline)
+    # The ONE decline (captain 2026-10-29 13:2xZ; decline-copy-ruling.md). A NOTICE, not an ask: it states no reason,
+    # asks for nothing, and carries no deadline. One per request id ever, one message per user per UTC day, and none
+    # within 7 days of another note (all three in verify_ledger). The copy shape is picked by the FILE, not the caller:
+    # a claim-shaped entry (key claim-<claiming.id>) gets the profile-claim wording, a credit-shaped entry the credit one.
+    MAX_CREDITS=1000; MAX_LISTED=25; COPY="decline"; APPROVAL_REF="$APPROVAL_REF_DECLINE"
+    # the send lock is real, not decorative: flipping DECLINE_COPY_APPROVED to 0 (or the campaign shipping without the
+    # ruling) stops every send while --dry-run keeps rendering for review.
+    [ "$DECLINE_COPY_APPROVED" = 1 ] || refuse "the decline's copy is send-locked (DECLINE_COPY_APPROVED=0): it goes live only in a PR carrying the captain's approval of the rendered copy."
+    [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live and the status notes; decline has ONE copy (captain 2026-10-29 13:2xZ) and it is pinned."
+    [ "$KIND" = "initial" ] || refuse "decline has no follow-ups: one decline per request id, ever. There is no reminder and no second note."
+    ;;
+  *) refuse "--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status, gap-ask, decline, merge-pending, merge-claim-first, credit-hold-status, claim-proof-pending or proof-need-ask (got '$CAMPAIGN'). Each campaign is pinned in this script; there is no other." ;;
 esac
 # C11 (p1 223): --check-recipient is the dry run that equals the send. It runs every send-time check a real send runs
 # up to the claim (the ledger peek, core_notice, the go-live guards, comm_state, the status-note Intercom reads, the
@@ -1613,6 +1670,27 @@ case "$CAMPAIGN" in
       || refuse "claim.platform must be one of $(printf '%s' "$CLAIM_SURFACES" | "$JQ_BIN" -r 'keys_unsorted | join(", ")'): a surface the daily code check can read (never Instagram, X or TikTok)."
     INPUT="$(printf '%s' "$INPUT" | "$JQ_BIN" -c --arg s "$CLAIM_SURFACE" '.claim.surface = $s | .credits[0] += {role: "-", track_title: "-", artist_name: "-"}')" ;;
 esac
+if [ "$CAMPAIGN" = "decline" ]; then
+  # The decline follows the FILE's shape, never the caller's word: a claim-shaped entry (claim-<claiming.id>, the same
+  # key the claim lane already uses) gets the profile-claim sentence, a credit-shaped entry (a real request id) gets the
+  # credit sentence with its list. One message is one shape.
+  nclaim="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '[.credits[] | select(.request_id | test("^claim-[0-9]{1,19}$"))] | length')"
+  nreal="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '[.credits[] | select((.request_id | test("^claim-[0-9]{1,19}$")) | not)] | length')"
+  [ "$nclaim" -eq 0 ] || [ "$nreal" -eq 0 ] \
+    || refuse "the decline's credits mix claim keys (claim-<id>) and request ids; one message is one shape. Split them."
+  # A reason is INTERNAL (captain 2026-10-29 13:2xZ; decline-copy-ruling.md item 1: no reason, no list of what was
+  # missing or wrong). It rides on the decider's row and the audit file; a payload that carries one toward the copy is
+  # refused here, so "the template receives only {n} and {profile}" is enforced, not promised.
+  wreason="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '[.credits[] | select((((.reason // "") | length) > 0) or (((.received // "") | length) > 0) or (((.rejected_reason // "") | length) > 0))] | length')"
+  [ "$wreason" -eq 0 ] || refuse "$wreason credit(s) carry a reason/received field. A decline never states a reason: the reviewer's code stays on the decider's row and in the audit file, never in a payload that renders copy. Remove it."
+  if [ "$nclaim" -gt 0 ]; then
+    [ "$N" -eq 1 ] || refuse "a profile-claim decline is one claim per message (got $N)."
+    printf '%s' "$INPUT" | "$JQ_BIN" -e '.credits[0].profile_id | length > 0' >/dev/null \
+      || refuse "the claim decline needs the entry's profile_id, the declined claim's profile id."
+    DECLINE_CLAIM=1
+    INPUT="$(printf '%s' "$INPUT" | "$JQ_BIN" -c '.credits[0] += {role: "-", track_title: "-", artist_name: "-"}')"
+  fi
+fi
 if [ "$COPY" = "teamreviewcount" ]; then
   # The count-only note shows no title, artist or role (they may be blank or unshowable: that is
   # why it is sent): placeholders for the shape checks; a malformed profile/track ref is dropped.
@@ -1764,6 +1842,9 @@ if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "uvn-status" ] && [ "$UVN_STATUS_COPY_AP
 fi
 if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "gap-ask" ] && [ "$GAP_ASK_COPY_APPROVED" != "1" ]; then
   refuse "the gap-ask copy is not approved for sending (GAP_ASK_COPY_APPROVED=0)."
+fi
+if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "decline" ] && [ "$DECLINE_CORE_ROUTE_OFF" != "1" ]; then
+  refuse "hydra's decline is silent on purpose: core's own credits_rejected email is the decline and carries the same approved text, and only one of the two may speak. This campaign activates only for a user whose core route is measured OFF (credit_review/decline_close.py). Nothing was sent or claimed; --dry-run renders exactly what would be sent."
 fi
 # Per-campaign kill switch (rulings-1028-1430 section 2.4): `touch /etc/hydra/<campaign>.disabled` stops every real
 # send of that campaign at once, before any claim or Intercom call; the dry run still renders. Removing the file
@@ -2081,6 +2162,36 @@ def live_followup($fn; $c; $maxl; $kind; $due):
   | .segs += [ {p: "Nothing has been removed yet: \(it1($n; "the credit stays"; "the credits stay")) on your profile. If we can't verify \(it1($n; "it"; "a credit")) by \($due), \(it1($n; "it"; "that credit")) will be removed from your profile that day. Reply to this message with any one of the documents from my earlier note and we'll pick it up right away."} ]
   | .segs += (if $kind == "reminder-25" then [ {p: "This is my last reminder about this review. If you need more time, tell us which credit and why, and we will keep the request open."} ] else [] end)
   | .segs += sig;
+# THE DECLINE (captain 2026-10-29 13:2xZ, verbatim: "It feels like we are over-communicating when we deny a credit: we
+# could just say supporting information was not provided adequate enough to earn the credit, and if they want to submit
+# something they can submit something again to start the process again"; ruling decline-copy-ruling.md item 1).
+# ONE reason-free sentence. It never names a reason, never lists what was wrong, never sets a date, never mentions
+# verification, fraud, documents we accept or a person to contact, and it is the SAME words for a fraud deny and for an
+# ordinary shortfall - a decline must not teach anyone which check failed. 
+# The sign-off is "Muso.AI" alone, not Caroline's "Thank you, Caroline, Muso Support" (a denial is not a support
+# conversation, and the approved text carries no such line).
+def decline_note($fn; $c; $maxl; $claim):
+  ($c | length) as $n
+  | if $claim then
+      { subject: "Your profile claim on Muso",
+        segs: [ {p: "Hi \($fn),"},
+                {p: "Thanks for your request. The supporting information we received wasn't enough to confirm this profile claim, so we've closed the request."},
+                {p: "If you'd like us to look again, submit the claim again from the profile page and a fresh review will start."},
+                {p: "Muso.AI"} ] }
+    elif $n == 1 then
+      { subject: "Your credit request on Muso",
+        segs: [ {p: "Hi \($fn),"},
+                {p: "Thanks for your request. The supporting information we received wasn't enough to confirm this credit, so we've closed the request."},
+                {p: "If you'd like us to look again, submit the credit again with your supporting documents and a fresh review will start."},
+                {p: "Muso.AI"} ] }
+    else
+      { subject: "Your credit request on Muso",
+        segs: [ {p: "Hi \($fn),"},
+                {p: "Thanks for your request. The supporting information we received wasn't enough to confirm these \($n) credits, so we've closed the requests."},
+                {ul: listed($c; $maxl)},
+                {p: "If you'd like us to look again, submit them again with your supporting documents and a fresh review will start."},
+                {p: "Muso.AI"} ] }
+    end;
 def past_initial($fn; $c; $maxl):
   ($c | length) as $n
   | (["mix_master","producer","writer","engineer","musician","studio_org","anr","other"] - (["mix_master","producer","writer","engineer","musician","studio_org","anr","other"] - [$c[].role_families[]])) as $fams
@@ -2426,6 +2537,7 @@ def gap_ask($fn; $c; $maxl):
    elif $copy == "removal" then removal_notice($fn; .credits; $maxl)
    elif $copy == "past" then
      past_initial($fn; .credits; $maxl)
+   elif $copy == "decline" then decline_note($fn; .credits; $maxl; $decline_claim == 1)
    elif $kind == "initial" then live_initial($fn; .credits; $maxl; $copy == "windowed"; $due)
    else live_followup($fn; .credits; $maxl; $kind; $due) end)
 # Status notes carry the approved "Muso Support" sign-off on email only (the handoff copy, firstmate
@@ -2440,6 +2552,7 @@ JQ
 readonly RENDER_JQ
 render() { # <input-json> -> {subject, text, html}
   printf '%s' "$1" | "$JQ_BIN" -c --argjson maxl "$MAX_LISTED" --arg copy "$COPY" --arg kind "$KIND" \
+    --argjson decline_claim "$DECLINE_CLAIM" \
     --arg ack "$MERGE_CLAIM_FIRST_PROOF_ACK" --argjson mcfproof "${MCF_PROOF:-null}" \
     --arg due "$DUE_LABEL" --arg mtype "$MESSAGE_TYPE" --arg day "$DAY" "$RENDER_JQ"
 }
@@ -2463,6 +2576,22 @@ leak_reason() {
   if printf '%s' "$1" | "$JQ_BIN" -e '(.subject + " " + .text) | explode | index([8212]) != null' >/dev/null; then
     echo "an em dash (Caroline's voice never uses one)"; return
   fi
+}
+
+# decline_copy_guard <rendered-json>: the decline's own rules, asserted on the copy PARAGRAPHS before anything is
+# claimed or sent (never on the track list: "Because", "Within" and "Fraud" are all real song titles and a decline
+# still has to go out about them). A hit is a build defect, not a data problem: it refuses, and nothing is written.
+decline_copy_guard() {
+  [ "$COPY" = "decline" ] || return 0
+  local ps hit
+  # The rendered note is {subject,text,html}; a list line is a track title, never copy, so it is dropped before the
+  # assertion ("Because", "Within" and "Fraud" really are song titles).
+  ps="$(printf '%s' "$1" | "$JQ_BIN" -r '[ .text | split("\n\n")[] | select((startswith("- ")) | not) ] | join("\n\n")')"
+  hit="$(printf '%s' "$ps" | grep -oiE "$DECLINE_FORBIDDEN" | head -1 || true)"
+  [ -z "$hit" ] || refuse "decline_copy_reason_word: the rendered decline says '$hit'. A decline never states a reason and no copy teaches what we check (captain 2026-10-29 13:2xZ; decline-copy-ruling.md item 1). Nothing was sent or claimed."
+  printf '%s' "$ps" | grep -qiE 'remov|deadline|by [0-9]|within [0-9]|days?\b' \
+    && refuse "decline_copy_deadline: the rendered decline carries removal, deadline or day-count wording (the decline promises no date and threatens nothing). Nothing was sent or claimed."
+  return 0
 }
 
 # record_refusal <reason>: terminal ledger record (initial notes per request id; a reminder
@@ -2607,6 +2736,7 @@ RENDERED="$(render "$INPUT")"
 [ "$GMO" != 1 ] || RENDERED="$(with_o "$RENDERED")"
 leak="$(leak_reason "$RENDERED")"
 [ -z "$leak" ] || record_refusal "the rendered note contains $leak (from a track title, artist or role). Customers never see internal surfaces; this note is not sent and the credits are recorded as refused for a human to look at."
+decline_copy_guard "$RENDERED"
 
 payload() { # <rendered-json> <contact-id>
   if [ -n "$THREAD" ]; then
@@ -3521,6 +3651,47 @@ if [ "$KIND" = "reminder-7" ]; then
   esac
 fi
 if [ -n "$REPLY_DUE" ] && [ "$ACTION" = "post" ]; then rd_final_read; fi
+# QA #1718 3: the activation lock is ONE switch for the campaign; the decision about a user is not. Ask who tells
+# THIS user before claiming anything: core's own credits_rejected email (its route is on, or the send ledger already
+# shows one for them) or hydra. Only `hydra_decline` proceeds - `core_email` and `hold` both stop here, UNCLAIMED, so
+# an enabled fallback can never send a second decline and never sends blind while the route is unread.
+if [ "$LIVE" = "1" ] && [ "$CAMPAIGN" = "decline" ]; then
+  # the window is the CLOSE of these credits, never "any email to this user lately" (QA #1718 B): a core note from
+  # before the close belongs to an earlier request, and a fixed window either misses it (a second decline) or lets
+  # it suppress a request that was never told. No close time = nothing to attribute the read to = hold.
+  DC_SINCE="${INTERCOM_VERIFY_TEST_DECLINE_SINCE:-}"
+  rc=0
+  if [ -z "$DC_SINCE" ]; then   # the test seam only exists while TESTABLE=1: the sanitizer clears it in production
+    set +e
+    DC_SINCE="$(ledger close-since --request-ids "$ALL_IDS" 2>/dev/null | "$JQ_BIN" -r '.since // ""' 2>/dev/null)"
+    rc=$?
+    set -e
+  fi
+  if [ "$rc" != 0 ] || [ -z "$DC_SINCE" ]; then
+    printf 'HELD decline_hold credits=%s (no close time for these credits: %s); nothing was sent or claimed\n' "$N" \
+      "${DC_SINCE:-the ledger did not report when they were closed}"
+    exit 3
+  fi
+  # WHICH TEMPLATE (QA #1718, 2026-11-06): a profile claim is declined by core's `profile_claim_rejected` email, not
+  # by `credits_rejected`, and the two have their own routes. Asking about the credit template for a claim would read
+  # "core emails credits" as "core told this claimant" and the claimant would never get the decline the copy promises.
+  DC_TEMPLATE="credits_rejected"
+  if [ "$DECLINE_CLAIM" = "1" ]; then DC_TEMPLATE="profile_claim_rejected"; fi
+  set +e
+  DC="$("$PY_BIN" -I "$DECLINE_CLOSE_HELPER" --user-id "$USER_ID" --since "$DC_SINCE" \
+    --template "$DC_TEMPLATE" 2>&1)"
+  rc=$?
+  set -e
+  # fail closed toward SILENCE: rc 0 alone is not an answer - the decision word must be hydra_decline, so a helper
+  # that printed nothing readable (or died) holds instead of sending
+  dc="$(printf '%s' "$DC" | "$JQ_BIN" -r '.decision // ""' 2>/dev/null || true)"
+  if [ "$rc" != 0 ] || [ "$dc" != "hydra_decline" ]; then
+    why="$(printf '%s' "$DC" | "$JQ_BIN" -r '.why // ""' 2>/dev/null || true)"
+    printf 'HELD decline_%s credits=%s (%s); nothing was sent or claimed\n' "${dc:-hold}" "$N" \
+      "${why:-the per-user decline decision could not be read: ${DC:0:160}}"
+    exit 3
+  fi
+fi
 # p1 615: the copy this note renders and its openers/prefixes go on the ledger row (audits read the ledger)
 NOTE_VARIANT="$( { [ "${C2:-0}" = "1" ] && echo c2; [ "${RD_PREFIX:-0}" = "1" ] && echo reply_due_correction; [ -n "${APPROVAL_REF_SUFFIX_O:-}" ] && echo o; true; } | paste -sd, -)"
 # The template identity this send renders, hashed: campaign|kind|copy|variant. Stamped on the ledger row with the
@@ -3594,6 +3765,12 @@ leak="$(leak_reason "$RENDERED")"
 if [ -n "$leak" ]; then
   ledger finalize --message-row "$ROW_ID" --status refused --reason "leak check: $leak" >/dev/null
   refuse "the rendered note contains $leak; not sent."
+fi
+# The decline's own rules, on the CLAIMED credits' render (the copy never varies with the payload, so a hit here is a
+# copy defect): the claim is closed refused, and nothing reaches the customer.
+if ! dg="$(decline_copy_guard "$RENDERED" 2>&1)"; then
+  ledger finalize --message-row "$ROW_ID" --status refused --reason "${dg:0:200}" >/dev/null
+  refuse "$dg"
 fi
 PAYLOAD="$(payload "$RENDERED" "$CONTACT_ID")"
 # [key=lamberto-reply-due]: the handed answer went unsent for 48 h - reassign to this gate (+ note), ledger row FIRST,

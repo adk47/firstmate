@@ -24,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from credit_review import claim_executor as cx  # noqa: E402
+from credit_review import decline_close as dc  # noqa: E402
 from credit_review import fable_executor as fx  # noqa: E402
 
 FANOUT_WAIT_S = int(os.environ.get("FABLE_DECIDER_FANOUT_WAIT_S", "90"))
@@ -58,6 +59,24 @@ def fanout_check(rows: list[tuple[str, int, str | None]], since: datetime,
                                  "users_noted": len(counts), "over": over}}), file=sys.stderr)
     if over:
         return f"more {template} notes than (user, profile) groups for {sorted(over)[:10]}"
+    return None
+
+
+def decline_plan(rows: list[tuple[str, int, str | None]], since: datetime) -> str | None:
+    """After a rejected batch was written: who tells each user, core's own email or hydra's `decline` campaign
+    (decline_close: the measured send-gateway ledger plus the configured route map, READ, never guessed).
+
+    This never sends: the plan is printed for the operator, and the campaign gate owns every send rule. The one
+    forbidden outcome is two decline messages for one request (core email + hydra campaign), so a user the ledger
+    cannot be read for is HELD, not sent. Returning a surprise stops the run (a person looks before anything else)."""
+    users = sorted({u for _, u, _ in rows})
+    result = dc.plan(users, since.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    print(json.dumps({"declines": {k: v for k, v in result.items() if k != "users"},
+                      "declines_by_user": result["users"]}), file=sys.stderr)
+    held = [u for u, row in result["users"].items() if row["decision"] == dc.HOLD]
+    if held:
+        return (f"{len(held)} user(s) cannot be told whether core's email already went out ({held[:10]}); "
+                "nothing else is sent to them")
     return None
 
 
@@ -110,6 +129,9 @@ def main() -> int:
     ap.add_argument("--apply", action="store_true", help="write (default: dry run)")
     ap.add_argument("--limit", type=_positive, default=None, help="only the first N rows (N >= 1)")
     ap.add_argument("--no-fanout-check", action="store_true", help="skip the between-batch send-ledger read")
+    ap.add_argument("--decline-plan", action="store_true",
+                    help="after each rejected batch, print who tells each user (core's email or hydra's decline); "
+                         "reads only, never sends")
     ap.add_argument("--verify-batch", action="store_true",
                     help="(wrapper boundary) re-check one batch: --tray --ruling --run-id --expected --ids")
     ap.add_argument("--ruling")
@@ -152,9 +174,16 @@ def main() -> int:
         print(json.dumps({"tray": a.tray, "refused": str(exc)}))
         return 2
     template = fx.TEMPLATE[tray.action]
+
+    def between(rows: list[tuple[str, int, str | None]], since: datetime) -> str | None:
+        surprise = fanout_check(rows, since, template)
+        if surprise or tray.action != "reject":
+            return surprise
+        # a close: core's own credits_rejected email may already be the decline (decline-copy-ruling.md §3.2)
+        return decline_plan(rows, since) if a.decline_plan else None
+
     res = fx.run(tray, apply=a.apply, limit=a.limit,
-                 between_batches=None if (a.no_fanout_check or not a.apply)
-                 else (lambda rows, since: fanout_check(rows, since, template)))
+                 between_batches=None if (a.no_fanout_check or not a.apply) else between)
     print(json.dumps({**res.as_dict(), "tray_sha256": tray.sha256, "daily_cap": tray.daily_cap,
                       "cap_ruling_id": tray.cap_ruling_id}))
     return 1 if res.stopped else 0

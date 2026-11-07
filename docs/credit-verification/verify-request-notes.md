@@ -111,8 +111,8 @@ says so. A reply carrying attachments also gets the `credit-proof` tag (a claim-
 reply gets `claim-proof` instead; see the claim proof ask section below). A tagged thread is
 never re-tagged (`ALREADY TAGGED`), but while its windowed note still has a credit no
 accepted review cleared (awaiting review, or rejected) the sweep keeps reading it and
-recording new replies, so a reply after any note in the thread holds that credit's removal
-for a human. Nothing else
+recording new replies, so a reply to the decline in any thread of the note
+holds that credit's removal for a human. Nothing else
 happens: no reply, no decision, no credit change. The Ops
 document step (T07) picks tagged conversations up later.
 
@@ -297,7 +297,7 @@ notes.
 | | NEW provisional approvals (`verify-live`) | PAST credits (`retro-past`) |
 |---|---|---|
 | Copy | `windowed`, the only copy ever sent: Fable's v1 with ONE date, the reply-by date 30 days out ("Reply to this message by {reply_by} (30 days from today)", "If we can't verify this credit by {reply_by}, it will be removed from your profile that day"), and a restore line ("If you send a valid document after that, we'll review it and can restore the credit"). The ledger stores `due_day` = reply-by and `removal_day` = the day after it, so nothing is ever removed before the date the note named. The day-25 reminder adds "If you need more time, tell us which credit and why, and we will keep the request open." (Fable copy review 2026-10-17, pack 1). `v1` (no date) is preview-only | Fable's GO'd role drafts: routine review, one document per credit, **no deadline, no removal language** |
-| Follow-ups | day 14 and day 25 (the second says it is the last), only for credits no review has ruled on. A **rejection sends nothing from this script** (see below). A follow-up with nothing left to send (every credit documented, approved by a person or no longer approved) is closed as `skipped`; one whose user is waiting on a pending document stays due. Only follow-ups actually sent count against `--max-users` | **none**: one message per user, ever, and never to a user who already sent proof |
+| Follow-ups | day 14 and day 25 (the second says it is the last), only for credits no review has ruled on. A closed request is the separate `decline` campaign, never a follow-up. A follow-up with nothing left to send (every credit documented, approved by a person or no longer approved) is closed as `skipped`; one whose user is waiting on a pending document stays due. Only follow-ups actually sent count against `--max-users` | **none**: one message per user, ever, and never to a user who already sent proof |
 | No reply | windowed: `credit-review.py verify-notify --removal-due FILE` lists the credits from their `removal_day` (00:00Z after the reply-by date ends; a reply on the reply-by date is never already in the export), minus any with their own proof-on-file entry (any kind) or a human approval. Credits whose user replied to the note are held for a human and written separately to `FILE.held`, never to FILE. A missing or stale proof-on-file list exports nothing and exits non-zero | the credit stays; `credit-review.py verify-wave --unverified FILE` lists it as `unverified` for the board / valuation basis after 30 days |
 | Send lock | `LIVE_WINDOWED_COPY_APPROVED=0`: every real verify-live send is refused, and the cron ships disabled | `RETRO_COPY_APPROVED=0`; cron ships disabled |
 
@@ -313,31 +313,100 @@ notes.
   [--reason R] --reviewer <who>` (`verify_proof_reviews`, keyed by the note and the request
   id). **Only an accepted document clears a credit.** When a document (attachment) was received on
   the note, a rejection needs `--reason`, one of `doesnt_name_you`, `other_track`,
-  `other_role`, `unreadable`, `not_a_document`; the reason is for humans - it stays in
-  `verify_proof_reviews` and the audit file and **reaches the user in no message** (never the
-  file name, never a reason). After a reply with no document a rejection takes no reason. Once every credit on the note is
+  `other_role`, `unreadable`, `not_a_document`; it stays INTERNAL (the `decline` copy states
+  no reason at all), so neither the reason nor the file name ever reaches the user. After a reply with no document a rejection takes no reason. Once every credit on the note is
   reviewed and any was rejected, the note goes back to "no proof" and the sweep re-tags it
   only when a NEW attachment arrives (which puts every rejected credit back under review).
   A reviewed credit never gets a day-14 / day-25 reminder ("We haven't received a document
   yet" would be false).
-- **After a rejection NOTHING is sent by this script** (deleted 2026-11-04, Fable ruling-79
-  denial + dispatch `decline-copy.md` + Aaron 2026-10-29 wording rule). The kind, its copy and
-  its five fixed reasons (`doesnt_name_you`, `other_track`, `other_role`, `unreadable`,
-  `not_a_document`) are gone from `intercom-verify-request.sh`; `--kind after-rejection` is
-  refused. The old copy named ONE of those five, i.e. it told a forger exactly which check
-  failed and over-communicated on a decline. The decline is the single approved sentence in the
-  `decline` campaign (its own PR), sent once per decision, with no reason, no deadline and no
-  list of accepted documents. `verify_ledger` keeps the historical kind for reading old rows
-  but `reminders_due` no longer offers it.
-- **A reply after a note** (text or attachment; the latest user reply's own time is recorded
-  per message, `last_reply_at`) holds the credits that note named for a human until a review
-  rules on them again.
+- **After a rejection** each rejected credit gets ONE `decline` note, ever — its own campaign,
+  not a follow-up, and `initial` kind only (no reminders, no second note). The batched
+  `decline` campaign sends it (one message per user per UTC day, 7-day cooldown, once per
+  request id ever). **The copy never says which check failed and never teaches the
+  process** (captain 2026-10-29 13:2xZ, `decline-copy-ruling.md` item 1): "The supporting
+  information we received wasn't enough to confirm this credit, so we've closed the
+  request." + "If you'd like us to look again, submit the credit again with your supporting
+  documents and a fresh review will start." + `Muso.AI`. The five reasons
+  (`doesnt_name_you`, `other_track`, `other_role`, `unreadable`, `not_a_document`) stay
+  INTERNAL — on the `verify_proof_reviews` row and the executor's audit file — because a
+  fraud denial and an ordinary shortfall are the same sentence to the customer. The gate
+  refuses any payload that carries a reason, any copy matching `DECLINE_FORBIDDEN`, and any
+  payload whose credits mix claim keys with request ids.
+  The decline names **no date**: a declined credit is removal-due from the original note's
+  own `removal_day`, and only once the decline was actually sent (`HELD_NOT_TOLD` before
+  that). A credit a review did not rule `rejected` is never declined.
+  **Only ONE of core and hydra may speak** (item 3): core already emails `credits_rejected`
+  on a rejection, and after the muso-messaging template change that email carries this same
+  approved text — so hydra's campaign ships SILENT (`DECLINE_CORE_ROUTE_OFF=0`: every real
+  send refuses, `--dry-run` still renders). It activates only for a user whose core route is
+  **measured off** (`scripts/credit_review/decline_close.py` reports `core_email` /
+  `hydra_decline` / `hold` per user; an unknown route word or an unreadable ledger HOLDS).
+  **The gate asks it per user before it claims anything** (`decline_close.py --user-id <id>`: exit 0 only for
+  `hydra_decline`), so the activation switch alone can never send to someone core already told, and never sends
+  while the route is unreadable. `core_email` and `hold` both print `HELD decline_<decision>` and claim nothing.
+  Two things make that read evidence rather than an impression. **The window is the CLOSE of these credits**
+  (`verify_ledger.py close-since`: the earliest `rejected` review on them, minus a day; a credit no review names
+  falls back to the earliest note that asked for it, which only widens the window), so a core note about an earlier
+  close neither suppresses this one nor falls outside it — and no close time at all is a HOLD, not a send.
+  **Every psql call is strict** (`-v ON_ERROR_STOP=1`, and any stderr or unexpected row shape reads as "could not
+  read the ledger"): psql otherwise prints an error and exits 0 with empty stdout, which would look exactly like
+  "core told nobody".
+  **A note is never attributed to a request** (QA #1718, 2026-11-06): `send.messages` carries no request id, so a
+  `credits_rejected` row for this user since the close may belong to a DIFFERENT request that closed at the same
+  time or later. Reading it as "core told them about this one" would leave this request silently untold, so a
+  positive note is a `hold` a person sees, never a `core_email` claim the ledger cannot support. Only the
+  configured route can say `core_email` for everyone, because a routed template emails on every rejected
+  transition — a statement about all requests, not about one row. No note since the close is still sound evidence
+  that core did not tell them: core's email is emitted on the `rejected` transition, so it can never predate it.
+  **The template is the one the decline is about** (QA #1718, 2026-11-06): a credit is declined by core's
+  `credits_rejected` email and a profile claim by `profile_claim_rejected`, and the two have their own routes. The
+  gate passes `--template profile_claim_rejected` for a `claim-<id>` request and the default `credits_rejected`
+  otherwise, and BOTH the route read and the ledger read use it — judging a claim by the credit route would read
+  "core emails credits" as "core told this claimant", and the claimant would never get the decline the copy promises.
+  **The close boundary is immutable** (same review): `verify_proof_reviews.reviewed_at` is overwritten by a later
+  re-rejection and `mark_tagged` deletes the old verdict, so a review timestamp alone moves FORWARD — and a boundary
+  that moves forward excludes core's earlier decline email, a zero count reads as "core never told them", and hydra
+  sends a second decline for the same request. The floor is the **day of the earliest note that asked for these
+  credits**: a request cannot be closed before it was asked, and a note's `day` is written once and never edited, so
+  no later review can move it. `close_since` takes the EARLIER of the note day and the earliest surviving rejection,
+  so the window can only ever widen toward silence. The cost is a wider window for a credit asked long before it
+  closed (a core note about another of that user's requests inside the gap holds this one) — the safe direction,
+  since a hold is printed and a person decides while a duplicate decline is invisible.
+  **The removal path asks core too** (same review): a rejected credit is only removed once its owner has been told,
+  and with core's route ON the telling is core's email — hydra writes no `decline` row at all. A removal decision
+  that reads only hydra's ledger therefore holds every rejected credit as never-told forever, which is what the
+  retired after-rejection note used to prevent. `decline_close.core_told` answers for core (routed = every rejected
+  credit is told, because core emails on the `rejected` transition; off = core told nobody, hydra's own sent row
+  decides; unreadable = `None`, which holds), and `credit-review.py verify-notify --removal-due` passes it into
+  `verify_ledger.removal_due` / `held_for_human`. **A user-level count is never per-request evidence**: no store we
+  can read carries a request id — `send.messages` has none, and ClickHouse `messaging.email_events` has none either
+  (`event_time, event_type, source, template_key, subject, campaign_name, provider, reason, email, user_id,
+  event_id`) — so a note cannot be attributed to a credit. Counting rows cannot close that gap: one credit rejected
+  twice produces two notes, so a count of N does not mean N distinct requests were told, and a count of at least N
+  does not mean every request was. `core_told` therefore never answers `True` for a specific request while core is
+  the teller; a note that exists but cannot be attributed holds the credit as `HELD_NOT_ATTRIBUTABLE` (distinct from
+  `HELD_NOT_TOLD`, which means no note was found at all), and a person decides. **The consequence, stated plainly:**
+  while core's `credits_rejected` route is on, a rejected credit is never auto-removed — it appears in
+  `held_for_human` for review. That is the fail-closed direction (a held credit is visible to a person; a credit
+  removed from someone nobody told is not), and it is the price of core's email carrying no request id. The day it
+  does, only `core_told` changes: the ledger already releases on a `True`.
+  Two declines for one request is the one outcome both paths must never produce.
+- **A reply to the decline** (text or attachment; the latest user reply's own time is
+  recorded per message, `last_reply_at`) holds the credits that note named for a human until
+  a review rules on them again. A new document sent in reply is tagged (the decline joins the
+  note's family), which clears the earlier rejection and puts the credit back under review —
+  the fresh review the copy promises — and holds it for a human. A decline may name credits of
+  SEVERAL notes (a user rejected on two of them): the verdict for each credit is filed under
+  **that credit's own note** (`verify_proof_reviews.family = the note that asked for the
+  credit`), and the re-tag clears every rejected verdict the decline covered, not only the
+  first note's — otherwise the promised fresh review could not complete for the second note.
 - **Held for a human** (`FILE.held`, counted in the run summary, never in FILE), each with its
   reason: a credit past its date whose document still awaits review (`document awaiting
   review`, including a credit the reviewer never ruled on), a credit whose user replied to the
   note in any way and no review has ruled on (`extension_requested_at`; the run summary also
-  reports each newly recorded reply), and a rejected credit whose user replied after the note.
-  A human picks them up with `--proof-review`.
+  reports each newly recorded reply), and a rejected credit whose decline has not gone out,
+  and a rejected credit whose user replied after its decline. A human picks them up with
+  `--proof-review`.
 - The removal export removes nothing. The removal step (a guarded server soft-remove with a
   restore path) must re-check each credit and never remove one that was confirmed
   meanwhile.

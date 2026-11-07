@@ -124,6 +124,7 @@ from credit_review import uvn_status  # noqa: E402
 from credit_review import withdrawal_confirm  # noqa: E402
 from credit_review import claim_proof_ask  # noqa: E402
 from credit_review import claim_status_list  # noqa: E402
+from credit_review import decline_close  # noqa: E402
 from credit_review import verify_notify  # noqa: E402
 from credit_review.evidence import EvidenceBuilder, parse_ts  # noqa: E402
 from credit_review.judge import DEFAULT_MIN_BALANCE_USD, Judge, account_balance_usd  # noqa: E402
@@ -714,7 +715,11 @@ def cmd_verify_notify(args: argparse.Namespace) -> int:
             return 1
         db = verify_ledger.connect(args.ledger or verify_ledger.DEFAULT_PATH)
         try:
-            rows, held = verify_notify.removal_due(db, admin_api.AdminClient(), documented, day=_today())
+            # WHO TOLD THEM (QA #1718, 2026-11-06): with core's own credits_rejected email routed, hydra writes no
+            # `decline` row, so the removal decision must ask core's route or it holds every rejected credit forever.
+            # An unreadable route answers None, which holds - never releases.
+            rows, held = verify_notify.removal_due(db, admin_api.AdminClient(), documented, day=_today(),
+                                                   core_told=decline_close.core_told)
         finally:
             db.close()
         held_path = args.removal_due + ".held"

@@ -84,7 +84,7 @@ os.environ["CREDIT_RETRO_ORG_AFFILIATION"] = AFFILIATION_FILE
 # Paying status: unknown in tests unless a test brings a file (oldest first).
 os.environ.setdefault("CREDIT_TRUST_PAYING_USERS_FILE", os.path.join(_PROOF_DIR, "paying-users.json"))
 
-from credit_review import affiliation, verify_ledger, verify_notify  # noqa: E402
+from credit_review import affiliation, decline_close, verify_ledger, verify_notify  # noqa: E402
 from credit_review import verify_notify as _vn_r5  # noqa: E402
 _vn_r5.PRESENTED_LOOKUP = lambda ids: {}  # r5: presented profile ids never come from the replica in tests
 
@@ -555,8 +555,11 @@ class WindowAndPastLedgerTests(unittest.TestCase):
     def held(self, day="2026-11-20"):
         return [(h["request_id"], h["reason"]) for h in verify_ledger.held_for_human(self.db, day=day)]
 
-    def tell(self, day, ids, mid="590"):
-        c = self.remind(verify_ledger.AFTER_REJECTION, day, ids=ids)
+    def decline(self, day, ids, mid="590", user="a@x.com"):
+        """The one reason-free decline (campaign `decline`): a rejected credit is HELD until a SENT decline row
+        names it. The decline names no date, so the ORIGINAL note's removal day governs from the moment the
+        user has been told."""
+        c = verify_ledger.claim(self.db, user_key=user, day=day, request_ids=list(ids), campaign="decline", **self.kw)
         self.assertEqual(c["result"], "claimed", c)
         verify_ledger.finalize(self.db, message_row=c["message_row"], status="sent", message_id=mid)
         return c
@@ -575,20 +578,92 @@ class WindowAndPastLedgerTests(unittest.TestCase):
                          "no follow-up after a rejection: the after-rejection kind is deleted from the "
                          "sender (2026-11-04) and the ledger no longer offers it")
         self.assertEqual(verify_ledger.awaiting_proof(self.db), ["500"], "the sweep watches for a new attachment")
-        c = self.tell("2026-11-10", ["r1"])
-        self.assertEqual((c["due_day"], c["removal_day"]), ("2026-11-17", "2026-11-18"),
-                         "the reply-by date is never earlier than 7 days after the after-rejection note")
-        self.assertEqual(self.due_ids(day="2026-11-17"), [], "removal stays after the date we named")
-        due = verify_ledger.removal_due(self.db, day="2026-11-18")
-        self.assertEqual([(d["request_id"], d["removal_day"]) for d in due], [("r1", "2026-11-18")])
-        self.assertEqual(self.remind(verify_ledger.AFTER_REJECTION, "2026-11-11")["result"], "done", "one per note")
+        c = self.decline("2026-11-10", ["r1"])
+        self.assertEqual(c["request_ids"], ["r1"], "the decline names the rejected credit")
+        self.assertFalse(c["removal_day"], "and it names no date")
+        self.assertEqual(self.held(), [], "told: the credit is no longer held for a human")
+        self.assertEqual(self.due_ids(day="2026-11-15"), [], "removal stays after the note's own window")
+        due = verify_ledger.removal_due(self.db, day="2026-11-16")
+        self.assertEqual([(d["request_id"], d["removal_day"]) for d in due], [("r1", "2026-11-16")],
+                         "the original note's removal day governs once the user has been told")
+        again = verify_ledger.claim(self.db, user_key="a@x.com", day="2026-11-11", request_ids=["r1"],
+                                    campaign="decline", **self.kw)
+        self.assertEqual(again["result"], "already_notified", "a declined request id is declined once, ever")
         self.assertEqual(verify_ledger.message(self.db, "500")["proof_attachments"], 1)
-        verify_ledger.mark_tagged(self.db, message_id="590", conversation_id="10", attachments=1)
+        row = self.db.execute("SELECT outcome, reviewed_by, reason FROM verify_proof_reviews WHERE request_id='r1'")
+        self.assertEqual(tuple(row.fetchone()), ("rejected", "ops-doc-step", "doesnt_name_you"),
+                         "the reason and its reviewer stay on the internal row: nothing about them reaches the user")
+        later = datetime.now(timezone.utc) + timedelta(hours=1)
+        verify_ledger.mark_tagged(self.db, message_id="590", conversation_id="10", attachments=1, now=later)
         self.assertEqual(self.due_ids(), [], "a new document puts the rejected credit back under review")
-        self.review(["r1"], "accepted", reviewer="U038BM16T7W")
-        self.assertEqual((self.due_ids(), self.held()), ([], []))
-        row = self.db.execute("SELECT outcome, reviewed_by FROM verify_proof_reviews WHERE request_id='r1'").fetchone()
-        self.assertEqual(tuple(row), ("accepted", "U038BM16T7W"))
+        self.assertEqual((self.due_ids(), self.held()), ([], [("r1", verify_ledger.HELD_AWAITING_REVIEW)]),
+                         "the document the decline invited is a FRESH review's input, so the credit waits for a human "
+                         "and is never removed on the strength of the earlier rejection")
+        # a resubmission is a new request in core (the decline says "submit the credit again"); this closed one is
+        # resolved by a person reading held_for_human, never by the export.
+        self.assertEqual(verify_ledger.removal_due(self.db, day="2027-01-01"), [])
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM verify_proof_reviews WHERE request_id='r1'").fetchone()[0],
+                         0, "the new document cleared the old verdict: the fresh review starts from nothing")
+
+    def test_a_tagged_decline_parented_to_a_retro_past_note_is_still_read(self):
+        """QA #1718 round 9 (2026-11-06): a decline is parented to the note whose credits it closed, and that note
+        may be a `retro-past` one. Reading the FAMILY's campaign made the decline look like a retro-past note, so a
+        tagged decline reply was skipped and the fresh review the decline promised never entered the sweep.
+
+        Both halves are asserted in ONE family, so the test proves the gate reads the MESSAGE and not the family: a
+        tagged decline in a retro-past family is read, and a tagged non-decline follow-up in that same family is not.
+        """
+        self.note(campaign="retro-past", windowed=False, ids=("p1",))
+        self.assertIsNone(verify_ledger.message(self.db, "500")["removal_day"], "a retro-past note names no date")
+        c = self.decline("2026-11-10", ["p1"])
+        self.assertEqual(c["result"], "claimed", c)
+        parent = self.db.execute("SELECT f.campaign FROM verify_messages m JOIN verify_messages f "
+                                 "ON f.id = m.parent_row WHERE m.message_id='590'").fetchone()[0]
+        self.assertEqual(parent, "retro-past", "the decline is parented to the retro-past note, not to a decline family")
+        # The mirror half. A retro-past note gets no follow-ups from the sender (reminder_state: not_applicable), so
+        # the row is written directly: a tagged, sent, non-decline follow-up in the SAME family, whose removal_day is
+        # NULL because the family root names no date. It must NOT be read - only a decline restarts the process.
+        self.db.execute(
+            "INSERT INTO verify_messages (campaign, kind, parent_row, user_key, day, status, message_type, "
+            "message_id, request_ids_json, n_credits, approved_by, approval_ref, created_at, updated_at, "
+            "proof_tagged_at) VALUES ('retro-past','reminder-14',1,'a@x.com','2026-11-01','sent','email',"
+            "'591','[\"p1\"]',1,?,'ref','2026-11-01T00:00:00Z','2026-11-01T00:00:00Z','2026-11-02T00:00:00Z')",
+            (CAPTAIN_UID,))
+        verify_ledger.mark_tagged(self.db, message_id="590", conversation_id="10", attachments=1)
+        read = verify_ledger.awaiting_proof(self.db)
+        self.assertIn("590", read,
+                      "the reply to a decline is read even when the note it closed was a retro-past one")
+        self.assertNotIn("591", read,
+                         "a tagged non-decline follow-up in the same family is still not read: only a decline restarts")
+
+    def test_a_multi_note_decline_is_still_read_after_its_first_credit_is_accepted(self):
+        """QA #1718 (2026-11-06): one decline can name credits from SEVERAL notes, and it is parented to only one of
+        them. Reading the parent note's ids and the parent's reviews meant that once the FIRST credit was accepted
+        the whole decline was skipped, so a fresh document for the second credit was never swept."""
+        self.note(ids=("r1",), mid="500")
+        # A second real note for the SAME user is impossible by design (one ask per user per 90 days, one retro-past
+        # note per user ever), so the second family is written directly: a sent verify-live note for r2. The claim
+        # gates are not what this test is about - the multi-family READ is.
+        self.db.execute(
+            "INSERT INTO verify_messages (campaign, kind, user_key, day, due_day, removal_day, status, message_type, "
+            "message_id, request_ids_json, n_credits, approved_by, approval_ref, created_at, updated_at) "
+            "VALUES ('verify-live','initial','a@x.com','2026-10-24','2026-11-23','2026-11-24','sent','email',"
+            "'501','[\"r2\"]',1,?,'ref',?,?)",
+            (CAPTAIN_UID, "2026-10-24T00:00:00Z", "2026-10-24T00:00:00Z"))
+        c = self.decline("2026-11-10", ["r1", "r2"])
+        self.assertEqual(c["request_ids"], ["r1", "r2"], "one decline, two credits, two note families")
+        parent = self.db.execute("SELECT f.message_id FROM verify_messages m JOIN verify_messages f "
+                                 "ON f.id = m.parent_row WHERE m.message_id='590'").fetchone()[0]
+        self.assertEqual(parent, "500", "the decline is parented to the FIRST note only")
+        verify_ledger.mark_tagged(self.db, message_id="590", conversation_id="10", attachments=1)
+        self.assertEqual(self.review(["r1"], "accepted")["result"], "ok")
+        self.assertIn("590", verify_ledger.awaiting_proof(self.db),
+                      "r2 is still unreviewed, so the decline's thread is still read: the parent note's acceptance "
+                      "cannot close a decline that also named another note's credit")
+        self.assertEqual(self.review(["r2"], "accepted", mid="590")["result"], "ok",
+                         "the document arrived on the decline thread, and the review is filed under r2's own note")
+        self.assertNotIn("590", verify_ledger.awaiting_proof(self.db),
+                         "both credits accepted: the decline's thread is done")
 
     def test_the_proof_review_is_per_credit(self):
         self.note(ids=("r1", "r2", "r3"))
@@ -597,51 +672,126 @@ class WindowAndPastLedgerTests(unittest.TestCase):
         self.review(["r2"], "rejected", reason="other_track")
         self.assertEqual(self.held(), [("r2", verify_ledger.HELD_NOT_TOLD), ("r3", verify_ledger.HELD_AWAITING_REVIEW)],
                          "an unreviewed credit on a tagged note never vanishes from both exports")
-        st = verify_ledger.reminder_state(self.db, parent_message_id="500", kind=verify_ledger.AFTER_REJECTION,
-                                          day="2026-11-01")
-        self.assertEqual((st["result"], st["request_ids"], st["reasons"]), ("due", ["r2"], {"r2": "other_track"}),
-                         "told as soon as a credit is rejected, while r3 still awaits review")
         self.assertEqual(verify_ledger.awaiting_proof(self.db), ["500"],
                          "the tagged thread is still read for replies while r3 awaits review")
-        self.tell("2026-11-01", ["r2"])
-        self.assertEqual(verify_ledger.awaiting_proof(self.db), ["500", "590"],
-                         "a reply to the after-rejection note is watched")
-        self.assertEqual(self.due_ids(), ["r2"], "r1 verified, r3 still awaiting review")
-        self.assertEqual(self.held(), [("r3", verify_ledger.HELD_AWAITING_REVIEW)])
+        self.decline("2026-11-01", ["r2"])
+        self.assertEqual(self.due_ids(), ["r2"], "r2: rejected, told, past the note's removal day")
+        self.assertEqual(self.held(), [("r3", verify_ledger.HELD_AWAITING_REVIEW)], "r1 verified, r3 awaiting review")
         self.review(["r3"], "rejected")
         self.assertEqual(self.due_ids(), ["r2"], "r3 is never removed before the user is told about it")
         self.assertEqual(self.held(), [("r3", verify_ledger.HELD_NOT_TOLD)])
         self.assertEqual(verify_ledger.reminders_due(self.db, campaign="verify-live", day="2026-11-10"), [],
                          "no day-14 / day-25 reminder about a reviewed credit, and no after-rejection note")
 
-    def test_a_credit_rejected_after_the_first_after_rejection_note_gets_its_own(self):
+    def test_each_rejected_credit_is_declined_once_in_its_own_message(self):
         self.note(ids=("r1", "r2", "r3"), day="2026-10-01")
         verify_ledger.mark_tagged(self.db, message_id="500", conversation_id="9", attachments=1)
         self.review(["r1"], "accepted")
         self.review(["r2"], "rejected", reason="other_track")
-        first = self.tell("2026-10-10", ["r2", "r3"])
-        self.assertEqual((first["request_ids"], first["due_day"]), (["r2"], "2026-10-31"),
-                         "only the rejected credit, by the note's own reply-by date")
+        first = self.decline("2026-10-10", ["r1", "r2"])
+        self.assertEqual((first["request_ids"], first["due_day"], first["removal_day"]), (["r2"], None, None),
+                         "only the review-rejected credit (r1 was accepted), and the decline names no date")
         self.review(["r3"], "rejected", reason="unreadable")
-        st = verify_ledger.reminder_state(self.db, parent_message_id="500", kind=verify_ledger.AFTER_REJECTION,
-                                          day="2026-10-25")
-        self.assertEqual((st["result"], st["request_ids"], st["reasons"], st["due_day"], st["removal_day"]),
-                         ("due", ["r3"], {"r3": "unreadable"}, "2026-11-01", "2026-11-02"),
-                         "a second after-rejection note for the newly rejected credit only")
-        self.tell("2026-10-25", ["r2", "r3"], mid="591")
+        second = self.decline("2026-10-25", ["r2", "r3"], mid="591")
+        self.assertEqual(second["request_ids"], ["r3"], "the newly rejected credit, never r2 again")
         self.assertEqual(self.db.execute("SELECT request_ids_json FROM verify_messages WHERE message_id='591'")
                          .fetchone()[0], '["r3"]')
-        self.assertEqual(self.due_ids(day="2026-11-01"), ["r2"], "r3 waits for the date its own note named")
-        self.assertEqual(self.due_ids(day="2026-11-02"), ["r2", "r3"])
-        self.assertEqual(verify_ledger.reminder_state(self.db, parent_message_id="500", kind=verify_ledger.AFTER_REJECTION,
-                                                      day="2026-10-26")["result"], "done",
-                         "at most one after-rejection note per credit")
+        self.assertEqual(self.due_ids(day="2026-10-15"), [], "before the note's reply-by date")
+        self.assertEqual(sorted(self.due_ids(day="2026-11-16")), ["r2", "r3"],
+                         "the note's own removal day governs, for every told credit")
+        again = verify_ledger.claim(self.db, user_key="a@x.com", day="2026-10-26", request_ids=["r3"],
+                                    campaign="decline", **self.kw)
+        self.assertEqual(again["result"], "already_notified", "at most one decline per credit, ever")
 
-    def test_a_reply_after_the_after_rejection_note_holds_the_credit_until_a_new_review(self):
+    def test_a_decline_covering_two_notes_reviews_each_credit_in_its_own_family(self):
+        # a user whose credits were rejected on two different notes: ONE decline names both (QA #1718 2). Each
+        # credit's family is its own note, so a document sent in reply can be reviewed for the second note's
+        # credit too — a single parent_row could not carry that.
+        self.note(ids=("r1",), day="2026-10-01")
+        # a second verify-live note for the same user, past the 90-day one-note lock
+        self.note(ids=("r2",), day="2027-01-05", mid="600")
+        self.review(["r1"], "rejected")
+        self.review(["r2"], "rejected", mid="600")
+        c = self.decline("2027-01-20", ["r1", "r2"])
+        self.assertEqual(c["request_ids"], ["r1", "r2"], "one decline names both credits")
+        self.assertEqual(self.db.execute("SELECT parent_row FROM verify_messages WHERE message_id='590'").fetchone()[0],
+                         self.db.execute("SELECT id FROM verify_messages WHERE message_id='500'").fetchone()[0],
+                         "the row is filed under the first note it names")
+        later = datetime.now(timezone.utc) + timedelta(hours=1)
+        verify_ledger.mark_tagged(self.db, message_id="590", conversation_id="10", attachments=1, now=later)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM verify_proof_reviews WHERE outcome='rejected'").fetchone()[0],
+                         0, "the new document cleared BOTH notes' rejected verdicts, not only the first")
+        second = verify_ledger.record_proof_review(self.db, message_id="590", request_ids=["r2"], outcome="accepted",
+                                                   reviewer="ops-doc-step", now=later + timedelta(hours=1))
+        self.assertEqual(second, {"result": "ok", "outcome": "accepted", "request_ids": ["r2"]},
+                         "the second note's credit is reviewable through the decline: no not_on_note")
+        self.assertEqual(self.db.execute("SELECT family FROM verify_proof_reviews WHERE request_id='r2'").fetchone()[0],
+                         self.db.execute("SELECT id FROM verify_messages WHERE message_id='600'").fetchone()[0],
+                         "the verdict lives under r2's own note family, which is what the per-credit reads join on")
+        self.assertEqual(self.due_ids(day="2027-02-10"), [],
+                         "r2 is verified; r1 is still rejected and now awaits its fresh review")
+        self.assertEqual(self.held(day="2027-02-10"), [("r1", verify_ledger.HELD_AWAITING_REVIEW)])
+        self.assertEqual(verify_ledger.record_proof_review(
+            self.db, message_id="500", request_ids=["r2"], outcome="accepted", reviewer="x")["result"],
+            "not_on_note", "a credit another note asked about is still refused on THAT note's own thread")
+
+    def test_close_since_is_the_credits_own_close_not_a_fixed_window(self):
+        # the send gate's window (QA #1718 B): a core note about an EARLIER close must not suppress this one, and an
+        # old close must not fall outside the read and let a second decline through
+        self.note(ids=("r1", "r2"), day="2026-10-01")
+        verify_ledger.mark_tagged(self.db, message_id="500", conversation_id="9", attachments=1)
+        self.review(["r1"], "rejected")
+        closed = self.db.execute("SELECT reviewed_at FROM verify_proof_reviews WHERE request_id='r1'").fetchone()[0]
+        out = verify_ledger.close_since(self.db, ["r1"])
+        self.assertRegex(out["since"], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
+        self.assertLess(out["since"], closed, "the read starts a day BEFORE the close, for clock and propagation")
+        # the note day is a hard floor (QA #1718, 2026-11-06): a request cannot be closed before it was asked, and a
+        # note's day is written once, so the window can never move past a core email we cannot see
+        self.assertEqual(out["since"][:10], "2026-09-30", "the note that asked for r1 went out on 2026-10-01")
+        # a credit no review names (a human closed it in core) falls back to the note that asked for it: a LONGER
+        # window, which can only ever move toward silence
+        self.assertEqual(verify_ledger.close_since(self.db, ["r2"])["since"][:10], "2026-09-30")
+        self.assertEqual(verify_ledger.close_since(self.db, ["zz"])["since"], None,
+                         "nothing in the ledger names this credit: no window, so the gate holds")
+        self.assertEqual(verify_ledger.close_since(self.db, [])["since"], None)
+
+    def test_the_close_boundary_never_moves_forward_on_a_re_rejection(self):
+        # QA #1718 (2026-11-06): `verify_proof_reviews.reviewed_at` is overwritten by a re-rejection and `mark_tagged`
+        # deletes the old verdict, so a review timestamp alone moves FORWARD. If the boundary moved, a later
+        # re-rejection would exclude core's EARLIER decline email, a zero count would read as "core never told them",
+        # and hydra would send a SECOND decline for the same request - the one forbidden outcome. The note day is the
+        # immutable floor, so the window can only ever widen.
+        self.note(ids=("r1",), day="2026-10-01")
+        verify_ledger.mark_tagged(self.db, message_id="500", conversation_id="9", attachments=1)
+        first = datetime(2026, 10, 5, 12, 0, tzinfo=timezone.utc)
+        self.review(["r1"], "rejected")
+        self.db.execute("UPDATE verify_proof_reviews SET reviewed_at=? WHERE request_id='r1'",
+                        (verify_ledger.stamp(first),))
+        self.assertEqual(verify_ledger.close_since(self.db, ["r1"])["since"][:10], "2026-09-30")
+        # a NEW document clears the verdict, then a LATER review rejects the same credit again
+        verify_ledger.mark_tagged(self.db, message_id="500", conversation_id="9", attachments=2,
+                                  now=first + timedelta(days=20))
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM verify_proof_reviews WHERE outcome='rejected'")
+                         .fetchone()[0], 0, "the fresh document cleared the old verdict")
+        self.review(["r1"], "rejected")
+        self.assertEqual(verify_ledger.close_since(self.db, ["r1"])["since"][:10], "2026-09-30",
+                         "the boundary is the note day, so core's earlier decline email stays inside the window")
+
+    def test_a_credit_no_note_names_still_resolves_from_its_reviews(self):
+        # a credit asked outside this ledger has no note day to floor the window: its own review is the boundary
+        self.note(ids=("r1",), day="2026-10-01")
+        verify_ledger.mark_tagged(self.db, message_id="500", conversation_id="9", attachments=1)
+        self.review(["r1"], "rejected")
+        self.db.execute("UPDATE verify_messages SET request_ids_json='[\"other\"]'")
+        out = verify_ledger.close_since(self.db, ["r1"])
+        self.assertIsNotNone(out["since"], "the review still names it")
+        self.assertIn("earliest rejection", out["why"])
+
+    def test_a_reply_after_the_decline_holds_the_credit_for_a_human(self):
         self.note(day="2026-10-01")
         verify_ledger.mark_tagged(self.db, message_id="500", conversation_id="9", attachments=1)
         self.review(["r1"], "rejected")
-        self.tell("2026-10-20", ["r1"])
+        self.decline("2026-10-20", ["r1"])
         self.assertEqual(self.due_ids(day="2026-11-01"), ["r1"])
         later = lambda h: (datetime.now(timezone.utc) + timedelta(hours=h)).strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
         self.assertEqual(verify_ledger.mark_replied(self.db, message_id="590", replied_at=later(1)), "recorded")
@@ -654,19 +804,80 @@ class WindowAndPastLedgerTests(unittest.TestCase):
                                           reviewer="U038BM16T7W", reason="other_role",
                                           now=datetime.now(timezone.utc) + timedelta(hours=3))
         self.assertEqual(self.due_ids(day="2026-11-01"), ["r1"], "a human reviewed it again")
-        self.assertEqual(verify_ledger.reminder_state(self.db, parent_message_id="500", kind=verify_ledger.AFTER_REJECTION,
-                                                      day="2026-11-01")["result"], "done")
         with self.assertRaises(ValueError):
             verify_ledger.mark_replied(self.db, message_id="590", replied_at="yesterday")
 
-    def test_a_reply_in_the_tagged_original_thread_after_an_after_rejection_note_holds_the_credit(self):
+    def test_two_notes_for_one_credit_never_release_the_other(self):
+        """The r1/r2 case END TO END, with the REAL reader (QA #1718, 2026-11-06): r1 is rejected twice, so the send
+        ledger shows two `credits_rejected` notes for this user, while r2's email never went out. A per-user count
+        cannot tell the two apart, so neither credit may be released - and r2 in particular must not be, because no
+        decline for r2 ever reached the customer. This joins the two halves (the reader and the ledger) in one test
+        so a future change to either cannot quietly restore the count."""
+        self.note(ids=("r1", "r2"))
+        self.db.execute("UPDATE verify_messages SET account_id='42' WHERE message_id='500'")
+        verify_ledger.mark_tagged(self.db, message_id="500", conversation_id="9", attachments=1)
+        self.review(["r1", "r2"], "rejected")
+        # the real reader, with two notes in the ledger that both belong to r1
+        def real(user_key, user_id, ids, since):
+            return decline_close.core_told(user_key, user_id, ids, since, route="routed", notes={42: 2})
+        self.assertEqual(real("a@x.com", "42", ["r1", "r2"], "2026-10-05T12:00:00Z"),
+                         {"r1": False, "r2": False}, "two notes for r1 cannot say r2 was told")
+        self.assertEqual(verify_ledger.removal_due(self.db, day="2026-11-20", core_told=real), [],
+                         "neither credit is released on a count that cannot name a request")
+        self.assertEqual([(h["request_id"], h["reason"]) for h in
+                          verify_ledger.held_for_human(self.db, day="2026-11-20", core_told=real)],
+                         [("r1", verify_ledger.HELD_NOT_ATTRIBUTABLE),
+                          ("r2", verify_ledger.HELD_NOT_ATTRIBUTABLE)],
+                         "r2 is held, not released: no decline for r2 ever reached the customer")
+
+    def test_core_sent_declines_release_a_rejected_credit_for_removal(self):
+        # QA #1718 (2026-11-06): with core's own credits_rejected email routed, hydra writes NO `decline` row, so a
+        # removal decision that reads only hydra's ledger holds every rejected credit as never-told forever. The
+        # reader answers for core; an unreadable route holds, and a route measured OFF leaves hydra's row in charge.
+        self.note(ids=("r1",))
+        verify_ledger.mark_tagged(self.db, message_id="500", conversation_id="9", attachments=1)
+        self.review(["r1"], "rejected")
+        self.assertEqual(self.held(), [("r1", verify_ledger.HELD_NOT_TOLD)], "nobody has told them yet")
+        # THE REAL READER TODAY (QA #1718 round 7, 2026-11-06): core's route is on and the ledger shows a note, but no
+        # store we can read carries a request id, so the note cannot be attributed to THIS credit. That is a HOLD with
+        # its own reason - not "not told" (a note exists) and not a release (we cannot prove it was this one).
+        unattributable = lambda *a: {"r1": False}  # noqa: E731
+        self.assertEqual([(h["request_id"], h["reason"]) for h in
+                          verify_ledger.held_for_human(self.db, day="2026-11-20", core_told=unattributable)],
+                         [("r1", verify_ledger.HELD_NOT_ATTRIBUTABLE)])
+        self.assertEqual(verify_ledger.removal_due(self.db, day="2026-11-20", core_told=unattributable), [],
+                         "an unattributable note never releases a credit")
+        # THE CONTRACT FOR THE DAY CORE'S EMAIL CARRIES A REQUEST ID: a True is a per-request delivery and releases.
+        # `core_told` cannot return True today (see test_decline_close), so this pins the ledger half only.
+        routed = lambda *a: {"r1": True}  # noqa: E731
+        self.assertEqual([d["request_id"] for d in verify_ledger.removal_due(self.db, day="2026-11-20",
+                                                                           core_told=routed)], ["r1"])
+        self.assertEqual(verify_ledger.held_for_human(self.db, day="2026-11-20", core_told=routed), [])
+        self.assertEqual(self.held(), [("r1", verify_ledger.HELD_NOT_TOLD)],
+                         "no reader supplied: hydra's own sent decline is the only telling")
+        self.assertEqual(self.held(), [("r1", verify_ledger.HELD_NOT_TOLD)])
+        self.assertEqual([(h["request_id"], h["reason"]) for h in
+                          verify_ledger.held_for_human(self.db, day="2026-11-20", core_told=lambda *a: None)],
+                         [("r1", verify_ledger.HELD_NOT_TOLD)], "an unreadable route holds, never releases")
+        self.assertEqual([(h["request_id"], h["reason"]) for h in
+                          verify_ledger.held_for_human(self.db, day="2026-11-20", core_told=lambda *a: {})],
+                         [("r1", verify_ledger.HELD_NOT_TOLD)], "route off and no hydra decline: still not told")
+        # a reply after core's email holds it for a human, exactly as a reply after hydra's decline does
+        later = (datetime.now(timezone.utc) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        verify_ledger.mark_replied(self.db, message_id="500", replied_at=later)
+        self.assertEqual([(h["request_id"], h["reason"]) for h in
+                          verify_ledger.held_for_human(self.db, day="2026-11-20", core_told=routed)],
+                         [("r1", verify_ledger.HELD_REPLIED)])
+
+    def test_a_reply_in_the_tagged_original_thread_after_a_decline_holds_the_credit(self):
         self.note(ids=("r1", "r2", "r3"), day="2026-10-01")
         verify_ledger.mark_tagged(self.db, message_id="500", conversation_id="9", attachments=1)
         self.review(["r1"], "accepted")
         self.review(["r2"], "rejected", reason="other_track")
-        self.tell("2026-10-10", ["r2"])
+        self.decline("2026-10-10", ["r2"])
         self.assertEqual(verify_ledger.awaiting_proof(self.db), ["500", "590"],
-                         "the tagged original thread is still read while r2 is rejected and r3 awaits review")
+                         "the tagged original thread and the decline are both read while r2 is rejected and r3 awaits "
+                         "review")
         self.assertEqual(self.due_ids(day="2026-11-01"), ["r2"])
         later = (datetime.now(timezone.utc) + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
         self.assertEqual(verify_ledger.mark_replied(self.db, message_id="500", replied_at=later), "recorded")
@@ -677,12 +888,13 @@ class WindowAndPastLedgerTests(unittest.TestCase):
         self.assertEqual(verify_ledger.awaiting_proof(self.db, now=soon), [], "the family sent nothing in 45 days")
         verify_ledger.record_proof_review(self.db, message_id="500", request_ids=["r3"], outcome="rejected",
                                           reviewer="x", reason="unreadable", now=soon - timedelta(days=11))
-        c = verify_ledger.claim_reminder(self.db, parent_message_id="500", kind=verify_ledger.AFTER_REJECTION,
-                                         user_key="a@x.com", day="2026-10-25", request_ids=["r3"],
-                                         approved_by=CAPTAIN_UID, approval_ref="ref", now=soon - timedelta(days=10))
+        c = verify_ledger.claim(self.db, user_key="a@x.com", day="2026-10-25", request_ids=["r3"],
+                                campaign="decline", approved_by=CAPTAIN_UID, approval_ref="ref",
+                                message_type="email", now=soon - timedelta(days=10))
+        self.assertEqual(c["result"], "claimed")
         verify_ledger.finalize(self.db, message_row=c["message_row"], status="sent", message_id="591")
         self.assertEqual(verify_ledger.awaiting_proof(self.db, now=soon), ["500", "590", "591"],
-                         "every thread of the note is read while its latest after-rejection note is recent")
+                         "every thread of the note and every decline of it is read while recent")
 
     def test_a_tagged_note_whose_credits_are_all_accepted_is_not_read_again(self):
         self.note(ids=("r1", "r2"))
@@ -701,9 +913,10 @@ class WindowAndPastLedgerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.review(["r1"], "rejected", reason="not_a_document")
         self.assertEqual(self.review(["r1"], "rejected", reason="")["result"], "ok")
-        st = verify_ledger.reminder_state(self.db, parent_message_id="500", kind=verify_ledger.AFTER_REJECTION,
-                                          day="2026-10-20")
-        self.assertEqual((st["received"], st["reasons"]), ({"r1": "reply"}, {"r1": ""}))
+        row = self.db.execute("SELECT outcome, reason FROM verify_proof_reviews WHERE request_id='r1'").fetchone()
+        self.assertEqual(tuple(row), ("rejected", None), "no reason: the user replied but sent no document to read")
+        c = self.decline("2026-10-20", ["r1"])
+        self.assertEqual(c["request_ids"], ["r1"], "the decline still goes out, reason-free")
 
     def test_a_review_needs_a_tagged_proof_or_a_reply_a_reviewer_the_notes_credits_and_a_reason(self):
         self.note(ids=("r1", "r2"))
@@ -743,7 +956,7 @@ class WindowAndPastLedgerTests(unittest.TestCase):
         self.assertEqual(self.held(day="2026-11-15"), [], "only past the reply-by date")
         self.assertEqual(self.review(["r2"], "rejected", reviewer="U038BM16T7W", reason="")["result"], "ok",
                          "a human picks the reply up")
-        self.tell("2026-11-01", ["r2"])
+        self.decline("2026-11-20", ["r2"])
         self.assertEqual(self.due_ids(), ["r2"])
         self.assertEqual(self.held(), [("r1", verify_ledger.HELD_REPLIED)])
 

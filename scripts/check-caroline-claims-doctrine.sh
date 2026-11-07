@@ -139,6 +139,34 @@ forbid "$FAQ" "Q2 Caroline does not look up the claim" "Caroline looks up its re
 require "$CAP" "Q3 declined: the approved decline paragraph (§2.6), no reason" "A request is closed when the supporting information we received wasn't enough to confirm the credit."
 forbid "$CAP" "Q3 declined: never a reason" "gives the reason (for example, the document doesn't name"
 forbid "$CAP" "Q3 removal: never a reason" "with the reason for each"
+# Captain 2026-10-29 13:2xZ (decline-copy-ruling.md item 1): a decline says only that the
+# supporting information was not enough. The five internal review codes
+# (doesnt_name_you, other_track, other_role, unreadable, not_a_document) never reach the
+# knowledge base, and neither does the way they sound to a user: a fraud denial and an
+# ordinary shortfall are the same sentence to the customer, on purpose.
+#
+# ALL FIVE codes, and all five of the ways they sound (QA #1718 round 8, 2026-11-06: the
+# first cut of this gate listed four codes and three phrasings, so a doctrine edit saying a
+# decline was for an unreadable document passed). The two lists are kept the same length on
+# purpose - a code with no matching phrasing is a hole, because the sentence a doctrine
+# author actually writes is the phrasing, not the code.
+#
+# `unreadable` is an ordinary English word, so the bare-word guard is scoped to the two
+# decline-doctrine files ($CAP, $CV) and NOT to the whole workspace: workspaces/support/
+# SOUL.md uses it legitimately twice, about the attachment block and `unsupported_type`
+# ("don't call it corrupt or unreadable"), which is a different subject. Neither $CAP nor
+# $CV contains the word today, so the guard starts clean; if one ever needs it for a
+# non-decline reason, scope that line rather than dropping the guard.
+for pat in doesnt_name_you other_track other_role unreadable not_a_document; do
+  forbid "$CAP" "Q3 declined: the internal review codes stay internal" "$pat"
+  forbid "$CV" "Q3 declined: the internal review codes stay internal" "$pat"
+done
+for pat in "didn't name you" "different track" "different role" \
+           "unreadable document" "document was unreadable" "couldn't read" \
+           "not a document" "wasn't a document"; do
+  forbid "$CAP" "Q3 declined: never a reason" "$pat"
+  forbid "$CV" "Q3 declined: never a reason" "$pat"
+done
 for f in "$CI" "$FAQ"; do
   forbid "$f" "Q3 no government-ID ask (no ID upload exists)" "resubmit with a government-issued ID"
   forbid "$f" "Q3 no government-ID ask (no ID upload exists)" "government-issued ID is most reliable"

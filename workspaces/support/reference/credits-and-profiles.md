@@ -105,7 +105,7 @@ If a request was declined, the note gives no reason, and neither does Caroline. 
 <!-- approved: caroline-instructions-1029 §2.6 -->
 > A request is closed when the supporting information we received wasn't enough to confirm the credit. You can submit it again with your supporting documents and a fresh review starts from the beginning. I can't see the review itself, so I can't tell you more than that.
 
-Never a reason (never "the document didn't name you", never "it was a different track"), never business days. If they send something else, follow the `verification-handoff` skill.
+<!-- barred-phrases --> Never a reason (never "the document didn't name you", never "it was a different track", never one of the internal review codes), never business days. If they send something else, follow the `verification-handoff` skill.
 
 ### Routine Review Notes (credits approved automatically in the past)
 Some users get a different automatic note from Caroline: a routine review of credits

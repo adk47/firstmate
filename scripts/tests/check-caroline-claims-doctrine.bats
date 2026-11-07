@@ -184,6 +184,45 @@ PY
   [[ "$output" == *"Q3 declined: the approved decline paragraph"* ]]
 }
 
+# QA #1718 round 8 (2026-11-06): the gate listed four of the five internal review codes, so a
+# doctrine edit saying a decline was for an unreadable document passed. One case per code, and
+# one per phrasing, so a future edit that drops a code from either list fails here.
+@test "CAN FAIL: every one of the five internal review codes is caught in the decline doctrine" {
+  CAP_MD="$FAKE/workspaces/support/reference/credits-and-profiles.md"
+  CV_MD="$FAKE/workspaces/support/skills/verification-handoff/SKILL.md"
+  for code in doesnt_name_you other_track other_role unreadable not_a_document; do
+    for f in "$CAP_MD" "$CV_MD"; do
+      cp "$f" "$f.orig"
+      printf '\nIf the review code was %s, tell them so.\n' "$code" >> "$f"
+      run_gate
+      [ "$status" -eq 1 ] || { echo "gate passed a doctrine file naming the code '$code' in ${f##*/}"; false; }
+      [[ "$output" == *"Q3 declined: the internal review codes stay internal"* ]]
+      mv "$f.orig" "$f"
+    done
+  done
+}
+
+@test "CAN FAIL: the way an unreadable or non-document decline SOUNDS is caught, not just the code" {
+  CAP_MD="$FAKE/workspaces/support/reference/credits-and-profiles.md"
+  for phrase in "the document was unreadable" "we couldn't read the file" "that wasn't a document"; do
+    cp "$CAP_MD" "$CAP_MD.orig"
+    printf '\nYour request was declined because %s.\n' "$phrase" >> "$CAP_MD"
+    run_gate
+    [ "$status" -eq 1 ] || { echo "gate passed the decline phrasing '$phrase'"; false; }
+    [[ "$output" == *"Q3 declined: never a reason"* ]]
+    mv "$CAP_MD.orig" "$CAP_MD"
+  done
+}
+
+@test "the unreadable guard does not reach SOUL.md's legitimate attachment-block use" {
+  # The bare word is scoped to the two decline-doctrine files on purpose: SOUL.md says
+  # "don't call it corrupt or unreadable" about the attachment block, which is a different
+  # subject. If the guard ever widens to the whole workspace, this case fails.
+  grep -qi "unreadable" "$FAKE/workspaces/support/SOUL.md"
+  run_gate
+  [ "$status" -eq 0 ]
+}
+
 @test "CAN FAIL: 'how do you verify credits?' naming our sources or a score is caught (§3)" {
   printf '\nWe compare every credit against Spotify and Tidal and MusicBrainz, then a risk score decides.\n' >> "$FAKE/workspaces/support/reference/faq.md"
   run_gate

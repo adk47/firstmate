@@ -37,12 +37,17 @@ the same SQLite file as the decider's ``decisions`` table
                another note (a status-doc-received note excepted: the gap ask is the follow-up it
                promised). Not blocked by an earlier ask about the same credit, nor by a proof
                reply: the user's earlier reply is what stage 2 judged.
+  decline      ONE reason-free decline to the owner of a request we closed (captain 2026-10-29
+               13:2xZ; decline-copy-ruling.md). A notice, not an ask: it closes nothing, asks for
+               nothing, and names no reason (the row keeps its real one internally). Sent by the
+               L12 close path only when core's own credits_rejected email is not routed to that
+               user, so a user never gets two declines; once per request id ever, one message per
+               user per day, and none within 7 days of another note from this gate.
   Details: docs/credit-verification/verify-request-notes.md.
 
 Guarantees:
   - a request id gets a campaign's initial note AT MOST once;
-  - each reminder kind is sent AT MOST once per note, and an after-rejection note
-    names a credit AT MOST once (windowed notes only);
+  - each reminder kind is sent AT MOST once per note; a decline names a request AT MOST once;
   - retro-past and uvn-status: one message per user, ever, and none to a user with a proof
     reply (uvn-status also none within 7 days of another note);
   - a user gets AT MOST one message per UTC day across every campaign and kind;
@@ -69,12 +74,12 @@ Statuses:
 
 Removal (windowed notes only) is per credit: removal-due from the day after the reply-by
 date unless an accepted document cleared the credit (verify_proof_reviews) or a tagged
-document awaits review for it (held for a human). A rejected credit gets ONE after-rejection
-note of its own (a later rejection on the same note gets another note for the newly rejected
-credits; the reviewer's fixed reason, or "we still need a document" after a reply with no
-document; a reply-by date at least 7 days out) and is removal-due only after the date that
-note named. Any user reply to the note (extension_requested_at) holds its unreviewed credits
-for a human, and a reply after a credit's after-rejection note holds that credit until a
+document awaits review for it (held for a human). A rejected credit is told ONCE, in the
+`decline` campaign's reason-free words (no reason, no document list, no date: the reviewer's
+coded reason stays on the row and in the audit file, never in the copy), and is removal-due
+only once that decline actually went out (never before the user is told) and its own note's
+removal day has come. Any user reply to the note (extension_requested_at) holds its
+unreviewed credits for a human, and a reply after the decline holds that credit until a
 review rules on it again (last_reply_at per message).
 
 The wrapper calls this as a CLI (one op per call, JSON on stdout). The driver
@@ -94,7 +99,7 @@ import urllib.parse
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 DEFAULT_PATH = os.environ.get("CREDIT_REVIEW_LEDGER", "/var/lib/hydra/credit-review/ledger.sqlite3")
 MAX_ATTEMPTS = 3
@@ -116,6 +121,7 @@ CAMPAIGNS = ("verify-live", "retro-past", "removal-notice", "takeback-notice", "
              "refund-confirm",   # fable-copy-1103-d2/refund-confirm: a refund that ALREADY happened, told once per refund id
              "uvn-new-rows",   # fable-copy-1101-r5/n1: a told user's owed rows no ask named (one message per row ever)
              "backlog-reply",
+             "decline",    # captain 2026-10-29 13:2xZ + decline-copy-ruling.md: the ONE reason-free decline
              DECIDER_SUPPORT)  # Fable d2 [key=decider-support-arm]: the decider's support write is an ask
 # backlog-reply (intercom-backlog-i1, hydra#1379; Fable review @092894d4): a reply in an Intercom
 # conversation where the customer spoke last, sent by scripts/intercom-backlog/send.py through
@@ -123,6 +129,15 @@ CAMPAIGNS = ("verify-live", "retro-past", "removal-notice", "takeback-notice", "
 # ever); it is a notice, not an ask, so only its own rows block it. It exists in THIS ledger so the
 # one-message-per-user-per-UTC-day cap (capped()) and the status campaigns' 7-day deferral see it.
 BACKLOG_REPLY = "backlog-reply"
+# decline (captain 2026-10-29 13:2xZ verbatim: "It feels like we are over-communicating when we deny a credit: we
+# could just say supporting information was not provided adequate enough to earn the credit, and if they want to
+# submit something they can submit something again to start the process again"; ruling decline-copy-ruling.md): the
+# owner of a request we closed is told the supporting information was not enough and that they may submit again.
+# A NOTICE: it asks for nothing, closes no ask, and says nothing about why (a decline never states a reason, and no
+# copy teaches what we check). One per request id, ever; one message per user per UTC day; none within 7 days of
+# another note from this gate. It exists for the window where core's own credits_rejected email is not routed
+# (MESSAGING_EMAIL_ROUTES): when core's email goes out, core's is the single decline and this campaign sends none.
+DECLINE_CAMPAIGN = "decline"
 # claim-proof-ask (steers-1830 #5, firstmate 125/126): a dated ask to the claimant of a pending
 # profile CLAIM (band B/C) to put the claim's bound-proof code in one platform bio. Its "request
 # id" is the claim key "claim-<claiming.id>", so only its own rows block it (claim ids never meet
@@ -173,7 +188,7 @@ STATUS_CAMPAIGNS = ("uvn-status", "status-doc-received", "status-team-review", C
 # Notices: only their own rows block them (they are not asks and never close one).
 NOTICE_CAMPAIGNS = ("takeback-notice", "withdrawal-confirm", "status-doc-received", "status-team-review",
                     "email-changed", "email-changed-dup", CLAIM_CAMPAIGN, CLAIM_STATUS_CAMPAIGN, MERGE_PENDING, MERGE_CLAIM_FIRST,
-                    CLAIM_PENDING_CAMPAIGN, CREDIT_HOLD_CAMPAIGN, "reply-ref", BACKLOG_REPLY)
+                    CLAIM_PENDING_CAMPAIGN, CREDIT_HOLD_CAMPAIGN, "reply-ref", BACKLOG_REPLY, DECLINE_CAMPAIGN)
 # Campaigns whose gate refusals are re-checkable (firstmate 076, 082, 083): a refusal holds the
 # USER (campaign, user_key or user_id) in verify_refusal_holds for RECHECK_DAYS (the runner and the gate skip
 # them until next_recheck_at, whatever requests are listed); a later send clears it; after
@@ -206,9 +221,10 @@ KINDS = ("initial", "reminder-14", "reminder-25", AFTER_REJECTION, CLAIM_REMINDE
 # Days after a WINDOWED note (reminder-14/25) or a claim-proof-ask note (reminder-7) at which each
 # reminder becomes due.
 REMINDER_DAYS = {"reminder-14": 14, "reminder-25": 25, CLAIM_REMINDER: 7}
-# The after-rejection note's reply-by date is never earlier than this many days after it is sent.
-AFTER_REJECTION_MIN_DAYS = 7
-# The reviewer's reason for a rejection: a fixed list, the only text the after-rejection note shows.
+# The reviewer's reason for a rejection: a fixed list, recorded on the review row and in the audit file ONLY. No
+# copy shows it (captain 2026-10-29 13:2xZ + decline-copy-ruling.md: a decline never states a reason, and the five
+# strings are exactly "which check failed"). It stays here because the decider's CLI validates against it and the
+# removal path reports it to a human.
 REJECTION_REASONS = ("doesnt_name_you", "other_track", "other_role", "unreadable", "not_a_document")
 WINDOW_DAYS = 30            # windowed (new provisional approval) notes only
 UNVERIFIED_AFTER_DAYS = 30  # retro-past: no proof after this long -> exported as unverified (credit stays)
@@ -217,7 +233,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS verify_messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   campaign TEXT NOT NULL,            -- verify-live | retro-past | removal-notice
-  kind TEXT NOT NULL,                -- initial | reminder-14 | reminder-25 | after-rejection
+  kind TEXT NOT NULL,                -- initial | reminder-14 | reminder-25 | reminder-7
   parent_row INTEGER,                -- follow-ups: verify_messages.id of the initial note
   user_key TEXT NOT NULL,            -- lower-cased account email (never printed)
   account_id TEXT,                   -- the Muso user id: the per-user locks key on it too (an email can change)
@@ -630,6 +646,68 @@ def blocked_ids(db: sqlite3.Connection, request_ids: list[str], campaign: str = 
     return out
 
 
+def _decline_family(db: sqlite3.Connection, request_ids: list[str]) -> int | None:
+    """The row of the note a decline answers, so the decline joins that note's FAMILY: the credit's story is one
+    family (the note, its reminders, its reviews, the decline and any reply to it), which is what the removal rule,
+    the proof sweep and the review all read. The decline itself names no date; the family's note carries it. A
+    decline covering credits of several notes is filed under the first one it lists (request ids are unique, and the
+    per-credit rules look the credit up, never the row alone)."""
+    for rid in request_ids:
+        note = _note_of(db, rid)
+        if note is not None:
+            return note
+    return None
+
+
+CLOSE_SINCE_MARGIN_DAYS = 1
+
+
+def close_since(db: sqlite3.Connection, request_ids: list[str]) -> dict[str, Any]:
+    """The moment these credits were CLOSED, so a caller can ask "did core already tell this user about THIS close"
+    instead of "did anyone email this user lately" (QA #1718 B). A user-level window cannot prove a single request
+    was not declined: a core note from before the close belongs to an earlier request, and a fixed window either
+    misses it (31 days ago -> a second decline) or lets it suppress a request that was never told.
+
+    The close is the earliest `rejected` review on any of the credits, minus a one-day margin for clock and
+    propagation. `since: null` = nothing to attribute the read to, and the caller must hold.
+
+    THE NOTE DAY IS A HARD FLOOR, AND IT IS THE IMMUTABLE BOUNDARY (QA #1718, 2026-11-06). A review timestamp cannot
+    be the boundary on its own: `verify_proof_reviews.reviewed_at` is OVERWRITTEN by a later re-rejection and
+    `mark_tagged` DELETEs the old verdict outright, so a re-rejection moves the earliest surviving review FORWARD.
+    A boundary that can move forward excludes core's earlier decline email, a zero count then reads as "core never
+    told them", and hydra sends a SECOND decline for the same request - the one forbidden outcome. A request cannot
+    be closed before it was asked, and a note's `day` is written once and never edited, so the earliest note that
+    asked for these credits is a lower bound on the first close that no later review can move. The answer is the
+    EARLIER of the two, so the window can only ever WIDEN toward silence. (A credit no note names - asked outside
+    this ledger - still resolves from its reviews alone.)
+
+    The cost is a wider window for a credit asked long before it closed: a core note about ANOTHER of that user's
+    requests inside the gap holds this one. That is the safe direction - a hold is printed and a person decides,
+    while a duplicate decline is invisible - and it is the same trade the module makes everywhere else."""
+    ids = list(dict.fromkeys(str(x).strip() for x in request_ids if str(x).strip()))
+    if not ids:
+        return {"since": None, "why": "no request ids"}
+    q = ",".join("?" * len(ids))
+    row = db.execute(f"SELECT MIN(reviewed_at) AS t, COUNT(*) AS n FROM verify_proof_reviews "
+                     f"WHERE outcome='rejected' AND request_id IN ({q})", ids).fetchone()
+    base = str(row["t"] or "") if row is not None else ""
+    why = f"the earliest rejection on these credits ({row['n']} reviewed)" if base else ""
+    # the earliest note that ASKED for them: a lower bound on the first close that no re-rejection can move
+    note = db.execute(f"SELECT MIN(day) AS d FROM verify_messages WHERE kind='initial' AND parent_row IS NULL "
+                      f"AND EXISTS (SELECT 1 FROM json_each(request_ids_json) j WHERE j.value IN ({q}))",
+                      ids).fetchone()
+    note_day = f"{note['d']}T00:00:00Z" if note is not None and note["d"] else ""
+    if note_day and (not base or note_day < base):
+        base = note_day
+        why = ("the earliest note that asked for these credits (a first close before it is impossible)" if not row
+               or not row["t"] else
+               f"the earliest note that asked for these credits: a first close before {row['t']} cannot be ruled out")
+    if not base:
+        return {"since": None, "why": "no review and no note names these credits"}
+    day = date.fromisoformat(base[:10]) - timedelta(days=CLOSE_SINCE_MARGIN_DAYS)
+    return {"since": f"{day.isoformat()}{base[10:]}", "why": why, "request_ids": ids}
+
+
 def _hold_of(user_key: str, user_id: str = "") -> tuple[str, tuple[Any, ...]]:
     """SQL condition + params for "this user's refusal hold": the same account email OR the same
     Muso user id, so an email change neither frees a held user nor resets the refusal count."""
@@ -876,6 +954,22 @@ def gap_user_done(db: sqlite3.Connection, user_key: str, *, now: datetime | None
     return ""
 
 
+def decline_user_done(db: sqlite3.Connection, user_key: str, *, day: str, user_id: str = "") -> str:
+    """decline: why this user must not get one now ('' when they may). Only a deferral exists:
+    messaged_7d (a note from this gate in the last 7 days, of any campaign - one decline never
+    lands on top of another message). The per-request once is blocked_ids', the one-message-per-user
+    -per-UTC-day cap is claim()'s. A decline is a NOTICE: it never blocks an ask and an ask never
+    blocks it beyond the 7-day cooldown."""
+    cond, params = _same_user(db, user_key, user_id)
+    # anchored on the DAY this note would go out (the ledger's own clock), never on the wall clock: a replayed or
+    # back-dated run then reads the same window every time.
+    since = _plus(day, -7)
+    if db.execute(f"SELECT 1 FROM verify_messages m WHERE {cond} AND m.day>=? AND m.status IN ('attempted','sent') "
+                  "LIMIT 1", (*params, since)).fetchone():
+        return "messaged_7d"
+    return ""
+
+
 def followed_notes(db: sqlite3.Connection, user_key: str, *, now: datetime | None = None,
                    user_id: str = "") -> dict[str, list[str]]:
     """The GAP_ASK_FOLLOWS notes sent to this user in the last 7 days: their Intercom message ids
@@ -908,6 +1002,15 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
     db.execute("BEGIN IMMEDIATE")
     try:
         blocked = blocked_ids(db, request_ids, campaign)
+        if campaign == DECLINE_CAMPAIGN:
+            # a decline names a credit a REVIEW ruled rejected at most: never one awaiting review, and never one a
+            # review accepted. A credit with no review at all is allowed through (a human may have rejected it in
+            # core), but a review that says otherwise always wins.
+            for rid in request_ids:
+                rv = db.execute("SELECT outcome FROM verify_proof_reviews WHERE request_id=? LIMIT 1",
+                                (rid,)).fetchone()
+                if rv is not None and str(rv["outcome"]) != "rejected":
+                    blocked.add(rid)
         fresh = [r for r in dict.fromkeys(request_ids) if r and r not in blocked]
         if not fresh:
             db.execute("COMMIT")
@@ -960,6 +1063,11 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
             if why:
                 db.execute("COMMIT")
                 return {"result": "recent", "reason": why, "request_ids": fresh}
+        if campaign == DECLINE_CAMPAIGN and enforce_cap:
+            why = decline_user_done(db, user_key, day=day, user_id=user_id)
+            if why:
+                db.execute("COMMIT")
+                return {"result": "recent", "reason": why, "request_ids": fresh}
         if campaign == UVN_NEW_ROWS and enforce_cap:
             # fable-copy-1101-r5/n1, inside this transaction (the peek reads the same)
             why = new_rows_user_done(db, user_key, now=now, user_id=user_id)
@@ -1007,11 +1115,13 @@ def claim(db: sqlite3.Connection, *, user_key: str, day: str, request_ids: list[
         due, removal = window(day) if windowed else (None, None)
         if campaign == CLAIM_CAMPAIGN:
             due = claim_close_day(day)
+        parent = _decline_family(db, fresh) if campaign == DECLINE_CAMPAIGN else None
         cur = db.execute(
-            "INSERT INTO verify_messages (campaign, kind, user_key, account_id, day, due_day, removal_day, status, "
-            "message_type, contact_id, request_ids_json, refs_json, n_credits, approved_by, approval_ref, created_at, "
-            "updated_at, approver_kind, approval_id, template_sha256) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (campaign, "initial", user_key, str(user_id or "").strip() or None, day, due, removal, "attempted",
+            "INSERT INTO verify_messages (campaign, kind, parent_row, user_key, account_id, day, due_day, removal_day, "
+            "status, message_type, contact_id, request_ids_json, refs_json, n_credits, approved_by, approval_ref, "
+            "created_at, updated_at, approver_kind, approval_id, template_sha256) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (campaign, "initial", parent, user_key, str(user_id or "").strip() or None, day, due, removal, "attempted",
              message_type, contact_id or None,
              json.dumps(fresh), json.dumps(keep) if keep else None, len(fresh), approved_by, approval_ref, ts, ts,
              approver_kind, approval_id, template_sha256))
@@ -1086,10 +1196,8 @@ def reminder_state(db: sqlite3.Connection, *, parent_message_id: str, kind: str,
     """Whether follow-up `kind` of the note `parent_message_id` may be sent on `day`.
     result: due | not_due | done | proof_received | not_applicable | no_parent.
       windowed note (removal date): day 14 and day 25, none after the window ends, and only
-      for credits no review has ruled on; after-rejection: as soon as a review rejected a
-      credit, for every rejected credit no after-rejection note has named yet (at most one
-      per credit), with what was received (document | reply), the reasons and a reply-by
-      date never earlier than AFTER_REJECTION_MIN_DAYS after `day` (removal the day after);
+      for credits no review has ruled on (a rejected credit is told by the reason-free `decline`
+      campaign, which is its own message, never a follow-up of this note);
       claim-proof-ask note: one reminder-7, from day 7 up to the day before its close day
       (due_day), unless it was closed (close_reminder: code found, claim decided or
       withdrawn); never once the claimant replied to the note (proof_received: a claim-proof
@@ -1126,20 +1234,6 @@ def reminder_state(db: sqlite3.Connection, *, parent_message_id: str, kind: str,
         return {"result": "not_applicable", **info}
     reviews = db.execute("SELECT request_id, outcome, reason, document FROM verify_proof_reviews WHERE family=?",
                          (parent["id"],)).fetchall()
-    if kind == AFTER_REJECTION:
-        rej = {str(r["request_id"]): r for r in reviews if r["outcome"] == "rejected"}
-        rejected = [rid for rid in info["request_ids"] if rid in rej]
-        if not rejected:
-            return {"result": "not_due", **info}
-        closed = _told(db, int(parent["id"]), finished=True)
-        pending = [rid for rid in rejected if rid not in closed]
-        if not pending:
-            return {"result": "done", **info}
-        reply_by = max(str(parent["due_day"]), _plus(day, AFTER_REJECTION_MIN_DAYS))
-        return {**info, "result": "due", "request_ids": pending,
-                "reasons": {r: str(rej[r]["reason"] or "") for r in pending},
-                "received": {r: "document" if rej[r]["document"] else "reply" for r in pending},
-                "due_day": reply_by, "removal_day": _plus(reply_by, 1)}
     prior = db.execute("SELECT status, attempts FROM verify_messages WHERE parent_row=? AND kind=? "
                        "ORDER BY id DESC LIMIT 1", (parent["id"], kind)).fetchone()
     finished = prior is not None and (prior["status"] in BLOCKING or int(prior["attempts"]) >= MAX_ATTEMPTS)
@@ -1159,17 +1253,18 @@ def reminder_state(db: sqlite3.Connection, *, parent_message_id: str, kind: str,
     return {"result": "due", **info}
 
 
-def _told(db: sqlite3.Connection, family: int, *, finished: bool = False) -> dict[str, sqlite3.Row]:
-    """request_id -> the latest after-rejection row of `family` that names it: sent ones
-    only, or (finished=True) every row that ends that credit's after-rejection note (sent,
-    in flight, refused, closed, or rejected with no retries left)."""
+def _declined(db: sqlite3.Connection, user_key: str = "", user_id: str = "") -> dict[str, sqlite3.Row]:
+    """request_id -> the latest `decline` row that names it: SENT ones only (the user has actually
+    been told). A claim that is in flight or was refused tells nobody, so the credit stays held
+    (HELD_NOT_TOLD) - never removed before its owner heard from us. Keyed across every note of
+    the user, because a decline is not a follow-up of the windowed note: it is its own message.
+    """
     out: dict[str, sqlite3.Row] = {}
-    for r in db.execute("SELECT * FROM verify_messages WHERE parent_row=? AND kind=? ORDER BY id",
-                        (family, AFTER_REJECTION)).fetchall():
-        done = r["status"] == "sent" or (finished and (r["status"] in BLOCKING or int(r["attempts"]) >= MAX_ATTEMPTS))
-        if done:
-            for rid in json.loads(r["request_ids_json"]):
-                out[str(rid)] = r
+    cond, params = _same_user(db, user_key, user_id) if (user_key or str(user_id or "").strip()) else ("1=1", ())
+    for r in db.execute(f"SELECT m.* FROM verify_messages m WHERE m.campaign=? AND {cond} AND m.status='sent' ORDER BY m.id",
+                        (DECLINE_CAMPAIGN, *params)).fetchall():
+        for rid in json.loads(r["request_ids_json"]):
+            out[str(rid)] = r
     return out
 
 
@@ -1232,9 +1327,7 @@ def claim_reminder(db: sqlite3.Connection, *, parent_message_id: str, kind: str,
             return {**st, "result": "daily_cap"}
         priors = db.execute("SELECT attempts, request_ids_json FROM verify_messages WHERE parent_row=? AND kind=? "
                             "AND status='rejected' ORDER BY id DESC", (st["parent_row"], kind)).fetchall()
-        if kind == AFTER_REJECTION:
-            priors = [p for p in priors if set(json.loads(p["request_ids_json"])) & set(keep)]
-        attempts = 1 + max([int(p["attempts"]) for p in priors[:1 if kind != AFTER_REJECTION else None]] or [0])
+        attempts = 1 + max([int(p["attempts"]) for p in priors[:1]] or [0])
         cur = db.execute(
             "INSERT INTO verify_messages (campaign, kind, parent_row, user_key, account_id, day, due_day, removal_day, "
             "status, message_type, contact_id, request_ids_json, n_credits, approved_by, approval_ref, attempts, "
@@ -1641,41 +1734,84 @@ def _reviews(db: sqlite3.Connection, family: int) -> dict[str, str]:
 HELD_AWAITING_REVIEW = "document awaiting review"
 HELD_REPLIED = "the user replied: removal held for a human"
 HELD_NOT_TOLD = "document rejected: the user has not been told why yet"
+# A note exists but cannot be tied to THIS credit (QA #1718 round 7, 2026-11-06): no store we can read carries a
+# request id, so a user-level count cannot prove this credit was one of the ones core told. Distinct from
+# HELD_NOT_TOLD on purpose - "we saw a note but cannot attribute it" and "we saw no note" are different facts, and
+# the human picking this up needs the right one.
+HELD_NOT_ATTRIBUTABLE = ("document rejected: core's decline route is on and the send ledger shows a note for this "
+                         "user, but a send.messages row carries no request id, so we cannot prove THIS credit was "
+                         "told; a person decides")
 
 
-def _past_removal_day(db: sqlite3.Connection, day: str) -> list[tuple[dict[str, Any], bool]]:
+def _past_removal_day(db: sqlite3.Connection, day: str, *,
+                      core_told: Callable[[str, str, list[str], str], dict[str, bool] | None] | None = None
+                      ) -> list[tuple[dict[str, Any], bool]]:
     """(row, held) per credit on a windowed note whose removal day has come and that no
     accepted document cleared. Held for a human (never removed by the export): a credit
     whose document awaits review, one whose user replied (extension_requested_at) and no
-    review has ruled on, a rejected one no sent after-rejection note named yet, and a
-    rejected one whose user replied after that note and no review has ruled on since. A
-    rejected credit is removal-due from the later of the note's removal day and the one ITS
-    after-rejection note named."""
+    review has ruled on, a rejected one whose user has NOT been told the reason-free decline
+    yet, and a rejected one whose user replied after that decline and no review has ruled on
+    since. A declined credit is removal-due from the note's own removal day once the decline
+    went out; the decline itself never names a date.
+
+    WHO TOLD THEM (QA #1718, 2026-11-06): with core's own `credits_rejected` email routed, the telling is CORE's
+    message and hydra writes no `decline` row at all - so a decision that reads only hydra's ledger holds every
+    rejected credit forever. `core_told(user_key, user_id, request_ids, since)` answers for core: a dict of the credits core
+    told them about, or None when that cannot be established (which holds, never releases). No reader supplied means
+    hydra's own sent decline is the only telling, which is the pre-existing behaviour."""
     out: list[tuple[dict[str, Any], bool]] = []
     rows = db.execute("SELECT * FROM verify_messages WHERE kind='initial' AND status='sent' "
                       "AND removal_day IS NOT NULL AND removal_day <= ? ORDER BY id", (day,)).fetchall()
     for r in rows:
         reviews = {str(x["request_id"]): x for x in
                    db.execute("SELECT * FROM verify_proof_reviews WHERE family=?", (r["id"],)).fetchall()}
-        told = _told(db, int(r["id"]))
-        replied = db.execute("SELECT MAX(last_reply_at) FROM verify_messages WHERE id=? OR parent_row=?",
-                             (r["id"], r["id"])).fetchone()[0]
+        told = _declined(db, str(r["user_key"]), str(r["account_id"] or ""))
+        rejected_ids = [str(ref.get("request_id")) for ref in _refs(r)
+                        if str(ref.get("request_id")) in reviews and reviews[str(ref.get("request_id"))]["outcome"] == "rejected"]
+        by_core: dict[str, bool] | None = {}
+        if core_told and rejected_ids:
+            # the close boundary: core's email is emitted on the `rejected` transition, so a delivery for this user
+            # can only be at or after the earliest of these reviews
+            closed_at = min(str(reviews[rid]["reviewed_at"]) for rid in rejected_ids)
+            by_core = core_told(str(r["user_key"]), str(r["account_id"] or ""), rejected_ids, closed_at)
         for ref in _refs(r):
             rid = str(ref.get("request_id"))
             review = reviews.get(rid)
             outcome = review["outcome"] if review is not None else None
+            # a reply may land in the original thread or in the user's decline of that very credit
+            replied = db.execute(
+                "SELECT MAX(last_reply_at) FROM verify_messages m2 WHERE (m2.id=? OR m2.parent_row=?) "
+                "OR (m2.campaign=? AND EXISTS (SELECT 1 FROM json_each(m2.request_ids_json) j WHERE j.value=?))",
+                (r["id"], r["id"], DECLINE_CAMPAIGN, rid)).fetchone()[0]
+            # a document may arrive in reply to the ORIGINAL note or to the user's decline of this credit (the decline is
+            # its own message, not a follow-up: it names the request ids, which is how the two are tied together).
+            proof_at = db.execute(
+                "SELECT MAX(proof_tagged_at) FROM verify_messages m2 WHERE (m2.id=? OR m2.parent_row=?) "
+                "OR (m2.campaign=? AND EXISTS (SELECT 1 FROM json_each(m2.request_ids_json) j WHERE j.value=?))",
+                (r["id"], r["id"], DECLINE_CAMPAIGN, rid)).fetchone()[0]
             removal = str(r["removal_day"])
             reason = "no valid verification within 30 days"
             if outcome == "accepted":
                 continue
             if outcome == "rejected":
                 note = told.get(rid)
-                if note is None:
-                    reason = HELD_NOT_TOLD
-                elif replied and replied > str(note["created_at"]) and replied > str(review["reviewed_at"]):
+                # core's email is emitted on the `rejected` transition, so the review time is when they were told
+                told_at = str(note["created_at"]) if note is not None else (
+                    str(review["reviewed_at"]) if by_core and by_core.get(rid) is True else None)
+                if proof_at and str(proof_at) > str(review["reviewed_at"]):
+                    # a document arrived AFTER this review: the decline promised a fresh review ("submit the credit
+                    # again with your supporting documents and a fresh review will start"), so the credit is held for
+                    # that review, never removed on the strength of the earlier one.
+                    reason = HELD_AWAITING_REVIEW
+                elif told_at is None:
+                    # `rid in by_core` with a False value means core's route is on and a note exists, but it cannot be
+                    # attributed to this request; absent means no note at all was found.
+                    reason = HELD_NOT_ATTRIBUTABLE if (by_core and rid in by_core) else HELD_NOT_TOLD
+                elif replied and replied > told_at and replied > str(review["reviewed_at"]):
                     reason = HELD_REPLIED
                 else:
-                    removal = max(removal, str(note["removal_day"]))
+                    # the decline names no date (no deadline in the copy by design): the note's own
+                    # removal day governs, and only once the user has actually been told.
                     if removal > day:
                         continue
                     reason = "the document sent did not verify it, and nothing else came by the date we named"
@@ -1683,7 +1819,7 @@ def _past_removal_day(db: sqlite3.Connection, day: str) -> list[tuple[dict[str, 
                 reason = HELD_AWAITING_REVIEW
             elif r["extension_requested_at"] is not None:
                 reason = HELD_REPLIED
-            held = reason in (HELD_AWAITING_REVIEW, HELD_REPLIED, HELD_NOT_TOLD)
+            held = reason in (HELD_AWAITING_REVIEW, HELD_REPLIED, HELD_NOT_TOLD, HELD_NOT_ATTRIBUTABLE)
             out.append(({"request_id": rid, "profile_id": ref.get("profile_id") or None,
                          "track_id": ref.get("track_id") or None, "campaign": r["campaign"],
                          "message_id": r["message_id"], "noted_day": r["day"], "due_day": r["due_day"],
@@ -1691,24 +1827,27 @@ def _past_removal_day(db: sqlite3.Connection, day: str) -> list[tuple[dict[str, 
     return out
 
 
-def removal_due(db: sqlite3.Connection, *, day: str) -> list[dict[str, Any]]:
+def removal_due(db: sqlite3.Connection, *, day: str,
+                core_told: Callable[[str, str, list[str], str], dict[str, bool] | None] | None = None
+                ) -> list[dict[str, Any]]:
     """Credits that may be removed on `day`: ONLY credits whose note named a reply-by
     date (windowed notes for NEW provisional approvals; captain 23:40Z "if no valid
     verification comes it should be removed", narrowed 00:35Z to new credits), from the
     day after it, with no valid document. Past (retro-past) credits are never here. Per
     credit: an accepted document clears it; a document awaiting review holds it; a rejected
-    one puts it back once its after-rejection note went out and the date it named passed. A
-    note the user replied to is held for a human (held_for_human) until a review rules on
-    the credit. The remover must still re-check each credit (confirmed meanwhile -> never
-    removed)."""
-    return [row for row, held in _past_removal_day(db, day) if not held]
+    one puts it back once the reason-free decline went out. A note the user replied to is held
+    for a human (held_for_human) until a review rules on the credit. The remover must still
+    re-check each credit (confirmed meanwhile -> never removed)."""
+    return [row for row, held in _past_removal_day(db, day, core_told=core_told) if not held]
 
 
-def held_for_human(db: sqlite3.Connection, *, day: str) -> list[dict[str, Any]]:
+def held_for_human(db: sqlite3.Connection, *, day: str,
+                   core_told: Callable[[str, str, list[str], str], dict[str, bool] | None] | None = None
+                   ) -> list[dict[str, Any]]:
     """Credits past their removal day that the export never removes, each with why: a
     document awaits review, the user replied to the note (text or attachment), or a
     rejection the user has not been told about yet. A human picks them up."""
-    return [row for row, held in _past_removal_day(db, day) if held]
+    return [row for row, held in _past_removal_day(db, day, core_told=core_told) if held]
 
 
 def unverified_past(db: sqlite3.Connection, *, day: str, after_days: int = UNVERIFIED_AFTER_DAYS) -> list[dict[str, Any]]:
@@ -1743,7 +1882,7 @@ def mark_replied(db: sqlite3.Connection, *, message_id: str, replied_at: str = "
     YYYY-MM-DDTHH:MM:SSZ; now when the conversation gives none). Records it on that message
     when it is newer than the one already recorded, and extension_requested_at on the
     initial note once: unreviewed credits are held for a human, and so is a rejected credit
-    whose user replied after its after-rejection note, until a review rules on it again.
+    whose user replied after the reason-free decline, until a review rules on it again.
     recorded | already | not_applicable | no_message."""
     if replied_at and not re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", replied_at):
         raise ValueError("replied_at must be UTC YYYY-MM-DDTHH:MM:SSZ")
@@ -1751,7 +1890,10 @@ def mark_replied(db: sqlite3.Connection, *, message_id: str, replied_at: str = "
     if root is None:
         return "no_message"
     note = db.execute("SELECT removal_day, campaign FROM verify_messages WHERE id=?", (root,)).fetchone()
-    if note is None or (note["removal_day"] is None and note["campaign"] != CLAIM_CAMPAIGN):
+    # a decline names no date, but a reply to it still matters: it is the user answering the decline, and the
+    # credit it names must stop being removal-due until a human reads that reply.
+    if note is None or (note["removal_day"] is None
+                        and note["campaign"] not in (CLAIM_CAMPAIGN, DECLINE_CAMPAIGN)):
         return "not_applicable"
     msg = db.execute("SELECT id, last_reply_at FROM verify_messages WHERE message_id=? ORDER BY id DESC LIMIT 1",
                      (message_id,)).fetchone()
@@ -1778,6 +1920,17 @@ def _family(db: sqlite3.Connection, message_id: str) -> int | None:
     return int(r["parent_row"] or r["id"]) if r is not None else None
 
 
+def _note_of(db: sqlite3.Connection, request_id: str) -> int | None:
+    """The note an id was asked about: a CREDIT's own family, whatever row it is read from. A decline
+    can cover credits of SEVERAL notes (a user whose credits were rejected on two of them), so the
+    family of a review, a re-tag or a rejected verdict is the credit's note — never the first note the
+    declining row happens to name (QA #1718 2: a single parent_row cannot represent several families)."""
+    row = db.execute(
+        "SELECT MIN(id) AS id FROM verify_messages WHERE kind='initial' AND parent_row IS NULL "
+        "AND EXISTS (SELECT 1 FROM json_each(request_ids_json) j WHERE j.value=?)", (str(request_id),)).fetchone()
+    return int(row["id"]) if row is not None and row["id"] is not None else None
+
+
 def mark_tagged(db: sqlite3.Connection, *, message_id: str, conversation_id: str, attachments: int = 0,
                 now: datetime | None = None) -> None:
     """Tag a note (and, for a follow-up, its initial note and every sibling) as proof
@@ -1795,7 +1948,14 @@ def mark_tagged(db: sqlite3.Connection, *, message_id: str, conversation_id: str
         if root is not None:
             db.execute("UPDATE verify_messages SET proof_tagged_at=COALESCE(proof_tagged_at, ?), updated_at=? "
                        "WHERE id=? OR parent_row=?", (ts, ts, root, root))
-            db.execute("DELETE FROM verify_proof_reviews WHERE family=? AND outcome='rejected'", (root,))
+            # the fresh review starts from nothing for EVERY credit this row covered: a decline can name
+            # credits of several notes, so its rejected verdicts live under each credit's own family
+            row = db.execute("SELECT request_ids_json FROM verify_messages WHERE message_id=?", (message_id,)).fetchone()
+            fams = {root}
+            for rid in json.loads((row["request_ids_json"] if row is not None else None) or "[]"):
+                fams.add(_note_of(db, rid) or root)
+            for fam in fams:
+                db.execute("DELETE FROM verify_proof_reviews WHERE family=? AND outcome='rejected'", (fam,))
         db.execute("COMMIT")
     except Exception:
         db.execute("ROLLBACK")
@@ -1809,10 +1969,10 @@ def record_proof_review(db: sqlite3.Connection, *, message_id: str, request_ids:
     proof-review-is-all-or-nothing-per-note):
     accepted  these credits are verified; never removal-due;
     rejected  these credits are not verified. When a document (attachment) was received on
-              the note, `reason` (one of REJECTION_REASONS) is required and is all the
-              user's after-rejection note says about why; after a reply with no document
-              there is no reason (the note says we still need a document). They are
-              removal-due after the date their after-rejection note names.
+              the note, `reason` (one of REJECTION_REASONS) is required and stays INTERNAL:
+              it rides on this row and the audit file only, and no user-facing copy ever
+              shows it (the decline says the information was not enough, nothing more).
+              They are removal-due once the reason-free decline went out.
     Credits on the note not reviewed yet stay held while the proof awaits review. Once every
     credit on the note is reviewed and any was rejected, the note returns to "no proof" (the
     sweep watches for a NEW attachment beyond the ones already reviewed). A reviewed credit
@@ -1836,19 +1996,33 @@ def record_proof_review(db: sqlite3.Connection, *, message_id: str, request_ids:
     db.execute("BEGIN IMMEDIATE")
     try:
         note = db.execute("SELECT * FROM verify_messages WHERE id=?", (root,)).fetchone()
-        on_note = [str(x) for x in json.loads(note["request_ids_json"])]
-        stray = [x for x in ids if x not in on_note]
+        row = db.execute("SELECT * FROM verify_messages WHERE message_id=? ORDER BY id DESC LIMIT 1",
+                         (message_id,)).fetchone()
+        # what the reviewed row itself covered (a decline names its own credits) plus the family note's
+        # credits: a review may name any credit the thread it arrives on actually asked about
+        covered = list(dict.fromkeys(
+            [str(x) for x in json.loads(note["request_ids_json"] or "[]")]
+            + [str(x) for x in json.loads((row["request_ids_json"] if row is not None else None) or "[]")]))
+        fams = sorted({_note_of(db, rid) or root for rid in ids})
+        stray = [x for x in ids if x not in covered]
         if stray:
             db.execute("COMMIT")
             return {"result": "not_on_note", "request_ids": stray}
-        tagged = db.execute("SELECT 1 FROM verify_messages WHERE (id=? OR parent_row=?) AND proof_tagged_at IS NOT NULL "
-                            "LIMIT 1", (root, root)).fetchone()
-        if tagged is None and not note["extension_requested_at"]:
+        # the threads a document or a reply can have arrived on: every reviewed credit's own family, the row's
+        # family, and the row the review is recorded against (a decline is its own message, filed under one note)
+        cand = sorted(set(fams) | {root, int(row["id"]) if row is not None else root})
+        in_fams = ",".join("?" * len(cand))
+        tagged = db.execute(f"SELECT 1 FROM verify_messages WHERE (id IN ({in_fams}) OR parent_row IN ({in_fams})) "
+                            "AND proof_tagged_at IS NOT NULL LIMIT 1", (*cand, *cand)).fetchone()
+        replied_to = note["extension_requested_at"] or db.execute(
+            f"SELECT 1 FROM verify_messages WHERE (id IN ({in_fams}) OR parent_row IN ({in_fams})) "
+            "AND extension_requested_at IS NOT NULL LIMIT 1", (*cand, *cand)).fetchone() is not None
+        if tagged is None and not replied_to:
             db.execute("COMMIT")
             return {"result": "not_tagged"}
         document = tagged is not None or db.execute(
-            "SELECT 1 FROM verify_messages WHERE (id=? OR parent_row=?) AND proof_attachments > 0 LIMIT 1",
-            (root, root)).fetchone() is not None
+            f"SELECT 1 FROM verify_messages WHERE (id IN ({in_fams}) OR parent_row IN ({in_fams})) "
+            "AND proof_attachments > 0 LIMIT 1", (*cand, *cand)).fetchone() is not None
         if outcome == "rejected" and document and not reason:
             raise ValueError(f"a document was received on this note: a rejection needs a reason, one of "
                              f"{REJECTION_REASONS}")
@@ -1860,11 +2034,15 @@ def record_proof_review(db: sqlite3.Connection, *, message_id: str, request_ids:
                        "reviewed_by) VALUES (?,?,?,?,?,?,?) ON CONFLICT(family, request_id) DO UPDATE SET "
                        "outcome=excluded.outcome, reason=excluded.reason, document=excluded.document, "
                        "reviewed_at=excluded.reviewed_at, reviewed_by=excluded.reviewed_by",
-                       (root, rid, outcome, reason or None, int(document), ts, reviewer))
-        reviews = _reviews(db, root)
-        if all(x in reviews for x in on_note) and "rejected" in reviews.values():
-            db.execute("UPDATE verify_messages SET proof_tagged_at=NULL, updated_at=? WHERE id=? OR parent_row=?",
-                       (ts, root, root))
+                       (_note_of(db, rid) or root, rid, outcome, reason or None, int(document), ts, reviewer))
+        # the row returns to "no proof" PER FAMILY: once every credit of a family that this thread covered
+        # is reviewed and any of them was rejected
+        for fam in fams:
+            reviews = _reviews(db, fam)
+            fam_ids = [x for x in covered if (_note_of(db, x) or root) == fam]
+            if fam_ids and all(x in reviews for x in fam_ids) and any(reviews[x] == "rejected" for x in fam_ids):
+                db.execute("UPDATE verify_messages SET proof_tagged_at=NULL, updated_at=? WHERE id=? OR parent_row=?",
+                           (ts, fam, fam))
         db.execute("COMMIT")
     except Exception:
         db.execute("ROLLBACK")
@@ -1886,8 +2064,15 @@ def awaiting_proof(db: sqlite3.Connection, *, days: int = 45, now: datetime | No
     checked first, then least recently checked, so a capped sweep reaches every note in
     turn instead of re-reading the same oldest ones."""
     since = stamp((now or utcnow()) - timedelta(days=days))
+    # m.campaign, NOT f.campaign (QA #1718 round 9, 2026-11-06): `f` is the note family's parent, and a decline is
+    # parented to the note whose credits it closed - which may be a `retro-past` note. Reading the family's campaign
+    # made a decline look like a retro-past note, so a tagged decline reply was skipped and the fresh review the
+    # decline promised never entered the sweep. A parent's own campaign equals its family's, and a follow-up row is
+    # written with its parent's campaign (record_reminder), so the message's own campaign is the right question to
+    # ask: "is THIS message a decline".
     rows = db.execute(
-        "SELECT m.message_id, m.proof_tagged_at, f.removal_day, f.request_ids_json, f.id AS family "
+        "SELECT m.message_id, m.proof_tagged_at, f.removal_day, f.request_ids_json, m.campaign AS campaign, "
+        "m.request_ids_json AS own_ids, f.id AS family "
         "FROM verify_messages m JOIN verify_messages f ON f.id = COALESCE(m.parent_row, m.id) "
         "WHERE m.status='sent' AND m.message_id IS NOT NULL AND EXISTS (SELECT 1 FROM verify_messages s "
         "WHERE (s.id=f.id OR s.parent_row=f.id) AND s.status='sent' AND s.created_at >= ?) "
@@ -1895,11 +2080,23 @@ def awaiting_proof(db: sqlite3.Connection, *, days: int = 45, now: datetime | No
     out: list[str] = []
     for r in rows:
         if r["proof_tagged_at"]:
-            if r["removal_day"] is None:
+            if r["campaign"] == DECLINE_CAMPAIGN:
+                # A decline is read whatever its parent note's date is: the user's new document is the restart the
+                # decline promised ("submit the credit again ... a fresh review will start"), never a dead thread.
+                # And it names its OWN credits, which can come from SEVERAL note families (QA #1718, 2026-11-06):
+                # reading the parent note's ids and the parent's reviews meant that once the FIRST credit was
+                # accepted the whole decline was skipped, so a fresh document for the second credit was never
+                # swept. Each id is judged against its own family, never the parent's.
+                own = [str(x) for x in json.loads(r["own_ids"] or "[]")]
+                if own and all(_reviews(db, _note_of(db, x) or int(r["family"])).get(x) == "accepted"
+                               for x in own):
+                    continue
+            elif r["removal_day"] is None:
                 continue
-            reviews = _reviews(db, int(r["family"]))
-            if all(reviews.get(str(x)) == "accepted" for x in json.loads(r["request_ids_json"])):
-                continue
+            else:
+                reviews = _reviews(db, int(r["family"]))
+                if all(reviews.get(str(x)) == "accepted" for x in json.loads(r["request_ids_json"])):
+                    continue
         out.append(str(r["message_id"]))
     return out
 
@@ -2319,6 +2516,8 @@ def _main(argv: list[str] | None = None) -> int:
     rs.add_argument("--parent-message-id", required=True)
     rs.add_argument("--kind", required=True, choices=KINDS[1:])
     rs.add_argument("--day", required=True)
+    cs = sub.add_parser("close-since", help="when these credits were closed (the window a per-user decline read needs)")
+    cs.add_argument("--request-ids", required=True)
     g = sub.add_parser("message")
     g.add_argument("--message-id", required=True)
     t = sub.add_parser("mark-tagged")
@@ -2439,6 +2638,9 @@ def _main(argv: list[str] | None = None) -> int:
         if a.user_key and a.campaign in GAP_LIKE:
             why = gap_user_done(db, a.user_key, user_id=a.user_id)
             out["user_done"], out["recent"], out["recent_why"] = "", bool(why), why
+        if a.user_key and a.campaign == DECLINE_CAMPAIGN:
+            why = decline_user_done(db, a.user_key, day=a.day or utcnow().strftime("%Y-%m-%d"), user_id=a.user_id)
+            out["user_done"], out["recent"], out["recent_why"] = "", bool(why), why
         if a.campaign == UVN_NEW_ROWS:
             why = new_rows_user_done(db, a.user_key, user_id=a.user_id)
             out["prior_uvn_ask"] = why != "no_prior_ask"
@@ -2458,6 +2660,8 @@ def _main(argv: list[str] | None = None) -> int:
         out = reminder_state(db, parent_message_id=a.parent_message_id, kind=a.kind, day=a.day)
         if out.get("result") == "due":       # QA #1588: the pre-send peek reads the same hold the claim enforces
             out["no_channel"] = no_channel(db, out.get("user_key") or "", out.get("account_id") or "")
+    elif a.op == "close-since":
+        out = close_since(db, _ids(a.request_ids))
     elif a.op == "message":
         r = message(db, a.message_id)
         out = dict(r) if r is not None else None
