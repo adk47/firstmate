@@ -1258,7 +1258,7 @@ PY
 @test "unknown campaigns and kinds are refused" {
   credits "$TEST_TMPDIR/c.json" Jane "r1:Mixing:Song A:Big Star"
   run -1 send --campaign everything
-  [[ "$output" == *"--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status, gap-ask, decline, merge-pending, merge-claim-first, credit-hold-status, claim-proof-pending or proof-need-ask"* ]]
+  [[ "$output" == *"--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status, gap-ask, decline, merge-pending, merge-claim-first, credit-hold-status, claim-proof-pending or proof-need-ask, wait-apology"* ]]
   run -1 send --kind final-notice --parent-message-id 1
   [[ "$output" == *"--kind must be initial, reminder-14, reminder-25 or reminder-7"* ]]
   # the retired after-rejection note fails closed, and says where a closed request goes now
@@ -5819,4 +5819,107 @@ HYBRID
   # assertion would silently lose the guard the day someone adds a bracketed parameter with content (created[gte], [0]).
   grep -q -- '-g' "$TEST_TMPDIR/srv/argv.log"
   kill "$srv_pid" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------------------------------------------
+# wait-apology (Fable d2, 2026-11-05 04:1xZ; copy v2 sha256 78f2b8751c1e1f7c4e6369cf4f1f321b4ba0350db404a245fd18769f3f5cf30e;
+# v1 was 83b82addc0e041bc and the ONLY change is F4)
+# The approved file says: one fact sentence chosen from the LIVE request state, "if the live state is not one of the
+# four below, the sender REFUSES that user". These arms pin the four sentences byte-for-byte and the refusal.
+apology() { # <credits-file> <paid:true|false> <fact:F1|F2|F3|F4> <all_approved:true|false>
+  jq -c --argjson paid "$2" --arg f "$3" --argjson aa "$4" \
+    '. + {apology:{paid:$paid, fact:$f, all_approved:$aa}}' "$1" > "$TEST_TMPDIR/a.json"
+  mv "$TEST_TMPDIR/a.json" "$1"
+}
+
+@test "wait-apology: F1 (waiting on them) renders d2's copy verbatim for one credit, paid" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  apology "$TEST_TMPDIR/c.json" true F1 false
+  run -0 send --campaign wait-apology --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  body="$(rendered .body | plain)"
+  [[ "$body" == *"Hi Jane,"* ]]
+  [[ "$body" == *"We owe you an apology. You have 1 credit request with us for \"Song A\" and you have not heard from us about it - that wait is too long, and it is on us, not you."* ]]
+  [[ "$body" == *"Right now it is waiting on one thing from you - something that shows your role, like a link to the credit on a streaming platform, a photo of the liner notes, or a note from the label or distributor. Reply here with it and it goes straight into review."* ]]
+  [[ "$body" == *"As a paying member your requests are at the front of our queue as we work through them. If anything about it is unclear, reply here and a person will answer."* ]]
+  [[ "$body" == *"- The Muso team"* ]]
+  # the subject is fixed by the copy, singular or plural
+  [ "$(rendered .subject)" = "Your Muso credit request: an update, and an apology" ]
+  # and no promise, date or ETA ever appears
+  [[ "$body" != *"soon"* ]]
+  [[ "$body" != *"approve"* ]]
+}
+
+@test "wait-apology: F2 (in review) and F3 (decided, not told) are the approved sentences, plural for two credits" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star" "u2:Mastering:Song B:Big Star"
+  apology "$TEST_TMPDIR/c.json" false F2 false
+  run -0 send --campaign wait-apology --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  body="$(rendered .body | plain)"
+  [[ "$body" == *"Sorry for the silence. You have 2 credit requests with us for \"Song A\" and \"Song B\" and we have not told you where they stand - that is our miss, not yours."* ]]
+  [[ "$body" == *"We have what you sent, and they are in our review queue. Nothing more is needed from you; we will tell you here when they have been checked."* ]]
+  [[ "$body" != *"paying member"* ]]
+  [ "$(rendered .subject)" = "Your Muso credit requests: an update, and an apology" ]
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  apology "$TEST_TMPDIR/c.json" true F3 false
+  run -0 send --campaign wait-apology --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  body="$(rendered .body | plain)"
+  [[ "$body" == *"It has been decided - the approved credits are on your profile now, and anything we could not verify is listed with the reason on the same page."* ]]
+  # "where everything was approved, drop the second clause"
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  apology "$TEST_TMPDIR/c.json" true F3 true
+  run -0 send --campaign wait-apology --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  body="$(rendered .body | plain)"
+  [[ "$body" == *"It has been decided - the approved credits are on your profile now."* ]]
+  [[ "$body" != *"could not verify"* ]]
+}
+
+@test "wait-apology: F4 (decided, NOTHING approved) is d2 copy v2's sentence - an all-rejected user never gets F3" {
+  # QA #1788 finding 2: F3 states an approval that may not exist. F3 REQUIRES at least one approved row; an all-rejected
+  # user gets F4, the ONLY fact allowed when zero rows are approved.
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  apology "$TEST_TMPDIR/c.json" true F4 false
+  run -0 send --campaign wait-apology --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  body="$(rendered .body | plain)"
+  [[ "$body" == *"It has been reviewed, and we could not verify it from the evidence we have. The reason is listed on each request on your profile. If you can send something that shows your role - a link to the credit on a streaming platform, a photo of the liner notes, or a note from the label or distributor - reply here and we will look again."* ]]
+  [[ "$body" != *"been decided"* ]]
+  [[ "$body" != *"approved credits are on your profile"* ]]
+  # plural, two credits
+  rm -f "$INTERCOM_VERIFY_TEST_LEDGER"
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star" "u2:Mastering:Song B:Big Star"
+  apology "$TEST_TMPDIR/c.json" false F4 false
+  run -0 send --campaign wait-apology --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ --dry-run
+  body="$(rendered .body | plain)"
+  [[ "$body" == *"They have been reviewed, and we could not verify them from the evidence we have."* ]]
+}
+
+@test "wait-apology: a live state that is not F1/F2/F3/F4 is REFUSED, never defaulted to a fact" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  apology "$TEST_TMPDIR/c.json" true F9 false
+  run -1 send --campaign wait-apology --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"REFUSED: apology_fact_invalid"* ]]
+  # a fact that is absent (the live read found no F1/F2/F3/F4) is refused by its own name: no default fact, ever
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  jq -c '. + {apology:{paid:true, fact:"", all_approved:false}}' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/a.json"
+  mv "$TEST_TMPDIR/a.json" "$TEST_TMPDIR/c.json"
+  run -1 send --campaign wait-apology --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"REFUSED: apology_fact_missing"* ]]
+  # a non-boolean paid flag cannot pick the paid or the free variant
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  jq -c '. + {apology:{paid:"yes", fact:"F1", all_approved:false}}' "$TEST_TMPDIR/c.json" > "$TEST_TMPDIR/a.json"
+  mv "$TEST_TMPDIR/a.json" "$TEST_TMPDIR/c.json"
+  run -1 send --campaign wait-apology --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"REFUSED: apology_fact_invalid"* ]]
+  [ "$(sql "SELECT COUNT(*) FROM verify_messages")" = "0" ]
+}
+
+@test "wait-apology: one message per user EVER, and no follow-up kinds" {
+  credits "$TEST_TMPDIR/c.json" Jane "u1:Mixing:Song A:Big Star"
+  apology "$TEST_TMPDIR/c.json" true F1 false
+  run -0 send --campaign wait-apology --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  run -0 send --campaign wait-apology --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"SKIPPED already-notified"* ]]
+  [ "$(posts)" -eq 1 ]
+  run -1 send --campaign wait-apology --kind reminder-14 --credits-file "$TEST_TMPDIR/c.json" --approved-by U7RP6HKUZ
+  [[ "$output" == *"REFUSED: wait-apology has no follow-ups"* ]]
 }

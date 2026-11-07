@@ -463,6 +463,7 @@ readonly APPROVAL_REF_CLAIM_ASK="Fable program lead steers-1830 #5 (relayed by f
 CLAIM_SURFACES='{"spotify": "Spotify artist bio", "website": "website (as one line in a file at /.well-known/muso.txt, or in a meta tag named muso-verify)", "youtube": "YouTube channel About section"}'
 readonly CLAIM_SURFACES
 readonly APPROVAL_REF_GAP_ASK="captain U7RP6HKUZ 2026-10-26 12:40Z: Fable decides, do not ask him; ~13:00Z: \"credit and profile verifications nothing is waiting on us right? you are moving these forward and ball should be in users court if required otherwise they are approved? if not get on this\"; Fable ruling 2026-10-26 13:23Z (captain-asks-fable-r4 report section H, GO 2): 460 need_more -> dated gap ask, one per user per day, Fable-approved paragraph, no deadline, no removal words; last sentence swapped to \"Your request stays open while we look.\" (the asked rows are pending, not live) by Fable decision (B) relayed by firstmate 2026-10-26 16:58Z (verify-ask-wiring-h2 inbox 005)"
+readonly APPROVAL_REF_WAIT_APOLOGY="Fable d2 (verify-sla-driver-fable-d2) 2026-11-05 04:1xZ on the captain's 01:4xZ order (\"anyone that hasn't been communicated needs to be - apologize for any excessive waits\"): the wait-apology copy v2 in data/verify-sla-driver-fable-d2/approved-copy/wait-apology-status-v2.md, sha256 78f2b8751c1e1f7c4e6369cf4f1f321b4ba0350db404a245fd18769f3f5cf30e (v1 83b82addc0e041bc; the only change is F4), rendered VERBATIM; one message per user, ever, ledgered as campaign wait-apology so the 7-day status gates see it."
 readonly APPROVAL_REF_MERGE_CLAIM_FIRST="pr-review-fable-r5 fable-copy-1030-r5/e1 (2026-10-31 05:2xZ, amended 05:4xZ); r5 fable-copy-1103-r5/mcf-proof-ack (2026-11-03 13:5xZ: the documents-on-file sentence, rendered only off a read fact); program-lead-fable-p2 062 (ii); firstmate 063; captain 13:1xZ delegation (Fable decides)"
 readonly APPROVAL_REF_MERGE_PENDING="captain 2026-10-28 12:4xZ: \"go live today and start conversations with users who requested credits, profiles (claims) or merges ASAP\"; copy = program-lead-fable-p2 go-live-today line M1, sent only on the captain's own yes to M1"
 readonly APPROVAL_REF_OWING_PROOF="captain U7RP6HKUZ 2026-10-27 20:1xZ: \"are you sure all users that need to be communicated have been already? If not get on it - make this a durable process that does not rely on my computer; do this all on OVH.\"; copy = Fable verify-program-lead-fable-l1 copy-owing-proof-1027 (20:2xZ), sent only on the captain's yes (L14a S1 credit-hold-status / L14b S2 claim-proof-pending)"
@@ -1205,7 +1206,16 @@ case "$CAMPAIGN" in
     [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live and the status notes; decline has ONE copy (captain 2026-10-29 13:2xZ) and it is pinned."
     [ "$KIND" = "initial" ] || refuse "decline has no follow-ups: one decline per request id, ever. There is no reminder and no second note."
     ;;
-  *) refuse "--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status, gap-ask, decline, merge-pending, merge-claim-first, credit-hold-status, claim-proof-pending or proof-need-ask (got '$CAMPAIGN'). Each campaign is pinned in this script; there is no other." ;;
+  wait-apology)
+    # d2's approved copy, rendered VERBATIM (sha256 83b82addc0e041bc): an apology plus exactly ONE fact sentence chosen
+    # from the LIVE request state. The fact arrives in .apology.fact (F1|F2|F3) with .apology.paid and
+    # .apology.all_approved; ANY other state refuses that user - no message beats a wrong one. No date, no ETA, no
+    # promise of approval anywhere in it.
+    MAX_CREDITS=1000; MAX_LISTED=3; COPY="waitapol"; APPROVAL_REF="$APPROVAL_REF_WAIT_APOLOGY"
+    [ -z "$COPY_ARG" ] || refuse "--copy applies to verify-live; wait-apology has one copy, d2's file verbatim."
+    [ "$KIND" = "initial" ] || refuse "wait-apology has no follow-ups: one message per user, ever."
+    ;;
+  *) refuse "--campaign must be verify-live, retro-past, removal-notice, takeback-notice, uvn-status, withdrawal-confirm, status-doc-received, status-team-review, email-changed, email-changed-dup, claim-proof-ask, claim-status, gap-ask, decline, merge-pending, merge-claim-first, credit-hold-status, claim-proof-pending or proof-need-ask, wait-apology (got '$CAMPAIGN'). Each campaign is pinned in this script; there is no other." ;;
 esac
 # C11 (p1 223): --check-recipient is the dry run that equals the send. It runs every send-time check a real send runs
 # up to the claim (the ledger peek, core_notice, the go-live guards, comm_state, the status-note Intercom reads, the
@@ -1339,6 +1349,10 @@ INPUT="$("$JQ_BIN" -c '
             pending_count: (.user.pending_count | if type == "number" and . == floor and . >= 0 and . <= 1000000 then . else null end),
             first_name: ((.user.first_name // "") | clean),
             filing_muso_ui: (.user.filing_muso_ui == true) },   # r5 19:2xZ: a Muso-UI filing (SYS-001) gets no R1
+    # [key=apology-fact]: the ONE fact sentence this note may carry, and which variant (paid/free) it is - read from the
+    # live request state by the runner, never from the list. Booleans stay booleans: a string "yes" is refused.
+    apology: { fact: ((.apology.fact // "") | clean), paid: (.apology.paid | if type == "boolean" then . else null end),
+               all_approved: (.apology.all_approved | if type == "boolean" then . else null end) },
     claim: ((.claim // {}) | { profile_name: ((.profile_name // "") | clean), profile_url: ((.profile_url // "") | clean),
                                code: ((.code // "") | clean), platform: ((.platform // "") | clean | ascii_downcase) }),
     merge: ((.merge // {}) | { profiles: [ (.profiles // [])[] | clean ], link_profile_id: ((.link_profile_id // "") | clean | ascii_downcase) }),
@@ -2489,6 +2503,46 @@ def gap_plural: {split_sheet: "split sheets", contract: "contracts", invoice: "i
   daw_session: "session screenshots", catalog_page: "credits pages"}[.];
 def a_an: if test("^[aeiou]") then "an " + . else "a " + . end;
 def orjoin: if length <= 1 then (.[0] // "") else (.[0:-1] | join(", ")) + " or " + .[-1] end;
+# d2's wait-apology copy v2 (sha256 78f2b8751c1e1f7c4e6369cf4f1f321b4ba0350db404a245fd18769f3f5cf30e; v1 was
+# 83b82addc0e041bc, and the ONLY change is F4), VERBATIM except the
+# TYPOGRAPHY of its dashes: the approved prose is written with em dashes and this gate refuses an em dash in any customer
+# note ("Caroline's voice never uses one"), so each one is rendered as " - ", exactly as every other approved copy in this
+# script does (the gap ask, the email-changed ack, the status notes). Words, order and sentences are unchanged; d2 sees
+# the three rendered bodies in the read-back and confirms on sight. The fact
+# sentence is chosen LIVE (F1 waiting on them / F2 in review / F3 decided with at least one approval / F4 decided with
+# NOTHING approved); any other value refuses the user.
+def ap_fact($n; $f; $aa):
+  if $f == "F1" then
+    "Right now \(if $n == 1 then "it is" else "they are" end) waiting on one thing from you - something that shows your role, like a link to the credit on a streaming platform, a photo of the liner notes, or a note from the label or distributor. Reply here with it and it goes straight into review."
+  elif $f == "F2" then
+    "We have what you sent, and \(if $n == 1 then "it is" else "they are" end) in our review queue. Nothing more is needed from you; we will tell you here when \(if $n == 1 then "it has" else "they have" end) been checked."
+  elif $f == "F3" then
+    "\(if $n == 1 then "It has" else "They have" end) been decided - the approved credits are on your profile now\(if $aa then "" else ", and anything we could not verify is listed with the reason on the same page" end)."
+  elif $f == "F4" then
+    # QA #1788 finding 2 (d2 copy v2, sha256 78f2b8751c1e1f7c4e6369cf4f1f321b4ba0350db404a245fd18769f3f5cf30e): F3 states
+    # an approval that may not exist. F3 REQUIRES at least one approved row; an all-rejected user gets F4, the ONLY fact
+    # allowed when zero rows are approved. Refusing the state and leaving the user silent is the D gap this closes.
+    "\(if $n == 1 then "It has" else "They have" end) been reviewed, and we could not verify \(if $n == 1 then "it" else "them" end) from the evidence we have. The reason is listed on each request on your profile. If you can send something that shows your role - a link to the credit on a streaming platform, a photo of the liner notes, or a note from the label or distributor - reply here and we will look again."
+  else error("apology_fact_unknown") end;
+def wait_apology($fn; $c; $maxl; $ap):
+  ($c | length) as $n
+  | ($ap.fact // "") as $f
+  | ($ap.all_approved // false) as $aa
+  | (if ($ap.paid | type) == "boolean" then $ap.paid else error("apology_paid_unknown") end) as $paid
+  | (if $n < 1 then error("apology_no_credits") else . end)
+  | ([ $c[0:$maxl][] | .track_title ] | utitles($c)) as $ts
+  | ([ $ts[] | qt ] | (if length <= 1 then (.[0] // "") else (.[0:-1] | join(", ")) + " and " + .[-1] end)) as $titles
+  | (if ($ts | length) >= 1 and ($ts | length) <= $maxl then "for " + $titles else "for that many tracks" end) as $which
+  | { subject: (if $n == 1 then "Your Muso credit request: an update, and an apology"
+                else "Your Muso credit requests: an update, and an apology" end),
+      segs: ([ {p: "Hi \($fn),"},
+               {p: (if $paid
+                    then "We owe you an apology. You have \($n) credit request\(if $n == 1 then "" else "s" end) with us \($which) and you have not heard from us about \(if $n == 1 then "it" else "them" end) - that wait is too long, and it is on us, not you."
+                    else "Sorry for the silence. You have \($n) credit request\(if $n == 1 then "" else "s" end) with us \($which) and we have not told you where \(if $n == 1 then "it" else "they" end) stand\(if $n == 1 then "s" else "" end) - that is our miss, not yours." end)},
+               {p: ap_fact($n; $f; $aa)} ]
+             + (if $paid then [ {p: "As a paying member your requests are at the front of our queue as we work through them. If anything about \(if $n == 1 then "it" else "them" end) is unclear, reply here and a person will answer."} ]
+                else [ {p: "If anything about \(if $n == 1 then "it" else "them" end) is unclear, reply here and a person will answer."} ] end)
+             + [ {p: "- The Muso team"} ]) };
 def roles_as: [ split(",")[] | gsub("^\\s+|\\s+$"; "") | select(length > 0) ] | andjoin;
 def gap_summary($c):
   ([ $c[].track_title | ascii_downcase ]) as $asked
@@ -2532,6 +2586,7 @@ def gap_ask($fn; $c; $maxl):
    elif $copy == "refundconfirm" then refund_confirm($fn; .refund)
    elif $copy == "uvn" then uvn_status($fn; .credits; $maxl)
    elif $copy == "gap" then gap_ask($fn; .credits; $maxl)
+   elif $copy == "waitapol" then wait_apology($fn; .credits; $maxl; (.apology // {}))
    elif $copy == "proofneed" then proof_need_ask($fn; .credits; .need; $maxl)
    elif $copy == "takeback" then takeback_notice($fn; .credits; $maxl)
    elif $copy == "removal" then removal_notice($fn; .credits; $maxl)
@@ -2728,6 +2783,23 @@ if [ "$CAMPAIGN" = "merge-claim-first" ]; then
   case "$MCF_PROOF" in
     true|false) MCF_SET=1 ;;
     *) refuse "mcf_proof_unreadable: the documents-on-file fact is missing or not a boolean; the acknowledgement cannot be rendered honestly. Nothing was sent or claimed." ;;
+  esac
+fi
+if [ "$CAMPAIGN" = "wait-apology" ]; then
+  # [key=apology-fact] (d2's copy, "the fact sentence comes from a LIVE read ... if the live state is not one of the three
+  # below, the sender REFUSES that user"): the payload must carry one of exactly four facts (F1-F4), a boolean paid flag and a
+  # boolean all_approved flag. Anything else is this user's refusal - never a default fact and never a blank.
+  af="$(printf '%s' "$INPUT" | "$JQ_BIN" -r '
+      if (.credits | type) == "array" and (.credits | length) >= 1
+         and ((.apology.fact // "") | IN("F1", "F2", "F3", "F4"))
+         and ((.apology.paid | type) == "boolean")
+         and ((.apology.all_approved | type) == "boolean")
+      then "ok" else ((.apology.fact // "") + "|" + ((.apology.paid | type) // "none")) end' 2>/dev/null || echo "unreadable")"
+  case "$af" in
+    ok) ;;
+    "F1|boolean"|"F2|boolean"|"F3|boolean"|"F4|boolean") refuse "apology_no_credits: the note names no credit request, so it cannot be rendered honestly. Nothing was sent or claimed." ;;
+    "|boolean") refuse "apology_fact_missing: the live request state was not one of F1/F2/F3/F4, so this user is refused (no message beats a wrong one). Nothing was sent or claimed." ;;
+    *) refuse "apology_fact_invalid: the apology fact ($af) is not one of F1/F2/F3/F4 with a boolean paid flag; the note cannot be rendered honestly. Nothing was sent or claimed." ;;
   esac
 fi
 RENDERED="$(render "$INPUT")"

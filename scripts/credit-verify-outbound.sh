@@ -155,6 +155,9 @@ CLAIM_PROOF_REPEAT_MIN="$(cfg CVO_CLAIM_PROOF_REPEAT_MIN 360)"
 # but never applies it (a signed batch goes by hand). FULL_CAP_FROM = v1's 10-sample line: before it the family runs
 # at FIRST_CAP, after it at its normal cap. Constants only - a date moves by PR, never by env or a state file.
 declare -A UNSIGNED_FROM=(
+  # wait-apology (fable d2 2026-11-05 / firstmate 772): a NEW customer-facing family. It stays SIGNED-only (checked,
+  # never applied) until fable d2's GO is stamped here as the read-back date - the same ladder every family walked.
+  [wait-apology]=""
   [uvn-status]="2026-10-31T18:02Z"     # AE-send-3: 3/3 = would-send 3, health + zero-read clean (h2 18:05Z, n1 465)
   [status-team-review]="2026-10-31T08:20Z"   # /k-ap 7: 7/7 = the signed set, health + zero-read clean (not a timer family yet)
   [claim-status]="2026-10-31T17:55Z"   # c2 batch 5 FREE 250: ledger 5763-6052 == the checked/signed 250, health + zero-read clean (p1 488)
@@ -1395,7 +1398,39 @@ need_families() {
     log "proof-need-ask: the deployed need_asks.py has no --check-recipients (#1582 not deployed); skipped"
   fi
 }
+# Fable d2 / firstmate 772 + 774: the wait-apology family. The audience is BUILT here, per segment, by the
+# audience builder - which goes INERT (exit 2, names the source, writes no list) unless every exclusion it cannot
+# infer loads. An inert build is a segment with no audience, never an unfiltered one.
+APOLOGY_BUILDER="$(cfg CVO_APOLOGY_BUILDER "$HYDRA_ROOT/scripts/credit_review/wait_apology_audience.py")"
+APOLOGY_PLAN_ROOT="$(cfg CVO_APOLOGY_PLAN_ROOT "/var/lib/hydra/paid-status")"
+apology_family() { # <segment>
+  local seg="$1" day plan out rc
+  day="$(date -u +%F)"
+  plan="$APOLOGY_PLAN_ROOT/$day/$seg"
+  out="$OUT/wait-apology-$seg.json"
+  if [ ! -d "$plan" ]; then
+    log "wait-apology $seg: no paid-status run for today at $plan; skipped (never a guessed audience)"
+    return 0
+  fi
+  py "$APOLOGY_BUILDER" --plan-dir "$plan" --segment "$seg" --out "$out" --cap "$R1_CAP" \
+    >> "$OUT/wait-apology-$seg.build.log" 2>&1; rc=$?
+  if [ "$rc" = 2 ]; then
+    log "wait-apology $seg: builder INERT ($(tail -1 "$OUT/wait-apology-$seg.build.log")); no audience this tick"
+    page "wait-apology: the audience builder is INERT for $seg - $(tail -1 "$OUT/wait-apology-$seg.build.log")"
+    return 0
+  fi
+  if [ "$rc" != 0 ]; then
+    autokill "wait-apology $seg: the audience builder failed (rc=$rc): $(tail -1 "$OUT/wait-apology-$seg.build.log")"
+    return 1
+  fi
+  log "wait-apology $seg: $(tail -1 "$OUT/wait-apology-$seg.build.log")"
+  family wait-apology "$seg" "$out" "$R1_CAP" uvn-status --campaign wait-apology || return 1
+}
+
 credit_families() {
+  # d2: PAID first, then free (the ladder's shared first-batch budget is charged in this order).
+  apology_family paid || return 1
+  apology_family free || return 1
   if [ -n "$RD_LIST" ]; then
     family reply-due paid "$RD_LIST" "$RD_CAP" uvn-status --campaign uvn-status || return $?
     family reply-due free "$RD_LIST" "$RD_CAP" uvn-status --campaign uvn-status || return $?

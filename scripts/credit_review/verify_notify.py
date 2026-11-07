@@ -1236,8 +1236,14 @@ def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
         fd, path = tempfile.mkstemp(prefix="verify-note-", suffix=".json")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                json.dump({"user": p["user"], "credits": p["credits"],
-                           **{k: p[k] for k in ("claim", "need") if k in p}}, fh, ensure_ascii=False)
+                body = {"user": p["user"], "credits": p["credits"],
+                        **{k: p[k] for k in ("claim", "need") if k in p}}
+                if "apology" in p:
+                    # [key=apology-fact]: the ONE fact sentence the approved wait-apology copy may carry, and its
+                    # paid/free variant. Exactly these three keys - the gate refuses a payload without a fact, and
+                    # nothing else about the apology is ever a caller's to set.
+                    body["apology"] = {k: p["apology"].get(k) for k in ("fact", "paid", "all_approved")}
+                json.dump(body, fh, ensure_ascii=False)
             argv = [wrapper, "send", "--credits-file", path, "--approved-by", CAPTAIN_UID]
             argv += (extra or []) + (p.get("extra") or [])
             if mode != "apply":

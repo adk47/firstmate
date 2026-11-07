@@ -122,7 +122,12 @@ CAMPAIGNS = ("verify-live", "retro-past", "removal-notice", "takeback-notice", "
              "uvn-new-rows",   # fable-copy-1101-r5/n1: a told user's owed rows no ask named (one message per row ever)
              "backlog-reply",
              "decline",    # captain 2026-10-29 13:2xZ + decline-copy-ruling.md: the ONE reason-free decline
-             DECIDER_SUPPORT)  # Fable d2 [key=decider-support-arm]: the decider's support write is an ask
+             DECIDER_SUPPORT,  # Fable d2 [key=decider-support-arm]: the decider's support write is an ask
+             # [key=wait-apology] (Fable d2 2026-11-05 01:4xZ): the apology + live status line for users who waited
+             # with no message from us. ONE per user, ever - and ledgered under ITS OWN campaign so every 7-day gate
+             # (the ask families', the status notes', the core notice) sees it: nobody gets this and a status note in
+             # the same week, and nobody gets it twice.
+             "wait-apology")
 # backlog-reply (intercom-backlog-i1, hydra#1379; Fable review @092894d4): a reply in an Intercom
 # conversation where the customer spoke last, sent by scripts/intercom-backlog/send.py through
 # intercom-ops-write.sh. Its "request id" is "conv-<conversation id>" (one reply per conversation,

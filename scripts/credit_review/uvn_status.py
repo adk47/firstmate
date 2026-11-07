@@ -120,7 +120,12 @@ CREDIT_HOLD = "credit-hold-status"
 # fable-copy-1101-r5/n1: the follow-up ask to a told user about owed rows no ask named (owing_proof class uvn_new_rows);
 # the uvn ask in every runner rule (statuses, proof_required rows, the fraud lens), send-locked in the gate.
 NEW_ROWS = "uvn-new-rows"
-CAMPAIGNS = ("uvn-status", "status-doc-received", "status-team-review", GAP_ASK, CREDIT_HOLD, NEW_ROWS)
+# [key=wait-apology] (Fable d2 2026-11-05 01:4xZ, the captain's 01:4xZ order): the apology + one live status fact for
+# users who have waited with no message from us. NOT an ask (nothing is requested: F1 does, F2 and F3 do not), so it has
+# no document exclusion and no ask cap - the fact sentence is what the live state decides, and a state outside F1/F2/F3
+# refuses that user (the gate refuses on a missing fact too).
+WAIT_APOLOGY = "wait-apology"
+CAMPAIGNS = ("uvn-status", "status-doc-received", "status-team-review", GAP_ASK, CREDIT_HOLD, NEW_ROWS, WAIT_APOLOGY)
 # The campaigns that ASK (documents-on-file exclusion, the ask cap, closing asks).
 ASKS = ("uvn-status", GAP_ASK, NEW_ROWS)
 # The replica re-check per campaign (firstmate 076): uvn-status needs requests still waiting on
@@ -135,6 +140,9 @@ PENDING_STATUSES = {
     GAP_ASK: ("unverified", "user_verification_needed"),
     # credit-hold-status: rows still waiting on the user's proof (UVN, or unverified under a review hold)
     CREDIT_HOLD: ("user_verification_needed", "unverified"),
+    # wait-apology: the apology is about EVERY request of theirs, decided ones included - F3 is a decided row, and
+    # dropping it would refuse exactly the users this campaign exists for
+    WAIT_APOLOGY: ("user_verification_needed", "unverified", "processing", "approved", "rejected"),
 }
 # A campaign the gate send-locks: a real run halts before any gate call while the gate script's own lock reads 0
 # (a status-note refusal would hold the user and count toward the three-refusal flag, for nothing they did).
@@ -287,6 +295,7 @@ class UvnReport(verify_notify.Report):
     fraud_held: int = 0
     ask_only: int = 0
     watchlisted: int = 0               # on the approval watchlist; messaged normally (reported, never a hold)
+    refused_no_fact: int = 0           # [key=apology-fact]: the live state was not F1/F2/F3 - this user is refused
     by_reason: dict[str, int] = field(default_factory=dict)
 
     def note(self, why: str) -> None:
@@ -744,6 +753,139 @@ def reply_due_of(payload: dict[str, Any]) -> dict[str, str]:
         return {}
 
 
+DECIDED_STATUSES = ("approved", "rejected")
+# QA #1788 finding 2 (carried twice): `processing` is TEAM-owned, not user-owed. Grouping it with the user-owed states
+# made a request already in our queue tell the user it was "waiting on one thing from you" - false, and the one thing
+# the copy must never do. The two groups are counted apart and apology_fact() refuses every combination no single
+# sentence is true of.
+WAITING_STATUSES = ("user_verification_needed", "unverified")
+TEAM_STATUSES = ("processing",)
+
+
+def apology_states(user_ids: list[int], query: Query = trino) -> dict[int, dict[str, Any]]:
+    """[key=apology-fact] the LIVE request state an apology may name, per user (d2's copy: "the fact sentence comes
+    from a LIVE read at send time, never from the list"). Returns
+    {uid: {"waiting": n, "team": n, "decided": n, "approved": n, "unknown": n}}.
+    A user absent from the result has no request at all: no fact, so no message.
+
+    QA #1788 finding 5: an UNRECOGNISED status is counted as `unknown`, never silently dropped. Dropping it made a user
+    with one approved row and one status we do not know read as "decided" and get F3 - a sentence that claims a decision
+    about a request whose state we could not read. An unknown row makes the whole state UNKNOWN, and apology_fact()
+    refuses it."""
+    out: dict[int, dict[str, Any]] = {}
+    for i in range(0, len(user_ids), 500):
+        chunk = user_ids[i:i + 500]
+        for row_ in query(
+                "SELECT CAST(userid AS varchar), status, CAST(id AS varchar) "
+                "FROM postgresql_core.public.credit_requests "
+                f"WHERE deletedat IS NULL AND userid IN ({_ids(chunk)})"):
+            uid, status = row_[0], row_[1]
+            rid = row_[2] if len(row_) > 2 else None      # a caller that selects only (user, status) still works
+            if not str(uid).isdigit():
+                continue
+            row = out.setdefault(int(uid), {"waiting": 0, "team": 0, "decided": 0, "approved": 0, "unknown": 0,
+                                            "undecided_ids": []})
+            st = str(status or "")
+            if st in WAITING_STATUSES:
+                row["waiting"] += 1
+                if rid is not None:
+                    row["undecided_ids"].append(str(rid))
+            elif st in TEAM_STATUSES:
+                row["team"] += 1
+                if rid is not None:
+                    row["undecided_ids"].append(str(rid))
+            elif st in DECIDED_STATUSES:
+                row["decided"] += 1
+                if st == "approved":
+                    row["approved"] += 1
+            else:
+                row["unknown"] += 1
+    return out
+
+
+def doc_coverage(entries: Any, undecided_ids: list[str]) -> tuple[int, int]:
+    """(covered, uncovered) of a user's LIVE undecided requests by their proof-on-file entries.
+
+    QA #1788 r10 (Important): the send-time check only asked whether the user appears ANYWHERE in the proof export,
+    although entries can be request-specific. A user with two waiting requests and a document for only one therefore
+    got F2 - "we have what you sent ... nothing more is needed from you" - which is FALSE for the second request. An
+    entry with ``request_id is None`` is a whole-user document and covers every request; an entry naming a request
+    covers only that one."""
+    covered = uncovered = 0
+    for rid in undecided_ids or []:
+        if any(e[0] is None or str(e[0]) == str(rid) for e in (entries or [])):
+            covered += 1
+        else:
+            uncovered += 1
+    return covered, uncovered
+
+
+def apology_fact(state: dict[str, Any] | None, has_doc: bool,
+                 coverage: tuple[int, int] | None = None) -> tuple[str, bool]:
+    """The ONE fact sentence this note may carry, or ("", False) = refuse this user (d2: "if the live state is not one
+    of the four below, the sender REFUSES that user").
+
+    F1 waiting on them   - something is still with the user and no usable document is on file
+    F2 in review         - a document is on file and no decision has been made (this is also the ONLY true sentence for a
+                           request already in OUR queue: "we have what you sent, and it is in our review queue")
+    F3 decided, not told - every request is decided AND at least one row is approved (the copy drops its unverified
+                           clause when all approved)
+    F4 decided, not told - every request is decided and NOTHING is approved (d2 copy v2, QA #1788 finding 2): F3 states
+                           an approval that may not exist, so an all-rejected user must never receive it. F4 is the ONLY
+                           fact allowed when zero rows are approved - refusing the state and leaving the user silent is
+                           the D gap the copy exists to close.
+    """
+    if not state:
+        return "", False
+    waiting, decided = state.get("waiting", 0), state.get("decided", 0)
+    approved, unknown = state.get("approved", 0), state.get("unknown", 0)
+    team = state.get("team", 0)
+    if unknown:
+        # QA #1788 finding 5: a status we cannot read is UNKNOWN, never "decided". No sentence is provably true of it.
+        return "", False
+    if team:
+        # QA #1788 finding 2: a request in OUR queue is never "waiting on one thing from you". With a document on file
+        # F2 is exactly true ("we have what you sent, and it is in our review queue"); with nothing on file neither F1
+        # nor F2 is true, and a mixed team+user-owed or team+decided state has no single true sentence either - refuse.
+        if waiting or decided:
+            return "", False
+        return ("F2", False) if _all_covered(has_doc, coverage) else ("", False)
+    if waiting and decided:
+        # A MIX: no single sentence is true of every request the note names (one is still waiting on them, another is
+        # decided), so this user is refused. The copy says "they are waiting on one thing from you" - it must not be
+        # sent to someone whose other request was already decided.
+        return "", False
+    if waiting:
+        # QA #1788 r10: F2 claims nothing more is needed from them, so it needs EVERY live waiting request covered by
+        # a document. A document for only one of two requests is a MIX: F2 is false for the other and F1 is false for
+        # the covered one, so no single sentence is true and the user is refused rather than told something untrue.
+        if coverage is not None:
+            covered, uncovered = coverage
+            if covered and uncovered:
+                return "", False
+            return ("F2", False) if covered else ("F1", False)
+        return ("F2", False) if has_doc else ("F1", False)
+    if decided:
+        # QA #1788 finding 2: F3 REQUIRES at least one approved row; zero approved is F4, never F3.
+        return ("F3", decided == approved) if approved else ("F4", False)
+    return "", False
+
+
+def _all_covered(has_doc: bool, coverage: tuple[int, int] | None) -> bool:
+    """F2's precondition: a document on file, and - when the per-request coverage is known - one that covers EVERY
+    live undecided request (QA #1788 r10)."""
+    if coverage is None:
+        return bool(has_doc)
+    covered, uncovered = coverage
+    return bool(covered) and not uncovered
+
+
+def with_apology(payload: dict[str, Any], fact: str, paid: bool, all_approved: bool) -> dict[str, Any]:
+    """Carry the ONE live fact sentence, the paid/free variant and (F3) whether every row was approved. The gate refuses
+    a payload without a fact, so this is only ever called with one."""
+    return {**payload, "apology": {"fact": fact, "paid": bool(paid), "all_approved": bool(all_approved)}}
+
+
 def note_payload(acct: dict[str, str], uid: int, credits: list[dict[str, Any]], as_count: bool,
                  total: int, since: str | None = None) -> dict[str, Any]:
     user = {"email": acct["email"], "id": str(uid), "professional_id": acct["professional_id"],
@@ -880,7 +1022,9 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
             report.halted = f"fraud lens unavailable ({exc}); nothing sent"
             return report
     documented: dict[str, Any] = {}
-    if is_ask:
+    # [key=apology-fact]: the apology is not an ask, but its F1/F2 split is exactly "is a usable document on file" -
+    # so the same read runs for it (a stale or unreadable file refuses the family rather than guess a fact)
+    if is_ask or campaign == WAIT_APOLOGY:
         try:
             documented = asks_proof_on_file(proof_path, now=now, ledger_path=ledger_path)
         except verify_notify.ProofFileError as exc:
@@ -945,6 +1089,15 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
             cands.append(u)
     finally:
         db.close()
+    # [key=apology-fact] (d2's copy: the fact comes from a LIVE read at send time): one replica read of this page's
+    # request states. An unreadable replica HALTS the family - a fact-less apology is never sent.
+    states: dict[int, dict[str, Any]] = {}
+    if campaign == WAIT_APOLOGY and cands:
+        try:
+            states = apology_states([int(u["user_id"]) for u in cands], query)
+        except Exception as exc:            # noqa: BLE001
+            report.halted = f"apology_state_unreadable: {exc}"
+            return report
     report.page = {"start": start, "end": end, "listed": n_listed}
     report.not_walked = n_listed - (end - start)
     if campaign == "status-team-review":
@@ -1109,6 +1262,18 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                         report.count_copy += 1
                         report.note("count_copy")
                     payload = with_reply_due(with_filing(note_payload(acct, uid, live, as_count, total, created_of(pending, live)), u), u)
+                    if campaign == WAIT_APOLOGY:
+                        _st = states.get(int(uid))
+                        fact, aa = apology_fact(_st, str(uid) in documented,
+                                                doc_coverage(documented.get(str(uid)),
+                                                             (_st or {}).get("undecided_ids") or []))
+                        if not fact:
+                            report.refused_no_fact += 1
+                            report.outcomes.append({"user": str(uid), "result": "refused",
+                                                    "reason": "apology_fact_missing: the live request state is not F1, F2, F3 or F4"})
+                            report.note("apology_fact_missing")
+                            continue
+                        payload = with_apology(payload, fact, segment == "paid", aa)
                     if mode != "apply" and with_reply_due({}, u).get("extra"):
                         # QA #1517: the row is classified on the PAYLOAD's own request ids - exactly what the gate's
                         # comm_state receives at send (the raw list row has request_ids, not credits)
@@ -1344,6 +1509,44 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                     # rebuilt from a fresh replica read: the answer's gate args (reply_due) carry over (QA #1509)
                     p = with_reply_due(with_filing(note_payload(acct, uid, live, as_count, total, created_of(fresh, live)),
                                                    p["user"]), {"reply_due": reply_due_of(p)})
+                    if campaign == WAIT_APOLOGY:
+                        # d2's copy: the fact comes from the LIVE read, and a state outside F1/F2/F3/F4 refuses THIS
+                        # user (a named deferral, never a default sentence and never a failure of the family).
+                        # QA #1788 finding 6: the APPLY re-derives the fact from a FRESH send-time read of this one
+                        # user, never from the page-level `states` snapshot taken before the walk. A request that flips
+                        # waiting -> approved between the snapshot and this send would otherwise still get F1 ("waiting
+                        # on one thing from you") for a credit that was just decided. The read is per user and happens
+                        # immediately before the gate call, so the sentence describes the state at send time.
+                        try:
+                            send_state = apology_states([int(uid)], query).get(int(uid))
+                        except Exception as exc:  # noqa: BLE001 - an unreadable read is a refusal for THIS user
+                            report.refused_no_fact += 1
+                            report.outcomes.append({"user": str(uid), "result": "refused",
+                                                    "reason": f"apology_state_unreadable: {str(exc)[:160]}"})
+                            report.note("apology_fact_missing")
+                            continue
+                        # QA #1788 finding 1 (carried three times): the DOCUMENT half of the fact was still the
+                        # page-level snapshot taken before the walk, so a document that arrived (or was removed) while
+                        # earlier users were being messaged could still produce F1 for a user whose document is now on
+                        # file. Re-read it here, beside the state read, so both halves of the sentence describe the
+                        # same instant. Unreadable = the family stops, exactly as the batch read does.
+                        try:
+                            send_docs = asks_proof_on_file(proof_path, now=now, ledger_path=ledger_path)
+                        except verify_notify.ProofFileError as exc:
+                            report.halted = str(exc)
+                            break
+                        # QA #1788 r10: coverage is per LIVE waiting request, not "the user appears somewhere in the
+                        # export" - a document for one of two requests must never produce F2 for both.
+                        fact, aa = apology_fact(send_state, str(uid) in send_docs,
+                                                doc_coverage(send_docs.get(str(uid)),
+                                                             (send_state or {}).get("undecided_ids") or []))
+                        if not fact:
+                            report.refused_no_fact += 1
+                            report.outcomes.append({"user": str(uid), "result": "refused",
+                                                    "reason": "apology_fact_missing: the live request state is not F1, F2, F3 or F4"})
+                            report.note("apology_fact_missing")
+                            continue
+                        p = with_apology(p, fact, segment == "paid", aa)
                     if calls and pace_seconds:
                         time.sleep(pace_seconds)
                 before = report.sent_notes if mode == "apply" else report.validated + report.recipient_ok
@@ -1558,6 +1761,9 @@ def render(report: UvnReport, mode: str, segment: str) -> str:
                       report.skipped if mode == "apply" else 0),
                      ("deferred (messaged in the last 7 days or today)", report.deferred_users),
                      ("deferred (asked in the last 90 days)", report.recently_asked),
+                     ("refused: the live request state is not one of the three the approved copy can name "
+                      "(F1 waiting on them / F2 in review / F3 decided) - no message beats a wrong one",
+                      report.refused_no_fact),
                      ("left for the next run (daily cap / run size)", report.over_daily_max)):
         if n:
             parts.append(f"{n} {label}")

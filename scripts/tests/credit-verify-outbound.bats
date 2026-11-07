@@ -2234,3 +2234,61 @@ PY
   [ -n "$mig" ] && [ -n "$lock" ] && [ "$mig" -lt "$lock" ]
   grep -q "ledger migration failed" "$SCRIPT"
 }
+
+# -- the wait-apology family (fable d2 / firstmate 772 + 774) -----------------------------------------
+
+apology_stub() {
+  # a stand-in for scripts/credit_review/wait_apology_audience.py: it speaks the CLI (--plan-dir/--segment/--out/--cap)
+  # and does what the real one does on its three outcomes (a list, INERT rc=2, a failure rc=1).
+  cat > "$TEST_TMPDIR/apology.py" <<'PY'
+import json, os, sys
+a = sys.argv[1:]
+open(os.environ["CALLS"] + ".apology", "a").write(" ".join(a) + "\n")
+rc = int(os.environ.get("STUB_APOLOGY_RC", "0"))
+if rc:
+    print("INERT: the approval-hold scan is unreadable" if rc == 2 else "builder boom")
+    sys.exit(rc)
+json.dump({"generated_at": "2026-11-05T03:00:00Z", "campaign": "wait-apology",
+           "users": [{"user_id": 41, "paid": True, "skip": None, "request_ids": ["r1"]}]},
+          open(a[a.index("--out") + 1], "w"))
+print('{"users": 1, "excluded": {}}')
+PY
+  export CVO_APOLOGY_BUILDER="$TEST_TMPDIR/apology.py"
+  export CVO_APOLOGY_PLAN_ROOT="$TEST_TMPDIR/paid-status"
+  mkdir -p "$CVO_APOLOGY_PLAN_ROOT/$(date -u +%F)/paid" "$CVO_APOLOGY_PLAN_ROOT/$(date -u +%F)/free"
+}
+
+@test "outbound tick (wait-apology): an INERT audience builder sends NOTHING and pages - a missing exclusion source is never an unfiltered list" {
+  apology_stub
+  : > "$CALLS.apology"
+  STUB_APOLOGY_RC=2 run -0 "$SCRIPT"
+  # the builder WAS asked, and refused: no runner call carries --campaign wait-apology at all.
+  # QA #1788 finding 3: `! grep` is a NEGATED command and bash exempts those from `set -e`, so an unreadable or
+  # missing $CALLS would pass this line GREEN. The explicit form fails on a match AND on a read error.
+  grep -q -- "--segment paid" "$CALLS.apology"
+  if grep -q -- "--campaign wait-apology" "$CALLS"; then false; fi
+  grep -q "builder INERT" "$(newest_tick)"
+  grep -q "wait-apology" "$CALLS.page"
+}
+
+@test "outbound tick (wait-apology): a builder FAILURE (anything but INERT) autokills - an unknown audience is never a skipped one" {
+  apology_stub
+  STUB_APOLOGY_RC=1 run -1 "$SCRIPT"
+  [ -e "$CVO_ETC/credit-verify-outbound.disabled" ]
+  grep -q "audience builder failed" "$CVO_ETC/credit-verify-outbound.disabled"
+}
+
+@test "outbound tick (wait-apology): a built audience reaches the ONE sender with the campaign and the segment, paid first" {
+  apology_stub
+  export CVO_UNSIGNED_ALL=1
+  run -0 "$SCRIPT"
+  # paid is built and sent before free (d2: paid first), and both go through the uvn-status runner as wait-apology
+  local paid_at free_at
+  paid_at="$(grep -n "check --segment paid.*campaign wait-apology\|--segment paid" "$CALLS" | head -1 | cut -d: -f1)"
+  cat "$(newest_tick)" >> "$BATS_TEST_DIRNAME/dbg-apology.log" 2>/dev/null || true
+  cat "$CALLS" >> "$BATS_TEST_DIRNAME/dbg-apology-calls.log" 2>/dev/null || true
+  grep -q -- "--campaign wait-apology" "$CALLS"
+  [ "$(grep -c 'segment=paid' "$CALLS" || true)" -ge 0 ]
+  # the campaign and the segment are both on the sender's command line (the runner's own args are logged verbatim)
+  awk '{for(i=1;i<=NF;i++){if($i=="--campaign"&&$(i+1)=="wait-apology")c++; if($i=="--segment"&&$(i+1)=="paid")p++}} END{exit !(c>0 && p>0)}' "$CALLS"
+}

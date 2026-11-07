@@ -20,13 +20,18 @@
     "proof-need-ask": {
       "paid": 2500,
       "free": 2500
+    },
+    "wait-apology": {
+      "paid": 2500,
+      "free": 2500
     }
   },
   "groups": {
     "credit": [
       "uvn-status",
       "status-doc-received",
-      "proof-need-ask"
+      "proof-need-ask",
+      "wait-apology"
     ],
     "claim": [
       "claim-status",
