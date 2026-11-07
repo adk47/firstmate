@@ -1025,7 +1025,7 @@ test_pi_model_picker_on_screen_reads_blocked() {
 
   # A pane that merely prints the hint line and a badge-looking line in the
   # source's order (hint then badge) is not the picker.
-  FM_FAKE_BUSY_TEXT=$'  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel\n  printf '\''%s\\n'\'' "$t" | grep -qE '\''\\[[A-Za-z0-9._-]+\\]'\'''
+  FM_FAKE_BUSY_TEXT=$'  Enter to select · Ctrl+S to set as default · Escape/Ctrl+C to cancel\n  printf '\''%s\\n'\'' tail | grep -qE '\''\\[[A-Za-z0-9._-]+\\]'\'''
   out=$(run_crew_state "$d" feat-pick)
   assert_not_contains "$out" "state: blocked" "a hint line followed by a badge-looking line is not the picker"
 
