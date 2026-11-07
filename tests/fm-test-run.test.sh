@@ -1506,6 +1506,45 @@ SH
   pass "the runner refuses a bare tmux kill-server from a test"
 }
 
+test_runner_allows_an_isolated_deliberate_refusal() {
+  local tmp repo fakebin rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-tmux-deliberate.XXXXXX")
+  repo="$tmp/repo"
+  fakebin="$tmp/fakebin"
+  mkdir -p "$repo/bin" "$repo/tests" "$fakebin"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cp "$ROOT/tests/tmux-test-safety.sh" "$repo/tests/tmux-test-safety.sh"
+  cat >"$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$FM_FAKE_TMUX_LOG"
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  cat >"$repo/tests/fm-deliberate-refusal.test.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+if FM_TEST_TMUX_REFUSAL_LOG= tmux kill-server 2>/dev/null; then
+  echo "not ok - a deliberate refusal was forwarded"
+  exit 1
+fi
+echo "ok - the deliberate refusal was isolated from the runner log"
+SH
+  chmod +x "$repo/tests/fm-deliberate-refusal.test.sh"
+  set +e
+  (cd "$repo" && PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$tmp/contacted" \
+    bin/fm-test-run.sh tests/fm-deliberate-refusal.test.sh) >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || { rm -rf "$tmp"; fail "the runner must allow a deliberate refusal isolated from its log, got $rc: $(cat "$tmp/out" "$tmp/err")"; }
+  grep -Fq 'FM_TEST_SUMMARY total=1 failed=0' "$tmp/out" \
+    || { rm -rf "$tmp"; fail "the deliberate-refusal test did not report green: $(cat "$tmp/out" "$tmp/err")"; }
+  [ ! -e "$tmp/contacted" ] \
+    || { rm -rf "$tmp"; fail "a deliberate refusal still reached the real binary"; }
+  rm -rf "$tmp"
+  pass "the runner allows a deliberate refusal isolated from its refusal log"
+}
+
 # The complement: a test invoking the runner for a DIFFERENT script is
 # legitimate and must still work, so the sentinel is not a blanket refusal of
 # nested runs.
@@ -1558,6 +1597,7 @@ test_reentry_sentinel_refuses_self_selection
 test_reentry_sentinel_refuses_differently_spelled_self_selection
 test_reentry_sentinel_allows_a_different_script
 test_runner_refuses_bare_tmux_from_a_test
+test_runner_allows_an_isolated_deliberate_refusal
 test_gate_skip_accounting
 test_fail_on_gate_skip_token
 test_exclude_family

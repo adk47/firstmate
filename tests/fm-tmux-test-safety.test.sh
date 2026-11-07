@@ -85,7 +85,7 @@ test_guard_install_refuses_and_forwards() {
   shim=$(fm_test_tmux_guard_install "$d/bin" "$fake") || fail "guard install failed"
   [ -x "$shim" ] || fail "the installed shim must be executable"
 
-  FM_FAKE_TMUX_LOG="$d/forwarded.log" out=$("$shim" kill-server 2>&1)
+  FM_FAKE_TMUX_LOG="$d/forwarded.log" out=$(fm_test_tmux_expect_refusal "$shim" kill-server 2>&1)
   rc=$?
   [ "$rc" -ne 0 ] || fail "the installed shim must refuse a bare kill-server"
   assert_contains "$out" "refusing" "the shim's refusal is the shared guard's"
@@ -97,7 +97,7 @@ test_guard_install_refuses_and_forwards() {
     "the forwarded argv reaches the real binary unchanged"
 
   rm -f -- "$d/forwarded.log"
-  FM_FAKE_TMUX_LOG="$d/forwarded.log" out=$("$shim" capture-pane -S -100 2>&1)
+  FM_FAKE_TMUX_LOG="$d/forwarded.log" out=$(fm_test_tmux_expect_refusal "$shim" capture-pane -S -100 2>&1)
   rc=$?
   [ "$rc" -ne 0 ] || fail "the installed shim must refuse a command-specific -S with no socket"
   assert_absent "$d/forwarded.log" "a refused command-option call must never reach the real binary"

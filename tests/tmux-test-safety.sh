@@ -70,6 +70,22 @@ fm_test_tmux_refuse_default_socket() {
   return 1
 }
 
+# fm_test_tmux_expect_refusal: run an invocation that is deliberately expected
+# to be refused, with the runner's refusal log detached so the expected refusal
+# is not reported as an unexpected one.
+fm_test_tmux_expect_refusal() {
+  local saved_set=0 saved= rc
+  if [ "${FM_TEST_TMUX_REFUSAL_LOG+x}" = x ]; then
+    saved_set=1
+    saved=$FM_TEST_TMUX_REFUSAL_LOG
+  fi
+  unset FM_TEST_TMUX_REFUSAL_LOG
+  "$@"
+  rc=$?
+  [ "$saved_set" -eq 1 ] && export FM_TEST_TMUX_REFUSAL_LOG="$saved"
+  return "$rc"
+}
+
 # fm_test_tmux_guard_install: write a `tmux` shim into <dir> that enforces the
 # rule for every invocation and then execs <real-tmux>. Echoes the shim path.
 # <real-tmux> defaults to the first tmux on PATH that is not the shim itself.

@@ -26,18 +26,20 @@ START="$ROOT/bin/fm-afk-start.sh"
 # Pin every tmux call in this file, and every bare tmux call the code under
 # test makes, to one throwaway socket. The runner's safety shim refuses a
 # default-socket call; this wrapper supplies the socket instead.
-TMUX_SOCKET="fm-afk-test-$$"
 TMUX_REAL=${FM_TEST_TMUX_REAL:-$(command -v tmux 2>/dev/null || true)}
 TMUX_WRAP_DIR=
+# shellcheck source=tests/tmux-test-safety.sh
+. "$ROOT/tests/tmux-test-safety.sh"
 if [ -n "$TMUX_REAL" ] && [ -x "$TMUX_REAL" ]; then
   TMUX_WRAP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-tmux-wrap.XXXXXX")
-  cat > "$TMUX_WRAP_DIR/tmux" <<EOF
-#!/usr/bin/env bash
-exec $(printf '%q' "$TMUX_REAL") -L $(printf '%q' "$TMUX_SOCKET") "\$@"
-EOF
-  chmod +x "$TMUX_WRAP_DIR/tmux"
-  PATH="$TMUX_WRAP_DIR:$PATH"
-  export PATH
+  TMUX_SOCKET="$TMUX_WRAP_DIR/dedicated.sock"
+  if fm_test_tmux_wrapper_write "$TMUX_WRAP_DIR/tmux" "$TMUX_REAL" "$TMUX_SOCKET" >/dev/null; then
+    PATH="$TMUX_WRAP_DIR:$PATH"
+    export PATH
+  else
+    rm -rf "$TMUX_WRAP_DIR"
+    TMUX_WRAP_DIR=
+  fi
 fi
 
 FAILED=0
