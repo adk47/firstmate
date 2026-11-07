@@ -890,17 +890,21 @@ fm_busy_grok_tail_busy() {
 # with the picker open is BLOCKED, whichever side of a run it opened on - and
 # fm-crew-state.sh is its only consumer. The verdict needs the picker's hint
 # row (`to select ·` ... `to set as default ·` ... `to cancel`, keybinding-
-# agnostic because Pi substitutes the bound keys) AND a rendered model list row
-# (the provider badge) or the no-matching-models row. A document that merely
-# quotes the picker's hint, Model Name, or provider-scope text therefore does
-# not read as the picker. tests/fm-pi-model-picker-live-e2e.test.sh is the live
-# guard that fails naming the Pi version when the picker's rows change.
+# agnostic because Pi substitutes the bound keys) as the FINAL non-blank line,
+# plus a rendered model list row (the provider badge at the end of the row) or
+# the no-matching-models row above it. A document that merely quotes the
+# picker's hint, Model Name, or provider-scope text therefore does not read as
+# the picker. tests/fm-pi-model-picker-live-e2e.test.sh is the live guard that
+# fails naming the Pi version when the picker's rows change.
 fm_busy_pi_tail_model_picker() {
-  local t
+  local t last body
   t=$(grep -v '^[[:space:]]*$' | tail -24)
   [ -n "$t" ] || return 1
-  printf '%s\n' "$t" | grep -qE 'to select · .* to set as default · .* to cancel' || return 1
-  printf '%s\n' "$t" | grep -qE '\[[A-Za-z0-9._-]+\]|^[[:space:]]*No matching models$'
+  last=${t##*$'\n'}
+  printf '%s\n' "$last" | grep -qE 'to select · .* to set as default · .* to cancel' || return 1
+  body=${t%$'\n'*}
+  [ "$body" != "$t" ] || return 1
+  printf '%s\n' "$body" | grep -qE '^[[:space:]]*(→[[:space:]]+)?(✓[[:space:]]+)?[^[:space:]#].*\[[A-Za-z0-9._-]+\]([[:space:]]+·[[:space:]]+default)?[[:space:]]*$|^[[:space:]]*No matching models$'
 }
 
 # fm_busy_rovo_tail_busy: the Rovo-only temporary rendered-tail fallback.

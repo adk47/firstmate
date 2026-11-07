@@ -402,9 +402,10 @@ window_key() {  # <window>
 # The inbox liveness signal, independent of the ladder above and of the pane:
 # an instruction unacknowledged past twice the expected cadence is surfaced
 # ONCE as a stale wake naming the record, its age, and the recovery, whether
-# the pane reads busy or idle. The gateway-stall path returns before this
-# check, so it does not run inside a stall. The ladder escalates
-# once on an idle pane and then hands off; this is the backstop for the worker
+# the pane reads busy or idle. The main path runs this only after
+# gateway_stall_check returns continue, but the capture-failure branch reaches
+# it without that check, so it can also run while a stall record is open. The
+# ladder escalates once on an idle pane and then hands off; this is the backstop for the worker
 # whose single escalation was never acted on, or who never read idle at all,
 # and sat for days while the doorbell kept ringing. bin/fm-task-inbox-lib.sh
 # owns the threshold and the once-per-message marker.
