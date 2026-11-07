@@ -851,6 +851,10 @@ if [ "$KIND" != secondmate ] && [ "$HAVE_TARGET" = 1 ]; then
           1) emit unknown pane "busy record with no live agent process in the worktree (stale: $BUSY_SOURCE)" ;;
           *) emit unknown pane "busy record unconfirmed: cannot read process working directories ($BUSY_SOURCE)" ;;
         esac
+      else
+        # A live PULL source is re-read from the harness's own artifact on every
+        # call, so it is its own corroboration and needs no process check.
+        emit working pane "harness busy ($BUSY_SOURCE)"
       fi
       ;;
     idle) ;;
