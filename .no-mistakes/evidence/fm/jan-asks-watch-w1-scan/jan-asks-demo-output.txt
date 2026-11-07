@@ -1,0 +1,32 @@
+SCAN RESULT (durable queue handed to firstmate):
+{
+  "ok": true,
+  "queue": [
+    {
+      "ask_id": "C0APB2CMM7C:1794010331.339469",
+      "who": "Jan",
+      "who_id": "U038BM16T7W",
+      "conv": "credit-verification",
+      "ts": "1794010331.339469",
+      "thread_ts": "1794010231.339469",
+      "class": "proof-review",
+      "text": "also review the proof for the user 12345",
+      "link": "https://muso-ai.slack.com/archives/C0APB2CMM7C/p1794010331339469",
+      "bot_reply_ts": null,
+      "coded_ts": null,
+      "emitted_ts": 1794012631.340522,
+      "checked_ts": 1794012631.340522
+    }
+  ],
+  "gaps": []
+}
+
+LEDGER LINE WRITTEN FOR THE ASK:
+- 2026-11-07 00:50Z [ask C0APB2CMM7C:1794010331.339469] need firstmate: task also review the proof for the user 12345 | proof-review | https://muso-ai.slack.com/archives/C0APB2CMM7C/p1794010331339469 | Jan | credit-verification | 38min | NO reply
+
+LEDGER REPARSE -> opened: ['C0APB2CMM7C:1794010331.339469'] resolved: {}
+
+SECOND POLL (ask already filed, not duplicated):
+{
+  "queue": []
+}
