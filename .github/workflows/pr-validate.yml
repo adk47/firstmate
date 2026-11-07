@@ -1877,6 +1877,17 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_clickup_drain_data_deletion
+      - name: Run bulk-credit-change drainer tests
+        # One ClickUp ticket = one bounded BATCH of credit edits, applied by code
+        # without a human reading the ticket first. These lock the properties
+        # that keep a bad batch from landing: a removal row is refused before
+        # any write, a batch that fails validation writes nothing, a row that
+        # fails after the write boundary leaves the ticket `partial` (never
+        # `complete`) and stops the batch, the shared daily cap bounds the run,
+        # and this path never writes a ClickUp workflow status.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_bulk_credit_change
       - name: Run Slack botToken SecretRef reader tests
         # openclaw-main.json carries botToken as a SecretRef; scripts that
         # json.load() it must resolve it via scripts/lib/slack_token.py or they

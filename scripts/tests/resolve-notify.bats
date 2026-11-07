@@ -124,6 +124,50 @@ PYEOF
   [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
 }
 
+@test "extract_candidate: a complete bulk-credit-change ticket passes (drainer allowlist)" {
+  # The bulk-credit-change drainer tags `complete` only when EVERY requested row
+  # was read back verified, so this action type belongs in the resolve-note
+  # allowlist with the SAME approved constant as the others (placement, not new
+  # wording — see ALLOWLIST in resolve-notify.py).
+  run python3 - <<'PYEOF'
+import os
+from importlib import util
+spec = util.spec_from_file_location('n', os.environ['NOTIFY'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+task = {"id": "T1", "status": {"type": "done", "status": "resolved"},
+        "tags": [{"name": "hydra-action-request"}, {"name": "action:bulk-credit-change"},
+                 {"name": "customer-outcome:complete"}],
+        "custom_fields": [{"id": mod.INTERCOM_LINK_FIELD, "value": "/conversation/CONV7"}],
+        "description": "---ACTION-REQUEST---\n{\"customer_email\": \"A@B.com\"}\n---END-ACTION-REQUEST---"}
+assert "bulk-credit-change" in mod.ALLOWLIST, "bulk-credit-change must be allowlisted"
+c, r = mod.extract_candidate(task, int(os.environ['RESOLVE_NOTIFY_NOW']))
+assert c and r is None, (c, r)
+assert c["conv_id"] == "CONV7" and c["email"] == "a@b.com", c
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
+}
+
+@test "extract_candidate: a PARTIAL bulk-credit-change ticket is never told 'it is sorted'" {
+  # A partial is a first-class outcome and never a close. If this ever passes,
+  # a customer whose batch half-landed gets told everything is done.
+  run python3 - <<'PYEOF'
+import os
+from importlib import util
+spec = util.spec_from_file_location('n', os.environ['NOTIFY'])
+mod = util.module_from_spec(spec); spec.loader.exec_module(mod)
+task = {"id": "T1", "status": {"type": "open", "status": "in progress"},
+        "tags": [{"name": "hydra-action-request"}, {"name": "action:bulk-credit-change"},
+                 {"name": "customer-outcome:partial"}],
+        "custom_fields": [{"id": mod.INTERCOM_LINK_FIELD, "value": "/conversation/CONV7"}],
+        "description": "---ACTION-REQUEST---\n{\"customer_email\": \"A@B.com\"}\n---END-ACTION-REQUEST---"}
+c, r = mod.extract_candidate(task, int(os.environ['RESOLVE_NOTIFY_NOW']))
+assert c is None, c
+print("ok")
+PYEOF
+  [ "$status" -eq 0 ]; echo "$output" | grep -qx ok
+}
+
 @test "extract_candidate: an UNresolved ticket is dropped (not-resolved)" {
   run python3 - <<'PYEOF'
 import os

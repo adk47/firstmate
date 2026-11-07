@@ -2015,6 +2015,37 @@
         "cwd": "/opt/hydra",
         "timeoutSeconds": 300
       }
+    },
+    {
+      "id": "5c753035-ec04-4a82-909e-ac40c98f015f",
+      "agentId": "operations",
+      "name": "clickup-drain-bulk-credit-change",
+      "description": "Drainer for the action:bulk-credit-change queue (99 open tickets on 2026-11-03, measured on list 901000600160; 'Update credits on multiple tracks', Tier 2, no drainer until now). SHADOW AS SHIPPED: argv carries no --apply, so every run READ+VALIDATES and prints per-bucket counts and the manifest hit rate, then writes NOTHING - no credit, no tag, no comment. ARMING IS A CAPTAIN DECISION, not a code change: append --apply to argv and set enabled true (and give it an announce target; delivery is 'none' today so a shadow run cannot spam Slack). What it does when armed: oldest 3 tickets/run, up to 25 rows each, every row validated BEFORE any write (track exists, profile not merged, the profile already holds a credit on that track, all rows on the ticket's own customer_profile_id - which the ticket MUST carry, so an anchor-less ticket is refused and counted rather than trusted) - any bad row refuses the WHOLE batch with zero writes. Rows then apply sequentially, each with its own read-back and a compare-and-set against the role set read at validation time. ALL rows verified -> customer-outcome:complete (the reconciler closes; resolve-notify sends the approved constant, bulk-credit-change was added to its allowlist in the same PR). SOME rows not verified -> customer-outcome:partial + ONE internal comment naming only the rows that did not land; the ticket STAYS OPEN for the SLA digest - partial is a first-class outcome and never a close. A removal (remove:true / from_role) or a manifest that cannot be parsed as data is refused; prose-only tickets write NO tag so they stay waiting-on-us and the unparseable count shows whether intake or executor is the problem. NEVER writes a ClickUp workflow status. Caps: 3 tickets/run, 25 rows/ticket, 100 credit writes per UTC day out of the FLEET-WIDE drain budget (/var/lib/hydra/clickup-drain/writes.json, deliberately outside this queue's state dir so --state-dir cannot fork it) and one lock over the whole drain surface /var/lib/hydra/clickup-drain.lock; ledger /var/lib/hydra/bulk-credit-change/ledger.jsonl carries each row's before/after role list (credit-review-style --revert is a HUMAN path: an undo of an add is a removal). Not a credit APPROVAL - policies/credit-approval-automation.json governs approvals and this edits the role set of a credit already on the profile. Kill switches: /etc/hydra/clickup-drain-bulk-credit.disabled (stops every drainer) and /etc/hydra/clickup-drain-credit-correction.disabled. Docs: docs/credit-verification/bulk-credit-change-drainer.md.",
+      "enabled": false,
+      "createdAtMs": 1793750400000,
+      "updatedAtMs": 1793750400000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "20 * * * *",
+        "tz": "UTC"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/clickup_drain/bulk_credit_change.py"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 900
+      },
+      "delivery": {
+        "mode": "none"
+      },
+      "state": {
+        "consecutiveErrors": 0
+      }
     }
   ]
 }

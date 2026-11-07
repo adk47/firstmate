@@ -661,6 +661,25 @@ Caroline (edge) approves nothing: `capability-approvers.txt` lists no approver a
 `credits_verify` / `profiles_consolidate` / `profiles_claim_self` stay off. Deploy refuses a
 source that lists one and strips `MUSO_CAPABILITY_APPROVER` from edge.env
 (`scripts/lib/ensure-no-service-approver.sh`; a 10-27 deploy re-opened it once).
+EDITS to a credit already on a profile (not approvals) go through ONE guarded write
+path, `scripts/clickup_drain/write_path.py`: shared kill files + one lock + 100 writes
+per UTC day across every queue drainer + a ledger row carrying each write's before/after
+role list. Two invariants are code, not prose: the budget FAILS CLOSED (an
+unreadable `writes.json` stops the run instead of reading as "zero writes today"),
+and "the admin API could not answer" (`Unavailable`) stops the run WITHOUT tagging
+the ticket, while a wrong row refuses the whole batch as `blocked` — turning an
+outage into a verdict is how a transient 503 parks a customer's ticket forever.
+The first drainer is `action:bulk-credit-change`
+(`scripts/clickup_drain/bulk_credit_change.py`; cron `clickup-drain-bulk-credit-change`
+ships UNARMED - no `--apply`, `enabled:false` - and arming it is a captain decision, not
+a merge). It reads `details.bulk_rows`, validates every row BEFORE any write,
+read-backs every row after, tags `complete` only when all verified and `partial` +
+one internal comment otherwise (partial is never a close, and this path never messages
+the customer, never writes a ClickUp status), and has NO removal capability at all:
+`--revert` prints a plan, because `muso-admin-api.sh enforce_removal_gate` refuses
+credit-removal DELETEs, so an undo is a named human's job via
+`skills-all/muso-ops-tracks` (Removal Requests). See
+`docs/credit-verification/bulk-credit-change-drainer.md`.
 Credit REMOVALS are the mirror: core-backend #10310 refuses every agent/API token on the
 admin credit DELETE routes and on approved->unverified/rejected take-backs, and
 approved->user_verification_needed is illegal (the only exit deletes every role on the

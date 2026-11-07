@@ -86,7 +86,7 @@ Only a genuinely different request (different `actionType`) is guaranteed a new 
 | `profile-merge` | 2 | none (`sla: null`) | "I have two profiles, combine them" (require `main_profile_url` and `duplicate_profile_urls[]` in `details` – no self-service merge UI exists, so URLs are the only way ops can act) |
 | `track-merge` | 2 | none (`sla: null`) | "Merge my duplicate tracks / combine these track pairs" (the same recording listed twice). Catalog data; capture `details.track_merge_pairs[{master, duplicates[]}]` (or `details.master_track` + `details.duplicate_tracks[]`). Caroline never executes the merge – filed by the `verification-handoff` skill (`details.handoff: "merge"`). |
 | `unmerge-request` | 2 | none (`sla: null`) | Caroline-flagged: customer asked to remove tracks, but most listed tracks share an artist not on the profile – likely a wrong merge. See "Unmerge Request" section below for required `details` shape. |
-| `bulk-credit-change` | 2 | none (`sla: null`) | "Update credits on multiple tracks" |
+| `bulk-credit-change` | 2 | none (`sla: null`) | "Update credits on multiple tracks" – requires `details.bulk_rows` (see "Bulk-Credit-Change Required Fields" below); this is the one type a machine executes unattended |
 | `profile-update` | 2 | none (`sla: null`) | "Change my profile name/details" |
 | `subscription-refund` | 3 | none (`sla: null`) | "I want a refund" |
 | `data-deletion` | 3 | none (`sla: null`) | "Delete my account and data" |
@@ -149,6 +149,69 @@ Filed by the `verification-handoff` skill when a customer says another artist's 
 ### Credit Correction (`credit-correction` / `bulk-credit-change`, including "remove these credits")
 
 Caroline never removes or changes a credit and never previews one. Filed by the `verification-handoff` skill with `details.handoff: "credit-status"`, the profile link, the track links or titles they listed, and their words. The verification agent does the rest.
+
+### Bulk-Credit-Change Required Fields (HARD GATE)
+
+`bulk-credit-change` is the one action type a **machine executes without a human
+reading the ticket first** (`scripts/clickup_drain/bulk_credit_change.py`). It
+takes the change from `details.bulk_rows` and from nowhere else. A ticket whose
+block has no `bulk_rows` is refused as `unparseable`, stays open, and a human has
+to re-file it from scratch – so the rows are the ticket.
+
+```json
+"details": {
+  "bulk_rows": [
+    {"track_url": "https://credits.muso.ai/track/<track-uuid>", "profile_id": "<customer-profile-uuid>", "role": "Mixing", "intent": "add"},
+    {"track_id": "<track-uuid>", "profile_id": "<customer-profile-uuid>", "role": "Mastering", "intent": "add"}
+  ]
+}
+```
+
+The drainer validates every row **before it writes anything**. If any rule below
+is broken it refuses the WHOLE batch: zero credits change and the ticket is
+tagged `customer-outcome:blocked` for a human. Nothing is ever half-applied
+against a mistyped row.
+
+- **One row per credit change, at most 25 rows.** A longer list is still worth
+  filing – the drainer declines it as `too-many-rows` and a human takes it,
+  which is the right answer for a list that size.
+- **`track_url` OR `track_id`, never both.** `track_url` must be a Muso track
+  link (`https://credits.muso.ai/track/<uuid>` or `https://muso.ai/…/track/<uuid>`).
+- **`profile_id` on every row, and it must equal the ticket's top-level
+  `customer_profile_id`.** One ticket never edits a second account – and a ticket
+  with **no** `customer_profile_id` is refused outright, because the drainer will
+  not edit an account the ticket cannot name. That id comes from the
+  authenticated session, so it is filled in for you; never invent one.
+- **`role` is the role the profile should HOLD on that track**, spelled exactly
+  as the credit UI spells it (`Mixing`, `Mastering`, `Producer`, `Songwriter`, …).
+  This is the desired end state, not a from/to pair.
+- **`intent` is required on every row and the only value is `"add"`.** A row that
+  names only a role cannot say whether the customer wants *another* credit or a
+  *different* one: "also credit me as Mastering" and "change my Mixing to
+  Mastering" both arrive as `role: "Mastering"`. The second is a removal plus an
+  add, and the drainer would add Mastering, verify it, and close the ticket while
+  Mixing still displays. So:
+  - customer wants a role **added** → `"intent": "add"`.
+  - customer wants a role **changed or replaced** ("change X to Y", "it should
+    say Y not X", "swap") → file the row with `"intent": "replace"` **and** a
+    `"remove": true` row for the old role. The drainer refuses the ticket as
+    `blocked` and a human does it from their own login. Do not translate a change
+    into a bare add – that is the one mistake that closes a ticket with the
+    customer's request half-done.
+  - a row with no `intent` is refused as `row-invalid` and the ticket stays open
+    untagged, so the intake has to be fixed and re-filed.
+- **A removal MUST be declared as a row – never left out.** If the customer asks
+  for anything to be taken off (`"remove"`, `"delete"`, `"that's not me"`, a
+  `from_role`), include a row for it with `"remove": true` and the role being
+  removed. The drainer refuses the whole ticket on that row and a human does the
+  removal from their own login (no automation may remove a credit). Leaving the
+  removal out would let the batch close as `complete` while the customer still
+  sees the credit they asked you to take down.
+- Rows that are **already correct** are fine – the drainer verifies them and
+  writes nothing.
+
+In the reply, say only that it has gone to the team. No row count, no per-track
+list, no timeframe (`sla` is always null – see "Business Rules").
 
 ### Order Fulfillment (`order-fulfillment` only)
 

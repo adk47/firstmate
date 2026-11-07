@@ -144,6 +144,13 @@ _CONV_ID_RE = re.compile(r"/conversation/([^/?#\s\"']+)")
 ALLOWLIST = {
     "credit-verify", "credit-claim", "credit-correction",
     "profile-claim", "analytics-followup",
+    # 2026-11-03: added by the bulk-credit-change drainer (#drainer spec item 4).
+    # PLACEMENT, not new wording: it reuses MESSAGE verbatim, because the line is
+    # the same "it's all sorted now on our side" note every other completed
+    # action type already sends. The drainer only tags `complete` when EVERY row
+    # it was asked to change was read back verified; a batch that half-landed is
+    # tagged `partial` and is not in this set, so it never reaches this sender.
+    "bulk-credit-change",
 }
 # Conversation tags that mean "do not auto-message here".
 BLOCKED_CONV_TAGS = {

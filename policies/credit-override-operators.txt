@@ -1,0 +1,26 @@
+# Who may authorize a customer-outcome OVERRIDE in the ClickUp drainers.
+#
+# `--allow-tagged --operator <email>` lets a drainer replace a customer-outcome
+# tag a human already set (e.g. `customer-outcome:verification-required` with
+# `customer-outcome:complete`). That is a decision about a customer's credits,
+# so the name on the flag has to be a person who is allowed to make it.
+#
+# A command-line flag is a CLAIM, not a credential: nothing in the process can
+# prove who typed it, and an email-shaped string is something anyone can invent.
+# This file is the bound code CAN enforce — scripts/clickup_drain/
+# bulk_credit_change.py refuses any `--operator` that is not listed here, and
+# writes the override to the ledger (operator, ticket, the outcome tags it
+# replaced, the new one) before it touches a tag.
+#
+# Matched case-insensitively; '#' comments and blank lines ignored. A missing or
+# EMPTY file fails closed: no list, no override. Adding a person is a reviewed
+# PR, because it grants the ability to overwrite a recorded human decision.
+#
+# This is NOT an approval list. Credit APPROVALS are governed by
+# policies/credit-approval-automation.json, and the capability-approver list
+# (workspaces/operations/skills/muso-ops-admin/config/capability-approvers.txt)
+# is deliberately empty by captain order. An override here only re-labels a
+# ticket whose credits a human already decided about.
+
+aaron@muso.ai
+nick@muso.ai

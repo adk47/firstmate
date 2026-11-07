@@ -37,4 +37,11 @@ what the close rested on, is out of bounds — that is a second writer of the sa
 decision, not a specialization.
 
 `data_deletion.py` is the `action:data-deletion` drainer; see its docstring.
+
+`bulk_credit_change.py` is the `action:bulk-credit-change` drainer, and it
+takes the other side of that line: it reads the ticket's machine-readable
+manifest, refuses anything it cannot prove, applies the request through the
+guarded admin write path, reads every row back, and writes a single
+`customer-outcome:*` tag. It never writes a ClickUp status, so the reconciler
+closes it — the ordinary path, not the exception above.
 """
