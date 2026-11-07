@@ -176,7 +176,7 @@ CREDIT_GUARD_CHECK="credit-approval-guard"
 # Checks that are exempt from the required-check proof: they are red or absent by
 # design on the changes they guard, and each one is named in the admin-bypass
 # record of every merge that relied on it.
-BY_DESIGN_CHECKS="credit-approval-guard actor"
+BY_DESIGN_CHECKS="$CREDIT_GUARD_CHECK"
 
 CHECK_TIMEOUT_SECS=60
 MERGE_TIMEOUT_SECS=240
@@ -496,15 +496,12 @@ is_by_design_check() {
 # marker that names a commit must name this head, so a GO written for an older
 # head does not carry over a push.
 fable_go_for() {
-  local comment=$1 head=$2 plain sha
-  plain=$(printf '%s' "$comment" | tr '[:upper:]' '[:lower:]' | tr -d '_-')
-  case "$plain" in
-    *"fable go"*|*fablego*) ;;
-    *) return 1 ;;
-  esac
-  sha=$(printf '%s' "$comment" \
-    | grep -oiE 'fable[ _-]?go[[:space:]]+[0-9a-f]{7,40}' \
-    | grep -oE '[0-9a-fA-F]{7,40}$' | head -1)
+  local comment=$1 head=$2 rest sha
+  rest=$(printf '%s' "$comment" | sed 's/^[[:space:]]*#*[[:space:]]*//')
+  printf '%s' "$rest" | grep -qiE '^fable[ _-]?go([^[:alnum:]]|$)' || return 1
+  rest=$(printf '%s' "$rest" | sed -E 's/^[Ff][Aa][Bb][Ll][Ee][ _-]?[Gg][Oo]//')
+  printf '%s' "$rest" | grep -qiE '^[[:space:]]*(pending|awaiting|not|no|without)([^[:alnum:]]|$)' && return 1
+  sha=$(printf '%s' "$rest" | grep -oiE '[0-9a-f]{7,40}' | head -1)
   [ -n "$sha" ] || return 0
   head=$(printf '%s' "$head" | tr '[:upper:]' '[:lower:]')
   sha=$(printf '%s' "$sha" | tr '[:upper:]' '[:lower:]')
@@ -521,9 +518,10 @@ fable_go_for() {
 # fails for any other reason is reported as unreadable, so the row stays queued
 # instead of merging on an unproven gate.
 read_required_checks() {
-  local owner=$1 repo=$2 base=$3 out rc
+  local owner=$1 repo=$2 base=$3 out rc branch_path
+  branch_path=$(github_urlencode_path_segment "$base")
   out=$(fm_run_timed "$CHECK_TIMEOUT_SECS" gh api \
-    "repos/$owner/$repo/branches/$base/protection/required_status_checks" \
+    "repos/$owner/$repo/branches/$branch_path/protection/required_status_checks" \
     --jq '.contexts[]?' 2>&1)
   rc=$?
   if [ "$rc" -ne 0 ]; then
@@ -534,8 +532,8 @@ read_required_checks() {
   else
     printf '%s\n' "$out" | sed '/^[[:space:]]*$/d'
   fi
-  out=$(fm_run_timed "$CHECK_TIMEOUT_SECS" gh api \
-    "repos/$owner/$repo/rules/branches/$base" \
+  out=$(fm_run_timed "$CHECK_TIMEOUT_SECS" gh api --paginate \
+    "repos/$owner/$repo/rules/branches/$branch_path" \
     --jq '.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context' \
     2>&1)
   rc=$?
@@ -805,6 +803,7 @@ process_row() {
   bypassed=
   case "$review_decision" in
     REVIEW_REQUIRED) bypassed="review-required" ;;
+    CHANGES_REQUESTED) bypassed="changes-requested" ;;
   esac
   for name in $exempted; do
     bypassed="${bypassed:+$bypassed,}$name"

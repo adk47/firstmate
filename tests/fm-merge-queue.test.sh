@@ -44,6 +44,10 @@
 #   (ak) a by-design check is exempt and named in the admin-bypass record
 #   (al) an unreadable required-check registration keeps the row queued
 #   (am) a sixth field that is not a comment is still an unusable row
+#   (an) a negated or pending Fable GO is not a GO
+#   (ao) a Fable GO that names a commit must name this head
+#   (ap) a changes-requested review is named in the admin-bypass record
+#   (aq) a slashed base branch is addressed as one encoded path segment
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -114,6 +118,10 @@ case "${1:-} ${2:-}" in
     printf '%s\n' "$FM_TEST_CHECKS"
     ;;
   "api "*)
+    if [ -n "${FM_TEST_REQUIRED_PATH:-}" ] && [[ "$*" != *"$FM_TEST_REQUIRED_PATH"* ]]; then
+      printf 'gh: Not Found (HTTP 404)\n' >&2
+      exit 1
+    fi
     if [ -n "${FM_TEST_REQUIRED_404:-}" ]; then
       printf 'gh: Not Found (HTTP 404)\n' >&2
       exit 1
@@ -160,7 +168,7 @@ green_head() {
 clear_head() {
   unset FM_TEST_HEAD FM_TEST_CHECKS FM_TEST_LABELS FM_TEST_BODY FM_TEST_MERGE_FAIL \
     FM_TEST_BASE FM_TEST_REVIEW_DECISION FM_TEST_REQUIRED FM_TEST_REQUIRED_RC \
-    FM_TEST_REQUIRED_404
+    FM_TEST_REQUIRED_404 FM_TEST_REQUIRED_PATH
 }
 
 # --- (a) a ready row merges and retires ------------------------------------
@@ -896,17 +904,30 @@ case_ak() {
   printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" \
     >"$dir/data/go-queue.txt"
   green_head
-  export FM_TEST_REQUIRED=$'qa-review\nbuild\nactor'
+  export FM_TEST_REQUIRED=$'qa-review\nbuild\ncredit-approval-guard'
   export FM_TEST_REVIEW_DECISION=REVIEW_REQUIRED
   out=$(run_queue "$dir" run)
   assert_contains "$out" "merged acme/widgets#12" "(ak) the row merges"
-  assert_contains "$out" "admin bypassed: review-required,actor" \
+  assert_contains "$out" "admin bypassed: review-required,credit-approval-guard" \
     "(ak) the bypassed protections are named on the merge line"
-  assert_grep "admin bypassed: review-required,actor" "$dir/state/merge-queue/ledger.tsv" \
+  assert_grep "admin bypassed: review-required,credit-approval-guard" "$dir/state/merge-queue/ledger.tsv" \
     "(ak) the ledger records what the bypass skipped"
   detail=$(sed -n 's/.*detail: \([^;]*\).*/\1/p' "$dir/state/.wake-queue")
-  assert_grep "admin bypassed: review-required,actor" "$detail" \
+  assert_grep "admin bypassed: review-required,credit-approval-guard" "$detail" \
     "(ak) the daily detail file records what the bypass skipped"
+
+  # actor is not on the by-design list, so a base branch that registers it
+  # requires it to be passing before an admin merge.
+  dir=$(make_case ak-actor)
+  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" \
+    >"$dir/data/go-queue.txt"
+  green_head
+  export FM_TEST_REQUIRED=$'qa-review\nbuild\nactor'
+  out=$(run_queue "$dir" run)
+  assert_contains "$out" "required checks not proven: actor=absent" \
+    "(ak) actor is not exempt from the required-check proof"
+  [ ! -s "$dir/merge.log" ] || fail "(ak) an absent actor check must never merge"
+  expect_code 1 "$(queue_rows "$dir")" "(ak) the row stays queued on actor"
   clear_head
   pass "a by-design check is exempt and named in the admin-bypass record"
 }
@@ -951,6 +972,89 @@ case_am() {
   pass "a sixth field that is not a comment is still an unusable row"
 }
 
+
+# --- (an) a negated or pending Fable GO is not a GO ----------------------
+
+case_an() {
+  local dir out comment
+  dir=$(make_case an)
+  green_head
+  for comment in 'awaiting Fable GO' 'no Fable GO yet' 'Fable GO pending' \
+    'without Fable GO' 'Fable GO not yet'; do
+    printf '# owner: acme\nwidgets 12 %s task-a squash # %s\n' "$HEAD_A" "$comment" \
+      >"$dir/data/go-queue.txt"
+    out=$(run_queue "$dir" run)
+    assert_contains "$out" "no Fable GO recorded for head" \
+      "(an) '$comment' is not an affirmative GO"
+    [ ! -s "$dir/merge.log" ] || fail "(an) '$comment' must never merge"
+    expect_code 1 "$(queue_rows "$dir")" "(an) '$comment' keeps the row queued"
+  done
+  clear_head
+  pass "a negated or pending Fable GO is not a GO"
+}
+
+# --- (ao) a Fable GO that names a commit must name this head -------------
+
+case_ao() {
+  local dir out comment
+  dir=$(make_case ao)
+  green_head
+  for comment in 'Fable GO on bbbbbbb' 'fable-go: bbbbbbb' 'Fable GO (bbbbbbb)'; do
+    printf '# owner: acme\nwidgets 12 %s task-a squash # %s\n' "$HEAD_A" "$comment" \
+      >"$dir/data/go-queue.txt"
+    out=$(run_queue "$dir" run)
+    assert_contains "$out" "no Fable GO recorded for head" \
+      "(ao) '$comment' names another commit"
+    [ ! -s "$dir/merge.log" ] || fail "(ao) '$comment' must never merge"
+    expect_code 1 "$(queue_rows "$dir")" "(ao) '$comment' keeps the row queued"
+  done
+  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO on %s\n' "$HEAD_A" "$HEAD_A" \
+    >"$dir/data/go-queue.txt"
+  out=$(run_queue "$dir" run)
+  assert_contains "$out" "merged acme/widgets#12" "(ao) a GO naming this head merges"
+  clear_head
+  pass "a Fable GO that names a commit must name this head"
+}
+
+# --- (ap) a changes-requested review is named in the bypass record -------
+
+case_ap() {
+  local dir out
+  dir=$(make_case ap)
+  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" \
+    >"$dir/data/go-queue.txt"
+  green_head
+  export FM_TEST_REVIEW_DECISION=CHANGES_REQUESTED
+  out=$(run_queue "$dir" run)
+  assert_contains "$out" "merged acme/widgets#12" "(ap) the row merges"
+  assert_contains "$out" "admin bypassed: changes-requested" \
+    "(ap) the changes-requested review is named as bypassed"
+  assert_grep "admin bypassed: changes-requested" "$dir/state/merge-queue/ledger.tsv" \
+    "(ap) the ledger records the bypassed review"
+  clear_head
+  pass "a changes-requested review is named in the admin-bypass record"
+}
+
+# --- (aq) a slashed base branch is one encoded path segment --------------
+
+case_aq() {
+  local dir out
+  dir=$(make_case aq)
+  printf '# owner: acme\nwidgets 12 %s task-a squash # Fable GO\n' "$HEAD_A" \
+    >"$dir/data/go-queue.txt"
+  green_head
+  export FM_TEST_BASE=release/2026
+  export FM_TEST_REQUIRED=security-scan
+  export FM_TEST_REQUIRED_PATH=release%2F2026
+  out=$(run_queue "$dir" run)
+  assert_contains "$out" "required checks not proven: security-scan=absent" \
+    "(aq) the slashed base branch's required checks are read"
+  [ ! -s "$dir/merge.log" ] || fail "(aq) an unproven required check must never merge"
+  expect_code 1 "$(queue_rows "$dir")" "(aq) the row stays queued"
+  clear_head
+  pass "a slashed base branch is addressed as one encoded path segment"
+}
+
 case_a
 case_b
 case_c
@@ -990,5 +1094,9 @@ case_aj
 case_ak
 case_al
 case_am
+case_an
+case_ao
+case_ap
+case_aq
 
 printf 'ok - fm-merge-queue suite complete\n'

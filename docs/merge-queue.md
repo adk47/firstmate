@@ -72,20 +72,20 @@ The merge is handed to `bin/fm-pr-merge.sh` with `--admin`, which bypasses the f
 That is deliberate: the account cannot approve its own pull requests, so the queue proves the three things that replace a human approval before it uses the bypass, and records what it bypassed.
 
 1. A `qa-review` check passing on the exact head, with no configuration switch.
-2. A Fable GO recorded on the row for this head, as a `Fable GO` marker in the row's trailing comment.
+2. A Fable GO recorded on the row for this head, as a `Fable GO` marker at the start of the row's trailing comment.
    The marker is read case- and separator-insensitively, and a marker that names a commit must name this head, so a GO written for an older head does not carry over a push.
+   A negated or pending form such as `awaiting Fable GO` or `Fable GO pending` is not a GO.
 3. Every required status check the base branch registers, present and passing, from both classic branch protection and repository rulesets.
 
 Anything unproven keeps the row queued and spends no attempt budget, because an unproven gate is not a refused merge.
 An unprotected base branch is a successful read of "nothing required"; a registration the forge cannot answer for is unproven, not empty.
 
-Two checks are exempt from the required-check proof because they are red or absent by design on the changes they guard, and each is named in the bypass record of every merge that relied on it:
+One check is exempt from the required-check proof because it is red or absent by design on the changes it guards, and it is named in the bypass record of every merge that relied on it:
 
 - `credit-approval-guard` - red by design on a credit-impact change, where the credit review itself is the gate.
   A failing instance is the waiver, and a guard that has not finished holds the row.
-- `actor` - the actor-identity check, which is not registered on every base branch and is not a merge gate.
 
-Every admin merge records the protections it bypassed on its own line, in the ledger, and in the daily detail file, as `admin bypassed: <list>`, where the list names `review-required` when the forge still wanted a review and each by-design check that was not passing.
+Every admin merge records the protections it bypassed on its own line, in the ledger, and in the daily detail file, as `admin bypassed: <list>`, where the list names `review-required` or `changes-requested` when the forge still wanted a review and each by-design check that was not passing.
 A merge that relied on the credit-guard exemption also says `credit-guard waived` in the same places, so neither the waiver nor the bypass is ever silent.
 
 A row leaves the queue only on a terminal verdict: merged, already merged, closed, fenced, a moved head, superseded by a newer row for the same pull request, or `FM_MERGE_QUEUE_MAX_ATTEMPTS` consecutive refused merge attempts (default 6), which retires it as abandoned.
