@@ -774,6 +774,14 @@ class TrinoTransientError(RuntimeError):
 
 
 # Trino's own words for "this is not your query's fault". Matched case-insensitively against the stderr tail.
+#
+# [key=trino-eof-transient] (firstmate 2026-11-07): the 04:00Z tick auto-killed itself on a TRUNCATED HTTP
+# RESPONSE, not on anything Trino said. The uvn-status-paid apply died with
+# `...&error=1&output=1": EOF` - a transport EOF from the replica wrapper - which matched none of the semantic
+# markers below, so it surfaced as a bare RuntimeError, credit-review.py returned 1, the apply wrote no outcome
+# file, and the OUTCOMES UNMEASURED guard killed the whole round (zero verification/claim/proof messages after
+# 04:45Z). A dropped connection is the textbook transient: the query's outcome is UNKNOWN, so retry-then-defer is
+# the only honest handling. The transport markers are the wrapper's own words for a broken read.
 TRINO_TRANSIENT_MARKERS = (
     "under too much load",
     "transient issue",
@@ -783,13 +791,41 @@ TRINO_TRANSIENT_MARKERS = (
     "error 502",
     "503 service unavailable",
     "502 bad gateway",
+    # transport-level truncation (the 04:00Z auto-kill)
+    "connection reset",
+    "connection refused",
+    "broken pipe",
+    "remote end closed",
+    "incompleteread",
+    "timed out",
+    "unexpected eof",
+    "eof while",
+    "eof occurred",
 )
+
+# A BARE "eof" is deliberately NOT a marker: "column eof_marker cannot be resolved" is a real terminal SQL error,
+# and classifying it as transient would defer that family forever instead of failing loudly.
+#
+# The token form is anchored to the END of the message, because that is the only shape a truncated transport
+# produces: the wrapper's `...&error=1&output=1": EOF` ends there. An earlier version matched EOF anywhere a
+# quote or space preceded it, which also matched `line 1:8: Column 'EOF' cannot be resolved` - a permanent SQL
+# error about an identifier - and would have deferred that family forever. A matcher broad enough to catch the
+# real case is broad enough to catch the lookalike; the answer is a narrower matcher plus a negative test, never
+# a broader one.
+_EOF_TOKEN = re.compile(r'(?<![A-Za-z0-9_])eof\s*$', re.I)
+# Belt and braces: even if a future edit loosens _EOF_TOKEN, an EOF that is the subject of a SQL error is never
+# transport. These are the three shapes Trino uses when it is complaining about an identifier.
+_EOF_SQL_ERROR = re.compile(r'eof\W+(cannot be resolved|does not exist|is not a valid)', re.I)
 
 
 def trino_transient(stderr: str) -> bool:
     """True when Trino's own stderr says the failure is transient (retryable), False for a real query failure."""
     low = (stderr or "").lower()
-    return any(m in low for m in TRINO_TRANSIENT_MARKERS)
+    if any(m in low for m in TRINO_TRANSIENT_MARKERS):
+        return True
+    if _EOF_SQL_ERROR.search(stderr or ""):
+        return False
+    return bool(_EOF_TOKEN.search(stderr or ""))
 
 
 def trino(sql: str, cmd: str | None = None) -> list[list[str]]:

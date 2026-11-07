@@ -216,6 +216,53 @@ class TrinoTransientTests(unittest.TestCase):
             verify_notify.trino("SELECT nope", cmd=str(self._trino(stderr)))
         self.assertNotIsInstance(ctx.exception, verify_notify.TrinoTransientError)
 
+    # [key=trino-eof-transient] the 04:00Z auto-kill: a TRUNCATED HTTP RESPONSE is transient, and a bare "eof"
+    # substring is NOT the way to say so (it would swallow "column eof_marker cannot be resolved").
+    TRANSIENT_STDERR = (
+        # the exact words from the 04:00Z uvn-status-paid apply
+        'curl: (18) transfer closed with outstanding read data remaining: ...&error=1&output=1": EOF',
+        "read timed out",
+        "Connection reset by peer",
+        'curl: (18) transfer closed with outstanding read data remaining: EOF',
+    )
+    TERMINAL_STDERR = (
+        "Table 'hive.x' does not exist",
+        "Access Denied: User cannot execute query",
+        "line 1:8: Column 'foo' cannot be resolved",
+        "syntax error at or near",
+        "line 1:8: Column 'eof_marker' cannot be resolved",
+        # the quoted-identifier trap: EOF as a SQL identifier must never look like a truncated transport
+        "line 1:8: Column 'EOF' cannot be resolved",
+    )
+
+    def test_a_truncated_response_is_transient(self):
+        for stderr in self.TRANSIENT_STDERR:
+            with self.subTest(stderr=stderr):
+                self.assertTrue(verify_notify.trino_transient(stderr))
+                with self.assertRaises(verify_notify.TrinoTransientError):
+                    verify_notify.trino("SELECT 1", cmd=str(self._trino(stderr)))
+
+    def test_a_real_sql_error_is_still_terminal(self):
+        for stderr in self.TERMINAL_STDERR:
+            with self.subTest(stderr=stderr):
+                self.assertFalse(verify_notify.trino_transient(stderr))
+                with self.assertRaises(RuntimeError) as ctx:
+                    verify_notify.trino("SELECT 1", cmd=str(self._trino(stderr)))
+                self.assertNotIsInstance(ctx.exception, verify_notify.TrinoTransientError)
+
+    def test_eof_is_matched_as_a_token_never_as_a_prefix(self):
+        # the whole reason the marker tuple does not carry a bare "eof"
+        self.assertTrue(verify_notify.trino_transient('...&output=1": EOF'))
+        self.assertTrue(verify_notify.trino_transient("EOF"))
+        self.assertFalse(verify_notify.trino_transient("column eof_marker cannot be resolved"))
+        self.assertFalse(verify_notify.trino_transient("eof_marker"))
+        # a quoted identifier named EOF is a permanent SQL error, not a truncated transport; the
+        # transient and terminal cases live in ONE test so nobody can widen the matcher without
+        # breaking the lookalike (firstmate, 2026-11-07)
+        self.assertFalse(verify_notify.trino_transient("line 1:8: Column 'EOF' cannot be resolved"))
+        self.assertFalse(verify_notify.trino_transient("line 1:8: Column 'EOF' does not exist"))
+        self.assertFalse(verify_notify.trino_transient("line 1:8: Column 'EOF' is not a valid identifier"))
+
     def test_a_successful_query_is_unchanged(self):
         d = Path(tempfile.mkdtemp(prefix="trino-ok-"))
         cmd = d / "trino.sh"
