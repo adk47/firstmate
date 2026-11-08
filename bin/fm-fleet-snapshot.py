@@ -23,13 +23,15 @@ How it stays faithful to the owners it does not restate:
     bin/fm-crew-state.sh's answer is fully determined by file reads plus one
     fleet-wide endpoint inventory: no no-mistakes run to attribute (not a ship
     task, or a ship worktree at detached HEAD), an endpoint the backend's own
-    inventory decides (orca terminal list, tmux list-windows), and a busy
-    verdict from a semantic busy record (bin/fm-busy-lib.sh's record path, for
-    the record-backed harnesses on non-herdr backends). Every other task - a
-    ship task on a branch, which needs a fresh `no-mistakes axi status` read,
-    an endpoint the inventory cannot decide, a harness whose busy source is
-    not a record - is DELEGATED to fm-crew-state.sh itself, unchanged, under
-    the bounds the bash pass used.
+    inventory decides (orca terminal list, tmux list-windows), and a semantic
+    busy record's idle or unavailable result. A record-backed BUSY verdict is
+    never decided here: the record survives a hard kill, so it is delegated to
+    fm-crew-state.sh, which corroborates it against a live agent process in the
+    worktree. Every other task - a ship task on a branch, which needs a fresh
+    `no-mistakes axi status` read, an endpoint the inventory cannot decide, a
+    harness whose busy source is not a record, or any record-backed busy
+    verdict - is DELEGATED to fm-crew-state.sh itself, unchanged, under the
+    bounds the bash pass used.
     tests/fm-fleet-snapshot-impl.test.sh pins both passes to identical output.
   - The one observational cache: state/snapshot-cache/runs/ holds, per
     repository, the owner's bounded `no-mistakes runs` listing for
@@ -263,9 +265,9 @@ def first_pr_url(path):
 # --- busy record (port of bin/fm-busy-lib.sh record path) ---------------------
 
 TOKEN_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-# Harnesses whose busy verdict is not the semantic record alone. These - and
-# any herdr task, whose classifier consults native pane state when no record
-# exists - are delegated to fm-crew-state.sh.
+# Harnesses whose busy verdict is never the semantic record alone. These - any
+# herdr task, whose classifier consults native pane state when no record exists -
+# and every record-backed BUSY verdict are delegated to fm-crew-state.sh.
 DELEGATED_HARNESS_PREFIXES = ("kimi", "codex", "cursor", "muse", "grok", "rovo")
 
 

@@ -50,7 +50,8 @@
 # SELF-THROTTLED. A stamp file keeps the scan off every watcher poll; the
 # default cadence is 300s and FM_FLEET_INTEGRITY_INTERVAL overrides it. The
 # whole poll is one lsof scan, one `ps` per matching process, and one local
-# git read per lane, well inside the watcher's FM_CHECK_TIMEOUT.
+# `git status` plus one local `git rev-list` per lane, well inside the
+# watcher's FM_CHECK_TIMEOUT.
 set -u
 export LC_ALL=C
 
