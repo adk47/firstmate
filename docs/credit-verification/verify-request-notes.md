@@ -717,11 +717,20 @@ midnight, not the mechanism.)
   died after claiming". That user is `timeout` (UNMEASURED), never `skipped`: a skip asserts we know nothing went out.
 - **Read-only gate calls are never retried** (`READ_TIMEOUT_S=20`, one attempt): `--check-recipient` / `--validate` /
   `--dry-run` run on `CHECK_WORKERS=4` threads, so a retry there multiplies across threads, and none of them posts.
-  Everything else through the runner keeps main's single `OTHER_TIMEOUT_S=180` attempt.
-- **One user's unknown outcome never costs the batch.** `NoteTimeout` (and any exception raised inside the gate) is
-  recorded on that user's own outcome row as `timeout` / `error` and the loop continues. The outcomes artefact is
-  therefore ALWAYS written, and it names success / timeout / error for every user the run touched; users it never
-  reached keep no row at all.
+  Everything else through the runner keeps main's single `OTHER_TIMEOUT_S=180` attempt. A read-only call that exhausts
+  its 20 s is not a failure of that user (and never raises out of the parallel pre-gate): the runner returns the
+  synthetic UNMEASURED result, and `_send_loop` records that user `timeout` (`gate_timeout`) on the main thread while
+  the batch continues.
+- **One user's unknown outcome never costs the batch; `max(5, 10% of the batch)` of them stop the run.** `NoteTimeout`
+  (and any exception raised inside the gate) is recorded on that user's own outcome row as `timeout` / `error`, counted
+  once on the main thread, and the loop continues. At `unmeasured_users >= max(UNMEASURED_STOP_MIN=5, 10% of the
+  batch evaluated so far)` (`verify_notify.unmeasured_stop_after`) the run stops LOUDLY: `stopped_on_unmeasured`,
+  `unmeasured_stop_at` and the per-user `unmeasured_reasons` are written to the outcome file and printed in the
+  summary/tick.log, the users behind the stop keep no row (still owed, walked again next tick), and no further POST is
+  made - dry-run and apply alike break the walk on the stop. The bar is separate from, and higher than, the systemic
+  failure bar (`max(3, 2%)`): a timed-out read says nothing about the account, so it is counted as UNMEASURED and only
+  a run of them is a statement about the gate. The outcomes artefact is therefore ALWAYS written, and it names success
+  / timeout / error for every user the run touched; users it never reached keep no row at all.
 - **A `timeout` / `error` row is never a refusal.** The tick's refusal ratio counts only `result` values that start
   with `refused`; an UNMEASURED note adds no refusal, so a run whose note steps timed out does not read as a spike.
 - **The missing-artefact policy is not this one.** An apply that sends rows and leaves no artefact at all is

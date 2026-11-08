@@ -41,7 +41,11 @@
 # $CLAIM_LIST (the claim runners refuse a list older than 30 h and keep every claim gate); on Sat/Sun (UTC) the claim
 # families run FIRST.
 # Outputs per tick: $OUT_ROOT/<UTC stamp>/ (outcomes JSON, check output, 5 bodies per family+segment, the log).
-# Exit: 0 ran (or killed/disabled cleanly), 1 a step failed (the tick stops at the first failure), 2 bad config.
+# Exit: 0 ran (or killed/disabled cleanly), 1 a step failed (the OTHER family groups still ran; the tick fails at the end),
+# 2 bad config. A family failure ends the tick at once only for the UNMEASURED bar (the gate is slow, every family behind
+# it would stall the same way), the TICK_HARD_S deadline, a failed or partial apply (rows may already be sent - the
+# post-send rails own it) and an auto-kill. A census read that fails (owing/receipts) is UNMEASURED, logged, and never
+# cancels the tick.
 set -uo pipefail
 
 # r5 NO-GO @184803d6 / captain [key=unattended]: every GATE input of this unattended timer is a CONSTANT - the kill-file
