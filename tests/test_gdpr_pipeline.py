@@ -298,6 +298,33 @@ class Intake(unittest.TestCase):
         c = intake.parse_clickup(self._task("x", action="data-export"))
         self.assertEqual(intake.ticket_class(c, "send me my data"), "privacy_access")
 
+    def test_a_combined_access_and_erasure_request_keeps_the_erasure(self):
+        """QA 2026-11-08 finding 2. The access rule runs before erasure, so a message asking for
+        BOTH took only the access path -- and the pipeline's ACCESS decision performs no hide and
+        sets no hide deadline, so the customer's erasure obligation disappeared entirely."""
+        for text in (
+            "Please send me a copy of my personal data and delete my profile under Article 17",
+            "Under Article 15 I want a copy of my data, and under Article 17 I demand erasure.",
+            "Export all my personal data and remove my profile.",
+            "Send me a copy of my data. I also invoke the right to be forgotten.",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(intake.classify("", text), "privacy_erasure")
+
+    def test_a_pure_access_request_is_still_access(self):
+        """The combined rule must not swallow the case it was added to protect: an Art.15 request
+        that asks for nothing else must never reach the hide path."""
+        for text in (
+            "Please send me a copy of my personal data.",
+            "I want to exercise my right of access under Article 15 GDPR.",
+            "Please export all my personal data.",
+            "Subject access request: what data do you hold on me?",
+            # a negation is not a deletion request
+            "I want a copy of my data. I do not want you to delete anything.",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(intake.classify("", text), "privacy_access")
+
     def test_register_rows(self):
         md = ("| # | received | Intercom | CU | who | request | ack | promised | status |\n|---|---|---|---|---|---|---|---|---|\n"
               "| 16 | 26 Aug | (email) legal@ 1a03cf817af65dcd | - | email-only | legal name | profile f8b294d0 | none | 26 Sep | open |\n"
@@ -4064,6 +4091,130 @@ class WatchdogDistinguishesInterim(unittest.TestCase):
         rid = self.row()
         line = self.line(rid, datetime(2026, 10, 3, tzinfo=timezone.utc))
         self.assertIn("no letter sent", line)
+
+
+class ACombinedRequestFilesBothDutiesEndToEnd(unittest.TestCase):
+    """QA #1847 r5 finding 2: the two-row test drove `upsert` twice by hand, but the real intake path submits ONE
+    class - so a message asking for a copy AND a deletion produced only an erasure row and the Art. 15 answer was
+    never tracked. This drives the operator-facing entrypoint."""
+
+    def test_intake_files_an_erasure_row_AND_an_access_row_for_one_message(self):
+        from gdpr_pipeline import run as gdpr_run
+        s = Store(":memory:")
+        log: list[str] = []
+        r = gdpr_run.Run(s, log=log.append)
+        conv = {"conversation_id": "777", "created_at": 1790000000, "subject": "my data",
+                "author_name": "A P", "author_email": "a@pm.me",
+                "customer_text": "Send me a copy of my personal data and delete my profile.",
+                "parts": [{"at": 1790000000,
+                           "text": "Send me a copy of my personal data and delete my profile."}]}
+        orig = gdpr_run.sources.search_conversations
+        gdpr_run.sources.search_conversations = lambda since: ["777"]
+        try:
+            r.intake_intercom(0, conv_reader=lambda cid: conv)
+        finally:
+            gdpr_run.sources.search_conversations = orig
+        rows = s.all("open")
+        classes = sorted(x["class"] for x in rows)
+        self.assertEqual(classes, ["privacy_access", "privacy_erasure"],
+                         f"one message owes two duties; log={log}")
+        by = {x["class"]: x for x in rows}
+        self.assertNotEqual(by["privacy_access"]["id"], by["privacy_erasure"]["id"])
+        # Two CLOCKS, not two different dates: one message is one arrival, so both duties share a receipt and
+        # therefore a due date - but each row carries its own, and each is watched separately. What must never
+        # recur is a combined request with ONE row and the other duty untracked.
+        for row in by.values():
+            self.assertTrue(row["due_at"], f"{row['class']} has no deadline")
+            self.assertTrue(row["hide_due_at"] or row["class"] == "privacy_access")
+        self.assertNotEqual(by["privacy_access"]["register_no"], by["privacy_erasure"]["register_no"])
+
+    def test_replaying_the_same_combined_message_adds_no_third_row(self):
+        from gdpr_pipeline import run as gdpr_run
+        s = Store(":memory:")
+        r = gdpr_run.Run(s, log=lambda *_: None)
+        conv = {"conversation_id": "777", "created_at": 1790000000, "subject": "my data",
+                "author_name": "A P", "author_email": "a@pm.me",
+                "customer_text": "Send me a copy of my personal data and delete my profile.",
+                "parts": [{"at": 1790000000,
+                           "text": "Send me a copy of my personal data and delete my profile."}]}
+        orig = gdpr_run.sources.search_conversations
+        gdpr_run.sources.search_conversations = lambda since: ["777"]
+        try:
+            for _ in range(2):
+                r.intake_intercom(0, conv_reader=lambda cid: conv)
+        finally:
+            gdpr_run.sources.search_conversations = orig
+        self.assertEqual(len(s.all("open")), 2, "the key is the idempotence test")
+
+
+class EachObligationGetsItsOwnRow(unittest.TestCase):
+    """QA #1847 findings 1 and 4: one thread can owe TWO statutory duties.
+
+    Keyed on the thread alone, a deletion-after-access merged into the access row and the access obligation lost its
+    own receipt and deadline; a deletion-then-access was ignored as the lower rank. End-to-end through `upsert`, on
+    the FINAL REGISTER STATE - two rows, two clocks, each with its own action - not on classifier precedence.
+    """
+
+    def setUp(self):
+        self.s = Store(":memory:")
+
+    def push(self, cls, at, **extra):
+        return self.s.upsert({"keys": ["intercom:9001"], "channel": "intercom", "class": cls,
+                              "received_at": at, "conversation_id": "9001",
+                              "requester_email": "a@pm.me", **extra})
+
+    def test_access_then_DELEGATION_keeps_two_rows_and_two_clocks(self):
+        access, how = self.push("privacy_access", "2026-10-01T09:00:00Z")
+        self.assertEqual(how, "created")
+        erase, how = self.push("privacy_erasure", "2026-10-09T09:00:00Z")
+        self.assertEqual(how, "created", "a deletion is NOT a re-classification of the access request")
+        self.assertNotEqual(access, erase)
+        a, e = self.s.get(access), self.s.get(erase)
+        # each duty keeps its OWN receipt and its OWN deadline
+        self.assertEqual(a["received_at"], "2026-10-01T09:00:00Z")
+        self.assertEqual(e["received_at"], "2026-10-09T09:00:00Z")
+        from gdpr_pipeline.store import due_from
+        self.assertEqual(a["due_at"], due_from("2026-10-01T09:00:00Z")[0])
+        self.assertEqual(e["due_at"], due_from("2026-10-09T09:00:00Z")[0])
+        self.assertNotEqual(a["due_at"], e["due_at"])
+        self.assertEqual(len(self.s.all("open")), 2)
+
+    def test_DELEGATION_then_access_is_not_swallowed_as_the_lower_rank(self):
+        erase, _ = self.push("privacy_erasure", "2026-10-01T09:00:00Z")
+        access, how = self.push("privacy_access", "2026-10-02T09:00:00Z")
+        self.assertEqual(how, "created")
+        self.assertNotEqual(erase, access)
+        leftover = self.s.get(erase)
+        self.assertEqual(leftover["class"], "privacy_erasure", "the erasure keeps its own class")
+        self.assertEqual(leftover["received_at"], "2026-10-01T09:00:00Z")
+        self.assertEqual(self.s.get(access)["class"], "privacy_access")
+
+    def test_a_COMBINED_request_files_both_duties_from_one_message(self):
+        """One message, two obligations: the customer asked for a copy AND a deletion."""
+        erase, _ = self.push("privacy_erasure", "2026-10-01T09:00:00Z")
+        access, how = self.push("privacy_access", "2026-10-01T09:00:00Z")
+        self.assertEqual(how, "created")
+        self.assertEqual(len(self.s.all("open")), 2)
+        self.assertEqual(sorted({self.s.get(r)["class"] for r in (erase, access)}),
+                         ["privacy_access", "privacy_erasure"])
+
+    def test_replaying_either_obligation_is_idempotent(self):
+        self.push("privacy_access", "2026-10-01T09:00:00Z")
+        self.push("privacy_erasure", "2026-10-09T09:00:00Z")
+        for cls, at in (("privacy_access", "2026-10-01T09:00:00Z"),
+                        ("privacy_erasure", "2026-10-09T09:00:00Z")):
+            _, how = self.push(cls, at)
+            self.assertEqual(how, "unchanged", f"replaying {cls} at {at} must not open a third row")
+        self.assertEqual(len(self.s.all("open")), 2)
+
+    def test_a_LATER_escalation_within_one_obligation_still_merges(self):
+        """A legal threat is the SAME erasure duty escalating, not a third obligation: it must merge."""
+        erase, _ = self.push("privacy_erasure", "2026-10-01T09:00:00Z")
+        rid, how = self.push("legal_threat", "2026-10-03T09:00:00Z")
+        self.assertEqual(rid, erase)
+        self.assertEqual(how, "merged")
+        self.assertEqual(self.s.get(erase)["class"], "legal_threat")
+        self.assertEqual(len(self.s.all("open")), 1)
 
 
 class CandidateIntake(unittest.TestCase):

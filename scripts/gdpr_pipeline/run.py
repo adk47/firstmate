@@ -437,6 +437,21 @@ class Run:
                 "requester_email": conv.get("author_email") or conv.get("contact_email") or "",
                 "contact_id": conv.get("contact_id", ""), "pages": intake.pages_in(conv.get("customer_text", ""))})
             self.log(f"intercom {cid}: {how} (row {rid}, {cls})")
+            # ONE MESSAGE CAN OWE TWO DUTIES (QA #1847). "Send me a copy and delete my profile" is an Art. 15
+            # access request AND an Art. 17 erasure demand: the register tracks one class per row, so without a
+            # second candidate the access half is silently untracked and no one owes the customer an answer to it.
+            # Filed here, on the same thread, so `upsert` mints the `:access` key and the two duties get two rows
+            # with two clocks. Idempotent: the key is the test, so the next tick replays as `unchanged`.
+            if cls in intake.ERASURE_CLASSES and intake.requests_access(conv.get("subject", ""),
+                                                                       conv.get("customer_text", "")):
+                arid, ahow = self.store.upsert({
+                    "keys": [f"intercom:{cid}"], "channel": "intercom", "class": "privacy_access",
+                    "conversation_id": cid, "received_at": intake.iso_s(at),
+                    "requester_name": conv.get("author_name") or "",
+                    "requester_email": conv.get("author_email") or conv.get("contact_email") or "",
+                    "contact_id": conv.get("contact_id", ""),
+                    "pages": intake.pages_in(conv.get("customer_text", ""))})
+                self.log(f"intercom {cid}: {ahow} (row {arid}, privacy_access - the same message asks for a copy)")
         return len(self.errors) == errs
 
     # ---------------------------------------------------------------- identity

@@ -2121,6 +2121,18 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_gdpr_pipeline
+      - name: Run GDPR triage bridge tests
+        # scripts/gdpr-triage-bridge.py routes the support@ triage's `human` verdicts into the
+        # erasure register, so a privacy request is filed and answered instead of paging a human.
+        # These lock: a request the register already holds is NOT a human page (the 2026-11-07
+        # defect -- the digest paged a human for register #399), a new one is filed and shows its
+        # register number, a pipeline refusal pages WITH the pipeline's own words, a non-privacy
+        # thread keeps the triage's verdict, and an unreadable register / undatable request is a
+        # refusal that names itself rather than a silent "not registered". Stdlib unittest, no
+        # network (the pipeline's hidden-list read is a stub `gh` on PATH). Targeted by name.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_gdpr_triage_bridge
       - name: Run ops-intake router tests (+ red-team corpus + census fixture)
         # plugins/ops-intake routes every ask on the `operations` Slack account to
         # coded answerers in scripts/ops_intake BEFORE any agent turn sees it (Jan

@@ -150,6 +150,11 @@ NOT build the Gmail URL or the body excerpt yourself — the script does, determ
      `caroline`); Google de-indexing; formal legal/privacy-rights deletion demands; and a
      disputed cross-account claim reversal (removing SOMEONE ELSE'S claim). **"Needs a
      write or a ticket" is NOT a human trigger.**
+
+     **Still classify privacy requests `human` — do not try to route them yourself.** Phase 2.5
+     hands every `human` thread to the GDPR erasure register, which files the ones it owns and
+     pages a human only for a refusal it raises itself. Your job is the classification; the
+     routing is code.
    - `spam` — not a support request at all, and no human action either: cold marketing /
      promotions (a fuel-card promo), SEO/link-building pitches, unsolicited app / TestFlight
      invites, newsletters; and system-noise (mailer-daemon / delivery-failure bounces,
@@ -184,10 +189,49 @@ NOT build the Gmail URL or the body excerpt yourself — the script does, determ
    Every `threadId` MUST exactly match an entry in `emails.json`. Do not invent rows, and
    include one row per thread in `emails.json` (no more, no fewer).
 
+### Phase 2.5 — Route privacy requests to the erasure register (deterministic)
+
+```bash
+/opt/hydra/scripts/gdpr-triage-bridge.py \
+  --emails "$WORKDIR/emails.json" --verdicts "$WORKDIR/verdicts.json" \
+  --out "$WORKDIR/bridge.json"
+```
+
+**Why this step exists.** The `human` class above covers "formal legal/privacy-rights deletion
+demands" and "Google de-indexing" — requests the GDPR erasure pipeline already owns, files,
+decides and answers with a statutory letter. Before this step every one of them paged a human,
+including the ones the register already held and was working: on 2026-11-07 the digest paged a
+human for the Jani López Torregrosa Art.17 request, which had been register #399 since
+2026-11-06T20:13Z and had already had two of its four pages hidden.
+
+The bridge asks the register first, then the pipeline's own classifier, and records exactly one
+outcome per `human` thread:
+
+| outcome | what happened | what the digest shows |
+|---|---|---|
+| `registered` | the register already holds this thread | the register number and the register's own next action — **no human page** |
+| `filed` | it did not, and the classifier says the register can act | the register number and the register's own next action — **no human page** |
+| `refused` | the pipeline was asked and refused | **a human page naming the pipeline's own refusal, verbatim** |
+| `not_privacy` | the classifier says this is not a privacy request | the triage's own `human` verdict and reason stand |
+
+It decides nothing itself: the class comes from `gdpr_pipeline.intake.classify` (the ONE copy of
+the rules, read from `scripts/legal-intake.py` by AST), the date from the support ledger's
+`first_seen` (or the triage's own UTC date when the ledger has not caught up), and the identity
+from the pipeline's own decide step. It never sends anything and never invents copy — the
+statutory letter text has standing approval and is sent by `gdpr-pipeline-tick`.
+
+**A read failure is never a verdict.** An unreadable register, an unreadable classifier or an
+undatable request is a `refused` that names itself, never a silent "not registered" (which would
+file a duplicate) and never a silent pass. The bridge exits 2 when any `human` thread could not
+be routed; the digest still renders and those threads page a human with the reason.
+
+If the bridge did not run at all, `format-digest.sh` still pages every `human` verdict and says
+so on stderr — the digest is the safety net, not the bridge.
+
 ### Phase 3 — Format + emit (deterministic)
 
 ```bash
-scripts/format-digest.sh   # joins emails.json + verdicts.json, prints the digest, scrubs $WORKDIR
+scripts/format-digest.sh   # joins emails.json + verdicts.json + bridge.json, prints the digest, scrubs $WORKDIR
 ```
 
 `format-digest.sh` joins the two files by `threadId`, computes the counts, and prints the

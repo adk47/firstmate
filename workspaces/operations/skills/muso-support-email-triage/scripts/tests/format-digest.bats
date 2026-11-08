@@ -960,3 +960,128 @@ STUB
   [ "$(printf '%s' "$row" | jq -r '.answers.owner.filler | length')" -eq 200000 ]
 }
 
+
+# --- Phase 2.5: the GDPR bridge ------------------------------------------
+#
+# The triage's `human` class covers "formal legal/privacy-rights deletion demands" and
+# "Google de-indexing" -- requests the erasure register already owns. Before the bridge every
+# one of them paged a human, including the ones the register already held and was working: on
+# 2026-11-07 the digest paged a human for the Jani Lopez Torregrosa Art.17 request, which had
+# been register #399 since 2026-11-06T20:13Z and had already had two of its four pages hidden.
+#
+# The bridge writes $WORKDIR/bridge.json; the digest reads it. These tests pin the digest half:
+# a routed thread shows the register, an unrouted one still pages, and a missing bridge is
+# never silent.
+
+bridge() { printf '%s' "$1" > "$WORKDIR/bridge.json"; }
+
+@test "a thread the bridge filed shows the register number and does NOT page a human" {
+  emails '[{"threadId":"t1","subject":"GDPR erasure","url":"u1"}]'
+  verdicts '[{"threadId":"t1","verdict":"human","description":"Art.17 erasure","reason":"privacy deletion"}]'
+  bridge '{"threads":{"t1":{"outcome":"filed","register_no":"412","class_":"privacy_erasure","action":"hide batch"}},"counts":{"human":1,"filed":1}}'
+
+  run --separate-stderr bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"erasure register #412"* ]]
+  [[ "$output" == *"hide batch"* ]]
+  [[ "$output" != *"needs a human"* ]]
+  [[ "$output" == *"0 need a human"* ]]
+  [[ "$output" == *"1 filed to the erasure register"* ]]
+}
+
+@test "a thread the register already held shows the register, not a human page" {
+  emails '[{"threadId":"t1","subject":"Re: GDPR Art. 17","url":"u1"}]'
+  verdicts '[{"threadId":"t1","verdict":"human","description":"Art.17 erasure","reason":"privacy deletion"}]'
+  bridge '{"threads":{"t1":{"outcome":"registered","register_no":"399","class_":"privacy_erasure","action":"read the mail thread: the full page link and the sender are not on file"}},"counts":{"human":1,"registered":1}}'
+
+  run --separate-stderr bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"erasure register #399"* ]]
+  [[ "$output" == *"read the mail thread"* ]]
+  [[ "$output" != *"needs a human"* ]]
+}
+
+@test "a thread the pipeline refused still pages, and the page names the refusal" {
+  emails '[{"threadId":"t1","subject":"GDPR erasure","url":"u1"}]'
+  verdicts '[{"threadId":"t1","verdict":"human","description":"Art.17 erasure","reason":"privacy deletion"}]'
+  bridge '{"threads":{"t1":{"outcome":"refused","class_":"privacy_erasure","reason":"the request could not be dated: the mail date is not a date"}},"counts":{"human":1,"refused":1}}'
+
+  run --separate-stderr bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"needs a human"* ]]
+  [[ "$output" == *"could not be dated"* ]]
+  [[ "$output" == *"1 need a human"* ]]
+}
+
+@test "a non-privacy thread keeps the triage's own human verdict and its reason" {
+  emails '[{"threadId":"t1","subject":"Merging accountants","url":"u1"}]'
+  verdicts '[{"threadId":"t1","verdict":"human","description":"merge request","reason":"disputed cross-account claim"}]'
+  bridge '{"threads":{"t1":{"outcome":"not_privacy","class_":"credit_dispute","reason":"the erasure register cannot act on this: its classifier reads it as '"'"'credit_dispute'"'"', not a privacy request"}},"counts":{"human":1,"not_privacy":1}}'
+
+  run --separate-stderr bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"needs a human"* ]]
+  [[ "$output" == *"credit_dispute"* ]]
+}
+
+@test "a missing bridge still pages every human verdict and says on stderr that it did not run" {
+  emails '[{"threadId":"t1","subject":"GDPR erasure","url":"u1"}]'
+  verdicts '[{"threadId":"t1","verdict":"human","description":"Art.17 erasure","reason":"privacy deletion"}]'
+
+  run --separate-stderr bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"needs a human"* ]]
+  [[ "$output" == *"1 need a human"* ]]
+  [[ "$stderr" == *"the GDPR bridge did not run"* ]]
+}
+
+@test "a corrupt bridge.json is ignored, pages every human verdict, and says so" {
+  emails '[{"threadId":"t1","subject":"GDPR erasure","url":"u1"}]'
+  verdicts '[{"threadId":"t1","verdict":"human","description":"Art.17 erasure","reason":"privacy deletion"}]'
+  printf 'not json at all' > "$WORKDIR/bridge.json"
+
+  run --separate-stderr bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"needs a human"* ]]
+  [[ "$stderr" == *"the GDPR bridge did not run"* ]]
+}
+
+@test "a bridge entry for a thread the triage did not mark human is ignored" {
+  # The bridge only routes `human` verdicts. A stale or hand-edited entry must never
+  # rewrite a Caroline-can-handle or spam verdict.
+  emails '[{"threadId":"t1","subject":"billing","url":"u1"}]'
+  verdicts '[{"threadId":"t1","verdict":"caroline","description":"billing","reason":"r"}]'
+  bridge '{"threads":{"t1":{"outcome":"filed","register_no":"999","class_":"privacy_erasure"}},"counts":{"human":0,"filed":1}}'
+
+  run --separate-stderr bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Caroline-can-handle"* ]]
+  [[ "$output" != *"erasure register"* ]]
+  [[ "$output" == *"1 Caroline-can-handle"* ]]
+}
+
+@test "the bridge warning never displaces the header when stdout and stderr are captured together" {
+  # Regression: the warning was written to stderr BEFORE the digest, so a caller that captures
+  # both streams (`run bash "$SCRIPT"`, which the rest of this file uses) read the warning as
+  # lines[0] and every header assertion failed. CI caught it on PR #1847; the local run passed
+  # only because the two writes happened to land in the other order.
+  emails '[
+    {"threadId":"t1","subject":"verify my credits","url":"https://mail/t1"},
+    {"threadId":"t2","subject":"Save 10p per litre on fuel with POWK","url":"https://mail/t2"},
+    {"threadId":"t3","subject":"chain of title","url":"https://mail/t3"}
+  ]'
+  verdicts '[
+    {"threadId":"t1","verdict":"caroline","description":"credits pending","reason":"customer-credit-verification"},
+    {"threadId":"t2","verdict":"spam","description":"fuel-card promo","reason":"promotional / not a customer"},
+    {"threadId":"t3","verdict":"human","description":"legal inquiry","reason":"legal / rights"}
+  ]'
+
+  run bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+  # lines[0] is the header, not the warning.
+  [[ "${lines[0]}" == *"3 new"* ]]
+  [[ "${lines[0]}" == *"1 need a human"* ]]
+  # ... and the warning is still there, after it.
+  [[ "$output" == *"the GDPR bridge did not run"* ]]
+  [[ "${lines[0]}" != *"WARN"* ]]
+}
