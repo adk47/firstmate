@@ -69,6 +69,38 @@ record_claude_idle() {  # <state-dir> <id>
     --source claude-hook --event stop
 }
 
+# A busy record is only evidence of a working lane while a live agent process sits in
+# the recorded worktree (bin/fm-lane-liveness-lib.sh), so a fixture that wants a
+# working verdict must place one there exactly as the real fleet does. Without it the
+# same record is a claim nothing corroborates and the lane reads unknown.
+LIVE_AGENTS=()
+spawn_live_agent() {  # <dir> <worktree>
+  local dir=$1 wt=$2 bin="$1/agentbin/claude" i=0
+  mkdir -p "$1/agentbin"
+  # Never rewrite a binary another fixture of this home is already executing: a copy
+  # over a running image fails with ETXTBSY.
+  if [ ! -x "$bin" ]; then
+    cp "$(command -v sleep)" "$bin" || return 1
+    chmod +x "$bin" || return 1
+  fi
+  ( cd "$wt" && exec "$bin" 300 ) >/dev/null 2>&1 &
+  LIVE_AGENTS+=("$!")
+  while [ "$i" -lt 50 ]; do
+    [ -d "/proc/$!" ] && return 0
+    i=$((i + 1))
+    sleep 0.02
+  done
+  return 0
+}
+
+reap_live_agents() {
+  local pid
+  for pid in "${LIVE_AGENTS[@]:-}"; do
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null
+  done
+  LIVE_AGENTS=()
+}
+
 write_fixture() {  # <home>
   local home=$1 fixture_gen
   mkdir -p "$home/projects/alpha-worktree" "$home/projects/scout-worktree" "$home/secondmate-home"
@@ -98,11 +130,13 @@ EOF
     "pr=https://github.com/kunchenguid/firstmate/pull/9"
   printf 'needs-decision: choose an API shape\n' > "$home/state/ship-task.status"
   # A working ship task proves it through its own semantic busy-state record
-  # (bin/fm-busy-lib.sh), which is what the snapshot's current-state read
-  # consults; rendered pane text is no longer a state source.
+  # (bin/fm-busy-lib.sh) corroborated by the live agent in its worktree; rendered
+  # pane text is no longer a state source.
   fixture_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" ship-task)
   "$ROOT/bin/fm-busy-event.sh" apply "$home/state" ship-task busy --gen "$fixture_gen" \
     --source claude-hook --event user-prompt-submit
+  spawn_live_agent "$home" "$home/projects/alpha-worktree" \
+    || fail "could not spawn the live agent fixture for ship-task"
   fm_write_meta "$home/state/scout-task.meta" \
     "window=firstmate:fm-scout-task" \
     "worktree=$home/projects/scout-worktree" \
@@ -448,6 +482,8 @@ test_event_hints_follow_reconciled_current_state() {
   hint_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" stale-decision)
   "$ROOT/bin/fm-busy-event.sh" apply "$home/state" stale-decision busy --gen "$hint_gen" \
     --source claude-hook --event user-prompt-submit
+  spawn_live_agent "$home" "$home/projects/stale-decision" \
+    || fail "could not spawn the live agent fixture for stale-decision"
   printf 'needs-decision: already answered\n' > "$home/state/stale-decision.status"
   fm_write_meta "$home/state/stale-blocked.meta" \
     "window=firstmate:fm-stale-blocked-ship-task" \
@@ -459,6 +495,8 @@ test_event_hints_follow_reconciled_current_state() {
   hint_gen=$("$ROOT/bin/fm-busy-event.sh" arm "$home/state" stale-blocked)
   "$ROOT/bin/fm-busy-event.sh" apply "$home/state" stale-blocked busy --gen "$hint_gen" \
     --source claude-hook --event user-prompt-submit
+  spawn_live_agent "$home" "$home/projects/stale-blocked" \
+    || fail "could not spawn the live agent fixture for stale-blocked"
   printf 'blocked: old failure\n' > "$home/state/stale-blocked.status"
   fakebin=$(make_fakebin "$home")
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json)
@@ -473,6 +511,7 @@ test_event_hints_follow_reconciled_current_state() {
       and task("stale-blocked").current_state.state == "working"
       and task("stale-blocked").hints.blocked_event == false
   ' >/dev/null || fail "event hints must follow reconciled current state"
+  reap_live_agents
   pass "snapshot event hints follow reconciled current state"
 }
 
