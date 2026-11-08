@@ -123,9 +123,10 @@ lockpath() { printf '%s.writers.lock' "$CFG"; }
 
 @test "serialised writers both complete and leave valid JSON" {
   printf '%s\n' '{"agents":{"list":[{"id":"cto"}]}}' > "$CFG"
-  ( ENSURE_SENTRY_MCP_LOCK_WAIT=30 "$HEALER" >/dev/null 2>&1 8>&- ) &
-  ( SPC_LOCK_WAIT=30 bash -c 'source "$1"; sync_profile_config "$2" "$3" test' _ "$LIB" "$SRC" "$CFG" >/dev/null 2>&1 ) &
-  wait
+  ( ENSURE_SENTRY_MCP_LOCK_WAIT=30 "$HEALER" >/dev/null 2>&1 8>&- ) & p_healer=$!
+  ( SPC_LOCK_WAIT=30 bash -c 'source "$1"; sync_profile_config "$2" "$3" test' _ "$LIB" "$SRC" "$CFG" >/dev/null 2>&1 ) & p_sync=$!
+  # Explicit pids, never a bare `wait` (bats' BATS_TEST_TIMEOUT watchdog is a child too).
+  wait "$p_healer" "$p_sync" || true   # asserts on files, not the child's status
   run jq -e . "$CFG"
   [ "$status" -eq 0 ]
   # repo content won either way; the file is never torn

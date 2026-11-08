@@ -70,9 +70,10 @@ DIGEST='{"text":"Ops-agent credit decisions: 3 approvals","blocks":[{"type":"sec
 }
 
 @test "overlapping runs send exactly one DM for the day" {
-    STUB_BODY="$DIGEST" STUB_SLACK_DELAY=2 bash "$SCRIPT" > "$T/o1" &
-    STUB_BODY="$DIGEST" STUB_SLACK_DELAY=2 bash "$SCRIPT" > "$T/o2" &
-    wait
+    STUB_BODY="$DIGEST" STUB_SLACK_DELAY=2 bash "$SCRIPT" > "$T/o1" & p1=$!
+    STUB_BODY="$DIGEST" STUB_SLACK_DELAY=2 bash "$SCRIPT" > "$T/o2" & p2=$!
+    # Explicit pids, never a bare `wait` (bats' BATS_TEST_TIMEOUT watchdog is a child too).
+    wait "$p1" "$p2" || true   # asserts on files, not the child's status
     [ "$(wc -l < "$T/sends" | tr -d ' ')" = "1" ]
     [ "$(cat "$T/o1")" = "NO_REPLY" ] && [ "$(cat "$T/o2")" = "NO_REPLY" ]
 }

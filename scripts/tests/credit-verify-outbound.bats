@@ -537,10 +537,11 @@ PY
   # a live holder: the measured reason, then exit 0 without running anything
   : > "$CALLS"
   rm -f "$CVO_STATE/tick.holder"
-  ( exec 9>>"$CVO_STATE/tick.lock"; flock 9; printf '4242 %s\n' "$(( $(date -u +%s) - 9000 ))" > "$CVO_STATE/tick.holder"; sleep 6 ) &
+  ( exec 9>>"$CVO_STATE/tick.lock"; flock 9; printf '4242 %s\n' "$(( $(date -u +%s) - 9000 ))" > "$CVO_STATE/tick.holder"; sleep 6 ) & holder=$!
   for _ in $(seq 50); do [ -s "$CVO_STATE/tick.holder" ] && break; sleep 0.1; done   # the holder has the lock
   run -0 "$SCRIPT"
-  wait
+  # Explicit pid, never a bare `wait` (bats' BATS_TEST_TIMEOUT watchdog is a child too).
+  wait "$holder" || true   # asserts on files, not the child's status
   [ ! -s "$CALLS" ]
   grep -q "STALE: tick pid 4242 has held .*tick.lock for 9[0-9][0-9][0-9]s (> cadence 7200s); this tick exits, nothing taken over" "$(newest_tick)"
 }

@@ -125,9 +125,10 @@ STUB
 }
 
 @test "overlapping runs send exactly one DM" {
-    STUB_ROWS=3 bash "$SCRIPT" > "$T/o1" &
-    STUB_ROWS=3 bash "$SCRIPT" > "$T/o2" &
-    wait
+    STUB_ROWS=3 bash "$SCRIPT" > "$T/o1" & p1=$!
+    STUB_ROWS=3 bash "$SCRIPT" > "$T/o2" & p2=$!
+    # Explicit pids, never a bare `wait` (bats' BATS_TEST_TIMEOUT watchdog is a child too).
+    wait "$p1" "$p2" || true   # asserts on files, not the child's status
     [ "$(sends)" = "1" ]
 }
 

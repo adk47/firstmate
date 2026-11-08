@@ -109,10 +109,13 @@ now_ts() { python3 -c "import datetime;print(datetime.datetime.now(datetime.time
 }
 
 @test "concurrent alerts on an unseen issue: exactly one proceeds" {
+  pids=()
   for _ in 1 2 3 4 5; do
     ( SENTRY_SHORT_ID=X-1 bash "$BLOCK" >/dev/null 2>&1 ) &
+    pids+=("$!")
   done
-  wait
+  # Explicit pids, never a bare `wait` (bats' BATS_TEST_TIMEOUT watchdog is a child too).
+  wait "${pids[@]}" || true   # asserts on files, not the child's status
   [ "$(grep -c in-progress "$LEDGER")" = "1" ]
   run jq -e . "$LEDGER"
   [ "$status" -eq 0 ]

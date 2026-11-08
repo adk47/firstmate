@@ -97,10 +97,13 @@ teardown() { rm -rf "$TEST_TMPDIR"; }
 }
 
 @test "with flock, concurrent callers: exactly one claim verify passes" {
+  pids=()
   for i in 1 2 3 4 5 6; do
     ( "$HOOK" POST "/admin/claiming/$i/verify" prod >/dev/null 2>&1; echo $? > "$TEST_TMPDIR/rc.$i" ) &
+    pids+=("$!")
   done
-  wait
+  # Explicit pids, never a bare `wait` (bats' BATS_TEST_TIMEOUT watchdog is a child too).
+  wait "${pids[@]}" || true   # asserts on files, not the child's status
   passed=$(grep -lx 0 "$TEST_TMPDIR"/rc.* | wc -l | tr -d ' ')
   [ "$passed" -eq 1 ]
 }

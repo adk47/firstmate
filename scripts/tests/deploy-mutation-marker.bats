@@ -88,12 +88,18 @@ setup() {
 
 @test "RACE: 20 concurrent claims with distinct tokens -> exactly one wins and the marker holds the winner's token" {
   out="$BATS_TEST_TMPDIR/rc"; mkdir -p "$out"
+  # Wait on THESE pids, never a bare `wait`. bats implements BATS_TEST_TIMEOUT with a
+  # background watchdog process in this shell, so a bare `wait` blocks on the watchdog
+  # too and the case runs until the timeout fires (600s here; reproduced 2026-11-08 —
+  # the file passes in 1.4s without BATS_TEST_TIMEOUT and hangs with it).
+  pids=()
   for i in $(seq 1 20); do
     # bats runs with errexit, which the subshell inherits: capture the status
     # with `|| rc=$?` or every LOSER aborts before it can record its rc.
     ( rc=0; claim_mutation_marker "$MARKER" "gha-race-$i" >/dev/null 2>&1 || rc=$?; echo "$rc" > "$out/$i" ) &
+    pids+=("$!")
   done
-  wait
+  wait "${pids[@]}" || true   # asserts on files, not the child's status
   winners=0; winner_token=""
   for i in $(seq 1 20); do
     if [ "$(cat "$out/$i")" = "0" ]; then winners=$((winners+1)); winner_token="gha-race-$i"; fi
@@ -135,10 +141,13 @@ setup() {
 @test "RACE: 20 concurrent TAKEOVERS of one stale marker -> exactly one wins, the rest are refused (QA Important round 5 on PR #948)" {
   claim_mutation_marker "$MARKER" manual-dead-owner-1
   out="$BATS_TEST_TMPDIR/rc-takeover"; mkdir -p "$out"
+  # Explicit pids, not a bare `wait` — see the note in the RACE case above.
+  pids=()
   for i in $(seq 1 20); do
     ( rc=0; claim_mutation_marker "$MARKER" "gha-take-$i" manual-dead-owner-1 >/dev/null 2>&1 || rc=$?; echo "$rc" > "$out/$i" ) &
+    pids+=("$!")
   done
-  wait
+  wait "${pids[@]}" || true   # asserts on files, not the child's status
   winners=0; winner_token=""
   for i in $(seq 1 20); do
     if [ "$(cat "$out/$i")" = "0" ]; then winners=$((winners+1)); winner_token="gha-take-$i"; fi

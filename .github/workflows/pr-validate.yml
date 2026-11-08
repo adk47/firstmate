@@ -77,6 +77,10 @@ jobs:
     # A retarget onto main must validate (see the `types:` comment above); a title/body edit must not
     # cost a 20-60 minute run. `github.event.changes.base` is present only when the base ref moved.
     if: github.event.action != 'edited' || github.event.changes.base != null
+    # Bound the job, not just the step: GitHub's default job timeout is 6 h,
+    # so a single hung test can hold a runner for six hours (measured 2026-11-06:
+    # one Bats case spun at 99.6% CPU for 72 min inside an 82-min run).
+    timeout-minutes: 20
     steps:
       - name: Checkout PR branch
         uses: actions/checkout@v5
@@ -1053,6 +1057,10 @@ jobs:
     # Trino gate would silently become advisory there. This name is not exempted.
     # Cost on node-8: git + python3, no test suite — seconds, not the 8-process bats run.
     runs-on: [self-hosted, hydra]
+    # Bound the job, not just the step: GitHub's default job timeout is 6 h,
+    # so a single hung test can hold a runner for six hours (measured 2026-11-06:
+    # one Bats case spun at 99.6% CPU for 72 min inside an 82-min run).
+    timeout-minutes: 20
     steps:
       - name: Checkout PR branch
         uses: actions/checkout@v5
@@ -1243,6 +1251,10 @@ jobs:
     # /opt/hydra/ — the actual target of the production deploy rsync.
     # ubuntu-latest can't do this check.
     runs-on: [self-hosted, hydra]
+    # Bound the job, not just the step: GitHub's default job timeout is 6 h,
+    # so a single hung test can hold a runner for six hours (measured 2026-11-06:
+    # one Bats case spun at 99.6% CPU for 72 min inside an 82-min run).
+    timeout-minutes: 20
     steps:
       - name: Checkout PR branch
         uses: actions/checkout@v5
@@ -1523,6 +1535,18 @@ jobs:
     # failure #1403 measured on node-8. Two shards at `--jobs 4` each split the files
     # round-robin from the slowest-first list below, so each shard gets every other long pole.
     runs-on: ovh-hydra
+    # Bound the job, not just the step: GitHub's default job timeout is 6 h,
+    # so a single hung test can hold a runner for six hours (measured 2026-11-06:
+    # one Bats case spun at 99.6% CPU for 72 min inside an 82-min run).
+    # 90, not 45: the suite's real baseline is ~35 min of wall clock across ~250
+    # files (measured live on a shard at 35:21 and still executing cases), so a
+    # tighter cap would fail healthy runs. Hang protection comes from
+    # BATS_TEST_TIMEOUT (600s per case) and the slot's own 45-min wait; this is
+    # the backstop against the 6 h default, not the primary limit.
+    # 600s, not 180s: three cases are slow by design (credit-verify-outbound's
+    # deadline cases take 44s and 35s alone, and the combinatorial sweep needs
+    # >180s), so a 180s per-case cap failed healthy tests and hid the real bug.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -1753,6 +1777,22 @@ jobs:
           # `host-systemd` cases drive the real systemd-run, which a pod does not have; they
           # run in the node-8 job instead (node8-handoff), so each case still runs exactly once.
           out="${RUNNER_TEMP:-/tmp}/bats-shard-${shard}.tap"
+          # PER-CASE TIMEOUT (2026-11-06). The slot wrapper below bounds how long we WAIT for
+          # a slot; nothing bounded the suite once it had one. A single case looped at 99.6%
+          # CPU for 72 min inside an 82-min run (run 42417384640) and would have held the
+          # runner until GitHub's 6 h default. BATS_TEST_TIMEOUT (bats-core >=1.7; the
+          # toolchain ships 1.14) kills the CASE and reports it as `not ok` with the case name,
+          # which the TAP parse below already treats as a failure — so we get per-test
+          # attribution instead of an opaque job timeout.
+          #
+          # 600, not 180. A first pass at 180s failed three cases that are slow by design, not
+          # stuck: "banned words ... every recommendation x brand-fit x flag subset" (a
+          # combinatorial sweep), "outbound tick ... ONE cap rule" and "RACE: 20 concurrent
+          # claims with distinct tokens" (concurrency). The hang this guards against ran 72
+          # MINUTES, so 600s still catches it with 7x margin while leaving slow-but-finite
+          # cases alone. If a case ever needs more than 10 min it is a bug in the case.
+          export BATS_TEST_TIMEOUT="${BATS_TEST_TIMEOUT:-600}"
+          echo "BATS_TEST_TIMEOUT=${BATS_TEST_TIMEOUT}s per case"
           # shellcheck disable=SC2086
           scripts/bats-slot.sh --lock /var/lock/hydra-bats.lock --timeout 2700 -- \
             bats --jobs 4 --no-parallelize-within-files --filter-tags '!host-systemd' $mine \
@@ -1779,6 +1819,10 @@ jobs:
     # surfaces typos / mis-paste / partial saves immediately.
     # 2026-10-27: ovh-hydra (stdlib python3 only; see the note above `validate`).
     runs-on: ovh-hydra
+    # Bound the job, not just the step: GitHub's default job timeout is 6 h,
+    # so a single hung test can hold a runner for six hours (measured 2026-11-06:
+    # one Bats case spun at 99.6% CPU for 72 min inside an 82-min run).
+    timeout-minutes: 10
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -1815,6 +1859,10 @@ jobs:
     # PyMuPDF / OpenCV / Pillow / tesseract, which node-8 had installed by hand; the pod gets
     # node-8's exact versions from scripts/ci/requirements-arc.txt.
     runs-on: ovh-hydra
+    # Bound the job, not just the step: GitHub's default job timeout is 6 h,
+    # so a single hung test can hold a runner for six hours (measured 2026-11-06:
+    # one Bats case spun at 99.6% CPU for 72 min inside an 82-min run).
+    timeout-minutes: 30
     # Until 2026-10-27 this job ran ON node-8, as root, where /etc/hydra/jev.env holds the real Jev
     # key and /var/lib/hydra-jev/shadow is the PRODUCTION shadow log that the
     # Phase 3 decisions are made from. Any test that reaches a real jev.sh or a
@@ -2511,6 +2559,10 @@ jobs:
     # 2026-10-27: ovh-hydra (see the note above `validate`); node + pnpm come from
     # scripts/ci/arc-toolchain.sh at node-8's versions.
     runs-on: ovh-hydra
+    # Bound the job, not just the step: GitHub's default job timeout is 6 h,
+    # so a single hung test can hold a runner for six hours (measured 2026-11-06:
+    # one Bats case spun at 99.6% CPU for 72 min inside an 82-min run).
+    timeout-minutes: 30
     # Until 2026-10-27 this job ran ON node-8, as root, where /etc/hydra/jev.env holds the real Jev
     # key and /var/lib/hydra-jev/shadow is the PRODUCTION shadow log that the
     # Phase 3 decisions are made from. Any test that reaches a real jev.sh or a
@@ -2700,6 +2752,10 @@ jobs:
     # the self-hosted hydra-node8 runner the other jobs run on.
     # 2026-10-27: ovh-hydra, the in-cluster repo-level fleet (see the note above `validate`).
     runs-on: ovh-hydra
+    # Bound the job, not just the step: GitHub's default job timeout is 6 h,
+    # so a single hung test can hold a runner for six hours (measured 2026-11-06:
+    # one Bats case spun at 99.6% CPU for 72 min inside an 82-min run).
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v5

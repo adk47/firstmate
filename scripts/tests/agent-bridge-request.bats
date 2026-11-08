@@ -930,9 +930,12 @@ sleep 0.2
 jq '.symptom = "SWAPPED ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"' "$REQ" > "$REQ.tmp" && mv "$REQ.tmp" "$REQ"
 SWAP
   chmod +x "$TEST_TMPDIR/swap.sh"
-  "$TEST_TMPDIR/swap.sh" &
+  "$TEST_TMPDIR/swap.sh" & swapper=$!
   run "$SCRIPT" --file "$REQ"
-  wait
+  # Explicit pid, never a bare `wait`: bats runs BATS_TEST_TIMEOUT with a background
+  # watchdog in this shell, so a bare `wait` also blocks on the watchdog and the case
+  # runs until the timeout fires.
+  wait "$swapper" || true   # asserts on files, not the child's status
   [ "$status" -eq 0 ]
   posted="$AGENT_BRIDGE_TEST_DIR/posts/cs-2026-08-26-analytics-zero-plays.md"
   [ -f "$posted" ]
