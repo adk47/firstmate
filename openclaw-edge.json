@@ -348,7 +348,7 @@
     "dmScope": "per-channel-peer",
     "maintenance": {
       "mode": "enforce",
-      "pruneAfter": "14d",
+      "pruneAfter": "7d",
       "maxEntries": 10000,
       "resetArchiveRetention": "7d",
       "maxDiskBytes": "8gb",
