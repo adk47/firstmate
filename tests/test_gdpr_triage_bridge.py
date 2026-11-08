@@ -132,16 +132,87 @@ class BridgeCase(unittest.TestCase):
         return proc
 
     def seed_registered(self, tid, register_no=399, cls="privacy_erasure", action="hide batch",
-                        status="open", confirmed_at=None):
+                        status="open", confirmed_at=None, pages=()):
         """Put a row in the register the way the pipeline would, so the bridge finds it."""
         db = store_mod.Store(self.store_path)
         rid, _ = db.upsert({"keys": [f"gmail:support@muso.ai:{tid}"], "channel": "support",
-                            "class": cls, "received_at": "2026-11-06T19:46:00Z", "pages": []})
+                            "class": cls, "received_at": "2026-11-06T19:46:00Z",
+                            "pages": [{"entity": "profile", "id": p} for p in pages]})
         db.db.execute("UPDATE erasure_requests SET register_no=?, action=?, identity_verdict=?, "
                       "status=?, confirmed_at=? WHERE id=?",
                       (register_no, action, "UNKNOWN", status, confirmed_at, rid))
         db.db.commit()
         return rid
+
+
+class TestANewPageInAnOpenThreadIsNotNothing(BridgeCase):
+    """QA #1858 r8 Important. An open erasure row with `pages=[]` plus a same-thread "please delete my profile
+    https://muso.ai/profile/<id>" returned `registered`, never called intake, and left `pages=[]` - so the
+    profile was neither registered for hiding nor handed to a human, and the digest dropped the page because
+    the thread looked answered."""
+
+    PID = "3d57a164-1111-2222-3333-444455556666"
+
+    def test_a_followup_that_supplies_a_new_page_puts_it_in_the_register(self):
+        tid = "1a1bNEWPAGE0001"
+        self.seed_registered(tid, register_no=731)
+        emails = [self.email(tid, "Re: complaint",
+                             f"Please delete my profile https://muso.ai/profile/{self.PID} too.")]
+        proc, result = self.run_bridge(emails, [self.verdict(tid, "privacy follow-up")])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rec = result["threads"][tid]
+        self.assertIn(self.PID, rec.get("new_pages") or [], rec)
+        db = store_mod.Store(self.store_path)
+        row = db.by_key_prefix(f"gmail:support@muso.ai:{tid}", "privacy_erasure")
+        self.assertIsNotNone(row)
+        ids = {str(p.get("id") if isinstance(p, dict) else p) for p in (row.get("pages") or [])}
+        self.assertIn(self.PID, ids, f"the register still holds {ids!r}: nothing is watching that page")
+
+    def test_a_merge_that_does_not_land_is_REFUSED_not_called_filed(self):
+        """QA #1864 r1 Important. `file_candidate` answers "an open row of this class exists" - and for a merge
+        that row existed BEFORE we asked, so a write that never landed still read `filed`. The bridge then
+        reported the thread answered and dropped the human page while the profile was absent from `pages`.
+
+        The unparseable earlier date is QA's own reproducer: `2026-00-08` passes `received_at`'s shape check and
+        makes the store fail when it parses the row's date, so intake exits 2 having written nothing."""
+        tid = "1a1bMERGEFAIL01"
+        self.seed_registered(tid, register_no=741)
+        emails = [self.email(tid, "Re: complaint",
+                             f"Please delete my profile https://muso.ai/profile/{self.PID} too.",
+                             date="2026-00-08 19:22")]
+        proc, result = self.run_bridge(emails, [self.verdict(tid, "privacy follow-up")])
+        rec = result["threads"][tid]
+        self.assertEqual(rec["outcome"], "refused", rec)
+        self.assertIn("the register still does not hold", rec["reason"], rec)
+        db = store_mod.Store(self.store_path)
+        row = db.by_key_prefix(f"gmail:support@muso.ai:{tid}", "privacy_erasure")
+        ids = {str(p.get("id") if isinstance(p, dict) else p) for p in (row.get("pages") or [])}
+        self.assertNotIn(self.PID, ids, "the reproducer must not have written the page")
+
+    def test_a_prefix_the_store_already_holds_is_NOT_a_new_page(self):
+        """QA #1864 r2 Important. The ledger keeps 8-char prefixes and Intercom keeps full uuids, so the same
+        page arrives spelled two ways. Compared verbatim, a held full uuid "loses" against the ledger's prefix,
+        the store dedups the merge, `merged_pages_landed` demands the literal prefix, and an already-watched
+        request is refused and paged to a human - a false alarm on the exact case the store was built for."""
+        tid = "1a1bPREFIX0001"
+        self.seed_registered(tid, register_no=742, pages=(self.PID,))
+        ledger = {f"support@muso.ai:{tid}": {
+            "thread": tid, "class": "privacy_erasure",
+            "first_seen": "Fri, 06 Nov 2026 19:46:00 GMT",
+            "last_seen": "Sun, 08 Nov 2026 19:00:00 GMT",
+            "ids": [{"kind": "profile", "id": self.PID[:8]}], "labels": []}}
+        emails = [self.email(tid, "Re: complaint", "Any update on this?")]
+        proc, result = self.run_bridge(emails, [self.verdict(tid, "privacy follow-up")], ledger=ledger)
+        rec = result["threads"][tid]
+        self.assertEqual(rec["outcome"], "registered", rec)
+
+    def test_a_followup_with_NO_new_page_stays_registered_and_does_not_page(self):
+        tid = "1a1bNEWPAGE0002"
+        self.seed_registered(tid, register_no=732)
+        emails = [self.email(tid, "Re: complaint", "Any update on this?")]
+        proc, result = self.run_bridge(emails, [self.verdict(tid, "privacy follow-up")])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(result["threads"][tid]["outcome"], "registered")
 
 
 class TestAFiledRequestIsNotAHumanPage(BridgeCase):

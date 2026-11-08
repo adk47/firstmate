@@ -101,6 +101,19 @@ def owns_obligation(existing: dict | None, incoming_class: str) -> bool:
     return before == after
 
 
+def page_eq(pid) -> str:
+    """The key the STORE compares a page on: its first 8 characters, lowercased.
+
+    `Store._prefixes` (`scripts/gdpr_pipeline/store.py:302`) is the authority here, and the reason is documented
+    there: the mail ledger keeps 8-char prefixes and Intercom keeps full uuids, so the same page arrives spelled
+    two ways (register #376 `fc31a861` and #377 `fc31a861-0297-...`, nine seconds apart, one person, one page).
+    Any comparison the bridge makes for itself has to use the store's spelling, or it disagrees with the store
+    that just wrote the row: a full uuid against a held 8-char prefix is not a new page, and demanding the
+    literal string would refuse a request the register is already watching (QA #1864 r2).
+    """
+    return str(pid or "")[:8].lower()
+
+
 def actively_owned(row: dict | None) -> bool:
     """Is the register still working this row?
 
@@ -264,6 +277,26 @@ def file_candidate(candidate: dict, store_path: str | None) -> tuple[str, str]:
     # The pipeline's own refusal, verbatim: the digest pages a human with this text, so it must
     # be the pipeline's reason and not a paraphrase of it.
     return "refused", (err or out or f"gdpr-pipeline.py intake exited {proc.returncode} with no message")
+
+
+def merged_pages_landed(store_path: str, key: str, cls: str, ids: list,
+                        message: str) -> tuple[str, str]:
+    """Did the pages we just claimed actually reach the row?!
+
+    `file_candidate` answers "is there an open row of this class", and for a MERGE that row existed before we
+    asked - so a write that never landed (an earlier date the store cannot parse, a refused update) still reads
+    `filed`. Reporting the thread answered on that verdict drops the human page while the named profile is
+    absent from `pages`, which is the defect this branch exists to close (QA #1864 r1). Believe the ROW.
+    """
+    try:
+        row = store_mod.Store(store_path or store_mod.DEFAULT_PATH).by_key_prefix(key, cls)
+    except Exception as exc:  # noqa: BLE001
+        return "refused", f"the register could not be re-read after the merge: {exc}"
+    held = {page_eq(p.get("id") if isinstance(p, dict) else p) for p in ((row or {}).get("pages") or [])}
+    missing = [i for i in ids if page_eq(i) not in held]
+    if missing:
+        return "refused", f"the register still does not hold {', '.join(missing)} after the merge"
+    return "filed", message
 
 
 def register_no_from(output: str) -> str:
@@ -441,6 +474,53 @@ def main(argv: list[str] | None = None) -> int:
                                 f"not filed ({a_message.splitlines()[0] if a_message else 'no message'}), so the "
                                 f"access answer has no deadline and a human must own it")
                             unrouted += 1
+            # A NEW PAGE IN AN OPEN THREAD IS NOT NOTHING (QA #1858 r8 Important). "Please delete my profile
+            # https://muso.ai/profile/<id>" against an open erasure row returned `registered`, never called
+            # intake, and left `pages=[]` - so the profile was neither registered for hiding nor handed to a
+            # human, while the digest dropped the page because the thread looked answered. Merge it through
+            # intake; if the merge cannot land, keep the page by refusing the "registered" outcome.
+            try:
+                incoming_pages = pages_for(tid, email, ledger)
+                held_ids = {page_eq(p.get("id") if isinstance(p, dict) else p)
+                            for p in (existing.get("pages") or [])}
+                fresh_pages = [p for p in incoming_pages
+                               if page_eq(p.get("id") if isinstance(p, dict) else p) not in held_ids]
+            except Exception:  # noqa: BLE001
+                fresh_pages = []
+            if fresh_pages:
+                rec["new_pages"] = [str(p.get("id") if isinstance(p, dict) else p) for p in fresh_pages]
+                if a.dry_run:
+                    rec["pages_note"] = "the register does not hold this page yet"
+                else:
+                    upd = {"keys": [key], "channel": "support", "class": existing.get("class") or "",
+                           "received_at": "", "pages": fresh_pages,
+                           "note": "filed by the support@ triage bridge: this message supplies a new page"}
+                    u_err = ""
+                    try:
+                        upd["received_at"], _src = received_at(tid, email, ledger, prefer_ledger=False)
+                    except ValueError as exc:
+                        u_err = str(exc)
+                    if not upd["received_at"]:
+                        u_outcome, u_message = "refused", u_err or "the message could not be dated"
+                    else:
+                        _n, _addr = requester_for(email)
+                        if _n:
+                            upd["requester_name"] = _n
+                        if _addr:
+                            upd["requester_email"] = _addr
+                        u_outcome, u_message = file_candidate(upd, a.store)
+                        if u_outcome == "filed":
+                            u_outcome, u_message = merged_pages_landed(
+                                a.store, key, existing.get("class") or "", rec["new_pages"], u_message)
+                    if u_outcome != "filed":
+                        # The page is not in the register, so it must not leave with the human page too.
+                        rec["outcome"] = "refused"
+                        rec["reason"] = (
+                            f"register #{existing.get('register_no') or existing.get('id')} is open, but this "
+                            f"message supplies page(s) it does not hold ({', '.join(rec['new_pages'])}) and the "
+                            f"merge did not land ({u_message.splitlines()[0] if u_message else 'no message'}), "
+                            f"so nothing is watching those pages and a human must own them")
+                        unrouted += 1
             threads[tid] = rec
             continue
 
