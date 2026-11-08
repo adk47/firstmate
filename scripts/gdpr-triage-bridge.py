@@ -69,13 +69,15 @@ SUPPORT_ALIAS = "support@muso.ai"
 ROUTABLE = intake.ERASURE_CLASSES + ("privacy_access",)
 
 
-# The obligations a thread can owe, and which of them a row of a given class already discharges. An Art. 15 row
-# answers an access request; it does NOT answer a deletion. `upsert` files one row per request with one class, so
-# ownership has to be judged per obligation, not per thread (QA #1847 Critical).
-OBLIGATION = {
-    "privacy_erasure": "erasure",
-    "privacy_access": "access",
-}
+# Classes a human must always read, whatever obligation the store maps them to. `legal_threat` and
+# `dmca_takedown` are not something the pipeline answers on its own, so an open row of ANY obligation must not
+# absorb them (QA #1858 r1).
+HUMAN_ALWAYS = ("legal_threat", "dmca_takedown")
+
+# Ownership is judged per OBLIGATION, not per thread (QA #1847 Critical): an Art.15 row answers an access
+# request, it does not answer a deletion. The mapping itself lives in ONE place, `store.OBLIGATION_OF_CLASS` -
+# a second copy here drifted the moment the store learned that a threat on a deletion thread IS that deletion
+# escalating, and the drift was itself a finding (QA #1858 r3). Read it, never restate it.
 
 
 def owns_obligation(existing: dict | None, incoming_class: str) -> bool:
@@ -90,14 +92,10 @@ def owns_obligation(existing: dict | None, incoming_class: str) -> bool:
     classifies as `other`: anything that is not a DIFFERENT routable privacy obligation keeps today's behaviour. Only
     a clear, differently-classed privacy request falls through to intake, which then decides whether to file.
     """
-    before = OBLIGATION.get(str((existing or {}).get("class") or ""))
-    after = OBLIGATION.get(incoming_class)
-    # A routable class we hold no obligation key for is legal_threat or dmca_takedown. They are NOT a privacy
-    # obligation, so an open Art.17 row does not discharge them: the customer has escalated, and reporting
-    # `registered` removed the human page while the register stayed on the old class (QA #1858 Important).
-    # Intake escalates the row's class on merge, so let it run.
-    if incoming_class in ROUTABLE and not after:
-        return False
+    if incoming_class in HUMAN_ALWAYS:
+        return False                     # a threat is never absorbed, whatever the store maps it to
+    before = store_mod.obligation_of(str((existing or {}).get("class") or ""))
+    after = store_mod.obligation_of(incoming_class)
     if not before or not after:
         return True                      # unknown either side: do not change the routing
     return before == after
@@ -357,7 +355,7 @@ def main(argv: list[str] | None = None) -> int:
             explicit = no_new_duty and intake.withdrawal_of_request(body)
             withdrew = intake.withdrawn_in_body(body) or explicit or (
                 no_new_duty and intake.withdrawal_signal(body)
-                and bool(OBLIGATION.get(str((existing or {}).get("class") or ""))))
+                and bool(store_mod.obligation_of(str((existing or {}).get("class") or ""))))
             asks_copy = intake.requests_access(email.get("subject") or "", body)
         except Exception:  # noqa: BLE001
             withdrew, asks_copy = False, False
@@ -390,7 +388,7 @@ def main(argv: list[str] | None = None) -> int:
             # my personal data and delete my profile." against an open erasure row returned `registered` here,
             # before the dual-duty filing below, so only the erasure row ever existed and the Art.15 answer had
             # no deadline. File the missing duty, or page the human who would otherwise never be asked.
-            if asks_copy and OBLIGATION.get(str(existing.get("class") or "")) == "erasure":
+            if asks_copy and store_mod.obligation_of(str(existing.get("class") or "")) == "erasure":
                 extra = {
                     "keys": [key], "channel": "support", "class": "privacy_access",
                     "received_at": "", "pages": [],
@@ -501,7 +499,7 @@ def main(argv: list[str] | None = None) -> int:
         # threat is not a self-serve pipeline item, and the row's class changing is not the same as someone
         # reading it. Recorded as its own outcome because `filed` removes the page.
         escalated_from = ((existing or {}).get("class") or "") if (
-            actively_owned(existing) and cls in ROUTABLE and not OBLIGATION.get(cls)) else ""
+            actively_owned(existing) and cls in HUMAN_ALWAYS) else ""
 
         outcome, message = file_candidate(candidate, a.store)
         if outcome == "filed":

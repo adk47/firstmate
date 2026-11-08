@@ -753,6 +753,57 @@ class TestAnUnqualifiedWithdrawalStillPages(BridgeCase):
         self.assertIsNone(db.by_key_prefix(f"gmail:support@muso.ai:{tid}"))
 
 
+class TestAnEscalationDoesNotSwallowALaterAccessRequest(BridgeCase):
+    """QA #1858 r3 Important. The bridge carried its OWN obligation map, so when the store learned that a threat on
+    a deletion thread IS that deletion escalating, the two disagreed: `owns_obligation({"class": "legal_threat"},
+    "privacy_access")` returned True and an open threat row swallowed a later Art.15 request - no access row, no
+    statutory deadline, and the human page removed. The mapping now lives only in the store."""
+
+    def test_the_bridge_and_the_store_agree_on_every_class(self):
+        bridge = _load_bridge()
+
+        for cls in bridge.ROUTABLE:
+            with self.subTest(cls=cls):
+                self.assertEqual(bridge.store_mod.obligation_of(cls), store_mod.obligation_of(cls))
+        # the exact call QA reproduced
+        self.assertFalse(bridge.owns_obligation({"class": "legal_threat", "status": "open"}, "privacy_access"))
+        self.assertFalse(bridge.owns_obligation({"class": "dmca_takedown", "status": "open"}, "privacy_access"))
+        # ... but a deletion demand on a threat thread IS the same obligation: the store maps a threat on a
+        # deletion thread to `erasure` on purpose (one clock, one duty), and a threat thread already has a
+        # human's attention, so suppressing the page here is the intended behaviour, not a swallow.
+        self.assertTrue(bridge.owns_obligation({"class": "legal_threat", "status": "open"}, "privacy_erasure"))
+
+    def test_a_threat_first_thread_still_files_the_later_ACCESS_request(self):
+        tid = "1a1bESCALATE07"
+        self.seed_registered(tid, register_no=701, cls="legal_threat")
+        emails = [self.email(tid, "Re: my account", "Please send me a copy of my personal data under Article 15.")]
+        proc, result = self.run_bridge(emails, [self.verdict(tid, "privacy follow-up")])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rec = result["threads"][tid]
+        self.assertNotEqual(rec["outcome"], "registered", rec)
+        self.assertEqual(rec["outcome"], "filed", rec)
+        self.assertEqual(rec["class_"], "privacy_access", rec)
+        db = store_mod.Store(self.store_path)
+        row = db.by_key_prefix(f"gmail:support@muso.ai:{tid}", "privacy_access")
+        self.assertIsNotNone(row, "the Art.15 request got no access row")
+        self.assertTrue(row.get("due_at"), row)
+        # and the threat row is untouched
+        threat = db.by_key_prefix(f"gmail:support@muso.ai:{tid}", "legal_threat")
+        self.assertIsNotNone(threat, "the open threat row was taken over")
+        self.assertEqual(threat.get("status"), "open", threat)
+
+    def test_a_threat_first_thread_keeps_the_human_page_for_each_new_duty(self):
+        tid = "1a1bESCALATE08"
+        self.seed_registered(tid, register_no=702, cls="legal_threat")
+        emails = [self.email(tid, "Re: my account",
+                             "Please send me a copy of my personal data under Article 15."),
+                  self.email(tid, "Re: my account", "Any update on this?")]
+        proc, result = self.run_bridge(emails[:1], [self.verdict(tid, "privacy follow-up")])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rec = result["threads"][tid]
+        self.assertEqual(rec["class_"], "privacy_access", rec)
+
+
 class TestAnEscalationKeepsTheHumanPage(BridgeCase):
     """QA #1858 Important. `owns_obligation` returned true whenever either side lacked an OBLIGATION key, so an
     open Art.17 row absorbed a later legal threat or DMCA notice from the same thread: the row stayed on the old
