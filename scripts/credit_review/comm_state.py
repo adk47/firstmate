@@ -918,14 +918,18 @@ def _is_o_thread(source_id: str) -> bool:
         raise Unknown(f"ledger unreadable: {exc}") from exc
 
 
-def reply_due(conversation: str, contact_id: str, part_id: str, ic: Intercom, now: float | None = None) -> list[str]:
+def reply_due(conversation: str, contact_id: str, part_id: str, ic: Intercom, now: float | None = None,
+              conv: dict[str, Any] | None = None) -> list[str]:
     """Fable [key=reply-due] (l1 219, p1 200): the user wrote to us in a credit/claim/merge thread and nobody answered
     for > 24 h. Empty list = due (the gate may send EXACTLY ONE in-thread answer despite the 7-day cooldowns);
-    otherwise the reasons it is not. Fail closed on anything unreadable."""
+    otherwise the reasons it is not. Fail closed on anything unreadable.
+    `conv`: the conversation when the caller already fetched it (the scan reads each thread ONCE - Fable d2 2026-11-08:
+    three GETs per candidate thread were the walk's cost); the send-time gate passes nothing and reads it fresh."""
     if not (conversation.isdigit() and part_id.isdigit() and contact_id):
         return ["reply_due:bad_input"]
     now = now or time.time()
-    conv = ic("GET", f"/conversations/{conversation}?display_as=plaintext", None)
+    if conv is None:
+        conv = ic("GET", f"/conversations/{conversation}?display_as=plaintext", None)
     if str(conv.get("id") or "") != conversation:
         raise Unknown("conversation unreadable")
     why: list[str] = []
@@ -965,15 +969,17 @@ HUMAN_ACTIVE_S = 48 * 3600                     # a named human who wrote in the 
 HANDOFF_EVERY_S = 7 * 86400                    # one reassignment per thread per 7 days
 
 
-def reply_due_thread(conversation: str, ic: Intercom, now: float | None = None, part: str = "") -> dict[str, Any]:
+def reply_due_thread(conversation: str, ic: Intercom, now: float | None = None, part: str = "",
+                     conv: dict[str, Any] | None = None) -> dict[str, Any]:
     """prior_note: our earlier 'Nothing is needed from you right now' line in THIS conversation (read from the thread -
     a comment by a gate admin id - or a ledgered note of a nothing-needed campaign into it; the ledger alone is not
     enough while the #1510 backfill is pending), as {part, campaign, at}. assignee: a named HUMAN admin assigned to the
     thread, as {id, last_part_at, action}: 'skip' while that human has their OWN part (comment or note) within 48 h or the
     thread was already handed over in the last 7 days, else 'reassign'. Tag / assignment events are not the human
-    writing (r5 g). Unreadable = Unknown (fail closed)."""
+    writing (r5 g). Unreadable = Unknown (fail closed). `conv`: as in reply_due() - a caller's own read of the thread."""
     now = now or time.time()
-    conv = ic("GET", f"/conversations/{conversation}?display_as=plaintext", None)
+    if conv is None:
+        conv = ic("GET", f"/conversations/{conversation}?display_as=plaintext", None)
     if str(conv.get("id") or "") != conversation:
         raise Unknown("conversation unreadable")
     src = dict(conv.get("source") or {})
@@ -1010,6 +1016,9 @@ def reply_due_thread(conversation: str, ic: Intercom, now: float | None = None, 
     return out
 
 
+_ADMIN_NAMES: dict[str, str] = {}      # admin id -> display name, per process: a label on a report row, never a decision
+
+
 def assignee_state(conversation: str, aid: str, parts: list[dict[str, Any]], ic: Intercom, now: float,
                    part: str = "") -> dict[str, Any]:
     """Fable 238/240 + r5: a thread assigned to a HUMAN (any admin outside GATE_BOT_ADMINS). action =
@@ -1038,10 +1047,12 @@ def assignee_state(conversation: str, aid: str, parts: list[dict[str, Any]], ic:
         raise Unknown(f"ledger unreadable: {exc}") from exc
     st: dict[str, Any] = {"id": aid, "name": "", "last_part_at": last_own, "handoff_part": "", "handoff_at": 0,
                           "human_replied_after": False}
-    try:
-        st["name"] = str((ic("GET", f"/admins/{aid}", None) or {}).get("name") or "")[:80]   # display only
-    except Exception:  # noqa: BLE001 - the name is a report column, never a decision
-        pass
+    if aid not in _ADMIN_NAMES:
+        try:
+            _ADMIN_NAMES[aid] = str((ic("GET", f"/admins/{aid}", None) or {}).get("name") or "")[:80]   # display only
+        except Exception:  # noqa: BLE001 - the name is a report column, never a decision
+            _ADMIN_NAMES[aid] = ""
+    st["name"] = _ADMIN_NAMES[aid]
     if ho:
         st["handoff_part"] = str(ho[0] or "")
         st["handoff_at"] = int(datetime.fromisoformat(str(ho[1]).replace("Z", "+00:00")).timestamp())
@@ -1071,6 +1082,14 @@ def filed_requests(uid: int, keys: list[str] | tuple[str, ...], conversation: st
                  f"WHERE userid = {int(uid)} AND deletedat IS NULL AND status NOT IN ('approved', 'rejected') "
                  f"AND lower(CAST(id AS varchar)) IN ({lst})")
     open_ids = {str(r[0]).lower() for r in rows if r}
+    return sorted(open_ids & linked_request_ids(uid, conversation))
+
+
+def linked_request_ids(uid: int, conversation: str) -> set[str]:
+    """The request ids LINKED to this conversation (filed_requests' two local reads): one of our sent notes in it named
+    the request (ledger), or a filing in it was taken against the request (proof_intake). Unreadable = Unknown."""
+    if not str(conversation).isdigit():
+        return set()
     linked: set[str] = set()
     try:
         for (rj,) in _ro(LEDGER).execute("SELECT request_ids_json FROM verify_messages WHERE conversation_id=? "
@@ -1093,7 +1112,28 @@ def filed_requests(uid: int, keys: list[str] | tuple[str, ...], conversation: st
                     continue
     except sqlite3.Error as exc:
         raise Unknown(f"proof_intake unreadable: {exc}") from exc
-    return sorted(open_ids & linked)
+    return linked
+
+
+PENDING_STATUSES = ("user_verification_needed", "unverified")   # open_titles' statuses
+
+
+def trigger_inputs(keys: list[str] | tuple[str, ...], rows: list[tuple[str, str, str]],
+                   linked: set[str]) -> tuple[list[str], list[str], list[str]]:
+    """status_trigger's three replica inputs - (titles, filed, other_titles) - derived from ONE batched replica read
+    instead of the three per-user queries (filed_requests + open_titles x2, ~2.2 s each on the Trino CLI).
+    Fable d2 2026-11-08: the reply-due scan classifies ~150 due threads a tick; this is what lets it call the slow
+    full check only for the parts the deployed trigger_class reads as a STATUS question.
+    `rows`: this user's OPEN requests as (request_id lowercased, status, track title) - the same filter as
+    filed_requests / open_titles (deletedat IS NULL AND status NOT IN ('approved', 'rejected')); `linked`:
+    linked_request_ids(uid, conversation). Pinned equal to status_trigger's own reads by test_reply_due_scan."""
+    want = {str(k).lower() for k in keys if re.fullmatch(r"[a-z0-9-]{1,64}", str(k).lower())}
+    open_ids = {str(rid).lower() for rid, _, _ in rows}
+    filed = sorted(open_ids & want & set(linked)) if want else []
+    pend = [(str(rid).lower(), str(t or "").strip()) for rid, st, t in rows if st in PENDING_STATUSES and str(t or "").strip()]
+    titles = sorted({t for rid, t in pend if rid in set(filed)}) if filed else []
+    others = [t for t in sorted({t for _, t in pend}) if t not in set(titles)]
+    return titles, filed, others
 
 
 def status_trigger(uid: int, keys: list[str] | tuple[str, ...], conversation: str, part_id: str, query: Query,
