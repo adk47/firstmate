@@ -266,6 +266,26 @@ def file_candidate(candidate: dict, store_path: str | None) -> tuple[str, str]:
     return "refused", (err or out or f"gdpr-pipeline.py intake exited {proc.returncode} with no message")
 
 
+def merged_pages_landed(store_path: str, key: str, cls: str, ids: list,
+                        message: str) -> tuple[str, str]:
+    """Did the pages we just claimed actually reach the row?!
+
+    `file_candidate` answers "is there an open row of this class", and for a MERGE that row existed before we
+    asked - so a write that never landed (an earlier date the store cannot parse, a refused update) still reads
+    `filed`. Reporting the thread answered on that verdict drops the human page while the named profile is
+    absent from `pages`, which is the defect this branch exists to close (QA #1864 r1). Believe the ROW.
+    """
+    try:
+        row = store_mod.Store(store_path or store_mod.DEFAULT_PATH).by_key_prefix(key, cls)
+    except Exception as exc:  # noqa: BLE001
+        return "refused", f"the register could not be re-read after the merge: {exc}"
+    held = {str(p.get("id") if isinstance(p, dict) else p) for p in ((row or {}).get("pages") or [])}
+    missing = [i for i in ids if i not in held]
+    if missing:
+        return "refused", f"the register still does not hold {', '.join(missing)} after the merge"
+    return "filed", message
+
+
 def register_no_from(output: str) -> str:
     m = re.search(r"-> register #(\d+)", output or "")
     return m.group(1) if m else ""
@@ -476,6 +496,9 @@ def main(argv: list[str] | None = None) -> int:
                         if _addr:
                             upd["requester_email"] = _addr
                         u_outcome, u_message = file_candidate(upd, a.store)
+                        if u_outcome == "filed":
+                            u_outcome, u_message = merged_pages_landed(
+                                a.store, key, existing.get("class") or "", rec["new_pages"], u_message)
                     if u_outcome != "filed":
                         # The page is not in the register, so it must not leave with the human page too.
                         rec["outcome"] = "refused"

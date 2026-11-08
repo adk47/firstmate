@@ -167,6 +167,27 @@ class TestANewPageInAnOpenThreadIsNotNothing(BridgeCase):
         ids = {str(p.get("id") if isinstance(p, dict) else p) for p in (row.get("pages") or [])}
         self.assertIn(self.PID, ids, f"the register still holds {ids!r}: nothing is watching that page")
 
+    def test_a_merge_that_does_not_land_is_REFUSED_not_called_filed(self):
+        """QA #1864 r1 Important. `file_candidate` answers "an open row of this class exists" - and for a merge
+        that row existed BEFORE we asked, so a write that never landed still read `filed`. The bridge then
+        reported the thread answered and dropped the human page while the profile was absent from `pages`.
+
+        The unparseable earlier date is QA's own reproducer: `2026-00-08` passes `received_at`'s shape check and
+        makes the store fail when it parses the row's date, so intake exits 2 having written nothing."""
+        tid = "1a1bMERGEFAIL01"
+        self.seed_registered(tid, register_no=741)
+        emails = [self.email(tid, "Re: complaint",
+                             f"Please delete my profile https://muso.ai/profile/{self.PID} too.",
+                             date="2026-00-08 19:22")]
+        proc, result = self.run_bridge(emails, [self.verdict(tid, "privacy follow-up")])
+        rec = result["threads"][tid]
+        self.assertEqual(rec["outcome"], "refused", rec)
+        self.assertIn("the register still does not hold", rec["reason"], rec)
+        db = store_mod.Store(self.store_path)
+        row = db.by_key_prefix(f"gmail:support@muso.ai:{tid}", "privacy_erasure")
+        ids = {str(p.get("id") if isinstance(p, dict) else p) for p in (row.get("pages") or [])}
+        self.assertNotIn(self.PID, ids, "the reproducer must not have written the page")
+
     def test_a_followup_with_NO_new_page_stays_registered_and_does_not_page(self):
         tid = "1a1bNEWPAGE0002"
         self.seed_registered(tid, register_no=732)
