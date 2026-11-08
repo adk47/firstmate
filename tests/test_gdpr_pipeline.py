@@ -4199,6 +4199,37 @@ class AnAccessReplyOnAnExistingThreadStillGetsItsOwnRow(unittest.TestCase):
         # replaying the same thread must not mint a third row
         self._run([], conv)
 
+    def test_the_access_clock_starts_at_the_ACCESS_message_not_the_thread(self):
+        """QA #1858 r7 Important. `conversation_request_at` matched a part only when its own `classify` equalled the
+        class, and a combined part classifies as the ERASURE - so the access row fell through to the thread's
+        creation date. Here the deletion is Nov 1 and the copy request is Nov 8; dating the access row from Nov 1
+        shortened its 30-day clock by a week."""
+        nov1 = 1793571600     # 2026-11-01T00:00:00Z
+        nov8 = 1794176400     # 2026-11-08T00:00:00Z
+        conv = {"conversation_id": "900", "created_at": nov1, "subject": "Re: my data",
+                "author_email": "a@pm.me",
+                "customer_text": "Please delete my profile.\nPlease send me a copy of my personal data.",
+                "parts": [{"at": nov1, "text": "Please delete my profile."},
+                          {"at": nov8, "text": "Please send me a copy of my personal data."}]}
+        s, log = self._run([], conv)
+        by = {x["class"]: x for x in s.all()}
+        self.assertIn("privacy_access", by, f"log={log}")
+        self.assertTrue(by["privacy_erasure"]["due_at"].startswith("2026-12-01"), by["privacy_erasure"])
+        self.assertTrue(by["privacy_access"]["due_at"].startswith("2026-12-08"),
+                        f"the access clock should start Nov 8, got {by['privacy_access']['due_at']}")
+
+    def test_the_access_clock_handles_a_COMBINED_part(self):
+        nov1 = 1793571600
+        nov8 = 1794176400
+        conv = {"conversation_id": "900", "created_at": nov1, "subject": "Re: my data",
+                "author_email": "a@pm.me",
+                "customer_text": "Delete my profile and send me a copy of my data.",
+                "parts": [{"at": nov8, "text": "Delete my profile and send me a copy of my data."}]}
+        s, log = self._run([], conv)
+        by = {x["class"]: x for x in s.all()}
+        self.assertEqual(sorted(by), ["privacy_access", "privacy_erasure"], f"log={log}")
+        self.assertTrue(by["privacy_access"]["due_at"].startswith("2026-12-08"), by["privacy_access"])
+
     def test_a_DELETION_ONLY_reply_on_an_existing_row_files_no_access_duty(self):
         conv = {"conversation_id": "900", "created_at": 1790000000, "subject": "Re: my data",
                 "author_email": "a@pm.me",
