@@ -187,6 +187,29 @@ class AWithdrawalInTheCurrentMessageUnwinsTheInheritedSubject(unittest.TestCase)
         for classify in (li.classify, pipeline_intake.classify):
             self.assertEqual(classify(self.SUBJECT, body), "privacy_erasure")
 
+    def test_an_UNRELATED_cancellation_does_not_suppress_a_live_deletion_demand(self):
+        # QA #1858 r4. The withdrawal verb was read from the whole body, so any `cancel`/`withdraw` anywhere
+        # defeated a live demand in the same message: the customer refused one deletion and demanded another, and
+        # `classify` returned `other` - no erasure row, no hide clock, no statutory deadline.
+        from gdpr_pipeline import intake as pipeline_intake    # noqa: E402
+        bodies = ("Do not delete my old profile; I cancel my subscription, but please delete my account.",
+                  "Do not remove my old profile. I cancel my subscription and want you to delete my account.",
+                  "Never delete my old profile - I withdraw consent for marketing, and please delete my data.")
+        for body in bodies:
+            for withdrawn in (li.withdrawn_in_body, pipeline_intake.withdrawn_in_body):
+                self.assertFalse(withdrawn(body), f"{body!r} via {withdrawn.__module__}")
+            for classify in (li.classify, pipeline_intake.classify):
+                self.assertEqual(classify("", body), "privacy_erasure",
+                                 f"{body!r} via {classify.__module__}")
+
+    def test_a_withdrawal_IN_the_same_clause_as_the_refusal_still_counts(self):
+        # The other direction: the withdrawal belongs to the deletion being refused, so it must still be seen.
+        from gdpr_pipeline import intake as pipeline_intake    # noqa: E402
+        for body in ("I cancel it - do not delete my profile.",
+                     "Do not delete my profile, I withdraw my request."):
+            for withdrawn in (li.withdrawn_in_body, pipeline_intake.withdrawn_in_body):
+                self.assertTrue(withdrawn(body), f"{body!r} via {withdrawn.__module__}")
+
     def test_requests_access_is_the_dual_duty_test(self):
         from gdpr_pipeline import intake as pipeline_intake    # noqa: E402
         self.assertTrue(li.requests_access("", "Send me a copy of my personal data and delete my profile."))

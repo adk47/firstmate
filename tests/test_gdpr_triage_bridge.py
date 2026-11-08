@@ -725,6 +725,24 @@ class TestAnUnqualifiedWithdrawalStillPages(BridgeCase):
         self.assertIsNotNone(row, "the deletion demand got no erasure row")
         self.assertTrue(row.get("due_at"), row)
 
+    def test_an_UNRELATED_cancellation_does_not_hide_a_live_demand_from_the_bridge(self):
+        """QA #1858 r4, end to end. The customer refuses one deletion and demands another in one message; a
+        `cancel` verb belonging to neither was read as the withdrawal of the whole message, so the bridge reported
+        `withdrawn`, the digest paged a human for the wrong reason, and the live Art.17 demand got no row at all."""
+        tid = "1a1bCANCEL07"
+        emails = [self.email(tid, "Re: complaint",
+                             "Do not delete my old profile; I cancel my subscription, but please delete my account.")]
+        proc, result = self.run_bridge(emails, [self.verdict(tid, "privacy follow-up")])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rec = result["threads"][tid]
+        self.assertNotEqual(rec["outcome"], "withdrawn", rec)
+        self.assertEqual(rec["outcome"], "filed", rec)
+        self.assertEqual(rec["class_"], "privacy_erasure", rec)
+        db = store_mod.Store(self.store_path)
+        row = db.by_key_prefix(f"gmail:support@muso.ai:{tid}", "privacy_erasure")
+        self.assertIsNotNone(row, "the live deletion demand got no erasure row")
+        self.assertTrue(row.get("due_at"), row)
+
     def test_a_coordinated_imperative_after_AND_files_the_deletion(self):
         """QA #1847 r9 Important, end to end. The comma and semicolon forms filed; "and" was the only
         difference, and the bridge marked it `withdrawn` with no row, no hide clock, no deadline."""

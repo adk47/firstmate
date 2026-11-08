@@ -194,21 +194,37 @@ def withdrawn_in_body(body: str) -> bool:
     # A NEGATOR immediately before a deletion word IS the withdrawal. Testing "no affirmative deletion anywhere"
     # instead would reclassify every legitimate request whose object the scoped vocabulary does not name -
     # "please delete my tracks" has no `delete my (profile|data|account)` match, and 14 tests caught exactly that.
-    negated = False
+    negated = None
     for m in _BARE_DELETION_RX.finditer(b):
         clause = b[max(0, m.start() - _NEGATOR_WINDOW):m.start()]
         breaks = list(_CLAUSE_BREAK_RX.finditer(clause))
         if breaks:
             clause = clause[breaks[-1].end():]
         if _NEGATOR_RX.search(clause):
-            negated = True
+            negated = m
             break
-    if not negated:
+    if negated is None:
         return False
     # A negated deletion settles it UNLESS the body also contains an affirmative demand - and even then an explicit
-    # withdrawal verb ("I take back my request to remove my profile") outranks that mention, because the mention names
-    # the request being withdrawn.
-    return True if _WITHDRAW_RX.search(b) else not affirmative_deletion(b)
+    # withdrawal verb outranks that mention, because the mention names the request being withdrawn.
+    #
+    # The withdrawal verb must belong to the CLAUSE THAT NAMES the negated deletion (QA #1858 r4). Scoped to the whole
+    # body, any unrelated `cancel`/`withdraw` defeated a live demand: "Do not delete my old profile; I cancel my
+    # subscription, but please delete my account" returned `other` and the new Art.17 demand got no row, no hide
+    # clock and no deadline. A message can refuse one deletion and demand another in the same breath.
+    # The immediate phrase, not the whole body: `_WITHDRAWAL_BREAK_RX` is the widest break set (it also splits on a
+    # spaced dash and on `and`), and a dash is what separates "Never delete my old profile - I withdraw consent for
+    # marketing, and please delete my data."
+    start = max(0, negated.start() - _NEGATOR_WINDOW)
+    pre = b[start:negated.start()]
+    breaks = list(_WITHDRAWAL_BREAK_RX.finditer(pre))
+    if breaks:
+        start += breaks[-1].end()
+    end = len(b)
+    for bm in _WITHDRAWAL_BREAK_RX.finditer(b, negated.end()):
+        end = bm.start()
+        break
+    return True if _WITHDRAW_RX.search(b[start:end]) else not affirmative_deletion(b)
 
 
 def withdrawal_signal(body: str) -> bool:
