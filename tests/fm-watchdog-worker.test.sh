@@ -168,6 +168,40 @@ backlog_bin() {  # <home> <id...>
   chmod +x "$home/fakebin/tasks-axi"
 }
 
+# held_bin <home> <id...>: a stand-in for tasks-axi that reports exactly the
+# given ids as held, and nothing as in flight.
+held_bin() {  # <home> <id...>
+  local home=$1
+  shift
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'case "$*" in\n'
+    printf '  *--state\\ held*)\n'
+    printf '    cat "%s/held.txt"\n' "$home"
+    printf '    ;;\n'
+    printf '  *) printf "count: 0\\ntasks[0]{id,state,kind,repo,title}:\\n" ;;\n'
+    printf 'esac\n'
+  } > "$home/fakebin/tasks-axi"
+  chmod +x "$home/fakebin/tasks-axi"
+  {
+    printf 'count: %d\ntasks[%d]{id,state,kind,repo,title}:\n' "$#" "$#"
+    local id
+    for id in "$@"; do printf '  %s,held,ship,p,t\n' "$id"; done
+  } > "$home/held.txt"
+}
+
+# held_bin_fails <home>: a tasks-axi whose held listing cannot be read at all.
+held_bin_fails() {  # <home>
+  cat > "$1/fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *--state\ held*) exit 1 ;;
+  *) printf 'count: 0\ntasks[0]{id,state,kind,repo,title}:\n' ;;
+esac
+SH
+  chmod +x "$1/fakebin/tasks-axi"
+}
+
 start_clock() { date +%s; }
 
 test_a_dead_worker_comes_back_in_one_pass_with_no_wake() {
@@ -589,6 +623,90 @@ test_a_dry_run_reports_every_lane_and_changes_nothing() {
   pass "a dry run reports every lane's plan and touches nothing"
 }
 
+test_a_stopped_task_is_never_relaunched_or_paged() {
+  local home now out i
+  home=$(make_home stopped); fake_tools "$home"
+  worker "$home" w1 dead
+  : > "$home/state/w1.stopped"
+  now=$(start_clock)
+  for i in 0 1 2 3 4; do
+    out=$(tick "$home" "$((now + i * 3700))")
+    [ -z "$out" ] || fail "a task the captain ordered left stopped was acted on: $out"
+  done
+  assert_eq "$(counter "$home" '^control ')" "0" "a stopped task was relaunched"
+  [ -z "$(wakes "$home")" ] || fail "a stopped task paged firstmate: $(wakes "$home")"
+  # Clearing the marker returns the lane to ordinary treatment with no cleanup.
+  rm -f "$home/state/w1.stopped"
+  out=$(tick "$home" "$((now + 25000))")
+  assert_contains "$out" "watchdog: relaunched w1 after endpoint dead" \
+    "a task whose stopped marker was cleared did not return to normal treatment"
+  pass "a stopped task is never relaunched or paged, and returns to normal when the marker clears"
+}
+
+test_a_held_backlog_item_is_never_relaunched_or_paged() {
+  local home now out i
+  home=$(make_home held); fake_tools "$home"
+  worker "$home" w1 dead
+  worker "$home" w2 alive
+  pane "$home" w2 busy 'a tool call that never returns'
+  held_bin "$home" w1 w2
+  now=$(start_clock)
+  for i in 0 1 2 3 4; do
+    out=$(tick "$home" "$((now + i * 1900))" FM_WATCHDOG_BACKLOG=on \
+      FM_WATCHDOG_BACKLOG_BIN="$home/fakebin/tasks-axi")
+    [ -z "$out" ] || fail "a held backlog task was acted on: $out"
+  done
+  assert_eq "$(counter "$home" '^control ')" "0" "a held backlog task was relaunched"
+  assert_eq "$(counter "$home" '^send ')" "0" "a held backlog task was re-rung or steered"
+  assert_eq "$(counter "$home" 'interrupt')" "0" "a held backlog task was interrupted"
+  [ -z "$(wakes "$home")" ] || fail "a held backlog task paged firstmate: $(wakes "$home")"
+  # Leaving held returns the lane to ordinary treatment with no cleanup.
+  held_bin "$home"
+  out=$(tick "$home" "$((now + 12000))" FM_WATCHDOG_BACKLOG=on \
+    FM_WATCHDOG_BACKLOG_BIN="$home/fakebin/tasks-axi")
+  assert_contains "$out" "watchdog: relaunched w1 after endpoint dead" \
+    "a task that left held did not return to normal treatment"
+  pass "a held backlog task is never relaunched, steered, or paged, and returns to normal when unheld"
+}
+
+test_an_unparked_dead_task_is_still_relaunched_and_paged() {
+  local home now out i
+  home=$(make_home unheld); fake_tools "$home"
+  worker "$home" w1 dead
+  held_bin "$home" other-lane
+  now=$(start_clock)
+  for i in 0 1 2 3 4 5; do
+    out=$(tick "$home" "$((now + i * 60))" FM_WATCHDOG_BACKLOG=on \
+      FM_WATCHDOG_BACKLOG_BIN="$home/fakebin/tasks-axi")
+  done
+  assert_eq "$(counter "$home" '^control .* relaunch')" "3" \
+    "a dead task that is neither stopped nor held was not relaunched up to its cap"
+  assert_eq "$(wakes "$home" | grep -c 'hourly relaunch budget')" "1" \
+    "a dead task that is neither stopped nor held no longer pages when its budget is spent"
+  pass "an unheld, unstopped dead task is still relaunched and still pages"
+}
+
+test_an_unreadable_hold_set_falls_back_to_ordinary_supervision() {
+  local home now out i
+  home=$(make_home held-broken); fake_tools "$home"
+  worker "$home" w1 dead
+  held_bin_fails "$home"
+  now=$(start_clock)
+  out=$(tick "$home" "$now" FM_WATCHDOG_BACKLOG=on \
+    FM_WATCHDOG_BACKLOG_BIN="$home/fakebin/tasks-axi")
+  assert_contains "$out" "could not read held backlog items" \
+    "a failed hold-set read was not disclosed"
+  assert_contains "$out" "watchdog: relaunched w1 after endpoint dead" \
+    "a failed hold-set read suppressed a real relaunch"
+  for i in 1 2 3 4; do
+    out=$(tick "$home" "$((now + i * 60))" FM_WATCHDOG_BACKLOG=on \
+      FM_WATCHDOG_BACKLOG_BIN="$home/fakebin/tasks-axi")
+  done
+  assert_eq "$(wakes "$home" | grep -c 'hourly relaunch budget')" "1" \
+    "a failed hold-set read suppressed the ordinary escalation"
+  pass "an unreadable hold set discloses itself and leaves supervision as it was"
+}
+
 test_a_dead_worker_comes_back_in_one_pass_with_no_wake
 test_an_unread_steer_is_interrupted_then_relaunched_once_each
 test_a_connection_error_lane_is_continued_then_relaunched_on_the_fallback_model
@@ -609,3 +727,7 @@ test_secondmates_are_not_the_watchdogs_to_relaunch
 test_a_chair_that_will_not_start_reports_itself
 test_status_prints_the_record_and_a_foreign_schema_is_ignored
 test_a_concurrent_pass_is_skipped_not_doubled
+test_a_stopped_task_is_never_relaunched_or_paged
+test_a_held_backlog_item_is_never_relaunched_or_paged
+test_an_unparked_dead_task_is_still_relaunched_and_paged
+test_an_unreadable_hold_set_falls_back_to_ordinary_supervision

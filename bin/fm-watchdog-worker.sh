@@ -51,6 +51,18 @@
 # endpoint, worktree, harness, model, and uncommitted work are preserved and the
 # note is the replacement agent's only carry-over context.
 #
+# PAUSED WORK. A captain-parked lane is not a lane that died, so the task
+# pass leaves it alone entirely: state/<id>.stopped (written only by
+# bin/fm-leave-stopped.sh, whose header owns the marker) is a plain file test,
+# and a backlog item the captain holds (tasks-axi list --state held, read once
+# per pass) is the same decision recorded in the backlog. Either one suppresses
+# every rung below - no re-ring, no relaunch, no connection action, and no
+# wake - and accrues no relaunch or stall history it never spent. Clearing the
+# marker or leaving held returns the lane to ordinary treatment on the next
+# pass. The hold set fails toward recovery: if the backend is manual, the tool
+# is missing, or the read fails, the pass says so once and supervises held work
+# exactly as it did before rather than going silent on a real stall.
+#
 # THE STALL LADDER. A live worker whose pane keeps one SHAPE for
 # no_progress_secs while it reads busy is stalled. Shape means printable ASCII
 # with digits folded and non-ASCII dropped, so a ticking timer, a spinner glyph,
@@ -468,6 +480,60 @@ record_store() {  # <boot> <units-json> <backlog-json>
   fi
 }
 
+# --- paused lanes -----------------------------------------------------------
+
+# HELD_IDS is the space-padded set of backlog ids the captain currently holds,
+# built once per pass (HELD_OK=1) so the hot loop never shells out per task.
+HELD_IDS=''
+HELD_OK=0
+
+# hold_set_build: read this home's held backlog items once. A hold the pass
+# cannot read must never silence a real recovery, so every failure path leaves
+# HELD_OK=0 and says so once.
+hold_set_build() {
+  local backend_file backend_name out
+  local -a file_args=()
+  HELD_IDS=''
+  HELD_OK=0
+  [ "$BACKLOG_ENABLED" = on ] || return 0
+  backend_file="$CONFIG_DIR/backlog-backend"
+  backend_name='tasks-axi'
+  if [ -f "$backend_file" ] && [ ! -L "$backend_file" ]; then
+    backend_name=$(tr -d '[:space:]' < "$backend_file" 2>/dev/null) || backend_name=''
+    [ -n "$backend_name" ] || backend_name='tasks-axi'
+  fi
+  if [ "$backend_name" = manual ]; then
+    printf 'watchdog: backlog backend is manual; held backlog items cannot be read and are supervised as before\n'
+    return 0
+  fi
+  if ! command -v "$BACKLOG_BIN" >/dev/null 2>&1; then
+    printf 'watchdog: %s is unavailable; held backlog items cannot be read and are supervised as before\n' "$BACKLOG_BIN"
+    return 0
+  fi
+  # Named explicitly, like backlog_pass: the pass runs from the code root
+  # while the items it must honour belong to this home.
+  [ ! -f "$DATA_DIR/backlog.md" ] || file_args=(--file "$DATA_DIR/backlog.md")
+  out=$(fm_run_timed "$READ_TIMEOUT_SECS" "$BACKLOG_BIN" list --state held \
+    ${file_args[@]+"${file_args[@]}"} 2>/dev/null) || {
+    printf 'watchdog: could not read held backlog items from %s; they are supervised as before\n' "$BACKLOG_BIN"
+    return 0
+  }
+  HELD_IDS=$(printf '%s\n' "$out" | awk 'NR > 1 && /^  / { print $1 }' | cut -d, -f1 \
+    | grep -E '^[A-Za-z0-9][A-Za-z0-9._-]*$' | sort -u | tr '\n' ' ')
+  HELD_OK=1
+  return 0
+}
+
+# task_paused <id>: the captain parked this lane, so no rung may touch it.
+task_paused() {  # <id>
+  [ -e "$STATE/$1.stopped" ] && return 0
+  [ "$HELD_OK" = 1 ] || return 1
+  case " $HELD_IDS " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
 # --- actions ----------------------------------------------------------------
 
 # wake_firstmate <key> <payload>: one durable check wake, the watchdog's only
@@ -684,6 +750,8 @@ boot_pass() {  # <boot>
     kind=$(fm_meta_get "$meta" kind)
     [ "$kind" = secondmate ] && continue
     [ -n "$(fm_meta_get "$meta" window)" ] || continue
+    # The captain parked this lane; a reboot is no order to restart it.
+    task_paused "$id" && continue
     if [ "$(now_epoch)" -ge "$deadline" ]; then
       printf 'watchdog: boot pass ran out of budget before it reached every task; the task pass continues from here\n'
       break
@@ -829,6 +897,11 @@ task_pass() {
     [ -n "$window" ] || continue
     # The boot pass already acted on this task in this pass.
     [ -e "$WORK/touched.$id" ] && continue
+    # A lane the captain parked is not a lane that died: no rung below applies.
+    if task_paused "$id"; then
+      [ "$DRY_RUN" = 1 ] && printf '%s\tpaused\tn/a\t-\t0\t0\tskipped: the captain parked this lane\n' "$id"
+      continue
+    fi
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
     [ -n "$target" ] || target="$window"
@@ -1151,6 +1224,7 @@ inbox_pass() {
     kind=$(fm_meta_get "$meta" kind)
     [ "$kind" = secondmate ] && continue
     [ -d "$STATE/$id.inbox" ] || continue
+    task_paused "$id" && continue
     oldest=$(inbox_oldest "$id") || continue
     base=${oldest##*/}
     age=$(path_age_now "$oldest")
@@ -1359,6 +1433,8 @@ main() {
 
   record_load
   printf '%s' "$PRIOR_TASKS" > "$WORK/tasks.json" 2>/dev/null || printf '{}' > "$WORK/tasks.json"
+  # One read of the captain-held backlog set per pass, before any lane ladder.
+  hold_set_build
 
   local boot units
   boot=$(boot_identity)
