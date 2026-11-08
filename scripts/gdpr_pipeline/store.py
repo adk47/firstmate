@@ -78,6 +78,10 @@ CREATE TABLE IF NOT EXISTS erasure_sends (
   approved_by TEXT NOT NULL,                   -- the human Slack id in the allowlist
   state       TEXT NOT NULL,                   -- sending | sent | failed | refused | unknown (ambiguous, never retried)
   idem        TEXT DEFAULT '',                 -- the letter's id (request:slot:body sha), for reconciliation
+  consumed_at TEXT DEFAULT '',                 -- when the WRITER consumed this claim (single-use). Set by
+                                               -- intercom-ops-write.sh in the same statement that authorises the
+                                               -- POST, so a replay cannot post the same letter twice; cleared by
+                                               -- claim_send when a failed/refused slot is legitimately retried.
   ref         TEXT DEFAULT '',                 -- the writer's receipt (api-log line / gog output)
   detail      TEXT DEFAULT '',
   at          TEXT NOT NULL,
@@ -112,7 +116,12 @@ SENDS_MIGRATIONS = (("idem", "TEXT DEFAULT ''"),     # the letter's id; the ledg
                     # A monotonic per-slot generation, bumped on EVERY claim. `at` cannot serve: it is a
                     # second-resolution timestamp, so two claims in the same second are indistinguishable and a
                     # stale resolution could still match a later attempt (QA #1848 r5, the ABA cycle).
-                    ("attempt", "INTEGER DEFAULT 0"))
+                    ("attempt", "INTEGER DEFAULT 0"),
+                    # The writer's single-use marker. A read-only "is there a sending row" check is not a claim:
+                    # if the POST lands but the pipeline has not yet recorded `sent`, or two invocations overlap,
+                    # the same check passes twice and the customer gets the letter twice. The writer now CONSUMES
+                    # the claim in one conditional UPDATE and requires exactly one row to change.
+                    ("consumed_at", "TEXT DEFAULT ''"))
 
 
 def migrate(db: sqlite3.Connection) -> None:
@@ -149,9 +158,15 @@ MAIL_CHANNELS = ("notices", "legal", "support")
 # pre-send: nothing was posted and a retry is safe. `send.py` keys the retryable/ambiguous split on this string.
 REFUSED_PREFIX = "REFUSED:"
 
+# The writer has TWO pre-send failures, and both are provable: `refuse()` prints `REFUSED: <why>` and exits 1, `die()`
+# prints `ERROR: <why>` and exits 2. Both are the usage/environment class and neither survives the POST — measured, not
+# assumed: no `refuse()` or `die()` call exists after the curl POST (`scripts/intercom-ops-write.sh:467`). This tuple is
+# the single answer to "was anything posted?", and `send.WRITER_PREFLIGHT_RC` must agree with it; a test pins the pair.
+PRE_SEND_PREFIXES = (REFUSED_PREFIX, "ERROR:")
+
 
 def is_writer_refusal(detail: str) -> bool:
-    """True when a ledger `detail` records a writer that REFUSED before it posted anything.
+    """True when a ledger `detail` records a writer that refused or errored BEFORE it posted anything.
 
     `send.deliver` wraps the writer's stderr as `<writer> exited rc N after being invoked: <stderr>`, so the refusal
     is the segment after the LAST `after being invoked: ` -- the writer's own first word, not a `REFUSED:` that
@@ -159,7 +174,7 @@ def is_writer_refusal(detail: str) -> bool:
     `REFUSED: ...` from a future writer would look like.
     """
     said = (detail or "").rsplit("after being invoked: ", 1)[-1].strip()
-    return said.startswith(REFUSED_PREFIX)
+    return said.startswith(PRE_SEND_PREFIXES)
 
 
 def now_iso() -> str:
@@ -437,8 +452,11 @@ class Store:
             return
         if prior["state"] not in ("failed", "refused"):
             raise sqlite3.IntegrityError(f"a {kind} for row {rid} is already {prior['state']} ({prior['at']})")
+        # `consumed_at` is cleared with the rest of the slot: a `failed`/`refused` attempt never reached the
+        # customer, so the writer's single-use marker must not survive into the retry and refuse it.
         self.db.execute("UPDATE erasure_sends SET channel=?, target=?, body_sha=?, approved_by=?, state=?, ref='', "
-                        "detail=?, idem=?, at=?, attempt=COALESCE(attempt,0)+1 WHERE request_id=? AND kind=?",
+                        "detail=?, idem=?, consumed_at='', at=?, attempt=COALESCE(attempt,0)+1 "
+                        "WHERE request_id=? AND kind=?",
                         (channel, target, body_sha, approved_by, state, detail[:500], idem, now_iso(), rid, kind))
         self.db.commit()
 
@@ -595,6 +613,25 @@ class Store:
         if refused_only:
             rows = [r for r in rows if is_writer_refusal(r.get("detail"))]
         return rows
+    def unknown_sends(self) -> list[dict]:
+        """Every ledger row in the AMBIGUOUS state, oldest first, with the request it belongs to.
+
+        `unknown` is the state that says "a letter may be out there, a human resolves this, the pipeline will never
+        retry". It is the right answer for a timeout or a dropped connection and the wrong one for a pre-flight
+        refusal, so the rows have to be readable in bulk to tell the two apart."""
+        return [self._row(r) for r in self.db.execute(
+            "SELECT * FROM erasure_sends WHERE state='unknown' ORDER BY at, id")]
+
+    def reclassify_send(self, rid: int, kind: str, state: str, detail: str) -> None:
+        """Move a ledger row out of `unknown` when its recorded detail PROVES nothing was posted.
+
+        The `state='unknown'` predicate is part of the UPDATE, not a read-then-write: a row that changed under us
+        (a human resolved it, a retry claimed it) is left alone rather than overwritten. The original detail is
+        carried into the new one, so the ledger still says what the writer actually answered."""
+        self.db.execute("UPDATE erasure_sends SET state=?, detail=? "
+                        "WHERE request_id=? AND kind=? AND state='unknown'",
+                        (state, detail[:500], rid, kind))
+        self.db.commit()
 
     def unsent_letters(self, kind: str = "confirm") -> list[int]:
         """Row ids whose letter has NOT gone out (no ledger row, or a failed/refused one -- a `sending` or `unknown`

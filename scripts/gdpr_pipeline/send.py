@@ -38,6 +38,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 
@@ -46,13 +47,44 @@ from .store import now_iso
 
 INTERCOM_WRITER = "intercom-ops-write.sh"      # resolved next to the CLI (scripts/), never hand-typed
 MAIL_ACCOUNT = "support@muso.ai"        # the fallback mailbox for a row whose channel is not in the table below
-# The mailbox that OWNS a thread, per channel. A reply has to leave from the same mailbox as the thread: gog will not
-# find a notices@ thread in support@'s account, and answering from the wrong address would be a different letter to a
-# different relationship. Whether gog is authed for that account is a HOST fact and is checked by gog, at send time -
-# this table only says which mailbox a channel's threads belong to.
-MAILBOX_BY_CHANNEL = {"support": "support@muso.ai", "notices": "notices@muso.ai", "legal": "legal@muso.ai"}
+# THE ACCOUNT EVERY LETTER IS SENT FROM, per channel. Captain, 2026-11-06: "can you use support as your outbound
+# channel please". legal@muso.ai is an alias for Aaron and notices@muso.ai is an alias for Kyran - neither is a mailbox
+# this host can sign into and neither is a separate account, so there is nothing to send AS. The table stays (the
+# channel concept is real, and `route` still needs to know which channels' threads live somewhere we cannot write)
+# but every entry is support@. See THREAD_MAILBOX_BY_CHANNEL below for the ownership question, which is a different
+# fact and must not be collapsed with this one.
+MAILBOX_BY_CHANNEL = {"support": "support@muso.ai", "notices": "support@muso.ai", "legal": "support@muso.ai"}
+# The mailbox that OWNS a thread, per channel - a fact about where the thread LIVES, not about who we send as. Because
+# notices@/legal@ are aliases rather than accounts, a thread in one is never writable, which is exactly what `route`
+# needs to know to open a new thread from support@ instead of refusing.
+THREAD_MAILBOX_BY_CHANNEL = {"support": "support@muso.ai", "notices": "notices@muso.ai", "legal": "legal@muso.ai"}
 GOG_ENV = ("GOG_KEYRING_PASSWORD",)     # gog cannot read its keyring without it
 SEND_LOCK_ENV = "MUSOAI_INTERCOM_TOKEN"
+
+# The Intercom writer's exit-code contract, from its own header: 0 ok · 1 refusal · 2 usage/environment error ·
+# 4 post failed or wrong part_type. `refuse()` and `die()` are the ONLY producers of 1 and 2, and every call to them
+# sits in the validation block ABOVE the POST (scripts/intercom-ops-write.sh: the POST is the only thing after them),
+# so a 1 carrying "REFUSED:" or a 2 carrying "ERROR:" is PROOF that nothing was posted. Anything else stays
+# ambiguous: a bare 1 is also how `set -e` reports an unexpected failure, and that one may have posted.
+WRITER_PREFLIGHT_RC = {1: "REFUSED:", 2: "ERROR:"}
+# The writer's machine-authorization class (scripts/intercom-ops-write.sh PURPOSE_TABLE). A purpose write carries no
+# human id and is bounded by the register that must own the conversation.
+INTERCOM_PURPOSE = "gdpr-erasure"
+# The two shapes a pre-flight refusal is recorded in `erasure_sends.detail`: the one this module writes now, and the
+# one it wrote before the distinction existed (rows already in the live ledger). `reconcile` reads BOTH, so the 40
+# letters the 2026-11-06 tick stranded are recoverable without hand-editing the store.
+_PREFLIGHT_DETAIL = re.compile(
+    re.escape(INTERCOM_WRITER) + r" (?:refused BEFORE posting \(rc [12]\)|exited rc [12] after being invoked): "
+    r"(?:REFUSED|ERROR):")
+
+
+def preflight_refusal(detail: str) -> bool:
+    """True when a recorded `unknown` detail PROVES the writer refused before it posted anything.
+
+    This is the discriminator `reconcile` uses to move a stranded row from `unknown` (never retried, a human's to
+    resolve) back to `failed` (retryable). It is deliberately narrow: only the writer's own pre-POST refusal text
+    matches, so a timeout, a dropped connection or a bare non-zero exit stays ambiguous and stays a human's."""
+    return bool(_PREFLIGHT_DETAIL.search(detail or ""))
 
 
 class Unknown(Exception):
@@ -71,6 +103,19 @@ def body_sha(text: str) -> str:
 
 
 NEW_THREAD_CHANNELS = ("notices", "legal")   # the two mailboxes firstmate inbox 073 names, and only those
+# Mailboxes that are ALIASES for a person, not accounts (captain, 2026-11-06: legal@ is Aaron, notices@ is Kyran).
+# Nothing can ever be authed for one, so "auth it and the route opens" is false advice for them and must not be said:
+# an operator who reads it goes looking for a mailbox that does not exist instead of recovering the address.
+ALIAS_MAILBOXES = ("notices@muso.ai", "legal@muso.ai")
+
+
+def _why_not_the_old_thread(channel: str, thread: str, why: str) -> str:
+    """The reason a thread cannot be replied in, phrased for the fix that actually exists."""
+    mailbox = THREAD_MAILBOX_BY_CHANNEL.get(channel, "")
+    if mailbox in ALIAS_MAILBOXES:
+        return (f"its thread {thread} is in {mailbox}, which is an alias for a person rather than an account "
+                f"(captain, 2026-11-06), so this host can never reply in it")
+    return f"its thread {thread} is in a mailbox this host cannot write ({why})"
 
 
 def _new_thread(row: dict, why_not_the_old_thread: str) -> tuple[str, str]:
@@ -127,18 +172,28 @@ def route(row: dict) -> tuple[str, str]:
     channel = row.get("channel")
     requester_email = str(row.get("requester_email") or "").strip()
     if thread:
-        if channel not in MAILBOX_BY_CHANNEL:
+        if channel not in THREAD_MAILBOX_BY_CHANNEL:
             raise Unknown(f"{channel} thread {thread} has no known mailbox, so a reply would have to guess "
-                          f"which account owns it; add the channel to MAILBOX_BY_CHANNEL")
-        ok, why = mailbox_writable(MAILBOX_BY_CHANNEL[channel])
-        if ok:
+                          f"which account owns it; add the channel to THREAD_MAILBOX_BY_CHANNEL")
+        owner = THREAD_MAILBOX_BY_CHANNEL[channel]
+        ok, why = mailbox_writable(owner)
+        if ok is True:
+            return "mail", thread
+        # UNMEASURABLE IS NOT WRITABLE. `gog auth list -j` failing (no gog, a 30 s timeout, unreadable JSON) used to
+        # read as "writable", so a notices@/legal@ thread took the in-thread route and `_mail_send` then tried to
+        # reply in it FROM support@ - a thread support@ does not own. That is a doomed attempt on a statutory letter,
+        # selected by a transient read, when the approved new thread from support@ was available the whole time. The
+        # only mailbox we may assume we can write when we cannot ask is the one we SEND from: there the writer is the
+        # backstop and there is no other route to take. For any other owner the route that is safe under BOTH
+        # readings is the new thread, so an unreadable discovery can never pick the customer-facing route.
+        if ok is None and owner == mailbox_of(row):
             return "mail", thread
         # The thread EXISTS and is perfectly replying-to, but it lives in a mailbox this host cannot write.
         # That is not "no thread" - it is the mailbox gap itself, and option 2 exists for exactly this shape: the
         # register's notices@/legal@ rows ALL carry a thread (48 notices / 24 legal on 2026-11-04, 0 without), so a
         # rule keyed on "no thread" would have unblocked nobody. Do not fall through to a different refusal.
         if channel in NEW_THREAD_CHANNELS:
-            return _new_thread(row, f"its thread {thread} is in a mailbox this host cannot write ({why})")
+            return _new_thread(row, _why_not_the_old_thread(channel, thread, why))
         raise Unknown(f"{channel} thread {thread}: {why}")
 
     # OPTION 2 (firstmate inbox 073): a notices@/legal@ request opens a NEW thread from support@. The copy carries a
@@ -176,7 +231,16 @@ def idem_key(rid: int, kind: str, text: str) -> str:
 
 
 def _intercom_send(conv: str, text: str, approved_by: str, dry_run: bool, key: str = "") -> str:
-    """Post the approved copy as a customer-facing Intercom reply through the wrapper that gates it."""
+    """Post the approved copy as a customer-facing Intercom reply through the wrapper that gates it.
+
+    The writer is called in its PURPOSE mode, not with a human's Slack id. A statutory erasure letter is not a human
+    request: it is an obligation with its own clock, and the writer's human allowlist exists to stop a bot writing to
+    the inbox as if somebody asked. Passing a human id here (the shape this used until 2026-11-06) made the writer's
+    audit log assert that a named human approved a customer-facing reply - false for an unattended standing-ruling
+    send - and the writer refused it anyway, because the sender seat is a bot. `--purpose gdpr-erasure` records
+    `approved_by: system:gdpr-pipeline` and lets the writer check, below us, that the erasure register owns the
+    conversation. `approved_by` stays in the signature because the LEDGER still records the standing ruling's
+    approver: that is the authorization chain, and it is a different fact from who posted."""
     writer = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), INTERCOM_WRITER)
     if not os.path.exists(writer):
         raise Unknown(f"{INTERCOM_WRITER} is not installed next to the pipeline: refusing to hand-compose a reply")
@@ -188,8 +252,8 @@ def _intercom_send(conv: str, text: str, approved_by: str, dry_run: bool, key: s
     if missing:
         raise Unknown(f"{missing} is not set: the Intercom writer cannot authenticate (the gateway exports it "
                       f"from /etc/openclaw/main.env)")
-    cmd = ["bash", writer, "reply", "--conversation", conv, "--requested-by", approved_by,
-           "--approved-by", approved_by, "--customer-facing", "--body", text]
+    cmd = ["bash", writer, "reply", "--conversation", conv, "--purpose", INTERCOM_PURPOSE,
+           "--customer-facing", "--body", text]
 
     try:
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=_with_key(key))
@@ -200,23 +264,27 @@ def _intercom_send(conv: str, text: str, approved_by: str, dry_run: bool, key: s
         raise Ambiguous(f"{INTERCOM_WRITER} timed out after {exc.timeout}s with the reply built: it may be posted, "
                         f"so this is never a retry") from exc
     if out.returncode != 0:
-        said = (out.stderr or out.stdout).strip()
-        # A `REFUSED:` line is the writer's OWN pre-flight refusal, and it is provably pre-send: every
-        # `refuse()` call in intercom-ops-write.sh is an argument/allowlist/leak check that runs BEFORE the
-        # POST (all 15 call sites are at lines 155-207; the curl POST is at line 267), and `refuse()` prints
-        # `REFUSED: <why>` to stderr and exits 1. Nothing was posted, so this is `Unknown` (retryable once a
-        # human fixes the cause), NOT `Ambiguous`.
+        msg = (out.stderr or out.stdout).strip()
+        # A pre-flight refusal is NOT ambiguous: the writer refused in its validation block, above the POST, so
+        # nothing reached the customer and the row must stay retryable. Recording it as `unknown` (which the pipeline
+        # never retries) is how 40 statutory letters were stranded on 2026-11-06 - every one of them refused for a
+        # reason a human could fix, and none of them posted.
+        # The prefix is looked for at the START OF ANY LINE, not at the start of the blob, because bash prints its
+        # own diagnostic for a failed redirection BEFORE the script's `die` runs:
         #
-        # Classifying it as ambiguous wedged 114 rows in `unknown` between 2026-11-06T14:16Z and
-        # 2026-11-07T20:19Z: every one of them was `REFUSED: U0AN41ZBTRU is not on the Intercom write
-        # allowlist`, i.e. nothing was ever sent, but `unknown` is never retried, so the confirm batch
-        # approved 20 letters and delivered zero, and adding the seat to the allowlist could not unstick a
-        # single row. The double-send guard is not weakened: a writer that actually ran and failed still
-        # reports `POST FAILED (curl rc=...)` / `POST NOT VERIFIED` and stays ambiguous.
-        if said.startswith("REFUSED:"):
-            raise Unknown(f"{INTERCOM_WRITER} refused before posting (rc {out.returncode}): {said[:300]}")
+        #     under-test.sh: line 463: /opt/.../intercom-reply-….json: Permission denied
+        #     ERROR: cannot write the audit record …; refusing to write unlogged. Nothing was posted.
+        #
+        # `msg.startswith("ERROR:")` was False on that stderr, so a failed AUDIT WRITE - provably before the POST,
+        # the writer says so itself - was classified Ambiguous, recorded `unknown`, and never retried. The exit CODE
+        # already narrows this to 1 or 2, which only `refuse()` and `die()` produce, so finding the prefix on any
+        # line is still proof and not a loosening (QA #1820 finding 1).
+        prefix = WRITER_PREFLIGHT_RC.get(out.returncode)
+        said = next((ln.strip() for ln in msg.splitlines() if ln.strip().startswith(prefix or "\0")), "")
+        if prefix and said:
+            raise Unknown(f"{INTERCOM_WRITER} refused BEFORE posting (rc {out.returncode}): {said[:300]}")
         # The writer already ran: Intercom may hold the reply. Ambiguous, never a retry.
-        raise Ambiguous(f"{INTERCOM_WRITER} exited rc {out.returncode} after being invoked: {said[:300]}")
+        raise Ambiguous(f"{INTERCOM_WRITER} exited rc {out.returncode} after being invoked: {msg[:300]}")
     return (out.stdout.strip().splitlines() or ["posted"])[-1][:300]
 
 
@@ -264,12 +332,19 @@ def gog_accounts() -> dict[str, set[str]] | None:
     return _ACCOUNTS
 
 
-def mailbox_writable(mailbox: str) -> tuple[bool, str]:
-    """(can this host write that mailbox, why not). Gmail service present means the account can act on mail at all;
-    `_mail_send` fails closed later if the stored grant turns out to be read-only."""
+def mailbox_writable(mailbox: str) -> tuple[bool | None, str]:
+    """(True writable / False not writable / None cannot be determined here, why). Gmail service present means the
+    account can act on mail at all; `_mail_send` fails closed later if the stored grant turns out to be read-only.
+
+    None is a THIRD state, not a synonym for True. It used to return True so "the writer will be the one to refuse",
+    which is only sound for the mailbox we send from: for any other mailbox it silently selected the in-thread route
+    on a transient read failure, and the writer then refused a letter that had an approved route. Callers must decide
+    what an unmeasurable host fact means for THEIR route; `route()` treats it as not-writable unless the thread's
+    owner is the account we send from."""
     acct = gog_accounts()
     if acct is None:
-        return True, ""          # cannot be determined (no gog here): the writer will be the one to refuse
+        return None, (f"whether {mailbox} is writable cannot be determined on this host: `gog auth list -j` was "
+                      f"missing, timed out or returned unreadable JSON")
     if mailbox not in acct:
         return False, (f"{mailbox} is not an account gog holds on this host "
                        f"({', '.join(sorted(acct)) or 'none'}); auth it and the route opens with no code change")
@@ -280,7 +355,10 @@ def mailbox_writable(mailbox: str) -> tuple[bool, str]:
 
 
 def mailbox_of(row: dict) -> str:
-    """The account that owns this row's thread. `route` has already refused an unknown channel."""
+    """The account this row's letter is SENT FROM. `route` has already refused an unknown channel.
+
+    Not the account that owns the thread: since the 2026-11-06 ruling every channel sends from support@, and a thread
+    in a mailbox we cannot write never reaches `_mail_send` at all - `route` sends it to a new thread instead."""
     return MAILBOX_BY_CHANNEL.get(row.get("channel") or "", MAIL_ACCOUNT)
 
 
@@ -398,7 +476,9 @@ def final_letter(row: dict, text: str) -> tuple[str, str, str]:
         return text, "", ""
     if channel != "mail_new_thread":
         return text, "", ""
-    written_to = MAILBOX_BY_CHANNEL.get(row.get("channel"), row.get("channel") or "")
+    # The mailbox the PERSON wrote to, never the one we send from: the lead line exists to name the address they
+    # chose, and under the 2026-11-06 ruling that is no longer the same address the letter leaves from.
+    written_to = THREAD_MAILBOX_BY_CHANNEL.get(row.get("channel"), row.get("channel") or "")
     body, subject = copy.new_thread_letter(written_to, row.get("received_at", ""), row.get("class") or "", text)
     return body, subject, target
 
@@ -529,3 +609,173 @@ def deliver(run, item: dict, kind: str, approved_by: str, dry_run: bool = False,
     # only the FINAL letter may do that.
     run.store.stamp_sent(rid, kind, slot, ref)
     return {"state": "sent", "channel": channel, "target": target, "ref": ref, "idem": key, "slot": slot}
+
+
+def reconcile_stranded(run, apply: bool = False) -> list[dict]:
+    """Reclassify `unknown` ledger rows whose recorded detail PROVES the writer refused before posting.
+
+    `unknown` means "a letter may be out there, a human resolves it, the pipeline will never retry". That is the
+    right answer for a timeout or a dropped connection. It is the WRONG answer for a pre-flight refusal, which the
+    writer raises in its validation block ABOVE the POST: nothing was posted, so the row is retryable, and leaving it
+    `unknown` strands a statutory letter forever. On 2026-11-06 the first live send tick refused 40 letters this way
+    (the sender seat is not on the writer's human allowlist) and every one of them was recorded `unknown`.
+
+    The register is re-read for every row: a letter is only re-queued while its request is still OPEN. A row that was
+    closed (hidden and confirmed by another path, or withdrawn) needs no letter, and re-queueing it would send a
+    statutory notice about a request that is already finished.
+
+    Returns one dict per row examined, so a dry run prints exactly what `--apply` would move. Nothing is written
+    unless `apply` is true, and a row whose detail does not match the pre-POST signature is reported and left alone.
+    """
+    out = []
+    for rec in run.store.unknown_sends():
+        detail = rec.get("detail") or ""
+        provable = preflight_refusal(detail)
+        req = run.store.get(rec["request_id"])
+        open_row = bool(req) and (req.get("status") or "open") == "open"
+        out.append({"request_id": rec["request_id"], "kind": rec["kind"], "channel": rec["channel"],
+                    "target": rec["target"], "at": rec["at"], "provable": provable,
+                    "open": open_row, "detail": detail})
+        if provable and open_row and apply:
+            run.store.reclassify_send(
+                rec["request_id"], rec["kind"], "failed",
+                f"reconciled {now_iso()}: the writer refused BEFORE posting, so nothing reached the customer and "
+                f"this letter is retryable. Original detail: {detail}")
+    return out
+
+
+_ADDRESS = re.compile(r"[A-Za-z0-9._%+'-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def _address_in(value: str) -> str:
+    """The bare address out of a From header (`Kyran <kyran@muso.ai>` -> `kyran@muso.ai`)."""
+    m = _ADDRESS.search(value or "")
+    return m.group(0) if m else ""
+
+
+def _sender_of(thread: dict) -> str:
+    """The address the person wrote FROM: the first From in the thread that is not one of OURS.
+
+    Not simply the first message. Measured on the live register: 11 support@ rows are threads WE opened, so their
+    first message is ours and the customer's address is further down. Not the last message either - a thread we
+    replied to ends with our own address. The only correct answer is the first message that came from somebody else,
+    and a thread with no such message has no requester address in it at all.
+    """
+    msgs = thread.get("messages") or []
+    if not msgs:
+        raise Unknown("the mail thread has no messages, so there is no sender to read")
+    seen = []
+    for m in msgs:
+        for h in (m.get("payload") or {}).get("headers") or []:
+            if str(h.get("name", "")).lower() != "from":
+                continue
+            addr = _address_in(str(h.get("value", "")))
+            if not addr:
+                raise Unknown(f"a From header in the thread carries no address "
+                              f"({str(h.get('value', ''))[:80]})")
+            if not _is_ours(addr):
+                return addr
+            seen.append(addr)
+    raise Unknown(f"every message in the thread is from one of OUR mailboxes "
+                  f"({', '.join(sorted(set(seen))) or 'none'}), so the requester's own address is not in it")
+
+
+def _is_ours(addr: str) -> bool:
+    """Is this address one of OUR mailboxes rather than the requester's?
+
+    Measured on the live register: 10 of the 19 addresses the first recovery pass found were `support@muso.ai` - the
+    thread's first message was OURS (an outbound thread, or a thread whose customer message is not first). Recording
+    that as the requester would open the next statutory letter to ourselves, which is worse than having no address:
+    it looks like progress and it is a letter to nobody.
+    """
+    a = (addr or "").strip().lower()
+    if not a:
+        return True
+    ours = {MAIL_ACCOUNT.lower()} | {m.lower() for m in MAILBOX_BY_CHANNEL.values()} \
+        | {m.lower() for m in THREAD_MAILBOX_BY_CHANNEL.values()}
+    ours |= {m.lower() for m in (gog_accounts() or {})}
+    return a in ours
+
+
+def thread_sender(thread_id: str, mailbox: str) -> str:
+    """Read one thread and return the requester's address. A READ: nothing is written, so a failure is retryable."""
+    missing = _env_missing(GOG_ENV)
+    if missing:
+        raise Unknown(f"{missing} is not set: gog cannot unlock its keyring")
+    gog = shutil.which("gog")
+    if not gog:
+        raise Unknown("gog is not on PATH: no thread can be read on this host")
+    try:
+        got = subprocess.run([gog, "gmail", "thread", "get", thread_id, "--account", mailbox, "-j"],
+                             capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired as exc:
+        raise Unknown(f"thread {thread_id}: the gog read timed out after {exc.timeout}s") from exc
+    if got.returncode != 0:
+        raise Unknown(f"thread {thread_id} is not readable in {mailbox} "
+                      f"({(got.stderr or got.stdout).strip()[:200]})")
+    try:
+        thread = json.loads(got.stdout or "{}").get("thread") or {}
+    except json.JSONDecodeError:
+        raise Unknown(f"thread {thread_id}: gog returned unparseable JSON")
+    return _sender_of(thread)
+
+
+def recover_addresses(run, apply: bool = False) -> list[dict]:
+    """Find the requester address for OPEN rows that have none (captain, 2026-11-06, item 3).
+
+    Two problems were tangled in the 69 rows that could not be answered: the code half (a thread in a mailbox we
+    cannot write needs a new thread from support@) and the data half (the row has no address to open one to). This is
+    the data half. Sources, in order, and each one is a fact the person themselves supplied:
+
+      1. the Intercom conversation - the contact's email, or the email on a CUSTOMER-authored source message;
+      2. the Gmail thread, read from the mailbox that owns it - but only when this host can actually read that
+         mailbox, which today means support@. notices@ and legal@ are aliases for people, not accounts, so their
+         threads are not readable here and are reported as such rather than guessed at.
+
+    NEVER touches `erasure_sends`. A row already claimed and `unknown` stays claimed and unknown: changing the
+    outbound mailbox must not become a way to send a second statutory letter to someone who may already have one
+    (captain, item 4). This writes `requester_email`, which is a register fact, and nothing else.
+
+    Returns one dict per row examined so a dry run prints exactly what `--apply` would fill.
+    """
+    from . import sources
+
+    out = []
+    for row in run.store.all(status="open"):
+        if (row.get("requester_email") or "").strip():
+            continue
+        rid, channel = row["id"], row.get("channel") or ""
+        email, source, why = "", "", ""
+        conv = (row.get("conversation_id") or "").strip()
+        thread = (row.get("gmail_thread") or "").strip()
+        if conv:
+            try:
+                cv = sources.conversation(conv)
+                email = (cv.get("author_email") or cv.get("contact_email") or "").strip()
+                source = "intercom"
+                if email and _is_ours(email):
+                    why = (f"conversation {conv} resolves to {email}, which is one of OUR mailboxes, so the "
+                           f"requester's own address is not in it")
+                    email = ""
+                elif not email:
+                    why = f"conversation {conv} carries no email on the contact or the customer's own message"
+            except Exception as exc:                      # noqa: BLE001 - any read failure is "not recovered"
+                why = f"conversation {conv} could not be read: {str(exc)[:160]}"
+        if not email and thread:
+            owner = THREAD_MAILBOX_BY_CHANNEL.get(channel, "")
+            ok, not_ok = mailbox_writable(owner) if owner else (False, f"{channel} has no known thread mailbox")
+            if ok:
+                try:
+                    email = thread_sender(thread, owner)
+                    source = f"gmail:{owner}"
+                except Exception as exc:                  # noqa: BLE001
+                    why = str(exc)[:200]
+            else:
+                why = (f"its thread {thread} is in {owner}, which this host cannot read "
+                       f"({not_ok}); the address is not recoverable from here")
+        if not email and not why:
+            why = "the row has neither a conversation nor a thread to read an address out of"
+        out.append({"id": rid, "channel": channel, "email": email, "source": source, "why": why})
+        if email and apply:
+            run.store.update(rid, "address_recovered", requester_email=email)
+    return out

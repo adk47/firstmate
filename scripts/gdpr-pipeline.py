@@ -765,6 +765,11 @@ def main() -> int:
     p.add_argument("--page", action="store_true")
     p = sub.add_parser("dedupe", help="report (or --apply) the same customer event opened under two row keys")
     p.add_argument("--apply", action="store_true")
+    p = sub.add_parser("reconcile", help="report (or --apply) the `unknown` letters the writer refused BEFORE posting")
+    p.add_argument("--apply", action="store_true")
+    p = sub.add_parser("recover-addresses",
+                       help="report (or --apply) the requester address for open rows that have none")
+    p.add_argument("--apply", action="store_true")
     a = ap.parse_args()
 
     writes = a.cmd in ("backfill", "tick", "decide", "mark-hidden", "intake") or getattr(a, "open_prs", False) or \
@@ -795,6 +800,15 @@ def main() -> int:
             # AFTER the read-back: `mark_hidden` is what turns a landed hide into hidden_at, so a confirmation
             # materialised before it would miss the rows this tick just landed. A send never changes that ordering.
             if getattr(a, "send", False):
+                # A provable pre-flight refusal is retryable, and the tick is where it gets retried. Doing this here
+                # rather than leaving it to a separate timer is the difference between a stranded letter healing on
+                # the next tick and a stranded letter sitting in `unknown` until somebody remembers: the failure this
+                # repairs (40 letters stuck for a day) WAS "nobody ran the repair". Only rows whose detail proves
+                # nothing was posted move, and only while the request is still open.
+                healed = [r for r in send.reconcile_stranded(run, apply=True) if r["provable"] and r["open"]]
+                if healed:
+                    print(f"tick reconcile: {len(healed)} stranded letter(s) re-queued (the writer refused before "
+                          f"posting, so nothing reached the customer)")
                 scheduled_send(run, a, now)
         if a.out:
             Path(a.out).write_text(backfill_table(run.store.all("open"), now) + "\n")
@@ -815,6 +829,42 @@ def main() -> int:
             print("dry run: nothing written (pass --apply to close the duplicates)")
         elif not pairs:
             print("no duplicate post-confirmation rows")
+    elif a.cmd == "reconcile":
+        # `unknown` is the never-retried state, and it is the right answer for a timeout. It is the wrong answer for a
+        # pre-flight refusal, which happens above the POST: nothing was posted, so the letter is retryable and
+        # leaving it `unknown` strands it forever. Only the writer's own pre-POST refusal text is provable.
+        before = len(run.store.unknown_sends())
+        rows = send.reconcile_stranded(run, apply=a.apply)
+        moved = sum(1 for r in rows if r["provable"] and r["open"])
+        for r in rows:
+            if not r["provable"]:
+                verdict = "stays unknown (may have posted)"
+            elif not r["open"]:
+                verdict = "stays unknown (register row is closed; no letter owed)"
+            else:
+                verdict = "RE-QUEUED (refused before posting; the next tick sends it)"
+            print(f"row {r['request_id']} {r['kind']} via {r['channel']} {r['target']} at {r['at']}: {verdict}")
+        after = len(run.store.unknown_sends())
+        print(f"unknown letters: {before} before, {after} after; {moved} re-queued")
+        if not a.apply:
+            print("dry run: nothing written (pass --apply to re-queue the provable ones)")
+        elif not moved:
+            print("nothing to reconcile")
+    elif a.cmd == "recover-addresses":
+        # The data half of the 69 rows that could not be answered: the code half (a new thread from support@) is in
+        # `route`. This only fills `requester_email` and NEVER touches erasure_sends - a claimed-unknown row stays
+        # claimed and unknown, so a mailbox change can never become a second statutory letter (captain, item 4).
+        rows = send.recover_addresses(run, apply=a.apply)
+        got = [r for r in rows if r["email"]]
+        for r in rows:
+            if r["email"]:
+                print(f"row {r['id']} {r['channel']}: {r['email']} (from {r['source']})")
+            else:
+                print(f"row {r['id']} {r['channel']}: NO ADDRESS - {r['why']}")
+        print(f"open rows with no address: {len(rows)}; recovered {len(got)}; "
+              f"genuinely unrecoverable {len(rows) - len(got)}")
+        if not a.apply:
+            print("dry run: nothing written (pass --apply to record the recovered addresses)")
     elif a.cmd == "decide":
         both, half = hidden_now(run)
         run.decide_all(both, half=half)

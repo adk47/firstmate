@@ -37,6 +37,8 @@ set -euo pipefail
 #       --audience <team|self|Name> (--body TEXT | --body-file FILE) [--dry-run|--validate]
 #   intercom-ops-write.sh reply --conversation <id> --requested-by <SlackUID> \
 #       --customer-facing --approved-by <SlackUID> (--body TEXT | --body-file FILE) [--dry-run|--validate]
+#   intercom-ops-write.sh reply --conversation <id> --purpose gdpr-erasure \
+#       --customer-facing (--body TEXT | --body-file FILE) [--dry-run|--validate]
 #
 # Exit codes: 0 ok · 1 refusal · 2 usage/environment error · 4 post failed or wrong part_type
 
@@ -66,6 +68,31 @@ readonly PROD_LOG_DIR="/opt/hydra/workspaces/operations/api-logs"
 readonly SANITIZER_WORDS="profile_status|profile_lookup|credits_search|create_ticket|subscription_status|remove_credits|dedupe_check|credit_verification_check|profiles_claim_self|credits_verify|profiles_consolidate|order_lookup|order_address_update|founding_status|founding_buyback_link|support_action_router|memory_search|memory_get|profile_analytics_status|profile_credits_status|profile_claim_status|retention_offer_check|retention_offer_apply|cancel_subscription|billing_status|track_analytics_status|analytics_refresh_request|analytics_recheck|subscription_cancel|refund_policy_check|refund_create|catalog_status|track_lookup|metadata_capture_request|artwork_refresh_request|catalog_recheck|user_status|resend_verification|email_delivery_status|login_recovery_packet|profile_change_packet|profile_merge_check|account_merge_preflight|email_change_preflight|profile_removal_preflight|ticket|tool failed|error fetching|unable to look up|the system says|my system|there was an issue with|ClickUp|openclaw|HYDRA|platform-data-processing"
 readonly ALLOWLIST_TEXT="Aaron U7RP6HKUZ, Jan U038BM16T7W, Nick U0AL36NADEY"
 
+# ---------------------------------------------------------------------------------------
+# PURPOSES: the machine-authorization class, and the ONLY one.
+#
+# A purpose is not a fourth human and it is not a way around the allowlist. It is the third
+# identity class for a write that no human asked for and that the repo has already ruled on:
+# a statutory erasure letter is a legal obligation with its own clock, not a Slack request.
+# Each purpose names the ONE identity it posts as, the ONE message shape it may use, and the
+# register that must OWN the conversation. A purpose not in this table does not exist, and a
+# purpose may never be combined with --requested-by/--approved-by: the audit record must say
+# what actually happened, and "a human approved this" would be a lie in the trail.
+#
+# Why not just add the devops seat to the human allowlist (the 2026-11-06 temptation): that
+# would let the bot write to ANY conversation - every customer thread, not just the ones the
+# erasure register owns - and the log would still claim a human asked. The blast radius is
+# the whole inbox, and it would be invisible.
+readonly PURPOSE_TABLE="gdpr-erasure"
+# The register that owns a gdpr-erasure conversation. The writer reads it READ-ONLY and
+# refuses any conversation it does not find: ownership is checked here, below the caller, so
+# a bug in the pipeline cannot widen it. Overridable only on a TESTABLE copy.
+readonly GDPR_REGISTER_PROD="/var/lib/hydra-gdpr/erasure.sqlite"
+
+# The identity a purpose posts as. Deliberately not a Slack id shape: nothing that looks like
+# a human can be mistaken for one in the log, and allowlisted_name() can never resolve it.
+readonly PURPOSE_IDENTITY="system:gdpr-pipeline"
+
 die()    { printf 'ERROR: %s\n' "$*" >&2; exit 2; }
 refuse() { printf 'REFUSED: %s\n' "$*" >&2; exit 1; }
 
@@ -82,6 +109,118 @@ allowlisted_name() {
   esac
 }
 
+# The ownership half of a purpose, and the ONLY thing that can say "this purpose owns this
+# conversation". Every entry in PURPOSE_TABLE needs an arm here; a purpose added to the table
+# without one falls to `*)` and is refused, so the table alone can never widen the blast
+# radius.
+#
+# $1 purpose, $2 conversation, $3 the exact body about to be posted.
+# Returns 0 owned, 1 not an open request, 2 register unreadable, 3 sqlite3 missing,
+# 4 sha256sum missing, 5 no claimed letter matches these bytes.
+purpose_owns_conversation() {
+  case "$1" in
+    gdpr-erasure)
+      [ -r "$GDPR_REGISTER" ] || return 2
+      [ -x "$SQLITE_BIN" ] || return 3
+      [ -x "$SHA256_BIN" ] || return 4
+      # $2 is already validated as ^[0-9]+$ above, so it cannot break out of the literal.
+      #
+      # OPEN ONLY. A closed (or duplicate) request is finished: its conversation is no longer a
+      # thread this purpose has anything to say on, and counting it would let a caller with the
+      # writer token post arbitrary customer-facing text to a finished request with no human
+      # approval and no live statutory send. The pipeline's own letters all go out while the row
+      # is open - `confirmed_at` is what closes it, and that is written AFTER the letter lands.
+      owned="$("$SQLITE_BIN" -readonly "$GDPR_REGISTER" \
+        "SELECT count(*) FROM erasure_requests WHERE conversation_id = '$2' AND status = 'open';" 2>/dev/null)" || return 2
+      case "$owned" in
+        ''|*[!0-9]*) return 2 ;;
+        0) return 1 ;;
+      esac
+      # THE LETTER, not just the thread. Ownership alone would make this writer a general-purpose
+      # customer-facing poster for anyone who can run it: the human allowlist would be bypassed by
+      # a flag, and the only remaining gate would be "is this conversation in the register". So the
+      # bytes must match a letter the pipeline has ALREADY CLAIMED. `claim_send` writes a `sending`
+      # row carrying the conversation as its target and the sha256 of the exact approved copy
+      # BEFORE it invokes this writer, so a matching row proves the pipeline composed this text for
+      # this thread under its own copy, standing-ruling and ledger gates. Arbitrary text has no
+      # such row and is refused.
+      sha="$(printf '%s' "$3" | "$SHA256_BIN" 2>/dev/null)" || return 2
+      sha="${sha%% *}"
+      case "$sha" in
+        [0-9a-f][0-9a-f]*) ;;
+        *) return 2 ;;
+      esac
+      #
+      # READ ONLY, ON PURPOSE. This function answers "may this purpose write here at all", and it is
+      # called BEFORE the --validate/--dry-run exits. Consuming the claim here would let a no-write
+      # mode burn it: validate would succeed without POSTing, the real reply would then be refused,
+      # and an owed statutory letter would silently never go out. The single-use consume lives in
+      # purpose_consume_claim(), which runs after every no-write exit, every refusal AND the audit-record
+      # write, immediately before the POST - see the ordering comment at that call site for why the
+      # record must land first.
+      claimed="$("$SQLITE_BIN" -readonly "$GDPR_REGISTER" \
+        "SELECT count(*) FROM erasure_sends \
+          WHERE target = '$2' AND channel = 'intercom' AND body_sha = '$sha' \
+            AND state = 'sending' AND consumed_at = '' \
+            AND request_id IN (SELECT id FROM erasure_requests WHERE status = 'open');" 2>/dev/null)" || return 2
+      case "$claimed" in
+        ''|*[!0-9]*) return 2 ;;
+        0) return 5 ;;
+      esac
+      return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Consume the claim, atomically. Returns 0 consumed, 2 register unreadable, 5 nothing left to consume
+# (already consumed, or another invocation won the race), 3 sqlite3 missing, 4 sha256sum missing.
+#
+# A read-only "is there a sending row" check is not a claim: if the POST lands but the pipeline has not
+# yet recorded `sent`, or two invocations overlap, the same check passes twice and the customer gets the
+# same statutory letter twice. The ledger's UNIQUE(request_id, kind) does not help, because it bounds the
+# PIPELINE's rows, not direct invocations of this writer. So the authorization is CONSUMED in one
+# conditional UPDATE and exactly one row must change. SQLite serialises writers, so of two concurrent
+# calls exactly one sees changes()=1 and the other is refused. `store.claim_send` clears `consumed_at`
+# when it legitimately reuses a `failed`/`refused` slot, so a real retry still works.
+purpose_consume_claim() {
+  case "$1" in
+    gdpr-erasure)
+      [ -r "$GDPR_REGISTER" ] || return 2
+      [ -x "$SQLITE_BIN" ] || return 3
+      [ -x "$SHA256_BIN" ] || return 4
+      sha="$(printf '%s' "$3" | "$SHA256_BIN" 2>/dev/null)" || return 2
+      sha="${sha%% *}"
+      case "$sha" in
+        [0-9a-f][0-9a-f]*) ;;
+        *) return 2 ;;
+      esac
+      # The busy timeout matters because this statement WRITES: the hourly tick holds the store while it
+      # decides, and a bare SQLITE_BUSY would be classified as "register unreadable" and refuse a letter
+      # that is fine.
+      # EXACTLY ONE CLAIM, and `id = (SELECT ... LIMIT 1)` is what guarantees it. Matching on conversation +
+      # bytes alone spent EVERY open claim whose copy is identical, so one POST consumed two claims while
+      # posting one reply: the second request was left `sending` with its claim gone and could never be sent
+      # (QA #1820). The subquery picks the oldest matching claim and the UPDATE touches only that row, so one
+      # invocation can never spend more than the one letter it is about to post. Two requests sharing a
+      # conversation and identical copy therefore take two invocations and post two replies - which is right,
+      # because each request is owed its own written confirmation.
+      consumed="$("$SQLITE_BIN" -cmd ".timeout 5000" "$GDPR_REGISTER" \
+        "UPDATE erasure_sends SET consumed_at = strftime('%Y-%m-%dT%H:%M:%SZ','now') \
+          WHERE id = (SELECT id FROM erasure_sends \
+                       WHERE target = '$2' AND channel = 'intercom' AND body_sha = '$sha' \
+                         AND state = 'sending' AND consumed_at = '' \
+                         AND request_id IN (SELECT id FROM erasure_requests WHERE status = 'open') \
+                       ORDER BY id LIMIT 1); \
+         SELECT changes();" 2>/dev/null)" || return 2
+      case "$consumed" in
+        ''|*[!0-9]*) return 2 ;;
+        0) return 5 ;;
+      esac
+      return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # ---------------------------------------------------------------------------------------
 # Deployed copies reject EVERY override before anything else can run.
 if [ "$TESTABLE" != "1" ]; then
@@ -92,6 +231,9 @@ if [ "$TESTABLE" != "1" ]; then
   CURL_BIN="/usr/bin/curl"
   JQ_BIN="/usr/bin/jq"
   TIMEOUT_BIN="/usr/bin/timeout"
+  SQLITE_BIN="/usr/bin/sqlite3"
+  SHA256_BIN="/usr/bin/sha256sum"
+  GDPR_REGISTER="$GDPR_REGISTER_PROD"
 else
   LOG_DIR="${INTERCOM_OPS_TEST_LOG_DIR:-$PROD_LOG_DIR}"
   # The suite's curl stub is reachable only through an explicit seam: PATH was replaced
@@ -101,8 +243,11 @@ else
   JQ_BIN="$(command -v jq || echo /usr/bin/jq)"
   # timeout lives outside the replaced PATH on a Homebrew dev box, so the suite hands it in.
   TIMEOUT_BIN="${INTERCOM_OPS_TEST_TIMEOUT_BIN:-$(command -v timeout || command -v gtimeout || echo /usr/bin/timeout)}"
+  SQLITE_BIN="${INTERCOM_OPS_TEST_SQLITE_BIN:-$(command -v sqlite3 || echo /usr/bin/sqlite3)}"
+  SHA256_BIN="${INTERCOM_OPS_TEST_SHA256_BIN:-$(command -v sha256sum || echo /usr/bin/sha256sum)}"
+  GDPR_REGISTER="${INTERCOM_OPS_TEST_GDPR_REGISTER:-$GDPR_REGISTER_PROD}"
 fi
-readonly LOG_DIR CURL_BIN JQ_BIN TIMEOUT_BIN
+readonly LOG_DIR CURL_BIN JQ_BIN TIMEOUT_BIN SQLITE_BIN SHA256_BIN GDPR_REGISTER
 
 # ---------------------------------------------------------------------------------------
 # Arguments
@@ -118,10 +263,10 @@ case "$MODE" in
   *) usage; die "unknown subcommand '$MODE' (note | reply). Closing, assigning, tagging and snoozing are outside this wrapper: bulk stale closes go through the cs-stale-drain skill, abuse tagging/closing through muso-abuse-block; any other close, assignment, tag or snooze is a human's action in the inbox." ;;
 esac
 
-CONVERSATION="" REQUESTED_BY="" AUDIENCE="" APPROVED_BY="" BODY="" BODY_FILE="" CUSTOMER_FACING=0 ACTION="post"
+CONVERSATION="" REQUESTED_BY="" AUDIENCE="" APPROVED_BY="" BODY="" BODY_FILE="" CUSTOMER_FACING=0 ACTION="post" PURPOSE=""
 while [ $# -gt 0 ]; do
   case "$1" in
-    --conversation|--requested-by|--audience|--approved-by|--body|--body-file)
+    --conversation|--requested-by|--audience|--approved-by|--body|--body-file|--purpose)
       # A dangling flag must be a usage error with a message: a bare `shift 2` past the end
       # of argv exits 1 under set -e with no output, which reads as a silent refusal.
       [ $# -ge 2 ] || { usage; die "$1 needs a value"; }
@@ -132,6 +277,7 @@ while [ $# -gt 0 ]; do
         --approved-by)  APPROVED_BY="$2" ;;
         --body)         BODY="$2" ;;
         --body-file)    BODY_FILE="$2" ;;
+        --purpose)      PURPOSE="$2" ;;
       esac
       shift 2 ;;
     --customer-facing) CUSTOMER_FACING=1; shift ;;
@@ -154,16 +300,53 @@ done
 printf '%s' "$CONVERSATION" | grep -qE '^[0-9]+$' \
   || refuse "--conversation must be the numeric Intercom conversation id (got '${CONVERSATION:-<empty>}')."
 
-printf '%s' "$REQUESTED_BY" | grep -qE '^U[A-Z0-9]{8,12}$' \
-  || refuse "--requested-by must be the Slack USER ID of the human who asked (from message metadata, never a display name); got '${REQUESTED_BY:-<empty>}'."
-REQUESTER_NAME="$(allowlisted_name "$REQUESTED_BY")" \
-  || refuse "$REQUESTED_BY is not on the Intercom write allowlist ($ALLOWLIST_TEXT). Intercom writes need one of them to ask; everyone else is read-only. Do not post; say who can authorize it."
-
+# The body is an INPUT, so it is materialised before anything validates it. A purpose write is
+# matched against the pipeline's claimed letter by the sha256 of these exact bytes, so reading
+# --body-file after that check would refuse every legitimate --body-file caller.
 if [ -n "$BODY_FILE" ]; then
   [ -z "$BODY" ] || refuse "pass --body OR --body-file, not both."
   [ -r "$BODY_FILE" ] || die "--body-file '$BODY_FILE' is not readable."
   BODY="$(cat "$BODY_FILE")"
 fi
+
+# A purpose is a MACHINE authorization: no human asked, so there is no requester to check and
+# no human to name. It is mutually exclusive with the human flags on purpose - the audit trail
+# must say what actually happened, and "a human approved this" would be a lie in the trail.
+if [ -n "$PURPOSE" ]; then
+  case " $PURPOSE_TABLE " in
+    *" $PURPOSE "*) ;;
+    *) refuse "--purpose '$PURPOSE' is not a purpose this writer knows ($PURPOSE_TABLE). A purpose is a machine authorization the repo has already ruled on; anything else needs a human's --approved-by." ;;
+  esac
+  [ "$MODE" = "reply" ] \
+    || refuse "--purpose applies to 'reply' only; a note is internal and needs a human requester."
+  [ -z "$REQUESTED_BY" ] \
+    || refuse "--purpose and --requested-by are mutually exclusive: a purpose write has no human requester, and recording one would be a false audit trail."
+  [ -z "$APPROVED_BY" ] \
+    || refuse "--purpose and --approved-by are mutually exclusive: a purpose write is authorized by the purpose, not by a human. Recording a human id here is exactly the lie this mode exists to avoid."
+  # OWNERSHIP, checked here and not in the caller: a purpose may write ONLY on a thread the
+  # register owns, so a bug in the pipeline cannot widen the blast radius to the whole inbox.
+  owned_rc=0
+  purpose_owns_conversation "$PURPOSE" "$CONVERSATION" "$BODY" || owned_rc=$?
+  case "$owned_rc" in
+    0) ;;
+    1) refuse "conversation $CONVERSATION is not an OPEN request in the erasure register, so the $PURPOSE purpose does not own it. A purpose may write ONLY on a thread the register owns and that is still open; anything else needs a human --approved-by." ;;
+    2) refuse "the erasure register ($GDPR_REGISTER) is not readable, or does not answer the ownership query, so this writer cannot prove it owns conversation $CONVERSATION. Refusing rather than posting to a thread nobody can vouch for." ;;
+    3) die "$SQLITE_BIN is missing or not executable; it is required to check register ownership." ;;
+    4) die "$SHA256_BIN is missing or not executable; it is required to match the letter against the pipeline's claim." ;;
+    5) refuse "no letter the erasure pipeline has claimed matches these exact bytes for conversation $CONVERSATION. A purpose write may post ONLY copy the pipeline has already ledgered as 'sending' for this thread; anything else needs a human --approved-by." ;;
+    *) refuse "could not establish whether the $PURPOSE purpose owns conversation $CONVERSATION; refusing to post unverified." ;;
+  esac
+  # The log's `requester` field is the identity that asked. For a purpose write that is the
+  # system, and it is set here rather than left empty so the record never reads as "nobody".
+  REQUESTED_BY="$PURPOSE_IDENTITY"
+  REQUESTER_NAME="$PURPOSE_IDENTITY"
+else
+printf '%s' "$REQUESTED_BY" | grep -qE '^U[A-Z0-9]{8,12}$' \
+  || refuse "--requested-by must be the Slack USER ID of the human who asked (from message metadata, never a display name); got '${REQUESTED_BY:-<empty>}'."
+REQUESTER_NAME="$(allowlisted_name "$REQUESTED_BY")" \
+  || refuse "$REQUESTED_BY is not on the Intercom write allowlist ($ALLOWLIST_TEXT). Intercom writes need one of them to ask; everyone else is read-only. Do not post; say who can authorize it."
+fi
+
 # Pure-bash test, no pipe: `printf | grep -q` under pipefail refuses a large multi-line
 # body as "empty" once grep exits early and printf takes SIGPIPE (reproduced at ~60 KB).
 [[ "$BODY" =~ [^[:space:]] ]] || refuse "the body is empty."
@@ -185,12 +368,17 @@ case "$MODE" in
     [ -z "$AUDIENCE" ] || refuse "--audience applies to notes only; a reply's audience is the customer."
     [ "$CUSTOMER_FACING" -eq 1 ] \
       || refuse "a reply reaches the CUSTOMER. Pass --customer-facing to state that on purpose, and --approved-by <SlackUID> of the human who told you to reply to the customer. If nobody did, post a note instead."
+    if [ -n "$PURPOSE" ]; then
+      # The purpose IS the authorization; there is no human to name and none is invented.
+      APPROVER_NAME="$PURPOSE_IDENTITY"
+    else
     [ -n "$APPROVED_BY" ] \
       || refuse "--approved-by <SlackUID> is required for a customer-facing reply: the human (Aaron, Jan or Nick) who explicitly asked for the CUSTOMER to be answered. A request to 'resolve' or 'give a summary' is a note, not a reply."
     printf '%s' "$APPROVED_BY" | grep -qE '^U[A-Z0-9]{8,12}$' \
       || refuse "--approved-by must be a human's Slack USER ID; '$APPROVED_BY' is not one. Self-approval, god_mode and agent identities never authorize a customer-facing reply (2026-08-31: a god_mode_self_approve reply reached customers under a human's name)."
     APPROVER_NAME="$(allowlisted_name "$APPROVED_BY")" \
       || refuse "$APPROVED_BY is not a human on the Intercom write allowlist ($ALLOWLIST_TEXT); a customer-facing reply needs one of them."
+    fi
     # The customer never sees internal surfaces. The word list is Caroline's own redaction
     # set (plugins/intercom/src/sanitize-tool-leak.ts PATTERNS) plus the shapes the ops
     # agent's escalation notes actually carry: issue links, the mailbox number, "Ops
@@ -243,7 +431,17 @@ case "$ACTION" in
 esac
 
 # ---------------------------------------------------------------------------------------
-# Log BEFORE the write (operations/SOUL.md, Write Activity Logging), then POST, then verify.
+# Log BEFORE the write (operations/SOUL.md, Write Activity Logging), then consume, then POST, then
+# verify.
+#
+# ORDER IS LOAD-BEARING, and it is not the intuitive one (QA #1820): every way this block can fail -
+# an unwritable log dir, a jq that cannot build the record, a full disk - exits 1 through `set -e`
+# ABOVE the POST. So the record must be BUILT AND WRITTEN FIRST, and the single-use claim consumed
+# only after it, immediately before the curl. Consuming first meant a failed audit write left a
+# letter marked spent that nobody had received: `_intercom_send` saw a bare 1, could not tell it from
+# a dropped connection, recorded `unknown`, and the never-retried state stranded the letter forever.
+# With this order, a failed audit write leaves the claim INTACT, so the next tick re-claims the slot
+# and retries - which is correct, because no customer received anything.
 # The dir is untracked and rsync-excluded (deploy.sh), so create it like every other
 # api-log writer does (qa-pr-approve.sh) and die only if that fails.
 mkdir -p "$LOG_DIR" || die "cannot create log dir $LOG_DIR; refusing to write unlogged."
@@ -253,15 +451,45 @@ LOG_FILE="$LOG_DIR/intercom-$MODE-$CONVERSATION-$(date -u +%Y%m%dT%H%M%SZ)-$$.js
 if [ "$MODE" = "note" ]; then
   LOG_ACTION="intercom_internal_note"; LOG_APPROVED=""; LOG_AUDIENCE="$AUDIENCE"
   LOG_AUTH="$REQUESTER_NAME ($REQUESTED_BY) requested it in Slack; internal note, not customer-visible"
+elif [ -n "$PURPOSE" ]; then
+  # The record says what actually happened: a machine authorization, naming the purpose and the
+  # ownership check that bounded it. It never claims a human asked.
+  LOG_ACTION="intercom_customer_reply"; LOG_APPROVED="$PURPOSE_IDENTITY"; LOG_AUDIENCE="customer"
+  LOG_AUTH="purpose $PURPOSE: the erasure register owns conversation $CONVERSATION; no human asked for this letter - it is a statutory obligation with its own clock"
 else
   LOG_ACTION="intercom_customer_reply"; LOG_APPROVED="$APPROVED_BY"; LOG_AUDIENCE="customer"
   LOG_AUTH="$APPROVER_NAME ($APPROVED_BY) explicitly approved a customer-facing reply in Slack"
 fi
 "$JQ_BIN" -nc --arg action "$LOG_ACTION" --arg target "conversation:$CONVERSATION" \
   --arg req "$REQUESTED_BY" --arg appr "$LOG_APPROVED" --arg aud "$LOG_AUDIENCE" \
-  --arg ts "$NOW" --arg auth "$LOG_AUTH" \
-  '{agent:"operations", action:$action, target:$target, requester:$req, approved_by:(if $appr == "" then null else $appr end), audience:$aud, timestamp:$ts, authorization:$auth}' \
-  > "$LOG_FILE"
+  --arg ts "$NOW" --arg auth "$LOG_AUTH" --arg purpose "$PURPOSE" \
+  '{agent:"operations", action:$action, target:$target, requester:$req, approved_by:(if $appr == "" then null else $appr end), audience:$aud, timestamp:$ts, authorization:$auth} + (if $purpose == "" then {} else {purpose:$purpose} end)' \
+  > "$LOG_FILE" \
+  || die "cannot write the audit record $LOG_FILE; refusing to write unlogged. Nothing was posted."
+# The `|| die` is not decoration: without it a redirection failure here is a BARE exit 1 through `set -e`, and a
+# bare 1 is indistinguishable from a dropped connection after a POST. `_intercom_send` would call it Ambiguous,
+# `deliver` would record `unknown`, and `unknown` is the never-retried state - so a letter nobody received would be
+# stranded forever even though the claim is left intact. `die` exits 2 with an `ERROR:` prefix, which
+# `send.WRITER_PREFLIGHT_RC` reads as PROVABLY pre-send, so `deliver` records `failed` and the next tick retries
+# (QA #1820 finding 1).
+
+# ---------------------------------------------------------------------------------------
+# CONSUME THE CLAIM, and only now - the record above is written, so nothing left to fail sits between
+# the consume and the POST. Every no-write exit and every refusal above has already returned, so
+# --validate, --dry-run, a preflight refusal and a failed audit write all leave the claim intact and
+# the real send still works. From here on the claim is spent, which is what makes a replay or a
+# concurrent invocation unable to post the same statutory letter twice.
+if [ -n "$PURPOSE" ]; then
+  consume_rc=0
+  purpose_consume_claim "$PURPOSE" "$CONVERSATION" "$BODY" || consume_rc=$?
+  case "$consume_rc" in
+    0) ;;
+    5) refuse "the letter the erasure pipeline claimed for conversation $CONVERSATION has already been consumed by another invocation, so this one will not post it again. If the earlier attempt did not reach the customer, the pipeline must re-claim the slot before retrying." ;;
+    3) die "$SQLITE_BIN is missing or not executable; it is required to consume the send claim." ;;
+    4) die "$SHA256_BIN is missing or not executable; it is required to match the letter against the pipeline's claim." ;;
+    *) refuse "the erasure register ($GDPR_REGISTER) could not be updated to consume the claim for conversation $CONVERSATION, so this writer cannot prove it is the only sender. Refusing rather than risking a duplicate statutory letter." ;;
+  esac
+fi
 
 set +e
 RESPONSE="$(printf '%s' "$PAYLOAD" | "$TIMEOUT_BIN" 45 "$CURL_BIN" -sS -X POST \

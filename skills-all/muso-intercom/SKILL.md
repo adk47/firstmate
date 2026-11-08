@@ -35,6 +35,17 @@ Query and manage Muso.AI customer messaging and support data from Intercom.
 - Everyone else → READ ONLY. Politely decline write requests: "Intercom writes
   need Jan, Nick or Aaron. Want me to ask Jan?"
 
+**The one machine class, and it is not yours to use.** `intercom-ops-write.sh reply
+--purpose gdpr-erasure` posts a statutory erasure letter as `system:gdpr-pipeline`
+with no human id. The writer refuses any conversation the erasure register does not
+own **and any body the pipeline has not already claimed** (a `sending` ledger row
+carrying that conversation and the sha256 of those exact bytes), so it can only post
+copy the pipeline composed under its own gates. It exists because a GDPR letter is an
+obligation with its own clock, not a request. It is called by
+`scripts/gdpr-pipeline.py` and by nothing else: an agent reaching for `--purpose` to
+skip the allowlist is exactly the 2026-08-31 failure with a new flag. If you are not
+the GDPR pipeline, you need a human.
+
 Authorization is not a path. A note or reply goes through the wrapper in "Writing to
 a conversation" below; a bulk stale close through `cs-stale-drain`; an abuse tag or
 close through `muso-abuse-block`. A write with no wrapper today (a single

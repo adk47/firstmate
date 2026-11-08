@@ -2761,7 +2761,11 @@ class SendPath(unittest.TestCase):
             with self.assertRaises(send.Unknown) as e0:
                 send.route({**r, "requester_email": ""})
         self.assertIn("legal@muso.ai", str(e0.exception))
-        self.assertIn("auth it and the route opens", str(e0.exception))
+        # NOT "auth it and the route opens": since the 2026-11-06 ruling legal@ is an alias for a person, not an
+        # account, so there is nothing to auth. The reason must say that instead of sending an operator after a
+        # mailbox that does not exist.
+        self.assertIn("alias for a person rather than an account", str(e0.exception))
+        self.assertNotIn("auth it and the route opens", str(e0.exception))
         self.assertIn("no requester_email", str(e0.exception))
         # the subject's own gate, still independent of the lead's: closing it keeps the mailbox reason in the message
         with mock.patch.object(copy, "NEW_THREAD_SUBJECT_APPROVED", False), \
@@ -2771,7 +2775,7 @@ class SendPath(unittest.TestCase):
                 send.route(r)
         msg = str(e.exception)
         self.assertIn("legal@muso.ai", msg)
-        self.assertIn("auth it and the route opens", msg)
+        self.assertIn("alias for a person rather than an account", msg)
         self.assertIn("has no GO of its own", msg)
         self.assertIn("NEW_THREAD_SUBJECT_APPROVED", msg)
         with mock.patch.object(copy, "NEW_THREAD_LEAD_APPROVED", False), \
@@ -3134,6 +3138,44 @@ class SendPath(unittest.TestCase):
         self.assertIn("no requester_email", msg)
         self.assertIn("recovered from the original", msg)
 
+    def test_an_unreadable_gog_never_routes_an_alias_thread_in_thread(self):
+        """UNMEASURABLE IS NOT WRITABLE. `gog auth list -j` failing (no gog, a 30 s timeout, unreadable JSON) used to
+        read as "writable", so a notices@/legal@ thread took the in-thread route and `_mail_send` then tried to reply
+        in it FROM support@ - a thread support@ does not own. A doomed attempt on a statutory letter, selected by a
+        transient read, while the approved new thread from support@ was available the whole time."""
+        rid, r = self.row(keys=["gmail:notices@muso.ai:t9"], channel="notices", conversation_id="",
+                          gmail_thread="1a1a436083a51047", requester_email="person@example.com")
+        with mock.patch.object(send, "_ACCOUNTS_READ", True), \
+                mock.patch.object(send, "_ACCOUNTS", None), \
+                self.approved_copy():
+            self.assertEqual(send.route(r), ("mail_new_thread", "person@example.com"))
+
+    def test_an_unreadable_gog_still_replies_in_our_own_support_thread(self):
+        """The one mailbox we may assume we can write when we cannot ask is the one we SEND from: there the writer is
+        the backstop and there is no other route to take, so an unreadable discovery must not push support@ rows onto
+        the new-thread path (that would be a different letter to a different relationship)."""
+        rid, r = self.row(keys=["gmail:support@muso.ai:t1"], channel="support", conversation_id="",
+                          gmail_thread="1a176619567e3fe0", requester_email="person@example.com")
+        with mock.patch.object(send, "_ACCOUNTS_READ", True), \
+                mock.patch.object(send, "_ACCOUNTS", None):
+            self.assertEqual(send.route(r), ("mail", "1a176619567e3fe0"))
+
+    def test_an_unreadable_gog_still_names_the_PERMANENT_alias_reason(self):
+        """When the thread's owner is an alias, the reason a letter cannot be threaded there is permanent (an alias is
+        not an account), so it must be the one reported - not the transient "we could not ask gog". An operator who
+        reads the transient reason goes looking for a mailbox that does not exist instead of recovering the address."""
+        rid, r = self.row(keys=["gmail:legal@muso.ai:t1"], channel="legal", conversation_id="",
+                          gmail_thread="1a073f2a93c21a6e", requester_email="")
+        with mock.patch.object(send, "_ACCOUNTS_READ", True), \
+                mock.patch.object(send, "_ACCOUNTS", None), \
+                self.approved_copy():
+            with self.assertRaises(send.Unknown) as e:
+                send.route(r)
+        msg = str(e.exception)
+        self.assertIn("alias for a person", msg)
+        self.assertIn("no requester_email", msg)
+        self.assertNotIn("cannot be determined", msg)
+
     def test_a_writable_thread_still_wins_over_option_2(self):
         """If the mailbox is ever authed the reply goes in the THREAD, never a new thread. Option 2 is the fallback,
         not the preferred route - otherwise authing the mailbox would change behaviour it should not."""
@@ -3162,13 +3204,20 @@ class SendPath(unittest.TestCase):
         with mock.patch.object(send, "_ACCOUNTS_READ", True), \
                 mock.patch.object(send, "_ACCOUNTS", {"support@muso.ai": {"gmail"}, "legal@muso.ai": {"gmail"}}):
             self.assertEqual(send.route(r), ("mail", "1a073f2a93c21a6e"))
-            self.assertEqual(send.mailbox_of(r), "legal@muso.ai")
+            # The thread is owned by legal@ (that is what makes it replyable in-thread at all), but the letter still
+            # leaves from support@ - the two facts are deliberately separate tables.
+            self.assertEqual(send.THREAD_MAILBOX_BY_CHANNEL["legal"], "legal@muso.ai")
+            self.assertEqual(send.mailbox_of(r), "support@muso.ai")
 
     def test_a_mailbox_in_gog_without_the_gmail_service_is_still_refused(self):
-        rid, r = self.row(keys=["gmail:notices@muso.ai:t9"], channel="notices", conversation_id="",
+        """A channel whose thread mailbox IS a real account but lacks the gmail service keeps the plain refusal, and
+        keeps the "enable gmail" advice - that advice is true here and false for the two aliases, which is why the
+        two cases are phrased differently. `register` is used because notices@/legal@ are aliases now."""
+        rid, r = self.row(keys=["gmail:register@muso.ai:t9"], channel="register", conversation_id="",
                           gmail_thread="1a073f2a93c21a6e", requester_email="")
         with mock.patch.object(send, "_ACCOUNTS_READ", True), \
-                mock.patch.object(send, "_ACCOUNTS", {"notices@muso.ai": {"calendar", "drive"}}):
+                mock.patch.object(send, "_ACCOUNTS", {"register@muso.ai": {"calendar", "drive"}}), \
+                mock.patch.dict(send.THREAD_MAILBOX_BY_CHANNEL, {"register": "register@muso.ai"}):
             with self.assertRaises(send.Unknown) as e:
                 send.route(r)
         self.assertIn("without the gmail service", str(e.exception))
@@ -3365,25 +3414,48 @@ class SendPath(unittest.TestCase):
         self.assertIn("no requester_email", rec["detail"],
                       "with both copy GOs open the remaining blocker is the missing address, and it must be named")
 
-    def test_a_legal_reply_leaves_from_the_legal_mailbox_not_from_support(self):
-        """The whole point of the per-mailbox fix: a letter to a legal@ thread must go out FROM legal@. Pinning
-        `mailbox_of` alone would prove the lookup, not the send; this pins the wiring into the adapter, which is what
-        actually leaves the building. A reply from the wrong address is a different letter to a different relationship."""
-        rid, _ = self.row(keys=["gmail:legal@muso.ai:t1"], channel="legal", conversation_id="",
-                          gmail_thread="1a073f2a93c21a6e")
-        seen = {}
+    def test_every_channel_sends_from_support_because_the_others_are_aliases(self):
+        """Captain, 2026-11-06: "can you use support as your outbound channel please". legal@muso.ai is an alias for
+        Aaron and notices@muso.ai is an alias for Kyran - neither is an account this host can sign into, so there is
+        nothing to send AS. This pins the wiring into the adapter, which is what actually leaves the building: a
+        `mailbox_of` assertion alone would prove the lookup, not the send.
 
-        def fake_mail(thread_id, text, approved_by, dry_run=False, key="", mailbox=""):
-            seen.update(thread_id=thread_id, mailbox=mailbox, key=key)
-            return "message 1a17 sent"
+        The OLD rule here was "a legal@ reply leaves from legal@". It was right while legal@ was believed to be an
+        account; it is wrong now, and leaving it in place would have made every legal@ letter fail at gog."""
+        for channel, thread in (("legal", "1a073f2a93c21a6e"), ("notices", "1a1a436083a51047"),
+                                ("support", "1a11c64e6b139977")):
+            rid, _ = self.row(keys=[f"gmail:{channel}@muso.ai:{thread}"], channel=channel, conversation_id="",
+                              gmail_thread=thread)
+            seen = {}
 
+            def fake_mail(thread_id, text, approved_by, dry_run=False, key="", mailbox=""):
+                seen.update(thread_id=thread_id, mailbox=mailbox, key=key)
+                return "message 1a17 sent"
+
+            with mock.patch.object(send, "_ACCOUNTS_READ", True), \
+                    mock.patch.object(send, "_ACCOUNTS", {"support@muso.ai": {"gmail"},
+                                                          f"{channel}@muso.ai": {"gmail"}}), \
+                    mock.patch.object(send, "_mail_send", fake_mail):
+                out = send.deliver(self.run, self.item(rid), "confirm", "U7RP6HKUZ")
+            self.assertEqual(out["state"], "sent", channel)
+            self.assertEqual(seen["mailbox"], "support@muso.ai",
+                             f"a {channel} letter must leave from support@, the only account we can send as")
+            self.assertEqual(seen["thread_id"], thread)
+
+    def test_the_lead_line_still_names_the_mailbox_the_person_wrote_to(self):
+        """The send account and the address the person chose are now DIFFERENT, and the lead line exists to name the
+        second one. Collapsing the two tables would have made every notices@/legal@ letter open with "you wrote to
+        support@muso.ai", which is false and is the one sentence in the letter that has to be true."""
+        rid, r = self.row(keys=["gmail:notices@muso.ai:t9"], channel="notices", conversation_id="",
+                          gmail_thread="1a1a436083a51047", requester_email="person@example.com",
+                          received_at="2026-10-21T18:14:00Z")
         with mock.patch.object(send, "_ACCOUNTS_READ", True), \
-                mock.patch.object(send, "_ACCOUNTS", {"support@muso.ai": {"gmail"}, "legal@muso.ai": {"gmail"}}), \
-                mock.patch.object(send, "_mail_send", fake_mail):
-            out = send.deliver(self.run, self.item(rid), "confirm", "U7RP6HKUZ")
-        self.assertEqual(out["state"], "sent")
-        self.assertEqual(seen["mailbox"], "legal@muso.ai", "the reply leaves from the mailbox that owns the thread")
-        self.assertEqual(seen["thread_id"], "1a073f2a93c21a6e")
+                mock.patch.object(send, "_ACCOUNTS", {"support@muso.ai": {"gmail"}}), \
+                self.approved_copy():
+            body, subject, to = send.final_letter(self.s.get(rid), "the body")
+        self.assertEqual(to, "person@example.com")
+        self.assertIn("notices@muso.ai", body, "the lead names the mailbox the person actually wrote to")
+        self.assertNotIn("you wrote to support@muso.ai", body)
 
     def test_a_dry_run_writes_nothing_at_all(self):
         """Nothing left the host, so there is nothing to guard against: a rehearsal must not consume the one send
@@ -3512,7 +3584,15 @@ class SendPath(unittest.TestCase):
         self.assertIn("unfinished", out["why"])
 
     # ---- the adapters --------------------------------------------------------------------------------------
-    def test_the_intercom_writer_is_invoked_with_the_gate_flags(self):
+    def test_the_intercom_writer_is_invoked_in_purpose_mode_not_as_a_human(self):
+        """A statutory letter is not a human request, so the writer is called with `--purpose gdpr-erasure`.
+
+        Until 2026-11-06 this passed the sender seat as BOTH `--requested-by` and `--approved-by`. The writer's human
+        allowlist refused every one of those (the seat is a bot), and had it accepted them the audit log would have
+        asserted that a named human approved a customer-facing reply - false for an unattended standing-ruling send.
+        The purpose mode records `approved_by: system:gdpr-pipeline` and lets the writer check, below us, that the
+        erasure register owns the conversation.
+        """
         calls = []
 
         def fake_run(cmd, **kw):
@@ -3521,11 +3601,13 @@ class SendPath(unittest.TestCase):
 
         with mock.patch.dict(os.environ, {"MUSOAI_INTERCOM_TOKEN": "x"}), \
                 mock.patch.object(send.subprocess, "run", fake_run):
-            ref = send._intercom_send("215476650395415", copy.ASK["ASK_LINK"], "U7RP6HKUZ", dry_run=False)
+            ref = send._intercom_send("215476650395415", copy.ASK["ASK_LINK"], "U0AN41ZBTRU", dry_run=False)
         cmd = calls[0]
         self.assertIn("reply", cmd)
         self.assertIn("--customer-facing", cmd)
-        self.assertEqual(cmd[cmd.index("--approved-by") + 1], "U7RP6HKUZ")
+        self.assertEqual(cmd[cmd.index("--purpose") + 1], "gdpr-erasure")
+        self.assertNotIn("--approved-by", cmd, "a purpose write must never name a human approver")
+        self.assertNotIn("--requested-by", cmd, "a purpose write must never name a human requester")
         self.assertEqual(cmd[cmd.index("--body") + 1], copy.ASK["ASK_LINK"], "the approved copy, verbatim")
         self.assertEqual(ref, "api-log 6 posted")
 
@@ -3562,7 +3644,65 @@ class SendPath(unittest.TestCase):
             with self.assertRaises(send.Unknown) as e:
                 send._intercom_send("1", "text", "U7RP6HKUZ", dry_run=False)
         self.assertIn("not on the Intercom write allowlist", str(e.exception))
-        self.assertIn("refused before posting", str(e.exception))
+        # Case-insensitive on purpose: this asserts that the refusal is REPORTED AS PRE-SEND and quotes the writer,
+        # not that a particular word is capitalised. The reconcile path (#1820) renders the same fact as "refused
+        # BEFORE posting" for emphasis, and pinning the casing made two correct messages disagree in a test.
+        self.assertIn("refused before posting", str(e.exception).lower())
+
+    def test_a_FAILED_AUDIT_WRITE_is_failed_not_unknown_through_the_PIPELINE(self):
+        """QA #1820 finding 1: the writer-side test was not enough - the whole delivery path has to stay retryable.
+
+        When `intercom-ops-write.sh` cannot write its audit record it exits 2 with `ERROR:`, ABOVE the POST. But bash
+        prints its own diagnostic first:
+
+            under-test.sh: line 463: /opt/.../intercom-reply-….json: Permission denied
+            ERROR: cannot write the audit record …; refusing to write unlogged. Nothing was posted.
+
+        `msg.startswith("ERROR:")` was False on that stderr, so this was read as Ambiguous, `deliver` recorded
+        `unknown`, and a letter nobody received became a human's forever. The prefix is now matched per LINE, and this
+        drives `deliver` rather than the writer alone so the LEDGER is what is asserted.
+        """
+        stderr = ("/opt/hydra/scripts/intercom-ops-write.sh: line 463: /opt/hydra/workspaces/operations/api-logs/"
+                  "intercom-reply-215476650395415-20261108T035405Z-1.json: Permission denied\n"
+                  "ERROR: cannot write the audit record /opt/hydra/workspaces/operations/api-logs/"
+                  "intercom-reply-215476650395415-20261108T035405Z-1.json; refusing to write unlogged. "
+                  "Nothing was posted.")
+        store = Store(":memory:")
+        run = Run(store, log=lambda *_: None)
+        rid, _ = store.upsert({"keys": ["intercom:1820"], "channel": "intercom", "class": "privacy_erasure",
+                               "received_at": "2026-09-01T10:00:00Z", "requester_email": "a@b.co",
+                               "conversation_id": "215476650395415", "requester_name": "A Person",
+                               "pages": [{"entity": "profile", "id": ARPAD}]})
+        with mock.patch.dict(os.environ, {"MUSOAI_INTERCOM_TOKEN": "x"}), \
+                mock.patch.object(send.subprocess, "run",
+                                  lambda cmd, **kw: mock.Mock(returncode=2, stdout="", stderr=stderr)):
+            out = send.deliver(run, {"row": rid, "text": "We removed your profile.", "register_no": 1},
+                               "ask", "U7RP6HKUZ")
+        self.assertEqual(out["state"], "failed", f"a pre-POST writer failure must be retryable, got {out}")
+        rec = store.send_record(rid, "ask")
+        self.assertEqual(rec["state"], "failed")
+        self.assertIn("refused BEFORE posting", rec["detail"])
+        # The invariant that matters to the ledger: `failed` can be re-claimed, so the next tick retries it.
+        store.claim_send(rid, "ask", "intercom", "215476650395415", send.body_sha("We removed your profile."),
+                         "U7RP6HKUZ", "sending")
+        self.assertEqual(store.send_record(rid, "ask")["state"], "sending")
+
+    def test_a_BARE_nonzero_exit_without_the_prefix_stays_unknown(self):
+        """The discriminator must not have been loosened: a bare 1 is still how `set -e` reports an unexpected
+        failure, which may have happened AFTER the POST, so it stays `unknown` and stays a human's."""
+        store = Store(":memory:")
+        run = Run(store, log=lambda *_: None)
+        rid, _ = store.upsert({"keys": ["intercom:1821"], "channel": "intercom", "class": "privacy_erasure",
+                               "received_at": "2026-09-01T10:00:00Z", "requester_email": "a@b.co",
+                               "conversation_id": "215476650395415", "requester_name": "A Person",
+                               "pages": [{"entity": "profile", "id": ARPAD}]})
+        with mock.patch.dict(os.environ, {"MUSOAI_INTERCOM_TOKEN": "x"}), \
+                mock.patch.object(send.subprocess, "run",
+                                  lambda cmd, **kw: mock.Mock(returncode=1, stdout="", stderr="killed")):
+            out = send.deliver(run, {"row": rid, "text": "We removed your profile.", "register_no": 1},
+                               "ask", "U7RP6HKUZ")
+        self.assertEqual(out["state"], "unknown")
+        self.assertIn("after being invoked", store.send_record(rid, "ask")["detail"])
 
     def test_a_writer_refusal_leaves_the_row_RETRYABLE_not_wedged(self):
         """End to end through the ledger: a `REFUSED:` writer must leave the slot `failed` (retryable), never
@@ -3776,6 +3916,51 @@ class SendPath(unittest.TestCase):
         self.assertEqual(rec["body_sha"], send.body_sha(seen["text"]))
         self.assertNotEqual(rec["body_sha"], send.body_sha(bare),
                             "the ledger must not record the bare body's digest for a letter carrying the lead")
+
+    def test_an_unwritable_thread_with_an_address_sends_a_new_thread_and_is_not_refused(self):
+        """Captain, 2026-11-06, item 5: a row whose thread is in a mailbox we cannot write, WITH a requester_email on
+        file, must produce a new thread from support@ and must NOT be recorded as refused.
+
+        `route()` alone does not prove this: the refusal the captain is describing happens in `deliver()`, which
+        ledgers `refused` and consumes the slot. So this pins the LEDGER, not just the route."""
+        rid, r = self.row(keys=["gmail:notices@muso.ai:t9"], channel="notices", conversation_id="",
+                          gmail_thread="1a1a436083a51047", requester_email="person@example.com",
+                          received_at="2026-10-21T18:14:00Z")
+        seen = {}
+
+        def fake_send(email, text, approved_by, dry_run=False, key="", mailbox="", subject=""):
+            seen.update(email=email, mailbox=mailbox, subject=subject, text=text)
+            return "gog-msg-1"
+
+        with mock.patch.object(send, "_ACCOUNTS_READ", True), \
+                mock.patch.object(send, "_ACCOUNTS", {"support@muso.ai": {"gmail"}}), \
+                self.approved_copy(), \
+                mock.patch.object(send, "_mail_send_new_thread", fake_send):
+            out = send.deliver(self.run, self.item(rid), "ask", "U7RP6HKUZ")
+        self.assertEqual(out["state"], "sent", "an unwritable thread with an address is NOT a refusal")
+        self.assertEqual(seen["email"], "person@example.com")
+        self.assertEqual(seen["mailbox"], "support@muso.ai", "the new thread leaves from support@")
+        rec = self.s.send_record(rid, "ask")
+        self.assertEqual(rec["state"], "sent")
+        self.assertEqual(rec["channel"], "mail_new_thread")
+        self.assertEqual(rec["target"], "person@example.com")
+
+    def test_a_missing_address_refuses_naming_the_address_not_the_mailbox(self):
+        """Captain, 2026-11-06, item 5: a row with no address must still refuse, and the message must say the ADDRESS
+        is missing rather than that the mailbox is unwritable. Those are different problems with different fixes -
+        auth a mailbox vs recover an address - and an operator reading the wrong one chases the wrong thing."""
+        rid, r = self.row(keys=["gmail:notices@muso.ai:t9"], channel="notices", conversation_id="",
+                          gmail_thread="1a1a436083a51047", requester_email="")
+        with mock.patch.object(send, "_ACCOUNTS_READ", True), \
+                mock.patch.object(send, "_ACCOUNTS", {"support@muso.ai": {"gmail"}}), \
+                self.approved_copy():
+            out = send.deliver(self.run, self.item(rid), "ask", "U7RP6HKUZ")
+        self.assertEqual(out["state"], "refused")
+        detail = self.s.send_record(rid, "ask")["detail"]
+        self.assertIn("no requester_email", detail)
+        self.assertIn("recovered from the original", detail)
+        self.assertNotIn("auth it and the route opens", detail,
+                         "the mailbox is not the blocker here; naming it sends the operator to the wrong fix")
 
     def test_a_new_thread_is_not_replied_all(self):
         """`--reply-all` is meaningless on a thread that does not exist yet; the new-thread writer must pass --to and
@@ -5950,3 +6135,451 @@ class ResolveWedgedSends(unittest.TestCase):
         with open(path) as f:
             src = f.read()
         self.assertIn(f"printf '{store.REFUSED_PREFIX} %s\\n'", src)
+
+
+class PreflightRefusalIsNotAmbiguous(unittest.TestCase):
+    """A refusal the writer raises ABOVE its POST is not an ambiguous send.
+
+    `unknown` is the never-retried state: it says "a letter may be out there, a human resolves this". That is the
+    right answer for a timeout or a dropped connection. It is the WRONG answer for a pre-flight refusal, which the
+    writer raises in its validation block before it posts anything - nothing reached the customer, so the letter is
+    retryable, and recording it `unknown` strands a statutory request forever.
+
+    This is not hypothetical: the first live send tick (2026-11-06 14:12Z) refused 40 letters because the sender seat
+    is not on the writer's human allowlist, and every one of them was recorded `unknown`. The discriminator is the
+    writer's own exit-code contract (scripts/intercom-ops-write.sh header): 1 = refusal, 2 = usage/environment error,
+    4 = post failed or wrong part_type, and `refuse()`/`die()` are the only producers of 1 and 2 and are only ever
+    called above the POST.
+    """
+
+    def setUp(self):
+        self._env = os.environ.get(send.SEND_LOCK_ENV)
+        os.environ[send.SEND_LOCK_ENV] = "test-token"
+        self._run = subprocess.run
+
+    def tearDown(self):
+        if self._env is None:
+            os.environ.pop(send.SEND_LOCK_ENV, None)
+        else:
+            os.environ[send.SEND_LOCK_ENV] = self._env
+        subprocess.run = self._run
+
+    def writer(self, rc, stderr="", stdout=""):
+        def fake(cmd, **kw):
+            return subprocess.CompletedProcess(cmd, rc, stdout=stdout, stderr=stderr)
+        subprocess.run = fake
+
+    def test_a_refusal_is_retryable(self):
+        self.writer(1, stderr="REFUSED: U0AN41ZBTRU is not on the Intercom write allowlist (Aaron, Jan, Nick).\n")
+        with self.assertRaises(send.Unknown) as e:
+            send._intercom_send("215476650395415", "body", "U0AN41ZBTRU", dry_run=False)
+        self.assertIn("refused BEFORE posting", str(e.exception))
+        self.assertIn("not on the Intercom write allowlist", str(e.exception))
+
+    def test_a_usage_error_is_retryable(self):
+        self.writer(2, stderr="ERROR: MUSOAI_INTERCOM_TOKEN is not set.\n")
+        with self.assertRaises(send.Unknown):
+            send._intercom_send("215476650395415", "body", "U0AN41ZBTRU", dry_run=False)
+
+    def test_a_post_failure_stays_ambiguous(self):
+        """rc 4 means the POST was attempted: the customer may have the letter, so this is never a retry."""
+        self.writer(4, stderr="POST FAILED (curl rc=28) for https://api.intercom.io/...\n")
+        with self.assertRaises(send.Ambiguous):
+            send._intercom_send("215476650395415", "body", "U0AN41ZBTRU", dry_run=False)
+
+    def test_a_bare_nonzero_exit_stays_ambiguous(self):
+        """A 1 with no REFUSED: prefix is how `set -e` reports an unexpected failure, and that one may have posted."""
+        self.writer(1, stderr="")
+        with self.assertRaises(send.Ambiguous):
+            send._intercom_send("215476650395415", "body", "U0AN41ZBTRU", dry_run=False)
+
+    def test_a_success_is_a_receipt(self):
+        self.writer(0, stdout="POSTED comment conversation=215476650395415 part=42\n")
+        self.assertEqual(send._intercom_send("215476650395415", "body", "U0AN41ZBTRU", dry_run=False),
+                         "POSTED comment conversation=215476650395415 part=42")
+
+
+class ReconcileStrandedLetters(unittest.TestCase):
+    """`reconcile` moves a stranded `unknown` row back to retryable ONLY when the detail proves nothing was posted."""
+
+    # The exact detail the live ledger holds for the 40 letters the 2026-11-06 tick stranded. Pinned verbatim: the
+    # reconcile has to recognise rows written BEFORE the distinction existed, or the fix only helps future ticks.
+    LIVE_DETAIL = ("intercom-ops-write.sh exited rc 1 after being invoked: REFUSED: U0AN41ZBTRU is not on the "
+                   "Intercom write allowlist (Aaron U7RP6HKUZ, Jan U038BM16T7W, Nick U0AL36NADEY). Intercom writes "
+                   "need one of them to ask; everyone else is read-only. Do not post; say who can authorize it.")
+
+    def setUp(self):
+        self.s = Store(":memory:")
+        self.run = Run(self.s, log=lambda *_: None)
+
+    def row(self, key, conv="215476650395415", email="a@b.co"):
+        rid, _ = self.s.upsert({"keys": [key], "channel": "intercom", "class": "privacy_erasure",
+                                "received_at": "2026-09-01T10:00:00Z", "requester_email": email,
+                                "conversation_id": conv, "requester_name": "Arpad Laczkovszki",
+                                "pages": [{"entity": "profile", "id": ARPAD}]})
+        return rid
+
+    def unknown(self, rid, detail, kind="ask", conv="215476650395415"):
+        self.s.begin_send(rid, kind, "intercom", conv, "sha", "U0AN41ZBTRU", "unknown", detail=detail)
+
+    def test_the_live_ledger_detail_is_recognised(self):
+        self.assertTrue(send.preflight_refusal(self.LIVE_DETAIL))
+
+    def test_the_new_detail_is_recognised(self):
+        self.assertTrue(send.preflight_refusal(
+            "intercom-ops-write.sh refused BEFORE posting (rc 1): REFUSED: not on the allowlist"))
+
+    def test_a_timeout_is_not_provable(self):
+        self.assertFalse(send.preflight_refusal(
+            "intercom-ops-write.sh timed out after 120s with the reply built: it may be posted, so this is never a "
+            "retry"))
+
+    def test_a_post_failure_is_not_provable(self):
+        self.assertFalse(send.preflight_refusal(
+            "intercom-ops-write.sh exited rc 4 after being invoked: POST FAILED (curl rc=28)"))
+
+    def test_a_dry_run_writes_nothing(self):
+        rid = self.row("intercom:1")
+        self.unknown(rid, self.LIVE_DETAIL)
+        out = send.reconcile_stranded(self.run, apply=False)
+        self.assertEqual(len(out), 1)
+        self.assertTrue(out[0]["provable"])
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "unknown")
+
+    def test_apply_moves_only_the_provable_rows(self):
+        provable = self.row("intercom:1")
+        ambiguous = self.row("intercom:2", conv="215476650395416", email="c@d.co")
+        self.unknown(provable, self.LIVE_DETAIL)
+        self.unknown(ambiguous, "intercom-ops-write.sh timed out after 120s with the reply built",
+                     conv="215476650395416")
+        out = send.reconcile_stranded(self.run, apply=True)
+        self.assertEqual(sum(1 for r in out if r["provable"]), 1)
+        self.assertEqual(self.s.send_record(provable, "ask")["state"], "failed")
+        self.assertEqual(self.s.send_record(ambiguous, "ask")["state"], "unknown")
+
+    def test_a_reconciled_row_is_retryable(self):
+        """The whole point: `failed` is retryable, `unknown` is not. `claim_send` is the gate that decides."""
+        rid = self.row("intercom:1")
+        self.unknown(rid, self.LIVE_DETAIL)
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.s.claim_send(rid, "ask", "intercom", "215476650395415", "sha2", "U0AN41ZBTRU", "sending")
+        send.reconcile_stranded(self.run, apply=True)
+        self.s.claim_send(rid, "ask", "intercom", "215476650395415", "sha2", "U0AN41ZBTRU", "sending")
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "sending")
+
+    def test_the_original_detail_survives_the_move(self):
+        rid = self.row("intercom:1")
+        self.unknown(rid, self.LIVE_DETAIL)
+        send.reconcile_stranded(self.run, apply=True)
+        detail = self.s.send_record(rid, "ask")["detail"]
+        self.assertIn("reconciled", detail)
+        self.assertIn("not on the Intercom write allowlist", detail)
+
+    def test_a_sent_row_is_never_touched(self):
+        rid = self.row("intercom:1")
+        self.s.begin_send(rid, "ask", "intercom", "215476650395415", "sha", "U0AN41ZBTRU", "sent")
+        self.assertEqual(send.reconcile_stranded(self.run, apply=True), [])
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "sent")
+
+    def test_a_closed_register_row_is_not_re_queued(self):
+        """The register is re-read: a request that is already finished needs no letter, and re-queueing it would
+        send a statutory notice about a request that is closed."""
+        rid = self.row("intercom:1")
+        self.unknown(rid, self.LIVE_DETAIL)
+        self.s.update(rid, "confirmed", status="closed")
+        out = send.reconcile_stranded(self.run, apply=True)
+        self.assertEqual(len(out), 1)
+        self.assertTrue(out[0]["provable"])
+        self.assertFalse(out[0]["open"])
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "unknown")
+
+    def test_an_open_register_row_is_re_queued(self):
+        rid = self.row("intercom:1")
+        self.unknown(rid, self.LIVE_DETAIL)
+        out = send.reconcile_stranded(self.run, apply=True)
+        self.assertTrue(out[0]["open"])
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "failed")
+
+
+class WriterExitCodeContract(unittest.TestCase):
+    """`send.py` reads the Intercom writer's exit codes to decide retryable-vs-stranded. Pin the contract it reads.
+
+    The distinction is only sound while two things stay true in `scripts/intercom-ops-write.sh`: 1 means refusal and 2
+    means usage/environment error, and EVERY `refuse()`/`die()` call sits above the POST. If a future edit adds a
+    `refuse` after the POST, or renumbers the codes, a refusal would be read as "nothing was posted" when something
+    was - and the retry is a second statutory letter. This test is the tripwire, not the prose.
+    """
+
+    WRITER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                          "scripts", "intercom-ops-write.sh")
+
+    def lines(self):
+        with open(self.WRITER) as fh:
+            return fh.read().splitlines()
+
+    def test_the_documented_codes_are_the_ones_send_py_reads(self):
+        header = "\n".join(self.lines())
+        self.assertIn("Exit codes: 0 ok · 1 refusal · 2 usage/environment error · 4 post failed", header)
+        self.assertEqual(send.WRITER_PREFLIGHT_RC, {1: "REFUSED:", 2: "ERROR:"})
+
+    def test_refuse_and_die_print_the_prefixes_send_py_matches(self):
+        body = "\n".join(self.lines())
+        self.assertIn("refuse() { printf 'REFUSED: %s\\n' \"$*\" >&2; exit 1; }", body)
+        self.assertIn("die()    { printf 'ERROR: %s\\n' \"$*\" >&2; exit 2; }", body)
+
+    def test_the_store_agrees_with_the_sender_about_what_is_pre_send(self):
+        """TWO modules answer "was anything posted?" and they must not drift.
+
+        `send.WRITER_PREFLIGHT_RC` decides what the writer's exit MEANS at send time; `store.is_writer_refusal`
+        decides what a recorded `detail` PROVES later, when `resolve --row` refuses to mark a letter `sent` and
+        `resolvable_sends(refused_only=True)` picks the rows a batch may touch. If one accepted `REFUSED:` and the
+        other `ERROR:`, a `die()` row would be retryable by the sender and un-resolvable by the operator - the
+        operator would be told a letter may be out when the writer never reached the POST.
+        """
+        self.assertEqual(tuple(send.WRITER_PREFLIGHT_RC.values()), store.PRE_SEND_PREFIXES)
+
+    def test_a_die_error_is_recognised_as_pre_send_by_both(self):
+        detail = ("intercom-ops-write.sh exited rc 2 after being invoked: ERROR: the API token is not set; "
+                  "refusing to build an unauthenticated request")
+        self.assertTrue(send.preflight_refusal(detail))
+        self.assertTrue(store.is_writer_refusal(detail))
+
+    def test_the_store_reads_the_writers_own_first_word_only(self):
+        # A `REFUSED:` that merely APPEARS in quoted customer text is not evidence. The predicate reads the first
+        # word after the wrapper's `after being invoked: `, so this must not be treated as a pre-send fact.
+        self.assertFalse(store.is_writer_refusal(
+            "intercom-ops-write.sh exited rc 4 after being invoked: POST FAILED (curl rc=28); "
+            "the response body said REFUSED: something"))
+
+    def test_every_refusal_is_above_the_post(self):
+        lines = self.lines()
+        post = [i for i, ln in enumerate(lines) if "-sS -X POST" in ln]
+        self.assertEqual(len(post), 1, "expected exactly one POST in the writer")
+        after = [ln for ln in lines[post[0] + 1:] if re.search(r"(^|[;&|]\s*)(refuse|die)\s", ln)]
+        self.assertEqual(after, [], f"a refusal after the POST would be read as 'nothing was posted': {after}")
+
+    def test_the_claim_is_consumed_between_the_audit_record_and_the_post(self):
+        """The third ordering fact this contract depends on, and the one QA #1820 found broken.
+
+        A consume BEFORE the audit record means a failed jq/mkdir/redirect strands a letter that was never sent: the
+        bare exit 1 is indistinguishable from a dropped connection, so `deliver` records `unknown`, and `unknown`
+        is never retried. Pin the order in the source, because no happy-path test can see it.
+        """
+        lines = self.lines()
+        record = [i for i, ln in enumerate(lines) if ln.strip().startswith('> "$LOG_FILE"')]
+        consume = [i for i, ln in enumerate(lines) if 'purpose_consume_claim "$PURPOSE" "$CONVERSATION"' in ln]
+        post = [i for i, ln in enumerate(lines) if "-sS -X POST" in ln]
+        self.assertEqual((len(record), len(consume), len(post)), (1, 1, 1))
+        self.assertLess(record[0], consume[0], "the audit record must be written BEFORE the claim is consumed")
+        self.assertLess(consume[0], post[0], "the claim must be consumed BEFORE the POST")
+
+
+class TheTickHealsStrandedLetters(unittest.TestCase):
+    """The tick re-queues provable pre-flight refusals before it sends, so a stranded letter heals on its own.
+
+    The failure this repairs was not only the wrong state: it was that 40 letters sat in `unknown` for a day because
+    the repair was a command somebody had to remember to run. Wiring it into the tick is what makes the repair
+    actually happen, so the wiring is what this pins.
+    """
+
+    CLI = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts", "gdpr-pipeline.py")
+
+    def tick_block(self):
+        with open(self.CLI) as fh:
+            src = fh.read()
+        start = src.index('if a.cmd == "tick":')
+        return src[start:src.index('elif a.cmd == "dedupe":', start)]
+
+    def test_the_tick_reconciles_before_it_sends(self):
+        block = self.tick_block()
+        self.assertIn("send.reconcile_stranded(run, apply=True)", block)
+        self.assertLess(block.index("reconcile_stranded"), block.index("scheduled_send"),
+                        "a reconcile after the send would leave this tick's own refusals stranded until the next one")
+
+    def test_the_tick_reconcile_is_inside_the_send_guard(self):
+        """A tick without --send must not write: the reconcile is a write, so it lives under the same guard."""
+        block = self.tick_block()
+        guard = block.index('if getattr(a, "send", False):')
+        self.assertLess(guard, block.index("reconcile_stranded"))
+
+    def test_the_tick_reconcile_only_moves_provable_open_rows(self):
+        block = self.tick_block()
+        self.assertIn('r["provable"] and r["open"]', block)
+
+
+class RecoverMissingAddresses(unittest.TestCase):
+    """Captain, 2026-11-06, item 3: the 69 rows that could not be answered are two problems - a code half (a new
+    thread from support@, in `route`) and a data half (no address to open one to). This is the data half.
+
+    The rule that matters most here is item 4: recovering an address must NEVER become a way to send a second
+    statutory letter. So every test that applies also asserts the send ledger is untouched."""
+
+    def setUp(self):
+        self.s = Store(":memory:")
+        self.run = Run(self.s, log=lambda *_: None)
+
+    def row(self, key, channel="notices", conv="", thread="", email=""):
+        rid, _ = self.s.upsert({"keys": [key], "channel": channel, "class": "privacy_erasure",
+                                "received_at": "2026-09-01T10:00:00Z", "requester_email": email,
+                                "conversation_id": conv, "gmail_thread": thread,
+                                "pages": [{"entity": "profile", "id": ARPAD}]})
+        return rid
+
+    def test_the_intercom_contact_email_is_recovered(self):
+        rid = self.row("intercom:1", channel="intercom", conv="215476650395415")
+        with mock.patch.object(sources, "conversation",
+                               lambda c: {"author_email": "", "contact_email": "person@example.com"}):
+            rows = send.recover_addresses(self.run, apply=True)
+        self.assertEqual([(r["id"], r["email"], r["source"]) for r in rows],
+                         [(rid, "person@example.com", "intercom")])
+        self.assertEqual(self.s.get(rid)["requester_email"], "person@example.com")
+
+    def test_the_customer_authored_source_email_wins_over_the_contact(self):
+        """The address the person WROTE FROM is the one to answer; the contact record can be a different address
+        (a work address on the Intercom contact, a personal one in the message)."""
+        rid = self.row("intercom:1", channel="intercom", conv="215476650395415")
+        with mock.patch.object(sources, "conversation",
+                               lambda c: {"author_email": "wrote@example.com", "contact_email": "contact@example.com"}):
+            send.recover_addresses(self.run, apply=True)
+        self.assertEqual(self.s.get(rid)["requester_email"], "wrote@example.com")
+
+    def test_a_support_thread_is_read_for_the_sender(self):
+        rid = self.row("gmail:support@muso.ai:t1", channel="support", thread="1a11c64e6b139977")
+        with mock.patch.object(send, "_ACCOUNTS_READ", True), \
+                mock.patch.object(send, "_ACCOUNTS", {"support@muso.ai": {"gmail"}}), \
+                mock.patch.object(send, "thread_sender", lambda t, m: "person@example.com"):
+            rows = send.recover_addresses(self.run, apply=True)
+        self.assertEqual(rows[0]["email"], "person@example.com")
+        self.assertEqual(rows[0]["source"], "gmail:support@muso.ai")
+        self.assertEqual(self.s.get(rid)["requester_email"], "person@example.com")
+
+    def test_a_notices_thread_is_reported_unrecoverable_and_never_guessed(self):
+        """notices@ and legal@ are aliases for people, not accounts (captain, 2026-11-06), so their threads cannot be
+        read on this host. The honest answer is "not recoverable from here" - inventing an address would send a
+        statutory letter to a stranger."""
+        rid = self.row("gmail:notices@muso.ai:t1", channel="notices", thread="19d85f50b5fbea79")
+        with mock.patch.object(send, "_ACCOUNTS_READ", True), \
+                mock.patch.object(send, "_ACCOUNTS", {"support@muso.ai": {"gmail"}}), \
+                mock.patch.object(send, "thread_sender", side_effect=AssertionError("must not read an alias")):
+            rows = send.recover_addresses(self.run, apply=True)
+        self.assertEqual(rows[0]["email"], "")
+        self.assertIn("cannot read", rows[0]["why"])
+        self.assertIn("notices@muso.ai", rows[0]["why"])
+        self.assertEqual(self.s.get(rid)["requester_email"], "")
+
+    def test_a_row_with_neither_a_conversation_nor_a_thread_says_so(self):
+        self.row("register:77", channel="register")
+        rows = send.recover_addresses(self.run, apply=True)
+        self.assertEqual(rows[0]["email"], "")
+        self.assertIn("neither a conversation nor a thread", rows[0]["why"])
+
+    def test_an_existing_address_is_never_overwritten(self):
+        rid = self.row("intercom:1", channel="intercom", conv="215476650395415", email="already@example.com")
+        with mock.patch.object(sources, "conversation",
+                               lambda c: {"author_email": "other@example.com", "contact_email": ""}):
+            rows = send.recover_addresses(self.run, apply=True)
+        self.assertEqual(rows, [], "a row that already has an address is not examined at all")
+        self.assertEqual(self.s.get(rid)["requester_email"], "already@example.com")
+
+    def test_a_claimed_unknown_letter_stays_claimed_and_unknown(self):
+        """Captain, item 4, and the reason this is a test rather than a comment: the whole point of recovering an
+        address is to send a letter, so the one thing that must not happen is a second one to somebody who may
+        already have the first."""
+        rid = self.row("intercom:1", channel="intercom", conv="215476650395415")
+        self.s.begin_send(rid, "ask", "intercom", "215476650395415", "sha", "U0AN41ZBTRU", "unknown",
+                          detail="intercom-ops-write.sh timed out after 120s with the reply built")
+        with mock.patch.object(sources, "conversation",
+                               lambda c: {"author_email": "person@example.com", "contact_email": ""}):
+            send.recover_addresses(self.run, apply=True)
+        self.assertEqual(self.s.get(rid)["requester_email"], "person@example.com")
+        rec = self.s.send_record(rid, "ask")
+        self.assertEqual(rec["state"], "unknown", "recovering an address must not re-open a claimed letter")
+        self.assertEqual(rec["target"], "215476650395415")
+
+    def test_a_dry_run_writes_nothing(self):
+        rid = self.row("intercom:1", channel="intercom", conv="215476650395415")
+        with mock.patch.object(sources, "conversation",
+                               lambda c: {"author_email": "person@example.com", "contact_email": ""}):
+            rows = send.recover_addresses(self.run, apply=False)
+        self.assertEqual(rows[0]["email"], "person@example.com")
+        self.assertEqual(self.s.get(rid)["requester_email"], "")
+
+    def test_a_closed_row_is_not_examined(self):
+        rid = self.row("intercom:1", channel="intercom", conv="215476650395415")
+        self.s.update(rid, "confirmed", status="closed")
+        with mock.patch.object(sources, "conversation", side_effect=AssertionError("must not read a closed row")):
+            self.assertEqual(send.recover_addresses(self.run, apply=True), [])
+
+    def test_the_sender_is_the_first_message_that_is_not_ours(self):
+        """Two shapes, both measured on the live register. A thread we replied to ENDS with our address, so the last
+        message is wrong. A thread WE opened STARTS with our address, so the first message is wrong too. The only
+        correct answer is the first message that came from somebody else."""
+        replied_to = {"messages": [
+            {"payload": {"headers": [{"name": "From", "value": "Person <person@example.com>"}]}},
+            {"payload": {"headers": [{"name": "From", "value": "Muso Support <support@muso.ai>"}]}},
+        ]}
+        self.assertEqual(send._sender_of(replied_to), "person@example.com")
+        we_opened = {"messages": [
+            {"payload": {"headers": [{"name": "From", "value": "Muso Support <support@muso.ai>"}]}},
+            {"payload": {"headers": [{"name": "From", "value": "Person <person@example.com>"}]}},
+        ]}
+        self.assertEqual(send._sender_of(we_opened), "person@example.com")
+
+    def test_a_thread_that_is_entirely_ours_has_no_requester_address(self):
+        thread = {"messages": [
+            {"payload": {"headers": [{"name": "From", "value": "Muso Support <support@muso.ai>"}]}},
+            {"payload": {"headers": [{"name": "From", "value": "Muso Support <support@muso.ai>"}]}},
+        ]}
+        with self.assertRaises(send.Unknown) as e:
+            send._sender_of(thread)
+        self.assertIn("OUR mailboxes", str(e.exception))
+
+    def test_a_thread_with_no_from_header_is_unknown_not_empty(self):
+        with self.assertRaises(send.Unknown):
+            send._sender_of({"messages": [{"payload": {"headers": []}}]})
+
+
+class RecoveryNeverRecordsOurOwnAddress(unittest.TestCase):
+    """Measured on the live register, 2026-11-06: 10 of the 19 addresses the first recovery pass found were
+    `support@muso.ai`. The thread's first message was OURS. Recording that as the requester would open the next
+    statutory letter to ourselves - worse than having no address, because it looks like progress."""
+
+    def setUp(self):
+        self.s = Store(":memory:")
+        self.run = Run(self.s, log=lambda *_: None)
+
+    def row(self, key, channel="support", conv="", thread=""):
+        rid, _ = self.s.upsert({"keys": [key], "channel": channel, "class": "privacy_erasure",
+                                "received_at": "2026-09-01T10:00:00Z", "requester_email": "",
+                                "conversation_id": conv, "gmail_thread": thread,
+                                "pages": [{"entity": "profile", "id": ARPAD}]})
+        return rid
+
+    def test_our_own_address_from_a_thread_is_not_recorded(self):
+        rid = self.row("gmail:support@muso.ai:t1", thread="1a11c64e6b139977")
+        with mock.patch.object(send, "_ACCOUNTS_READ", True), \
+                mock.patch.object(send, "_ACCOUNTS", {"support@muso.ai": {"gmail"}}), \
+                mock.patch.object(send, "thread_sender", side_effect=send.Unknown(
+                    "thread 1a11c64e6b139977: its first message is from support@muso.ai, which is one of OUR "
+                    "mailboxes, so the requester's own address is not in this thread")):
+            rows = send.recover_addresses(self.run, apply=True)
+        self.assertEqual(rows[0]["email"], "")
+        self.assertIn("OUR mailboxes", rows[0]["why"])
+        self.assertEqual(self.s.get(rid)["requester_email"], "")
+
+    def test_our_own_address_from_a_conversation_is_not_recorded(self):
+        rid = self.row("intercom:1", channel="intercom", conv="215476650395415")
+        with mock.patch.object(sources, "conversation",
+                               lambda c: {"author_email": "support@muso.ai", "contact_email": ""}):
+            rows = send.recover_addresses(self.run, apply=True)
+        self.assertEqual(rows[0]["email"], "")
+        self.assertIn("OUR mailboxes", rows[0]["why"])
+        self.assertEqual(self.s.get(rid)["requester_email"], "")
+
+    def test_is_ours_covers_every_mailbox_we_own(self):
+        with mock.patch.object(send, "_ACCOUNTS_READ", True), \
+                mock.patch.object(send, "_ACCOUNTS", {"support@muso.ai": {"gmail"}, "ak@muso.ai": {"gmail"}}):
+            for addr in ("support@muso.ai", "notices@muso.ai", "legal@muso.ai", "ak@muso.ai", "SUPPORT@MUSO.AI"):
+                self.assertTrue(send._is_ours(addr), addr)
+            for addr in ("person@example.com", "blake.khakhria@gmail.com", ""):
+                self.assertFalse(send._is_ours(addr) and addr, addr)

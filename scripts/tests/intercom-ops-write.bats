@@ -67,6 +67,26 @@ STUB
   export INTERCOM_OPS_TEST_CURL_BIN="$STUB_DIR/curl"
   INTERCOM_OPS_TEST_TIMEOUT_BIN="$(command -v timeout || command -v gtimeout)"
   export INTERCOM_OPS_TEST_TIMEOUT_BIN
+
+  # The erasure register the gdpr-erasure purpose must find its conversation in. A real sqlite
+  # file with the real table shape, because the ownership check is a real query: a stub would
+  # certify a writer that cannot read the register it is supposed to be bounded by.
+  export INTERCOM_OPS_TEST_GDPR_REGISTER="$TEST_TMPDIR/erasure.sqlite"
+  sqlite3 "$INTERCOM_OPS_TEST_GDPR_REGISTER" \
+    'CREATE TABLE erasure_requests (id INTEGER PRIMARY KEY, conversation_id TEXT, status TEXT);' \
+    'CREATE TABLE erasure_sends (id INTEGER PRIMARY KEY, request_id INTEGER, kind TEXT, channel TEXT, target TEXT, body_sha TEXT, state TEXT, consumed_at TEXT DEFAULT "");' \
+    "INSERT INTO erasure_requests (id, conversation_id, status) VALUES (1, '215476650395415', 'open');" \
+    "INSERT INTO erasure_requests (id, conversation_id, status) VALUES (2, '215476650395416', 'closed');"
+}
+
+# The pipeline claims a letter BEFORE it invokes the writer: a `sending` row carrying the
+# conversation as its target and the sha256 of the exact approved bytes. A purpose write must
+# match one, so every purpose test that expects a POST has to seed the claim it is posting.
+claim_letter() {  # $1 conversation, $2 body, $3 request id (default 1), $4 state (default sending)
+  local sha
+  sha="$(printf '%s' "$2" | sha256sum | cut -d' ' -f1)"
+  sqlite3 "$INTERCOM_OPS_TEST_GDPR_REGISTER" \
+    "INSERT INTO erasure_sends (request_id, kind, channel, target, body_sha, state) VALUES (${3:-1}, 'ask', 'intercom', '$1', '$sha', '${4:-sending}');"
 }
 
 teardown() { rm -rf "$TEST_TMPDIR"; }
@@ -141,6 +161,236 @@ curl_calls() { if [ -f "$CURL_STUB_LOG" ]; then wc -l < "$CURL_STUB_LOG" | tr -d
 }
 
 # --- write access: only the three allowlisted humans can request a write ----------
+
+# --- the purpose class: a machine authorization, never a fourth human -----------------
+
+@test "a purpose reply posts as a comment and logs the machine authorization, not a human" {
+  claim_letter 215476650395415 "We have removed your profile from Muso."
+  run "$SCRIPT" reply --conversation 215476650395415 --purpose gdpr-erasure --customer-facing \
+    --body "We have removed your profile from Muso."
+  [ "$status" -eq 0 ]
+  [[ "$output" == "POSTED comment conversation=215476650395415 part=52987726093" ]]
+  [ "$(payload | jq -r .message_type)" = "comment" ]
+  [ "$(payload | jq -r .admin_id)" = "5763097" ]
+  log="$(find "$INTERCOM_OPS_TEST_LOG_DIR" -type f -name '*.json' | head -1)"
+  [ "$(jq -r .approved_by "$log")" = "system:gdpr-pipeline" ]
+  [ "$(jq -r .requester "$log")" = "system:gdpr-pipeline" ]
+  [ "$(jq -r .purpose "$log")" = "gdpr-erasure" ]
+  [[ "$(jq -r .authorization "$log")" == *"no human asked for this letter"* ]]
+  # The whole point: the trail must not claim a human approved it.
+  ! grep -qE 'U7RP6HKUZ|U038BM16T7W|U0AL36NADEY|explicitly approved' "$log"
+}
+
+@test "a purpose reply is refused when the bytes are not a letter the pipeline claimed" {
+  # The hole QA found on the second review of #1820: ownership alone made this writer a
+  # general-purpose customer-facing poster for anyone who can run it. The body must match a
+  # `sending` row the pipeline wrote BEFORE invoking the writer.
+  claim_letter 215476650395415 "the approved letter"
+  run "$SCRIPT" reply --conversation 215476650395415 --purpose gdpr-erasure --customer-facing \
+    --body "arbitrary text nobody approved"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no letter the erasure pipeline has claimed matches these exact bytes"* ]]
+  [ "$(curl_calls)" -eq 0 ]
+  [ "$(log_count)" -eq 0 ]
+}
+
+@test "a purpose reply CONSUMES the claim, so a sequential replay cannot post the same letter twice" {
+  # The finding this pins: a read-only "is there a sending row" check is not a claim. If the POST lands but the
+  # pipeline has not yet recorded `sent`, a second invocation with the same conversation and bytes passed the same
+  # check and posted a duplicate statutory letter. The check now consumes the claim in one conditional UPDATE.
+  claim_letter 215476650395415 "We have removed your profile from Muso."
+  run "$SCRIPT" reply --conversation 215476650395415 --purpose gdpr-erasure --customer-facing \
+    --body "We have removed your profile from Muso."
+  [ "$status" -eq 0 ]
+  [ "$(curl_calls)" -eq 1 ]
+  # The claim is now spent, and the ledger still says `sending` - the pipeline has not recorded `sent` yet, which is
+  # exactly the window the replay used to slip through.
+  [ "$(sqlite3 "$INTERCOM_OPS_TEST_GDPR_REGISTER" "SELECT state FROM erasure_sends WHERE target='215476650395415'")" = "sending" ]
+  [ -n "$(sqlite3 "$INTERCOM_OPS_TEST_GDPR_REGISTER" "SELECT consumed_at FROM erasure_sends WHERE target='215476650395415'")" ]
+  run "$SCRIPT" reply --conversation 215476650395415 --purpose gdpr-erasure --customer-facing \
+    --body "We have removed your profile from Muso."
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no letter the erasure pipeline has claimed matches these exact bytes"* ]]
+  [ "$(curl_calls)" -eq 1 ]
+}
+
+@test "a purpose reply is refused when the claim was already consumed, even if the state is still sending" {
+  claim_letter 215476650395415 "We have removed your profile from Muso."
+  sqlite3 "$INTERCOM_OPS_TEST_GDPR_REGISTER" \
+    "UPDATE erasure_sends SET consumed_at='2026-11-06T20:00:00Z' WHERE target='215476650395415';"
+  run "$SCRIPT" reply --conversation 215476650395415 --purpose gdpr-erasure --customer-facing \
+    --body "We have removed your profile from Muso."
+  [ "$status" -eq 1 ]
+  [ "$(curl_calls)" -eq 0 ]
+}
+
+@test "two concurrent purpose replies post the letter exactly once" {
+  # SQLite serialises writers, so of two overlapping invocations exactly one sees changes()=1. Without the atomic
+  # consume both read the same `sending` row and both POST.
+  claim_letter 215476650395415 "We have removed your profile from Muso."
+  "$SCRIPT" reply --conversation 215476650395415 --purpose gdpr-erasure --customer-facing \
+    --body "We have removed your profile from Muso." >"$TEST_TMPDIR/a.out" 2>&1 &
+  local pa=$! sa=0 sb=0
+  "$SCRIPT" reply --conversation 215476650395415 --purpose gdpr-erasure --customer-facing \
+    --body "We have removed your profile from Muso." >"$TEST_TMPDIR/b.out" 2>&1 &
+  local pb=$!
+  # `local` resets $?, so capture each status in the same statement that waits.
+  wait "$pa" || sa=$?
+  wait "$pb" || sb=$?
+  # Exactly one succeeded and exactly one POST happened.
+  [ "$(( (sa == 0) + (sb == 0) ))" -eq 1 ]
+  [ "$(curl_calls)" -eq 1 ]
+}
+
+@test "--validate and --dry-run do NOT consume the claim, so the real send still works" {
+  # The finding this pins: the consume used to run inside the ownership check, which is called BEFORE the
+  # no-write exits. A --validate on a valid claim therefore burned it, the real reply was then refused, and an
+  # owed statutory letter silently never went out. The consume now runs after every no-write exit.
+  claim_letter 215476650395415 "We have removed your profile from Muso."
+  run "$SCRIPT" reply --conversation 215476650395415 --purpose gdpr-erasure --customer-facing \
+    --body "We have removed your profile from Muso." --validate
+  [ "$status" -eq 0 ]
+  [ "$(curl_calls)" -eq 0 ]
+  [ -z "$(sqlite3 "$INTERCOM_OPS_TEST_GDPR_REGISTER" "SELECT consumed_at FROM erasure_sends WHERE target='215476650395415'")" ]
+  run "$SCRIPT" reply --conversation 215476650395415 --purpose gdpr-erasure --customer-facing \
+    --body "We have removed your profile from Muso." --dry-run
+  [ "$status" -eq 0 ]
+  [ "$(curl_calls)" -eq 0 ]
+  [ -z "$(sqlite3 "$INTERCOM_OPS_TEST_GDPR_REGISTER" "SELECT consumed_at FROM erasure_sends WHERE target='215476650395415'")" ]
+  # The claim survived both no-write modes, so the real letter still goes out exactly once.
+  run "$SCRIPT" reply --conversation 215476650395415 --purpose gdpr-erasure --customer-facing \
+    --body "We have removed your profile from Muso."
+  [ "$status" -eq 0 ]
+  [ "$(curl_calls)" -eq 1 ]
+}
+
+@test "a preflight refusal does NOT consume the claim, so a corrected retry still works" {
+  # A refusal is not a send. If the leak scan or a flag check refuses, the claim must survive so the pipeline's
+  # next attempt (with corrected copy) is not blocked by a claim nobody spent.
+  claim_letter 215476650395415 "We have removed your profile from Muso."
+  run "$SCRIPT" reply --conversation 215476650395415 --purpose gdpr-erasure --body "We have removed your profile from Muso."
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--customer-facing"* ]]
+  [ "$(curl_calls)" -eq 0 ]
+  [ -z "$(sqlite3 "$INTERCOM_OPS_TEST_GDPR_REGISTER" "SELECT consumed_at FROM erasure_sends WHERE target='215476650395415'")" ]
+  run "$SCRIPT" reply --conversation 215476650395415 --purpose gdpr-erasure --customer-facing \
+    --body "We have removed your profile from Muso."
+  [ "$status" -eq 0 ]
+  [ "$(curl_calls)" -eq 1 ]
+}
+
+@test "a purpose reply is refused when the claim is already sent, not sending" {
+  claim_letter 215476650395415 "the approved letter" 1 sent
+  run "$SCRIPT" reply --conversation 215476650395415 --purpose gdpr-erasure --customer-facing \
+    --body "the approved letter"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"no letter the erasure pipeline has claimed"* ]]
+  [ "$(curl_calls)" -eq 0 ]
+}
+
+@test "a purpose reply is refused when the claim belongs to a closed request" {
+  claim_letter 215476650395416 "the approved letter" 2
+  run "$SCRIPT" reply --conversation 215476650395416 --purpose gdpr-erasure --customer-facing \
+    --body "the approved letter"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"not an OPEN request in the erasure register"* ]]
+  [ "$(curl_calls)" -eq 0 ]
+}
+
+@test "a purpose reply accepts --body-file, because the body is read before it is matched" {
+  claim_letter 215476650395415 "a letter from a file"
+  printf '%s' "a letter from a file" > "$TEST_TMPDIR/letter.txt"
+  run "$SCRIPT" reply --conversation 215476650395415 --purpose gdpr-erasure --customer-facing \
+    --body-file "$TEST_TMPDIR/letter.txt"
+  [ "$status" -eq 0 ]
+  [[ "$output" == "POSTED comment conversation=215476650395415 part=52987726093" ]]
+  [ "$(payload | jq -r .body)" = "a letter from a file" ]
+}
+
+@test "every purpose in the table has an ownership arm, so the table alone cannot widen the blast radius" {
+  table="$(sed -n 's/^readonly PURPOSE_TABLE="\(.*\)"$/\1/p' "$REAL_SCRIPT")"
+  [ -n "$table" ]
+  arms="$(sed -n '/^purpose_owns_conversation()/,/^}/p' "$REAL_SCRIPT" | sed -n 's/^    \([a-z0-9-]*\))$/\1/p')"
+  for p in $table; do
+    [[ " $arms " == *" $p "* ]] || { echo "purpose '$p' has no ownership arm"; return 1; }
+  done
+}
+
+@test "a purpose reply is refused for a conversation the register does not own" {
+  run "$SCRIPT" reply --conversation 999999999 --purpose gdpr-erasure --customer-facing --body "x"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"not an OPEN request in the erasure register"* ]]
+  [ "$(curl_calls)" -eq 0 ]
+  [ "$(log_count)" -eq 0 ]
+}
+
+@test "a purpose reply is refused for a CLOSED request, so a finished thread cannot be written to" {
+  # The register owns this conversation, but the request is finished. Counting it would let a caller with the
+  # writer token post arbitrary customer-facing text to a closed request with no human approval and no live
+  # statutory send - the hole QA found on PR #1820.
+  run "$SCRIPT" reply --conversation 215476650395416 --purpose gdpr-erasure --customer-facing --body "x"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"not an OPEN request in the erasure register"* ]]
+  [ "$(curl_calls)" -eq 0 ]
+  [ "$(log_count)" -eq 0 ]
+}
+
+@test "a purpose reply is refused when the register cannot be read" {
+  export INTERCOM_OPS_TEST_GDPR_REGISTER="$TEST_TMPDIR/absent.sqlite"
+  run "$SCRIPT" reply --conversation 215476650395415 --purpose gdpr-erasure --customer-facing --body "x"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"not readable"* ]]
+  [ "$(curl_calls)" -eq 0 ]
+}
+
+@test "a purpose reply is refused when the register has no erasure_requests table" {
+  sqlite3 "$TEST_TMPDIR/empty.sqlite" 'CREATE TABLE unrelated (x);'
+  export INTERCOM_OPS_TEST_GDPR_REGISTER="$TEST_TMPDIR/empty.sqlite"
+  run "$SCRIPT" reply --conversation 215476650395415 --purpose gdpr-erasure --customer-facing --body "x"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"does not answer the ownership query"* ]]
+  [ "$(curl_calls)" -eq 0 ]
+}
+
+@test "a purpose may not be combined with a human approver or requester" {
+  run "$SCRIPT" reply --conversation 215476650395415 --purpose gdpr-erasure --customer-facing \
+    --approved-by U7RP6HKUZ --body "x"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"mutually exclusive"* ]]
+  run "$SCRIPT" reply --conversation 215476650395415 --purpose gdpr-erasure --customer-facing \
+    --requested-by U7RP6HKUZ --body "x"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"mutually exclusive"* ]]
+  [ "$(curl_calls)" -eq 0 ]
+}
+
+@test "an unknown purpose is refused" {
+  run "$SCRIPT" reply --conversation 215476650395415 --purpose refunds --customer-facing --body "x"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"not a purpose this writer knows"* ]]
+  [ "$(curl_calls)" -eq 0 ]
+}
+
+@test "a purpose does not apply to an internal note" {
+  run "$SCRIPT" note --conversation 215476650395415 --purpose gdpr-erasure --audience team --body "x"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"applies to 'reply' only"* ]]
+  [ "$(curl_calls)" -eq 0 ]
+}
+
+@test "a purpose reply still needs --customer-facing and still passes the leak scan" {
+  # The claim is seeded so the ownership gate passes and these later gates are actually reached.
+  claim_letter 215476650395415 "x"
+  claim_letter 215476650395415 "see https://github.com/Muso-AI/hydra/issues/1"
+  run "$SCRIPT" reply --conversation 215476650395415 --purpose gdpr-erasure --body "x"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--customer-facing"* ]]
+  run "$SCRIPT" reply --conversation 215476650395415 --purpose gdpr-erasure --customer-facing \
+    --body "see https://github.com/Muso-AI/hydra/issues/1"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"internal surfaces"* ]]
+  [ "$(curl_calls)" -eq 0 ]
+}
 
 @test "a requester outside the write allowlist is refused" {
   run "$SCRIPT" note --conversation 1 --requested-by U0ANK0VS75F --audience team --body "x"
@@ -363,4 +613,81 @@ curl_calls() { if [ -f "$CURL_STUB_LOG" ]; then wc -l < "$CURL_STUB_LOG" | tr -d
   run "$SCRIPT" close --conversation 1 --requested-by U038BM16T7W
   [ "$status" -eq 2 ]
   [ "$(curl_calls)" -eq 0 ]
+}
+
+@test "a FAILED audit-record write leaves the claim intact, so the letter is retryable (QA #1820)" {
+  # The finding this pins: the purpose path used to consume the claim BEFORE building/writing its audit
+  # record. Every way that block fails - an unwritable dir, a jq that cannot build the JSON, a full disk -
+  # exits 1 through `set -e` ABOVE the POST. `_intercom_send` cannot tell a bare 1 from a dropped
+  # connection, so it reads Ambiguous, `deliver` records `unknown`, and `unknown` is the never-retried
+  # state: a statutory letter nobody received is stranded forever.
+  #
+  # A read-only log dir reproduces it exactly - mkdir -p succeeds on an existing dir, and the `>` onto
+  # "$LOG_FILE" fails with a bare 1, which is the disk-full shape QA named.
+  claim_letter 215476650395415 "We have removed your profile from Muso."
+  chmod 500 "$INTERCOM_OPS_TEST_LOG_DIR"
+  run "$SCRIPT" reply --conversation 215476650395415 --purpose gdpr-erasure --customer-facing \
+    --body "We have removed your profile from Muso."
+  chmod 700 "$INTERCOM_OPS_TEST_LOG_DIR"
+  # EXIT 2 WITH AN `ERROR:` PREFIX, not a bare 1. `send.WRITER_PREFLIGHT_RC` maps 2 to `ERROR:`, which is what makes
+  # `deliver` record `failed` (retryable) instead of `unknown` (never retried). A bare 1 is indistinguishable from a
+  # dropped connection after a POST, so the letter would still be stranded even with its claim intact (QA #1820).
+  [ "$status" -eq 2 ]
+  # `ERROR:` must be on its own line: bash prints the redirection diagnostic first, so the line that matters is the
+  # writer's, and `send._intercom_send` matches the prefix per line for exactly that reason.
+  [[ "$output" == *"ERROR: cannot write the audit record"* ]]
+  [[ "$output" == *"refusing to write unlogged"* ]]
+  [ "$(curl_calls)" -eq 0 ]
+  # THE ASSERTION THAT MATTERS: nothing was posted AND the claim was not burned.
+  [ -z "$(sqlite3 "$INTERCOM_OPS_TEST_GDPR_REGISTER" "SELECT consumed_at FROM erasure_sends WHERE target='215476650395415'")" ]
+  [ "$(sqlite3 "$INTERCOM_OPS_TEST_GDPR_REGISTER" "SELECT state FROM erasure_sends WHERE target='215476650395415'")" = "sending" ]
+  # And the retry works, which is the whole point of leaving the claim intact.
+  run "$SCRIPT" reply --conversation 215476650395415 --purpose gdpr-erasure --customer-facing \
+    --body "We have removed your profile from Muso."
+  [ "$status" -eq 0 ]
+  [[ "$output" == POSTED* ]]
+  [ "$(curl_calls)" -eq 1 ]
+  [ -n "$(sqlite3 "$INTERCOM_OPS_TEST_GDPR_REGISTER" "SELECT consumed_at FROM erasure_sends WHERE target='215476650395415'")" ]
+}
+
+@test "one POST consumes exactly ONE claim, so two requests on one conversation both keep a letter" {
+  # QA #1820: the consume matched conversation + body hash, not a row, and accepted any positive changes(). Two
+  # open requests sharing a conversation with identical copy therefore had BOTH claims consumed by one invocation
+  # while only one reply was posted - the second letter was left `sending` with its claim spent and could never go
+  # out. Exactly one claim per POST is the invariant.
+  claim_letter 215476650395415 "We have removed your profile from Muso."
+  # A SECOND open request for the same conversation, carrying a claim for the SAME approved bytes.
+  sqlite3 "$INTERCOM_OPS_TEST_GDPR_REGISTER" \
+    "INSERT INTO erasure_requests (id, conversation_id, status) VALUES (3, '215476650395415', 'open');"
+  claim_letter 215476650395415 "We have removed your profile from Muso." 3
+  [ "$(sqlite3 "$INTERCOM_OPS_TEST_GDPR_REGISTER" \
+      "SELECT count(*) FROM erasure_sends WHERE target='215476650395415' AND consumed_at=''")" -eq 2 ]
+  run "$SCRIPT" reply --conversation 215476650395415 --purpose gdpr-erasure --customer-facing \
+    --body "We have removed your profile from Muso."
+  [ "$status" -eq 0 ]
+  [ "$(curl_calls)" -eq 1 ]
+  # EXACTLY ONE consumed. Not two: the second request still owns an unspent claim and can still be sent.
+  [ "$(sqlite3 "$INTERCOM_OPS_TEST_GDPR_REGISTER" \
+      "SELECT count(*) FROM erasure_sends WHERE target='215476650395415' AND consumed_at=''")" -eq 1 ]
+  # And the second letter can go out, which is the point of not spending its claim.
+  run "$SCRIPT" reply --conversation 215476650395415 --purpose gdpr-erasure --customer-facing \
+    --body "We have removed your profile from Muso."
+  [ "$status" -eq 0 ]
+  [ "$(curl_calls)" -eq 2 ]
+  [ "$(sqlite3 "$INTERCOM_OPS_TEST_GDPR_REGISTER" \
+      "SELECT count(*) FROM erasure_sends WHERE target='215476650395415' AND consumed_at=''")" -eq 0 ]
+}
+
+@test "the consume is ordered AFTER the audit record and immediately BEFORE the POST" {
+  # A structural guard, because the bug above is an ORDERING bug and an ordering bug is invisible to a
+  # test that only exercises the happy path. This fails if anyone moves the consume back above the log
+  # write (stranding letters on a failed record) or below the POST (allowing a replayed letter).
+  log_dir_line="$(grep -n 'mkdir -p "$LOG_DIR"' "$SCRIPT" | head -1 | cut -d: -f1)"
+  log_file_line="$(grep -n '> "$LOG_FILE"' "$SCRIPT" | head -1 | cut -d: -f1)"
+  consume_line="$(grep -n 'purpose_consume_claim "$PURPOSE" "$CONVERSATION"' "$SCRIPT" | head -1 | cut -d: -f1)"
+  post_line="$(grep -n -- '--data @-' "$SCRIPT" | head -1 | cut -d: -f1)"
+  [ -n "$log_dir_line" ] && [ -n "$log_file_line" ] && [ -n "$consume_line" ] && [ -n "$post_line" ]
+  [ "$log_dir_line" -lt "$log_file_line" ]
+  [ "$log_file_line" -lt "$consume_line" ]
+  [ "$consume_line" -lt "$post_line" ]
 }

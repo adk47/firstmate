@@ -14,7 +14,7 @@ big-name / safety cases, and (with the captain) anything irreversible. Runs on n
 | hide | `hide-batch` plans identity-PASS profile pages, most overdue first, skips ids already in an open PR, and opens ONE H-DevOps PR (`HIDDEN_ENTITY_IDS`, prod + dev: 410 + noindex) and ONE platform-data-processing PR (`LEGAL_HIDDEN_ENTITY_IDS` + the strict-equality test's `ERASURE_PROFILES`, ref `gdpr-erasure-register-<n>`). A person merges. Only the anonymous 410 + noindex read-back (`mark-hidden`, every tick) sets `hidden_at`, per ELIGIBLE page (`hidden_pages`): a row that carries a PASS page next to an ASK / Jan page records its hide as soon as the PASS page is down, while a letter still waits for the whole row | `gdpr_pipeline/hide_batch.py`, `checks.public_gone` |
 | confirm | for rows due within 3 d (or hidden): the approved letter (`erasure-confirmation-template.md`), lines S/P/M only from THIS run's checks (S: public autocomplete exact/lower/prefix; a FULL results page without the id is "cannot verify here" → `Unknown`, never "absent" — the endpoint has no paging, so a name with more matches than its cap can hide the target; P: 410 + noindex on /profile and /credits; M: every sitemap file walked, one unreadable file = no M line), `[D-no]` always, G never | `gdpr_pipeline/copy.py`, `checks.py` |
 | asks | the approved lines only, verbatim: link line (no page), v2 step 1 (identity), authorisation line (representative). A row ALREADY past its statutory date carries the past-due opening line first ("the deletion request you made on {date} is in progress ...") because the ruling requires the letter to acknowledge the delay instead of reading as a fresh promise — and while `copy.PROGRESS_LINE_APPROVED` is False a past-due ask is **REFUSED** (ledgered, retryable), never sent missing that sentence and never sent with wording nobody reviewed | `copy.ASK`, `copy.progress_line` |
-| **send** | ONE ledgered letter per request through the approved writers: `intercom-ops-write.sh reply --customer-facing --approved-by <human>` for a conversation, `gog gmail send --thread-id … --reply-all` from `support@muso.ai` for a support@ thread. The body is the approved copy byte for byte; `erasure_sends` holds `body_sha` + the writer's receipt, `UNIQUE(request_id, kind)` is the double-send guard, and the row is written `sending` BEFORE the writer runs | `gdpr_pipeline/send.py`, `erasure_sends` |
+| **send** | ONE ledgered letter per request through the approved writers: `intercom-ops-write.sh reply --customer-facing --purpose gdpr-erasure` for a conversation, `gog gmail send --thread-id … --reply-all` from `support@muso.ai` for a support@ thread. The body is the approved copy byte for byte; `erasure_sends` holds `body_sha` + the writer's receipt, `UNIQUE(request_id, kind)` is the double-send guard, and the row is written `sending` BEFORE the writer runs | `gdpr_pipeline/send.py`, `erasure_sends` |
 | watchdog | hourly tick pages #cs_priority (Jan) every open request at or past `due_at - 3 d` without `confirmed_at`, and identity ASKs unanswered > 7 d. The page fires per REQUEST, not per day-count: it is suppressed only for register numbers already paged today, so a request that becomes due the hour another one is confirmed is still paged. Each line carries the SEND FACT as well as the date (`no letter sent`, `no letter sent, N d past the deadline`, `letter failed`, `letter sent <date>`): "overdue" and "a letter went out" are two different claims, and on 2026-11-03 the line made only the first while 97 decided requests had no letter at all. When a row has no route at all, or the pipeline TRIED and the writer refused, the line names that and its reason (`no route for a letter (…thread is in a mailbox gog cannot write…)` / `the ask letter is refused (…)`): on 2026-11-04, 24 of the 141 approved letters were unroutable, and without the reason they read exactly like a broken pipeline instead of a missing mailbox auth. The route check is a pure capability test (`send.route`), so it names the blocker before anything has been attempted — the ledger only knows about attempts that happened | `run.watchdog_rows`, `erasure_sends` |
 | gone pages | a page that answers 404 in the catalog AND publicly, with no merge record, was removed by something other than the hide process (the class of markdown register #36). `removed_outside_process` records those ids per row so the Jan item can cite the store instead of re-deriving it from the markdown; such a row is never hidden again and its letter waits for a person to say what was done | `run.decide_row`, `identity.GONE` |
 | half-hidden pages | a hide needs BOTH lists — `HIDDEN_ENTITY_IDS` in H-DevOps drives the app-side hide, the PDP sitemap `legal_hidden` drives the 410 — and the two halves ship in **separate PRs**, so there is a window where the page answers 404 to the catalog and the public read while only one list holds it. `HIDDEN_PENDING` records that window and names which list is missing. Reading it as `GONE` files our own half-finished work as somebody else's deletion and sends it to Jan to explain; reading it as `ALREADY_HIDDEN` claims a hide that has not happened. It owes no letter either way. Measured live 2026-11-04: 9 open rows, all PDP-only, all waiting on the H-DevOps counterpart PR | `identity.HIDDEN_PENDING`, `sources.half_hidden`, `page_facts(..., half=)` |
@@ -40,7 +40,9 @@ big-name / safety cases, and (with the captain) anything irreversible. Runs on n
   `copy.PIPELINE_SENDS_APPROVED` — a rollback flips it to `False` and every send refuses at once, no adapter change;
   (2) `--approved-by <Slack user id>`: one of the three people (Aaron / Jan / Nick) **or** the approved sender seat
   (`verify-sla-driver-fable-d2`, which posts through the DEVOPS bot — its id is that bot's `auth.test` user id, or
-  `GDPR_APPROVER_SEAT` when set, never a name we were given);
+  `GDPR_APPROVER_SEAT` when set, never a name we were given). **This is the ledger's record of who authorized the
+  batch; it is NOT who posts.** The Intercom writer is called in its `--purpose gdpr-erasure` mode, which carries no
+  human id at all (see "The Intercom writer's purpose mode" below);
   (3) **an approval record, not chat text**: one top-level message in the approval channel (default #clio_devops,
   `GDPR_APPROVAL_CHANNEL` overrides, and a channel set to empty switches approvals OFF) that is EXACTLY
   ```
@@ -149,16 +151,120 @@ big-name / safety cases, and (with the captain) anything irreversible. Runs on n
   together so the window cannot drift away from the thing it is derived from. Dry run unless `--apply`. Written for 2026-11-07, when
   114 rows sat in `unknown` — every one a `REFUSED:` — and the confirm batch was approved and delivered ZERO of 20
   because each row was blocked by an earlier claim nobody could clear.
+  - **A writer REFUSAL is one of the provable ones, and it is read from the writer's own exit-code contract.**
+    `intercom-ops-write.sh` documents 0 ok · 1 refusal · 2 usage/environment error · 4 post failed or wrong
+    part_type, and its `refuse()`/`die()` are the only producers of 1 and 2 and are only ever called in the
+    validation block ABOVE the POST. So a 1 carrying `REFUSED:` or a 2 carrying `ERROR:` proves nothing was posted
+    and the letter is `failed` (retryable); a 4, a timeout, or a bare 1 (how `set -e` reports an unexpected failure)
+    stays `unknown`. Getting this wrong is not cosmetic: on 2026-11-06 the first live send tick refused 40 letters
+    (the sender seat is not on the writer's human allowlist) and every one was recorded `unknown`, i.e. permanently
+    stranded. `gdpr-pipeline.py reconcile` is the repair for rows written before the distinction existed — it moves
+    an `unknown` row to `failed` only when the recorded detail matches the pre-POST signature AND the register row is
+    still open, and reports the rest as still a human's. It prints the `unknown` count before and after, so the
+    repair is measured rather than asserted. **The tick runs it before it sends** (under the same `--send` guard), so
+    a stranded letter heals on the next tick with no human step: the 2026-11-06 outage was not only the wrong state,
+    it was that the repair was a command somebody had to remember to run.
+
+### Recovering a missing requester address
+
+A row with no `requester_email` cannot be answered at all: there is nowhere to open the new thread that a thread in
+an alias mailbox needs. `gdpr-pipeline.py recover-addresses` reads the address out of a source the person themselves
+supplied, in this order, and records it on the row:
+
+1. **the Intercom conversation** — the email on a CUSTOMER-authored source message, else the contact's email;
+2. **the Gmail thread**, read from the mailbox that owns it — but only when this host can actually read that
+   mailbox, which today means `support@`.
+
+Two rules make the answer honest rather than merely non-empty:
+
+- **The sender is the first message in the thread that is not one of OURS.** Not the first message (11 support@ rows
+  are threads WE opened, so their first message is ours) and not the last (a thread we replied to ends with our own
+  address). Measured on the live register, 10 of the 19 addresses the first pass found were `support@muso.ai` —
+  recording that as the requester would open the next statutory letter to ourselves, which is worse than having no
+  address because it looks like progress.
+- **A mailbox we cannot read is reported, never guessed at.** `notices@` and `legal@` are aliases for people, not
+  accounts, so their threads are unreadable here and the row says so.
+
+Measured on the live register, 2026-11-06: **100 open rows had no address; 9 were recovered; 91 genuinely have none
+anywhere the pipeline can reach** — 54 in a notices@/legal@ thread (35 + 19), 13 Intercom conversations carrying no
+email on the contact or the customer's message, 11 support@ threads that are entirely ours, and 14 rows with neither
+a conversation nor a thread (11 support, 3 register). Those 91 are the only ones that still need a human.
+
+### The Intercom writer's purpose mode
+
+A statutory erasure letter is not a human request. It is an obligation with its own clock, and the writer's human
+allowlist exists to stop a bot writing to the inbox as if somebody asked. So the writer has a **third identity
+class**, not a fourth human: `reply --purpose gdpr-erasure`.
+
+- **A purpose is a machine authorization the repo has already ruled on.** `PURPOSE_TABLE` in
+  `scripts/intercom-ops-write.sh` is the whole list; a purpose not in it does not exist. Each purpose names the ONE
+  identity it posts as (`system:gdpr-pipeline`), the ONE message shape it may use (`comment`), and the register that
+  must OWN the conversation.
+- **Ownership is checked in the writer, below the caller.** The writer refuses any conversation that is not an
+  **open** row in `erasure_requests`. A bug in the pipeline therefore cannot widen the blast radius to the rest of
+  the inbox. An unreadable register, or one with no `erasure_requests` table, is a refusal — never a pass. The
+  ownership READ is read-only; the single-use claim CONSUME (below) is the one write the writer makes to
+  `/var/lib/hydra-gdpr/erasure.sqlite`, and it touches only `erasure_sends.consumed_at`.
+- **The BYTES are checked too, not just the thread.** Ownership alone would make the writer a general-purpose
+  customer-facing poster for anyone who can run it: the human allowlist would be bypassed by a flag, and the only
+  remaining gate would be "is this conversation in the register". So the body must match a letter the pipeline has
+  **already claimed** — `claim_send` writes a `sending` row carrying the conversation as its target and the sha256 of
+  the exact approved copy *before* it invokes the writer, so a matching row proves the pipeline composed this text
+  for this thread under its own copy, standing-ruling and ledger gates. Arbitrary text has no such row and is
+  refused. A `sent` claim does not match either: the letter is already out.
+- **The claim is CONSUMED, atomically — a read-only check is not a claim.** Asking "is there a `sending` row" and
+  then POSTing leaves a window: if the POST lands but the pipeline has not yet recorded `sent`, or two invocations
+  overlap, the same check passes twice and the customer gets the same statutory letter twice. `UNIQUE(request_id,
+  kind)` does not close it, because it bounds the PIPELINE's rows, not direct invocations of the writer. So the
+  check is one conditional `UPDATE … SET consumed_at=… WHERE … AND state='sending' AND consumed_at=''` followed by
+  `SELECT changes()`, and exactly one row must change. SQLite serialises writers, so of two concurrent calls exactly
+  one wins and the other is refused. `store.claim_send` clears `consumed_at` when it legitimately reuses a
+  `failed`/`refused` slot, so a real retry still works; a crash between the consume and `finish_send` leaves the row
+  `sending` with `consumed_at` set, which is the correct "a letter may be out there" state and is never retried.
+- **The consume runs LAST, after every no-write exit and every refusal.** `--validate` and `--dry-run` must not burn
+  a claim: if they did, the no-write mode would succeed without POSTing, the real reply would then be refused, and
+  an owed statutory letter would silently never go out. So `purpose_owns_conversation()` only READS, and
+  `purpose_consume_claim()` runs immediately before the logged POST. A preflight refusal (leak scan, a missing
+  `--customer-facing`, a bad flag) likewise leaves the claim intact, so a corrected retry still works.
+- **`--purpose` is mutually exclusive with `--requested-by` and `--approved-by`.** The audit record must say what
+  actually happened, and "a human approved this" would be a lie in the trail. The api-log entry carries
+  `approved_by: system:gdpr-pipeline`, `requester: system:gdpr-pipeline`, `purpose: gdpr-erasure`, and an
+  `authorization` line naming the register ownership that bounded it.
+- **Why not just add the devops seat to the human allowlist** (the 2026-11-06 temptation): that would let the bot
+  write to ANY conversation — every customer thread, not just the ones the register owns — and the log would still
+  claim a human asked. Bigger blast radius, invisible in the trail.
+- The ledger's `approved_by` still records the standing ruling's approver. That is the authorization chain and it is
+  a different fact from who posted.
 - **A confirmation has TWO letters and they get two slots.** An interim letter goes out while the pages are not yet
   off the public view ("the remaining step is in progress"); the final one says they no longer show the information.
   The interim is ledgered in `confirm-interim` and sets `interim_confirm_at`; only the final uses the `confirm` slot
   and sets `confirmed_at`, which is what takes the row out of the confirmation queue. With one slot the interim
   consumed it and the closing letter could never send. The deadline alert names which one happened — "interim letter
   sent …, final letter NOT sent" — because "no letter sent" while one is with the customer is the wrong fact.
-  - **Every route fails closed.** A `legal@` / `notices@` thread is REFUSED, not skipped: those mailboxes are not
-    authed in gog on node-8, so the letter cannot be threaded there and the ledger records `refused` with that
-    reason. Same for a non-numeric conversation id or a row with neither a conversation nor a thread: the pipeline
-    never opens a new thread with copy nobody approved.
+  - **Every route fails closed.** A non-numeric conversation id, or a row with neither a conversation nor a thread,
+    is REFUSED: the pipeline never opens a new thread with copy nobody approved.
+  - **An unmeasurable host fact never picks the customer-facing route.** `gog auth list -j` failing (no gog, a 30 s
+    timeout, unreadable JSON) is a THIRD state, not "writable": only the mailbox we SEND from may be assumed writable
+    when we cannot ask (the writer is the backstop and there is no other route), so an unreadable discovery sends an
+    alias-owned thread down the approved new-thread path instead of a doomed in-thread reply from support@ into a
+    thread support@ does not own. When the owner is an alias the refusal names that PERMANENT reason, never the
+    transient read — "we could not ask" and "the answer is no" have different fixes.
+  - **Every letter is sent FROM `support@muso.ai`, whatever channel the request arrived on** (captain, 2026-11-06:
+    "can you use support as your outbound channel please"). `legal@muso.ai` is an alias for Aaron and
+    `notices@muso.ai` is an alias for Kyran — neither is an account this host can sign into, so there is nothing to
+    send AS. `MAILBOX_BY_CHANNEL` is the send account (all three channels → support@);
+    `THREAD_MAILBOX_BY_CHANNEL` is the separate fact of which mailbox OWNS a thread, and the two must not be
+    collapsed: `route` needs the second to know a notices@/legal@ thread cannot be replied in, and `_mail_send`
+    needs the first to know what to send as. The lead line still names the mailbox the PERSON wrote to, because that
+    is the one sentence in the letter that has to be true.
+  - **A thread in a mailbox we cannot write becomes a NEW thread from support@, not a refusal** — provided the row
+    has a `requester_email`. With no address it still refuses, and the reason says the ADDRESS is missing rather
+    than the mailbox: those are different problems with different fixes, and an operator reading the wrong one
+    chases the wrong thing. For the two aliases the reason says "an alias for a person rather than an account"
+    instead of gog's "auth it and the route opens", which is false advice for a mailbox that does not exist.
+  - **Recovering a missing address never re-opens a claimed letter.** `recover-addresses` writes `requester_email`
+    and nothing else; a row already claimed and `unknown` stays claimed and unknown, so a mailbox change can never
+    become a second statutory letter to somebody who may already have the first.
   - **A dry run is the default** (`--send` is opt-in) and records `refused`/`dry run`, never `confirmed_at`.
     `--limit N` sends at most N, OLDEST deadline first (`oldest_first`), so a first live batch can be a canary.
 - The search flags (`search_hidden` + `search_hidden_strict`, a catalog write) are not part of the batch; the S
@@ -223,6 +329,10 @@ gdpr-pipeline.py ask --manifest batch.json   # renders EXACTLY the approved rows
 gdpr-pipeline.py report --out register.md    # the register table
 gdpr-pipeline.py dedupe                      # report post-confirmation rows that are one customer event
 gdpr-pipeline.py dedupe --apply               # close the duplicate, keys re-pointed at the row kept
+gdpr-pipeline.py reconcile                     # report `unknown` letters the writer refused BEFORE posting
+gdpr-pipeline.py reconcile --apply             # make the provable ones retryable (`failed`); the rest stay `unknown`
+gdpr-pipeline.py recover-addresses             # report the requester address for open rows that have none
+gdpr-pipeline.py recover-addresses --apply     # record the recovered ones (never touches erasure_sends)
 gdpr-pipeline.py intake --candidate -         # record ONE request pushed by another producer (see below)
 ```
 
