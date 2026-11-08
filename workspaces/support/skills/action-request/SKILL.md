@@ -79,6 +79,7 @@ Only a genuinely different request (different `actionType`) is guaranteed a new 
 |-------------|------|-----|---------|
 | `credit-claim` | 1 | none (`sla: null`) | "I produced this track, add my credit" |
 | `credit-correction` | 1 | none (`sla: null`) | "My role is listed wrong" |
+| `credit-removal` | 1 | none (`sla: null`) | "Take this credit off my profile" / "that isn't me on this track" |
 | `credit-verify` | 1 | none (`sla: null`) | A credit status or document hand-off from the `verification-handoff` skill (`details.handoff: "credit-status"` or `"document"`). Caroline never looks the credit up and never approves it. |
 | `profile-claim` | 1 | none (`sla: null`) | "I want to claim this profile" |
 | `support-general` | 1 | none (`sla: null`) | General questions needing ops follow-up. **Also used for human-handoff bail-outs** – when the customer asks for a human, gets frustrated, or the conversation loops, file with `details.escalation_reason` (see "Human Handoff" section below). **Also used for ads/sponsorship sales leads** – when a customer wants to advertise WITH Muso (buy ad space, ad packages, in-feed ads, sponsorships), file as `support-general` and keep the customer's advertising wording (e.g. "ad packages", "advertising", "ad space") in the ticket summary and `details.interest` verbatim – a keyword sweep routes these tickets to the ads owner in Slack, and paraphrasing away the ad vocabulary breaks that routing. |
@@ -212,6 +213,33 @@ against a mistyped row.
 
 In the reply, say only that it has gone to the team. No row count, no per-track
 list, no timeframe (`sla` is always null – see "Business Rules").
+### Credit Removal (`credit-removal` only)
+
+A credit coming OFF a profile, which is a different request from a wrong role. The customer's answer
+to the one approved question decides which of the two it is (`verification-handoff`), and Caroline
+never chooses for them:
+
+```json
+"details": {
+  "handoff": "credit-status",
+  "intent": "hide_mine",
+  "track_urls": ["https://credits.muso.ai/track/<id>"],
+  "customer_verbatim_request": "<their words, unmodified>"
+}
+```
+
+- `intent` is REQUIRED and is exactly `hide_mine` ("this is mine, I don't want it shown") or
+  `not_me` ("this isn't me / I'm not on this track"). Any other value is refused by the automation
+  that owns the ticket and the ticket goes to a human; never improvise one.
+- `track_urls[]` = the track link(s) they named (at most 3). When a title is all they gave, put it
+  in `track_titles[]` (at most 3) as well: the automation reads `track_ids[]`, `track_urls[]` and
+  `track_titles[]`, and a title that lives only in `customer_verbatim_request` is a ticket that names
+  no track, which parks it for a human. Never invent a link.
+- `proof_urls[]` = a link they sent after being asked to show the right person. Appended to the SAME
+  ticket, never a new one and never a `credit-verify`.
+- On behalf of an artist: `details.on_behalf: true` and the relationship.
+- Caroline still says nothing about the outcome: no "hidden", no "removed", no "done". The lane that
+  owns the ticket decides and the answer reaches them in this conversation.
 
 ### Order Fulfillment (`order-fulfillment` only)
 

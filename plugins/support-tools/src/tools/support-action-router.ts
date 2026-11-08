@@ -7,6 +7,7 @@ const IntentSchema = Type.Union([
   Type.Literal("profile_claim"),
   Type.Literal("profile_duplicates"),
   Type.Literal("remove_wrong_credits"),
+  Type.Literal("remove_own_credit"),
   Type.Literal("order_fulfillment"),
   Type.Literal("founding_member"),
   Type.Literal("billing_cancel_refund"),
@@ -170,6 +171,11 @@ export const SUPPORT_ACTION_ROUTES: Record<string, RouteDefinition> = {
     "Wrong credits / removal request (hand-off only)",
     "Answer with the approved removal paragraph and hand off; never preview, check or remove a credit.",
     "credit-correction", ["Profile URL", "Specific track titles"],
+    ["intent:credit-removal", "bundle:credits", "outcome:handoff"]),
+  remove_own_credit: verificationHandoffRoute(
+    "Credit removal: hide it, or it isn't me (hand-off only)",
+    "Ask the one approved two-option question (hide it from my profile / this isn't me), file ONE credit-removal ticket with that intent, then hand off; never preview, decide or remove a credit.",
+    "credit-removal", ["Profile URL", "Specific track titles"],
     ["intent:credit-removal", "bundle:credits", "outcome:handoff"]),
   order_fulfillment: {
     label: "Plaque or poster order fulfillment",

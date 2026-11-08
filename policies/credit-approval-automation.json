@@ -219,6 +219,19 @@
         },
         "tier_line": "popularity 1-59 (a zero is unattributable, refused), artist < 90"
       }
+    },
+    "credit-removal-executor": {
+      "description": "scripts/clickup_drain/credit_removal.py + scripts/credit_review/removal_executor.py: clears ClickUp `action:credit-removal` tickets through the TWO intents of the credit-removal model (Fable credit-removal-flow-fable-r2 §4/§7). `hide_mine` ('this is me, but hide it from my profile') writes the served-visibility hide only: no verification, no catalog delete, reversible (unhide). `not_me` ('this isn't me / I'm not on this track') files a removal claim on the core removal gate, which hides the credit at once and decides on the deterministic public-credit rule; this automation never decides a removal and never calls a catalog delete. A proof follow-up is recorded in `credit_proof_verifications` and graded by ONE tool-less Codex call (credit_trust.llm.Provider; the metered OpenRouter rung is the shared ladder every other credit judgement uses), and the graded proof is POSTed to the gate's own proof route as evidence on the EXISTING claim (once per request+proof, never re-filing the claim); until that route exists the ticket says `proof_awaiting_gate` (proof received, graded X, awaiting gate) and the internal ask for proof is not repeated. Identity comes from the verified Intercom contact through credit_review.identity_resolver, never from the ticket text. Every write is a line in /var/lib/hydra/credit-removal/ledger.jsonl with an inverse (unhide / withdraw) and is replayable with `--revert <run_id>`.",
+      "entrypoints": [
+        "clickup_drain/credit_removal.py"
+      ],
+      "cron_names": [
+        "clickup-credit-removal-hourly"
+      ],
+      "approved": false,
+      "approved_by": null,
+      "approval_ref": null,
+      "status_note": "SHIPS UNAPPROVED, on purpose. Three separate gates must open before a credit is hidden or a claim is filed: (1) THIS entry must be flipped to approved:true with the captain's approved_by + approval_ref, because a hide is customer-visible on a named person's profile and the first batch is signed off from the dry run (one line per ticket: intent, track, roles, identity match and the disposition); (2) /etc/hydra/credit-removal-executor.live must exist, because the core routes it calls are new (C1's hide primitive, C2's gate request) and a human has to record that core really admits this automation; and (3) the routes must actually answer: while C1/C2 are unmerged every row is `authority_unavailable` (the run reports it and writes nothing) rather than falling back to the legacy removal path. Kill switches: /etc/hydra/clickup-drain-credit-removal.disabled (the drainer), /etc/hydra/credit-removal-executor.disabled (the executor), the cron's enabled:false, and this flag. Caps: 20 rows/run, 3 rows/ticket. The two intents are the ONLY actions; the cron ships dry-run."
     }
   }
 }

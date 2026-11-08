@@ -2046,6 +2046,34 @@
       "state": {
         "consecutiveErrors": 0
       }
+    },
+    {
+      "id": "c3f0a44e-6c1d-4f7e-9a51-0b7d2e6c9a10",
+      "agentId": "operations",
+      "name": "clickup-credit-removal-hourly",
+      "description": "Hourly DRY RUN of the credit-removal drainer: reads every open ClickUp `action:credit-removal` ticket (the app modal's 'this is me, hide it' / 'this isn't me' choice, and Caroline's two-option question), resolves the ticket's identity from its VERIFIED Intercom contact, and asks scripts/credit_review/removal_executor.py to decide each row. Prints, per row, the intent, the track, the roles it covers, whether the verified account presents that profile at all, and the disposition (hide | gate_filed | proof_required | identity_unlinked | track_unresolved | authority_unavailable ...), plus one digest line per ticket that was not written. Writes NOTHING: no hide, no gate request, no ClickUp tag, no proof row. Apply mode (argv gains --apply) is gated three ways and is NOT enabled here: policies/credit-approval-automation.json 'credit-removal-executor' must be approved by the captain, /etc/hydra/credit-removal-executor.live must exist, and core must actually serve C1's hide route and C2's gate-request route (otherwise every row reports authority_unavailable and nothing is written). Ship enabled:false: the registry entry is unapproved, and CI (scripts/check-credit-approval-automation.sh) refuses an enabled cron over an unapproved entry.",
+      "enabled": false,
+      "createdAtMs": 1793900000000,
+      "updatedAtMs": 1793900000000,
+      "schedule": {
+        "kind": "cron",
+        "expr": "40 * * * *",
+        "tz": "UTC"
+      },
+      "sessionTarget": "isolated",
+      "wakeMode": "now",
+      "payload": {
+        "kind": "command",
+        "argv": [
+          "python3",
+          "/opt/hydra/scripts/clickup_drain/credit_removal.py"
+        ],
+        "cwd": "/opt/hydra",
+        "timeoutSeconds": 900
+      },
+      "delivery": {
+        "mode": "none"
+      }
     }
   ]
 }

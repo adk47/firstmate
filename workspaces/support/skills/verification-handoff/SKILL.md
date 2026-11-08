@@ -33,6 +33,7 @@ hand the customer off.
    |---|---|---|
    | a missing credit | `credit-claim` | `credit-status` |
    | a wrong role / wrong credit, or "remove these credits" | `credit-correction` (several tracks: `bulk-credit-change`) | `credit-status` |
+   | "take this credit off my profile", "hide it", or "that isn't me on this track" | `credit-removal` | `credit-status` |
    | a pending / stuck credit, "where is my credit request" | `credit-verify` | `credit-status` |
    | a document, screenshot or link as proof for a credit | `credit-verify` | `document` |
    | their profile claim (status, rejected, stuck, on behalf of an artist) | `profile-claim` | `claim` |
@@ -55,6 +56,12 @@ hand the customer off.
      or, when they name only the other artist, `details.suspect_artist_names[]` = those names, in
      their words.
    - `track-merge`: `details.track_merge_pairs[{master, duplicates[]}]`.
+   - `credit-removal` (the customer wants a credit off their profile): `details.intent` is REQUIRED
+     and is exactly one of the two answers below, in their words, never your guess. `details.track_urls[]`
+     = the track link(s) they named (at most 3); when a title is all they gave, `details.track_titles[]`
+     (at most 3) as well, because a title that lives only in `customer_verbatim_request` is a ticket
+     that names no track and it parks for a human. `details.proof_urls[]` = a link they sent after being
+     asked to show the right person. Contract: `docs/credit-verification/credit-removal.md`.
    - If `create_ticket` returns a capture-incomplete refusal, ask for exactly the missing link and
      nothing else, then file again.
    - On behalf of an artist (manager / label / publisher): `details.on_behalf: true` and the
@@ -87,6 +94,32 @@ hand the customer off.
 
 4. If `create_ticket` fails, follow the SOUL Contact Disclosure; never claim a handoff that did not
    happen.
+
+## The one removal question, and the two intents
+
+A credit can come off a profile for two different reasons, and they are not the same request. Ask
+exactly this, once, in these words, and only when the customer has not already said which one it is:
+
+<!-- approved: captain 2026-11-04, the removal modal's two choices -->
+> Is this track yours but you'd rather it wasn't shown on your profile, or is this not you on the track?
+
+Then file ONE `credit-removal` ticket with `details.intent` set to their answer:
+
+| their answer | `details.intent` | what the ticket is |
+|---|---|---|
+| it is theirs, they don't want it shown | `hide_mine` | their own choice about their own profile; no proof is asked for |
+| it is not them / they are not on the track | `not_me` | a request to take a credit off a profile because the person is wrong; the verification lane asks for proof if it needs it |
+
+- **Never pick the intent for them.** If they have not answered, ask once; if they still have not,
+  file `credit-correction` and hand off. Guessing `hide_mine` takes a credit off someone's profile
+  without their choice; guessing `not_me` starts a wrong-person claim against their own credit.
+- **Never say which one will happen.** Not "it will be hidden", not "we'll remove it", not "that's
+  done": the lane that owns the ticket decides, and the outcome reaches them in this conversation.
+- A proof they send after the ticket is filed goes on the SAME ticket: append `details.proof_urls[]`
+  to that ticket (one ticket per conversation per kind), never a new one, and never a `credit-verify`.
+- An artist-role credit ("Primary Artist", "Featured Artist") is still one of these two choices: the
+  `not_me` answer is the one that unscrambles a wrong artist credit.
+- On behalf of an artist: `details.on_behalf: true` and the relationship, as for every other kind.
 
 ## Hard lines
 

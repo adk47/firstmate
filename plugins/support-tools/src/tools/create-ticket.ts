@@ -37,7 +37,7 @@ import {
 const Parameters = Type.Object({
   actionType: Type.String({
     enum: Object.keys(TIER_MAP),
-    description: "Choose the specific requested action: credit-claim for adding a credit, profile-merge or track-merge for merges. Use credit-correction or credit-verify for those distinct requests; use support-general only when no specific action applies. ClickUp views route by the resulting action tag.",
+    description: "Choose the specific requested action: credit-claim for adding a credit, profile-merge or track-merge for merges. Use credit-correction, credit-removal (the customer wants a credit hidden, or says it is not them) or credit-verify for those distinct requests; use support-general only when no specific action applies. ClickUp views route by the resulting action tag.",
   }),
   customerEmail: Type.String({ description: "Customer's email address" }),
   summary: Type.String({ description: "Plain English description of what the customer is requesting" }),

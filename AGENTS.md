@@ -694,6 +694,14 @@ admin credit DELETE routes and on approved->unverified/rejected take-backs, and
 approved->user_verification_needed is illegal (the only exit deletes every role on the
 request). Retro take-backs are role-scoped and run from a named human's own session via
 `scripts/credit-retro.py` (`docs/credit-verification/credit-retro-r1.md`).
+Customer-initiated removal is TWO intents, never one: `hide_mine` (the owner's right: a
+served-visibility hide, no verification, reversible) and `not_me` (a claim on the removal gate, which
+decides on the live public-credit rule). `scripts/clickup_drain/credit_removal.py` +
+`scripts/credit_review/removal_executor.py` execute them from ClickUp under `credit-removal@hydra-ops`,
+with identity resolved from the VERIFIED Intercom contact (never the ticket text), every write on an
+append-only ledger with an inverse, and `--revert <run_id>`. It decides no removal and calls no
+catalog delete: while core C1/C2 are unmerged every row is `authority_unavailable` and nothing is
+written (`docs/credit-verification/credit-removal.md`).
 The "we added your credit, please help us verify it" note to users goes ONLY through
 `scripts/intercom-verify-request.sh` (fixed copy, captain-approved, idempotent via the
 verify ledger); see `docs/credit-verification/verify-request-notes.md`.

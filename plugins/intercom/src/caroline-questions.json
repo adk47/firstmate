@@ -40,6 +40,7 @@
       "other": "None of the above intents match the customer's request.",
       "profile_claim": "Answer in approved wording and hand off to the claim lane; never read, verify or approve a claim.",
       "profile_duplicates": "Answer in approved wording and hand off to the merge agent; never check duplicates or merge.",
+      "remove_own_credit": "Ask the one approved two-option question (hide it from my profile / this isn't me), file ONE credit-removal ticket with that intent, then hand off; never preview, decide or remove a credit.",
       "remove_wrong_credits": "Answer with the approved removal paragraph and hand off; never preview, check or remove a credit."
     },
     "instructions": "Caroline is Muso's support agent. Judge the customer's LAST message in the context of the conversation. Pick the single support intent that best matches the customer's request.",

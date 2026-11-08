@@ -28,7 +28,8 @@ A name is never an input. A pending / rejected / closed claim confers nothing.
 
 Consumers: credit_review.verify_notify (user.presented_ids for Caroline's gate), intercom_reconcile
 (an account's own presented profile is never an "orphan"), paid-status/email_route.py (the A3
-check), and the proof_intake filer (matched_by = presented_profile).
+check), the proof_intake filer (matched_by = presented_profile), and the credit-removal drainer
+(`owns`, the ownership question: is this profile THIS account's own?).
 """
 from __future__ import annotations
 
@@ -129,6 +130,22 @@ def resolve(exts: Iterable[str], query: Query) -> dict[str, Resolution]:
     xs = sorted({str(x or "").strip() for x in exts} - {""})
     own, rev = facts(xs, query)
     return {x: decide(x, own.get(x, {}), rev.get(x, set())) for x in xs}
+
+
+def owns(user_id: int | str, profile_id: str, query: Query) -> bool:
+    """Whether `profile_id` is THIS account's own: its neptuneprofessionalid, its representation
+    profile, or the profile of a processed, non-deleted claim it holds. False for ambiguity (another
+    account also owns it, or had a reverted claim on it) and for anything else.
+
+    The ONE ownership question, asked at the shared identity boundary: a caller that needs "is this
+    profile mine" (the credit-removal drainer) must not re-derive it from `presented_ids`, which
+    deliberately strips the account's own professional id."""
+    uid = str(user_id or "").strip()
+    pid = str(profile_id or "").strip()
+    if not uid.isdigit() or not pid or not EXT_RE.match(pid):
+        return False
+    res = resolve([pid], query).get(pid)
+    return bool(res and res.account_id is not None and str(res.account_id) == uid)
 
 
 def presented_ids(user_ids: Iterable[int | str], query: Query) -> dict[str, list[str]]:

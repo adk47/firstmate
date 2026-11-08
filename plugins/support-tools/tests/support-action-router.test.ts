@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { Value } from "@sinclair/typebox/value";
 import { createSupportActionRouterTool, SUPPORT_ACTION_ROUTES } from "../src/tools/support-action-router.js";
 
 async function call(params: Record<string, unknown>) {
@@ -20,8 +21,27 @@ describe("support_action_router", () => {
       "order_fulfillment",
       "profile_claim",
       "profile_duplicates",
+      "remove_own_credit",
       "remove_wrong_credits",
     ]);
+  });
+
+  it("accepts every routed intent through its own parameter schema", () => {
+    const tool = createSupportActionRouterTool();
+    for (const intent of Object.keys(SUPPORT_ACTION_ROUTES)) {
+      expect(Value.Check(tool.parameters, { intent })).toBe(true);
+    }
+  });
+
+  it("routes remove_own_credit to the credit-removal hand-off", async () => {
+    const out = await call({ intent: "remove_own_credit" });
+    expect(out.ok).toBe(true);
+    expect(out.next).toMatchObject({
+      outcome: "run_skill",
+      skill: "verification-handoff",
+      tool: "create_ticket",
+      action_type: "credit-removal",
+    });
   });
 
   it("exposes the live retention/cancel trio but keeps refunds handoff-only", async () => {

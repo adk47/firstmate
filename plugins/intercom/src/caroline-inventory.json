@@ -106,6 +106,14 @@
       "write_tools": []
     },
     {
+      "action_type_on_handoff": "credit-removal",
+      "description": "Ask the one approved two-option question (hide it from my profile / this isn't me), file ONE credit-removal ticket with that intent, then hand off; never preview, decide or remove a credit.",
+      "first_read_tool": "",
+      "handoff_when": "Always: this request is decided by the verification / merge agents",
+      "intent": "remove_own_credit",
+      "write_tools": []
+    },
+    {
       "action_type_on_handoff": "credit-correction",
       "description": "Answer with the approved removal paragraph and hand off; never preview, check or remove a credit.",
       "first_read_tool": "",

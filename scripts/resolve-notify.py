@@ -142,7 +142,7 @@ _CONV_ID_RE = re.compile(r"/conversation/([^/?#\s\"']+)")
 # retired 2026-06-30; see workspaces/support/SOUL.md "Analytics handling" and
 # docs/lessons/muso-domain.md).
 ALLOWLIST = {
-    "credit-verify", "credit-claim", "credit-correction",
+    "credit-verify", "credit-claim", "credit-correction", "credit-removal",
     "profile-claim", "analytics-followup",
     # 2026-11-03: added by the bulk-credit-change drainer (#drainer spec item 4).
     # PLACEMENT, not new wording: it reuses MESSAGE verbatim, because the line is

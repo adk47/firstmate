@@ -342,10 +342,10 @@ class TestTierMapParity(unittest.TestCase):
         assert match, "could not locate TIER_MAP block in ticket-format.ts"
         cls.tier_map_keys = set(re.findall(r'"([a-z][a-z-]*)"\s*:', match.group(1)))
 
-    def test_tier_map_has_17_keys(self):
+    def test_tier_map_has_18_keys(self):
         # Locks the known-good count so a parsing regression (e.g. the regex
         # silently matching 0 keys) can't masquerade as "parity".
-        self.assertEqual(len(self.tier_map_keys), 17, self.tier_map_keys)
+        self.assertEqual(len(self.tier_map_keys), 18, self.tier_map_keys)
 
     def test_every_tier_map_key_is_classified(self):
         missing = self.tier_map_keys - set(m.FEATURE_MAP)

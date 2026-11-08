@@ -107,7 +107,7 @@ _CONV_ID_RE = re.compile(r"/conversation/([^/?#\s\"']+)")
 # (carve-out retired 2026-06-30; see workspaces/support/SOUL.md "Analytics
 # handling", reference/common-issues.md row #7, docs/lessons/muso-domain.md).
 ALLOWLIST = {
-    "credit-verify", "credit-claim", "credit-correction",
+    "credit-verify", "credit-claim", "credit-correction", "credit-removal",
     "profile-claim", "analytics-followup",
 }
 SKIP_TICKET_TAGS = {"escalation:sla-breach-customer-followup"}

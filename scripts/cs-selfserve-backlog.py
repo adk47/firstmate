@@ -161,7 +161,7 @@ SESSIONKEY_CONV_PREFIX = "agent:support:intercom:direct:"
 
 # --------------------------------------------------------------------------
 # Vendored twin of plugins/support-tools/src/tools/ticket-format.ts's
-# TIER_MAP (17 actionType keys) -- parity-tested against that file by
+# TIER_MAP (18 actionType keys) -- parity-tested against that file by
 # tests/test_cs_selfserve_backlog.py in BOTH directions, so a new repo-side
 # actionType fails CI until it is classified here, and a stale entry here
 # fails CI once it is removed there.
@@ -180,6 +180,7 @@ FEATURE_MAP = {
     "track-merge": ("MISSING", "self-serve merge/unmerge"),
     "profile-update": ("MISSING", "self-serve profile/credit editing"),
     "bulk-credit-change": ("MISSING", "self-serve profile/credit editing"),
+    "credit-removal": ("MISSING", "self-serve profile/credit editing"),
     "subscription-refund": ("POLICY", "refund"),
     "dispute": ("POLICY", "dispute"),
     "data-deletion": ("POLICY", "data deletion"),

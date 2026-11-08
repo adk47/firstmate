@@ -137,7 +137,7 @@ verification-handoff"
   [[ "$inv_skills" != *"output-sanitizer"* ]]
 }
 
-@test "the 11 intents appear with an explicit first_read_tool (possibly empty)" {
+@test "the 12 intents appear with an explicit first_read_tool (possibly empty)" {
   run "$GEN" --out-dir "$TEST_TMPDIR/run"
   [ "$status" -eq 0 ]
 
@@ -145,7 +145,7 @@ verification-handoff"
 import json, sys
 d = json.load(open('$TEST_TMPDIR/run/caroline-inventory.json'))
 intents = d['intents']
-assert len(intents) == 11, f'expected 11 intents, got {len(intents)}'
+assert len(intents) == 12, f'expected 12 intents, got {len(intents)}'
 for i in intents:
     assert 'first_read_tool' in i, f\"{i['intent']} missing first_read_tool key\"
     assert isinstance(i['first_read_tool'], str), f\"{i['intent']} first_read_tool not a string\"
@@ -204,7 +204,7 @@ print('ok')
   [[ "$output" == *"ok"* ]]
 }
 
-@test "intent criteria keys equal the 11 intents plus other" {
+@test "intent criteria keys equal the 12 intents plus other" {
   run "$GEN" --out-dir "$TEST_TMPDIR/run"
   [ "$status" -eq 0 ]
 
@@ -214,7 +214,7 @@ inv = json.load(open('$TEST_TMPDIR/run/caroline-inventory.json'))
 q = json.load(open('$TEST_TMPDIR/run/caroline-questions.json'))
 expected = {i['intent'] for i in inv['intents']} | {'other'}
 actual = set(q['intent']['criteria'].keys())
-assert len(expected) == 12, len(expected)
+assert len(expected) == 13, len(expected)
 assert actual == expected, (sorted(actual - expected), sorted(expected - actual))
 print('ok')
 "

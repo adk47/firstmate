@@ -227,7 +227,7 @@ forbid "$SOUL" "no per-category SLA table for claims/credits" "2 business days f
 forbid "$SOUL" "no hard-coded tier SLA list" "Tier 2: 5 business days"
 for f in "$TF_SUPPORT" "$TF_INTERCOM"; do
   require "$f" "AGENT_LANE_ACTIONS covers merges" '"profile-merge", "track-merge", "unmerge-request",'
-  require "$f" "AGENT_LANE_ACTIONS covers claims + credits" '"credit-claim", "credit-correction", "credit-verify", "bulk-credit-change", "profile-claim",'
+  require "$f" "AGENT_LANE_ACTIONS covers claims + credits" '"credit-claim", "credit-correction", "credit-removal", "credit-verify", "bulk-credit-change", "profile-claim",'
   require "$f" "profile-claim outcome is an app notification" 'if (actionType === "profile-claim") return "app_notification";'
 done
 

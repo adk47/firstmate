@@ -2435,6 +2435,15 @@ jobs:
           # and the weekly line's window math. Every store, policy and risk file is in a temp dir; no
           # network, no Trino, no Intercom, no ClickUp. Stdlib unittest, run directly.
           python3 scripts/tests/test_churn_risk.py
+          # Credit-removal drainer + executor (H1): the two intents, the identity LINK (an account that
+          # does not present the profile writes nothing), the ladder (registry + live flag + read-back),
+          # the ledger inverse, revert, and `credit_proof_verifications` grading. Core and ClickUp
+          # faked, every path in a temp dir. Stdlib only.
+          python3 scripts/tests/test_credit_removal.py
+          # The same surfaces, attacked: text that tries to become identity or an intent, a structured
+          # block that tries to widen the action, a path/scheme that tries to reach the host, a page that
+          # tries to talk the model into a verdict, and the gates that must refuse first.
+          python3 scripts/tests/test_credit_removal_redteam.py
 
       - name: Run sentinel-demote tests
         # scripts/sentinel/demote.py is the ONLY code that narrows a capability's
