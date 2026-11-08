@@ -34,9 +34,12 @@ SH
 
 # --- the rule itself --------------------------------------------------------
 
+# The rule's refusal cases run with the isolation pair detached: the test file
+# itself runs under the runner's private socket directory, and a bare call is
+# allowed there by design. fail-closed means losing the pair re-enables refusal.
 test_rule_refuses_default_socket() {
   local out rc
-  out=$(fm_test_tmux_refuse_default_socket kill-server 2>&1)
+  out=$(fm_test_tmux_expect_refusal fm_test_tmux_refuse_default_socket kill-server 2>&1)
   rc=$?
   [ "$rc" -ne 0 ] || fail "a bare kill-server must be refused"
   assert_contains "$out" "refusing" "the refusal names itself"
@@ -60,16 +63,40 @@ test_rule_passes_named_socket() {
 test_rule_refuses_other_default_socket_commands() {
   local cmd
   for cmd in kill-session kill-window new-session list-sessions; do
-    if fm_test_tmux_refuse_default_socket "$cmd" 2>/dev/null; then
+    if fm_test_tmux_expect_refusal fm_test_tmux_refuse_default_socket "$cmd" 2>/dev/null; then
       fail "a bare '$cmd' must be refused"
     fi
   done
   pass "the guard refuses every default-socket command, not only kill-server"
 }
 
+test_rule_allows_only_a_proven_private_socket_directory() {
+  local d
+  d="$TMP_ROOT/isolated"
+  mkdir -p "$d" || fail "could not create the private socket fixture"
+
+  TMUX_TMPDIR=$d FM_TEST_TMUX_PRIVATE_TMPDIR=$d \
+    fm_test_tmux_refuse_default_socket list-sessions \
+    || fail "a matching private TMUX_TMPDIR pair must be accepted"
+
+  if TMUX_TMPDIR=$d FM_TEST_TMUX_PRIVATE_TMPDIR="$d/other" \
+    fm_test_tmux_refuse_default_socket list-sessions 2>/dev/null; then
+    fail "a mismatched private TMUX_TMPDIR pair must stay refused"
+  fi
+  if (unset TMUX_TMPDIR FM_TEST_TMUX_PRIVATE_TMPDIR; \
+    fm_test_tmux_refuse_default_socket list-sessions) 2>/dev/null; then
+    fail "an unset private TMUX_TMPDIR pair must stay refused"
+  fi
+  if (TMUX_TMPDIR=$d; unset FM_TEST_TMUX_PRIVATE_TMPDIR; \
+    fm_test_tmux_refuse_default_socket list-sessions) 2>/dev/null; then
+    fail "a half-set private TMUX_TMPDIR pair must stay refused"
+  fi
+  pass "the guard accepts only a matching non-empty private socket pair"
+}
+
 test_rule_refuses_command_option_socket_lookalike() {
   local out rc
-  out=$(fm_test_tmux_refuse_default_socket capture-pane -S -100 2>&1)
+  out=$(fm_test_tmux_expect_refusal fm_test_tmux_refuse_default_socket capture-pane -S -100 2>&1)
   rc=$?
   [ "$rc" -ne 0 ] || fail "a command-specific -S (capture-pane scrollback) must not count as a socket"
   assert_contains "$out" "refusing" "the refusal names itself"
@@ -133,6 +160,7 @@ test_wrapper_pins_socket_and_refuses_caller_socket() {
 
 test_rule_refuses_default_socket
 test_rule_passes_named_socket
+test_rule_allows_only_a_proven_private_socket_directory
 test_rule_refuses_other_default_socket_commands
 test_rule_refuses_command_option_socket_lookalike
 test_guard_install_refuses_and_forwards

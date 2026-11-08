@@ -2146,9 +2146,21 @@ cleanup_run() {
 
 trap cleanup_run EXIT
 
-# Every launched test gets a PATH shim that refuses a tmux invocation which
+# Every launched test gets a private tmux socket directory inside the run's
+# own temp root, exported as BOTH TMUX_TMPDIR and FM_TEST_TMUX_PRIVATE_TMPDIR.
+# tmux's default server then lives in that throwaway directory, so production
+# code a test sources cannot reach the fleet's server even when it calls tmux
+# without -L/-S. The pair is the guard's proof of isolation; losing either
+# value re-enables the refusal (fail closed).
+FM_TEST_TMUX_PRIVATE_TMPDIR="$RUN_TMP/tmux-socket"
+mkdir -p "$FM_TEST_TMUX_PRIVATE_TMPDIR"
+TMUX_TMPDIR=$FM_TEST_TMUX_PRIVATE_TMPDIR
+export TMUX_TMPDIR FM_TEST_TMUX_PRIVATE_TMPDIR
+
+# Every launched test also gets a PATH shim that refuses a tmux invocation which
 # would reach the default server. The shim is installed once per run and
-# forwards to the real binary when the test names its own socket.
+# forwards to the real binary when the test names its own socket or runs in the
+# private socket directory above.
 if [ -r "$ROOT/tests/tmux-test-safety.sh" ]; then
   # shellcheck source=tests/tmux-test-safety.sh
   . "$ROOT/tests/tmux-test-safety.sh"

@@ -1486,8 +1486,11 @@ printf '%s\n' "$*" >>"$FM_FAKE_TMUX_LOG"
 exit 0
 SH
   chmod +x "$fakebin/tmux"
+  # The runner proves isolation with the private TMUX_TMPDIR pair; detach one
+  # half so the guard fails closed, exactly as it would if a test lost it.
   cat >"$repo/tests/fm-bare-tmux.test.sh" <<'SH'
 #!/usr/bin/env bash
+unset FM_TEST_TMUX_PRIVATE_TMPDIR
 tmux kill-server
 echo "ok - bare tmux returned"
 SH
@@ -1503,7 +1506,45 @@ SH
   [ ! -e "$tmp/contacted" ] \
     || { rm -rf "$tmp"; fail "the runner shim forwarded a default-socket tmux call to the real binary"; }
   rm -rf "$tmp"
-  pass "the runner refuses a bare tmux kill-server from a test"
+  pass "the runner refuses a bare tmux kill-server when isolation is not proven"
+}
+
+test_runner_allows_bare_tmux_inside_its_private_socket_dir() {
+  local tmp repo fakebin rc
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-run-tmux-isolated.XXXXXX")
+  repo="$tmp/repo"
+  fakebin="$tmp/fakebin"
+  mkdir -p "$repo/bin" "$repo/tests" "$fakebin"
+  cp "$RUNNER" "$repo/bin/fm-test-run.sh"
+  chmod +x "$repo/bin/fm-test-run.sh"
+  cp "$ROOT/tests/tmux-test-safety.sh" "$repo/tests/tmux-test-safety.sh"
+  cat >"$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >>"$FM_FAKE_TMUX_LOG"
+exit 0
+SH
+  chmod +x "$fakebin/tmux"
+  cat >"$repo/tests/fm-isolated-bare-tmux.test.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ -n "${TMUX_TMPDIR:-}" ] && [ "$TMUX_TMPDIR" = "${FM_TEST_TMUX_PRIVATE_TMPDIR:-}" ] \
+  || { echo "not ok - the runner did not export a matching private socket pair"; exit 1; }
+tmux list-sessions
+echo "ok - bare tmux is confined to the runner's private socket directory"
+SH
+  chmod +x "$repo/tests/fm-isolated-bare-tmux.test.sh"
+  set +e
+  (cd "$repo" && PATH="$fakebin:$PATH" FM_FAKE_TMUX_LOG="$tmp/contacted" \
+    bin/fm-test-run.sh tests/fm-isolated-bare-tmux.test.sh) >"$tmp/out" 2>"$tmp/err"
+  rc=$?
+  set -e
+  [ "$rc" -eq 0 ] || { rm -rf "$tmp"; fail "the runner must allow a bare tmux inside its private socket directory, got $rc: $(cat "$tmp/out" "$tmp/err")"; }
+  grep -Fq 'list-sessions' "$tmp/contacted" \
+    || { rm -rf "$tmp"; fail "the isolated bare tmux call must reach the real binary"; }
+  grep -Fq 'FM_TEST_SUMMARY total=1 failed=0' "$tmp/out" \
+    || { rm -rf "$tmp"; fail "the isolated bare tmux test did not report green: $(cat "$tmp/out" "$tmp/err")"; }
+  rm -rf "$tmp"
+  pass "the runner allows a bare tmux inside its private socket directory"
 }
 
 test_runner_allows_an_isolated_deliberate_refusal() {
@@ -1524,7 +1565,9 @@ SH
   cat >"$repo/tests/fm-deliberate-refusal.test.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
-if FM_TEST_TMUX_REFUSAL_LOG= tmux kill-server 2>/dev/null; then
+# Detach the isolation pair so the guard has something to refuse, and detach
+# the runner's log so that expected refusal is not reported as unexpected.
+if (unset FM_TEST_TMUX_PRIVATE_TMPDIR; FM_TEST_TMUX_REFUSAL_LOG= tmux kill-server) 2>/dev/null; then
   echo "not ok - a deliberate refusal was forwarded"
   exit 1
 fi
@@ -1597,6 +1640,7 @@ test_reentry_sentinel_refuses_self_selection
 test_reentry_sentinel_refuses_differently_spelled_self_selection
 test_reentry_sentinel_allows_a_different_script
 test_runner_refuses_bare_tmux_from_a_test
+test_runner_allows_bare_tmux_inside_its_private_socket_dir
 test_runner_allows_an_isolated_deliberate_refusal
 test_gate_skip_accounting
 test_fail_on_gate_skip_token

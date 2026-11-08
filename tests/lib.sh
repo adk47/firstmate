@@ -87,8 +87,9 @@ pass() {
 FM_TEST_CLEANUP_DIRS=()
 FM_TEST_CLEANUP_REGISTRY=$(mktemp "${TMPDIR:-/tmp}/.fm-test-cleanup.$$.XXXXXX") || return 1
 
-# A hand-run test file gets the same tmux PATH shim the runner installs, so
-# running one file directly cannot reach the default server either.
+# A hand-run test file gets the same private tmux socket directory and PATH
+# shim the runner installs, so running one file directly cannot reach the
+# default server either. Values already exported by the runner are honoured.
 if [ -r "$ROOT/tests/tmux-test-safety.sh" ]; then
   # shellcheck source=tests/tmux-test-safety.sh
   . "$ROOT/tests/tmux-test-safety.sh"
@@ -116,6 +117,14 @@ if [ -r "$ROOT/tests/tmux-test-safety.sh" ]; then
     unset _fm_test_real_tmux _fm_test_shim_dir
   fi
   export FM_TEST_TMUX_TEST_LABEL=${FM_TEST_TMUX_TEST_LABEL:-$(basename "$0")}
+  if [ -z "${TMUX_TMPDIR:-}" ] || [ -z "${FM_TEST_TMUX_PRIVATE_TMPDIR:-}" ]; then
+    _fm_test_tmux_tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/fm-test-tmux-socket.XXXXXX")
+    TMUX_TMPDIR=$_fm_test_tmux_tmpdir
+    FM_TEST_TMUX_PRIVATE_TMPDIR=$_fm_test_tmux_tmpdir
+    export TMUX_TMPDIR FM_TEST_TMUX_PRIVATE_TMPDIR
+    FM_TEST_CLEANUP_DIRS+=("$_fm_test_tmux_tmpdir")
+    unset _fm_test_tmux_tmpdir
+  fi
 fi
 
 fm_test_pid_identity() {
