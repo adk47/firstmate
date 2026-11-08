@@ -216,6 +216,12 @@
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
 #     __GEMINISETTINGS__ firstmate-owned per-task gemini settings file (busy-state hooks)
 #     __ROVOBIN__   resolved, rovo-verified executable for a rovo launch
+#   The launch line therefore stays constant-size as a brief grows. If the resolved
+#   launch argument still exceeds MAX_ARG_STRLEN (131072 bytes), the spawn refuses
+#   before any process starts, naming the brief path, its byte size, and the limit.
+#   The opt-in inline escape hatch caps its body at FM_SPAWN_BRIEF_INLINE_MAX bytes
+#   with the pointer as the first line and an explicit truncation notice, never a
+#   silent cut.
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
