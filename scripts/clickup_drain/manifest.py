@@ -16,7 +16,7 @@ So the intake emits a manifest, and the executor accepts nothing else:
       "customer_profile_id": "<uuid>",
       "details": {
         "bulk_rows": [
-          {"track_url": "https://credits.muso.ai/track/<uuid>",
+          {"track_url": "https://muso.ai/track/<uuid>",
            "profile_id": "<uuid>", "role": "Mixing", "intent": "add",
            "remove": false},
           ...
@@ -95,7 +95,7 @@ INTENT_ADD = "add"
 #: the request is real, it just belongs to a named human (core #10310).
 INTENTS_REFUSED = frozenset({"replace", "change", "swap", "remove", "removal"})
 
-# https://credits.muso.ai/track/<id>, https://muso.ai/track/<id>, trailing slash,
+# https://muso.ai/track/<id>, trailing slash,
 # optional query/fragment. Deliberately anchored: a URL that is not a muso track
 # URL must not contribute an id by accident.
 TRACK_URL_RE = re.compile(
