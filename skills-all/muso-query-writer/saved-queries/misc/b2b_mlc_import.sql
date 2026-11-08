@@ -27,7 +27,7 @@ select name,
 		array_join(note_lines, '')
 	) as note
 from (
-		select 'https://credits.muso.ai/profile/' || _id as muso_url,
+		select 'https://muso.ai/profile/' || _id as muso_url,
 			arbitrary(name) as name,
 			max(credits_count) as credits_count,
 			max(popularity) as popularity,

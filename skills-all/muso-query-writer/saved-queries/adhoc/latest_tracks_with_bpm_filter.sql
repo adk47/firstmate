@@ -49,7 +49,7 @@ select ARBITRARY(title) as "Track Name",
 	MAX(popularity) as "Popularity",
 	MAX("release_date") AS "Release Date",
 	ARBITRARY(tempo) AS "BPM",
-	'https://credits.muso.ai/track/' || ARBITRARY(rec._id) AS "Muso URL",
+	'https://muso.ai/track/' || ARBITRARY(rec._id) AS "Muso URL",
 	array_join(ARBITRARY(genres), ', ') AS "Genres"
 from rec
 	left join g ON (CONTAINS(rec."raw_artist_ids", g._id))

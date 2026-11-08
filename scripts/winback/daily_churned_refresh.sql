@@ -41,7 +41,7 @@ SELECT
   ''                                                                      AS used_roster,
   CAST(CASE WHEN u.neptuneprofessionalid IS NOT NULL THEN true ELSE false END AS varchar) AS has_claimed_profile,
   CASE WHEN u.neptuneprofessionalid IS NOT NULL THEN
-    'https://credits.muso.ai/profile/' || u.neptuneprofessionalid
+    'https://muso.ai/profile/' || u.neptuneprofessionalid
     ELSE '' END                                                           AS profile_url,
   ''                                                                      AS outreach_status,
   ''                                                                      AS email_sent_date,

@@ -21,7 +21,7 @@ with lr AS (
 		) AS r(rid)
 	where source = 'spotify'
 )
-select 'https://credits.muso.ai/track/' || _id AS track_url,
+select 'https://muso.ai/track/' || _id AS track_url,
 	max(popularity) AS popularity,
 	arbitrary(title) AS title,
 	arbitrary(

@@ -103,7 +103,7 @@ select arbitrary(name) as name,
 	ARBITRARY(yt) as YT_url,
 	ARBITRARY(x) as X_url,
 	ARBITRARY(web) as Website,
-	'https://credits.muso.ai/profile/' || profile_id as muso_url
+	'https://muso.ai/profile/' || profile_id as muso_url
 from pt
 	left join ip using(profile_id)
 group by profile_id

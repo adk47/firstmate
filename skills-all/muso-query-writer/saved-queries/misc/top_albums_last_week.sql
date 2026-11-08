@@ -18,7 +18,7 @@ select
     min(date(from_unixtime(try(release_timestamp/1000)))) as release_date,
     max(r.popularity) as album_popularity,
     max(p.popularity) as top_artist_popularity, 
-    'https://credits.muso.ai/album/' || album_id as muso_url,
+    'https://muso.ai/album/' || album_id as muso_url,
     MIN(r.images[1].url) as image_url
 from hive."platform-industry-bi-prod".matvw_catalog_release as r
 cross join unnest(artists) as ra(artist)

@@ -36,7 +36,7 @@ from (
 			ARBITRARY(size_group) AS size_group,
 			ARBITRARY(country) AS country,
 			ARBITRARY(legal_name) AS legal_name,
-			concat('https://credits.muso.ai/profile/', _id) AS muso_url
+			concat('https://muso.ai/profile/', _id) AS muso_url
 		from "platform-industry-db-industry-prod".catalog_profile
 			cross join unnest(raw_profile_ids) AS cr(raw_profile_id)
 			join tsa USING(raw_profile_id)

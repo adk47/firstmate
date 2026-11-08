@@ -18,7 +18,7 @@ select t._id AS track_id,
 	ARBITRARY(
 		array_join(transform(t.artists, a->a.name), ', ')
 	) AS artists,
-	ARBITRARY('https://credits.muso.ai/track/') || t._id AS muso_url,
+	ARBITRARY('https://muso.ai/track/') || t._id AS muso_url,
 	SUM(cardinality(catalog_credits)) AS num_profile_credits,
 	cardinality(
 		filter(

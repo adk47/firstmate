@@ -18,7 +18,7 @@ select country,
 	profile_id,
 	name,
 	score,
-	'https://credits.muso.ai/profile/' || profile_id as muso_url
+	'https://muso.ai/profile/' || profile_id as muso_url
 from (
 		select row_number() over (
 				partition by country

@@ -21,7 +21,7 @@ with pt as (
     group by 1
 )
 select 
-    'https://credits.muso.ai/profile/'||_id as muso_url,
+    'https://muso.ai/profile/'||_id as muso_url,
     name,
     popularity,
     credits_count,

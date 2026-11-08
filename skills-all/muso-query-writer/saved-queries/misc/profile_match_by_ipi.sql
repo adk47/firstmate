@@ -167,7 +167,7 @@ select
     coalesce(in_roster, FALSE) as in_roster,
     coalesce(is_claimed, FALSE) as is_claimed,
     coalesce(is_paid, FALSE) as is_paid,
-    'https://credits.muso.ai/profile/'||_id as muso_url
+    'https://muso.ai/profile/'||_id as muso_url
 from hive."platform-industry-bi-prod".matvw_catalog_profile
 cross join unnest(raw_profile_ids) as pr(rid)
 join mlc USING(rid)

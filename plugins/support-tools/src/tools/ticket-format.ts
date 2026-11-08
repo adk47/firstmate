@@ -111,7 +111,7 @@ export function escalationTag(details?: Record<string, unknown>): string | null 
 }
 
 export function musoProfileUrl(profileId: string): string {
-  return `https://credits.muso.ai/profile/${profileId}`;
+  return `https://muso.ai/profile/${profileId}`;
 }
 
 export function intercomDeeplink(workspaceId: string, conversationId: string): string {

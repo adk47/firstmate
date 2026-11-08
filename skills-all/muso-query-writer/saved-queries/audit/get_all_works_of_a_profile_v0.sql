@@ -38,7 +38,7 @@ select
     sum(track_popularity) as sum_popularity,
     arbitrary(mlc_work_id) is null as no_mlc_work,
     array_join(array_distinct(flatten(array_agg(represented_by))), ', ') as represented_by,
-    'https://credits.muso.ai/track/' || min_by(track_id, length(title)) as muso_track_url,
+    'https://muso.ai/track/' || min_by(track_id, length(title)) as muso_track_url,
     min_by(spotify_url, length(title)) as spotify_track_url
 from "audit-prod".audit_profile_track
 cross join unnest(coalesce(split(nullif(mlc_codes, ''), ','), array[cast(NULL as varchar)])) as w (mlc_work_id)

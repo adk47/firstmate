@@ -727,6 +727,15 @@ jobs:
           scripts/check-caroline-inventory.sh
           echo "::endgroup::"
 
+      - name: Legacy domain guard — old credits subdomain only where .legacy-domain-allowlist says so
+        # Customer-facing profile links are https://muso.ai/<path>. The old credits subdomain
+        # still resolves (301), but nothing new may hardcode it. Fails when git grep finds the
+        # host outside .legacy-domain-allowlist (frozen, KEEP, tests, docs). MUS-31227.
+        run: |
+          echo "::group::Legacy domain guard"
+          bash scripts/check-legacy-domain.sh
+          echo "::endgroup::"
+
       - name: Em-dash lint — no em-dashes in Caroline's surface
         # The outbound sanitizer (sanitize-typography.ts) guarantees no em-dash
         # reaches a customer at runtime; this gate keeps the SOURCE clean so the

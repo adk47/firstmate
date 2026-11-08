@@ -16,7 +16,7 @@ select
     position_stream_1y as position,
     name,
     score_stream_1y as streams_2025, 
-    'https://credits.muso.ai/profile/' || profile_id as muso_url
+    'https://muso.ai/profile/' || profile_id as muso_url
 from "platform-industry-calc-prod".calc_credit_score_charts_entries_history 
 where date ='2025-12-04' and position_stream_1y < 21
 order by 1, 2
@@ -57,7 +57,7 @@ select
     streams,
     num_tracks,
     name,
-    'https://credits.muso.ai/profile/' || profile_id as muso_url
+    'https://muso.ai/profile/' || profile_id as muso_url
 from (
     select 
         category,

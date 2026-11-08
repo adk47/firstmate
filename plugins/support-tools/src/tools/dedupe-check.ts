@@ -275,7 +275,7 @@ const Parameters = Type.Object({
     Type.String({ pattern: UUID_PATTERN, description: "UUID of the profile the customer wants to KEEP (the survivor). Provide this or survivorProfileUrl." }),
   ),
   survivorProfileUrl: Type.Optional(
-    Type.String({ description: "Full https://credits.muso.ai/profile/<uuid> URL of the survivor profile." }),
+    Type.String({ description: "Full https://muso.ai/profile/<uuid> URL of the survivor profile." }),
   ),
   duplicateProfileIds: Type.Optional(
     Type.Array(Type.String(), { maxItems: MAX_DUPLICATES, description: "UUIDs of the duplicate profile(s) to fold into the survivor. Max 5." }),

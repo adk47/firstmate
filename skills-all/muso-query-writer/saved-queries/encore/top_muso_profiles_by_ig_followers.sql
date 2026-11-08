@@ -80,7 +80,7 @@ pro AS (
 select 
 -- *
     profile_id,
-    'https://credits.muso.ai/profile/'||profile_id as muso_url,
+    'https://muso.ai/profile/'||profile_id as muso_url,
 	name,
 	profile_type,
 	primary_genre,

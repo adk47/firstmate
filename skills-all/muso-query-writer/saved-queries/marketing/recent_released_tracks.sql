@@ -12,7 +12,7 @@ pii: unknown
 last_exported: 2025-01-31
 */
 
-select 'https://credits.muso.ai/track/' || t._id AS track_url,
+select 'https://muso.ai/track/' || t._id AS track_url,
 	arbitrary(t.title) AS title,
 	ARRAY_JOIN(transform(arbitrary("artists"), a->a.name), ', ') AS artists,
 	MAX(t.popularity) AS track_popularity,

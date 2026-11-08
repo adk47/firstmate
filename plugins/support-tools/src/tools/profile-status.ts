@@ -7,7 +7,7 @@ import { resolveOwnerAnchor, type OwnerAnchorDeps } from "../owner-anchor.js";
 
 const Parameters = Type.Object({
   profile_id: Type.Optional(Type.String({ description: "Bare Muso profile UUID" })),
-  profile_url: Type.Optional(Type.String({ description: "Full https://credits.muso.ai/profile/<uuid> URL" })),
+  profile_url: Type.Optional(Type.String({ description: "Full https://muso.ai/profile/<uuid> URL" })),
   email: Type.Optional(Type.String({ description: "Customer account email — used for lookup, never echoed back" })),
   name: Type.Optional(Type.String({ description: "Profile display name to resolve via autocomplete/search" })),
 });

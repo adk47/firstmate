@@ -1,0 +1,45 @@
+# Files allowed to keep the legacy host credits.muso.ai (checked by scripts/check-legacy-domain.sh).
+# One git pathspec per line; '#' comments; globs like :(glob)**/*.test.* are allowed.
+# The credits.muso.ai host itself stays (ingress, DNS, WAF, 301 redirector). MUS-31201 / MUS-31227.
+
+# --- FROZEN (Aaron, 20 Oct): no code on the credits system ---
+scripts/credit_review
+plugins/support-tools/src/tools/credit-verification-check.ts
+scripts/intercom-verify-request.sh
+workspaces/operations/skills/muso-ops-credit-verification
+skills-all/muso-query-writer/saved-queries/org/add_remove_credits_by_rules_suggestion.sql
+skills-all/muso-query-writer/saved-queries/org/label_credits_suggestion.sql
+
+# --- Aaron's call, separate [Q]: Stripe dispute ToS text ---
+cron-jobs.json
+skills-all/muso-stripe-disputes
+
+# --- KEEP: matches the legacy host on purpose ---
+# proof_scan.py:100 recognises customer-supplied links that still use the legacy host
+scripts/cs_proof_feed/proof_scan.py
+# Athena WAF partition is literally named credits.muso.ai
+skills-all/muso-query-writer/saved-queries/waf
+skills-all/muso-query-writer/saved-queries/index/queries.ndjson
+# resolution-matcher parses legacy-host links customers paste
+scripts/resolution-matcher.py
+
+# --- Tests and fixtures: feed legacy-host inputs on purpose ---
+:(glob)**/tests/**
+:(glob)**/test_*.py
+:(glob)**/*.test.*
+:(glob)**/*.bats
+
+# --- Docs, plans, SOUL/skill prose: not behaviour, swept in a follow-up under MUS-31201 ---
+docs
+skills-all/muso-clio
+skills-all/muso-credit-investigator
+skills-all/muso-verify-profile
+skills-all/report-systemic-data-issues
+skills-all/billion-streams-club/SKILL.md
+skills-all/muso-streams-lookup/SKILL.md
+:(glob)workspaces/**/*.md
+# fastlane.sh usage text names the legacy host because it accepts pasted legacy-host profile URLs
+workspaces/operations/skills/muso-ops-fastlane/scripts/fastlane.sh
+
+# --- This guard names the host in its own message ---
+scripts/check-legacy-domain.sh

@@ -99,7 +99,7 @@ select
     num_bs_isrcs,
     pct_isrc_match,
     pct_name_diff,
-    'https://credits.muso.ai/profile/' || m_id as muso_url
+    'https://muso.ai/profile/' || m_id as muso_url
 from (
     select
         *,

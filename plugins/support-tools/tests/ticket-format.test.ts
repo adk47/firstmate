@@ -87,7 +87,7 @@ describe("buildTicketMarkdown", () => {
       customerProfileId: "54a99ccc-8313",
       intercomUrl: "https://app.intercom.com/a/inbox/w/inbox/conversation/123",
     });
-    expect(md).toContain("**Profile:** https://credits.muso.ai/profile/54a99ccc-8313");
+    expect(md).toContain("**Profile:** https://muso.ai/profile/54a99ccc-8313");
     expect(md).toContain("**Conversation:** https://app.intercom.com/a/inbox/w/inbox/conversation/123");
   });
 
