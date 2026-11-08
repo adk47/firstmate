@@ -134,6 +134,21 @@ big-name / safety cases, and (with the captain) anything irreversible. Runs on n
   pipeline never retries it** — a retry is how one request gets two statutory letters. Only failures that provably
   happened *before* the writer ran (no token, gog absent, thread unreadable/no subject) are `failed`, and those stay
   retryable in the same slot. That is why the two error types are separate classes in `send.py`, not one.
+- **A wedged `unknown` row has an operator path, and it is audited.** `gdpr-pipeline.py resolve` is the only way a
+  person moves a `unknown`/`sending` row: it requires a non-empty `--why` and a named person, it APPENDS the decision
+  to `erasure_events` (`send-resolved`: from-state, to-state, why, who, the evidence it was decided on) instead of
+  overwriting the writer's own `detail`, and it refuses a `sent` row (a letter that went out is not a question) and a
+  `failed`/`refused` one (already retryable). `--all-refused` covers only rows whose evidence is a writer `REFUSED:`
+  — every `refuse()` call site in `intercom-ops-write.sh` runs before the curl POST, so a refusal is provably
+  pre-send and one shared reason is honest for the whole batch; anything else needs `--force` and an individual
+  `--row`. `--all-refused --state sent` is refused outright. A `sending` row is resolvable only once its claim is
+  older than `Store.SENDING_QUIESCENT_S` (900s): `sending` means a writer was STARTED and has not reported, so
+  resolving it earlier makes the slot retryable while the original POST may still be in flight — two statutory
+  letters to one person. The window is 20x the writer's own hard bound (`intercom-ops-write.sh` runs its curl under
+  `timeout 45`), so past it the writer has provably exited and the row is an orphan; a test pins the two numbers
+  together so the window cannot drift away from the thing it is derived from. Dry run unless `--apply`. Written for 2026-11-07, when
+  114 rows sat in `unknown` — every one a `REFUSED:` — and the confirm batch was approved and delivered ZERO of 20
+  because each row was blocked by an earlier claim nobody could clear.
 - **A confirmation has TWO letters and they get two slots.** An interim letter goes out while the pages are not yet
   off the public view ("the remaining step is in progress"); the final one says they no longer show the information.
   The interim is ledgered in `confirm-interim` and sets `interim_confirm_at`; only the final uses the `confirm` slot

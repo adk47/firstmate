@@ -108,7 +108,11 @@ MIGRATIONS = (("removed_outside_process", "TEXT DEFAULT '[]'"), ("hidden_pages",
               ("interim_confirm_at", "TEXT DEFAULT ''"), ("interim_confirm_ref", "TEXT DEFAULT ''"))
 
 
-SENDS_MIGRATIONS = (("idem", "TEXT DEFAULT ''"),)     # the letter's id; the ledger is the double-send guard
+SENDS_MIGRATIONS = (("idem", "TEXT DEFAULT ''"),     # the letter's id; the ledger is the double-send guard
+                    # A monotonic per-slot generation, bumped on EVERY claim. `at` cannot serve: it is a
+                    # second-resolution timestamp, so two claims in the same second are indistinguishable and a
+                    # stale resolution could still match a later attempt (QA #1848 r5, the ABA cycle).
+                    ("attempt", "INTEGER DEFAULT 0"))
 
 
 def migrate(db: sqlite3.Connection) -> None:
@@ -139,6 +143,23 @@ CLASS_RANK = ("not_erasure", "privacy_access", "privacy_erasure", "dmca_takedown
               "cancel_intent_mentions_deletion", "legal_threat")
 
 MAIL_CHANNELS = ("notices", "legal", "support")
+
+# The prefix `scripts/intercom-ops-write.sh`'s `refuse()` writes to stderr before it exits 1. Every one of its call
+# sites is an argument/allowlist/leak check that runs BEFORE the curl POST, so a `REFUSED:` exit is provably
+# pre-send: nothing was posted and a retry is safe. `send.py` keys the retryable/ambiguous split on this string.
+REFUSED_PREFIX = "REFUSED:"
+
+
+def is_writer_refusal(detail: str) -> bool:
+    """True when a ledger `detail` records a writer that REFUSED before it posted anything.
+
+    `send.deliver` wraps the writer's stderr as `<writer> exited rc N after being invoked: <stderr>`, so the refusal
+    is the segment after the LAST `after being invoked: ` -- the writer's own first word, not a `REFUSED:` that
+    happens to appear somewhere in the text. A detail with no wrapper is read whole, which is what a bare
+    `REFUSED: ...` from a future writer would look like.
+    """
+    said = (detail or "").rsplit("after being invoked: ", 1)[-1].strip()
+    return said.startswith(REFUSED_PREFIX)
 
 
 def now_iso() -> str:
@@ -399,7 +420,7 @@ class Store:
         """Claim the one send slot for this request+kind. Raises sqlite3.IntegrityError if it is already claimed:
         that is the double-send guard, not an error to swallow."""
         self.db.execute("INSERT INTO erasure_sends(request_id, kind, channel, target, body_sha, approved_by, state,"
-                        " detail, idem, at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        " detail, idem, at, attempt) VALUES (?,?,?,?,?,?,?,?,?,?,1)",
                         (rid, kind, channel, target, body_sha, approved_by, state, detail[:500], idem, now_iso()))
         self.db.commit()
 
@@ -417,7 +438,7 @@ class Store:
         if prior["state"] not in ("failed", "refused"):
             raise sqlite3.IntegrityError(f"a {kind} for row {rid} is already {prior['state']} ({prior['at']})")
         self.db.execute("UPDATE erasure_sends SET channel=?, target=?, body_sha=?, approved_by=?, state=?, ref='', "
-                        "detail=?, idem=?, at=? WHERE request_id=? AND kind=?",
+                        "detail=?, idem=?, at=?, attempt=COALESCE(attempt,0)+1 WHERE request_id=? AND kind=?",
                         (channel, target, body_sha, approved_by, state, detail[:500], idem, now_iso(), rid, kind))
         self.db.commit()
 
@@ -425,6 +446,155 @@ class Store:
         self.db.execute("UPDATE erasure_sends SET state=?, ref=?, detail=? WHERE request_id=? AND kind=?",
                         (state, ref[:500], detail[:500], rid, kind))
         self.db.commit()
+
+    # The states a person may resolve. `sent` is not a question and `failed`/`refused` are already retryable, so
+    # only the two "a letter may be out there" states are resolvable -- and only with a reason on the record.
+    RESOLVABLE_SEND_STATES = ("unknown", "sending")
+
+    # A `sending` row means a writer was STARTED and has not reported. Unlike `unknown` (a writer ran and the outcome
+    # is lost) there is no evidence yet that it stopped, so resolving one to `failed` makes the slot retryable while
+    # the original POST may still be in flight -- a second statutory letter to the same person (QA #1848 r6).
+    #
+    # The quiescence proof comes from the writer's own hard bound: `scripts/intercom-ops-write.sh` runs its curl under
+    # `timeout 45`, so no writer it starts can outlive that by more than its own process start-up. This window is set
+    # 20x above it so a slow host or a queued tick cannot be mistaken for a dead one. It is evidence, not a guess: past
+    # it, any writer this claim started has exited, and the row is an orphan a person may resolve.
+    SENDING_QUIESCENT_S = 900
+
+    def stamp_sent(self, rid: int, kind: str, slot: str, ref: str, commit: bool = True) -> None:
+        """Write the row-level send stamp that goes WITH a `sent` ledger row.
+
+        `send.deliver` writes these next to the ledger record and the rest of the pipeline reads them: `confirmed_at`
+        is what takes a row out of the confirmation queue, `ask_sent_at` is what arms the chase, and
+        `interim_confirm_at` records the interim letter without consuming the final slot. A `sent` ledger row with no
+        stamp is a letter the register believes it never sent -- so a manual resolution to `sent` must write the same
+        stamp, or the row stays in the queue and a later customer message is folded into an already-answered request.
+
+        `commit=False` lets a caller keep the stamp in the same transaction as the ledger row it belongs to.
+        """
+        stamp = now_iso()
+        if kind == "ask":
+            self.update(rid, "ask", commit=commit, ask_sent_at=stamp, ask_ref=ref)
+        elif slot == "confirm":
+            self.update(rid, "confirmed", commit=commit, confirmed_at=stamp, confirm_ref=ref)
+        else:
+            self.update(rid, "confirmed", commit=commit, interim_confirm_at=stamp, interim_confirm_ref=ref)
+
+    def resolve_send(self, rid: int, kind: str, state: str, why: str, by: str, evidence: str = "",
+                     ref: str = "", expect: tuple[str, str, int] | None = None) -> dict:
+        """Resolve a send the sender could not finish, APPENDING the decision to the event ledger.
+
+        The ledger row's state moves -- that is what unsticks the queue -- but the RECORD of why is an append: an
+        `erasure_events` row carries the previous state, the new one, the evidence it was decided on and who decided
+        it. A later reader can therefore tell a person's resolution from the sender's own transition, and the
+        original `detail` (the writer's own words) is never overwritten by the resolution.
+
+        `expect` is the ATTEMPT the decision was made on -- `(state, detail, attempt)` as the caller selected it. A
+        caller that picked the row earlier (a batch, a dry run the operator read) must pass it, because re-reading
+        here is not the same thing: between selection and this call the sender can reclaim the slot (`failed` ->
+        `sending`, detail cleared), and a fresh read would then judge the NEW attempt while the decision was made on
+        the OLD evidence. The write is bound to `expect`, so that case is a detectable no-op instead of a silent
+        overwrite that lets the next tick send a duplicate statutory letter.
+
+        `attempt` is the per-slot generation, not decoration. `claim_send` bumps it on every claim and `finish_send`
+        leaves it alone. State and detail alone are NOT an identity: a retry that fails the same way returns the row
+        to `unknown` with the same detail, so a stale selection would match again (an ABA cycle) and mark the newer
+        attempt resolved. If that second POST actually delivered, the next retry sends a duplicate statutory letter.
+        `at` cannot serve either -- it is a second-resolution timestamp, so two claims in one second collide.
+
+        Refuses a `sent` row (a letter that went out is not a question) and a `failed`/`refused` one (already
+        retryable, nothing to resolve). Raises `SendNotResolvable` rather than returning a flag: a caller that
+        ignores the answer must not be able to write.
+        """
+        why = (why or "").strip()
+        by = (by or "").strip()
+        if not why:
+            raise SendNotResolvable("a resolution needs a reason: pass --why with the evidence it was decided on")
+        if not by:
+            raise SendNotResolvable("a resolution needs a person: pass --by (or set GDPR_RESOLVER)")
+        if state not in ("sent", "failed"):
+            raise SendNotResolvable(f"{state!r} is not a resolution state (sent | failed)")
+        prior = self.send_record(rid, kind)
+        if prior is None:
+            raise SendNotResolvable(f"row {rid} has no {kind} letter on record")
+        # The attempt this decision is about. Everything below -- the resolvable check, the refusal guard and the
+        # write itself -- is judged against THIS, never against a fresh read that may already be a different attempt.
+        want_state, want_detail, want_attempt = (expect if expect is not None
+                                                 else (prior["state"], prior.get("detail") or "",
+                                                       int(prior.get("attempt") or 0)))
+        if want_state not in self.RESOLVABLE_SEND_STATES:
+            raise SendNotResolvable(f"the {kind} for row {rid} is {want_state}, not a state a person resolves")
+        if want_state == "sending":
+            # A `sending` row has no recorded outcome AND no evidence the writer stopped. Resolving it now makes the
+            # slot retryable while the original POST may still be running, and the customer gets two letters. Require
+            # the claim to be past the writer's own bound before it can be treated as an orphan.
+            try:
+                claimed = parse_iso(prior.get("at") or "")
+            except (TypeError, ValueError):
+                claimed = None
+            age = (datetime.now(timezone.utc) - claimed).total_seconds() if claimed else None
+            if age is None or age < self.SENDING_QUIESCENT_S:
+                raise SendNotResolvable(
+                    f"the {kind} for row {rid} is `sending` (claimed {prior.get('at')}), so a writer may still be "
+                    f"running: the writer is bounded at 45s and a row is only treated as orphaned after "
+                    f"{self.SENDING_QUIESCENT_S}s. Wait for it to report, or for the window to pass, then resolve.")
+        if state == "sent" and is_writer_refusal(want_detail):
+            # A writer REFUSAL is provably pre-send: `refuse()` in intercom-ops-write.sh exits before the curl POST.
+            # Recording one as `sent` would claim a statutory letter was delivered when nothing left the host, stamp
+            # the row as answered, and suppress the retry that would actually send it. The honest resolution is
+            # `failed`, which makes the slot retryable again.
+            raise SendNotResolvable(
+                f"the {kind} for row {rid} was REFUSED by the writer before it posted anything, so it cannot be "
+                f"resolved to `sent`: nothing was delivered. Resolve it to `failed` and let the sender retry.")
+        # One transaction: the state, the row-level stamp and the audit event land together or not at all. A `sent`
+        # row whose `send-resolved` event failed to write would be a delivered letter with no person or reason on
+        # record -- exactly the unaudited write this subcommand exists to prevent.
+        try:
+            # Compare-and-swap on the attempt we READ, not a blind write. Between `send_record` above and this
+            # statement the sender can reclaim the slot (`failed` -> `sending`) and start a retry; a blind UPDATE
+            # would then overwrite that NEWER attempt with a resolution decided on the OLD evidence, and the next
+            # tick could send again while the first retry is still in flight -- two statutory letters to one person.
+            # `attempt` is what makes this hold across a FULL retry cycle: state and detail can return to the same
+            # values (unknown + the same writer error), but `claim_send` bumps the generation on every claim, so a
+            # stale selection can never match a later attempt.
+            cur = self.db.execute(
+                "UPDATE erasure_sends SET state=? WHERE request_id=? AND kind=? AND state=? "
+                "AND COALESCE(detail,'')=? AND COALESCE(attempt,0)=?",
+                (state, rid, kind, want_state, want_detail, want_attempt))
+            if cur.rowcount != 1:
+                raise SendNotResolvable(
+                    f"the {kind} for row {rid} changed while it was being resolved (it is no longer attempt "
+                    f"{want_attempt} in state {want_state} with the evidence this decision was made on). "
+                    f"Re-read it and decide again.")
+            if state == "sent":
+                # A `sent` ledger row without its row-level stamp is a letter the register believes it never sent:
+                # the row stays in the confirmation queue and a later customer message is folded into an answered
+                # request.
+                self.stamp_sent(rid, kind, kind, ref or f"resolved by {by}", commit=False)
+            self.db.execute("INSERT INTO erasure_events(request_id, at, kind, detail) VALUES (?,?,?,?)",
+                            (rid, now_iso(), "send-resolved",
+                             json.dumps({"slot": kind, "from": want_state, "to": state, "why": why[:500],
+                                         "by": by[:120], "attempt": want_attempt,
+                                         "evidence": (evidence or want_detail or "")[:500]},
+                                        sort_keys=True)))
+            self.db.commit()
+        except Exception:
+            # The state, the stamp and the audit event land together or not at all. A `sent` row whose
+            # `send-resolved` event failed to write would be a delivered letter with no person or reason on record
+            # -- exactly the unaudited write this subcommand exists to prevent.
+            self.db.rollback()
+            raise
+        return {"request_id": rid, "kind": kind, "from": prior["state"], "to": state}
+
+    def resolvable_sends(self, kind: str = "", refused_only: bool = False) -> list[dict]:
+        """The send rows a person could resolve, oldest first. `refused_only` narrows to the rows whose evidence is
+        a writer REFUSAL -- provably pre-send, so one shared reason covers the whole batch."""
+        sql = ("SELECT * FROM erasure_sends WHERE state IN ('unknown','sending')"
+               + (" AND kind=?" if kind else "") + " ORDER BY at, id")
+        rows = [self._row(r) for r in self.db.execute(sql, (kind,) if kind else ())]
+        if refused_only:
+            rows = [r for r in rows if is_writer_refusal(r.get("detail"))]
+        return rows
 
     def unsent_letters(self, kind: str = "confirm") -> list[int]:
         """Row ids whose letter has NOT gone out (no ledger row, or a failed/refused one -- a `sending` or `unknown`
@@ -607,6 +777,11 @@ class Store:
 
 class MergeRefused(Exception):
     """Two rows for one request each carry a letter that may have reached the customer. Not a code decision."""
+
+
+class SendNotResolvable(Exception):
+    """A send a person asked to resolve is not in a state a person may resolve, or the resolution carries no
+    reason/person. Raised rather than returned so a caller cannot ignore it and write anyway."""
 
 
 # The row-level stamps `send.deliver` writes NEXT TO the ledger record, with the ref that came with each.

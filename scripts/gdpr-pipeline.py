@@ -20,6 +20,11 @@
       (copy.PIPELINE_SENDS_APPROVED) AND an allowlisted human's --approved-by; one ledgered letter per request.
   gdpr-pipeline.py confirm [--sitemap] [--send --approved-by SLACKUID] [--limit N]
       written confirmations due within 3 d (or hidden), S/P/M lines only from this run's checks; OLDEST deadline first
+  gdpr-pipeline.py resolve --state sent|failed --why TEXT (--row N | --rows 1,2 | --all-refused) [--apply]
+      resolve a send the sender could not finish (`unknown`/`sending`), with the evidence on the record. `--why` and
+      a person are required; the decision APPENDS to `erasure_events` and never overwrites the writer's own words.
+      `--all-refused` covers only rows whose evidence is a writer REFUSAL (provably pre-send, so one shared reason
+      is honest); anything else needs `--force` and an individual `--row`. Dry run unless `--apply`.
   gdpr-pipeline.py watchdog [--page]                    due_at - 3 d without confirmation; ASK > 7 d unanswered
 
 Never deletes: there is no DELETE /api/v3/admin/profile and no muso-cli delete in this pipeline. Store:
@@ -223,6 +228,121 @@ def cmd_intake(run: Run, a) -> int:
                   f"{(' detail=' + r['note']) if r['note'] else ''}")
     # A failed decision is not a success: the caller (a cron, the intake lane) must not believe the row is watched.
     return 2 if run.errors else 0
+
+
+def cmd_resolve(run: Run, a) -> int:
+    """Resolve a send the sender could not finish, with the evidence on the record.
+
+    Why this exists: `send.deliver` records a writer that exited non-zero as `unknown`, which the ledger treats as
+    "a letter may be out there, a human's to resolve" and never retries. That is the right answer for a genuinely
+    ambiguous POST and the wrong one for a writer that REFUSED before it posted anything -- and the wrong answer is
+    not self-correcting: on 2026-11-07 the register held 114 `unknown` rows, every one of them a `REFUSED:` from
+    `intercom-ops-write.sh`, and the confirm batch was approved and delivered ZERO of 20 because each row was
+    blocked by an earlier claim nobody could clear. There was no operator path at all: `finish_send` is the only
+    transition and only the sender calls it.
+
+    The guards are the point, not the convenience:
+      * `--why` is required and must not be blank. A resolution with no reason is not a record.
+      * the resolution APPENDS to `erasure_events` (from-state, to-state, why, who, the evidence it was decided on)
+        and never overwrites the writer's own `detail`, so a later reader can tell a person's decision from the
+        sender's transition.
+      * `--all-refused` only ever touches rows whose evidence is a writer REFUSAL, which is provably pre-send, so
+        one shared reason is honest for the whole batch. Anything else needs `--force` and an individual `--row`.
+      * `--all-refused --state sent` is refused: a batch of provably-pre-send refusals cannot have been delivered.
+    """
+    why = (a.why or "").strip()
+    if not why:
+        print("resolve: --why is required and must not be blank. A resolution with no reason is not a record.")
+        return 2
+    by = (a.by or os.environ.get("GDPR_RESOLVER") or os.environ.get("GDPR_SENDER_SEAT")
+          or os.environ.get("USER") or "").strip()
+    if not by:
+        print("resolve: cannot tell who is resolving. Pass --by: the record must name a person.")
+        return 2
+    if a.force and a.all_refused:
+        print("resolve: --force cannot be combined with --all-refused. A batch shares one provable cause; anything "
+              "else needs its own reason, one row at a time.")
+        return 2
+    if a.all_refused and a.state == "sent":
+        print("resolve: --all-refused --state sent is refused. A writer refusal is provably pre-send, so nothing "
+              "was delivered; the honest resolution is --state failed.")
+        return 2
+    ids = list(a.row)
+    if a.rows:
+        try:
+            ids += [int(x) for x in a.rows.replace(" ", "").split(",") if x]
+        except ValueError:
+            print(f"resolve: --rows must be comma-separated integers, got {a.rows!r}")
+            return 2
+    if a.all_refused and ids:
+        print("resolve: --all-refused and --row/--rows are exclusive.")
+        return 2
+    if not a.all_refused and not ids:
+        print("resolve: name the rows (--row N, --rows 1,2,3) or --all-refused.")
+        return 2
+
+    # Build the work list: (row id, slot, the ledger record).
+    work: list[tuple[int, str, dict]] = []
+    if a.all_refused:
+        for rec in run.store.resolvable_sends(kind=a.kind, refused_only=True):
+            work.append((rec["request_id"], rec["kind"], rec))
+    else:
+        for rid in ids:
+            slots = [a.kind] if a.kind else ["ask", "confirm", "confirm-interim"]
+            for slot in slots:
+                rec = run.store.send_record(rid, slot)
+                if rec is None:
+                    continue
+                if rec["state"] not in run.store.RESOLVABLE_SEND_STATES:
+                    print(f"  #{rid} {slot}: {rec['state']} - not a state a person resolves, skipped")
+                    continue
+                work.append((rid, slot, rec))
+    if not work:
+        print("resolve: nothing to resolve.")
+        return 0
+
+    # The evidence guard. A row whose writer did not REFUSE is a genuine ambiguity: a person may still resolve it,
+    # but only by naming that row and saying why, never by sweeping it into a batch.
+    refused = [w for w in work if store.is_writer_refusal(w[2].get("detail"))]
+    other = [w for w in work if w not in refused]
+    if a.force and len(work) != 1:
+        # `--force` is the "a person looked at THIS letter" escape hatch. A batch of genuinely ambiguous sends under
+        # one reason is exactly the thing the guard exists to stop: each one is a question about whether a customer
+        # already got a statutory letter, and answering two of them with one sentence is not evidence for either.
+        # Omitting --kind can also select several slots on one row, so the count is over SENDS, not rows.
+        print(f"resolve: --force resolves exactly ONE send, and this selects {len(work)}. Name one --row and one "
+              f"--kind, with the reason you checked that letter.")
+        return 2
+    if other and not a.force:
+        for rid, slot, rec in other:
+            print(f"  #{rid} {slot}: evidence is NOT a writer refusal ({rec['state']}: "
+                  f"{(rec.get('detail') or '(no detail)')[:120]})")
+        print(f"resolve: {len(other)} row(s) are not provably pre-send. Resolve each one individually with --row "
+              f"and --force once you have checked the thread, or narrow to --all-refused.")
+        return 2
+
+    print(f"resolve: {len(work)} letter(s) -> {a.state}, by {by}")
+    print(f"  why: {why}")
+    for rid, slot, rec in work:
+        print(f"  #{rid} {slot}: {rec['state']} -> {a.state}  (claimed {rec['at']}, "
+              f"{(rec.get('detail') or '')[:100]})")
+    if not a.apply:
+        print("dry run: nothing written (pass --apply to record the resolution)")
+        return 0
+    done = 0
+    for rid, slot, rec in work:
+        try:
+            # `expect` binds the write to the attempt this decision was made on. Without it a reclaim between
+            # selection and resolution would be judged as if it were the attempt the operator read; without `at`
+            # a full retry cycle that fails the same way would look like the same attempt again.
+            run.store.resolve_send(rid, slot, a.state, why, by, evidence=rec.get("detail") or "",
+                                   ref=f"resolved by {by}",
+                                   expect=(rec["state"], rec.get("detail") or "", int(rec.get("attempt") or 0)))
+            done += 1
+        except store.SendNotResolvable as exc:
+            print(f"  #{rid} {slot}: REFUSED: {exc}")
+    print(f"resolve: {done} of {len(work)} recorded (each appended to erasure_events as send-resolved)")
+    return 0 if done == len(work) else 2
 
 
 def slack_post(text: str) -> bool:
@@ -624,6 +744,23 @@ def main() -> int:
                             "register number per line")
         if name == "confirm":
             p.add_argument("--sitemap", action="store_true", help="walk every sitemap file for the M line")
+    p = sub.add_parser("resolve", help="resolve a send the sender could not finish (unknown/sending), with the "
+                                        "evidence it was decided on")
+    p.add_argument("--row", type=int, action="append", default=[], help="register row id (repeatable)")
+    p.add_argument("--rows", default="", help="comma-separated row ids")
+    p.add_argument("--all-refused", action="store_true",
+                   help="every unknown row whose evidence is a writer REFUSAL (provably pre-send, so one shared "
+                        "--why covers the batch)")
+    p.add_argument("--kind", default="", help="only this slot (ask | confirm); default: every slot on the row")
+    p.add_argument("--state", required=True, choices=("sent", "failed"),
+                   help="sent = the letter did go out; failed = it did not, and the slot is retryable again")
+    p.add_argument("--why", required=True,
+                   help="the evidence this was decided on. Required: a resolution with no reason is not a record")
+    p.add_argument("--by", default="", help="who resolved it (default: $GDPR_RESOLVER, $GDPR_SENDER_SEAT, $USER)")
+    p.add_argument("--force", action="store_true",
+                   help="resolve a row whose evidence is NOT a writer refusal. Needs an individual --row; never "
+                        "combined with --all-refused")
+    p.add_argument("--apply", action="store_true", help="write (default: dry run)")
     p = sub.add_parser("watchdog")
     p.add_argument("--page", action="store_true")
     p = sub.add_parser("dedupe", help="report (or --apply) the same customer event opened under two row keys")
@@ -759,6 +896,8 @@ def main() -> int:
             if a.send:
                 r = send.deliver(run, x, "confirm", a.approved_by, slot=x.get("slot"))
                 print(f"===== #{x['register_no']} -> {r['state']} {r.get('why') or r.get('ref') or ''}\n")
+    elif a.cmd == "resolve":
+        return cmd_resolve(run, a)
     elif a.cmd == "watchdog":
         watchdog(run, a.page)
 

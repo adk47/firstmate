@@ -524,13 +524,8 @@ def deliver(run, item: dict, kind: str, approved_by: str, dry_run: bool = False,
         return {"state": "failed", "why": detail}
 
     run.store.finish_send(rid, slot, "sent", ref=ref)
-    stamp = now_iso()
-    if kind == "ask":
-        run.store.update(rid, "ask", ask_sent_at=stamp, ask_ref=ref)
-    elif slot == "confirm":
-        run.store.update(rid, "confirmed", confirmed_at=stamp, confirm_ref=ref)
-    else:
-        # The interim letter records itself and nothing else: `confirmed_at` is what takes the row out of the
-        # confirmation queue, and only the FINAL letter may do that.
-        run.store.update(rid, "confirmed", interim_confirm_at=stamp, interim_confirm_ref=ref)
+    # The row-level stamp lives in the store so a MANUAL resolution to `sent` writes the same one: the interim letter
+    # records itself and nothing else, because `confirmed_at` is what takes the row out of the confirmation queue and
+    # only the FINAL letter may do that.
+    run.store.stamp_sent(rid, kind, slot, ref)
     return {"state": "sent", "channel": channel, "target": target, "ref": ref, "idem": key, "slot": slot}

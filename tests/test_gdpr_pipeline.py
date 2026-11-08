@@ -11,6 +11,8 @@ Hermetic: no network, no Trino, no Intercom. Stdlib unittest.
 """
 import json
 import os
+import pathlib
+import re
 import sqlite3
 import subprocess
 import sys
@@ -5488,3 +5490,463 @@ class FrozenBatchManifest(unittest.TestCase):
                       'run)', src)
         self.assertNotIn('send.materialise(run, select_batch(', src)
         self.assertIn('p.add_argument("--manifest"', src)
+
+
+class ResolveWedgedSends(unittest.TestCase):
+    """`gdpr-pipeline.py resolve`: the operator path for a send the sender could not finish.
+
+    The live case it was written for (2026-11-07): 114 `erasure_sends` rows sat in `unknown`, every one of them a
+    `REFUSED:` from `intercom-ops-write.sh` -- provably pre-send, because every `refuse()` call site is an
+    argument/allowlist/leak check that runs before the curl POST. `send.deliver` classified any non-zero writer exit
+    as `Ambiguous`, the ledger records that as `unknown`, and `unknown` is never retried and is "a human's to
+    resolve". There was no operator path at all, so the confirm batch was approved and delivered ZERO of 20 while
+    each row was blocked by an earlier claim nobody could clear.
+
+    The guards are the point: a resolution needs a reason and a person, it APPENDS to the audit ledger instead of
+    overwriting the writer's own words, and a batch may only ever cover rows whose evidence is a writer refusal.
+    """
+
+    REFUSAL = ("intercom-ops-write.sh exited rc 1 after being invoked: REFUSED: U0AN41ZBTRU is not on the "
+               "Intercom write allowlist (Aaron U7RP6HKUZ, Jan U038BM16T7W, Nick U0AL36NADEY).")
+    WHY = ("provably pre-send — writer refused before the curl POST; nothing was posted, so a retry is safe")
+
+    def setUp(self):
+        self.s = Store(":memory:")
+        self.run = Run(self.s, log=lambda *_: None)
+
+    def row(self, n=1, **kw):
+        c = {"keys": [f"intercom:{n}"], "channel": "intercom", "class": "privacy_erasure",
+             "received_at": "2026-09-01T10:00:00Z", "requester_email": f"a{n}@b.co",
+             "conversation_id": f"21547665039541{n}", "requester_name": "Arpad Laczkovszki",
+             "pages": [{"entity": "profile", "id": ARPAD}]}
+        c.update(kw)
+        rid, _ = self.s.upsert(c)
+        return rid
+
+    # A writer that RAN and failed: `intercom-ops-write.sh:276` prints this after the curl POST, so the letter may
+    # be out there. This is the genuinely ambiguous case, and the one a person must decide individually.
+    AMBIGUOUS = "intercom-ops-write.sh exited rc 1 after being invoked: POST FAILED (curl rc=7)"
+
+    def wedged(self, n=1, kind="ask", detail=None, state="unknown", ambiguous=False):
+        rid = self.row(n)
+        if detail is None:
+            detail = self.AMBIGUOUS if ambiguous else self.REFUSAL
+        self.s.begin_send(rid, kind, "intercom", f"21547665039541{n}", "sha", "U7RP6HKUZ",
+                          state=state, detail=detail)
+        return rid
+
+    def args(self, **kw):
+        import argparse
+        base = dict(row=[], rows="", all_refused=False, kind="", state="failed", why=self.WHY,
+                    by="adk47", force=False, apply=False)
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    def resolve(self, **kw):
+        cli = _cli()
+        return cli.cmd_resolve(self.run, self.args(**kw))
+
+    # ---- the happy path ------------------------------------------------------------------------------------
+    def test_a_refused_batch_resolves_to_failed_and_the_slot_is_retryable_again(self):
+        rid = self.wedged()
+        self.assertEqual(self.resolve(all_refused=True, apply=True), 0)
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "failed")
+        # The whole point: `claim_send` reuses a `failed` slot, so the next tick can send. It raises on `unknown`.
+        self.s.claim_send(rid, "ask", "intercom", "215476650395411", "sha2", "U7RP6HKUZ")
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "sending")
+
+    def test_the_resolution_APPENDS_to_the_audit_ledger_and_keeps_the_writers_own_words(self):
+        rid = self.wedged()
+        self.resolve(all_refused=True, apply=True)
+        ev = [r for r in self.s.db.execute(
+            "SELECT detail FROM erasure_events WHERE request_id=? AND kind='send-resolved'", (rid,))]
+        self.assertEqual(len(ev), 1)
+        d = json.loads(ev[0][0])
+        self.assertEqual((d["from"], d["to"], d["slot"]), ("unknown", "failed", "ask"))
+        self.assertEqual(d["by"], "adk47")
+        self.assertEqual(d["why"], self.WHY)
+        self.assertIn("REFUSED:", d["evidence"])
+        # The writer's own `detail` is NOT overwritten by the resolution: the evidence stays readable on the row.
+        self.assertIn("REFUSED:", self.s.send_record(rid, "ask")["detail"])
+
+    def test_a_dry_run_writes_nothing(self):
+        rid = self.wedged()
+        self.assertEqual(self.resolve(all_refused=True), 0)
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "unknown")
+        self.assertEqual(list(self.s.db.execute("SELECT count(*) FROM erasure_events WHERE kind='send-resolved'"))[0][0], 0)
+
+    def test_an_individual_row_resolves_without_all_refused(self):
+        rid = self.wedged()
+        self.assertEqual(self.resolve(row=[rid], apply=True), 0)
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "failed")
+
+    def test_rows_accepts_a_comma_list(self):
+        a, b = self.wedged(1), self.wedged(2)
+        self.assertEqual(self.resolve(rows=f"{a}, {b}", apply=True), 0)
+        self.assertEqual([self.s.send_record(r, "ask")["state"] for r in (a, b)], ["failed", "failed"])
+
+    # ---- the guards ----------------------------------------------------------------------------------------
+    def test_a_blank_why_is_refused(self):
+        rid = self.wedged()
+        self.assertEqual(self.resolve(all_refused=True, why="   ", apply=True), 2)
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "unknown")
+
+    def test_a_resolution_with_no_person_is_refused(self):
+        rid = self.wedged()
+        with mock.patch.dict(os.environ, {"GDPR_RESOLVER": "", "GDPR_SENDER_SEAT": "", "USER": ""}):
+            self.assertEqual(self.resolve(all_refused=True, by="", apply=True), 2)
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "unknown")
+
+    def test_all_refused_state_sent_is_refused_because_a_refusal_is_provably_pre_send(self):
+        rid = self.wedged()
+        self.assertEqual(self.resolve(all_refused=True, state="sent", apply=True), 2)
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "unknown")
+
+    def test_force_cannot_be_combined_with_all_refused(self):
+        rid = self.wedged()
+        self.assertEqual(self.resolve(all_refused=True, force=True, apply=True), 2)
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "unknown")
+
+    def test_a_genuinely_ambiguous_row_is_not_swept_into_a_batch(self):
+        """A POST that may have landed is a question about whether a letter went out. A person may still resolve it,
+        but only by naming that row and saying why -- never by sharing a batch reason with the refusals."""
+        rid = self.wedged(detail="intercom-ops-write.sh exited rc 7 after being invoked: POST FAILED (curl rc=7)")
+        self.assertEqual(self.resolve(all_refused=True, apply=True), 0)      # nothing matched the batch
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "unknown")
+        # ...and an explicit --row without --force is refused, naming the evidence.
+        self.assertEqual(self.resolve(row=[rid], apply=True), 2)
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "unknown")
+        # ...and WITH --force it resolves, because a person looked.
+        self.assertEqual(self.resolve(row=[rid], force=True, state="sent", why="checked the thread: the letter is "
+                                                                              "there", apply=True), 0)
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "sent")
+
+    def test_a_sent_row_is_not_a_question(self):
+        rid = self.row()
+        self.s.begin_send(rid, "ask", "intercom", "x", "sha", "U7RP6HKUZ", state="sent")
+        self.assertEqual(self.resolve(row=[rid], force=True, apply=True), 0)   # nothing resolvable -> no-op
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "sent")
+
+    def test_the_store_refuses_a_sent_row_and_a_blank_reason_directly(self):
+        rid = self.row()
+        self.s.begin_send(rid, "ask", "intercom", "x", "sha", "U7RP6HKUZ", state="sent")
+        with self.assertRaises(store.SendNotResolvable):
+            self.s.resolve_send(rid, "ask", "failed", self.WHY, "adk47")
+        rid2 = self.wedged(2)
+        with self.assertRaises(store.SendNotResolvable):
+            self.s.resolve_send(rid2, "ask", "failed", "  ", "adk47")
+        with self.assertRaises(store.SendNotResolvable):
+            self.s.resolve_send(rid2, "ask", "failed", self.WHY, "")
+        with self.assertRaises(store.SendNotResolvable):
+            self.s.resolve_send(rid2, "ask", "unknown", self.WHY, "adk47")     # not a resolution state
+
+    # ---- the evidence test itself --------------------------------------------------------------------------
+    def test_is_writer_refusal_reads_the_writers_own_first_word(self):
+        self.assertTrue(store.is_writer_refusal(self.REFUSAL))
+        self.assertTrue(store.is_writer_refusal("REFUSED: bare"))
+        # A `REFUSED:` that is not the writer's first word is not evidence of a refusal.
+        self.assertFalse(store.is_writer_refusal(
+            "intercom-ops-write.sh exited rc 7 after being invoked: POST FAILED (curl rc=7) REFUSED: no"))
+        self.assertFalse(store.is_writer_refusal("intercom-ops-write.sh exited rc 7 after being invoked: POST FAILED"))
+        self.assertFalse(store.is_writer_refusal(""))
+        self.assertFalse(store.is_writer_refusal(None))
+
+    def test_a_manual_sent_resolution_writes_the_row_level_stamp_too(self):
+        """QA #1848 finding 1: a `sent` ledger row with no stamp is a letter the register believes it never sent. The
+        row stays in the confirmation queue and a later customer message is folded into an already-answered request."""
+        rid = self.wedged(kind="confirm", detail="intercom-ops-write.sh exited rc 7 after being invoked: POST FAILED")
+        self.assertEqual(self.s.get(rid)["confirmed_at"], "")
+        self.assertEqual(self.resolve(row=[rid], kind="confirm", force=True, state="sent",
+                                      why="checked the thread: the final letter is there", apply=True), 0)
+        self.assertEqual(self.s.send_record(rid, "confirm")["state"], "sent")
+        row = self.s.get(rid)
+        self.assertNotEqual(row["confirmed_at"], "", "a manual `sent` must stamp confirmed_at like the sender does")
+        self.assertIn("resolved by adk47", row["confirm_ref"])
+        # ...and the row is out of the confirmation queue, which is what `confirmed_at` means.
+        self.assertNotIn(rid, [x["row"] for x in self.run.confirmations(
+            datetime.now(timezone.utc), s_check=lambda *a: True, p_check=lambda *a: True)])
+
+    def test_a_manual_sent_resolution_stamps_the_ask_and_the_interim_slots_too(self):
+        ask = self.wedged(1, kind="ask", detail="intercom-ops-write.sh exited rc 7 after being invoked: POST FAILED")
+        interim = self.wedged(2, kind="confirm-interim",
+                              detail="intercom-ops-write.sh exited rc 7 after being invoked: POST FAILED")
+        self.assertEqual(self.resolve(row=[ask], kind="ask", force=True, state="sent", why="in the thread",
+                                      apply=True), 0)
+        self.assertEqual(self.resolve(row=[interim], kind="confirm-interim", force=True, state="sent",
+                                      why="in the thread", apply=True), 0)
+        self.assertNotEqual(self.s.get(ask)["ask_sent_at"], "")
+        self.assertNotEqual(self.s.get(interim)["interim_confirm_at"], "")
+        # The interim letter must NOT consume the final slot: `confirmed_at` is what closes the request.
+        self.assertEqual(self.s.get(interim)["confirmed_at"], "")
+
+    def test_force_resolves_exactly_one_send(self):
+        """QA #1848 finding 2: `--force` is the "a person looked at THIS letter" escape hatch. Two ambiguous sends
+        under one reason is not evidence for either, and omitting --kind can select several slots on one row."""
+        a = self.wedged(1, detail="intercom-ops-write.sh exited rc 7 after being invoked: POST FAILED")
+        b = self.wedged(2, detail="intercom-ops-write.sh exited rc 7 after being invoked: POST FAILED")
+        self.assertEqual(self.resolve(rows=f"{a},{b}", force=True, state="sent", why="checked one thread",
+                                      apply=True), 2)
+        self.assertEqual([self.s.send_record(r, "ask")["state"] for r in (a, b)], ["unknown", "unknown"])
+        # ...and one row with two resolvable slots is two sends, so it is refused as well.
+        c = self.wedged(3, kind="ask", detail="intercom-ops-write.sh exited rc 7 after being invoked: POST FAILED")
+        self.s.begin_send(c, "confirm", "intercom", "x", "sha", "U7RP6HKUZ", state="unknown",
+                          detail="intercom-ops-write.sh exited rc 7 after being invoked: POST FAILED")
+        self.assertEqual(self.resolve(row=[c], force=True, state="sent", why="checked one thread", apply=True), 2)
+        self.assertEqual([self.s.send_record(c, k)["state"] for k in ("ask", "confirm")], ["unknown", "unknown"])
+        # ...and naming the one slot resolves it.
+        self.assertEqual(self.resolve(row=[c], kind="confirm", force=True, state="sent", why="checked the thread",
+                                      apply=True), 0)
+        self.assertEqual(self.s.send_record(c, "confirm")["state"], "sent")
+        self.assertEqual(self.s.send_record(c, "ask")["state"], "unknown")
+
+    def test_a_refused_row_cannot_be_resolved_to_sent(self):
+        """QA #1848 r2 finding 1: a writer REFUSAL is provably pre-send, so `sent` is a lie about a statutory letter.
+
+        The batch guard (`--all-refused --state sent`) is not enough: a single `--row N --state sent` would record a
+        letter that never left the host as delivered, stamp the row as answered, and suppress the retry that would
+        actually send it. The refusal lives in the STORE so a direct call cannot get around it either.
+        """
+        rid = self.wedged()
+        self.assertEqual(self.resolve(row=[rid], state="sent", apply=True), 2)
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "unknown")
+        self.assertFalse(self.s.get(rid).get("ask_sent_at"))
+        with self.assertRaises(store.SendNotResolvable) as ctx:
+            self.s.resolve_send(rid, "ask", "sent", self.WHY, "adk47")
+        self.assertIn("REFUSED by the writer", str(ctx.exception))
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "unknown")
+        # ...and `failed` is the honest resolution, which is what makes the slot retryable again.
+        self.assertEqual(self.resolve(row=[rid], state="failed", apply=True), 0)
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "failed")
+
+    def test_a_failed_audit_write_leaves_the_send_unresolved(self):
+        """QA #1848 r2 finding 2: the state, the stamp and the `send-resolved` event are ONE transaction.
+
+        `stamp_sent` used to commit on its own, so a `sent` resolution whose audit insert then failed left a
+        delivered letter with no person or reason on record -- the unaudited write this subcommand exists to prevent.
+        """
+        # A genuinely ambiguous row: the writer ran and we cannot prove it did not post, so `sent` is a legitimate
+        # resolution and the transaction is what is under test.
+        rid = self.wedged(detail="intercom-ops-write.sh exited rc 7 after being invoked: POST FAILED (curl rc=7)")
+        real = self.s.db
+
+        class _Boom:
+            """Delegates everything to the real connection but fails the audit insert."""
+
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+            def execute(self, sql, *a, **kw):
+                # Only the `send-resolved` audit row fails. `update()` writes its own `erasure_events` row through
+                # the same statement, so matching on the SQL alone would abort the stamp before it could commit and
+                # the test would pass for the wrong reason.
+                if (sql.lstrip().startswith("INSERT INTO erasure_events") and a and a[0]
+                        and a[0][2] == "send-resolved"):
+                    raise sqlite3.OperationalError("database or disk is full")
+                return real.execute(sql, *a, **kw)
+
+        self.s.db = _Boom()
+        try:
+            with self.assertRaises(sqlite3.OperationalError):
+                self.s.resolve_send(rid, "ask", "sent", self.WHY, "adk47")
+        finally:
+            self.s.db = real
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "unknown")
+        self.assertFalse(self.s.get(rid).get("ask_sent_at"))
+        self.assertEqual([r for r in self.s.db.execute(
+            "SELECT 1 FROM erasure_events WHERE request_id=? AND kind='send-resolved'", (rid,))], [])
+
+    def test_a_resolution_does_not_overwrite_a_newer_send_attempt(self):
+        """QA #1848 r3 finding 1: the write is a compare-and-swap on the attempt that was READ.
+
+        The race: two `--all-refused --apply` runs select the same `unknown` refusal; the first marks it `failed`,
+        the sender reclaims it as `sending`, and the second run -- which read the OLD evidence -- unconditionally
+        writes `failed` over that newer attempt. The next tick can then send while the first retry is still in
+        flight, which is two statutory letters to one person.
+        """
+        rid = self.wedged()
+        real = self.s.db
+        fired = []
+
+        class _Racing:
+            """Lets the sender reclaim the slot between our read and our write."""
+
+            def __getattr__(self, name):
+                return getattr(real, name)
+
+            def execute(self, sql, *a, **kw):
+                if sql.lstrip().startswith("UPDATE erasure_sends SET state=?") and not fired:
+                    fired.append(1)
+                    real.execute("UPDATE erasure_sends SET state='sending', detail='' "
+                                 "WHERE request_id=? AND kind=?", (rid, "ask"))
+                    real.commit()
+                return real.execute(sql, *a, **kw)
+
+        self.s.db = _Racing()
+        try:
+            with self.assertRaises(store.SendNotResolvable) as ctx:
+                self.s.resolve_send(rid, "ask", "failed", self.WHY, "adk47")
+        finally:
+            self.s.db = real
+        self.assertIn("changed while it was being resolved", str(ctx.exception))
+        # The newer attempt survives, and no audit row claims a resolution that never happened.
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "sending")
+        self.assertEqual([r for r in self.s.db.execute(
+            "SELECT 1 FROM erasure_events WHERE request_id=? AND kind='send-resolved'", (rid,))], [])
+
+    def test_a_reclaim_between_selection_and_resolution_is_refused(self):
+        """QA #1848 r4: the write is bound to the attempt the CALLER selected, not to a fresh read.
+
+        The CAS on a fresh read is not enough. Two `--all-refused --apply` runs select the same old `unknown`
+        refusal; the first marks it `failed`, the sender reclaims it as `sending` with empty detail, and the second
+        run re-reads that NEW attempt -- which is still resolvable -- so a fresh-read CAS succeeds and marks the
+        in-flight attempt `failed`. The next tick then sends a duplicate statutory letter.
+        """
+        rid = self.wedged()
+        selected = self.s.resolvable_sends(refused_only=True)
+        self.assertEqual([r["request_id"] for r in selected], [rid])
+        # The sender reclaims the slot after the operator's selection.
+        self.s.db.execute("UPDATE erasure_sends SET state='sending', detail='' WHERE request_id=? AND kind=?",
+                          (rid, "ask"))
+        self.s.db.commit()
+        with self.assertRaises(store.SendNotResolvable) as ctx:
+            self.s.resolve_send(rid, "ask", "failed", self.WHY, "adk47",
+                                expect=(selected[0]["state"], selected[0].get("detail") or "",
+                                        int(selected[0].get("attempt") or 0)))
+        self.assertIn("changed while it was being resolved", str(ctx.exception))
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "sending")
+
+    def test_the_cli_binds_the_write_to_the_attempt_it_selected(self):
+        """The same race, driven through `cmd_resolve`: the batch selects, the sender reclaims, the write is refused."""
+        rid = self.wedged()
+        real = self.s.resolvable_sends
+
+        def select_then_reclaim(**kw):
+            rows = real(**kw)
+            self.s.db.execute("UPDATE erasure_sends SET state='sending', detail='' "
+                              "WHERE request_id=? AND kind=?", (rid, "ask"))
+            self.s.db.commit()
+            return rows
+
+        self.s.resolvable_sends = select_then_reclaim
+        try:
+            self.assertEqual(self.resolve(all_refused=True, apply=True), 2)
+        finally:
+            del self.s.resolvable_sends
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "sending")
+        self.assertEqual([r for r in self.s.db.execute(
+            "SELECT 1 FROM erasure_events WHERE request_id=? AND kind='send-resolved'", (rid,))], [])
+
+    def test_a_stale_selection_cannot_cross_a_full_retry_cycle(self):
+        """QA #1848 r5: state and detail can return to the same values, so the CAS needs the per-attempt identity.
+
+        The ABA cycle: select `unknown` with an ambiguous writer error; resolve it to `failed`; the sender retries
+        and the retry fails the SAME way, so the row is `unknown` with the same detail again; then apply the OLD
+        selection. Without `at` in the CAS that stale write succeeds and marks the newer attempt resolved -- and if
+        the second POST actually delivered, the next retry sends a duplicate statutory letter.
+        """
+        rid = self.wedged(ambiguous=True)
+        stale = self.s.resolvable_sends()[0]
+        self.assertEqual(stale["state"], "unknown")
+        # 1. the first resolution lands
+        self.s.resolve_send(rid, "ask", "failed", self.WHY, "adk47",
+                            expect=(stale["state"], stale.get("detail") or "", int(stale.get("attempt") or 0)))
+        # 2. the sender retries and the retry fails the same way -> same state, same detail, NEW attempt
+        self.s.claim_send(rid, "ask", channel="intercom", target="c1", body_sha="b", approved_by="seat")
+        self.s.finish_send(rid, "ask", "unknown", detail=stale.get("detail") or "")
+        now = self.s.send_record(rid, "ask")
+        self.assertEqual((now["state"], now["detail"]), (stale["state"], stale.get("detail")))
+        self.assertNotEqual(now["attempt"], stale["attempt"])
+        # 3. the stale selection must not match
+        with self.assertRaises(store.SendNotResolvable) as ctx:
+            self.s.resolve_send(rid, "ask", "failed", self.WHY, "adk47",
+                                expect=(stale["state"], stale.get("detail") or "", int(stale.get("attempt") or 0)))
+        self.assertIn("changed while it was being resolved", str(ctx.exception))
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "unknown")
+
+    def test_a_sending_row_whose_writer_may_still_be_running_is_not_resolvable(self):
+        """QA #1848 r6: `sending` has no recorded outcome AND no evidence the writer stopped.
+
+        Resolving it makes the slot retryable while the original POST may still be in flight, and the customer gets
+        two statutory letters. The writer is bounded at 45s (`intercom-ops-write.sh`), so the row only becomes an
+        orphan a person may resolve once that bound is comfortably past.
+        """
+        rid = self.wedged(state="sending", detail="")
+        with self.assertRaises(store.SendNotResolvable) as caught:
+            self.s.resolve_send(rid, "ask", "failed", self.WHY, "adk47",
+                                expect=("sending", "", 0))
+        self.assertIn("may still be running", str(caught.exception))
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "sending")
+        # and the CLI refuses it too, rather than relying on that one caller
+        self.assertEqual(self.resolve(row=[rid], kind="ask", force=True, apply=True), 2)
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "sending")
+
+    def test_a_sending_row_past_the_writers_bound_is_an_orphan_a_person_may_resolve(self):
+        """The other half: a claim older than the writer's own bound has provably stopped, so it MUST be recoverable,
+        or a crash mid-POST wedges the slot forever."""
+        rid = self.wedged(state="sending", detail="")
+        old = (datetime.now(timezone.utc)
+               - timedelta(seconds=self.s.SENDING_QUIESCENT_S + 60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        self.s.db.execute("UPDATE erasure_sends SET at=? WHERE request_id=? AND kind='ask'", (old, rid))
+        self.s.db.commit()
+        prior = self.s.send_record(rid, "ask")
+        self.assertEqual(self.s.resolve_send(rid, "ask", "failed", self.WHY, "adk47",
+                                             expect=(prior["state"], prior.get("detail") or "",
+                                                     int(prior.get("attempt") or 0)))["to"], "failed")
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "failed")
+
+    def test_the_writers_bound_is_what_the_quiescence_window_is_derived_from(self):
+        """A guard whose number nobody can trace back to evidence is a guess. Pin the two together: the writer's
+        own `timeout` must be far inside the window, or the window stops proving anything."""
+        src = (pathlib.Path(__file__).resolve().parents[1] / "scripts" / "intercom-ops-write.sh").read_text()
+        m = re.search(r'"\$TIMEOUT_BIN"\s+(\d+)\s+"\$CURL_BIN"', src)
+        self.assertIsNotNone(m, "the writer's curl timeout is no longer where this window assumes it is")
+        self.assertLessEqual(int(m.group(1)) * 2, store.Store.SENDING_QUIESCENT_S)
+
+    def test_the_cli_refuses_a_stale_selection_across_a_retry_cycle(self):
+        """The same ABA cycle driven through `cmd_resolve`, which is where the operator actually hits it.
+
+        The `--row` path selects with `send_record`, so that is what has to be interleaved -- patching
+        `resolvable_sends` would never fire and the test would pass on the evidence guard instead of on the CAS.
+        """
+        rid = self.wedged(ambiguous=True)
+        real = self.s.send_record
+        stale = {}
+
+        def select_then_cycle(r, k):
+            """The operator's selection, then a whole retry cycle, then the STALE snapshot is handed back."""
+            rec = real(r, k)
+            if rec is not None and not stale:
+                stale.update(rec)
+                self.s.send_record = real
+                try:
+                    # another operator run resolves attempt 1 to `failed`
+                    self.s.resolve_send(rid, "ask", "failed", self.WHY, "adk47",
+                                        expect=(rec["state"], rec.get("detail") or "",
+                                                int(rec.get("attempt") or 0)))
+                    # the sender retries and the retry fails the SAME way -> attempt 2, same state, same detail
+                    self.s.claim_send(rid, "ask", channel="intercom", target="c1", body_sha="b",
+                                      approved_by="seat")
+                    self.s.finish_send(rid, "ask", "unknown", detail=rec.get("detail") or "")
+                finally:
+                    self.s.send_record = select_then_cycle
+            return rec
+
+        self.s.send_record = select_then_cycle
+        try:
+            # `--force` because this row's evidence is a POST that may have landed: a person names it individually.
+            self.assertEqual(self.resolve(row=[rid], kind="ask", force=True, apply=True), 2)
+        finally:
+            del self.s.send_record
+        # The newer attempt is untouched, and the only resolution on record is the one for attempt 1.
+        self.assertEqual(self.s.send_record(rid, "ask")["state"], "unknown")
+        events = [json.loads(r[0]) for r in self.s.db.execute(
+            "SELECT detail FROM erasure_events WHERE request_id=? AND kind='send-resolved'", (rid,))]
+        self.assertEqual([e["attempt"] for e in events], [1])
+
+    def test_the_prefix_is_the_one_the_writer_actually_prints(self):
+        """Pinned to the shell script, not to a copy of the string: a rename on one side would otherwise silently
+        turn every refusal back into an unresolvable `unknown`."""
+        path = os.path.join(HERE, "intercom-ops-write.sh")
+        with open(path) as f:
+            src = f.read()
+        self.assertIn(f"printf '{store.REFUSED_PREFIX} %s\\n'", src)
