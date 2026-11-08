@@ -1649,7 +1649,7 @@ fm_wake_clean_field() {
 
 fm_wake_append() {
   local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
-  local recovery_marker
+  local recovery_marker pending coalesce _tmp
   case "$kind" in
     signal|stale|check|heartbeat) ;;
     *) printf 'fm_wake_append: invalid wake kind: %s\n' "$kind" >&2; return 2 ;;

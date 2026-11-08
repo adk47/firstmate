@@ -755,6 +755,53 @@ test_turn_ended_not_working_surfaced() {
   pass "a bare turn-end whose crew is not provably working is surfaced (the swallowed-finish fix)"
 }
 
+# A surfaced turn-end batch must advance each file's .seen-* suppressor to the
+# file's current signature, so the next poll with nothing changed stays quiet.
+# Regression for the whole-fleet re-report: fm_wake_append once assigned the
+# watcher's global scan list (`pending`) while counting queued rows for the
+# batch key, so the marker loop that runs after the enqueue read a row count
+# instead of the scan rows, wrote a stray file named after that count in the
+# watcher's cwd, and never recorded the turn-ends as seen - every poll re-reported
+# every turn-end in the fleet under the same batch key until this was fixed.
+test_turn_ended_batch_advances_seen_markers() {
+  local dir state fakebin out pid t marker expected
+  dir=$(make_case turn-ended-seen-advance); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  # Two turn-ends, so what must advance is a batch, not one file. The queue file
+  # exists and is empty so the per-key row count is a deterministic "0".
+  : > "$state/alpha.turn-ended"; : > "$state/beta.turn-ended"
+  : > "$state/.wake-queue"
+  export FM_FAKE_CREW_STATE='state: unknown · source: none · no current-state source available'
+  pushd "$dir" >/dev/null || fail "could not enter the case dir"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  popd >/dev/null || fail "could not leave the case dir"
+  wait_for_exit "$pid" 100 || fail "watcher did not surface the two-file turn-end batch"
+  grep -F "signal: $state/alpha.turn-ended $state/beta.turn-ended" "$out" >/dev/null \
+    || fail "watcher did not print the two-file turn-end batch: $(cat "$out")"
+  for t in alpha beta; do
+    marker="$state/.seen-${t}_turn-ended"
+    expected=$(seen_sig "$state/$t.turn-ended")
+    [ -e "$marker" ] || fail "surfacing $t.turn-ended left no .seen-* marker"
+    [ "$(cat "$marker")" = "$expected" ] \
+      || fail "$t.turn-ended marker holds '$(cat "$marker")' but the file signature is '$expected'"
+  done
+  [ ! -e "$dir/0" ] || fail "the marker loop wrote a stray file named after the queue row count"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the surfaced batch"
+  # Nothing changed: the next poll must not re-report the same two files.
+  : > "$out"
+  pushd "$dir" >/dev/null || fail "could not enter the case dir"
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  popd >/dev/null || fail "could not leave the case dir"
+  if ! wait_live "$pid" 40; then
+    fail "an unchanged fleet re-reported the already-surfaced turn-ends: $(cat "$out")"
+  fi
+  reap "$pid"
+  [ ! -s "$out" ] || fail "an unchanged fleet printed a wake: $(cat "$out")"
+  pass "a surfaced turn-end batch advances its .seen-* markers and an unchanged fleet stays quiet"
+}
+
 # --- bare turn-end, unverifiable harness: pane churn is the third proof --------
 # A harness whose semantic busy state has no verified source (codex) can never
 # report working, so the two proofs above are unreachable for it and EVERY worker
@@ -5030,6 +5077,7 @@ test_secondmate_status_signal_never_absorbed_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
+test_turn_ended_batch_advances_seen_markers
 test_turn_ended_churning_pane_absorbed
 test_turn_ended_churn_resets_prior_stale_classification
 test_turn_ended_churn_resets_wedge_state_before_stale_poll
