@@ -43,12 +43,25 @@ setup() {
 }
 
 @test "concurrency stays PER-REF with cancel-in-progress true (a constant group was rejected)" {
-  run grep -A2 '^concurrency:' "$wf"
-  [ "$status" -eq 0 ]
-  [[ "$output" == *'github.ref'* ]]
-  [[ "$output" == *'cancel-in-progress: true'* ]]
+  # Read the BLOCK, not a fixed window. `grep -A2 '^concurrency:'` only ever saw the first two
+  # lines, so the moment the group grew a comment explaining the event-aware discriminator the
+  # assertion failed on prose rather than on the shape it exists to pin (QA #1813 r3).
+  block="$(awk '/^concurrency:/{f=1;next} f&&/^[^ #]/{exit} f' "$wf" | grep -v '^[[:space:]]*#')"
+  [ -n "$block" ]
+  [[ "$block" == *'github.ref'* ]]
+  [[ "$block" == *'cancel-in-progress: true'* ]]
   # No pool-wide constant group may creep back in.
-  [[ "$output" != *'pr-validate-node8'* ]]
+  [[ "$block" != *'pr-validate-node8'* ]]
+}
+
+@test "the concurrency group is event-aware, so a metadata edit cannot cancel a code run" {
+  # The discriminator is `github.event.changes.base`: present on a retarget, absent on a
+  # metadata edit. A retarget must land in the `code` bucket, where it supersedes and is
+  # superseded by ordinary code runs (QA #1813 r2).
+  block="$(awk '/^concurrency:/{f=1;next} f&&/^[^ #]/{exit} f' "$wf" | grep -v '^[[:space:]]*#')"
+  [[ "$block" == *"github.event.changes.base"* ]]
+  [[ "$block" == *"'meta'"* ]]
+  [[ "$block" == *"'code'"* ]]
 }
 
 @test "bats --jobs stays at 4 or below while this box also serves production" {

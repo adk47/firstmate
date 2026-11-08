@@ -3,6 +3,18 @@ name: PR Validation
 on:
   pull_request:
     branches: [main]
+    # `edited` is NOT a default pull_request activity type, and a RETARGET onto main is an `edited`
+    # event. Without it, a stacked PR whose base is another branch gets no run when it is opened
+    # (correct — `branches: [main]` does not match) and then STILL gets no run when it is retargeted
+    # onto main, so it never validates, never fires qa-autoreview (which triggers on this workflow's
+    # completion), and can never merge. 2026-11-06: hydra#1787 was rebased and retargeted at 01:17Z
+    # and its entire run history was PR Title Check + credit-approval-guard; `qa-review` stayed NONE
+    # for six hours and the PR looked like an orphan with no owner.
+    #
+    # The `validate` job's `if:` below keeps this cheap: a title/body edit carries `changes.title` or
+    # `changes.body` and no `changes.base`, so it skips the job and consumes no runner. Only a base
+    # change actually validates.
+    types: [opened, synchronize, reopened, edited]
 
 # Cancel a run superseded by a newer push to the same PR ref. Without this every push
 # stacks another full run (measured 5 of 31 runs superseded, ~16 % of pool minutes). A
@@ -24,7 +36,20 @@ on:
 # ROLLBACK of the slot: drop the `scripts/bats-slot.sh ... --` prefix on the bats
 # invocation. Do that only with a node-8 hydra runner count of 1-2, or the pile-up returns.
 concurrency:
-  group: pr-validate-${{ github.ref }}
+  # The group is EVENT-AWARE, and it keys on whether the BASE changed — not on the action.
+  #
+  # A metadata edit (title/body) must never cancel a code run: the replacement run skips the
+  # heavy jobs, and a SKIPPED job reports SUCCESS, so cancelling a live validation and replacing
+  # it with a skip would let a PR go green without ever being validated (QA #1813 Critical).
+  #
+  # But `edited` is NOT the same as "metadata only". A base-ref change is ALSO an `edited` event,
+  # and that one MUST validate. Keying the bucket on the action alone put a retarget in the meta
+  # bucket, so a title/body edit arriving while the retarget validation ran cancelled it and the
+  # replacement skipped every job — the PR then had no completed validation at all (QA #1813
+  # r2). The discriminator is `github.event.changes.base`: present on a retarget, absent on a
+  # metadata edit. A retarget therefore lands in the `code` bucket, where it supersedes and is
+  # superseded by ordinary code runs, which is what it is.
+  group: pr-validate-${{ github.ref }}-${{ (github.event.action == 'edited' && github.event.changes.base == null) && 'meta' || 'code' }}
   cancel-in-progress: true
 
 jobs:
@@ -47,7 +72,11 @@ jobs:
   # logins), which is the point: a test that silently needed production credentials goes red
   # here instead of quietly using them.
   validate:
+    name: validate${{ (github.event.action == 'edited' && github.event.changes.base == null) && ' (metadata edit — not run)' || '' }}
     runs-on: ovh-hydra
+    # A retarget onto main must validate (see the `types:` comment above); a title/body edit must not
+    # cost a 20-60 minute run. `github.event.changes.base` is present only when the base ref moved.
+    if: github.event.action != 'edited' || github.event.changes.base != null
     steps:
       - name: Checkout PR branch
         uses: actions/checkout@v5
@@ -994,7 +1023,8 @@ jobs:
           echo "::endgroup::"
 
   node8-handoff:
-    name: Node-8 hand-off (QA rebase-integrity + blast-radius, live Trino SQL, host-only bats)
+    name: Node-8 hand-off (QA rebase-integrity + blast-radius, live Trino SQL, host-only bats)${{ (github.event.action == 'edited' && github.event.changes.base == null) && ' (metadata edit — not run)' || '' }}
+    if: github.event.action != 'edited' || github.event.changes.base != null
     # The QA hand-off is published as a hidden PR comment (T10), so the analyzers no longer HAVE
     # to be on node-8 for Grounds 8/9 to read them — but this job still is the one that runs
     # them, and it is cheap (git + python3, seconds). Moving them to ovh-hydra is a follow-up
@@ -1207,7 +1237,8 @@ jobs:
           fi
 
   deploy-preflight:
-    name: Deploy pre-flight (rsync --delete dry-run vs /opt/hydra/)
+    name: Deploy pre-flight (rsync --delete dry-run vs /opt/hydra/)${{ (github.event.action == 'edited' && github.event.changes.base == null) && ' (metadata edit — not run)' || '' }}
+    if: github.event.action != 'edited' || github.event.changes.base != null
     # Must run on the self-hosted hydra runner because it needs to see
     # /opt/hydra/ — the actual target of the production deploy rsync.
     # ubuntu-latest can't do this check.
@@ -1477,7 +1508,8 @@ jobs:
           echo "✓ All plugin env-var references resolve in /etc/openclaw/{shared,<profile>}.env"
 
   bats-tests:
-    name: Bats (scripts/ + ops-admin gates) (${{ matrix.shard }}/2)
+    name: Bats (scripts/ + ops-admin gates) (${{ matrix.shard }}/2)${{ (github.event.action == 'edited' && github.event.changes.base == null) && ' (metadata edit — not run)' || '' }}
+    if: github.event.action != 'edited' || github.event.changes.base != null
     # Added 2026-05-20 after PR #297: Clio caught a `set -u` regression in
     # find-dupes.sh --catalog that emitted "unbound variable" to stderr
     # while still exiting 0 — bats picked it up locally but the suite
@@ -1739,7 +1771,8 @@ jobs:
           fi
 
   py-syntax:
-    name: Python syntax check (py_compile)
+    name: Python syntax check (py_compile)${{ (github.event.action == 'edited' && github.event.changes.base == null) && ' (metadata edit — not run)' || '' }}
+    if: github.event.action != 'edited' || github.event.changes.base != null
     # Added 2026-05-20 alongside the bats wiring: 44 .py files exist
     # under scripts/, skills-all/, and workspaces/ but nothing in CI
     # catches a syntax typo before deploy. py_compile is ~5s and
@@ -1766,7 +1799,8 @@ jobs:
           echo "✓ All Python files parse cleanly"
 
   py-tests:
-    name: Python unit tests (watchdog)
+    name: Python unit tests (watchdog)${{ (github.event.action == 'edited' && github.event.changes.base == null) && ' (metadata edit — not run)' || '' }}
+    if: github.event.action != 'edited' || github.event.changes.base != null
     # Added 2026-06-03 (PR #411): the Intercom intake-outage watchdog
     # (scripts/intercom-intake-watchdog.py) is the ONLY tripwire for the
     # April-2026 silent-intake-outage class. py_compile (above) proves it
@@ -2460,7 +2494,8 @@ jobs:
           python3 -m unittest -v tests.test_sentinel_demote
 
   plugin-tests:
-    name: Plugin tests (vitest)
+    name: Plugin tests (vitest)${{ (github.event.action == 'edited' && github.event.changes.base == null) && ' (metadata edit — not run)' || '' }}
+    if: github.event.action != 'edited' || github.event.changes.base != null
     # Added 2026-05-20: 3 plugins under plugins/ (intercom, support-tools,
     # muso-credit-verification-enforcer) ship test files that never ran
     # in CI before this PR. PR #297's TypeScript changes in
@@ -2656,7 +2691,8 @@ jobs:
           echo "✓ All plugin tests pass"
 
   shellcheck:
-    name: Shellcheck (scripts/ + .githooks/)
+    name: Shellcheck (scripts/ + .githooks/)${{ (github.event.action == 'edited' && github.event.changes.base == null) && ' (metadata edit — not run)' || '' }}
+    if: github.event.action != 'edited' || github.event.changes.base != null
     # Was ubuntu-latest, but GitHub-hosted runners stopped being assignable
     # for this repo around 2026-04-24 (job completes in ~3s with
     # runner_id=0, runner_name="" — runner never assigned). Until that
