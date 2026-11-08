@@ -752,6 +752,70 @@ test_an_unreadable_hold_set_pages_once_and_recovers_nothing() {
   pass "an unreadable hold set pages once and recovers nothing"
 }
 
+test_a_dry_run_with_an_unreadable_hold_set_queues_no_wake() {
+  local home now out
+  home=$(make_home dry-held-broken); fake_tools "$home"
+  worker "$home" w1 dead
+  held_bin_fails "$home"
+  now=$(start_clock)
+  out=$(WD_ARGS=--dry-run tick "$home" "$now" FM_WATCHDOG_BACKLOG=on \
+    FM_WATCHDOG_BACKLOG_BIN="$home/fakebin/tasks-axi")
+  assert_contains "$out" "would wake firstmate: watchdog-held-unavailable" \
+    "the dry run did not report the instrument page it would queue"
+  [ -e "$home/state/.wake-queue" ] && fail "a dry run queued the instrument wake"
+  [ -e "$home/state/.wake-queue.seq" ] && fail "a dry run advanced the wake sequence"
+  pass "a dry run with an unreadable hold set queues no wake"
+}
+
+test_a_fail_closed_pass_preserves_relaunch_history() {
+  local home now i
+  home=$(make_home held-history); fake_tools "$home"
+  worker "$home" w1 dead
+  held_bin "$home" other-lane
+  now=$(start_clock)
+  for i in 0 1; do
+    tick "$home" "$((now + i * 60))" FM_WATCHDOG_BACKLOG=on \
+      FM_WATCHDOG_BACKLOG_BIN="$home/fakebin/tasks-axi" >/dev/null
+  done
+  assert_eq "$(counter "$home" '^control .* relaunch')" "2" \
+    "the setup did not spend two relaunches"
+  held_bin_fails "$home"
+  tick "$home" "$((now + 120))" FM_WATCHDOG_BACKLOG=on \
+    FM_WATCHDOG_BACKLOG_BIN="$home/fakebin/tasks-axi" >/dev/null
+  held_bin "$home" other-lane
+  for i in 3 4 5; do
+    tick "$home" "$((now + i * 60))" FM_WATCHDOG_BACKLOG=on \
+      FM_WATCHDOG_BACKLOG_BIN="$home/fakebin/tasks-axi" >/dev/null
+  done
+  assert_eq "$(counter "$home" '^control .* relaunch')" "3" \
+    "a fail-closed pass erased the hourly relaunch history"
+  assert_eq "$(wakes "$home" | grep -c 'hourly relaunch budget')" "1" \
+    "a fail-closed pass erased the relaunch history and skipped the escalation"
+  pass "a fail-closed pass preserves the hourly relaunch history"
+}
+
+test_a_fail_closed_pass_preserves_the_backlog_hash() {
+  local home now
+  home=$(make_home held-backlog-history); fake_tools "$home"
+  worker "$home" w1 alive
+  pane "$home" w1 idle 'fine'
+  backlog_bin "$home" w1 ghost-lane
+  now=$(start_clock)
+  tick "$home" "$now" FM_WATCHDOG_BACKLOG=on \
+    FM_WATCHDOG_BACKLOG_BIN="$home/fakebin/tasks-axi" >/dev/null
+  assert_eq "$(wakes "$home" | grep -c 'no task record')" "1" \
+    "the setup did not report the orphan"
+  held_bin_fails "$home"
+  tick "$home" "$((now + 60))" FM_WATCHDOG_BACKLOG=on \
+    FM_WATCHDOG_BACKLOG_BIN="$home/fakebin/tasks-axi" >/dev/null
+  backlog_bin "$home" w1 ghost-lane
+  tick "$home" "$((now + 120))" FM_WATCHDOG_BACKLOG=on \
+    FM_WATCHDOG_BACKLOG_BIN="$home/fakebin/tasks-axi" >/dev/null
+  assert_eq "$(wakes "$home" | grep -c 'no task record')" "1" \
+    "a fail-closed pass erased the backlog hash and re-paged an unchanged orphan"
+  pass "a fail-closed pass preserves the backlog hash"
+}
+
 test_a_held_in_flight_orphan_is_silent_while_an_unheld_orphan_pages() {
   local home now out
   home=$(make_home held-orphan); fake_tools "$home"
@@ -801,4 +865,7 @@ test_a_stopped_task_is_never_relaunched_or_paged
 test_a_held_backlog_item_is_never_relaunched_or_paged
 test_an_unparked_dead_task_is_still_relaunched_and_paged
 test_an_unreadable_hold_set_pages_once_and_recovers_nothing
+test_a_dry_run_with_an_unreadable_hold_set_queues_no_wake
+test_a_fail_closed_pass_preserves_relaunch_history
+test_a_fail_closed_pass_preserves_the_backlog_hash
 test_a_held_in_flight_orphan_is_silent_while_an_unheld_orphan_pages

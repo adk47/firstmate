@@ -387,11 +387,13 @@ record_load() {
   RECORD_BOOT=''
   RECORD_UNITS='{}'
   PRIOR_TASKS='{}'
+  PRIOR_BACKLOG='{}'
   if [ -f "$RECORD" ] && [ ! -L "$RECORD" ]; then
     [ "$(jq -r '.schema // 0' "$RECORD" 2>/dev/null)" = "$SCHEMA" ] || return 0
     RECORD_BOOT=$(jq -r '.boot_identity // ""' "$RECORD" 2>/dev/null)
     RECORD_UNITS=$(jq -c '.units // {}' "$RECORD" 2>/dev/null) || RECORD_UNITS='{}'
     PRIOR_TASKS=$(jq -c '.tasks // {}' "$RECORD" 2>/dev/null) || PRIOR_TASKS='{}'
+    PRIOR_BACKLOG=$(jq -c '.backlog // {}' "$RECORD" 2>/dev/null) || PRIOR_BACKLOG='{}'
   fi
   return 0
 }
@@ -463,13 +465,17 @@ task_reset() {  # <id> <relaunches>
     > "$WORK/entry.$1.json" 2>/dev/null || true
 }
 
-record_store() {  # <boot> <units-json> <backlog-json>
+record_store() {  # <boot> <units-json> <backlog-json> [preserve-tasks]
   local tasks='{}' tmp
   [ "$DRY_RUN" = 1 ] && return 0
   if compgen -G "$WORK/entry.*.json" >/dev/null 2>&1; then
     tasks=$(jq -s 'map({ key: .key, value: .value }) | from_entries' "$WORK"/entry.*.json 2>/dev/null) || tasks='{}'
   fi
+  if [ "${4:-0}" = 1 ]; then
+    tasks=$(jq -n --argjson prior "$PRIOR_TASKS" --argjson new "$tasks" '$prior + $new' 2>/dev/null) || tasks=$PRIOR_TASKS
+  fi
   tmp="$RECORD.tmp.$$"
+
   if jq -n --argjson schema "$SCHEMA" --arg boot "$1" \
       --argjson units "$2" --argjson tasks "$tasks" --argjson backlog "${3:-{\}}" \
       '{ schema: $schema, boot_identity: $boot, units: $units, tasks: $tasks,
@@ -561,6 +567,10 @@ wake_firstmate() {  # <key> <payload>
 # a pass that cannot read the hold set never floods the queue.
 wake_instrument_once() {  # <key> <payload>
   local queued
+  if [ "$DRY_RUN" = 1 ]; then
+    wake_firstmate "$1" "$2"
+    return 0
+  fi
   queued=$(fm_wake_queued_keys check 2>/dev/null || true)
   printf '%s\n' "$queued" | grep -Fx -- "$1" >/dev/null 2>&1 && return 0
   wake_firstmate "$1" "$2"
@@ -1488,9 +1498,14 @@ main() {
   task_pass
   backlog_pass
   # A pass that could not read the hold set ran no recovery, so it must not
-  # record the new boot as handled; the next readable pass retries it.
-  [ "$HELD_UNAVAILABLE" = 1 ] && boot=$RECORD_BOOT
-  record_store "$boot" "$units" "$BACKLOG_JSON"
+  # record the new boot as handled or erase the history a later pass needs.
+  local preserve=0
+  if [ "$HELD_UNAVAILABLE" = 1 ]; then
+    boot=$RECORD_BOOT
+    BACKLOG_JSON=$PRIOR_BACKLOG
+    preserve=1
+  fi
+  record_store "$boot" "$units" "$BACKLOG_JSON" "$preserve"
   [ "$DRY_RUN" = 1 ] || fm_lock_release "$LOCK"
   return 0
 }
