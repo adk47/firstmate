@@ -103,7 +103,7 @@ def no_emdash(s):
 # The GDPR bridge (scripts/gdpr-triage-bridge.py) resolves a `human` verdict that is really a
 # privacy request: `registered` when the erasure register already holds the thread, `filed` when
 # it just filed it. Those are NOT human pages -- the pipeline owns them and has its own due
-# dates. `refused`, `not_privacy` and `withdrawn` keep the human page, and each carries its own
+# dates. `refused`, `not_privacy`, `withdrawn` and `escalated` keep the human page, and each carries its own
 # words so the page names the reason instead of a generic "needs a human". `withdrawn` exists
 # because a customer can cancel a request the register still holds open: the register has no
 # cancellation transition, so only a human can stop the next action.
@@ -180,7 +180,7 @@ for tid in ordered_tids[:MAX_LINES]:
         else:
             tag = ":raising_hand: needs a human"
             # A pipeline refusal names itself; anything else keeps the triage's own reason.
-            if outcome in ("refused", "not_privacy", "withdrawn") and rec.get("reason"):
+            if outcome in ("refused", "not_privacy", "withdrawn", "escalated") and rec.get("reason"):
                 reason = no_emdash(slack_escape(rec["reason"]))
     link = "<%s|%s>" % (url, subject) if url else subject
     lines.append("• %s - %s · %s (%s)" % (link, desc, tag, reason))

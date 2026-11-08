@@ -24,6 +24,9 @@ register first, then the pipeline's own classifier, and records exactly ONE outc
   withdrawn    the customer withdrew a request the register still holds open. The register has no
                cancellation transition, so a human must decide whether to stop its next action. The
                digest pages a human and says why.
+  escalated    an open row was raised to legal_threat or dmca_takedown. Intake absorbs the escalation
+               and the row's class changes, but a threat is not a self-serve pipeline item, so the
+               digest still pages a human and names the class it came from.
   not_privacy  the pipeline's classifier says this is not a privacy request (a sales
                negotiation, a credit dispute). The triage's own `human` verdict stands.
 
@@ -89,6 +92,12 @@ def owns_obligation(existing: dict | None, incoming_class: str) -> bool:
     """
     before = OBLIGATION.get(str((existing or {}).get("class") or ""))
     after = OBLIGATION.get(incoming_class)
+    # A routable class we hold no obligation key for is legal_threat or dmca_takedown. They are NOT a privacy
+    # obligation, so an open Art.17 row does not discharge them: the customer has escalated, and reporting
+    # `registered` removed the human page while the register stayed on the old class (QA #1858 Important).
+    # Intake escalates the row's class on merge, so let it run.
+    if incoming_class in ROUTABLE and not after:
+        return False
     if not before or not after:
         return True                      # unknown either side: do not change the routing
     return before == after
@@ -488,9 +497,16 @@ def main(argv: list[str] | None = None) -> int:
             threads[tid] = rec
             continue
 
+        # An escalation of a row we already hold still needs a human even after intake has absorbed it: a legal
+        # threat is not a self-serve pipeline item, and the row's class changing is not the same as someone
+        # reading it. Recorded as its own outcome because `filed` removes the page.
+        escalated_from = ((existing or {}).get("class") or "") if (
+            actively_owned(existing) and cls in ROUTABLE and not OBLIGATION.get(cls)) else ""
+
         outcome, message = file_candidate(candidate, a.store)
         if outcome == "filed":
-            rec.update(outcome="filed", class_=cls, register_no=register_no_from(message),
+            rec.update(outcome="escalated" if escalated_from else "filed", class_=cls,
+                       register_no=register_no_from(message),
                        reason=message.splitlines()[0] if message else "")
             # A read that failed after the row was created is a warning, not a refusal: the
             # request is in the register and the pipeline re-reads on its next tick.
@@ -509,6 +525,13 @@ def main(argv: list[str] | None = None) -> int:
                 rec["action"] = row.get("action") or ""
                 rec["identity_verdict"] = row.get("identity_verdict") or ""
                 rec["status"] = row.get("status") or ""
+            if escalated_from:
+                rec["escalated_from"] = escalated_from
+                rec["reason"] = (
+                    f"register #{rec.get('register_no') or '?'} was an open {escalated_from} and this message "
+                    f"escalated it to {cls}: the register holds no obligation key for {cls}, and a legal threat "
+                    f"or takedown notice is not something the pipeline answers on its own, so a human must "
+                    f"still read it")
         else:
             rec.update(outcome="refused", class_=cls, reason=message)
 

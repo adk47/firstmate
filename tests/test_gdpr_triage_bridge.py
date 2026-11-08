@@ -753,6 +753,67 @@ class TestAnUnqualifiedWithdrawalStillPages(BridgeCase):
         self.assertIsNone(db.by_key_prefix(f"gmail:support@muso.ai:{tid}"))
 
 
+class TestAnEscalationKeepsTheHumanPage(BridgeCase):
+    """QA #1858 Important. `owns_obligation` returned true whenever either side lacked an OBLIGATION key, so an
+    open Art.17 row absorbed a later legal threat or DMCA notice from the same thread: the row stayed on the old
+    class, nothing escalated, and the digest went to zero human pages. `legal_threat` and `dmca_takedown` ARE
+    routable, so intake escalates the row's class on merge - but a threat is not a self-serve pipeline item, so the
+    page has to survive the escalation."""
+
+    THREAT = ("My attorney will file a lawsuit unless you respond to this formal notice. "
+              "This is a legal threat and my last warning.")
+
+    def test_a_legal_threat_on_an_open_erasure_row_pages_a_human(self):
+        tid = "1a1bESCALATE01"
+        self.seed_registered(tid, register_no=611, cls="privacy_erasure")
+        emails = [self.email(tid, "Re: my account", self.THREAT)]
+        proc, result = self.run_bridge(emails, [self.verdict(tid, "legal threat")])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rec = result["threads"][tid]
+        self.assertEqual(rec["outcome"], "escalated", rec)
+        self.assertEqual(rec["class_"], "legal_threat", rec)
+        self.assertEqual(rec["escalated_from"], "privacy_erasure", rec)
+        self.assertIn("human", rec["reason"], rec)
+        d = self.digest(result)
+        self.assertIn("needs a human", d.stdout)
+        self.assertIn("escalated", d.stdout)
+
+    def test_a_dmca_notice_on_an_open_erasure_row_pages_a_human(self):
+        tid = "1a1bESCALATE02"
+        self.seed_registered(tid, register_no=612, cls="privacy_erasure")
+        emails = [self.email(tid, "Re: my account",
+                             "Please remove the infringing copies of my copyrighted work. "
+                             "This is a DMCA takedown notice.")]
+        proc, result = self.run_bridge(emails, [self.verdict(tid, "dmca")])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rec = result["threads"][tid]
+        self.assertEqual(rec["outcome"], "escalated", rec)
+        self.assertEqual(rec["class_"], "dmca_takedown", rec)
+        d = self.digest(result)
+        self.assertIn("needs a human", d.stdout)
+
+    def test_a_fresh_legal_threat_with_no_open_row_is_still_FILED_and_not_escalated(self):
+        """The escalation outcome is for a row we already hold. A first-message threat files its own row."""
+        tid = "1a1bESCALATE03"
+        emails = [self.email(tid, "", self.THREAT)]
+        proc, result = self.run_bridge(emails, [self.verdict(tid, "legal threat")])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rec = result["threads"][tid]
+        self.assertEqual(rec["outcome"], "filed", rec)
+        self.assertNotIn("escalated_from", rec)
+
+    def test_a_same_class_reply_on_an_open_erasure_row_is_still_registered(self):
+        tid = "1a1bESCALATE04"
+        self.seed_registered(tid, register_no=613, cls="privacy_erasure")
+        emails = [self.email(tid, "Re: my account",
+                             "Please delete my profile. I already asked and nothing has happened.")]
+        proc, result = self.run_bridge(emails, [self.verdict(tid, "privacy")])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rec = result["threads"][tid]
+        self.assertEqual(rec["outcome"], "registered", rec)
+        self.assertEqual(rec["register_no"], "613", rec)
+
+
 class TestAnAccessDutyIsNotDroppedWhenErasureIsAlreadyOpen(BridgeCase):
     """QA #1847 r5 Important. The `registered` short-circuit returned before the dual-duty filing, so a
     message that ALSO asks for a copy left the Art.15 answer with no row and no deadline."""
