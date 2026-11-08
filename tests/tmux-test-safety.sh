@@ -87,7 +87,7 @@ fm_test_tmux_refuse_default_socket() {
 # to be refused, with the runner's refusal log detached so the expected refusal
 # is not reported as an unexpected one.
 fm_test_tmux_expect_refusal() {
-  local saved_log_set=0 saved_log= saved_tmp_set=0 saved_tmp= saved_private_set=0 saved_private= rc
+  local saved_log_set=0 saved_log='' saved_tmp_set=0 saved_tmp='' saved_private_set=0 saved_private='' rc
   if [ "${FM_TEST_TMUX_REFUSAL_LOG+x}" = x ]; then
     saved_log_set=1
     saved_log=$FM_TEST_TMUX_REFUSAL_LOG
