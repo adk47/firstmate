@@ -1470,6 +1470,8 @@ def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pac
                      f"a POST attempt timed out and the retry answered rc={res.returncode} {out!r}; the claim may "
                      f"have landed without a note, so the outcome is unknown and it is never scored as a skip or a "
                      f"refusal")
+            if _unmeasured_stop(report, walked):
+                return
         elif res.returncode == 0:
             report.skipped += 1
             _outcome(report, p, "skipped", out)

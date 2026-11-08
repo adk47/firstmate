@@ -3679,5 +3679,46 @@ class SignedAcceptedTests(SignedHeadTests):
             self.assertIn(want, out.getvalue())
 
 
+class AfterTimeoutUnmeasuredBarTests(unittest.TestCase):
+    """A timed-out POST whose retry answers is UNMEASURED, and the bar applies to it exactly as it applies to a
+    timeout that raised: once enough of the batch is unmeasured the apply walk stops instead of sending on."""
+
+    def _send(self, n, stopped_after):
+        calls = []
+
+        def run(argv):
+            uid = json.load(open(argv[argv.index("--credits-file") + 1]))["user"]["id"]
+            calls.append(uid)
+            res = subprocess.CompletedProcess(argv, 1, "", "REFUSED user already messaged in the last 7 days\n")
+            res.after_timeout = 1
+            return res
+
+        payloads = [{"user": {"id": str(i), "email": f"u{i}@x.com"},
+                     "credits": [{"request_id": f"r{i}"}]} for i in range(1, n + 1)]
+        rep = verify_notify.Report()
+        with unittest.mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, [])), \
+             tempfile.TemporaryDirectory() as d, \
+             unittest.mock.patch.object(verify_notify, "APPLY_LOCK_PATH", os.path.join(d, "apply.lock")):
+            verify_notify.send_all(payloads, rep, mode="apply", runner=run, extra=["--campaign", "uvn-status"])
+        self.assertEqual(len(calls), stopped_after)
+        self.assertEqual(rep.timeout_users, stopped_after)
+        return rep
+
+    def test_the_after_timeout_branch_honours_the_unmeasured_bar(self):
+        rep = self._send(12, 5)
+        self.assertEqual(rep.unmeasured_stop_at, 5)
+        self.assertTrue(rep.failed)
+        self.assertIn("UNMEASURED STOP: 5 of 12", rep.stopped_on_unmeasured)
+        self.assertIn("UNMEASURED STOP: 5 of 12", rep.render("apply"))
+        self.assertEqual([o["result"] for o in rep.outcomes], ["timeout"] * 5)
+        self.assertEqual(rep.refused_users, 0)
+
+    def test_below_the_bar_the_walk_continues(self):
+        rep = self._send(4, 4)
+        self.assertEqual(rep.timeout_users, 4)
+        self.assertFalse(rep.failed)
+        self.assertEqual(rep.stopped_on_unmeasured, "")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
