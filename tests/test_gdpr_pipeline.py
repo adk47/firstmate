@@ -4147,6 +4147,67 @@ class ACombinedRequestFilesBothDutiesEndToEnd(unittest.TestCase):
         self.assertEqual(len(s.all("open")), 2, "the key is the idempotence test")
 
 
+class AnAccessReplyOnAnExistingThreadStillGetsItsOwnRow(unittest.TestCase):
+    """QA #1858 r6 Important. The dual-duty filing lived only on the FRESH-conversation path. On a conversation
+    the store already held, `intake_intercom` called `merge_reply` and continued, and `merge_reply` only folds
+    pages and raises the class - so an access-only reply on an open erasure thread left the Art. 15 duty with no
+    row, no 30-day clock and nobody owing it."""
+
+    def _run(self, seeds, conv):
+        from gdpr_pipeline import run as gdpr_run
+        s = Store(":memory:")
+        log: list[str] = []
+        r = gdpr_run.Run(s, log=log.append)
+        for cls in seeds:
+            s.upsert({"keys": ["intercom:900"], "channel": "intercom", "class": cls,
+                      "conversation_id": "900", "received_at": "2026-11-01T00:00:00Z",
+                      "requester_email": "a@pm.me"})
+        orig = gdpr_run.sources.search_conversations
+        gdpr_run.sources.search_conversations = lambda since: ["900"]
+        try:
+            r.intake_intercom(0, conv_reader=lambda cid: conv)
+        finally:
+            gdpr_run.sources.search_conversations = orig
+        return s, log
+
+    def test_an_access_only_reply_on_an_open_erasure_row_files_the_access_duty(self):
+        conv = {"conversation_id": "900", "created_at": 1790000000, "subject": "Re: my data",
+                "author_email": "a@pm.me",
+                "customer_text": "Please send me a copy of my personal data.",
+                "parts": [{"at": 1793000000, "text": "Please send me a copy of my personal data."}]}
+        s, log = self._run(["privacy_erasure"], conv)
+        rows = s.all()
+        by = {}
+        for x in rows:
+            by.setdefault(x["class"], []).append(x)
+        self.assertIn("privacy_access", by, f"the Art.15 duty got no row; log={log}")
+        access = by["privacy_access"][0]
+        self.assertTrue(access["due_at"], access)
+        self.assertEqual(access["channel"], "intercom")
+        # the erasure duty is untouched, not replaced
+        self.assertEqual(len(by["privacy_erasure"]), 1)
+
+    def test_a_COMBINED_reply_on_an_existing_row_files_both_and_does_not_duplicate(self):
+        conv = {"conversation_id": "900", "created_at": 1790000000, "subject": "Re: my data",
+                "author_email": "a@pm.me",
+                "customer_text": "Send me a copy of my personal data and delete my profile.",
+                "parts": [{"at": 1793000000,
+                           "text": "Send me a copy of my personal data and delete my profile."}]}
+        s, log = self._run(["privacy_erasure"], conv)
+        classes = sorted(x["class"] for x in s.all())
+        self.assertEqual(classes, ["privacy_access", "privacy_erasure"], f"log={log}")
+        # replaying the same thread must not mint a third row
+        self._run([], conv)
+
+    def test_a_DELETION_ONLY_reply_on_an_existing_row_files_no_access_duty(self):
+        conv = {"conversation_id": "900", "created_at": 1790000000, "subject": "Re: my data",
+                "author_email": "a@pm.me",
+                "customer_text": "Please delete my profile.",
+                "parts": [{"at": 1793000000, "text": "Please delete my profile."}]}
+        s, log = self._run(["privacy_erasure"], conv)
+        self.assertEqual(sorted(x["class"] for x in s.all()), ["privacy_erasure"], f"log={log}")
+
+
 class EachObligationGetsItsOwnRow(unittest.TestCase):
     """QA #1847 findings 1 and 4: one thread can owe TWO statutory duties.
 
