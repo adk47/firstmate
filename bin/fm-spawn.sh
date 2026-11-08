@@ -1487,9 +1487,9 @@ launch_template() {
     # effort axis is deliberately omitted and stays in task metadata only.
     cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ __BRIEFARG__' ;;
     # gemini (Google Gemini CLI): a positional query starts the supervised
-    # interactive session and auto-submits it, so the brief rides the launch
-    # command exactly as it does for claude and grok (verified: a multi-line
-    # brief submitted itself with no extra Enter, gemini-cli 0.58.0).
+    # interactive session and auto-submits it, so the brief pointer rides the
+    # launch command exactly as it does for claude and grok (verified: a
+    # multi-line brief submitted itself with no extra Enter, gemini-cli 0.58.0).
     # -y (--yolo) auto-approves every tool call, which an unattended crewmate
     # needs; the footer renders ` YOLO Ctrl+Y` while it is on and a WriteFile
     # was verified to land with no approval gate.
@@ -3736,7 +3736,7 @@ if [ "$HARNESS" = kimi ]; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
     exit 1
   fi
-  KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+  KIMI_POINTER=$(brief_pointer_text "$BRIEF_REAL")
   KIMI_SUBMIT_RETRIES=${FM_KIMI_SUBMIT_RETRIES:-3}
   KIMI_SUBMIT_SLEEP=${FM_KIMI_SUBMIT_SLEEP:-${FM_KIMI_POLL_INTERVAL:-0.5}}
   KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}
@@ -3760,7 +3760,7 @@ if [ "$HARNESS" = rovo ]; then
     rovo_spawn_fail "rovo did not show a verified ready signal before brief delivery in window $T"
     exit 1
   fi
-  ROVO_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+  ROVO_POINTER=$(brief_pointer_text "$BRIEF_REAL")
   ROVO_SUBMIT_RETRIES=${FM_ROVO_SUBMIT_RETRIES:-3}
   ROVO_SUBMIT_SLEEP=${FM_ROVO_SUBMIT_SLEEP:-${FM_ROVO_POLL_INTERVAL:-0.5}}
   ROVO_SUBMIT_SETTLE=${FM_ROVO_SUBMIT_SETTLE:-0}
