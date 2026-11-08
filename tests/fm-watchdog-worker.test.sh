@@ -772,7 +772,7 @@ test_a_stopped_task_is_never_relaunched_or_paged() {
 
 test_a_held_backlog_item_is_never_relaunched_or_paged() {
   local home now out i
-  home=$(make_home held); fake_tools "$home"
+  home=$(make_home held-backlog); fake_tools "$home"
   worker "$home" w1 dead
   worker "$home" w2 alive
   pane "$home" w2 busy 'a tool call that never returns'
