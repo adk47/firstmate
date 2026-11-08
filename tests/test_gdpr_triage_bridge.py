@@ -132,11 +132,12 @@ class BridgeCase(unittest.TestCase):
         return proc
 
     def seed_registered(self, tid, register_no=399, cls="privacy_erasure", action="hide batch",
-                        status="open", confirmed_at=None):
+                        status="open", confirmed_at=None, pages=()):
         """Put a row in the register the way the pipeline would, so the bridge finds it."""
         db = store_mod.Store(self.store_path)
         rid, _ = db.upsert({"keys": [f"gmail:support@muso.ai:{tid}"], "channel": "support",
-                            "class": cls, "received_at": "2026-11-06T19:46:00Z", "pages": []})
+                            "class": cls, "received_at": "2026-11-06T19:46:00Z",
+                            "pages": [{"entity": "profile", "id": p} for p in pages]})
         db.db.execute("UPDATE erasure_requests SET register_no=?, action=?, identity_verdict=?, "
                       "status=?, confirmed_at=? WHERE id=?",
                       (register_no, action, "UNKNOWN", status, confirmed_at, rid))
@@ -187,6 +188,23 @@ class TestANewPageInAnOpenThreadIsNotNothing(BridgeCase):
         row = db.by_key_prefix(f"gmail:support@muso.ai:{tid}", "privacy_erasure")
         ids = {str(p.get("id") if isinstance(p, dict) else p) for p in (row.get("pages") or [])}
         self.assertNotIn(self.PID, ids, "the reproducer must not have written the page")
+
+    def test_a_prefix_the_store_already_holds_is_NOT_a_new_page(self):
+        """QA #1864 r2 Important. The ledger keeps 8-char prefixes and Intercom keeps full uuids, so the same
+        page arrives spelled two ways. Compared verbatim, a held full uuid "loses" against the ledger's prefix,
+        the store dedups the merge, `merged_pages_landed` demands the literal prefix, and an already-watched
+        request is refused and paged to a human - a false alarm on the exact case the store was built for."""
+        tid = "1a1bPREFIX0001"
+        self.seed_registered(tid, register_no=742, pages=(self.PID,))
+        ledger = {f"support@muso.ai:{tid}": {
+            "thread": tid, "class": "privacy_erasure",
+            "first_seen": "Fri, 06 Nov 2026 19:46:00 GMT",
+            "last_seen": "Sun, 08 Nov 2026 19:00:00 GMT",
+            "ids": [{"kind": "profile", "id": self.PID[:8]}], "labels": []}}
+        emails = [self.email(tid, "Re: complaint", "Any update on this?")]
+        proc, result = self.run_bridge(emails, [self.verdict(tid, "privacy follow-up")], ledger=ledger)
+        rec = result["threads"][tid]
+        self.assertEqual(rec["outcome"], "registered", rec)
 
     def test_a_followup_with_NO_new_page_stays_registered_and_does_not_page(self):
         tid = "1a1bNEWPAGE0002"

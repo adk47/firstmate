@@ -101,6 +101,19 @@ def owns_obligation(existing: dict | None, incoming_class: str) -> bool:
     return before == after
 
 
+def page_eq(pid) -> str:
+    """The key the STORE compares a page on: its first 8 characters, lowercased.
+
+    `Store._prefixes` (`scripts/gdpr_pipeline/store.py:302`) is the authority here, and the reason is documented
+    there: the mail ledger keeps 8-char prefixes and Intercom keeps full uuids, so the same page arrives spelled
+    two ways (register #376 `fc31a861` and #377 `fc31a861-0297-...`, nine seconds apart, one person, one page).
+    Any comparison the bridge makes for itself has to use the store's spelling, or it disagrees with the store
+    that just wrote the row: a full uuid against a held 8-char prefix is not a new page, and demanding the
+    literal string would refuse a request the register is already watching (QA #1864 r2).
+    """
+    return str(pid or "")[:8].lower()
+
+
 def actively_owned(row: dict | None) -> bool:
     """Is the register still working this row?
 
@@ -279,8 +292,8 @@ def merged_pages_landed(store_path: str, key: str, cls: str, ids: list,
         row = store_mod.Store(store_path or store_mod.DEFAULT_PATH).by_key_prefix(key, cls)
     except Exception as exc:  # noqa: BLE001
         return "refused", f"the register could not be re-read after the merge: {exc}"
-    held = {str(p.get("id") if isinstance(p, dict) else p) for p in ((row or {}).get("pages") or [])}
-    missing = [i for i in ids if i not in held]
+    held = {page_eq(p.get("id") if isinstance(p, dict) else p) for p in ((row or {}).get("pages") or [])}
+    missing = [i for i in ids if page_eq(i) not in held]
     if missing:
         return "refused", f"the register still does not hold {', '.join(missing)} after the merge"
     return "filed", message
@@ -468,10 +481,10 @@ def main(argv: list[str] | None = None) -> int:
             # intake; if the merge cannot land, keep the page by refusing the "registered" outcome.
             try:
                 incoming_pages = pages_for(tid, email, ledger)
-                held_ids = {str(p.get("id") if isinstance(p, dict) else p)
+                held_ids = {page_eq(p.get("id") if isinstance(p, dict) else p)
                             for p in (existing.get("pages") or [])}
                 fresh_pages = [p for p in incoming_pages
-                               if str(p.get("id") if isinstance(p, dict) else p) not in held_ids]
+                               if page_eq(p.get("id") if isinstance(p, dict) else p) not in held_ids]
             except Exception:  # noqa: BLE001
                 fresh_pages = []
             if fresh_pages:
