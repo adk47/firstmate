@@ -947,7 +947,7 @@ run_probe() { # id -> sets PROBE_RESULT=distinct|identical|error:<reason>, PROBE
 # identical-output finding points at the statement that says the same words in
 # both cases rather than at the top of the file.
 emitting_line() { # file captured-stdout -> line number
-  local file=$1 captured=$2 i=0 line lit first_output= first_exec=
+  local file=$1 captured=$2 i=0 line lit first_output='' first_exec=''
   while IFS= read -r line; do
     i=$((i + 1))
     case $line in
