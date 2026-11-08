@@ -161,6 +161,12 @@ CLASS_RANK = ("not_erasure", "privacy_access", "privacy_erasure", "dmca_takedown
 OBLIGATION_OF_CLASS = {
     "privacy_erasure": "erasure",
     "privacy_access": "access",
+    # A threat or a takedown notice on a DELETION thread is that deletion escalating: it must keep the erasure
+    # row's clock rather than open a second row for the same duty. On an ACCESS thread it is a different duty and
+    # must NOT take the access row over -- that merged the class and left the Art.15 answer with no row and no
+    # deadline at all (QA #1858). Mapping both to `erasure` expresses exactly that split.
+    "legal_threat": "erasure",
+    "dmca_takedown": "erasure",
 }
 
 
@@ -312,9 +318,10 @@ class Store:
             if not row:
                 return None
             have = obligation_of(row.get("class") or "")
-            # UNKNOWN ON EITHER SIDE KEEPS TODAY'S ROUTING. `legal_threat` and `dmca_takedown` carry no separate
-            # obligation of their own, and a candidate whose class we do not map must not be pushed into a second
-            # row just because we cannot classify it - that would double-file the population we already handle.
+            # UNKNOWN ON EITHER SIDE KEEPS TODAY'S ROUTING: a candidate whose class we do not map must not be
+            # pushed into a second row just because we cannot classify it, which would double-file the population
+            # we already handle. `legal_threat` and `dmca_takedown` ARE mapped (to `erasure`), so they merge into a
+            # deletion row and never take over an access one.
             if not have or not obligation:
                 return row
             return row if have == obligation else None

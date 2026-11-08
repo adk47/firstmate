@@ -802,6 +802,31 @@ class TestAnEscalationKeepsTheHumanPage(BridgeCase):
         self.assertEqual(rec["outcome"], "filed", rec)
         self.assertNotIn("escalated_from", rec)
 
+    def test_an_access_first_thread_keeps_the_access_row_when_a_threat_arrives(self):
+        """QA #1858 Important, end to end. Access row open, then a legal threat: the threat was merged into the
+        access row and changed its class, so the Art.15 answer lost its row and its deadline. Both duties must
+        survive with their own clock, and the human must still be paged."""
+        tid = "1a1bESCALATE05"
+        self.seed_registered(tid, register_no=614, cls="privacy_access")
+        emails = [self.email(tid, "Re: my account", self.THREAT)]
+        proc, result = self.run_bridge(emails, [self.verdict(tid, "legal threat")])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rec = result["threads"][tid]
+        self.assertEqual(rec["outcome"], "escalated", rec)
+        self.assertEqual(rec["class_"], "legal_threat", rec)
+        db = store_mod.Store(self.store_path)
+        access = db.by_key_prefix(f"gmail:support@muso.ai:{tid}", "privacy_access")
+        self.assertIsNotNone(access, "the access row was taken over by the escalation")
+        self.assertEqual(access["class"], "privacy_access")
+        self.assertTrue(access["due_at"], access)
+        rows = [r for r in db.all("open")
+                if str(r.get("conversation_id") or r.get("thread_id") or "") in (tid, "")]
+        keys = {r["row_key"] for r in db.all("open")}
+        self.assertTrue(any("escalation" in k or "erasure" in k for k in keys) or len(db.all("open")) >= 2,
+                        f"no row kept the threat: {sorted(keys)}")
+        d = self.digest(result)
+        self.assertIn("needs a human", d.stdout)
+
     def test_a_same_class_reply_on_an_open_erasure_row_is_still_registered(self):
         tid = "1a1bESCALATE04"
         self.seed_registered(tid, register_no=613, cls="privacy_erasure")

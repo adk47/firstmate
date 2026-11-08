@@ -4207,6 +4207,33 @@ class EachObligationGetsItsOwnRow(unittest.TestCase):
             self.assertEqual(how, "unchanged", f"replaying {cls} at {at} must not open a third row")
         self.assertEqual(len(self.s.all("open")), 2)
 
+    def test_an_escalation_never_takes_over_an_ACCESS_row(self):
+        """QA #1858 Important. Access-first, then a legal threat: `upsert` merged the threat into the access row
+        and changed its class, so the Art.15 answer had no row and no deadline at all. A threat escalates a
+        DELETION duty; it is a different duty from an access request and must get its own row."""
+        access, how = self.push("privacy_access", "2026-10-01T09:00:00Z")
+        self.assertEqual(how, "created")
+        threat, how2 = self.push("legal_threat", "2026-10-03T09:00:00Z")
+        self.assertNotEqual(threat, access)
+        self.assertEqual(how2, "created")
+        # the access duty is intact, with its own class and its own clock
+        self.assertEqual(self.s.get(access)["class"], "privacy_access")
+        self.assertTrue(self.s.get(access)["due_at"], self.s.get(access))
+        self.assertEqual(self.s.get(threat)["class"], "legal_threat")
+        self.assertTrue(self.s.get(threat)["due_at"], self.s.get(threat))
+        self.assertEqual(len(self.s.all("open")), 2)
+
+    def test_an_escalation_never_takes_over_a_DELETION_row_either_but_merges_into_it(self):
+        """The mirror of the test above: on a deletion thread the same notice IS that deletion escalating, so it
+        keeps one row and one clock (the existing `test_a_LATER_escalation_within_one_obligation_still_merges`
+        asserts the merge; this pins that no second row appears)."""
+        erase, _ = self.push("privacy_erasure", "2026-10-01T09:00:00Z")
+        threat, how = self.push("dmca_takedown", "2026-10-03T09:00:00Z")
+        self.assertEqual(threat, erase)
+        self.assertEqual(how, "merged")
+        self.assertEqual(self.s.get(erase)["class"], "dmca_takedown")
+        self.assertEqual(len(self.s.all("open")), 1)
+
     def test_a_LATER_escalation_within_one_obligation_still_merges(self):
         """A legal threat is the SAME erasure duty escalating, not a third obligation: it must merge."""
         erase, _ = self.push("privacy_erasure", "2026-10-01T09:00:00Z")
