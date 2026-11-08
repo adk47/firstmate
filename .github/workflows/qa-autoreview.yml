@@ -16,7 +16,7 @@ name: qa-autoreview
 # Coordinates in the run name so scripts/qa-dispatch-pr-review.sh can see an in-flight
 # review for the same (repo, pr, sha) straight from `gh run list` (MUS-7955). Same shape
 # as external-pr-review.yml's run-name. Empty pr (fork PR) never matches: fail open.
-run-name: "qa ${{ github.repository }}#${{ github.event.workflow_run.pull_requests[0].number }} @ ${{ github.event.workflow_run.head_sha }} (autoreview)"
+run-name: "qa ${{ github.repository }}#${{ github.event_name == 'workflow_dispatch' && inputs.pr || github.event.workflow_run.pull_requests[0].number }} @ ${{ github.event_name == 'workflow_dispatch' && inputs.sha || github.event.workflow_run.head_sha }} (autoreview)"
 
 on:
   workflow_run:
@@ -24,6 +24,39 @@ on:
     # filename (pr-validate.yml) — workflow_run keys off the workflow name.
     workflows: ["PR Validation"]
     types: [completed]
+
+  # Manual re-dispatch — the recovery path for a review that was dispatched and then LOST.
+  #
+  # WHY THIS EXISTS (2026-11-06, incident): the dispatch below is fire-and-forget — it
+  # registers a one-shot openclaw cron job and returns. If the gateway restarts before that
+  # job runs, the job is removed and the review is aborted with `Operation aborted | Cron job
+  # removed by operator.` and NOTHING retries it: this workflow's only other trigger is
+  # `workflow_run`, and the PR Validation run that fired it has already completed, so it
+  # never fires again for that head. On 2026-11-06 the 05:42Z deploy's gateway reload drained
+  # with `timeout 0ms` at 05:48:26Z and killed hydra#1799's review 40s after dispatch, and
+  # hydra#1800's 26s in; both heads then sat with NO `qa-review` status at all (hydra is not
+  # in `merge_gate_repos`, so the `pending` seed is a no-op and a lost dispatch leaves no
+  # trace). The only recovery was to re-run PR Validation, which re-runs 20-60 min of CI to
+  # re-fire a 10-second hand-off.
+  #
+  # This is the narrow fix: re-fire the hand-off for a named (pr, sha) without re-running CI.
+  # It deliberately does NOT add a retry-on-abort or a stale-pending sweep — those need the
+  # watchdog described in policies/qa-approval-policy.json `_field_notes`, and a sweep that
+  # re-dispatches on its own could double-review a head that is merely slow.
+  #
+  # Both inputs are REQUIRED and are checked against live state before anything is dispatched
+  # (see "Manual re-dispatch guards" below): a stale sha would post a verdict on a superseded
+  # commit, which is worse than no verdict.
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "PR number to re-review (must be open, non-draft, base main)"
+        required: true
+        type: string
+      sha:
+        description: "Head SHA to review — must still be the PR's current head"
+        required: true
+        type: string
 
 permissions:
   # actions: read lets the dispatcher's `gh run list` in-flight dedup work; without it the
@@ -48,8 +81,9 @@ jobs:
     # (and NOT hydra) serve only dispatches. PRECONDITION: >= 1 online runner carries hydra-dispatch BEFORE
     # this merges, or every dispatch queues forever. Revert = put back [self-hosted, hydra].
     runs-on: [self-hosted, hydra-dispatch]
-    # pr-validate only runs on pull_request, but guard explicitly anyway.
-    if: github.event.workflow_run.event == 'pull_request'
+    # pr-validate only runs on pull_request, but guard explicitly anyway. A manual
+    # re-dispatch has no workflow_run payload, so it is admitted on its own event name.
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.event == 'pull_request'
     steps:
       - name: Checkout (default branch — main's dispatcher, not PR code)
         uses: actions/checkout@v5
@@ -58,7 +92,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.sha || github.event.workflow_run.head_sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_PR: ${{ inputs.pr }}
         run: |
           set -euo pipefail
 
@@ -107,6 +143,21 @@ jobs:
               || echo "::warning::could not post qa-review=$1 for ${HEAD_SHA:0:7}"
           }
           say_status pending "QA review queued for ${HEAD_SHA:0:7}"
+          # A REFUSAL is not a gate state, so it must not be suppressed by `gated`. `say_status` is a
+          # no-op when the repo is not in `.merge_gate_repos` (hydra is not), which meant a manual
+          # re-dispatch that refused a stale head failed the job and posted NOTHING on the PR - the
+          # operator saw a red run and the PR carried no explanation (QA #1812 finding 2).
+          #
+          # The refusal lands on the commit a reader will actually look at. For a head-moved
+          # refusal that is the PR's CURRENT head, not the superseded sha the operator typed:
+          # posting on the stale sha left the requested PR with no visible refusal at all, and
+          # could mark a different PR's commit (QA #1812 finding 1). The third argument is the
+          # target; it defaults to HEAD_SHA for the case where there is no PR head to use.
+          refuse_status() {  # <state> <description> [sha] — always posts, never aborts
+            local sha="${3:-$HEAD_SHA}"
+            bash scripts/qa-review-status.sh "$REPO" "$sha" "$1" "$2" \
+              || echo "::warning::could not post qa-review=$1 for ${sha:0:7}"
+          }
 
           # Resolve the open PR that owns this commit.
           # 2026-10-28 (hydra#1456, run 40787678249): ONE head sha can be the head of several
@@ -115,11 +166,39 @@ jobs:
           # (base fm/...), which skipped as "not main", so the one PR QA gates never got a
           # review. The main-based PR is the only one this workflow reviews, so it wins.
           # Otherwise the first open PR keeps today's skip/pending behaviour.
-          prjson="$(gh api "repos/${REPO}/commits/${HEAD_SHA}/pulls" \
-            --jq '[.[] | select(.state=="open")] | ((map(select(.base.ref=="main")) + .)[0]) // empty')"
-          if [ -z "$prjson" ]; then
-            echo "No open PR for ${HEAD_SHA} — nothing to review."
-            exit 0
+          #
+          # A MANUAL re-dispatch resolves the NAMED PR directly instead of going through the
+          # sha->PR lookup. The lookup returns empty for a sha that is the head of no OPEN PR (a
+          # closed PR, a branch tip, a typo), and the empty branch below exits 0 - so a manual
+          # re-dispatch of such a sha reported a SUCCESSFUL job while dispatching no review and
+          # posting no refusal (QA #1812 finding 3). Resolving `INPUT_PR` makes the named PR the
+          # subject, so "not open" and "head moved" are both explicit refusals.
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            prjson="$(gh api "repos/${REPO}/pulls/${INPUT_PR}" 2>/dev/null || true)"
+            if [ -z "$prjson" ] || [ "$(jq -r '.state // ""' <<<"$prjson")" != "open" ]; then
+              # NO STATUS IS POSTED HERE, deliberately. The named PR has no verified head, so the only sha we
+              # hold is the one the operator typed — and that sha may be the current head of a DIFFERENT open
+              # PR. Posting `qa-review=failure` there would overwrite that PR's real verdict with a refusal
+              # about a PR it has nothing to do with (QA #1812 r3). A refusal with no safe target belongs in
+              # the run log, where the operator who typed the number will look.
+              echo "::error::re-dispatch asked for PR #${INPUT_PR}, which is not an open PR — refusing. No status was posted: the supplied sha ${HEAD_SHA:0:7} may belong to another PR."
+              exit 1
+            fi
+            head_now="$(jq -r '.head.sha' <<<"$prjson")"
+            if [ "$head_now" != "$HEAD_SHA" ]; then
+              echo "::error::PR #${INPUT_PR} head is now ${head_now:0:7}, not ${HEAD_SHA:0:7} — refusing to review a superseded commit."
+              # Target the PR's live head: that is where the operator and the merge gate look.
+              refuse_status failure "re-dispatch refused: PR #${INPUT_PR} head moved to ${head_now:0:7}" "$head_now"
+              exit 1
+            fi
+            echo "Manual re-dispatch: PR #${INPUT_PR} @ ${HEAD_SHA:0:7} is still the current head — proceeding."
+          else
+            prjson="$(gh api "repos/${REPO}/commits/${HEAD_SHA}/pulls" \
+              --jq '[.[] | select(.state=="open")] | ((map(select(.base.ref=="main")) + .)[0]) // empty')"
+            if [ -z "$prjson" ]; then
+              echo "No open PR for ${HEAD_SHA} — nothing to review."
+              exit 0
+            fi
           fi
 
           PR="$(jq -r '.number' <<<"$prjson")"

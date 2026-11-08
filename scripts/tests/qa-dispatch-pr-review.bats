@@ -631,19 +631,48 @@ gh_runs() {  # gh_runs <databaseId> <pr> <sha> [status] [repo] [age-seconds]
 # --- hydra's own path: qa-autoreview.yml calls this same script (MUS-7955 bot round) ---
 AUTOREVIEW="$HYDRA_REPO/.github/workflows/qa-autoreview.yml"
 
-@test "dedup: qa-autoreview.yml's run-name, rendered, is a name the guard matches -> second hydra dispatch refused" {
+# The run-name carries a TERNARY per field (workflow_dispatch -> inputs, else workflow_run), so a
+# renderer must resolve BOTH event shapes. Rendering only the workflow_run form leaves `${{` in the
+# name and the guard never matches (QA #1812 r4).
+render_run_name() {  # <event: dispatch|workflow_run> <pr> <sha>
+  local rn name
   rn="$(grep -m1 '^run-name:' "$AUTOREVIEW")"
-  [ -n "$rn" ]
+  [ -n "$rn" ] || return 1
   name="$(printf '%s' "${rn#run-name: }" | tr -d '"' \
-    | sed -e 's/\${{ github.repository }}/Muso-AI\/hydra/' \
-          -e 's/\${{ github.event.workflow_run.pull_requests\[0\].number }}/123/' \
-          -e "s/\${{ github.event.workflow_run.head_sha }}/${GOOD_SHA}0000000000000000000000000000/")"
+    | sed -e 's/\${{ github.repository }}/Muso-AI\/hydra/')"
+  if [ "$1" = "dispatch" ]; then
+    # `A && B || C` with A true resolves to B.
+    name="$(printf '%s' "$name" \
+      | sed -e "s/\${{ github.event_name == 'workflow_dispatch' && inputs.pr || github.event.workflow_run.pull_requests\[0\].number }}/$2/" \
+            -e "s/\${{ github.event_name == 'workflow_dispatch' && inputs.sha || github.event.workflow_run.head_sha }}/$3/")"
+  else
+    # `A && B || C` with A false resolves to C.
+    name="$(printf '%s' "$name" \
+      | sed -e "s/\${{ github.event_name == 'workflow_dispatch' && inputs.pr || github.event.workflow_run.pull_requests\[0\].number }}/$2/" \
+            -e "s/\${{ github.event_name == 'workflow_dispatch' && inputs.sha || github.event.workflow_run.head_sha }}/$3/")"
+  fi
+  printf '%s' "$name"
+}
+
+@test "dedup: qa-autoreview.yml's run-name, rendered, is a name the guard matches -> second hydra dispatch refused" {
+  name="$(render_run_name workflow_run 123 "${GOOD_SHA}0000000000000000000000000000")"
   [[ "$name" != *'${{'* ]]
   printf '[{"databaseId":100,"name":"%s","status":"queued","createdAt":"%s"}]\n' "$name" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$TEST_TMPDIR/gh.json"
   export STUB_GH_JSON="$TEST_TMPDIR/gh.json"
   QA_REVIEW_REQUESTER_UID="$NICK" run "$SCRIPT" 123 "$GOOD_SHA"
   [[ "$output" == *"DEDUP-REFUSED duplicate"* ]]
   [ ! -s "$STUB_CALLS" ]
+}
+
+@test "dedup: the run-name renders for BOTH event shapes, and they differ" {
+  # A manual re-dispatch must produce a name the guard can match too, or a re-dispatch of a head
+  # that is already queued would add a second cron job for the same review.
+  wr="$(render_run_name workflow_run 123 "${GOOD_SHA}0000000000000000000000000000")"
+  md="$(render_run_name dispatch 123 "${GOOD_SHA}0000000000000000000000000000")"
+  [[ "$wr" != *'${{'* ]]
+  [[ "$md" != *'${{'* ]]
+  [ "$wr" = "$md" ]
+  [[ "$wr" == *"Muso-AI/hydra#123"* ]]
 }
 
 @test "dedup: qa-autoreview.yml grants actions: read at workflow level (gh run list 403s without it -> silent DEDUP-SKIPPED)" {
@@ -1112,11 +1141,22 @@ autoreview_scratch() {   # <dispatcher-rc> -> scratch checkout dir with stubs
   printf '{"merge_gate_repos":[],"identity":{"app_repos":[]}}\n' > "$d/policies/qa-approval-policy.json"
   printf '#!/usr/bin/env bash\necho "dispatch $*" >> "%s/calls"\nexit %s\n' "$d" "$1" > "$d/scripts/qa-dispatch-pr-review.sh"
   printf '#!/usr/bin/env bash\necho "status $*" >> "%s/calls"\n' "$d" > "$d/scripts/qa-review-status.sh"
-  # gh stub: the PR lookup for the head (one open main-based PR by adk47).
+  # gh stub: the PR lookup for the head (one open main-based PR by adk47), plus the
+  # manual-dispatch lookup `repos/<repo>/pulls/<n>`. STUB_PULLS lists the PR numbers that
+  # are OPEN; STUB_PULL_HEAD is the head sha they report. Anything else 404s, which is what
+  # the step's `|| true` is there for.
   cat > "$STUBBIN/gh" <<'STUB'
 #!/usr/bin/env bash
 case "$1 $2" in
   "api repos/Muso-AI/hydra/commits/"*) echo '{"number":1820,"user":{"login":"adk47"},"draft":false,"base":{"ref":"main"}}' ;;
+  "api repos/Muso-AI/hydra/pulls/"*)
+    n="${2##*/}"
+    if [ -n "${STUB_PULLS:-}" ] && printf '%s\n' $STUB_PULLS | grep -qx "$n"; then
+      printf '{"number":%s,"state":"open","head":{"sha":"%s"},"user":{"login":"adk47"},"draft":false,"base":{"ref":"main"}}\n' \
+        "$n" "${STUB_PULL_HEAD:-086158dfc76ea0be043d3a7fb95b92ea5f240947}"
+    else
+      echo '{"message":"Not Found"}' >&2; exit 1
+    fi ;;
   *) echo "unexpected gh $*" >&2; exit 1 ;;
 esac
 STUB
@@ -1124,8 +1164,13 @@ STUB
   autoreview_step_script > "$d/step.sh"
   echo "$d"
 }
-autoreview_run_step() {   # <dir>
+# EVENT_NAME and INPUT_PR are step env in the workflow, so the harness must supply them or
+# the step aborts under `set -u` before it reaches any stub (QA #1812 r4). The default is the
+# automatic workflow_run shape, which is what every pre-existing test here exercises.
+autoreview_run_step() {   # <dir> [event] [input-pr]
+  local ev="${2:-workflow_run}" ipr="${3:-}"
   ( cd "$1" && REPO=Muso-AI/hydra HEAD_SHA=086158dfc76ea0be043d3a7fb95b92ea5f240947 \
+      EVENT_NAME="$ev" INPUT_PR="$ipr" \
       GITHUB_SERVER_URL=https://github.com GITHUB_RUN_ID=42282917209 bash step.sh )
 }
 
@@ -1165,4 +1210,55 @@ autoreview_run_step() {   # <dir>
   [ -n "$desc" ]
   source "$HYDRA_REPO/scripts/lib/qa-reconcile.sh"
   [ "$(qar_classify_verdict 0 failure 0 "$desc")" = "candidate" ]
+}
+
+# --- 2026-11-07 (hydra#1812 r4): the MANUAL re-dispatch paths, executed ---------------
+# The schema suite pins the workflow's shape; these run the shipped step script so the
+# refusal paths are proven end to end, including WHICH commit a refusal lands on. That
+# target is the whole point: a refusal posted to the wrong sha either hides the refusal
+# from the PR the operator asked about, or marks an unrelated PR red.
+@test "autoreview step (manual): a current head proceeds and posts no status on an ungated repo" {
+  d="$(autoreview_scratch 0)"
+  STUB_PULLS=1820 autoreview_run_step "$d" workflow_dispatch 1820 >"$d/out" 2>&1
+  grep -q 'Manual re-dispatch: PR #1820 @ 086158d is still the current head — proceeding.' "$d/out"
+  grep -q '^dispatch 1820 086158dfc76ea0be043d3a7fb95b92ea5f240947 Muso-AI/hydra U7RP6HKUZ$' "$d/calls"
+  ! grep -q '^status ' "$d/calls"
+}
+
+@test "autoreview step (manual): a head-moved refusal lands on the PR's LIVE head, not the typed sha" {
+  d="$(autoreview_scratch 0)"
+  # The PR's head has moved on; the operator typed the superseded sha.
+  rc=0
+  STUB_PULLS=1820 STUB_PULL_HEAD=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef \
+    autoreview_run_step "$d" workflow_dispatch 1820 >"$d/out" 2>&1 || rc=$?
+  [ "$rc" -eq 1 ]
+  grep -q '::error::PR #1820 head is now deadbee, not 086158d — refusing to review a superseded commit.' "$d/out"
+  # The refusal is on the LIVE head...
+  grep -q '^status Muso-AI/hydra deadbeefdeadbeefdeadbeefdeadbeefdeadbeef failure re-dispatch refused: PR #1820 head moved to deadbee$' "$d/calls"
+  # ...and NOT on the sha the operator typed, which is what QA #1812 finding 1 was about.
+  # A bare `! grep` is not enough: bats takes the test result from the LAST command, so a regression here would
+  # fail this line and still report green off the next one (QA #1812 r5). Each negative is fatal on its own.
+  if grep -q '^status Muso-AI/hydra 086158dfc76ea0be043d3a7fb95b92ea5f240947 ' "$d/calls"; then
+    echo "a refusal was posted on the superseded sha the operator typed:"; cat "$d/calls"; false
+  fi
+  if grep -q '^dispatch ' "$d/calls"; then
+    echo "a superseded head was dispatched anyway:"; cat "$d/calls"; false
+  fi
+}
+
+@test "autoreview step (manual): a not-open PR posts NO status at all, so it cannot mark another PR red" {
+  d="$(autoreview_scratch 0)"
+  # PR 9999 is not open; the typed sha is the current head of open PR 1820.
+  rc=0
+  STUB_PULLS=1820 autoreview_run_step "$d" workflow_dispatch 9999 >"$d/out" 2>&1 || rc=$?
+  [ "$rc" -eq 1 ]
+  grep -q '::error::re-dispatch asked for PR #9999, which is not an open PR — refusing. No status was posted' "$d/out"
+  # No status on ANY sha: the only sha we hold is the one the operator typed. Fatal on its own, for the reason
+  # above: a `! grep` followed by another command cannot fail the test.
+  if grep -q '^status ' "$d/calls"; then
+    echo "a not-open refusal posted a status, which can mark another PR red:"; cat "$d/calls"; false
+  fi
+  if grep -q '^dispatch ' "$d/calls"; then
+    echo "a not-open PR was dispatched anyway:"; cat "$d/calls"; false
+  fi
 }
