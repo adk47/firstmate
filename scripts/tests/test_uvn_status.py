@@ -3031,6 +3031,17 @@ class GateTimeoutUnmeasuredTest(UvnStatusTests):
         self.assertIn("UNMEASURED STOP: 5 of 12", text)
         self.assertEqual(len([o for o in rep.outcomes if o["result"] == "unmeasured"]), 5)
 
+    def test_apply_mode_stops_the_walk_at_the_unmeasured_bar(self):
+        """The bar is a stop in APPLY too: once 5 of 12 users time out, no further send_all([p]) / real POST happens."""
+        self._users(12)
+        gate = TimingOutGate({str(u) for u in range(1, 6)})
+        rep, gate = self.run_(mode="apply", max_users=12, gate=gate, query=replica(range(1, 13)))
+        self.assertEqual(len(gate.calls), 5, "the walk stopped at the bar: no gate call for users 6-12")
+        self.assertEqual(rep.unmeasured_users, 5)
+        self.assertTrue(rep.failed)
+        self.assertIn("UNMEASURED STOP: 5 of 12", rep.stopped_on_unmeasured)
+        self.assertIn("UNMEASURED STOP: 5 of 12", uvn_status.render(rep, "apply", "paid"))
+
     def test_every_user_timing_out_fails_the_run_loudly(self):
         """Brief test (b): every user times out -> the tick fails loudly (and names the bar)."""
         self._users(7)

@@ -1551,8 +1551,8 @@ def _unmeasured_stop(report: Report, batch: int) -> bool:
         report.stopped_on_unmeasured = (
             f"UNMEASURED STOP: {report.unmeasured_users} of {batch} user(s) could not be measured (gate_timeout / gate "
             f"error) >= max({UNMEASURED_STOP_MIN}, {int(UNMEASURED_STOP_SHARE * 100)}% of the batch) = {bar}; the run "
-            f"stopped here and fails loudly - the gate itself is slow, not these accounts. Nothing was sent or scored "
-            f"as a refusal; the users not reached stay owed for the next tick.")
+            f"stopped here and fails loudly - the gate itself is slow, not these accounts. Nothing further was sent or "
+            f"scored as a refusal; the users not reached stay owed for the next tick.")
     return True
 
 

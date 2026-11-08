@@ -1600,7 +1600,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                         record_segment(path, campaign, segment, day, str(uid), reached + unknown)
                 if report.halted:
                     break
-                if report.stopped_on_failures:
+                if report.stopped_on_failures or report.stopped_on_unmeasured:
                     # r5 (firstmate 770) (3): the systemic stop is the ROUND's, and this loop is the round. Without this
                     # the probe walked 8 of 8 after stopping at 3: send_all() returned, the walk carried on, and the stop
                     # only coloured the exit code.
@@ -1619,7 +1619,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                     examined.difference_update(str(b[1]["user"]["id"]) for b in batch[i:])
                     budget_stop = True
                     break
-            if report.halted or report.stopped_on_failures or budget_stop:
+            if report.halted or report.stopped_on_failures or report.stopped_on_unmeasured or budget_stop:
                 break
     finally:
         if lock_fh is not None:
