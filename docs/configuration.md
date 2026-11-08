@@ -711,15 +711,20 @@ It exists because every other signal that noticed a broken worker ended in a fir
 The 2026-11-03 autonomy measurements are the evidence: rows that already had an owner stalled 50-70 minutes on a pool-swap connection reset, and a 17:36Z power loss needed a hand relaunch for every worker because the old boot helper waited on a chair that itself needed one.
 Its header owns the exact stall rules, the ladder, the caps, and the record format; this section owns the configuration and the operator contract.
 
+Before any ladder, a pass reads the captain-paused set once: `state/<id>.stopped` markers (owned by [`bin/fm-leave-stopped.sh`](../bin/fm-leave-stopped.sh)) and backlog items the captain holds.
+A paused lane is skipped by every pass and every lane ladder below - no re-ring, no relaunch, no connection action, no nudge, no backlog orphan report, and no wake - and it accrues no relaunch or stall history.
+If the held set cannot be read because the backlog backend is manual, the backlog tool is missing, or the read fails, the pass fails closed: it relaunches, steers, interrupts, and pages no lane, queues one `watchdog-held-unavailable` check wake naming the reason, and preserves its previous task and backlog history for a later readable pass.
+A dry run queues nothing even on that path.
+
 A pass does six things in order.
-First, on the first pass after a reboot, it relaunches every ordinary task whose endpoint is gone and then brings the chair up last, so a reboot needs no hand relaunch and nothing waits on the chair.
+First, on the first pass after a reboot, it relaunches every ordinary task whose endpoint is gone that is not paused and then brings the chair up last, so a reboot needs no hand relaunch and nothing waits on the chair.
 Second, it restarts fleet-owned `fm-*` units systemd reports as failed, capped per unit per hour.
 Third, it walks each live lane's oldest unacknowledged steering message up an age ladder: a re-ring at 20 minutes, an interrupt plus a bounded continue at 45, and a relaunch at 90, one rung per message and never repeated.
 The record it re-rings is the same durable one [`bin/fm-task-inbox-lib.sh`](../bin/fm-task-inbox-lib.sh) writes, and the watcher's per-attempt ladder keeps running underneath, which is free because a duplicated doorbell is a no-op.
-Fourth, it relaunches every task whose endpoint reads `dead` or `missing` through `bin/fm-backend.sh`'s recovery-grade classifier; an `ambiguous`, `unreadable`, or `unverified` endpoint is recorded and left alone, because a duplicate agent in one worktree is worse than waiting another minute.
-Fifth, it walks each live but frozen worker up a stall ladder: one re-ring through `bin/fm-send.sh`, then a relaunch, then a reassign, then one wake for firstmate - one rung per pass, never sooner than the grace interval after the previous rung, and the ladder resets the moment the worker writes a new status line.
+Fourth, it relaunches every task that is not paused and whose endpoint reads `dead` or `missing` through `bin/fm-backend.sh`'s recovery-grade classifier; an `ambiguous`, `unreadable`, or `unverified` endpoint is recorded and left alone, because a duplicate agent in one worktree is worse than waiting another minute.
+Fifth, it walks each live but frozen worker that is not paused up a stall ladder: one re-ring through `bin/fm-send.sh`, then a relaunch, then a reassign, then one wake for firstmate - one rung per pass, never sooner than the grace interval after the previous rung, and the ladder resets the moment the worker writes a new status line.
 A worker that is alive and idle rather than frozen is nudged at most once an hour, and only while `bin/fm-crew-state.sh` still reads `working` from a source the worker itself owns.
-Sixth, it reports in-flight backlog items that no task record can serve, and live lanes whose record went missing, once per change of that set.
+Sixth, it reports in-flight backlog items that no task record can serve, and live lanes whose record went missing, once per change of that set, excluding ids the captain holds.
 Such a lane cannot be steered at all - `bin/fm-send.sh` resolves targets from the record - so the report names every id for firstmate to adopt or close instead of leaving it unowned.
 The watchdog never writes a task record: a wrong endpoint binding is worse than a lane that is visibly unowned.
 
@@ -760,7 +765,7 @@ FM_WATCHDOG_CONNECTION_SECS=600        # a connection error frozen this long is 
 FM_WATCHDOG_CONNECTION_STRIKES=3       # continues before the lane is relaunched
 FM_WATCHDOG_FALLBACK_MODEL='openrouter-named/deepseek/deepseek-v4.1-flash-1017'
 FM_WATCHDOG_FALLBACK_KINDS='ship scout'  # lane kinds the fallback model applies to
-FM_WATCHDOG_BACKLOG=on                 # off skips the backlog reconcile report
+FM_WATCHDOG_BACKLOG=on                 # off skips the backlog reconcile report and the held-backlog read; state/<id>.stopped markers still suppress paused lanes
 FM_WATCHDOG_BACKLOG_BIN=tasks-axi
 FM_WATCHDOG_BACKLOG_LIST_MAX=25        # ids named in one report
 ```
@@ -768,6 +773,7 @@ FM_WATCHDOG_BACKLOG_LIST_MAX=25        # ids named in one report
 `FM_WATCHDOG_FALLBACK_MODEL` is the model spec the fleet already records for DeepSeek V4.1 Flash; set it empty on a home with no second gateway, where no lane can reach that model.
 
 The pass records what it did in `state/.watchdog-worker.json`: the boot identity, each task's last pane shape with when it last changed, its stall and inbox ladder stages, its connection strikes, its capped action history, each unit's restart history, and the identity of the last backlog difference it reported.
+A pass that could not read the held set records no new task actions and keeps the prior task and backlog entries, so a later readable pass still sees the relaunch caps and once-per-change backlog hash it needs.
 `bin/fm-watchdog-worker.sh status` prints that record without acting, and a record carrying a different schema stamp is treated as no record at all.
 A pass holds `state/.watchdog-worker.lock`, so a slow pass never overlaps the next tick.
 
