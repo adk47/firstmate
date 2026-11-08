@@ -159,11 +159,15 @@ backlog_bin() {  # <home> <id...>
   shift
   {
     printf '#!/usr/bin/env bash\n'
-    printf 'printf "count: 2\\ntasks[2]{id,state,kind,repo,title}:\\n"\n'
+    printf 'case "$*" in\n'
+    printf '  *--state\\ held*) printf "count: 0\\ntasks[0]{id,state,kind,repo,title}:\\n" ;;\n'
+    printf '  *) printf "count: %d\\ntasks[%d]{id,state,kind,repo,title}:\\n"\n' "$#" "$#"
     local id
     for id in "$@"; do
       printf 'printf "  %s,in_flight,ship,p,t\\n"\n' "$id"
     done
+    printf '    ;;\n'
+    printf 'esac\n'
   } > "$home/fakebin/tasks-axi"
   chmod +x "$home/fakebin/tasks-axi"
 }
@@ -200,6 +204,39 @@ case "$*" in
 esac
 SH
   chmod +x "$1/fakebin/tasks-axi"
+}
+
+# held_in_flight_bin <home> <held-id...> -- <in-flight-id...>: a tasks-axi that
+# reports the first group as held and the second as in flight, so one id can be
+# both at once.
+held_in_flight_bin() {  # <home> <held-id...> -- <in-flight-id...>
+  local home=$1 id
+  shift
+  local -a held=() flight=()
+  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do held+=("$1"); shift; done
+  [ "${1:-}" = -- ] && shift
+  flight=("$@")
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'case "$*" in\n'
+    printf '  *--state\\ held*)\n'
+    printf '    cat "%s/held.txt"\n' "$home"
+    printf '    ;;\n'
+    printf '  *--state\\ in_flight*)\n'
+    printf '    cat "%s/inflight.txt"\n' "$home"
+    printf '    ;;\n'
+    printf '  *) printf "count: 0\\ntasks[0]{id,state,kind,repo,title}:\\n" ;;\n'
+    printf 'esac\n'
+  } > "$home/fakebin/tasks-axi"
+  chmod +x "$home/fakebin/tasks-axi"
+  {
+    printf 'count: %d\ntasks[%d]{id,state,kind,repo,title}:\n' "${#held[@]}" "${#held[@]}"
+    for id in ${held[@]+"${held[@]}"}; do printf '  %s,held,ship,p,t\n' "$id"; done
+  } > "$home/held.txt"
+  {
+    printf 'count: %d\ntasks[%d]{id,state,kind,repo,title}:\n' "${#flight[@]}" "${#flight[@]}"
+    for id in ${flight[@]+"${flight[@]}"}; do printf '  %s,in_flight,ship,p,t\n' "$id"; done
+  } > "$home/inflight.txt"
 }
 
 start_clock() { date +%s; }
@@ -686,7 +723,7 @@ test_an_unparked_dead_task_is_still_relaunched_and_paged() {
   pass "an unheld, unstopped dead task is still relaunched and still pages"
 }
 
-test_an_unreadable_hold_set_falls_back_to_ordinary_supervision() {
+test_an_unreadable_hold_set_pages_once_and_recovers_nothing() {
   local home now out i
   home=$(make_home held-broken); fake_tools "$home"
   worker "$home" w1 dead
@@ -696,15 +733,48 @@ test_an_unreadable_hold_set_falls_back_to_ordinary_supervision() {
     FM_WATCHDOG_BACKLOG_BIN="$home/fakebin/tasks-axi")
   assert_contains "$out" "could not read held backlog items" \
     "a failed hold-set read was not disclosed"
-  assert_contains "$out" "watchdog: relaunched w1 after endpoint dead" \
-    "a failed hold-set read suppressed a real relaunch"
+  assert_eq "$(counter "$home" '^control ')" "0" \
+    "a failed hold-set read relaunched a task"
+  assert_eq "$(wakes "$home" | grep -c 'held set was unreadable')" "1" \
+    "a failed hold-set read did not queue exactly one instrument page"
+  assert_eq "$(wakes "$home" | grep -c 'hourly relaunch budget')" "0" \
+    "a failed hold-set read paged about a task"
   for i in 1 2 3 4; do
     out=$(tick "$home" "$((now + i * 60))" FM_WATCHDOG_BACKLOG=on \
       FM_WATCHDOG_BACKLOG_BIN="$home/fakebin/tasks-axi")
   done
-  assert_eq "$(wakes "$home" | grep -c 'hourly relaunch budget')" "1" \
-    "a failed hold-set read suppressed the ordinary escalation"
-  pass "an unreadable hold set discloses itself and leaves supervision as it was"
+  assert_eq "$(counter "$home" '^control ')" "0" \
+    "a failed hold-set read relaunched a task on a later pass"
+  assert_eq "$(wakes "$home" | grep -c 'held set was unreadable')" "1" \
+    "the instrument page flooded the queue"
+  assert_eq "$(wakes "$home" | grep -c 'hourly relaunch budget')" "0" \
+    "a failed hold-set read paged about a task on a later pass"
+  pass "an unreadable hold set pages once and recovers nothing"
+}
+
+test_a_held_in_flight_orphan_is_silent_while_an_unheld_orphan_pages() {
+  local home now out
+  home=$(make_home held-orphan); fake_tools "$home"
+  worker "$home" w1 alive
+  pane "$home" w1 idle 'fine'
+  held_in_flight_bin "$home" held-ghost -- held-ghost free-ghost
+  now=$(start_clock)
+  out=$(tick "$home" "$now" FM_WATCHDOG_BACKLOG=on \
+    FM_WATCHDOG_BACKLOG_BIN="$home/fakebin/tasks-axi")
+  assert_contains "$out" "1 in-flight backlog item(s) with no task record" \
+    "an unheld in-flight orphan was not reported"
+  assert_contains "$out" "free-ghost" "the report did not name the unheld orphan"
+  printf '%s' "$out" | grep -q 'held-ghost' \
+    && fail "a held in-flight orphan was reported"
+  assert_contains "$(wakes "$home")" "free-ghost" \
+    "the unheld orphan never reached firstmate"
+  held_in_flight_bin "$home" held-ghost -- held-ghost
+  out=$(tick "$home" "$((now + 300))" FM_WATCHDOG_BACKLOG=on \
+    FM_WATCHDOG_BACKLOG_BIN="$home/fakebin/tasks-axi")
+  [ -z "$out" ] || fail "a held in-flight orphan was acted on: $out"
+  assert_eq "$(wakes "$home" | grep -c 'no task record')" "1" \
+    "a held in-flight orphan paged firstmate"
+  pass "a held in-flight orphan is silent while an unheld orphan still pages"
 }
 
 test_a_dead_worker_comes_back_in_one_pass_with_no_wake
@@ -730,4 +800,5 @@ test_a_concurrent_pass_is_skipped_not_doubled
 test_a_stopped_task_is_never_relaunched_or_paged
 test_a_held_backlog_item_is_never_relaunched_or_paged
 test_an_unparked_dead_task_is_still_relaunched_and_paged
-test_an_unreadable_hold_set_falls_back_to_ordinary_supervision
+test_an_unreadable_hold_set_pages_once_and_recovers_nothing
+test_a_held_in_flight_orphan_is_silent_while_an_unheld_orphan_pages
