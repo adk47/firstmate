@@ -200,9 +200,23 @@ def _intercom_send(conv: str, text: str, approved_by: str, dry_run: bool, key: s
         raise Ambiguous(f"{INTERCOM_WRITER} timed out after {exc.timeout}s with the reply built: it may be posted, "
                         f"so this is never a retry") from exc
     if out.returncode != 0:
+        said = (out.stderr or out.stdout).strip()
+        # A `REFUSED:` line is the writer's OWN pre-flight refusal, and it is provably pre-send: every
+        # `refuse()` call in intercom-ops-write.sh is an argument/allowlist/leak check that runs BEFORE the
+        # POST (all 15 call sites are at lines 155-207; the curl POST is at line 267), and `refuse()` prints
+        # `REFUSED: <why>` to stderr and exits 1. Nothing was posted, so this is `Unknown` (retryable once a
+        # human fixes the cause), NOT `Ambiguous`.
+        #
+        # Classifying it as ambiguous wedged 114 rows in `unknown` between 2026-11-06T14:16Z and
+        # 2026-11-07T20:19Z: every one of them was `REFUSED: U0AN41ZBTRU is not on the Intercom write
+        # allowlist`, i.e. nothing was ever sent, but `unknown` is never retried, so the confirm batch
+        # approved 20 letters and delivered zero, and adding the seat to the allowlist could not unstick a
+        # single row. The double-send guard is not weakened: a writer that actually ran and failed still
+        # reports `POST FAILED (curl rc=...)` / `POST NOT VERIFIED` and stays ambiguous.
+        if said.startswith("REFUSED:"):
+            raise Unknown(f"{INTERCOM_WRITER} refused before posting (rc {out.returncode}): {said[:300]}")
         # The writer already ran: Intercom may hold the reply. Ambiguous, never a retry.
-        raise Ambiguous(f"{INTERCOM_WRITER} exited rc {out.returncode} after being invoked: "
-                        f"{(out.stderr or out.stdout).strip()[:300]}")
+        raise Ambiguous(f"{INTERCOM_WRITER} exited rc {out.returncode} after being invoked: {said[:300]}")
     return (out.stdout.strip().splitlines() or ["posted"])[-1][:300]
 
 

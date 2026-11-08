@@ -3527,15 +3527,71 @@ class SendPath(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--body") + 1], copy.ASK["ASK_LINK"], "the approved copy, verbatim")
         self.assertEqual(ref, "api-log 6 posted")
 
-    def test_a_refused_intercom_write_is_ambiguous_not_a_plain_failure(self):
-        """The writer RAN and exited non-zero: Intercom may hold the reply. That is `Ambiguous` (never retried), not
-        `Unknown` (retryable) - r5 finding 1, the double-send."""
+    def test_a_post_that_failed_after_the_writer_ran_is_ambiguous_not_a_plain_failure(self):
+        """The writer RAN and the POST failed: Intercom may hold the reply. That is `Ambiguous` (never retried), not
+        `Unknown` (retryable) - r5 finding 1, the double-send. `POST FAILED (curl rc=...)` is the real output of
+        intercom-ops-write.sh:276, i.e. the curl POST at :267 was attempted."""
         with mock.patch.dict(os.environ, {"MUSOAI_INTERCOM_TOKEN": "x"}), \
                 mock.patch.object(send.subprocess, "run",
-                                  lambda cmd, **kw: mock.Mock(returncode=1, stdout="", stderr="refuse: leaks internals")):
+                                  lambda cmd, **kw: mock.Mock(
+                                      returncode=1, stdout="",
+                                      stderr="POST FAILED (curl rc=7) for https://api.intercom.io/x; the write "
+                                             "was logged at /var/log/x but may not have landed.")):
             with self.assertRaises(send.Ambiguous) as e:
                 send._intercom_send("1", "text", "U7RP6HKUZ", dry_run=False)
-        self.assertIn("leaks internals", str(e.exception))
+        self.assertIn("POST FAILED", str(e.exception))
+
+    def test_a_writer_REFUSAL_is_retryable_because_nothing_was_posted(self):
+        """`REFUSED:` is the writer's own pre-flight refusal, and it is provably pre-send: every `refuse()` call in
+        intercom-ops-write.sh is an argument/allowlist/leak check that runs BEFORE the POST (all 15 call sites are
+        at lines 155-207; the curl POST is at line 267). Nothing was posted, so this must be `Unknown` (retryable
+        once a human fixes the cause), not `Ambiguous`.
+
+        Classifying it as ambiguous wedged 114 rows in `unknown` on 2026-11-06/07 - every one of them
+        `REFUSED: U0AN41ZBTRU is not on the Intercom write allowlist` - so the confirm batch approved 20 letters
+        and delivered zero, and adding the seat to the allowlist could not unstick a single row."""
+        with mock.patch.dict(os.environ, {"MUSOAI_INTERCOM_TOKEN": "x"}), \
+                mock.patch.object(send.subprocess, "run",
+                                  lambda cmd, **kw: mock.Mock(
+                                      returncode=1, stdout="",
+                                      stderr="REFUSED: U0AN41ZBTRU is not on the Intercom write allowlist "
+                                             "(Aaron U7RP6HKUZ, Jan U038BM16T7W, Nick U0AL3...). Intercom writes "
+                                             "need one of them to ask; everyone else is read-only.")):
+            with self.assertRaises(send.Unknown) as e:
+                send._intercom_send("1", "text", "U7RP6HKUZ", dry_run=False)
+        self.assertIn("not on the Intercom write allowlist", str(e.exception))
+        self.assertIn("refused before posting", str(e.exception))
+
+    def test_a_writer_refusal_leaves_the_row_RETRYABLE_not_wedged(self):
+        """End to end through the ledger: a `REFUSED:` writer must leave the slot `failed` (retryable), never
+        `unknown` (a human's to resolve). This is the difference between a batch that recovers once the allowlist
+        is fixed and one that is permanently stalled."""
+        import tempfile
+        from gdpr_pipeline import store as gstore
+        with tempfile.TemporaryDirectory() as td:
+            db = gstore.Store(os.path.join(td, "e.sqlite"))
+            db.claim_send(1, "confirm", "intercom", "215476751087361", "sha", "U7RP6HKUZ", "sending",
+                          idem="k1")
+            with mock.patch.dict(os.environ, {"MUSOAI_INTERCOM_TOKEN": "x"}), \
+                    mock.patch.object(send.subprocess, "run",
+                                      lambda cmd, **kw: mock.Mock(
+                                          returncode=1, stdout="",
+                                          stderr="REFUSED: U0AN41ZBTRU is not on the Intercom write allowlist")):
+                with self.assertRaises(send.Unknown):
+                    send._intercom_send("215476751087361", "text", "U7RP6HKUZ", dry_run=False)
+            # The caller's generic handler records `failed` for Unknown, which is retryable.
+            db.finish_send(1, "confirm", "failed", detail="refused before posting")
+            self.assertEqual(db.send_record(1, "confirm")["state"], "failed")
+            # Retryability is the whole point: `claim_send` refuses to overwrite a `sending`/`unknown` row and
+            # allows `failed`/`refused`. So a second attempt must be ACCEPTED here, and would raise for `unknown`.
+            db.claim_send(1, "confirm", "intercom", "215476751087361", "sha2", "U7RP6HKUZ", "sending",
+                          idem="k2")
+            self.assertEqual(db.send_record(1, "confirm")["state"], "sending")
+            # And the contrast: an `unknown` row is NOT retryable.
+            db.finish_send(1, "confirm", "unknown", detail="ambiguous")
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.claim_send(1, "confirm", "intercom", "215476751087361", "sha3", "U7RP6HKUZ", "sending",
+                              idem="k3")
 
     def test_a_missing_intercom_token_fails_before_any_write(self):
         with mock.patch.dict(os.environ, {}, clear=True):
