@@ -354,7 +354,7 @@ def main(argv: list[str] | None = None) -> int:
             no_new_duty = incoming_cls == "other"
             explicit = no_new_duty and intake.withdrawal_of_request(body)
             withdrew = intake.withdrawn_in_body(body) or explicit or (
-                no_new_duty and intake.withdrawal_signal(body)
+                no_new_duty and (intake.withdrawal_signal(body) or intake.access_refused(body))
                 and bool(store_mod.obligation_of(str((existing or {}).get("class") or ""))))
             asks_copy = intake.requests_access(email.get("subject") or "", body)
         except Exception:  # noqa: BLE001
@@ -503,7 +503,8 @@ def main(argv: list[str] | None = None) -> int:
 
         outcome, message = file_candidate(candidate, a.store)
         if outcome == "filed":
-            rec.update(outcome="escalated" if escalated_from else "filed", class_=cls,
+            rec.update(outcome=("escalated" if escalated_from else
+                                "human_review" if cls in HUMAN_ALWAYS else "filed"), class_=cls,
                        register_no=register_no_from(message),
                        reason=message.splitlines()[0] if message else "")
             # A read that failed after the row was created is a warning, not a refusal: the
@@ -523,6 +524,13 @@ def main(argv: list[str] | None = None) -> int:
                 rec["action"] = row.get("action") or ""
                 rec["identity_verdict"] = row.get("identity_verdict") or ""
                 rec["status"] = row.get("status") or ""
+            if not escalated_from and cls in HUMAN_ALWAYS:
+                # A FIRST-message threat or takedown has no prior row to escalate, but it is still not something
+                # the pipeline answers on its own -- `filed` removed the human page and the digest said nothing
+                # needed a human (QA #1858 r5).
+                rec["reason"] = (
+                    f"register #{rec.get('register_no') or '?'} holds this {cls} notice, but the pipeline does "
+                    f"not answer a legal threat or a takedown notice on its own, so a human must read it")
             if escalated_from:
                 rec["escalated_from"] = escalated_from
                 rec["reason"] = (

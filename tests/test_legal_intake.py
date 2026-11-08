@@ -210,6 +210,26 @@ class AWithdrawalInTheCurrentMessageUnwinsTheInheritedSubject(unittest.TestCase)
             for withdrawn in (li.withdrawn_in_body, pipeline_intake.withdrawn_in_body):
                 self.assertTrue(withdrawn(body), f"{body!r} via {withdrawn.__module__}")
 
+    def test_a_DECLINED_copy_is_not_an_access_request(self):
+        # QA #1858 r5. The body negates the copy and the inherited subject reintroduced it, so the customer's
+        # refusal filed a fresh Art.15 duty with a deadline nobody asked for.
+        from gdpr_pipeline import intake as pipeline_intake    # noqa: E402
+        subject = "Re: Article 15 access request"
+        body = "Do not send me a copy of my data."
+        for mod in (li, pipeline_intake):
+            self.assertFalse(mod.requests_access(subject, body), mod.__name__)
+            self.assertTrue(mod.access_refused(body), mod.__name__)
+            self.assertEqual(mod.classify(subject, body), "other", mod.__name__)
+        # a body SILENT about access still defers to the inherited subject
+        for mod in (li, pipeline_intake):
+            self.assertTrue(mod.requests_access(subject, "Any update on this?"), mod.__name__)
+            self.assertFalse(mod.access_refused("Any update on this?"), mod.__name__)
+            self.assertEqual(mod.classify(subject, "Any update on this?"), "privacy_access", mod.__name__)
+        # and a refusal that still demands deletion is an erasure, not a withdrawal
+        for mod in (li, pipeline_intake):
+            self.assertFalse(mod.access_refused("Do not send me a copy of my data; please delete my profile."),
+                             mod.__name__)
+
     def test_requests_access_is_the_dual_duty_test(self):
         from gdpr_pipeline import intake as pipeline_intake    # noqa: E402
         self.assertTrue(li.requests_access("", "Send me a copy of my personal data and delete my profile."))

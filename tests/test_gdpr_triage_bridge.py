@@ -861,15 +861,47 @@ class TestAnEscalationKeepsTheHumanPage(BridgeCase):
         d = self.digest(result)
         self.assertIn("needs a human", d.stdout)
 
-    def test_a_fresh_legal_threat_with_no_open_row_is_still_FILED_and_not_escalated(self):
-        """The escalation outcome is for a row we already hold. A first-message threat files its own row."""
+    def test_a_fresh_legal_threat_files_its_row_AND_keeps_the_human_page(self):
+        """QA #1858 r5. `escalated` is for a row we already hold, but a FIRST-message threat is still not
+        something the pipeline answers on its own: it filed the row and reported `filed`, which is in RESOLVED,
+        so the digest said 0 need a human for a legal threat."""
         tid = "1a1bESCALATE03"
         emails = [self.email(tid, "", self.THREAT)]
         proc, result = self.run_bridge(emails, [self.verdict(tid, "legal threat")])
         self.assertEqual(proc.returncode, 0, proc.stderr)
         rec = result["threads"][tid]
-        self.assertEqual(rec["outcome"], "filed", rec)
+        self.assertEqual(rec["outcome"], "human_review", rec)
         self.assertNotIn("escalated_from", rec)
+        self.assertTrue(rec["register_no"], rec)
+        d = self.digest(result)
+        self.assertIn("needs a human", d.stdout, d.stdout)
+        self.assertIn("legal_threat", d.stdout, d.stdout)
+
+    def test_a_fresh_DMCA_notice_keeps_the_human_page_too(self):
+        tid = "1a1bESCALATE04"
+        emails = [self.email(tid, "", "This is a DMCA takedown notice.")]
+        proc, result = self.run_bridge(emails, [self.verdict(tid, "dmca")])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rec = result["threads"][tid]
+        self.assertEqual(rec["outcome"], "human_review", rec)
+        self.assertIn("needs a human", self.digest(result).stdout)
+
+    def test_a_declined_ACCESS_copy_is_not_filed_as_a_new_duty(self):
+        """QA #1858 r5. `Re: Article 15 access request` with `Do not send me a copy of my data.` filed a NEW
+        access row off the inherited subject and the digest said 0 need a human, so the customer's refusal was
+        neither surfaced nor treated as a withdrawal."""
+        tid = "1a1bESCALATE06"
+        self.seed_registered(tid, register_no=703, cls="privacy_access")
+        emails = [self.email(tid, "Re: Article 15 access request",
+                             "Do not send me a copy of my data.")]
+        proc, result = self.run_bridge(emails, [self.verdict(tid, "privacy follow-up")])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rec = result["threads"][tid]
+        self.assertEqual(rec["outcome"], "withdrawn", rec)
+        self.assertNotIn("duties", rec)
+        d = self.digest(result)
+        self.assertIn("needs a human", d.stdout, d.stdout)
+        self.assertNotIn("erasure register #703", d.stdout, d.stdout)
 
     def test_an_access_first_thread_keeps_the_access_row_when_a_threat_arrives(self):
         """QA #1858 Important, end to end. Access row open, then a legal threat: the threat was merged into the

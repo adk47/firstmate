@@ -255,9 +255,26 @@ def requests_access(subject: str, body: str) -> bool:
     b = (body or "").lower()
     if affirmative_access(b):
         return True
+    # The body MENTIONS access but negates it: "Do not send me a copy of my data." That is a refusal, and an
+    # inherited "Re: Article 15 access request" must not resurrect the duty the customer just declined
+    # (QA #1858 r5). Only a body silent about access defers to the subject.
+    if _ACCESS_RX.search(b):
+        return False
     if _DELETION_RX.search(b) or _BARE_DELETION_RX.search(b):
         return False
     return affirmative_access(f"{subject or ''}\n{b}".lower())
+
+
+def access_refused(body: str) -> bool:
+    """The CURRENT message declines a copy without asking for anything else tracked.
+
+    The mirror of `withdrawn_in_body` for Art.15: the body names the copy and negates it, and there is no live
+    deletion demand in the same message, so the message is a refusal and not a fresh access duty (QA #1858 r5).
+    It is a SIGNAL for the bridge, like `withdrawal_signal`; `classify` uses it only to stop returning
+    `privacy_access` off an inherited subject.
+    """
+    b = (body or "").lower()
+    return bool(_ACCESS_RX.search(b)) and not affirmative_access(b) and not affirmative_deletion(b)
 
 
 _INHERITED_SUBJECT_RX = re.compile(r"^\s*(?:(?:re|fw|fwd|aw|sv)\s*:\s*)+", re.IGNORECASE)
@@ -289,6 +306,9 @@ def classify(subject: str, body: str) -> str:
     # could run against a customer who asked, in this message, only for a copy. When the subject is a reply
     # and the BODY makes no affirmative deletion demand, the body decides.
     b = body.lower()
+    # A body that declines the copy is not an access request, whatever the inherited subject says (QA #1858 r5).
+    if access_refused(body):
+        return "other"
     if inherited_subject(subject) and not affirmative_deletion(b) and affirmative_access(b):
         return "privacy_access"
     for cls, rx in RULES:
