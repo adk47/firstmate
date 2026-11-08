@@ -771,6 +771,39 @@ class TestAnUnqualifiedWithdrawalStillPages(BridgeCase):
         self.assertIsNone(db.by_key_prefix(f"gmail:support@muso.ai:{tid}"))
 
 
+    def test_a_refused_deletion_PLUS_an_access_request_does_both(self):
+        """firstmate 2026-11-08, reproduced from my own status line. `withdrawn_in_body` is the FIRST disjunct of
+        `withdrew` and was not gated on `no_new_duty`, so this sentence took the withdrawal branch, exited 0, and
+        dropped the Art.15 row AND its statutory deadline: a customer who asks for their data while refusing a
+        deletion got neither. Gating the whole block on `no_new_duty` would instead make the withdrawal
+        inexpressible - the open row's hide action could still fire on an instruction that cancelled it, silently.
+        So both are processed: the access row is filed with its own deadline, and the withdrawal is recorded and
+        paged."""
+        tid = "1a1bWITHDRAW09"
+        self.seed_registered(tid, register_no=727, cls="privacy_erasure")
+        emails = [self.email(tid, "Re: my account",
+                             "Do not delete my profile. Please send me a copy of my data.")]
+        proc, result = self.run_bridge(emails, [self.verdict(tid, "privacy follow-up")])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rec = result["threads"][tid]
+        # the withdrawal is RECORDED
+        self.assertEqual(rec["outcome"], "withdrawn_filed", rec)
+        self.assertEqual(rec["withdrawn_from"], "privacy_erasure", rec)
+        # and the new duty is FILED, with a deadline
+        self.assertEqual(rec["class_"], "privacy_access", rec)
+        db = store_mod.Store(self.store_path)
+        row = db.by_key_prefix(f"gmail:support@muso.ai:{tid}", "privacy_access")
+        self.assertIsNotNone(row, "the Art.15 request got no row")
+        self.assertTrue(row.get("due_at"), row)
+        self.assertEqual(str(row.get("register_no")), str(rec["register_no"]), rec)
+        # the row we held is untouched
+        held = db.by_key_prefix(f"gmail:support@muso.ai:{tid}", "privacy_erasure")
+        self.assertIsNotNone(held)
+        self.assertEqual(str(held.get("register_no")), "727", held)
+        # and a human is still paged, because the register cannot cancel
+        self.assertIn("needs a human", self.digest(result).stdout)
+
+
 class TestAnEscalationDoesNotSwallowALaterAccessRequest(BridgeCase):
     """QA #1858 r3 Important. The bridge carried its OWN obligation map, so when the store learned that a threat on
     a deletion thread IS that deletion escalating, the two disagreed: `owns_obligation({"class": "legal_threat"},

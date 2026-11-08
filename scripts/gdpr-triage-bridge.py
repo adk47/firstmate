@@ -364,18 +364,30 @@ def main(argv: list[str] | None = None) -> int:
         # path and minted a FRESH erasure row, so the hide path could act against the very instruction that
         # cancelled it. `withdrawal_of_request` is narrow on purpose: the verb must be followed by a request
         # noun, so "cancel my subscription and delete my profile" is still a deletion demand.
+        withdrew_from = ""
         if withdrew and (actively_owned(existing) or explicit):
             held_row = existing or {}
             held = (f"while register #{held_row.get('register_no') or held_row.get('id')} "
                     f"({held_row.get('class') or 'row'}) is still open"
                     if actively_owned(existing) else "and no request of theirs is open")
-            rec.update(outcome="withdrawn", class_=held_row.get("class") or "",
-                       register_no=str(held_row.get("register_no") or ""),
-                       reason=(f"the customer WITHDREW this request {held}. Nothing new was filed. The "
-                               f"register has no cancellation, so a human must decide whether to stop any "
-                               f"action already in flight"))
-            threads[tid] = rec
-            continue
+            if not no_new_duty:
+                # BOTH DUTIES, IN ONE MESSAGE (firstmate 2026-11-08). "Do not delete my profile. Please send me
+                # a copy of my data." refuses the deletion we hold AND asks for a copy. Taking this branch as a
+                # terminal withdrawal dropped the Art.15 row and its statutory deadline, so a customer who asked
+                # for their data while refusing deletion got neither. Gating the whole block on `no_new_duty`
+                # would fix that but make the withdrawal inexpressible instead - the open row's hide action
+                # could still fire on an instruction that cancelled it, and nothing would say so. So: file the
+                # new duty AND record the withdrawal, and page a human for the withdrawal.
+                withdrew_from = held_row.get("class") or "row"
+                rec["withdrawn_held"] = held
+            else:
+                rec.update(outcome="withdrawn", class_=held_row.get("class") or "",
+                           register_no=str(held_row.get("register_no") or ""),
+                           reason=(f"the customer WITHDREW this request {held}. Nothing new was filed. The "
+                                   f"register has no cancellation, so a human must decide whether to stop any "
+                                   f"action already in flight"))
+                threads[tid] = rec
+                continue
 
         if actively_owned(existing) and owns_obligation(existing, incoming_cls):
             rec.update(outcome="registered",
@@ -524,6 +536,17 @@ def main(argv: list[str] | None = None) -> int:
                 rec["action"] = row.get("action") or ""
                 rec["identity_verdict"] = row.get("identity_verdict") or ""
                 rec["status"] = row.get("status") or ""
+            if withdrew_from and rec.get("outcome") == "filed":
+                # The page must survive: `filed` is in RESOLVED, but a withdrawal is not something the register
+                # can record, so a human still has to decide about the row we held.
+                rec.update(outcome="withdrawn_filed")
+                rec["withdrawn_from"] = withdrew_from
+                rec["reason"] = (
+                    f"the customer WITHDREW the {withdrew_from} request {rec.pop('withdrawn_held', '')}, AND "
+                    f"this message asks for a different duty, which was filed as register "
+                    f"#{rec.get('register_no') or '?'}. Both are real: the new duty has its own deadline, and "
+                    f"the register has no cancellation, so a human must decide whether to stop any action "
+                    f"already in flight on the withdrawn row")
             if not escalated_from and cls in HUMAN_ALWAYS:
                 # A FIRST-message threat or takedown has no prior row to escalate, but it is still not something
                 # the pipeline answers on its own -- `filed` removed the human page and the digest said nothing
