@@ -6,14 +6,15 @@
 # Pins, through the real executable over one fixture home:
 #   1. Parity: both passes print byte-identical normalized JSON in --json and
 #      --secondmate-home-summary modes over a fixture that exercises every
-#      native classification path (busy, idle, malformed, gen-mismatch, and
-#      untrusted busy records; status-log fallbacks with keys, timestamps,
-#      correlation tokens, and pauses; a ship worktree at detached HEAD; a
-#      gone worktree; a missing target; an Orca terminal absent from the
-#      inventory; PR and report hints; open decisions) and every delegated one
-#      (a ship branch with a run, including one older than the owner's bounded
-#      listing, a ship branch with no run, a Grok rendered-tail harness, a
-#      local secondmate, a remote secondmate).
+#      native classification path (idle, malformed, gen-mismatch, and untrusted
+#      busy records; status-log fallbacks with keys, timestamps, correlation
+#      tokens, and pauses; a ship worktree at detached HEAD; a gone worktree; a
+#      missing target; an Orca terminal absent from the inventory; PR and report
+#      hints; open decisions) and every delegated one (a record-backed busy
+#      verdict with a live agent in the worktree, the same record with no live
+#      agent, a ship branch with a run, including one older than the owner's
+#      bounded listing, a ship branch with no run, a Grok rendered-tail harness,
+#      a local secondmate, a remote secondmate).
 #   2. The runs ledger is read once per repository and reused inside
 #      FM_SNAPSHOT_RUNS_CACHE_SECS, and refreshed when the window is 0, while
 #      every ship branch still gets its own fresh `axi status` read.
