@@ -441,6 +441,50 @@ def main(argv: list[str] | None = None) -> int:
                                 f"not filed ({a_message.splitlines()[0] if a_message else 'no message'}), so the "
                                 f"access answer has no deadline and a human must own it")
                             unrouted += 1
+            # A NEW PAGE IN AN OPEN THREAD IS NOT NOTHING (QA #1858 r8 Important). "Please delete my profile
+            # https://muso.ai/profile/<id>" against an open erasure row returned `registered`, never called
+            # intake, and left `pages=[]` - so the profile was neither registered for hiding nor handed to a
+            # human, while the digest dropped the page because the thread looked answered. Merge it through
+            # intake; if the merge cannot land, keep the page by refusing the "registered" outcome.
+            try:
+                incoming_pages = pages_for(tid, email, ledger)
+                held_ids = {str(p.get("id") if isinstance(p, dict) else p)
+                            for p in (existing.get("pages") or [])}
+                fresh_pages = [p for p in incoming_pages
+                               if str(p.get("id") if isinstance(p, dict) else p) not in held_ids]
+            except Exception:  # noqa: BLE001
+                fresh_pages = []
+            if fresh_pages:
+                rec["new_pages"] = [str(p.get("id") if isinstance(p, dict) else p) for p in fresh_pages]
+                if a.dry_run:
+                    rec["pages_note"] = "the register does not hold this page yet"
+                else:
+                    upd = {"keys": [key], "channel": "support", "class": existing.get("class") or "",
+                           "received_at": "", "pages": fresh_pages,
+                           "note": "filed by the support@ triage bridge: this message supplies a new page"}
+                    u_err = ""
+                    try:
+                        upd["received_at"], _src = received_at(tid, email, ledger, prefer_ledger=False)
+                    except ValueError as exc:
+                        u_err = str(exc)
+                    if not upd["received_at"]:
+                        u_outcome, u_message = "refused", u_err or "the message could not be dated"
+                    else:
+                        _n, _addr = requester_for(email)
+                        if _n:
+                            upd["requester_name"] = _n
+                        if _addr:
+                            upd["requester_email"] = _addr
+                        u_outcome, u_message = file_candidate(upd, a.store)
+                    if u_outcome != "filed":
+                        # The page is not in the register, so it must not leave with the human page too.
+                        rec["outcome"] = "refused"
+                        rec["reason"] = (
+                            f"register #{existing.get('register_no') or existing.get('id')} is open, but this "
+                            f"message supplies page(s) it does not hold ({', '.join(rec['new_pages'])}) and the "
+                            f"merge did not land ({u_message.splitlines()[0] if u_message else 'no message'}), "
+                            f"so nothing is watching those pages and a human must own them")
+                        unrouted += 1
             threads[tid] = rec
             continue
 

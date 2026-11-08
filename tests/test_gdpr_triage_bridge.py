@@ -144,6 +144,38 @@ class BridgeCase(unittest.TestCase):
         return rid
 
 
+class TestANewPageInAnOpenThreadIsNotNothing(BridgeCase):
+    """QA #1858 r8 Important. An open erasure row with `pages=[]` plus a same-thread "please delete my profile
+    https://muso.ai/profile/<id>" returned `registered`, never called intake, and left `pages=[]` - so the
+    profile was neither registered for hiding nor handed to a human, and the digest dropped the page because
+    the thread looked answered."""
+
+    PID = "3d57a164-1111-2222-3333-444455556666"
+
+    def test_a_followup_that_supplies_a_new_page_puts_it_in_the_register(self):
+        tid = "1a1bNEWPAGE0001"
+        self.seed_registered(tid, register_no=731)
+        emails = [self.email(tid, "Re: complaint",
+                             f"Please delete my profile https://muso.ai/profile/{self.PID} too.")]
+        proc, result = self.run_bridge(emails, [self.verdict(tid, "privacy follow-up")])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rec = result["threads"][tid]
+        self.assertIn(self.PID, rec.get("new_pages") or [], rec)
+        db = store_mod.Store(self.store_path)
+        row = db.by_key_prefix(f"gmail:support@muso.ai:{tid}", "privacy_erasure")
+        self.assertIsNotNone(row)
+        ids = {str(p.get("id") if isinstance(p, dict) else p) for p in (row.get("pages") or [])}
+        self.assertIn(self.PID, ids, f"the register still holds {ids!r}: nothing is watching that page")
+
+    def test_a_followup_with_NO_new_page_stays_registered_and_does_not_page(self):
+        tid = "1a1bNEWPAGE0002"
+        self.seed_registered(tid, register_no=732)
+        emails = [self.email(tid, "Re: complaint", "Any update on this?")]
+        proc, result = self.run_bridge(emails, [self.verdict(tid, "privacy follow-up")])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(result["threads"][tid]["outcome"], "registered")
+
+
 class TestAFiledRequestIsNotAHumanPage(BridgeCase):
     """The whole point: a synthetic Art.17 request is filed and does NOT page a human."""
 
