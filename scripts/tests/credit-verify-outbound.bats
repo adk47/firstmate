@@ -1190,10 +1190,13 @@ PY
   run -0 "$SCRIPT"
   grep -q -- "--out .*/owing.json --class-out uvn=.*/owing-uvn.json" "$CALLS.owing"
   jq -e '.split_of.class == "uvn"' "$CVO_OUT_ROOT"/*/owing-uvn.json >/dev/null      # the builder's file, not a rewrite
-  # a builder that writes no class list stops the tick before any family
+  # Fable d2 (captain 2026-11-08): a builder that writes no class list is UNMEASURED at census (the tick continues), and the
+  # rebuild right before the uvn-status family stops THAT family - the stale/missing list is never served, the tick exits 1
   rm -rf "$CVO_OUT_ROOT"; : > "$CALLS"
   STUB_NO_CLASS_OUT=1 run -1 "$SCRIPT"
-  grep -q "owing builder wrote no uvn-class list; tick stops" "$(newest_tick)"
+  grep -q "census UNMEASURED (1): owing builder wrote no uvn-class list" "$(newest_tick)"
+  grep -q "owing builder wrote no uvn-class list on the rebuild before uvn-status paid; this family stops" "$(newest_tick)"
+  grep -q "tick done with FAILED group(s): credit families" "$(newest_tick)"
   if grep -q "^uvn-status " "$CALLS"; then false; fi
 }
 
