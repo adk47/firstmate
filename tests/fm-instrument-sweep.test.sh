@@ -223,3 +223,151 @@ test_untrusted_check_is_unproven_not_proven
 test_probe_dir_without_manifest_is_refused
 test_fail_on_defect_exit_codes
 test_probe_that_cannot_run_is_unproven
+
+test_probe_evidence_does_not_leak_to_the_next_check() {
+  local home corpus probe out
+  home="$TMP_ROOT/probe-isolation"
+  corpus="$home/state"
+  probe="$home/probes"
+  mkdir -p "$corpus" "$probe"
+  cat > "$corpus/probed.check.sh" <<'EOS'
+#!/usr/bin/env bash
+set -u
+F="$FM_PROBE_ROOT/fact"
+if [ -s "$F" ]; then
+  echo "fact present"
+else
+  echo "fact absent"
+fi
+EOS
+  cat > "$probe/probed.probe.sh" <<'EOS'
+#!/usr/bin/env bash
+set -u
+case ${FM_PROBE_VARIANT:-} in
+healthy) printf 'present\n' > "$FM_PROBE_ROOT/fact" ;;
+broken) rm -f -- "$FM_PROBE_ROOT/fact" ;;
+*) exit 2 ;;
+esac
+EOS
+  cat > "$corpus/unprobed.check.sh" <<'EOS'
+#!/usr/bin/env bash
+set -u
+F="$FM_PROBE_ROOT/other-fact"
+if [ -s "$F" ]; then
+  echo "fact present"
+else
+  echo "fact absent"
+fi
+EOS
+  chmod 0700 "$corpus"/*.check.sh
+  chmod +x "$probe/probed.probe.sh"
+  cp "$FIXTURES/planted/instrument-sweep.probes" "$probe/"
+
+  out=$(sweep_tsv "$corpus" "$probe") || fail "sweep failed on a probe-isolation corpus:"$'\n'"$out"
+  printf '%s\n' "$out" | awk -F'\t' '
+    $1 == "verdict" && $2 == "unprobed" { found = ($3 == "UNPROVEN") }
+    END { exit !found }
+  ' || fail "an unprobed check inherited the previous check's probe evidence:"$'\n'"$out"
+
+  pass "probe evidence does not leak across checks"
+}
+
+test_every_defect_carries_its_exact_source_line() {
+  local out kind id class file line rest snippet actual
+  out=$(sweep_tsv "$FIXTURES/planted" "$FIXTURES/planted") ||
+    fail "sweep failed on the planted corpus:"$'\n'"$out"
+
+  while IFS=$'\t' read -r kind id class file line rest; do
+    [ "$kind" = finding ] || continue
+    case $rest in
+    *" [source: "*']') ;;
+    *) fail "$class finding for $id carried no exact source snippet: $rest" ;;
+    esac
+    snippet=${rest#* \[source: }
+    snippet=${snippet%]}
+    actual=$(sed -n "${line}p" "$file" | tr '\t' ' ')
+    [ "$snippet" = "$actual" ] ||
+      fail "$class finding at $file:$line carried '$snippet' instead of '$actual'"
+  done < <(printf '%s\n' "$out")
+
+  pass "every defect carries its exact source line"
+}
+
+test_zero_guarded_rate_is_not_a_defect() {
+  local home corpus out
+  home="$TMP_ROOT/guarded-rate"
+  corpus="$home/state"
+  mkdir -p "$corpus"
+  cat > "$corpus/eq-guard.check.sh" <<'EOS'
+#!/usr/bin/env bash
+set -u
+total=$(wc -l < "$FM_PROBE_ROOT/input")
+errors=$(grep -c error "$FM_PROBE_ROOT/input" || true)
+if [ "$total" -eq 0 ]; then
+  echo "no input"
+  exit 0
+fi
+pct=$((errors * 100 / total))
+echo "$pct"
+EOS
+  cat > "$corpus/empty-guard.check.sh" <<'EOS'
+#!/usr/bin/env bash
+set -u
+total=$(wc -l < "$FM_PROBE_ROOT/input")
+errors=$(grep -c error "$FM_PROBE_ROOT/input" || true)
+if [ -z "$total" ]; then
+  echo "no input"
+  exit 0
+fi
+pct=$((errors * 100 / total))
+echo "$pct"
+EOS
+  chmod 0700 "$corpus"/*.check.sh
+
+  out=$("$SWEEP" --state "$corpus" --tsv 2>&1) || fail "sweep failed on zero-guarded rates:"$'\n'"$out"
+  printf '%s\n' "$out" | awk -F'\t' '$1 == "finding" && $3 == "rate-without-denominator" { found = 1 } END { exit found }' ||
+    fail "a rate whose denominator is guarded against zero was reported as a defect:"$'\n'"$out"
+
+  pass "a zero-guarded rate is not reported as a denominator defect"
+}
+
+test_identical_output_falls_back_to_the_output_statement() {
+  local home corpus probe out line
+  home="$TMP_ROOT/emitting-line"
+  corpus="$home/state"
+  probe="$home/probes"
+  mkdir -p "$corpus" "$probe"
+  cat > "$corpus/dynamic.check.sh" <<'EOS'
+#!/usr/bin/env bash
+# The captured output carries no literal, so no echo/printf line can match it.
+set -u
+F="$FM_PROBE_ROOT/fact"
+cat "$F" >/dev/null 2>&1
+MESSAGE="queue is clear"
+printf '%s\n' "$MESSAGE"
+EOS
+  cat > "$probe/dynamic.probe.sh" <<'EOS'
+#!/usr/bin/env bash
+set -u
+case ${FM_PROBE_VARIANT:-} in
+healthy) printf 'healthy\n' > "$FM_PROBE_ROOT/fact" ;;
+broken) printf 'broken\n' > "$FM_PROBE_ROOT/fact" ;;
+*) exit 2 ;;
+esac
+EOS
+  chmod 0700 "$corpus/dynamic.check.sh"
+  chmod +x "$probe/dynamic.probe.sh"
+  cp "$FIXTURES/planted/instrument-sweep.probes" "$probe/"
+
+  out=$(sweep_tsv "$corpus" "$probe") || fail "sweep failed on a dynamic-output check:"$'\n'"$out"
+  line=$(printf '%s\n' "$out" | awk -F'\t' '$1 == "finding" && $3 == "identical-output" { print $5; exit }')
+  [ -n "$line" ] || fail "dynamic identical output was not reported:"$'\n'"$out"
+  [ "$line" != 1 ] || fail "identical-output fell back to the shebang line instead of the output statement:"$'\n'"$out"
+
+  pass "identical-output falls back to the output statement, not line 1"
+}
+
+test_probe_evidence_does_not_leak_to_the_next_check
+test_every_defect_carries_its_exact_source_line
+test_zero_guarded_rate_is_not_a_defect
+test_identical_output_falls_back_to_the_output_statement

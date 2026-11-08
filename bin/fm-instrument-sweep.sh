@@ -62,7 +62,7 @@
 #   --help             print this text
 #
 # TSV rows (stable, one record per line):
-#   finding  <check-id> <class> <file> <line> <message>
+#   finding  <check-id> <class> <file> <line> <message [source: exact source line]>
 #   note     <check-id> unproven <file> <line> <reason>
 #   verdict  <check-id> <DEFECT|PROVEN-DISTINGUISHING|UNPROVEN> <reason>
 #   rank     <n> <damage> <check-id> <class> <file> <line>
@@ -166,6 +166,7 @@ F_CLASS=()
 F_FILE=()
 F_LINE=()
 F_MSG=()
+F_SNIPPET=()
 N_ID=()
 N_MSG=()
 CK_ID=()
@@ -174,6 +175,13 @@ CK_DELEGATE=()
 CK_VERDICT=()
 CK_REASON=()
 CK_BODIES=()
+
+display_path() { # absolute file -> path relative to the invocation directory when inside it
+  case $1 in
+  "$PWD"/*) printf '%s\n' "${1#"$PWD"/}" ;;
+  *) printf '%s\n' "$1" ;;
+  esac
+}
 
 damage_of() {
   case $1 in
@@ -188,12 +196,17 @@ damage_of() {
   esac
 }
 
+snippet_of() { # file line -> exact source line
+  sed -n "${2}p" "$1" 2>/dev/null | tr '\t' ' '
+}
+
 add_finding() { # id class file line message
   F_ID[${#F_ID[@]}]=$1
   F_CLASS[${#F_CLASS[@]}]=$2
   F_FILE[${#F_FILE[@]}]=$3
   F_LINE[${#F_LINE[@]}]=$4
   F_MSG[${#F_MSG[@]}]=$5
+  F_SNIPPET[${#F_SNIPPET[@]}]=$(snippet_of "$3" "$4")
 }
 
 add_note() { # id message
@@ -326,10 +339,20 @@ collect_evidence() { # file -> "guard\t<var>" / "touch\t<base>" rows
     for (i = 1; i <= n; i++) {
       line = L[i]
       if (line ~ /^[ \t]*#/) continue
-      if (match(line, /\$?[A-Za-z_][A-Za-z0-9_]*"?[ \t]*-(gt|ge|ne)[ \t]+(0|1)/)) {
+      if (match(line, /\$?[A-Za-z_][A-Za-z0-9_]*"?[ \t]*-(gt|ge|ne)[ \t]+(0|1)/) ||
+          match(line, /\$?[A-Za-z_][A-Za-z0-9_]*"?[ \t]*-(eq|le)[ \t]+0/) ||
+          match(line, /\$?[A-Za-z_][A-Za-z0-9_]*"?[ \t]*-lt[ \t]+1/) ||
+          match(line, /\$?[A-Za-z_][A-Za-z0-9_]*"?[ \t]*==?[ \t]*"?0"?/)) {
         s = substr(line, RSTART, RLENGTH)
         gsub(/[$" \t]/, "", s)
-        sub(/-(gt|ge|ne).*$/, "", s)
+        sub(/-(gt|ge|ne|eq|le|lt).*$/, "", s)
+        sub(/==?.*$/, "", s)
+        if (s != "") printf "guard\t%s\n", s
+      }
+      if (match(line, /\[\[?[ \t]+-z[ \t]+"?\$\{?[A-Za-z_][A-Za-z0-9_]*/)) {
+        s = substr(line, RSTART, RLENGTH)
+        sub(/^.*-z[ \t]+"?\$\{?/, "", s)
+        sub(/[^A-Za-z0-9_].*$/, "", s)
         if (s != "") printf "guard\t%s\n", s
       }
       if (line ~ /(^|[ \t;|&(])(touch|>>?)/) {
@@ -924,9 +947,16 @@ run_probe() { # id -> sets PROBE_RESULT=distinct|identical|error:<reason>, PROBE
 # identical-output finding points at the statement that says the same words in
 # both cases rather than at the top of the file.
 emitting_line() { # file captured-stdout -> line number
-  local file=$1 captured=$2 i=0 line lit
+  local file=$1 captured=$2 i=0 line lit first_output= first_exec=
   while IFS= read -r line; do
     i=$((i + 1))
+    case $line in
+    '' | '#'* | [[:space:]]*'#'*) continue ;;
+    esac
+    [ -n "$first_exec" ] || first_exec=$i
+    case $line in
+    *echo* | *printf* | *cat\ * | *cat\"*) [ -n "$first_output" ] || first_output=$i ;;
+    esac
     case $line in
     *echo* | *printf*) ;;
     *) continue ;;
@@ -946,7 +976,7 @@ emitting_line() { # file captured-stdout -> line number
 ' "$line" | grep -o -e "'[^']*'" -e '"[^"]*"' |
       sed -e "s/^'//" -e "s/'$//" -e 's/^"//' -e 's/"$//')
   done < "$file"
-  echo 1
+  echo "${first_output:-${first_exec:-1}}"
 }
 
 # --- output -----------------------------------------------------------------
@@ -958,18 +988,19 @@ print_findings_for() { # id
   i=0
   while [ "$i" -lt "${#F_ID[@]}" ]; do
     if [ "${F_ID[$i]}" = "$id" ]; then
-      printf '%s\t%s\t%s\t%s\t%s\n' "$(damage_of "${F_CLASS[$i]}")" "${F_LINE[$i]}" \
-        "${F_CLASS[$i]}" "${F_FILE[$i]}" "${F_MSG[$i]}" >> "$tmp"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$(damage_of "${F_CLASS[$i]}")" "${F_LINE[$i]}" \
+        "${F_CLASS[$i]}" "${F_FILE[$i]}" "${F_MSG[$i]}" "${F_SNIPPET[$i]}" >> "$tmp"
     fi
     i=$((i + 1))
   done
   sort -t "$(printf '\t')" -k1,1nr -k2,2n "$tmp" 2>/dev/null > "$tmp.sorted" || cp "$tmp" "$tmp.sorted"
-  while IFS=$'\t' read -r damage line class file msg; do
+  while IFS=$'\t' read -r damage line class file msg snippet; do
     [ -n "${damage:-}" ] || continue
+    file=$(display_path "$file")
     if [ "$TSV" = 1 ]; then
-      printf 'finding\t%s\t%s\t%s\t%s\t%s\n' "$id" "$class" "$file" "$line" "$msg"
+      printf 'finding\t%s\t%s\t%s\t%s\t%s [source: %s]\n' "$id" "$class" "$file" "$line" "$msg" "$snippet"
     else
-      printf '  defect damage=%s %s %s:%s: %s\n' "$damage" "$class" "$file" "$line" "$msg"
+      printf '  defect damage=%s %s %s:%s: %s [source: %s]\n' "$damage" "$class" "$file" "$line" "$msg" "$snippet"
     fi
   done < "$tmp.sorted"
 }
@@ -1076,6 +1107,8 @@ while [ "$I" -lt "${#CK_ID[@]}" ]; do
   done < "$TMP/defects.$I"
 
   probe_reason=''
+  PROBE_RESULT=
+  PROBE_LINE=1
   if probe_files "$id"; then
     run_probe "$id"
     case $PROBE_RESULT in
@@ -1130,7 +1163,7 @@ while [ "$I" -lt "${#CK_ID[@]}" ]; do
   while [ "$j" -lt "${#N_ID[@]}" ]; do
     if [ "${N_ID[$j]}" = "$id" ]; then
       if [ "$TSV" = 1 ]; then
-        printf 'note\t%s\tunproven\t%s\t0\t%s\n' "$id" "$body" "${N_MSG[$j]}"
+        printf 'note\t%s\tunproven\t%s\t0\t%s\n' "$id" "$(display_path "$body")" "${N_MSG[$j]}"
       else
         printf '  note unproven: %s\n' "${N_MSG[$j]}"
       fi
@@ -1158,7 +1191,7 @@ if [ "$TSV" = 1 ]; then
   while IFS=$'\t' read -r d id class file line; do
     [ -n "${d:-}" ] || continue
     n=$((n + 1))
-    printf 'rank\t%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$d" "$id" "$class" "$file" "$line"
+    printf 'rank\t%s\t%s\t%s\t%s\t%s\t%s\n' "$n" "$d" "$id" "$class" "$(display_path "$file")" "$line"
   done < "$TMP/rank.sorted"
 else
   printf 'defect ranking (damage desc, then check id)\n'
@@ -1166,7 +1199,7 @@ else
   while IFS=$'\t' read -r d id class file line; do
     [ -n "${d:-}" ] || continue
     n=$((n + 1))
-    printf '%2d. damage=%s %s %s %s:%s\n' "$n" "$d" "$id" "$class" "$file" "$line"
+    printf '%2d. damage=%s %s %s %s:%s\n' "$n" "$d" "$id" "$class" "$(display_path "$file")" "$line"
   done < "$TMP/rank.sorted"
   [ "$n" -gt 0 ] || printf 'none\n'
 fi
