@@ -1160,10 +1160,18 @@ print(sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True).execute(
 # account_hold - that the uvn-status runner does not cover; they belong to their own campaign's family).
 # r5 776 / p1 581: the BUILDER writes the uvn-class list (its own facts header over exactly those users); the tick
 # never edits a built list - a list changed after its build is refused by the facts check, by design.
-py "$OWING" --out "$OUT/owing.json" --class-out "uvn=$OUT/owing-uvn.json" > "$OUT/owing.out" 2>&1 \
-  || { log "owing builder failed: $(tail -c 300 "$OUT/owing.out")"; exit 1; }
-[ -s "$OUT/owing-uvn.json" ] || { log "owing builder wrote no uvn-class list; tick stops"; exit 1; }
-py "$RECEIPTS" --out-dir "$OUT/receipts" > "$OUT/receipts.out" 2>&1 || { log "receipts builder failed: $(tail -c 300 "$OUT/receipts.out")"; exit 1; }
+CENSUS_UNMEASURED=0
+census_unmeasured() { # <why>: a census read that failed is UNMEASURED, never a reason to cancel the tick
+  CENSUS_UNMEASURED=$((CENSUS_UNMEASURED + 1))
+  log "census UNMEASURED ($CENSUS_UNMEASURED): $1; the tick continues into the families (a census read never cancels the run)"
+}
+if py "$OWING" --out "$OUT/owing.json" --class-out "uvn=$OUT/owing-uvn.json" > "$OUT/owing.out" 2>&1; then
+  [ -s "$OUT/owing-uvn.json" ] || census_unmeasured "owing builder wrote no uvn-class list"
+else
+  census_unmeasured "owing builder failed: $(tail -c 300 "$OUT/owing.out")"
+fi
+py "$RECEIPTS" --out-dir "$OUT/receipts" > "$OUT/receipts.out" 2>&1 \
+  || census_unmeasured "receipts builder failed: $(tail -c 300 "$OUT/receipts.out")"
 log "owing classes: $(tail -1 "$OUT/owing.out" | py -c 'import json,sys; print(json.dumps(json.loads(sys.stdin.read() or "{}").get("classes", {})))' 2>/dev/null) -> uvn-status family gets the uvn class (owing-uvn.json, built by the builder)"
 log "audiences: owing $(head -c 300 "$OUT/owing.out"); receipts $(head -c 300 "$OUT/receipts.out")"
 
@@ -1171,8 +1179,8 @@ log "audiences: owing $(head -c 300 "$OUT/owing.out"); receipts $(head -c 300 "$
 # after the apology and reply-due families; the decider rewrites held rows every 15 min, so owing_proof.verify_facts
 # marked every user "owed requests changed since the list was built" and the family sent nothing (02:00Z: 1,391 held,
 # 0 on the list). The ruling: rebuild the list, with the SAME builder, immediately before the stage that enforces it.
-# The early build above stays (it is the tick's audience census and its failure stops the tick early); each uvn-status
-# family re-runs the builder right before its own check, so the facts header the check signs is minutes old, not 25.
+# The early build above is the tick's audience census and is UNMEASURED, never fatal; each uvn-status family re-runs
+# the builder right before its own check, so the facts header the check signs is minutes old, not 25.
 rebuild_owing_uvn() { # <for>
   local t0; t0=$(date +%s)
   py "$OWING" --out "$OUT/owing.json" --class-out "uvn=$OUT/owing-uvn.json" > "$OUT/owing.out" 2>&1 \
@@ -1315,11 +1323,10 @@ log "uvn-reminder-7: no deployed audience builder/runner on this tree yet (rides
 # (open threads where the customer replied > 24 h ago and after us; comm_state.reply_due() per thread; one row per user;
 # paid first). It runs FIRST so answers go before unsolicited notes. It sends through the uvn-status runner, so it
 # charges the SAME uvn-status daily row and the shared credit cap as the uvn-status family (room() counts every
-# uvn-status message of the day, whatever list it came from). Not deployed = logged and skipped; a builder that IS
-# deployed and fails stops the tick, like the other builders.
+# uvn-status message of the day, whatever list it came from). Not deployed = logged and skipped.
 NEED_LIST=""
-# Defect B (Fable d2): the need list carries its own facts header too (need_asks.verify_facts), so it is built by this
-# function at the census point AND rebuilt immediately before need_families enforces it (the same builder, same filter).
+# Defect B (Fable d2): the need list carries its own facts header too (need_asks.verify_facts), so it is rebuilt
+# immediately before need_families enforces it (the same builder, same filter).
 build_need_list() { # <when>: 0 = NEED_LIST set; 1 = the builder or the filter failed (logged)
   if py "$NEED_RUNNER" build --out "$OUT/need-asks-all.json" > "$OUT/need-asks.out" 2>&1; then
     # the exclude file (users another lane messages today) holds them out of the need family too - need_asks has no
@@ -1344,7 +1351,6 @@ PY
   log "proof-need-ask builder failed ($1): $(tail -c 300 "$OUT/need-asks.out")"
   return 1
 }
-build_need_list "tick census" || exit 1
 RD_LIST=""
 # Persist where the reply-due upstream walk stopped, and the candidates it collected but never finished evaluating.
 # Only called when BOTH family segments are done: a page the family did not answer is re-walked, never skipped.

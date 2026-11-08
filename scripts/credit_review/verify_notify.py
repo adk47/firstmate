@@ -923,14 +923,17 @@ class NoteTimeout(RuntimeError):
 
 
 class UnmeasuredResult(subprocess.CompletedProcess):
-    """Defect A: a runner's synthetic answer for ONE user whose read-only gate call timed out and whom the runner has
-    ALREADY recorded (`unmeasured` / gate_timeout, timeout_users bumped). _send_loop classifies nothing on it: it only
-    applies the unmeasured bar and moves on, so the user is counted exactly once and never as a pass or a refusal."""
+    """Defect A: a runner's synthetic answer for ONE user whose read-only gate call timed out. _send_loop records the
+    user `unmeasured` (reason gate_timeout) and counts them on the main thread, so the user is counted exactly once and
+    never as a pass or a refusal."""
     unmeasured = True
+    reason = ""
 
 
 def unmeasured_result(argv: list[str], why: str) -> UnmeasuredResult:
-    return UnmeasuredResult(argv, returncode=-1, stdout="", stderr=f"UNMEASURED gate_timeout: {why}")
+    res = UnmeasuredResult(argv, returncode=-1, stdout="", stderr=f"UNMEASURED gate_timeout: {why}")
+    res.reason = f"gate_timeout: {why}; outcome unknown, never scored as a refusal"
+    return res
 
 
 def _note_post(argv: list[str]) -> bool:
@@ -1410,8 +1413,11 @@ def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pac
                 return
             continue
         if getattr(res, "unmeasured", False):
-            # the runner already recorded this user as unmeasured (uvn_status.seen on a gate_timeout): no second row,
-            # no classification - only the bar
+            # uvn_status.seen caught a gate_timeout in a parallel worker: record and count it HERE, on the main thread,
+            # so the counter, the outcome file and the bar agree
+            report.timeout_users += 1
+            _outcome(report, p, "unmeasured", getattr(res, "reason", "") or
+                     "gate_timeout: outcome unknown, never scored as a refusal")
             if _unmeasured_stop(report, walked):
                 return
             continue

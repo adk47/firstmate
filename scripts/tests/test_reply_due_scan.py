@@ -966,9 +966,31 @@ class TriggerPrefilterTest(ReplyDueScanTest):
         self.assertIs(sig.parameters["checker"].default, cs.check)
         self.assertEqual(rds.CHECK_BUDGET_S, 900.0)                 # the budget is NOT the fix
         self.assertEqual(rds.CHECK_MAX, 400)
-        # the signed header did not move: the titles read is a second query, not a change to FACTS_QUERY
-        self.assertNotIn("spotifytracktitle", rds.FACTS_QUERY)
-        self.assertIn("spotifytracktitle", rds.TITLES_QUERY)
+
+    def test_the_titles_read_is_its_own_query_per_chunk_and_never_moves_the_signed_facts(self):
+        self.audience(301)
+        queries = []
+        inner = self.q
+        def counting(sql):
+            queries.append(sql)
+            return inner(sql)
+        kw = dict(ic=self.ic, paying_path=str(self.paying), dv_store="/nonexistent", now=NOW,
+                  checker=lambda *a, **k: {"hold": False, "reasons": []},
+                  trigger=lambda conv, part, **k: {"class": "status", "why": "test"},
+                  linked=lambda uid, conv: set())
+        doc = rds.build(query=counting, **kw)
+        facts_q = [s for s in queries if "credit_requests" in s and "spotifytracktitle" not in s]
+        titles_q = [s for s in queries if "spotifytracktitle" in s]
+        self.assertEqual(len(facts_q), 2)                            # 301+ users -> two 300-user chunks
+        self.assertEqual(len(titles_q), len(facts_q))                # one titles read per facts chunk
+        for facts, titles in zip(facts_q, titles_q):
+            self.assertEqual(facts.split("userid IN (")[1], titles.split("userid IN (")[1])
+        def no_titles(sql):
+            return [] if "spotifytracktitle" in sql else inner(sql)
+        bare = rds.build(query=no_titles, **kw)
+        self.assertEqual(doc["facts"], bare["facts"])
+        self.assertEqual(doc["replica_facts"]["columns"], bare["replica_facts"]["columns"])
+        self.assertEqual(doc["replica_facts"]["sha256"], bare["replica_facts"]["sha256"])
 
     def test_each_candidate_thread_is_fetched_once(self):
         ic, gets = self.counting_ic()

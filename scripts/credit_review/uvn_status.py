@@ -1405,14 +1405,12 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                     except verify_notify.NoteTimeout as exc:
                         # Defect A (Fable driver 02:55Z, inbox 001): this is where the tick DIED at 22:28Z, 00:19Z and
                         # 02:30Z - one read-only gate call over READ_TIMEOUT_S raised out of `seen`, through send_all's
-                        # parallel pre-gate, and the whole batch got nothing. The user is recorded UNMEASURED (reason
-                        # gate_timeout) on their own row, timeout_users counts them, outs[] gets NO entry (so the tick
-                        # never reads them as a pass and never as a refusal), and the batch continues. The run stops
-                        # only at verify_notify.unmeasured_stop_after(batch) = max(5, 10% of the batch), which
+                        # parallel pre-gate, and the whole batch got nothing. This worker only returns the synthetic
+                        # result; _send_loop records the user UNMEASURED (reason gate_timeout) and counts them on the
+                        # main thread, so the counter, the outcome file and the bar agree. outs[] gets NO entry (so the
+                        # tick never reads them as a pass and never as a refusal), and the batch continues. The run
+                        # stops only at verify_notify.unmeasured_stop_after(batch) = max(5, 10% of the batch), which
                         # _send_loop enforces on this synthetic result. READ_TIMEOUT_S is NOT raised.
-                        report.timeout_users += 1
-                        verify_notify._outcome(report, {"user": user_}, "unmeasured",
-                                               f"gate_timeout: {exc}; outcome unknown, never scored as a refusal")
                         return verify_notify.unmeasured_result(argv, str(exc))
                     if res.returncode == 0 and verify_notify._first_line(res.stdout).startswith(("RECIPIENT OK", "VALID ", "DRY-RUN ")):
                         outs[uid_] = "ok"

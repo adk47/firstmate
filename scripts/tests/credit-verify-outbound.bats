@@ -367,9 +367,12 @@ CLAIM_PROOF_REPEAT_MIN=360"
   if grep -q "^send " "$CALLS"; then false; fi
   grep -q "^uvn-status .*--mode apply" "$CALLS"
   grep -q "no --check-recipients (#1582 not deployed); skipped" "$(newest_tick)"
-  # a builder that fails stops the tick (like the other builders)
+  # a need build that fails stops the NEED group loudly, after the credit families have already run
   rm -f "$CVO_ETC/credit-verify-outbound.disabled"; : > "$CALLS"; STUB_NEED_BUILD_FAIL=1 run -1 "$SCRIPT"
-  if grep -q -- "--mode apply" "$CALLS"; then false; fi
+  grep -q "proof-need-ask builder failed (rebuild before need families)" "$(newest_tick)"
+  grep -q "need families: FAILED (rc=1)" "$(newest_tick)"
+  grep -q -- "^uvn-status .*--mode apply" "$CALLS"
+  if grep -q "^send --list .*need-asks.json" "$CALLS"; then false; fi
 }
 
 @test "outbound tick (h2/p1 713): a SECONDS-form read-back date is honoured by the same reader that arms the family" {
@@ -627,7 +630,7 @@ PY
   t0=$(date +%s)
   STUB_OWING_SLEEP=30 CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6897 CVO_TICK_HARD_S=6900 run -1 "$SCRIPT"
   [ $(( $(date +%s) - t0 )) -lt 25 ]
-  grep -q "owing builder failed" "$(newest_tick)"
+  grep -q "census UNMEASURED (1): owing builder failed" "$(newest_tick)"
   if grep -q -- "--check-recipients" "$CALLS"; then false; fi
 }
 
@@ -2382,8 +2385,28 @@ PY
   [ -n "$paid_rebuild" ] && [ -n "$paid_check" ] && [ -n "$free_rebuild" ] && [ -n "$free_check" ]
   [ "$paid_rebuild" -lt "$paid_check" ] && [ "$paid_check" -lt "$free_rebuild" ] && [ "$free_rebuild" -lt "$free_check" ]
   # the need list is rebuilt right before the need families too (its own facts header)
-  [ "$(grep -c "^need-build" "$CALLS.need")" = 2 ]
+  [ "$(grep -c "^need-build" "$CALLS.need")" = 1 ]
   grep -q "audiences: proof-need-ask (rebuild before need families)" "$t"
+}
+
+@test "outbound tick (Fable d2, census): a census builder failure is UNMEASURED and never cancels the tick - the claim and need families still run" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  claim_list
+  rm -f "$CVO_ETC/credit-verify-outbound.disabled"
+  cat > "$TEST_TMPDIR/owing-census-flaky.py" <<'PY'
+import os, sys, runpy
+n = os.path.exists(os.environ["CALLS"] + ".owing") and sum(1 for _ in open(os.environ["CALLS"] + ".owing")) or 0
+if n == 0:                                   # the census build fails once; every later build works
+    open(os.environ["CALLS"] + ".owing", "a").write("census-failed\n")
+    print("replica unavailable at census"); sys.exit(1)
+sys.argv[0] = os.environ["STUB_OWING_REAL"]; runpy.run_path(os.environ["STUB_OWING_REAL"], run_name="__main__")
+PY
+  STUB_OWING_REAL="$TEST_TMPDIR/owing.py" CVO_OWING="$TEST_TMPDIR/owing-census-flaky.py" STUB_NEED_USERS=1 CVO_DOW=3 run -0 "$SCRIPT"
+  grep -q "census UNMEASURED (1): owing builder failed" "$(newest_tick)"
+  grep -q -- "^claim-proof-ask --list .*--mode apply" "$CALLS"
+  grep -q -- "^send --list .*need-asks.json .*--mode apply" "$CALLS"
+  grep -q -- "^uvn-status --list .*owing-uvn.json --segment free .*--mode apply" "$CALLS"
+  grep -q "Z tick done$" "$(newest_tick)"
 }
 
 @test "outbound tick (Fable d2, Defect B): a rebuild that fails stops THAT family group loudly and never serves the stale list" {
