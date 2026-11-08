@@ -18,6 +18,10 @@ set -euo pipefail
 : "${WORKDIR:?WORKDIR not set — source preflight.sh first}"
 EMAILS="${WORKDIR}/emails.json"
 VERDICTS="${WORKDIR}/verdicts.json"
+# Written by scripts/gdpr-triage-bridge.py (Phase 2.5). OPTIONAL on purpose: the digest is the
+# safety net, so a bridge that did not run must still produce a digest -- it just pages a human
+# for every `human` verdict, exactly as before the bridge existed, and says so on stderr.
+BRIDGE="${WORKDIR}/bridge.json"
 
 [ -f "$EMAILS" ] || { echo "format-digest: ${EMAILS} missing (fetch did not run)" >&2; exit 1; }
 [ -f "$VERDICTS" ] || { echo "format-digest: ${VERDICTS} missing (classify step did not write it)" >&2; exit 1; }
@@ -29,10 +33,10 @@ VERDICTS="${WORKDIR}/verdicts.json"
 # preflight's INT/TERM trap covers interrupt/timeout; on a reconciliation
 # failure `set -e` exits here, leaving the fetch data in place for the agent
 # to re-derive verdicts and re-run.
-python3 - "$EMAILS" "$VERDICTS" <<'PY'
+python3 - "$EMAILS" "$VERDICTS" "$BRIDGE" <<'PY'
 import sys, json, re
 
-emails_path, verdicts_path = sys.argv[1], sys.argv[2]
+emails_path, verdicts_path, bridge_path = sys.argv[1], sys.argv[2], sys.argv[3]
 MAX_LINES = 25
 
 def die(msg):
@@ -96,15 +100,55 @@ def no_emdash(s):
     # the horizontal-bar variants to a plain hyphen.
     return re.sub(r"[‒–—―]", "-", str(s))
 
+# The GDPR bridge (scripts/gdpr-triage-bridge.py) resolves a `human` verdict that is really a
+# privacy request: `registered` when the erasure register already holds the thread, `filed` when
+# it just filed it. Those are NOT human pages -- the pipeline owns them and has its own due
+# dates. `refused`, `not_privacy`, `withdrawn`, `escalated`, `human_review` and `withdrawn_filed` keep the human page, and each carries its own
+# words so the page names the reason instead of a generic "needs a human". `withdrawn` exists
+# because a customer can cancel a request the register still holds open: the register has no
+# cancellation transition, so only a human can stop the next action.
+#
+# A missing bridge file is not an error: every `human` verdict then stays a human page, which is
+# the pre-bridge behaviour and the safe direction. It is reported on stderr so a bridge that
+# silently stopped running is visible rather than looking like a quiet hour.
+bridge = {}
+if bridge_path:
+    try:
+        with open(bridge_path) as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict) and isinstance(loaded.get("threads"), dict):
+            bridge = loaded["threads"]
+    except (OSError, ValueError):
+        bridge = {}
+
+RESOLVED = ("registered", "filed")
+
+def bridge_outcome(tid):
+    rec = bridge.get(tid)
+    return rec if isinstance(rec, dict) else {}
+
 n = len(emails)
 n_caroline = sum(1 for v in verdict_by_tid.values() if v["verdict"] == "caroline")
 n_spam = sum(1 for v in verdict_by_tid.values() if v["verdict"] == "spam")
-n_human = n - n_caroline - n_spam
+n_resolved = sum(1 for tid, v in verdict_by_tid.items()
+                if v["verdict"] == "human" and bridge_outcome(tid).get("outcome") in RESOLVED)
+n_human = n - n_caroline - n_spam - n_resolved
+
+# Emitted AFTER the digest, and only after stdout is flushed: callers that capture the two
+# streams together (`run bash "$SCRIPT"` in the bats suite) read lines[0] as the header, so a
+# warning written first would displace it. The warning is still stderr, never the digest body --
+# the digest is what gets posted to Slack and its shape is a contract.
+bridge_warning = ""
+if n_human and not bridge:
+    bridge_warning = ("format-digest: WARN %d human verdict(s) and no bridge.json -- the GDPR "
+                      "bridge did not run, so every privacy request is paging a human" % n_human)
 
 # Spam/no-action never counts as a Caroline win; only show its segment when
 # there is spam so quiet hours stay glanceable.
 header = (":envelope: *support@ triage* · last 1h · %d new · "
           "%d Caroline-can-handle · %d need a human") % (n, n_caroline, n_human)
+if n_resolved:
+    header += " · %d filed to the erasure register" % n_resolved
 if n_spam:
     header += " · %d spam/no-action" % n_spam
 lines = [no_emdash(header)]
@@ -123,7 +167,21 @@ for tid in ordered_tids[:MAX_LINES]:
     elif v["verdict"] == "spam":
         tag = ":wastebasket: spam/no-action"
     else:
-        tag = ":raising_hand: needs a human"
+        rec = bridge_outcome(tid)
+        outcome = rec.get("outcome")
+        if outcome in RESOLVED:
+            reg = rec.get("register_no") or ""
+            tag = ":inbox_tray: erasure register #%s" % reg if reg else ":inbox_tray: erasure register"
+            # The register's own next action, not a paraphrase: it is what the pipeline will do
+            # and what a human would need to know if they did look.
+            action = no_emdash(slack_escape(rec.get("action") or ""))
+            if action:
+                reason = action
+        else:
+            tag = ":raising_hand: needs a human"
+            # A pipeline refusal names itself; anything else keeps the triage's own reason.
+            if outcome in ("refused", "not_privacy", "withdrawn", "escalated", "human_review", "withdrawn_filed") and rec.get("reason"):
+                reason = no_emdash(slack_escape(rec["reason"]))
     link = "<%s|%s>" % (url, subject) if url else subject
     lines.append("• %s - %s · %s (%s)" % (link, desc, tag, reason))
 
@@ -131,6 +189,10 @@ if n > MAX_LINES:
     lines.append("...and %d more" % (n - MAX_LINES))
 
 print("\n".join(lines))
+sys.stdout.flush()
+if bridge_warning:
+    print(bridge_warning, file=sys.stderr)
+    sys.stderr.flush()
 PY
 
 # SHADOW-ONLY Jev classification (docs/plans/jev-adoption.md Phase 2b,

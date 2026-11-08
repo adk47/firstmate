@@ -151,6 +151,30 @@ SAME_EVENT_SECONDS = 120   # two copies of one notice differ only by delivery, n
 CLASS_RANK = ("not_erasure", "privacy_access", "privacy_erasure", "dmca_takedown",
               "cancel_intent_mentions_deletion", "legal_threat")
 
+# ONE ROW OWES ONE STATUTORY OBLIGATION, and a thread can owe two (QA #1847 Critical). An Art. 15 access request
+# and an Art. 17 erasure demand in the same conversation are two duties with two clocks: the access answer has its
+# own deadline, the hide has a 24 h one. Keyed on the thread alone they merged, and whichever arrived first kept its
+# receipt and its due date while the other obligation lost its own tracked answer entirely - in the deletion-after-
+# access direction the erasure row also silently inherited the ACCESS receipt time. The obligation is DERIVED FROM
+# THE CLASS, deliberately: no new column, no register migration, and existing rows are carried forward by the same
+# rule that files new ones. `upsert` and `_match` both consult this one map so they cannot disagree.
+OBLIGATION_OF_CLASS = {
+    "privacy_erasure": "erasure",
+    "privacy_access": "access",
+    # A threat or a takedown notice on a DELETION thread is that deletion escalating: it must keep the erasure
+    # row's clock rather than open a second row for the same duty. On an ACCESS thread it is a different duty and
+    # must NOT take the access row over -- that merged the class and left the Art.15 answer with no row and no
+    # deadline at all (QA #1858). Mapping both to `erasure` expresses exactly that split.
+    "legal_threat": "erasure",
+    "dmca_takedown": "erasure",
+}
+
+
+def obligation_of(cls: str) -> str:
+    """The duty a row of this class discharges, or "" when the class carries none we track separately."""
+    return OBLIGATION_OF_CLASS.get(cls, "")
+
+
 MAIL_CHANNELS = ("notices", "legal", "support")
 
 # The prefix `scripts/intercom-ops-write.sh`'s `refuse()` writes to stderr before it exits 1. Every one of its call
@@ -226,6 +250,36 @@ class Store:
         r = self.db.execute("SELECT request_id FROM erasure_keys WHERE key=?", (key,)).fetchone()
         return self.get(r[0]) if r else None
 
+    def by_key_prefix(self, prefix: str, cls: str = "") -> dict | None:
+        """The row whose key is `prefix` or `prefix:<suffix>`, preferring one still being worked.
+
+        A thread that comes back after its request was answered gets a `:again:<ts>` key, so the
+        new request is a NEW row (the key is the idempotence test). A caller asking "does the
+        register already hold this thread?" must see that row too, or it files a duplicate for a
+        thread the register is already working.
+
+        OPEN ROWS FIRST, and that ordering is load-bearing. A thread can hold a CLOSED row (the
+        customer was answered) and an OPEN one (they wrote again). Returning the newest row
+        regardless would hand a caller the closed one and let it conclude the thread is handled,
+        silently dropping the live request. `upsert` already treats an answered row as the start
+        of a new request; this lookup has to agree with it.
+
+        `substr` rather than `LIKE` on purpose: a key contains `_` and `%`-free text today, but a
+        LIKE pattern would silently start matching wildcards the moment one does not.
+        """
+        # `cls` narrows to the rows of ONE class. A thread can now hold two obligations, so "does the register
+        # already hold this?" has to say WHICH - otherwise a caller verifying that a DELETION landed is handed the
+        # open ACCESS row for the same thread, concludes nothing was filed, and pages a human for a request that is
+        # recorded (QA #1847). Ordering still applies within the class.
+        cls_filter = " AND r.class=?" if cls else ""
+        args = (prefix, len(prefix) + 1, prefix + ":") + ((cls,) if cls else ())
+        r = self.db.execute(
+            "SELECT k.request_id FROM erasure_keys k JOIN erasure_requests r ON r.id = k.request_id "
+            "WHERE (k.key=? OR substr(k.key, 1, ?)=?)" + cls_filter +
+            " ORDER BY (r.status='open' AND r.confirmed_at IS NULL) DESC, k.request_id DESC LIMIT 1",
+            args).fetchone()
+        return self.get(r[0]) if r else None
+
     def all(self, status: str | None = None) -> list[dict]:
         q, a = "SELECT * FROM erasure_requests", ()
         if status:
@@ -253,9 +307,33 @@ class Store:
         return {(p.get("id") or "")[:8].lower() for p in pages if p.get("id")}
 
     def _match(self, keys: list[str], email: str, page_ids: set[str], received_at: str = "",
-               channel: str = "") -> dict | None:
+               channel: str = "", obligation: str = "") -> dict | None:
+        def owns(row: dict | None) -> dict | None:
+            """A row only answers a candidate that owes the SAME obligation (QA #1847).
+
+            Without this an erasure demand matched the open access row for the thread, was merged into it by
+            `upsert`'s class escalation, and the access obligation's own receipt and deadline disappeared while the
+            erasure inherited them. A cross-obligation candidate must start its own row, so its own clock exists.
+            """
+            if not row:
+                return None
+            have = obligation_of(row.get("class") or "")
+            # UNKNOWN ON EITHER SIDE KEEPS TODAY'S ROUTING: a candidate whose class we do not map must not be
+            # pushed into a second row just because we cannot classify it, which would double-file the population
+            # we already handle. `legal_threat` and `dmca_takedown` ARE mapped (to `erasure`), so they merge into a
+            # deletion row and never take over an access one.
+            if not have or not obligation:
+                return row
+            return row if have == obligation else None
+
         for k in keys:
-            hit = self.by_key(k)
+            # The obligation-suffixed key first: that is the deterministic key `upsert` mints for the SECOND
+            # obligation on a thread, and it is what makes a replay idempotent instead of opening a third row.
+            if obligation:
+                hit = owns(self.by_key(f"{k}:{obligation}"))
+                if hit:
+                    return hit
+            hit = owns(self.by_key(k))
             if hit:
                 return hit
         want = {(i or "")[:8].lower() for i in page_ids if i}
@@ -264,6 +342,8 @@ class Store:
             for r in self.all("open"):
                 if r["confirmed_at"]:
                     continue      # a later look-alike after a written confirmation is a NEW request, not a merge
+                if obligation_of(r["class"] or "") != obligation:
+                    continue      # another obligation's clock is not this one's
                 if (r["requester_email"] or "").lower() != email.lower() or not (want & self._prefixes(r["pages"])):
                     continue
                 # A shared page and a shared sender prove the same PERSON, not the same EVENT, so the receipt time
@@ -294,6 +374,8 @@ class Store:
             for r in self.all("open"):
                 if r["confirmed_at"] or r["channel"] == channel:
                     continue
+                if obligation_of(r["class"] or "") != obligation:
+                    continue      # another obligation's clock is not this one's
                 if r["channel"] in MAIL_CHANNELS and self._prefixes(r["pages"]) == want \
                         and abs((parse_iso(r["received_at"]) - t).total_seconds()) <= SAME_EVENT_SECONDS:
                     return r
@@ -307,7 +389,30 @@ class Store:
         keys = [k for k in cand["keys"] if k]
         pages = _dedupe_pages(cand.get("pages") or [])
         email = (cand.get("requester_email") or "").strip()
-        hit = self._match(keys, email, {p["id"] for p in pages}, cand.get("received_at", ""), cand.get("channel", ""))
+        obligation = obligation_of(cand["class"])
+        hit = self._match(keys, email, {p["id"] for p in pages}, cand.get("received_at", ""),
+                          cand.get("channel", ""), obligation)
+        # ANOTHER OBLIGATION HOLDS THIS THREAD'S KEY: mint a deterministic suffixed key so this duty gets its own
+        # row, its own receipt and its own deadline while the other row keeps the plain key it already has. Only
+        # when nothing of OUR obligation matched - otherwise a plain replay of the first push would look like a new
+        # set of keys and report "merged" forever instead of "unchanged".
+        def _taken_by_another(k: str) -> bool:
+            held = self.by_key(k)
+            if held is None:
+                return False
+            have = obligation_of(held.get("class") or "")
+            return bool(have) and have != obligation
+
+        if hit is None and obligation:
+            alt = [f"{k}:{obligation}" if _taken_by_another(k) else k for k in keys]
+            if alt != keys:
+                keys = alt
+                hit = self._match(keys, email, {p["id"] for p in pages}, cand.get("received_at", ""),
+                                  cand.get("channel", ""), obligation)
+        # A key another obligation already holds is not a key THIS row can claim, or a replay reports `merged`
+        # forever: the plain thread key stays with the first duty while this one lives on its suffixed key.
+        if hit is not None and obligation:
+            keys = [k for k in keys if not _taken_by_another(k)] or [hit["row_key"]]
         ts = now_iso()
         if hit is not None and (hit["confirmed_at"] or hit["status"] != "open"):
             # ANSWERED = a written confirmation OR closed for any other reason (a markdown-register row a human closed).

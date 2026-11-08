@@ -111,6 +111,306 @@ class Harness(unittest.TestCase):
         return json.load(open(li.LEDGER))
 
 
+class ANegatedDeletionIsNotADemand(unittest.TestCase):
+    """QA #1847 Critical: the combined rule reads deletion WORDS, and a word can be negated.
+
+    "Please send me a copy of my data. Do not delete my profile." matched the combined rule, classified
+    privacy_erasure, and the pipeline could take the HIDE path against an explicit instruction not to delete
+    anything. A regex cannot tell a demand from a refusal, so the match is checked for a negator.
+    """
+
+    def test_a_copy_request_that_REFUSES_deletion_is_an_access_request(self):
+        self.assertEqual(li.classify("", "Please send me a copy of my data. Do not delete my profile."),
+                         "privacy_access")
+
+    def test_a_copy_request_that_REFUSES_deletion_in_other_words(self):
+        for body in ("I do not want you to remove my name, just send me a copy of my personal data.",
+                     "Never delete my account - I only want a copy of my personal data.",
+                     "Send me my data without deleting my profile.",
+                     "No deletion please, I need a copy of my data for my solicitor."):
+            self.assertEqual(li.classify("", body), "privacy_access", body)
+
+    def test_a_genuine_combined_request_is_still_an_erasure_request(self):
+        # The deletion half must keep its ranking, or the customer's erasure obligation disappears - the
+        # exact loss the combined rule exists to prevent.
+        self.assertEqual(li.classify("", "Send me a copy of my personal data and delete my profile."),
+                         "privacy_erasure")
+
+    def test_ONE_affirmative_mention_survives_another_negated_one(self):
+        self.assertEqual(li.classify("", "Do not delete my tracks, but please delete my profile."),
+                         "privacy_erasure")
+        self.assertTrue(li.affirmative_deletion("do not delete my tracks, but please delete my profile"))
+        # ... and the same must survive the WITHDRAWAL rule, which looks at negators before deletion words: the
+        # affirmative demand is the intent, so this is not a withdrawal.
+        self.assertFalse(li.withdrawn_in_body("Do not delete my tracks, but please delete my profile."))
+
+    def test_a_plain_deletion_request_is_unchanged(self):
+        self.assertEqual(li.classify("", "Please delete my profile."), "privacy_erasure")
+        self.assertEqual(li.classify("", "Send me a copy of my data under Article 15."), "privacy_access")
+
+    def test_the_negator_only_reaches_the_phrase_it_is_next_to(self):
+        # A negator in an EARLIER sentence must not disarm a later demand: "I have not heard back. Delete my
+        # profile." is still a deletion request.
+        self.assertTrue(li.affirmative_deletion(
+            "i have not heard back from you at all about this, so please delete my profile now"))
+        self.assertEqual(li.classify("", "I have not heard back. Please delete my profile."),
+                         "privacy_erasure")
+
+
+class AWithdrawalInTheCurrentMessageUnwinsTheInheritedSubject(unittest.TestCase):
+    """QA #1847: a reply inherits the thread subject. `Re: GDPR Article 17 erasure request` supplied deletion
+    vocabulary the customer was no longer asking for, so a withdrawal still classified as an erasure and the register
+    reported it as already handled - invisible, and the pipeline would still hide the page."""
+
+    SUBJECT = "Re: GDPR Article 17 erasure request"
+
+    def test_a_body_that_refuses_deletion_is_not_an_erasure_whatever_the_subject_says(self):
+        from gdpr_pipeline import intake as pipeline_intake    # noqa: E402
+        for body in ("Do not delete my profile. I withdraw my request.",
+                     "Please do not delete anything, I have changed my mind.",
+                     "I take back my request to remove my profile - do not delete it."):
+            for classify in (li.classify, pipeline_intake.classify):
+                self.assertNotEqual(classify(self.SUBJECT, body), "privacy_erasure",
+                                    f"{body!r} via {classify.__module__}")
+
+    def test_a_body_that_STILL_asks_for_deletion_wins_over_its_subject_too(self):
+        from gdpr_pipeline import intake as pipeline_intake    # noqa: E402
+        body = "On reflection please delete my profile and all my data."
+        for classify in (li.classify, pipeline_intake.classify):
+            self.assertEqual(classify(self.SUBJECT, body), "privacy_erasure")
+
+    def test_a_body_that_says_nothing_about_deletion_still_uses_the_subject(self):
+        from gdpr_pipeline import intake as pipeline_intake    # noqa: E402
+        # Any update?" says nothing about deletion, so the inherited subject is all we have. It must not be
+        # silently reclassified - that would turn a live erasure thread into `other`.
+        body = "Any update on this?"
+        for classify in (li.classify, pipeline_intake.classify):
+            self.assertEqual(classify(self.SUBJECT, body), "privacy_erasure")
+
+    def test_an_UNRELATED_cancellation_does_not_suppress_a_live_deletion_demand(self):
+        # QA #1858 r4. The withdrawal verb was read from the whole body, so any `cancel`/`withdraw` anywhere
+        # defeated a live demand in the same message: the customer refused one deletion and demanded another, and
+        # `classify` returned `other` - no erasure row, no hide clock, no statutory deadline.
+        from gdpr_pipeline import intake as pipeline_intake    # noqa: E402
+        bodies = ("Do not delete my old profile; I cancel my subscription, but please delete my account.",
+                  "Do not remove my old profile. I cancel my subscription and want you to delete my account.",
+                  "Never delete my old profile - I withdraw consent for marketing, and please delete my data.")
+        for body in bodies:
+            for withdrawn in (li.withdrawn_in_body, pipeline_intake.withdrawn_in_body):
+                self.assertFalse(withdrawn(body), f"{body!r} via {withdrawn.__module__}")
+            for classify in (li.classify, pipeline_intake.classify):
+                self.assertEqual(classify("", body), "privacy_erasure",
+                                 f"{body!r} via {classify.__module__}")
+
+    def test_a_withdrawal_IN_the_same_clause_as_the_refusal_still_counts(self):
+        # The other direction: the withdrawal belongs to the deletion being refused, so it must still be seen.
+        from gdpr_pipeline import intake as pipeline_intake    # noqa: E402
+        for body in ("I cancel it - do not delete my profile.",
+                     "Do not delete my profile, I withdraw my request."):
+            for withdrawn in (li.withdrawn_in_body, pipeline_intake.withdrawn_in_body):
+                self.assertTrue(withdrawn(body), f"{body!r} via {withdrawn.__module__}")
+
+    def test_a_DECLINED_copy_is_not_an_access_request(self):
+        # QA #1858 r5. The body negates the copy and the inherited subject reintroduced it, so the customer's
+        # refusal filed a fresh Art.15 duty with a deadline nobody asked for.
+        from gdpr_pipeline import intake as pipeline_intake    # noqa: E402
+        subject = "Re: Article 15 access request"
+        body = "Do not send me a copy of my data."
+        for mod in (li, pipeline_intake):
+            self.assertFalse(mod.requests_access(subject, body), mod.__name__)
+            self.assertTrue(mod.access_refused(body), mod.__name__)
+            self.assertEqual(mod.classify(subject, body), "other", mod.__name__)
+        # a body SILENT about access still defers to the inherited subject
+        for mod in (li, pipeline_intake):
+            self.assertTrue(mod.requests_access(subject, "Any update on this?"), mod.__name__)
+            self.assertFalse(mod.access_refused("Any update on this?"), mod.__name__)
+            self.assertEqual(mod.classify(subject, "Any update on this?"), "privacy_access", mod.__name__)
+        # and a refusal that still demands deletion is an erasure, not a withdrawal
+        for mod in (li, pipeline_intake):
+            self.assertFalse(mod.access_refused("Do not send me a copy of my data; please delete my profile."),
+                             mod.__name__)
+
+    def test_requests_access_is_the_dual_duty_test(self):
+        from gdpr_pipeline import intake as pipeline_intake    # noqa: E402
+        self.assertTrue(li.requests_access("", "Send me a copy of my personal data and delete my profile."))
+        self.assertTrue(pipeline_intake.requests_access("", "Send me a copy of my personal data and delete my "
+                                                            "profile."))
+        self.assertFalse(li.requests_access("", "Please delete my profile."))
+        self.assertFalse(pipeline_intake.requests_access("", "Please delete my profile."))
+
+
+class ABareWithdrawalVerbIsASignalButNeverAClass(unittest.TestCase):
+    """QA #1847 r5. "I withdraw my request. Please stop processing it." names the request in the inherited
+    subject, so the deletion vocabulary is not in the body and `withdrawn_in_body` cannot see it. The bare verb
+    is still a signal -- but only a caller that can SEE the open row may act on it. `classify` must not, or
+    every "I withdraw my complaint" becomes a privacy signal, and a bare withdrawal says nothing about which
+    duty is being cancelled."""
+
+    def test_the_bare_verb_is_a_signal_in_BOTH_copies(self):
+        """`gdpr_pipeline.intake` is the copy the bridge imports, `legal-intake` is the source it is read from."""
+        from gdpr_pipeline import intake as pipeline_intake    # noqa: E402
+        for mod in (li, pipeline_intake):
+            for body in ("I withdraw my request. Please stop processing it.",
+                         "Please take back my request.",
+                         "I have changed my mind."):
+                self.assertTrue(mod.withdrawal_signal(body), (mod.__name__, body))
+
+    def test_an_ordinary_reply_is_not_a_signal(self):
+        from gdpr_pipeline import intake as pipeline_intake    # noqa: E402
+        for mod in (li, pipeline_intake):
+            for body in ("Any update on this?", "Thanks, that is fine.", ""):
+                self.assertFalse(mod.withdrawal_signal(body), (mod.__name__, body))
+
+    def test_classify_does_not_act_on_the_bare_verb_alone(self):
+        """The broad signal is not a class. "Please cancel my subscription" carries the verb and must stay
+        with the rules; only an EXPLICIT withdrawal of a request reclassifies (QA #1847 r7)."""
+        for mod in self.copies():
+            with self.subTest(copy=mod.__name__):
+                self.assertEqual(mod.classify("Re: GDPR Article 17 erasure request",
+                                              "Please cancel my subscription."), "privacy_erasure")
+
+    def test_classify_DOES_act_on_an_explicit_withdrawal_of_a_request(self):
+        """QA #1847 r7 Critical. With the request named, classify must not hand the hide path a fresh
+        erasure: "I withdraw my erasure request." names no negation, so `withdrawn_in_body` missed it and a
+        thread whose row was already closed minted a new erasure row."""
+        for mod in self.copies():
+            for body in ("I withdraw my erasure request.",
+                         "I withdraw my request. Please stop processing it.",
+                         "I take back my request to remove my profile.",
+                         "Please retract my deletion request."):
+                with self.subTest(copy=mod.__name__, body=body):
+                    self.assertNotEqual(
+                        mod.classify("Re: GDPR Article 17 erasure request", body), "privacy_erasure", body)
+
+    def test_a_withdrawal_of_SOMETHING_ELSE_does_not_cancel_a_deletion_demand(self):
+        """QA #1847 r8 Important. "I withdraw my complaint" withdraws a duty we do not track; the deletion
+        after the semicolon is a live Art. 17 demand and must still file. The old rule short-circuited on the
+        word "complaint", returned `other`, and the customer got no erasure row, no hide clock, no statutory
+        deadline, and a human page that said nothing new had been filed."""
+        for mod in self.copies():
+            with self.subTest(copy=mod.__name__):
+                self.assertEqual(
+                    mod.classify("", "I withdraw my complaint; please delete my profile."),
+                    "privacy_erasure")
+                # and the same thing under the thread's own subject, which is how it actually arrives
+                self.assertEqual(
+                    mod.classify("Re: GDPR Article 17 erasure request",
+                                 "I withdraw my complaint; please delete my profile."),
+                    "privacy_erasure")
+
+    def test_only_a_demand_in_a_LATER_CLAUSE_survives_the_withdrawal(self):
+        """The phrase being WITHDRAWN is not a new demand. "I take back my request to remove my profile"
+        names the deletion as the object of the withdrawal, in the same clause, so it still cancels."""
+        for mod in self.copies():
+            with self.subTest(copy=mod.__name__):
+                for body in ("I withdraw my erasure request.",
+                             "I withdraw my request. Please stop processing it.",
+                             "I take back my request to remove my profile.",
+                             "Please retract my deletion request.",
+                             "I take back my request to remove my profile - do not delete it."):
+                    self.assertTrue(mod.withdrawal_cancels(body), body)
+                    self.assertEqual(mod.classify("", body), "other", body)
+                for body in ("I withdraw my complaint; please delete my profile.",
+                             "I withdraw my complaint, please delete my profile.",
+                             "I cancel my complaint - please delete my profile.",
+                             # QA #1847 r9 Important: a coordinated imperative joined by "and" is a
+                             # demand in its own clause, not the object of the withdrawal.
+                             "I withdraw my complaint and please delete my profile.",
+                             "I withdraw my erasure request and delete my profile."):
+                    self.assertFalse(mod.withdrawal_cancels(body), body)
+
+    def test_a_coordinated_imperative_after_AND_still_files(self):
+        """QA #1847 r9 Important. `classify("Re: complaint", "I withdraw my complaint and please delete my
+        profile.")` returned `other` on r9 while the comma and semicolon versions filed -- the conjunction
+        was the only difference, so the erasure row, the hide clock and the statutory deadline were dropped."""
+        for mod in self.copies():
+            with self.subTest(copy=mod.__name__):
+                self.assertEqual(
+                    mod.classify("Re: complaint", "I withdraw my complaint and please delete my profile."),
+                    "privacy_erasure")
+                # ... and a negated deletion after the "and" still cancels.
+                self.assertTrue(mod.withdrawal_cancels(
+                    "I withdraw my erasure request and do not delete anything."))
+
+    def test_a_withdrawal_that_is_really_a_deletion_demand_stays_an_erasure(self):
+        for mod in self.copies():
+            with self.subTest(copy=mod.__name__):
+                self.assertEqual(
+                    mod.classify("Re: Article 17 erasure request",
+                                 "I want to cancel my subscription and delete my profile."),
+                    "privacy_erasure")
+
+    @staticmethod
+    def copies():
+        from gdpr_pipeline import intake as pipeline_intake    # noqa: E402
+        return (li, pipeline_intake)
+
+
+class TheTwoClassifiersAgree(unittest.TestCase):
+    """The pipeline reads legal-intake.py's RULES as LITERALS, so it carries its own `classify`.
+
+    Two copies drifting is how the negation half of the rule could land in one and not the other: the vocabulary
+    would agree while the pipeline still took the hide path for a customer who said "do not delete my profile".
+    Pinned on a corpus, not by inspection.
+    """
+
+    CORPUS = (
+        "",
+        "Please send me a copy of my data. Do not delete my profile.",
+        "I do not want you to remove my name, just send me a copy of my personal data.",
+        "Never delete my account - I only want a copy of my personal data.",
+        "Send me my data without deleting my profile.",
+        "No deletion please, I need a copy of my data for my solicitor.",
+        "Send me a copy of my personal data and delete my profile.",
+        "Do not delete my tracks, but please delete my profile.",
+        "Please delete my profile.",
+        "Send me a copy of my data under Article 15.",
+        "I have not heard back. Please delete my profile.",
+        "Remove my profile and my tracks, this is a GDPR erasure request.",
+        "Do not delete my profile.",
+        "Do not delete my profile, but send me a copy of my personal data.",
+        "This is a GDPR request about my personal data.",
+        "DMCA takedown for this page",
+        "unsubscribe",
+    )
+
+    def test_legal_intake_and_the_pipeline_classify_identically(self):
+        from gdpr_pipeline import intake as pipeline_intake    # noqa: E402  (import order: needs the stub)
+        for body in self.CORPUS:
+            self.assertEqual(li.classify("", body), pipeline_intake.classify("", body), body)
+
+    def test_a_STANDALONE_refusal_is_not_an_erasure_request_in_EITHER_copy(self):
+        # QA #1847 r3: the negation guard covered only the combined rule, so "Do not delete my profile" matched
+        # the GENERIC erasure rule and could still take the hide path. Every erasure path is guarded now.
+        from gdpr_pipeline import intake as pipeline_intake    # noqa: E402
+        for body in ("Do not delete my profile.",
+                     "Please do not delete my profile or my tracks.",
+                     "Never delete my account."):
+            for classify in (li.classify, pipeline_intake.classify):
+                self.assertEqual(classify("", body), "other", f"{body!r} via {classify.__module__}")
+
+    def test_a_refusal_that_also_asks_for_a_copy_is_an_access_request(self):
+        from gdpr_pipeline import intake as pipeline_intake    # noqa: E402
+        body = "Do not delete my profile, but send me a copy of my personal data."
+        self.assertEqual(li.classify("", body), "privacy_access")
+        self.assertEqual(pipeline_intake.classify("", body), "privacy_access")
+
+    def test_a_message_with_NO_deletion_phrase_is_untouched(self):
+        # The generic rule also fires on "gdpr"/"personal data" alone. Those must keep classifying erasure, or a
+        # plain erasure request would fall to `other` and page a human for nothing.
+        from gdpr_pipeline import intake as pipeline_intake    # noqa: E402
+        for body in ("This is a GDPR request about my personal data.",
+                     "I am exercising my right to be forgotten."):
+            self.assertEqual(li.classify("", body), "privacy_erasure", body)
+            self.assertEqual(pipeline_intake.classify("", body), "privacy_erasure", body)
+
+    def test_neither_copy_takes_the_hide_path_on_a_NEGATED_deletion(self):
+        from gdpr_pipeline import intake as pipeline_intake    # noqa: E402
+        body = "Please send me a copy of my data. Do not delete my profile."
+        self.assertEqual(li.classify("", body), "privacy_access")
+        self.assertEqual(pipeline_intake.classify("", body), "privacy_access")
+
+
 class Page(unittest.TestCase):
     def render(self, frm):
         h0 = {"from": frm, "subject": SUBJECT}
@@ -488,3 +788,131 @@ class SendAckExecution(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+
+class AnInheritedSubjectDoesNotCreateAnAccessDuty(unittest.TestCase):
+    """QA #1847 r6: on a REPLY the subject belongs to the old message.
+
+    "Re: Article 15 access request" answered with "Please delete my profile." is a deletion. Counting the
+    inherited subject filed a privacy_access row and a deadline nobody asked for, and could queue an
+    unwanted access response off a closed row.
+    """
+
+    SUBJECT = "Re: Article 15 access request"
+
+    @staticmethod
+    def copies():
+        from gdpr_pipeline import intake as pipeline_intake    # noqa: E402
+        return (li, pipeline_intake)
+
+    def test_a_deletion_only_reply_does_not_ask_for_a_copy(self):
+        for mod in self.copies():
+            with self.subTest(copy=mod.__name__):
+                self.assertFalse(mod.requests_access(self.SUBJECT, "Please delete my profile."))
+
+    def test_a_genuine_combined_reply_still_owes_both(self):
+        for mod in self.copies():
+            with self.subTest(copy=mod.__name__):
+                self.assertTrue(mod.requests_access(
+                    self.SUBJECT, "Please delete my profile and send me a copy of my personal data."))
+
+    def test_an_access_only_reply_still_owes_the_copy(self):
+        for mod in self.copies():
+            with self.subTest(copy=mod.__name__):
+                self.assertTrue(mod.requests_access(self.SUBJECT, "Here is what you asked for; please proceed."))
+
+    def test_a_body_silent_about_both_duties_falls_back_to_the_subject(self):
+        # A first message, or a bare "any update?" on a thread that really is an access request.
+        for mod in self.copies():
+            with self.subTest(copy=mod.__name__):
+                self.assertTrue(mod.requests_access(self.SUBJECT, "Any update on this?"))
+                self.assertFalse(mod.requests_access("Re: my account", "Any update on this?"))
+
+    def test_a_deletion_in_the_body_wins_over_the_inherited_access_subject(self):
+        for mod in self.copies():
+            with self.subTest(copy=mod.__name__):
+                self.assertFalse(mod.requests_access(self.SUBJECT, "I want my profile removed."))
+                self.assertFalse(mod.requests_access(self.SUBJECT, "Exercise my right to be forgotten."))
+
+    def test_the_two_copies_agree(self):
+        cases = [
+            (self.SUBJECT, "Please delete my profile."),
+            (self.SUBJECT, "Please delete my profile and send me a copy of my personal data."),
+            (self.SUBJECT, "Any update on this?"),
+            ("Re: my account", "Any update on this?"),
+            ("Re: GDPR Article 17 erasure request", "I am exercising my right to be forgotten."),
+            ("Re: GDPR Article 17 erasure request", "I withdraw my request."),
+        ]
+        for subject, body in cases:
+            with self.subTest(body=body):
+                self.assertEqual(li.requests_access(subject, body),
+                                 self.copies()[1].requests_access(subject, body))
+
+
+class AnInheritedErasureSubjectDoesNotStartAnErasure(unittest.TestCase):
+    """QA #1847 r6 Critical: the mirror of the access case.
+
+    "Re: Article 17 erasure request" answered with "Please send me a copy of my data." is an access-only
+    reply. The inherited subject supplied the affirmative deletion phrase, so the whole message read as
+    erasure and the hide path could run against a customer who asked, in this message, only for a copy.
+    """
+
+    SUBJECT = "Re: Article 17 erasure request"
+    ACCESS_BODY = "Please send me a copy of my data."
+
+    @staticmethod
+    def copies():
+        from gdpr_pipeline import intake as pipeline_intake    # noqa: E402
+        return (li, pipeline_intake)
+
+    def test_an_access_only_reply_is_an_ACCESS_request_not_an_erasure(self):
+        for mod in self.copies():
+            with self.subTest(copy=mod.__name__):
+                self.assertEqual(mod.classify(self.SUBJECT, self.ACCESS_BODY), "privacy_access")
+
+    def test_the_same_body_under_a_FRESH_erasure_subject_is_still_an_erasure(self):
+        """The subject is the current message's own words, so it counts: a first contact that says
+        "Article 17 erasure request" in the subject and asks for a copy in the body is mixed."""
+        for mod in self.copies():
+            with self.subTest(copy=mod.__name__):
+                self.assertEqual(mod.classify("Article 17 erasure request", self.ACCESS_BODY),
+                                 "privacy_erasure")
+
+    def test_a_deletion_in_the_reply_body_still_wins_over_the_subject(self):
+        for mod in self.copies():
+            with self.subTest(copy=mod.__name__):
+                self.assertEqual(mod.classify(self.SUBJECT, "Please delete my profile."), "privacy_erasure")
+                self.assertEqual(mod.classify(self.SUBJECT, "Delete my profile and send me a copy of my data."),
+                                 "privacy_erasure")
+
+    def test_a_reply_silent_about_access_still_inherits_the_erasure(self):
+        """A bare "Any update?" on an erasure thread is still an erasure thread; the body says nothing, so
+        the subject is the only evidence there is."""
+        for mod in self.copies():
+            with self.subTest(copy=mod.__name__):
+                self.assertEqual(mod.classify(self.SUBJECT, "Any update?"), "privacy_erasure")
+
+    def test_reply_prefixes_are_recognised_in_every_form(self):
+        for mod in self.copies():
+            for prefix in ("Re:", "RE:", "re:", "Re :", "Fwd:", "FW:", "Re: Re:", "AW:", "SV:"):
+                with self.subTest(copy=mod.__name__, prefix=prefix):
+                    self.assertTrue(mod.inherited_subject(f"{prefix} Article 17 erasure request"))
+            for fresh in ("Article 17 erasure request", "GDPR erasure", ""):
+                with self.subTest(copy=mod.__name__, fresh=fresh):
+                    self.assertFalse(mod.inherited_subject(fresh))
+
+    def test_the_two_copies_agree(self):
+        cases = [
+            (self.SUBJECT, self.ACCESS_BODY),
+            ("Article 17 erasure request", self.ACCESS_BODY),
+            (self.SUBJECT, "Please delete my profile."),
+            (self.SUBJECT, "Delete my profile and send me a copy of my data."),
+            (self.SUBJECT, "Any update?"),
+            ("Re: Article 15 access request", "Please delete my profile."),
+        ]
+        for subject, body in cases:
+            with self.subTest(body=body):
+                self.assertEqual(li.classify(subject, body),
+                                 self.copies()[1].classify(subject, body))

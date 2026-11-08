@@ -38,6 +38,18 @@ def ask_refusal(cls: str, past_due: bool) -> str:
     return ""
 
 
+def _part_asks_for(text: str, cls: str) -> bool:
+    """Does THIS part's own words carry the class? Not the same question for an access duty.
+
+    A combined part ("send me a copy of my data and delete my profile") classifies as the ERASURE, because that is
+    the more urgent duty. Keying the access duty off `classify` alone therefore never matched the very part that
+    asked for the copy, and the access row fell through to the thread's creation date - dating a Nov 8 request from
+    a Nov 1 thread and shortening its statutory clock by a week (QA #1858 r7). Ask the access question directly."""
+    if cls == "privacy_access":
+        return intake.requests_access("", text)
+    return intake.classify("", text) == cls
+
+
 def conversation_request_at(conv: dict, cls: str) -> int:
     """The epoch of the FIRST customer part whose own words ask for the removal (the request's date).
 
@@ -47,7 +59,7 @@ def conversation_request_at(conv: dict, cls: str) -> int:
     creation only when no single part matches at all (the class came from subject + body together)."""
     parts = conv.get("parts") or []
     for part in parts:
-        if intake.classify("", part["text"]) == cls:
+        if _part_asks_for(part["text"], cls):
             return int(part["at"])
     if cls in ERASURE_FAMILY:
         for part in parts:
@@ -416,9 +428,19 @@ class Run:
                 # ASK_LINK on the same thread ("here is my profile"), or escalates ("or my attorney will write").
                 # Skipping left the row ASK_LINK forever while its deadline ran.
                 try:
-                    self.merge_reply(row, conv_reader(cid))
+                    conv = conv_reader(cid)
                 except sources.Unknown as exc:
                     self.fail(f"intercom {cid}", exc)
+                    continue
+                try:
+                    self.merge_reply(row, conv)
+                except sources.Unknown as exc:
+                    self.fail(f"intercom {cid}", exc)
+                    continue
+                # `merge_reply` folds pages and raises the class; it does not know about the SECOND duty. Without
+                # this an access-only reply on an open erasure thread left the Art. 15 half with no row and no
+                # 30-day clock (QA #1858 r6). Same helper as the fresh path, so the two cannot drift.
+                self.file_access_duty(cid, conv, existing=row)
                 continue
             try:
                 conv = conv_reader(cid)
@@ -437,7 +459,38 @@ class Run:
                 "requester_email": conv.get("author_email") or conv.get("contact_email") or "",
                 "contact_id": conv.get("contact_id", ""), "pages": intake.pages_in(conv.get("customer_text", ""))})
             self.log(f"intercom {cid}: {how} (row {rid}, {cls})")
+            self.file_access_duty(cid, conv)
         return len(self.errors) == errs
+
+    def file_access_duty(self, cid: str, conv: dict, existing: dict | None = None) -> None:
+        """File the Art. 15 half of a message that asks for BOTH a copy and deletion (QA #1847).
+
+        The register tracks one class per row, so without a second candidate the access half is silently
+        untracked and nobody owes the customer an answer to it. Filed on the same thread, so `upsert` mints the
+        `:access` key and the two duties get two rows with their own clocks. Idempotent: the key is the test, so a
+        replay is `unchanged`. Called from BOTH the fresh and the already-keyed conversation paths - an
+        access-only reply on an open erasure thread owes exactly the same duty as a combined first message."""
+        subject, text = conv.get("subject", ""), conv.get("customer_text", "")
+        if not intake.requests_access(subject, text):
+            return
+        # The duty is owed when EITHER this message carries the erasure demand or the thread we already hold does.
+        # An access-ONLY reply on an open erasure row is exactly that case: `classify` answers `privacy_access`, so
+        # a gate of "this message is an erasure request" would skip the very reply that owes the copy (QA #1858 r6).
+        cls = intake.classify(subject, text)
+        if (cls not in intake.ERASURE_CLASSES
+                and ((existing or {}).get("class") or "") not in intake.ERASURE_CLASSES):
+            return
+        # Dated by the ACCESS question, never by `cls`: the message's own class is the erasure, so asking for the
+        # erasure's first part dates the copy from the deletion and shortens its clock (QA #1858 r7).
+        at = conversation_request_at(conv, "privacy_access")
+        arid, ahow = self.store.upsert({
+            "keys": [f"intercom:{cid}"], "channel": "intercom", "class": "privacy_access",
+            "conversation_id": cid, "received_at": intake.iso_s(at),
+            "requester_name": conv.get("author_name") or "",
+            "requester_email": conv.get("author_email") or conv.get("contact_email") or "",
+            "contact_id": conv.get("contact_id", ""),
+            "pages": intake.pages_in(text)})
+        self.log(f"intercom {cid}: {ahow} (row {arid}, privacy_access - the message also asks for a copy)")
 
     # ---------------------------------------------------------------- identity
     def decide_all(self, hidden: set[str], conv_reader=None, stale_hours: float = 0,

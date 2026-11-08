@@ -59,12 +59,270 @@ RULES, _PRIVACY = _legal_intake_literals()
 PRIVACY_SERVICES = re.compile(_PRIVACY, re.I)
 
 
+# The negation half of the combined rule, pinned equal to scripts/legal-intake.py by
+# tests/test_legal_intake.py::TheTwoClassifiersAgree. This module re-reads legal-intake.py's RULES as literals so
+# the two can never disagree about the VOCABULARY; the vocabulary alone cannot tell a demand from a refusal, so the
+# rule is also applied here. Without this half the pipeline kept the hide path for
+# "Please send me a copy of my data. Do not delete my profile." - a regex match turning an explicit instruction NOT
+# to delete into an instruction to delete (QA #1847 Critical).
+_DELETION_RX = re.compile(r"(?:erasure|effacement|right to be forgotten|article ?17|art\.? ?17|"
+                          r"delete my (?:profile|data|account)|remove my (?:profile|name|data))")
+_ACCESS_RX = re.compile(r"(?:article ?15\b|art\.? ?15\b|right of access|subject access request|"
+                        r"copy of (?:my|the|all) (?:personal )?data|access (?:to )?(?:my|the) (?:personal )?data|"
+                        r"export (?:my|all my|the) (?:personal )?data|"
+                        r"send me (?:a copy of )?(?:my|all my) (?:personal )?data|"
+                        r"what (?:personal )?data (?:do )?you (?:hold|have|store|keep))")
+# A withdrawal is often not phrased as "delete my profile". "Please do not delete anything" names the ACT without
+# naming the object, so the scoped vocabulary above cannot see it - and the inherited subject carried the rest.
+# Inflected on purpose: "I want my profile removed" names the duty even though the word is not "remove".
+# A bare `remove\b` missed it, so `requests_access` fell through to the inherited subject and filed an
+# access row nothing asked for (QA #1847 r6).
+_BARE_DELETION_RX = re.compile(r"\b(?:delet\w*|eras\w*|remov\w*|removal)\b")
+_NEGATOR_RX = re.compile(r"\b(?:do not|don'?t|never|without|no need to|not|no)\b")
+# "I withdraw my erasure request" NAMES the request it is withdrawing, so the scoped deletion vocabulary sees an
+# affirmative mention ("my erasure request") that is really the thing being taken back. A withdrawal verb next to a
+# negated deletion is the intent.
+_WITHDRAW_RX = re.compile(r"\b(?:withdraw\w*|take back|taking back|retract\w*|cancel\w*|"
+                          r"no longer (?:want|wish|need)|changed my mind)\b")
+_NEGATOR_WINDOW = 40
+# Statement boundaries for the copy-request test: sentence punctuation, contrast words, and a spaced dash
+# (people write "--", "-" or an em dash between two instructions).
+_ACCESS_STATEMENT_RX = re.compile(r"(?:[;,.!?]|\bbut\b|\bhowever\b|\balthough\b|\s[-\u2013\u2014]+\s)")
+_CLAUSE_BREAK_RX = re.compile(r"(?:[,;.!?]|\bbut\b|\bhowever\b|\balthough\b|\bso\b|\bthen\b)")
+# A withdrawal needs its own break set: a spaced dash separates two demands just as well as a semicolon, and
+# "I cancel my complaint - please delete my profile." is the same shape as the semicolon version (QA #1847 r8).
+# Kept separate so widening it here cannot move the negation windows the deletion/access rules depend on.
+_WITHDRAWAL_BREAK_RX = re.compile(r"(?:[,;.!?]|\s[-\u2013\u2014]\s|\band\b|\bbut\b|\bhowever\b|\balthough\b|\bso\b|\bthen\b)")
+
+
+_WITHDRAWAL_OF_RX = re.compile(
+    r"\b(?:withdraw\w*|withdrew|take\s+back|taking\s+back|retract\w*|cancel\w*)\s+"
+    r"(?:my\s+|the\s+|this\s+|that\s+|our\s+)?"
+    r"(?:erasure|deletion|request|demand|application|complaint)\b")
+
+
+def withdrawal_of_request(body: str) -> bool:
+    """Does this message explicitly withdraw a REQUEST? (QA #1847 r7 Critical.)
+
+    "I withdraw my erasure request." names no negation, so `withdrawn_in_body` did not see it; the inherited
+    "Re: Article 17 erasure request" subject then carried the deletion phrase and a withdrawal on a thread
+    whose row was already closed filed a FRESH erasure row, so the hide path could act against the very
+    instruction that cancelled it.
+
+    Deliberately narrow: the verb must be followed by a request noun. "I want to cancel my subscription and
+    delete my profile" is a deletion demand, not a withdrawal, and must stay an erasure.
+    """
+    return bool(_WITHDRAWAL_OF_RX.search((body or "").lower()))
+
+
+def withdrawal_cancels(body: str) -> bool:
+    """Does the withdrawal in this message cancel the WHOLE message? (QA #1847 r8 Important.)
+
+    `withdrawal_of_request` answers "is a request being withdrawn"; it cannot tell whether anything else is
+    being ASKED. "I withdraw my complaint; please delete my profile." withdraws a complaint we do not track
+    and then makes a live Art. 17 demand -- the demand survives the withdrawal. The old rule short-circuited
+    on the word "complaint" and returned `other`, so the deletion got no erasure row, no 24-hour hide clock,
+    no statutory response deadline, and the digest paged a human saying nothing new had been filed.
+
+    Only a demand in a LATER CLAUSE survives. "I take back my request to remove my profile." names the
+    deletion as the OBJECT of the withdrawal, in the same clause, so the whole message is a withdrawal.
+    """
+    text = (body or "").lower()
+    m = _WITHDRAWAL_OF_RX.search(text)
+    if m is None:
+        return True
+    after = text[m.end():]
+    for dm in _DELETION_RX.finditer(after):
+        # Same clause as the withdrawal verb: this phrase is what is being withdrawn, not a new demand.
+        if not _WITHDRAWAL_BREAK_RX.search(after[:dm.start()]):
+            continue
+        clause = after[max(0, dm.start() - _NEGATOR_WINDOW):dm.start()]
+        breaks = list(_WITHDRAWAL_BREAK_RX.finditer(clause))
+        if breaks:
+            clause = clause[breaks[-1].end():]
+        if not _NEGATOR_RX.search(clause):
+            return False
+    return True
+
+
+def affirmative_access(s: str) -> bool:
+    """Is there a copy request in here that is NOT negated? (QA #1847 r7 Important.)
+
+    `_ACCESS_RX.search` alone matched "Do not send me a copy of my data; please delete my profile." and the
+    dual-duty paths then filed a privacy_access row and deadline for a response the customer explicitly
+    refused. One affirmative mention is enough, exactly like the deletion rule.
+    """
+    # A negator belongs to the phrase it precedes. "Never delete my account - I only want a copy of my
+    # personal data." is an affirmative copy request, but a flat window before "copy" reaches back over
+    # "never" and negates it. So the window stops at the last clause break AND at the end of the last
+    # deletion mention inside it: a negator that already did its work on a deletion cannot also negate the
+    # copy request that follows.
+    for m in _ACCESS_RX.finditer(s):
+        start = max(0, m.start() - _NEGATOR_WINDOW)
+        clause = s[start:m.start()]
+        breaks = list(_CLAUSE_BREAK_RX.finditer(clause))
+        if breaks:
+            clause = clause[breaks[-1].end():]
+        cut = 0
+        for rx in (_DELETION_RX, _BARE_DELETION_RX):
+            for dm in rx.finditer(clause):
+                cut = max(cut, dm.end())
+        clause = clause[cut:]
+        if not _NEGATOR_RX.search(clause):
+            return True
+    return False
+
+
+def affirmative_deletion(s: str) -> bool:
+    """Is there a deletion demand in here that is NOT negated? One affirmative mention is enough."""
+    for m in _DELETION_RX.finditer(s):
+        clause = s[max(0, m.start() - _NEGATOR_WINDOW):m.start()]
+        breaks = list(_CLAUSE_BREAK_RX.finditer(clause))
+        if breaks:
+            clause = clause[breaks[-1].end():]
+        if not _NEGATOR_RX.search(clause):
+            return True
+    return False
+
+
+def withdrawn_in_body(body: str) -> bool:
+    """A reply inherits the thread subject, so `Re: Article 17 erasure request` supplies deletion vocabulary the
+    customer is no longer asking for. The body we are reading outranks it (QA #1847)."""
+    b = (body or "").lower()
+    if not b:
+        return False
+    # A NEGATOR immediately before a deletion word IS the withdrawal. Testing "no affirmative deletion anywhere"
+    # instead would reclassify every legitimate request whose object the scoped vocabulary does not name -
+    # "please delete my tracks" has no `delete my (profile|data|account)` match, and 14 tests caught exactly that.
+    negated = None
+    for m in _BARE_DELETION_RX.finditer(b):
+        clause = b[max(0, m.start() - _NEGATOR_WINDOW):m.start()]
+        breaks = list(_CLAUSE_BREAK_RX.finditer(clause))
+        if breaks:
+            clause = clause[breaks[-1].end():]
+        if _NEGATOR_RX.search(clause):
+            negated = m
+            break
+    if negated is None:
+        return False
+    # A negated deletion settles it UNLESS the body also contains an affirmative demand - and even then an explicit
+    # withdrawal verb outranks that mention, because the mention names the request being withdrawn.
+    #
+    # The withdrawal verb must belong to the CLAUSE THAT NAMES the negated deletion (QA #1858 r4). Scoped to the whole
+    # body, any unrelated `cancel`/`withdraw` defeated a live demand: "Do not delete my old profile; I cancel my
+    # subscription, but please delete my account" returned `other` and the new Art.17 demand got no row, no hide
+    # clock and no deadline. A message can refuse one deletion and demand another in the same breath.
+    # The immediate phrase, not the whole body: `_WITHDRAWAL_BREAK_RX` is the widest break set (it also splits on a
+    # spaced dash and on `and`), and a dash is what separates "Never delete my old profile - I withdraw consent for
+    # marketing, and please delete my data."
+    start = max(0, negated.start() - _NEGATOR_WINDOW)
+    pre = b[start:negated.start()]
+    breaks = list(_WITHDRAWAL_BREAK_RX.finditer(pre))
+    if breaks:
+        start += breaks[-1].end()
+    end = len(b)
+    for bm in _WITHDRAWAL_BREAK_RX.finditer(b, negated.end()):
+        end = bm.start()
+        break
+    return True if _WITHDRAW_RX.search(b[start:end]) else not affirmative_deletion(b)
+
+
+def withdrawal_signal(body: str) -> bool:
+    """The CURRENT message withdraws, whether or not it also names a deletion.
+
+    `withdrawn_in_body` needs a negated deletion word, which cannot see "I withdraw my request. Please stop
+    processing it." -- the withdrawal verb is there and the deletion word is not, because the request being
+    withdrawn is named in the inherited subject (QA #1847 r5 Critical).
+
+    `classify` must NOT act on this: on its own "I withdraw my complaint" is not a privacy signal, and a bare
+    withdrawal verb says nothing about which duty is being cancelled. Only a caller that can SEE the open row
+    may act on it, which is the support@ bridge.
+    """
+    return bool(_WITHDRAW_RX.search((body or "").lower()))
+
+
+def requests_access(subject: str, body: str) -> bool:
+    """Does the CURRENT message ask for a copy? A combined request owes two duties (QA #1847).
+
+    On a reply the subject is the OLD message's, so "Re: Article 15 access request" with a body of "Please
+    delete my profile." is a deletion, not a fresh Art.15 demand. Counting the inherited subject filed an
+    access row and a deadline the customer never asked for, and could queue an unwanted access response off
+    a closed row (QA #1847 r6).
+
+    The subject is consulted only when the body is itself silent about which duty it wants -- a first
+    message, or a bare "any update?" on a thread that really is an access request.
+    """
+    b = (body or "").lower()
+    if affirmative_access(b):
+        return True
+    # The body MENTIONS access but negates it: "Do not send me a copy of my data." That is a refusal, and an
+    # inherited "Re: Article 15 access request" must not resurrect the duty the customer just declined
+    # (QA #1858 r5). Only a body silent about access defers to the subject.
+    if _ACCESS_RX.search(b):
+        return False
+    if _DELETION_RX.search(b) or _BARE_DELETION_RX.search(b):
+        return False
+    return affirmative_access(f"{subject or ''}\n{b}".lower())
+
+
+def access_refused(body: str) -> bool:
+    """The CURRENT message declines a copy without asking for anything else tracked.
+
+    The mirror of `withdrawn_in_body` for Art.15: the body names the copy and negates it, and there is no live
+    deletion demand in the same message, so the message is a refusal and not a fresh access duty (QA #1858 r5).
+    It is a SIGNAL for the bridge, like `withdrawal_signal`; `classify` uses it only to stop returning
+    `privacy_access` off an inherited subject.
+    """
+    b = (body or "").lower()
+    return bool(_ACCESS_RX.search(b)) and not affirmative_access(b) and not affirmative_deletion(b)
+
+
+_INHERITED_SUBJECT_RX = re.compile(r"^\s*(?:(?:re|fw|fwd|aw|sv)\s*:\s*)+", re.IGNORECASE)
+
+
+def inherited_subject(subject: str) -> bool:
+    """Is this subject carried over from an earlier message rather than written for this one?
+
+    Every mail client prefixes a reply ("Re:", "RE:", "Fwd:", "AW:" for German Outlook, "SV:" for Swedish).
+    When it is, the subject describes the request the thread STARTED with, so it cannot on its own say what
+    the message we are reading asks for.
+    """
+    return bool(_INHERITED_SUBJECT_RX.match(subject or ""))
+
+
 def classify(subject: str, body: str) -> str:
-    """legal-intake.py classify(), same RULES, same order."""
+    """legal-intake.py classify(), same RULES, same order, same negation rule."""
     s = f"{subject}\n{body}".lower()
+    if withdrawn_in_body(body) or withdrawal_of_request(body):
+        if affirmative_access(body.lower()):
+            return "privacy_access"
+        if withdrawal_cancels(body):
+            return "other"
+        # A withdrawal that names a duty we do not track, followed by a live demand in its own clause,
+        # cancels nothing we hold. Fall through so the rules file that demand (QA #1847 r8).
+    # An INHERITED subject cannot start a duty on its own (QA #1847 r6 Critical). "Re: Article 17 erasure
+    # request" answered with "Please send me a copy of my data." is an access-only reply, but the subject
+    # supplied the affirmative deletion phrase and the whole message read as erasure -- so the hide path
+    # could run against a customer who asked, in this message, only for a copy. When the subject is a reply
+    # and the BODY makes no affirmative deletion demand, the body decides.
+    b = body.lower()
+    # A body that declines the copy is not an access request, whatever the inherited subject says (QA #1858 r5).
+    if access_refused(body):
+        return "other"
+    if inherited_subject(subject) and not affirmative_deletion(b) and affirmative_access(b):
+        return "privacy_access"
     for cls, rx in RULES:
-        if re.search(rx, s):
-            return cls
+        if not re.search(rx, s):
+            continue
+        # The COMBINED rule (access phrase AND deletion phrase) outranks privacy_access so a genuinely mixed
+        # request keeps its deletion half. It must stand down when every deletion mention is negated.
+        # EVERY erasure path, not just the combined one (QA #1847 r3: "Do not delete my profile" matches the
+        # generic erasure rule too). A message that mentions deletion only to refuse it is not an erasure
+        # request at all: if it also asks for a copy it is an access request, and if it does neither it is a
+        # human's to read. A message with NO deletion phrase keeps whatever the rules said, so nothing else moves.
+        if cls == "privacy_erasure" and _DELETION_RX.search(s) and not affirmative_deletion(s):
+            return "privacy_access" if affirmative_access(s) else "other"
+        return cls
     return "other"
 
 
