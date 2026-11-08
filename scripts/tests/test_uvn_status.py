@@ -2948,5 +2948,121 @@ class OpsKillDryRunTest(unittest.TestCase):
         self.assertEqual(self.rows(), before)
 
 
+class TimingOutGate(FakeGate):
+    """The gate whose READ-ONLY call stalls past READ_TIMEOUT_S for these user ids: the real `_run` raises NoteTimeout
+    after its single attempt (verify_notify.py `_run`), so the fake raises the same exception for the same users."""
+
+    def __init__(self, slow, out="VALID uvn-status initial email credits=1 copy=default"):
+        super().__init__(out=out)
+        self.slow = set(slow)
+
+    def __call__(self, argv):
+        res = super().__call__(argv)
+        if self.calls[-1][1]["user"]["id"] in self.slow:
+            raise verify_notify.NoteTimeout(f"a gate call timed out after 1 attempt(s) of {verify_notify.READ_TIMEOUT_S}s")
+        return res
+
+
+class GateTimeoutUnmeasuredTest(UvnStatusTests):
+    """Defect A (Fable d2 owner brief; Fable driver 02:55Z inbox 001): the tick died at 22:28Z, 00:19Z and 02:30Z with
+    `Credit review uvn-status failed with an internal error (NoteTimeout)` - ONE read-only gate call over 20 s raised out
+    of uvn_status.seen(), through send_all's parallel pre-gate (`list(ex.map(gate, payloads))` re-raises the first
+    worker exception), and every user behind that one check got nothing. READ_TIMEOUT_S stays 20."""
+
+    def _users(self, n):
+        self.users = [{"user_id": u, "paid": True, "skip": None, "request_ids": [f"r{u}"]} for u in range(1, n + 1)]
+        self.write_list()
+
+    def test_one_gate_timeout_records_that_user_unmeasured_and_the_batch_completes(self):
+        """Acceptance (1): N users, one times out -> exactly that user is `unmeasured` (reason gate_timeout), the other
+        N-1 are processed, the run returns normally (not failed), and no outs[] entry means the tick never reads the
+        stalled user as a pass or a refusal."""
+        self._users(7)
+        gate = TimingOutGate({"4"})
+        rep, gate = self.run_(mode="dry-run", gate=gate, query=replica(range(1, 8)))
+        self.assertEqual(len(gate.calls), 7, "every user's gate call ran: the batch was not aborted at the stall")
+        self.assertEqual((rep.users, rep.validated), (6, 6))                  # N-1 processed
+        self.assertEqual((rep.timeout_users, rep.unmeasured_users), (1, 1))
+        self.assertFalse(rep.failed, "one unmeasured user is below the bar: the run returns normally")
+        self.assertEqual(rep.stopped_on_unmeasured, "")
+        rows = [o for o in rep.outcomes if o["result"] == "unmeasured"]
+        self.assertEqual([(o["user"], o["reason"].split(":")[0]) for o in rows], [("4", "gate_timeout")])
+        self.assertEqual([o for o in rep.outcomes if o["result"].startswith("refused")], [])
+        self.assertEqual(rep.refused_users, 0)
+        self.assertEqual(rep.unmeasured_reasons(), rows)
+        text = uvn_status.render(rep, "dry-run", "paid")
+        self.assertIn("6 would be messaged", text)
+        self.assertIn("UNMEASURED 1", text)
+        self.assertIn(f"stop bar {verify_notify.unmeasured_stop_after(7)} = max(5, 10% of the batch)", text)
+        self.assertEqual(rep.unmeasured_stop_at, 5)                            # max(5, ceil(0.7))
+
+    def test_a_non_zero_gate_answer_is_still_a_refusal_exactly_as_today(self):
+        """Acceptance (2): a gate that REFUSES (rc=1 + REFUSED line) is a refusal, counted and rendered as before; it is
+        never folded into the unmeasured bucket."""
+        self._users(4)
+        rep, gate = self.run_(mode="dry-run", gate=RefusingGate({"2"}), query=replica(range(1, 5)))
+        self.assertEqual(len(gate.calls), 4)
+        self.assertEqual((rep.refused_users, rep.timeout_users, rep.unmeasured_users), (1, 0, 0))
+        self.assertEqual([o["user"] for o in rep.outcomes if o["result"].startswith("refused")], ["2"])
+        self.assertEqual([o for o in rep.outcomes if o["result"] == "unmeasured"], [])
+        self.assertFalse(rep.failed)
+
+    def test_the_run_stops_loudly_only_at_max_5_or_10_percent_of_the_batch(self):
+        """Acceptance (3) / ruling (3): the bar is unmeasured_users >= max(5, 10% of the batch). 4 stalls in a batch of
+        12 keep walking (bar = max(5, ceil(1.2)) = 5); 5 stalls stop the run, fail it, and the summary names the bar."""
+        self.assertEqual(verify_notify.unmeasured_stop_after(12), 5)
+        self.assertEqual(verify_notify.unmeasured_stop_after(1), 5)
+        self.assertEqual(verify_notify.unmeasured_stop_after(80), 8)         # 10% wins above 50
+        self.assertEqual(verify_notify.READ_TIMEOUT_S, 20, "ruling (4): the read timeout is not widened")
+        self._users(12)
+        rep, gate = self.run_(mode="dry-run", max_users=12, gate=TimingOutGate({"1", "2", "3", "4"}),
+                              query=replica(range(1, 13)))
+        self.assertEqual(len(gate.calls), 12)
+        self.assertEqual((rep.unmeasured_users, rep.users), (4, 8))
+        self.assertFalse(rep.failed)
+        self._users(12)
+        rep, gate = self.run_(mode="dry-run", max_users=12, gate=TimingOutGate({"1", "2", "3", "4", "5"}),
+                              query=replica(range(1, 13)))
+        self.assertEqual(rep.unmeasured_users, 5)
+        self.assertTrue(rep.failed, "at the bar the run FAILS LOUDLY (exit 1 through credit-review.py)")
+        self.assertIn("UNMEASURED STOP: 5 of 12", rep.stopped_on_unmeasured)
+        self.assertIn("max(5, 10% of the batch) = 5", rep.stopped_on_unmeasured)
+        text = uvn_status.render(rep, "dry-run", "paid")
+        self.assertIn("UNMEASURED STOP: 5 of 12", text)
+        self.assertEqual(len([o for o in rep.outcomes if o["result"] == "unmeasured"]), 5)
+
+    def test_every_user_timing_out_fails_the_run_loudly(self):
+        """Brief test (b): every user times out -> the tick fails loudly (and names the bar)."""
+        self._users(7)
+        rep, gate = self.run_(mode="dry-run", gate=TimingOutGate({str(u) for u in range(1, 8)}),
+                              query=replica(range(1, 8)))
+        self.assertTrue(rep.failed)
+        self.assertEqual(rep.users, 0)
+        self.assertGreaterEqual(rep.unmeasured_users, 5)
+        self.assertIn("UNMEASURED STOP", uvn_status.render(rep, "dry-run", "paid"))
+
+    def test_the_outcome_file_carries_the_unmeasured_count_reasons_and_bar(self):
+        """Ruling (2)/(3): `unmeasured_users`, `unmeasured_reasons` and the bar are in the outcome file - the count is
+        never silently omitted, and a verdict (the accepted / outcome rows) is still written for the rest."""
+        import argparse
+        import importlib.util
+        self._users(7)
+        rep, _ = self.run_(mode="dry-run", gate=TimingOutGate({"4"}), query=replica(range(1, 8)))
+        spec = importlib.util.spec_from_file_location("credit_review_cli", Path(__file__).resolve().parents[1] / "credit-review.py")
+        cli = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cli)
+        out = self.dir / "uvn-status-paid-check.json"
+        err = cli.write_outcomes(argparse.Namespace(outcomes_json=str(out), mode="dry-run", segment="paid", max_users=7), rep)
+        self.assertEqual(err, "")
+        doc = json.loads(out.read_text())
+        self.assertEqual(doc["unmeasured_users"], 1)
+        self.assertEqual([(r["user"], r["result"]) for r in doc["unmeasured_reasons"]], [("4", "unmeasured")])
+        self.assertTrue(doc["unmeasured_reasons"][0]["reason"].startswith("gate_timeout:"))
+        self.assertEqual(doc["unmeasured_stop_at"], 5)
+        self.assertEqual(doc["unmeasured_stop_rule"], "unmeasured_users >= max(5, 10% of the batch)")
+        self.assertEqual(doc["stopped_on_unmeasured"], "")
+        self.assertEqual(len(doc["outcomes"]), 1)                              # the unmeasured row; 6 validated
+
+
 if __name__ == "__main__":
     unittest.main()

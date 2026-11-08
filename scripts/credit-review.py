@@ -778,6 +778,14 @@ def write_outcomes(args: argparse.Namespace, report: object) -> str:
                        "accepted": list(getattr(report, "accepted", [])), "filtered": list(getattr(report, "filtered", [])),
                        "sent": list(getattr(report, "sent", [])),
                        "recipient_ok": getattr(report, "recipient_ok", 0),
+                       # Defect A (Fable d2 ruling (2)/(3)): the UNMEASURED count is never silently omitted, its per-user
+                       # reasons ride with it, and the bar the run stops at is printed - here and in tick.log
+                       "unmeasured_users": int(getattr(report, "unmeasured_users", 0) or 0),
+                       "unmeasured_reasons": (report.unmeasured_reasons() if hasattr(report, "unmeasured_reasons") else []),
+                       "unmeasured_stop_at": int(getattr(report, "unmeasured_stop_at", 0) or 0),
+                       "unmeasured_stop_rule": "unmeasured_users >= max(%d, %d%% of the batch)" % (
+                           verify_notify.UNMEASURED_STOP_MIN, int(verify_notify.UNMEASURED_STOP_SHARE * 100)),
+                       "stopped_on_unmeasured": getattr(report, "stopped_on_unmeasured", "") or "",
                        "page": getattr(report, "page", None) or None,     # QA #1612: the entries walked
                        # p1 579: every tick artefact names the deploy head it ran on and the head its list was signed on
                        "deployed": verify_notify.deployed_head() or None,

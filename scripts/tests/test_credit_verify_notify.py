@@ -2828,6 +2828,51 @@ class ParallelCheckTests(unittest.TestCase):
         _, peak = self.report_of("apply", 4, check=False)
         self.assertEqual(peak, 1)
 
+    def test_one_gate_timeout_in_the_parallel_pre_gate_is_that_users_row_never_the_batchs_abort(self):
+        """Defect A (Fable d2): `pre = list(ex.map(gate, payloads))` re-raised the FIRST worker's NoteTimeout out of
+        send_all, so one slow read-only gate call (>= READ_TIMEOUT_S) aborted the whole check and every user behind it
+        got nothing (22:28Z / 00:19Z / 02:30Z). Any runner's timeout is now captured per user: that user is
+        `unmeasured` (gate_timeout), the rest are classified exactly as serial, and the run is not failed below the
+        max(5, 10% of the batch) bar. At the bar it stops and fails loudly."""
+        import threading
+        live, peak, lock = [0], [0], threading.Lock()
+        base, _ = self.runner(live, peak, lock)
+
+        def run(argv):
+            uid = json.load(open(argv[argv.index("--credits-file") + 1]))["user"]["id"]
+            if uid == "5":
+                raise verify_notify.NoteTimeout("a gate call timed out after 1 attempt(s) of 20s")
+            return base(argv)
+
+        rep = Report()
+        with unittest.mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, [])):
+            verify_notify.send_all(self.payloads(), rep, mode="dry-run", runner=run, extra=["--campaign", "uvn-status"],
+                                   check_recipients=True, workers=4)
+        self.assertEqual([a["user"] for a in rep.accepted], [str(i) for i in range(23) if i % 4 == 0])
+        self.assertEqual((rep.timeout_users, rep.unmeasured_users, rep.unmeasured_stop_at), (1, 1, 5))
+        self.assertEqual([(o["user"], o["reason"][:12]) for o in rep.outcomes if o["result"] == "unmeasured"],
+                         [("5", "gate_timeout")])
+        self.assertFalse(rep.failed)
+        self.assertIn("UNMEASURED", rep.render("dry-run"))
+        self.assertIn("bar 5 = max(5, 10% of the batch)", rep.render("dry-run"))
+        # the bar: 23 users -> max(5, ceil(2.3)) = 5; five stalls stop the run loudly, four do not
+        for slow, stopped in (({"1", "2", "3", "5"}, False), ({"1", "2", "3", "5", "6"}, True)):
+            def run_n(argv, slow=slow):
+                uid = json.load(open(argv[argv.index("--credits-file") + 1]))["user"]["id"]
+                if uid in slow:
+                    raise verify_notify.NoteTimeout("a gate call timed out after 1 attempt(s) of 20s")
+                return base(argv)
+            rep = Report()
+            with unittest.mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, [])):
+                verify_notify.send_all(self.payloads(), rep, mode="dry-run", runner=run_n,
+                                       extra=["--campaign", "uvn-status"], check_recipients=True, workers=4)
+            self.assertEqual(rep.unmeasured_users, len(slow))
+            self.assertEqual(rep.failed, stopped, slow)
+            self.assertEqual(bool(rep.stopped_on_unmeasured), stopped)
+            if stopped:
+                self.assertIn("UNMEASURED STOP: 5 of 23", rep.stopped_on_unmeasured)
+                self.assertIn("UNMEASURED STOP", rep.render("dry-run"))
+
 
 class WiringTests(unittest.TestCase):
     """The real gate (TESTABLE copy) behind the real driver: one note per account,

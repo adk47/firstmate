@@ -167,6 +167,13 @@ class Report:
     # Counted on their own: the run still reports on every other user, and the tick must never score these as refusals.
     timeout_users: int = 0
     error_users: int = 0
+    # Defect A (Fable d2, firstmate ruling 18:34Z / inbox 214): the UNMEASURED users of a batch have their own bar. One
+    # read-only gate call that timed out used to escape send_all's parallel pre-gate as an exception and abort the
+    # whole tick (`NoteTimeout` out of `ex.map`), so everyone behind that one check got nothing. Now that user is
+    # recorded `unmeasured` (reason `gate_timeout`) and the pass continues; the run stops loudly only once
+    # unmeasured_users >= unmeasured_stop_after(batch) = max(5, 10% of the batch), named here and in the outcome file.
+    stopped_on_unmeasured: str = ""
+    unmeasured_stop_at: int = 0
     # [key=post-failed-unknown] (QA #1756 Important 2): the gate printed POST FAILED and exited 4 - the POST was
     # ATTEMPTED and nobody can prove it did not land. Neither a refusal (it must never enter the refusal ratio, which
     # would blame the user) nor a delivery. The tick's own post_failed arm reads this row; before this counter existed
@@ -193,8 +200,18 @@ class Report:
         # raised by the gate's POST FAILED LINE (checked before the generic branches, so it is the one that fires for
         # the real gate), `post_failed` by the rc=4/5 code path in _failed(kind="post"). Either one means a note may
         # or may not have reached a customer, so the caller must never exit 0 on it.
-        return bool(self.stopped_on_failures or self.proof_failed or self.halted or self.flag_failures
-                    or self.post_failed or self.post_failed_users)
+        return bool(self.stopped_on_failures or self.stopped_on_unmeasured or self.proof_failed or self.halted
+                    or self.flag_failures or self.post_failed or self.post_failed_users)
+
+    @property
+    def unmeasured_users(self) -> int:
+        """Users whose gate answer is UNKNOWN (a timed-out or crashed gate call): never a refusal, never a send."""
+        return int(self.timeout_users) + int(self.error_users)
+
+    def unmeasured_reasons(self) -> list[dict[str, str]]:
+        """The per-user rows behind `unmeasured_users` ({user, result, reason}) - the outcome file carries them so the
+        count is never a bare number (Defect A ruling (2))."""
+        return [o for o in self.outcomes if o.get("result") in ("unmeasured", "timeout", "error")]
 
     def render(self, mode: str, title: str = "VERIFY NOTES") -> str:
         if self.halted:
@@ -254,11 +271,15 @@ class Report:
         if self.timeout_users or self.error_users:
             lacking = []
             if self.timeout_users:
-                lacking.append(f"{self.timeout_users} timed out after {NOTE_ATTEMPTS} attempts")
+                lacking.append(f"{self.timeout_users} timed out (gate_timeout)")
             if self.error_users:
                 lacking.append(f"{self.error_users} raised inside the gate")
             parts.append("UNMEASURED (outcome unknown, not a refusal - the ledger row stays claimed and is never "
-                         "re-sent automatically): " + ", ".join(lacking))
+                         "re-sent automatically): " + ", ".join(lacking)
+                         + (f"; bar {self.unmeasured_stop_at} = max({UNMEASURED_STOP_MIN}, "
+                            f"{int(UNMEASURED_STOP_SHARE * 100)}% of the batch)" if self.unmeasured_stop_at else ""))
+        if self.stopped_on_unmeasured:
+            parts.append(self.stopped_on_unmeasured)
         if self.not_approved_now:
             parts.append(f"{self.not_approved_now} no longer approved on the server (not announced)")
         if self.proof_on_file:
@@ -901,6 +922,17 @@ class NoteTimeout(RuntimeError):
     """The note step exhausted its attempts: the outcome is UNKNOWN, never a refusal and never a send."""
 
 
+class UnmeasuredResult(subprocess.CompletedProcess):
+    """Defect A: a runner's synthetic answer for ONE user whose read-only gate call timed out and whom the runner has
+    ALREADY recorded (`unmeasured` / gate_timeout, timeout_users bumped). _send_loop classifies nothing on it: it only
+    applies the unmeasured bar and moves on, so the user is counted exactly once and never as a pass or a refusal."""
+    unmeasured = True
+
+
+def unmeasured_result(argv: list[str], why: str) -> UnmeasuredResult:
+    return UnmeasuredResult(argv, returncode=-1, stdout="", stderr=f"UNMEASURED gate_timeout: {why}")
+
+
 def _note_post(argv: list[str]) -> bool:
     """The one call a retry is safe for: `send` with no read-only flag (see the claim-before-POST note above)."""
     return "send" in argv and not any(f in argv for f in _READ_ONLY_FLAGS)
@@ -953,6 +985,20 @@ FAIL_STOP_SHARE = 0.02
 def fail_stop_after(walked: int) -> int:
     """How many failed users make a run systemic (>= max(FAIL_STOP_MIN, FAIL_STOP_SHARE of the users walked))."""
     return max(FAIL_STOP_MIN, math.ceil(FAIL_STOP_SHARE * max(1, int(walked))))
+
+
+# Defect A (Fable d2 owner brief, firstmate ruling 18:34Z / inbox 214): the UNMEASURED bar is separate from the failed
+# bar above and deliberately higher. A timed-out read-only gate call says nothing about the user (the outcome is
+# unknown, not a refusal and not a failure of their account); one of them records that user and the pass continues.
+# Only when unmeasured_users >= max(5, 10% of the batch) is the run a statement about the environment, and then it
+# fails loudly - printed in the outcome file and in tick.log. READ_TIMEOUT_S itself stays 20 s (ruling (4)).
+UNMEASURED_STOP_MIN = 5
+UNMEASURED_STOP_SHARE = 0.10
+
+
+def unmeasured_stop_after(batch: int) -> int:
+    """How many UNMEASURED users stop a run (>= max(UNMEASURED_STOP_MIN, UNMEASURED_STOP_SHARE of the batch))."""
+    return max(UNMEASURED_STOP_MIN, math.ceil(UNMEASURED_STOP_SHARE * max(1, int(batch))))
 
 # Fable [key=signed-on-sha] (r5 747, the 04:21Z C p3 stop: a deploy landed between signing and apply): a signature is
 # for ONE deploy head. Every list builder records signed_on = the deployed sha at build / dry-run time; a list-driven
@@ -1253,11 +1299,20 @@ def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
         finally:
             os.unlink(path)
 
+    def gate_captured(p: dict[str, Any]) -> Any:
+        # Defect A: the parallel pre-gate CAPTURES each user's exception instead of letting `ex.map` re-raise the first
+        # one out of send_all - which aborted the whole batch (and the tick) on ONE slow account check. _send_loop
+        # re-raises the captured value inside its per-user try, so a timeout is that user's `unmeasured` row.
+        try:
+            return gate(p)
+        except Exception as exc:  # noqa: BLE001 - re-raised per user in _send_loop
+            return exc
+
     n_workers = CHECK_WORKERS if workers is None else workers
-    pre: list[subprocess.CompletedProcess] | None = None
+    pre: list[Any] | None = None
     if mode != "apply" and n_workers > 1 and len(payloads) > 1:
         with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as ex:
-            pre = list(ex.map(gate, payloads))           # list order, whatever order they finish in
+            pre = list(ex.map(gate_captured, payloads))  # list order, whatever order they finish in
     lock = None
     if mode == "apply" and _SESSION_LOCK is None:    # inside an apply_session the run already holds it
         try:
@@ -1282,6 +1337,7 @@ def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pac
     # per send_all() call, so len(payloads) was 1 and the systemic bar became max(3, 2% of 1) = 3 threshold against a
     # denominator of 1 - and a family that stopped at 3 of 8 kept walking all 8 because the outer loop never looked.
     walked = len(payloads) if walked is None else max(int(walked), len(payloads))
+    report.unmeasured_stop_at = unmeasured_stop_after(walked)     # Defect A: the bar is printed even when nobody hit it
     # the run's clock when there IS a run (apply_session): QA #1756 Critical. Without it this loop measured the budget
     # from its own call, so N per-user calls each got the whole share and the family overran the tick by N times.
     started = _SESSION_STARTED if (mode == "apply" and _SESSION_STARTED is not None) else time.monotonic()
@@ -1333,13 +1389,31 @@ def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pac
         # never reached keep no row at all, which the tick reads as UNMEASURED (never as a refusal).
         try:
             res = pre[i] if pre is not None else gate(p)
+            if isinstance(res, BaseException):      # Defect A: captured by the parallel pre-gate, raised per user here
+                raise res
         except NoteTimeout as exc:
             report.timeout_users += 1
-            _outcome(report, p, "timeout", f"{exc}; outcome unknown, never scored as a refusal")
+            if mode != "apply":
+                # Defect A ruling (1): a timed-out READ-ONLY gate call records THAT user as `unmeasured`, reason
+                # `gate_timeout`, and the pass continues. (An apply-time note step keeps its own `timeout` row: there
+                # the POST may have landed and the ledger row stays claimed.)
+                _outcome(report, p, "unmeasured", f"gate_timeout: {exc}; outcome unknown, never scored as a refusal")
+            else:
+                _outcome(report, p, "timeout", f"{exc}; outcome unknown, never scored as a refusal")
+            if _unmeasured_stop(report, walked):
+                return
             continue
         except Exception as exc:  # noqa: BLE001 - one user's crash must not cost the batch its artefact
             report.error_users += 1
             _outcome(report, p, "error", f"the gate raised {type(exc).__name__}: {exc}"[:180])
+            if _unmeasured_stop(report, walked):
+                return
+            continue
+        if getattr(res, "unmeasured", False):
+            # the runner already recorded this user as unmeasured (uvn_status.seen on a gate_timeout): no second row,
+            # no classification - only the bar
+            if _unmeasured_stop(report, walked):
+                return
             continue
         if preview_dir and mode != "apply" and res.returncode == 0:
             uid = re.sub(r"[^A-Za-z0-9-]", "", str(p["user"].get("id") or ""))[:64]
@@ -1457,6 +1531,23 @@ def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pac
 # r8 (firstmate 771) (2): the gate's exit codes are distinct facts. 4 = NOTHING WAS SENT (a pre-send check failed),
 # 5 = ATTEMPTED, OUTCOME UNKNOWN (posted, transport failed or the answer could not be verified; row left CLAIMED).
 POST_FAILED_RC = 5
+
+
+def _unmeasured_stop(report: Report, batch: int) -> bool:
+    """Defect A ruling (3): the run stops LOUDLY once unmeasured_users >= max(5, 10% of the batch) - never before. The
+    bar is recorded on the report (so the outcome file and the summary print it) and the users behind the stop keep
+    no row at all, exactly like a user the page never reached: still owed, walked again next tick."""
+    bar = unmeasured_stop_after(batch)
+    report.unmeasured_stop_at = bar
+    if report.unmeasured_users < bar:
+        return False
+    if not report.stopped_on_unmeasured:
+        report.stopped_on_unmeasured = (
+            f"UNMEASURED STOP: {report.unmeasured_users} of {batch} user(s) could not be measured (gate_timeout / gate "
+            f"error) >= max({UNMEASURED_STOP_MIN}, {int(UNMEASURED_STOP_SHARE * 100)}% of the batch) = {bar}; the run "
+            f"stopped here and fails loudly - the gate itself is slow, not these accounts. Nothing was sent or scored "
+            f"as a refusal; the users not reached stay owed for the next tick.")
+    return True
 
 
 def _failed(report: Report, p: dict[str, Any], why: str, walked: int, *, kind: str = "read") -> None:
