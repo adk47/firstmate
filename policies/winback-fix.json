@@ -1,0 +1,242 @@
+{
+  "_doc": "wb_fix_1 (support-churn-winback-fix-first-w1): the ONE copy + gate file for the 'we fixed the thing you waited on' win-back. Ruling R2 (data/support-churn-winback-fable-c1/report.md, Fable 2026-11-03): NO message goes to a churned user until the thing they waited for is DONE and visible in the system of record - the fix ticket routes it (scripts/route_fix.py), fix_readback.py proves it Seen, and winback_fix_send.py renders this copy only for the users whose fix read back. Six fixed FIX_LINE variants, one per cause class, numbers filled from the read-back; 'other' quotes the human reply already sent in Intercom and is the only free text. Offers stay inside the approved set (R3): WB_M2_MONTH1 / WB_M2_ANNUAL40 are the EXISTING coupons in muso-messaging contracts/email/coupons.json, a Regional Discount user keeps the country coupon, a payment_failed churner gets a restart link and NO coupon. Never Klaviyo, never Jaxsta, never a date we do not hold. template.enabled stays false until Fable GO on the six rendered variants (the PR body carries them); --live also needs /etc/hydra/winback-fix.live. Every dated value lives HERE (data), never as a literal in code: a code literal with a date in it is a CI red with a countdown on it.",
+  "campaign": "wb_fix_1",
+  "source_ruling": "data/support-churn-winback-fable-c1/report.md R2/R3/R5/R6 (Fable lead, 2026-11-03), copy skeleton report 3.2",
+  "template": {
+    "key": "wb_fix_1",
+    "channel": "email",
+    "enabled": false,
+    "fable_go_ref": null,
+    "enabled_note": "Flipping this to true (with fable_go_ref) is the Fable GO on the six rendered FIX_LINE variants. Until then winback_fix_send.py refuses to hand a live batch to the sender seat; dry-run rendering still works.",
+    "fable_go_rule": "A set fable_go_ref is only a claim; the approval itself is recorded in its own file under docs/support/copy-gos/ (wb_fix_1-regional-suffix.md is the shape: ref, approved text verbatim, ruling verbatim, seat, date, conditions). tests/test_churn_copy_gos.py fails the build when a set ref has no such file, so neither this GO nor the regional one can be self-granted by an edit to this policy.",
+    "requested_by": "firstmate support-churn-winback-fix-first-w1 (Fable R2/R3/R5, 2026-11-03)",
+    "subject": "We fixed the thing you were waiting on",
+    "body": [
+      "Hi {first_name},",
+      "You wrote to us about {cause_noun} and we did not get back to you the way we should have. That was on us. It is done now: {fix_line}.",
+      "You cancelled your {plan_noun} on {pro_ended_date}. If you want to come back, {offer_line}",
+      "If anything about the fix is wrong, reply to this email and a person will answer.",
+      "— The Muso team"
+    ]
+  },
+  "fix_lines": {
+    "_doc": "Exactly one FIX_LINE per message, chosen by cause class. {n}/{m}/{platform}/{amount} come from the read-back evidence, never from a guess: a variant whose numbers the read-back cannot fill makes the user INELIGIBLE (R2: no fix -> no message).",
+    "credits_not_approved": "{n} of your pending credits are now approved and showing on your profile{declined_clause}",
+    "proof_sent_no_update": "we reviewed the documents you sent and {n} credits are now approved",
+    "merge_claim_stuck": "{merge_claim_result}",
+    "analytics_stale_wrong": "your {platform} numbers have been refreshed and now update on schedule",
+    "billing_confusion": "the {amount} charge has been refunded to your card",
+    "other": "{human_reply_sentence}"
+  },
+  "merge_claim_results": {
+    "_doc": "The merge_claim_stuck copy has two shapes (report 3.2 splits them with a slash); the read-back decides which is true for THIS user, and neither is ever sent without its Seen outcome row.",
+    "merge": "the duplicate profiles are merged and your credits are on one page now",
+    "claim": "your profile claim is processed"
+  },
+  "cause_nouns": {
+    "_doc": "The plain-words name of the thing the user waited on, for the opening sentence. Short, no jargon, no internal names.",
+    "credits_not_approved": "your pending credits",
+    "proof_sent_no_update": "the documents you sent",
+    "merge_claim_stuck": "your duplicate profiles",
+    "analytics_stale_wrong": "your analytics numbers",
+    "billing_confusion": "a charge on your account",
+    "other": "your message"
+  },
+  "plan_nouns": {
+    "_doc": "How the ended plan is named back to the user, from the store's plan slug family. Anything unmatched uses the default.",
+    "muso_team_business_": "Muso Business",
+    "muso_team_pro_": "Muso Pro",
+    "muso_individual_pro_": "Muso Pro",
+    "default": "Muso Pro"
+  },
+  "offers": {
+    "_doc": "R3: the approved set only, no new spend. coupon codes, slugs and redeem_by are the LIVE values in muso-messaging contracts/email/coupons.json (the send-gateway refuses a body whose slug is missing there or whose redeem_by is inside min_days_left, so a copy of them here that drifts is a refused send, not a silent discount). offer_lines are the approved sentences (report 3.2) with the redeem link filled in: a sentence that says 'with this link' MUST carry {offer_url}, and the guards refuse a body that says it without one. A Regional Discount user keeps the country coupon: same link, plus the regional sentence, and the coupon itself is country-keyed so nothing new is minted.",
+    "monthly": {
+      "coupon": "WB_M2_MONTH1",
+      "slug": "wb-m2-month1",
+      "period": "monthly",
+      "offer_line": "your first month back is $1 with this link: {offer_url} (good until {redeem_by}).",
+      "redeem_by": "January 31, 2027"
+    },
+    "annual": {
+      "coupon": "WB_M2_ANNUAL40",
+      "slug": "wb-m2-annual40",
+      "period": "annual",
+      "offer_line": "a year of Pro is $72 with this link: {offer_url}"
+    },
+    "payment_failed": {
+      "coupon": null,
+      "slug": null,
+      "period": null,
+      "offer_line": "you can restart with the same plan here: {offer_url} — nothing else changes."
+    },
+    "regional_suffix": {
+      "_doc": "Regional Discount users keep the coupon they already had (country-keyed, not a new discount). Appended to the cadence offer_line above, and ONLY when requires_fable_go is false or fable_go_ref carries the explicit GO for this sentence: it states a price, and the template-level GO covers the six FIX_LINE variants only. Unset = a Regional Discount user is held with a reason, never sent an unapproved price. With the GO recorded, the sentence still ships only to a user whose country coupon is re-checked AT SEND TIME (scripts/churn/coupons.py): HELD appends it, LAPSED or UNVERIFIED drops it and the message still sends. GO: the Fable driver, single sender seat verify-sla-driver-fable-d2, 2026-11-04T14:18:11Z; the ruling, the approved text and its conditions are recorded verbatim in docs/support/copy-gos/wb_fix_1-regional-suffix.md, which fable_go_evidence names.",
+      "text": " Your regional discount still applies, so the price stays the same.",
+      "requires_fable_go": true,
+      "fable_go_ref": "fable-ruling-1104-d2/wbfix1-regional-suffix",
+      "fable_go_evidence": "docs/support/copy-gos/wb_fix_1-regional-suffix.md"
+    },
+    "offer_url": "https://muso.ai/login?redirect=%2Fpricing%3Fplan%3Dpro%26period%3D{period}%26offer%3D{slug}%26utm_source%3Dnews%26utm_medium%3Demail%26utm_campaign%3Dwb_fix_1"
+  },
+  "windows": {
+    "churn_days": 60,
+    "fix_eligible_days": 7,
+    "paid_priority_days": 30,
+    "returns_days": 30
+  },
+  "readback": {
+    "_doc": "The read-back's attempt budget (firstmate inbox 007): a routed ticket is re-read at these many hours after its PREVIOUS attempt, one interval per attempt, and stops after the last one. It is never auto-ineligible - it stays routed and is reported as readback_exhausted for its owning lane. max_per_run is the per-run ceiling of the hourly job, oldest-due first.",
+    "backoff_hours": [
+      1,
+      6,
+      24,
+      72,
+      168
+    ],
+    "max_per_run": 500
+  },
+  "holdout": {
+    "_doc": "sha256('muso-holdout:' + <user_id>) % modulus == residue is NEVER messaged by this campaign, so returns are measurable against an untouched control. scripts/churn/model.py holdout() is the implementation (the 'muso-holdout:' prefix is part of the assignment, so changing it reshuffles the control group).",
+    "modulus": 10,
+    "residue": 0
+  },
+  "caps": {
+    "_doc": "The lane's own ceiling on a batch; the sender seat (verify-sla-driver-fable-d2) still owns the fleet-wide daily cap and the one-message-per-user-per-day rule. Both must pass.",
+    "per_run": 200
+  },
+  "exclusions": {
+    "_doc": "R5. Each entry names WHERE the truth lives. 'source: lane' = this lane reads it and holds the user on unreadable (fail closed). 'source: gateway' = the send-gateway enforces it at send time (suppression, unsubscribe, marketing frequency, one-per-day) - the lane delegates and records the delegation rather than duplicating a gate it cannot read.",
+    "paying_again": {
+      "source": "lane",
+      "reader": "trino_subscriptions",
+      "why": "back on an active/trialing/past_due subscription: nothing to win back"
+    },
+    "staff_or_test": {
+      "source": "lane",
+      "reader": "staff_test_ids",
+      "why": "staff / test account"
+    },
+    "fraud_watchlist": {
+      "source": "lane",
+      "reader": "fraud_lens",
+      "why": "the fraud lens or policies/fraud-watchlist.json names them"
+    },
+    "open_dispute": {
+      "source": "lane",
+      "reader": "store_dispute_flag",
+      "why": "an open chargeback: never a marketing note"
+    },
+    "affiliation": {
+      "source": "lane",
+      "reader": "org_affiliation",
+      "why": "major label / publisher affiliation: a NAMED human answers, never the automated note"
+    },
+    "prefs_suppression": {
+      "source": "gateway",
+      "why": "unsubscribed / suppressed at the send-gateway"
+    },
+    "marketing_7d": {
+      "source": "gateway",
+      "why": "any marketing inside 7 days (send.messages)"
+    },
+    "one_per_day": {
+      "source": "gateway",
+      "why": "one message per user per UTC day, fleet-wide"
+    },
+    "campaign_once": {
+      "source": "lane",
+      "reader": "ticket_ledger",
+      "why": "one message per user, ever, from wb_fix_1"
+    },
+    "no_verified_email": {
+      "source": "lane",
+      "reader": "trino_users_emailconfirmed",
+      "why": "no address, or an unconfirmed one: the gateway would drop it after we counted it"
+    }
+  },
+  "guards": {
+    "forbidden_names": [
+      "klaviyo",
+      "jaxsta"
+    ],
+    "promise_patterns": [
+      "business days",
+      "within \\d+ (?:hour|day|week)s?",
+      "we will (?:follow up|get back|be in touch)",
+      "you will hear back",
+      "guarantee",
+      "we promise",
+      "priorit(?:y|ised) look",
+      "12-24 hours"
+    ],
+    "human_reply_min_words": 40,
+    "human_reply_sentence_min_words": 8,
+    "_doc": "forbidden_names: never name a vendor or a data source (captain rule; 'never Jaxsta'). promise_patterns: the exact family that burned these users (report 0.2 'the same copy cs-health 6 flagged as misdirecting') - a body carrying one is BLOCKED, not rewritten. human_reply_min_words: the 'other' variant only answers a reply that is a real ANSWER, so the WHOLE reply has to reach this many words (report 3.1; wired at readback.intercom_verdict). human_reply_sentence_min_words: the separate floor for the ONE sentence we QUOTE out of that reply, which also has to name the fix (a verb plus an object); render.quote_fix_sentence raises a FIXABLE policy gap, never a terminal ineligible, when no sentence qualifies. A fable_go_ref names an approval that must have its evidence file under docs/support/copy-gos/ (tests/test_churn_copy_gos.py). link_claim: an offer sentence that says 'this link' must carry a muso.ai URL in the body."
+  },
+  "paths": {
+    "_doc": "Deploy-proof state lives under /var/lib (never /opt/hydra, which the deploy rsync overwrites). Every one is overridable by the flag named, so a test or a dry run can point at a scratch dir.",
+    "state_dir": {
+      "default": "/var/lib/hydra/churn",
+      "flag": "--state-dir"
+    },
+    "support_state_sqlite": {
+      "default": "/var/lib/hydra/churn/support-state.sqlite",
+      "flag": "--state"
+    },
+    "live_flag": {
+      "default": "/etc/hydra/winback-fix.live",
+      "flag": "--live-flag"
+    },
+    "policy": {
+      "default": "policies/winback-fix.json",
+      "flag": "--policy"
+    },
+    "measured_candidates": {
+      "default": "data/support-churn-winback-fable-c1/measure/winback-candidates.json",
+      "_doc": "The Fable report's measured artifact (325 ids, $5,371 list MRR) is kept in firstmate data, NOT in this repo: it is a snapshot of user ids, not code. --source json reads it so the campaign can be rehearsed against the exact audience the report counted before the nightly store (support_state.py, churn-risk-signal-prevent-p1) ships.",
+      "read_by": "scripts/route_fix.py --source json (flag --candidates overrides)"
+    },
+    "churn_priority": {
+      "default": "/var/lib/hydra/churn/intake/churn-priority.json",
+      "_doc": "Stage 1 writes the churn priority list here and scripts/credit_review/decide.py READS it: the decider sorts these users to the head of the free segment for windows.paid_priority_days (R4's 'a policy key + a sort change'). A missing or unreadable file changes no ordering.",
+      "read_by": "scripts/credit_review/decide.py:load_churn_priority (env CREDIT_TRUST_CHURN_PRIORITY)"
+    }
+  },
+  "clickup": {
+    "_doc": "The lanes whose owner is a person or the support agents write a hydra-action-request task to the ClickUp User Requests board (901000600160, workspaces/support/skills/action-request/SKILL.md). That board is drained: resolve-notify.py, clickup-todo-dedupe.py and the support agents read it. The credit-review and proof lanes do NOT write a task: their owner is the decider cron, which reads the churn priority file (paths.churn_priority) and already holds these users' open requests. Every task carries the churned:<date> tag, paid priority, and is deduped by its marker before creation.",
+    "list_id": "901000600160",
+    "base_tags": [
+      "hydra-action-request",
+      "action-source:churn-winback"
+    ],
+    "tier_tag": "tier-2",
+    "actions": {
+      "merge": {
+        "action_tag": "action:merge-duplicates",
+        "title": "Merge duplicate profiles (churned user, paid priority)"
+      },
+      "analytics": {
+        "action_tag": "action:analytics-followup",
+        "title": "Analytics not updating (churned user, paid priority)"
+      },
+      "refund": {
+        "action_tag": "action:refund-judge",
+        "title": "Refund/charge fix for a churned paying user (paid priority)"
+      },
+      "claim": {
+        "action_tag": "action:claim-proof",
+        "title": "Profile claim stuck for a churned paying user (paid priority)"
+      },
+      "caroline": {
+        "action_tag": "action:thread-answer",
+        "title": "Answer a churned paying user's unanswered thread (paid priority)"
+      }
+    }
+  },
+  "sender_seat": {
+    "_doc": "R5: the lane NEVER sends. It renders, guards, ledgers, and hands ONE batch manifest to the single sender seat. verify-sla-driver-fable-d2 owns the seat, the fleet daily cap and the template routing; the seat writes the gateway's send.messages row. This lane keeps its own ledger so 'was this user messaged by wb_fix_1' is answerable without the gateway.",
+    "owner": "verify-sla-driver-fable-d2",
+    "handoff_dir": "outbound"
+  }
+}

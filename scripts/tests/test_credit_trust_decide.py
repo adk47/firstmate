@@ -797,6 +797,55 @@ class PaidUsersFirst(Base):
         self.assertEqual([r["id"] for r in decide.order_rows(rows, None, T.NOW)],
                          [uuid_of(180), uuid_of(183), uuid_of(182), uuid_of(181)], "unknown paying = oldest first")
 
+    def test_churned_winback_user_is_served_ahead_of_the_free_segment(self):
+        """R4 (firstmate support-churn-winback-fix-first-w1): a user who CANCELLED while waiting
+        for us must not be sorted to the back of the queue at the moment we owe them most."""
+        rows = [req(uuid_of(180), uid=501, created="2026-10-01T00:00:00Z"),   # free, oldest
+                req(uuid_of(181), uid=900, created="2026-10-10T20:00:00Z"),   # paid < 24h
+                req(uuid_of(182), uid=777, created="2026-10-09T00:00:00Z")]   # churned (not paying)
+        self.assertEqual([r["id"] for r in decide.order_rows(rows, frozenset({900}), T.NOW)],
+                         [uuid_of(181), uuid_of(180), uuid_of(182)])
+        self.assertEqual([r["id"] for r in decide.order_rows(rows, frozenset({900}), T.NOW,
+                                                            frozenset({777}))],
+                         [uuid_of(182), uuid_of(181), uuid_of(180)],
+                         "churn priority joins the paid tier (ahead of paid-<24h and of the free segment)")
+
+    def test_churn_priority_survives_the_ask_cap_admission_order(self):
+        """R4 must hold through the ask-cap order, not only batch selection: the cap admits asks
+        by iterating the decisions list, so a re-sort back into the free segment defers exactly
+        the users the promotion exists for."""
+        path = Path(self.tmp) / "churn-priority.json"
+        path.write_text(json.dumps({"schema": "churn-priority/v1", "generated_at": T.NOW.timestamp(),
+                                    "entries": [{"user_id": 777,
+                                                 "until": T.NOW.timestamp() + 86400}]}))
+        rows = [req(uuid_of(110), uid=501, created="2026-10-01T00:00:00Z"),   # free, oldest
+                req(uuid_of(111), uid=777, created="2026-10-09T00:00:00Z")]   # churned, newer
+        with mock.patch.object(decide, "CHURN_PRIORITY", path):
+            self.go(rows, judge=FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5,
+                                                      provider="codex")),
+                    policy=dataclasses.replace(POLICY, max_ask_users_per_day=1))
+        d = self.decisions()
+        self.assertEqual(d[uuid_of(111)]["decision"], "support",
+                         "the churned user is admitted under the cap")
+        self.assertEqual(d[uuid_of(110)]["decision"], "defer",
+                         "the older free user waits: the promotion is not re-sorted away")
+
+    def test_churn_priority_list_is_read_and_lapses_on_its_own(self):
+        tmp = tempfile.mkdtemp()
+        path = os.path.join(tmp, "churn-priority.json")
+        now_ts = T.NOW.timestamp()
+        open(path, "w").write(json.dumps({
+            "schema": "churn-priority/v1", "generated_at": now_ts,
+            "entries": [{"user_id": "777", "until": now_ts + 86400, "tier": 0},
+                        {"user_id": 778, "until": now_ts - 1},           # lapsed: ignored
+                        {"user_id": "not-an-int", "until": now_ts + 86400}]}))
+        self.assertEqual(decide.load_churn_priority(path, now=T.NOW), frozenset({777}))
+        open(path, "w").write("{not json")
+        self.assertEqual(decide.load_churn_priority(path, now=T.NOW), frozenset(),
+                         "an unreadable list changes no ordering (fail open: it is an accelerator)")
+        self.assertEqual(decide.load_churn_priority(os.path.join(tmp, "absent.json"), now=T.NOW),
+                         frozenset())
+
     def test_paid_not_found_small_track_is_provisionally_approved_free_is_asked(self):
         """Fable ruling 4: trust yet verify for PAID users (small/medium, NOT_FOUND, nothing
         against the claim); free users stay on the ask path; big tracks stay strict."""

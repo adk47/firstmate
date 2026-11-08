@@ -1940,6 +1940,20 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_bulk_credit_change
+      - name: Run churn winback fix-first tests
+        # R2 (fix first, message second) is enforced by the readback gate: the
+        # send path can only reach a user the readback marked eligible from a
+        # fix that is SEEN in the system of record. These tests lock the send
+        # gates, the six-cause copy rendering and the ticket idempotency.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v \
+            tests.test_churn_routing \
+            tests.test_churn_readback \
+            tests.test_churn_copy \
+            tests.test_churn_template \
+            tests.test_churn_scripts \
+            tests.test_churn_copy_gos
       - name: Run Slack botToken SecretRef reader tests
         # openclaw-main.json carries botToken as a SecretRef; scripts that
         # json.load() it must resolve it via scripts/lib/slack_token.py or they

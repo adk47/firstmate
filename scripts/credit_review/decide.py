@@ -1100,9 +1100,56 @@ def paying_users(path: Path | None = None, now: datetime | None = None) -> tuple
 PAID_SLA = timedelta(hours=24)
 
 
-def paid_tier(user_id: Any, created_at: Any, paying: frozenset[int] | None, now: datetime) -> int:
+#: The churn win-back priority list (firstmate support-churn-winback-fix-first-w1, ruling R4).
+#: Written by scripts/route_fix.py (churn.lanes.write_priority_lane), read here so a user who
+#: CANCELLED while waiting for us is not sorted to the back of the queue at the exact moment we
+#: owe them the most. Absent/unreadable => no change to the ordering (fail open: this file is an
+#: accelerator, never a gate).
+CHURN_PRIORITY = Path(os.environ.get("CREDIT_TRUST_CHURN_PRIORITY",
+                                     "/var/lib/hydra/churn/intake/churn-priority.json"))
+
+
+def load_churn_priority(path: str | Path | None = None,
+                        now: datetime | None = None) -> frozenset[int]:
+    """User ids on the churn priority list whose 30-day flag has not lapsed.
+
+    Best effort by design: a malformed file changes nothing, and the caller's ordering is exactly
+    what it would have been. ``until`` is an epoch, so an entry lapses without anyone removing it.
+    """
+    path = Path(path or CHURN_PRIORITY)
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return frozenset()
+    if not isinstance(doc, dict) or doc.get("schema") != "churn-priority/v1":
+        return frozenset()
+    now_ts = (now or datetime.now(timezone.utc)).timestamp()
+    out: set[int] = set()
+    for entry in doc.get("entries") or []:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            user_id = int(entry.get("user_id"))
+            until = float(entry.get("until") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if until > now_ts:
+            out.add(user_id)
+    return frozenset(out)
+
+
+def paid_tier(user_id: Any, created_at: Any, paying: frozenset[int] | None, now: datetime,
+              churned: frozenset[int] | None = None) -> int:
     """Fable ruling 6 (credit-backlog-1019): 0 = paid and older than 24h, 1 = paid within
-    24h, 2 = free (or paying status unknown)."""
+    24h, 2 = free (or paying status unknown).
+
+    A churned user on the win-back priority list is tier 0 (R4): their request is old by
+    definition (they have cancelled since), so inside tier 0 they are served oldest-first like
+    any other long wait. The flag lapses on its own, and it never approves anything - it only
+    changes who is looked at first.
+    """
+    if churned and _as_int(user_id) in churned:
+        return 0
     if paying is None or user_id not in paying:
         return 2
     ts = parse_ts(created_at)
@@ -1213,14 +1260,36 @@ def _ledger_owners(db: sqlite3.Connection, request_ids: list[str]) -> dict[str, 
     return out
 
 
+def _as_int(raw: Any) -> int | None:
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _paid_tier_key(user_id: Any, created_at: Any, paying: frozenset[int] | None, now: datetime,
+                   churned: frozenset[int] | None = None) -> tuple[int, str]:
+    """Tier first, then oldest-created, with the churn promotion folded into the tier (Fable
+    ruling 6 + R4).
+
+    Used by ``order_rows`` (the batch-order key) and by the support-ask sort just before the
+    daily cap, so a churned user promoted to tier 0 for batch selection cannot be re-sorted back
+    into the free segment before the ask cap admits them. ``scripts/credit_review/score_approve.py``
+    still orders its reread queue by the bare ``paid_tier``; aligning it is a separate
+    d2-reviewed follow-up, not a change this campaign makes.
+    """
+    return (paid_tier(user_id, created_at, paying, now, churned), str(created_at or ""))
+
+
 def order_rows(rows: list[dict[str, Any]], paying: frozenset[int] | None,
-               now: datetime | None = None) -> list[dict[str, Any]]:
+               now: datetime | None = None,
+               churned: frozenset[int] | None = None) -> list[dict[str, Any]]:
     """PAID > 24h, then PAID < 24h, then FREE; oldest-created first inside each (Fable
-    ruling 6). Paying status unknown = everyone oldest-first."""
+    ruling 6). Paying status unknown = everyone oldest-first. ``churned`` promotes the win-back
+    priority list to tier 0 (R4); it is loaded by the caller so one run reads the file once."""
     now = now or datetime.now(timezone.utc)
-    def created(r: dict[str, Any]) -> str:
-        return str(r.get("createdAt") or "")
-    return sorted(rows, key=lambda r: (paid_tier(r.get("userId"), r.get("createdAt"), paying, now), created(r)))
+    return sorted(rows, key=lambda r: _paid_tier_key(r.get("userId"), r.get("createdAt"), paying,
+                                                     now, churned))
 
 
 def _set(d: Decision, decision: str, reason: str, *, doc_required: bool | None = None) -> Decision:
@@ -2516,7 +2585,12 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
     if proof_why:
         log(f"decide: proof-on-file status unknown ({proof_why}); no support request is written this run")
     proof = with_intake(with_stage2(proof))
-    batch = order_rows(rows if rows is not None else held_rows(admin, skip), paying, now)[:policy.max_rows_per_run]
+    churn_priority = load_churn_priority(now=now)
+    if churn_priority:
+        log(f"decide: {len(churn_priority)} churned win-back user(s) on the priority list "
+            f"({CHURN_PRIORITY}): served at the head of the free segment for 30 days (R4)")
+    batch = order_rows(rows if rows is not None else held_rows(admin, skip), paying, now,
+                       churn_priority)[:policy.max_rows_per_run]
     builder = EvidenceBuilder(admin, now=now)
     decisions: list[Decision] = []
     needs_web: list[tuple[dict[str, Any], Evidence, int]] = []
@@ -2614,9 +2688,10 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
         if d.user_id is not None:
             prov_today[d.user_id] = prov_today.get(d.user_id, 0) + 1
 
-    # Ruling 6 also orders the asks: paid > 24h first, so the daily cap admits them first.
-    decisions.sort(key=lambda d: (paid_tier(d.user_id, (req_by_id.get(d.request_id) or {}).get("createdAt"),
-                                            paying, now), str((req_by_id.get(d.request_id) or {}).get("createdAt") or "")))
+    # Ruling 6 also orders the asks: paid > 24h first, so the daily cap admits them first. R4's
+    # churn promotion must survive this re-sort, or the cap defers the very users it exists for.
+    decisions.sort(key=lambda d: _paid_tier_key(d.user_id, (req_by_id.get(d.request_id) or {}).get("createdAt"),
+                                                paying, now, churn_priority))
 
     needs_proof = doc_required_ids(db)
     # [key=doc-approval-doctrine] the documents that may approve without a DSP anchor: only the ones
