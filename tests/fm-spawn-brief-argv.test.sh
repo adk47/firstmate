@@ -93,7 +93,7 @@ launch_line() {  # <launch-log>
 
 test_oversized_brief_launches_through_the_path_pointer() {
   local rec id out status launch brief_bytes launch_bytes
-  id=brief-argv-oversized-z1
+  id='brief-argv-oversized-z1'
   rec=$(make_spawn_case brief-argv-oversized pi "$id")
   read_case_record "$rec"
   grow_brief "$HOME_DIR/data/$id/brief.md" 400000
@@ -118,7 +118,7 @@ test_oversized_brief_launches_through_the_path_pointer() {
 
 test_small_brief_launch_is_unchanged() {
   local rec id out status launch
-  id=brief-argv-small-z1
+  id='brief-argv-small-z1'
   rec=$(make_spawn_case brief-argv-small pi "$id")
   read_case_record "$rec"
 
@@ -140,7 +140,7 @@ test_small_brief_launch_is_unchanged() {
 
 test_oversized_inline_body_fails_loudly_before_launch() {
   local rec id out status launch brief_bytes
-  id=brief-argv-inline-over-z1
+  id='brief-argv-inline-over-z1'
   rec=$(make_spawn_case brief-argv-inline-over pi "$id")
   read_case_record "$rec"
   grow_brief "$HOME_DIR/data/$id/brief.md" 400000
@@ -163,7 +163,7 @@ test_oversized_inline_body_fails_loudly_before_launch() {
 
 test_inline_harness_caps_the_body_and_names_the_truncation() {
   local rec id out status launch body body_bytes
-  id=brief-argv-inline-cap-z1
+  id='brief-argv-inline-cap-z1'
   rec=$(make_spawn_case brief-argv-inline-cap pi "$id")
   read_case_record "$rec"
   grow_brief "$HOME_DIR/data/$id/brief.md" 400000
