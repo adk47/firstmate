@@ -217,6 +217,18 @@ EXEC_POLICY_ALERT_STATE="${CRON_HEALTH_EXEC_POLICY_STATE:-/var/lib/cron-health-w
 EXEC_POLICY_ALERT_INTERVAL="${CRON_HEALTH_EXEC_POLICY_INTERVAL:-86400}"  # 24h
 
 if [ -n "$EXEC_POLICY_CHECK" ]; then
+  # FINDING IDENTITY vs THE CLOCK. The dedupe stamp is keyed to a sha of what the checker printed, so
+  # anything in that text that changes on its own looks like a NEW finding. The pre-expiry warning carries
+  # a countdown ("in 6d" -> "in 5d" at UTC midnight), which is exactly that: one unchanged exception would
+  # re-page every day inside the 24h window and train everyone to ignore the alert. The countdown is for the
+  # READER, not for the identity, so the signature is computed with it stripped — the agent, the DATE and
+  # the exit code all stay in, so a different exception still pages at once.
+  # Deliberate failure direction: if the wording ever drifts and this strip stops matching, the identity
+  # degrades to the full text, i.e. a daily re-page. Never a silently-collapsed one.
+  _ep_identity() {
+    printf '%s\nrc=%s' \
+      "$(printf '%s\n' "$1" | sed -E 's/ - (in [0-9]+d|TODAY) \(7-day window\)/ (7-day window)/')" "$2"
+  }
   _ep_out=""; _ep_rc=0
   if [ ! -f "$EXEC_POLICY_CHECK" ]; then
     _ep_rc=3
@@ -237,7 +249,7 @@ if [ -n "$EXEC_POLICY_CHECK" ]; then
     # Otherwise one alert at 01:00 buys silence until 01:00 tomorrow for every other posture failure in between — a
     # restored root shell is not "the thing we already told you about". A clean tick clears the stamp outright (see
     # the else branch below), so recovery re-arms the alarm.
-    _ep_sig="$(printf '%s\nrc=%s' "$_ep_out" "$_ep_rc" | sha256sum | cut -c1-16)"
+    _ep_sig="$(_ep_identity "$_ep_out" "$_ep_rc" | sha256sum | cut -c1-16)"
     _ep_last=0; _ep_last_sig=""
     if [ -r "$EXEC_POLICY_ALERT_STATE" ]; then read -r _ep_last _ep_last_sig < "$EXEC_POLICY_ALERT_STATE" || true; fi
     case "$_ep_last" in (*[!0-9]*|"") _ep_last=0 ;; esac

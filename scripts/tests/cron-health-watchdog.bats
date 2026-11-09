@@ -694,6 +694,39 @@ STUB
   grep -q "ROOT on node-8" "$TEST_TMPDIR/last-text"      # the violation wording, not the deadline wording
 }
 
+@test "agent exec posture: the countdown is NOT part of the finding identity (no re-page at UTC midnight)" {
+  # qa-review 2026-11-09: the dedupe stamp hashes the checker's output, and "in 6d" becomes "in 5d" at
+  # midnight. Without this, one unchanged exception pages every single day for a week inside the 24h
+  # window, and an alert that fires daily about the same unactioned thing is how people learn to ignore it.
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _stub_policy_check 4 "::warning::openclaw-main.json:cto: full exception expires 2026-11-15 - in 6d (7-day window). Renew it with a new ruling, or deny exec, before that date."
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "Posted agent exec posture alert" <<< "$output"
+  # the SAME exception, one day later: countdown decremented, nothing else changed
+  _stub_policy_check 4 "::warning::openclaw-main.json:cto: full exception expires 2026-11-15 - in 5d (7-day window). Renew it with a new ruling, or deny exec, before that date."
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "UNCHANGED and already paged" <<< "$output"
+  [[ "$output" != *"Posted agent exec posture alert"* ]]
+  # ...and the last day reads TODAY, which is the same finding too
+  _stub_policy_check 4 "::warning::openclaw-main.json:cto: full exception expires 2026-11-15 - TODAY (7-day window). Renew it with a new ruling, or deny exec, before that date."
+  run bash "$WD"
+  grep -q "UNCHANGED and already paged" <<< "$output"
+}
+
+@test "agent exec posture: a DIFFERENT expiring exception still pages inside the 24h window" {
+  # The stable identity must not go too far: a second agent joining the window is news.
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _stub_policy_check 4 "::warning::openclaw-main.json:cto: full exception expires 2026-11-15 - in 6d (7-day window)."
+  run bash "$WD"
+  grep -q "Posted agent exec posture alert" <<< "$output"
+  _stub_policy_check 4 "::warning::openclaw-main.json:cto: full exception expires 2026-11-15 - in 6d (7-day window).
+::warning::openclaw-main.json:cmo: full exception expires 2026-11-15 - in 6d (7-day window)."
+  run bash "$WD"
+  grep -q "Posted agent exec posture alert" <<< "$output"
+}
+
 @test "agent exec posture: --dry-run never posts and never stamps the dedupe file" {
   echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
   _stub_policy_check 1
