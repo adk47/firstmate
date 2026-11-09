@@ -840,19 +840,26 @@ EOF
     # mate is in fact working - the ordinary behaviour this rung exists to
     # detect would satisfy the alarm. Mate stall coverage is currently
     # UNAVAILABLE because mate launches never arm the semantic busy contract
-    # (bin/fm-spawn.sh skips arming it for KIND=secondmate), so every read here
-    # is unprovable; reporting on an unprovable read fired a false stall for
-    # every long mate turn. Report ONLY on an idle verdict, which proves the
-    # mate is not working; a busy verdict is ordinary mid-turn work, and every
-    # unprovable read (unknown, missing, malformed, dead, empty, or failed
-    # capture) stays silent. mate-busy-source-s1 owns restoring coverage, and
-    # this path self-reactivates once mate busy arming exists. Nothing below
-    # the marker, receipt, dedupe, or notify-key shape changes.
+    # (bin/fm-spawn.sh skips arming it for KIND=secondmate), so a semantic read
+    # here is unprovable; reporting on an unprovable read fired a false stall
+    # for every long mate turn. Report ONLY on an idle verdict from a semantic
+    # source, which proves the mate is not working; a busy verdict is ordinary
+    # mid-turn work, and every unprovable read (unknown, missing, malformed,
+    # dead, empty, or failed capture) stays silent. The rendered-text fallbacks
+    # grok-regex and rovo-regex are classifier-only sources owned by
+    # bin/fm-busy-lib.sh, not proof of an idle turn, so their idle verdicts stay
+    # silent too. mate-busy-source-s1 owns restoring coverage, and this path
+    # self-reactivates once mate busy arming exists. Nothing below the marker,
+    # receipt, dedupe, or notify-key shape changes.
     endpoint_window=$(fm_meta_get "$meta" window)
     [ -n "$endpoint_window" ] || continue
     tail40=$(fm_backend_capture "$(window_backend "$endpoint_window")" "$endpoint_window" 40 "$(window_label "$endpoint_window")" 2>/dev/null) || continue
+    [ -n "$tail40" ] || continue
     verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE" "$tail40")
     [ "${verdict%% *}" = idle ] || continue
+    case "${verdict#* }" in
+      grok-regex|rovo-regex) continue ;;
+    esac
     row_key="$epoch-$seq"
     receipt="$receipt_dir/$row_key"
     if [ -e "$marker" ] || [ -L "$marker" ]; then

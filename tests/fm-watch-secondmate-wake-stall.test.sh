@@ -7,9 +7,10 @@
 # than SECONDMATE_WAKE_STALL_SECS (a build, a test sweep, a review, a merge)
 # leaves an aged foreign row behind while the mate is provably mid-turn. Mate
 # launches do not currently arm the semantic busy contract, so the rung reports
-# ONLY on an idle verdict that proves the mate is not working; a busy verdict is
-# ordinary mid-turn work, and every unprovable read (unknown, missing, dead,
-# empty, or failed capture) stays silent.
+# ONLY on an idle verdict from a semantic source that proves the mate is not
+# working; a busy verdict is ordinary mid-turn work, and every unprovable read
+# (unknown, missing, dead, empty, or failed capture) stays silent. Rendered-text
+# fallback verdicts (grok-regex, rovo-regex) are not proof and stay silent too.
 #
 # Each case is wired through exactly one gate so a regression in that gate alone
 # fails it:
@@ -17,6 +18,7 @@
 #   busy-contract-idle        -> reports with the unchanged reason text
 #   busy-contract-busy        -> silent, and no marker/receipt side effect
 #   capture failure           -> silent (an unprovable read is never a stall)
+#   grok rendered fallback    -> silent (a rendered-text idle is not proof)
 #
 # Busy records are produced through the REAL writer, bin/fm-busy-event.sh arm
 # and apply, the same calls fm-spawn makes for a crew window. No test
@@ -37,13 +39,13 @@ BUSY_EVENT="$ROOT/bin/fm-busy-event.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-secondmate-wake-stall)
 
-# make_stall_case <name> <pane-file> <capture-fails 0|1>
+# make_stall_case <name> <pane-file> <capture-fails> [harness]
 # Builds one secondmate fixture: a recorded foreign mate with one aged wake row
 # in its own home, a parent meta naming its endpoint, and a fake tmux that
 # serves <pane-file> as the captured pane (or exits non-zero when the capture is
 # meant to fail). Echoes the case dir.
-make_stall_case() {  # <name> <pane-file> <capture-fails>
-  local name=$1 pane=$2 fails=$3 dir state sub fakebin
+make_stall_case() {  # <name> <pane-file> <capture-fails> [harness]
+  local name=$1 pane=$2 fails=$3 harness=${4:-claude} dir state sub fakebin
   dir="$TMP_ROOT/$name"
   state="$dir/state"
   sub="$dir/secondmate"
@@ -51,8 +53,8 @@ make_stall_case() {  # <name> <pane-file> <capture-fails>
   mkdir -p "$state" "$sub/state" "$fakebin"
   printf '# Firstmate\n' > "$sub/AGENTS.md"
   printf 'mate\n' > "$sub/.fm-secondmate-home"
-  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' \
-    "$sub" > "$state/mate.meta"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=%s\nbackend=tmux\nhome=%s\n' \
+    "$harness" "$sub" > "$state/mate.meta"
   # One aged, structurally valid foreign row: this is exactly what a mate's
   # queue looks like while it is mid-turn on that row.
   printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$(( $(date +%s) - 10 ))" \
@@ -175,8 +177,33 @@ test_unreadable_mate_on_aged_row_stays_silent() {
   pass "a failed pane capture stays silent"
 }
 
+# A grok mate has no semantic busy record, so the busy lib falls back to its
+# rendered tail. A tail without the busy signature yields `idle grok-regex`,
+# which is not proof the mate is not working: a long turn can scroll the busy
+# footer out of the captured tail. The rung must stay silent.
+test_grok_rendered_idle_on_aged_row_stays_silent() {
+  local dir state out
+  dir=$(make_stall_case grok-rendered-idle "$TMP_ROOT/grok-pane.txt" 0 grok)
+  state="$dir/state"
+  out="$dir/watch.out"
+  printf 'Working... (279k context)\n' > "$TMP_ROOT/grok-pane.txt"
+
+  run_stall_checkpoint "$dir" 6 "$out"
+
+  ! grep -F 'secondmate wake-loop stalled' "$out" >/dev/null \
+    || fail "a grok rendered-text idle verdict reported a false wake-loop stall: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "a grok rendered-text idle verdict still published a durable notification"
+  [ ! -e "$state/.secondmate-wake-stall-mate" ] \
+    || fail "a grok rendered-text idle verdict still wrote the stall marker"
+  [ ! -e "$state/.secondmate-wake-stall-receipts/mate" ] \
+    || fail "a grok rendered-text idle verdict still wrote a stall receipt"
+  pass "a grok rendered-text idle verdict stays silent with no side effect"
+}
+
 test_unarmed_mate_on_aged_row_stays_silent
 test_idle_mate_on_aged_row_reports
+test_grok_rendered_idle_on_aged_row_stays_silent
 test_busy_mate_on_aged_row_stays_silent
 test_unreadable_mate_on_aged_row_stays_silent
 
