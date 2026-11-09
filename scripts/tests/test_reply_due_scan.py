@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -79,6 +80,14 @@ class ReplyDueScanTest(unittest.TestCase):
         self.saved = cs.LEDGER
         cs.LEDGER = str(d / "ledger.sqlite3")
         vl.connect(cs.LEDGER).close()
+        # QA #1857 r3: the production linkage (comm_state.linked_request_ids, the default `linked` of rds.build) reads
+        # the PROOF STORE too. Left at its production path the suite's result depended on the HOST: unreadable on a
+        # dev box (Unknown -> the full check ran, green), readable on node-8 (no link -> hand-off, red). Pin it to a
+        # readable, empty store so every box sees what node-8 sees.
+        self.saved_proof = cs.PROOF_STORE
+        cs.PROOF_STORE = str(d / "proof.sqlite")
+        with sqlite3.connect(cs.PROOF_STORE) as db:
+            db.execute("CREATE TABLE proof_intake (user_id INTEGER, conversation_id TEXT, candidate_request_ids_json TEXT)")
         self.paying = d / "paying.json"
         self.paying.write_text(json.dumps({"ids": [2, 15]}))
         self.ic = ic = FakeIntercom()
@@ -119,15 +128,17 @@ class ReplyDueScanTest(unittest.TestCase):
 
     def tearDown(self):
         cs.LEDGER = self.saved
+        cs.PROOF_STORE = self.saved_proof
 
     def build(self, **kw):
+        kw.setdefault("ic", self.ic)
         kw.setdefault("checker", lambda *a, **k: {"hold": False, "reasons": []})      # the gate's send-time check
         # Fable d2: the scan's own run of the trigger rules is a FILTER in front of the check; these tests pin the
         # check as the oracle, so the default trigger here reads every part as a status question (the production
         # default, comm_state.trigger_class, is pinned by TriggerPrefilterTest below).
         kw.setdefault("trigger", lambda conv, part, **k: {"class": "status", "why": "test: every part is a status question"})
         kw.setdefault("linked", lambda uid, conv: set())
-        return rds.build(ic=self.ic, query=self.q, paying_path=str(self.paying), dv_store="/nonexistent", now=NOW, **kw)
+        return rds.build(query=self.q, paying_path=str(self.paying), dv_store="/nonexistent", now=NOW, **kw)
 
     def test_builder_equals_send_the_gates_own_check_sorts_them(self):
         # h2 G1 11:1xZ: 100 listed, 0 answerable - every user goes through comm_state.check(reply_due_part=...) here
@@ -492,14 +503,14 @@ class ReplyDueScanTest(unittest.TestCase):
             rds.time.monotonic = lambda: clock["t"]
             # no walk share at all: the walks get no clock, so nothing is found and nothing is served
             clock["t"] = 0.0
-            starved = rds.build(ic=slow, query=self.q, paying_path=str(self.paying), dv_store="/nonexistent",
-                                now=NOW, max_checks=None, budget_seconds=50, walk_share=0.0,
-                                checker=lambda *a, **k: {"hold": False, "reasons": []})
+            # QA #1857 r3: through self.build(), so the trigger is the fixture's permissive filter and the check stays the
+            # oracle this test pins. A direct rds.build() took the PRODUCTION trigger + linkage, which read the host's
+            # proof store: unreadable on a dev box (Unknown -> full check, green), readable on node-8 (no linked
+            # request -> hand-off, red). The production prefilter has its own cases in TriggerPrefilterTest.
+            starved = self.build(ic=slow, max_checks=None, budget_seconds=50, walk_share=0.0)
             # the fix: the walks stop at half the budget and the reply work gets the other half
             clock["t"] = 0.0
-            fixed = rds.build(ic=slow, query=self.q, paying_path=str(self.paying), dv_store="/nonexistent",
-                              now=NOW, max_checks=None, budget_seconds=50,
-                              checker=lambda *a, **k: {"hold": False, "reasons": []})
+            fixed = self.build(ic=slow, max_checks=None, budget_seconds=50)
         finally:
             rds.time.monotonic = saved
         # the walk share is what feeds the reply work: with none, the walk finds nothing to serve
@@ -725,15 +736,14 @@ class ReplyDueScanTest(unittest.TestCase):
         self.audience(2)
         saved, rds.time.monotonic = rds.time.monotonic, monotonic
         try:
-            first = rds.build(ic=ic, query=self.q, paying_path=str(self.paying), dv_store="/nonexistent", now=NOW,
-                              budget_seconds=600.0, checker=lambda *a, **k: {"hold": True, "reasons": ["h"]},
-                              upstream_resume=None)
+            # QA #1857 r3: through self.build() (fixture trigger; see test_firstmate034_* for why a direct rds.build()
+            # was host-dependent)
+            first = self.build(ic=ic, budget_seconds=600.0, checker=lambda *a, **k: {"hold": True, "reasons": ["h"]},
+                               upstream_resume=None)
             pend = first["upstream"].get("pending") or []
             self.assertTrue(pend, "a budget-staved run must CARRY the rows it could not decide, never drop them")
             clock["t"] = 0.0
-            doc = rds.build(ic=ic, query=self.q, paying_path=str(self.paying), dv_store="/nonexistent", now=NOW,
-                            budget_seconds=1.0, checker=lambda *a, **k: {"hold": False, "reasons": []},
-                            upstream_resume=first["upstream"])
+            doc = self.build(ic=ic, budget_seconds=1.0, upstream_resume=first["upstream"])
         finally:
             rds.time.monotonic = saved
         self.assertEqual(doc["counts"]["candidates_resumed"], len(pend))
