@@ -74,6 +74,15 @@ FACTS_QUERY = ("SELECT CAST(userid AS varchar), lower(CAST(id AS varchar)), stat
                "CAST(json_extract(metadata, '$.reviewStage') IS NOT NULL AS varchar) FROM postgresql_core.public.credit_requests "
                "WHERE deletedat IS NULL AND status NOT IN ('approved','rejected') AND userid IN ({ids})")
 
+# Fable d2 2026-11-08 (the reply check's cost): the track titles of the user's PENDING requests, read in the same
+# 300-user chunks as FACTS_QUERY. With them, the deployed trigger_class rules run here on the thread the scan already
+# holds, so the ~20 s full check (6-7 Trino queries + 5+ GETs per user) runs only for the parts it reads as a STATUS
+# question - the 02:00Z/04:00Z ticks checked 57 users at that price and found 1. FACTS_QUERY is the signed header and
+# is NOT changed by this; the status filter here is open_titles' (PENDING_STATUSES), applied again in trigger_inputs.
+TITLES_QUERY = ("SELECT CAST(userid AS varchar), lower(CAST(id AS varchar)), coalesce(spotifytracktitle, '') "
+                "FROM postgresql_core.public.credit_requests WHERE deletedat IS NULL "
+                "AND status IN ('user_verification_needed','unverified') AND userid IN ({ids})")
+
 Query = Callable[[str], "list[list[str]]"]
 Intercom = Callable[[str, str, "dict | None"], dict]
 
@@ -123,11 +132,15 @@ def candidates(ic: Intercom, now: float, counts: collections.Counter | None = No
 
 
 def due_threads(cands: list[dict[str, Any]], ic: Intercom, now: float, counts: collections.Counter,
-                deadline: float | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+                deadline: float | None = None,
+                convs: dict[str, dict[str, Any]] | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Step 2: the deployed reply_due() decides; reply_due_thread() gives the gate's facts.
 
     r5 (1574 finding 4): it returns the candidates it never got to. The next run EVALUATES them before it searches again -
     a candidate the search found but the deadline never reached is work in progress, not a page to skip past.
+    Fable d2 2026-11-08: ONE GET per candidate. The thread is fetched here and handed to reply_due() / reply_due_thread(),
+    which used to fetch it again each (3 GETs per thread; 02:00Z: ~836 threads in the 450 s walk share). `convs` keeps
+    the due threads for the classifier so it never re-reads them either; it is never written to the output.
     """
     out, unevaluated = [], []
     for i, c in enumerate(cands):
@@ -144,12 +157,15 @@ def due_threads(cands: list[dict[str, Any]], ic: Intercom, now: float, counts: c
                 counts["not_due:no_customer_part"] += 1
                 continue
             part = str(cust[-1]["id"])
-            why = comm_state.reply_due(c["conv"], c["cid"], part, ic, now=now)
+            counts["conversation_gets"] += 1
+            why = comm_state.reply_due(c["conv"], c["cid"], part, ic, now=now, conv=conv)
             if why:
                 counts.update("not_due:" + (w.split(":", 1)[1] if ":" in w else w) for w in why)
                 continue
-            th = comm_state.reply_due_thread(c["conv"], ic, now=now, part=part)
+            th = comm_state.reply_due_thread(c["conv"], ic, now=now, part=part, conv=conv)
             tc = comm_state.trigger_class(conv, part, now=now)
+            if convs is not None:
+                convs[str(c["conv"])] = conv
         except Exception as exc:  # noqa: BLE001 - one unreadable thread is skipped and counted, never listed
             counts["skipped_unreadable:" + type(exc).__name__] += 1
             counts["due_threads_skipped_before"] += 1
@@ -322,10 +338,23 @@ def map_users(due: list[dict[str, Any]], ic: Intercom, query: Query, counts: col
 THREAD_ONLY_NON_STATUS = ("part not in thread", "not the customer's latest part", "stale part")
 
 
+def trigger_decides(trigger: dict[str, Any] | None) -> bool:
+    """True when the scan's own run of the deployed trigger_class already settles the part as NON-STATUS, so the slow
+    full check (whose status_trigger would compute the same verdict from the same rules) is not needed to list it as a
+    hand-off. Two cases: a thread-only rule (THREAD_ONLY_NON_STATUS, decided before any replica input), or a trigger
+    computed with the REPLICA inputs (`inputs == "replica"`: titles / filed / other_titles from trigger_inputs). A
+    thread-only trigger that says anything else never decides - the full check still runs. A STATUS verdict never
+    short-circuits anything: the send-time gate is the only thing that answers."""
+    if not trigger or trigger.get("class") != "non_status":
+        return False
+    why = str(trigger.get("why") or "")
+    return trigger.get("inputs") == "replica" or why.startswith(THREAD_ONLY_NON_STATUS)
+
+
 def classify(u: dict[str, Any], cid: str, checker: Callable[..., dict[str, Any]], query: Query, ic: Intercom,
              trigger: dict[str, Any] | None = None) -> tuple[str, str]:
     """(bucket, detail) from the gate's own send-time check: answer | class:<campaign> | handoff | held | unreadable."""
-    if trigger and trigger.get("class") == "non_status" and str(trigger.get("why") or "").startswith(THREAD_ONLY_NON_STATUS):
+    if trigger_decides(trigger):
         return "handoff", "reply_due:non_status_part (handoff:product): " + str(trigger["why"])
     try:
         r = checker("uvn-status", "uvn", int(u["user_id"]), u["request_ids"], cid, conversation=u["reply_due"]["conversation"],
@@ -349,9 +378,16 @@ def build(*, ic: Intercom = comm_state.intercom, query: Query = comm_state.trino
           walk_share: float = WALK_SHARE,
           start_after_user: int | None = None,
           checker: Callable[..., dict[str, Any]] = comm_state.check, ledger_path: str | None = None,
-          upstream_resume: dict[str, Any] | None = None) -> dict[str, Any]:
+          upstream_resume: dict[str, Any] | None = None,
+          trigger: Callable[..., dict[str, Any]] = comm_state.trigger_class,
+          linked: Callable[[int, str], "set[str]"] = comm_state.linked_request_ids) -> dict[str, Any]:
+    """`trigger` / `linked`: the deployed trigger_class and linked_request_ids (comm_state), injectable for tests only.
+    The scan runs them over the thread it already holds plus the batched replica reads (trigger_inputs) so the full
+    check is spent on STATUS parts only; the gate re-runs its own status_trigger at send time regardless."""
     now = now or time.time()
     counts: collections.Counter = collections.Counter()
+    convs: dict[str, dict[str, Any]] = {}      # due thread id -> the conversation due_threads fetched (never output)
+    titles: dict[tuple[str, str], str] = {}    # (user, request) -> track title of a PENDING request (TITLES_QUERY)
     # r5 (1574 finding 2): the budget started AFTER the unbounded upstream work - `apology_rows` walks every historical
     # sent-apology conversation and `candidates`/`due_threads` fetch and evaluate every candidate, so the timer only ever
     # measured the part that was already bounded. It now starts HERE, before the first upstream call, and every walk
@@ -458,6 +494,8 @@ def build(*, ic: Intercom = comm_state.intercom, query: Query = comm_state.trino
             for u, rid, st, pr, rs in query(FACTS_QUERY.format(ids=ids)):
                 req[u].append(rid)
                 facts[u].append([rid, st, pr == "true", rs == "true", lat.get((u, rid), "")])
+            for u, rid, t in query(TITLES_QUERY.format(ids=ids)):
+                titles[(str(u), str(rid).lower())] = str(t or "").strip()
             for u, fn, em, pro, a0 in query("SELECT CAST(id AS varchar), coalesce(firstname, ''), coalesce(lower(email), ''), "
                                             "coalesce(neptuneprofessionalid, ''), coalesce(auth0userid, '') "
                                             f"FROM postgresql_core.public.users WHERE id IN ({ids})"):
@@ -469,6 +507,23 @@ def build(*, ic: Intercom = comm_state.intercom, query: Query = comm_state.trino
                   "_thread": {"assignee": first[u]["assignee"], "prior_note": first[u]["prior_note"],
                               "waiting_since": first[u]["at"], "mapped_by": first[u]["mapped_by"]}} for u in uids]
         users.sort(key=lambda x: (not x["paid"], x["_thread"]["waiting_since"]))
+        # Fable d2: the deployed trigger rules, run here with the replica inputs the batched reads supplied. A user whose
+        # inputs could not be read keeps the thread-only trigger (the full check decides, as before); nothing here is a
+        # send decision - a non_status verdict lists a hand-off, a status verdict buys the full check.
+        for u in uids:
+            if trigger_decides(first[u].get("trigger")):
+                continue                                     # a thread-only verdict stands; no replica input changes it
+            conv = convs.get(str(first[u]["conv"]))
+            if conv is None:
+                counts["trigger_inputs_no_thread"] += 1
+                continue
+            try:
+                rows = [(rid, st, titles.get((u, rid), "")) for rid, st, *_ in facts.get(u, [])]
+                t, f, o = comm_state.trigger_inputs(req.get(u, []), rows, linked(int(u), str(first[u]["conv"])))
+                first[u]["trigger"] = {**trigger(conv, first[u]["part"], titles=t, now=now, filed=f, other_titles=o),
+                                       "inputs": "replica"}
+            except Exception as exc:  # noqa: BLE001 - unknown inputs: the full check decides this user, as before
+                counts["trigger_inputs_unreadable:" + type(exc).__name__] += 1
         # r5 (1574 finding 6): a due thread that was EVALUATED but then dropped by a downstream budget stop (a mapping batch
         # or a facts chunk) produced no audience row - so committing the search token resumed PAST it and the reply it holds
         # would never be answered from that slice. Those threads go back into `pending`: the next run re-evaluates them first,
@@ -529,7 +584,9 @@ def build(*, ic: Intercom = comm_state.intercom, query: Query = comm_state.trino
                 break
             if n % 25 == 0:
                 print(f"reply_due_scan: checked {n}/{total}, answerable {len(answer)}", file=sys.stderr, flush=True)
-            bucket, detail = classify(u, first[str(u["user_id"])]["cid"], checker, query, ic, first[str(u["user_id"])].get("trigger"))
+            tr = first[str(u["user_id"])].get("trigger")
+            counts["check_skipped:trigger_non_status" if trigger_decides(tr) else "full_checks"] += 1
+            bucket, detail = classify(u, first[str(u["user_id"])]["cid"], checker, query, ic, tr)
             checked += 1
             counts[f"bucket:{bucket.split(':')[0]}"] += 1
             if bucket == "answer":
@@ -556,7 +613,7 @@ def build(*, ic: Intercom = comm_state.intercom, query: Query = comm_state.trino
     upstream: dict[str, Any] = {}
     if pending:
         counts["candidates_resumed"] = len(pending)
-        carried_due, unevaluated = due_threads(pending, ic, now, counts, deadline=walk_slice())
+        carried_due, unevaluated = due_threads(pending, ic, now, counts, deadline=walk_slice(), convs=convs)
         if carried_due:
             prep_and_walk(carried_due, sliced=False)          # owed work first: mapped, facts read, classified
     cands, cand_next = candidates(ic, now, counts=counts, deadline=walk_slice(),
@@ -567,7 +624,7 @@ def build(*, ic: Intercom = comm_state.intercom, query: Query = comm_state.trino
     routed += [c for c in cands if c["conv"] in sent]
     counts["routed_backlog_apology"] = len(routed)
     cands = [c for c in cands if c["conv"] not in sent]
-    fresh_due, fresh_unevaluated = due_threads(cands, ic, now, counts, deadline=walk_slice())
+    fresh_due, fresh_unevaluated = due_threads(cands, ic, now, counts, deadline=walk_slice(), convs=convs)
     due += fresh_due
     unevaluated += fresh_unevaluated
     counts["threads_due"] = len(due)

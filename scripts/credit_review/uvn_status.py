@@ -1395,12 +1395,23 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                 outs: dict[str, str] = {}
 
                 def seen(argv: list[str], _run=runner) -> Any:
-                    res = _run(argv)
                     try:
-                        with open(argv[argv.index("--credits-file") + 1], encoding="utf-8") as fh:
-                            uid_ = str(json.load(fh)["user"].get("id") or "")
-                    except (OSError, ValueError, KeyError, IndexError):
-                        uid_ = ""
+                        user_ = json.load(open(argv[argv.index("--credits-file") + 1], encoding="utf-8"))["user"]
+                    except (OSError, ValueError, KeyError, IndexError, TypeError):
+                        user_ = {}
+                    uid_ = str((user_ or {}).get("id") or "")
+                    try:
+                        res = _run(argv)
+                    except verify_notify.NoteTimeout as exc:
+                        # Defect A (Fable driver 02:55Z, inbox 001): this is where the tick DIED at 22:28Z, 00:19Z and
+                        # 02:30Z - one read-only gate call over READ_TIMEOUT_S raised out of `seen`, through send_all's
+                        # parallel pre-gate, and the whole batch got nothing. This worker only returns the synthetic
+                        # result; _send_loop records the user UNMEASURED (reason gate_timeout) and counts them on the
+                        # main thread, so the counter, the outcome file and the bar agree. outs[] gets NO entry (so the
+                        # tick never reads them as a pass and never as a refusal), and the batch continues. The run
+                        # stops only at verify_notify.unmeasured_stop_after(batch) = max(5, 10% of the batch), which
+                        # _send_loop enforces on this synthetic result. READ_TIMEOUT_S is NOT raised.
+                        return verify_notify.unmeasured_result(argv, str(exc))
                     if res.returncode == 0 and verify_notify._first_line(res.stdout).startswith(("RECIPIENT OK", "VALID ", "DRY-RUN ")):
                         outs[uid_] = "ok"
                     return res
@@ -1418,7 +1429,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                         if dropped:
                             report.rows_held += dropped
                             report.note("rows_left_out")
-                if report.halted:
+                if report.halted or report.stopped_on_unmeasured:   # Defect A: the bar is a loud stop, not a next batch
                     break
                 continue
             for i, (listed, p, dropped) in enumerate(batch):
@@ -1589,7 +1600,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                         record_segment(path, campaign, segment, day, str(uid), reached + unknown)
                 if report.halted:
                     break
-                if report.stopped_on_failures:
+                if report.stopped_on_failures or report.stopped_on_unmeasured:
                     # r5 (firstmate 770) (3): the systemic stop is the ROUND's, and this loop is the round. Without this
                     # the probe walked 8 of 8 after stopping at 3: send_all() returned, the walk carried on, and the stop
                     # only coloured the exit code.
@@ -1608,7 +1619,7 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                     examined.difference_update(str(b[1]["user"]["id"]) for b in batch[i:])
                     budget_stop = True
                     break
-            if report.halted or report.stopped_on_failures or budget_stop:
+            if report.halted or report.stopped_on_failures or report.stopped_on_unmeasured or budget_stop:
                 break
     finally:
         if lock_fh is not None:
@@ -1797,6 +1808,13 @@ def render(report: UvnReport, mode: str, segment: str) -> str:
                      + (f"; SYSTEMIC at {report.stopped_on_failures}: the run stopped"
                         if report.stopped_on_failures else "")
                      + "): " + "; ".join(report.failures[:3]))
+    if report.unmeasured_users:
+        # Defect A: the UNMEASURED count and its bar are printed in the summary the tick logs (tick.log), never only in
+        # the outcome file - and a stop at the bar says so in the same sentence.
+        parts.append(f"UNMEASURED {report.unmeasured_users} (gate_timeout / gate error: outcome unknown, never a refusal, "
+                     f"never a pass; stop bar {report.unmeasured_stop_at} = max({verify_notify.UNMEASURED_STOP_MIN}, "
+                     f"{int(verify_notify.UNMEASURED_STOP_SHARE * 100)}% of the batch))"
+                     + (f"; {report.stopped_on_unmeasured}" if report.stopped_on_unmeasured else ""))
     for r in report.reply_due_rows:                                   # every row (QA #1517): the reviewer reads them all
         pn, a = r.get("prior_note"), r.get("assignee")
         parts.append(f"reply_due user {r['user']} part {r['part']} conversation {r['conversation']}: prior_note "

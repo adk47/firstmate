@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -53,12 +54,17 @@ class FakeIntercom:
         return self.convs[path.split("/")[2].split("?")[0]]
 
 
-def replica(pro_of, email_of, open_rows, names):
+def replica(pro_of, email_of, open_rows, names, titles=None):
+    titles = titles or {}
     def q(sql):
         if "neptuneprofessionalid IN" in sql:
             return [[u, p, ""] for u, p in pro_of.items() if f"'{p}'" in sql]
         if "lower(email) IN" in sql:
             return [[u, e] for u, e in email_of.items() if f"'{e}'" in sql]
+        if "spotifytracktitle" in sql:                      # TITLES_QUERY (Fable d2): pending requests' track titles
+            ids = sql.split("userid IN (")[1].split(")")[0].split(",")
+            return [[r[0], r[1], titles.get((r[0], r[1]), f"Track {r[1]}")] for r in open_rows
+                    if r[0] in ids and r[2] in cs.PENDING_STATUSES]
         if "credit_requests" in sql:
             ids = sql.split("userid IN (")[1].split(")")[0].split(",")
             return [r for r in open_rows if r[0] in ids]
@@ -74,6 +80,14 @@ class ReplyDueScanTest(unittest.TestCase):
         self.saved = cs.LEDGER
         cs.LEDGER = str(d / "ledger.sqlite3")
         vl.connect(cs.LEDGER).close()
+        # QA #1857 r3: the production linkage (comm_state.linked_request_ids, the default `linked` of rds.build) reads
+        # the PROOF STORE too. Left at its production path the suite's result depended on the HOST: unreadable on a
+        # dev box (Unknown -> the full check ran, green), readable on node-8 (no link -> hand-off, red). Pin it to a
+        # readable, empty store so every box sees what node-8 sees.
+        self.saved_proof = cs.PROOF_STORE
+        cs.PROOF_STORE = str(d / "proof.sqlite")
+        with sqlite3.connect(cs.PROOF_STORE) as db:
+            db.execute("CREATE TABLE proof_intake (user_id INTEGER, conversation_id TEXT, candidate_request_ids_json TEXT)")
         self.paying = d / "paying.json"
         self.paying.write_text(json.dumps({"ids": [2, 15]}))
         self.ic = ic = FakeIntercom()
@@ -114,10 +128,17 @@ class ReplyDueScanTest(unittest.TestCase):
 
     def tearDown(self):
         cs.LEDGER = self.saved
+        cs.PROOF_STORE = self.saved_proof
 
     def build(self, **kw):
+        kw.setdefault("ic", self.ic)
         kw.setdefault("checker", lambda *a, **k: {"hold": False, "reasons": []})      # the gate's send-time check
-        return rds.build(ic=self.ic, query=self.q, paying_path=str(self.paying), dv_store="/nonexistent", now=NOW, **kw)
+        # Fable d2: the scan's own run of the trigger rules is a FILTER in front of the check; these tests pin the
+        # check as the oracle, so the default trigger here reads every part as a status question (the production
+        # default, comm_state.trigger_class, is pinned by TriggerPrefilterTest below).
+        kw.setdefault("trigger", lambda conv, part, **k: {"class": "status", "why": "test: every part is a status question"})
+        kw.setdefault("linked", lambda uid, conv: set())
+        return rds.build(query=self.q, paying_path=str(self.paying), dv_store="/nonexistent", now=NOW, **kw)
 
     def test_builder_equals_send_the_gates_own_check_sorts_them(self):
         # h2 G1 11:1xZ: 100 listed, 0 answerable - every user goes through comm_state.check(reply_due_part=...) here
@@ -482,14 +503,14 @@ class ReplyDueScanTest(unittest.TestCase):
             rds.time.monotonic = lambda: clock["t"]
             # no walk share at all: the walks get no clock, so nothing is found and nothing is served
             clock["t"] = 0.0
-            starved = rds.build(ic=slow, query=self.q, paying_path=str(self.paying), dv_store="/nonexistent",
-                                now=NOW, max_checks=None, budget_seconds=50, walk_share=0.0,
-                                checker=lambda *a, **k: {"hold": False, "reasons": []})
+            # QA #1857 r3: through self.build(), so the trigger is the fixture's permissive filter and the check stays the
+            # oracle this test pins. A direct rds.build() took the PRODUCTION trigger + linkage, which read the host's
+            # proof store: unreadable on a dev box (Unknown -> full check, green), readable on node-8 (no linked
+            # request -> hand-off, red). The production prefilter has its own cases in TriggerPrefilterTest.
+            starved = self.build(ic=slow, max_checks=None, budget_seconds=50, walk_share=0.0)
             # the fix: the walks stop at half the budget and the reply work gets the other half
             clock["t"] = 0.0
-            fixed = rds.build(ic=slow, query=self.q, paying_path=str(self.paying), dv_store="/nonexistent",
-                              now=NOW, max_checks=None, budget_seconds=50,
-                              checker=lambda *a, **k: {"hold": False, "reasons": []})
+            fixed = self.build(ic=slow, max_checks=None, budget_seconds=50)
         finally:
             rds.time.monotonic = saved
         # the walk share is what feeds the reply work: with none, the walk finds nothing to serve
@@ -715,15 +736,14 @@ class ReplyDueScanTest(unittest.TestCase):
         self.audience(2)
         saved, rds.time.monotonic = rds.time.monotonic, monotonic
         try:
-            first = rds.build(ic=ic, query=self.q, paying_path=str(self.paying), dv_store="/nonexistent", now=NOW,
-                              budget_seconds=600.0, checker=lambda *a, **k: {"hold": True, "reasons": ["h"]},
-                              upstream_resume=None)
+            # QA #1857 r3: through self.build() (fixture trigger; see test_firstmate034_* for why a direct rds.build()
+            # was host-dependent)
+            first = self.build(ic=ic, budget_seconds=600.0, checker=lambda *a, **k: {"hold": True, "reasons": ["h"]},
+                               upstream_resume=None)
             pend = first["upstream"].get("pending") or []
             self.assertTrue(pend, "a budget-staved run must CARRY the rows it could not decide, never drop them")
             clock["t"] = 0.0
-            doc = rds.build(ic=ic, query=self.q, paying_path=str(self.paying), dv_store="/nonexistent", now=NOW,
-                            budget_seconds=1.0, checker=lambda *a, **k: {"hold": False, "reasons": []},
-                            upstream_resume=first["upstream"])
+            doc = self.build(ic=ic, budget_seconds=1.0, upstream_resume=first["upstream"])
         finally:
             rds.time.monotonic = saved
         self.assertEqual(doc["counts"]["candidates_resumed"], len(pend))
@@ -852,6 +872,191 @@ class ReplyDueScanTest(unittest.TestCase):
         rds.write(str(out), {"users": []})
         self.assertEqual(oct(os.stat(out).st_mode & 0o777), "0o600")
         self.assertEqual(json.loads(out.read_text()), {"users": []})
+
+
+class TriggerPrefilterTest(ReplyDueScanTest):
+    """Fable d2 2026-11-08 (the reply check's per-thread cost). The 02:00Z tick evaluated ~836 threads in the 450 s walk
+    share at 3 GETs each, then spent the other 450 s on 30 full checks (~20 s each: 6-7 Trino CLI queries + 5+ GETs per
+    user) of which 29 were hand-offs the deployed trigger_class decides from the thread + two replica columns. The
+    scan now (1) reads each thread ONCE and (2) runs the deployed trigger rules itself, with inputs from the batched
+    replica reads, so the full check is spent on STATUS parts only. Nothing here sends: the gate re-runs its own
+    status_trigger at send time, and the budget (900 s / 400 checks) is not raised."""
+
+    def counting_ic(self):
+        gets = []
+        outer = self.ic
+        class Counting(FakeIntercom):
+            def __call__(self, method, path, body=None):
+                if method == "GET" and path.startswith("/conversations/"):
+                    gets.append(path.split("/")[2].split("?")[0])
+                return outer(method, path, body)
+        c = Counting()
+        c.search, c.convs, c.contacts = outer.search, outer.convs, outer.contacts
+        return c, gets
+
+    def test_trigger_inputs_equal_status_triggers_own_reads(self):
+        # the derived (titles, filed, other_titles) == what status_trigger reads per user with filed_requests +
+        # open_titles(only=filed) + open_titles(uid), over every linkage shape: ledger-linked, proof-linked, unlinked,
+        # a non-pending (but open) request, an unknown key, a request of ANOTHER user with the same id
+        rows_by_user = {
+            "7": [("ra", "user_verification_needed", "Song A"), ("rb", "unverified", "Song B"),
+                  ("rc", "pending", "Song C"), ("rd", "unverified", "")],
+            "8": [("ra", "unverified", "Other A")],
+        }
+        def q(sql):
+            uid = "7" if "userid = 7" in sql else "8"
+            rows = rows_by_user[uid]
+            if "spotifytracktitle" in sql:
+                rows = [r for r in rows if r[1] in cs.PENDING_STATUSES]
+                if "lower(CAST(id AS varchar)) IN (" in sql:
+                    want = sql.split("lower(CAST(id AS varchar)) IN (")[1].split(")")[0].replace("'", "").split(",")
+                    rows = [r for r in rows if r[0] in want]
+                return [[r[2]] for r in rows]
+            if "lower(CAST(id AS varchar)) IN (" in sql:               # filed_requests' open-ids read
+                want = sql.split("lower(CAST(id AS varchar)) IN (")[1].split(")")[0].replace("'", "").split(",")
+                return [[r[0]] for r in rows if r[0] in want]
+            return []
+        for linked in (set(), {"ra"}, {"rb", "rc"}, {"ra", "rb", "rc", "rd", "zz"}):
+            for keys in (["ra", "rb", "rc", "rd"], ["ra"], ["zz"], [], ["RB", "bad key!"]):
+                with self.subTest(linked=sorted(linked), keys=keys):
+                    saved = cs.linked_request_ids
+                    cs.linked_request_ids = lambda uid, conv, _l=linked: set(_l)
+                    try:
+                        filed = cs.filed_requests(7, keys, "555", q)
+                        titles = cs.open_titles(7, q, only=filed)
+                        others = [t for t in cs.open_titles(7, q) if t not in set(titles)]
+                    finally:
+                        cs.linked_request_ids = saved
+                    self.assertEqual(cs.trigger_inputs(keys, rows_by_user["7"], linked), (titles, filed, others))
+
+    def test_full_check_runs_only_for_status_parts_with_the_production_trigger(self):
+        # user 1: "any update on my credits?" with r1 linked -> status -> the full check runs; 2: the same words but
+        # nothing linked -> 'no open request of theirs is linked' -> a hand-off WITHOUT the check; 901 (thread 900): a
+        # how-to ('how do I change my artist name') -> a hand-off without the check; 902 (thread 901): a status
+        # question naming ANOTHER of their pending titles (Blue Moon, not the linked Red Sun) -> hand-off without the check
+        self.audience(2)
+        self.ic.convs["900"]["conversation_parts"]["conversation_parts"][0]["body"] = "how do I change my artist name?"
+        self.ic.convs["901"]["conversation_parts"]["conversation_parts"][0]["body"] = "any update on Blue Moon?"
+        self.open_rows += [["902", "r9a", "unverified", "false", "false"], ["902", "r9b", "unverified", "false", "false"]]
+        self.q = replica(self.pro_of, self.emails_of, self.open_rows, self.names,
+                         titles={("902", "r9a"): "Red Sun", ("902", "r9b"): "Blue Moon"})
+        checked = []
+        def check(campaign, copy, uid, keys, cid, **kw):
+            checked.append(uid)
+            return {"hold": False, "reasons": []}
+        doc = self.build(checker=check, trigger=cs.trigger_class,
+                         linked=lambda uid, conv: {"r1"} if (uid, conv) == (1, "101") else ({"r9a"} if uid == 902 else set()))
+        self.assertEqual(sorted(checked), [1])
+        self.assertEqual([u["user_id"] for u in doc["users"]], [1])
+        whys = {h["user_id"]: h["why"] for h in doc["handoff"]}
+        self.assertIn("no open request of theirs is linked", whys[2])
+        self.assertIn("how-to / change request", whys[901])
+        self.assertIn("names another open request 'Blue Moon'", whys[902])
+        self.assertEqual(doc["counts"]["full_checks"], 1)
+        self.assertEqual(doc["counts"]["check_skipped:trigger_non_status"], 3)
+        self.assertEqual(doc["counts"]["checked"], 4)     # a skipped check is still an examined entry (cursor, page)
+
+    def test_a_replica_trigger_that_cannot_be_read_falls_back_to_the_full_check(self):
+        def linked(uid, conv):
+            raise cs.Unknown("ledger unreadable: test")
+        checked = []
+        def check(campaign, copy, uid, keys, cid, **kw):
+            checked.append(uid)
+            return {"hold": False, "reasons": []}
+        doc = self.build(checker=check, trigger=cs.trigger_class, linked=linked)
+        self.assertEqual(sorted(checked), [1, 2])                  # unknown inputs: the check decides, as before
+        self.assertEqual(doc["counts"]["trigger_inputs_unreadable:Unknown"], 2)
+        self.assertEqual(doc["counts"]["full_checks"], 2)
+
+    def test_the_production_defaults_are_the_deployed_trigger_and_linkage(self):
+        import inspect
+        sig = inspect.signature(rds.build)
+        self.assertIs(sig.parameters["trigger"].default, cs.trigger_class)
+        self.assertIs(sig.parameters["linked"].default, cs.linked_request_ids)
+        self.assertIs(sig.parameters["checker"].default, cs.check)
+        self.assertEqual(rds.CHECK_BUDGET_S, 900.0)                 # the budget is NOT the fix
+        self.assertEqual(rds.CHECK_MAX, 400)
+
+    def test_the_titles_read_is_its_own_query_per_chunk_and_never_moves_the_signed_facts(self):
+        self.audience(301)
+        queries = []
+        inner = self.q
+        def counting(sql):
+            queries.append(sql)
+            return inner(sql)
+        kw = dict(ic=self.ic, paying_path=str(self.paying), dv_store="/nonexistent", now=NOW,
+                  checker=lambda *a, **k: {"hold": False, "reasons": []},
+                  trigger=lambda conv, part, **k: {"class": "status", "why": "test"},
+                  linked=lambda uid, conv: set())
+        doc = rds.build(query=counting, **kw)
+        facts_q = [s for s in queries if "credit_requests" in s and "spotifytracktitle" not in s]
+        titles_q = [s for s in queries if "spotifytracktitle" in s]
+        self.assertEqual(len(facts_q), 2)                            # 301+ users -> two 300-user chunks
+        self.assertEqual(len(titles_q), len(facts_q))                # one titles read per facts chunk
+        for facts, titles in zip(facts_q, titles_q):
+            self.assertEqual(facts.split("userid IN (")[1], titles.split("userid IN (")[1])
+        def no_titles(sql):
+            return [] if "spotifytracktitle" in sql else inner(sql)
+        bare = rds.build(query=no_titles, **kw)
+        self.assertEqual(doc["facts"], bare["facts"])
+        self.assertEqual(doc["replica_facts"]["columns"], bare["replica_facts"]["columns"])
+        self.assertEqual(doc["replica_facts"]["sha256"], bare["replica_facts"]["sha256"])
+
+    def test_each_candidate_thread_is_fetched_once(self):
+        ic, gets = self.counting_ic()
+        self.audience(3)
+        doc = rds.build(ic=ic, query=self.q, paying_path=str(self.paying), dv_store="/nonexistent", now=NOW,
+                        checker=lambda *a, **k: {"hold": False, "reasons": []})
+        evaluated = len(self.ic.search) - 1                          # 108 is never fetched (admin replied after)
+        self.assertEqual(len(gets), evaluated)
+        self.assertEqual(len(gets), len(set(gets)))                  # no thread read twice
+        self.assertEqual(doc["counts"]["conversation_gets"], evaluated)
+
+    def test_per_thread_cost_inside_the_existing_budget(self):
+        # The cost model, with the unit latencies measured read-only on node-8 on 2026-11-08 (deployed code, nothing
+        # copied): GET /conversations/{id}?display_as=plaintext 0.19 s (mean of 8), one Trino CLI query 2.2-2.3 s
+        # whatever its size (the cost is the CLI start, per QUERY not per row), GET /admins 0.08 s. Counted here with
+        # the fakes: GETs per evaluated thread, replica queries per 300-user chunk, full checks per due user.
+        GET_S, TRINO_S, CHECK_S = 0.19, 2.3, 20.0
+        n = 40
+        self.audience(n)
+        ic, gets = self.counting_ic()
+        queries = []
+        inner = self.q
+        def q(sql):
+            queries.append(sql)
+            return inner(sql)
+        checks = []
+        def check(campaign, copy, uid, keys, cid, **kw):
+            checks.append(uid)
+            return {"hold": False, "reasons": []}
+        doc = rds.build(ic=ic, query=q, paying_path=str(self.paying), dv_store="/nonexistent", now=NOW, checker=check,
+                        trigger=cs.trigger_class, linked=lambda uid, conv: {"r1"} if uid == 1 else set())
+        threads = len(gets)
+        due = doc["counts"]["checked"]
+        replica_q = [s for s in queries if "credit_requests" in s or "firstname" in s]
+        # BEFORE (deployed): 3 GETs per thread + a ~20 s full check per due user
+        before = threads * 3 * GET_S + due * CHECK_S
+        # AFTER: 1 GET per thread, the batched replica reads, a full check only for the status parts
+        after = threads * GET_S + len(replica_q) * TRINO_S + len(checks) * CHECK_S
+        self.assertEqual(threads, n + 7)
+        self.assertEqual(len(checks), 1)                            # only user 1 (status, r1 linked) is fully checked
+        self.assertLessEqual(len(replica_q), 4)                     # one chunk: map, facts, titles, names
+        per_thread_after = after / threads
+        per_thread_before = before / threads
+        # The fixture is small (47 threads), so the one-off replica reads and the single full check are amortised over
+        # far fewer threads than a live tick's ~840 - this is the PESSIMISTIC bound. Even so: a day of ticks (every 2 h,
+        # 12 x 900 s) at the AFTER cost covers the whole measured backlog several times over (threads_customer_waiting
+        # 3,053 on the 02:00Z board; 1,798 candidates carried); at the BEFORE cost one tick reached ~30 of them.
+        day_s = 12 * rds.CHECK_BUDGET_S
+        self.assertGreater(day_s / per_thread_after, 3 * 3053)
+        self.assertGreater(rds.CHECK_BUDGET_S / per_thread_after, 1000)
+        self.assertLess(rds.CHECK_BUDGET_S / per_thread_before, 50)
+        self.assertLess(per_thread_after, 1.0)
+        self.assertGreater(per_thread_before / per_thread_after, 15)
+        print(f"reply_due_scan cost model: threads={threads} due={due} full_checks={len(checks)} replica_queries={len(replica_q)} "
+              f"before={per_thread_before:.2f}s/thread after={per_thread_after:.2f}s/thread "
+              f"(budget {rds.CHECK_BUDGET_S:.0f}s covers {rds.CHECK_BUDGET_S / per_thread_after:.0f} threads)", file=sys.stderr)
 
 
 if __name__ == "__main__":

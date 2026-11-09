@@ -41,7 +41,11 @@
 # $CLAIM_LIST (the claim runners refuse a list older than 30 h and keep every claim gate); on Sat/Sun (UTC) the claim
 # families run FIRST.
 # Outputs per tick: $OUT_ROOT/<UTC stamp>/ (outcomes JSON, check output, 5 bodies per family+segment, the log).
-# Exit: 0 ran (or killed/disabled cleanly), 1 a step failed (the tick stops at the first failure), 2 bad config.
+# Exit: 0 ran (or killed/disabled cleanly), 1 a step failed (the OTHER family groups still ran; the tick fails at the end),
+# 2 bad config. A family failure ends the tick at once only for the UNMEASURED bar (the gate is slow, every family behind
+# it would stall the same way), the TICK_HARD_S deadline, a failed or partial apply (rows may already be sent - the
+# post-send rails own it) and an auto-kill. A census read that fails (owing/receipts) is UNMEASURED, logged, and never
+# cancels the tick.
 set -uo pipefail
 
 # r5 NO-GO @184803d6 / captain [key=unattended]: every GATE input of this unattended timer is a CONSTANT - the kill-file
@@ -334,6 +338,18 @@ elapsed() { echo $(( $(date -u +%s) - TICK_T0 )); }
 bounded() { local left=$(( TICK_HARD_S - $(elapsed) )); [ "$left" -ge 1 ] || left=1
   "$TIMEOUT_BIN" --kill-after=30 "${left}s" "$@"; }
 deadline_rc() { [ "$1" = 124 ] || [ "$1" = 137 ]; }
+# Defect A (Fable d2): the runner stops a batch LOUDLY only at unmeasured_users >= max(5, 10% of the batch) and writes
+# the reason into the outcome file (`stopped_on_unmeasured`). The tick reads that field - never a string match on the
+# summary - and that stop is the ONE family failure that ends the whole tick (the gate itself is slow, every family
+# behind it would stall the same way). TICK_ENDS=1 marks it for run_group below.
+TICK_ENDS=0
+unmeasured_bar_hit() { # <outcomes json>: 0 iff the runner recorded an UNMEASURED STOP in it
+  [ -s "$1" ] || return 1
+  py -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get("stopped_on_unmeasured") else 1)' "$1" 2>/dev/null
+}
+unmeasured_summary() { # <outcomes json>: "unmeasured N / bar B" for tick.log (Defect A ruling (3): printed in tick.log too)
+  py -c 'import json,sys; d=json.load(open(sys.argv[1])); print("unmeasured %s / bar %s (%s)" % (d.get("unmeasured_users", "?"), d.get("unmeasured_stop_at", "?"), d.get("unmeasured_stop_rule", "")))' "$1" 2>/dev/null || echo "unmeasured ? (outcome file unreadable)"
+}
 # b1 560: EVERY python subprocess of the tick - builders, filters, cap reads, checks, renders, the judge, the apply and
 # the post-send health / ledger / zero-read reads - runs under the one deadline wrapper; no exceptions
 py() { bounded "$PY" "$@"; }
@@ -883,8 +899,13 @@ family() {
   [ "$rc" = 2 ] && return 2
   rc="$RC"
   log "$tag check (rc=$rc): $(head -c 600 "$OUT/$tag-check.out")"
-  if deadline_rc "$rc"; then log "$tag: check hit the ${TICK_HARD_S}s deadline (read-only, stopped); the tick ends"; return 1; fi
-  [ "$rc" = 0 ] || { log "$tag: check failed; tick stops"; return 1; }
+  if deadline_rc "$rc"; then log "$tag: check hit the ${TICK_HARD_S}s deadline (read-only, stopped); the tick ends"; TICK_ENDS=1; return 1; fi
+  [ -s "$OUT/$tag-check.json" ] && log "$tag check: $(unmeasured_summary "$OUT/$tag-check.json")"
+  if unmeasured_bar_hit "$OUT/$tag-check.json"; then
+    log "$tag: UNMEASURED STOP - the check crossed the bar ($(unmeasured_summary "$OUT/$tag-check.json")); the gate is slow, not these accounts; the tick ends here (fail loud)"
+    TICK_ENDS=1; return 1
+  fi
+  [ "$rc" = 0 ] || { log "$tag: check failed; this family stops"; return 1; }
   # QA #1612 (round 2): the cursor moves only when the family's step for this page is DONE - a dry tick or a check
   # that accepted nobody (to where the CHECK stopped), or a clean apply (to where the APPLY stopped) - and to the
   # first entry that run did not get to (page.end), never past entries a capped run never examined
@@ -900,10 +921,10 @@ family() {
     --preview "$OUT/$tag-bodies" --preview-accepted "$OUT/$tag-check.json"; rc=$?
   [ "$rc" = 2 ] && return 2
   rc="$RC"
-  if deadline_rc "$rc"; then log "$tag: bodies hit the ${TICK_HARD_S}s deadline (read-only, stopped); no apply, the tick ends"; return 1; fi
+  if deadline_rc "$rc"; then log "$tag: bodies hit the ${TICK_HARD_S}s deadline (read-only, stopped); no apply, the tick ends"; TICK_ENDS=1; return 1; fi
   [ "$rc" = 0 ] || { log "$tag: body sample failed; no apply, tick stops: $(head -c 300 "$OUT/$tag-bodies.out")"; return 1; }
   accept_bodies "$tag"; rc=$?
-  if deadline_rc "$rc"; then log "$tag: the accepted-bodies step hit the ${TICK_HARD_S}s deadline; no apply, the tick ends"; return 1; fi
+  if deadline_rc "$rc"; then log "$tag: the accepted-bodies step hit the ${TICK_HARD_S}s deadline; no apply, the tick ends"; TICK_ENDS=1; return 1; fi
   # QA #1610: a check that accepted NOBODY is a no-apply family outcome - never an apply over the original list
   if [ "$rc" = 3 ]; then log "$tag: the check accepted nobody; no apply this tick (the family is done)"; completed "$tag"; advance_cursor "$tag" "$cur_file" "$OUT/$tag-check.json" "$cur"; return 0; fi
   [ "$rc" = 0 ] || { log "$tag: the rendered bodies are not the check's accepted set (rc=$rc); no apply, tick stops"; return 1; }
@@ -986,7 +1007,7 @@ family() {
       # into later groups. An unopenable lock is a hard stop with its own line - never a retry, never a deferral.
       log "$tag: the apply lock could not be OPENED - a permissions or I/O fault, not a deploy; nothing was attempted"
       log "$tag: apply failed rc=$rc; tick stops"
-      return 1
+      TICK_ENDS=1; return 1
     fi
     if [ "$rc" = "$APPLY_LOCK_RC" ] && ! grep -q "$APPLY_LOCK_MARKER" "$OUT/$tag-apply.out" 2>/dev/null; then
       # QA #1799 r12 (Critical): the discriminator is the LEDGER, not the return. rc=3 without the marker is NOT only
@@ -1004,7 +1025,7 @@ family() {
       # that never attempted a send.
       log "$tag: apply rc=3 WITHOUT the held-lock marker and an UNCHANGED ledger - a hard refusal (cap-short, signed-set mismatch or HEAD_REFUSED), not a deploy lock"
       log "$tag: apply failed rc=$rc; tick stops"
-      return 1
+      TICK_ENDS=1; return 1
     fi
     hi="$(maxid)"
     if [ "$hi" != "$lo" ]; then
@@ -1117,13 +1138,13 @@ print(sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True).execute(
           > "$STATE/zero-unmeasured-undelivered-$tag" 2>/dev/null \
           || { autokill "$tag: the zero-read was UNMEASURED, the page FAILED, and no durable retry marker could be written ($STATE)"; return 1; }
         log "$tag zero-read UNMEASURED: the PAGE FAILED; persisted $STATE/zero-unmeasured-undelivered-$tag for the next tick's retry - this tick stops here (fail closed)"
-        return 1
+        TICK_ENDS=1; return 1
       fi
       # QA #1545 finding 3: a NONZERO apply is a FAILED apply - rows may already be sent. The UNMEASURED continuation
       # must never turn that into a successful family by skipping the rc guard below.
       if [ "$rc" != 0 ]; then
         log "$tag: apply FAILED (rc=$rc) AND the zero-read was UNMEASURED; the tick stops here (a partial send is never a clean family)"
-        return 1
+        TICK_ENDS=1; return 1
       fi
       # QA #1545 round 9 (Important): this continuation returned 0 WITHOUT moving the paged family's cursor, so every
       # later tick re-walked the SAME page - a persistent UNMEASURED (Loki or Trino down for hours) starved every entry
@@ -1133,7 +1154,7 @@ print(sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True).execute(
       return 0
     fi
   fi
-  [ "$rc" = 0 ] || { log "$tag: apply failed rc=$rc; tick stops"; return 1; }
+  [ "$rc" = 0 ] || { log "$tag: apply failed rc=$rc; tick stops"; TICK_ENDS=1; return 1; }
   completed "$tag"
   advance_cursor "$tag" "$cur_file" "$OUT/$tag-apply.json" "$cur"
 }
@@ -1143,12 +1164,54 @@ print(sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True).execute(
 # account_hold - that the uvn-status runner does not cover; they belong to their own campaign's family).
 # r5 776 / p1 581: the BUILDER writes the uvn-class list (its own facts header over exactly those users); the tick
 # never edits a built list - a list changed after its build is refused by the facts check, by design.
-py "$OWING" --out "$OUT/owing.json" --class-out "uvn=$OUT/owing-uvn.json" > "$OUT/owing.out" 2>&1 \
-  || { log "owing builder failed: $(tail -c 300 "$OUT/owing.out")"; exit 1; }
-[ -s "$OUT/owing-uvn.json" ] || { log "owing builder wrote no uvn-class list; tick stops"; exit 1; }
-py "$RECEIPTS" --out-dir "$OUT/receipts" > "$OUT/receipts.out" 2>&1 || { log "receipts builder failed: $(tail -c 300 "$OUT/receipts.out")"; exit 1; }
+# QA #1857 r1 (Important 1) / r2: a list builder runs under the ONE deadline wrapper, so a builder killed at TICK_HARD_S
+# comes back rc 124/137 - the same "nothing behind it would fit" class the tick already ends on at the check, the bodies
+# and the accepted-bodies steps. Treating that rc as an ordinary failure (census UNMEASURED at the census, `return 1` on
+# a rebuild) made a spent budget look like a read-only read error, and the tick went on into the families PAST the
+# deadline with `bounded` clamping every call to 1 s. A non-deadline failure keeps its own behaviour: the census is
+# UNMEASURED and the tick continues; a rebuild failure stops that family and the next group still runs.
+builder_deadline() { # <rc> <what>: 0 iff rc is the deadline class (logged, TICK_ENDS set); else 1
+  deadline_rc "$1" || return 1
+  log "$2 hit the ${TICK_HARD_S}s deadline (rc=$1, read-only, stopped); nothing behind it would fit; the tick ends"
+  TICK_ENDS=1
+}
+CENSUS_UNMEASURED=0
+census_unmeasured() { # <why>: a census read that failed is UNMEASURED, never a reason to cancel the tick
+  CENSUS_UNMEASURED=$((CENSUS_UNMEASURED + 1))
+  log "census UNMEASURED ($CENSUS_UNMEASURED): $1; the tick continues into the families (a census read never cancels the run)"
+}
+py "$OWING" --out "$OUT/owing.json" --class-out "uvn=$OUT/owing-uvn.json" > "$OUT/owing.out" 2>&1; rc=$?
+if [ "$rc" = 0 ]; then
+  [ -s "$OUT/owing-uvn.json" ] || census_unmeasured "owing builder wrote no uvn-class list"
+elif builder_deadline "$rc" "owing census builder"; then
+  exit 1   # the deadline is the hard stop, at the census as everywhere else: no receipts read, no family starts
+else
+  census_unmeasured "owing builder failed: $(tail -c 300 "$OUT/owing.out")"
+fi
+py "$RECEIPTS" --out-dir "$OUT/receipts" > "$OUT/receipts.out" 2>&1; rc=$?
+if [ "$rc" != 0 ]; then
+  builder_deadline "$rc" "receipts census builder" && exit 1
+  census_unmeasured "receipts builder failed: $(tail -c 300 "$OUT/receipts.out")"
+fi
 log "owing classes: $(tail -1 "$OUT/owing.out" | py -c 'import json,sys; print(json.dumps(json.loads(sys.stdin.read() or "{}").get("classes", {})))' 2>/dev/null) -> uvn-status family gets the uvn class (owing-uvn.json, built by the builder)"
 log "audiences: owing $(head -c 300 "$OUT/owing.out"); receipts $(head -c 300 "$OUT/receipts.out")"
+
+# Defect B (Fable d2 owner brief): the owing list was built HERE and consumed by the uvn-status families ~25 min later,
+# after the apology and reply-due families; the decider rewrites held rows every 15 min, so owing_proof.verify_facts
+# marked every user "owed requests changed since the list was built" and the family sent nothing (02:00Z: 1,391 held,
+# 0 on the list). The ruling: rebuild the list, with the SAME builder, immediately before the stage that enforces it.
+# The early build above is the tick's audience census and is UNMEASURED, never fatal; each uvn-status family re-runs
+# the builder right before its own check, so the facts header the check signs is minutes old, not 25.
+rebuild_owing_uvn() { # <for>
+  local t0 rc; t0=$(date +%s)
+  py "$OWING" --out "$OUT/owing.json" --class-out "uvn=$OUT/owing-uvn.json" > "$OUT/owing.out" 2>&1; rc=$?
+  if [ "$rc" != 0 ]; then
+    builder_deadline "$rc" "owing builder on the rebuild before $1" && return 1
+    log "owing builder failed on the rebuild before $1 (rc=$rc): $(tail -c 300 "$OUT/owing.out")"; return 1
+  fi
+  [ -s "$OUT/owing-uvn.json" ] || { log "owing builder wrote no uvn-class list on the rebuild before $1; this family stops"; return 1; }
+  log "owing list rebuilt immediately before $1 (Defect B: the facts the check enforces are $(( $(date +%s) - t0 ))s old, not the tick's age): $(head -c 200 "$OUT/owing.out")"
+}
 
 # [key=arm-per-family] (l1 ruling 2026-11-02, ruling-never-a-bottleneck-1102.md): arming is PER FAMILY, read from the
 # policy file's armed_families, so a proven class moves along without arming everything - the defect was that two GLOBAL
@@ -1284,13 +1347,18 @@ log "uvn-reminder-7: no deployed audience builder/runner on this tree yet (rides
 # (open threads where the customer replied > 24 h ago and after us; comm_state.reply_due() per thread; one row per user;
 # paid first). It runs FIRST so answers go before unsolicited notes. It sends through the uvn-status runner, so it
 # charges the SAME uvn-status daily row and the shared credit cap as the uvn-status family (room() counts every
-# uvn-status message of the day, whatever list it came from). Not deployed = logged and skipped; a builder that IS
-# deployed and fails stops the tick, like the other builders.
+# uvn-status message of the day, whatever list it came from). Not deployed = logged and skipped.
 NEED_LIST=""
-if py "$NEED_RUNNER" build --out "$OUT/need-asks-all.json" > "$OUT/need-asks.out" 2>&1; then
-  # the exclude file (users another lane messages today) holds them out of the need family too - need_asks has no
-  # --exclude-users, so the tick filters its list, as it does the claim list
-  py - "$OUT/need-asks-all.json" "$EXCLUDE" "$OUT/need-asks.json" <<'PY' >> "$OUT/tick.log" || { log "need list filter failed"; exit 1; }
+# Defect B (Fable d2): the need list carries its own facts header too (need_asks.verify_facts), so it is rebuilt
+# immediately before need_families enforces it (the same builder, same filter).
+build_need_list() { # <when>: 0 = NEED_LIST set; 1 = the builder or the filter failed (logged; TICK_ENDS=1 at the deadline)
+  local rc
+  py "$NEED_RUNNER" build --out "$OUT/need-asks-all.json" > "$OUT/need-asks.out" 2>&1; rc=$?
+  if [ "$rc" != 0 ] && builder_deadline "$rc" "proof-need-ask builder ($1)"; then return 1; fi
+  if [ "$rc" = 0 ]; then
+    # the exclude file (users another lane messages today) holds them out of the need family too - need_asks has no
+    # --exclude-users, so the tick filters its list, as it does the claim list
+    py - "$OUT/need-asks-all.json" "$EXCLUDE" "$OUT/need-asks.json" <<'PY' >> "$OUT/tick.log" || { log "need list filter failed ($1)"; return 1; }
 import json, os, sys
 src, excl, out = sys.argv[1:4]
 doc = json.load(open(src))
@@ -1303,11 +1371,13 @@ else:
     open(out, "w").close()                       # an empty audience: the family logs and skips
 print(f"need list: {len(users)} users, {len(users) - len(keep)} held out by the exclude file")
 PY
-  NEED_LIST="$OUT/need-asks.json"
-  log "audiences: proof-need-ask $(head -c 300 "$OUT/need-asks.out")"
-else
-  log "proof-need-ask builder failed: $(tail -c 300 "$OUT/need-asks.out")"; exit 1
-fi
+    NEED_LIST="$OUT/need-asks.json"
+    log "audiences: proof-need-ask ($1) $(head -c 300 "$OUT/need-asks.out")"
+    return 0
+  fi
+  log "proof-need-ask builder failed ($1): rc=$rc $(tail -c 300 "$OUT/need-asks.out")"
+  return 1
+}
 RD_LIST=""
 # Persist where the reply-due upstream walk stopped, and the candidates it collected but never finished evaluating.
 # Only called when BOTH family segments are done: a page the family did not answer is re-walked, never skipped.
@@ -1388,6 +1458,8 @@ fi
 # checked-only until UNSIGNED_FROM is dated - first would spend the tick on zero sends and starve the paid families)
 need_families() {
   if grep -q -- '"--check-recipients"' "$NEED_RUNNER" 2>/dev/null; then
+    # Defect B: rebuilt right here, immediately before the stage that enforces its facts header
+    build_need_list "rebuild before need families" || return 1
     family proof-need-ask free "$NEED_LIST" "$CAP" need-send || return $?
     if reached "${PAID_FROM[proof-need-ask]:-}"; then
       family proof-need-ask paid "$NEED_LIST" "$CAP" need-send || return $?
@@ -1464,8 +1536,10 @@ credit_families() {
     fi
   fi
   local c2=(); reached "${UNSIGNED_FROM[uvn-status:c2]:-}" || c2=(--no-correction)
+  rebuild_owing_uvn "uvn-status paid" || return 1
   family uvn-status paid "$OUT/owing-uvn.json" "$CAP" uvn-status --campaign uvn-status "${c2[@]}" || return $?
   family r1 paid "$OUT/receipts/receipts-received.json" "$R1_CAP" uvn-status --campaign status-doc-received --wording received || return $?
+  rebuild_owing_uvn "uvn-status free" || return 1
   family uvn-status free "$OUT/owing-uvn.json" "$CAP" uvn-status --campaign uvn-status "${c2[@]}" || return $?
   family r1 free "$OUT/receipts/receipts-received.json" "$R1_CAP" uvn-status --campaign status-doc-received --wording received || return $?
 }
@@ -1541,14 +1615,29 @@ done
 # CONTINUES to the next one, instead of `exit 1` starving every family behind it. A hard failure (rc=1: kill file,
 # partial send, zero-read unmeasured, a real SQL/auth error) still exits 1 immediately. A deferred tick exits 2, so it is
 # visible in the exit code and the log without having cost the families behind it.
+#
+# Fable d2 (2026-11-08, the weekday ordering): a credit-family FAILURE (rc=1) must not skip the claim families, and a
+# claim-family failure must not skip the credit families - the families are independent audiences, and `|| exit 1`
+# starved everyone behind the first bad check (the 02:30Z tick: uvn-status died, claims and need got nothing). A failed
+# GROUP is recorded, the next group still runs, and the tick exits 1 at the end so the failure stays loud. This covers
+# the READ-ONLY stages (check, bodies, accepted-bodies, a list rebuild): nothing was sent, so the other audience loses
+# nothing by going on. The family failures that still end the tick at once (TICK_ENDS=1): the unmeasured bar (Defect A -
+# the gate itself is slow, every family behind it would stall the same way), the TICK_HARD_S deadline (nothing behind
+# it would fit), a FAILED or PARTIAL APPLY (QA #1799 / spec-deploy-lock-deferral-m1: rows may be sent, the post-send
+# rails own it and more sends are the wrong direction), and an auto-kill (the kill file means nothing more runs).
+FAILED_GROUPS=""
 run_group() { # <label> <group fn>: 0 = done, 1 = hard stop (exit 1), 2 = deferred (continue, DEFERRED=1)
   local label="$1" rc; shift
   "$@"; rc=$?
   case "$rc" in
     0) return 0 ;;
     2) DEFERRED=1; log "$label: deferred (transient); continuing to the next family group"; return 0 ;;
-    *) return 1 ;;
   esac
+  if [ "$TICK_ENDS" = 1 ]; then log "$label: FAILED at the unmeasured bar, the deadline or a failed apply; the tick ends here"; return 1; fi
+  if killed; then log "$label: FAILED and the kill file is present (auto-kill); nothing more runs"; return 1; fi
+  FAILED_GROUPS="${FAILED_GROUPS:+$FAILED_GROUPS, }$label"
+  log "$label: FAILED (rc=$rc); the next family group still runs (a credit failure never skips the claim families and a claim failure never skips the credit families); the tick exits 1 at the end"
+  return 0
 }
 if [ "$DOW" = 6 ] || [ "$DOW" = 7 ]; then   # Fable 10-30: claims prioritised Sat-Sun
   log "weekend: claim families first"
@@ -1559,6 +1648,10 @@ else
   run_group "credit families" credit_families || exit 1
   run_group "claim families" claim_families || exit 1
   run_group "need families" need_families || exit 1
+fi
+if [ -n "$FAILED_GROUPS" ]; then
+  log "tick done with FAILED group(s): $FAILED_GROUPS (the other groups ran); exit 1"
+  exit 1
 fi
 log "tick done"
 if [ "$DEFERRED" = 1 ]; then

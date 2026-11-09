@@ -2828,6 +2828,51 @@ class ParallelCheckTests(unittest.TestCase):
         _, peak = self.report_of("apply", 4, check=False)
         self.assertEqual(peak, 1)
 
+    def test_one_gate_timeout_in_the_parallel_pre_gate_is_that_users_row_never_the_batchs_abort(self):
+        """Defect A (Fable d2): `pre = list(ex.map(gate, payloads))` re-raised the FIRST worker's NoteTimeout out of
+        send_all, so one slow read-only gate call (>= READ_TIMEOUT_S) aborted the whole check and every user behind it
+        got nothing (22:28Z / 00:19Z / 02:30Z). Any runner's timeout is now captured per user: that user is
+        `unmeasured` (gate_timeout), the rest are classified exactly as serial, and the run is not failed below the
+        max(5, 10% of the batch) bar. At the bar it stops and fails loudly."""
+        import threading
+        live, peak, lock = [0], [0], threading.Lock()
+        base, _ = self.runner(live, peak, lock)
+
+        def run(argv):
+            uid = json.load(open(argv[argv.index("--credits-file") + 1]))["user"]["id"]
+            if uid == "5":
+                raise verify_notify.NoteTimeout("a gate call timed out after 1 attempt(s) of 20s")
+            return base(argv)
+
+        rep = Report()
+        with unittest.mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, [])):
+            verify_notify.send_all(self.payloads(), rep, mode="dry-run", runner=run, extra=["--campaign", "uvn-status"],
+                                   check_recipients=True, workers=4)
+        self.assertEqual([a["user"] for a in rep.accepted], [str(i) for i in range(23) if i % 4 == 0])
+        self.assertEqual((rep.timeout_users, rep.unmeasured_users, rep.unmeasured_stop_at), (1, 1, 5))
+        self.assertEqual([(o["user"], o["reason"][:12]) for o in rep.outcomes if o["result"] == "unmeasured"],
+                         [("5", "gate_timeout")])
+        self.assertFalse(rep.failed)
+        self.assertIn("UNMEASURED", rep.render("dry-run"))
+        self.assertIn("bar 5 = max(5, 10% of the batch)", rep.render("dry-run"))
+        # the bar: 23 users -> max(5, ceil(2.3)) = 5; five stalls stop the run loudly, four do not
+        for slow, stopped in (({"1", "2", "3", "5"}, False), ({"1", "2", "3", "5", "6"}, True)):
+            def run_n(argv, slow=slow):
+                uid = json.load(open(argv[argv.index("--credits-file") + 1]))["user"]["id"]
+                if uid in slow:
+                    raise verify_notify.NoteTimeout("a gate call timed out after 1 attempt(s) of 20s")
+                return base(argv)
+            rep = Report()
+            with unittest.mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, [])):
+                verify_notify.send_all(self.payloads(), rep, mode="dry-run", runner=run_n,
+                                       extra=["--campaign", "uvn-status"], check_recipients=True, workers=4)
+            self.assertEqual(rep.unmeasured_users, len(slow))
+            self.assertEqual(rep.failed, stopped, slow)
+            self.assertEqual(bool(rep.stopped_on_unmeasured), stopped)
+            if stopped:
+                self.assertIn("UNMEASURED STOP: 5 of 23", rep.stopped_on_unmeasured)
+                self.assertIn("UNMEASURED STOP", rep.render("dry-run"))
+
 
 class WiringTests(unittest.TestCase):
     """The real gate (TESTABLE copy) behind the real driver: one note per account,
@@ -3632,6 +3677,47 @@ class SignedAcceptedTests(SignedHeadTests):
             with contextlib.redirect_stdout(out):
                 self.assertEqual(need_asks._main(base + extra), 2)
             self.assertIn(want, out.getvalue())
+
+
+class AfterTimeoutUnmeasuredBarTests(unittest.TestCase):
+    """A timed-out POST whose retry answers is UNMEASURED, and the bar applies to it exactly as it applies to a
+    timeout that raised: once enough of the batch is unmeasured the apply walk stops instead of sending on."""
+
+    def _send(self, n, stopped_after):
+        calls = []
+
+        def run(argv):
+            uid = json.load(open(argv[argv.index("--credits-file") + 1]))["user"]["id"]
+            calls.append(uid)
+            res = subprocess.CompletedProcess(argv, 1, "", "REFUSED user already messaged in the last 7 days\n")
+            res.after_timeout = 1
+            return res
+
+        payloads = [{"user": {"id": str(i), "email": f"u{i}@x.com"},
+                     "credits": [{"request_id": f"r{i}"}]} for i in range(1, n + 1)]
+        rep = verify_notify.Report()
+        with unittest.mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, [])), \
+             tempfile.TemporaryDirectory() as d, \
+             unittest.mock.patch.object(verify_notify, "APPLY_LOCK_PATH", os.path.join(d, "apply.lock")):
+            verify_notify.send_all(payloads, rep, mode="apply", runner=run, extra=["--campaign", "uvn-status"])
+        self.assertEqual(len(calls), stopped_after)
+        self.assertEqual(rep.timeout_users, stopped_after)
+        return rep
+
+    def test_the_after_timeout_branch_honours_the_unmeasured_bar(self):
+        rep = self._send(12, 5)
+        self.assertEqual(rep.unmeasured_stop_at, 5)
+        self.assertTrue(rep.failed)
+        self.assertIn("UNMEASURED STOP: 5 of 12", rep.stopped_on_unmeasured)
+        self.assertIn("UNMEASURED STOP: 5 of 12", rep.render("apply"))
+        self.assertEqual([o["result"] for o in rep.outcomes], ["timeout"] * 5)
+        self.assertEqual(rep.refused_users, 0)
+
+    def test_below_the_bar_the_walk_continues(self):
+        rep = self._send(4, 4)
+        self.assertEqual(rep.timeout_users, 4)
+        self.assertFalse(rep.failed)
+        self.assertEqual(rep.stopped_on_unmeasured, "")
 
 
 if __name__ == "__main__":
