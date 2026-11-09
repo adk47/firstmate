@@ -627,11 +627,23 @@ PY
   grep -q '^py() { bounded "\$PY" "\$@"; }' "$src"
   if grep -nE '(^|[[:space:](;|&]|\$\()"\$PY" ' "$src" | grep -v ':py() {'; then false; fi
   touch "$CVO_ETC/credit-verify-outbound.live"
+  claim_list
   t0=$(date +%s)
-  STUB_OWING_SLEEP=30 CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6897 CVO_TICK_HARD_S=6900 run -1 "$SCRIPT"
+  STUB_OWING_SLEEP=30 CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6897 CVO_TICK_HARD_S=6900 CVO_DOW=3 run -1 "$SCRIPT"
   [ $(( $(date +%s) - t0 )) -lt 25 ]
-  grep -q "census UNMEASURED (1): owing builder failed" "$(newest_tick)"
+  # QA #1857 r2 (Important): the CENSUS builder killed at the deadline is the deadline class, not "census UNMEASURED" -
+  # before the fix the tick read it as a failed census read, went on into the receipts read and every family group past
+  # TICK_HARD_S with each call clamped to 1 s. Now: the deadline line, no receipts read, no family group starts.
+  grep -q "owing census builder hit the 6900s deadline (rc=124, read-only, stopped); nothing behind it would fit; the tick ends" "$(newest_tick)"
+  if grep -q "census UNMEASURED" "$(newest_tick)"; then false; fi
+  if grep -q "families" "$(newest_tick)"; then false; fi                  # no "credit families: ...", no "claim families: ..."
   if grep -q -- "--check-recipients" "$CALLS"; then false; fi
+  if grep -q -- "^claim-" "$CALLS"; then false; fi
+  if grep -q -- "need-build" "$CALLS.need" 2>/dev/null; then false; fi
+  [ ! -e "$(dirname "$(newest_tick)")/receipts/receipts-received.json" ]   # the receipts census never ran either
+  # the lock is released: the next tick runs at once
+  run "$SCRIPT"
+  if grep -q "another tick holds" "$(newest_tick)"; then false; fi
 }
 
 @test "outbound tick (QA #1857 r1, Important 1): a REBUILD of the owing list that hits the tick deadline ENDS the tick - the claim and need groups never start past TICK_HARD_S" {

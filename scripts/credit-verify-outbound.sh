@@ -1164,18 +1164,35 @@ print(sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True).execute(
 # account_hold - that the uvn-status runner does not cover; they belong to their own campaign's family).
 # r5 776 / p1 581: the BUILDER writes the uvn-class list (its own facts header over exactly those users); the tick
 # never edits a built list - a list changed after its build is refused by the facts check, by design.
+# QA #1857 r1 (Important 1) / r2: a list builder runs under the ONE deadline wrapper, so a builder killed at TICK_HARD_S
+# comes back rc 124/137 - the same "nothing behind it would fit" class the tick already ends on at the check, the bodies
+# and the accepted-bodies steps. Treating that rc as an ordinary failure (census UNMEASURED at the census, `return 1` on
+# a rebuild) made a spent budget look like a read-only read error, and the tick went on into the families PAST the
+# deadline with `bounded` clamping every call to 1 s. A non-deadline failure keeps its own behaviour: the census is
+# UNMEASURED and the tick continues; a rebuild failure stops that family and the next group still runs.
+builder_deadline() { # <rc> <what>: 0 iff rc is the deadline class (logged, TICK_ENDS set); else 1
+  deadline_rc "$1" || return 1
+  log "$2 hit the ${TICK_HARD_S}s deadline (rc=$1, read-only, stopped); nothing behind it would fit; the tick ends"
+  TICK_ENDS=1
+}
 CENSUS_UNMEASURED=0
 census_unmeasured() { # <why>: a census read that failed is UNMEASURED, never a reason to cancel the tick
   CENSUS_UNMEASURED=$((CENSUS_UNMEASURED + 1))
   log "census UNMEASURED ($CENSUS_UNMEASURED): $1; the tick continues into the families (a census read never cancels the run)"
 }
-if py "$OWING" --out "$OUT/owing.json" --class-out "uvn=$OUT/owing-uvn.json" > "$OUT/owing.out" 2>&1; then
+py "$OWING" --out "$OUT/owing.json" --class-out "uvn=$OUT/owing-uvn.json" > "$OUT/owing.out" 2>&1; rc=$?
+if [ "$rc" = 0 ]; then
   [ -s "$OUT/owing-uvn.json" ] || census_unmeasured "owing builder wrote no uvn-class list"
+elif builder_deadline "$rc" "owing census builder"; then
+  exit 1   # the deadline is the hard stop, at the census as everywhere else: no receipts read, no family starts
 else
   census_unmeasured "owing builder failed: $(tail -c 300 "$OUT/owing.out")"
 fi
-py "$RECEIPTS" --out-dir "$OUT/receipts" > "$OUT/receipts.out" 2>&1 \
-  || census_unmeasured "receipts builder failed: $(tail -c 300 "$OUT/receipts.out")"
+py "$RECEIPTS" --out-dir "$OUT/receipts" > "$OUT/receipts.out" 2>&1; rc=$?
+if [ "$rc" != 0 ]; then
+  builder_deadline "$rc" "receipts census builder" && exit 1
+  census_unmeasured "receipts builder failed: $(tail -c 300 "$OUT/receipts.out")"
+fi
 log "owing classes: $(tail -1 "$OUT/owing.out" | py -c 'import json,sys; print(json.dumps(json.loads(sys.stdin.read() or "{}").get("classes", {})))' 2>/dev/null) -> uvn-status family gets the uvn class (owing-uvn.json, built by the builder)"
 log "audiences: owing $(head -c 300 "$OUT/owing.out"); receipts $(head -c 300 "$OUT/receipts.out")"
 
@@ -1185,16 +1202,6 @@ log "audiences: owing $(head -c 300 "$OUT/owing.out"); receipts $(head -c 300 "$
 # 0 on the list). The ruling: rebuild the list, with the SAME builder, immediately before the stage that enforces it.
 # The early build above is the tick's audience census and is UNMEASURED, never fatal; each uvn-status family re-runs
 # the builder right before its own check, so the facts header the check signs is minutes old, not 25.
-# QA #1857 r1 (Important 1): a list builder runs under the ONE deadline wrapper, so a rebuild killed at TICK_HARD_S comes
-# back rc 124/137 - the same "nothing behind it would fit" class the tick already ends on at the check, the bodies and
-# the accepted-bodies steps. Mapping it to a plain `return 1` made a spent budget look like a read-only family failure,
-# and run_group then started the claim and need groups PAST the deadline with `bounded` clamping every call to 1 s.
-# A non-deadline failure keeps today's behaviour: that family stops, the next group still runs.
-builder_deadline() { # <rc> <what>: 0 iff rc is the deadline class (logged, TICK_ENDS set); else 1
-  deadline_rc "$1" || return 1
-  log "$2 hit the ${TICK_HARD_S}s deadline (rc=$1, read-only, stopped); nothing behind it would fit; the tick ends"
-  TICK_ENDS=1
-}
 rebuild_owing_uvn() { # <for>
   local t0 rc; t0=$(date +%s)
   py "$OWING" --out "$OUT/owing.json" --class-out "uvn=$OUT/owing-uvn.json" > "$OUT/owing.out" 2>&1; rc=$?
