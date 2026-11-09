@@ -5,8 +5,10 @@
 # The watcher used to enqueue one row per changed state file, each repeating the
 # whole "signal:$files" list, so a busy fleet cost a hundred rows per drain. These
 # tests pin the batch shape: N changed files produce one ordinary row (plus one
-# decision row when the batch contains a decision-owned file), the reason line
-# stays byte-identical, and every file's .seen-* marker still advances.
+# decision row when the batch contains a decision-owned file), the printed reason
+# is the compact summary while the batch's full path list goes to the private
+# batch-path record keyed by the same batch identity, and every file's .seen-*
+# marker still advances.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -32,7 +34,7 @@ test_batch_enqueues_one_ordinary_row() {
   printf 'blocked: a\n' > "$state/a.status"
   printf 'blocked: b\n' > "$state/b.status"
   printf 'blocked: c\n' > "$state/c.status"
-  reason="signal:$state/a.status $state/b.status $state/c.status"
+  reason="signal: 3 files (3 status, 0 turn-end): $state/a.status +2 more"
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     signal_enqueue_batch "$2" "" "$3" "$4" "$5"
@@ -44,7 +46,11 @@ test_batch_enqueues_one_ordinary_row() {
   case "$key" in signal-batch-*) ;; *) fail "batch row key is not a stable batch identity: $key" ;; esac
   payload=$(signal_rows "$state" | cut -f5)
   [ "$payload" = "$reason" ] || fail "batch row payload changed shape: $payload"
-  pass "a changed-file batch enqueues one ordinary row with the byte-identical reason"
+  record=$(awk -F '\t' -v k="$key" '$1 == k { print $2 }' "$state/.signal-batch-paths")
+  for f in a b c; do
+    case "$record" in *"$state/$f.status"*) ;; *) fail "the batch-path record dropped $f.status: $record" ;; esac
+  done
+  pass "a changed-file batch enqueues one ordinary row with its compact reason and records the full list privately"
 }
 
 test_batch_with_a_decision_file_enqueues_one_ordinary_and_one_decision_row() {
@@ -53,6 +59,8 @@ test_batch_with_a_decision_file_enqueues_one_ordinary_and_one_decision_row() {
   printf 'blocked: a\n' > "$state/a.status"
   printf 'needs-decision: pick one\n' > "$state/b.status"
   reason="signal:$state/a.status $state/b.status"
+  # The decision row carries the batch's full path list, not the printed reason,
+  # because the Pi branch dispatcher resolves the decision task from that row.
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     signal_enqueue_batch "$2" "$3" "$4" "$5"
@@ -66,8 +74,10 @@ test_batch_with_a_decision_file_enqueues_one_ordinary_and_one_decision_row() {
   [ -n "$decision" ] || fail "a decision batch lost its decision row: $(cat "$state/.wake-queue")"
   [ "${decision%%$'\t'*}" = "b.status" ] \
     || fail "the decision row is not keyed by the decision file's status name: $decision"
-  [ "${decision#*$'\t'}" = "needs-decision:$state/a.status $state/b.status" ] \
-    || fail "the decision row payload changed shape: $decision"
+  case "${decision#*$'\t'}" in
+    needs-decision:*"$state/a.status"*"$state/b.status"*) ;;
+    *) fail "the decision row lost the batch's full path list: $decision" ;;
+  esac
   [ "${ordinary#*$'\t'}" = "$reason" ] \
     || fail "the ordinary row payload changed shape: $ordinary"
   pass "a decision batch enqueues one ordinary row plus one decision row, not one per file"
@@ -86,8 +96,14 @@ test_watcher_coalesces_a_real_changed_file_batch() {
   count=$(signal_rows "$state" | wc -l | tr -d '[:space:]')
   [ "$count" -eq 1 ] || fail "the watcher enqueued $count signal rows for 3 changed files: $(cat "$state/.wake-queue")"
   payload=$(signal_rows "$state" | cut -f5)
+  case "$payload" in
+    "signal: 3 files (3 status, 0 turn-end): "*) ;;
+    *) fail "the batch payload is not the compact summary: $payload" ;;
+  esac
+  key=$(signal_rows "$state" | cut -f4)
+  record=$(awk -F '\t' -v k="$key" '$1 == k { print $2 }' "$state/.signal-batch-paths")
   for f in a b c; do
-    case "$payload" in *"$state/$f.status"*) ;; *) fail "the batch payload dropped $f.status: $payload" ;; esac
+    case "$record" in *"$state/$f.status"*) ;; *) fail "the batch-path record dropped $f.status: $record" ;; esac
   done
   for f in a b c; do
     [ -s "$state/.seen-${f}_status" ] \
@@ -96,6 +112,27 @@ test_watcher_coalesces_a_real_changed_file_batch() {
   pass "a real watcher poll coalesces N changed files into one signal row"
 }
 
+test_batch_path_record_stays_bounded() {
+  local dir state records i
+  dir=$(make_case batch-record-bound); state="$dir/state"
+  printf 'blocked: a\n' > "$state/a.status"
+  for i in $(seq 1 40); do
+    FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+      . "$1"
+      signal_record_batch_paths "signal-batch-$2" "$3"
+    ' _ "$WATCH" "$i" "$state/a.status" || fail "batch-path record write failed for batch $i"
+  done
+  records=$(wc -l < "$state/.signal-batch-paths" | tr -d '[:space:]')
+  [ "$records" -le 32 ] \
+    || fail "the batch-path record grew past its bound: $records lines"
+  grep -F "signal-batch-40" "$state/.signal-batch-paths" >/dev/null \
+    || fail "the newest batch lost its private path record"
+  grep -F "signal-batch-1"$'\t' "$state/.signal-batch-paths" >/dev/null \
+    && fail "the batch-path record kept a batch beyond its bound"
+  pass "the private batch-path record stays bounded and keeps the newest batches"
+}
+
 test_batch_enqueues_one_ordinary_row
 test_batch_with_a_decision_file_enqueues_one_ordinary_and_one_decision_row
 test_watcher_coalesces_a_real_changed_file_batch
+test_batch_path_record_stays_bounded

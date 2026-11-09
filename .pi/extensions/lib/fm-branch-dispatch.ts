@@ -188,18 +188,47 @@ function hasOpenNeedsDecision(
 }
 
 // The status files a signal row names. A legacy row is keyed by one status
-// filename; a coalesced batch row is keyed by a stable batch identity and
-// carries the whole batch in its byte-identical "signal:$files" payload, so
-// the task set comes from that payload. An empty result is an unresolvable
-// row, which the caller treats as a scan veto exactly as before.
-function signalRowFiles(key: string, payload: string): string[] {
+// filename; a coalesced batch row is keyed by a stable batch identity whose
+// full batch list lives in the private batch-path record bin/fm-watch.sh writes
+// beside the queue (see its signal_record_batch_paths). The queued payload is a
+// compact summary - counts, up to five status paths, a "+N more" suffix - so it
+// is only a fallback for a record that has already rolled out of its bound. An
+// empty result is an unresolvable row, which the caller treats as a scan veto
+// exactly as before.
+function signalRowFiles(key: string, payload: string, state: string): string[] {
   if (/^[A-Za-z0-9._-]+\.(?:status|turn-ended)$/.test(key)) return [key];
   const match = /^signal:(.*)$/.exec(payload);
   if (!match) return [];
+  const recorded = signalBatchPaths(state, key);
+  if (recorded.length > 0) return recorded;
+  // Only state-file tokens are paths: the summary's counts, labels, and
+  // "+N more" suffix are prose, and treating them as paths would veto the scan.
   return match[1]
     .split(/\s+/)
-    .filter(Boolean)
+    .filter((token) => /\.(?:status|turn-ended)$/.test(token))
     .map((path) => path.split("/").pop() ?? path);
+}
+
+// The basenames recorded for one batch key, or none when the record is absent
+// or has rolled past its bound.
+function signalBatchPaths(state: string, key: string): string[] {
+  let lines: string[];
+  try {
+    lines = readFileSync(`${state}/.signal-batch-paths`, "utf8").split(/\r?\n/);
+  } catch {
+    return [];
+  }
+  for (const line of lines) {
+    const tab = line.indexOf("\t");
+    if (tab < 0 || line.slice(0, tab) !== key) continue;
+    return line
+      .slice(tab + 1)
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((path) => path.split("/").pop() ?? path);
+  }
+  return [];
 }
 
 export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWakeScope {
@@ -285,7 +314,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
         needsDecisionKeys.push(key);
         continue;
       }
-      const files = signalRowFiles(key, payload);
+      const files = signalRowFiles(key, payload, state);
       if (files.length === 0) return UNSAFE_SCOPE;
       for (const file of files) {
         const fileTask = file.replace(/\.(?:status|turn-ended)$/, "");
