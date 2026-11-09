@@ -55,6 +55,21 @@ LIVE_CONFIG = {
 # The only agents that may hold exec indefinitely-renewable; everyone else is on borrowed, dated time.
 OPS_AGENTS = frozenset({"operations", "devops", "clio"})
 MAX_EXPIRY_DAYS = 31
+# REVIEWED RE-GRANT ALLOWLIST (firstmate ruling [key=exec-posture-renew-qa], 2026-11-09).
+# A non-ops agent that is `denied` on the base branch may be given exec back ONLY when this table carries a claim
+# naming that agent, the ruling that authorises it, and the EXACT expiry being granted. Editing
+# policies/agent-exec-policy.json alone can therefore never re-grant: the same diff must also touch this table,
+# which is the reviewed change the PR body pointed at. `grants` is the narrow set of shell surfaces the agent may
+# reach; it is enforced against the config, not merely recorded, so the registry cannot claim a width the config
+# does not have (and the config cannot keep a width the registry did not review).
+# Removing a claim in a later PR removes the permission - that is the expiry control.
+REGRANT_ALLOWLIST = {
+    ("openclaw-main.json", "qa"): {
+        "ruling": "[key=exec-posture-renew-qa] 2026-11-09",
+        "expires": "2026-12-09",
+        "grants": ("exec",),
+    },
+}
 # Start warning this many days before a dated exception lapses. A week is long enough to write an exit plan or take a
 # ruling, and short enough that the warning is still about the next deploy rather than background noise.
 EXPIRY_WARNING_DAYS = 7
@@ -205,6 +220,28 @@ def _date(value, where, errors):
         return None
 
 
+def _check_grants(where: str, cfg: dict, agent: dict, entry: dict, errors: list) -> None:
+    """A `grants` list is the reviewed width of a `full` posture, enforced against the CONFIG.
+
+    Why this exists: on openclaw 2026.8.35 an allowlist exec mode is refused by the codex harness
+    (EXEC_SHAPE_TRAP), so a narrow posture cannot be expressed as tools.exec. It is expressed instead as
+    "full exec, every other shell surface denied", and this check refuses a registry row that claims a narrower
+    width than the config grants, or a config that grants more than the row reviewed. Without it a narrowing
+    would be a comment rather than a rule.
+    """
+    want = entry.get("grants")
+    if want is None:
+        return
+    reach = reachable_shell(cfg, agent)
+    extra = sorted(reach - set(want))
+    missing = sorted(set(want) - reach)
+    if extra:
+        errors.append(f"{where}: posture=full grants {sorted(want)} but the config also reaches {extra} - "
+                      "deny them, or widen the reviewed grants list")
+    if missing:
+        errors.append(f"{where}: posture=full grants {sorted(want)} but the config does not reach {missing}")
+
+
 def check_profile(profile: str, cfg: dict, reg: dict, today: dt.date, errors: list, notes: list,
                   warnings: list | None = None) -> None:
     agents = agents_of(cfg)
@@ -241,6 +278,7 @@ def check_profile(profile: str, cfg: dict, reg: dict, today: dt.date, errors: li
             for k in ("reason", "exit", "ruling"):
                 if not str(entry.get(k) or "").strip():
                     errors.append(f"{where}: posture=full needs a non-empty '{k}'")
+            _check_grants(where, cfg, a, entry, errors)
             exp = _date(entry.get("expires"), f"{where}.expires", errors)
             if exp is not None:
                 if today > exp:
@@ -290,7 +328,19 @@ def check_base(profile: str, cfg: dict, reg: dict, base_cfg, base_reg, errors: l
             ((base_reg or {}).get(aid) or {}).get("posture") == "denied"
         if base_denied:
             msg = f"{profile}:{aid}: RE-GRANT - exec is denied on base and this change gives it back"
-            if aid in OPS_AGENTS:
+            claim = REGRANT_ALLOWLIST.get((profile, aid))
+            if claim and str(claim["expires"]) == str(entry.get("expires")):
+                # The reviewed route: this script carries a claim naming the agent, the ruling and THIS expiry.
+                notes.append(msg + f" (REVIEWED re-grant per {claim['ruling']}, expires {claim['expires']}, "
+                                    f"grants {sorted(claim['grants'])} - reviewer must see this)")
+                if str(claim["ruling"]) not in str(entry.get("ruling") or ""):
+                    errors.append(f"{profile}:{aid}: RE-GRANT claim {claim['ruling']} is not cited in the "
+                                  "registry row's `ruling` field")
+            elif claim:
+                errors.append(f"{profile}:{aid}: RE-GRANT - reviewed claim {claim['ruling']} authorises "
+                              f"{claim['expires']} but the registry says {entry.get('expires')!r}; the claim and "
+                              "the data must name the same expiry")
+            elif aid in OPS_AGENTS:
                 notes.append(msg + " (ops agent: allowed, reviewer must see this)")
             else:
                 errors.append(msg + " (non-ops agent: never; a re-grant needs a change to this script's rules)")

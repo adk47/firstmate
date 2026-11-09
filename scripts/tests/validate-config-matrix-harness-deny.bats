@@ -93,8 +93,9 @@ add_excepted_agent() {
 # scout's shell lockdown (exec-lever 2026-11-01). $1 (optional) = jq filter on its deny.
 add_scout_agent() { add_excepted_agent scout "${1:-.}"; }
 
-# qa + finance were DENIED on 2026-11-09 ([key=exec-posture-lapsed]) and carry the same
-# six excepted denies as scout, so every openclaw-main.json fixture needs them too.
+# finance was DENIED on 2026-11-09 ([key=exec-posture-lapsed]) and carries the same six
+# excepted denies as scout. qa was re-granted `exec` on 2026-11-09 ([key=exec-posture-renew-qa])
+# so it now carries only the five non-exec denies -- `qa:exec` is NOT an exception any more.
 add_qa_and_finance_agents() { add_excepted_agent qa; add_excepted_agent finance; }
 
 # Same fixture, converted to the keyed `.agents.entries{}` form the >=2026.8
@@ -245,24 +246,40 @@ SUPPORT_DENY='["exec","credits_verify","credit_verification_check","profiles_cla
   [ "$status" -eq 0 ]
 }
 
-@test "check8: documented exception (main:qa + main:finance shell lockdown, exec-posture-lapsed 2026-11-09) PASSES" {
-  # The deny that unblocked the deploy: both agents carry the same six excepted denies.
+@test "check8: documented exception (main:finance shell lockdown, exec-posture-lapsed 2026-11-09) PASSES" {
+  # finance stayed denied: it carries the six excepted denies and `finance:exec` is still an exception.
   write_policy_profile '{"deny":["web_fetch","web_search"]}' 'operations' 'openclaw-main.json'
   add_scout_agent
   add_qa_and_finance_agents
-  jq -e '.agents.list[] | select(.id=="qa") | .tools.deny | index("exec")' "$PROFILE" >/dev/null
+  jq -e '.agents.list[] | select(.id=="finance") | .tools.deny | index("exec")' "$PROFILE" >/dev/null
   run "$SCRIPT" "$PROFILE"
   [ "$status" -eq 0 ]
 }
 
-@test "check8: qa dropping exec leaves a STALE exception (red build, never a silent re-open)" {
+@test "check8: qa re-granted exec needs NO exception and keeps its five denies" {
+  # [key=exec-posture-renew-qa] 2026-11-09: the reviewed re-grant removes `qa:exec` from the exception list.
+  # A build that still listed it would fail STALE, so this asserts BOTH halves: exec absent from qa's deny and
+  # the remaining five still present and still excepted.
   write_policy_profile '{"deny":["web_fetch","web_search"]}' 'operations' 'openclaw-main.json'
   add_scout_agent
-  add_excepted_agent qa 'map(select(. != "exec"))'
+  add_qa_and_finance_agents
+  run jq -e '.agents.list[] | select(.id=="qa") | .tools.deny | index("exec") | not' "$PROFILE"
+  [ "$status" -eq 0 ]
+  for t in process lobster nodes computer terminal; do
+    jq -e --arg t "$t" '.agents.list[] | select(.id=="qa") | .tools.deny | index($t)' "$PROFILE" >/dev/null
+  done
+  run "$SCRIPT" "$PROFILE"
+  [ "$status" -eq 0 ]
+}
+
+@test "check8: qa dropping process leaves a STALE exception (red build, never a silent re-open)" {
+  write_policy_profile '{"deny":["web_fetch","web_search"]}' 'operations' 'openclaw-main.json'
+  add_scout_agent
+  add_excepted_agent qa 'map(select(. != "process"))'
   add_excepted_agent finance
   run "$SCRIPT" "$PROFILE"
   [ "$status" -eq 1 ]
-  [[ "$output" == *'STALE EXCEPTION "openclaw-main.json:qa:exec"'* ]]
+  [[ "$output" == *'STALE EXCEPTION "openclaw-main.json:qa:process"'* ]]
 }
 
 @test "check8: scout dropping lobster leaves a STALE exception (red build, never a silent re-open)" {

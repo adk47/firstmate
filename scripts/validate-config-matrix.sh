@@ -315,16 +315,24 @@ for cfg in ${PROFILES[@]+"${PROFILES[@]}"}; do
   #        web_fetch, company_finder_* and the support-tools lookups. lobster is denied because its `exec --shell`
   #        steps spawn with no tool-policy check. The registry + rules live in policies/agent-exec-policy.json and
   #        scripts/check-agent-exec-policy.py; revert = drop these six rows and scout's deny together.
-  #      - openclaw-main.json:{qa,finance}:{exec,process,lobster,nodes,computer,terminal} -- firstmate ruling
+  #      - openclaw-main.json:finance:{exec,process,lobster,nodes,computer,terminal} -- firstmate ruling
   #        [key=exec-posture-lapsed] 2026-11-09: both dated exec exceptions expired on 2026-11-08 and the fail-safe's
-  #        first duty is to resolve an expired posture to DENIED. State the bill plainly, because it is the whole
-  #        point of the ruling: while denied, qa reviews nothing and finance has no Stripe reporting; and because
-  #        `exec` is outside the safe-deny set, both ALSO lose codex-native web_search / skill_search / memories /
-  #        MCP. That cost is accepted for an unknown length of time rather than paid by running an unreviewed root
-  #        shell on the agent that reads attacker-authored PR text. The rows exist so a deploy keeps the deny; the
+  #        first duty is to resolve an expired posture to DENIED. finance was left denied deliberately and is
+  #        unaffected by the renewal below. State the bill plainly, because it is the whole point of the ruling:
+  #        finance has no Stripe reporting; and because `exec` is outside the safe-deny set, it ALSO loses
+  #        codex-native web_search / skill_search / memories / MCP. The row exists so a deploy keeps the deny; the
   #        route back is a captain-decided change to check-agent-exec-policy.py's rules (a RE-GRANT to a non-ops
   #        agent is rejected there by design, so it can never be flipped back by editing data).
-  HARNESS_DENY_EXCEPTIONS='["openclaw-main.json:scout:exec","openclaw-main.json:qa:exec","openclaw-main.json:qa:process","openclaw-main.json:qa:lobster","openclaw-main.json:qa:nodes","openclaw-main.json:qa:computer","openclaw-main.json:qa:terminal","openclaw-main.json:finance:exec","openclaw-main.json:finance:process","openclaw-main.json:finance:lobster","openclaw-main.json:finance:nodes","openclaw-main.json:finance:computer","openclaw-main.json:finance:terminal","openclaw-main.json:scout:process","openclaw-main.json:scout:lobster","openclaw-main.json:scout:nodes","openclaw-main.json:scout:computer","openclaw-main.json:scout:terminal","openclaw-edge.json:support:exec","openclaw-main.json:operations:web_search","openclaw-edge.json:support:credits_verify","openclaw-edge.json:support:credit_verification_check","openclaw-edge.json:support:profiles_claim_self","openclaw-edge.json:support:profiles_consolidate","openclaw-edge.json:support:profile_claim_status","openclaw-edge.json:support:profile_credits_status","openclaw-edge.json:support:dedupe_check","openclaw-edge.json:support:remove_credits","openclaw-edge.json:support:credit_status_lookup","openclaw-edge.json:support:document_intake","openclaw-edge.json:support:merge_request_intake","openclaw-edge.json:support:credit_trust_handoff","openclaw-edge.json:support:merge_intake","openclaw-edge.json:support:proof_on_file"]'
+  #      - openclaw-main.json:qa:{process,lobster,nodes,computer,terminal} -- firstmate ruling
+  #        [key=exec-posture-renew-qa] 2026-11-09: qa was re-granted `exec` for 31 days through the reviewed
+  #        allowlist in check-agent-exec-policy.py (REGRANT_ALLOWLIST), so `qa:exec` is NO LONGER an exception and
+  #        its row here is gone -- a stale row would fail this check rather than linger. The five remaining denies
+  #        are the deliberate narrowing: qa may run the qa-*.sh wrappers and ordinary shell, but holds no
+  #        process-spawn, lobster, nodes, computer or terminal surface. Because they are outside the safe-deny set
+  #        qa still runs the restricted harness, so it still has no native web_search / skill_search / memories /
+  #        MCP; the PR body enumerates what replaces each of those. Revert = restore `exec` to qa's deny list and
+  #        delete the REGRANT_ALLOWLIST claim.
+  HARNESS_DENY_EXCEPTIONS='["openclaw-main.json:scout:exec","openclaw-main.json:qa:process","openclaw-main.json:qa:lobster","openclaw-main.json:qa:nodes","openclaw-main.json:qa:computer","openclaw-main.json:qa:terminal","openclaw-main.json:finance:exec","openclaw-main.json:finance:process","openclaw-main.json:finance:lobster","openclaw-main.json:finance:nodes","openclaw-main.json:finance:computer","openclaw-main.json:finance:terminal","openclaw-main.json:scout:process","openclaw-main.json:scout:lobster","openclaw-main.json:scout:nodes","openclaw-main.json:scout:computer","openclaw-main.json:scout:terminal","openclaw-edge.json:support:exec","openclaw-main.json:operations:web_search","openclaw-edge.json:support:credits_verify","openclaw-edge.json:support:credit_verification_check","openclaw-edge.json:support:profiles_claim_self","openclaw-edge.json:support:profiles_consolidate","openclaw-edge.json:support:profile_claim_status","openclaw-edge.json:support:profile_credits_status","openclaw-edge.json:support:dedupe_check","openclaw-edge.json:support:remove_credits","openclaw-edge.json:support:credit_status_lookup","openclaw-edge.json:support:document_intake","openclaw-edge.json:support:merge_request_intake","openclaw-edge.json:support:credit_trust_handoff","openclaw-edge.json:support:merge_intake","openclaw-edge.json:support:proof_on_file"]'
 
   #    REACH OF THIS GATE, stated honestly: openclaw classifies over
   #    explicitPolicies = [globalPolicy, globalProviderPolicy, agentPolicy,
