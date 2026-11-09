@@ -128,9 +128,12 @@ test_batch_path_record_tracks_queue_lifetime() {
     || fail "the batch-path record dropped queued batches: $records records"
   grep -F "signal-batch-1"$'\t' "$state/.signal-batch-paths" >/dev/null \
     || fail "the oldest queued batch lost its private path record"
-  awk -F '\t' '$4 == "signal-batch-40"' "$state/.wake-queue" > "$state/.wake-queue.next" \
-    && mv "$state/.wake-queue.next" "$state/.wake-queue" \
-    || fail "could not consume the older queued batches"
+  if ! awk -F '\t' '$4 == "signal-batch-40"' "$state/.wake-queue" > "$state/.wake-queue.next"; then
+    fail "could not filter the wake queue"
+  fi
+  if ! mv "$state/.wake-queue.next" "$state/.wake-queue"; then
+    fail "could not consume the older queued batches"
+  fi
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     signal_record_batch_paths "signal-batch-40" "$2"
