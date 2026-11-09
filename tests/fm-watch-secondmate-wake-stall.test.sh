@@ -5,17 +5,22 @@
 #
 # A mate drains its own wake queue at TURN START only, so any single turn longer
 # than SECONDMATE_WAKE_STALL_SECS (a build, a test sweep, a review, a merge)
-# leaves an aged foreign row behind while the mate is provably mid-turn. The
-# rung therefore suppresses itself ONLY on a positive busy read through the same
-# semantic busy contract stale detection uses, and reports in every other case:
-# an idle-or-unknown pane, and a pane that cannot be captured at all.
+# leaves an aged foreign row behind while the mate is provably mid-turn. Mate
+# launches do not currently arm the semantic busy contract, so the rung reports
+# ONLY on an idle verdict that proves the mate is not working; a busy verdict is
+# ordinary mid-turn work, and every unprovable read (unknown, missing, dead,
+# empty, or failed capture) stays silent.
 #
 # Each case is wired through exactly one gate so a regression in that gate alone
 # fails it:
-#   busy-contract-busy  -> silent, and no marker/receipt side effect that would
-#                          suppress a later real stall
-#   busy-contract-idle  -> reports with the unchanged reason text
-#   capture failure     -> reports (a mate that cannot be read is never exempt)
+#   unarmed production layout -> silent (the reported false-stall defect)
+#   busy-contract-idle        -> reports with the unchanged reason text
+#   busy-contract-busy        -> silent, and no marker/receipt side effect
+#   capture failure           -> silent (an unprovable read is never a stall)
+#
+# Busy records are produced through the REAL writer, bin/fm-busy-event.sh arm
+# and apply, the same calls fm-spawn makes for a crew window. No test
+# hand-writes a busy record into any state directory.
 #
 # Fixtures are driven through bin/fm-watch-checkpoint.sh, the same foreground
 # checkpoint harness its neighbours (fm-wake-queue.test.sh) use, with a fake
@@ -28,6 +33,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/wake-helpers.sh"
 
 CHECKPOINT="$ROOT/bin/fm-watch-checkpoint.sh"
+BUSY_EVENT="$ROOT/bin/fm-busy-event.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-secondmate-wake-stall)
 
@@ -76,23 +82,65 @@ run_stall_checkpoint() {  # <dir> <seconds> <out>
     "$CHECKPOINT" --seconds "$seconds" > "$out" 2> "$dir/watch.err" || true
 }
 
-# A mate provably mid-turn on an aged row: the rung stays silent, publishes
-# nothing durable, and leaves no marker or receipt that would later hide a real
-# stall on the same mate.
-test_busy_mate_on_aged_row_stays_silent() {
-  local dir state pane out
-  pane="$TMP_ROOT/busy-pane.txt"
-  mkdir -p "$TMP_ROOT"
-  printf 'Working... (279k context)\n' > "$pane"
-  dir=$(make_stall_case busy-mate "$pane" 0)
+# The reported production layout: a recorded local secondmate whose launch never
+# armed the semantic busy contract, with one aged foreign row. No busy gen and
+# no busy record exist anywhere, so the rung cannot prove the mate is idle and
+# must stand down rather than fire a false stall for an ordinary long turn.
+test_unarmed_mate_on_aged_row_stays_silent() {
+  local dir state out
+  dir=$(make_stall_case unarmed-mate "$TMP_ROOT/unarmed-pane.txt" 0)
   state="$dir/state"
   out="$dir/watch.out"
-  # The ONE gate this case turns on: a valid, gen-matching, source-trusted busy
-  # record for the mate's recorded harness (claude). The pane bytes themselves
-  # are irrelevant to a converted adapter's verdict.
-  printf 'g-busy.1.1\n' > "$state/mate.busy-gen"
-  printf 'v1 gen=g-busy.1.1 seq=1 state=busy source=claude-hook event=turn ts=%s\n' \
-    "$(date +%s)" > "$state/mate.busy-state"
+  printf 'Working... (279k context)\n' > "$TMP_ROOT/unarmed-pane.txt"
+
+  run_stall_checkpoint "$dir" 6 "$out"
+
+  ! grep -F 'secondmate wake-loop stalled' "$out" >/dev/null \
+    || fail "an unarmed mate's aged row reported a false wake-loop stall: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "an unarmed mate still published a durable parent notification"
+  [ ! -e "$state/.secondmate-wake-stall-mate" ] \
+    || fail "an unarmed mate still wrote the stall marker"
+  [ ! -e "$state/.secondmate-wake-stall-receipts/mate" ] \
+    || fail "an unarmed mate still wrote a stall receipt"
+  pass "an unarmed mate's aged row stays silent with no side effect"
+}
+
+# An idle mate on an aged row is a genuine stall and keeps the exact reason text,
+# marker, receipt, and durable publication it has today. The idle record is
+# produced through the real writer, not hand-written.
+test_idle_mate_on_aged_row_reports() {
+  local dir state out gen
+  dir=$(make_stall_case idle-mate "$TMP_ROOT/idle-pane.txt" 0)
+  state="$dir/state"
+  out="$dir/watch.out"
+  printf 'Idle\n' > "$TMP_ROOT/idle-pane.txt"
+  gen=$("$BUSY_EVENT" arm "$state" mate) || fail "arming the idle mate's busy contract failed"
+  "$BUSY_EVENT" apply "$state" mate idle --gen "$gen" --source claude-hook --event stop \
+    || fail "applying the idle verdict failed"
+
+  run_stall_checkpoint "$dir" 8 "$out"
+
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7 age=' "$out" >/dev/null \
+    || fail "an idle mate's aged row did not report: $(cat "$out"); err=$(cat "$dir/watch.err")"
+  grep -E 'check: secondmate wake-loop stalled: mate=mate row=7 age=[0-9]+s$' "$out" >/dev/null \
+    || fail "the reported reason text changed shape: $(cat "$out")"
+  [ -s "$state/.wake-queue" ] || fail "the idle mate's stall was not published durably"
+  [ -e "$state/.secondmate-wake-stall-mate" ] \
+    || fail "the idle mate's stall wrote no marker, so it would repeat every poll"
+  pass "an idle mate's aged row reports with the unchanged reason, marker, and publication"
+}
+
+# A mate provably mid-turn on an aged row: the rung stays silent, publishes
+# nothing durable, and leaves no marker or receipt that would later hide a real
+# stall on the same mate. The busy record comes from the real writer.
+test_busy_mate_on_aged_row_stays_silent() {
+  local dir state out
+  dir=$(make_stall_case busy-mate "$TMP_ROOT/busy-pane.txt" 0)
+  state="$dir/state"
+  out="$dir/watch.out"
+  printf 'Working... (279k context)\n' > "$TMP_ROOT/busy-pane.txt"
+  "$BUSY_EVENT" arm "$state" mate >/dev/null || fail "arming the busy mate's busy contract failed"
 
   run_stall_checkpoint "$dir" 6 "$out"
 
@@ -107,49 +155,29 @@ test_busy_mate_on_aged_row_stays_silent() {
   pass "an aged foreign row on a provably busy mate stays silent with no side effect"
 }
 
-# An idle mate on an aged row is a genuine stall and keeps the exact reason text,
-# marker, receipt, and durable publication it has today.
-test_idle_mate_on_aged_row_reports() {
-  local dir state out
-  dir=$(make_stall_case idle-mate "$TMP_ROOT/idle-pane.txt" 0)
-  state="$dir/state"
-  out="$dir/watch.out"
-  printf 'Idle\n' > "$TMP_ROOT/idle-pane.txt"
-  printf 'g-idle.1.1\n' > "$state/mate.busy-gen"
-  printf 'v1 gen=g-idle.1.1 seq=1 state=idle source=claude-hook event=stop ts=%s\n' \
-    "$(date +%s)" > "$state/mate.busy-state"
-
-  run_stall_checkpoint "$dir" 8 "$out"
-
-  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7 age=' "$out" >/dev/null \
-    || fail "an idle mate's aged row did not report: $(cat "$out"); err=$(cat "$dir/watch.err")"
-  grep -E 'check: secondmate wake-loop stalled: mate=mate row=7 age=[0-9]+s$' "$out" >/dev/null \
-    || fail "the reported reason text changed shape: $(cat "$out")"
-  [ -s "$state/.wake-queue" ] || fail "the idle mate's stall was not published durably"
-  [ -e "$state/.secondmate-wake-stall-mate" ] \
-    || fail "the idle mate's stall wrote no marker, so it would repeat every poll"
-  pass "an idle mate's aged row reports with the unchanged reason, marker, and publication"
-}
-
-# A mate whose pane cannot be read is never exempt: an unprovable busy read falls
-# through to the ordinary report.
-test_unreadable_mate_on_aged_row_reports() {
-  local dir state out
+# A mate whose pane cannot be read is unprovable, so the rung stays silent. The
+# idle record proves the capture gate is the only reason this case is silent.
+test_unreadable_mate_on_aged_row_stays_silent() {
+  local dir state out gen
   dir=$(make_stall_case capture-failure "$TMP_ROOT/unreadable-pane.txt" 1)
   state="$dir/state"
   out="$dir/watch.out"
+  gen=$("$BUSY_EVENT" arm "$state" mate) || fail "arming the capture-failure mate failed"
+  "$BUSY_EVENT" apply "$state" mate idle --gen "$gen" --source claude-hook --event stop \
+    || fail "applying the idle verdict failed"
 
   run_stall_checkpoint "$dir" 8 "$out"
 
-  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7 age=' "$out" >/dev/null \
-    || fail "a mate whose pane could not be captured was silently exempted: $(cat "$out"); err=$(cat "$dir/watch.err")"
-  [ -s "$state/.wake-queue" ] \
-    || fail "an uncapturable mate's stall was not published durably"
-  pass "a failed pane capture still reports the stall"
+  ! grep -F 'secondmate wake-loop stalled' "$out" >/dev/null \
+    || fail "a mate whose pane could not be captured was reported as a stall: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "an uncapturable mate still published a durable notification"
+  pass "a failed pane capture stays silent"
 }
 
-test_busy_mate_on_aged_row_stays_silent
+test_unarmed_mate_on_aged_row_stays_silent
 test_idle_mate_on_aged_row_reports
-test_unreadable_mate_on_aged_row_reports
+test_busy_mate_on_aged_row_stays_silent
+test_unreadable_mate_on_aged_row_stays_silent
 
 echo "# all fm-watch-secondmate-wake-stall tests passed"
