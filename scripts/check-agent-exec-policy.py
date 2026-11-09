@@ -55,6 +55,38 @@ LIVE_CONFIG = {
 # The only agents that may hold exec indefinitely-renewable; everyone else is on borrowed, dated time.
 OPS_AGENTS = frozenset({"operations", "devops", "clio"})
 MAX_EXPIRY_DAYS = 31
+# REVIEWED RE-GRANT ALLOWLIST (firstmate ruling [key=exec-posture-renew-qa], 2026-11-09).
+# A non-ops agent that is `denied` on the base branch may be given exec back ONLY when this table carries a claim
+# naming that agent, the ruling that authorises it, and the EXACT expiry being granted. Editing
+# policies/agent-exec-policy.json alone can therefore never re-grant: the same diff must also touch this table,
+# which is the reviewed change the PR body pointed at. `grants` is the narrow set of shell surfaces the agent may
+# reach; it is enforced against the config, not merely recorded, so the registry cannot claim a width the config
+# does not have (and the config cannot keep a width the registry did not review).
+# Removing a claim in a later PR removes the permission - that is the expiry control.
+REGRANT_ALLOWLIST = {
+    ("openclaw-main.json", "qa"): {
+        "ruling": "[key=exec-posture-renew-qa] 2026-11-09",
+        "expires": "2026-12-09",
+        "grants": ("exec",),
+    },
+}
+# Agents whose `full` posture is BOUND to the claim above - checked on EVERY run, not only on the denied->full
+# crossing (qa-review findings 5832032402 and 5832644136).
+#
+# Why a second table: `check_base` only consults a claim when the base was DENIED. Once this PR merges, qa is
+# `full` on base and that branch never runs again, so the claim stopped constraining anything: measured on
+# 1074f8b7a, setting qa `expires` to 2026-12-11 (still inside the 31-day cap, so no other check fires) or
+# DELETING the claim outright while qa stayed `full` both returned rc=0 on the deploy path, where `--base` is not
+# passed (deploy.sh:2050). Either one silently renews the untrusted-PR-reading agent past its reviewed date, or
+# turns a reviewed exec-only re-grant into an open-ended full posture, with nothing red anywhere.
+#
+# The rule: while a row is at `full`, its claim's `expires` and `ruling` are authoritative and the row must match
+# them, and a CLAIM-BOUND row with NO claim is an ERROR. Revoking therefore takes TWO changes - delete the claim
+# AND deny exec - which is the fail-closed direction: the half-finished revocation is loud instead of silent.
+# Every key here must also appear in REGRANT_ALLOWLIST (`test_every_claim_is_also_claim_bound` pins the pair).
+CLAIM_BOUND = frozenset({
+    ("openclaw-main.json", "qa"),
+})
 # Start warning this many days before a dated exception lapses. A week is long enough to write an exit plan or take a
 # ruling, and short enough that the warning is still about the next deploy rather than background noise.
 EXPIRY_WARNING_DAYS = 7
@@ -205,6 +237,81 @@ def _date(value, where, errors):
         return None
 
 
+def _check_claim_binding(where: str, entry: dict, claim: dict | None, bound: bool, errors: list) -> None:
+    """A `full` posture that exists only because a ruling granted it stays bound to that claim FOREVER.
+
+    `check_base` consults the claim only when the base was denied, which is the crossing. After the merge this
+    row is `full` on base, so that branch is dead and, without this function, the claim constrains nothing: a
+    data-only expiry bump or a deleted claim both passed every check on 1074f8b7a.
+
+    The two halves, deliberately asymmetric:
+      * bound and NO claim -> error. Deleting the claim is not how a re-grant is revoked; revocation is the claim
+        removed AND the row denied, so a half-finished one is loud.
+      * bound and a claim -> the claim's `expires` and `ruling` are authoritative. The row may not outlive or
+        re-attribute what was reviewed. (Width is `_check_grants`' job.)
+    """
+    if not bound:
+        return
+    if claim is None:
+        errors.append(f"{where}: posture=full is CLAIM-BOUND but REGRANT_ALLOWLIST carries no claim for it - "
+                      "deleting the claim does not revoke a re-grant (deny exec as well); with no claim nothing "
+                      "dates or narrows this posture")
+        return
+    if str(entry.get("expires")) != str(claim["expires"]):
+        errors.append(f"{where}: posture=full expires {entry.get('expires')!r} but the claim it is bound to "
+                      f"({claim['ruling']}) authorises {claim['expires']} - a renewal past the reviewed date is a new "
+                      "ruling, not a data edit (the 31-day cap alone will not catch it once the date is inside it)")
+    if str(claim["ruling"]) not in str(entry.get("ruling") or ""):
+        errors.append(f"{where}: posture=full is bound to claim {claim['ruling']} but the row's `ruling` does not "
+                      "cite it - the binding must be readable by the next person to touch this file")
+
+
+def _check_grants(where: str, cfg: dict, agent: dict, entry: dict, errors: list,
+                  claim: dict | None = None) -> None:
+    """A `grants` list is the reviewed width of a `full` posture, enforced against the CONFIG and the CLAIM.
+
+    Why this exists: on openclaw 2026.8.35 an allowlist exec mode is refused by the codex harness
+    (EXEC_SHAPE_TRAP), so a narrow posture cannot be expressed as tools.exec. It is expressed instead as
+    "full exec, every other shell surface denied", and this check refuses a registry row that claims a narrower
+    width than the config grants, or a config that grants more than the row reviewed. Without it a narrowing
+    would be a comment rather than a rule.
+
+    THREE comparisons, and the first two are why this function takes `claim` (qa-review finding on 9bdb57281):
+      1. An absent `grants` on a row backed by a reviewed re-grant claim is an ERROR, not a skip. The table
+         records a width; a row that omits the field leaves nothing for comparisons 2-3 to enforce, so the
+         reviewed narrowing silently becomes the config's width. Before this, dropping `qa.grants` AND
+         `process` from qa's deny list in one diff reached ['exec', 'process'] and BOTH check_profile and
+         check_base returned zero errors - a one-line delete that widened a re-grant past its ruling.
+      2. A row whose `grants` exceed the claim's `grants` is an error even when the config matches the row:
+         the claim is the ruling, so the row cannot be wider than what was reviewed.
+      3. The row and the config must agree exactly, in both directions.
+    Only an absent `grants` on a row with NO claim stays a skip - that is every already-`full` agent, whose width
+    predates this check and whose rows this PR must not have to rewrite.
+    """
+    want = entry.get("grants")
+    if want is None:
+        if claim is not None:
+            errors.append(
+                f"{where}: posture=full under reviewed re-grant claim {claim['ruling']} but the registry row "
+                f"declares no `grants` - the claim reviews exactly {sorted(claim['grants'])} and an absent field "
+                "enforces nothing, so state it (the config comparison is what makes the narrowing a rule)")
+        return
+    if claim is not None:
+        wider = sorted(set(want) - set(claim["grants"]))
+        if wider:
+            errors.append(f"{where}: posture=full grants {sorted(want)} but the reviewed re-grant claim "
+                          f"{claim['ruling']} authorises only {sorted(claim['grants'])} - a re-grant cannot exceed "
+                          f"the width it was granted ({wider} is wider)")
+    reach = reachable_shell(cfg, agent)
+    extra = sorted(reach - set(want))
+    missing = sorted(set(want) - reach)
+    if extra:
+        errors.append(f"{where}: posture=full grants {sorted(want)} but the config also reaches {extra} - "
+                      "deny them, or widen the reviewed grants list")
+    if missing:
+        errors.append(f"{where}: posture=full grants {sorted(want)} but the config does not reach {missing}")
+
+
 def check_profile(profile: str, cfg: dict, reg: dict, today: dt.date, errors: list, notes: list,
                   warnings: list | None = None) -> None:
     agents = agents_of(cfg)
@@ -241,6 +348,9 @@ def check_profile(profile: str, cfg: dict, reg: dict, today: dt.date, errors: li
             for k in ("reason", "exit", "ruling"):
                 if not str(entry.get(k) or "").strip():
                     errors.append(f"{where}: posture=full needs a non-empty '{k}'")
+            claim = REGRANT_ALLOWLIST.get((profile, aid))
+            _check_claim_binding(where, entry, claim, (profile, aid) in CLAIM_BOUND, errors)
+            _check_grants(where, cfg, a, entry, errors, claim)
             exp = _date(entry.get("expires"), f"{where}.expires", errors)
             if exp is not None:
                 if today > exp:
@@ -290,7 +400,19 @@ def check_base(profile: str, cfg: dict, reg: dict, base_cfg, base_reg, errors: l
             ((base_reg or {}).get(aid) or {}).get("posture") == "denied"
         if base_denied:
             msg = f"{profile}:{aid}: RE-GRANT - exec is denied on base and this change gives it back"
-            if aid in OPS_AGENTS:
+            claim = REGRANT_ALLOWLIST.get((profile, aid))
+            if claim and str(claim["expires"]) == str(entry.get("expires")):
+                # The reviewed route: this script carries a claim naming the agent, the ruling and THIS expiry.
+                notes.append(msg + f" (REVIEWED re-grant per {claim['ruling']}, expires {claim['expires']}, "
+                                    f"grants {sorted(claim['grants'])} - reviewer must see this)")
+                if str(claim["ruling"]) not in str(entry.get("ruling") or ""):
+                    errors.append(f"{profile}:{aid}: RE-GRANT claim {claim['ruling']} is not cited in the "
+                                  "registry row's `ruling` field")
+            elif claim:
+                errors.append(f"{profile}:{aid}: RE-GRANT - reviewed claim {claim['ruling']} authorises "
+                              f"{claim['expires']} but the registry says {entry.get('expires')!r}; the claim and "
+                              "the data must name the same expiry")
+            elif aid in OPS_AGENTS:
                 notes.append(msg + " (ops agent: allowed, reviewer must see this)")
             else:
                 errors.append(msg + " (non-ops agent: never; a re-grant needs a change to this script's rules)")

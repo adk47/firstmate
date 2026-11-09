@@ -39,54 +39,57 @@
         "note": "Fail-safe applied under firstmate ruling [key=exec-posture-lapsed] 2026-11-09: deny now, hold the capability question for the captain. A renewal is deliberately NOT reachable by editing this file: check-agent-exec-policy.py's base rule rejects a RE-GRANT to a non-ops agent, so the captain's decision lands as a reviewed change to that script's rules. Cost accepted meanwhile: no Stripe reporting, and (because exec is outside the codex safe-deny set) no native web_search / skill_search / memories / MCP either."
       },
       "qa": {
-        "posture": "denied",
-        "since": "2026-11-09",
-        "reason": "Was full for the review pipeline (26,132 calls in 14d: qa-gh.sh, qa-review-clone.sh, qa-review-status.sh, qa-pr-approve.sh, qa-slack-dm.sh) until its dated exception expired on 2026-11-08. RESIDUAL RISK, now closed rather than renewed: qa reads attacker-authored PR text, so an expired exec=full posture on that agent is the worst of the two failures.",
-        "exit": "The route back is the exit plan that was already written: PR bodies/diffs reach qa as fenced data, every qa-*.sh refuses argv/stdin without the dispatch nonce, then T9 moves qa to its own gateway (pods/qa-review-gateway). Renaming the posture back to full is NOT a data edit - see the note below.",
-        "ruling": "security-arch-fable-s1 [key=exec-lever] 2026-11-01 item 3",
-        "note": "Fail-safe applied under firstmate ruling [key=exec-posture-lapsed] 2026-11-09: deny now, hold the capability question for the captain. A renewal is deliberately NOT reachable by editing this file: check-agent-exec-policy.py's base rule rejects a RE-GRANT to a non-ops agent, so the captain's decision lands as a reviewed change to that script's rules. Cost accepted meanwhile: qa reviews nothing, and (because exec is outside the codex safe-deny set) it also loses native web_search / skill_search / memories / MCP."
+        "posture": "full",
+        "expires": "2026-12-09",
+        "grants": [
+          "exec"
+        ],
+        "reason": "Renewed under firstmate ruling [key=exec-posture-renew-qa] 2026-11-09 (Fable): the review pipeline is the launch blocker and qa is the only agent renewed. Narrower than the old full posture it had until 2026-11-08: exec is back, and process/lobster/nodes/computer/terminal stay DENIED, so qa keeps exactly the one shell surface its wrappers need (qa-gh.sh, qa-review-clone.sh, qa-review-status.sh, qa-pr-approve.sh, qa-slack-dm.sh - 26,132 calls in 14d) and none of the others. `grants` is enforced against openclaw-main.json by scripts/check-agent-exec-policy.py.",
+        "exit": "The route back to an unreviewed posture stays the one already written: PR bodies/diffs reach qa as fenced data, every qa-*.sh refuses argv/stdin without the dispatch nonce, then T9 moves qa to its own gateway (pods/qa-review-gateway). THIS renewal expires 2026-12-09 and the next one is not a data edit: it needs either the dispatch-nonce control or the T9 step 3 gate to exist first. Neither exists today - qa-review-gateway is 0/2 paused with the image pending t2, three ExternalSecrets are in SecretSyncedError, and no scripts/qa-*.sh on main carries a nonce check.",
+        "ruling": "firstmate ruling [key=exec-posture-renew-qa] 2026-11-09 (Fable decision, executed exactly): renew qa only, 31 days, reviewed allowlist route; finance stays denied. Supersedes the lapse recorded under [key=exec-posture-lapsed] 2026-11-09.",
+        "note": "RE-GRANTED through the reviewed allowlist, not by editing data: REGRANT_ALLOWLIST in scripts/check-agent-exec-policy.py carries the matching claim ([key=exec-posture-renew-qa], expires 2026-12-09, grants exec). Removing that claim is how this renewal is revoked. Cost still accepted while narrower than full: because the five remaining denies are outside the codex safe-deny set, the restricted harness also keeps native web_search / skill_search / memories / MCP OFF, exactly as it did under the deny fallback."
       },
       "cto": {
         "posture": "full",
-        "expires": "2026-11-15",
+        "expires": "2026-12-10",
         "reason": "Engineering shell (5,650 bash + 1,254 gateway_exec in 14d: gh, git, kubectl, muso-read.sh). Reads PR bodies and GitHub = untrusted, second-highest risk.",
         "exit": "Every untrusted read goes through a no-exec reader agent whose output comes back as quoted data; then an allowlist or deny.",
-        "ruling": "security-arch-fable-s1 [key=exec-lever] 2026-11-01 item 4"
+        "ruling": "security-arch-fable-s1 [key=exec-lever] 2026-11-01 item 4 ; extended 31 days under [key=exec-posture-renew-qa] 2026-11-09 so the deploy does not halt on 2026-11-16"
       },
       "ceo": {
         "posture": "full",
-        "expires": "2026-11-15",
+        "expires": "2026-12-10",
         "reason": "966 bash + 333 gateway_exec in 14d (muso CLI, gh, muso-admin-api, skill reads).",
         "exit": "Untrusted reads through the no-exec reader agent; then an allowlist or deny.",
-        "ruling": "security-arch-fable-s1 [key=exec-lever] 2026-11-01 item 4"
+        "ruling": "security-arch-fable-s1 [key=exec-lever] 2026-11-01 item 4 ; extended 31 days under [key=exec-posture-renew-qa] 2026-11-09 so the deploy does not halt on 2026-11-16"
       },
       "cmo": {
         "posture": "full",
-        "expires": "2026-11-15",
+        "expires": "2026-12-10",
         "reason": "1,061 bash + 228 gateway_exec in 14d (gog 277, muso-read.sh 192).",
         "exit": "Untrusted reads through the no-exec reader agent; then an allowlist or deny.",
-        "ruling": "security-arch-fable-s1 [key=exec-lever] 2026-11-01 item 4"
+        "ruling": "security-arch-fable-s1 [key=exec-lever] 2026-11-01 item 4 ; extended 31 days under [key=exec-posture-renew-qa] 2026-11-09 so the deploy does not halt on 2026-11-16"
       },
       "operations": {
         "posture": "full",
-        "expires": "2026-11-15",
+        "expires": "2026-12-10",
         "reason": "Ops agent: acts only for god-mode requesters; its exec runs the ops wrappers (muso CLI, intercom-ops-write.sh, agent-bridge-request.sh, muso-admin-api.sh, stripe). Already on the restricted harness (web_fetch/web_search deny).",
         "exit": "Allowlist of its named wrapper scripts.",
-        "ruling": "security-arch-fable-s1 [key=exec-lever] 2026-11-01 item 5"
+        "ruling": "security-arch-fable-s1 [key=exec-lever] 2026-11-01 item 5 ; extended 31 days under [key=exec-posture-renew-qa] 2026-11-09 so the deploy does not halt on 2026-11-16"
       },
       "devops": {
         "posture": "full",
-        "expires": "2026-11-15",
+        "expires": "2026-12-10",
         "reason": "Ops agent: kubectl, journalctl, systemctl, prod-log fetchers; acts only for god-mode requesters.",
         "exit": "Allowlist of its named wrapper scripts.",
-        "ruling": "security-arch-fable-s1 [key=exec-lever] 2026-11-01 item 5"
+        "ruling": "security-arch-fable-s1 [key=exec-lever] 2026-11-01 item 5 ; extended 31 days under [key=exec-posture-renew-qa] 2026-11-09 so the deploy does not halt on 2026-11-16"
       },
       "clio": {
         "posture": "full",
-        "expires": "2026-11-15",
+        "expires": "2026-12-10",
         "reason": "Ops/coordination agent: rg, gh, kubectl, muso CLI; acts only for god-mode requesters.",
         "exit": "Allowlist of its named wrapper scripts.",
-        "ruling": "security-arch-fable-s1 [key=exec-lever] 2026-11-01 item 5"
+        "ruling": "security-arch-fable-s1 [key=exec-lever] 2026-11-01 item 5 ; extended 31 days under [key=exec-posture-renew-qa] 2026-11-09 so the deploy does not halt on 2026-11-16"
       }
     },
     "openclaw-edge.json": {
