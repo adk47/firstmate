@@ -167,6 +167,7 @@ class Report:
     # Counted on their own: the run still reports on every other user, and the tick must never score these as refusals.
     timeout_users: int = 0
     error_users: int = 0
+    # Reviewed baseline: deploy overwrites - 2026-11-08 (verify-notify-marker-m1): node-8's 18:14 copy is the uncommitted ancestor of the merged #1857 fix, this blob is the reviewed superset (defect A below), nothing server-side is lost.
     # Defect A (Fable d2, firstmate ruling 18:34Z / inbox 214): the UNMEASURED users of a batch have their own bar. One
     # read-only gate call that timed out used to escape send_all's parallel pre-gate as an exception and abort the
     # whole tick (`NoteTimeout` out of `ex.map`), so everyone behind that one check got nothing. Now that user is
