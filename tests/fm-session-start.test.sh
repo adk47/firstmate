@@ -977,6 +977,11 @@ EOF
   rm -f "$fakebin/node"
 
   printf 'window=fm-sess:w1\nkind=ship\n' > "$home/state/task-a.meta"
+  # A live task, not an idle record: the digest prints only tasks that are busy,
+  # holding an open decision, or touched in the last 24h, and this test is about
+  # where that live-task inventory sits relative to the curated memory a
+  # truncated tail is allowed to take.
+  printf 'working: step 1\n' > "$home/state/task-a.status"
   printf 'Captain memory that may be truncated away safely.\n' > "$home/data/captain.md"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
