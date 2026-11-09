@@ -634,6 +634,54 @@ PY
   if grep -q -- "--check-recipients" "$CALLS"; then false; fi
 }
 
+@test "outbound tick (QA #1857 r1, Important 1): a REBUILD of the owing list that hits the tick deadline ENDS the tick - the claim and need groups never start past TICK_HARD_S" {
+  # The census build is healthy (so the tick reaches the families); the rebuild immediately before uvn-status paid is
+  # the one that is killed at the deadline (rc 124). Before the fix that rc was a plain `return 1`, run_group read it as
+  # a read-only family failure, and the claim group started past the deadline with every call clamped to 1 s.
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  claim_list
+  rm -f "$CVO_ETC/credit-verify-outbound.disabled" "$CALLS.owing"
+  cat > "$TEST_TMPDIR/owing-rebuild-slow.py" <<'PYSRC'
+import os, runpy, sys, time
+if os.path.exists(os.environ["CALLS"] + ".owing"):      # the census build already ran: this call is the rebuild
+    time.sleep(30)
+sys.argv[0] = os.environ["STUB_OWING_REAL"]
+runpy.run_path(os.environ["STUB_OWING_REAL"], run_name="__main__")
+PYSRC
+  t0=$(date +%s)
+  STUB_OWING_REAL="$TEST_TMPDIR/owing.py" CVO_OWING="$TEST_TMPDIR/owing-rebuild-slow.py" \
+    CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6897 CVO_TICK_HARD_S=6900 CVO_DOW=3 run -1 "$SCRIPT"
+  [ $(( $(date +%s) - t0 )) -lt 25 ]
+  grep -q "owing builder on the rebuild before uvn-status paid hit the 6900s deadline (rc=124" "$(newest_tick)"
+  grep -q "credit families: FAILED at the unmeasured bar, the deadline or a failed apply; the tick ends here" "$(newest_tick)"
+  if grep -q "the next family group still runs" "$(newest_tick)"; then false; fi
+  if grep -q -- "^claim-" "$CALLS"; then false; fi         # nothing behind a spent budget runs blind
+  if grep -q -- "need-build" "$CALLS.need" 2>/dev/null; then false; fi
+  if grep -q -- "--mode apply" "$CALLS"; then false; fi
+}
+
+@test "outbound tick (QA #1857 r1, Important 1): the proof-need-ask builder hitting the deadline is the deadline class too - logged as such and the tick ends, not a plain family failure" {
+  touch "$CVO_ETC/credit-verify-outbound.live"
+  cat > "$TEST_TMPDIR/need-slow.py" <<'PYSRC'
+import os, runpy, sys, time
+# speaks #1582's CLI ("--check-recipients"): the tick greps the deployed runner for it before running the family
+if sys.argv[1:2] == ["build"]:
+    time.sleep(30)
+sys.argv[0] = os.environ["STUB_NEED_REAL"]
+runpy.run_path(os.environ["STUB_NEED_REAL"], run_name="__main__")
+PYSRC
+  # elapsed 6897 of 6900: the credit families' own rebuild would be the first casualty, so give the need builder the
+  # deadline by itself - a weekend order puts claim first; a huge budget and a healthy owing list let the credit
+  # families complete their read-only checks inside the 3 s before the need group starts.
+  t0=$(date +%s)
+  STUB_NEED_REAL="$TEST_TMPDIR/need.py" CVO_NEED_RUNNER="$TEST_TMPDIR/need-slow.py" \
+    CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6880 CVO_TICK_HARD_S=6900 CVO_DOW=3 run -1 "$SCRIPT"
+  [ $(( $(date +%s) - t0 )) -lt 60 ]
+  grep -q "proof-need-ask builder (rebuild before need families) hit the 6900s deadline (rc=124" "$(newest_tick)"
+  grep -q "need families: FAILED at the unmeasured bar, the deadline or a failed apply; the tick ends here" "$(newest_tick)"
+  if grep -q "proof-need-ask builder failed (rebuild before need families" "$(newest_tick)"; then false; fi
+}
+
 @test "outbound tick: the kill file stops everything - no builder, no runner" {
   touch "$CVO_ETC/credit-verify-outbound.disabled"
   run -0 "$SCRIPT"

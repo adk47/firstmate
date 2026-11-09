@@ -1185,10 +1185,23 @@ log "audiences: owing $(head -c 300 "$OUT/owing.out"); receipts $(head -c 300 "$
 # 0 on the list). The ruling: rebuild the list, with the SAME builder, immediately before the stage that enforces it.
 # The early build above is the tick's audience census and is UNMEASURED, never fatal; each uvn-status family re-runs
 # the builder right before its own check, so the facts header the check signs is minutes old, not 25.
+# QA #1857 r1 (Important 1): a list builder runs under the ONE deadline wrapper, so a rebuild killed at TICK_HARD_S comes
+# back rc 124/137 - the same "nothing behind it would fit" class the tick already ends on at the check, the bodies and
+# the accepted-bodies steps. Mapping it to a plain `return 1` made a spent budget look like a read-only family failure,
+# and run_group then started the claim and need groups PAST the deadline with `bounded` clamping every call to 1 s.
+# A non-deadline failure keeps today's behaviour: that family stops, the next group still runs.
+builder_deadline() { # <rc> <what>: 0 iff rc is the deadline class (logged, TICK_ENDS set); else 1
+  deadline_rc "$1" || return 1
+  log "$2 hit the ${TICK_HARD_S}s deadline (rc=$1, read-only, stopped); nothing behind it would fit; the tick ends"
+  TICK_ENDS=1
+}
 rebuild_owing_uvn() { # <for>
-  local t0; t0=$(date +%s)
-  py "$OWING" --out "$OUT/owing.json" --class-out "uvn=$OUT/owing-uvn.json" > "$OUT/owing.out" 2>&1 \
-    || { log "owing builder failed on the rebuild before $1: $(tail -c 300 "$OUT/owing.out")"; return 1; }
+  local t0 rc; t0=$(date +%s)
+  py "$OWING" --out "$OUT/owing.json" --class-out "uvn=$OUT/owing-uvn.json" > "$OUT/owing.out" 2>&1; rc=$?
+  if [ "$rc" != 0 ]; then
+    builder_deadline "$rc" "owing builder on the rebuild before $1" && return 1
+    log "owing builder failed on the rebuild before $1 (rc=$rc): $(tail -c 300 "$OUT/owing.out")"; return 1
+  fi
   [ -s "$OUT/owing-uvn.json" ] || { log "owing builder wrote no uvn-class list on the rebuild before $1; this family stops"; return 1; }
   log "owing list rebuilt immediately before $1 (Defect B: the facts the check enforces are $(( $(date +%s) - t0 ))s old, not the tick's age): $(head -c 200 "$OUT/owing.out")"
 }
@@ -1331,8 +1344,11 @@ log "uvn-reminder-7: no deployed audience builder/runner on this tree yet (rides
 NEED_LIST=""
 # Defect B (Fable d2): the need list carries its own facts header too (need_asks.verify_facts), so it is rebuilt
 # immediately before need_families enforces it (the same builder, same filter).
-build_need_list() { # <when>: 0 = NEED_LIST set; 1 = the builder or the filter failed (logged)
-  if py "$NEED_RUNNER" build --out "$OUT/need-asks-all.json" > "$OUT/need-asks.out" 2>&1; then
+build_need_list() { # <when>: 0 = NEED_LIST set; 1 = the builder or the filter failed (logged; TICK_ENDS=1 at the deadline)
+  local rc
+  py "$NEED_RUNNER" build --out "$OUT/need-asks-all.json" > "$OUT/need-asks.out" 2>&1; rc=$?
+  if [ "$rc" != 0 ] && builder_deadline "$rc" "proof-need-ask builder ($1)"; then return 1; fi
+  if [ "$rc" = 0 ]; then
     # the exclude file (users another lane messages today) holds them out of the need family too - need_asks has no
     # --exclude-users, so the tick filters its list, as it does the claim list
     py - "$OUT/need-asks-all.json" "$EXCLUDE" "$OUT/need-asks.json" <<'PY' >> "$OUT/tick.log" || { log "need list filter failed ($1)"; return 1; }
@@ -1352,7 +1368,7 @@ PY
     log "audiences: proof-need-ask ($1) $(head -c 300 "$OUT/need-asks.out")"
     return 0
   fi
-  log "proof-need-ask builder failed ($1): $(tail -c 300 "$OUT/need-asks.out")"
+  log "proof-need-ask builder failed ($1): rc=$rc $(tail -c 300 "$OUT/need-asks.out")"
   return 1
 }
 RD_LIST=""
