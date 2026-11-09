@@ -406,7 +406,17 @@
             "openrouter/deepseek/deepseek-v4.1-flash-1017"
           ]
         },
-        "thinkingDefault": "high"
+        "thinkingDefault": "high",
+        "tools": {
+          "deny": [
+            "exec",
+            "process",
+            "lobster",
+            "nodes",
+            "computer",
+            "terminal"
+          ]
+        }
       },
       {
         "id": "finance",
@@ -417,7 +427,17 @@
             "openrouter/deepseek/deepseek-v4.1-flash-1017"
           ]
         },
-        "thinkingDefault": "medium"
+        "thinkingDefault": "medium",
+        "tools": {
+          "deny": [
+            "exec",
+            "process",
+            "lobster",
+            "nodes",
+            "computer",
+            "terminal"
+          ]
+        }
       },
       {
         "id": "operations",

@@ -821,8 +821,19 @@ call sites, and PR CI alone is not enough — it only ever sees the repo copy at
 rsync or a hand-reverted live file could drop scout's deny and ship clean: PR CI (`--base origin/main`), `deploy.sh`
 Step 1 pre-sync (repo tree, no `--live` — a pre-sync `--live` would deadlock every deploy that legitimately changes a
 posture) and Step 4d.5b post-sync (`--live --live-profile <target>`, before the Step 6 restart, so a failing deploy
-never reloads the gateway onto an unreviewed shell posture), plus a tick in `cron-health-watchdog.sh` so a `full`
-exception whose **expiry date passes** during a deploy-free week still pages. That tick dedupes per FINDING (the stamp
+never reloads the gateway onto an unreviewed shell posture), plus a tick in `cron-health-watchdog.sh` so an exception
+that runs out during a deploy-free week is noticed.
+
+**An expired posture resolves to DENIED, never to "carry on" — and the clock now runs a week early.** A dated `full`
+exception is valid THROUGH its date; the day after, the checker fails and the deploy halts at Step 1 (2026-11-09: that
+is how a burned deploy happened, with PR CI red fleet-wide for every lane until the postures were settled). So the
+tick runs `check-agent-exec-policy.py --live --fail-on-expiring`, which returns **rc 4 = "clean, but a dated exception
+is inside its 7-day window"**, and pages a WARNING naming the **expiry date and the countdown** rather than the
+violation wording. Inside the window the row no longer prints `full until <date>` — a row about to lapse must not read
+as clean. Deploy and PR CI leave the flag off on purpose (an approaching expiry must never block the deploy that
+carries the fix) and stay rc 0 until the date actually passes. **A renewal is a ruling, not a data edit**: the base
+rule rejects a RE-GRANT to a non-ops agent, so restoring `full` needs a reviewed change to the checker's rules. The
+tick dedupes per FINDING (the stamp
 carries the findings' sha, so an unchanged violation is quiet while a new one pages at once, and a clean tick clears
 the stamp), pages when the checker itself has gone missing, and stamps only after Slack CONFIRMS the post — an
 undelivered security page must never buy 24h of silence. Pinned by

@@ -31,18 +31,20 @@
         "note": "Reads the open web (373 web_fetch + ~3,300 native searches in 14d) = the most injectable main agent; 150 shell calls in 14d (muso-read.sh SQL ~55, the rest reading skill files). Accepted cost: the restricted codex harness turns native web_search/web_run OFF (verified in @openclaw/codex resolveCodexWebSearchPlan: restricted -> kind=managed, hydra configures no managed provider). Canary after deploy: scripts/redteam/exec_injection_probe.py --agent scout and --check-search. Revert = remove scout's deny entries (and its HARNESS_DENY_EXCEPTIONS rows) in one PR."
       },
       "finance": {
-        "posture": "full",
-        "expires": "2026-11-08",
-        "reason": "Stripe reporting is shell: 339 stripe CLI calls in 14d (312 via gateway_exec for Secret Store env), plus inline python over the output.",
-        "exit": "One read-only wrapper stripe-report.sh run by a cron that posts its output to finance's channel (finance consumes text, never runs it); then posture=denied.",
-        "ruling": "security-arch-fable-s1 [key=exec-lever] 2026-11-01 item 2"
+        "posture": "denied",
+        "since": "2026-11-09",
+        "reason": "Was full for Stripe reporting (339 stripe CLI calls in 14d, 312 via gateway_exec for Secret Store env) until its dated exception expired on 2026-11-08. An expired posture resolves to DENIED, never to 'carry on': the deploy was blocked on 2026-11-09 and that block was correct behaviour.",
+        "exit": "The route back is the exit plan that was already written: one read-only wrapper stripe-report.sh run by a cron that posts its output to finance's channel, so finance consumes text and never runs it. Renaming the posture back to full is NOT a data edit - see the note below.",
+        "ruling": "security-arch-fable-s1 [key=exec-lever] 2026-11-01 item 2",
+        "note": "Fail-safe applied under firstmate ruling [key=exec-posture-lapsed] 2026-11-09: deny now, hold the capability question for the captain. A renewal is deliberately NOT reachable by editing this file: check-agent-exec-policy.py's base rule rejects a RE-GRANT to a non-ops agent, so the captain's decision lands as a reviewed change to that script's rules. Cost accepted meanwhile: no Stripe reporting, and (because exec is outside the codex safe-deny set) no native web_search / skill_search / memories / MCP either."
       },
       "qa": {
-        "posture": "full",
-        "expires": "2026-11-08",
-        "reason": "The review pipeline is shell (26,132 calls in 14d: qa-gh.sh, qa-review-clone.sh, qa-review-status.sh, qa-pr-approve.sh, qa-slack-dm.sh). RESIDUAL RISK, stated plainly: qa reviews attacker-authored PR text with exec=full on node-8 until this expires.",
-        "exit": "Compensating control: PR bodies/diffs reach qa as fenced data, and every qa-*.sh refuses argv/stdin without the dispatch nonce; then T9 moves qa to its own gateway (pods/qa-review-gateway).",
-        "ruling": "security-arch-fable-s1 [key=exec-lever] 2026-11-01 item 3"
+        "posture": "denied",
+        "since": "2026-11-09",
+        "reason": "Was full for the review pipeline (26,132 calls in 14d: qa-gh.sh, qa-review-clone.sh, qa-review-status.sh, qa-pr-approve.sh, qa-slack-dm.sh) until its dated exception expired on 2026-11-08. RESIDUAL RISK, now closed rather than renewed: qa reads attacker-authored PR text, so an expired exec=full posture on that agent is the worst of the two failures.",
+        "exit": "The route back is the exit plan that was already written: PR bodies/diffs reach qa as fenced data, every qa-*.sh refuses argv/stdin without the dispatch nonce, then T9 moves qa to its own gateway (pods/qa-review-gateway). Renaming the posture back to full is NOT a data edit - see the note below.",
+        "ruling": "security-arch-fable-s1 [key=exec-lever] 2026-11-01 item 3",
+        "note": "Fail-safe applied under firstmate ruling [key=exec-posture-lapsed] 2026-11-09: deny now, hold the capability question for the captain. A renewal is deliberately NOT reachable by editing this file: check-agent-exec-policy.py's base rule rejects a RE-GRANT to a non-ops agent, so the captain's decision lands as a reviewed change to that script's rules. Cost accepted meanwhile: qa reviews nothing, and (because exec is outside the codex safe-deny set) it also loses native web_search / skill_search / memories / MCP."
       },
       "cto": {
         "posture": "full",

@@ -645,6 +645,55 @@ agent exec policy: clean"
   grep -q "No such file or directory" "$TEST_TMPDIR/last-text"
 }
 
+@test "agent exec posture: the tick asks the checker for the pre-expiry window (--fail-on-expiring)" {
+  # Paging only on rc 1 meant the first alarm about a lapsed exception fired AFTER deform already blocked deploys.
+  # The tick must opt into rc 4, and the flag must be on the same invocation that carries --live.
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  export CRON_HEALTH_EXEC_POLICY_CHECK="$TEST_TMPDIR/exec-policy-check.py"
+  cat > "$CRON_HEALTH_EXEC_POLICY_CHECK" <<STUB
+import sys
+open("$TEST_TMPDIR/argv", "w").write(" ".join(sys.argv[1:]))
+print("agent exec policy: clean")
+sys.exit(0)
+STUB
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  # a CLEAN tick prints nothing, so the flag is observed from the stub's own argv record
+  [ "$(cat "$TEST_TMPDIR/argv")" = "--live --fail-on-expiring" ]
+}
+
+@test "agent exec posture: an expiring exception (exit 4) pages a WARNING with the date and countdown" {
+  # rc 4 = "nothing is violated yet". It must page EARLY and read as a deadline, never as a violation (that wording
+  # sends people looking for a restored shell) and never as CANNOT EVALUATE.
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _stub_policy_check 4 "::warning::openclaw-main.json:cto: full exception expires 2026-11-15 - in 6d (7-day window). Renew it with a new ruling, or deny exec, before that date."
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "Posted agent exec posture alert" <<< "$output"
+  grep -q "about to lapse" "$TEST_TMPDIR/last-text"
+  grep -q "2026-11-15" "$TEST_TMPDIR/last-text"          # the DATE travels with the page
+  grep -q "in 6d" "$TEST_TMPDIR/last-text"                # ...and so does the countdown
+  grep -q "2026-11-09" "$TEST_TMPDIR/last-text"           # names the outage this avoids
+  [[ "$(cat "$TEST_TMPDIR/last-text")" != *"posture violated"* ]]
+  [[ "$(cat "$TEST_TMPDIR/last-text")" != *"CANNOT EVALUATE"* ]]
+  [ -f "$CRON_HEALTH_EXEC_POLICY_STATE" ]              # a delivered warning DOES stamp: one page, not 288/day
+}
+
+@test "agent exec posture: a warning does NOT hide a real violation inside the 24h window" {
+  # Sharing the dedupe file is the point; sharing the SIGNATURE would let a six-day warning buy silence for a
+  # restored root shell. The stamp is keyed to the finding, so the violation pages immediately.
+  echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
+  _stub_policy_check 4 "::warning::openclaw-main.json:cto: full exception expires 2026-11-15 - in 6d (7-day window)."
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "about to lapse" "$TEST_TMPDIR/last-text"
+  _stub_policy_check 1 "FAIL openclaw-main.json:scout: posture=denied but tools.deny lacks ['exec']"
+  run bash "$WD"
+  [ "$status" -eq 0 ]
+  grep -q "Posted agent exec posture alert" <<< "$output"
+  grep -q "ROOT on node-8" "$TEST_TMPDIR/last-text"      # the violation wording, not the deadline wording
+}
+
 @test "agent exec posture: --dry-run never posts and never stamps the dedupe file" {
   echo 'MUSO_SLACK_BOT_TOKEN_DEVOPS=xoxb-test' > "$MUSO_SLACK_ENV_FILE"
   _stub_policy_check 1

@@ -187,6 +187,14 @@ fi
 # no deploy to notice it, and a hot edit or a hand-reverted live file restores a root shell until someone looks. The
 # expiry case is the one that needs a clock rather than a deploy, so this tick is that clock.
 #
+# THE CLOCK RUNS EARLY NOW (2026-11-09, [key=exec-posture-lapsed]). Paging only on rc 1 meant the FIRST alarm about
+# a lapsed exception fired the day AFTER it lapsed - by then deploys were already blocked, PR CI was already red, and
+# the exit plan had had no deadline at all. So this tick also passes --fail-on-expiring: rc 4 says "nothing is wrong
+# yet, an exception is inside its pre-expiry window", and it pages with its own wording, the expiry DATE and the
+# countdown. rc 4 is WARN, not CANNOT-EVALUATE and not violated; it shares the delivery/dedupe machinery below so a
+# six-day warning pages once, not 288 times, and a real violation still pages immediately because its signature
+# differs. Silence from this tick now means no exception is inside a week of lapsing.
+#
 # Deduped to ONE page per 24h PER FINDING: the watchdog ticks every 5 min, and a posture that nobody has fixed would
 # otherwise post 288 times a day and train everyone to ignore the very alert that matters. The stamp carries the
 # findings' identity (sha) alongside the timestamp, so an UNCHANGED violation is quiet while a NEW one pages at once,
@@ -214,11 +222,12 @@ if [ -n "$EXEC_POLICY_CHECK" ]; then
     _ep_rc=3
     _ep_out="MISSING CHECKER: ${EXEC_POLICY_CHECK} is not on this host, so this tick cannot evaluate the shell posture"
   else
-    _ep_out="$(python3 "$EXEC_POLICY_CHECK" --live 2>&1)" || _ep_rc=$?
+    _ep_out="$(python3 "$EXEC_POLICY_CHECK" --live --fail-on-expiring 2>&1)" || _ep_rc=$?
   fi
   if [ "$_ep_rc" -ne 0 ]; then
     case "$_ep_rc" in
       (3) _ep_head=":rotating_light: *Agent exec posture: CANNOT EVALUATE (checker MISSING)* — \`scripts/check-agent-exec-policy.py\` is not on node-8 at the path this tick runs. Deploys and this clock are the only things that catch a restored root shell, so a missing checker means the posture has been UNVERIFIED since that file went away. Nothing about that is benign.\n\n\`\`\`$_ep_out\`\`\`\n\nRestore it from the repo (\`ls -l /opt/hydra/scripts/check-agent-exec-policy.py\`) and re-deploy, then run \`python3 /opt/hydra/scripts/check-agent-exec-policy.py --live\` by hand and confirm it is clean. Posture rules: \`AGENTS.md\` §\"Agent shell (exec) posture\"." ;;
+      (4) _ep_head=":hourglass_flowing_sand: *Agent exec posture: an exception is about to lapse* — nothing is violated yet, which is exactly why this page matters. A dated \`full\` exec exception is inside its pre-expiry window; the date and countdown are in the findings below. On the day AFTER it lapses this check turns red, the deploy halts at Step 1, and PR CI goes red for every lane — that is what happened on 2026-11-09 and it is avoidable with a week's notice.\n\n\`\`\`$_ep_out\`\`\`\n\nDecide BEFORE the date, in a PR: DENY it (the fail-safe — \`tools.deny: [\"exec\",\"process\",\"lobster\",\"nodes\",\"computer\",\"terminal\"]\` plus its row in \`policies/agent-exec-policy.json\`), or RENEW it with a new ruling and a fresh exit plan. State the cost out loud: a denied codex agent also loses native web_search / skill_search / memories / MCP (\`scripts/validate-config-matrix.sh\` check 8), so this is a capability decision, not a formality. Posture rules: \`AGENTS.md\` §\"Agent shell (exec) posture\"." ;;
       (2) _ep_head=":rotating_light: *Agent exec posture: CANNOT EVALUATE* — \`scripts/check-agent-exec-policy.py --live\` exited 2, meaning a config or the registry could not be read. That is not an all-clear: an unreadable \`openclaw-{main,edge}.json\` is exactly the state a bad edit leaves behind, so the fleet's shell posture is UNKNOWN right now.\n\n\`\`\`$_ep_out\`\`\`\n\nCheck \`/opt/hydra/openclaw-main.json\`, \`/root/.openclaw-main/openclaw.json\` and \`policies/agent-exec-policy.json\` are readable valid JSON, then run \`python3 /opt/hydra/scripts/check-agent-exec-policy.py --live\` by hand." ;;
       (*) _ep_head=":no_entry: *Agent exec posture violated* — \`scripts/check-agent-exec-policy.py --live\` found a node-8 shell posture the repo does not declare, or an exception that has run out. Every main agent with \`tools.exec security=full\` runs as ROOT on node-8, so this is the H1 surface: a prompt-injected Slack thread, fetched page or PR body becomes \`curl ... | sh\`.\n\n\`\`\`$_ep_out\`\`\`\n\nFix the finding it names: \`deny\` the agent (\`tools.deny: [\"exec\",\"process\",\"lobster\",\"nodes\",\"computer\",\"terminal\"]\` in \`openclaw-{main,edge}.json\`, plus its row in \`policies/agent-exec-policy.json\`), or RENEW its dated \`full\` exception with a new ruling. Land it as a PR — CI re-checks the same rules — and never restore a posture on the live file by hand, which is what this check exists to catch. Posture rules: \`AGENTS.md\` §\"Agent shell (exec) posture\"." ;;
     esac
@@ -261,7 +270,7 @@ if [ -n "$EXEC_POLICY_CHECK" ]; then
         printf '%s\n' "$_ep_out"
       fi
     else
-      log "agent exec posture violation UNCHANGED and already paged $((_ep_now - _ep_last))s ago (rc=${_ep_rc}) — suppressed"
+      log "agent exec posture finding UNCHANGED and already paged $((_ep_now - _ep_last))s ago (rc=${_ep_rc}) — suppressed"
     fi
   else
     # CLEAN tick: drop the dedupe stamp, so a posture regression that appears after recovery pages immediately

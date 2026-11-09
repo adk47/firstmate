@@ -11,7 +11,20 @@ the RULES are the constants below, so a PR cannot widen a rule by editing data.
   python3 scripts/check-agent-exec-policy.py --live              node-8 live configs vs the repo (post-deploy)
   python3 scripts/check-agent-exec-policy.py --live --live-profile main   only the profiles being deployed
 
-Exit 0 = clean; 1 = a violation (each named on stdout); 2 = a config or registry could not be read (never a pass).
+Exit 0 = clean; 1 = a violation (each named on stdout); 2 = a config or registry could not be read (never a pass);
+4 = clean, but a dated `full` exception is inside the pre-expiry warning window (--fail-on-expiring only).
+
+WHY THERE IS A WARNING WINDOW (2026-11-09, [key=exec-posture-lapsed]): this script used to be silent about a dated
+exception until the DAY AFTER it lapsed, so the first alarm fired once the damage was done - the deploy was already
+blocked, the fix was already a rush, and nobody had had a week to write the exit plan the deleted exception asked for.
+A full exception now reports as a WARNING (a github ::warning:: annotation, and rc 4 under --fail-on-expiring, which
+is what cron-health-watchdog.sh pages on) from EXPIRY_WARNING_DAYS out, naming the date and the countdown so nobody
+has to go looking. It stays exit 0 for deploy and PR CI on purpose: an approaching expiry is a reason to plan, never
+a reason to refuse the deploy that ships the fix.
+
+Warnings are NOT errors: the `full until` line is replaced by the warning inside the window, because a registry row
+that is about to lapse must never read as `ok`. Expiry itself is still an error - the fail-safe direction is to deny,
+nothing else.
 
 TWO CALL SITES, both in scripts/deploy.sh, plus the daily watchdog tick (scripts/cron-health-watchdog.sh) so a
 quiet week still pages once an exception's expiry date passes:
@@ -42,6 +55,12 @@ LIVE_CONFIG = {
 # The only agents that may hold exec indefinitely-renewable; everyone else is on borrowed, dated time.
 OPS_AGENTS = frozenset({"operations", "devops", "clio"})
 MAX_EXPIRY_DAYS = 31
+# Start warning this many days before a dated exception lapses. A week is long enough to write an exit plan or take a
+# ruling, and short enough that the warning is still about the next deploy rather than background noise.
+EXPIRY_WARNING_DAYS = 7
+RC_CLEAN, RC_VIOLATION, RC_UNREADABLE, RC_EXPIRING = 0, 1, 2, 4
+# rc 3 is reserved: cron-health-watchdog.sh uses it for "the checker itself is missing", which this process can
+# never observe about itself (a script that is not there cannot exit).
 
 # Shell-capable tool ids a `denied` agent must deny, per profile.
 #   exec     - OpenClaw host exec; its codex aliases gateway_exec / node_exec / sandbox_exec follow it, and because
@@ -186,7 +205,8 @@ def _date(value, where, errors):
         return None
 
 
-def check_profile(profile: str, cfg: dict, reg: dict, today: dt.date, errors: list, notes: list) -> None:
+def check_profile(profile: str, cfg: dict, reg: dict, today: dt.date, errors: list, notes: list,
+                  warnings: list | None = None) -> None:
     agents = agents_of(cfg)
     want = set(reg)
     for missing in sorted(set(agents) - want):
@@ -227,6 +247,17 @@ def check_profile(profile: str, cfg: dict, reg: dict, today: dt.date, errors: li
                     errors.append(f"{where}: posture=full EXPIRED on {exp} - deny exec, or renew with a new ruling")
                 elif (exp - today).days > MAX_EXPIRY_DAYS:
                     errors.append(f"{where}: expires {exp} is more than {MAX_EXPIRY_DAYS} days out")
+                elif (exp - today).days <= EXPIRY_WARNING_DAYS:
+                    # Inside the window the row must NOT read as `ok`: replace the clean note with the warning.
+                    left = (exp - today).days
+                    when = "TODAY" if left == 0 else f"in {left}d"
+                    line = (f"{where}: full exception expires {exp} - {when} "
+                            f"({EXPIRY_WARNING_DAYS}-day window)")
+                    (warnings if warnings is not None else notes).append(line)
+                    notes.append(
+                        f"::warning::{line}. Renew it with a new ruling and a fresh exit plan, or deny exec, before "
+                        "that date: on the day AFTER it lapses this check turns red and the deploy halts at Step 1. "
+                        "Denying is the fail-safe; a renewal is a ruling, not a data edit.")
                 else:
                     notes.append(f"{where}: full until {exp} ({(exp - today).days}d left)"
                                  + ("" if aid in OPS_AGENTS else " - non-ops, dated exception"))
@@ -321,9 +352,13 @@ def git_show(ref: str, rel: str, root: Path):
 
 
 def run(root: Path = REPO, base: str | None = None, live: bool = False, today: dt.date | None = None,
-        live_paths: dict | None = None, live_profiles=None) -> tuple[int, list, list]:
+        live_paths: dict | None = None, live_profiles=None,
+        fail_on_expiring: bool = False) -> tuple[int, list, list]:
+    """`fail_on_expiring` turns the pre-expiry warning into rc 4 (clean but expiring). Deploy and PR CI leave it off:
+    an approaching expiry must never block the deploy that carries the fix, while the watchdog wants an exit code it
+    can page on without parsing prose."""
     today = today or dt.datetime.now(dt.timezone.utc).date()
-    errors, notes = [], []
+    errors, warnings, notes = [], [], []
     # A partial deploy (--target main|edge) must not be blocked by a profile it never touched: `live_profiles`
     # scopes the LIVE comparison only. Every other rule still runs for every profile.
     scope = None if live_profiles is None else {
@@ -351,7 +386,7 @@ def run(root: Path = REPO, base: str | None = None, live: bool = False, today: d
             if profile not in registry["profiles"] or profile not in REQUIRED_DENY:
                 continue
             cfg, reg = load(root / profile), registry["profiles"][profile]
-            check_profile(profile, cfg, reg, today, errors, notes)
+            check_profile(profile, cfg, reg, today, errors, notes, warnings)
             if base:
                 check_base(profile, cfg, reg, git_show(base, profile, root),
                            ((base_reg or {}).get("profiles") or {}).get(profile), errors, notes)
@@ -363,8 +398,10 @@ def run(root: Path = REPO, base: str | None = None, live: bool = False, today: d
                 check_profile(profile, live_cfg, reg, today, lerr, [])
                 errors.extend(f"LIVE {e}" for e in lerr)
     except Unreadable as exc:
-        return 2, [str(exc)], notes
-    return (1 if errors else 0), errors, notes
+        return RC_UNREADABLE, [str(exc)], notes
+    if errors:
+        return RC_VIOLATION, errors, notes
+    return (RC_EXPIRING if (fail_on_expiring and warnings) else RC_CLEAN), errors, notes
 
 
 def main(argv=None) -> int:
@@ -375,14 +412,20 @@ def main(argv=None) -> int:
     ap.add_argument("--live-profile", action="append", metavar="main|edge",
                     help="limit the --live comparison to these profiles (a partial deploy must not be blocked "
                          "by a profile it does not target); implies --live")
+    ap.add_argument("--fail-on-expiring", action="store_true",
+                    help="exit 4 when a dated full exception is inside the pre-expiry warning window (the watchdog "
+                         "pages on this). Off for deploy and PR CI: an approaching expiry must not block a deploy")
     args = ap.parse_args(argv)
-    rc, errors, notes = run(base=args.base, live=args.live, live_profiles=args.live_profile)
+    rc, errors, notes = run(base=args.base, live=args.live, live_profiles=args.live_profile,
+                            fail_on_expiring=args.fail_on_expiring)
     for n in notes:
         print(f"ok   {n}" if not n.startswith("::") else n)
     for e in errors:
         print(f"FAIL {e}")
-    print({0: "agent exec policy: clean", 1: f"agent exec policy: {len(errors)} violation(s)",
-           2: "agent exec policy: UNREADABLE input - not a pass"}[rc])
+    print({RC_CLEAN: "agent exec policy: clean", RC_VIOLATION: f"agent exec policy: {len(errors)} violation(s)",
+           RC_UNREADABLE: "agent exec policy: UNREADABLE input - not a pass",
+           RC_EXPIRING: "agent exec policy: clean, but a dated exception is inside the pre-expiry window - "
+                        "renew or deny before it lapses"}[rc])
     return rc
 
 
