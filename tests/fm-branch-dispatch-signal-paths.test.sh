@@ -91,7 +91,7 @@ test_c_a_summary_token_is_never_read_as_a_path() {
   pass "a summary with no resolvable status path stays a scan veto instead of a junk-token task"
 }
 
-test_d_a_needs_decision_row_keeps_its_full_path_list() {
+test_d_a_needs_decision_row_is_main_owned_through_its_status_key() {
   local dir
   dir="$TMP_ROOT/dispatcher-decision"
   rm -rf "$dir"
@@ -100,10 +100,10 @@ test_d_a_needs_decision_row_keeps_its_full_path_list() {
   queue_row "$dir" 1 "task-b.status" \
     "needs-decision: ${dir}/state/task-a.status ${dir}/state/task-b.status"
   expect_scope "decision" "$(run_scope "$dir" "decision")" '"eligible":false' '"corrupted":false'
-  pass "a needs-decision row stays main-owned and its full path list still parses"
+  pass "a needs-decision row is main-owned through its status-shaped key"
 }
 
 test_a_compact_payload_resolves_the_batch_from_the_private_record
 test_b_a_recordless_compact_payload_surfaces_instead_of_trusting_the_summary
 test_c_a_summary_token_is_never_read_as_a_path
-test_d_a_needs_decision_row_keeps_its_full_path_list
+test_d_a_needs_decision_row_is_main_owned_through_its_status_key

@@ -74,10 +74,8 @@ test_batch_with_a_decision_file_enqueues_one_ordinary_and_one_decision_row() {
   [ -n "$decision" ] || fail "a decision batch lost its decision row: $(cat "$state/.wake-queue")"
   [ "${decision%%$'\t'*}" = "b.status" ] \
     || fail "the decision row is not keyed by the decision file's status name: $decision"
-  case "${decision#*$'\t'}" in
-    needs-decision:*"$state/a.status"*"$state/b.status"*) ;;
-    *) fail "the decision row lost the batch's full path list: $decision" ;;
-  esac
+  [ "${decision#*$'\t'}" = "needs-decision: $state/a.status $state/b.status" ] \
+    || fail "the decision row payload is not byte-identical to the pre-change value: $decision"
   [ "${ordinary#*$'\t'}" = "$reason" ] \
     || fail "the ordinary row payload changed shape: $ordinary"
   pass "a decision batch enqueues one ordinary row plus one decision row, not one per file"
