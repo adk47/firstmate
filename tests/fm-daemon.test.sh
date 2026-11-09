@@ -390,6 +390,30 @@ EOF
   pass "classification failure retains the complete durable wake batch"
 }
 
+test_durable_batch_resolves_every_path_from_its_private_record() {
+  local dir state fakebin reason attempts
+  dir=$(make_supercase durable-record); state="$dir/state"; fakebin="$dir/daemon-bin"; attempts="$dir/attempts"
+  reason="signal: 2 files (1 status, 1 turn-end): $state/task-a.status +1 more"
+  printf '%s\t%s/task-a.status %s/task-b.status\n' signal-batch-record "$state" "$state" \
+    > "$state/.signal-batch-paths"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/fm-wake-drain.sh" <<EOF
+#!/usr/bin/env bash
+if [ "\${1:-}" = --ack-through ]; then printf '%s\n' ack >> "$dir/acked"; exit 0; fi
+printf '1\t1\tsignal\tsignal-batch-record\t%s\n'
+printf 'WAKE_ACK_REQUIRED: ordinary --ack-through 1 --recovery-generation gen\n' >&2
+EOF
+  chmod +x "$fakebin/fm-wake-drain.sh"
+  (
+    FM_DAEMON_DIR="$fakebin"
+    handle_wake() { printf '%s\n' "$1" >> "$attempts"; }
+    handle_durable_wakes fallback "$state"
+  ) || fail "a coalesced batch with a private record was not acknowledged"
+  [ "$(cat "$attempts")" = "signal: $state/task-a.status $state/task-b.status" ] \
+    || fail "the daemon classified only the compact prompt paths instead of the full batch: $(cat "$attempts")"
+  pass "durable coalesced signals classify the full batch from the private record"
+}
+
 test_missing_status_stale_is_acknowledged_without_diagnostic() {
   local dir state fakebin
   dir=$(make_supercase durable-no-status); state="$dir/state"; fakebin="$dir/daemon-bin"
@@ -2685,6 +2709,7 @@ test_catchall_advances_routine_then_surfaces_append
 test_escalation_buffer_failure_retains_wake_and_position
 test_catchall_buffer_failure_preserves_position
 test_durable_wake_failure_retains_entire_batch
+test_durable_batch_resolves_every_path_from_its_private_record
 test_missing_status_stale_is_acknowledged_without_diagnostic
 test_transient_unreadable_signal_recovers_without_advancing
 test_permission_recovery_reclassifies_catchall_status

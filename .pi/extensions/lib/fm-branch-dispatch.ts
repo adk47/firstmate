@@ -64,6 +64,13 @@ export interface UnreadWakeScope {
    */
   needsDecisionKeys: string[];
   taskByWakeKey: Record<string, string>;
+  /**
+   * Every task resolved from each signal row's full batch, keyed by that row's
+   * queued payload. The compact payload can omit status paths another consumer
+   * needs, so the dispatcher cross-references a trigger against this record
+   * instead of re-parsing the prompt alone.
+   */
+  signalTasksByPayload: Record<string, string[]>;
 }
 
 const EMPTY_SCOPE: UnreadWakeScope = {
@@ -75,6 +82,7 @@ const EMPTY_SCOPE: UnreadWakeScope = {
   corrupted: false,
   needsDecisionKeys: [],
   taskByWakeKey: {},
+  signalTasksByPayload: {},
 };
 const UNSAFE_SCOPE: UnreadWakeScope = {
   status: "unsafe",
@@ -85,6 +93,7 @@ const UNSAFE_SCOPE: UnreadWakeScope = {
   corrupted: true,
   needsDecisionKeys: [],
   taskByWakeKey: {},
+  signalTasksByPayload: {},
 };
 
 // scopeForUnreadWake is the single owner of branch-eligibility classification
@@ -279,6 +288,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
   const eligibleSeqs: string[] = [];
   const eligibleTasks = new Set<string>();
   const needsDecisionKeys: string[] = [];
+  const signalTasksByPayload: Record<string, string[]> = {};
   const staleDecisionOwnership = new Map<string, boolean>();
   const resolveVerb = process.env.FM_CLASSIFY_RESOLVE_VERB || "resolved";
   const heldVerb = process.env.FM_CLASSIFY_CAPTAIN_HELD_VERB || "captain-held";
@@ -316,13 +326,16 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
       }
       const files = signalRowFiles(key, payload, state);
       if (files.length === 0) return UNSAFE_SCOPE;
+      const rowTasks = new Set(signalTasksByPayload[payload] ?? []);
       for (const file of files) {
         const fileTask = file.replace(/\.(?:status|turn-ended)$/, "");
         const fileProject = metadata.get(fileTask) ?? "";
         if (!fileTask || !fileProject) return UNSAFE_SCOPE;
         projects.add(fileProject);
         eligibleTasks.add(fileTask);
+        rowTasks.add(fileTask);
       }
+      signalTasksByPayload[payload] = [...rowTasks];
       eligibleSeqs.push(seq);
       continue;
     } else if (kind === "stale") {
@@ -394,6 +407,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean): UnreadWak
     corrupted: false,
     needsDecisionKeys,
     taskByWakeKey: Object.fromEntries(taskByKey),
+    signalTasksByPayload,
   };
 }
 
