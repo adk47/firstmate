@@ -220,18 +220,42 @@ def _date(value, where, errors):
         return None
 
 
-def _check_grants(where: str, cfg: dict, agent: dict, entry: dict, errors: list) -> None:
-    """A `grants` list is the reviewed width of a `full` posture, enforced against the CONFIG.
+def _check_grants(where: str, cfg: dict, agent: dict, entry: dict, errors: list,
+                  claim: dict | None = None) -> None:
+    """A `grants` list is the reviewed width of a `full` posture, enforced against the CONFIG and the CLAIM.
 
     Why this exists: on openclaw 2026.8.35 an allowlist exec mode is refused by the codex harness
     (EXEC_SHAPE_TRAP), so a narrow posture cannot be expressed as tools.exec. It is expressed instead as
     "full exec, every other shell surface denied", and this check refuses a registry row that claims a narrower
     width than the config grants, or a config that grants more than the row reviewed. Without it a narrowing
     would be a comment rather than a rule.
+
+    THREE comparisons, and the first two are why this function takes `claim` (qa-review finding on 9bdb57281):
+      1. An absent `grants` on a row backed by a reviewed re-grant claim is an ERROR, not a skip. The table
+         records a width; a row that omits the field leaves nothing for comparisons 2-3 to enforce, so the
+         reviewed narrowing silently becomes the config's width. Before this, dropping `qa.grants` AND
+         `process` from qa's deny list in one diff reached ['exec', 'process'] and BOTH check_profile and
+         check_base returned zero errors - a one-line delete that widened a re-grant past its ruling.
+      2. A row whose `grants` exceed the claim's `grants` is an error even when the config matches the row:
+         the claim is the ruling, so the row cannot be wider than what was reviewed.
+      3. The row and the config must agree exactly, in both directions.
+    Only an absent `grants` on a row with NO claim stays a skip - that is every already-`full` agent, whose width
+    predates this check and whose rows this PR must not have to rewrite.
     """
     want = entry.get("grants")
     if want is None:
+        if claim is not None:
+            errors.append(
+                f"{where}: posture=full under reviewed re-grant claim {claim['ruling']} but the registry row "
+                f"declares no `grants` - the claim reviews exactly {sorted(claim['grants'])} and an absent field "
+                "enforces nothing, so state it (the config comparison is what makes the narrowing a rule)")
         return
+    if claim is not None:
+        wider = sorted(set(want) - set(claim["grants"]))
+        if wider:
+            errors.append(f"{where}: posture=full grants {sorted(want)} but the reviewed re-grant claim "
+                          f"{claim['ruling']} authorises only {sorted(claim['grants'])} - a re-grant cannot exceed "
+                          f"the width it was granted ({wider} is wider)")
     reach = reachable_shell(cfg, agent)
     extra = sorted(reach - set(want))
     missing = sorted(set(want) - reach)
@@ -278,7 +302,7 @@ def check_profile(profile: str, cfg: dict, reg: dict, today: dt.date, errors: li
             for k in ("reason", "exit", "ruling"):
                 if not str(entry.get(k) or "").strip():
                     errors.append(f"{where}: posture=full needs a non-empty '{k}'")
-            _check_grants(where, cfg, a, entry, errors)
+            _check_grants(where, cfg, a, entry, errors, REGRANT_ALLOWLIST.get((profile, aid)))
             exp = _date(entry.get("expires"), f"{where}.expires", errors)
             if exp is not None:
                 if today > exp:

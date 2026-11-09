@@ -298,6 +298,54 @@ class Mutations(unittest.TestCase):
         self.edit(chk.REGISTRY, lambda r: r["profiles"]["openclaw-main.json"]["qa"].update(grants=["exec", "process"]))
         self.assertFails("the config does not reach ['process']")
 
+    # ── the claim's WIDTH, not just its expiry (qa-review finding on 9bdb57281) ─────────────────────────────
+    # `_check_grants` used to return immediately when a row carried no `grants`, and `check_base` compared only the
+    # claim's expiry and ruling. So a SINGLE diff that deleted `qa.grants` and dropped `process` from qa's deny list
+    # reached ['exec', 'process'] while check_profile AND check_base both returned zero errors: the reviewed
+    # narrowing was enforced by a field that could simply be deleted. These pin that the claim's width is a rule.
+
+    def test_a_claimed_regrant_cannot_silently_omit_grants(self):
+        # The exact reproduction: absent `grants` + coupled registry/config widening, no other change.
+        def coupled(c):
+            self.agent(c, "qa")["tools"]["deny"].remove("process")
+        self.edit("openclaw-main.json", coupled)
+        self.edit(chk.REGISTRY, lambda r: r["profiles"]["openclaw-main.json"]["qa"].pop("grants"))
+        # Prove the hole is real, not asserted: the config genuinely reaches process now.
+        cfg = json.loads((self.tmp / "openclaw-main.json").read_text())
+        self.assertEqual(sorted(chk.reachable_shell(cfg, self.agent(cfg, "qa"))), ["exec", "process"])
+        self.assertFails("declares no `grants`")
+
+    def test_omitting_grants_alone_is_caught_without_a_base(self):
+        # No --base: the renewal's width is a property of the claim in this script, so the check must hold on the
+        # head alone. Otherwise a PR could rely on a base that no longer exists.
+        self.edit(chk.REGISTRY, lambda r: r["profiles"]["openclaw-main.json"]["qa"].pop("grants"))
+        self.assertFails("declares no `grants`")
+
+    def test_a_claimed_regrant_cannot_be_wider_than_its_claim(self):
+        # Here the registry and the config AGREE (both ['exec', 'process']), so the row-vs-config comparison is
+        # clean; only the claim knows the width was never reviewed. Without the claim comparison this passes.
+        self.edit("openclaw-main.json", lambda c: self.agent(c, "qa")["tools"]["deny"].remove("process"))
+        self.edit(chk.REGISTRY,
+                  lambda r: r["profiles"]["openclaw-main.json"]["qa"].update(grants=["exec", "process"]))
+        self.assertFails("a re-grant cannot exceed the width it was granted")
+
+    def test_an_unclaimed_full_row_may_still_omit_grants(self):
+        # The narrowness boundary: `grants` stays OPTIONAL for every agent with no claim (all the already-`full`
+        # rows), so this PR does not force a fleet-wide data rewrite. Asserted on a real such row.
+        rc, errors, notes = self.run_check(base="HEAD")
+        self.assertEqual((rc, errors), (0, []))
+        cfg = json.loads((self.tmp / "openclaw-main.json").read_text())
+        row = registry()["profiles"]["openclaw-main.json"]["ceo"]
+        self.assertNotIn("grants", row)
+        self.assertNotIn(("openclaw-main.json", "ceo"), chk.REGRANT_ALLOWLIST)
+        self.assertIn("exec", chk.reachable_shell(cfg, self.agent(cfg, "ceo")))
+
+    def test_the_shipped_row_states_exactly_the_claimed_width(self):
+        # The other direction, so neither side can drift: the shipped row's `grants` IS the claim's `grants`.
+        claim = chk.REGRANT_ALLOWLIST[("openclaw-main.json", "qa")]
+        self.assertEqual(sorted(registry()["profiles"]["openclaw-main.json"]["qa"]["grants"]),
+                         sorted(claim["grants"]))
+
     def test_removing_the_claim_closes_the_regrant(self):
         self._qa_from_denied_base()
         saved = dict(chk.REGRANT_ALLOWLIST)
