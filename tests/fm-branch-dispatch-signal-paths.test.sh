@@ -2,8 +2,8 @@
 # tests/fm-branch-dispatch-signal-paths.test.sh - how the supervision branch
 # dispatcher resolves the tasks in a coalesced signal batch row now that the
 # queued payload is a compact summary: from the private batch-path record
-# bin/fm-watch.sh writes beside the queue, with the payload's own status paths as
-# the fallback, and a scan veto only for a row nothing can resolve.
+# bin/fm-watch.sh writes beside the queue, and a scan veto for a row whose record
+# is missing so it surfaces rather than being classified from the summary alone.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -67,17 +67,17 @@ test_a_compact_payload_resolves_the_batch_from_the_private_record() {
   pass "the dispatcher resolves a compact batch from the private batch-path record"
 }
 
-test_b_a_recordless_compact_payload_falls_back_to_its_named_status_path() {
+test_b_a_recordless_compact_payload_surfaces_instead_of_trusting_the_summary() {
   local dir
-  dir="$TMP_ROOT/dispatcher-fallback"
+  dir="$TMP_ROOT/dispatcher-missing-record"
   rm -rf "$dir"
   mkdir -p "$dir"
   new_case "$dir"
   queue_row "$dir" 1 signal-batch-ddd \
     "signal: 2 files (1 status, 1 turn-end): ${dir}/state/task-a.status +1 more"
-  expect_scope "fallback" "$(run_scope "$dir" "fallback")" \
-    '"eligible":true' '"corrupted":false' '"task-a"'
-  pass "a batch record that has rolled out of its bound still resolves its named status paths"
+  expect_scope "missing record" "$(run_scope "$dir" "missing record")" \
+    '"eligible":false' '"corrupted":true'
+  pass "a queued batch without its record surfaces instead of using the compact summary"
 }
 
 test_c_a_summary_token_is_never_read_as_a_path() {
@@ -104,6 +104,6 @@ test_d_a_needs_decision_row_keeps_its_full_path_list() {
 }
 
 test_a_compact_payload_resolves_the_batch_from_the_private_record
-test_b_a_recordless_compact_payload_falls_back_to_its_named_status_path
+test_b_a_recordless_compact_payload_surfaces_instead_of_trusting_the_summary
 test_c_a_summary_token_is_never_read_as_a_path
 test_d_a_needs_decision_row_keeps_its_full_path_list

@@ -112,10 +112,13 @@ test_watcher_coalesces_a_real_changed_file_batch() {
   pass "a real watcher poll coalesces N changed files into one signal row"
 }
 
-test_batch_path_record_stays_bounded() {
+test_batch_path_record_tracks_queue_lifetime() {
   local dir state records i
-  dir=$(make_case batch-record-bound); state="$dir/state"
-  printf 'blocked: a\n' > "$state/a.status"
+  dir=$(make_case batch-record-lifetime); state="$dir/state"
+  for i in $(seq 1 40); do
+    printf '1\t%s\tsignal\tsignal-batch-%s\tsignal: %s/a.status\n' "$i" "$i" "$state" \
+      >> "$state/.wake-queue"
+  done
   for i in $(seq 1 40); do
     FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
       . "$1"
@@ -123,16 +126,26 @@ test_batch_path_record_stays_bounded() {
     ' _ "$WATCH" "$i" "$state/a.status" || fail "batch-path record write failed for batch $i"
   done
   records=$(wc -l < "$state/.signal-batch-paths" | tr -d '[:space:]')
-  [ "$records" -le 32 ] \
-    || fail "the batch-path record grew past its bound: $records lines"
-  grep -F "signal-batch-40" "$state/.signal-batch-paths" >/dev/null \
-    || fail "the newest batch lost its private path record"
+  [ "$records" -eq 40 ] \
+    || fail "the batch-path record dropped queued batches: $records records"
   grep -F "signal-batch-1"$'\t' "$state/.signal-batch-paths" >/dev/null \
-    && fail "the batch-path record kept a batch beyond its bound"
-  pass "the private batch-path record stays bounded and keeps the newest batches"
+    || fail "the oldest queued batch lost its private path record"
+  awk -F '\t' '$4 == "signal-batch-40"' "$state/.wake-queue" > "$state/.wake-queue.next" \
+    && mv "$state/.wake-queue.next" "$state/.wake-queue" \
+    || fail "could not consume the older queued batches"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    signal_record_batch_paths "signal-batch-40" "$2"
+  ' _ "$WATCH" "$state/a.status" || fail "batch-path record write failed after consuming rows"
+  records=$(wc -l < "$state/.signal-batch-paths" | tr -d '[:space:]')
+  [ "$records" -eq 1 ] \
+    || fail "consumed batches kept their records: $records records"
+  grep -F "signal-batch-40"$'\t' "$state/.signal-batch-paths" >/dev/null \
+    || fail "the still-queued batch lost its private path record"
+  pass "the private batch-path record follows the wake queue's lifetime"
 }
 
 test_batch_enqueues_one_ordinary_row
 test_batch_with_a_decision_file_enqueues_one_ordinary_and_one_decision_row
 test_watcher_coalesces_a_real_changed_file_batch
-test_batch_path_record_stays_bounded
+test_batch_path_record_tracks_queue_lifetime

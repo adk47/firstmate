@@ -17,8 +17,8 @@
 #                          a prompt-sized summary of the changed-file batch: the
 #                          total, how many status versus turn-end, then up to five
 #                          changed status paths, never a turn-ended one, capped at
-#                          FM_SIGNAL_REASON_MAX_BYTES. The batch identity and every
-#                          internal set consumer still use the full path list.
+#                          400 bytes. The batch identity and every internal set
+#                          consumer still use the full path list.
 #                          Surfaced when a listed status
 #                          span has a captain-relevant event OR a no-verb signal lacks
 #                          positive execution evidence, unless afk is active
@@ -1338,9 +1338,9 @@ signal_batch_key() {  # <file> ...
 # Hard cap on the printed reason's size, in bytes. The reason is a prompt, so a
 # much larger fleet must not be able to grow it back into a token sink; the full
 # path list stays on the arguments the classifiers and the batch key consume.
-FM_SIGNAL_REASON_MAX_BYTES=${FM_SIGNAL_REASON_MAX_BYTES:-400}
+FM_SIGNAL_REASON_MAX_BYTES=400
 # Most changed status paths a printed reason ever names (before the byte cap).
-FM_SIGNAL_REASON_MAX_PATHS=${FM_SIGNAL_REASON_MAX_PATHS:-5}
+FM_SIGNAL_REASON_MAX_PATHS=5
 
 # Print the status-file paths signal_files_actionable captured in
 # FM_SIGNAL_SURFACE_ENDPOINTS (one "<file>\t<end>\t<ident>" record per file).
@@ -1366,11 +1366,10 @@ EOF
 # only real consumer is the in-process benign check, which reads the argument
 # list rather than this string. Status paths are ordered by decision relevance -
 # decision-owned files, then files with an actionable span, then the rest -
-# because the two out-of-process readers of this line resolve status files from
-# the reason itself: the away-mode daemon's classify_signal (bin/fm-supervise-daemon.sh)
-# and the Pi branch dispatcher's decision cross-reference
-# (.pi/extensions/fm-primary-pi-watch.ts). Both therefore still see every status
-# file that could change their verdict whenever the batch names it at all.
+# because both out-of-process readers of this batch - the away-mode daemon's
+# classify_signal (bin/fm-supervise-daemon.sh) and the Pi branch dispatcher's
+# decision cross-reference (.pi/extensions/fm-primary-pi-watch.ts) - resolve
+# the full path list from the private batch record instead.
 signal_batch_reason() {  # <file> ...
   local f total=0 status_count=0 turnend_count=0 seen=" " candidates=""
   local prefix list="" shown=0 remaining budget
@@ -1416,27 +1415,37 @@ signal_batch_reason() {  # <file> ...
 # keyed by the batch identity. The queued payload is a compact summary now, and
 # the Pi branch dispatcher still has to resolve every task in a batch from its
 # row's key, so the list lives here instead of in the prompt. One record per
-# batch, newest last, bounded to the most recent FM_SIGNAL_BATCH_PATHS_KEEP
-# entries; written atomically (unique temp file, then rename) so a reader never
-# observes a partial record. Format: "<batch-key>\t<space-separated paths>".
-FM_SIGNAL_BATCH_PATHS_KEEP=${FM_SIGNAL_BATCH_PATHS_KEEP:-32}
-
+# batch, newest last, retained while its batch key remains in the wake queue;
+# written atomically (unique temp file, then rename) so a reader never observes a
+# partial record. Format: "<batch-key>\t<space-separated paths>".
 signal_record_batch_paths() {  # <batch-key> <file> ...
-  local key=$1 sidecar tmp keep=${FM_SIGNAL_BATCH_PATHS_KEEP:-32}
+  local key=$1 sidecar tmp
   shift
   [ -d "$STATE" ] || return 1
   sidecar="$STATE/.signal-batch-paths"
   tmp="$sidecar.$$.tmp"
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
   if {
     if [ -f "$sidecar" ]; then
-      awk -F '\t' -v k="$key" '$1 != k' "$sidecar"
+      awk -F '\t' -v k="$key" -v queue="$FM_WAKE_QUEUE" '
+        BEGIN {
+          while ((getline row < queue) > 0) {
+            split(row, field, "\t")
+            if (field[4] != "") queued[field[4]] = 1
+          }
+          close(queue)
+        }
+        $1 != k && ($1 in queued) { print }
+      ' "$sidecar"
     fi
     printf '%s\t%s\n' "$key" "$*"
-  } | tail -n "$keep" > "$tmp"; then
+  } > "$tmp"; then
     if mv -f "$tmp" "$sidecar"; then
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
       return 0
     fi
   fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   rm -f "$tmp"
   return 1
 }
@@ -1455,9 +1464,9 @@ signal_enqueue_batch() {  # <reason> <decision-files> <file> ...
   shift 2
   [ "$#" -gt 0 ] || return 1
   batch_key=$(signal_batch_key "$@") || return 1
-  # Best-effort: a batch whose record cannot be written still wakes firstmate,
-  # it just loses the dispatcher's full task resolution for that batch.
-  signal_record_batch_paths "$batch_key" "$@" || true
+  if ! signal_record_batch_paths "$batch_key" "$@"; then
+    reason="signal: $*"
+  fi
   fm_wake_append signal "$batch_key" "$reason" || return 1
   [ -n "$decision_files" ] || return 0
   for f in $decision_files; do

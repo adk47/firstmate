@@ -1464,7 +1464,11 @@ handle_durable_wakes() {  # <watcher-reason> <state>
       case "$key" in
         signal-batch-*)
           batch_files=$(signal_batch_record_paths "$state" "$key")
-          [ -z "$batch_files" ] || payload="signal: $batch_files"
+          if [ -n "$batch_files" ]; then
+            payload="signal: $batch_files"
+          else
+            payload="signal batch record missing: $key"
+          fi
           ;;
       esac
     fi

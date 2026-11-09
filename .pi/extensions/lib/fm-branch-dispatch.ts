@@ -199,27 +199,16 @@ function hasOpenNeedsDecision(
 // The status files a signal row names. A legacy row is keyed by one status
 // filename; a coalesced batch row is keyed by a stable batch identity whose
 // full batch list lives in the private batch-path record bin/fm-watch.sh writes
-// beside the queue (see its signal_record_batch_paths). The queued payload is a
-// compact summary - counts, up to five status paths, a "+N more" suffix - so it
-// is only a fallback for a record that has already rolled out of its bound. An
-// empty result is an unresolvable row, which the caller treats as a scan veto
-// exactly as before.
+// beside the queue (see its signal_record_batch_paths). An empty result is an
+// unresolvable row, which the caller treats as a scan veto so a missing record
+// surfaces rather than being classified from the compact summary alone.
 function signalRowFiles(key: string, payload: string, state: string): string[] {
   if (/^[A-Za-z0-9._-]+\.(?:status|turn-ended)$/.test(key)) return [key];
-  const match = /^signal:(.*)$/.exec(payload);
-  if (!match) return [];
-  const recorded = signalBatchPaths(state, key);
-  if (recorded.length > 0) return recorded;
-  // Only state-file tokens are paths: the summary's counts, labels, and
-  // "+N more" suffix are prose, and treating them as paths would veto the scan.
-  return match[1]
-    .split(/\s+/)
-    .filter((token) => /\.(?:status|turn-ended)$/.test(token))
-    .map((path) => path.split("/").pop() ?? path);
+  if (!/^signal:/.test(payload)) return [];
+  return signalBatchPaths(state, key);
 }
 
-// The basenames recorded for one batch key, or none when the record is absent
-// or has rolled past its bound.
+// The basenames recorded for one batch key, or none when the record is absent.
 function signalBatchPaths(state: string, key: string): string[] {
   let lines: string[];
   try {
