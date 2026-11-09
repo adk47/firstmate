@@ -113,14 +113,18 @@
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
 #                          inactive terminal outcome that still lacks its durable
 #                          upstream receipt
-#   check: secondmate wake-loop stalled: mate=<id> row=<seq> age=<seconds>s
+#   check: secondmate wake-loop stalled: mate=<id> row=<seq> age=<seconds>s branch=<idle|none>
 #                          the oldest valid row in an endpoint-recorded local
 #                          secondmate home's durable wake queue exceeded
 #                          FM_SECONDMATE_WAKE_STALL_SECS AND the mate's own
-#                          endpoint is not provably busy; a positive busy read
-#                          stays silent, while a failed capture or any
-#                          unprovable read still reports; observation is
-#                          read-only and one parent receipt suppresses repeats
+#                          endpoint is not provably busy AND the mate's Pi
+#                          supervision branch has not written its session
+#                          within that window; a positive busy read or a
+#                          branch mid-turn stays silent (branch work never
+#                          renders in the pane, so the pane alone cannot prove
+#                          idleness), while a failed capture or any unprovable
+#                          read still reports; observation is read-only and
+#                          one parent receipt suppresses repeats
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
 # no-op through the watcher singleton lock.
@@ -294,7 +298,11 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # A local secondmate's foreign queue is checked on every poll, but only after this
 # bounded age can it produce a parent notification.
-SECONDMATE_WAKE_STALL_SECS=${FM_SECONDMATE_WAKE_STALL_SECS:-60}
+# Fifteen minutes by default: a mate's supervision branch handles a wake inside
+# one model turn, and a measured healthy branch turn ran past four minutes while
+# the main pane sat idle; a sixty-second default reported that working mate as
+# stalled and the relaunch that followed cut its branch work off.
+SECONDMATE_WAKE_STALL_SECS=${FM_SECONDMATE_WAKE_STALL_SECS:-900}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
@@ -822,15 +830,35 @@ secondmate_oldest_queue_row() {  # <queue-path>
   ' "$queue" 2>/dev/null || true
 }
 
+# A Pi mate's supervision branch runs its model turn out of the pane, so the
+# busy contract above cannot see it; the branch session file it appends to is
+# the only evidence. busy when that file was written within the window, idle
+# when it exists but is older, none when the home has no branch session.
+secondmate_branch_state() {  # <home> <threshold-secs> -> idle|busy|none
+  local home=$1 threshold=$2 pointer session mtime now
+  pointer="$home/state/.branch-session"
+  [ -f "$pointer" ] && [ ! -L "$pointer" ] || { printf 'none'; return 0; }
+  session=$(head -n 1 "$pointer" 2>/dev/null || true)
+  case "$session" in
+    /*) ;;
+    ?*) session="$home/state/$session" ;;
+    *) printf 'none'; return 0 ;;
+  esac
+  [ -f "$session" ] || { printf 'none'; return 0; }
+  mtime=$(stat -c %Y "$session" 2>/dev/null || stat -f %m "$session" 2>/dev/null || echo 0)
+  now=$(date +%s)
+  if [ $((now - mtime)) -lt "$threshold" ]; then printf 'busy'; else printf 'idle'; fi
+}
+
 # Surface one durable parent check for one unchanged foreign row after its
 # bounded age. The primary marker and queued-key check make repeated watcher
 # cycles converge without a notification storm, while an empty queue removes
 # only this home's marker so a later row can be observed.
 secondmate_wake_stall_tick() {
   local now=$(( $(date +%s) )) threshold=$SECONDMATE_WAKE_STALL_SECS
-  local meta task kind remote_host home queue row epoch seq row_key marker receipt receipt_dir notify_key queued age reason verdict
+  local meta task kind remote_host home queue row epoch seq row_key marker receipt receipt_dir notify_key queued age reason verdict branch_state
   local backend target harness label
-  case "$threshold" in ''|*[!0-9]*|0) threshold=60 ;; esac
+  case "$threshold" in ''|*[!0-9]*|0) threshold=900 ;; esac
   # Endpoint metadata admits this queue-loop check; secondmate-liveness owns registered mates whose endpoint is missing or dead.
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -883,6 +911,13 @@ EOF
     label="fm-$task"
     verdict=$(fm_busy_classify_live "$backend" "$target" "$harness" "$task" "$STATE" "$label")
     [ "${verdict%% *}" = busy ] && continue
+    # The branch read leaves no marker either, so a mate skipped here is still
+    # reported if it later goes idle with the same row unconsumed.
+    branch_state=$(secondmate_branch_state "$home" "$threshold")
+    if [ "$branch_state" = busy ]; then
+      triage_log "secondmate $task queue row $seq aged ${age}s but its supervision branch is mid-turn"
+      continue
+    fi
     row_key="$epoch-$seq"
     receipt="$receipt_dir/$row_key"
     if [ -e "$marker" ] || [ -L "$marker" ]; then
@@ -891,7 +926,7 @@ EOF
     [ "$(cat "$marker" 2>/dev/null || true)" = "$row_key" ] && continue
     [ "$(cat "$receipt" 2>/dev/null || true)" = "$row_key" ] && continue
     notify_key="secondmate-wake-loop-$task-$row_key"
-    reason="check: secondmate wake-loop stalled: mate=$task row=$seq age=${age}s"
+    reason="check: secondmate wake-loop stalled: mate=$task row=$seq age=${age}s branch=$branch_state"
     queued=$(fm_wake_queued_keys check)
     if ! printf '%s\n' "$queued" | grep -Fx "$notify_key" >/dev/null 2>&1; then
       fm_wake_append check "$notify_key" "$reason" || return 1

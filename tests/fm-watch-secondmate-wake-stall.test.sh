@@ -147,7 +147,7 @@ test_idle_mate_from_real_spawn_reports() {
 
   grep -F 'check: secondmate wake-loop stalled: mate=mate row=7 age=' "$out" >/dev/null \
     || fail "an idle mate's aged row did not report: $(cat "$out"); err=$(cat "$dir/watch.err")"
-  grep -E 'check: secondmate wake-loop stalled: mate=mate row=7 age=[0-9]+s$' "$out" >/dev/null \
+  grep -E 'check: secondmate wake-loop stalled: mate=mate row=7 age=[0-9]+s branch=none$' "$out" >/dev/null \
     || fail "the reported reason text changed shape: $(cat "$out")"
   [ -s "$state/.wake-queue" ] || fail "the idle mate's stall was not published durably"
   [ -e "$state/.secondmate-wake-stall-mate" ] \

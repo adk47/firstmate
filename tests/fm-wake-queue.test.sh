@@ -321,6 +321,72 @@ SH
   pass "foreign secondmate queue stalls notify once, remain byte-stable, and stay quiet when empty or healthy"
 }
 
+# One fixture per direction for the supervision-branch read. A mate whose
+# branch is mid-turn has a queue that is merely behind its own work, and the
+# pane never shows that work, so the pane busy gate (pinned by
+# tests/fm-watch-secondmate-wake-stall.test.sh) cannot see it; reporting it
+# as stalled invites a relaunch that cuts the branch work off. Only an idle
+# branch may report, and the reason must carry the evidence that was read.
+secondmate_stall_fixture() {  # <name> -> prints dir; creates $dir/secondmate home and meta for mate
+  local name=$1 dir state sub
+  dir=$(make_case "$name")
+  state="$dir/state"
+  sub="$dir/secondmate"
+  mkdir -p "$sub/state" "$sub/data" "$sub/bin" "$dir/fake-tmux"
+  printf '# Firstmate\n' > "$sub/AGENTS.md"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=pi\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  printf '%s\t7\tsignal\trouted\tsignal: routed row\n' "$(( $(date +%s) - 10 ))" > "$sub/state/.wake-queue"
+  printf '> \n' > "$dir/fake-tmux/pane.txt"
+  printf '%s\n' "$dir"
+}
+
+secondmate_stall_checkpoint() {  # <dir> <out-name> [<stall-secs>]
+  local dir=$1 out=$2 secs=${3:-1}
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$dir/state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
+    FM_SECONDMATE_WAKE_STALL_SECS="$secs" FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 > "$dir/$out.out" 2> "$dir/$out.err" || true
+}
+
+test_secondmate_stall_stays_quiet_while_branch_is_mid_turn() {
+  local dir sub
+  dir=$(secondmate_stall_fixture secondmate-stall-busy-branch)
+  sub="$dir/secondmate"
+  mkdir -p "$sub/state/branch-session"
+  printf '{"type":"message"}\n' > "$sub/state/branch-session/turn.jsonl"
+  printf '%s\n' "$sub/state/branch-session/turn.jsonl" > "$sub/state/.branch-session"
+  # The row is ten seconds old and the branch wrote its session just now, so a
+  # five-second window ages the row past the threshold while the branch write
+  # still falls inside it.
+  secondmate_stall_checkpoint "$dir" watch-busy-branch 5
+  ! grep -F 'secondmate wake-loop stalled' "$dir/watch-busy-branch.out" >/dev/null \
+    || fail "a mate whose branch is mid-turn was reported as stalled: $(cat "$dir/watch-busy-branch.out")"
+  [ ! -e "$dir/state/.secondmate-wake-stall-mate" ] \
+    || fail "a branch-busy mate left a stall marker"
+  pass "an aged foreign row behind a supervision branch turn is not a stall"
+}
+
+test_secondmate_stall_reports_idle_branch_with_evidence() {
+  local dir sub
+  dir=$(secondmate_stall_fixture secondmate-stall-idle)
+  sub="$dir/secondmate"
+  mkdir -p "$sub/state/branch-session"
+  printf '{"type":"message"}\n' > "$sub/state/branch-session/old.jsonl"
+  touch -d '1 hour ago' "$sub/state/branch-session/old.jsonl" 2>/dev/null \
+    || touch -t "$(date -v-1H +%Y%m%d%H%M 2>/dev/null || date +%Y%m%d%H%M)" "$sub/state/branch-session/old.jsonl"
+  printf '%s\n' "$sub/state/branch-session/old.jsonl" > "$sub/state/.branch-session"
+  secondmate_stall_checkpoint "$dir" watch-idle
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7' "$dir/watch-idle.out" >/dev/null \
+    || fail "an idle mate with an aged row did not report: $(cat "$dir/watch-idle.out"); err=$(cat "$dir/watch-idle.err")"
+  grep -E ' branch=idle$' "$dir/watch-idle.out" >/dev/null \
+    || fail "the stall reason did not carry its branch evidence: $(cat "$dir/watch-idle.out")"
+  pass "an idle branch with an aged row reports once with the evidence it read"
+}
+
 test_secondmate_stall_marker_rejects_symlink() {
   local dir state sub fakebin marker outside expected
   dir=$(make_case secondmate-stall-marker-symlink)
@@ -1606,6 +1672,8 @@ test_bounded_lock_handoff_after_contention
 test_live_presentation_holder_is_deadlined_without_weakening_ack
 test_malformed_presentation_lock_reports_acquire_failure
 test_secondmate_foreign_queue_stall_is_one_shot_and_read_only
+test_secondmate_stall_stays_quiet_while_branch_is_mid_turn
+test_secondmate_stall_reports_idle_branch_with_evidence
 test_secondmate_stall_marker_rejects_symlink
 test_acknowledged_stall_publication_survives_pre_marker_crash
 test_empty_prefix_mate_preserves_other_mate_receipt
