@@ -128,7 +128,16 @@ jobs:
   # whose "ofN" disagrees with it (docs/fm-test-portable-shards.md).
   tests-portable-serial:
     name: Behavior portable serial ${{ matrix.shard }}
-    runs-on: ubuntu-latest
+    # Pin this job rather than ubuntu-latest: latest resolves to 25.10, which
+    # ships coreutils as the uutils multicall binary, and uutils `mkdir` is not
+    # atomic (2-3 winners in 114/300 concurrent rounds, against 0/300 on GNU
+    # coreutils 9.4). bin/fm-remote-job-lib.sh's fm_remote_job_next_seq uses
+    # mkdir as its sole uniqueness arbiter, so on 25.10 the claim stops being
+    # unique and monotonic, reproducing the `1 2 3 ... 16 17 17 18 19` duplicate
+    # this lane reported. tests/fm-remote-transport-lanes.test.sh owns the
+    # 20-way uniqueness assertion. The durable atomic-arbiter replacement is
+    # separate follow-up work.
+    runs-on: ubuntu-24.04
     # Measured whole remainder is ~98 min of serial work. Eight shards put
     # ~12.3 min of it on each runner; five put ~19.7 min, which was enough
     # heavy subprocess work on a 2-core runner that concurrency and timing
