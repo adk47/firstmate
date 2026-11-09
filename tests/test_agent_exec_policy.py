@@ -178,8 +178,10 @@ class Mutations(unittest.TestCase):
         self.assertFails("tools.allow/alsoAllow names ['exec']")
 
     def test_exec_security_deny_on_a_codex_agent_is_the_openrouter_trap(self):
+        # cto, not finance: finance is DENIED since 2026-11-09 ([key=exec-posture-lapsed]) and a denied agent has no
+        # `tools.exec` block to mistype, so it can no longer stand in for the trap this test is about.
         def f(c):
-            s = self.agent(c, "finance")
+            s = self.agent(c, "cto")
             s["tools"] = {"exec": {"security": "deny"}}
         self.edit("openclaw-main.json", f)
         self.assertFails("fallback runner silently moves it to openrouter")
@@ -191,16 +193,19 @@ class Mutations(unittest.TestCase):
         self.assertGreaterEqual(sum("openrouter" in e for e in errors), 9)
 
     def test_expired_full_fails_the_day_after(self):
+        # The ON-date tick must stay clean (a dated exception is valid THROUGH its date) and the day after must fail:
+        # that boundary is what makes an expired posture resolve to denied rather than to "carry on".
+        self.edit(chk.REGISTRY, lambda r: r["profiles"]["openclaw-main.json"]["cto"].update(expires="2026-11-08"))
         self.assertEqual(self.run_check(today=dt.date(2026, 11, 8))[0], 0)
-        self.assertFails("finance: posture=full EXPIRED on 2026-11-08", today=dt.date(2026, 11, 9))
+        self.assertFails("cto: posture=full EXPIRED on 2026-11-08", today=dt.date(2026, 11, 9))
 
     def test_expiry_more_than_31_days_out_fails(self):
         self.edit(chk.REGISTRY, lambda r: r["profiles"]["openclaw-main.json"]["cto"].update(expires="2027-01-01"))
         self.assertFails("more than 31 days out")
 
     def test_full_without_reason_fails(self):
-        self.edit(chk.REGISTRY, lambda r: r["profiles"]["openclaw-main.json"]["qa"].update(reason=""))
-        self.assertFails("qa: posture=full needs a non-empty 'reason'")
+        self.edit(chk.REGISTRY, lambda r: r["profiles"]["openclaw-main.json"]["cto"].update(reason=""))
+        self.assertFails("cto: posture=full needs a non-empty 'reason'")
 
     def test_unregistered_agent_fails(self):
         self.edit("openclaw-main.json", lambda c: c["agents"]["list"].append(
@@ -233,10 +238,68 @@ class Mutations(unittest.TestCase):
         self.assertFails("support: RE-GRANT", base="HEAD")
 
     def test_expiry_extension_is_visible(self):
-        self.edit(chk.REGISTRY, lambda r: r["profiles"]["openclaw-main.json"]["qa"].update(expires="2026-11-20"))
+        self.edit(chk.REGISTRY, lambda r: r["profiles"]["openclaw-main.json"]["cto"].update(expires="2026-11-20"))
         rc, _, notes = self.run_check(base="HEAD")
         self.assertEqual(rc, 0)
-        self.assertTrue(any("qa: expiry EXTENDED 2026-11-08 -> 2026-11-20" in n for n in notes))
+        self.assertTrue(any("cto: expiry EXTENDED 2026-11-15 -> 2026-11-20" in n for n in notes))
+
+    # ── pre-expiry warning window ([key=exec-posture-lapsed] 2026-11-09) ──────────────────────────────────────
+    # The lapse burned a deploy because the FIRST alarm about an expiring exception fired the day AFTER it lapsed, so
+    # the picture for a whole week beforehand was "ok, full until <date>". These pin that window: the date and the
+    # countdown must appear, the row must not read as clean inside it, and it must never become a deploy blocker.
+
+    def _expiring_cto(self, expires="2026-11-15"):
+        self.edit(chk.REGISTRY, lambda r: r["profiles"]["openclaw-main.json"]["cto"].update(expires=expires))
+
+    def test_inside_the_window_the_row_does_not_read_as_ok(self):
+        self._expiring_cto()
+        rc, errors, notes = self.run_check(today=dt.date(2026, 11, 10))   # 5d left
+        self.assertEqual((rc, errors), (0, []))
+        self.assertFalse(any(n.startswith("openclaw-main.json:cto: full until") for n in notes),
+                         "a row inside the window must not print the clean `full until` line")
+        self.assertTrue(any("::warning::openclaw-main.json:cto: full exception expires 2026-11-15 - in 5d" in n
+                            for n in notes), notes)
+
+    def test_the_warning_names_the_date_and_the_countdown(self):
+        self._expiring_cto()
+        _, _, notes = self.run_check(today=dt.date(2026, 11, 13))
+        warning = next(n for n in notes if "::warning::openclaw-main.json:cto: full exception expires" in n)
+        self.assertIn("2026-11-15", warning)          # the DATE, so nobody has to go looking
+        self.assertIn("in 2d", warning)               # ...and the countdown
+        self.assertIn("deny exec", warning)           # both exits are named, the fail-safe first
+        self.assertIn("new ruling", warning)
+
+    def test_the_last_day_reads_TODAY_not_zero_days(self):
+        self._expiring_cto()
+        _, _, notes = self.run_check(today=dt.date(2026, 11, 15))
+        self.assertTrue(any("expires 2026-11-15 - TODAY" in n for n in notes), notes)
+        self.assertEqual(self.run_check(today=dt.date(2026, 11, 15))[0], 0)
+
+    def test_outside_the_window_stays_a_plain_note(self):
+        self._expiring_cto("2026-11-25")               # 24d out from TODAY
+        rc, errors, notes = self.run_check()
+        self.assertEqual((rc, errors), (0, []))
+        self.assertFalse(any("full exception expires" in n for n in notes), notes)
+        self.assertTrue(any("cto: full until 2026-11-25 (24d left)" in n for n in notes), notes)
+
+    def test_fail_on_expiring_turns_the_warning_into_rc_4(self):
+        # Deploy and PR CI leave the flag OFF (an approaching expiry must not block the deploy carrying the fix);
+        # the watchdog uses it, because it wants a failure it can page on rather than prose it has to parse.
+        self._expiring_cto()
+        self.assertEqual(self.run_check(today=dt.date(2026, 11, 10))[0], 0)
+        self.assertEqual(self.run_check(today=dt.date(2026, 11, 10), fail_on_expiring=True)[0], 4)
+        self.assertEqual(self.run_check(today=dt.date(2026, 10, 20), fail_on_expiring=True)[0], 0)  # outside
+
+    def test_a_violation_beats_the_warning(self):
+        # rc must not degrade to "just expiring" when something is actually wrong.
+        self._expiring_cto()
+        self.edit("openclaw-main.json", lambda c: self.agent(c, "scout")["tools"]["deny"].remove("exec"))
+        self.assertEqual(self.run_check(today=dt.date(2026, 11, 10), fail_on_expiring=True)[0], 1)
+
+    def test_denied_rows_never_warn(self):
+        # finance/qa were denied on 2026-11-09: a denied row has no date to expire, so it must never be a warning.
+        _, _, notes = self.run_check(today=dt.date(2026, 11, 10))
+        self.assertFalse(any("finance: full exception" in n or "qa: full exception" in n for n in notes), notes)
 
     def test_unknown_posture_fails(self):
         self.edit(chk.REGISTRY, lambda r: r["profiles"]["openclaw-main.json"]["ceo"].update(posture="allowlist"))

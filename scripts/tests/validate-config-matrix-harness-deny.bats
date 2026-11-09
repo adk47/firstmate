@@ -75,19 +75,27 @@ JSON
   declare_model_catalog
 }
 
-# Append `scout` with its REAL deny (read from the repo's openclaw-main.json, so this
-# cannot drift) to the current fixture. Any openclaw-main.json fixture needs it once
-# scout carries excepted denies: without scout those exception rows are judged
-# STALE, which is the gate working, not the case under test.
-# $1 (optional) = jq filter applied to scout's deny array (default: unchanged).
-add_scout_agent() {
+# Append an agent with its REAL deny (read from the repo's openclaw-main.json, so this
+# cannot drift) to the current fixture. Any openclaw-main.json fixture needs one of these
+# per agent that carries excepted denies: without the agent those exception rows are
+# judged STALE, which is the gate working, not the case under test.
+# $1 = agent id. $2 (optional) = jq filter applied to that agent's deny array.
+add_excepted_agent() {
+  local aid="$1"
   local deny
-  deny=$(jq -c --argjson d "$(jq -c '.agents.list[] | select(.id=="scout") | .tools.deny' "$HYDRA_REPO/openclaw-main.json")" \
-    -n "\$d | ${1:-.}")
-  jq --argjson deny "$deny" '.agents.list += [{"id":"scout","thinkingDefault":"medium",
+  deny=$(jq -c --argjson d "$(jq -c --arg a "$aid" '.agents.list[] | select(.id==$a) | .tools.deny' "$HYDRA_REPO/openclaw-main.json")" \
+    -n "\$d | ${2:-.}")
+  jq --argjson deny "$deny" --arg a "$aid" '.agents.list += [{"id":$a,"thinkingDefault":"medium",
       "model":{"primary":"openai/gpt-5.6-sol","fallbacks":["openrouter/deepseek/deepseek-v4.1-flash-1017"]},
       "tools":{"deny":$deny}}]' "$PROFILE" > "$PROFILE.tmp" && mv "$PROFILE.tmp" "$PROFILE"
 }
+
+# scout's shell lockdown (exec-lever 2026-11-01). $1 (optional) = jq filter on its deny.
+add_scout_agent() { add_excepted_agent scout "${1:-.}"; }
+
+# qa + finance were DENIED on 2026-11-09 ([key=exec-posture-lapsed]) and carry the same
+# six excepted denies as scout, so every openclaw-main.json fixture needs them too.
+add_qa_and_finance_agents() { add_excepted_agent qa; add_excepted_agent finance; }
 
 # Same fixture, converted to the keyed `.agents.entries{}` form the >=2026.8
 # doctor understands. DERIVED from write_policy_profile rather than hand-written,
@@ -223,6 +231,7 @@ SUPPORT_DENY='["exec","credits_verify","credit_verification_check","profiles_cla
 @test "check8: documented exception (main:operations:web_search) PASSES" {
   write_policy_profile '{"deny":["web_fetch","web_search"]}' 'operations' 'openclaw-main.json'
   add_scout_agent
+  add_qa_and_finance_agents
   run "$SCRIPT" "$PROFILE"
   [ "$status" -eq 0 ]
 }
@@ -230,9 +239,30 @@ SUPPORT_DENY='["exec","credits_verify","credit_verification_check","profiles_cla
 @test "check8: documented exception (main:scout shell lockdown, exec-lever 2026-11-01) PASSES" {
   write_policy_profile '{"deny":["web_fetch","web_search"]}' 'operations' 'openclaw-main.json'
   add_scout_agent
+  add_qa_and_finance_agents
   jq -e '.agents.list[] | select(.id=="scout") | .tools.deny | index("lobster")' "$PROFILE" >/dev/null
   run "$SCRIPT" "$PROFILE"
   [ "$status" -eq 0 ]
+}
+
+@test "check8: documented exception (main:qa + main:finance shell lockdown, exec-posture-lapsed 2026-11-09) PASSES" {
+  # The deny that unblocked the deploy: both agents carry the same six excepted denies.
+  write_policy_profile '{"deny":["web_fetch","web_search"]}' 'operations' 'openclaw-main.json'
+  add_scout_agent
+  add_qa_and_finance_agents
+  jq -e '.agents.list[] | select(.id=="qa") | .tools.deny | index("exec")' "$PROFILE" >/dev/null
+  run "$SCRIPT" "$PROFILE"
+  [ "$status" -eq 0 ]
+}
+
+@test "check8: qa dropping exec leaves a STALE exception (red build, never a silent re-open)" {
+  write_policy_profile '{"deny":["web_fetch","web_search"]}' 'operations' 'openclaw-main.json'
+  add_scout_agent
+  add_excepted_agent qa 'map(select(. != "exec"))'
+  add_excepted_agent finance
+  run "$SCRIPT" "$PROFILE"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'STALE EXCEPTION "openclaw-main.json:qa:exec"'* ]]
 }
 
 @test "check8: scout dropping lobster leaves a STALE exception (red build, never a silent re-open)" {
@@ -282,6 +312,7 @@ SUPPORT_DENY='["exec","credits_verify","credit_verification_check","profiles_cla
   # main-profile fixture — it is not applicable to this file, not stale.
   write_policy_profile '{"deny":["web_fetch","web_search"]}' 'operations' 'openclaw-main.json'
   add_scout_agent
+  add_qa_and_finance_agents
   run "$SCRIPT" "$PROFILE"
   [ "$status" -eq 0 ]
   [[ "$output" != *"support"* ]]
