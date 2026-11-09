@@ -346,6 +346,70 @@ class Mutations(unittest.TestCase):
         self.assertEqual(sorted(registry()["profiles"]["openclaw-main.json"]["qa"]["grants"]),
                          sorted(claim["grants"]))
 
+    # ── the claim binds on EVERY run, not just on the denied->full crossing (qa-review 5832644136) ────────────
+    # `check_base` consults a claim only when the base was DENIED. Once this PR merges, qa is full on base and that
+    # branch is dead, so on head 1074f8b7a a data-only expiry bump (still inside the 31-day cap) and a deleted
+    # claim both returned rc=0 on the DEPLOY path, which passes no --base at all.
+
+    def _claim_bound(self):
+        """Every REGRANT_ALLOWLIST key must also be CLAIM_BOUND, or the binding silently does not apply."""
+        self.assertTrue(chk.REGRANT_ALLOWLIST)
+        self.assertEqual(set(chk.REGRANT_ALLOWLIST), set(chk.CLAIM_BOUND))
+
+    def test_every_claim_is_also_claim_bound(self):
+        # The pair cannot drift: a future re-grant added to one table but not the other would be unconstrained
+        # again, and nothing else in this suite would notice.
+        self._claim_bound()
+
+    def test_a_claim_bound_full_row_cannot_be_extended_by_data_alone(self):
+        # The reported scenario: qa is already full (the merged state), someone moves expires to 2026-12-11, which
+        # is 31 days from 2026-11-10 and therefore inside MAX_EXPIRY_DAYS - the cap alone never catches it.
+        self.edit(chk.REGISTRY, lambda r: r["profiles"]["openclaw-main.json"]["qa"].update(expires="2026-12-11"))
+        rc, errors, _ = self.run_check(today=dt.date(2026, 11, 10))
+        self.assertEqual(rc, 1, errors)
+        self.assertTrue(any("a renewal past the reviewed date is a new ruling, not a data edit" in e
+                            for e in errors), errors)
+
+    def test_the_deploy_path_enforces_the_binding_without_a_base(self):
+        # deploy.sh:2050 runs the checker with NO --base, so the binding must hold on the head alone. Pinned
+        # separately from the case above so a future change that only enforces under --base fails here.
+        self._claim_bound()
+        self.edit(chk.REGISTRY, lambda r: r["profiles"]["openclaw-main.json"]["qa"].update(expires="2026-12-11"))
+        rc, errors, _ = chk.run(root=self.tmp, today=dt.date(2026, 11, 10))  # no base= keyword at all
+        self.assertEqual(rc, 1, errors)
+
+    def test_deleting_the_claim_from_a_claim_bound_row_fails_closed(self):
+        # Deleting the claim is NOT how a re-grant is revoked. Before this, the row simply became an ordinary full
+        # posture with no expiry binding at all.
+        self.edit(chk.REGISTRY, lambda r: r["profiles"]["openclaw-main.json"]["qa"].update(expires="2026-12-09"))
+        saved = dict(chk.REGRANT_ALLOWLIST)
+        try:
+            chk.REGRANT_ALLOWLIST.clear()
+            self.assertFails("CLAIM-BOUND but REGRANT_ALLOWLIST carries no claim")
+        finally:
+            chk.REGRANT_ALLOWLIST.clear()
+            chk.REGRANT_ALLOWLIST.update(saved)
+
+    def test_revoking_a_claim_bound_row_means_deleting_the_claim_AND_denying_it(self):
+        # The intended exit: the half-finished revocation is loud, the complete one is clean.
+        def deny(c):
+            self.agent(c, "qa")["tools"].update(deny=list(self.QA_DENY))
+        self.edit("openclaw-main.json", deny)
+        self.edit(chk.REGISTRY, lambda r: r["profiles"]["openclaw-main.json"].update(qa={"posture": "denied"}))
+        saved = dict(chk.REGRANT_ALLOWLIST)
+        try:
+            chk.REGRANT_ALLOWLIST.clear()
+            rc, errors, _ = chk.run(root=self.tmp, today=dt.date(2026, 11, 10))
+            self.assertEqual((rc, errors), (0, []))
+        finally:
+            chk.REGRANT_ALLOWLIST.clear()
+            chk.REGRANT_ALLOWLIST.update(saved)
+
+    def test_a_claim_bound_row_must_cite_the_claim_ruling(self):
+        self.edit(chk.REGISTRY,
+                  lambda r: r["profiles"]["openclaw-main.json"]["qa"].update(ruling="renewed, trust me"))
+        self.assertFails("the row's `ruling` does not cite it")
+
     def test_removing_the_claim_closes_the_regrant(self):
         self._qa_from_denied_base()
         saved = dict(chk.REGRANT_ALLOWLIST)

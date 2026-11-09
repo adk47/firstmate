@@ -70,6 +70,23 @@ REGRANT_ALLOWLIST = {
         "grants": ("exec",),
     },
 }
+# Agents whose `full` posture is BOUND to the claim above - checked on EVERY run, not only on the denied->full
+# crossing (qa-review findings 5832032402 and 5832644136).
+#
+# Why a second table: `check_base` only consults a claim when the base was DENIED. Once this PR merges, qa is
+# `full` on base and that branch never runs again, so the claim stopped constraining anything: measured on
+# 1074f8b7a, setting qa `expires` to 2026-12-11 (still inside the 31-day cap, so no other check fires) or
+# DELETING the claim outright while qa stayed `full` both returned rc=0 on the deploy path, where `--base` is not
+# passed (deploy.sh:2050). Either one silently renews the untrusted-PR-reading agent past its reviewed date, or
+# turns a reviewed exec-only re-grant into an open-ended full posture, with nothing red anywhere.
+#
+# The rule: while a row is at `full`, its claim's `expires` and `ruling` are authoritative and the row must match
+# them, and a CLAIM-BOUND row with NO claim is an ERROR. Revoking therefore takes TWO changes - delete the claim
+# AND deny exec - which is the fail-closed direction: the half-finished revocation is loud instead of silent.
+# Every key here must also appear in REGRANT_ALLOWLIST (`test_every_claim_is_also_claim_bound` pins the pair).
+CLAIM_BOUND = frozenset({
+    ("openclaw-main.json", "qa"),
+})
 # Start warning this many days before a dated exception lapses. A week is long enough to write an exit plan or take a
 # ruling, and short enough that the warning is still about the next deploy rather than background noise.
 EXPIRY_WARNING_DAYS = 7
@@ -220,6 +237,35 @@ def _date(value, where, errors):
         return None
 
 
+def _check_claim_binding(where: str, entry: dict, claim: dict | None, bound: bool, errors: list) -> None:
+    """A `full` posture that exists only because a ruling granted it stays bound to that claim FOREVER.
+
+    `check_base` consults the claim only when the base was denied, which is the crossing. After the merge this
+    row is `full` on base, so that branch is dead and, without this function, the claim constrains nothing: a
+    data-only expiry bump or a deleted claim both passed every check on 1074f8b7a.
+
+    The two halves, deliberately asymmetric:
+      * bound and NO claim -> error. Deleting the claim is not how a re-grant is revoked; revocation is the claim
+        removed AND the row denied, so a half-finished one is loud.
+      * bound and a claim -> the claim's `expires` and `ruling` are authoritative. The row may not outlive or
+        re-attribute what was reviewed. (Width is `_check_grants`' job.)
+    """
+    if not bound:
+        return
+    if claim is None:
+        errors.append(f"{where}: posture=full is CLAIM-BOUND but REGRANT_ALLOWLIST carries no claim for it - "
+                      "deleting the claim does not revoke a re-grant (deny exec as well); with no claim nothing "
+                      "dates or narrows this posture")
+        return
+    if str(entry.get("expires")) != str(claim["expires"]):
+        errors.append(f"{where}: posture=full expires {entry.get('expires')!r} but the claim it is bound to "
+                      f"({claim['ruling']}) authorises {claim['expires']} - a renewal past the reviewed date is a new "
+                      "ruling, not a data edit (the 31-day cap alone will not catch it once the date is inside it)")
+    if str(claim["ruling"]) not in str(entry.get("ruling") or ""):
+        errors.append(f"{where}: posture=full is bound to claim {claim['ruling']} but the row's `ruling` does not "
+                      "cite it - the binding must be readable by the next person to touch this file")
+
+
 def _check_grants(where: str, cfg: dict, agent: dict, entry: dict, errors: list,
                   claim: dict | None = None) -> None:
     """A `grants` list is the reviewed width of a `full` posture, enforced against the CONFIG and the CLAIM.
@@ -302,7 +348,9 @@ def check_profile(profile: str, cfg: dict, reg: dict, today: dt.date, errors: li
             for k in ("reason", "exit", "ruling"):
                 if not str(entry.get(k) or "").strip():
                     errors.append(f"{where}: posture=full needs a non-empty '{k}'")
-            _check_grants(where, cfg, a, entry, errors, REGRANT_ALLOWLIST.get((profile, aid)))
+            claim = REGRANT_ALLOWLIST.get((profile, aid))
+            _check_claim_binding(where, entry, claim, (profile, aid) in CLAIM_BOUND, errors)
+            _check_grants(where, cfg, a, entry, errors, claim)
             exp = _date(entry.get("expires"), f"{where}.expires", errors)
             if exp is not None:
                 if today > exp:
