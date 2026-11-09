@@ -382,7 +382,6 @@
         "thinkingDefault": "high",
         "tools": {
           "deny": [
-            "exec",
             "process",
             "lobster",
             "nodes",
