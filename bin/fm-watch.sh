@@ -800,7 +800,7 @@ secondmate_oldest_queue_row() {  # <queue-path>
 # only this home's marker so a later row can be observed.
 secondmate_wake_stall_tick() {
   local now=$(( $(date +%s) )) threshold=$SECONDMATE_WAKE_STALL_SECS
-  local meta task kind remote_host home queue row epoch seq row_key marker receipt receipt_dir notify_key queued age reason
+  local meta task kind remote_host home queue row epoch seq row_key marker receipt receipt_dir notify_key queued age reason endpoint_window tail40
   case "$threshold" in ''|*[!0-9]*|0) threshold=60 ;; esac
   # Endpoint metadata admits this queue-loop check; secondmate-liveness owns registered mates whose endpoint is missing or dead.
   for meta in "$STATE"/*.meta; do
@@ -835,6 +835,20 @@ EOF
     case "$seq" in ''|*[!0-9]*) continue ;; esac
     age=$((now - epoch))
     [ "$age" -ge "$threshold" ] || continue
+    # A mate drains its own wake queue at turn start, never mid-turn, so ANY
+    # single turn longer than the threshold looks like a stalled loop while the
+    # mate is in fact working - the ordinary behaviour this rung exists to
+    # detect would satisfy the alarm. Suppress only on a POSITIVE busy read
+    # through the same semantic busy contract stale detection uses, never a
+    # second notion of busy. The capture sits inside the `if`, so a mate whose
+    # pane cannot be read is never silently exempted: a failed or empty capture
+    # falls straight through to the ordinary report, and an idle-or-unknown
+    # pane still reports with unchanged reason text. Nothing below the marker,
+    # receipt, dedupe, or notify-key shape changes.
+    endpoint_window=$(fm_meta_get "$meta" window)
+    if [ -n "$endpoint_window" ] && tail40=$(fm_backend_capture "$(window_backend "$endpoint_window")" "$endpoint_window" 40 "$(window_label "$endpoint_window")" 2>/dev/null); then
+      window_is_busy "$endpoint_window" "$tail40" && continue
+    fi
     row_key="$epoch-$seq"
     receipt="$receipt_dir/$row_key"
     if [ -e "$marker" ] || [ -L "$marker" ]; then
