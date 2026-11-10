@@ -20,7 +20,8 @@
 # fails it:
 #   real spawn, busy record   -> silent, and no marker/receipt side effect
 #   real spawn, idle event    -> reports with the unchanged reason text
-#   real spawn, capture fails -> still reports (a positive read is impossible)
+#   real spawn, capture fails -> silent (the semantic record still proves busy)
+#   grok, capture fails        -> still reports (no positive read is possible)
 #   grok rendered busy footer -> silent (the rendered fallback still suppresses)
 #
 # Residual gap, stated plainly: a harness with no semantic busy source (grok,
@@ -153,21 +154,43 @@ test_idle_mate_from_real_spawn_reports() {
   pass "an idle mate's aged row reports with the unchanged reason, marker, and publication"
 }
 
-# A mate whose pane cannot be captured has no positive busy read, so the rung
-# must still report. A capture failure is never a silent exemption.
-test_capture_failure_still_reports() {
+# A semantic busy record is positive proof of a turn in flight and does not
+# depend on the rendered pane, so a transient capture failure must not turn a
+# provably busy mate into a reported stall.
+test_capture_failure_does_not_override_semantic_busy() {
   local dir state out
   dir=$(make_spawned_mate capture-failure "$TMP_ROOT/unreadable-pane.txt" 1)
+  state="$dir/home/state"
+  out="$dir/watch.out"
+
+  [ -s "$state/mate.busy-state" ] \
+    || fail "the real secondmate spawn armed no busy record"
+
+  run_stall_checkpoint "$dir" 8 "$out"
+
+  ! grep -F 'secondmate wake-loop stalled' "$out" >/dev/null \
+    || fail "a failed pane capture overrode a provably busy mate: $(cat "$out"); err=$(cat "$dir/watch.err")"
+  [ ! -s "$state/.wake-queue" ] \
+    || fail "a failed pane capture published a false stall for a busy mate"
+  pass "a failed pane capture does not override a semantic busy record"
+}
+
+# A grok mate has no semantic record, so its only positive read is the rendered
+# tail. When the capture itself fails there is no positive read, and the rung
+# must still report rather than silently exempt the mate.
+test_grok_capture_failure_still_reports() {
+  local dir state out
+  dir=$(make_spawned_mate grok-capture-failure "$TMP_ROOT/grok-unreadable-pane.txt" 1 grok)
   state="$dir/home/state"
   out="$dir/watch.out"
 
   run_stall_checkpoint "$dir" 8 "$out"
 
   grep -F 'check: secondmate wake-loop stalled: mate=mate row=7 age=' "$out" >/dev/null \
-    || fail "a failed pane capture silently exempted the mate: $(cat "$out"); err=$(cat "$dir/watch.err")"
+    || fail "a grok mate with no readable pane was silently exempted: $(cat "$out"); err=$(cat "$dir/watch.err")"
   [ -s "$state/.wake-queue" ] \
-    || fail "a failed pane capture published no durable notification"
-  pass "a failed pane capture still reports the stall"
+    || fail "a grok mate with no readable pane published no durable notification"
+  pass "a grok capture failure still reports the stall"
 }
 
 # The residual gap, pinned so it cannot be forgotten: a grok mate arms no
@@ -205,7 +228,8 @@ test_grok_rendered_tail_decides_the_rung() {
 
 test_busy_mate_from_real_spawn_stays_silent
 test_idle_mate_from_real_spawn_reports
-test_capture_failure_still_reports
+test_capture_failure_does_not_override_semantic_busy
+test_grok_capture_failure_still_reports
 test_grok_rendered_tail_decides_the_rung
 
 echo "# all fm-watch-secondmate-wake-stall tests passed"
