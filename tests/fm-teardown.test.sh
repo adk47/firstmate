@@ -3531,7 +3531,7 @@ mwt_commit_file() {
   git -C "$wt" -c user.email=t@t -c user.name=t commit -q -m "$msg"
 }
 
-# Install an `orca` mock that still records the worktree at the prior path and
+# Install an `orca` mock that resolves the prior path to the live worktree and
 # removes it on `worktree rm`. Args: case_dir
 add_fake_orca() {
   local case_dir=$1 wt prior
@@ -3543,12 +3543,13 @@ case "\${1:-} \${2:-}" in
   "worktree show")
     case " \$* " in
       *"path:$prior"*)
-        printf '{"ok":true,"result":{"worktree":{"id":"live-id-1","path":"$prior"}}}\n'
+        printf '{"ok":true,"result":{"worktree":{"id":"live-id-1","path":"$wt"}}}\n'
         exit 0 ;;
     esac
     printf '{"ok":false,"error":{"code":"selector_not_found"}}\n' >&2
     exit 1 ;;
   "worktree rm")
+    printf 'removed\n' >> "$case_dir/orca-rm.log"
     rm -rf "$wt"
     git -C "$case_dir/project" worktree prune 2>/dev/null || true
     printf '{"ok":true,"result":{"removed":true}}\n'
@@ -3606,6 +3607,7 @@ test_migrated_orca_clean_worktree_removed() {
   expect_code 0 "$rc" "migrated-orca-clean: teardown should remove a clean migrated Orca worktree"
   ! grep -q REFUSED "$case_dir/stderr" || fail "migrated-orca-clean: teardown printed a REFUSED line"
   [ ! -e "$wt" ] || fail "migrated-orca-clean: the migrated Orca worktree was not removed"
+  [ -e "$case_dir/orca-rm.log" ] || fail "migrated-orca-clean: Orca removal was not invoked"
   [ ! -e "$case_dir/state/task-x1.meta" ] || fail "migrated-orca-clean: the task meta was not removed"
   pass "a clean migrated Orca worktree is removed through Orca"
 }
