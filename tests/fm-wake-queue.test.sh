@@ -415,7 +415,7 @@ SH
 }
 
 test_empty_prefix_mate_preserves_other_mate_receipt() {
-  local dir state empty stalled fakebin epoch row_before round
+  local dir state empty stalled fakebin epoch row_before round gen
   dir=$(make_case secondmate-prefix-receipt)
   state="$dir/state"
   empty="$dir/ios"
@@ -424,12 +424,16 @@ test_empty_prefix_mate_preserves_other_mate_receipt() {
   printf 'ios\n' > "$empty/.fm-secondmate-home"
   printf 'ios-ui\n' > "$stalled/.fm-secondmate-home"
   printf 'window=firstmate:fm-ios\nkind=secondmate\nhome=%s\n' "$empty" > "$state/ios.meta"
-  printf 'window=firstmate:fm-ios-ui\nkind=secondmate\nhome=%s\n' "$stalled" > "$state/ios-ui.meta"
+  printf 'window=firstmate:fm-ios-ui\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' "$stalled" > "$state/ios-ui.meta"
   : > "$empty/state/.wake-queue"
   epoch=$(( $(date +%s) - 10 ))
   printf '%s\t9\tcheck\trouted\tcheck: routed row\n' "$epoch" > "$stalled/state/.wake-queue"
   row_before="$dir/foreign-before"
   cp "$stalled/state/.wake-queue" "$row_before"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" ios-ui) \
+    || fail "arming the idle ios-ui busy contract failed"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" ios-ui idle --gen "$gen" --source claude-hook --event stop \
+    || fail "applying the idle ios-ui verdict failed"
   append_wake "$state" check "secondmate-wake-loop-ios-ui-$epoch-9" \
     "check: secondmate wake-loop stalled: mate=ios-ui row=9 age=10s" \
     || fail "could not seed the ios-ui stall publication"
