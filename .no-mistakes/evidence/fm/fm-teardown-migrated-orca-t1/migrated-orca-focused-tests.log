@@ -1,0 +1,4 @@
+ok - a clean migrated Orca worktree is removed through Orca
+ok - a mismatched Orca path falls back to removing the inspected worktree
+ok - a dirty migrated Orca worktree is still refused
+ok - unlanded work in a migrated Orca worktree is still refused

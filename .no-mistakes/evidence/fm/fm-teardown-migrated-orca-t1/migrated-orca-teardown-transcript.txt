@@ -1,0 +1,70 @@
+Migrated Orca teardown - end-to-end CLI transcript
+Generated: 2026-11-10T22:55:12Z
+
+Each case is a real bin/fm-teardown.sh invocation against a sandboxed firstmate home.
+The task worktree lives under .../home/aaron/orca/workspaces/proj/fm-task-x1 and its meta carries only
+orca_worktree_id_prior=...::/Users/aaron/orca/workspaces/proj/fm-task-x1 (no orca_worktree_id).
+
+======================================================================
+CASE: migrated-orca-clean
+======================================================================
+--- teardown stdout ---
+teardown: removed migrated Orca worktree <sandbox>/migrated-orca-clean/home/aaron/orca/workspaces/proj/fm-task-x1 through Orca (live-id-1)
+<sandbox>/migrated-orca-clean/project: synced d69187a..78e5237
+teardown task-x1 complete (window firstmate:fm-task-x1, worktree <sandbox>/migrated-orca-clean/home/aaron/orca/workspaces/proj/fm-task-x1)
+Backlog: task-x1 just finished (this home keeps no backlog at <sandbox>/migrated-orca-clean/data/backlog.md). Update <sandbox>/migrated-orca-clean/data/backlog.md - move task-x1 to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due.
+--- teardown stderr (supervision banner omitted) ---
+--- orca worktree rm invoked? ---
+yes: removed
+--- inspected worktree still present? ---
+no
+--- task meta still present? ---
+no
+
+======================================================================
+CASE: migrated-orca-mismatch
+======================================================================
+--- teardown stdout ---
+teardown: removed migrated Orca worktree <sandbox>/migrated-orca-mismatch/home/aaron/orca/workspaces/proj/fm-task-x1 as a plain git worktree (Orca no longer tracks it)
+<sandbox>/migrated-orca-mismatch/project: synced e817c07..c269dba
+teardown task-x1 complete (window firstmate:fm-task-x1, worktree <sandbox>/migrated-orca-mismatch/home/aaron/orca/workspaces/proj/fm-task-x1)
+Backlog: task-x1 just finished (this home keeps no backlog at <sandbox>/migrated-orca-mismatch/data/backlog.md). Update <sandbox>/migrated-orca-mismatch/data/backlog.md - move task-x1 to Done, keep Done to the 10 most recent, then re-scan Queued and dispatch only work whose blockers are gone and date is due.
+--- teardown stderr (supervision banner omitted) ---
+--- orca worktree rm invoked? ---
+no
+--- inspected worktree still present? ---
+no
+--- task meta still present? ---
+no
+
+======================================================================
+CASE: migrated-orca-dirty
+======================================================================
+--- teardown stdout ---
+--- teardown stderr (supervision banner omitted) ---
+REFUSED: worktree <sandbox>/migrated-orca-dirty/home/aaron/orca/workspaces/proj/fm-task-x1 has uncommitted changes.
+uncommitted changes present
+Commit them (or get the captain's explicit OK to discard, then --force).
+--- orca worktree rm invoked? ---
+no
+--- inspected worktree still present? ---
+yes
+--- task meta still present? ---
+yes
+
+======================================================================
+CASE: migrated-orca-unpushed
+======================================================================
+--- teardown stdout ---
+--- teardown stderr (supervision banner omitted) ---
+REFUSED: worktree <sandbox>/migrated-orca-unpushed/home/aaron/orca/workspaces/proj/fm-task-x1 has work not on any remote and not landed.
+unpushed commits:
+155c673 add feature
+Push the branch, land its PR, or get the captain's explicit OK to discard, then --force.
+--- orca worktree rm invoked? ---
+no
+--- inspected worktree still present? ---
+yes
+--- task meta still present? ---
+yes
+
