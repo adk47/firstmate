@@ -2030,18 +2030,20 @@ migrated_orca_worktree_path() {
 # Orca worktree. Returns 0 when it removed it, 3 when this is not a migrated
 # Orca worktree (the caller then uses the treehouse path), and 1 on a real
 # failure. Orca is asked for the worktree it still records at the prior path;
-# the answer must name that same prior path, so a stale or wrong registry row
-# can never authorize a removal of a different directory.
+# the answer must canonicalize to the very directory the safety gates inspected,
+# so a stale or wrong registry row can never authorize a removal of a different
+# directory.
 teardown_migrated_orca_worktree() {
-  local meta=$1 wt=$2 proj=$3 prior prior_tail out id resolved
+  local meta=$1 wt=$2 proj=$3 prior out id resolved resolved_abs wt_abs
   prior=$(migrated_orca_worktree_path "$meta" "$wt") || return 3
-  prior_tail=${prior#/Users/*/}
   if fm_backend_source orca 2>/dev/null && command -v orca >/dev/null 2>&1 \
      && out=$(orca worktree show --worktree "path:$prior" --json 2>/dev/null) \
      && id=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-id 2>/dev/null) \
      && [ -n "$id" ] \
      && resolved=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-path 2>/dev/null) \
-     && case "$resolved" in */"$prior_tail") true ;; *) false ;; esac; then
+     && resolved_abs=$(canonical_existing_dir "$resolved") \
+     && wt_abs=$(canonical_existing_dir "$wt") \
+     && [ "$resolved_abs" = "$wt_abs" ]; then
     if fm_backend_remove_worktree orca "$id"; then
       echo "teardown: removed migrated Orca worktree $wt through Orca ($id)"
       return 0

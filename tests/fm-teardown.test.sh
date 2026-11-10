@@ -3559,6 +3559,34 @@ SH
   chmod +x "$case_dir/fakebin/orca"
 }
 
+# Install an `orca` mock that reports a different directory sharing the prior
+# path's tail. A removal through Orca would destroy that unchecked directory.
+# Args: case_dir decoy
+add_fake_orca_mismatched_path() {
+  local case_dir=$1 decoy=$2 prior
+  prior=/Users/aaron/orca/workspaces/proj/fm-task-x1
+  cat > "$case_dir/fakebin/orca" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "worktree show")
+    case " \$* " in
+      *"path:$prior"*)
+        printf '{"ok":true,"result":{"worktree":{"id":"live-id-1","path":"$decoy"}}}\n'
+        exit 0 ;;
+    esac
+    printf '{"ok":false,"error":{"code":"selector_not_found"}}\n' >&2
+    exit 1 ;;
+  "worktree rm")
+    printf 'removed\n' >> "$case_dir/orca-rm.log"
+    rm -rf "$decoy"
+    printf '{"ok":true,"result":{"removed":true}}\n'
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+}
+
 test_migrated_orca_clean_worktree_removed() {
   local case_dir rc wt
   case_dir=$(make_migrated_orca_case migrated-orca-clean)
@@ -3580,6 +3608,32 @@ test_migrated_orca_clean_worktree_removed() {
   [ ! -e "$wt" ] || fail "migrated-orca-clean: the migrated Orca worktree was not removed"
   [ ! -e "$case_dir/state/task-x1.meta" ] || fail "migrated-orca-clean: the task meta was not removed"
   pass "a clean migrated Orca worktree is removed through Orca"
+}
+
+test_migrated_orca_mismatched_path_not_removed() {
+  local case_dir rc wt decoy
+  case_dir=$(make_migrated_orca_case migrated-orca-mismatch)
+  wt=$(migrated_orca_wt "$case_dir")
+  decoy="$case_dir/decoy/orca/workspaces/proj/fm-task-x1"
+  mkdir -p "$decoy"
+  write_migrated_orca_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  mwt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$wt" rev-parse HEAD)"
+  add_fake_orca_mismatched_path "$case_dir" "$decoy"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "migrated-orca-mismatch: teardown should fall back to git removal"
+  [ ! -e "$wt" ] || fail "migrated-orca-mismatch: the inspected worktree was not removed"
+  [ -d "$decoy" ] || fail "migrated-orca-mismatch: Orca removed a directory the safety gates never inspected"
+  [ ! -e "$case_dir/orca-rm.log" ] || fail "migrated-orca-mismatch: Orca removal was invoked for a mismatched path"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "migrated-orca-mismatch: the task meta was not removed"
+  pass "a mismatched Orca path falls back to removing the inspected worktree"
 }
 
 test_migrated_orca_dirty_worktree_refuses() {
@@ -3709,5 +3763,6 @@ test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
 test_migrated_orca_clean_worktree_removed
+test_migrated_orca_mismatched_path_not_removed
 test_migrated_orca_dirty_worktree_refuses
 test_migrated_orca_unpushed_worktree_refuses
