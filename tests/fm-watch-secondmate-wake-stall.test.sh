@@ -17,7 +17,7 @@
 #   unarmed production layout -> silent (the reported false-stall defect)
 #   busy-contract-idle        -> reports with the unchanged reason text
 #   busy-contract-busy        -> silent, and no marker/receipt side effect
-#   capture failure           -> silent (an unprovable read is never a stall)
+#   capture failure           -> semantic idle still reports (capture is not proof)
 #   grok rendered fallback    -> silent (a rendered-text idle is not proof)
 #
 # Busy records are produced through the REAL writer, bin/fm-busy-event.sh arm
@@ -157,9 +157,10 @@ test_busy_mate_on_aged_row_stays_silent() {
   pass "an aged foreign row on a provably busy mate stays silent with no side effect"
 }
 
-# A mate whose pane cannot be read is unprovable, so the rung stays silent. The
-# idle record proves the capture gate is the only reason this case is silent.
-test_unreadable_mate_on_aged_row_stays_silent() {
+# A semantic idle record proves the mate is not working even when the pane
+# cannot be captured, so a transient capture failure must not suppress the
+# stall. Capture is only an input to the rendered-text fallbacks.
+test_semantic_idle_survives_capture_failure() {
   local dir state out gen
   dir=$(make_stall_case capture-failure "$TMP_ROOT/unreadable-pane.txt" 1)
   state="$dir/state"
@@ -170,11 +171,11 @@ test_unreadable_mate_on_aged_row_stays_silent() {
 
   run_stall_checkpoint "$dir" 8 "$out"
 
-  ! grep -F 'secondmate wake-loop stalled' "$out" >/dev/null \
-    || fail "a mate whose pane could not be captured was reported as a stall: $(cat "$out")"
-  [ ! -s "$state/.wake-queue" ] \
-    || fail "an uncapturable mate still published a durable notification"
-  pass "a failed pane capture stays silent"
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7 age=' "$out" >/dev/null \
+    || fail "a semantic idle verdict was suppressed by a failed pane capture: $(cat "$out")"
+  [ -s "$state/.wake-queue" ] \
+    || fail "a semantic idle verdict published no durable notification"
+  pass "a semantic idle verdict reports despite a failed pane capture"
 }
 
 # A grok mate has no semantic busy record, so the busy lib falls back to its
@@ -205,6 +206,6 @@ test_unarmed_mate_on_aged_row_stays_silent
 test_idle_mate_on_aged_row_reports
 test_grok_rendered_idle_on_aged_row_stays_silent
 test_busy_mate_on_aged_row_stays_silent
-test_unreadable_mate_on_aged_row_stays_silent
+test_semantic_idle_survives_capture_failure
 
 echo "# all fm-watch-secondmate-wake-stall tests passed"

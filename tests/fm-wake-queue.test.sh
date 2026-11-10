@@ -245,6 +245,12 @@ test_secondmate_foreign_queue_stall_is_one_shot_and_read_only() {
   row_before="$dir/foreign-before"
   row_after="$dir/foreign-after"
   cp "$sub/state/.wake-queue" "$row_before"
+  mkdir -p "$dir/fake-tmux"
+  printf 'Idle\n' > "$dir/fake-tmux/pane.txt"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" mate) \
+    || fail "arming the idle mate's busy contract failed"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" mate idle --gen "$gen" --source claude-hook --event stop \
+    || fail "applying the idle verdict failed"
   fakebin="$dir/fakebin"
   cat > "$fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -320,8 +326,12 @@ test_secondmate_stall_marker_rejects_symlink() {
   sub="$dir/secondmate"
   mkdir -p "$sub/state"
   printf 'mate\n' > "$sub/.fm-secondmate-home"
-  printf 'window=firstmate:fm-mate\nkind=secondmate\nhome=%s\n' "$sub" > "$state/mate.meta"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' "$sub" > "$state/mate.meta"
   printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$(( $(date +%s) - 10 ))" > "$sub/state/.wake-queue"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" mate) \
+    || fail "arming the idle mate's busy contract failed"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" mate idle --gen "$gen" --source claude-hook --event stop \
+    || fail "applying the idle verdict failed"
   outside="$dir/outside"
   expected='must remain unchanged'
   printf '%s\n' "$expected" > "$outside"
@@ -332,7 +342,7 @@ test_secondmate_stall_marker_rejects_symlink() {
 #!/usr/bin/env bash
 case "${1:-}" in
   list-windows) printf '%s\n' 'firstmate:fm-mate' ;;
-  capture-pane) : ;;
+  capture-pane) printf 'Idle\n' ;;
   display-message) printf '0\n' ;;
   *) exit 0 ;;
 esac
@@ -363,6 +373,10 @@ test_acknowledged_stall_publication_survives_pre_marker_crash() {
   printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$epoch" > "$sub/state/.wake-queue"
   row_before="$dir/foreign-before"
   cp "$sub/state/.wake-queue" "$row_before"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" mate) \
+    || fail "arming the idle mate's busy contract failed"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" mate idle --gen "$gen" --source claude-hook --event stop \
+    || fail "applying the idle verdict failed"
   append_wake "$state" check "secondmate-wake-loop-mate-$epoch-7" \
     "check: secondmate wake-loop stalled: mate=mate row=7 age=10s" \
     || fail "could not seed the pre-marker crash publication"
@@ -372,6 +386,18 @@ test_acknowledged_stall_publication_survives_pre_marker_crash() {
     || fail "pre-marker crash publication could not be acknowledged"
 
   fakebin="$dir/fakebin"
+  mkdir -p "$fakebin" "$dir/fake-tmux"
+  printf 'Idle\n' > "$dir/fake-tmux/pane.txt"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) printf '%s\n' 'firstmate:fm-mate' ;;
+  capture-pane) cat "${FM_FAKE_TMUX_CAPTURE:-/dev/null}" ;;
+  display-message) printf '0\n' ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
   out="$dir/watch.out"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
