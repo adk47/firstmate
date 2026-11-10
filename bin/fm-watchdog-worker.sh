@@ -51,6 +51,19 @@
 # endpoint, worktree, harness, model, and uncommitted work are preserved and the
 # note is the replacement agent's only carry-over context.
 #
+# PAUSED WORK. A captain-parked lane is not a lane that died, so the task
+# pass leaves it alone entirely: state/<id>.stopped (written only by
+# bin/fm-leave-stopped.sh, whose header owns the marker) is a plain file test,
+# and a backlog item the captain holds (tasks-axi list --state held, read once
+# per pass) is the same decision recorded in the backlog. Either one suppresses
+# every rung below - no re-ring, no relaunch, no connection action, and no
+# wake - and accrues no relaunch or stall history it never spent. Clearing the
+# marker or leaving held returns the lane to ordinary treatment on the next
+# pass. The hold set fails closed: if the backend is manual, the tool is
+# missing, or the read fails, the pass relaunches nothing and pages nothing per
+# task, and queues one instrument wake naming the unreadable hold set so the
+# captain knows no recovery ran.
+#
 # THE STALL LADDER. A live worker whose pane keeps one SHAPE for
 # no_progress_secs while it reads busy is stalled. Shape means printable ASCII
 # with digits folded and non-ASCII dropped, so a ticking timer, a spinner glyph,
@@ -374,11 +387,13 @@ record_load() {
   RECORD_BOOT=''
   RECORD_UNITS='{}'
   PRIOR_TASKS='{}'
+  PRIOR_BACKLOG='{}'
   if [ -f "$RECORD" ] && [ ! -L "$RECORD" ]; then
     [ "$(jq -r '.schema // 0' "$RECORD" 2>/dev/null)" = "$SCHEMA" ] || return 0
     RECORD_BOOT=$(jq -r '.boot_identity // ""' "$RECORD" 2>/dev/null)
     RECORD_UNITS=$(jq -c '.units // {}' "$RECORD" 2>/dev/null) || RECORD_UNITS='{}'
     PRIOR_TASKS=$(jq -c '.tasks // {}' "$RECORD" 2>/dev/null) || PRIOR_TASKS='{}'
+    PRIOR_BACKLOG=$(jq -c '.backlog // {}' "$RECORD" 2>/dev/null) || PRIOR_BACKLOG='{}'
   fi
   return 0
 }
@@ -450,13 +465,17 @@ task_reset() {  # <id> <relaunches>
     > "$WORK/entry.$1.json" 2>/dev/null || true
 }
 
-record_store() {  # <boot> <units-json> <backlog-json>
+record_store() {  # <boot> <units-json> <backlog-json> [preserve-tasks]
   local tasks='{}' tmp
   [ "$DRY_RUN" = 1 ] && return 0
   if compgen -G "$WORK/entry.*.json" >/dev/null 2>&1; then
     tasks=$(jq -s 'map({ key: .key, value: .value }) | from_entries' "$WORK"/entry.*.json 2>/dev/null) || tasks='{}'
   fi
+  if [ "${4:-0}" = 1 ]; then
+    tasks=$(jq -n --argjson prior "$PRIOR_TASKS" --argjson new "$tasks" '$prior + $new' 2>/dev/null) || tasks=$PRIOR_TASKS
+  fi
   tmp="$RECORD.tmp.$$"
+
   if jq -n --argjson schema "$SCHEMA" --arg boot "$1" \
       --argjson units "$2" --argjson tasks "$tasks" --argjson backlog "${3:-{\}}" \
       '{ schema: $schema, boot_identity: $boot, units: $units, tasks: $tasks,
@@ -466,6 +485,70 @@ record_store() {  # <boot> <units-json> <backlog-json>
   else
     rm -f "$tmp" 2>/dev/null || true
   fi
+}
+
+# --- paused lanes -----------------------------------------------------------
+
+# HELD_IDS is the space-padded set of backlog ids the captain currently holds,
+# built once per pass (HELD_OK=1) so the hot loop never shells out per task.
+HELD_IDS=''
+HELD_OK=0
+HELD_UNAVAILABLE=0
+HELD_REASON=''
+
+# hold_set_build: read this home's held backlog items once. A hold the pass
+# cannot read must never let paused work be restarted, so every failure path
+# sets HELD_UNAVAILABLE=1 and names the reason for the one instrument wake.
+hold_set_build() {
+  local backend_file backend_name out
+  local -a file_args=()
+  HELD_IDS=''
+  HELD_OK=0
+  HELD_UNAVAILABLE=0
+  HELD_REASON=''
+  [ "$BACKLOG_ENABLED" = on ] || return 0
+  backend_file="$CONFIG_DIR/backlog-backend"
+  backend_name='tasks-axi'
+  if [ -f "$backend_file" ] && [ ! -L "$backend_file" ]; then
+    backend_name=$(tr -d '[:space:]' < "$backend_file" 2>/dev/null) || backend_name=''
+    [ -n "$backend_name" ] || backend_name='tasks-axi'
+  fi
+  if [ "$backend_name" = manual ]; then
+    HELD_UNAVAILABLE=1
+    HELD_REASON='the backlog backend is manual'
+    printf 'watchdog: backlog backend is manual; held backlog items cannot be read, so no recovery ran this pass\n'
+    return 0
+  fi
+  if ! command -v "$BACKLOG_BIN" >/dev/null 2>&1; then
+    HELD_UNAVAILABLE=1
+    HELD_REASON="$BACKLOG_BIN is unavailable"
+    printf 'watchdog: %s is unavailable; held backlog items cannot be read, so no recovery ran this pass\n' "$BACKLOG_BIN"
+    return 0
+  fi
+  # Named explicitly, like backlog_pass: the pass runs from the code root
+  # while the items it must honour belong to this home.
+  [ ! -f "$DATA_DIR/backlog.md" ] || file_args=(--file "$DATA_DIR/backlog.md")
+  out=$(fm_run_timed "$READ_TIMEOUT_SECS" "$BACKLOG_BIN" list --state held \
+    ${file_args[@]+"${file_args[@]}"} 2>/dev/null) || {
+    HELD_UNAVAILABLE=1
+    HELD_REASON="could not read held backlog items from $BACKLOG_BIN"
+    printf 'watchdog: could not read held backlog items from %s, so no recovery ran this pass\n' "$BACKLOG_BIN"
+    return 0
+  }
+  HELD_IDS=$(printf '%s\n' "$out" | awk 'NR > 1 && /^  / { print $1 }' | cut -d, -f1 \
+    | grep -E '^[A-Za-z0-9][A-Za-z0-9._-]*$' | sort -u | tr '\n' ' ')
+  HELD_OK=1
+  return 0
+}
+
+# task_paused <id>: the captain parked this lane, so no rung may touch it.
+task_paused() {  # <id>
+  [ -e "$STATE/$1.stopped" ] && return 0
+  [ "$HELD_OK" = 1 ] || return 1
+  case " $HELD_IDS " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
 }
 
 # --- actions ----------------------------------------------------------------
@@ -478,6 +561,19 @@ wake_firstmate() {  # <key> <payload>
     return 0
   fi
   fm_wake_append check "$1" "$2" 2>/dev/null || true
+}
+
+# wake_instrument_once <key> <payload>: one instrument page per pending key, so
+# a pass that cannot read the hold set never floods the queue.
+wake_instrument_once() {  # <key> <payload>
+  local queued
+  if [ "$DRY_RUN" = 1 ]; then
+    wake_firstmate "$1" "$2"
+    return 0
+  fi
+  queued=$(fm_wake_queued_keys check 2>/dev/null || true)
+  printf '%s\n' "$queued" | grep -Fx -- "$1" >/dev/null 2>&1 && return 0
+  wake_firstmate "$1" "$2"
 }
 
 # task_agent_state <id> <meta>: the recovery-grade endpoint state, bounded.
@@ -676,6 +772,7 @@ chair_ensure() {
 # the chair LAST, and queue one check wake describing the result.
 boot_pass() {  # <boot>
   local boot=$1 id meta kind state ok=0 tried=0 deadline chair result
+  [ "$HELD_UNAVAILABLE" = 1 ] && return 0
   deadline=$(( $(now_epoch) + BOOT_BUDGET_SECS ))
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -684,6 +781,8 @@ boot_pass() {  # <boot>
     kind=$(fm_meta_get "$meta" kind)
     [ "$kind" = secondmate ] && continue
     [ -n "$(fm_meta_get "$meta" window)" ] || continue
+    # The captain parked this lane; a reboot is no order to restart it.
+    task_paused "$id" && continue
     if [ "$(now_epoch)" -ge "$deadline" ]; then
       printf 'watchdog: boot pass ran out of budget before it reached every task; the task pass continues from here\n'
       break
@@ -818,6 +917,7 @@ task_pass() {
   local since stage stage_at rings relaunches steers woke status_mtime changed stage_age
   local sig='' istage istage_at ibase strikes
   local ring_count relaunch_count steer_count minutes conn_err strike_count
+  [ "$HELD_UNAVAILABLE" = 1 ] && return 0
   now=$(now_epoch)
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
@@ -829,6 +929,11 @@ task_pass() {
     [ -n "$window" ] || continue
     # The boot pass already acted on this task in this pass.
     [ -e "$WORK/touched.$id" ] && continue
+    # A lane the captain parked is not a lane that died: no rung below applies.
+    if task_paused "$id"; then
+      [ "$DRY_RUN" = 1 ] && printf '%s\tpaused\tn/a\t-\t0\t0\tskipped: the captain parked this lane\n' "$id"
+      continue
+    fi
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
     [ -n "$target" ] || target="$window"
@@ -1144,6 +1249,7 @@ inbox_pass() {
   local meta id kind backend target state oldest base age
   local sig since stage stage_at rings relaunches steers woke istage istage_at ibase strikes
   local mins
+  [ "$HELD_UNAVAILABLE" = 1 ] && return 0
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     id=$(basename "$meta" .meta)
@@ -1151,6 +1257,7 @@ inbox_pass() {
     kind=$(fm_meta_get "$meta" kind)
     [ "$kind" = secondmate ] && continue
     [ -d "$STATE/$id.inbox" ] || continue
+    task_paused "$id" && continue
     oldest=$(inbox_oldest "$id") || continue
     base=${oldest##*/}
     age=$(path_age_now "$oldest")
@@ -1213,6 +1320,7 @@ inbox_pass() {
 backlog_pass() {
   local ids orphans unresolved hash flagged count line
   BACKLOG_JSON='{}'
+  [ "$HELD_UNAVAILABLE" = 1 ] && return 0
   [ "$BACKLOG_ENABLED" = on ] || return 0
   [ -n "$BACKLOG_BIN" ] && command -v "$BACKLOG_BIN" >/dev/null 2>&1 || return 0
   # Named explicitly: the pass runs from the code root, while the record it must
@@ -1226,8 +1334,12 @@ backlog_pass() {
   [ -n "$ids" ] || return 0
   orphans=$(printf '%s\n' "$ids" | while IFS= read -r line; do
       [ -f "$STATE/$line.meta" ] || printf '%s\n' "$line"
+    done | while IFS= read -r line; do
+      task_paused "$line" || printf '%s\n' "$line"
     done)
-  unresolved=$(live_lanes_without_meta)
+  unresolved=$(live_lanes_without_meta | while IFS= read -r line; do
+      task_paused "$line" || printf '%s\n' "$line"
+    done)
   hash=$(printf '%s\n--\n%s\n' "$orphans" "$unresolved" | cksum 2>/dev/null | tr -d ' ')
   count=$(printf '%s\n' "$orphans" | grep -c . || true)
   flagged=$(jq -r '.backlog.hash // ""' "$RECORD" 2>/dev/null) || flagged=''
@@ -1359,6 +1471,12 @@ main() {
 
   record_load
   printf '%s' "$PRIOR_TASKS" > "$WORK/tasks.json" 2>/dev/null || printf '{}' > "$WORK/tasks.json"
+  # One read of the captain-held backlog set per pass, before any lane ladder.
+  hold_set_build
+  if [ "$HELD_UNAVAILABLE" = 1 ]; then
+    wake_instrument_once watchdog-held-unavailable \
+      "check: watchdog could not read the captain-held backlog set ($HELD_REASON); no recovery ran this pass because the held set was unreadable"
+  fi
 
   local boot units
   boot=$(boot_identity)
@@ -1379,7 +1497,15 @@ main() {
   inbox_pass
   task_pass
   backlog_pass
-  record_store "$boot" "$units" "$BACKLOG_JSON"
+  # A pass that could not read the hold set ran no recovery, so it must not
+  # record the new boot as handled or erase the history a later pass needs.
+  local preserve=0
+  if [ "$HELD_UNAVAILABLE" = 1 ]; then
+    boot=$RECORD_BOOT
+    BACKLOG_JSON=$PRIOR_BACKLOG
+    preserve=1
+  fi
+  record_store "$boot" "$units" "$BACKLOG_JSON" "$preserve"
   [ "$DRY_RUN" = 1 ] || fm_lock_release "$LOCK"
   return 0
 }
