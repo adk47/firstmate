@@ -198,14 +198,20 @@ class Base(unittest.TestCase):
         return True
 
     def run_cli(self, *argv, now=NOW):
-        """Run the CLI exactly as the unit does, with a pinned clock."""
+        """Run the CLI exactly as the unit does, with a pinned clock.
+
+        `main()` passes no `now`, so every command reads `demote._now()`; that seam is the
+        ONLY clock on the CLI path, and it is patched WITHOUT `create=True` on purpose: the
+        old `create=True` pin bound a name the module never read, so these runs used the
+        real clock and the fixtures aged out of the 7-day window on 2026-11-10.
+        """
         args = list(argv) + [
             "--registry", str(self.registry_path),
             "--runtime-state", str(self.runtime_path),
             "--paths-json", json.dumps(self.fakes.paths),
             "--no-page",
         ]
-        with mock.patch.object(demote, "_now", create=True, return_value=now):
+        with mock.patch.object(demote, "_now", return_value=now):
             return demote.main(args)
 
     def run_tick(self, *argv, now=NOW):
@@ -540,10 +546,35 @@ class Thresholds(Base):
             {"at": utc(NOW - timedelta(hours=i + 1)), "capability_id": "credit.remove.self",
              "reverted_at": utc(NOW - timedelta(hours=i))} for i in range(6)
         ])
-        rc = self.run_cli("run", "--dry-run", "--json", now=NOW)
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            rc = self.run_cli("run", "--dry-run", "--json", now=NOW)
         self.assertEqual(rc, demote.EXIT_TRIPPED)
         self.assertFalse(self.runtime_path.exists(), "dry-run must not write the runtime state")
         self.assertFalse((self.kill_root / "sentinel-credit-remove-self.disabled").exists())
+        self.assertEqual(json.loads(out.getvalue())["at"], utc(NOW),
+                         "the CLI path must evaluate at the pinned clock, not the wall clock")
+
+    def test_cli_clock_is_pinned_not_wall_clock(self):
+        """The CLI reads exactly one clock, `demote._now`, and the harness pins it.
+
+        Two things keep this suite date-independent: `main()` has no other clock read
+        (asserted on the source, so a new `datetime.now()` in the module fails here, not
+        on the day the fixtures age out), and `run_cli`'s pin actually lands on the name
+        the code reads (the digest's `at` is the pinned instant, not today).
+        """
+        src = Path(demote.__file__).read_text(encoding="utf-8")
+        self.assertEqual(src.count("datetime.now("), 1,
+                         "demote.py must read the wall clock only inside _now()")
+        self.assertIn("return datetime.now(timezone.utc)", src[src.index("def _now("):])
+        self.assertNotIn("utcnow(", src)
+        self.assertNotIn("time.time(", src)
+        far = NOW + timedelta(days=400)
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            rc = self.run_cli("digest", "--json", now=far)
+        self.assertEqual(rc, demote.EXIT_OK)
+        self.assertEqual(json.loads(out.getvalue())["at"], utc(far))
 
 
 # ── missing sources ──────────────────────────────────────────────────────────
