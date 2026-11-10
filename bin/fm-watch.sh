@@ -110,8 +110,8 @@
 #   check: secondmate wake-loop stalled: mate=<id> row=<seq> age=<seconds>s
 #                          the oldest valid row in an endpoint-recorded local
 #                          secondmate home's durable wake queue exceeded
-#                          FM_SECONDMATE_WAKE_STALL_SECS AND the stale-path busy
-#                          contract proves the mate idle from a semantic source;
+#                          FM_SECONDMATE_WAKE_STALL_SECS AND the semantic
+#                          busy-state contract proves the mate idle from a semantic source;
 #                          busy or unprovable reads stay silent; observation is
 #                          read-only and one parent receipt suppresses repeats
 # For normal supervision, resume the session-start primary-harness protocol
