@@ -93,6 +93,19 @@ FAST_RULES = ("audit_fail_any", "manipulated_7d")
 OVERDUE_PCT_DEFAULT = report.OVERDUE_PCT_DEFAULT
 
 
+def _now() -> datetime:
+    """The ONE wall-clock read in this module; every command defaults its `now` to it.
+
+    `main()` dispatches without a `now`, so the CLI path (the unit, and the tests that
+    drive the CLI end to end) reads the clock here and nowhere else. Tests pin it with
+    `mock.patch.object(demote, "_now", return_value=...)`. A second wall-clock read
+    anywhere in this module leaks the real clock past that pin, and a seeded fixture
+    then ages out of the 7-day window on a date (2026-11-10: `test_dry_run_changes_nothing`
+    went red on main and on every open PR). `tests/test_sentinel_demote.py` pins this.
+    """
+    return datetime.now(timezone.utc)
+
+
 # ── trips ──────────────────────────────────────────────────────────────────────
 @dataclass
 class Trip:
@@ -215,7 +228,7 @@ def _announce_needed(runtime: registry.RuntimeState, cap: str, prev: str, nxt: s
 
 def evaluate(rows: Sequence[Dict[str, Any]], counters, runtime: registry.RuntimeState,
              *, fast: bool = False, now: Optional[datetime] = None) -> List[Trip]:
-    now = now or datetime.now(timezone.utc)
+    now = now or _now()
     trips: List[Trip] = []
     for row in rows:
         cap = str(row["id"])
@@ -414,7 +427,7 @@ class LockUnavailable(RuntimeError):
 
 
 def cmd_run(a, *, now: Optional[datetime] = None) -> int:
-    now = now or datetime.now(timezone.utc)
+    now = now or _now()
     at = outcomes.utc(now)
     stop = _stop_reason()
     if stop:
@@ -650,7 +663,7 @@ def _mark_registry_seen(path: str) -> None:
     is the old behaviour (a loss reads as pre-S0).
     """
     seen = _registry_seen_paths()
-    seen[path] = outcomes.utc(datetime.now(timezone.utc))
+    seen[path] = outcomes.utc(_now())
     if len(seen) > SEEN_PATHS_MAX:
         # Newest wins, EXCEPT the live path, which is never evicted. A cap that can drop
         # the live path reintroduces the bug it was added to bound: 20 scratch loads and
@@ -725,7 +738,7 @@ def _page_missing_registry_once(now: datetime, detail: str, *, enabled: bool) ->
 
 
 def cmd_digest(a, *, now: Optional[datetime] = None) -> int:
-    now = now or datetime.now(timezone.utc)
+    now = now or _now()
     try:
         rows = _load(a.registry)
     except registry.RegistryError as exc:
@@ -751,7 +764,7 @@ def cmd_digest(a, *, now: Optional[datetime] = None) -> int:
 
 def cmd_promote(a, *, now: Optional[datetime] = None) -> int:
     """Render the parity report for a Fable ruling. NEVER changes state."""
-    now = now or datetime.now(timezone.utc)
+    now = now or _now()
     try:
         rows = _load(a.registry)
     except registry.RegistryError as exc:
@@ -948,7 +961,7 @@ def cmd_propose(a, *, now: Optional[datetime] = None) -> int:
     belongs to S0's classifier and an AI output is data that code validates, so a
     proposal's text is a template, never a model's judgement.
     """
-    now = now or datetime.now(timezone.utc)
+    now = now or _now()
     stop = _stop_reason()
     if stop:
         print(f"[propose] {stop} present — NOT proposing: the whole sentinel is stopped, so a "
