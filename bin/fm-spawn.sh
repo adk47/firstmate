@@ -200,8 +200,11 @@
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
 #                  turn-end signal rides the launch command, e.g. codex -c notify=[...])
-#     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi turn-end extension,
-#                  written by this script; outside the worktree to avoid pi's trust gate)
+#     __PIEXT__    absolute path to state/<task-id>.pi-ext.ts (pi semantic busy-state
+#                  events plus the turn-end notification, written by this script;
+#                  outside the worktree to avoid pi's trust gate). Loaded by a crew
+#                  window and by a pi secondmate, whose busy record the wake-stall
+#                  rung reads.
 #     __PITURNEND__ absolute path to .pi/extensions/fm-primary-turnend-guard.ts in a pi secondmate home
 #     __PIWATCH__   absolute path to .pi/extensions/fm-primary-pi-watch.ts in a pi secondmate home
 #     __OPINPUT__   absolute path to the canonical operational-input encoder
@@ -1372,7 +1375,11 @@ launch_template() {
     pi|pi-signed)
       printf '%s' '__PIBIN____PITUIMODE__'
       if [ "$kind" = secondmate ]; then
-        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        # __PIEXT__ carries the semantic busy-state events the wake-stall rung
+        # reads; without it a pi mate's armed record would never leave its seed
+        # state. It is written outside the mate home, so it loads without a
+        # project-trust dialog exactly as it does for a crew window.
+        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ -e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       else
         printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
       fi
@@ -2957,9 +2964,13 @@ if [ "$RELAUNCH" -eq 1 ]; then
   RELAUNCH_REPLACEMENT_STATE=$STATE_REAL
   RELAUNCH_REPLACEMENT_WT=$WT
 fi
-if [ "$KIND" != secondmate ]; then
-  # Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every
-  # adapter with a verified semantic source. The launch brief sent below IS a
+# Arm the semantic busy-state contract (bin/fm-busy-lib.sh) for every adapter
+# with a verified semantic source, for EVERY spawn kind. A secondmate arms it
+# too: the wake-stall rung (bin/fm-watch.sh secondmate_wake_stall_tick) reads
+# this record to tell a long mate turn from a stalled loop, and a mate that
+# never armed it could only ever be reported on an unprovable read.
+if [ "$KIND" = ship ] || [ "$KIND" = scout ] || [ "$KIND" = secondmate ]; then
+  # The launch brief sent below IS a
   # submitted turn, so the seed record is busy/fm-spawn. The minted gen is
   # embedded into each adapter's wiring so an event from a superseded
   # incarnation is rejected as stale. Grok and rovo stay on their isolated

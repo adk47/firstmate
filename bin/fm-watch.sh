@@ -110,9 +110,10 @@
 #   check: secondmate wake-loop stalled: mate=<id> row=<seq> age=<seconds>s
 #                          the oldest valid row in an endpoint-recorded local
 #                          secondmate home's durable wake queue exceeded
-#                          FM_SECONDMATE_WAKE_STALL_SECS AND the semantic
-#                          busy-state contract proves the mate idle from a semantic source;
-#                          busy or unprovable reads stay silent; observation is
+#                          FM_SECONDMATE_WAKE_STALL_SECS AND the mate's own
+#                          endpoint is not provably busy; a positive busy read
+#                          stays silent, while a failed capture or any
+#                          unprovable read still reports; observation is
 #                          read-only and one parent receipt suppresses repeats
 # For normal supervision, resume the session-start primary-harness protocol
 # after each printed reason. Direct duplicate invocations of this script still
@@ -802,7 +803,7 @@ secondmate_oldest_queue_row() {  # <queue-path>
 # only this home's marker so a later row can be observed.
 secondmate_wake_stall_tick() {
   local now=$(( $(date +%s) )) threshold=$SECONDMATE_WAKE_STALL_SECS
-  local meta task kind remote_host home queue row epoch seq row_key marker receipt receipt_dir notify_key queued age reason endpoint_window verdict
+  local meta task kind remote_host home queue row epoch seq row_key marker receipt receipt_dir notify_key queued age reason endpoint_window tail40
   case "$threshold" in ''|*[!0-9]*|0) threshold=60 ;; esac
   # Endpoint metadata admits this queue-loop check; secondmate-liveness owns registered mates whose endpoint is missing or dead.
   for meta in "$STATE"/*.meta; do
@@ -840,26 +841,17 @@ EOF
     # A mate drains its own wake queue at turn start, never mid-turn, so ANY
     # single turn longer than the threshold looks like a stalled loop while the
     # mate is in fact working - the ordinary behaviour this rung exists to
-    # detect would satisfy the alarm. Mate stall coverage is currently
-    # UNAVAILABLE because mate launches never arm the semantic busy contract
-    # (bin/fm-spawn.sh skips arming it for KIND=secondmate), so a semantic read
-    # here is unprovable; reporting on an unprovable read fired a false stall
-    # for every long mate turn. Report ONLY on an idle verdict from a semantic
-    # source, which proves the mate is not working; a busy verdict is ordinary
-    # mid-turn work, and every unprovable read (unknown, missing, malformed,
-    # dead, empty, or failed capture) stays silent. The rendered-text fallbacks
-    # grok-regex and rovo-regex are classifier-only sources owned by
-    # bin/fm-busy-lib.sh, not proof of an idle turn, so their idle verdicts stay
-    # silent too. mate-busy-source-s1 owns restoring coverage, and this path
-    # self-reactivates once mate busy arming exists. Nothing below the marker,
-    # receipt, dedupe, or notify-key shape changes.
+    # detect would satisfy the alarm. bin/fm-spawn.sh arms the same semantic
+    # busy contract for a mate that it arms for a crew window, so a positive
+    # busy read proves the mate is mid-turn and the rung stays silent. Only a
+    # POSITIVE read suppresses: a failed or empty capture, or any unprovable
+    # verdict, falls through and still reports, so a mate that cannot be
+    # captured is never silently exempted. Nothing below the marker, receipt,
+    # dedupe, or notify-key shape changes.
     endpoint_window=$(fm_meta_get "$meta" window)
-    [ -n "$endpoint_window" ] || continue
-    verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE")
-    [ "${verdict%% *}" = idle ] || continue
-    case "${verdict#* }" in
-      grok-regex|rovo-regex) continue ;;
-    esac
+    if [ -n "$endpoint_window" ] && tail40=$(fm_backend_capture "$(window_backend "$endpoint_window")" "$endpoint_window" 40 "$(window_label "$endpoint_window")" 2>/dev/null); then
+      window_is_busy "$endpoint_window" "$tail40" && continue
+    fi
     row_key="$epoch-$seq"
     receipt="$receipt_dir/$row_key"
     if [ -e "$marker" ] || [ -L "$marker" ]; then
