@@ -61,6 +61,10 @@ const mod = await import(pathToFileURL(process.env.EXT_PATH).href);
 const handlers = {};
 mod.default({ on: (name, fn) => { handlers[name] = fn; } });
 const ctx = { isIdle: () => process.env.MODE !== "settle-continuing" };
+const busyCtx = { isIdle: () => false };
+const errorEnd = (text) => handlers["message_end"]({ message: { role: "assistant", stopReason: "error", errorMessage: text } }, ctx);
+const okEnd = () => handlers["message_end"]({ message: { role: "assistant", stopReason: "stop" } }, ctx);
+const picker = { kind: "select", title: "Select model" };
 switch (process.env.MODE) {
   case "agent-start": await handlers["agent_start"]({}, ctx); break;
   case "settle-idle": await handlers["agent_settled"]({}, ctx); break;
@@ -70,6 +74,52 @@ switch (process.env.MODE) {
     await handlers["agent_start"]({}, ctx);
     break;
   case "turn-end": await handlers["turn_end"]({}, ctx); break;
+  // A run whose assistant message ended on an upstream error, then settled.
+  case "error-settle":
+    await handlers["agent_start"]({}, ctx);
+    await errorEnd("api_error read tcp 10.0.0.103->160.79.104.10:443: connection reset by peer");
+    await handlers["agent_settled"]({}, ctx);
+    break;
+  // An error that Pi retried in a fresh run which then ended cleanly.
+  case "error-retried-settle":
+    await handlers["agent_start"]({}, ctx);
+    await errorEnd("fetch failed");
+    await handlers["agent_start"]({}, ctx);
+    await okEnd();
+    await handlers["agent_settled"]({}, ctx);
+    break;
+  // A user-role message_end never counts as an error.
+  case "user-end-settle":
+    await handlers["agent_start"]({}, ctx);
+    await handlers["message_end"]({ message: { role: "user", stopReason: "error", errorMessage: "x" } }, ctx);
+    await okEnd();
+    await handlers["agent_settled"]({}, ctx);
+    break;
+  // The /model picker opened at the idle prompt, then cancelled.
+  case "dialog-idle-open":
+    await handlers["agent_settled"]({}, ctx);
+    await handlers["ui_prompt_start"](picker, ctx);
+    break;
+  case "dialog-idle-close":
+    await handlers["ui_prompt_end"](picker, ctx);
+    break;
+  // A dialog raised inside a running tool call, then answered.
+  case "dialog-busy-open":
+    await handlers["agent_start"]({}, busyCtx);
+    await handlers["ui_prompt_start"]({ kind: "confirm", title: "Proceed?" }, busyCtx);
+    break;
+  case "dialog-busy-close":
+    await handlers["ui_prompt_end"]({ kind: "confirm", title: "Proceed?" }, busyCtx);
+    break;
+  // A picker opened after an error-ended run and cancelled: the stall stays
+  // recorded once the dialog closes.
+  case "error-then-dialog":
+    await handlers["agent_start"]({}, ctx);
+    await errorEnd("api_error read tcp 10.0.0.103->160.79.104.10:443: connection reset by peer");
+    await handlers["agent_settled"]({}, ctx);
+    await handlers["ui_prompt_start"](picker, ctx);
+    await handlers["ui_prompt_end"](picker, ctx);
+    break;
   default: throw new Error("unknown mode " + process.env.MODE);
 }
 if (process.env.MODE === "turn-end") {
@@ -113,6 +163,77 @@ test_pi_extension_semantic_lifecycle() {
   out=$(classify pi "$id" "$state")
   [ "$out" = "idle pi-ext" ] || fail "the final settle must classify idle, got '$out'"
   pass "pi extension reports agent_start busy, settles idle only via ctx.isIdle(), and keeps turn_end a notification"
+}
+
+record_event() {  # <state-dir> <id>
+  fm_busy_record_read "$1" "$2" | cut -d' ' -f3
+}
+
+test_pi_extension_records_an_error_turn_end_with_its_text() {
+  local rec id=busy-pi-err out state ext detail
+  rec=$(make_spawn_case pi-error pi "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "pi spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.pi-ext.ts"
+
+  out=$(drive_pi_ext "$ext" error-settle) || fail "error-settle drive failed: $out"
+  out=$(classify pi "$id" "$state")
+  [ "$out" = "idle pi-ext" ] || fail "an error-ended run must still settle idle, got '$out'"
+  [ "$(record_event "$state" "$id")" = stop-failure ] \
+    || fail "a settle after an assistant error must record stop-failure, got '$(record_event "$state" "$id")'"
+  detail=$(fm_busy_record_detail "$state" "$id") || fail "the error text was not recorded as the detail"
+  case "$detail" in
+    *'connection reset by peer'*) : ;;
+    *) fail "the detail must carry Pi's own error text, got '$detail'" ;;
+  esac
+
+  out=$(drive_pi_ext "$ext" error-retried-settle) || fail "error-retried-settle drive failed: $out"
+  [ "$(record_event "$state" "$id")" = agent-settled ] \
+    || fail "an error Pi retried in a fresh run that ended cleanly must settle normally, got '$(record_event "$state" "$id")'"
+  fm_busy_record_detail "$state" "$id" >/dev/null && fail "a clean settle must carry no error detail"
+
+  out=$(drive_pi_ext "$ext" user-end-settle) || fail "user-end-settle drive failed: $out"
+  [ "$(record_event "$state" "$id")" = agent-settled ] \
+    || fail "only an assistant message's error counts, got '$(record_event "$state" "$id")'"
+  pass "pi extension records stop-failure with Pi's own error text at an error-ended settle, and a retried or clean run settles normally"
+}
+
+test_pi_extension_records_blocking_dialogs() {
+  local rec id=busy-pi-dialog out state ext
+  rec=$(make_spawn_case pi-dialog pi "$id")
+  read_case_record "$rec"
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+  expect_code 0 $? "pi spawn should succeed: $out"
+  state="$HOME_DIR/state"
+  ext="$state/$id.pi-ext.ts"
+
+  out=$(drive_pi_ext "$ext" dialog-idle-open) || fail "dialog-idle-open drive failed: $out"
+  out=$(classify pi "$id" "$state")
+  [ "$out" = "idle pi-ext" ] || fail "a picker opened at the idle prompt stays idle, got '$out'"
+  [ "$(record_event "$state" "$id")" = dialog-open ] || fail "expected dialog-open, got '$(record_event "$state" "$id")'"
+  [ "$(fm_busy_record_detail "$state" "$id")" = 'select: Select model' ] \
+    || fail "the dialog kind and title must be the detail, got '$(fm_busy_record_detail "$state" "$id")'"
+  out=$(drive_pi_ext "$ext" dialog-idle-close) || fail "dialog-idle-close drive failed: $out"
+  [ "$(record_event "$state" "$id")" = dialog-closed ] || fail "expected dialog-closed, got '$(record_event "$state" "$id")'"
+  out=$(classify pi "$id" "$state")
+  [ "$out" = "idle pi-ext" ] || fail "a cancelled idle picker stays idle, got '$out'"
+
+  out=$(drive_pi_ext "$ext" dialog-busy-open) || fail "dialog-busy-open drive failed: $out"
+  out=$(classify pi "$id" "$state")
+  [ "$out" = "busy pi-ext" ] || fail "a dialog raised inside a run stays busy, got '$out'"
+  [ "$(record_event "$state" "$id")" = dialog-open ] || fail "expected dialog-open inside a run, got '$(record_event "$state" "$id")'"
+  out=$(drive_pi_ext "$ext" dialog-busy-close) || fail "dialog-busy-close drive failed: $out"
+  out=$(classify pi "$id" "$state")
+  [ "$out" = "busy pi-ext" ] || fail "answering a dialog inside a run stays busy, got '$out'"
+
+  out=$(drive_pi_ext "$ext" error-then-dialog) || fail "error-then-dialog drive failed: $out"
+  [ "$(record_event "$state" "$id")" = stop-failure ] \
+    || fail "closing a picker on a run that ended on an error must restore stop-failure, got '$(record_event "$state" "$id")'"
+  fm_busy_record_detail "$state" "$id" | grep -q 'connection reset by peer' \
+    || fail "the restored stop-failure must carry the error text again"
+  pass "pi extension brackets a blocking dialog as dialog-open/dialog-closed with kind and title on either side of a run, and restores a recorded stall when the dialog closes"
 }
 
 test_pi_extension_serializes_settle_before_next_start() {
@@ -417,6 +538,8 @@ test_kimi_and_grok_install_no_unverified_wiring() {
 }
 
 test_pi_extension_semantic_lifecycle
+test_pi_extension_records_an_error_turn_end_with_its_text
+test_pi_extension_records_blocking_dialogs
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
 test_kimi_and_grok_install_no_unverified_wiring

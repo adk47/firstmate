@@ -32,6 +32,10 @@ Treat the merged fleet event as already handled for fleet operations: MAIN must 
 Separately, MAIN applies judgment about whether and how to surface, summarize, reference, or incorporate a merged sailboat outcome in the captain conversation; event ownership does not decide the conversational treatment.
 Read the durable outcome store with the fm_branch_outcomes tool when the captain asks what happened.
 
+When `config/captain-intake` is present, a captain prompt typed while a turn was running arrives after that turn as a follow-up whose first line reads `Firstmate intake #<n> (typed <time> while the previous turn was still running; acknowledge it in one line, then handle it):` followed by the captain's verbatim text.
+Finish nothing early for it: Pi delivers it only once the running turn has settled, so treat the previous turn as complete, acknowledge the intake in one line, then handle it as the captain's next request; several intakes arrive in the order they were typed and are handled in that order, each acknowledged once.
+The durable record behind it lives under `state/intake/` ([docs/configuration.md](../configuration.md) "Captain prompt intake"); a `/intake` command lists what is pending.
+
 The turn-end guard extension lives at `__FM_PI_TURNEND_EXT__`.
 The watcher extension lives at `__FM_PI_EXT__`.
 Both are tracked, project-local `.pi/extensions/*.ts` files that Pi auto-discovers once the project is trusted; `bin/fm-session-start.sh` reports when the running Pi session has not loaded both required extensions.
