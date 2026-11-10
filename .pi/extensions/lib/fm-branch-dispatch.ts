@@ -209,6 +209,9 @@ function signalRowFiles(key: string, payload: string, state: string): string[] {
   if (!/^signal:/.test(payload)) return [];
   const recorded = signalBatchPaths(state, key);
   if (recorded.length > 0) return recorded;
+  // A compact summary names only the first few paths, so a missing record must
+  // surface the whole batch rather than let the dispatcher claim a partial set.
+  if (/^signal: [0-9]+ file/.test(payload)) return [];
   return payload
     .split(/\s+/)
     .filter((token) => /\.(?:status|turn-ended)$/.test(token))
