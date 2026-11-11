@@ -29,12 +29,12 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 LEDGER="$DATA/decider/rulings.md"
-SCAN="$SCRIPT_DIR/fm-hold-scan.py"
+SCAN="$FM_ROOT/bin/fm-hold-scan.py"
 
 [ -f "$SCAN" ] || exit 0
 command -v python3 >/dev/null 2>&1 || exit 0
 
-rows=$(python3 "$SCAN" 2>/dev/null) || exit 0
+rows=$(python3 "$SCAN" --backlog "$DATA/backlog.md" 2>/dev/null) || exit 0
 [ -n "$rows" ] || exit 0
 
 ruled_ids=""

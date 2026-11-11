@@ -177,7 +177,7 @@ QUOTED_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
 
 TASK_RE = re.compile(r"^- \[[ x]\] (?P<id>[A-Za-z0-9._-]+) - (?P<rest>.*)$")
 HOLD_RE = re.compile(
-    r"\(hold: (?P<reason>.*?)\) \(hold-kind: (?P<kind>[a-z]+)\)"
+    r"\(hold: (?P<reason>.*?)\) \(hold-kind: (?P<kind>captain|future)\)"
 )
 SET_RE = re.compile(r"^\s+Captain hold set: (?P<ts>[0-9T:Z.+-]+)")
 UNTIL_RE = re.compile(r"\(hold-until: (?P<date>[0-9]{4}-[0-9]{2}-[0-9]{2})\)")

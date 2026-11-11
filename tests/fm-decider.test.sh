@@ -364,6 +364,81 @@ EOF
   pass "digest keeps a version number and skips a bare verb"
 }
 
+test_external_holds_are_not_captain_holds() {
+  local home out
+  home=$(make_home external)
+  cat > "$home/data/backlog.md" <<'EOF'
+## Queued
+
+- [ ] external-gate - waiting on a vendor (hold: the vendor must enable the account) (hold-kind: external)
+    Captain hold set: 2026-11-01T00:00:00Z
+- [ ] captain-call - a finished thing (hold: built and green, needs your click) (hold-kind: captain)
+    Captain hold set: 2026-11-02T00:00:00Z
+
+## Done
+EOF
+  out=$(FM_HOME="$home" python3 "$ROOT/bin/fm-hold-scan.py" --backlog "$home/data/backlog.md" --ids)
+  printf '%s\n' "$out" | grep -qx 'external-gate' \
+    && fail "an external gate is not a captain hold and must leave the queue: $out"
+  printf '%s\n' "$out" | grep -qx 'captain-call' \
+    || fail "a captain hold must stay in the queue: $out"
+
+  cat > "$home/data/backlog.md" <<'EOF'
+## Queued
+
+- [ ] external-only - waiting on a vendor (hold: the vendor must enable the account) (hold-kind: external)
+    Captain hold set: 2026-11-01T00:00:00Z
+
+## Done
+EOF
+  out=$(FM_HOME="$home" "$CHECK")
+  [ -z "$out" ] || fail "the check must stay silent when only external gates remain: $out"
+  pass "external holds are not captain holds"
+}
+
+test_installed_check_finds_the_scanner() {
+  local home out
+  home=$(make_home installed)
+  mkdir -p "$home/bin"
+  cp "$ROOT/bin/fm-hold-scan.py" "$home/bin/fm-hold-scan.py"
+  cp "$CHECK" "$home/state/decider.check.sh"
+  chmod +x "$home/state/decider.check.sh"
+
+  out=$(FM_HOME="$home" "$home/state/decider.check.sh")
+  printf '%s\n' "$out" | grep -q 'class_a_unruled=' \
+    || fail "the installed check must find the scanner beside the home's bin: $out"
+  pass "installed check finds the scanner"
+}
+
+test_root_override_reads_and_lifts_the_override_backlog() {
+  local home calls backlog out
+  home=$(make_home rootoverride)
+  calls="$home/calls.log"
+  backlog=$(cd "$home/data" && pwd -P)/backlog.md
+  cat > "$home/data/backlog.md" <<'EOF'
+## Queued
+
+- [ ] override-only - a finished thing (hold: built and green, options: A ship it; B wait) (hold-kind: captain)
+    Captain hold set: 2026-11-01T00:00:00Z
+
+## Done
+EOF
+
+  out=$(cd "$ROOT" && env -u FM_HOME FM_ROOT_OVERRIDE="$home" "$DECIDER" plan 2>&1)
+  printf '%s\n' "$out" | grep -q 'override-only' \
+    || fail "a root override must scan the override home's backlog: $out"
+
+  (cd "$ROOT" && env -u FM_HOME FM_ROOT_OVERRIDE="$home" PATH="$home/fakebin:$PATH" "$DECIDER" record override-only "unhold and ship" "built and green" "wiki" "re-hold" >/dev/null)
+  (cd "$ROOT" && env -u FM_HOME FM_ROOT_OVERRIDE="$home" PATH="$home/fakebin:$PATH" "$DECIDER" apply --yes >/dev/null 2>&1) \
+    || fail "apply must succeed under a root override"
+  grep -q "^unhold override-only --file $backlog$" "$calls" \
+    || fail "apply must lift the hold from the override home's backlog"
+  pass "root override reads and lifts the override backlog"
+}
+
+test_external_holds_are_not_captain_holds
+test_installed_check_finds_the_scanner
+test_root_override_reads_and_lifts_the_override_backlog
 test_scan_classifies_both_axes
 test_scan_summary_counts_every_hold
 test_scan_filters_by_class_and_readiness

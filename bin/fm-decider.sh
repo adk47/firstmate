@@ -138,12 +138,12 @@ cmd_scan() {
   done
   if [ "$filtered" -eq 0 ] && [ "${1:-}" != "--summary" ] && [ "${1:-}" != "--ids" ]; then
     ensure_decider_dir
-    python3 "$SCAN" "$@" > "$SNAPSHOT.tmp"
+    python3 "$SCAN" --backlog "$DATA/backlog.md" "$@" > "$SNAPSHOT.tmp"
     mv "$SNAPSHOT.tmp" "$SNAPSHOT"
     cat "$SNAPSHOT"
     return 0
   fi
-  python3 "$SCAN" "$@"
+  python3 "$SCAN" --backlog "$DATA/backlog.md" "$@"
 }
 
 cmd_digest() {
@@ -158,7 +158,7 @@ cmd_digest() {
   [ -f "$DIGEST" ] || die "missing $DIGEST"
   if [ ! -f "$SNAPSHOT" ]; then
     ensure_decider_dir
-    python3 "$SCAN" > "$SNAPSHOT"
+    python3 "$SCAN" --backlog "$DATA/backlog.md" > "$SNAPSHOT"
   fi
   if [ -z "$out" ]; then
     ensure_decider_dir
@@ -202,7 +202,7 @@ walk() {  # <apply|plan>
   local mode=$1
   [ -f "$SCAN" ] || die "missing $SCAN"
   local rows
-  rows=$(python3 "$SCAN")
+  rows=$(python3 "$SCAN" --backlog "$DATA/backlog.md")
   local total a b ready work unknown awaiting=0 lifted=0 dispatched=0
   total=$(printf '%s\n' "$rows" | grep -c . || true)
   a=$(printf '%s\n' "$rows" | python3 -c 'import sys,json;print(sum(1 for l in sys.stdin if l.strip() and json.loads(l)["class"]=="A"))')
@@ -280,7 +280,7 @@ cmd_apply() {
 cmd_status() {
   [ -f "$SCAN" ] || die "missing $SCAN"
   local rows
-  rows=$(python3 "$SCAN")
+  rows=$(python3 "$SCAN" --backlog "$DATA/backlog.md")
   printf '%s\n' "$rows" | python3 -c '
 import sys, json
 rows = [json.loads(l) for l in sys.stdin if l.strip()]
