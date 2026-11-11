@@ -1810,8 +1810,9 @@ test_permission_recovery_surfaces_preserved_status() {
   after_ident=$(_fm_open_decisions_file_ident "$status_file")
   [ "$after_ident" = "$before_ident" ] || { reap "$pid"; fail "the permission-only recovery changed file identity"; }
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "readability recovery did not surface preserved content"; }
-  grep -Fx "signal: $status_file" "$out" >/dev/null \
-    || fail "readability recovery did not use the actionable signal path: $(cat "$out")"
+  assert_surfaced_signal_printed "$out" "readability recovery did not use the actionable signal path"
+  grep -F "$status_file" "$out" >/dev/null \
+    || fail "readability recovery did not name the recovered status path: $(cat "$out")"
   [ "$(status_presentation_marker_offset "$marker" "$status_file")" = "$(size_of "$status_file")" ] \
     || fail "readability recovery did not classify from the unadvanced position"
   pass "permission recovery surfaces content from the unadvanced position"
