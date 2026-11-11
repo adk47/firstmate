@@ -160,6 +160,23 @@ test_dynamic_fails_when_a_producer_grows() {
   pass "the dynamic check fails when a producer grows"
 }
 
+# --- the payload check ----------------------------------------------------------
+
+test_payload_check_fails_when_the_canonical_tree_changes() {
+  local fake=$SANDBOX/payload-repo
+  mkdir -p "$fake"
+  cp -a "$ROOT/ak47" "$fake/ak47"
+  printf '\n# drift\n' >>"$fake/ak47/tick.sh"
+  if "$fake/ak47/guards/guard-producers.sh" --payload >/dev/null 2>&1; then
+    fail "the payload check passed after a canonical ak47 script changed without regenerating the payload"
+  fi
+  "$fake/ak47/hdevops/apply.sh" --write-payload >/dev/null 2>&1 \
+    || fail "could not regenerate the payload"
+  "$fake/ak47/guards/guard-producers.sh" --payload >/dev/null 2>&1 \
+    || fail "the payload check failed after regenerating the payload"
+  pass "the payload check fails on drift and passes after regeneration"
+}
+
 # --- the report -----------------------------------------------------------------
 
 test_the_report_names_every_check() {
@@ -184,4 +201,5 @@ test_static_fails_on_a_leaking_tree
 test_static_skips_a_file_absent_from_the_checkout
 test_dynamic_skips_without_a_baseline
 test_dynamic_fails_when_a_producer_grows
+test_payload_check_fails_when_the_canonical_tree_changes
 test_the_report_names_every_check

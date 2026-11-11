@@ -2,7 +2,7 @@
 # ak47/guards/guard-producers.sh - the guard on each producer.
 #
 # Without this the source fix rots and the sweeper becomes load-bearing again.
-# Three independent checks, each of which fails on its own:
+# Four independent checks, each of which fails on its own:
 #
 #   static   every file in cleanup-patterns.conf that creates temp state must
 #            also contain a cleanup call. A file that makes temp dirs and never
@@ -15,11 +15,14 @@
 #   dynamic  no producer's /tmp count may grow past its census baseline. This is
 #            the check that catches a producer nobody has written a static row
 #            for yet, and the one that proves the fix actually worked.
+#   payload  the committed H-DevOps payload must match the canonical ak47/ tree.
+#            The payload is generated, so a source edit that was not regenerated
+#            would otherwise ship stale code to a rebuild.
 #
-# Usage: guard-producers.sh [--projects DIR] [--static|--systemic|--dynamic]
-#                           [--json]
+# Usage: guard-producers.sh [--projects DIR]
+#                           [--static|--systemic|--dynamic|--payload] [--json]
 #   --projects  where the project clones live (default $FM_HOME/projects)
-#   --static / --systemic / --dynamic  run only that check (default: all three)
+#   --static / --systemic / --dynamic / --payload  run only that check
 #   --json      machine-readable result
 #
 # Exit: 0 all checks pass, 1 a check failed, 2 a malformed table.
@@ -31,15 +34,16 @@ AK47_ROOT=${AK47_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}
 
 PROJECTS=${AK47_PROJECTS:-$FM_HOME/projects}
 PATTERNS=$AK47_ROOT/guards/cleanup-patterns.conf
-RUN_STATIC=1; RUN_SYSTEMIC=1; RUN_DYNAMIC=1; JSON=0
+RUN_STATIC=1; RUN_SYSTEMIC=1; RUN_DYNAMIC=1; RUN_PAYLOAD=1; JSON=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --projects) PROJECTS=${2:?--projects needs a directory}; shift 2 ;;
-    --static) RUN_SYSTEMIC=0; RUN_DYNAMIC=0; shift ;;
-    --systemic) RUN_STATIC=0; RUN_DYNAMIC=0; shift ;;
-    --dynamic) RUN_STATIC=0; RUN_SYSTEMIC=0; shift ;;
+    --static) RUN_SYSTEMIC=0; RUN_DYNAMIC=0; RUN_PAYLOAD=0; shift ;;
+    --systemic) RUN_STATIC=0; RUN_DYNAMIC=0; RUN_PAYLOAD=0; shift ;;
+    --dynamic) RUN_STATIC=0; RUN_SYSTEMIC=0; RUN_PAYLOAD=0; shift ;;
+    --payload) RUN_STATIC=0; RUN_SYSTEMIC=0; RUN_DYNAMIC=0; shift ;;
     --json) JSON=1; shift ;;
-    -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,36p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "guard-producers.sh: unknown argument $1" >&2; exit 2 ;;
   esac
 done
@@ -119,9 +123,33 @@ dynamic_check() {
   fi
 }
 
+# ---- payload -------------------------------------------------------------------
+# The committed payload is a build artifact. Regenerate it with
+# `hdevops/apply.sh --write-payload`; this check fails when that was forgotten.
+payload_check() {
+  local apply="$AK47_ROOT/hdevops/apply.sh" out rc=0
+  if [ ! -x "$apply" ]; then
+    skips=$((skips + 1))
+    record skip "payload:hdevops" "no $apply"
+    return
+  fi
+  out=$("$apply" --check 2>&1) || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    passes=$((passes + 1))
+    record pass "payload:hdevops" "committed payload matches ak47/"
+  elif [ "$rc" -eq 1 ]; then
+    fails=$((fails + 1))
+    record fail "payload:hdevops" "$(printf '%s' "$out" | tr '\n' ';' | cut -c1-400)"
+  else
+    skips=$((skips + 1))
+    record skip "payload:hdevops" "payload check could not run (rc=$rc): $(printf '%s' "$out" | head -1)"
+  fi
+}
+
 [ "$RUN_STATIC" = 1 ] && static_check
 [ "$RUN_SYSTEMIC" = 1 ] && systemic_check
 [ "$RUN_DYNAMIC" = 1 ] && dynamic_check
+[ "$RUN_PAYLOAD" = 1 ] && payload_check
 
 if [ "$JSON" = 1 ]; then
   printf '{"pass":%d,"fail":%d,"skip":%d,"results":[' "$passes" "$fails" "$skips"

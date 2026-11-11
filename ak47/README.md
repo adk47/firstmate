@@ -114,15 +114,19 @@ pass static:uvn            test_uvn_status.py still cleans up after itself
 fail static:wc             test_uvn_status.py creates wc- and never removes it
 pass systemic:per-task-tmpdir  bin/fm-spawn.sh exports a per-task TMPDIR
 fail dynamic:py-mkdtemp    py-mkdtemp grew 12,400 since the baseline
+pass payload:hdevops       committed payload matches ak47/
 ```
 
-Three independent checks:
+Four independent checks:
 
 - **static** — a file that matches a `create` pattern must also match a
   `cleanup` pattern. A file absent from the checkout is skipped, not failed.
 - **systemic** — `bin/fm-spawn.sh` must still export a per-task `TMPDIR`.
 - **dynamic** — `census.sh --check` against a baseline the check never moves. A
   check that rewrites its own reference can only ever see one interval.
+- **payload** — the committed H-DevOps payload must match the canonical `ak47/`
+  tree. The payload is generated, so a source edit that was not regenerated
+  fails here instead of shipping stale code to a rebuild.
 
 Without this, the source fix rots and the sweeper becomes load-bearing again.
 
@@ -135,6 +139,12 @@ installs the scripts under `~/.local/lib/ak47` and points the units there, so a
 rebuild runs from the payload rather than a firstmate checkout. The playbook is
 `ansible/playbooks/07-ak47-hygiene.yml`, deliberately not in `site.yml` — that
 targets the OVH cluster, this targets one workstation.
+
+The payload under `hdevops/ansible/playbooks/files/ak47/` is generated from the
+canonical `ak47/` tree by `apply.sh`; never edit it by hand. `apply.sh --check`
+diffs the committed payload against a fresh generation, and
+`apply.sh --write-payload` regenerates it. The guard's `payload` check runs the
+same comparison, so CI fails when a source edit was not regenerated.
 
 The tick watches its own log freshness. A `loop_gap` over three intervals is a
 finding, because a loop that dies silently is worse than no loop.

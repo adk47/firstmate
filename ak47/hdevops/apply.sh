@@ -9,11 +9,17 @@
 # It never pushes to the default branch, never merges, and never touches the
 # clone's working tree beyond the payload paths it owns.
 #
+# The payload under ansible/playbooks/files/ak47/ is generated from the
+# canonical ak47/ tree. Never edit it by hand.
+#
 # Usage: apply.sh [--repo DIR] [--branch NAME] [--dry-run] [--no-pr]
-#   --repo DIR     H-DevOps clone (default $FM_HOME/projects/H-DevOps)
-#   --branch NAME  branch to create (default fm/ak47-hygiene-deployment)
-#   --dry-run      show what would be copied and committed, change nothing
-#   --no-pr        commit and push, but do not open a PR
+#                 [--check] [--write-payload]
+#   --repo DIR       H-DevOps clone (default $FM_HOME/projects/H-DevOps)
+#   --branch NAME    branch to create (default fm/ak47-hygiene-deployment)
+#   --dry-run        show what would be copied and committed, change nothing
+#   --no-pr          commit and push, but do not open a PR
+#   --check          regenerate into a temp dir and diff the committed payload
+#   --write-payload  regenerate the committed payload and exit
 #
 # Exit: 0 landed, 1 a step failed, 2 bad usage.
 set -u
@@ -24,21 +30,73 @@ AK47_ROOT=${AK47_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)}
 
 REPO=$FM_HOME/projects/H-DevOps
 BRANCH=fm/ak47-hygiene-deployment
-DRY=0; OPEN_PR=1
+DRY=0; OPEN_PR=1; CHECK=0; WRITE_PAYLOAD=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --repo) REPO=${2:?--repo needs a path}; shift 2 ;;
     --branch) BRANCH=${2:?--branch needs a name}; shift 2 ;;
     --dry-run) DRY=1; shift ;;
     --no-pr) OPEN_PR=0; shift ;;
-    -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    --check) CHECK=1; shift ;;
+    --write-payload) WRITE_PAYLOAD=1; shift ;;
+    -h|--help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "apply.sh: unknown argument $1" >&2; exit 2 ;;
   esac
 done
 
 PAYLOAD=$AK47_ROOT/hdevops
-[ -d "$REPO/.git" ] || { echo "apply.sh: $REPO is not a git clone" >&2; exit 1; }
+PAYLOAD_DIR=$PAYLOAD/ansible/playbooks/files/ak47
+PAYLOAD_FILES=(
+  README.md
+  budget.conf
+  census-producers.conf
+  census.sh
+  guards/cleanup-patterns.conf
+  guards/guard-producers.sh
+  lib/classify.py
+  lib/common.sh
+  lib/safe-delete.sh
+  status.sh
+  tick.sh
+  weekly-review.sh
+)
+
+generate_payload() {
+  local dest=$1 f
+  mkdir -p "$dest" || return 1
+  for f in "${PAYLOAD_FILES[@]}"; do
+    mkdir -p "$dest/$(dirname "$f")" || return 1
+    cp -p "$AK47_ROOT/$f" "$dest/$f" || return 1
+  done
+}
+
 [ -d "$PAYLOAD/ansible" ] || { echo "apply.sh: payload missing at $PAYLOAD" >&2; exit 1; }
+
+if [ "$CHECK" = 1 ] || [ "$WRITE_PAYLOAD" = 1 ]; then
+  tmp=$(mktemp -d "${TMPDIR:-/tmp}/ak47-payload.XXXXXX") || exit 1
+  trap 'rm -rf "$tmp"' EXIT
+  generate_payload "$tmp" || { echo "apply.sh: could not generate the payload" >&2; exit 1; }
+  if [ "$WRITE_PAYLOAD" = 1 ]; then
+    rm -rf "$PAYLOAD_DIR"
+    mkdir -p "$(dirname "$PAYLOAD_DIR")"
+    mv "$tmp" "$PAYLOAD_DIR" || exit 1
+    trap - EXIT
+    echo "regenerated: $PAYLOAD_DIR"
+    exit 0
+  fi
+  if [ ! -d "$PAYLOAD_DIR" ]; then
+    echo "apply.sh: committed payload missing at $PAYLOAD_DIR" >&2
+    exit 1
+  fi
+  if diff -ru "$PAYLOAD_DIR" "$tmp"; then
+    echo "payload is up to date"
+    exit 0
+  fi
+  echo "apply.sh: committed payload differs from ak47/; run apply.sh --write-payload" >&2
+  exit 1
+fi
+
+[ -d "$REPO/.git" ] || { echo "apply.sh: $REPO is not a git clone" >&2; exit 1; }
 
 # The paths this script owns inside H-DevOps. Nothing else is staged, so a
 # dirty clone with unrelated work in it is safe to run against.
@@ -100,6 +158,16 @@ elif git -C "$REPO" show-ref --verify --quiet "refs/heads/$BRANCH"; then
 else
   git -C "$REPO" checkout -b "$BRANCH" || exit 1
 fi
+
+# ---- payload -------------------------------------------------------------------
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/ak47-payload.XXXXXX") || exit 1
+trap 'rm -rf "$tmp"' EXIT
+generate_payload "$tmp" || { echo "apply.sh: could not generate the payload" >&2; exit 1; }
+rm -rf "$PAYLOAD_DIR"
+mkdir -p "$(dirname "$PAYLOAD_DIR")"
+mv "$tmp" "$PAYLOAD_DIR" || exit 1
+trap - EXIT
+echo "regenerated: $PAYLOAD_DIR"
 
 # ---- copy ----------------------------------------------------------------------
 for p in "${OWNED[@]}"; do
