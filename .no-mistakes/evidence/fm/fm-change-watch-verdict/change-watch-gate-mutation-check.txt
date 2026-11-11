@@ -1,0 +1,78 @@
+=== Scenario 1: a merge whose API target is never read ===
+
+$ run_cw /tmp/tmp.qNcySziNmh/u 1790000000 register u1 https://github.com/Muso-AI/H-DevOps/pull/3317
+change-watch: registered u1-3317 for https://github.com/Muso-AI/H-DevOps/pull/3317 (1 target(s))
+[exit 0]
+
+$ run_cw /tmp/tmp.qNcySziNmh/u 1790044000 drive u1-3317
+notice: change-watch: unmeasurable for https://github.com/Muso-AI/H-DevOps/pull/3317: nothing measured at +15m, +60m, +360m; never measured: muso-prod/feed-service; last read reason: read exited 1 with no value
+[exit 0]
+
+$ run_cw /tmp/tmp.qNcySziNmh/u 1790044000 verdict u1-3317
+change-watch unmeasurable-with-reason: nothing measured at +15m, +60m, +360m; never measured: muso-prod/feed-service; last read reason: read exited 1 with no value
+[exit 1]
+
+$ run_cw /tmp/tmp.qNcySziNmh/u 1790044000 gate u1
+change-watch: gate FAIL u1-3317: unmeasurable-with-reason: nothing measured at +15m, +60m, +360m; never measured: muso-prod/feed-service; last read reason: read exited 1 with no value
+change-watch: gate ok for u1
+[exit 0]
+
+--- queued check wake ---
+1794408730	1	check	change-watch-u1-3317-unmeasured	check: change-watch u1 https://github.com/Muso-AI/H-DevOps/pull/3317 unmeasurable (nothing measured at +15m, +60m, +360m; never measured: muso-prod/feed-service; last read reason: read exited 1 with no value)
+
+--- durable row ---
+{"version": "fm-change-watch-row-v1", "watch_id": "u1-3317", "task": "u1", "pr_url": "https://github.com/Muso-AI/H-DevOps/pull/3317", "merge_epoch": 1790000000, "registered_epoch": 1790000000, "completed_epoch": 1790044000, "readings": {"900": {"at": 1790044000, "scored": 0, "unmeasured": 6, "awaiting": 0, "regressed": 0, "measured": false, "values": {}}, "3600": {"at": 1790044000, "scored": 0, "unmeasured": 6, "awaiting": 0, "regressed": 0, "measured": false, "values": {}}, "21600": {"at": 1790044000, "scored": 0, "unmeasured": 6, "awaiting": 0, "regressed": 0, "measured": false, "values": {}}}, "real_user_check": "not-observed", "real_user_reason": "http_5xx_per_min was never scored, so no real user request was observed", "unmeasured_metrics": "http_5xx_per_min@muso-prod/feed-service, oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, restarts@muso-prod/feed-service, rss_ratio@muso-prod/feed-service", "unproven_targets": "muso-prod/feed-service", "terminal_state": "unmeasurable-with-reason", "reason": "nothing measured at +15m, +60m, +360m; never measured: muso-prod/feed-service; last read reason: read exited 1 with no value"}
+
+--- audit (7 days) ---
+
+$ run_cw /tmp/tmp.qNcySziNmh/u 1790044000 audit 7
+change-watch audit: window 7 day(s) from 1789439200
+change-watch audit: FAIL u1-3317 ended unmeasurable-with-reason
+change-watch audit: 1 row(s) recorded, 1 unmeasurable in the window, 0 "completed unmeasured" status line(s)
+[exit 1]
+
+=== Scenario 2: operator fixes the read path and re-registers ===
+
+$ run_cw /tmp/tmp.qNcySziNmh/u 1790045000 register u1 https://github.com/Muso-AI/H-DevOps/pull/3317
+change-watch: re-armed u1-3317 for https://github.com/Muso-AI/H-DevOps/pull/3317 (15 sample(s) remaining)
+[exit 0]
+--- row after re-register ---
+{"version": "fm-change-watch-row-v1", "watch_id": "u1-3317", "task": "u1", "pr_url": "https://github.com/Muso-AI/H-DevOps/pull/3317", "merge_epoch": 1790045000, "registered_epoch": 1790000000, "completed_epoch": null, "readings": {"900": null, "3600": null, "21600": null}, "real_user_check": "not-observed", "real_user_reason": "http_5xx_per_min was never scored, so no real user request was observed", "unmeasured_metrics": "http_5xx_per_min@muso-prod/feed-service, oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, restarts@muso-prod/feed-service, rss_ratio@muso-prod/feed-service", "unproven_targets": "muso-prod/feed-service", "terminal_state": "open", "reason": "the watch is still running"}
+
+$ run_cw /tmp/tmp.qNcySziNmh/u 1790088200 drive u1-3317
+notice: change-watch: clean for https://github.com/Muso-AI/H-DevOps/pull/3317 on every metric it could read, but these metrics were never measured: oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service; the rollout could not be proven for: muso-prod/feed-service
+[exit 0]
+
+$ run_cw /tmp/tmp.qNcySziNmh/u 1790088200 verdict u1-3317
+change-watch clean
+[exit 0]
+
+$ run_cw /tmp/tmp.qNcySziNmh/u 1790088200 gate u1
+change-watch: gate ok for u1
+[exit 0]
+--- row after clean re-measure ---
+{"version": "fm-change-watch-row-v1", "watch_id": "u1-3317", "task": "u1", "pr_url": "https://github.com/Muso-AI/H-DevOps/pull/3317", "merge_epoch": 1790045000, "registered_epoch": 1790000000, "completed_epoch": 1790088200, "readings": {"900": {"at": 1790088200, "scored": 2, "unmeasured": 4, "awaiting": 0, "regressed": 0, "measured": true, "values": {"restarts@muso-prod/feed-service": "2", "http_5xx_per_min@muso-prod/feed-service": "0"}}, "3600": {"at": 1790088200, "scored": 2, "unmeasured": 4, "awaiting": 0, "regressed": 0, "measured": true, "values": {"restarts@muso-prod/feed-service": "2", "http_5xx_per_min@muso-prod/feed-service": "0"}}, "21600": {"at": 1790088200, "scored": 2, "unmeasured": 4, "awaiting": 0, "regressed": 0, "measured": true, "values": {"restarts@muso-prod/feed-service": "2", "http_5xx_per_min@muso-prod/feed-service": "0"}}}, "real_user_check": "observed", "real_user_reason": "real user traffic was read from the pods' own access logs", "unmeasured_metrics": "oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service", "unproven_targets": "muso-prod/feed-service", "terminal_state": "proven", "reason": "all three readings (+15m, +1h, +6h) scored and every target was measured at least once; never measured: oomkilled@muso-prod/feed-service, p95_ms@muso-prod/feed-service, pgbouncer_cl_waiting@muso-prod/feed-service, rss_ratio@muso-prod/feed-service"}
+
+--- audit (7 days) ---
+
+$ run_cw /tmp/tmp.qNcySziNmh/u 1790088200 audit 7
+change-watch audit: window 7 day(s) from 1789483400
+change-watch audit: 1 row(s) recorded, 0 unmeasurable in the window, 0 "completed unmeasured" status line(s)
+[exit 0]
+
+=== Scenario 3: docs-only merge writes not-applicable and does not block teardown ===
+
+$ run_cw /tmp/tmp.qNcySziNmh/d 1790000000 register d1 https://github.com/Muso-AI/H-DevOps/pull/3317
+change-watch: no deployable service touched by https://github.com/Muso-AI/H-DevOps/pull/3317; nothing registered
+[exit 0]
+--- durable row ---
+{"version": "fm-change-watch-row-v1", "watch_id": "d1-3317", "task": "d1", "pr_url": "https://github.com/Muso-AI/H-DevOps/pull/3317", "merge_epoch": 1790000000, "registered_epoch": 1790000000, "completed_epoch": 1790000000, "readings": {"900": null, "3600": null, "21600": null}, "real_user_check": "not-applicable", "real_user_reason": "no http_5xx_per_min target: this watch has no real-user surface", "unmeasured_metrics": "", "unproven_targets": "", "terminal_state": "not-applicable", "reason": "no deployable surface touched by https://github.com/Muso-AI/H-DevOps/pull/3317"}
+
+$ run_cw /tmp/tmp.qNcySziNmh/d 1790000100 gate d1 --terminal-gap
+change-watch: gate ok for d1
+[exit 0]
+
+$ run_cw /tmp/tmp.qNcySziNmh/d 1790000100 audit 7
+change-watch audit: window 7 day(s) from 1789395300
+change-watch audit: 1 row(s) recorded, 0 unmeasurable in the window, 0 "completed unmeasured" status line(s)
+[exit 0]
