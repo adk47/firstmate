@@ -61,7 +61,11 @@
 # The producer owns once-ness per (pull request, head, event kind) - it fires
 # the same delivery id once - while the record itself is written idempotently,
 # so a repeated identical body lands on the record already present instead of
-# queueing a second copy the worker would act on twice. Firing stays safe for a
+# queueing a second copy the worker would act on twice. A caller whose record
+# body renders more than its identity sets FM_SEND_DEDUP_KEY to that canonical
+# identity, and the inbox then collapses on the key rather than on the body, so
+# a rendering difference such as the head's provenance cannot split one event
+# into two records. Firing stays safe for a
 # finding because the producer keeps its own SLA backstop as an ordinary steer
 # and a pull-request label, so a worker that never reads the fired record still
 # surfaces; the fired record exists to remove the wait, not the escalation.
@@ -1151,7 +1155,7 @@ else
         "$COALESCE_KEY") || inbox_write_rc=$?
     elif [ "${FM_SEND_IDEMPOTENT:-0}" = 1 ]; then
       INBOX_RECORD=$(fm_task_inbox_write_idempotent "$STATE" "$INBOX_TASK_ID" "$MESSAGE" \
-        "${FIRE_AND_FORGET_ID:+fire-and-forget}") || inbox_write_rc=$?
+        "${FIRE_AND_FORGET_ID:+fire-and-forget}" "${FM_SEND_DEDUP_KEY:-}") || inbox_write_rc=$?
     else
       INBOX_RECORD=$(fm_task_inbox_write "$STATE" "$INBOX_TASK_ID" "$MESSAGE" \
         "${FIRE_AND_FORGET_ID:+fire-and-forget}") || inbox_write_rc=$?
@@ -1165,11 +1169,14 @@ else
       exit 1
     fi
     fm_lock_release "$INBOX_META_LOCK"
-    # The record is the delivery. Confirm it is on disk carrying this text before
+    # The record is the delivery. Confirm it is on disk carrying this text (or,
+    # for a canonical dedup key, carrying that identity) before
     # any bookkeeping reports the steer as delivered: a write that cannot be
     # verified (a replaced or retired inbox) must refuse the send rather than
     # leave firstmate believing an instruction reached the worker.
-    if ! fm_task_inbox_verify "$INBOX_RECORD" "$MESSAGE"; then
+    if ! fm_task_inbox_verify "$INBOX_RECORD" "$MESSAGE" \
+      && ! { [ -n "${FM_SEND_DEDUP_KEY:-}" ] \
+        && fm_task_inbox_verify_dedup "$INBOX_RECORD" "$FM_SEND_DEDUP_KEY"; }; then
       if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
         fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
       fi

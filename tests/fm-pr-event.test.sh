@@ -5,8 +5,9 @@
 # NO-GO, or a conflict into the steering inbox of the crew that authored the
 # pull request at the moment it appears, instead of waiting on a firstmate turn
 # days later. bin/fm-pr-event.sh owns that one command: it resolves the author
-# from the recorded pr= identity, derives a stable delivery id from the exact
-# record body, and fires a fire-and-forget record through bin/fm-send.sh.
+# from the recorded pr= identity, derives a stable delivery id from the canonical
+# fields (pull request, resolved head, kind, text), and fires a fire-and-forget
+# record through bin/fm-send.sh.
 # These tests drive the real executable over a stubbed tmux and a real bare
 # origin plus the author's worktree, so the head is resolved exactly the way
 # production resolves it. They pin:
@@ -21,11 +22,14 @@
 #   4. A recorded pr_head= is only a named last resort, and a head that cannot
 #      be resolved is named as such instead of collapsing events.
 #   5. --head overrides live resolution and is named as explicit.
-#   6. A pull request no task records exits 4 and enqueues nothing, so the
+#   6. The delivery identity is the canonical fields, not the rendered body: the
+#      same head reached through a different source collapses onto one record,
+#      while a different head reached through a different source stays distinct.
+#   7. A pull request no task records exits 4 and enqueues nothing, so the
 #      producer keeps its own routing.
-#   7. A pull request two tasks record exits 5 and enqueues nothing.
-#   8. A malformed URL, kind, head, or empty text exits 2.
-#   9. A metadata file that is a symlink is not a record this home wrote.
+#   8. A pull request two tasks record exits 5 and enqueues nothing.
+#   9. A malformed URL, kind, head, or empty text exits 2.
+#  10. A metadata file that is a symlink is not a record this home wrote.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -266,6 +270,64 @@ test_gitlab_merge_request_head_is_live() {
   pass "fm-pr-event: a GitLab merge request resolves its live head, not an unknown one"
 }
 
+test_same_head_from_another_source_collapses() {
+  local dir err rc inbox head
+  dir=$(setup_case same-head); err="$dir/event.err"
+  inbox="$dir/home/state/author-t1.inbox"
+  head=$(remote_head "$dir")
+  run_event "$dir" "$err" -- "$URL" finding 'no test covers the retry'; rc=$?
+  expect_code 0 "$rc" "the live-head delivery should succeed"
+  git -C "$dir/origin.git" update-ref -d "$PR_REF"
+  fm_write_meta "$dir/home/state/author-t1.meta" \
+    "window=sess:fm-author-t1" "kind=ship" "harness=claude" "pr=$URL" \
+    "worktree=$dir/wt" "pr_head=$head"
+  run_event "$dir" "$err" -- "$URL" finding 'no test covers the retry'; rc=$?
+  expect_code 0 "$rc" "the recorded-head delivery should succeed"
+  [ "$(count_records "$inbox")" = 1 ] \
+    || fail "the same head reached through a different source was recorded twice:"$'\n'"$(ls "$inbox")"
+  [ "$(record_body "$inbox/001.msg")" = "pr-flow: $URL finding (head $head live): no test covers the retry" ] \
+    || fail "the surviving record does not name the live head it was fired for"
+  pass "fm-pr-event: the same head from a different source collapses onto one record"
+}
+
+test_different_head_from_another_source_is_distinct() {
+  local dir err rc inbox head_a head_b
+  dir=$(setup_case other-head); err="$dir/event.err"
+  inbox="$dir/home/state/author-t1.inbox"
+  head_a=$(git -C "$dir/origin.git" rev-parse refs/heads/main)
+  head_b=$(remote_head "$dir")
+  [ "$head_a" != "$head_b" ] || fail "the fixture needs two distinct commits"
+  fm_write_meta "$dir/home/state/author-t1.meta" \
+    "window=sess:fm-author-t1" "kind=ship" "harness=claude" "pr=$URL" \
+    "worktree=$dir/wt" "pr_head=$head_a"
+  run_event "$dir" "$err" -- "$URL" finding 'no test covers the retry'; rc=$?
+  expect_code 0 "$rc" "the live-head delivery should succeed"
+  git -C "$dir/origin.git" update-ref -d "$PR_REF"
+  run_event "$dir" "$err" -- "$URL" finding 'no test covers the retry'; rc=$?
+  expect_code 0 "$rc" "the recorded-head delivery should succeed"
+  [ "$(count_records "$inbox")" = 2 ] \
+    || fail "a different head reached through a different source collapsed:"$'\n'"$(ls "$inbox")"
+  [ "$(record_body "$inbox/001.msg")" = "pr-flow: $URL finding (head $head_b live): no test covers the retry" ] \
+    || fail "the first record does not name the live head"
+  [ "$(record_body "$inbox/002.msg")" = "pr-flow: $URL finding (head $head_a recorded): no test covers the retry" ] \
+    || fail "the second record does not name the recorded head"
+  pass "fm-pr-event: a different head from a different source stays a distinct record"
+}
+
+test_explicit_head_matching_live_collapses() {
+  local dir err rc inbox head
+  dir=$(setup_case explicit-live); err="$dir/event.err"
+  inbox="$dir/home/state/author-t1.inbox"
+  head=$(remote_head "$dir")
+  run_event "$dir" "$err" -- "$URL" finding 'no test covers the retry'; rc=$?
+  expect_code 0 "$rc" "the live-head delivery should succeed"
+  run_event "$dir" "$err" -- --head "$head" "$URL" finding 'no test covers the retry'; rc=$?
+  expect_code 0 "$rc" "the explicit-head delivery should succeed"
+  [ "$(count_records "$inbox")" = 1 ] \
+    || fail "an explicit head equal to the live head was recorded twice:"$'\n'"$(ls "$inbox")"
+  pass "fm-pr-event: an explicit head equal to the live head collapses onto one record"
+}
+
 test_distinct_events_are_distinct() {
   local dir err rc inbox
   dir=$(setup_case distinct); err="$dir/event.err"
@@ -340,6 +402,9 @@ test_recorded_head_is_a_named_fallback
 test_unresolvable_head_is_stated
 test_explicit_head_overrides_live_resolution
 test_gitlab_merge_request_head_is_live
+test_same_head_from_another_source_collapses
+test_different_head_from_another_source_is_distinct
+test_explicit_head_matching_live_collapses
 test_distinct_events_are_distinct
 test_no_author_keeps_caller_routing
 test_ambiguous_author_refuses

@@ -13,13 +13,16 @@
 # ever climbing the re-ring ladder into a firstmate escalation
 # (bin/fm-task-inbox-lib.sh owns that record format and ladder).
 #
-# Once-ness belongs to this script, not to the caller: the delivery id is the
-# first 16 hex of the SHA-256 of the exact record body, and the local inbox
-# collapses an identical fire-and-forget body onto the record already present.
-# The body carries the head the event belongs to, so once-ness is per pull
-# request, head, and event kind: the same finding re-fired on a new head is a
-# new record, while a blind retry after an uncertain outcome can never queue a
-# second copy the crew would act on twice.
+# Once-ness belongs to this script, not to the caller, and it is computed from
+# the canonical fields rather than from the rendered record: the delivery id is
+# the first 16 hex of the SHA-256 of the pull request URL, the resolved head, the
+# event kind, and the event text. The body is a rendering of those fields and
+# names the head's provenance, so the same event fired twice through different
+# head sources still collapses onto one record, while a different head, kind, or
+# text is a new record. The local inbox dedups on that id
+# (bin/fm-task-inbox-lib.sh owns the record format and the dedup), so a blind
+# retry after an uncertain outcome can never queue a second copy the crew would
+# act on twice.
 #
 # The head is resolved live, never from a snapshot that a push leaves behind: it
 # is the opened pull request's own head ref (refs/pull/<n>/head on GitHub,
@@ -176,19 +179,21 @@ else
   BODY="pr-flow: $URL $KIND (head unresolvable): $TEXT"
 fi
 
-# The delivery id is derived from the exact body so a retry of the same event
-# carries the same id, and a different event can never collide with it.
-BODY_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-pr-event.XXXXXX") || {
-  echo "error: could not stage the event body" >&2
+# The delivery id is derived from the canonical fields, never from the rendered
+# body: provenance is a rendering detail, so it must not split one event into
+# two records. An unresolvable head contributes an empty head field, which keeps
+# every such event for the same pull request, kind, and text on one identity.
+IDENTITY_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-pr-event.XXXXXX") || {
+  echo "error: could not stage the event identity" >&2
   exit 1
 }
-trap 'rm -f -- "$BODY_TMP"' EXIT
+trap 'rm -f -- "$IDENTITY_TMP"' EXIT
 trap 'exit 1' HUP INT TERM
-printf '%s' "$BODY" > "$BODY_TMP" || {
-  echo "error: could not stage the event body" >&2
+printf '%s\n%s\n%s\n%s' "$URL" "$HEAD" "$KIND" "$TEXT" > "$IDENTITY_TMP" || {
+  echo "error: could not stage the event identity" >&2
   exit 1
 }
-DIGEST=$(fm_pr_sha256 "$BODY_TMP") || {
+DIGEST=$(fm_pr_sha256 "$IDENTITY_TMP") || {
   echo "error: no SHA-256 tool is available to derive the delivery id" >&2
   exit 1
 }
@@ -197,6 +202,8 @@ DIGEST=$(fm_pr_sha256 "$BODY_TMP") || {
   exit 1
 }
 DELIVERY_ID=${DIGEST:0:16}
+FM_SEND_DEDUP_KEY=$DELIVERY_ID
+export FM_SEND_DEDUP_KEY
 
 # bin/fm-send.sh resolves its own state from FM_HOME and FM_STATE_OVERRIDE, so
 # both must reach it exactly as this script resolved them.
