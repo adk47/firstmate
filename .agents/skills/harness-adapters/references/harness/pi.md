@@ -14,6 +14,7 @@ Verified on 2026-07-27 with Pi and Pi-signed 0.82.0 unless a fact gives another 
 | Model flag | `--model <model>`. |
 | Effort flag | `--thinking <low\|medium\|high\|xhigh\|max>`; both identities expose the same levels and completed the same model-qualified max-thinking smoke. |
 | Model discovery | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
+| Footer fields | The rendered status footer reads `↑<in> ↓<out> R<cache-read> W<cache-write> CH<nn.n>% $<cost> <nn.n>%/<window> (auto) <model>` per the installed `dist/modes/interactive/components/footer.js`; `CH` is the latest prompt-cache hit rate and the only context measure is the `<nn.n>%/<window>` token, which `../../../bin/fm-chair-status.sh` already parses. A `CH99.0%` reading on a lane showing `15.4%/1.0M` is a healthy cache, not a full context. |
 
 Pi has no permission system, so workers are always autonomous.
 Pi's installed `packages/coding-agent/docs/settings.md` UI and display section documents `regular` as the `tuiMode` default and `fullscreen` as experimental.
