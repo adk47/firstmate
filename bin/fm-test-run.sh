@@ -242,7 +242,8 @@ family_for_basename() {
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
     fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
     fm-transition-lib.test.sh|\
-    fm-test-run.test.sh|fm-test-isolation-proof.test.sh|fm-test-reap.test.sh)
+    fm-test-run.test.sh|fm-test-isolation-proof.test.sh|fm-test-reap.test.sh|\
+    fm-sa-store.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
     fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
@@ -1401,7 +1402,7 @@ families_for_changed_path() {
     docs/fm-test-isolation-proof.json)
       printf '%s\n' pure-contract-unit
       ;;
-    .github/*|.tasks.toml|AGENTS.md|CLAUDE.md|CONTRIBUTING.md|\
+    .github/*|.tasks.toml|AGENTS.md|CLAUDE.md|CONTRIBUTING.md|GROK_BOT.md|\
     docs/configuration.md|docs/supervision-protocols/*)
       printf '%s\n' pure-contract-unit
       ;;
@@ -1432,6 +1433,11 @@ families_for_changed_path() {
       ;;
     tests/*)
       printf '%s\n' "__unmapped__:$path"
+      ;;
+    sa/*)
+      # The SA store is one stdlib-only Python package covered by one suite;
+      # tests/fm-sa-store.test.sh is its wrapper and lives in this family.
+      printf '%s\n' pure-contract-unit
       ;;
     README.md|LICENSE|assets/*|docs/*|.gitignore)
       ;;
