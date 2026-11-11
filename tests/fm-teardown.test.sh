@@ -4011,6 +4011,8 @@ test_proven_change_watch_allows_teardown() {
   expect_code 0 "$rc" "cw-proven: teardown should proceed when the watch ended proven"
   ! grep -q REFUSED "$case_dir/stderr" || fail "cw-proven: teardown printed a REFUSED line for a proven watch"
   pass "a change watch that ended proven allows teardown"
+}
+
 # The Captain's incident: teardown passed the landed-work gate, killed the agent
 # and closed its window, then aborted at the worktree return because treehouse is
 # not installed on this host. Verification must happen BEFORE the endpoint kill:
