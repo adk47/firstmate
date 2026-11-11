@@ -396,7 +396,7 @@ The optional local, gitignored `config/task-tmpdir` restores the old behaviour: 
 Any other content, or an absent file, leaves the per-task `TMPDIR` enabled.
 The path is kept short because a unix socket path is capped at 108 bytes.
 
-`ak47/guards/guard-producers.sh --systemic` fails when this export disappears, and [`tests/fm-gotmp.test.sh`](../tests/fm-gotmp.test.sh) covers the creation, the export, and the opt-out.
+`ak47/guards/guard-producers.sh --systemic` fails when this export disappears, and [`tests/fm-kimi-harness.test.sh`](../tests/fm-kimi-harness.test.sh) covers the export and the opt-out by running the spawn path and inspecting the pane command.
 The `ak47/` hygiene system that measures and reaps what still leaks is documented in [`ak47/README.md`](../ak47/README.md).
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
