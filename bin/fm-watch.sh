@@ -1525,10 +1525,6 @@ signal_enqueue_batch() {  # <reason> <decision-files> <file> ...
       reason="signal:${ordinary}"
     fi
     fm_wake_append signal "$batch_key" "$reason" || return 1
-  else
-    # A decision-only batch has no ordinary row, so nothing can claim these
-    # paths; record them anyway so the batch's paths stay discoverable.
-    signal_record_batch_paths "$batch_key" "$@" || true
   fi
   for f in $decision_files; do
     decision_key=$(basename "$f")

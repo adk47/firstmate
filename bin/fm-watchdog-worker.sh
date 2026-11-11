@@ -223,6 +223,7 @@ CONNECTION_SECS=600
 CONNECTION_STRIKES=3
 FALLBACK_MODEL=''
 FALLBACK_KINDS=''
+HELD_IDS=''
 BACKLOG_ENABLED=on
 BACKLOG_BIN=''
 BACKLOG_LIST_MAX=25
@@ -658,6 +659,31 @@ task_conn_relaunch() {  # <id> <kind> <minutes> <strikes>
   return 1
 }
 
+# load_held_ids: read the captain-held set once per pass. A task held for the
+# captain is DELIBERATELY stopped: its endpoint being dead is the expected state,
+# not a fault. Relaunching it burns the hourly budget on work the captain has not
+# released, and then pages firstmate about a task that is stopped on purpose.
+# Measured 2026-11-10 14:1xZ: six held tasks were relaunched three times each in
+# one hour and then paged as "needs a hand". An unreadable backlog leaves the set
+# empty, which degrades to the old behaviour rather than silently skipping every
+# task.
+load_held_ids() {
+  local -a held_file_args=()
+  HELD_IDS=''
+  [ ! -f "$DATA_DIR/backlog.md" ] || held_file_args=(--file "$DATA_DIR/backlog.md")
+  if [ -n "$BACKLOG_BIN" ] && command -v "$BACKLOG_BIN" >/dev/null 2>&1; then
+    HELD_IDS=$(fm_run_timed "$READ_TIMEOUT_SECS" "$BACKLOG_BIN" list --state held \
+      ${held_file_args[@]+"${held_file_args[@]}"} 2>/dev/null \
+      | awk 'NR > 1 && /^  / { print $1 }' | cut -d, -f1 \
+      | grep -E '^[A-Za-z0-9][A-Za-z0-9._-]*$' | sort -u) || HELD_IDS=''
+  fi
+}
+
+# task_is_held <id>: true when the captain holds this task.
+task_is_held() {  # <id>
+  [ -n "$HELD_IDS" ] && printf '%s\n' "$HELD_IDS" | grep -qxF "$1"
+}
+
 # --- boot pass --------------------------------------------------------------
 
 # chair_ensure: make sure the chair's own unit runs, without ever starting a
@@ -708,6 +734,7 @@ boot_pass() {  # <boot>
     kind=$(fm_meta_get "$meta" kind)
     [ "$kind" = secondmate ] && continue
     [ -n "$(fm_meta_get "$meta" window)" ] || continue
+    task_is_held "$id" && continue
     if [ "$(now_epoch)" -ge "$deadline" ]; then
       printf 'watchdog: boot pass ran out of budget before it reached every task; the task pass continues from here\n'
       break
@@ -842,23 +869,7 @@ task_pass() {
   local since stage stage_at rings relaunches steers woke status_mtime changed stage_age
   local sig='' istage istage_at ibase strikes
   local ring_count relaunch_count steer_count minutes conn_err strike_count
-  local HELD_IDS=''
   now=$(now_epoch)
-  # A task held for the captain is DELIBERATELY stopped: its endpoint being dead
-  # is the expected state, not a fault. Relaunching it burns the hourly budget on
-  # work the captain has not released, and then pages firstmate about a task that
-  # is stopped on purpose. Measured 2026-11-10 14:1xZ: six held tasks were
-  # relaunched three times each in one hour and then paged as "needs a hand".
-  # Read the held set once per pass; an unreadable backlog leaves it empty, which
-  # degrades to the old behaviour rather than silently skipping every task.
-  local -a held_file_args=()
-  [ ! -f "$DATA_DIR/backlog.md" ] || held_file_args=(--file "$DATA_DIR/backlog.md")
-  if [ -n "$BACKLOG_BIN" ] && command -v "$BACKLOG_BIN" >/dev/null 2>&1; then
-    HELD_IDS=$(fm_run_timed "$READ_TIMEOUT_SECS" "$BACKLOG_BIN" list --state held \
-      ${held_file_args[@]+"${held_file_args[@]}"} 2>/dev/null \
-      | awk 'NR > 1 && /^  / { print $1 }' | cut -d, -f1 \
-      | grep -E '^[A-Za-z0-9][A-Za-z0-9._-]*$' | sort -u) || HELD_IDS=''
-  fi
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
     id=$(basename "$meta" .meta)
@@ -869,6 +880,7 @@ task_pass() {
     [ -n "$window" ] || continue
     # The boot pass already acted on this task in this pass.
     [ -e "$WORK/touched.$id" ] && continue
+    task_is_held "$id" && continue
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
     [ -n "$target" ] || target="$window"
@@ -898,11 +910,6 @@ task_pass() {
     case "$state" in
       alive) ;;
       dead|missing)
-        # Held for the captain: stopped on purpose, so neither relaunch nor page.
-        if [ -n "$HELD_IDS" ] && printf '%s\n' "$HELD_IDS" | grep -qxF "$id"; then
-          task_store "$id"
-          continue
-        fi
         if [ "$DRY_RUN" = 1 ]; then
           printf '%s\t%s\tn/a\t-\t%d\t%d\twould relaunch (endpoint %s)\n' \
             "$id" "$state" "$(quiet_minutes_of "$id" "$now")" "$(inbox_minutes_of "$id")" "$state"
@@ -1146,10 +1153,23 @@ dry_plan() {  # <id> <busy> <changed> <conn_err> <stage> <strikes> <inbox-min>
       printf 'conn: would escalate (relaunch budget spent)'
       return 0
     fi
-    case "$(fm_meta_get "$STATE/$1.meta" harness)" in
-      ''|claude|claude-*) printf 'would relaunch on fallback model' ;;
-      *) printf 'would relaunch on its own model' ;;
-    esac
+    local kind harness
+    kind=$(fm_meta_get "$STATE/$1.meta" kind)
+    harness=$(fm_meta_get "$STATE/$1.meta" harness)
+    if [ -n "$FALLBACK_MODEL" ]; then
+      case " $FALLBACK_KINDS " in
+        *" $kind "*)
+          if [ -f "$STATE/$1.gateway.env" ]; then
+            printf 'would relaunch on fallback model'
+            return 0
+          fi
+          case "$harness" in
+            ''|claude|claude-*) printf 'would relaunch on fallback model'; return 0 ;;
+          esac
+          ;;
+      esac
+    fi
+    printf 'would relaunch on its own model'
     return 0
   fi
   if [ "$busy" = busy ]; then
@@ -1219,6 +1239,7 @@ inbox_pass() {
     case "$id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
     kind=$(fm_meta_get "$meta" kind)
     [ "$kind" = secondmate ] && continue
+    task_is_held "$id" && continue
     [ -d "$STATE/$id.inbox" ] || continue
     oldest=$(inbox_oldest "$id") || continue
     base=${oldest##*/}
@@ -1429,6 +1450,7 @@ main() {
   record_load
   printf '%s' "$PRIOR_TASKS" > "$WORK/tasks.json" 2>/dev/null || printf '{}' > "$WORK/tasks.json"
 
+  load_held_ids
   local boot units
   boot=$(boot_identity)
   # A host that exposes no boot identity never guesses one: it simply runs the

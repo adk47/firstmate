@@ -168,6 +168,20 @@ backlog_bin() {  # <home> <id...>
   chmod +x "$home/fakebin/tasks-axi"
 }
 
+held_backlog_bin() {  # <home> <id...>: a tasks-axi stand-in that reports held ids.
+  local home=$1
+  shift
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'printf "count: 2\\ntasks[2]{id,state,kind,repo,title}:\\n"\n'
+    local id
+    for id in "$@"; do
+      printf 'printf "  %s,held,ship,p,t\\n"\n' "$id"
+    done
+  } > "$home/fakebin/tasks-axi"
+  chmod +x "$home/fakebin/tasks-axi"
+}
+
 start_clock() { date +%s; }
 
 test_a_dead_worker_comes_back_in_one_pass_with_no_wake() {
@@ -625,6 +639,44 @@ test_a_dry_run_reports_every_lane_and_changes_nothing() {
   [ -e "$home/state/.wake-queue" ] && fail "a dry run queued a wake"
   [ -e "$home/state/.watchdog-worker.json" ] && fail "a dry run wrote the durable record"
   pass "a dry run reports every lane's plan and touches nothing"
+}
+
+test_a_held_task_is_never_relaunched_or_paged() {
+  local home now out
+  home=$(make_home held); fake_tools "$home"
+  worker "$home" w1 dead
+  worker "$home" w2 alive
+  pane "$home" w2 busy 'a tool call that never returns'
+  steer "$home" w2 5500
+  held_backlog_bin "$home" w1 w2
+  now=$(start_clock)
+  out=$(tick "$home" "$now" FM_WATCHDOG_BACKLOG=on FM_WATCHDOG_BACKLOG_BIN="$home/fakebin/tasks-axi")
+  [ -z "$out" ] || fail "a held task was acted on: $out"
+  assert_eq "$(counter "$home" '^control .* relaunch')" "0" "a held task was relaunched"
+  assert_eq "$(counter "$home" '^send ')" "0" "a held task was steered"
+  [ -z "$(wakes "$home")" ] || fail "a held task woke firstmate: $(wakes "$home")"
+  out=$(tick "$home" "$((now + 300))" FM_WATCHDOG_BOOT_ID=boot-a FM_WATCHDOG_BACKLOG=on FM_WATCHDOG_BACKLOG_BIN="$home/fakebin/tasks-axi")
+  assert_contains "$out" "relaunched 0 of 0 task(s)" "the boot pass counted or relaunched a held task"
+  assert_eq "$(counter "$home" '^control .* relaunch')" "0" "the boot pass relaunched a held task"
+  pass "a held task is never relaunched or paged, in the boot pass or the task pass"
+}
+
+test_a_dry_run_plan_matches_the_connection_relaunch_model() {
+  local home now out
+  home=$(make_home dry-conn); fake_tools "$home"
+  worker "$home" w1 alive review claude
+  pane "$home" w1 idle 'Error: Connection reset by peer'
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  tick "$home" "$((now + 700))" >/dev/null
+  tick "$home" "$((now + 710))" >/dev/null
+  tick "$home" "$((now + 720))" >/dev/null
+  out=$(WD_ARGS=--dry-run tick "$home" "$((now + 730))")
+  assert_contains "$out" "would relaunch on its own model" \
+    "the dry-run plan promised a fallback model the pass refuses for a review seat"
+  assert_not_contains "$out" "would relaunch on fallback model" \
+    "the dry-run plan disagreed with the pass about the review seat's model"
+  pass "the dry-run plan agrees with the connection relaunch's fallback-kind rule"
 }
 
 test_a_dead_worker_comes_back_in_one_pass_with_no_wake
