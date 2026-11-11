@@ -23,9 +23,11 @@
 #   readiness  ready | work | unknown   (is the deliverable finished?)
 #   class      A | B                    (is the remaining act the captain's alone?)
 #
-# Class B is the closed list: new spend or a vendor contract; logins or
-# credentials only the captain holds; legal signatures or sends under his name;
-# irreversible customer-data destruction; a security change judged risky.
+# Class B is the closed rule table: money and vendor commitments; legal
+# signatures and sends under his name; credentials and secrets only he holds;
+# irreversible data destruction; customer-facing copy and notices; edge, DNS,
+# and firewall changes; consoles and logins only he can reach; and any explicit
+# captain instruction or switch the record names as his.
 # Everything else is Class A, which this lane rules and executes.
 #
 # Usage:
@@ -61,8 +63,8 @@
 # lane's. `apply` refuses to lift a Class A hold with no ruling, and never
 # touches a Class B row.
 #
-# `status` prints one line: held, class A, class B, ready, work, unknown, and
-# how many Class A rows are still awaiting a ruling.
+# `status` prints a counts line (held, class A, class B, ready, work, unknown)
+# plus how many Class A rows are still awaiting a ruling.
 #
 # `arm` installs the hourly scan-and-rule check as a registered custom check so
 # the lane runs without a human remembering it. It prints the exact commands

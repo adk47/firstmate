@@ -46,9 +46,11 @@
 #            generic runner then retires the registration itself.
 # source-id  Print the canonical source id for <name>.
 # retire     Stop the watch: retire the registration and remove the spec, trust
-#            record, and fired marker. Idempotent. Captured results and their
-#            handled acknowledgements are never touched. Warns when the action
-#            had already fired without a captured outcome.
+#            record, and fired marker. Idempotent. Accepts the bare name or the
+#            printed when-<name> form. After a successful retire it marks every
+#            captured unhandled result handled, so the retire ends the
+#            announcements too; a refused retire marks nothing. Warns when the
+#            action had already fired without a captured outcome.
 # run        The blocking child the generic runner executes; never run it in a
 #            conversational turn. It polls the condition on the registered
 #            cadence, requires the stable count of consecutive trues, claims a

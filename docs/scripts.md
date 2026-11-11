@@ -37,6 +37,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-decider-check.sh`    | Hourly poll that wakes only when the lane has work it can do without the captain |
 | `fm-hold-scan.py`        | Deterministic two-axis classifier (readiness, class) for every held task, with the rule that fired |
 | `fm-hold-digest.py`      | Render the capped, grouped digest of held work from a scan and the ruling ledger |
+| `fm-tmp-top`             | Show a bounded `/tmp` total, top entries, and entry count with one `du` pass, never a per-entry fork |
 | `fm-brief.sh`            | Scaffold ship (explicit `--mode`), scout, secondmate-charter, and Herdr-lab briefs, with Captain's intent and Firstmate spec subsections on ship/scout |
 | `fm-dod-lib.sh`          | One owner of the ship definition of done and of the no-mistakes `--intent` contract |
 | `fm-herdr-lab.sh`        | Provision and guardedly operate an isolated, never-default Herdr lab session         |

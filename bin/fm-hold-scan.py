@@ -16,19 +16,23 @@ is work still owed?
 Axis 2 - class. Is the remaining act the captain's alone (Class B), or is it
 the fleet's to decide (Class A)?
 
-  B  the closed Class B list: new spend or a vendor contract; logins or
-     credentials only the captain holds; legal signatures or sends under his
-     name; irreversible customer-data destruction; a security change judged
-     risky. The rule table is deliberately biased toward B: a false B costs one
-     digest line, a false A sends the captain's own call to the fleet.
+  B  the closed Class B rule table: money and vendor commitments; legal
+     signatures and sends under his name; credentials and secrets only he
+     holds; irreversible data destruction; customer-facing copy and notices;
+     edge, DNS, and firewall changes; consoles and logins only he can reach;
+     and any explicit captain instruction or switch the record names as his.
+     The rule table is deliberately biased toward B: a false B costs one digest
+     line, a false A sends the captain's own call to the fleet.
   A  everything else, which the lane rules and executes.
 
 A hold also carries a `hold-until` date when it was set as a time gate. A hold
 whose date has passed is expired, not live: the gate opened and nobody walked
 through it. Expired holds are excluded by default because counting them inflates
 the queue and would have the lane rule items that are no longer held; pass
---include-expired to see them. A `hold-kind: future` hold is a dated reminder
-rather than a captain call, so it is Class A with rule `dated-reminder`.
+--include-expired to see them. A `hold-kind: future` hold that matches no
+Class B rule is a dated reminder rather than a captain call, so it is Class A
+with rule `dated-reminder`; a future hold whose reason does match a Class B rule
+stays Class B.
 
 The rule table is data, not code. Widening or narrowing Class B is a reviewed
 diff to CLASS_B_RULES below, never a runtime decision.

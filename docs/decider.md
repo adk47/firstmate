@@ -23,7 +23,7 @@ The lane does not re-derive it; it applies the two-axis test that policy implies
 
 **Class** asks whose act the remainder is.
 
-- Class B is the closed list: new spend or a vendor contract; logins or credentials only the captain holds; legal signatures or sends under his name; irreversible customer-data destruction; a security change judged risky; and any explicit captain instruction, or any switch the record names as his.
+- Class B is the closed rule table: money and vendor commitments; legal signatures and sends under his name; credentials and secrets only he holds; irreversible data destruction; customer-facing copy and notices; edge, DNS, and firewall changes; consoles and logins only he can reach; and any explicit captain instruction, or any switch the record names as his.
 - Class A is everything else, which the lane rules and executes.
 
 The captain-instruction rule is kept narrow on purpose.
@@ -35,14 +35,15 @@ A false Class B costs one line in a digest; a false Class A sends the captain's 
 A hold also carries a `hold-until` date when it was set as a time gate.
 A hold whose date has passed is expired, not live: the gate opened and nobody walked through it.
 Expired holds leave the queue, because counting them inflates it and would have the lane rule items that are no longer held; `--include-expired` still reports them.
-A `hold-kind: future` hold is a dated reminder rather than a captain call, so it is Class A with rule `dated-reminder`.
+A `hold-kind: future` hold that matches no Class B rule is a dated reminder rather than a captain call, so it is Class A with rule `dated-reminder`; a future hold whose reason does match a Class B rule stays Class B.
 
 Readiness ignores quoted spans, because a quoted option value describes a choice rather than the state of the work: "the report is complete; say 'arm' or 'not yet'" is ready, not work.
 
 ## The four layers
 
 `bin/fm-hold-scan.py` is layer one: a deterministic classifier with no model and no network.
-It reads the active home's backlog, extracts every active hold, and emits one JSON object per hold carrying the rule that fired, so every classification is auditable.
+It reads the active home's backlog, extracts every active captain hold and dated future reminder, and emits one JSON object per hold carrying the rule that fired, so every classification is auditable.
+An external gate is not a captain call, so the scan never classifies or lifts one.
 The rule table is data, not code, so widening or narrowing Class B is a reviewed diff rather than a runtime decision.
 
 `bin/fm-decider.sh record` is layer two: the ruling ledger.
@@ -65,7 +66,7 @@ It renders Class A rulings already made, then every Class B item as exactly one 
 ## Commands
 
 ```
-bin/fm-decider.sh scan [--json|--summary] [--class A|B] [--readiness R] [--ids]
+bin/fm-decider.sh scan [--json|--summary] [--class A|B] [--readiness R] [--ids] [--include-expired]
 bin/fm-decider.sh digest [--cap N] [--out PATH]
 bin/fm-decider.sh record <id> <ruling> <reason> <evidence> <revert>
 bin/fm-decider.sh rulings
@@ -75,11 +76,11 @@ bin/fm-decider.sh status
 bin/fm-decider.sh arm
 ```
 
-`scan` refreshes the durable snapshot at `data/decider/holds.jsonl` unless a filter is given.
+`scan` refreshes the durable snapshot at `data/decider/holds.jsonl` unless a filter or output selector is given.
 It reports live holds only; pass `--include-expired` to see the time gates that already opened.
 `digest` writes `data/decider/digest-<YYYY-MM-DD>.md` and prints its path.
 `plan` prints what `apply` would do and changes nothing; `apply` without `--yes` is the same dry run.
-`status` reports the whole queue on one line.
+`status` reports the whole queue as a counts line plus the number of Class A rows still awaiting a ruling.
 
 ## Cadence
 
