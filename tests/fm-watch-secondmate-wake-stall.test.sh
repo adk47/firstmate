@@ -227,8 +227,44 @@ test_grok_rendered_tail_decides_the_rung() {
   pass "a grok mate's rendered tail decides the rung: busy footer silent, unprovable reports"
 }
 
+# A valid busy record proves nothing once the mate's endpoint is gone. The live
+# classifier checks the endpoint before the record, so a killed harness that
+# left its busy record behind can never silence the rung forever.
+test_endpoint_gone_does_not_suppress_a_busy_record() {
+  local dir state out
+  dir=$(make_spawned_mate endpoint-gone "$TMP_ROOT/gone-pane.txt" 0)
+  state="$dir/home/state"
+  out="$dir/watch.out"
+  printf 'Working... (279k context)\n' > "$TMP_ROOT/gone-pane.txt"
+
+  [ -s "$state/mate.busy-state" ] \
+    || fail "the real secondmate spawn armed no busy record"
+  grep -F 'state=busy' "$state/mate.busy-state" >/dev/null \
+    || fail "the real secondmate spawn did not seed a busy record: $(cat "$state/mate.busy-state")"
+
+  cat > "$dir/fakebin/tmux" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  list-windows) exit 1 ;;
+  capture-pane) cat "$TMP_ROOT/gone-pane.txt" ;;
+  display-message) exit 1 ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$dir/fakebin/tmux"
+
+  run_stall_checkpoint "$dir" 8 "$out"
+
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7 age=' "$out" >/dev/null \
+    || fail "a gone endpoint with a stale busy record silenced the rung: $(cat "$out"); err=$(cat "$dir/watch.err")"
+  [ -s "$state/.wake-queue" ] \
+    || fail "a gone endpoint with a stale busy record published no durable notification"
+  pass "a gone endpoint does not suppress the rung even with a valid busy record"
+}
+
 test_busy_mate_from_real_spawn_stays_silent
 test_idle_mate_from_real_spawn_reports
+test_endpoint_gone_does_not_suppress_a_busy_record
 test_capture_failure_does_not_override_semantic_busy
 test_grok_capture_failure_still_reports
 test_grok_rendered_tail_decides_the_rung

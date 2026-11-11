@@ -804,6 +804,7 @@ secondmate_oldest_queue_row() {  # <queue-path>
 secondmate_wake_stall_tick() {
   local now=$(( $(date +%s) )) threshold=$SECONDMATE_WAKE_STALL_SECS
   local meta task kind remote_host home queue row epoch seq row_key marker receipt receipt_dir notify_key queued age reason verdict
+  local backend target harness label
   case "$threshold" in ''|*[!0-9]*|0) threshold=60 ;; esac
   # Endpoint metadata admits this queue-loop check; secondmate-liveness owns registered mates whose endpoint is missing or dead.
   for meta in "$STATE"/*.meta; do
@@ -843,12 +844,19 @@ EOF
     # mate is in fact working - the ordinary behaviour this rung exists to
     # detect would satisfy the alarm. bin/fm-spawn.sh arms the same semantic
     # busy contract for a mate that it arms for a crew window, so a positive
-    # busy read proves the mate is mid-turn and the rung stays silent. Only a
-    # POSITIVE read suppresses: idle, unknown, dead, missing, no-target, and any
-    # capture failure inside the busy lib all fall through and still report, so
-    # a mate that cannot be proven working is never silently exempted. Nothing
-    # below the marker, receipt, dedupe, or notify-key shape changes.
-    verdict=$(fm_busy_classify_meta "$meta" "$task" "$STATE")
+    # busy read proves the mate is mid-turn and the rung stays silent. The live
+    # classifier checks the endpoint first, so a mate whose endpoint is gone is
+    # dead, never busy, and a stale record cannot silence the rung forever.
+    # Only a POSITIVE read suppresses: idle, unknown, dead, missing, no-target,
+    # and any capture failure inside the busy lib all fall through and still
+    # report, so a mate that cannot be proven working is never silently
+    # exempted. Nothing below the marker, receipt, dedupe, or notify-key shape
+    # changes.
+    backend=$(fm_backend_of_meta "$meta")
+    target=$(fm_backend_target_of_meta "$meta")
+    harness=$(fm_meta_get "$meta" harness)
+    label="fm-$task"
+    verdict=$(fm_busy_classify_live "$backend" "$target" "$harness" "$task" "$STATE" "$label")
     [ "${verdict%% *}" = busy ] && continue
     row_key="$epoch-$seq"
     receipt="$receipt_dir/$row_key"
