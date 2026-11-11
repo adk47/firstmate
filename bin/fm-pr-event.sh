@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Deliver one pull-request event to the crew that owns the pull request.
-# Usage: fm-pr-event.sh [--source <name>] <pr-url> <kind> <text...>
+# Usage: fm-pr-event.sh <pr-url> <kind> <text...>
 #
 # A PR-event producer - the pr-flow job is the canonical one - calls this at the
 # moment it observes a QA finding, a NO-GO, a conflict, or any other event that
@@ -16,17 +16,21 @@
 # Once-ness belongs to this script, not to the caller: the delivery id is the
 # first 16 hex of the SHA-256 of the exact record body, and the local inbox
 # collapses an identical fire-and-forget body onto the record already present.
-# A producer that includes the head commit in <text> therefore gets one record
-# per (pull request, head, event) for free, and a blind retry after an
-# uncertain outcome can never queue a second copy the crew would act on twice.
+# The body carries the author's recorded pr_head= (bin/fm-pr-check.sh writes it
+# when the forge's CLI can supply it), so once-ness is per pull request, head,
+# and event kind: the same finding re-fired for a new head is a new record,
+# while a blind retry after an uncertain outcome can never queue a second copy
+# the crew would act on twice. A record with no recorded head says so in the
+# body rather than silently collapsing onto the same identity.
 #
-# <kind> and <source> are lowercase tokens (a letter, then letters, digits, or
-# dashes). The recorded body is "<source>: <pr-url> <kind>: <text>", so every
-# fired record names its producer, its pull request, and its event kind.
+# <kind> is a lowercase token (a letter, then letters, digits, or dashes). The
+# recorded body is "pr-flow: <pr-url> <kind> (head <head>): <text>", so every
+# fired record names the producer, the pull request, the head it was fired for,
+# and its event kind.
 #
 # Exit codes:
 #   0  the event is durably recorded in the author's steering inbox
-#   2  invalid request (URL, kind, source, or missing text)
+#   2  invalid request (URL, kind, or missing text)
 #   4  no task in this home records that pull request, so the caller keeps its
 #      own routing (the pr-flow job's lane ping and stale-finding label)
 #   5  more than one task records that pull request; refuse rather than guess
@@ -43,22 +47,12 @@ STATE="${FM_STATE_OVERRIDE-$FM_HOME/state}"
 
 usage_error() {
   printf 'error: %s\n' "$1" >&2
-  printf 'usage: fm-pr-event.sh [--source <name>] <pr-url> <kind> <text...>\n' >&2
+  printf 'usage: fm-pr-event.sh <pr-url> <kind> <text...>\n' >&2
   exit 2
 }
 
-SOURCE=pr-flow
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --source)
-      [ "$#" -ge 2 ] || usage_error "--source requires a name"
-      SOURCE=$2
-      shift 2
-      ;;
-    --source=*)
-      SOURCE=${1#--source=}
-      shift
-      ;;
     --)
       shift
       break
@@ -78,7 +72,6 @@ KIND=$2
 shift 2
 TEXT=$*
 
-[[ "$SOURCE" =~ ^[a-z][a-z0-9-]{0,31}$ ]] || usage_error "invalid source name: $SOURCE"
 [[ "$KIND" =~ ^[a-z][a-z0-9-]{0,31}$ ]] || usage_error "invalid event kind: $KIND"
 [ -n "$TEXT" ] || usage_error "the event text is empty"
 fm_pr_url_parse "$RAW_URL" || usage_error "invalid pull request URL: $RAW_URL"
@@ -93,6 +86,7 @@ fi
 # symlink, a directory, or not a single-link regular file is not a record this
 # home wrote, so it is skipped rather than trusted.
 AUTHOR=
+META=
 MATCHES=0
 for meta in "$STATE"/*.meta; do
   [ -e "$meta" ] || continue
@@ -102,6 +96,7 @@ for meta in "$STATE"/*.meta; do
   fm_pr_task_id_valid "$id" || continue
   grep -qxF "pr=$URL" "$meta" 2>/dev/null || continue
   AUTHOR=$id
+  META=$meta
   MATCHES=$((MATCHES + 1))
 done
 
@@ -117,7 +112,13 @@ case "$MATCHES" in
     ;;
 esac
 
-BODY="$SOURCE: $URL $KIND: $TEXT"
+HEAD=$(grep '^pr_head=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
+fm_pr_head_valid "${HEAD-}" || HEAD=
+if [ -n "$HEAD" ]; then
+  BODY="pr-flow: $URL $KIND (head $HEAD): $TEXT"
+else
+  BODY="pr-flow: $URL $KIND (head unknown): $TEXT"
+fi
 
 # The delivery id is derived from the exact body so a retry of the same event
 # carries the same id, and a different event can never collide with it.

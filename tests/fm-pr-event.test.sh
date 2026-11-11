@@ -10,15 +10,16 @@
 # These tests drive the real executable over a stubbed tmux and pin:
 #   1. The author is resolved from state/<id>.meta and the event lands in that
 #      task's inbox as a fire-and-forget record that never enters the re-ring
-#      ladder, with the canonical "<source>: <url> <kind>: <text>" body.
+#      ladder, with the canonical "pr-flow: <url> <kind> (head <head>): <text>"
+#      body naming the recorded pr_head=.
 #   2. A repeated identical event collapses onto the record already present, so
 #      a blind retry after an uncertain outcome cannot queue a second copy.
-#   3. A different event kind, or a different head in the text, is a distinct
-#      record.
+#   3. A different event kind, or the same event on a new recorded head, is a
+#      distinct record.
 #   4. A pull request no task records exits 4 and enqueues nothing, so the
 #      producer keeps its own routing.
 #   5. A pull request two tasks record exits 5 and enqueues nothing.
-#   6. A malformed URL, kind, source, or empty text exits 2.
+#   6. A malformed URL, kind, or empty text exits 2.
 #   7. A metadata file that is a symlink is not a record this home wrote.
 set -u
 
@@ -27,6 +28,8 @@ set -u
 
 EVENT="$ROOT/bin/fm-pr-event.sh"
 URL='https://github.com/Muso-AI/H-DevOps/pull/4301'
+HEAD_A='1111111111111111111111111111111111111111'
+HEAD_B='2222222222222222222222222222222222222222'
 
 TMP_ROOT=$(fm_test_tmproot fm-pr-event)
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
@@ -76,7 +79,7 @@ setup_case() {  # <name> -> echoes case dir with home/state and an author task
   mkdir -p "$dir/home/state"
   make_stubs "$dir"
   fm_write_meta "$dir/home/state/author-t1.meta" \
-    "window=sess:fm-author-t1" "kind=ship" "harness=claude" "pr=$URL"
+    "window=sess:fm-author-t1" "kind=ship" "harness=claude" "pr=$URL" "pr_head=$HEAD_A"
   printf '%s\n' "$dir"
 }
 
@@ -112,7 +115,7 @@ test_delivers_to_the_author() {
   rec="$inbox/001.msg"
   [ -f "$rec" ] || fail "the event was not recorded at $rec:"$'\n'"$(cat "$err")"
   body=$(record_body "$rec")
-  [ "$body" = "pr-flow: $URL finding: no test covers the retry" ] \
+  [ "$body" = "pr-flow: $URL finding (head $HEAD_A): no test covers the retry" ] \
     || fail "the recorded body differs: $body"
   inbox_ladder fm_task_inbox_is_fire_and_forget "$rec" \
     || fail "the record does not carry the fire-and-forget delivery mode, so the watcher would escalate it"
@@ -138,6 +141,39 @@ test_repeat_collapses() {
   pass "fm-pr-event: a repeated identical event collapses onto the record already present"
 }
 
+test_new_head_is_a_distinct_record() {
+  local dir err rc inbox
+  dir=$(setup_case new-head); err="$dir/event.err"
+  inbox="$dir/home/state/author-t1.inbox"
+  run_event "$dir" "$err" -- "$URL" finding 'no test covers the retry'; rc=$?
+  expect_code 0 "$rc" "the finding should deliver for the first head"
+  fm_write_meta "$dir/home/state/author-t1.meta" \
+    "window=sess:fm-author-t1" "kind=ship" "harness=claude" "pr=$URL" "pr_head=$HEAD_B"
+  run_event "$dir" "$err" -- "$URL" finding 'no test covers the retry'; rc=$?
+  expect_code 0 "$rc" "the same finding on a new head should deliver"
+  [ "$(count_records "$inbox")" = 2 ] \
+    || fail "the same finding on a new head collapsed onto the old record:"$'\n'"$(ls "$inbox")"
+  [ "$(record_body "$inbox/001.msg")" = "pr-flow: $URL finding (head $HEAD_A): no test covers the retry" ] \
+    || fail "the first record does not name the head it was fired for"
+  [ "$(record_body "$inbox/002.msg")" = "pr-flow: $URL finding (head $HEAD_B): no test covers the retry" ] \
+    || fail "the second record does not name the head it was fired for"
+  pass "fm-pr-event: the same event on a new recorded head is a distinct record"
+}
+
+test_missing_head_is_stated() {
+  local dir err rc rec body
+  dir=$(setup_case no-head); err="$dir/event.err"
+  fm_write_meta "$dir/home/state/author-t1.meta" \
+    "window=sess:fm-author-t1" "kind=ship" "harness=claude" "pr=$URL"
+  run_event "$dir" "$err" -- "$URL" finding 'no test covers the retry'; rc=$?
+  expect_code 0 "$rc" "a record without a head should still deliver"
+  rec="$dir/home/state/author-t1.inbox/001.msg"
+  body=$(record_body "$rec")
+  [ "$body" = "pr-flow: $URL finding (head unknown): no test covers the retry" ] \
+    || fail "the recorded body does not state the missing head: $body"
+  pass "fm-pr-event: a record with no pr_head= states the missing head in its body"
+}
+
 test_distinct_events_are_distinct() {
   local dir err rc inbox
   dir=$(setup_case distinct); err="$dir/event.err"
@@ -146,11 +182,11 @@ test_distinct_events_are_distinct() {
   expect_code 0 "$rc" "the finding should deliver"
   run_event "$dir" "$err" -- "$URL" conflict 'the base branch moved'; rc=$?
   expect_code 0 "$rc" "the conflict should deliver"
-  run_event "$dir" "$err" -- "$URL" finding 'no test covers the retry on head 0123abcd'; rc=$?
-  expect_code 0 "$rc" "the same kind on a new head should deliver"
+  run_event "$dir" "$err" -- "$URL" finding 'the retry still has no test'; rc=$?
+  expect_code 0 "$rc" "a different finding on the same head should deliver"
   [ "$(count_records "$inbox")" = 3 ] \
     || fail "distinct events collapsed:"$'\n'"$(ls "$inbox")"
-  pass "fm-pr-event: a different kind or head is a distinct record"
+  pass "fm-pr-event: a different kind or text is a distinct record"
 }
 
 test_no_author_keeps_caller_routing() {
@@ -186,8 +222,6 @@ test_invalid_requests() {
   expect_code 2 "$rc" "an uppercase event kind should exit 2"
   run_event "$dir" "$err" -- "$URL" finding; rc=$?
   expect_code 2 "$rc" "a missing event text should exit 2"
-  run_event "$dir" "$err" -- --source 'Bad Name' "$URL" finding 'x'; rc=$?
-  expect_code 2 "$rc" "a malformed source name should exit 2"
   run_event "$dir" "$err" -- --bogus "$URL" finding 'x'; rc=$?
   expect_code 2 "$rc" "an unknown option should exit 2"
   [ ! -d "$dir/home/state/author-t1.inbox" ] || [ "$(count_records "$dir/home/state/author-t1.inbox")" = 0 ] \
@@ -205,23 +239,12 @@ test_symlinked_meta_is_not_a_record() {
   pass "fm-pr-event: a symlinked metadata file is not a record this home wrote"
 }
 
-test_source_override() {
-  local dir err rc rec body
-  dir=$(setup_case source); err="$dir/event.err"
-  run_event "$dir" "$err" -- --source ci-watch "$URL" check-failed 'the lint job failed'; rc=$?
-  expect_code 0 "$rc" "a source override should deliver"
-  rec="$dir/home/state/author-t1.inbox/001.msg"
-  body=$(record_body "$rec")
-  [ "$body" = "ci-watch: $URL check-failed: the lint job failed" ] \
-    || fail "the recorded body differs: $body"
-  pass "fm-pr-event: --source names the producer in the recorded body"
-}
-
 test_delivers_to_the_author
 test_repeat_collapses
+test_new_head_is_a_distinct_record
+test_missing_head_is_stated
 test_distinct_events_are_distinct
 test_no_author_keeps_caller_routing
 test_ambiguous_author_refuses
 test_invalid_requests
 test_symlinked_meta_is_not_a_record
-test_source_override
