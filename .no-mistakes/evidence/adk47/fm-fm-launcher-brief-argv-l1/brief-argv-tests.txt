@@ -1,0 +1,4 @@
+ok - a 406387-byte brief launches through a 552-byte path pointer
+ok - a small brief launches with the same command shape as before
+ok - an oversized inline body refuses the spawn with a named error and no launch (406389-byte brief)
+ok - an inline harness caps the body at 65536 bytes, names the truncation, and launches

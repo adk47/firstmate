@@ -1,0 +1,17 @@
+Scenario: launch a lane whose brief exceeds MAX_ARG_STRLEN
+Brief path : /tmp/fm-spawn-brief-argv.MJ1Zzw/brief-argv-evidence/home/data/brief-argv-evidence-z1/launch-brief.md
+Brief bytes: 406386 (limit 131072)
+
+spawn exit: 0
+Launch line bytes: 547
+Launch line sent to the pane:
+env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI FM_PI_HARNESS=pi '/tmp/fm-spawn-brief-argv.MJ1Zzw/brief-argv-evidence/fake/fakebin/pi' --tui-mode regular -e '/tmp/fm-spawn-brief-argv.MJ1Zzw/brief-argv-evidence/home/state/brief-argv-evidence-z1.pi-ext.ts' "$(printf %s 'Read the brief at /tmp/fm-spawn-brief-argv.MJ1Zzw/brief-argv-evidence/home/data/brief-argv-evidence-z1/launch-brief.md and follow it exactly.' | '/home/aaron/.no-mistakes/worktrees/72295860b10d/01M6WD766K0SK1VZ1T9WXS1X06/bin/fm-operational-input.sh' encode launch-brief)"
+
+Launch line contains brief archive content: NO
+
+Scenario: inline harness configured above the argv cap (pre-flight refusal)
+spawn exit: 1
+diagnostic:
+warning: /tmp/fm-spawn-brief-argv.MJ1Zzw/brief-argv-evidence-inline/home/data/brief-argv-evidence-inline-z1/launch-brief.md records no delivery contract line (scaffolded before ship briefs recorded one); launching on the explicit --mode no-mistakes - confirm its definition of done matches
+error: this brief is too large to pass as an argument: /tmp/fm-spawn-brief-argv.MJ1Zzw/brief-argv-evidence-inline/home/data/brief-argv-evidence-inline-z1/launch-brief.md is 407200 bytes, the launch argument limit is 131072 bytes (encoded launch argument 200406 bytes, launch line 0 bytes); refusing to start brief-argv-evidence-inline-z1
+launch lines sent: 0

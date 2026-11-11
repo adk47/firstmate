@@ -1,0 +1,11 @@
+Oversized source brief on disk : 406382 bytes
+Launch line executed in the pane shell: exit=0
+Largest argv element the harness received: 167 bytes
+
+Harness-side decoded brief instruction:
+Read the brief at /tmp/fm-spawn-brief-argv.IM2oNE/brief-argv-exec/home/data/brief-argv-exec-z1/launch-brief.md and follow it exactly.
+
+Brief file is still present and unchanged in size: 406382 bytes
+Brief contains archived history content: YES (not truncated)
+
+Pane shell output (empty means no argv error):

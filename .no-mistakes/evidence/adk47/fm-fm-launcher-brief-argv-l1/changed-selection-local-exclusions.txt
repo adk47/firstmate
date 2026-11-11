@@ -1,0 +1,9 @@
+$ bin/fm-test-run.sh --list --changed --base 3136d49bb7904df0297b1662a2ffd45168d5cb0c
+fm-test-run: applied local environment exclusions from .no-mistakes/test-exclude
+
+(local excluded suites absent from selection above; all five are present under --list --all)
+tests/fm-bearings-board.test.sh
+tests/fm-calm-pi-extension.test.sh
+tests/fm-captain-hold-lifecycle.test.sh
+tests/fm-teardown.test.sh
+tests/fm-test-run.test.sh
