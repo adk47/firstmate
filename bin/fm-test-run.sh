@@ -13,6 +13,13 @@
 #   fm-test-run.sh --proven-isolated
 #   fm-test-run.sh tests/<name>.test.sh [more scripts...]
 #
+# Local environment exclusions: --changed additionally drops any selected suite
+# listed in the gitignored .no-mistakes/test-exclude (one suite path per line,
+# with or without the leading tests/), so a contributor whose machine lacks
+# optional tooling or carries atypical ambient settings can exclude exactly
+# those suites without editing the trusted commands.test that CI shares.
+# Other selection modes ignore the file.
+#
 # Inspection (no execution):
 #   fm-test-run.sh --list --all
 #   fm-test-run.sh --list --family <name>
