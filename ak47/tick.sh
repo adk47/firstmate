@@ -264,10 +264,19 @@ while IFS=$'\t' read -r class name _age; do
 done <"$CLASSED"
 
 # ---- class: quarantine-expire --------------------------------------------------
-# Quarantine is a 7-day holding pen, not a second /tmp. Anything still there
-# after quarantine_days is deleted; the revert window has closed.
+# Quarantine is a 7-day holding pen, not a second /tmp. The age is measured from
+# the dated directory (the move day), never from the entry's mtime: mv preserves
+# mtime, so an old leak would otherwise be deleted on the first tick after it was
+# quarantined instead of getting its full revert window.
+quar_cutoff=$(date -u -d "$QUAR_DAYS days ago" +%Y%m%d 2>/dev/null) || quar_cutoff=
 while IFS= read -r d; do
   [ -n "$d" ] || continue
+  quar_day=${d##*/}
+  case "$quar_day" in
+    [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) ;;
+    *) continue ;;
+  esac
+  [ -n "$quar_cutoff" ] && [ "$quar_day" -lt "$quar_cutoff" ] || continue
   while IFS= read -r name; do
     [ -n "$name" ] || continue
     path="$d/$name"
@@ -284,7 +293,7 @@ while IFS= read -r d; do
       act "WARN could-not-delete class=quarantine-expire $path reason='${AK47_SD_ERROR}'"
       failures=$((failures + 1))
     fi
-  done < <(find "$d" -mindepth 1 -maxdepth 1 -mtime +"$QUAR_DAYS" -printf '%f\n' 2>/dev/null)
+  done < <(find "$d" -mindepth 1 -maxdepth 1 -printf '%f\n' 2>/dev/null)
 done < <(find "$QUAR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
 
 # ---- report-only classes -------------------------------------------------------

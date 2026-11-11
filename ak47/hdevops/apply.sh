@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # ak47/hdevops/apply.sh - land the ak47 hygiene deployment in H-DevOps as a PR.
 #
-# The hygiene system's code lives in firstmate. What a rebuild would lose is the
-# deployment: two user timers and two sysctls that were hand-written on the box
-# and recorded nowhere. This script copies that payload into an H-DevOps clone,
-# commits it on a branch, pushes the branch, and opens a PR.
+# The hygiene system's code lives in firstmate. This script captures both the
+# code and the deployment into an H-DevOps clone: the ak47 scripts, the two user
+# timers, and the two sysctls that were hand-written on the box and recorded
+# nowhere. It commits on a branch, pushes the branch, and opens a PR.
 #
 # It never pushes to the default branch, never merges, and never touches the
 # clone's working tree beyond the payload paths it owns.
@@ -45,6 +45,18 @@ PAYLOAD=$AK47_ROOT/hdevops
 OWNED=(
   ansible/inventory/local/hosts.yml
   ansible/playbooks/07-ak47-hygiene.yml
+  ansible/playbooks/files/ak47/README.md
+  ansible/playbooks/files/ak47/budget.conf
+  ansible/playbooks/files/ak47/census-producers.conf
+  ansible/playbooks/files/ak47/census.sh
+  ansible/playbooks/files/ak47/guards/cleanup-patterns.conf
+  ansible/playbooks/files/ak47/guards/guard-producers.sh
+  ansible/playbooks/files/ak47/lib/classify.py
+  ansible/playbooks/files/ak47/lib/common.sh
+  ansible/playbooks/files/ak47/lib/safe-delete.sh
+  ansible/playbooks/files/ak47/status.sh
+  ansible/playbooks/files/ak47/tick.sh
+  ansible/playbooks/files/ak47/weekly-review.sh
   ansible/playbooks/templates/60-ak47-inotify.conf
   ansible/playbooks/templates/60-ak47-swap.conf
   ansible/playbooks/templates/ak47-devops.service
@@ -113,9 +125,11 @@ ls, every find and every test run, and showed up as load rather than as a
 disk alert.
 
 The fix lives in firstmate (ak47/tick.sh, status.sh, census.sh, guards/,
-weekly-review.sh, and a per-task TMPDIR in bin/fm-spawn.sh). What this commit
-captures is everything a rebuild would otherwise lose:
+weekly-review.sh, and a per-task TMPDIR in bin/fm-spawn.sh). This commit
+captures everything a rebuild would otherwise lose:
 
+- the ak47 scripts, libraries, budget and producer table, installed under
+  ~/.local/lib/ak47 so the units run without a firstmate checkout
 - the two user timers that run the 5-minute tick and the Monday review
 - the two sysctls that were hand-written on the box on 2026-11-03 and
   2026-11-10 and recorded nowhere else: vm.swappiness=10, which stopped the
@@ -141,9 +155,9 @@ if [ "$OPEN_PR" = 1 ]; then
       --base "$default_branch" \
       --head "$BRANCH" \
       --title "ak47: capture the hygiene deployment as code" \
-      --body "Captures the ak47 factory box's hygiene deployment so a rebuild reproduces it: the two user timers (5-minute deterministic tick, Monday review) and the two sysctls that were hand-written on the box and recorded nowhere else.
+      --body "Captures the ak47 factory box's hygiene system so a rebuild reproduces it: the ak47 scripts, libraries, budget and producer table installed under ~/.local/lib/ak47, the two user timers (5-minute deterministic tick, Monday review), and the two sysctls that were hand-written on the box and recorded nowhere else.
 
-The hygiene code itself lives in firstmate (\`ak47/\`). This PR is the drift capture only.
+The hygiene code is developed in firstmate (\`ak47/\`); this PR carries the payload a rebuild installs.
 
 Revert is in the playbook header and keeps every log and every quarantine directory." ) || exit 1
 fi

@@ -243,31 +243,9 @@ test_teardown_skips_gracefully_when_dir_missing() {
 # GOTMPDIR only covers Go. Every other tool that calls tempfile.mkdtemp() or
 # mktemp -d without a prefix writes into /tmp itself, and on 2026-11-10 that was
 # 950,700 entries. The task's own TMPDIR puts those leaks inside the root
-# teardown already removes.
-
-test_spawn_creates_the_task_tmpdir() {
-  grep -q 'mkdir -p "$TASK_TMP/gotmp" "$TASK_TMP/tmp"' "$ROOT/bin/fm-spawn.sh" \
-    || fail "fm-spawn no longer creates \$TASK_TMP/tmp"
-  pass "fm-spawn creates the task's own TMPDIR alongside gotmp"
-}
-
-test_spawn_exports_tmpdir_into_the_pane() {
-  grep -Eq '^[^#]*export TMPDIR=\$TASK_TMP/tmp' "$ROOT/bin/fm-spawn.sh" \
-    || fail "fm-spawn no longer exports TMPDIR=\$TASK_TMP/tmp into the crewmate pane"
-  pass "fm-spawn exports the task's own TMPDIR into the crewmate pane"
-}
-
-test_spawn_honours_the_opt_out() {
-  grep -q 'config/task-tmpdir\|\$CONFIG/task-tmpdir' "$ROOT/bin/fm-spawn.sh" \
-    || fail "fm-spawn has no opt-out for the per-task TMPDIR"
-  grep -q 'TASK_TMPDIR_ENABLED=0' "$ROOT/bin/fm-spawn.sh" \
-    || fail "fm-spawn's TMPDIR opt-out does not actually disable the export"
-  pass "fm-spawn honours config/task-tmpdir=off"
-}
+# teardown already removes. The isolated fm-spawn subprocess in
+# fm-kimi-harness.test.sh exercises the export and its opt-out behaviour.
 
 test_teardown_removes_tasktmp_dir
 test_teardown_skips_gracefully_without_tasktmp
 test_teardown_skips_gracefully_when_dir_missing
-test_spawn_creates_the_task_tmpdir
-test_spawn_exports_tmpdir_into_the_pane
-test_spawn_honours_the_opt_out

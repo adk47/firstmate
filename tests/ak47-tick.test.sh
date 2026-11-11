@@ -191,6 +191,33 @@ test_quarantines_a_leaked_named_producer_dir() {
   pass "tick quarantines every named producer prefix"
 }
 
+test_quarantined_entry_keeps_its_full_revert_window() {
+  reset_tree
+  # mv preserves mtime, so an entry that was already old when it was moved into
+  # quarantine must still get its full window measured from the move day.
+  local day entry
+  day=$(date -u +%Y%m%d)
+  entry="$AK47_STATE/quarantine/$day/tmpold001aaa_"
+  mkdir -p "$entry"
+  touch -d '30 days ago' "$entry"
+  "$TICK" --apply >/dev/null 2>&1 || fail "tick exited non-zero"
+  [ -d "$entry" ] \
+    || fail "tick deleted a just-quarantined entry because its mtime was old"
+  pass "a quarantined entry keeps its full revert window regardless of its mtime"
+}
+
+test_expires_an_entry_after_its_quarantine_window() {
+  reset_tree
+  local day entry
+  day=$(date -u -d '8 days ago' +%Y%m%d)
+  entry="$AK47_STATE/quarantine/$day/tmpold002bbb_"
+  mkdir -p "$entry"
+  "$TICK" --apply >/dev/null 2>&1 || fail "tick exited non-zero"
+  [ ! -e "$entry" ] \
+    || fail "tick kept an entry past its quarantine window"
+  pass "an entry is deleted once its dated quarantine directory is past the window"
+}
+
 test_dry_run_changes_nothing() {
   reset_tree
   local d=$AK47_TMP_ROOT/tmpf008qqq_
@@ -315,6 +342,8 @@ test_refuses_a_symlink_that_points_at_a_protected_path
 test_refuses_a_young_leak
 test_quarantines_a_leaked_default_temp_dir
 test_quarantines_a_leaked_named_producer_dir
+test_quarantined_entry_keeps_its_full_revert_window
+test_expires_an_entry_after_its_quarantine_window
 test_dry_run_changes_nothing
 test_stops_quarantining_once_under_the_entry_ceiling
 test_writes_exactly_one_line_per_run

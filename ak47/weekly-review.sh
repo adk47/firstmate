@@ -194,9 +194,10 @@ PY
   echo
   if [ -r "$DEVOPS" ]; then
     since=$(( $(ak47_epoch) - DAYS * 86400 ))
+    since_iso=$(date -u -d "@$since" +%Y-%m-%dT%H:%M:%SZ)
     # grep -c prints 0 AND exits 1 on no match, so `|| echo 0` would print twice.
     count_in() { local n; n=$(grep -c "$1" "$DEVOPS" 2>/dev/null); echo "${n:-0}"; }
-    echo "- tick lines in the window: $(awk -v s="$since" '{print $1}' "$DEVOPS" 2>/dev/null | wc -l)"
+    echo "- tick lines in the window: $(awk -v s="$since_iso" '$1 >= s' "$DEVOPS" 2>/dev/null | wc -l)"
     echo "- last tick: $(tail -n 1 "$DEVOPS" 2>/dev/null | cut -d' ' -f1)"
     echo "- runs reporting a failure: $(count_in 'failures=[1-9]')"
     echo "- runs with a loop gap over 3 intervals: $(count_in 'loop_gap=[0-9]\{4,\}')"

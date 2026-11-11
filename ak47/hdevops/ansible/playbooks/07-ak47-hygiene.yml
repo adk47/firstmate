@@ -8,18 +8,20 @@
 # glob, every `ls`, every `find` and every test run on the box, and it showed up
 # as load15 14-240 rather than as a disk alert.
 #
-# This playbook is the drift capture, not the fix. The fix is in firstmate:
-#   ak47/tick.sh            the deterministic 5-minute tick
-#   ak47/status.sh          the budget, rendered against live samples
-#   ak47/census.sh          which producer creates the growth
-#   ak47/guards/            a check per producer that fails when it stops cleaning up
-#   ak47/weekly-review.sh   proposes threshold diffs, never applies them
-#   bin/fm-spawn.sh         exports a per-task TMPDIR so a leak lands in the
-#                           task's own scratch root and teardown removes it
+# The scripts are developed in firstmate and captured in this repo's payload:
+#   files/ak47/tick.sh            the deterministic 5-minute tick
+#   files/ak47/status.sh          the budget, rendered against live samples
+#   files/ak47/census.sh          which producer creates the growth
+#   files/ak47/guards/            a check per producer that fails when it stops cleaning up
+#   files/ak47/weekly-review.sh   proposes threshold diffs, never applies them
+#   bin/fm-spawn.sh               exports a per-task TMPDIR so a leak lands in the
+#                                 task's own scratch root and teardown removes it
 #
-# What this playbook owns is everything that would be lost in a rebuild: the two
-# user timers, and the two sysctls that were hand-written on the box on
-# 2026-11-03 and 2026-11-10 with no record anywhere else.
+# What this playbook owns is everything that would be lost in a rebuild: the
+# scripts, the two user timers, and the two sysctls that were hand-written on the
+# box on 2026-11-03 and 2026-11-10 with no record anywhere else. The installed
+# units run from the payload copy under ~/.local/lib/ak47, not from a firstmate
+# checkout.
 #
 # It is NOT in site.yml on purpose. site.yml targets the OVH cluster; this
 # targets one workstation over a local connection. Adding it to site.yml would
@@ -42,6 +44,7 @@
   gather_facts: true
 
   vars:
+    ak47_install_dir: "{{ ak47_home }}/.local/lib/ak47"
     ak47_unit_dir: "{{ ak47_home }}/.config/systemd/user"
     ak47_state_dir: "{{ ak47_home }}/.local/state/ak47"
     ak47_config_dir: "{{ ak47_home }}/.config/ak47"
@@ -61,8 +64,25 @@
         that: ak47_tick.stat.exists and ak47_tick.stat.executable
         fail_msg: >-
           {{ ak47_repo }}/ak47/tick.sh is missing or not executable. Update the
-          firstmate checkout first; this playbook only deploys, it does not
-          install the code.
+          firstmate checkout first; the installed copy comes from this repo's
+          payload, but the source tree must still be present.
+
+    # ---- the code, from the payload -----------------------------------------
+    # The scripts are captured in this repo so a rebuild does not need a
+    # firstmate checkout. The assert above still proves the source tree exists.
+    - name: Create the installed script directory
+      ansible.builtin.file:
+        path: "{{ ak47_install_dir }}"
+        state: directory
+        owner: "{{ ak47_user }}"
+        mode: "0755"
+
+    - name: Install the hygiene scripts from the payload
+      ansible.builtin.copy:
+        src: "files/ak47/"
+        dest: "{{ ak47_install_dir }}/"
+        owner: "{{ ak47_user }}"
+        mode: preserve
 
     # ---- sysctls ------------------------------------------------------------
     # Both were hand-written on the box and existed nowhere else. Captured here
@@ -132,7 +152,7 @@
 
     # ---- prove it -----------------------------------------------------------
     - name: Read the budget back
-      ansible.builtin.command: "{{ ak47_repo }}/ak47/status.sh --print"
+      ansible.builtin.command: "{{ ak47_install_dir }}/status.sh --print"
       register: ak47_status
       changed_when: false
       failed_when: ak47_status.rc != 0

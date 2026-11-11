@@ -99,6 +99,21 @@ test_emits_a_unified_diff_against_the_budget() {
   pass "the review emits a unified diff against the budget"
 }
 
+test_counts_only_tick_lines_inside_the_window() {
+  seed_samples load15 20
+  local old new out
+  old=$(date -u -d '10 days ago' +%Y-%m-%dT%H:%M:%SZ)
+  new=$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)
+  printf '%s tick mode=apply tmp_before=0 tmp_after=0\n' "$old" >"$AK47_STATE/devops.log"
+  printf '%s tick mode=apply tmp_before=0 tmp_after=0\n' "$new" >>"$AK47_STATE/devops.log"
+  out=$("$REVIEW" --print --no-inbox 2>&1) || fail "the review failed: $out"
+  case "$out" in
+    *"- tick lines in the window: 1"*) : ;;
+    *) fail "the review counted tick lines outside the window: $out" ;;
+  esac
+  pass "the review counts only tick lines inside the requested window"
+}
+
 # --- what it must never do ------------------------------------------------------
 
 test_never_writes_the_budget() {
@@ -171,6 +186,7 @@ test_reports_no_changes_when_every_metric_sits_mid_band
 test_proposes_a_raise_when_p95_sits_near_the_ceiling
 test_proposes_a_lower_when_p95_sits_far_below_the_ceiling
 test_emits_a_unified_diff_against_the_budget
+test_counts_only_tick_lines_inside_the_window
 test_never_writes_the_budget
 test_never_proposes_a_new_action_class
 test_states_what_it_will_not_do
