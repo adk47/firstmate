@@ -133,10 +133,10 @@ Without this, the source fix rots and the sweeper becomes load-bearing again.
 ## 5. Codification and self-monitoring
 
 `hdevops/apply.sh` lands the system in H-DevOps as a PR: the ak47 scripts,
-libraries, budget and producer table, the two user timers, and the two sysctls
-that were hand-written on the box and recorded nowhere else. The playbook
-installs the scripts under `~/.local/lib/ak47` and points the units there, so a
-rebuild runs from the payload rather than a firstmate checkout. The playbook is
+libraries, budget and producer table, the two user timers, the two sysctls
+that were hand-written on the box and recorded nowhere else, systemd-oomd
+with its swap and avoid drop-ins, and the health beat that pages on swap and
+memory pressure as well as load. The playbook is
 `ansible/playbooks/07-ak47-hygiene.yml`, deliberately not in `site.yml` — that
 targets the OVH cluster, this targets one workstation.
 

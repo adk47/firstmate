@@ -1,0 +1,10 @@
+[Unit]
+Description=ak47: recurring box-health check (safe auto-fixes, reports to the chair)
+
+[Service]
+Type=oneshot
+Environment=FM_HOME=/home/aaron/Projects/firstmate
+Environment=PATH=/home/aaron/.local/bin:/home/aaron/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+ExecStart=/home/aaron/bin/ak47-health.sh
+Nice=10
+TimeoutStartSec=900
