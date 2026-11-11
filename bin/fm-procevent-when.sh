@@ -46,9 +46,11 @@
 #            generic runner then retires the registration itself.
 # source-id  Print the canonical source id for <name>.
 # retire     Stop the watch: retire the registration and remove the spec, trust
-#            record, and fired marker. Idempotent. Captured results and their
-#            handled acknowledgements are never touched. Warns when the action
-#            had already fired without a captured outcome.
+#            record, and fired marker. Idempotent. Accepts the bare name or the
+#            printed when-<name> form. After a successful retire it marks every
+#            captured unhandled result handled, so the retire ends the
+#            announcements too; a refused retire marks nothing. Warns when the
+#            action had already fired without a captured outcome.
 # run        The blocking child the generic runner executes; never run it in a
 #            conversational turn. It polls the condition on the registered
 #            cadence, requires the stable count of consecutive trues, claims a
@@ -478,7 +480,14 @@ cmd_terminal() {
 cmd_retire() {
   local name=${1-} sid captured=0 result
   when_name_valid "$name" || die "name must be path-safe and at most 59 characters: ${name-}"
-  sid="when-$name"
+  # Accept the bare name AND the prefixed form this command itself prints. A
+  # retire that silently builds 'when-when-<name>' removes nothing and reports
+  # success, so a reader who re-feeds the printed name believes the watch is
+  # gone while it keeps firing.
+  case "$name" in
+    when-*) sid=$name ;;
+    *)      sid="when-$name" ;;
+  esac
   if [ -e "$(fired_file "$sid")" ]; then
     for result in "$(fm_procevent_inbox_dir "$STATE")/$sid".*.result; do
       [ -e "$result" ] && captured=1
@@ -487,8 +496,30 @@ cmd_retire() {
       printf 'warning: the action had fired but no outcome was captured; verify its effect manually\n' >&2
     fi
   fi
+  # A captured result with no durable handled acknowledgement stays eligible for
+  # re-announcement on every pass, so a retire that leaves one behind reports
+  # success while the watch it just retired keeps waking firstmate. Capture the
+  # unhandled results first, retire the source, and only then mark them handled:
+  # a refused retire must not suppress announcements for a watch that is still
+  # active.
+  local resolved=0 seq
+  local -a pending=()
+  for result in "$(fm_procevent_inbox_dir "$STATE")/$sid".*.result; do
+    [ -e "$result" ] || continue
+    [ -e "${result%.result}.handled" ] && continue
+    seq=$(basename "$result" .result)
+    seq=${seq##*.}
+    case "$seq" in ''|*[!0-9]*) continue ;; esac
+    pending+=("$result")
+  done
   "$SCRIPT_DIR/fm-procevent.sh" retire "$sid" || die "cannot retire the watch source: $sid"
+  for result in ${pending[@]+"${pending[@]}"}; do
+    seq=$(basename "$result" .result)
+    seq=${seq##*.}
+    "$SCRIPT_DIR/fm-procevent.sh" handled "$sid" "$seq" >/dev/null 2>&1 && resolved=$((resolved + 1))
+  done
   rm -f -- "$(spec_file "$sid")" "$(trust_file "$sid")" "$(fired_file "$sid")"
+  [ "$resolved" -eq 0 ] || printf 'acknowledged %s captured result(s) so the retire ends the announcements too\n' "$resolved"
   printf 'retired: %s\n' "$sid"
 }
 

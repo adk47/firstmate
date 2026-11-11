@@ -5,8 +5,8 @@
 # The watcher used to enqueue one row per changed state file, each repeating the
 # whole "signal:$files" list, so a busy fleet cost a hundred rows per drain. These
 # tests pin the batch shape: N changed files produce one ordinary row (plus one
-# decision row when the batch contains a decision-owned file), the printed reason
-# is the compact summary while the batch's full path list goes to the private
+# decision row per decision-owned file), the printed reason is the compact
+# summary while the batch's non-decision path list goes to the private
 # batch-path record keyed by the same batch identity, and every file's .seen-*
 # marker still advances.
 set -u
@@ -78,7 +78,83 @@ test_batch_with_a_decision_file_enqueues_one_ordinary_and_one_decision_row() {
     || fail "the decision row payload is not byte-identical to the pre-change value: $decision"
   [ "${ordinary#*$'\t'}" = "$reason" ] \
     || fail "the ordinary row payload changed shape: $ordinary"
+  record=$(awk -F '\t' -v k="${ordinary%%$'\t'*}" '$1 == k { print $2 }' "$state/.signal-batch-paths")
+  case "$record" in *"$state/b.status"*) fail "the batch-path record still carries a decision-owned file: $record" ;; esac
+  case "$record" in *"$state/a.status"*) ;; *) fail "the batch-path record dropped the ordinary file: $record" ;; esac
   pass "a decision batch enqueues one ordinary row plus one decision row, not one per file"
+}
+
+test_batch_with_two_decision_files_keeps_every_decision_row() {
+  local dir state reason count ordinary decisions
+  dir=$(make_case batch-two-decisions); state="$dir/state"
+  printf 'blocked: a\n' > "$state/a.status"
+  printf 'needs-decision: pick one\n' > "$state/b.status"
+  printf 'needs-decision: pick two\n' > "$state/c.status"
+  reason="signal: $state/a.status $state/b.status $state/c.status"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    signal_enqueue_batch "$2" "$3" "$4" "$5" "$6"
+  ' _ "$WATCH" "$reason" "$state/b.status $state/c.status" \
+    "$state/a.status" "$state/b.status" "$state/c.status" \
+    || fail "two-decision batch enqueue failed"
+  count=$(signal_rows "$state" | wc -l | tr -d '[:space:]')
+  [ "$count" -eq 3 ] || fail "a two-decision batch produced $count signal rows, not 3: $(cat "$state/.wake-queue")"
+  ordinary=$(signal_rows "$state" | awk -F '\t' '$5 ~ /^signal:/ { print $4 "\t" $5 }')
+  decisions=$(signal_rows "$state" | awk -F '\t' '$5 ~ /^needs-decision:/ { print $4 }' | LC_ALL=C sort | tr '\n' ',')
+  [ "${ordinary#*$'\t'}" = "$reason" ] \
+    || fail "the ordinary row payload changed shape: $ordinary"
+  record=$(awk -F '\t' -v k="${ordinary%%$'\t'*}" '$1 == k { print $2 }' "$state/.signal-batch-paths")
+  case "$record" in *"$state/b.status"*|*"$state/c.status"*) fail "the batch-path record still carries a decision-owned file: $record" ;; esac
+  case "$record" in *"$state/a.status"*) ;; *) fail "the batch-path record dropped the ordinary file: $record" ;; esac
+  [ "$decisions" = "b.status,c.status," ] \
+    || fail "a decision-owned file lost its own decision row: $decisions"
+  pass "a batch with two decision files keeps one decision row per file"
+}
+
+test_a_decision_only_batch_writes_no_batch_path_record() {
+  local dir state reason count
+  dir=$(make_case batch-decision-only); state="$dir/state"
+  printf 'needs-decision: pick one\n' > "$state/b.status"
+  reason="signal: $state/b.status"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    signal_enqueue_batch "$2" "$3" "$4"
+  ' _ "$WATCH" "$reason" "$state/b.status" "$state/b.status" \
+    || fail "decision-only batch enqueue failed"
+  count=$(signal_rows "$state" | wc -l | tr -d '[:space:]')
+  [ "$count" -eq 1 ] || fail "a decision-only batch produced $count signal rows, not 1: $(cat "$state/.wake-queue")"
+  [ ! -e "$state/.signal-batch-paths" ] \
+    || fail "a decision-only batch wrote a batch-path record: $(cat "$state/.signal-batch-paths")"
+  pass "a decision-only batch writes no batch-path record"
+}
+
+test_a_stale_ordinary_row_cannot_claim_decision_owned_paths() {
+  local dir state reason key before after
+  dir=$(make_case batch-stale-ordinary); state="$dir/state"
+  printf 'blocked: a\n' > "$state/a.status"
+  printf 'needs-decision: b\n' > "$state/b.status"
+  reason="signal: $state/a.status $state/b.status"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    signal_enqueue_batch "$2" "$3" "$4" "$5"
+  ' _ "$WATCH" "$reason" "$state/b.status" "$state/a.status" "$state/b.status" \
+    || fail "ordinary batch enqueue failed"
+  key=$(signal_rows "$state" | awk -F '\t' '$5 ~ /^signal:/ { print $4 }')
+  [ -n "$key" ] || fail "the ordinary batch row is missing: $(cat "$state/.wake-queue")"
+  before=$(awk -F '\t' -v k="$key" '$1 == k { print $2 }' "$state/.signal-batch-paths")
+  case "$before" in *"$state/a.status"*) ;; *) fail "the ordinary batch record dropped its own file: $before" ;; esac
+  # The same full batch is now entirely decision-owned. Its batch identity is
+  # unchanged, so a stale ordinary row with that key is still queued.
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    signal_enqueue_batch "$2" "$3" "$4" "$5"
+  ' _ "$WATCH" "$reason" "$state/a.status $state/b.status" "$state/a.status" "$state/b.status" \
+    || fail "decision-only re-enqueue failed"
+  after=$(awk -F '\t' -v k="$key" '$1 == k { print $2 }' "$state/.signal-batch-paths")
+  [ "$after" = "$before" ] \
+    || fail "a decision-only batch overwrote the stale ordinary row's record: '$before' -> '$after'"
+  case "$after" in *"$state/b.status"*) fail "the stale ordinary row can now claim a decision-owned file: $after" ;; esac
+  pass "a stale ordinary row cannot pick up decision-owned paths"
 }
 
 test_watcher_coalesces_a_real_changed_file_batch() {
@@ -148,5 +224,8 @@ test_batch_path_record_tracks_queue_lifetime() {
 
 test_batch_enqueues_one_ordinary_row
 test_batch_with_a_decision_file_enqueues_one_ordinary_and_one_decision_row
+test_batch_with_two_decision_files_keeps_every_decision_row
+test_a_decision_only_batch_writes_no_batch_path_record
+test_a_stale_ordinary_row_cannot_claim_decision_owned_paths
 test_watcher_coalesces_a_real_changed_file_batch
 test_batch_path_record_tracks_queue_lifetime

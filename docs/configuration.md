@@ -725,19 +725,22 @@ The 2026-11-03 autonomy measurements are the evidence: rows that already had an 
 Its header owns the exact stall rules, the ladder, the caps, and the record format; this section owns the configuration and the operator contract.
 
 A pass does six things in order.
+A task the captain holds is deliberately stopped, so every pass skips it: its dead endpoint is the expected state, not a fault, and relaunching or paging it would spend the budget on work he has not released.
 First, on the first pass after a reboot, it relaunches every ordinary task whose endpoint is gone and then brings the chair up last, so a reboot needs no hand relaunch and nothing waits on the chair.
 Second, it restarts fleet-owned `fm-*` units systemd reports as failed, capped per unit per hour.
 Third, it walks each live lane's oldest unacknowledged steering message up an age ladder: a re-ring at 20 minutes, an interrupt plus a bounded continue at 45, and a relaunch at 90, one rung per message and never repeated.
 The record it re-rings is the same durable one [`bin/fm-task-inbox-lib.sh`](../bin/fm-task-inbox-lib.sh) writes, and the watcher's per-attempt ladder keeps running underneath, which is free because a duplicated doorbell is a no-op.
-Fourth, it relaunches every task whose endpoint reads `dead` or `missing` through `bin/fm-backend.sh`'s recovery-grade classifier; an `ambiguous`, `unreadable`, or `unverified` endpoint is recorded and left alone, because a duplicate agent in one worktree is worse than waiting another minute.
+Fourth, it relaunches every task it does not find held whose endpoint reads `dead` or `missing` through `bin/fm-backend.sh`'s recovery-grade classifier; an `ambiguous`, `unreadable`, or `unverified` endpoint is recorded and left alone, because a duplicate agent in one worktree is worse than waiting another minute.
 Fifth, it walks each live but frozen worker up a stall ladder: one re-ring through `bin/fm-send.sh`, then a relaunch, then a reassign, then one wake for firstmate - one rung per pass, never sooner than the grace interval after the previous rung, and the ladder resets the moment the worker writes a new status line.
 A worker that is alive and idle rather than frozen is nudged at most once an hour, and only while `bin/fm-crew-state.sh` still reads `working` from a source the worker itself owns.
 Sixth, it reports in-flight backlog items that no task record can serve, and live lanes whose record went missing, once per change of that set.
 Such a lane cannot be steered at all - `bin/fm-send.sh` resolves targets from the record - so the report names every id for firstmate to adopt or close instead of leaving it unowned.
 The watchdog never writes a task record: a wrong endpoint binding is worse than a lane that is visibly unowned.
 
-A live lane whose pane shows a connection error or a connection reset and has produced nothing new for ten minutes is not working on anything, so it takes a lane of its own: one bounded continue per pass, and a relaunch once three of those have failed to move it.
+A live lane whose pane shows a connection error or a connection reset and has produced nothing new for ten minutes is not working on anything, so it takes a lane of its own: one bounded continue per pass, then a relaunch once three of those have failed to move it.
+The relaunch rung is budgeted at `FM_WATCHDOG_RELAUNCH_PER_HOUR` per task per rolling hour; once that budget is spent it stops retrying and wakes firstmate once with the lane named, because a rung that cannot succeed is a request for a hand, not a retry loop.
 That relaunch puts a worker lane (`ship`, `scout`) on `FM_WATCHDOG_FALLBACK_MODEL` and leaves a review or planning seat on the model the captain chose for it, because a lane that died on transport three times running is not converging where it is, while a seat chosen for its judgement is not a worker to be downgraded.
+Only a Claude Code lane can be repointed through the gateway switch; any other recorded harness relaunches on its own model instead of attempting a switch it cannot reach.
 Reaching that model needs the second gateway's endpoint, so the repoint is recorded first by the script that owns the move, [`bin/fm-lane-model-switch.sh`](../bin/fm-lane-model-switch.sh) - never by typing `/model` into a live lane - and a lane that refuses the repoint (it owns scheduled ticks) still gets the plain relaunch, on its own model, with the refusal reported.
 A gateway-owned transient failure is left to the gateway re-ring ladder that already owns it ([`docs/gateway-keepalive.md`](gateway-keepalive.md)), and a permanent failure - a spent usage limit, an expired login, a prompt too long - is never retried at all.
 

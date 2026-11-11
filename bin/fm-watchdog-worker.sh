@@ -186,6 +186,11 @@ export LC_ALL=C
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+# fm-send refuses to resolve targets without FM_HOME in its ENVIRONMENT, and
+# this script's systemd unit does not set one. Without this export every steer
+# this watchdog attempts dies with "FM_HOME is not set" while the watchdog
+# itself reports only a connection error (ak47 2026-11-07).
+export FM_HOME
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG_DIR="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 DATA_DIR="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
@@ -218,6 +223,7 @@ CONNECTION_SECS=600
 CONNECTION_STRIKES=3
 FALLBACK_MODEL=''
 FALLBACK_KINDS=''
+HELD_IDS=''
 BACKLOG_ENABLED=on
 BACKLOG_BIN=''
 BACKLOG_LIST_MAX=25
@@ -616,6 +622,25 @@ task_conn_relaunch() {  # <id> <kind> <minutes> <strikes>
     esac
   fi
   if [ -n "$model" ] && [ "$DRY_RUN" != 1 ] && [ ! -f "$STATE/$id.gateway.env" ]; then
+    # Only a Claude Code lane can be repointed by typing /model into its pane.
+    # Every other harness refuses structurally, so attempting the switch on them
+    # is not a failed action - it is an impossible one, and waking firstmate for
+    # it trains the reader to skip the watchdog-model line. Check the harness
+    # BEFORE the attempt; a non-Claude lane simply relaunches on its own model.
+    # Skip only when the harness is POSITIVELY known to be non-Claude. An
+    # unrecorded harness keeps the old attempt-and-fall-back behaviour, because
+    # absence of a recorded harness is not evidence that the lane is not Claude.
+    lane_harness=$(fm_meta_get "$STATE/$id.meta" harness)
+    case "$lane_harness" in
+      ''|claude|claude-*) ;;
+      *)
+        printf 'watchdog: %s runs harness %s, which no /model switch can reach; relaunching it on its own model\n' \
+          "$id" "$lane_harness"
+        model=''
+        ;;
+    esac
+  fi
+  if [ -n "$model" ] && [ "$DRY_RUN" != 1 ] && [ ! -f "$STATE/$id.gateway.env" ]; then
     out=$(fm_run_timed "$READ_TIMEOUT_SECS" "$LANE_SWITCH_BIN" "$id" gateway 2>&1)
     rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -632,6 +657,31 @@ task_conn_relaunch() {  # <id> <kind> <minutes> <strikes>
     return 0
   fi
   return 1
+}
+
+# load_held_ids: read the captain-held set once per pass. A task held for the
+# captain is DELIBERATELY stopped: its endpoint being dead is the expected state,
+# not a fault. Relaunching it burns the hourly budget on work the captain has not
+# released, and then pages firstmate about a task that is stopped on purpose.
+# Measured 2026-11-10 14:1xZ: six held tasks were relaunched three times each in
+# one hour and then paged as "needs a hand". An unreadable backlog leaves the set
+# empty, which degrades to the old behaviour rather than silently skipping every
+# task.
+load_held_ids() {
+  local -a held_file_args=()
+  HELD_IDS=''
+  [ ! -f "$DATA_DIR/backlog.md" ] || held_file_args=(--file "$DATA_DIR/backlog.md")
+  if [ -n "$BACKLOG_BIN" ] && command -v "$BACKLOG_BIN" >/dev/null 2>&1; then
+    HELD_IDS=$(fm_run_timed "$READ_TIMEOUT_SECS" "$BACKLOG_BIN" list --state held \
+      ${held_file_args[@]+"${held_file_args[@]}"} 2>/dev/null \
+      | awk 'NR > 1 && /^  / { print $1 }' | cut -d, -f1 \
+      | grep -E '^[A-Za-z0-9][A-Za-z0-9._-]*$' | sort -u) || HELD_IDS=''
+  fi
+}
+
+# task_is_held <id>: true when the captain holds this task.
+task_is_held() {  # <id>
+  [ -n "$HELD_IDS" ] && printf '%s\n' "$HELD_IDS" | grep -qxF "$1"
 }
 
 # --- boot pass --------------------------------------------------------------
@@ -684,6 +734,7 @@ boot_pass() {  # <boot>
     kind=$(fm_meta_get "$meta" kind)
     [ "$kind" = secondmate ] && continue
     [ -n "$(fm_meta_get "$meta" window)" ] || continue
+    task_is_held "$id" && continue
     if [ "$(now_epoch)" -ge "$deadline" ]; then
       printf 'watchdog: boot pass ran out of budget before it reached every task; the task pass continues from here\n'
       break
@@ -829,6 +880,7 @@ task_pass() {
     [ -n "$window" ] || continue
     # The boot pass already acted on this task in this pass.
     [ -e "$WORK/touched.$id" ] && continue
+    task_is_held "$id" && continue
     backend=$(fm_backend_of_meta "$meta")
     target=$(fm_backend_target_of_meta "$meta")
     [ -n "$target" ] || target="$window"
@@ -942,9 +994,23 @@ task_pass() {
         task_conn_continue "$id" "$((changed / 60))" || true
         strikes=$(csv_append "$strikes" "$now")
       else
-        task_conn_relaunch "$id" "$kind" "$((changed / 60))" "$strike_count" || true
-        strikes=$(csv_append "$strikes" "$now")
-        relaunches=$(csv_append "$relaunches" "$now")
+        # The relaunch rung is budgeted exactly like the stall ladder's. Without
+        # this check the ladder relaunches on EVERY pass once the strike count is
+        # reached, because the strikes list keeps growing and never falls back
+        # below the threshold: seven lanes were relaunched twelve times each in
+        # fifty-five minutes, and every relaunch woke firstmate. A rung that
+        # cannot succeed is a request for a hand, not a retry loop.
+        relaunch_count=$(csv_recent "$relaunches" "$now" "$HOUR")
+        if [ "$relaunch_count" -lt "$RELAUNCH_PER_HOUR" ]; then
+          task_conn_relaunch "$id" "$kind" "$((changed / 60))" "$strike_count" || true
+          strikes=$(csv_append "$strikes" "$now")
+          relaunches=$(csv_append "$relaunches" "$now")
+        elif [ "$woke" != true ]; then
+          printf 'watchdog: %s stuck on a connection error and out of relaunches; asking firstmate\n' "$id"
+          wake_firstmate "watchdog-conn-$id" \
+            "check: watchdog $id is stuck on a connection error and its hourly relaunch budget ($RELAUNCH_PER_HOUR) is spent; it needs a hand"
+          woke=true
+        fi
       fi
       task_store "$id"
       continue
@@ -1078,9 +1144,32 @@ dry_plan() {  # <id> <busy> <changed> <conn_err> <stage> <strikes> <inbox-min>
   if [ "$conn_err" = 1 ] && [ "$changed" -ge "$CONNECTION_SECS" ]; then
     if [ "$(csv_recent "$strikes" "$(now_epoch)" "$HOUR")" -lt "$CONNECTION_STRIKES" ]; then
       printf 'would continue'
-    else
-      printf 'would relaunch on fallback model'
+      return 0
     fi
+    # The plan must agree with the pass. A preview that promises a relaunch the
+    # pass will refuse, on a model the harness cannot reach, sends the reader
+    # looking for a change that never happens.
+    if [ "$(csv_recent "$relaunches" "$(now_epoch)" "$HOUR")" -ge "$RELAUNCH_PER_HOUR" ]; then
+      printf 'conn: would escalate (relaunch budget spent)'
+      return 0
+    fi
+    local kind harness
+    kind=$(fm_meta_get "$STATE/$1.meta" kind)
+    harness=$(fm_meta_get "$STATE/$1.meta" harness)
+    if [ -n "$FALLBACK_MODEL" ]; then
+      case " $FALLBACK_KINDS " in
+        *" $kind "*)
+          if [ -f "$STATE/$1.gateway.env" ]; then
+            printf 'would relaunch on fallback model'
+            return 0
+          fi
+          case "$harness" in
+            ''|claude|claude-*) printf 'would relaunch on fallback model'; return 0 ;;
+          esac
+          ;;
+      esac
+    fi
+    printf 'would relaunch on its own model'
     return 0
   fi
   if [ "$busy" = busy ]; then
@@ -1150,6 +1239,7 @@ inbox_pass() {
     case "$id" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
     kind=$(fm_meta_get "$meta" kind)
     [ "$kind" = secondmate ] && continue
+    task_is_held "$id" && continue
     [ -d "$STATE/$id.inbox" ] || continue
     oldest=$(inbox_oldest "$id") || continue
     base=${oldest##*/}
@@ -1360,6 +1450,7 @@ main() {
   record_load
   printf '%s' "$PRIOR_TASKS" > "$WORK/tasks.json" 2>/dev/null || printf '{}' > "$WORK/tasks.json"
 
+  load_held_ids
   local boot units
   boot=$(boot_identity)
   # A host that exposes no boot identity never guesses one: it simply runs the

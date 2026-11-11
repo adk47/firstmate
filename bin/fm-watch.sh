@@ -1497,26 +1497,41 @@ signal_record_batch_paths() {  # <batch-key> <file> ...
 # dedupe and identical-batch collapse are unchanged. The batch's full path list
 # is recorded in the private sidecar above before the row is appended, so the
 # branch dispatcher resolves the batch from that record and never from the
-# printed prompt. A batch containing a decision-owned file emits one additional
-# row keyed by that file's status name, because the Pi branch dispatcher resolves
-# a decision row's task from its key; that row keeps the whole batch's path list
-# byte-identical to what it was before the reason was compacted.
+# printed prompt. The record holds only the files that are NOT decision-owned,
+# so a decision task can never be claimed through the ordinary row even when a
+# later heartbeat, not this batch's own trigger, offers it: the dispatcher's
+# trigger cross-reference only covers the triggering message. Each
+# decision-owned file gets its own "needs-decision:$files" row keyed by that
+# file's status name, because the Pi branch dispatcher resolves a decision row's
+# task from its key; that row keeps the whole batch's path list byte-identical
+# to what it was before the reason was compacted.
 signal_enqueue_batch() {  # <reason> <decision-files> <file> ...
-  local reason=$1 decision_files=$2 batch_key decision_key f
+  local reason=$1 decision_files=$2 batch_key decision_key f ordinary=''
   shift 2
   [ "$#" -gt 0 ] || return 1
+  for f in "$@"; do
+    case " $decision_files " in
+      *" $f "*) ;;
+      *) ordinary="$ordinary $f" ;;
+    esac
+  done
+  # The key is the whole batch's identity, not the ordinary subset's, so two
+  # batches that differ only in their decision files never collapse into one
+  # another while an identical re-enqueued batch still dedupes.
   batch_key=$(signal_batch_key "$@") || return 1
-  if ! signal_record_batch_paths "$batch_key" "$@"; then
-    reason="signal: $*"
+  if [ -n "$ordinary" ]; then
+    # shellcheck disable=SC2086  # space-separated path list (ids carry no spaces)
+    if ! signal_record_batch_paths "$batch_key" $ordinary; then
+      reason="signal:${ordinary}"
+    fi
+    fm_wake_append signal "$batch_key" "$reason" || return 1
   fi
-  fm_wake_append signal "$batch_key" "$reason" || return 1
-  [ -n "$decision_files" ] || return 0
   for f in $decision_files; do
     decision_key=$(basename "$f")
-    break
+    [ -n "$decision_key" ] || return 1
+    fm_wake_append signal "$decision_key" "needs-decision: $*" || return 1
   done
-  [ -n "$decision_key" ] || return 1
-  fm_wake_append signal "$decision_key" "needs-decision: $*" || return 1
+  return 0
 }
 
 # Deliver a durably queued process-event result to firstmate. Publication is
@@ -2160,7 +2175,14 @@ while :; do
   if inactive_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$SCRIPT_DIR/fm-inactive-reconcile.sh" scan 2>/dev/null); then
     if [ -n "$inactive_out" ]; then
-      wake "check: inactive-outcome"
+      # The scan already publishes one keyed wake per fingerprint, and those
+      # carry the detail. This generic line exists so a scan that published
+      # nothing still surfaces, but a bare "check: inactive-outcome" names a
+      # condition without naming the action that clears it: 94 terminal
+      # outcomes accumulated over two months because nothing could be
+      # acknowledged from a wake that never said which record it meant.
+      # Carry the scan's own first line so the wake is actionable.
+      wake "check: inactive-outcome: $(printf '%s' "$inactive_out" | head -1 | cut -c1-300)"
     fi
   else
     triage_log "inactive-outcome reconciliation unavailable"
@@ -2317,7 +2339,9 @@ EOF
     # enqueue N rows that each repeated the whole "signal:$files" list. The
     # printed wake reason is the compact batch summary built above, never the
     # full path list; every harness-arm consumer only pattern-matches the
-    # "signal:" prefix, so the shorter prompt changes none of them. A
+    # "signal:" prefix, so the shorter prompt changes none of them. The batch's
+    # private path record holds only the files that are not decision-owned, so a
+    # decision task can never be claimed through the ordinary row. A
     # decision-owned file in the batch still gets its own
     # "needs-decision:$files" row (keyed by that file's status name so the Pi
     # branch dispatcher can resolve it), which is what

@@ -779,6 +779,16 @@ assert_batch_path_recorded() {  # <state> <path>
     || fail "the queued batch did not record $2 in its private path record"
 }
 
+assert_batch_path_not_recorded() {  # <state> <path>
+  [ ! -e "$1/.signal-batch-paths" ] || ! grep -F "$2" "$1/.signal-batch-paths" >/dev/null \
+    || fail "a decision-only batch recorded $2 in its private path record"
+}
+
+assert_decision_row_queued() {  # <state> <key>
+  grep -F "$(printf 'signal\t%s\tneeds-decision:' "$2")" "$1/.wake-queue" >/dev/null \
+    || fail "a decision row for $2 was not queued: $(cat "$1/.wake-queue")"
+}
+
 
 # --- bare turn-end, unverifiable harness: pane churn is the third proof --------
 # A harness whose semantic busy state has no verified source (codex) can never
@@ -1533,9 +1543,10 @@ test_actionable_signal_surfaced() {
   wait_for_exit "$pid" 100 || fail "watcher did not exit for an actionable needs-decision signal"
   assert_surfaced_signal_printed "$out" "watcher did not print the actionable signal reason"
   grep -F "$status_file" "$out" >/dev/null || fail "watcher did not print the actionable signal reason"
+  assert_batch_path_not_recorded "$state" "$status_file"
+  assert_decision_row_queued "$state" "$(basename "$status_file")"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the actionable signal failed"
   assert_surfaced_signal_queued "$drain_out" "actionable signal was not queued"
-  assert_batch_path_recorded "$state" "$status_file"
   [ -s "$state/.hb-surfaced-task" ] || fail "actionable signal did not record the surfaced marker"
   pass "captain-relevant signal is surfaced (queue + exit) and marked surfaced"
 }
@@ -1682,9 +1693,10 @@ test_actionable_signal_survives_a_later_routine_append() {
     || { reap "$pid"; fail "watcher absorbed a needs-decision hidden behind a later working: line"; }
   assert_surfaced_signal_printed "$out" "watcher did not print the actionable signal reason"
   grep -F "$status_file" "$out" >/dev/null || fail "watcher did not print the actionable signal reason"
+  assert_batch_path_not_recorded "$state" "$status_file"
+  assert_decision_row_queued "$state" "$(basename "$status_file")"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the masked signal failed"
   assert_surfaced_signal_queued "$drain_out" "the masked actionable signal was not queued"
-  assert_batch_path_recorded "$state" "$status_file"
   unset FM_FAKE_CREW_STATE
   pass "a captain event hidden behind a later routine append is still surfaced (queue + exit)"
 }

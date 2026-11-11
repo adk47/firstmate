@@ -92,11 +92,11 @@ SH
 }
 
 # worker <home> <id> <state> [kind]: one recorded task and its endpoint state.
-worker() {  # <home> <id> <state> [kind]
-  local home=$1 id=$2 state=$3 kind=${4:-ship}
+worker() {  # <home> <id> <state> [kind] [harness]
+  local home=$1 id=$2 state=$3 kind=${4:-ship} harness=${5:-pi}
   fm_write_meta "$home/state/$id.meta" \
     "window=firstmate:$id" "endpoint_task_id=$id" "worktree=$home/wt-$id" \
-    "project=p" "harness=pi" "kind=$kind" "mode=no-mistakes" "yolo=off"
+    "project=p" "harness=$harness" "kind=$kind" "mode=no-mistakes" "yolo=off"
   printf '%s\n' "$state" > "$home/fix/$id.state"
 }
 
@@ -163,6 +163,20 @@ backlog_bin() {  # <home> <id...>
     local id
     for id in "$@"; do
       printf 'printf "  %s,in_flight,ship,p,t\\n"\n' "$id"
+    done
+  } > "$home/fakebin/tasks-axi"
+  chmod +x "$home/fakebin/tasks-axi"
+}
+
+held_backlog_bin() {  # <home> <id...>: a tasks-axi stand-in that reports held ids.
+  local home=$1
+  shift
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'printf "count: 2\\ntasks[2]{id,state,kind,repo,title}:\\n"\n'
+    local id
+    for id in "$@"; do
+      printf 'printf "  %s,held,ship,p,t\\n"\n' "$id"
     done
   } > "$home/fakebin/tasks-axi"
   chmod +x "$home/fakebin/tasks-axi"
@@ -469,7 +483,9 @@ test_an_unread_steer_is_interrupted_then_relaunched_once_each() {
 test_a_connection_error_lane_is_continued_then_relaunched_on_the_fallback_model() {
   local home now out
   home=$(make_home conn); fake_tools "$home"
-  worker "$home" w1 alive ship
+  # A Claude Code lane is the ONLY harness where the fallback-model repoint is
+  # reachable, so this fixture is what makes the model assertion meaningful.
+  worker "$home" w1 alive ship claude
   pane "$home" w1 idle 'Error: Connection error. Retrying...'
   now=$(start_clock)
   tick "$home" "$now" >/dev/null
@@ -494,7 +510,7 @@ test_a_connection_error_lane_is_continued_then_relaunched_on_the_fallback_model(
   # A lane that owns scheduled ticks refuses the gateway repoint; it still comes
   # back, on its own model, and the refusal is reported rather than swallowed.
   home=$(make_home conn-refuse); fake_tools "$home"
-  worker "$home" w9 alive ship
+  worker "$home" w9 alive ship claude
   pane "$home" w9 idle 'Error: Connection reset by peer'
   : > "$home/units/lane-switch-refuses"
   now=$(start_clock)
@@ -509,6 +525,42 @@ test_a_connection_error_lane_is_continued_then_relaunched_on_the_fallback_model(
   assert_contains "$(wakes "$home")" 'could not move w9' \
     "a refused repoint was not reported to firstmate"
   pass "a lane frozen on a connection error is continued, then relaunched onto the fallback worker model"
+}
+
+test_a_pi_lane_is_never_asked_to_move_to_a_model_it_cannot_reach() {
+  local home now out
+  home=$(make_home conn-pi); fake_tools "$home"
+  worker "$home" w1 alive ship pi
+  pane "$home" w1 idle 'Error: Connection error. Retrying...'
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  tick "$home" "$((now + 700))" >/dev/null
+  tick "$home" "$((now + 710))" >/dev/null
+  tick "$home" "$((now + 720))" >/dev/null
+  out=$(tick "$home" "$((now + 730))")
+  # The lane still comes back - restoring it matters more than the model.
+  assert_contains "$(cat "$home/calls")" 'control w1 relaunch' \
+    "a pi lane stuck on a connection error was never relaunched"
+  # ...but it is never asked for a repoint it cannot perform, and firstmate is
+  # never woken for an impossible action it cannot take.
+  grep -q -- 'model-switch' "$home/calls" \
+    && fail "a pi lane was asked for a /model repoint its harness cannot perform"
+  grep -q -- '--model' "$home/calls" \
+    && fail "a pi lane was relaunched onto the fallback model instead of its own"
+  ! wakes "$home" | grep -q 'could not move w1' \
+    || fail "an impossible /model switch on a pi lane was reported to firstmate as a failure"
+  # The connection ladder's relaunch rung is budgeted like the stall ladder's.
+  # Seven lanes were relaunched twelve times each in fifty-five minutes because
+  # this rung had no cap: every pass past the strike count relaunched again.
+  local t
+  for t in 740 750 760 770 780 790 800 810; do
+    tick "$home" "$((now + t))" >/dev/null 2>&1
+  done
+  assert_eq "$(counter "$home" '^control .* relaunch')" "3" \
+    "the connection relaunch rung ignored its hourly budget"
+  assert_eq "$(wakes "$home" | grep -c 'relaunch budget')" "1" \
+    "a spent connection relaunch budget was not reported exactly once"
+  pass "a pi lane is relaunched on its own model, never asked for a repoint it cannot perform"
 }
 
 test_a_review_seat_keeps_its_model_and_a_permanent_error_is_never_retried() {
@@ -589,12 +641,53 @@ test_a_dry_run_reports_every_lane_and_changes_nothing() {
   pass "a dry run reports every lane's plan and touches nothing"
 }
 
+test_a_held_task_is_never_relaunched_or_paged() {
+  local home now out
+  home=$(make_home held); fake_tools "$home"
+  worker "$home" w1 dead
+  worker "$home" w2 alive
+  pane "$home" w2 busy 'a tool call that never returns'
+  steer "$home" w2 5500
+  held_backlog_bin "$home" w1 w2
+  now=$(start_clock)
+  out=$(tick "$home" "$now" FM_WATCHDOG_BACKLOG=on FM_WATCHDOG_BACKLOG_BIN="$home/fakebin/tasks-axi")
+  [ -z "$out" ] || fail "a held task was acted on: $out"
+  assert_eq "$(counter "$home" '^control .* relaunch')" "0" "a held task was relaunched"
+  assert_eq "$(counter "$home" '^send ')" "0" "a held task was steered"
+  [ -z "$(wakes "$home")" ] || fail "a held task woke firstmate: $(wakes "$home")"
+  out=$(tick "$home" "$((now + 300))" FM_WATCHDOG_BOOT_ID=boot-a FM_WATCHDOG_BACKLOG=on FM_WATCHDOG_BACKLOG_BIN="$home/fakebin/tasks-axi")
+  assert_contains "$out" "relaunched 0 of 0 task(s)" "the boot pass counted or relaunched a held task"
+  assert_eq "$(counter "$home" '^control .* relaunch')" "0" "the boot pass relaunched a held task"
+  pass "a held task is never relaunched or paged, in the boot pass or the task pass"
+}
+
+test_a_dry_run_plan_matches_the_connection_relaunch_model() {
+  local home now out
+  home=$(make_home dry-conn); fake_tools "$home"
+  worker "$home" w1 alive review claude
+  pane "$home" w1 idle 'Error: Connection reset by peer'
+  now=$(start_clock)
+  tick "$home" "$now" >/dev/null
+  tick "$home" "$((now + 700))" >/dev/null
+  tick "$home" "$((now + 710))" >/dev/null
+  tick "$home" "$((now + 720))" >/dev/null
+  out=$(WD_ARGS=--dry-run tick "$home" "$((now + 730))")
+  assert_contains "$out" "would relaunch on its own model" \
+    "the dry-run plan promised a fallback model the pass refuses for a review seat"
+  assert_not_contains "$out" "would relaunch on fallback model" \
+    "the dry-run plan disagreed with the pass about the review seat's model"
+  pass "the dry-run plan agrees with the connection relaunch's fallback-kind rule"
+}
+
 test_a_dead_worker_comes_back_in_one_pass_with_no_wake
 test_an_unread_steer_is_interrupted_then_relaunched_once_each
 test_a_connection_error_lane_is_continued_then_relaunched_on_the_fallback_model
+test_a_pi_lane_is_never_asked_to_move_to_a_model_it_cannot_reach
 test_a_review_seat_keeps_its_model_and_a_permanent_error_is_never_retried
 test_in_flight_backlog_items_without_a_record_are_reported_once
 test_a_dry_run_reports_every_lane_and_changes_nothing
+test_a_held_task_is_never_relaunched_or_paged
+test_a_dry_run_plan_matches_the_connection_relaunch_model
 test_a_reboot_rebuilds_the_fleet_and_starts_the_chair_last
 test_the_same_boot_is_not_a_boot_twice
 test_a_new_boot_identity_runs_the_boot_pass_again
