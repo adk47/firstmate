@@ -99,9 +99,12 @@ The table is bounded and every action carries its revert:
 | `orphan-task-scratch` | quarantine a `/tmp/fm-<id>` with no live task record | same |
 | `quarantine-expire` | delete a quarantined entry after 7 days | none — it is already 7 days past its leak |
 
-Report-only classes (`dead-pane`, `swap-pressure`, `fat-process`, `stale-lock`,
-`disk`) never act. `swap-pressure` and `fat-process` are armed only by an
-operator setting them to `1` in `~/.config/ak47/devops.conf`.
+The four classes in the table are armed by default. `dead-pane`,
+`stale-lock` and `disk` are report-only and never act. `swap-pressure` and
+`fat-process` are report-only until an operator sets `swap_pressure=1` or
+`fat_process=1` in `~/.config/ak47/devops.conf`; once armed, swap-pressure
+reclaims swap when RAM is free, and fat-process renices the process to 19,
+sends `SIGTERM`, and sends `SIGKILL` if it survives five minutes.
 
 The agent wakes only for findings the table cannot settle, and at most once per
 six hours per finding key.
@@ -133,7 +136,7 @@ Without this, the source fix rots and the sweeper becomes load-bearing again.
 ## 5. Codification and self-monitoring
 
 `hdevops/apply.sh` lands the system in H-DevOps as a PR: the ak47 scripts,
-libraries, budget and producer table, the two user timers, the two sysctls
+libraries, budget and producer table, the hygiene user timers, the two sysctls
 that were hand-written on the box and recorded nowhere else, systemd-oomd
 with its swap and avoid drop-ins, and the health beat that pages on swap and
 memory pressure as well as load. The playbook is
@@ -273,8 +276,8 @@ default. Absent keys take the default in the right-hand column.
 | `quarantine_days` | 7 | days a quarantined entry is kept before it is deleted for good |
 | `tmp_max_entries` | 5000 | stop working once `/tmp` is back under this many entries |
 | `tmp_max_moves` | 2000 | the most entries one run may move |
-| `swap_pressure` | 0 | arm the report-only swap-pressure class |
-| `fat_process` | 0 | arm the report-only fat-process class |
+| `swap_pressure` | 0 | arm the swap-pressure class: reclaim swap when RAM is free |
+| `fat_process` | 0 | arm the fat-process class: renice, `SIGTERM`, then `SIGKILL` after 5 min |
 | `fat_process_gb` | 3 | the RSS a process must hold to count as fat |
 | `fat_process_min` | 10 | minutes a fat process must hold it before it is reported |
 | `interval_seconds` | 300 | the timer's period, so the tick can notice its own loop has stopped |

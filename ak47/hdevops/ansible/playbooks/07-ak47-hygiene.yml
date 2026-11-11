@@ -18,10 +18,11 @@
 #                                 task's own scratch root and teardown removes it
 #
 # What this playbook owns is everything that would be lost in a rebuild: the
-# scripts, the two user timers, and the two sysctls that were hand-written on the
-# box on 2026-11-03 and 2026-11-10 with no record anywhere else. The installed
-# units run from the payload copy under ~/.local/lib/ak47, not from a firstmate
-# checkout.
+# scripts, the hygiene user timers, the two sysctls that were hand-written on
+# the box on 2026-11-03 and 2026-11-10 with no record anywhere else,
+# systemd-oomd with its swap and avoid drop-ins, and the 10-minute health beat.
+# The installed units run from the payload copy under ~/.local/lib/ak47, not
+# from a firstmate checkout.
 #
 # It is NOT in site.yml on purpose. site.yml targets the OVH cluster; this
 # targets one workstation over a local connection. Adding it to site.yml would
