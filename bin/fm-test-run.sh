@@ -110,6 +110,13 @@
 # recorded family-level coupling still expands to the whole family.
 set -eu
 
+# Pin the umask the suite runs under. Several behavior tests assert a
+# private-directory contract (mode without group/other write) on fixtures they
+# create with `mkdir -p`, so an ambient umask of 002 turns those fixtures into
+# 775 directories and fails tests that pass in CI, where the umask is 022. A
+# test runner must not let the invoking shell's umask change a test's verdict.
+umask 022
+
 now_ms() {
   if command -v python3 >/dev/null 2>&1; then
     python3 -c 'import time; print(int(time.time() * 1000))'
@@ -242,7 +249,9 @@ family_for_basename() {
     fm-supervision-instructions.test.sh|fm-task-delivery.test.sh|\
     fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
     fm-transition-lib.test.sh|\
-    fm-test-run.test.sh|fm-test-isolation-proof.test.sh|fm-test-reap.test.sh)
+    fm-test-run.test.sh|fm-test-isolation-proof.test.sh|fm-test-reap.test.sh|\
+    ak47-budget.test.sh|ak47-census.test.sh|ak47-guards.test.sh|\
+    ak47-safe-delete.test.sh|ak47-tick.test.sh|ak47-weekly-review.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
     fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
@@ -1421,6 +1430,11 @@ families_for_changed_path() {
         families_for_test_reference "fixtures/$fixture_ref" \
           || printf '%s\n' "__unmapped__:$path"
       fi
+      ;;
+    ak47/*)
+      # The ak47 suites are hermetic and registered as pure-contract-unit, so
+      # every ak47 path (scripts, config, guards, hdevops) selects that family.
+      printf '%s\n' pure-contract-unit
       ;;
     bin/*)
       # A deleted script has no consuming suite left to select, the same rule

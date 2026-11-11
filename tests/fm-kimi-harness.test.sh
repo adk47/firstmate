@@ -220,13 +220,40 @@ test_kimi_launch_then_send_is_verified() {
   assert_grep 'effort=high' "$meta" "kimi meta did not retain the unsupported effort axis"
   assert_grep "tasktmp=$task_tmp" "$meta" "kimi meta did not record its task temp root"
   assert_present "$task_tmp/gotmp" "kimi spawn did not create its Go temp directory"
+  assert_present "$task_tmp/tmp" "kimi spawn did not create its per-task TMPDIR"
   assert_grep "export GOTMPDIR=$task_tmp/gotmp" "$CASE_DIR/tmux-calls.log" \
     "kimi spawn did not export its Go temp directory into the pane"
+  assert_grep "export TMPDIR=$task_tmp/tmp" "$CASE_DIR/tmux-calls.log" \
+    "kimi spawn did not export its per-task TMPDIR into the pane"
   assert_grep 'BEGIN FIRSTMATE KIMI TURN-END HOOK' "$HOME_DIR/.kimi-code/config.toml" \
     "kimi spawn did not install its guarded global hook region"
   assert_grep 'token=' "$WT_DIR/.fm-kimi-turnend" "kimi spawn did not write its token pointer"
   assert_present "$HOME_DIR/state/$id.kimi-turnend-token" "kimi spawn did not record its token"
+  rm -rf "$task_tmp"
+  KIMI_RUNTIME_TASK_TMP=
   pass "fm-spawn: kimi launches, delivers its brief, and registers a guarded turn-end token"
+}
+
+test_kimi_spawn_honours_task_tmpdir_opt_out() {
+  local id rec out rc task_tmp
+  id="kimi-tmpdir-off-z2-$$"
+  task_tmp="/tmp/fm-$id"
+  KIMI_RUNTIME_TASK_TMP=$task_tmp
+  rm -rf "$task_tmp"
+  rec=$(make_spawn_case tmpdir-off "$id")
+  read_spawn_record "$rec"
+  printf 'off\n' > "$HOME_DIR/config/task-tmpdir"
+  out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
+  rc=$?
+  expect_code 0 "$rc" "kimi spawn with task-tmpdir=off should succeed"
+  assert_present "$task_tmp/gotmp" "opt-out spawn did not create its Go temp directory"
+  assert_grep "export GOTMPDIR=$task_tmp/gotmp" "$CASE_DIR/tmux-calls.log" \
+    "opt-out spawn stopped exporting its Go temp directory"
+  assert_not_contains "$(cat "$CASE_DIR/tmux-calls.log")" "export TMPDIR=$task_tmp/tmp" \
+    "task-tmpdir=off still exported the per-task TMPDIR"
+  rm -rf "$task_tmp"
+  KIMI_RUNTIME_TASK_TMP=
+  pass "fm-spawn: config/task-tmpdir=off suppresses only the per-task TMPDIR export"
 }
 
 test_kimi_hook_install_is_surgical_idempotent_and_removable() {
@@ -680,6 +707,7 @@ test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
 test_kimi_hook_install_refuses_without_jq
 test_kimi_launch_then_send_is_verified
+test_kimi_spawn_honours_task_tmpdir_opt_out
 test_kimi_hook_is_silent_and_requires_registered_workspace_token
 test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation
 test_kimi_teardown_removes_pointer_and_registry_token

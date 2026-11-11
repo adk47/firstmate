@@ -117,7 +117,8 @@ init_changed_fixture_repo() {
     fm-backend-cmux.test.sh \
     fm-backend-zellij.test.sh \
     fm-control-herdr-smoke.test.sh \
-    fm-backend-orca.test.sh; do
+    fm-backend-orca.test.sh \
+    ak47-budget.test.sh; do
     printf '#!/usr/bin/env bash\n# tests/lib.sh\n' >"$repo/tests/$script"
     chmod +x "$repo/tests/$script"
   done
@@ -143,6 +144,7 @@ init_changed_fixture_repo() {
     >>"$repo/tests/fm-cd-pretool-check.test.sh"
   printf '# .pi/extensions/fm-primary-pi-watch.ts\n' >>"$repo/tests/fm-pi-watch-extension.test.sh"
   mkdir -p \
+    "$repo/ak47" \
     "$repo/.agents/skills/example" \
     "$repo/.agents/skills/harness-adapters/references/common" \
     "$repo/.claude" "$repo/.pi/extensions" "$repo/docs" "$repo/src"
@@ -155,6 +157,7 @@ init_changed_fixture_repo() {
   : >"$repo/docs/fm-test-isolation-proof.md"
   : >"$repo/CONTRIBUTING.md"
   : >"$repo/src/unmapped.ts"
+  : >"$repo/ak47/README.md"
   git -C "$repo" init -q
   git -C "$repo" add .
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm baseline
@@ -244,6 +247,13 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-pi-watch-extension.test.sh" "Pi source selects watcher coverage"
   git -C "$repo" add .agents .claude .pi
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm non-bin-source-change
+
+  printf '\n' >>"$repo/ak47/README.md"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/ak47-budget.test.sh" \
+    "ak47 source selects the hermetic ak47 family"
+  git -C "$repo" add ak47/README.md
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm ak47-source-change
 
   printf '\n' >>"$repo/.agents/skills/harness-adapters/references/common/dispatch.md"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
@@ -1298,10 +1308,13 @@ test_herdr_ci_family_run_has_a_step_timeout() {
   # The required Herdr lane's hang tripwire is the family-run *step* bound, not
   # the 75-minute job cap. Parse the workflow as YAML so nested `with.name`
   # artifact keys cannot masquerade as the step contract.
-  command -v ruby >/dev/null 2>&1 \
-    || fail "ruby is required to parse .github/workflows/ci.yml as YAML"
+  # Either YAML reader is acceptable: the assertion is about the workflow's
+  # declared timeouts, not about which interpreter reads them. Ruby is used
+  # when present (CI has it); python3 is the fallback so a workstation without
+  # ruby still verifies the contract instead of failing on a missing tool.
   local json job_timeout step_timeout
-  json=$(ruby -ryaml -rjson -e '
+  if command -v ruby >/dev/null 2>&1; then
+    json=$(ruby -ryaml -rjson -e '
 doc = YAML.load_file(ARGV[0])
 job = doc.fetch("jobs").fetch("tests-herdr")
 step = job.fetch("steps").find { |s|
@@ -1314,7 +1327,27 @@ puts JSON.generate(
   "step_timeout" => step.fetch("timeout-minutes")
 )
 ' "$ROOT/.github/workflows/ci.yml") \
-    || fail "could not parse tests-herdr timeouts from ci.yml"
+      || fail "could not parse tests-herdr timeouts from ci.yml"
+  else
+    command -v python3 >/dev/null 2>&1 \
+      || fail "ruby or python3 is required to parse .github/workflows/ci.yml as YAML"
+    json=$(python3 -c '
+import json, sys, yaml
+doc = yaml.safe_load(open(sys.argv[1]))
+job = doc["jobs"]["tests-herdr"]
+step = next(
+    s for s in job["steps"]
+    if isinstance(s, dict) and s.get("name") == "Run real-Herdr family (serial, required)"
+)
+if "timeout-minutes" not in step:
+    raise SystemExit("family-run step has no timeout-minutes")
+print(json.dumps({
+    "job_timeout": job["timeout-minutes"],
+    "step_timeout": step["timeout-minutes"],
+}))
+' "$ROOT/.github/workflows/ci.yml") \
+      || fail "could not parse tests-herdr timeouts from ci.yml"
+  fi
   job_timeout=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["job_timeout"])' <<<"$json") \
     || fail "could not read job timeout from parsed workflow"
   step_timeout=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["step_timeout"])' <<<"$json") \
