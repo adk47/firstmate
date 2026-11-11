@@ -1,0 +1,30 @@
+### uninstall with systemctl --user disable failing for every unit
+
+== removing the ak47 hygiene timers (state is kept) ==
+run: systemctl --user disable --now ak47-devops.service
+run: systemctl --user disable --now ak47-devops.timer
+run: systemctl --user disable --now ak47-devops-weekly.service
+run: systemctl --user disable --now ak47-devops-weekly.timer
+run: rm -f /tmp/ak47-uninstall.HYDQ8D/config/systemd/user/ak47-devops.service
+run: rm -f /tmp/ak47-uninstall.HYDQ8D/config/systemd/user/ak47-devops.timer
+run: rm -f /tmp/ak47-uninstall.HYDQ8D/config/systemd/user/ak47-devops-weekly.service
+run: rm -f /tmp/ak47-uninstall.HYDQ8D/config/systemd/user/ak47-devops-weekly.timer
+run: systemctl --user daemon-reload
+
+Removed. Kept, deliberately:
+  /tmp/ak47-uninstall.HYDQ8D/state   logs, quarantine, findings, baselines
+  /tmp/ak47-uninstall.HYDQ8D/config/ak47  devops.conf
+  /tmp/ak47-uninstall.HYDQ8D/cache   the cached du sample
+Delete those by hand if you want the history gone too.
+
+rc=0
+
+### unit files remaining
+(none if empty)
+
+### stub systemctl calls
+stub systemctl --user disable --now ak47-devops.service
+stub systemctl --user disable --now ak47-devops.timer
+stub systemctl --user disable --now ak47-devops-weekly.service
+stub systemctl --user disable --now ak47-devops-weekly.timer
+stub systemctl --user daemon-reload

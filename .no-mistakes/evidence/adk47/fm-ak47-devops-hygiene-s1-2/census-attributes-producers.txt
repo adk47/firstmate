@@ -1,0 +1,12 @@
+### census of the real /tmp (static, read-only)
+unattributed        51858
+sh-mktemp           25744
+py-mkdtemp          22791
+uvn                  3551
+puppeteer             211
+wc                    126
+TOTAL              104281
+
+### census --check with no baseline (the guard refuses rather than inventing one)
+census: no baseline at /tmp/tmp.GWzjdkwgkJ/state/census.baseline; run 'census.sh --write-baseline' after a source fix lands
+rc=2

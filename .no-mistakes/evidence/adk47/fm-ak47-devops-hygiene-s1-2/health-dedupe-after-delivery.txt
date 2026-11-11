@@ -1,0 +1,16 @@
+### run 1: inbox delivery fails
+health.log lines mentioning watcher / delivery:
+2026-11-11T06:58:15Z FIND watcher Fleet monitoring has not checked in for 29906338 min while 142 agents run
+2026-11-11T06:58:15Z DELIVERY-FAILED 4 finding(s) not delivered; dedupe keys not committed
+dedupe keys committed: 0
+
+### run 2: inbox delivery succeeds
+health.log lines mentioning watcher / delivery:
+2026-11-11T06:58:15Z FIND watcher Fleet monitoring has not checked in for 29906338 min while 142 agents run
+2026-11-11T06:58:15Z DELIVERY-FAILED 4 finding(s) not delivered; dedupe keys not committed
+2026-11-11T06:58:29Z FIND watcher Fleet monitoring has not checked in for 29906338 min while 142 agents run
+dedupe keys committed: devops-absent failed-29c2791e watcher tmp 
+
+### run 3: same finding still present, key committed -> no re-send
+new inbox calls in run 3: 0
+run 3 health.log FIND lines: 8 total (should still be 2: one failed run 1, one delivered run 2)

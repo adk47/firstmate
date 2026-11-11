@@ -1,0 +1,5 @@
+### devops.log gaps: 899, 900, 901, 950, 1000 (interval_seconds=300, tick threshold = 3*300 = 900)
+### expected count: >900 only -> 901, 950, 1000 = 3 (900 exactly is not 'over')
+
+- tick lines in the window: 5
+- runs with a loop gap over 3 intervals: 3

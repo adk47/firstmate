@@ -1,0 +1,53 @@
+### BEFORE
+ak47-forwarder
+fm-livetask
+fm-orphan42
+tmpabcd1234
+tmpwxyz9876
+uvn-leak
+
+### TICK (apply)
+tick mode=apply tmp_before=6 tmp_after=3 moved=3 deleted=0 busy=1 protected=0 failures=0 actions=3 loop_gap=0s classes=tmp-mktemp:1,tmp-producer:1,orphan-task-scratch:1 breaches=none top=fm-livetask:1,tmpabcd1234:1,ak47-forwarder:1
+
+VERDICT: humming - every ceiling holds.
+# ak47 budget - 1:56 AM ET (2026-11-11T06:56:56Z)
+
+METRIC         NOW        CEILING    STATE  REASON
+------         ---        -------    -----  ------
+load15         14.73      <= 32      ok     2x the 32 threads: above this the box is not keeping up and every agent turn slows
+swap_pct       44         <= 50      ok     the 2026-11-10 lockup ran at 99% swap with 77 GB RAM free; 50% means real pressure, not idle paging
+mem_avail_gb   96         >= 15      ok     one full test suite plus a browser needs ~15 GB; below it a single run can stall every agent
+tmp_entries    3          <= 200000  ok     950k entries slowed every glob and test run at 14% disk; 200k keeps a top-level readdir under a second
+tmp_gb         1          <= 20      ok     a week of live scratch fits in 20 GB; the 163 GB today is leaked test scratch, not work in progress
+root_disk_pct  14         <= 85      ok     ext4 fragments badly past 85% and one large build can fill the volume; 540 GB of headroom remains
+tmux_core_pct  0          <= 100     ok     the tmux server idles at ~74% of one core with 81 panes; a whole core means it is competing with real work
+agent_count    142        <= 160     ok     160 agents at 90 MB-1.7 GB each is where per-agent CPU share and tmux cost cross the load ceiling
+
+## last action
+  2026-11-11T06:56:56Z quarantine class=tmp-producer /tmp/ak47-demo.rmCYyv/tmp/uvn-leak -> /tmp/ak47-demo.rmCYyv/state/quarantine/20261111/uvn-leak kib=4 revert='mv /tmp/ak47-demo.rmCYyv/state/quarantine/20261111/uvn-leak /tmp/ak47-demo.rmCYyv/tmp/uvn-leak'
+  2026-11-11T06:56:56Z quarantine class=tmp-mktemp /tmp/ak47-demo.rmCYyv/tmp/tmpwxyz9876 -> /tmp/ak47-demo.rmCYyv/state/quarantine/20261111/tmpwxyz9876 kib=4 revert='mv /tmp/ak47-demo.rmCYyv/state/quarantine/20261111/tmpwxyz9876 /tmp/ak47-demo.rmCYyv/tmp/tmpwxyz9876'
+  2026-11-11T06:56:56Z quarantine class=orphan-task-scratch /tmp/ak47-demo.rmCYyv/tmp/fm-orphan42 -> /tmp/ak47-demo.rmCYyv/state/quarantine/20261111/fm-orphan42 kib=8 revert='mv /tmp/ak47-demo.rmCYyv/state/quarantine/20261111/fm-orphan42 /tmp/ak47-demo.rmCYyv/tmp/fm-orphan42'
+
+## open findings (the table cannot settle these)
+  none
+
+## loop
+  last tick 0s ago (2026-11-11T06:56:56Z); log /tmp/ak47-demo.rmCYyv/state/devops.log
+
+### AFTER
+ak47-forwarder
+fm-livetask
+tmpabcd1234
+
+### QUARANTINE
+20261111/fm-orphan42
+20261111/tmpwxyz9876
+20261111/uvn-leak
+
+### REAP LOG
+2026-11-11T06:56:56Z quarantine class=tmp-producer /tmp/ak47-demo.rmCYyv/tmp/uvn-leak -> /tmp/ak47-demo.rmCYyv/state/quarantine/20261111/uvn-leak kib=4 revert='mv /tmp/ak47-demo.rmCYyv/state/quarantine/20261111/uvn-leak /tmp/ak47-demo.rmCYyv/tmp/uvn-leak'
+2026-11-11T06:56:56Z quarantine class=tmp-mktemp /tmp/ak47-demo.rmCYyv/tmp/tmpwxyz9876 -> /tmp/ak47-demo.rmCYyv/state/quarantine/20261111/tmpwxyz9876 kib=4 revert='mv /tmp/ak47-demo.rmCYyv/state/quarantine/20261111/tmpwxyz9876 /tmp/ak47-demo.rmCYyv/tmp/tmpwxyz9876'
+2026-11-11T06:56:56Z quarantine class=orphan-task-scratch /tmp/ak47-demo.rmCYyv/tmp/fm-orphan42 -> /tmp/ak47-demo.rmCYyv/state/quarantine/20261111/fm-orphan42 kib=8 revert='mv /tmp/ak47-demo.rmCYyv/state/quarantine/20261111/fm-orphan42 /tmp/ak47-demo.rmCYyv/tmp/fm-orphan42'
+
+### DEVOPS LOG (one line, always)
+2026-11-11T06:56:56Z tick mode=apply tmp_before=6 tmp_after=3 moved=3 deleted=0 busy=1 protected=0 failures=0 actions=3 loop_gap=0s classes=tmp-mktemp:1,tmp-producer:1,orphan-task-scratch:1 breaches=none top=fm-livetask:1,tmpabcd1234:1,ak47-forwarder:1

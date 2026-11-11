@@ -1,0 +1,15 @@
+skip static:uvn                   not cloned at /tmp/tmp.3JYyyUheDK/fmhome/projects/hydra/scripts/tests/test_uvn_status.py
+skip static:wc                    not cloned at /tmp/tmp.3JYyyUheDK/fmhome/projects/hydra/scripts/tests/test_uvn_status.py
+skip static:uvn-lens              not cloned at /tmp/tmp.3JYyyUheDK/fmhome/projects/hydra/scripts/tests/test_fraud_lens.py
+skip static:merge-outcome         not cloned at /tmp/tmp.3JYyyUheDK/fmhome/projects/hydra/scripts/tests/test_merge_outcome_notify.py
+skip static:irc                   not cloned at /tmp/tmp.3JYyyUheDK/fmhome/projects/hydra/scripts/tests/test_intercom_reconcile.py
+skip static:rmtc                  not cloned at /tmp/tmp.3JYyyUheDK/fmhome/projects/core-backend/src/commands/repairMissingTrackCredits.test.js
+skip static:rmtc-artifacts        not cloned at /tmp/tmp.3JYyyUheDK/fmhome/projects/core-backend/src/commands/repairMissingTrackCredits.test.js
+skip static:restore-test          not cloned at /tmp/tmp.3JYyyUheDK/fmhome/projects/core-backend/src/commands/restoreRevertedApprovals.test.js
+skip static:csv                   not cloned at /tmp/tmp.3JYyyUheDK/fmhome/projects/core-backend/scripts/claim-surface-verify.test.js
+skip static:hdevops-scaleup-gate  not cloned at /tmp/tmp.3JYyyUheDK/fmhome/projects/H-DevOps/scripts/devops-agent/tests/test-rebalance-wedge-scaleup-gate.sh
+pass systemic:per-task-tmpdir     bin/fm-spawn.sh exports a per-task TMPDIR
+skip dynamic:census               census could not run (rc=2): census: no baseline at /tmp/tmp.3JYyyUheDK/state/census.baseline; run 'census.sh --write-baseline' after a source fix lands
+pass payload:hdevops              committed payload matches ak47/
+
+2 passed, 0 failed, 11 skipped
