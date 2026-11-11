@@ -1,8 +1,9 @@
 use strict;
 use warnings;
 use Cwd qw(getcwd);
-use Fcntl qw(O_CREAT O_EXCL O_NOFOLLOW O_RDONLY O_RDWR);
-use JSON::PP qw(encode_json);
+use Fcntl qw(O_CREAT O_EXCL O_NOFOLLOW O_NONBLOCK O_RDONLY O_RDWR O_WRONLY);
+use JSON::PP qw(decode_json encode_json);
+use Digest::SHA qw(sha256_hex);
 use POSIX qw(dup2);
 
 if (@ARGV && $ARGV[0] eq 'handoff') {
@@ -92,8 +93,12 @@ if (@ARGV && $ARGV[0] eq 'handoff') {
 my ($registry_fd, $inbox_fd, $reservation_fd, $id, $adapter, $extension_id, $extension_version, $capability_version,
     $package_digest, $binding_digest, $claim_token, $runner_name, $output_name,
     $runner_pid, $claim_identity, $limit, @command) = @ARGV;
+my $launch_ready_name;
+$launch_ready_name = shift @command if @command && $command[0] ne "--";
 die "missing command\n" unless @command && shift(@command) eq "--";
 die "invalid limit\n" unless defined $limit && $limit =~ /\A\d+\z/;
+die "invalid launch boundary\n" if defined($launch_ready_name)
+  && $launch_ready_name !~ /\A\.[A-Za-z0-9._-]{1,384}\.launch-ready\z/;
 our ($registry_dir, $registry, $reservation_dir, $reservation_root, $sequence);
 
 sub fail { die "capture failed: $_[0]\n"; }
@@ -133,6 +138,23 @@ sub publish_new {
   my ($temporary, $final) = @_;
   link($temporary, $final) or fail("cannot publish $final");
   unlink($temporary) or fail("cannot remove temporary evidence");
+}
+# Coalescing is limited to complete host-owned error envelopes. Adapter output
+# can contain the same bytes on success, so only an explicit host-error sidecar
+# written for exit 70 can identify a reusable, still-unhandled capture.
+sub private_file_matches {
+  my ($name, $expected) = @_;
+  sysopen(my $fh, $name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK) or return 0;
+  my @st = stat($fh);
+  return 0 unless @st && -f $fh && $st[4] == $< && ($st[2] & 07777) == 0600
+    && $st[3] == 1 && $st[7] == length($expected);
+  my $bytes = '';
+  while (length($bytes) < length($expected)) {
+    my $read = sysread($fh, my $buffer, length($expected) - length($bytes));
+    return 0 unless defined $read && $read > 0;
+    $bytes .= $buffer;
+  }
+  return $bytes eq $expected;
 }
 sub random_token {
   open(my $random, '<', '/dev/urandom') or fail('cannot create capture reservation');
@@ -180,6 +202,14 @@ my $runner = open_new($runner_name);
 write_all($runner, "$runner_pid\n");
 close($runner) or fail("cannot close runner record");
 my $stage = open_new($output_name);
+my $launch_ready;
+if (defined $launch_ready_name) {
+  sysopen($launch_ready, $launch_ready_name, O_WRONLY | O_NOFOLLOW)
+    or fail("cannot open launch boundary");
+  my @launch_ready_stat = stat($launch_ready);
+  fail("unsafe launch boundary") unless @launch_ready_stat && -f _ && $launch_ready_stat[4] == $<
+    && ($launch_ready_stat[2] & 07777) == 0600 && $launch_ready_stat[3] == 1;
+}
 pipe(my $reader, my $writer) or fail("cannot create output pipe");
 my $child = fork();
 defined $child or fail("cannot fork adapter");
@@ -191,6 +221,10 @@ if ($child == 0) {
   exit 127;
 }
 close($writer);
+if (defined $launch_ready) {
+  write_all($launch_ready, "ready\n");
+  close($launch_ready) or fail("cannot close launch boundary");
+}
 my ($written, $truncated) = (0, 0);
 while (1) {
   my $read = sysread($reader, my $buffer, 65536);
@@ -221,7 +255,44 @@ if ($rc != 0 && $written == 0) {
   print "no-result\t$rc\t$truncated\n";
   exit 0;
 }
+my $extension_owner = join("\n", "schema=fm-procevent-extension-owner.v1", "extension_id=$extension_id", "extension_version=$extension_version", "capability_version=$capability_version", "package_digest=$package_digest", "binding_digest=$binding_digest", "");
+my ($host_error, $error_bytes);
+if ($rc == 70 && !$truncated && $written > 0 && $written <= 1024) {
+  seek($stage, 0, 0) or fail("cannot rewind host error");
+  $error_bytes = '';
+  while (length($error_bytes) < $written) {
+    my $read = sysread($stage, my $buffer, $written - length($error_bytes));
+    defined $read && $read > 0 or fail("cannot read host error");
+    $error_bytes .= $buffer;
+  }
+  my $error = eval { decode_json($error_bytes) };
+  if (ref($error) eq 'HASH' && keys(%$error) == 4
+      && ($error->{schema} // '') eq 'firstmate.process-event-extension-error.v1'
+      && ($error->{extension_id} // '') eq $extension_id
+      && ($error->{operation} // '') eq 'source.poll'
+      && !ref($error->{code}) && ($error->{code} // '') =~ /\A[a-z0-9-]{1,64}\z/) {
+    $host_error = "schema=fm-procevent-host-error.v1\nidentity=sha256:"
+      . sha256_hex(join("\0", $adapter, $extension_owner, $error_bytes)) . "\n";
+  }
+}
 chdir($inbox_dir) or fail("cannot enter inbox directory");
+if (defined $host_error) {
+  for my $marker (glob("$id.*.host-error")) {
+    next unless $marker =~ /\A\Q$id\E\.(\d+)\.host-error\z/;
+    my $prefix = "$id.$1";
+    next if -e "$prefix.handled" || -l "$prefix.handled";
+    next unless private_file_matches($marker, $host_error)
+      && private_file_matches("$prefix.result", $error_bytes)
+      && private_file_matches("$prefix.adapter", "$adapter\n")
+      && private_file_matches("$prefix.extension", $extension_owner);
+    close($stage) or fail("cannot close staged output");
+    chdir($registry_dir) or fail("cannot return to registry directory");
+    unlink($output_name) or fail("cannot remove staged output");
+    unlink($runner_name) or fail("cannot remove runner record");
+    print "no-result\t$rc\t$truncated\n";
+    exit 0;
+  }
+}
 $sequence = 1;
 $sequence++ while -e "$id.$sequence.result" || -l "$id.$sequence.result";
 my $prefix = "$id.$sequence";
@@ -238,10 +309,17 @@ my $adapter_file = open_new($adapter_tmp);
 write_all($adapter_file, "$adapter\n");
 close($adapter_file) or fail("cannot close adapter evidence");
 my $extension_file = open_new($extension_tmp);
-write_all($extension_file, join("\n", "schema=fm-procevent-extension-owner.v1", "extension_id=$extension_id", "extension_version=$extension_version", "capability_version=$capability_version", "package_digest=$package_digest", "binding_digest=$binding_digest", ""));
+write_all($extension_file, $extension_owner);
 close($extension_file) or fail("cannot close extension evidence");
 publish_new($adapter_tmp, "$prefix.adapter");
 publish_new($extension_tmp, "$prefix.extension");
+if (defined $host_error) {
+  my $marker_tmp = "$nonce.host-error";
+  my $marker = open_new($marker_tmp);
+  write_all($marker, $host_error);
+  close($marker) or fail("cannot close host error identity");
+  publish_new($marker_tmp, "$prefix.host-error");
+}
 publish_new($result_tmp, "$prefix.result");
 my @inbox_stat = stat($inbox_dir);
 my @result_stat = stat("$prefix.result");

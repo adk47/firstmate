@@ -46,8 +46,19 @@ case "${1:-}${2:-}" in
     echo "$n" > "$count_file"
     file="$FM_ORCA_SCREENS/$n.json"
     if [ ! -f "$file" ]; then
-      printf '{"ok":false,"error":{"message":"no queued screen %s"}}\n' "$n"
-      exit 2
+      # A terminal's screen persists, and the composer path may read it more
+      # than once per step, so past the queue the newest screen keeps serving.
+      # Only a case that queued NOTHING is unreadable.
+      last=''
+      for candidate in "$FM_ORCA_SCREENS"/*.json; do
+        [ -f "$candidate" ] || continue
+        last=$candidate
+      done
+      if [ -z "$last" ]; then
+        printf '{"ok":false,"error":{"message":"no queued screen %s"}}\n' "$n"
+        exit 2
+      fi
+      file=$last
     fi
     cat "$file"
     ;;

@@ -22,10 +22,15 @@
 #      fast-forward is still named for restart and genuinely restarted, and one
 #      whose runtime cannot prove a restart keeps the honest re-read path with
 #      its agent left running.
+#   7. A T3 mate, whose thread keeps its conversation so no replacement can be
+#      launched into it, is routed by both passes to the re-read message on its
+#      thread and never asked to persist for a restart that cannot come.
 set -u
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+# shellcheck source=tests/t3-fake-lib.sh
+. "$(dirname "${BASH_SOURCE[0]}")/t3-fake-lib.sh"
 
 RESTART="$ROOT/bin/fm-secondmate-restart.sh"
 
@@ -33,7 +38,7 @@ fm_git_identity fmtest fmtest@example.com
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-restart)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
-trap 'rm -rf -- "$TMP_ROOT"' EXIT
+trap 't3_fake_stop; rm -rf -- "$TMP_ROOT"' EXIT
 
 # A session-provider stub that models the two things this pass depends on: the
 # harness exit command stops the agent, a launch brief starts the replacement,
@@ -62,16 +67,23 @@ case "${1:-}" in
     done
     payload=${1:-}
     if [ "$literal" = 1 ]; then
+      case "$payload" in
+        ". '"*"'")
+          staged=${payload#". '"}
+          staged=${staged%"'"}
+          [ ! -f "$staged" ] || payload=$(cat "$staged")
+          ;;
+      esac
       printf '%s\n' "$payload" >> "$D/literal"
       case "$payload" in
         /exit|/quit)
           if [ -e "$D/remote-relaunch-start" ] && [ ! -e "$D/remote-relaunch-end" ]; then
             : > "$D/local-relaunch-during-remote"
           fi
-          printf 'zsh' > "$D/command"
+          printf 'zsh' > "$D/command.$target"
           ;;
-        *'encode launch-brief'*) cat "$D/becomes" > "$D/command" ;;
-        'Firstmate instruction waiting: list '*)
+        *'encode launch-brief'* | *'Firstmate operational input waiting: read'*) cat "$D/becomes" > "$D/command.$target" ;;
+        ': Firstmate instruction waiting: list '*)
           printf 'doorbell\n' >> "$D/rings"
           if [ -x "$D/on-doorbell" ]; then
             "$D/on-doorbell" "$payload"
@@ -95,15 +107,21 @@ case "${1:-}" in
     fi
     exit 0 ;;
   display-message)
+    target=
+    prev=
     for a in "$@"; do
+      if [ "$prev" = -t ]; then target=$a; fi
       case "$a" in
         *cursor_y*) printf '1\n'; exit 0 ;;
-        *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
+        *pane_current_command*)
+          if [ -f "$D/command.$target" ]; then cat "$D/command.$target"; else cat "$D/command"; fi
+          printf '\n'; exit 0 ;;
         *pane_current_path*) cat "$D/cwd"; printf '\n'; exit 0 ;;
       esac
+      prev=$a
     done
     printf 'fakepane\n'; exit 0 ;;
-  capture-pane) printf '> \n'; exit 0 ;;
+  capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
   list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
 esac
 exit 0
@@ -159,7 +177,7 @@ add_local_mate() {
     echo "home=$smhome"
     [ -z "$backend" ] || echo "backend=$backend"
   } > "$home/state/$id.meta"
-  printf '%s\n' "fm-$id" > "$dir/fake/windows"
+  printf '%s\n' "fm-$id" >> "$dir/fake/windows"
   printf '%s' "$smhome" > "$dir/fake/cwd"
 }
 
@@ -284,7 +302,7 @@ test_persist_precedes_restart() {
   assert_contains "$out" "summary: 1 of 1 restarted, 0 nudged, 0 unreached" "the summary should report the reload"
   # The pane transcript orders the two phases: the instruction doorbell first,
   # the harness exit command only after it.
-  doorbell_line=$(grep -n '^Firstmate instruction waiting: ' "$dir/fake/literal" | head -1 | cut -d: -f1)
+  doorbell_line=$(grep -n '^: Firstmate instruction waiting: ' "$dir/fake/literal" | head -1 | cut -d: -f1)
   exit_line=$(grep -n '^/exit$' "$dir/fake/literal" | head -1 | cut -d: -f1)
   [ -n "$doorbell_line" ] || fail "the persist request never reached the mate"
   [ -n "$exit_line" ] || fail "the mate was never stopped, so it was not restarted"
@@ -308,6 +326,43 @@ test_arrived_answer_precedes_deadline_check() {
   expect_code 0 "$rc" "an answer delivered with the request must beat the deadline check"$'\n'"$out"
   assert_contains "$out" "restarted: sm1" "the arrived persist answer was ignored at the deadline"
   pass "T2b an arrived persist answer is resolved before timeout"
+}
+
+# --- T2c: an answer arriving between resolution and timeout wins -------------
+test_answer_between_resolution_and_timeout_wins() {
+  local dir out rc
+  dir=$(new_case answer-at-timeout-decision)
+  add_local_mate "$dir" sm1
+
+  # Delay the modelled answer until the first resolution attempt has completed
+  # its unsuccessful status scan. The real pending-reply machinery publishes
+  # that scan signature with mv; this wrapper appends the correlated answer only
+  # after that publication, reproducing the boundary race deterministically.
+  cat > "$dir/fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -u
+/bin/mv "$@" || exit $?
+target=${!#}
+case "$target" in
+  "${FM_FAKE_DIR%/fake}"/home/state/pending-replies/*)
+    if [ ! -e "$FM_FAKE_DIR/answer-after-scan" ] \
+      && grep -q '^parent_status_scan_signature=.' "$target"; then
+      : > "$FM_FAKE_DIR/answer-after-scan"
+      corr=${target##*/}
+      status=$(sed -n 's/^parent_status=//p' "$target")
+      printf 'done [corr=%s]: open records written down\n' "$corr" >> "$status"
+    fi
+    ;;
+esac
+SH
+  chmod +x "$dir/fakebin/mv"
+
+  out=$(FM_TEST_PERSIST_WAIT=0 run_restart "$dir" sm1); rc=$?
+
+  expect_code 0 "$rc" "an answer already on disk at the timeout decision must release the gate"$'\n'"$out"
+  assert_contains "$out" "restarted: sm1" "the reply that raced the timeout was ignored"
+  assert_not_contains "$out" "nudged: sm1" "a confirmed mate must not take the timeout fallback"
+  pass "T2c a reply between the preliminary scan and timeout decision wins"
 }
 
 # --- T3: a runtime that cannot prove a restart never gets one ----------------
@@ -404,7 +459,6 @@ setup_remote_case() {  # <case-dir> <id> <ssh-mode>
   cat > "$fb/fake-ssh" <<'SH'
 #!/usr/bin/env bash
 set -u
-cat > /dev/null
 while [ "$#" -gt 0 ]; do
   case "$1" in -o) shift 2 ;; --) shift; break ;; *) exit 90 ;; esac
 done
@@ -413,16 +467,17 @@ argv_b64=$4
 decode() { printf '%s' "$1" | base64 --decode 2>/dev/null || printf '%s' "$1" | base64 -D; }
 rargs=()
 while IFS= read -r -d '' a; do rargs+=("$a"); done < <(decode "$argv_b64")
+stdin_payload=$(cat)
 printf '%s\n' "${rargs[*]}" >> "$FM_FAKE_SSH_LOG"
 case "${FM_FAKE_SSH_MODE:-ok}" in
   unreachable) exit 255 ;;
 esac
 case "${rargs[1]:-}" in
-  send)
+  send-stdin)
     # Model the live remote mate: act on the instruction and report back on the
     # parent channel, carrying the correlation token the request embedded.
     if [ -n "${FM_FAKE_ANSWER_STATUS:-}" ]; then
-      corr=$(printf '%s' "${rargs[3]:-}" | grep -oE 'corr=[0-9a-f]{16}' | head -1)
+      corr=$(printf '%s' "$stdin_payload" | grep -oE 'corr=[0-9a-f]{16}' | head -1)
       [ -z "$corr" ] || printf 'done [%s]: open records written down\n' "$corr" \
         >> "$FM_FAKE_ANSWER_STATUS"
     fi
@@ -435,7 +490,15 @@ case "${rargs[1]:-}" in
         : > "$FM_FAKE_DIR/remote-relaunch-end"
         ;;
     esac
-    printf 'relaunched %s\n' "${rargs[2]}"
+    printf 'relaunched %s harness=%s from=claude model=%s effort=%s backend=herdr endpoint=fm-remote:2ndmate-%s worktree=/srv/fm\n' \
+      "${rargs[2]}" "${rargs[3]}" "${rargs[4]}" "${rargs[5]}" "${rargs[2]}"
+    printf 'schema=fm-remote-secondmate-control.v1\n'
+    printf 'backend=herdr\n'
+    printf 'target=fm-remote:2ndmate-%s\n' "${rargs[2]}"
+    printf 'herdr_session=fm-remote\n'
+    printf 'harness=%s\n' "${rargs[3]}"
+    printf 'model=%s\n' "${rargs[4]}"
+    printf 'effort=%s\n' "${rargs[5]}"
     ;;
 esac
 exit 0
@@ -467,10 +530,89 @@ test_remote_mate_restarts_over_the_transport_hop() {
   [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 codex big-model high" ] \
     || fail "the host-local relaunch did not carry the parent's resolved profile: $relaunch_line"
   # The persist request crossed the SAME hop before the restart did.
-  [ "$(grep -n '^fm-remote-secondmate-control.sh send' "$dir/ssh.log" | head -1 | cut -d: -f1)" \
+  [ "$(grep -n '^fm-remote-secondmate-control.sh send-stdin' "$dir/ssh.log" | head -1 | cut -d: -f1)" \
      -lt "$(grep -n '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1 | cut -d: -f1)" ] \
     || fail "the remote mate was restarted before it was asked to persist"$'\n'"$(cat "$dir/ssh.log")"
   pass "T6 a remote mate restarts through the host-local control plane over the fm-on hop"
+}
+
+# --- T6b: a per-mate override decides which runtime that mate lands on -------
+# The default line is what a mate without its own override gets; a mate with one
+# gets its own, and an unreadable pin is a per-mate refusal that keeps the
+# running agent instead of migrating it onto whatever the default says today.
+test_remote_restart_lands_on_the_per_mate_pin() {
+  local dir out rc relaunch_line
+  dir=$(new_case matepin)
+  setup_remote_case "$dir" sm2 ok
+  export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm2.status"
+  printf 'codex big-model high\nmate sm2: pi mate-model max\n' > "$dir/home/config/secondmate-harness"
+
+  out=$(run_restart "$dir" sm2); rc=$?
+  unset FM_FAKE_ANSWER_STATUS
+
+  expect_code 0 "$rc" "a mate with its own override should restart onto it"$'\n'"$out"
+  relaunch_line=$(grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1)
+  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 pi mate-model max" ] \
+    || fail "the mate's own override did not reach the host relaunch: $relaunch_line\n$out"
+  pass "T6a a remote mate with a per-mate override restarts onto that override, not the default pin"
+}
+
+test_remote_restart_uses_the_default_for_an_unpinned_mate() {
+  local dir out rc relaunch_line
+  dir=$(new_case matenopin)
+  setup_remote_case "$dir" sm2 ok
+  export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm2.status"
+  printf 'codex big-model high\nmate some-other-mate: muse other-model low\n' > "$dir/home/config/secondmate-harness"
+
+  out=$(run_restart "$dir" sm2); rc=$?
+  unset FM_FAKE_ANSWER_STATUS
+
+  expect_code 0 "$rc" "a mate with no override should restart onto the default pin"$'\n'"$out"
+  relaunch_line=$(grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1)
+  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 codex big-model high" ] \
+    || fail "an unpinned mate did not resolve the default pin: $relaunch_line\n$out"
+  pass "T6b a remote mate with no override line still restarts onto the default pin"
+}
+
+# The restart half of the opt-in scope: a pin file that declares no
+# "mate <id>:" line is read exactly as it was before that grammar existed, so a
+# second default line and a fourth token must not stop the restart. The mate
+# still restarts onto the first line's runtime.
+test_remote_restart_with_a_legacy_pin_file_uses_the_first_line() {
+  local dir out rc relaunch_line
+  dir=$(new_case matelegacypin)
+  setup_remote_case "$dir" sm2 ok
+  export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm2.status"
+  printf 'codex big-model high extra\ngrok other-model low\n' > "$dir/home/config/secondmate-harness"
+
+  out=$(run_restart "$dir" sm2); rc=$?
+  unset FM_FAKE_ANSWER_STATUS
+
+  expect_code 0 "$rc" "a legacy pin file must not refuse a restart"$'\n'"$out"
+  relaunch_line=$(grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1)
+  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 codex big-model high" ] \
+    || fail "the restart did not use the first line of the legacy pin: $relaunch_line\n$out"
+  pass "T6d a legacy pin file still restarts the mate onto its first line"
+}
+
+test_remote_restart_refuses_an_unreadable_per_mate_pin() {
+  local dir out rc
+  dir=$(new_case matebadpin)
+  setup_remote_case "$dir" sm2 ok
+  export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm2.status"
+  printf 'codex big-model high\nmate sm2: pi mate-model max\nmate sm2: muse other-model low\n' > "$dir/home/config/secondmate-harness"
+
+  out=$(run_restart "$dir" sm2); rc=$?
+  unset FM_FAKE_ANSWER_STATUS
+
+  expect_code 3 "$rc" "an unreadable pin is a fallback, never a claimed reload"$'\n'"$out"
+  assert_contains "$out" "its configured runtime pin could not be read" \
+    "the per-mate refusal must name what could not be resolved"
+  assert_contains "$out" "line 3" "the per-mate refusal must carry the pin file's line number"
+  assert_contains "$out" "summary: 0 of 1 restarted" "an unreadable pin must not be reported as a reload"
+  [ -z "$(grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" || true)" ] \
+    || fail "a mate with an unreadable pin must not be restarted over the transport hop"
+  pass "T6c an unreadable per-mate pin falls back to the re-read path with its agent left running"
 }
 
 # --- T7: an unreachable host is unknown, never a claimed reload --------------
@@ -505,6 +647,34 @@ test_local_restart_uses_the_home_pin_and_reports_what_ran() {
   [ "$(grep '^harness=' "$dir/home/state/sm1.meta" | tail -1)" = "harness=codex" ] \
     || fail "the durable record did not follow the replacement onto the pinned runtime"
   pass "T8 a local restart re-resolves this home's pin and reports the runtime that came up"
+}
+
+test_native_ultra_restart_keeps_local_and_remote_profiles() {
+  local dir out rc relaunch_line
+  dir=$(new_case native-local)
+  add_local_mate "$dir" sm1
+  arm_answer "$dir" sm1
+  printf 'pi codex-native/gpt-6-astra ultra\n' > "$dir/home/config/secondmate-harness"
+  printf 'pi' > "$dir/fake/becomes"
+  printf '#!/usr/bin/env bash\nprintf "Options: --tui-mode\\n"\n' > "$dir/fakebin/pi"
+  chmod +x "$dir/fakebin/pi"
+  out=$(run_restart "$dir" sm1); rc=$?
+  expect_code 0 "$rc" "native local restart failed: $out"
+  assert_contains "$out" "restarted: sm1 (pi)" "native local restart did not complete"
+  assert_contains "$(cat "$dir/home/state/sm1.meta")" "effort=ultra" "local restart dropped native effort"
+  assert_contains "$(cat "$dir/fake/literal")" "--codex-effort 'ultra'" "local restart dropped native launch flag"
+
+  dir=$(new_case native-remote)
+  setup_remote_case "$dir" sm2 ok
+  export FM_FAKE_ANSWER_STATUS="$dir/home/state/sm2.status"
+  printf 'pi-signed codex-native/gpt-6-astra ultra\n' > "$dir/home/config/secondmate-harness"
+  out=$(run_restart "$dir" sm2); rc=$?
+  unset FM_FAKE_ANSWER_STATUS
+  expect_code 0 "$rc" "native remote restart failed: $out"
+  relaunch_line=$(grep '^fm-remote-secondmate-control.sh relaunch' "$dir/ssh.log" | head -1)
+  [ "$relaunch_line" = "fm-remote-secondmate-control.sh relaunch sm2 pi-signed codex-native/gpt-6-astra ultra" ] \
+    || fail "remote restart dropped native profile: $relaunch_line"
+  pass "native Ultra survives local restart and the remote restart transport"
 }
 
 # --- T9: an unrelated concurrent reply cannot release the persist gate -------
@@ -553,7 +723,7 @@ test_persist_waits_are_polled_together() {
 
   expect_code 3 "$rc" "the unanswered mate should fall back after the confirmed mate restarts"$'\n'"$out"
   exit_line=$(grep -n '^/exit$' "$dir/fake/literal" | head -1 | cut -d: -f1)
-  nudge_line=$(grep -n '^Firstmate instruction waiting: ' "$dir/fake/literal" | tail -1 | cut -d: -f1)
+  nudge_line=$(grep -n '^: Firstmate instruction waiting: ' "$dir/fake/literal" | tail -1 | cut -d: -f1)
   [ -n "$exit_line" ] && [ -n "$nudge_line" ] && [ "$exit_line" -lt "$nudge_line" ] \
     || fail "the first mate's timeout held the confirmed second mate behind it: $out"
   pass "T10 pending persist answers are polled as one fleet"
@@ -712,7 +882,7 @@ test_already_current_mate_restarts_end_to_end() {
   assert_contains "$out" "summary: 1 of 1 restarted, 0 nudged, 0 unreached" \
     "the pass must report the reload it performed"
   # Persist strictly before replace, read off the pane transcript.
-  doorbell_line=$(grep -n '^Firstmate instruction waiting: ' "$dir/fake/literal" | head -1 | cut -d: -f1)
+  doorbell_line=$(grep -n '^: Firstmate instruction waiting: ' "$dir/fake/literal" | head -1 | cut -d: -f1)
   exit_line=$(grep -n '^/exit$' "$dir/fake/literal" | head -1 | cut -d: -f1)
   [ -n "$doorbell_line" ] || fail "the persist request never reached the already-current mate"
   [ -n "$exit_line" ] || fail "the already-current mate was never stopped, so it was not restarted"
@@ -761,14 +931,76 @@ test_already_current_unprovable_mate_stays_on_the_nudge_path() {
   pass "T16 an already-current mate with an unprovable runtime keeps the honest nudge path"
 }
 
+# --- T17: a T3 mate has no replacement to launch, so it keeps the nudge -------
+# T3 proves its agent's state, but its thread keeps the conversation across
+# turns, so the control plane refuses a relaunch onto it before stopping
+# anything. The update pass must route a live T3 mate to the re-read steer, and
+# the restart pass must deliver the re-read message on its thread without first
+# asking it to persist for a restart that can never come.
+test_t3_mate_stays_on_the_nudge_path() {
+  local dir out rc restart_line nudge_line sends
+  dir=$(new_case t3-mate)
+  add_repo_backed_mate "$dir" sm1 claude t3code
+  printf 't3_thread_id=thread-sm1\nt3_project_id=proj-1\n' >> "$dir/home/state/sm1.meta"
+  fm_fake_exit0 "$dir/fakebin" treehouse
+  t3_fake_start "$dir/t3-server"
+  t3_fake_case "$dir/t3"
+  FM_T3_HOME="$dir/sm1-home" t3_fake_set '
+w = { tokens: [],
+  projects: [{ id: "proj-1", title: "sm1-home", workspaceRoot: process.env.FM_T3_HOME, deletedAt: null,
+    defaultModelSelection: { instanceId: "claudeAgent", model: "claude-sonnet-5" } }],
+  threads: { "thread-sm1": { threadId: "thread-sm1", projectId: "proj-1", status: "idle", activeRunId: null,
+    archived: false, worktreePath: null, pendingRequestCount: 0, providerInstanceId: "claudeAgent",
+    runtimeMode: "full-access", parentThreadId: null, items: [], runs: [] } } };'
+  t3_fake_credential "$dir/home/config/t3code-token"
+  arm_answer "$dir" sm1
+
+  out=$(run_update_in_case "$dir")
+
+  restart_line=$(printf '%s\n' "$out" | grep '^restart-secondmates:')
+  nudge_line=$(printf '%s\n' "$out" | grep '^nudge-secondmates:')
+  assert_not_contains "$restart_line" "sm1" \
+    "a T3 mate, which cannot be given a replacement agent, must stay out of the restart set"
+  assert_contains "$nudge_line" "fm-sm1" \
+    "a live T3 mate must keep the re-read steer"
+
+  out=$(run_restart "$dir" sm1); rc=$?
+  sends=$(t3_fake_calls t3_thread_send)
+  t3_fake_stop
+
+  expect_code 3 "$rc" "a T3 mate must not report a reload"$'\n'"$out"
+  assert_contains "$out" "nudged: sm1: its runtime cannot launch a replacement agent (backend t3code)" \
+    "the T3 mate must be nudged, naming the runtime limit"
+  assert_not_contains "$out" "restarted: sm1" "a T3 mate must never be reported as restarted"
+  assert_contains "$out" "summary: 0 of 1 restarted, 1 nudged, 0 unreached" \
+    "the pass must count the T3 mate as nudged"
+  assert_no_grep 'Open-record persistence' "$dir/home/state/sm1.inbox/001.msg" \
+    "a T3 mate should not be asked to persist for a restart that cannot come"
+  assert_grep 're-read your AGENTS.md' "$dir/home/state/sm1.inbox/001.msg" \
+    "the T3 mate should be handed the ordinary re-read message"
+  [ "$(printf '%s\n' "$sends" | grep -c .)" = 1 ] \
+    || fail "the T3 thread should receive exactly the one re-read doorbell, got: $sends"
+  assert_contains "$sends" "Firstmate instruction waiting" \
+    "the re-read doorbell must reach the T3 thread"
+  [ "$(t3_fake_mutations)" = t3_thread_send ] \
+    || fail "nothing but the doorbell may reach the T3 thread, got '$(t3_fake_mutations)'"
+  pass "T17 a T3 mate is routed to the re-read message by both passes, never restarted"
+}
+
 test_persist_gates_and_asks_only_for_open_records
 test_persist_precedes_restart
 test_arrived_answer_precedes_deadline_check
+test_answer_between_resolution_and_timeout_wins
 test_unprovable_runtime_falls_back
 test_unknown_mate_is_accounted_for
 test_refused_restart_falls_back_without_claiming_a_reload
 test_local_restart_uses_the_home_pin_and_reports_what_ran
+test_native_ultra_restart_keeps_local_and_remote_profiles
 test_remote_mate_restarts_over_the_transport_hop
+test_remote_restart_lands_on_the_per_mate_pin
+test_remote_restart_uses_the_default_for_an_unpinned_mate
+test_remote_restart_with_a_legacy_pin_file_uses_the_first_line
+test_remote_restart_refuses_an_unreadable_per_mate_pin
 test_unreachable_host_is_reported_unknown
 test_concurrent_reply_cannot_release_persist_gate
 test_persist_waits_are_polled_together
@@ -778,5 +1010,6 @@ test_unpublished_worker_result_is_accounted_for
 test_result_published_while_reaping_is_honored
 test_already_current_mate_restarts_end_to_end
 test_already_current_unprovable_mate_stays_on_the_nudge_path
+test_t3_mate_stays_on_the_nudge_path
 
 echo "# all fm-secondmate-restart tests passed"

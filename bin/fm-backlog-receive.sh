@@ -57,7 +57,7 @@ list_keys() { # <file>
 lock_age() {
   local modified now
   if [ "$(uname 2>/dev/null)" = Darwin ]; then
-    modified=$(stat -f '%m' "$1" 2>/dev/null) || return 1
+    modified=$(/usr/bin/stat -f '%m' "$1" 2>/dev/null) || return 1
   else
     modified=$(stat -c '%Y' "$1" 2>/dev/null) || return 1
   fi
@@ -79,7 +79,8 @@ remove_dead_stale_lock() { # <lock-path>
 }
 
 run_move() { # <keys...>
-  tasks-axi mv "$@" --file "$DELIVERED" --to "$DEST"
+  # Pin the markdown backend so a .tasks.toml in the caller's directory cannot redirect the move.
+  tasks-axi mv "$@" --file "$DELIVERED" --to "$DEST" --backend markdown
 }
 
 [ "$#" -eq 4 ] || usage
