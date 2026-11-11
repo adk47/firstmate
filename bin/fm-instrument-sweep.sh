@@ -42,8 +42,9 @@
 #                                    command decides the outcome.
 #   stale-reading                    reads a file mtime it writes itself instead
 #                                    of the fact it claims to measure.
-#   failure-path-exit-zero           a failed state read, or an error branch, that
-#                                    exits 0 (silence reported as health).
+#   failure-path-exit-zero           a failed state read that exits 0, or a branch
+#                                    that reports an unreadable instrument and
+#                                    then exits 0 (silence reported as health).
 #
 # Usage:
 #   fm-instrument-sweep.sh [--state DIR] [--probe-dir DIR] [--writers DIR]...
@@ -513,6 +514,13 @@ detect_static() { # file evidence-file -> defect rows
           gsub(/^\$/, "", den)
           if (den == "" || den in GUARDED || den in SEENDEN) continue
           SEENDEN[den] = 1
+          # A divisor bound to a nonzero literal is not a denominator that can
+          # collapse: it is a bucket width such as BAND=1000. The assignment
+          # keeps any trailing comment, so take its first word.
+          dv = den in MAP ? MAP[den] : ""
+          sub(/[ \t].*$/, "", dv)
+          gsub(/^["\047]|["\047]$/, "", dv)
+          if (COUNTV[den] == 1 && dv ~ /^[0-9]+$/ && dv + 0 > 0) continue
           printf "%d\trate-without-denominator\tdivides by %s with no zero guard on %s\n", i, den, den
         }
       }
@@ -578,12 +586,19 @@ detect_static() { # file evidence-file -> defect rows
           GATES = GATES (GATES == "" ? "" : ",") i
         }
       }
-      if (line ~ /^[ \t]*exit[ \t]+0[ \t]*$/) {
+      # A branch that reports an unreadable instrument and then exits 0 is the
+      # same silence: nothing wakes, so the report never leaves the check. A
+      # top-level trailing exit 0 is not this defect, because the check already
+      # woke its reader with the line it printed.
+      if (line ~ /^[ \t]+exit[ \t]+0[ \t]*$/) {
         for (k = i - 1; k >= 1 && k >= i - 2; k--) {
           if (L[k] ~ /^[ \t]*#/ || L[k] ~ /^[ \t]*$/) continue
           low = tolower(L[k])
-          if (low ~ /(error|fail|unable|unavailable|missing|absent|cannot|refus)/) {
-            printf "%d\tfailure-path-exit-zero\terror branch exits 0\n", i
+          if (low ~ /(error|fail|unable|unreadable|unavailable|missing|absent|cannot|refus)/) {
+            # A report printed to stdout wakes the reader, so this branch is not
+            # silence and not this defect; only a stderr-only or silent report is.
+            if (low ~ /^[ \t]*(echo|printf)/ && low !~ /(>&2|1>&2)/) break
+            printf "%d\tfailure-path-exit-zero\ta branch reports an unreadable instrument and then exits 0, so nothing wakes\n", i
             break
           }
         }

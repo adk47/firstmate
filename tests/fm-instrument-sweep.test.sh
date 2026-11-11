@@ -37,10 +37,30 @@ planted_line() { # fixture-file class -> line number
   ' "$1"
 }
 
+# arm_corpus registers every check a test just wrote, so the sweep analyses it.
+# A corpus that is not armed is only UNPROVEN, and asserting "no findings" there
+# would pass no matter what the detector does.
+arm_corpus() { # home-dir check-id...
+  local home=$1 id
+  shift
+  for id in "$@"; do
+    FM_HOME="$home" "$REGISTER" "$id" >/dev/null 2>&1 ||
+      fail "could not register the test corpus check $id"
+  done
+}
+
 sweep_tsv() { # state probe-dir [extra args...]
-  local state=$1 probe=$2
-  shift 2
-  "$SWEEP" --state "$state" --probe-dir "$probe" --tsv "$@" 2>&1
+  local state=$1 probe=${2:-}
+  if [ -n "$probe" ]; then
+    shift 2
+  else
+    shift 1
+  fi
+  if [ -n "$probe" ]; then
+    "$SWEEP" --state "$state" --probe-dir "$probe" --tsv "$@" 2>&1
+  else
+    "$SWEEP" --state "$state" --tsv "$@" 2>&1
+  fi
 }
 
 test_planted_corpus_names_every_class_at_its_line() {
@@ -323,12 +343,77 @@ pct=$((errors * 100 / total))
 echo "$pct"
 EOS
   chmod 0700 "$corpus"/*.check.sh
+  arm_corpus "$home" eq-guard empty-guard
 
   out=$("$SWEEP" --state "$corpus" --tsv 2>&1) || fail "sweep failed on zero-guarded rates:"$'\n'"$out"
   printf '%s\n' "$out" | awk -F'\t' '$1 == "finding" && $3 == "rate-without-denominator" { found = 1 } END { exit found }' ||
     fail "a rate whose denominator is guarded against zero was reported as a defect:"$'\n'"$out"
 
   pass "a zero-guarded rate is not reported as a denominator defect"
+}
+
+test_stderr_only_failure_branch_is_a_defect() {
+  local home corpus out
+  home="$TMP_ROOT/stderr-branch"
+  corpus="$home/state"
+  mkdir -p "$corpus"
+  # The report goes to stderr and the branch exits 0, so the reader is never
+  # woken: the check looks healthy while it is unmeasurable.
+  cat > "$corpus/silent-failure.check.sh" <<'EOS'
+#!/usr/bin/env bash
+set -u
+F="$1"
+if [ ! -r "$F" ]; then
+  echo "ledger is unreadable" >&2
+  exit 0
+fi
+echo ledger-ok
+EOS
+  # The stdout variant wakes its reader and is not this defect.
+  cat > "$corpus/loud-failure.check.sh" <<'EOS'
+#!/usr/bin/env bash
+set -u
+F="$1"
+if [ ! -r "$F" ]; then
+  echo "ledger is unreadable"
+  exit 0
+fi
+echo ledger-ok
+EOS
+  chmod 0700 "$corpus"/*.check.sh
+  arm_corpus "$home" silent-failure loud-failure
+
+  out=$(sweep_tsv "$corpus") || fail "sweep failed on failure branches:"$'\n'"$out"
+  printf '%s\n' "$out" | awk -F'\t' '$1 == "finding" && $3 == "failure-path-exit-zero" && $2 == "silent-failure" { found = 1 } END { exit !found }' ||
+    fail "a stderr-only failure branch that exits 0 was not reported:"$'\n'"$out"
+  printf '%s\n' "$out" | awk -F'\t' '$1 == "finding" && $3 == "failure-path-exit-zero" && $2 == "loud-failure" { found = 1 } END { exit found }' ||
+    fail "a failure branch that prints to stdout was reported as silence:"$'\n'"$out"
+
+  pass "only a stderr-only failure branch that exits 0 counts as silence"
+}
+
+test_literal_divisor_is_not_a_rate_defect() {
+  local home corpus out
+  home="$TMP_ROOT/literal-divisor"
+  corpus="$home/state"
+  mkdir -p "$corpus"
+  # bucket_width=1000 is a bucket, not a denominator that can collapse to zero.
+  cat > "$corpus/bucket.check.sh" <<'EOS'
+#!/usr/bin/env bash
+set -u
+BAND=1000
+silent=2500
+band=$(( silent / BAND ))
+echo "band $band"
+EOS
+  chmod 0700 "$corpus"/*.check.sh
+  arm_corpus "$home" bucket
+
+  out=$(sweep_tsv "$corpus") || fail "sweep failed on a literal divisor:"$'\n'"$out"
+  printf '%s\n' "$out" | awk -F'\t' '$1 == "finding" && $3 == "rate-without-denominator" { found = 1 } END { exit found }' ||
+    fail "a divisor bound to a nonzero literal was reported as a rate defect:"$'\n'"$out"
+
+  pass "a divisor bound to a nonzero literal is not a rate defect"
 }
 
 test_identical_output_falls_back_to_the_output_statement() {
@@ -370,4 +455,6 @@ EOS
 test_probe_evidence_does_not_leak_to_the_next_check
 test_every_defect_carries_its_exact_source_line
 test_zero_guarded_rate_is_not_a_defect
+test_literal_divisor_is_not_a_rate_defect
+test_stderr_only_failure_branch_is_a_defect
 test_identical_output_falls_back_to_the_output_statement

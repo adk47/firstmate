@@ -123,47 +123,34 @@ summary: checks=7 defect=0 unproven=0 proven=7 findings=0
 Run from the live home checkout with this branch's binary.
 The sweep reads the live checks and the live writers statically; it never executes a live check, and it writes only under `TMPDIR`.
 
-`bin/fm-instrument-sweep.sh --state state --writers bin`
+`bin/fm-instrument-sweep.sh --state /home/aaron/Projects/firstmate/state`
 
-The run below is the live `state/*.check.sh` set on 2026-11-08: 42 checks, 14 DEFECT, 28 UNPROVEN, 0 PROVEN.
-No allowlist was applied, and the 28 UNPROVEN entries state their own reason in the full output.
+The live home is a moving target: checks are registered and retired while fleet work runs, so the numbers below are a snapshot, not a fixed figure.
+At this snapshot the corpus held 79 registered checks and the run reported 36 DEFECT, 43 UNPROVEN, 0 PROVEN.
+No allowlist was applied, and every UNPROVEN entry states its own reason in the full output.
 
 ```console
-defect ranking (damage desc, then check id)
- 1. damage=8 ai-dev-secrets-eso-a1 failure-path-exit-zero state/ai-dev-secrets-eso-a1.check.sh:104
- 2. damage=8 ai-dev-secrets-eso-a1 failure-path-exit-zero state/ai-dev-secrets-eso-a1.check.sh:105
- 3. damage=8 ai-dev-secrets-eso-a1 failure-path-exit-zero state/ai-dev-secrets-eso-a1.check.sh:65
- 4. damage=8 artem-cto-watch failure-path-exit-zero state/artem-cto-watch.check.sh:5
- 5. damage=8 artem-cto-watch failure-path-exit-zero state/artem-cto-watch.check.sh:7
- 6. damage=8 artem-watch failure-path-exit-zero state/artem-watch.check.sh:5
- 7. damage=8 artem-watch failure-path-exit-zero state/artem-watch.check.sh:7
- 8. damage=8 backlog-sentinel failure-path-exit-zero state/backlog-sentinel.check.sh:4
- 9. damage=8 captain-requests-sweep failure-path-exit-zero state/captain-requests-sweep.check.sh:17
-10. damage=8 churn-save-pause-offer-c1 failure-path-exit-zero state/churn-save-pause-offer-c1.check.sh:16
-11. damage=8 factory-autonomy-fable-a1 failure-path-exit-zero state/factory-autonomy-fable-a1.check.sh:104
-12. damage=8 factory-autonomy-fable-a1 failure-path-exit-zero state/factory-autonomy-fable-a1.check.sh:105
-13. damage=8 factory-autonomy-fable-a1 failure-path-exit-zero state/factory-autonomy-fable-a1.check.sh:65
-14. damage=8 jan-watch failure-path-exit-zero state/jan-watch.check.sh:6
-15. damage=8 jan-watch failure-path-exit-zero state/jan-watch.check.sh:8
-16. damage=8 nick-watch failure-path-exit-zero state/nick-watch.check.sh:5
-17. damage=8 nick-watch failure-path-exit-zero state/nick-watch.check.sh:7
-18. damage=8 paid-sla-age failure-path-exit-zero state/paid-sla-age.check.sh:5
-19. damage=8 plaque-email-pack-m3 failure-path-exit-zero state/plaque-email-pack-m3.check.sh:104
-20. damage=8 plaque-email-pack-m3 failure-path-exit-zero state/plaque-email-pack-m3.check.sh:105
-21. damage=8 plaque-email-pack-m3 failure-path-exit-zero state/plaque-email-pack-m3.check.sh:65
-22. damage=8 terms-1728 failure-path-exit-zero state/terms-1728.check.sh:4
-23. damage=6 pa-sweeper-live orphan-marker state/pa-sweeper-live.check.sh:16
-24. damage=6 train-lines orphan-marker state/train-lines.check.sh:5
+$ bin/fm-instrument-sweep.sh --state /home/aaron/Projects/firstmate/state | tail -3
+90. damage=6 pa-sweeper-live orphan-marker /home/aaron/Projects/firstmate/state/pa-sweeper-live.check.sh:16
+91. damage=6 train-lines orphan-marker /home/aaron/Projects/firstmate/state/train-lines.check.sh:5
 
-summary: checks=42 defect=14 unproven=28 proven=0 findings=24
+summary: checks=79 defect=36 unproven=43 proven=0 findings=91
 ```
+
+The ranking is dominated by one defect instance replicated across fleet checks, which is the finding that matters most: the shape is a forge or remote read whose failure exits 0.
+
+| Class | Findings | Where |
+| --- | --- | --- |
+| `failure-path-exit-zero` | 88 | 75 of them are the same three lines (65, 104, 105) copied into 25 PR-poll checks; the rest are the ssh watch family (5, 7), `jan-watch` (6, 8), `paid-sla-age` (5), `backlog-sentinel` (4), `terms-1728` (4), `decider` (35, 37) |
+| `vacuous-comparison` | 1 | `box-forkbomb-guard` (22): `[ -n "$procs" ]` over `wc -l` output, which is never empty |
+| `orphan-marker` | 2 | `pa-sweeper-live` (16), `train-lines` (5); both state that the writer lives in a project clone outside the scanned corpus |
 
 ## Highest-damage follow-up work
 
-The top of the ranking is the failure-path class at damage 8.
-Six remote or API watchers exit 0 when their measurement fails, so an unreachable monitor reads as healthy: `ai-dev-secrets-eso-a1`, `artem-cto-watch`, `artem-watch`, `backlog-sentinel`, `jan-watch`, and `nick-watch`.
-The same pattern recurs in `factory-autonomy-fable-a1` and `plaque-email-pack-m3` at lines 65 and 104-105, and in `paid-sla-age`, `terms-1728`, `captain-requests-sweep`, and `churn-save-pause-offer-c1` as error branches that exit 0.
-The two orphan markers at damage 6 are `pa-sweeper-live` and `train-lines`.
+The highest-damage class is `vacuous-comparison` at damage 9 (`box-forkbomb-guard`), because a guard that cannot fail is silent in exactly the case it exists for.
+At damage 8, the three-line forge template (`state=$(gh pr view ...) || exit 0`, `raw=$(glab mr view ...) || exit 0`, `state=$(printf ... | sed -n ...) || exit 0`) is one shared defect in 25 checks: a forge read that fails is reported as no merge.
+The ssh watch family (`artem-watch`, `artem-cto-watch`, `jan-watch`, `nick-watch`) turns an unreachable host into silence the same way, and `paid-sla-age`, `backlog-sentinel`, `terms-1728`, and `decider` do it to a Prometheus query, an ssh `cat`, a `gh pr checks` read, and a scanner invocation.
+The two `orphan-marker` findings at damage 6 are `pa-sweeper-live` and `train-lines`, whose marker is written outside the scanned writer corpus, so that finding is a question for their owner rather than a proven dead marker.
 Clearing these is follow-up work, not part of this task.
 
 ## The suite holds both directions
@@ -172,9 +159,10 @@ Clearing these is follow-up work, not part of this task.
 
 ```console
 $ bin/fm-test-run.sh tests/fm-instrument-sweep.test.sh | tail -3
-ok - a zero-guarded rate is not reported as a denominator defect
-ok - identical-output falls back to the output statement, not line 1
-FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=17954
+ok - a divisor bound to a nonzero literal is not a rate defect
+ok - only a stderr-only failure branch that exits 0 counts as silence
+FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=13976
 ```
 
 The suite also proves the safety and honesty properties the sweep would otherwise only claim: a registered corpus keeps its trust binding and its directory listing unchanged across a run, an undeclared probe directory is refused with exit 2 so a live check is never executed, probe evidence does not leak from one check to the next, every finding carries its exact source line, and a check with no distinguishing scenario is reported `UNPROVEN` with its reason rather than passed.
+Each of those assertions arms the corpus it writes: an unarmed corpus is only ever `UNPROVEN`, so a "no findings" assertion over it would hold no matter what the detectors do.
