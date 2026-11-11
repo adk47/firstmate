@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
 #
-# The daily GDPR hide-batch timer, pinned as WIRING.
+# The GDPR hide-batch timer, pinned as WIRING.
 #
 # WHY: the brief's step 3 is "daily hide batch PR generated from PASS rows", and until this timer existed
 # `gdpr-pipeline.py hide-batch --open-prs` was a manual command - so a PASS row waited on somebody remembering to
@@ -31,9 +31,12 @@ INSTALLER="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)/scripts/install
     | grep -q '^Environment=HOME=/root$'
 }
 
-@test "the timer is daily, persistent, and enabled" {
+@test "the timer runs every six hours at fixed times, persistent, and enabled" {
+  # The hide is owed within 24 h of receipt. One batch a day spends up to all of it before a person sees the PR.
   awk '/cat > \/etc\/systemd\/system\/gdpr-hide-batch.timer/,/^GDPRHIDETMR$/' "$INSTALLER" \
-    | grep -q '^OnCalendar='
+    | grep -qx 'OnCalendar=\*-\*-\* 00,06,12,18:20:00 UTC'
+  [ "$(awk '/cat > \/etc\/systemd\/system\/gdpr-hide-batch.timer/,/^GDPRHIDETMR$/' "$INSTALLER" \
+        | grep -c '^OnCalendar=')" -eq 1 ]
   awk '/cat > \/etc\/systemd\/system\/gdpr-hide-batch.timer/,/^GDPRHIDETMR$/' "$INSTALLER" \
     | grep -q '^Persistent=true$'
   grep -q 'systemctl enable "\$ht"' "$INSTALLER"
@@ -53,4 +56,11 @@ INSTALLER="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)/scripts/install
   # The CLI checks /etc/hydra/gdpr-pipeline.disabled for every writing run, and --open-prs counts as one.
   grep -q 'KILL' "$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)/scripts/gdpr-pipeline.py"
   grep -q 'getattr(a, "open_prs", False)' "$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)/scripts/gdpr-pipeline.py"
+}
+
+@test "a pending batch is never force-pushed and its branch is never deleted" {
+  # The batch is a review artefact: a superseded PR is closed with a comment and stays readable.
+  local hb
+  hb="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)/scripts/gdpr_pipeline/hide_batch.py"
+  ! grep -Eq -- '"--force"|"-f"|--force-with-lease|--delete-branch|"--delete"' "$hb"
 }

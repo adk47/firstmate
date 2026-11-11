@@ -68,6 +68,13 @@ class Page:
     gone: bool = False                      # the catalog AND the public page both answer 404 (deleted / merged)
     facts_unknown: str = ""                 # comma-joined SAFETY fields the catalog did not state (isClaimed, …):
                                             # absence is not "unclaimed and small", so no path may pass
+    # A track / album only (`entity != "profile"`). `item_read` is False until the catalog item was actually read:
+    # an item nobody read stays with a person exactly as before the item gate existed. `artists` are the PROFILE
+    # facts of the item's own artists (read from the catalog, never from the request), which is what the identity
+    # paths are about; `item_why` says why an item that was looked up could not be established.
+    item_read: bool = False
+    artists: tuple = ()
+    item_why: str = ""
 
 
 @dataclass
@@ -183,7 +190,7 @@ def decide_page(p: Page, r: Requester, cls: str) -> PageVerdict:
                        "removed outside the hide process (deleted or merged); a person confirms what happened "
                        "before any letter")
     if p.entity != "profile":
-        return v(JAN_REVIEW, f"a {p.entity} page: identity paths A-D are about profiles; Jan decides the scope")
+        return decide_item(p, r, cls)
     if p.facts_unknown:
         # Fail closed on the fields that decide whether C may pass and whether this is a big name for Jan. Reading a
         # missing field as False/0 turned "we do not know if it is claimed" into "unclaimed", and "unknown
@@ -229,6 +236,74 @@ def decide_page(p: Page, r: Requester, cls: str) -> PageVerdict:
         return v(ASK_IDENTITY, f"D would pass on the address host {sd}, but the sender is not verified: "
                                f"ask for a written authorisation from that address")
     return v(ASK_IDENTITY, "no path passed: the name does not match and there is no claim, account or domain")
+
+
+ITEM_VERDICTS = (JAN_REVIEW, JAN_BIGNAME, LEGAL_HIDE_FIRST, PASS_A, PASS_B, PASS_C, PASS_D)
+
+
+def decide_item(p: Page, r: Requester, cls: str) -> PageVerdict:
+    """A track or an album. The gate is the SAME identity gate, applied to the one artist the page belongs to.
+
+    Before this existed every non-profile page was `JAN_REVIEW` ("identity paths A-D are about profiles"), so a
+    request about a track had no route to a hide at all. The paths ARE about profiles, and that is kept: an item
+    passes only when the catalog says it has EXACTLY ONE artist and that artist's profile passes `decide_page` for
+    this requester and this class - the very same function, the same claim / account / name / domain evidence, the
+    same verified-sender rule, the same big-name exclusion. Nothing about the item is taken from the request.
+
+    What it can never do, by construction (`ITEM_VERDICTS`):
+      - produce an ASK. The approved ask copy is written about a profile ("open the page in the Muso app and claim
+        it"), and a new verdict here would send those words about a track. An item that does not pass stays with a
+        person, with the reason.
+      - pass on a fact that was not read. An unread item, an unreadable artist, a deleted artist profile, a
+        wrong-typed field: all `JAN_REVIEW`, exactly what the page was before. Stricter than a profile on purpose:
+        the row was already with a person, so "could not establish" must not move it to a pile nobody reads.
+      - hide a page that also belongs to somebody else. Two artists = a person decides the scope.
+      - hide a big page. An item of popularity >= BIG_POPULARITY goes to Jan on EVERY path, including a claim.
+
+    legal_threat keeps the 10-23 rule (hide first, identity after; the captain owns the reply) with the big-name
+    exclusion measured on the item AND on every artist; an artist whose facts cannot be read cannot be shown to be
+    small, so the item stays with a person. The routine batch still leaves these out (`--include-legal`)."""
+    def v(verdict: str, why: str) -> PageVerdict:
+        assert verdict in ITEM_VERDICTS, verdict
+        return PageVerdict(p.entity_id, verdict, why)
+
+    kind = p.entity
+    a_kind = f"an {kind}" if kind[:1] in "aeiou" else f"a {kind}"
+    if not p.item_read:
+        return v(JAN_REVIEW, p.item_why or
+                 f"{a_kind} page: identity paths A-D are about profiles; Jan decides the scope")
+    if p.facts_unknown:
+        return v(JAN_REVIEW, f"{a_kind} page whose catalog answer did not state {p.facts_unknown}: the artist and "
+                             f"the big-name exclusion cannot be established, so it stays with a person")
+    if not p.artists:
+        return v(JAN_REVIEW, f"{a_kind} page with no artist in the catalog: there is nobody to match the requester "
+                             f"against; a person decides the scope")
+    unread = [a for a in p.artists if not a.found or a.gone or a.facts_unknown]
+    if cls == "legal_threat":
+        if p.popularity >= BIG_POPULARITY:
+            return v(JAN_BIGNAME, f"legal threat on a big-name {kind} (popularity {p.popularity})")
+        big = [a for a in p.artists if a not in unread and big_name(a)]
+        if big:
+            return v(JAN_BIGNAME, f"legal threat on {a_kind} of a big-name artist ({big[0].entity_id[:8]}: popularity "
+                                  f"{big[0].popularity}, {big[0].credit_count} credits)")
+        if unread:
+            return v(JAN_REVIEW, f"legal threat on {a_kind} whose artist "
+                                 f"{', '.join(a.entity_id[:8] for a in unread)} cannot be read (deleted or unreadable "
+                                 f"profile): the big-name exclusion cannot be established, so a person decides")
+        return v(LEGAL_HIDE_FIRST, f"legal threat on {a_kind}: hide first, identity after (10-23 exception: the "
+                                   f"disputed item, as narrowly as the claim allows); the captain owns the reply")
+    if len(p.artists) != 1:
+        return v(JAN_REVIEW, f"{a_kind} with {len(p.artists)} artists: hiding it hides other people's page too, so "
+                             f"a person decides the scope")
+    artist = p.artists[0]
+    av = decide_page(artist, r, cls)
+    if av.verdict not in IDENTITY_PASS:
+        return v(JAN_REVIEW, f"{a_kind} whose one artist {artist.entity_id[:8]} does not pass the identity gate "
+                             f"({av.verdict}): a person decides the scope")
+    if p.popularity >= BIG_POPULARITY:
+        return v(JAN_BIGNAME, f"{av.verdict} would pass on the artist, but a big-name {kind} (popularity "
+                              f"{p.popularity}) goes to Jan")
+    return v(av.verdict, f"{kind} of one artist ({artist.entity_id}), who passes the same gate - {av.why}")
 
 
 # Row verdict: the most restrictive page wins, so a PASS page never carries an ASK page with it in the row

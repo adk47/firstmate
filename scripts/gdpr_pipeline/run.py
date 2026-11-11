@@ -571,7 +571,14 @@ class Run:
             names = sources.account_names([acc]).get(acc, ()) if acc is not None else ()
             prof_ids = [p["id"] for p in pages if p.get("entity", "profile") == "profile" and len(p["id"]) == 36]
             claims = sources.processed_claims(prof_ids) if prof_ids else {}
-            facts = sources.page_facts(pages, hidden, claims, half)
+            # The item gate (a track / album passes through its ONE artist's profile: identity.decide_item) reads
+            # the catalog only where a read can change the answer. A DMCA item can only pass on the requesting
+            # ACCOUNT's processed claim, so without an account there is nothing to look up and the page stays with a
+            # person at no cost - register #171 alone carries 36 item pages.
+            items = ((cls in ("privacy_erasure", "legal_threat") or (cls == "dmca_takedown" and acc is not None))
+                     and any((p.get("entity") or "profile") in sources.ITEM_ENTITIES for p in pages))
+            facts = (sources.page_facts(pages, hidden, claims, half, items=True) if items
+                     else sources.page_facts(pages, hidden, claims, half))
             req = identity.Requester(name=name, email=email, account_id=acc, account_names=names, representative=rep,
                                      verified=bool(trusted))
             dec = identity.decide(facts, req, cls)

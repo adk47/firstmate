@@ -133,6 +133,102 @@ class Identity(unittest.TestCase):
     def test_no_link_is_ask_link(self):
         self.assertEqual(identity.decide([], Requester(name="A B"), "privacy_erasure").verdict, "ASK_LINK")
 
+    # ---- a track / album: the SAME gate, through the page's one artist (identity.decide_item)
+    TRACK = "99999999-aaaa-bbbb-cccc-dddddddddddd"
+
+    def item(self, *artists, **kw):
+        base = dict(entity_id=self.TRACK, entity="track", name="A Song", popularity=10, item_read=True,
+                    artists=tuple(artists))
+        base.update(kw)
+        return Page(**base)
+
+    def test_an_item_nobody_read_stays_with_jan_exactly_as_before(self):
+        d = identity.decide([Page(self.TRACK, "track")], Requester(name="Arpad Laczkovszki", verified=True),
+                            "privacy_erasure")
+        self.assertEqual(d.verdict, "JAN_REVIEW")
+        self.assertEqual(d.pages[0].why, "a track page: identity paths A-D are about profiles; Jan decides the scope")
+
+    def test_an_item_passes_only_through_its_one_artist_and_on_the_same_path(self):
+        ok = Requester(name="Arpad Laczkovszki", email="arpad.laczkovszki@pm.me", verified=True)
+        d = identity.decide([self.item(page())], ok, "privacy_erasure")
+        self.assertEqual((d.verdict, d.basis), ("PASS_C", "C"))
+        self.assertIn(ARPAD, d.pages[0].why)
+        # the claim path, and it is the artist's claim that counts
+        claimed = page(is_claimed=True, claim_user_ids=frozenset({42}))
+        self.assertEqual(identity.decide([self.item(claimed)], Requester(account_id=42), "privacy_erasure").verdict,
+                         "PASS_A")
+        self.assertEqual(identity.decide([self.item(claimed)], Requester(account_id=7, name="Arpad Laczkovszki"),
+                                         "privacy_erasure").verdict, "JAN_REVIEW")
+
+    def test_an_item_never_asks_and_never_passes_where_the_profile_would_not(self):
+        """The approved ask copy is about a profile ("open the page in the Muso app and claim it"). An item that does
+        not pass stays with a person; it never becomes an ASK that would send those words about a track."""
+        unverified = Requester(name="Arpad Laczkovszki", email="arpad.laczkovszki@pm.me")
+        self.assertEqual(identity.decide([page()], unverified, "privacy_erasure").verdict, "ASK_IDENTITY")
+        self.assertEqual(identity.decide([self.item(page())], unverified, "privacy_erasure").verdict, "JAN_REVIEW")
+        rep = Requester(name="Arpad Laczkovszki", representative=True, verified=True)
+        self.assertEqual(identity.decide([self.item(page())], rep, "privacy_erasure").verdict, "JAN_REVIEW")
+        self.assertEqual(identity.decide([self.item(page())], Requester(name="Astra", verified=True),
+                                         "privacy_erasure").verdict, "JAN_REVIEW")
+        # exhaustive over the shapes that decide a page: an item is never more permissive than its artist's profile
+        reqs = [Requester(), Requester(name="Arpad Laczkovszki"), Requester(name="Arpad Laczkovszki", verified=True),
+                Requester(account_id=42), Requester(account_id=9, account_names=("Arpad Laczkovszki",)),
+                Requester(name="Arpad Laczkovszki", representative=True, verified=True),
+                Requester(email="legal@biglabel.com", verified=True)]
+        arts = [page(), page(popularity=61), page(credit_count=50), page(is_claimed=True, claim_user_ids=frozenset({42})),
+                page(found=False), page(gone=True), page(facts_unknown="isClaimed"), page(hidden=True),
+                page(name="Big Label Artist", website="https://www.biglabel.com/a")]
+        for cls in ("privacy_erasure", "dmca_takedown", "legal_threat"):
+            for r in reqs:
+                for a in arts:
+                    for pop in (10, 60):
+                        got = identity.decide_page(self.item(a, popularity=pop), r, cls).verdict
+                        self.assertIn(got, identity.ITEM_VERDICTS, (cls, r, a))
+                        self.assertFalse(got.startswith("ASK_"))
+                        if got in identity.IDENTITY_PASS:
+                            self.assertEqual(got, identity.decide_page(a, r, cls).verdict, (cls, r, a))
+                            self.assertLess(pop, identity.BIG_POPULARITY)
+
+    def test_an_item_with_two_artists_or_none_is_a_persons_call(self):
+        ok = Requester(name="Arpad Laczkovszki", verified=True)
+        two = self.item(page(), page(entity_id=OTHER, name="Someone Else"))
+        d = identity.decide([two], ok, "privacy_erasure")
+        self.assertEqual(d.verdict, "JAN_REVIEW")
+        self.assertIn("2 artists", d.pages[0].why)
+        self.assertEqual(identity.decide([self.item()], ok, "privacy_erasure").verdict, "JAN_REVIEW")
+
+    def test_a_big_item_goes_to_jan_on_every_path_including_a_claim(self):
+        claimed = page(is_claimed=True, claim_user_ids=frozenset({42}))
+        self.assertEqual(identity.decide([self.item(claimed, popularity=60)], Requester(account_id=42),
+                                         "privacy_erasure").verdict, "JAN_BIGNAME")
+        self.assertEqual(identity.decide([self.item(claimed, popularity=59)], Requester(account_id=42),
+                                         "privacy_erasure").verdict, "PASS_A")
+
+    def test_an_item_whose_facts_were_not_established_never_passes(self):
+        ok = Requester(name="Arpad Laczkovszki", verified=True)
+        for bad in (self.item(page(gone=True)), self.item(page(found=False)),
+                    self.item(page(facts_unknown="popularity")), self.item(page(), facts_unknown="artists"),
+                    self.item(page(), item_read=False)):
+            self.assertEqual(identity.decide([bad], ok, "privacy_erasure").verdict, "JAN_REVIEW", bad)
+
+    def test_legal_threat_on_an_item_is_hide_first_with_the_big_name_exclusion_measured(self):
+        r = Requester(name="A Lawyer")
+        self.assertEqual(identity.decide([self.item(page(), page(entity_id=OTHER))], r, "legal_threat").verdict,
+                         "LEGAL_HIDE_FIRST")
+        self.assertEqual(identity.decide([self.item(page(), popularity=60)], r, "legal_threat").verdict, "JAN_BIGNAME")
+        self.assertEqual(identity.decide([self.item(page(credit_count=50))], r, "legal_threat").verdict, "JAN_BIGNAME")
+        # an artist we cannot read cannot be shown to be small: a person decides, the page is not hidden on a guess
+        self.assertEqual(identity.decide([self.item(page(gone=True))], r, "legal_threat").verdict, "JAN_REVIEW")
+        self.assertEqual(identity.decide([self.item(page(facts_unknown="creditCount"))], r, "legal_threat").verdict,
+                         "JAN_REVIEW")
+
+    def test_dmca_on_an_item_is_claim_first_like_a_profile(self):
+        claimed = page(is_claimed=True, claim_user_ids=frozenset({42}))
+        self.assertEqual(identity.decide([self.item(claimed)], Requester(account_id=42), "dmca_takedown").verdict,
+                         "PASS_A")
+        self.assertEqual(identity.decide([self.item(claimed)], Requester(account_id=7), "dmca_takedown").verdict,
+                         "JAN_REVIEW")
+
     def test_legal_threat_hides_first_except_big_names(self):
         self.assertEqual(identity.decide([page()], Requester(), "legal_threat").verdict, "LEGAL_HIDE_FIRST")
         self.assertEqual(identity.decide([page(popularity=80)], Requester(), "legal_threat").verdict, "JAN_BIGNAME")
@@ -242,6 +338,178 @@ class Identity(unittest.TestCase):
 
     def test_not_erasure(self):
         self.assertEqual(identity.decide([page()], Requester(), "not_erasure").verdict, "NOT_ERASURE")
+
+
+class ItemFacts(unittest.TestCase):
+    """The reads behind the item gate (`sources.item_page`). The gate is only as strong as the facts it is given, so
+    these pin WHERE each fact comes from: the catalog item, its artists' catalog profiles, the claiming table. The
+    request contributes the id and nothing else."""
+    T = "99999999-aaaa-bbbb-cccc-dddddddddddd"
+    PROFILE = {"name": "Laczkovszki Arpad", "isClaimed": True, "popularity": 3, "creditCount": 4, "links": {}}
+
+    def read(self, item, profiles=None, claims=None, pages=None, hidden=(), half=None, calls=None):
+        profiles = {ARPAD: self.PROFILE} if profiles is None else profiles
+        calls = calls if calls is not None else []
+
+        def item_doc(entity, pid):
+            calls.append(("item", entity, pid))
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        def profile_doc(pid):
+            calls.append(("profile", pid))
+            doc = profiles.get(pid)
+            if isinstance(doc, Exception):
+                raise doc
+            return doc
+
+        def processed_claims(ids):
+            calls.append(("claims", tuple(ids)))
+            return claims or {}
+
+        with mock.patch.object(sources, "item_doc", item_doc), \
+                mock.patch.object(sources, "profile_doc", profile_doc), \
+                mock.patch.object(sources, "processed_claims", processed_claims), \
+                mock.patch.object(sources, "public_status", lambda entity, pid: 404):
+            return sources.page_facts(pages or [{"entity": "track", "id": self.T}], set(hidden), {}, half, items=True)
+
+    def doc(self, *artist_ids, **kw):
+        base = {"id": self.T, "title": "A Song", "popularity": 12, "artists": [{"id": i, "name": "x"} for i in artist_ids]}
+        base.update(kw)
+        return base
+
+    def test_the_artist_is_read_from_the_catalog_as_a_profile_with_its_claims(self):
+        calls = []
+        [p] = self.read(self.doc(ARPAD), claims={ARPAD: {7}}, calls=calls)
+        self.assertTrue(p.item_read)
+        self.assertEqual((p.entity, p.entity_id, p.popularity), ("track", self.T, 12.0))
+        [a] = p.artists
+        self.assertEqual((a.entity, a.entity_id, a.name, a.is_claimed, a.claim_user_ids, a.popularity, a.credit_count),
+                         ("profile", ARPAD, "Laczkovszki Arpad", True, frozenset({7}), 3.0, 4))
+        self.assertEqual(calls, [("item", "track", self.T), ("claims", (ARPAD,)), ("profile", ARPAD)])
+        # and end to end: the account that holds the processed claim on the artist passes on path A, nobody else does
+        self.assertEqual(identity.decide_page(p, Requester(name="x", account_id=7), "privacy_erasure").verdict, "PASS_A")
+        self.assertEqual(identity.decide_page(p, Requester(name="x", account_id=8), "privacy_erasure").verdict,
+                         "JAN_REVIEW")
+
+    def test_without_items_a_track_is_not_read_at_all(self):
+        """The default. Every caller that does not ask for the item gate gets what a track was before it existed."""
+        calls = []
+        with mock.patch.object(sources, "item_doc", lambda *a: calls.append(a)), \
+                mock.patch.object(sources, "profile_doc", lambda *a: calls.append(a)):
+            [p] = sources.page_facts([{"entity": "track", "id": self.T}], set(), {})
+        self.assertEqual(calls, [])
+        self.assertFalse(p.item_read)
+        self.assertEqual(identity.decide_page(p, Requester(name="x", account_id=7), "privacy_erasure").verdict,
+                         "JAN_REVIEW")
+
+    def test_a_hidden_or_half_hidden_item_keeps_its_state_and_costs_no_read(self):
+        calls = []
+        [p] = self.read(self.doc(ARPAD), hidden={self.T}, calls=calls)
+        self.assertTrue(p.hidden)
+        [q] = self.read(self.doc(ARPAD), half={self.T: "hd"}, calls=calls)
+        self.assertEqual(q.half_hidden, "hd")
+        self.assertEqual(calls, [])
+        self.assertEqual(identity.decide_page(p, Requester(), "privacy_erasure").verdict, "ALREADY_HIDDEN")
+        self.assertEqual(identity.decide_page(q, Requester(), "privacy_erasure").verdict, "HIDDEN_PENDING")
+
+    def test_an_artist_on_a_hide_list_is_still_the_person_to_match(self):
+        """The artist's own hide state must not leak into the item: a hidden artist would read ALREADY_HIDDEN, which
+        is not a pass, and the artist's own track could then never be hidden."""
+        [p] = self.read(self.doc(ARPAD), claims={ARPAD: {7}}, hidden={ARPAD})
+        self.assertFalse(p.artists[0].hidden)
+        self.assertEqual(identity.decide_page(p, Requester(name="x", account_id=7), "privacy_erasure").verdict, "PASS_A")
+
+    def test_a_shape_the_gate_cannot_use_never_passes(self):
+        claimant = Requester(name="Arpad Laczkovszki", account_id=7, verified=True)
+        shapes = {
+            "no such item": None,
+            "artists missing": {"popularity": 1},
+            "artists not a list": self.doc(ARPAD, artists={"id": ARPAD}),
+            "an artist without an id": self.doc(ARPAD, artists=[{"name": "x"}]),
+            "an artist id that is not a full id": self.doc(ARPAD, artists=[{"id": ARPAD[:8]}]),
+            "a non-dict artist": self.doc(ARPAD, artists=[ARPAD]),
+            "popularity missing": {"artists": [{"id": ARPAD}]},
+            "popularity a string": self.doc(ARPAD, popularity="12"),
+            "popularity a bool": self.doc(ARPAD, popularity=True),
+            "no artist": self.doc(),
+            "two artists": self.doc(ARPAD, OTHER),
+            "a compilation": self.doc(*[f"{n:08d}-2222-3333-4444-555555555555" for n in range(9)]),
+        }
+        for name, item in shapes.items():
+            with self.subTest(name):
+                [p] = self.read(item, claims={ARPAD: {7}})
+                self.assertEqual(identity.decide_page(p, claimant, "privacy_erasure").verdict, "JAN_REVIEW")
+                self.assertNotIn(identity.decide_page(p, claimant, "legal_threat").verdict,
+                                 identity.IDENTITY_PASS if name == "two artists" else identity.HIDE_ELIGIBLE)
+
+    def test_a_compilation_is_not_read_artist_by_artist(self):
+        calls = []
+        self.read(self.doc(*[f"{n:08d}-2222-3333-4444-555555555555" for n in range(9)]), calls=calls)
+        self.assertEqual([c[0] for c in calls], ["item"])
+
+    def test_a_part_id_is_not_looked_up(self):
+        calls = []
+        [p] = self.read(self.doc(ARPAD), pages=[{"entity": "album", "id": self.T[:8]}], calls=calls)
+        self.assertEqual(calls, [])
+        self.assertFalse(p.item_read)
+        self.assertIn("only part of its id", p.item_why)
+
+    def test_a_read_that_did_not_complete_is_unknown_never_an_answer(self):
+        with self.assertRaises(sources.Unknown):
+            self.read(sources.Unknown("admin track: 503"))
+        with self.assertRaises(sources.Unknown):
+            self.read(self.doc(ARPAD), profiles={ARPAD: sources.Unknown("admin profile: 503")})
+
+    def test_an_artist_whose_profile_is_gone_or_untyped_does_not_pass(self):
+        claimant = Requester(name="Arpad Laczkovszki", account_id=7, verified=True)
+        for name, prof in (("gone", None), ("untyped", dict(self.PROFILE, isClaimed="yes"))):
+            with self.subTest(name):
+                [p] = self.read(self.doc(ARPAD), profiles={ARPAD: prof}, claims={ARPAD: {7}})
+                self.assertEqual(identity.decide_page(p, claimant, "privacy_erasure").verdict, "JAN_REVIEW")
+                self.assertEqual(identity.decide_page(p, claimant, "legal_threat").verdict, "JAN_REVIEW")
+
+    def test_item_doc_is_a_get_on_a_track_or_an_album_only(self):
+        from credit_review import admin
+        seen = []
+
+        class Client:
+            def get(self, path, params=None):
+                seen.append(path)
+                return {"id": "x"}
+
+        with mock.patch.object(admin, "AdminClient", Client):
+            sources.item_doc("track", self.T)
+            sources.item_doc("album", self.T)
+            with self.assertRaises(sources.Unknown):
+                sources.item_doc("profile", self.T)
+        self.assertEqual(seen, [f"/admin/track/{self.T}", f"/admin/album/{self.T}"])
+
+    def test_decide_row_asks_for_the_item_read_only_where_it_can_change_the_answer(self):
+        asked = []
+
+        def page_facts(pages, hidden, claims, half=None, items=False):
+            asked.append(items)
+            return [Page(p["id"], p.get("entity") or "profile") for p in pages]
+
+        def decide(cls, pages, account):
+            s = Store(":memory:")
+            rid, _ = s.upsert({"keys": [f"register:{len(asked) + 900}"], "channel": "register", "class": cls,
+                               "received_at": "2026-10-01T00:00:00Z", "pages": pages})
+            with mock.patch("gdpr_pipeline.sources.resolve_account", lambda *a, **k: (account, "")), \
+                    mock.patch("gdpr_pipeline.sources.page_facts", page_facts), \
+                    mock.patch("gdpr_pipeline.sources.account_names", lambda ids: {}), \
+                    mock.patch("gdpr_pipeline.sources.processed_claims", lambda ids: {}):
+                Run(s, log=lambda *_: None).decide_row(s.get(rid), set(), {}, lambda c: {})
+            return asked[-1]
+
+        track, prof = [{"entity": "track", "id": self.T}], [{"entity": "profile", "id": ARPAD}]
+        self.assertTrue(decide("privacy_erasure", track, None))
+        self.assertTrue(decide("legal_threat", track, None))
+        self.assertTrue(decide("dmca_takedown", track, 7))
+        self.assertFalse(decide("dmca_takedown", track, None), "no account: a DMCA item can only pass on a claim")
+        self.assertFalse(decide("privacy_erasure", prof, 7), "no item on the row: nothing to read")
 
 
 class RepresentativeBeatsClaim(unittest.TestCase):
@@ -626,6 +894,49 @@ class HideBatch(unittest.TestCase):
         # a page held ONLY by a non-legal row is unaffected by the rule
         rows[0]["class"] = "privacy_erasure"
         self.assertEqual([p["id"] for p in hide_batch.plan(rows, set(), set(), {})], [ARPAD])
+
+    TRACK = "99999999-aaaa-bbbb-cccc-dddddddddddd"
+    TEST_ITEMS = TEST.replace("\n\ndef test_x", "ERASURE_ITEMS: dict[str, str] = {\n}\n\n\ndef test_x")
+
+    def test_plan_takes_a_track_the_identity_gate_passed_and_says_what_it_is(self):
+        rows = [{"id": 1, "status": "open", "register_no": 146, "due_at": "2026-11-20T00:00:00Z",
+                 "pages": [{"entity": "track", "id": self.TRACK}, {"entity": "album", "id": OTHER}],
+                 "verdict_detail": [{"id": self.TRACK, "verdict": "PASS_A"}, {"id": OTHER, "verdict": "JAN_REVIEW"}]}]
+        plan = hide_batch.plan(rows, set(), set(), {})
+        self.assertEqual([(b["id"], b["entity"], b["need"]) for b in plan], [(self.TRACK, "track", ["hdevops", "pdp"])])
+
+    def test_a_track_is_written_with_its_own_entity_and_its_own_test_set(self):
+        batch = [dict(self.batch[0]), {"id": self.TRACK, "entity": "track", "register_no": 146, "basis": "PASS_A",
+                                       "due_at": "2026-11-20T00:00:00Z", "need": ["hdevops", "pdp"], "request_id": 2}]
+        lt, tt, added = hide_batch.edit_pdp(LEGAL, self.TEST_ITEMS, batch, "2026-11-11")
+        self.assertEqual(added, [ARPAD, self.TRACK])
+        self.assertIn(f'    "{ARPAD}": ("profile", "gdpr-erasure-register-39"),\n', lt)
+        self.assertIn(f'    "{self.TRACK}": ("track", "gdpr-erasure-register-146"),\n}}', lt)
+        # the profile set gains ONLY the profile; the track goes to the item set with its entity
+        prof = tt[tt.index("ERASURE_PROFILES"):tt.index("ERASURE_ITEMS")]
+        self.assertIn(ARPAD, prof)
+        self.assertNotIn(self.TRACK, prof)
+        self.assertIn(f'    # register #146 (gdpr-pipeline)\n    "{self.TRACK}": "track",\n}}', tt)
+        # a formatter's one-line empty dict is the same anchor
+        one_line = self.TEST_ITEMS.replace("= {\n}\n\n\ndef", "= {}\n\n\ndef")
+        self.assertIn("= {}", one_line)
+        self.assertTrue(hide_batch.has_items_anchor(one_line))
+        _, tt2, _ = hide_batch.edit_pdp(LEGAL, one_line, batch, "2026-11-11")
+        self.assertIn(f'ERASURE_ITEMS: dict[str, str] = {{\n    # register #146 (gdpr-pipeline)\n    "{self.TRACK}": "track",\n}}', tt2)
+        # idempotent
+        self.assertEqual(hide_batch.edit_pdp(lt, tt, batch, "2026-11-11"), (lt, tt, []))
+
+    def test_without_the_item_set_the_test_is_never_rewritten(self):
+        """The PDP test's strict equality is extended, never loosened. With no ERASURE_ITEMS set there is nowhere
+        honest to put a track, so the editor refuses instead of filing it under ERASURE_PROFILES (whose own test
+        asserts every entry is a profile)."""
+        batch = [{"id": self.TRACK, "entity": "track", "register_no": 146, "basis": "PASS_A",
+                  "due_at": "2026-11-20T00:00:00Z", "need": ["pdp"], "request_id": 2}]
+        self.assertFalse(hide_batch.has_items_anchor(TEST))
+        with self.assertRaises(hide_batch.ItemAnchorMissing):
+            hide_batch.edit_pdp(LEGAL, TEST, batch, "2026-11-11")
+        with self.assertRaises(hide_batch.ShapeError):
+            hide_batch.add_to_legal_hidden(LEGAL, [(self.TRACK, "playlist", "gdpr-erasure-register-1")], [])
 
     def test_half_opened_batch_is_retried_for_the_missing_half_only(self):
         rows = [{"id": 1, "status": "open", "register_no": 40, "due_at": "2026-12-01T00:00:00Z", "pages": [],
@@ -1211,30 +1522,212 @@ class BacklogAndDiff(unittest.TestCase):
         self.assertEqual(hide_batch.in_flight_ids([ARPAD], runner=no_base)["hdevops"], set(),
                          "without a base sha the PR cannot prove it added anything")
 
-    def test_a_new_batch_defers_while_the_previous_pair_is_unmerged(self):
-        """A daily batch whose PR nobody merged must NOT open a second pair: both PRs of a batch insert at the same
-        point in the same list file, so the second pair is a guaranteed conflict against ids nobody reviewed yet."""
-        from gdpr_pipeline import hide_batch
-        batch = [{"id": ARPAD, "register_no": 39, "basis": "PASS_C", "due_at": "2026-11-01", "need": ["hdevops", "pdp"]}]
-        calls = []
+    # ---- one live pipeline PR per repository, always carrying the whole set (hide_batch.open_prs)
+    HD, PD = "Muso-AI/H-DevOps", "Muso-AI/platform-data-processing"
+    TRACK = "99999999-aaaa-bbbb-cccc-dddddddddddd"
 
-        def runner(argv):
+    def _world(self, own=None, main_test=None, mergeable=None):
+        """A fake `gh`/`git`: `own` = {repo: [(number, ids the PR adds)]} on the pipeline's branch prefix;
+        `mergeable` = {number: what GitHub says} (MERGEABLE when not named)."""
+        from gdpr_pipeline import hide_batch
+        own = own or {}
+        main = {self.HD: YAML, self.PD: LEGAL}
+        test_text = main_test if main_test is not None else TEST
+        calls, closed, created = [], [], []
+
+        def at(repo, sha):
+            if sha in ("main", "base"):
+                return main[repo]
+            ids = dict(own.get(repo, []))[int(sha)]
+            if repo == self.HD:
+                return hide_batch.add_to_hidden_yaml(YAML, ids, [])[0]
+            return hide_batch.add_to_legal_hidden(LEGAL, [(i, "r") for i in ids], [])[0]
+
+        def runner(argv, cwd=None):
             calls.append(argv)
-            if argv[:2] == ["gh", "pr"]:
+            if argv[:3] == ["gh", "pr", "list"]:
                 repo = argv[argv.index("-R") + 1]
-                prior = {"Muso-AI/H-DevOps": [{"number": 4624, "url": "https://github.com/Muso-AI/H-DevOps/pull/4624",
-                                               "headRefName": "gdpr-pipeline/hide-20261102-2200"}],
-                         "Muso-AI/platform-data-processing": [{"number": 2575, "url": "https://x/2575",
-                                                               "headRefName": "gdpr-pipeline/hide-20261102-2200"}]}[repo]
-                return json.dumps(prior)
-            raise AssertionError(f"nothing should be cloned or pushed while a batch is open: {argv[:3]}")
+                return json.dumps([{"number": n, "url": f"https://github.com/{repo}/pull/{n}",
+                                    "headRefName": f"gdpr-pipeline/hide-{n}", "headRefOid": str(n),
+                                    "baseRefOid": "base", "mergeable": (mergeable or {}).get(n, "MERGEABLE")}
+                                   for n, _ in own.get(repo, [])])
+            if argv[:2] == ["gh", "api"]:
+                repo = argv[-1].split("repos/")[1].split("/contents/")[0]
+                path, sha = argv[-1].split("/contents/")[1].split("?ref=")
+                return test_text if path == hide_batch.PDP_TEST else at(repo, sha)
+            if argv[:3] == ["gh", "repo", "clone"]:
+                d = pathlib.Path(argv[4])
+                files = ({f: YAML for f in hide_batch.HDEVOPS_FILES} if argv[3] == self.HD
+                         else {hide_batch.PDP_LIST: LEGAL, hide_batch.PDP_TEST: test_text})
+                for f, t in files.items():
+                    (d / f).parent.mkdir(parents=True, exist_ok=True)
+                    (d / f).write_text(t)
+                return ""
+            if argv[:3] == ["gh", "pr", "create"]:
+                repo = self.HD if "hd" in pathlib.Path(cwd).name else self.PD
+                created.append((repo, argv[argv.index("--body") + 1]))
+                return f"https://github.com/{repo}/pull/9000"
+            if argv[:3] == ["gh", "pr", "close"]:
+                closed.append((argv[argv.index("-R") + 1], int(argv[3]), argv[argv.index("--comment") + 1]))
+                return ""
+            if argv[0] == "git":
+                return "DIFF" if argv[1] == "diff" else ""
+            raise AssertionError(f"unexpected command: {argv[:4]}")
+        return runner, calls, closed, created
+
+    def _b(self, pid=ARPAD, reg=39, entity="profile", need=("hdevops", "pdp")):
+        return {"id": pid, "entity": entity, "register_no": reg, "basis": "PASS_C", "due_at": "2026-11-01",
+                "need": list(need), "request_id": reg}
+
+    def test_an_unmerged_batch_that_already_carries_the_set_is_left_alone(self):
+        """A review in progress stays a review of the same ids: no clone, no push, no new PR, nothing closed."""
+        from gdpr_pipeline import hide_batch
+        runner, calls, closed, created = self._world({self.HD: [(4624, [ARPAD])], self.PD: [(2575, [ARPAD])]})
+        res = hide_batch.open_prs([self._b()], dry_run=False, runner=runner)
+        self.assertEqual(res["kept"], {"hdevops": f"https://github.com/{self.HD}/pull/4624",
+                                       "pdp": f"https://github.com/{self.PD}/pull/2575"})
+        self.assertEqual((res["opened"], res["superseded"], closed, created), ({}, {}, [], []))
+        self.assertFalse([c for c in calls if c[:3] == ["gh", "repo", "clone"] or c[0] == "git"])
+
+    def test_a_new_id_never_waits_behind_an_unmerged_batch(self):
+        """What deferral did (measured 11-10/11-11): the new id queued behind a PR nobody had merged, and the two
+        repositories fell out of step. Now the whole set is re-issued as ONE new PR per repository and the old one is
+        closed naming it - after the new one exists, and never by force-pushing under a reviewer."""
+        from gdpr_pipeline import hide_batch
+        runner, calls, closed, created = self._world({self.HD: [(4624, [ARPAD])], self.PD: [(2575, [ARPAD])]})
+        res = hide_batch.open_prs([self._b(), self._b(OTHER, 40)], dry_run=False, runner=runner)
+        self.assertEqual(set(res["opened"]), {"hdevops", "pdp"})
+        self.assertEqual(res["superseded"], {"hdevops": [f"https://github.com/{self.HD}/pull/4624"],
+                                             "pdp": [f"https://github.com/{self.PD}/pull/2575"]})
+        self.assertEqual([(r, n) for r, n, _ in closed], [(self.HD, 4624), (self.PD, 2575)])
+        self.assertIn(f"https://github.com/{self.HD}/pull/9000", closed[0][2])
+        for _, body in created:                     # each new PR carries the WHOLE set, old id included
+            self.assertIn(ARPAD, body)
+            self.assertIn(OTHER, body)
+        order = [c[:3] for c in calls if c[:3] in (["gh", "pr", "create"], ["gh", "pr", "close"])]
+        self.assertEqual(order, [["gh", "pr", "create"]] * 2 + [["gh", "pr", "close"]] * 2)
+        self.assertFalse([c for c in calls if c[0] == "git" and "--force" in " ".join(c)])
+
+    def test_only_the_repository_whose_set_changed_is_reissued(self):
+        from gdpr_pipeline import hide_batch
+        runner, _, closed, created = self._world({self.HD: [(4624, [ARPAD])], self.PD: [(2575, [ARPAD])]})
+        res = hide_batch.open_prs([self._b(), self._b(OTHER, 40, need=("pdp",))], dry_run=False, runner=runner)
+        self.assertEqual(list(res["kept"]), ["hdevops"])
+        self.assertEqual(list(res["opened"]), ["pdp"])
+        self.assertEqual([(r, n) for r, n, _ in closed], [(self.PD, 2575)])
+        self.assertIn(f"Twin: https://github.com/{self.HD}/pull/4624", created[0][1])
+
+    def test_a_batch_pr_that_conflicts_with_main_is_reissued_not_left_unmergeable(self):
+        """The hide list is ONE line, so any other merge to it leaves the open batch PR unmergeable. With an unchanged
+        set the PR used to look fine ("already carries exactly this set") and would have waited forever."""
+        from gdpr_pipeline import hide_batch
+        own = {self.HD: [(4624, [ARPAD])], self.PD: [(2575, [ARPAD])]}
+        runner, calls, closed, created = self._world(own, mergeable={4624: "CONFLICTING"})
+        res = hide_batch.open_prs([self._b()], dry_run=False, runner=runner)
+        self.assertEqual(res["kept"], {"pdp": f"https://github.com/{self.PD}/pull/2575"})
+        self.assertEqual(list(res["opened"]), ["hdevops"])
+        self.assertEqual([(r, n) for r, n, _ in closed], [(self.HD, 4624)])
+        self.assertEqual(closed[0][2], hide_batch.CONFLICTED.format(url=res["opened"]["hdevops"]))
+        self.assertFalse([c for c in calls if "--force" in c or "-f" in c])
+        # GitHub still computing is not a conflict: the PR under review is left alone
+        runner, _, closed, created = self._world(own, mergeable={4624: "UNKNOWN"})
+        res = hide_batch.open_prs([self._b()], dry_run=False, runner=runner)
+        self.assertEqual((sorted(res["kept"]), closed, created), (["hdevops", "pdp"], [], []))
+
+    def test_a_dry_run_opens_and_closes_nothing(self):
+        from gdpr_pipeline import hide_batch
+        runner, calls, closed, created = self._world({self.HD: [(4624, [ARPAD])]})
+        res = hide_batch.open_prs([self._b(), self._b(OTHER, 40)], dry_run=True, runner=runner)
+        self.assertEqual((closed, created, res["opened"], res["superseded"]), ([], [], {}, {}))
+        self.assertEqual((res["hdevops"], res["pdp"]), ("DIFF", "DIFF"))
+        self.assertFalse([c for c in calls if c[:2] == ["git", "push"]])
+
+    def test_a_batch_pr_nothing_still_needs_is_closed_with_the_reason(self):
+        from gdpr_pipeline import hide_batch
+        runner, calls, closed, _ = self._world({self.HD: [(4624, [ARPAD])]})
+        res = hide_batch.open_prs([], dry_run=False, runner=runner)
+        self.assertEqual([(r, n) for r, n, _ in closed], [(self.HD, 4624)])
+        self.assertEqual(closed[0][2], hide_batch.NOTHING_LEFT)
+        self.assertEqual(res["opened"], {})
+        self.assertFalse([c for c in calls if c[:3] == ["gh", "repo", "clone"]])
+
+    def test_a_track_is_prepared_in_neither_repository_until_the_test_has_its_set(self):
+        """Never half a hide on purpose: without ERASURE_ITEMS in the PDP test the track is dropped from BOTH PRs and
+        named, and the profile in the same batch still goes."""
+        from gdpr_pipeline import hide_batch
+        runner, _, _, created = self._world()
+        res = hide_batch.open_prs([self._b(), self._b(self.TRACK, 146, "track")], dry_run=False, runner=runner)
+        self.assertEqual(res["blocked_items"], [self.TRACK])
+        self.assertEqual(set(res["opened"]), {"hdevops", "pdp"})
+        for _, body in created:
+            self.assertIn(ARPAD, body)
+            self.assertNotIn(self.TRACK, body)
+        # with the set in the test, the same batch carries the track in both, as a track
+        items_test = TEST.replace("\n\ndef test_x", "ERASURE_ITEMS = {\n}\n\n\ndef test_x")
+        runner, _, _, created = self._world(main_test=items_test)
+        res = hide_batch.open_prs([self._b(), self._b(self.TRACK, 146, "track")], dry_run=False, runner=runner)
+        self.assertEqual(res["blocked_items"], [])
+        for _, body in created:
+            self.assertIn(f"| #146 | `{self.TRACK}` | track |", body)
+
+    def test_the_pipelines_own_pr_is_not_somebody_elses_in_flight_id(self):
+        """`in_flight_ids` answers "does ANOTHER open PR already add this id". The pipeline's own batch PR must not
+        count, or its ids leave the plan and the next run cannot re-issue the whole set."""
+        from gdpr_pipeline import hide_batch
+        runner, _, _, _ = self._world({self.HD: [(4624, [ARPAD])], self.PD: [(2575, [ARPAD])]})
+        self.assertEqual(hide_batch.in_flight_ids([ARPAD], runner=runner), {"hdevops": set(), "pdp": set()})
+
+    def test_a_routine_run_keeps_the_legal_ids_the_captains_run_put_in_the_open_pr(self):
+        """`--include-legal` is the captain's GO, given on ONE run. Each pipeline PR replaces the last, so the routine
+        run that follows would open a PR without those ids and close his as superseded - withdrawing a hide he
+        ordered. The id stays while an open pipeline PR still adds it and the register still wants it."""
+        from gdpr_pipeline import hide_batch
+        legal_b = dict(self._b(OTHER, 45), basis="LEGAL_HIDE_FIRST")
+        routine = [self._b()]
+        legal_plan = [legal_b, self._b()]
+        runner, _, closed, created = self._world({self.HD: [(4624, [ARPAD, OTHER])], self.PD: [(2575, [ARPAD, OTHER])]})
+        own = hide_batch.own_added(runner=runner)
+        self.assertEqual(own, {"hdevops": {ARPAD, OTHER}, "pdp": {ARPAD, OTHER}})
+        batch = hide_batch.carry_legal(routine, legal_plan, own)
+        self.assertEqual([b["id"] for b in batch], [ARPAD, OTHER])
         res = hide_batch.open_prs(batch, dry_run=False, runner=runner)
-        self.assertEqual(res["deferred"], {"hdevops": "https://github.com/Muso-AI/H-DevOps/pull/4624",
-                                           "pdp": "https://x/2575"})
-        self.assertEqual(res["hdevops"], "")
-        self.assertEqual(res["pdp"], "")
-        self.assertEqual(res["ids"], [ARPAD])
-        self.assertEqual(len(calls), 2)          # one `gh pr list` per repository, and nothing else
+        self.assertEqual((sorted(res["kept"]), closed, created), (["hdevops", "pdp"], [], []),
+                         "the captain's PR is left exactly as it is")
+
+    def test_a_legal_id_no_open_pr_carries_never_enters_a_routine_batch(self):
+        from gdpr_pipeline import hide_batch
+        legal_b = dict(self._b(OTHER, 45), basis="LEGAL_HIDE_FIRST")
+        for own in ({"hdevops": set(), "pdp": set()}, {"hdevops": {ARPAD}, "pdp": {ARPAD}},
+                    {"hdevops": None, "pdp": None}):
+            with self.subTest(own=own):
+                self.assertEqual([b["id"] for b in hide_batch.carry_legal([self._b()], [legal_b, self._b()], own)],
+                                 [ARPAD])
+        # carried in the repository that still needs it, and only there: a merged half is not "in an open PR"
+        half = dict(legal_b, need=["pdp"])
+        self.assertEqual(len(hide_batch.carry_legal([], [half], {"hdevops": {OTHER}, "pdp": set()})), 0)
+        self.assertEqual(len(hide_batch.carry_legal([], [half], {"hdevops": set(), "pdp": {OTHER}})), 1)
+
+    def test_a_legal_id_the_register_no_longer_wants_is_not_carried(self):
+        """`legal` is the include-legal plan computed now: a row that closed or changed verdict is not in it."""
+        from gdpr_pipeline import hide_batch
+        self.assertEqual(hide_batch.carry_legal([self._b()], [self._b()], {"hdevops": {OTHER}, "pdp": {OTHER}}),
+                         [self._b()])
+
+    def test_a_pipeline_pr_that_cannot_be_read_is_neither_replaced_nor_closed(self):
+        """What it adds is unknown, so replacing it could drop an id somebody put there. Unknown is not "stale"."""
+        from gdpr_pipeline import hide_batch
+        runner, calls, closed, created = self._world({self.HD: [(4624, [ARPAD])], self.PD: [(2575, [ARPAD])]})
+
+        def flaky(argv, cwd=None):
+            if argv[:2] == ["gh", "api"] and f"repos/{self.HD}/contents/" in argv[-1] and argv[-1].endswith("?ref=4624"):
+                raise RuntimeError("gh api: 502")
+            return runner(argv, cwd=cwd)
+        res = hide_batch.open_prs([self._b(), self._b(OTHER, 40)], dry_run=False, runner=flaky)
+        self.assertEqual(res["unreadable"], {"hdevops": f"https://github.com/{self.HD}/pull/4624"})
+        self.assertNotIn("hdevops", res["opened"])
+        self.assertEqual([c[0] for c in closed], [self.PD], "only the repository that WAS read is re-issued")
+        self.assertEqual([c[0] for c in created], [self.PD])
+        self.assertEqual(hide_batch.own_added(runner=flaky)["hdevops"], None)
 
     def test_a_human_authored_hide_pr_does_not_defer_the_pipeline(self):
         """Only OUR branch prefix defers. Arpad's hand-written #4619/#2574 are not a pipeline batch."""

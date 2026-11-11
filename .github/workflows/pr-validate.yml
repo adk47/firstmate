@@ -2194,6 +2194,14 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_gdpr_pipeline
+      - name: Run Caroline billing and hide boundary tests
+        # policies/caroline-billing-and-hide.json states, per billing shape, whether Caroline answers from a
+        # read, performs one bounded write, or hands off, plus the refund caps and every undo. This pins it to
+        # the code: every tool named is registered and not denied on edge, no ACTION moves money, every ACTION
+        # states its undo, and Caroline holds no refund, delete or hide write.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_caroline_billing_and_hide
       - name: Run GDPR triage bridge tests
         # scripts/gdpr-triage-bridge.py routes the support@ triage's `human` verdicts into the
         # erasure register, so a privacy request is filed and answered instead of paging a human.

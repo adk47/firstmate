@@ -1,10 +1,20 @@
-"""The daily reversible-hide batch: one H-DevOps PR (HIDDEN_ENTITY_IDS, prod + dev -> 410 + noindex) and one
+"""The reversible-hide batch: one H-DevOps PR (HIDDEN_ENTITY_IDS, prod + dev -> 410 + noindex) and one
 platform-data-processing PR (sitemap LEGAL_HIDDEN_ENTITY_IDS + its strict-equality test), generated from PASS rows.
 Shape follows H-DevOps #4619 + PDP #2574 (Arpad, cs-systemic-c3).
 
 The pipeline never hides by itself (captain standing order, c3 handoff §4.1): it PREPARES the PRs; a person
 merges them, and only the 410 read-back (checks.public_gone) ever writes `hidden_at`. Nothing is deleted; there
 is no `DELETE /api/v3/admin/profile` and no muso-cli delete anywhere in this module. Undo = remove the id.
+
+Pages are profiles, tracks and albums. Both hide lists have always been keyed by entity id (the sitemap list already
+carries tracks and one album from the 10-23 legal batch); what kept an item out was that nothing could decide one.
+`identity.decide_item` now does, through the item's one artist, so `plan` takes whatever page the identity gate made
+eligible and writes its real entity.
+
+ONE LIVE PAIR, ALWAYS THE WHOLE SET (`open_prs`). Each run's PR carries EVERY id the register currently wants hidden
+and that `main` does not have yet. When that set differs from what the pipeline's own open PR adds, a new PR is opened
+from `main` and the old one is closed as superseded; when it is the same, nothing is touched. Nothing ever waits
+"behind" an unmerged PR, and there are never two pipeline PRs editing the same line.
 
 Editors are pure (text in, text out) and refuse rather than guess when a file's shape is not the expected one.
 Ids only in files and PR text: no requester names (the legal_hidden list says "Ids only; no names").
@@ -54,36 +64,83 @@ def add_to_hidden_yaml(text: str, ids: list[str], comment: list[str]) -> tuple[s
     return text[:m.start()] + new + text[m.end():], add
 
 
-def add_to_legal_hidden(text: str, entries: list[tuple[str, str]], comment: list[str]) -> tuple[str, list[str]]:
-    """entries: [(profile id, 'gdpr-erasure-register-<n>')] appended at the end of LEGAL_HIDDEN_ENTITY_IDS."""
+ENTITIES = ("profile", "track", "album")
+# The PDP strict-equality test keeps the pipeline's ids in two named sets, and the pipeline only ever EXTENDS them:
+#   ERASURE_PROFILES = {"<id>", ...}            every entry must be ("profile", "gdpr-erasure-register-N")
+#   ERASURE_ITEMS = {"<id>": "track", ...}      a track / album; its entity is stated so the test can hold it to it
+# ERASURE_ITEMS is a ONE-TIME change in platform-data-processing (docs/support/caroline-billing-and-hide.md gives the
+# exact patch). Until it is there an item is not prepared at all - neither half - and the run says so: the alternative
+# is rewriting that test's assertion from here, which is the loosening c3 handoff §4.4 forbids.
+ITEMS_ANCHOR = "ERASURE_ITEMS"
+_ITEMS_RE = re.compile(r"^ERASURE_ITEMS(?:[ \t]*:[^=\n]+)? = \{\n(?P<body>.*?)^\}\n", re.M | re.S)
+_ITEMS_EMPTY_RE = re.compile(r"^(?P<head>ERASURE_ITEMS(?:[ \t]*:[^=\n]+)? = )\{\}\n", re.M)
+
+
+class ItemAnchorMissing(ShapeError):
+    pass
+
+
+def _entry(e: tuple) -> tuple[str, str, str]:
+    """(id, ref) is a profile (the shape before items existed); (id, entity, ref) states its entity."""
+    i, ent, ref = (e[0], "profile", e[1]) if len(e) == 2 else e
+    if ent not in ENTITIES:
+        raise ShapeError(f"{ent!r} is not a page entity the hide lists know")
+    return i, ent, ref
+
+
+def has_items_anchor(test_text: str) -> bool:
+    return bool(_ITEMS_RE.search(test_text) or _ITEMS_EMPTY_RE.search(test_text))
+
+
+def add_to_legal_hidden(text: str, entries: list[tuple], comment: list[str]) -> tuple[str, list[str]]:
+    """entries: [(id, entity, 'gdpr-erasure-register-<n>')] appended at the end of LEGAL_HIDDEN_ENTITY_IDS."""
     m = re.search(r"^LEGAL_HIDDEN_ENTITY_IDS = \{\n(?P<body>.*?)^\}\n", text, re.M | re.S)
     if not m:
         raise ShapeError("LEGAL_HIDDEN_ENTITY_IDS dict not found")
-    add = [(i, ref) for i, ref in entries if f'"{i}"' not in m.group("body")]
+    add = [e for e in map(_entry, entries) if f'"{e[0]}"' not in m.group("body")]
     if not add:
         return text, []
-    block = "".join(f"    # {c}\n" for c in comment) + "".join(f'    "{i}": ("profile", "{ref}"),\n' for i, ref in add)
+    block = ("".join(f"    # {c}\n" for c in comment)
+             + "".join(f'    "{i}": ("{ent}", "{ref}"),\n' for i, ent, ref in add))
     pos = m.end("body")
-    return text[:pos] + block + text[pos:], [i for i, _ in add]
+    return text[:pos] + block + text[pos:], [i for i, _, _ in add]
 
 
-def add_to_erasure_test(text: str, entries: list[tuple[str, str]]) -> tuple[str, list[str]]:
-    """Extend ERASURE_PROFILES so the strict equality keeps its meaning (never loosen it: c3 handoff §4.4)."""
-    m = re.search(r"^ERASURE_PROFILES = \{\n(?P<body>.*?)^\}\n", text, re.M | re.S)
-    if not m:
-        raise ShapeError("ERASURE_PROFILES set not found in the PDP test")
-    add = [(i, ref) for i, ref in entries if f'"{i}"' not in m.group("body")]
-    if not add:
-        return text, []
-    block = "".join(f'    # {ref.replace("gdpr-erasure-register-", "register #")} (gdpr-pipeline)\n    "{i}",\n'
-                    for i, ref in add)
-    pos = m.end("body")
-    return text[:pos] + block + text[pos:], [i for i, _ in add]
+def add_to_erasure_test(text: str, entries: list[tuple]) -> tuple[str, list[str]]:
+    """Extend the test's own sets so the strict equality keeps its meaning (never loosen it: c3 handoff §4.4).
+    Profiles go to ERASURE_PROFILES, a track / album to ERASURE_ITEMS with its entity."""
+    ents = [_entry(e) for e in entries]
+    added: list[str] = []
+    profiles = [(i, ref) for i, ent, ref in ents if ent == "profile"]
+    items = [e for e in ents if e[1] != "profile"]
+    if profiles:
+        m = re.search(r"^ERASURE_PROFILES = \{\n(?P<body>.*?)^\}\n", text, re.M | re.S)
+        if not m:
+            raise ShapeError("ERASURE_PROFILES set not found in the PDP test")
+        add = [(i, ref) for i, ref in profiles if f'"{i}"' not in m.group("body")]
+        block = "".join(f'    # {ref.replace("gdpr-erasure-register-", "register #")} (gdpr-pipeline)\n    "{i}",\n'
+                        for i, ref in add)
+        text = text[:m.end("body")] + block + text[m.end("body"):]
+        added += [i for i, _ in add]
+    if items:
+        text = _ITEMS_EMPTY_RE.sub(lambda e: e.group("head") + "{\n}\n", text, count=1)
+        m = _ITEMS_RE.search(text)
+        if not m:
+            raise ItemAnchorMissing(f"{ITEMS_ANCHOR} dict not found in the PDP test: a track / album cannot be added "
+                                    f"until the one-time platform-data-processing change is merged")
+        add = [e for e in items if f'"{e[0]}"' not in m.group("body")]
+        block = "".join(f'    # {ref.replace("gdpr-erasure-register-", "register #")} (gdpr-pipeline)\n'
+                        f'    "{i}": "{ent}",\n' for i, ent, ref in add)
+        text = text[:m.end("body")] + block + text[m.end("body"):]
+        added += [i for i, _, _ in add]
+    return text, added
 
 
 def plan(rows: list[dict], hdevops_ids: set[str], pdp_ids: set[str], in_flight: dict[str, set[str]],
          include_legal: bool = False) -> list[dict]:
-    """Identity-PASS PROFILE pages of open rows, most overdue first: [{id, register_no, basis, due_at, need}].
+    """Identity-PASS pages of open rows, most overdue first: [{id, entity, register_no, basis, due_at, need}].
+    A page is a profile, a track or an album; which of them may pass is `identity`'s decision, not this function's
+    (a track / album passes only through its one artist: identity.decide_item).
     `need` names the list(s) still missing the id AND not already carried by an open PR in that repository
     (in_flight = {"hdevops": ids, "pdp": ids}), so a batch whose second PR failed to open is retried for that
     half only.
@@ -109,16 +166,16 @@ def plan(rows: list[dict], hdevops_ids: set[str], pdp_ids: set[str], in_flight: 
                 continue
             if pid in held and not include_legal:
                 continue
-            ent = next((p["entity"] for p in r["pages"] if p["id"] == pid), "profile")
-            if ent != "profile":
+            ent = next((p.get("entity") or "profile" for p in r["pages"] if p["id"] == pid), "profile")
+            if ent not in ENTITIES:
                 continue
             need = [n for n, s in (("hdevops", hdevops_ids), ("pdp", pdp_ids))
                     if pid not in s and pid not in in_flight.get(n, set())]
             if not need:
                 continue
             seen.add(pid)
-            out.append({"id": pid, "register_no": r["register_no"], "basis": pv["verdict"], "due_at": r["due_at"],
-                        "need": need, "request_id": r["id"]})
+            out.append({"id": pid, "entity": ent, "register_no": r["register_no"], "basis": pv["verdict"],
+                        "due_at": r["due_at"], "need": need, "request_id": r["id"]})
     return out
 
 
@@ -139,14 +196,20 @@ def edit_hdevops(texts: dict[str, str], batch: list[dict], day: str) -> tuple[di
 
 
 def edit_pdp(list_text: str, test_text: str, batch: list[dict], day: str) -> tuple[str, str, list[str]]:
-    entries = [(b["id"], f"gdpr-erasure-register-{b['register_no']}") for b in batch if "pdp" in b["need"]]
-    new_list, added = add_to_legal_hidden(list_text, entries, _comment([b for b in batch if "pdp" in b["need"]], day))
+    sub = [b for b in batch if "pdp" in b["need"]]
+    entries = [(b["id"], b.get("entity") or "profile", f"gdpr-erasure-register-{b['register_no']}") for b in sub]
+    new_list, added = add_to_legal_hidden(list_text, entries, _comment(sub, day))
     new_test, _ = add_to_erasure_test(test_text, [e for e in entries if e[0] in added])
     return new_list, new_test, added
 
 
 def pr_body(kind: str, batch: list[dict], twin: str = "") -> str:
-    rows = "\n".join(f"| #{b['register_no']} | `{b['id']}` | {b['basis']} | {b['due_at'][:10]} |" for b in batch)
+    rows = "\n".join(f"| #{b['register_no']} | `{b['id']}` | {b.get('entity') or 'profile'} | {b['basis']} | "
+                     f"{b['due_at'][:10]} |" for b in batch)
+    items = ("\n\nA track / album row is here because the catalog gives it exactly ONE artist and that artist's profile "
+             "passes the same identity gate for this requester (`identity.decide_item`); a page with two artists, a "
+             "big page, or an artist we could not read never reaches a batch."
+             if any((b.get("entity") or "profile") != "profile" for b in batch) else "")
     what = ("`HIDDEN_ENTITY_IDS` gives 410 + `x-robots-tag: noindex` on each public page (prod + the dev mirror)."
             if kind == "hdevops" else
             "`LEGAL_HIDDEN_ENTITY_IDS` stops the sitemaps advertising each page; the test's erasure set gains the same "
@@ -159,7 +222,10 @@ def pr_body(kind: str, batch: list[dict], twin: str = "") -> str:
     return (f"Daily GDPR erasure hide batch, generated by hydra `scripts/gdpr-pipeline.py hide-batch` from the "
             f"erasure register's identity-PASS rows (Fable `gdpr-ruling-for-jan.md` §3; identity paths per "
             f"`gdpr-ack-v2-and-arpad-1101.md` §3, decided by code from the core replica + the Intercom contact).\n\n"
-            f"| register | id | identity | written confirmation due |\n|---|---|---|---|\n{rows}\n\n"
+            f"| register | id | page | identity | written confirmation due |\n|---|---|---|---|---|\n{rows}{items}\n\n"
+            f"This PR carries the WHOLE set the register wants hidden and `main` does not have yet. When that set "
+            f"changes the pipeline opens a new PR and closes this one as superseded, so a review is always of exactly "
+            f"the ids in this table.\n\n"
             f"This is the reversible hide only: {what} Nothing is deleted, there is no `DELETE /api/v3/admin/profile` "
             f"and no muso-cli delete. The pipeline never merges: a person does, and only the anonymous 410 read-back "
             f"marks a row hidden.\n\n{('Twin: ' + twin + chr(10) + chr(10)) if twin else ''}{tier}\n")
@@ -173,68 +239,194 @@ def _run(argv: list[str], cwd: str | None = None) -> str:
 
 
 BATCH_BRANCH = "gdpr-pipeline/hide-"
+KINDS = (("hdevops", HDEVOPS_REPO, HDEVOPS_FILES[0], hidden_ids_from_yaml),
+         ("pdp", PDP_REPO, PDP_LIST, legal_hidden_from_py))
+_UNREADABLE = (Unknown, RuntimeError, OSError, ValueError, IndexError, AttributeError, KeyError)
 
 
 def open_batch_prs(repo: str, runner=_run) -> list[dict]:
-    """The pipeline's OWN unmerged hide-batch PRs in `repo` ([{number, url, headRefName}]). Identified by the branch
-    prefix this module pushes, never by a title or a body mention."""
+    """The pipeline's OWN unmerged hide-batch PRs in `repo`, oldest first ([{number, url, headRefName, ...}]).
+    Identified by the branch prefix this module pushes, never by a title or a body mention."""
     listing = json.loads(runner(["gh", "pr", "list", "-R", repo, "--state", "open", "--limit", "100",
-                                 "--json", "number,url,headRefName"]))
-    return [pr for pr in listing if str(pr.get("headRefName") or "").startswith(BATCH_BRANCH)]
+                                 "--json", "number,url,headRefName,headRefOid,baseRefOid,mergeable"]))
+    own = [pr for pr in listing if str(pr.get("headRefName") or "").startswith(BATCH_BRANCH)]
+    return sorted(own, key=lambda pr: int(pr.get("number") or 0))
+
+
+def pr_adds(repo: str, path: str, parse, pr: dict, runner=_run) -> set[str] | None:
+    """The ids this PR ADDS to its hide list: head file minus base file, both read with the read-back's own parser.
+    None when that cannot be established (no sha, a deleted file, a reshaped parse): never an empty set, because
+    "adds nothing" and "could not read" lead to different actions."""
+    head, base = pr.get("headRefOid") or "", pr.get("baseRefOid") or ""
+    if not head or not base:
+        return None
+    try:
+        have = parse(runner(["gh", "api", "-H", "Accept: application/vnd.github.raw",
+                             f"repos/{repo}/contents/{path}?ref={head}"]))
+        was = parse(runner(["gh", "api", "-H", "Accept: application/vnd.github.raw",
+                            f"repos/{repo}/contents/{path}?ref={base}"]))
+    except _UNREADABLE:
+        # Unreadable (a nonzero `gh api` is a RuntimeError, not an Unknown) or reshaped.
+        return None
+    return {i.lower() for i in have - was}
+
+
+def own_added(runner=_run) -> dict[str, set[str] | None]:
+    """{"hdevops": ids, "pdp": ids}: what the pipeline's OWN open PRs add, per repository. None for a repository
+    where one of them could not be read - which is not "adds nothing"."""
+    out: dict[str, set[str] | None] = {}
+    for kind, repo, path, parse in KINDS:
+        ids: set[str] | None = set()
+        for pr in open_batch_prs(repo, runner=runner):
+            got = pr_adds(repo, path, parse, pr, runner=runner)
+            if got is None:
+                ids = None
+                break
+            ids |= got
+        out[kind] = ids
+    return out
+
+
+def carry_legal(routine: list[dict], legal: list[dict], own: dict[str, set[str] | None]) -> list[dict]:
+    """The routine batch, plus every legal hide-first id a `--include-legal` run already put in an open pipeline PR.
+
+    `--include-legal` is the captain's GO, given on one run. That run's PR is where the GO is recorded. Because each
+    pipeline PR carries the whole set and replaces the last one, a routine run six hours later would otherwise open
+    a PR WITHOUT those ids and close the captain's one as superseded - withdrawing a hide he ordered, with a polite
+    comment. So an id stays in the set while (a) an open pipeline PR still adds it and (b) the register still wants
+    it (`legal` is the include-legal plan computed NOW, so a row that closed or changed verdict drops out).
+
+    It never adds a legal id on its own: an id no open pipeline PR carries is not here, GO or no GO."""
+    have = {b["id"] for b in routine}
+    carried = [b for b in legal if b["id"] not in have
+               and any(b["id"].lower() in (own.get(kind) or set()) for kind in b["need"])]
+    return sorted(routine + carried, key=lambda b: (b["due_at"], b["register_no"] or 0))
+
+
+SUPERSEDED = ("Superseded by {url}: the erasure register's hide set changed, and each pipeline PR carries the whole "
+              "set, so that one replaces this one. Nothing here was merged; no page was hidden by this PR.")
+CONFLICTED = ("Superseded by {url}: `main` changed the hide list after this PR was opened, so this one could no longer "
+              "be merged. The replacement carries the whole set from the current `main`. Nothing here was merged; no "
+              "page was hidden by this PR.")
+NOTHING_LEFT = ("Closed by the pipeline: nothing in this PR is still waiting. Every id it added is either on `main` "
+                "already or no longer hide-eligible in the erasure register. Nothing here was merged.")
 
 
 def open_prs(batch: list[dict], dry_run: bool = True, runner=_run) -> dict:
-    """Clone both repos, apply the edits, and (unless dry_run) push a branch and open the two PRs.
-    Returns {"hdevops": url|diff, "pdp": url|diff, "ids": [...], "deferred": {kind: url}}.
+    """Bring each repository's ONE pipeline PR in line with the batch, and (unless dry_run) push and open what changed.
 
-    ONE batch pair at a time per repository: both PRs of a batch insert at the same point in the same list file, so a
-    second pair opened before the first merges merges as a conflict against a list of ids nobody has reviewed yet. A
-    daily batch whose PR a person has not merged defers instead, and says which PR it is waiting for; the ids stay
-    un-hidden and every later tick retries them."""
-    all_ids = [b["id"] for b in batch]
-    need = {k for b in batch for k in ("hdevops", "pdp") if k in b["need"]}
-    deferred = {}
-    for kind, repo in (("hdevops", HDEVOPS_REPO), ("pdp", PDP_REPO)):
-        if kind not in need:
+    Returns {"ids", "hdevops": url|diff|"", "pdp": url|diff|"", "opened": {kind: url}, "kept": {kind: url},
+             "superseded": {kind: [url]}, "blocked_items": [..], "close_failed": [..], "unreadable": {kind: url}}.
+
+    WHY NOT "one pair at a time, the next batch waits" (what this replaced). Both PRs of a batch edit the same line
+    of the same file, so two open pipeline PRs do conflict - that part was right. But waiting made every later id
+    queue behind a PR nobody had merged yet, and because the two repositories defer independently the halves fell
+    out of step: measured 2026-11-10/11, the H-DevOps half of one id waited behind the PDP PR of the day before
+    while its PDP half opened, and the next day the reverse - a page half-hidden for as long as the reviews
+    alternated. A hide that is due in 24 hours cannot queue behind a review.
+
+    So there is one pipeline PR per repository and it always carries the WHOLE set (`batch` is every id `main` does
+    not have and no other PR adds). Per repository:
+      - the pipeline's newest open PR already adds exactly that set  -> it is left alone (a review in progress stays
+        a review of the same ids) - unless GitHub says it CONFLICTS with `main` (the hide list is one line, so any
+        other merge to it does that): a PR nobody can merge is re-issued from `main` like a changed set;
+      - otherwise a new PR is opened from `main` with the whole set, and every older pipeline PR is closed as
+        superseded with a comment naming the new one. A new PR, never a force-push: an approval of the old ids must
+        not ride along onto ids the reviewer never saw;
+      - the register wants nothing more from that repository -> stale pipeline PRs are closed with the reason;
+      - what an open pipeline PR adds cannot be read -> nothing in that repository is opened or closed this run
+        (`unreadable`), because replacing a PR whose contents are unknown could drop an id somebody put there.
+    A person still merges. Closing is the one thing here that is not an addition, and it only ever touches PRs on
+    this module's own branch prefix.
+
+    A track / album whose sitemap half needs the PDP test's ERASURE_ITEMS set, when that set is not in the test
+    yet, is left out of BOTH halves (never half a hide on purpose) and named in `blocked_items`."""
+    out: dict = {"ids": [b["id"] for b in batch], "hdevops": "", "pdp": "", "opened": {}, "kept": {},
+                 "superseded": {}, "blocked_items": [], "close_failed": [], "unreadable": {}}
+    items = [b for b in batch if (b.get("entity") or "profile") != "profile" and "pdp" in b["need"]]
+    if items:
+        try:
+            anchored = has_items_anchor(runner(["gh", "api", "-H", "Accept: application/vnd.github.raw",
+                                                f"repos/{PDP_REPO}/contents/{PDP_TEST}?ref=main"]))
+        except _UNREADABLE:
+            anchored = False          # unread is not "present": the item waits, the profiles go
+        if not anchored:
+            out["blocked_items"] = [b["id"] for b in items]
+            batch = [b for b in batch if b["id"] not in set(out["blocked_items"])]
+    own = {kind: open_batch_prs(repo, runner=runner) for kind, repo, _, _ in KINDS}
+    want = {kind: {b["id"].lower() for b in batch if kind in b["need"]} for kind, _, _, _ in KINDS}
+    todo, stale, conflicted = [], {}, set()
+    for kind, repo, path, parse in KINDS:
+        prs = own[kind]
+        adds = [pr_adds(repo, path, parse, pr, runner=runner) for pr in prs]
+        if any(a is None for a in adds):
+            # What an open pipeline PR adds could not be read, so this run cannot tell whether replacing it would
+            # drop an id a person (or the captain's --include-legal run) put there. Touch nothing in this repository.
+            bad = prs[[a is None for a in adds].index(True)]
+            out["unreadable"][kind] = bad.get("url") or f"{repo}#{bad.get('number')}"
+            stale[kind] = []
             continue
-        prior = open_batch_prs(repo, runner=runner)
-        if prior:
-            deferred[kind] = prior[0].get("url") or f"{repo}#{prior[0].get('number')}"
-    if deferred:
-        batch = [dict(b, need=[n for n in b["need"] if n not in deferred]) for b in batch]
-        batch = [b for b in batch if b["need"]]
-        if not batch:
-            return {"ids": all_ids, "hdevops": "", "pdp": "", "deferred": deferred}
+        if prs and want[kind] and adds[-1] == want[kind] and prs[-1].get("mergeable") == "CONFLICTING":
+            conflicted.add(kind)      # only an explicit CONFLICTING: UNKNOWN is GitHub still computing, not a verdict
+        if prs and want[kind] and adds[-1] == want[kind] and kind not in conflicted:
+            out["kept"][kind] = out[kind] = prs[-1].get("url") or f"{repo}#{prs[-1].get('number')}"
+            stale[kind] = prs[:-1]
+        else:
+            stale[kind] = prs
+            if want[kind]:
+                todo.append(kind)
     now = datetime.now(timezone.utc)
     day, branch = now.strftime("%Y-%m-%d"), BATCH_BRANCH + now.strftime("%Y%m%d-%H%M")
-    out: dict = {"ids": [b["id"] for b in batch], "deferred": deferred}
-    with tempfile.TemporaryDirectory(prefix="gdpr-hide-") as tmp:
-        hd, pdp = Path(tmp, "hd"), Path(tmp, "pdp")
-        _run(["gh", "repo", "clone", HDEVOPS_REPO, str(hd), "--", "--depth", "1"])
-        _run(["gh", "repo", "clone", PDP_REPO, str(pdp), "--", "--depth", "1"])
-        texts, hd_added = edit_hdevops({f: (hd / f).read_text() for f in HDEVOPS_FILES}, batch, day)
-        lt, tt, pdp_added = edit_pdp((pdp / PDP_LIST).read_text(), (pdp / PDP_TEST).read_text(), batch, day)
-        for repo_dir, files, added, kind in ((hd, texts, hd_added, "hdevops"),
-                                             (pdp, {PDP_LIST: lt, PDP_TEST: tt}, pdp_added, "pdp")):
-            if not added:
-                continue
-            for f, t in files.items():
-                (repo_dir / f).write_text(t)
+    if todo:
+        with tempfile.TemporaryDirectory(prefix="gdpr-hide-") as tmp:
+            for kind, repo, _, _ in KINDS:
+                if kind not in todo:
+                    continue
+                repo_dir = Path(tmp, kind)
+                runner(["gh", "repo", "clone", repo, str(repo_dir), "--", "--depth", "1"])
+                if kind == "hdevops":
+                    files, added = edit_hdevops({f: (repo_dir / f).read_text() for f in HDEVOPS_FILES}, batch, day)
+                else:
+                    lt, tt, added = edit_pdp((repo_dir / PDP_LIST).read_text(), (repo_dir / PDP_TEST).read_text(),
+                                             batch, day)
+                    files = {PDP_LIST: lt, PDP_TEST: tt}
+                if not added:
+                    continue          # `main` gained the ids between the plan and the clone
+                for f, t in files.items():
+                    (repo_dir / f).write_text(t)
+                if dry_run:
+                    out[kind] = runner(["git", "diff"], cwd=str(repo_dir))
+                    continue
+                title = (f"feat(hide): GDPR erasure hide batch {day} (+{len(added)} ids, reversible)"
+                         if kind == "hdevops"
+                         else f"feat(sitemap): stop advertising the GDPR erasure batch {day} (+{len(added)} ids)")
+                runner(["git", "checkout", "-b", branch], cwd=str(repo_dir))
+                runner(["git", "-c", f"user.name={GIT_NAME}", "-c", f"user.email={GIT_EMAIL}", "commit", "-am", title],
+                       cwd=str(repo_dir))
+                runner(["git", "push", "-u", "origin", branch], cwd=str(repo_dir))
+                sub = [b for b in batch if b["id"] in added]
+                twin = out["hdevops"] if kind == "pdp" and str(out["hdevops"]).startswith("http") else ""
+                # tier:1 like #4619/#2574; no-automerge because every hide is a person's decision (captain order).
+                out[kind] = out["opened"][kind] = runner(
+                    ["gh", "pr", "create", "--title", title, "--body", pr_body(kind, sub, twin),
+                     "--head", branch, "--label", "tier:1", "--label", "no-automerge"],
+                    cwd=str(repo_dir)).splitlines()[-1]
+    for kind, repo, _, _ in KINDS:
+        live = out["opened"].get(kind) or out["kept"].get(kind) or ""
+        if kind in todo and not live:
+            continue                  # nothing replaced the old PR (dry run, or no PR was needed): leave it be
+        for pr in stale[kind]:
+            url = pr.get("url") or f"{repo}#{pr.get('number')}"
+            out["superseded"].setdefault(kind, []).append(url)
             if dry_run:
-                out[kind] = _run(["git", "diff"], cwd=str(repo_dir))
                 continue
-            title = (f"feat(hide): GDPR erasure hide batch {day} (+{len(added)} ids, reversible)" if kind == "hdevops"
-                     else f"feat(sitemap): stop advertising the GDPR erasure batch {day} (+{len(added)} ids)")
-            _run(["git", "checkout", "-b", branch], cwd=str(repo_dir))
-            _run(["git", "-c", f"user.name={GIT_NAME}", "-c", f"user.email={GIT_EMAIL}", "commit", "-am", title],
-                 cwd=str(repo_dir))
-            _run(["git", "push", "-u", "origin", branch], cwd=str(repo_dir))
-            sub = [b for b in batch if b["id"] in added]
-            # tier:1 like #4619/#2574; no-automerge because every hide is a person's decision (captain order).
-            out[kind] = _run(["gh", "pr", "create", "--title", title, "--body",
-                              pr_body(kind, sub, out.get("hdevops", "") if kind == "pdp" else ""),
-                              "--head", branch, "--label", "tier:1", "--label", "no-automerge"],
-                             cwd=str(repo_dir)).splitlines()[-1]
+            try:
+                runner(["gh", "pr", "close", str(pr["number"]), "-R", repo, "--comment",
+                        (CONFLICTED if kind in conflicted else SUPERSEDED).format(url=live) if live
+                        else NOTHING_LEFT])
+            except _UNREADABLE as exc:
+                # The new PR is the review artefact and it exists; an old one left open is closed by the next run.
+                out["close_failed"].append(f"{url}: {exc}")
     return out
 
 
@@ -242,7 +434,9 @@ PR_SCAN_LIMIT = 1000        # `gh pr list` paginates internally to reach --limit
 
 
 def in_flight_ids(ids: list[str], runner=_run) -> dict[str, set[str]]:
-    """{"hdevops": ids, "pdp": ids} that an OPEN PR in that repository actually ADDS to its hide LIST.
+    """{"hdevops": ids, "pdp": ids} that an OPEN PR in that repository actually ADDS to its hide LIST - any PR EXCEPT
+    the pipeline's own batch PRs. The pipeline's own PR is not "somebody else already has it": `open_prs` owns that
+    PR and re-issues it with the whole set, so its ids must stay in the plan.
 
     Per repository: an H-DevOps PR never stands in for the sitemap half, or the reverse.
 
@@ -254,52 +448,20 @@ def in_flight_ids(ids: list[str], runner=_run) -> dict[str, set[str]]:
 
     Two ways to claim nothing, both deliberate: an unreadable file (a PR that deleted it, a 404, a reshaped parse) and
     a PR list at the scan cap, where pagination stops being a proof. A duplicate PR is the safe miss; aborting the whole
-    batch is not, because the pages then sit past their 24-hour deadline."""
+    batch is not, because the pages then sit past their 24-hour deadline. The `gh pr list` itself stays fatal: without
+    the list nothing is known."""
     hit: dict[str, set[str]] = {"hdevops": set(), "pdp": set()}
     want = {i.lower() for i in ids}
     if not want:
         return hit
-    targets = (("hdevops", HDEVOPS_REPO, (HDEVOPS_FILES[0],), hidden_ids_from_yaml),
-               ("pdp", PDP_REPO, (PDP_LIST,), legal_hidden_from_py))
-    for kind, repo, files, parse in targets:
+    for kind, repo, path, parse in KINDS:
         listing = json.loads(runner(["gh", "pr", "list", "-R", repo, "--state", "open",
                                      "--limit", str(PR_SCAN_LIMIT),
-                                     "--json", "number,headRefOid,baseRefOid"]))
+                                     "--json", "number,headRefOid,baseRefOid,headRefName"]))
         if len(listing) >= PR_SCAN_LIMIT:
             continue          # a truncated view proves nothing about which PR added what
         for pr in listing:
-            head, base = pr.get("headRefOid") or "", pr.get("baseRefOid") or ""
-            if not head or not base:
+            if str(pr.get("headRefName") or "").startswith(BATCH_BRANCH):
                 continue
-            for f in files:
-                try:
-                    have = parse(runner(["gh", "api", "-H", "Accept: application/vnd.github.raw",
-                                         f"repos/{repo}/contents/{f}?ref={head}"]))
-                    was = parse(runner(["gh", "api", "-H", "Accept: application/vnd.github.raw",
-                                        f"repos/{repo}/contents/{f}?ref={base}"]))
-                except (Unknown, RuntimeError, OSError, ValueError, IndexError, AttributeError, KeyError):
-                    # Unreadable (a nonzero `gh api` is a RuntimeError, not an Unknown) or reshaped: claim nothing.
-                    continue
-                hit[kind] |= (have - was) & want
-    return hit
-    targets = (("hdevops", HDEVOPS_REPO, (HDEVOPS_FILES[0],), hidden_ids_from_yaml),
-               ("pdp", PDP_REPO, (PDP_LIST,), legal_hidden_from_py))
-    for kind, repo, files, parse in targets:
-        listing = json.loads(runner(["gh", "pr", "list", "-R", repo, "--state", "open", "--limit", "200",
-                                     "--json", "number,headRefOid"]))
-        for pr in listing:
-            sha = pr.get("headRefOid") or ""
-            if not sha:
-                continue
-            for f in files:
-                try:
-                    have = parse(runner(["gh", "api", "-H", "Accept: application/vnd.github.raw",
-                                         f"repos/{repo}/contents/{f}?ref={sha}"]))
-                except (Unknown, RuntimeError, OSError, ValueError, IndexError, AttributeError, KeyError):
-                    # Unreadable (a nonzero `gh api` is a RuntimeError, not an Unknown) or reshaped: claim nothing.
-                    # A duplicate PR is the safe miss; aborting the whole batch is not -- an unrelated open PR that
-                    # deleted the hide-list file would otherwise stop every eligible page from being prepared, past
-                    # the 24-hour deadline. The `gh pr list` above stays fatal: without the list nothing is known.
-                    continue
-                hit[kind] |= have & want
+            hit[kind] |= (pr_adds(repo, path, parse, pr, runner=runner) or set()) & want
     return hit

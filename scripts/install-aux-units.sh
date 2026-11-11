@@ -961,22 +961,27 @@ systemctl enable "$gt" >/dev/null 2>&1 || log "WARN: could not enable $gt"
 systemctl start "$gt" >/dev/null 2>&1 || log "WARN: could not start $gt"
 log "  $gt: $(systemctl is-active "$gt" 2>/dev/null || echo unknown)"
 
-# Daily. scripts/gdpr-pipeline.py hide-batch --open-prs: the reversible-hide batch, generated from the
-# identity-PASS rows and opened as ONE H-DevOps PR (`HIDDEN_ENTITY_IDS`, prod + dev: 410 + noindex) and ONE
-# platform-data-processing PR (`LEGAL_HIDDEN_ENTITY_IDS` + the strict-equality test's `ERASURE_PROFILES`).
+# Four times a day. scripts/gdpr-pipeline.py hide-batch --open-prs: the reversible-hide batch, generated from the
+# identity-PASS rows (profiles, and since the item gate a track / album whose ONE artist passes the same gate) and
+# opened as ONE H-DevOps PR (`HIDDEN_ENTITY_IDS`, prod + dev: 410 + noindex) and ONE platform-data-processing PR
+# (`LEGAL_HIDDEN_ENTITY_IDS` + the strict-equality test's `ERASURE_PROFILES` / `ERASURE_ITEMS`).
 # It OPENS PRs and merges nothing - a person merges, per the ruling - and it never deletes: the only write to a
-# profile is the reversible hide, and `DELETE /api/v3/admin/profile` is not reachable from this pipeline at all.
-# The brief's step 3 is "daily hide batch PR", and until this timer existed the command was manual, so a PASS row
-# waited on somebody remembering to run it.
+# page is the reversible hide, and `DELETE /api/v3/admin/profile` is not reachable from this pipeline at all.
 #
-# Safe to run daily BECAUSE of two guards that already exist, not because of the schedule:
-#   - one batch pair at a time: while one of the pipeline's own `gdpr-pipeline/hide-*` PRs is unmerged, the run
-#     DEFERS and says which PR it is waiting for (both PRs of a batch insert at the same point in the same list
-#     file, so a second pair could only conflict against ids nobody has reviewed). The waiting ids stay un-hidden
-#     and the next tick retries them, so a daily timer on a pending batch is a no-op, not a pile-up;
+# WHY NOT DAILY ANY MORE: the hide is owed within 24 h of receipt, and a batch that is generated once a day spends up
+# to the whole 24 h before a person can even see the PR. Six hours is the longest a decided row now waits for one.
+#
+# Safe to run this often BECAUSE of three guards, not because of the schedule:
+#   - one LIVE pair, always the whole set: each repository has at most one open `gdpr-pipeline/hide-*` PR, and it
+#     carries every id the register wants hidden that `main` does not have yet. A run that finds that PR already
+#     adding exactly that set touches NOTHING (no push, no comment), so a pending batch is a no-op, not a pile-up
+#     and not a re-review. When the set changed, the run opens a new PR from `main` with the whole set and closes
+#     the old one as superseded, naming the new one. The earlier rule ("defer while a pair is unmerged") made every
+#     new id wait behind an unmerged PR and, measured 11-10 / 11-11, left the two repositories permanently one batch
+#     out of step with each other (H-DevOps #5105 waiting on PDP #2582, PDP #2583 waiting on H-DevOps #5105);
 #   - the run lock: `--open-prs` counts as a write, so it takes the same flock as the tick and exits 0 having done
-#     nothing if a tick is mid-run.
-# An empty batch prints and exits without opening anything.
+#     nothing if a tick is mid-run;
+#   - nothing is force-pushed and no branch is deleted: a superseded PR is closed with a comment and stays readable.
 # NOT --include-legal: legal_threat rows are a separate captain call ("legal threat, hide first"), and folding them
 # into the routine batch would hide pages on a rule nobody re-approved here.
 # Kill: /etc/hydra/gdpr-pipeline.disabled (the CLI checks it for every writing run).
@@ -996,12 +1001,12 @@ GDPRHIDESVC
 
 cat > /etc/systemd/system/gdpr-hide-batch.timer << GDPRHIDETMR
 [Unit]
-Description=Open the GDPR erasure hide batch daily
+Description=Open the GDPR erasure hide batch every six hours
 
 [Timer]
-# A fixed wall-clock time, not OnUnitActiveSec: the batch is a review artefact, so it should land at a predictable
-# hour rather than drift with the last run. Persistent=true catches up after a reboot instead of skipping a day.
-OnCalendar=*-*-* 06:20:00 UTC
+# Fixed wall-clock times, not OnUnitActiveSec: the batch is a review artefact, so it should land at predictable
+# hours rather than drift with the last run. Persistent=true catches up after a reboot instead of skipping a run.
+OnCalendar=*-*-* 00,06,12,18:20:00 UTC
 Persistent=true
 Unit=gdpr-hide-batch.service
 

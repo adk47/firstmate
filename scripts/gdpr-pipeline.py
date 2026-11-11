@@ -879,35 +879,55 @@ def main() -> int:
             return 2
         rows = run.store.all("open")
         cand = hide_batch.plan(rows, hd, pdp, {}, include_legal=a.include_legal)
+        # `flight` is what OTHER people's open PRs already add. The pipeline's own PR is not in it: open_prs owns
+        # that PR and re-issues it with the whole set, so nothing queues behind an unmerged batch.
         flight = hide_batch.in_flight_ids([c["id"] for c in cand]) if cand else {}
         batch = hide_batch.plan(rows, hd, pdp, flight, include_legal=a.include_legal)
-        print(f"hide batch: {len(batch)} id(s); already in an open PR: "
+        carried: set[str] = set()
+        if not a.include_legal:
+            # A legal hide-first id enters only on the captain's --include-legal run. Once that run's PR is open the
+            # GO is on record there, and this routine run must not replace that PR with one that drops the id.
+            routine = {b["id"] for b in batch}
+            batch = hide_batch.carry_legal(batch, hide_batch.plan(rows, hd, pdp, flight, include_legal=True),
+                                           hide_batch.own_added())
+            carried = {b["id"] for b in batch} - routine
+        print(f"hide batch: {len(batch)} id(s); already in somebody else's open PR: "
               + ", ".join(f"{k} {len(v)}" for k, v in flight.items()))
         for b in batch:
-            print(f"  #{b['register_no']} {b['id']} {b['basis']} due {b['due_at'][:10]} needs {'+'.join(b['need'])}")
-        if batch:
-            res = hide_batch.open_prs(batch, dry_run=not a.open_prs)
-            deferred = res.get("deferred") or {}
-            for kind, url in deferred.items():
-                print(f"deferred ({kind}): the open batch PR {url} has not merged yet, so the next batch waits for it "
-                      f"(both PRs of a batch insert at the same point in the same list file, so a second pair would "
-                      f"only conflict). These ids stay un-hidden and the next tick retries them.")
-            opened = {k for k in ("hdevops", "pdp") if str(res.get(k, "")).startswith("http")}
-            if not a.open_prs:
-                for k in ("hdevops", "pdp"):
-                    if k in deferred:
-                        print(f"----- {k} (deferred: {deferred[k]}) -----")
-                    else:
-                        print(f"----- {k} (dry run) -----\n{res.get(k, '(no change)')}")
-            elif opened:
-                for rid in {b["request_id"] for b in batch if set(b["need"]) & opened}:
-                    row = run.store.get(rid)
-                    prs = dict(row["hide_pr"])
-                    prs.setdefault("batches", []).append({k: res[k] for k in opened} |
-                                                         {"ids": [b["id"] for b in batch if b["request_id"] == rid
-                                                                  and set(b["need"]) & opened]})
-                    run.store.update(rid, "hide_pr", hide_pr=prs)
-                print(json.dumps({k: res[k] for k in opened}, indent=1))
+            print(f"  #{b['register_no']} {b['entity']} {b['id']} {b['basis']} due {b['due_at'][:10]} "
+                  f"needs {'+'.join(b['need'])}"
+                  + ("  (kept: already in the open batch PR from an --include-legal run)" if b["id"] in carried
+                     else ""))
+        # Always called, an empty batch included: that is the run that closes a pipeline PR nothing still needs.
+        res = hide_batch.open_prs(batch, dry_run=not a.open_prs)
+        for pid in res["blocked_items"]:
+            print(f"blocked (track/album {pid}): the platform-data-processing test has no {hide_batch.ITEMS_ANCHOR} "
+                  f"set yet, so this page is prepared in NEITHER repository (never half a hide on purpose). The "
+                  f"one-time change is in docs/support/caroline-billing-and-hide.md; the page stays un-hidden.")
+        for kind, url in res["kept"].items():
+            print(f"unchanged ({kind}): {url} already carries exactly this set; waiting for a person to merge it")
+        for kind, urls in res["superseded"].items():
+            print(f"{'superseded' if a.open_prs else 'would supersede'} ({kind}): {', '.join(urls)}")
+        for line in res["close_failed"]:
+            print(f"WARNING could not close a superseded batch PR (the next run retries): {line}")
+        for kind, url in res["unreadable"].items():
+            # Not a verdict about the PR: nothing in that repository was opened or closed, and the run exits 2.
+            run.fail(f"hide batch ({kind})", sources.Unknown(
+                f"could not read what the open pipeline PR {url} adds, so it was neither replaced nor closed"))
+        if not a.open_prs:
+            for k in ("hdevops", "pdp"):
+                if k not in res["kept"]:
+                    print(f"----- {k} (dry run) -----\n{res.get(k) or '(no change)'}")
+        elif res["opened"]:
+            opened = set(res["opened"])
+            for rid in {b["request_id"] for b in batch if set(b["need"]) & opened}:
+                row = run.store.get(rid)
+                prs = dict(row["hide_pr"])
+                prs.setdefault("batches", []).append({k: res[k] for k in opened} |
+                                                     {"ids": [b["id"] for b in batch if b["request_id"] == rid
+                                                              and set(b["need"]) & opened]})
+                run.store.update(rid, "hide_pr", hide_pr=prs)
+            print(json.dumps(res["opened"], indent=1))
     elif a.cmd == "mark-hidden":
         run.mark_hidden()
     elif a.cmd == "copy-sha":

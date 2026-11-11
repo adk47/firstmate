@@ -1,0 +1,171 @@
+{
+  "_doc": "What Caroline (edge, Intercom) does with a billing ask and with a hide / remove ask: ANSWER from a named read, ACT with a named bounded write that has a stated undo, or FENCE (hand off, with the measured cost of keeping it human). Authoritative prose: docs/support/caroline-billing-and-hide.md. Pinned by tests/test_caroline_billing_and_hide.py: every tool named here is registered, is not on the edge deny list, no ACTION moves money, every ACTION states its undo, and Caroline holds no refund, delete or hide write. Changing a mode from fence to action, or raising a cap, is a captain decision carried by the PR that makes it.",
+  "measured_at": "2026-11-11T19:25Z",
+  "measured_from": "ClickUp list 901000600160, not-closed tickets whose status is not `resolved`, tags action:billing-issue (111) and action:subscription-refund (86). Shape counts are a first-match keyword read of the ticket title and summary, not a judgement.",
+
+  "unresolved_total": {"billing-issue": 111, "subscription-refund": 86},
+  "new_per_week": {"billing-issue": 18, "subscription-refund": 6},
+
+  "caroline_writes": {
+    "_doc": "The ONLY billing writes Caroline holds. Neither moves money. Adding a tool here is the change that needs the captain.",
+    "retention_offer_apply": {
+      "what": "applies the product's own cancel-flow save (the coupon is resolved server-side; Caroline passes no amount)",
+      "bound": "the verified Intercom contact's own subscription; 3 calls per 60 min per conversation; only after the customer accepted the offer in this conversation",
+      "moves_money": false,
+      "undo": "Operations removes the discount from the subscription in Stripe (staff, #operations). Restores the full price from the next invoice. Caroline has no remove tool."
+    },
+    "cancel_subscription": {
+      "what": "sets the customer's own subscription to end at the period end (a past-due subscription ends at once, server-side)",
+      "bound": "the verified Intercom contact's own subscription; 3 calls per 60 min per conversation; only after the customer asked to cancel and declined the save; no money moves",
+      "moves_money": false,
+      "undo": "Before the access-until date: the customer resumes in Settings > Billing, or Operations clears cancel-at-period-end in Stripe. Restores the renewal. After that date there is no undo: it is a new subscription. muso-cli has no resume command, so this undo is never Caroline's."
+    }
+  },
+
+  "billing_shapes": [
+    {
+      "key": "why_was_i_charged",
+      "ask": "why was I charged / when / how much / was I refunded already",
+      "mode": "answer",
+      "read": ["billing_status"],
+      "write": null,
+      "unresolved_tickets": {"billing-issue": 9, "subscription-refund": 0}
+    },
+    {
+      "key": "plan_and_renewal_question",
+      "ask": "what plan am I on, when does it renew, is it active",
+      "mode": "answer",
+      "read": ["subscription_status", "billing_status"],
+      "write": null,
+      "unresolved_tickets": {"billing-issue": 0, "subscription-refund": 0}
+    },
+    {
+      "key": "invoice_or_receipt",
+      "ask": "send me an invoice / receipt, add a VAT number or company name",
+      "mode": "fence",
+      "read": ["billing_status"],
+      "write": null,
+      "handoff": "billing-issue",
+      "why_fenced": "Caroline has no read that returns an invoice document and no write to billing details. She confirms the charge from billing_status and points to Settings > Billing, then hands off what self-service cannot do (VAT id, company name on a past invoice).",
+      "unresolved_tickets": {"billing-issue": 8, "subscription-refund": 1}
+    },
+    {
+      "key": "failed_payment_or_card_update",
+      "ask": "my payment failed / my card was declined / how do I change my card",
+      "mode": "fence",
+      "read": ["billing_status"],
+      "write": null,
+      "handoff": "billing-issue",
+      "why_fenced": "How to update a card is answered from the self-service guide. A subscription that is past_due or needs_review always hands off (billing_status routes it): retrying or forgiving a payment is a money write.",
+      "unresolved_tickets": {"billing-issue": 7, "subscription-refund": 9}
+    },
+    {
+      "key": "plan_change_or_seats",
+      "ask": "upgrade, downgrade, add seats, a discount I was promised",
+      "mode": "fence",
+      "read": ["subscription_status"],
+      "write": null,
+      "handoff": "billing-issue",
+      "why_fenced": "Upgrade, downgrade and seats are self-service and Caroline answers how. She holds no plan-change write, and a discount other than the product's own save is a policy exception.",
+      "unresolved_tickets": {"billing-issue": 13, "subscription-refund": 5}
+    },
+    {
+      "key": "cancel",
+      "ask": "cancel my subscription",
+      "mode": "action",
+      "read": ["billing_status", "retention_offer_check"],
+      "write": "cancel_subscription",
+      "unresolved_tickets": {"billing-issue": 18, "subscription-refund": 17}
+    },
+    {
+      "key": "win_back",
+      "ask": "it is too expensive / I was about to cancel",
+      "mode": "action",
+      "read": ["retention_offer_check"],
+      "write": "retention_offer_apply",
+      "unresolved_tickets": {"billing-issue": 0, "subscription-refund": 0}
+    },
+    {
+      "key": "refund_request",
+      "ask": "I want my money back (unexpected renewal, annual instead of monthly, no stated cause)",
+      "mode": "fence",
+      "read": ["billing_status"],
+      "write": null,
+      "handoff": "subscription-refund",
+      "why_fenced": "A refund spends money and cannot be undone. Caroline never decides one and never promises one. See refund_rule for who does.",
+      "unresolved_tickets": {"billing-issue": 38, "subscription-refund": 51}
+    },
+    {
+      "key": "charge_dispute",
+      "ask": "charged after I cancelled, charged twice, charged but not active",
+      "mode": "fence",
+      "read": ["billing_status"],
+      "write": null,
+      "handoff": "billing-issue",
+      "why_fenced": "The fix is a refund or a manual correction of the account. On Stripe facts most 'charged after I cancelled' have no cancellation recorded before the charge, and most 'duplicates' are two products, so the customer's account of it cannot select a write.",
+      "unresolved_tickets": {"billing-issue": 12, "subscription-refund": 2}
+    },
+    {
+      "key": "credit_balance_dispute",
+      "ask": "my account credit / proration balance is wrong",
+      "mode": "fence",
+      "read": [],
+      "write": null,
+      "handoff": "billing-issue",
+      "why_fenced": "billing_status does not return the credit balance, so Caroline cannot state one. Not separately measured: no ticket in the read named it.",
+      "unresolved_tickets": {"billing-issue": 0, "subscription-refund": 0}
+    },
+    {
+      "key": "chargeback_or_fraud",
+      "ask": "a bank dispute, an unauthorised card, an account takeover",
+      "mode": "fence",
+      "read": [],
+      "write": null,
+      "handoff": "billing-issue",
+      "why_fenced": "Never refunded by a rule: an open chargeback already has the money in dispute, and fraud is a deny (captain 10-12, 11-02).",
+      "unresolved_tickets": {"billing-issue": 0, "subscription-refund": 1}
+    },
+    {
+      "key": "other_billing",
+      "ask": "an offer that will not apply, a subscription on the wrong account, a partner redemption",
+      "mode": "fence",
+      "read": ["subscription_status"],
+      "write": null,
+      "handoff": "billing-issue",
+      "why_fenced": "No rule covers these; each is a manual account correction.",
+      "unresolved_tickets": {"billing-issue": 6, "subscription-refund": 0}
+    }
+  ],
+
+  "refund_rule": {
+    "_doc": "The captain's own numbers (2026-10-30 'refunds under ~$150 decided by AI with his veto, larger to him'; confirmed as fable ruling 186 Q4/Q5). They are restated here so the boundary has ONE place Caroline's side reads; the decider is the refund judge, never Caroline.",
+    "caroline_may_refund": false,
+    "caroline_may_promise_a_refund": false,
+    "decider": "the refund judge (coded gates, then a bounded tool-less model call), on node-8, outside any agent turn",
+    "decider_status": "shadow only. https://github.com/Muso-AI/hydra/pull/1624 is unmerged, and live needs a write-scoped Stripe key only the captain can mint. Until both, every refund is decided by a named human in #operations.",
+    "cap_usd_per_refund": 150,
+    "cap_usd_per_customer_per_year": 300,
+    "veto_window_hours": 4,
+    "covers": "a customer whose identity is the verified Intercom contact, with a USD charge found in Stripe by code (never the amount the customer states), not already refunded, in a class the judge's coded gates name. Measured 2026-11-01 over 174 open tickets: 1 such case ($107.50, an annual charge right after a monthly plan). A request outside the coded classes is not approved by the rule.",
+    "above_cap": "the captain decides. The judge writes the facts card and stops; nothing is refunded and the customer is told only that the request is being looked at.",
+    "never_by_rule": ["fraud or a suspected stolen card (deny)", "an open chargeback", "a charge not in USD", "a second refund to the same customer beyond the yearly cap", "a request whose text carries instructions or states an amount above the cap"],
+    "after_a_refund": "paid access ends first (cancel, then refund) and no cash refund sits on top of a live credit balance: scripts/muso-stripe-write.sh refuses otherwise",
+    "undo": "none. A Stripe refund cannot be reversed, which is why it has a cap, a veto window and a human above the cap."
+  },
+
+  "hide": {
+    "_doc": "Caroline holds NO hide write. A hide or removal ask becomes a row in the erasure register (Intercom intake, or create_ticket data-deletion); code decides identity (scripts/gdpr_pipeline/identity.py) and prepares the reversible hide; a person merges.",
+    "caroline_may_hide": false,
+    "caroline_may_delete": false,
+    "intake": ["create_ticket"],
+    "entities": ["profile", "track", "album"],
+    "undo": "remove the id from HIDDEN_ENTITY_IDS (Muso-AI/H-DevOps k8s/prod/core-services/deployments.yaml and k8s/dev/dev-deployments.yaml) and from LEGAL_HIDDEN_ENTITY_IDS plus the test set (Muso-AI/platform-data-processing), one PR each, merged by a person. Restores the page (200, indexable) when the H-DevOps change rolls out and its sitemap entry on the next sitemap run. Not restored: the entry's scrubbed `changed/` sitemap history, which ages out by itself. Nothing in the catalog was deleted, so nothing else needs restoring."
+  },
+
+  "never": [
+    "delete a profile, a credit, an account or any record (DELETE /api/v3/admin/profile and muso-cli delete are not reachable from Caroline or from the erasure pipeline; legal hold 1350)",
+    "issue, promise or size a refund",
+    "assert a legal position, say where data came from, or promise a date",
+    "close an erasure request that has hidden nothing and told the person nothing"
+  ]
+}

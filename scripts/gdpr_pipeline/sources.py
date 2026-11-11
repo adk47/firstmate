@@ -173,13 +173,70 @@ def half_hidden(hd: set[str], pdp: set[str]) -> dict[str, str]:
     return {**{i: "hd" for i in hd - pdp}, **{i: "pdp" for i in pdp - hd}}
 
 
+ITEM_ENTITIES = ("track", "album")
+ITEM_MAX_ARTISTS = 8        # more artists than this is a compilation: a person's call, and not worth 8+ reads a tick
+
+
+def item_doc(entity: str, pid: str) -> dict | None:
+    """The admin track / album (GET only). None on 404. Same contract as `profile_doc`: a read that did not complete
+    raises Unknown and is never an answer."""
+    from credit_review import admin
+    if entity not in ITEM_ENTITIES:
+        raise Unknown(f"item_doc: {entity!r} is not a track or an album")
+    try:
+        doc = admin.AdminClient().get(f"/admin/{entity}/{pid}")
+    except admin.NotFound:
+        return None
+    except admin.AdminError as exc:
+        raise Unknown(f"admin {entity} {pid}: {exc}") from exc
+    return doc if isinstance(doc, dict) else None
+
+
+def item_page(entity: str, pid: str, half_hidden: str = "") -> Page:
+    """The facts the item gate needs about ONE track / album: its own popularity and its artists' PROFILE facts.
+
+    Everything here comes from the catalog. The artist ids are the item's `artists[].id`; each artist is then read as
+    a profile with the same reader and the same typed-field rule a profile page gets, and its processed claims come
+    from the same claiming table. The artist page deliberately carries NO hide-list state: an artist who is already
+    hidden is still the person the requester has to be.
+
+    A shape the gate cannot use (no such item, `artists` not a list of ids, popularity not a number, too many
+    artists) returns an unread item with the reason, which `identity.decide_item` keeps with a person."""
+    def unread(why: str) -> Page:
+        return Page(pid, entity, half_hidden=half_hidden, item_why=f"{entity} page: {why}; a person decides the scope")
+
+    if not UUID_RE.fullmatch(pid):
+        return unread("only part of its id is on file")
+    doc = item_doc(entity, pid)
+    if not doc:
+        return unread(f"the catalog has no such {entity}")
+    arts = doc.get("artists")
+    ids = [a.get("id") for a in arts if isinstance(a, dict)] if isinstance(arts, list) else None
+    if ids is None or len(ids) != len(arts) or not all(isinstance(i, str) and UUID_RE.fullmatch(i) for i in ids):
+        return Page(pid, entity, half_hidden=half_hidden, item_read=True, facts_unknown="artists")
+    if not _is_number(doc.get("popularity")):
+        return Page(pid, entity, half_hidden=half_hidden, item_read=True, facts_unknown="popularity")
+    ids = list(dict.fromkeys(ids))
+    if len(ids) > ITEM_MAX_ARTISTS:
+        return unread(f"it has {len(ids)} artists")
+    claims = processed_claims(ids) if ids else {}
+    artists = tuple(page_facts([{"entity": "profile", "id": i} for i in ids], set(), claims))
+    return Page(pid, entity, name=str(doc.get("title") or ""), popularity=float(doc.get("popularity")),
+                half_hidden=half_hidden, item_read=True, artists=artists)
+
+
 def page_facts(pages: list[dict], hidden: set[str], claims: dict[str, set[int]],
-               half: dict[str, str] | None = None) -> list[Page]:
+               half: dict[str, str] | None = None, items: bool = False) -> list[Page]:
+    """`items=True` reads a track / album for the item gate. Off by default: a caller that does not ask for it gets
+    the unread item every non-profile page was before (-> JAN_REVIEW), and performs no read for it."""
     half = half or {}
     out = []
     for p in pages:
         pid, ent = p["id"], p.get("entity") or "profile"
         if ent != "profile" or pid in hidden:
+            if items and ent in ITEM_ENTITIES and pid not in hidden and not half.get(pid):
+                out.append(item_page(ent, pid))
+                continue
             out.append(Page(pid, ent, hidden=pid in hidden, half_hidden=half.get(pid, "")))
             continue
         if not UUID_RE.fullmatch(pid):

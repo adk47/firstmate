@@ -856,6 +856,10 @@ Identity is decided by code per gdpr-ack-v2 paths A-E (a claim is one path, neve
 never selects a hide. The pipeline only PREPARES the reversible hide PRs (H-DevOps `HIDDEN_ENTITY_IDS` + PDP
 sitemap `LEGAL_HIDDEN_ENTITY_IDS`); a person merges. Never `DELETE /api/v3/admin/profile` or muso-cli delete
 (legal hold 1350). Customer sends stay locked until Fable's GO lands in a PR.
+A track / album passes only through its ONE catalog artist's profile on the same paths (`identity.decide_item`).
+Each repo has one live batch PR carrying the whole set; a changed set opens a new PR and closes the old one, never a
+force-push. What Caroline answers, does and hands off for billing and hides, the refund caps and every undo:
+`docs/support/caroline-billing-and-hide.md` (pinned by `policies/caroline-billing-and-hide.json` + its test).
 
 ## Sentinel demotion: three independent stops, and nothing promotes itself
 
