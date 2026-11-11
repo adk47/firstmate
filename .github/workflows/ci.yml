@@ -139,7 +139,7 @@ jobs:
     # separate follow-up work.
     runs-on: ubuntu-24.04
     # Measured whole remainder is ~98 min of serial work. Eight shards put
-    # ~12.3 min of it on each runner; five put ~19.7 min, which was enough
+    # ~12.6 min of it on each runner; five put ~19.7 min, which was enough
     # heavy subprocess work on a 2-core runner that concurrency and timing
     # assertions began failing on contention rather than on any defect. Cap is
     # a hang tripwire with over 3x margin over the balanced load, not the

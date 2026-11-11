@@ -64,7 +64,7 @@ Each shard is still strictly serial in itself, and separate runners mean no two 
 It was 5 until 2026-11-05, when the remainder had grown to ~98 minutes of serial work and each of five runners carried ~20 minutes of heavy subprocess work on a 2-core box.
 At that load the lane's concurrency and timing assertions started failing on runner contention rather than on any defect: `the first drain over a 5272019-byte log took 114.821s, over the 60s bound`, `slow check checkpoint exit: expected exit 0, got 124`, `concurrent append/drain subprocess failed`, `concurrent sequence claims were not unique and monotonic`, `a fast scan should compute one signature per file and check the beacon once`, and `the tmux task shell did not become ready`.
 Different shards failed on each run, which is the signature of contention rather than a defect, and the same scripts passed when run alone.
-Eight shards put ~12.5 minutes on each runner without changing the total work or any assertion.
+Eight shards put ~12.6 minutes on each runner without changing the total work or any assertion.
 
 `bin/fm-test-run.sh` owns `n` and refuses any lane whose `of<n>` disagrees with it.
 `.github/workflows/ci.yml` derives the same `n` from `strategy.job-total` rather than a literal, so changing the shard count in either file without the other fails the lane loudly instead of leaving part of the required suite unrun.
