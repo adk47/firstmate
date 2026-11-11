@@ -125,18 +125,20 @@ test_record_appends_one_ledger_line_and_refuses_bad_input() {
 }
 
 test_apply_lifts_only_ruled_class_a_holds() {
-  local home calls
+  local home calls backlog
   home=$(make_home apply)
   calls="$home/calls.log"
+  backlog=$(cd "$home/data" && pwd -P)/backlog.md
 
   run_decider "$home" record ready-a "unhold and ship" "built and green" "wiki" "re-hold" >/dev/null
   run_decider "$home" apply --yes >/dev/null 2>&1 || fail "apply --yes must succeed"
 
-  grep -q '^unhold ready-a$' "$calls" || fail "apply must lift a ruled Class A hold"
-  grep -q '^unhold decided-a$' "$calls" && fail "apply must not lift a Class A hold with no ruling"
-  grep -q '^unhold spend-item$' "$calls" && fail "apply must never lift a Class B hold"
-  grep -q '^unhold legal-item$' "$calls" && fail "apply must never lift a Class B hold"
-  grep -q '^unhold work-a$' "$calls" && fail "apply must not lift a hold with work outstanding"
+  grep -q "^unhold ready-a --file $backlog$" "$calls" \
+    || fail "apply must lift a ruled Class A hold from the active home's backlog"
+  grep -q "^unhold decided-a --file $backlog$" "$calls" && fail "apply must not lift a Class A hold with no ruling"
+  grep -q "^unhold spend-item --file $backlog$" "$calls" && fail "apply must never lift a Class B hold"
+  grep -q "^unhold legal-item --file $backlog$" "$calls" && fail "apply must never lift a Class B hold"
+  grep -q "^unhold work-a --file $backlog$" "$calls" && fail "apply must not lift a hold with work outstanding"
   pass "apply lifts only ruled Class A holds"
 }
 

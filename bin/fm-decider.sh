@@ -93,7 +93,24 @@ SNAPSHOT="$DECIDER/holds.jsonl"
 SCAN="$SCRIPT_DIR/fm-hold-scan.py"
 DIGEST="$SCRIPT_DIR/fm-hold-digest.py"
 
+# shellcheck source=bin/fm-tasks-axi-lib.sh
+. "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
+# shellcheck source=bin/fm-backlog-transition-lib.sh
+. "$SCRIPT_DIR/fm-backlog-transition-lib.sh"
+
 die() { printf 'fm-decider: %s\n' "$*" >&2; exit 1; }
+
+tasks_axi() {
+  local data file root
+  data=$(fm_backlog_data_absolute "$DATA") || die "data directory cannot be resolved: $DATA"
+  root=$(fm_backlog_root "$data") || die "$FM_BACKLOG_TRANSITION_ERROR"
+  if [ "$(fm_tasks_axi_backend "$root")" = markdown ]; then
+    file=$(fm_backlog_file "$data") || die "$FM_BACKLOG_TRANSITION_ERROR"
+    (cd "$root" && tasks-axi "$@" --file "$file")
+  else
+    (cd "$root" && tasks-axi "$@")
+  fi
+}
 
 usage() { sed -n '2,/^set -eu$/p' "${BASH_SOURCE[0]}" | sed '$d' | sed 's/^# \{0,1\}//'; }
 
@@ -208,7 +225,7 @@ walk() {  # <apply|plan>
     if [ "$klass" = "A" ]; then
       if has_ruling "$id"; then
         if [ "$mode" = "apply" ]; then
-          if tasks-axi unhold "$id" >/dev/null 2>&1; then
+          if tasks_axi unhold "$id" >/dev/null 2>&1; then
             printf 'lifted: %s (ruled)\n' "$id"
             lifted=$((lifted + 1))
           else
