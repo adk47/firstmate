@@ -196,6 +196,10 @@
 #   See docs/configuration.md for provider/Git setup and supported limits.
 #   Launch templates live in launch_template() below; placeholders replaced before launch:
 #     __BRIEF__    absolute path to data/<task-id>/brief.md
+#     __BRIEFARG__ the whole quoted launch argument that carries the brief: a
+#                  constant-size pointer to __BRIEF__ (or, for a harness listed in
+#                  FM_SPAWN_BRIEF_INLINE_HARNESSES, a capped inline body). Never the
+#                  brief's content, so the launch line cannot outgrow MAX_ARG_STRLEN.
 #     __PIBIN__    quoted concrete Pi-family executable path resolved from PATH
 #     __PITUIMODE__ optional --tui-mode regular when that executable advertises it
 #     __TURNEND__  absolute path to state/<task-id>.turn-ended (for harnesses whose
@@ -212,6 +216,12 @@
 #     __CURSORBIN__ resolved, cursor-verified executable for a cursor launch
 #     __GEMINISETTINGS__ firstmate-owned per-task gemini settings file (busy-state hooks)
 #     __ROVOBIN__   resolved, rovo-verified executable for a rovo launch
+#   The launch line therefore stays constant-size as a brief grows. If the resolved
+#   launch argument still exceeds MAX_ARG_STRLEN (131072 bytes), the spawn refuses
+#   before any process starts, naming the brief path, its byte size, and the limit.
+#   The opt-in inline escape hatch caps its body at FM_SPAWN_BRIEF_INLINE_MAX bytes
+#   with the pointer as the first line and an explicit truncation notice, never a
+#   silent cut.
 # Verified per-harness turn-end hooks are installed automatically where enabled; some live outside the worktree.
 # Kimi uses one surgically installed Firstmate region in $HOME/.kimi-code/config.toml,
 # a firstmate-owned global hook and registry, and a gitignored per-task pointer.
@@ -1316,6 +1326,83 @@ shell_quote() {
   printf "'"
 }
 
+# Linux caps a single argv element at MAX_ARG_STRLEN (131072 bytes on every
+# supported kernel). The launch line hands the brief to the agent as ONE argv
+# element, so a brief above that cap cannot start at all: the pane shell dies
+# with "-bash: /usr/bin/env: Argument list too long" and the lane reads as dead
+# rather than as an oversized brief. A brief legitimately grows with a lane's
+# history, so the launcher passes a constant-size POINTER to the brief's stable
+# path instead of its content, and refuses loudly when even that cannot fit.
+FM_MAX_ARG_STRLEN=${FM_MAX_ARG_STRLEN:-131072}
+# Harnesses that genuinely need the brief text inline rather than a path
+# pointer. Empty by default: every verified harness reads the brief from disk.
+FM_SPAWN_BRIEF_INLINE_HARNESSES=${FM_SPAWN_BRIEF_INLINE_HARNESSES:-}
+# Cap for an inline body, leaving room for the envelope and the rest of the
+# launch line inside FM_MAX_ARG_STRLEN.
+FM_SPAWN_BRIEF_INLINE_MAX=${FM_SPAWN_BRIEF_INLINE_MAX:-65536}
+
+brief_pointer_text() {  # <brief-real>
+  printf 'Read the brief at %s and follow it exactly.' "$1"
+}
+
+brief_harness_needs_inline() {  # <harness>
+  local entry
+  local IFS=,
+  for entry in $FM_SPAWN_BRIEF_INLINE_HARNESSES; do
+    [ "$entry" = "$1" ] && return 0
+  done
+  return 1
+}
+
+# The body the launch argument carries. The default is the constant-size
+# pointer, so the launch line never grows with the brief. A harness listed in
+# FM_SPAWN_BRIEF_INLINE_HARNESSES gets the brief text inline, capped at
+# FM_SPAWN_BRIEF_INLINE_MAX with the pointer as its first line and an explicit
+# truncation notice, never a silent cut.
+brief_launch_body() {  # <brief-real> <harness> <out-file>
+  local brief=$1 harness=$2 out=$3 size
+  brief_pointer_text "$brief" > "$out" || return 1
+  brief_harness_needs_inline "$harness" || return 0
+  size=$(wc -c < "$brief" 2>/dev/null) || return 1
+  if [ "$size" -gt "$FM_SPAWN_BRIEF_INLINE_MAX" ]; then
+    printf '\n\n[firstmate: this brief is %s bytes; only its first %s bytes are inline. Read the rest at %s.]\n\n' \
+      "$size" "$FM_SPAWN_BRIEF_INLINE_MAX" "$brief" >> "$out" || return 1
+  fi
+  head -c "$FM_SPAWN_BRIEF_INLINE_MAX" "$brief" >> "$out" || return 1
+}
+
+# The exact shell text the launch template carries for the brief, including the
+# surrounding double quotes. Both forms are constant-size in the brief.
+brief_launch_argument() {  # <brief-real> <harness> <body-file>
+  local brief=$1 harness=$2 body=$3 pointer opinput
+  opinput=$(shell_quote "$FM_ROOT/bin/fm-operational-input.sh")
+  # shellcheck disable=SC2016  # single quotes are deliberate: the $(...) expands in the pane, not here
+  if brief_harness_needs_inline "$harness"; then
+    printf '"$(%s encode launch-brief < %s)"' "$opinput" "$(shell_quote "$body")"
+  else
+    pointer=$(brief_pointer_text "$brief")
+    printf '"$(printf %%s %s | %s encode launch-brief)"' "$(shell_quote "$pointer")" "$opinput"
+  fi
+}
+
+# Refuse the spawn before any endpoint or process exists when the launch
+# argument cannot fit in one argv element. The message names the brief path, its
+# byte size, and the limit, so an oversized brief reads as itself instead of as
+# a dead lane.
+brief_launch_guard() {  # <brief-real> <body-file> [<resolved-launch-line>]
+  local brief=$1 body=$2 launch=${3:-} brief_bytes encoded_bytes launch_bytes
+  brief_bytes=$(wc -c < "$brief" 2>/dev/null) || brief_bytes=0
+  encoded_bytes=$("$FM_ROOT/bin/fm-operational-input.sh" encode launch-brief < "$body" 2>/dev/null | wc -c) || encoded_bytes=0
+  launch_bytes=0
+  [ -z "$launch" ] || launch_bytes=$(printf '%s' "$launch" | wc -c)
+  if [ "$encoded_bytes" -le "$FM_MAX_ARG_STRLEN" ] && [ "$launch_bytes" -le "$FM_MAX_ARG_STRLEN" ]; then
+    return 0
+  fi
+  printf 'error: this brief is too large to pass as an argument: %s is %s bytes, the launch argument limit is %s bytes (encoded launch argument %s bytes, launch line %s bytes); refusing to start %s\n' \
+    "$brief" "$brief_bytes" "$FM_MAX_ARG_STRLEN" "$encoded_bytes" "$launch_bytes" "$ID" >&2
+  return 1
+}
+
 resolve_pi_executable() {
   local candidate dir
   candidate=$(type -P -- "$1" 2>/dev/null) || return 1
@@ -1363,15 +1450,15 @@ launch_template() {
     # alone disables the feature; keep both so a managed override of one still
     # leaves the other in force. Both are per-launch, scoped to this invocation only,
     # and never touch the captain's global ~/.claude/settings.json.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off"}'\'' __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions --settings '\''{"feedbackDrafts":"off"}'\'' __MODELFLAG____EFFORTFLAG____BRIEFARG__' ;;
     codex)
       if [ "$kind" = secondmate ]; then
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox __BRIEFARG__'
       else
-        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox -c "notify=[\"bash\",\"-c\",\"touch __TURNEND__\"]" __BRIEFARG__'
       fi
       ;;
-    opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    opencode) printf '%s' 'OPENCODE_CONFIG_CONTENT='\''{"permission":{"*":"allow"}}'\'' opencode __MODELFLAG__--prompt __BRIEFARG__' ;;
     pi|pi-signed)
       printf '%s' '__PIBIN____PITUIMODE__'
       if [ "$kind" = secondmate ]; then
@@ -1379,9 +1466,9 @@ launch_template() {
         # reads; without it a pi mate's armed record would never leave its seed
         # state. It is written outside the mate home, so it loads without a
         # project-trust dialog exactly as it does for a crew window.
-        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ -e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PITURNEND__ -e __PIWATCH__ -e __PIEXT__ __BRIEFARG__'
       else
-        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"'
+        printf '%s' ' __MODELFLAG____EFFORTFLAG__-e __PIEXT__ __BRIEFARG__'
       fi
       ;;
     # grok (Grok Build TUI): a positional prompt starts the supervised interactive
@@ -1391,7 +1478,7 @@ launch_template() {
     # --dangerously-skip-permissions. grok's turn-end signal does NOT ride the
     # launch command - it is a Stop-event hook installed below (global hook +
     # per-task pointer), so the template is identical for ship/scout/secondmate.
-    grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    grok) printf '%s' 'grok --always-approve __MODELFLAG____EFFORTFLAG____BRIEFARG__' ;;
     # Cursor Agent CLI. --trust suppresses the workspace-trust prompt, which
     # --yolo does NOT cover and which would otherwise block every spawn, since
     # each task gets a fresh worktree path cursor has never seen. --yolo is the
@@ -1404,11 +1491,11 @@ launch_template() {
     # inherited CLAUDECODE cannot outrank cursor's own marker in a process that
     # only reads the environment. Cursor exposes no effort flag, so the shared
     # effort axis is deliberately omitted and stays in task metadata only.
-    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ "$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    cursor) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS -u GEMINI_CLI -u CURSOR_INVOKED_AS __CURSORBIN__ --trust --yolo __MODELFLAG__--workspace __WORKTREE__ __BRIEFARG__' ;;
     # gemini (Google Gemini CLI): a positional query starts the supervised
-    # interactive session and auto-submits it, so the brief rides the launch
-    # command exactly as it does for claude and grok (verified: a multi-line
-    # brief submitted itself with no extra Enter, gemini-cli 0.58.0).
+    # interactive session and auto-submits it, so the brief pointer rides the
+    # launch command exactly as it does for claude and grok (verified: a
+    # multi-line brief submitted itself with no extra Enter, gemini-cli 0.58.0).
     # -y (--yolo) auto-approves every tool call, which an unattended crewmate
     # needs; the footer renders ` YOLO Ctrl+Y` while it is on and a WriteFile
     # was verified to land with no approval gate.
@@ -1439,7 +1526,7 @@ launch_template() {
     # stays in task metadata only, per the record-and-omit contract.
     # Its turn-end and busy-state signals do NOT ride the launch command:
     # they are project hooks written into the worktree below.
-    gemini) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS GEMINI_CLI_TRUST_WORKSPACE=true GEMINI_CLI_SYSTEM_SETTINGS_PATH=__GEMINISETTINGS__ gemini -y __MODELFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    gemini) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS GEMINI_CLI_TRUST_WORKSPACE=true GEMINI_CLI_SYSTEM_SETTINGS_PATH=__GEMINISETTINGS__ gemini -y __MODELFLAG____BRIEFARG__' ;;
     # Kimi Code rejects a positional prompt, so it launches bare and receives
     # only an absolute brief pointer after the TUI readiness gate below.
     # Its turn-end signal is a globally configured Stop hook plus a guarded
@@ -1466,7 +1553,7 @@ launch_template() {
     # session event log instead (bin/fm-busy-lib.sh), bound by the sidecar
     # written below. Nothing to place in the template for it.
     # codex, opencode, and kimi are also markerless and share this inherited-marker hazard; changing their verified launch boundaries belongs in follow-up work.
-    muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
+    muse) printf '%s' 'env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT -u FM_PI_HARNESS XDG_CONFIG_HOME=__MUSECONFIG__ XDG_DATA_HOME=__MUSEDATA__ MUSE_EXPERIMENTAL_FOREIGN_PERSONAL_CONTEXT_KILL=on __MUSEBIN__ --yolo __MODELFLAG____EFFORTFLAG____BRIEFARG__' ;;
     # rovo (Atlassian Rovo CLI): a positional brief is dead-on-arrival - rovo
     # loads, never enters a working state, and drops back to an idle shell within
     # about 10-15 seconds (confirmed live four times over a raw PTY and once under
@@ -2129,6 +2216,14 @@ fi
 
 BRIEF_DIR_REAL=$(cd "$(dirname "$BRIEF")" && pwd -P)
 BRIEF_REAL="$BRIEF_DIR_REAL/$(basename "$BRIEF")"
+
+# Resolve the launch argument's brief body and refuse an oversized one here,
+# before any endpoint or process exists (brief_launch_guard above).
+BRIEF_ARG_BODY="$STATE/$ID.brief-arg"
+brief_launch_body "$BRIEF" "$HARNESS" "$BRIEF_ARG_BODY" \
+  || { echo "error: could not prepare the launch brief body for $BRIEF" >&2; exit 1; }
+brief_launch_guard "$BRIEF" "$BRIEF_ARG_BODY" || exit 1
+BRIEF_ARG=$(brief_launch_argument "$BRIEF" "$HARNESS" "$BRIEF_ARG_BODY")
 
 # PROJ_ABS can still carry a symlinked path component (e.g. macOS's /tmp ->
 # /private/tmp) when it came from the ship/scout branch's logical `pwd` above.
@@ -3512,6 +3607,7 @@ if [ "$HARNESS" = rovo ]; then
   }
   LAUNCH=${LAUNCH//__ROVOCONFIGOVERRIDE__/$ROVOCONFIGOVERRIDE}
 fi
+LAUNCH=${LAUNCH//__BRIEFARG__/$BRIEF_ARG}
 LAUNCH=${LAUNCH//__BRIEF__/$sq_brief}
 LAUNCH=${LAUNCH//__TURNEND__/$sq_turnend}
 LAUNCH=${LAUNCH//__PIEXT__/$sq_piext}
@@ -3632,6 +3728,7 @@ if [ "$LAUNCH_ENV_ENABLED" = 1 ]; then
   fi
   LAUNCH="$LAUNCH_ENV_PREFIX /bin/sh -c $(shell_quote "$LAUNCH")"
 fi
+brief_launch_guard "$BRIEF" "$BRIEF_ARG_BODY" "$LAUNCH" || exit 1
 sleep 0.3
 spawn_send_literal "$T" "$LAUNCH"
 sleep 0.3
@@ -3645,7 +3742,7 @@ if [ "$HARNESS" = kimi ]; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
     exit 1
   fi
-  KIMI_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+  KIMI_POINTER=$(brief_pointer_text "$BRIEF_REAL")
   KIMI_SUBMIT_RETRIES=${FM_KIMI_SUBMIT_RETRIES:-3}
   KIMI_SUBMIT_SLEEP=${FM_KIMI_SUBMIT_SLEEP:-${FM_KIMI_POLL_INTERVAL:-0.5}}
   KIMI_SUBMIT_SETTLE=${FM_KIMI_SUBMIT_SETTLE:-0}
@@ -3669,7 +3766,7 @@ if [ "$HARNESS" = rovo ]; then
     rovo_spawn_fail "rovo did not show a verified ready signal before brief delivery in window $T"
     exit 1
   fi
-  ROVO_POINTER="Read the brief at $BRIEF_REAL and follow it exactly."
+  ROVO_POINTER=$(brief_pointer_text "$BRIEF_REAL")
   ROVO_SUBMIT_RETRIES=${FM_ROVO_SUBMIT_RETRIES:-3}
   ROVO_SUBMIT_SLEEP=${FM_ROVO_SUBMIT_SLEEP:-${FM_ROVO_POLL_INTERVAL:-0.5}}
   ROVO_SUBMIT_SETTLE=${FM_ROVO_SUBMIT_SETTLE:-0}

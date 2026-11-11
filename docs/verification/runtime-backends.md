@@ -419,7 +419,7 @@ On the cancelled turn the same payload carried `prompt_response = '[no response 
 
 ### Autonomous end-to-end worker
 
-One throwaway worker was launched exactly as the spawn launches one - positional brief, `-y`, workspace trust - and observed from start to idle:
+One throwaway worker was launched exactly as the spawn then launched one - positional brief, `-y`, workspace trust - and observed from start to idle:
 
 ```text
 t=5s   (esc to cancel, 2s)
@@ -1247,7 +1247,7 @@ This row is a delivery guard for submit acknowledgement only; recorded worker st
 
 A throwaway scout was spawned through `bin/fm-spawn.sh --scout --backend tmux` on a real cursor worker and driven to completion:
 
-1. the launch delivered its brief positionally and the agent executed it;
+1. the launch then delivered its brief positionally and the agent executed it;
 2. `state/<id>.cursor-session` was written with the task worktree;
 3. the transcript fold read `busy` mid-turn and `idle` after it;
 4. `bin/fm-send.sh` delivered a steer through the then-current typed path and exited 0;

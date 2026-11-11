@@ -13,6 +13,13 @@
 #   fm-test-run.sh --proven-isolated
 #   fm-test-run.sh tests/<name>.test.sh [more scripts...]
 #
+# Local environment exclusions: --changed additionally drops any selected suite
+# listed in the gitignored .no-mistakes/test-exclude (one suite path per line,
+# with or without the leading tests/), so a contributor whose machine lacks
+# optional tooling or carries atypical ambient settings can exclude exactly
+# those suites without editing the trusted commands.test that CI shares.
+# Other selection modes ignore the file.
+#
 # Inspection (no execution):
 #   fm-test-run.sh --list --all
 #   fm-test-run.sh --list --family <name>
@@ -317,7 +324,7 @@ family_for_basename() {
     fm-control.test.sh|fm-control-relaunch.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|\
     fm-send-inbox.test.sh|fm-send-liveness.test.sh|fm-spawn-batch.test.sh|\
-    fm-spawn-dispatch-profile.test.sh|fm-claude-trust.test.sh|\
+    fm-spawn-dispatch-profile.test.sh|fm-spawn-brief-argv.test.sh|fm-claude-trust.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
     fm-teardown-endpoint-safety.test.sh)
       printf '%s\n' backend-dispatch
@@ -679,6 +686,7 @@ tests/fm-sessionstart-hook-live-e2e.test.sh 20
 tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh 22
 tests/fm-sessionstart-nudge.test.sh 68274
 tests/fm-shared-captain-inheritance.test.sh 6108
+tests/fm-spawn-brief-argv.test.sh 9400
 tests/fm-spawn-dispatch-profile.test.sh 82762
 tests/fm-spawn-pool-base-freshen.test.sh 39868
 tests/fm-spawn-worktree-settle.test.sh 5913
@@ -1535,6 +1543,26 @@ detect_gate_skip_token() {
   grep -F -q "skip: $token" "$file" 2>/dev/null
 }
 
+# Local environment exclusions: lines of suite paths in the gitignored
+# .no-mistakes/test-exclude are dropped from the selection. Some suites depend
+# on machine-local tooling (Ruby for workflow parsing, a particular installed
+# Pi build) or ambient settings (a group-writable umask), so a contributor can
+# exclude exactly those suites without changing the trusted commands.test that
+# CI and every other machine share. The list is local state, never tracked.
+apply_local_exclusions() {
+  local list="$ROOT/.no-mistakes/test-exclude" s name keep
+  local -a kept=()
+  [ -f "$list" ] || return 0
+  for s in "${SCRIPTS[@]+"${SCRIPTS[@]}"}"; do
+    name=${s#tests/}
+    keep=1
+    if grep -Fxq -e "$s" -e "$name" "$list"; then keep=0; fi
+    [ "$keep" -eq 1 ] && kept+=("$s")
+  done
+  SCRIPTS=("${kept[@]+"${kept[@]}"}")
+  log "applied local environment exclusions from ${list#"$ROOT"/}"
+}
+
 apply_exclude_families() {
   local s fam keep ex
   local -a kept=()
@@ -1885,6 +1913,9 @@ case "${MODE:-}" in
 esac
 
 apply_exclude_families
+if [ "$MODE" = changed ]; then
+  apply_local_exclusions
+fi
 if [ "${#EXCLUDE_FAMILIES[@]}" -gt 0 ]; then
   SELECTION_DESC="${SELECTION_DESC};exclude-family=$(IFS=,; printf '%s' "${EXCLUDE_FAMILIES[*]}")"
 fi
