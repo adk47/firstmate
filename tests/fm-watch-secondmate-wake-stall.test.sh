@@ -7,7 +7,7 @@
 # than SECONDMATE_WAKE_STALL_SECS (a build, a test sweep, a review, a merge)
 # leaves an aged foreign row behind while the mate is provably mid-turn. The rung
 # therefore stays silent on a POSITIVE busy read of the mate's own endpoint and
-# reports otherwise, so a mate that cannot be captured is never silently
+# reports otherwise, so a mate that cannot be proven busy is never silently
 # exempted.
 #
 # Every fixture here is built by running the REAL bin/fm-spawn.sh --secondmate,
@@ -24,10 +24,11 @@
 #   grok, capture fails        -> still reports (no positive read is possible)
 #   grok rendered busy footer -> silent (the rendered fallback still suppresses)
 #
-# Residual gap, stated plainly: a harness with no semantic busy source (grok,
-# rovo, muse, cursor, codex) arms no record, so its mate is reported unless the
-# rendered tail carries a busy signature. That is the honest "cannot be proven"
-# case, not a silent exemption.
+# Residual gap, stated plainly: grok and rovo classify from their rendered tail,
+# and muse and cursor fold their own durable session logs, so those can still
+# prove a busy turn; a harness with no semantic or pull source (codex, standalone
+# kimi) arms no record and classifies unknown, so its mate is reported. That is
+# the honest "cannot be proven" case, not a silent exemption.
 #
 # Fixtures are driven through bin/fm-watch-checkpoint.sh, the same foreground
 # checkpoint harness its neighbours (fm-wake-queue.test.sh) use, with a fake
