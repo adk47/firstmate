@@ -50,9 +50,119 @@ proof status (including documentation-required approvals, below), and sent.
 | Outcome | When | Write |
 |---|---|---|
 | **Approve (provisional)** | All of the conditions in the list below hold. | `approved` (Knock's "approved" notice) |
+| **Approve per role (`approve_partial`)** | The request claims several roles and a trusted source - or a dv-4 verified document's own per-role verdicts - proves some of them but not all. The proven roles are approved, every other claimed role is PENDING with its own proof need. See "Per-role decisions" below. | **none yet** - the write half is `credit-per-role-write-c1` (core-backend); apply mode records the split and refuses the write |
 | **Request support** | Everything decided against: big track (including a popularity the catalog does not carry), validator conflict, a trusted or verified-web contradiction (one-person roles flagged `n1`), red flags, NOT_FOUND, deny-listed user/profile, the editorial rules below. | `user_verification_needed` (Knock "more info needed"; the credit stays held) |
 | **Defer** | The track is not ingested yet. Catalog or evidence is unreadable this run, including a track or a linked artist's profile that could not be read (a failed read never becomes a support request; a 404 is the exception after 3 deferred runs, below). A source fetch failed and nothing was fetched. The web check could not run (Codex down or capped and Jev did not answer; the paid fallback is off or over its cap). The web-check cap was hit. The user hit 200 approvals today. The never-re-ask per-user window, or unknown proof-on-file status. | none; retried after 2h |
 | **Hold** | A validator `reject_*` rule fired (any `rule_risk_percent` key starting `reject_` with a number > 0; the reason names the rule): never approved and never asked by automation. It is checked on the request row before any evidence is read, so no evidence error or catalog 404 can turn such a row into a support request. A support request the never-re-ask filters stop: proof on file, or the credit was already asked about. An approval of a documentation-required row with no approved proof on file for that request. | none; a human looks |
+
+### Per-role decisions (R90 / ruling 149 `[key=anchor-granularity]`)
+
+A request with several claimed roles used to be decided ALL-OR-NOTHING: `Evidence.all_confirmed` is
+`all(r.status == CONFIRMED for r in roles)`, so one unproven role blocked every role. A manager who is
+provably the Composer and merely unproven as Co-Writer got nothing approved and heard nothing back.
+
+The decision is now per role, and it is the DEFAULT path - not a branch beside the all-or-nothing one:
+
+- **approved** = the claimed roles a trusted source credits THIS profile in (`RoleEvidence.status` is
+  `CONFIRMED`), plus the claimed roles a dv-4 verified document's own per-role verdicts prove.
+- **pending** = every other claimed role, each with a `pending_proof_need` string saying what would prove
+  it. **A role is never rejected for absence of proof** - pending is pending, forever.
+- pending empty -> today's `approve` (same reason, same write). approved empty -> today's `support` /
+  `defer` (nothing to approve). Both non-empty -> `approve_partial`, with `doc_required=False` for the
+  approved roles and one proof need per pending role.
+
+**The whole-request guards run FIRST and still decide the whole request.** A contradiction in ANY role
+(`ev.any_contradicted`), the editorial-role documentation rule, `one_person`, red flags, a big track, an
+unreadable catalog or a 404 all return before the split, so a partial can never be a way past one of
+them. A contradicted role is evidence the CLAIM is wrong, not merely unproven: it blocks the whole
+request and `approved_roles` stays empty.
+
+**A document on file that contradicts or flags a role blocks the whole request too.** The dv-4 per-role
+verdicts are the second contradiction source (`doc_approve.blocked_role_verdicts`): when any claimed
+role's standing verdict is `contradicted` or `forged`, the row is decided `support` with a reason naming
+the role and the verdict, before the paid provisional arm and before the split, and the document path
+skips it. `verified` does not block, and neither does `unverifiable` nor `unknown` - those are the
+statuses that may pend.
+
+**The web check runs before the split too.** `pre_model` never returns a partial: a request with some
+roles confirmed and some not falls through to the web check, so a web contradiction on ANY role still
+blocks the whole request. Only a NOT_FOUND web verdict leaves a split to decide.
+
+**The whole-request arms run before the split, so they keep what they take.** The paid provisional arm
+(`trust yet verify`) and the footprint path approve the WHOLE request and name every claimed role as
+approved; a row that qualifies for one of them is never downgraded to a partial - with ONE exception: a
+document on file that proves only SOME of the claimed roles (below).
+
+**A partial support document is the split's other source.** A dv-4 document whose own per-role verdicts
+prove SOME of the claimed roles approves those and holds the rest pending; one that proves every claimed
+role is the whole-request document approval. A document that proves none of the claimed roles leaves the
+row to the guard that already decided it. `unverifiable` and `unknown` are the statuses that may pend -
+"we could not check it" is neither good nor bad, and `unknown` is what the store writes when the dv-4
+tooling itself failed, so a provider outage must not cost the user the roles the document DID prove. A
+role the document CONTRADICTS, or one flagged forged, is never approvable and never pendable: the
+document is not used at all.
+
+**Neither-never: a partial approves the roles the proof supports AND asks for the rest in the same
+pass.** The ask goes out through the ENABLED `uvn-status` sender, not through `held_rows` (which is a
+document-intake and shadow-judging surface, not a message). `scripts/paid-status/partial_asks.py` builds
+`list-P.json` from the ledger - the latest `apply` decision per request that is `approve_partial`
+with a non-empty `pending_roles` and no ask-hold marker on its reason (a `judge`-mode run decides in
+shadow and never messages a customer) - listing ONLY those split requests, never another open request
+the same user happens to have, and naming only the pending roles in the ask - and `scripts/paid-status/daily.sh`
+runs it through the same `runner()` and the same `uvn-status` campaign as every other list, so the
+standing captain-approved copy, the kill switch, the fraud lens, the ask caps, the segment's own holds
+(`exclude-cs`, support@ 7d, core notice 7d) and the `UVN_STATUS_COPY_APPROVED` send gate all apply
+unchanged. The lane has its OWN switch, `PARTIAL_ASKS` (default 0; the installed
+`/etc/cron.d/hydra-paid-status` lines leave it unset until the per-role core write ships, so no ask
+reaches a customer while the proven roles are still unapproved): `ASKS` is never assigned in `daily.sh`
+and stays 0, so the general ask lane remains closed (firstmate 024). Once the write half ships, setting
+`PARTIAL_ASKS=1` admits the population the captain ordered.
+`uvn_status.partial_pending_roles` is the narrow decider-driven exception (latest `apply` decision only)
+that admits those requests to the
+list-driven path while their core status is still `unverified` (the per-role write half does not exist
+yet); it is not a widening of `PENDING_STATUSES`. The ask never flips the decision - `approve_partial`
+keeps its `approved_roles`, `pending_roles` and `pending_proof_need`. Every never-re-ask rule (already
+asked, support contacted, the 24h per-user window, the day/run ask caps) still applies and prepends its
+own marker, which takes the row out of the vehicle; unknown proof status defers the ASK, never the
+approval. The catalog split has its OWN reason prefix (`per-role split:`), so `proof on file` keeps
+meaning exactly one thing - a document is on file - and `stage2.held_rows` selects only the
+`approve_partial` rows that carry a `proof_id`: stage 2 can only judge a document, and a split row in
+that campaign would spend its per-run budget on a row it can never resolve. The `proof on file` reason
+prefix is NOT the delivery mechanism: it is the marker
+`stage2.held_rows` matches so an incoming document is filed against the row and shadow-judged, and
+`verification-queue-report.py` only counts it as "with a person" when the row is a `hold` or carries a
+`proof_id` - a catalog split with no document is not a document on file.
+
+**A partial document approves exactly the roles the proof supports: the roles it verified PLUS the
+roles a trusted source already confirmed.** `approved = catalog_confirmed ∪ doc_roles`, and every other
+claimed role pends. A catalog-confirmed role is never demoted to `pending` - that would ask the customer
+to prove a credit the catalog already proves. The document's standing verdict is `partial`, so the commit
+passes `partial_ok` for the document it planned with: the role set and the commit agree on the same
+document, and nothing is demoted to make them agree.
+
+**The recorded document is the one that proves the most claimed roles.** `doc_approve.pick` orders by
+coverage first and recency only as a tie-break, so a newer PARTIAL filing can never shadow an older
+fully-verified one - that would ask the customer to prove again something already proven, and would
+record the weaker document as the proof.
+
+**A documentation-required request with NO document is held whole.** The `needs_proof` hold and the
+`server_approval_refusal` guard cover `approve_partial` as well as `approve`, so an editorial
+documentation requirement in ANY role still blocks the whole request - unless the customer has already
+sent a document that proves some of the roles, in which case that document IS the proof and those roles
+are approved.
+
+**Caps count the request once.** `approvals_today_by_user` counts `COUNT(DISTINCT request_id)`, so a
+3-role request with 1 proven role is ONE approval of ONE request, never three.
+
+**The ledger carries the split.** `decisions.approved_roles` / `decisions.pending_roles` are comma-joined
+(same convention as `claimed_roles`), added by an additive, idempotent `ALTER TABLE` guarded by
+`PRAGMA table_info`; existing rows keep NULL and are never rewritten. `decision_outcomes` books the action
+`approve_partial`.
+
+**Shadow only.** `--mode judge` records the split and writes nothing. `--mode apply` REFUSES
+`approve_partial` with the reason `partial approval needs the core write half: credit-per-role-write-c1`
+and books the outcome `refused:partial_write_half_missing`. Sending a whole-request PUT for a partial
+would approve the unproven roles, which is worse than today.
 
 A row is approved only if all of these hold:
 - no validator `reject_*` rule fired (`policy.validator_rejected_rules`, the SAME predicate the approval

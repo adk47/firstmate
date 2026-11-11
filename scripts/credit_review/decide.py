@@ -71,6 +71,28 @@ older than 3h):
   * DEFER (no write, retried later) when the web check could not run (Codex
     unavailable, nothing fetched and no fallback) - a model outage must never
     turn into a wave of support requests - or the user hit the daily cap.
+  * APPROVE PER ROLE (``approve_partial``, R90 / ruling 149
+    [key=anchor-granularity], captain 2026-11-06: "approve the roles where
+    proof supports it"). A request with several claimed roles is no longer
+    all-or-nothing: the roles a trusted source credits to THIS profile are
+    approved and every other claimed role is PENDING with its own proof need
+    (``pending_proof_need``). A role is NEVER rejected for absence of proof.
+    This is the DEFAULT path, not a branch beside ``all_confirmed``, and it
+    runs only AFTER every whole-request guard above - a contradiction in any
+    role still blocks the whole request, so a partial can never be a way past
+    one. The footprint and web paths keep their whole-request semantics (they
+    do not name roles). Caps count the REQUEST once.
+
+    THIS CHANGE APPROVES NOTHING ON ITS OWN. It is the DECISION half only:
+    apply mode records the split and REFUSES the write with
+    ``PARTIAL_WRITE_REFUSAL`` (a whole-request PUT would approve the unproven
+    roles, which is worse than today), so no proven role is written to core
+    for any user. Its ONLY customer-visible effect today is the ask for the
+    pending roles (``scripts/paid-status/partial_asks.py`` -> the uvn-status
+    sender). The WRITE half is ``credit-per-role-write-c1`` (core-backend) and
+    is a HARD DEPENDENCY of this change: a decision half that lands and whose
+    write half never does is worse than neither, because it records approvals
+    that never happen.
 
 Writes go through muso-admin-api.sh's conditional endpoint (compare-and-set
 ``expectedStatus: unverified``) in batches of <= 50, as
@@ -103,6 +125,7 @@ from . import dsp_gate, proof_parts
 from .evidence import (
     BIG_ARTIST_POPULARITY,
     BIG_TRACK_POPULARITY,
+    CONFIRMED,
     Evidence,
     EvidenceBuilder,
     EvidenceIncomplete,
@@ -157,6 +180,20 @@ JUDGE_KILL_SWITCH = Path(os.environ.get("CREDIT_TRUST_JUDGE_KILL_SWITCH", "/etc/
 APPROVE_SWITCH = Path(os.environ.get("CREDIT_TRUST_DECIDE_APPROVE_DISABLED",
                                      "/etc/hydra/credit-trust-decide-approve.disabled"))
 APPROVE_ARM_OFF_OUTCOME = "held:approve_arm_disabled"
+#: R90 / ruling 149 [key=anchor-granularity]: a request whose claimed roles split into proven and unproven
+#: is decided `approve_partial`. The DECISION half ships here; the WRITE half is `credit-per-role-write-c1`
+#: in core-backend. Until it lands, apply mode REFUSES the write and says so: sending a whole-request PUT
+#: for a partial decision would approve the unproven roles, which is worse than today's all-or-nothing.
+PARTIAL = "approve_partial"
+PARTIAL_WRITE_REFUSAL = "partial approval needs the core write half: credit-per-role-write-c1"
+PARTIAL_REFUSED_OUTCOME = "refused:partial_write_half_missing"
+#: The reason prefix that puts a row in the stage-2 ask campaign (proof.stage2.held_rows). A PARTIAL
+#: row keeps its decision, so its ask is marked in the reason instead of by a HOLD.
+PROOF_ON_FILE_REASON = "proof on file"
+#: The catalog split's OWN prefix. `proof on file` means exactly one thing - a document is on file - so the
+#: split, which has no document, must never carry it: stage 2 can only judge a document, and a split row
+#: in that campaign would starve the real doc-on-file rows out of its per-run budget.
+SPLIT_REASON = "per-role split"
 #: The ONE sender name for this family's ask. The support write's note is core's Knock message, so this name
 #: is what the ledger row carries (verify_messages.approved_by) and what the tick's gates read; no hydra
 #: sender may post the same family (see verify_ledger.DECIDER_SUPPORT).
@@ -389,9 +426,11 @@ CREATE TABLE IF NOT EXISTS decisions (
   track_id TEXT,
   track_title TEXT,
   claimed_roles TEXT,
+  approved_roles TEXT,                 -- per-role split: the claimed roles a trusted source credits to this profile
+  pending_roles TEXT,                  -- per-role split: the claimed roles still UNPROVEN (never rejected)
   popularity INTEGER,
   big_track INTEGER NOT NULL,
-  decision TEXT NOT NULL,              -- approve | support | hold (no write, a human looks) | defer
+  decision TEXT NOT NULL,              -- approve | approve_partial (per role, R90) | support | hold (no write, a human looks) | defer
   reason TEXT NOT NULL,
   evidence_kind TEXT,                  -- catalog_confirmed | footprint | web_credible | NULL
   catalog TEXT,                        -- per-role trusted verdicts
@@ -419,7 +458,7 @@ CREATE TABLE IF NOT EXISTS decision_outcomes (
   run_id TEXT NOT NULL,
   at TEXT NOT NULL,
   request_id TEXT NOT NULL,
-  action TEXT NOT NULL,                -- approve | support | revert
+  action TEXT NOT NULL,                -- approve | approve_partial | support | revert
   outcome TEXT NOT NULL                -- approved | user_verification_needed | unverified | skipped:<reason> | error:<msg> | shadow
 );
 CREATE INDEX IF NOT EXISTS outcomes_req ON decision_outcomes(request_id);
@@ -443,7 +482,7 @@ def ensure_schema(db: sqlite3.Connection) -> None:
     db.executescript(SCHEMA)
     have = {r[1] for r in db.execute("PRAGMA table_info(decisions)")}
     for col, decl in (("doc_required", "INTEGER NOT NULL DEFAULT 0"), ("paid_priority", "INTEGER"),
-                      ("proof_id", "TEXT")):
+                      ("proof_id", "TEXT"), ("approved_roles", "TEXT"), ("pending_roles", "TEXT")):
         if col not in have:
             db.execute(f"ALTER TABLE decisions ADD COLUMN {col} {decl}")
     db.commit()
@@ -478,16 +517,27 @@ class Decision:
     llm_call_id: int | None = None
     conflict: dict[str, Any] | None = None
     request_created_at: str | None = None    # the credit request's createdAt (proof-on-file request scope)
+    # ── the per-role split (R90 / ruling 149 [key=anchor-granularity]) ──────────────────────────────
+    # A request with several claimed roles is no longer all-or-nothing: a role a trusted source credits
+    # to THIS profile is approved, every other claimed role is PENDING with its own proof need. A role is
+    # never rejected here - absence of proof is pending, forever. The whole-request guards (contradiction,
+    # editorial, one-person, red flags, big track, unreadable catalog) all run BEFORE the split and still
+    # decide the whole request, so a partial can never be a way past one of them.
+    approved_roles: list[str] = field(default_factory=list)
+    pending_roles: list[str] = field(default_factory=list)
+    pending_proof_need: dict[str, str] = field(default_factory=dict)   # role -> what would prove it
 
 
 def record_decision(db: sqlite3.Connection, run_id: str, mode: str, d: Decision, at: datetime | None = None) -> None:
     db.execute(
         "INSERT INTO decisions (run_id, decided_at, request_id, profile_id, user_id, track_id, track_title, claimed_roles,"
-        " popularity, big_track, decision, reason, evidence_kind, catalog, web_verdict, web_urls, footprint, n1,"
-        " doc_required, paid_priority, proof_id, model, provider, cost_usd, prompt_sha256, llm_call_id, conflict, mode)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        " approved_roles, pending_roles, popularity, big_track, decision, reason, evidence_kind, catalog, web_verdict,"
+        " web_urls, footprint, n1, doc_required, paid_priority, proof_id, model, provider, cost_usd, prompt_sha256,"
+        " llm_call_id, conflict, mode)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (run_id, utc(at), d.request_id, d.profile_id, d.user_id, d.track_id, d.track_title, ",".join(d.claimed_roles),
-         d.popularity, 1 if d.big_track else 0, d.decision, d.reason[:600], d.evidence_kind, d.catalog, d.web_verdict,
+         ",".join(d.approved_roles), ",".join(d.pending_roles), d.popularity, 1 if d.big_track else 0, d.decision,
+         d.reason[:600], d.evidence_kind, d.catalog, d.web_verdict,
          json.dumps(d.web_urls[:6], ensure_ascii=False), d.footprint, 1 if d.n1 else 0,
          1 if d.doc_required else 0, None if d.paid_priority is None else int(d.paid_priority), d.proof_id,
          d.model, d.provider,
@@ -508,10 +558,13 @@ def recently_decided(db: sqlite3.Connection, since: str) -> set[str]:
 
 
 def approvals_today_by_user(db: sqlite3.Connection, day_start: str) -> dict[int, int]:
+    """Approvals per user today, counted ONCE PER REQUEST (COUNT(DISTINCT request_id)) - never once per
+    claimed role."""
     rows = db.execute(
         "SELECT d.user_id, COUNT(DISTINCT o.request_id) FROM decision_outcomes o JOIN decisions d "
         "ON d.request_id = o.request_id AND d.run_id = o.run_id "
-        "WHERE o.outcome = 'approved' AND o.action = 'approve' AND o.at >= ? GROUP BY d.user_id", (day_start,))
+        "WHERE o.outcome = 'approved' AND o.action = 'approve' AND o.at >= ? GROUP BY d.user_id",
+        (day_start,))
     return {int(u): int(n) for u, n in rows if u is not None}
 
 
@@ -555,6 +608,26 @@ def web_reading(j: JudgeResult | None, ev: Evidence) -> tuple[str, list[dict[str
             and j.identity_consistent is not False and ev.claimant_domains is not None):
         return "CREDIBLE", findings, sup, con
     return "NOT_FOUND", findings, sup, con
+
+
+def proof_need_for(role: str) -> str:
+    """What would prove ONE claimed role. Never a rejection: a role with no proof is pending, forever."""
+    return (f"a trusted source (Spotify/Tidal/MLC/Jaxsta) crediting this profile as {role}, "
+            f"or a document that proves the {role} credit")
+
+
+def role_split(ev: Evidence) -> tuple[list[str], list[str], dict[str, str]]:
+    """(approved, pending, {pending role: what would prove it}) for one request's claimed roles.
+
+    A role is APPROVED when a trusted source credits THIS profile in that role (RoleEvidence.status ==
+    CONFIRMED). Every other claimed role is PENDING with its own proof need. Nothing is ever rejected
+    here, and this function is only reached AFTER every whole-request guard has already returned its
+    decision - a contradiction in any role still blocks the whole request upstream.
+    """
+    confirmed = {r.claimed_role for r in ev.roles if r.status == CONFIRMED}
+    approved = [r for r in ev.claimed_roles if r in confirmed]
+    pending = [r for r in ev.claimed_roles if r not in confirmed]
+    return approved, pending, {r: proof_need_for(r) for r in pending}
 
 
 def one_person(ev: Evidence) -> bool:
@@ -622,12 +695,25 @@ def pre_model(req: dict[str, Any], ev: Evidence, policy: Policy, fp: int) -> Dec
         if not ev.all_confirmed:
             return _set(d, "support", f"editorial role ({roles}): only a trusted source naming this profile in "
                         "the role approves it (never footprint or web); documentation required")
-    if ev.all_confirmed:
+    # ── the per-role split (R90 / ruling 149 [key=anchor-granularity]) ──────────────────────────────
+    # The two whole-request evidence paths keep their semantics EXACTLY: a request every claimed role of
+    # which a trusted source confirms is approved whole, and so is one the trusted footprint vouches for
+    # in every claimed role family. Neither names which roles it supports, so neither is split.
+    approved, pending, _ = role_split(ev)
+    if approved and not pending:
         d.evidence_kind = "catalog_confirmed"
+        # The decision and its reason are today's, unchanged. The roles are recorded anyway so the ledger
+        # can answer "which roles did this approval cover" for every row the split decided - the read-back
+        # `approved roles == anchored roles` is only checkable if a full approval names its roles too.
+        d.approved_roles = approved
         return _set(d, "approve", "every claimed role is credited to this profile by a trusted source")
     if fp >= FOOTPRINT_MIN:
         d.evidence_kind = "footprint"
+        d.approved_roles = list(ev.claimed_roles)
         return _set(d, "approve", f"trusted footprint: {fp} earlier trusted-confirmed claims in this role family")
+    # A trusted source credits this profile in SOME of the claimed roles: the per-role split decides those
+    # and holds the rest PENDING. It is NOT decided here: the whole-request web check still has to run, so
+    # a contradiction in any role blocks the whole request before any role is approved (R90).
     return None
 
 
@@ -646,8 +732,11 @@ def with_web(req: dict[str, Any], ev: Evidence, j: JudgeResult | None, fp: int) 
         return _set(d, "support", f"web sources contradict the claim: {', '.join(sorted(con))}")
     if reading == "CREDIBLE":
         d.evidence_kind = "web_credible"
+        d.approved_roles = list(ev.claimed_roles)
         return _set(d, "approve", f"verified web support: {', '.join(sorted(sup))}")
-    return _set(d, "support", "no trusted or verifiable web evidence found (NOT_FOUND)", doc_required=False)
+    _set(d, "support", "no trusted or verifiable web evidence found (NOT_FOUND)", doc_required=False)
+    d.approved_roles, d.pending_roles, d.pending_proof_need = role_split(ev)
+    return d
 
 
 def base_decision(req: dict[str, Any], ev: Evidence) -> Decision:
@@ -877,7 +966,11 @@ def with_intake(proof: ProofOnFile | None, path: str | None = None) -> ProofOnFi
     return replace(proof, intake_requests=frozenset(ids), scoped=True)
 
 
-STAGE2_ASK_HOLD = "proof on file: stage 2 judged the document"
+STAGE2_ASK_HOLD = f"{PROOF_ON_FILE_REASON}: stage 2 judged the document"
+DOC_ON_FILE_HOLD = f"{PROOF_ON_FILE_REASON}: human review"
+SUPPORT_CONTACTED_HOLD = "emailed support@ in the last 90 days"
+REASKED_HOLD = "support already requested for this credit once"
+NO_ACCOUNT_DEFER = "no account user id on the request"
 
 
 def with_stage2(proof: ProofOnFile | None, path: str | None = None) -> ProofOnFile | None:
@@ -947,6 +1040,12 @@ def _nonneg_int(v: Any, key: str) -> int:
 
 ASK_CAP_DEFER = "daily ask cap: "
 RUN_CAP_DEFER = "per-run ask cap: "
+#: The reason prefixes `filter_support` PREPENDS to a row it will not ask about. A PARTIAL row keeps its
+#: decision and its roles, so the ask outcome lives in the reason; the sender reads these to know the ask
+#: was withheld (never re-ask, a document on file, the 24h window, the caps, unknown proof status).
+#: `PROOF_ON_FILE_REASON` alone is NOT one of them: the per-role split has its own prefix.
+ASK_HOLD_MARKERS = (STAGE2_ASK_HOLD, DOC_ON_FILE_HOLD, SUPPORT_CONTACTED_HOLD, REASKED_HOLD,
+                    WINDOW_DEFER, RUN_CAP_DEFER, ASK_CAP_DEFER, PROOF_UNKNOWN, NO_ACCOUNT_DEFER)
 
 
 def filter_support(db: sqlite3.Connection, decisions: list["Decision"], res: "RunResult",
@@ -962,41 +1061,57 @@ def filter_support(db: sqlite3.Connection, decisions: list["Decision"], res: "Ru
     waiting batch in this run.
     """
     support = [d for d in decisions if d.decision == "support"]
+    partial = [d for d in decisions if d.decision == PARTIAL]
     res.support_candidates = len(support)
+
+    def note(d: "Decision", decision: str, text: str) -> None:
+        """Record the ask outcome. A PARTIAL row keeps its decision and its roles (R90: the
+        approved roles are approved and the pending ones are asked, never neither), so its ask
+        is appended to the reason the stage-2 campaign reads instead of replacing the decision."""
+        if d.decision == PARTIAL:
+            d.reason = f"{text} | {d.reason}"
+        else:
+            _set(d, decision, text)
+
     if proof is None:
         for d in support:
             _set(d, "defer", f"{PROOF_UNKNOWN} ({proof_why}): no support request is sent while it is unknown")
-        res.deferred_proof_unknown += len(support)
+        for d in partial:
+            note(d, "defer", f"{PROOF_UNKNOWN} ({proof_why}): no support request is sent while it is unknown")
+        res.deferred_proof_unknown += len(support) + len(partial)
         return
     asked = asked_requests(db)
     recent = users_asked_since(db, utc(now - SUPPORT_WINDOW))
-    for d in support:
+    pending_cap: list["Decision"] = []
+    for d in support + partial:
         if proof.covers(d) and (ask := proof.handed_to_ask(d)):
-            _set(d, "hold", f"{STAGE2_ASK_HOLD} ({stage2_outcome(ask)}): the user is asked through "
+            note(d, "hold", f"{STAGE2_ASK_HOLD} ({stage2_outcome(ask)}): the user is asked through "
                  f"intercom-verify-request.sh --campaign {ask}, never by a support write")
             res.held_stage2_ask += 1
         elif proof.covers(d):
-            _set(d, "hold", "proof on file: human review (a document is already on file; never ask again)")
+            note(d, "hold", f"{DOC_ON_FILE_HOLD} (a document is already on file; never ask again)")
             res.held_proof += 1
         elif proof.contacted_support(d):
-            _set(d, "hold", "emailed support@ in the last 90 days: human review, never asked "
+            note(d, "hold", f"{SUPPORT_CONTACTED_HOLD}: human review, never asked "
                  "(when in doubt, don't send)")
             res.held_proof += 1
         elif d.request_id in asked:
-            _set(d, "hold", "support already requested for this credit once: never re-ask; human review")
+            note(d, "hold", f"{REASKED_HOLD}: never re-ask; human review")
             res.held_reasked += 1
         elif d.user_id is not None and d.user_id in recent:
-            _set(d, "defer", WINDOW_DEFER + "this user was asked in the last 24h; this row goes out with "
+            note(d, "defer", WINDOW_DEFER + "this user was asked in the last 24h; this row goes out with "
                  "the user's next batch")
             res.deferred_window += 1
+        else:
+            pending_cap.append(d)
     if max_ask_users_per_day is None and max_ask_users_per_run is None:
         return
     # Daily cap on DISTINCT users asked (UTC day): users already asked today count;
     # a user admitted under the cap gets all of their rows in this run (one batch).
     asked_today = users_asked_since(db, now.strftime("%Y-%m-%dT00:00:00Z"))
     admitted: set[int] = set()
-    for d in support:
-        if d.decision != "support" or d.user_id is None:
+    for d in pending_cap:
+        if d.user_id is None:
             continue
         if d.user_id in asked_today or d.user_id in admitted:
             continue
@@ -1005,22 +1120,20 @@ def filter_support(db: sqlite3.Connection, decisions: list["Decision"], res: "Ru
         if max_ask_users_per_day is not None and len(asked_today) + len(admitted) >= max_ask_users_per_day:
             continue
         admitted.add(d.user_id)
-    for d in support:
-        if d.decision != "support":
-            continue
+    for d in pending_cap:
         if d.user_id is None:
             # No account on the row: nobody to ask, whatever the cap (it was mislabelled as
             # the cap being reached).
-            _set(d, "defer", "no account user id on the request: nobody to ask; decided again when it has one")
+            note(d, "defer", f"{NO_ACCOUNT_DEFER}: nobody to ask; decided again when it has one")
             continue
         if d.user_id in asked_today or d.user_id in admitted:
             continue
         if max_ask_users_per_run is not None and len(admitted) >= max_ask_users_per_run:
-            _set(d, "defer", RUN_CAP_DEFER + f"{max_ask_users_per_run} users/run already reached; "
+            note(d, "defer", RUN_CAP_DEFER + f"{max_ask_users_per_run} users/run already reached; "
                  "this row goes out in a later run")
             res.deferred_run_cap += 1
             continue
-        _set(d, "defer", ASK_CAP_DEFER + f"{max_ask_users_per_day} users/day already reached; "
+        note(d, "defer", ASK_CAP_DEFER + f"{max_ask_users_per_day} users/day already reached; "
              "this row goes out on a later day")
         res.deferred_ask_cap += 1
 
@@ -1297,6 +1410,11 @@ def _set(d: Decision, decision: str, reason: str, *, doc_required: bool | None =
     (only web NOT_FOUND: nothing was found against an ordinary claim)."""
     d.decision, d.reason = decision, reason
     d.doc_required = decision == "support" if doc_required is None else doc_required
+    if decision not in ("approve", PARTIAL):
+        # A later guard (server approval guard, proof on file, the caps, the never-re-ask filters)
+        # overrode an approval: the row is NOT approved, so it must not carry the roles an approval
+        # would have covered. The read-back `approved roles == anchored roles` reads this column.
+        d.approved_roles, d.pending_roles, d.pending_proof_need = [], [], {}
     if decision != "approve" and d.evidence_kind == PROVISIONAL_KIND:
         # A later guard (server approval guard, proof on file, the caps) overrode the paid
         # provisional approval: the ledger must not record a provisional kind on an ask or a
@@ -2043,6 +2161,7 @@ class RunResult:
     doc_audit: str = ""               # R22 guard 8: the 14-day 100% audit window's state
     doc_refused_by_core: int = 0      # eligible documents whose row core's own agent guard would refuse
     held_approve_arm: int = 0      # approve verdicts RECORDED and not written (the support-only arm)
+    partial: int = 0               # per-role partial approvals RECORDED (R90); apply mode writes none yet
     support_uncertain: int = 0     # support PUTs that MAY have landed (write or read-back failed): they owe a read-back
     asks_ledgered: int = 0         # distinct users whose Knock ask was ledgered for the tick's gates
     support_candidates: int = 0
@@ -2074,7 +2193,9 @@ class RunResult:
                 f"{self.approved} {verb}, {self.support} {verb2}, {self.deferred} deferred, {self.held} held for a human, "
                 f"{sk} skipped by the server{f' ({skd})' if skd else ''}, {self.n1} one-person contradictions flagged, "
                 f"{self.cas_unreadable_refusals} CAS-unreadable refusals, "
-                f"{self.web_checked} web-checked ({self.model_calls - self.paid_calls} Codex calls at $0, {self.paid_calls} "
+                + (f"{self.partial} per-role partial approval(s) recorded and not written "
+                   f"({PARTIAL_WRITE_REFUSAL}), " if self.partial else "")
+                + f"{self.web_checked} web-checked ({self.model_calls - self.paid_calls} Codex calls at $0, {self.paid_calls} "
                 f"OpenRouter fallback ${self.spend_usd:.2f}{jev}; the rest had no free source to cite), "
                 f"{self.errors} evidence errors. Support asks: {self.support_candidates} before filters, "
                 f"{self.held_proof} held for proof on file, "
@@ -2137,9 +2258,12 @@ def coded_decider_document(res: "RunResult", decisions: Sequence["Decision"], *,
         "decision": d.decision, "reason": (d.reason or "")[:200],
         "evidence_kind": d.evidence_kind, "popularity": d.popularity, "big_track": d.big_track,
         "paid_priority": d.paid_priority, "n1": d.n1, "doc_required": d.doc_required,
+        "approved_roles": list(d.approved_roles), "pending_roles": list(d.pending_roles),
+        "pending_proof_need": dict(d.pending_proof_need),
         "model": d.model, "provider": d.provider, "cost_usd": d.cost_usd, "prompt_sha256": d.prompt_sha256,
     } for d in decisions]
-    counts = {k: sum(1 for d in decisions if d.decision == k) for k in ("approve", "support", "hold", "defer")}
+    counts = {k: sum(1 for d in decisions if d.decision == k)
+              for k in ("approve", "support", "hold", "defer", PARTIAL)}
     counts["total"] = len(decisions)
     executable = res.mode == "apply" and not res.write_errors and res.never_lower_refusals == 0
     return {
@@ -2168,7 +2292,7 @@ STALE_DECIDER_OUT = {
     "executable": False,
     "writes": {"acted": False, "approved": 0, "support": 0, "scanned": 0, "errors": 0,
                "never_lower_refusals": 0, "cas_unreadable_refusals": 0},
-    "counts": {"approve": 0, "support": 0, "hold": 0, "defer": 0, "total": 0},
+    "counts": {"approve": 0, "support": 0, "hold": 0, "defer": 0, PARTIAL: 0, "total": 0},
     "decisions": [],
 }
 
@@ -2647,6 +2771,42 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
                 _set(d, "support", f"catalog_unreadable: the admin catalog still answers 404 after {n} deferred runs; "
                      "a human checks the catalog and the claim (never approved or denied on a 404)")
 
+    # R90 / ruling 149 [key=anchor-granularity]: a contradiction in ANY role blocks the WHOLE request, so
+    # the per-role split can never be a way past one. A document on file that CONTRADICTS a claimed role,
+    # or flags it forged, decides the whole request HERE - before the paid provisional arm and before the
+    # split, so neither can approve a role the document refuses. `verified` does not block, and neither
+    # `unverifiable` nor `unknown` does (those are the statuses that may pend). A row already held or
+    # deferred keeps that decision: the guard only pre-empts an approval or an ask.
+    doc_blocked: dict[str, dict[str, str]] = {}
+    guard_error = ""
+    if doc_enabled:
+        try:
+            doc_blocked = doc_approve.blocked_role_verdicts(DOC_STORE)
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            # Fail CLOSED: an unreadable store may hide a standing contradiction, and "we could not
+            # read it" is not "there is none". Defer the rows this run (never abort the whole run).
+            guard_error = str(exc)[:160]
+            res.note = (res.note + " " if res.note else "") + f"doc-verdict guard unreadable: {guard_error}"
+            log(f"decide: {res.note}")
+            for d in decisions:
+                if d.decision in ("hold", "defer"):
+                    continue
+                _set(d, "defer", f"document contradiction guard unreadable ({guard_error}): deferred, "
+                     "never approved or asked without it")
+    doc_blocked_ids: set[str] = set()
+    for d in decisions:
+        if d.decision in ("hold", "defer"):
+            continue
+        bad = {r: v for r, v in (doc_blocked.get(d.request_id.lower()) or {}).items()
+               if r in d.claimed_roles}
+        if not bad:
+            continue
+        doc_blocked_ids.add(d.request_id.lower())
+        _set(d, "support", "a document on file " + "; ".join(
+            f"flags the {r} credit as {v}" if v == "forged" else f"contradicts the {r} credit"
+            for r, v in sorted(bad.items()))
+            + " - a contradiction in any role blocks the whole request")
+
     # Fable ruling 4 (credit-backlog-1019, firstmate 072): trust yet verify for PAID users.
     # A small/medium track (big tracks never reach here: pre_model asks for proof) whose
     # web check found nothing against the claim (NOT_FOUND: no contradiction, no red flag,
@@ -2671,7 +2831,8 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
         if provisional_paid_off:
             break
         if not (d.decision == "support" and d.web_verdict == "NOT_FOUND" and d.paid_priority
-                and not d.big_track and d.conflict is None and not d.n1):
+                and not d.big_track and d.conflict is None and not d.n1
+                and d.request_id.lower() not in doc_blocked_ids):
             continue
         anchor = provisional_anchor(d, req_by_id.get(d.request_id) or {}, proof)
         if anchor.startswith("no:"):
@@ -2685,8 +2846,27 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
         _set(d, "approve", f"trust yet verify (Fable ruling 4 + E1 review-audit-1021): paid user, small/medium track, "
              f"{anchor}, no claimed role credited to others only, no red flag; provisional approval with a no-threat "
              "document request; never auto-removed: unconfirmed after 30 days it goes to the Ops review list (still live)")
+        # A provisional approval covers the WHOLE request, so it names every claimed role: the ledger must
+        # not say a role is pending on a row core is about to approve.
+        d.approved_roles, d.pending_roles, d.pending_proof_need = list(d.claimed_roles), [], {}
         if d.user_id is not None:
             prov_today[d.user_id] = prov_today.get(d.user_id, 0) + 1
+
+    # ── the per-role split (R90 / ruling 149 [key=anchor-granularity]) ──────────────────────────────
+    # What the whole-request arms above could NOT take is decided per role: a request the web check found
+    # nothing against, and whose catalog credits this profile in SOME of its claimed roles, approves those
+    # and holds the rest PENDING with their own proof need. It runs AFTER the paid provisional arm (a row
+    # that qualifies keeps its whole-request approval) and AFTER every whole-request guard, so a
+    # contradiction, a red flag or an editorial requirement still decides the whole request.
+    for d in decisions:
+        if not (d.decision == "support" and d.web_verdict == "NOT_FOUND"
+                and d.approved_roles and d.pending_roles):
+            continue
+        _set(d, PARTIAL, f"{SPLIT_REASON}: approved {', '.join(d.approved_roles)} "
+             f"(a trusted source credits this profile in that role); pending {', '.join(d.pending_roles)} "
+             f"(unproven, NOT rejected): "
+             + "; ".join(f"{r} needs {w}" for r, w in d.pending_proof_need.items()))
+        d.evidence_kind = "catalog_confirmed"
 
     # Ruling 6 also orders the asks: paid > 24h first, so the daily cap admits them first. R4's
     # churn promotion must survive this re-sort, or the cap defers the very users it exists for.
@@ -2702,7 +2882,8 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
     if doc_enabled:
         try:
             doc_approve.ensure_schema(db)
-            doc_docs = {rid: tuple(ds) for rid, ds in doc_approve.verified_docs(DOC_STORE, DOC_PROOF_STORE).items()}
+            doc_docs = {rid: tuple(ds) for rid, ds in
+                        doc_approve.approvable_docs(DOC_STORE, DOC_PROOF_STORE).items()}
             doc_refs = doc_approve.approved_refs(db, doc_store=DOC_STORE, now=now)
         except (OSError, sqlite3.Error, ValueError) as exc:
             # never an approval on an unreadable store: the class simply does not fire this run
@@ -2724,7 +2905,7 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
     #       document-only approval could never fire at all.
     # A row refused by a pre-model rule (deny list, big track, validator conflict, red flag) never carries
     # web_verdict NOT_FOUND; a CONTRADICTED verdict is NOT_FOUND's opposite and is never convertible.
-    doc_pending: dict[str, tuple[doc_approve.Candidate, doc_approve.Approval, Decision]] = {}
+    doc_pending: dict[str, tuple[doc_approve.Candidate, doc_approve.Approval, Decision, bool]] = {}
     if doc_enabled:
         # `paid_first_oldest` AT THE USER GRANULARITY (QA #1684 round 5, finding 1): iterating `decisions`
         # sorts each request by ITS OWN age, so a person's second credit sits behind someone else and the
@@ -2771,10 +2952,10 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
                         "fail closed")
         for d in doc_order:
             rid = d.request_id.lower()
-            if rid not in doc_docs:
+            if rid not in doc_docs or rid in doc_blocked_ids:
                 continue
             if not ((d.decision == "approve" and rid in needs_proof)
-                    or (d.decision == "support" and d.web_verdict == "NOT_FOUND")):
+                    or (d.decision in ("support", PARTIAL) and d.web_verdict == "NOT_FOUND")):
                 continue
             # R22 guards 3 and 7 need the claimed roles and the profile: the role guard refuses
             # artist/org claims, and the per-profile cap bounds one artist page per day.
@@ -2782,6 +2963,15 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
                                       d.profile_id, tuple(d.claimed_roles), bool(d.big_track),
                                       _account_created_at(by_lower.get(rid)))
             hids, husers = _doc_holds(d)
+            # R90: the document's own per-role verdicts are the split's other source. A document that
+            # proves SOME of the claimed roles approves those and holds the rest PENDING; one that proves
+            # every claimed role is the whole-request approval this class always made.
+            picked = doc_approve.pick(c)
+            doc_roles = [r for r in d.claimed_roles if r in set(picked.verified_roles)]
+            if not doc_roles:
+                log(f"decide: doc-approve {d.request_id} proves none of the claimed roles "
+                    f"({', '.join(d.claimed_roles)}): left to the guard that already decided it")
+                continue
             # the ruling's `paid_first_oldest`: a person's own requests are adjacent, so the 50 user
             # slots are spent on paid, longest-waiting accounts first - and a person's several credits
             # are approved in one pass.
@@ -2792,7 +2982,7 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
             ap, answers = doc_approve.plan(c, db, doc_store=DOC_STORE, proof_store=DOC_PROOF_STORE,
                                            gate=doc_gate, hold_ids=hids,
                                            hold_users=husers, now=now,
-                                           req_users=owners)
+                                           req_users=owners, partial_ok=True)
             if ap is None:
                 refusal = answers[-1] if answers else None
                 log(f"decide: doc-approve {d.request_id} refused by "
@@ -2816,16 +3006,31 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
                 log(f"decide: doc-approve {d.request_id} not planned: core's agent guard would refuse this "
                     f"approval ({','.join(core_refusal)}) - the document is recorded in our ledger, not in core")
                 continue
-            doc_pending[rid] = (c, ap, d)
-            _set(d, "approve", f"dv-4 verified document {ap.ref} (popularity {ap.popularity}, {ap.tier}): "
-                 f"no same-run DSP anchor needed for a T0/T1 credit (Fable 2026-11-03)")
+            # A PARTIAL document approves exactly the roles the proof supports: the roles it verified
+            # PLUS the roles a trusted source already confirmed. Demoting a catalog-confirmed role to
+            # `pending` would ask the customer to prove a credit the catalog already proves. The
+            # standing verdict is `partial`, so the commit passes `partial_ok` - the role set and the
+            # commit agree on the same document without demoting anything.
+            verdict, _ = doc_approve.current_verdict(DOC_STORE, picked.intake_id, rid)
+            approved = [r for r in d.claimed_roles if r in set(d.approved_roles) | set(doc_roles)]
+            pending = [r for r in d.claimed_roles if r not in approved]
+            doc_pending[rid] = (c, ap, d, verdict == "partial")
             d.evidence_kind = doc_approve.DOC_KIND
             d.proof_id = ap.ref
+            d.approved_roles, d.pending_roles = approved, pending
+            d.pending_proof_need = {r: proof_need_for(r) for r in pending}
+            if pending:
+                _set(d, PARTIAL, f"{PROOF_ON_FILE_REASON}: dv-4 verified document {ap.ref} proves "
+                     f"{', '.join(doc_roles)}: approved {', '.join(approved)}; pending "
+                     f"{', '.join(pending)} (unproven, NOT rejected)")
+            else:
+                _set(d, "approve", f"dv-4 verified document {ap.ref} (popularity {ap.popularity}, {ap.tier}): "
+                     f"no same-run DSP anchor needed for a T0/T1 credit (Fable 2026-11-03)")
             log(f"decide: doc-approve {d.request_id} planned ({ap.tier}, popularity {ap.popularity}, "
                 f"{ap.intake_id}) - dv-4 verified document, provisional {doc_approve.PROVISIONAL_DAYS} days")
 
     for d in decisions:
-        if d.decision == "approve" and d.request_id.lower() in needs_proof:
+        if d.decision in ("approve", PARTIAL) and d.request_id.lower() in needs_proof:
             rid = d.request_id.lower()
             if rid in doc_pending:
                 continue              # a document is about to approve this: nothing to hold for proof
@@ -2849,7 +3054,7 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
     # claimant's proof (support); anything else goes to a human.
     req_of = {str(r.get("id")): r for r in batch}
     for d in decisions:
-        if d.decision != "approve" or d.request_id not in req_of:
+        if d.decision not in ("approve", PARTIAL) or d.request_id not in req_of:
             continue
         refusal = server_approval_refusal(req_of[d.request_id])
         if not refusal:
@@ -2897,14 +3102,16 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
     # if the PUT does not confirm, `write_ids` RELEASES the row again (QA #1684 finding 2), so no phantom
     # approval can stand in for a credit that was never approved.
     doc_committed: list[str] = []
-    for rid, (c, ap, d) in doc_pending.items():
+    for rid, (c, ap, d, partial_ok) in doc_pending.items():
+        if d.decision == PARTIAL:
+            continue              # a per-role split writes nothing until credit-per-role-write-c1 lands
         if d.decision != "approve" or d.evidence_kind != doc_approve.DOC_KIND:
             log(f"decide: doc-approve {d.request_id} not committed: a later guard set {d.decision}")
             continue
         hids, husers = _doc_holds(d)
         got, answers = doc_approve.approve(c, db, doc_store=DOC_STORE, proof_store=DOC_PROOF_STORE,
                                            gate=doc_gate, hold_ids=hids,
-                                           hold_users=husers, now=now, mode=mode)
+                                           hold_users=husers, now=now, mode=mode, partial_ok=partial_ok)
         if got is None:
             refusal = answers[-1] if answers else None
             _set(d, "hold", f"doc approval refused at the write boundary "
@@ -2920,12 +3127,28 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
         except Exception as exc:  # noqa: BLE001 - a report line must never fail a run
             res.doc_audit = f"audit state unreadable ({exc})"
 
+    # ── per-role partial approvals: DECIDED here, WRITTEN by credit-per-role-write-c1 ──────────────
+    # The split is recorded in the ledger (approved_roles / pending_roles) in every mode. What apply mode
+    # must NOT do is send a whole-request PUT for it: that would approve the unproven roles, which is
+    # worse than today's all-or-nothing. So the refusal is written into the row's reason BEFORE the
+    # ledger write, and the write itself is booked as refused below.
+    partial = [d for d in decisions if d.decision == PARTIAL]
+    if partial and mode == "apply":
+        for d in partial:
+            d.reason = (d.reason + "; " if d.reason else "") + PARTIAL_WRITE_REFUSAL
+        res.note = ((res.note + " ") if res.note else "") + (
+            f"{len(partial)} per-role partial approval(s) recorded and NOT written: {PARTIAL_WRITE_REFUSAL}.")
+
     # Ledger BEFORE any write.
     for d in decisions:
         record_decision(db, res.run_id, mode, d, now)
         res.n1 += 1 if d.n1 else 0
     res.deferred = sum(1 for d in decisions if d.decision == "defer")
     res.held = sum(1 for d in decisions if d.decision == "hold")
+    res.partial = len(partial)
+    if partial and mode == "apply":
+        for d in partial:
+            record_outcome(db, res.run_id, d.request_id, PARTIAL, PARTIAL_REFUSED_OUTCOME, now)
 
     approve_ids = [d.request_id for d in decisions if d.decision == "approve"]
     support_ids = [d.request_id for d in decisions if d.decision == "support"]
@@ -2961,6 +3184,8 @@ def run(admin: admin_api.Admin, db: sqlite3.Connection, judge: Any, *, mode: str
         res.approved, res.support = len(approve_ids), len(support_ids)
         for rid in approve_ids + support_ids:
             record_outcome(db, res.run_id, rid, "approve" if rid in approve_ids else "support", "shadow", now)
+        for d in partial:
+            record_outcome(db, res.run_id, d.request_id, PARTIAL, "shadow", now)
         write_coded_decider_output(res, decisions, path=coded_out, db=db)
         return res
     why_armed = kill_armed_refusal(db)

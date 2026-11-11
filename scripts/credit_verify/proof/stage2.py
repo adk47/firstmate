@@ -91,7 +91,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Iterable
 
 from credit_retro.takeback import _read_affiliation
-from credit_review.decide import muso_user_id
+from credit_review.decide import PROOF_ON_FILE_REASON, muso_user_id
 
 from . import FORENSICS_VERSION, content
 from .intercom import ORIGINAL, contact_hash
@@ -252,21 +252,40 @@ class Held:
     user_id: int
     paid: int | None
     decided_at: str
+    #: The roles a per-role partial approval still owes proof for (R90). Empty for a whole-request
+    #: hold, which asks about the request as a whole.
+    pending_roles: tuple[str, ...] = ()
 
 
 def held_rows(ledger_path: str = DECIDE_LEDGER) -> list[Held]:
     """The decider's current "proof on file" holds (its latest apply decision
-    per request), paid first, then oldest decision first."""
+    per request), paid first, then oldest decision first.
+
+    A per-role partial approval is in the same campaign ONLY when it carries a document on file: it
+    approved the roles its document proved and still owes an ask for the rest, so it is never neither
+    approved nor asked. A catalog split has no document, and stage 2 can only judge a document, so it is
+    not selected here - it would spend the per-run budget on a row this campaign can never resolve.
+    """
     db = sqlite3.connect(f"file:{ledger_path}?mode=ro", uri=True, timeout=30)
     try:
+        # The decider owns this schema and adds `pending_roles` additively; a ledger written before
+        # that migration has no such column and no partial rows either.
+        cols = {r[1] for r in db.execute("PRAGMA table_info(decisions)")}
+        pending = "d.pending_roles" if "pending_roles" in cols else "NULL"
+        proof = "d.proof_id" if "proof_id" in cols else "NULL"
         rows = db.execute(
             "WITH last AS (SELECT request_id, MAX(id) id FROM decisions WHERE mode IN ('apply', 'judge') "
             "GROUP BY request_id) "
-            "SELECT d.request_id, d.user_id, d.paid_priority, d.decided_at FROM decisions d JOIN last USING(id) "
-            "WHERE d.decision='hold' AND d.reason LIKE 'proof on file%'").fetchall()
+            f"SELECT d.request_id, d.user_id, d.paid_priority, d.decided_at, {pending} "
+            "FROM decisions d JOIN last USING(id) "
+            "WHERE (d.decision='hold' AND d.reason LIKE ?) "
+            f"   OR (d.decision='approve_partial' AND d.reason LIKE ? AND coalesce({proof}, '') <> '')",
+            (f"{PROOF_ON_FILE_REASON}%", f"{PROOF_ON_FILE_REASON}%")).fetchall()
     finally:
         db.close()
-    out = [Held(r[0], int(r[1]), r[2], r[3]) for r in rows if r[1] is not None and UUID.match(str(r[0]))]
+    out = [Held(r[0], int(r[1]), r[2], r[3],
+                tuple(x for x in str(r[4] or "").split(",") if x))
+           for r in rows if r[1] is not None and UUID.match(str(r[0]))]
     out.sort(key=lambda h: (0 if h.paid == 1 else 1, h.decided_at))
     return out
 

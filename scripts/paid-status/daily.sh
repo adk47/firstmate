@@ -4,7 +4,8 @@
 # gets the approved status copy: paid first, then free, oldest first, within the runner's daily caps
 # (1,000 status notes per campaign/day, 400 asks/day; send-gateway 1/user/day). Runs on node-8 as root.
 #
-#   MODE=dry-run|apply   EMAIL_ROUTE=0|1   SEGMENTS="paid free"   ASKS=0|1   BIN=/opt/hydra/scripts/paid-status
+#   MODE=dry-run|apply   EMAIL_ROUTE=0|1   SEGMENTS="paid free"   ASKS=0|1   PARTIAL_ASKS=0|1
+#   BIN=/opt/hydra/scripts/paid-status
 #
 # Per segment: population (silent_count.py) -> lens (Fable: watchlist/velocity/single-signal are APPROVAL holds;
 # lens users get the ask only, LENS_ASK=1; Fable's named messaging holds stay held) -> segments -> support@
@@ -176,6 +177,23 @@ json.dump({"status-team-review": out} if out else {}, open(f"{D}/email-lists-b0.
 print(len(out))
 PY
     email email-lists-b0.json b0 || break
+  fi
+  # Per-role partials (captain 2026-11-06 ~17:05Z): the decider approved the roles its proof covered and still
+  # owes an ask for the rest. The request stays `unverified` in core (the per-role write half does not exist
+  # yet), so only this list names it. Its OWN switch, PARTIAL_ASKS (default 0), because the general ask lane is
+  # a different population: `ASKS` is never assigned in this script (only read as ${ASKS:-0} at the U, B0 and
+  # email gates), so it is 0, and the cron in install-aux-units.sh sets MODE=apply EMAIL_ROUTE=1 SEGMENTS=...
+  # and no ASKS. The captain's 2026-11-06 ~17:05Z order is the authority for asking THIS population while the
+  # general ask lane stays off (firstmate 024: no proof ask offering documents until a returned document can
+  # be accepted), so the installed cron leaves PARTIAL_ASKS unset until the per-role core write ships: an ask
+  # must never reach a customer while the proven roles are still unapproved. Every cap, the kill switch, the fraud lens, the
+  # ask cap, the gate and the segment's own holds (exclude-cs, support@ 7d, core notice 7d) still apply.
+  if [ "${PARTIAL_ASKS:-0}" = 1 ]; then
+    python3 "$BIN/partial_asks.py" "$W" > partial.out || { log "$SEG partial list failed"; FAILED=1; continue; }
+    log "$SEG partials: $(cat partial.out)"
+    { cat "$W/exclude-cs.txt"; for f in support-held-17.txt core-notice-held.txt; do [ -f "$W/$f" ] && cat "$W/$f"; done; } \
+      | sort -u > "$W/exclude-partial.txt"
+    runner "$SEG" P uvn-status --exclude-users "$W/exclude-partial.txt" || break
   fi
 done
 # Receipts (proof loop, [key=proof-loop-plan-1027] ACK): a NEW proof_intake row (b1's filer) triggers the

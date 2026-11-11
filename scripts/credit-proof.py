@@ -151,7 +151,8 @@ def cmd_file(args: argparse.Namespace) -> int:
     if args.held_from_ledger:
         for h in held_rows():
             held.setdefault(h.user_id, []).append({"request_id": h.request_id, "paid": h.paid,
-                                                  "decided_at": h.decided_at})
+                                                  "decided_at": h.decided_at,
+                                                  "roles": h.pending_roles})
     stats = intake.run(ProofStore.for_run(args.store, args.apply), conversations=convs, fetch=make_fetch(tok),
                        lookup=intake.professional_lookup, open_rows=open_rows, held=held,
                        export_path=args.proof_on_file or intake.PROOF_ON_FILE,
@@ -199,7 +200,8 @@ def cmd_file_recent(args: argparse.Namespace) -> int:
     store = ProofStore.for_run(args.store, args.apply)
     held: dict[int, list[dict]] = {}
     for h in held_rows():
-        held.setdefault(h.user_id, []).append({"request_id": h.request_id, "paid": h.paid, "decided_at": h.decided_at})
+        held.setdefault(h.user_id, []).append({"request_id": h.request_id, "paid": h.paid,
+                                               "decided_at": h.decided_at, "roles": h.pending_roles})
     export = intake.export_users()
     try:
         paying = set(json.loads(Path(PAYING_USERS).read_text())["ids"])

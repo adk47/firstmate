@@ -53,9 +53,11 @@ mismatch instead of printing a total it cannot defend).
    such a hold is structurally an old accepted document and the decider itself files it as
    "human review" (see the Fable ruling below).
 3. **Sitting with a person** — a `support` write (a support ticket/ask was raised), a
-   human-review hold (`emailed support@`, `support already requested`), the user replying
-   to a note (`extension_requested_at`), a flagged refusal hold already posted to
-   #cs_priority, or the user being in the proof feed's `gmail_contacts_90d`.
+   human-review hold (`emailed support@`, `support already requested`), a per-role split
+   (`approve_partial`) whose reason carries the `proof on file: human review` sentence or a
+   recorded `proof_id` (a catalog-only split has no document, so it is NOT documents on file),
+   the user replying to a note (`extension_requested_at`), a flagged refusal hold already posted
+   to #cs_priority, or the user being in the proof feed's `gmail_contacts_90d`.
 4. **Muted — no more messages** — a messaging refusal hold whose `next_recheck_at` is
    still in the future.
 5. **Needs documents — user told** — an ASK note went out (`verify-live`, `retro-past`,

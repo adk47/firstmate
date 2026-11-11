@@ -18,7 +18,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from credit_review import fraud_lens, uvn_status, verify_ledger, verify_notify, withdrawal_confirm  # noqa: E402
+from credit_review import decide, fraud_lens, uvn_status, verify_ledger, verify_notify, withdrawal_confirm  # noqa: E402
 from credit_review import verify_notify as _vn_r5  # noqa: E402
 _vn_r5.PRESENTED_LOOKUP = lambda ids: {}  # r5: presented profile ids never come from the replica in tests
 
@@ -3073,6 +3073,170 @@ class GateTimeoutUnmeasuredTest(UvnStatusTests):
         self.assertEqual(doc["unmeasured_stop_rule"], "unmeasured_users >= max(5, 10% of the batch)")
         self.assertEqual(doc["stopped_on_unmeasured"], "")
         self.assertEqual(len(doc["outcomes"]), 1)                              # the unmeasured row; 6 validated
+PARTIAL_RID = "3f2b8c1e-0a4d-4e6b-9c7a-1d2e3f4a5b6c"
+
+
+class PerRolePartialAskTests(unittest.TestCase):
+    """Captain 2026-11-06 ~17:05Z: a per-role split approved the roles its proof covered and still owes an
+    ask for the rest. The request stays `unverified` in core (the per-role write half does not exist yet),
+    so the replica re-check alone drops it and the decider's ledger row is the only thing that names it.
+    These prove a MESSAGE LEAVES for that row through the enabled uvn-status sender, and that it does NOT
+    leave while that sender is locked."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="uvn-partial-"))
+        self.list = self.dir / "list-P.json"
+        self.proof = self.dir / "proof.json"
+        self.ledger = str(self.dir / "ledger.sqlite3")
+        proof(self.proof)
+        self.list.write_text(json.dumps({"generated_at": iso(2), "users": [
+            {"user_id": 1, "paid": True, "skip": None, "request_ids": [PARTIAL_RID], "class": "PARTIAL"}]}))
+        db = verify_ledger.connect(self.ledger)
+        try:
+            decide.ensure_schema(db)
+            db.execute("INSERT INTO decisions (run_id, decided_at, request_id, user_id, claimed_roles,"
+                       " approved_roles, pending_roles, big_track, decision, reason, mode) VALUES"
+                       " ('r1', ?, ?, 1, 'Mixing,Mastering', 'Mixing', 'Mastering', 0, ?, 'per-role split', 'apply')",
+                       (iso(1), PARTIAL_RID, decide.PARTIAL))
+            db.commit()
+        finally:
+            db.close()
+        self.q = replica({1}, status={1: "unverified"}, requests={1: [PARTIAL_RID]},
+                         rows={PARTIAL_RID: {"role": "{Mixing,Mastering}"}})
+
+    def add_decision(self, reason: str, pending: str = "Mastering", run_id: str = "r2",
+                     decision: str = decide.PARTIAL, rid: str = PARTIAL_RID, uid: int = 1) -> None:
+        db = verify_ledger.connect(self.ledger)
+        try:
+            db.execute("INSERT INTO decisions (run_id, decided_at, request_id, user_id, claimed_roles,"
+                       " approved_roles, pending_roles, big_track, decision, reason, mode) VALUES"
+                       " (?, ?, ?, ?, 'Mixing,Mastering', 'Mixing', ?, 0, ?, ?, 'apply')",
+                       (run_id, iso(0), rid, uid, pending, decision, reason))
+            db.commit()
+        finally:
+            db.close()
+
+    def gate_file(self, uvn: int = 1) -> str:
+        p = self.dir / f"gate-uvn{uvn}.sh"
+        p.write_text(f"readonly UVN_STATUS_COPY_APPROVED={uvn}\nreadonly CREDIT_HOLD_STATUS_COPY_APPROVED=0\n")
+        return str(p)
+
+    def run_(self, **kw):
+        gate = kw.pop("gate", FakeGate())
+        rep = uvn_status.run(list_path=str(self.list), segment="paid", mode=kw.pop("mode", "apply"),
+                             max_users=10, ledger_path=self.ledger, proof_path=str(self.proof),
+                             query=self.q, runner=gate, wrapper=kw.pop("wrapper", self.gate_file()),
+                             now=NOW, pace_seconds=0, **kw)
+        return rep, gate
+
+    def test_a_per_role_partial_request_is_asked_through_the_uvn_status_sender(self):
+        rep, gate = self.run_()
+        self.assertEqual(rep.halted, "")
+        self.assertEqual(len(gate.calls), 1, rep.note)
+        payload = gate.calls[0][1]
+        self.assertEqual(payload["user"]["id"], "1")
+        self.assertEqual([c["request_id"] for c in payload["credits"]], [PARTIAL_RID])
+        # the customer is asked ONLY for the roles still owed, never for the approved Mixing
+        self.assertEqual(payload["credits"][0]["role"], "Mastering")
+
+    def test_a_stale_list_entry_whose_split_is_gone_is_never_asked(self):
+        # QA 2026-11-11 (Important, hydra#1851): list-P is a SNAPSHOT. If the latest apply decision
+        # for a listed request is no longer a per-role split (here it became `support` with no
+        # pending roles), the replica row still carries the ORIGINAL `{Mixing,Mastering}` role text,
+        # so letting it through asks the customer to prove Mixing - a role the decider already
+        # approved. A listed row with no current pending-role entry must be dropped, not sent.
+        #
+        # The row reaches the send through the NORMAL population here (core status
+        # `user_verification_needed`), not through the split's own `partial_ids` add: that is the
+        # path where the stale mapping is the only thing standing between the customer and an ask
+        # for a role they already hold.
+        self.add_decision("a trusted source credits someone else in this role", pending="",
+                          decision="support")
+        self.q = replica({1}, status={1: "user_verification_needed"}, requests={1: [PARTIAL_RID]},
+                         rows={PARTIAL_RID: {"role": "{Mixing,Mastering}"}})
+        rep, gate = self.run_()
+        self.assertEqual(rep.halted, "")
+        self.assertEqual(gate.calls, [], "a stale list entry must not produce an ask")
+
+    def test_a_split_that_goes_away_mid_run_is_not_asked_at_send_time(self):
+        # QA 2026-11-11 (Important, hydra#1851): `partial_pending_roles` is read ONCE at run start.
+        # If the decider moves a listed request off `approve_partial` while earlier users are being
+        # messaged, the pre-send pass must re-read the split for THIS user's requests and drop the
+        # row - otherwise the customer is asked about a role the decider no longer owes them.
+        #
+        # The race is simulated at the only point it can happen: the replica read the pre-send pass
+        # makes is the SECOND population read of the run, so the decider's change lands between the
+        # run-start snapshot and the send.
+        base = self.q
+        reads = {"n": 0}
+
+        def racing(sql):
+            if "public.users" not in sql:
+                reads["n"] += 1
+                if reads["n"] == 2:
+                    self.add_decision("a trusted source credits someone else in this role",
+                                      pending="", decision="support", run_id="r9")
+            return base(sql)
+
+        self.q = racing
+        rep, gate = self.run_()
+        self.assertEqual(rep.halted, "")
+        self.assertEqual(gate.calls, [],
+                         "a split the decider withdrew mid-run must not be asked about")
+
+    def test_a_partial_entry_never_asks_about_the_users_other_open_requests(self):
+        other = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"
+        self.list.write_text(json.dumps({"generated_at": iso(2), "users": [
+            {"user_id": 1, "paid": True, "skip": None, "request_ids": [PARTIAL_RID], "class": "PARTIAL"}]}))
+        self.q = replica({1}, status={1: "user_verification_needed"},
+                         requests={1: [PARTIAL_RID, other]},
+                         rows={PARTIAL_RID: {"role": "{Mixing,Mastering}"},
+                               other: {"role": "{Mixing}"}})
+        rep, gate = self.run_()
+        self.assertEqual(rep.halted, "")
+        self.assertEqual(len(gate.calls), 1, rep.note)
+        payload = gate.calls[0][1]
+        self.assertEqual([c["request_id"] for c in payload["credits"]], [PARTIAL_RID])
+        self.assertEqual(payload["credits"][0]["role"], "Mastering")
+
+    def test_a_per_role_partial_request_is_not_asked_while_the_uvn_status_lock_is_0(self):
+        rep, gate = self.run_(wrapper=self.gate_file(0))
+        self.assertEqual(gate.calls, [])
+        self.assertIn("UVN_STATUS_COPY_APPROVED=0", rep.halted)
+
+    def test_a_partial_row_held_for_a_document_on_file_is_not_asked(self):
+        self.add_decision(f"{decide.DOC_ON_FILE_HOLD} (a document is already on file; never ask again)"
+                          " | per-role split: approved Mixing; pending Mastering")
+        rep, gate = self.run_()
+        self.assertEqual(gate.calls, [])
+        self.assertEqual(rep.no_longer_uvn, 1, rep.note)
+
+    def test_a_partial_row_deferred_by_the_24h_window_is_not_asked(self):
+        self.add_decision(f"{decide.WINDOW_DEFER}this user was asked in the last 24h"
+                          " | per-role split: approved Mixing; pending Mastering")
+        rep, gate = self.run_()
+        self.assertEqual(gate.calls, [])
+
+    def test_a_deferred_partial_is_asked_again_once_the_decider_re_decides(self):
+        self.add_decision(f"{decide.WINDOW_DEFER}this user was asked in the last 24h"
+                          " | per-role split: approved Mixing; pending Mastering")
+        self.add_decision("per-role split: approved Mixing; pending Mastering", run_id="r3")
+        rep, gate = self.run_()
+        self.assertEqual(len(gate.calls), 1, rep.note)
+
+    def test_a_request_whose_roles_are_all_decided_is_not_in_the_partial_population(self):
+        db = verify_ledger.connect(self.ledger)
+        try:
+            db.execute("INSERT INTO decisions (run_id, decided_at, request_id, user_id, claimed_roles,"
+                       " approved_roles, pending_roles, big_track, decision, reason, mode) VALUES"
+                       " ('r2', ?, ?, 1, 'Mixing,Mastering', 'Mixing,Mastering', '', 0, ?, 'per-role split', 'apply')",
+                       (iso(0), PARTIAL_RID, decide.PARTIAL))
+            db.commit()
+        finally:
+            db.close()
+        rep, gate = self.run_()
+        self.assertEqual(gate.calls, [])
+        self.assertEqual(rep.no_longer_uvn, 1, rep.note)
 
 
 if __name__ == "__main__":

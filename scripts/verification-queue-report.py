@@ -479,11 +479,12 @@ def ledger_facts() -> dict:
         # the maximum. Add a second aggregate here and every reason silently becomes an
         # arbitrary row's reason — which would move users between buckets.
         latest: dict[int, dict] = {}
-        for uid, dec, reason, docreq, at in db.execute(
-                "SELECT user_id, decision, reason, doc_required, max(decided_at) FROM decisions "
+        for uid, dec, reason, docreq, at, proof in db.execute(
+                "SELECT user_id, decision, reason, doc_required, max(decided_at), proof_id FROM decisions "
                 "WHERE user_id IS NOT NULL GROUP BY user_id"):
             latest[int(uid)] = {"decision": dec, "reason": reason or "",
-                                "doc_required": int(docreq or 0), "at": at or ""}
+                                "doc_required": int(docreq or 0), "at": at or "",
+                                "proof_id": proof or ""}
         first_proof_hold: dict[int, str] = {}
         for uid, at in db.execute(
                 "SELECT user_id, min(decided_at) FROM decisions WHERE decision='hold' "
@@ -713,8 +714,15 @@ def classify_credit(user: int, facts: dict, credit: dict, wz: frozenset) -> str:
     # shown to postdate the request (Fable, 2026-10-27): those holds rest on the proof feed,
     # which carries no timestamp at all — structurally an old accepted document. The decider's
     # own sentence for them is "a document is already on file; never ask again; human review",
-    # so they are counted where they belong: with a person.
-    if reason.startswith("proof on file") or lat.get("decision") == "support" \
+    # so they are counted where they belong: with a person. A per-role split carries the same
+    # prefix but may have NO document at all (the catalog proved some roles and the rest are
+    # owed an ask): only the hold sentence, a hold, or a split with a recorded document is a
+    # document on file. The hold sentence is keyed on directly because a PARTIAL row held for a
+    # document on file keeps its decision and carries no proof_id.
+    on_file = (reason.startswith("proof on file: human review")
+               or (reason.startswith("proof on file")
+                   and (lat.get("decision") == "hold" or bool(lat.get("proof_id")))))
+    if on_file or lat.get("decision") == "support" \
             or "emailed support@" in reason \
             or "support already requested" in reason or user in facts["replied"] \
             or user in facts["flagged"] or user in facts["support_contacts"]:

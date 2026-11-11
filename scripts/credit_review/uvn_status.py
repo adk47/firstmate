@@ -96,6 +96,7 @@ import fcntl
 import json
 import os
 import re
+import sqlite3
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -103,6 +104,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import comm_state, evidence, fraud_lens, policy, stage2_verdicts, verify_ledger, verify_notify
+from .decide import ASK_HOLD_MARKERS
 from .roles import ONE_PERSON_FAMILIES, family_of
 
 # The proof-on-file kinds that mean "we approved a document" (decide.APPROVED_PROOF_KINDS).
@@ -161,6 +163,10 @@ def campaign_lock_open(wrapper: str, var: str) -> bool:
 # Rows in these statuses join a campaign only when stage 2 released them to it: uvn-status's
 # no_document users whose requests are still `unverified` (held with us; firstmate spec item 2).
 RELEASED_EXTRA_STATUSES = {"uvn-status": ("unverified",)}
+# The decider's per-role split (captain 2026-11-06): it approved the roles its proof covered and still
+# owes an ask for the rest. The request stays `unverified` in core because the per-role write half does
+# not exist yet, so the replica re-check alone drops it and the user is never asked for the roles owed.
+PARTIAL_DECISION = "approve_partial"
 # Reviewed baseline: deploy overwrites - 2026-10-26 (verify-ask-wiring-h2, firstmate inbox 015): node-8's
 # paid-wave-runner-p2 hot-patch [key=p2-caps] (DAILY_MAX / STATUS_DAILY_MAX 20000, marked "reverts on next
 # deploy") was superseded by env caps, which are now gone too: the policy file below is the ONE source.
@@ -645,13 +651,92 @@ def stage2_released(campaign: str, path: str | None = None, *, user_ids: list[in
     return stage2_verdicts.released(stage2_verdicts.load(path, user_ids=user_ids), outcome)
 
 
+def partial_pending_roles(ledger_path: str | None = None,
+                          request_ids: list[str] | None = None) -> dict[str, list[str]]:
+    """Request id -> the roles whose latest decider decision is a per-role split that still owes them
+    (`approve_partial` with a non-empty `pending_roles`), request ids lowercased.
+
+    This is the ONE decider-driven exception to the replica re-check: such a request is still
+    `unverified` in core (the decision half writes nothing), so without it the user who was
+    approved for one role and owes proof for another is never asked about the rest.
+
+    Only an APPLY row names a live ask: `judge` is shadow and must never message a customer.
+
+    A row `filter_support` withheld the ask for is NOT in the population: it keeps its PARTIAL
+    decision and its roles, so the hold/defer marker is the only record that the ask must not go
+    (never re-ask, a document on file, the 24h window, the caps). A defer is re-askable because the
+    decider re-decides the row and writes a fresh reason without the marker."""
+    path = ledger_path or verify_ledger.DEFAULT_PATH
+    if not os.path.exists(path):
+        return {}
+    db = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+    try:
+        # The decider owns this schema and adds `pending_roles` additively; a ledger written before
+        # that migration has no such column and no partial rows either.
+        if "pending_roles" not in {r[1] for r in db.execute("PRAGMA table_info(decisions)")}:
+            return {}
+        sql = ("WITH last AS (SELECT request_id, MAX(id) id FROM decisions WHERE mode = 'apply' "
+               "GROUP BY request_id) "
+               "SELECT d.request_id, d.reason, d.pending_roles FROM decisions d JOIN last USING(id) "
+               "WHERE d.decision = ? AND coalesce(d.pending_roles, '') <> ''")
+        args: list[Any] = [PARTIAL_DECISION]
+        # The pre-send re-read asks about ONE user's listed requests, so it must not scan the whole
+        # ledger for every user in the batch.
+        if request_ids is not None:
+            wanted = sorted({str(r).strip().lower() for r in request_ids if str(r).strip()})
+            if not wanted:
+                return {}
+            sql += f" AND lower(d.request_id) IN ({','.join('?' * len(wanted))})"
+            args.extend(wanted)
+        rows = db.execute(sql, args).fetchall()
+    finally:
+        db.close()
+    return {str(r[0]).lower(): [x.strip() for x in str(r[2] or "").split(",") if x.strip()]
+            for r in rows if r[0] and not str(r[1] or "").startswith(ASK_HOLD_MARKERS)}
+
+
+def partial_pending_ids(ledger_path: str | None = None) -> set[str]:
+    """The request-id half of `partial_pending_roles` (the list builder's population)."""
+    return set(partial_pending_roles(ledger_path))
+
+
+def partial_scoped(rows: list[dict[str, Any]], partial_roles: dict[str, list[str]],
+                   listed: list[str]) -> list[dict[str, Any]]:
+    """A per-role split entry speaks ONLY for the rows on its list and ONLY about the roles it still
+    owes. The user's other open requests are neither asked about nor treated as an unlisted hold, and
+    the customer is never asked to prove a role the decider already approved."""
+    ids = {str(r).strip().lower() for r in listed if str(r).strip()}
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        rid = str(row["request_id"]).lower()
+        if rid not in ids:
+            continue
+        owed = partial_roles.get(rid)
+        if owed is None:
+            # The list is a SNAPSHOT: it was built when this request was a per-role split. If the
+            # latest apply decision no longer owes any role (it became `support`, or the split was
+            # otherwise resolved), the row must not be asked about at all. The replica row still
+            # carries the ORIGINAL role text, so letting it through would ask the customer to prove
+            # a role the decider already approved (QA 2026-11-11, hydra#1851). Drop it; the decider
+            # re-decides the row and the list builder rebuilds the population.
+            continue
+        row = dict(row)
+        row["role"] = ", ".join(owed)
+        row["_incomplete"] = _row_incomplete(row["track_title"], row["artist_name"], row["role"],
+                                            row["profile_id"], row["track_id"])
+        out.append(row)
+    return out
+
+
 def pending_rows(user_ids: list[int], campaign: str, released: set[str],
-                 query: Query = trino, *, with_released: bool = False) -> dict[int, list[dict[str, Any]]]:
+                 query: Query = trino, *, with_released: bool = False,
+                 partial_ids: set[str] | frozenset[str] = frozenset()) -> dict[int, list[dict[str, Any]]]:
     """uvn_requests for the campaign, with the stage-2 release applied: gap-ask, and any run whose
     population is stage 2's (`with_released`), keeps ONLY the released requests (an unjudged
     request of the same user is never named: QA on #1364); with `with_released` uvn-status also
     adds the released requests still `unverified`. A list-driven uvn-status run is bounded by
-    t01's list instead and never adds them (they would hold the user as unlisted)."""
+    t01's list instead and never adds them (they would hold the user as unlisted) - except the
+    decider's per-role splits (`partial_ids`), which are exactly the rows that owe an ask."""
     reqs = uvn_requests(user_ids, query, PENDING_STATUSES[campaign])
     if campaign == GAP_ASK or with_released:
         reqs = {u: kept for u, rows in reqs.items()
@@ -666,6 +751,13 @@ def pending_rows(user_ids: list[int], campaign: str, released: set[str],
     if extra and released and with_released:
         for u, rows in uvn_requests(user_ids, query, extra).items():
             add = [r for r in rows if r["request_id"].lower() in released]
+            if add:
+                reqs.setdefault(u, []).extend(add)
+    if extra and partial_ids and not with_released:
+        for u, rows in uvn_requests(user_ids, query, extra).items():
+            have = {r["request_id"].lower() for r in reqs.get(u, [])}
+            add = [r for r in rows if r["request_id"].lower() in partial_ids
+                   and r["request_id"].lower() not in have]
             if add:
                 reqs.setdefault(u, []).extend(add)
     return reqs
@@ -1051,6 +1143,8 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
     report.listed = n_listed
     day = (now or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
     path = ledger_path or verify_ledger.DEFAULT_PATH
+    partial_roles = partial_pending_roles(path) if campaign == CAMPAIGN and not from_stage2 else {}
+    partial_ids = frozenset(partial_roles)
     cap = DAILY_MAX if is_ask else STATUS_DAILY_MAX
     db = verify_ledger.connect(path)
     cands: list[dict[str, Any]] = []
@@ -1224,13 +1318,15 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                         continue
                     picked.append((u, acct))
                 reqs = (pending_rows([int(u["user_id"]) for u, _ in picked], campaign, released, query,
-                                     with_released=from_stage2) if picked else {})
+                                     with_released=from_stage2, partial_ids=partial_ids) if picked else {})
                 for u, acct in picked:
                     uid = int(u["user_id"])
                     # A stage-2 population names only the released requests; the note covers every
                     # request the campaign may ask about (the release is checked on each before the send).
                     listed = set() if from_stage2 else {str(r) for r in (u.get("request_ids") or [])}
                     pending = reqs.get(uid, [])
+                    if str(u.get("class") or "") == "PARTIAL":
+                        pending = partial_scoped(pending, partial_roles, u.get("request_ids") or [])
                     asked = asked_ids(path, campaign, listed, pending)
                     why, live = plan(listed, pending, is_ask, asked)
                     why, live, as_count, total = count_copy_of(campaign, listed, pending, why, live)
@@ -1486,7 +1582,16 @@ def run(*, list_path: str | None = None, segment: str, mode: str = "dry-run", ma
                     # Re-plan on a fresh replica read right before this user's send (QA: a request
                     # approved, withdrawn, opened or blanked while earlier users were being
                     # messaged must neither get a 'waiting on you' note nor be left out of it).
-                    fresh = pending_rows([uid], campaign, mine, query, with_released=from_stage2).get(uid, [])
+                    fresh = pending_rows([uid], campaign, mine, query, with_released=from_stage2,
+                                         partial_ids=partial_ids).get(uid, [])
+                    if str(u.get("class") or "") == "PARTIAL":
+                        # Re-read the split for THIS user's listed requests right before the send.
+                        # `partial_roles` is a run-start snapshot: a request the decider moved off
+                        # `approve_partial` (or whose pending roles changed) while earlier users
+                        # were being messaged must not be asked about with the stale role text
+                        # (QA 2026-11-11, hydra#1851).
+                        owed_now = partial_pending_roles(path, request_ids=u.get("request_ids") or [])
+                        fresh = partial_scoped(fresh, owed_now, u.get("request_ids") or [])
                     asked = asked_ids(path, campaign, listed, fresh)
                     why, live = plan(listed, fresh, is_ask, asked)
                     why, live, as_count, total = count_copy_of(campaign, listed, fresh, why, live)

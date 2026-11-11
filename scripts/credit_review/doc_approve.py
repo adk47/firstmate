@@ -206,6 +206,7 @@ class Doc:
     verdict_at: str
     account_hold: bool
     candidate_ids: tuple[str, ...]
+    verified_roles: tuple[str, ...] = ()   # the roles this document's newest run judged `verified`
 
     @property
     def ref(self) -> str:
@@ -254,50 +255,92 @@ def _newest_run_rows(db: sqlite3.Connection) -> list[tuple[Any, ...]]:
         (VERDICT_VERSION, VERDICT_VERSION, VERDICT_VERSION)).fetchall()
 
 
-def _unverified_roles(db: sqlite3.Connection) -> dict[tuple[str, str], str]:
-    """Documents where SOME role's own newest verdict is not `verified`.
+def _role_verdicts(db: sqlite3.Connection) -> dict[tuple[str, str], dict[str, str]]:
+    """(intake_id, request_id) -> {role: its own newest verdict}, for every role ever judged.
 
     QA #1684 round 3, finding 2 (the same hole one layer out): the newest run is not always a full
     re-judgement. A later run that re-judged only "Composer" would otherwise make the document look
     verified while "Lyricist" still stands contradicted. A role that was ever judged and never cleared
     keeps the document out of the approvable set - fail closed, and the cost is a stronger proof ask.
+
+    Per ROLE, not per document: R90 decides per role, so the caller has to know WHICH role is bad.
+    This is the ONE source of a role's standing verdict: `verified_roles` and `all_verified` are both
+    read off it, so a run that judged only part of a request can never pend a role it proves.
     """
-    out: dict[tuple[str, str], str] = {}
-    for i, r, outcome in db.execute(
+    out: dict[tuple[str, str], dict[str, str]] = {}
+    for i, r, role, outcome in db.execute(
             "WITH role_last AS (SELECT intake_id, request_id, role, MAX(id) AS id FROM dv_outcomes"
             "                     WHERE version = ? AND intake_id IS NOT NULL"
             "                     GROUP BY intake_id, request_id, role)"
-            " SELECT o.intake_id, o.request_id, o.outcome FROM dv_outcomes o"
-            "   JOIN role_last rl ON rl.id = o.id"
-            "  WHERE o.outcome <> 'verified'", (VERDICT_VERSION,)).fetchall():
-        out.setdefault((str(i), str(r).lower()), str(outcome))
+            " SELECT o.intake_id, o.request_id, o.role, o.outcome FROM dv_outcomes o"
+            "   JOIN role_last rl ON rl.id = o.id", (VERDICT_VERSION,)).fetchall():
+        out.setdefault((str(i), str(r).lower()), {})[str(role)] = str(outcome)
     return out
 
 
+BLOCKING_VERDICTS = ("contradicted", "forged")
+
+
 def _group_runs(rows: Iterable[tuple[Any, ...]],
-                unverified: dict[tuple[str, str], str] | None = None) -> dict[tuple[str, str], dict[str, Any]]:
-    """(intake_id, request_id) -> the newest run's identity + whether EVERY role of it - and every role's
-    own newest verdict - is `verified`."""
-    blocked = unverified or {}
+                verdicts: dict[tuple[str, str], dict[str, str]]
+                ) -> dict[tuple[str, str], dict[str, Any]]:
+    """(intake_id, request_id) -> the newest run's identity, whether EVERY role's own newest verdict is
+    `verified`, and which roles are `verified` / `unverifiable` / blocked."""
     out: dict[tuple[str, str], dict[str, Any]] = {}
     for intake_id, request_id, run_id, user_id, proof_id, role, outcome, account_hold, at in rows:  # noqa: E501
         key = (str(intake_id), str(request_id).lower())
         g = out.setdefault(key, {
             "run_id": str(run_id), "user_id": user_id, "proof_id": str(proof_id),
-            "account_hold": bool(account_hold), "at": str(at), "all_verified": key not in blocked,
-            "roles": 0})
-        g["roles"] += 1
+            "account_hold": bool(account_hold), "at": str(at),
+            "verified_roles": set(), "unverifiable_roles": set(), "blocked_roles": set()})
         # QA #1684 round 4, finding 1: a hold on ANY role of the run holds the document. Copying it
         # from the first role row let a Composer `account_hold=0` mask a Lyricist `account_hold=1`,
         # i.e. a fraud-held credit passed `gate_no_hold`.
         if account_hold:
             g["account_hold"] = True
-        if outcome != "verified":
-            # one contradicted/forged/unverifiable role in the newest run means the document does not
-            # prove this credit - never averaged away by the verified roles next to it
-            g["all_verified"] = False
         if str(at) > g["at"]:
             g["at"] = str(at)
+    for key, g in out.items():
+        for role, outcome in (verdicts.get(key) or {}).items():
+            if outcome == "verified":
+                g["verified_roles"].add(role)
+            elif outcome in BLOCKING_VERDICTS:
+                g["blocked_roles"].add(role)
+            else:
+                g["unverifiable_roles"].add(role)
+        # one contradicted/forged/unverifiable role anywhere in the document means it does not prove
+        # this credit - never averaged away by the verified roles next to it
+        g["all_verified"] = not g["unverifiable_roles"] and not g["blocked_roles"]
+        # R90: a document may feed a PER-ROLE decision when no role it judged is contradicted or
+        # flagged forged, and at least one is `verified`. `unverifiable` and `unknown` are the statuses
+        # that may pend - "we could not check it" is neither good nor bad, and `unknown` is what the
+        # store writes when the dv-4 tooling itself failed, so a provider outage must not cost the user
+        # the roles the document DID prove. A role the document CONTRADICTS, or one flagged forged, is
+        # never approvable and never pendable: the document is not used at all.
+        g["partial_ok"] = not g["blocked_roles"] and bool(g["verified_roles"])
+    return out
+
+
+def blocked_role_verdicts(doc_store: str | Path = DEFAULT_DOC_STORE
+                          ) -> dict[str, dict[str, str]]:
+    """request id -> {role: its standing dv-4 verdict} for every role a document on file CONTRADICTS or
+    flags forged.
+
+    R90 / ruling 149 [key=anchor-granularity]: a contradiction in ANY role blocks the WHOLE request, so
+    the per-role split must never be a way past one. Only `contradicted` and `forged` block. `verified`
+    does not block, and neither does `unverifiable` nor `unknown` - those are the statuses that mean the
+    document did not settle the role (a provider outage is not a contradiction), so the role pends.
+    """
+    db = _ro(doc_store)
+    try:
+        verdicts = _role_verdicts(db)
+    finally:
+        db.close()
+    out: dict[str, dict[str, str]] = {}
+    for (_intake, rid), roles in verdicts.items():
+        bad = {r: v for r, v in roles.items() if v in BLOCKING_VERDICTS}
+        if bad:
+            out.setdefault(rid, {}).update(bad)
     return out
 
 
@@ -345,17 +388,18 @@ def _attribute_filings(out: dict[str, list[Doc]], proof_store: str | Path) -> No
                 except ValueError:
                     ids = ()
                 doc_list[doc_list.index(d)] = Doc(d.intake_id, d.user_id, d.request_id,
-                                                 str(r[1] or d.proof_id), d.verdict_at, d.account_hold, ids)
+                                                 str(r[1] or d.proof_id), d.verdict_at, d.account_hold, ids,
+                                                 d.verified_roles)
     finally:
         pdb.close()
 
 
 def _docs_by_request(doc_store: str | Path, proof_store: str | Path, *,
-                     verified_only: bool) -> dict[str, list[Doc]]:
+                     verified_only: bool, partial: bool = False) -> dict[str, list[Doc]]:
     """request id -> the documents that name it, from the doc-verify store's NEWEST run per role."""
     db = _ro(doc_store)
     try:
-        runs = _group_runs(_newest_run_rows(db), _unverified_roles(db))
+        runs = _group_runs(_newest_run_rows(db), _role_verdicts(db))
     finally:
         db.close()
     out: dict[str, list[Doc]] = {}
@@ -363,11 +407,11 @@ def _docs_by_request(doc_store: str | Path, proof_store: str | Path, *,
         user_id = g["user_id"]
         if not isinstance(user_id, int):
             continue
-        if verified_only and not g["all_verified"]:
+        if verified_only and not (g["all_verified"] or (partial and g["partial_ok"])):
             continue
         out.setdefault(request_id.lower(), []).append(
             Doc(intake_id, int(user_id), request_id.lower(), g["proof_id"], g["at"],
-                g["account_hold"], ()))
+                g["account_hold"], (), tuple(sorted(g["verified_roles"]))))
     _attribute_filings(out, proof_store)
     return out
 
@@ -382,6 +426,22 @@ def verified_docs(doc_store: str | Path = DEFAULT_DOC_STORE,
     makes a later forgery verdict bite.
     """
     return _docs_by_request(doc_store, proof_store, verified_only=True)
+
+
+def approvable_docs(doc_store: str | Path = DEFAULT_DOC_STORE,
+                    proof_store: str | Path = DEFAULT_PROOF_STORE) -> dict[str, list[Doc]]:
+    """request id -> the documents a PER-ROLE decision may consider.
+
+    A document qualifies when no role it judged is `contradicted` or `forged`, and at least one is
+    `verified`. `unverifiable` and `unknown` are the statuses that may pend: "we could not check it"
+    is neither good nor bad, and `unknown` is what the store writes when the dv-4 tooling itself
+    failed. A role the document CONTRADICTS, or one flagged forged, is never approvable and never
+    pendable - the document is not used at all.
+
+    `verified_docs` stays the whole-request view (the write's own gate and the arming measurement),
+    because a partial document must never be recorded as a whole-request approval.
+    """
+    return _docs_by_request(doc_store, proof_store, verified_only=True, partial=True)
 
 
 def document_universe(doc_store: str | Path = DEFAULT_DOC_STORE,
@@ -440,20 +500,24 @@ def current_verdict(doc_store: str | Path, intake_id: str, request_id: str) -> t
     try:
         rows = [r for r in _newest_run_rows(db)
                 if str(r[0]) == str(intake_id) and str(r[1]).lower() == request_id.lower()]
-        blocked = {k: v for k, v in _unverified_roles(db).items() if k[0] == str(intake_id)}
+        verdicts = {k: v for k, v in _role_verdicts(db).items() if k[0] == str(intake_id)}
     finally:
         db.close()
     if not rows:
         return "", ""
-    g = _group_runs(rows, blocked)[(str(intake_id), request_id.lower())]
+    g = _group_runs(rows, verdicts)[(str(intake_id), request_id.lower())]
     if g["all_verified"]:
         return "verified", g["at"]
+    if g["partial_ok"]:
+        return "partial", g["at"]
     outcomes = {str(r[6]) for r in rows}
     if len(outcomes) > 1:
         return "mixed", g["at"]
     # every role of the newest run agreed, but some OTHER role's newest verdict does not: the document
     # was contradicted for that role and no later run cleared it, so it proves nothing here
-    return blocked.get((str(intake_id), request_id.lower())) or "mixed", g["at"]
+    bad = {v for v in (verdicts.get((str(intake_id), request_id.lower())) or {}).values()
+           if v != "verified"}
+    return (bad.pop() if len(bad) == 1 else "mixed"), g["at"]
 
 
 # ── the evidence the R22 guards read (forensics + independent cross-checks) ──
@@ -663,7 +727,7 @@ def gate_one_request(c: Candidate, req_users: dict[str, Any] | None = None) -> G
 
 
 def gate_dv4_verified(c: Candidate, doc_store: str | Path = DEFAULT_DOC_STORE,
-                      doc: Doc | None = None) -> Gate:
+                      doc: Doc | None = None, *, partial_ok: bool = False) -> Gate:
     """The doc-verify verdict that stands NOW is `verified` (dv-4) - for the document the approval is
     about to RECORD (`pick`, unless a caller names one).
 
@@ -676,10 +740,10 @@ def gate_dv4_verified(c: Candidate, doc_store: str | Path = DEFAULT_DOC_STORE,
         return _fail("dv4_verified", "no verified document names this request")
     d = doc if doc is not None else pick(c)
     outcome, at = current_verdict(doc_store, d.intake_id, c.request_id)
-    if outcome != "verified":
-        return _fail("dv4_verified", f"the standing verdict for {d.intake_id} is {outcome or 'unknown'}"
-                     f" ({at or 'no run'})")
-    return _pass()
+    if outcome == "verified" or (partial_ok and outcome == "partial"):
+        return _pass()
+    return _fail("dv4_verified", f"the standing verdict for {d.intake_id} is {outcome or 'unknown'}"
+                 f" ({at or 'no run'})")
 
 
 def gate_forensics(c: Candidate, doc_store: str | Path = DEFAULT_DOC_STORE,
@@ -1062,7 +1126,8 @@ def evaluate(c: Candidate, db: sqlite3.Connection, *, doc_store: str | Path = DE
              gate: account_gate.Cached | Callable[[Any], Any] | None = None,
              hold_ids: Iterable[str] = (), hold_users: Iterable[Any] = (),
              now: datetime | None = None,
-             req_users: dict[str, Any] | None = None) -> tuple[Gate, list[Gate]]:
+             req_users: dict[str, Any] | None = None,
+             partial_ok: bool = False) -> tuple[Gate, list[Gate]]:
     """(verdict, every gate's answer in order). The first failing gate decides; all of them are
     returned so a report can say why the ones after it were never reached."""
     answers: list[Gate] = []
@@ -1079,7 +1144,7 @@ def evaluate(c: Candidate, db: sqlite3.Connection, *, doc_store: str | Path = DE
         d0 = pick(c)
         ev = doc_evidence(doc_store, d0.intake_id, c.request_id)
     for g in (lambda: gate_one_request(c, req_users),
-              lambda: gate_dv4_verified(c, doc_store),
+              lambda: gate_dv4_verified(c, doc_store, partial_ok=partial_ok),
               lambda: gate_forensics(c, doc_store, ev=ev),
               lambda: gate_crosscheck(c, doc_store, ev=ev),
               lambda: gate_same_release(c, doc_store, ev=ev),
@@ -1288,8 +1353,14 @@ def _row_verdict(c: Candidate, db: sqlite3.Connection, *, doc_store: str | Path,
 
 
 def pick(c: Candidate) -> Doc:
-    """The document the approval records: the newest verified one (all of them name this request)."""
-    return max(c.docs, key=lambda d: (d.verdict_at, d.intake_id))
+    """The document the approval records: the one that proves the most of the claimed roles.
+
+    Coverage comes before recency. A newer PARTIAL filing must never shadow an older fully-verified
+    one, or the customer is asked to prove again something already proven and the recorded ref is the
+    weaker document. Recency only breaks a tie.
+    """
+    claimed = set(c.roles)
+    return max(c.docs, key=lambda d: (len(claimed & set(d.verified_roles)), d.verdict_at, d.intake_id))
 
 
 def order_key(user_id: Any, created_at: Any, paying: Any = None, now: datetime | None = None,
@@ -1320,7 +1391,8 @@ def plan(c: Candidate, db: sqlite3.Connection, *, doc_store: str | Path = DEFAUL
          gate: account_gate.Cached | Callable[[Any], Any] | None = None,
          hold_ids: Iterable[str] = (), hold_users: Iterable[Any] = (),
          now: datetime | None = None,
-         req_users: dict[str, Any] | None = None) -> tuple[Approval | None, list[Gate]]:
+         req_users: dict[str, Any] | None = None,
+         partial_ok: bool = False) -> tuple[Approval | None, list[Gate]]:
     """(the approval this candidate WOULD record, every gate's answer) - and **no write at all**.
 
     QA #1684 finding 2: the decider has guards AFTER the doc gates (the server's own approval refusal,
@@ -1334,7 +1406,8 @@ def plan(c: Candidate, db: sqlite3.Connection, *, doc_store: str | Path = DEFAUL
     # one. A file SHA reused across two accounts in the configured store was refused by the gate and
     # approved by the plan.
     verdict, answers = evaluate(c, db, doc_store=doc_store, proof_store=proof_store, gate=gate,
-                               hold_ids=hold_ids, hold_users=hold_users, now=now, req_users=req_users)
+                               hold_ids=hold_ids, hold_users=hold_users, now=now, req_users=req_users,
+                               partial_ok=partial_ok)
     if not verdict.ok:
         return None, answers
     d = pick(c)
@@ -1522,13 +1595,15 @@ def approve(c: Candidate, db: sqlite3.Connection, *, doc_store: str | Path = DEF
             proof_store: str | Path | None = None,
             gate: account_gate.Cached | Callable[[Any], Any] | None = None,
             hold_ids: Iterable[str] = (), hold_users: Iterable[Any] = (),
-            now: datetime | None = None, mode: str = "shadow") -> tuple[Approval | None, list[Gate]]:
+            now: datetime | None = None, mode: str = "shadow",
+            partial_ok: bool = False) -> tuple[Approval | None, list[Gate]]:
     """One candidate's answer, recorded. In apply mode a passing candidate writes its provisional
     row (and only apply mode consumes the day cap); shadow/judge record the event and write nothing,
     so a judge run can never approve a request or spend a slot."""
     now = now or datetime.now(timezone.utc)
     verdict, answers = evaluate(c, db, doc_store=doc_store, proof_store=proof_store, gate=gate,
-                                hold_ids=hold_ids, hold_users=hold_users, now=now)
+                                hold_ids=hold_ids, hold_users=hold_users, now=now,
+                                partial_ok=partial_ok)
     d = pick(c) if c.docs else None
     if not verdict.ok:
         record_event(db, now, c.request_id, c.user_id, d.intake_id if d else None, "refused",

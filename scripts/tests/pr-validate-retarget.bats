@@ -66,13 +66,13 @@ PY
   [ "$status" -eq 0 ]
 }
 
-@test "a title/body edit does NOT run the validate job (no runner cost)" {
+@test "a title/body edit does NOT run the validate-code job (no runner cost)" {
   run python3 - <<'PY'
 import os, yaml
-job = yaml.safe_load(open(os.environ["WF"]))["jobs"]["validate"]
+job = yaml.safe_load(open(os.environ["WF"]))["jobs"]["validate-code"]
 cond = job.get("if")
-assert cond, ("the validate job has no `if:` — with `edited` in the trigger types every title or "
-              "body edit would start a 20-60 minute run")
+assert cond, ("the validate-code job has no `if:` — with `edited` in the trigger types every title "
+              "or body edit would start a 20-60 minute run")
 assert "github.event.action != 'edited'" in cond, f"the guard does not exclude edited: {cond!r}"
 assert "github.event.changes.base" in cond, (
     f"the guard does not key on the base ref changing: {cond!r} — `changes.base` is present only "
@@ -84,7 +84,7 @@ PY
 @test "the guard is an OR of (not-edited, base-changed) — not an AND" {
   run python3 - <<'PY'
 import os, yaml
-cond = yaml.safe_load(open(os.environ["WF"]))["jobs"]["validate"]["if"]
+cond = yaml.safe_load(open(os.environ["WF"]))["jobs"]["validate-code"]["if"]
 # `A && B` would require BOTH "not edited" AND "base changed", which is never true: a retarget is
 # edited, and a push has no changes.base. The guard must be `A || B`.
 assert "||" in cond, f"the guard is not an OR: {cond!r}"
@@ -165,28 +165,45 @@ PY
 import os, yaml
 jobs = yaml.safe_load(open(os.environ["WF"]))["jobs"]
 guard = "github.event.action != 'edited' || github.event.changes.base != null"
-missing = [j for j, v in jobs.items() if v.get("if") != guard]
+# `validate` is the required MIRROR job: it must run on every event so the required context is
+# always posted, so it is the one job without the guard. It costs seconds, not a runner-hour.
+missing = [j for j, v in jobs.items() if j != "validate" and v.get("if") != guard]
 assert not missing, f"jobs without the metadata-edit guard: {missing}"
+assert jobs["validate"]["if"] == "always()", jobs["validate"].get("if")
 PY
   [ "$status" -eq 0 ]
 }
 
-@test "a skipped job posts under a DIFFERENT check name, so it cannot mask a real failure" {
-  # QA #1813 Critical, second half: a skipped job still posts a check run, and GitHub resolves
-  # duplicate check names by the most recent run - so a skipped `validate` would overwrite a
-  # real FAILURE on the same head. Every job name must therefore change for the metadata case.
+@test "no job name is templated, and the required validate context is always posted" {
+  # 2026-11-11 (hydra#1851): GitHub does NOT evaluate `${{ }}` in `jobs.<job_id>.name` — it posts
+  # the check run under the RAW template string. The heavy job was named
+  # `validate${{ (github.event.action == 'edited' && ...) && ' (metadata edit — not run)' || '' }}`,
+  # so a metadata edit posted a check run literally named `validate${{ (((((github.event.action ...`
+  # and the required `validate` context was never produced on that head. GitHub then refused the
+  # merge with 'Required status check "validate" is expected' — a required check that can never
+  # pass, the same class of defect as one that can never fail.
   run python3 - <<'PY'
 import os, yaml
 jobs = yaml.safe_load(open(os.environ["WF"]))["jobs"]
-bad = []
-for j, v in jobs.items():
-    name = v.get("name") or j
-    if "metadata edit" not in name:
-        bad.append((j, name))
-assert not bad, f"jobs whose check name is unchanged on a metadata edit: {bad}"
-# And the normal-run name must be untouched, or branch protection stops matching.
-assert jobs["validate"]["name"].startswith("validate${{"), jobs["validate"]["name"]
-assert jobs["bats-tests"]["name"].startswith(
+# Only EVENT-dependent templating is the defect; `${{ matrix.shard }}` is evaluated normally.
+templated = [(j, v.get("name")) for j, v in jobs.items() if "github.event" in (v.get("name") or "")]
+assert not templated, f"job names must be literal, not event-templated: {templated}"
+# The required context must be the literal name, posted on every event, and it must mirror.
+assert jobs["validate"]["name"] == "validate", jobs["validate"]["name"]
+assert jobs["validate"]["if"] == "always()", jobs["validate"]["if"]
+assert jobs["validate"]["needs"] == ["validate-code"], jobs["validate"]["needs"]
+# The skip lives on the heavy job, which must NOT be named `validate`: a skipped job reports
+# SUCCESS and GitHub resolves duplicate names by the most recent run, so a skipped `validate`
+# would mask a real FAILURE on the same head (QA #1813 Critical).
+assert jobs["validate-code"]["name"] == "validate-code", jobs["validate-code"]["name"]
+assert jobs["validate-code"]["if"] == (
+    "github.event.action != 'edited' || github.event.changes.base != null"), jobs["validate-code"]["if"]
+# And the mirror must actually mirror: on a metadata edit it re-reports the head's earned
+# conclusion rather than reporting a green nobody validated.
+mirror = "\n".join(s.get("run") or "" for s in jobs["validate"]["steps"])
+assert "check-runs" in mirror, "the mirror must read the head's check runs"
+assert "exit 1" in mirror, "the mirror must fail when the head has not earned a success"
+assert jobs["bats-tests"]["name"] == (
     "Bats (scripts/ + ops-admin gates) (${{ matrix.shard }}/2)"), jobs["bats-tests"]["name"]
 PY
   [ "$status" -eq 0 ]

@@ -7,7 +7,7 @@ Code: `scripts/credit_verify/docverify/` and `scripts/credit-doc-verify.py`. Tes
 
 H3 ([proof-forensics.md](./proof-forensics.md)) asks whether the **file** was tampered with. Doc-verify asks whether what the document **claims** is true, using sources the user does not control. Every document that H3 judged for a linked credit request (what stage 2 reads before it can approve) passes through it.
 
-**Shadow reader; it cannot approve a document by itself** (captain, 2026-10-27, Fable rules #1380). `verified` is evidence for stage 2 or the decider. It is never an approval on its own, and nothing reads it to approve. Whatever later consumes it must still apply its own approve rule and the account-level band.
+**Shadow reader; it cannot approve a document by itself** (captain, 2026-10-27, Fable rules #1380). `verified` is evidence for stage 2 or the decider. It is never an approval on its own: a consumer reads it as evidence and must still apply its own approve rule and the account-level band.
 
 **Shadow.** It writes only its own store, `/var/lib/hydra-credit-verify/doc-verify.sqlite` (0600), and reads the H3 proof store read-only. It changes no credit and sends nothing to anybody: no issuer email and no customer copy. How its outcome plugs into stage 2 or the decider is the Fable verifier's call. Until then, stage 2 does not read it.
 
@@ -28,12 +28,12 @@ H3 ([proof-forensics.md](./proof-forensics.md)) asks whether the **file** was ta
 
 ## Outcome per document, request and role (`dv_outcomes`)
 
-| Outcome | When | Meaning for the credit (once a consumer is wired; today nothing reads it) |
+| Outcome | When | Meaning for the credit (the decider reads these as evidence; never an approval by itself) |
 |---|---|---|
 | `forged` | H3 FORGED_LIKELY or any hard forensic signal, or a fabricated sender (look-alike or nonexistent domain) | Decline with the reason + account hold (`account_hold=1`) |
 | `contradicted` | On a **fresh Spotify AND Tidal capture requested by this run** (rows captured after `Deps.fresh_since`, within 30 days), each DSP credits exactly one other person, the same one, in this one-person role, and not the claimant (Fable, 2026-10-27, D5). A stored capture, one DSP, Jaxsta/MLC/MusicBrainz alone, or two people in the role is a possible conflict: `unverifiable`, recorded with `dsp_conflict`. No capture is requested yet, so nothing is `contradicted` until that wiring lands | Hold (not a verdict); a named human confirms the first 20 declines |
 | `verified` | **All of the following:** the claims were extracted (not degraded); the document supports the claim (H3 GENUINE, VERIFIED or PLAUSIBLE, or H3 SUSPECT for coverage only with the extracted credits showing the claimant in that role family on exactly that track: its normalized title, only a featured-artist credit dropped, or the catalog ISRC; never a prefix or substring); no hard or soft forensic doubt; no soft cross-check; Spotify/Tidal or MusicBrainz independently confirm the credit; the account is not on hold | Evidence only: never an approval by itself. A consumer may count it next to its own approve rule, under the account-level band |
-| `unknown` | Our tooling could not decide: extraction did not run (model down, cap, document not located, sandbox failed), H3 missing or UNDETERMINED, Spotify/Tidal credits unreadable (D3) | Nothing: no ask, no approval, no hold. Retried for up to 3 runs; then the last one stands |
+| `unknown` | Our tooling could not decide: extraction did not run (model down, cap, document not located, sandbox failed), H3 missing or UNDETERMINED, Spotify/Tidal credits unreadable (D3) | No approval and no hold, and never a contradiction: the role PENDS, so the per-role split may still ask for it. Retried for up to 3 runs; then the last one stands |
 | `unverifiable` | Everything else. **UNKNOWN never approves** | `need` names the stronger proof: `distributor_dashboard_with_code`, `issuer_email_from_official_domain`, `counterparty_signed_or_registered`, `readable_document`, `account_on_hold`. These are machine codes; the copy is not written here |
 
 **Low-confidence extraction is never evidence** (QA, Fable, 2026-10-27). Below confidence 0.6, an extracted field cannot make an outcome on its own. A confidence that is not a finite number (NaN, Infinity, a string, `true`) reads as 0.0, and every floor is written so NaN fails it. A sender read that low is `weak`: it is not looked up, and it can never forge a document or hold an account. An issuer or signatory read that low is not used. A track or ISRC read that low cannot bind a credit to the claimed track. A credit read that low does not count.

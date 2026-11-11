@@ -285,9 +285,11 @@ def candidate_requests(user_id: int | None, *, open_rows: dict[int, list[dict[st
                                               "basis": "open_credit_request"})
     for h in held.get(user_id, []):
         cur = out.setdefault(str(h["request_id"]), {"request_id": str(h["request_id"]),
-                                                    "status": "held", "basis": "proof_on_file_hold"})
+                                                    "status": "held", "basis": "proof_on_file_hold",
+                                                    "roles": []})
         if cur["basis"] == "open_credit_request":
             cur["basis"] = "open_credit_request+proof_on_file_hold"
+        cur["roles"] = list(h.get("roles") or ())
     return sorted(out.values(), key=lambda r: r["request_id"])
 
 

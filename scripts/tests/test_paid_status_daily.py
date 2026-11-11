@@ -10,12 +10,14 @@ import os
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import textwrap
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DAILY = os.path.join(HERE, "..", "paid-status", "daily.sh")
+PARTIAL_ASKS = os.path.join(HERE, "..", "paid-status", "partial_asks.py")
 
 STUBS = {
     "silent_count.py": """
@@ -33,7 +35,12 @@ STUBS = {
         json.dump([{"user_id": u, "msg_hold": False, "lens_held": False, "cs_excluded": False, "ask_only": False}
                    for u in (1, 2)], open(f"{D}/segments.json", "w"))
     """,
-    "support7d.py": "import json, os; json.dump([], open(os.environ['PWR_DIR'] + '/support7d.json', 'w'))",
+    "support7d.py": """
+        import json, os
+        held = os.environ.get("SUPPORT_HELD", "").split()
+        json.dump([{"user_id": int(u), "human_7d": True} for u in held],
+                  open(os.environ['PWR_DIR'] + '/support7d.json', 'w'))
+    """,
     "classify2.py": """
         import json, os, sys
         out = sys.argv[sys.argv.index("--out-dir") + 1]
@@ -59,6 +66,13 @@ STUBS = {
             json.dump({"generated_at": "x", "users": u}, open(f"{D}/list-{n}.json", "w"))
         json.dump({"uvn-status": u, "status-team-review": u}, open(f"{D}/email-lists.json", "w"))
         print("lists")
+    """,
+    "partial_asks.py": """
+        import json, sys
+        d = sys.argv[1]
+        u = [{"user_id": 1, "paid": True, "skip": None, "request_ids": ["r1"], "class": "PARTIAL"}]
+        json.dump({"generated_at": "x", "users": u}, open(f"{d}/list-P.json", "w"))
+        print(json.dumps({"partial_requests": 1, "users": 1, "paid": 1}))
     """,
     "b0_gap.py": """
         import json, os
@@ -167,6 +181,17 @@ class DailyShTest(unittest.TestCase):
                 out.append(a[a.index("--campaign") + 1])
         return out
 
+    def lists(self, calls, mode="apply"):
+        """The --list values of the segment pass (the receipts stage has its own helper)."""
+        out = []
+        for c in calls:
+            a = c.split()
+            if "--list" in a and a[a.index("--list") + 1] in RECEIPT_LISTS:
+                continue
+            if "--mode" in a and a[a.index("--mode") + 1] == mode:
+                out.append(a[a.index("--list") + 1])
+        return out
+
     def receipt_calls(self, calls, mode="apply"):
         out = []
         for c in calls:
@@ -236,8 +261,8 @@ class DailyShTest(unittest.TestCase):
         self.assertNotIn("status-doc-received", sent)               # QA #1603: the A lane is retired
         self.assertIn("paid A: retired lane", p.stdout)
         self.assertIn("status-team-review", sent)
-        self.assertNotIn("uvn-status", sent)                       # no Intercom ask
-        self.assertNotIn("uvn-status", self.campaigns(calls, "dry-run"))
+        self.assertNotIn("list-U.json", self.lists(calls))          # no general Intercom ask
+        self.assertNotIn("list-U.json", self.lists(calls, "dry-run"))
         d = self.seg_dir()
         self.assertFalse(os.path.exists(os.path.join(d, "B0GAP_RAN")))  # b0_gap not run
         self.assertIn("4242", open(os.path.join(d, "exclude-cs.txt")).read().split())  # held ids are excluded
@@ -245,6 +270,31 @@ class DailyShTest(unittest.TestCase):
         emailed = open(os.path.join(d, "EMAIL_APPLIED")).read().split()
         self.assertIn("status-team-review", emailed)
         self.assertNotIn("uvn-status", emailed)                    # no email ask (credit_status_uvn_ask)
+
+    def test_the_per_role_partial_lane_runs_with_its_own_switch(self):
+        # captain 2026-11-06 ~17:05Z: the per-role split population is asked through the uvn-status sender
+        # while the general ask lane stays off (firstmate 024). Its own switch, not ASKS.
+        p, calls = self.run_daily(PARTIAL_ASKS="1")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertIn("list-P.json", self.lists(calls))
+        self.assertIn("paid partials: ", p.stdout)
+        self.assertNotIn("list-U.json", self.lists(calls))
+
+    def test_the_per_role_partial_lane_does_not_run_without_its_switch(self):
+        p, calls = self.run_daily()
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        self.assertNotIn("list-P.json", self.lists(calls))
+        self.assertNotIn("paid partials: ", p.stdout)
+
+    def test_the_per_role_partial_lane_carries_the_segment_holds(self):
+        # F1: the P lane must not message a user the segment holds (cs exclusion, support@ 7d, core notice 7d).
+        p, calls = self.run_daily(PARTIAL_ASKS="1", SUPPORT_HELD="7", CORE_NOTICE_HELD="1")
+        self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
+        call = next(c for c in calls if "list-P.json" in c)
+        self.assertIn("--exclude-users", call)
+        with open(call.split("--exclude-users")[1].split()[0]) as fh:
+            ids = set(fh.read().split())
+        self.assertEqual(ids, {"0", "4242", "7", "1"})
 
     def test_with_asks_the_ask_and_b0_gap_run(self):
         p, calls = self.run_daily(ASKS="1")
@@ -289,7 +339,7 @@ class DailyShTest(unittest.TestCase):
         p, calls = self.run_daily(LISTS="A")        # a later run with no B class: the earlier B list is never sent
         self.assertEqual(p.returncode, 0, p.stdout + p.stderr)
         self.assertNotIn("status-team-review", self.campaigns(calls, "dry-run"))
-        self.assertEqual(self.campaigns(calls), [])
+        self.assertNotIn("list-B.json", self.lists(calls))
 
     def test_a_missing_cs_exclusion_list_refuses_the_run(self):
         os.remove(self.excl)
@@ -302,6 +352,115 @@ class DailyShTest(unittest.TestCase):
         p, calls = self.run_daily(KILL_SWITCH=ks)
         self.assertEqual(calls, [])
         self.assertIn("kill switch present", p.stdout + p.stderr)
+
+
+class PartialAsksListTest(unittest.TestCase):
+    """scripts/paid-status/partial_asks.py: the list the uvn-status sender reads for the per-role split
+    population. Built from the decider's ledger (the only place a partial is named) plus the replica's
+    owner, ids only."""
+
+    RID = "3f2b8c1e-0a4d-4e6b-9c7a-1d2e3f4a5b6c"
+    OTHER = "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"
+
+    def setUp(self):
+        self.t = tempfile.mkdtemp()
+        self.ledger = os.path.join(self.t, "ledger.sqlite3")
+        self.out = os.path.join(self.t, "out")
+        self.trino = os.path.join(self.t, "trino.py")
+        with open(self.trino, "w") as fh:
+            fh.write("#!/usr/bin/env python3\nimport sys\nsql = sys.stdin.read()\n"
+                     "if 'group by 1, 2' in sql:\n"
+                     f"    print('\"{self.RID}\",\"1\",\"1\"')\n"
+                     "else:\n"
+                     f"    print('\"{self.RID}\",\"1\"')\n"
+                     f"    print('\"{self.OTHER}\",\"1\"')\n")
+        os.chmod(self.trino, 0o755)
+
+    def tearDown(self):
+        shutil.rmtree(self.t, ignore_errors=True)
+
+    def decide(self, decision, pending, mode="apply"):
+        sys.path.insert(0, os.path.join(HERE, ".."))
+        from credit_review import decide
+        db = sqlite3.connect(self.ledger)
+        decide.ensure_schema(db)
+        db.execute("INSERT INTO decisions (run_id, decided_at, request_id, user_id, claimed_roles, approved_roles,"
+                   " pending_roles, big_track, decision, reason, mode) VALUES ('r1','2026-11-06T17:00:00Z',?,1,"
+                   " 'Mixing,Mastering','Mixing',?,0,?,'x',?)", (self.RID, pending, decision, mode))
+        db.commit(); db.close()
+
+    def decide_second(self, rid, pending, uid=1):
+        """A SECOND split request owned by the same user (two workspaces: one paid, one free)."""
+        db = sqlite3.connect(self.ledger)
+        db.execute("INSERT INTO decisions (run_id, decided_at, request_id, user_id, claimed_roles, approved_roles,"
+                   " pending_roles, big_track, decision, reason, mode) VALUES ('r1','2026-11-06T17:00:00Z',?,?,"
+                   " 'Mixing,Mastering','Mixing',?,0,'approve_partial','x','apply')", (rid, uid, pending))
+        db.commit(); db.close()
+
+    def trino_rows(self, rows):
+        """Rewrite the replica fake so it returns exactly `rows` (rid, uid, paid-as-0/1), in that order."""
+        with open(self.trino, "w") as fh:
+            fh.write("#!/usr/bin/env python3\nimport sys\nsql = sys.stdin.read()\n")
+            fh.write("if 'group by 1, 2' in sql:\n")
+            for rid, uid, paid in rows:
+                fh.write(f"    print('\"{rid}\",\"{uid}\",\"{paid}\"')\n")
+            fh.write("else:\n")
+            for rid, uid, _ in rows:
+                fh.write(f"    print('\"{rid}\",\"{uid}\"')\n")
+        os.chmod(self.trino, 0o755)
+
+    def build(self):
+        env = dict(os.environ, CREDIT_REVIEW_LEDGER=self.ledger, CREDIT_PROOF_TRINO=self.trino)
+        p = subprocess.run([sys.executable, PARTIAL_ASKS, self.out], env=env, capture_output=True, text=True,
+                           timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        with open(os.path.join(self.out, "list-P.json")) as fh:
+            return json.load(fh), json.loads(p.stdout)
+
+    def test_a_partial_row_becomes_a_list_entry_for_its_owner(self):
+        self.decide("approve_partial", "Mastering")
+        doc, summary = self.build()
+        self.assertEqual([(u["user_id"], u["paid"], u["request_ids"]) for u in doc["users"]],
+                         [(1, True, [self.RID])])
+        self.assertEqual(summary, {"partial_requests": 1, "users": 1, "paid": 1})
+
+    def test_the_list_is_scoped_to_the_split_requests(self):
+        # A separate open request is NOT part of the partial lane: listing it would let this cron ask
+        # about it while the general ask lane is off, and the sender scopes PARTIAL entries itself.
+        self.decide("approve_partial", "Mastering")
+        doc, _ = self.build()
+        self.assertNotIn(self.OTHER, doc["users"][0]["request_ids"])
+
+    def test_a_row_with_no_roles_still_pending_is_not_listed(self):
+        self.decide("approve_partial", "")
+        doc, summary = self.build()
+        self.assertEqual((doc["users"], summary["partial_requests"]), ([], 0))
+
+    def test_a_shadow_partial_is_not_listed(self):
+        self.decide("approve_partial", "Mastering", mode="shadow")
+        doc, _ = self.build()
+        self.assertEqual(doc["users"], [])
+
+    def test_a_judge_only_partial_never_reaches_a_customer(self):
+        # `judge` is shadow: its ledger row must not name a live ask population.
+        self.decide("approve_partial", "Mastering", mode="judge")
+        doc, _ = self.build()
+        self.assertEqual(doc["users"], [])
+
+    def test_a_paid_workspace_partial_is_paid_whatever_the_trino_row_order(self):
+        # QA 2026-11-11 (Important): the user row was built with setdefault, so `paid` was fixed by the FIRST
+        # request row returned. A free-workspace partial arriving before the same user's paid-workspace
+        # partial marked the user free and ran BOTH requests under the free segment and its cap, breaking
+        # paid-first priority. The flag is ORed across the user's rows, so neither order can demote them.
+        self.decide("approve_partial", "Mastering")
+        self.decide_second(self.OTHER, "Mastering")
+        for rows in ([(self.RID, 1, 0), (self.OTHER, 1, 1)],
+                     [(self.OTHER, 1, 1), (self.RID, 1, 0)]):
+            self.trino_rows(rows)
+            doc, summary = self.build()
+            self.assertEqual([(u["user_id"], u["paid"]) for u in doc["users"]], [(1, True)], rows)
+            self.assertEqual(sorted(doc["users"][0]["request_ids"]), sorted([self.RID, self.OTHER]), rows)
+            self.assertEqual(summary["paid"], 1, rows)
 
 
 if __name__ == "__main__":

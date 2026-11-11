@@ -86,9 +86,15 @@ Subcommands:
   decide   credit-trust-decide (trust-yet-verify, captain 2026-10-15 ~22:12Z):
            decide the HELD queue - provisional approval on catalog / footprint /
            verified-web evidence for non-big rows without a validator conflict,
-           a support request (user_verification_needed) for the rest. --mode
-           shadow records only; --mode apply writes, and only when
+           a support request (user_verification_needed) for the rest. A request
+           with several claimed roles is decided PER ROLE (R90): the roles a
+           trusted source credits are approved, the rest are pending with their
+           own proof need, never rejected. --mode shadow records only; --mode
+           apply writes, and only when
            policies/credit-approval-automation.json approves credit-trust-decide.
+           --mode apply REFUSES a per-role partial (approve_partial) until the
+           core write half credit-per-role-write-c1 lands: a whole-request PUT
+           would approve the unproven roles.
            Exit code = run status (command-shaped cron).
   explain <request-id>        every decision + server outcome for one row.
   export-decisions --since T  JSON lines for the board / digest.

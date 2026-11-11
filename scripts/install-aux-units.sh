@@ -2808,6 +2808,9 @@ chmod 644 /etc/cron.d/openclaw-watchdog
 # document can be accepted), so this cron sends status-only notes. The daily cap is the policy file's
 # shared credit cap, read in code ([key=uvn-daily-cap-400]; main.env CREDIT_*_DAILY_MAX are ignored). Stop switch:
 # touch /etc/hydra/credit-ops-notes.disabled. Replaces the hand-installed 2026-10-26 file.
+# PARTIAL_ASKS is the per-role split lane's OWN switch and stays UNSET here on purpose: the ask must not
+# reach a customer before the proven roles are actually approved, and apply mode still refuses the
+# per-role core write (credit-per-role-write-c1). Set PARTIAL_ASKS=1 only after that write ships.
 cat > /etc/cron.d/hydra-paid-status << CRONPAIDSTATUS
 # MANAGED BY scripts/install-aux-units.sh — DO NOT EDIT BY HAND.
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin

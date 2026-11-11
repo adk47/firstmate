@@ -90,6 +90,30 @@ class CreditBuckets(unittest.TestCase):
                               "doc_required": 0, "at": ""}})
         self.assertEqual(vqr.classify_credit(5, f, CREDIT, frozenset()), "human")
 
+    def test_a_per_role_split_with_no_document_is_not_a_document_on_file(self):
+        # captain 2026-11-06: a per-role split has NO document at all (the catalog proved some roles,
+        # the rest are owed an ask). Counting it as "a document is already on file" hides the very
+        # population the captain ordered asked.
+        f = facts(latest={8: {"decision": "approve_partial",
+                              "reason": "per-role split: approved Mixing; pending Mastering",
+                              "doc_required": 0, "at": "", "proof_id": ""}})
+        self.assertEqual(vqr.classify_credit(8, f, CREDIT, frozenset()), "untouched")
+
+    def test_a_per_role_split_held_for_a_document_on_file_is_human_review(self):
+        # F4: filter_support holds a PARTIAL row for a document on file by PREPENDING the hold sentence and
+        # keeping the decision, so the row carries no proof_id. It is still a document on file.
+        f = facts(latest={10: {"decision": "approve_partial",
+                               "reason": "proof on file: human review (a document is already on file; never ask again)"
+                                         " | per-role split: approved Mixing; pending Mastering",
+                               "doc_required": 0, "at": "", "proof_id": ""}})
+        self.assertEqual(vqr.classify_credit(10, f, CREDIT, frozenset()), "human")
+
+    def test_a_per_role_split_with_a_document_is_human_review(self):
+        f = facts(latest={9: {"decision": "approve_partial",
+                              "reason": "proof on file: dv-4 verified document dv-4:sha:1 proves Mixing",
+                              "doc_required": 0, "at": "", "proof_id": "dv-4:sha:1"}})
+        self.assertEqual(vqr.classify_credit(9, f, CREDIT, frozenset()), "human")
+
     def test_a_document_dated_after_the_request_is_docs_in(self):
         f = facts(messaged={6: ""}, proof_waiting={6: "2026-10-27T10:00:00Z"})
         self.assertEqual(vqr.classify_credit(6, f, CREDIT, frozenset()), "docs_in")
@@ -433,7 +457,7 @@ class DecidedNotClosed(unittest.TestCase):
         CREATE TABLE decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL,
           decided_at TEXT NOT NULL, request_id TEXT NOT NULL, user_id INTEGER,
           big_track INTEGER NOT NULL DEFAULT 0, decision TEXT NOT NULL, reason TEXT NOT NULL,
-          mode TEXT NOT NULL);
+          proof_id TEXT, mode TEXT NOT NULL);
         CREATE TABLE decision_outcomes (id INTEGER PRIMARY KEY AUTOINCREMENT, run_id TEXT NOT NULL,
           at TEXT NOT NULL, request_id TEXT NOT NULL, action TEXT NOT NULL, outcome TEXT NOT NULL);
         """)

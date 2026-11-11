@@ -11,8 +11,8 @@ on:
     # and its entire run history was PR Title Check + credit-approval-guard; `qa-review` stayed NONE
     # for six hours and the PR looked like an orphan with no owner.
     #
-    # The `validate` job's `if:` below keeps this cheap: a title/body edit carries `changes.title` or
-    # `changes.body` and no `changes.base`, so it skips the job and consumes no runner. Only a base
+    # The `validate-code` job's `if:` below keeps this cheap: a title/body edit carries `changes.title`
+    # or `changes.body` and no `changes.base`, so it skips the job and consumes no runner. Only a base
     # change actually validates.
     types: [opened, synchronize, reopened, edited]
 
@@ -71,8 +71,81 @@ jobs:
   # It also has none of node-8's SECRETS (/etc/openclaw/*.env, /etc/hydra/*.env, the gog/gh
   # logins), which is the point: a test that silently needed production credentials goes red
   # here instead of quietly using them.
+  # THE REQUIRED CHECK. `require-ci` (ruleset 26901288) requires the literal context `validate`, so
+  # this job must be named exactly that and must post on EVERY event, including a metadata edit.
+  #
+  # 2026-11-11 (hydra#1851): the heavy job used to be named
+  # `validate${{ (github.event.action == 'edited' && ...) && ' (metadata edit — not run)' || '' }}`.
+  # GitHub does NOT evaluate that expression in `jobs.<job_id>.name` — it posts the check run under
+  # the RAW template string. So a metadata edit produced a check run literally named
+  # `validate${{ (((((github.event.action == 'edited') ...` and the required `validate` was left
+  # "expected" on the head, which blocks the merge outright. A required check that can never pass is
+  # the same class of defect as a check that can never fail.
+  #
+  # The skip now lives on `validate-code` (a separate job) and this job MIRRORS its result. The
+  # mirror is load-bearing, not decoration: a SKIPPED job reports SUCCESS, and GitHub resolves
+  # duplicate check names by the most recent run, so a metadata edit that merely skipped would
+  # overwrite a real FAILURE on the same head with a green (QA #1813 Critical). On a metadata edit
+  # this job therefore re-reports the conclusion the head actually earned, and fails when the head
+  # has not earned one.
   validate:
-    name: validate${{ (github.event.action == 'edited' && github.event.changes.base == null) && ' (metadata edit — not run)' || '' }}
+    name: validate
+    needs: [validate-code]
+    # `always()` so the required check is posted even when `validate-code` was skipped (metadata
+    # edit) or failed. Without it a failed validation would leave `validate` absent, not red.
+    if: always()
+    runs-on: ovh-hydra
+    timeout-minutes: 5
+    permissions:
+      checks: read
+      contents: read
+    steps:
+      - name: Report the head's real validation conclusion
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULT: ${{ needs.validate-code.result }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          case "$RESULT" in
+            success)
+              echo "validate-code succeeded on $SHA"
+              exit 0
+              ;;
+            skipped)
+              # A title/body edit does not re-run the suite. Mirror what the head actually earned
+              # instead of reporting a green nobody validated.
+              prior=$(curl -sS \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "https://api.github.com/repos/$REPO/commits/$SHA/check-runs?per_page=100" \
+                | python3 -c '
+          import json, sys
+          runs = json.load(sys.stdin).get("check_runs", [])
+          done = [r for r in runs if r.get("name") == "validate" and r.get("conclusion")]
+          done.sort(key=lambda r: r.get("started_at") or "")
+          print(done[-1]["conclusion"] if done else "none")
+          ')
+              echo "metadata edit: head $SHA last validate conclusion = $prior"
+              if [ "$prior" = "success" ]; then
+                echo "::notice::metadata edit — head already validated, not re-running"
+                exit 0
+              fi
+              echo "::error::metadata edit — head $SHA has no successful validate (last: $prior). A metadata edit cannot stand in for a validation."
+              exit 1
+              ;;
+            *)
+              echo "::error::validate-code concluded '$RESULT' on $SHA"
+              exit 1
+              ;;
+          esac
+
+  # The real suite. Named `validate-code`, NOT `validate`: a skipped job still posts a check run and
+  # GitHub resolves duplicate names by the most recent run, so a skipped `validate` would mask a real
+  # failure on the same head. The required `validate` context is produced by the mirror job above.
+  validate-code:
+    name: validate-code
     runs-on: ovh-hydra
     # A retarget onto main must validate (see the `types:` comment above); a title/body edit must not
     # cost a 20-60 minute run. `github.event.changes.base` is present only when the base ref moved.
@@ -1036,7 +1109,7 @@ jobs:
           echo "::endgroup::"
 
   node8-handoff:
-    name: Node-8 hand-off (QA rebase-integrity + blast-radius, live Trino SQL, host-only bats)${{ (github.event.action == 'edited' && github.event.changes.base == null) && ' (metadata edit — not run)' || '' }}
+    name: Node-8 hand-off (QA rebase-integrity + blast-radius, live Trino SQL, host-only bats)
     if: github.event.action != 'edited' || github.event.changes.base != null
     # The QA hand-off is published as a hidden PR comment (T10), so the analyzers no longer HAVE
     # to be on node-8 for Grounds 8/9 to read them — but this job still is the one that runs
@@ -1254,7 +1327,7 @@ jobs:
           fi
 
   deploy-preflight:
-    name: Deploy pre-flight (rsync --delete dry-run vs /opt/hydra/)${{ (github.event.action == 'edited' && github.event.changes.base == null) && ' (metadata edit — not run)' || '' }}
+    name: Deploy pre-flight (rsync --delete dry-run vs /opt/hydra/)
     if: github.event.action != 'edited' || github.event.changes.base != null
     # Must run on the self-hosted hydra runner because it needs to see
     # /opt/hydra/ — the actual target of the production deploy rsync.
@@ -1529,7 +1602,7 @@ jobs:
           echo "✓ All plugin env-var references resolve in /etc/openclaw/{shared,<profile>}.env"
 
   bats-tests:
-    name: Bats (scripts/ + ops-admin gates) (${{ matrix.shard }}/2)${{ (github.event.action == 'edited' && github.event.changes.base == null) && ' (metadata edit — not run)' || '' }}
+    name: Bats (scripts/ + ops-admin gates) (${{ matrix.shard }}/2)
     if: github.event.action != 'edited' || github.event.changes.base != null
     # Added 2026-05-20 after PR #297: Clio caught a `set -u` regression in
     # find-dupes.sh --catalog that emitted "unbound variable" to stderr
@@ -1820,7 +1893,7 @@ jobs:
           fi
 
   py-syntax:
-    name: Python syntax check (py_compile)${{ (github.event.action == 'edited' && github.event.changes.base == null) && ' (metadata edit — not run)' || '' }}
+    name: Python syntax check (py_compile)
     if: github.event.action != 'edited' || github.event.changes.base != null
     # Added 2026-05-20 alongside the bats wiring: 44 .py files exist
     # under scripts/, skills-all/, and workspaces/ but nothing in CI
@@ -1852,7 +1925,7 @@ jobs:
           echo "✓ All Python files parse cleanly"
 
   py-tests:
-    name: Python unit tests (watchdog)${{ (github.event.action == 'edited' && github.event.changes.base == null) && ' (metadata edit — not run)' || '' }}
+    name: Python unit tests (watchdog)
     if: github.event.action != 'edited' || github.event.changes.base != null
     # Added 2026-06-03 (PR #411): the Intercom intake-outage watchdog
     # (scripts/intercom-intake-watchdog.py) is the ONLY tripwire for the
@@ -2563,7 +2636,7 @@ jobs:
           python3 -m unittest -v tests.test_sentinel_demote
 
   plugin-tests:
-    name: Plugin tests (vitest)${{ (github.event.action == 'edited' && github.event.changes.base == null) && ' (metadata edit — not run)' || '' }}
+    name: Plugin tests (vitest)
     if: github.event.action != 'edited' || github.event.changes.base != null
     # Added 2026-05-20: 3 plugins under plugins/ (intercom, support-tools,
     # muso-credit-verification-enforcer) ship test files that never ran
@@ -2764,7 +2837,7 @@ jobs:
           echo "✓ All plugin tests pass"
 
   shellcheck:
-    name: Shellcheck (scripts/ + .githooks/)${{ (github.event.action == 'edited' && github.event.changes.base == null) && ' (metadata edit — not run)' || '' }}
+    name: Shellcheck (scripts/ + .githooks/)
     if: github.event.action != 'edited' || github.event.changes.base != null
     # Was ubuntu-latest, but GitHub-hosted runners stopped being assignable
     # for this repo around 2026-04-24 (job completes in ~3s with

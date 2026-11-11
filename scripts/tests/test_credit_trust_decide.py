@@ -900,14 +900,24 @@ class PaidUsersFirst(Base):
 
     def test_e1_pixlpxl_catalog_confirmed_role_is_approved_with_the_citation(self):
         """pixlpxl fixture: one claimed role CONFIRMED by the catalog (the Atmos mix), the other
-        unverifiable, web NOT_FOUND -> provisional approval citing the confirmed role."""
+        unverifiable.
+
+        R90 / ruling 149 [key=anchor-granularity] does NOT take the paid provisional approval away: the
+        whole-request arms run FIRST, so a paid user who qualified for trust-yet-verify keeps it, and the
+        per-role split only decides what those arms could not take. The provisional approval covers the
+        whole request, so the ledger names every claimed role as approved."""
         self.paying("2026-10-11T02:30:00Z", ids=(900,))
         judge = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, model="gpt-6-sol"))
         res, w = self.go([req(uuid_of(303), uid=900, track="t3", roles=("Mixing", "Mastering"))],
                          {"t3": [T.raw("Real Engineer", "mixer")]}, judge=judge)
         d = self.decisions()[uuid_of(303)]
         self.assertEqual((d["decision"], d["evidence_kind"]), ("approve", decide.PROVISIONAL_KIND), d["reason"])
+        self.assertIn("trust yet verify", d["reason"])
         self.assertIn("catalog confirms Mixing", d["reason"])
+        self.assertEqual((d["approved_roles"], d["pending_roles"]), ("Mixing,Mastering", ""),
+                         "a provisional approval covers the whole request")
+        self.assertIn(uuid_of(303), [i for c in w.calls if c["status"] == decide.APPROVED for i in c["ids"]],
+                      "the paid provisional approval is PRESERVED, not replaced by a partial")
         d0 = decide.Decision(request_id="x", profile_id="p", user_id=900, track_id="t", track_title="V",
                              claimed_roles="Immersive Mixing,Mastering", popularity=20, big_track=False,
                              decision="support", reason="")
@@ -2274,14 +2284,15 @@ class DocApprovalDispatcher(Base):
         self.CONTRADICTED = _Answering(contradicted)
 
     def file_doc(self, request_id, *, user_id=900, outcome="verified", version="dv-4", at="2026-10-31T12:26:32Z",
-                 sha="a4205f34", intake_id=None):
+                 sha="a4205f34", intake_id=None, roles=("Mixing",), role_outcomes=None, run_id="r1"):
         intake = intake_id or "145833:a4205f34"
         d = sqlite3.connect(decide.DOC_STORE)
-        for role in ("Lyricist", "Composer"):
+        for role in roles:
             d.execute("INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, user_id, h3_verdict, outcome,"
-                      " reason, account_hold, detail_json, version, intake_id) VALUES ('r1',?,'sha',?,?,?,"
+                      " reason, account_hold, detail_json, version, intake_id) VALUES (?,?,'sha',?,?,?,"
                       " 'PLAUSIBLE',?,'because',0,?,'dv-4',?)",
-                      (at, request_id, role, user_id, outcome, R22_DETAIL, intake))
+                      (run_id, at, request_id, role, user_id, (role_outcomes or {}).get(role, outcome), R22_DETAIL,
+                       intake))
         d.commit()
         d.close()
         p = sqlite3.connect(decide.DOC_PROOF_STORE)
@@ -2300,6 +2311,269 @@ class DocApprovalDispatcher(Base):
                 sqlite3.connect(decide.DOC_STORE).execute("SELECT 1").fetchall()] if False else [
             {"request_id": r[0], "state": r[1], "ref": r[2]} for r in
             self.db.execute("SELECT request_id, state, ref FROM doc_approvals")]
+
+    def test_a_document_that_proves_some_roles_approves_those_and_pends_the_rest(self):
+        """F1: per-role is the DEFAULT path for a partial support document, built the way the dv-4
+        runner actually emits it - `intake_keys` writes one dv_outcomes row per CLAIMED role, so a
+        3-role request whose document verifies two and cannot check the third is 2 verified + 1
+        unverifiable, never a document that judged only one role of the request."""
+        rid = uuid_of(452)
+        self.file_doc(rid, user_id=900, roles=("Lyricist", "Composer", "Producer"),
+                      role_outcomes={"Lyricist": "verified", "Composer": "verified",
+                                     "Producer": "unverifiable"})
+        self.proof([{"user_id": 900, "request_id": None, "kind": "pending_doc", "source": "intercom",
+                     "ref": "c1"}])
+        stage2_row(str(decide.STAGE2_STORE), rid, "Producer", 900, "need_more")
+        res, w = self.go([req(rid, uid=900, track="small",
+                              roles=("Lyricist", "Composer", "Producer"))], {},
+                         judge=self.NOT_FOUND)
+        d = self.decisions()[rid]
+        self.assertEqual(d["decision"], decide.PARTIAL, d["reason"])
+        self.assertEqual((d["approved_roles"], d["pending_roles"]), ("Lyricist,Composer", "Producer"))
+        self.assertIn("dv-4 verified document", d["reason"])
+        self.assertIn("--campaign gap-ask", d["reason"],
+                      "neither-never: the roles it proved are approved AND the rest are asked")
+        self.assertTrue(d["reason"].startswith(decide.PROOF_ON_FILE_REASON), d["reason"])
+        self.assertEqual(self.approve_writes(w), [],
+                         "a partial writes nothing until credit-per-role-write-c1 lands")
+        self.assertEqual(self.doc_rows(), [], "no whole-request doc approval row for a partial")
+        self.assertEqual(res.partial, 1)
+        self.assertEqual(res.held_stage2_ask, 1)
+        from credit_verify.proof import stage2
+        held = {h.request_id: h for h in stage2.held_rows(self.ledger.path)}
+        self.assertIn(rid, held, "the ask is in the campaign, not recorded and never sent")
+        self.assertEqual(held[rid].pending_roles, ("Producer",),
+                         "the ask names the roles still owed proof, not the whole request again")
+
+    def test_a_role_the_document_could_not_judge_pends_instead_of_dropping_the_document(self):
+        """F2: `unknown` is what the store writes when the dv-4 tooling itself failed, so it must pend
+        like `unverifiable` - never block. A document that proved Lyricist and merely errored on
+        Producer still approves Lyricist; it is not dropped as "proves none of the claimed roles"."""
+        rid = uuid_of(466)
+        self.file_doc(rid, user_id=900, roles=("Lyricist", "Producer"),
+                      role_outcomes={"Lyricist": "verified", "Producer": "unknown"})
+        res, w = self.go([req(rid, uid=900, track="small", roles=("Lyricist", "Producer"))], {},
+                         judge=self.NOT_FOUND)
+        d = self.decisions()[rid]
+        self.assertEqual(d["decision"], decide.PARTIAL, d["reason"])
+        self.assertEqual((d["approved_roles"], d["pending_roles"]), ("Lyricist", "Producer"))
+        self.assertIn("dv-4 verified document", d["reason"])
+        self.assertNotIn("contradicts", d["reason"])
+        self.assertEqual(self.approve_writes(w), [])
+        self.assertEqual(res.partial, 1)
+
+    def test_a_document_that_contradicts_one_role_blocks_the_whole_request(self):
+        """F2: a contradiction in ANY role blocks the WHOLE request, so the per-role split can never be
+        a way past one. The catalog confirms Mixing and the document verifies it, but the same document
+        CONTRADICTS Producer: nothing is approved and nothing is pended."""
+        rid = uuid_of(460)
+        self.file_doc(rid, user_id=900, roles=("Mixing", "Producer"),
+                      role_outcomes={"Mixing": "verified", "Producer": "contradicted"})
+        res, w = self.go([req(rid, uid=900, track="small", roles=("Mixing", "Producer"))], {},
+                         judge=self.NOT_FOUND)
+        d = self.decisions()[rid]
+        self.assertNotEqual(d["decision"], decide.PARTIAL, d["reason"])
+        self.assertEqual(d["decision"], "support", d["reason"])
+        self.assertEqual(d["approved_roles"], "")
+        self.assertIn("contradicts the Producer credit", d["reason"])
+        self.assertEqual(self.approve_writes(w), [])
+        self.assertEqual(res.partial, 0)
+
+    def test_a_document_that_flags_one_role_forged_blocks_the_whole_request(self):
+        """F2 mirror: `forged` blocks exactly like `contradicted`."""
+        rid = uuid_of(461)
+        self.file_doc(rid, user_id=900, roles=("Mixing", "Producer"),
+                      role_outcomes={"Mixing": "verified", "Producer": "forged"})
+        res, w = self.go([req(rid, uid=900, track="small", roles=("Mixing", "Producer"))], {},
+                         judge=self.NOT_FOUND)
+        d = self.decisions()[rid]
+        self.assertNotEqual(d["decision"], decide.PARTIAL, d["reason"])
+        self.assertEqual(d["decision"], "support", d["reason"])
+        self.assertEqual(d["approved_roles"], "")
+        self.assertIn("flags the Producer credit as forged", d["reason"])
+        self.assertEqual(self.approve_writes(w), [])
+        self.assertEqual(res.partial, 0)
+
+    def test_a_document_verdict_that_is_unknown_does_not_block_the_split(self):
+        """F3: `unknown` is what the dv-4 tooling writes when IT failed. A provider outage is not a
+        contradiction, so the role pends and the proven role is still approved."""
+        rid = uuid_of(462)
+        self.file_doc(rid, user_id=900, roles=("Mixing", "Producer"),
+                      role_outcomes={"Mixing": "verified", "Producer": "unknown"})
+        res, w = self.go([req(rid, uid=900, track="small", roles=("Mixing", "Producer"))], self.RAWS,
+                         judge=self.NOT_FOUND)
+        d = self.decisions()[rid]
+        self.assertEqual(d["decision"], decide.PARTIAL, d["reason"])
+        self.assertEqual((d["approved_roles"], d["pending_roles"]), ("Mixing", "Producer"))
+        self.assertNotIn("contradicts", d["reason"])
+        self.assertEqual(res.partial, 1)
+
+    def test_a_validator_rejected_row_keeps_its_hold_when_a_document_contradicts_a_role(self):
+        """F1: the guard only pre-empts an approval or an ask. A validator-rejected row is already
+        held for human review and must not be rewritten into a support ask."""
+        rid = uuid_of(463)
+        self.file_doc(rid, user_id=900, roles=("Mixing", "Producer"),
+                      role_outcomes={"Mixing": "verified", "Producer": "contradicted"})
+        row = req(rid, uid=900, track="small", roles=("Mixing", "Producer"),
+                  vd_rules={"reject_high_velocity_profile": 100})
+        res, w = self.go([row], {}, judge=self.NOT_FOUND)
+        d = self.decisions()[rid]
+        self.assertEqual(d["decision"], "hold", d["reason"])
+        self.assertIn("reject_high_velocity_profile", d["reason"])
+        self.assertNotIn("a document on file", d["reason"])
+        self.assertEqual(self.approve_writes(w), [])
+
+    def test_a_deferred_row_stays_retryable_when_a_document_contradicts_a_role(self):
+        """F1: a retryable defer must survive the guard, or the row is never retried."""
+        rid = uuid_of(464)
+        self.file_doc(rid, user_id=900, roles=("Mixing", "Producer"),
+                      role_outcomes={"Mixing": "verified", "Producer": "contradicted"})
+        res, w = self.go([req(rid, uid=900, track="small", roles=("Mixing", "Producer"))], self.RAWS,
+                         judge=self.NOT_FOUND, max_model_calls=0)
+        d = self.decisions()[rid]
+        self.assertEqual(d["decision"], "defer", d["reason"])
+        self.assertIn("web-check cap", d["reason"])
+        self.assertNotIn("a document on file", d["reason"])
+        self.assertEqual(self.approve_writes(w), [])
+
+    def test_an_unreadable_document_store_defers_instead_of_approving_without_the_guard(self):
+        """F2: a corrupt store must not take the run down, but it must never fail OPEN either: an
+        unreadable guard may hide a standing contradiction, so the row is deferred, not approved."""
+        rid = uuid_of(465)
+        self.file_doc(rid, user_id=900, roles=("Mixing",))
+        with open(decide.DOC_STORE, "wb") as fh:
+            fh.write(b"not a sqlite database")
+        res, w = self.go([req(rid, uid=900, track="small", roles=("Mixing",))], self.RAWS,
+                         judge=self.NOT_FOUND)
+        d = self.decisions()[rid]
+        self.assertEqual(d["decision"], "defer", d["reason"])
+        self.assertIn("document contradiction guard unreadable", d["reason"])
+        self.assertIn("doc-verdict guard unreadable", res.note)
+        self.assertEqual(self.approve_writes(w), [])
+
+    def test_a_role_judged_in_an_earlier_run_is_still_proved_by_the_document(self):
+        """F1: the runner truncates its claim list at MAX_INTAKE_CLAIMS, so a request's roles can be
+        split across runs. A later run that re-judged only Lyricist must not pend Composer, which the
+        document's own newest verdict for Composer still says is verified."""
+        rid = uuid_of(458)
+        self.file_doc(rid, user_id=900, roles=("Lyricist", "Composer"), at="2026-10-30T09:00:00Z", run_id="r1")
+        self.file_doc(rid, user_id=900, roles=("Lyricist",), at="2026-10-31T12:26:32Z", run_id="r2")
+        res, w = self.go([req(rid, uid=900, track="small", roles=("Lyricist", "Composer"))], {},
+                         judge=self.NOT_FOUND)
+        d = self.decisions()[rid]
+        self.assertEqual(d["decision"], "approve", d["reason"])
+        self.assertEqual((d["approved_roles"], d["pending_roles"]), ("Lyricist,Composer", ""))
+        self.assertEqual(res.partial, 0)
+
+    def test_a_document_that_contradicts_one_role_approves_nothing(self):
+        """F1 mirror: a role the document CONTRADICTS is never approvable and never pendable, so the
+        document is not used at all and the row stays the whole-request ask it already was."""
+        rid = uuid_of(453)
+        self.file_doc(rid, user_id=900, roles=("Lyricist", "Composer", "Producer"),
+                      role_outcomes={"Lyricist": "verified", "Composer": "verified",
+                                     "Producer": "contradicted"})
+        res, w = self.go([req(rid, uid=900, track="small",
+                              roles=("Lyricist", "Composer", "Producer"))], {},
+                         judge=self.NOT_FOUND)
+        d = self.decisions()[rid]
+        self.assertEqual(d["decision"], "support", d["reason"])
+        self.assertEqual(d["approved_roles"], "", "a contradicted role approves nothing")
+        self.assertEqual(self.approve_writes(w), [])
+        self.assertEqual(self.doc_rows(), [])
+        self.assertEqual(res.partial, 0)
+
+    def test_a_partial_document_on_a_documentation_required_request_approves_only_its_roles(self):
+        """F1: a documentation-required request whose catalog confirms two of three claimed roles is a
+        per-role split before the document is read; the document proves the same two, so the row
+        approves those two and pends the third - the customer sent a document proving two roles and
+        must not get nothing."""
+        rid = uuid_of(455)
+        roles = ("Lyricist", "Composer", "Producer")
+        self.db.execute("INSERT INTO decisions (run_id, decided_at, request_id, claimed_roles, big_track,"
+                        " decision, reason, mode, doc_required) VALUES ('r0','2026-09-01T00:00:00Z',?,?,0,"
+                        " 'support','fixture','apply',1)", (rid, ",".join(roles)))
+        self.db.commit()
+        self.file_doc(rid, user_id=900, roles=roles,
+                      role_outcomes={"Lyricist": "verified", "Composer": "verified",
+                                     "Producer": "unverifiable"})
+        res, w = self.go([req(rid, uid=900, track="small", roles=roles)],
+                         {"small": [T.raw("Real Engineer", "lyricist"),
+                                    T.raw("Real Engineer", "composer")]},
+                         judge=self.NOT_FOUND)
+        d = self.decisions()[rid]
+        self.assertEqual(d["decision"], decide.PARTIAL, d["reason"])
+        self.assertEqual((d["approved_roles"], d["pending_roles"]), ("Lyricist,Composer", "Producer"))
+        self.assertEqual(self.approve_writes(w), [])
+        self.assertEqual(self.doc_rows(), [])
+        self.assertEqual(res.partial, 1)
+
+    def test_a_partial_document_keeps_the_catalog_confirmed_roles(self):
+        """F2: a per-role split row whose catalog and document evidence COMPLEMENT each other approves
+        the union. Demoting a catalog-confirmed role to `pending` asked the customer to prove a credit
+        the trusted catalog already proves; the commit instead passes `partial_ok` for the document it
+        planned with, so the role set and the commit agree without demoting anything."""
+        rid = uuid_of(457)
+        roles = ("Mixing", "Mastering", "Producer")
+        self.file_doc(rid, user_id=900, roles=roles,
+                      role_outcomes={"Mixing": "verified", "Mastering": "verified",
+                                     "Producer": "unverifiable"})
+        res, w = self.go([req(rid, uid=900, track="small", roles=roles)],
+                         {"small": [T.raw("Real Engineer", "mixer"),
+                                    T.raw("Real Engineer", "producer")]},
+                         judge=self.NOT_FOUND)
+        d = self.decisions()[rid]
+        self.assertEqual(d["decision"], "approve", d["reason"])
+        self.assertEqual((d["approved_roles"], d["pending_roles"]), ("Mixing,Mastering,Producer", ""))
+        self.assertEqual(res.partial, 0)
+        self.assertEqual(res.doc_approved, 1, "the commit must accept the document it planned with")
+        self.assertEqual(len(self.doc_rows()), 1)
+        self.assertEqual(len(self.approve_writes(w)), 1)
+
+    def test_a_catalog_split_partial_with_no_document_enters_the_ask_population(self):
+        """F1: a per-role split with nothing on file must be asked about, not silently dropped. The
+        ask population is the one `scripts/paid-status/partial_asks.py` builds its list from, so the
+        row has to be in it; the send itself is proven in test_uvn_status.py."""
+        rid = uuid_of(459)
+        res, w = self.go([req(rid, uid=900, track="small", roles=("Mixing", "Mastering"))],
+                         {"small": [T.raw("Real Engineer", "mixer")]},
+                         judge=self.NOT_FOUND)
+        d = self.decisions()[rid]
+        self.assertEqual(d["decision"], decide.PARTIAL, d["reason"])
+        self.assertEqual((d["approved_roles"], d["pending_roles"]), ("Mixing", "Mastering"))
+        from credit_review import uvn_status
+        self.assertIn(rid.lower(), uvn_status.partial_pending_ids(self.ledger.path),
+                      "a partial with no document on file must still be asked about")
+        self.assertFalse(d["reason"].startswith(decide.PROOF_ON_FILE_REASON), d["reason"])
+        from credit_verify.proof import stage2
+        self.assertNotIn(rid, {h.request_id for h in stage2.held_rows(self.ledger.path)},
+                         "stage 2 can only judge a document, so a split must not spend its budget")
+
+    def test_a_newer_partial_document_never_shadows_an_older_verified_one(self):
+        """F2: `pick` prefers the document that proves the most claimed roles, so a newer PARTIAL
+        filing cannot make the customer prove again what an older fully-verified filing already
+        proves - and the recorded ref is the stronger document."""
+        rid = uuid_of(456)
+        roles = ("Lyricist", "Composer", "Producer")
+        self.db.execute("INSERT INTO decisions (run_id, decided_at, request_id, claimed_roles, big_track,"
+                        " decision, reason, mode, doc_required) VALUES ('r0','2026-09-01T00:00:00Z',?,?,0,"
+                        " 'support','fixture','apply',1)", (rid, ",".join(roles)))
+        self.db.commit()
+        self.file_doc(rid, user_id=900, roles=roles, at="2026-10-20T00:00:00Z",
+                      intake_id="145833:aaaaaaaa", sha="aaaa1111")
+        self.file_doc(rid, user_id=900, roles=roles, at="2026-10-31T00:00:00Z",
+                      intake_id="145833:bbbbbbbb", sha="bbbb2222",
+                      role_outcomes={"Lyricist": "verified", "Composer": "unverifiable",
+                                     "Producer": "unverifiable"})
+        res, w = self.go([req(rid, uid=900, track="small", roles=roles)],
+                         {"small": [T.raw("Real Engineer", "lyricist"),
+                                    T.raw("Real Engineer", "composer"),
+                                    T.raw("Real Engineer", "producer")]},
+                         judge=self.NOT_FOUND)
+        d = self.decisions()[rid]
+        self.assertEqual(d["decision"], "approve", d["reason"])
+        self.assertEqual((d["approved_roles"], d["pending_roles"]), (",".join(roles), ""))
+        self.assertIn("145833:aaaaaaaa", d["reason"], "the fully-verified filing is the one recorded")
+        self.assertEqual(res.partial, 0)
 
     def test_a_doc_only_apply_with_the_arm_off_gives_the_slot_back(self):
         """qa-review #1782 (r8) Important: a DOC-ONLY apply commits the provisional row (and spends the
@@ -2366,7 +2640,7 @@ class DocApprovalDispatcher(Base):
     def file_multi(self, rids, *, user_id=900, intake_id="145833:many", sha="s600"):
         d = sqlite3.connect(decide.DOC_STORE)
         for rid in rids:
-            for role in ("Lyricist", "Composer"):
+            for role in ("Mixing",):
                 d.execute("INSERT INTO dv_outcomes (run_id, at, proof_id, request_id, role, user_id,"
                           " h3_verdict, outcome, reason, account_hold, detail_json, version, intake_id)"
                           " VALUES ('r1','2026-10-31T12:26:32Z','sha',?,?,?,'PLAUSIBLE','verified','because',"
@@ -3541,6 +3815,242 @@ class DecideRearmCli(unittest.TestCase):
     def test_the_plain_command_restores_the_switch_and_leaves_the_writer_off(self):
         self.assertEqual(decide.decide_rearm(self.db, out=lambda *_: None), 0)
         self.assertTrue(self.switch.exists(), "re-arm writes the switch back")
+
+
+class PerRoleSplit(Base):
+    """R90 / ruling 149 [key=anchor-granularity]: a request with several claimed roles is decided PER ROLE.
+
+    A role a trusted source credits to THIS profile is approved; every other claimed role is PENDING with
+    its own proof need, never rejected. The split is the DEFAULT path (not a branch beside all_confirmed),
+    and it runs only AFTER every whole-request guard - so a contradiction, a red flag, an editorial-role
+    documentation requirement or a fraud hold still decides the WHOLE request and no partial escapes it.
+    """
+
+    #: a 2-role request where the catalog credits this profile as Mixing and says nothing about Mastering
+    TWO_ROLES = ("Mixing", "Mastering")
+    MIX_ONLY = {"t3": [T.raw("Real Engineer", "mixer")]}
+    #: the web check finds nothing against the claim, so the split is what decides the row
+    NOT_FOUND = FakeJudge(JudgeResult(ok=True, verdict="NEEDS-HUMAN", confidence=0.5, provider="codex"))
+
+    def go(self, rows, raws=None, judge=None, **kw):
+        return super().go(rows, raws, judge=judge or self.NOT_FOUND, **kw)
+
+    def test_a_two_role_request_with_proof_for_one_role_approves_one_and_pends_one(self):
+        """READ-BACK 2 (worked example): 2 claimed roles, proof for 1 -> exactly 1 approved, 1 pending."""
+        res, w = self.go([req(uuid_of(401), uid=900, track="t3", roles=self.TWO_ROLES)], self.MIX_ONLY,
+                         mode="judge")
+        d = self.decisions()[uuid_of(401)]
+        self.assertEqual(d["decision"], decide.PARTIAL, d["reason"])
+        self.assertEqual(d["approved_roles"], "Mixing")
+        self.assertEqual(d["pending_roles"], "Mastering")
+        self.assertEqual(d["doc_required"], 0, "the approved role needs no document")
+        self.assertIn("approved Mixing", d["reason"])
+        self.assertIn("pending Mastering", d["reason"])
+        self.assertIn("NOT rejected", d["reason"])
+        self.assertEqual(res.partial, 1)
+        self.assertEqual(w.calls, [], "judge mode writes nothing")
+        # the split itself, printed for the PR body: pre_model does NOT decide it (the whole-request web
+        # check still has to run first), so the roles come from role_split
+        ev = decide.EvidenceBuilder(T.FakeAdmin([], self.MIX_ONLY, PROFILES, TRACKS)).build(
+            req(uuid_of(401), uid=900, track="t3", roles=self.TWO_ROLES))
+        self.assertIsNone(decide.pre_model(req(uuid_of(401), uid=900, track="t3", roles=self.TWO_ROLES),
+                                           ev, POLICY, 0),
+                          "a partial is not decided before the whole-request web check")
+        approved, pending, proof_need = decide.role_split(ev)
+        print(f"\n  worked example: approved={approved} pending={pending} proof_need={proof_need}")
+        self.assertEqual((approved, pending), (["Mixing"], ["Mastering"]))
+        self.assertEqual(list(proof_need), ["Mastering"])
+
+    def test_a_contradiction_in_role_b_still_blocks_role_a(self):
+        """READ-BACK 3 (negative): a trusted source credits SOMEONE ELSE as Mastering while this profile is
+        provably the Mixing engineer. The contradiction is evidence the CLAIM is wrong, not merely
+        unproven, so the whole request is `support` and NOTHING is approved - no partial is produced."""
+        raws = {"t3": [T.raw("Real Engineer", "mixer"), T.raw("Somebody Else", "mastering")]}
+        res, w = self.go([req(uuid_of(402), uid=900, track="t3", roles=self.TWO_ROLES)], raws, mode="judge")
+        d = self.decisions()[uuid_of(402)]
+        self.assertEqual(d["decision"], "support", d["reason"])
+        self.assertEqual(d["approved_roles"], "", "a contradiction in role B blocks role A")
+        self.assertEqual(d["pending_roles"], "")
+        self.assertEqual(res.partial, 0)
+        self.assertEqual(w.calls, [])
+
+    def test_a_three_role_request_counts_once_against_the_daily_cap(self):
+        """Caps count the REQUEST once, never once per role: a 3-role request is ONE approval of ONE
+        request. A per-role partial is not counted at all - it is never written until
+        credit-per-role-write-c1 lands, and the per-role count is that write half's job."""
+        roles = ("Mixing", "Mastering", "Composer")
+        res, _ = self.go([req(uuid_of(403), uid=900, track="t3", roles=roles)], self.MIX_ONLY, mode="judge")
+        d = self.decisions()[uuid_of(403)]
+        self.assertEqual((d["decision"], d["approved_roles"], d["pending_roles"]),
+                         (decide.PARTIAL, "Mixing", "Mastering,Composer"))
+        decide.record_outcome(self.db, res.run_id, uuid_of(403), "approve", "approved", T.NOW)
+        day = T.NOW.strftime("%Y-%m-%dT00:00:00Z")
+        self.assertEqual(decide.approvals_today_by_user(self.db, day), {900: 1}, "one request, one approval")
+        # a second request is a second approval - the count is per request, not per role
+        res2, _ = self.go([req(uuid_of(404), uid=900, track="t3", roles=roles)], self.MIX_ONLY, mode="judge")
+        decide.record_outcome(self.db, res2.run_id, uuid_of(404), "approve", "approved", T.NOW)
+        self.assertEqual(decide.approvals_today_by_user(self.db, day), {900: 2})
+        # a partial books no approval, so it never consumes the cap
+        decide.record_outcome(self.db, res.run_id, uuid_of(403), decide.PARTIAL, "approved", T.NOW)
+        self.assertEqual(decide.approvals_today_by_user(self.db, day), {900: 2})
+
+    def test_apply_mode_refuses_the_partial_write_and_names_the_core_half(self):
+        """A whole-request PUT for a partial would approve the UNPROVEN roles - worse than today. Apply mode
+        records the split, refuses the write, and says which dispatch unblocks it."""
+        res, w = self.go([req(uuid_of(405), uid=900, track="t3", roles=self.TWO_ROLES)], self.MIX_ONLY)
+        d = self.decisions()[uuid_of(405)]
+        self.assertEqual(d["decision"], decide.PARTIAL)
+        self.assertEqual(d["approved_roles"], "Mixing")
+        self.assertIn(decide.PARTIAL_WRITE_REFUSAL, d["reason"])
+        self.assertIn("credit-per-role-write-c1", d["reason"])
+        self.assertEqual(w.calls, [], "no PUT of any kind for a partial")
+        self.assertEqual(res.partial, 1)
+        self.assertIn(decide.PARTIAL_WRITE_REFUSAL, res.line())
+        outcomes = [r[0] for r in self.db.execute(
+            "SELECT outcome FROM decision_outcomes WHERE request_id = ? AND action = ?",
+            (uuid_of(405), decide.PARTIAL))]
+        self.assertEqual(outcomes, [decide.PARTIAL_REFUSED_OUTCOME])
+
+    def test_judge_mode_records_the_split_and_books_it_as_shadow(self):
+        res, w = self.go([req(uuid_of(406), uid=900, track="t3", roles=self.TWO_ROLES)], self.MIX_ONLY,
+                         mode="judge")
+        self.assertEqual(w.calls, [])
+        rows = list(self.db.execute("SELECT action, outcome FROM decision_outcomes WHERE request_id = ?",
+                                    (uuid_of(406),)))
+        self.assertEqual([tuple(r) for r in rows], [(decide.PARTIAL, "shadow")])
+        self.assertEqual(res.partial, 1)
+
+    def test_approved_roles_equal_anchored_roles(self):
+        """READ-BACK 1: every approved role has an anchor row, and no approved row lacks one.
+
+        The anchor rows are derived here from the FIXTURE's trusted raw credits (independently of
+        role_split), so a split that approved a role the sources do not support would show up as a
+        mismatch rather than agreeing with itself.
+        """
+        self.db.execute("CREATE TABLE credit_anchors (request_id TEXT, role TEXT, kind TEXT, source TEXT)")
+        rows = [req(uuid_of(407), uid=900, track="t3", roles=self.TWO_ROLES),
+                req(uuid_of(408), uid=901, track="t3", roles=("Mixing",))]
+        self.go(rows, self.MIX_ONLY, mode="judge")
+        # the anchors core would hold: one row per (request, role) a trusted source credits to this profile
+        for r in rows:
+            for role in r["credits"]:
+                if decide.family_of(role) == "mix":
+                    self.db.execute("INSERT INTO credit_anchors VALUES (?,?,'dsp_anchor','spotify')",
+                                    (r["id"], role))
+        self.db.commit()
+        approved = self.db.execute(
+            "SELECT d.request_id, d.approved_roles FROM decisions d WHERE d.approved_roles <> ''").fetchall()
+        self.assertEqual(len(approved), 2)
+        pairs = [(rid, role) for rid, roles in approved for role in roles.split(",")]
+        self.assertEqual(len(pairs), 2, "one approved role per request")
+        anchored = {(r[0], r[1]) for r in self.db.execute("SELECT request_id, role FROM credit_anchors")}
+        self.assertEqual(set(pairs), anchored, "approved roles == anchored roles")
+        orphan = [p for p in pairs if p not in anchored]
+        self.assertEqual(orphan, [], "0 approved rows with no anchor row")
+        print(f"\n  approved roles == anchored roles: {len(pairs)} approved role(s), {len(anchored)} anchor row(s), "
+              f"{len(orphan)} approved without an anchor")
+
+    def test_the_ledger_migration_is_additive_and_leaves_existing_rows_alone(self):
+        """An existing sqlite ledger gains the two columns in place; no row is rewritten."""
+        old = decide.SCHEMA.replace(
+            "  approved_roles TEXT,                 -- per-role split: the claimed roles a trusted source credits to this profile\n"
+            "  pending_roles TEXT,                  -- per-role split: the claimed roles still UNPROVEN (never rejected)\n", "")
+        self.assertNotIn("approved_roles", old)
+        path = Path(self.tmp) / "old.sqlite3"
+        db = sqlite3.connect(str(path))
+        db.executescript(old)
+        db.execute("INSERT INTO decisions (run_id, decided_at, request_id, claimed_roles, big_track, decision,"
+                   " reason, mode) VALUES ('r0','2026-10-01T00:00:00Z','old-req','Mixing,Mastering',0,'approve',"
+                   " 'pre-split row','apply')")
+        db.commit()
+        decide.ensure_schema(db)
+        cols = {r[1] for r in db.execute("PRAGMA table_info(decisions)")}
+        self.assertTrue({"approved_roles", "pending_roles"} <= cols)
+        row = db.execute("SELECT claimed_roles, approved_roles, pending_roles, decision, reason FROM decisions"
+                         " WHERE request_id = 'old-req'").fetchone()
+        self.assertEqual(row, ("Mixing,Mastering", None, None, "approve", "pre-split row"),
+                         "an existing row is untouched: the new columns stay NULL")
+        decide.ensure_schema(db)   # idempotent
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM decisions").fetchone()[0], 1)
+        db.close()
+
+    def test_the_footprint_path_still_approves_the_whole_request(self):
+        """No regression on the whole-request evidence paths: the footprint does not name which roles it
+        supports, so a request it vouches for in EVERY claimed family is approved whole - not split into
+        a partial that would leave a footprint-supported role pending."""
+        for i in range(3):
+            self.ledger.record({"request_id": f"old{i}", "mode": "audit", "phase": "live", "verdict": "CONFIRMED",
+                                "confidence": 1, "basis": "trusted_source_confirmation", "big_track": False,
+                                "profile_id": T.PID_GOOD, "claimed_roles": ["Mix Engineer", "Mastering Engineer"]})
+        self.assertEqual(decide.footprint(self.db, T.PID_GOOD, {"mix", "master"}), 3)
+        # the catalog confirms Mixing only; Mastering is unproven but the footprint covers it
+        self.go([req(uuid_of(410), uid=900, track="t3", roles=self.TWO_ROLES)], self.MIX_ONLY, mode="judge")
+        d = self.decisions()[uuid_of(410)]
+        self.assertEqual((d["decision"], d["evidence_kind"]), ("approve", "footprint"), d["reason"])
+        self.assertEqual(d["pending_roles"], "")
+
+    def test_an_editorial_role_still_requires_documentation_for_the_whole_request(self):
+        """The editorial-role guard runs BEFORE the split and still decides the whole request: a proven
+        Mixing role does not buy a partial while an editorial role on the same request is unproven."""
+        self.go([req(uuid_of(411), uid=900, track="t3", roles=("Mixing", "Editor"))], self.MIX_ONLY,
+                mode="judge")
+        d = self.decisions()[uuid_of(411)]
+        self.assertEqual(d["decision"], "support", d["reason"])
+        self.assertEqual(d["approved_roles"], "")
+        self.assertIn("editorial role", d["reason"])
+        self.assertIn("documentation required", d["reason"])
+
+    def test_a_later_guard_that_overrides_an_approval_clears_the_roles(self):
+        """The read-back `approved roles == anchored roles` reads decisions.approved_roles, so a row a later
+        guard turned into a support/hold/defer must not carry the roles an approval would have covered.
+
+        Here the split approves the single claimed role and the daily cap then defers the write: the
+        decision is `defer` and the roles are gone."""
+        capped = dataclasses.replace(POLICY, max_approvals_per_user_per_day=0)
+        self.go([req(uuid_of(412), uid=900, track="t3", roles=("Mixing",))], self.MIX_ONLY, mode="judge",
+                policy=capped)
+        d = self.decisions()[uuid_of(412)]
+        self.assertEqual(d["decision"], "defer", d["reason"])
+        self.assertEqual((d["approved_roles"], d["pending_roles"]), ("", ""))
+
+    def test_a_web_contradiction_on_a_partially_confirmed_request_blocks_the_whole_request(self):
+        """F3: the whole-request web check runs BEFORE the split, so a contradiction on ANY role blocks
+        the whole request - a partially-confirmed request is not a partial when the web contradicts it."""
+        contradicted = JudgeResult(ok=True, verdict="CONTRADICTED", confidence=0.9, provider="codex")
+        contradicted.findings = [{"source_url": "https://label.example/press",
+                                  "quote": "credited to another writer", "effect": "contradicts",
+                                  "confidence": 0.9}]
+        contradicted.cited_urls = ["https://label.example/press"]
+        res, w = self.go([req(uuid_of(420), uid=900, track="t3", roles=self.TWO_ROLES)], self.MIX_ONLY,
+                         judge=FakeJudge(contradicted), mode="judge")
+        d = self.decisions()[uuid_of(420)]
+        self.assertEqual(d["decision"], "support", d["reason"])
+        self.assertIn("contradict", d["reason"])
+        self.assertEqual((d["approved_roles"], d["pending_roles"]), ("", ""))
+        self.assertEqual(res.partial, 0)
+
+    def test_a_documentation_required_request_cannot_record_approved_roles(self):
+        """F5: the documentation-required hold covers PARTIAL rows too, so a request the decider marked
+        documentation-required never records approved_roles on a per-role split."""
+        rid = uuid_of(421)
+        self.db.execute("INSERT INTO decisions (run_id, decided_at, request_id, claimed_roles, big_track,"
+                        " decision, reason, mode, doc_required) VALUES ('r0','2026-09-01T00:00:00Z',?,?,0,"
+                        " 'support','fixture','apply',1)", (rid, ",".join(self.TWO_ROLES)))
+        self.db.commit()
+        res, w = self.go([req(rid, uid=900, track="t3", roles=self.TWO_ROLES)], self.MIX_ONLY, mode="judge")
+        d = self.decisions()[rid]
+        self.assertEqual(d["decision"], "hold", d["reason"])
+        self.assertIn("documentation required", d["reason"])
+        self.assertEqual((d["approved_roles"], d["pending_roles"]), ("", ""))
+        self.assertEqual(res.partial, 0)
+
+    def test_a_role_is_never_rejected_for_absence_of_proof(self):
+        """Pending is pending, forever: no decision value in this module rejects a role."""
+        self.go([req(uuid_of(409), uid=900, track="t3", roles=self.TWO_ROLES)], self.MIX_ONLY, mode="judge")
+        d = self.decisions()[uuid_of(409)]
+        self.assertNotIn("reject", d["decision"])
+        self.assertIn("Mastering", d["pending_roles"])
+        self.assertNotIn("Mastering", d["approved_roles"])
 
 
 if __name__ == "__main__":
