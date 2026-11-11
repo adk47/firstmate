@@ -1536,6 +1536,26 @@ detect_gate_skip_token() {
   grep -F -q "skip: $token" "$file" 2>/dev/null
 }
 
+# Local environment exclusions: lines of suite paths in the gitignored
+# .no-mistakes/test-exclude are dropped from the selection. Some suites depend
+# on machine-local tooling (Ruby for workflow parsing, a particular installed
+# Pi build) or ambient settings (a group-writable umask), so a contributor can
+# exclude exactly those suites without changing the trusted commands.test that
+# CI and every other machine share. The list is local state, never tracked.
+apply_local_exclusions() {
+  local list="$ROOT/.no-mistakes/test-exclude" s name keep
+  local -a kept=()
+  [ -f "$list" ] || return 0
+  for s in "${SCRIPTS[@]+"${SCRIPTS[@]}"}"; do
+    name=${s#tests/}
+    keep=1
+    if grep -Fxq -e "$s" -e "$name" "$list"; then keep=0; fi
+    [ "$keep" -eq 1 ] && kept+=("$s")
+  done
+  SCRIPTS=("${kept[@]+"${kept[@]}"}")
+  log "applied local environment exclusions from ${list#"$ROOT"/}"
+}
+
 apply_exclude_families() {
   local s fam keep ex
   local -a kept=()
@@ -1886,6 +1906,9 @@ case "${MODE:-}" in
 esac
 
 apply_exclude_families
+if [ "$MODE" = changed ]; then
+  apply_local_exclusions
+fi
 if [ "${#EXCLUDE_FAMILIES[@]}" -gt 0 ]; then
   SELECTION_DESC="${SELECTION_DESC};exclude-family=$(IFS=,; printf '%s' "${EXCLUDE_FAMILIES[*]}")"
 fi
