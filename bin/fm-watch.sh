@@ -1515,16 +1515,20 @@ signal_enqueue_batch() {  # <reason> <decision-files> <file> ...
       *) ordinary="$ordinary $f" ;;
     esac
   done
+  # The key is the whole batch's identity, not the ordinary subset's, so two
+  # batches that differ only in their decision files never collapse into one
+  # another while an identical re-enqueued batch still dedupes.
+  batch_key=$(signal_batch_key "$@") || return 1
   if [ -n "$ordinary" ]; then
-    # The key is the whole batch's identity, not the ordinary subset's, so two
-    # batches that differ only in their decision files never collapse into one
-    # another while an identical re-enqueued batch still dedupes.
-    batch_key=$(signal_batch_key "$@") || return 1
     # shellcheck disable=SC2086  # space-separated path list (ids carry no spaces)
     if ! signal_record_batch_paths "$batch_key" $ordinary; then
       reason="signal:${ordinary}"
     fi
     fm_wake_append signal "$batch_key" "$reason" || return 1
+  else
+    # A decision-only batch has no ordinary row, so nothing can claim these
+    # paths; record them anyway so the batch's paths stay discoverable.
+    signal_record_batch_paths "$batch_key" "$@" || true
   fi
   for f in $decision_files; do
     decision_key=$(basename "$f")
