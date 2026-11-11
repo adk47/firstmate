@@ -1,6 +1,5 @@
 [Unit]
 Description=ak47: deterministic hygiene tick (sample, self-heal the enumerated table, one log line)
-Documentation=file://%h/.local/lib/ak47/README.md
 # The tick is cheap and idempotent; it must not be skipped just because the
 # previous run was slow, so it is not ordered against anything else.
 After=local-fs.target

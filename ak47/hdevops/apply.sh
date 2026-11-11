@@ -47,7 +47,6 @@ done
 PAYLOAD=$AK47_ROOT/hdevops
 PAYLOAD_DIR=$PAYLOAD/ansible/playbooks/files/ak47
 PAYLOAD_FILES=(
-  README.md
   budget.conf
   census-producers.conf
   census.sh
@@ -103,7 +102,6 @@ fi
 OWNED=(
   ansible/inventory/local/hosts.yml
   ansible/playbooks/07-ak47-hygiene.yml
-  ansible/playbooks/files/ak47/README.md
   ansible/playbooks/files/ak47/budget.conf
   ansible/playbooks/files/ak47/census-producers.conf
   ansible/playbooks/files/ak47/census.sh

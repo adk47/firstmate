@@ -1,6 +1,5 @@
 [Unit]
 Description=ak47: weekly hygiene review (reads its own logs, proposes threshold diffs)
-Documentation=file://%h/.local/lib/ak47/README.md
 
 [Service]
 Type=oneshot
