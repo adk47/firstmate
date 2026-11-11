@@ -14,6 +14,8 @@
 #   fm-change-watch.sh drive <watch-id>
 #   fm-change-watch.sh sample <watch-id> [<offset-seconds>]
 #   fm-change-watch.sh verdict <watch-id>
+#   fm-change-watch.sh gate <task-id> [--terminal-gap]
+#   fm-change-watch.sh audit [<days>]
 #   fm-change-watch.sh status [<watch-id>]
 #   fm-change-watch.sh doctor [<watch-id>]
 #
@@ -43,7 +45,9 @@
 #           so, as does one that only deletes a manifest, one whose only target
 #           could not be read, one whose manifests could not be read, and one
 #           whose cluster image inventory could not be read; each says which of
-#           those it was.
+#           those it was. Every one of those still writes the merge's durable
+#           row, and one whose surface could not be read records it as
+#           unmeasurable-with-reason and queues the unmeasurable wake.
 #           Every Kubernetes target records a rollout FINGERPRINT at
 #           registration - its pod images plus its pods' pod-template-hash
 #           labels - and the watch refuses to score it until that fingerprint
@@ -54,12 +58,18 @@
 #           a digest-pinned image still proves its own rollout. A target whose
 #           fingerprint has not changed is recorded as awaiting the deploy, never
 #           as health. When the fingerprint cannot be read at registration the
-#           target is still measured, and the clean completion, the completed-
-#           unmeasured note, and the status line each say the rollout was never
-#           proven for it.
+#           target is still measured, and the clean completion, the unmeasurable
+#           verdict, and the status line each say the rollout was never proven
+#           for it.
 #           Registering an existing watch whose drive stopped before the end of
-#           its schedule re-arms the remaining samples; any other existing watch
-#           is left alone. Registration is read-only against the cluster; it
+#           its schedule, or whose schedule ended unmeasurable, re-arms it: a
+#           completed schedule is reset and re-measured from that point, its
+#           samples, previous values and read failures are cleared, its
+#           measurement epoch moves to the re-registration, and its durable row
+#           goes back to open, so no evidence from before the re-registration
+#           can score. The durable row decides this as well as the verdict, so a
+#           deleted verdict cannot hide a gap. Any other existing watch is left
+#           alone. Registration is read-only against the cluster; it
 #           writes only under this home's state/ directory. Its forge reads
 #           share one budget (default 60s) and its baseline capture the sample
 #           budget below, so a merge or watcher cycle is never stalled by it.
@@ -74,13 +84,29 @@
 # sample    Read every metric for every target, compare each to its baseline
 #           with a stated bar, and append one sample record. Degrades to
 #           "unmeasured" per metric rather than failing the whole watch.
-# verdict   Print "change-watch clean", "change-watch completed unmeasured",
-#           "change-watch interrupted at +Nm", or
+# verdict   Print "change-watch clean", "change-watch unmeasurable-with-reason:
+#           <reason>", "change-watch interrupted at +Nm", or
 #           "change-watch regressed at +Nm on <metric> (<value> vs baseline <value>)".
 #           Clean means every target had at least one scored reading across the
-#           schedule. Completed unmeasured means the schedule ended with some
-#           target never read: a measurement gap, recorded as such, never as
-#           health.
+#           schedule AND the +15m, +1h and +6h readings all scored something.
+#           Anything less is unmeasurable-with-reason: a measurement gap,
+#           recorded as such, never as health. The exit status is the done-claim
+#           block: 0 for clean or regressed, 1 for unmeasurable-with-reason.
+# gate      The done-claim gate for one task: exit 0 only when every watch that
+#           task registered has reached a terminal state that is not a
+#           measurement gap. A watch still running is not a pass, and an
+#           unmeasurable watch is a failure, so a task cannot claim done while
+#           its merge has no evidence. bin/fm-teardown.sh calls it with
+#           --terminal-gap, which fails only for a terminal measurement gap: a
+#           running watch never blocks teardown, because state/change-watch/ is
+#           not a task record and keeps sampling after the task is gone. Both
+#           modes decide from the watch's durable row, so deleting the verdict
+#           file never turns a failing row into a pass, and a row whose merge
+#           never created a watch directory is still seen.
+# audit     The 7-day acceptance, measured. It fails (exit 1) when any status log
+#           under state/ carries the literal "change-watch completed unmeasured"
+#           line, or when any durable row completed inside the window ended
+#           unmeasurable-with-reason. Default window 7 days.
 # status    Print one line per registered watch (all of them, or one).
 # doctor    Live self-test of the read path. It prints the kubeconfig in use,
 #           proves the cluster answers, and with a watch id reads every target
@@ -165,15 +191,33 @@
 # regression. On a clean +12h the watch appends one note to the task's status
 # log and, when that note has no gap to report, records one wiki observation; a
 # clean ending that did leave a metric unmeasured or a rollout unproven says so
-# in the note instead, and on a completed-unmeasured +12h it appends one note
-# naming the targets it never read and records nothing else.
+# in the note instead. A +12h that cannot be proven writes NO status note at
+# all: it is a failure, so it queues a check wake and records the row.
+#
+# Awaiting the deploy is not a measurement gap. A sample taken before the
+# watched rollout landed has nothing to read yet, so it is recorded as awaiting
+# rather than as a failed read, and it never counts against a proven verdict.
+# A watch whose rollout never landed at all still ends unmeasurable, because no
+# target ever scored and the verdict names it.
+#
+# Durable row: every merge writes exactly one row at
+# state/change-watch/rows/<watch-id>.json, holding the +15m, +1h and +6h
+# readings, the real-user check, and a terminal state of proven / regressed /
+# unmeasurable-with-reason (plus open while the watch runs, and not-applicable
+# for a merge that touched no deployable surface at all, where a read that failed
+# instead records unmeasurable-with-reason). state/change-watch/ is
+# not a task record, so bin/fm-teardown.sh never removes it and the row outlives
+# the task. The schema is owned by the "durable row" section below.
 #
 # Reporting: the first regression appends one
 #   check: change-watch <task-id> <pr-url> <metric> regressed
 # wake to the durable wake queue and steers the owning task through
 # bin/fm-send.sh with the numbers; an interrupted drive appends one
 #   check: change-watch <task-id> <pr-url> interrupted at +Nm
-# wake. All are best-effort and never fail a merge.
+# wake; and a schedule that ends unmeasurable appends one
+#   check: change-watch <task-id> <pr-url> unmeasurable (<reason>)
+# wake, because an unmeasurable watch is a failure and not a quiet completion.
+# All are best-effort and never fail a merge.
 #
 # Read-only against the cluster. No model calls. No new fleet workers: the
 # watcher's existing process-event runner drives the registered watch. One
@@ -424,6 +468,20 @@ cw_meta_get() {  # <watch-id> <key>
   file=$(cw_meta_path "$1")
   [ -f "$file" ] || return 1
   grep "^$2=" "$file" | tail -1 | cut -d= -f2- || true
+}
+
+cw_meta_set() {  # <watch-id> <key> <value>
+  local file tmp
+  file=$(cw_meta_path "$1")
+  [ -f "$file" ] || return 1
+  tmp=$(umask 077; mktemp "$(dirname "$file")/.cw.XXXXXX") || return 1
+  awk -v key="$2" -v value="$3" '
+    BEGIN { done = 0 }
+    index($0, key "=") == 1 { if (!done) { print key "=" value; done = 1 }; next }
+    { print }
+    END { if (!done) print key "=" value }
+  ' "$file" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 0600 "$tmp" && mv -f -- "$tmp" "$file"
 }
 
 cw_watch_exists() {
@@ -1808,11 +1866,15 @@ cw_set_previous_value() {  # <watch-id> <key> <value>
 # Take one sample. Prints "metric<TAB>target<TAB>value<TAB>baseline" for the
 # first bar crossed, or nothing when every scored metric is inside its bar.
 # Appends one record per metric to samples.log:
-#   epoch<TAB>offset<TAB>key<TAB>value<TAB>baseline<TAB>regressed<TAB>scored
-# where scored is 0 for an unmeasured value or a relative bar with no baseline.
+#   epoch<TAB>offset<TAB>key<TAB>value<TAB>baseline<TAB>regressed<TAB>scored<TAB>awaiting
+# where scored is 0 for an unmeasured value or a relative bar with no baseline,
+# and awaiting is 1 when the only reason the value is missing is that the
+# rollout had not landed yet. Awaiting is not a measurement gap: there was
+# nothing to measure, so it never counts against a proven verdict the way a
+# failed read does.
 cw_take_sample() {  # <watch-id> <offset-seconds> <sample-epoch> <baseline-epoch>
   local id=$1 offset=$2 epoch=$3 baseline_epoch=$4
-  local key metric target value baseline previous regressed scored first reason cluster err rc
+  local key metric target value baseline previous regressed scored awaiting first reason cluster err rc
   first=''
   cw_budget_start
   cw_reasons_begin "$id"
@@ -1853,6 +1915,8 @@ cw_take_sample() {  # <watch-id> <offset-seconds> <sample-epoch> <baseline-epoch
     fi
     [ -n "$value" ] || cw_record_reason "$id" "$key" "${reason:-unmeasured}"
     [ -n "$value" ] || scored=0
+    awaiting=0
+    case "$reason" in 'awaiting the deploy:'*) awaiting=1 ;; esac
     if [ "$scored" -eq 1 ] && cw_metric_relative "$metric" && [ -z "$baseline" ]; then
       scored=0
       cw_record_reason "$id" "$key" "baseline could not be read, so the relative bar was not scored"
@@ -1862,7 +1926,8 @@ cw_take_sample() {  # <watch-id> <offset-seconds> <sample-epoch> <baseline-epoch
       regressed=1
       [ -n "$first" ] || first="$metric	$target	$value	$baseline"
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$epoch" "$offset" "$key" "$value" "$baseline" "$regressed" "$scored" \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$epoch" "$offset" "$key" "$value" "$baseline" "$regressed" "$scored" "$awaiting" \
       >> "$(cw_samples_path "$id")"
     [ -z "$value" ] || cw_set_previous_value "$id" "$key" "$value"
   done < <(cw_metric_keys "$id")
@@ -1951,6 +2016,218 @@ cw_progress_label() {  # <watch-id>
   printf '+%dm of +%dm' "$((offset / 60))" "$((latest / 60))"
 }
 
+# --- durable row --------------------------------------------------------------
+#
+# One row per merge, at state/change-watch/rows/<watch-id>.json. It is written
+# when the watch is registered (terminal_state "open") and rewritten once, at
+# the terminal verdict, so a merge always has exactly one durable record of what
+# was measured. state/change-watch/ is not a task record: bin/fm-teardown.sh
+# removes state/<task>.* and never this tree, so the row outlives the task.
+#
+# Schema (one JSON object, one line):
+#   version            "fm-change-watch-row-v1"
+#   watch_id           the watch directory name
+#   task, pr_url       the owning task and the merged pull request
+#   merge_epoch        the rollout epoch the schedule is measured from, or null
+#   registered_epoch   when the watch was registered, or null
+#   completed_epoch    when the terminal state was written, or null while open
+#   readings           {"900": <reading>|null, "3600": ..., "21600": ...}
+#   real_user_check    "observed" | "not-observed" | "not-applicable"
+#   real_user_reason   why the real-user check reads as it does
+#   unmeasured_metrics metric keys no sample ever scored
+#   unproven_targets   targets whose rollout was never proven
+#   terminal_state     "open" | "proven" | "regressed" |
+#                      "unmeasurable-with-reason" | "not-applicable"
+#   reason             the human sentence behind the terminal state
+#
+# A reading is {"at": <epoch>, "scored": <n>, "unmeasured": <n>,
+# "awaiting": <n>, "regressed": <n>, "measured": <bool>,
+# "values": {"<metric>@<target>": "<value>", ...}}, or null when no sample was
+# ever taken at that offset. "measured" is true when the reading scored
+# something, or when everything it could not score was only waiting for the
+# rollout to land; a reading that failed to read is present but measured
+# nothing, which is exactly what makes a row unproven.
+
+cw_rows_dir() { printf '%s/rows\n' "$WATCH_ROOT"; }
+cw_row_path() { printf '%s/%s.json\n' "$(cw_rows_dir)" "$1"; }
+
+# The terminal state a watch's durable row records, or nothing when the watch
+# never wrote a row. The row, not the verdict file, is the authority the gates
+# read: deleting a verdict can remove the wake's detail but never the record that
+# a merge ended without a measurement.
+cw_row_state() {  # <watch-id>
+  local row
+  row=$(cw_row_path "$1")
+  [ -f "$row" ] || return 0
+  sed -n 's/.*"terminal_state": "\([^"]*\)".*/\1/p' "$row" 2>/dev/null | tail -1
+}
+
+# The reason a watch's durable row recorded, for the refusal text.
+cw_row_reason() {  # <watch-id>
+  local row
+  row=$(cw_row_path "$1")
+  [ -f "$row" ] || return 0
+  sed -n 's/.*"reason": "\(.*\)".*/\1/p' "$row" 2>/dev/null | tail -1
+}
+
+# The task a durable row belongs to, so a merge whose gap never created a watch
+# directory is still found by the task's gate.
+cw_row_task() {  # <watch-id>
+  local row
+  row=$(cw_row_path "$1")
+  [ -f "$row" ] || return 0
+  sed -n 's/.*"task": "\([^"]*\)".*/\1/p' "$row" 2>/dev/null | tail -1
+}
+
+cw_json_escape() {  # <text>
+  printf '%s' "$1" | awk '
+    BEGIN { ORS = "" }
+    {
+      if (NR > 1) print "\\n"
+      line = $0
+      gsub(/\\/, "\\\\", line)
+      gsub(/"/, "\\\"", line)
+      gsub(/\t/, "\\t", line)
+      gsub(/\r/, "\\r", line)
+      gsub(/[\001-\010\013\014\016-\037]/, "", line)
+      print line
+    }'
+}
+
+cw_json_string() { printf '"%s"' "$(cw_json_escape "$1")"; }
+
+# One reading of the row: the samples this watch took at one schedule offset.
+cw_reading_json() {  # <watch-id> <offset-seconds>
+  local id=$1 offset=$2 samples
+  samples=$(cw_samples_path "$id")
+  [ -f "$samples" ] || { printf 'null'; return 0; }
+  awk -F'\t' -v offset="$offset" '
+    function esc(s) {
+      gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s)
+      gsub(/\t/, "\\t", s); gsub(/\r/, "\\r", s)
+      return s
+    }
+    $2 == offset {
+      if (at == "") at = $1
+      if ($7 == 1) { scored++; values = values (n++ ? ", " : "") "\"" esc($3) "\": \"" esc($4) "\"" }
+      else if ($8 == 1) awaiting++
+      else unmeasured++
+      if ($6 == 1) regressed++
+    }
+    END {
+      if (at == "") { printf "null"; exit }
+      # A reading is measured when it scored something, or when everything it
+      # could not score was only waiting for the rollout to land. A reading
+      # whose samples all failed to read is a gap, and so is one that mixes a
+      # failed read with an awaiting one.
+      measured = (scored > 0 || (awaiting > 0 && unmeasured == 0)) ? "true" : "false"
+      printf "{\"at\": %s, \"scored\": %d, \"unmeasured\": %d, \"awaiting\": %d, \"regressed\": %d, \"measured\": %s, \"values\": {%s}}", at, scored, unmeasured, awaiting, regressed, measured, values
+    }
+  ' "$samples"
+}
+
+# The real-user check: http_5xx_per_min is read from the pods' own access logs,
+# so a scored reading of it is the only evidence in this watch that a real user
+# request was observed. A watch with no such key has no real-user surface. It is
+# recorded, never a gate on proven: a service whose access logs are not readable
+# is already named by the metric gap, and gating on it would make every such
+# watch permanently unmeasurable.
+cw_real_user_check() {  # <watch-id> -> "<state>\t<reason>"
+  local id=$1 samples
+  if [ -z "$(cw_metric_keys "$id" | awk -F@ '$1 == "http_5xx_per_min" { print; exit }')" ]; then
+    printf 'not-applicable\tno http_5xx_per_min target: this watch has no real-user surface\n'
+    return 0
+  fi
+  samples=$(cw_samples_path "$id")
+  if [ -f "$samples" ] \
+    && awk -F'\t' '$3 ~ /^http_5xx_per_min@/ && $7 == 1 { found = 1 } END { exit !found }' "$samples"; then
+    printf 'observed\treal user traffic was read from the pods\047 own access logs\n'
+  else
+    printf 'not-observed\thttp_5xx_per_min was never scored, so no real user request was observed\n'
+  fi
+}
+
+# Write the one durable row for this merge. <task>/<url>/<merge-epoch>/
+# <registered-epoch> are only used when the watch has no metadata of its own,
+# which is the not-applicable case: a merge that touched no deployable surface
+# still gets its row, because "every merge writes one durable row" is the
+# contract and a row saying why nothing was measurable is the honest record.
+cw_row_write() {  # <watch-id> <terminal-state> <reason> [<task>] [<url>] [<merge-epoch>] [<registered-epoch>]
+  local id=$1 state=$2 reason=$3 task=${4:-} url=${5:-} t0=${6:-} created=${7:-}
+  local completed r900 r3600 r21600 ru ru_reason gaps unproven
+  if cw_watch_exists "$id"; then
+    task=$(cw_meta_get "$id" task || true)
+    url=$(cw_meta_get "$id" pr_url || true)
+    t0=$(cw_meta_get "$id" t0 || true)
+    created=$(cw_meta_get "$id" created || true)
+  fi
+  case "$state" in
+    open) completed=null ;;
+    *) completed=$(cw_now) ;;
+  esac
+  r900=$(cw_reading_json "$id" 900)
+  r3600=$(cw_reading_json "$id" 3600)
+  r21600=$(cw_reading_json "$id" 21600)
+  ru=$(cw_real_user_check "$id")
+  ru_reason=${ru#*$'\t'}
+  ru=${ru%%$'\t'*}
+  gaps=$(cw_measured_gaps "$id")
+  unproven=$(cw_unproven_landing "$id" | paste -sd ',' - | sed 's/,/, /g')
+  mkdir -p "$(cw_rows_dir)" 2>/dev/null || true
+  chmod 0700 "$(cw_rows_dir)" 2>/dev/null || true
+  {
+    printf '{"version": "fm-change-watch-row-v1"'
+    printf ', "watch_id": %s' "$(cw_json_string "$id")"
+    printf ', "task": %s' "$(cw_json_string "$task")"
+    printf ', "pr_url": %s' "$(cw_json_string "$url")"
+    printf ', "merge_epoch": %s' "${t0:-null}"
+    printf ', "registered_epoch": %s' "${created:-null}"
+    printf ', "completed_epoch": %s' "$completed"
+    printf ', "readings": {"900": %s, "3600": %s, "21600": %s}' "$r900" "$r3600" "$r21600"
+    printf ', "real_user_check": %s' "$(cw_json_string "$ru")"
+    printf ', "real_user_reason": %s' "$(cw_json_string "$ru_reason")"
+    printf ', "unmeasured_metrics": %s' "$(cw_json_string "$gaps")"
+    printf ', "unproven_targets": %s' "$(cw_json_string "$unproven")"
+    printf ', "terminal_state": %s' "$(cw_json_string "$state")"
+    printf ', "reason": %s}\n' "$(cw_json_string "$reason")"
+  } | cw_write "$(cw_row_path "$id")" \
+    || notice "change-watch: could not write the durable row for $id"
+}
+
+# The terminal state of a finished watch, as "<state>\t<reason>". proven needs
+# all three readings present, every one of them measured, and every target
+# measured at least once; anything less is unmeasurable-with-reason naming what
+# is missing. A missing reading is never a pass.
+#
+# A reading that only ever waited for its rollout to land is measured, not a
+# gap: the deploy had not happened yet, so there was nothing to read. A watch
+# whose rollout never landed at all still ends unmeasurable, because no target
+# ever scored and cw_unmeasured_targets names it.
+cw_terminal_state() {  # <watch-id>
+  local id=$1 r json missing='' empty='' unread gaps why=''
+  for r in 900 3600 21600; do
+    json=$(cw_reading_json "$id" "$r")
+    if [ "$json" = null ]; then
+      missing="$missing${missing:+, }+$((r / 60))m"
+    elif printf '%s' "$json" | grep -q '"measured": false'; then
+      empty="$empty${empty:+, }+$((r / 60))m"
+    fi
+  done
+  unread=$(cw_unmeasured_targets "$id" | paste -sd ',' - | sed 's/,/, /g')
+  gaps=$(cw_measured_gaps "$id")
+  if [ -z "$missing" ] && [ -z "$empty" ] && [ -z "$unread" ] \
+    && [ -n "$(cw_metric_keys "$id")" ]; then
+    printf 'proven\tall three readings (+15m, +1h, +6h) scored and every target was measured at least once%s\n' \
+      "${gaps:+; never measured: $gaps}"
+    return 0
+  fi
+  [ -z "$missing" ] || why="no reading at $missing"
+  [ -z "$empty" ] || why="$why${why:+; }nothing measured at $empty"
+  [ -z "$unread" ] || why="$why${why:+; }never measured: $unread"
+  [ -n "$(cw_metric_keys "$id")" ] || why="$why${why:+; }the watch registered no metric"
+  printf 'unmeasurable-with-reason\t%s\n' "$why"
+}
+
 cw_record_regression() {  # <watch-id> <offset-seconds> <metric> <target> <value> <baseline>
   local id=$1 offset=$2 metric=$3 target=$4 value=$5 baseline=$6 tick line
   tick=$((offset / 60))
@@ -1965,6 +2242,7 @@ cw_record_regression() {  # <watch-id> <offset-seconds> <metric> <target> <value
     printf 'offset=%s\n' "$offset"
     printf 'tick=%s\n' "$tick"
   } | cw_write "$(cw_watch_dir "$id")/regression"
+  cw_row_write "$id" regressed "$line"
   printf '%s\n' "$line"
 }
 
@@ -2040,11 +2318,13 @@ cw_task_note() {  # <task> <url> <line>
   fi
 }
 
-cw_record_clean() {  # <watch-id>
-  local id=$1 task url gaps unproven
+cw_record_clean() {  # <watch-id> [<reason>]
+  local id=$1 reason=${2:-} task url gaps unproven
   task=$(cw_meta_get "$id" task || true)
   url=$(cw_meta_get "$id" pr_url || true)
+  [ -n "$reason" ] || reason='all three readings scored and every target was measured at least once'
   printf 'clean\n' | cw_write "$(cw_verdict_path "$id")"
+  cw_row_write "$id" proven "$reason"
   cw_mark_once "$(cw_watch_dir "$id")/noted" || return 0
   gaps=$(cw_measured_gaps "$id")
   unproven=$(cw_unproven_landing "$id" | paste -sd ',' - | sed 's/,/, /g')
@@ -2058,20 +2338,34 @@ cw_record_clean() {  # <watch-id>
   cw_wiki_note "$id" "$task" "$url"
 }
 
-cw_record_unmeasured() {  # <watch-id> <unread-targets>
-  local id=$1 unread=$2 task url list unproven why
+# Queue the one check wake an unmeasurable merge produces. It carries the
+# task, the PR and the reason so the gap is actionable without opening the row.
+cw_queue_unmeasured_wake() {  # <watch-id> <task> <url> <reason>
+  local id=$1 task=$2 url=$3 reason=$4 line
+  line="check: change-watch $task $url unmeasurable ($reason)"
+  fm_wake_append check "change-watch-$id-unmeasured" "$line" 2>/dev/null \
+    || notice "change-watch: could not queue the unmeasurable wake for $url"
+}
+
+# A schedule that ended without the evidence a clean verdict needs is a
+# FAILURE, not a quiet completion. It writes the unmeasurable-with-reason
+# verdict and row, queues one check wake so the gap is actionable, and writes NO
+# status note at all: the literal "change-watch completed unmeasured" line must
+# never appear in a status log again, which is what the 7-day acceptance counts.
+cw_record_unmeasured() {  # <watch-id> <reason>
+  local id=$1 reason=$2 task url why
   task=$(cw_meta_get "$id" task || true)
   url=$(cw_meta_get "$id" pr_url || true)
-  printf 'completed unmeasured\n' | cw_write "$(cw_verdict_path "$id")"
-  cw_mark_once "$(cw_watch_dir "$id")/noted" || return 0
-  list=$(printf '%s\n' "$unread" | paste -sd ',' - | sed 's/,/, /g')
-  unproven=$(cw_unproven_landing "$id" | paste -sd ',' - | sed 's/,/, /g')
+  [ -n "$reason" ] || reason='the schedule ended without a scored reading for every target'
   # The reason the last sample recorded is what turns "unmeasured" into an
   # actionable gap instead of a mystery.
   why=$(awk -F'\t' '{ if ($2 != "") { print $2; exit } }' "$(cw_reasons_path "$id")" 2>/dev/null || true)
-  cw_task_note "$task" "$url" \
-    "note: change-watch completed unmeasured for $url (never measured: $list)${unproven:+; the rollout was never proven for: $unproven}${why:+; last reason: $why}"
-  notice "change-watch: wiki note skipped for $url (completed unmeasured: $list)${unproven:+; the rollout could not be proven for: $unproven}${why:+; last reason: $why}"
+  [ -z "$why" ] || reason="$reason; last read reason: $why"
+  printf 'unmeasurable-with-reason: %s\n' "$reason" | cw_write "$(cw_verdict_path "$id")"
+  cw_row_write "$id" unmeasurable-with-reason "$reason"
+  cw_mark_once "$(cw_watch_dir "$id")/noted" || return 0
+  cw_queue_unmeasured_wake "$id" "$task" "$url" "$reason"
+  notice "change-watch: unmeasurable for $url: $reason"
 }
 
 # Targets that never had one scored reading across the whole schedule.
@@ -2111,16 +2405,17 @@ cw_measured_gaps() {  # <watch-id>
   '
 }
 
-# The schedule ended: clean only when every target was measured at least once.
+# The schedule ended: proven only when all three readings scored and every
+# target was measured at least once; anything less is unmeasurable-with-reason.
 cw_record_completion() {  # <watch-id>
-  local id=$1 unread
-  unread=$(cw_unmeasured_targets "$id")
-  if [ -z "$unread" ] && [ -n "$(cw_metric_keys "$id")" ]; then
-    cw_record_clean "$id"
-  else
-    [ -n "$unread" ] || unread='no target of this watch was ever registered'
-    cw_record_unmeasured "$id" "$unread"
-  fi
+  local id=$1 state reason
+  state=$(cw_terminal_state "$id")
+  reason=${state#*$'\t'}
+  state=${state%%$'\t'*}
+  case "$state" in
+    proven) cw_record_clean "$id" "$reason" ;;
+    *) cw_record_unmeasured "$id" "$reason" ;;
+  esac
 }
 
 # A drive that stopped before the end of its schedule: the verdict names the
@@ -2135,6 +2430,7 @@ cw_record_interrupted() {  # <watch-id> <epoch>
   [ "$offset" -le "$latest" ] || offset=$latest
   tick=$((offset / 60))
   printf 'interrupted at +%dm\n' "$tick" | cw_write "$(cw_verdict_path "$id")"
+  cw_row_write "$id" unmeasurable-with-reason "interrupted at +${tick}m before the schedule ended"
   rm -f -- "$(cw_drive_pid_path "$id")" "$(cw_drive_identity_path "$id")" "$(cw_drive_alive_path "$id")"
   cw_mark_once "$(cw_watch_dir "$id")/interrupted-reported" || return 0
   task=$(cw_meta_get "$id" task || true)
@@ -2229,16 +2525,27 @@ cw_rearm() {  # <watch-id> <url>
   local id=$1 url=$2 remaining old attempt when_name arm_cmd
   remaining=$(cw_remaining_count "$id")
   if [ "$remaining" -eq 0 ]; then
-    rm -f -- "$(cw_verdict_path "$id")"
-    cw_record_completion "$id"
-    printf 'change-watch: %s had no samples left; completed as %s\n' "$id" "$(cw_verdict_line "$id")"
-    return 0
+    # A completed schedule has nothing left to sample, so re-arming it would
+    # only recompute the same terminal state. Recovery re-measures from now:
+    # the readings are taken again and the row goes back to open.
+    rm -f -- "$(cw_sampled_path "$id")" "$(cw_verdict_path "$id")" \
+      "$(cw_reasons_path "$id")" \
+      "$(cw_watch_dir "$id")/noted" "$(cw_watch_dir "$id")/interrupted-reported"
+    : > "$(cw_samples_path "$id")"
+    rm -f -- "$(cw_watch_dir "$id")"/last.*
+    cw_meta_set "$id" t0 "$(cw_now)"
+    cw_write_schedule "$id" "$(cw_now)"
+    remaining=$(cw_remaining_count "$id")
   fi
   old=$(cw_meta_get "$id" when_name || true)
   attempt=$(cw_meta_get "$id" arm_attempt || true)
   case "$attempt" in ''|*[!0-9]*) attempt=1 ;; esac
   attempt=$((attempt + 1))
   rm -f -- "$(cw_verdict_path "$id")" "$(cw_watch_dir "$id")/interrupted-reported"
+  # The watch is in flight again, so its durable row must not keep the
+  # interrupted terminal state it just left: a stale terminal row would make the
+  # audit report a gap for a watch that is still measuring.
+  cw_row_write "$id" open 'the watch is still running'
   arm_cmd=${FM_CW_ARM_CMD:-$SCRIPT_DIR/fm-procevent-when.sh}
   if [ -n "$old" ] && { [ -x "$arm_cmd" ] || command -v "$arm_cmd" >/dev/null 2>&1; }; then
     "$arm_cmd" retire "$old" >/dev/null 2>&1 || true
@@ -2256,7 +2563,7 @@ cw_rearm() {  # <watch-id> <url>
 
 cmd_register() {
   local task=$1 url=$2 provider owner repo number repo_name id derived targets sentries runs
-  local notes unread inventory_unread now t0 landed_unread when_name sentry_unreadable
+  local notes unread inventory_unread now t0 landed_unread when_name sentry_unreadable row_state row_reason
   fm_pr_task_id_valid "$task" || die "invalid task id: $task"
   fm_pr_url_parse "$url" || die "invalid pr url: $url"
   provider=$FM_PR_PROVIDER
@@ -2270,7 +2577,11 @@ cmd_register() {
   if cw_watch_exists "$id"; then
     cw_reconcile_drive "$id"
     case "$(cat "$(cw_verdict_path "$id")" 2>/dev/null || true)" in
-      interrupted*) cw_rearm "$id" "$url"; return 0 ;;
+      interrupted*|unmeasurable-with-reason*) cw_rearm "$id" "$url"; return 0 ;;
+    esac
+    row_state=$(cw_row_state "$id")
+    case "$row_state" in
+      unmeasurable-with-reason) cw_rearm "$id" "$url"; return 0 ;;
     esac
     printf 'change-watch: %s already registered for %s\n' "$id" "$url"
     return 0
@@ -2291,29 +2602,51 @@ cmd_register() {
     sentries=''
     sentry_unreadable=1
   fi
-  if [ -z "$targets" ] && [ -z "$sentries" ] && [ -z "$runs" ]; then
-    unread=$(printf '%s\n' "$derived" | grep -c '^note	manifest unread: ' || true)
-    inventory_unread=$(printf '%s\n' "$derived" | grep -c '^note	image inventory unread: ' || true)
-    if ! cw_forge_files "$url" "$provider" "$owner" "$repo" "$number" >/dev/null 2>&1; then
-      printf 'change-watch: cannot read the merged file list for %s; nothing registered\n' "$url"
-    elif [ "$unread" -gt 0 ]; then
-      printf 'change-watch: could not read %s manifest(s) for %s; nothing registered\n' "$unread" "$url"
-    elif [ "$inventory_unread" -gt 0 ]; then
-      printf 'change-watch: could not read the image inventory for %s%s; nothing registered\n' "$url" "${notes:+ ($notes)}"
-    elif [ -n "$sentry_unreadable" ]; then
-      printf 'change-watch: nothing measurable for %s (%s); nothing registered\n' "$url" "$notes"
-    else
-      printf 'change-watch: no deployable service touched by %s%s; nothing registered\n' "$url" "${notes:+ ($notes)}"
-    fi
-    return 0
-  fi
-
   now=$(cw_now)
   t0=$(cw_forge_merge_epoch "$url" "$provider" 2>/dev/null || true)
   case "$t0" in
     ''|*[!0-9]*) t0=$now ;;
   esac
   [ "$t0" -le "$now" ] || t0=$now
+
+  if [ -z "$targets" ] && [ -z "$sentries" ] && [ -z "$runs" ]; then
+    unread=$(printf '%s\n' "$derived" | grep -c '^note	manifest unread: ' || true)
+    inventory_unread=$(printf '%s\n' "$derived" | grep -c '^note	image inventory unread: ' || true)
+    row_state=not-applicable
+    row_reason="no deployable surface touched by $url${notes:+ ($notes)}"
+    if ! cw_forge_files "$url" "$provider" "$owner" "$repo" "$number" >/dev/null 2>&1; then
+      row_state=unmeasurable-with-reason
+      row_reason="the merged file list for $url could not be read"
+      printf 'change-watch: cannot read the merged file list for %s; nothing registered\n' "$url"
+    elif [ "$unread" -gt 0 ]; then
+      row_state=unmeasurable-with-reason
+      row_reason="$unread manifest(s) for $url could not be read"
+      printf 'change-watch: could not read %s manifest(s) for %s; nothing registered\n' "$unread" "$url"
+    elif [ "$inventory_unread" -gt 0 ]; then
+      row_state=unmeasurable-with-reason
+      row_reason="the image inventory for $url could not be read"
+      printf 'change-watch: could not read the image inventory for %s%s; nothing registered\n' "$url" "${notes:+ ($notes)}"
+    elif [ -n "$sentry_unreadable" ]; then
+      row_state=unmeasurable-with-reason
+      row_reason="nothing measurable for $url ($notes)"
+      printf 'change-watch: nothing measurable for %s (%s); nothing registered\n' "$url" "$notes"
+    elif printf '%s\n' "$notes" | grep -q 'no namespace: '; then
+      row_state=unmeasurable-with-reason
+      row_reason="a deployable surface for $url could not be watched ($notes)"
+      printf 'change-watch: a deployable surface for %s could not be watched (%s); nothing registered\n' "$url" "$notes"
+    else
+      printf 'change-watch: no deployable service touched by %s%s; nothing registered\n' "$url" "${notes:+ ($notes)}"
+    fi
+    # Every merge writes one durable row. A merge that touched no deployable
+    # surface is not-applicable; one whose surface could not be read is a
+    # measurement gap, so the audit never passes a merge nobody could measure.
+    # A gap is a watch that ended unmeasurable, so it queues the same wake.
+    cw_row_write "$id" "$row_state" "$row_reason" \
+      "$task" "$url" "$t0" "$now"
+    [ "$row_state" != unmeasurable-with-reason ] \
+      || cw_queue_unmeasured_wake "$id" "$task" "$url" "$row_reason"
+    return 0
+  fi
 
   mkdir -p "$(cw_watch_dir "$id")" || die "cannot create watch directory"
   chmod 0700 "$(cw_watch_dir "$id")" 2>/dev/null || true
@@ -2333,6 +2666,9 @@ cmd_register() {
     printf 'created=%s\n' "$now"
   } | cw_write "$(cw_meta_path "$id")"
   cw_write_schedule "$id" "$t0"
+  # The row exists from registration, so a merge is never unrecorded even if the
+  # drive dies before its terminal verdict.
+  cw_row_write "$id" open 'the watch is still running'
   cw_capture_baseline "$id" "$t0"
   # The rollout evidence: the images these Deployments run before the release
   # reaches them. A sample scores a target only after they change.
@@ -2438,6 +2774,9 @@ cmd_drive() {
   return 0
 }
 
+# The exit status is the done-claim block: an unmeasurable watch is a failure,
+# so verdict exits 1 for it and 0 only for clean or regressed. A watch still
+# running is not terminal and exits 0, because it has not claimed anything yet.
 cmd_verdict() {
   local id=$1 line
   cw_watch_exists "$id" || die "unknown watch: $id"
@@ -2445,9 +2784,131 @@ cmd_verdict() {
   if [ -f "$(cw_verdict_path "$id")" ]; then
     line=$(cat "$(cw_verdict_path "$id")")
     printf 'change-watch %s\n' "$line"
+    case "$line" in
+      unmeasurable-with-reason*|interrupted*) return 1 ;;
+    esac
     return 0
   fi
   cw_verdict_line "$id"
+}
+
+# The done-claim gate for one task: exit 0 only when every watch that task
+# registered has reached a terminal state that is not a measurement gap. A watch
+# still running is not a pass, and an unmeasurable watch is a failure, so a task
+# cannot claim done while its merge has no evidence. A task with no watch at all
+# passes, because there is nothing to prove.
+#
+# Both modes decide from the watch's durable row, which the verdict file cannot
+# mask: deleting a verdict leaves the row's terminal state intact, so a watch
+# that ended unmeasurable keeps failing. Only a watch registered before rows
+# existed, which has no row, is judged by its verdict file.
+#
+# --terminal-gap is the same gate for the teardown boundary bin/fm-teardown.sh
+# consults: only a terminal measurement gap fails there, because a watch still
+# running outlives the task's records in state/change-watch/ and keeps sampling
+# on its own, so refusing teardown for it would block every merge for 12 hours.
+
+# One watch's gate decision: 0 passes, 1 fails.
+cw_gate_row() {  # <watch-id> <mode>
+  local id=$1 mode=${2:-} state line
+  state=$(cw_row_state "$id")
+  if [ -z "$state" ]; then
+    line=''
+    [ -f "$(cw_verdict_path "$id")" ] && line=$(cat "$(cw_verdict_path "$id")")
+    case "$line" in
+      clean|regressed*) return 0 ;;
+      unmeasurable-with-reason*|interrupted*)
+        printf 'change-watch: gate FAIL %s: %s\n' "$id" "$line"; return 1 ;;
+      '')
+        if [ "$mode" = --terminal-gap ]; then return 0; fi
+        printf 'change-watch: gate FAIL %s: still running (%s)\n' "$id" "$(cw_progress_label "$id")"
+        return 1 ;;
+      *) printf 'change-watch: gate FAIL %s: %s\n' "$id" "$line"; return 1 ;;
+    esac
+  fi
+  case "$state" in
+    unmeasurable-with-reason)
+      printf 'change-watch: gate FAIL %s: unmeasurable-with-reason: %s\n' \
+        "$id" "$(cw_row_reason "$id")"
+      return 1 ;;
+    open)
+      if [ "$mode" = --terminal-gap ]; then return 0; fi
+      if cw_watch_exists "$id"; then
+        printf 'change-watch: gate FAIL %s: still running (%s)\n' "$id" "$(cw_progress_label "$id")"
+      else
+        printf 'change-watch: gate FAIL %s: still running\n' "$id"
+      fi
+      return 1 ;;
+    proven|regressed|not-applicable) return 0 ;;
+    *) printf 'change-watch: gate FAIL %s: the durable row records terminal_state %s\n' "$id" "$state"; return 1 ;;
+  esac
+}
+
+cmd_gate() {  # <task-id> [--terminal-gap]
+  local task=$1 mode=${2:-} meta id rc=0 found=0 rows row
+  [ -d "$WATCH_ROOT" ] || return 0
+  for meta in "$WATCH_ROOT"/*/watch.meta; do
+    [ -e "$meta" ] || continue
+    id=$(basename "$(dirname "$meta")")
+    [ "$(cw_meta_get "$id" task || true)" = "$task" ] || continue
+    found=1
+    cw_reconcile_drive "$id"
+    cw_gate_row "$id" "$mode" || rc=1
+  done
+  # A merge whose surface could not be read never created a watch directory:
+  # its gap lives only in the durable row, so the gate reads the rows too.
+  rows=$(cw_rows_dir)
+  if [ -d "$rows" ]; then
+    for row in "$rows"/*.json; do
+      [ -e "$row" ] || continue
+      id=$(basename "$row" .json)
+      cw_watch_exists "$id" && continue
+      [ "$(cw_row_task "$id")" = "$task" ] || continue
+      found=1
+      cw_gate_row "$id" "$mode" || rc=1
+    done
+  fi
+  [ "$found" -eq 1 ] || return 0
+  [ "$rc" -ne 0 ] || printf 'change-watch: gate ok for %s\n' "$task"
+  return "$rc"
+}
+
+# The 7-day acceptance, measured. It fails when any status log under state/
+# carries the literal "change-watch completed unmeasured" line, or when any
+# durable row completed inside the window ended unmeasurable-with-reason. Both
+# are the same disease: a merge that landed with no evidence it was safe.
+cmd_audit() {  # [<days>]
+  local days=${1:-7} now since rows row state completed hits=0 bad=0 total=0
+  case "$days" in ''|*[!0-9]*) die "invalid day count: $days" ;; esac
+  now=$(cw_now)
+  since=$(( now - days * 86400 ))
+  printf 'change-watch audit: window %s day(s) from %s\n' "$days" "$since"
+  if [ -d "$STATE" ]; then
+    hits=$(grep -hc 'change-watch completed unmeasured' "$STATE"/*.status 2>/dev/null \
+      | awk '{ n += $1 } END { print n + 0 }')
+    [ "$hits" -eq 0 ] || grep -l 'change-watch completed unmeasured' "$STATE"/*.status 2>/dev/null \
+      | while IFS= read -r row; do printf 'change-watch audit: FAIL %s carries a "completed unmeasured" line\n' "$row"; done
+  fi
+  rows=$(cw_rows_dir)
+  if [ -d "$rows" ]; then
+    for row in "$rows"/*.json; do
+      [ -e "$row" ] || continue
+      total=$((total + 1))
+      state=$(cw_row_state "$(basename "$row" .json)")
+      completed=$(sed -n 's/.*"completed_epoch": \([0-9]*\).*/\1/p' "$row" 2>/dev/null | tail -1)
+      [ -n "$completed" ] || continue
+      [ "$completed" -ge "$since" ] || continue
+      case "$state" in
+        unmeasurable-with-reason)
+          bad=$((bad + 1))
+          printf 'change-watch audit: FAIL %s ended unmeasurable-with-reason\n' "$(basename "$row" .json)" ;;
+      esac
+    done
+  fi
+  printf 'change-watch audit: %s row(s) recorded, %s unmeasurable in the window, %s "completed unmeasured" status line(s)\n' \
+    "$total" "$bad" "$hits"
+  [ "$hits" -eq 0 ] && [ "$bad" -eq 0 ] && return 0
+  return 1
 }
 
 # One status line per watch, with the metrics no sample ever scored and any
@@ -2618,6 +3079,8 @@ case "${1:-}" in
   drive) [ "$#" -eq 2 ] || usage; shift; cmd_drive "$@" ;;
   sample) if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then usage; fi; shift; cmd_sample "$@" ;;
   verdict) [ "$#" -eq 2 ] || usage; shift; cmd_verdict "$@" ;;
+  gate) [ "$#" -eq 2 ] || [ "$#" -eq 3 ] || usage; shift; cmd_gate "$@" ;;
+  audit) [ "$#" -le 2 ] || usage; shift; cmd_audit "$@" ;;
   status) [ "$#" -le 2 ] || usage; shift; cmd_status "$@" ;;
   doctor) [ "$#" -le 2 ] || usage; shift; cmd_doctor "$@" ;;
   ""|-h|--help|help) usage ;;

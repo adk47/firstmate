@@ -7,9 +7,14 @@
 # the manifest's own namespace; a 5xx series that crosses its bar at +15m
 # reports the first regression as a wake and a steer; an OOMKilled event reports
 # on the sample that sees it; a clean series runs the whole 12h schedule and
-# records the clean note; a schedule that never read a target completes
-# unmeasured instead of clean; an interrupted drive is never clean and can be
-# re-armed; the pool metric is scoped to the Deployment's own pool; the pool
+# records the clean note and one durable row with all three readings; a schedule
+# that never read a target ends unmeasurable-with-reason, queues a check wake,
+# and blocks the done claim instead of completing quietly; a row missing a
+# reading is never proven; the audit fails on an unmeasurable row and on a
+# completed-unmeasured status line; an interrupted drive is never clean and can
+# be re-armed; a re-registered completed watch re-measures from scratch and a
+# deleted verdict cannot hide its durable row; the pool metric is scoped to the
+# Deployment's own pool; the pool
 # console is read as ubuntu through the admin unix socket with stdin closed and
 # a hard bound, and the doctor states every failed pool read; a reused pid never
 # reads as a live drive; and a docs-only PR registers nothing at all.
@@ -223,18 +228,23 @@ esac
   || fail "two hunks in feed-service did not target it alone"
 pass "several hunks in one Deployment target that Deployment once"
 
-# A Deployment that declares no namespace is skipped with its reason, never guessed.
+# A Deployment that declares no namespace is a measurement gap, never guessed
+# and never recorded as a merge with nothing deployable.
 HOME_A6=$(new_world a6)
 printf 'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: argocd-server\nspec: {}\n' > "$TMP_ROOT/nons.yaml"
 seed_pr "$HOME_A6" k8s/prod/argocd/install.yaml "$TMP_ROOT/nons.yaml" k8s/prod/argocd/install.yaml
 seed_diff "$HOME_A6" k8s/prod/argocd/install.yaml 4
 out=$(run_cw "$HOME_A6" 1790000000 register w6 "$PR_URL") || fail "register failed"
 case "$out" in
-  *"no deployable service touched"*"(no namespace: argocd-server in k8s/prod/argocd/install.yaml)"*) ;;
-  *) fail "a Deployment without metadata.namespace was not skipped with its reason: $out" ;;
+  *"could not be watched"*"(no namespace: argocd-server in k8s/prod/argocd/install.yaml)"*) ;;
+  *) fail "a Deployment without metadata.namespace was not recorded as a gap: $out" ;;
 esac
 [ -e "$HOME_A6/state/change-watch/w6-3317" ] && fail "a Deployment without a namespace was watched under a guess"
-pass "a Deployment without metadata.namespace is skipped, never guessed"
+grep -q '"terminal_state": "unmeasurable-with-reason"' "$HOME_A6/state/change-watch/rows/w6-3317.json" \
+  || fail "a Deployment without a namespace was recorded as not-applicable"
+run_cw "$HOME_A6" 1790000100 audit 7 >/dev/null \
+  && fail "the audit passed a Deployment that could not be watched"
+pass "a Deployment without metadata.namespace is a stated gap, never guessed"
 
 # A manifest that cannot be read is reported as unread, not as no service.
 HOME_A7=$(new_world a7)
@@ -247,6 +257,16 @@ case "$out" in
   *) fail "an unreadable manifest was not reported as unread: $out" ;;
 esac
 [ -e "$HOME_A7/state/change-watch/w7-3317" ] && fail "an unreadable manifest created a watch record"
+grep -q '"terminal_state": "unmeasurable-with-reason"' "$HOME_A7/state/change-watch/rows/w7-3317.json" \
+  || fail "an unreadable manifest was recorded as a merge with nothing to measure"
+grep -qF "check: change-watch w7 $PR_URL unmeasurable (" "$HOME_A7/state/.wake-queue" \
+  || fail "an unreadable manifest did not queue the unmeasurable wake"
+run_cw "$HOME_A7" 1790000100 gate w7 >/dev/null \
+  && fail "the done-claim gate passed a merge whose manifest could not be read"
+run_cw "$HOME_A7" 1790000100 gate w7 --terminal-gap >/dev/null \
+  && fail "the teardown gate passed a row-only measurement gap"
+run_cw "$HOME_A7" 1790000100 audit 7 >/dev/null \
+  && fail "the audit passed a merge whose manifest could not be read"
 pass "an unreadable manifest is a stated measurement gap, not a PR without a service"
 
 # A manifest the PR deletes is a decommission, not a forge read failure.
@@ -350,21 +370,167 @@ grep -qF "note: change-watch clean for $PR_URL" "$HOME_D/state/d1.status" \
   && fail "a clean watch must not queue a wake"
 pass "a clean 12h series records the clean note and queues nothing"
 
-# A schedule in which the target was never read completes unmeasured, not clean.
+# --- (e) a merge writes exactly one row with all three readings ----------------
+
+ROW_D="$HOME_D/state/change-watch/rows/d1-3317.json"
+[ -f "$ROW_D" ] || fail "a merge wrote no durable row"
+[ "$(find "$HOME_D/state/change-watch/rows" -type f | wc -l | tr -d ' ')" = 1 ] \
+  || fail "a merge wrote more than one durable row"
+grep -q '"terminal_state": "proven"' "$ROW_D" || fail "a clean watch did not record terminal_state proven"
+for offset in 900 3600 21600; do
+  grep -q "\"$offset\": {\"at\":" "$ROW_D" \
+    || fail "the row has no +$((offset / 60))m reading"
+done
+grep -q '"real_user_check": "observed"' "$ROW_D" \
+  || fail "the row did not record the real-user check as observed"
+grep -q '"completed_epoch": [0-9]' "$ROW_D" || fail "the row has no completion epoch"
+run_cw "$HOME_D" 1790044000 gate d1 >/dev/null \
+  || fail "the done-claim gate failed a proven watch"
+run_cw "$HOME_D" 1790044000 gate no-such-task >/dev/null \
+  || fail "the done-claim gate failed a task with no watch"
+pass "a merge writes exactly one row with the +15m/+1h/+6h readings and a terminal state"
+
+# --- (f) an unmeasurable watch wakes and blocks the done claim ----------------
+
+# A schedule in which the target was never read is a FAILURE, not a quiet
+# completion: it queues a check wake, blocks the done claim, and writes no
+# status note at all.
 HOME_U=$(new_world u)
 seed_pr "$HOME_U" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
 seed_diff "$HOME_U" "$MANIFEST" "$FEED_LINE"
 run_cw "$HOME_U" 1790000000 register u1 "$PR_URL" >/dev/null || fail "register failed"
 printf 'kind=crewmate\n' > "$HOME_U/state/u1.meta"
 run_cw "$HOME_U" 1790044000 drive u1-3317 >/dev/null || fail "unmeasured drive failed"
-[ "$(run_cw "$HOME_U" 1790044000 verdict u1-3317)" = "change-watch completed unmeasured" ] \
-  || fail "an entirely unmeasured watch read as: $(run_cw "$HOME_U" 1790044000 verdict u1-3317)"
-grep -qF "note: change-watch completed unmeasured for $PR_URL (never measured: muso-prod/feed-service)" \
-  "$HOME_U/state/u1.status" || fail "the unmeasured completion note was not appended"
-grep -q "change-watch clean" "$HOME_U/state/u1.status" && fail "an unmeasured watch recorded a clean note"
-[ -e "$HOME_U/state/.wake-queue" ] && [ -s "$HOME_U/state/.wake-queue" ] \
-  && fail "an unmeasured completion must not queue a wake"
-pass "a never-measured target completes unmeasured with its own note and no clean claim"
+line=$(run_cw "$HOME_U" 1790044000 verdict u1-3317)
+case "$line" in
+  "change-watch unmeasurable-with-reason: "*) ;;
+  *) fail "an entirely unmeasured watch read as: $line" ;;
+esac
+run_cw "$HOME_U" 1790044000 verdict u1-3317 >/dev/null \
+  && fail "an unmeasurable verdict exited 0, so it does not block the done claim"
+run_cw "$HOME_U" 1790044000 gate u1 >/dev/null \
+  && fail "the done-claim gate passed an unmeasurable watch"
+grep -qF "check: change-watch u1 $PR_URL unmeasurable (" "$HOME_U/state/.wake-queue" \
+  || fail "an unmeasurable watch did not queue a check wake"
+[ -e "$HOME_U/state/u1.status" ] && grep -q 'change-watch' "$HOME_U/state/u1.status" \
+  && fail "an unmeasurable watch still wrote a status note"
+grep -q '"terminal_state": "unmeasurable-with-reason"' \
+  "$HOME_U/state/change-watch/rows/u1-3317.json" \
+  || fail "an unmeasurable watch did not record its terminal state"
+pass "an unmeasurable watch queues a check wake and blocks the done claim"
+
+# The teardown refusal tells the operator to re-register once the read path is
+# fixed. That recovery must actually re-measure a completed schedule instead of
+# recomputing the same gap.
+run_cw "$HOME_U" 1790045000 register u1 "$PR_URL" >/dev/null \
+  || fail "re-registering an unmeasurable watch failed"
+grep -q '"terminal_state": "open"' "$HOME_U/state/change-watch/rows/u1-3317.json" \
+  || fail "re-registering an unmeasurable watch did not reopen its durable row"
+[ -e "$HOME_U/state/change-watch/u1-3317/verdict" ] \
+  && fail "re-registering an unmeasurable watch kept its terminal verdict"
+[ -e "$HOME_U/state/change-watch/u1-3317/sampled" ] \
+  && fail "re-registering a completed watch kept its old samples"
+run_cw "$HOME_U" 1790045000 gate u1 --terminal-gap >/dev/null \
+  || fail "a re-registered watch still blocked teardown"
+pass "re-registering an unmeasurable watch reopens it and re-measures"
+
+# --- re-registering a completed watch re-measures from scratch ----------------
+
+# A completed watch that ended unmeasurable must not carry its old samples into
+# the re-measurement: otherwise a re-registered watch could be proven by
+# evidence taken before the re-registration.
+HOME_W=$(new_world w)
+seed_pr "$HOME_W" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_W" "$MANIFEST" "$FEED_LINE" "$API_LINE"
+seed_series "$HOME_W" http_5xx_per_min muso-prod_feed-service baseline 0
+seed_series "$HOME_W" http_5xx_per_min muso-prod_feed-service sample \
+  0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+seed_series "$HOME_W" restarts muso-prod_feed-service baseline 2
+seed_series "$HOME_W" restarts muso-prod_feed-service sample \
+  2 2 2 2 2 2 2 2 2 2 2 2 2 2 2
+run_cw "$HOME_W" 1790000000 register w1 "$PR_URL" >/dev/null || fail "register failed"
+run_cw "$HOME_W" 1790044000 drive w1-3317 >/dev/null || fail "drive failed"
+grep -q '"terminal_state": "unmeasurable-with-reason"' \
+  "$HOME_W/state/change-watch/rows/w1-3317.json" \
+  || fail "a watch with one target never measured did not end unmeasurable"
+run_cw "$HOME_W" 1790045000 register w1 "$PR_URL" >/dev/null \
+  || fail "re-registering a completed unmeasurable watch failed"
+[ -s "$HOME_W/state/change-watch/w1-3317/samples.log" ] \
+  && fail "re-registering a completed watch kept its old samples"
+[ -n "$(find "$HOME_W/state/change-watch/w1-3317" -name 'last.*' -print -quit)" ] \
+  && fail "re-registering a completed watch kept its old previous values"
+rm -f "$HOME_W"/cluster/*
+run_cw "$HOME_W" 1790088200 drive w1-3317 >/dev/null || fail "re-measuring drive failed"
+grep -q '"terminal_state": "unmeasurable-with-reason"' \
+  "$HOME_W/state/change-watch/rows/w1-3317.json" \
+  || fail "a re-registered watch was proven by samples taken before the re-registration"
+pass "re-registering a completed watch re-measures from scratch"
+
+# --- the durable row is the authority for recovery ----------------------------
+
+# Deleting the verdict must not make an unmeasurable watch look already
+# registered: the row still records the gap, so re-registering must reopen it
+# and a later clean drive must reach proven.
+HOME_X=$(new_world x)
+seed_pr "$HOME_X" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_X" "$MANIFEST" "$FEED_LINE"
+seed_series "$HOME_X" http_5xx_per_min muso-prod_feed-service baseline 0
+seed_series "$HOME_X" http_5xx_per_min muso-prod_feed-service sample \
+  0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+seed_series "$HOME_X" restarts muso-prod_feed-service baseline 2
+seed_series "$HOME_X" restarts muso-prod_feed-service sample \
+  2 2 2 2 2 2 2 2 2 2 2 2 2 2 2
+run_cw "$HOME_X" 1790000000 register v1 "$PR_URL" >/dev/null || fail "register failed"
+rm -f "$HOME_X"/cluster/*
+run_cw "$HOME_X" 1790044000 drive v1-3317 >/dev/null || fail "unmeasured drive failed"
+rm -f "$HOME_X/state/change-watch/v1-3317/verdict"
+run_cw "$HOME_X" 1790045000 register v1 "$PR_URL" >/dev/null \
+  || fail "re-registering a watch whose verdict was deleted failed"
+grep -q '"terminal_state": "open"' "$HOME_X/state/change-watch/rows/v1-3317.json" \
+  || fail "a watch whose verdict was deleted was not reopened from its durable row"
+seed_series "$HOME_X" http_5xx_per_min muso-prod_feed-service sample \
+  0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+seed_series "$HOME_X" restarts muso-prod_feed-service sample \
+  2 2 2 2 2 2 2 2 2 2 2 2 2 2 2
+run_cw "$HOME_X" 1790088200 drive v1-3317 >/dev/null || fail "clean drive after recovery failed"
+grep -q '"terminal_state": "proven"' "$HOME_X/state/change-watch/rows/v1-3317.json" \
+  || fail "a recovered watch did not reach proven on a clean drive"
+pass "a deleted verdict does not hide the durable row from recovery"
+
+# --- (g) a row with a missing reading is not proven ---------------------------
+
+# The schedule is cut to +15m and +1h only, so the +6h reading never happens.
+# Every target is measured, so the old clean bar would have passed it; the row
+# must still refuse to call it proven.
+HOME_V=$(new_world v)
+seed_pr "$HOME_V" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_V" "$MANIFEST" "$FEED_LINE"
+seed_series "$HOME_V" restarts muso-prod_feed-service baseline 2
+seed_series "$HOME_V" restarts muso-prod_feed-service sample 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2
+run_cw "$HOME_V" 1790000000 register r1 "$PR_URL" >/dev/null || fail "register failed"
+printf '900\t1790000900\n3600\t1790003600\n' > "$HOME_V/state/change-watch/r1-3317/schedule"
+run_cw "$HOME_V" 1790004000 drive r1-3317 >/dev/null || fail "short drive failed"
+line=$(run_cw "$HOME_V" 1790004000 verdict r1-3317)
+case "$line" in
+  "change-watch unmeasurable-with-reason: "*"+360m"*) ;;
+  *) fail "a row missing the +6h reading was not refused: $line" ;;
+esac
+ROW_V="$HOME_V/state/change-watch/rows/r1-3317.json"
+grep -q '"21600": null' "$ROW_V" || fail "the missing +6h reading was not recorded as null"
+grep -q '"terminal_state": "proven"' "$ROW_V" \
+  && fail "a row with a missing reading was recorded as proven"
+pass "a row with a missing reading is not proven"
+
+# --- (h) the 7-day acceptance is measurable -----------------------------------
+
+run_cw "$HOME_V" 1790004000 audit 7 >/dev/null \
+  && fail "the audit passed while an unmeasurable row sat inside the window"
+printf 'note: change-watch completed unmeasured for %s\n' "$PR_URL" >> "$HOME_V/state/r1.status"
+run_cw "$HOME_V" 1790004000 audit 7 >/dev/null \
+  && fail "the audit passed with a completed-unmeasured status line present"
+run_cw "$HOME_V" 1790004000 audit 7 2>&1 | grep -q 'completed unmeasured' \
+  || fail "the audit did not name the offending status line"
+pass "the audit fails on an unmeasurable row and on a completed-unmeasured status line"
 
 # --- the pool metric is the Deployment's own pool -------------------------------
 
@@ -437,6 +603,13 @@ esac
 grep -q "^retire cw-" "$HOME_I/arm.log" || fail "re-arm did not retire the stopped source"
 run_cw "$HOME_I" 1790001000 verdict i1-3317 | grep -q "clean so far" \
   || fail "re-arm did not clear the interrupted verdict"
+ROW_I="$HOME_I/state/change-watch/rows/i1-3317.json"
+grep -q '"terminal_state": "open"' "$ROW_I" \
+  || fail "re-arm left the durable row in its interrupted terminal state"
+grep -q '"completed_epoch": null' "$ROW_I" \
+  || fail "re-arm left a completion epoch on the durable row"
+run_cw "$HOME_I" 1790001000 audit 7 >/dev/null \
+  || fail "the audit false-failed a re-armed in-flight watch"
 
 run_cw "$HOME_I" 1790044000 drive i1-3317 >/dev/null || fail "resumed drive failed"
 [ "$(run_cw "$HOME_I" 1790044000 verdict i1-3317)" = "change-watch clean" ] \
@@ -501,7 +674,19 @@ esac
 [ -e "$HOME_E/state/change-watch/e1-3317" ] && fail "docs-only PR created a watch record"
 [ "$(grep -c '' "$HOME_E/arm.log" 2>/dev/null || echo 0)" -eq 0 ] \
   || fail "docs-only PR armed a watch"
-pass "docs-only PR leaves no watch behind"
+# Every merge writes one durable row, including one with nothing to measure: the
+# row says why, so the merge is never silently unrecorded.
+grep -q '"terminal_state": "not-applicable"' "$HOME_E/state/change-watch/rows/e1-3317.json" \
+  || fail "a docs-only merge wrote no not-applicable row"
+run_cw "$HOME_E" 1790000100 audit 7 >/dev/null \
+  || fail "the audit failed a docs-only merge with nothing to measure"
+run_cw "$HOME_E" 1790000100 gate e1 --terminal-gap >/dev/null \
+  || fail "teardown was refused for a docs-only merge with nothing to measure"
+run_cw "$HOME_E" 1790000100 gate e1 >/dev/null \
+  || fail "the done-claim gate failed a docs-only merge with nothing to measure"
+[ -e "$HOME_E/state/.wake-queue" ] && [ -s "$HOME_E/state/.wake-queue" ] \
+  && fail "a docs-only merge queued a wake"
+pass "docs-only PR leaves no watch behind but still writes its row"
 
 # --- an application repo resolves through its name -----------------------------
 
@@ -1006,6 +1191,45 @@ awk -F'\t' '$2 == 900 && $7 == 1' "$SAMPLES_G" | grep -q "restarts@muso-prod/cor
   || fail "the landed release was not scored: $(awk -F'\t' '$2 == 900' "$SAMPLES_G")"
 pass "the new image lands and the same watch scores the release"
 
+# --- awaiting the deploy is not a measurement gap ------------------------------
+# A reading whose every sample was taken before the rollout landed has nothing
+# to read yet. Counting that as a failed read would end a healthy merge
+# unmeasurable and block its own done claim, which is the opposite of what the
+# watch is for.
+
+HOME_AW=$(cluster_world aw)
+seed_app_pr "$HOME_AW"
+printf 'muso-prod\tcore-backend-api\t6\tlocalhost:30500/muso/core-backend:old-1\n' > "$HOME_AW/workloads"
+printf '[]\n' > "$HOME_AW/sentry/issues-core-backend.json"
+AW_IMAGE='localhost:30500/muso/core-backend:old-1'
+aw_cw() {  # <now> <args...>
+  local now=$1
+  shift
+  CW_CLUSTER_DIR='' PATH="$HOME_AW/bin:$PATH" FM_CW_SHIM_LOG="$HOME_AW/shim.log" \
+    FM_CW_SHIM_WORKLOADS="$HOME_AW/workloads" FM_CW_SHIM_IMAGE="$AW_IMAGE" \
+    FM_CW_CONFIG_DIR="$HOME_AW/config" FM_CW_SENTRY_DIR="$HOME_AW/sentry" \
+    run_cw "$HOME_AW" "$now" "$@"
+}
+aw_cw 1790000000 register aw1 "$CORE_PR" >/dev/null || fail "register failed"
+printf '900\t1790000900\n3600\t1790003600\n21600\t1790021600\n' \
+  > "$HOME_AW/state/change-watch/aw1$CORE_ID_SUFFIX/schedule"
+aw_cw 1790000900 sample "aw1$CORE_ID_SUFFIX" 900 >/dev/null || fail "sample failed"
+SAMPLES_AW="$HOME_AW/state/change-watch/aw1$CORE_ID_SUFFIX/samples.log"
+[ "$(awk -F'\t' '$2 == 900 && $7 == 1' "$SAMPLES_AW" | wc -l | tr -d ' ')" -eq 0 ] \
+  || fail "a pre-rollout sample scored something: $(cat "$SAMPLES_AW")"
+[ "$(awk -F'\t' '$2 == 900 && $8 == 1' "$SAMPLES_AW" | wc -l | tr -d ' ')" -gt 0 ] \
+  || fail "a pre-rollout sample was not recorded as awaiting the deploy: $(cat "$SAMPLES_AW")"
+AW_IMAGE='localhost:30500/muso/core-backend:new-2'
+aw_cw 1790021600 drive "aw1$CORE_ID_SUFFIX" >/dev/null || fail "drive failed"
+[ "$(aw_cw 1790021600 verdict "aw1$CORE_ID_SUFFIX")" = "change-watch clean" ] \
+  || fail "a watch whose first reading only awaited its deploy did not end clean: $(aw_cw 1790021600 verdict "aw1$CORE_ID_SUFFIX")"
+ROW_AW="$HOME_AW/state/change-watch/rows/aw1$CORE_ID_SUFFIX.json"
+grep -q '"terminal_state": "proven"' "$ROW_AW" \
+  || fail "an awaiting-deploy reading made the row unproven: $(cat "$ROW_AW")"
+grep -q '"900": {"at": [0-9]*, "scored": 0, "unmeasured": 0, "awaiting": [1-9]' "$ROW_AW" \
+  || fail "the +15m reading did not record its awaiting samples: $(cat "$ROW_AW")"
+pass "a reading that only awaited its deploy is measured, not a gap"
+
 # One pod read serves the landing gate and every pod-backed metric of a sample.
 # The armed drive takes all 15 samples in one process, so a read repeated per
 # metric is what spends a family's sample budget before its later targets.
@@ -1087,6 +1311,10 @@ case "$out" in
 esac
 [ -e "$HOME_SO/state/change-watch/so1$CORE_ID_SUFFIX" ] \
   && fail "a watch with nothing to measure created a watch record"
+grep -q '"terminal_state": "unmeasurable-with-reason"' "$HOME_SO/state/change-watch/rows/so1$CORE_ID_SUFFIX.json" \
+  || fail "an unreadable Sentry project was recorded as a merge with nothing to measure"
+run_cw "$HOME_SO" 1790000100 audit 7 >/dev/null \
+  && fail "the audit passed a merge whose only target could not be read"
 [ "$(grep -c '' "$HOME_SO/arm.log" 2>/dev/null || echo 0)" -eq 0 ] \
   || fail "a watch with nothing to measure was armed"
 pass "a repository with nothing measurable registers nothing instead of a clean verdict"
@@ -1387,6 +1615,10 @@ case "$out" in
 esac
 [ -e "$HOME_INV/state/change-watch/inv1-620" ] \
   && fail "a watch with an unreadable inventory was armed"
+grep -q '"terminal_state": "unmeasurable-with-reason"' "$HOME_INV/state/change-watch/rows/inv1-620.json" \
+  || fail "an unreadable image inventory was recorded as a merge with nothing to measure"
+run_cw "$HOME_INV" 1790000100 audit 7 >/dev/null \
+  && fail "the audit passed a merge whose image inventory could not be read"
 pass "an unreadable image inventory is stated instead of read as no deployable service"
 
 # --- a status line states a rollout it could never prove ----------------------
