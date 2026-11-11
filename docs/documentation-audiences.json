@@ -281,6 +281,10 @@
       "audience": "public-product"
     },
     {
+      "path": "ak47/README.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "bin/fm-house-wiki-stanza.txt",
       "audience": "agent-runtime"
     },
