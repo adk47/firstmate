@@ -3446,6 +3446,19 @@ if { [ "$TEARDOWN_RELEASE_MODE" = orca ] || [ "$BACKEND" = orca ]; } && [ "$KIND
       echo "error: orca worktree removal failed for ${ORCA_WORKTREE_ID}; teardown aborted with the branch and worktree intact" >&2
       exit 1
     fi
+  elif migrated_orca_worktree_path "$META" "$WT" >/dev/null; then
+    # A migrated Mac-era record names the worktree only by its prior
+    # /Users/<user>/orca/workspaces/... path. Orca resolves that path and the
+    # answer must canonicalize to the very directory the landed-work gates
+    # inspected; a stale or wrong registry row never authorizes removing a
+    # directory nobody inspected, and the helper falls back to a guarded plain
+    # git removal only when Orca no longer tracks it.
+    migrated_orca_rc=0
+    teardown_migrated_orca_worktree "$META" "$WT" "$PROJ" || migrated_orca_rc=$?
+    if [ "$migrated_orca_rc" -ne 0 ]; then
+      restore_worktree_branch "$WT" "$branch"
+      exit 1
+    fi
   else
     # A path selector can miss only because Orca's registry still names a stale
     # path for a worktree that moved between hosts. That proven registry miss -
