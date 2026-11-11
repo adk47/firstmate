@@ -197,22 +197,29 @@ locally — the box has no route to cluster ClusterIPs.
 ### Proof that it refuses
 
 A tree that is known to be live, with every age gate set to `0` so nothing is
-spared by time:
+spared by time. Point the tick at a demo root so the real `/tmp` is untouched:
 
 ```
-$ ls /tmp/ak47-demo
+$ demo=$(mktemp -d)
+$ export AK47_TMP_ROOT=$demo/tmp AK47_STATE=$demo/state \
+    AK47_CACHE=$demo/cache AK47_CONFIG=$demo/config FM_HOME=$demo/fmhome
+$ mkdir -p "$AK47_TMP_ROOT" "$AK47_STATE" "$AK47_CACHE" "$AK47_CONFIG" "$FM_HOME/state"
+$ printf 'tmp_mktemp_min=0\ntmp_producer_min=0\norphan_min=0\ntmp_max_entries=0\n' \
+    >"$AK47_CONFIG/devops.conf"
+$ mkdir -p "$AK47_TMP_ROOT"/{fm-livetask,fm-orphan9,tmp.abcdefghij,tmpa003ltt_,uvn-abc123}
+$ ls "$AK47_TMP_ROOT"
 fm-livetask  fm-orphan9  tmp.abcdefghij  tmpa003ltt_  uvn-abc123
 
 # a process sitting in tmpa003ltt_, a process with a file open in
 # tmp.abcdefghij, and a live task record for fm-livetask
-$ ( cd /tmp/ak47-demo/tmpa003ltt_ && sleep 20 ) &
-$ ( exec 3</tmp/ak47-demo/tmp.abcdefghij/open.txt; sleep 20 ) &
-$ touch $FM_HOME/state/livetask.meta
+$ ( cd "$AK47_TMP_ROOT/tmpa003ltt_" && sleep 20 ) &
+$ ( exec 3<"$AK47_TMP_ROOT/tmp.abcdefghij/open.txt"; sleep 20 ) &
+$ touch "$FM_HOME/state/livetask.meta"
 
 $ ak47/tick.sh --apply
-$ ls /tmp/ak47-demo
+$ ls "$AK47_TMP_ROOT"
 fm-livetask  tmp.abcdefghij  tmpa003ltt_
-$ ls ~/.local/state/ak47/quarantine/*/
+$ ls "$AK47_STATE"/quarantine/*/
 fm-orphan9  uvn-abc123
 ```
 
@@ -231,8 +238,8 @@ $ ak47/install.sh --uninstall   # remove the units, keep every log
 
 ## Configuration
 
-`~/.config/ak47/devops.conf`, seeded by `install.sh` with every key commented
-out. Absent keys take the default in the right-hand column.
+`~/.config/ak47/devops.conf`, seeded by `install.sh` with every key set to its
+default. Absent keys take the default in the right-hand column.
 
 | key | default | what it does |
 |-----|---------|--------------|

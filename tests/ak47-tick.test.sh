@@ -242,6 +242,41 @@ test_stops_quarantining_once_under_the_entry_ceiling() {
   pass "tick stops quarantining once the tree is under its entry ceiling"
 }
 
+test_stops_as_soon_as_the_live_tree_crosses_the_ceiling() {
+  reset_tree
+  # Three candidates, a ceiling of 2, and a move budget far above the number of
+  # candidates. The tick must stop after the first move brings the live tree to
+  # the ceiling, not spend the whole per-run budget.
+  sed -i 's/^tmp_max_entries=.*/tmp_max_entries=2/' "$AK47_CONFIG/devops.conf"
+  local d
+  for d in tmpi011aaa_ tmpj012bbb_ tmpk013ccc_; do
+    mkdir -p "$AK47_TMP_ROOT/$d"
+    age "$AK47_TMP_ROOT/$d"
+  done
+  "$TICK" --apply >/dev/null 2>&1 || fail "tick exited non-zero"
+  local n
+  n=$(find "$AK47_STATE/quarantine" -mindepth 2 -maxdepth 2 -type d 2>/dev/null | wc -l)
+  [ "$n" -eq 1 ] || fail "tick moved $n entries instead of stopping at the ceiling"
+  pass "tick stops as soon as the live tree crosses the entry ceiling"
+}
+
+test_quarantines_a_same_day_name_collision_without_nesting() {
+  reset_tree
+  local d=$AK47_TMP_ROOT/tmpl014ddd_
+  mkdir -p "$d"; age "$d"
+  "$TICK" --apply >/dev/null 2>&1 || fail "first tick exited non-zero"
+  # A producer recreates the same name on the same UTC day.
+  mkdir -p "$d"; age "$d"
+  "$TICK" --apply >/dev/null 2>&1 || fail "second tick exited non-zero"
+  local day
+  day=$(find "$AK47_STATE/quarantine" -mindepth 1 -maxdepth 1 -type d | head -n 1)
+  [ -n "$day" ] || fail "tick did not quarantine either entry"
+  [ -d "$day/tmpl014ddd_" ] || fail "first quarantined entry is missing"
+  [ -d "$day/tmpl014ddd_.1" ] || fail "second quarantined entry did not get a unique name"
+  [ ! -e "$day/tmpl014ddd_/tmpl014ddd_" ] || fail "second entry was nested inside the first"
+  pass "a same-day name collision is quarantined under a unique name, not nested"
+}
+
 # --- the log --------------------------------------------------------------------
 
 test_writes_exactly_one_line_per_run() {
@@ -346,6 +381,8 @@ test_quarantined_entry_keeps_its_full_revert_window
 test_expires_an_entry_after_its_quarantine_window
 test_dry_run_changes_nothing
 test_stops_quarantining_once_under_the_entry_ceiling
+test_stops_as_soon_as_the_live_tree_crosses_the_ceiling
+test_quarantines_a_same_day_name_collision_without_nesting
 test_writes_exactly_one_line_per_run
 test_the_log_line_carries_the_verdict
 test_writes_a_numeric_sample_for_the_weekly_review

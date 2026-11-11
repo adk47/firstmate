@@ -221,7 +221,13 @@ skipped_busy=${skipped_busy:-0}; skipped_protected=${skipped_protected:-0}
 # Move one top-level entry into today's quarantine. A rename, so it is atomic and
 # reversible with a single mv back; the revert is printed on the log line.
 quarantine() {
-  local name=$1 class=$2 path="$TMP_ROOT/$1" dest="$qdir/$1" kib
+  local name=$1 class=$2 path="$TMP_ROOT/$1" dest="$qdir/$1" kib n=1
+  if [ -e "$dest" ] || [ -L "$dest" ]; then
+    while [ -e "$dest" ] || [ -L "$dest" ]; do
+      dest="$qdir/$name.$n"
+      n=$((n + 1))
+    done
+  fi
   if [ "$APPLY" -eq 0 ]; then
     class_dry[$class]=$(( ${class_dry[$class]:-0} + 1 ))
     # A dry run logs a bounded sample, not 650,000 lines.
@@ -249,7 +255,7 @@ while IFS=$'\t' read -r class name _age; do
   [ -n "${class:-}" ] || continue
   # Two separate stops. The tree is already under its ceiling: stop, the job is
   # done. The run has moved its per-run budget: stop, the next tick continues.
-  [ "$before" -le "$MAX_ENTRIES" ] && break
+  [ $((before - moved)) -le "$MAX_ENTRIES" ] && break
   [ "$moved" -ge "$MAX_MOVES" ] && break
   path="$TMP_ROOT/$name"
   # Re-verify on the canonical path: the classifier's pass is a prefilter.
