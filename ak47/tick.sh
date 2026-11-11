@@ -20,7 +20,9 @@
 #                         quarantine_days
 #   dead-pane             a tmux pane whose process is gone            report only   report
 #   swap-pressure         swap >= 70% and RAM available >= 20 GB       report only   report
-#   fat-process           one pid > fat_process_gb for fat_process_min report only   report
+#   fat-process           one pid > fat_process_gb for fat_process_min  report/arm    renice 19,
+#                         (report until fat_process=1)                  SIGTERM, SIGKILL
+#                                                                        after 5 min
 #   stale-lock            state/.lock pid not alive                    report only   report
 #   disk                  root >= 85%                                  report only   report
 #
@@ -261,11 +263,10 @@ while IFS=$'\t' read -r class name _age; do
   # Re-verify on the canonical path: the classifier's pass is a prefilter.
   if is_protected "$path"; then skipped_protected=$((skipped_protected + 1)); continue; fi
   if is_busy "$name"; then skipped_busy=$((skipped_busy + 1)); continue; fi
-  # The small class gets a real per-path handle scan as well as the busy set.
-  if [ "$class" = orphan-task-scratch ]; then
-    rc=0; ak47_has_open_handles "$path" || rc=$?
-    if [ "$rc" -ne 1 ]; then skipped_busy=$((skipped_busy + 1)); continue; fi
-  fi
+  # The busy set is a snapshot; scan this path again immediately before the move
+  # so a process that started using it during the run is still protected.
+  rc=0; ak47_has_open_handles "$path" || rc=$?
+  if [ "$rc" -ne 1 ]; then skipped_busy=$((skipped_busy + 1)); continue; fi
   quarantine "$name" "$class"
 done <"$CLASSED"
 
@@ -346,12 +347,55 @@ report_only() {
     if [ "$FAT_ARMED" = 1 ] && [ "$APPLY" -eq 1 ]; then
       renice 19 -p "$pid" >/dev/null 2>&1 || true
       kill -TERM "$pid" 2>/dev/null || true
+      # The escalation clock, so a SIGTERM the process ignores becomes a
+      # SIGKILL five minutes later even though the next tick is a new process.
+      printf '%s %s\n' "$pid" "$(ak47_epoch)" >>"$AK47_STATE/fat.term" 2>/dev/null || true
       act "fat-process pid=$pid comm=$comm rss=$((rss / 1048576))G action='renice 19 + SIGTERM' revert='process restarts from its own supervisor'"
     else
       finding fat-process "pid $pid ($comm) holding $((rss / 1048576)) GB for $((FAT_MIN)) min; arm fat_process=1 to reap it"
     fi
   done < <(ps -eo pid,rss,comm --sort=-rss --no-headers 2>/dev/null | awk -v g="$FAT_GB" '$2 > g*1048576 {print $1, $2, $3}' | head -5)
   if [ "$newhold" != /dev/null ]; then mv -f "$newhold" "$holdf" 2>/dev/null || rm -f "$newhold" 2>/dev/null || true; fi
+
+  # fat-process escalation: a SIGTERM that was ignored becomes a SIGKILL after
+  # five minutes. The clock is $AK47_STATE/fat.term, so it survives across
+  # ticks; a dry run must not consume the record, or the next applying tick
+  # would find nothing to escalate and the process would survive.
+  local termf="$AK47_STATE/fat.term" tpid tepoch keepf
+  if [ -s "$termf" ]; then
+    keepf=$(mktemp) || keepf=/dev/null
+    while read -r tpid tepoch; do
+      [ -n "${tpid:-}" ] || continue
+      case "${tepoch:-}" in ''|*[!0-9]*) continue ;; esac
+      kill -0 "$tpid" 2>/dev/null || continue          # it died: drop the record
+      if [ $(( $(ak47_epoch) - tepoch )) -ge 300 ]; then
+        if [ "$APPLY" -eq 1 ]; then
+          kill -KILL "$tpid" 2>/dev/null || true
+          act "fat-process pid=$tpid action='SIGKILL after 5 min of ignored SIGTERM' revert='process restarts from its own supervisor'"
+        else
+          printf '%s %s\n' "$tpid" "$tepoch" >>"$keepf" 2>/dev/null || true
+          finding fat-process "pid $tpid ignored SIGTERM for 5 min; a real tick would SIGKILL it"
+        fi
+      else
+        printf '%s %s\n' "$tpid" "$tepoch" >>"$keepf" 2>/dev/null || true
+      fi
+    done <"$termf"
+    if [ "$keepf" != /dev/null ]; then mv -f "$keepf" "$termf" 2>/dev/null || rm -f "$keepf" 2>/dev/null || true; fi
+  fi
+
+  # dry-run expiry: a class left report-only past its 24 h dry run is a
+  # finding, not an action. The tick never arms itself; it only refuses to let
+  # the "dry-run for 24 h, then armed" step be forgotten.
+  local first_epoch age_h
+  first_epoch=$(head -n 1 "$DEVOPS_LOG" 2>/dev/null | cut -d' ' -f1)
+  first_epoch=$(date -u -d "${first_epoch:-}" +%s 2>/dev/null || echo 0)
+  if [ "${first_epoch:-0}" -gt 0 ]; then
+    age_h=$(( ( $(ak47_epoch) - first_epoch ) / 3600 ))
+    if [ "$age_h" -ge 24 ]; then
+      [ "$SWAP_ARMED" = 1 ] || finding swap-unarmed "swap-pressure has been report-only for ${age_h} h; arm it with swap_pressure=1 in $AK47_CONFIG/devops.conf"
+      [ "$FAT_ARMED" = 1 ] || finding fat-unarmed "fat-process has been report-only for ${age_h} h; arm it with fat_process=1 in $AK47_CONFIG/devops.conf"
+    fi
+  fi
 
   # stale-lock: report only. Clearing a lock is firstmate's decision, never ours.
   local lock="$FM_HOME/state/.lock" lpid
@@ -427,20 +471,27 @@ ak47_log "$DEVOPS_LOG" "$line"
 # chair's inbox so a lane can pick them up. One key per finding per 6 h.
 if [ "${#findings[@]}" -gt 0 ]; then
   mkdir -p "$AK47_STATE/keys" 2>/dev/null || true
-  fresh=()
+  # The dedupe key is committed only after the note is actually delivered. A
+  # key touched before a failed send silences the finding for six hours: the
+  # same defect the health beat had, in the other half of the same system.
+  fresh=(); freshkeys=()
   for f in "${findings[@]}"; do
     key=${f%%|*}; msg=${f#*|}
     kf="$AK47_STATE/keys/$key"
     if [ ! -f "$kf" ] || [ $(( $(ak47_epoch) - $(stat -c %Y "$kf" 2>/dev/null || echo 0) )) -gt 21600 ]; then
-      touch "$kf"
       ak47_log "$FIND_LOG" "$key $msg"
-      fresh+=("$msg")
+      fresh+=("$msg"); freshkeys+=("$kf")
     fi
   done
-  if [ "${#fresh[@]}" -gt 0 ] && [ -x "$FM_HOME/bin/fm-inbox.sh" ]; then
+  if [ "${#fresh[@]}" -gt 0 ]; then
     body=$(printf '%s; ' "${fresh[@]}")
-    "$FM_HOME/bin/fm-inbox.sh" note --source ak47-devops \
-      "ak47 hygiene: ${body}board $AK47_STATE/status.md" >/dev/null 2>&1 || true
+    if [ -x "$FM_HOME/bin/fm-inbox.sh" ] && \
+       "$FM_HOME/bin/fm-inbox.sh" note --source ak47-devops \
+         "ak47 hygiene: ${body}board $AK47_STATE/status.md" >/dev/null 2>&1; then
+      for kf in "${freshkeys[@]}"; do touch "$kf" 2>/dev/null || true; done
+    else
+      ak47_log "$FIND_LOG" "DELIVERY-FAILED ${#fresh[@]} finding(s) not delivered; dedupe keys not committed"
+    fi
   fi
 fi
 

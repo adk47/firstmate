@@ -95,7 +95,9 @@ if [ "$CHECK" = 1 ] || [ "$WRITE_PAYLOAD" = 1 ]; then
   exit 1
 fi
 
-[ -d "$REPO/.git" ] || { echo "apply.sh: $REPO is not a git clone" >&2; exit 1; }
+# -e, not -d: a linked worktree has .git as a file, and a worktree is the
+# right place to run this from when the main clone is busy on another branch.
+[ -e "$REPO/.git" ] || { echo "apply.sh: $REPO is not a git clone" >&2; exit 1; }
 
 # The paths this script owns inside H-DevOps. Nothing else is staged, so a
 # dirty clone with unrelated work in it is safe to run against.
@@ -115,6 +117,11 @@ OWNED=(
   ansible/playbooks/files/ak47/weekly-review.sh
   ansible/playbooks/templates/60-ak47-inotify.conf
   ansible/playbooks/templates/60-ak47-swap.conf
+  ansible/playbooks/templates/60-ak47-oomd-swap.conf
+  ansible/playbooks/templates/60-ak47-oomd-avoid.conf
+  ansible/playbooks/templates/ak47-health.sh
+  ansible/playbooks/templates/ak47-health.service
+  ansible/playbooks/templates/ak47-health.timer
   ansible/playbooks/templates/ak47-devops.service
   ansible/playbooks/templates/ak47-devops.timer
   ansible/playbooks/templates/ak47-devops-weekly.service
@@ -190,9 +197,11 @@ nothing that watched bytes ever looked; the cost landed on every glob, every
 ls, every find and every test run, and showed up as load rather than as a
 disk alert.
 
-The fix lives in firstmate (ak47/tick.sh, status.sh, census.sh, guards/,
-weekly-review.sh, and a per-task TMPDIR in bin/fm-spawn.sh). This commit
-captures everything a rebuild would otherwise lose:
+The same box locked up on 2026-11-10 with swap at 99-100% of 32 GB while 77 GB
+of RAM sat free: nothing was watching swap, because systemd-oomd was not
+installed and the health beat paged on load15 only, which never crossed 64.
+
+What this commit captures is everything a rebuild would otherwise lose:
 
 - the ak47 scripts, libraries, budget and producer table, installed under
   ~/.local/lib/ak47 so the units run without a firstmate checkout
@@ -201,6 +210,12 @@ captures everything a rebuild would otherwise lose:
   2026-11-10 and recorded nowhere else: vm.swappiness=10, which stopped the
   kernel paging 20 GB of idle agents to disk while 77 GB of RAM sat free, and
   fs.inotify.max_user_instances=8192, which ~250 agents need
+- systemd-oomd, with ManagedOOMSwap=kill on user@1000.service (systemd 255
+  monitors swap only for `kill`, never for `auto`) and
+  ManagedOOMPreference=avoid on the six units that are the fleet's spine
+- ak47-health.sh and its 10-minute timer, now paging on swap >= 70% and
+  available RAM < 15 GB as well as load, and paging when the hygiene tick
+  itself stops writing for 30 minutes
 
 The playbook is not in site.yml on purpose: site.yml targets the OVH cluster,
 and this targets one workstation over a local connection.

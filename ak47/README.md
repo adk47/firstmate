@@ -99,9 +99,12 @@ The table is bounded and every action carries its revert:
 | `orphan-task-scratch` | quarantine a `/tmp/fm-<id>` with no live task record | same |
 | `quarantine-expire` | delete a quarantined entry after 7 days | none — it is already 7 days past its leak |
 
-Report-only classes (`dead-pane`, `swap-pressure`, `fat-process`, `stale-lock`,
-`disk`) never act. `swap-pressure` and `fat-process` are armed only by an
-operator setting them to `1` in `~/.config/ak47/devops.conf`.
+The four classes in the table are armed by default. `dead-pane`,
+`stale-lock` and `disk` are report-only and never act. `swap-pressure` and
+`fat-process` are report-only until an operator sets `swap_pressure=1` or
+`fat_process=1` in `~/.config/ak47/devops.conf`; once armed, swap-pressure
+reclaims swap when RAM is free, and fat-process renices the process to 19,
+sends `SIGTERM`, and sends `SIGKILL` if it survives five minutes.
 
 The agent wakes only for findings the table cannot settle, and at most once per
 six hours per finding key.
@@ -133,10 +136,10 @@ Without this, the source fix rots and the sweeper becomes load-bearing again.
 ## 5. Codification and self-monitoring
 
 `hdevops/apply.sh` lands the system in H-DevOps as a PR: the ak47 scripts,
-libraries, budget and producer table, the two user timers, and the two sysctls
-that were hand-written on the box and recorded nowhere else. The playbook
-installs the scripts under `~/.local/lib/ak47` and points the units there, so a
-rebuild runs from the payload rather than a firstmate checkout. The playbook is
+libraries, budget and producer table, the hygiene user timers, the two sysctls
+that were hand-written on the box and recorded nowhere else, systemd-oomd
+with its swap and avoid drop-ins, and the health beat that pages on swap and
+memory pressure as well as load. The playbook is
 `ansible/playbooks/07-ak47-hygiene.yml`, deliberately not in `site.yml` — that
 targets the OVH cluster, this targets one workstation.
 
@@ -147,7 +150,13 @@ diffs the committed payload against a fresh generation, and
 same comparison, so CI fails when a source edit was not regenerated.
 
 The tick watches its own log freshness. A `loop_gap` over three intervals is a
-finding, because a loop that dies silently is worse than no loop.
+finding, because a loop that dies silently is worse than no loop. It also flags
+a report-only class that has outlived its 24 h dry run, so the "then armed" step
+cannot be forgotten; it never arms itself.
+
+A finding's dedupe key is committed only after the chair-inbox note is actually
+delivered. A key touched before a failed send would silence the finding for six
+hours, so a failed delivery is logged as `DELIVERY-FAILED` and retried next tick.
 
 ## 6. The weekly review
 
@@ -196,37 +205,55 @@ locally — the box has no route to cluster ClusterIPs.
 
 ### Proof that it refuses
 
-A tree that is known to be live, with every age gate set to `0` so nothing is
-spared by time. Point the tick at a demo root so the real `/tmp` is untouched:
+Run against a real tree under `/tmp`, with every age gate set to `0` so nothing
+is spared by time. The two holders are real processes; the two records are the
+real gates.
 
 ```
-$ demo=$(mktemp -d)
-$ export AK47_TMP_ROOT=$demo/tmp AK47_STATE=$demo/state \
-    AK47_CACHE=$demo/cache AK47_CONFIG=$demo/config FM_HOME=$demo/fmhome
-$ mkdir -p "$AK47_TMP_ROOT" "$AK47_STATE" "$AK47_CACHE" "$AK47_CONFIG" "$FM_HOME/state"
-$ printf 'tmp_mktemp_min=0\ntmp_producer_min=0\norphan_min=0\ntmp_max_entries=0\n' \
-    >"$AK47_CONFIG/devops.conf"
-$ mkdir -p "$AK47_TMP_ROOT"/{fm-livetask,fm-orphan9,tmp.abcdefghij,tmpa003ltt_,uvn-abc123}
-$ ls "$AK47_TMP_ROOT"
-fm-livetask  fm-orphan9  tmp.abcdefghij  tmpa003ltt_  uvn-abc123
+$ ls /tmp/ak47-demo
+drain-old  fm-livetask  fm-move  spelled-fm-move  tmpa003ltt_
+           tmp.abcdefghij  uvn-abc123
 
 # a process sitting in tmpa003ltt_, a process with a file open in
-# tmp.abcdefghij, and a live task record for fm-livetask
-$ ( cd "$AK47_TMP_ROOT/tmpa003ltt_" && sleep 20 ) &
-$ ( exec 3<"$AK47_TMP_ROOT/tmp.abcdefghij/open.txt"; sleep 20 ) &
-$ touch "$FM_HOME/state/livetask.meta"
+# tmp.abcdefghij, a live task record for fm-livetask, and a symlink spelled
+# /tmp//ak47-demo/fm-move (two slashes) that resolves to the protected fm-move
+$ ( cd /tmp/ak47-demo/tmpa003ltt_ && sleep 40 ) &
+$ ( exec 3</tmp/ak47-demo/tmp.abcdefghij/open.txt; sleep 40 ) &
+$ printf 'window=x:fm-livetask\n' >$FM_HOME/state/livetask.meta
+$ ln -s /tmp//ak47-demo/fm-move /tmp/ak47-demo/spelled-fm-move
 
 $ ak47/tick.sh --apply
-$ ls "$AK47_TMP_ROOT"
-fm-livetask  tmp.abcdefghij  tmpa003ltt_
-$ ls "$AK47_STATE"/quarantine/*/
-fm-orphan9  uvn-abc123
+$ ls /tmp/ak47-demo
+drain-old  fm-livetask  fm-move  spelled-fm-move  tmpa003ltt_  tmp.abcdefghij
+$ ls ~/.local/state/ak47/quarantine/*/
+uvn-abc123
+
+tick mode=apply tmp_before=7 tmp_after=6 moved=1 deleted=0 busy=2 \
+     protected=1 failures=0 actions=1 classes=tmp-producer:1
 ```
 
 It declined the directory a process was sitting in, the directory a process had
-a file open in, and the live task's scratch root. It quarantined the two that
-nothing held. `tests/ak47-tick.test.sh` runs this as a test, in both directions,
-for every protected path and every producer prefix.
+a file open in, the live task's scratch root, the protected `fm-move` name, and
+the symlink whose two-slash spelling canonicalises onto it. It left `drain-old`
+alone because no producer row names it: an unenumerated class is never acted on.
+It quarantined the one entry nothing held. `tests/ak47-tick.test.sh` runs this as
+a test, in both directions, for every protected path and every producer prefix.
+
+### Measured so far
+
+The loop has been armed since 2026-11-10T21:20Z. This is the trend, not a
+snapshot; the 7-day acceptance gate is 2026-11-17.
+
+| metric | first tick | latest tick | ceiling |
+|--------|-----------|-------------|---------|
+| `/tmp` entries | 954,210 | 117,171 | 200,000 |
+| load15 | 18.03 | 17.02 | 32 |
+| swap | 44% | 44% | 50% |
+| `tmp_gb` | 162 | 110 | 20 |
+
+Every entry that left `/tmp` is in `~/.local/state/ak47/quarantine/<date>/` with
+its `mv` revert, deleted only after seven days. `devops.log` has one line per
+run, so the trend is provable without a second source.
 
 ## Install
 
@@ -249,11 +276,15 @@ default. Absent keys take the default in the right-hand column.
 | `quarantine_days` | 7 | days a quarantined entry is kept before it is deleted for good |
 | `tmp_max_entries` | 5000 | stop working once `/tmp` is back under this many entries |
 | `tmp_max_moves` | 2000 | the most entries one run may move |
-| `swap_pressure` | 0 | arm the report-only swap-pressure class |
-| `fat_process` | 0 | arm the report-only fat-process class |
+| `swap_pressure` | 0 | arm the swap-pressure class: reclaim swap when RAM is free |
+| `fat_process` | 0 | arm the fat-process class: renice, `SIGTERM`, then `SIGKILL` after 5 min |
 | `fat_process_gb` | 3 | the RSS a process must hold to count as fat |
 | `fat_process_min` | 10 | minutes a fat process must hold it before it is reported |
 | `interval_seconds` | 300 | the timer's period, so the tick can notice its own loop has stopped |
+
+A fat process that ignores `SIGTERM` is `SIGKILL`ed after five minutes. The
+escalation clock is `~/.local/state/ak47/fat.term`, so it survives across ticks,
+and a dry run neither kills nor consumes the record.
 
 The per-task `TMPDIR` and its `config/task-tmpdir` opt-out are firstmate
 configuration, owned by [`docs/configuration.md`](../docs/configuration.md#per-task-temporary-directory-configtask-tmpdir).
@@ -264,7 +295,7 @@ configuration, owned by [`docs/configuration.md`](../docs/configuration.md#per-t
 $ bin/fm-test-run.sh tests/ak47-*.test.sh
 ```
 
-77 tests across six files: the budget, the census, the guards, the guarded
+82 tests across six files: the budget, the census, the guards, the guarded
 delete, the tick, and the weekly review. They are hermetic — no tmux, no
 network, no live fleet state — and registered as `pure-contract-unit` in
 `bin/fm-test-run.sh`.
