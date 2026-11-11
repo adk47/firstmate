@@ -118,8 +118,10 @@
 #                          secondmate home's durable wake queue exceeded
 #                          FM_SECONDMATE_WAKE_STALL_SECS AND the mate's own
 #                          endpoint is not provably busy AND the mate's Pi
-#                          supervision branch has not written its session
-#                          within that window; a positive busy read or a
+#                          supervision branch is not mid-turn; the branch is
+#                          judged by its last session message entry first, and
+#                          only a session with no readable message entry falls
+#                          back to the mtime window; a positive busy read or a
 #                          branch mid-turn stays silent (branch work never
 #                          renders in the pane, so the pane alone cannot prove
 #                          idleness), while a failed capture or any unprovable
@@ -832,10 +834,14 @@ secondmate_oldest_queue_row() {  # <queue-path>
 
 # A Pi mate's supervision branch runs its model turn out of the pane, so the
 # busy contract above cannot see it; the branch session file it appends to is
-# the only evidence. busy when that file was written within the window, idle
-# when it exists but is older, none when the home has no branch session.
+# the only evidence. The last message entry proves the turn state: a user
+# message, an assistant message with stopReason toolUse, or a tool result is a
+# turn in flight and busy regardless of mtime; an assistant message with any
+# other stopReason is positive idle evidence. Only a session with no readable
+# message entry falls back to the mtime window. none when the home has no
+# branch session.
 secondmate_branch_state() {  # <home> <threshold-secs> -> idle|busy|none
-  local home=$1 threshold=$2 pointer session mtime now
+  local home=$1 threshold=$2 pointer session mtime now last role stop
   pointer="$home/state/.branch-session"
   [ -f "$pointer" ] && [ ! -L "$pointer" ] || { printf 'none'; return 0; }
   session=$(head -n 1 "$pointer" 2>/dev/null || true)
@@ -845,6 +851,32 @@ secondmate_branch_state() {  # <home> <threshold-secs> -> idle|busy|none
     *) printf 'none'; return 0 ;;
   esac
   [ -f "$session" ] || { printf 'none'; return 0; }
+  last="" role="" stop=""
+  if command -v jq >/dev/null 2>&1; then
+    last=$(jq -r 'select(.type == "message") | [(.message.role // ""), (.message.stopReason // "")] | @tsv' "$session" 2>/dev/null | tail -n 1)
+    if [ -n "$last" ]; then
+      role=${last%%$'\t'*}
+      stop=${last#*$'\t'}
+      [ "$stop" = "$last" ] && stop=""
+    fi
+  else
+    last=$(grep -E '"type"[[:space:]]*:[[:space:]]*"message"' "$session" 2>/dev/null | tail -n 1)
+    if [ -n "$last" ]; then
+      role=$(printf '%s\n' "$last" | sed -n 's/.*"role"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+      stop=$(printf '%s\n' "$last" | sed -n 's/.*"stopReason"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    fi
+  fi
+  if [ -n "$last" ]; then
+    case "$role" in
+      user|toolResult) printf 'busy'; return 0 ;;
+      assistant)
+        case "$stop" in
+          toolUse) printf 'busy'; return 0 ;;
+          '') ;;
+          *) printf 'idle'; return 0 ;;
+        esac ;;
+    esac
+  fi
   mtime=$(stat -c %Y "$session" 2>/dev/null || stat -f %m "$session" 2>/dev/null || echo 0)
   now=$(date +%s)
   if [ $((now - mtime)) -lt "$threshold" ]; then printf 'busy'; else printf 'idle'; fi

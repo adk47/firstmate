@@ -357,7 +357,7 @@ test_secondmate_stall_stays_quiet_while_branch_is_mid_turn() {
   dir=$(secondmate_stall_fixture secondmate-stall-busy-branch)
   sub="$dir/secondmate"
   mkdir -p "$sub/state/branch-session"
-  printf '{"type":"message"}\n' > "$sub/state/branch-session/turn.jsonl"
+  printf '%s\n' '{"type":"message","message":{"role":"assistant","stopReason":"toolUse"}}' > "$sub/state/branch-session/turn.jsonl"
   printf '%s\n' "$sub/state/branch-session/turn.jsonl" > "$sub/state/.branch-session"
   # The row is ten seconds old and the branch wrote its session just now, so a
   # five-second window ages the row past the threshold while the branch write
@@ -370,12 +370,30 @@ test_secondmate_stall_stays_quiet_while_branch_is_mid_turn() {
   pass "an aged foreign row behind a supervision branch turn is not a stall"
 }
 
+test_secondmate_stall_stays_quiet_for_long_branch_turn() {
+  local dir sub
+  dir=$(secondmate_stall_fixture secondmate-stall-long-branch-turn)
+  sub="$dir/secondmate"
+  mkdir -p "$sub/state/branch-session"
+  printf '%s\n' '{"type":"message","message":{"role":"assistant","stopReason":"toolUse"}}' > "$sub/state/branch-session/turn.jsonl"
+  touch -d '16 minutes ago' "$sub/state/branch-session/turn.jsonl" 2>/dev/null \
+    || touch -t "$(date -v-16M +%Y%m%d%H%M 2>/dev/null || date -d '16 minutes ago' +%Y%m%d%H%M)" "$sub/state/branch-session/turn.jsonl"
+  printf '%s\n' "$sub/state/branch-session/turn.jsonl" > "$sub/state/.branch-session"
+  printf '%s\t7\tsignal\trouted\tsignal: routed row\n' "$(( $(date +%s) - 1020 ))" > "$sub/state/.wake-queue"
+  secondmate_stall_checkpoint "$dir" watch-long-branch-turn 900
+  ! grep -F 'secondmate wake-loop stalled' "$dir/watch-long-branch-turn.out" >/dev/null \
+    || fail "a long branch turn with no fresh write was reported as stalled: $(cat "$dir/watch-long-branch-turn.out")"
+  [ ! -e "$dir/state/.secondmate-wake-stall-mate" ] \
+    || fail "a long branch turn left a stall marker"
+  pass "a long branch turn past the mtime window is not a stall"
+}
+
 test_secondmate_stall_reports_idle_branch_with_evidence() {
   local dir sub
   dir=$(secondmate_stall_fixture secondmate-stall-idle)
   sub="$dir/secondmate"
   mkdir -p "$sub/state/branch-session"
-  printf '{"type":"message"}\n' > "$sub/state/branch-session/old.jsonl"
+  printf '%s\n' '{"type":"message","message":{"role":"assistant","stopReason":"stop"}}' > "$sub/state/branch-session/old.jsonl"
   touch -d '1 hour ago' "$sub/state/branch-session/old.jsonl" 2>/dev/null \
     || touch -t "$(date -v-1H +%Y%m%d%H%M 2>/dev/null || date +%Y%m%d%H%M)" "$sub/state/branch-session/old.jsonl"
   printf '%s\n' "$sub/state/branch-session/old.jsonl" > "$sub/state/.branch-session"
@@ -1673,6 +1691,7 @@ test_live_presentation_holder_is_deadlined_without_weakening_ack
 test_malformed_presentation_lock_reports_acquire_failure
 test_secondmate_foreign_queue_stall_is_one_shot_and_read_only
 test_secondmate_stall_stays_quiet_while_branch_is_mid_turn
+test_secondmate_stall_stays_quiet_for_long_branch_turn
 test_secondmate_stall_reports_idle_branch_with_evidence
 test_secondmate_stall_marker_rejects_symlink
 test_acknowledged_stall_publication_survives_pre_marker_crash
