@@ -173,7 +173,7 @@ own authority. A new action class needs the captain's word.
 - **Never a live task's scratch.** `/tmp/fm-<id>` is protected while
   `state/<id>.meta` exists.
 - **Never a named protected path.** `/tmp/fm-move`, `/tmp/ak47-*`, the `:8317`
-  forwarder, `orca-*`, `systemd-*`, `snap*`, X11 sockets and locks, and anything
+  forwarder, `orcad-*`, `systemd-*`, `snap*`, X11 sockets and locks, and anything
   matching `*router*.sh`, `*forward*`, `cli-proxy*`, `*.token`.
 - **Never anything a running process holds.** One `/proc` scan collects every
   top-level `/tmp` name any live process has as its cwd, root, exe, or an open
@@ -248,9 +248,8 @@ out. Absent keys take the default in the right-hand column.
 | `fat_process_min` | 10 | minutes a fat process must hold it before it is reported |
 | `interval_seconds` | 300 | the timer's period, so the tick can notice its own loop has stopped |
 
-`bin/fm-spawn.sh` reads one more file, `config/task-tmpdir` in the firstmate
-home. It is absent by default, which means every task gets its own `TMPDIR`
-under `/tmp/fm-<id>/tmp`. Write `off` into it to restore the old behaviour.
+The per-task `TMPDIR` and its `config/task-tmpdir` opt-out are firstmate
+configuration, owned by [`docs/configuration.md`](../docs/configuration.md#per-task-temporary-directory-configtask-tmpdir).
 
 ## Tests
 
@@ -258,7 +257,7 @@ under `/tmp/fm-<id>/tmp`. Write `off` into it to restore the old behaviour.
 $ bin/fm-test-run.sh tests/ak47-*.test.sh
 ```
 
-68 tests across six files: the budget, the census, the guards, the guarded
+72 tests across six files: the budget, the census, the guards, the guarded
 delete, the tick, and the weekly review. They are hermetic — no tmux, no
 network, no live fleet state — and registered as `pure-contract-unit` in
 `bin/fm-test-run.sh`.
