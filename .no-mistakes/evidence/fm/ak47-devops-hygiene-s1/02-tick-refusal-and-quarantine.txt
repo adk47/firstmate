@@ -1,0 +1,25 @@
+$ before:
+fm-livetask
+fm-orphan9
+tmpa003ltt_
+tmp.abcdefghij
+uvn-abc123
+
+$ ak47/tick.sh --apply
+rc=0
+
+$ after:
+fm-livetask
+tmpa003ltt_
+tmp.abcdefghij
+
+$ quarantine contents:
+/tmp/tmp.xTFEGpmpAJ/state/quarantine/20261111/uvn-abc123
+/tmp/tmp.xTFEGpmpAJ/state/quarantine/20261111/fm-orphan9
+
+$ devops.log
+2026-11-11T06:48:51Z tick mode=apply tmp_before=5 tmp_after=3 moved=2 deleted=0 busy=1 protected=0 failures=0 actions=2 loop_gap=0s classes=tmp-producer:1,orphan-task-scratch:1 breaches=none top=fm-livetask:1,tmpa003ltt:1,tmp.abcdefghij:1
+
+$ reap.log
+2026-11-11T06:48:51Z quarantine class=tmp-producer /tmp/tmp.xTFEGpmpAJ/tmp/uvn-abc123 -> /tmp/tmp.xTFEGpmpAJ/state/quarantine/20261111/uvn-abc123 kib=4 revert='mv /tmp/tmp.xTFEGpmpAJ/state/quarantine/20261111/uvn-abc123 /tmp/tmp.xTFEGpmpAJ/tmp/uvn-abc123'
+2026-11-11T06:48:51Z quarantine class=orphan-task-scratch /tmp/tmp.xTFEGpmpAJ/tmp/fm-orphan9 -> /tmp/tmp.xTFEGpmpAJ/state/quarantine/20261111/fm-orphan9 kib=4 revert='mv /tmp/tmp.xTFEGpmpAJ/state/quarantine/20261111/fm-orphan9 /tmp/tmp.xTFEGpmpAJ/tmp/fm-orphan9'

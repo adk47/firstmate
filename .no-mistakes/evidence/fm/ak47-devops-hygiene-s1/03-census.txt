@@ -1,0 +1,24 @@
+$ ak47/census.sh
+sh-mktemp               2
+csv                     1
+irc                     1
+merge-outcome           1
+puppeteer               1
+restore-test            1
+rmtc                    1
+twin-req                1
+unattributed            1
+uvn                     1
+uvn-lens                1
+wc                      1
+TOTAL                  13
+
+$ ak47/census.sh --write-baseline
+census: baseline recorded at /tmp/tmp.an8IIuX6Ak/state/census.baseline
+
+$ ak47/census.sh --check
+rc=0
+
+$ mkdir uvn-newleak; ak47/census.sh --check
+census: GREW uvn 1 -> 2
+rc=1
