@@ -1,0 +1,17 @@
+=== human output (copied sweep, partial writer corpus) ===
+instrument-sweep v1
+corpus warning: writer evidence is partial (/tmp/tmp.jcIV1GB2aj/copy/bin (not firstmate's bin)); an unwritten marker there is UNPROVEN, not proven orphaned
+check marker trust=ok
+  note unproven: line 4: marker .published-marker is not written by the partial writer corpus, so an unseen writer there is unproven
+  result marker UNPROVEN (static analysis found no defect, but nothing proved the check distinguishes a broken fact; no probe scenario was supplied)
+
+defect ranking (damage desc, then check id)
+none
+
+summary: checks=1 defect=0 unproven=1 proven=0 findings=0
+
+=== TSV output ===
+corpus	partial	/tmp/tmp.jcIV1GB2aj/copy/bin (not firstmate's bin)
+note	marker	unproven	/tmp/tmp.jcIV1GB2aj/home/state/marker.check.sh	0	line 4: marker .published-marker is not written by the partial writer corpus, so an unseen writer there is unproven
+verdict	marker	UNPROVEN	static analysis found no defect, but nothing proved the check distinguishes a broken fact; no probe scenario was supplied
+summary	checks=1	defect=0	unproven=1	proven=0

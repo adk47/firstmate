@@ -1,0 +1,33 @@
+instrument-sweep v1
+check failure trust=missing
+  note unproven: check is not armed with a matching trust binding (trust=missing)
+  result failure PROVEN-DISTINGUISHING (differential probe produced different output for a healthy and a broken fact)
+
+check identical trust=missing
+  note unproven: check is not armed with a matching trust binding (trust=missing)
+  result identical PROVEN-DISTINGUISHING (differential probe produced different output for a healthy and a broken fact)
+
+check negative trust=missing
+  note unproven: check is not armed with a matching trust binding (trust=missing)
+  result negative PROVEN-DISTINGUISHING (differential probe produced different output for a healthy and a broken fact)
+
+check orphan trust=missing
+  note unproven: check is not armed with a matching trust binding (trust=missing)
+  result orphan PROVEN-DISTINGUISHING (differential probe produced different output for a healthy and a broken fact)
+
+check rate trust=missing
+  note unproven: check is not armed with a matching trust binding (trust=missing)
+  result rate PROVEN-DISTINGUISHING (differential probe produced different output for a healthy and a broken fact)
+
+check stale trust=missing
+  note unproven: check is not armed with a matching trust binding (trust=missing)
+  result stale PROVEN-DISTINGUISHING (differential probe produced different output for a healthy and a broken fact)
+
+check vacuous trust=missing
+  note unproven: check is not armed with a matching trust binding (trust=missing)
+  result vacuous PROVEN-DISTINGUISHING (differential probe produced different output for a healthy and a broken fact)
+
+defect ranking (damage desc, then check id)
+none
+
+summary: checks=7 defect=0 unproven=0 proven=7 findings=0

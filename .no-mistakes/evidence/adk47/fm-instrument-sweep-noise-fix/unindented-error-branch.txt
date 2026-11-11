@@ -1,0 +1,7 @@
+note	loud-failure	unproven	/tmp/tmp.U2CMIlJ7te/state/loud-failure.check.sh	0	check is not armed with a matching trust binding (trust=missing)
+verdict	loud-failure	UNPROVEN	no matching trust binding (trust=missing), so no differential evidence is possible
+finding	unindented-failure	failure-path-exit-zero	/tmp/tmp.U2CMIlJ7te/state/unindented-failure.check.sh	6	a branch reports an unreadable instrument and then exits 0, so nothing wakes [source: exit 0]
+note	unindented-failure	unproven	/tmp/tmp.U2CMIlJ7te/state/unindented-failure.check.sh	0	check is not armed with a matching trust binding (trust=missing)
+verdict	unindented-failure	DEFECT	highest damage 8
+rank	1	8	unindented-failure	failure-path-exit-zero	/tmp/tmp.U2CMIlJ7te/state/unindented-failure.check.sh	6
+summary	checks=2	defect=1	unproven=1	proven=0

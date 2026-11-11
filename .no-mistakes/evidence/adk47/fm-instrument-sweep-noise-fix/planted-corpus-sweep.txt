@@ -1,0 +1,54 @@
+instrument-sweep v1
+check failure trust=missing
+  defect damage=8 failure-path-exit-zero tests/fixtures/instrument-sweep/planted/failure.check.sh:6: a failed measurement exits 0, reporting an unreadable instrument as health [source: entries=$(wc -l < "$F") || exit 0]
+  note unproven: check is not armed with a matching trust binding (trust=missing)
+  result failure DEFECT (highest damage 8)
+
+check identical trust=missing
+  defect damage=10 identical-output tests/fixtures/instrument-sweep/planted/identical.check.sh:6: printed byte-identical stdout, stderr, and status for a healthy and a broken fact [source: printf 'queue: all clear for %s\n' "$(uname -s)"]
+  note unproven: check is not armed with a matching trust binding (trust=missing)
+  result identical DEFECT (highest damage 10)
+
+check negative trust=missing
+  defect damage=10 identical-output tests/fixtures/instrument-sweep/planted/negative.check.sh:7: printed byte-identical stdout, stderr, and status for a healthy and a broken fact [source: echo "result file looks good"]
+  defect damage=8 discarded-negative-assertion tests/fixtures/instrument-sweep/planted/negative.check.sh:6: status discarded by a later command so the check cannot fail here [source: [ ! -s "$F" ]]
+  note unproven: check is not armed with a matching trust binding (trust=missing)
+  result negative DEFECT (highest damage 10)
+
+check orphan trust=missing
+  defect damage=10 identical-output tests/fixtures/instrument-sweep/planted/orphan.check.sh:7: printed no output and the same status for a healthy and a broken fact [source:   echo "orphan marker is present"]
+  defect damage=6 orphan-marker tests/fixtures/instrument-sweep/planted/orphan.check.sh:6: reads marker .instrument-sweep-orphan-marker, which nothing in the scanned writer corpus (state checks plus bin) writes [source: if [ -s "$M" ]; then]
+  note unproven: check is not armed with a matching trust binding (trust=missing)
+  result orphan DEFECT (highest damage 10)
+
+check rate trust=missing
+  defect damage=5 rate-without-denominator tests/fixtures/instrument-sweep/planted/rate.check.sh:8: divides by total with no zero guard on total [source: pct=$((errors * 100 / total))]
+  note unproven: check is not armed with a matching trust binding (trust=missing)
+  result rate DEFECT (highest damage 5)
+
+check stale trust=missing
+  defect damage=10 identical-output tests/fixtures/instrument-sweep/planted/stale.check.sh:10: printed no output and the same status for a healthy and a broken fact [source:   echo "instrument has not reported recently"]
+  defect damage=7 stale-reading tests/fixtures/instrument-sweep/planted/stale.check.sh:8: reads the mtime of .instrument-sweep-beat which this check writes itself instead of the fact it measures [source: last=$(stat -c %Y "$M")]
+  note unproven: check is not armed with a matching trust binding (trust=missing)
+  result stale DEFECT (highest damage 10)
+
+check vacuous trust=missing
+  defect damage=10 identical-output tests/fixtures/instrument-sweep/planted/vacuous.check.sh:8: printed byte-identical stdout, stderr, and status for a healthy and a broken fact [source:   echo "build: failures recorded in the log"]
+  defect damage=9 vacuous-comparison tests/fixtures/instrument-sweep/planted/vacuous.check.sh:7: -n/-z over count, which is assigned a command that always prints a number [source: if [ -n "$count" ]; then]
+  note unproven: check is not armed with a matching trust binding (trust=missing)
+  result vacuous DEFECT (highest damage 10)
+
+defect ranking (damage desc, then check id)
+ 1. damage=10 identical identical-output tests/fixtures/instrument-sweep/planted/identical.check.sh:6
+ 2. damage=10 negative identical-output tests/fixtures/instrument-sweep/planted/negative.check.sh:7
+ 3. damage=10 orphan identical-output tests/fixtures/instrument-sweep/planted/orphan.check.sh:7
+ 4. damage=10 stale identical-output tests/fixtures/instrument-sweep/planted/stale.check.sh:10
+ 5. damage=10 vacuous identical-output tests/fixtures/instrument-sweep/planted/vacuous.check.sh:8
+ 6. damage=9 vacuous vacuous-comparison tests/fixtures/instrument-sweep/planted/vacuous.check.sh:7
+ 7. damage=8 failure failure-path-exit-zero tests/fixtures/instrument-sweep/planted/failure.check.sh:6
+ 8. damage=8 negative discarded-negative-assertion tests/fixtures/instrument-sweep/planted/negative.check.sh:6
+ 9. damage=7 stale stale-reading tests/fixtures/instrument-sweep/planted/stale.check.sh:8
+10. damage=6 orphan orphan-marker tests/fixtures/instrument-sweep/planted/orphan.check.sh:6
+11. damage=5 rate rate-without-denominator tests/fixtures/instrument-sweep/planted/rate.check.sh:8
+
+summary: checks=7 defect=7 unproven=0 proven=0 findings=11
