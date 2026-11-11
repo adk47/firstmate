@@ -195,7 +195,8 @@
 # state/change-watch/rows/<watch-id>.json, holding the +15m, +1h and +6h
 # readings, the real-user check, and a terminal state of proven / regressed /
 # unmeasurable-with-reason (plus open while the watch runs, and not-applicable
-# for a merge that touched no deployable surface at all). state/change-watch/ is
+# for a merge that touched no deployable surface at all, where a read that failed
+# instead records unmeasurable-with-reason). state/change-watch/ is
 # not a task record, so bin/fm-teardown.sh never removes it and the row outlives
 # the task. The schema is owned by the "durable row" section below.
 #
@@ -2516,7 +2517,7 @@ cw_rearm() {  # <watch-id> <url>
 
 cmd_register() {
   local task=$1 url=$2 provider owner repo number repo_name id derived targets sentries runs
-  local notes unread inventory_unread now t0 landed_unread when_name sentry_unreadable
+  local notes unread inventory_unread now t0 landed_unread when_name sentry_unreadable row_state row_reason
   fm_pr_task_id_valid "$task" || die "invalid task id: $task"
   fm_pr_url_parse "$url" || die "invalid pr url: $url"
   provider=$FM_PR_PROVIDER
@@ -2561,23 +2562,32 @@ cmd_register() {
   if [ -z "$targets" ] && [ -z "$sentries" ] && [ -z "$runs" ]; then
     unread=$(printf '%s\n' "$derived" | grep -c '^note	manifest unread: ' || true)
     inventory_unread=$(printf '%s\n' "$derived" | grep -c '^note	image inventory unread: ' || true)
+    row_state=not-applicable
+    row_reason="no deployable surface touched by $url${notes:+ ($notes)}"
     if ! cw_forge_files "$url" "$provider" "$owner" "$repo" "$number" >/dev/null 2>&1; then
+      row_state=unmeasurable-with-reason
+      row_reason="the merged file list for $url could not be read"
       printf 'change-watch: cannot read the merged file list for %s; nothing registered\n' "$url"
     elif [ "$unread" -gt 0 ]; then
+      row_state=unmeasurable-with-reason
+      row_reason="$unread manifest(s) for $url could not be read"
       printf 'change-watch: could not read %s manifest(s) for %s; nothing registered\n' "$unread" "$url"
     elif [ "$inventory_unread" -gt 0 ]; then
+      row_state=unmeasurable-with-reason
+      row_reason="the image inventory for $url could not be read"
       printf 'change-watch: could not read the image inventory for %s%s; nothing registered\n' "$url" "${notes:+ ($notes)}"
     elif [ -n "$sentry_unreadable" ]; then
+      row_state=unmeasurable-with-reason
+      row_reason="nothing measurable for $url ($notes)"
       printf 'change-watch: nothing measurable for %s (%s); nothing registered\n' "$url" "$notes"
     else
       printf 'change-watch: no deployable service touched by %s%s; nothing registered\n' "$url" "${notes:+ ($notes)}"
     fi
-    # Every merge writes one durable row, including one that touched no
-    # deployable surface: the row says why nothing was measurable, so the merge
-    # is never silently unrecorded. It is not a watch, so it emits no wake and
-    # blocks no done claim.
-    cw_row_write "$id" not-applicable \
-      "no deployable surface touched by $url${notes:+ ($notes)}" \
+    # Every merge writes one durable row. A merge that touched no deployable
+    # surface is not-applicable; one whose surface could not be read is a
+    # measurement gap, so the audit never passes a merge nobody could measure.
+    # Neither is a watch, so neither emits a wake.
+    cw_row_write "$id" "$row_state" "$row_reason" \
       "$task" "$url" "$t0" "$now"
     return 0
   fi

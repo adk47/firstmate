@@ -89,7 +89,7 @@ A clean completion is not captain-facing news, so never surface it to the captai
 
 ## The durable row and the 7-day acceptance
 
-Every merge writes exactly one row at `state/change-watch/rows/<watch-id>.json`, holding the +15m, +1h and +6h readings, the real-user check, and a terminal state of `proven`, `regressed`, or `unmeasurable-with-reason` (plus `open` while the watch runs, and `not-applicable` for a merge that touched no deployable surface at all).
+Every merge writes exactly one row at `state/change-watch/rows/<watch-id>.json`, holding the +15m, +1h and +6h readings, the real-user check, and a terminal state of `proven`, `regressed`, or `unmeasurable-with-reason` (plus `open` while the watch runs, and `not-applicable` for a merge that touched no deployable surface at all; a merge whose surface could not be read is `unmeasurable-with-reason`, never `not-applicable`).
 `state/change-watch/` is not a task record, so `bin/fm-teardown.sh` never removes it and the row outlives the task; the schema is owned by the `durable row` section of `bin/fm-change-watch.sh`.
 `proven` needs all three readings present, every one of them measured, and every target measured at least once; a missing reading is never a pass.
 A reading counts as measured when it scored something, or when everything it could not score was only waiting for the rollout to land - a sample taken before the deploy landed has nothing to read yet, so it is recorded as awaiting rather than as a failed read.

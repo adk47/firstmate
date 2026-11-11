@@ -250,6 +250,10 @@ case "$out" in
   *) fail "an unreadable manifest was not reported as unread: $out" ;;
 esac
 [ -e "$HOME_A7/state/change-watch/w7-3317" ] && fail "an unreadable manifest created a watch record"
+grep -q '"terminal_state": "unmeasurable-with-reason"' "$HOME_A7/state/change-watch/rows/w7-3317.json" \
+  || fail "an unreadable manifest was recorded as a merge with nothing to measure"
+run_cw "$HOME_A7" 1790000100 audit 7 >/dev/null \
+  && fail "the audit passed a merge whose manifest could not be read"
 pass "an unreadable manifest is a stated measurement gap, not a PR without a service"
 
 # A manifest the PR deletes is a decommission, not a forge read failure.
@@ -583,6 +587,8 @@ esac
 # row says why, so the merge is never silently unrecorded.
 grep -q '"terminal_state": "not-applicable"' "$HOME_E/state/change-watch/rows/e1-3317.json" \
   || fail "a docs-only merge wrote no not-applicable row"
+run_cw "$HOME_E" 1790000100 audit 7 >/dev/null \
+  || fail "the audit failed a docs-only merge with nothing to measure"
 [ -e "$HOME_E/state/.wake-queue" ] && [ -s "$HOME_E/state/.wake-queue" ] \
   && fail "a docs-only merge queued a wake"
 pass "docs-only PR leaves no watch behind but still writes its row"
@@ -1210,6 +1216,10 @@ case "$out" in
 esac
 [ -e "$HOME_SO/state/change-watch/so1$CORE_ID_SUFFIX" ] \
   && fail "a watch with nothing to measure created a watch record"
+grep -q '"terminal_state": "unmeasurable-with-reason"' "$HOME_SO/state/change-watch/rows/so1$CORE_ID_SUFFIX.json" \
+  || fail "an unreadable Sentry project was recorded as a merge with nothing to measure"
+run_cw "$HOME_SO" 1790000100 audit 7 >/dev/null \
+  && fail "the audit passed a merge whose only target could not be read"
 [ "$(grep -c '' "$HOME_SO/arm.log" 2>/dev/null || echo 0)" -eq 0 ] \
   || fail "a watch with nothing to measure was armed"
 pass "a repository with nothing measurable registers nothing instead of a clean verdict"
@@ -1510,6 +1520,10 @@ case "$out" in
 esac
 [ -e "$HOME_INV/state/change-watch/inv1-620" ] \
   && fail "a watch with an unreadable inventory was armed"
+grep -q '"terminal_state": "unmeasurable-with-reason"' "$HOME_INV/state/change-watch/rows/inv1-620.json" \
+  || fail "an unreadable image inventory was recorded as a merge with nothing to measure"
+run_cw "$HOME_INV" 1790000100 audit 7 >/dev/null \
+  && fail "the audit passed a merge whose image inventory could not be read"
 pass "an unreadable image inventory is stated instead of read as no deployable service"
 
 # --- a status line states a rollout it could never prove ----------------------
