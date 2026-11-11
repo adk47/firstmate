@@ -277,11 +277,11 @@ default. Absent keys take the default in the right-hand column.
 | `fat_process` | 0 | arm the report-only fat-process class |
 | `fat_process_gb` | 3 | the RSS a process must hold to count as fat |
 | `fat_process_min` | 10 | minutes a fat process must hold it before it is reported |
+| `interval_seconds` | 300 | the timer's period, so the tick can notice its own loop has stopped |
 
 A fat process that ignores `SIGTERM` is `SIGKILL`ed after five minutes. The
 escalation clock is `~/.local/state/ak47/fat.term`, so it survives across ticks,
 and a dry run neither kills nor consumes the record.
-| `interval_seconds` | 300 | the timer's period, so the tick can notice its own loop has stopped |
 
 The per-task `TMPDIR` and its `config/task-tmpdir` opt-out are firstmate
 configuration, owned by [`docs/configuration.md`](../docs/configuration.md#per-task-temporary-directory-configtask-tmpdir).
@@ -292,7 +292,7 @@ configuration, owned by [`docs/configuration.md`](../docs/configuration.md#per-t
 $ bin/fm-test-run.sh tests/ak47-*.test.sh
 ```
 
-79 tests across six files: the budget, the census, the guards, the guarded
+82 tests across six files: the budget, the census, the guards, the guarded
 delete, the tick, and the weekly review. They are hermetic — no tmux, no
 network, no live fleet state — and registered as `pure-contract-unit` in
 `bin/fm-test-run.sh`.
