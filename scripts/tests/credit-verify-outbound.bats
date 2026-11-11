@@ -646,6 +646,122 @@ PY
   [ "$(grep -c -- "^uvn-status .*--max-entries 200 " "$CALLS")" -eq "$(grep -c "^uvn-status " "$CALLS")" ]
 }
 
+@test "outbound tick (2026-11-11): the SHIPPED deadline fits the send family's worst case - a shorter one starves every send" {
+  # The gate is right (QA #1587): a family whose worst case does not fit before TICK_HARD_S must not start. The defect
+  # this pins is the NUMBER. On 2026-11-11 00:04Z the live tree cut TICK_BUDGET_S/TICK_HARD_S 6000/6900 -> 1500/1700
+  # to fit a 30-minute cron. 1700 < 1900 (the worst case at the 200-entry page) and < 5100 at the 600-entry page, so
+  # uvn-status could never start: every tick from 00:49Z ended "credit families: FAILED at the unmeasured bar, the
+  # deadline or a failed apply" and NOTHING was sent for a day (last real acknowledgement 2026-11-10T03:06:37Z).
+  # The invariant is arithmetic on the SHIPPED constants - no clock, no fixture - so it cannot drift with a shard.
+  # `env -u BATS_TEST_TMPDIR` is what makes --print-config report the shipped values instead of the harness seam.
+  run -0 env -u BATS_TEST_TMPDIR "$SCRIPT" --print-config
+  local hard budget entries per pad worst
+  hard="$(printf '%s\n' "$output" | sed -n 's/^TICK_HARD_S=//p')"
+  budget="$(printf '%s\n' "$output" | sed -n 's/^TICK_BUDGET_S=//p')"
+  entries="$(printf '%s\n' "$output" | sed -n 's/^CHECK_ENTRIES=//p')"
+  per="$(printf '%s\n' "$output" | sed -n 's/^CHECK_S_PER_USER=//p')"
+  pad="$(printf '%s\n' "$output" | sed -n 's/^RESERVE_PAD_S=//p')"
+  [ -n "$hard" ] && [ -n "$budget" ] && [ -n "$entries" ] && [ -n "$per" ] && [ -n "$pad" ]
+  worst=$(( 2 * entries * per + pad ))
+  [ "$hard" -ge "$worst" ] || {
+    echo "TICK_HARD_S=${hard}s < the send family's worst case ${worst}s (2 x ${entries} entries x ${per}s + ${pad}s pad): uvn-status can never start, so nothing is ever sent"
+    false
+  }
+  # and the budget must leave the send family room to start at all, not just the deadline room to finish
+  [ "$budget" -lt "$hard" ]
+}
+
+@test "outbound tick (2026-11-11): a deadline too short for the send family PAGES instead of starving the send quietly" {
+  # The live 1500/1700 was wrong QUIETLY: the tick ran, logged a deferral per family and exited 0, so nothing paged
+  # and the ledger simply stopped moving. A number that makes the send impossible must be loud on the first tick.
+  run -0 env CVO_TICK_HARD_S=1700 CVO_TICK_BUDGET_S=1500 CVO_CHECK_ENTRIES=600 \
+    CVO_CHECK_S_PER_USER=4 CVO_RESERVE_PAD_S=300 "$SCRIPT"
+  grep -q "TICK DEADLINE TOO SHORT: TICK_HARD_S=1700s cannot fit the send family's worst case 5100s" "$(newest_tick)"
+  # page_confirmed, not page: a warning that cannot be delivered is the same silent failure this guard ends
+  grep -q "TICK DEADLINE TOO SHORT" "$CALLS.page-confirmed"
+  grep -q "Raise CVO_TICK_HARD_S to >= 5100" "$CALLS.page-confirmed"
+  if grep -q "page not delivered" "$(newest_tick)"; then false; fi
+}
+
+@test "outbound tick (2026-11-11): a deadline page Slack REJECTS is logged as undelivered, not swallowed" {
+  # `page` delegates to notify(), whose slack_notify ends `|| true`, so it reports success on a rejected post. A
+  # warning nobody receives is the same silent failure the guard exists to end (QA #1882 Important 2).
+  run -0 env CVO_TICK_HARD_S=1700 CVO_TICK_BUDGET_S=1500 CVO_CHECK_ENTRIES=600 \
+    CVO_CHECK_S_PER_USER=4 CVO_RESERVE_PAD_S=300 STUB_SLACK_CONFIRM_RC=1 "$SCRIPT"
+  grep -q "TICK DEADLINE TOO SHORT: TICK_HARD_S=1700s cannot fit the send family's worst case 5100s" "$(newest_tick)"
+  grep -q "page not delivered: TICK DEADLINE TOO SHORT" "$(newest_tick)"
+  # ...and the tick still ran: the other families have work to do
+  grep -q "tick start" "$(newest_tick)"
+}
+
+@test "outbound tick (2026-11-11): a deadline that fits the send family does not page about it" {
+  # The guard must be silent on a healthy tick, or it becomes noise nobody reads (and the page above stops meaning
+  # anything). The setup's 999999 s deadline fits every worst case.
+  run -0 "$SCRIPT"
+  ! grep -q "TICK DEADLINE TOO SHORT" "$(newest_tick)"
+  [ ! -e "$CALLS.page" ] || ! grep -q "TICK DEADLINE TOO SHORT" "$CALLS.page"
+}
+
+@test "outbound tick (2026-11-11): a FAILED family does not starve the send - uvn-status still runs after reply-due fails" {
+  # The group wrapper already learned this ACROSS groups (a credit failure never skips the claim families), but inside
+  # credit_families every call was `|| return $?`. On 2026-11-11 05:39Z reply-due-paid's check timed out after 900 s on
+  # a Trino replica read, the group returned 1, and uvn-status - the family that actually sends - never ran. A family
+  # that cannot run is a reason to run the NEXT one, not to stop the tick.
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  cat > "$TEST_TMPDIR/rd_scan.py" <<'PY'
+import json, sys
+json.dump({"generated_at": "x", "users": [{"user_id": "41", "paid": True, "reply_due": {"part": "9", "conversation": "7"}}]},
+          open(sys.argv[sys.argv.index("--out") + 1], "w"))
+print('{"rows": 1}')
+PY
+  CVO_RD_SCAN="$TEST_TMPDIR/rd_scan.py" STUB_FAIL_LIST=reply-due.json STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 run -1 "$SCRIPT"
+  grep -q "reply-due-paid: check failed; this family stops" "$(newest_tick)"
+  # ...and the send family still ran, and still applied
+  grep -q "^uvn-status --list .*owing-uvn.json --segment paid --campaign uvn-status .*--mode apply" "$CALLS"
+  # the failure is REMEMBERED, not swallowed: the group still reports it and the tick still exits 1
+  grep -q "credit families: FAILED (rc=1); the next family group still runs" "$(newest_tick)"
+}
+
+@test "outbound tick (2026-11-11): a FAILED family followed by a DEFERRAL is still reported as a FAILURE" {
+  # QA #1882: fam() returned 2 on a deferral even when an EARLIER family had already failed, so run_group recorded only
+  # a deferral and the tick exited 2 - the failed family disappeared from the tick's outcome and nobody was paged for it.
+  # A failure must outrank a later deferral while still stopping the group.
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  cat > "$TEST_TMPDIR/rd_scan.py" <<'PY'
+import json, sys
+json.dump({"generated_at": "x", "users": [{"user_id": "41", "paid": True, "reply_due": {"part": "9", "conversation": "7"}}]},
+          open(sys.argv[sys.argv.index("--out") + 1], "w"))
+print('{"rows": 1}')
+PY
+  CVO_RD_SCAN="$TEST_TMPDIR/rd_scan.py" STUB_FAIL_LIST=reply-due.json STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 \
+    CVO_TRANSIENT_RETRY_SLEEPS="0 0 0" STUB_CHECK_RC=4 STUB_CHECK_RC_SUB=uvn-status run -1 "$SCRIPT"
+  # the failure is what the tick reports, not the later deferral
+  grep -q "credit families: FAILED (rc=1); the next family group still runs" "$(newest_tick)"
+  ! grep -q "credit families: deferred" "$(newest_tick)"
+}
+
+@test "outbound tick (2026-11-11): a wait-apology DEFERRAL stops the credit group instead of burning the tick on the send families" {
+  # QA #1882: apology_family mapped a family rc 2 to rc 1 (`|| return 1`), so the new fam() handler recorded a FAILURE
+  # and walked on into the send families under the SAME transient condition - burning the tick budget and reporting
+  # exit 1 where the honest answer is "deferred". A deferral is not a failure and must not be laundered into one.
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  mkdir -p "$TEST_TMPDIR/paid-status/$(date -u +%F)/paid"
+  cat > "$TEST_TMPDIR/apology_builder.py" <<'PY'
+import json, sys
+json.dump({"generated_at": "x", "users": [{"user_id": "41"}]}, open(sys.argv[sys.argv.index("--out") + 1], "w"))
+print('{"rows": 1}')
+PY
+  # a Trino transient on the wait-apology CHECK is the deferral path (rc 4 -> run_transient -> family rc 2)
+  CVO_APOLOGY_PLAN_ROOT="$TEST_TMPDIR/paid-status" CVO_APOLOGY_BUILDER="$TEST_TMPDIR/apology_builder.py" \
+    CVO_TRANSIENT_RETRY_SLEEPS="0 0 0" STUB_CHECK_RC=4 STUB_CHECK_RC_SUB=uvn-status \
+    STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 run -2 "$SCRIPT"
+  # the deferral is reported as a deferral, not as a failure
+  grep -q "credit families: deferred (transient); continuing to the next family group" "$(newest_tick)"
+  ! grep -q "credit families: FAILED" "$(newest_tick)"
+  # ...and the send families did NOT run under the same transient condition
+  ! grep -q "^uvn-status --list .*owing-uvn.json" "$CALLS"
+}
+
 @test "outbound tick (QA #1587): every subprocess runs under the deadline - a slow read-only check is stopped there and the tick ends (lock released); a slow APPLY cut at the deadline writes the kill file" {
   touch "$CVO_ETC/credit-verify-outbound.live"
   # 20 s before the deadline, a check that would take 120 s: stopped at ~20 s, the tick ends, nothing applied, no kill

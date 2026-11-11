@@ -452,6 +452,27 @@ killed && { echo "$(date -u +%FT%TZ) credit-verify-outbound: kill file $KILL or 
   || { [ ! -e "$STATE" ] && [ -d "$(dirname "$STATE")" ] && [ -w "$(dirname "$STATE")" ]; }; } \
   || { echo "$(date -u +%FT%TZ) credit-verify-outbound: neither $ETC nor $STATE is writable for a kill file; nothing runs" >&2; exit 2; }
 install -d -m 700 "$STATE" "$OUT_ROOT" "$OUT" || exit 2
+# [key=tick-deadline-fits-the-send] (2026-11-11): a deadline SHORTER than the send family's own worst case does not
+# slow the tick down, it stops it sending - permanently and silently. `family()` refuses to start a family whose worst
+# case (2 x walk x CHECK_S_PER_USER + RESERVE_PAD_S) does not fit before TICK_HARD_S, and uvn-status is the family that
+# actually sends. On 2026-11-11 00:04Z TICK_BUDGET_S/TICK_HARD_S were cut 6000/6900 -> 1500/1700 on the server to fit a
+# 30-minute cron: 1700 < 1900 (the worst case even at the old 200-entry page, and 5100 at the 600-entry page), so
+# uvn-status could never start. Every tick from 00:49Z ended "credit families: FAILED at the unmeasured bar, the
+# deadline or a failed apply" with the ledger untouched; the last real acknowledgement was 2026-11-10T03:06:37Z.
+# The gate itself is right (QA #1587) - a family that cannot finish must not start - so the defect is the NUMBER, and
+# the one thing that must never happen is that it is wrong quietly. This is a page, not an exit: the other families
+# still have work to do, and a tick that stops here would take them down with it.
+SEND_WALK=$(( CHECK_ENTRIES > CAP ? CHECK_ENTRIES : CAP ))
+SEND_WORST_S=$(( 2 * SEND_WALK * CHECK_S_PER_USER + RESERVE_PAD_S ))
+if [ "$TICK_HARD_S" -lt "$SEND_WORST_S" ]; then
+  log "TICK DEADLINE TOO SHORT: TICK_HARD_S=${TICK_HARD_S}s cannot fit the send family's worst case ${SEND_WORST_S}s (2 x ${SEND_WALK} entries x ${CHECK_S_PER_USER}s + ${RESERVE_PAD_S}s pad). family() will refuse to start uvn-status on EVERY tick, so NOTHING will be sent. Raise CVO_TICK_HARD_S to at least ${SEND_WORST_S} (the shipped value is 6900, inside the ${TICK_CADENCE_S}s cadence)."
+  # page_confirmed, not page: `page` delegates to notify(), whose last command is slack_notify_critical and whose
+  # slack_notify ends `|| true`, so it reports success even when Slack rejected the post or carried no credentials.
+  # A warning that cannot be delivered is the same silent failure this guard exists to end, so the undelivered case is
+  # logged as its own line (QA #1882 Important 2) and the tick still runs - the other families have work to do.
+  page_confirmed "credit-verify-outbound $STAMP: TICK DEADLINE TOO SHORT - TICK_HARD_S=${TICK_HARD_S}s < the send family's worst case ${SEND_WORST_S}s, so uvn-status can never start and NOTHING is sent. Raise CVO_TICK_HARD_S to >= ${SEND_WORST_S} (shipped: 6900)." \
+    || log "page not delivered: TICK DEADLINE TOO SHORT (${PAGE_WHY:-unknown}); the tick.log line above is the only record of it"
+fi
 # autokill is defined HERE (before the tick lock) so the pre-lock ledger migration can use it: an
 # unreadable/unmigratable ledger is an operational failure that must leave the durable kill file, exactly like the
 # cap read that used to be the first thing to notice it.
@@ -1525,16 +1546,44 @@ apology_family() { # <segment>
     return 1
   fi
   log "wait-apology $seg: $(tail -1 "$OUT/wait-apology-$seg.build.log")"
-  family wait-apology "$seg" "$out" "$R1_CAP" uvn-status --campaign wait-apology || return 1
+  family wait-apology "$seg" "$out" "$R1_CAP" uvn-status --campaign wait-apology || return $?
 }
 
+# [key=send-never-starved] (2026-11-11): a family that FAILS must not take the families behind it down with it. The
+# group wrapper already learned this ACROSS groups (spec-deploy-lock-deferral-m1: a credit failure never skips the
+# claim families), but inside credit_families every call was `|| return $?`, so reply-due failing skipped uvn-status -
+# the family that actually sends - for the whole tick. On 2026-11-11 05:39Z exactly that happened: reply-due-paid's
+# check timed out after 900 s on a Trino replica read, the group returned 1, and uvn-status never ran. A family that
+# cannot run is a reason to run the NEXT one, not to stop. The outcomes that still end the group are the ones that end
+# the TICK (TICK_ENDS=1: the unmeasured bar, the deadline, a failed apply) and a kill file - those are not this
+# family's problem to swallow. A DEFERRAL (rc 2) is different and still stops the group: the condition that deferred
+# it - a deploy lock, a transient Trino read - is still there for the family behind it, so walking past it would only
+# buy a second deferral. Only a FAILURE is worth walking past, and it is remembered so the group still reports it.
+FAM_RC=0
+fam() { # <cmd> <args...>: run one family step, remember a FAILURE, keep going; a DEFERRAL still stops the group
+  local rc
+  "$@"; rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    # rc 2 is "this family waits" (a deploy lock, a transient Trino read). The condition that deferred it is still
+    # there for the family behind it, so the group stops as it always has - only a FAILURE is worth walking past.
+    # A failure EARLIER in the group still outranks it: returning 2 here would make run_group report a clean deferral
+    # and the tick exit 2, and the failed family would vanish from the tick's outcome (QA #1882).
+    2) [ "$FAM_RC" = 1 ] && return 1; FAM_RC=2; return 2 ;;
+  esac
+  [ "$TICK_ENDS" = 1 ] && return "$rc"
+  killed && return "$rc"
+  FAM_RC=1
+  return 0
+}
 credit_families() {
+  FAM_RC=0
   # d2: PAID first, then free (the ladder's shared first-batch budget is charged in this order).
-  apology_family paid || return 1
-  apology_family free || return 1
+  fam apology_family paid || return $?
+  fam apology_family free || return $?
   if [ -n "$RD_LIST" ]; then
-    family reply-due paid "$RD_LIST" "$RD_CAP" uvn-status --campaign uvn-status || return $?
-    family reply-due free "$RD_LIST" "$RD_CAP" uvn-status --campaign uvn-status || return $?
+    fam family reply-due paid "$RD_LIST" "$RD_CAP" uvn-status --campaign uvn-status || return $?
+    fam family reply-due free "$RD_LIST" "$RD_CAP" uvn-status --campaign uvn-status || return $?
     # r5 (1574 finding 1, round 2): a 0 return is NOT proof of completion - family() also returns 0 when the tick budget
     # is reached, when its worst case does not fit, when it is SIGNED-only or when the daily cap is spent, and in those
     # cases it has processed nobody. So the cursor moves only on the marker the family writes when its step for this
@@ -1565,12 +1614,16 @@ credit_families() {
     fi
   fi
   local c2=(); reached "${UNSIGNED_FROM[uvn-status:c2]:-}" || c2=(--no-correction)
+  # a REBUILD that fails still ends the group: the family behind it would read a list the builder did not just write,
+  # and messaging from a stale owing list is how a user gets told twice. A family that fails is different - the next
+  # family has its own list and its own facts.
   rebuild_owing_uvn "uvn-status paid" || return 1
-  family uvn-status paid "$OUT/owing-uvn.json" "$CAP" uvn-status --campaign uvn-status "${c2[@]}" || return $?
-  family r1 paid "$OUT/receipts/receipts-received.json" "$R1_CAP" uvn-status --campaign status-doc-received --wording received || return $?
+  fam family uvn-status paid "$OUT/owing-uvn.json" "$CAP" uvn-status --campaign uvn-status "${c2[@]}" || return $?
+  fam family r1 paid "$OUT/receipts/receipts-received.json" "$R1_CAP" uvn-status --campaign status-doc-received --wording received || return $?
   rebuild_owing_uvn "uvn-status free" || return 1
-  family uvn-status free "$OUT/owing-uvn.json" "$CAP" uvn-status --campaign uvn-status "${c2[@]}" || return $?
-  family r1 free "$OUT/receipts/receipts-received.json" "$R1_CAP" uvn-status --campaign status-doc-received --wording received || return $?
+  fam family uvn-status free "$OUT/owing-uvn.json" "$CAP" uvn-status --campaign uvn-status "${c2[@]}" || return $?
+  fam family r1 free "$OUT/receipts/receipts-received.json" "$R1_CAP" uvn-status --campaign status-doc-received --wording received || return $?
+  return "$FAM_RC"
 }
 claim_families() {
   if [ ! -s "$CLAIM_LIST" ]; then log "claim families: no claim list at $CLAIM_LIST (the claim lane drops it); skipped"; return 0; fi
