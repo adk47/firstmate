@@ -226,18 +226,23 @@ esac
   || fail "two hunks in feed-service did not target it alone"
 pass "several hunks in one Deployment target that Deployment once"
 
-# A Deployment that declares no namespace is skipped with its reason, never guessed.
+# A Deployment that declares no namespace is a measurement gap, never guessed
+# and never recorded as a merge with nothing deployable.
 HOME_A6=$(new_world a6)
 printf 'apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: argocd-server\nspec: {}\n' > "$TMP_ROOT/nons.yaml"
 seed_pr "$HOME_A6" k8s/prod/argocd/install.yaml "$TMP_ROOT/nons.yaml" k8s/prod/argocd/install.yaml
 seed_diff "$HOME_A6" k8s/prod/argocd/install.yaml 4
 out=$(run_cw "$HOME_A6" 1790000000 register w6 "$PR_URL") || fail "register failed"
 case "$out" in
-  *"no deployable service touched"*"(no namespace: argocd-server in k8s/prod/argocd/install.yaml)"*) ;;
-  *) fail "a Deployment without metadata.namespace was not skipped with its reason: $out" ;;
+  *"could not be watched"*"(no namespace: argocd-server in k8s/prod/argocd/install.yaml)"*) ;;
+  *) fail "a Deployment without metadata.namespace was not recorded as a gap: $out" ;;
 esac
 [ -e "$HOME_A6/state/change-watch/w6-3317" ] && fail "a Deployment without a namespace was watched under a guess"
-pass "a Deployment without metadata.namespace is skipped, never guessed"
+grep -q '"terminal_state": "unmeasurable-with-reason"' "$HOME_A6/state/change-watch/rows/w6-3317.json" \
+  || fail "a Deployment without a namespace was recorded as not-applicable"
+run_cw "$HOME_A6" 1790000100 audit 7 >/dev/null \
+  && fail "the audit passed a Deployment that could not be watched"
+pass "a Deployment without metadata.namespace is a stated gap, never guessed"
 
 # A manifest that cannot be read is reported as unread, not as no service.
 HOME_A7=$(new_world a7)
@@ -252,6 +257,12 @@ esac
 [ -e "$HOME_A7/state/change-watch/w7-3317" ] && fail "an unreadable manifest created a watch record"
 grep -q '"terminal_state": "unmeasurable-with-reason"' "$HOME_A7/state/change-watch/rows/w7-3317.json" \
   || fail "an unreadable manifest was recorded as a merge with nothing to measure"
+grep -qF "check: change-watch w7 $PR_URL unmeasurable (" "$HOME_A7/state/.wake-queue" \
+  || fail "an unreadable manifest did not queue the unmeasurable wake"
+run_cw "$HOME_A7" 1790000100 gate w7 >/dev/null \
+  && fail "the done-claim gate passed a merge whose manifest could not be read"
+run_cw "$HOME_A7" 1790000100 gate w7 --terminal-gap >/dev/null \
+  && fail "the teardown gate passed a row-only measurement gap"
 run_cw "$HOME_A7" 1790000100 audit 7 >/dev/null \
   && fail "the audit passed a merge whose manifest could not be read"
 pass "an unreadable manifest is a stated measurement gap, not a PR without a service"
@@ -405,6 +416,21 @@ grep -q '"terminal_state": "unmeasurable-with-reason"' \
   "$HOME_U/state/change-watch/rows/u1-3317.json" \
   || fail "an unmeasurable watch did not record its terminal state"
 pass "an unmeasurable watch queues a check wake and blocks the done claim"
+
+# The teardown refusal tells the operator to re-register once the read path is
+# fixed. That recovery must actually re-measure a completed schedule instead of
+# recomputing the same gap.
+run_cw "$HOME_U" 1790045000 register u1 "$PR_URL" >/dev/null \
+  || fail "re-registering an unmeasurable watch failed"
+grep -q '"terminal_state": "open"' "$HOME_U/state/change-watch/rows/u1-3317.json" \
+  || fail "re-registering an unmeasurable watch did not reopen its durable row"
+[ -e "$HOME_U/state/change-watch/u1-3317/verdict" ] \
+  && fail "re-registering an unmeasurable watch kept its terminal verdict"
+[ -e "$HOME_U/state/change-watch/u1-3317/sampled" ] \
+  && fail "re-registering a completed watch kept its old samples"
+run_cw "$HOME_U" 1790045000 gate u1 --terminal-gap >/dev/null \
+  || fail "a re-registered watch still blocked teardown"
+pass "re-registering an unmeasurable watch reopens it and re-measures"
 
 # --- (g) a row with a missing reading is not proven ---------------------------
 

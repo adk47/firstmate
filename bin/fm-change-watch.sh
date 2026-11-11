@@ -60,8 +60,10 @@
 #           unmeasured note, and the status line each say the rollout was never
 #           proven for it.
 #           Registering an existing watch whose drive stopped before the end of
-#           its schedule re-arms the remaining samples; any other existing watch
-#           is left alone. Registration is read-only against the cluster; it
+#           its schedule, or whose schedule ended unmeasurable, re-arms it: a
+#           completed schedule is reset and re-measured from that point, and its
+#           durable row goes back to open. Any other existing watch is left
+#           alone. Registration is read-only against the cluster; it
 #           writes only under this home's state/ directory. Its forge reads
 #           share one budget (default 60s) and its baseline capture the sample
 #           budget below, so a merge or watcher cycle is never stalled by it.
@@ -93,7 +95,8 @@
 #           running watch never blocks teardown, because state/change-watch/ is
 #           not a task record and keeps sampling after the task is gone. Both
 #           modes decide from the watch's durable row, so deleting the verdict
-#           file never turns a failing row into a pass.
+#           file never turns a failing row into a pass, and a row whose merge
+#           never created a watch directory is still seen.
 # audit     The 7-day acceptance, measured. It fails (exit 1) when any status log
 #           under state/ carries the literal "change-watch completed unmeasured"
 #           line, or when any durable row completed inside the window ended
@@ -2047,6 +2050,15 @@ cw_row_reason() {  # <watch-id>
   sed -n 's/.*"reason": "\(.*\)".*/\1/p' "$row" 2>/dev/null | tail -1
 }
 
+# The task a durable row belongs to, so a merge whose gap never created a watch
+# directory is still found by the task's gate.
+cw_row_task() {  # <watch-id>
+  local row
+  row=$(cw_row_path "$1")
+  [ -f "$row" ] || return 0
+  sed -n 's/.*"task": "\([^"]*\)".*/\1/p' "$row" 2>/dev/null | tail -1
+}
+
 cw_json_escape() {  # <text>
   printf '%s' "$1" | awk '
     BEGIN { ORS = "" }
@@ -2306,13 +2318,22 @@ cw_record_clean() {  # <watch-id> [<reason>]
   cw_wiki_note "$id" "$task" "$url"
 }
 
+# Queue the one check wake an unmeasurable merge produces. It carries the
+# task, the PR and the reason so the gap is actionable without opening the row.
+cw_queue_unmeasured_wake() {  # <watch-id> <task> <url> <reason>
+  local id=$1 task=$2 url=$3 reason=$4 line
+  line="check: change-watch $task $url unmeasurable ($reason)"
+  fm_wake_append check "change-watch-$id-unmeasured" "$line" 2>/dev/null \
+    || notice "change-watch: could not queue the unmeasurable wake for $url"
+}
+
 # A schedule that ended without the evidence a clean verdict needs is a
 # FAILURE, not a quiet completion. It writes the unmeasurable-with-reason
 # verdict and row, queues one check wake so the gap is actionable, and writes NO
 # status note at all: the literal "change-watch completed unmeasured" line must
 # never appear in a status log again, which is what the 7-day acceptance counts.
 cw_record_unmeasured() {  # <watch-id> <reason>
-  local id=$1 reason=$2 task url line why
+  local id=$1 reason=$2 task url why
   task=$(cw_meta_get "$id" task || true)
   url=$(cw_meta_get "$id" pr_url || true)
   [ -n "$reason" ] || reason='the schedule ended without a scored reading for every target'
@@ -2323,9 +2344,7 @@ cw_record_unmeasured() {  # <watch-id> <reason>
   printf 'unmeasurable-with-reason: %s\n' "$reason" | cw_write "$(cw_verdict_path "$id")"
   cw_row_write "$id" unmeasurable-with-reason "$reason"
   cw_mark_once "$(cw_watch_dir "$id")/noted" || return 0
-  line="check: change-watch $task $url unmeasurable ($reason)"
-  fm_wake_append check "change-watch-$id-unmeasured" "$line" 2>/dev/null \
-    || notice "change-watch: could not queue the unmeasurable wake for $url"
+  cw_queue_unmeasured_wake "$id" "$task" "$url" "$reason"
   notice "change-watch: unmeasurable for $url: $reason"
 }
 
@@ -2486,10 +2505,14 @@ cw_rearm() {  # <watch-id> <url>
   local id=$1 url=$2 remaining old attempt when_name arm_cmd
   remaining=$(cw_remaining_count "$id")
   if [ "$remaining" -eq 0 ]; then
-    rm -f -- "$(cw_verdict_path "$id")"
-    cw_record_completion "$id"
-    printf 'change-watch: %s had no samples left; completed as %s\n' "$id" "$(cw_verdict_line "$id")"
-    return 0
+    # A completed schedule has nothing left to sample, so re-arming it would
+    # only recompute the same terminal state. Recovery re-measures from now:
+    # the readings are taken again and the row goes back to open.
+    rm -f -- "$(cw_sampled_path "$id")" "$(cw_verdict_path "$id")" \
+      "$(cw_reasons_path "$id")" \
+      "$(cw_watch_dir "$id")/noted" "$(cw_watch_dir "$id")/interrupted-reported"
+    cw_write_schedule "$id" "$(cw_now)"
+    remaining=$(cw_remaining_count "$id")
   fi
   old=$(cw_meta_get "$id" when_name || true)
   attempt=$(cw_meta_get "$id" arm_attempt || true)
@@ -2531,7 +2554,7 @@ cmd_register() {
   if cw_watch_exists "$id"; then
     cw_reconcile_drive "$id"
     case "$(cat "$(cw_verdict_path "$id")" 2>/dev/null || true)" in
-      interrupted*) cw_rearm "$id" "$url"; return 0 ;;
+      interrupted*|unmeasurable-with-reason*) cw_rearm "$id" "$url"; return 0 ;;
     esac
     printf 'change-watch: %s already registered for %s\n' "$id" "$url"
     return 0
@@ -2580,15 +2603,21 @@ cmd_register() {
       row_state=unmeasurable-with-reason
       row_reason="nothing measurable for $url ($notes)"
       printf 'change-watch: nothing measurable for %s (%s); nothing registered\n' "$url" "$notes"
+    elif printf '%s\n' "$notes" | grep -q 'no namespace: '; then
+      row_state=unmeasurable-with-reason
+      row_reason="a deployable surface for $url could not be watched ($notes)"
+      printf 'change-watch: a deployable surface for %s could not be watched (%s); nothing registered\n' "$url" "$notes"
     else
       printf 'change-watch: no deployable service touched by %s%s; nothing registered\n' "$url" "${notes:+ ($notes)}"
     fi
     # Every merge writes one durable row. A merge that touched no deployable
     # surface is not-applicable; one whose surface could not be read is a
     # measurement gap, so the audit never passes a merge nobody could measure.
-    # Neither is a watch, so neither emits a wake.
+    # A gap is a watch that ended unmeasurable, so it queues the same wake.
     cw_row_write "$id" "$row_state" "$row_reason" \
       "$task" "$url" "$t0" "$now"
+    [ "$row_state" != unmeasurable-with-reason ] \
+      || cw_queue_unmeasured_wake "$id" "$task" "$url" "$row_reason"
     return 0
   fi
 
@@ -2751,8 +2780,45 @@ cmd_verdict() {
 # consults: only a terminal measurement gap fails there, because a watch still
 # running outlives the task's records in state/change-watch/ and keeps sampling
 # on its own, so refusing teardown for it would block every merge for 12 hours.
+
+# One watch's gate decision: 0 passes, 1 fails.
+cw_gate_row() {  # <watch-id> <mode>
+  local id=$1 mode=${2:-} state line
+  state=$(cw_row_state "$id")
+  if [ -z "$state" ]; then
+    line=''
+    [ -f "$(cw_verdict_path "$id")" ] && line=$(cat "$(cw_verdict_path "$id")")
+    case "$line" in
+      clean|regressed*) return 0 ;;
+      unmeasurable-with-reason*|interrupted*)
+        printf 'change-watch: gate FAIL %s: %s\n' "$id" "$line"; return 1 ;;
+      '')
+        if [ "$mode" = --terminal-gap ]; then return 0; fi
+        printf 'change-watch: gate FAIL %s: still running (%s)\n' "$id" "$(cw_progress_label "$id")"
+        return 1 ;;
+      *) printf 'change-watch: gate FAIL %s: %s\n' "$id" "$line"; return 1 ;;
+    esac
+  fi
+  case "$state" in
+    unmeasurable-with-reason)
+      printf 'change-watch: gate FAIL %s: unmeasurable-with-reason: %s\n' \
+        "$id" "$(cw_row_reason "$id")"
+      return 1 ;;
+    open)
+      if [ "$mode" = --terminal-gap ]; then return 0; fi
+      if cw_watch_exists "$id"; then
+        printf 'change-watch: gate FAIL %s: still running (%s)\n' "$id" "$(cw_progress_label "$id")"
+      else
+        printf 'change-watch: gate FAIL %s: still running\n' "$id"
+      fi
+      return 1 ;;
+    proven|regressed) return 0 ;;
+    *) printf 'change-watch: gate FAIL %s: the durable row records terminal_state %s\n' "$id" "$state"; return 1 ;;
+  esac
+}
+
 cmd_gate() {  # <task-id> [--terminal-gap]
-  local task=$1 mode=${2:-} meta id line state rc=0 found=0
+  local task=$1 mode=${2:-} meta id rc=0 found=0 rows row
   [ -d "$WATCH_ROOT" ] || return 0
   for meta in "$WATCH_ROOT"/*/watch.meta; do
     [ -e "$meta" ] || continue
@@ -2760,42 +2826,21 @@ cmd_gate() {  # <task-id> [--terminal-gap]
     [ "$(cw_meta_get "$id" task || true)" = "$task" ] || continue
     found=1
     cw_reconcile_drive "$id"
-    state=$(cw_row_state "$id")
-    if [ -n "$state" ]; then
-      case "$state" in
-        unmeasurable-with-reason)
-          printf 'change-watch: gate FAIL %s: unmeasurable-with-reason: %s\n' \
-            "$id" "$(cw_row_reason "$id")"
-          rc=1 ;;
-        open)
-          if [ "$mode" = --terminal-gap ]; then
-            :
-          else
-            printf 'change-watch: gate FAIL %s: still running (%s)\n' "$id" "$(cw_progress_label "$id")"
-            rc=1
-          fi ;;
-        proven|regressed) ;;
-        *)
-          printf 'change-watch: gate FAIL %s: the durable row records terminal_state %s\n' "$id" "$state"; rc=1 ;;
-      esac
-      continue
-    fi
-    line=''
-    [ -f "$(cw_verdict_path "$id")" ] && line=$(cat "$(cw_verdict_path "$id")")
-    case "$line" in
-      clean|regressed*) ;;
-      unmeasurable-with-reason*) printf 'change-watch: gate FAIL %s: %s\n' "$id" "$line"; rc=1 ;;
-      interrupted*) printf 'change-watch: gate FAIL %s: %s\n' "$id" "$line"; rc=1 ;;
-      '')
-        if [ "$mode" = --terminal-gap ]; then
-          :
-        else
-          printf 'change-watch: gate FAIL %s: still running (%s)\n' "$id" "$(cw_progress_label "$id")"
-          rc=1
-        fi ;;
-      *) printf 'change-watch: gate FAIL %s: %s\n' "$id" "$line"; rc=1 ;;
-    esac
+    cw_gate_row "$id" "$mode" || rc=1
   done
+  # A merge whose surface could not be read never created a watch directory:
+  # its gap lives only in the durable row, so the gate reads the rows too.
+  rows=$(cw_rows_dir)
+  if [ -d "$rows" ]; then
+    for row in "$rows"/*.json; do
+      [ -e "$row" ] || continue
+      id=$(basename "$row" .json)
+      cw_watch_exists "$id" && continue
+      [ "$(cw_row_task "$id")" = "$task" ] || continue
+      found=1
+      cw_gate_row "$id" "$mode" || rc=1
+    done
+  fi
   [ "$found" -eq 1 ] || return 0
   [ "$rc" -ne 0 ] || printf 'change-watch: gate ok for %s\n' "$task"
   return "$rc"
