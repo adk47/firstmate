@@ -263,11 +263,10 @@ while IFS=$'\t' read -r class name _age; do
   # Re-verify on the canonical path: the classifier's pass is a prefilter.
   if is_protected "$path"; then skipped_protected=$((skipped_protected + 1)); continue; fi
   if is_busy "$name"; then skipped_busy=$((skipped_busy + 1)); continue; fi
-  # The small class gets a real per-path handle scan as well as the busy set.
-  if [ "$class" = orphan-task-scratch ]; then
-    rc=0; ak47_has_open_handles "$path" || rc=$?
-    if [ "$rc" -ne 1 ]; then skipped_busy=$((skipped_busy + 1)); continue; fi
-  fi
+  # The busy set is a snapshot; scan this path again immediately before the move
+  # so a process that started using it during the run is still protected.
+  rc=0; ak47_has_open_handles "$path" || rc=$?
+  if [ "$rc" -ne 1 ]; then skipped_busy=$((skipped_busy + 1)); continue; fi
   quarantine "$name" "$class"
 done <"$CLASSED"
 

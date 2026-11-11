@@ -161,12 +161,12 @@ fi
 
 # a --print/--no-notify run is a dry view: it must not consume a 6 h key, or a
 # look at the dashboard would silence the next real page for that finding
-new=()
+new=(); newkeys=()
 if [ "$NOTIFY" = 1 ]; then
   for f in "${finds[@]}"; do
     k=${f%%|*}; kf=$SD/keys/$k
     if [ ! -f "$kf" ] || [ $(( $(date +%s) - $(stat -c %Y "$kf") )) -gt 21600 ]; then
-      touch "$kf"; new+=("${f#*|}"); echo "$now FIND $k ${f#*|}" >>"$LOG"
+      new+=("${f#*|}"); newkeys+=("$kf"); echo "$now FIND $k ${f#*|}" >>"$LOG"
     fi
   done
   # clear keys for findings that went away, so a recurrence reports again
@@ -187,7 +187,11 @@ if [ "$NOTIFY" = 1 ] && [ ${#new[@]} -gt 0 ]; then
   note="ak47 box health ($et): "
   [ -n "$paged" ] && note="$note${paged#PAGE! }; "
   [ -s "$SD/.note-body" ] && note="$note$(cat "$SD/.note-body"); "
-  "$FM_HOME/bin/fm-inbox.sh" note --source health "${note}details ~/.local/state/ak47/health-latest.md" >/dev/null 2>&1 || true
+  if "$FM_HOME/bin/fm-inbox.sh" note --source health "${note}details ~/.local/state/ak47/health-latest.md" >/dev/null 2>&1; then
+    for kf in "${newkeys[@]}"; do touch "$kf" 2>/dev/null || true; done
+  else
+    echo "$now DELIVERY-FAILED ${#new[@]} finding(s) not delivered; dedupe keys not committed" >>"$LOG"
+  fi
   rm -f "$SD/.note-body"
 fi
 tail -n 20000 "$SD/samples.log" >"$SD/.s" 2>/dev/null && mv -f "$SD/.s" "$SD/samples.log"

@@ -42,13 +42,22 @@ run() {
   fi
 }
 
+run_nonfatal() {
+  if [ "$DRY" = 1 ]; then
+    printf 'would: %s\n' "$*"
+  else
+    printf 'run: %s\n' "$*"
+    "$@" 2>/dev/null || true
+  fi
+}
+
 UNITS="ak47-devops.service ak47-devops.timer ak47-devops-weekly.service ak47-devops-weekly.timer"
 
 # ---- uninstall -----------------------------------------------------------------
 if [ "$UNINSTALL" = 1 ]; then
   echo "== removing the ak47 hygiene timers (state is kept) =="
   for u in $UNITS; do
-    run systemctl --user disable --now "$u" 2>/dev/null || true
+    run_nonfatal systemctl --user disable --now "$u"
   done
   for u in $UNITS; do
     [ -f "$UNIT_DIR/$u" ] && run rm -f "$UNIT_DIR/$u"
