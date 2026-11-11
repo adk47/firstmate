@@ -388,6 +388,24 @@ test_secondmate_stall_stays_quiet_for_long_branch_turn() {
   pass "a long branch turn past the mtime window is not a stall"
 }
 
+test_secondmate_stall_stays_quiet_for_malformed_branch_session() {
+  local dir sub
+  dir=$(secondmate_stall_fixture secondmate-stall-malformed-branch-session)
+  sub="$dir/secondmate"
+  mkdir -p "$sub/state/branch-session"
+  printf '%s\n' \
+    '{"type":"message","message":{"role":"assistant","stopReason":"stop"}}' \
+    '{"type":"message","message":{"role":' > "$sub/state/branch-session/turn.jsonl"
+  printf '%s\n' "$sub/state/branch-session/turn.jsonl" > "$sub/state/.branch-session"
+  printf '%s\t7\tsignal\trouted\tsignal: routed row\n' "$(( $(date +%s) - 1020 ))" > "$sub/state/.wake-queue"
+  secondmate_stall_checkpoint "$dir" watch-malformed-branch-session 900
+  ! grep -F 'secondmate wake-loop stalled' "$dir/watch-malformed-branch-session.out" >/dev/null \
+    || fail "a branch writing a malformed session was reported as stalled: $(cat "$dir/watch-malformed-branch-session.out")"
+  [ ! -e "$dir/state/.secondmate-wake-stall-mate" ] \
+    || fail "a malformed branch session left a stall marker"
+  pass "a malformed branch session is treated as writing, not idle"
+}
+
 test_secondmate_stall_reports_idle_branch_with_evidence() {
   local dir sub
   dir=$(secondmate_stall_fixture secondmate-stall-idle)
@@ -1692,6 +1710,7 @@ test_malformed_presentation_lock_reports_acquire_failure
 test_secondmate_foreign_queue_stall_is_one_shot_and_read_only
 test_secondmate_stall_stays_quiet_while_branch_is_mid_turn
 test_secondmate_stall_stays_quiet_for_long_branch_turn
+test_secondmate_stall_stays_quiet_for_malformed_branch_session
 test_secondmate_stall_reports_idle_branch_with_evidence
 test_secondmate_stall_marker_rejects_symlink
 test_acknowledged_stall_publication_survives_pre_marker_crash

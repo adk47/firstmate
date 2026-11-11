@@ -119,9 +119,11 @@
 #                          FM_SECONDMATE_WAKE_STALL_SECS AND the mate's own
 #                          endpoint is not provably busy AND the mate's Pi
 #                          supervision branch is not mid-turn; the branch is
-#                          judged by its last session message entry first, and
-#                          only a session with no readable message entry falls
-#                          back to the mtime window; a positive busy read or a
+#                          judged by its last session message entry, and a
+#                          malformed or partially written session means the
+#                          branch is writing and stays silent; only a session
+#                          with no message entries at all falls back to the
+#                          mtime window; a positive busy read or a
 #                          branch mid-turn stays silent (branch work never
 #                          renders in the pane, so the pane alone cannot prove
 #                          idleness), while a failed capture or any unprovable
@@ -837,11 +839,12 @@ secondmate_oldest_queue_row() {  # <queue-path>
 # the only evidence. The last message entry proves the turn state: a user
 # message, an assistant message with stopReason toolUse, or a tool result is a
 # turn in flight and busy regardless of mtime; an assistant message with any
-# other stopReason is positive idle evidence. Only a session with no readable
-# message entry falls back to the mtime window. none when the home has no
-# branch session.
+# other stopReason is positive idle evidence. A malformed or partially written
+# session means the branch is writing now and is busy, never idle. Only a
+# session with no type=message entries at all falls back to the mtime window;
+# none when the home has no branch session.
 secondmate_branch_state() {  # <home> <threshold-secs> -> idle|busy|none
-  local home=$1 threshold=$2 pointer session mtime now last role stop
+  local home=$1 threshold=$2 pointer session mtime now last role stop jq_status
   pointer="$home/state/.branch-session"
   [ -f "$pointer" ] && [ ! -L "$pointer" ] || { printf 'none'; return 0; }
   session=$(head -n 1 "$pointer" 2>/dev/null || true)
@@ -851,9 +854,12 @@ secondmate_branch_state() {  # <home> <threshold-secs> -> idle|busy|none
     *) printf 'none'; return 0 ;;
   esac
   [ -f "$session" ] || { printf 'none'; return 0; }
-  last="" role="" stop=""
+  last="" role="" stop="" jq_status=0
   if command -v jq >/dev/null 2>&1; then
-    last=$(jq -r 'select(.type == "message") | [(.message.role // ""), (.message.stopReason // "")] | @tsv' "$session" 2>/dev/null | tail -n 1)
+    last=$(jq -r 'select(.type == "message") | [(.message.role // ""), (.message.stopReason // "")] | @tsv' "$session" 2>/dev/null)
+    jq_status=$?
+    if [ "$jq_status" -ne 0 ]; then printf 'busy'; return 0; fi
+    last=$(printf '%s\n' "$last" | tail -n 1)
     if [ -n "$last" ]; then
       role=${last%%$'\t'*}
       stop=${last#*$'\t'}
