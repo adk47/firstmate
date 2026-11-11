@@ -173,6 +173,7 @@ Missing, malformed, stale, untrusted, or unverified semantic state is unknown, n
 Ordinary task-state consumers act only on an exact busy verdict, so an unreadable worker surfaces for a closer look instead of being absorbed as still-working or written off as finished.
 Endpoint death is the only process-level override and yields dead; child processes, CPU, process sleep state, and marker modification times are not state signals.
 `state/<id>.turn-ended` files remain wake notifications, not current state.
+A secondmate spawn arms the same busy-state contract but deliberately omits its harness turn-end notification, because a mate's meta lives in the parent's state directory and each touch there would wake the parent firstmate; the wake-stall rung reads the busy record instead.
 
 Each record is bound to an incarnation token minted when the task's wiring is armed, so an event from a superseded incarnation is rejected rather than applied, and a record left behind by one classifies unknown.
 Three rendered-text checks deliberately remain outside this contract because they answer delivery questions: submit acknowledgement and the away-mode supervisor-pane busy guard consume the shared delivery-footer matcher owned by `bin/fm-composer-lib.sh`, while `bin/fm-pending-reply-lib.sh` owns the secondmate delivery-confirmation observation.

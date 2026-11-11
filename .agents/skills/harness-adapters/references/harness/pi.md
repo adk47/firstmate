@@ -37,6 +37,7 @@ The decision persists per path in `~/.pi/agent/trust.json`, so later spawns in t
 
 `../../../bin/fm-spawn.sh` keeps the worker turn-end extension in `state/`, outside the worktree, because project-local extension files worsen the trust gate and pollute the project.
 The extension listens for Pi's `turn_end` event, not `agent_end`, so supervision is notified after each completed turn rather than only when the whole run exits.
+A secondmate's extension still records busy state but omits the turn-end touch, because a mate's meta lives in the parent's state directory.
 Pi sets `PI_CODING_AGENT=true` for its children as its harness-detection marker.
 
 ## Primary integration

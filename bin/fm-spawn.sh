@@ -2942,6 +2942,22 @@ mkdir -p "$TASK_TMP/gotmp"
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
+# A secondmate's meta lives in the PARENT's state directory, so a turn-end
+# touch there would wake the parent firstmate on every mate turn and the
+# parent watcher can never absorb it. The busy-state contract still arms for
+# a mate (the wake-stall rung reads it); only the turn-end NOTIFICATION is
+# suppressed, so TURNEND_NOTIFY is empty for a secondmate and every arm below
+# omits its touch while keeping its busy event.
+TURNEND_NOTIFY=$TURNEND
+if [ "$KIND" = secondmate ]; then
+  TURNEND_NOTIFY=
+fi
+# The turn-end NOTIFICATION prefix for a shell hook command, empty when the
+# notification is suppressed (see TURNEND_NOTIFY above).
+turnend_touch_sh() {
+  [ -n "$TURNEND_NOTIFY" ] || return 0
+  printf 'touch %s; ' "$(shell_quote "$TURNEND_NOTIFY")"
+}
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
@@ -3029,7 +3045,7 @@ case "$HARNESS" in
     busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
     busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source claude-hook"
     j_submit=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event user-prompt-submit 2>/dev/null || true")
-    j_stop=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
+    j_stop=$(json_escape "$(turnend_touch_sh)$busy_cmd_prefix idle $busy_suffix --event stop 2>/dev/null || true")
     j_stopfail=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event stop-failure 2>/dev/null || true")
     j_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end 2>/dev/null || true")
       cat > "$WT/.claude/settings.local.json" <<EOF
@@ -3064,7 +3080,7 @@ EOF
     busy_cmd_prefix="$(shell_quote "$FM_ROOT/bin/fm-busy-event.sh") apply $(shell_quote "$STATE_REAL") $(shell_quote "$ID")"
     busy_suffix="--gen $(shell_quote "$BUSY_GEN") --source gemini-hook"
     g_before=$(json_escape "$busy_cmd_prefix busy $busy_suffix --event before-agent >/dev/null 2>&1 || true; printf '{}'")
-    g_after=$(json_escape "touch $(shell_quote "$TURNEND"); $busy_cmd_prefix idle $busy_suffix --event after-agent >/dev/null 2>&1 || true; printf '{}'")
+    g_after=$(json_escape "$(turnend_touch_sh)$busy_cmd_prefix idle $busy_suffix --event after-agent >/dev/null 2>&1 || true; printf '{}'")
     g_sessionend=$(json_escape "$busy_cmd_prefix idle $busy_suffix --event session-end >/dev/null 2>&1 || true; printf '{}'")
       cat > "$STATE_REAL/$ID.gemini-settings.json" <<EOF
 {"hooks":{"BeforeAgent":[{"hooks":[{"type":"command","command":"$g_before"}]}],"AfterAgent":[{"hooks":[{"type":"command","command":"$g_after"}]}],"SessionEnd":[{"hooks":[{"type":"command","command":"$g_sessionend"}]}]}}
@@ -3084,6 +3100,9 @@ EOF
 // never clear the worker's busy state. The session.idle touch stays the
 // watcher's wake NOTIFICATION, never current-state truth.
 import { execFile } from "node:child_process";
+// Empty for a secondmate: its meta lives in the parent's state directory, so
+// the touch would wake the parent firstmate on every mate turn.
+const TURNEND = "$TURNEND_NOTIFY";
 const busyEvent = (state, event) =>
   new Promise((resolve) => {
     execFile("$FM_ROOT/bin/fm-busy-event.sh", [
@@ -3114,9 +3133,11 @@ export const FmBusyState = async () => {
           activeSession = null;
           await busyEvent("idle", "session-idle");
         }
-        await new Promise((resolve) => {
-          execFile("touch", ["$TURNEND"], () => resolve());
-        });
+        if (TURNEND) {
+          await new Promise((resolve) => {
+            execFile("touch", [TURNEND], () => resolve());
+          });
+        }
       }
     },
   };
@@ -3140,6 +3161,9 @@ EOF
 // tool calls) and stays a wake NOTIFICATION touch for the watcher, never
 // current-state truth.
 import { execFile } from "node:child_process";
+// Empty for a secondmate: its meta lives in the parent's state directory, so
+// the touch would wake the parent firstmate on every mate turn.
+const TURNEND = "$TURNEND_NOTIFY";
 const busyEvent = (state: string, event: string) =>
   new Promise<void>((resolve) => {
     execFile("$FM_ROOT/bin/fm-busy-event.sh", [
@@ -3153,7 +3177,7 @@ export default function (pi: any) {
     if (ctx && typeof ctx.isIdle === "function" && !ctx.isIdle()) return;
     return busyEvent("idle", "agent-settled");
   });
-  pi.on("turn_end", () => execFile("touch", ["$TURNEND"]));
+  if (TURNEND) pi.on("turn_end", () => execFile("touch", [TURNEND]));
 }
 EOF
     ;;
@@ -3185,12 +3209,14 @@ EOF
     GROK_HOOKS_DIR="${GROK_HOME:-$HOME/.grok}/hooks"
     GROK_AUTH_DIR="$GROK_HOOKS_DIR/fm-turn-end.d"
     mkdir -p "$GROK_AUTH_DIR"
-    old_umask=$(umask)
-    umask 077
-    auth_file=$(mktemp "$GROK_AUTH_DIR/fm.XXXXXXXXXXXX")
-    umask "$old_umask"
-    printf '%s\n' "$TURNEND" > "$auth_file"
-    printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.grok-turnend-token"
+    if [ -n "$TURNEND_NOTIFY" ]; then
+      old_umask=$(umask)
+      umask 077
+      auth_file=$(mktemp "$GROK_AUTH_DIR/fm.XXXXXXXXXXXX")
+      umask "$old_umask"
+      printf '%s\n' "$TURNEND_NOTIFY" > "$auth_file"
+      printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.grok-turnend-token"
+    fi
     sq_grok_auth_dir=$(shell_quote "$GROK_AUTH_DIR")
       cat > "$GROK_HOOKS_DIR/fm-turn-end.sh" <<EOF
 #!/usr/bin/env bash
@@ -3213,8 +3239,10 @@ EOF
     chmod +x "$GROK_HOOKS_DIR/fm-turn-end.sh"
     hook_command=$(json_escape "bash $(shell_quote "$GROK_HOOKS_DIR/fm-turn-end.sh")")
     printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"%s"}]}]}}\n' "$hook_command" > "$GROK_HOOKS_DIR/fm-turn-end.json"
-    printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
-    exclude_path '.fm-grok-turnend'
+    if [ -n "$TURNEND_NOTIFY" ]; then
+      printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-grok-turnend"
+      exclude_path '.fm-grok-turnend'
+    fi
     ;;
   muse*)
     # muse's turn lifecycle is neither a hook nor a launch flag: its plugin
@@ -3272,15 +3300,17 @@ EOF
     # task's token pointer and the token resolves through Firstmate's private
     # registry. The installer above owns the format-preserving config edit and
     # the always-zero, silent hook script.
-    KIMI_AUTH_DIR="$HOME/.kimi-code/fm-turn-end.d"
-    old_umask=$(umask)
-    umask 077
-    auth_file=$(mktemp "$KIMI_AUTH_DIR/fm.XXXXXXXXXXXX")
-    umask "$old_umask"
-    printf '%s\n' "$TURNEND" > "$auth_file"
-    printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.kimi-turnend-token"
-    printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-kimi-turnend"
-    exclude_path '.fm-kimi-turnend'
+    if [ -n "$TURNEND_NOTIFY" ]; then
+      KIMI_AUTH_DIR="$HOME/.kimi-code/fm-turn-end.d"
+      old_umask=$(umask)
+      umask 077
+      auth_file=$(mktemp "$KIMI_AUTH_DIR/fm.XXXXXXXXXXXX")
+      umask "$old_umask"
+      printf '%s\n' "$TURNEND_NOTIFY" > "$auth_file"
+      printf '%s\n' "${auth_file##*/}" > "$STATE/$ID.kimi-turnend-token"
+      printf 'token=%s\n' "${auth_file##*/}" > "$WT/.fm-kimi-turnend"
+      exclude_path '.fm-kimi-turnend'
+    fi
     ;;
 esac
 
