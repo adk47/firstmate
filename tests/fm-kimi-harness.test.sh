@@ -239,11 +239,13 @@ test_kimi_launch_then_send_is_verified() {
 test_kimi_spawn_honours_task_tmpdir_opt_out() {
   local id rec out rc task_tmp
   id="kimi-tmpdir-off-z2-$$"
-  task_tmp="/tmp/fm-$id"
-  KIMI_RUNTIME_TASK_TMP=$task_tmp
-  rm -rf "$task_tmp"
   rec=$(make_spawn_case tmpdir-off "$id")
   read_spawn_record "$rec"
+  # Same cache-backed per-task root as the launch case above; the opt-out only
+  # suppresses the per-task TMPDIR export, never the resolved root itself.
+  task_tmp="$HOME_DIR/.cache/fm/$id"
+  KIMI_RUNTIME_TASK_TMP=$task_tmp
+  rm -rf "$task_tmp"
   printf 'off\n' > "$HOME_DIR/config/task-tmpdir"
   out=$(run_spawn "$CASE_DIR" "$HOME_DIR" "$PROJ_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id")
   rc=$?
