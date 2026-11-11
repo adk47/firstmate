@@ -96,18 +96,18 @@
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working
 #      (the id-addressed detail read carries step words the overview does not),
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
-#      passed/checks-passed/passed-with-override/passed-with-skips -> done,
-#      failed -> failed, cancelled -> unknown (no verdict unless the green
-#      delivery safeguard below applies). A cancelled outcome takes precedence
-#      over an interrupted step's failed status or outstanding gate findings;
-#      it does not rewrite historical events or backlog records.
-#      passed-with-override is a passing outcome
-#      carrying an explicitly approved Test or CI exception (no-mistakes' own
-#      vocabulary), read identically to a clean passed. passed-with-skips is
-#      also a passing outcome (publication or CI verification was
-#      automatically skipped, no-mistakes' own vocabulary), read as done but
-#      with that skip kept visible in the detail, unlike a clean passed.
-#      EXCEPT: while
+#      passed/checks-passed/passed-with-override -> done, failed -> failed,
+#      cancelled -> unknown (no verdict unless the green delivery safeguard
+#      below applies). A cancelled outcome takes precedence over an
+#      interrupted step's failed status or outstanding gate findings; it does
+#      not rewrite historical events or backlog records.
+#      passed-with-override is a passing outcome carrying an explicitly
+#      approved Test or CI exception (no-mistakes' own vocabulary), read
+#      identically to a clean passed. passed-with-skips is a FAILED outcome
+#      (publication or CI verification was automatically skipped, no-mistakes'
+#      own vocabulary), because nothing verified its checks (see
+#      nm_ci_skip_reason); a run whose ci step was automatically skipped
+#      (`ci,skipped` with a "skipping CI" log) reads the same way. EXCEPT: while
 #      the active step is ci, `axi status` alone cannot tell "still waiting on
 #      checks" from "checks green, waiting on merge" (see nm_ci_checks_state) -
 #      a check of the full ci-step log overrides working -> done once checks read
@@ -882,6 +882,38 @@ nm_ci_step_status() {
   strip_quotes "$(trim "${rest%%,*}")"
 }
 
+# The ci step's recorded status from the steps[] table, whatever it is (the
+# helper above reads only the active running/fixing row).
+nm_ci_step_row_status() {
+  local row rest
+  row=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*ci,' | head -1)
+  [ -n "$row" ] || return 0
+  row=$(trim "$row")
+  rest=${row#*,}
+  strip_quotes "$(trim "${rest%%,*}")"
+}
+
+# A CI step that no-mistakes SKIPPED verified nothing, yet the run still ends
+# `completed` with `outcome: passed` (2026-10-18 audit: 42 runs since 09-05
+# skipped CI on "gh CLI is not authenticated" - `gh auth status` exits non-zero
+# when ANY configured account fails, including an inactive one - and were read
+# as green; one PR was red). Newer no-mistakes names that outcome
+# passed-with-skips. Either way it is not checks-green: prints the skip reason
+# from the ci step's own log when the skip was automatic, `unreadable` when the
+# log cannot be read, and nothing for a skip the log does not record as
+# automatic (an operator's explicit --skip ci).
+nm_ci_skip_reason() {
+  local run_id log_tail line
+  run_id=$(strip_quotes "$(nm_field id)")
+  [ -n "$run_id" ] || { printf 'unreadable'; return; }
+  log_tail=$(nm_run axi logs --step ci --run "$run_id") || true
+  [ -n "$log_tail" ] || { printf 'unreadable'; return; }
+  line=$(printf '%s\n' "$log_tail" | grep -E 'skipping CI' | tail -1)
+  [ -n "$line" ] || return 0
+  line=${line#*skipping CI: }
+  printf '%s' "$(trim "$line" | cut -c1-160)"
+}
+
 nm_effective_ci_step_status() {
   local step_status
   if [ "${RUN_STATUS:-}" = fixing ]; then
@@ -1231,6 +1263,11 @@ if [ "$HAVE_RUN" = 1 ]; then
         passed|passed-with-override) RUN_STATE="done"; RUN_DETAIL=$(passed_pr_detail) ;;
         passed-with-skips) RUN_STATE="done"; RUN_DETAIL="$(passed_pr_detail) (publication/CI verification skipped)" ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
+        passed-with-skips)
+          RUN_STATE=failed
+          RUN_DETAIL="CI verification skipped (outcome passed-with-skips): the PR's checks were never verified"
+          ;;
+        passed-with-override) RUN_STATE="done"; RUN_DETAIL="run passed with a recorded CI override" ;;
         failed)
           if nm_reclassify_failed_run_as_held_green; then :; else
             RUN_STATE=failed; RUN_DETAIL="run failed"
@@ -1296,6 +1333,23 @@ if [ "$HAVE_RUN" = 1 ]; then
             ;;
         esac
       fi
+    fi
+  fi
+
+  # A run that reads finished while its ci step was skipped never verified the
+  # PR's checks: failed, never green.
+  if [ "$RUN_SOURCE" != coarse ] && [ "$RUN_STATE" = "done" ] \
+     && [ "$(nm_ci_step_row_status)" = skipped ]; then
+    skip_reason=$(nm_ci_skip_reason)
+    if [ -n "$skip_reason" ]; then
+      RUN_STATE=failed
+      if [ "$skip_reason" = unreadable ]; then
+        RUN_DETAIL="CI step skipped and its log is unreadable: the PR's checks were never verified"
+      else
+        RUN_DETAIL="CI verification skipped ($skip_reason): the PR's checks were never verified"
+      fi
+    else
+      RUN_DETAIL="$RUN_DETAIL (CI skipped by request)"
     fi
   fi
 

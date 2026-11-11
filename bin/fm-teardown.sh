@@ -67,13 +67,16 @@
 # by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
-# A merge-tree option or execution error reports the content-landed proof as
-# unavailable. The merge-tree --write-tree proof requires Git 2.38 or newer.
-# Uncommitted changes are never landed. Before return, the dirty check explicitly
-# requests all untracked files, even when status.showUntrackedFiles hides them.
-# Dirty refusals distinguish untracked-only leftovers from tracked edits and list
-# at most ten non-exempt untracked paths. tests/fm-teardown.test.sh covers hidden
-# untracked work and the clean return control.
+# Uncommitted changes are never landed.
+# REFUSES when this task's change watch ended in a measurement gap - a verdict of
+# `unmeasurable-with-reason` or `interrupted` - because cleanup removes the task
+# records that made the gap actionable, and a merge whose watch measured nothing
+# has no evidence it was safe. This is the enforcement boundary for the done
+# claim: it consults `bin/fm-change-watch.sh gate <task-id> --terminal-gap` on
+# every teardown rather than relying on an agent to remember the gate. A watch
+# still RUNNING does not refuse teardown: state/change-watch/ is not a task
+# record, so the watch outlives the task and keeps sampling on its own, and
+# blocking on it would stall every merge for 12 hours.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
@@ -177,6 +180,14 @@
 # Orca tasks use the same safety checks, then close the recorded terminal and
 # remove the recorded worktree through `orca worktree rm`; teardown never guesses
 # an Orca target from ambient CLI state.
+# A task migrated from the Mac-era Orca backend keeps only
+# orca_worktree_id_prior (a /Users/<user>/orca/workspaces/... path) and no
+# orca_worktree_id, so its backend reads as tmux and its worktree is not in
+# treehouse's pool. After the same landed-work gates pass, teardown resolves the
+# worktree Orca still records at that prior path, requires it to canonicalize to
+# the very directory the gates inspected, and removes it through Orca; when Orca
+# no longer tracks it, teardown removes it as a plain git worktree. Neither path
+# relaxes the dirty, unlanded, or force gates.
 # A Herdr presentation journal never authorizes cleanup. Teardown still closes
 # only the exact task pane from ordinary endpoint metadata and never calls
 # `workspace close`. It retires the non-authoritative journal only when a
@@ -2209,7 +2220,7 @@ task_status_is_own_parked_run() {  # <worktree> <axi-status-output>
   status=$(fm_nm_strip_quotes "$(fm_nm_field "$out" status)")
   [ -n "$status" ] || return 1
   case "$status" in
-    completed|failed|cancelled|passed|checks-passed|running|fixing|ci) return 1 ;;
+    completed|failed|cancelled|passed|checks-passed|passed-with-skips|passed-with-override|running|fixing|ci) return 1 ;;
   esac
   if ! fm_nm_head_matches_worktree "$wt" "$run_head"; then
     # The strict object-local rule rejected this run head. That rejection is
@@ -2255,7 +2266,7 @@ task_status_is_terminal_run() {  # <axi-status-output> <run-id>
   [ "$run_id" = "$expected_id" ] || return 1
   outcome=$(fm_nm_strip_quotes "$(fm_nm_field "$out" outcome)")
   case "$outcome" in
-    cancelled|failed|passed|checks-passed|passed-with-override|passed-with-skips) return 0 ;;
+    cancelled|failed|passed|checks-passed|passed-with-skips|passed-with-override) return 0 ;;
   esac
   return 1
 }
@@ -2673,6 +2684,86 @@ require_owned_task_worktree_slot() {
 
 teardown_owns_worktree() {
   [ "$TEARDOWN_SLOT_REASSIGNED" != 1 ]
+}
+
+# --- migrated Orca worktrees -------------------------------------------------
+#
+# A task spawned on the Mac-era Orca backend and later migrated to this host
+# keeps only orca_worktree_id_prior - a /Users/<user>/... path - and no
+# orca_worktree_id, so its backend reads as tmux and its worktree is not in
+# treehouse's pool. The worktree is still an Orca-managed worktree: Orca's own
+# registry still names it by that prior path. These helpers resolve it there and
+# remove it through Orca, falling back to a plain git worktree removal when Orca
+# no longer tracks it. They run only after every landed-work gate above has
+# passed and never decide whether work landed.
+
+# migrated_orca_prior_path <meta>: print the recorded prior worktree path.
+migrated_orca_prior_path() {
+  local prior
+  prior=$(meta_value "$1" orca_worktree_id_prior)
+  [ -n "$prior" ] || return 1
+  case "$prior" in
+    *::/*) printf '%s\n' "${prior#*::}" ;;
+    *) return 1 ;;
+  esac
+}
+
+# migrated_orca_worktree_path <meta> <worktree>: succeed only for the migrated
+# Orca shape, printing the recorded prior path. The record must carry a prior
+# path and no current orca_worktree_id, the prior path must be a Mac-era
+# /Users/<user>/orca/workspaces/... path, and the inspected worktree must end
+# with that exact tail after the Mac home component. That whole-tail equality is
+# the identity proof: it maps one recorded worktree onto one live directory
+# instead of guessing by basename.
+migrated_orca_worktree_path() {
+  local meta=$1 wt=$2 prior prior_tail
+  [ -n "$wt" ] || return 1
+  [ -z "$(meta_value "$meta" orca_worktree_id)" ] || return 1
+  prior=$(migrated_orca_prior_path "$meta") || return 1
+  case "$prior" in
+    /Users/*/orca/workspaces/?*) ;;
+    *) return 1 ;;
+  esac
+  prior_tail=${prior#/Users/*/}
+  case "$wt" in
+    */"$prior_tail") ;;
+    *) return 1 ;;
+  esac
+  printf '%s\n' "$prior"
+}
+
+# teardown_migrated_orca_worktree <meta> <worktree> <project>: remove a migrated
+# Orca worktree. Returns 0 when it removed it, 3 when this is not a migrated
+# Orca worktree (the caller then uses the treehouse path), and 1 on a real
+# failure. Orca is asked for the worktree it still records at the prior path;
+# the answer must canonicalize to the very directory the safety gates inspected,
+# so a stale or wrong registry row can never authorize a removal of a different
+# directory.
+teardown_migrated_orca_worktree() {
+  local meta=$1 wt=$2 proj=$3 prior out id resolved resolved_abs wt_abs
+  prior=$(migrated_orca_worktree_path "$meta" "$wt") || return 3
+  if fm_backend_source orca 2>/dev/null && command -v orca >/dev/null 2>&1 \
+     && out=$(orca worktree show --worktree "path:$prior" --json 2>/dev/null) \
+     && id=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-id 2>/dev/null) \
+     && [ -n "$id" ] \
+     && resolved=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-path 2>/dev/null) \
+     && resolved_abs=$(canonical_existing_dir "$resolved") \
+     && wt_abs=$(canonical_existing_dir "$wt") \
+     && [ "$resolved_abs" = "$wt_abs" ]; then
+    if fm_backend_remove_worktree orca "$id"; then
+      echo "teardown: removed migrated Orca worktree $wt through Orca ($id)"
+      return 0
+    fi
+    echo "error: Orca worktree removal failed for $id ($wt); teardown aborted" >&2
+    return 1
+  fi
+  # Orca no longer tracks this worktree: remove it as a plain git worktree.
+  if git -C "$proj" worktree remove --force "$wt" 2>/dev/null; then
+    echo "teardown: removed migrated Orca worktree $wt as a plain git worktree (Orca no longer tracks it)"
+    return 0
+  fi
+  echo "error: could not remove migrated Orca worktree $wt through Orca or git; teardown aborted" >&2
+  return 1
 }
 
 firstmate_home_has_treehouse_slot() {
@@ -3572,7 +3663,7 @@ cleanup_firstmate_home_children() {
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
       "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
       "$sub_state/$child_id.cursor-session" "$sub_state/$child_id.reconcile-nudged" \
-      "$sub_state/$child_id.gateway-stall" \
+      "$sub_state/$child_id.gateway-stall" "$sub_state/$child_id.stopped" \
       "$sub_state/$child_id.claude-settings.json" "$sub_state/$child_id.devin-config.json" \
       "$sub_state/$child_id.polytoken-busy.sh" \
       "$sub_state/.$child_id.branch-outcome-index"
@@ -3700,6 +3791,22 @@ fi
 X_REQUEST=$(grep '^x_request=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
 if [ -n "$X_REQUEST" ]; then
   echo "warning: task $ID still carries an unreconciled Relay request link ($X_REQUEST) on its task record." >&2
+fi
+
+# A merge whose change watch ended in a measurement gap has no evidence it was
+# safe, and cleanup removes the task records that made the gap actionable. This
+# is the shared boundary that always runs when a task's outcome is finalized, so
+# the done-claim block does not depend on an agent remembering to call the gate.
+# Only a TERMINAL gap refuses: a watch still running keeps sampling on its own
+# from state/change-watch/, which is not a task record and survives teardown.
+if [ "$FORCE" != "--force" ]; then
+  if ! CHANGE_WATCH_GAP=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-change-watch.sh" gate "$ID" --terminal-gap 2>/dev/null); then
+    echo "REFUSED: task $ID has a change watch that ended without a measurement verdict." >&2
+    printf '%s\n' "$CHANGE_WATCH_GAP" >&2
+    echo "A merge is not safe until its watch says so. Record what the watch measured with bin/fm-change-watch.sh verdict <watch-id>, diagnose the read path with bin/fm-change-watch.sh doctor <watch-id>, and re-register the watch once the read path is fixed." >&2
+    exit 1
+  fi
 fi
 
 if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
@@ -3914,10 +4021,18 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   fi
   wt_pool_slot=0
   fm_treehouse_pool_slot "$PROJ" "$WT" && wt_pool_slot=1
-  teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
-    echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+  # A migrated Orca worktree is not in treehouse's pool, so it is removed
+  # through Orca (or as a plain git worktree) instead of being returned.
+  migrated_orca_rc=0
+  teardown_migrated_orca_worktree "$META" "$WT" "$PROJ" || migrated_orca_rc=$?
+  if [ "$migrated_orca_rc" -eq 3 ]; then
+    teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
+      echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
+      exit 1
+    }
+  elif [ "$migrated_orca_rc" -ne 0 ]; then
     exit 1
-  }
+  fi
   [ "$wt_pool_slot" = 0 ] || teardown_note_dirty_return "$WT"
   # The slot is back in the pool, so this task's claim on it is spent. Dropping
   # it here - and only after a return that succeeded - keeps a returned slot
@@ -4099,7 +4214,8 @@ rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.progress" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
   "$STATE/$ID.reconcile-nudged" "$STATE/$ID.gemini-settings.json" \
-  "$STATE/$ID.gateway-stall" \
+  "$STATE/$ID.gateway-stall" "$STATE/$ID.stopped" \
+  "$STATE/$ID.brief-arg" \
   "$STATE/$ID.claude-settings.json" "$STATE/$ID.devin-config.json" \
   "$STATE/$ID.polytoken-busy.sh" \
   "$STATE/.$ID.branch-outcome-index" \

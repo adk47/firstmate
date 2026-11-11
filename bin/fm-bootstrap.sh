@@ -769,8 +769,9 @@ secondmate_liveness_sweep() {
   # lacked.
   # A meta with no window remains owned by secondmate-provisioning recovery.
   # Secondmate homes never contain kind=secondmate meta, so this is naturally a
-  # primary-only no-op there. The probe/relaunch mechanics live in
-  # bin/fm-secondmate-liveness-lib.sh; this sweep keeps the reporting.
+  # primary-only no-op there. Ordinary-task mid-session liveness belongs to
+  # bin/fm-watchdog-worker.sh, which is the separate periodic signal; secondmates
+  # stay with this session-start sweep and their own home.
   [ -d "$STATE" ] || return 0
   local meta id remote_host label __fm_timing_stamp parallel=0
   SECONDMATE_RESPAWNED_IDS=""

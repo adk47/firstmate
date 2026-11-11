@@ -67,10 +67,22 @@ On [PR 1495](https://github.com/kunchenguid/firstmate/pull/1495), its main step 
 `portable-serial-<k>of<n>` splits it across `n` separate CI runners.
 Each shard is still strictly serial in itself, and separate runners mean no two of these stateful scripts ever share a machine, so the split needs no concurrency isolation proof.
 
+`n` is 8.
+It was 5 until 2026-11-05, when the remainder had grown to ~98 minutes of serial work and each of five runners carried ~20 minutes of heavy subprocess work on a 2-core box.
+At that load the lane's concurrency and timing assertions started failing on runner contention rather than on any defect: `the first drain over a 5272019-byte log took 114.821s, over the 60s bound`, `slow check checkpoint exit: expected exit 0, got 124`, `concurrent append/drain subprocess failed`, `concurrent sequence claims were not unique and monotonic`, `a fast scan should compute one signature per file and check the beacon once`, and `the tmux task shell did not become ready`.
+Different shards failed on each run, which is the signature of contention rather than a defect, and the same scripts passed when run alone.
+Eight shards put ~12.6 minutes on each runner without changing the total work or any assertion.
+
 `bin/fm-test-run.sh` owns `n` and refuses any lane whose `of<n>` disagrees with it.
 `.github/workflows/ci.yml` derives the same `n` from `strategy.job-total` rather than a literal, so changing the shard count in either file without the other fails the lane loudly instead of leaving part of the required suite unrun.
 
 Assignment is longest-processing-time bin packing over per-script duration hints embedded in `bin/fm-test-run.sh`.
+The last full refresh of the hints retained the slowest measurements from the `fm-test-timing-portable-serial-*` artifacts of three green CI runs on 2026-09-01, [33558082172](https://github.com/kunchenguid/firstmate/actions/runs/33558082172), [33523597838](https://github.com/kunchenguid/firstmate/actions/runs/33523597838), and [33463326167](https://github.com/kunchenguid/firstmate/actions/runs/33463326167).
+A later refresh on 2026-11-05 raised every hint whose measured `duration_ms` in run [41977644651](https://github.com/adk47/firstmate/actions/runs/41977644651) exceeded it, keeping the retained maximum rather than replacing it with a single run's figure.
+That refresh was forced by real drift: `tests/fm-watch-triage.test.sh` had grown from 262626 ms to 663532 ms and `tests/fm-session-start.test.sh` from 156952 ms to 280157 ms, so shard 1 carried about 20 minutes of real work against a 20-minute cap and was cancelled while still running.
+Scripts added since then carry the slowest of several runs measured through `bin/fm-test-run.sh` on the branch that added them until the next artifact refresh replaces those local figures.
+The 153 current hints total 5589554 ms of conservative balance weight.
+
 [Verification inputs](#verification-inputs) owns the measurement provenance and exceptions.
 A script with no hint gets the conservative `PORTABLE_SERIAL_DEFAULT_WEIGHT_MS` default.
 Hints only affect balance: the coverage guard keeps the partition complete and disjoint whatever they say, so a stale hint costs a slower shard rather than lost coverage.
@@ -139,15 +151,11 @@ The workflow retains per-PR supersession and keeps only the newest of close main
 
 ## Timeouts
 
-CI job timeouts follow one three-tier policy, so the workflow reads as a policy rather than as a collection of per-job numbers.
-Every tier is a hang tripwire with headroom above the healthy duration, never a packing estimate or a runtime target.
-A lane that reaches its tier bound needs investigation and a distribution or runtime fix, not a larger timeout to fit the same work.
-
-| Tier | Jobs | Bound | Rationale |
-|---|---|---|---|
-| Fast | coverage guard, repo invariants, timing aggregate, Full suite verdict | 5 minutes | Seconds-long local work, so the tripwire only catches a hung runner. |
-| Normal | lint partitions, portable parallel shards, portable serial shards, macOS stock Bash | 30 minutes, one value shared by every job in the tier | One shared hang tripwire keeps every ordinary test and lint lane on the same policy instead of allowing per-lane packing estimates or one-off caps to set the bound. |
-| Heavy | Herdr | family-run step 20 minutes under a 75-minute job-level last-resort backstop | Healthy runs finish in about 7-10 minutes, so the step tripwire fails a wedged suite while the `always()` cleanup and timing upload still run, and the job cap only catches a hang outside that step. |
+| Lane | Bound | Rationale |
+|---|---|---|
+| portable parallel 1/2 | job `timeout-minutes: 10` | The measured shard sums are about three minutes and the timeout is a hang tripwire. |
+| portable serial 1-8 | job `timeout-minutes: 40` | Each balanced shard carries about 12.60 minutes of conservative assignment weight, leaving over 3x hang-tripwire margin for job setup and runner-speed spread. |
+| Herdr | family-run step `timeout-minutes: 20`; job `timeout-minutes: 75` backstop | Healthy runs finished around 7 minutes before this lane gained `fm-backend-herdr-focus-flash-e2e`, which measures about 2 minutes against a real lab locally, so the step bound is still the hang tripwire (cleanup and timing artifacts still upload) while the job cap stays a last-resort backstop. Refresh this figure from the lane's uploaded timing artifact. |
 
 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) holds the executable values and names each job's tier beside its `timeout-minutes`.
 [`tests/fm-ci-workflow.test.sh`](../tests/fm-ci-workflow.test.sh) holds the policy against the parsed workflow: every job belongs to exactly one tier, the workflow carries exactly three distinct job-level values, the fast tier stays within 5-10 minutes, the normal jobs share one 30-minute budget, and the Herdr family-run step is the 20-minute tripwire below its job backstop with an `always()` teardown after it.

@@ -52,6 +52,7 @@ Do not work around these refusals by respawning; preserve the recorded task and 
 That reclaim is the owning home's operation only, and a secondmate is the one exception: recover it through `bin/fm-spawn.sh <id> --secondmate` as above.
 Do not use a fresh generic spawn while the recorded worktree is unaccounted for, because allocating another worktree can split one task across two copies.
 If the worktree or ownership cannot be reconciled safely, leave all state intact and report the task failed or blocked with the conflicting evidence.
+When the captain has ordered a dead worker left as it is, main records that order with `bin/fm-leave-stopped.sh <id> mark --reason '<the captain's words>'` (its header owns the marker): the watcher then stops alarming on that endpoint, while the record, worktree, and endpoint stay untouched.
 
 ## A live crewmate claiming the pipeline is dead
 

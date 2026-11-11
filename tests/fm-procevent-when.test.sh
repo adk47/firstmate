@@ -645,5 +645,34 @@ assert_grep 'status: fired' "$RESULT" \
   "the reload must wait past the torn spec/trust window, not reject a legitimate rebind mid-publish"
 assert_grep 'v2 ran against' "$RESULT" "the fired action ran the rebound (v2) bytes, not a rejection from a torn read"
 pass "the fire-time reload never observes rebind_one's spec/trust publish mid-rename"
+# --- a refused retire leaves captured results unacknowledged -----------------
+H="$TMP_ROOT/h-retire-refused"; new_home "$H"
+SID=when-retire-refused
+DIGEST="sha256:$(printf 'a%.0s' $(seq 1 64))"
+mkdir -p "$H/state/procevent" "$H/state/procevent-inbox"
+cat > "$H/state/procevent/$SID.source" <<EOF
+adapter=test
+owner=extension
+extension_schema=fm-procevent-extension-owner.v1
+extension_id=test-ext
+extension_version=1.0.0
+capability_version=1
+package_digest=$DIGEST
+binding_digest=$DIGEST
+config_ref=test
+registration_token=$DIGEST
+argc=0
+argv:
+EOF
+chmod 600 "$H/state/procevent/$SID.source"
+printf 'when: %s\nstatus: fired\n' "$SID" > "$H/state/procevent-inbox/$SID.1.result"
+if when "$H" retire retire-refused >/dev/null 2>"$TMP_ROOT/retire-refused.err"; then
+  fail "a retire that cannot prove extension ownership must fail"
+fi
+assert_grep "requires its exact --if-owner token" "$TMP_ROOT/retire-refused.err" \
+  "the refused retire did not report its ownership refusal"
+assert_absent "$H/state/procevent-inbox/$SID.1.handled" \
+  "a refused retire marked the captured result handled and suppressed its announcement"
+pass "a refused retire leaves captured results unacknowledged"
 
 printf 'all fm-procevent-when tests passed\n'

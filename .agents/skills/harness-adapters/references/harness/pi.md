@@ -15,6 +15,7 @@ Verified on 2026-07-27 with Pi and Pi-signed 0.82.0 unless a fact gives another 
 | Model flag | `--model <model>`; under a home's worker account pin the model must be `<provider>/<id>` and Firstmate also passes `--provider <provider>` (`../../../docs/configuration.md` "Worker account pin"). |
 | Effort flag | `--thinking <low\|medium\|high\|xhigh\|max>`; both identities expose the same levels and completed the same model-qualified max-thinking smoke. |
 | Model discovery | Run the selected executable as `<executable> --list-models [search]`; Pi's installed `docs/models.md` owns how built-in, extension-registered, and custom provider/model entries reach that list. |
+| Footer fields | The rendered status footer reads `↑<in> ↓<out> R<cache-read> W<cache-write> CH<nn.n>% $<cost> <nn.n>%/<window> (auto) <model>` per the installed `dist/modes/interactive/components/footer.js`; `CH` is the latest prompt-cache hit rate and the only context measure is the `<nn.n>%/<window>` token, which `../../../bin/fm-chair-status.sh` already parses. A `CH99.0%` reading on a lane showing `15.4%/1.0M` is a healthy cache, not a full context. |
 
 Native Codex sessions may request `ultra` through the native extension flag described by `../../../bin/fm-spawn.sh`; it is separate from Pi's thinking levels.
 Pi has no permission system, so workers are always autonomous.
@@ -27,8 +28,9 @@ The observed signed process tree has an exact `pi-signed` wrapper parent with th
 The installed plain `pi` command also execs that signed launcher.
 The router's Detection section owns how launch markers and ancestry select between the identities.
 
-Keep the instructions as one positional argument.
-Multiple positional arguments become separate queued messages; the spawn template already preserves the one-argument shape.
+Keep any manual instructions as one positional argument.
+Multiple positional arguments become separate queued messages.
+The spawn template passes one constant-size pointer prompt to the brief path, never the brief content, so the launch argument cannot outgrow the kernel limit.
 
 A project trust dialog can appear on the first Pi run in any not-yet-trusted directory that holds a trust-requiring resource such as `.pi/extensions/`, including a clean worktree and a freshly seeded secondmate home.
 Accept it with Enter and verify the instructions begin processing.
@@ -41,6 +43,7 @@ For unattended seeded-secondmate launches, `../../../bin/fm-spawn.sh --help` own
 The extension listens for Pi's `turn_end` event, not `agent_end`, so supervision is notified after each completed turn rather than only when the whole run exits.
 Native-harness progress uses the separate generation-bound marker owned by `../../../bin/fm-busy-event.sh`; it never fabricates Pi turn completion.
 Optional foreground model-stream observation is version-gated separately; `../../../docs/configuration.md` (Environment variables) owns activation and `../../../docs/verification/runtime-backends.md` (Pi worker model-stream observation) owns the real-Pi evidence.
+A secondmate's extension still records busy state but omits the turn-end touch, because a mate's meta lives in the parent's state directory.
 Pi sets `PI_CODING_AGENT=true` for its children as its harness-detection marker.
 
 ## Primary integration

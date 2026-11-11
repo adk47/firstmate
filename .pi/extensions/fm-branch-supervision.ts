@@ -1697,6 +1697,9 @@ ${context.command}
         isProcessingCustomMessage(event.message) && event.message.content === queuedProcessingContent;
       return;
     }
+    // A run started by an idle custom message (pi.sendMessage with triggerTurn)
+    // carries that message and no prompt, and it is never captain dialog.
+    // Testing for the prompt itself also narrows prompt-only SDK event types.
     if (!("prompt" in event)) return;
     rememberMainModel(ctx);
     currentMainSession = ctx?.sessionManager ?? null;

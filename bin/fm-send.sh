@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Steer a task by durable record: write the message into the task's steering
-# inbox and ring a constant doorbell through its backend endpoint, best-effort.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] [--coalesce <key>] <text...>
+# inbox and ring a constant doorbell line into its terminal, best-effort.
+# Usage: fm-send.sh <target> [--resolve-key <key>]... [--fire-and-forget <delivery-id>] [--coalesce <key>] [--allow-dead <reason>] <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -26,21 +26,26 @@
 # self-describing doorbell, best-effort. Pane backends type its line plus Enter;
 # T3 Code starts one native turn. The durable record IS
 # the delivery, so the record's fate alone governs the exit: 0 = the steer is
-# durably sent (recorded); nonzero = nothing was confirmed delivered and a
-# resend is appropriate (unresolvable target, an endpoint that cannot be
-# locked and revalidated or that retired or changed, an unwritable record, a
-# failed or lost remote transport) or a decision-close append failed after
-# delivery (the error then carries the exact manual close). The remote enqueue
+# durably sent (recorded and confirmed on disk carrying the instructed text);
+# nonzero = nothing was confirmed delivered and a resend is appropriate
+# (unresolvable target, an endpoint that cannot be locked and revalidated or
+# that retired or changed, an unwritable record, a record that is not on disk
+# carrying the instructed text after the write, a failed or lost remote
+# transport) or a decision-close append failed after delivery (the error then
+# carries the exact manual close). The remote enqueue
 # is idempotent: the remote leg deduplicates an exact re-run of the same
 # request onto the existing record (bin/fm-task-inbox-lib.sh), so after a lost
 # transport (ssh exit 255, completion unknown) fm-send retries the same leg
 # once itself. For an ordinary reply-bearing request, a later re-run is
 # idempotent only through the printed FM_PENDING_REPLY_EXISTING_CORR=<corr>
 # command: it preserves the same correlation, body, and record, while a plain
-# re-run mints a new correlation and delivers a separate record. An explicit
-# fire-and-forget request instead retries with its same caller-supplied delivery
-# id. A still-unconfirmed reply-bearing request keeps its reply expectation
-# preserved for the record that may have landed.
+# re-run mints a new correlation and delivers a separate record. When that
+# dedup lands on a record the worker already moved into handled/, the send
+# reports success without ringing: the steer was delivered and acknowledged,
+# so there is nothing left to announce.
+# An explicit fire-and-forget request instead retries with its same
+# caller-supplied delivery id. A still-unconfirmed reply-bearing request keeps
+# its reply expectation preserved for the record that may have landed.
 # Pending-reply bookkeeping trouble after a durable enqueue NEVER exits
 # nonzero: with the recovery marker stored the watcher reconciles it silently,
 # and with both the commit and the marker lost the send prints a distinct
@@ -49,10 +54,25 @@
 # instruction. There is no delivered-unconfirmed
 # outcome on this plane: "did the doorbell land" is no longer the question -
 # "was the message acted on" is, and that is answered asynchronously for an
-# ordinary record by the worker's acknowledgement move into handled/.
-# bin/fm-task-inbox-lib.sh owns the record format, doorbell line, and retry and
-# escalation policy for ordinary and fire-and-forget records.
-# On pane backends, the composer pre-check before the ring is ADVISORY only: when
+# ordinary record by the worker's acknowledgement move into handled/, with the
+# watcher re-ringing an unacknowledged message and escalating a stuck one. An
+# explicit fire-and-forget record is excluded from that ladder, and any recorded
+# task selector may carry one - not only a secondmate: a crewmate or scout
+# target uses it for an event that belongs in the worker's own record but must
+# never climb the ladder into a firstmate escalation. A PR-event producer such
+# as the pr-flow job is the canonical caller, delivering a QA finding, NO-GO, or
+# conflict to the author that owns the pull request at the moment it appears:
+#   fm-send.sh <author-task-id> --fire-and-forget <16-hex-delivery-id> \
+#     'pr-flow: https://github.com/<owner>/<repo>/pull/<n> has a qa-review ...'
+# The producer owns once-ness per (pull request, head, event kind) - it fires
+# the same delivery id once - while the record itself is written idempotently,
+# so a repeated identical body lands on the record already present instead of
+# queueing a second copy the worker would act on twice. Firing stays safe for a
+# finding because the producer keeps its own SLA backstop as an ordinary steer
+# and a pull-request label, so a worker that never reads the fired record still
+# surfaces; the fired record exists to remove the wait, not the escalation.
+# bin/fm-task-inbox-lib.sh owns the record format, the doorbell line, and the
+# re-ring ladder. The composer pre-check before the ring is ADVISORY only: when
 # the composer visibly holds pending text the ring is skipped with a notice and
 # the watcher re-rings an ordinary record later; no composer verdict is
 # delivery proof on this plane, and a failed ring never fails the send.
@@ -112,15 +132,19 @@
 # send remains successful and watcher reconciliation owns the repair, and when
 # the commit and marker are BOTH lost the send still remains successful with a
 # reply-tracking-degraded warning naming the expectation an operator must
-# inspect (it can no longer reconcile or escalate on its own). Only a
-# failed enqueue discards the expectation. On the typed plane an unconfirmed submit (exit 3) keeps
-# it armed rather than dropping it, and only a proven send failure discards it.
+# inspect (it can no longer reconcile or escalate on its own). Only a failed
+# enqueue, or an enqueue whose record cannot be confirmed on disk carrying the
+# instructed text, discards the expectation.
+# On the typed plane an unconfirmed submit (exit 3) keeps it armed rather than
+# dropping it, and only a proven send failure discards it.
 # Set FM_PENDING_REPLY_EXISTING_CORR=<id> when re-sending a recovery request
 # for an already-open expectation so a second record is not created. Direct
 # unmarked captain input never creates one. A marked secondmate instruction
 # sent with --fire-and-forget <16-hex-delivery-id> uses the same inbox transport
 # without creating a reply expectation; its delivery id makes uncertain retries
-# idempotent while allowing a later identical instruction to be distinct.
+# idempotent while allowing a later identical instruction to be distinct. A
+# crewmate or scout target has no reply expectation to suppress, so the flag
+# there changes only the record's delivery mode and the same retry idempotence.
 #
 # Remote secondmate delivery: the send crosses fm-on.sh to a host-local leg
 # (bin/fm-remote-secondmate-control.sh cmd_send_stdin) that writes the message as a
@@ -217,6 +241,30 @@
 # semantics). It needs a local task selector on the inbox plane and is refused
 # with --key, --resolve-key, --fire-and-forget, FM_SEND_IDEMPOTENT=1, any
 # secondmate target, an explicit backend target, and parser-native typed text.
+#
+# Liveness refusal: a text steer to a LOCAL task recorded in this home is
+# refused with exit 3, before any durable write, when the worker is not live:
+# its recorded endpoint reads dead or missing (fm_backend_agent_state), or the
+# endpoint cannot be verified alive (ambiguous, unreadable, or an unverified
+# backend) and the task has shown no activity - no status line, turn end, busy
+# transition, or metadata change - for FM_SEND_LIVENESS_SILENCE_SECS (default
+# 21600, six hours). The message names the time it was last live and says to
+# relaunch first (bin/fm-control.sh <task> relaunch --note '<what happened>'). A verified-alive endpoint
+# is never refused for silence alone, because a worker idle on a decision for
+# hours is still the right place for its answer. A secondmate's silence is
+# never a reason either: an idle secondmate endpoint is healthy and is judged by
+# its routed status rather than by pane quiet, and the secondmate liveness sweep
+# (SECONDMATE_LIVENESS lines in bin/fm-bootstrap.sh) owns dead-secondmate
+# detection. Remote secondmates, explicit backend targets, and --key are not
+# checked here.
+# --allow-dead <reason> writes the record anyway, prints a warning, and appends
+# one audit line to state/.fm-send-allow-dead.log so firstmate sees the
+# override. FM_SEND_LIVENESS_BYPASS=1 is a test-harness escape hatch exported
+# only by tests/lib.sh for its stubbed backends, never an operator knob. This
+# check runs before the inbox/typed plane is chosen, so the exit 3 it returns
+# means "refused, nothing written" on either local plane; the typed plane's own
+# exit 3 (an unconfirmed submit) only follows a live endpoint that passed this
+# check, and the remote leg's exit 3 means the record may already have landed.
 #
 # After a successful TYPED-plane submit fm-send pauses FM_SEND_SETTLE seconds
 # (default 1, 0 disables) before returning: submit confirmation only proves the
@@ -512,7 +560,8 @@ fi
 RESOLVE_KEYS=
 FIRE_AND_FORGET_ID=
 COALESCE_KEY=
-fm_send_add_resolve_key() { # <key>
+ALLOW_DEAD_REASON=
+fm_send_add_resolve_key() {  # <key>
   local k=$1
   case "$k" in
   '' | *[!A-Za-z0-9._-]*)
@@ -579,7 +628,22 @@ while :; do
         ;;
     esac
     ;;
-  *) break ;;
+    --allow-dead|--allow-dead=*)
+      [ -z "$ALLOW_DEAD_REASON" ] || { echo "error: duplicate --allow-dead" >&2; exit 1; }
+      if [ "$1" = --allow-dead ]; then
+        [ $# -ge 2 ] || { echo "error: --allow-dead requires a reason" >&2; exit 1; }
+        ALLOW_DEAD_REASON=$2
+        shift 2
+      else
+        ALLOW_DEAD_REASON=${1#--allow-dead=}
+        shift
+      fi
+      case "$ALLOW_DEAD_REASON" in
+        *[![:space:]]*) ;;
+        *) echo "error: --allow-dead requires a non-empty reason" >&2; exit 1 ;;
+      esac
+      ;;
+    *) break ;;
   esac
 done
 
@@ -596,6 +660,66 @@ MARK_FROM_FIRSTMATE=0
 PENDING_REPLY_CORR=
 PENDING_REPLY_CREATED=0
 TARGET_TASK_ID=
+# fm_send_last_activity <task-id>: the newest epoch at which the task showed any
+# sign of life in this home's records, or empty when it has none.
+fm_send_last_activity() {
+  local id=$1 f m newest=
+  for f in "$STATE/$id.status" "$STATE/$id.turn-ended" "$STATE/$id.busy-state" "$STATE/$id.meta"; do
+    [ -e "$f" ] || continue
+    m=$(fm_path_mtime "$f") || continue
+    case "$m" in ''|*[!0-9]*) continue ;; esac
+    if [ -z "$newest" ] || [ "$m" -gt "$newest" ]; then newest=$m; fi
+  done
+  printf '%s' "$newest"
+}
+
+fm_send_epoch_utc() {  # <epoch>
+  date -u -r "$1" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u -d "@$1" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf '@%s' "$1"
+}
+
+# fm_send_liveness_gate: refuse (exit status 3) a text steer to a local task
+# whose worker is not live; see "Liveness refusal" in the header.
+fm_send_liveness_gate() {
+  local id state silence last now age why since
+  [ "${FM_SEND_LIVENESS_BYPASS:-}" != 1 ] || return 0
+  [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ] || return 0
+  [ "$TARGET_BACKEND" != remote ] || return 0
+  [ -z "$(fm_meta_get "$TARGET_META" remote_host)" ] || return 0
+  id=$(fm_send_id_from_meta "$TARGET_META")
+  [ -n "$id" ] || return 0
+  silence=${FM_SEND_LIVENESS_SILENCE_SECS:-21600}
+  case "$silence" in ''|*[!0-9]*) silence=21600 ;; esac
+  state=$(fm_backend_agent_state "$TARGET_BACKEND" "$T" 2>/dev/null) || state=unreadable
+  last=$(fm_send_last_activity "$id")
+  now=$(date +%s)
+  why=
+  case "$state" in
+    alive) return 0 ;;
+    dead|missing) why="its $TARGET_BACKEND endpoint $T is $state" ;;
+    *)
+      [ "$(fm_meta_get "$TARGET_META" kind)" != secondmate ] || return 0
+      [ "$silence" -gt 0 ] || return 0
+      if [ -z "$last" ]; then
+        why="it has no recorded activity and its endpoint reads $state"
+      else
+        age=$((now - last))
+        [ "$age" -ge "$silence" ] || return 0
+        why="it has shown no activity for $((age / 3600))h and its endpoint reads $state"
+      fi
+      ;;
+  esac
+  since=never
+  [ -z "$last" ] || since=$(fm_send_epoch_utc "$last")
+  if [ -n "$ALLOW_DEAD_REASON" ]; then
+    echo "warning: $id is not live since $since ($why); writing the steer anyway (--allow-dead: $ALLOW_DEAD_REASON)" >&2
+    printf '%s\t%s\t%s\t%s\n' "$(fm_send_epoch_utc "$now")" "$id" "$why" \
+      "$(printf '%s' "$ALLOW_DEAD_REASON" | tr '\t\n' '  ')" >> "$STATE/.fm-send-allow-dead.log" 2>/dev/null || true
+    return 0
+  fi
+  echo "error: steer not sent to $id: target not live since $since ($why); relaunch first (bin/fm-control.sh $id relaunch --note '<what happened>'), or pass --allow-dead <reason> to record it anyway" >&2
+  return 3
+}
+
 fm_send_known_undelivered_cleanup() {
   [ -n "$PENDING_REPLY_CORR" ] || return 0
   if [ "$PENDING_REPLY_CREATED" = 1 ]; then
@@ -660,21 +784,16 @@ fm_send_resolve_close_note() { # <key> <excerpt>
 }
 
 if [ -n "$FIRE_AND_FORGET_ID" ]; then
-  printf '%s' "$FIRE_AND_FORGET_ID" | grep -Eq '^[a-f0-9]{16}$' ||
-    {
-      echo "error: --fire-and-forget delivery id must be 16 lowercase hex characters" >&2
-      exit 1
-    }
-  [ "$MARK_FROM_FIRSTMATE" = 1 ] ||
-    {
-      echo "error: --fire-and-forget requires a recorded secondmate task selector" >&2
-      exit 1
-    }
-  [ -z "$RESOLVE_KEYS" ] ||
-    {
-      echo "error: --fire-and-forget cannot accompany --resolve-key" >&2
-      exit 1
-    }
+  printf '%s' "$FIRE_AND_FORGET_ID" | grep -Eq '^[a-f0-9]{16}$' \
+    || { echo "error: --fire-and-forget delivery id must be 16 lowercase hex characters" >&2; exit 1; }
+  # A fired delivery is a recorded task's durable record, so it needs a task
+  # selector resolved through this home's metadata. An explicit backend target
+  # names an endpoint with no inbox, and the --key and --resolve-key planes are
+  # separate: a fired delivery never answers a decision.
+  { [ -n "$TARGET_SELECTOR" ] && [ -n "$TARGET_META" ]; } \
+    || { echo "error: --fire-and-forget requires a recorded task selector" >&2; exit 1; }
+  [ -z "$RESOLVE_KEYS" ] \
+    || { echo "error: --fire-and-forget cannot accompany --resolve-key" >&2; exit 1; }
 fi
 
 if [ -n "$COALESCE_KEY" ]; then
@@ -780,8 +899,8 @@ if [ -n "$RESOLVE_KEYS" ]; then
 fi
 
 # Close each answered decision in this home's ledger, only after the answer is
-# durably sent: enqueued on the inbox plane, submit-confirmed on the typed
-# plane. An append failure exits nonzero with the manual close
+# durably sent: enqueued and confirmed on disk on the inbox plane,
+# submit-confirmed on the typed plane. An append failure exits nonzero with the manual close
 # command; the decision then stays open and re-surfaces, never silently lost.
 # All of one answer's closes are this home's own bookkeeping, written by the
 # very turn that answered the decisions, so they go through ONE guarded
@@ -892,6 +1011,7 @@ else
     echo "error: a text steer requires a nonempty message; nothing was sent (an empty marked request would deliver only marker and correlation bytes and leave the parent waiting on a reply to nothing)" >&2
     exit 1
   fi
+  fm_send_liveness_gate || exit $?
   if [ "$TARGET_BACKEND" = remote ]; then
     FM_SEND_REMOTE_BUDGET=${FM_SEND_REMOTE_BUDGET:-30}
     case "$FM_SEND_REMOTE_BUDGET" in
@@ -957,6 +1077,13 @@ else
       echo "error: failed to durably prepare pending-reply delivery for $TARGET_TASK_ID" >&2
       exit 1
     fi
+  fi
+  if [ "$MARK_FROM_FIRSTMATE" != 1 ] && [ -n "$FIRE_AND_FORGET_ID" ]; then
+    # A crewmate or scout target arms no reply expectation, so the delivery mode
+    # and the caller's retry idempotence are the whole effect of the flag: the
+    # record carries delivery=fire-and-forget (the watcher leaves it out of the
+    # re-ring ladder) and an identical re-delivery collapses onto it.
+    FM_SEND_IDEMPOTENT=1
   fi
   # Data-plane selection (see the header): text addressed to a task selector
   # resolved through this home's metadata rides the inbox plane, unless it is
@@ -1149,6 +1276,17 @@ else
       exit 1
     fi
     fm_lock_release "$INBOX_META_LOCK"
+    # The record is the delivery. Confirm it is on disk carrying this text before
+    # any bookkeeping reports the steer as delivered: a write that cannot be
+    # verified (a replaced or retired inbox) must refuse the send rather than
+    # leave firstmate believing an instruction reached the worker.
+    if ! fm_task_inbox_verify "$INBOX_RECORD" "$MESSAGE"; then
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      echo "error: steer not sent to $INBOX_TASK_ID: the inbox write reported ${INBOX_RECORD:-no record}, but that record is not on disk carrying the instructed text" >&2
+      exit 1
+    fi
     # Enqueue IS durable delivery to the task's record: mark the pending
     # expectation delivered now, without resolving it - only a correlated
     # parent report acknowledges the request.
@@ -1179,8 +1317,17 @@ else
       fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
     fi
     # Ring the doorbell, best-effort: no ring outcome changes the exit status,
-    # because the watcher owns loss detection from here, either through its
-    # bounded re-ring ladder or direct unavailable-endpoint recovery.
+    # because the watcher's re-ring ladder owns loss detection from here.
+    # An idempotent dedup can land on a record the worker already acknowledged;
+    # that steer was delivered and acted on, so there is nothing to announce and
+    # no acknowledgement left to ask for. The remote steer leg returns early for
+    # the same case.
+    case "$INBOX_RECORD" in
+      */handled/*)
+        echo "notice: this steer was already delivered and acknowledged at $INBOX_RECORD; nothing re-rung" >&2
+        exit 0
+        ;;
+    esac
     ring_rc=0
     fm_task_inbox_ring "$TARGET_BACKEND" "$T" "$INBOX_RECORD" "$EXPECTED_LABEL" || ring_rc=$?
     ring_retry="the watcher will re-ring"

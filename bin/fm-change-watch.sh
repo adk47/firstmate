@@ -14,6 +14,8 @@
 #   fm-change-watch.sh drive <watch-id>
 #   fm-change-watch.sh sample <watch-id> [<offset-seconds>]
 #   fm-change-watch.sh verdict <watch-id>
+#   fm-change-watch.sh gate <task-id> [--terminal-gap]
+#   fm-change-watch.sh audit [<days>]
 #   fm-change-watch.sh status [<watch-id>]
 #   fm-change-watch.sh doctor [<watch-id>]
 #
@@ -28,14 +30,46 @@
 #           cannot be placed in its manifest (no diff, or content that does not
 #           match it) every Deployment in that manifest is watched and the
 #           registration line says so. For an application repository the
-#           target is the Deployment carrying the repository's name in the
-#           local H-DevOps checkout. A PR that touches no deployable service
-#           registers nothing and says so, as does one that only deletes a
-#           manifest; a PR whose manifests could not be read registers nothing
-#           and says that instead.
+#           targets are the Deployments that RUN this repository's image in a
+#           production namespace, found by matching a container image's
+#           repository name against the repository's own name and the aliases
+#           in config/change-watch-repos (local, gitignored); a repository
+#           whose Deployment names differ from its image name is mapped there,
+#           and one that deploys to a host rather than the cluster is watched
+#           through its own deploy workflow instead. A large family is capped
+#           at MAX_TARGETS busiest Deployments and the registration line states
+#           the cap. A repository that also has a Sentry project, and any
+#           workflow the map names, become additional targets of their own; a
+#           Sentry project this home has no token for is not a target. A
+#           PR that touches no deployable service registers nothing and says
+#           so, as does one that only deletes a manifest, one whose only target
+#           could not be read, one whose manifests could not be read, and one
+#           whose cluster image inventory could not be read; each says which of
+#           those it was. Every one of those still writes the merge's durable
+#           row, and one whose surface could not be read records it as
+#           unmeasurable-with-reason and queues the unmeasurable wake.
+#           Every Kubernetes target records a rollout FINGERPRINT at
+#           registration - its pod images plus its pods' pod-template-hash
+#           labels - and the watch refuses to score it until that fingerprint
+#           CHANGES, so a sample taken before the rollout lands measures the
+#           release rather than the code it replaced. The template hash is why a
+#           manifest change that rolls pods without touching an image (an env
+#           value, a routing table) still opens the gate, and why a mutable tag or
+#           a digest-pinned image still proves its own rollout. A target whose
+#           fingerprint has not changed is recorded as awaiting the deploy, never
+#           as health. When the fingerprint cannot be read at registration the
+#           target is still measured, and the clean completion, the unmeasurable
+#           verdict, and the status line each say the rollout was never proven
+#           for it.
 #           Registering an existing watch whose drive stopped before the end of
-#           its schedule re-arms the remaining samples; any other existing watch
-#           is left alone. Registration is read-only against the cluster; it
+#           its schedule, or whose schedule ended unmeasurable, re-arms it: a
+#           completed schedule is reset and re-measured from that point, its
+#           samples, previous values and read failures are cleared, its
+#           measurement epoch moves to the re-registration, and its durable row
+#           goes back to open, so no evidence from before the re-registration
+#           can score. The durable row decides this as well as the verdict, so a
+#           deleted verdict cannot hide a gap. Any other existing watch is left
+#           alone. Registration is read-only against the cluster; it
 #           writes only under this home's state/ directory. Its forge reads
 #           share one budget (default 60s) and its baseline capture the sample
 #           budget below, so a merge or watcher cycle is never stalled by it.
@@ -50,21 +84,49 @@
 # sample    Read every metric for every target, compare each to its baseline
 #           with a stated bar, and append one sample record. Degrades to
 #           "unmeasured" per metric rather than failing the whole watch.
-# verdict   Print "change-watch clean", "change-watch completed unmeasured",
-#           "change-watch interrupted at +Nm", or
+# verdict   Print "change-watch clean", "change-watch unmeasurable-with-reason:
+#           <reason>", "change-watch interrupted at +Nm", or
 #           "change-watch regressed at +Nm on <metric> (<value> vs baseline <value>)".
 #           Clean means every target had at least one scored reading across the
-#           schedule. Completed unmeasured means the schedule ended with some
-#           target never read: a measurement gap, recorded as such, never as
-#           health.
+#           schedule AND the +15m, +1h and +6h readings all scored something.
+#           Anything less is unmeasurable-with-reason: a measurement gap,
+#           recorded as such, never as health. The exit status is the done-claim
+#           block: 0 for clean or regressed, 1 for unmeasurable-with-reason.
+# gate      The done-claim gate for one task: exit 0 only when every watch that
+#           task registered has reached a terminal state that is not a
+#           measurement gap. A watch still running is not a pass, and an
+#           unmeasurable watch is a failure, so a task cannot claim done while
+#           its merge has no evidence. bin/fm-teardown.sh calls it with
+#           --terminal-gap, which fails only for a terminal measurement gap: a
+#           running watch never blocks teardown, because state/change-watch/ is
+#           not a task record and keeps sampling after the task is gone. Both
+#           modes decide from the watch's durable row, so deleting the verdict
+#           file never turns a failing row into a pass, and a row whose merge
+#           never created a watch directory is still seen.
+# audit     The 7-day acceptance, measured. It fails (exit 1) when any status log
+#           under state/ carries the literal "change-watch completed unmeasured"
+#           line, or when any durable row completed inside the window ended
+#           unmeasurable-with-reason. Default window 7 days.
 # status    Print one line per registered watch (all of them, or one).
-# doctor    Live self-test of the pooler console read. With no argument it runs
-#           SHOW POOLS at the documented pooler path (ubuntu@10.0.0.17, port
-#           6432) and proves rows come back; with a watch id it reads every
-#           target's own resolved pool and names a target whose pool is
-#           unresolved. A read that fails, times out, or returns no row for the
-#           database is a stated "doctor: FAIL" line and a non-zero exit, so an
-#           unmeasured pool metric is never silent.
+# doctor    Live self-test of the read path. It prints the kubeconfig in use,
+#           proves the cluster answers, and with a watch id reads every target
+#           live: a Deployment target must return its pods and its pod images, a
+#           pool-backed target its own resolved pool, a Sentry target its
+#           project, and a workflow target its run list. It also replays the
+#           reasons the last sample recorded for each unmeasured metric, so the
+#           question "why was nothing measured" is answered with evidence
+#           instead of silence. A read that fails, times out, or returns no data
+#           is a stated "doctor: FAIL" line and a non-zero exit.
+#
+# Kubeconfig: the cluster is read with the first of FM_CW_KUBECONFIG, the path
+# on the first non-comment line of config/change-watch-kubeconfig (local,
+# gitignored), an operator's own KUBECONFIG, and ~/.kube/mcp-viewer.kubeconfig
+# (the read-only production reader this home uses) that is set and readable.
+# The ambient ~/.kube/config default is used only when none of those exist,
+# because that default can point at a cluster this home cannot reach - which is
+# exactly how every watch once completed unmeasured while looking healthy. A
+# sample proves the cluster answers once before reading any metric and records
+# the reason for every metric it could not read.
 #
 # Metrics, bars, and windows:
 #   http_5xx_per_min     5xx responses per minute from the pods' own access
@@ -94,35 +156,95 @@
 #                        samples.
 #   rss_ratio            highest container working set as a fraction of its
 #                        memory limit; regressed when value > 0.85.
+#   sentry_new_issues    issues first seen at or after the baseline epoch at
+#                        level error or fatal; regressed when value > baseline
+#                        AND value >= 3. Its target is sentry/<project>. It is
+#                        not read until the watch's own landing is proven: the
+#                        watched Deployments' rollout when the watch has any,
+#                        otherwise its deploy workflow's run for this merge.
+#                        Without a Sentry token or a mapped project it is
+#                        unmeasured for the whole watch, with the reason
+#                        recorded.
+#   deploy_run           the repository's own deploy workflow as 1 when a run
+#                        created at or after the merge completed successfully
+#                        and 0 when it failed, was cancelled, or timed out;
+#                        regressed when value is 0, because a failed deploy is
+#                        definite whether or not any run existed at registration
+#                        (so its baseline reads "unmeasured"). Its target is
+#                        run/<owner>/<repo>#<workflow-path>. No run yet, or one
+#                        still in flight, is awaiting the deploy and unmeasured.
 # The baseline window is the 60 minutes before the change's rollout start, read
 # as a level for counters (restarts, oomkilled, rss_ratio) and as a rate for the
 # others. An unmeasured metric is skipped, never scored as a pass, and a metric
-# with a relative bar (http_5xx_per_min, restarts, p95_ms) whose baseline could
-# not be read is recorded but never scored.
+# with a relative bar (http_5xx_per_min, restarts, p95_ms, sentry_new_issues)
+# whose baseline could not be read is recorded but never scored. Every metric a
+# sample could not read leaves its reason in the watch's read-failures record,
+# and both status and doctor replay them.
+#
+# An absent metric is never implied to be healthy: a clean verdict counts only
+# the metrics that were actually read, and the completion note and status line
+# name every metric key no sample ever scored, target included, so a release
+# watched only for restarts and memory says exactly that and a target whose own
+# pool or pods were never read is named as the gap it is.
 #
 # Schedule: +5m, +15m, +30m, then hourly to +12h. Samples stop at the first
 # regression. On a clean +12h the watch appends one note to the task's status
-# log and records one wiki observation; on a completed-unmeasured +12h it
-# appends one note naming the targets it never read and records nothing else.
+# log and, when that note has no gap to report, records one wiki observation; a
+# clean ending that did leave a metric unmeasured or a rollout unproven says so
+# in the note instead. A +12h that cannot be proven writes NO status note at
+# all: it is a failure, so it queues a check wake and records the row.
+#
+# Awaiting the deploy is not a measurement gap. A sample taken before the
+# watched rollout landed has nothing to read yet, so it is recorded as awaiting
+# rather than as a failed read, and it never counts against a proven verdict.
+# A watch whose rollout never landed at all still ends unmeasurable, because no
+# target ever scored and the verdict names it.
+#
+# Durable row: every merge writes exactly one row at
+# state/change-watch/rows/<watch-id>.json, holding the +15m, +1h and +6h
+# readings, the real-user check, and a terminal state of proven / regressed /
+# unmeasurable-with-reason (plus open while the watch runs, and not-applicable
+# for a merge that touched no deployable surface at all, where a read that failed
+# instead records unmeasurable-with-reason). state/change-watch/ is
+# not a task record, so bin/fm-teardown.sh never removes it and the row outlives
+# the task. The schema is owned by the "durable row" section below.
 #
 # Reporting: the first regression appends one
 #   check: change-watch <task-id> <pr-url> <metric> regressed
 # wake to the durable wake queue and steers the owning task through
 # bin/fm-send.sh with the numbers; an interrupted drive appends one
 #   check: change-watch <task-id> <pr-url> interrupted at +Nm
-# wake. All are best-effort and never fail a merge.
+# wake; and a schedule that ends unmeasurable appends one
+#   check: change-watch <task-id> <pr-url> unmeasurable (<reason>)
+# wake, because an unmeasurable watch is a failure and not a quiet completion.
+# All are best-effort and never fail a merge.
 #
 # Read-only against the cluster. No model calls. No new fleet workers: the
 # watcher's existing process-event runner drives the registered watch. One
 # sample, and the baseline capture at registration, are each bounded by a hard
-# budget (default 25s); every metric not read inside it is recorded unmeasured.
+# budget (default 25s). That budget bounds the cluster reads only: every metric
+# they cannot reach inside it is recorded unmeasured, while the Sentry and
+# deploy-workflow reads go over the network under their own bounds and are never
+# costed against a budget the pod reads spent.
 #
 # Test seams (all optional, all inert in production):
 #   FM_CW_NOW              fixed current epoch (integer) instead of `date +%s`
 #   FM_CW_FORGE_DIR        directory replacing every forge read (files.txt,
 #                          merge-epoch, head-ref, diff.txt, content/<path>)
-#   FM_CW_HDEVOPS_K8S_DIR  k8s/prod tree of an H-DevOps checkout, used to resolve
-#                          an application repository to its Deployment
+#   FM_CW_HDEVOPS_K8S_DIR  k8s/prod tree of an H-DevOps checkout, the last-resort
+#                          way to resolve an application repository to a Deployment
+#   FM_CW_KUBECONFIG       kubeconfig file used for every cluster read
+#   FM_CW_CONFIG_DIR       directory replacing the home's config/ directory,
+#                          where change-watch-kubeconfig and change-watch-repos live
+#   FM_CW_MAX_TARGETS      cap on Deployments watched for one repository (default 8)
+#   FM_CW_WORKLOADS_DIR    directory replacing the live image inventory: a file
+#                          workloads holds "ns<TAB>name<TAB>replicas<TAB>images",
+#                          images comma- or space-separated
+#   FM_CW_SENTRY_VAULT     Sentry credential file (default ~/.config/muso/sentry-vault.json)
+#   FM_CW_SENTRY_DIR       directory of stubbed Sentry responses: issues-<project>.json
+#   FM_CW_GH               gh command used for the deploy-run target (default gh)
+#   FM_CW_GH_DIR           directory of stubbed gh responses:
+#                          runs-<owner>-<repo>-<workflow-path with / and space as _>.json
 #   FM_CW_FORGE_TIMEOUT    per-call bound on a forge read (default 12s)
 #   FM_CW_FORGE_BUDGET     total bound on forge reads in one register (default 60s)
 #   FM_CW_SAMPLE_DEADLINE  hard budget for one sample or baseline capture (default 25)
@@ -152,7 +274,9 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 WATCH_ROOT="$STATE/change-watch"
 SCHEDULE_OFFSETS="300 900 1800 3600 7200 10800 14400 18000 21600 25200 28800 32400 36000 39600 43200"
-METRICS="http_5xx_per_min restarts oomkilled p95_ms rss_ratio pgbouncer_cl_waiting"
+K8S_METRICS="restarts oomkilled rss_ratio http_5xx_per_min p95_ms pgbouncer_cl_waiting"
+SENTRY_METRICS="sentry_new_issues"
+RUN_METRICS="deploy_run"
 BASELINE_WINDOW_SECONDS=3600
 SAMPLE_WINDOW_SECONDS=300
 LOG_TAIL_LINES=2000
@@ -164,6 +288,18 @@ FORGE_BUDGET_SECONDS=${FM_CW_FORGE_BUDGET:-60}
 # never run a sample, a merge, or a watcher cycle past its bound.
 SAMPLE_DEADLINE_SECONDS=${FM_CW_SAMPLE_DEADLINE:-25}
 MAX_MANIFEST_READS=20
+# Cap on Deployments watched for one repository: a large image family (the
+# industry-data-processing family alone is 21 Deployments in production) cannot
+# be sampled inside one sample budget, so the busiest MAX_TARGETS are watched and
+# the registration line states the cap instead of silently dropping the rest.
+MAX_TARGETS=${FM_CW_MAX_TARGETS:-8}
+# A Deployment is a watch target only when it runs in a production namespace:
+# a dev, test, drill, or staging copy is not the release.
+PROD_NAMESPACE_EXCLUDE='-dev|-test|-tests|-staging|-stage|-drill|-pr-'
+TARGET_NAME_EXCLUDE='-test$'
+SENTRY_VAULT=${FM_CW_SENTRY_VAULT:-$HOME/.config/muso/sentry-vault.json}
+SENTRY_MIN_NEW=3
+SENTRY_HTTP_TIMEOUT=6
 POOLER_SSH_USER=ubuntu
 POOLER_SOCKET_DIR=/var/run/postgresql
 POOLER_DEFAULT_HOST=10.0.0.17
@@ -171,7 +307,10 @@ POOLER_DEFAULT_PORT=6432
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 notice() { printf 'notice: %s\n' "$1" >&2; }
-usage() { sed -n '2,138p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() {
+  awk 'NR == 1 { next } /^set -u$/ { exit } { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]}"
+  exit 2
+}
 
 cw_now() {
   if [ -n "${FM_CW_NOW:-}" ]; then
@@ -183,8 +322,67 @@ cw_now() {
 
 CW_FORGE_START=$(cw_now)
 CW_BUDGET_START=''
+CW_CONFIG_DIR=${FM_CW_CONFIG_DIR:-$FM_HOME/config}
+CW_KUBECONFIG=''
+CW_KUBECONFIG_SOURCE=''
 
 cw_kubectl() { kubectl --request-timeout="$KUBECTL_TIMEOUT" "$@"; }
+
+# Resolve the kubeconfig every cluster read uses, and export it once so a
+# subshell, a background reader, and a by-hand reproduction all see the same
+# file. Precedence: an explicit FM_CW_KUBECONFIG, the home's own
+# config/change-watch-kubeconfig, an operator's KUBECONFIG, then the read-only
+# production reader this house ships. The ambient default is last on purpose:
+# when it points at a cluster this home cannot reach, every watch completed
+# unmeasured while its record still read as a normal watch.
+cw_kubeconfig_init() {
+  local source configured candidate
+  configured=''
+  if [ -f "$CW_CONFIG_DIR/change-watch-kubeconfig" ]; then
+    configured=$(sed -n 's/^[[:space:]]*#.*$//; s/^[[:space:]]*//; s/[[:space:]]*$//; /^$/d; p; q' \
+      "$CW_CONFIG_DIR/change-watch-kubeconfig" 2>/dev/null || true)
+  fi
+  # Candidates are walked in precedence order and each one is tested for
+  # readability as it is offered: an unreadable file is stated and skipped so the
+  # next candidate still gets its turn. Ending the walk at the first unreadable
+  # file is what silently moved reads onto the ambient default.
+  for source in FM_CW_KUBECONFIG config/change-watch-kubeconfig KUBECONFIG mcp-viewer; do
+    case "$source" in
+      FM_CW_KUBECONFIG) candidate=${FM_CW_KUBECONFIG:-} ;;
+      config/change-watch-kubeconfig) candidate=$configured ;;
+      KUBECONFIG) candidate=${KUBECONFIG:-}; candidate=${candidate%%:*} ;;
+      mcp-viewer) candidate=$HOME/.kube/mcp-viewer.kubeconfig ;;
+    esac
+    [ -n "$candidate" ] || continue
+    if [ ! -r "$candidate" ]; then
+      printf 'notice: change-watch: kubeconfig %s (%s) is unreadable; trying the next one\n' \
+        "$candidate" "$source" >&2
+      continue
+    fi
+    CW_KUBECONFIG=$candidate
+    CW_KUBECONFIG_SOURCE=$source
+    export KUBECONFIG="$candidate"
+    return 0
+  done
+  CW_KUBECONFIG=''
+  CW_KUBECONFIG_SOURCE='ambient default'
+  return 0
+}
+
+# One cheap proof that the cluster answers, run before a sample spends its
+# budget on metric reads that would each fail the same way.
+cw_cluster_probe() {
+  local out
+  # A stubbed series directory stands in for every cluster read, so the probe
+  # has nothing to prove.
+  [ -z "${FM_CW_CLUSTER_DIR:-}" ] || return 0
+  command -v kubectl >/dev/null 2>&1 || { printf 'kubectl not installed\n'; return 1; }
+  if out=$(cw_kubectl get --raw=/version 2>&1 >/dev/null); then
+    return 0
+  fi
+  printf '%s\n' "${out:-unreadable}" | grep -v '^$' | tail -1 | cut -c1-200
+  return 1
+}
 
 # Bound one forge read per call and all forge reads of this process together, so
 # a hung CLI or a wide PR can never stall the merge or watcher path.
@@ -196,7 +394,16 @@ cw_forge_run() {
   fm_run_timed "$left" "$@" 2>/dev/null
 }
 
-cw_budget_start() { CW_BUDGET_START=$(cw_now); }
+# Every read-scoped cache and budget starts with the sample, because the armed
+# drive is one long-lived process that takes every sample in-process: a budget
+# or a memo spent at +5m must not decide the read at +6h.
+cw_budget_start() {
+  CW_BUDGET_START=$(cw_now)
+  CW_FORGE_START=$(cw_now)
+  CW_POD_FACTS_CACHE=''
+  CW_WORKLOADS_CACHE=''
+  [ -z "$CW_POOL_BAD_HOSTS_FILE" ] || : > "$CW_POOL_BAD_HOSTS_FILE" 2>/dev/null || true
+}
 cw_within_budget() { [ $(( $(cw_now) - CW_BUDGET_START )) -lt "$SAMPLE_DEADLINE_SECONDS" ]; }
 cw_budget_left() {
   local used=0 left
@@ -225,6 +432,27 @@ cw_watch_dir() { printf '%s/%s\n' "$WATCH_ROOT" "$1"; }
 cw_meta_path() { printf '%s/watch.meta\n' "$(cw_watch_dir "$1")"; }
 cw_targets_path() { printf '%s/targets\n' "$(cw_watch_dir "$1")"; }
 cw_pools_path() { printf '%s/pools\n' "$(cw_watch_dir "$1")"; }
+# Extra target kinds: a Sentry project and a deploy workflow are watched
+# alongside the Deployments, and each is its own line in its own record so a
+# watch with no cluster targets still has targets.
+cw_sentry_path() { printf '%s/sentry\n' "$(cw_watch_dir "$1")"; }
+cw_runs_path() { printf '%s/runs\n' "$(cw_watch_dir "$1")"; }
+# The pod images and rollout fingerprint a Kubernetes target had at registration,
+# the evidence the
+# rollout must replace before the target is scored.
+cw_landed_path() { printf '%s/images-at-register\n' "$(cw_watch_dir "$1")"; }
+cw_landed_at_path() { printf '%s/landed-at\n' "$(cw_watch_dir "$1")"; }
+# Why each metric of the last sample could not be read.
+cw_reasons_path() { printf '%s/read-failures\n' "$(cw_watch_dir "$1")"; }
+cw_reasons_begin() {
+  : > "$(cw_reasons_path "$1")" 2>/dev/null || true
+}
+cw_record_reason() {  # <watch-id> <key> <reason>
+  local id=$1 key=$2 reason=$3
+  [ -n "$key" ] || return 0
+  { printf '%s\t%s\n' "$key" "$(printf '%s' "${reason:-unmeasured}" | tr '\t\n' '  ' | cut -c1-200)"; } \
+    >> "$(cw_reasons_path "$id")" 2>/dev/null || true
+}
 cw_baseline_path() { printf '%s/baseline\n' "$(cw_watch_dir "$1")"; }
 cw_schedule_path() { printf '%s/schedule\n' "$(cw_watch_dir "$1")"; }
 cw_samples_path() { printf '%s/samples.log\n' "$(cw_watch_dir "$1")"; }
@@ -240,6 +468,20 @@ cw_meta_get() {  # <watch-id> <key>
   file=$(cw_meta_path "$1")
   [ -f "$file" ] || return 1
   grep "^$2=" "$file" | tail -1 | cut -d= -f2- || true
+}
+
+cw_meta_set() {  # <watch-id> <key> <value>
+  local file tmp
+  file=$(cw_meta_path "$1")
+  [ -f "$file" ] || return 1
+  tmp=$(umask 077; mktemp "$(dirname "$file")/.cw.XXXXXX") || return 1
+  awk -v key="$2" -v value="$3" '
+    BEGIN { done = 0 }
+    index($0, key "=") == 1 { if (!done) { print key "=" value; done = 1 }; next }
+    { print }
+    END { if (!done) print key "=" value }
+  ' "$file" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 0600 "$tmp" && mv -f -- "$tmp" "$file"
 }
 
 cw_watch_exists() {
@@ -406,9 +648,176 @@ cw_diff_changed_lines() {
   ' | sort -u
 }
 
+# LIVE QUERY (cluster) - every Deployment's namespace, name, replicas, and
+# container images, one "ns<TAB>name<TAB>replicas<TAB>images" line each. A
+# Deployment with more than one container renders its images space-separated, so
+# a reader splits the field on commas and whitespace alike. One call answers the
+# whole inventory, which keeps registering an application release cheap enough
+# to run inside a merge hook. An unreadable cluster prints nothing and its caller
+# records the reason.
+cw_live_workloads() {
+  if [ -n "${CW_WORKLOADS_CACHE:-}" ]; then
+    printf '%s' "$CW_WORKLOADS_CACHE"
+    return 0
+  fi
+  local out
+  if [ -n "${FM_CW_WORKLOADS_DIR:-}" ]; then
+    [ -f "$FM_CW_WORKLOADS_DIR/workloads" ] || return 1
+    out=$(cat "$FM_CW_WORKLOADS_DIR/workloads")
+  else
+    command -v kubectl >/dev/null 2>&1 || return 1
+    out=$(cw_kubectl get deploy -A \
+      -o jsonpath='{range .items[*]}{.metadata.namespace}{"\t"}{.metadata.name}{"\t"}{.status.replicas}{"\t"}{.spec.template.spec.containers[*].image}{"\n"}{end}' \
+      2>/dev/null) || return 1
+  fi
+  [ -n "$out" ] || return 1
+  CW_WORKLOADS_CACHE=$out
+  printf '%s' "$out"
+}
+
+# The built-in repository map: the aliases an image name does not carry itself,
+# the Sentry project a repository reports into, and the deploy workflow of a
+# repository that reaches a host rather than the cluster. A home extends or
+# overrides it in config/change-watch-repos (never sourced), whose lines are
+# "<repo> <spec>..." with each spec one of
+#   <namespace>/<deployment>   an explicit Deployment target
+#   <deployment>               a Deployment in muso-prod
+#   image:<name>               match Deployments running an image named <name>
+#   sentry:<project-slug>      the repository's Sentry project
+#   run:<owner>/<repo>#<workflow-path>   the repository's deploy workflow
+#                                  (a path such as .github/workflows/deploy.yml,
+#                                  so the spec stays one whitespace-free token)
+
+# The home's repository map with comments removed. A `#` starts a comment only at
+# the start of a line or after whitespace, because a `run:` spec carries one
+# inside `<owner>/<repo>#<workflow-path>`.
+cw_repo_map_clean() {
+  sed -e 's/^#.*$//' -e 's/[[:space:]]#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' \
+    "$CW_CONFIG_DIR/change-watch-repos" 2>/dev/null | grep -v '^$' || true
+}
+
+cw_repo_map_lines() {
+  cat <<'BUILTIN'
+core-backend image:core-backend sentry:core-backend
+industry-data-processing image:industry-data-processing
+web-credits-next image:web-credits-next sentry:credits-web-next
+muso-messaging messaging/notify-gateway messaging/send-gateway messaging/preferences
+hydra run:Muso-AI/hydra#.github/workflows/deploy.yml
+BUILTIN
+  if [ -f "$CW_CONFIG_DIR/change-watch-repos" ]; then
+    cw_repo_map_clean
+  fi
+}
+
+# Specs mapped to one repository, in order: the home's own line when it names
+# the repository (so a local map replaces the built-in one), else the built-in
+# line.
+cw_repo_specs() {  # <repo>
+  local repo=$1 line specs=''
+  if [ -f "$CW_CONFIG_DIR/change-watch-repos" ]; then
+    specs=$(cw_repo_map_clean \
+      | awk -v r="$repo" '$1 == r { $1 = ""; sub(/^ /, ""); print }' | paste -sd ' ' -)
+  fi
+  [ -z "$specs" ] || { printf '%s\n' "$specs"; return 0; }
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    [ "$(printf '%s' "$line" | awk '{print $1}')" = "$repo" ] || continue
+    specs="$specs $(printf '%s' "$line" | cut -d' ' -f2-)"
+  done <<MAP
+$(cw_repo_map_lines)
+MAP
+  printf '%s\n' "$(printf '%s' "$specs" | sed -e 's/^ *//' -e 's/ *$//')"
+}
+
+# Production-only filter for a Deployment: a dev, test, drill, or staging copy is
+# not the release, and a test copy of a production Deployment is not a target.
+cw_target_eligible() {  # <ns> <name>
+  local ns=$1 name=$2
+  case "$ns" in '') return 1 ;; esac
+  if printf '%s' "$ns" | grep -Eq "($PROD_NAMESPACE_EXCLUDE)"; then return 1; fi
+  if printf '%s' "$name" | grep -Eq "($TARGET_NAME_EXCLUDE)"; then return 1; fi
+  return 0
+}
+
+# Resolve one spec to "target<TAB>ns<TAB>name" or "sentry<TAB>slug" or
+# "run<TAB>owner/repo<TAB>workflow" lines, ranked by replica count and capped at
+# MAX_TARGETS so a large image family is watched by its busiest members.
+cw_spec_targets() {  # <spec>
+  local spec=$1 arg='' ns name matched='' total inventory
+  case "$spec" in
+    sentry:*) printf 'sentry\t%s\n' "${spec#sentry:}"; return 0 ;;
+    run:*)
+      arg=${spec#run:}
+      printf 'run\t%s\t%s\n' "${arg%%#*}" "${arg#*#}"
+      return 0
+      ;;
+    image:*) arg=${spec#image:} ;;
+    '') return 0 ;;
+    */*) ns=${spec%%/*}; name=${spec#*/}
+      cw_target_eligible "$ns" "$name" || return 0
+      printf 'target\t%s\t%s\n' "$ns" "$name"
+      return 0
+      ;;
+    *) ns=muso-prod; name=$spec
+      cw_target_eligible "$ns" "$name" || return 0
+      printf 'target\t%s\t%s\n' "$ns" "$name"
+      return 0
+      ;;
+  esac
+  [ -n "$arg" ] || return 0
+  # Match every production Deployment running an image whose repository name is
+  # <arg>, then keep the busiest MAX_TARGETS. An inventory that cannot be read is
+  # stated, so it is distinguishable from a repository that deploys nothing.
+  if ! inventory=$(cw_live_workloads 2>/dev/null); then
+    printf 'note\timage inventory unread: no Deployment of image:%s could be resolved\t\n' "$arg"
+    return 0
+  fi
+  matched=$(printf '%s\n' "$inventory" | awk -F'\t' -v want="$arg" '
+    {
+      ns = $1; name = $2; replicas = $3 + 0; images = $4
+      n = split(images, list, /[,[:space:]]+/)
+      for (i = 1; i <= n; i++) {
+        repo = list[i]
+        sub(/^.*\//, "", repo)
+        sub(/@.*$/, "", repo)
+        sub(/:.*$/, "", repo)
+        if (repo == want) { printf "%s\t%s\t%d\n", ns, name, replicas; break }
+      }
+    }' | while IFS=$'\t' read -r ns name replicas; do
+      cw_target_eligible "$ns" "$name" || continue
+      printf '%s\t%s\t%s\n' "$replicas" "$ns" "$name"
+    done | sort -t$'\t' -k1,1nr -k2,2 -k3,3)
+  [ -n "$matched" ] || return 0
+  total=$(printf '%s\n' "$matched" | grep -c '' || true)
+  if [ "$total" -gt "$MAX_TARGETS" ]; then
+    printf 'note\tcapped: watching the %s busiest of %s image:%s Deployments\t\n' \
+      "$MAX_TARGETS" "$total" "$arg"
+  fi
+  printf '%s\n' "$matched" | head -n "$MAX_TARGETS" \
+    | while IFS=$'\t' read -r replicas ns name; do
+        [ -n "$ns" ] || continue
+        printf 'target\t%s\t%s\n' "$ns" "$name"
+      done
+}
+
+# Resolve an application repository to its whole target set from the map: the
+# Deployments that run its image, its Sentry project, and its deploy workflow.
+# Prints "target<TAB>ns<TAB>name", "sentry<TAB>slug", "run<TAB>repo<TAB>workflow",
+# and "note<TAB>text" lines. LIVE QUERY (cluster inventory).
+cw_repo_targets() {  # <repo>
+  local repo=$1 specs spec
+  specs=$(cw_repo_specs "$repo")
+  [ -n "$specs" ] || return 1
+  for spec in $specs; do
+    cw_spec_targets "$spec"
+  done
+  return 0
+}
+
 # Resolve an application repository's name to "target<TAB>namespace<TAB>name"
 # from a local H-DevOps checkout's k8s/prod tree. Read-only; prints nothing when
-# unresolved or when the Deployment declares no namespace. LIVE QUERY (checkout).
+# unresolved or when the Deployment declares no namespace. Used only when the
+# image inventory resolves nothing for the repository. LIVE QUERY (checkout).
 cw_service_targets() {  # <service>
   local root=${FM_CW_HDEVOPS_K8S_DIR:-$FM_HOME/projects/H-DevOps/k8s/prod}
   local service=$1 dir manifest ns name
@@ -474,7 +883,7 @@ cw_derive_targets() {  # <url> <provider> <owner> <repo> <number> <repo-name>
   [ -n "$files" ] || return 1
   manifests=$(printf '%s\n' "$files" | grep -E '^k8s/prod/[^/]+/[^/]+\.ya?ml$' || true)
   if [ -z "$manifests" ]; then
-    cw_service_targets "$repo_name"
+    cw_app_targets "$repo_name"
     return
   fi
   ref=$(cw_forge_head_ref "$url" 2>/dev/null || true)
@@ -504,7 +913,31 @@ cw_derive_targets() {  # <url> <provider> <owner> <repo> <number> <repo-name>
 $manifests
 PATHS
   [ "$any" -eq 1 ] && return 0
-  cw_service_targets "$repo_name"
+  cw_app_targets "$repo_name"
+}
+
+# An application repository's targets: its image family from the live cluster,
+# its mapped Sentry project, and its mapped deploy workflow. Falls back to the
+# local H-DevOps checkout's Deployment names when the inventory resolves no
+# Deployment for the repository, so a repository whose image name is unknown is
+# still watched rather than silently unwatched.
+cw_app_targets() {  # <repo>
+  local repo=$1 out targets
+  out=$(cw_repo_targets "$repo" 2>/dev/null || true)
+  targets=$(printf '%s\n' "$out" | grep -c '^target	' || true)
+  if [ "$targets" -eq 0 ] && ! printf '%s\n' "$out" | grep -q '^run	'; then
+    # The image inventory resolved no Deployment. Fall back to the checkout's own
+    # manifest, and keep every non-Deployment target the map already resolved
+    # (its Sentry project, its deploy workflow): those reads never touch the
+    # cluster, so a cluster that refused the inventory is no reason to lose them.
+    if cw_service_targets "$repo"; then
+      printf '%s\n' "$out" | grep -v '^target	' || true
+    else
+      printf '%s\n' "$out"
+    fi
+    return 0
+  fi
+  printf '%s\n' "$out"
 }
 
 # --- live metric reads --------------------------------------------------------
@@ -517,8 +950,8 @@ PATHS
 # LOG_TAIL_LINES lines; a container that hit the cap is rated over the span its
 # lines cover, one that did not over the whole window.
 cw_live_http_5xx_per_min() {  # <ns> <deploy> <window-seconds>
-  local ns=$1 deploy=$2 secs=$3
-  cw_kubectl -n "$ns" logs --tail="$LOG_TAIL_LINES" --since="${secs}s" --max-log-requests=10 \
+  local ns=$1 deploy=$2 secs=$3 out
+  out=$(cw_kubectl -n "$ns" logs --tail="$LOG_TAIL_LINES" --since="${secs}s" --max-log-requests=10 \
     --prefix --timestamps -l "app=$deploy" 2>/dev/null | python3 -c '
 import datetime, re, sys
 window = float(sys.argv[1])
@@ -554,59 +987,175 @@ for p in pods.values():
     span = window if p["lines"] < cap else max(p["last"] - p["first"], 1.0)
     rate += p["errors"] * 60.0 / span
 print("%.4f" % rate)
-' "$secs" "$LOG_TAIL_LINES" 2>/dev/null || return 1
+' "$secs" "$LOG_TAIL_LINES" 2>/dev/null)
+  [ -n "$out" ] || {
+    printf 'no HTTP access-log status lines in this Deployment\047s pod logs over the window\n' >&2
+    return 1
+  }
+  printf '%s\n' "$out"
 }
 
-# LIVE QUERY (cluster) - total container restartCount across the Deployment.
-cw_live_restarts() {  # <ns> <deploy> <window-seconds>
-  local ns=$1 deploy=$2
-  cw_kubectl -n "$ns" get pods -l "app=$deploy" -o json 2>/dev/null | python3 -c '
-import json, sys
-data = json.load(sys.stdin)
-total = 0
-for pod in data.get("items", []):
-    for cs in pod.get("status", {}).get("containerStatuses", []) or []:
-        total += int(cs.get("restartCount", 0) or 0)
-print(total)
-' 2>/dev/null || return 1
+# LIVE QUERY (cluster) - one Deployment's pod facts, read once and reused by
+# every metric that needs them: restartCount total, the OOMKilled termination
+# epochs, the pod images, and the per-container memory limits that the
+# working-set ratio divides by, and the pods' pod-template-hash labels that the
+# landing gate uses to prove a rollout. The row is epoch-free so one read answers
+# the landing gate and every pod-backed metric of the sample; cw_prime_pod_facts
+# takes that read in this process, because a memo written inside a per-metric
+# command substitution dies with its subshell. Prints
+# "restarts<TAB>oom-epochs<TAB>images<TAB>pairs<TAB>hashes" where oom-epochs is
+# the termination epochs joined by "," (0 for a termination that carries no
+# timestamp), pairs is "pod,container,limit-bytes" joined by ";", and hashes is
+# the sorted distinct pod-template-hash values joined by ",".
+CW_POD_FACTS_CACHE=''
+CW_WORKLOADS_CACHE=''
+# A read that failed is remembered for the sample as this sentinel, so a target
+# whose pods cannot be read costs one attempt instead of one per metric.
+CW_POD_FACTS_FAILED='!'
+cw_pod_facts_failed() {  # <key>
+  CW_POD_FACTS_CACHE="$CW_POD_FACTS_CACHE$1	$CW_POD_FACTS_FAILED
+"
 }
-
-# LIVE QUERY (cluster) - OOMKilled terminations at or after the baseline epoch.
-# An OOMKilled pod that restarted successfully never shows in the pod's current
-# STATUS, so lastState is the only honest signal.
-cw_live_oomkilled() {  # <ns> <deploy> <baseline-epoch>
-  local ns=$1 deploy=$2 since=${3:-0}
-  cw_kubectl -n "$ns" get pods -l "app=$deploy" -o json 2>/dev/null | python3 -c '
+cw_pod_facts() {  # <ns> <deploy>
+  local ns=$1 deploy=$2 key cached
+  key="$ns/$deploy"
+  while IFS=$'\t' read -r k v; do
+    [ "$k" = "$key" ] || continue
+    [ "$v" = "$CW_POD_FACTS_FAILED" ] && return 1
+    printf '%s\n' "$v"
+    return 0
+  done <<CACHE
+$CW_POD_FACTS_CACHE
+CACHE
+  command -v kubectl >/dev/null 2>&1 || { cw_pod_facts_failed "$key"; return 1; }
+  cached=$(cw_kubectl -n "$ns" get pods -l "app=$deploy" -o json 2>/dev/null | python3 -c '
 import datetime, json, sys
-since = int(sys.argv[1] or 0)
-data = json.load(sys.stdin)
-count = 0
-for pod in data.get("items", []):
+try:
+    data = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+items = data.get("items", [])
+if not items:
+    sys.exit(1)
+restarts = 0
+ooms = []
+images = []
+hashes = []
+pairs = []
+for pod in items:
+    pname = pod.get("metadata", {}).get("name", "")
+    h = (pod.get("metadata", {}).get("labels", {}) or {}).get("pod-template-hash", "")
+    if h and h not in hashes:
+        hashes.append(h)
     for cs in pod.get("status", {}).get("containerStatuses", []) or []:
+        restarts += int(cs.get("restartCount", 0) or 0)
         for state in (cs.get("lastState", {}) or {}).values():
             if not isinstance(state, dict) or state.get("reason") != "OOMKilled":
                 continue
             ts = state.get("finishedAt") or ""
-            if not ts:
-                count += 1
-                continue
             try:
                 t = datetime.datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
-                if int(t.replace(tzinfo=datetime.timezone.utc).timestamp()) >= since:
-                    count += 1
+                ooms.append(int(t.replace(tzinfo=datetime.timezone.utc).timestamp()))
             except ValueError:
-                count += 1
-print(count)
-' "$since" 2>/dev/null || return 1
+                ooms.append(0)
+    for c in pod.get("spec", {}).get("containers", []) or []:
+        img = c.get("image", "")
+        if img and img not in images:
+            images.append(img)
+        raw = str((c.get("resources", {}).get("limits", {}) or {}).get("memory", "") or "")
+        factor = 1
+        for suffix, mult in (("Ki", 1024), ("Mi", 1024 ** 2), ("Gi", 1024 ** 3),
+                             ("K", 1000), ("M", 1000 ** 2), ("G", 1000 ** 3)):
+            if raw.endswith(suffix):
+                factor = mult
+                raw = raw[: -len(suffix)]
+                break
+        try:
+            limit = float(raw) * factor
+        except ValueError:
+            limit = 0.0
+        if limit > 0:
+            pairs.append("%s,%s,%.0f" % (pname, c.get("name", ""), limit))
+print("%d\t%s\t%s\t%s\t%s" % (restarts, ",".join(str(e) for e in ooms),
+                              ",".join(images), ";".join(pairs), ",".join(hashes)))
+') || { cw_pod_facts_failed "$key"; return 1; }
+  [ -n "$cached" ] || { cw_pod_facts_failed "$key"; return 1; }
+  CW_POD_FACTS_CACHE="$CW_POD_FACTS_CACHE$key	$cached
+"
+  printf '%s\n' "$cached"
+}
+
+# Read every target's pod facts once per sample so the landing gate and each
+# pod-backed metric are served by that one read: a whole image family then costs
+# one pod read per target instead of one per metric per target.
+cw_prime_pod_facts() {  # <watch-id>
+  local id=$1 ns deploy
+  [ -f "$(cw_targets_path "$id")" ] || return 0
+  while IFS=$'\t' read -r ns deploy; do
+    [ -n "${ns:-}" ] || continue
+    cw_within_budget || return 0
+    cw_pod_facts "$ns" "$deploy" >/dev/null 2>&1 || true
+  done < "$(cw_targets_path "$id")"
+}
+
+# One field of a target's pod facts, or nothing when the read failed.
+cw_pod_fact() {  # <ns> <deploy> <field>
+  local facts
+  facts=$(cw_pod_facts "$1" "$2") || return 1
+  printf '%s' "$facts" | cut -f"$3"
+}
+
+# LIVE QUERY (cluster) - total container restartCount across the Deployment.
+cw_live_restarts() {  # <ns> <deploy>
+  cw_pod_fact "$1" "$2" 1
+}
+
+# LIVE QUERY (cluster) - OOMKilled terminations at or after the baseline epoch.
+# An OOMKilled pod that restarted successfully never shows in the pod's current
+# STATUS, so lastState is the only honest signal. A termination that carries no
+# timestamp cannot be proven to predate the baseline, so it counts.
+cw_live_oomkilled() {  # <ns> <deploy> <baseline-epoch>
+  local epochs
+  epochs=$(cw_pod_fact "$1" "$2" 2) || return 1
+  printf '%s' "$epochs" | awk -F, -v since="${3:-0}" '
+    { for (i = 1; i <= NF; i++) if ($i != "" && ($i + 0 == 0 || $i + 0 >= since)) n++ }
+    END { print n + 0 }
+  '
+}
+
+# LIVE QUERY (cluster) - the pod images a target runs, comma-separated.
+cw_live_images() {  # <ns> <deploy>
+  cw_pod_fact "$1" "$2" 3
+}
+
+# LIVE QUERY (cluster) - the rollout fingerprint a target is judged by: its pod
+# images plus its pods' pod-template-hash labels. A Deployment rollout always
+# mints a new template hash, so an env or routing change that leaves every image
+# byte-identical still changes the fingerprint, while a mutable tag or a
+# digest-pinned reference still proves the rollout happened by its own hash.
+cw_live_fingerprint() {  # <ns> <deploy>
+  local facts images hashes
+  facts=$(cw_pod_facts "$1" "$2") || return 1
+  images=$(printf '%s' "$facts" | cut -f3)
+  hashes=$(printf '%s' "$facts" | cut -f5)
+  [ -n "$images$hashes" ] || return 1
+  printf '%s|%s\n' "$images" "$hashes"
 }
 
 # LIVE QUERY (cluster) - request p95 latency where the service exposes it, from
 # the conventional per-service Prometheus histogram. An absent series is
-# unmeasured, not a pass.
+# unmeasured, not a pass. The read needs a port-forward into the monitoring
+# namespace, which a read-only reader is usually not granted; that refusal is a
+# measured gap with its reason recorded, never a silent zero.
 cw_live_p95_ms() {  # <ns> <deploy> <window-seconds>
   local ns=$1 deploy=$2 secs=$3 value rc
   command -v kubectl >/dev/null 2>&1 || return 1
   command -v curl >/dev/null 2>&1 || return 1
+  fm_run_timed "$(cw_budget_left || printf 5)" kubectl -n monitoring \
+    auth can-i create pods/portforward >/dev/null 2>&1 || {
+    printf 'port-forward into the monitoring namespace is not permitted for this reader, so the Prometheus p95 series cannot be read\n' >&2
+    return 1
+  }
   value=$(
     cw_kubectl -n monitoring port-forward svc/kube-prometheus-kube-prome-prometheus 19090:9090 >/dev/null 2>&1 &
     pf=$!
@@ -630,36 +1179,16 @@ except Exception:
 }
 
 # LIVE QUERY (cluster) - highest container working set as a fraction of its
-# memory limit across the Deployment's pods. Reads the pod specs for limits and
-# metrics-server (POD NAME CPU MEMORY) for the working set, then takes the worst
-# ratio.
+# memory limit across the Deployment's pods. The limits come from the pod facts
+# read the other pod metrics already share, and the working set from
+# metrics-server (POD NAME CONTAINER CPU MEMORY); the worst ratio wins.
 cw_live_rss_ratio() {  # <ns> <deploy> <window-seconds>
   local ns=$1 deploy=$2 limits usage
-  limits=$(cw_kubectl -n "$ns" get pods -l "app=$deploy" -o json 2>/dev/null | python3 -c '
-import json, sys
-data = json.load(sys.stdin)
-for pod in data.get("items", []):
-    p = pod.get("metadata", {}).get("name", "")
-    for c in pod.get("spec", {}).get("containers", []) or []:
-        raw = str((c.get("resources", {}).get("limits", {}) or {}).get("memory", "") or "")
-        factor = 1
-        for suffix, mult in (("Ki", 1024), ("Mi", 1024 ** 2), ("Gi", 1024 ** 3),
-                             ("K", 1000), ("M", 1000 ** 2), ("G", 1000 ** 3)):
-            if raw.endswith(suffix):
-                factor = mult
-                raw = raw[: -len(suffix)]
-                break
-        try:
-            limit = float(raw) * factor
-        except ValueError:
-            limit = 0.0
-        if limit > 0:
-            print("%s\t%s\t%.0f" % (p, c.get("name", ""), limit))
-' 2>/dev/null) || return 1
+  limits=$(cw_pod_fact "$1" "$2" 4) || return 1
   [ -n "$limits" ] || return 1
   usage=$(cw_kubectl -n "$ns" top pods -l "app=$deploy" --containers --no-headers 2>/dev/null) || return 1
   [ -n "$usage" ] || return 1
-  printf '%s\n' "$limits" | CW_USAGE="$usage" awk -F'\t' '
+  printf '%s\n' "$limits" | tr ';' '\n' | CW_USAGE="$usage" awk -F',' '
     function bytes(u,    two, one) {
       two = substr(u, length(u) - 1, 2)
       one = substr(u, length(u), 1)
@@ -689,6 +1218,174 @@ for pod in data.get("items", []):
     }
     END { if (worst > 0) printf "%.4f\n", worst }
   '
+}
+
+# LIVE QUERY (http) - the mapped Sentry project's new error and fatal issues:
+# those first seen at or after <since-epoch>. A missing credential, an unmapped
+# project, or a refused read is unmeasured with its reason, never a zero.
+
+# True when the vault holds a token, without ever materialising the token itself.
+cw_sentry_vault_ready() {
+  local file=$SENTRY_VAULT
+  [ -r "$file" ] || return 1
+  python3 - "$file" <<'PY' 2>/dev/null || return 1
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(1)
+inner = data.get("data") if isinstance(data, dict) else None
+if not isinstance(inner, dict) or not (inner.get("auth_token") or ""):
+    sys.exit(1)
+PY
+}
+
+# One page of the mapped project's issues first seen at or after <since>, as the
+# JSON its caller counts. The filter is server-side so a busy project's newest
+# issues are the page itself rather than whatever survived a most-recently-seen
+# cut, and the token is read and used inside the interpreter only: unlike a curl
+# header built from it, it never appears in any process's argv.
+cw_sentry_issue_page() {  # <project> <since-epoch>
+  local project=$1 since=$2 budget
+  if [ -n "${FM_CW_SENTRY_DIR:-}" ]; then
+    [ -f "$FM_CW_SENTRY_DIR/issues-$project.json" ] || return 1
+    cat "$FM_CW_SENTRY_DIR/issues-$project.json"
+    return 0
+  fi
+  command -v python3 >/dev/null 2>&1 || return 1
+  budget=$(cw_budget_left || printf '%s' "$SENTRY_HTTP_TIMEOUT")
+  fm_run_timed "$budget" python3 -c '
+import datetime, json, sys, urllib.error, urllib.parse, urllib.request
+vault, project, since, timeout = sys.argv[1], sys.argv[2], int(sys.argv[3]), float(sys.argv[4])
+try:
+    data = json.load(open(vault))
+except Exception:
+    sys.stderr.write("no readable Sentry vault at %s\n" % vault)
+    sys.exit(1)
+inner = data.get("data") if isinstance(data, dict) else None
+if not isinstance(inner, dict):
+    sys.stderr.write("Sentry vault %s has no data section\n" % vault)
+    sys.exit(1)
+token = inner.get("auth_token") or ""
+if not token:
+    sys.stderr.write("no Sentry token in %s\n" % vault)
+    sys.exit(1)
+host = inner.get("host") or "sentry.io"
+org = inner.get("org") or "musoai"
+first_seen = datetime.datetime.fromtimestamp(since, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+params = urllib.parse.urlencode({
+    "query": "is:unresolved firstSeen:>=%s" % first_seen,
+    "limit": "100",
+    "sort": "new",
+})
+url = "https://%s/api/0/projects/%s/%s/issues/?%s" % (host, org, project, params)
+request = urllib.request.Request(url, headers={"Authorization": "Bearer %s" % token})
+try:
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        body = response.read()
+except urllib.error.HTTPError as exc:
+    sys.stderr.write("Sentry read refused for %s: HTTP %s\n" % (project, exc.code))
+    sys.exit(1)
+except Exception as exc:
+    sys.stderr.write("Sentry read refused for %s: %s\n" % (project, exc))
+    sys.exit(1)
+try:
+    issues = json.loads(body)
+except ValueError:
+    issues = None
+if not isinstance(issues, list):
+    sys.stderr.write("Sentry returned an unreadable issue list for %s\n" % project)
+    sys.exit(1)
+json.dump(issues, sys.stdout)
+' "$SENTRY_VAULT" "$project" "$since" "$SENTRY_HTTP_TIMEOUT"
+}
+
+cw_live_sentry_new_issues() {  # <project> <since-epoch>
+  local project=$1 since=$2 page
+  case "$project" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  page=$(cw_sentry_issue_page "$project" "$since") || return 1
+  printf '%s' "$page" | python3 -c '
+import datetime, json, sys
+since = int(sys.argv[1] or 0)
+try:
+    issues = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+if not isinstance(issues, list):
+    sys.exit(1)
+count = 0
+for issue in issues:
+    level = (issue.get("level") or "").lower()
+    if level not in ("error", "fatal"):
+        continue
+    first = issue.get("firstSeen") or ""
+    try:
+        t = datetime.datetime.strptime(first.replace("Z", "")[:19], "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        continue
+    if int(t.replace(tzinfo=datetime.timezone.utc).timestamp()) >= since:
+        count += 1
+print(count)
+' "$since"
+}
+
+# LIVE QUERY (forge) - the mapped deploy workflow's run created at or after the
+# merge: 1 when the earliest such run completed successfully, 0 when it failed,
+# and nothing while no run exists or one is still in flight (both are awaiting
+# the deploy, never health).
+cw_live_deploy_run() {  # <owner/repo> <workflow> <since-epoch>
+  local repo=$1 workflow=$2 since=$3 gh_cmd=${FM_CW_GH:-gh} out rc=0
+  if [ -n "${FM_CW_GH_DIR:-}" ]; then
+    local safe=${workflow//[\/ ]/_}
+    [ -f "$FM_CW_GH_DIR/runs-$repo-$safe.json" ] || {
+      printf 'no %s run since the merge\n' "$workflow"
+      return 1
+    }
+    out=$(cat "$FM_CW_GH_DIR/runs-$repo-$safe.json")
+  else
+    command -v "$gh_cmd" >/dev/null 2>&1 || return 1
+    out=$(cw_forge_run "$gh_cmd" run list -R "$repo" --workflow "$workflow" --limit 20 \
+      --json conclusion,status,createdAt,databaseId,url) || rc=$?
+    if [ "${rc:-0}" -ne 0 ]; then
+      # A spent budget is stated as itself: "read exited 124 with no value" told
+      # nobody why the deploy target stayed unmeasured.
+      [ "${rc:-0}" -ne 124 ] || printf 'the forge read budget for this sample was already spent\n'
+      return 1
+    fi
+  fi
+  printf '%s' "$out" | python3 -c '
+import datetime, json, sys
+since = int(sys.argv[1] or 0)
+try:
+    runs = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+if not isinstance(runs, list):
+    sys.exit(1)
+candidates = []
+for run in runs:
+    created = run.get("createdAt") or ""
+    try:
+        t = datetime.datetime.strptime(created.replace("Z", "")[:19], "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        continue
+    if int(t.replace(tzinfo=datetime.timezone.utc).timestamp()) >= since:
+        candidates.append(run)
+if not candidates:
+    print("no run created at or after the merge")
+    sys.exit(1)
+candidates.sort(key=lambda r: r.get("createdAt") or "")
+run = candidates[0]
+status = (run.get("status") or "")
+conclusion = (run.get("conclusion") or "")
+if status != "completed" or not conclusion:
+    print("run in flight: status %s" % (status or "unknown"))
+    sys.exit(1)
+if conclusion == "success":
+    print("1")
+    sys.exit(0)
+print("0")
+' "$since"
 }
 
 # LIVE QUERY (cluster) - the Deployment's own pgbouncer pool as
@@ -738,23 +1435,54 @@ sys.exit(1)
 # can never drain a caller's input stream), through the admin unix socket, and
 # bounded by the remaining sample budget. Prints the console's unaligned rows;
 # exit 124 when the bound was hit.
+# A host whose console did not answer is remembered for this sample: a watch
+# with several targets on one unreachable pooler must not spend the sample budget
+# on the same connect timeout once per target. The record is a file because every
+# pool read runs inside a command substitution, where a variable assignment dies
+# with its subshell.
+# The path is made once per process with mktemp so no other process can
+# pre-place it, and it is unlinked when the process exits.
+CW_POOL_BAD_HOSTS_FILE=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-cw-pool-unreachable.XXXXXX" 2>/dev/null) || CW_POOL_BAD_HOSTS_FILE=''
+cw_pool_memo_clear() {
+  [ -z "$CW_POOL_BAD_HOSTS_FILE" ] || rm -f -- "$CW_POOL_BAD_HOSTS_FILE" 2>/dev/null || true
+}
 cw_pool_console() {  # <host> <port>
-  local host=$1 port=$2 left
+  local host=$1 port=$2 left out rc
   command -v ssh >/dev/null 2>&1 || return 1
   case "$port" in ''|*[!0-9]*) return 1 ;; esac
   case "$host" in ''|*[!A-Za-z0-9.-]*) return 1 ;; esac
+  if [ -n "$CW_POOL_BAD_HOSTS_FILE" ] && grep -qxF -- "$host" "$CW_POOL_BAD_HOSTS_FILE" 2>/dev/null; then
+    printf '%s: console unreachable (recorded earlier in this read)\n' "$host" >&2
+    return 1
+  fi
   left=$(cw_budget_left) || return 124
-  fm_run_timed "$left" ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
+  out=$(fm_run_timed "$left" ssh -n -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=5 \
     "$POOLER_SSH_USER@$host" \
-    "sudo -u postgres psql -h $POOLER_SOCKET_DIR -p $port -U pgbouncer pgbouncer -Ac 'SHOW POOLS'"
+    "sudo -u postgres psql -h $POOLER_SOCKET_DIR -p $port -U pgbouncer pgbouncer -Ac 'SHOW POOLS'")
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    [ -z "$CW_POOL_BAD_HOSTS_FILE" ] \
+      || printf '%s\n' "$host" >> "$CW_POOL_BAD_HOSTS_FILE" 2>/dev/null || true
+    return "$rc"
+  fi
+  printf '%s\n' "$out"
 }
 
 # Clients waiting on one database's pools (cl_waiting summed over that
 # database's users). An unreachable console or an absent database is unmeasured.
 cw_live_pgbouncer_cl_waiting() {  # <host> <port> <database>
-  local host=$1 port=$2 db=$3 out
+  local host=$1 port=$2 db=$3 out err rc
   case "$db" in ''|*[!A-Za-z0-9_-]*) return 1 ;; esac
-  out=$(cw_pool_console "$host" "$port" 2>/dev/null) || return 1
+  err=$(mktemp "${TMPDIR:-/tmp}/fm-cw-pool.XXXXXX" 2>/dev/null) || err=/dev/null
+  out=$(cw_pool_console "$host" "$port" 2>"$err")
+  rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$out" ]; then
+    printf 'pgbouncer console %s:%s unreachable: %s\n' "$host" "$port" \
+      "$(tail -1 "$err" 2>/dev/null || printf 'exit %s with no rows' "$rc")" >&2
+    [ "$err" = /dev/null ] || rm -f -- "$err"
+    return 1
+  fi
+  [ "$err" = /dev/null ] || rm -f -- "$err"
   [ -n "$out" ] || return 1
   printf '%s\n' "$out" | awk -F'|' -v db="$db" '
     NR == 1 {
@@ -790,7 +1518,10 @@ cw_metric_read() {  # <watch-id> <metric> <target> <window> [<baseline-epoch>]
   local id=$1 metric=$2 target=$3 window=$4 since=${5:-0}
   local file value sanitized secs ns='' deploy='' spec=''
   if [ "$metric" = pgbouncer_cl_waiting ]; then
-    spec=$(cw_pool_spec "$id" "$target") || return 1
+    if ! spec=$(cw_pool_spec "$id" "$target"); then
+      printf 'no pgbouncer pool was resolved for this target, so its pool metric is unmeasured for the whole watch\n' >&2
+      return 1
+    fi
   fi
   if [ -n "${FM_CW_CLUSTER_DIR:-}" ]; then
     sanitized=$(printf '%s' "$target" | tr '/' '_')
@@ -802,6 +1533,17 @@ cw_metric_read() {  # <watch-id> <metric> <target> <window> [<baseline-epoch>]
       *) printf '%s\n' "$value"; return 0 ;;
     esac
   fi
+  case "$metric" in
+    sentry_new_issues)
+      cw_live_sentry_new_issues "${target#sentry/}" "$since"
+      return $?
+      ;;
+    deploy_run)
+      local run_target=${target#run/}
+      cw_live_deploy_run "${run_target%%#*}" "${run_target#*#}" "$since"
+      return $?
+      ;;
+  esac
   case "$target" in
     */*) ns=${target%%/*}; deploy=${target#*/} ;;
     *) return 1 ;;
@@ -809,7 +1551,7 @@ cw_metric_read() {  # <watch-id> <metric> <target> <window> [<baseline-epoch>]
   if [ "$window" = baseline ]; then secs=$BASELINE_WINDOW_SECONDS; else secs=$SAMPLE_WINDOW_SECONDS; fi
   case "$metric" in
     http_5xx_per_min) cw_live_http_5xx_per_min "$ns" "$deploy" "$secs" ;;
-    restarts) cw_live_restarts "$ns" "$deploy" "$secs" ;;
+    restarts) cw_live_restarts "$ns" "$deploy" ;;
     oomkilled) cw_live_oomkilled "$ns" "$deploy" "$since" ;;
     p95_ms) cw_live_p95_ms "$ns" "$deploy" "$secs" ;;
     rss_ratio) cw_live_rss_ratio "$ns" "$deploy" "$secs" ;;
@@ -836,27 +1578,188 @@ cw_series_next() {  # <file> <cursor-id>
 # --- baseline and sample ------------------------------------------------------
 
 cw_metric_keys() {  # <watch-id>
-  local target ns deploy metric
+  local id=$1 target ns deploy metric project run_repo workflow
+  if [ -f "$(cw_targets_path "$id")" ]; then
+    while IFS=$'\t' read -r ns deploy; do
+      [ -n "${ns:-}" ] || continue
+      target="$ns/$deploy"
+      for metric in $K8S_METRICS; do
+        printf '%s@%s\n' "$metric" "$target"
+      done
+    done < "$(cw_targets_path "$id")"
+  fi
+  if [ -f "$(cw_sentry_path "$id")" ]; then
+    while IFS= read -r project; do
+      [ -n "$project" ] || continue
+      for metric in $SENTRY_METRICS; do
+        printf '%s@sentry/%s\n' "$metric" "$project"
+      done
+    done < "$(cw_sentry_path "$id")"
+  fi
+  if [ -f "$(cw_runs_path "$id")" ]; then
+    while IFS=$'\t' read -r run_repo workflow; do
+      [ -n "${run_repo:-}" ] || continue
+      for metric in $RUN_METRICS; do
+        printf '%s@run/%s#%s\n' "$metric" "$run_repo" "$workflow"
+      done
+    done < "$(cw_runs_path "$id")"
+  fi
+}
+
+# Every target of every kind this watch was registered with, as the target
+# strings the metric keys carry, so a completion can name what it never read.
+cw_target_ids() {  # <watch-id>
+  local id=$1 ns deploy project run_repo workflow
+  if [ -f "$(cw_targets_path "$id")" ]; then
+    while IFS=$'\t' read -r ns deploy; do
+      [ -n "${ns:-}" ] || continue
+      printf '%s/%s\n' "$ns" "$deploy"
+    done < "$(cw_targets_path "$id")"
+  fi
+  if [ -f "$(cw_sentry_path "$id")" ]; then
+    while IFS= read -r project; do
+      [ -n "$project" ] || continue
+      printf 'sentry/%s\n' "$project"
+    done < "$(cw_sentry_path "$id")"
+  fi
+  if [ -f "$(cw_runs_path "$id")" ]; then
+    while IFS=$'\t' read -r run_repo workflow; do
+      [ -n "${run_repo:-}" ] || continue
+      printf 'run/%s#%s\n' "$run_repo" "$workflow"
+    done < "$(cw_runs_path "$id")"
+  fi
+}
+
+# The landing gate: a Kubernetes target is scored only once the rollout it
+# ran at registration have been replaced, so a sample can never report the code
+# the release replaced as healthy. 0 = landed or nothing to compare, 2 = still
+# awaiting the rollout, 3 = images unreadable.
+cw_target_landed() {  # <watch-id> <ns> <deploy>
+  local id=$1 ns=$2 deploy=$3 row recorded fingerprint current
+  [ -f "$(cw_landed_path "$id")" ] || return 0
+  row=$(awk -F'\t' -v t="$ns/$deploy" '$1 == t { print $2 "|" $3; found = 1 } END { exit(found ? 0 : 1) }' \
+    "$(cw_landed_path "$id")" 2>/dev/null) || return 0
+  recorded=${row%%|*}
+  fingerprint=${row#*|}
+  # No image was recorded for this target, so the rollout cannot be proven.
+  # The watch still measures its metrics (a reader that works is worth more than
+  # a silent 12h gap) but every verdict says the landing was never proven.
+  [ -n "$recorded" ] || return 0
+  if [ -n "$fingerprint" ]; then
+    # A landing record from this release carries the fingerprint: the rollout is
+    # proven by the template hash, so a change that leaves every image identical
+    # (an env value, a routing table) still opens the gate.
+    current=$(cw_live_fingerprint "$ns" "$deploy" 2>/dev/null) || return 3
+    [ -n "$current" ] || return 3
+    [ "$current" = "$fingerprint" ] || return 0
+    return 2
+  fi
+  # A landed record written before the fingerprint existed compares the images,
+  # which is all it recorded.
+  current=$(cw_live_images "$ns" "$deploy" 2>/dev/null) || return 3
+  [ -n "$current" ] || return 3
+  [ "$current" = "$recorded" ] || return 0
+  return 2
+}
+
+# Record the images and rollout fingerprint every Kubernetes target runs right
+# now, the evidence the rollout must replace. Both come from one pod read, so a
+# target can never be recorded with images but no fingerprint. A target whose
+# pods cannot be read is recorded empty and its gate stays open (never scored).
+cw_record_images() {  # <watch-id>
+  local id=$1 ns deploy facts images hashes fingerprint out=''
+  [ -z "${FM_CW_CLUSTER_DIR:-}" ] || return 0
+  [ -f "$(cw_targets_path "$id")" ] || return 0
   while IFS=$'\t' read -r ns deploy; do
     [ -n "${ns:-}" ] || continue
-    target="$ns/$deploy"
-    for metric in $METRICS; do
-      printf '%s@%s\n' "$metric" "$target"
-    done
-  done < "$(cw_targets_path "$1")"
+    cw_within_budget || break
+    facts=$(cw_pod_facts "$ns" "$deploy" 2>/dev/null || true)
+    images=$(printf '%s' "$facts" | cut -f3)
+    hashes=$(printf '%s' "$facts" | cut -f5)
+    fingerprint=''
+    [ -z "$images$hashes" ] || fingerprint="$images|$hashes"
+    out="$out$ns/$deploy	$images	$fingerprint
+"
+  done < "$(cw_targets_path "$id")"
+  printf '%s' "$out" | cw_write "$(cw_landed_path "$id")"
+}
+
+# cw_runs_awaiting_deploy <watch-id> <since-epoch> succeeds when a watch with no
+# Deployment target has no completed deploy-workflow run for this release, and
+# prints why. The Sentry gate uses it so a repository deployed by its own workflow
+# (hydra) does not read its errors before that deploy has landed either.
+cw_runs_awaiting_deploy() {  # <watch-id> <since-epoch>
+  local id=$1 since=$2 run_repo workflow out rc seen=0 awaiting='' unreadable=''
+  [ -f "$(cw_runs_path "$id")" ] || return 1
+  while IFS=$'\t' read -r run_repo workflow; do
+    [ -n "${run_repo:-}" ] || continue
+    [ -n "${workflow:-}" ] || continue
+    seen=1
+    rc=0
+    out=$(cw_live_deploy_run "$run_repo" "$workflow" "$since" 2>&1) || rc=$?
+    [ "$rc" -eq 0 ] && continue
+    case "$out" in
+      no\ *|'run in flight'*) awaiting=${out:-no run has been read} ;;
+      '') awaiting='no run has been read' ;;
+      *) unreadable=$out ;;
+    esac
+  done < "$(cw_runs_path "$id")"
+  [ "$seen" -eq 1 ] || return 1
+  # A read that failed for its own reason is unmeasured, never "awaiting".
+  if [ -n "$unreadable" ]; then
+    printf '%s\n' "$unreadable"
+    return 0
+  fi
+  [ -n "$awaiting" ] || return 1
+  printf 'awaiting the deploy: %s\n' "$awaiting"
+  return 0
+}
+
+# cw_all_k8s_awaiting <watch-id> succeeds when every k8s target of the watch is
+# still running the images it ran at registration, so no rollout has happened.
+cw_all_k8s_awaiting() {  # <watch-id>
+  local id=$1 ns deploy landed seen=0
+  [ -f "$(cw_targets_path "$id")" ] || return 1
+  while IFS=$'\t' read -r ns deploy; do
+    [ -n "$ns" ] || continue
+    seen=1
+    landed=0
+    cw_target_landed "$id" "$ns" "$deploy" || landed=$?
+    [ "$landed" -eq 2 ] || return 1
+  done < "$(cw_targets_path "$id")"
+  [ "$seen" -eq 1 ]
+}
+
+# cw_unproven_landing <watch-id> prints the k8s targets whose pre-merge pod
+# images were never readable, so no verdict can claim their rollout was seen.
+cw_unproven_landing() {  # <watch-id>
+  local id=$1 ns deploy recorded
+  [ -f "$(cw_targets_path "$id")" ] || return 0
+  while IFS=$'\t' read -r ns deploy; do
+    recorded=$(awk -F'\t' -v t="$ns/$deploy" '$1 == t { print $2 }' "$(cw_landed_path "$id")" 2>/dev/null)
+    [ -n "$recorded" ] || printf '%s/%s\n' "$ns" "$deploy"
+  done < "$(cw_targets_path "$id")"
+}
+
+cw_mark_landed() {  # <watch-id> <ns> <deploy> <epoch>
+  local id=$1 target="$2/$3"
+  [ -f "$(cw_landed_at_path "$id")" ] || : > "$(cw_landed_at_path "$id")"
+  grep -qF "$target" "$(cw_landed_at_path "$id")" 2>/dev/null && return 0
+  printf '%s\t%s\n' "$target" "$4" >> "$(cw_landed_at_path "$id")" 2>/dev/null || true
 }
 
 cw_key_metric() { printf '%s\n' "${1%%@*}"; }
 cw_key_target() { printf '%s\n' "${1#*@}"; }
 
 cw_metric_relative() {
-  case "$1" in http_5xx_per_min|restarts|p95_ms) return 0 ;; *) return 1 ;; esac
+  case "$1" in http_5xx_per_min|restarts|p95_ms|sentry_new_issues) return 0 ;; *) return 1 ;; esac
 }
 
 # Resolve every target's pool inside the shared budget; an unresolved target has
 # no pools line and its pool metric stays unmeasured.
 cw_resolve_pools() {  # <watch-id>
   local id=$1 ns deploy spec out=''
+  [ -f "$(cw_targets_path "$id")" ] || return 0
   while IFS=$'\t' read -r ns deploy; do
     [ -n "${ns:-}" ] || continue
     cw_within_budget || break
@@ -868,23 +1771,57 @@ cw_resolve_pools() {  # <watch-id>
   printf '%s' "$out" | cw_write "$(cw_pools_path "$id")"
 }
 
+# True when a metric's read needs the cluster, mirroring cw_sample_blocker: the
+# Sentry and deploy-run reads go over the network, so neither is gated on the
+# cluster probe.
+cw_baseline_needs_cluster() {  # <metric>
+  case "$1" in
+    sentry_new_issues|deploy_run) return 1 ;;
+  esac
+  return 0
+}
+
 cw_capture_baseline() {  # <watch-id> <baseline-epoch>
-  local id=$1 since=$2 key metric target value out
+  local id=$1 since=$2 key metric target value out cluster err rc
   out=''
   cw_budget_start
+  cw_reasons_begin "$id"
+  err=$(mktemp "${TMPDIR:-/tmp}/fm-cw-base.XXXXXX" 2>/dev/null) || err=/dev/null
+  cluster=$(cw_cluster_probe || true)
   cw_resolve_pools "$id"
+  [ -z "$cluster" ] || cw_record_reason "$id" "baseline" "cluster read failed: $cluster"
+  [ -n "$cluster" ] || cw_prime_pod_facts "$id"
   while IFS= read -r key; do
     [ -n "$key" ] || continue
     metric=$(cw_key_metric "$key")
     target=$(cw_key_target "$key")
     value=''
-    if cw_within_budget; then
-      value=$(cw_metric_read "$id" "$metric" "$target" baseline "$since" 2>/dev/null || true)
+    # Only a cluster-backed metric is gated on the probe. A Sentry or deploy-run
+    # baseline is read over the network, so a cluster that is down at register
+    # time must not cost the whole watch its relative bar.
+    if [ -n "$cluster" ] && cw_baseline_needs_cluster "$metric"; then
+      :
+    elif cw_baseline_needs_cluster "$metric" || cw_within_budget; then
+      rc=0
+      value=$(cw_metric_read "$id" "$metric" "$target" baseline "$since" 2>"$err") || rc=$?
+      if [ "$rc" -ne 0 ] || ! printf '%s' "$value" | grep -qE '^-?[0-9]+([.][0-9]+)?$'; then
+        # A reader that explains itself on stdout ("no run since the merge")
+        # supplies the reason; one that fails silently is reported by its stderr
+        # or its exit status, so a baseline gap is always stated.
+        if [ -n "$value" ] && ! printf '%s' "$value" | grep -qE '^[0-9]'; then
+          cw_record_reason "$id" "$key" "$(printf '%s' "$value" | tail -1 | cut -c1-200)"
+        else
+          cw_record_reason "$id" "$key" "$(tail -1 "$err" 2>/dev/null | cut -c1-200)"
+        fi
+        value=''
+      fi
     fi
     out="$out$key	$value
 "
   done < <(cw_metric_keys "$id")
+  [ "$err" = /dev/null ] || rm -f -- "$err" 2>/dev/null || true
   printf '%s' "$out" | cw_write "$(cw_baseline_path "$id")"
+  cw_pool_memo_clear
 }
 
 cw_baseline_value() {  # <watch-id> <key>
@@ -905,6 +1842,10 @@ cw_metric_regressed() {  # <metric> <value> <baseline> <previous>
     p95_ms) awk -v v="$value" -v b="$baseline" 'BEGIN { exit !((v+0) > (b+0) + 100 && (v+0) > 3*(b+0)) }' ;;
     pgbouncer_cl_waiting) awk -v v="$value" -v p="$previous" 'BEGIN { exit !((v+0) > 0 && (p+0) > 0) }' ;;
     rss_ratio) awk -v v="$value" 'BEGIN { exit !((v+0) > 0.85) }' ;;
+    sentry_new_issues)
+      awk -v v="$value" -v b="$baseline" -v min="$SENTRY_MIN_NEW" \
+        'BEGIN { exit !((v+0) >= min && (v+0) > (b+0)) }' ;;
+    deploy_run) awk -v v="$value" 'BEGIN { exit !((v+0) < 1) }' ;;
     *) return 1 ;;
   esac
 }
@@ -925,36 +1866,125 @@ cw_set_previous_value() {  # <watch-id> <key> <value>
 # Take one sample. Prints "metric<TAB>target<TAB>value<TAB>baseline" for the
 # first bar crossed, or nothing when every scored metric is inside its bar.
 # Appends one record per metric to samples.log:
-#   epoch<TAB>offset<TAB>key<TAB>value<TAB>baseline<TAB>regressed<TAB>scored
-# where scored is 0 for an unmeasured value or a relative bar with no baseline.
+#   epoch<TAB>offset<TAB>key<TAB>value<TAB>baseline<TAB>regressed<TAB>scored<TAB>awaiting
+# where scored is 0 for an unmeasured value or a relative bar with no baseline,
+# and awaiting is 1 when the only reason the value is missing is that the
+# rollout had not landed yet. Awaiting is not a measurement gap: there was
+# nothing to measure, so it never counts against a proven verdict the way a
+# failed read does.
 cw_take_sample() {  # <watch-id> <offset-seconds> <sample-epoch> <baseline-epoch>
   local id=$1 offset=$2 epoch=$3 baseline_epoch=$4
-  local key metric target value baseline previous regressed scored first
+  local key metric target value baseline previous regressed scored awaiting first reason cluster err rc
   first=''
   cw_budget_start
+  cw_reasons_begin "$id"
+  err=$(mktemp "${TMPDIR:-/tmp}/fm-cw-read.XXXXXX" 2>/dev/null) || err=/dev/null
+  # Prove the cluster answers once. Without this an unreachable cluster spent the
+  # whole budget on reads that each failed the same way, and every watch
+  # completed unmeasured while its record still looked like a normal watch.
+  cluster=$(cw_cluster_probe || true)
+  [ -n "$cluster" ] || cw_prime_pod_facts "$id"
   while IFS= read -r key; do
     [ -n "$key" ] || continue
     metric=$(cw_key_metric "$key")
     target=$(cw_key_target "$key")
     value=''
-    if cw_within_budget; then
-      value=$(cw_metric_read "$id" "$metric" "$target" sample "$baseline_epoch" 2>/dev/null || true)
-    fi
+    reason=''
+    reason=$(cw_sample_blocker "$id" "$metric" "$target" "$cluster") || true
     baseline=$(cw_baseline_value "$id" "$key" 2>/dev/null || true)
     previous=$(cw_previous_value "$id" "$key" 2>/dev/null || true)
     scored=1
+    if [ -z "$reason" ]; then
+      rc=0
+      value=$(cw_metric_read "$id" "$metric" "$target" sample "$baseline_epoch" 2>"$err") || rc=$?
+      if [ "$rc" -ne 0 ] || [ -z "$value" ]; then
+        # A reader that explains itself on stdout ("no run since the merge")
+        # hands that sentence back as the reason; one that fails silently is
+        # reported by its stderr or its exit status.
+        if [ -n "$value" ] && ! printf '%s' "$value" | grep -qE '^-?[0-9]+([.][0-9]+)?$'; then
+          reason=$value
+        else
+          reason=$(tail -1 "$err" 2>/dev/null | cut -c1-200)
+          [ -n "$reason" ] || reason="read exited $rc with no value"
+        fi
+        value=''
+      elif ! printf '%s' "$value" | grep -qE '^-?[0-9]+([.][0-9]+)?$'; then
+        reason=$value
+        value=''
+      fi
+    fi
+    [ -n "$value" ] || cw_record_reason "$id" "$key" "${reason:-unmeasured}"
     [ -n "$value" ] || scored=0
-    if [ "$scored" -eq 1 ] && cw_metric_relative "$metric" && [ -z "$baseline" ]; then scored=0; fi
+    awaiting=0
+    case "$reason" in 'awaiting the deploy:'*) awaiting=1 ;; esac
+    if [ "$scored" -eq 1 ] && cw_metric_relative "$metric" && [ -z "$baseline" ]; then
+      scored=0
+      cw_record_reason "$id" "$key" "baseline could not be read, so the relative bar was not scored"
+    fi
     regressed=0
     if [ "$scored" -eq 1 ] && cw_metric_regressed "$metric" "$value" "$baseline" "$previous"; then
       regressed=1
       [ -n "$first" ] || first="$metric	$target	$value	$baseline"
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$epoch" "$offset" "$key" "$value" "$baseline" "$regressed" "$scored" \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$epoch" "$offset" "$key" "$value" "$baseline" "$regressed" "$scored" "$awaiting" \
       >> "$(cw_samples_path "$id")"
     [ -z "$value" ] || cw_set_previous_value "$id" "$key" "$value"
   done < <(cw_metric_keys "$id")
+  [ "$err" = /dev/null ] || rm -f -- "$err" 2>/dev/null || true
+  cw_pool_memo_clear
   [ -n "$first" ] && printf '%s\n' "$first"
+  return 0
+}
+
+# Why a metric cannot be read right now, as one stated reason, or nothing when
+# the read may proceed. A Kubernetes target that has not seen its rollout is
+# awaiting the deploy, and an unreachable cluster is named once instead of being
+# retried per metric.
+cw_sample_blocker() {  # <watch-id> <metric> <target> <cluster-probe-error>
+  local id=$1 metric=$2 target=$3 cluster=$4 ns deploy landed since
+  case "$metric" in
+    sentry_new_issues)
+      # Sentry errors are only the release's once its landing is proven: the
+      # watched Deployments' rollout when the watch has any, otherwise its own
+      # deploy workflow's run for this merge. A watch with neither has nothing
+      # better to prove, so its Sentry read proceeds.
+      #
+      # Proving a rollout costs a pod read, and a spent sample budget buys none:
+      # the pod-backed metrics state that budget themselves, and a landing the
+      # sample could not read is unproven (as an unreadable fingerprint already
+      # is), never a silent reason to skip a network read.
+      if [ -s "$(cw_targets_path "$id")" ]; then
+        if cw_within_budget && cw_all_k8s_awaiting "$id"; then
+          printf 'awaiting the deploy: no watched Deployment has rolled out yet\n'
+        fi
+        return 0
+      fi
+      since=$(cw_meta_get "$id" t0 || true)
+      cw_runs_awaiting_deploy "$id" "$since" || true
+      return 0
+      ;;
+    deploy_run) return 0 ;;
+  esac
+  if [ -n "$cluster" ]; then
+    printf 'cluster read failed: %s\n' "$cluster"
+    return 0
+  fi
+  case "$target" in
+    */*) ns=${target%%/*}; deploy=${target#*/} ;;
+    *) return 0 ;;
+  esac
+  # A spent budget is stated as itself before the pod read this metric needs, and
+  # stops that read only: the Sentry and deploy-workflow reads above go over the
+  # network with their own bounds, so a budget cluster reads spent never costs
+  # them the sample.
+  cw_within_budget || { printf 'sample budget spent before this metric was read\n'; return 0; }
+  landed=0
+  cw_target_landed "$id" "$ns" "$deploy" || landed=$?
+  case "$landed" in
+    2) printf 'awaiting the deploy: the pods still run the image they ran at registration\n' ;;
+    3) printf 'deploy landing unreadable: the target\047s pod fingerprint could not be read\n' ;;
+  esac
   return 0
 }
 
@@ -986,6 +2016,218 @@ cw_progress_label() {  # <watch-id>
   printf '+%dm of +%dm' "$((offset / 60))" "$((latest / 60))"
 }
 
+# --- durable row --------------------------------------------------------------
+#
+# One row per merge, at state/change-watch/rows/<watch-id>.json. It is written
+# when the watch is registered (terminal_state "open") and rewritten once, at
+# the terminal verdict, so a merge always has exactly one durable record of what
+# was measured. state/change-watch/ is not a task record: bin/fm-teardown.sh
+# removes state/<task>.* and never this tree, so the row outlives the task.
+#
+# Schema (one JSON object, one line):
+#   version            "fm-change-watch-row-v1"
+#   watch_id           the watch directory name
+#   task, pr_url       the owning task and the merged pull request
+#   merge_epoch        the rollout epoch the schedule is measured from, or null
+#   registered_epoch   when the watch was registered, or null
+#   completed_epoch    when the terminal state was written, or null while open
+#   readings           {"900": <reading>|null, "3600": ..., "21600": ...}
+#   real_user_check    "observed" | "not-observed" | "not-applicable"
+#   real_user_reason   why the real-user check reads as it does
+#   unmeasured_metrics metric keys no sample ever scored
+#   unproven_targets   targets whose rollout was never proven
+#   terminal_state     "open" | "proven" | "regressed" |
+#                      "unmeasurable-with-reason" | "not-applicable"
+#   reason             the human sentence behind the terminal state
+#
+# A reading is {"at": <epoch>, "scored": <n>, "unmeasured": <n>,
+# "awaiting": <n>, "regressed": <n>, "measured": <bool>,
+# "values": {"<metric>@<target>": "<value>", ...}}, or null when no sample was
+# ever taken at that offset. "measured" is true when the reading scored
+# something, or when everything it could not score was only waiting for the
+# rollout to land; a reading that failed to read is present but measured
+# nothing, which is exactly what makes a row unproven.
+
+cw_rows_dir() { printf '%s/rows\n' "$WATCH_ROOT"; }
+cw_row_path() { printf '%s/%s.json\n' "$(cw_rows_dir)" "$1"; }
+
+# The terminal state a watch's durable row records, or nothing when the watch
+# never wrote a row. The row, not the verdict file, is the authority the gates
+# read: deleting a verdict can remove the wake's detail but never the record that
+# a merge ended without a measurement.
+cw_row_state() {  # <watch-id>
+  local row
+  row=$(cw_row_path "$1")
+  [ -f "$row" ] || return 0
+  sed -n 's/.*"terminal_state": "\([^"]*\)".*/\1/p' "$row" 2>/dev/null | tail -1
+}
+
+# The reason a watch's durable row recorded, for the refusal text.
+cw_row_reason() {  # <watch-id>
+  local row
+  row=$(cw_row_path "$1")
+  [ -f "$row" ] || return 0
+  sed -n 's/.*"reason": "\(.*\)".*/\1/p' "$row" 2>/dev/null | tail -1
+}
+
+# The task a durable row belongs to, so a merge whose gap never created a watch
+# directory is still found by the task's gate.
+cw_row_task() {  # <watch-id>
+  local row
+  row=$(cw_row_path "$1")
+  [ -f "$row" ] || return 0
+  sed -n 's/.*"task": "\([^"]*\)".*/\1/p' "$row" 2>/dev/null | tail -1
+}
+
+cw_json_escape() {  # <text>
+  printf '%s' "$1" | awk '
+    BEGIN { ORS = "" }
+    {
+      if (NR > 1) print "\\n"
+      line = $0
+      gsub(/\\/, "\\\\", line)
+      gsub(/"/, "\\\"", line)
+      gsub(/\t/, "\\t", line)
+      gsub(/\r/, "\\r", line)
+      gsub(/[\001-\010\013\014\016-\037]/, "", line)
+      print line
+    }'
+}
+
+cw_json_string() { printf '"%s"' "$(cw_json_escape "$1")"; }
+
+# One reading of the row: the samples this watch took at one schedule offset.
+cw_reading_json() {  # <watch-id> <offset-seconds>
+  local id=$1 offset=$2 samples
+  samples=$(cw_samples_path "$id")
+  [ -f "$samples" ] || { printf 'null'; return 0; }
+  awk -F'\t' -v offset="$offset" '
+    function esc(s) {
+      gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s)
+      gsub(/\t/, "\\t", s); gsub(/\r/, "\\r", s)
+      return s
+    }
+    $2 == offset {
+      if (at == "") at = $1
+      if ($7 == 1) { scored++; values = values (n++ ? ", " : "") "\"" esc($3) "\": \"" esc($4) "\"" }
+      else if ($8 == 1) awaiting++
+      else unmeasured++
+      if ($6 == 1) regressed++
+    }
+    END {
+      if (at == "") { printf "null"; exit }
+      # A reading is measured when it scored something, or when everything it
+      # could not score was only waiting for the rollout to land. A reading
+      # whose samples all failed to read is a gap, and so is one that mixes a
+      # failed read with an awaiting one.
+      measured = (scored > 0 || (awaiting > 0 && unmeasured == 0)) ? "true" : "false"
+      printf "{\"at\": %s, \"scored\": %d, \"unmeasured\": %d, \"awaiting\": %d, \"regressed\": %d, \"measured\": %s, \"values\": {%s}}", at, scored, unmeasured, awaiting, regressed, measured, values
+    }
+  ' "$samples"
+}
+
+# The real-user check: http_5xx_per_min is read from the pods' own access logs,
+# so a scored reading of it is the only evidence in this watch that a real user
+# request was observed. A watch with no such key has no real-user surface. It is
+# recorded, never a gate on proven: a service whose access logs are not readable
+# is already named by the metric gap, and gating on it would make every such
+# watch permanently unmeasurable.
+cw_real_user_check() {  # <watch-id> -> "<state>\t<reason>"
+  local id=$1 samples
+  if [ -z "$(cw_metric_keys "$id" | awk -F@ '$1 == "http_5xx_per_min" { print; exit }')" ]; then
+    printf 'not-applicable\tno http_5xx_per_min target: this watch has no real-user surface\n'
+    return 0
+  fi
+  samples=$(cw_samples_path "$id")
+  if [ -f "$samples" ] \
+    && awk -F'\t' '$3 ~ /^http_5xx_per_min@/ && $7 == 1 { found = 1 } END { exit !found }' "$samples"; then
+    printf 'observed\treal user traffic was read from the pods\047 own access logs\n'
+  else
+    printf 'not-observed\thttp_5xx_per_min was never scored, so no real user request was observed\n'
+  fi
+}
+
+# Write the one durable row for this merge. <task>/<url>/<merge-epoch>/
+# <registered-epoch> are only used when the watch has no metadata of its own,
+# which is the not-applicable case: a merge that touched no deployable surface
+# still gets its row, because "every merge writes one durable row" is the
+# contract and a row saying why nothing was measurable is the honest record.
+cw_row_write() {  # <watch-id> <terminal-state> <reason> [<task>] [<url>] [<merge-epoch>] [<registered-epoch>]
+  local id=$1 state=$2 reason=$3 task=${4:-} url=${5:-} t0=${6:-} created=${7:-}
+  local completed r900 r3600 r21600 ru ru_reason gaps unproven
+  if cw_watch_exists "$id"; then
+    task=$(cw_meta_get "$id" task || true)
+    url=$(cw_meta_get "$id" pr_url || true)
+    t0=$(cw_meta_get "$id" t0 || true)
+    created=$(cw_meta_get "$id" created || true)
+  fi
+  case "$state" in
+    open) completed=null ;;
+    *) completed=$(cw_now) ;;
+  esac
+  r900=$(cw_reading_json "$id" 900)
+  r3600=$(cw_reading_json "$id" 3600)
+  r21600=$(cw_reading_json "$id" 21600)
+  ru=$(cw_real_user_check "$id")
+  ru_reason=${ru#*$'\t'}
+  ru=${ru%%$'\t'*}
+  gaps=$(cw_measured_gaps "$id")
+  unproven=$(cw_unproven_landing "$id" | paste -sd ',' - | sed 's/,/, /g')
+  mkdir -p "$(cw_rows_dir)" 2>/dev/null || true
+  chmod 0700 "$(cw_rows_dir)" 2>/dev/null || true
+  {
+    printf '{"version": "fm-change-watch-row-v1"'
+    printf ', "watch_id": %s' "$(cw_json_string "$id")"
+    printf ', "task": %s' "$(cw_json_string "$task")"
+    printf ', "pr_url": %s' "$(cw_json_string "$url")"
+    printf ', "merge_epoch": %s' "${t0:-null}"
+    printf ', "registered_epoch": %s' "${created:-null}"
+    printf ', "completed_epoch": %s' "$completed"
+    printf ', "readings": {"900": %s, "3600": %s, "21600": %s}' "$r900" "$r3600" "$r21600"
+    printf ', "real_user_check": %s' "$(cw_json_string "$ru")"
+    printf ', "real_user_reason": %s' "$(cw_json_string "$ru_reason")"
+    printf ', "unmeasured_metrics": %s' "$(cw_json_string "$gaps")"
+    printf ', "unproven_targets": %s' "$(cw_json_string "$unproven")"
+    printf ', "terminal_state": %s' "$(cw_json_string "$state")"
+    printf ', "reason": %s}\n' "$(cw_json_string "$reason")"
+  } | cw_write "$(cw_row_path "$id")" \
+    || notice "change-watch: could not write the durable row for $id"
+}
+
+# The terminal state of a finished watch, as "<state>\t<reason>". proven needs
+# all three readings present, every one of them measured, and every target
+# measured at least once; anything less is unmeasurable-with-reason naming what
+# is missing. A missing reading is never a pass.
+#
+# A reading that only ever waited for its rollout to land is measured, not a
+# gap: the deploy had not happened yet, so there was nothing to read. A watch
+# whose rollout never landed at all still ends unmeasurable, because no target
+# ever scored and cw_unmeasured_targets names it.
+cw_terminal_state() {  # <watch-id>
+  local id=$1 r json missing='' empty='' unread gaps why=''
+  for r in 900 3600 21600; do
+    json=$(cw_reading_json "$id" "$r")
+    if [ "$json" = null ]; then
+      missing="$missing${missing:+, }+$((r / 60))m"
+    elif printf '%s' "$json" | grep -q '"measured": false'; then
+      empty="$empty${empty:+, }+$((r / 60))m"
+    fi
+  done
+  unread=$(cw_unmeasured_targets "$id" | paste -sd ',' - | sed 's/,/, /g')
+  gaps=$(cw_measured_gaps "$id")
+  if [ -z "$missing" ] && [ -z "$empty" ] && [ -z "$unread" ] \
+    && [ -n "$(cw_metric_keys "$id")" ]; then
+    printf 'proven\tall three readings (+15m, +1h, +6h) scored and every target was measured at least once%s\n' \
+      "${gaps:+; never measured: $gaps}"
+    return 0
+  fi
+  [ -z "$missing" ] || why="no reading at $missing"
+  [ -z "$empty" ] || why="$why${why:+; }nothing measured at $empty"
+  [ -z "$unread" ] || why="$why${why:+; }never measured: $unread"
+  [ -n "$(cw_metric_keys "$id")" ] || why="$why${why:+; }the watch registered no metric"
+  printf 'unmeasurable-with-reason\t%s\n' "$why"
+}
+
 cw_record_regression() {  # <watch-id> <offset-seconds> <metric> <target> <value> <baseline>
   local id=$1 offset=$2 metric=$3 target=$4 value=$5 baseline=$6 tick line
   tick=$((offset / 60))
@@ -1000,6 +2242,7 @@ cw_record_regression() {  # <watch-id> <offset-seconds> <metric> <target> <value
     printf 'offset=%s\n' "$offset"
     printf 'tick=%s\n' "$tick"
   } | cw_write "$(cw_watch_dir "$id")/regression"
+  cw_row_write "$id" regressed "$line"
   printf '%s\n' "$line"
 }
 
@@ -1044,7 +2287,7 @@ cw_report_regression() {  # <watch-id>
 }
 
 cw_wiki_note() {  # <watch-id> <task> <url>
-  local id=$1 task=$2 url=$3 cmd body
+  local id=$1 task=$2 url=$3 cmd kinds targets body
   if [ "${FM_CW_NO_WIKI:-0}" = 1 ]; then
     notice "change-watch: wiki note skipped by FM_CW_NO_WIKI for $url"
     return 0
@@ -1054,7 +2297,12 @@ cw_wiki_note() {  # <watch-id> <task> <url>
     notice "change-watch: wiki note skipped (no $cmd on PATH) for $url"
     return 0
   fi
-  body="Post-merge change watch for $url (task $task) completed clean at +12h: no 5xx, restart, OOMKilled, latency, pool-wait, or RSS regression against the pre-deploy baseline."
+  # The body names the metric kinds and targets this watch actually measured: a
+  # watch of a deploy workflow or a Sentry project alone must never claim a
+  # Kubernetes metric it never read.
+  kinds=$(cw_metric_keys "$id" | awk -F@ '{ print $1 }' | sort -u | paste -sd ',' - | sed 's/,/, /g')
+  targets=$(cw_target_ids "$id" | sort -u | paste -sd ',' - | sed 's/,/, /g')
+  body="Post-merge change watch for $url (task $task) completed clean at +12h: no regression on ${kinds:-any metric} against the pre-deploy baseline${targets:+ (watched: $targets)}."
   printf '%s\n' "$body" | "$cmd" "change-watch-clean-$id" "Post-merge change watch clean: $url" \
     >/dev/null 2>&1 || notice "change-watch: wiki note failed for $url"
 }
@@ -1070,48 +2318,104 @@ cw_task_note() {  # <task> <url> <line>
   fi
 }
 
-cw_record_clean() {  # <watch-id>
-  local id=$1 task url
+cw_record_clean() {  # <watch-id> [<reason>]
+  local id=$1 reason=${2:-} task url gaps unproven
   task=$(cw_meta_get "$id" task || true)
   url=$(cw_meta_get "$id" pr_url || true)
+  [ -n "$reason" ] || reason='all three readings scored and every target was measured at least once'
   printf 'clean\n' | cw_write "$(cw_verdict_path "$id")"
+  cw_row_write "$id" proven "$reason"
   cw_mark_once "$(cw_watch_dir "$id")/noted" || return 0
+  gaps=$(cw_measured_gaps "$id")
+  unproven=$(cw_unproven_landing "$id" | paste -sd ',' - | sed 's/,/, /g')
+  if [ -n "$gaps" ] || [ -n "$unproven" ]; then
+    cw_task_note "$task" "$url" \
+      "note: change-watch clean for $url on every metric it could read${gaps:+; never measured: $gaps}${unproven:+; the rollout was never proven for: $unproven}"
+    notice "change-watch: clean for $url on every metric it could read${gaps:+, but these metrics were never measured: $gaps}${unproven:+; the rollout could not be proven for: $unproven}"
+    return 0
+  fi
   cw_task_note "$task" "$url" "note: change-watch clean for $url"
   cw_wiki_note "$id" "$task" "$url"
 }
 
-cw_record_unmeasured() {  # <watch-id> <unread-targets>
-  local id=$1 unread=$2 task url list
+# Queue the one check wake an unmeasurable merge produces. It carries the
+# task, the PR and the reason so the gap is actionable without opening the row.
+cw_queue_unmeasured_wake() {  # <watch-id> <task> <url> <reason>
+  local id=$1 task=$2 url=$3 reason=$4 line
+  line="check: change-watch $task $url unmeasurable ($reason)"
+  fm_wake_append check "change-watch-$id-unmeasured" "$line" 2>/dev/null \
+    || notice "change-watch: could not queue the unmeasurable wake for $url"
+}
+
+# A schedule that ended without the evidence a clean verdict needs is a
+# FAILURE, not a quiet completion. It writes the unmeasurable-with-reason
+# verdict and row, queues one check wake so the gap is actionable, and writes NO
+# status note at all: the literal "change-watch completed unmeasured" line must
+# never appear in a status log again, which is what the 7-day acceptance counts.
+cw_record_unmeasured() {  # <watch-id> <reason>
+  local id=$1 reason=$2 task url why
   task=$(cw_meta_get "$id" task || true)
   url=$(cw_meta_get "$id" pr_url || true)
-  printf 'completed unmeasured\n' | cw_write "$(cw_verdict_path "$id")"
+  [ -n "$reason" ] || reason='the schedule ended without a scored reading for every target'
+  # The reason the last sample recorded is what turns "unmeasured" into an
+  # actionable gap instead of a mystery.
+  why=$(awk -F'\t' '{ if ($2 != "") { print $2; exit } }' "$(cw_reasons_path "$id")" 2>/dev/null || true)
+  [ -z "$why" ] || reason="$reason; last read reason: $why"
+  printf 'unmeasurable-with-reason: %s\n' "$reason" | cw_write "$(cw_verdict_path "$id")"
+  cw_row_write "$id" unmeasurable-with-reason "$reason"
   cw_mark_once "$(cw_watch_dir "$id")/noted" || return 0
-  list=$(printf '%s\n' "$unread" | paste -sd ',' - | sed 's/,/, /g')
-  cw_task_note "$task" "$url" "note: change-watch completed unmeasured for $url (never measured: $list)"
-  notice "change-watch: wiki note skipped for $url (completed unmeasured: $list)"
+  cw_queue_unmeasured_wake "$id" "$task" "$url" "$reason"
+  notice "change-watch: unmeasurable for $url: $reason"
 }
 
 # Targets that never had one scored reading across the whole schedule.
 cw_unmeasured_targets() {  # <watch-id>
-  local id=$1 samples
+  local id=$1 samples want
   samples=$(cw_samples_path "$id")
   [ -f "$samples" ] || : > "$samples"
+  want=$(mktemp "${TMPDIR:-/tmp}/fm-cw-want.XXXXXX" 2>/dev/null) || { printf 'no temp file\n'; return 0; }
+  cw_target_ids "$id" | sort -u > "$want"
   awk -F'\t' '
-    NR == FNR { if ($1 != "") want[$1 "/" $2] = 1; next }
-    $7 == 1 { t = $3; sub(/^[^@]*@/, "", t); delete want[t] }
+    NR == FNR { want[$1] = 1; next }
+    $7 == 1 { key = $3; sub(/^[^@]*@/, "", key); delete want[key] }
     END { for (t in want) print t }
-  ' "$(cw_targets_path "$id")" "$samples" | sort
+  ' "$want" "$samples" | sort
+  rm -f -- "$want" 2>/dev/null || true
 }
 
-# The schedule ended: clean only when every target was measured at least once.
+# Every metric key no sample of this watch ever scored, across every target it
+# was registered with: the honest statement of what a clean verdict did and did
+# not cover, so a release watched only for restarts and memory says exactly that
+# and a target whose own pool or pods were never read is named as the gap it is.
+cw_measured_gaps() {  # <watch-id>
+  local id=$1 samples keys
+  samples=$(cw_samples_path "$id")
+  keys=$(cw_metric_keys "$id" | sort -u)
+  [ -n "$keys" ] || return 0
+  [ -f "$samples" ] || samples=/dev/null
+  printf '%s\n' "$keys" | awk -F'\t' -v samples="$samples" '
+    BEGIN {
+      while ((getline line < samples) > 0) {
+        n = split(line, f, "\t")
+        if (n >= 7 && f[7] == 1) measured[f[3]] = 1
+      }
+      close(samples)
+    }
+    !($1 in measured) { printf "%s%s", sep, $1; sep = ", " }
+  '
+}
+
+# The schedule ended: proven only when all three readings scored and every
+# target was measured at least once; anything less is unmeasurable-with-reason.
 cw_record_completion() {  # <watch-id>
-  local id=$1 unread
-  unread=$(cw_unmeasured_targets "$id")
-  if [ -z "$unread" ]; then
-    cw_record_clean "$id"
-  else
-    cw_record_unmeasured "$id" "$unread"
-  fi
+  local id=$1 state reason
+  state=$(cw_terminal_state "$id")
+  reason=${state#*$'\t'}
+  state=${state%%$'\t'*}
+  case "$state" in
+    proven) cw_record_clean "$id" "$reason" ;;
+    *) cw_record_unmeasured "$id" "$reason" ;;
+  esac
 }
 
 # A drive that stopped before the end of its schedule: the verdict names the
@@ -1126,6 +2430,7 @@ cw_record_interrupted() {  # <watch-id> <epoch>
   [ "$offset" -le "$latest" ] || offset=$latest
   tick=$((offset / 60))
   printf 'interrupted at +%dm\n' "$tick" | cw_write "$(cw_verdict_path "$id")"
+  cw_row_write "$id" unmeasurable-with-reason "interrupted at +${tick}m before the schedule ended"
   rm -f -- "$(cw_drive_pid_path "$id")" "$(cw_drive_identity_path "$id")" "$(cw_drive_alive_path "$id")"
   cw_mark_once "$(cw_watch_dir "$id")/interrupted-reported" || return 0
   task=$(cw_meta_get "$id" task || true)
@@ -1220,16 +2525,27 @@ cw_rearm() {  # <watch-id> <url>
   local id=$1 url=$2 remaining old attempt when_name arm_cmd
   remaining=$(cw_remaining_count "$id")
   if [ "$remaining" -eq 0 ]; then
-    rm -f -- "$(cw_verdict_path "$id")"
-    cw_record_completion "$id"
-    printf 'change-watch: %s had no samples left; completed as %s\n' "$id" "$(cw_verdict_line "$id")"
-    return 0
+    # A completed schedule has nothing left to sample, so re-arming it would
+    # only recompute the same terminal state. Recovery re-measures from now:
+    # the readings are taken again and the row goes back to open.
+    rm -f -- "$(cw_sampled_path "$id")" "$(cw_verdict_path "$id")" \
+      "$(cw_reasons_path "$id")" \
+      "$(cw_watch_dir "$id")/noted" "$(cw_watch_dir "$id")/interrupted-reported"
+    : > "$(cw_samples_path "$id")"
+    rm -f -- "$(cw_watch_dir "$id")"/last.*
+    cw_meta_set "$id" t0 "$(cw_now)"
+    cw_write_schedule "$id" "$(cw_now)"
+    remaining=$(cw_remaining_count "$id")
   fi
   old=$(cw_meta_get "$id" when_name || true)
   attempt=$(cw_meta_get "$id" arm_attempt || true)
   case "$attempt" in ''|*[!0-9]*) attempt=1 ;; esac
   attempt=$((attempt + 1))
   rm -f -- "$(cw_verdict_path "$id")" "$(cw_watch_dir "$id")/interrupted-reported"
+  # The watch is in flight again, so its durable row must not keep the
+  # interrupted terminal state it just left: a stale terminal row would make the
+  # audit report a gap for a watch that is still measuring.
+  cw_row_write "$id" open 'the watch is still running'
   arm_cmd=${FM_CW_ARM_CMD:-$SCRIPT_DIR/fm-procevent-when.sh}
   if [ -n "$old" ] && { [ -x "$arm_cmd" ] || command -v "$arm_cmd" >/dev/null 2>&1; }; then
     "$arm_cmd" retire "$old" >/dev/null 2>&1 || true
@@ -1246,7 +2562,8 @@ cw_rearm() {  # <watch-id> <url>
 # --- commands -----------------------------------------------------------------
 
 cmd_register() {
-  local task=$1 url=$2 provider owner repo number repo_name id derived targets notes unread now t0
+  local task=$1 url=$2 provider owner repo number repo_name id derived targets sentries runs
+  local notes unread inventory_unread now t0 landed_unread when_name sentry_unreadable row_state row_reason
   fm_pr_task_id_valid "$task" || die "invalid task id: $task"
   fm_pr_url_parse "$url" || die "invalid pr url: $url"
   provider=$FM_PR_PROVIDER
@@ -1260,27 +2577,31 @@ cmd_register() {
   if cw_watch_exists "$id"; then
     cw_reconcile_drive "$id"
     case "$(cat "$(cw_verdict_path "$id")" 2>/dev/null || true)" in
-      interrupted*) cw_rearm "$id" "$url"; return 0 ;;
+      interrupted*|unmeasurable-with-reason*) cw_rearm "$id" "$url"; return 0 ;;
+    esac
+    row_state=$(cw_row_state "$id")
+    case "$row_state" in
+      unmeasurable-with-reason) cw_rearm "$id" "$url"; return 0 ;;
     esac
     printf 'change-watch: %s already registered for %s\n' "$id" "$url"
     return 0
   fi
 
+  cw_kubeconfig_init
   derived=$(cw_derive_targets "$url" "$provider" "$owner" "$repo" "$number" "$repo_name" 2>/dev/null || true)
   targets=$(printf '%s\n' "$derived" | awk -F'\t' '$1 == "target" && $2 != "" && $3 != "" { print $2 "\t" $3 }' | sort -u)
+  sentries=$(printf '%s\n' "$derived" | awk -F'\t' '$1 == "sentry" && $2 != "" { print $2 }' | sort -u)
+  runs=$(printf '%s\n' "$derived" | awk -F'\t' '$1 == "run" && $2 != "" && $3 != "" { print $2 "\t" $3 }' | sort -u)
   notes=$(printf '%s\n' "$derived" | awk -F'\t' '$1 == "note" { print $2 }' | sort -u | paste -sd ';' - | sed 's/;/; /g')
-  if [ -z "$targets" ]; then
-    unread=$(printf '%s\n' "$derived" | grep -c '^note	manifest unread: ' || true)
-    if ! cw_forge_files "$url" "$provider" "$owner" "$repo" "$number" >/dev/null 2>&1; then
-      printf 'change-watch: cannot read the merged file list for %s; nothing registered\n' "$url"
-    elif [ "$unread" -gt 0 ]; then
-      printf 'change-watch: could not read %s manifest(s) for %s; nothing registered\n' "$unread" "$url"
-    else
-      printf 'change-watch: no deployable service touched by %s%s; nothing registered\n' "$url" "${notes:+ ($notes)}"
-    fi
-    return 0
+  # A Sentry project this home cannot authenticate is not a target: keeping it
+  # would arm a watch whose every sample reads nothing, and whose end-of-schedule
+  # verdict would then read as a clean release.
+  sentry_unreadable=''
+  if [ -n "$sentries" ] && [ -z "${FM_CW_SENTRY_DIR:-}" ] && ! cw_sentry_vault_ready; then
+    notes="$notes${notes:+; }sentry unmeasured: no token in $SENTRY_VAULT"
+    sentries=''
+    sentry_unreadable=1
   fi
-
   now=$(cw_now)
   t0=$(cw_forge_merge_epoch "$url" "$provider" 2>/dev/null || true)
   case "$t0" in
@@ -1288,9 +2609,50 @@ cmd_register() {
   esac
   [ "$t0" -le "$now" ] || t0=$now
 
+  if [ -z "$targets" ] && [ -z "$sentries" ] && [ -z "$runs" ]; then
+    unread=$(printf '%s\n' "$derived" | grep -c '^note	manifest unread: ' || true)
+    inventory_unread=$(printf '%s\n' "$derived" | grep -c '^note	image inventory unread: ' || true)
+    row_state=not-applicable
+    row_reason="no deployable surface touched by $url${notes:+ ($notes)}"
+    if ! cw_forge_files "$url" "$provider" "$owner" "$repo" "$number" >/dev/null 2>&1; then
+      row_state=unmeasurable-with-reason
+      row_reason="the merged file list for $url could not be read"
+      printf 'change-watch: cannot read the merged file list for %s; nothing registered\n' "$url"
+    elif [ "$unread" -gt 0 ]; then
+      row_state=unmeasurable-with-reason
+      row_reason="$unread manifest(s) for $url could not be read"
+      printf 'change-watch: could not read %s manifest(s) for %s; nothing registered\n' "$unread" "$url"
+    elif [ "$inventory_unread" -gt 0 ]; then
+      row_state=unmeasurable-with-reason
+      row_reason="the image inventory for $url could not be read"
+      printf 'change-watch: could not read the image inventory for %s%s; nothing registered\n' "$url" "${notes:+ ($notes)}"
+    elif [ -n "$sentry_unreadable" ]; then
+      row_state=unmeasurable-with-reason
+      row_reason="nothing measurable for $url ($notes)"
+      printf 'change-watch: nothing measurable for %s (%s); nothing registered\n' "$url" "$notes"
+    elif printf '%s\n' "$notes" | grep -q 'no namespace: '; then
+      row_state=unmeasurable-with-reason
+      row_reason="a deployable surface for $url could not be watched ($notes)"
+      printf 'change-watch: a deployable surface for %s could not be watched (%s); nothing registered\n' "$url" "$notes"
+    else
+      printf 'change-watch: no deployable service touched by %s%s; nothing registered\n' "$url" "${notes:+ ($notes)}"
+    fi
+    # Every merge writes one durable row. A merge that touched no deployable
+    # surface is not-applicable; one whose surface could not be read is a
+    # measurement gap, so the audit never passes a merge nobody could measure.
+    # A gap is a watch that ended unmeasurable, so it queues the same wake.
+    cw_row_write "$id" "$row_state" "$row_reason" \
+      "$task" "$url" "$t0" "$now"
+    [ "$row_state" != unmeasurable-with-reason ] \
+      || cw_queue_unmeasured_wake "$id" "$task" "$url" "$row_reason"
+    return 0
+  fi
+
   mkdir -p "$(cw_watch_dir "$id")" || die "cannot create watch directory"
   chmod 0700 "$(cw_watch_dir "$id")" 2>/dev/null || true
-  printf '%s\n' "$targets" | cw_write "$(cw_targets_path "$id")"
+  [ -z "$targets" ] || printf '%s\n' "$targets" | cw_write "$(cw_targets_path "$id")"
+  [ -z "$sentries" ] || printf '%s\n' "$sentries" | cw_write "$(cw_sentry_path "$id")"
+  [ -z "$runs" ] || printf '%s\n' "$runs" | cw_write "$(cw_runs_path "$id")"
   {
     printf 'version=fm-change-watch-v1\n'
     printf 'task=%s\n' "$task"
@@ -1304,9 +2666,18 @@ cmd_register() {
     printf 'created=%s\n' "$now"
   } | cw_write "$(cw_meta_path "$id")"
   cw_write_schedule "$id" "$t0"
+  # The row exists from registration, so a merge is never unrecorded even if the
+  # drive dies before its terminal verdict.
+  cw_row_write "$id" open 'the watch is still running'
   cw_capture_baseline "$id" "$t0"
+  # The rollout evidence: the images these Deployments run before the release
+  # reaches them. A sample scores a target only after they change.
+  cw_budget_start
+  cw_record_images "$id"
+  landed_unread=$(awk -F'\t' '$2 == "" { print $1 }' "$(cw_landed_path "$id")" 2>/dev/null | paste -sd ',' - | sed 's/,/, /g')
+  [ -z "$landed_unread" ] \
+    || notes="$notes${notes:+; }images unread, so the deploy landing cannot be proven for: $landed_unread"
 
-  local when_name
   when_name="cw-$(cw_hash "$id" | cut -c1-40)"
   {
     printf 'when_name=%s\n' "$when_name"
@@ -1315,7 +2686,7 @@ cmd_register() {
   cw_arm "$id" "$when_name" "$url"
 
   printf 'change-watch: registered %s for %s (%s target(s)%s)\n' \
-    "$id" "$url" "$(grep -c '' "$(cw_targets_path "$id")")" "${notes:+; $notes}"
+    "$id" "$url" "$(( $(cw_target_ids "$id" | grep -c '' || true) ))" "${notes:+; $notes}"
 }
 
 cmd_due() {
@@ -1375,7 +2746,7 @@ cmd_drive() {
   CW_DRIVE_IDENTITY_FILE=$(cw_drive_identity_path "$id")
   printf '%s\n' "$$" > "$CW_DRIVE_PIDFILE" || die "cannot record the drive pid"
   printf '%s\n' "$identity" > "$CW_DRIVE_IDENTITY_FILE" || die "cannot record the drive identity"
-  trap 'rm -f -- "$CW_DRIVE_PIDFILE" "$CW_DRIVE_IDENTITY_FILE"' EXIT
+  trap 'cw_pool_memo_clear; rm -f -- "$CW_DRIVE_PIDFILE" "$CW_DRIVE_IDENTITY_FILE"' EXIT
   trap cw_drive_interrupted TERM INT HUP
 
   while IFS=$'\t' read -r offset epoch; do
@@ -1403,6 +2774,9 @@ cmd_drive() {
   return 0
 }
 
+# The exit status is the done-claim block: an unmeasurable watch is a failure,
+# so verdict exits 1 for it and 0 only for clean or regressed. A watch still
+# running is not terminal and exits 0, because it has not claimed anything yet.
 cmd_verdict() {
   local id=$1 line
   cw_watch_exists "$id" || die "unknown watch: $id"
@@ -1410,9 +2784,144 @@ cmd_verdict() {
   if [ -f "$(cw_verdict_path "$id")" ]; then
     line=$(cat "$(cw_verdict_path "$id")")
     printf 'change-watch %s\n' "$line"
+    case "$line" in
+      unmeasurable-with-reason*|interrupted*) return 1 ;;
+    esac
     return 0
   fi
   cw_verdict_line "$id"
+}
+
+# The done-claim gate for one task: exit 0 only when every watch that task
+# registered has reached a terminal state that is not a measurement gap. A watch
+# still running is not a pass, and an unmeasurable watch is a failure, so a task
+# cannot claim done while its merge has no evidence. A task with no watch at all
+# passes, because there is nothing to prove.
+#
+# Both modes decide from the watch's durable row, which the verdict file cannot
+# mask: deleting a verdict leaves the row's terminal state intact, so a watch
+# that ended unmeasurable keeps failing. Only a watch registered before rows
+# existed, which has no row, is judged by its verdict file.
+#
+# --terminal-gap is the same gate for the teardown boundary bin/fm-teardown.sh
+# consults: only a terminal measurement gap fails there, because a watch still
+# running outlives the task's records in state/change-watch/ and keeps sampling
+# on its own, so refusing teardown for it would block every merge for 12 hours.
+
+# One watch's gate decision: 0 passes, 1 fails.
+cw_gate_row() {  # <watch-id> <mode>
+  local id=$1 mode=${2:-} state line
+  state=$(cw_row_state "$id")
+  if [ -z "$state" ]; then
+    line=''
+    [ -f "$(cw_verdict_path "$id")" ] && line=$(cat "$(cw_verdict_path "$id")")
+    case "$line" in
+      clean|regressed*) return 0 ;;
+      unmeasurable-with-reason*|interrupted*)
+        printf 'change-watch: gate FAIL %s: %s\n' "$id" "$line"; return 1 ;;
+      '')
+        if [ "$mode" = --terminal-gap ]; then return 0; fi
+        printf 'change-watch: gate FAIL %s: still running (%s)\n' "$id" "$(cw_progress_label "$id")"
+        return 1 ;;
+      *) printf 'change-watch: gate FAIL %s: %s\n' "$id" "$line"; return 1 ;;
+    esac
+  fi
+  case "$state" in
+    unmeasurable-with-reason)
+      printf 'change-watch: gate FAIL %s: unmeasurable-with-reason: %s\n' \
+        "$id" "$(cw_row_reason "$id")"
+      return 1 ;;
+    open)
+      if [ "$mode" = --terminal-gap ]; then return 0; fi
+      if cw_watch_exists "$id"; then
+        printf 'change-watch: gate FAIL %s: still running (%s)\n' "$id" "$(cw_progress_label "$id")"
+      else
+        printf 'change-watch: gate FAIL %s: still running\n' "$id"
+      fi
+      return 1 ;;
+    proven|regressed|not-applicable) return 0 ;;
+    *) printf 'change-watch: gate FAIL %s: the durable row records terminal_state %s\n' "$id" "$state"; return 1 ;;
+  esac
+}
+
+cmd_gate() {  # <task-id> [--terminal-gap]
+  local task=$1 mode=${2:-} meta id rc=0 found=0 rows row
+  [ -d "$WATCH_ROOT" ] || return 0
+  for meta in "$WATCH_ROOT"/*/watch.meta; do
+    [ -e "$meta" ] || continue
+    id=$(basename "$(dirname "$meta")")
+    [ "$(cw_meta_get "$id" task || true)" = "$task" ] || continue
+    found=1
+    cw_reconcile_drive "$id"
+    cw_gate_row "$id" "$mode" || rc=1
+  done
+  # A merge whose surface could not be read never created a watch directory:
+  # its gap lives only in the durable row, so the gate reads the rows too.
+  rows=$(cw_rows_dir)
+  if [ -d "$rows" ]; then
+    for row in "$rows"/*.json; do
+      [ -e "$row" ] || continue
+      id=$(basename "$row" .json)
+      cw_watch_exists "$id" && continue
+      [ "$(cw_row_task "$id")" = "$task" ] || continue
+      found=1
+      cw_gate_row "$id" "$mode" || rc=1
+    done
+  fi
+  [ "$found" -eq 1 ] || return 0
+  [ "$rc" -ne 0 ] || printf 'change-watch: gate ok for %s\n' "$task"
+  return "$rc"
+}
+
+# The 7-day acceptance, measured. It fails when any status log under state/
+# carries the literal "change-watch completed unmeasured" line, or when any
+# durable row completed inside the window ended unmeasurable-with-reason. Both
+# are the same disease: a merge that landed with no evidence it was safe.
+cmd_audit() {  # [<days>]
+  local days=${1:-7} now since rows row state completed hits=0 bad=0 total=0
+  case "$days" in ''|*[!0-9]*) die "invalid day count: $days" ;; esac
+  now=$(cw_now)
+  since=$(( now - days * 86400 ))
+  printf 'change-watch audit: window %s day(s) from %s\n' "$days" "$since"
+  if [ -d "$STATE" ]; then
+    hits=$(grep -hc 'change-watch completed unmeasured' "$STATE"/*.status 2>/dev/null \
+      | awk '{ n += $1 } END { print n + 0 }')
+    [ "$hits" -eq 0 ] || grep -l 'change-watch completed unmeasured' "$STATE"/*.status 2>/dev/null \
+      | while IFS= read -r row; do printf 'change-watch audit: FAIL %s carries a "completed unmeasured" line\n' "$row"; done
+  fi
+  rows=$(cw_rows_dir)
+  if [ -d "$rows" ]; then
+    for row in "$rows"/*.json; do
+      [ -e "$row" ] || continue
+      total=$((total + 1))
+      state=$(cw_row_state "$(basename "$row" .json)")
+      completed=$(sed -n 's/.*"completed_epoch": \([0-9]*\).*/\1/p' "$row" 2>/dev/null | tail -1)
+      [ -n "$completed" ] || continue
+      [ "$completed" -ge "$since" ] || continue
+      case "$state" in
+        unmeasurable-with-reason)
+          bad=$((bad + 1))
+          printf 'change-watch audit: FAIL %s ended unmeasurable-with-reason\n' "$(basename "$row" .json)" ;;
+      esac
+    done
+  fi
+  printf 'change-watch audit: %s row(s) recorded, %s unmeasurable in the window, %s "completed unmeasured" status line(s)\n' \
+    "$total" "$bad" "$hits"
+  [ "$hits" -eq 0 ] && [ "$bad" -eq 0 ] && return 0
+  return 1
+}
+
+# One status line per watch, with the metrics no sample ever scored and any
+# target whose rollout was never proven appended when there are any: a watch is
+# never summarized as clean without saying what it did not measure.
+cw_status_line() {  # <watch-id>
+  local id=$1 gaps unproven line
+  gaps=$(cw_measured_gaps "$id")
+  unproven=$(cw_unproven_landing "$id" | paste -sd ',' - | sed 's/,/, /g')
+  line=$(cw_verdict_line "$id")
+  [ -z "$gaps" ] || line="$line	unmeasured: $gaps"
+  [ -z "$unproven" ] || line="$line	rollout never proven: $unproven"
+  printf '%s\t%s\n' "$id" "$line"
 }
 
 cmd_status() {
@@ -1421,14 +2930,14 @@ cmd_status() {
   if [ -n "$id" ]; then
     cw_watch_exists "$id" || die "unknown watch: $id"
     cw_reconcile_drive "$id"
-    printf '%s\t%s\n' "$id" "$(cw_verdict_line "$id")"
+    cw_status_line "$id"
     return 0
   fi
   for meta in "$WATCH_ROOT"/*/watch.meta; do
     [ -e "$meta" ] || continue
     id=$(basename "$(dirname "$meta")")
     cw_reconcile_drive "$id"
-    printf '%s\t%s\n' "$id" "$(cw_verdict_line "$id")"
+    cw_status_line "$id"
     count=$((count + 1))
   done
   [ "$count" -gt 0 ] || printf 'change-watch: no watches registered\n'
@@ -1464,28 +2973,105 @@ cw_doctor_pool() {  # <label> <host> <port> <database>
   printf 'doctor: ok %s returned %s pool row(s)%s\n' "$where" "$rows" "${db:+ for database $db}"
 }
 
+# The doctor's two halves: the cluster read path itself, then every target's own
+# live read. Each line is a stated ok or FAIL, so an unmeasured watch never has to
+# be diagnosed by re-reading its samples by hand.
+cw_doctor_open_target() {  # <ns> <deploy>
+  local ns=$1 deploy=$2 target="$1/$2" images
+  if images=$(cw_live_images "$ns" "$deploy" 2>/dev/null) && [ -n "$images" ]; then
+    printf 'doctor: ok %s pods read, images %s\n' "$target" "$images"
+    return 0
+  fi
+  printf 'doctor: FAIL %s pods unreadable through %s\n' "$target" "${CW_KUBECONFIG:-the ambient kubectl default}"
+  return 1
+}
+
+cw_doctor_reasons() {  # <watch-id>
+  local id=$1 lines
+  lines=$(awk -F'\t' '$2 != "" { printf "%s: %s\n", $1, $2 }' "$(cw_reasons_path "$id")" 2>/dev/null | head -20 || true)
+  [ -n "$lines" ] || return 0
+  printf '%s\n' "$lines" | while IFS= read -r line; do
+    case "$line" in
+      # A wait the watch expects to end by itself is reported as a wait, so a
+      # doctor run between the merge and the rollout does not read as breakage.
+      *"awaiting the deploy"*|*"no "*"run since the merge"*|*"no run created at or after the merge"*|*"run in flight"*)
+        printf 'doctor: awaiting %s\n' "$line" ;;
+      *) printf 'doctor: last read FAIL %s\n' "$line" ;;
+    esac
+  done
+}
+
 cmd_doctor() {
-  local id=${1:-} ns deploy target spec failed=0
+  local id=${1:-} ns deploy target spec failed=0 project run_repo workflow value last
+  cw_kubeconfig_init
+  printf 'doctor: kubeconfig %s (%s)\n' "${CW_KUBECONFIG:-ambient kubectl default}" "$CW_KUBECONFIG_SOURCE"
+  if probe=$(cw_cluster_probe); then
+    printf 'doctor: ok cluster answers\n'
+  else
+    printf 'doctor: FAIL cluster unreachable: %s\n' "$probe"
+    failed=1
+  fi
   if [ -z "$id" ]; then
     cw_doctor_pool '' "$POOLER_DEFAULT_HOST" "$POOLER_DEFAULT_PORT" '' || failed=1
     return "$failed"
   fi
   cw_watch_exists "$id" || die "unknown watch: $id"
-  while IFS=$'\t' read -r ns deploy; do
-    [ -n "${ns:-}" ] || continue
-    target="$ns/$deploy"
-    if spec=$(cw_pool_spec "$id" "$target"); then
-      cw_doctor_pool "$target" "$(printf '%s' "$spec" | cut -f1)" \
-        "$(printf '%s' "$spec" | cut -f2)" "$(printf '%s' "$spec" | cut -f3)" || failed=1
-    else
-      printf 'doctor: FAIL %s pool unresolved; its pool metric is unmeasured for the whole watch\n' "$target"
-      failed=1
-    fi
-  done < "$(cw_targets_path "$id")"
+  cw_budget_start
+  if [ -f "$(cw_targets_path "$id")" ]; then
+    while IFS=$'\t' read -r ns deploy; do
+      [ -n "${ns:-}" ] || continue
+      target="$ns/$deploy"
+      cw_doctor_open_target "$ns" "$deploy" || failed=1
+      if spec=$(cw_pool_spec "$id" "$target"); then
+        cw_doctor_pool "$target" "$(printf '%s' "$spec" | cut -f1)" \
+          "$(printf '%s' "$spec" | cut -f2)" "$(printf '%s' "$spec" | cut -f3)" || failed=1
+      else
+        printf 'doctor: FAIL %s pool unresolved; its pool metric is unmeasured for the whole watch\n' "$target"
+        failed=1
+      fi
+    done < "$(cw_targets_path "$id")"
+  fi
+  if [ -f "$(cw_sentry_path "$id")" ]; then
+    while IFS= read -r project; do
+      [ -n "$project" ] || continue
+      if value=$(cw_live_sentry_new_issues "$project" "$(($(cw_now) - 86400))" 2>&1) \
+        && printf '%s' "$value" | grep -qE '^[0-9]+$'; then
+        printf 'doctor: ok sentry/%s read %s new error issue(s) in the last 24h\n' "$project" "$value"
+      else
+        printf 'doctor: FAIL sentry/%s unreadable: %s\n' "$project" "$(printf '%s' "$value" | tail -1)"
+        failed=1
+      fi
+    done < "$(cw_sentry_path "$id")"
+  fi
+  if [ -f "$(cw_runs_path "$id")" ]; then
+    while IFS=$'\t' read -r run_repo workflow; do
+      [ -n "${run_repo:-}" ] || continue
+      cw_budget_start
+      if value=$(cw_live_deploy_run "$run_repo" "$workflow" "$(cw_meta_get "$id" t0 || true)" 2>&1) \
+        && printf '%s' "$value" | grep -qE '^[01]$'; then
+        printf 'doctor: ok run/%s#%s read %s\n' "$run_repo" "$workflow" "$value"
+      else
+        last=$(printf '%s' "$value" | tail -1)
+        case "$last" in
+          "no "*run*|*"in flight"*)
+            printf 'doctor: awaiting run/%s#%s: %s\n' "$run_repo" "$workflow" "$last" ;;
+          *)
+            printf 'doctor: FAIL run/%s#%s unreadable: %s\n' "$run_repo" "$workflow" "$last"
+            failed=1 ;;
+        esac
+      fi
+    done < "$(cw_runs_path "$id")"
+  fi
+  cw_doctor_reasons "$id"
   return "$failed"
 }
 
 # --- entry --------------------------------------------------------------------
+
+# Every command that reads the cluster resolves the kubeconfig first, so a
+# by-hand reproduction and the armed watch read the same cluster.
+cw_kubeconfig_init
+trap cw_pool_memo_clear EXIT
 
 case "${1:-}" in
   register) [ "$#" -eq 3 ] || usage; shift; cmd_register "$@" ;;
@@ -1493,6 +3079,8 @@ case "${1:-}" in
   drive) [ "$#" -eq 2 ] || usage; shift; cmd_drive "$@" ;;
   sample) if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then usage; fi; shift; cmd_sample "$@" ;;
   verdict) [ "$#" -eq 2 ] || usage; shift; cmd_verdict "$@" ;;
+  gate) [ "$#" -eq 2 ] || [ "$#" -eq 3 ] || usage; shift; cmd_gate "$@" ;;
+  audit) [ "$#" -le 2 ] || usage; shift; cmd_audit "$@" ;;
   status) [ "$#" -le 2 ] || usage; shift; cmd_status "$@" ;;
   doctor) [ "$#" -le 2 ] || usage; shift; cmd_doctor "$@" ;;
   ""|-h|--help|help) usage ;;

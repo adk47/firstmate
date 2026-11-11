@@ -1114,7 +1114,7 @@ The stable local estimate is `ceil(UTF-8 bytes / 3)` per file, a conservative po
 
 An inherited `data/captain-shared.md` counts in a secondmate's total but remains primary-owned and read-only there.
 The internal [`/stow` skill](../.agents/skills/stow/SKILL.md) owns curation and its automatic secondmate cascade, which accounts every home against this same per-home allowance separately rather than against a fleet total.
-
+The post-compaction compact digest also sizes its one shared curated-memory excerpt from this allowance at the same 3 bytes per estimated token, using the `7500` default when the file is absent or invalid so a compaction never loses its bound; `bin/fm-session-start.sh --compact` owns that excerpt.
 The helper's header owns exact parsing, publication, and report output mechanics.
 
 ### Daily startup growth check
@@ -1330,7 +1330,7 @@ Those inherited values are defaults and rules only; `fm-spawn` still permits a c
 
 ### Installed hooks and launch details
 
-For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
+For grok crews, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For Kimi crews, `fm-spawn.sh` runs `fm-kimi-turnend-hook.sh install`, drops a per-task `.fm-kimi-turnend` pointer in the worktree, and records the matching private registry token for teardown.
 
 Kimi continues to use the captain's normal Kimi home, including the existing config, skills, and memory; Firstmate does not create an isolated Kimi home.
@@ -1735,6 +1735,19 @@ When every place is held, `bin/fm-spawn.sh` launches nothing, creates no record,
 A malformed or unreadable file refuses every fresh ship or scout spawn until it is fixed, rather than guessing the intended limit, and so does a local home's state directory or task record that cannot be read while counting a capped project's holders.
 Firstmate cannot see which part of a worker's life uses the resource, so the number bounds whole workers from launch to handoff, and the tightest resource every worker needs should decide it.
 [`bin/fm-project-capacity-lib.sh`](../bin/fm-project-capacity-lib.sh) owns the file format, what holds a place, and why concurrent spawns cannot both take the last one.
+
+## Per-task temporary directory (config/task-tmpdir)
+
+Every spawned task gets a temp root at `/tmp/fm-<id>/` with Go's build temp at `gotmp/` and, by default, the task's own `TMPDIR` at `tmp/`.
+`fm-spawn.sh` exports `TMPDIR=$TASK_TMP/tmp` into the worker pane, so a tool that calls `tempfile.mkdtemp()` or `mktemp -d` without a prefix writes inside the root `fm-teardown.sh` already removes instead of into `/tmp` itself.
+`GOTMPDIR` alone only covers Go; on 2026-11-10 the uncovered leaks had grown `/tmp` to 950,700 entries, which slowed every glob, `ls`, `find`, and test run on the box.
+
+The optional local, gitignored `config/task-tmpdir` restores the old behaviour: write `off` into it and `fm-spawn.sh` stops exporting `TMPDIR`.
+Any other content, or an absent file, leaves the per-task `TMPDIR` enabled.
+The path is kept short because a unix socket path is capped at 108 bytes.
+
+`ak47/guards/guard-producers.sh --systemic` fails when this export disappears, and [`tests/fm-kimi-harness.test.sh`](../tests/fm-kimi-harness.test.sh) covers the export and the opt-out by running the spawn path and inspecting the pane command.
+The `ak47/` hygiene system that measures and reaps what still leaks is documented in [`ak47/README.md`](../ak47/README.md).
 
 ## Crew dispatch profiles (config/crew-dispatch.json)
 
@@ -2552,7 +2565,7 @@ FM_FLEET_STALL_REFRESH_GRACE_SECS=900   # time an account may sit in that window
 FM_FLEET_STALL_ERROR_WINDOW_SECS=300    # gateway log window for the error rate
 FM_FLEET_STALL_ERROR_MIN=30             # error count that can raise the error-rate condition
 FM_FLEET_STALL_ERROR_RATE_PCT=50        # error percentage that raises it
-FM_FLEET_STALL_CAPTURE_JOBS=16          # pane captures run at once
+FM_FLEET_STALL_CAPTURE_JOBS=16          # pane captures run at once, capped by FM_LOCAL_JOB_WORKERS
 FM_FLEET_STALL_CCFLARE_DB=~/.config/better-ccflare/better-ccflare.db   # empty = judge auth from the CLIProxyAPI inventory files
 FM_FLEET_STALL_ACCESS_SYNC_LOG=~/Library/Logs/ccflare-access-sync.log # the access-sync agent's log; its .err sits beside it; empty = not watched
 FM_FLEET_STALL_ACCESS_SYNC_STALE_SECS=600  # an access-sync log this old is a condition
@@ -2562,6 +2575,118 @@ The page always posts a macOS notification, and `FM_FLEET_STALL_PAGE_CMD` is how
 Arm the check once per home with `bin/fm-fleet-stall-check.sh arm`, which writes `state/fleet-stall.check.sh` and binds it with `bin/fm-check-register.sh`, so the watcher polls it on its normal slow-poll cadence.
 A whole poll is budgeted at half of `FM_CHECK_TIMEOUT`, at most 15 seconds, because the watcher runs its checks one after another and a check that spends most of its timeout on every sweep holds the whole sweep back; a worker the pane captures do not reach in time is not counted that poll and keeps its history.
 `bin/fm-fleet-stall-check.sh status` prints the last recorded verdict, and `bin/fm-fleet-stall-check.sh disarm` removes the shim, its trust binding, and `state/.fleet-stall.json`.
+
+## Fleet watchdog (config/watchdog.env)
+
+[`bin/fm-watchdog-worker.sh`](../bin/fm-watchdog-worker.sh) is the fleet's watchdog: a systemd user timer runs one bounded pass every five minutes, outside the firstmate session, and that pass needs no model and no firstmate turn to act.
+It exists because every other signal that noticed a broken worker ended in a firstmate turn - the watcher raised a `stale:` wake and a person read the pane and relaunched by hand.
+The 2026-11-03 autonomy measurements are the evidence: rows that already had an owner stalled 50-70 minutes on a pool-swap connection reset, and a 17:36Z power loss needed a hand relaunch for every worker because the old boot helper waited on a chair that itself needed one.
+Its header owns the exact stall rules, the ladder, the caps, and the record format; this section owns the configuration and the operator contract.
+
+A pass does six things in order.
+A task the captain holds is deliberately stopped, so every pass skips it: its dead endpoint is the expected state, not a fault, and relaunching or paging it would spend the budget on work he has not released.
+First, on the first pass after a reboot, it relaunches every ordinary task whose endpoint is gone and then brings the chair up last, so a reboot needs no hand relaunch and nothing waits on the chair.
+Second, it restarts fleet-owned `fm-*` units systemd reports as failed, capped per unit per hour.
+Third, it walks each live lane's oldest unacknowledged steering message up an age ladder: a re-ring at 20 minutes, an interrupt plus a bounded continue at 45, and a relaunch at 90, one rung per message and never repeated.
+The record it re-rings is the same durable one [`bin/fm-task-inbox-lib.sh`](../bin/fm-task-inbox-lib.sh) writes, and the watcher's per-attempt ladder keeps running underneath, which is free because a duplicated doorbell is a no-op.
+Fourth, it relaunches every task it does not find held whose endpoint reads `dead` or `missing` through `bin/fm-backend.sh`'s recovery-grade classifier; an `ambiguous`, `unreadable`, or `unverified` endpoint is recorded and left alone, because a duplicate agent in one worktree is worse than waiting another minute.
+Fifth, it walks each live but frozen worker up a stall ladder: one re-ring through `bin/fm-send.sh`, then a relaunch, then a reassign, then one wake for firstmate - one rung per pass, never sooner than the grace interval after the previous rung, and the ladder resets the moment the worker writes a new status line.
+A worker that is alive and idle rather than frozen is nudged at most once an hour, and only while `bin/fm-crew-state.sh` still reads `working` from a source the worker itself owns.
+Sixth, it reports in-flight backlog items that no task record can serve, and live lanes whose record went missing, once per change of that set.
+Such a lane cannot be steered at all - `bin/fm-send.sh` resolves targets from the record - so the report names every id for firstmate to adopt or close instead of leaving it unowned.
+The watchdog never writes a task record: a wrong endpoint binding is worse than a lane that is visibly unowned.
+
+A live lane whose pane shows a connection error or a connection reset and has produced nothing new for ten minutes is not working on anything, so it takes a lane of its own: one bounded continue per pass, then a relaunch once three of those have failed to move it.
+The relaunch rung is budgeted at `FM_WATCHDOG_RELAUNCH_PER_HOUR` per task per rolling hour; once that budget is spent it stops retrying and wakes firstmate once with the lane named, because a rung that cannot succeed is a request for a hand, not a retry loop.
+That relaunch puts a worker lane (`ship`, `scout`) on `FM_WATCHDOG_FALLBACK_MODEL` and leaves a review or planning seat on the model the captain chose for it, because a lane that died on transport three times running is not converging where it is, while a seat chosen for its judgement is not a worker to be downgraded.
+Only a Claude Code lane can be repointed through the gateway switch; any other recorded harness relaunches on its own model instead of attempting a switch it cannot reach.
+Reaching that model needs the second gateway's endpoint, so the repoint is recorded first by the script that owns the move, [`bin/fm-lane-model-switch.sh`](../bin/fm-lane-model-switch.sh) - never by typing `/model` into a live lane - and a lane that refuses the repoint (it owns scheduled ticks) still gets the plain relaunch, on its own model, with the refusal reported.
+A gateway-owned transient failure is left to the gateway re-ring ladder that already owns it ([`docs/gateway-keepalive.md`](gateway-keepalive.md)), and a permanent failure - a spent usage limit, an expired login, a prompt too long - is never retried at all.
+
+The boot pass restarts the chair unit rather than starting it, because that unit is a `RemainAfterExit` oneshot: once its session dies the unit still reads active, where `start` would do nothing, while `restart` re-runs the unit's own guard against ever holding two chairs.
+
+One owner per signal: the fleet-wide gateway episode and the captain page belong to [`config/fleet-stall.env`](#fleet-stall-watch-configfleet-stallenv), secondmate liveness belongs to the session start's sweep and to each secondmate's own home, and the per-worker recovery above belongs here.
+This script replaces the old `fm-fleet-revive.service` boot helper, whose `After=fm-chair.service` ordering and fixed 90-second wait are the reason a reboot used to need a hand.
+
+`config/watchdog.env` is optional, local, gitignored, and not inherited by secondmate homes.
+It holds `KEY=value` lines, it is parsed rather than sourced, and a set environment variable of the same name wins.
+
+```sh
+FM_WATCHDOG_RELAUNCH_PER_HOUR=3        # relaunches per task per rolling hour
+FM_WATCHDOG_UNIT_RESTARTS_PER_HOUR=3   # restarts per failed unit per rolling hour
+FM_WATCHDOG_RINGS_PER_HOUR=2           # stall re-rings per task per rolling hour
+FM_WATCHDOG_IDLE_STEERS_PER_HOUR=1     # idle nudges per task per rolling hour
+FM_WATCHDOG_NO_PROGRESS_SECS=1800      # a busy pane frozen this long is a stall
+FM_WATCHDOG_IDLE_SECS=1800             # an idle worker quiet this long may be nudged
+FM_WATCHDOG_RUNG_GRACE_SECS=600        # a rung may not be followed for this long
+FM_WATCHDOG_UNITS=on                   # off skips the unit pass and the chair start
+FM_WATCHDOG_UNIT_ALLOW='fm-*'          # glob list of units it may restart
+FM_WATCHDOG_UNIT_DENY='fm-watchdog-worker.service fm-watchdog-worker.timer'
+FM_WATCHDOG_CHAIR_UNIT=fm-chair.service
+FM_WATCHDOG_CHAIR_SESSION=chair        # tmux session whose first window is the chair
+FM_WATCHDOG_CAPTURE_LINES=24           # pane lines that make up a pane's shape
+FM_WATCHDOG_READ_TIMEOUT_SECS=10
+FM_WATCHDOG_RELAUNCH_TIMEOUT_SECS=240
+FM_WATCHDOG_BOOT_BUDGET_SECS=1500      # a boot pass stops taking new tasks past this
+FM_WATCHDOG_INBOX_RING_SECS=1200       # an unread steer this old is re-rung
+FM_WATCHDOG_INBOX_INTERRUPT_SECS=2700  # ... interrupted and continued this old
+FM_WATCHDOG_INBOX_RELAUNCH_SECS=5400   # ... and relaunched this old
+FM_WATCHDOG_CONNECTION_SECS=600        # a connection error frozen this long is stuck
+FM_WATCHDOG_CONNECTION_STRIKES=3       # continues before the lane is relaunched
+FM_WATCHDOG_FALLBACK_MODEL='openrouter-named/deepseek/deepseek-v4.1-flash-1017'
+FM_WATCHDOG_FALLBACK_KINDS='ship scout'  # lane kinds the fallback model applies to
+FM_WATCHDOG_BACKLOG=on                 # off skips the backlog reconcile report
+FM_WATCHDOG_BACKLOG_BIN=tasks-axi
+FM_WATCHDOG_BACKLOG_LIST_MAX=25        # ids named in one report
+```
+
+`FM_WATCHDOG_FALLBACK_MODEL` is the model spec the fleet already records for DeepSeek V4.1 Flash; set it empty on a home with no second gateway, where no lane can reach that model.
+
+The pass records what it did in `state/.watchdog-worker.json`: the boot identity, each task's last pane shape with when it last changed, its stall and inbox ladder stages, its connection strikes, its capped action history, each unit's restart history, and the identity of the last backlog difference it reported.
+`bin/fm-watchdog-worker.sh status` prints that record without acting, and a record carrying a different schema stamp is treated as no record at all.
+A pass holds `state/.watchdog-worker.lock`, so a slow pass never overlaps the next tick.
+
+Install it once per home, as the user that owns the fleet:
+
+```sh
+mkdir -p ~/.config/systemd/user
+cat > ~/.config/systemd/user/fm-watchdog-worker.service <<'UNIT'
+[Unit]
+Description=firstmate fleet watchdog (one pass)
+After=default.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/Projects/firstmate/bin/fm-watchdog-worker.sh
+TimeoutStartSec=1800
+Nice=5
+UNIT
+cat > ~/.config/systemd/user/fm-watchdog-worker.timer <<'UNIT'
+[Unit]
+Description=firstmate fleet watchdog
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl --user daemon-reload
+systemctl --user enable --now fm-watchdog-worker.timer
+systemctl --user disable --now fm-fleet-revive.service 2>/dev/null || true
+loginctl enable-linger "$USER"
+```
+
+`ExecStart` names this repo's own path; adjust it for a home that lives elsewhere.
+The timer's first pass runs a minute after boot and every five minutes after that, which is what puts a killed worker back inside five minutes.
+Disabling `fm-fleet-revive.service` is part of the install, not an optional tidy-up: two boot helpers racing would double every relaunch.
+Verify with `systemctl --user list-timers fm-watchdog-worker.timer`, `bin/fm-watchdog-worker.sh status`, and `journalctl --user -u fm-watchdog-worker.service -n 20 --no-pager`; a quiet pass writes nothing, so an empty journal is healthy.
+`bin/fm-watchdog-worker.sh --dry-run` is the same pass with every action replaced by a `would ...` line, a `lane/state/busy/conn/quiet/inbox/action` row for every lane, and no write, call, or wake at all - run it against a live home before trusting the timer, and read its action column to see what the ladder would have done.
+A pass over a few hundred lanes takes one to two minutes of wall time, which is why the timer's period is five minutes rather than one.
+`systemctl --user disable --now fm-watchdog-worker.timer` stops it.
 
 ## Sentry watch (config/sentry-watch.json)
 
@@ -2683,6 +2808,36 @@ The token is read from `~/.config/muso/sentry-vault.json` by the interpreter onl
 The watch is read-only against Sentry and GitHub, makes no model calls, and bounds a whole poll by `FM_SENTRY_WATCH_BUDGET_SECS` (default 20) so it ends inside `FM_CHECK_TIMEOUT` rather than being killed with nothing printed.
 That budget is shared fairly: each project's read gets the budget divided by the project count, at least 2 seconds and never more than `FM_SENTRY_WATCH_HTTP_TIMEOUT` (default 5), and the read order rotates round-robin every poll starting after the last project read, so a slow host starves no fixed tail and every project is read within a bounded number of polls.
 A project left unread for three consecutive polls is reported as `could-not-determine` on that transition.
+
+## Post-merge change watch (config/change-watch-kubeconfig, config/change-watch-repos)
+
+[`bin/fm-change-watch.sh`](../bin/fm-change-watch.sh) watches a merged change by effect for 12 hours; its header owns the commands, metrics, bars, schedule, target resolution, and test seams, and [`docs/architecture.md`](architecture.md) "Post-merge change watch" owns why it exists.
+This section owns only the two local, gitignored files that point its reads at this home's cluster and this home's repository map.
+
+`config/change-watch-kubeconfig` holds one path on its first non-comment line: the kubeconfig every cluster read of a watch uses.
+Precedence is `FM_CW_KUBECONFIG`, then this file, then an operator's own `KUBECONFIG`, then `~/.kube/mcp-viewer.kubeconfig`, and only then the ambient `~/.kube/config` default.
+The order exists because a watch once inherited an ambient context pointed at an unreachable cluster and every watch for months completed `unmeasured` while its record looked normal, so a home that reads production should name its reader here rather than rely on whatever `kubectl` was last configured with.
+A kubeconfig named here that cannot be read is reported, never silently replaced by another cluster.
+
+Every merge writes one durable row at `state/change-watch/rows/<watch-id>.json` with its +15m, +1h and +6h readings, its real-user check, and a terminal state of `proven`, `regressed`, or `unmeasurable-with-reason` (or `not-applicable` when the merge touched no deployable surface); `state/change-watch/` is not a task record, so teardown never removes it.
+`bin/fm-change-watch.sh gate <task-id>` exits non-zero while a task's watch is still running or ended unmeasurable, and `bin/fm-change-watch.sh audit [<days>]` fails on any `change-watch completed unmeasured` status line or any unmeasurable row inside the window; the row schema is owned by the `durable row` section of `bin/fm-change-watch.sh`, and the acceptance by [`docs/architecture.md`](architecture.md) "Post-merge change watch".
+
+`config/change-watch-repos` maps a repository to the things a watch should sample, one repository per line, `<repo> <spec>...`, where `<repo>` is the GitHub repository name and each spec is one of:
+
+```
+<namespace>/<deployment>   an explicit Deployment target
+<deployment>               a Deployment in muso-prod
+image:<name>               every Deployment running an image whose repository is <name>
+sentry:<project-slug>      the repository's Sentry project
+run:<owner>/<repo>#<workflow-path>   the repository's deploy workflow, by path
+```
+
+A line for a repository replaces that repository's built-in entry rather than adding to it, so a home can point a watch at a different namespace, a narrower image, or its own Sentry project; a repository with no line and no built-in entry still resolves through the Deployments that run an image named after it.
+A `run:` spec names the workflow by file (`run:Muso-AI/hydra#.github/workflows/deploy.yml`) because a spec is one whitespace-free token and workflow display names contain spaces.
+Sentry reads use the org `auth_token` in `~/.config/muso/sentry-vault.json` (override `FM_CW_SENTRY_VAULT`); with no token or no mapped project the Sentry target is not registered and the registration line says so, and it is never a silent zero.
+A Sentry read waits for the watch's own landing — the Deployments' rollout fingerprint when the watch has any, otherwise its mapped `run:` workflow's run for this merge — because before that landing those are the errors of the code the release replaced.
+Every mapped target is bounded — an image family is watched by its busiest `FM_CW_MAX_TARGETS` (default 8) Deployments and the registration line states the cap — and a Kubernetes target is scored only once its rollout fingerprint (pod images plus pod-template hash) differs from registration, so a sample taken before the rollout is recorded as awaiting the deploy rather than as health and a rollout that changes no image still counts.
+The per-sample budget (`FM_CW_SAMPLE_DEADLINE`) bounds the cluster reads only: the Sentry and deploy-workflow reads go over the network under their own bounds, so a sample whose pod reads spent the budget still measures them.
 
 ## Relay (.env)
 
@@ -3469,6 +3624,7 @@ Each is one line in a local, gitignored `config/` file, with an environment vari
 
 That configuration is the whole opt-in: an unconfigured home cannot start the relay and cannot run `fm-inbox.sh say` or `ask`, while `note`, `announce`, `reply`, `receipts`, `ready`, `status`, `list` and `drain` need no configuration at all because they make no model call.
 The voice handover depends on `note`, so it keeps working in a home that has configured nothing.
+A note is filed under the class of the source that wrote it, and an automated source files into its own `state/inbox-auto/` queue so `list` and `drain` always present the captain's own notes first; `bin/fm-inbox.sh --help` owns the class list and the queue each one uses.
 
 | File | Environment | Holds |
 | --- | --- | --- |
@@ -3577,6 +3733,11 @@ FM_CHECK_SLOW_LOG_SECS=10   # a slow check that takes at least this long is logg
 FM_MAIL_CHECK_BUDGET=15   # seconds allowed for one standing mail poll; valid 5..25, cut to fit FM_CHECK_TIMEOUT
 FM_MAIL_POLL_MAX_WAKES=20   # per-poll wake cap for a mail poll; valid 1..200, keeps a flood from flooding firstmate
 FM_MAIL_TIMEOUT=20   # mail-plane IMAP/SMTP socket timeout in seconds; invalid or non-positive values become 20
+FM_LOCAL_JOB_NICE=19        # niceness for every local job the watcher launches (each slow check and what it starts, and the detached ledger, lock-reap, and reconcile jobs); 0 disables
+FM_LOCAL_JOB_WORKERS=8      # parallelism exported to checks for their own fan-out; the fleet-stall capture pass uses at most this many
+FM_WATCH_BEAT_LAG_LOG_SECS=60     # when the watcher's beacon had lagged this long by its next touch, the top CPU consumers and load are logged to state/.watch-triage.log; 0 disables
+FM_WATCH_BEAT_LAG_LOG_EVERY=300   # at most one such beat-lag line per this many seconds
+FM_SEND_LIVENESS_SILENCE_SECS=21600   # fm-send refuses (exit 3) a steer to a local task whose endpoint cannot be verified alive and that has shown no activity this long; a dead or missing endpoint is refused at once; --allow-dead <reason> overrides (bin/fm-send.sh "Liveness refusal")
 FM_TOOL_UPDATE_INTERVAL=900   # seconds between watched-tool probe sweeps; 0 probes on every run, other values must be 60..86400
 FM_TOOL_UPDATE_PROBE_SECS=5   # 1..30 seconds allowed for one version or git probe
 FM_TOOL_UPDATE_BUDGET_SECS=24   # 1..120 seconds allowed for a whole watched-tool sweep; cut to fit FM_CHECK_TIMEOUT, and the cut is reported
@@ -3652,12 +3813,13 @@ FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stal
 FM_BUSY_TURN_MAX_SECS=3600         # maximum age without a completed turn, explicit native-harness progress, or opted-in model progress (see the stream option above; bin/fm-watch.sh owns marker selection), before the same wedge escalation used for a provably-working non-busy stale takes over; inspection-only, never an automatic interrupt or restart; a declared external wait, an attended verified captain-held transfer, an attended backlog captain hold on the crew's task, or - where config/wedge-defer-worker-wait or config/wedge-defer-parked-gate arms it - the worker's own still-open newest `blocked:` or `needs-decision:` line or a validation gate of the crew's own awaiting the supervisor's still-unanswered decision, or - where config/wedge-defer-validating arms it - an attributed validation run that is running or fixing, takes the FM_PAUSE_RESURFACE_SECS recheck below instead
 FM_STREAM_SILENT_MAX_SECS=         # opt-in Pi worker foreground model-stream silence threshold; off by default; see the option above and bin/fm-busy-lib.sh
 FM_PAUSE_RESURFACE_SECS=14400      # four hours between bounded rechecks of a declared external wait or verified captain-held transfer, repeated new-hash stale alarms for an ordinary crew task with an open backlog captain call, and repeated first-sight alarms from an otherwise-unclassifiable pane whose recovery-grade endpoint probe proves its agent alive and whose own status log or task worktree was written within FM_STALE_ESCALATE_SECS (without that progress evidence every new hash still surfaces immediately); a structured until time can make an external-wait recheck occur sooner but cannot extend this bound; this includes a live idle pane after its first inconclusive stale wake, a provably-working pane whose own unelapsed declared wait, backlog captain hold, or, where config/wedge-defer-worker-wait or config/wedge-defer-parked-gate arms it, its worker's own still-open `blocked:` or `needs-decision:` line or unanswered supervisor-owed validation gate, or, where config/wedge-defer-validating arms it, attributed validation run that is running or fixing, defers its FM_STALE_ESCALATE_SECS escalation, and a live busy pane past FM_BUSY_TURN_MAX_SECS, while the away-mode daemon uses the same setting and ages its window against the crew's own latest status line rather than pane busy state; set it in config/watch.env for durable non-Relay tuning of watchers started through bin/fm-watch-arm.sh, while the Codex checkpoint route with no config/supervision-host and the away-mode daemon start the watcher directly and use the default; a captain-held transfer or backlog captain hold is never rechecked while the away-posture record exists, while an armed validation gate awaiting the supervisor's decision keeps this recheck in either posture
-FM_SECONDMATE_WAKE_STALL_SECS=180  # minimum interval with no change of the oldest actionable foreign wake-queue row (it advances as the mate drains, and a queue reprovisioned under the same task id starts a fresh interval at whatever sequence it restarts) before an endpoint-recorded local secondmate produces one durable parent wake-loop-stall notification for that no-progress episode; a mate that is provably inside an active turn (an exact busy verdict) does not escalate until that same no-progress interval reaches FM_BUSY_TURN_MAX_SECS above; a mate whose busy class is exactly idle, whose agent is alive, and whose composer is not pending is rung once so its own home can drain, and the parent notification is withheld until that same row stays frozen for another stall interval; unknown or ring-unsafe panes keep the parent alarm; declared external-wait pause rows are excluded, and zero or invalid values use 180
+FM_SECONDMATE_WAKE_STALL_SECS=900  # minimum age of the oldest valid foreign wake-queue row before an endpoint-recorded local secondmate produces one durable parent wake-loop-stall notification; zero or invalid values use 900, fifteen minutes, because a Pi mate's supervision branch handles a wake inside one model turn that runs out of the pane and a measured healthy branch turn passed four minutes; the rung reads the session named by the mate's `state/.branch-session` pointer and judges the branch by its last message entry first: a user message, an assistant message with `stopReason` `toolUse`, or a tool result is a turn in flight and stays silent regardless of mtime, while an assistant message with any other `stopReason` is positive idle evidence; only a session with no `type=message` entries at all falls back to this mtime window, which is the residual, while a malformed trailing line means the branch is writing now and stays silent and malformed earlier lines are skipped so the last complete message entry decides; the reason carries `branch=idle` or `branch=none` so the reader knows the branch evidence it read. A mate drains that queue only at turn start, so a single turn longer than this threshold is ordinary work rather than a stalled loop: the rung stays silent on a POSITIVE busy read of the mate's own endpoint, through the same semantic busy-state contract owned by `bin/fm-busy-lib.sh` that stale detection uses, and `bin/fm-spawn.sh` arms that contract for a secondmate exactly as it does for a crew window. Only a positive read suppresses: a failed capture inside the busy lib, or any unprovable verdict, still reports, so a mate that cannot be proven working is never silently exempted. The rung classifies through the live contract, so a gone endpoint is dead, never busy, and a stale busy record cannot silence the rung for a mate whose endpoint has disappeared. Grok and rovo classify from their rendered tail, and muse and cursor fold their own durable session logs, so those can still prove a busy turn; a harness with no semantic or pull source (codex, standalone kimi) arms no record and classifies unknown, so its mate is reported - the honest cannot-be-proven case, not a silent exemption
 FM_SECONDMATE_LIVENESS_SECS=60   # seconds between watcher probes of each registered secondmate's recorded endpoint; bin/fm-secondmate-liveness-lib.sh owns recovery actions and refusal rules; zero or invalid values use 60
 FM_SECONDMATE_LIVENESS_TIMEOUT=120   # seconds allowed separately for a watcher-driven relaunch's per-home lock wait and its spawn execution; a lock-wait timeout skips recovery without touching the endpoint or recording an attempt; zero or invalid values use 120
 FM_SECONDMATE_LIVENESS_MAX_ATTEMPTS=3   # automatic relaunch attempts allowed per mate inside the window before the watcher parks auto-relaunch behind state/.secondmate-relaunch-bound-<id> and escalates once; a later live probe clears the marker and restores the full attempt budget (the ledger keeps its history behind a `rearmed` row); zero or invalid values use 3
 FM_SECONDMATE_LIVENESS_WINDOW_SECS=3600   # window the relaunch bound counts state/.secondmate-relaunch-<id> attempt lines over; the file is also the durable per-mate relaunch record; zero or invalid values use 3600
 FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
+FM_WEDGE_REALARM_SECS=86400        # seconds after the ladder's last delivered escalation before an unchanged pane re-alarms once; until then every further timer expiry on the same pane is absorbed as an already-reported repeat, while an idle pane's hash change, or the pane leaving the busy state, resets the ladder and reports the pane as a first sight again (a busy pane past FM_BUSY_TURN_MAX_SECS keeps its ladder across render changes until it goes idle); a task left stopped through bin/fm-leave-stopped.sh never re-alarms at all
 FM_WEDGE_GUARD_TIMEOUT_SECS=5      # seconds one guard from config/wedge-evidence-guards may run before it counts as no answer; zero or invalid values use 5
 FM_WEDGE_GUARD_DEFER_MAX=3         # consecutive windows a CRITICAL guard answer may defer one pane's wedge escalation before it fires anyway; invalid values use 3
 FM_WEDGE_MAX_ESCALATIONS=0    # optional ceiling on consecutive wedge escalations for one worker window; 0 (the default) leaves the cap off and every escalation produces a wake, and any value from 1 up to 999999999999999999 publishes one terminal PERMANENTLY-WEDGED wake at that count - carrying the same evidence the escalation it replaces carried: the guard verdict, and the `demand-deep-inspection` marker once the count has reached `FM_WEDGE_DEMAND_INSPECT_COUNT` - and then writes the window-scoped state/.wedge-permanent-<key> to silence further wedge escalations for that window whatever hash its pane renders; the wedge path publishes no second terminal wake while the row that episode queued is still unacknowledged, which scopes the suppression to the episode rather than the window so an earlier episode's unconsumed wake cannot silence a later episode's (the away-posture first sight, which releases the markers without ending the episode, can re-open the row within one episode - an over-notify in the safe direction: the queue check bounds duplicate terminal wakes only while the episode marker stands, and the release removed exactly the marker that would have gated the re-fire, so after it a second wake can stand behind an unacknowledged first), the cap marker and the escalation count the cap was counting drop through the one episode-ending reset whose release routes are owned by the cap discussion below, and a fresh wedge escalates normally again; a cap fire also resets the consecutive-deferral budget of a config/wedge-evidence-guards guard, because the guard is not consulted at all while the cap is silencing that window, so its budget must not carry across as if it had been spent, and preserving it would leave a CRITICAL guard that reached its deferral ceiling before the cap fired already at that ceiling on the first escalation after the cap lifts, unable to defer at all; an invalid or out-of-range value uses 0
@@ -3666,7 +3828,7 @@ FM_ROLLBACK_SENTINEL_TTL_SECS=3600   # seconds a cap-state write failure that co
 FM_WORKTREE_WRITE_PRUNE='.git node_modules .venv venv __pycache__ .mypy_cache .pytest_cache .ruff_cache .tox target dist build .next .cache vendor'   # directory names the wedge detector's task-worktree write probe skips; the default keeps .git out so a supervisor's own read-only git command can never look like crew progress; set it to the empty string to prune nothing, which widens the probe to the whole depth-bounded tree rather than disabling it
 FM_WORKTREE_WRITE_MAXDEPTH=6       # depth that same probe walks below the recorded worktree; it runs only at the moment a wedge escalation would otherwise fire, never on every poll; no probe knob applies to a secondmate, whose recorded worktree is a provisioned home the probe skips entirely
 FM_WORKTREE_WRITE_TIMEOUT=10       # wall-clock seconds that one walk may take, so a worktree on a hung mount cannot stall the watcher poll that started it; hitting the bound reads as no write evidence, which leaves the escalation schedule exactly as it was; a value that is not a positive integer falls back to the default
-FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
+FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
 FM_STALE_WORKTREE_LOCK_AGE_SECS=30       # min mtime age before fm-teardown.sh treats a leftover worktree git index.lock as provably stale

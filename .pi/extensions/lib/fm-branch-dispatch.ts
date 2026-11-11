@@ -143,6 +143,13 @@ export interface UnreadWakeScope {
    */
   heartbeatSeqs: string[];
   taskByWakeKey: Record<string, string>;
+  /**
+   * Every task resolved from each signal row's full batch, keyed by that row's
+   * queued payload. The compact payload can omit status paths another consumer
+   * needs, so the dispatcher cross-references a trigger against this record
+   * instead of re-parsing the prompt alone.
+   */
+  signalTasksByPayload: Record<string, string[]>;
 }
 
 const EMPTY_SCOPE: UnreadWakeScope = {
@@ -156,6 +163,7 @@ const EMPTY_SCOPE: UnreadWakeScope = {
   checkSeqs: [],
   heartbeatSeqs: [],
   taskByWakeKey: {},
+  signalTasksByPayload: {},
 };
 const UNSAFE_SCOPE: UnreadWakeScope = {
   status: "unsafe",
@@ -168,6 +176,7 @@ const UNSAFE_SCOPE: UnreadWakeScope = {
   checkSeqs: [],
   heartbeatSeqs: [],
   taskByWakeKey: {},
+  signalTasksByPayload: {},
 };
 
 // scopeForUnreadWake is the single owner of branch-eligibility classification
@@ -370,6 +379,49 @@ function spanIsDecisionOwned(
   return false;
 }
 
+// The status files a signal row names. A legacy row is keyed by one status
+// filename; a coalesced batch row is keyed by a stable batch identity whose
+// full batch list lives in the private batch-path record bin/fm-watch.sh writes
+// beside the queue (see its signal_record_batch_paths). A legacy row with no
+// record still carries its path list in the payload, so fall back to the
+// path-shaped tokens there. An empty result is an unresolvable row, which the
+// caller treats as a scan veto so a missing record surfaces rather than being
+// classified from the compact summary alone.
+function signalRowFiles(key: string, payload: string, state: string): string[] {
+  if (/^[A-Za-z0-9._-]+\.(?:status|turn-ended)$/.test(key)) return [key];
+  if (!/^signal:/.test(payload)) return [];
+  const recorded = signalBatchPaths(state, key);
+  if (recorded.length > 0) return recorded;
+  // A compact summary names only the first few paths, so a missing record must
+  // surface the whole batch rather than let the dispatcher claim a partial set.
+  if (/^signal: [0-9]+ file/.test(payload)) return [];
+  return payload
+    .split(/\s+/)
+    .filter((token) => /\.(?:status|turn-ended)$/.test(token))
+    .map((path) => path.split("/").pop() ?? path);
+}
+
+// The basenames recorded for one batch key, or none when the record is absent.
+function signalBatchPaths(state: string, key: string): string[] {
+  let lines: string[];
+  try {
+    lines = readFileSync(`${state}/.signal-batch-paths`, "utf8").split(/\r?\n/);
+  } catch {
+    return [];
+  }
+  for (const line of lines) {
+    const tab = line.indexOf("\t");
+    if (tab < 0 || line.slice(0, tab) !== key) continue;
+    return line
+      .slice(tab + 1)
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((path) => path.split("/").pop() ?? path);
+  }
+  return [];
+}
+
 export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = false, attendedHost = false): UnreadWakeScope {
   let queue = "";
   try {
@@ -385,7 +437,12 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
   const metadata = new Map<string, string>();
   const secondmates = new Set<string>();
   // The task id behind each key a signal or stale row may carry: the task id
-  // itself, or the endpoint its metadata records.
+  // itself, or the endpoint its metadata records. A stale row is keyed by the
+  // target bin/fm-watch.sh polls (bin/fm-backend.sh's fm_backend_target_of_meta):
+  // the recorded `window=` for every backend except Orca, whose target is its
+  // `terminal=` handle. Both must resolve here, or every Orca stale row reads as
+  // unresolvable and drags the whole scan - and every routine signal row queued
+  // beside it - to main.
   const taskByKey = new Map<string, string>();
   try {
     for (const name of readdirSync(state)) {
@@ -406,6 +463,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
         // must not inherit another record's decision state or project context.
         if (owner !== undefined && owner !== task) return UNSAFE_SCOPE;
         taskByKey.set(key, task);
+        if (project && (key === window || key === terminal)) metadata.set(key, project);
       }
       if (project) metadata.set(task, project);
     }
@@ -418,6 +476,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
   const needsDecisionKeys: string[] = [];
   const checkSeqs: string[] = [];
   const heartbeatSeqs: string[] = [];
+  const signalTasksByPayload: Record<string, string[]> = {};
   const staleDecisionOwnership = new Map<string, boolean>();
   const resolveVerb = process.env.FM_CLASSIFY_RESOLVE_VERB || "resolved";
   const heldVerb = process.env.FM_CLASSIFY_CAPTAIN_HELD_VERB || "captain-held";
@@ -466,8 +525,20 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
         needsDecisionKeys.push(key);
         if (!afk) continue;
       }
-      task = key.replace(/\.(?:status|turn-ended)$/, "");
-      project = metadata.get(task) ?? "";
+      const files = signalRowFiles(key, payload, state);
+      if (files.length === 0) return UNSAFE_SCOPE;
+      const rowTasks = new Set(signalTasksByPayload[payload] ?? []);
+      for (const file of files) {
+        const fileTask = file.replace(/\.(?:status|turn-ended)$/, "");
+        const fileProject = metadata.get(fileTask) ?? "";
+        if (!fileTask || !fileProject) return UNSAFE_SCOPE;
+        projects.add(fileProject);
+        eligibleTasks.add(fileTask);
+        rowTasks.add(fileTask);
+      }
+      signalTasksByPayload[payload] = [...rowTasks];
+      eligibleSeqs.push(seq);
+      continue;
     } else if (kind === "stale") {
       task = taskByKey.get(key) ?? taskByKey.get(key.replace(/^fm-/, "")) ?? "";
       project = metadata.get(task) ?? "";
@@ -570,6 +641,7 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
     checkSeqs,
     heartbeatSeqs,
     taskByWakeKey: Object.fromEntries(taskByKey),
+    signalTasksByPayload,
   };
 }
 

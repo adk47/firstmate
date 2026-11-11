@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2016 # The fixture heredocs are literal Python and JavaScript.
 # Behavior tests for per-task GOTMPDIR support (fm-gotmp).
 #
 # fm-spawn gives each task a temp root /tmp/fm-<id>/ with Go's build temp nested at
@@ -10,6 +11,7 @@
 # The isolated fm-spawn subprocess in fm-kimi-harness.test.sh covers temp-root creation,
 # metadata publication, and the pane environment export.
 set -u
+
 
 # This suite does not source tests/lib.sh, so exempt its teardown subprocess from
 # the gate-lifecycle refusal (bin/fm-gate-refuse-lib.sh) the way lib.sh does for
@@ -98,6 +100,8 @@ SH
   # Ordinary teardown reports any final ledger outcome before removing records.
   ln -s "$ROOT/bin/fm-inactive-reconcile.sh" "$fake/bin/fm-inactive-reconcile.sh"
   ln -s "$ROOT/bin/fm-parent-channel-lib.sh" "$fake/bin/fm-parent-channel-lib.sh"
+  # fm-change-watch.sh: teardown consults its gate before removing task state.
+  ln -s "$ROOT/bin/fm-change-watch.sh" "$fake/bin/fm-change-watch.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -200,6 +204,8 @@ SH
   ln -s "$ROOT/bin/fm-operational-input.sh" "$fake/bin/fm-operational-input.sh"
   ln -s "$ROOT/bin/fm-inactive-reconcile.sh" "$fake/bin/fm-inactive-reconcile.sh"
   ln -s "$ROOT/bin/fm-parent-channel-lib.sh" "$fake/bin/fm-parent-channel-lib.sh"
+  # fm-change-watch.sh: teardown consults its gate before removing task state.
+  ln -s "$ROOT/bin/fm-change-watch.sh" "$fake/bin/fm-change-watch.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -246,6 +252,14 @@ test_teardown_skips_gracefully_when_dir_missing() {
   [ ! -e "$task_tmp" ] || fail "teardown created/left the tasktmp dir unexpectedly"
   pass "fm-teardown skips gracefully when tasktmp= points to a nonexistent dir"
 }
+
+# --- per-task TMPDIR ------------------------------------------------------------
+#
+# GOTMPDIR only covers Go. Every other tool that calls tempfile.mkdtemp() or
+# mktemp -d without a prefix writes into /tmp itself, and on 2026-11-10 that was
+# 950,700 entries. The task's own TMPDIR puts those leaks inside the root
+# teardown already removes. The isolated fm-spawn subprocess in
+# fm-kimi-harness.test.sh exercises the export and its opt-out behaviour.
 
 test_teardown_removes_tasktmp_dir
 test_teardown_skips_gracefully_without_tasktmp

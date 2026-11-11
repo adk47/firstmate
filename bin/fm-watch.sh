@@ -18,7 +18,13 @@
 # item held for the captain is never rechecked at all, in either posture.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
-#   signal: <file>...      status/turn-end signals, surfaced when a listed status
+#   signal: <N> file(s) (<S> status, <T> turn-end): <status path>... [+N more]
+#                          a prompt-sized summary of the changed-file batch: the
+#                          total, how many status versus turn-end, then up to five
+#                          changed status paths, never a turn-ended one, capped at
+#                          400 bytes. The batch identity and every internal set
+#                          consumer still use the full path list.
+#                          Surfaced when a listed status
 #                          span has a captain-relevant event OR a no-verb signal lacks
 #                          positive execution evidence, unless afk is active
 #   stale: <window>        a provably-working stale is ALWAYS absorbed (with a wedge
@@ -39,7 +45,20 @@
 #                          also carries a "demand-deep-inspection" marker so the
 #                          wake payload itself, not just repetition, forces a
 #                          closer look instead of another routine supervision
-#                          resume. Where FM_WEDGE_MAX_ESCALATIONS is set above 0,
+#                          resume. That rung also ends the ladder for an unchanged
+#                          pane: later timer expiries are absorbed as
+#                          already-reported repeats until FM_WEDGE_REALARM_SECS
+#                          have passed since the last delivered escalation, when
+#                          one re-alarm fires (same reason, the ladder count
+#                          advanced, plus an "unchanged since last report"
+#                          backstop clause) and the quiet window restarts. An
+#                          idle pane whose render changes - the terminal coming
+#                          back, dying differently, new output - resets the
+#                          ladder with the hash, as does a pane leaving the busy
+#                          state, so that change is reported as a first sight
+#                          again; a busy pane past FM_BUSY_TURN_MAX_SECS keeps
+#                          its ladder across render changes until it goes idle.
+#                          Where FM_WEDGE_MAX_ESCALATIONS is set above 0,
 #                          the escalation at that count carries an extra
 #                          "PERMANENTLY-WEDGED" clause and is the last wedge
 #                          escalation for that WINDOW while its cap marker
@@ -125,6 +144,13 @@
 #                          (bin/fm-task-inbox-lib.sh owns the ladder policy)
 #                          steering-inbox recovery; bin/fm-task-inbox-lib.sh owns
 #                          delivery-attempt, busy-deferral, and unavailable-endpoint policy
+# A task the captain ordered left stopped carries state/<id>.stopped (written only
+# by bin/fm-leave-stopped.sh, whose header owns the marker). Its endpoint is
+# skipped by the whole pane path above - no capture, no stale classification, no
+# wedge timer, no steering-inbox ring, no declared-wait recheck - in normal and
+# away mode alike, so a dead terminal the captain chose to leave dead never
+# re-alarms. Its status log is still read by the signal path, because a line it
+# appends is a genuine state change.
 # An idle pane whose last output is a transient inference-gateway error is
 # absorbed instead, and re-rung with a bounded continue instruction through the
 # same steering inbox (gateway_stall_check; bin/fm-gateway-retry-lib.sh owns the
@@ -167,10 +193,20 @@
 #   check: inactive-outcome bounded poll-loop reconciliation found a suspicious
 #                          inactive terminal outcome that still lacks its durable
 #                          upstream receipt
-#   check: secondmate wake-loop stalled: mate=<id> row=<seq> idle=<seconds>s
+#   check: secondmate wake-loop stalled: mate=<id> row=<seq> idle=<seconds>s branch=<idle|none>
 #                          an actionable row in an endpoint-recorded local
 #                          secondmate home's durable wake queue did not advance
 #                          between observations for FM_SECONDMATE_WAKE_STALL_SECS
+#                          AND the mate's Pi supervision branch is not mid-turn;
+#                          the branch is judged by its last complete session
+#                          message entry, with a malformed trailing line meaning
+#                          the branch is writing and silent, malformed earlier
+#                          lines skipped, and only a session with no message
+#                          entries at all falling back to the mtime window; a
+#                          branch mid-turn stays silent (branch work never
+#                          renders in the pane, so the pane alone cannot prove
+#                          idleness), while a failed capture or any unprovable
+#                          read still reports;
 #                          while the mate was not in an active turn (a busy mate
 #                          is exempt only until the queue has been frozen for
 #                          BUSY_TURN_MAX_SECS); declared external-wait pause
@@ -363,6 +399,25 @@ HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
 CHECK_SLOW_LOG_SECS=${FM_CHECK_SLOW_LOG_SECS:-10}  # a check at least this slow is triage-logged
+# Mac-load guard (G16). Every local job this watcher launches - each slow check
+# and the detached ledger, lock-reap, and reconcile jobs - runs under
+# nice -n LOCAL_JOB_NICE (0 disables), so its children (a check that launches a
+# background scan) inherit the low priority while the watcher itself keeps its
+# own. FM_LOCAL_JOB_WORKERS is exported to checks as the parallelism a check may
+# use for its own fan-out (the fleet-stall capture pass honors it). When the
+# beacon has lagged BEAT_LAG_LOG_SECS by the time it is next touched, the top
+# CPU consumers at that moment are triage-logged, at most once per
+# BEAT_LAG_LOG_EVERY seconds.
+LOCAL_JOB_NICE=${FM_LOCAL_JOB_NICE:-19}
+case "$LOCAL_JOB_NICE" in ''|*[!0-9]*) LOCAL_JOB_NICE=19 ;; esac
+[ "$LOCAL_JOB_NICE" -le 19 ] || LOCAL_JOB_NICE=19
+FM_LOCAL_JOB_WORKERS=${FM_LOCAL_JOB_WORKERS:-8}
+case "$FM_LOCAL_JOB_WORKERS" in ''|0|*[!0-9]*) FM_LOCAL_JOB_WORKERS=8 ;; esac
+export FM_LOCAL_JOB_WORKERS
+BEAT_LAG_LOG_SECS=${FM_WATCH_BEAT_LAG_LOG_SECS:-60}
+case "$BEAT_LAG_LOG_SECS" in ''|*[!0-9]*) BEAT_LAG_LOG_SECS=60 ;; esac
+BEAT_LAG_LOG_EVERY=${FM_WATCH_BEAT_LAG_LOG_EVERY:-300}
+case "$BEAT_LAG_LOG_EVERY" in ''|*[!0-9]*) BEAT_LAG_LOG_EVERY=300 ;; esac
 case "$CHECK_SLOW_LOG_SECS" in ''|*[!0-9]*) CHECK_SLOW_LOG_SECS=10 ;; esac
 HOME_SUMMARY_INTERVAL=${FM_HOME_SUMMARY_INTERVAL:-300}
 case "$HOME_SUMMARY_INTERVAL" in
@@ -456,8 +511,12 @@ BUSY_STREAM_SNAPSHOT=
 # A healthy mate drains its queue between turns, not inside one, so this default
 # sits above a real turn; it is only the backstop behind the active-turn gate in
 # secondmate_wake_stall_tick, never a substitute for it.
+# Fifteen minutes by default: a mate's supervision branch handles a wake inside
+# one model turn, and a measured healthy branch turn ran past four minutes while
+# the main pane sat idle; a shorter default reported that working mate as
+# stalled and the relaunch that followed cut its branch work off.
 SECONDMATE_WAKE_STALL_SECS=${FM_SECONDMATE_WAKE_STALL_SECS:-}
-case "$SECONDMATE_WAKE_STALL_SECS" in ''|*[!0-9]*|0) SECONDMATE_WAKE_STALL_SECS=180 ;; esac
+case "$SECONDMATE_WAKE_STALL_SECS" in ''|*[!0-9]*|0) SECONDMATE_WAKE_STALL_SECS=900 ;; esac
 # Secondmate ENDPOINT liveness (distinct from the wake-loop stall observation
 # above): on this cadence the watcher probes each registered mate's recorded
 # endpoint through fm-secondmate-liveness-lib.sh and relaunches only on the
@@ -505,6 +564,9 @@ EVENT_CAP_FAIL_MAX=${FM_EVENT_CAP_FAIL_MAX:-3}
 _event_cap_key=""
 _event_cap_ok=0
 _event_cap_fails=0
+# Per-process memo of the left-stopped tasks already noted in the triage log, so
+# the skip is recorded once per watcher cycle rather than once per poll.
+_stopped_logged=""
 
 # afk_present: 0 while the away-mode flag exists. When set, the daemon wraps this
 # watcher and owns triage, so the watcher must behave one-shot (enqueue + exit on
@@ -1205,10 +1267,81 @@ secondmate_ring_to_drain() {  # <task> <window>
 # parent alarm. Empty inbox and a fresh child beacon are not idle proof.
 # Receipts close the append-before-marker crash window without changing the
 # foreign queue.
+# A Pi mate's supervision branch runs its model turn out of the pane, so the
+# busy contract above cannot see it; the branch session file it appends to is
+# the only evidence. The last complete message entry proves the turn state: a
+# user message, an assistant message with stopReason toolUse, or a tool result
+# is a turn in flight and busy regardless of mtime; an assistant message with
+# any other stopReason is positive idle evidence. A malformed trailing line
+# means the branch is writing now and is busy, never idle; malformed lines
+# earlier are skipped so the last complete message entry decides. Only a
+# session with no type=message entries at all falls back to the mtime window;
+# none when the home has no branch session.
+secondmate_branch_state() {  # <home> <threshold-secs> -> idle|busy|none
+  local home=$1 threshold=$2 pointer session mtime now last role stop last_line
+  pointer="$home/state/.branch-session"
+  [ -f "$pointer" ] && [ ! -L "$pointer" ] || { printf 'none'; return 0; }
+  session=$(head -n 1 "$pointer" 2>/dev/null || true)
+  case "$session" in
+    /*) ;;
+    ?*) session="$home/state/$session" ;;
+    *) printf 'none'; return 0 ;;
+  esac
+  [ -f "$session" ] || { printf 'none'; return 0; }
+  last="" role="" stop=""
+  if command -v jq >/dev/null 2>&1; then
+    local line is_last=1 extract jq_status
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      extract=$(printf '%s\n' "$line" | jq -r 'if (.type // "") == "message" then [(.message.role // ""), (.message.stopReason // "")] | @tsv else "__not_message__" end' 2>/dev/null)
+      jq_status=$?
+      if [ "$jq_status" -ne 0 ]; then
+        [ "$is_last" -eq 1 ] && { printf 'busy'; return 0; }
+        is_last=0
+        continue
+      fi
+      is_last=0
+      [ "$extract" = "__not_message__" ] && continue
+      last=$extract
+      break
+    done < <(awk '{ lines[NR] = $0 } END { for (i = NR; i >= 1; i--) print lines[i] }' "$session")
+    if [ -n "$last" ]; then
+      role=${last%%$'\t'*}
+      stop=${last#*$'\t'}
+      [ "$stop" = "$last" ] && stop=""
+    fi
+  else
+    last_line=$(awk 'NF { keep = $0 } END { if (keep != "") print keep }' "$session")
+    if [ -n "$last_line" ] && ! printf '%s\n' "$last_line" | grep -q '}[[:space:]]*$'; then
+      printf 'busy'; return 0
+    fi
+    last=$(grep -E '"type"[[:space:]]*:[[:space:]]*"message"' "$session" 2>/dev/null | tail -n 1)
+    if [ -n "$last" ]; then
+      role=$(printf '%s\n' "$last" | sed -n 's/.*"role"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+      stop=$(printf '%s\n' "$last" | sed -n 's/.*"stopReason"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+    fi
+  fi
+  if [ -n "$last" ]; then
+    case "$role" in
+      user|toolResult) printf 'busy'; return 0 ;;
+      assistant)
+        case "$stop" in
+          toolUse) printf 'busy'; return 0 ;;
+          '') ;;
+          *) printf 'idle'; return 0 ;;
+        esac ;;
+    esac
+  fi
+  mtime=$(stat -c %Y "$session" 2>/dev/null || stat -f %m "$session" 2>/dev/null || echo 0)
+  now=$(date +%s)
+  if [ $((now - mtime)) -lt "$threshold" ]; then printf 'busy'; else printf 'idle'; fi
+}
+
 secondmate_wake_stall_tick() {
   local now=$(( $(date +%s) )) threshold=$SECONDMATE_WAKE_STALL_SECS
   local meta task kind remote_host home queue row epoch seq row_key marker progress_marker ring_marker progress observed_at observed_key
   local receipt receipt_dir notify_key queued idle reason episode_alerted already_rung w
+  local branch_state
   # Endpoint metadata admits this queue-loop check; secondmate-liveness owns registered mates whose endpoint is missing or dead.
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -1270,6 +1403,13 @@ EOF
     [ "$idle" -ge "$threshold" ] || continue
     w=$(fm_backend_target_of_meta "$meta")
     ! secondmate_in_active_turn "$w" "$idle" || continue
+    # The branch read leaves no marker either, so a mate skipped here is still
+    # reported if it later goes idle with the same row unconsumed.
+    branch_state=$(secondmate_branch_state "$home" "$threshold")
+    if [ "$branch_state" = busy ]; then
+      triage_log "secondmate $task queue row $seq idle ${idle}s but its supervision branch is mid-turn"
+      continue
+    fi
     already_rung=0
     if [ -e "$ring_marker" ] || [ -L "$ring_marker" ]; then
       [ -f "$ring_marker" ] && [ ! -L "$ring_marker" ] || return 1
@@ -1288,7 +1428,7 @@ EOF
       continue
     fi
     notify_key="secondmate-wake-loop-$task-$row_key"
-    reason="check: secondmate wake-loop stalled: mate=$task row=$seq idle=${idle}s"
+    reason="check: secondmate wake-loop stalled: mate=$task row=$seq idle=${idle}s branch=$branch_state"
     queued=$(fm_wake_queued_keys check)
     if ! printf '%s\n' "$queued" | grep -Fx "$notify_key" >/dev/null 2>&1; then
       fm_wake_append check "$notify_key" "$reason" || return 1
@@ -1403,6 +1543,23 @@ secondmate_liveness_tick() {
 # pane/hash state resets to genuinely active (see the two rm-on-reset call sites
 # below).
 FM_WEDGE_DEMAND_INSPECT_COUNT=${FM_WEDGE_DEMAND_INSPECT_COUNT:-3}
+
+# The demand-deep-inspection rung is also the END of the ladder for an unchanged
+# pane. Before this bound existed, every STALE_ESCALATE_SECS re-fired the same
+# escalation with the count advanced (202 wakes for one dead terminal in a day),
+# each one a supervisor turn that could only re-read the same evidence. Once the
+# ladder has delivered FM_WEDGE_DEMAND_INSPECT_COUNT escalations for the SAME
+# pane hash, a further timer expiry is an already-reported repeat and is absorbed
+# until FM_WEDGE_REALARM_SECS have passed since the last DELIVERED escalation
+# (the .wedge-alarmed-<key> marker's mtime); then one re-alarm fires and the
+# window restarts. The ladder resets when an idle pane's hash changes and when a
+# pane leaves the busy state, so a terminal that comes back, dies differently,
+# or renders anything new while idle is a fresh first sight, never a suppressed
+# repeat; a busy pane past FM_BUSY_TURN_MAX_SECS (busy_turn_bound_check) keeps
+# its ladder across render changes until it goes idle. Suppression is a watcher-level absorb
+# at zero token cost: the first report and the bounded ladder still reach the
+# supervisor, and nothing here ever interrupts, signals, or restarts the worker.
+FM_WEDGE_REALARM_SECS=${FM_WEDGE_REALARM_SECS:-86400}
 
 # Bounds for the opt-in operator guard consult (wedge_guard_evidence): seconds
 # one guard may run before it is treated as no answer, and consecutive windows
@@ -2260,6 +2417,7 @@ wedge_write_escalation_count() {  # <window> <window-key> <escalation-file> <sin
 # that wake and its count instead of surfacing an obsolete observation.
 wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-file> <task> <pane-hash> [dialog-name] [stream snapshot]
   local win=$1 since_file=$2 label=$3 escalation_file=$4 task=$5 hash=$6 dialog=${7-} since age n prev reason evidence guard guard_note
+  local delivered alarmed rage backstop
   local stream_snapshot=${8:-} stream_ts stream_detail='' append_status
   local _wkey _wrollback_sentinel _wrb_ts _wrb_cap_reason _wrb_cap_status _wrb_rm_status
   local _wrb_since _wrb_now _wrb_age _wrb_cap_ts _wrb_gate
@@ -2356,6 +2514,24 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
             || { fm_epoch_seconds_to _wrb_now; printf '%s\n' "$_wrb_now" > "$since_file"; }
           return 0
         fi
+        delivered=$(cat "$escalation_file" 2>/dev/null || echo 0)
+        case "$delivered" in ''|*[!0-9]*) delivered=0 ;; esac
+        alarmed="$STATE/.wedge-alarmed-$_wkey"
+        if [ "$delivered" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ] && [ -e "$alarmed" ]; then
+          rage=$(age_of "$alarmed")
+          if [ "$rage" -lt "$FM_WEDGE_REALARM_SECS" ]; then
+            # The ladder already ended on this exact pane and nothing about it
+            # has changed since: an already-reported repeat. Restart the idle
+            # timer so the backstop is re-checked on the same cadence, and
+            # keep the escalation count where the last delivery left it.
+            date +%s > "$since_file"
+            triage_log "absorbed repeat wedge escalation (unchanged pane, reported ${rage}s ago, re-alarm backstop ${FM_WEDGE_REALARM_SECS}s): $win"
+            return 0
+          fi
+          backstop=", unchanged since last report ${rage}s ago - re-alarm backstop"
+        else
+          backstop=""
+        fi
         if evidence=$(wedge_wait_evidence "$task") &&
            wedge_defer_wait "$win" "$since_file" "$label" "$age" "$evidence"; then
           return 0
@@ -2405,7 +2581,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         [ -n "$stream_snapshot" ] || wedge_write_escalation_count "$win" "$_wkey" "$escalation_file" "$since_file" "$n"
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n$stream_detail$guard_note)"
         if [ "$n" -ge "$FM_WEDGE_DEMAND_INSPECT_COUNT" ]; then
-          reason="stale: $win (idle ${age}s, possible wedge, escalation $n$stream_detail, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone$guard_note)"
+          reason="stale: $win (idle ${age}s, possible wedge, escalation $n$stream_detail, demand-deep-inspection: same pane has wedge-escalated $n times in a row - do not re-absorb on the run-step/pane state alone${backstop}$guard_note)"
         fi
         # Cap-fire block: when FM_WEDGE_MAX_ESCALATIONS is configured above 0
         # and the per-window escalation counter has reached the bound, emit
@@ -2499,6 +2675,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
         else
           fm_wake_append stale "$win" "$reason" || exit 1
         fi
+        date +%s > "$alarmed"
         # The ladder's own step, not an episode end: this pane is still wedged,
         # so the idle timer restarts for the next rung of the same escalation
         # count and the cap that fired stays exactly where it is.
@@ -3216,6 +3393,184 @@ scan_signals() {
   return 0
 }
 
+# Stable identity for one coalesced signal batch: a digest of the batch's
+# sorted file paths. The drain presents one row per (kind, key), so a per-batch
+# key is what keeps two different batches from collapsing into one another
+# while an identical re-enqueued batch still dedupes. It is deliberately not a
+# status filename: a batch spans many files, and a file-shaped key would both
+# collide across batches and misattribute the whole batch to one task.
+signal_batch_key() {  # <file> ...
+  local digest
+  if command -v shasum >/dev/null 2>&1; then
+    digest=$(printf '%s\n' "$@" | LC_ALL=C sort | shasum -a 256 2>/dev/null | awk '{print $1}')
+  elif command -v sha256sum >/dev/null 2>&1; then
+    digest=$(printf '%s\n' "$@" | LC_ALL=C sort | sha256sum 2>/dev/null | awk '{print $1}')
+  else
+    digest=$(printf '%s\n' "$@" | LC_ALL=C sort | cksum 2>/dev/null | awk '{print $1}')
+  fi
+  case "$digest" in
+    ''|*[!A-Za-z0-9]*) return 1 ;;
+  esac
+  printf 'signal-batch-%s' "${digest:0:16}"
+}
+
+# Hard cap on the printed reason's size, in bytes. The reason is a prompt, so a
+# much larger fleet must not be able to grow it back into a token sink; the full
+# path list stays on the arguments the classifiers and the batch key consume.
+FM_SIGNAL_REASON_MAX_BYTES=400
+# Most changed status paths a printed reason ever names (before the byte cap).
+FM_SIGNAL_REASON_MAX_PATHS=5
+
+# Print the status-file paths signal_files_actionable captured in
+# FM_SIGNAL_SURFACE_ENDPOINTS (one "<file>\t<end>\t<ident>" record per file).
+signal_reason_surface_paths() {
+  local f rest endpoints=${FM_SIGNAL_SURFACE_ENDPOINTS-}
+  [ -n "$endpoints" ] || return 0
+  while IFS=$'\t' read -r f rest; do
+    [ -n "$f" ] || continue
+    printf '%s ' "$f"
+  done <<EOF
+$endpoints
+EOF
+}
+
+# Print the compact, human- and model-facing reason for one coalesced signal
+# batch (see the printed-reason line in this file's header). The batch
+# identity is untouched: signal_batch_key still digests the full sorted set, and
+# $files still reaches every classifier as one space-separated list
+# (ids carry no spaces). Only this prompt becomes compact.
+#
+# Shape: "signal: <N> file(s) (<S> status, <T> turn-end): <status path>... [+N more]".
+# Turn-ended markers never appear: they carry no verb and no content, and their
+# only real consumer is the in-process benign check, which reads the argument
+# list rather than this string. Status paths are ordered by decision relevance -
+# decision-owned files, then files with an actionable span, then the rest -
+# because both out-of-process readers of this batch - the away-mode daemon's
+# classify_signal (bin/fm-supervise-daemon.sh) and the Pi branch dispatcher's
+# decision cross-reference (.pi/extensions/fm-primary-pi-watch.ts) - resolve
+# the full path list from the private batch record instead.
+signal_batch_reason() {  # <file> ...
+  local f total=0 status_count=0 turnend_count=0 seen=" " candidates=""
+  local prefix list="" shown=0 remaining budget
+  local decision_files=${FM_SIGNAL_NEEDS_DECISION_FILES-}
+  for f in "$@"; do
+    total=$((total + 1))
+    case "$f" in
+      *.turn-ended) turnend_count=$((turnend_count + 1)) ;;
+      *.status) status_count=$((status_count + 1)) ;;
+    esac
+  done
+  # shellcheck disable=SC2086  # space-separated status-path lists (ids carry no spaces)
+  for f in $decision_files $(signal_reason_surface_paths) "$@"; do
+    case "$f" in *.status) ;; *) continue ;; esac
+    case "$seen" in *" $f "*) continue ;; esac
+    seen="$seen$f "
+    candidates="$candidates $f"
+  done
+  prefix="signal: $total file"
+  [ "$total" -eq 1 ] || prefix="${prefix}s"
+  prefix="$prefix ($status_count status, $turnend_count turn-end)"
+  # Reserve room for the worst-case " +<N> more" suffix before adding paths.
+  budget=$((FM_SIGNAL_REASON_MAX_BYTES - 20))
+  for f in $candidates; do
+    [ "$shown" -lt "$FM_SIGNAL_REASON_MAX_PATHS" ] || break
+    [ $(( ${#prefix} + 2 + ${#list} + 1 + ${#f} )) -le "$budget" ] || break
+    list="$list $f"
+    shown=$((shown + 1))
+  done
+  if [ -z "$list" ]; then
+    printf '%s' "$prefix"
+    return 0
+  fi
+  remaining=$((status_count - shown))
+  if [ "$remaining" -gt 0 ]; then
+    printf '%s:%s +%s more' "$prefix" "$list" "$remaining"
+  else
+    printf '%s:%s' "$prefix" "$list"
+  fi
+}
+
+# Private sidecar holding each queued signal batch's full changed-path list,
+# keyed by the batch identity. The queued payload is a compact summary now, and
+# the Pi branch dispatcher still has to resolve every task in a batch from its
+# row's key, so the list lives here instead of in the prompt. One record per
+# batch, newest last, pruned on the next write once its batch key leaves the
+# wake queue; written atomically (unique temp file, then rename) so a reader never observes a
+# partial record. Format: "<batch-key>\t<space-separated paths>".
+signal_record_batch_paths() {  # <batch-key> <file> ...
+  local key=$1 sidecar tmp
+  shift
+  [ -d "$STATE" ] || return 1
+  sidecar="$STATE/.signal-batch-paths"
+  tmp="$sidecar.$$.tmp"
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK" || return 1
+  if {
+    if [ -f "$sidecar" ]; then
+      awk -F '\t' -v k="$key" -v queue="$FM_WAKE_QUEUE" '
+        BEGIN {
+          while ((getline row < queue) > 0) {
+            split(row, field, "\t")
+            if (field[4] != "") queued[field[4]] = 1
+          }
+          close(queue)
+        }
+        $1 != k && ($1 in queued) { print }
+      ' "$sidecar"
+    fi
+    printf '%s\t%s\n' "$key" "$*"
+  } > "$tmp"; then
+    if mv -f "$tmp" "$sidecar"; then
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      return 0
+    fi
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+  rm -f "$tmp"
+  return 1
+}
+
+# Enqueue one coalesced signal wake for a batch of changed files. The ordinary
+# row carries the compact prompt reason; the batch identity is the key, so
+# dedupe and identical-batch collapse are unchanged. The batch's full path list
+# is recorded in the private sidecar above before the row is appended, so the
+# branch dispatcher resolves the batch from that record and never from the
+# printed prompt. The record holds only the files that are NOT decision-owned,
+# so a decision task can never be claimed through the ordinary row even when a
+# later heartbeat, not this batch's own trigger, offers it: the dispatcher's
+# trigger cross-reference only covers the triggering message. Each
+# decision-owned file gets its own "needs-decision:$files" row keyed by that
+# file's status name, because the Pi branch dispatcher resolves a decision row's
+# task from its key; that row keeps the whole batch's path list byte-identical
+# to what it was before the reason was compacted.
+signal_enqueue_batch() {  # <reason> <decision-files> <file> ...
+  local reason=$1 decision_files=$2 batch_key decision_key f ordinary=''
+  shift 2
+  [ "$#" -gt 0 ] || return 1
+  for f in "$@"; do
+    case " $decision_files " in
+      *" $f "*) ;;
+      *) ordinary="$ordinary $f" ;;
+    esac
+  done
+  # The key is the whole batch's identity, not the ordinary subset's, so two
+  # batches that differ only in their decision files never collapse into one
+  # another while an identical re-enqueued batch still dedupes.
+  batch_key=$(signal_batch_key "$@") || return 1
+  if [ -n "$ordinary" ]; then
+    # shellcheck disable=SC2086  # space-separated path list (ids carry no spaces)
+    if ! signal_record_batch_paths "$batch_key" $ordinary; then
+      reason="signal:${ordinary}"
+    fi
+    fm_wake_append signal "$batch_key" "$reason" || return 1
+  fi
+  for f in $decision_files; do
+    decision_key=$(basename "$f")
+    [ -n "$decision_key" ] || return 1
+    fm_wake_append signal "$decision_key" "needs-decision: $*" || return 1
+  done
+  return 0
+}
+
 # Deliver a durably queued process-event result to firstmate. Publication is
 # owned by bin/fm-procevent.sh - by the runner at capture time and by reconcile's
 # re-announcement - so this decides only whether a queued check record has been
@@ -3284,16 +3639,28 @@ procevent_surface_queued() {
   wake "$reason"
 }
 
+# local_job <command...>: run a watcher-launched local job at low priority.
+local_job() {
+  if [ "$LOCAL_JOB_NICE" -gt 0 ] && command -v nice >/dev/null 2>&1; then
+    nice -n "$LOCAL_JOB_NICE" "$@"
+  else
+    "$@"
+  fi
+}
+
 run_check_process() {
-  local c=$1
+  local c=$1 prio=()
   shift
+  if [ "$LOCAL_JOB_NICE" -gt 0 ] && command -v nice >/dev/null 2>&1; then
+    prio=(nice -n "$LOCAL_JOB_NICE")
+  fi
   if [ "${FM_CHECK_FORCE_FALLBACK:-0}" != 1 ] && command -v timeout >/dev/null 2>&1; then
-    exec timeout "$CHECK_TIMEOUT" bash "$c" "$@"
+    exec ${prio[@]+"${prio[@]}"} timeout "$CHECK_TIMEOUT" bash "$c" "$@"
   elif [ "${FM_CHECK_FORCE_FALLBACK:-0}" != 1 ] && command -v gtimeout >/dev/null 2>&1; then
-    exec gtimeout "$CHECK_TIMEOUT" bash "$c" "$@"
+    exec ${prio[@]+"${prio[@]}"} gtimeout "$CHECK_TIMEOUT" bash "$c" "$@"
   else
     # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
-    exec perl -e 'my $t = shift; my $owned = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0) unless $owned; exec @ARGV } my $group = $owned ? getpgrp(0) : $pid; my $stop = sub { $SIG{HUP} = $SIG{INT} = $SIG{TERM} = "IGNORE"; kill "TERM", -$group; select undef, undef, undef, 0.2; kill "KILL", $owned ? $pid : -$group; waitpid $pid, 0; exit 124 }; local $SIG{ALRM} = $stop; local $SIG{HUP} = $stop; local $SIG{INT} = $stop; local $SIG{TERM} = $stop; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$CHECK_TIMEOUT" "${FM_CHECK_OWNED_GROUP:-0}" bash "$c" "$@"
+    exec ${prio[@]+"${prio[@]}"} perl -e 'my $t = shift; my $owned = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0) unless $owned; exec @ARGV } my $group = $owned ? getpgrp(0) : $pid; my $stop = sub { $SIG{HUP} = $SIG{INT} = $SIG{TERM} = "IGNORE"; kill "TERM", -$group; select undef, undef, undef, 0.2; kill "KILL", $owned ? $pid : -$group; waitpid $pid, 0; exit 124 }; local $SIG{ALRM} = $stop; local $SIG{HUP} = $stop; local $SIG{INT} = $stop; local $SIG{TERM} = $stop; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$CHECK_TIMEOUT" "${FM_CHECK_OWNED_GROUP:-0}" bash "$c" "$@"
   fi
 }
 
@@ -3463,8 +3830,25 @@ watch_beat() {
   local age
   age=$(fm_path_age "$STATE/.last-watcher-beat")
   case "$age" in ''|*[!0-9]*) return 0 ;; esac
-  [ "$age" -ge "$WATCH_BEAT_REFRESH_SECS" ] && touch "$STATE/.last-watcher-beat"
+  [ "$age" -ge "$WATCH_BEAT_REFRESH_SECS" ] && watch_beat_touch "$age"
   return 0
+}
+
+# watch_beat_touch [<age>]: touch the beacon, and when it had lagged at least
+# BEAT_LAG_LOG_SECS, log the top CPU consumers so a lag can be attributed.
+WATCH_BEAT_LAG_LOGGED_AT=0
+watch_beat_touch() {
+  local age=${1:-} now top
+  [ -n "$age" ] || age=$(fm_path_age "$STATE/.last-watcher-beat")
+  touch "$STATE/.last-watcher-beat"
+  case "$age" in ''|*[!0-9]*) return 0 ;; esac
+  [ "$BEAT_LAG_LOG_SECS" -gt 0 ] && [ "$age" -ge "$BEAT_LAG_LOG_SECS" ] || return 0
+  now=$(date +%s)
+  [ $((now - WATCH_BEAT_LAG_LOGGED_AT)) -ge "$BEAT_LAG_LOG_EVERY" ] || return 0
+  WATCH_BEAT_LAG_LOGGED_AT=$now
+  top=$(LC_ALL=C ps -Ao pcpu=,pid=,comm= 2>/dev/null | sort -rn | head -3 \
+    | awk '{ n = split($3, p, "/"); printf "%s%s pid %s %s%%", (NR > 1 ? "; " : ""), p[n], $2, $1 }')
+  triage_log "watcher beat lagged ${age}s; top CPU: ${top:-unavailable}; load: $(uptime 2>/dev/null | sed 's/.*load averages*: //')"
 }
 
 # watch_beat for a per-item loop: consult the beacon at most once per elapsed
@@ -3811,7 +4195,7 @@ lock_reap_detached() {
   fi
   touch "$STATE/.last-lock-reap" 2>/dev/null || true
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-lock-reap.sh" </dev/null >> "$TRIAGE_LOG" 2>/dev/null &
+    local_job "$SCRIPT_DIR/fm-lock-reap.sh" </dev/null >> "$TRIAGE_LOG" 2>/dev/null &
   LOCK_REAP_PID=$!
 }
 
@@ -3838,7 +4222,7 @@ reconcile_requests_detached() {
     RECONCILE_REQUEST_PID=
   fi
   FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-secondmate-reconcile.sh" process-requests </dev/null >/dev/null 2>&1 &
+    local_job "$SCRIPT_DIR/fm-secondmate-reconcile.sh" process-requests </dev/null >/dev/null 2>&1 &
   RECONCILE_REQUEST_PID=$!
 }
 
@@ -3966,7 +4350,7 @@ home_summary_refresh_detached() {
     HOME_SUMMARY_PID=
   fi
   FM_HOME_SUMMARY_IF_IDLE=1 \
-    "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort </dev/null >/dev/null 2>&1 &
+    local_job "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort </dev/null >/dev/null 2>&1 &
   HOME_SUMMARY_PID=$!
 }
 
@@ -4101,7 +4485,7 @@ while :; do
 
   # Liveness beacon for fm-guard.sh: a fresh mtime here means a watcher is
   # alive. Supervision scripts warn when this goes stale with tasks in flight.
-  touch "$STATE/.last-watcher-beat"
+  watch_beat_touch
 
   # Opt-in fleet activity ledger (docs/fleet-ledger.md): pick up newly appended
   # status lines before this cycle can exit on a wake. Off costs one file test.
@@ -4189,7 +4573,14 @@ while :; do
   if inactive_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$SCRIPT_DIR/fm-inactive-reconcile.sh" scan 2>/dev/null); then
     if [ -n "$inactive_out" ]; then
-      wake "check: inactive-outcome"
+      # The scan already publishes one keyed wake per fingerprint, and those
+      # carry the detail. This generic line exists so a scan that published
+      # nothing still surfaces, but a bare "check: inactive-outcome" names a
+      # condition without naming the action that clears it: 94 terminal
+      # outcomes accumulated over two months because nothing could be
+      # acknowledged from a wake that never said which record it meant.
+      # Carry the scan's own first line so the wake is actionable.
+      wake "check: inactive-outcome: $(printf '%s' "$inactive_out" | head -1 | cut -c1-300)"
     fi
   else
     triage_log "inactive-outcome reconciliation unavailable"
@@ -4369,7 +4760,10 @@ EOF
     done <<EOF
 $pending
 EOF
-    reason="signal:$files"
+    # Built only now, because the compact reason's ordering prioritizes the two
+    # status sets the call above just captured. $files itself stays untouched.
+    # shellcheck disable=SC2086  # $files is the full space-separated changed-path list
+    reason="$(signal_batch_reason $files)"
     # Triage: a signal is ACTIONABLE when any of these holds (cheapest first):
     #   - the away-mode daemon owns triage (afk) and wants every wake;
     #   - any status file gained a captain-relevant event since it was last
@@ -4411,14 +4805,8 @@ EOF
     # shellcheck disable=SC2086  # same space-separated status-path list
     if afk_present || [ "$signal_actionable" -eq 0 ] \
       || { ! signal_crew_provably_working $files && ! signal_turnend_panes_churned $files; }; then
-      while IFS=$'\t' read -r sf sig f; do
-        [ -n "$sf" ] || continue
-        file_reason="$reason"
-        case " $FM_SIGNAL_NEEDS_DECISION_FILES " in *" $f "*) file_reason="needs-decision:$files" ;; esac
-        fm_wake_append signal "$(basename "$f")" "$file_reason" || exit 1
-      done <<EOF
-$pending
-EOF
+      # shellcheck disable=SC2086  # $files is a space-separated status-path list
+      signal_enqueue_batch "$reason" "$FM_SIGNAL_NEEDS_DECISION_FILES" $files || exit 1
       # The wake signature advances for every file in this batch, including one
       # whose span could not be classified: it has now been reported, and this is
       # what bounds an unreadable log to one report per distinct file state. Only
@@ -4460,12 +4848,8 @@ EOF
 $FM_SIGNAL_SURFACE_ENDPOINTS
 EOF
       if [ "$signal_commit_error" -ne 0 ]; then
-        while IFS=$'\t' read -r sf sig f; do
-          [ -n "$sf" ] || continue
-          fm_wake_append signal "$(basename "$f")" "$reason" || exit 1
-        done <<EOF
-$pending
-EOF
+        # shellcheck disable=SC2086  # $files is a space-separated status-path list
+        signal_enqueue_batch "$reason" '' $files || exit 1
         wake "$reason"
       fi
       triage_log "absorbed benign $reason"
@@ -4482,6 +4866,18 @@ EOF
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     key=$(window_key "$w")
+    # A task the captain ordered left stopped (state/<id>.stopped, owned by
+    # bin/fm-leave-stopped.sh) is not supervised through its pane at all: no
+    # capture, no stale classification, no wedge timer, no steering ring, in
+    # normal and away mode alike. Logged once per watcher process, not per poll.
+    if [ -n "$task" ] && [ -e "$STATE/$task.stopped" ]; then
+      case "$_stopped_logged" in
+        *"|$task|"*) ;;
+        *) _stopped_logged="$_stopped_logged|$task|"
+           triage_log "skipped pane of a task left stopped on the captain's order (state/$task.stopped): $w" ;;
+      esac
+      continue
+    fi
     last=$(status_declared_wait_line "$STATE/$task.status")
     if ! status_is_paused_or_captain_held "$last" && [ -e "$STATE/.paused-$key" ]; then
       clear_pause_tracking "$key"

@@ -268,10 +268,28 @@ fm_watcher_healthy() {
 # arm layer (bin/fm-watch-arm.sh, bin/fm-claude-stop-autoarm.sh) needs exactly
 # that - it decides whether to start, attach to, or replace a real watcher
 # process, so a leftover beacon must never satisfy it. bin/fm-turnend-guard.sh
-# also keeps this strict check because it fires at the turn boundary where the
-# auto-arm brings a fresh watcher up. The pull warning (bin/fm-guard.sh) fires
-# mid-turn, where the auto-arm model runs no watcher at all, so it wants a
-# different, model-aware question:
+# keeps this strict check as its base predicate because it fires at the turn
+# boundary where the auto-arm brings a fresh watcher up, and it consults the
+# model-aware question below for the extension model ONLY, never for autoarm. The
+# pull warning (bin/fm-guard.sh) fires mid-turn, where the autoarm model runs no
+# watcher at all, so it governs itself with that model-aware question:
+
+# fm_supervision_model_for_harness <harness>
+# The single owner of the harness -> supervision-model table. fm_supervision_model
+# applies it to THIS home's detected harness, and bin/fm-spawn.sh applies it to the
+# harness it is launching, so a secondmate launch pins the model its own harness
+# really runs under rather than a hand-kept copy of this table that drifts as soon
+# as a harness's supervision shape changes - a Pi secondmate reports extension, or
+# its turn-end guard would keep the PID-strict predicate and alarm through the
+# extension's own hand-off. It reads no environment override on purpose: the harness
+# of the home being resolved decides, never a pin inherited from its spawner.
+fm_supervision_model_for_harness() {
+  case "${1:-unknown}" in
+    claude|cursor|agy) printf 'autoarm\n' ;;
+    pi|pi-signed|omp) printf 'extension\n' ;;
+    *) printf 'persistent\n' ;;
+  esac
+}
 
 # fm_supervision_model
 # Print the supervision model of this home's PRIMARY harness:
@@ -298,11 +316,7 @@ fm_supervision_model() {
     autoarm|extension|persistent) printf '%s\n' "$FM_SUPERVISION_MODEL"; return 0 ;;
   esac
   harness=$("$FM_WAKE_LIB_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
-  case "$harness" in
-    claude|cursor|agy) printf 'autoarm\n' ;;
-    pi|pi-signed|omp) printf 'extension\n' ;;
-    *) printf 'persistent\n' ;;
-  esac
+  fm_supervision_model_for_harness "$harness"
 }
 
 # Pi primary supervision evidence. The Pi extensions record, in their state
@@ -476,7 +490,9 @@ fm_afk_mode() {
 
 # fm_watcher_supervision_verdict <state> <watch-path> [grace] [home] [root]
 # Model-aware "is supervision healthy right now" verdict for the pull warning
-# guard (bin/fm-guard.sh), NOT the arm layer or the turn-end guard. Sets:
+# guard (bin/fm-guard.sh) and, for the extension model only, for
+# bin/fm-turnend-guard.sh. Never for the arm layer, and never for the turn-end
+# guard under the autoarm or persistent model. Sets:
 #   FM_WATCHER_VERDICT_OK      true when supervision is healthy for this model
 #   FM_WATCHER_VERDICT_REASON  when not ok, the true failing condition:
 #                              no-watcher   - a live watcher process is the real
@@ -2736,7 +2752,7 @@ fm_wake_append_guarded() {
 # their own write, then release.
 fm_wake_append_locked() {
   local kind=$1 key=$2 payload=$3 clean_key clean_payload epoch seq seq_file status
-  local recovery_marker guard=${4:-}
+  local recovery_marker pending_rows coalesce _tmp guard=${4:-}
   shift 3
   [ -z "$guard" ] || shift
   case "$kind" in
@@ -2746,11 +2762,70 @@ fm_wake_append_locked() {
 
   clean_key=$(printf '%s' "$key" | fm_wake_clean_field)
   clean_payload=$(printf '%s' "$payload" | fm_wake_clean_field)
+  # Bound the payload. A signal wake lists every changed status path, and with ~250 lanes that
+  # reached 24 KB per row; the drain prints rows and the session-start digest prints the drain,
+  # so a handful of rows made the startup digest 9.9 MB and the chair appeared to hang ingesting
+  # it. The payload is display data — the drain re-reads the files it names — so a bounded prefix
+  # is enough, and the count of the rest is kept.
+  if [ "${#clean_payload}" -gt 500 ]; then
+    clean_payload="${clean_payload:0:500} …(truncated)"
+  fi
   epoch=$(date +%s)
   seq_file="$STATE/.wake-queue.seq"
   recovery_marker="$STATE/.watcher-down"
   status=0
 
+  fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
+  # Coalesce repeated machine wakes, but APPEND FIRST and prune after.
+  #
+  # A process-event watcher re-fires the same key on every poll; 30 copies of one key were
+  # observed in the queue, which floods the chair and buries the real wakes. One pending row
+  # per key is enough, carrying the LATEST payload.
+  #
+  # Order matters: deleting the old row before the new one is written loses the wake if the
+  # append fails (a full disk, a failed seq write). Appending first and pruning after can only
+  # ever leave a duplicate, and a duplicate is delivered twice while a loss is never delivered.
+  # At-least-once beats exactly-once here.
+  #
+  # Scope: only `check` wakes whose key is a process-event key. `signal` rows are per-actor (a
+  # branch and main may legitimately hold the same key) and must never be coalesced;
+  # tests/fm-wake-queue.test.sh pins that.
+  coalesce=0
+  # A `signal` wake is per-actor, so it is never coalesced by key alone: a branch and main may
+  # legitimately hold the same key with different payloads (tests/fm-wake-queue.test.sh pins
+  # that). But the SAME key with the SAME payload already pending is a re-fire, not a second
+  # actor: the watcher re-appends a turn-ended signal on every poll while the marker persists,
+  # which produced 19 rows for 8 keys. Identical (key, payload) is therefore skipped outright.
+  # `signal` wakes are PER-ACTOR: a branch and main may legitimately hold the same key, and the
+  # drain gives each actor its own row (tests/fm-wake-queue.test.sh pins exactly that). So a
+  # signal row is never deleted or merged by key — that would starve one actor.
+  #
+  # What a re-firing watcher CAN do is stack unbounded duplicates: 103 rows for 55 keys, 7 copies
+  # of one key, which woke the chair in a loop. The correct control is backpressure, not
+  # coalescing: cap the pending rows per key. Two actors need two rows; a third is already a
+  # re-fire, and the drain re-reads the status files anyway, so the extra rows carry no new
+  # information.
+  if [ "$kind" = signal ]; then
+    # Named pending_rows rather than pending on purpose: ShellCheck's
+    # --external-sources analysis leaks a sourced file's numeric globals into the
+    # sourcing file's scopes, so a bare `pending` here made
+    # bin/fm-pending-reply-lib.sh's `token=pending-reply-missed` parse as the
+    # arithmetic expression `pending - reply - missed` and trip SC2100 there.
+    pending_rows=$(awk -F '\t' -v k="$clean_key" 'NF >= 5 && $4 == k { n++ } END { print n + 0 }' "$FM_WAKE_QUEUE" 2>/dev/null)
+    if [ "${pending_rows:-0}" -ge 3 ]; then
+      fm_lock_release "$FM_WAKE_QUEUE_LOCK"
+      return 0
+    fi
+  fi
+  if [ "$kind" = check ]; then
+    case "$clean_key" in
+      procevent:*)
+        if awk -F '\t' -v k="$clean_key" 'NF >= 5 && $4 == k { found = 1; exit } END { exit !found }' "$FM_WAKE_QUEUE" 2>/dev/null; then
+          coalesce=1
+        fi
+        ;;
+    esac
+  fi
   _fm_recovery_marker_publish "$recovery_marker" downtime "" append "$guard" "$@" || status=$?
   if [ "$status" -eq 0 ]; then
     seq=$(cat "$seq_file" 2>/dev/null || echo 0)
@@ -2781,6 +2856,19 @@ fm_wake_append_locked() {
     FM_WAKE_APPEND_RECOVERY_PREVIOUS_TOKEN=
     FM_WAKE_APPEND_RECOVERY_PUBLISHED_TOKEN=
   fi
+  # Prune only after a successful append: keep the newest row for this key, drop the older ones.
+  if [ "$status" -eq 0 ] && [ "$coalesce" -eq 1 ]; then
+    _tmp="$FM_WAKE_QUEUE.coalesce.$$"
+    if awk -F '\t' -v k="$clean_key" -v keep="$seq" '
+         NF >= 5 && $4 == k && $2 != keep { next }
+         { print }
+       ' "$FM_WAKE_QUEUE" > "$_tmp" 2>/dev/null; then
+      mv "$_tmp" "$FM_WAKE_QUEUE" 2>/dev/null || rm -f "$_tmp"
+    else
+      rm -f "$_tmp"
+    fi
+  fi
+  fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"
 }
 

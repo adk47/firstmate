@@ -36,6 +36,10 @@
 #  10. An empty or whitespace-only text steer is refused before anything is
 #      marked, recorded, or typed - on the marked secondmate path that means
 #      no marker-only record and no pending-reply expectation.
+#  13. Parallel sends from many processes all land as distinct intact records:
+#      concurrent steers never collapse, overwrite, or drop one another.
+#  14. A send whose record cannot be confirmed on disk fails loudly with the
+#      path, and leaves no false pending-reply expectation behind.
 # Every case below that passes a literal `$...` message quotes it on purpose
 # (the point is sending an unexpanded `$` line), so SC2016 is disabled.
 # shellcheck disable=SC2016
@@ -564,6 +568,91 @@ test_coalesce_keeps_reringing_ladder() {
   pass "fm-send inbox: a coalesced replacement keeps the oldest tick's age, ring count, and escalation"
 }
 
+# Several senders steer one task at the same moment (firstmate plus lead workers
+# on the same host). Every instruction must survive as its own record.
+# An idempotent steer that dedups onto a record the worker already acknowledged
+# was delivered and acted on: there is nothing left to announce, so the send must
+# succeed without typing a doorbell that asks the worker to acknowledge it again.
+test_already_acknowledged_steer_is_not_rung_again() {
+  local dir err rc inbox
+  dir=$(setup_case already-acked); err="$dir/send.err"
+  inbox="$dir/home/state/t1.inbox"
+  run_send "$dir" "$err" FM_SEND_IDEMPOTENT=1 -- t1 "steer that was already handled"; rc=$?
+  expect_code 0 "$rc" "the first idempotent steer should send"
+  [ -f "$inbox/001.msg" ] || fail "the first steer was not recorded"
+  mv "$inbox/001.msg" "$inbox/handled/"
+  : > "$dir/send.log"
+  run_send "$dir" "$err" FM_SEND_IDEMPOTENT=1 -- t1 "steer that was already handled"; rc=$?
+  expect_code 0 "$rc" "a dedup onto an acknowledged record is still a delivered steer"
+  [ -z "$(ls "$inbox"/*.msg 2>/dev/null)" ] \
+    || fail "the dedup wrote a new record instead of landing on the acknowledged one"
+  [ ! -s "$dir/send.log" ] \
+    || fail "an already-acknowledged steer was rung again:"$'\n'"$(cat "$dir/send.log")"
+  assert_contains "$(cat "$err")" "already delivered and acknowledged" \
+    "the send should say the steer was already handled"
+  pass "fm-send inbox: an already-acknowledged steer is never rung again"
+}
+
+test_parallel_sends_never_lose_a_record() {
+  local dir err i pids=() rc=0 inbox count
+  dir=$(setup_case parallel); err="$dir/send.err"
+  inbox="$dir/home/state/t1.inbox"
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    run_send "$dir" "$err.$i" -- t1 "parallel steer $i keep-me" &
+    pids+=($!)
+  done
+  for i in "${pids[@]}"; do
+    wait "$i" || rc=$((rc + 1))
+  done
+  [ "$rc" = 0 ] || fail "$rc parallel sends failed"
+  count=$(find "$inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')
+  [ "$count" = 12 ] || fail "12 parallel sends should yield 12 records, got $count:"$'\n'"$(ls "$inbox")"
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    grep -rqF "parallel steer $i keep-me" "$inbox" \
+      || fail "parallel steer $i was lost"
+  done
+  pass "fm-send inbox: parallel sends all land as distinct intact records"
+}
+
+# The record is the delivery: a send whose record vanishes between the enqueue
+# and the send's own confirmation - a replaced, retired, or reaped inbox - must
+# refuse, never report a durable steer that is not there. The record is
+# published for real (so the enqueue and its own verification succeed) and is
+# then removed while the send releases its task metadata lock, the last moment
+# before the send confirms the record itself.
+test_unconfirmed_record_fails_the_send() {
+  local dir err rc real_rm
+  dir=$(setup_case unconfirmed); err="$dir/send.err"
+  real_rm=$(command -v rm)
+  cat > "$dir/fakebin/rm" <<'SH'
+#!/usr/bin/env bash
+set -u
+for a in "$@"; do
+  case "$a" in
+    *"$FM_UNCONFIRMED_LOCK"*/role) "$FM_REAL_RM" -f "$FM_UNCONFIRMED_RECORD" 2>/dev/null || true ;;
+  esac
+done
+exec "$FM_REAL_RM" "$@"
+SH
+  chmod +x "$dir/fakebin/rm"
+  run_send "$dir" "$err" \
+    FM_REAL_RM="$real_rm" FM_UNCONFIRMED_LOCK='.meta-t1.lock' \
+    FM_UNCONFIRMED_RECORD="$dir/home/state/t1.inbox/001.msg" \
+    -- t1 "steer that vanishes before the confirmation"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a send whose record vanished under it reported success"
+  assert_contains "$(cat "$err")" "steer not sent to t1" \
+    "the refusal should say the steer was not sent"
+  assert_contains "$(cat "$err")" "is not on disk carrying the instructed text" \
+    "the refusal should name the missing record rather than report delivery"
+  assert_contains "$(cat "$err")" "$dir/home/state/t1.inbox" \
+    "the refusal should name the inbox whose record could not be confirmed"
+  [ ! -e "$dir/home/state/t1.inbox/001.msg" ] || fail "the fixture did not remove the record"
+  [ ! -s "$dir/send.log" ] || fail "a refused send still typed something:"$'\n'"$(cat "$dir/send.log")"
+  [ -z "$(find "$dir/home/state/pending-replies" -type f -not -name '.*' 2>/dev/null)" ] \
+    || fail "an unconfirmed record should discard the just-created pending-reply expectation"
+  pass "fm-send inbox: an unconfirmable record fails the send instead of reporting delivery"
+}
+
 test_coalesce_refusals() {
   local dir err rc
   dir=$(setup_case coalesce-refuse); err="$dir/send.err"
@@ -626,6 +715,68 @@ test_empty_message_refused() {
   pass "fm-send: an empty or whitespace-only text steer refuses before marking, recording, or typing"
 }
 
+# A PR-event producer such as the pr-flow job delivers an informational event
+# (a QA finding, NO-GO, or conflict) to the crew that owns the pull request at
+# the moment it appears. It must reach that crew's durable record without ever
+# climbing the inbox re-ring ladder into a firstmate escalation, which is what
+# the explicit fire-and-forget delivery mode is for.
+test_crewmate_fire_and_forget_records_and_dedups() {
+  local dir err rc inbox delivery rec body action
+  dir=$(setup_case fire-and-forget); err="$dir/send.err"
+  inbox="$dir/home/state/t1.inbox"
+  delivery=9f2c1a4b7d3e5061
+  run_send "$dir" "$err" -- t1 --fire-and-forget "$delivery" \
+    'pr-flow: https://github.com/Muso-AI/H-DevOps/pull/1 has a qa-review finding: no test covers the retry'; rc=$?
+  expect_code 0 "$rc" "a fired delivery to an ordinary crew should enqueue"
+  rec="$inbox/001.msg"
+  [ -f "$rec" ] || fail "the fired delivery was not recorded at $rec"
+  [ "$(find "$inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the fired delivery enqueued more than one record:"$'\n'"$(ls "$inbox")"
+  body=$(record_body _ "$rec")
+  [ "$body" = 'pr-flow: https://github.com/Muso-AI/H-DevOps/pull/1 has a qa-review finding: no test covers the retry' ] \
+    || fail "the recorded body differs: $body"
+  case "$body" in
+    *corr=*) fail "a crewmate fired delivery must not carry a reply expectation: $body" ;;
+  esac
+  inbox_ladder fm_task_inbox_is_fire_and_forget "$rec" \
+    || fail "the record does not carry the fire-and-forget delivery mode, so the watcher would escalate it"
+  action=$(inbox_ladder fm_task_inbox_due_action "$dir/home/state" t1)
+  [ "$action" = quiet ] || fail "a fired delivery entered the re-ring ladder: $action"
+  assert_contains "$(cat "$dir/send.log")" "Firstmate instruction waiting" \
+    "a fired delivery should still ring its doorbell once"
+  # The producer owns once-ness per event, so a blind retry after an uncertain
+  # outcome must land on the record already present instead of queueing a
+  # second copy the crew would act on twice.
+  run_send "$dir" "$err" -- t1 --fire-and-forget "$delivery" \
+    'pr-flow: https://github.com/Muso-AI/H-DevOps/pull/1 has a qa-review finding: no test covers the retry'; rc=$?
+  expect_code 0 "$rc" "a retried fired delivery should succeed"
+  [ "$(find "$inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')" = 1 ] \
+    || fail "the same fired delivery was recorded twice:"$'\n'"$(ls "$inbox")"
+  # Ordinary steers are untouched: the same bytes without the flag are a
+  # deliberate new instruction.
+  run_send "$dir" "$err" -- t1 'pr-flow: https://github.com/Muso-AI/H-DevOps/pull/1 has a qa-review finding: no test covers the retry' \
+    || fail "an ordinary steer after a fired delivery should succeed"
+  [ "$(find "$inbox" -maxdepth 1 -name '*.msg' | wc -l | tr -d ' ')" = 2 ] \
+    || fail "an ordinary steer was collapsed onto the fired record:"$'\n'"$(ls "$inbox")"
+  pass "fm-send inbox: an explicit fire-and-forget delivery to a crew is durable, off the re-run ladder, and idempotent"
+}
+
+test_fire_and_forget_requires_a_home_task() {
+  local dir err rc
+  dir=$(setup_case fire-and-forget-refuse); err="$dir/send.err"
+  run_send "$dir" "$err" -- t1 --fire-and-forget XYZ 'event'; rc=$?
+  [ "$rc" -ne 0 ] || fail "a malformed fire-and-forget delivery id should be refused"
+  assert_contains "$(cat "$err")" "16 lowercase hex" "the refusal should name the delivery-id format"
+  run_send "$dir" "$err" -- sess:fm-t1 --fire-and-forget 0123456789abcdef 'event'; rc=$?
+  [ "$rc" -ne 0 ] || fail "fire-and-forget to an explicit backend target should be refused"
+  assert_contains "$(cat "$err")" "requires a recorded task selector" \
+    "the refusal should name the missing task record"
+  [ ! -d "$dir/home/state/t1.inbox" ] \
+    || fail "a refused fire-and-forget must not enqueue anything"
+  [ ! -s "$dir/send.log" ] || fail "a refused fire-and-forget typed something"
+  pass "fm-send inbox: --fire-and-forget needs a recorded task and a well-formed delivery id"
+}
+
 test_text_steer_rides_inbox
 test_deep_home_doorbell_stays_short
 test_multiline_steer_is_legal
@@ -641,8 +792,13 @@ test_secondmate_marker_and_enqueue_delivery
 test_post_enqueue_bookkeeping_failure_is_not_retryable
 test_meta_lock_contention_fails_bounded
 test_unwritable_inbox_fails_loudly
+test_parallel_sends_never_lose_a_record
+test_unconfirmed_record_fails_the_send
+test_already_acknowledged_steer_is_not_rung_again
 test_stranded_meta_lock_is_reclaimed
 test_coalesce_replaces_unhandled_ticks
 test_coalesce_keeps_reringing_ladder
 test_coalesce_refusals
 test_empty_message_refused
+test_crewmate_fire_and_forget_records_and_dedups
+test_fire_and_forget_requires_a_home_task

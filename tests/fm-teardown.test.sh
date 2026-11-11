@@ -43,6 +43,14 @@
 #   (q4) no-mistakes + squash-merged rebased local plus extra commit -> REFUSE
 #   (q5) gh down + squash-merged stale local, content not in default -> REFUSE
 #
+# Also covers the change-watch done-claim boundary, which is enforced here because
+# teardown is the step every finalized task passes through:
+#   (cw1) watch ended unmeasurable-with-reason                       -> REFUSE
+#   (cw2) watch ended interrupted, then re-registered                -> REFUSE then ALLOW
+#   (cw3) watch still running (it outlives the task)                 -> ALLOW
+#   (cw4) watch ended proven                                         -> ALLOW
+#   (cw5) unmeasurable watch whose verdict file was deleted           -> REFUSE
+#
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
 #   (r) provably-stale index.lock (old mtime, no live holder) -> lock removed, ALLOW
@@ -3152,17 +3160,22 @@ SH
 # The gateway keep-alive's stall record is per-task runtime state, so a retired
 # task must not leave one behind: a stale record carrying a spent budget would
 # make the next task reusing that id start its ladder already exhausted.
+# The same holds for the captain's left-stopped marker (bin/fm-leave-stopped.sh):
+# an order about a retired task must not silence the next task reusing its id.
 test_teardown_removes_the_gateway_stall_record() {
-  local case_dir rec
+  local case_dir rec stopped
   case_dir=$(make_case gateway-stall-cleanup)
   write_meta "$case_dir" local-only ship
   rec="$case_dir/state/task-x1.gateway-stall"
+  stopped="$case_dir/state/task-x1.stopped"
   printf 'v1 first=1 attempts=8 last=1 notified=1\n' > "$rec"
+  printf 'schema=fm-leave-stopped.v1\nat=2026-10-26T13:15:00Z\nreason=captain: leave it stopped\n' > "$stopped"
 
   run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" \
     || fail "gateway-stall-cleanup: forced teardown failed: $(cat "$case_dir/stderr")"
   [ ! -e "$rec" ] || fail "gateway-stall-cleanup: teardown left the task's gateway stall record behind"
-  pass "teardown removes the per-task gateway keep-alive stall record"
+  [ ! -e "$stopped" ] || fail "gateway-stall-cleanup: teardown left the task's left-stopped marker behind"
+  pass "teardown removes the per-task gateway keep-alive stall record and the left-stopped marker"
 }
 
 # Flat (non-projected) Herdr endpoint whose fake pane exists until a locked
@@ -5983,6 +5996,370 @@ test_missing_adapter_sibling_refuses_before_cleanup
 test_forced_child_missing_adapter_sibling_refuses_before_cleanup
 test_forced_secondmate_own_missing_adapter_sibling_refuses_before_child_cleanup
 test_retained_sources_still_reach_the_ordinary_refusal
+# --- Migrated Orca worktrees -------------------------------------------------
+#
+# A task spawned on the Mac-era Orca backend keeps only orca_worktree_id_prior (a
+# /Users/<user>/orca/workspaces/... path) and no orca_worktree_id, so its backend
+# reads as tmux and its worktree is not in treehouse's pool. These cases prove the
+# migrated path removes a clean worktree and still refuses dirty or unlanded work.
+
+# Build a case whose task worktree sits at the migrated Orca location. Echoes the
+# case dir.
+make_migrated_orca_case() {
+  local name=$1 case_dir wt
+  case_dir=$(make_case "$name")
+  wt=$(migrated_orca_wt "$case_dir")
+  mkdir -p "$(dirname "$wt")"
+  git -C "$case_dir/project" worktree move "$case_dir/wt" "$wt"
+  printf '%s\n' "$case_dir"
+}
+
+migrated_orca_wt() { printf '%s\n' "$1/home/aaron/orca/workspaces/proj/fm-task-x1"; }
+
+# Write the migrated-Orca meta shape: a prior id+path, no current orca id, and no
+# backend field. Args: case_dir mode kind
+write_migrated_orca_meta() {
+  local case_dir=$1 mode=$2 kind=$3 wt
+  wt=$(migrated_orca_wt "$case_dir")
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=firstmate:fm-task-x1" \
+    "endpoint_task_id=task-x1" \
+    "worktree=$wt" \
+    "project=$case_dir/project" \
+    "kind=$kind" \
+    "mode=$mode" \
+    "spawn_gen=teardown-test-task-x1" \
+    "orca_worktree_id_prior=11111111-2222-3333-4444-555555555555::/Users/aaron/orca/workspaces/proj/fm-task-x1"
+}
+
+# Commit a real file change on the migrated worktree's task branch.
+# Args: case_dir file content [message]
+mwt_commit_file() {
+  local case_dir=$1 file=$2 content=$3 msg=${4:-add $2} wt
+  wt=$(migrated_orca_wt "$case_dir")
+  printf '%s\n' "$content" > "$wt/$file"
+  git -C "$wt" add -- "$file"
+  git -C "$wt" -c user.email=t@t -c user.name=t commit -q -m "$msg"
+}
+
+# Install an `orca` mock that resolves the prior path to the live worktree and
+# removes it on `worktree rm`. Args: case_dir
+add_fake_orca() {
+  local case_dir=$1 wt prior
+  wt=$(migrated_orca_wt "$case_dir")
+  prior=/Users/aaron/orca/workspaces/proj/fm-task-x1
+  cat > "$case_dir/fakebin/orca" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "worktree show")
+    case " \$* " in
+      *"path:$prior"*)
+        printf '{"ok":true,"result":{"worktree":{"id":"live-id-1","path":"$wt"}}}\n'
+        exit 0 ;;
+    esac
+    printf '{"ok":false,"error":{"code":"selector_not_found"}}\n' >&2
+    exit 1 ;;
+  "worktree rm")
+    printf 'removed\n' >> "$case_dir/orca-rm.log"
+    rm -rf "$wt"
+    git -C "$case_dir/project" worktree prune 2>/dev/null || true
+    printf '{"ok":true,"result":{"removed":true}}\n'
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+}
+
+# Install an `orca` mock that reports a different directory sharing the prior
+# path's tail. A removal through Orca would destroy that unchecked directory.
+# Args: case_dir decoy
+add_fake_orca_mismatched_path() {
+  local case_dir=$1 decoy=$2 prior
+  prior=/Users/aaron/orca/workspaces/proj/fm-task-x1
+  cat > "$case_dir/fakebin/orca" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "worktree show")
+    case " \$* " in
+      *"path:$prior"*)
+        printf '{"ok":true,"result":{"worktree":{"id":"live-id-1","path":"$decoy"}}}\n'
+        exit 0 ;;
+    esac
+    printf '{"ok":false,"error":{"code":"selector_not_found"}}\n' >&2
+    exit 1 ;;
+  "worktree rm")
+    printf 'removed\n' >> "$case_dir/orca-rm.log"
+    rm -rf "$decoy"
+    printf '{"ok":true,"result":{"removed":true}}\n'
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+}
+
+test_migrated_orca_clean_worktree_removed() {
+  local case_dir rc wt
+  case_dir=$(make_migrated_orca_case migrated-orca-clean)
+  wt=$(migrated_orca_wt "$case_dir")
+  write_migrated_orca_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  mwt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$wt" rev-parse HEAD)"
+  add_fake_orca "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "migrated-orca-clean: teardown should remove a clean migrated Orca worktree"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "migrated-orca-clean: teardown printed a REFUSED line"
+  [ ! -e "$wt" ] || fail "migrated-orca-clean: the migrated Orca worktree was not removed"
+  [ -e "$case_dir/orca-rm.log" ] || fail "migrated-orca-clean: Orca removal was not invoked"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "migrated-orca-clean: the task meta was not removed"
+  pass "a clean migrated Orca worktree is removed through Orca"
+}
+
+test_migrated_orca_mismatched_path_not_removed() {
+  local case_dir rc wt decoy
+  case_dir=$(make_migrated_orca_case migrated-orca-mismatch)
+  wt=$(migrated_orca_wt "$case_dir")
+  decoy="$case_dir/decoy/orca/workspaces/proj/fm-task-x1"
+  mkdir -p "$decoy"
+  write_migrated_orca_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  mwt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$wt" rev-parse HEAD)"
+  add_fake_orca_mismatched_path "$case_dir" "$decoy"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "migrated-orca-mismatch: teardown should fall back to git removal"
+  [ ! -e "$wt" ] || fail "migrated-orca-mismatch: the inspected worktree was not removed"
+  [ -d "$decoy" ] || fail "migrated-orca-mismatch: Orca removed a directory the safety gates never inspected"
+  [ ! -e "$case_dir/orca-rm.log" ] || fail "migrated-orca-mismatch: Orca removal was invoked for a mismatched path"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "migrated-orca-mismatch: the task meta was not removed"
+  pass "a mismatched Orca path falls back to removing the inspected worktree"
+}
+
+test_migrated_orca_dirty_worktree_refuses() {
+  local case_dir rc wt
+  case_dir=$(make_migrated_orca_case migrated-orca-dirty)
+  wt=$(migrated_orca_wt "$case_dir")
+  write_migrated_orca_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  mwt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$wt" rev-parse HEAD)"
+  add_fake_orca "$case_dir"
+  printf '%s\n' 'uncommitted edit' > "$wt/feature.txt"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "migrated-orca-dirty: teardown should refuse a dirty migrated Orca worktree"
+  grep -q REFUSED "$case_dir/stderr" || fail "migrated-orca-dirty: no REFUSED line in stderr"
+  grep -q 'uncommitted changes' "$case_dir/stderr" || fail "migrated-orca-dirty: refusal did not cite uncommitted changes"
+  [ -d "$wt" ] || fail "migrated-orca-dirty: the dirty worktree was removed anyway"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "migrated-orca-dirty: the task meta was removed despite the refusal"
+  pass "a dirty migrated Orca worktree is still refused"
+}
+
+test_migrated_orca_unpushed_worktree_refuses() {
+  local case_dir rc wt
+  case_dir=$(make_migrated_orca_case migrated-orca-unpushed)
+  wt=$(migrated_orca_wt "$case_dir")
+  write_migrated_orca_meta "$case_dir" no-mistakes ship
+  mwt_commit_file "$case_dir" feature.txt hello "add feature"
+  add_fake_orca "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "migrated-orca-unpushed: teardown should refuse unlanded work in a migrated Orca worktree"
+  grep -q REFUSED "$case_dir/stderr" || fail "migrated-orca-unpushed: no REFUSED line in stderr"
+  [ -d "$wt" ] || fail "migrated-orca-unpushed: the unlanded worktree was removed anyway"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "migrated-orca-unpushed: the task meta was removed despite the refusal"
+  pass "unlanded work in a migrated Orca worktree is still refused"
+}
+
+# Seed one change watch for task-x1 in <case_dir>. <state> is the watch's
+# durable row terminal_state; <verdict> is written to the watch's verdict file
+# when non-empty. Deleting the verdict file must never clear the row.
+seed_change_watch() {  # <case-dir> <state> [<verdict>]
+  local case_dir=$1 state=$2 verdict=${3:-} id='task-x1-7'
+  local dir="$case_dir/state/change-watch/$id"
+  mkdir -p "$dir" "$case_dir/state/change-watch/rows"
+  {
+    printf 'version=fm-change-watch-v1\n'
+    printf 'task=task-x1\n'
+    printf 'pr_url=https://github.com/example/repo/pull/7\n'
+    printf 'watch_id=%s\n' "$id"
+    printf 't0=1790000000\n'
+    printf 'created=1790000000\n'
+  } > "$dir/watch.meta"
+  printf '900\t1790000900\n3600\t1790003600\n21600\t1790021600\n' > "$dir/schedule"
+  [ -z "$verdict" ] || printf '%s\n' "$verdict" > "$dir/verdict"
+  {
+    printf '{"version": "fm-change-watch-row-v1", "watch_id": "%s", ' "$id"
+    printf '"task": "task-x1", "completed_epoch": %s, ' \
+      "$( [ "$state" = open ] && printf null || printf 1790044000 )"
+    printf '"readings": {"900": null, "3600": null, "21600": null}, '
+    printf '"real_user_check": "not-applicable", '
+    printf '"terminal_state": "%s", "reason": "%s"}\n' "$state" "${verdict:-the watch is still running}"
+  } > "$case_dir/state/change-watch/rows/$id.json"
+}
+
+# Run the change watch script the way a firstmate home runs it, with a stub arm
+# command so re-registering never touches a real scheduler.
+run_change_watch() {  # <case-dir> <command> [<args>...]
+  local case_dir=$1
+  shift
+  printf '#!/bin/sh\nexit 0\n' > "$case_dir/fakebin/fm-cw-arm"
+  chmod +x "$case_dir/fakebin/fm-cw-arm"
+  env FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" FM_CW_NOW=1790001000 \
+    FM_CW_ARM_CMD="$case_dir/fakebin/fm-cw-arm" FM_CW_NO_WIKI=1 \
+    "$ROOT/bin/fm-change-watch.sh" "$@"
+}
+
+# A landed task whose change watch ended with no measurement verdict is refused:
+# the merge has no evidence it was safe, and cleanup would erase the records that
+# make the gap actionable. The refusal names the watch, its reason, and the
+# recovery commands.
+test_change_watch_terminal_gap_refuses_teardown() {
+  local case_dir rc
+  case_dir=$(make_case cw-terminal-gap)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+  seed_change_watch "$case_dir" unmeasurable-with-reason 'unmeasurable-with-reason: nothing measured at +15m'
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "cw-terminal-gap: teardown should refuse a watch that ended unmeasurable"
+  grep -q 'REFUSED' "$case_dir/stderr" || fail "cw-terminal-gap: no REFUSED line in stderr"
+  grep -q 'task-x1-7' "$case_dir/stderr" || fail "cw-terminal-gap: the refusal did not name the watch"
+  grep -q 'unmeasurable-with-reason' "$case_dir/stderr" || fail "cw-terminal-gap: the refusal did not name the reason"
+  grep -q 'fm-change-watch.sh verdict' "$case_dir/stderr" || fail "cw-terminal-gap: the refusal did not name the verdict recovery command"
+  grep -q 'fm-change-watch.sh doctor' "$case_dir/stderr" || fail "cw-terminal-gap: the refusal did not name the doctor recovery command"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "cw-terminal-gap: the task meta was removed despite the refusal"
+  [ -d "$case_dir/wt" ] || fail "cw-terminal-gap: the worktree was removed despite the refusal"
+  pass "a task whose change watch ended unmeasurable is refused at teardown"
+}
+
+# An interrupted watch is the same terminal gap, and re-registering it is what
+# clears the refusal.
+test_change_watch_interrupted_refuses_until_reregistered() {
+  local case_dir rc
+  case_dir=$(make_case cw-interrupted)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+  seed_change_watch "$case_dir" unmeasurable-with-reason 'interrupted at +30m'
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "cw-interrupted: teardown should refuse an interrupted watch"
+  grep -q 'interrupted at +30m' "$case_dir/stderr" || fail "cw-interrupted: the refusal did not name the interruption"
+
+  run_change_watch "$case_dir" register task-x1 https://github.com/example/repo/pull/7 \
+    > "$case_dir/register.out" 2>&1 \
+    || fail "cw-interrupted: re-registering the interrupted watch failed"
+  grep -q '"terminal_state": "open"' "$case_dir/state/change-watch/rows/task-x1-7.json" \
+    || fail "cw-interrupted: re-registering did not rewrite the durable row as open"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "cw-interrupted: teardown should proceed once the watch was re-registered"
+  pass "an interrupted change watch refuses teardown until it is re-registered"
+}
+
+# The durable row is the authority: removing the verdict file must not clear a
+# refusal, because that would make the guard satisfiable by deleting the artifact
+# it guards.
+test_change_watch_gap_survives_verdict_deletion() {
+  local case_dir rc
+  case_dir=$(make_case cw-verdict-deleted)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+  seed_change_watch "$case_dir" unmeasurable-with-reason 'unmeasurable-with-reason: nothing measured at +15m'
+  rm -f "$case_dir/state/change-watch/task-x1-7/verdict"
+
+  set +e
+  run_change_watch "$case_dir" gate task-x1 --terminal-gap > "$case_dir/gate.out" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "cw-verdict-deleted: gate --terminal-gap passed after the verdict was deleted"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "cw-verdict-deleted: teardown should still refuse after the verdict was deleted"
+  grep -q 'REFUSED' "$case_dir/stderr" || fail "cw-verdict-deleted: no REFUSED line in stderr"
+  pass "deleting the verdict file does not clear a measurement gap"
+}
+
+# A watch that is still running keeps sampling from state/change-watch/, which is
+# not a task record and survives teardown, so it must not block the task.
+test_running_change_watch_does_not_block_teardown() {
+  local case_dir rc
+  case_dir=$(make_case cw-running)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+  seed_change_watch "$case_dir" open
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "cw-running: teardown should not be blocked by a watch still running"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "cw-running: teardown printed a REFUSED line for a running watch"
+  [ -f "$case_dir/state/change-watch/rows/task-x1-7.json" ] \
+    || fail "cw-running: teardown removed the durable row"
+  pass "a change watch still running does not block teardown"
+}
+
+# A watch that ended proven is evidence the merge was safe, so teardown proceeds.
+test_proven_change_watch_allows_teardown() {
+  local case_dir rc
+  case_dir=$(make_case cw-proven)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+  seed_change_watch "$case_dir" proven 'clean'
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "cw-proven: teardown should proceed when the watch ended proven"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "cw-proven: teardown printed a REFUSED line for a proven watch"
+  pass "a change watch that ended proven allows teardown"
+}
+
 test_local_only_fork_remote_allows
 test_teardown_closes_the_backlog_item_itself
 test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note
@@ -6107,3 +6484,12 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_migrated_orca_clean_worktree_removed
+test_migrated_orca_mismatched_path_not_removed
+test_migrated_orca_dirty_worktree_refuses
+test_migrated_orca_unpushed_worktree_refuses
+test_change_watch_terminal_gap_refuses_teardown
+test_change_watch_interrupted_refuses_until_reregistered
+test_change_watch_gap_survives_verdict_deletion
+test_running_change_watch_does_not_block_teardown
+test_proven_change_watch_allows_teardown

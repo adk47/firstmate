@@ -48,39 +48,44 @@ chmod +x "$LAB/shim/tmux"
 PATH="$LAB/shim:$PATH"
 export PATH
 
-# Stand-in "harness" binaries: each is a symlink named after the harness whose
-# target is fm_agent_standin's long-running native process (tests/lib.sh owns
-# why it is never a copy and never a host `sleep` that dispatches on its name).
-# The symlink name is what the kernel records as the executable identity, which
-# is exactly the signal under test.
-STANDIN_BIN=$(fm_agent_standin "$LAB/standin") || {
-  echo "skip: no long-running stand-in binary survives a rename (multicall coreutils, no C compiler)"
-  exit 0
-}
+# Stand-in "harness" binaries. Each must be a real executable whose own file
+# name is the harness name, because that name is the executable identity the
+# kernel records and the classifier reads. A symlink to a system binary is NOT
+# portable: Ubuntu 25.10 ships coreutils as the uutils multicall binary, which
+# refuses to run under a name that does not match the utility it was asked for
+# ("Security violation: Requested utility `claude-link` does not match
+# executable name"), so a `sleep` symlink exits instantly there and the pane
+# never exists at all. Compiling our own tiny spinner keeps the identity equal
+# to the harness name on every platform, and unlike a copy of a signed system
+# binary it is not killed by macOS arm64 code-signing validation. Where no C
+# compiler exists the symlink fallback still covers the platforms whose `sleep`
+# tolerates being renamed.
 CC_BIN=$(command -v cc 2>/dev/null || command -v gcc 2>/dev/null || true)
-ln -s "$STANDIN_BIN" "$LAB/bin/claude-link"
-ln -s "$STANDIN_BIN" "$LAB/bin/pi"
-ln -s "$STANDIN_BIN" "$LAB/bin/notaharness"
-# omp (Oh My Pi) is a single binary whose live process name is the bare word
-# `omp`; the two decoys are the substrings an unanchored glob would misread.
-ln -s "$STANDIN_BIN" "$LAB/bin/omp"
-ln -s "$STANDIN_BIN" "$LAB/bin/ompd"
-ln -s "$STANDIN_BIN" "$LAB/bin/comp"
-# Command Code sets its process title to the bare word `command-code`; the decoy
-# merely contains it.
-ln -s "$STANDIN_BIN" "$LAB/bin/command-code"
-ln -s "$STANDIN_BIN" "$LAB/bin/command-code-helper"
+if [ -n "$CC_BIN" ]; then
+  printf '%s\n' '#include <unistd.h>' 'int main(void){for(;;)sleep(60);return 0;}' > "$LAB/spin.c"
+fi
+# A stand-in that is a real executable when a compiler exists, and a symlink to
+# the system sleep otherwise.
+make_stand_in() {  # <path>
+  if [ -n "$CC_BIN" ] && "$CC_BIN" -o "$1" "$LAB/spin.c" 2>/dev/null; then
+    return 0
+  fi
+  ln -sf "$SLEEP_BIN" "$1"
+}
+make_stand_in "$LAB/bin/claude-link"
+make_stand_in "$LAB/bin/pi"
+make_stand_in "$LAB/bin/notaharness"
 # muse's installed binary is muse-bin-<version>: the launcher execs it, so the
 # version is the LIVE process name and it changes on every auto-update. Unlike
 # Claude Code's version-named binary there is no `muse` path component to fall
 # back on (~/.local/bin/muse-bin-<version>), so the executable name is the ONLY
 # signal, and `muse` alone is a common English fragment that must not widen into
 # a substring match. The last two names are the decoys that would be misread.
-ln -s "$STANDIN_BIN" "$LAB/bin/muse-bin-0.1.0-R708.1"
-ln -s "$STANDIN_BIN" "$LAB/bin/musescore"
-ln -s "$STANDIN_BIN" "$LAB/bin/amuse"
-ln -s "$STANDIN_BIN" "$LAB/bin/muse-binary"
-ln -s "$STANDIN_BIN" "$LAB/bin/muse-bind"
+make_stand_in "$LAB/bin/muse-bin-0.1.0-R708.1"
+make_stand_in "$LAB/bin/musescore"
+make_stand_in "$LAB/bin/amuse"
+make_stand_in "$LAB/bin/muse-binary"
+make_stand_in "$LAB/bin/muse-bind"
 
 # A launcher whose own process identity is a bare shell, running the harness as
 # a child in the same foreground process group - the shape the real Pi Launcher
@@ -229,7 +234,6 @@ pass "tmux liveness: Command Code's anchored process name classifies alive; a co
 # from the resolved target's name, so it is skipped where no C compiler exists.
 
 if [ -n "$CC_BIN" ] &&
-  printf '%s\n' '#include <unistd.h>' 'int main(void){for(;;)sleep(60);return 0;}' > "$LAB/spin.c" &&
   "$CC_BIN" -o "$LAB/bin/claude/2.1.220" "$LAB/spin.c" 2>/dev/null &&
   "$CC_BIN" -o "$LAB/bin/decoy/2.1.220" "$LAB/spin.c" 2>/dev/null; then
   new_window titled "$LAB/bin/claude/2.1.220"
@@ -316,8 +320,8 @@ pass "tmux liveness: an absent window classifies missing rather than inheriting 
 # shellcheck source=bin/fm-tmux-lib.sh
 . "$ROOT/bin/fm-tmux-lib.sh"
 
-ln -s "$STANDIN_BIN" "$LAB/bin/cursor-agent"
-ln -s "$STANDIN_BIN" "$LAB/bin/notcursor"
+make_stand_in "$LAB/bin/cursor-agent"
+make_stand_in "$LAB/bin/notcursor"
 
 # Cursor's real screen shape: a BARE composer row carrying its U+2192 glyph, two
 # footer rows below it, and the terminal cursor left on a blank row past the

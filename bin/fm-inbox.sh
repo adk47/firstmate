@@ -20,8 +20,8 @@
 #           fleet work and must not become fleet work.
 #
 # Usage:
-#   fm-inbox.sh note [--request-id <id>] [--json] [--] <text>...
-#   fm-inbox.sh note [--request-id <id>] [--json] -   (body from stdin)
+#   fm-inbox.sh note [--source <class>] [--request-id <id>] [--json] [--] <text>...
+#   fm-inbox.sh note [--source <class>] [--request-id <id>] [--json] -   (body from stdin)
 #   fm-inbox.sh announce [--json] <id>
 #   fm-inbox.sh reply [--json] <id> <text>... | reply [--json] <id> -
 #   fm-inbox.sh receipts [--after <cursor>] [--all-pending] [--all-handled] [--all-replies]
@@ -29,8 +29,29 @@
 #   fm-inbox.sh say  [<file.wav>]       (default: audio on stdin)
 #   fm-inbox.sh status
 #   fm-inbox.sh ask  <question>...
-#   fm-inbox.sh list
-#   fm-inbox.sh drain [--ack <id>...]
+#   fm-inbox.sh list  [--all]
+#   fm-inbox.sh drain [--ack <id>...] [--all]
+#
+# Source classes. Every note is filed under the class of the thing that wrote it,
+# and the class decides which queue it lands in. Separating the two is what keeps
+# the captain's queue readable: an automated source writes hundreds of records a
+# week that the captain never wrote and must never have to read past.
+#
+#   class       queue                written by
+#   text        state/inbox/         `note`, or the voice handover's queued work
+#   voice       state/inbox/         `say`, after transcription
+#   sentry      state/inbox-auto/    the Sentry bridge
+#   lane-tick   state/inbox-auto/    a lane tick
+#   ci          state/inbox-auto/    a CI or pull-request poll
+#   watch       state/inbox-auto/    the factory watch loop (fm-watch-all, fm-watch-threads)
+#   health      state/inbox-auto/    the box health check (ak47-health)
+#
+# An unknown class refuses rather than guessing, because a guess is how a machine
+# record lands in the captain's queue. `list` and `drain` print the captain's
+# notes first, then a bounded tail of the automated queue, so a captain record is
+# never buried by machine output. Both queues append one wake - a page that never
+# wakes is a page nobody reads - and an automated wake names its class, so it is
+# recognizable as automated without opening the record.
 #
 # `note --request-id` is the idempotent capture path: a repeat of the same
 # request id returns the original note instead of creating a second one, and
@@ -123,6 +144,15 @@ FM_HOME="${FM_HOME:-$FM_ROOT}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 INBOX="$STATE/inbox"
+# Automated sources keep their own queue, so a captain record and a machine record
+# are never the same kind of thing on disk. A record lands in exactly one of the
+# two; see "Source classes" in the header.
+INBOX_AUTO="$STATE/inbox-auto"
+CAPTAIN_CLASSES="text voice"
+AUTOMATED_CLASSES="sentry lane-tick ci watch health"
+# How many automated records a listing prints. The automated queue holds hundreds,
+# and printing all of it is exactly what made the captain's own notes unreadable.
+AUTO_SHOWN_MAX=20
 
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 
@@ -421,15 +451,39 @@ publish_from_reservation() {  # <request-id> <source> <body> <extra>
   fi
   printf '%s\n' "$id"
 }
-
-queue_note() {
-  local source=$1 body=$2 extra=${3:-} request_id=${4:-} json=${5:-0}
-  local strict=0
-  if [ -n "$request_id" ] || [ "$json" -eq 1 ]; then
-    strict=1
+wake_for() {  # <class> <id> <summary>
+  local class=$1 id=$2 summary=$3 payload lib="$FM_ROOT/bin/fm-wake-lib.sh"
+  if [ ! -r "$lib" ]; then
+    printf 'fm-inbox: note saved but NOT announced (missing %s)\n' "$lib" >&2
+    return 1
   fi
+  # The payload is the one line firstmate reads without opening the record, so it
+  # says which queue the record came from rather than leaving it to guess.
+  case " $CAPTAIN_CLASSES " in
+    *" $class "*) payload="check: captain inbox note $id - $summary" ;;
+    *) payload="check: automated inbox note $id ($class) - $summary" ;;
+  esac
+  # shellcheck source=/dev/null
+  FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" STATE="$STATE" . "$lib"
+  fm_wake_append check "inbox:$id" "$payload"
+}
+
+# The queue a class files under, or a refusal naming the classes that exist.
+class_queue() {  # <class>
+  case " $CAPTAIN_CLASSES " in
+    *" $1 "*) printf '%s' "$INBOX"; return 0 ;;
+  esac
+  case " $AUTOMATED_CLASSES " in
+    *" $1 "*) printf '%s' "$INBOX_AUTO"; return 0 ;;
+  esac
+  die "unknown note class: $1 (captain: $CAPTAIN_CLASSES; automated: $AUTOMATED_CLASSES)"
+}
+
+queue_note() {  # <class> <body> [<extra>] [<request-id>] [<json>]
+  local class=$1 body=$2 extra=${3:-} request_id=${4:-} json=${5:-0}
   [ -n "${body//[[:space:]]/}" ] || die "refusing to queue an empty note"
-  mkdir -p "$INBOX"
+  dir=$(class_queue "$class")
+  mkdir -p "$dir"
 
   local tmp id summary staging_name reserved
 
@@ -442,7 +496,7 @@ queue_note() {
       finish_note_result replay "$id" "$request_id" "$json" "$strict" "$summary"
       return $?
     fi
-    tmp=$(mktemp "$INBOX/.staging-XXXXXX")
+    tmp=$(mktemp "$dir/.staging-XXXXXX")
     staging_name=$(basename "$tmp")
     id="$(date +%s)-${staging_name#.staging-}"
     write_note_file "$tmp" "$id" "$source" "$body" "$extra" "$request_id"
@@ -454,25 +508,32 @@ queue_note() {
       finish_note_result replay "$id" "$request_id" "$json" "$strict" "$summary"
       return $?
     fi
-    mv "$tmp" "$INBOX/$id.note"
+    mv "$tmp" "$dir/$id.note"
     summary=$(note_summary_from_body "$body")
     finish_note_result created "$id" "$request_id" "$json" "$strict" "$summary"
     return $?
   fi
 
-  tmp=$(mktemp "$INBOX/.staging-XXXXXX")
+  tmp=$(mktemp "$dir/.staging-XXXXXX")
   staging_name=$(basename "$tmp")
   id="$(date +%s)-${staging_name#.staging-}"
   write_note_file "$tmp" "$id" "$source" "$body" "$extra" ""
-  mv "$tmp" "$INBOX/$id.note"
+  mv "$tmp" "$dir/$id.note"
   summary=$(note_summary_from_body "$body")
   finish_note_result created "$id" "" "$json" "$strict" "$summary"
 }
 
 cmd_note() {
-  local body json=0 request_id=""
+  local body json=0 request_id="" class=text
   while [ "$#" -gt 0 ]; do
     case "$1" in
+      --source)
+        [ "$#" -ge 2 ] || die "usage: fm-inbox.sh note [--source <class>] [--request-id <id>] [--json] [--] <text>..."
+        class=$2
+        shift 2
+        # Validate before reading stdin, so a typo cannot consume a piped body first.
+        class_queue "$class" >/dev/null
+        ;;
       --json) json=1; shift ;;
       --request-id)
         [ "$#" -ge 2 ] || die "usage: fm-inbox.sh note [--request-id <id>] [--json] [--] <text>... (or: note -)"
@@ -1038,14 +1099,22 @@ audio_seconds=$secs"
 
 # ---------------------------------------------------------------- status
 
+count_notes() {  # <dir>
+  [ -d "$1" ] || { printf '0'; return 0; }
+  find "$1" -maxdepth 1 -name '*.note' 2>/dev/null | wc -l | tr -d ' '
+}
+
 cmd_status() {
-  local pending=0
-  [ -d "$INBOX" ] && pending=$(find "$INBOX" -maxdepth 1 -name '*.note' 2>/dev/null | wc -l | tr -d ' ')
+  local pending auto
+  pending=$(count_notes "$INBOX")
+  auto=$(count_notes "$INBOX_AUTO")
 
   printf '=== firstmate status (read-only, no wake sent) ===\n'
   printf 'home     %s\n' "$FM_HOME"
   printf 'time     %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf 'inbox    %s note(s) waiting for firstmate\n' "$pending"
+  [ "$auto" -eq 0 ] ||
+    printf 'auto     %s automated note(s) waiting, none of it the captain\n' "$auto"
 
   if [ -f "$DATA/backlog.md" ]; then
     printf '\n--- in flight ---\n'
@@ -1101,35 +1170,84 @@ PY
 
 # ---------------------------------------------------------------- list / drain
 
+# Print one record: its bare id, then its body indented. The id is what
+# `drain --ack` takes back.
+print_note() {  # <file>
+  printf '%s\n' "$(basename "$1" .note)"
+  sed -n '/^--$/,$p' "$1" | tail -n +2 | sed 's/^/    /'
+}
+
+# The automated queue, after the captain's. A bounded tail by default because
+# this queue is a log, not a to-do list: the whole point of the split is that the
+# captain's own records are the short part. Record ids are epoch-second prefixed,
+# so name order is arrival order to the second.
+print_auto_notes() {  # <show-all 0|1>
+  local show_all=$1 total f
+  total=$(count_notes "$INBOX_AUTO")
+  [ "$total" -gt 0 ] || return 0
+  printf '\n--- automated queue: %s waiting, none of it the captain ---\n' "$total"
+  if [ "$show_all" -eq 1 ] || [ "$total" -le "$AUTO_SHOWN_MAX" ]; then
+    for f in "$INBOX_AUTO"/*.note; do
+      [ -e "$f" ] || break
+      print_note "$f"
+    done
+  else
+    printf '(newest %s shown; %s older stay on disk - --all lists them, or ack by id)\n' \
+      "$AUTO_SHOWN_MAX" "$((total - AUTO_SHOWN_MAX))"
+    while IFS= read -r f; do
+      [ -n "$f" ] || continue
+      print_note "$f"
+    done < <(find "$INBOX_AUTO" -maxdepth 1 -name '*.note' | sort | tail -n "$AUTO_SHOWN_MAX")
+  fi
+}
+
 cmd_list() {
-  [ -d "$INBOX" ] || { printf '(inbox empty)\n'; return 0; }
-  local any=0
+  local show_all=0 any=0 f
+  case "${1:-}" in
+    --all) show_all=1 ;;
+    '') ;;
+    *) die "usage: fm-inbox.sh list [--all]" ;;
+  esac
+
   for f in "$INBOX"/*.note; do
     [ -e "$f" ] || break
     any=1
-    printf '%s\n' "$(basename "$f" .note)"
-    sed -n '/^--$/,$p' "$f" | tail -n +2 | sed 's/^/    /'
+    print_note "$f"
   done
-  [ "$any" -eq 1 ] || printf '(inbox empty)\n'
+  [ "$any" -eq 1 ] || printf '(no captain notes waiting)\n'
+  print_auto_notes "$show_all"
 }
 
 cmd_drain() {
+  local show_all=0
+  if [ "${1:-}" = "--all" ]; then
+    show_all=1
+    shift
+  fi
   if [ "${1:-}" = "--ack" ]; then
     shift
     [ "$#" -gt 0 ] || die "usage: fm-inbox.sh drain --ack <id>..."
-    mkdir -p "$INBOX/handled"
-    local id
+    local id dir acked
     for id in "$@"; do
-      if [ -f "$INBOX/$id.note" ]; then
-        mv "$INBOX/$id.note" "$INBOX/handled/$id.note"
+      # An id is a bare file name in one of the two queues; a path would let a
+      # typo reach outside them.
+      case "$id" in
+        ''|*/*|*..*) die "not a note id: $id" ;;
+      esac
+      acked=0
+      for dir in "$INBOX" "$INBOX_AUTO"; do
+        [ -f "$dir/$id.note" ] || continue
+        mkdir -p "$dir/handled"
+        mv "$dir/$id.note" "$dir/handled/$id.note"
         printf 'acked %s\n' "$id"
-      else
-        printf 'already-acked %s\n' "$id"
-      fi
+        acked=1
+        break
+      done
+      [ "$acked" -eq 1 ] || printf 'already-acked %s\n' "$id"
     done
     return 0
   fi
-  cmd_list
+  if [ "$show_all" -eq 1 ]; then cmd_list --all; else cmd_list; fi
   printf '\nAck with: fm-inbox.sh drain --ack <id>...\n'
 }
 

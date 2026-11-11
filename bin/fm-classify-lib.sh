@@ -54,6 +54,7 @@ _FM_CLASSIFY_LIB_DIR="$(d=${BASH_SOURCE[0]%/*}; [ "$d" != "${BASH_SOURCE[0]}" ] 
 # cache would never persist. fm-wake-lib.sh's _FM_UNAME is reused when it is
 # already loaded; either value is compared only against Darwin.
 _FM_CLASSIFY_UNAME_S=${_FM_UNAME:-$(uname -s 2>/dev/null)}
+export _FM_CLASSIFY_UNAME_S
 
 # The crew current-state reader used for the "provably working" decision.
 # Overridable so tests can stub the run-step/pane verdict without a real worktree
@@ -108,7 +109,28 @@ FM_CLASSIFY_CAPTAIN_RE_DEFAULT='done:|needs-decision:|blocked:|failed:|PR ready|
 # drift between the two consumers. FM_CLASSIFY_PAUSED_VERB overrides it.
 FM_CLASSIFY_PAUSED_VERB_DEFAULT='paused'
 
-# Bounded re-surface cadence for a declared external-wait pause.
+# A pause is a declared wait only when it names when it ends: its note must carry
+# `until HH:MMZ` (or `until YYYY-MM-DDTHH:MMZ`, `until YYYY-MM-DD HH:MMZ`, with
+# UTC accepted for Z), the time the lane will look again or has armed a wake for.
+# A `paused:` line without one waits for a wake nobody set, so the open-decision
+# fold treats it as `blocked:` (guard G15): it opens a red OPEN DECISIONS entry
+# under its key that every wake drain prints, noted "paused without a wake
+# time", until the lane's next line for that key that is not itself a
+# time-less pause, or an ordinary resolved answer, closes it. The watcher and
+# away-mode daemon still treat it as a declared pause for wedge suppression;
+# the drain is where it can no longer wait silently.
+FM_CLASSIFY_PAUSE_UNTIL_RE='[Uu][Nn][Tt][Ii][Ll][[:space:]]+([0-9]{4}-[0-9]{2}-[0-9]{2}[T[:space:]])?[0-2][0-9]:[0-5][0-9][[:space:]]*(Z|UTC)'
+FM_CLASSIFY_TIMELESS_PAUSE_PREFIX='paused without a wake time (needs until HH:MMZ): '
+
+# One declared wait is exempt from needing a wake time: firstmate's own gateway
+# keep-alive declares its external wait as `paused [key=gateway-503]: ...` with
+# no wake time, because the wait ends when the account pool recovers and the
+# ladder's own `resolved [key=gateway-503]` closes it. docs/gateway-keepalive.md
+# owns that shape, so that exact key stays a declared wait; every other
+# time-less pause still folds as blocked.
+FM_CLASSIFY_PAUSED_DECLARED_WAIT_KEY='gateway-503'
+
+# Bounded re-surface cadence for a declared pause or a verified captain hold.
 # Far longer than the wedge threshold (FM_STALE_ESCALATE_SECS, default 240s), it
 # avoids nagging a deliberate wait while ensuring a forgotten wait cannot rot
 # invisibly - it re-surfaces once for a recheck every window. Four hours by
@@ -412,6 +434,13 @@ status_is_paused() {  # <status-line>
   verb=$(status_line_verb "$line")
   [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]
 }
+
+# 0 if the line (or note) names a wake time a pause can be held to. Builtins
+# only, so the per-line folds stay fork-free.
+status_pause_has_wake_time() {  # <status-line-or-note>
+  [[ "$1" =~ $FM_CLASSIFY_PAUSE_UNTIL_RE ]]
+}
+
 
 # 0 if a status line's leading verb is the verified captain-held transfer verb.
 # The same pure verb read as status_is_paused, and the discriminator a supervisor
@@ -1017,17 +1046,44 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
     *:*|*\[key=*\]*) ;;
     *) printf '%s' "$open"; return 0 ;;
   esac
-  status_line_verb "$line" verb
-  case "$unstamped" in
-    *:*) case "$verb:$kind" in done:ship|done:scout|failed:ship|failed:scout) return 0 ;; esac ;;
-  esac
+  status_line_verb_core "$line"
+  verb=$_FM_STATUS_VERB
+  _fm_decision_key_core "$line" || { _FM_FOLD_OPEN=$open; return 0; }
+  key=$_FM_DECISION_KEY
+  status_line_note_core "$line"
+  note=$_FM_STATUS_NOTE
+  _fm_decision_key_transition_allowed "$key" "$note" || { _FM_FOLD_OPEN=$open; return 0; }
+  _FM_FOLD_KEY=$key
+  # A time-less pause opens like blocked: (FM_CLASSIFY_PAUSE_UNTIL_RE), and the
+  # entry it opened closes on the key's next line that is not itself one. The one
+  # exception is the documented gateway keep-alive declaration, which names no
+  # wake time by design (docs/gateway-keepalive.md).
+  if [ "$verb" = "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}" ]; then
+    if status_pause_has_wake_time "$note" || [ "$key" = "$FM_CLASSIFY_PAUSED_DECLARED_WAIT_KEY" ]; then
+      verb=working
+    else
+      # A time-less pause is a weaker statement than the blocked: or
+      # needs-decision: it may already sit under the same key: it opens the
+      # entry when the key is not open, and never replaces a stronger one.
+      if _fm_open_set_has "$open" "$key"; then
+        _FM_FOLD_OPEN=$open
+        return 0
+      fi
+      verb=blocked
+      note="${FM_CLASSIFY_TIMELESS_PAUSE_PREFIX}${note}"
+    fi
+  fi
   case "$verb" in
-    needs-decision|blocked|"$resolve"|"$held") ;;
-    *) printf '%s' "$open"; return 0 ;;
+    working|done|failed)
+      case $'\n'"$open" in
+        *$'\n'"$key"$'\t'blocked$'\t'"$FM_CLASSIFY_TIMELESS_PAUSE_PREFIX"*)
+          _fm_decision_drop_core "$open" "$key"
+          open=$_FM_DECISION_DROP
+          _FM_FOLD_OP=close
+          ;;
+      esac
+      ;;
   esac
-  key=$(_fm_decision_key "$line") || { printf '%s' "$open"; return 0; }
-  _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" \
-    || { printf '%s' "$open"; return 0; }
   case "$verb" in
     needs-decision|blocked)
       note=$(status_line_note "$line")
@@ -1325,11 +1381,13 @@ EOF
 # is open. Cost is bounded by NEW appends since the last drain, not by the
 # status file's total lifetime size.
 #
-# Correctness invariant (unchanged from the whole-file fold): cursor advancement,
-# age, and being buried under later appends never drop an open decision - the
-# persisted open-set carries every still-open key forward across calls regardless
-# of how much new unrelated log content has since been folded in. Only a line the
-# shared fold rule retires removes one.
+# Correctness invariant (unchanged from the whole-file fold): an open decision
+# is dropped ONLY by an explicit resolved/captain-held line for its exact key,
+# or - for an entry opened by a time-less pause - by that key's next line that
+# is not itself a time-less pause, never by cursor advancement, age, or being
+# buried under later appends - the persisted open-set carries every still-open
+# key forward across calls regardless of how much new unrelated log content has
+# since been folded in.
 #
 # The cursor format is `version` (FM_OPEN_DECISIONS_FOLD_VERSION plus the task
 # kind, as `<n>:<kind>`), `offset`, `ident`, then the folded open set.
@@ -1428,11 +1486,13 @@ _fm_status_read_text_var() {  # <file> <output-variable>
 # or a close. A cursor persisted under the older reading has already consumed
 # such lines as ordinary status and would keep their decisions invisible
 # forever, so it must be discarded and rebuilt from byte 0.
-# 10: the fold is kind-aware (a done/failed line on a ship or scout closes every
-# open decision) and the timed view adds an emission-time column, so a cursor
-# persisted under the kind-blind reading must be discarded and rebuilt from
-# byte 0.
-FM_OPEN_DECISIONS_FOLD_VERSION=10
+# 11: the fold is kind-aware (a done/failed line on a ship or scout closes every
+# open decision), the timed view adds an emission-time column, and a time-less
+# `paused:` line now opens like `blocked:` for its key instead of waiting
+# silently (the documented gateway-503 declared wait excepted). A cursor
+# persisted under any older reading has already consumed lines this one treats
+# differently, so it must be discarded and rebuilt from byte 0.
+FM_OPEN_DECISIONS_FOLD_VERSION=11
 
 # Portable device:inode identity for the rotation/recreation check below.
 # One `stat` call answers identity, birth epoch, and birth string together, so
@@ -1503,7 +1563,11 @@ _FM_SC_MTIME=
 _FM_SC_IDENT=
 fm_status_stat_cache_load() {  # <state>
   local state=$1 out path size mtime raw
-  local -a files=()
+  # Library-local arrays carry the _fm_ prefix on purpose: ShellCheck's
+  # --external-sources analysis leaks a sourced file's `local -a` name into the
+  # sourcing file's function scopes, so a plain `files`/`keys` array here makes
+  # every consumer's scalar of that name trip SC2178/SC2128. Keep the prefix.
+  local -a _fm_files=()
   fm_status_stat_cache_clear
   [ "$_FM_STATUS_STAT_CACHE_SUPPORTED" = 1 ] || return 0
   # A test reader seam owns those answers; never shadow it with real stats.
@@ -1511,13 +1575,13 @@ fm_status_stat_cache_load() {  # <state>
   for path in "$state"/*.status; do
     [ -f "$path" ] && [ ! -L "$path" ] || continue
     case "$path" in *$'\t'*|*$'\n'*) continue ;; esac
-    files+=("$path")
+    _fm_files+=("$path")
   done
-  [ "${#files[@]}" -gt 0 ] || return 0
+  [ "${#_fm_files[@]}" -gt 0 ] || return 0
   if [ "$_FM_CLASSIFY_UNAME_S" = Darwin ]; then
-    out=$(LC_ALL=C stat -f '%N%t%z%t%m%t%d:%i|%B|%FB' -- "${files[@]}" 2>/dev/null) || true
+    out=$(LC_ALL=C stat -f '%N%t%z%t%m%t%d:%i|%B|%FB' -- "${_fm_files[@]}" 2>/dev/null) || true
   else
-    out=$(LC_ALL=C stat --printf '%n\t%s\t%Y\t%d:%i|%W|%w\n' -- "${files[@]}" 2>/dev/null) || true
+    out=$(LC_ALL=C stat --printf '%n\t%s\t%Y\t%d:%i|%W|%w\n' -- "${_fm_files[@]}" 2>/dev/null) || true
   fi
   while IFS=$'\t' read -r path size mtime raw; do
     [ -n "$path" ] && [ -n "$raw" ] || continue
@@ -2063,7 +2127,7 @@ status_snapshot_latest_event() {  # <status-file> <captured-endpoint> <captured-
 # without a loaded stat pass or under a span test seam.
 status_snapshot_latest_event_prefetch() {  # <state> <snapshot>
   local state=$1 snapshot=$2 task endpoint ident f start skip devino ino out rec key i=0 limit=65536
-  local -a args=() keys=()
+  local -a args=() _fm_keys=()
   [ "$FM_STATUS_STAT_CACHE_LOADED" = 1 ] || return 0
   [ -z "${FM_STATUS_SPAN_READER:-}" ] && [ -z "${FM_STATUS_SPAN_READ_PROBE:-}" ] || return 0
   while IFS=$'\t' read -r task endpoint ident; do
@@ -2078,11 +2142,11 @@ status_snapshot_latest_event_prefetch() {  # <state> <snapshot>
     devino="${devino%%:*}:${ino%%:*}"
     [ -z "${FM_STATUS_IDENTITY_READER:-}" ] || devino=
     args+=("$f" "$start" "$((endpoint - start))" "$skip" "$devino" "$endpoint")
-    keys+=("$f"$'\t'"$endpoint"$'\t'"$ident")
+    _fm_keys+=("$f"$'\t'"$endpoint"$'\t'"$ident")
   done <<EOF
 $snapshot
 EOF
-  [ "${#keys[@]}" -gt 0 ] || return 0
+  [ "${#_fm_keys[@]}" -gt 0 ] || return 0
   out=$(LC_ALL=C perl -MFcntl=:DEFAULT -e '
     sub latest {
       my ($path, $start, $length, $skip_first, $devino, $endpoint) = @_;
@@ -2125,8 +2189,8 @@ EOF
     }
   ' "${args[@]}" 2>/dev/null) || return 0
   while IFS= read -r rec; do
-    [ "$i" -lt "${#keys[@]}" ] || break
-    key=${keys[$i]}
+    [ "$i" -lt "${#_fm_keys[@]}" ] || break
+    key=${_fm_keys[$i]}
     i=$((i + 1))
     case "$rec" in
       ok$'\t'*) _FM_STATUS_LATEST_MEMO[$key]=${rec#ok$'\t'} ;;
@@ -2503,7 +2567,7 @@ EOF
 # itself to report.
 status_presentation_prefetch_spans() {  # <state> <snapshot>
   local state=$1 snapshot=$2 task endpoint ident f offset size out rec n line lines i=0
-  local -a args=() keys=()
+  local -a args=() _fm_keys=()
   [ "$FM_STATUS_STAT_CACHE_LOADED" = 1 ] || return 0
   [ -z "${FM_STATUS_SPAN_READER:-}" ] && [ -z "${FM_STATUS_SPAN_READ_PROBE:-}" ] || return 0
   while IFS=$'\t' read -r task endpoint ident; do
@@ -2517,11 +2581,11 @@ status_presentation_prefetch_spans() {  # <state> <snapshot>
     _fm_status_size_into "$f" size || continue
     [ "$endpoint" -le "$size" ] && [ "$offset" -lt "$endpoint" ] || continue
     args+=("$f" "$offset" "$((endpoint - offset))")
-    keys+=("$f"$'\t'"$offset"$'\t'"$endpoint")
+    _fm_keys+=("$f"$'\t'"$offset"$'\t'"$endpoint")
   done <<EOF
 $snapshot
 EOF
-  [ "${#keys[@]}" -gt 0 ] || return 0
+  [ "${#_fm_keys[@]}" -gt 0 ] || return 0
   # One process reads every span: per span a "<ok|fail>\t<count>" header, then
   # its <count> non-blank lines exactly as the per-span `read -r` loop keeps
   # them (newline-split, a final unterminated line included, NULs dropped).
@@ -2545,7 +2609,7 @@ EOF
     }
   ' "${args[@]}" 2>/dev/null) || return 0
   while IFS=$'\t' read -r rec n; do
-    [ "$i" -lt "${#keys[@]}" ] || break
+    [ "$i" -lt "${#_fm_keys[@]}" ] || break
     case "$n" in ''|*[!0-9]*) break ;; esac
     lines=
     while [ "$n" -gt 0 ] && IFS= read -r line; do
@@ -2553,7 +2617,7 @@ EOF
       n=$((n - 1))
     done
     [ "$n" -eq 0 ] || break
-    [ "$rec" != ok ] || _FM_STATUS_SPAN_MEMO[${keys[$i]}]=${lines%$'\n'}
+    [ "$rec" != ok ] || _FM_STATUS_SPAN_MEMO[${_fm_keys[$i]}]=${lines%$'\n'}
     i=$((i + 1))
   done <<EOF
 $out

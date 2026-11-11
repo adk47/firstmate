@@ -13,6 +13,13 @@
 #   fm-test-run.sh --proven-isolated
 #   fm-test-run.sh tests/<name>.test.sh [more scripts...]
 #
+# Local environment exclusions: --changed additionally drops any selected suite
+# listed in the gitignored .no-mistakes/test-exclude (one suite path per line,
+# with or without the leading tests/), so a contributor whose machine lacks
+# optional tooling or carries atypical ambient settings can exclude exactly
+# those suites without editing the trusted commands.test that CI shares.
+# Other selection modes ignore the file.
+#
 # Inspection (no execution):
 #   fm-test-run.sh --list --all
 #   fm-test-run.sh --list --family <name>
@@ -152,6 +159,13 @@
 # individual tests/ files explicitly.
 set -eu
 
+# Pin the umask the suite runs under. Several behavior tests assert a
+# private-directory contract (mode without group/other write) on fixtures they
+# create with `mkdir -p`, so an ambient umask of 002 turns those fixtures into
+# 775 directories and fails tests that pass in CI, where the umask is 022. A
+# test runner must not let the invoking shell's umask change a test's verdict.
+umask 022
+
 now_ms() {
   if command -v python3 >/dev/null 2>&1; then
     python3 -c 'import time; print(int(time.time() * 1000))'
@@ -200,11 +214,12 @@ CHANGED_DEFAULT_TIMEOUT_SECS=1500
 
 # How many separate-runner shards the portable serial remainder splits into.
 # One owner: CI lane names carry this count and are refused when they disagree.
+# Eleven rather than eight because this fork's serial remainder carries the
+# local feature suites on top of upstream's: at eight shards the largest packed
+# shard measured 1231352 ms against the 1200000 ms target, so the partition
+# could not be balanced without a twelfth of the work moving off each runner.
+# Eleven shards put ~9 minutes on each runner without changing the total work.
 PORTABLE_SERIAL_SHARDS=11
-
-# Conservative balance hint for a portable-serial script with no measurement.
-# Rounded above the current CI mean, including the capability-skipped scripts.
-PORTABLE_SERIAL_DEFAULT_WEIGHT_MS=45000
 
 # Packing target, not an execution timeout: leave at least ten minutes of the
 # normal CI tier for setup and runtime variance. --check-coverage refuses a
@@ -305,7 +320,9 @@ family_for_basename() {
     fm-timeout-lib.test.sh|\
     fm-tmux-submit-busy.test.sh|fm-trace-context-lib.test.sh|\
     fm-transition-lib.test.sh|\
-    fm-test-run.test.sh|fm-test-isolation-proof.test.sh|fm-test-reap.test.sh|fm-test-tap-verify.test.sh)
+    fm-test-run.test.sh|fm-test-isolation-proof.test.sh|fm-test-reap.test.sh|fm-test-tap-verify.test.sh|\
+    ak47-budget.test.sh|ak47-census.test.sh|ak47-guards.test.sh|\
+    ak47-safe-delete.test.sh|ak47-tick.test.sh|ak47-weekly-review.test.sh)
       printf '%s\n' pure-contract-unit
       ;;
     fm-daemon.test.sh|fm-guard-stale-banner.test.sh|fm-pi-watch-extension.test.sh|\
@@ -319,7 +336,8 @@ family_for_basename() {
     fm-wake-queue.test.sh|fm-watch-arm.test.sh|fm-watch-checkpoint.test.sh|fm-watch-recovery-loop.test.sh|\
     fm-watch-inbox-meta.test.sh|fm-watch-open-decisions.test.sh|\
     fm-watch-triage.test.sh|fm-watch-triage-pause.test.sh|\
-    fm-watch-triage-wedge-defer.test.sh|fm-task-inbox.test.sh|\
+    fm-watch-triage-wedge-defer.test.sh|fm-watchdog-worker.test.sh|\
+    fm-task-inbox.test.sh|fm-leave-stopped.test.sh|\
     fm-watcher-lock.test.sh|fm-inactive-reconcile.test.sh|fm-watch-wedge-cap.test.sh|\
     fm-watch-wedge-cap-unconfigured-parity.test.sh|fm-lock-reap.test.sh)
       printf '%s\n' watcher-wake-lock
@@ -395,8 +413,8 @@ family_for_basename() {
     fm-backend-t3code.test.sh|fm-t3-mcp.test.sh|fm-tmux-agent-liveness.test.sh|\
     fm-control.test.sh|fm-control-relaunch.test.sh|\
     fm-herdr-session-cleanup.test.sh|fm-send-resolve-key.test.sh|fm-send-strict.test.sh|\
-    fm-send-inbox.test.sh|fm-spawn-batch.test.sh|\
-    fm-spawn-dispatch-profile.test.sh|fm-claude-trust.test.sh|\
+    fm-send-inbox.test.sh|fm-send-liveness.test.sh|fm-spawn-batch.test.sh|\
+    fm-spawn-dispatch-profile.test.sh|fm-spawn-brief-argv.test.sh|fm-claude-trust.test.sh|\
     fm-worker-account.test.sh|\
     fm-git-strip-ai-trailers.test.sh|\
     fm-trace-context-spawn.test.sh|fm-spawn-worktree-settle.test.sh|\
@@ -448,6 +466,7 @@ family_for_basename() {
     fm-claude-stop-autoarm.test.sh|fm-cursor-harness.test.sh|\
     fm-dispatch-resolve.test.sh|\
     fm-extension-binding.test.sh|fm-gitignore-config.test.sh|\
+    fm-instrument-sweep.test.sh|\
     fm-no-mistakes-required.test.sh|fm-peek-remote.test.sh|\
     fm-pending-reply.test.sh|fm-pi-branch-extension.test.sh|\
     fm-procevent-extension-errors.test.sh|fm-procevent-quota.test.sh|fm-procevent-when.test.sh|fm-procevent.test.sh|\
@@ -720,10 +739,9 @@ list_portable_serial() {
 # partition stays complete and disjoint whatever they say, so a stale hint costs
 # balance rather than coverage. That doc owns the refresh procedure.
 portable_serial_weight_hints() {
-  cat <<'EOF'
 tests/fm-afk-contract.test.sh 11101
 tests/fm-afk-inject-e2e.test.sh 41958
-tests/fm-afk-pi-herdr-return-e2e.test.sh 52
+tests/fm-afk-pi-herdr-return-e2e.test.sh 100
 tests/fm-afk-return.test.sh 47380
 tests/fm-agy-harness.test.sh 50959
 tests/fm-agy-primary-live-e2e.test.sh 75
@@ -744,7 +762,7 @@ tests/fm-backend-t3code-live-e2e.test.sh 51
 tests/fm-backend-t3code-pr-tools-live-e2e.test.sh 52
 tests/fm-backend-tern-smoke.test.sh 60
 tests/fm-backend-tern.test.sh 6000
-tests/fm-backend-tmux-smoke.test.sh 291
+tests/fm-backend-tmux-smoke.test.sh 393
 tests/fm-backend-zellij-smoke.test.sh 23
 tests/fm-backend-zellij.test.sh 10453
 tests/fm-backend.test.sh 23932
@@ -759,7 +777,7 @@ tests/fm-bootstrap-network-parallel.test.sh 30424
 tests/fm-bootstrap.test.sh 50965
 tests/fm-branch-supervision.test.sh 22979
 tests/fm-busy-adapter-wiring.test.sh 31642
-tests/fm-busy-state.test.sh 3185
+tests/fm-busy-state.test.sh 3279
 tests/fm-calm-claude-mod-live-e2e.test.sh 47
 tests/fm-calm-claude-mod-plugin.test.sh 77
 tests/fm-calm-claude-mod.test.sh 2527
@@ -767,15 +785,12 @@ tests/fm-calm-pi-extension.test.sh 56463
 tests/fm-calm-pi-queue-retention-live-e2e.test.sh 1345
 tests/fm-chair-flip.test.sh 3420
 tests/fm-chair-runway.test.sh 607
-tests/fm-chair-runway.test.sh 607
-tests/fm-chair-sentinel.test.sh 1277
 tests/fm-chair-sentinel.test.sh 1277
 tests/fm-chair-status.test.sh 2400
-tests/fm-chair-status.test.sh 2400
-tests/fm-change-watch.test.sh 22685
-tests/fm-check-unregister.test.sh 469
+tests/fm-change-watch.test.sh 56339
+tests/fm-check-unregister.test.sh 517
 tests/fm-ci-workflow.test.sh 5833
-tests/fm-classify-corr-token.test.sh 23085
+tests/fm-classify-corr-token.test.sh 38742
 tests/fm-classify-decision-key.test.sh 4362
 tests/fm-classify-fold-bounded.test.sh 35503
 tests/fm-claude-stop-autoarm-live-e2e.test.sh 73
@@ -793,7 +808,7 @@ tests/fm-control-relaunch.test.sh 114115
 tests/fm-control.test.sh 72794
 tests/fm-cortex-harness.test.sh 5400
 tests/fm-cortex-signals-live-e2e.test.sh 49
-tests/fm-cursor-harness.test.sh 30088
+tests/fm-cursor-harness.test.sh 30113
 tests/fm-cursor-primary-live-e2e.test.sh 75
 tests/fm-cursor-primary.test.sh 69845
 tests/fm-daemon.test.sh 33606
@@ -803,8 +818,8 @@ tests/fm-devin-signals-live-e2e.test.sh 49
 tests/fm-dispatch-resolve.test.sh 10051
 tests/fm-documentation-audiences.test.sh 1301
 tests/fm-dod-lib.test.sh 2035
-tests/fm-extension-binding.test.sh 11105
-tests/fm-fable-runway.test.sh 14241
+tests/fm-extension-binding.test.sh 12639
+tests/fm-fable-runway.test.sh 25316
 tests/fm-fleet-ledger.test.sh 19980
 tests/fm-fleet-snapshot-impl.test.sh 121000
 tests/fm-fleet-snapshot-view.test.sh 23334
@@ -816,13 +831,13 @@ tests/fm-gate-refuse.test.sh 9953
 tests/fm-gateway-keepalive.test.sh 2978
 tests/fm-gemini-harness.test.sh 947
 tests/fm-git-strip-ai-trailers.test.sh 2067
-tests/fm-gitignore-config.test.sh 59
+tests/fm-gitignore-config.test.sh 62
 tests/fm-gotmp.test.sh 1509
 tests/fm-grok-continuity-live-e2e.test.sh 46
 tests/fm-grok-stop-live-e2e.test.sh 48
 tests/fm-guard-stale-banner.test.sh 17234
 tests/fm-harness-adapter-instructions-live-e2e.test.sh 72
-tests/fm-harness-adapter-references.test.sh 64
+tests/fm-harness-adapter-references.test.sh 83
 tests/fm-harness-liveness-drift-live-e2e.test.sh 1309
 tests/fm-harness-precedence.test.sh 4083
 tests/fm-herdr-groups.test.sh 5418
@@ -830,42 +845,42 @@ tests/fm-herdr-pi-stale-registration-live-e2e.test.sh 55
 tests/fm-herdr-session-cleanup.test.sh 7425
 tests/fm-herdr-submit-confirm-live-e2e.test.sh 51
 tests/fm-herdr-version-floor-live-e2e.test.sh 50
-tests/fm-home-summary-refresh.test.sh 37057
+tests/fm-home-summary-refresh.test.sh 50699
 tests/fm-host-mirror-live-e2e.test.sh 79
 tests/fm-host-mirror.test.sh 11587
 tests/fm-inactive-reconcile.test.sh 60823
 tests/fm-inbox.test.sh 6062
+tests/fm-instrument-sweep.test.sh 13200
 tests/fm-jev-mem-guard.test.sh 336
 tests/fm-kimi-harness.test.sh 58917
 tests/fm-kimi-trust-prompt-live-e2e.test.sh 60
-tests/fm-lane-model-switch.test.sh 2186
-tests/fm-lane-model-switch.test.sh 2186
+tests/fm-lane-model-switch.test.sh 25902
 tests/fm-launch-prompt-signals-live-e2e.test.sh 50
-tests/fm-lint-workflows.test.sh 872
+tests/fm-lint-workflows.test.sh 1459
 tests/fm-live-gate.test.sh 7452
 tests/fm-live-lab-up-mate.test.sh 17363
 tests/fm-live-lab.test.sh 79639
 tests/fm-lock-reap.test.sh 18900
 tests/fm-mail-check.test.sh 7524
 tests/fm-mail.test.sh 9684
-tests/fm-muse-harness.test.sh 46548
+tests/fm-muse-harness.test.sh 55572
 tests/fm-muse-signals-live-e2e.test.sh 52
 tests/fm-nm-test-contract.test.sh 853
-tests/fm-no-mistakes-required.test.sh 270
+tests/fm-no-mistakes-required.test.sh 370
 tests/fm-omp-harness.test.sh 63796
 tests/fm-omp-primary-live-e2e.test.sh 74
-tests/fm-on.test.sh 11473
+tests/fm-on.test.sh 17663
 tests/fm-opencode-primary-live-e2e.test.sh 47
 tests/fm-operational-input.test.sh 2404
 tests/fm-peek-remote.test.sh 1082
 tests/fm-pending-reply.test.sh 41090
 tests/fm-pi-branch-extension.test.sh 77218
-tests/fm-pi-branch-live-e2e.test.sh 48
+tests/fm-pi-branch-live-e2e.test.sh 56
 tests/fm-pi-branch-responsiveness-live-e2e.test.sh 12834
 tests/fm-pi-codex-native.test.sh 75
 tests/fm-pi-primary-live-e2e.test.sh 72
 tests/fm-pi-seeded-home-trust-live-e2e.test.sh 45
-tests/fm-pi-watch-extension.test.sh 56515
+tests/fm-pi-watch-extension.test.sh 78360
 tests/fm-pi-windows-shell-invocation.test.sh 5121
 tests/fm-polytoken-harness.test.sh 21090
 tests/fm-polytoken-signals-live-e2e.test.sh 103
@@ -876,7 +891,7 @@ tests/fm-pr-state.test.sh 525
 tests/fm-procevent-quota.test.sh 2459
 tests/fm-procevent-when.test.sh 25674
 tests/fm-procevent.test.sh 292297
-tests/fm-project-origin.test.sh 123
+tests/fm-project-origin.test.sh 137
 tests/fm-public-followup.test.sh 381564
 tests/fm-quota-array-dispatch-live-e2e.test.sh 50
 tests/fm-quota-choose.test.sh 2860
@@ -884,18 +899,17 @@ tests/fm-read-repetition-live.test.sh 1110
 tests/fm-read-repetition.test.sh 602
 tests/fm-remote-backlog-handoff.test.sh 82063
 tests/fm-remote-doctor.test.sh 14460
-tests/fm-remote-entrypoint.test.sh 134
+tests/fm-remote-entrypoint.test.sh 136
 tests/fm-remote-herdr-guard.test.sh 3140
 tests/fm-remote-job-orphan-reap.test.sh 2985
 tests/fm-remote-job-process-start.test.sh 11871
 tests/fm-remote-job.test.sh 81046
 tests/fm-remote-reply.test.sh 140887
 tests/fm-remote-secondmate-lifecycle-e2e.test.sh 345655
-tests/fm-remote-secondmate-parent-binding.test.sh 42294
+tests/fm-remote-secondmate-parent-binding.test.sh 43690
 tests/fm-remote-secondmate-relaunch.test.sh 879
-tests/fm-remote-secondmate-trace-context.test.sh 74870
-tests/fm-remote-transport-lanes.test.sh 66089
-tests/fm-roster.test.sh 789
+tests/fm-remote-secondmate-trace-context.test.sh 76555
+tests/fm-remote-transport-lanes.test.sh 66269
 tests/fm-roster.test.sh 789
 tests/fm-rovo-harness.test.sh 15691
 tests/fm-rovo-signals-live-e2e.test.sh 52
@@ -903,24 +917,26 @@ tests/fm-secondmate-busy-contract-live-e2e.test.sh 90000
 tests/fm-secondmate-harness.test.sh 188187
 tests/fm-secondmate-lifecycle-e2e.test.sh 11268
 tests/fm-secondmate-liveness.test.sh 24564
-tests/fm-secondmate-reconcile.test.sh 100853
+tests/fm-secondmate-reconcile.test.sh 101628
 tests/fm-secondmate-restart.test.sh 52591
 tests/fm-secondmate-safety.test.sh 69424
-tests/fm-secondmate-sync.test.sh 55501
+tests/fm-secondmate-sync.test.sh 61966
 tests/fm-send-agy-confirm.test.sh 4440
 tests/fm-send-inbox-doorbell-live-e2e.test.sh 108
-tests/fm-send-inbox.test.sh 41713
+tests/fm-send-inbox.test.sh 41893
+tests/fm-send-liveness.test.sh 30000
 tests/fm-send-remote-delivery.test.sh 31964
 tests/fm-send-resolve-key.test.sh 47317
 tests/fm-send-secondmate-marker-herdr-e2e.test.sh 80
 tests/fm-send-secondmate-marker.test.sh 7574
-tests/fm-sentry-watch.test.sh 35300
+tests/fm-sentry-watch.test.sh 79109
 tests/fm-session-lock-ancestry.test.sh 18918
 tests/fm-session-start.test.sh 363574
 tests/fm-sessionstart-hook-live-e2e.test.sh 50
 tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh 49
 tests/fm-sessionstart-nudge.test.sh 71802
 tests/fm-shared-captain-inheritance.test.sh 7991
+tests/fm-spawn-brief-argv.test.sh 9400
 tests/fm-spawn-compact-adviser-disable-remote.test.sh 38561
 tests/fm-spawn-compact-adviser-disable.test.sh 21654
 tests/fm-spawn-dispatch-profile.test.sh 197548
@@ -931,57 +947,58 @@ tests/fm-startup-memory-budget.test.sh 8086
 tests/fm-startup-network.test.sh 72106
 tests/fm-stat-shadowing.test.sh 75
 tests/fm-status-log-bounded-read.test.sh 99240
-tests/fm-stow-cascade.test.sh 3058
-tests/fm-subagent-pretool-check.test.sh 998
-tests/fm-supervision-events.test.sh 673
+tests/fm-stow-cascade.test.sh 3101
+tests/fm-subagent-pretool-check.test.sh 1030
+tests/fm-supervision-events.test.sh 719
 tests/fm-supervision-host-attended-live-e2e.test.sh 49
 tests/fm-supervision-host-drain.test.sh 45950
 tests/fm-supervision-host-hook.test.sh 403793
 tests/fm-supervision-host-live-e2e.test.sh 75
 tests/fm-supervision-host-park.test.sh 329326
 tests/fm-supervision-host.test.sh 435581
-tests/fm-tangle-guard.test.sh 8501
+tests/fm-tangle-guard.test.sh 9662
 tests/fm-task-delivery.test.sh 32789
-tests/fm-task-inbox.test.sh 31965
+tests/fm-task-inbox.test.sh 35673
 tests/fm-tasks-axi.test.sh 2293
 tests/fm-teardown-endpoint-safety.test.sh 40851
 tests/fm-teardown.test.sh 202132
-tests/fm-test-fixture-cleanup.test.sh 866
+tests/fm-test-fixture-cleanup.test.sh 915
 tests/fm-test-fixtures.test.sh 1802
 tests/fm-test-isolation-proof.test.sh 2866
 tests/fm-test-reap.test.sh 12000
 tests/fm-test-tap-verify.test.sh 1000
 tests/fm-timeout-lib.test.sh 10750
-tests/fm-tmux-agent-liveness.test.sh 3770
-tests/fm-tool-update-check.test.sh 14383
-tests/fm-trace-context-lib.test.sh 221
+tests/fm-tmux-agent-liveness.test.sh 11421
+tests/fm-tool-update-check.test.sh 24858
+tests/fm-trace-context-lib.test.sh 289
 tests/fm-trace-context-spawn.test.sh 57488
 tests/fm-turnend-foreign-owner-arm-fix.test.sh 5575
-tests/fm-turnend-guard.test.sh 34727
+tests/fm-turnend-guard.test.sh 42565
 tests/fm-update.test.sh 11894
-tests/fm-vendor-auth-probe.test.sh 43278
+tests/fm-vendor-auth-probe.test.sh 44042
 tests/fm-voice-relay.test.sh 28917
-tests/fm-wake-daemon-lifecycle-e2e.test.sh 7345
+tests/fm-wake-daemon-lifecycle-e2e.test.sh 7381
 tests/fm-wake-drain-fleet-cost.test.sh 20000
 tests/fm-wake-drain-open-decisions-cursor.test.sh 47677
 tests/fm-wake-drain-open-decisions.test.sh 8781
 tests/fm-wake-drain-outcome-backstop.test.sh 46316
-tests/fm-wake-drain-unread-status.test.sh 24251
+tests/fm-wake-drain-unread-status.test.sh 35078
 tests/fm-wake-queue.test.sh 165906
 tests/fm-warm-compact-herdr-live-e2e.test.sh 170
 tests/fm-warm-compact.test.sh 1500
 tests/fm-watch-arm.test.sh 113076
 tests/fm-watch-checkpoint.test.sh 11234
 tests/fm-watch-inbox-meta.test.sh 283
-tests/fm-watch-recovery-loop.test.sh 59092
+tests/fm-watch-recovery-loop.test.sh 59837
 tests/fm-watch-scan-signals.test.sh 5810
 tests/fm-watch-triage-pause.test.sh 466750
 tests/fm-watch-triage-wedge-defer.test.sh 526980
-tests/fm-watch-triage.test.sh 592950
+tests/fm-watch-triage.test.sh 663532
 tests/fm-watch-wedge-cap-live.test.sh 74
 tests/fm-watch-wedge-cap-unconfigured-parity.test.sh 27763
 tests/fm-watch-wedge-cap.test.sh 374225
-tests/fm-watcher-lock.test.sh 72022
+tests/fm-watchdog-worker.test.sh 40000
+tests/fm-watcher-lock.test.sh 88554
 tests/fm-worker-account-live-e2e.test.sh 3179
 tests/fm-worker-account.test.sh 37445
 EOF
@@ -1593,19 +1610,9 @@ families_for_changed_path() {
       printf '%s\n' backend-dispatch
       printf '%s\n' real-herdr-gated
       ;;
-    bin/fm-agent-process-lib.sh)
-      # The shared harness-process classifier feeds both the tmux and Herdr
-      # liveness verdicts, so a change to it is proven by both backends' suites.
-      printf '%s\n' backend-dispatch
-      printf '%s\n' real-herdr-gated
-      printf '%s\n' pure-contract-unit
-      ;;
-    bin/fm-watch*|bin/fm-classify-lib.sh)
-      printf '%s\n' watcher-wake-lock
-      printf '%s\n' "__script__:fm-backend-t3code.test.sh"
-      ;;
-    bin/fm-wake*|bin/fm-inactive-reconcile.sh|\
-    bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
+    # bin/fm-watch* covers the timer-driven bin/fm-watchdog-worker.sh too.
+    bin/fm-watch*|bin/fm-wake*|bin/fm-inactive-reconcile.sh|\
+    bin/fm-classify-lib.sh|bin/fm-daemon*|bin/fm-turnend-guard*|bin/fm-guard.sh)
       printf '%s\n' watcher-wake-lock
       ;;
     bin/fm-afk*)
@@ -1869,24 +1876,10 @@ families_for_changed_path() {
           || printf '%s\n' "__unmapped__:$path"
       fi
       ;;
-    tests/captures/*/*)
-      # A recorded capture selects the suites that read its directory, by the
-      # same rule as a fixture directory.
-      capture_ref=${path#tests/captures/}
-      capture_ref=${capture_ref%%/*}
-      if [ -d "tests/captures/$capture_ref" ]; then
-        families_for_test_reference "captures/$capture_ref" \
-          || printf '%s\n' "__unmapped__:$path"
-      fi
-      ;;
-    tests/lib.sh|tests/*-helpers.sh|tests/fixtures.sh|tests/*-fixture.sh)
-      # Shared top-level test files, selected by the suites that name them.
-      # Must stay below the tests/fixtures/*/* arm: a case glob's * spans /, so
-      # tests/*-fixture.sh would otherwise swallow a nested
-      # tests/fixtures/<dir>/<name>-fixture.sh and scan for its basename
-      # instead of the fixture directory its readers actually name.
-      families_for_test_reference "$(basename "$path")" \
-        || printf '%s\n' "__unmapped__:$path"
+    ak47/*)
+      # The ak47 suites are hermetic and registered as pure-contract-unit, so
+      # every ak47 path (scripts, config, guards, hdevops) selects that family.
+      printf '%s\n' pure-contract-unit
       ;;
     bin/*)
       # A deleted script has no consuming suite left to select, the same rule
@@ -2003,6 +1996,26 @@ detect_gate_skip_token() {
   local file=$1 token=$2
   [ -n "$token" ] || return 1
   grep -F -q "skip: $token" "$file" 2>/dev/null
+}
+
+# Local environment exclusions: lines of suite paths in the gitignored
+# .no-mistakes/test-exclude are dropped from the selection. Some suites depend
+# on machine-local tooling (Ruby for workflow parsing, a particular installed
+# Pi build) or ambient settings (a group-writable umask), so a contributor can
+# exclude exactly those suites without changing the trusted commands.test that
+# CI and every other machine share. The list is local state, never tracked.
+apply_local_exclusions() {
+  local list="$ROOT/.no-mistakes/test-exclude" s name keep
+  local -a kept=()
+  [ -f "$list" ] || return 0
+  for s in "${SCRIPTS[@]+"${SCRIPTS[@]}"}"; do
+    name=${s#tests/}
+    keep=1
+    if grep -Fxq -e "$s" -e "$name" "$list"; then keep=0; fi
+    [ "$keep" -eq 1 ] && kept+=("$s")
+  done
+  SCRIPTS=("${kept[@]+"${kept[@]}"}")
+  log "applied local environment exclusions from ${list#"$ROOT"/}"
 }
 
 apply_exclude_families() {
@@ -2366,6 +2379,9 @@ case "${MODE:-}" in
 esac
 
 apply_exclude_families
+if [ "$MODE" = changed ]; then
+  apply_local_exclusions
+fi
 if [ "${#EXCLUDE_FAMILIES[@]}" -gt 0 ]; then
   SELECTION_DESC="${SELECTION_DESC};exclude-family=$(IFS=,; printf '%s' "${EXCLUDE_FAMILIES[*]}")"
 fi

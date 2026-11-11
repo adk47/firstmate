@@ -330,6 +330,10 @@
       "audience": "public-product"
     },
     {
+      "path": "ak47/README.md",
+      "audience": "operator-current"
+    },
+    {
       "path": "bin/fm-house-wiki-stanza.txt",
       "audience": "agent-runtime"
     },
@@ -380,6 +384,10 @@
     {
       "path": "docs/captain-hold-lifecycle.md",
       "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/decider.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/deepseek-lane-gateway.md",
@@ -464,6 +472,10 @@
     {
       "path": "docs/jev-guards.md",
       "audience": "maintainer-architecture"
+    },
+    {
+      "path": "docs/merge-queue.md",
+      "audience": "operator-current"
     },
     {
       "path": "docs/orca-backend.md",
@@ -611,6 +623,10 @@
     },
     {
       "path": "docs/verification/kiro.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/instrument-sweep.md",
       "audience": "maintainer-verification"
     },
     {

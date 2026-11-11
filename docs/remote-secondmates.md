@@ -494,6 +494,7 @@ If delivery remains unconfirmed, only the exact `FM_PENDING_REPLY_EXISTING_CORR=
 That command preserves the request body and lets the remote enqueue deduplicate onto the same record.
 A plain rerun mints a different correlation and is not idempotent.
 When deduplication finds that the worker already moved the matching record into `handled/`, the resend exits successfully without ringing the doorbell again.
+A record the worker deleted instead of acknowledging survives only as the inbox's hidden link; the same resend links it back into the inbox and reports the delivered record rather than publishing a duplicate, as `bin/fm-task-inbox-lib.sh` owns.
 
 ### Swallowed doorbells
 
@@ -503,7 +504,6 @@ Its recovery request rings the doorbell again when it is enqueued.
 A fire-and-forget record, such as a reconcile ask, gets its single retry ring only on the local plane, and only when `config/wait-no-turns` is present: the remote steer leg owes no re-ring, so a swallowed remote doorbell for one waits for the next ring into that inbox, and a remote-side retry is known follow-up scope.
 
 ### Remote reads
-
 `fm-peek.sh` and `fm-crew-state.sh` route remote-secondmate reads to the endpoint's host instead of consulting local worktree or backend state.
 An unreachable or unreadable remote read is unknown, not evidence that the endpoint is dead.
 

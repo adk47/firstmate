@@ -69,7 +69,7 @@ A re-emit (`--reemit`) reprints the digest for a process that already has the he
 | Source | Action | Why |
 | --- | --- | --- |
 | `startup`, `new` | Full digest | This is a true session start that has not taken the helm; Pi CLI continuations are refined to `resume` by the adapter before reaching this boundary. |
-| `clear`, `compact` | `--reemit` after a proven complete startup, otherwise full digest | This process normally has the helm and lost only its context, but an earlier hook may have been truncated after acquiring the lock. |
+| `clear`, `compact` | `--reemit` after a proven complete startup, otherwise full digest; `compact` also renders the bounded `--compact` view | This process normally has the helm and lost only its context, but an earlier hook may have been truncated after acquiring the lock. A compaction re-delivers into the context it just shrank, so a full digest there refills it and forces the next compaction. |
 | `resume`, `reload`, `fork` | Delegate to the nudge wrapper | Prior context is restored, so re-running is redundant when the lock is still ours and an instruction is enough when a new process resumed an old session. |
 | unreadable or unrecognized | Full digest | Taking the helm redundantly is cheap and idempotent; not taking it is the bug this tier exists to fix. |
 
@@ -115,11 +115,7 @@ The requested session start remains idempotent.
 
 `bin/fm-session-start.sh --reemit` owns these re-emit details:
 
-- Which work a re-emit skips.
-- Its true-start AGENTS.md baseline.
-- Its supported stale-instruction refresh pairs.
-
-The `bin/fm-session-start.sh` header is the single owner of those mechanics.
+`bin/fm-session-start.sh --reemit` owns which work a re-emit skips, its true-start AGENTS.md baseline, and its supported stale-instruction refresh pairs, and `--compact` owns what the post-compaction view keeps verbatim and what it bounds; its header is the single owner of those mechanics.
 
 ## Runtime bound
 
@@ -406,45 +402,11 @@ It proves the nudge wrapper's silence for these cases:
 It also proves the nudge wrapper's exact U+2063 `FIRSTMATE_OP:`-prefixed, `session-start`-typed one-line output.
 
 It separately proves the run wrapper's silence for the gate environment and an unmarked linked worktree, including the internal Pi prerequisite's explicit silent stand-down.
-It proves the run wrapper creates a missing state directory on a fresh primary and delivers the full digest, while an unmarked linked worktree gets none.
-It proves a fresh primary whose state directory cannot be created reports that on one stderr line and stands down without a digest.
-
-It proves the run wrapper's source routing end to end against a real `fm-session-start.sh`, including:
-
-- Completion-gated `--reemit` selection.
-- Resume delegation.
-- Pi CLI continuation classification.
-- An unrecognized source falling through to the full digest.
-- Bounded loud delivery of an oversized Pi digest.
-
-Through the extension's public event surface, the same portable suite proves:
-
-- Provider exclusion until settlement.
-- Exactly-one execution and context delivery.
-- Interruption.
-- Process-tree retirement.
-- Two rapid replacements.
-- Stale completion.
-- Eligible empty output.
-- Spawn error.
-- Wrapper timeout output.
-- Truncation.
-- Ineligible stand-down.
-- Compaction cancellation.
-
-### Runtime bound test
-
-`tests/fm-session-start.test.sh` proves the runtime bound through the forced pure-Bash fallback.
-It uses a TERM-resistant digest that exceeds its budget and proves that the digest:
-
-- Is force-killed with its grandchild.
-- Still emits its completed stages.
-- Names the incomplete stage and every stage it never reached.
-- Leaves no completion proof.
-- Exits 0.
-
-### Native startup and Ahoy tests
-
+It proves the run wrapper's source routing end to end against a real `fm-session-start.sh`, including completion-gated `--reemit` selection, compact-view selection for `compact` only, resume delegation, Pi CLI continuation classification, an unrecognized source falling through to the full digest, and bounded loud delivery of an oversized Pi digest.
+It drives the Pi extension's `session_compact` and `session_start` events to prove compaction requests the compact view while a true startup keeps the full digest.
+The same portable suite proves provider exclusion until settlement, exactly-one execution and context delivery, interruption, process-tree retirement, two rapid replacements, stale completion, eligible empty output, spawn error, wrapper timeout output, truncation, ineligible stand-down, and compaction cancellation through the extension's public event surface.
+`tests/fm-session-start.test.sh` holds the compact view of a large synthetic fleet with live-sized curated memory to 128 KiB while it still carries the wake queue and its acknowledgement, the head of `data/captain.md` within the shared `config/startup-memory-budget` excerpt with its truncation marker, and each bounded section's own total beside its exact omission disclosure.
+It also proves the runtime bound through the forced pure-Bash fallback: a TERM-resistant digest that exceeds its budget is force-killed with its grandchild, still emits its completed stages, names the incomplete stage and every stage it never reached, leaves no completion proof, and exits 0.
 `tests/fm-pi-primary-live-e2e.test.sh` and `tests/fm-opencode-primary-live-e2e.test.sh` exercise native startup paths with first-message and later-message Ahoy regressions.
 
 ### Cursor tests

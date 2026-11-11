@@ -40,6 +40,34 @@ run_spawn() {  # <home> <wt> <fakebin> <spawn-args...>
     fm_test_run_spawn "$home" "$wt" "$fakebin" "$@" --mode no-mistakes --yolo off
 }
 
+# make_secondmate_case <name> <harness> <id>: a parent home plus a mate home,
+# echoing the same record shape as make_spawn_case. A mate's meta lives in the
+# PARENT's state directory, which is exactly the path a turn-end touch must
+# never reach.
+make_secondmate_case() {  # <name> <harness> <id>
+  local name=$1 harness=$2 id=$3 case_dir home mate fakebin
+  case_dir="$TMP_ROOT/$name"
+  home="$case_dir/home"
+  mate="$case_dir/mate"
+  fakebin=$(make_spawn_fakebin "$case_dir/fake" pi opencode claude codex gemini)
+  fm_test_spawn_home "$home" "$harness"
+  mkdir -p "$mate/data" "$mate/state" "$mate/config" "$mate/projects" "$mate/bin"
+  printf '# Firstmate\n' > "$mate/AGENTS.md"
+  printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
+  printf '# Charter\n' > "$mate/data/charter.md"
+  : > "$mate/pane"
+  printf '%s\n' "$case_dir|$home|$mate|$mate|$fakebin"
+}
+
+run_secondmate_spawn() {  # <home> <mate> <fakebin> <id> <harness>
+  # A secondmate spawn carries no delivery contract, so it deliberately omits
+  # run_spawn's ship-only --mode/--yolo arguments.
+  local home=$1 mate=$2 fakebin=$3 id=$4 harness=$5
+  GROK_HOME="$home/grok-home" \
+    fm_test_run_spawn "$home" "$mate/pane" "$fakebin" "$id" "$mate" \
+    --secondmate --harness "$harness"
+}
+
 read_case_record() {
   # shellcheck disable=SC2034 # CASE_DIR is part of the shared record shape
   IFS='|' read -r CASE_DIR HOME_DIR PROJ_DIR WT_DIR FAKEBIN_DIR <<EOF
@@ -1138,6 +1166,77 @@ test_secondmate_pi_extension_reports_busy_without_a_parent_turnend
 test_secondmate_omp_extension_reports_busy_without_a_parent_turnend
 test_secondmate_opencode_plugin_closes_without_a_parent_turnend
 test_secondmate_codex_and_grok_do_not_arm_a_parent_turnend
+# A secondmate's meta lives in the PARENT's state directory, so a turn-end
+# touch there would wake the parent firstmate on every mate turn and the parent
+# watcher can never absorb it. The busy contract must still arm (the wake-stall
+# rung reads it); only the turn-end NOTIFICATION must be absent.
+test_secondmate_spawn_arms_busy_without_turnend() {
+  local harness rec id out state turnend
+  for harness in pi claude opencode; do
+    id="mate-$harness"
+    rec=$(make_secondmate_case "mate-$harness" "$harness" "$id")
+    read_case_record "$rec"
+    out=$(run_secondmate_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$harness")
+    expect_code 0 $? "secondmate $harness spawn should succeed: $out"
+    state="$HOME_DIR/state"
+    turnend="$state/$id.turn-ended"
+    assert_present "$state/$id.meta" \
+      "secondmate $harness spawn did not record its meta in the parent state"
+    out=$(classify "$harness" "$id" "$state")
+    [ "$out" = "busy fm-spawn" ] \
+      || fail "secondmate $harness spawn must still arm the busy contract, got '$out'"
+    rm -f "$turnend"
+    case "$harness" in
+      pi)
+        drive_pi_ext "$state/$id.pi-ext.ts" turn-end >/dev/null 2>&1 || true
+        ;;
+      opencode)
+        drive_oc_plugin "$WT_DIR/.opencode/plugins/fm-busy-state.js" \
+          "$(oc_status ses_main busy)" "$(oc_idle ses_main)" >/dev/null 2>&1 || true
+        ;;
+      claude)
+        run_claude_hook "$WT_DIR/.claude/settings.local.json" Stop >/dev/null 2>&1 || true
+        ;;
+    esac
+    assert_absent "$turnend" \
+      "a secondmate $harness turn-end must not touch the parent's state"
+  done
+  pass "a secondmate arms the busy contract but never touches a turn-end marker in the parent's state"
+}
+
+# The same harnesses must keep the turn-end NOTIFICATION for a crew window.
+test_crewmate_spawn_still_touches_turnend() {
+  local harness rec id out state turnend
+  for harness in pi claude opencode; do
+    id="crew-$harness"
+    rec=$(make_spawn_case "crew-$harness" "$harness" "$id")
+    read_case_record "$rec"
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$id" "$PROJ_DIR")
+    expect_code 0 $? "crewmate $harness spawn should succeed: $out"
+    state="$HOME_DIR/state"
+    turnend="$state/$id.turn-ended"
+    rm -f "$turnend"
+    case "$harness" in
+      pi)
+        drive_pi_ext "$state/$id.pi-ext.ts" turn-end >/dev/null 2>&1 \
+          || fail "pi turn_end drive failed"
+        ;;
+      opencode)
+        drive_oc_plugin "$WT_DIR/.opencode/plugins/fm-busy-state.js" \
+          "$(oc_status ses_main busy)" "$(oc_idle ses_main)" >/dev/null 2>&1 \
+          || fail "opencode session.idle drive failed"
+        ;;
+      claude)
+        run_claude_hook "$WT_DIR/.claude/settings.local.json" Stop >/dev/null 2>&1 \
+          || fail "claude Stop hook failed"
+        ;;
+    esac
+    assert_present "$turnend" \
+      "a crewmate $harness turn-end must still touch the notification marker"
+  done
+  pass "a crewmate spawn still touches the turn-end notification marker"
+}
+
 test_pi_extension_semantic_lifecycle
 test_pi_extension_serializes_settle_before_next_start
 test_pi_extension_stale_incarnation_rejected
@@ -1154,5 +1253,7 @@ test_kiro_hooks_semantic_lifecycle
 test_kiro_hooks_stale_incarnation_harmless
 test_raw_kiro_launch_has_no_semantic_wiring
 test_codex_unverified_until_a_semantic_source_exists
+test_secondmate_spawn_arms_busy_without_turnend
+test_crewmate_spawn_still_touches_turnend
 
 echo "all fm-busy-adapter-wiring tests passed"

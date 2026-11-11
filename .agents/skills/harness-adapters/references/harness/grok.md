@@ -2,7 +2,7 @@
 
 The xAI `grok` TUI is Claude-Code-compatible.
 Verified initially on 2026-06-29 with 0.2.73, slash submission on 2026-07-03 with 0.2.82, effort on 2026-07-13 with 0.2.99, exit on 2026-07-19 with 0.2.103, and folder trust, the training opt-in, and unsent composer delivery on 2026-09-24 with 1.0.41.
-Launch shape: `grok --always-approve "$(cat <brief>)"`.
+Launch shape: `grok --always-approve "Read the brief at <brief-path> and follow it exactly."`.
 
 ## Operating facts
 
@@ -78,7 +78,7 @@ The spawn installs guarded global `fm-turn-end.json` and `fm-turn-end.sh`.
 They act only when workspace `.fm-grok-turnend` matches the registry under `~/.grok/hooks/fm-turn-end.d/`, then touch the task's `state/<id>.turn-ended` through always-set `GROK_WORKSPACE_ROOT`, which equals the worktree.
 This stays outside the worktree, needs no trust grant, and writes only Firstmate files.
 `../../../bin/fm-teardown.sh` removes the gitignored pointer before pooling.
-Secondmates skip it because idle is healthy and ordinary stale-pane detection does not apply.
+Secondmates skip it because a mate's meta lives in the parent's state directory, so a turn-end touch there would wake the parent firstmate; the busy-state contract still arms for the wake-stall rung.
 
 ## Primary integration
 

@@ -576,6 +576,11 @@ ok - unseeded path without --approve still prompts on Trust project folder?
 ```
 
 Portable launch-command coverage lives in `tests/fm-spawn-dispatch-profile.test.sh` (`test_pi_seeded_secondmate_preapproves_project_trust`, `test_pi_worker_launch_omits_seeded_home_approve`, `test_pi_approve_probe_omits_unsupported_flag`).
+All six installed harnesses honored the doorbell contract with real model turns: each listed the inbox named by the doorbell, read its record, executed the instruction inside it, and acknowledged with the atomic `mv`.
+The acknowledgement shape this run verified live is exactly the plain rename into `handled/`, and the shipped doorbell line, relaunch note, and brief still name that form first, so the dated evidence above stands; the blessed helper `bin/fm-inbox-ack.sh` is named second, as the preferred form wherever its path is reachable, because it acknowledges the same way and also retires the record's hidden link. `bin/fm-task-inbox-lib.sh` owns that ordering, and its header owns the doorbell's quoting contract; [`rovo.md`](rovo.md) owns the granted paths that make the plain rename the one universally executable form. The emitted forms in all three carriers are executed verbatim from a space-bearing home path in `tests/fm-task-inbox.test.sh`, `tests/fm-control-relaunch.test.sh`, and `tests/fm-brief.test.sh`.
+Two findings from the run shaped the shipped behavior: an OpenCode vendor update modal swallowed the first doorbell and the single re-ring recovered it, which is exactly the watcher ladder's job; and grok 1.0.5's idle composer never classifies `empty` (a classifier drift owned by the [Composer classification matrix](#composer-classification-matrix) guard, whose refresh for grok 1.0.5 is still owed), which is why the ring's advisory pre-check skips only on an exact proven `pending` verdict - a doorbell into an ambiguous composer is a recoverable constant line, while skipping on ambiguity would starve steering for any harness the classifier cannot positively identify.
+Kimi was not installed on the verification machine; its receive path is the same one-line-plus-shell contract, and the portable ladder and enqueue regressions in `tests/fm-task-inbox.test.sh` and `tests/fm-send-inbox.test.sh` cover every harness-independent half.
+This guard is the refresh command after any harness upgrade; it spends a small number of real tokens per installed harness, reports an absent harness explicitly, and refuses a run that verified nothing.
 
 ## Launch-prompt backstop signatures
 
@@ -650,6 +655,7 @@ Gemini, launched `GEMINI_CLI_TRUST_WORKSPACE=true gemini -y` with no `GEMINI_API
      3. Vertex AI
 
    No authentication method selected.
+One throwaway worker was launched exactly as the spawn then launched one - positional brief, `-y`, workspace trust - and observed from start to idle:
 
    (Use Enter to select)
 
@@ -2954,7 +2960,7 @@ This row is a delivery guard for submit acknowledgement only; recorded worker st
 
 A throwaway scout was spawned through `bin/fm-spawn.sh --scout --backend tmux` on a real cursor worker and driven to completion:
 
-1. the launch delivered its brief positionally and the agent executed it;
+1. the launch then delivered its brief positionally and the agent executed it;
 2. `state/<id>.cursor-session` was written with the task worktree;
 3. the transcript fold read `busy` mid-turn and `idle` after it;
 4. `bin/fm-send.sh` delivered a steer through the then-current typed path and exited 0;

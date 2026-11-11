@@ -1050,10 +1050,10 @@ SIGNALS
     assert_grep "States: working, needs-decision, blocked, awaiting, done, failed." "$brief" \
       "$kind brief did not render the configured pause verb in its states list"
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
-    assert_grep 'Use `awaiting: {why}`' "$brief" \
+    assert_grep 'Use `awaiting: {why} until HH:MMZ`' "$brief" \
       "$kind brief did not instruct the configured pause status"
     # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
-    assert_no_grep '`paused: {why}`' "$brief" \
+    assert_no_grep '`paused: {why}' "$brief" \
       "$kind brief still instructs the default paused status"
     assert_grep 'a blocker or wait clears' "$brief" \
       "$kind brief did not require durable resolution when a blocker clears"
@@ -1178,6 +1178,34 @@ ROWS
 }
 
 # Scout and secondmate paths still scaffold well-formed briefs.
+# The inbox scaffold's acknowledgement command is emitted into the brief and
+# run by the worker, so it must survive any home path. A home whose path carries
+# a space and an apostrophe yields an unusable command if the emitted paths are
+# not shell-quoted: run the command the brief actually emits.
+test_inbox_ack_command_runs_from_a_quoted_home_path() {
+  local home id brief inbox cmd
+  home="$TMP_ROOT/brief home's root"
+  mkdir -p "$home/data"
+  id=brief_ack_quoted_home
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1 \
+    || fail "fm-brief.sh could not scaffold a brief under a quoted home path"
+  brief="$home/data/$id/brief.md"
+  inbox="$home/state/$id.inbox"
+  mkdir -p "$inbox/handled" "$inbox/.unhandled"
+  # shellcheck disable=SC2016
+  printf 'schema=fm-task-inbox.v1\nat=2026-01-01T00:00:00Z\n--\ninstruction to acknowledge\n' > "$inbox/001.msg"
+  # shellcheck disable=SC2016  # the sed expression is the pattern, not a shell expansion
+  cmd=$(sed -n 's/.*acknowledge each handled message with `\([^`]*\)`.*/\1/p' "$brief" | head -1)
+  [ -n "$cmd" ] || fail "the brief did not emit an acknowledgement command"
+  cmd=${cmd//NNN/001}
+  bash -c "$cmd" >/dev/null 2>&1 \
+    || fail "the acknowledgement command the brief emits does not run for a quoted home path: $cmd"
+  [ -f "$inbox/handled/001.msg" ] \
+    || fail "the brief's acknowledgement command did not acknowledge the record: $cmd"
+  [ ! -e "$inbox/001.msg" ] || fail "the brief's acknowledgement left the record unacknowledged"
+  pass "fm-brief.sh: the scaffolded acknowledgement command runs for a quoted home path"
+}
+
 test_scout_and_secondmate_scaffold() {
   local brief
   FM_HOME="$BRIEF_HOME" "$ROOT/bin/fm-brief.sh" brief-scout-q6 alpha --scout >/dev/null 2>&1 \
@@ -1757,6 +1785,7 @@ test_pause_verb_override_renders_all_brief_scaffolds
 test_ship_and_scout_teach_validation_round_pause
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_completion_write_exception_is_task_scoped
+test_inbox_ack_command_runs_from_a_quoted_home_path
 test_scout_and_secondmate_scaffold
 test_house_wiki_stanza_is_on_workers_not_secondmates
 test_scout_lavish_line_follows_presentation_floor

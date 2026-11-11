@@ -35,17 +35,11 @@
 # Away mode (state/.afk): the away-mode daemon owns supervision and runs the
 # watcher one-shot, restarting it after every wake, so the watch lock is
 # regularly unheld at a turn boundary with nothing wrong. A live
-# identity-matched daemon holding this home, plus a fresh beacon, is what
-# proves supervision there - see fm_afk_daemon_owns_supervision in
-# bin/fm-wake-lib.sh. The beacon freshness test there uses AFK_GRACE
-# (fm_poll_derived_grace, docs/turnend-guard.md "Guard grace and the poll
-# cadence"), not the flat $GRACE every other check on this page uses: the
-# daemon starts a fresh one-shot watcher only after it finishes handling the
-# previous wake, and that handling can legitimately run past a flat 300s
-# window under load (a slow registered check, a busy supervisor pane) with the
-# daemon perfectly healthy throughout. The strict watcher predicate and $GRACE
-# are unchanged everywhere else, including for a dead daemon pid or a beacon
-# older than AFK_GRACE, which still block.
+# identity-matched daemon holding this home, plus the unchanged fresh-beacon
+# test, is what proves supervision there - see fm_afk_daemon_owns_supervision in
+# bin/fm-wake-lib.sh. This daemon proof is the away-mode exception; with away
+# mode off, the strict watcher predicate plus the extension-only hand-off
+# tolerance in the predicate below are the only paths.
 #
 # Loop-guard, codex/Grok (default) mode: never block twice in the same turn.
 # Codex uses stop_hook_active and Grok uses stopHookActive; typed camel-case
@@ -244,6 +238,27 @@ allow_supervised_stop() {
 
 if fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME"; then
   allow_supervised_stop
+fi
+
+# The Pi extension model has one benign no-watcher window the PID-strict check
+# above cannot express: the extension tears the watcher down and respawns it on
+# every actionable wake, so a turn boundary can legitimately land with a fresh
+# beacon, a genuinely unheld lock, and a live Pi session that provably owns
+# continuity. fm_watcher_supervision_verdict is the single owner of that
+# model-aware rule, and bin/fm-guard.sh (the mid-turn warning) already governs
+# itself with it, so consulting it here is what makes the two guards agree
+# instead of raising a blind-turn alarm at a healthy hand-off. It is deliberately
+# scoped to the extension model: the autoarm model treats a fresh beacon alone as
+# healthy, which a turn boundary must never accept, so autoarm and persistent
+# keep exactly the strict paths above and below. Everything the verdict cannot
+# prove - a stale beacon, a lock still recording a pid, a Pi session that
+# exited, or an extension that is unloaded or drifted off its on-disk build -
+# still reaches block_stop.
+if [ "$(fm_supervision_model)" = extension ]; then
+  fm_watcher_supervision_verdict "$STATE" "$WATCH" "$GRACE" "$FM_HOME" "$FM_ROOT"
+  if [ "$FM_WATCHER_VERDICT_OK" = true ]; then
+    allow_supervised_stop
+  fi
 fi
 
 # Away mode transfers supervision ownership from the watcher to the away-mode

@@ -160,7 +160,8 @@ test_signal_catchup_without_running_watcher() {
   watcher=$!
   wait_for_watcher_lock "$watcher" "$state" || fail "watcher never started for first signal"
   wait_for_exit "$watcher" 150 || fail "watcher did not exit for first signal"
-  grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print first signal"
+  grep -F "signal:" "$out" >/dev/null || fail "watcher did not print first signal"
+  grep -F "$status_file" "$out" >/dev/null || fail "watcher did not name the first signal path"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2> "$drain_err" || fail "drain after first signal failed"
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "first signal was not queued"
   sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$drain_err")
@@ -174,7 +175,8 @@ test_signal_catchup_without_running_watcher() {
   watcher=$!
   wait_for_watcher_lock "$watcher" "$state" || fail "watcher never started for second signal"
   wait_for_exit "$watcher" 150 || fail "watcher did not exit for second signal"
-  grep -F "signal: $status_file" "$out" >/dev/null || fail "signal written with no watcher was not caught"
+  grep -F "signal:" "$out" >/dev/null || fail "signal written with no watcher was not caught"
+  grep -F "$status_file" "$out" >/dev/null || fail "signal written with no watcher did not name its path"
   pass "signal written while no watcher runs is caught on next run"
 }
 
@@ -1207,6 +1209,130 @@ test_secondmate_genuine_stall_after_idle_ring_still_alarms() {
   pass "a leftover row that survives a proven-idle ring still surfaces as a genuine stall"
 }
 
+# One fixture per direction for the supervision-branch read. A mate whose
+# branch is mid-turn has a queue that is merely behind its own work, and the
+# pane never shows that work, so the pane busy gate (pinned by
+# tests/fm-watch-secondmate-wake-stall.test.sh) cannot see it; reporting it
+# as stalled invites a relaunch that cuts the branch work off. Only an idle
+# branch may report, and the reason must carry the evidence that was read.
+secondmate_stall_fixture() {  # <name> -> prints dir; creates $dir/secondmate home and meta for mate
+  local name=$1 dir state sub
+  dir=$(make_case "$name")
+  state="$dir/state"
+  sub="$dir/secondmate"
+  mkdir -p "$sub/state" "$sub/data" "$sub/bin" "$dir/fake-tmux"
+  printf '# Firstmate\n' > "$sub/AGENTS.md"
+  printf 'mate\n' > "$sub/.fm-secondmate-home"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=pi\nbackend=tmux\nhome=%s\n' \
+    "$sub" > "$state/mate.meta"
+  printf '%s\t7\tsignal\trouted\tsignal: routed row\n' "$(( $(date +%s) - 10 ))" > "$sub/state/.wake-queue"
+  printf '> \n' > "$dir/fake-tmux/pane.txt"
+  printf '%s\n' "$dir"
+}
+
+secondmate_stall_checkpoint() {  # <dir> <out-name> [<stall-secs>]
+  local dir=$1 out=$2 secs=${3:-1}
+  PATH="$dir/fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$dir/state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
+    FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
+    FM_SECONDMATE_WAKE_STALL_SECS="$secs" FM_POLL=1 FM_SIGNAL_GRACE=0 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    "$ROOT/bin/fm-watch-checkpoint.sh" --seconds 2 > "$dir/$out.out" 2> "$dir/$out.err" || true
+}
+
+test_secondmate_stall_stays_quiet_while_branch_is_mid_turn() {
+  local dir sub
+  dir=$(secondmate_stall_fixture secondmate-stall-busy-branch)
+  sub="$dir/secondmate"
+  mkdir -p "$sub/state/branch-session"
+  printf '%s\n' '{"type":"message","message":{"role":"assistant","stopReason":"toolUse"}}' > "$sub/state/branch-session/turn.jsonl"
+  printf '%s\n' "$sub/state/branch-session/turn.jsonl" > "$sub/state/.branch-session"
+  # The row is ten seconds old and the branch wrote its session just now, so a
+  # five-second window ages the row past the threshold while the branch write
+  # still falls inside it.
+  secondmate_stall_checkpoint "$dir" watch-busy-branch 5
+  ! grep -F 'secondmate wake-loop stalled' "$dir/watch-busy-branch.out" >/dev/null \
+    || fail "a mate whose branch is mid-turn was reported as stalled: $(cat "$dir/watch-busy-branch.out")"
+  [ ! -e "$dir/state/.secondmate-wake-stall-mate" ] \
+    || fail "a branch-busy mate left a stall marker"
+  pass "an aged foreign row behind a supervision branch turn is not a stall"
+}
+
+test_secondmate_stall_stays_quiet_for_long_branch_turn() {
+  local dir sub
+  dir=$(secondmate_stall_fixture secondmate-stall-long-branch-turn)
+  sub="$dir/secondmate"
+  mkdir -p "$sub/state/branch-session"
+  printf '%s\n' '{"type":"message","message":{"role":"assistant","stopReason":"toolUse"}}' > "$sub/state/branch-session/turn.jsonl"
+  touch -d '16 minutes ago' "$sub/state/branch-session/turn.jsonl" 2>/dev/null \
+    || touch -t "$(date -v-16M +%Y%m%d%H%M 2>/dev/null || date -d '16 minutes ago' +%Y%m%d%H%M)" "$sub/state/branch-session/turn.jsonl"
+  printf '%s\n' "$sub/state/branch-session/turn.jsonl" > "$sub/state/.branch-session"
+  printf '%s\t7\tsignal\trouted\tsignal: routed row\n' "$(( $(date +%s) - 1020 ))" > "$sub/state/.wake-queue"
+  secondmate_stall_checkpoint "$dir" watch-long-branch-turn 900
+  ! grep -F 'secondmate wake-loop stalled' "$dir/watch-long-branch-turn.out" >/dev/null \
+    || fail "a long branch turn with no fresh write was reported as stalled: $(cat "$dir/watch-long-branch-turn.out")"
+  [ ! -e "$dir/state/.secondmate-wake-stall-mate" ] \
+    || fail "a long branch turn left a stall marker"
+  pass "a long branch turn past the mtime window is not a stall"
+}
+
+test_secondmate_stall_stays_quiet_for_malformed_branch_session() {
+  local dir sub
+  dir=$(secondmate_stall_fixture secondmate-stall-malformed-branch-session)
+  sub="$dir/secondmate"
+  mkdir -p "$sub/state/branch-session"
+  printf '%s\n' \
+    '{"type":"message","message":{"role":"assistant","stopReason":"stop"}}' \
+    '{"type":"message","message":{"role":' > "$sub/state/branch-session/turn.jsonl"
+  touch -d '16 minutes ago' "$sub/state/branch-session/turn.jsonl" 2>/dev/null \
+    || touch -t "$(date -v-16M +%Y%m%d%H%M 2>/dev/null || date -d '16 minutes ago' +%Y%m%d%H%M)" "$sub/state/branch-session/turn.jsonl"
+  printf '%s\n' "$sub/state/branch-session/turn.jsonl" > "$sub/state/.branch-session"
+  printf '%s\t7\tsignal\trouted\tsignal: routed row\n' "$(( $(date +%s) - 1020 ))" > "$sub/state/.wake-queue"
+  secondmate_stall_checkpoint "$dir" watch-malformed-branch-session 900
+  ! grep -F 'secondmate wake-loop stalled' "$dir/watch-malformed-branch-session.out" >/dev/null \
+    || fail "a branch writing a malformed trailing line was reported as stalled: $(cat "$dir/watch-malformed-branch-session.out")"
+  [ ! -e "$dir/state/.secondmate-wake-stall-mate" ] \
+    || fail "a malformed branch session left a stall marker"
+  pass "a malformed trailing branch line is treated as writing, not idle"
+}
+
+test_secondmate_stall_skips_historical_malformed_branch_line() {
+  local dir sub
+  dir=$(secondmate_stall_fixture secondmate-stall-historical-malformed-branch-line)
+  sub="$dir/secondmate"
+  mkdir -p "$sub/state/branch-session"
+  printf '%s\n' \
+    '{"type":"message","message":{"role":' \
+    '{"type":"message","message":{"role":"assistant","stopReason":"stop"}}' > "$sub/state/branch-session/old.jsonl"
+  touch -d '16 minutes ago' "$sub/state/branch-session/old.jsonl" 2>/dev/null \
+    || touch -t "$(date -v-16M +%Y%m%d%H%M 2>/dev/null || date -d '16 minutes ago' +%Y%m%d%H%M)" "$sub/state/branch-session/old.jsonl"
+  printf '%s\n' "$sub/state/branch-session/old.jsonl" > "$sub/state/.branch-session"
+  printf '%s\t7\tsignal\trouted\tsignal: routed row\n' "$(( $(date +%s) - 1020 ))" > "$sub/state/.wake-queue"
+  secondmate_stall_checkpoint "$dir" watch-historical-malformed-branch-line 900
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7' "$dir/watch-historical-malformed-branch-line.out" >/dev/null \
+    || fail "a historical malformed line silenced an idle branch: $(cat "$dir/watch-historical-malformed-branch-line.out")"
+  grep -E ' branch=idle$' "$dir/watch-historical-malformed-branch-line.out" >/dev/null \
+    || fail "the stall reason did not carry its branch evidence: $(cat "$dir/watch-historical-malformed-branch-line.out")"
+  pass "a historical malformed branch line is skipped and the last complete message decides"
+}
+
+test_secondmate_stall_reports_idle_branch_with_evidence() {
+  local dir sub
+  dir=$(secondmate_stall_fixture secondmate-stall-idle)
+  sub="$dir/secondmate"
+  mkdir -p "$sub/state/branch-session"
+  printf '%s\n' '{"type":"message","message":{"role":"assistant","stopReason":"stop"}}' > "$sub/state/branch-session/old.jsonl"
+  touch -d '1 hour ago' "$sub/state/branch-session/old.jsonl" 2>/dev/null \
+    || touch -t "$(date -v-1H +%Y%m%d%H%M 2>/dev/null || date +%Y%m%d%H%M)" "$sub/state/branch-session/old.jsonl"
+  printf '%s\n' "$sub/state/branch-session/old.jsonl" > "$sub/state/.branch-session"
+  secondmate_stall_checkpoint "$dir" watch-idle
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7' "$dir/watch-idle.out" >/dev/null \
+    || fail "an idle mate with an aged row did not report: $(cat "$dir/watch-idle.out"); err=$(cat "$dir/watch-idle.err")"
+  grep -E ' branch=idle$' "$dir/watch-idle.out" >/dev/null \
+    || fail "the stall reason did not carry its branch evidence: $(cat "$dir/watch-idle.out")"
+  pass "an idle branch with an aged row reports once with the evidence it read"
+}
+
 test_secondmate_stall_marker_rejects_symlink() {
   local dir state sub fakebin marker outside expected epoch
   dir=$(make_case secondmate-stall-marker-symlink)
@@ -1214,9 +1340,13 @@ test_secondmate_stall_marker_rejects_symlink() {
   sub="$dir/secondmate"
   mkdir -p "$sub/state"
   printf 'mate\n' > "$sub/.fm-secondmate-home"
-  printf 'window=firstmate:fm-mate\nkind=secondmate\nhome=%s\n' "$sub" > "$state/mate.meta"
+  printf 'window=firstmate:fm-mate\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' "$sub" > "$state/mate.meta"
+  printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$(( $(date +%s) - 10 ))" > "$sub/state/.wake-queue"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" mate) \
+    || fail "arming the idle mate's busy contract failed"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" mate idle --gen "$gen" --source claude-hook --event stop \
+    || fail "applying the idle verdict failed"
   epoch=$(( $(date +%s) - 10 ))
-  printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$epoch" > "$sub/state/.wake-queue"
   outside="$dir/outside"
   expected='must remain unchanged'
   printf '%s\n' "$expected" > "$outside"
@@ -1228,7 +1358,7 @@ test_secondmate_stall_marker_rejects_symlink() {
 #!/usr/bin/env bash
 case "${1:-}" in
   list-windows) printf '%s\n' 'firstmate:fm-mate' ;;
-  capture-pane) : ;;
+  capture-pane) printf 'Idle\n' ;;
   display-message) printf '0\n' ;;
   *) exit 0 ;;
 esac
@@ -1258,6 +1388,10 @@ test_acknowledged_stall_publication_survives_pre_marker_crash() {
   printf '%s\t7\tcheck\trouted\tcheck: routed row\n' "$epoch" > "$sub/state/.wake-queue"
   row_before="$dir/foreign-before"
   cp "$sub/state/.wake-queue" "$row_before"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" mate) \
+    || fail "arming the idle mate's busy contract failed"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" mate idle --gen "$gen" --source claude-hook --event stop \
+    || fail "applying the idle verdict failed"
   printf '%s\t%s-7\n' "$(( $(date +%s) - 2 ))" "$epoch" > "$state/.secondmate-wake-progress-mate"
   append_wake "$state" check "secondmate-wake-loop-mate-$epoch-7" \
     "check: secondmate wake-loop stalled: mate=mate row=7 idle=2s" \
@@ -1268,7 +1402,19 @@ test_acknowledged_stall_publication_survives_pre_marker_crash() {
     || fail "pre-marker crash publication could not be acknowledged"
 
   fakebin="$dir/fakebin"
-  out="$dir/watch-once.out"
+  mkdir -p "$fakebin" "$dir/fake-tmux"
+  printf 'Idle\n' > "$dir/fake-tmux/pane.txt"
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  list-windows) printf '%s\n' 'firstmate:fm-mate' ;;
+  capture-pane) cat "${FM_FAKE_TMUX_CAPTURE:-/dev/null}" ;;
+  display-message) printf '0\n' ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$fakebin/tmux"
+  out="$dir/watch.out"
   PATH="$fakebin:$PATH" FM_HOME="$dir" FM_ROOT_OVERRIDE="$ROOT" \
     FM_STATE_OVERRIDE="$state" FM_FAKE_TMUX_WINDOW='firstmate:fm-mate' \
     FM_FAKE_TMUX_LOG="$dir/tmux.log" FM_FAKE_TMUX_CAPTURE="$dir/fake-tmux/pane.txt" \
@@ -1285,7 +1431,7 @@ test_acknowledged_stall_publication_survives_pre_marker_crash() {
 }
 
 test_empty_prefix_mate_preserves_other_mate_receipt() {
-  local dir state empty stalled fakebin epoch row_before round
+  local dir state empty stalled fakebin epoch row_before round gen
   dir=$(make_case secondmate-prefix-receipt)
   state="$dir/state"
   empty="$dir/ios"
@@ -1294,12 +1440,16 @@ test_empty_prefix_mate_preserves_other_mate_receipt() {
   printf 'ios\n' > "$empty/.fm-secondmate-home"
   printf 'ios-ui\n' > "$stalled/.fm-secondmate-home"
   printf 'window=firstmate:fm-ios\nkind=secondmate\nhome=%s\n' "$empty" > "$state/ios.meta"
-  printf 'window=firstmate:fm-ios-ui\nkind=secondmate\nhome=%s\n' "$stalled" > "$state/ios-ui.meta"
+  printf 'window=firstmate:fm-ios-ui\nkind=secondmate\nharness=claude\nbackend=tmux\nhome=%s\n' "$stalled" > "$state/ios-ui.meta"
   : > "$empty/state/.wake-queue"
   epoch=$(( $(date +%s) - 10 ))
   printf '%s\t9\tcheck\trouted\tcheck: routed row\n' "$epoch" > "$stalled/state/.wake-queue"
   row_before="$dir/foreign-before"
   cp "$stalled/state/.wake-queue" "$row_before"
+  gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" ios-ui) \
+    || fail "arming the idle ios-ui busy contract failed"
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" ios-ui idle --gen "$gen" --source claude-hook --event stop \
+    || fail "applying the idle ios-ui verdict failed"
   printf '%s\t%s-9\n' "$(( $(date +%s) - 2 ))" "$epoch" > "$state/.secondmate-wake-progress-ios-ui"
   append_wake "$state" check "secondmate-wake-loop-ios-ui-$epoch-9" \
     "check: secondmate wake-loop stalled: mate=ios-ui row=9 idle=2s" \
@@ -3751,6 +3901,11 @@ test_secondmate_proven_idle_ring_lets_the_child_drain
 test_term_stops_a_watcher_blocked_in_the_drain_ring_idle_capture
 test_secondmate_busy_and_unknown_panes_are_not_rung
 test_secondmate_genuine_stall_after_idle_ring_still_alarms
+test_secondmate_stall_stays_quiet_while_branch_is_mid_turn
+test_secondmate_stall_stays_quiet_for_long_branch_turn
+test_secondmate_stall_stays_quiet_for_malformed_branch_session
+test_secondmate_stall_skips_historical_malformed_branch_line
+test_secondmate_stall_reports_idle_branch_with_evidence
 test_secondmate_stall_marker_rejects_symlink
 test_acknowledged_stall_publication_survives_pre_marker_crash
 test_empty_prefix_mate_preserves_other_mate_receipt

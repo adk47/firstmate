@@ -1063,22 +1063,17 @@ await fire("before_agent_start", { messageType: "user", prompt: operational.stdo
 entries.push({ type: "message", message: { role: "user", content: operational.stdout } });
 const unsolicitedPrompt = "Please keep responses concise while monitoring the fleet.";
 await fire("before_agent_start", { messageType: "user", prompt: unsolicitedPrompt }, mainCtx);
-await fire("before_agent_start", {
-  messageType: "custom",
-  message: { role: "custom", customType: "fixture", content: "custom content must not become captain dialog", display: true },
-}, mainCtx);
 entries.push({ type: "message", message: { role: "user", content: unsolicitedPrompt } });
-// Pi 1.2's idle sendMessage trigger carries a CustomMessage, not a prompt.
-// Even report-request wording in it must never become captain dialog.
-await fire("before_agent_start", {
-  type: "before_agent_start",
-  messageType: "custom",
-  message: {
-    role: "custom", customType: "fixture", content: explicitRequest,
-    display: false, timestamp: Date.now(),
-  },
-  systemPrompt: "fixture", systemPromptOptions: {},
-}, mainCtx);
+// Pi 1.x's idle sendMessage trigger carries a CustomMessage, not a prompt.
+// It must neither throw nor become captain dialog, even with request wording.
+for (const content of ["custom content must not become captain dialog", explicitRequest]) {
+  await fire("before_agent_start", {
+    type: "before_agent_start",
+    messageType: "custom",
+    message: { role: "custom", customType: "fixture", content, display: false, timestamp: Date.now() },
+    systemPrompt: "fixture", systemPromptOptions: {},
+  }, mainCtx);
+}
 await fire("agent_start", {}, mainCtx);
 await fire("agent_end", {}, mainCtx);
 const legacyOperational = "⁣FIRSTMATE_OP: give me a fresh system-resource report.";
@@ -1137,8 +1132,8 @@ for (const content of [unsolicitedPrompt, ...requestedPrompts]) {
 }
 if (mirroredCaptainText.some((text) =>
   text === `[captain] ${explicitRequest}` ||
-  text.includes("operational watcher injection") || text.includes("FIRSTMATE_OP: give me a fresh system-resource report") ||
-  text.includes("custom content must not become captain dialog")
+  text.includes("custom content must not become captain dialog") ||
+  text.includes("operational watcher injection") || text.includes("FIRSTMATE_OP: give me a fresh system-resource report")
 )) {
   throw new Error("canonical current or legacy operational input entered captain mirror context");
 }
@@ -4775,6 +4770,7 @@ test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot(
   cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
   cp "$ROOT/.pi/extensions/lib/fm-branch-model-picker.ts" "$repo/.pi/extensions/lib/fm-branch-model-picker.ts"
   printf 'project=%s/projects/approved\nwindow=fm-window\n' "$home" > "$home/state/task-a.meta"
+  printf 'project=%s/projects/approved\nwindow=fm-window-b\n' "$home" > "$home/state/task-b.meta"
   LIB="$repo/.pi/extensions/lib/fm-branch-dispatch.ts" FM_HOME="$home" GRANT="$ROOT/bin/fm-wake-grant.sh" \
     node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 import { pathToFileURL } from "node:url";
@@ -4848,6 +4844,24 @@ writeFileSync(`${state}/.wake-queue`, "1\t1\tsignal\ttask-a.status\tneeds-decisi
 const needsDecisionOnly = scopeForUnreadWake(state, false);
 if (needsDecisionOnly.eligible || needsDecisionOnly.eligibleSeqs.length !== 0 || needsDecisionOnly.corrupted) {
   throw new Error(`a needs-decision-only queue must be ordinary main-only absence: ${JSON.stringify(needsDecisionOnly)}`);
+}
+
+// A coalesced batch row is keyed by a stable batch identity, not a status
+// filename, so its task set comes from the byte-identical "signal:$files"
+// payload. Every task in the batch stays independently reportable.
+writeFileSync(
+  `${state}/.wake-queue`,
+  `1\t1\tsignal\tsignal-batch-abc123\tsignal: ${state}/task-a.status ${state}/task-b.status`,
+);
+const batchRow = scopeForUnreadWake(state, false);
+if (!batchRow.eligible || batchRow.corrupted || batchRow.eligibleSeqs.join(",") !== "1") {
+  throw new Error(`a coalesced batch row was not branch-eligible: ${JSON.stringify(batchRow)}`);
+}
+if (batchRow.eligibleTasks.slice().sort().join(",") !== "task-a,task-b") {
+  throw new Error(`a coalesced batch row lost a task from its payload: ${JSON.stringify(batchRow)}`);
+}
+if (!batchRow.projects.includes(project)) {
+  throw new Error(`a coalesced batch row lost its project context: ${JSON.stringify(batchRow)}`);
 }
 
 // A captain-held task's bounded stale recheck is itself a decision wake. It is
@@ -5336,6 +5350,79 @@ EOF
   out=$(cat "$TMP_ROOT/node-output")
   expect_code 0 "$status" "second-mate signal rows must be routed by their new span: $out"
   pass "second-mate signal rows route by their new span while crewmate and stale routing stay unchanged"
+}
+# An Orca task's stale rows are keyed by its `terminal=` handle, because that is
+# the target bin/fm-watch.sh polls for that backend (bin/fm-backend.sh's
+# fm_backend_target_of_meta), while every other backend's are keyed by its
+# `window=`. Before 2026-10-26 the dispatcher resolved only `window=`, so every
+# Orca stale row read as unresolvable: the scan went unsafe, the stale wake and
+# every routine signal row queued beside it went to main, and the captain's
+# chat took a turn per repeat (the reproduction: 202 for one dead terminal).
+test_branch_dispatch_resolves_an_orca_terminal_stale_key() {
+  local repo home out status
+  repo="$TMP_ROOT/dispatch-orca-root"
+  home="$TMP_ROOT/dispatch-orca-home"
+  mkdir -p "$repo/.pi/extensions/lib" "$home/state" "$home/projects/approved"
+  cp "$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" "$repo/.pi/extensions/lib/fm-branch-dispatch.ts"
+  cp "$ROOT/.pi/extensions/lib/fm-async-exec.ts" "$repo/.pi/extensions/lib/fm-async-exec.ts"
+  printf 'project=%s/projects/approved\nwindow=fm-orca-task\nbackend=orca\nterminal=term_5abe6990-e0ac-4d65-a4d8-1d5dde01e201\n' "$home" \
+    > "$home/state/orca-task.meta"
+  printf 'project=%s/projects/approved\nwindow=fm-tmux-task\n' "$home" > "$home/state/tmux-task.meta"
+  printf 'working: routine\n' > "$home/state/orca-task.status"
+  printf 'working: routine\n' > "$home/state/tmux-task.status"
+  LIB="$repo/.pi/extensions/lib/fm-branch-dispatch.ts" FM_HOME="$home" \
+    node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF2'
+import { pathToFileURL } from "node:url";
+import { writeFileSync } from "node:fs";
+
+const { scopeForUnreadWake } = await import(pathToFileURL(process.env.LIB).href);
+const state = `${process.env.FM_HOME}/state`;
+const project = `${process.env.FM_HOME}/projects/approved`;
+const terminal = "term_5abe6990-e0ac-4d65-a4d8-1d5dde01e201";
+
+// The reproduction: an Orca wedge repeat queued beside another task's routine
+// progress. Both rows are task-local and both belong to the branch.
+writeFileSync(
+  `${state}/.wake-queue`,
+  [
+    `1\t1\tstale\t${terminal}\tstale: ${terminal} (idle 435s, possible wedge, escalation 132, demand-deep-inspection: ...)`,
+    "1\t2\tsignal\ttmux-task.turn-ended\tsignal: tmux-task.turn-ended",
+  ].join("\n"),
+);
+const scope = scopeForUnreadWake(state, false);
+if (scope.corrupted) throw new Error(`an Orca terminal-keyed stale row read as unresolvable: ${JSON.stringify(scope)}`);
+if (!scope.eligible || scope.eligibleSeqs.slice().sort().join(",") !== "1,2") {
+  throw new Error(`the Orca stale row and the routine signal beside it must both be branch-eligible: ${JSON.stringify(scope)}`);
+}
+if (scope.eligibleTasks.slice().sort().join(",") !== "orca-task,tmux-task") {
+  throw new Error(`the stale row must resolve to the task whose record names that terminal: ${JSON.stringify(scope)}`);
+}
+if (scope.taskByWakeKey[terminal] !== "orca-task" || scope.taskByWakeKey["fm-orca-task"] !== "orca-task") {
+  throw new Error(`both the terminal and the window alias must name the Orca task: ${JSON.stringify(scope.taskByWakeKey)}`);
+}
+if (!scope.projects.includes(project)) throw new Error(`project context lost: ${JSON.stringify(scope.projects)}`);
+
+// Decision ownership follows the terminal key exactly as it follows a window
+// key: a captain-held Orca task's recheck stays on main while the routine
+// signal beside it stays branch-owned.
+writeFileSync(`${state}/orca-task.status`, "captain-held [key=route]: awaiting the captain\n");
+const held = scopeForUnreadWake(state, false);
+if (!held.eligible || held.eligibleSeqs.join(",") !== "2" || held.needsDecisionKeys.join(",") !== terminal) {
+  throw new Error(`a captain-held Orca task's terminal-keyed stale row was not kept on main: ${JSON.stringify(held)}`);
+}
+
+// A terminal no record names is still unresolvable - that remains a metadata
+// fault the scan refuses to reason past, not something this fix papers over.
+writeFileSync(`${state}/.wake-queue`, "1\t1\tstale\tterm_00000000-0000-0000-0000-000000000000\tstale: unknown terminal");
+const unknown = scopeForUnreadWake(state, false);
+if (!unknown.corrupted || unknown.eligible) {
+  throw new Error(`an unrecorded terminal must still fail the scan closed: ${JSON.stringify(unknown)}`);
+}
+EOF2
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "Orca terminal-keyed stale rows must resolve to their task: $out"
+  pass "scopeForUnreadWake resolves an Orca stale row through the task record's terminal handle, so the wake and the routine rows beside it reach the branch"
 }
 
 # The model picker's bounded scrolling and its search ranking are Pi's own
@@ -6246,6 +6333,7 @@ test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
 test_branch_dispatch_resolves_terminal_keyed_orca_stale_row
 test_branch_dispatch_keeps_project_with_canonical_owner
 test_branch_dispatch_routes_secondmate_signal_by_new_span
+test_branch_dispatch_resolves_an_orca_terminal_stale_key
 test_branch_cache_key_is_per_home_stable
 test_branch_default_on_heartbeat_afk_and_fallback
 test_away_record_parks_main_and_presents_after_archive
