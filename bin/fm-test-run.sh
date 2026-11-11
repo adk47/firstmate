@@ -354,6 +354,7 @@ family_for_basename() {
     fm-busy-state.test.sh|fm-classify-corr-token.test.sh|\
     fm-claude-stop-autoarm.test.sh|fm-cursor-harness.test.sh|\
     fm-extension-binding.test.sh|fm-gitignore-config.test.sh|\
+    fm-instrument-sweep.test.sh|\
     fm-no-mistakes-required.test.sh|fm-peek-remote.test.sh|\
     fm-pending-reply.test.sh|fm-pi-branch-extension.test.sh|\
     fm-procevent-quota.test.sh|fm-procevent-when.test.sh|fm-procevent.test.sh|\
@@ -630,6 +631,7 @@ tests/fm-herdr-submit-confirm-live-e2e.test.sh 23
 tests/fm-herdr-version-floor-live-e2e.test.sh 23
 tests/fm-home-summary-refresh.test.sh 50699
 tests/fm-inactive-reconcile.test.sh 54465
+tests/fm-instrument-sweep.test.sh 13200
 tests/fm-kimi-harness.test.sh 18015
 tests/fm-lane-model-switch.test.sh 25902
 tests/fm-lint-workflows.test.sh 1459
