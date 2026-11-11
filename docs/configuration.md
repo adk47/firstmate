@@ -853,6 +853,57 @@ A `working` claim is not compared (work in progress is expected to hold work), a
 Arm the check once per home with `bin/fm-fleet-integrity-check.sh arm`, which writes `state/fleet-integrity.check.sh` and binds it with `bin/fm-check-register.sh`, so the watcher polls it on its normal slow-poll cadence.
 `FM_FLEET_INTEGRITY_INTERVAL` (default 300 seconds) sets the self-throttle, and `bin/fm-fleet-integrity-check.sh status` prints the last recorded verdict.
 `bin/fm-fleet-integrity-check.sh disarm` removes the shim, its trust binding, the record, and the stamp.
+## Overseer (config/overlord.env)
+
+[`bin/fm-overlord.sh`](../bin/fm-overlord.sh) is a registered watcher check that reads one number per domain from the monitors a home already runs and interjects when a named threshold is crossed.
+It exists because a monitor nobody reads cannot raise anything: on 2026-11-11 a send count of zero held for a day and green pull requests sat unmerged, each visible in some monitor's output, and each found only by the captain looking.
+Its header owns the domains, the numbers, the thresholds, the disagreement rule, and the record format; this section owns the configuration and the operator contract.
+
+The overseer measures nothing itself.
+Every number is read from its source on every run, and a source that is absent, stale, unreadable, or cut short reads `unmeasured` with the reason, never as zero.
+A stored verdict is never read back, and a pull request's check result counts only when it is attached to that pull request's current head commit.
+
+`fm-overlord.sh digest` prints one line per domain, each number with its source and its age, and changes nothing.
+`fm-overlord.sh arm` registers the check, and `fm-overlord.sh disarm` removes it together with its record.
+When a threshold is crossed the check does three things once, in order: it appends a `blocked [key=overlord-<rule>]` line to `state/overlord.status`, which the watcher delivers as an ordinary wake; it runs the page command with the crossed threshold; and it steers the owning lane with the specific correction as a fire-and-forget steer.
+An unchanged number is not a crossing, and an open crossing says nothing more until the number is back inside its threshold, when one `resolved` line with the same key closes it.
+A correction that could not be delivered to a lane is recorded on that key, so the correction is routed by hand rather than lost.
+
+The Fable lane has two jobs.
+A crossing whose correction is irreversible, such as merging pull requests, is steered to the Fable lane for a verdict on the current head and never to the owning lane as an instruction to act.
+When two readings of one number disagree, `fm-overlord.sh adjudicate` names the window and the source of each and applies one rule: the reading whose window ends latest is authoritative, and readings over the same window, or with an unknown window, are `unmeasured` and go to the Fable lane.
+The overseer never averages.
+
+`config/overlord.env` is optional, local, gitignored, and not inherited by secondmate homes.
+It holds `KEY=value` lines, it is parsed rather than sourced, and a set environment variable of the same name wins.
+A source left unset leaves its numbers `unmeasured (not configured)`, which is not a crossing.
+
+```sh
+FM_OVERLORD_REMOTE=                  # command prefix that runs `sh -s` where the remote files live; empty reads them on this host
+FM_OVERLORD_SENTINEL_LANE=           # task id whose status log carries the `sentinel: pass` lines
+FM_OVERLORD_TICK_LOG=                # outbound tick log, on the remote
+FM_OVERLORD_TICK_CADENCE_SECS=7200   # the tick's schedule interval
+FM_OVERLORD_TICK_SLACK_SECS=600      # how late a tick may start before it exceeds its cadence
+FM_OVERLORD_CLAIMS_JSON=             # claims backlog file, on the remote
+FM_OVERLORD_SUPPORT_JSON=            # support backlog file, on the remote
+FM_OVERLORD_PR_SCOPE=                # pull request search scope, for example org:<login>
+FM_OVERLORD_PR_PAGES=2               # pages of 100 green pull requests read per check
+FM_OVERLORD_GREEN_AGE_SECS=7200      # a green head older than this that nobody merged is counted
+FM_OVERLORD_FLAT_SECS=14400          # users_told_today flat this long is a crossing
+FM_OVERLORD_STALE_SECS=3600          # a source older than this is unmeasured
+FM_OVERLORD_OWNER_CREDIT=            # owning lane per domain: the task id a correction is steered to
+FM_OVERLORD_OWNER_CLAIMS=
+FM_OVERLORD_OWNER_SUPPORT=
+FM_OVERLORD_OWNER_MERGES=
+FM_OVERLORD_OWNER_METER=
+FM_OVERLORD_FABLE_LANE=              # the lane that reviews irreversible corrections and adjudicates disagreements
+FM_OVERLORD_PAGE_CMD=                # shell command given the page text as $1 and on stdin, bounded at 5s
+FM_OVERLORD_PROBE_SECS=600           # the check reads its sources at most this often
+FM_OVERLORD_REMIND_SECS=14400        # least time between two interjections of one open rise
+```
+
+The claims and support backlog files are JSON objects written by those domains' own monitors.
+The claims file carries `stuck_over_7d_no_step` and `reason_loss`; the support file carries `waiting_on_us`, `promised_a_person_24h`, `promises_broken_24h`, and `commitments_overdue`; both carry `written_at` as an ISO-8601 UTC time.
 
 ## Fleet watchdog (config/watchdog.env)
 
