@@ -372,6 +372,87 @@ test_refuses_a_malformed_config() {
   pass "tick refuses a malformed config value instead of guessing"
 }
 
+# --- the fat-process escalation and the finding delivery ----------------------
+
+test_escalates_an_ignored_sigterm_to_sigkill() {
+  reset_tree
+  sed -i 's/^fat_process=.*/fat_process=1/' "$AK47_CONFIG/devops.conf"
+  sleep 60 &
+  local p=$!
+  # A record from ten minutes ago: the tick that sent SIGTERM is long gone, so
+  # only the durable clock can escalate.
+  printf '%s %s\n' "$p" "$(( $(date +%s) - 600 ))" >"$AK47_STATE/fat.term"
+  "$TICK" --apply >/dev/null 2>&1 || fail "tick exited non-zero"
+  sleep 0.2
+  if kill -0 "$p" 2>/dev/null; then
+    kill -KILL "$p" 2>/dev/null
+    fail "tick did not SIGKILL a pid that ignored SIGTERM for ten minutes"
+  fi
+  grep -q 'SIGKILL' "$AK47_STATE/reap.log" 2>/dev/null \
+    || fail "the escalation was not logged with its revert"
+  [ -s "$AK47_STATE/fat.term" ] && fail "the fat.term record survived the kill"
+  pass "tick escalates an ignored SIGTERM to SIGKILL across runs"
+}
+
+test_a_dry_run_does_not_consume_the_escalation() {
+  reset_tree
+  sed -i 's/^fat_process=.*/fat_process=1/' "$AK47_CONFIG/devops.conf"
+  sleep 60 &
+  local p=$! stamp
+  stamp=$(( $(date +%s) - 600 ))
+  printf '%s %s\n' "$p" "$stamp" >"$AK47_STATE/fat.term"
+  "$TICK" --dry-run >/dev/null 2>&1 || fail "tick exited non-zero"
+  kill -0 "$p" 2>/dev/null || fail "a dry run killed a process"
+  grep -q "^$p $stamp$" "$AK47_STATE/fat.term" 2>/dev/null \
+    || fail "a dry run consumed the escalation record, so the next real tick would miss it"
+  grep -q 'fat-process' "$AK47_STATE/findings.log" 2>/dev/null \
+    || fail "a dry run did not file a finding for the escalation it would perform"
+  kill -KILL "$p" 2>/dev/null
+  pass "a dry run neither kills nor consumes the escalation record"
+}
+
+test_commits_a_finding_key_only_after_delivery() {
+  reset_tree
+  # A failed inbox send must leave the dedupe key uncommitted, or the finding is
+  # silenced for six hours. The fake fm-inbox.sh is the only delivery path.
+  printf '#!/usr/bin/env bash\nexit 1\n' >"$FM_HOME/bin/fm-inbox.sh"
+  chmod +x "$FM_HOME/bin/fm-inbox.sh"
+  printf '%s tick mode=apply tmp_before=0 tmp_after=0\n' \
+    "$(date -u -d '4 hours ago' +%Y-%m-%dT%H:%M:%SZ)" >"$AK47_STATE/devops.log"
+  "$TICK" --apply >/dev/null 2>&1 || fail "tick exited non-zero"
+  [ -f "$AK47_STATE/keys/loop-gap" ] \
+    && fail "a finding's dedupe key was committed before its note was delivered"
+  grep -q 'DELIVERY-FAILED' "$AK47_STATE/findings.log" 2>/dev/null \
+    || fail "a failed delivery was not recorded"
+  pass "a failed delivery does not commit the finding's dedupe key"
+}
+
+test_delivery_commits_the_key_so_the_next_tick_is_quiet() {
+  reset_tree
+  printf '#!/usr/bin/env bash\nexit 0\n' >"$FM_HOME/bin/fm-inbox.sh"
+  chmod +x "$FM_HOME/bin/fm-inbox.sh"
+  printf '%s tick mode=apply tmp_before=0 tmp_after=0\n' \
+    "$(date -u -d '4 hours ago' +%Y-%m-%dT%H:%M:%SZ)" >"$AK47_STATE/devops.log"
+  "$TICK" --apply >/dev/null 2>&1 || fail "tick exited non-zero"
+  [ -f "$AK47_STATE/keys/loop-gap" ] \
+    || fail "a delivered finding did not commit its dedupe key"
+  pass "a delivered finding commits its key so it is not re-sent"
+}
+
+test_reports_a_dry_run_that_outlived_its_24_hours() {
+  reset_tree
+  # The first tick line is 25 hours old, and both acting classes are still
+  # report-only: the tick must say so without arming itself.
+  printf '%s tick mode=apply tmp_before=0 tmp_after=0\n' \
+    "$(date -u -d '25 hours ago' +%Y-%m-%dT%H:%M:%SZ)" >"$AK47_STATE/devops.log"
+  "$TICK" --apply >/dev/null 2>&1 || fail "tick exited non-zero"
+  grep -q 'swap-unarmed' "$AK47_STATE/findings.log" 2>/dev/null \
+    || fail "the tick did not flag a report-only class past its 24 h dry run"
+  grep -q 'fat-unarmed' "$AK47_STATE/findings.log" 2>/dev/null \
+    || fail "the tick did not flag fat-process past its 24 h dry run"
+  pass "the tick flags a report-only class that outlived its dry run"
+}
+
 test_refuses_a_directory_a_live_process_is_sitting_in
 test_refuses_a_directory_a_live_process_has_a_file_open_in
 test_refuses_a_live_tasks_scratch_root
@@ -392,3 +473,8 @@ test_the_log_line_carries_the_verdict
 test_writes_a_numeric_sample_for_the_weekly_review
 test_reports_its_own_loop_gap
 test_refuses_a_malformed_config
+test_escalates_an_ignored_sigterm_to_sigkill
+test_a_dry_run_does_not_consume_the_escalation
+test_commits_a_finding_key_only_after_delivery
+test_delivery_commits_the_key_so_the_next_tick_is_quiet
+test_reports_a_dry_run_that_outlived_its_24_hours
