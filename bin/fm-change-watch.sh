@@ -91,7 +91,9 @@
 #           its merge has no evidence. bin/fm-teardown.sh calls it with
 #           --terminal-gap, which fails only for a terminal measurement gap: a
 #           running watch never blocks teardown, because state/change-watch/ is
-#           not a task record and keeps sampling after the task is gone.
+#           not a task record and keeps sampling after the task is gone. Both
+#           modes decide from the watch's durable row, so deleting the verdict
+#           file never turns a failing row into a pass.
 # audit     The 7-day acceptance, measured. It fails (exit 1) when any status log
 #           under state/ carries the literal "change-watch completed unmeasured"
 #           line, or when any durable row completed inside the window ended
@@ -2025,6 +2027,25 @@ cw_progress_label() {  # <watch-id>
 cw_rows_dir() { printf '%s/rows\n' "$WATCH_ROOT"; }
 cw_row_path() { printf '%s/%s.json\n' "$(cw_rows_dir)" "$1"; }
 
+# The terminal state a watch's durable row records, or nothing when the watch
+# never wrote a row. The row, not the verdict file, is the authority the gates
+# read: deleting a verdict can remove the wake's detail but never the record that
+# a merge ended without a measurement.
+cw_row_state() {  # <watch-id>
+  local row
+  row=$(cw_row_path "$1")
+  [ -f "$row" ] || return 0
+  sed -n 's/.*"terminal_state": "\([^"]*\)".*/\1/p' "$row" 2>/dev/null | tail -1
+}
+
+# The reason a watch's durable row recorded, for the refusal text.
+cw_row_reason() {  # <watch-id>
+  local row
+  row=$(cw_row_path "$1")
+  [ -f "$row" ] || return 0
+  sed -n 's/.*"reason": "\(.*\)".*/\1/p' "$row" 2>/dev/null | tail -1
+}
+
 cw_json_escape() {  # <text>
   printf '%s' "$1" | awk '
     BEGIN { ORS = "" }
@@ -2711,12 +2732,17 @@ cmd_verdict() {
 # cannot claim done while its merge has no evidence. A task with no watch at all
 # passes, because there is nothing to prove.
 #
+# Both modes decide from the watch's durable row, which the verdict file cannot
+# mask: deleting a verdict leaves the row's terminal state intact, so a watch
+# that ended unmeasurable keeps failing. Only a watch registered before rows
+# existed, which has no row, is judged by its verdict file.
+#
 # --terminal-gap is the same gate for the teardown boundary bin/fm-teardown.sh
 # consults: only a terminal measurement gap fails there, because a watch still
 # running outlives the task's records in state/change-watch/ and keeps sampling
 # on its own, so refusing teardown for it would block every merge for 12 hours.
 cmd_gate() {  # <task-id> [--terminal-gap]
-  local task=$1 mode=${2:-} meta id line rc=0 found=0
+  local task=$1 mode=${2:-} meta id line state rc=0 found=0
   [ -d "$WATCH_ROOT" ] || return 0
   for meta in "$WATCH_ROOT"/*/watch.meta; do
     [ -e "$meta" ] || continue
@@ -2724,6 +2750,26 @@ cmd_gate() {  # <task-id> [--terminal-gap]
     [ "$(cw_meta_get "$id" task || true)" = "$task" ] || continue
     found=1
     cw_reconcile_drive "$id"
+    state=$(cw_row_state "$id")
+    if [ -n "$state" ]; then
+      case "$state" in
+        unmeasurable-with-reason)
+          printf 'change-watch: gate FAIL %s: unmeasurable-with-reason: %s\n' \
+            "$id" "$(cw_row_reason "$id")"
+          rc=1 ;;
+        open)
+          if [ "$mode" = --terminal-gap ]; then
+            :
+          else
+            printf 'change-watch: gate FAIL %s: still running (%s)\n' "$id" "$(cw_progress_label "$id")"
+            rc=1
+          fi ;;
+        proven|regressed) ;;
+        *)
+          printf 'change-watch: gate FAIL %s: the durable row records terminal_state %s\n' "$id" "$state"; rc=1 ;;
+      esac
+      continue
+    fi
     line=''
     [ -f "$(cw_verdict_path "$id")" ] && line=$(cat "$(cw_verdict_path "$id")")
     case "$line" in
@@ -2766,7 +2812,7 @@ cmd_audit() {  # [<days>]
     for row in "$rows"/*.json; do
       [ -e "$row" ] || continue
       total=$((total + 1))
-      state=$(sed -n 's/.*"terminal_state": "\([^"]*\)".*/\1/p' "$row" 2>/dev/null | tail -1)
+      state=$(cw_row_state "$(basename "$row" .json)")
       completed=$(sed -n 's/.*"completed_epoch": \([0-9]*\).*/\1/p' "$row" 2>/dev/null | tail -1)
       [ -n "$completed" ] || continue
       [ "$completed" -ge "$since" ] || continue

@@ -45,6 +45,7 @@
 #   (cw2) watch ended interrupted, then re-registered                -> REFUSE then ALLOW
 #   (cw3) watch still running (it outlives the task)                 -> ALLOW
 #   (cw4) watch ended proven                                         -> ALLOW
+#   (cw5) unmeasurable watch whose verdict file was deleted           -> REFUSE
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -3690,11 +3691,11 @@ test_migrated_orca_unpushed_worktree_refuses() {
   pass "unlanded work in a migrated Orca worktree is still refused"
 }
 
-# Seed one change watch for task-x1 in <case_dir>. <verdict> is written to the
-# watch's verdict file when non-empty; an empty verdict is a watch whose drive is
-# still running (it has registered, but reached no terminal state).
-seed_change_watch() {  # <case-dir> [<verdict>]
-  local case_dir=$1 verdict=${2:-} id='task-x1-1'
+# Seed one change watch for task-x1 in <case_dir>. <state> is the watch's
+# durable row terminal_state; <verdict> is written to the watch's verdict file
+# when non-empty. Deleting the verdict file must never clear the row.
+seed_change_watch() {  # <case-dir> <state> [<verdict>]
+  local case_dir=$1 state=$2 verdict=${3:-} id='task-x1-7'
   local dir="$case_dir/state/change-watch/$id"
   mkdir -p "$dir" "$case_dir/state/change-watch/rows"
   {
@@ -3705,18 +3706,28 @@ seed_change_watch() {  # <case-dir> [<verdict>]
     printf 't0=1790000000\n'
     printf 'created=1790000000\n'
   } > "$dir/watch.meta"
+  printf '900\t1790000900\n3600\t1790003600\n21600\t1790021600\n' > "$dir/schedule"
   [ -z "$verdict" ] || printf '%s\n' "$verdict" > "$dir/verdict"
   {
     printf '{"version": "fm-change-watch-row-v1", "watch_id": "%s", ' "$id"
-    printf '"task": "task-x1", "completed_epoch": 1790044000, '
+    printf '"task": "task-x1", "completed_epoch": %s, ' \
+      "$( [ "$state" = open ] && printf null || printf 1790044000 )"
     printf '"readings": {"900": null, "3600": null, "21600": null}, '
     printf '"real_user_check": "not-applicable", '
-    if [ -z "$verdict" ]; then
-      printf '"terminal_state": "open", "reason": "the watch is still running"}\n'
-    else
-      printf '"terminal_state": "%s", "reason": "test"}\n' "$verdict"
-    fi
+    printf '"terminal_state": "%s", "reason": "%s"}\n' "$state" "${verdict:-the watch is still running}"
   } > "$case_dir/state/change-watch/rows/$id.json"
+}
+
+# Run the change watch script the way a firstmate home runs it, with a stub arm
+# command so re-registering never touches a real scheduler.
+run_change_watch() {  # <case-dir> <command> [<args>...]
+  local case_dir=$1
+  shift
+  printf '#!/bin/sh\nexit 0\n' > "$case_dir/fakebin/fm-cw-arm"
+  chmod +x "$case_dir/fakebin/fm-cw-arm"
+  env FM_HOME="$case_dir" FM_STATE_OVERRIDE="$case_dir/state" FM_CW_NOW=1790001000 \
+    FM_CW_ARM_CMD="$case_dir/fakebin/fm-cw-arm" FM_CW_NO_WIKI=1 \
+    "$ROOT/bin/fm-change-watch.sh" "$@"
 }
 
 # A landed task whose change watch ended with no measurement verdict is refused:
@@ -3729,7 +3740,7 @@ test_change_watch_terminal_gap_refuses_teardown() {
   write_meta "$case_dir" local-only ship
   wt_commit "$case_dir" "fix the thing"
   add_fork_with_pushed_branch "$case_dir"
-  seed_change_watch "$case_dir" 'unmeasurable-with-reason: nothing measured at +15m'
+  seed_change_watch "$case_dir" unmeasurable-with-reason 'unmeasurable-with-reason: nothing measured at +15m'
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -3738,7 +3749,7 @@ test_change_watch_terminal_gap_refuses_teardown() {
 
   expect_code 1 "$rc" "cw-terminal-gap: teardown should refuse a watch that ended unmeasurable"
   grep -q 'REFUSED' "$case_dir/stderr" || fail "cw-terminal-gap: no REFUSED line in stderr"
-  grep -q 'task-x1-1' "$case_dir/stderr" || fail "cw-terminal-gap: the refusal did not name the watch"
+  grep -q 'task-x1-7' "$case_dir/stderr" || fail "cw-terminal-gap: the refusal did not name the watch"
   grep -q 'unmeasurable-with-reason' "$case_dir/stderr" || fail "cw-terminal-gap: the refusal did not name the reason"
   grep -q 'fm-change-watch.sh verdict' "$case_dir/stderr" || fail "cw-terminal-gap: the refusal did not name the verdict recovery command"
   grep -q 'fm-change-watch.sh doctor' "$case_dir/stderr" || fail "cw-terminal-gap: the refusal did not name the doctor recovery command"
@@ -3755,7 +3766,7 @@ test_change_watch_interrupted_refuses_until_reregistered() {
   write_meta "$case_dir" local-only ship
   wt_commit "$case_dir" "fix the thing"
   add_fork_with_pushed_branch "$case_dir"
-  seed_change_watch "$case_dir" 'interrupted at +30m'
+  seed_change_watch "$case_dir" unmeasurable-with-reason 'interrupted at +30m'
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -3765,14 +3776,44 @@ test_change_watch_interrupted_refuses_until_reregistered() {
   expect_code 1 "$rc" "cw-interrupted: teardown should refuse an interrupted watch"
   grep -q 'interrupted at +30m' "$case_dir/stderr" || fail "cw-interrupted: the refusal did not name the interruption"
 
-  # Re-registering clears the verdict and rewrites the row as open.
-  rm -f "$case_dir/state/change-watch/task-x1-1/verdict"
+  run_change_watch "$case_dir" register task-x1 https://github.com/example/repo/pull/7 \
+    > "$case_dir/register.out" 2>&1 \
+    || fail "cw-interrupted: re-registering the interrupted watch failed"
+  grep -q '"terminal_state": "open"' "$case_dir/state/change-watch/rows/task-x1-7.json" \
+    || fail "cw-interrupted: re-registering did not rewrite the durable row as open"
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
   expect_code 0 "$rc" "cw-interrupted: teardown should proceed once the watch was re-registered"
   pass "an interrupted change watch refuses teardown until it is re-registered"
+}
+
+# The durable row is the authority: removing the verdict file must not clear a
+# refusal, because that would make the guard satisfiable by deleting the artifact
+# it guards.
+test_change_watch_gap_survives_verdict_deletion() {
+  local case_dir rc
+  case_dir=$(make_case cw-verdict-deleted)
+  write_meta "$case_dir" local-only ship
+  wt_commit "$case_dir" "fix the thing"
+  add_fork_with_pushed_branch "$case_dir"
+  seed_change_watch "$case_dir" unmeasurable-with-reason 'unmeasurable-with-reason: nothing measured at +15m'
+  rm -f "$case_dir/state/change-watch/task-x1-7/verdict"
+
+  set +e
+  run_change_watch "$case_dir" gate task-x1 --terminal-gap > "$case_dir/gate.out" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "cw-verdict-deleted: gate --terminal-gap passed after the verdict was deleted"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "cw-verdict-deleted: teardown should still refuse after the verdict was deleted"
+  grep -q 'REFUSED' "$case_dir/stderr" || fail "cw-verdict-deleted: no REFUSED line in stderr"
+  pass "deleting the verdict file does not clear a measurement gap"
 }
 
 # A watch that is still running keeps sampling from state/change-watch/, which is
@@ -3783,7 +3824,7 @@ test_running_change_watch_does_not_block_teardown() {
   write_meta "$case_dir" local-only ship
   wt_commit "$case_dir" "fix the thing"
   add_fork_with_pushed_branch "$case_dir"
-  seed_change_watch "$case_dir" ''
+  seed_change_watch "$case_dir" open
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -3792,7 +3833,7 @@ test_running_change_watch_does_not_block_teardown() {
 
   expect_code 0 "$rc" "cw-running: teardown should not be blocked by a watch still running"
   ! grep -q REFUSED "$case_dir/stderr" || fail "cw-running: teardown printed a REFUSED line for a running watch"
-  [ -f "$case_dir/state/change-watch/rows/task-x1-1.json" ] \
+  [ -f "$case_dir/state/change-watch/rows/task-x1-7.json" ] \
     || fail "cw-running: teardown removed the durable row"
   pass "a change watch still running does not block teardown"
 }
@@ -3804,7 +3845,7 @@ test_proven_change_watch_allows_teardown() {
   write_meta "$case_dir" local-only ship
   wt_commit "$case_dir" "fix the thing"
   add_fork_with_pushed_branch "$case_dir"
-  seed_change_watch "$case_dir" 'clean'
+  seed_change_watch "$case_dir" proven 'clean'
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -3903,5 +3944,6 @@ test_migrated_orca_dirty_worktree_refuses
 test_migrated_orca_unpushed_worktree_refuses
 test_change_watch_terminal_gap_refuses_teardown
 test_change_watch_interrupted_refuses_until_reregistered
+test_change_watch_gap_survives_verdict_deletion
 test_running_change_watch_does_not_block_teardown
 test_proven_change_watch_allows_teardown
