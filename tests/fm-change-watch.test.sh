@@ -1083,6 +1083,45 @@ awk -F'\t' '$2 == 900 && $7 == 1' "$SAMPLES_G" | grep -q "restarts@muso-prod/cor
   || fail "the landed release was not scored: $(awk -F'\t' '$2 == 900' "$SAMPLES_G")"
 pass "the new image lands and the same watch scores the release"
 
+# --- awaiting the deploy is not a measurement gap ------------------------------
+# A reading whose every sample was taken before the rollout landed has nothing
+# to read yet. Counting that as a failed read would end a healthy merge
+# unmeasurable and block its own done claim, which is the opposite of what the
+# watch is for.
+
+HOME_AW=$(cluster_world aw)
+seed_app_pr "$HOME_AW"
+printf 'muso-prod\tcore-backend-api\t6\tlocalhost:30500/muso/core-backend:old-1\n' > "$HOME_AW/workloads"
+printf '[]\n' > "$HOME_AW/sentry/issues-core-backend.json"
+AW_IMAGE='localhost:30500/muso/core-backend:old-1'
+aw_cw() {  # <now> <args...>
+  local now=$1
+  shift
+  CW_CLUSTER_DIR='' PATH="$HOME_AW/bin:$PATH" FM_CW_SHIM_LOG="$HOME_AW/shim.log" \
+    FM_CW_SHIM_WORKLOADS="$HOME_AW/workloads" FM_CW_SHIM_IMAGE="$AW_IMAGE" \
+    FM_CW_CONFIG_DIR="$HOME_AW/config" FM_CW_SENTRY_DIR="$HOME_AW/sentry" \
+    run_cw "$HOME_AW" "$now" "$@"
+}
+aw_cw 1790000000 register aw1 "$CORE_PR" >/dev/null || fail "register failed"
+printf '900\t1790000900\n3600\t1790003600\n21600\t1790021600\n' \
+  > "$HOME_AW/state/change-watch/aw1$CORE_ID_SUFFIX/schedule"
+aw_cw 1790000900 sample "aw1$CORE_ID_SUFFIX" 900 >/dev/null || fail "sample failed"
+SAMPLES_AW="$HOME_AW/state/change-watch/aw1$CORE_ID_SUFFIX/samples.log"
+[ "$(awk -F'\t' '$2 == 900 && $7 == 1' "$SAMPLES_AW" | wc -l | tr -d ' ')" -eq 0 ] \
+  || fail "a pre-rollout sample scored something: $(cat "$SAMPLES_AW")"
+[ "$(awk -F'\t' '$2 == 900 && $8 == 1' "$SAMPLES_AW" | wc -l | tr -d ' ')" -gt 0 ] \
+  || fail "a pre-rollout sample was not recorded as awaiting the deploy: $(cat "$SAMPLES_AW")"
+AW_IMAGE='localhost:30500/muso/core-backend:new-2'
+aw_cw 1790021600 drive "aw1$CORE_ID_SUFFIX" >/dev/null || fail "drive failed"
+[ "$(aw_cw 1790021600 verdict "aw1$CORE_ID_SUFFIX")" = "change-watch clean" ] \
+  || fail "a watch whose first reading only awaited its deploy did not end clean: $(aw_cw 1790021600 verdict "aw1$CORE_ID_SUFFIX")"
+ROW_AW="$HOME_AW/state/change-watch/rows/aw1$CORE_ID_SUFFIX.json"
+grep -q '"terminal_state": "proven"' "$ROW_AW" \
+  || fail "an awaiting-deploy reading made the row unproven: $(cat "$ROW_AW")"
+grep -q '"900": {"at": [0-9]*, "scored": 0, "unmeasured": 0, "awaiting": [1-9]' "$ROW_AW" \
+  || fail "the +15m reading did not record its awaiting samples: $(cat "$ROW_AW")"
+pass "a reading that only awaited its deploy is measured, not a gap"
+
 # One pod read serves the landing gate and every pod-backed metric of a sample.
 # The armed drive takes all 15 samples in one process, so a read repeated per
 # metric is what spends a family's sample budget before its later targets.

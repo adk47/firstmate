@@ -180,6 +180,12 @@
 # in the note instead. A +12h that cannot be proven writes NO status note at
 # all: it is a failure, so it queues a check wake and records the row.
 #
+# Awaiting the deploy is not a measurement gap. A sample taken before the
+# watched rollout landed has nothing to read yet, so it is recorded as awaiting
+# rather than as a failed read, and it never counts against a proven verdict.
+# A watch whose rollout never landed at all still ends unmeasurable, because no
+# target ever scored and the verdict names it.
+#
 # Durable row: every merge writes exactly one row at
 # state/change-watch/rows/<watch-id>.json, holding the +15m, +1h and +6h
 # readings, the real-user check, and a terminal state of proven / regressed /
@@ -1831,11 +1837,15 @@ cw_set_previous_value() {  # <watch-id> <key> <value>
 # Take one sample. Prints "metric<TAB>target<TAB>value<TAB>baseline" for the
 # first bar crossed, or nothing when every scored metric is inside its bar.
 # Appends one record per metric to samples.log:
-#   epoch<TAB>offset<TAB>key<TAB>value<TAB>baseline<TAB>regressed<TAB>scored
-# where scored is 0 for an unmeasured value or a relative bar with no baseline.
+#   epoch<TAB>offset<TAB>key<TAB>value<TAB>baseline<TAB>regressed<TAB>scored<TAB>awaiting
+# where scored is 0 for an unmeasured value or a relative bar with no baseline,
+# and awaiting is 1 when the only reason the value is missing is that the
+# rollout had not landed yet. Awaiting is not a measurement gap: there was
+# nothing to measure, so it never counts against a proven verdict the way a
+# failed read does.
 cw_take_sample() {  # <watch-id> <offset-seconds> <sample-epoch> <baseline-epoch>
   local id=$1 offset=$2 epoch=$3 baseline_epoch=$4
-  local key metric target value baseline previous regressed scored first reason cluster err rc
+  local key metric target value baseline previous regressed scored awaiting first reason cluster err rc
   first=''
   cw_budget_start
   cw_reasons_begin "$id"
@@ -1876,6 +1886,8 @@ cw_take_sample() {  # <watch-id> <offset-seconds> <sample-epoch> <baseline-epoch
     fi
     [ -n "$value" ] || cw_record_reason "$id" "$key" "${reason:-unmeasured}"
     [ -n "$value" ] || scored=0
+    awaiting=0
+    case "$reason" in 'awaiting the deploy:'*) awaiting=1 ;; esac
     if [ "$scored" -eq 1 ] && cw_metric_relative "$metric" && [ -z "$baseline" ]; then
       scored=0
       cw_record_reason "$id" "$key" "baseline could not be read, so the relative bar was not scored"
@@ -1885,7 +1897,8 @@ cw_take_sample() {  # <watch-id> <offset-seconds> <sample-epoch> <baseline-epoch
       regressed=1
       [ -n "$first" ] || first="$metric	$target	$value	$baseline"
     fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$epoch" "$offset" "$key" "$value" "$baseline" "$regressed" "$scored" \
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$epoch" "$offset" "$key" "$value" "$baseline" "$regressed" "$scored" "$awaiting" \
       >> "$(cw_samples_path "$id")"
     [ -z "$value" ] || cw_set_previous_value "$id" "$key" "$value"
   done < <(cw_metric_keys "$id")
@@ -1999,9 +2012,12 @@ cw_progress_label() {  # <watch-id>
 #   reason             the human sentence behind the terminal state
 #
 # A reading is {"at": <epoch>, "scored": <n>, "unmeasured": <n>,
-# "regressed": <n>, "values": {"<metric>@<target>": "<value>", ...}}, or null
-# when no sample was ever taken at that offset. A reading with scored 0 is
-# present but measured nothing, which is exactly what makes a row unproven.
+# "awaiting": <n>, "regressed": <n>, "measured": <bool>,
+# "values": {"<metric>@<target>": "<value>", ...}}, or null when no sample was
+# ever taken at that offset. "measured" is true when the reading scored
+# something, or when everything it could not score was only waiting for the
+# rollout to land; a reading that failed to read is present but measured
+# nothing, which is exactly what makes a row unproven.
 
 cw_rows_dir() { printf '%s/rows\n' "$WATCH_ROOT"; }
 cw_row_path() { printf '%s/%s.json\n' "$(cw_rows_dir)" "$1"; }
@@ -2037,12 +2053,18 @@ cw_reading_json() {  # <watch-id> <offset-seconds>
     $2 == offset {
       if (at == "") at = $1
       if ($7 == 1) { scored++; values = values (n++ ? ", " : "") "\"" esc($3) "\": \"" esc($4) "\"" }
+      else if ($8 == 1) awaiting++
       else unmeasured++
       if ($6 == 1) regressed++
     }
     END {
       if (at == "") { printf "null"; exit }
-      printf "{\"at\": %s, \"scored\": %d, \"unmeasured\": %d, \"regressed\": %d, \"values\": {%s}}", at, scored, unmeasured, regressed, values
+      # A reading is measured when it scored something, or when everything it
+      # could not score was only waiting for the rollout to land. A reading
+      # whose samples all failed to read is a gap, and so is one that mixes a
+      # failed read with an awaiting one.
+      measured = (scored > 0 || (awaiting > 0 && unmeasured == 0)) ? "true" : "false"
+      printf "{\"at\": %s, \"scored\": %d, \"unmeasured\": %d, \"awaiting\": %d, \"regressed\": %d, \"measured\": %s, \"values\": {%s}}", at, scored, unmeasured, awaiting, regressed, measured, values
     }
   ' "$samples"
 }
@@ -2116,17 +2138,21 @@ cw_row_write() {  # <watch-id> <terminal-state> <reason> [<task>] [<url>] [<merg
 }
 
 # The terminal state of a finished watch, as "<state>\t<reason>". proven needs
-# all three readings present, every one of them having scored at least one
-# metric, and every target measured at least once; anything less is
-# unmeasurable-with-reason naming what is missing. A missing reading is never a
-# pass.
+# all three readings present, every one of them measured, and every target
+# measured at least once; anything less is unmeasurable-with-reason naming what
+# is missing. A missing reading is never a pass.
+#
+# A reading that only ever waited for its rollout to land is measured, not a
+# gap: the deploy had not happened yet, so there was nothing to read. A watch
+# whose rollout never landed at all still ends unmeasurable, because no target
+# ever scored and cw_unmeasured_targets names it.
 cw_terminal_state() {  # <watch-id>
   local id=$1 r json missing='' empty='' unread gaps why=''
   for r in 900 3600 21600; do
     json=$(cw_reading_json "$id" "$r")
     if [ "$json" = null ]; then
       missing="$missing${missing:+, }+$((r / 60))m"
-    elif printf '%s' "$json" | grep -q '"scored": 0,'; then
+    elif printf '%s' "$json" | grep -q '"measured": false'; then
       empty="$empty${empty:+, }+$((r / 60))m"
     fi
   done
@@ -2139,7 +2165,7 @@ cw_terminal_state() {  # <watch-id>
     return 0
   fi
   [ -z "$missing" ] || why="no reading at $missing"
-  [ -z "$empty" ] || why="$why${why:+; }nothing scored at $empty"
+  [ -z "$empty" ] || why="$why${why:+; }nothing measured at $empty"
   [ -z "$unread" ] || why="$why${why:+; }never measured: $unread"
   [ -n "$(cw_metric_keys "$id")" ] || why="$why${why:+; }the watch registered no metric"
   printf 'unmeasurable-with-reason\t%s\n' "$why"

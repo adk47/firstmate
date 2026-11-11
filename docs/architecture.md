@@ -343,7 +343,9 @@ A schedule that ends without the evidence a clean verdict needs records `unmeasu
 
 Every merge also writes exactly one durable row at `state/change-watch/rows/<watch-id>.json`, holding the +15m, +1h and +6h readings, the real-user check, and a terminal state of `proven`, `regressed`, or `unmeasurable-with-reason` (plus `open` while the watch runs, and `not-applicable` for a merge that touched no deployable surface at all).
 `state/change-watch/` is not a task record, so teardown never removes it and the row outlives the task; the schema is owned by the `durable row` section of the script.
-`proven` needs all three readings present, every one of them having scored at least one metric, and every target measured at least once, so a row with a missing reading is never `proven`.
+`proven` needs all three readings present, every one of them measured, and every target measured at least once, so a row with a missing reading is never `proven`.
+A reading counts as measured when it scored something, or when everything it could not score was only waiting for the rollout to land: a sample taken before the deploy landed has nothing to read yet, so it is recorded as awaiting rather than as a failed read and never counts against a proven verdict.
+A watch whose rollout never landed at all still ends unmeasurable, because no target ever scored and the verdict names it.
 The real-user check is `observed` when `http_5xx_per_min` - the only metric read from the pods' own access logs - was scored, `not-observed` when it was never scored, and `not-applicable` when the watch has no such target; it is recorded, never a gate on `proven`.
 `bin/fm-change-watch.sh audit [<days>]` is the 7-day acceptance, measured: it fails when any status log under `state/` carries the literal `change-watch completed unmeasured` line, or when any row completed inside the window ended `unmeasurable-with-reason`.
 `doctor` proves each of those reads on demand and states every failure as `doctor: FAIL`, so an unmeasured watch is a diagnosable condition rather than a silent one.

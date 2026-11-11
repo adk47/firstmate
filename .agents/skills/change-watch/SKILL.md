@@ -91,7 +91,9 @@ A clean completion is not captain-facing news, so never surface it to the captai
 
 Every merge writes exactly one row at `state/change-watch/rows/<watch-id>.json`, holding the +15m, +1h and +6h readings, the real-user check, and a terminal state of `proven`, `regressed`, or `unmeasurable-with-reason` (plus `open` while the watch runs, and `not-applicable` for a merge that touched no deployable surface at all).
 `state/change-watch/` is not a task record, so `bin/fm-teardown.sh` never removes it and the row outlives the task; the schema is owned by the `durable row` section of `bin/fm-change-watch.sh`.
-`proven` needs all three readings present, every one of them having scored at least one metric, and every target measured at least once; a missing reading is never a pass.
+`proven` needs all three readings present, every one of them measured, and every target measured at least once; a missing reading is never a pass.
+A reading counts as measured when it scored something, or when everything it could not score was only waiting for the rollout to land - a sample taken before the deploy landed has nothing to read yet, so it is recorded as awaiting rather than as a failed read.
+A watch whose rollout never landed at all still ends unmeasurable, because no target ever scored.
 The real-user check is `observed` when `http_5xx_per_min` - the only metric read from the pods' own access logs - was scored, `not-observed` when it was never scored, and `not-applicable` when the watch has no such target; it is recorded, never a gate on `proven`.
 
 `bin/fm-change-watch.sh gate <task-id>` is the done-claim gate: it exits 0 only when every watch that task registered is terminal and not a measurement gap, so a task cannot claim done while its merge has no evidence.
