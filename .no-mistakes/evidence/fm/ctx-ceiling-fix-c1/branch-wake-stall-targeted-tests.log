@@ -1,0 +1,15 @@
+$ bash tests/fm-wake-queue.test.sh
+ok - an aged foreign row behind a supervision branch turn is not a stall
+ok - a long branch turn past the mtime window is not a stall
+ok - a malformed trailing branch line is treated as writing, not idle
+ok - a historical malformed branch line is skipped and the last complete message decides
+ok - an idle branch with an aged row reports once with the evidence it read
+
+$ bash tests/fm-watch-secondmate-wake-stall.test.sh
+ok - a busy mate from a real spawn stays silent with no side effect
+ok - an idle mate's aged row reports with the unchanged reason, marker, and publication
+ok - a gone endpoint does not suppress the rung even with a valid busy record
+ok - a failed pane capture does not override a semantic busy record
+ok - a grok capture failure still reports the stall
+ok - a grok mate's rendered tail decides the rung: busy footer silent, unprovable reports
+# all fm-watch-secondmate-wake-stall tests passed
