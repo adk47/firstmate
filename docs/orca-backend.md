@@ -76,7 +76,7 @@ Firstmate never raw-deletes an Orca worktree Orca still names.
 
 A task migrated from the Mac-era Orca backend keeps only `orca_worktree_id_prior=` (a `/Users/<user>/orca/workspaces/...` path) and no `orca_worktree_id=`, so its backend reads as tmux and its worktree is not in Treehouse's pool.
 After the same landed-work gates pass, cleanup resolves the worktree Orca still records at that prior path and requires it to canonicalize to the exact directory the gates inspected before removing it through Orca.
-When Orca no longer tracks it, cleanup removes it as a plain git worktree.
+Only Orca's proven `selector_not_found` registry miss falls back to the same guarded plain git release; every other failure, including a registry row that resolves elsewhere, refuses with the concrete error and leaves the worktree, branch, and record intact.
 Neither path relaxes the dirty, unlanded, or force gates.
 
 ## Active limits

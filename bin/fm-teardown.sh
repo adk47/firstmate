@@ -76,9 +76,11 @@
 # orca_worktree_id, so its backend reads as tmux and its worktree is not in
 # treehouse's pool. After the same landed-work gates pass, teardown resolves the
 # worktree Orca still records at that prior path, requires it to canonicalize to
-# the very directory the gates inspected, and removes it through Orca; when Orca
-# no longer tracks it, teardown removes it as a plain git worktree. Neither path
-# relaxes the dirty, unlanded, or force gates.
+# the very directory the gates inspected, and removes it through Orca; only
+# Orca's proven selector_not_found registry miss falls back to the guarded plain
+# git release, and every other failure refuses with the concrete error rather
+# than deleting a directory Orca still names. Neither path relaxes the dirty,
+# unlanded, or force gates.
 # A Herdr presentation journal never authorizes cleanup. Teardown still closes
 # only the exact task pane from ordinary endpoint metadata and never calls
 # `workspace close`. It retires the non-authoritative journal only when a
@@ -114,10 +116,10 @@
 # never to a discard. Every other Orca failure refuses with the concrete Orca
 # error named, including one the CLI reports only on stderr, because a bare git
 # remove would delete a worktree Orca still owns.
-# A tmux-era worktree - a Mac-migrated record whose backend is tmux - on a host
-# without treehouse has no pool to corrupt, so it releases through the same
-# guarded plain git release once that release is proven safe, instead of the
-# treehouse refusal. Every other worktree needs treehouse installed on this host
+# A legacy tmux-era worktree outside an Orca workspace tree on a host without
+# treehouse has no pool to corrupt, so it releases through the same guarded
+# plain git release once that release is proven safe, instead of the treehouse
+# refusal. Every other worktree needs treehouse installed on this host
 # plus an inspectable recorded project directory, and the treehouse pool the
 # project resolves is asked (read only) whether it holds that exact worktree -
 # judged from the `status` stdout listing alone, never from the diagnostics real
