@@ -45,7 +45,9 @@
 #           so, as does one that only deletes a manifest, one whose only target
 #           could not be read, one whose manifests could not be read, and one
 #           whose cluster image inventory could not be read; each says which of
-#           those it was.
+#           those it was. Every one of those still writes the merge's durable
+#           row, and one whose surface could not be read records it as
+#           unmeasurable-with-reason and queues the unmeasurable wake.
 #           Every Kubernetes target records a rollout FINGERPRINT at
 #           registration - its pod images plus its pods' pod-template-hash
 #           labels - and the watch refuses to score it until that fingerprint
@@ -56,9 +58,9 @@
 #           a digest-pinned image still proves its own rollout. A target whose
 #           fingerprint has not changed is recorded as awaiting the deploy, never
 #           as health. When the fingerprint cannot be read at registration the
-#           target is still measured, and the clean completion, the completed-
-#           unmeasured note, and the status line each say the rollout was never
-#           proven for it.
+#           target is still measured, and the clean completion, the unmeasurable
+#           verdict, and the status line each say the rollout was never proven
+#           for it.
 #           Registering an existing watch whose drive stopped before the end of
 #           its schedule, or whose schedule ended unmeasurable, re-arms it: a
 #           completed schedule is reset and re-measured from that point, its
