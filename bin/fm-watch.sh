@@ -13,7 +13,7 @@
 # although its initial no-verb status signal still surfaces in normal mode.
 # While state/.afk exists, the daemon owns triage and this watcher queues and exits
 # on every wake. Printed reason lines:
-#   signal: <N> files (<S> status, <T> turn-end): <status path>... [+N more]
+#   signal: <N> file(s) (<S> status, <T> turn-end): <status path>... [+N more]
 #                          a prompt-sized summary of the changed-file batch: the
 #                          total, how many status versus turn-end, then up to five
 #                          changed status paths, never a turn-ended one, capped at
@@ -1361,7 +1361,7 @@ EOF
 # $files still reaches every classifier as one space-separated list
 # (ids carry no spaces). Only this prompt becomes compact.
 #
-# Shape: "signal: <N> files (<S> status, <T> turn-end): <status path>... [+N more]".
+# Shape: "signal: <N> file(s) (<S> status, <T> turn-end): <status path>... [+N more]".
 # Turn-ended markers never appear: they carry no verb and no content, and their
 # only real consumer is the in-process benign check, which reads the argument
 # list rather than this string. Status paths are ordered by decision relevance -
@@ -1415,8 +1415,8 @@ signal_batch_reason() {  # <file> ...
 # keyed by the batch identity. The queued payload is a compact summary now, and
 # the Pi branch dispatcher still has to resolve every task in a batch from its
 # row's key, so the list lives here instead of in the prompt. One record per
-# batch, newest last, retained while its batch key remains in the wake queue;
-# written atomically (unique temp file, then rename) so a reader never observes a
+# batch, newest last, pruned on the next write once its batch key leaves the
+# wake queue; written atomically (unique temp file, then rename) so a reader never observes a
 # partial record. Format: "<batch-key>\t<space-separated paths>".
 signal_record_batch_paths() {  # <batch-key> <file> ...
   local key=$1 sidecar tmp
