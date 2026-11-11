@@ -909,6 +909,10 @@ treehouse_required_by_recorded_task() {
     [ -f "$meta" ] || continue
     grep -q '^kind=secondmate$' "$meta" 2>/dev/null && continue
     [ "$(fm_backend_of_meta "$meta")" = orca ] && continue
+    if grep -q '^orca_worktree_id_prior=' "$meta" 2>/dev/null \
+       && ! grep -q '^orca_worktree_id=' "$meta" 2>/dev/null; then
+      continue
+    fi
     return 0
   done
   return 1

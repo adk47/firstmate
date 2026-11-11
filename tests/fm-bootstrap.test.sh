@@ -789,7 +789,8 @@ test_recorded_default_backend_task_requires_absent_treehouse() {
 # A remote secondmate record carries kind=secondmate and remote_backend=herdr
 # but no backend= line, so it must not be mistaken for a local tmux task that
 # needs this host's treehouse. Its worktree lease lives on the remote host.
-test_remote_secondmate_record_does_not_require_local_treehouse() {
+test_remote_secondmate_record_does_not_require_local_treehouse
+test_migrated_orca_record_does_not_require_local_treehouse() {
   local case_dir home fakebin base_path out
   case_dir="$TMP_ROOT/orca-remote-secondmate-no-treehouse"
   home="$case_dir/home"
@@ -812,6 +813,30 @@ SH
   assert_not_contains "$out" "MISSING: treehouse" \
     "a remote secondmate record must not require local treehouse under an orca home"
   pass "bootstrap: a remote secondmate record does not require local treehouse"
+}
+
+# A migrated Mac-era Orca task keeps only orca_worktree_id_prior and no
+# backend= line, so its backend reads as tmux. Its worktree is Orca-managed and
+# outside Treehouse's pool, so this host must not report a missing treehouse for it.
+test_migrated_orca_record_does_not_require_local_treehouse() {
+  local case_dir home fakebin base_path out
+  case_dir="$TMP_ROOT/orca-migrated-task-no-treehouse"
+  home="$case_dir/home"
+  mkdir -p "$home/config" "$home/state"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  printf '%s\n' orca > "$home/config/backend"
+  printf '%s\n' 'window=firstmate:fm-migrated-task' 'kind=ship' \
+    'orca_worktree_id_prior=11111111-2222-3333-4444-555555555555::/Users/aaron/orca/workspaces/proj/fm-migrated-task' \
+    > "$home/state/migrated-task.meta"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/tmux" "$fakebin/treehouse"
+  fm_fake_exit0 "$fakebin" orca
+  base_path=$(make_path_without_tool "$case_dir" treehouse)
+  out=$(PATH="$fakebin:$base_path" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "MISSING: treehouse" \
+    "a migrated Orca task record must not require local treehouse under an orca home"
+  pass "bootstrap: a migrated Orca task record does not require local treehouse"
 }
 
 test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
@@ -1269,6 +1294,7 @@ test_treehouse_lease_check_follows_resolved_backend
 test_recorded_treehouse_backend_requires_treehouse_under_orca
 test_recorded_default_backend_task_requires_absent_treehouse
 test_remote_secondmate_record_does_not_require_local_treehouse
+test_migrated_orca_record_does_not_require_local_treehouse
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets
 test_fleet_sync_timeout_explicit_override_wins
