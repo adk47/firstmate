@@ -122,6 +122,44 @@ test_counts_only_lines_inside_the_window() {
   pass "the review counts only lines inside the requested window"
 }
 
+test_counts_a_loop_gap_just_over_three_intervals() {
+  seed_samples load15 20
+  local new out
+  new=$(date -u -d '1 day ago' +%Y-%m-%dT%H:%M:%SZ)
+  printf '%s tick mode=apply tmp_before=0 tmp_after=0 failures=0 loop_gap=901s\n' "$new" >"$AK47_STATE/devops.log"
+  printf '%s tick mode=apply tmp_before=0 tmp_after=0 failures=0 loop_gap=900s\n' "$new" >>"$AK47_STATE/devops.log"
+  out=$("$REVIEW" --print --no-inbox 2>&1) || fail "the review failed: $out"
+  case "$out" in
+    *"- runs with a loop gap over 3 intervals: 1"*) : ;;
+    *) fail "the review did not count a 901s gap against a 900s threshold: $out" ;;
+  esac
+  pass "the review counts a loop gap just over three intervals"
+}
+
+test_reads_a_sample_written_by_the_tick() {
+  local tick=$ROOT/ak47/tick.sh out
+  cat >"$AK47_CONFIG/devops.conf" <<'CONF'
+tmp_mktemp_min=0
+tmp_producer_min=0
+orphan_min=0
+quarantine_days=7
+tmp_max_entries=0
+tmp_max_moves=2000
+swap_pressure=0
+fat_process=0
+fat_process_gb=3
+fat_process_min=10
+interval_seconds=300
+CONF
+  "$tick" --apply >/dev/null 2>&1 || fail "the tick failed while producing a sample"
+  out=$("$REVIEW" --print --no-inbox 2>&1) || fail "the review could not read the tick's sample: $out"
+  case "$out" in
+    *"load15"*) : ;;
+    *) fail "the review reported no statistics for the tick's sample: $out" ;;
+  esac
+  pass "the review reads a sample line produced by the tick"
+}
+
 # --- what it must never do ------------------------------------------------------
 
 test_never_writes_the_budget() {
@@ -195,6 +233,8 @@ test_proposes_a_raise_when_p95_sits_near_the_ceiling
 test_proposes_a_lower_when_p95_sits_far_below_the_ceiling
 test_emits_a_unified_diff_against_the_budget
 test_counts_only_lines_inside_the_window
+test_counts_a_loop_gap_just_over_three_intervals
+test_reads_a_sample_written_by_the_tick
 test_never_writes_the_budget
 test_never_proposes_a_new_action_class
 test_states_what_it_will_not_do

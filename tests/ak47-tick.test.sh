@@ -309,8 +309,12 @@ test_writes_a_numeric_sample_for_the_weekly_review() {
   reset_tree
   "$TICK" --apply >/dev/null 2>&1 || fail "tick exited non-zero"
   [ -s "$AK47_STATE/samples.log" ] || fail "tick wrote no samples.log line"
-  local line
+  local line first
   line=$(tail -n 1 "$AK47_STATE/samples.log")
+  first=${line%% *}
+  case "$first" in
+    ''|*[!0-9]*) fail "sample line does not start with an epoch: $line" ;;
+  esac
   case "$line" in
     *load15=*) : ;;
     *) fail "sample line is missing load15: $line" ;;

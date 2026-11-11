@@ -200,8 +200,11 @@ PY
     count_in() { local n; n=$(window_lines | grep -c "$1" 2>/dev/null); echo "${n:-0}"; }
     echo "- tick lines in the window: $(window_lines | wc -l)"
     echo "- last tick: $(tail -n 1 "$DEVOPS" 2>/dev/null | cut -d' ' -f1)"
+    interval=$(ak47_conf interval_seconds 300)
+    case "$interval" in ''|*[!0-9]*) interval=300 ;; esac
+    gap_limit=$((interval * 3))
     echo "- runs reporting a failure: $(count_in 'failures=[1-9]')"
-    echo "- runs with a loop gap over 3 intervals: $(count_in 'loop_gap=[0-9]\{4,\}')"
+    echo "- runs with a loop gap over 3 intervals: $(window_lines | awk -v lim="$gap_limit" '{for (i = 1; i <= NF; i++) if ($i ~ /^loop_gap=/) {v = substr($i, 10); sub(/s$/, "", v); if (v + 0 > lim) {c++; break}}} END {print c + 0}')"
   else
     echo "- no tick log at $DEVOPS"
   fi

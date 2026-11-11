@@ -133,6 +133,14 @@ ak47_safe_delete() {
   local path=$1 id qdir qpath kib rc=0
   AK47_SD_ERROR=""; AK47_SD_QPATH=""
   [ -e "$path" ] || [ -L "$path" ] || { AK47_SD_ERROR="does not exist"; return 1; }
+  if [ -L "$path" ]; then
+    if ! rm -f -- "$path" 2>/dev/null; then
+      AK47_SD_ERROR="could not remove symlink"
+      return 1
+    fi
+    printf '0'
+    return 0
+  fi
   id=$(ak47_path_identity "$path") || { AK47_SD_ERROR="cannot canonicalise path"; return 1; }
   # A symlink is never followed: removing the link is fine, removing its target
   # through it is not. Refuse anything that is not the canonical path itself.

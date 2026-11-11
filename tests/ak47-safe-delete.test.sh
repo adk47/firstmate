@@ -224,6 +224,22 @@ test_safe_delete_refuses_a_path_that_does_not_exist() {
   pass "ak47_safe_delete refuses a path that does not exist"
 }
 
+test_safe_delete_unlinks_a_symlink_without_following_it() {
+  local target=$TMP_ROOT/symlink-target link=$TMP_ROOT/symlink-victim broken=$TMP_ROOT/symlink-broken
+  mkdir -p "$target"
+  printf 'keep\n' >"$target/file"
+  ln -s "$target" "$link"
+  ln -s "$TMP_ROOT/never-existed" "$broken"
+  AK47_MOUNTS_FILE=$EMPTY_MOUNTS ak47_safe_delete "$link" >/dev/null \
+    || fail "ak47_safe_delete refused a symlink: $AK47_SD_ERROR"
+  [ ! -L "$link" ] || fail "ak47_safe_delete left the symlink in place"
+  [ -f "$target/file" ] || fail "ak47_safe_delete followed the symlink and removed its target"
+  AK47_MOUNTS_FILE=$EMPTY_MOUNTS ak47_safe_delete "$broken" >/dev/null \
+    || fail "ak47_safe_delete refused a broken symlink: $AK47_SD_ERROR"
+  [ ! -L "$broken" ] || fail "ak47_safe_delete left the broken symlink in place"
+  pass "ak47_safe_delete unlinks a symlink without following it"
+}
+
 test_path_same_accepts_two_spellings_of_one_path
 test_path_same_rejects_different_paths
 test_path_same_prints_both_spellings_on_mismatch
@@ -239,3 +255,4 @@ test_safe_delete_refuses_a_held_directory
 test_safe_delete_refuses_a_mount_point
 test_safe_delete_restores_when_a_handle_appears_mid_move
 test_safe_delete_refuses_a_path_that_does_not_exist
+test_safe_delete_unlinks_a_symlink_without_following_it

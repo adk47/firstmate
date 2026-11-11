@@ -409,7 +409,7 @@ while IFS=$'\t' read -r key ceil dir _unit _reason; do
   sample="${sample}${sample:+ }${key}=${val}"
   ak47_breach "$val" "$ceil" "$dir" && breaches="${breaches}${breaches:+,}${key}=${val}>${ceil}"
 done < <(ak47_budget_rows)
-ak47_log "$AK47_STATE/samples.log" "$(ak47_epoch) $sample"
+printf '%s %s\n' "$(ak47_epoch)" "$sample" >>"$AK47_STATE/samples.log" 2>/dev/null || true
 
 # Per-class counts, so the line says what moved without reading reap.log.
 byclass=""
