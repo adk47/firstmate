@@ -61,8 +61,12 @@
 #           proven for it.
 #           Registering an existing watch whose drive stopped before the end of
 #           its schedule, or whose schedule ended unmeasurable, re-arms it: a
-#           completed schedule is reset and re-measured from that point, and its
-#           durable row goes back to open. Any other existing watch is left
+#           completed schedule is reset and re-measured from that point, its
+#           samples, previous values and read failures are cleared, its
+#           measurement epoch moves to the re-registration, and its durable row
+#           goes back to open, so no evidence from before the re-registration
+#           can score. The durable row decides this as well as the verdict, so a
+#           deleted verdict cannot hide a gap. Any other existing watch is left
 #           alone. Registration is read-only against the cluster; it
 #           writes only under this home's state/ directory. Its forge reads
 #           share one budget (default 60s) and its baseline capture the sample
@@ -462,6 +466,20 @@ cw_meta_get() {  # <watch-id> <key>
   file=$(cw_meta_path "$1")
   [ -f "$file" ] || return 1
   grep "^$2=" "$file" | tail -1 | cut -d= -f2- || true
+}
+
+cw_meta_set() {  # <watch-id> <key> <value>
+  local file tmp
+  file=$(cw_meta_path "$1")
+  [ -f "$file" ] || return 1
+  tmp=$(umask 077; mktemp "$(dirname "$file")/.cw.XXXXXX") || return 1
+  awk -v key="$2" -v value="$3" '
+    BEGIN { done = 0 }
+    index($0, key "=") == 1 { if (!done) { print key "=" value; done = 1 }; next }
+    { print }
+    END { if (!done) print key "=" value }
+  ' "$file" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 0600 "$tmp" && mv -f -- "$tmp" "$file"
 }
 
 cw_watch_exists() {
@@ -2511,6 +2529,9 @@ cw_rearm() {  # <watch-id> <url>
     rm -f -- "$(cw_sampled_path "$id")" "$(cw_verdict_path "$id")" \
       "$(cw_reasons_path "$id")" \
       "$(cw_watch_dir "$id")/noted" "$(cw_watch_dir "$id")/interrupted-reported"
+    : > "$(cw_samples_path "$id")"
+    rm -f -- "$(cw_watch_dir "$id")"/last.*
+    cw_meta_set "$id" t0 "$(cw_now)"
     cw_write_schedule "$id" "$(cw_now)"
     remaining=$(cw_remaining_count "$id")
   fi
@@ -2555,6 +2576,10 @@ cmd_register() {
     cw_reconcile_drive "$id"
     case "$(cat "$(cw_verdict_path "$id")" 2>/dev/null || true)" in
       interrupted*|unmeasurable-with-reason*) cw_rearm "$id" "$url"; return 0 ;;
+    esac
+    row_state=$(cw_row_state "$id")
+    case "$row_state" in
+      unmeasurable-with-reason) cw_rearm "$id" "$url"; return 0 ;;
     esac
     printf 'change-watch: %s already registered for %s\n' "$id" "$url"
     return 0
@@ -2812,7 +2837,7 @@ cw_gate_row() {  # <watch-id> <mode>
         printf 'change-watch: gate FAIL %s: still running\n' "$id"
       fi
       return 1 ;;
-    proven|regressed) return 0 ;;
+    proven|regressed|not-applicable) return 0 ;;
     *) printf 'change-watch: gate FAIL %s: the durable row records terminal_state %s\n' "$id" "$state"; return 1 ;;
   esac
 }

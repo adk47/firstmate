@@ -12,7 +12,9 @@
 # and blocks the done claim instead of completing quietly; a row missing a
 # reading is never proven; the audit fails on an unmeasurable row and on a
 # completed-unmeasured status line; an interrupted drive is never clean and can
-# be re-armed; the pool metric is scoped to the Deployment's own pool; the pool
+# be re-armed; a re-registered completed watch re-measures from scratch and a
+# deleted verdict cannot hide its durable row; the pool metric is scoped to the
+# Deployment's own pool; the pool
 # console is read as ubuntu through the admin unix socket with stdin closed and
 # a hard bound, and the doctor states every failed pool read; a reused pid never
 # reads as a live drive; and a docs-only PR registers nothing at all.
@@ -432,6 +434,69 @@ run_cw "$HOME_U" 1790045000 gate u1 --terminal-gap >/dev/null \
   || fail "a re-registered watch still blocked teardown"
 pass "re-registering an unmeasurable watch reopens it and re-measures"
 
+# --- re-registering a completed watch re-measures from scratch ----------------
+
+# A completed watch that ended unmeasurable must not carry its old samples into
+# the re-measurement: otherwise a re-registered watch could be proven by
+# evidence taken before the re-registration.
+HOME_W=$(new_world w)
+seed_pr "$HOME_W" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_W" "$MANIFEST" "$FEED_LINE" "$API_LINE"
+seed_series "$HOME_W" http_5xx_per_min muso-prod_feed-service baseline 0
+seed_series "$HOME_W" http_5xx_per_min muso-prod_feed-service sample \
+  0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+seed_series "$HOME_W" restarts muso-prod_feed-service baseline 2
+seed_series "$HOME_W" restarts muso-prod_feed-service sample \
+  2 2 2 2 2 2 2 2 2 2 2 2 2 2 2
+run_cw "$HOME_W" 1790000000 register w1 "$PR_URL" >/dev/null || fail "register failed"
+run_cw "$HOME_W" 1790044000 drive w1-3317 >/dev/null || fail "drive failed"
+grep -q '"terminal_state": "unmeasurable-with-reason"' \
+  "$HOME_W/state/change-watch/rows/w1-3317.json" \
+  || fail "a watch with one target never measured did not end unmeasurable"
+run_cw "$HOME_W" 1790045000 register w1 "$PR_URL" >/dev/null \
+  || fail "re-registering a completed unmeasurable watch failed"
+[ -s "$HOME_W/state/change-watch/w1-3317/samples.log" ] \
+  && fail "re-registering a completed watch kept its old samples"
+[ -n "$(find "$HOME_W/state/change-watch/w1-3317" -name 'last.*' -print -quit)" ] \
+  && fail "re-registering a completed watch kept its old previous values"
+rm -f "$HOME_W"/cluster/*
+run_cw "$HOME_W" 1790088200 drive w1-3317 >/dev/null || fail "re-measuring drive failed"
+grep -q '"terminal_state": "unmeasurable-with-reason"' \
+  "$HOME_W/state/change-watch/rows/w1-3317.json" \
+  || fail "a re-registered watch was proven by samples taken before the re-registration"
+pass "re-registering a completed watch re-measures from scratch"
+
+# --- the durable row is the authority for recovery ----------------------------
+
+# Deleting the verdict must not make an unmeasurable watch look already
+# registered: the row still records the gap, so re-registering must reopen it
+# and a later clean drive must reach proven.
+HOME_X=$(new_world x)
+seed_pr "$HOME_X" "$MANIFEST" "$TMP_ROOT/multi.yaml" "$MANIFEST"
+seed_diff "$HOME_X" "$MANIFEST" "$FEED_LINE"
+seed_series "$HOME_X" http_5xx_per_min muso-prod_feed-service baseline 0
+seed_series "$HOME_X" http_5xx_per_min muso-prod_feed-service sample \
+  0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+seed_series "$HOME_X" restarts muso-prod_feed-service baseline 2
+seed_series "$HOME_X" restarts muso-prod_feed-service sample \
+  2 2 2 2 2 2 2 2 2 2 2 2 2 2 2
+run_cw "$HOME_X" 1790000000 register v1 "$PR_URL" >/dev/null || fail "register failed"
+rm -f "$HOME_X"/cluster/*
+run_cw "$HOME_X" 1790044000 drive v1-3317 >/dev/null || fail "unmeasured drive failed"
+rm -f "$HOME_X/state/change-watch/v1-3317/verdict"
+run_cw "$HOME_X" 1790045000 register v1 "$PR_URL" >/dev/null \
+  || fail "re-registering a watch whose verdict was deleted failed"
+grep -q '"terminal_state": "open"' "$HOME_X/state/change-watch/rows/v1-3317.json" \
+  || fail "a watch whose verdict was deleted was not reopened from its durable row"
+seed_series "$HOME_X" http_5xx_per_min muso-prod_feed-service sample \
+  0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+seed_series "$HOME_X" restarts muso-prod_feed-service sample \
+  2 2 2 2 2 2 2 2 2 2 2 2 2 2 2
+run_cw "$HOME_X" 1790088200 drive v1-3317 >/dev/null || fail "clean drive after recovery failed"
+grep -q '"terminal_state": "proven"' "$HOME_X/state/change-watch/rows/v1-3317.json" \
+  || fail "a recovered watch did not reach proven on a clean drive"
+pass "a deleted verdict does not hide the durable row from recovery"
+
 # --- (g) a row with a missing reading is not proven ---------------------------
 
 # The schedule is cut to +15m and +1h only, so the +6h reading never happens.
@@ -615,6 +680,10 @@ grep -q '"terminal_state": "not-applicable"' "$HOME_E/state/change-watch/rows/e1
   || fail "a docs-only merge wrote no not-applicable row"
 run_cw "$HOME_E" 1790000100 audit 7 >/dev/null \
   || fail "the audit failed a docs-only merge with nothing to measure"
+run_cw "$HOME_E" 1790000100 gate e1 --terminal-gap >/dev/null \
+  || fail "teardown was refused for a docs-only merge with nothing to measure"
+run_cw "$HOME_E" 1790000100 gate e1 >/dev/null \
+  || fail "the done-claim gate failed a docs-only merge with nothing to measure"
 [ -e "$HOME_E/state/.wake-queue" ] && [ -s "$HOME_E/state/.wake-queue" ] \
   && fail "a docs-only merge queued a wake"
 pass "docs-only PR leaves no watch behind but still writes its row"
