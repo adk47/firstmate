@@ -286,6 +286,10 @@ default. Absent keys take the default in the right-hand column.
 | `fat_process` | 0 | arm the fat-process class: renice, `SIGTERM`, then `SIGKILL` after 5 min |
 | `fat_process_gb` | 3 | the RSS a process must hold to count as fat |
 | `fat_process_min` | 10 | minutes a fat process must hold it before it is reported |
+
+A fat process that ignores `SIGTERM` is `SIGKILL`ed after five minutes. The
+escalation clock is `~/.local/state/ak47/fat.term`, so it survives across ticks,
+and a dry run neither kills nor consumes the record.
 | `interval_seconds` | 300 | the timer's period, so the tick can notice its own loop has stopped |
 
 A fat process that ignores `SIGTERM` is `SIGKILL`ed after five minutes. The
