@@ -625,6 +625,7 @@ tests/fm-documentation-audiences.test.sh 732
 tests/fm-drift-check.test.sh 4077
 tests/fm-extension-binding.test.sh 12639
 tests/fm-fable-runway.test.sh 25316
+tests/fm-fleet-integrity-check.test.sh 5000
 tests/fm-fleet-snapshot-impl.test.sh 121000
 tests/fm-fleet-snapshot-view.test.sh 8547
 tests/fm-fleet-stall-check.test.sh 25000
@@ -645,6 +646,7 @@ tests/fm-home-summary-refresh.test.sh 50699
 tests/fm-inactive-reconcile.test.sh 54465
 tests/fm-instrument-sweep.test.sh 13200
 tests/fm-kimi-harness.test.sh 18015
+tests/fm-lane-liveness.test.sh 4000
 tests/fm-lane-model-switch.test.sh 25902
 tests/fm-lint-workflows.test.sh 1459
 tests/fm-lock-reap.test.sh 18900
@@ -720,6 +722,7 @@ tests/fm-test-fixtures.test.sh 151
 tests/fm-test-isolation-proof.test.sh 2567
 tests/fm-test-reap.test.sh 12000
 tests/fm-tmux-agent-liveness.test.sh 11421
+tests/fm-tmux-test-safety.test.sh 800
 tests/fm-tool-update-check.test.sh 24858
 tests/fm-trace-context-lib.test.sh 289
 tests/fm-trace-context-spawn.test.sh 47355
