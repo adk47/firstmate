@@ -1424,6 +1424,11 @@ families_for_changed_path() {
           || printf '%s\n' "__unmapped__:$path"
       fi
       ;;
+    ak47/*)
+      # The ak47 suites are hermetic and registered as pure-contract-unit, so
+      # every ak47 path (scripts, config, guards, hdevops) selects that family.
+      printf '%s\n' pure-contract-unit
+      ;;
     bin/*)
       # A deleted script has no consuming suite left to select, the same rule
       # the fixture case above applies. Refusing on its absent mapping would

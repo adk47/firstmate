@@ -117,7 +117,8 @@ init_changed_fixture_repo() {
     fm-backend-cmux.test.sh \
     fm-backend-zellij.test.sh \
     fm-control-herdr-smoke.test.sh \
-    fm-backend-orca.test.sh; do
+    fm-backend-orca.test.sh \
+    ak47-budget.test.sh; do
     printf '#!/usr/bin/env bash\n# tests/lib.sh\n' >"$repo/tests/$script"
     chmod +x "$repo/tests/$script"
   done
@@ -143,6 +144,7 @@ init_changed_fixture_repo() {
     >>"$repo/tests/fm-cd-pretool-check.test.sh"
   printf '# .pi/extensions/fm-primary-pi-watch.ts\n' >>"$repo/tests/fm-pi-watch-extension.test.sh"
   mkdir -p \
+    "$repo/ak47" \
     "$repo/.agents/skills/example" \
     "$repo/.agents/skills/harness-adapters/references/common" \
     "$repo/.claude" "$repo/.pi/extensions" "$repo/docs" "$repo/src"
@@ -155,6 +157,7 @@ init_changed_fixture_repo() {
   : >"$repo/docs/fm-test-isolation-proof.md"
   : >"$repo/CONTRIBUTING.md"
   : >"$repo/src/unmapped.ts"
+  : >"$repo/ak47/README.md"
   git -C "$repo" init -q
   git -C "$repo" add .
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm baseline
@@ -244,6 +247,13 @@ test_changed_dependency_selection_and_unmapped_failure() {
   assert_contains "$listed" "tests/fm-pi-watch-extension.test.sh" "Pi source selects watcher coverage"
   git -C "$repo" add .agents .claude .pi
   git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm non-bin-source-change
+
+  printf '\n' >>"$repo/ak47/README.md"
+  listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
+  assert_contains "$listed" "tests/ak47-budget.test.sh" \
+    "ak47 source selects the hermetic ak47 family"
+  git -C "$repo" add ak47/README.md
+  git -C "$repo" -c user.name=test -c user.email=test@example.invalid commit -qm ak47-source-change
 
   printf '\n' >>"$repo/.agents/skills/harness-adapters/references/common/dispatch.md"
   listed=$(cd "$repo" && bin/fm-test-run.sh --list --changed --base HEAD)
