@@ -838,6 +838,48 @@ test_migrated_orca_record_does_not_require_local_treehouse() {
   pass "bootstrap: a migrated Orca task record does not require local treehouse"
 }
 
+test_orca_recorded_id_does_not_require_local_treehouse() {
+  local case_dir home fakebin base_path out
+  case_dir="$TMP_ROOT/orca-recorded-id-no-treehouse"
+  home="$case_dir/home"
+  mkdir -p "$home/config" "$home/state"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  printf '%s\n' orca > "$home/config/backend"
+  printf '%s\n' 'window=firstmate:fm-orca-id-task' 'kind=ship' \
+    'orca_worktree_id=11111111-2222-3333-4444-555555555555' \
+    > "$home/state/orca-id-task.meta"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/tmux" "$fakebin/treehouse"
+  fm_fake_exit0 "$fakebin" orca
+  base_path=$(make_path_without_tool "$case_dir" treehouse)
+  out=$(PATH="$fakebin:$base_path" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "MISSING: treehouse" \
+    "a recorded Orca worktree id must not require local treehouse under an orca home"
+  pass "bootstrap: a recorded Orca worktree id does not require local treehouse"
+}
+
+test_orca_workspace_path_record_does_not_require_local_treehouse() {
+  local case_dir home fakebin base_path out
+  case_dir="$TMP_ROOT/orca-workspace-path-no-treehouse"
+  home="$case_dir/home"
+  mkdir -p "$home/config" "$home/state"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  printf '%s\n' orca > "$home/config/backend"
+  printf '%s\n' 'window=firstmate:fm-workspace-task' 'kind=ship' \
+    "worktree=$case_dir/orca/workspaces/proj/fm-workspace-task" \
+    > "$home/state/workspace-task.meta"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/tmux" "$fakebin/treehouse"
+  fm_fake_exit0 "$fakebin" orca
+  base_path=$(make_path_without_tool "$case_dir" treehouse)
+  out=$(PATH="$fakebin:$base_path" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "MISSING: treehouse" \
+    "a recorded worktree under an Orca workspace tree must not require local treehouse"
+  pass "bootstrap: a recorded Orca workspace path does not require local treehouse"
+}
+
 test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
   local case_dir home fakebin fake_root out
   case_dir="$TMP_ROOT/fleet-timeout-scaled"
@@ -1294,6 +1336,8 @@ test_recorded_treehouse_backend_requires_treehouse_under_orca
 test_recorded_default_backend_task_requires_absent_treehouse
 test_remote_secondmate_record_does_not_require_local_treehouse
 test_migrated_orca_record_does_not_require_local_treehouse
+test_orca_recorded_id_does_not_require_local_treehouse
+test_orca_workspace_path_record_does_not_require_local_treehouse
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets
 test_fleet_sync_timeout_explicit_override_wins

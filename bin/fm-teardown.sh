@@ -1588,8 +1588,9 @@ EOF
 # endpoint kill, storing the mode in TEARDOWN_RELEASE_MODE ("orca", "treehouse",
 # or "git") or the concrete missing requirement in TEARDOWN_RELEASE_REFUSAL and
 # returning 1 so the caller leaves the agent alive and the branch intact.
-worktree_release_mode() {  # <backend> <worktree> <project> [<orca-worktree-id>]
-  local backend=$1 wt=$2 proj=$3 orca_id=${4:-} probe=0 reason=
+worktree_release_mode() {  # <backend> <worktree> <project> [<orca-worktree-id>] [<orca-selector>]
+  local backend=$1 wt=$2 proj=$3 orca_id=${4:-} orca_selector=${5:-} probe=0 reason=
+  local out code msg='' err='' errfile resolved resolved_abs wt_abs
   TEARDOWN_RELEASE_MODE=
   TEARDOWN_RELEASE_REFUSAL=
   if [ -z "$wt" ] || [ ! -d "$wt" ]; then
@@ -1610,9 +1611,53 @@ worktree_release_mode() {  # <backend> <worktree> <project> [<orca-worktree-id>]
         TEARDOWN_RELEASE_REFUSAL="Orca worktree id ${orca_id} does not resolve to $wt, so removing it through Orca would discard work nobody inspected"
         return 1
       }
+      TEARDOWN_RELEASE_MODE=orca
+      return 0
     fi
-    TEARDOWN_RELEASE_MODE=orca
-    return 0
+    fm_backend_source orca >/dev/null 2>&1 || {
+      TEARDOWN_RELEASE_REFUSAL="the orca CLI support module could not be loaded, so whether Orca tracks $wt cannot be verified"
+      return 1
+    }
+    orca_selector=${orca_selector:-$wt}
+    errfile=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-orca-show.XXXXXX") || {
+      TEARDOWN_RELEASE_REFUSAL="cannot create a temp file to capture orca worktree show output for $wt"
+      return 1
+    }
+    out=$(orca worktree show --worktree "path:$orca_selector" --json 2>"$errfile" || true)
+    err=$(cat "$errfile" 2>/dev/null || true)
+    rm -f "$errfile"
+    case "$out" in
+      *[![:space:]]*) ;;
+      *) out= ;;
+    esac
+    if [ -n "$out" ] && msg=$(printf '%s' "$out" | fm_backend_orca_json_ok 2>&1); then
+      resolved=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-path 2>/dev/null || true)
+      resolved_abs=$(canonical_existing_dir "$resolved" 2>/dev/null || true)
+      wt_abs=$(canonical_existing_dir "$wt" 2>/dev/null || true)
+      if [ -z "$resolved_abs" ] || [ "$resolved_abs" != "$wt_abs" ]; then
+        TEARDOWN_RELEASE_REFUSAL="Orca resolves $orca_selector to ${resolved_abs:-an uninspectable path}, not $wt, so removing it through Orca would discard work nobody inspected"
+        return 1
+      fi
+      TEARDOWN_RELEASE_MODE=orca
+      return 0
+    fi
+    code=$(printf '%s' "$out" | fm_backend_orca_json_error_code 2>/dev/null || true)
+    if [ "$code" = selector_not_found ]; then
+      if reason=$(plain_git_remove_would_succeed "$proj" "$wt"); then
+        TEARDOWN_RELEASE_MODE=git
+        return 0
+      fi
+      TEARDOWN_RELEASE_REFUSAL="Orca no longer tracks $orca_selector, and a guarded plain git release of $wt cannot be proven safe: $reason"
+      return 1
+    fi
+    if [ -z "$msg" ] || [ "${msg#invalid Orca JSON}" != "$msg" ]; then
+      case "$err" in
+        *[![:space:]]*) msg=$err ;;
+      esac
+    fi
+    [ -n "$msg" ] || msg="orca worktree show for $orca_selector returned ${out:-no output}"
+    TEARDOWN_RELEASE_REFUSAL=$msg
+    return 1
   fi
   # tmux-era provenance: a Mac-migrated task whose record says backend=tmux has a
   # plain git worktree this host's treehouse never leased. A host WITHOUT
@@ -3356,8 +3401,12 @@ BACKLOG_TRANSITION_FLAGS=()
 # process-event and firstmate-home removal machinery further below, not by
 # task-worktree cleanup.
 TEARDOWN_RELEASE_MODE=
+ORCA_RELEASE_SELECTOR=$WT
+if [ -n "$WT" ] && migrated_orca_worktree_path "$META" "$WT" >/dev/null 2>&1; then
+  ORCA_RELEASE_SELECTOR=$(migrated_orca_prior_path "$META") || ORCA_RELEASE_SELECTOR=$WT
+fi
 if [ "$KIND" != secondmate ] && [ -n "$WT" ] && [ -d "$WT" ]; then
-  if ! worktree_release_mode "$BACKEND" "$WT" "$PROJ" "$ORCA_WORKTREE_ID"; then
+  if ! worktree_release_mode "$BACKEND" "$WT" "$PROJ" "$ORCA_WORKTREE_ID" "$ORCA_RELEASE_SELECTOR"; then
     echo "error: no worktree-return path is available for $WT (backend=${BACKEND:-unset}): $TEARDOWN_RELEASE_REFUSAL; leaving the agent alive and the branch intact" >&2
     exit 1
   fi
