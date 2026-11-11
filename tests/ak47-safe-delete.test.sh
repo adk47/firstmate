@@ -25,7 +25,7 @@ TMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/ak47-sd-tests.XXXXXX")
 EMPTY_MOUNTS=$TMP_ROOT/mounts.empty
 : >"$EMPTY_MOUNTS"
 
-# shellcheck source=../ak47/lib/safe-delete.sh
+# shellcheck source=/dev/null # $LIB is resolved at runtime from $ROOT.
 . "$LIB"
 
 # --- path identity --------------------------------------------------------------

@@ -33,8 +33,8 @@ test_the_shipped_budget_loads() {
 }
 
 test_every_shipped_row_carries_a_reason() {
-  local key ceil dir unit reason n=0
-  while IFS='|' read -r key ceil dir unit reason; do
+  local key ceil dir _unit reason n=0
+  while IFS='|' read -r key ceil dir _unit reason; do
     case "$key" in ''|'#'*) continue ;; esac
     n=$((n + 1))
     [ -n "${reason:-}" ] || fail "budget row $key has no reason"
@@ -45,8 +45,8 @@ test_every_shipped_row_carries_a_reason() {
 }
 
 test_every_shipped_row_has_a_numeric_ceiling() {
-  local key ceil dir unit reason
-  while IFS='|' read -r key ceil dir unit reason; do
+  local key ceil dir _unit reason
+  while IFS='|' read -r key ceil dir _unit reason; do
     case "$key" in ''|'#'*) continue ;; esac
     case "$ceil" in ''|*[!0-9]*) fail "budget row $key has a non-numeric ceiling: $ceil" ;; esac
     case "$dir" in max|min) : ;; *) fail "budget row $key has direction '$dir'; expected max or min" ;; esac

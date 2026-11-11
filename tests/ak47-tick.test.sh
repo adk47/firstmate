@@ -257,6 +257,22 @@ test_writes_a_numeric_sample_for_the_weekly_review() {
     *tmp_entries=*) : ;;
     *) fail "sample line is missing tmp_entries: $line" ;;
   esac
+  # Every metric must contribute exactly one number. A sampler that prints two
+  # lines (pgrep -c prints 0 AND exits 1 on no match) splits the sample across
+  # two lines and the review silently reads a bare "0" as the whole sample.
+  local n
+  n=$(wc -l <"$AK47_STATE/samples.log")
+  [ "$n" -eq 1 ] || fail "one run wrote $n sample lines; expected exactly 1"
+  case "$line" in
+    *agent_count=*) : ;;
+    *) fail "sample line is missing agent_count: $line" ;;
+  esac
+  local agents
+  agents=$(printf '%s\n' "$line" | sed -n 's/.*agent_count=\([^ ]*\).*/\1/p')
+  case "$agents" in
+    ''|*[!0-9]*) fail "agent_count is not a single number: '$agents' in $line" ;;
+    *) : ;;
+  esac
   pass "the tick writes the numeric sample the weekly review reads"
 }
 

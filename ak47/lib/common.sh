@@ -120,7 +120,14 @@ ak47_load15() { awk '{print $3}' /proc/loadavg; }
 ak47_root_disk_pct() { df --output=pcent / 2>/dev/null | tail -1 | tr -dc 0-9; }
 
 # ak47_agent_count - resident pi agents.
-ak47_agent_count() { pgrep -c -x pi 2>/dev/null || echo 0; }
+# pgrep -c prints 0 AND exits 1 when nothing matches, so `|| echo 0` would emit
+# two lines and split the sample line the weekly review parses. Capture, then
+# default, so the caller always gets exactly one number.
+ak47_agent_count() {
+  local n
+  n=$(pgrep -c -x pi 2>/dev/null) || n=0
+  printf '%s' "${n:-0}"
+}
 
 # ak47_tmux_core_pct - the tmux server's share of one core, as a percentage.
 # The server is the fleet's spine: this is measured, never signalled.
