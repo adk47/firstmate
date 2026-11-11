@@ -47,6 +47,15 @@
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
+# REFUSES when this task's change watch ended in a measurement gap - a verdict of
+# `unmeasurable-with-reason` or `interrupted` - because cleanup removes the task
+# records that made the gap actionable, and a merge whose watch measured nothing
+# has no evidence it was safe. This is the enforcement boundary for the done
+# claim: it consults `bin/fm-change-watch.sh gate <task-id> --terminal-gap` on
+# every teardown rather than relying on an agent to remember the gate. A watch
+# still RUNNING does not refuse teardown: state/change-watch/ is not a task
+# record, so the watch outlives the task and keeps sampling on its own, and
+# blocking on it would stall every merge for 12 hours.
 # local-only projects additionally accept work merged into the local default
 # branch (firstmate performs that merge after configured approval) as a fallback
 # for the common case where there is no remote at all.
@@ -2896,6 +2905,22 @@ fi
 X_REQUEST=$(grep '^x_request=' "$META" 2>/dev/null | tail -1 | cut -d= -f2- || true)
 if [ -n "$X_REQUEST" ]; then
   echo "warning: task $ID still carries an unreconciled Relay request link ($X_REQUEST) on its task record." >&2
+fi
+
+# A merge whose change watch ended in a measurement gap has no evidence it was
+# safe, and cleanup removes the task records that made the gap actionable. This
+# is the shared boundary that always runs when a task's outcome is finalized, so
+# the done-claim block does not depend on an agent remembering to call the gate.
+# Only a TERMINAL gap refuses: a watch still running keeps sampling on its own
+# from state/change-watch/, which is not a task record and survives teardown.
+if [ "$FORCE" != "--force" ]; then
+  if ! CHANGE_WATCH_GAP=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-change-watch.sh" gate "$ID" --terminal-gap 2>/dev/null); then
+    echo "REFUSED: task $ID has a change watch that ended without a measurement verdict." >&2
+    printf '%s\n' "$CHANGE_WATCH_GAP" >&2
+    echo "A merge is not safe until its watch says so. Record what the watch measured with bin/fm-change-watch.sh verdict <watch-id>, diagnose the read path with bin/fm-change-watch.sh doctor <watch-id>, and re-register the watch once the read path is fixed." >&2
+    exit 1
+  fi
 fi
 
 if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then

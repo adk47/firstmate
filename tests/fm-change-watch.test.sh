@@ -508,6 +508,13 @@ esac
 grep -q "^retire cw-" "$HOME_I/arm.log" || fail "re-arm did not retire the stopped source"
 run_cw "$HOME_I" 1790001000 verdict i1-3317 | grep -q "clean so far" \
   || fail "re-arm did not clear the interrupted verdict"
+ROW_I="$HOME_I/state/change-watch/rows/i1-3317.json"
+grep -q '"terminal_state": "open"' "$ROW_I" \
+  || fail "re-arm left the durable row in its interrupted terminal state"
+grep -q '"completed_epoch": null' "$ROW_I" \
+  || fail "re-arm left a completion epoch on the durable row"
+run_cw "$HOME_I" 1790001000 audit 7 >/dev/null \
+  || fail "the audit false-failed a re-armed in-flight watch"
 
 run_cw "$HOME_I" 1790044000 drive i1-3317 >/dev/null || fail "resumed drive failed"
 [ "$(run_cw "$HOME_I" 1790044000 verdict i1-3317)" = "change-watch clean" ] \

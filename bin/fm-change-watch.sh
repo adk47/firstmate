@@ -14,7 +14,7 @@
 #   fm-change-watch.sh drive <watch-id>
 #   fm-change-watch.sh sample <watch-id> [<offset-seconds>]
 #   fm-change-watch.sh verdict <watch-id>
-#   fm-change-watch.sh gate <task-id>
+#   fm-change-watch.sh gate <task-id> [--terminal-gap]
 #   fm-change-watch.sh audit [<days>]
 #   fm-change-watch.sh status [<watch-id>]
 #   fm-change-watch.sh doctor [<watch-id>]
@@ -88,7 +88,10 @@
 #           task registered has reached a terminal state that is not a
 #           measurement gap. A watch still running is not a pass, and an
 #           unmeasurable watch is a failure, so a task cannot claim done while
-#           its merge has no evidence.
+#           its merge has no evidence. bin/fm-teardown.sh calls it with
+#           --terminal-gap, which fails only for a terminal measurement gap: a
+#           running watch never blocks teardown, because state/change-watch/ is
+#           not a task record and keeps sampling after the task is gone.
 # audit     The 7-day acceptance, measured. It fails (exit 1) when any status log
 #           under state/ carries the literal "change-watch completed unmeasured"
 #           line, or when any durable row completed inside the window ended
@@ -2471,6 +2474,10 @@ cw_rearm() {  # <watch-id> <url>
   case "$attempt" in ''|*[!0-9]*) attempt=1 ;; esac
   attempt=$((attempt + 1))
   rm -f -- "$(cw_verdict_path "$id")" "$(cw_watch_dir "$id")/interrupted-reported"
+  # The watch is in flight again, so its durable row must not keep the
+  # interrupted terminal state it just left: a stale terminal row would make the
+  # audit report a gap for a watch that is still measuring.
+  cw_row_write "$id" open 'the watch is still running'
   arm_cmd=${FM_CW_ARM_CMD:-$SCRIPT_DIR/fm-procevent-when.sh}
   if [ -n "$old" ] && { [ -x "$arm_cmd" ] || command -v "$arm_cmd" >/dev/null 2>&1; }; then
     "$arm_cmd" retire "$old" >/dev/null 2>&1 || true
@@ -2703,8 +2710,13 @@ cmd_verdict() {
 # still running is not a pass, and an unmeasurable watch is a failure, so a task
 # cannot claim done while its merge has no evidence. A task with no watch at all
 # passes, because there is nothing to prove.
-cmd_gate() {  # <task-id>
-  local task=$1 meta id line rc=0 found=0
+#
+# --terminal-gap is the same gate for the teardown boundary bin/fm-teardown.sh
+# consults: only a terminal measurement gap fails there, because a watch still
+# running outlives the task's records in state/change-watch/ and keeps sampling
+# on its own, so refusing teardown for it would block every merge for 12 hours.
+cmd_gate() {  # <task-id> [--terminal-gap]
+  local task=$1 mode=${2:-} meta id line rc=0 found=0
   [ -d "$WATCH_ROOT" ] || return 0
   for meta in "$WATCH_ROOT"/*/watch.meta; do
     [ -e "$meta" ] || continue
@@ -2718,7 +2730,13 @@ cmd_gate() {  # <task-id>
       clean|regressed*) ;;
       unmeasurable-with-reason*) printf 'change-watch: gate FAIL %s: %s\n' "$id" "$line"; rc=1 ;;
       interrupted*) printf 'change-watch: gate FAIL %s: %s\n' "$id" "$line"; rc=1 ;;
-      '') printf 'change-watch: gate FAIL %s: still running (%s)\n' "$id" "$(cw_progress_label "$id")"; rc=1 ;;
+      '')
+        if [ "$mode" = --terminal-gap ]; then
+          :
+        else
+          printf 'change-watch: gate FAIL %s: still running (%s)\n' "$id" "$(cw_progress_label "$id")"
+          rc=1
+        fi ;;
       *) printf 'change-watch: gate FAIL %s: %s\n' "$id" "$line"; rc=1 ;;
     esac
   done
@@ -2933,7 +2951,7 @@ case "${1:-}" in
   drive) [ "$#" -eq 2 ] || usage; shift; cmd_drive "$@" ;;
   sample) if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then usage; fi; shift; cmd_sample "$@" ;;
   verdict) [ "$#" -eq 2 ] || usage; shift; cmd_verdict "$@" ;;
-  gate) [ "$#" -eq 2 ] || usage; shift; cmd_gate "$@" ;;
+  gate) [ "$#" -eq 2 ] || [ "$#" -eq 3 ] || usage; shift; cmd_gate "$@" ;;
   audit) [ "$#" -le 2 ] || usage; shift; cmd_audit "$@" ;;
   status) [ "$#" -le 2 ] || usage; shift; cmd_status "$@" ;;
   doctor) [ "$#" -le 2 ] || usage; shift; cmd_doctor "$@" ;;
