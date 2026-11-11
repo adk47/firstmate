@@ -1590,7 +1590,7 @@ EOF
 # returning 1 so the caller leaves the agent alive and the branch intact.
 worktree_release_mode() {  # <backend> <worktree> <project> [<orca-worktree-id>] [<orca-selector>]
   local backend=$1 wt=$2 proj=$3 orca_id=${4:-} orca_selector=${5:-} probe=0 reason=
-  local out code msg='' err='' errfile resolved resolved_abs wt_abs
+  local out code msg='' err='' errfile id resolved resolved_abs wt_abs
   TEARDOWN_RELEASE_MODE=
   TEARDOWN_RELEASE_REFUSAL=
   if [ -z "$wt" ] || [ ! -d "$wt" ]; then
@@ -1631,9 +1631,14 @@ worktree_release_mode() {  # <backend> <worktree> <project> [<orca-worktree-id>]
       *) out= ;;
     esac
     if [ -n "$out" ] && msg=$(printf '%s' "$out" | fm_backend_orca_json_ok 2>&1); then
+      id=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-id 2>/dev/null || true)
       resolved=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-path 2>/dev/null || true)
       resolved_abs=$(canonical_existing_dir "$resolved" 2>/dev/null || true)
       wt_abs=$(canonical_existing_dir "$wt" 2>/dev/null || true)
+      if [ -z "$id" ]; then
+        TEARDOWN_RELEASE_REFUSAL="Orca returned no worktree id for $orca_selector, so removing $wt through Orca cannot be verified"
+        return 1
+      fi
       if [ -z "$resolved_abs" ] || [ "$resolved_abs" != "$wt_abs" ]; then
         TEARDOWN_RELEASE_REFUSAL="Orca resolves $orca_selector to ${resolved_abs:-an uninspectable path}, not $wt, so removing it through Orca would discard work nobody inspected"
         return 1
@@ -1643,6 +1648,10 @@ worktree_release_mode() {  # <backend> <worktree> <project> [<orca-worktree-id>]
     fi
     code=$(printf '%s' "$out" | fm_backend_orca_json_error_code 2>/dev/null || true)
     if [ "$code" = selector_not_found ]; then
+      if [ -z "$proj" ] || [ ! -d "$proj" ] || ! worktree_registered_for_project "$proj" "$wt"; then
+        TEARDOWN_RELEASE_REFUSAL="Orca no longer tracks $orca_selector, and $wt is not a registered worktree of ${proj:-<missing>} that a guarded plain git release could verify"
+        return 1
+      fi
       if reason=$(plain_git_remove_would_succeed "$proj" "$wt"); then
         TEARDOWN_RELEASE_MODE=git
         return 0

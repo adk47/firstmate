@@ -4497,6 +4497,87 @@ SH
   pass "an unproven Orca release refuses before the agent is killed"
 }
 
+test_orca_selector_miss_without_git_registration_refuses_before_kill() {
+  local case_dir rc wt pid
+  case_dir=$(make_case orca-pre-kill-unregistered-miss)
+  wt=$(write_orca_workspace_case "$case_dir")
+  sed -i.bak "s|^project=.*|project=$case_dir/origin.git|" "$case_dir/state/task-x1.meta"
+  cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "worktree show") printf '{"ok":false,"error":{"code":"selector_not_found","message":"No worktree matches selector path"}}\n'; exit 1 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+
+  ( cd "$wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "orca-pre-kill-unregistered-miss: setup sleeper did not start"
+
+  rc=0
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "orca-pre-kill-unregistered-miss: an unregistered git fallback must refuse before the kill"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'no worktree-return path is available' "$case_dir/stderr" \
+    "orca-pre-kill-unregistered-miss: the refusal did not report the unproven release path"
+  assert_grep 'not a registered worktree' "$case_dir/stderr" \
+    "orca-pre-kill-unregistered-miss: the refusal did not name the missing git registration"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "orca-pre-kill-unregistered-miss: the agent was killed before the git fallback was proven"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  assert_present "$wt" \
+    "orca-pre-kill-unregistered-miss: the worktree was removed despite the refusal"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "orca-pre-kill-unregistered-miss: the task records were removed despite the refusal"
+  pass "an Orca registry miss without git registration refuses before the agent is killed"
+}
+
+test_orca_show_without_worktree_id_refuses_before_kill() {
+  local case_dir rc wt pid
+  case_dir=$(make_case orca-pre-kill-missing-id)
+  wt=$(write_orca_workspace_case "$case_dir")
+  cat > "$case_dir/fakebin/orca" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "worktree show")
+    selector=
+    for arg in "$@"; do
+      case "$arg" in path:*) selector=${arg#path:} ;; esac
+    done
+    printf '{"ok":true,"result":{"worktree":{"path":"%s"}}}\n' "$selector"
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+
+  ( cd "$wt" && exec sleep 300 ) &
+  pid=$!
+  disown
+  sleep 0.3
+  kill -0 "$pid" 2>/dev/null || fail "orca-pre-kill-missing-id: setup sleeper did not start"
+
+  rc=0
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr" || rc=$?
+  expect_code 1 "$rc" "orca-pre-kill-missing-id: an Orca answer without a worktree id must refuse before the kill"$'\n'"$(cat "$case_dir/stderr")"
+  assert_grep 'no worktree-return path is available' "$case_dir/stderr" \
+    "orca-pre-kill-missing-id: the refusal did not report the unproven release path"
+  assert_grep 'returned no worktree id' "$case_dir/stderr" \
+    "orca-pre-kill-missing-id: the refusal did not name the missing worktree id"
+  if ! kill -0 "$pid" 2>/dev/null; then
+    fail "orca-pre-kill-missing-id: the agent was killed before the release path was proven"
+  fi
+  kill -KILL "$pid" 2>/dev/null || true
+  assert_present "$wt" \
+    "orca-pre-kill-missing-id: the worktree was removed despite the refusal"
+  assert_present "$case_dir/state/task-x1.meta" \
+    "orca-pre-kill-missing-id: the task records were removed despite the refusal"
+  pass "an Orca answer without a worktree id refuses before the agent is killed"
+}
+
 test_orca_path_miss_falls_back_to_guarded_git_release() {
   local case_dir rc wt
   case_dir=$(make_case orca-path-miss)
@@ -5216,6 +5297,8 @@ test_plain_git_release_refuses_locked_worktree
 test_plain_git_release_refuses_initialized_submodule
 test_orca_workspace_path_routes_release_to_orca
 test_orca_show_failure_refuses_before_killing_the_agent
+test_orca_selector_miss_without_git_registration_refuses_before_kill
+test_orca_show_without_worktree_id_refuses_before_kill
 test_orca_path_miss_falls_back_to_guarded_git_release
 test_orca_non_selector_failure_refuses_instead_of_plain_git_fallback
 test_orca_empty_failure_output_refuses_instead_of_success
