@@ -1082,11 +1082,23 @@ if [ -n "$PROBE_DIR" ]; then
   done
 fi
 for d in "${EXTRA_WRITERS[@]}"; do
-  [ -d "$d" ] || continue
+  # A writer directory that is not there, or that holds no firstmate helper,
+  # means the marker evidence is partial and every unmarked marker would look
+  # orphaned. Say so instead of implying a complete corpus.
+  if [ ! -d "$d" ]; then
+    MISSING_WRITERS="${MISSING_WRITERS:-}${MISSING_WRITERS:+ }$d (absent)"
+    continue
+  fi
+  found=0
   for f in "$d"/*.sh; do
     [ -f "$f" ] || continue
     WRITER_FILES[${#WRITER_FILES[@]}]=$f
+    case ${f##*/} in
+    fm-check-lib.sh | fm-wake-lib.sh | fm-state-lib.sh) found=1 ;;
+    esac
   done
+  [ "$found" = 1 ] ||
+    MISSING_WRITERS="${MISSING_WRITERS:-}${MISSING_WRITERS:+ }$d (not firstmate's bin)"
 done
 writer_index "${WRITER_FILES[@]}"
 globals_index "${WRITER_FILES[@]}"
@@ -1094,6 +1106,9 @@ globals_index "${WRITER_FILES[@]}"
 printf '#instrument-sweep-v1\n' > "$TMP/rows"
 if [ "$TSV" != 1 ]; then
   printf 'instrument-sweep v1\n'
+  if [ -n "${MISSING_WRITERS:-}" ]; then
+    printf 'corpus warning: writer evidence is partial (%s); an unwritten marker there is UNPROVEN, not proven orphaned\n' "$MISSING_WRITERS"
+  fi
 fi
 
 FM_SWEEP_GLOBALS=$TMP/globals.tsv

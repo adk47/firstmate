@@ -352,6 +352,36 @@ EOS
   pass "a zero-guarded rate is not reported as a denominator defect"
 }
 
+test_partial_writer_corpus_is_announced() {
+  local home corpus copy out
+  home="$TMP_ROOT/partial-writers"
+  corpus="$home/state"
+  copy="$home/elsewhere"
+  mkdir -p "$corpus" "$copy/bin"
+  cat > "$corpus/marker.check.sh" <<'EOS'
+#!/usr/bin/env bash
+set -u
+M="$FM_PROBE_ROOT/.published-marker"
+if [ -s "$M" ]; then echo "marker is live"; else echo "marker is absent"; fi
+EOS
+  chmod 0700 "$corpus/marker.check.sh"
+  arm_corpus "$home" marker
+  # A copy outside the repository resolves its writer corpus to a stranger's
+  # bin/, where no firstmate helper writes any marker. Running it there must
+  # announce that the evidence is partial instead of reporting every marker as
+  # orphaned.
+  cp "$SWEEP" "$copy/bin/fm-instrument-sweep.sh"
+  chmod +x "$copy/bin/fm-instrument-sweep.sh"
+
+  out=$("$copy/bin/fm-instrument-sweep.sh" --state "$corpus" 2>&1) || fail "copied sweep failed:"$'\n'"$out"
+  case $out in
+  *"writer evidence is partial"*) ;;
+  *) fail "a partial writer corpus was not announced:"$'\n'"$out" ;;
+  esac
+
+  pass "a partial writer corpus is announced instead of implied complete"
+}
+
 test_stderr_only_failure_branch_is_a_defect() {
   local home corpus out
   home="$TMP_ROOT/stderr-branch"
@@ -457,4 +487,5 @@ test_every_defect_carries_its_exact_source_line
 test_zero_guarded_rate_is_not_a_defect
 test_literal_divisor_is_not_a_rate_defect
 test_stderr_only_failure_branch_is_a_defect
+test_partial_writer_corpus_is_announced
 test_identical_output_falls_back_to_the_output_statement
