@@ -2395,29 +2395,57 @@ migrated_orca_worktree_path() {
 # so a stale or wrong registry row can never authorize a removal of a different
 # directory.
 teardown_migrated_orca_worktree() {
-  local meta=$1 wt=$2 proj=$3 prior out id resolved resolved_abs wt_abs
+  local meta=$1 wt=$2 proj=$3 prior out code msg='' err='' errfile id resolved resolved_abs wt_abs
   prior=$(migrated_orca_worktree_path "$meta" "$wt") || return 3
-  if fm_backend_source orca 2>/dev/null && command -v orca >/dev/null 2>&1 \
-     && out=$(orca worktree show --worktree "path:$prior" --json 2>/dev/null) \
-     && id=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-id 2>/dev/null) \
-     && [ -n "$id" ] \
-     && resolved=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-path 2>/dev/null) \
-     && resolved_abs=$(canonical_existing_dir "$resolved") \
-     && wt_abs=$(canonical_existing_dir "$wt") \
-     && [ "$resolved_abs" = "$wt_abs" ]; then
-    if fm_backend_remove_worktree orca "$id"; then
-      echo "teardown: removed migrated Orca worktree $wt through Orca ($id)"
-      return 0
-    fi
-    echo "error: Orca worktree removal failed for $id ($wt); teardown aborted" >&2
+  if ! fm_backend_source orca 2>/dev/null || ! command -v orca >/dev/null 2>&1; then
+    echo "error: the orca CLI is unavailable, so migrated Orca worktree $wt cannot be released; teardown aborted" >&2
     return 1
   fi
-  # Orca no longer tracks this worktree: remove it as a plain git worktree.
-  if git -C "$proj" worktree remove --force "$wt" 2>/dev/null; then
-    echo "teardown: removed migrated Orca worktree $wt as a plain git worktree (Orca no longer tracks it)"
-    return 0
+  errfile=$(umask 077; mktemp "${TMPDIR:-/tmp}/fm-orca-show.XXXXXX") || {
+    echo "error: cannot create a temp file to capture orca worktree show output" >&2
+    return 1
+  }
+  out=$(orca worktree show --worktree "path:$prior" --json 2>"$errfile" || true)
+  err=$(cat "$errfile" 2>/dev/null || true)
+  rm -f "$errfile"
+  case "$out" in
+    *[![:space:]]*) ;;
+    *) out= ;;
+  esac
+  if [ -n "$out" ] && msg=$(printf '%s' "$out" | fm_backend_orca_json_ok 2>&1); then
+    id=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-id 2>/dev/null || true)
+    resolved=$(printf '%s' "$out" | fm_backend_orca_json_get worktree-path 2>/dev/null || true)
+    resolved_abs=$(canonical_existing_dir "$resolved" 2>/dev/null || true)
+    wt_abs=$(canonical_existing_dir "$wt" 2>/dev/null || true)
+    if [ -n "$id" ] && [ -n "$resolved_abs" ] && [ "$resolved_abs" = "$wt_abs" ]; then
+      if fm_backend_remove_worktree orca "$id"; then
+        echo "teardown: removed migrated Orca worktree $wt through Orca ($id)"
+        return 0
+      fi
+      echo "error: Orca worktree removal failed for $id ($wt); teardown aborted" >&2
+      return 1
+    fi
+    echo "error: Orca resolves $prior to a worktree that is not $wt; teardown aborted without removing it" >&2
+    return 1
   fi
-  echo "error: could not remove migrated Orca worktree $wt through Orca or git; teardown aborted" >&2
+  code=$(printf '%s' "$out" | fm_backend_orca_json_error_code 2>/dev/null || true)
+  if [ "$code" = selector_not_found ]; then
+    # Orca no longer tracks this worktree: release it only through the guarded
+    # plain git path, which never forces a dirty or locked worktree.
+    if guarded_plain_git_release "$wt" "$proj"; then
+      echo "teardown: removed migrated Orca worktree $wt as a plain git worktree (Orca no longer tracks it)"
+      return 0
+    fi
+    echo "error: Orca no longer tracks migrated worktree $wt and a guarded plain git release could not prove it safe; teardown aborted" >&2
+    return 1
+  fi
+  if [ -z "$code" ]; then
+    case "$err" in
+      *[![:space:]]*) msg=$err ;;
+    esac
+  fi
+  [ -n "$msg" ] || msg="orca worktree show for $prior returned ${out:-no output}"
+  echo "error: Orca worktree show failed for $prior: $msg; teardown aborted without removing $wt" >&2
   return 1
 }
 

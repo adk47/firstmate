@@ -3680,12 +3680,126 @@ test_migrated_orca_mismatched_path_not_removed() {
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "migrated-orca-mismatch: teardown should fall back to git removal"
-  [ ! -e "$wt" ] || fail "migrated-orca-mismatch: the inspected worktree was not removed"
+  expect_code 1 "$rc" "migrated-orca-mismatch: teardown should refuse a mismatched Orca path"
+  [ -d "$wt" ] || fail "migrated-orca-mismatch: the inspected worktree was removed despite the mismatch"
   [ -d "$decoy" ] || fail "migrated-orca-mismatch: Orca removed a directory the safety gates never inspected"
   [ ! -e "$case_dir/orca-rm.log" ] || fail "migrated-orca-mismatch: Orca removal was invoked for a mismatched path"
-  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "migrated-orca-mismatch: the task meta was not removed"
-  pass "a mismatched Orca path falls back to removing the inspected worktree"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "migrated-orca-mismatch: the task meta was removed despite the refusal"
+  assert_grep 'resolves' "$case_dir/stderr" "migrated-orca-mismatch: refusal did not name the path mismatch"
+  pass "a mismatched Orca path refuses instead of removing the inspected worktree"
+}
+
+# Install an `orca` mock whose `worktree show` fails with a non-selector error.
+# Args: case_dir code message [stderr-only]
+add_fake_orca_show_failure() {
+  local case_dir=$1 code=$2 message=$3 stderr_only=${4:-}
+  cat > "$case_dir/fakebin/orca" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "worktree show")
+    if [ -n "$stderr_only" ]; then
+      printf '%s\n' "$message" >&2
+    else
+      printf '{"ok":false,"error":{"code":"$code","message":"$message"}}\n'
+    fi
+    exit 1 ;;
+  "worktree rm")
+    printf 'removed\n' >> "$case_dir/orca-rm.log"
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+}
+
+# Install an `orca` mock that reports the prior path as a proven registry miss.
+# Args: case_dir
+add_fake_orca_selector_not_found() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/orca" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "worktree show")
+    printf '{"ok":false,"error":{"code":"selector_not_found"}}\n'
+    exit 1 ;;
+  "worktree rm")
+    printf 'removed\n' >> "$case_dir/orca-rm.log"
+    exit 0 ;;
+esac
+exit 0
+SH
+  chmod +x "$case_dir/fakebin/orca"
+}
+
+test_migrated_orca_show_failure_refuses_with_concrete_error() {
+  local case_dir rc wt
+  case_dir=$(make_migrated_orca_case migrated-orca-show-failure)
+  wt=$(migrated_orca_wt "$case_dir")
+  write_migrated_orca_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  mwt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$wt" rev-parse HEAD)"
+  add_fake_orca_show_failure "$case_dir" runtime_unavailable "Orca runtime is not running"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "migrated-orca-show-failure: teardown should refuse a non-selector show failure"
+  [ -d "$wt" ] || fail "migrated-orca-show-failure: the worktree was removed despite the show failure"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "migrated-orca-show-failure: the task meta was removed despite the refusal"
+  assert_grep 'Orca runtime is not running' "$case_dir/stderr" \
+    "migrated-orca-show-failure: refusal did not name the concrete Orca error"
+  pass "a non-selector Orca show failure refuses with the concrete error"
+}
+
+test_migrated_orca_stderr_only_show_failure_refuses_with_concrete_error() {
+  local case_dir rc wt
+  case_dir=$(make_migrated_orca_case migrated-orca-stderr-failure)
+  wt=$(migrated_orca_wt "$case_dir")
+  write_migrated_orca_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  mwt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$wt" rev-parse HEAD)"
+  add_fake_orca_show_failure "$case_dir" '' "orca: Orca is no longer installed at /opt/Orca/resources/bin/orca-ide." stderr-only
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "migrated-orca-stderr-failure: teardown should refuse a stderr-only show failure"
+  [ -d "$wt" ] || fail "migrated-orca-stderr-failure: the worktree was removed despite the show failure"
+  [ -e "$case_dir/state/task-x1.meta" ] || fail "migrated-orca-stderr-failure: the task meta was removed despite the refusal"
+  assert_grep 'Orca is no longer installed' "$case_dir/stderr" \
+    "migrated-orca-stderr-failure: refusal did not name the concrete stderr error"
+  pass "a stderr-only Orca show failure refuses with the concrete error"
+}
+
+test_migrated_orca_selector_not_found_uses_guarded_git_release() {
+  local case_dir rc wt
+  case_dir=$(make_migrated_orca_case migrated-orca-selector-miss)
+  wt=$(migrated_orca_wt "$case_dir")
+  write_migrated_orca_meta "$case_dir" no-mistakes ship
+  printf '%s\n' 'pr=https://github.com/example/repo/pull/7' >> "$case_dir/state/task-x1.meta"
+  mwt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  add_gh_pr_merged_for_head "$case_dir" "$(git -C "$wt" rev-parse HEAD)"
+  add_fake_orca_selector_not_found "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "migrated-orca-selector-miss: teardown should release a proven registry miss"
+  [ ! -e "$wt" ] || fail "migrated-orca-selector-miss: the worktree was not released"
+  [ ! -e "$case_dir/orca-rm.log" ] || fail "migrated-orca-selector-miss: Orca removal was invoked for a registry miss"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "migrated-orca-selector-miss: the task meta was not removed"
+  pass "a proven Orca registry miss releases through the guarded plain git path"
 }
 
 test_migrated_orca_dirty_worktree_refuses() {
@@ -4997,6 +5111,9 @@ test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
 test_migrated_orca_clean_worktree_removed
 test_migrated_orca_mismatched_path_not_removed
+test_migrated_orca_show_failure_refuses_with_concrete_error
+test_migrated_orca_stderr_only_show_failure_refuses_with_concrete_error
+test_migrated_orca_selector_not_found_uses_guarded_git_release
 test_migrated_orca_dirty_worktree_refuses
 test_migrated_orca_unpushed_worktree_refuses
 test_change_watch_terminal_gap_refuses_teardown

@@ -786,6 +786,34 @@ test_recorded_default_backend_task_requires_absent_treehouse() {
   pass "bootstrap: a recorded default-backend task reports an absent treehouse under an orca home"
 }
 
+# A remote secondmate record carries kind=secondmate and remote_backend=herdr
+# but no backend= line, so it must not be mistaken for a local tmux task that
+# needs this host's treehouse. Its worktree lease lives on the remote host.
+test_remote_secondmate_record_does_not_require_local_treehouse() {
+  local case_dir home fakebin base_path out
+  case_dir="$TMP_ROOT/orca-remote-secondmate-no-treehouse"
+  home="$case_dir/home"
+  mkdir -p "$home/config" "$home/state"
+  printf '%s\n' manual > "$home/config/backlog-backend"
+  printf '%s\n' orca > "$home/config/backend"
+  printf '%s\n' 'window=remote:fm-sm' 'kind=secondmate' 'remote_host=remote.example' \
+    'remote_backend=herdr' > "$home/state/sm.meta"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  rm -f "$fakebin/tmux" "$fakebin/treehouse"
+  fm_fake_exit0 "$fakebin" orca
+  cat > "$fakebin/ssh" <<'SH'
+#!/usr/bin/env bash
+exit 255
+SH
+  chmod +x "$fakebin/ssh"
+  base_path=$(make_path_without_tool "$case_dir" treehouse)
+  out=$(PATH="$fakebin:$base_path" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    "$ROOT/bin/fm-bootstrap.sh")
+  assert_not_contains "$out" "MISSING: treehouse" \
+    "a remote secondmate record must not require local treehouse under an orca home"
+  pass "bootstrap: a remote secondmate record does not require local treehouse"
+}
+
 test_fleet_sync_timeout_scales_with_origin_backed_project_count() {
   local case_dir home fakebin fake_root out
   case_dir="$TMP_ROOT/fleet-timeout-scaled"
@@ -1240,6 +1268,7 @@ test_json_backends_require_jq_not_tmux
 test_treehouse_lease_check_follows_resolved_backend
 test_recorded_treehouse_backend_requires_treehouse_under_orca
 test_recorded_default_backend_task_requires_absent_treehouse
+test_remote_secondmate_record_does_not_require_local_treehouse
 test_fleet_sync_timeout_scales_with_origin_backed_project_count
 test_fleet_sync_timeout_floor_preserves_small_fleets
 test_fleet_sync_timeout_explicit_override_wins

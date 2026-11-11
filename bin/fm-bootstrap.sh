@@ -907,6 +907,7 @@ treehouse_required_by_recorded_task() {
   local meta
   for meta in "$STATE"/*.meta; do
     [ -f "$meta" ] || continue
+    grep -q '^kind=secondmate$' "$meta" 2>/dev/null && continue
     [ "$(fm_backend_of_meta "$meta")" = orca ] && continue
     return 0
   done
