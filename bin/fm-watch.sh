@@ -119,11 +119,12 @@
 #                          FM_SECONDMATE_WAKE_STALL_SECS AND the mate's own
 #                          endpoint is not provably busy AND the mate's Pi
 #                          supervision branch is not mid-turn; the branch is
-#                          judged by its last session message entry, and a
-#                          malformed or partially written session means the
-#                          branch is writing and stays silent; only a session
-#                          with no message entries at all falls back to the
-#                          mtime window; a positive busy read or a
+#                          judged by its last complete session message entry,
+#                          with a malformed trailing line meaning the branch is
+#                          writing and silent, malformed earlier lines skipped,
+#                          and only a session with no message entries at all
+#                          falling back to the mtime window; a positive busy
+#                          read or a
 #                          branch mid-turn stays silent (branch work never
 #                          renders in the pane, so the pane alone cannot prove
 #                          idleness), while a failed capture or any unprovable
@@ -836,15 +837,16 @@ secondmate_oldest_queue_row() {  # <queue-path>
 
 # A Pi mate's supervision branch runs its model turn out of the pane, so the
 # busy contract above cannot see it; the branch session file it appends to is
-# the only evidence. The last message entry proves the turn state: a user
-# message, an assistant message with stopReason toolUse, or a tool result is a
-# turn in flight and busy regardless of mtime; an assistant message with any
-# other stopReason is positive idle evidence. A malformed or partially written
-# session means the branch is writing now and is busy, never idle. Only a
+# the only evidence. The last complete message entry proves the turn state: a
+# user message, an assistant message with stopReason toolUse, or a tool result
+# is a turn in flight and busy regardless of mtime; an assistant message with
+# any other stopReason is positive idle evidence. A malformed trailing line
+# means the branch is writing now and is busy, never idle; malformed lines
+# earlier are skipped so the last complete message entry decides. Only a
 # session with no type=message entries at all falls back to the mtime window;
 # none when the home has no branch session.
 secondmate_branch_state() {  # <home> <threshold-secs> -> idle|busy|none
-  local home=$1 threshold=$2 pointer session mtime now last role stop jq_status
+  local home=$1 threshold=$2 pointer session mtime now last role stop last_line
   pointer="$home/state/.branch-session"
   [ -f "$pointer" ] && [ ! -L "$pointer" ] || { printf 'none'; return 0; }
   session=$(head -n 1 "$pointer" 2>/dev/null || true)
@@ -854,18 +856,33 @@ secondmate_branch_state() {  # <home> <threshold-secs> -> idle|busy|none
     *) printf 'none'; return 0 ;;
   esac
   [ -f "$session" ] || { printf 'none'; return 0; }
-  last="" role="" stop="" jq_status=0
+  last="" role="" stop=""
   if command -v jq >/dev/null 2>&1; then
-    last=$(jq -r 'select(.type == "message") | [(.message.role // ""), (.message.stopReason // "")] | @tsv' "$session" 2>/dev/null)
-    jq_status=$?
-    if [ "$jq_status" -ne 0 ]; then printf 'busy'; return 0; fi
-    last=$(printf '%s\n' "$last" | tail -n 1)
+    local line is_last=1 extract jq_status
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      extract=$(printf '%s\n' "$line" | jq -r 'if (.type // "") == "message" then [(.message.role // ""), (.message.stopReason // "")] | @tsv else "__not_message__" end' 2>/dev/null)
+      jq_status=$?
+      if [ "$jq_status" -ne 0 ]; then
+        [ "$is_last" -eq 1 ] && { printf 'busy'; return 0; }
+        is_last=0
+        continue
+      fi
+      is_last=0
+      [ "$extract" = "__not_message__" ] && continue
+      last=$extract
+      break
+    done < <(awk '{ lines[NR] = $0 } END { for (i = NR; i >= 1; i--) print lines[i] }' "$session")
     if [ -n "$last" ]; then
       role=${last%%$'\t'*}
       stop=${last#*$'\t'}
       [ "$stop" = "$last" ] && stop=""
     fi
   else
+    last_line=$(awk 'NF { keep = $0 } END { if (keep != "") print keep }' "$session")
+    if [ -n "$last_line" ] && ! printf '%s\n' "$last_line" | grep -q '}[[:space:]]*$'; then
+      printf 'busy'; return 0
+    fi
     last=$(grep -E '"type"[[:space:]]*:[[:space:]]*"message"' "$session" 2>/dev/null | tail -n 1)
     if [ -n "$last" ]; then
       role=$(printf '%s\n' "$last" | sed -n 's/.*"role"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')

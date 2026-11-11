@@ -396,14 +396,36 @@ test_secondmate_stall_stays_quiet_for_malformed_branch_session() {
   printf '%s\n' \
     '{"type":"message","message":{"role":"assistant","stopReason":"stop"}}' \
     '{"type":"message","message":{"role":' > "$sub/state/branch-session/turn.jsonl"
+  touch -d '16 minutes ago' "$sub/state/branch-session/turn.jsonl" 2>/dev/null \
+    || touch -t "$(date -v-16M +%Y%m%d%H%M 2>/dev/null || date -d '16 minutes ago' +%Y%m%d%H%M)" "$sub/state/branch-session/turn.jsonl"
   printf '%s\n' "$sub/state/branch-session/turn.jsonl" > "$sub/state/.branch-session"
   printf '%s\t7\tsignal\trouted\tsignal: routed row\n' "$(( $(date +%s) - 1020 ))" > "$sub/state/.wake-queue"
   secondmate_stall_checkpoint "$dir" watch-malformed-branch-session 900
   ! grep -F 'secondmate wake-loop stalled' "$dir/watch-malformed-branch-session.out" >/dev/null \
-    || fail "a branch writing a malformed session was reported as stalled: $(cat "$dir/watch-malformed-branch-session.out")"
+    || fail "a branch writing a malformed trailing line was reported as stalled: $(cat "$dir/watch-malformed-branch-session.out")"
   [ ! -e "$dir/state/.secondmate-wake-stall-mate" ] \
     || fail "a malformed branch session left a stall marker"
-  pass "a malformed branch session is treated as writing, not idle"
+  pass "a malformed trailing branch line is treated as writing, not idle"
+}
+
+test_secondmate_stall_skips_historical_malformed_branch_line() {
+  local dir sub
+  dir=$(secondmate_stall_fixture secondmate-stall-historical-malformed-branch-line)
+  sub="$dir/secondmate"
+  mkdir -p "$sub/state/branch-session"
+  printf '%s\n' \
+    '{"type":"message","message":{"role":' \
+    '{"type":"message","message":{"role":"assistant","stopReason":"stop"}}' > "$sub/state/branch-session/old.jsonl"
+  touch -d '16 minutes ago' "$sub/state/branch-session/old.jsonl" 2>/dev/null \
+    || touch -t "$(date -v-16M +%Y%m%d%H%M 2>/dev/null || date -d '16 minutes ago' +%Y%m%d%H%M)" "$sub/state/branch-session/old.jsonl"
+  printf '%s\n' "$sub/state/branch-session/old.jsonl" > "$sub/state/.branch-session"
+  printf '%s\t7\tsignal\trouted\tsignal: routed row\n' "$(( $(date +%s) - 1020 ))" > "$sub/state/.wake-queue"
+  secondmate_stall_checkpoint "$dir" watch-historical-malformed-branch-line 900
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7' "$dir/watch-historical-malformed-branch-line.out" >/dev/null \
+    || fail "a historical malformed line silenced an idle branch: $(cat "$dir/watch-historical-malformed-branch-line.out")"
+  grep -E ' branch=idle$' "$dir/watch-historical-malformed-branch-line.out" >/dev/null \
+    || fail "the stall reason did not carry its branch evidence: $(cat "$dir/watch-historical-malformed-branch-line.out")"
+  pass "a historical malformed branch line is skipped and the last complete message decides"
 }
 
 test_secondmate_stall_reports_idle_branch_with_evidence() {
@@ -1711,6 +1733,7 @@ test_secondmate_foreign_queue_stall_is_one_shot_and_read_only
 test_secondmate_stall_stays_quiet_while_branch_is_mid_turn
 test_secondmate_stall_stays_quiet_for_long_branch_turn
 test_secondmate_stall_stays_quiet_for_malformed_branch_session
+test_secondmate_stall_skips_historical_malformed_branch_line
 test_secondmate_stall_reports_idle_branch_with_evidence
 test_secondmate_stall_marker_rejects_symlink
 test_acknowledged_stall_publication_survives_pre_marker_crash
