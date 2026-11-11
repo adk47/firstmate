@@ -658,8 +658,13 @@ class UvnStatusTests(unittest.TestCase):
             rep, gate = verify_notify.Report(), FakeGate()
             verify_notify.send_all(ps, rep, mode="apply", wrapper="/gate", runner=gate)
             self.assertEqual(seen, [["42", "43"]])
-            self.assertEqual([p["user"].get("professional_id") for _, p in gate.calls], ["pro-42", None])
-            self.assertEqual(gate.calls[0][1]["user"]["auth_id"], "sub-42")
+            # [key=apply-pool] the apply gate now runs on a bounded pool, so the ORDER of gate.calls is the workers'
+            # completion order, not the list order. The property under test is that each payload carries ITS OWN
+            # identity, so it is asserted per user id - an order-sensitive list here would be a flake, not a check.
+            by_id = {p["user"]["id"]: p["user"] for _, p in gate.calls}
+            self.assertEqual({k: v.get("professional_id") for k, v in by_id.items()},
+                             {"42": "pro-42", "": None})   # 43 has no id: held, so the gate is never called for it
+            self.assertEqual(by_id["42"]["auth_id"], "sub-42")
             self.assertEqual(rep.no_professional_id, 1)
             self.assertIn("no professional id on the account", rep.render("apply"))
 

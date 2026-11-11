@@ -181,10 +181,11 @@ class ClaimProofAskTests(unittest.TestCase):
         q = replica({c: ("pending", u) for c, u in ((1, 7), (2, 7), (3, 8), (4, 9), (5, 10), (6, 11))},
                     {7: "a@x.com", 8: "b@x.com", 9: "c@x.com", 10: "d@x.com", 11: "e@x.com"})
         rep, gate = self.go(self.lst(claims), q)
-        sent = [p["credits"][0]["request_id"] for _, p in gate.calls]
+        sent = sorted(p["credits"][0]["request_id"] for _, p in gate.calls)
         self.assertEqual(sent, ["claim-1", "claim-6"])
         self.assertEqual((rep.second_claim, rep.not_band, rep.code_found), (1, 1, 1))
-        argv, p = gate.calls[0]
+        # the note steps run on the apply pool, so completion order is not the list's: find claim-1's call
+        argv, p = next(c for c in gate.calls if c[1]["credits"][0]["request_id"] == "claim-1")
         self.assertEqual(argv[argv.index("--campaign") + 1], "claim-proof-ask")
         self.assertEqual(p["claim"], {"profile_name": "Big Star", "profile_url": "https://credits.muso.ai/profile/abc",
                                       "code": "MUSO-7K2Q", "platform": "spotify"})
@@ -198,7 +199,7 @@ class ClaimProofAskTests(unittest.TestCase):
         q = replica({c: ("pending", u) for c, u in ((1, 7), (2, 8), (3, 9), (4, 10), (5, 11))},
                     {u: f"u{u}@x.com" for u in (7, 8, 9, 10, 11)})
         rep, gate = self.go(self.lst(claims), q)
-        self.assertEqual([p["claim"]["platform"] for _, p in gate.calls], ["website", "youtube"])
+        self.assertEqual(sorted(p["claim"]["platform"] for _, p in gate.calls), ["website", "youtube"])
         self.assertEqual(rep.no_readable_surface, 3)
 
     def test_apply_rewrites_the_send_log_the_daily_check_reads(self):
@@ -254,10 +255,12 @@ class ClaimProofAskTests(unittest.TestCase):
         q = replica({c["claim_id"]: ("pending", c["user_id"]) for c in claims},
                     {u: f"u{u}@x.com" for u in (7, 8, 9, 10, 11)})
         rep, gate = self.go(self.lst(claims), q, max_users=3, gate=LedgerGate(self.ledger, "2026-10-24"))
-        self.assertEqual([p["credits"][0]["request_id"] for _, p in gate.calls], ["claim-1", "claim-3", "claim-4"])
+        # the apply loop runs the note steps on a bounded pool, so the gate's COMPLETION order is not the list's:
+        # these assert WHICH claims were asked, never the order they happened to finish in.
+        self.assertEqual(sorted(p["credits"][0]["request_id"] for _, p in gate.calls), ["claim-1", "claim-3", "claim-4"])
         rep, gate = self.go(self.lst(claims, gen=1 - 24, check_age=2 - 24), q, max_users=3,
                             gate=LedgerGate(self.ledger, "2026-10-25"), now=NOW + timedelta(days=1))
-        self.assertEqual([p["credits"][0]["request_id"] for _, p in gate.calls], ["claim-2", "claim-5", "claim-6"])
+        self.assertEqual(sorted(p["credits"][0]["request_id"] for _, p in gate.calls), ["claim-2", "claim-5", "claim-6"])
         self.assertEqual((rep.already_asked, rep.second_claim, rep.over_daily_max), (3, 0, 0))
 
     def test_reminders_honour_the_segment(self):
@@ -353,7 +356,7 @@ class ClaimProofAskTests(unittest.TestCase):
                     {7: "u7@x.com", 8: "u8@x.com", 9: "u9@x.com"})
         with mock.patch.object(claim_proof_ask, "claim_daily_cap", lambda path=None: 3):
             rep, gate = self.go(self.lst([claim(1, 7), claim(2, 8), claim(3, 9)]), q, reminders=True)
-        self.assertEqual([p["credits"][0]["request_id"] for _, p in gate.calls], ["claim-1", "claim-2"])
+        self.assertEqual(sorted(p["credits"][0]["request_id"] for _, p in gate.calls), ["claim-1", "claim-2"])
         self.assertEqual(rep.over_daily_max, 1)
         self.assertEqual(q.user_reads, 1)
 

@@ -579,7 +579,13 @@ class NeedAsksTest(unittest.TestCase):
                 return type("R", (), {"returncode": 0, "stdout": "POSTED email message=1 credits=1\n", "stderr": ""})()
             with unittest.mock.patch.object(na.verify_notify.time, "monotonic", lambda: clock["t"]), \
                     unittest.mock.patch.object(na.verify_notify.time, "sleep", lambda s: None), \
-                    unittest.mock.patch.object(na.verify_notify, "attach_identities", lambda ps_, r: (ps_, [])):
+                    unittest.mock.patch.object(na.verify_notify, "attach_identities", lambda ps_, r: (ps_, [])), \
+                    unittest.mock.patch.object(na.verify_notify, "APPLY_WORKERS", 1):
+                # APPLY_WORKERS=1 on purpose: this test is about the CURSOR (a user the budget refused to
+                # start must not count as examined), and it pins "room for exactly ONE worst-case user".
+                # The synthetic clock advances inside the gate, so with a real pool the admission verdict
+                # would depend on how many workers happened to run before the next submit - a race, not a
+                # property. The pool's own admission rule has its own test in test_credit_verify_notify.
                 kw.pop("runner", None)
                 return real(ps, rep, runner=gate, **kw)
         try:

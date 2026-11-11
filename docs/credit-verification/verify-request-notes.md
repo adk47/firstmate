@@ -713,6 +713,51 @@ midnight, not the mechanism.)
 - **A user whose whole retry budget does not fit what is left is DEFERRED, never started** (`spent + WORST_USER_S >
   APPLY_BUDGET_S`): no row, no claim, still owed, reported as `apply_budget` - so one slow user can overrun the share
   by at most one retry budget, and only the last one started.
+
+## A page too big to fit is CUT to what fits, never dropped (`[key=tick-budget-page-fit]`, 2026-11-11)
+
+A paged family's worst-case estimate before it starts is `2 x max(cap, CHECK_ENTRIES) x CHECK_S_PER_USER +
+RESERVE_PAD_S` (the check and the bodies each walk the page). `CHECK_ENTRIES` is a page-SIZE knob, so it decided
+whether the family ran AT ALL: on node-8 `CHECK_ENTRIES=600` makes that estimate 5,100 s, the tick reaches uvn-status
+~3,963 s in (the builders and reply-due run first), and `3,963 + 5,100 > 6,900` skipped **every family on every tick**
+for hours - the tick never reached a send, and raising the page size made it strictly worse.
+
+A page that does not fit is now cut to what fits and the family runs. The walk still starts at the same cursor and the
+cursor still advances from the check's own page record, so a smaller page is a SLOWER page, never a skipped one.
+`PAGE_FLOOR` (`CVO_PAGE_FLOOR`, default 20) is the smallest page worth the setup cost; below it the family still waits
+for the next tick. At the repo's own `CHECK_ENTRIES=200` the estimate is 1,900 s and the page is never cut, so this is
+a no-op at the default and a guard against the next person raising the knob.
+
+## The apply loop is a bounded pool of 6, keyed per user (`[key=apply-pool]`, captain 2026-11-11)
+
+A real send used to be strictly serial, so a run walked ~75 users at `APPLY_S_PER_USER=40` and the untold backlog took
+~15 h. `verify_notify.APPLY_WORKERS = 6` note steps now run at once. What makes that safe is not the pool, it is the
+key:
+
+- **The idempotency key is `campaign|user|UTC day`, checked BEFORE a worker starts.** Two checks, both before the gate
+  is ever called: an in-run `seen` set (a duplicate payload for the same user is a `duplicate_idempotency_key`
+  deferral, so two workers can never both send for one person) and the durable `verify_ledger.capped` predicate (a
+  user the ledger already noted today is an `already_notified_today` deferral, so **a re-run sends nothing**). `capped`
+  is the same predicate `claim()` refuses on inside its `BEGIN IMMEDIATE` transaction, so the pre-check can only defer
+  a user the gate would itself have deferred - it never invents a refusal. The gate's atomic claim stays the
+  authority; the key is the cheap proof in front of it.
+- **Only the gate subprocess leaves the caller's thread.** Every counter, every guard, the outcome file and the stop
+  bars keep exactly one writer, and results are consumed in LIST order, so the accounting is identical to a serial
+  pass. A worker's exception is that user's row (`error`), never the batch's.
+- **Pacing is a RATE, not a per-user sleep.** The serial loop slept `pace_seconds` between users; the pool sleeps
+  `pace_seconds / workers` between submits, so the aggregate send rate is exactly what it was.
+- **The budget guard is unchanged** (`spent + WORST_USER_S > APPLY_BUDGET_S`): the workers run concurrently, so the
+  wall-clock worst case is still ONE retry budget, not `APPLY_WORKERS` of them.
+- **The tick sizes the apply at `remaining x APPLY_WORKERS / APPLY_S_PER_USER`** (`scripts/credit-verify-outbound.sh`),
+  i.e. six times the users for the same remainder. The pool is bounded at 6 on purpose: raise it only after measuring
+  what the admin API sustains.
+
+**The pool does NOT reach the uvn-status family, and that is the family carrying the backlog.** `uvn_status.run()`
+calls `send_all([p])` once per user in apply mode (a fresh replica re-plan, `asks_proof_on_file`, `stage2_released`,
+`plan`, `documents_block`, `read_hold_until` and `apology_states` immediately before each send), so `_send_loop` sees a
+one-payload batch and runs it with `workers = 1`. The pool is real for the families that hand `send_all` a batch
+(`claim_proof_ask`, `need_asks`). Batching uvn-status's apply walk would widen the window between those reads and the
+send, so it is a separate change that needs a ruling, not a side effect of this one.
 - **A timeout is not erased by the retry's answer.** The gate claims the user BEFORE it posts, so when the first POST
   times out and a retry answers `SKIPPED already-notified`, the run cannot tell "the timed-out POST landed" from "it
   died after claiming". That user is `timeout` (UNMEASURED), never `skipped`: a skip asserts we know nothing went out.

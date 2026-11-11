@@ -975,8 +975,16 @@ def _first_line(text: str) -> str:
 # Fable 526 / measured 10-31 23:1xZ: a live-gate check costs ~10 s, so a read-only pass (check-recipients, preview,
 # validate) runs its gate calls on CHECK_WORKERS threads. Safe because every gate write is guarded by ACTION=post and the
 # ledger opens --readonly off post; results are consumed in LIST order, so the accounting equals a serial pass. A real
-# send (apply) is always serial: one writer for claims, caps and pacing.
+# send (apply) runs on its own, smaller pool (APPLY_WORKERS below) with the same one-writer accounting.
 CHECK_WORKERS = 4
+
+# [key=apply-pool] (captain 2026-11-11, work order item 1): a real send used to be strictly serial, so a run did 75
+# users at 40 s each and the untold backlog took ~15 h. APPLY_WORKERS note steps now run at once, each user carrying an
+# idempotency key (campaign|user|UTC day) that is checked BEFORE a worker starts, so two workers can never both send
+# for one person and a re-run sends nothing. Bounded at 6 on purpose: raise it only after measuring what the admin API
+# sustains. Only the gate subprocess leaves the caller's thread - every counter, guard and the outcome file keep one
+# writer, and results are consumed in list order, so the accounting is identical to a serial pass.
+APPLY_WORKERS = 6
 
 # Fable r5's ruled bar (firstmate 764, restated in 765): a run of failed users becomes a systemic stop at
 # max(3, 2% of the users walked) - NOT 5%, which was my reading and r5's ruling corrects. Below the bar every failed
@@ -1333,6 +1341,38 @@ def send_all(payloads: list[dict[str, Any]], report: Report, *, mode: str,
             lock.close()
 
 
+def _apply_idem_key(p: dict[str, Any], campaign: str, day: str) -> str:
+    """The per-user idempotency key for one apply submission: campaign + user + UTC day.
+
+    One note per user per UTC day is the ledger's OWN rule (``verify_ledger.capped``, enforced inside
+    ``claim()``'s BEGIN IMMEDIATE transaction), so the key names exactly the thing a duplicate send would
+    violate. It is deliberately per USER, not per user+credit: two workers must never both send for the
+    same person, whatever credits each of them carries."""
+    uid = _uid(p)
+    ukey = str((p.get("user") or {}).get("email") or "").strip().lower()
+    return f"{campaign}|{ukey or uid}|{day}"
+
+
+def _already_noted_today(path: str, campaign: str, user_key: str, user_id: str, day: str) -> bool:
+    """The DURABLE half of the idempotency key: has the ledger already noted this user today?
+
+    ``verify_ledger.capped`` is the same predicate ``claim()`` refuses on, so this can only ever defer a
+    user the gate would itself have deferred - it never invents a new refusal. Checking it BEFORE a worker
+    starts is what makes a re-run send nothing: the second run never even opens a note step for a user the
+    first run already claimed. An unreadable ledger is "not noted" (the gate's atomic claim stays the
+    authority), never a reason to stop the walk."""
+    if not (user_key or user_id):
+        return False
+    try:
+        db = verify_ledger.connect(path)
+        try:
+            return verify_ledger.capped(db, user_key=user_key, day=day, user_id=user_id)
+        finally:
+            db.close()
+    except sqlite3.Error:
+        return False
+
+
 def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pace_seconds: float, pre: Any,
                gate: Callable[[dict[str, Any]], Any], extra: list[str] | None, preview_dir: str | None,
                reminder: bool, walked: int | None = None, ledger_path: str | None = None,
@@ -1345,23 +1385,47 @@ def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pac
     # the run's clock when there IS a run (apply_session): QA #1756 Critical. Without it this loop measured the budget
     # from its own call, so N per-user calls each got the whole share and the family overran the tick by N times.
     started = _SESSION_STARTED if (mode == "apply" and _SESSION_STARTED is not None) else time.monotonic()
-    for i, p in enumerate(payloads):
-        # [key=note-step-budget] (Fable 753): never START a user whose WORST case (the whole retry budget) would not fit
-        # in the share this run was given. The rest keep no row at all - they stay owed and unsent, exactly like a user
-        # the page never reached - so nothing here is a refusal and nothing is lost; the next tick starts them again.
-        # This is what lets the tick size an apply at the EXPECTED cost (40 s) instead of the worst case (200 s): one
-        # slow user can overrun the share by at most one retry budget, and only the last one started.
-        if mode == "apply" and APPLY_BUDGET_S is not None:
-            spent = time.monotonic() - started
-            if spent + WORST_USER_S > APPLY_BUDGET_S:
-                for rest in payloads[i:]:
-                    report.deferred_users += 1
-                    report.budget_deferred_users += 1
-                    _outcome(report, rest, "deferred",
-                             f"apply_budget: {spent:.0f}s of {APPLY_BUDGET_S:.0f}s spent and one note can cost up to "
-                             f"{WORST_USER_S:.0f}s; not started, stays owed for the next tick")
-                break
-        if i and pace_seconds and mode == "apply":
+    day = verify_ledger.stamp()[:10]
+    # [key=apply-pool] (captain 2026-11-11, work order item 1): a real send used to be strictly serial, so a run did
+    # 75 users at 40 s each and the untold backlog took ~15 h. APPLY_WORKERS note steps now run at once. Only the GATE
+    # CALL (the slow subprocess) leaves this thread: every guard, every counter, the outcome file and the stop bars
+    # keep exactly one writer, and results are consumed in LIST order, so the accounting is identical to a serial pass.
+    # The pool is bounded at 6 on purpose - raise it only after measuring what the admin API sustains.
+    workers = APPLY_WORKERS if (mode == "apply" and pre is None and len(payloads) > 1) else 1
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=workers) if workers > 1 else None
+    futures: dict[int, Any] = {}
+    skipped: set[int] = set()
+    seen: set[str] = set()          # the idempotency keys already submitted in THIS run
+    next_j = 0
+    budget_stopped = False
+
+    def _capture(p: dict[str, Any]) -> Any:
+        # a worker's exception is that user's row, never the batch's: _send_loop re-raises it inside its per-user try
+        try:
+            return gate(p)
+        except Exception as exc:  # noqa: BLE001 - re-raised per user below
+            return exc
+
+    def _defer_budget(from_i: int, spent: float) -> None:
+        for rest in payloads[from_i:]:
+            report.deferred_users += 1
+            report.budget_deferred_users += 1
+            _outcome(report, rest, "deferred",
+                     f"apply_budget: {spent:.0f}s of {APPLY_BUDGET_S:.0f}s spent and one note can cost up to "
+                     f"{WORST_USER_S:.0f}s; not started, stays owed for the next tick")
+
+    def _start(j: int) -> bool:
+        """Every guard that must pass BEFORE user j's note step starts. True when it may start.
+
+        Runs on the caller's thread, in list order, so a user is never started before its own checks pass and
+        a deferral is recorded exactly once."""
+        p = payloads[j]
+        # [key=apply-pool] pacing is a RATE LIMIT on SUBMITS, and the pool does not divide it (QA 2026-11-11,
+        # Important). `pace_seconds` bounds how fast notes START; dividing it by the pool width let six workers start
+        # six notes in the one second the contract allows one, which is a burst the configured limit exists to prevent.
+        # Keeping the interval costs nothing in steady state: a note takes far longer than pace_seconds, so the pool
+        # still saturates - it just fills over 6 x pace_seconds instead of instantly.
+        if j and pace_seconds and mode == "apply":
             time.sleep(pace_seconds)
         if mode == "apply":
             hm = head_mismatch()
@@ -1371,7 +1435,7 @@ def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pac
                 report.deferred_users += 1
                 why = _outcome(report, p, "deferred", hm)
                 report.deferrals.append(f"user {_uid(p)}: {why}"[:200])
-                continue
+                return False
         # Fable r5 2026-11-06 00:53Z: the hold is HONOURED by every lane, not only by UVN. A user whose own read failed
         # on an earlier tick is skipped with a named deferral until it expires, so the consecutive count can reach the
         # page instead of the same unreadable read being walked every run with no memory of it.
@@ -1383,53 +1447,113 @@ def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pac
                 report.outcomes.append({"user": _uid(p), "result": "deferred",
                                         "reason": f"read_failed_hold until {hold_until}"})
                 report.deferrals.append(f"user {_uid(p)}: read failed on an earlier tick; retry after {hold_until}")
+                return False
+        if mode == "apply":
+            # [key=apply-idem] the idempotency key is checked BEFORE a worker starts, never after: a duplicate is a
+            # deferral with a name, and the gate is never called for it. Two workers cannot both send for one user.
+            key = _apply_idem_key(p, campaign, day)
+            if key in seen:
+                report.deferred_users += 1
+                why = _outcome(report, p, "deferred",
+                               f"duplicate_idempotency_key {key}: this user is already being sent in this run; "
+                               f"not started, so no second note can go out")
+                report.deferrals.append(f"user {_uid(p)}: {why}"[:200])
+                return False
+            if ledger_path and campaign and _already_noted_today(ledger_path, campaign, hold_ukey, _uid(p), day):
+                # SKIPPED, not deferred: this is exactly the answer the gate itself gives ("SKIPPED already told",
+                # rc=0), so the served numbers do not move - the only difference is that a re-run never pays for the
+                # subprocess to say it. Counting it as a deferral would have inflated deferred_users for every family
+                # and changed a number the tick reports.
+                report.skipped += 1
+                _outcome(report, p, "skipped",
+                         f"already_notified_today {key}: the ledger already has a note for this user today "
+                         f"(verify_ledger.capped); not started, so a re-run sends nothing")
+                return False
+            seen.add(key)
+        return True
+
+    def _fill(upto: int) -> None:
+        """Start users in list order until `workers` note steps are in flight (or `upto` is reached)."""
+        nonlocal next_j, budget_stopped
+        while next_j <= upto and next_j < len(payloads) and len(futures) < workers:
+            j = next_j
+            next_j += 1
+            if budget_stopped:
+                skipped.add(j)
                 continue
+            # [key=note-step-budget] (Fable 753): never START a user whose WORST case (the whole retry budget) would not
+            # fit in the share this run was given. The rest keep no row at all - they stay owed and unsent, exactly like
+            # a user the page never reached - so nothing here is a refusal and nothing is lost; the next tick starts
+            # them again. This is what lets the tick size an apply at the EXPECTED cost (40 s) instead of the worst case
+            # (200 s). With a pool the workers run at once, so the wall-clock worst case is still ONE retry budget.
+            if mode == "apply" and APPLY_BUDGET_S is not None:
+                spent = time.monotonic() - started
+                if spent + WORST_USER_S > APPLY_BUDGET_S:
+                    budget_stopped = True
+                    _defer_budget(j, spent)
+                    skipped.add(j)
+                    continue
+            if not _start(j):
+                skipped.add(j)
+                continue
+            if pre is not None:
+                futures[j] = pre[j]
+            elif ex is not None:
+                futures[j] = ex.submit(_capture, payloads[j])
+            else:
+                futures[j] = _capture(payloads[j])
+
+    def _record(i: int, p: dict[str, Any], res: Any) -> None:
+        """Classify ONE user's gate result and account for it, on the caller's thread and in list order.
+
+        A `return` where the serial loop had `continue` means the same thing: this user is done, go to the next."""
+        hold_ukey = str((p.get("user") or {}).get("email") or "").strip().lower()
         fh0 = len(report.failed_held)
-        # [key=note-step-timeout] (firstmate 748, the 15:05Z auto-kill): ONE note step that timed out or raised used to
-        # propagate out of this loop and abort the run before its outcomes file was written - so the tick saw a missing
-        # artefact (and the deployed tick scored that as a refusal spike) and killed itself over a single stall, while
-        # the notes it never reached stayed owed. An unknown outcome is now recorded PER USER and the loop continues:
-        # the artefact always exists, it names success / timeout / error for every user it touched, and the users it
-        # never reached keep no row at all, which the tick reads as UNMEASURED (never as a refusal).
+        # [key=note-step-timeout] (firstmate 748, the 15:05Z auto-kill): ONE note step that timed out or raised used
+        # to propagate out of this loop and abort the run before its outcomes file was written - so the tick saw a
+        # missing artefact (and the deployed tick scored that as a refusal spike) and killed itself over a single
+        # stall, while the notes it never reached stayed owed. An unknown outcome is now recorded PER USER and the
+        # loop continues: the artefact always exists, it names success / timeout / error for every user it touched,
+        # and the users it never reached keep no row at all, which the tick reads as UNMEASURED (never as a
+        # refusal).
         try:
-            res = pre[i] if pre is not None else gate(p)
-            if isinstance(res, BaseException):      # Defect A: captured by the parallel pre-gate, raised per user here
+            if isinstance(res, BaseException):      # captured by a pool worker, raised per user here
                 raise res
         except NoteTimeout as exc:
             report.timeout_users += 1
             if mode != "apply":
                 # Defect A ruling (1): a timed-out READ-ONLY gate call records THAT user as `unmeasured`, reason
-                # `gate_timeout`, and the pass continues. (An apply-time note step keeps its own `timeout` row: there
-                # the POST may have landed and the ledger row stays claimed.)
+                # `gate_timeout`, and the pass continues. (An apply-time note step keeps its own `timeout` row:
+                # there the POST may have landed and the ledger row stays claimed.)
                 _outcome(report, p, "unmeasured", f"gate_timeout: {exc}; outcome unknown, never scored as a refusal")
             else:
                 _outcome(report, p, "timeout", f"{exc}; outcome unknown, never scored as a refusal")
             if _unmeasured_stop(report, walked):
                 return
-            continue
+            return
         except Exception as exc:  # noqa: BLE001 - one user's crash must not cost the batch its artefact
             report.error_users += 1
             _outcome(report, p, "error", f"the gate raised {type(exc).__name__}: {exc}"[:180])
             if _unmeasured_stop(report, walked):
                 return
-            continue
+            return
         if getattr(res, "unmeasured", False):
-            # uvn_status.seen caught a gate_timeout in a parallel worker: record and count it HERE, on the main thread,
-            # so the counter, the outcome file and the bar agree
+            # uvn_status.seen caught a gate_timeout in a parallel worker: record and count it HERE, on the main
+            # thread, so the counter, the outcome file and the bar agree
             report.timeout_users += 1
             _outcome(report, p, "unmeasured", getattr(res, "reason", "") or
                      "gate_timeout: outcome unknown, never scored as a refusal")
             if _unmeasured_stop(report, walked):
                 return
-            continue
+            return
         if preview_dir and mode != "apply" and res.returncode == 0:
             uid = re.sub(r"[^A-Za-z0-9-]", "", str(p["user"].get("id") or ""))[:64]
             out_path = os.path.join(preview_dir, f"{uid or f'{i + 1:05d}'}.txt")
             fdp = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fdp, "w", encoding="utf-8") as fh:
                 fh.write(res.stdout)
-            # [key=scale-now-openclaw] the batch judge's contract (p1 485 / r5): the RENDERER's own facts for this body,
-            # a JSON object beside it - never derived later from the text
+            # [key=scale-now-openclaw] the batch judge's contract (p1 485 / r5): the RENDERER's own facts for this
+            # body, a JSON object beside it - never derived later from the text
             fdf = os.open(out_path[:-4] + ".facts.json", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fdf, "w", encoding="utf-8") as fh:
                 json.dump(render_facts(p, extra or []), fh)
@@ -1459,13 +1583,14 @@ def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pac
             except (IndexError, ValueError):
                 report.sent_credits += len(p["credits"])
         elif getattr(res, "after_timeout", 0) and not _post_failed_line(res.stderr):
-            # QA #1756 Important 2 (r12): a timeout was followed by a NON-POSTED answer - and that is every answer but
-            # a proven POSTED, not just rc=0. The claim is written before the POST, so "already notified" (rc=0),
-            # "REFUSED" (rc=1) and "DEFERRED" (rc=3) can each mean "the timed-out attempt landed" or "it died after
-            # claiming"; the run cannot tell them apart. UNMEASURED, never a skip and NEVER a refusal: scoring the
-            # rc=1 case as a refusal blames the user for our timeout and can trip the refusal-spike kill, and scoring
-            # the rc=3 case as a known deferral asserts a certainty we do not have. The one exception is the gate's
-            # explicit POST FAILED line, which is its own unknown (post_failed) and is classified below.
+            # QA #1756 Important 2 (r12): a timeout was followed by a NON-POSTED answer - and that is every answer
+            # but a proven POSTED, not just rc=0. The claim is written before the POST, so "already notified"
+            # (rc=0), "REFUSED" (rc=1) and "DEFERRED" (rc=3) can each mean "the timed-out attempt landed" or "it
+            # died after claiming"; the run cannot tell them apart. UNMEASURED, never a skip and NEVER a refusal:
+            # scoring the rc=1 case as a refusal blames the user for our timeout and can trip the refusal-spike
+            # kill, and scoring the rc=3 case as a known deferral asserts a certainty we do not have. The one
+            # exception is the gate's explicit POST FAILED line, which is its own unknown (post_failed) and is
+            # classified below.
             report.timeout_users += 1
             _outcome(report, p, "timeout",
                      f"a POST attempt timed out and the retry answered rc={res.returncode} {out!r}; the claim may "
@@ -1479,18 +1604,20 @@ def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pac
         elif res.returncode == 3:
             report.deferred_users += 1
             why = _outcome(report, p, "deferred", out.removeprefix("DEFERRED ") or err)
-            # the 7-day USER window is counted on its own, IN ADDITION: the check measures per claim, the send per user,
-            # so this is the population a signed 'accepted' set overstates. deferred_users stays what every family
-            # already reports; the claim line shows the window separately (deferred_users - held_user_window).
+            # the 7-day USER window is counted on its own, IN ADDITION: the check measures per claim, the send per
+            # user, so this is the population a signed 'accepted' set overstates. deferred_users stays what every
+            # family already reports; the claim line shows the window separately (deferred_users -
+            # held_user_window).
             if "messaged_7d" in why:
                 report.held_user_window += 1
                 report.window_after_gate += 1        # this one IS in deferred_users above
             report.deferrals.append(f"user {_uid(p)}: {why}"[:200])
         elif _post_failed_line(res.stderr):
-            # [key=post-failed-unknown] (QA #1756 Important 2): the gate's POST FAILED line, checked BEFORE the generic
-            # failure branches. The real gate prints it and exits 4 (scripts/intercom-verify-request.sh:3603-3606);
-            # every other rc=4 is a pre-POST "nothing was sent or claimed" and stays a plain failure. Classifying by
-            # the LINE, not the code, is what makes the tick's post_failed arm reachable at all.
+            # [key=post-failed-unknown] (QA #1756 Important 2): the gate's POST FAILED line, checked BEFORE the
+            # generic failure branches. The real gate prints it and exits 4
+            # (scripts/intercom-verify-request.sh:3603-3606); every other rc=4 is a pre-POST "nothing was sent or
+            # claimed" and stays a plain failure. Classifying by the LINE, not the code, is what makes the tick's
+            # post_failed arm reachable at all.
             #
             # ONE classification, TWO counters: `_failed(kind="post")` is the single place that records an unknown
             # POST (failed_users, post_failed, post_failures, the `post_failed` outcome row), and
@@ -1499,8 +1626,9 @@ def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pac
             report.post_failed_users += 1
             _failed(report, p, _post_failed_line(res.stderr), walked, kind="post")
         elif res.returncode == 1 and _refused_line(res.stderr):
-            # the gate's OWN refusal line (r5 on #1515: the first stderr line can be an info line). A refusal before the
-            # claim ('nothing was sent or claimed', e.g. G1-G5) has no ledger row by design: recorded as such, by user
+            # the gate's OWN refusal line (r5 on #1515: the first stderr line can be an info line). A refusal
+            # before the claim ('nothing was sent or claimed', e.g. G1-G5) has no ledger row by design: recorded as
+            # such, by user
             why = _refused_line(res.stderr)
             report.refused_users += 1
             report.refusals.append(why[:160])
@@ -1510,18 +1638,18 @@ def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pac
             _failed(report, p, f"rc=1 without a REFUSED line: {_failure_text(res, err or out)}", walked)
         elif res.returncode == POST_FAILED_RC or _post_failed_line(res.stderr) or _post_failed_line(res.stdout):
             # (1): the gate's OWN line is the authority for WHAT failed. rc 4 is its documented contract for this
-            # (scripts/intercom-verify-request.sh) but an rc alone must never relabel a failed READ as a failed POST:
-            # a read that failed under rc 4 would then escape the hold that retries it next tick.
+            # (scripts/intercom-verify-request.sh) but an rc alone must never relabel a failed READ as a failed
+            # POST: a read that failed under rc 4 would then escape the hold that retries it next tick.
             # the same unknown-POST fact, reached by the CODE (rc=5, or the line on stdout) rather than the stderr
             # line above: the tick's arm reads post_failed_users, so it is bumped here too - never one surface only.
             report.post_failed_users += 1
             _failed(report, p, f"rc={res.returncode} {_failure_text(res, err or out)}", walked, kind="post")
         elif _post_rejected_line(res.stderr) or _post_rejected_line(res.stdout):
-            # QA #1780 (Important, 03:07Z): Intercom's error.list answers rc=4 with "POST REJECTED by Intercom (nothing
-            # delivered; retried on a later run)" AFTER the reads succeeded. That is not an unreadable read: counting
-            # three of them as three consecutive read failures pages a human for the wrong condition and holds a user
-            # whose account was perfectly readable. Nothing was delivered, so it is a DEFERRAL (the gate retries it),
-            # never a failure and never a read hold.
+            # QA #1780 (Important, 03:07Z): Intercom's error.list answers rc=4 with "POST REJECTED by Intercom
+            # (nothing delivered; retried on a later run)" AFTER the reads succeeded. That is not an unreadable
+            # read: counting three of them as three consecutive read failures pages a human for the wrong
+            # condition and holds a user whose account was perfectly readable. Nothing was delivered, so it is a
+            # DEFERRAL (the gate retries it), never a failure and never a read hold.
             why = _post_rejected_line(res.stderr) or _post_rejected_line(res.stdout)
             report.post_rejected += 1
             report.deferred_users += 1
@@ -1533,8 +1661,41 @@ def _send_loop(payloads: list[dict[str, Any]], report: Report, *, mode: str, pac
         # rejected POST is not a failed read, so the consecutive counter starts over (QA #1780, r8 771 (4)).
         if mode == "apply" and ledger_path and campaign and len(report.failed_held) == fh0:
             clear_read_hold(ledger_path, campaign, hold_ukey)
-        if report.stopped_on_failures:
-            return
+
+
+    def _drain() -> None:
+        """A stop does NOT cancel work already in flight - a gate call that has started may already have POSTed.
+
+        QA 2026-11-11 (Critical): returning from the loop with workers still running let those notes land AFTER
+        send_all released the apply lock and AFTER the outcomes file was written, so a real send was missing from the
+        report and its user looked untouched. The pool is therefore JOINED here and every in-flight result is
+        classified before this function returns; only then does the apply lock drop. Users never submitted keep no
+        row at all - still owed, walked again next tick - which is what makes a stop safe.
+        """
+        for j in sorted(futures):
+            res = futures[j]
+            if isinstance(res, concurrent.futures.Future):
+                res = res.result()
+            _record(j, payloads[j], res)
+        futures.clear()
+
+    try:
+        for i, p in enumerate(payloads):
+            _fill(i + workers - 1)
+            if i in skipped:
+                continue
+            res = futures.pop(i)
+            if isinstance(res, concurrent.futures.Future):
+                res = res.result()          # _capture returns the exception, so this never raises
+            _record(i, p, res)
+            if report.stopped_on_failures or report.stopped_on_unmeasured:
+                _drain()
+                return
+    finally:
+        if ex is not None:
+            # wait=True: a worker that is already inside the gate runs to completion and is waited for, so no note can
+            # outlive this call (and therefore the apply lock). cancel_futures only drops work never started.
+            ex.shutdown(wait=True, cancel_futures=True)
 
 
 # r8 (firstmate 771) (2): the gate's exit codes are distinct facts. 4 = NOTHING WAS SENT (a pre-send check failed),

@@ -127,20 +127,29 @@ read -r -a APPLY_RETRY_SLEEPS <<<"$(cfg CVO_APPLY_RETRY_SLEEPS '15 30 60 60 120'
 APPLY_RETRY_CAP_S="$(cfg CVO_APPLY_RETRY_CAP_S 600)"   # hard cap from the first transient rc, whatever the budget
 read -r -a TRANSIENT_RETRY_SLEEPS <<<"$(cfg CVO_TRANSIENT_RETRY_SLEEPS '30 60 120')"  # 4 read-only attempts
 DEFERRED=0                             # 1 once any family deferred: the tick then exits 2, never 0
-CHECK_ENTRIES="$(cfg CVO_CHECK_ENTRIES 200)"   # p1 599 / r5 598: a uvn family walks at most this many LIST ENTRIES a tick
+CHECK_ENTRIES="$(cfg CVO_CHECK_ENTRIES 200)"
+# [key=tick-budget-page-fit] (2026-11-11): the smallest page a paged family will still run with. A page that does not
+# fit before TICK_HARD_S is CUT to what fits (see family()); below this floor the setup cost is not worth the walk, so
+# the family waits for the next tick instead. This is a floor, never a target - it does not raise a page.
+PAGE_FLOOR="$(cfg CVO_PAGE_FLOOR 20)"   # p1 599 / r5 598: a uvn family walks at most this many LIST ENTRIES a tick
 CHECK_S_PER_USER="$(cfg CVO_CHECK_S_PER_USER 4)"   # ~10-15 s a live-gate check on 4 read-only workers (#1596)
 RESERVE_PAD_S="$(cfg CVO_RESERVE_PAD_S 300)"      # + the replica read (~86 s) and the health / zero-read rails
 # [key=note-step-timeout] / [key=note-step-budget] (d2 r5 750, amended by Fable 753): TWO numbers, not one.
-#   APPLY_S_PER_USER  - the EXPECTED cost of one user (a note step measured at ~40 s). It sizes the apply: fit =
-#                       remaining / 40, i.e. ~165 users a tick for a 6,600 s remainder.
+#   APPLY_S_PER_USER  - the EXPECTED cost of one user (a note step measured at ~40 s). It sizes the apply:
+#                       fit = remaining x APPLY_WORKERS / 40, i.e. ~990 users a tick for a 6,600 s remainder at 6.
 #   APPLY_USER_WORST_S - the WORST case one user can cost: the note step's retry budget in
 #                       scripts/credit_review/verify_notify.py, NOTE_ATTEMPTS x NOTE_TIMEOUT_S + sum(NOTE_BACKOFF_S)
 #                       = 3 x 55 + 35 = 200 s. It is NOT the sizing number (fit = remaining / 200 cut throughput 3x to
 #                       budget a 1-in-80 event); instead the runner's send loop refuses to START a user whose worst case
 #                       would not fit the share we hand it (--apply-budget-s), so one slow user overruns by at most one
-#                       retry budget, and only the last one. Change a number here, change the other side's.
+#                       retry budget. Change a number here, change the other side's.
+#   APPLY_WORKERS     - how many note steps run at once (verify_notify.APPLY_WORKERS, bounded at 6). The workers run
+#                       concurrently, so the WALL-CLOCK worst case is still one retry budget, not APPLY_WORKERS of them;
+#                       that is why the budget guard stays `spent + 200 > share` and only the SIZING multiplies by it.
+#                       Raise it only after measuring what the admin API sustains.
 APPLY_S_PER_USER="$(cfg CVO_APPLY_S_PER_USER 40)"
 APPLY_USER_WORST_S="$(cfg CVO_APPLY_USER_WORST_S 200)"
+APPLY_WORKERS="$(cfg CVO_APPLY_WORKERS 6)"
 TICK_ELAPSED0="$(cfg CVO_TICK_ELAPSED0 0)"     # bats only: the tick started this many seconds ago
 TICK_CADENCE_S=7200
 TIMEOUT_BIN="$(cfg CVO_TIMEOUT_BIN /usr/bin/timeout)"   # QA #1587: every stage of a started family runs under the deadline
@@ -271,7 +280,7 @@ PY
 }
 if [ "${1:-}" = "--print-config" ]; then
   for v in CVO_HARNESS HYDRA_ROOT KILL KILL2 LIVE_FLAG PAID_FLAG EXCLUDE STATE PY RUNNER OWING RECEIPTS HEALTH ZERO_READ \
-           FRAUD MAIN_ENV LEDGER SCRIPTS_DIR RD_SCAN RD_CAP RD_CHECKS RD_BUDGET POLICY CLAIM_LIST CAP R1_CAP CLAIM_CAP DOW REFUSAL_SPIKE NEED_RUNNER FIRST_CAP UNSIGNED_ALL NOW_EPOCH JUDGE DEPLOYED_SHA_FILE CHECK_ENTRIES TICK_BUDGET_S TICK_HARD_S CHECK_S_PER_USER RESERVE_PAD_S APPLY_S_PER_USER APPLY_USER_WORST_S TICK_ELAPSED0 FULL_CAP_FROM_TEST PER_SEGMENT_FROM_TEST PAID_FROM_TEST TIMEOUT_BIN \
+           FRAUD MAIN_ENV LEDGER SCRIPTS_DIR RD_SCAN RD_CAP RD_CHECKS RD_BUDGET POLICY CLAIM_LIST CAP R1_CAP CLAIM_CAP DOW REFUSAL_SPIKE NEED_RUNNER FIRST_CAP UNSIGNED_ALL NOW_EPOCH JUDGE DEPLOYED_SHA_FILE CHECK_ENTRIES PAGE_FLOOR TICK_BUDGET_S TICK_HARD_S CHECK_S_PER_USER RESERVE_PAD_S APPLY_S_PER_USER APPLY_USER_WORST_S APPLY_WORKERS TICK_ELAPSED0 FULL_CAP_FROM_TEST PER_SEGMENT_FROM_TEST PAID_FROM_TEST TIMEOUT_BIN \
            CLAIM_PROOF_STATE CLAIM_PROOF_LIMIT_H CLAIM_PROOF_UNREAD_H CLAIM_PROOF_REPEAT_MIN; do
     printf '%s=%s\n' "$v" "${!v}"
   done
@@ -890,6 +899,24 @@ family() {
   local walk="$cap"; [ "$paged" = 1 ] && [ "$CHECK_ENTRIES" -gt "$cap" ] && walk="$CHECK_ENTRIES"
   local worst=$(( 2 * walk * CHECK_S_PER_USER + RESERVE_PAD_S ))
   if [ $(( $(elapsed) + worst )) -gt "$TICK_HARD_S" ]; then
+    # [key=tick-budget-page-fit] (2026-11-11): a paged family's worst case is 2 x max(cap, CHECK_ENTRIES) x
+    # CHECK_S_PER_USER + RESERVE_PAD_S, so the PAGE SIZE - a throughput knob - decided whether the family ran AT ALL.
+    # On node-8 CHECK_ENTRIES=600 made that estimate 5,100 s; the tick reaches uvn-status ~4,000 s in (the builders and
+    # reply-due run first), so 4,000 + 5,100 > 6,900 and EVERY family was skipped on EVERY tick: the tick never reached
+    # a send, and raising the page size made it worse. A page that does not fit is now CUT to what fits instead of the
+    # family being dropped - the walk still starts at the same cursor and the cursor still advances from the check's own
+    # page record, so a smaller page is a SLOWER page, never a skipped one.
+    if [ "$paged" = 1 ]; then
+      local fit=$(( (TICK_HARD_S - $(elapsed) - RESERVE_PAD_S) / (2 * CHECK_S_PER_USER) ))
+      if [ "$fit" -ge "$PAGE_FLOOR" ] && [ "$fit" -lt "$walk" ]; then
+        log "$tag: page cut from $walk to $fit entries (what fits before the ${TICK_HARD_S}s deadline); the family runs"
+        walk="$fit"
+        pg=(--max-entries "$walk" --start-entry "$cur")
+        worst=$(( 2 * walk * CHECK_S_PER_USER + RESERVE_PAD_S ))
+      fi
+    fi
+  fi
+  if [ $(( $(elapsed) + worst )) -gt "$TICK_HARD_S" ]; then
     log "$tag: $(elapsed)s into the tick and its worst case is ${worst}s (cap $cap); it does not fit before the ${TICK_HARD_S}s deadline; this family waits for the next tick"
     return 0
   fi
@@ -959,7 +986,9 @@ family() {
   fi
   local _shared; read -r n daily _shared <<<"$rm"   # (the shared cap is the runner's own policy read)
   if [ "${n:-0}" -le 0 ]; then log "$tag: daily cap reached for $campaign/$seg; no apply"; return 0; fi
-  local fit=$(( (TICK_HARD_S - $(elapsed)) / APPLY_S_PER_USER ))
+  # [key=apply-pool] (captain 2026-11-11, work order item 1): APPLY_WORKERS note steps run at once, so the users that
+  # fit before the deadline is the serial fit x the pool size. The pool is bounded at 6; the runner clamps it.
+  local fit=$(( (TICK_HARD_S - $(elapsed)) * APPLY_WORKERS / APPLY_S_PER_USER ))
   if [ "$fit" -le 0 ]; then log "$tag: no time left before the ${TICK_HARD_S}s deadline; no apply this tick"; return 0; fi
   if [ "$n" -gt "$fit" ]; then log "$tag: apply cut from $n to $fit (what fits before the ${TICK_HARD_S}s deadline)"; n="$fit"; fi
   local lo; lo="$(maxid)"

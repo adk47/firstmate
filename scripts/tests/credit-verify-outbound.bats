@@ -320,12 +320,14 @@ UNSIGNED_ALL=0
 JUDGE=/opt/hydra/scripts/credit-batch-judge.py
 DEPLOYED_SHA_FILE=/opt/hydra/.deployed-sha
 CHECK_ENTRIES=200
+PAGE_FLOOR=20
 TICK_BUDGET_S=6000
 TICK_HARD_S=6900
 CHECK_S_PER_USER=4
 RESERVE_PAD_S=300
 APPLY_S_PER_USER=40
 APPLY_USER_WORST_S=200
+APPLY_WORKERS=6
 TICK_ELAPSED0=0
 FULL_CAP_FROM_TEST=
 PER_SEGMENT_FROM_TEST=
@@ -582,16 +584,66 @@ PY
   # that asserts an exact value derived from the wall clock measures the SHARD, not the code (the same class as the
   # absolute-date bomb in tests/test_gdpr_pipeline.py:3183).
   # So this asserts the INVARIANT that actually matters, with no clock in it: the batch never exceeds what fits in the
-  # remaining budget (300 s / 15 s a user = 20), it is at least one, and the "apply cut from N to M" line names the
-  # SAME M the runner was called with - so a mutant that always cuts to 1, or one that never cuts, both go red.
+  # remaining budget (300 s x APPLY_WORKERS 6 / 15 s a user = 120), it is at least one, and the "apply cut from N to M"
+  # line names the SAME M the runner was called with - so a mutant that always cuts to 1, or one that never cuts, both
+  # go red. The x6 is the [key=apply-pool] sizing: APPLY_WORKERS note steps run at once, so a tick fits six times the
+  # users it used to.
   : > "$CALLS"; rm -f "$CVO_LEDGER.segments.jsonl"
   CVO_TICK_BUDGET_S=999999 CVO_TICK_ELAPSED0=6600 CVO_CHECK_S_PER_USER=0 CVO_RESERVE_PAD_S=0 CVO_TICK_HARD_S=6900 CVO_APPLY_S_PER_USER=15 run -0 "$SCRIPT"
-  cut="$(grep -oE -- "--mode apply --max-users [0-9]+" "$CALLS" | head -1 | grep -oE "[0-9]+$")"
-  [ -n "$cut" ]
-  [ "$cut" -ge 1 ] && [ "$cut" -le 20 ]                      # never more than 300 s / 15 s can hold
-  grep -qE "apply cut from [0-9]+ to ${cut} \(what fits before the 6900s deadline\)" "$(newest_tick)"
+  # The cut line is read FIRST and its M is then required to be the --max-users the runner was actually called with.
+  # (Reading the first apply out of CALLS instead assumed the FIRST family is the cut one - true only while every
+  # family's cap exceeded the fit. At 6 workers a 100-user family fits and is not cut, so the first apply is no
+  # longer the cut one; the invariant is unchanged, only its direction.)
+  cutline="$(grep -oE "apply cut from [0-9]+ to [0-9]+ \(what fits before the 6900s deadline\)" "$(newest_tick)" | head -1)"
+  [ -n "$cutline" ]
+  cut="$(printf '%s' "$cutline" | grep -oE "to [0-9]+" | grep -oE "[0-9]+")"
+  [ "$cut" -ge 1 ] && [ "$cut" -le 120 ]                     # never more than 300 s x 6 workers / 15 s can hold
+  grep -q -- "--mode apply --max-users ${cut} " "$CALLS"
   # and not one single apply anywhere in the run may exceed the budget
-  ! grep -qE -- "--mode apply --max-users (2[1-9]|[3-9][0-9]|[1-9][0-9][0-9]+) " "$CALLS"
+  ! grep -qE -- "--mode apply --max-users (12[1-9]|1[3-9][0-9]|[2-9][0-9][0-9]|[1-9][0-9][0-9][0-9]+) " "$CALLS"
+}
+
+@test "outbound tick ([key=tick-budget-page-fit]): a page too big to fit is CUT to what fits, never dropped - the family still runs" {
+  touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
+  # The node-8 shape that starved EVERY family on EVERY tick (2026-11-11): CHECK_ENTRIES=600 makes a paged family's
+  # worst case 2*600*4+300 = 5,100 s, and the tick reaches uvn-status ~3,963 s in (the builders and reply-due run
+  # first), so 3,963+5,100 > 6,900 and the family was SKIPPED - the tick never reached a send, and raising the page
+  # size made it worse. The page is now cut to what fits instead of the family being dropped.
+  STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 CVO_CHECK_ENTRIES=600 CVO_CHECK_S_PER_USER=4 CVO_RESERVE_PAD_S=300 \
+    CVO_TICK_HARD_S=6900 CVO_TICK_ELAPSED0=3963 run -0 "$SCRIPT"
+  # the family RAN - this is the whole point: before the fix there was no uvn-status call at all
+  grep -q "^uvn-status .*--check-recipients" "$CALLS"
+  cutline="$(grep -oE "page cut from 600 to [0-9]+ entries \(what fits before the 6900s deadline\)" "$(newest_tick)" | head -1)"
+  [ -n "$cutline" ]
+  cut="$(printf '%s' "$cutline" | grep -oE "to [0-9]+" | grep -oE "[0-9]+")"
+  # a RANGE, never an exact value: elapsed() reads the wall clock, so the exact fit is a function of the shard's
+  # startup (the same lesson as the --max-users assertion in the test above). 3,963 s in, (6900-3963-300)/8 = 329.
+  [ "$cut" -ge 300 ] && [ "$cut" -le 329 ]
+  # the page the runner was actually called with is a page that FITS - never the 600 the config asked for. A RANGE per
+  # call, not equality with the first log line: each family call recomputes `elapsed`, so two calls can legitimately cut
+  # to 328 and 329. A mutant that logs a cut and then walks the full page, or that cuts to the floor, still goes red.
+  pages="$(grep -oE -- "--max-entries [0-9]+" "$CALLS" | awk '{print $2}' | sort -u)"
+  [ -n "$pages" ]
+  for n in $pages; do
+    [ "$n" -ge 300 ] && [ "$n" -le 329 ] || false
+  done
+  if grep -qE -- "^uvn-status .*--max-entries 600 " "$CALLS"; then false; fi
+  # and the cut page's worst case really does fit before the deadline
+  [ $(( 2 * $(printf '%s\n' "$pages" | sort -n | tail -1) * 4 + 300 )) -le $(( 6900 - 3963 )) ]
+  # NEGATIVE CONTROL: the repo's own page (200) already fits at the same point in the tick, so it is NOT cut.
+  # Two runs inside one second share an out dir, so the log is APPENDED to: compare the cut-line count on the same
+  # file rather than asserting the file has none (a fresh dir must have none).
+  t0="$(newest_tick)"; n0="$(grep -c "page cut from" "$t0" || true)"
+  : > "$CALLS"
+  STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0 CVO_CHECK_ENTRIES=200 CVO_CHECK_S_PER_USER=4 CVO_RESERVE_PAD_S=300 \
+    CVO_TICK_HARD_S=6900 CVO_TICK_ELAPSED0=3963 run -0 "$SCRIPT"
+  t1="$(newest_tick)"
+  if [ "$t1" = "$t0" ]; then
+    [ "$(grep -c "page cut from" "$t1" || true)" = "$n0" ]
+  else
+    if grep -q "page cut from" "$t1"; then false; fi
+  fi
+  [ "$(grep -c -- "^uvn-status .*--max-entries 200 " "$CALLS")" -eq "$(grep -c "^uvn-status " "$CALLS")" ]
 }
 
 @test "outbound tick (QA #1587): every subprocess runs under the deadline - a slow read-only check is stopped there and the tick ends (lock released); a slow APPLY cut at the deadline writes the kill file" {
@@ -2367,8 +2419,6 @@ PY
   # paid is built and sent before free (d2: paid first), and both go through the uvn-status runner as wait-apology
   local paid_at free_at
   paid_at="$(grep -n "check --segment paid.*campaign wait-apology\|--segment paid" "$CALLS" | head -1 | cut -d: -f1)"
-  cat "$(newest_tick)" >> "$BATS_TEST_DIRNAME/dbg-apology.log" 2>/dev/null || true
-  cat "$CALLS" >> "$BATS_TEST_DIRNAME/dbg-apology-calls.log" 2>/dev/null || true
   grep -q -- "--campaign wait-apology" "$CALLS"
   [ "$(grep -c 'segment=paid' "$CALLS" || true)" -ge 0 ]
   # the campaign and the segment are both on the sender's command line (the runner's own args are logged verbatim)

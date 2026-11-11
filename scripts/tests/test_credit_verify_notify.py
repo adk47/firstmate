@@ -19,6 +19,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import pathlib
 import unittest
 import unittest.mock
@@ -1281,6 +1282,7 @@ class RunTests(unittest.TestCase):
 
         rep = verify_notify.Report()
         with unittest.mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, [])), \
+             unittest.mock.patch.object(verify_notify, "APPLY_WORKERS", 1), \
              unittest.mock.patch.object(verify_notify.time, "monotonic", lambda: clock["t"]), \
              unittest.mock.patch.object(verify_notify.time, "sleep", lambda s: None):
             try:
@@ -2574,7 +2576,10 @@ class SignedHeadTests(unittest.TestCase):
 
     def apply(self, runner, n=5):
         rep = Report()
-        with unittest.mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, [])):
+        # [key=apply-pool] these tests pin the HEAD / signed-set semantics, which are per-user and unchanged by the
+        # pool; pinning APPLY_WORKERS=1 keeps them deterministic. The pool's own bound is tested in ApplyPoolTests.
+        with unittest.mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, [])), \
+             unittest.mock.patch.object(verify_notify, "APPLY_WORKERS", 1):
             verify_notify.send_all(self.payloads(n), rep, mode="apply", runner=runner, extra=["--campaign", "uvn-status"])
         return rep
 
@@ -2824,9 +2829,13 @@ class ParallelCheckTests(unittest.TestCase):
         self.assertEqual((par.recipient_ok, par.deferred_users, par.deferrals, par.skipped),
                          (serial.recipient_ok, serial.deferred_users, serial.deferrals, serial.skipped))
 
-    def test_apply_is_always_serial(self):
+    def test_apply_runs_a_bounded_pool_never_more_than_APPLY_WORKERS_at_once(self):
+        """[key=apply-pool] (captain 2026-11-11, work order item 1): a real send used to be strictly serial. It now
+        runs a bounded pool, and the bound is the constant - never an unbounded fan-out."""
         _, peak = self.report_of("apply", 4, check=False)
-        self.assertEqual(peak, 1)
+        self.assertGreater(peak, 1, "apply really runs more than one note step at once")
+        self.assertLessEqual(peak, verify_notify.APPLY_WORKERS)
+        self.assertEqual(verify_notify.APPLY_WORKERS, 6, "the pool is bounded at 6 by the captain's work order")
 
     def test_one_gate_timeout_in_the_parallel_pre_gate_is_that_users_row_never_the_batchs_abort(self):
         """Defect A (Fable d2): `pre = list(ex.map(gate, payloads))` re-raised the FIRST worker's NoteTimeout out of
@@ -3697,6 +3706,7 @@ class AfterTimeoutUnmeasuredBarTests(unittest.TestCase):
                      "credits": [{"request_id": f"r{i}"}]} for i in range(1, n + 1)]
         rep = verify_notify.Report()
         with unittest.mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, [])), \
+             unittest.mock.patch.object(verify_notify, "APPLY_WORKERS", 1), \
              tempfile.TemporaryDirectory() as d, \
              unittest.mock.patch.object(verify_notify, "APPLY_LOCK_PATH", os.path.join(d, "apply.lock")):
             verify_notify.send_all(payloads, rep, mode="apply", runner=run, extra=["--campaign", "uvn-status"])
@@ -3718,6 +3728,187 @@ class AfterTimeoutUnmeasuredBarTests(unittest.TestCase):
         self.assertEqual(rep.timeout_users, 4)
         self.assertFalse(rep.failed)
         self.assertEqual(rep.stopped_on_unmeasured, "")
+
+
+class ApplyPoolTests(unittest.TestCase):
+    """[key=apply-pool] (captain 2026-11-11, work order item 1): the apply loop runs a bounded pool of 6 note steps,
+    each user carrying an idempotency key (campaign|user|UTC day). The three things this must never do: send twice for
+    one user, send again on a re-run, or fan out past the bound."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="apply-pool-")
+        self.ledger = os.path.join(self.tmp, "ledger.sqlite3")
+        self.lock = os.path.join(self.tmp, "apply.lock")
+        self.day = verify_ledger.stamp()[:10]
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def payloads(self, users):
+        return [{"user": {"id": str(u), "email": f"u{u}@x.com"}, "credits": [{"request_id": f"r{u}"}]} for u in users]
+
+    def send(self, payloads, runner, workers=None):
+        rep = Report()
+        patches = [unittest.mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, [])),
+                   unittest.mock.patch.object(verify_notify, "APPLY_LOCK_PATH", self.lock)]
+        if workers is not None:
+            patches.append(unittest.mock.patch.object(verify_notify, "APPLY_WORKERS", workers))
+        for x in patches:
+            x.start()
+        try:
+            verify_notify.send_all(payloads, rep, mode="apply", runner=runner, extra=["--campaign", "uvn-status"],
+                                   ledger_path=self.ledger, campaign="uvn-status")
+        finally:
+            for x in reversed(patches):
+                x.stop()
+        return rep
+
+    def claiming_runner(self, calls):
+        """A gate that does what the real one does: claim the user in the ledger BEFORE posting."""
+        def run(argv):
+            body = json.loads(Path(argv[argv.index("--credits-file") + 1]).read_text())
+            calls.append(body["user"]["id"])
+            db = verify_ledger.connect(self.ledger)
+            try:
+                got = verify_ledger.claim(db, user_key=body["user"]["email"], day=self.day,
+                                          request_ids=[c["request_id"] for c in body["credits"]],
+                                          message_type="email", approved_by=CAPTAIN_UID, approval_ref="ref",
+                                          campaign="uvn-status")
+            finally:
+                db.close()
+            if got.get("result") != "claimed":
+                return subprocess.CompletedProcess(argv, 0, "SKIPPED already told\n", "")
+            return subprocess.CompletedProcess(argv, 0, "POSTED email message=1 credits=1\n", "")
+        return run
+
+    def test_a_rerun_sends_nothing(self):
+        """The exit criterion, literally: run the same batch twice and the second run opens no note step at all."""
+        calls = []
+        run = self.claiming_runner(calls)
+        first = self.send(self.payloads([1, 2, 3]), run)
+        self.assertEqual(sorted(calls), ["1", "2", "3"])
+        self.assertEqual(first.sent_notes, 3)
+        calls.clear()
+        second = self.send(self.payloads([1, 2, 3]), run)
+        self.assertEqual(calls, [], "a re-run must not even call the gate for a user the ledger already noted today")
+        self.assertEqual(second.sent_notes, 0)
+        # SKIPPED, not deferred: the gate's own answer for this user is "SKIPPED already told", so the served numbers
+        # do not move - the re-run just never pays for the subprocess to say it.
+        self.assertEqual(second.skipped, 3)
+        self.assertEqual(second.deferred_users, 0)
+        self.assertTrue(all("already_notified_today" in o["reason"] for o in second.outcomes), second.outcomes)
+        self.assertFalse(second.failed, "a re-run that sends nothing is a KNOWN outcome, not a failed round")
+
+    def test_two_workers_cannot_both_send_for_the_same_user(self):
+        """The idempotency key is checked BEFORE a worker starts, so a duplicate payload is a named deferral and the
+        gate is never called for it - whatever the pool size."""
+        calls = []
+        run = self.claiming_runner(calls)
+        dup = self.payloads([7]) + self.payloads([7])
+        rep = self.send(dup, run, workers=6)
+        self.assertEqual(calls, ["7"], "exactly one note step for one user, never two")
+        self.assertEqual(rep.sent_notes, 1)
+        self.assertEqual(rep.deferred_users, 1)
+        self.assertTrue(any("duplicate_idempotency_key" in o["reason"] for o in rep.outcomes), rep.outcomes)
+
+    def test_a_deploy_mid_batch_defers_every_user_not_yet_started(self):
+        """The head check is a pre-START guard. With a pool, the users already in flight when a deploy lands may still
+        send (they started under the signed head); every user not yet started is deferred, and the bound is the pool."""
+        import threading
+        sha = Path(self.tmp) / "deployed.sha"
+        sha.write_text("a" * 40 + "\n")
+        barrier = threading.Barrier(2)
+        sent = []
+
+        def run(argv):
+            uid = json.loads(Path(argv[argv.index("--credits-file") + 1]).read_text())["user"]["id"]
+            sha.write_text("b" * 40 + "\n")          # the deploy lands while both in-flight workers are inside
+            barrier.wait(timeout=10)
+            sent.append(uid)
+            return subprocess.CompletedProcess(argv, 0, "POSTED email message=1 credits=1\n", "")
+
+        rep = Report()
+        with unittest.mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, [])), \
+             unittest.mock.patch.object(verify_notify, "APPLY_LOCK_PATH", self.lock), \
+             unittest.mock.patch.object(verify_notify, "APPLY_WORKERS", 2), \
+             unittest.mock.patch.object(verify_notify, "DEPLOYED_SHA_PATH", str(sha)), \
+             unittest.mock.patch.object(verify_notify, "LIST_SIGNED_ON", "a" * 40), \
+             unittest.mock.patch.object(verify_notify, "HEAD_REFUSED", 0):
+            verify_notify.send_all(self.payloads([0, 1, 2, 3, 4]), rep, mode="apply", runner=run,
+                                   extra=["--campaign", "uvn-status"])
+            self.assertEqual(verify_notify.HEAD_REFUSED, 3)      # read inside the patch: the counter is a module global
+        self.assertEqual(sorted(sent), ["0", "1"], "only the two users already in flight when the deploy landed")
+        self.assertEqual(rep.deferred_users, 3)
+        self.assertTrue(all("sha_mismatch" in o["reason"] for o in rep.outcomes), rep.outcomes)
+
+    def test_the_pooled_budget_guard_stops_submitting_at_the_wall_clock_deadline(self):
+        """With a pool the worst case is ONE retry budget of wall clock (the workers run at once), so the guard is a
+        deadline: once `spent + WORST_USER_S` would pass the share, nothing more is started and the rest stay owed."""
+        clock = {"t": 0.0}
+        started = []
+
+        def run(argv):
+            started.append(json.loads(Path(argv[argv.index("--credits-file") + 1]).read_text())["user"]["id"])
+            clock["t"] += 120.0
+            return subprocess.CompletedProcess(argv, 0, "POSTED email message=1 credits=1\n", "")
+
+        rep = Report()
+        with unittest.mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, [])), \
+             unittest.mock.patch.object(verify_notify, "APPLY_LOCK_PATH", self.lock), \
+             unittest.mock.patch.object(verify_notify, "APPLY_WORKERS", 2), \
+             unittest.mock.patch.object(verify_notify.time, "monotonic", lambda: clock["t"]), \
+             unittest.mock.patch.object(verify_notify.time, "sleep", lambda s: None):
+            try:
+                verify_notify.set_apply_budget(200)
+                verify_notify.send_all(self.payloads([0, 1, 2, 3, 4]), rep, mode="apply", runner=run,
+                                       extra=["--campaign", "uvn-status"])
+            finally:
+                verify_notify.set_apply_budget(None)
+        self.assertEqual(sorted(started), ["0", "1"], "the two in flight fit; the third would not")
+        self.assertEqual(rep.budget_deferred_users, 3)
+        self.assertEqual(rep.refused_users, 0, "a budget deferral is never a refusal")
+        self.assertTrue(all("apply_budget" in o["reason"] for o in rep.outcomes if o["result"] == "deferred"))
+
+    def test_a_stop_joins_the_pool_so_a_late_send_is_recorded_not_lost(self):
+        """QA on #1884: the pool used to be shut down with `wait=False`, so a worker already in flight when the
+        systemic stop fired could POST *after* `_send_loop` returned and after `send_all` released the apply lock -
+        a real note to a real user that appeared in no counter and in no outcomes file. The stop now drains: every
+        in-flight call is joined and accounted for before the lock is released.
+
+        Three cheap failures trip the systemic bar (`fail_stop_after` = max(3, 2% of walked)) while user 4 is still
+        blocked inside its gate; 4 only completes after the stop has fired.
+        """
+        release = threading.Event()
+        in_flight = threading.Event()
+
+        def run(argv):
+            body = json.loads(Path(argv[argv.index("--credits-file") + 1]).read_text())
+            uid = str((body.get("user") or {}).get("id") or "")
+            if uid == "4":
+                in_flight.set()
+                release.wait(timeout=15)
+                return subprocess.CompletedProcess(argv, 0, "POSTED email message=1 credits=1\n", "")
+            if uid in ("1", "2", "3"):
+                return subprocess.CompletedProcess(argv, 1, "", "")
+            return subprocess.CompletedProcess(argv, 0, "SKIPPED\n", "")
+
+        threading.Timer(1.5, release.set).start()
+        rep = Report()
+        with unittest.mock.patch.object(verify_notify, "attach_identities", lambda ps, r: (ps, [])), \
+             unittest.mock.patch.object(verify_notify, "APPLY_LOCK_PATH", self.lock), \
+             unittest.mock.patch.object(verify_notify, "APPLY_WORKERS", 3):
+            verify_notify.send_all(self.payloads([1, 2, 3, 4]), rep, mode="apply", runner=run,
+                                   extra=["--campaign", "uvn-status"])
+
+        self.assertTrue(rep.stopped_on_failures)
+        self.assertEqual(rep.failed_users, 3)
+        self.assertTrue(in_flight.is_set(), "the worker was still running when the stop fired")
+        # THE ASSERTION THAT MATTERS: the worker that was mid-call across the stop had its POST counted.
+        self.assertEqual(rep.sent_notes, 1)
+        self.assertEqual([s["user"] for s in rep.sent], ["4"])
+        # ...and nobody is silently absent from the accounting.
+        accounted = {str(o["user"]) for o in rep.outcomes} | {str(s["user"]) for s in rep.sent}
+        self.assertEqual(accounted, {"1", "2", "3", "4"})
 
 
 if __name__ == "__main__":
