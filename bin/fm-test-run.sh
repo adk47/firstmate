@@ -110,6 +110,13 @@
 # recorded family-level coupling still expands to the whole family.
 set -eu
 
+# Pin the umask the suite runs under. Several behavior tests assert a
+# private-directory contract (mode without group/other write) on fixtures they
+# create with `mkdir -p`, so an ambient umask of 002 turns those fixtures into
+# 775 directories and fails tests that pass in CI, where the umask is 022. A
+# test runner must not let the invoking shell's umask change a test's verdict.
+umask 022
+
 now_ms() {
   if command -v python3 >/dev/null 2>&1; then
     python3 -c 'import time; print(int(time.time() * 1000))'
