@@ -704,6 +704,7 @@ tests/fm-test-fixture-cleanup.test.sh 915
 tests/fm-test-fixtures.test.sh 151
 tests/fm-test-isolation-proof.test.sh 2567
 tests/fm-test-reap.test.sh 12000
+tests/fm-thread-deliver.test.sh 2600
 tests/fm-tmux-agent-liveness.test.sh 11421
 tests/fm-tool-update-check.test.sh 24858
 tests/fm-trace-context-lib.test.sh 289
