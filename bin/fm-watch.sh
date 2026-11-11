@@ -1330,25 +1330,42 @@ signal_batch_key() {  # <file> ...
 }
 
 # Enqueue one coalesced signal wake for a batch of changed files. The ordinary
-# row keeps the byte-identical "signal:$files" payload every harness-arm
-# consumer pattern-matches. A batch containing a decision-owned file emits one
-# additional row keyed by that file's status name, because the Pi branch
-# dispatcher resolves a decision row's task from its key; the ordinary row
-# still carries the whole batch, so the dispatcher's trigger cross-reference
-# keeps the entire coalesced batch on main.
+# row keeps the byte-identical "signal:$files" shape every harness-arm consumer
+# pattern-matches, and carries only the files that are NOT decision-owned. Each
+# decision-owned file gets its own "needs-decision:$files" row keyed by that
+# file's status name, because the Pi branch dispatcher resolves a decision row's
+# task from its key. Keeping decision-owned files out of the ordinary row is
+# what keeps them off the supervision branch even when a later heartbeat, not
+# this batch's own trigger, offers that row: the dispatcher's trigger
+# cross-reference only covers the triggering message, so a decision task left in
+# an eligible ordinary payload could still be claimed by a heartbeat.
 signal_enqueue_batch() {  # <reason> <decision-files> <file> ...
-  local reason=$1 decision_files=$2 batch_key decision_key f
+  local reason=$1 decision_files=$2 batch_key decision_key f ordinary='' sep
   shift 2
   [ "$#" -gt 0 ] || return 1
-  batch_key=$(signal_batch_key "$@") || return 1
-  fm_wake_append signal "$batch_key" "$reason" || return 1
-  [ -n "$decision_files" ] || return 0
+  # Keep the reason's own separator after "signal:" so the ordinary row's
+  # payload is spelled exactly like the batch reason it was carved from.
+  sep=${reason#signal:}
+  sep=${sep%%[! ]*}
+  for f in "$@"; do
+    case " $decision_files " in
+      *" $f "*) ;;
+      *) ordinary="$ordinary $f" ;;
+    esac
+  done
+  if [ -n "$ordinary" ]; then
+    # The key is the whole batch's identity, not the ordinary subset's, so two
+    # batches that differ only in their decision files never collapse into one
+    # another while an identical re-enqueued batch still dedupes.
+    batch_key=$(signal_batch_key "$@") || return 1
+    fm_wake_append signal "$batch_key" "signal:${sep}${ordinary# }" || return 1
+  fi
   for f in $decision_files; do
     decision_key=$(basename "$f")
-    break
+    [ -n "$decision_key" ] || return 1
+    fm_wake_append signal "$decision_key" "needs-decision:${reason#signal:}" || return 1
   done
-  [ -n "$decision_key" ] || return 1
-  fm_wake_append signal "$decision_key" "needs-decision:${reason#signal:}" || return 1
+  return 0
 }
 
 # Deliver a durably queued process-event result to firstmate. Publication is
@@ -1963,7 +1980,14 @@ while :; do
   if inactive_out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
     "$SCRIPT_DIR/fm-inactive-reconcile.sh" scan 2>/dev/null); then
     if [ -n "$inactive_out" ]; then
-      wake "check: inactive-outcome"
+      # The scan already publishes one keyed wake per fingerprint, and those
+      # carry the detail. This generic line exists so a scan that published
+      # nothing still surfaces, but a bare "check: inactive-outcome" names a
+      # condition without naming the action that clears it: 94 terminal
+      # outcomes accumulated over two months because nothing could be
+      # acknowledged from a wake that never said which record it meant.
+      # Carry the scan's own first line so the wake is actionable.
+      wake "check: inactive-outcome: $(printf '%s' "$inactive_out" | head -1 | cut -c1-300)"
     fi
   else
     triage_log "inactive-outcome reconciliation unavailable"
@@ -2116,13 +2140,14 @@ EOF
     # One coalesced row per batch, not one per file: a busy fleet used to
     # enqueue N rows that each repeated the whole "signal:$files" list. The
     # wake reason line itself, and every harness-arm consumer that
-    # pattern-matches it, stays byte-identical. A decision-owned file in the
-    # batch still gets its own "needs-decision:$files" row (keyed by that
-    # file's status name so the Pi branch dispatcher can resolve it), which is
-    # what docs/pi-supervision-branch.md's dispatcher reads to keep a
-    # decision-owned row off the supervision branch (fm-branch-dispatch.ts,
+    # pattern-matches it, keeps the same "signal:$files" shape. A
+    # decision-owned file is split out of the ordinary row into its own
+    # "needs-decision:$files" row (keyed by that file's status name so the Pi
+    # branch dispatcher can resolve it), which is what
+    # docs/pi-supervision-branch.md's dispatcher reads to keep a decision-owned
+    # row off the supervision branch (fm-branch-dispatch.ts,
     # fm-primary-pi-watch.ts). Every other harness and script keeps seeing the
-    # exact same "signal:$files" wake it always has.
+    # same "signal:$files" wake shape it always has.
     # shellcheck disable=SC2086  # same space-separated status-path list
     if afk_present || [ "$signal_actionable" -eq 0 ] \
       || { ! signal_crew_provably_working $files && ! signal_turnend_panes_churned $files; }; then

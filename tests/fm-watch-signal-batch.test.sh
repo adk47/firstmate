@@ -5,8 +5,8 @@
 # The watcher used to enqueue one row per changed state file, each repeating the
 # whole "signal:$files" list, so a busy fleet cost a hundred rows per drain. These
 # tests pin the batch shape: N changed files produce one ordinary row (plus one
-# decision row when the batch contains a decision-owned file), the reason line
-# stays byte-identical, and every file's .seen-* marker still advances.
+# decision row per decision-owned file), the reason line keeps its shape, and
+# every file's .seen-* marker still advances.
 set -u
 
 # shellcheck source=tests/wake-helpers.sh
@@ -32,7 +32,7 @@ test_batch_enqueues_one_ordinary_row() {
   printf 'blocked: a\n' > "$state/a.status"
   printf 'blocked: b\n' > "$state/b.status"
   printf 'blocked: c\n' > "$state/c.status"
-  reason="signal:$state/a.status $state/b.status $state/c.status"
+  reason="signal: $state/a.status $state/b.status $state/c.status"
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     signal_enqueue_batch "$2" "" "$3" "$4" "$5"
@@ -52,7 +52,7 @@ test_batch_with_a_decision_file_enqueues_one_ordinary_and_one_decision_row() {
   dir=$(make_case batch-decision-row); state="$dir/state"
   printf 'blocked: a\n' > "$state/a.status"
   printf 'needs-decision: pick one\n' > "$state/b.status"
-  reason="signal:$state/a.status $state/b.status"
+  reason="signal: $state/a.status $state/b.status"
   FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
     . "$1"
     signal_enqueue_batch "$2" "$3" "$4" "$5"
@@ -66,11 +66,35 @@ test_batch_with_a_decision_file_enqueues_one_ordinary_and_one_decision_row() {
   [ -n "$decision" ] || fail "a decision batch lost its decision row: $(cat "$state/.wake-queue")"
   [ "${decision%%$'\t'*}" = "b.status" ] \
     || fail "the decision row is not keyed by the decision file's status name: $decision"
-  [ "${decision#*$'\t'}" = "needs-decision:$state/a.status $state/b.status" ] \
+  [ "${decision#*$'\t'}" = "needs-decision: $state/a.status $state/b.status" ] \
     || fail "the decision row payload changed shape: $decision"
-  [ "${ordinary#*$'\t'}" = "$reason" ] \
-    || fail "the ordinary row payload changed shape: $ordinary"
+  [ "${ordinary#*$'\t'}" = "signal: $state/a.status" ] \
+    || fail "the ordinary row still carries a decision-owned file: $ordinary"
   pass "a decision batch enqueues one ordinary row plus one decision row, not one per file"
+}
+
+test_batch_with_two_decision_files_keeps_every_decision_row() {
+  local dir state reason count ordinary decisions
+  dir=$(make_case batch-two-decisions); state="$dir/state"
+  printf 'blocked: a\n' > "$state/a.status"
+  printf 'needs-decision: pick one\n' > "$state/b.status"
+  printf 'needs-decision: pick two\n' > "$state/c.status"
+  reason="signal: $state/a.status $state/b.status $state/c.status"
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    signal_enqueue_batch "$2" "$3" "$4" "$5" "$6"
+  ' _ "$WATCH" "$reason" "$state/b.status $state/c.status" \
+    "$state/a.status" "$state/b.status" "$state/c.status" \
+    || fail "two-decision batch enqueue failed"
+  count=$(signal_rows "$state" | wc -l | tr -d '[:space:]')
+  [ "$count" -eq 3 ] || fail "a two-decision batch produced $count signal rows, not 3: $(cat "$state/.wake-queue")"
+  ordinary=$(signal_rows "$state" | awk -F '\t' '$5 ~ /^signal:/ { print $4 "\t" $5 }')
+  decisions=$(signal_rows "$state" | awk -F '\t' '$5 ~ /^needs-decision:/ { print $4 }' | LC_ALL=C sort | tr '\n' ',')
+  [ "${ordinary#*$'\t'}" = "signal: $state/a.status" ] \
+    || fail "the ordinary row still carries a decision-owned file: $ordinary"
+  [ "$decisions" = "b.status,c.status," ] \
+    || fail "a decision-owned file lost its own decision row: $decisions"
+  pass "a batch with two decision files keeps one decision row per file"
 }
 
 test_watcher_coalesces_a_real_changed_file_batch() {
@@ -98,4 +122,5 @@ test_watcher_coalesces_a_real_changed_file_batch() {
 
 test_batch_enqueues_one_ordinary_row
 test_batch_with_a_decision_file_enqueues_one_ordinary_and_one_decision_row
+test_batch_with_two_decision_files_keeps_every_decision_row
 test_watcher_coalesces_a_real_changed_file_batch
