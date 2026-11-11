@@ -789,8 +789,7 @@ test_recorded_default_backend_task_requires_absent_treehouse() {
 # A remote secondmate record carries kind=secondmate and remote_backend=herdr
 # but no backend= line, so it must not be mistaken for a local tmux task that
 # needs this host's treehouse. Its worktree lease lives on the remote host.
-test_remote_secondmate_record_does_not_require_local_treehouse
-test_migrated_orca_record_does_not_require_local_treehouse() {
+test_remote_secondmate_record_does_not_require_local_treehouse() {
   local case_dir home fakebin base_path out
   case_dir="$TMP_ROOT/orca-remote-secondmate-no-treehouse"
   home="$case_dir/home"
