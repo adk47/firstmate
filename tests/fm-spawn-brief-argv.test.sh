@@ -97,7 +97,7 @@ test_oversized_brief_launches_through_the_path_pointer() {
   rec=$(make_spawn_case brief-argv-oversized pi "$id")
   read_case_record "$rec"
   grow_brief "$HOME_DIR/data/$id/brief.md" 400000
-  brief_bytes=$(stat -c %s "$HOME_DIR/data/$id/brief.md")
+  brief_bytes=$(wc -c < "$HOME_DIR/data/$id/brief.md")
   [ "$brief_bytes" -gt "$ARG_LIMIT" ] || fail "test setup did not build an oversized brief ($brief_bytes bytes)"
 
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
@@ -144,7 +144,7 @@ test_oversized_inline_body_fails_loudly_before_launch() {
   rec=$(make_spawn_case brief-argv-inline-over pi "$id")
   read_case_record "$rec"
   grow_brief "$HOME_DIR/data/$id/brief.md" 400000
-  brief_bytes=$(stat -c %s "$HOME_DIR/data/$id/brief.md")
+  brief_bytes=$(wc -c < "$HOME_DIR/data/$id/brief.md")
 
   out=$(FM_SPAWN_BRIEF_INLINE_HARNESSES=pi FM_SPAWN_BRIEF_INLINE_MAX=200000 \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
@@ -175,7 +175,7 @@ test_inline_harness_caps_the_body_and_names_the_truncation() {
 
   body="$HOME_DIR/state/$id.brief-arg"
   [ -f "$body" ] || fail "the inline harness launch left no capped body at $body"
-  body_bytes=$(stat -c %s "$body")
+  body_bytes=$(wc -c < "$body")
   [ "$body_bytes" -lt "$ARG_LIMIT" ] || fail "capped inline body is $body_bytes bytes, above the argv cap"
   head -n 1 "$body" | grep -Fq "Read the brief at $HOME_DIR/data/$id/launch-brief.md and follow it exactly." \
     || fail "the capped inline body does not start with the brief path pointer"
