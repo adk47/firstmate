@@ -1,0 +1,30 @@
+$ ak47/guards/guard-producers.sh --projects <clean fixture>
+pass static:uvn                   hydra/scripts/tests/test_uvn_status.py creates and cleans up
+pass static:wc                    hydra/scripts/tests/test_uvn_status.py creates and cleans up
+skip static:uvn-lens              not cloned at /tmp/ak47-demo.FK9rlq/projects/hydra/scripts/tests/test_fraud_lens.py
+skip static:merge-outcome         not cloned at /tmp/ak47-demo.FK9rlq/projects/hydra/scripts/tests/test_merge_outcome_notify.py
+skip static:irc                   not cloned at /tmp/ak47-demo.FK9rlq/projects/hydra/scripts/tests/test_intercom_reconcile.py
+skip static:rmtc                  not cloned at /tmp/ak47-demo.FK9rlq/projects/core-backend/src/commands/repairMissingTrackCredits.test.js
+skip static:rmtc-artifacts        not cloned at /tmp/ak47-demo.FK9rlq/projects/core-backend/src/commands/repairMissingTrackCredits.test.js
+skip static:restore-test          not cloned at /tmp/ak47-demo.FK9rlq/projects/core-backend/src/commands/restoreRevertedApprovals.test.js
+skip static:csv                   not cloned at /tmp/ak47-demo.FK9rlq/projects/core-backend/scripts/claim-surface-verify.test.js
+skip static:hdevops-scaleup-gate  not cloned at /tmp/ak47-demo.FK9rlq/projects/H-DevOps/scripts/devops-agent/tests/test-rebalance-wedge-scaleup-gate.sh
+pass systemic:per-task-tmpdir     bin/fm-spawn.sh exports a per-task TMPDIR
+pass dynamic:census               no producer grew past its baseline
+pass payload:hdevops              committed payload matches ak47/
+
+5 passed, 0 failed, 8 skipped
+
+## the same guard against a producer that stopped cleaning up
+fail static:uvn                   hydra/scripts/tests/test_uvn_status.py creates temp state and matches no cleanup pattern (addCleanup\(|rmtree\(|tearDownClass)
+fail static:wc                    hydra/scripts/tests/test_uvn_status.py creates temp state and matches no cleanup pattern (addCleanup\(|rmtree\(|tearDownClass)
+skip static:uvn-lens              not cloned at /tmp/ak47-demo.FK9rlq/projects/hydra/scripts/tests/test_fraud_lens.py
+skip static:merge-outcome         not cloned at /tmp/ak47-demo.FK9rlq/projects/hydra/scripts/tests/test_merge_outcome_notify.py
+skip static:irc                   not cloned at /tmp/ak47-demo.FK9rlq/projects/hydra/scripts/tests/test_intercom_reconcile.py
+skip static:rmtc                  not cloned at /tmp/ak47-demo.FK9rlq/projects/core-backend/src/commands/repairMissingTrackCredits.test.js
+skip static:rmtc-artifacts        not cloned at /tmp/ak47-demo.FK9rlq/projects/core-backend/src/commands/repairMissingTrackCredits.test.js
+skip static:restore-test          not cloned at /tmp/ak47-demo.FK9rlq/projects/core-backend/src/commands/restoreRevertedApprovals.test.js
+skip static:csv                   not cloned at /tmp/ak47-demo.FK9rlq/projects/core-backend/scripts/claim-surface-verify.test.js
+skip static:hdevops-scaleup-gate  not cloned at /tmp/ak47-demo.FK9rlq/projects/H-DevOps/scripts/devops-agent/tests/test-rebalance-wedge-scaleup-gate.sh
+
+0 passed, 2 failed, 8 skipped

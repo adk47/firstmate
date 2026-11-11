@@ -1,0 +1,102 @@
+$ ak47/weekly-review.sh --days 7 --print --no-inbox
+
+# ak47 hygiene review - 20261111 (last 7 days)
+
+## what the box actually did
+
+METRIC                p05      p50      p95      max      n
+------                ---      ---      ---      ---      -
+agent_count            10       10       10       10     20
+load15                 31       31       31       31     20
+mem_avail_gb           40       40       40       40     20
+root_disk_pct          40       40       40       40     20
+swap_pct               10       10       10       10     20
+tmp_entries          1000     1000     1000     1000     20
+tmp_gb                  2        2        2        2     20
+tmux_core_pct          20       20       20       20     20
+
+## tick health
+
+- tick lines in the window: 1
+- last tick: 2026-11-11T07:33:10Z
+- runs reporting a failure: 0
+- runs with a loop gap over 3 intervals: 1
+- actions recorded: 2
+- no findings log at /tmp/ak47-demo.FK9rlq/state/findings.log
+
+## proposed threshold changes
+
+```diff
+--- ak47/budget.conf
++++ ak47/budget.conf (proposed)
+@@ -21,38 +21,38 @@
+ # 2x the 32 threads. Above this the box is not keeping up: every agent turn
+ # slows, and the 2026-11-10 lockup peaked at 452. 32 is the point where the
+ # scheduler is still draining work faster than it arrives.
+-load15|32|max|load|2x the 32 threads: above this the box is not keeping up and every agent turn slows
++load15|39|max|load|2x the 32 threads: above this the box is not keeping up and every agent turn slows
+ 
+ # --- memory ------------------------------------------------------------------
+ # The 2026-11-10 lockup sat at 99-100% swap while 77 GB of RAM was free, because
+ # swappiness 60 paged out idle agents. At 10 the kernel only swaps under real
+ # pressure, so 50% is already a signal that something is holding memory it should
+ # have released.
+-swap_pct|50|max|%|the 2026-11-10 lockup ran at 99% swap with 77 GB RAM free; 50% means real pressure, not idle paging
++swap_pct|16|max|%|the 2026-11-10 lockup ran at 99% swap with 77 GB RAM free; 50% means real pressure, not idle paging
+ # 15 GB is the headroom one full test suite plus a browser needs. Below it a
+ # single heavy run can push the box into reclaim and stall every agent at once.
+-mem_avail_gb|15|min|GB|one full test suite plus a browser needs ~15 GB; below it a single run can stall every agent
++mem_avail_gb|21|min|GB|one full test suite plus a browser needs ~15 GB; below it a single run can stall every agent
+ 
+ # --- /tmp --------------------------------------------------------------------
+ # The measured problem is entry count, not bytes: 950,700 entries made every
+ # glob, ls, find and test run slow while the disk was only 14% full. 200,000 is
+ # the acceptance ceiling and roughly the point where a top-level readdir stays
+ # under a second.
+-tmp_entries|200000|max|entries|950k entries slowed every glob and test run at 14% disk; 200k keeps a top-level readdir under a second
++tmp_entries|10000|max|entries|950k entries slowed every glob and test run at 14% disk; 200k keeps a top-level readdir under a second
+ # 20 GB is the scratch a week of live work needs. The 163 GB today is leaked test
+ # scratch, not work in progress.
+-tmp_gb|20|max|GB|a week of live scratch fits in 20 GB; the 163 GB today is leaked test scratch, not work in progress
++tmp_gb|4|max|GB|a week of live scratch fits in 20 GB; the 163 GB today is leaked test scratch, not work in progress
+ 
+ # --- disk --------------------------------------------------------------------
+ # 85% is where ext4 starts fragmenting badly and a single large build can fill
+ # the volume. The root is 3.6 TB, so 85% is still 540 GB of headroom.
+-root_disk_pct|85|max|%|ext4 fragments badly past 85% and one large build can fill the volume; 540 GB of headroom remains
++root_disk_pct|61|max|%|ext4 fragments badly past 85% and one large build can fill the volume; 540 GB of headroom remains
+ 
+ # --- the fleet's own overhead ------------------------------------------------
+ # The tmux server is the fleet's spine and costs a permanent ~74% of one core
+ # with 81 panes. 100% (one whole core) is the point where it is competing with
+ # real work rather than idling alongside it. Measured, never signalled.
+-tmux_core_pct|100|max|% of one core|the tmux server idles at ~74% of one core with 81 panes; a whole core means it is competing with real work
++tmux_core_pct|40|max|% of one core|the tmux server idles at ~74% of one core with 81 panes; a whole core means it is competing with real work
+ # 160 resident pi agents at 90 MB-1.7 GB each. Past this the per-agent CPU share
+ # and the tmux server cost both cross into the load ceiling above.
+-agent_count|160|max|agents|160 agents at 90 MB-1.7 GB each is where per-agent CPU share and tmux cost cross the load ceiling
++agent_count|20|max|agents|160 agents at 90 MB-1.7 GB each is where per-agent CPU share and tmux cost cross the load ceiling
+```
+
+- load15: 32 -> 39 (p95 31 is within 20% of 32; the reason text may need rewriting)
+- swap_pct: 50 -> 16 (p95 10 is below half of 50; the reason text may need rewriting)
+- mem_avail_gb: 15 -> 21 (p05 40 is more than twice the floor 15; the reason text may need rewriting)
+- tmp_entries: 200000 -> 10000 (p95 1000 is below half of 200000; the reason text may need rewriting)
+- tmp_gb: 20 -> 4 (p95 2 is below half of 20; the reason text may need rewriting)
+- root_disk_pct: 85 -> 61 (p95 40 is below half of 85; the reason text may need rewriting)
+- tmux_core_pct: 100 -> 40 (p95 20 is below half of 100; the reason text may need rewriting)
+- agent_count: 160 -> 20 (p95 10 is below half of 160; the reason text may need rewriting)
+
+## what this review will not do
+
+It will not apply the diff, add a class to the tick's table, or widen the
+tick's authority. A new action class needs the captain's word; a threshold
+change needs a human to accept the diff above.
+
+diff: /tmp/ak47-demo.FK9rlq/state/review-20261111.diff
+weekly-review.sh: wrote /tmp/ak47-demo.FK9rlq/state/review-20261111.md
+weekly-review.sh: proposed diff at /tmp/ak47-demo.FK9rlq/state/review-20261111.diff
+
+budget.conf sha256 before: 0921960c612846c0c17d76015912b95a35b96c97985edb4b6ccb80a34cd96b0e
+budget.conf sha256 after:  0921960c612846c0c17d76015912b95a35b96c97985edb4b6ccb80a34cd96b0e
+(equal means the review proposed, and did not write, the budget)

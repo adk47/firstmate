@@ -1,0 +1,16 @@
+$ ak47/census.sh   (AK47_TMP_ROOT is a fixture tree with known producer prefixes)
+unattributed            2
+csv                     1
+restore-test            1
+sh-mktemp               1
+uvn                     1
+uvn-lens                1
+wc                      1
+TOTAL                   8
+
+$ ak47/census.sh --write-baseline && ak47/census.sh --check
+census: baseline recorded at /tmp/ak47-demo2.DhfTA2/state/census.baseline
+
+baseline is not rewritten by --check:
+census: GREW uvn 1 -> 2
+baseline sha256 before=8b426879054af8eb5df380e1e06b1950e2c0be557daadec6df665fad60126bb0 after=8b426879054af8eb5df380e1e06b1950e2c0be557daadec6df665fad60126bb0 (equal)

@@ -1,0 +1,31 @@
+$ ak47/tick.sh --apply   (real live process in tmpa001bbb_; open descriptor in tmpc002ddd_)
+exit=0
+
+## tick log line (exactly one per run)
+2026-11-11T07:34:37Z tick mode=apply tmp_before=7 tmp_after=4 moved=3 deleted=0 busy=2 protected=1 failures=0 actions=3 loop_gap=0s classes=tmp-mktemp:1,tmp-producer:1,orphan-task-scratch:1 breaches=none top=fm-livetask:1,fm-move:1,tmpa001bbb:1,tmpc002ddd:1
+
+## actions, each with its revert
+2026-11-11T07:34:36Z quarantine class=tmp-producer /tmp/ak47-demo2.DhfTA2/tmp/uvn-abc123 -> /tmp/ak47-demo2.DhfTA2/state/quarantine/20261111/uvn-abc123 kib=4 revert='mv /tmp/ak47-demo2.DhfTA2/state/quarantine/20261111/uvn-abc123 /tmp/ak47-demo2.DhfTA2/tmp/uvn-abc123'
+2026-11-11T07:34:36Z quarantine class=orphan-task-scratch /tmp/ak47-demo2.DhfTA2/tmp/fm-orphantask -> /tmp/ak47-demo2.DhfTA2/state/quarantine/20261111/fm-orphantask kib=8 revert='mv /tmp/ak47-demo2.DhfTA2/state/quarantine/20261111/fm-orphantask /tmp/ak47-demo2.DhfTA2/tmp/fm-orphantask'
+2026-11-11T07:34:36Z quarantine class=tmp-mktemp /tmp/ak47-demo2.DhfTA2/tmp/tmpb003eee_ -> /tmp/ak47-demo2.DhfTA2/state/quarantine/20261111/tmpb003eee_ kib=4 revert='mv /tmp/ak47-demo2.DhfTA2/state/quarantine/20261111/tmpb003eee_ /tmp/ak47-demo2.DhfTA2/tmp/tmpb003eee_'
+
+## tree BEFORE
+/tmp/ak47-demo2.DhfTA2/tmp/fm-livetask
+/tmp/ak47-demo2.DhfTA2/tmp/fm-move
+/tmp/ak47-demo2.DhfTA2/tmp/fm-orphantask
+/tmp/ak47-demo2.DhfTA2/tmp/tmpa001bbb_
+/tmp/ak47-demo2.DhfTA2/tmp/tmpb003eee_
+/tmp/ak47-demo2.DhfTA2/tmp/tmpc002ddd_
+/tmp/ak47-demo2.DhfTA2/tmp/uvn-abc123
+
+## tree AFTER - held directories, the live task root and fm-move survive;
+##             the idle leak and the orphaned task root were quarantined
+/tmp/ak47-demo2.DhfTA2/tmp/fm-livetask
+/tmp/ak47-demo2.DhfTA2/tmp/fm-move
+/tmp/ak47-demo2.DhfTA2/tmp/tmpa001bbb_
+/tmp/ak47-demo2.DhfTA2/tmp/tmpc002ddd_
+
+## quarantine contents (moved, not deleted)
+/tmp/ak47-demo2.DhfTA2/state/quarantine/20261111/fm-orphantask
+/tmp/ak47-demo2.DhfTA2/state/quarantine/20261111/tmpb003eee_
+/tmp/ak47-demo2.DhfTA2/state/quarantine/20261111/uvn-abc123

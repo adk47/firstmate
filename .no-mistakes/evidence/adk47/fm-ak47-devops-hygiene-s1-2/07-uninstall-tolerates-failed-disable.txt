@@ -1,0 +1,20 @@
+$ PATH=<fake systemctl that fails every disable> ak47/install.sh --uninstall
+== removing the ak47 hygiene timers (state is kept) ==
+run: systemctl --user disable --now ak47-devops.service
+run: systemctl --user disable --now ak47-devops.timer
+run: systemctl --user disable --now ak47-devops-weekly.service
+run: systemctl --user disable --now ak47-devops-weekly.timer
+run: rm -f /tmp/ak47-demo.FK9rlq/home3/.config/systemd/user/ak47-devops.service
+run: rm -f /tmp/ak47-demo.FK9rlq/home3/.config/systemd/user/ak47-devops.timer
+run: rm -f /tmp/ak47-demo.FK9rlq/home3/.config/systemd/user/ak47-devops-weekly.service
+run: rm -f /tmp/ak47-demo.FK9rlq/home3/.config/systemd/user/ak47-devops-weekly.timer
+run: systemctl --user daemon-reload
+
+Removed. Kept, deliberately:
+  /tmp/ak47-demo.FK9rlq/state   logs, quarantine, findings, baselines
+  /tmp/ak47-demo.FK9rlq/config  devops.conf
+  /tmp/ak47-demo.FK9rlq/cache   the cached du sample
+Delete those by hand if you want the history gone too.
+exit=0
+
+## units left behind

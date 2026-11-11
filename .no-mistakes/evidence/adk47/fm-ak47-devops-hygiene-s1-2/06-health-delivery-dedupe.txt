@@ -1,0 +1,15 @@
+## run 1: inbox delivery FAILS (INBOX_OK=0), load page forced with AK47_PAGE_LOAD15=0
+health.log FIND/DELIVERY lines:
+2026-11-11T07:36:35Z FIND load-sustain PAGE! load15 13.20 on 32 threads (page threshold 0, 2 per thread) - hottest: fm-tmux-anchor(x1,tmux:_server) tmux-spawn-313ce7a6-7842-4924-96
+2026-11-11T07:36:35Z FIND tmp /tmp holds 110 GB (it is emptied at every boot)
+2026-11-11T07:36:35Z FIND watcher Fleet monitoring has not checked in for 29906376 min while 142 agents run
+2026-11-11T07:36:35Z FIND failed-29c2791e Failed background jobs: fm-lane-tick-feed.service 
+2026-11-11T07:36:35Z FIND devops-absent no /tmp/ak47-healthdemo.mtc0zX/home/.local/state/ak47/devops.log: the ak47 hygiene tick has never run on this box
+2026-11-11T07:36:35Z DELIVERY-FAILED 5 finding(s) not delivered; dedupe keys not committed
+committed dedupe keys after failed delivery: 0
+
+## run 2: inbox delivery SUCCEEDS (INBOX_OK=1)
+committed dedupe keys after successful delivery: 5
+
+delivered inbox note (first 240 chars):
+note --source health ak47 box health (2:36 AM ET): load15 13.34 on 32 threads (page threshold 0, 2 per thread) - hottest: fm-tmux-anchor(x1,tmux:_server) tmux-spawn-313ce7a6-7842-4924-9629-c8a6fb913740(x1,pi) orca_pty_orca_daemon_377d1ed8_8
