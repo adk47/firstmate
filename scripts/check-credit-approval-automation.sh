@@ -19,6 +19,12 @@
 #   3. the registry is missing, unparseable, or drops an entrypoint from the
 #      built-in floor below. Deleting a registry line must not make a known
 #      approver invisible.
+#   4. an approve CAPABILITY the wrapper exposes has no registry entry. This is
+#      the hole that let the verification scale drain ship approve-capable and
+#      unregistered: the cron scan below only ever sees what cron-jobs.json
+#      names, so an operator- or loop-driven approver was invisible to CI.
+#      Detection enumerates the wrapper's `is_*_approval` predicates and
+#      requires every one of them to be named by a registry entry.
 #
 # Detection is a fixed-substring match on each job's payload text: the argv
 # joined with spaces, plus the agent-turn message for agentTurn payloads.
@@ -52,6 +58,13 @@ NEVER_SCHEDULED=(
   "batch-verify-profile.sh"
 )
 
+# The wrapper's approve predicates are the closed set of approve PATHS. Every one of
+# them is a way to approve a credit request, and every one must be registered - whether
+# or not a cron reaches it. This is the check that was missing when the verification
+# scale drain shipped approve-capable and unregistered: the cron scan only ever sees
+# what cron-jobs.json names, so an operator- or loop-driven approver was invisible.
+WRAPPER="${MUSO_ADMIN_API_SH:-$ROOT/workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh}"
+
 for f in "$CRON_FILE" "$REGISTRY"; do
   [ -r "$f" ] || { echo "check-credit-approval-automation: missing $f" >&2; exit 2; }
 done
@@ -69,6 +82,45 @@ for ep in "${FLOOR_ENTRYPOINTS[@]}"; do
     violation "registry does not list known credit-approving entrypoint '$ep' (policies/credit-approval-automation.json)"
   fi
 done
+
+# 4. Every approve PATH in the wrapper must be registered.
+#
+#    The wrapper admits an approve through a closed set of `is_*_approval` predicates.
+#    Each one is a way to approve a credit request, so each one needs a registry entry
+#    that names it in `wrapper_predicate`. This is the check that was missing when the
+#    verification scale drain shipped approve-capable and unregistered: the cron scan
+#    below only ever sees what cron-jobs.json names, so an operator- or loop-driven
+#    approver was invisible to CI.
+#
+#    Both directions are checked. A predicate with no registry entry is an unregistered
+#    approve path (the defect). A registry entry naming a predicate that no longer exists
+#    is a phantom approval - the entry claims to govern a path that is gone, which is how
+#    a stale approval_ref outlives the code it approved.
+if [ -r "$WRAPPER" ]; then
+  #    Bash accepts three spellings of a function definition, and a predicate written in
+  #    either of the other two is just as much an approve path. Matching only `name()`
+  #    let `function name()` and `name ()` evade the scan entirely (QA review 2 of
+  #    hydra#1883).
+  predicates=$(grep -oE '^[[:space:]]*(function[[:space:]]+)?is_[a-z0-9_]+_approval[[:space:]]*\(\)' "$WRAPPER" \
+    | sed -E 's/^[[:space:]]*(function[[:space:]]+)?//; s/[[:space:]]*\(\)$//' | sort -u)
+  if [ -z "$predicates" ]; then
+    violation "no is_*_approval predicate found in $WRAPPER - the approve-path scan cannot verify anything"
+  fi
+  while IFS= read -r pred; do
+    [ -n "$pred" ] || continue
+    if ! jq -e --arg p "$pred" '[.automations[].wrapper_predicate? // empty] | index($p) != null' "$REGISTRY" >/dev/null; then
+      violation "approve path '$pred' in $(basename "$WRAPPER") has no registry entry naming it in wrapper_predicate (policies/credit-approval-automation.json)"
+    fi
+  done <<< "$predicates"
+  while IFS= read -r pred; do
+    [ -n "$pred" ] || continue
+    if ! grep -qE "^[[:space:]]*(function[[:space:]]+)?${pred}[[:space:]]*\(\)" "$WRAPPER"; then
+      violation "registry entry names wrapper_predicate '$pred' but $(basename "$WRAPPER") has no such predicate (phantom approval)"
+    fi
+  done < <(jq -r '[.automations[].wrapper_predicate? // empty] | .[]' "$REGISTRY" | sort -u)
+else
+  violation "cannot read the admin wrapper at $WRAPPER - the approve-path scan cannot verify anything"
+fi
 
 # 2b. Every approved entry must say who approved it and where, whether or not a
 #     cron runs it: the @Ops Slack trigger reaches real apply with the cron off

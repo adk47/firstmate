@@ -1180,5 +1180,79 @@ class BuildSubcommandBudgetTest(unittest.TestCase):
         budget.assert_called_once_with(900.0)
 
 
+class DrainReconciliationTest(NeedAsksTest):
+    """The scale drain decides WHO is asked; this module still decides WHICH document and owns the send.
+
+    verify-ask-wiring-h2 (PR #1845) and the scale drain touch the same domain from different files. The
+    reconciliation is that there is exactly ONE reviewed ask/notify path - this one - and the drain feeds it an
+    audience instead of growing a second sender. These tests pin that the drain's `ask` rows are the audience, that a
+    non-ask row is never asked, and that a drain ask with no sendable document is listed as a wait, never dropped.
+    """
+
+    def _plan(self, rows):
+        d = Path(tempfile.mkdtemp())
+        path = d / "plan.jsonl"
+        path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        return str(path)
+
+    def test_only_the_drains_ask_rows_are_listed(self):
+        plan = self._plan([
+            {"request_id": "r1", "rule": "ask", "outcome": "ask", "user_id": 1},
+            {"request_id": "r2", "rule": "precedent", "outcome": "approve", "user_id": 1},
+            {"request_id": "r3", "rule": "duplicate", "outcome": "close_duplicate", "user_id": 2},
+        ])
+        res = na.build(dv_store=self.dv, proof_store=self.proof, paying_path=str(self.paying),
+                       query=self.q, from_drain=plan)
+        asked = {a["request_id"] for u in res["users"] for a in u["asks"]}
+        self.assertEqual(asked, {"r1"})
+        self.assertEqual(res["counts"]["drain_asks"], 1)
+        self.assertGreater(res["counts"]["skip_not_in_drain"], 0)
+
+    def test_a_drain_ask_with_no_sendable_document_waits_and_is_never_dropped(self):
+        plan = self._plan([{"request_id": "r6", "rule": "ask", "outcome": "ask", "user_id": 5}])   # r6 has no intake row
+        res = na.build(dv_store=self.dv, proof_store=self.proof, paying_path=str(self.paying),
+                       query=self.q, from_drain=plan)
+        self.assertEqual(res["users"], [])
+        waits = [w for w in res["waits"] if w["reason"] == "wait:no_sendable_document"]
+        self.assertEqual([(w["user_id"], w["request_id"]) for w in waits], [("5", "r6")])
+        self.assertTrue(waits[0]["due_at"])
+
+    def test_a_downgraded_approve_is_in_the_ask_audience(self):
+        """An approve with no evidence anchor resolves to outcome=ask, not a dropped row."""
+        plan = self._plan([
+            {"request_id": "r4", "rule": "proof_verdict", "outcome": "ask",
+             "reason_code": "no_evidence_anchor", "user_id": 5},
+        ])
+        res = na.build(dv_store=self.dv, proof_store=self.proof, paying_path=str(self.paying),
+                       query=self.q, from_drain=plan)
+        self.assertEqual(res["counts"]["drain_asks"], 1)
+        waits = [w for w in res["waits"] if w["reason"] == "wait:no_sendable_document"]
+        self.assertEqual([(w["user_id"], w["request_id"]) for w in waits], [("5", "r4")])
+
+    def test_a_drain_ask_without_a_user_id_is_refused_loudly(self):
+        plan = self._plan([{"request_id": "r1", "rule": "ask", "outcome": "ask", "user_id": None}])
+        with self.assertRaises(na.NeedError):
+            na.build(dv_store=self.dv, proof_store=self.proof, paying_path=str(self.paying),
+                     query=self.q, from_drain=plan)
+
+    def test_an_unreadable_plan_is_refused(self):
+        with self.assertRaises(na.NeedError):
+            na.build(dv_store=self.dv, proof_store=self.proof, paying_path=str(self.paying),
+                     query=self.q, from_drain="/nonexistent/plan.jsonl")
+
+    def test_without_a_plan_the_audience_is_unchanged(self):
+        base = na.build(dv_store=self.dv, proof_store=self.proof, paying_path=str(self.paying), query=self.q)
+        self.assertNotIn("drain_asks", base["counts"])
+        self.assertNotIn("skip_not_in_drain", base["counts"])
+
+    def test_the_cli_flag_reaches_build(self):
+        plan = self._plan([{"request_id": "r1", "rule": "ask", "outcome": "ask", "user_id": 1}])
+        out = Path(tempfile.mkdtemp()) / "list.json"
+        with unittest.mock.patch.object(na, "build", return_value={"generated_at": "x", "counts": {}}) as b:
+            rc = na._main(["build", "--out", str(out), "--from-drain", plan])
+        self.assertEqual(rc, 0)
+        self.assertEqual(b.call_args.kwargs.get("from_drain"), plan)
+
+
 if __name__ == "__main__":
     unittest.main()

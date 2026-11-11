@@ -143,9 +143,16 @@ skill_tree_copy() {
 # file's source-safe guard (`if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then return`),
 # because when sourced that guard returns and anything appended after it is dead
 # code — the redefinition would silently never take effect.
+#
+# Match the GUARD, not the first `${BASH_SOURCE[0]}` in the file. Any ordinary
+# helper that resolves its own directory also mentions BASH_SOURCE, and on
+# 2026-11-11 `scale_drain_root()` became the first occurrence — the mutant then
+# cut the script in the middle of a function definition, the injected deny-all
+# never ran, and both deny-all cases went green against a broken mutant (a false
+# pass exactly of the kind these tests exist to catch).
 deny_all_mutant() {
   local fn="$1" marker="$2" out="$3" guard
-  guard="$(grep -n 'BASH_SOURCE\[0\]' "$CANON" | head -1 | cut -d: -f1)"
+  guard="$(grep -n 'BASH_SOURCE\[0\]}" != "${0}"' "$CANON" | head -1 | cut -d: -f1)"
   [ -n "$guard" ] || { echo "source-guard not found in $CANON" >&2; return 1; }
   head -n "$((guard - 1))" "$CANON" > "$out"
   cat >> "$out" <<EOF

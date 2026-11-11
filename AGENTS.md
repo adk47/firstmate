@@ -887,6 +887,160 @@ triggers). Authoritative doc: `data/sentinel/README.md`; registry `policies/sent
 - **Ticks serialize on a host `flock`** across load → evaluate → save → mirror PR; a tick that cannot
   acquire within `SENTINEL_LOCK_TIMEOUT` exits 0 silently (the other tick is doing the same join).
 
+## The verification scale drain: one deterministic ladder, one reviewed ask path
+
+The 92,861-request verification backlog is a **one-time drain**, not a throughput problem:
+at 1,000/min it is 93 minutes, then a small continuous tail. Design of record is
+`data/verification-scale-plan.md`; the operator doc is
+`docs/credit-verification/scale-drain.md`. The measured ceiling was 1.4 min/user because
+`muso-admin-api.sh` did three round trips per user (token resolve, account resolve, route).
+
+- **`scripts/credit_review/scale_drain.py`** is the decider: a single SQL ladder
+  (`LADDER_SQL`) in rank order — duplicate of a decided request → close; precedent →
+  approve on a per-claimant prior approval, or queue a refusal for a named human; a
+  readable proof verdict → approve, or queue a refusal; **asked** and expired with no
+  proof → queue for tier-2; else ask. **No model in the hot path** (Aaron's 2026-10-29
+  ruling: a model reviews a sample and proposes rule changes, it never decides a row).
+  `decision_key = sha256(request_id || rule || outcome || version)` is the ledger primary
+  key, so a re-run cannot double-apply and a killed worker re-reads its shard and skips
+  every row already in the ledger (there is no cursor to lose or trust). The **outcome** is
+  in the key on purpose: without it a decision that changes keeps its key and `apply` skips
+  it, so a queued refusal that later becomes an approval would be silently dropped. The plan JSONL is
+  canonical (sorted, no clock, no run id) — that is what makes "run it twice, diff the
+  bytes" a real test.
+- **Expiry may only refuse a request we actually ASKED** (`asked_at IS NOT NULL`). A
+  never-asked request falls through to `ask`: the 23,247 OPEN_UNASKED rows are the
+  drain's population, not its refuse pile, and refusing a customer we never asked is a
+  customer-facing denial we do not do (captain decision 2026-11-11).
+- **`apply` performs a real API side effect** through the one reviewed path
+  `muso-admin-api.sh` already exposes: `PUT /admin/credit-requests
+  {"requestIds":[…],"status":…}` through the wrapper, so the full gate chain still runs.
+  `approve` → `approved`, `close_duplicate` → `rejected` via `conditional-status`,
+  `ask` → no write (the send is `need_asks.py`'s), `queue_tier2` → no write (a refusal is
+  a named human's). **Intent, write, confirm**: `apply` commits an `intents` row BEFORE
+  the API call and confirms it after. An intent left open (a kill between the two, or a
+  write that failed or timed out) is never retried blind: the next run reads the live
+  request (`verify_anchor.reconcile`) and records `reconciled`, retries a still-pending
+  one through the gate, or abandons with a reason code. The gate still refuses a decided
+  request; write-then-commit could not recover that row at all (QA review 5).
+- **The pass is small, and an `ask` is not a decision.** Measured on the live snapshot
+  2026-11-11: 3,294 approve, 1,324 queued for a human, 856 `already_on_profile`
+  (unmatched), 91,229 ask of 96,703. Never describe it as deciding the backlog; the table
+  and the reasons two rules are zero are in the operator doc.
+- **The proof store keys a verdict by CLAIM (`<request uuid>#<Role>`), and core's
+  `duplicate_of` is a map of credits, not a request id.** Keyed by bare request id the
+  proof rule matched none of 326,611 verdicts, and the map crashed the plan. A document
+  on file with no decisive verdict keeps `proof_received_at`, so it is
+  `ask`/`proof_on_file_undecided` and never `expired_no_proof`. Run a ladder change
+  against a real snapshot before believing a fixture.
+- **Duplicate closes are autonomous; refusals are not** (captain decision 2026-11-11).
+  A duplicate of an already-decided request is deduplication, not a new decision, so it
+  closes through `is_scale_drain_duplicate_close` with
+  `EVIDENCE_EXCERPT=drain-dup:<original-uuid>;<reason>;v<n>;<profile-uuid>` and is audited like a human
+  reject with the original as the approval reference. Expired-with-no-proof and a
+  `refuse` verdict are customer-facing denials: they get `queue_tier2`, write nothing, and
+  `tier2-queue` lists them for a human who supplies `--confirmed-by`/`--approval-msg-id`.
+  The drain never supplies those. Never lower a served number, never deny a customer
+  autonomously.
+- **The drain never sets `CV_APPROVE_GATE_DISABLED`.** That variable skips every evidence
+  requirement and must not be set by an agent. The wrapper instead carries a fifth
+  registered predicate, `is_scale_drain_approval`, which admits only
+  `scale-drain@hydra-ops` + `SCALE_DRAIN=1` + the drain's token + the registry entry + a
+  body of exactly one request id + an `EVIDENCE_EXCERPT` matching
+  `drain-signal:<rule>;<reason>;v<n>;(<uuid>|<64-hex proof id>);<profile|->`. The digest
+  must name an auto-approvable rule AND a row-specific anchor (the precedent request, or
+  the proof id — a proof id is a sha256 digest, not a UUID). **A digest is a claim, not a
+  fact**: the predicate hands the parts to `scripts/credit_review/verify_anchor.py`, which
+  checks the anchor against a source the caller does not control — one admin GET for the
+  claimant's profile (the anchor must be `approved` and match on claimant, track and
+  roles) for `precedent`, or the root-owned proof store plus the same one GET for
+  `proof_verdict` (the newest verdict of every claim **for the request** must be a
+  decision on the anchored proof, and **every role the LIVE request claims needs its own
+  verdict** - a check that walks only the store approves on whatever happens to be on
+  file). A verifier that cannot run refuses the write. A duplicate close is not an
+  approval, so it needs the token **and** a verified original: the same verifier checks
+  the named original is decided and matches on claimant, track and roles. **Both writes
+  carry exactly ONE request id**: one digest names one anchor, so a second id is a write
+  nothing verified (the close predicate once took 50 and checked the first). **Both writes present the token**
+  (`/etc/hydra/scale-drain.token`, mode 600, owned by the drain's own user; one check,
+  `scale_drain_token_ok`). It raises the bar to "can read that file" and is not claimed to
+  be non-forgeable - any root process on node-8 can read it - and **nothing creates it**:
+  until an operator places the file, `apply` refuses every write. The verified anchor is
+  what makes an approval per-row true; the verified original is what stops a
+  caller closing an unrelated pending request as a "duplicate". A row with no anchor is **not**
+  downgraded to an ask: it is `unmatched` (`unmatched_precedent` /
+  `unmatched_proof_verdict`), counted and never written, so a user who was already
+  decided is never sent a fresh "please verify" ask. `scripts/check-credit-approval-automation.sh`
+  enumerates the wrapper's `is_*_approval` predicates — in all three Bash spellings
+  (`name()`, `name ()`, `function name()`) — and fails CI when one has no registry entry
+  naming it in `wrapper_predicate`, so a new approve path cannot ship unregistered.
+- **The bulk read is the core replica, not the admin list.** The admin list refuses
+  unfiltered paging past offset 20,000 and its own refusal text says to use Trino; 92,861
+  rows at `limit=200` is page 465. `snapshot` reads
+  `postgresql_core.public.credit_requests` in one query and joins the verify ledger for
+  ask history (core has no `asked_at`; only ASK campaigns count, and it is keyed by
+  **request** from `request_ids_json`, not by account — keyed by account, an old unasked
+  request could be expired because a different request for the same user was asked). The
+  admin API is the
+  write path.
+- **`scripts/credit_review/batch_admin.py`** is the hoist: `muso-admin-api.sh call-batch`
+  is ONE process, ONE token resolve, N requests, with the same gate chain `call` runs.
+  Never add a direct-HTTP batch client — it would bypass the approve/reject/removal/
+  tier-2/pace/merge-reverse/enrich-link/bulk-destructive gates. The route call is NOT in
+  the decision path: the sender is the tail.
+- **There is exactly ONE reviewed ask/notify path, and it is `need_asks.py`.** The drain
+  decides WHO is asked (its `ask` rows); `need_asks.py build --from-drain PLAN` takes that
+  audience and still decides WHICH document and owns the send through
+  `intercom-verify-request.sh --campaign proof-need-ask`. This is the reconciliation with
+  verify-ask-wiring-h2 (PR #1845). A drain ask with no sendable document is listed as
+  `wait:no_sendable_document` with a `due_at`, never dropped. Do not grow a second sender.
+- `expires_at` does not exist in core; the snapshot derives it from **`asked_at`** +
+  `ASK_WINDOW_DAYS` (30), keeps a core-supplied value when one appears, and leaves it NULL
+  for a never-asked row. Keyed on `created_at` it expired a request the moment we finally
+  asked it (created 2026-01-01, asked 2026-11-10, refused 2026-11-11) — a denial of a
+  request the customer was never given time to answer (QA review 3 of hydra#1883).
+- **`chaos` takes no `--ledger`.** It makes its own scratch SQLite in a fresh temp dir.
+  Refusing only the default path or a non-empty ledger was not enough: a fresh custom
+  ledger a real run was about to use got filled with no-writer `applied` rows, and the
+  real run then skipped them.
+- **Neither the verifier's path nor the proof store is caller-controlled.** `HYDRA_ROOT`
+  and `CREDIT_PROOF_STORE` are env vars, so a caller could point the check at a substitute
+  verifier or a SQLite file it wrote itself. The wrapper derives the verifier from its own
+  location (`scale_drain_root()` walks up from `$(dirname "${BASH_SOURCE[0]}")` to
+  `scripts/credit_review/verify_anchor.py`) and the proof store is a constant in the
+  verifier. The walk starts from the wrapper's `realpath`, so a symlink to the wrapper in
+  a caller's tree still trusts the deployed tree. **The approval registry is pinned the
+  same way** (`scale_drain_registry()` → `<root>/policies/credit-approval-automation.json`);
+  a `CREDIT_APPROVAL_REGISTRY` or `HYDRA_ROOT` resolving to another file is refused (QA
+  review 5: a caller's own `approved: true` registry was honoured). The older predicates
+  in the operations wrapper still read that variable.
+- **Both gates' trust sources are pinned, and an override is REFUSED, not ignored** (QA
+  review 4 of hydra#1883). The verifier reads the admin API only through the operations
+  wrapper found from its own location (`verify_anchor.ADMIN_SCRIPT`); a
+  `CREDIT_REVIEW_ADMIN_SCRIPT` resolving elsewhere fails the write. The token
+  path is the literal `/etc/hydra/scale-drain.token`; a set `SCALE_DRAIN_TOKEN_FILE`
+  fails the write. Never add an env or CLI seam for either - a positive test rewrites the
+  literal in a scratch copy. **Every new trust source is a hole until it is pinned to
+  something the caller does not control**: four were found in review, one at a time
+  (verifier path, admin script, token file, registry). What a bash gate cannot pin is the
+  caller's whole environment (`PATH`, `BASH_ENV`, the API URL and credentials).
+- **The wrapper runs the verifier as a FILE (`python3 -I verify_anchor.py`), so it must
+  not use a relative or `sys.path` import.** `from . import batch_admin` made both gates
+  refuse every write while 113 tests passed, because none executed the real entrypoint.
+  `RealEntrypointTests` runs `bash <wrapper>` at its real path with only `curl` stubbed;
+  a gate change that is not exercised there is not tested. Since a passing write needs the
+  root-only token, its passing cases run in a byte-for-byte mirror of the tree with that
+  one literal rewritten (a test holds the mirror to the diff), and the checked-in files
+  are run unmodified for the refusals.
+- Tests: `scripts/tests/test_scale_drain.py` (ladder, idempotency, shards, byte-identical
+  re-runs, kill -9 chaos), `scripts/tests/test_verify_anchor.py` (the anchor checks:
+  unapproved anchor, different claimant/track/roles, newest-soft-verdict-wins, unreadable
+  store is a refusal), `scripts/tests/muso-admin-api-scale-drain-gate.bats` (both wrapper
+  copies: digest shape, delegation to the verifier, missing verifier refuses, batch body
+  refuses, duplicate-close token and its pinned path) and `scripts/tests/muso-admin-api-call-batch.bats` (one
+  token resolve, per-item failure isolation, writes serialised after reads, gates still
+  run).
+
 ## Picking the right extension mechanism
 
 Before writing new code in this repo, walk this decision tree top-down and stop at

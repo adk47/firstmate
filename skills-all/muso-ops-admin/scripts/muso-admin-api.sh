@@ -271,6 +271,12 @@ check_env() {
 }
 
 get_token() {
+    # A batch resolves the token ONCE (call-batch sets TOKEN_MEMO); every item in the
+    # batch reuses it instead of re-reading the cache or logging in per request.
+    if [[ -n "${TOKEN_MEMO:-}" ]]; then
+        printf '%s\n' "$TOKEN_MEMO"
+        return 0
+    fi
     # Return cached token if fresh
     if [[ -f "$TOKEN_CACHE" ]]; then
         local cached_time
@@ -341,6 +347,207 @@ CV_SESSION_MAX_AGE_MIN="${CV_SESSION_MAX_AGE_MIN:-10}"
 CV_EVIDENCE_EXCERPT_MIN="${CV_EVIDENCE_EXCERPT_MIN:-8}"
 CV_EVIDENCE_EXCERPT_MAX="${CV_EVIDENCE_EXCERPT_MAX:-200}"
 
+# The verification scale drain's approve predicate (2026-11-11).
+#
+# The drain (scripts/credit_review/scale_drain.py) approves off a deterministic SQL
+# ladder, not browser evidence, so the Tier-1 quorum checks below cannot be satisfied by
+# it. It gets its OWN narrow predicate rather than the blanket
+# CV_APPROVE_GATE_DISABLED bypass: that variable skips EVERY evidence requirement and
+# must not be set by an agent, and a second bypass caller is exactly what we do not do.
+#
+# What this predicate checks, all of it, before returning 0:
+#   * SCALE_DRAIN=1 and the drain's own requester identity (no other caller can borrow it)
+#   * the kill file /etc/hydra/scale-drain.disabled
+#   * the registry entry verification-scale-drain is approved, with approved_by and
+#     approval_ref recorded (policies/credit-approval-automation.json)
+#   * the body is exactly {requestIds, status:"approved"} with exactly ONE UUID (one
+#     digest carries one anchor, so a second id would be a write nothing verified)
+#   * the evidence excerpt is a well-formed drain digest naming an AUTO-APPROVABLE rule
+#     and a row-specific anchor: drain-signal:<precedent|proof_verdict>;<reason>;v<n>;<anchor>,
+#     where the anchor is the precedent request id (a UUID) or the proof id (a sha256
+#     hex digest - scripts/credit_verify/proof/store.py:37). Both formats are accepted.
+#     A digest naming ask/expired/duplicate is refused, so the drain can never approve a
+#     row its ladder did not decide on evidence.
+# The verifier and its interpreter path are derived from THIS FILE's location, never from
+# the environment. HYDRA_ROOT and CREDIT_PROOF_STORE are caller-controlled: a caller who
+# can invoke the wrapper can set them, so honouring them here would let a caller point the
+# gate at a substitute verifier or a SQLite file it wrote itself. Walking up from the
+# wrapper's own directory is not forgeable - you cannot invoke a different wrapper without
+# invoking a different script, and the script you invoke is the one enforcing the gate.
+#
+# The walk starts from the wrapper's RESOLVED path. A symlink to the deployed wrapper,
+# made in a tree the caller owns, has the caller's path in BASH_SOURCE: walking up from
+# that found the caller's verifier and the caller's registry beside it.
+scale_drain_root() {
+    local self dir
+    self="$(realpath -- "${BASH_SOURCE[0]}" 2>/dev/null)" || return 1
+    dir="$(dirname "$self")"
+    while [[ "$dir" != "/" ]]; do
+        if [[ -f "$dir/scripts/credit_review/verify_anchor.py" ]]; then
+            printf '%s' "$dir"
+            return 0
+        fi
+        dir="$(dirname "$dir")"
+    done
+    return 1
+}
+
+# The approval registry both drain predicates read: the deployed policy file, found from
+# the wrapper's own location exactly as the verifier is. It was read from
+# CREDIT_APPROVAL_REGISTRY / HYDRA_ROOT, so a caller could point the gate at an
+# `approved: true` file it had written itself and "the captain recorded this decision"
+# meant "the caller says so" (QA review 5 of hydra#1883).
+#
+# A caller value naming any OTHER file is REFUSED, not ignored: a redirect attempt must
+# not read as a clean run. A value that resolves to the pinned file is not a redirect -
+# this wrapper's other predicates still default that variable to the same deployed path.
+# Prints the pinned path.
+scale_drain_registry() {
+    local root pinned claimed
+    root="$(scale_drain_root)" || {
+        echo "scale_drain: the deployed tree cannot be located from the wrapper - refusing" >&2
+        return 1
+    }
+    pinned="$root/policies/credit-approval-automation.json"
+    claimed="${CREDIT_APPROVAL_REGISTRY:-}"
+    if [[ -z "$claimed" && -n "${HYDRA_ROOT:-}" ]]; then
+        claimed="$HYDRA_ROOT/policies/credit-approval-automation.json"
+    fi
+    if [[ -n "$claimed" && "$(realpath -m -- "$claimed" 2>/dev/null)" != "$(realpath -m -- "$pinned" 2>/dev/null)" ]]; then
+        echo "scale_drain: the approval registry is pinned to $pinned and cannot be redirected (CREDIT_APPROVAL_REGISTRY/HYDRA_ROOT name $claimed) - refusing" >&2
+        return 1
+    fi
+    printf '%s' "$pinned"
+}
+
+# The drain's execution identity: a token file only the drain's own user can read. BOTH
+# drain write paths present it - an approval as well as a duplicate close. SCALE_DRAIN,
+# REQUESTER_EMAIL and EVIDENCE_EXCERPT are things a caller simply asserts, so without
+# this the approve exception was open to anyone who could invoke the wrapper and name a
+# real approved same-claim anchor (QA review 5 of hydra#1883).
+#
+# This RAISES THE BAR from "can invoke the wrapper" to "can read that file". It does not
+# make either path non-forgeable, and it is not claimed to: any process running as the
+# file's owner (root on node-8) can read it (captain decision, 2026-11-11).
+#
+# The token lives at ONE path, and the caller does not get to name another. With a
+# caller-selected SCALE_DRAIN_TOKEN_FILE the checks below proved only that the caller
+# could write a mode-600 file and read it back, which any caller can, so the identity
+# was whatever the caller said it was (QA review 4 of hydra#1883). /etc/hydra is
+# writable by root alone, so a token that matches this file is one only root placed.
+# An override is REFUSED rather than ignored: an attempt to redirect the gate must not
+# read as a clean run.
+scale_drain_token_ok() {
+    local what="$1"
+    local drain_token_file="/etc/hydra/scale-drain.token"
+    if [[ -n "${SCALE_DRAIN_TOKEN_FILE+set}" ]]; then
+        echo "scale_drain: SCALE_DRAIN_TOKEN_FILE is set, but the token path is pinned to $drain_token_file and cannot be redirected - refusing" >&2
+        return 1
+    fi
+    if [[ ! -f "$drain_token_file" ]]; then
+        echo "scale_drain: $drain_token_file is missing - refusing ($what needs the root-only token)" >&2
+        return 1
+    fi
+    # The bar is "only the drain's own identity can read this file", so the owner must be
+    # the EFFECTIVE user (root in production) and nobody else may read it. Requiring
+    # literally root would be stricter than the bar and would make the path untestable
+    # outside root.
+    local drain_mode drain_owner drain_euid
+    drain_mode="$(stat -c '%a' "$drain_token_file" 2>/dev/null)" || drain_mode=""
+    drain_owner="$(stat -c '%u' "$drain_token_file" 2>/dev/null)" || drain_owner=""
+    drain_euid="$(id -u)"
+    if [[ "$drain_mode" != "600" || "$drain_owner" != "$drain_euid" ]]; then
+        echo "scale_drain: $drain_token_file must be mode 600 owned by the drain's user (uid $drain_euid; is ${drain_mode:-?}/uid ${drain_owner:-?}) - refusing" >&2
+        return 1
+    fi
+    if [[ -z "${SCALE_DRAIN_TOKEN:-}" ]] || [[ "$(cat "$drain_token_file" 2>/dev/null)" != "${SCALE_DRAIN_TOKEN}" ]]; then
+        echo "scale_drain: SCALE_DRAIN_TOKEN does not match $drain_token_file - refusing" >&2
+        return 1
+    fi
+    return 0
+}
+
+is_scale_drain_approval() {
+    local method="$1" path="$2" body="$3"
+    [[ "${SCALE_DRAIN:-0}" == "1" ]] || return 1
+    [[ "${REQUESTER_EMAIL:-}" == "scale-drain@hydra-ops" ]] || return 1
+    [[ "$method" == "PUT" ]] || return 1
+    [[ "$path" == "/admin/credit-requests" ]] || return 1
+    if [[ -e /etc/hydra/scale-drain.disabled ]]; then
+        echo "scale_drain: /etc/hydra/scale-drain.disabled is present - refusing" >&2
+        return 1
+    fi
+    # An approval is the drain's most consequential write. The verified anchor below is
+    # the per-row control; this is the per-caller one (see scale_drain_token_ok).
+    scale_drain_token_ok "an approval" || return 1
+    local registry
+    registry="$(scale_drain_registry)" || return 1
+    jq -e '.automations["verification-scale-drain"]
+           | .approved == true
+             and ((.approved_by // "") | tostring | length > 0)
+             and ((.approval_ref // "") | tostring | length > 0)' \
+        "$registry" >/dev/null 2>&1 || {
+        echo "scale_drain: verification-scale-drain is not approved in $registry - refusing" >&2
+        return 1
+    }
+    printf '%s' "$body" | jq -e '
+        type == "object"
+        and ((keys | sort) == ["requestIds", "status"])
+        and .status == "approved"
+        and (
+            .requestIds as $ids
+            | ($ids | type) == "array"
+            and ($ids | length) > 0
+            and ($ids | length) <= 50
+            and all($ids[];
+                type == "string"
+                and length == 36
+                and test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+            )
+            and (($ids | map(ascii_downcase) | unique | length) == ($ids | length))
+        )
+    ' >/dev/null 2>&1 || return 1
+    # The evidence is CHECKED, not skipped: the digest must name an auto-approvable rule
+    # and carry the row-specific anchor the ladder decided on.
+    if [[ ! "${EVIDENCE_EXCERPT:-}" =~ ^drain-signal:(precedent|proof_verdict)\;[a-z_]+\;v[0-9]+\;([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9a-f]{64})\;([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|-)$ ]]; then
+        echo "scale_drain: --evidence-excerpt must be drain-signal:<precedent|proof_verdict>;<reason>;v<n>;<anchor>;<profile> - refusing" >&2
+        return 1
+    fi
+    # A digest is a CLAIM; the anchor is a FACT. Verify it against a source the caller
+    # does not control before the write lands (QA review of hydra#1883, 2026-11-11):
+    #   precedent     -> one admin-API GET for the claimant's profile; the anchor must be
+    #                    approved and match this request on claimant, track and roles.
+    #   proof_verdict -> the root-owned proof store; the newest verdict must be a decision
+    #                    and must name this request.
+    # One request per call, because one digest carries one anchor. A batch would need N
+    # anchors and N verifications, and the drain writes one row at a time.
+    local drain_ids drain_rule drain_anchor drain_profile drain_root drain_verifier
+    drain_ids="$(printf '%s' "$body" | jq -r '.requestIds | length' 2>/dev/null)" || return 1
+    [[ "$drain_ids" == "1" ]] || {
+        echo "scale_drain: exactly one requestId per call (one digest carries one anchor) - refusing" >&2
+        return 1
+    }
+    IFS=';' read -r drain_rule _ _ drain_anchor drain_profile <<< "${EVIDENCE_EXCERPT#drain-signal:}"
+    drain_root="$(scale_drain_root)" || drain_root=""
+    drain_verifier="${drain_root:-/nonexistent}/scripts/credit_review/verify_anchor.py"
+    if [[ ! -f "$drain_verifier" ]]; then
+        echo "scale_drain: anchor verifier $drain_verifier is missing - refusing (an unverifiable approve is not an approve)" >&2
+        return 1
+    fi
+    # python3 -I: the verifier takes nothing from the caller's Python environment. It
+    # loads its one sibling module from its own directory, so it needs no PYTHONPATH -
+    # and an inherited one would sit ahead of the standard library on sys.path, where a
+    # caller's json.py or subprocess.py answers instead of the admin API.
+    if ! python3 -I "$drain_verifier" \
+            --rule "$drain_rule" --anchor "$drain_anchor" \
+            --request-id "$(printf '%s' "$body" | jq -r '.requestIds[0]')" \
+            --profile-id "$drain_profile"; then
+        echo "scale_drain: anchor verification failed - refusing the approve" >&2
+        return 1
+    fi
+    return 0
+}
+
 enforce_credit_approve_gate() {
     local method="$1" path="$2" body="$3"
 
@@ -403,6 +610,10 @@ enforce_credit_approve_gate() {
     # the #873 review. Deleting it breaks autonomous credit approval on a cron
     # nobody is watching. Setting it skips EVERY evidence requirement below, so
     # it is not an operator knob and must not be set by hand or by an agent.
+    if is_scale_drain_approval "$method" "$path" "$body"; then
+        return 0
+    fi
+
     if [[ "${CV_APPROVE_GATE_DISABLED:-0}" == "1" ]]; then
         return 0
     fi
@@ -575,6 +786,98 @@ EOF
 # --approval-msg-id. Deliberately NO env off-switch and NO dry-run skip — the
 # actor this gate restrains controls its own env, and a dry-run preview of an
 # unauthorized reject should fail loudly too.
+# is_scale_drain_duplicate_close -> 0 when this is the verification scale drain closing a
+# DUPLICATE of an already-decided request. A duplicate close is NOT a new decision: the
+# original decision stands and the customer's outcome is unchanged, so it does not need a
+# tier-2 approver the way a refusal does (captain decision 2026-11-11). It is still a
+# reject at the API, so it is audited exactly like one, with the ORIGINAL request id as
+# the approval reference - that id is the whole justification, and the gate refuses a
+# digest that does not name one.
+#
+#   * SCALE_DRAIN=1, requester scale-drain@hydra-ops, PUT conditional-status
+#   * the kill file is absent and the registry entry is approved
+#   * the body is {expectedStatus, requestIds, status:"rejected"} with exactly ONE UUID
+#   * the evidence excerpt is drain-dup:<original-uuid>;<reason>;v<n>
+is_scale_drain_duplicate_close() {
+    local method="$1" path="$2" body="$3"
+    [[ "${SCALE_DRAIN:-0}" == "1" ]] || return 1
+    [[ "${REQUESTER_EMAIL:-}" == "scale-drain@hydra-ops" ]] || return 1
+    [[ "$method" == "PUT" ]] || return 1
+    [[ "$path" == "/admin/credit-requests/conditional-status" ]] || return 1
+    if [[ -e /etc/hydra/scale-drain.disabled ]]; then
+        echo "scale_drain: /etc/hydra/scale-drain.disabled is present - refusing" >&2
+        return 1
+    fi
+    # A duplicate close is NOT an approval: it is gated on the drain's execution identity
+    # (see scale_drain_token_ok) and, below, on a verified original.
+    scale_drain_token_ok "a duplicate close" || return 1
+    local registry
+    registry="$(scale_drain_registry)" || return 1
+    jq -e '.automations["verification-scale-drain"]
+           | .approved == true
+             and ((.approved_by // "") | tostring | length > 0)
+             and ((.approval_ref // "") | tostring | length > 0)' \
+        "$registry" >/dev/null 2>&1 || {
+        echo "scale_drain: verification-scale-drain is not approved in $registry - refusing" >&2
+        return 1
+    }
+    printf '%s' "$body" | jq -e '
+        type == "object"
+        and ((keys | sort) == ["expectedStatus", "requestIds", "status"])
+        and .status == "rejected"
+        and (.expectedStatus == "unverified" or .expectedStatus == "user_verification_needed")
+        and (
+            .requestIds as $ids
+            | ($ids | type) == "array"
+            and ($ids | length) > 0
+            and all($ids[];
+                type == "string"
+                and length == 36
+                and test("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+            )
+        )
+    ' >/dev/null 2>&1 || return 1
+    # ONE request per close. The digest names one original and the verifier below checks
+    # one target against it, so every further id in the body would be rejected on the
+    # strength of a check that never looked at it: a valid duplicate first and an
+    # unrelated pending request second closed both (QA review 6 of hydra#1883). The drain
+    # writes one row per call; a batch is not this path.
+    local dup_ids
+    dup_ids="$(printf '%s' "$body" | jq -r '.requestIds | length' 2>/dev/null)" || return 1
+    if [[ "$dup_ids" != "1" ]]; then
+        echo "scale_drain: exactly one requestId per duplicate close (one digest names one original) - refusing" >&2
+        return 1
+    fi
+    # The evidence is CHECKED: the digest must name the decided ORIGINAL this row
+    # duplicates. Without it there is no standing decision and no autonomous close.
+    local dup_re='^drain-dup:([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\;[a-z_]+\;v[0-9]+\;([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|-)$'
+    if [[ ! "${EVIDENCE_EXCERPT:-}" =~ $dup_re ]]; then
+        echo "scale_drain: --evidence-excerpt must be drain-dup:<original-request-uuid>;<reason>;v<n>;<profile-uuid> - refusing" >&2
+        return 1
+    fi
+    local dup_original="${BASH_REMATCH[1]}" dup_profile="${BASH_REMATCH[2]}"
+    # ...and the claim is VERIFIED, not trusted: the named original must be a DECIDED
+    # request for the same claimant, track and roles. The token alone let a caller close an
+    # unrelated pending request as a "duplicate" (QA review 2 of hydra#1883).
+    local dup_root dup_verifier
+    dup_root="$(scale_drain_root)" || dup_root=""
+    dup_verifier="${dup_root:-/nonexistent}/scripts/credit_review/verify_anchor.py"
+    if [[ ! -f "$dup_verifier" ]]; then
+        echo "scale_drain: anchor verifier $dup_verifier is missing - refusing (an unverifiable close is not a close)" >&2
+        return 1
+    fi
+    local dup_target
+    dup_target="$(printf '%s' "$body" | jq -r '.requestIds[0]')" || return 1
+    # python3 -I, as on the approve path: no caller PYTHONPATH, no working directory.
+    if ! python3 -I "$dup_verifier" \
+            --rule duplicate --anchor "$dup_original" --request-id "$dup_target" \
+            --profile-id "$dup_profile"; then
+        echo "scale_drain: duplicate verification failed for $dup_target -> $dup_original - refusing" >&2
+        return 1
+    fi
+    return 0
+}
+
 enforce_credit_reject_gate() {
     local method="$1" path="$2" body="$3"
 
@@ -598,6 +901,24 @@ enforce_credit_reject_gate() {
     status_val="$(printf '%s' "$body" | jq -r '.status // empty' 2>/dev/null || true)"
     if [[ "$status_val" != "rejected" ]] \
         && ! echo "$body" | grep -q '"status"[[:space:]]*:[[:space:]]*"rejected"'; then
+        return 0
+    fi
+
+    # The verification scale drain closing a DUPLICATE of an already-decided request.
+    # Deduplication is not a new decision, so it does not need a tier-2 approver - but it
+    # is audited like one, with the original request id as the approval reference.
+    if is_scale_drain_duplicate_close "$method" "$path" "$body"; then
+        if ! mkdir -p "$(dirname "$CREDIT_REJECT_AUDIT_PATH")" 2>/dev/null \
+            || ! jq -n -c --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg method "$method" --arg path "$path" \
+                --arg requester "${REQUESTER_EMAIL:-}" --arg original "${EVIDENCE_EXCERPT}" \
+                --argjson n "$(printf '%s' "$body" | jq '.requestIds | length')" \
+                '{ts:$ts, gate:"credit_reject", method:$method, path:$path, requester:$requester,
+                  confirmed_by:"scale-drain-duplicate-close", approval_msg_id:$original,
+                  automation:"verification-scale-drain", rows:$n}' \
+                >> "$CREDIT_REJECT_AUDIT_PATH"; then
+            echo "MUSO_CREDIT_REJECT_AUDIT_UNWRITABLE: scale-drain duplicate close not audited - refusing." >&2
+            return 1
+        fi
         return 0
     fi
 
@@ -2092,6 +2413,140 @@ cmd_upload() {
         || echo "{\"http_status\": $http_code, \"raw\": $(echo "$response_body" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read()))')}"
 }
 
+# --- Batched calls (the scale drain's hoist) --------------------------------
+#
+# The measured ceiling this removes: three round trips per user (token resolve, account
+# resolve, route) at 1.4 minutes per user end to end, which caps even perfect batching
+# near 1,000/day. `call-batch` is ONE process, ONE token resolve, N requests, and the
+# SAME gate chain every single `call` already runs - a batch client that spoke HTTP
+# directly would be faster and would also bypass the credit-approve, reject, removal,
+# tier-2, pace, merge-reverse, enrich-link and bulk-destructive gates.
+#
+# Reads run in a bounded pool (the decision pass is read-only and safe to run wide).
+# WRITES are strictly serial: the destructive-op counters and the pace gate are shared
+# state, and a concurrent write batch would race them. That is the plan's "parallelise
+# the read, keep the write ordered" enforced here rather than trusted to callers.
+#
+# Input:  one JSON object per line on stdin:
+#           {"id": <opaque>, "method": "GET", "path": "/admin/...", "body": <optional>}
+# Output: one JSON object per line on stdout, in input order:
+#           {"id": <opaque>, "http_status": <int|null>, "body": <parsed|null>,
+#            "rc": <int>, "error": <string|null>}
+# A per-item failure is reported on that item's line; it never aborts the batch, because
+# one bad row must not cost the other 92,860.
+cmd_call_batch() {
+    check_env
+    local pool=8
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --pool) pool="${2:?--pool needs a number}"; shift 2 ;;
+            *) die "call-batch: unknown argument: $1" ;;
+        esac
+    done
+    [[ "$pool" =~ ^[0-9]+$ ]] && (( pool >= 1 )) || die "call-batch: --pool must be a positive integer"
+
+    local workdir
+    workdir=$(mktemp -d "${TMPDIR:-/tmp}/admin-call-batch.XXXXXX") || die "call-batch: cannot create a work dir"
+
+    # ONE token resolve for the whole batch. get_token memoises TOKEN_MEMO, so every
+    # cmd_call below reuses this value instead of re-reading the cache or logging in.
+    TOKEN_MEMO=$(get_token) || { rm -rf "$workdir"; die "call-batch: token resolve failed"; }
+    export TOKEN_MEMO
+
+    # Split the input into one file per item and classify read vs write. python3 is
+    # already a hard dependency of this script (the login response is parsed with it).
+    # The batch is spooled to a file FIRST: a `python3 - <<'PY'` heredoc consumes stdin
+    # for the script itself, so it cannot also read the batch from stdin.
+    cat > "$workdir/input.jsonl"
+    local plan
+    plan=$(python3 - "$workdir" <<'PY'
+import json, os, sys
+workdir = sys.argv[1]
+n = 0
+for line in open(os.path.join(workdir, "input.jsonl"), encoding="utf-8"):
+    if not line.strip():
+        continue
+    n += 1
+    try:
+        item = json.loads(line)
+    except ValueError as exc:
+        print(f"call-batch: bad JSON on line {n}: {exc}", file=sys.stderr)
+        sys.exit(2)
+    idx = f"{n:06d}"
+    with open(os.path.join(workdir, idx + ".json"), "w", encoding="utf-8") as fh:
+        json.dump(item, fh)
+    method = str(item.get("method") or "GET").upper()
+    kind = "read" if method in ("GET", "HEAD") else "write"
+    print(f"{idx}\t{kind}\t{method}\t{item.get('path') or ''}")
+PY
+    ) || { rm -rf "$workdir"; die "call-batch: could not parse the batch input"; }
+
+    local -a read_idx=() write_idx=()
+    local idx kind method path
+    while IFS=$'\t' read -r idx kind method path; do
+        [[ -z "$idx" ]] && continue
+        if [[ "$kind" == "read" ]]; then read_idx+=("$idx"); else write_idx+=("$idx"); fi
+    done <<< "$plan"
+
+    _call_batch_one() {   # $1 = index
+        local i="$1" m p b rc=0 out
+        m=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("method") or "GET")' "$workdir/$i.json")
+        p=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("path") or "")' "$workdir/$i.json")
+        b=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); b=d.get("body"); print(b if isinstance(b,str) else (json.dumps(b) if b is not None else ""))' "$workdir/$i.json")
+        out=$(cmd_call "$m" "$p" "$b" 2>"$workdir/$i.err") || rc=$?
+        printf '%s' "$out" > "$workdir/$i.out"
+        printf '%s' "$rc" > "$workdir/$i.rc"
+    }
+
+    local running=0
+    if (( ${#read_idx[@]} )); then
+        for idx in "${read_idx[@]}"; do
+            _call_batch_one "$idx" &
+            running=$((running + 1))
+            if (( running >= pool )); then
+                wait -n 2>/dev/null || true
+                running=$((running - 1))
+            fi
+        done
+        wait 2>/dev/null || true
+    fi
+    if (( ${#write_idx[@]} )); then
+        for idx in "${write_idx[@]}"; do
+            _call_batch_one "$idx"
+        done
+    fi
+
+    python3 - "$workdir" <<'PY'
+import json, os, sys
+workdir = sys.argv[1]
+for name in sorted(os.listdir(workdir)):
+    if not name.endswith(".out"):
+        continue
+    idx = name[:-4]
+    raw = open(os.path.join(workdir, name), encoding="utf-8").read().strip()
+    rc_path = os.path.join(workdir, idx + ".rc")
+    rc = int(open(rc_path, encoding="utf-8").read().strip() or 0) if os.path.exists(rc_path) else 0
+    item = json.load(open(os.path.join(workdir, idx + ".json"), encoding="utf-8"))
+    status, body = None, None
+    if raw:
+        try:
+            env = json.loads(raw.splitlines()[-1])
+            status = env.get("http_status")
+            body = env.get("body")
+        except (ValueError, IndexError):
+            body = raw[:2000]
+    err = ""
+    err_path = os.path.join(workdir, idx + ".err")
+    if os.path.exists(err_path):
+        err = open(err_path, encoding="utf-8").read().strip()[:500]
+    print(json.dumps({"id": item.get("id"), "http_status": status, "body": body,
+                      "rc": rc, "error": err or None}, sort_keys=True))
+PY
+    local rc=$?
+    rm -rf "$workdir"
+    return "$rc"
+}
+
 # --- Main ---
 
 # Source-safe guard: if this file is `source`d (e.g. by bats tests), skip the
@@ -2140,6 +2595,7 @@ shift || true
 case "$command" in
     login)          cmd_login "$@" ;;
     call)           cmd_call "$@" ;;
+    call-batch)     cmd_call_batch "$@" ;;
     upload)         cmd_upload "$@" ;;
     resolve-email)  resolve_slack_to_email "${1:?Usage: resolve-email <slack_id>}" ;;
     help)           head -14 "$0" | tail -13 | sed 's/^# //' | sed 's/^#//' ;;

@@ -26,6 +26,7 @@
       ],
       "approved": true,
       "approved_by": "Nick (nsollazzo)",
+      "wrapper_predicate": "is_uvn_popularity_cron_approval",
       "approval_ref": "2026-08-13 authorization of the autonomous admin-write gate; apply mode + hourly from 2026-09-09 (recorded in the cron description in cron-jobs.json). This is Nick's approval as recorded, not a captain decision; firstmate to confirm or flip to false.",
       "status_note": "From 2026-10-11 it also refuses rows with any review_* hold rule (IDP #1686) in verificationData."
     },
@@ -39,6 +40,7 @@
       ],
       "approved": false,
       "approved_by": "captain (Aaron)",
+      "wrapper_predicate": "is_credit_trust_decide_approval",
       "approval_ref": "2026-10-15 ~22:12Z (verbatim, relayed by firstmate inbox 002/003): 'i want AI live now - we have too many credits to approve and to get supporting data for - let users know where there was a credit given and that it needs support (trust yet verify approach)'",
       "status_note": "JUDGE-ONLY (Fable [key=switch-on-plan] item 3, firstmate 159, 2026-10-30 21:50Z): the WRITER is not approved (approved=false: muso-admin-api.sh refuses every apply write, and the writer kill file /etc/hydra/credit-trust-decide.disabled stays). The decider may run --mode judge only: decider rows in the ledger, no core write, no ask, no notify. Previously approved by captain (Aaron) (2026-10-15 ~22:12Z (verbatim, relayed by firstmate inbox 002...); re-approving apply is a captain decision in a reviewed PR. Wiring: data/credit-trust-system-fable-a1/live-tonight.md Piece 1 (Fable). Cron ships enabled=true from the repo (captain's 22:12Z approval above); there are no live toggles, because deploy.sh re-syncs cron-jobs.json on every deploy, so disabling it durably is a repo PR. Kill switches: /etc/hydra/credit-trust-decide.disabled (silences it), cron enabled=false, or approved=false here (the wrapper then refuses every approval). 2026-11-04 (Fable d2 [key=decider-support-arm]): the writer is SUPPORT-ONLY. `approved` stays false and the approve arm is off IN CODE (policies/credit-trust-decide.json `approve_arm: false` plus the write_ids tripwire); an approve verdict is recorded in the ledger and never written. Support writes are capped at 100 distinct users per run and max_ask_users_per_day per day, ledgered as the `decider-support` ask so the tick's own campaigns stand down, and every apply run owes a read-back before the next. This PR adds no cron: arming is an ops step (docs/credit-verification/decider-support-arm.md). Paging alert: scripts/credit-decider-support-watch.py.",
       "judge_only": {
@@ -66,6 +68,7 @@
       ],
       "approved": true,
       "approved_by": "Aaron Kaufman (U7RP6HKUZ)",
+      "wrapper_predicate": "is_credit_trust_score_approval",
       "approval_ref": "captain verbatim 2026-10-20 ~11:30Z \"approve low risk credits\" (data/captain.md) + Fable ruling data/credit-trust-system-fable-a1/ruling-score-approve-band-b-2026-10-20.md (band-B phase 1, 11 conditions) + Fable ruling data/credit-trust-system-fable-a1/ruling-band-hint-stamps-2026-10-20.md (non-sticky band-hint stamp, engaged-user exclusion)",
       "status_note": "Relayed by firstmate inbox 110 (2026-10-20 11:31Z). Scope per firstmate: total risk < 30 only, every other guard intact, the 709 risk-0 rows first (Fable credit-pending-census ruling 1). Kill switches: /etc/hydra/credit-trust-score-approve.disabled (also honours /etc/hydra/credit-trust-decide.disabled), policies/credit-trust-decide.json score_approve.enabled=false, cron enabled=false, or approved=false here. Fable condition 10: an audit sample below 95 % precision pauses it at once (credit-review.py score-approve --pause <audit id>) and this entry flips to approved=false by PR until Fable reviews."
     },
@@ -77,6 +80,7 @@
       "cron_names": [],
       "approved": true,
       "approved_by": "captain (Aaron Kaufman, U7RP6HKUZ)",
+      "wrapper_predicate": "is_fable_decider_approval",
       "approval_ref": "captain-1028-213x: captain verbatim 2026-10-28 21:3xZ \"move credits and profiles along ... if you get one fraud document deny ...\" + 21:4xZ \"yes approve all if Fable confirms\" (data/captain.md:586); Fable exec plan data/verify-program-lead-fable-l1/exec-plan-captain-1028-213x.md section (a); Fable confirms data/verify-program-lead-fable-l1/confirms-captain-1028-214x.md; APPROVE scope: captain 2026-10-29 12:1xZ \"ddl go\" (anchor records: DDL GO ANCHOR RECORDS, firstmate 110) + Fable [key=l12-approvals-core] = option A and r3 [key=ddl-anchor-records-guards] (approvals <= 50/day, gate allow, not watchlisted, pop 1-59)",
       "cap_per_day": 100,
       "approve_cap_per_day": 50
@@ -232,6 +236,19 @@
       "approved_by": null,
       "approval_ref": null,
       "status_note": "SHIPS UNAPPROVED, on purpose. Three separate gates must open before a credit is hidden or a claim is filed: (1) THIS entry must be flipped to approved:true with the captain's approved_by + approval_ref, because a hide is customer-visible on a named person's profile and the first batch is signed off from the dry run (one line per ticket: intent, track, roles, identity match and the disposition); (2) /etc/hydra/credit-removal-executor.live must exist, because the core routes it calls are new (C1's hide primitive, C2's gate request) and a human has to record that core really admits this automation; and (3) the routes must actually answer: while C1/C2 are unmerged every row is `authority_unavailable` (the run reports it and writes nothing) rather than falling back to the legacy removal path. Kill switches: /etc/hydra/clickup-drain-credit-removal.disabled (the drainer), /etc/hydra/credit-removal-executor.disabled (the executor), the cron's enabled:false, and this flag. Caps: 20 rows/run, 3 rows/ticket. The two intents are the ONLY actions; the cron ships dry-run."
+    },
+    "verification-scale-drain": {
+      "description": "The verification scale drain (scripts/credit_review/scale_drain.py): a deterministic SQL ladder over the 92,861-request verification backlog, no model in the hot path. Approves ONLY on a row-specific evidence anchor - a per-claimant precedent match (the same claimant's earlier approved request for the same track and role set) or a proof verdict (the proof id, newest verdict wins including a soft one) - closes a decided duplicate, and queues a refusal or an asked-and-expired request for a named tier-2 approver. A row with no anchor falls through to ask. Writes through the reviewed wrapper (PUT /admin/credit-requests) under its own requester identity scale-drain@hydra-ops, admitted by is_scale_drain_approval in muso-admin-api.sh, which re-checks this registry entry, the kill file /etc/hydra/scale-drain.disabled, the body shape (<=50 unique UUIDs) and the drain-signal digest naming an auto-approvable rule. Never sets CV_APPROVE_GATE_DISABLED. Never lowers a served number, never deletes, never removes a credit.",
+      "entrypoints": [
+        "scale_drain.py",
+        "credit_review/scale_drain.py"
+      ],
+      "cron_names": [],
+      "approved": true,
+      "approved_by": "captain (Aaron Kaufman, U7RP6HKUZ)",
+      "wrapper_predicate": "is_scale_drain_approval",
+      "approval_ref": "captain-1111-night-order: captain verbatim 2026-11-11 \"im going to bed can you assure we reach our goal and you setup creds properly (monitor whoever is doing it) create a loop to check and drive it from here figure it out\" + work order item 3 \"the full pass: 16 shards, 32-wide read, 6-wide apply, idempotency key per request\"; design of record data/verification-scale-plan.md; operator doc docs/credit-verification/scale-drain.md",
+      "status_note": "Approve scope is precedent and proof-verdict rows ONLY, each citing a row-specific anchor the wrapper gate parses. The drain is not scheduled: it is run by an operator/firstmate loop, so cron_names is empty on purpose."
     }
   }
 }

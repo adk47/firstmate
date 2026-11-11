@@ -13,7 +13,12 @@ only decides WHO is listed and WHICH document each ask names.
   send:  one ask per user per run (the oldest document first), paid first, --max-users bounded, dry-run by default;
          a real run halts before any gate call while the gate's lock is 0.
 
-CLI:  need_asks.py build --out FILE
+  --from-drain PLAN (the scale drain, data/verification-scale-plan.md): the drain's deterministic ladder decides WHO
+         is asked (rule `ask`); this module still decides WHICH document each ask names and still owns the send. That
+         is the reconciliation with verify-ask-wiring-h2 (PR #1845): there is ONE reviewed ask/notify path, and it is
+         this one. A drain ask with no sendable document is listed as `wait:no_sendable_document`, never dropped.
+
+CLI:  need_asks.py build --out FILE [--from-drain PLAN]
       need_asks.py send --list FILE --segment paid|free [--mode dry-run|apply] [--max-users N] [--preview DIR]
 """
 from __future__ import annotations
@@ -128,9 +133,40 @@ def stale_filing(received: Any, now: datetime) -> bool:
     return (today - d).days > STALE_FILING_DAYS
 
 
+def drain_asks(plan_path: str) -> set[tuple[int, str]]:
+    """The (user, request) pairs the scale drain's ladder decided to ASK.
+
+    The drain (scripts/credit_review/scale_drain.py) is the deterministic decider: duplicate -> close, precedent ->
+    approve or tier-2 queue, proof verdict -> approve or tier-2 queue, expired -> tier-2 queue, otherwise ask. The
+    audience is every row whose OUTCOME is `ask` - including a rule that wanted to approve but had no evidence anchor
+    and was downgraded to ask - so this module never re-decides it. A row with no user id cannot be asked by the
+    reviewed path and is refused loudly rather than silently dropped.
+    """
+    out: set[tuple[int, str]] = set()
+    try:
+        with open(plan_path, encoding="utf-8") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                if row.get("outcome") != "ask":
+                    continue
+                uid = row.get("user_id")
+                if uid is None or str(uid).strip() == "":
+                    raise NeedError(f"drain ask {row.get('request_id')!r} carries no user_id")
+                out.add((int(uid), str(row.get("request_id") or "").lower()))
+    except (OSError, ValueError) as exc:
+        raise NeedError(f"drain plan unreadable: {exc}") from exc
+    return out
+
+
 def build(*, dv_store: str = DV_STORE, proof_store: str = PROOF_STORE, paying_path: str = PAYING,
-          query: uvn_status.Query | None = None, now: datetime | None = None, tray: str | None = None) -> dict[str, Any]:
+          query: uvn_status.Query | None = None, now: datetime | None = None, tray: str | None = None,
+          from_drain: str | None = None) -> dict[str, Any]:
     counts: Counter[str] = Counter()
+    asked: set[tuple[int, str]] | None = drain_asks(from_drain) if from_drain else None
+    if asked is not None:
+        counts["drain_asks"] = len(asked)
     tray_paid: set[int] | None = None
     if tray:
         outcomes, _ids, tray_paid, n_carried = tray_outcomes(tray)
@@ -157,6 +193,10 @@ def build(*, dv_store: str = DV_STORE, proof_store: str = PROOF_STORE, paying_pa
         raise NeedError(f"input unreadable: {exc}") from exc
     cands: dict[int, list[dict[str, Any]]] = {}
     for (uid, rid, _doc), (outcome, need, sha) in outcomes.items():
+        if asked is not None and (int(uid), str(rid).lower()) not in asked:
+            # the drain did not ask this one (it was a duplicate, a precedent, a verdict or an expiry)
+            counts["skip_not_in_drain"] += 1
+            continue
         if outcome != "unverifiable" or not need:
             continue
         if need in NOT_YET:
@@ -208,6 +248,17 @@ def build(*, dv_store: str = DV_STORE, proof_store: str = PROOF_STORE, paying_pa
         users.append({"user_id": str(uid), "paid": is_paid, "asks": rows, "arrivals": sorted(arrivals.get(uid, []))})
         counts[f"list_{'paid' if is_paid else 'free'}"] += 1
         counts["list_requests"] += len(rows)
+    if asked is not None:
+        covered = {(int(u["user_id"]), str(a["request_id"]).lower()) for u in users for a in u["asks"]}
+        # A request that already has a wait row (e.g. wait:stale_filing) must not get a
+        # second one: two rows for one request read as two outstanding asks, and the
+        # operator cannot tell which is the live one.
+        already_waiting = {(int(w["user_id"]), str(w["request_id"]).lower()) for w in waits}
+        for uid, rid in sorted(asked - covered - already_waiting):
+            waits.append({"user_id": str(uid), "paid": uid in (tray_paid if tray_paid is not None else paying),
+                          "request_id": rid, "reason": "wait:no_sendable_document",
+                          "due_at": (t_now + timedelta(days=1)).isoformat(timespec="seconds")})
+            counts["wait_no_sendable_document"] += 1
     users.sort(key=lambda u: (not u["paid"], u["asks"][0]["doc_received_at"]))
     facts = replica_facts(query or uvn_status.trino) if users else {}
     for u in users:
@@ -680,6 +731,9 @@ def _main(argv: list[str] | None = None) -> int:
     b = sub.add_parser("build")
     b.add_argument("--out", required=True)
     b.add_argument("--tray", default=None, help="b1's L11c tray JSON (the source of truth, Fable [key=l11c-plural])")
+    b.add_argument("--from-drain", default=None, metavar="PLAN",
+                   help="the scale drain's plan JSONL: its `ask` rows are the audience (the drain decides WHO, this "
+                        "module decides WHICH document and owns the send)")
     v = sub.add_parser("verify-facts")
     v.add_argument("--list", required=True)
     s = sub.add_parser("send")
@@ -775,7 +829,7 @@ def _main(argv: list[str] | None = None) -> int:
             print(json.dumps({"changed": diffs}))
             return 1 if diffs else 0
         if a.op == "build":
-            res = build(tray=a.tray)
+            res = build(tray=a.tray, from_drain=a.from_drain)
             fd = os.open(a.out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(res, fh, indent=1)

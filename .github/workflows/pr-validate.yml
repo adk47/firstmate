@@ -2484,6 +2484,12 @@ jobs:
           python3 scripts/tests/test_verify_ledger_proof_need.py
           # the L11c audience + sender path (credit_review/need_asks.py; the gate owns copy, lock and guards).
           python3 scripts/tests/test_need_asks.py
+          # the verification scale drain (data/verification-scale-plan.md): the deterministic ladder, the
+          # idempotency key, sharding, byte-identical re-runs and the kill -9 chaos proof. Stdlib only.
+          python3 scripts/tests/test_scale_drain.py
+          # the anchor verifier behind both scale-drain gates: the checks themselves, the pinned admin
+          # source (a caller CREDIT_REVIEW_ADMIN_SCRIPT is denied), and the file run as the wrapper runs it.
+          python3 scripts/tests/test_verify_anchor.py
           for f in scripts/paid-status/*.py; do python3 -m py_compile "$f"; done
           # The stage-2 release from the proof-on-file hold (credit_review/stage2_verdicts.py):
           # uvn-status for no_document, gap-ask for need_more, the gap-ask ledger rules. Stdlib only.

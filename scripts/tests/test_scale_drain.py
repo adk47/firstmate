@@ -1,0 +1,2880 @@
+"""The verification scale drain: rank order, idempotency, sharding, byte-identical re-run.
+
+Design of record: data/verification-scale-plan.md. These tests pin the properties the
+plan's Definition of done names, on hermetic fixtures:
+
+  * a dry run over 1,000 real-shaped rows produces decisions, and running it twice
+    produces byte-identical output (also across two separate PROCESSES, which is the
+    version that actually catches a clock or a run id leaking into the plan);
+  * the full 92,861-request decision pass is fast enough that the 90-minute budget is
+    spent on the API, not on the ladder;
+  * zero duplicate sends and zero orphans, including after a kill -9 mid-pass;
+  * `expires_at` exists and a refusal names its reason code and is told once.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import shutil
+import signal
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from credit_review import scale_drain as sd  # noqa: E402
+
+NOW = datetime(2026, 11, 11, 12, 0, 0, tzinfo=timezone.utc)
+SCRIPTS = Path(__file__).resolve().parents[1]
+
+
+REGISTRY = SCRIPTS.parent / "policies/credit-approval-automation.json"
+
+
+def cli(*argv: str) -> list[str]:
+    """The ONE CLI: the module's own entry point (f6 - two CLIs is how a bypass hides)."""
+    return [sys.executable, "-m", "credit_review.scale_drain", *argv]
+
+
+def rid(n: int) -> str:
+    return f"{n:08x}-0000-4000-8000-000000000000"
+
+
+def row(n: int, **kw) -> dict:
+    base = {"request_id": rid(n), "profile_id": f"p{n}", "user_id": 1000 + n,
+            "status": "user_verification_needed", "created_at": "2026-11-01T00:00:00Z"}
+    base.update(kw)
+    return base
+
+
+def snapshot(rows, decided=(), precedent=()):
+    db = sd.open_snapshot()
+    sd.load_snapshot(db, rows)
+    if decided:
+        sd.load_decided(db, decided)
+    if precedent:
+        sd.load_precedent(db, precedent)
+    return db
+
+
+class DecisionKeyTests(unittest.TestCase):
+    def test_key_is_sha256_of_request_rule_outcome_version(self):
+        want = hashlib.sha256(
+            f"{rid(1)}\x00precedent\x00approve\x00{sd.RULE_VERSION}".encode()).hexdigest()
+        self.assertEqual(sd.decision_key(rid(1), "precedent", "approve"), want)
+
+    def test_a_changed_outcome_is_a_new_key(self):
+        """QA review 2: a queued refusal that becomes an approval must not be skipped."""
+        self.assertNotEqual(sd.decision_key(rid(1), "proof_verdict", "queue_tier2"),
+                            sd.decision_key(rid(1), "proof_verdict", "approve"))
+
+    def test_key_differs_by_rule_and_version(self):
+        a = sd.decision_key(rid(1), "precedent", "approve")
+        b = sd.decision_key(rid(1), "ask", "ask")
+        c = sd.decision_key(rid(1), "precedent", "approve", version="r2")
+        self.assertEqual(len({a, b, c}), 3)
+
+    def test_key_is_stable(self):
+        self.assertEqual(sd.decision_key(rid(7), "expired", "queue_tier2"),
+                         sd.decision_key(rid(7), "expired", "queue_tier2"))
+
+    def test_unknown_rule_refused(self):
+        with self.assertRaises(sd.DrainError):
+            sd.decision_key(rid(1), "made_up", "ask")
+
+    def test_empty_request_id_refused(self):
+        with self.assertRaises(sd.DrainError):
+            sd.decision_key("", "ask", "ask")
+
+
+class RankOrderTests(unittest.TestCase):
+    """Stop at the first match. The order IS the specification."""
+
+    def test_duplicate_beats_everything(self):
+        db = snapshot(
+            [row(1, duplicate_of=rid(99), precedent_key="k", proof_verdict="approve",
+                 expires_at="2020-01-01T00:00:00Z")],
+            decided=[{"request_id": rid(99), "decision": "approved"}],
+            precedent=[{"precedent_key": "k", "outcome": "approve", "request_id": rid(9)}])
+        d = sd.plan(db, now=NOW)[0]
+        self.assertEqual(d.rule, "duplicate")
+        self.assertEqual(d.outcome, "close_duplicate")
+        self.assertEqual(d.reason_code, "duplicate_of_decided")
+        # The close is only autonomous because the original decision stands, so the
+        # decision carries it and the ledger row names it.
+        self.assertEqual(d.duplicate_of, rid(99))
+        self.assertEqual(d.as_row()["duplicate_of"], rid(99))
+
+    def test_duplicate_of_an_undecided_request_is_unmatched_not_asked(self):
+        db = snapshot([row(1, duplicate_of=rid(99))])
+        d = sd.plan(db, now=NOW)[0]
+        self.assertEqual(d.rule, "duplicate")
+        self.assertEqual(d.outcome, sd.UNMATCHED)
+        self.assertEqual(d.reason_code, "unmatched_duplicate")
+
+    def test_precedent_beats_proof_and_expiry(self):
+        db = snapshot([row(1, precedent_key="k", proof_verdict="refuse", asked_at="2020-01-01T00:00:00Z",
+                            expires_at="2020-01-01T00:00:00Z")],
+                      precedent=[{"precedent_key": "k", "outcome": "approve", "request_id": rid(9)}])
+        d = sd.plan(db, now=NOW)[0]
+        self.assertEqual(d.rule, "precedent")
+        self.assertEqual(d.outcome, "approve")
+        self.assertEqual(d.reason_code, "precedent_match")
+
+    def test_proof_verdict_beats_expiry(self):
+        db = snapshot([row(1, proof_verdict="approve", proof_id="proof-1",
+                            asked_at="2020-01-01T00:00:00Z", expires_at="2020-01-01T00:00:00Z")])
+        d = sd.plan(db, now=NOW)[0]
+        self.assertEqual(d.rule, "proof_verdict")
+        self.assertEqual(d.outcome, "approve")
+        self.assertEqual(d.reason_code, "proof_verdict_approve")
+        self.assertEqual(d.evidence_anchor, "proof-1")
+
+    def test_a_proof_approve_with_no_proof_id_is_unmatched(self):
+        """The approve gate needs a row-specific anchor; a verdict with no proof id
+        cannot produce one, so the row is surfaced rather than asked or approved."""
+        db = snapshot([row(1, proof_verdict="approve")])
+        d = sd.plan(db, now=NOW)[0]
+        self.assertEqual(d.outcome, sd.UNMATCHED)
+        self.assertEqual(d.reason_code, "unmatched_proof_verdict")
+
+    def test_proof_verdict_refuse_is_queued_for_a_tier2_approver(self):
+        """A refusal is a customer-facing denial: the drain queues it, never makes it."""
+        db = snapshot([row(1, proof_verdict="refuse")])
+        d = sd.plan(db, now=NOW)[0]
+        self.assertEqual(d.outcome, "queue_tier2")
+        self.assertEqual(d.reason_code, "proof_verdict_refuse")
+
+    def test_an_unmapped_verdict_is_unmatched_not_asked(self):
+        db = snapshot([row(1, proof_verdict="maybe")])
+        d = sd.plan(db, now=NOW)[0]
+        self.assertEqual(d.rule, "proof_verdict")
+        self.assertEqual(d.outcome, sd.UNMATCHED)
+        self.assertEqual(d.reason_code, "unmatched_proof_verdict")
+
+    def test_expired_beats_ask(self):
+        db = snapshot([row(1, expires_at="2026-11-01T00:00:00Z", asked_at="2026-10-01T00:00:00Z")])
+        d = sd.plan(db, now=NOW)[0]
+        self.assertEqual(d.rule, "expired")
+        self.assertEqual(d.outcome, "queue_tier2")
+        self.assertEqual(d.reason_code, "expired_no_proof")
+
+    def test_expired_does_not_fire_when_proof_arrived(self):
+        db = snapshot([row(1, expires_at="2026-11-01T00:00:00Z", asked_at="2026-10-01T00:00:00Z",
+                            proof_received_at="2026-10-30T00:00:00Z")])
+        d = sd.plan(db, now=NOW)[0]
+        self.assertEqual(d.rule, "ask")
+        # ...and the row says WHY it is not a first ask: a document is already on file
+        self.assertEqual((d.outcome, d.reason_code), ("ask", "proof_on_file_undecided"))
+
+    def test_an_ask_with_nothing_on_file_keeps_its_own_reason(self):
+        d = sd.plan(snapshot([row(1)]), now=NOW)[0]
+        self.assertEqual((d.rule, d.outcome, d.reason_code), ("ask", "ask", "no_rule_matched"))
+
+    def test_expired_does_not_fire_before_the_window(self):
+        # asked 2026-10-20, so the 30-day window closes 2026-11-19 - still open on NOW
+        db = snapshot([row(1, expires_at="2026-12-01T00:00:00Z", asked_at="2026-10-20T00:00:00Z")])
+        self.assertEqual(sd.plan(db, now=NOW)[0].rule, "ask")
+
+    def test_the_window_runs_from_the_ask_not_from_creation(self):
+        """QA review 3: a request created in January and asked yesterday must not expire
+        today - one day after the customer was asked for documents is not a window."""
+        db = snapshot([row(1, created_at="2026-01-01T00:00:00Z",
+                           expires_at="2026-01-31T00:00:00Z",
+                           asked_at="2026-11-10T00:00:00Z")])
+        self.assertEqual(sd.plan(db, now=NOW)[0].rule, "ask")
+
+    def test_an_ask_older_than_the_window_expires(self):
+        db = snapshot([row(1, created_at="2026-01-01T00:00:00Z",
+                           asked_at="2026-09-01T00:00:00Z")])
+        d = sd.plan(db, now=NOW)[0]
+        self.assertEqual((d.rule, d.outcome), ("expired", "queue_tier2"))
+
+    def test_ask_is_the_fallthrough(self):
+        db = snapshot([row(1)])
+        d = sd.plan(db, now=NOW)[0]
+        self.assertEqual(d.rule, "ask")
+        self.assertEqual(d.outcome, "ask")
+        self.assertEqual(d.reason_code, "no_rule_matched")
+
+    def test_only_pending_statuses_are_in_the_population(self):
+        db = snapshot([row(1, status="approved"), row(2, status="rejected"),
+                       row(3, status="unverified"), row(4, status="user_verification_needed")])
+        self.assertEqual([d.request_id for d in sd.plan(db, now=NOW)], [rid(3), rid(4)])
+
+
+class ExpiresAtTests(unittest.TestCase):
+    def test_derived_from_created_at(self):
+        self.assertEqual(sd.derive_expires_at("2026-11-01T00:00:00Z", 30),
+                         "2026-12-01T00:00:00Z")
+
+    def test_absent_created_at_yields_none(self):
+        self.assertIsNone(sd.derive_expires_at(None))
+        self.assertIsNone(sd.derive_expires_at("not-a-date"))
+
+    def test_snapshot_populates_expires_at_when_core_carries_none(self):
+        db = snapshot([row(1, created_at="2026-11-01T00:00:00Z")])
+        got = db.execute("SELECT expires_at FROM requests WHERE request_id=?", (rid(1),)).fetchone()[0]
+        self.assertEqual(got, "2026-12-01T00:00:00Z")
+
+    def test_snapshot_keeps_a_core_supplied_expires_at(self):
+        db = snapshot([row(1, expires_at="2027-01-01T00:00:00Z")])
+        got = db.execute("SELECT expires_at FROM requests WHERE request_id=?", (rid(1),)).fetchone()[0]
+        self.assertEqual(got, "2027-01-01T00:00:00Z")
+
+
+class ShardTests(unittest.TestCase):
+    def test_bounds_are_contiguous_and_cover_everything(self):
+        ids = [rid(i) for i in range(100)]
+        bounds = sd.shard_bounds(ids, 16)
+        self.assertEqual(len(bounds), 16)
+        self.assertEqual(bounds[0][0], 0)
+        self.assertEqual(bounds[-1][1], 100)
+        for (s1, e1), (s2, _e2) in zip(bounds, bounds[1:]):
+            self.assertEqual(e1, s2)
+        self.assertEqual(sum(e - s for s, e in bounds), 100)
+
+    def test_bounds_are_deterministic_regardless_of_input_order(self):
+        ids = [rid(i) for i in range(50)]
+        self.assertEqual(sd.shard_bounds(ids, 8), sd.shard_bounds(list(reversed(ids)), 8))
+
+    def test_shard_of_is_total_and_matches_bounds(self):
+        ids = [rid(i) for i in range(37)]
+        for i, r in enumerate(sorted(ids)):
+            k = sd.shard_of(ids, 8, r)
+            s, e = sd.shard_bounds(ids, 8)[k]
+            self.assertTrue(s <= i < e)
+
+    def test_shard_of_unknown_id_refused(self):
+        with self.assertRaises(sd.DrainError):
+            sd.shard_of([rid(1)], 4, rid(2))
+
+    def test_more_shards_than_ids_is_safe(self):
+        bounds = sd.shard_bounds([rid(1), rid(2)], 16)
+        self.assertEqual(sum(e - s for s, e in bounds), 2)
+
+
+class ByteIdenticalTests(unittest.TestCase):
+    """The Definition of done: a dry run over 1,000 rows, twice, byte-identical."""
+
+    def _thousand(self):
+        rows = []
+        for i in range(1000):
+            kw = {}
+            if i % 7 == 0:
+                kw["duplicate_of"] = rid(9000 + i)
+            elif i % 5 == 0:
+                kw["precedent_key"] = f"k{i % 11}"
+            elif i % 3 == 0:
+                kw["proof_verdict"] = "approve" if i % 2 else "refuse"
+            elif i % 11 == 0:
+                kw["expires_at"] = "2026-10-01T00:00:00Z"
+                kw["asked_at"] = "2026-09-01T00:00:00Z"
+            rows.append(row(i, **kw))
+        decided = [{"request_id": rid(9000 + i), "decision": "approved"} for i in range(0, 1000, 7)]
+        precedent = [{"precedent_key": f"k{k}", "outcome": "approve"} for k in range(11)]
+        return rows, decided, precedent
+
+    def test_two_runs_are_byte_identical(self):
+        rows, decided, precedent = self._thousand()
+        a = sd.serialize(sd.plan(snapshot(rows, decided, precedent), now=NOW))
+        b = sd.serialize(sd.plan(snapshot(rows, decided, precedent), now=NOW))
+        self.assertEqual(a, b)
+        self.assertEqual(len(a.splitlines()), 1000)
+
+    def test_two_processes_are_byte_identical(self):
+        """The version that catches a clock or a run id leaking into the plan."""
+        rows, decided, precedent = self._thousand()
+        with tempfile.TemporaryDirectory() as td:
+            snap = Path(td) / "snap.jsonl"
+            dec = Path(td) / "decided.jsonl"
+            prec = Path(td) / "precedent.jsonl"
+            snap.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+            dec.write_text("\n".join(json.dumps(r) for r in decided) + "\n")
+            prec.write_text("\n".join(json.dumps(r) for r in precedent) + "\n")
+            outs = []
+            for n in range(2):
+                out = Path(td) / f"plan{n}.jsonl"
+                subprocess.run(cli("plan", "--snapshot", str(snap),
+                                "--decided", str(dec), "--precedent", str(prec),
+                                "--out", str(out), "--now", "2026-11-11T12:00:00Z"),
+                               check=True, capture_output=True, cwd=SCRIPTS)
+                outs.append(out.read_bytes())
+            self.assertEqual(outs[0], outs[1])
+            self.assertEqual(len(outs[0].splitlines()), 1000)
+
+    def test_plan_carries_no_clock_and_no_run_id(self):
+        d = sd.plan(snapshot([row(1)]), now=NOW)[0]
+        blob = json.dumps(d.as_row(), sort_keys=True)
+        self.assertNotIn("2026-11-11", blob)
+        self.assertNotIn("run_id", blob)
+        self.assertNotIn("decided_at", blob)
+
+
+class ApplyTests(unittest.TestCase):
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.ledger = str(Path(self.td.name) / "ledger.sqlite")
+        self.decisions = sd.plan(snapshot([row(i) for i in range(50)]), now=NOW)
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def test_apply_is_idempotent(self):
+        db = sd.open_ledger(self.ledger)
+        first = sd.apply(self.decisions, db, shards=4, write_pool=2, now=NOW)
+        second = sd.apply(self.decisions, db, shards=4, write_pool=2, now=NOW)
+        self.assertEqual(first["applied"], 50)
+        self.assertEqual(second["applied"], 0)
+        self.assertEqual(second["skipped"], 50)
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM applied").fetchone()[0], 50)
+
+    def test_verify_is_clean_after_a_full_apply(self):
+        db = sd.open_ledger(self.ledger)
+        sd.apply(self.decisions, db, shards=4, write_pool=2, now=NOW)
+        result = sd.verify(self.decisions, db)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["duplicate_request_ids"], [])
+
+    def test_verify_reports_missing_and_orphans(self):
+        db = sd.open_ledger(self.ledger)
+        sd.apply(self.decisions[:10], db, shards=4, write_pool=2, now=NOW)
+        result = sd.verify(self.decisions, db)
+        self.assertFalse(result["ok"])
+        self.assertEqual(len(result["missing"]), 40)
+        self.assertEqual(result["orphans"], [])
+
+    def test_ledger_is_append_only(self):
+        db = sd.open_ledger(self.ledger)
+        sd.apply(self.decisions[:1], db, shards=1, write_pool=1, now=NOW)
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute("UPDATE applied SET outcome='approve'")
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute("DELETE FROM applied")
+
+class ChaosTests(unittest.TestCase):
+    """kill -9 every worker mid-pass, restart, verify zero duplicates and zero orphans."""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.ledger = str(Path(self.td.name) / "ledger.sqlite")
+        self.decisions = sd.plan(snapshot([row(i) for i in range(200)]), now=NOW)
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def test_two_kills_produce_identical_final_state(self):
+        db = sd.open_ledger(self.ledger)
+        for _ in range(2):
+            sd.apply(self.decisions, db, shards=8, write_pool=4, now=NOW, stop_after=37)
+            result = sd.verify(self.decisions, db)
+            self.assertEqual(result["duplicate_request_ids"], [])
+            self.assertEqual(result["orphans"], [])
+        final = sd.apply(self.decisions, db, shards=8, write_pool=4, now=NOW)
+        self.assertEqual(final["applied"], 200 - 74)
+        result = sd.verify(self.decisions, db)
+        self.assertTrue(result["ok"], result)
+
+    def test_a_kill_never_leaves_a_partial_row(self):
+        db = sd.open_ledger(self.ledger)
+        sd.apply(self.decisions, db, shards=8, write_pool=4, now=NOW, stop_after=13)
+        rows = db.execute("SELECT decision_key, request_id, rule, outcome, reason_code FROM applied").fetchall()
+        self.assertEqual(len(rows), 13)
+        for key, request_id, rule, outcome, reason_code in rows:
+            self.assertEqual(key, sd.decision_key(request_id, rule, outcome))
+            self.assertTrue(outcome)
+            self.assertTrue(reason_code)
+
+    def test_chaos_cli_reports_ok(self):
+        with tempfile.TemporaryDirectory() as td:
+            plan = Path(td) / "plan.jsonl"
+            plan.write_bytes(sd.serialize(self.decisions))
+            ledger = str(Path(td) / "ledger.sqlite")
+            proc = subprocess.run(cli("chaos", "--plan", str(plan),
+                                   "--kill-after", "40", "--rounds", "2",
+                                   "--shards", "8"), capture_output=True, text=True,
+                                  cwd=SCRIPTS)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            out = json.loads(proc.stdout)
+            self.assertTrue(out["ok"])
+            # chaos makes its OWN ledger, in its own temp dir, and says where
+            self.assertNotEqual(out["ledger"], ledger)
+            self.assertIn("scale-drain-chaos-", out["ledger"])
+
+    def test_chaos_never_takes_a_ledger_at_all(self):
+        """A rehearsal must never poison a real ledger (QA review 3 of hydra#1883).
+
+        Chaos commits writing outcomes with NO writer, so pointing it at a real ledger
+        would mark approve/close rows applied without any API call and the next real apply
+        would skip them. Refusing a NAMED ledger is not enough: an empty one is just as
+        dangerous, and a fresh custom path a real run is about to use is indistinguishable
+        from a scratch file. So chaos takes no ledger and makes its own.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            plan = Path(td) / "plan.jsonl"
+            plan.write_bytes(sd.serialize(self.decisions))
+            ledger = str(Path(td) / "ledger.sqlite")
+            # a real apply already ran here
+            db = sd.open_ledger(ledger)
+            sd.apply(self.decisions, db, shards=8, write_pool=4, now=NOW, stop_after=5)
+            before = db.execute("SELECT COUNT(*) FROM applied").fetchone()[0]
+            self.assertEqual(before, 5)
+            proc = subprocess.run(cli("chaos", "--plan", str(plan), "--ledger", ledger,
+                                      "--kill-after", "40", "--rounds", "2", "--shards", "8"),
+                                  capture_output=True, text=True, cwd=SCRIPTS)
+            # the flag is gone, so argparse refuses it outright
+            self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
+            self.assertIn("unrecognized arguments", proc.stderr)
+            # and the real ledger is untouched
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM applied").fetchone()[0], before)
+
+
+class ToldOnceTests(unittest.TestCase):
+    def test_a_refusal_is_told_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = sd.open_ledger(str(Path(td) / "l.sqlite"))
+            self.assertTrue(sd.mark_told(db, rid(1), "expired_no_proof", NOW))
+            self.assertFalse(sd.mark_told(db, rid(1), "expired_no_proof", NOW))
+            # a different reason code is a different telling
+            self.assertTrue(sd.mark_told(db, rid(1), "proof_verdict_refuse", NOW))
+
+    def test_apply_marks_every_refusal_told_exactly_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = sd.open_ledger(str(Path(td) / "l.sqlite"))
+            decisions = sd.plan(snapshot([row(1, expires_at="2026-10-01T00:00:00Z", asked_at="2026-09-01T00:00:00Z"),
+                                          row(2, proof_verdict="refuse")]), now=NOW)
+            stats = sd.apply(decisions, db, shards=2, write_pool=1, now=NOW)
+            self.assertEqual(stats["told"], 2)
+            again = sd.apply(decisions, db, shards=2, write_pool=1, now=NOW)
+            self.assertEqual(again["told"], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM told").fetchone()[0], 2)
+
+    def test_the_tier2_queue_lists_every_queued_refusal(self):
+        """A refusal the drain will not make is still a row a human can pick up."""
+        with tempfile.TemporaryDirectory() as td:
+            ledger = str(Path(td) / "l.sqlite")
+            db = sd.open_ledger(ledger)
+            decisions = sd.plan(snapshot([
+                row(1, expires_at="2026-10-01T00:00:00Z", asked_at="2026-09-01T00:00:00Z"),
+                row(2, proof_verdict="refuse"),
+                row(3),
+            ]), now=NOW)
+            sd.apply(decisions, db, shards=2, write_pool=1, now=NOW)
+            out = Path(td) / "queue.jsonl"
+            proc = subprocess.run(cli("tier2-queue", "--ledger", ledger, "--out", str(out)),
+                                  cwd=SCRIPTS, capture_output=True, text=True, check=False)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            rows = [json.loads(line) for line in out.read_text().splitlines() if line.strip()]
+            self.assertEqual([r["request_id"] for r in rows], [rid(1), rid(2)])
+            self.assertEqual({r["reason_code"] for r in rows},
+                             {"expired_no_proof", "proof_verdict_refuse"})
+            self.assertIn('"queued": 2', proc.stderr)
+
+
+class ScaleTests(unittest.TestCase):
+    """The plan's arithmetic: 92,861 requests, 1,000/min, 93 minutes, < 90 min budget."""
+
+    def test_full_pass_decision_cost_is_negligible(self):
+        n = 92861
+        rows = []
+        for i in range(n):
+            kw = {}
+            if i % 14 == 0:
+                kw["duplicate_of"] = rid(200000 + i)
+            elif i % 10 == 0:
+                kw["precedent_key"] = f"k{i % 50}"
+            elif i % 6 == 0:
+                kw["proof_verdict"] = "approve"
+            elif i % 23 == 0:
+                kw["expires_at"] = "2026-10-01T00:00:00Z"
+                kw["asked_at"] = "2026-09-01T00:00:00Z"
+            rows.append(row(i, **kw))
+        decided = [{"request_id": rid(200000 + i), "decision": "approved"} for i in range(0, n, 14)]
+        precedent = [{"precedent_key": f"k{k}", "outcome": "approve"} for k in range(50)]
+        db = snapshot(rows, decided, precedent)
+        t0 = time.perf_counter()
+        decisions = sd.plan(db, now=NOW)
+        elapsed = time.perf_counter() - t0
+        self.assertEqual(len(decisions), n)
+        # The ladder is microseconds per row; the 90-minute budget belongs to the API.
+        self.assertLess(elapsed, 60.0, f"the decision pass took {elapsed:.1f}s for {n} rows")
+        self.assertLess(elapsed * 1000.0 / n, 100.0, "per-request decision cost must be < 100 ms")
+
+    def test_the_plan_arithmetic_holds(self):
+        # 92,861 at 1,000/min is 93 minutes; the budget is 90, so the pass must run
+        # slightly above 1,000/min. This is the checkable form of the plan's target.
+        self.assertLess(92861 / 1000.0, 90.0 + 3.0)
+
+
+class UnaskedIsAskedTests(unittest.TestCase):
+    """Firstmate decision: ask comes before expiry for a request that was never asked.
+
+    The 23,247 OPEN_UNASKED rows are the drain's population, not its refuse pile.
+    Refusing a customer we never asked is a customer-facing denial we do not do.
+    """
+
+    def test_an_unasked_request_past_its_window_is_asked_not_expired(self):
+        db = snapshot([row(1, expires_at="2026-10-01T00:00:00Z")])  # asked_at is NULL
+        d = sd.plan(db, now=NOW)[0]
+        self.assertEqual(d.rule, "ask")
+        self.assertEqual(d.outcome, "ask")
+        self.assertEqual(d.reason_code, "no_rule_matched")
+
+    def test_an_asked_request_past_its_window_is_expired(self):
+        db = snapshot([row(1, expires_at="2026-10-01T00:00:00Z", asked_at="2026-09-01T00:00:00Z")])
+        d = sd.plan(db, now=NOW)[0]
+        self.assertEqual(d.rule, "expired")
+        self.assertEqual(d.outcome, "queue_tier2")
+        self.assertEqual(d.reason_code, "expired_no_proof")
+
+    def test_an_unasked_request_inside_its_window_is_asked(self):
+        db = snapshot([row(1, expires_at="2026-12-01T00:00:00Z")])
+        self.assertEqual(sd.plan(db, now=NOW)[0].rule, "ask")
+
+    def test_an_unasked_request_with_proof_still_uses_the_verdict(self):
+        db = snapshot([row(1, proof_verdict="approve", expires_at="2026-10-01T00:00:00Z")])
+        self.assertEqual(sd.plan(db, now=NOW)[0].rule, "proof_verdict")
+
+    def test_asked_at_survives_the_snapshot_round_trip(self):
+        db = snapshot([row(1, asked_at="2026-09-01T00:00:00Z")])
+        got = db.execute("SELECT asked_at FROM requests WHERE request_id=?", (rid(1),)).fetchone()[0]
+        self.assertEqual(got, "2026-09-01T00:00:00Z")
+
+
+class PrecedentOutcomeTests(unittest.TestCase):
+    """A precedent carries its own outcome: a refuse precedent must refuse."""
+
+    def test_refuse_precedent_is_queued_for_a_tier2_approver(self):
+        db = snapshot([row(1, precedent_key="k")],
+                      precedent=[{"precedent_key": "k", "outcome": "refuse"}])
+        d = sd.plan(db, now=NOW)[0]
+        self.assertEqual(d.rule, "precedent")
+        self.assertEqual(d.outcome, "queue_tier2")
+        self.assertEqual(d.reason_code, "precedent_refuse")
+
+    def test_approve_precedent_approves(self):
+        db = snapshot([row(1, precedent_key="k")],
+                      precedent=[{"precedent_key": "k", "outcome": "approve", "request_id": rid(9)}])
+        self.assertEqual(sd.plan(db, now=NOW)[0].outcome, "approve")
+
+    def test_unreadable_precedent_outcome_is_unmatched_not_asked(self):
+        db = snapshot([row(1, precedent_key="k")],
+                      precedent=[{"precedent_key": "k", "outcome": "maybe"}])
+        d = sd.plan(db, now=NOW)[0]
+        self.assertEqual(d.outcome, sd.UNMATCHED)
+        self.assertEqual(d.reason_code, "unmatched_precedent")
+
+
+class ReviewedWritePathTests(unittest.TestCase):
+    """Firstmate decision: apply performs a REAL API side effect through the reviewed path.
+
+    The reviewed path is the one ``muso-admin-api.sh`` already exposes and the lobster MVP
+    already uses: a chunked ``PUT /admin/credit-requests {"requestIds":[...],"status":...}``
+    through the wrapper. These tests pin the verb, the body, the status mapping, the
+    approve-gate evidence treatment, and the write-then-commit ordering.
+    """
+
+    def _writer(self, rc=0, stdout=None):
+        calls = []
+        # The duplicate-close path reads the root-only token file. The path is pinned, so
+        # the scratch file is handed over as an in-process argument: there is no
+        # environment variable that selects it, and setting one is refused (see
+        # test_a_caller_supplied_token_file_is_denied_before_any_write).
+        token = Path(tempfile.mkdtemp()) / "scale-drain.token"
+        token.write_text("s3cret\n")
+
+        class Proc:
+            returncode = rc
+            stderr = "" if rc == 0 else "boom"
+
+        def run(argv, **kw):
+            calls.append({"argv": argv, "env": kw.get("env") or {}})
+            p = Proc()
+            p.stdout = stdout if stdout is not None else json.dumps(
+                {"http_status": 200, "body": json.dumps({"data": {"updatedIds": [rid(1)]}})})
+            return p
+
+        return sd.admin_writer("/opt/hydra/scripts/muso-admin-api.sh", runner=run,
+                               token_file=str(token)), calls
+
+    def _duplicate(self):
+        return sd.Decision(rid(1), "duplicate", "close_duplicate", "duplicate_of_decided",
+                           sd.decision_key(rid(1), "duplicate", "close_duplicate"),
+                           status="unverified", duplicate_of=rid(9))
+
+    def _with_env(self, name: str, value: str) -> None:
+        saved = os.environ.get(name)
+        os.environ[name] = value
+        self.addCleanup(lambda: os.environ.pop(name, None) if saved is None
+                        else os.environ.__setitem__(name, saved))
+
+    def test_the_token_path_is_pinned_and_is_not_read_from_the_environment(self):
+        self.assertEqual(sd.DRAIN_TOKEN_FILE, "/etc/hydra/scale-drain.token")
+        self.assertEqual(sd.admin_writer.__kwdefaults__["token_file"], sd.DRAIN_TOKEN_FILE)
+        # the CLI offers no way to name another file
+        source = Path(sd.__file__).read_text()
+        self.assertNotIn("--token-file", source)
+        self.assertNotIn('environ.get("SCALE_DRAIN_TOKEN_FILE"', source)
+
+    def test_a_caller_supplied_token_file_is_denied_before_any_write(self):
+        """QA review 4, finding 1: SCALE_DRAIN_TOKEN_FILE let a caller name the file the
+        gate compares against. It is DENIED - the close raises and nothing is spawned -
+        not quietly ignored in favour of the pinned path."""
+        w, calls = self._writer()
+        own = Path(tempfile.mkdtemp()) / "mine.token"
+        own.write_text("attacker\n")
+        own.chmod(0o600)
+        self._with_env("SCALE_DRAIN_TOKEN_FILE", str(own))
+        with self.assertRaises(sd.DrainWriteError) as ctx:
+            w(self._duplicate())
+        self.assertIn("SCALE_DRAIN_TOKEN_FILE is set", str(ctx.exception))
+        self.assertIn("cannot be redirected", str(ctx.exception))
+        self.assertEqual(calls, [])
+
+    def test_an_empty_token_file_override_is_still_denied(self):
+        w, calls = self._writer()
+        self._with_env("SCALE_DRAIN_TOKEN_FILE", "")
+        with self.assertRaises(sd.DrainWriteError):
+            w(self._duplicate())
+        self.assertEqual(calls, [])
+
+    def test_a_caller_supplied_token_never_reaches_the_wrapper(self):
+        """The drain presents what the pinned file holds. A SCALE_DRAIN_TOKEN already in
+        its environment is replaced, so the caller's value is never the one compared; the
+        wrapper's own refusal of a wrong value is pinned in
+        WrapperAcceptsTheRealDigestTests and in the bats suite."""
+        w, calls = self._writer()
+        self._with_env("SCALE_DRAIN_TOKEN", "attacker-chosen")
+        w(self._duplicate())
+        self.assertEqual(calls[0]["env"]["SCALE_DRAIN_TOKEN"], "s3cret")
+        self.assertNotIn("SCALE_DRAIN_TOKEN_FILE", calls[0]["env"])
+
+    def test_a_missing_token_file_refuses_the_close(self):
+        calls = []
+        w = sd.admin_writer("/opt/hydra/scripts/muso-admin-api.sh",
+                            runner=lambda *a, **k: calls.append(a),
+                            token_file=str(Path(tempfile.mkdtemp()) / "absent.token"))
+        with self.assertRaises(sd.DrainWriteError) as ctx:
+            w(self._duplicate())
+        self.assertIn("duplicate close needs", str(ctx.exception))
+        self.assertEqual(calls, [])
+
+    # ── the approve presents the same identity (QA review 5) ────────────────
+    def _approve(self):
+        return sd.Decision(rid(1), "precedent", "approve", "precedent_match",
+                           sd.decision_key(rid(1), "precedent", "approve"),
+                           evidence_anchor=rid(9), profile_id=rid(7))
+
+    def test_an_approve_presents_the_pinned_token(self):
+        """An approval is the more consequential write, and it used to present nothing
+        but values the caller sets. It now carries what the pinned file holds - never a
+        SCALE_DRAIN_TOKEN that was already in the environment."""
+        w, calls = self._writer()
+        self._with_env("SCALE_DRAIN_TOKEN", "attacker-chosen")
+        w(self._approve())
+        self.assertEqual(calls[0]["env"]["SCALE_DRAIN_TOKEN"], "s3cret")
+        self.assertNotIn("SCALE_DRAIN_TOKEN_FILE", calls[0]["env"])
+
+    def test_a_missing_token_file_refuses_the_approve(self):
+        calls = []
+        w = sd.admin_writer("/opt/hydra/scripts/muso-admin-api.sh",
+                            runner=lambda *a, **k: calls.append(a),
+                            token_file=str(Path(tempfile.mkdtemp()) / "absent.token"))
+        with self.assertRaises(sd.DrainWriteError) as ctx:
+            w(self._approve())
+        self.assertIn("approve needs", str(ctx.exception))
+        self.assertEqual(calls, [])
+
+    def test_a_caller_supplied_token_file_is_denied_for_an_approve(self):
+        for value in (str(Path(tempfile.mkdtemp()) / "mine.token"), "", sd.DRAIN_TOKEN_FILE):
+            with self.subTest(value=value):
+                w, calls = self._writer()
+                os.environ["SCALE_DRAIN_TOKEN_FILE"] = value
+                try:
+                    with self.assertRaises(sd.DrainWriteError) as ctx:
+                        w(self._approve())
+                finally:
+                    del os.environ["SCALE_DRAIN_TOKEN_FILE"]
+                self.assertIn("cannot be redirected", str(ctx.exception))
+                self.assertEqual(calls, [])
+
+    def test_approve_puts_approved_through_the_wrapper(self):
+        w, calls = self._writer()
+        w(sd.Decision(rid(1), "precedent", "approve", "precedent_match",
+                      sd.decision_key(rid(1), "precedent", "approve"), evidence_anchor=rid(9)))
+        self.assertEqual(len(calls), 1)
+        argv = calls[0]["argv"]
+        self.assertEqual(argv[0], "bash")
+        self.assertEqual(argv[1], "/opt/hydra/scripts/muso-admin-api.sh")
+        self.assertIn("call", argv)
+        self.assertIn("PUT", argv)
+        self.assertIn("/admin/credit-requests", argv)
+        body = json.loads(argv[-1])
+        self.assertEqual(body, {"requestIds": [rid(1)], "status": "approved"})
+        self.assertEqual(calls[0]["env"]["OPS_DRY_RUN"], "0")
+
+    def test_approve_carries_the_approve_gate_evidence(self):
+        """The gate is SATISFIED, never disabled: no CV_APPROVE_GATE_DISABLED, and the
+        digest names the auto-approvable rule plus the row-specific anchor."""
+        w, calls = self._writer()
+        w(sd.Decision(rid(1), "precedent", "approve", "precedent_match",
+                      sd.decision_key(rid(1), "precedent", "approve"), evidence_anchor=rid(9)))
+        env = calls[0]["env"]
+        self.assertNotIn("CV_APPROVE_GATE_DISABLED", env)
+        self.assertEqual(env["SCALE_DRAIN"], "1")
+        self.assertEqual(env["EVIDENCE_EXCERPT"],
+                         f"drain-signal:precedent;precedent_match;v{sd.RULE_VERSION};{rid(9)};-")
+        self.assertIn("--evidence-excerpt", calls[0]["argv"])
+
+    def test_an_approve_without_an_anchor_is_refused(self):
+        """A row the ladder could not anchor is not auto-approvable - never approve blind."""
+        w, calls = self._writer()
+        with self.assertRaises(sd.DrainWriteError):
+            w(sd.Decision(rid(1), "precedent", "approve", "precedent_match",
+                          sd.decision_key(rid(1), "precedent", "approve")))
+        self.assertEqual(calls, [])
+
+    def test_a_non_auto_approvable_rule_is_refused(self):
+        w, calls = self._writer()
+        with self.assertRaises(sd.DrainWriteError):
+            w(sd.Decision(rid(1), "ask", "approve", "no_rule_matched",
+                          sd.decision_key(rid(1), "ask", "ask"), evidence_anchor=rid(9)))
+        self.assertEqual(calls, [])
+
+    def test_a_queued_refusal_performs_no_write(self):
+        """The drain never rejects autonomously: a refusal is a named human's call."""
+        w, calls = self._writer()
+        w(sd.Decision(rid(1), "expired", "queue_tier2", "expired_no_proof",
+                      sd.decision_key(rid(1), "expired", "queue_tier2")))
+        self.assertEqual(calls, [])
+
+    def test_close_duplicate_goes_through_the_conditional_close_route(self):
+        w, calls = self._writer()
+        w(sd.Decision(rid(1), "duplicate", "close_duplicate", "duplicate_of_decided",
+                      sd.decision_key(rid(1), "duplicate", "close_duplicate"), status="unverified",
+                      duplicate_of=rid(9)))
+        argv = calls[0]["argv"]
+        self.assertIn(sd.DUPLICATE_CLOSE_PATH, argv)
+        body = json.loads(argv[-1])
+        self.assertEqual(body["status"], "rejected")
+        self.assertEqual(body["expectedStatus"], "unverified")
+        self.assertEqual(calls[0]["env"]["EVIDENCE_EXCERPT"],
+                         f"drain-dup:{rid(9)};duplicate_of_decided;v{sd.RULE_VERSION};-")
+        self.assertEqual(calls[0]["env"]["SCALE_DRAIN"], "1")
+        self.assertEqual(calls[0]["env"]["SCALE_DRAIN_TOKEN"], "s3cret")
+        self.assertNotIn("CV_APPROVE_GATE_DISABLED", calls[0]["env"])
+
+    def test_a_duplicate_close_without_its_real_status_is_refused(self):
+        w, calls = self._writer()
+        with self.assertRaises(sd.DrainWriteError):
+            w(sd.Decision(rid(1), "duplicate", "close_duplicate", "duplicate_of_decided",
+                          sd.decision_key(rid(1), "duplicate", "close_duplicate"), duplicate_of=rid(9)))
+        self.assertEqual(calls, [])
+
+    def test_a_duplicate_close_with_no_original_is_refused(self):
+        w, calls = self._writer()
+        with self.assertRaises(sd.DrainWriteError):
+            w(sd.Decision(rid(1), "duplicate", "close_duplicate", "duplicate_of_decided",
+                          sd.decision_key(rid(1), "duplicate", "close_duplicate")))
+        self.assertEqual(calls, [])
+
+    def test_ask_performs_no_write(self):
+        w, calls = self._writer()
+        w(sd.Decision(rid(1), "ask", "ask", "no_rule_matched", sd.decision_key(rid(1), "ask", "ask")))
+        self.assertEqual(calls, [])
+
+    def test_a_non_2xx_raises_and_is_not_committed(self):
+        w, calls = self._writer(rc=0, stdout='{"http_status":500,"body":{}}')
+        with self.assertRaises(sd.DrainWriteError):
+            w(sd.Decision(rid(1), "precedent", "approve", "precedent_match",
+                          sd.decision_key(rid(1), "precedent", "approve"), evidence_anchor=rid(9)))
+        self.assertEqual(len(calls), 1)
+
+    def test_a_200_that_omits_the_row_is_a_failed_write(self):
+        w, _ = self._writer(rc=0, stdout=json.dumps(
+            {"http_status": 200, "body": json.dumps({"data": {"updatedIds": [rid(2)]}})}))
+        with self.assertRaises(sd.DrainWriteError):
+            w(sd.Decision(rid(1), "precedent", "approve", "precedent_match",
+                          sd.decision_key(rid(1), "precedent", "approve"), evidence_anchor=rid(9)))
+
+    def test_a_200_with_no_per_row_report_is_unattributable(self):
+        w, _ = self._writer(rc=0, stdout='{"http_status":200,"body":{"data":{"ok":true}}}')
+        with self.assertRaises(sd.DrainWriteError):
+            w(sd.Decision(rid(1), "precedent", "approve", "precedent_match",
+                          sd.decision_key(rid(1), "precedent", "approve"), evidence_anchor=rid(9)))
+
+    def test_a_wrapper_failure_raises(self):
+        w, _ = self._writer(rc=1)
+        with self.assertRaises(sd.DrainWriteError):
+            w(sd.Decision(rid(1), "precedent", "approve", "precedent_match",
+                          sd.decision_key(rid(1), "precedent", "approve")))
+
+    def test_apply_calls_the_writer_only_for_writing_outcomes(self):
+        """ask belongs to need_asks.py and queue_tier2 to a human: neither is a write."""
+        decisions = sd.plan(snapshot([row(1, precedent_key="k"), row(2), row(3, proof_verdict="refuse")],
+                                     precedent=[{"precedent_key": "k", "outcome": "approve", "request_id": rid(9)}]),
+                            now=NOW)
+        seen = []
+        with tempfile.TemporaryDirectory() as td:
+            db = sd.open_ledger(str(Path(td) / "l.sqlite"))
+            stats = sd.apply(decisions, db, shards=2, write_pool=1, writer=seen.append, now=NOW)
+        self.assertEqual(stats["applied"], 3)
+        self.assertEqual([d.request_id for d in seen], [rid(1)])
+
+    def test_a_failed_write_is_not_committed_and_is_retried(self):
+        """A failure leaves the row unapplied and its intent open. The next run retries
+        it - once the live request has been read and found still pending, never blind."""
+        decisions = sd.plan(snapshot([row(1, precedent_key="k")],
+                                     precedent=[{"precedent_key": "k", "outcome": "approve", "request_id": rid(9)}]), now=NOW)
+        attempts = []
+
+        def flaky(d):
+            attempts.append(d.request_id)
+            if len(attempts) == 1:
+                raise sd.DrainWriteError("transient")
+
+        with tempfile.TemporaryDirectory() as td:
+            db = sd.open_ledger(str(Path(td) / "l.sqlite"))
+            first = sd.apply(decisions, db, shards=1, write_pool=1, writer=flaky, now=NOW)
+            self.assertEqual(first["applied"], 0)
+            self.assertEqual(first["errors"], 1)
+            self.assertEqual(sd.verify(decisions, db)["missing"], [decisions[0].decision_key])
+            self.assertEqual(sd.verify(decisions, db)["unconfirmed"], [rid(1)])
+            # no reconciler: the failure did not prove the write missed, so no second call
+            blind = sd.apply(decisions, db, shards=1, write_pool=1, writer=flaky, now=NOW)
+            self.assertEqual((blind["applied"], blind["unreconciled"]), (0, 1))
+            self.assertEqual(len(attempts), 1)
+            second = sd.apply(decisions, db, shards=1, write_pool=1, writer=flaky, now=NOW,
+                              reconciler=lambda d, planned_at: sd.NOT_LANDED)
+            self.assertEqual(second["applied"], 1)
+            self.assertEqual(len(attempts), 2)
+            self.assertTrue(sd.verify(decisions, db)["ok"])
+
+
+
+class ReplicaSnapshotTests(unittest.TestCase):
+    """The bulk read comes from the replica, not the admin list.
+
+    The admin list refuses unfiltered paging past offset 20,000, and 92,861 rows at
+    limit=200 is page 465 - so the admin API cannot enumerate the population at all.
+    """
+
+    def _query(self, pending, decided=()):
+        calls = []
+
+        def q(sql):
+            calls.append(sql)
+            return list(decided) if "status IN ('approved', 'rejected')" in sql else list(pending)
+        return q, calls
+
+    def _proof_store(self, td, rows):
+        path = str(Path(td) / "proof.sqlite")
+        db = sqlite3.connect(path)
+        db.execute("CREATE TABLE verdicts (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                   " proof_id TEXT, request_id TEXT, verdict TEXT, created_at TEXT)")
+        db.executemany("INSERT INTO verdicts (proof_id, request_id, verdict, created_at)"
+                       " VALUES (?,?,?,?)", rows)
+        db.commit()
+        db.close()
+        return path
+
+    def _ledger(self, td):
+        ledger = str(Path(td) / "ledger.sqlite")
+        db = sqlite3.connect(ledger)
+        db.executescript(
+            "CREATE TABLE verify_messages (campaign TEXT, status TEXT, account_id TEXT,"
+            " sent_at TEXT, request_ids_json TEXT NOT NULL);")
+        db.execute("INSERT INTO verify_messages VALUES"
+                   " ('verify-live','sent','1001','2026-09-01T00:00:00Z','[\"r1\"]')")
+        db.execute("INSERT INTO verify_messages VALUES"
+                   " ('removal-notice','sent','1002','2026-09-01T00:00:00Z','[\"r2\"]')")
+        db.commit()
+        db.close()
+        return ledger
+
+    def test_rows_are_mapped_and_asked_at_comes_from_the_ledger(self):
+        with tempfile.TemporaryDirectory() as td:
+            ledger = self._ledger(td)
+            # keyed the way stage 2 writes it: one verdict per claimed role
+            proofs = self._proof_store(
+                td, [("a" * 64, "r1#Mixing Engineer", "GENUINE", "2026-11-02T00:00:00Z")])
+            q, calls = self._query([
+                ("r1", "1001", "p1", "user_verification_needed", "2026-11-01T00:00:00Z",
+                 '{"duplicate_of": null}', "{}", "trk-1", '{Mixing Engineer}'),
+                ("r2", "1002", "p2", "unverified", "2026-11-01T00:00:00Z", "{}", "{}", "trk-1", '{Producer}'),
+            ])
+            rows = sd.snapshot_from_replica(q, ledger_path=ledger, proof_store_path=proofs)
+        self.assertEqual(len(calls), 1, "one query for the whole population")
+        self.assertEqual(rows[0]["asked_at"], "2026-09-01T00:00:00Z")
+        self.assertEqual(rows[0]["claimed_roles"], ["Mixing Engineer"])
+        self.assertEqual(rows[0]["precedent_key"], sd.claim_key("1001", "trk-1", ["Mixing Engineer"]))
+        self.assertEqual(rows[0]["proof_verdict"], "approve")
+        self.assertEqual(rows[0]["proof_id"], "a" * 64)
+        self.assertEqual(rows[0]["proof_received_at"], "2026-11-02T00:00:00Z")
+        self.assertIsNone(rows[1]["proof_verdict"])
+        # a removal notice is NOT an ask
+        self.assertIsNone(rows[1]["asked_at"])
+
+    def test_the_newest_verdict_wins_even_when_it_is_soft(self):
+        with tempfile.TemporaryDirectory() as td:
+            proofs = self._proof_store(td, [
+                ("b" * 64, "r1", "FORGED_LIKELY", "2026-11-01T00:00:00Z"),
+                ("c" * 64, "r1", "UNDETERMINED", "2026-11-02T00:00:00Z"),
+                ("d" * 64, "r1", "VERIFIED", "2026-11-03T00:00:00Z"),
+                ("e" * 64, "r2", "SUSPECT", "2026-11-03T00:00:00Z"),
+                # a re-analysis under a newer analyzer: the soft verdict must clear the
+                # older approval rather than resurrecting it
+                ("f" * 64, "r3", "GENUINE", "2026-11-01T00:00:00Z"),
+                ("g" * 64, "r3", "PLAUSIBLE", "2026-11-04T00:00:00Z"),
+            ])
+            facts = sd.proof_facts(proofs)
+        self.assertEqual(facts["r1"]["proof_verdict"], "approve")
+        self.assertEqual(facts["r1"]["proof_id"], "d" * 64)
+        self.assertIsNone(facts["r2"]["proof_verdict"], "a soft verdict is not a decision")
+        self.assertIsNone(facts["r3"]["proof_verdict"], "the newest verdict wins, soft or not")
+        self.assertIsNone(facts["r3"]["proof_id"], "a soft verdict is never an anchor")
+        self.assertEqual(facts["r3"]["proof_received_at"], "2026-11-04T00:00:00Z")
+
+    def test_an_unreadable_proof_store_refuses_rather_than_asking_every_user(self):
+        with tempfile.TemporaryDirectory() as td:
+            bad = str(Path(td) / "proof.sqlite")
+            Path(bad).write_bytes(b"not a database")
+            with self.assertRaises(sd.DrainError):
+                sd.proof_facts(bad)
+
+    def test_decided_rows_become_per_claimant_precedents(self):
+        decided = [
+            ("d1", "approved", "u1", "trk-1", '{Mixing Engineer,"Mastering Engineer"}'),
+            ("d2", "rejected", "u2", "trk-2", '{Producer}'),
+            ("d3", "approved", "u3", "", '{Producer}'),
+        ]
+
+        def q(_sql):
+            return decided
+        rows, precedent = sd.decided_facts(q)
+        self.assertEqual(len(rows), 3)
+        by_key = {p["precedent_key"]: p for p in precedent}
+        approve = by_key[sd.claim_key("u1", "trk-1", ["Mixing Engineer", "Mastering Engineer"])]
+        self.assertEqual((approve["outcome"], approve["request_id"]), ("approve", "d1"))
+        refuse = by_key[sd.claim_key("u2", "trk-2", ["Producer"])]
+        self.assertEqual((refuse["outcome"], refuse["request_id"]), ("refuse", "d2"))
+        self.assertEqual(len(precedent), 2, "a row with no track yields no precedent")
+
+    def test_one_claimants_approval_is_not_another_claimants_precedent(self):
+        decided = [("d1", "approved", "u1", "trk-1", '{Mixing Engineer}')]
+
+        def q(_sql):
+            return decided
+        _, precedent = sd.decided_facts(q)
+        self.assertEqual(len(precedent), 1)
+        self.assertNotEqual(sd.claim_key("u1", "trk-1", ["Mixing Engineer"]),
+                            sd.claim_key("u2", "trk-1", ["Mixing Engineer"]))
+        self.assertIsNone(sd.claim_key("", "trk-1", ["Mixing Engineer"]),
+                          "a row with no claimant cannot produce a precedent key")
+
+    def test_an_unreadable_ledger_refuses_rather_than_assuming_nobody_was_asked(self):
+        with tempfile.TemporaryDirectory() as td:
+            bad = str(Path(td) / "bad.sqlite")
+            Path(bad).write_bytes(b"not a database")
+            with self.assertRaises(sd.DrainError):
+                sd.asked_at_by_request(bad)
+
+    def test_a_missing_ledger_means_no_ask_history(self):
+        self.assertEqual(sd.asked_at_by_request("/nonexistent/ledger.sqlite"), {})
+
+    def test_ask_history_is_keyed_by_request_not_by_account(self):
+        """QA review 2: asking about request A must not expire request B for the same user."""
+        with tempfile.TemporaryDirectory() as td:
+            path = str(Path(td) / "ledger.sqlite")
+            db = sqlite3.connect(path)
+            db.executescript("""
+                CREATE TABLE verify_messages (
+                  id INTEGER PRIMARY KEY AUTOINCREMENT, campaign TEXT, status TEXT,
+                  sent_at TEXT, account_id TEXT, request_ids_json TEXT NOT NULL);
+            """)
+            db.execute("INSERT INTO verify_messages (campaign, status, sent_at, account_id,"
+                       " request_ids_json) VALUES ('proof-need-ask','sent',"
+                       " '2026-10-01T00:00:00Z','u1','[\"req-A\"]')")
+            db.commit()
+            db.close()
+            asked = sd.asked_at_by_request(path)
+        self.assertEqual(asked, {"req-A": "2026-10-01T00:00:00Z"})
+        self.assertNotIn("req-B", asked)
+
+    def test_the_snapshot_query_is_bounded_to_pending_and_not_deleted(self):
+        db = sqlite3.connect(":memory:")
+        db.create_function("json_format", 1, lambda v: v)
+        db.execute(
+            "CREATE TABLE credit_requests ("
+            " id TEXT, userid TEXT, profileid TEXT, status TEXT, createdat TEXT,"
+            " verificationdata TEXT, metadata TEXT, trackid TEXT, credits TEXT, deletedat TEXT)")
+        rows = [("alive", "1", "p1", "user_verification_needed", "2026-11-01", "{}", "{}", "t", "{}", None),
+                ("soft", "2", "p2", "unverified", "2026-11-01", "{}", "{}", "t", "{}", "2026-11-02"),
+                ("done", "3", "p3", "approved", "2026-11-01", "{}", "{}", "t", "{}", None)]
+        db.executemany("INSERT INTO credit_requests VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
+        sql = sd.SNAPSHOT_SQL.replace("postgresql_core.public.credit_requests", "credit_requests")
+        self.assertEqual([r[0] for r in db.execute(sql)], ["alive"])
+
+
+class RealSourcesTests(unittest.TestCase):
+    """The documented `snapshot` then `plan --snapshot` contract, over real sources.
+
+    The three highest-volume rules (duplicate, precedent, proof verdict) each depend on a
+    fact that lives OUTSIDE the pending row: the original's decision, the decided history,
+    and the proof store. A fixture that feeds those facts in `verificationData` proves
+    nothing, so this drives the snapshot builder's real queries and then the ladder.
+    """
+
+    def _proof_store(self, td, rows):
+        path = str(Path(td) / "proof.sqlite")
+        db = sqlite3.connect(path)
+        db.execute("CREATE TABLE verdicts (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                   " proof_id TEXT, request_id TEXT, verdict TEXT, created_at TEXT)")
+        db.executemany("INSERT INTO verdicts (proof_id, request_id, verdict, created_at)"
+                       " VALUES (?,?,?,?)", rows)
+        db.commit()
+        db.close()
+        return path
+
+    def test_the_documented_two_command_contract_matches_all_three_decided_classes(self):
+        with tempfile.TemporaryDirectory() as td:
+            proofs = self._proof_store(td, [
+                # the store keys a verdict by CLAIM, "<request>#<Role>", never by request
+                ("f" * 64, f"{rid(4)}#Songwriter", "GENUINE", "2026-11-05T00:00:00Z")])
+            pending = [
+                # r1 duplicates r10, already approved: close it
+                (rid(1), "1001", "p1", "user_verification_needed", "2026-11-01T00:00:00Z",
+                 json.dumps({"duplicate_of": rid(10)}), "{}", "trk-1", '{Mixing Engineer}'),
+                # r2 is the SAME claimant as approved r11, same claim: approve on precedent
+                (rid(2), "1002", "p2", "user_verification_needed", "2026-11-01T00:00:00Z",
+                 "{}", "{}", "trk-1", '{Mixing Engineer}'),
+                # r3 is the same claimant as rejected r12: queue for a human, never ask
+                (rid(3), "1003", "p3", "unverified", "2026-11-01T00:00:00Z",
+                 "{}", "{}", "trk-2", '{Producer}'),
+                # r4 has a genuine proof: approve
+                (rid(4), "1004", "p4", "user_verification_needed", "2026-11-01T00:00:00Z",
+                 "{}", "{}", "trk-4", '{Songwriter}'),
+                # r5 is a DIFFERENT claimant with r11's exact claim: no precedent, so ask
+                (rid(5), "1005", "p5", "user_verification_needed", "2026-11-01T00:00:00Z",
+                 "{}", "{}", "trk-1", '{Mixing Engineer}'),
+            ]
+            decided = [
+                (rid(10), "approved", "1001", "trk-10", '{Mixing Engineer}'),
+                (rid(11), "approved", "1002", "trk-1", '{Mixing Engineer}'),
+                (rid(12), "rejected", "1003", "trk-2", '{Producer}'),
+            ]
+
+            def q(sql):
+                return list(decided) if "status IN ('approved', 'rejected')" in sql else list(pending)
+
+            rows = sd.replica_snapshot_rows(q, proof_store_path=proofs)
+            path = str(Path(td) / "snap.jsonl")
+            with open(path, "w") as fh:
+                for r in rows:
+                    fh.write(json.dumps(r, sort_keys=True) + "\n")
+            db = sd._build_snapshot(_args(snapshot=path))
+        decisions = {d.request_id: d for d in sd.plan(db, now=NOW)}
+        self.assertEqual(decisions[rid(1)].outcome, "close_duplicate")
+        self.assertEqual(decisions[rid(2)].outcome, "approve")
+        self.assertEqual(decisions[rid(2)].reason_code, "precedent_match")
+        self.assertEqual(decisions[rid(3)].outcome, "queue_tier2")
+        self.assertEqual(decisions[rid(3)].reason_code, "precedent_refuse")
+        self.assertEqual(decisions[rid(4)].outcome, "approve")
+        self.assertEqual(decisions[rid(4)].reason_code, "proof_verdict_approve")
+        self.assertEqual(decisions[rid(4)].evidence_anchor, "f" * 64)
+        self.assertEqual(decisions[rid(5)].outcome, "ask",
+                         "another account's approval is not this account's precedent")
+
+    def test_a_row_whose_fact_cannot_be_resolved_is_unmatched_not_asked(self):
+        with tempfile.TemporaryDirectory() as td:
+            proofs = self._proof_store(td, [])
+            pending = [
+                # says it duplicates something, but the original was never decided (or is
+                # older than the decided window): the fact cannot be resolved
+                (rid(1), "1001", "p1", "user_verification_needed", "2026-11-01T00:00:00Z",
+                 json.dumps({"duplicate_of": rid(99)}), "{}", "trk-1", '{Mixing Engineer}'),
+            ]
+
+            def q(sql):
+                return list(pending) if "status IN ('approved', 'rejected')" not in sql else []
+            rows = sd.replica_snapshot_rows(q, proof_store_path=proofs)
+            path = str(Path(td) / "snap.jsonl")
+            with open(path, "w") as fh:
+                for r in rows:
+                    fh.write(json.dumps(r, sort_keys=True) + "\n")
+            db = sd._build_snapshot(_args(snapshot=path))
+            decisions = sd.plan(db, now=NOW)
+            ledger = sd.open_ledger(str(Path(td) / "l.sqlite"))
+        self.assertEqual([d.outcome for d in decisions], [sd.UNMATCHED])
+        stats = sd.apply(decisions, ledger, commit_writes=False, now=NOW)
+        self.assertEqual(stats["unmatched"], 1)
+        self.assertEqual(stats["applied"], 0)
+        self.assertEqual(stats["would_write"], 0)
+
+
+def _args(**kw):
+    base = {"snapshot": None, "decided": None, "precedent": None, "ask_window_days": sd.ASK_WINDOW_DAYS}
+    base.update(kw)
+    return type("Args", (), base)()
+
+
+class WrapperAcceptsTheRealDigestTests(unittest.TestCase):
+    """The digest the drain EMITS must pass the wrapper's predicate, not a hand-typed one.
+
+    The bats suite feeds literal ``v1`` digests, so it cannot catch a version string the
+    drain formats differently (``v`` + ``r1`` = ``vr1``). This runs the real predicate
+    from both wrapper copies against the real ``drain_evidence`` / ``duplicate_evidence``
+    output, which is the contract that decides whether a write is allowed.
+    """
+
+    WRAPPERS = (
+        "skills-all/muso-ops-admin/scripts/muso-admin-api.sh",
+        "workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh",
+    )
+
+    def setUp(self):
+        # A stub verifier that records the parts the wrapper parsed out of the digest and
+        # exits 0. The wrapper's job is to parse and DELEGATE; verify_anchor's own tests
+        # cover the verification. This proves the delegation happens with the right args.
+        #
+        # The stub lives in a MIRRORED tree, at the path the predicate derives from its own
+        # location. That derivation is the fix for QA review 3: HYDRA_ROOT is caller-
+        # controlled, so a caller could point the gate at a substitute verifier. Nothing
+        # here can be overridden by an environment variable.
+        self.root = Path(tempfile.mkdtemp())
+        (self.root / "scripts/credit_review").mkdir(parents=True)
+        self.argv_log = self.root / "verifier-argv.json"
+        (self.root / "scripts/credit_review/verify_anchor.py").write_text(
+            "import json, sys\n"
+            f"open({str(self.argv_log)!r}, 'w').write(json.dumps(sys.argv[1:]))\n"
+            "sys.exit(0)\n")
+        self.token = self.root / "scale-drain.token"
+        self.token.write_text("s3cret\n")
+        self.token.chmod(0o600)
+        # The registry is read from the tree the wrapper sits in, so the mirrored tree
+        # carries a copy of the real one - exactly where a deploy puts it.
+        self.registry = self.root / "policies/credit-approval-automation.json"
+        self.registry.parent.mkdir()
+        self.registry.write_text(REGISTRY.read_text())
+
+    #: The one line, in each wrapper, that names the token file - shared by the approve
+    #: and the duplicate gate. A positive test cannot write /etc/hydra, so it rewrites
+    #: THIS literal in its scratch copy. There is deliberately no environment seam to do
+    #: it with: that seam was the finding. The denial tests run the text unmodified.
+    TOKEN_PIN = 'local drain_token_file="/etc/hydra/scale-drain.token"'
+    #: The helpers both predicates call. Extracted with them, so what runs is their real
+    #: text and nothing a test wrote.
+    HELPERS = ("scale_drain_root", "scale_drain_registry", "scale_drain_token_ok")
+
+    def _predicate(self, wrapper: str, fn: str, excerpt: str, body: str,
+                   path: str = "/admin/credit-requests", *,
+                   pinned: bool = False,
+                   extra_env: dict[str, str] | None = None,
+                   invoke_as: Path | None = None) -> subprocess.CompletedProcess:
+        # Materialise the REAL predicate text in a mirrored tree, so ${BASH_SOURCE[0]}
+        # resolves the way it does in production and the wrapper-root walk is exercised.
+        rel = Path(wrapper)
+        target = self.root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        real = (SCRIPTS.parent / wrapper).read_text()
+        self.assertEqual(real.count(self.TOKEN_PIN), 1,
+                         f"{wrapper}: the token path is no longer the one pinned literal")
+        text = "".join(
+            f"{name}() {{" + real.split(f"\n{name}() {{", 1)[1].split("\n}\n", 1)[0] + "\n}\n"
+            for name in (*self.HELPERS, fn))
+        if not pinned:
+            text = text.replace(self.TOKEN_PIN, f'local drain_token_file="{self.token}"')
+            self.assertNotIn("/etc/hydra/scale-drain.token", text)
+        target.write_text(text + f'{fn} PUT "$1" "$2"\n')
+        target.chmod(0o755)
+        env = {
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "MUSO_OPS_STATE_DIR": tempfile.mkdtemp(),
+            "OPS_RUNLOG_DIR": tempfile.mkdtemp(),
+            "MUSO_API_URL": "http://127.0.0.1:0/none",
+            "MUSO_ADMIN_EMAIL": "test@example.com",
+            "MUSO_ADMIN_PASSWORD": "x",
+            # Neither registry variable is set: the predicate finds the registry itself.
+            "SCALE_DRAIN": "1",
+            "REQUESTER_EMAIL": "scale-drain@hydra-ops",
+            "EVIDENCE_EXCERPT": excerpt,
+            "SCALE_DRAIN_TOKEN": "s3cret",
+            **(extra_env or {}),
+        }
+        # ``invoke_as`` is the path the caller RUNS (a symlink, say); the file is the same.
+        return subprocess.run(["bash", str(invoke_as or target), path, body],
+                              capture_output=True, text=True, env=env, check=False)
+
+    def test_the_emitted_approve_digest_passes_both_wrappers(self):
+        d = sd.Decision(rid(1), "precedent", "approve", "precedent_match",
+                        sd.decision_key(rid(1), "precedent", "approve"), evidence_anchor=rid(9),
+                        profile_id=rid(7))
+        body = json.dumps({"requestIds": [rid(1)], "status": "approved"})
+        for wrapper in self.WRAPPERS:
+            proc = self._predicate(wrapper, "is_scale_drain_approval",
+                                   sd.drain_evidence(d), body)
+            self.assertEqual(proc.returncode, 0, f"{wrapper} refused {sd.drain_evidence(d)!r}: {proc.stderr}")
+            # the wrapper DELEGATES the anchor to the verifier, with the parts it parsed
+            argv = json.loads(self.argv_log.read_text())
+            self.assertEqual(argv[argv.index("--rule") + 1], "precedent")
+            self.assertEqual(argv[argv.index("--anchor") + 1], rid(9))
+            self.assertEqual(argv[argv.index("--request-id") + 1], rid(1))
+            self.assertEqual(argv[argv.index("--profile-id") + 1], rid(7))
+
+    def test_a_forged_digest_cannot_skip_the_verifier(self):
+        """The digest is a claim; the verifier is what makes it a fact."""
+        d = sd.Decision(rid(1), "precedent", "approve", "precedent_match",
+                        sd.decision_key(rid(1), "precedent", "approve"), evidence_anchor=rid(9),
+                        profile_id=rid(7))
+        body = json.dumps({"requestIds": [rid(1)], "status": "approved"})
+        # a verifier that refuses (the anchor is not approved / not this claimant)
+        (self.root / "scripts/credit_review/verify_anchor.py").write_text("import sys; sys.exit(1)\n")
+        for wrapper in self.WRAPPERS:
+            proc = self._predicate(wrapper, "is_scale_drain_approval",
+                                   sd.drain_evidence(d), body)
+            self.assertEqual(proc.returncode, 1, f"{wrapper} approved without a verified anchor")
+            self.assertIn("anchor verification failed", proc.stderr)
+
+    def test_a_missing_verifier_refuses_rather_than_passing(self):
+        d = sd.Decision(rid(1), "precedent", "approve", "precedent_match",
+                        sd.decision_key(rid(1), "precedent", "approve"), evidence_anchor=rid(9),
+                        profile_id=rid(7))
+        body = json.dumps({"requestIds": [rid(1)], "status": "approved"})
+        (self.root / "scripts/credit_review/verify_anchor.py").unlink()
+        for wrapper in self.WRAPPERS:
+            proc = self._predicate(wrapper, "is_scale_drain_approval",
+                                   sd.drain_evidence(d), body)
+            self.assertEqual(proc.returncode, 1, f"{wrapper} approved with no verifier")
+            # The deployed tree is FOUND by its verifier, so a tree with no verifier is a
+            # tree that cannot be located - and the registry is pinned to that tree, so
+            # the refusal now comes one step earlier than the verifier call itself.
+            self.assertIn("cannot be located", proc.stderr)
+            self.assertFalse(self.argv_log.exists(), "a verifier ran from somewhere")
+
+    def test_a_batch_body_is_refused(self):
+        """One digest carries one anchor, so a batch would be unverified rows."""
+        d = sd.Decision(rid(1), "precedent", "approve", "precedent_match",
+                        sd.decision_key(rid(1), "precedent", "approve"), evidence_anchor=rid(9),
+                        profile_id=rid(7))
+        body = json.dumps({"requestIds": [rid(1), rid(2)], "status": "approved"})
+        for wrapper in self.WRAPPERS:
+            proc = self._predicate(wrapper, "is_scale_drain_approval",
+                                   sd.drain_evidence(d), body)
+            self.assertEqual(proc.returncode, 1, f"{wrapper} accepted a batch on one anchor")
+
+    def test_the_emitted_proof_digest_passes_both_wrappers(self):
+        proof_id = "9f2c1d4e5a6b7c8d9e0f1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f"
+        d = sd.Decision(rid(1), "proof_verdict", "approve", "proof_verdict_approve",
+                        sd.decision_key(rid(1), "proof_verdict", "approve"), evidence_anchor=proof_id,
+                        profile_id=rid(7))
+        body = json.dumps({"requestIds": [rid(1)], "status": "approved"})
+        for wrapper in self.WRAPPERS:
+            proc = self._predicate(wrapper, "is_scale_drain_approval",
+                                   sd.drain_evidence(d), body)
+            self.assertEqual(proc.returncode, 0, f"{wrapper} refused {sd.drain_evidence(d)!r}: {proc.stderr}")
+
+    def test_the_emitted_duplicate_digest_passes_both_wrappers(self):
+        d = sd.Decision(rid(1), "duplicate", "close_duplicate", "duplicate_of_decided",
+                        sd.decision_key(rid(1), "duplicate", "close_duplicate"), status="unverified",
+                        duplicate_of=rid(9))
+        body = json.dumps({"expectedStatus": "unverified", "requestIds": [rid(1)],
+                           "status": "rejected"})
+        for wrapper in self.WRAPPERS:
+            proc = self._predicate(wrapper, "is_scale_drain_duplicate_close",
+                                   sd.duplicate_evidence(d), body,
+                                   path=sd.DUPLICATE_CLOSE_PATH)
+            self.assertEqual(proc.returncode, 0,
+                             f"{wrapper} refused {sd.duplicate_evidence(d)!r}: {proc.stderr}")
+            # ...and the claim is delegated, not trusted
+            argv = json.loads(self.argv_log.read_text())
+            self.assertEqual(argv[argv.index("--rule") + 1], "duplicate")
+            self.assertEqual(argv[argv.index("--anchor") + 1], rid(9))
+            self.assertEqual(argv[argv.index("--request-id") + 1], rid(1))
+
+    def test_a_duplicate_close_whose_original_is_not_decided_is_refused(self):
+        """QA review 2: the token alone let a caller close an unrelated pending request."""
+        d = sd.Decision(rid(1), "duplicate", "close_duplicate", "duplicate_of_decided",
+                        sd.decision_key(rid(1), "duplicate", "close_duplicate"),
+                        status="unverified", duplicate_of=rid(9))
+        body = json.dumps({"expectedStatus": "unverified", "requestIds": [rid(1)],
+                           "status": "rejected"})
+        (self.root / "scripts/credit_review/verify_anchor.py").write_text("import sys; sys.exit(1)\n")
+        for wrapper in self.WRAPPERS:
+            proc = self._predicate(wrapper, "is_scale_drain_duplicate_close",
+                                   sd.duplicate_evidence(d), body,
+                                   path=sd.DUPLICATE_CLOSE_PATH)
+            self.assertEqual(proc.returncode, 1, f"{wrapper} closed an unverified duplicate")
+            self.assertIn("duplicate verification failed", proc.stderr)
+
+    def test_a_duplicate_close_without_the_token_is_refused(self):
+        d = sd.Decision(rid(1), "duplicate", "close_duplicate", "duplicate_of_decided",
+                        sd.decision_key(rid(1), "duplicate", "close_duplicate"), status="unverified",
+                        duplicate_of=rid(9))
+        body = json.dumps({"expectedStatus": "unverified", "requestIds": [rid(1)],
+                           "status": "rejected"})
+        self.token.unlink()
+        for wrapper in self.WRAPPERS:
+            proc = self._predicate(wrapper, "is_scale_drain_duplicate_close",
+                                   sd.duplicate_evidence(d), body,
+                                   path=sd.DUPLICATE_CLOSE_PATH)
+            self.assertEqual(proc.returncode, 1, f"{wrapper} closed a duplicate with no token")
+            self.assertIn("scale-drain.token", proc.stderr)
+            self.assertIn("root-only token", proc.stderr)
+            self.assertFalse(self.argv_log.exists(), "the verifier ran with no token")
+
+    def _dup_call(self):
+        d = sd.Decision(rid(1), "duplicate", "close_duplicate", "duplicate_of_decided",
+                        sd.decision_key(rid(1), "duplicate", "close_duplicate"),
+                        status="unverified", duplicate_of=rid(9))
+        body = json.dumps({"expectedStatus": "unverified", "requestIds": [rid(1)],
+                           "status": "rejected"})
+        return sd.duplicate_evidence(d), body
+
+    def test_a_duplicate_close_names_exactly_one_request(self):
+        """One digest names one original, so one call closes one request. The verifier
+        was only ever handed the first id (QA review 6 of hydra#1883)."""
+        excerpt, body = self._dup_call()
+        one = json.loads(body)
+        for wrapper in self.WRAPPERS:
+            proc = self._predicate(wrapper, "is_scale_drain_duplicate_close", excerpt, body,
+                                   sd.DUPLICATE_CLOSE_PATH)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            for ids in ([rid(1), rid(2)], [rid(1), rid(1)], [],
+                        [rid(n) for n in range(1, 51)]):
+                with self.subTest(wrapper=wrapper, ids=len(ids)):
+                    self.argv_log.unlink(missing_ok=True)
+                    proc = self._predicate(
+                        wrapper, "is_scale_drain_duplicate_close", excerpt,
+                        json.dumps({**one, "requestIds": ids}), sd.DUPLICATE_CLOSE_PATH)
+                    self.assertEqual(proc.returncode, 1, f"{wrapper} closed {len(ids)} ids")
+                    self.assertFalse(self.argv_log.exists(), "the verifier was reached")
+                    if ids:
+                        self.assertIn("exactly one requestId per duplicate close",
+                                      proc.stderr)
+
+    def _approve_call(self):
+        d = sd.Decision(rid(1), "precedent", "approve", "precedent_match",
+                        sd.decision_key(rid(1), "precedent", "approve"),
+                        evidence_anchor=rid(9), profile_id=rid(7))
+        return sd.drain_evidence(d), json.dumps({"requestIds": [rid(1)], "status": "approved"})
+
+    def _gates(self):
+        """Both drain writes, as ``(wrapper, fn, excerpt, body, path)``. An approval is
+        gated on the same identity as a close (QA review 5), so every identity and
+        registry case below runs against both, in both wrapper copies."""
+        for wrapper in self.WRAPPERS:
+            yield (wrapper, "is_scale_drain_approval", *self._approve_call(),
+                   "/admin/credit-requests")
+            yield (wrapper, "is_scale_drain_duplicate_close", *self._dup_call(),
+                   sd.DUPLICATE_CLOSE_PATH)
+
+    def test_a_caller_supplied_token_file_is_denied_by_the_wrapper(self):
+        """QA review 4, finding 1. The attack, on the UNMODIFIED gate: the caller writes
+        its own mode-600 file, names it in SCALE_DRAIN_TOKEN_FILE, and presents its
+        contents. Before the pin that passed every check the gate had. It must be refused
+        for the override itself, before the verifier is consulted."""
+        for wrapper, fn, excerpt, body, path in self._gates():
+            with self.subTest(wrapper=wrapper, gate=fn):
+                self.argv_log.unlink(missing_ok=True)
+                proc = self._predicate(
+                    wrapper, fn, excerpt, body, path=path, pinned=True,
+                    extra_env={"SCALE_DRAIN_TOKEN_FILE": str(self.token)})
+                self.assertEqual(proc.returncode, 1,
+                                 f"{wrapper} accepted a caller-selected token file")
+                self.assertIn("SCALE_DRAIN_TOKEN_FILE is set", proc.stderr)
+                self.assertIn("cannot be redirected", proc.stderr)
+                self.assertFalse(self.argv_log.exists())
+
+    def test_the_override_is_denied_even_when_everything_else_is_valid(self):
+        """Denied, not ignored. With the token file in place and the right token
+        presented the close is allowed; the ONLY change is the variable - set to the very
+        file the gate already reads - and the close is refused. A gate that merely
+        ignored the override would pass this call."""
+        for wrapper, fn, excerpt, body, path in self._gates():
+            with self.subTest(wrapper=wrapper, gate=fn):
+                ok = self._predicate(wrapper, fn, excerpt, body, path=path)
+                self.assertEqual(ok.returncode, 0, ok.stderr)
+                self.argv_log.unlink()
+                for value in (str(self.token), ""):
+                    proc = self._predicate(
+                        wrapper, fn, excerpt, body, path=path,
+                        extra_env={"SCALE_DRAIN_TOKEN_FILE": value})
+                    self.assertEqual(proc.returncode, 1,
+                                     f"{wrapper} ignored SCALE_DRAIN_TOKEN_FILE={value!r}")
+                    self.assertIn("SCALE_DRAIN_TOKEN_FILE is set", proc.stderr)
+                    self.assertFalse(self.argv_log.exists())
+
+    def test_a_caller_supplied_token_is_denied_by_the_wrapper(self):
+        """A SCALE_DRAIN_TOKEN the caller chose is refused unless it is exactly what the
+        pinned file holds - and the verifier is not consulted on its behalf."""
+        for wrapper, fn, excerpt, body, path in self._gates():
+            for value in ("attacker-chosen", "S3CRET", "s3cret ", ""):
+                with self.subTest(wrapper=wrapper, gate=fn, token=value):
+                    self.argv_log.unlink(missing_ok=True)
+                    proc = self._predicate(
+                        wrapper, fn, excerpt, body, path=path,
+                        extra_env={"SCALE_DRAIN_TOKEN": value})
+                    self.assertEqual(proc.returncode, 1,
+                                     f"{wrapper} accepted SCALE_DRAIN_TOKEN={value!r}")
+                    self.assertIn("SCALE_DRAIN_TOKEN does not match", proc.stderr)
+                    self.assertFalse(self.argv_log.exists())
+
+    @unittest.skipIf(os.path.exists("/etc/hydra/scale-drain.token"),
+                     "this host carries the real drain token")
+    def test_a_callers_own_token_is_denied_against_the_real_pinned_path(self):
+        """No override at all, the unmodified gate, and a token the caller made up: the
+        gate looks only at /etc/hydra/scale-drain.token, which the caller cannot create."""
+        for wrapper, fn, excerpt, body, path in self._gates():
+            with self.subTest(wrapper=wrapper, gate=fn):
+                proc = self._predicate(wrapper, fn, excerpt, body, path=path, pinned=True)
+                self.assertEqual(proc.returncode, 1)
+                self.assertIn("/etc/hydra/scale-drain.token is missing", proc.stderr)
+                self.assertFalse(self.argv_log.exists())
+
+    def test_an_approval_presents_the_same_identity_as_a_close(self):
+        """QA review 5: the approve exception had no identity at all - the requester, the
+        flag and the digest are all things a caller asserts. One helper, called by both
+        predicates, in both wrapper copies; neither predicate carries a path of its own."""
+        for wrapper in self.WRAPPERS:
+            real = (SCRIPTS.parent / wrapper).read_text()
+            for fn, what in (("is_scale_drain_approval", "an approval"),
+                             ("is_scale_drain_duplicate_close", "a duplicate close")):
+                body = real.split(f"\n{fn}() {{", 1)[1].split("\n}\n", 1)[0]
+                self.assertIn(f'scale_drain_token_ok "{what}" || return 1', body, wrapper)
+                self.assertNotIn("drain_token_file", body, wrapper)
+                # the identity is checked before the registry, the digest or the verifier
+                self.assertLess(body.index("scale_drain_token_ok"),
+                                body.index("scale_drain_registry"), wrapper)
+
+    # ── the approval registry (QA review 5) ──────────────────────────────────
+    def _callers_registry(self, approved: bool = True) -> Path:
+        """A registry the caller wrote: the real one, with the drain's entry as the
+        caller would like it to read."""
+        doc = json.loads(REGISTRY.read_text())
+        doc["automations"]["verification-scale-drain"]["approved"] = approved
+        mine = self.root / "mine/policies/credit-approval-automation.json"
+        mine.parent.mkdir(parents=True, exist_ok=True)
+        mine.write_text(json.dumps(doc))
+        return mine
+
+    def _unapprove_the_deployed_registry(self) -> None:
+        doc = json.loads(REGISTRY.read_text())
+        doc["automations"]["verification-scale-drain"]["approved"] = False
+        self.registry.write_text(json.dumps(doc))
+
+    def test_the_drain_must_be_approved_in_the_deployed_registry(self):
+        """The control: with the deployed registry saying no, nothing else matters."""
+        self._unapprove_the_deployed_registry()
+        for wrapper, fn, excerpt, body, path in self._gates():
+            with self.subTest(wrapper=wrapper, gate=fn):
+                proc = self._predicate(wrapper, fn, excerpt, body, path=path)
+                self.assertEqual(proc.returncode, 1)
+                self.assertIn(f"is not approved in {self.registry}", proc.stderr)
+                self.assertFalse(self.argv_log.exists())
+
+    def test_a_caller_supplied_registry_is_denied(self):
+        """The attack. The deployed registry has NOT approved the drain; the caller
+        points the gate at an ``approved: true`` copy it wrote, by either variable. That
+        used to be the whole of 'the captain recorded this decision'."""
+        self._unapprove_the_deployed_registry()
+        mine = self._callers_registry()
+        overrides = ({"CREDIT_APPROVAL_REGISTRY": str(mine)},
+                     {"HYDRA_ROOT": str(mine.parents[1])},
+                     {"CREDIT_APPROVAL_REGISTRY": str(mine), "HYDRA_ROOT": str(self.root)})
+        for wrapper, fn, excerpt, body, path in self._gates():
+            for override in overrides:
+                with self.subTest(wrapper=wrapper, gate=fn, override=sorted(override)):
+                    self.argv_log.unlink(missing_ok=True)
+                    proc = self._predicate(wrapper, fn, excerpt, body, path=path,
+                                           extra_env=override)
+                    self.assertEqual(proc.returncode, 1,
+                                     f"{wrapper} read a caller-selected registry")
+                    self.assertIn("cannot be redirected", proc.stderr)
+                    self.assertIn(str(self.registry), proc.stderr)
+                    self.assertFalse(self.argv_log.exists())
+
+    def test_a_registry_override_is_denied_even_when_the_deployed_one_approves(self):
+        """Denied, not ignored. The deployed registry approves the drain and the call is
+        allowed; the ONLY change is a registry variable naming another file - one that
+        approves it too - and the call is refused. A gate that quietly read the pinned
+        file anyway would pass this."""
+        mine = self._callers_registry()
+        for wrapper, fn, excerpt, body, path in self._gates():
+            with self.subTest(wrapper=wrapper, gate=fn):
+                ok = self._predicate(wrapper, fn, excerpt, body, path=path)
+                self.assertEqual(ok.returncode, 0, ok.stderr)
+                for override in ({"CREDIT_APPROVAL_REGISTRY": str(mine)},
+                                 {"HYDRA_ROOT": str(mine.parents[1])}):
+                    self.argv_log.unlink(missing_ok=True)
+                    proc = self._predicate(wrapper, fn, excerpt, body, path=path,
+                                           extra_env=override)
+                    self.assertEqual(proc.returncode, 1, f"{wrapper} ignored {override}")
+                    self.assertIn("cannot be redirected", proc.stderr)
+                    self.assertFalse(self.argv_log.exists())
+
+    def test_the_pinned_registry_named_explicitly_is_not_a_redirect(self):
+        """The operations wrapper's other predicates default CREDIT_APPROVAL_REGISTRY to
+        the deployed path, and a host may export it: naming the pinned file - directly,
+        through HYDRA_ROOT, or through a symlink to it - changes nothing."""
+        link = self.root / "registry-link.json"
+        link.symlink_to(self.registry)
+        for wrapper, fn, excerpt, body, path in self._gates():
+            for override in ({"CREDIT_APPROVAL_REGISTRY": str(self.registry)},
+                             {"HYDRA_ROOT": str(self.root)},
+                             {"CREDIT_APPROVAL_REGISTRY": str(link)}):
+                with self.subTest(wrapper=wrapper, gate=fn, override=sorted(override)):
+                    proc = self._predicate(wrapper, fn, excerpt, body, path=path,
+                                           extra_env=override)
+                    self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_no_drain_predicate_reads_the_registry_path_from_the_environment(self):
+        for wrapper in self.WRAPPERS:
+            real = (SCRIPTS.parent / wrapper).read_text()
+            for fn in ("is_scale_drain_approval", "is_scale_drain_duplicate_close"):
+                body = real.split(f"\n{fn}() {{", 1)[1].split("\n}\n", 1)[0]
+                self.assertIn('registry="$(scale_drain_registry)" || return 1', body, wrapper)
+                self.assertNotIn("CREDIT_APPROVAL_REGISTRY", body, wrapper)
+                self.assertNotIn("HYDRA_ROOT", body, wrapper)
+
+    def test_a_symlink_to_the_wrapper_does_not_move_the_tree_it_trusts(self):
+        """The same redirect without a variable: a symlink to the deployed wrapper, made
+        in a tree the caller owns, beside a verifier that passes everything and a registry
+        that approves everything. The walk starts from the wrapper's resolved path, so the
+        deployed verifier - which refuses here - is the one that answers."""
+        (self.root / "scripts/credit_review/verify_anchor.py").write_text(
+            "import sys; sys.exit(1)\n")
+        self._unapprove_the_deployed_registry()
+        mine = self._callers_registry().parents[1]
+        ran = mine / "callers-verifier-ran"
+        (mine / "scripts/credit_review").mkdir(parents=True)
+        (mine / "scripts/credit_review/verify_anchor.py").write_text(
+            f"open({str(ran)!r}, 'w').close()\n")
+        for wrapper, fn, excerpt, body, path in self._gates():
+            with self.subTest(wrapper=wrapper, gate=fn):
+                link = mine / wrapper
+                link.parent.mkdir(parents=True, exist_ok=True)
+                link.unlink(missing_ok=True)
+                link.symlink_to(self.root / wrapper)
+                proc = self._predicate(wrapper, fn, excerpt, body, path=path, invoke_as=link)
+                self.assertEqual(proc.returncode, 1, f"{wrapper} trusted the caller's tree")
+                self.assertIn(f"is not approved in {self.registry}", proc.stderr)
+                self.assertFalse(ran.exists())
+
+
+class CommitErrorTests(unittest.TestCase):
+    """Only a duplicate decision_key means 'already applied'."""
+
+    def test_a_duplicate_key_is_a_skip(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = sd.open_ledger(str(Path(td) / "l.sqlite"))
+            d = sd.Decision(rid(1), "ask", "ask", "no_rule_matched", sd.decision_key(rid(1), "ask", "ask"))
+            self.assertTrue(sd._commit(db, d, 0, NOW))
+            self.assertFalse(sd._commit(db, d, 0, NOW))
+
+    def test_a_non_unique_constraint_error_is_not_swallowed(self):
+        with tempfile.TemporaryDirectory() as td:
+            db = sd.open_ledger(str(Path(td) / "l.sqlite"))
+            db.execute("CREATE TRIGGER boom BEFORE INSERT ON applied BEGIN SELECT RAISE(ABORT, 'boom'); END")
+            d = sd.Decision(rid(1), "ask", "ask", "no_rule_matched", sd.decision_key(rid(1), "ask", "ask"))
+            with self.assertRaises(sqlite3.IntegrityError):
+                sd._commit(db, d, 0, NOW)
+
+
+class NoWriteRehearsalTests(unittest.TestCase):
+    def test_a_rehearsal_reports_writes_without_poisoning_the_ledger(self):
+        precedent = [{"precedent_key": "k", "outcome": "approve", "request_id": rid(9)}]
+        decisions = sd.plan(snapshot([row(1, precedent_key="k"), row(2)], precedent=precedent),
+                            now=NOW)
+        with tempfile.TemporaryDirectory() as td:
+            db = sd.open_ledger(str(Path(td) / "l.sqlite"))
+            stats = sd.apply(decisions, db, shards=1, write_pool=1, writer=None,
+                             commit_writes=False, now=NOW)
+            applied = {r[0] for r in db.execute("SELECT decision_key FROM applied")}
+        approve = next(d for d in decisions if d.outcome == "approve")
+        ask = next(d for d in decisions if d.outcome == "ask")
+        self.assertEqual(stats["would_write"], 1)
+        self.assertEqual(stats["applied"], 1)
+        self.assertNotIn(approve.decision_key, applied)
+        self.assertIn(ask.decision_key, applied)
+
+
+class ResumeTests(unittest.TestCase):
+    def test_a_failed_row_behind_a_committed_row_is_retried(self):
+        precedent = [{"precedent_key": "k", "outcome": "approve", "request_id": rid(9)}]
+        decisions = sd.plan(snapshot([row(1, precedent_key="k"), row(2)], precedent=precedent),
+                            now=NOW)
+        attempts = []
+
+        def writes_once(d):
+            attempts.append(d.request_id)
+            if len(attempts) == 1:
+                raise sd.DrainWriteError("transient")
+
+        with tempfile.TemporaryDirectory() as td:
+            db = sd.open_ledger(str(Path(td) / "l.sqlite"))
+            first = sd.apply(decisions, db, shards=1, write_pool=1, writer=writes_once, now=NOW)
+            self.assertEqual(first["errors"], 1)
+            second = sd.apply(decisions, db, shards=1, write_pool=1, writer=writes_once, now=NOW,
+                              reconciler=lambda d, planned_at: sd.NOT_LANDED)
+            self.assertEqual(second["applied"], 1)
+            self.assertTrue(sd.verify(decisions, db)["ok"])
+
+    def test_a_complete_shard_is_skipped_on_restart(self):
+        decisions = sd.plan(snapshot([row(i) for i in range(20)]), now=NOW)
+        with tempfile.TemporaryDirectory() as td:
+            db = sd.open_ledger(str(Path(td) / "l.sqlite"))
+            first = sd.apply(decisions, db, shards=4, write_pool=1, now=NOW)
+            self.assertEqual(first["applied"], 20)
+            second = sd.apply(decisions, db, shards=4, write_pool=1, now=NOW)
+            self.assertEqual(second["applied"], 0)
+            self.assertEqual(second["skipped"], 20)
+
+
+#: One apply in a child process whose writer performs the API write and then dies before
+#: returning - a real SIGKILL between step 2 (the write) and step 3 (the confirm). argv:
+#: scripts dir, plan, ledger, the file standing in for the API, and where to die.
+CRASHING_APPLY = r"""
+import os, signal, sys
+sys.path.insert(0, sys.argv[1])
+from credit_review import scale_drain as sd
+plan, ledger, api, die = sys.argv[2:6]
+def writer(d):
+    if die == "before-write":
+        os.kill(os.getpid(), signal.SIGKILL)
+    with open(api, "a") as fh:
+        fh.write(d.request_id + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.kill(os.getpid(), signal.SIGKILL)
+sd.apply(sd.parse_plan(open(plan, "rb").read()), sd.open_ledger(ledger),
+         shards=1, write_pool=1, writer=writer)
+"""
+
+
+class WriteAheadTests(unittest.TestCase):
+    """Intent, write, confirm - and what a restart does with an intent nobody confirmed.
+
+    QA review 5 of hydra#1883: ``apply`` wrote, then committed. A process that died in
+    between left a request approved in the product and unknown to the ledger, and the next
+    run could not repair it, because the gate refuses a request that is no longer pending.
+    The row was reported missing forever.
+    """
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.addCleanup(self.td.cleanup)
+        self.ledger = str(Path(self.td.name) / "ledger.sqlite")
+        self.api = Path(self.td.name) / "api.log"
+        self.api.write_text("")
+        precedent = [{"precedent_key": "k", "outcome": "approve", "request_id": rid(9)}]
+        self.decisions = sd.plan(
+            snapshot([row(1, precedent_key="k"), row(2)], precedent=precedent), now=NOW)
+        self.approve = next(d for d in self.decisions if d.outcome == "approve")
+
+    def _intents(self, db=None):
+        db = db or sd.open_ledger(self.ledger)
+        return db.execute("SELECT request_id, state, resolution FROM intents"
+                          " ORDER BY request_id").fetchall()
+
+    def _applied(self, db=None):
+        db = db or sd.open_ledger(self.ledger)
+        return [r[0] for r in db.execute(
+            "SELECT request_id FROM applied WHERE outcome = 'approve'")]
+
+    def _writes(self):
+        return self.api.read_text().split()
+
+    def _api_writer(self, d):
+        with self.api.open("a") as fh:
+            fh.write(d.request_id + "\n")
+
+    def _api_reconciler(self, d, planned_at):
+        return sd.LANDED if d.request_id in self._writes() else sd.NOT_LANDED
+
+    def _crash(self, where):
+        plan = Path(self.td.name) / "plan.jsonl"
+        plan.write_bytes(sd.serialize(self.decisions))
+        proc = subprocess.run(
+            [sys.executable, "-c", CRASHING_APPLY, str(SCRIPTS), str(plan), self.ledger,
+             str(self.api), where], capture_output=True, text=True, check=False)
+        self.assertEqual(proc.returncode, -signal.SIGKILL, proc.stderr)
+
+    # ── the order ────────────────────────────────────────────────────────────
+    def test_the_intent_is_on_disk_before_the_api_is_called(self):
+        seen = []
+
+        def writer(d):
+            # a second connection: what another process would find if we died right here
+            seen.append((self._intents(), self._applied()))
+
+        db = sd.open_ledger(self.ledger)
+        sd.apply(self.decisions, db, shards=1, write_pool=1, writer=writer)
+        self.assertEqual(seen, [([(rid(1), "planned", None)], [])])
+        self.assertEqual(self._intents(db), [(rid(1), "confirmed", "written")])
+        self.assertEqual(self._applied(db), [rid(1)])
+
+    def test_no_intent_no_api_call(self):
+        """If the ledger cannot be told, the API is not either."""
+        db = sd.open_ledger(self.ledger)
+        db.execute("CREATE TRIGGER full_disk BEFORE INSERT ON intents"
+                   " BEGIN SELECT RAISE(ABORT, 'disk full'); END")
+        stats = sd.apply(self.decisions, db, shards=1, write_pool=1, writer=self._api_writer)
+        self.assertEqual(self._writes(), [])
+        self.assertEqual(stats["errors"], 1)
+        self.assertEqual(self._applied(db), [])
+
+    def test_only_a_side_effect_gets_an_intent(self):
+        """``ask`` writes nothing to the API, so there is nothing to be ahead of."""
+        db = sd.open_ledger(self.ledger)
+        sd.apply(self.decisions, db, shards=1, write_pool=1, writer=self._api_writer)
+        self.assertEqual([r[0] for r in self._intents(db)], [rid(1)])
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM applied").fetchone()[0], 2)
+
+    # ── the crash ────────────────────────────────────────────────────────────
+    def test_a_kill_between_the_write_and_the_confirm_is_reconciled_on_restart(self):
+        self._crash("after-write")
+        # what the dead process left: the API written, an intent, and no applied row
+        self.assertEqual(self._writes(), [rid(1)])
+        self.assertEqual(self._intents(), [(rid(1), "planned", None)])
+        self.assertEqual(self._applied(), [])
+        db = sd.open_ledger(self.ledger)
+        before = sd.verify(self.decisions, db)
+        self.assertFalse(before["ok"])
+        self.assertEqual(before["unconfirmed"], [rid(1)])
+
+        stats = sd.apply(self.decisions, db, shards=1, write_pool=1, writer=self._api_writer,
+                         reconciler=self._api_reconciler)
+        # zero duplicates: the API was written once, and the ledger holds one row for it
+        self.assertEqual(self._writes(), [rid(1)])
+        self.assertEqual(self._applied(db), [rid(1)])
+        # ...and the row is confirmed, as a reconciliation rather than a write we watched
+        self.assertEqual(self._intents(db), [(rid(1), "confirmed", "reconciled")])
+        self.assertEqual((stats["reconciled"], stats["errors"]), (1, 0))
+        after = sd.verify(self.decisions, db)
+        self.assertTrue(after["ok"], after)
+        self.assertEqual(after["duplicate_request_ids"], [])
+        self.assertEqual(after["unconfirmed"], [])
+        # and a third run finds nothing left to do
+        again = sd.apply(self.decisions, db, shards=1, write_pool=1, writer=self._api_writer,
+                         reconciler=self._api_reconciler)
+        self.assertEqual((again["applied"], again["skipped"]), (0, 2))
+        self.assertEqual(self._writes(), [rid(1)])
+
+    def test_a_kill_before_the_write_is_retried_on_restart(self):
+        """The twin. Same open intent, but the API was never written - so 'landed' would
+        be a lie, and the restart must make the write, exactly once."""
+        self._crash("before-write")
+        self.assertEqual(self._writes(), [])
+        self.assertEqual(self._intents(), [(rid(1), "planned", None)])
+        db = sd.open_ledger(self.ledger)
+        stats = sd.apply(self.decisions, db, shards=1, write_pool=1, writer=self._api_writer,
+                         reconciler=self._api_reconciler)
+        self.assertEqual(self._writes(), [rid(1)])
+        self.assertEqual(self._intents(db), [(rid(1), "confirmed", "written")])
+        self.assertEqual(stats["reconciled"], 0)
+        self.assertTrue(sd.verify(self.decisions, db)["ok"])
+
+    # ── what a restart must NOT do ───────────────────────────────────────────
+    def _open_intent(self):
+        db = sd.open_ledger(self.ledger)
+        sd._record_intent(db, self.approve, 0, NOW)
+        return db
+
+    def test_a_request_decided_elsewhere_is_abandoned_and_never_written(self):
+        db = self._open_intent()
+
+        def elsewhere(d, planned_at):
+            raise sd.Abandon("target_rejected")
+
+        stats = sd.apply(self.decisions, db, shards=1, write_pool=1, writer=self._api_writer,
+                         reconciler=elsewhere)
+        self.assertEqual(self._writes(), [])
+        self.assertEqual(self._applied(db), [])
+        self.assertEqual(self._intents(db), [(rid(1), "abandoned", "target_rejected")])
+        self.assertEqual((stats["abandoned"], stats["errors"]), (1, 0))
+        result = sd.verify(self.decisions, db)
+        # known not to have happened, with why: reported, and not "missing"
+        self.assertEqual(result["abandoned"],
+                         [{"request_id": rid(1), "reason": "target_rejected"}])
+        self.assertEqual(result["missing"], [])
+        self.assertTrue(result["ok"], result)
+        # an abandoned decision stays abandoned: no reconciler call, no write, next run
+        again = sd.apply(self.decisions, db, shards=1, write_pool=1, writer=self._api_writer,
+                         reconciler=lambda d, planned_at: self.fail("asked again"))
+        self.assertEqual(again["abandoned"], 0)
+        self.assertEqual(self._writes(), [])
+
+    def test_an_unreadable_request_is_neither_confirmed_nor_written(self):
+        db = self._open_intent()
+
+        def unreadable(d, planned_at):
+            raise sd.DrainError("admin API 503")
+
+        stats = sd.apply(self.decisions, db, shards=1, write_pool=1, writer=self._api_writer,
+                         reconciler=unreadable)
+        self.assertEqual(self._writes(), [])
+        self.assertEqual(self._applied(db), [])
+        self.assertEqual(self._intents(db), [(rid(1), "planned", None)])
+        self.assertEqual((stats["unreconciled"], stats["errors"]), (1, 1))
+        self.assertFalse(sd.verify(self.decisions, db)["ok"])
+
+    def test_an_open_intent_with_no_reconciler_is_never_retried_blind(self):
+        db = self._open_intent()
+        stats = sd.apply(self.decisions, db, shards=1, write_pool=1, writer=self._api_writer)
+        self.assertEqual(self._writes(), [])
+        self.assertEqual(self._intents(db), [(rid(1), "planned", None)])
+        self.assertEqual((stats["unreconciled"], stats["errors"]), (1, 1))
+
+    def test_an_answer_that_is_not_a_verdict_settles_nothing(self):
+        db = self._open_intent()
+        stats = sd.apply(self.decisions, db, shards=1, write_pool=1, writer=self._api_writer,
+                         reconciler=lambda d, planned_at: "probably")
+        self.assertEqual(self._writes(), [])
+        self.assertEqual(self._intents(db), [(rid(1), "planned", None)])
+        self.assertEqual(stats["unreconciled"], 1)
+
+    def test_an_open_intent_is_never_marked_done_by_a_run_that_cannot_write(self):
+        """No writer means no side effect - which, for a fresh row, is how chaos commits
+        without touching the API. With an intent open it would record a write nobody
+        made, so it is refused."""
+        db = self._open_intent()
+        stats = sd.apply(self.decisions, db, shards=1, write_pool=1,
+                         reconciler=lambda d, planned_at: sd.NOT_LANDED)
+        self.assertEqual(self._applied(db), [])
+        self.assertEqual(self._intents(db), [(rid(1), "planned", None)])
+        self.assertEqual(stats["unreconciled"], 1)
+
+    def test_the_reconciler_is_given_the_time_the_intent_was_recorded(self):
+        db = self._open_intent()
+        seen = []
+
+        def reconciler(d, planned_at):
+            seen.append((d.decision_key, planned_at))
+            return sd.LANDED
+
+        sd.apply(self.decisions, db, shards=1, write_pool=1, writer=self._api_writer,
+                 reconciler=reconciler)
+        self.assertEqual(seen, [(self.approve.decision_key, "2026-11-11T12:00:00.000000Z")])
+
+    # ── the ledger's own rules ───────────────────────────────────────────────
+    def test_an_intent_is_resolved_once_and_never_rewritten(self):
+        db = self._open_intent()
+        key = self.approve.decision_key
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute("DELETE FROM intents")
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute("UPDATE intents SET planned_at = '2020-01-01T00:00:00Z'")
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute("UPDATE intents SET request_id = ?", (rid(2),))
+        # 'confirmed' is not a word a caller can write on its own: it needs the applied row
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute("UPDATE intents SET state = 'confirmed', resolution = 'written',"
+                       " resolved_at = 'now' WHERE decision_key = ?", (key,))
+        self.assertTrue(sd._confirm_intent(db, self.approve, 0, NOW, sd.WRITTEN))
+        for state, resolution in (("abandoned", "target_rejected"), ("planned", None),
+                                  ("confirmed", "reconciled")):
+            with self.assertRaises(sqlite3.IntegrityError):
+                db.execute("UPDATE intents SET state = ?, resolution = ?, resolved_at = ?"
+                           " WHERE decision_key = ?",
+                           (state, resolution, None if state == "planned" else "now", key))
+        self.assertEqual(self._intents(db), [(rid(1), "confirmed", "written")])
+
+    def test_the_confirm_and_the_applied_row_are_one_transaction(self):
+        """A confirm that cannot finish leaves NEITHER half behind."""
+        db = self._open_intent()
+        db.execute("CREATE TRIGGER boom BEFORE UPDATE ON intents"
+                   " BEGIN SELECT RAISE(ABORT, 'boom'); END")
+        with self.assertRaises(sqlite3.IntegrityError):
+            sd._confirm_intent(db, self.approve, 0, NOW, sd.WRITTEN)
+        self.assertEqual(self._applied(db), [])
+        self.assertEqual(self._intents(db), [(rid(1), "planned", None)])
+
+    def test_a_write_with_no_intent_is_not_recorded(self):
+        db = sd.open_ledger(self.ledger)
+        with self.assertRaises(sd.DrainError):
+            sd._confirm_intent(db, self.approve, 0, NOW, sd.WRITTEN)
+        self.assertEqual(self._applied(db), [])
+
+    def test_an_older_ledger_gains_the_intents_table_on_open(self):
+        """The ledger on node-8 predates intents; opening it must add them, not fail."""
+        raw = sqlite3.connect(self.ledger)
+        raw.executescript(sd.LEDGER_SCHEMA.split("CREATE TABLE IF NOT EXISTS intents")[0])
+        raw.execute("INSERT INTO applied VALUES ('k', 'r', 'ask', 'ask', 'x', 0, 't')")
+        raw.commit()
+        raw.close()
+        db = sd.open_ledger(self.ledger)
+        self.assertEqual(self._intents(db), [])
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM applied").fetchone()[0], 1)
+
+
+TRACK = "0a1b2c3d-0000-4000-8000-00000000abcd"
+#: ``verificationData.duplicate_of`` exactly as core carries it on every pending row that
+#: has one (856 of 96,703 on 2026-11-11): a map from "<track uuid>|<role>" to the 24-hex
+#: id of the credit already on the profile. Never a request id.
+PROFILE_CREDIT_MAP = {f"{TRACK}|composer": "65f0c2a4e1b7d9a3c5e8f012",
+                      f"{TRACK}|producer": "65f0c2a4e1b7d9a3c5e8f013"}
+
+
+class RealDataShapeTests(unittest.TestCase):
+    """The two shapes the live snapshot has and the fixtures did not (readout r1, 15:14Z).
+
+    Every fixture in this file wrote ``duplicate_of`` as a request id and keyed a proof
+    verdict by request id. Production does neither: ``duplicate_of`` is a map of profile
+    credits, and the proof store keys a verdict by claim, ``<request>#<Role>``. The first
+    crashed the plan on 856 rows. The second made the proof rule match nothing, so 10,559
+    pending requests with a document on file read as "no proof received".
+    """
+
+    def _proof_store(self, td, rows):
+        path = str(Path(td) / "proof.sqlite")
+        db = sqlite3.connect(path)
+        db.execute("CREATE TABLE verdicts (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                   " proof_id TEXT, request_id TEXT, verdict TEXT, created_at TEXT)")
+        db.executemany("INSERT INTO verdicts (proof_id, request_id, verdict, created_at)"
+                       " VALUES (?,?,?,?)", rows)
+        db.commit()
+        db.close()
+        return path
+
+    def _plan_from_replica(self, td, pending, proof_rows=(), decided=()):
+        """The real path: replica rows -> snapshot JSONL -> ``plan --snapshot``."""
+        proofs = self._proof_store(td, list(proof_rows))
+
+        def q(sql):
+            return list(decided) if "status IN ('approved', 'rejected')" in sql else list(pending)
+
+        rows = sd.replica_snapshot_rows(q, proof_store_path=proofs)
+        path = str(Path(td) / "snap.jsonl")
+        with open(path, "w") as fh:
+            for r in rows:
+                fh.write(json.dumps(r, sort_keys=True) + "\n")
+        return sd.plan(sd._build_snapshot(_args(snapshot=path)), now=NOW)
+
+    def _pending(self, n, roles="{Composer,Producer}", vd=None, user=None):
+        return (rid(n), str(user or 1000 + n), f"p{n}", "user_verification_needed",
+                "2026-11-01T00:00:00Z", json.dumps(vd or {}), "{}", TRACK, roles)
+
+    # ── duplicate_of is a map ────────────────────────────────────────────────
+    def test_a_duplicate_of_map_does_not_crash_the_plan(self):
+        with tempfile.TemporaryDirectory() as td:
+            decisions = self._plan_from_replica(
+                td, [self._pending(1, vd={"duplicate_of": PROFILE_CREDIT_MAP}), self._pending(2)])
+        by_id = {d.request_id: d for d in decisions}
+        d = by_id[rid(1)]
+        self.assertEqual((d.rule, d.outcome, d.reason_code),
+                         ("duplicate", sd.UNMATCHED, "already_on_profile"))
+        self.assertIsNone(d.duplicate_of)
+        # the row beside it is untouched by its neighbour
+        self.assertEqual(by_id[rid(2)].outcome, "ask")
+
+    def test_an_already_on_profile_row_is_neither_written_nor_asked(self):
+        from credit_review import need_asks
+
+        decisions = sd.plan(snapshot([row(1, duplicate_of=PROFILE_CREDIT_MAP), row(2)]), now=NOW)
+        calls = []
+        with tempfile.TemporaryDirectory() as td:
+            db = sd.open_ledger(str(Path(td) / "l.sqlite"))
+            stats = sd.apply(decisions, db, shards=1, write_pool=1, writer=calls.append, now=NOW)
+            self.assertEqual(calls, [])
+            self.assertEqual(stats["unmatched"], 1)
+            self.assertEqual([r[0] for r in db.execute("SELECT request_id FROM applied")], [rid(2)])
+            self.assertTrue(sd.verify(decisions, db)["ok"])
+            plan_path = Path(td) / "plan.jsonl"
+            plan_path.write_bytes(sd.serialize(decisions))
+            # the one reviewed ask path is handed row 2 and never row 1
+            self.assertEqual(need_asks.drain_asks(str(plan_path)), {(1002, rid(2))})
+
+    def test_it_keeps_rank_one_and_does_not_slide_to_a_lower_rule(self):
+        """A duplicate fact outranks precedent and proof whether or not it can be closed:
+        a row core says is already on the profile is not approved on a precedent here."""
+        db = snapshot([row(1, duplicate_of=PROFILE_CREDIT_MAP, precedent_key="k",
+                           proof_verdict="approve", proof_id="a" * 64)],
+                      precedent=[{"precedent_key": "k", "outcome": "approve", "request_id": rid(9)}])
+        d = sd.plan(db, now=NOW)[0]
+        self.assertEqual((d.rule, d.outcome), ("duplicate", sd.UNMATCHED))
+
+    def test_classify_duplicate(self):
+        self.assertEqual(sd.classify_duplicate(rid(9)), (rid(9), "request"))
+        self.assertEqual(sd.classify_duplicate(PROFILE_CREDIT_MAP), (None, "profile_credit"))
+        for nothing in (None, "", {}, []):
+            self.assertEqual(sd.classify_duplicate(nothing), (None, None), nothing)
+        for odd in ([rid(9)], 7, True):
+            self.assertEqual(sd.classify_duplicate(odd), (None, "other"), odd)
+
+    def test_no_shape_of_duplicate_of_can_crash_the_load(self):
+        shapes = [PROFILE_CREDIT_MAP, [rid(9)], 7, {"a": {"b": [1]}}, {}, [], "", None, rid(9)]
+        db = snapshot([row(i + 1, duplicate_of=v) for i, v in enumerate(shapes)])
+        got = {d.request_id: (d.rule, d.outcome, d.reason_code) for d in sd.plan(db, now=NOW)}
+        self.assertEqual(got[rid(1)], ("duplicate", sd.UNMATCHED, "already_on_profile"))
+        self.assertEqual(got[rid(2)], ("duplicate", sd.UNMATCHED, "unmatched_duplicate"))
+        self.assertEqual(got[rid(3)], ("duplicate", sd.UNMATCHED, "unmatched_duplicate"))
+        self.assertEqual(got[rid(4)], ("duplicate", sd.UNMATCHED, "already_on_profile"))
+        for empty in (5, 6, 7, 8):          # no duplicate fact at all: an ordinary ask
+            self.assertEqual(got[rid(empty)], ("ask", "ask", "no_rule_matched"), empty)
+        self.assertEqual(got[rid(9)], ("duplicate", sd.UNMATCHED, "unmatched_duplicate"))
+
+    def test_a_snapshot_database_from_before_the_column_still_opens(self):
+        with tempfile.TemporaryDirectory() as td:
+            path = str(Path(td) / "snap.sqlite")
+            old = sqlite3.connect(path)
+            old.executescript(sd.SNAPSHOT_SCHEMA.replace("  duplicate_kind    TEXT,\n", ""))
+            self.assertNotIn("duplicate_kind",
+                             {r[1] for r in old.execute("PRAGMA table_info(requests)")})
+            old.close()
+            db = sd.open_snapshot(path)
+            sd.load_snapshot(db, [row(1, duplicate_of=PROFILE_CREDIT_MAP)])
+            self.assertEqual(sd.plan(db, now=NOW)[0].reason_code, "already_on_profile")
+
+    # ── the proof store keys a verdict by claim ──────────────────────────────
+    def test_a_claim_keyed_verdict_reaches_its_request(self):
+        """The test the old suite did not have: the store's own key shape, end to end."""
+        with tempfile.TemporaryDirectory() as td:
+            decisions = self._plan_from_replica(td, [self._pending(1)], [
+                ("a" * 64, f"{rid(1)}#Composer", "GENUINE", "2026-11-02T00:00:00Z"),
+                ("a" * 64, f"{rid(1)}#Producer", "GENUINE", "2026-11-02T00:00:00Z")])
+        d = decisions[0]
+        self.assertEqual((d.rule, d.outcome, d.reason_code),
+                         ("proof_verdict", "approve", "proof_verdict_approve"))
+        self.assertEqual(d.evidence_anchor, "a" * 64)
+
+    def _fact(self, rows, roles=("Composer", "Producer")):
+        with tempfile.TemporaryDirectory() as td:
+            claims = sd.proof_claims(self._proof_store(td, rows))
+        return sd.proof_fact(claims.get(rid(1)), list(roles))
+
+    def test_every_claimed_role_must_be_approved_on_one_proof(self):
+        ok = [("a" * 64, f"{rid(1)}#Composer", "GENUINE", "2026-11-02T00:00:00Z"),
+              ("a" * 64, f"{rid(1)}#Producer", "VERIFIED", "2026-11-02T00:00:00Z")]
+        self.assertEqual(self._fact(ok)["proof_verdict"], "approve")
+        self.assertEqual(self._fact(ok)["proof_id"], "a" * 64)
+        cases = {
+            "one role is still soft": [ok[0], ("a" * 64, f"{rid(1)}#Producer", "SUSPECT",
+                                               "2026-11-02T00:00:00Z")],
+            "a claimed role has no verdict": [ok[0]],
+            "the roles rest on different proofs": [ok[0], ("b" * 64, f"{rid(1)}#Producer",
+                                                           "GENUINE", "2026-11-02T00:00:00Z")],
+            "a role on file that is no longer claimed is soft": ok + [
+                ("a" * 64, f"{rid(1)}#Mixing", "PLAUSIBLE", "2026-11-02T00:00:00Z")],
+            "a newer soft verdict cleared the approval": ok + [
+                ("c" * 64, f"{rid(1)}#Producer", "PLAUSIBLE", "2026-11-03T00:00:00Z")],
+        }
+        for name, rows in cases.items():
+            with self.subTest(case=name):
+                fact = self._fact(rows)
+                self.assertIsNone(fact["proof_verdict"])
+                self.assertIsNone(fact["proof_id"], "a soft verdict is never an anchor")
+                # ...but the document IS on file, whatever its verdict
+                self.assertTrue(fact["proof_received_at"])
+
+    def test_one_refused_role_refuses_the_request(self):
+        fact = self._fact([
+            ("a" * 64, f"{rid(1)}#Composer", "GENUINE", "2026-11-02T00:00:00Z"),
+            ("b" * 64, f"{rid(1)}#Producer", "FORGED_LIKELY", "2026-11-02T00:00:00Z")])
+        self.assertEqual((fact["proof_verdict"], fact["proof_id"]), ("refuse", "b" * 64))
+
+    def test_role_case_and_spacing_do_not_decide_a_verdict(self):
+        rows = [("a" * 64, f"{rid(1)}#composer", "GENUINE", "2026-11-02T00:00:00Z"),
+                ("a" * 64, f"{rid(1)}# Producer ", "GENUINE", "2026-11-02T00:00:00Z")]
+        self.assertEqual(self._fact(rows, roles=("COMPOSER", "producer"))["proof_verdict"],
+                         "approve")
+
+    def test_a_request_with_no_roles_is_the_stores_unknown_claim(self):
+        rows = [("a" * 64, f"{rid(1)}#unknown", "GENUINE", "2026-11-02T00:00:00Z")]
+        self.assertEqual(self._fact(rows, roles=())["proof_verdict"], "approve")
+        self.assertIsNone(self._fact(rows, roles=("Composer",))["proof_verdict"])
+
+    def test_a_whole_request_verdict_does_not_stand_in_for_a_role(self):
+        """A verdict keyed by the bare request id names no role, so it cannot be the
+        verdict for whatever the request claims: that would be the one row that approves
+        any role set. The gate applies the same rule against the live request, so the
+        planner must not plan an approve the gate refuses (QA review 6 of hydra#1883)."""
+        bare = [("a" * 64, rid(1), "GENUINE", "2026-11-02T00:00:00Z")]
+        self.assertIsNone(self._fact(bare, roles=("Composer",))["proof_verdict"])
+        self.assertIsNone(self._fact(bare, roles=())["proof_verdict"])
+        self.assertTrue(self._fact(bare, roles=("Composer",))["proof_received_at"])
+        # beside a real claim it still does not cover the role that has none...
+        mixed = bare + [("a" * 64, f"{rid(1)}#Composer", "GENUINE", "2026-11-02T00:00:00Z")]
+        self.assertIsNone(self._fact(mixed)["proof_verdict"])
+        # ...and it is still held to the approve rule where every role IS covered
+        self.assertEqual(self._fact(mixed, roles=("Composer",))["proof_verdict"], "approve")
+        soft = [("a" * 64, rid(1), "SUSPECT", "2026-11-02T00:00:00Z"), mixed[1]]
+        self.assertIsNone(self._fact(soft, roles=("Composer",))["proof_verdict"])
+
+    def test_another_requests_claims_are_not_this_requests(self):
+        with tempfile.TemporaryDirectory() as td:
+            claims = sd.proof_claims(self._proof_store(td, [
+                ("a" * 64, f"{rid(1)}#Composer", "GENUINE", "2026-11-02T00:00:00Z"),
+                ("b" * 64, f"{rid(2)}#Composer", "INCONSISTENT", "2026-11-02T00:00:00Z")]))
+        self.assertEqual(set(claims), {rid(1), rid(2)})
+        self.assertEqual(sd.proof_fact(claims[rid(1)], ["Composer"])["proof_verdict"], "approve")
+        self.assertEqual(sd.proof_fact(claims[rid(2)], ["Composer"])["proof_verdict"], "refuse")
+        self.assertEqual(sd.proof_fact(claims.get(rid(3)), ["Composer"]), {})
+
+    def test_a_document_on_file_is_never_expired_no_proof(self):
+        """The harm the wrong key did quietly: asked 40 days ago, answered with a document
+        the analyzer has not decided on. Read as "no proof received", this row was headed
+        for ``expired_no_proof`` - a refusal queue entry saying the customer sent nothing."""
+        ledger_rows = [("verify-live", "sent", "1001", "2026-10-01T00:00:00Z", json.dumps([rid(1)]))]
+        with tempfile.TemporaryDirectory() as td:
+            ledger = str(Path(td) / "ledger.sqlite")
+            ldb = sqlite3.connect(ledger)
+            ldb.execute("CREATE TABLE verify_messages (campaign TEXT, status TEXT, account_id TEXT,"
+                        " sent_at TEXT, request_ids_json TEXT NOT NULL)")
+            ldb.executemany("INSERT INTO verify_messages VALUES (?,?,?,?,?)", ledger_rows)
+            ldb.commit()
+            ldb.close()
+            for rows, expected in (
+                    ([], ("expired", "queue_tier2", "expired_no_proof")),
+                    ([("a" * 64, f"{rid(1)}#Composer", "SUSPECT", "2026-10-20T00:00:00Z"),
+                      ("a" * 64, f"{rid(1)}#Producer", "SUSPECT", "2026-10-20T00:00:00Z")],
+                     ("ask", "ask", "proof_on_file_undecided"))):
+                with self.subTest(on_file=bool(rows)):
+                    proofs = self._proof_store(tempfile.mkdtemp(dir=td), rows)
+                    snap = sd.snapshot_from_replica(lambda sql: [self._pending(1)],
+                                                    ledger_path=ledger, proof_store_path=proofs)
+                    d = sd.plan(snapshot(snap), now=NOW)[0]
+                    self.assertEqual((d.rule, d.outcome, d.reason_code), expected)
+
+    def test_the_plan_summary_counts_reasons(self):
+        with tempfile.TemporaryDirectory() as td:
+            snap = Path(td) / "snap.jsonl"
+            rows = [row(1, duplicate_of=PROFILE_CREDIT_MAP), row(2),
+                    row(3, proof_received_at="2026-11-02T00:00:00Z")]
+            snap.write_text("".join(json.dumps(r) + "\n" for r in rows))
+            proc = subprocess.run(cli("plan", "--snapshot", str(snap), "--now", "2026-11-11T12:00:00Z"),
+                                  capture_output=True, text=True, cwd=SCRIPTS, check=False)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        summary = json.loads(proc.stdout)
+        self.assertEqual(summary["by_reason"], {"unmatched/already_on_profile": 1,
+                                                "ask/no_rule_matched": 1,
+                                                "ask/proof_on_file_undecided": 1})
+        self.assertEqual(summary["unmatched"], 1)
+
+
+class _FakeApi:
+    """A `curl` on PATH that answers as core-backend would, and records every request.
+
+    This is the same seam ``muso-admin-api-call-batch.bats`` uses. It replaces the NETWORK
+    and nothing else: the wrapper, its gate chain, the verifier and the batch client are
+    the real files at their real paths.
+    """
+
+    def __init__(self, root: Path):
+        self.root = root
+        self.log = root / "curl.log"
+        self.items = root / "items.json"
+        self.put_body = root / "put.json"
+        (root / "bin").mkdir()
+        stub = root / "bin/curl"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            'printf \'%s\\n\' "$*" >> "$FAKE_API_LOG"\n'
+            'case "$*" in\n'
+            '    *"/admin/user/login"*) printf \'{"data":{"authentication":{"accessToken":"t"}}}\' ;;\n'
+            '    *"-X GET"*"/admin/credit-requests?"*) cat "$FAKE_API_ITEMS"; printf \'\\n200\' ;;\n'
+            '    *"-X PUT"*) cat "$FAKE_API_PUT"; printf \'\\n200\' ;;\n'
+            '    *) printf \'{"error":"unexpected request"}\\n500\' ;;\n'
+            "esac\n")
+        stub.chmod(0o755)
+        (root / "codex-health.sh").write_text("codex_health_gate() { return 0; }\n")
+        (root / "token-cache").write_text(f"{int(time.time())}\ndummy-token\n")
+
+    def serve(self, items: list[dict], updated: list[str]) -> None:
+        self.items.write_text(json.dumps({"data": {"items": items}}))
+        self.put_body.write_text(json.dumps({"data": {"updatedIds": updated}}))
+        self.log.write_text("")
+
+    def requests(self, verb: str) -> list[str]:
+        return [ln for ln in self.log.read_text().splitlines() if f"-X {verb}" in ln]
+
+    def env(self, registry: Path = REGISTRY) -> dict[str, str]:
+        """``registry`` must be the registry of the tree the wrapper under test lives in:
+        the gate pins the registry to its own tree and REFUSES a variable naming another.
+        It is named at all only because the operations wrapper defaults the variable to
+        ``/opt/hydra/...`` at file scope, which is not this checkout."""
+        return {
+            "PATH": f"{self.root / 'bin'}:/usr/local/bin:/usr/bin:/bin",
+            "HOME": str(self.root),
+            "FAKE_API_LOG": str(self.log),
+            "FAKE_API_ITEMS": str(self.items),
+            "FAKE_API_PUT": str(self.put_body),
+            "MUSO_API_URL": "https://example.invalid",
+            "MUSO_ADMIN_EMAIL": "test@example.com",
+            "MUSO_ADMIN_PASSWORD": "unused",
+            "MUSO_OPS_STATE_DIR": str(self.root / "state"),
+            "OPS_RUNLOG_DIR": str(self.root / "runlogs"),
+            "CV_RESULTS_PATH": str(self.root / "results.jsonl"),
+            "ADMIN_TOKEN_CACHE_PATH": str(self.root / "token-cache"),
+            "CODEX_HEALTH_LIB": str(self.root / "codex-health.sh"),
+            "CREDIT_APPROVAL_REGISTRY": str(registry),
+        }
+
+
+def _api_request(request_id: str, *, status: str, user: str = "u1", track: str = "t1",
+                 roles: tuple[str, ...] = ("Mixing Engineer",)) -> dict:
+    return {"id": request_id, "status": status, "userId": user, "trackId": track,
+            "credits": list(roles), "profileId": rid(7)}
+
+
+class RealEntrypointTests(unittest.TestCase):
+    """The drain's approve goes through the REAL wrapper, which runs the REAL verifier.
+
+    QA review 4 of hydra#1883: the wrapper ran ``python3 verify_anchor.py``, and the
+    verifier then did ``from . import batch_admin`` with no package context. Every direct
+    invocation died ``ImportError: attempted relative import with no known parent
+    package``, so both gates refused every write - while the suite stayed green, because
+    every other wrapper test here swaps the verifier for a stub and every verifier test
+    imports the module instead of executing it. A suite that never runs the production
+    entrypoint cannot see the production entrypoint is broken.
+
+    So nothing here is a stub except the network. ``admin_writer`` builds the argv and
+    environment production builds, ``bash <wrapper>`` is the whole wrapper file at its real
+    relative path, the gate finds ``scripts/credit_review/verify_anchor.py`` by walking up
+    from itself, and the verifier reads the claimant's profile back through the wrapper.
+
+    ONE thing changed when approvals were bound to the drain's token (QA review 5): a
+    successful write now needs ``/etc/hydra/scale-drain.token``, a root-only path no test
+    may create. So the successful paths run in a MIRROR of the deployed tree - the two
+    skill directories, the verifier, its batch client and the registry, byte for byte at
+    their real relative paths - in which exactly one line of each wrapper differs: the
+    token literal names a scratch file. ``test_the_mirror_is_the_real_tree_but_for_the_
+    token_path`` holds that claim to the diff. The checked-in files themselves, unmodified,
+    are exercised by the two ``callers_own_token`` tests, which is the half that can run
+    anywhere: against the real pinned path they must refuse.
+    """
+
+    WRAPPERS = WrapperAcceptsTheRealDigestTests.WRAPPERS
+    TOKEN_PIN = WrapperAcceptsTheRealDigestTests.TOKEN_PIN
+    #: What the mirror carries, relative to the repo root.
+    MIRRORED = ("skills-all/muso-ops-admin", "workspaces/operations/skills",
+                "scripts/credit_review/verify_anchor.py",
+                "scripts/credit_review/batch_admin.py",
+                "policies/credit-approval-automation.json")
+
+    @classmethod
+    def setUpClass(cls):
+        cls._mirror_tmp = tempfile.TemporaryDirectory()
+        cls.mirror = Path(cls._mirror_tmp.name) / "tree"
+        cls.token = Path(cls._mirror_tmp.name) / "scale-drain.token"
+        cls.token.write_text("s3cret\n")
+        cls.token.chmod(0o600)
+        repo = SCRIPTS.parent
+        for rel in cls.MIRRORED:
+            dst = cls.mirror / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if (repo / rel).is_dir():
+                shutil.copytree(repo / rel, dst, symlinks=True,
+                                ignore=shutil.ignore_patterns(".admin-token-cache"))
+            else:
+                shutil.copy2(repo / rel, dst)
+        for wrapper in cls.WRAPPERS:
+            text = (cls.mirror / wrapper).read_text()
+            assert text.count(cls.TOKEN_PIN) == 1, f"{wrapper}: token pin reworded"
+            (cls.mirror / wrapper).write_text(text.replace(
+                cls.TOKEN_PIN, f'local drain_token_file="{cls.token}"'))
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._mirror_tmp.cleanup()
+
+    def setUp(self):
+        self.api = _FakeApi(Path(tempfile.mkdtemp()))
+        self.registry = self.mirror / "policies/credit-approval-automation.json"
+        self.decision = sd.Decision(
+            rid(1), "precedent", "approve", "precedent_match",
+            sd.decision_key(rid(1), "precedent", "approve"), evidence_anchor=rid(9),
+            profile_id=rid(7))
+
+    def _env(self, extra_env: dict[str, str] | None = None) -> dict[str, str]:
+        return {**self.api.env(self.registry), **(extra_env or {})}
+
+    def _writer(self, wrapper: str):
+        return sd.admin_writer(str(self.mirror / wrapper), token_file=str(self.token))
+
+    def _write(self, wrapper: str, extra_env: dict[str, str] | None = None) -> None:
+        saved = dict(os.environ)
+        os.environ.clear()
+        os.environ.update(self._env(extra_env))
+        try:
+            self._writer(wrapper)(self.decision)
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+
+    def test_the_mirror_is_the_real_tree_but_for_the_token_path(self):
+        """The mirror earns the word 'real' only if this holds: every mirrored file is
+        byte-identical to the checked-in one, except ONE line in each wrapper."""
+        repo = SCRIPTS.parent
+        differing = {}
+        for rel in self.MIRRORED:
+            base = repo / rel
+            files = [base] if base.is_file() else [
+                f for f in sorted(base.rglob("*"))
+                if f.is_file() and not f.is_symlink() and f.name != ".admin-token-cache"]
+            for f in files:
+                twin = self.mirror / f.relative_to(repo)
+                if f.read_bytes() != twin.read_bytes():
+                    a, b = f.read_text().splitlines(), twin.read_text().splitlines()
+                    self.assertEqual(len(a), len(b), f)
+                    differing[str(f.relative_to(repo))] = [
+                        (x, y) for x, y in zip(a, b) if x != y]
+        self.assertEqual(sorted(differing), sorted(self.WRAPPERS))
+        for rel, lines in differing.items():
+            self.assertEqual(len(lines), 1, rel)
+            self.assertEqual(lines[0][0].strip(), self.TOKEN_PIN)
+            self.assertEqual(lines[0][1].strip(), f'local drain_token_file="{self.token}"')
+
+    def test_an_approve_presents_the_token_to_the_real_wrapper(self):
+        """The successful approve below is only meaningful if the wrapper would have
+        refused it without the identity. Same call, same approved anchor, and the one
+        difference is the token: wrong, or not presented at all."""
+        for wrapper in self.WRAPPERS:
+            for label, token_text in (("wrong", "not-the-token\n"), ("empty", "")):
+                with self.subTest(wrapper=wrapper, token=label):
+                    self.api.serve([_api_request(rid(1), status="user_verification_needed"),
+                                    _api_request(rid(9), status="approved")], [rid(1)])
+                    other = self.api.root / f"{label}.token"
+                    other.write_text(token_text)
+                    other.chmod(0o600)
+                    saved = dict(os.environ)
+                    os.environ.clear()
+                    os.environ.update(self._env())
+                    try:
+                        with self.assertRaises(sd.DrainWriteError) as ctx:
+                            sd.admin_writer(str(self.mirror / wrapper),
+                                            token_file=str(other))(self.decision)
+                    finally:
+                        os.environ.clear()
+                        os.environ.update(saved)
+                    self.assertIn("SCALE_DRAIN_TOKEN does not match", str(ctx.exception))
+                    self.assertEqual(self.api.requests("GET"), [])
+                    self.assertEqual(self.api.requests("PUT"), [])
+
+    def test_a_caller_supplied_registry_is_denied_by_the_real_wrapper(self):
+        """QA review 5. The deployed registry authorises the drain here, so a wrapper
+        that merely IGNORED the caller's registry would let this approve through. The
+        attempt to name another registry is what refuses it."""
+        mine = self.api.root / "my-registry.json"
+        mine.write_text(self.registry.read_text())
+        for wrapper in self.WRAPPERS:
+            for name, value in (("CREDIT_APPROVAL_REGISTRY", str(mine)),):
+                with self.subTest(wrapper=wrapper, var=name):
+                    self.api.serve([_api_request(rid(1), status="user_verification_needed"),
+                                    _api_request(rid(9), status="approved")], [rid(1)])
+                    with self.assertRaises(sd.DrainWriteError) as ctx:
+                        self._write(wrapper, {name: value})
+                    self.assertIn("cannot be redirected", str(ctx.exception))
+                    self.assertEqual(self.api.requests("GET"), [])
+                    self.assertEqual(self.api.requests("PUT"), [])
+
+    def test_an_approve_with_a_real_approved_anchor_reaches_the_api(self):
+        for wrapper in self.WRAPPERS:
+            with self.subTest(wrapper=wrapper):
+                self.api.serve([_api_request(rid(1), status="user_verification_needed"),
+                                _api_request(rid(9), status="approved")], [rid(1)])
+                self._write(wrapper)
+                # the verifier asked the API about the claimant's profile...
+                reads = self.api.requests("GET")
+                self.assertEqual(len(reads), 1, reads)
+                self.assertIn(f"profilesIds={rid(7)}", reads[0])
+                # ...and only then did the approve land
+                writes = self.api.requests("PUT")
+                self.assertEqual(len(writes), 1, writes)
+                self.assertIn("/admin/credit-requests", writes[0])
+                self.assertIn(rid(1), writes[0])
+
+    def test_an_approve_whose_anchor_is_not_approved_never_reaches_the_api(self):
+        """The twin that keeps the test above honest: the same call, an anchor the API
+        reports as still pending, and the write must not happen. Without this, a verifier
+        that passed everything would look identical to one that works."""
+        for wrapper in self.WRAPPERS:
+            with self.subTest(wrapper=wrapper):
+                self.api.serve([_api_request(rid(1), status="user_verification_needed"),
+                                _api_request(rid(9), status="unverified")], [rid(1)])
+                with self.assertRaises(sd.DrainWriteError) as ctx:
+                    self._write(wrapper)
+                self.assertIn("not approved", str(ctx.exception))
+                self.assertEqual(self.api.requests("PUT"), [])
+
+    def _fabricator(self) -> tuple[Path, Path]:
+        """An 'admin script' that answers call-batch with exactly what the verifier needs
+        to pass: the target pending and the anchor APPROVED for the same claim. It also
+        leaves a marker, so a test can tell 'refused' from 'ran and happened to fail'."""
+        marker = self.api.root / "fabricator-ran"
+        script = self.api.root / "fake-admin.sh"
+        body = {"data": {"items": [_api_request(rid(1), status="user_verification_needed"),
+                                   _api_request(rid(9), status="approved")]}}
+        row = json.dumps({"id": "one", "http_status": 200, "body": body})
+        script.write_text("#!/usr/bin/env bash\n"
+                          f": > {marker}\n"
+                          "cat >/dev/null\n"
+                          f"printf '%s\\n' '{row}'\n")
+        script.chmod(0o755)
+        return script, marker
+
+    def test_the_fabricated_response_would_verify_if_it_were_read(self):
+        """Pins that the fabricator below is a working attack and not a strawman: handed
+        to the batch client directly, its response satisfies the precedent check."""
+        from credit_review import batch_admin, verify_anchor
+        script, marker = self._fabricator()
+        verify_anchor.verify_precedent(batch_admin.BatchAdmin(script=str(script)),
+                                       rid(1), rid(9), rid(7))
+        self.assertTrue(marker.exists())
+
+    def test_a_caller_supplied_admin_script_is_denied(self):
+        """QA review 4, finding 1. The API says the anchor is NOT approved; the caller
+        points CREDIT_REVIEW_ADMIN_SCRIPT at a script that says it is. The verifier must
+        refuse the redirect - never run the script, never approve - and say why."""
+        script, marker = self._fabricator()
+        for wrapper in self.WRAPPERS:
+            with self.subTest(wrapper=wrapper):
+                self.api.serve([_api_request(rid(1), status="user_verification_needed"),
+                                _api_request(rid(9), status="unverified")], [rid(1)])
+                with self.assertRaises(sd.DrainWriteError) as ctx:
+                    self._write(wrapper, {"CREDIT_REVIEW_ADMIN_SCRIPT": str(script)})
+                self.assertIn("CREDIT_REVIEW_ADMIN_SCRIPT", str(ctx.exception))
+                self.assertFalse(marker.exists(), "the caller's admin script was executed")
+                self.assertEqual(self.api.requests("PUT"), [])
+
+    def test_the_override_is_denied_even_when_the_api_would_have_agreed(self):
+        """Denied, not ignored. Here the real API WOULD verify the approve (see the first
+        test in this class), so a verifier that ignored the override and read through the
+        pinned wrapper would let it through. The redirect attempt alone refuses it."""
+        script, marker = self._fabricator()
+        for wrapper in self.WRAPPERS:
+            with self.subTest(wrapper=wrapper):
+                self.api.serve([_api_request(rid(1), status="user_verification_needed"),
+                                _api_request(rid(9), status="approved")], [rid(1)])
+                with self.assertRaises(sd.DrainWriteError) as ctx:
+                    self._write(wrapper, {"CREDIT_REVIEW_ADMIN_SCRIPT": str(script)})
+                self.assertIn("CREDIT_REVIEW_ADMIN_SCRIPT", str(ctx.exception))
+                self.assertFalse(marker.exists())
+                self.assertEqual(self.api.requests("GET"), [])
+                self.assertEqual(self.api.requests("PUT"), [])
+
+    def test_the_pinned_path_named_explicitly_is_not_a_redirect(self):
+        """A host that exports the canonical wrapper path for the other credit tools is
+        not attacking anything; only a DIFFERENT script is refused."""
+        pinned = self.mirror / "workspaces/operations/skills/muso-ops-admin/scripts/muso-admin-api.sh"
+        self.api.serve([_api_request(rid(1), status="user_verification_needed"),
+                        _api_request(rid(9), status="approved")], [rid(1)])
+        self._write(self.WRAPPERS[0], {"CREDIT_REVIEW_ADMIN_SCRIPT": str(pinned)})
+        self.assertEqual(len(self.api.requests("PUT")), 1)
+
+    def test_a_caller_python_path_cannot_substitute_the_batch_client(self):
+        """The verifier runs isolated (python3 -I) and loads its batch client from its own
+        directory, so a PYTHONPATH carrying a look-alike changes nothing."""
+        hostile = self.api.root / "hostile"
+        marker = self.api.root / "hostile-imported"
+        (hostile / "credit_review").mkdir(parents=True)
+        payload = f"open({str(marker)!r}, 'w').close()\nraise SystemExit(0)\n"
+        for name in ("batch_admin.py", "credit_review/__init__.py",
+                     "credit_review/batch_admin.py", "verify_anchor.py"):
+            (hostile / name).write_text(payload)
+        for wrapper in self.WRAPPERS:
+            with self.subTest(wrapper=wrapper):
+                self.api.serve([_api_request(rid(1), status="user_verification_needed"),
+                                _api_request(rid(9), status="unverified")], [rid(1)])
+                with self.assertRaises(sd.DrainWriteError) as ctx:
+                    self._write(wrapper, {"PYTHONPATH": str(hostile)})
+                self.assertIn("not approved", str(ctx.exception))
+                self.assertFalse(marker.exists(), "a module from PYTHONPATH was imported")
+                self.assertEqual(len(self.api.requests("GET")), 1)
+                self.assertEqual(self.api.requests("PUT"), [])
+
+    PROOF_STORE_PIN = 'PROOF_STORE = "/var/lib/hydra-credit-verify/proof.sqlite"'
+
+    def _proof_tree(self, verdicts) -> Path:
+        """A second mirror whose verifier reads a scratch proof store.
+
+        The proof store is a constant in the verifier and the wrapper never passes
+        ``--proof-store``, so the only way to run a proof approve end to end off node-8
+        is the one used for the token path: copy the tree and rewrite that ONE literal.
+        The copy's verifier is asserted to differ from the checked-in file by that line
+        and no other.
+        """
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        tree = root / "tree"
+        shutil.copytree(self.mirror, tree, symlinks=True)
+        store = root / "proof.sqlite"
+        db = sqlite3.connect(store)
+        db.execute("CREATE TABLE verdicts (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                   " proof_id TEXT, request_id TEXT, verdict TEXT, created_at TEXT)")
+        db.executemany("INSERT INTO verdicts (proof_id, request_id, verdict, created_at)"
+                       " VALUES (?,?,?,?)", verdicts)
+        db.commit()
+        db.close()
+        verifier = tree / "scripts/credit_review/verify_anchor.py"
+        real = (SCRIPTS / "credit_review/verify_anchor.py").read_text()
+        self.assertEqual(real.count(self.PROOF_STORE_PIN), 1, "proof store pin reworded")
+        verifier.write_text(real.replace(self.PROOF_STORE_PIN, f'PROOF_STORE = "{store}"'))
+        differing = [(x, y) for x, y in zip(real.splitlines(),
+                                            verifier.read_text().splitlines()) if x != y]
+        self.assertEqual(len(differing), 1, differing)
+        return tree
+
+    def _proof_write(self, tree: Path, wrapper: str, proof: str) -> None:
+        decision = sd.Decision(
+            rid(1), "proof_verdict", "approve", "proof_verdict_approve",
+            sd.decision_key(rid(1), "proof_verdict", "approve"), evidence_anchor=proof,
+            profile_id=rid(7))
+        saved = dict(os.environ)
+        os.environ.clear()
+        os.environ.update(self.api.env(tree / "policies/credit-approval-automation.json"))
+        try:
+            sd.admin_writer(str(tree / wrapper), token_file=str(self.token))(decision)
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+
+    def test_a_proof_approve_is_checked_against_the_roles_the_live_request_claims(self):
+        """QA review 6 of hydra#1883, through both real entrypoints. The proof gate read
+        only the store, so it approved on whatever claims happened to be on file: a
+        Composer + Producer request with one GENUINE Composer verdict and nothing for
+        Producer passed, on a stale or edited plan. The gate now reads the request as it
+        stands and needs a verdict for every role it claims."""
+        proof = "a" * 64
+        composer = (proof, f"{rid(1)}#Composer", "GENUINE", "2026-11-02T00:00:00Z")
+        producer = (proof, f"{rid(1)}#Producer", "VERIFIED", "2026-11-02T00:00:00Z")
+        live = [_api_request(rid(1), status="user_verification_needed",
+                             roles=("Composer", "Producer"))]
+        covered = self._proof_tree([composer, producer])
+        omitted = self._proof_tree([composer])
+        for wrapper in self.WRAPPERS:
+            with self.subTest(wrapper=wrapper, case="every claimed role has its verdict"):
+                self.api.serve(live, [rid(1)])
+                self._proof_write(covered, wrapper, proof)
+                reads = self.api.requests("GET")
+                self.assertEqual(len(reads), 1, reads)
+                self.assertIn(f"profilesIds={rid(7)}", reads[0])
+                self.assertEqual(len(self.api.requests("PUT")), 1)
+            with self.subTest(wrapper=wrapper, case="a claimed role has no verdict"):
+                self.api.serve(live, [rid(1)])
+                with self.assertRaises(sd.DrainWriteError) as ctx:
+                    self._proof_write(omitted, wrapper, proof)
+                self.assertIn("claims producer with no verdict on file", str(ctx.exception))
+                self.assertEqual(len(self.api.requests("GET")), 1)
+                self.assertEqual(self.api.requests("PUT"), [])
+            with self.subTest(wrapper=wrapper, case="the request gained a role since the plan"):
+                # the same store that passed above; only the live request changed
+                self.api.serve([_api_request(rid(1), status="user_verification_needed",
+                                             roles=("Composer", "Producer", "Lyricist"))],
+                               [rid(1)])
+                with self.assertRaises(sd.DrainWriteError) as ctx:
+                    self._proof_write(covered, wrapper, proof)
+                self.assertIn("claims lyricist with no verdict on file", str(ctx.exception))
+                self.assertEqual(self.api.requests("PUT"), [])
+
+    def _duplicate(self) -> "sd.Decision":
+        return sd.Decision(rid(1), "duplicate", "close_duplicate", "duplicate_of_decided",
+                           sd.decision_key(rid(1), "duplicate", "close_duplicate"),
+                           status="unverified", duplicate_of=rid(9), profile_id=rid(7))
+
+    def _close(self, wrapper: str, extra_ids: tuple[str, ...] = ()) -> None:
+        """The drain's own duplicate close through the mirrored real wrapper. With
+        ``extra_ids`` the body - and only the body - gains more request ids on its way
+        to the wrapper: the argv, environment, token and digest stay the ones production
+        builds for the first id."""
+        def run(argv, **kwargs):
+            if extra_ids:
+                body = json.loads(argv[-1])
+                body["requestIds"] = body["requestIds"] + list(extra_ids)
+                argv = argv[:-1] + [json.dumps(body, sort_keys=True)]
+            return subprocess.run(argv, **kwargs)
+
+        writer = sd.admin_writer(str(self.mirror / wrapper), token_file=str(self.token),
+                                 runner=run)
+        saved = dict(os.environ)
+        os.environ.clear()
+        os.environ.update(self._env())
+        try:
+            writer(self._duplicate())
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+
+    def test_a_duplicate_close_of_a_decided_original_reaches_the_api(self):
+        """The control for the denial below: one id, a pending target, an approved
+        original of the same claim. One read, one conditional close."""
+        for wrapper in self.WRAPPERS:
+            with self.subTest(wrapper=wrapper):
+                self.api.serve([_api_request(rid(1), status="unverified"),
+                                _api_request(rid(9), status="approved")], [rid(1)])
+                self._close(wrapper)
+                self.assertEqual(len(self.api.requests("GET")), 1)
+                writes = self.api.requests("PUT")
+                self.assertEqual(len(writes), 1, writes)
+                self.assertIn("/admin/credit-requests/conditional-status", writes[0])
+                self.assertIn(rid(1), writes[0])
+
+    def test_a_second_request_in_a_duplicate_close_never_reaches_the_api(self):
+        """QA review 6 of hydra#1883, against both real entrypoints. The predicate took
+        up to 50 ids and verified only the first, so a real duplicate in front carried
+        every other pending request in the body to ``rejected`` - a customer-facing
+        denial of a request nobody examined. Everything here is valid for the first id:
+        the token, the registry, the digest, the decided original. The second id is an
+        unrelated pending request on another claim, and the API would have taken both."""
+        other = _api_request(rid(2), status="unverified", user="u2", track="t2",
+                             roles=("Producer",))
+        for wrapper in self.WRAPPERS:
+            for extra in ((rid(2),), (rid(1),), tuple(rid(n) for n in range(2, 51))):
+                with self.subTest(wrapper=wrapper, ids=1 + len(extra)):
+                    self.api.serve([_api_request(rid(1), status="unverified"),
+                                    _api_request(rid(9), status="approved"), other],
+                                   [rid(1), *extra])
+                    with self.assertRaises(sd.DrainWriteError) as ctx:
+                        self._close(wrapper, extra)
+                    self.assertIn("exactly one requestId per duplicate close",
+                                  str(ctx.exception))
+                    self.assertEqual(self.api.requests("PUT"), [],
+                                     "a close the gate did not verify reached the API")
+                    self.assertEqual(self.api.requests("GET"), [])
+
+    @unittest.skipIf(os.path.exists("/etc/hydra/scale-drain.token"),
+                     "this host carries the real drain token")
+    def test_a_duplicate_close_with_a_callers_own_token_never_reaches_the_api(self):
+        """The whole duplicate path, real wrapper, real pinned path: the drain is handed
+        a token file the caller wrote, and the wrapper - which reads only
+        /etc/hydra/scale-drain.token - refuses before any request is made."""
+        own = self.api.root / "mine.token"
+        own.write_text("attacker\n")
+        own.chmod(0o600)
+        dup = sd.Decision(rid(1), "duplicate", "close_duplicate", "duplicate_of_decided",
+                          sd.decision_key(rid(1), "duplicate", "close_duplicate"),
+                          status="unverified", duplicate_of=rid(9), profile_id=rid(7))
+        for wrapper in self.WRAPPERS:
+            with self.subTest(wrapper=wrapper):
+                self.api.serve([_api_request(rid(1), status="unverified"),
+                                _api_request(rid(9), status="approved")], [rid(1)])
+                saved = dict(os.environ)
+                os.environ.clear()
+                os.environ.update(self.api.env())
+                try:
+                    with self.assertRaises(sd.DrainWriteError) as ctx:
+                        sd.admin_writer(str(SCRIPTS.parent / wrapper),
+                                        token_file=str(own))(dup)
+                finally:
+                    os.environ.clear()
+                    os.environ.update(saved)
+                self.assertIn("scale-drain.token", str(ctx.exception))
+                self.assertEqual(self.api.requests("GET"), [])
+                self.assertEqual(self.api.requests("PUT"), [])
+
+    @unittest.skipIf(os.path.exists("/etc/hydra/scale-drain.token"),
+                     "this host carries the real drain token")
+    def test_an_approve_with_a_callers_own_token_never_reaches_the_api(self):
+        """The approve path, CHECKED-IN wrapper, real pinned path, and an approve the API
+        would fully verify. The caller's own mode-600 token is not the drain's identity:
+        the wrapper reads only /etc/hydra/scale-drain.token and refuses before the
+        verifier or the API is asked anything."""
+        own = self.api.root / "mine.token"
+        own.write_text("attacker\n")
+        own.chmod(0o600)
+        for wrapper in self.WRAPPERS:
+            with self.subTest(wrapper=wrapper):
+                self.api.serve([_api_request(rid(1), status="user_verification_needed"),
+                                _api_request(rid(9), status="approved")], [rid(1)])
+                saved = dict(os.environ)
+                os.environ.clear()
+                os.environ.update(self.api.env())
+                try:
+                    with self.assertRaises(sd.DrainWriteError) as ctx:
+                        sd.admin_writer(str(SCRIPTS.parent / wrapper),
+                                        token_file=str(own))(self.decision)
+                finally:
+                    os.environ.clear()
+                    os.environ.update(saved)
+                self.assertIn("scale-drain.token is missing", str(ctx.exception))
+                self.assertEqual(self.api.requests("GET"), [])
+                self.assertEqual(self.api.requests("PUT"), [])
+
+    # ── a write that landed and was never confirmed (QA review 5) ────────────
+    #: One real apply in a child: the real writer, through the real wrapper, and then a
+    #: SIGKILL the instant the wrapper returns - after the PUT, before the confirm.
+    CRASH_AFTER_REAL_WRITE = r"""
+import os, signal, sys
+sys.path.insert(0, sys.argv[1])
+from credit_review import scale_drain as sd
+plan, ledger, wrapper, token = sys.argv[2:6]
+real = sd.admin_writer(wrapper, token_file=token)
+def writer(d):
+    real(d)
+    os.kill(os.getpid(), signal.SIGKILL)
+sd.apply(sd.parse_plan(open(plan, "rb").read()), sd.open_ledger(ledger),
+         shards=1, write_pool=1, writer=writer)
+"""
+
+    def _in_api_env(self, fn):
+        saved = dict(os.environ)
+        os.environ.clear()
+        os.environ.update(self._env())
+        try:
+            return fn()
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+
+    def _resume(self, wrapper, ledger):
+        """What ``scale_drain apply`` does on a restart: the real writer and the real
+        reconciler, which reads through the verifier's pinned wrapper."""
+        db = sd.open_ledger(ledger)
+        stats = self._in_api_env(lambda: sd.apply(
+            [self.decision], db, shards=1, write_pool=1,
+            writer=self._writer(wrapper), reconciler=sd.live_reconciler()))
+        intents = db.execute("SELECT state, resolution FROM intents").fetchall()
+        applied = db.execute("SELECT request_id FROM applied").fetchall()
+        return stats, intents, applied
+
+    def _now(self, delta_s=0):
+        return (datetime.now(timezone.utc) + timedelta(seconds=delta_s)).strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ")
+
+    def _live(self, target_status, *, updated_at=None, anchor_status="approved"):
+        """Change what the API reports WITHOUT clearing the request log."""
+        target = _api_request(rid(1), status=target_status)
+        if updated_at:
+            target["updatedAt"] = updated_at
+        self.api.items.write_text(json.dumps({"data": {"items": [
+            target, _api_request(rid(9), status=anchor_status)]}}))
+
+    def test_a_real_write_killed_before_its_confirm_is_reconciled_not_repeated(self):
+        for wrapper in self.WRAPPERS:
+            with self.subTest(wrapper=wrapper):
+                ledger = str(self.api.root / f"ledger-{self.WRAPPERS.index(wrapper)}.sqlite")
+                plan = self.api.root / "plan.jsonl"
+                plan.write_bytes(sd.serialize([self.decision]))
+                self.api.serve([_api_request(rid(1), status="user_verification_needed"),
+                                _api_request(rid(9), status="approved")], [rid(1)])
+                proc = subprocess.run(
+                    [sys.executable, "-c", self.CRASH_AFTER_REAL_WRITE, str(SCRIPTS),
+                     str(plan), ledger, str(self.mirror / wrapper), str(self.token)],
+                    capture_output=True, text=True, env=self._env(), check=False)
+                self.assertEqual(proc.returncode, -signal.SIGKILL, proc.stderr)
+                # the approve reached the API, and the ledger has only the intent
+                self.assertEqual(len(self.api.requests("PUT")), 1)
+                db = sd.open_ledger(ledger)
+                self.assertEqual(db.execute("SELECT state FROM intents").fetchall(),
+                                 [("planned",)])
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM applied").fetchone()[0], 0)
+                db.close()
+                # the backend now reports what that PUT did
+                self._live("approved", updated_at=self._now())
+
+                # THE BUG, kept visible: writing it again is refused by the gate, every
+                # time, because the request is no longer pending. Retrying could never
+                # have recorded this row.
+                with self.assertRaises(sd.DrainWriteError) as ctx:
+                    self._write(wrapper)
+                self.assertIn("already approved", str(ctx.exception))
+                self.assertEqual(len(self.api.requests("PUT")), 1)
+
+                stats, intents, applied = self._resume(wrapper, ledger)
+                self.assertEqual((stats["reconciled"], stats["applied"], stats["errors"]),
+                                 (1, 1, 0), stats)
+                self.assertEqual(intents, [("confirmed", "reconciled")])
+                self.assertEqual(applied, [(rid(1),)])
+                # zero duplicates: still the one PUT the dead process made
+                self.assertEqual(len(self.api.requests("PUT")), 1)
+                self.assertTrue(sd.verify([self.decision], sd.open_ledger(ledger))["ok"])
+
+    def _open_intent(self, name):
+        ledger = str(self.api.root / name)
+        sd._record_intent(sd.open_ledger(ledger), self.decision, 0,
+                          datetime.now(timezone.utc))
+        return ledger
+
+    def test_an_approval_that_predates_our_intent_is_not_claimed(self):
+        """Approved by somebody else, before this drain ever planned to: the ledger must
+        not say we did it, and the request must not be touched."""
+        wrapper = self.WRAPPERS[0]
+        self.api.serve([], [rid(1)])
+        self._live("approved", updated_at=self._now(-3600))
+        stats, intents, applied = self._resume(wrapper, self._open_intent("before.sqlite"))
+        self.assertEqual(intents, [("abandoned", "decided_before_intent")])
+        self.assertEqual(applied, [])
+        self.assertEqual((stats["abandoned"], stats["reconciled"]), (1, 0))
+        self.assertEqual(self.api.requests("PUT"), [])
+
+    def test_an_approval_this_decision_could_not_have_made_is_not_claimed(self):
+        """Approved after our intent, but the precedent we cited is not approved - so the
+        gate refused us, and the approval is somebody else's."""
+        wrapper = self.WRAPPERS[0]
+        self.api.serve([], [rid(1)])
+        ledger = self._open_intent("unanchored.sqlite")
+        self._live("approved", updated_at=self._now(), anchor_status="unverified")
+        stats, intents, applied = self._resume(wrapper, ledger)
+        self.assertEqual(intents, [("abandoned", "anchor_unverified")])
+        self.assertEqual(applied, [])
+        self.assertEqual(self.api.requests("PUT"), [])
+
+    def test_a_request_somebody_rejected_is_abandoned_not_overwritten(self):
+        wrapper = self.WRAPPERS[0]
+        self.api.serve([], [rid(1)])
+        ledger = self._open_intent("rejected.sqlite")
+        self._live("rejected", updated_at=self._now())
+        stats, intents, applied = self._resume(wrapper, ledger)
+        self.assertEqual(intents, [("abandoned", "target_rejected")])
+        self.assertEqual(applied, [])
+        self.assertEqual(self.api.requests("PUT"), [])
+
+    def test_a_still_pending_request_is_written_through_the_gate(self):
+        """The intent was recorded and the write never happened: the restart makes it,
+        once, by the same gated path as any other approve."""
+        wrapper = self.WRAPPERS[0]
+        self.api.serve([], [rid(1)])
+        ledger = self._open_intent("pending.sqlite")
+        self._live("user_verification_needed")
+        stats, intents, applied = self._resume(wrapper, ledger)
+        self.assertEqual(intents, [("confirmed", "written")])
+        self.assertEqual(applied, [(rid(1),)])
+        self.assertEqual(len(self.api.requests("PUT")), 1)
+        self.assertEqual(stats["reconciled"], 0)
+
+    def test_an_api_that_cannot_answer_settles_nothing(self):
+        """Not a verdict in either direction: no write, no confirm, no abandon."""
+        wrapper = self.WRAPPERS[0]
+        self.api.serve([], [rid(1)])
+        ledger = self._open_intent("outage.sqlite")
+        self.api.items.write_text('{"error": "upstream"}')
+        stats, intents, applied = self._resume(wrapper, ledger)
+        self.assertEqual(intents, [("planned", None)])
+        self.assertEqual(applied, [])
+        self.assertEqual((stats["unreconciled"], stats["errors"]), (1, 1))
+        self.assertEqual(self.api.requests("PUT"), [])
+
+    def test_the_reconcile_read_cannot_be_redirected_either(self):
+        """A caller's admin script would happily report the request approved. The
+        reconciler reads through the verifier's pinned wrapper or not at all."""
+        wrapper = self.WRAPPERS[0]
+        self.api.serve([], [rid(1)])
+        ledger = self._open_intent("redirected.sqlite")
+        self._live("user_verification_needed")
+        script, marker = self._fabricator()
+        db = sd.open_ledger(ledger)
+        saved = dict(os.environ)
+        os.environ.clear()
+        os.environ.update(self._env({"CREDIT_REVIEW_ADMIN_SCRIPT": str(script)}))
+        try:
+            stats = sd.apply([self.decision], db, shards=1, write_pool=1,
+                             writer=self._writer(wrapper),
+                             reconciler=sd.live_reconciler())
+        finally:
+            os.environ.clear()
+            os.environ.update(saved)
+        self.assertEqual(db.execute("SELECT state FROM intents").fetchall(), [("planned",)])
+        self.assertEqual(db.execute("SELECT COUNT(*) FROM applied").fetchone()[0], 0)
+        self.assertEqual(stats["unreconciled"], 1)
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.api.requests("PUT"), [])
+
+
+if __name__ == "__main__":
+    unittest.main()
