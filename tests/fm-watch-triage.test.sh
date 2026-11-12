@@ -1701,7 +1701,8 @@ test_secondmate_buried_block_wakes_despite_busy_agent() {
     watch_bg "$state" "$fakebin" "$out"
     pid=$!
     wait_for_exit "$pid" 100 || fail "busy secondmate's blocker did not wake after '$suffix'"
-    grep -q 'signal:' "$out" && grep -F "$state/mate.status" "$out" >/dev/null \
+    grep -q 'signal:' "$out" || fail "watcher printed no signal reason: $(cat "$out")"
+  grep -F "$state/mate.status" "$out" >/dev/null \
       || fail "busy secondmate's blocker was not surfaced"
     grep -F "$state/mate.status" "$state/.wake-queue" >/dev/null \
       || fail "busy secondmate's blocker was not durably queued"
@@ -1769,7 +1770,8 @@ test_self_announced_close_after_open_decisions_fold_does_not_rewake() {
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "folded close enqueued a durable wake"; }
   printf 'blocked: worker still needs help\n' >> "$status_file"
   wait_for_exit "$pid" 100 || fail "a later worker line after a folded close was swallowed"
-  grep -q 'signal:' "$out" && grep -F "$status_file" "$out" >/dev/null \
+  grep -q 'signal:' "$out" || fail "watcher printed no signal reason: $(cat "$out")"
+  grep -F "$status_file" "$out" >/dev/null \
     || fail "the later worker line did not surface as a signal"
   pass "a close after OPEN DECISIONS fold never wakes its own home, and the next real note still does"
 }
@@ -1790,7 +1792,8 @@ test_folded_worker_decision_without_home_append_still_wakes() {
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "a folded worker decision with no home append was swallowed"
-  grep -q 'signal:' "$out" && grep -F "$status_file" "$out" >/dev/null \
+  grep -q 'signal:' "$out" || fail "watcher printed no signal reason: $(cat "$out")"
+  grep -F "$status_file" "$out" >/dev/null \
     || fail "the folded worker decision did not surface as a signal: $(cat "$out")"
   pass "a folded worker decision with no home append still wakes"
 }
@@ -1824,7 +1827,8 @@ test_separate_self_announced_answers_after_fold_wake_once() {
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "the unclassified worker decisions were swallowed"
-  grep -q 'signal:' "$out" && grep -F "$status_file" "$out" >/dev/null \
+  grep -q 'signal:' "$out" || fail "watcher printed no signal reason: $(cat "$out")"
+  grep -F "$status_file" "$out" >/dev/null \
     || fail "the worker decisions did not surface as a signal: $(cat "$out")"
   ack_stopped_cycle "$state" || fail "could not handle the worker decisions' wake"
   : > "$out"
@@ -1837,7 +1841,8 @@ test_separate_self_announced_answers_after_fold_wake_once() {
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "the owned answers enqueued another durable wake"; }
   printf 'blocked: need staging credentials\n' >> "$status_file"
   wait_for_exit "$pid" 100 || fail "a later worker line after two owned answers was swallowed"
-  grep -q 'signal:' "$out" && grep -F "$status_file" "$out" >/dev/null \
+  grep -q 'signal:' "$out" || fail "watcher printed no signal reason: $(cat "$out")"
+  grep -F "$status_file" "$out" >/dev/null \
     || fail "the later worker line did not surface as a signal"
   pass "separate answers over unclassified decisions wake once, and the next real note still does"
 }
@@ -1868,7 +1873,8 @@ test_self_announced_close_after_fold_still_surfaces_folded_worker_failure() {
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "the folded worker failure was swallowed by the supervisor's close"
-  grep -q 'signal:' "$out" && grep -F "$status_file" "$out" >/dev/null \
+  grep -q 'signal:' "$out" || fail "watcher printed no signal reason: $(cat "$out")"
+  grep -F "$status_file" "$out" >/dev/null \
     || fail "the folded worker failure did not surface as a signal: $(cat "$out")"
   pass "a close after OPEN DECISIONS fold still surfaces a worker failure inside the folded span"
 }
@@ -1902,7 +1908,8 @@ test_self_announced_close_after_fold_still_surfaces_folded_secondmate_lines() {
     watch_bg "$state" "$fakebin" "$out"
     pid=$!
     wait_for_exit "$pid" 100 || fail "the supervisor's close swallowed folded secondmate lines: $lagging"
-    grep -q 'signal:' "$out" && grep -F "$status_file" "$out" >/dev/null \
+    grep -q 'signal:' "$out" || fail "watcher printed no signal reason: $(cat "$out")"
+  grep -F "$status_file" "$out" >/dev/null \
       || fail "folded secondmate lines did not surface as a signal: $(cat "$out")"
   done
   pass "a close after OPEN DECISIONS fold still surfaces unlisted secondmate lines inside the folded span"
@@ -4959,7 +4966,8 @@ test_afk_present_reverts_watcher_to_one_shot() {
   watch_bg "$state" "$fakebin" "$out"
   pid=$!
   wait_for_exit "$pid" 100 || fail "with .afk present the watcher did not exit one-shot for a benign signal"
-  grep -q 'signal:' "$out" && grep -F "$status_file" "$out" >/dev/null || fail "afk-mode watcher did not surface the signal for the daemon"
+  grep -q 'signal:' "$out" || fail "watcher printed no signal reason: $(cat "$out")"
+  grep -F "$status_file" "$out" >/dev/null || fail "afk-mode watcher did not surface the signal for the daemon"
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the afk-mode signal failed"
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null \
     || fail "afk-mode benign signal was not queued for the daemon to classify"

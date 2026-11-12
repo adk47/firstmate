@@ -208,7 +208,7 @@ jobs:
   # and the shard count both belong to bin/fm-test-run.sh, which refuses a lane
   # whose "ofN" disagrees with it (docs/fm-test-portable-shards.md).
   tests-portable-serial:
-    name: ${{ (github.event.action == 'labeled' && github.event.label.name != 'full-ci') && 'Not run for label - ' || '' }}Lint ${{ matrix.partition }}
+    name: ${{ (github.event.action == 'labeled' && github.event.label.name != 'full-ci') && 'Not run for label - ' || '' }}Behavior portable serial ${{ matrix.shard }}
     # Pin this job rather than ubuntu-latest: latest resolves to 25.10, which
     # ships coreutils as the uutils multicall binary, and uutils `mkdir` is not
     # atomic (2-3 winners in 114/300 concurrent rounds, against 0/300 on GNU
@@ -218,6 +218,7 @@ jobs:
     # this lane reported. tests/fm-remote-transport-lanes.test.sh owns the
     # 20-way uniqueness assertion. The durable atomic-arbiter replacement is
     # separate follow-up work.
+    runs-on: ubuntu-24.04
     if: ${{ !(github.event_name == 'push' && vars.FM_CI_SKIP_PUSH == '1') && !(github.event.action == 'labeled' && github.event.label.name != 'full-ci') && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository || github.event.pull_request.author_association == 'OWNER' || github.event.pull_request.author_association == 'MEMBER' || github.event.pull_request.author_association == 'COLLABORATOR' || contains(github.event.pull_request.labels.*.name, 'full-ci')) }}
     # Measured whole remainder is ~98 min of serial work. Eleven shards put
     # ~9 min of it on each runner; five put ~19.7 min, which was enough

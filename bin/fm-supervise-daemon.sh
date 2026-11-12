@@ -617,9 +617,8 @@ clear_pause_tracking() {  # <window> <state>
     "$state/.wedge-rollback-failed-$watcher_key" \
     "$state/.writing-since-$watcher_key" "$state/.writing-resurfaced-$watcher_key" \
     "$state/.validating-since-$watcher_key" "$state/.validating-resurfaced-$watcher_key" \
-    "$state/.waiting-resurfaced-$watcher_key" "$state/.guard-deferrals-$watcher_key"
-    "$state/.wedge-alarmed-$watcher_key" \
-}
+    "$state/.waiting-resurfaced-$watcher_key" "$state/.guard-deferrals-$watcher_key" \
+    "$state/.wedge-alarmed-$watcher_key"
 }
 
 reconcile_pause_tracking() {  # <window> <state> <last-status-line>

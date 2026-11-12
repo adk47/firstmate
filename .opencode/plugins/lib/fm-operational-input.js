@@ -13,10 +13,7 @@ export function encodeFirstmateOperationalInput(root, kind, content) {
     const script = existsSync(requested)
       ? requested
       : `${adapterRoot}/bin/fm-operational-input.sh`;
-    const invocation = process.platform === "win32"
-      ? { command: "bash", args: [script, "encode", kind] }
-      : { command: script, args: ["encode", kind] };
-    const child = spawn(invocation.command, invocation.args, {
+    const child = spawn(script, ["encode", kind], {
       stdio: ["pipe", "pipe", "pipe"],
     });
     let stdout = "";
@@ -35,9 +32,6 @@ export function encodeFirstmateOperationalInput(root, kind, content) {
       }
       reject(new Error(stderr.trim() || `operational-input encoder exited ${code ?? "unknown"}`));
     });
-    // A child that exits before reading stdin makes this write fail with
-    // EPIPE; an unhandled stdin error would crash the host process.
-    child.stdin.on("error", () => {});
     child.stdin.end(content);
   });
 }

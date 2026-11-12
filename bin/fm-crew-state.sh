@@ -1261,13 +1261,11 @@ if [ "$HAVE_RUN" = 1 ]; then
     if [ -n "$outcome" ]; then
       case "$outcome" in
         passed|passed-with-override) RUN_STATE="done"; RUN_DETAIL=$(passed_pr_detail) ;;
-        passed-with-skips) RUN_STATE="done"; RUN_DETAIL="$(passed_pr_detail) (publication/CI verification skipped)" ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
         passed-with-skips)
           RUN_STATE=failed
           RUN_DETAIL="CI verification skipped (outcome passed-with-skips): the PR's checks were never verified"
           ;;
-        passed-with-override) RUN_STATE="done"; RUN_DETAIL="run passed with a recorded CI override" ;;
         failed)
           if nm_reclassify_failed_run_as_held_green; then :; else
             RUN_STATE=failed; RUN_DETAIL="run failed"

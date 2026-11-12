@@ -684,8 +684,12 @@ export function branchOfferForWake(state: string, message: string, afk: boolean,
   const heartbeat = /^heartbeat($|:)/.test(message);
   const isCheckTrigger = /^check:/.test(message);
   const scope = scopeForUnreadWake(state, heartbeat, afk, attendedHost && !afk);
+  // The batch's own resolved task set wins over the printed paths: a coalesced
+  // batch row carries a compact reason that names only a few of its files, so
+  // reading the paths out of the message would miss a decision-owned task the
+  // batch actually covers and offer that batch to the branch.
   const triggerKeys = /^signal:/.test(message)
-    ? message
+    ? scope.signalTasksByPayload[message] ?? message
       .slice("signal:".length)
       .split(/\s+/)
       .filter(Boolean)

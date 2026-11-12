@@ -751,7 +751,7 @@ fi
 # A different live+fresh watcher that won the singleton while this restart
 # stopped its predecessor is adopted rather than raced. The watcher this restart
 # signalled is never adopted: it is about to exit on that TERM.
-if [ "$mode" = restart ] && healthy_watcher && [ "$HEALTHY_PID" != "$signalled_pid" ]; then
+if [ "$mode" = restart ] && healthy_watcher && [ "$HEALTHY_PID" != "$STOPPED_PID" ]; then
   cycle_mark_predecessor_successor "attached:$HEALTHY_PID"
   cycle_begin "$HEALTHY_PID" attached "$HEALTHY_IDENTITY"
   report_attached

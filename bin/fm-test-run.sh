@@ -1588,7 +1588,7 @@ families_for_changed_path() {
       # resolution in the caller; emit a marker family of __script__
       printf '%s\n' "__script__:$(basename "$path")"
       ;;
-    bin/fm-test-run.sh|bin/fm-test-isolation-proof.sh|bin/fm-test-reap-lib.sh)
+    bin/fm-test-run.sh|bin/fm-test-reap-lib.sh)
       # Deliberately the WHOLE family, not just the two contract tests. This
       # runner executes every pure-contract-unit script, so a change to it is
       # only proven by running them: its own contract test passing says the
