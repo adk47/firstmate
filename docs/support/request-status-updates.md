@@ -135,6 +135,16 @@ The rules are mechanical, not stylistic (the CI guard fails on each):
    would leave the one they wrote on unanswered while a second appeared beside it. With no
    `conversation_id` on the row the request is **held** (`no_thread`), never sent as a new message
    that breaks its own promise.
+
+   Any other type replies on **the conversation the promise ledger says carries the promise** for
+   this contact and request type (`commitments.thread_for`, read from the Caroline monitor's
+   `monitor.sqlite`), and Intercom is moved ahead of the bell for that request. A commitment is
+   closed only by a message sent on its own thread, so a bell or a new outbound message would tell
+   the customer in one place and leave them waiting where they wrote. The ledger is read only when
+   the request has no `conversation_id` of its own and Intercom is in the ladder; a ledger that
+   cannot be read, or raises, answers `""` and the ladder is unchanged — never worse than not
+   sending. See `docs/support/caroline-monitor.md`.
+
 4. **Email** through the send-gateway, only when there is **no** Intercom identity, and only for a
    request type with a configured template key. A type with no key gets no email rung and says so;
    it is never silently re-routed. "No Intercom identity" means a lookup that **completed** and

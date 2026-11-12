@@ -464,6 +464,8 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/intercom-rights-holder-watchdog.py missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/intercom-legal-unanswered-watchdog.py" ]] \
   || fail "$HYDRA_ROOT/scripts/intercom-legal-unanswered-watchdog.py missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/caroline-monitor.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/caroline-monitor.py missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/legal-intake.py" ]] \
   || fail "$HYDRA_ROOT/scripts/legal-intake.py missing or not executable"
 [[ -x "$HYDRA_ROOT/scripts/mercury-token-watchdog.sh" ]] \
@@ -894,6 +896,56 @@ wd=intercom-legal-unanswered-watchdog.timer
 systemctl enable "$wd" >/dev/null 2>&1 || log "WARN: could not enable $wd"
 systemctl start "$wd" >/dev/null 2>&1 || log "WARN: could not start $wd"
 log "  $wd: $(systemctl is-active "$wd" 2>/dev/null || echo unknown)"
+
+# ─── Caroline monitor: hand-offs with nobody assigned, the promise ledger, the support file ─
+# Every 2 hours. Reads Intercom (read-only), counts what Caroline did with each thread, PAGES
+# #clio_devops when a number moves the wrong way, keeps the promise ledger, and rewrites
+# /var/lib/hydra/support-backlog.json (the chair's check calls that file stale after 3h, which
+# is why this is 2h and not daily). It sends nothing to any customer. Exit 0 = measured, or blind
+# with the health line and the page it owed delivered; exit 1 = a page or the health line could
+# not be delivered; exit 2 = the register will not load. A non-zero exit reaches
+# OnFailure paging, so a monitor that cannot speak through its own Slack post is still heard, and
+# a delivered page is never duplicated by the unit pager.
+# State directory: $CAROLINE_MONITOR_STATE_DIR (production default /var/lib/hydra/caroline-monitor,
+# NOT /opt/hydra, which the deploy rsync overwrites); the knob exists so a test can exercise this
+# step in a sandbox.
+# TimeoutStartSec: the first run after a rule change re-reads every open conversation (about
+# 9,400 on 2026-11-11, about 12 minutes); a normal tick re-reads only what moved.
+# See docs/support/caroline-monitor.md.
+cm_state="${CAROLINE_MONITOR_STATE_DIR:-/var/lib/hydra/caroline-monitor}"
+install -d -m 700 "$cm_state"
+cat > /etc/systemd/system/caroline-monitor.service << CAROLINEMONITORSVC
+[Unit]
+Description=Caroline monitor: hand-offs with nobody assigned, promise ledger, support-backlog.json
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/edge.env
+TimeoutStartSec=45min
+SuccessExitStatus=0
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/caroline-monitor.py tick
+CAROLINEMONITORSVC
+
+cat > /etc/systemd/system/caroline-monitor.timer << CAROLINEMONITORTMR
+[Unit]
+Description=Run the Caroline monitor every 2 hours
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=2h
+Unit=caroline-monitor.service
+
+[Install]
+WantedBy=timers.target
+CAROLINEMONITORTMR
+
+systemctl daemon-reload
+cm=caroline-monitor.timer
+systemctl enable "$cm" >/dev/null 2>&1 || log "WARN: could not enable $cm"
+systemctl start "$cm" >/dev/null 2>&1 || log "WARN: could not start $cm"
+log "  $cm: $(systemctl is-active "$cm" 2>/dev/null || echo unknown)"
 
 # ─── GDPR erasure pipeline (register + identity + 410 read-back + due-date watchdog) ─
 # Hourly. scripts/gdpr-pipeline.py tick: intake (open data-deletion / data-export tickets
@@ -4653,6 +4705,7 @@ done
 # OnFailure= at itself is an infinite loop.
 AUX_ONFAILURE_UNITS=(
   caroline-behavior-digest.service
+  caroline-monitor.service
   caroline-safety-daily.service
   claim-list-build.service
   ops-intake-digest.service

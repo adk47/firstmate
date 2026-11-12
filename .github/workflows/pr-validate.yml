@@ -2256,6 +2256,20 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_intercom_legal_unanswered_watchdog
+      - name: Run Caroline monitor, fix loop and promise ledger tests
+        # scripts/caroline_monitor/ PAGES #clio_devops when hand-offs with nobody assigned rise,
+        # keeps the per-shape fix register, and keeps the promise ledger that the request status
+        # driver reads to find the thread a promise was made on. These lock: the monitor can fire
+        # (and never reads "could not measure" as quiet), the register records shapes and never
+        # threads, a person can never own a commitment, and only a sent message closes one.
+        # The checker pins the register to the classifier, the recorded baseline and the hand
+        # labels. Bare stdlib unittest, no network. The unit wiring is
+        # scripts/tests/install-aux-units-caroline-monitor.bats, discovered by the bats job.
+        run: |
+          set -euo pipefail
+          python3 scripts/check-caroline-shapes.py
+          python3 -m unittest -v tests.test_caroline_monitor
+          python3 -m unittest -v tests.test_caroline_commitments
       - name: Run Ops summarize/resolve surface tests
         # scripts/ops_intake/ is the first coded path for the Ops bot's 112 "summarize + suggest a
         # resolution" asks per 14 days, each followed by "do resolution then update the user". The

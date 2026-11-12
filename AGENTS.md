@@ -805,6 +805,32 @@ conversation is decided in ONE module, `plugins/intercom/src/assignment-policy.t
   verify): assignment parts and internal notes only, a ledger row with the inverse before each
   write, never a close or a customer message.
 
+## Caroline is measured by one reader, and a promise closes only on a sent message
+
+`scripts/caroline-monitor.py tick` (`caroline-monitor.timer`, every 2h) reads Intercom read-only and is the
+ONE place that says what Caroline did: `scripts/caroline_monitor/rules.py` holds every shape rule and every
+"she said a person is coming" pattern. Do not write a second classifier; read
+`/var/lib/hydra/support-backlog.json` or `caroline-monitor.py report`. Full doc: `docs/support/caroline-monitor.md`.
+
+- **The number is hand-offs with nobody assigned per week** (1,078 on 2026-11-11, rising). It pages
+  `#clio_devops`; a tick that could not read Intercom pages too and never rewrites the file. The first
+  unreadable tick is recorded and posts `NOT MEASURED` without paging; `monitor.blind_ticks_to_page`
+  (2) decides when it pages.
+- **Communicating back to users is NOT satisfied by this change**: the ledger queues a due promise
+  (`commitment_outbox`, held until the copy gate `outbound-copy-fable-gate-v1` and the driver in
+  `scripts/request_comms/` are on), so no customer receives a line from it. Owners per part:
+  `docs/support/caroline-monitor.md` §"What sends the message back".
+- **A fix is recorded per SHAPE in `policies/caroline-shapes.json`, never per conversation**, and is re-measured
+  against the other shapes once its row has `shipped_at`. A new bot admin or a staffed team inbox goes in
+  `monitor.non_human_admin_ids` / `monitor.staffed_team_ids`, or its assignments are misread.
+- **Changing a rule = bump `RULES_VERSION`, re-label (`calibrate sample` / `score`), re-record the baseline.**
+  `scripts/check-caroline-shapes.py` fails CI while the hand labels on file are for older rules.
+- **A commitment's owner is a job, rule or tool, never a person, and there is no close call**: the ledger row is
+  rewritten only from a new read of the thread, so only a message sent on that conversation closes it.
+- **It sends nothing.** The sender is `scripts/request_comms/` (still off: `enabled: false`), which asks the
+  ledger which thread carries the promise. Turning those lines on is a captain decision on the exact copy.
+- `waiting_on_us` is 1,594 with 1,391 older than 90 days, so never alarm on `> 0`; use `waiting_on_us_by_wait`.
+
 ## The Ops bot's staff asks are routed, not answered by an agent turn
 
 Every message on the `operations` Slack account is intercepted by

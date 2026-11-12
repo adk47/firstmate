@@ -87,6 +87,9 @@ class Cfg:
     bans: Any = None
     identity: Callable[[str, str, dict[str, Any]], str] = lambda email, uid, detail: ""
     admin_id: Callable[[], str] = lambda: ""
+    # The promise ledger's answer to "which conversation is this contact waiting on us in, for
+    # this kind of request?" ('' = none). See `_waiting_thread`.
+    thread_for: Callable[[str, str], str] = lambda contact_id, request_type: ""
 
 
 def _admin_id() -> str:
@@ -96,6 +99,34 @@ def _admin_id() -> str:
         from intercom_identity import ADMIN_ID  # noqa: PLC0415
 
         return str(ADMIN_ID)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _default_thread_for(contact_id: str, request_type: str) -> str:
+    """The open commitment's conversation, from the promise ledger the Caroline monitor keeps
+    (scripts/caroline_monitor/commitments.py). Read-only, and '' on any failure."""
+    try:
+        from caroline_monitor import commitments  # noqa: PLC0415
+
+        return commitments.thread_for(contact_id, request_type)
+    except Exception:  # noqa: BLE001 - an unreadable ledger must never stop a status line
+        return ""
+
+
+def _waiting_thread(cfg: "Cfg", contact_id: str, request_type: str) -> str:
+    """Where Caroline told this contact that we would come back about this kind of request.
+
+    A status line sent anywhere else leaves that conversation exactly as it was: the customer is
+    told in one place and still waiting in the other, and the promise stays open because a
+    promise is only closed by a message on its own thread. '' when there is no such thread, when
+    the ledger cannot be read, or when the seam raises: the line then goes out the way it always
+    did, which is never worse than not sending it.
+    """
+    if not contact_id:
+        return ""
+    try:
+        return str(cfg.thread_for(contact_id, request_type) or "")
     except Exception:  # noqa: BLE001
         return ""
 
@@ -659,6 +690,17 @@ def _deliver(chan: Any, p: Plan, text: str, cfg: Cfg, identify=None,
     contact = ""            # resolved at most once; the email rung needs the same answer
     unknown = str(facts.get("identity_unknown") or "")   # a lookup that FAILED, not one that found nothing
     last = None
+    # A request that already names its thread (an erasure) keeps it. Otherwise ask the promise
+    # ledger whether this contact is waiting on us in a conversation, and if so answer THERE
+    # first: the bell would tell them in the app and leave the promise on the thread unkept.
+    thread = str(facts.get("conversation_id") or "")
+    if not thread and "intercom" in order:
+        contact = str(facts.get("contact_id") or "")
+        if not contact and identify is not None:
+            contact, _ = identify(str(facts.get("email") or ""), r.user_id, r.detail or {}, "")
+        thread = _waiting_thread(cfg, contact, r.type)
+        if thread:
+            order = ["intercom"] + [c for c in order if c != "intercom"]
     for channel in order:
         if channel == "bell":
             if not p.decision.bell_key:
@@ -671,8 +713,7 @@ def _deliver(chan: Any, p: Plan, text: str, cfg: Cfg, identify=None,
                 contact, _ = identify(str(facts.get("email") or ""), r.user_id, r.detail or {}, "")
             if not contact:
                 continue
-            res = chan.intercom(text, contact, admin_id=cfg.admin_id(),
-                                conversation_id=str(facts.get("conversation_id") or ""))
+            res = chan.intercom(text, contact, admin_id=cfg.admin_id(), conversation_id=thread)
         elif channel == "email":
             email = str(facts.get("email") or "")
             if not email or "@" not in email:
@@ -753,7 +794,8 @@ def main(argv: list[str] | None = None) -> int:
         cfg = Cfg(store_path=a.store, policy_path=a.policy or lines.default_policy_path(),
                   only=tuple(x.strip() for x in a.only.split(",") if x.strip()),
                   limit=a.limit, max_per_run=a.max_per_run,
-                  dry_run=not a.live, admin_id=_admin_id, identity=_default_identity)
+                  dry_run=not a.live, admin_id=_admin_id, identity=_default_identity,
+                  thread_for=_default_thread_for)
         summary = tick(cfg)
         report_mod.write_snapshot(summary, cfg.report_dir)
         print(json.dumps(summary, indent=2, sort_keys=True) if a.json else report_mod.render_tick(summary))

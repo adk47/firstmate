@@ -1,0 +1,552 @@
+{
+  "_doc": [
+    "The Caroline fix loop's register: ONE row per SHAPE of customer ask, plus the monitor's thresholds.",
+    "Read by scripts/caroline-monitor.py (scripts/caroline_monitor/), checked in PR Validation by",
+    "scripts/check-caroline-shapes.py. Runbook: docs/support/caroline-monitor.md.",
+    "",
+    "A row records the decision about what KIND of fix a shape gets and where that fix stands. It never",
+    "records a conversation: an Intercom id or an inbox link anywhere in this file fails the check.",
+    "",
+    "fix_type: rule (a deterministic answer exists) | tool (a read or an action is missing) | copy (our own",
+    "wording causes the ask or makes a wrong promise) | person (genuinely needs one: `person_reason` is",
+    "required and the share of threads in person shapes is capped) | refusal (Caroline must not answer the",
+    "substance: reason + re-apply path) | none (residual buckets only).",
+    "Only rule and tool rows may carry `automation`. A copy fix ships as copy.",
+    "",
+    "status: open | in_progress | shipped | verified | did_not_work | not_planned. Setting `shipped_at`",
+    "(YYYY-MM-DD, UTC) + `ref` ARMS the re-measurement: the monitor compares the shape's own rate in the 7",
+    "matured days before the fix with the first 7 after it, against every other shape as the control, and",
+    "pages if the number did not move. `verified` and `did_not_work` are written from that verdict, never",
+    "from an opinion.",
+    "",
+    "`fix` on an open row is the missing piece named by the caroline-intent-mining-m1 report (30-day read of",
+    "all 4,051 threads, 2026-11-11). It says what kind of fix this is, not how to build it."
+  ],
+  "rules_version": "2026-11-11.2",
+  "monitor": {
+    "cadence": "every 2 hours (caroline-monitor.timer on node-8)",
+    "window_days": 37,
+    "retention_days": 180,
+    "maturity_hours": 48,
+    "unanswered_hours": 24,
+    "non_human_admin_ids": [
+      "5763097",
+      "4359478"
+    ],
+    "_non_human_admin_ids": "Caroline and Intercom's Operator bot. Any new bot or AI-queue admin id goes here, or assigning to it would count as a person.",
+    "staffed_team_ids": [],
+    "_staffed_team_ids": "Team inboxes that people actually work. Empty on purpose: the default team is stamped on every new thread and nobody works it, so a team assignment is not a human assignment until a team is named here.",
+    "max_read_error_share": 0.02,
+    "blind_ticks_to_page": 2,
+    "slack": {
+      "channel": "C0ADV2W76G4",
+      "mention_ids": [
+        "U7RP6HKUZ"
+      ],
+      "weekly_post_weekday_utc": 0,
+      "weekly_post_hour_utc": 8,
+      "health_line": true
+    },
+    "page": {
+      "headline_rise_pct": 10,
+      "headline_rise_min": 25,
+      "headline_ceiling_per_week": 1078,
+      "handoff_rate_rise_pp": 5,
+      "resolved_rate_fall_pp": 5,
+      "never_answered_rise_pct": 50,
+      "never_answered_rise_min": 10,
+      "assigned_no_reply_rise_pct": 25,
+      "assigned_no_reply_rise_min": 25,
+      "date_promise_max_per_week": 14,
+      "shape_rise_pct": 30,
+      "shape_rise_min": 15,
+      "residual_share_max": 0.25,
+      "min_threads_week": 100,
+      "repage_hours": 72,
+      "escalate_pct": 10
+    },
+    "_page": "headline_ceiling_per_week and date_promise_max_per_week are RATCHETS pinned to data/caroline-monitor/baseline.json: the check refuses a value above the baseline, so they only ever come down.",
+    "fix_loop": {
+      "window_days": 7,
+      "min_threads": 15,
+      "min_relative_drop": 0.3,
+      "min_margin_over_control": 0.15,
+      "min_shape_precision": 0.5,
+      "person_share_max": 0.06
+    },
+    "backlog_since_hours": 26,
+    "waiting_on_us_hours": 24
+  },
+  "global_fixes": {
+    "same_step_assignment": {
+      "fix_type": "rule",
+      "status": "in_progress",
+      "metric": "handoff_no_assignment",
+      "why": "Caroline sends the hand-off line and the thread stays assigned to herself: a person is promised and nobody is told.",
+      "fix": "Output-guard rule: say a person is coming only when the thread is assigned to a staffed queue in the same step.",
+      "owner": "caroline-read-state-tools-r1",
+      "ref": null,
+      "shipped_at": null
+    },
+    "human_assignment_by_exception": {
+      "fix_type": "rule",
+      "status": "in_progress",
+      "metric": "handoff_assigned",
+      "why": "Standing assignment rules put threads on a person's name whether or not that person will answer: assigned hand-offs with no human reply.",
+      "fix": "Remove the standing human-assignment mechanisms; a person is assigned only by an explicit escalation that names its reason.",
+      "owner": "intercom-no-human-assignment-k1",
+      "ref": null,
+      "shipped_at": null
+    }
+  },
+  "exemptions": {
+    "legal_position": {
+      "never": "State a legal position: what the law requires of Muso, who owns a right, whether something is lawful, what Muso is liable for.",
+      "reason": "A legal position binds Muso and is counsel's to give, not a model's reading of the law.",
+      "reapply_path": "The customer sends the notice or request in writing on the same thread; it is acknowledged with the approved line and answered in writing by the named owner.",
+      "enforced_by": "plugins/intercom/src/caroline-output-guard.ts rule `legal_position`; unanswered legal threads page from scripts/intercom-legal-unanswered-watchdog.py",
+      "measured_by": "outcome class `refused` and `guard_blocked` per shape, on shapes legal_notice and gdpr_erasure",
+      "shapes": [
+        "legal_notice",
+        "gdpr_erasure"
+      ]
+    },
+    "provenance": {
+      "never": "Disclose how a decision was reached: which source was checked, a score, a threshold, a signal, who reviewed it.",
+      "reason": "The review's internals are what a forger needs; saying them teaches the next forged document.",
+      "reapply_path": "Resubmit the request with supporting documents and a fresh review starts from the beginning (answer-bank line `declined`).",
+      "enforced_by": "plugins/intercom/src/caroline-output-guard.ts family `reveal` and rule `decline_reason`; plugins/intercom/src/answer-bank.ts `declined`",
+      "measured_by": "outcome class `refused` on shape declined_why; `guard_blocked` per shape",
+      "shapes": [
+        "declined_why"
+      ]
+    },
+    "fraud_label": {
+      "never": "Call a person, a document or an account fraudulent, fake, forged or suspicious, or say it was flagged.",
+      "reason": "It is an accusation. A wrong one defames a real customer and a right one warns the person it is about.",
+      "reapply_path": "The customer can send what shows the profile or credit is theirs on the same thread; the decision is made by the named owner and comes back in writing.",
+      "enforced_by": "plugins/intercom/src/caroline-output-guard.ts rules `flagged_or_held`, `score_or_signal`, `forensic_terms`",
+      "measured_by": "`guard_blocked` per shape, on shape claim_conflict",
+      "shapes": [
+        "claim_conflict"
+      ]
+    },
+    "date_promise": {
+      "never": "Promise a date, a day count or a time by which something will happen.",
+      "reason": "Nobody owns the clock she would be promising on: of the 873 threads that carried a day-count promise in the 30 days to 2026-11-11, a person replied inside the promised window in 78.",
+      "reapply_path": "State where the request is and what triggers the next message (it arrives on this thread and by email); no clock.",
+      "enforced_by": "plugins/intercom/src/caroline-output-guard.ts rules `timeframe_*`",
+      "measured_by": "`date_promise` per week, paged above monitor.page.date_promise_max_per_week",
+      "shapes": [],
+      "fix_type": "copy",
+      "status": "verified",
+      "metric": "date_promise",
+      "shipped_at": "2026-10-29",
+      "ref": "https://github.com/Muso-AI/hydra/pull/1451",
+      "residual": "The approved claim copy still says `usually within a day` (plugins/intercom/src/answer-bank.ts entries claim_how and timing_claim). It is the whole of what is left; changing approved copy is a copy ruling, not a code fix."
+    }
+  },
+  "commitments": {
+    "_doc": "The promise ledger (scripts/caroline_monitor/commitments.py). When Caroline tells a customer that someone will take it from here, or that it sits in a queue, that sentence is a commitment. A kind says what is being done, what resolves it and WHO OWNS coming back: a job, a rule or a tool, never a person. `owner: null` means nobody can keep this promise yet; it needs `unbacked_reason` and is counted as unbacked. A shape no kind lists is unbacked too. `due_hours` is our own checkpoint for having said something on the thread. It is never told to the customer. A commitment closes only when a message is sent on its own conversation. `priority` is the captain's order (2026-11-11): credit verification first, analytics second, refunds and status third. `request_type` is the request status driver's type (scripts/request_comms/): the driver asks the ledger for the waiting conversation of that type and answers there.",
+    "due_hours": 24,
+    "followup_min_seconds": 300,
+    "kinds": {
+      "credit_verification": {
+        "priority": 1,
+        "owner": "job:request-comms",
+        "request_type": "credit",
+        "doing": "the credit request is being checked against the proof on file",
+        "trigger": "the request changes state in core (received, verifying, need_you, decided), read hourly by request-comms",
+        "shapes": [
+          "proof_sent",
+          "proof_what_needed",
+          "request_withdraw_correct",
+          "declined_why"
+        ]
+      },
+      "analytics": {
+        "priority": 2,
+        "owner": null,
+        "doing": "the stream or stats figure the customer questioned is being looked at",
+        "trigger": "nothing a job can read yet",
+        "unbacked_reason": "no job, rule or tool can read whether an analytics complaint moved. The data-freshness read tool is being designed by intercom-no-human-assignment-k1; name it here when it exists",
+        "shapes": [
+          "stats_wrong"
+        ]
+      },
+      "refund": {
+        "priority": 3,
+        "owner": null,
+        "request_type": "refund",
+        "doing": "the refund or charge dispute is with a named human (money is W2: no job decides it)",
+        "trigger": "the refund ticket changes status in ClickUp",
+        "unbacked_reason": "request-comms has a refund line but cannot read refunds in production: a ClickUp ticket carries no Muso user id, so the source is unconfigured (scripts/request_comms/driver.py _default_sources)",
+        "shapes": [
+          "refund_dispute"
+        ]
+      },
+      "request_status": {
+        "priority": 3,
+        "owner": "job:request-comms",
+        "request_type": "credit",
+        "doing": "the customer asked where a request stands and was not told",
+        "trigger": "the request changes state in core, or 48 hours pass with it still open (the waiting line)",
+        "shapes": [
+          "request_status"
+        ]
+      },
+      "claim": {
+        "priority": 4,
+        "owner": "job:request-comms",
+        "request_type": "claim",
+        "doing": "the profile claim is being confirmed",
+        "trigger": "the claim changes state in core, read hourly by request-comms",
+        "shapes": [
+          "claim_start_problem",
+          "claim_code_added"
+        ]
+      },
+      "merge": {
+        "priority": 4,
+        "owner": null,
+        "request_type": "merge",
+        "doing": "the profile merge or split is with the catalog queue",
+        "trigger": "the merge ticket changes status in ClickUp",
+        "unbacked_reason": "request-comms has a merge line but cannot read merges in production: a ClickUp ticket carries no Muso user id, so the source is unconfigured (scripts/request_comms/driver.py _default_sources)",
+        "shapes": [
+          "merge_split"
+        ]
+      },
+      "erasure": {
+        "priority": 4,
+        "owner": "job:request-comms",
+        "request_type": "erasure",
+        "doing": "the erasure or takedown request is on the GDPR register",
+        "trigger": "the register row changes state (scripts/gdpr-pipeline.py), read hourly by request-comms",
+        "shapes": [
+          "gdpr_erasure"
+        ]
+      }
+    }
+  },
+  "shapes": {
+    "proof_sent": {
+      "fix_type": "tool",
+      "status": "in_progress",
+      "metric": "handoff_no_assignment",
+      "why": "The customer sends proof and Caroline cannot see whether it landed, so she hands off instead of confirming a fact.",
+      "fix": "Read of `proof_on_file` (built, denied) so the receipt is a checked fact and needs no hand-off line.",
+      "owner": "caroline-read-state-tools-r1",
+      "ref": null,
+      "shipped_at": null
+    },
+    "proof_what_needed": {
+      "fix_type": "tool",
+      "status": "in_progress",
+      "metric": "handoff_no_assignment",
+      "why": "The customer asks what is needed or which credit the mail is about, and she cannot see their open requests.",
+      "fix": "Read of the customer's own open requests by track and role (`credit_verification_check`, `profile_credits_status`). The proof mail's own wording is a second, copy cause.",
+      "owner": "caroline-read-state-tools-r1",
+      "ref": null,
+      "shipped_at": null
+    },
+    "request_status": {
+      "fix_type": "tool",
+      "status": "in_progress",
+      "metric": "handoff_no_assignment",
+      "why": "The customer asks where a request stands and gets the hand-off line or a queue line with no state.",
+      "fix": "Read of request state plus the `open_request` fact, so the approved status line can be sent.",
+      "owner": "caroline-read-state-tools-r1",
+      "ref": null,
+      "shipped_at": null
+    },
+    "claim_start_problem": {
+      "fix_type": "tool",
+      "status": "in_progress",
+      "metric": "handoff_no_assignment",
+      "why": "A claim question needs the claim's state and she cannot read it.",
+      "fix": "Read of claim state (`profile_claim_status`, built, denied).",
+      "owner": "caroline-read-state-tools-r1",
+      "ref": null,
+      "shipped_at": null
+    },
+    "claim_code_added": {
+      "fix_type": "tool",
+      "status": "in_progress",
+      "metric": "handoff_no_assignment",
+      "why": "The customer says the code is placed; the daily code check already decides the claim, but she cannot see its result.",
+      "fix": "The same claim-state read.",
+      "owner": "caroline-read-state-tools-r1",
+      "ref": null,
+      "shipped_at": null
+    },
+    "credit_add_howto": {
+      "fix_type": "rule",
+      "status": "open",
+      "metric": "handoff_no_assignment",
+      "why": "The answer is fixed and approved, and the thread is still handed off.",
+      "fix": "Answer with the approved `credit_how` line; nothing is missing.",
+      "owner": null,
+      "ref": null,
+      "shipped_at": null
+    },
+    "request_withdraw_correct": {
+      "fix_type": "tool",
+      "status": "open",
+      "metric": "handoff_no_assignment",
+      "why": "The requester wants their own pending request withdrawn or corrected and there is no action for it.",
+      "fix": "A tool that withdraws the requester's own pending request.",
+      "owner": null,
+      "ref": null,
+      "shipped_at": null
+    },
+    "declined_why": {
+      "fix_type": "refusal",
+      "status": "open",
+      "metric": "handoff_no_assignment",
+      "why": "Asked why a request was declined, she hands off, though the answer is a refusal she is approved to give.",
+      "fix": "Send the approved `declined` line: the reason she cannot say more, and the way to submit again.",
+      "refusal": {
+        "reason": "How a request was reviewed is never disclosed.",
+        "reapply_path": "Submit the request again with supporting documents; a fresh review starts from the beginning."
+      },
+      "exemptions": [
+        "provenance"
+      ],
+      "owner": null,
+      "ref": null,
+      "shipped_at": null
+    },
+    "merge_split": {
+      "fix_type": "tool",
+      "status": "open",
+      "metric": "handoff_no_assignment",
+      "why": "A merge is judged in shadow and executed by a named human; the customer is told a person is coming and no one is assigned.",
+      "fix": "An executor for the merge verifier's approve verdicts, with an unmerge record.",
+      "owner": null,
+      "ref": null,
+      "shipped_at": null
+    },
+    "artist_link": {
+      "fix_type": "tool",
+      "status": "open",
+      "metric": "handoff_no_assignment",
+      "why": "The product pre-fills this ask and nothing receives the link the customer supplies.",
+      "fix": "An intake tool that files the supplied link as a link proposal for the presented profile.",
+      "owner": null,
+      "ref": null,
+      "shipped_at": null
+    },
+    "credit_wrong": {
+      "fix_type": "tool",
+      "status": "open",
+      "metric": "handoff_no_assignment",
+      "why": "A credit is wrong or not theirs; the removal path reports `authority_unavailable` until the core routes deploy.",
+      "fix": "The core hide and removal routes (core C1 and C2) behind the existing credit-removal drainer.",
+      "owner": null,
+      "ref": null,
+      "shipped_at": null
+    },
+    "track_fix_takedown": {
+      "fix_type": "tool",
+      "status": "open",
+      "metric": "handoff_no_assignment",
+      "why": "She files a track-fix ticket and nothing reads that queue.",
+      "fix": "A drainer for the track-fix tickets she already files.",
+      "owner": null,
+      "ref": null,
+      "shipped_at": null
+    },
+    "profile_edit": {
+      "fix_type": "tool",
+      "status": "open",
+      "metric": "handoff_no_assignment",
+      "why": "A rename exists as a ledgered action, but only staff can start it.",
+      "fix": "Owner-initiated rename through the existing ledgered rename action.",
+      "owner": null,
+      "ref": null,
+      "shipped_at": null
+    },
+    "claim_conflict": {
+      "fix_type": "person",
+      "status": "open",
+      "metric": "handoff_no_assignment",
+      "why": "Someone else holds the profile the customer says is theirs.",
+      "fix": "Assign to the conflicts owner in the same step as the hand-off line.",
+      "person_reason": "Deciding which of two people owns a profile is an identity judgement with an accusation inside it; no rule supplies it and Caroline must never label anyone fraudulent.",
+      "exemptions": [
+        "fraud_label"
+      ],
+      "owner": null,
+      "ref": null,
+      "shipped_at": null
+    },
+    "cancel_subscription": {
+      "fix_type": "rule",
+      "status": "open",
+      "metric": "handoff_no_assignment",
+      "why": "Mostly closes today; the residue is handed off when the customer also asks about a charge.",
+      "fix": "Nothing is missing for the cancel itself: answer it, and route the invoice question as billing_question.",
+      "owner": null,
+      "ref": null,
+      "shipped_at": null
+    },
+    "refund_dispute": {
+      "fix_type": "person",
+      "status": "open",
+      "metric": "handoff_no_assignment",
+      "why": "The customer wants money back or disputes a charge.",
+      "fix": "Assign to the payments owner in the same step as the hand-off line.",
+      "person_reason": "A refund is irreversible money and is granted to nobody on any agent path today; the way out is a written refund rule and a capped refund action, which is a spend decision.",
+      "owner": null,
+      "ref": null,
+      "shipped_at": null
+    },
+    "billing_question": {
+      "fix_type": "tool",
+      "status": "open",
+      "metric": "handoff_no_assignment",
+      "why": "`billing_status` cannot say why a charge happened or failed.",
+      "fix": "Add last payment attempt, retry state, invoice-void state and entitlement to `billing_status`.",
+      "owner": null,
+      "ref": null,
+      "shipped_at": null
+    },
+    "plaque_order": {
+      "fix_type": "tool",
+      "status": "open",
+      "metric": "handoff_no_assignment",
+      "why": "`order_lookup` returns status only and `order_address_update` refuses every caller while identity verification is off.",
+      "fix": "Intercom Identity Verification, so the order tools can act for the verified owner.",
+      "owner": null,
+      "ref": null,
+      "shipped_at": null
+    },
+    "robot_mail": {
+      "fix_type": "rule",
+      "status": "open",
+      "metric": "answered",
+      "why": "Bounces, helpdesk auto-replies and stray mail get an answer, which starts mail loops and inflates every rate.",
+      "fix": "Filter non-customer mail on the email channel before any agent turn. For this shape the number that must fall is `answered`.",
+      "owner": null,
+      "ref": null,
+      "shipped_at": null
+    },
+    "stats_wrong": {
+      "fix_type": "tool",
+      "status": "in_progress",
+      "metric": "handoff_no_assignment",
+      "why": "The customer says a stream count or chart is wrong and she cannot see when each source last updated.",
+      "fix": "A data-freshness read: last update per source and any known correction.",
+      "owner": "intercom-no-human-assignment-k1",
+      "ref": null,
+      "shipped_at": null
+    },
+    "account_access": {
+      "fix_type": "tool",
+      "status": "open",
+      "metric": "handoff_no_assignment",
+      "why": "Sign-in and email-change asks need the account's state.",
+      "fix": "A read of account state: disabled flag, sign-in method, pending email verification.",
+      "owner": null,
+      "ref": null,
+      "shipped_at": null
+    },
+    "app_bug": {
+      "fix_type": "tool",
+      "status": "open",
+      "metric": "handoff_no_assignment",
+      "why": "She cannot tell a known bug from a new one, or say when it is fixed.",
+      "fix": "A known-issues register she can read and that posts back when an issue is fixed.",
+      "owner": null,
+      "ref": null,
+      "shipped_at": null
+    },
+    "gdpr_erasure": {
+      "fix_type": "person",
+      "status": "open",
+      "metric": "handoff_no_assignment",
+      "why": "An erasure or account-deletion request needs an outcome letter.",
+      "fix": "Send the approved acknowledgement and assign to the erasure owner in the same step.",
+      "person_reason": "Erasure is a legal process under a legal hold: the pipeline only prepares reversible hide changes, a person merges them, and the outcome letter is a legal statement.",
+      "exemptions": [
+        "legal_position"
+      ],
+      "owner": null,
+      "ref": null,
+      "shipped_at": null
+    },
+    "legal_notice": {
+      "fix_type": "person",
+      "status": "open",
+      "metric": "handoff_no_assignment",
+      "why": "A legal notice, takedown demand or security report arrives on the support thread.",
+      "fix": "Acknowledge and assign to the legal owner in the same step; state no position.",
+      "person_reason": "Answering a legal notice is stating Muso's legal position, which only a named person may do.",
+      "exemptions": [
+        "legal_position"
+      ],
+      "owner": null,
+      "ref": null,
+      "shipped_at": null
+    },
+    "human_request": {
+      "fix_type": "person",
+      "status": "open",
+      "metric": "handoff_no_assignment",
+      "why": "The customer asks for a human and states no need.",
+      "fix": "Assign in the same step as the hand-off line.",
+      "person_reason": "A plain request for a person is honoured, not argued with; there is no ask for a rule to answer.",
+      "owner": null,
+      "ref": null,
+      "shipped_at": null
+    },
+    "api_support": {
+      "fix_type": "tool",
+      "status": "open",
+      "metric": "handoff_no_assignment",
+      "why": "API asks need to know whether the workspace has a key and of what type.",
+      "fix": "A read of whether a workspace API key exists and its type.",
+      "owner": null,
+      "ref": null,
+      "shipped_at": null
+    },
+    "partnership": {
+      "fix_type": "rule",
+      "status": "open",
+      "metric": "handoff_no_assignment",
+      "why": "A business or partnership approach lands in support and is handed off to nobody.",
+      "fix": "Route to the B2B inbox in the same step. Seen a handful of times a month: not worth more than the route.",
+      "owner": null,
+      "ref": null,
+      "shipped_at": null
+    },
+    "product_question": {
+      "fix_type": "none",
+      "status": "not_planned",
+      "metric": "handoff_no_assignment",
+      "why": "Residual bucket: a question the named shapes did not catch. Its growth means a shape is missing from the classifier.",
+      "owner": null,
+      "ref": null,
+      "shipped_at": null
+    },
+    "thanks_empty": {
+      "fix_type": "none",
+      "status": "not_planned",
+      "metric": "handoff_no_assignment",
+      "why": "Residual bucket: thanks, a greeting or nothing. No ask to fix.",
+      "owner": null,
+      "ref": null,
+      "shipped_at": null
+    },
+    "other": {
+      "fix_type": "none",
+      "status": "not_planned",
+      "metric": "handoff_no_assignment",
+      "why": "Residual bucket: nothing matched. Its size is the discovery input; when it grows, read it and name the shape.",
+      "owner": null,
+      "ref": null,
+      "shipped_at": null
+    }
+  }
+}

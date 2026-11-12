@@ -2668,5 +2668,78 @@ class ChannelTests(unittest.TestCase):
         self.assertEqual((got.status, got.reason), ("rejected", "unsubscribed"))
 
 
+class PromiseLedgerThreadTests(Base):
+    """A status line for someone Caroline told "we will come back" goes onto THAT conversation.
+
+    The promise ledger (scripts/caroline_monitor/commitments.py) closes a commitment only on a
+    message sent on its own thread, so a line delivered anywhere else leaves the promise open
+    and the customer still waiting where they wrote."""
+
+    def _tick(self, ch, thread_for, request=None, **kw):
+        asked = []
+
+        def seam(contact_id, request_type):
+            asked.append((contact_id, request_type))
+            return thread_for(contact_id, request_type)
+
+        src = request if isinstance(request, FakeSources) else FakeSources([request or req(state="received")])
+        cfg = self.cfg(src, live=True, channels=ch,
+                       bans=FakeBans(), identity=lambda e, u, d: "contact_1", thread_for=seam, **kw)
+        return driver.tick(cfg), asked
+
+    def test_the_line_lands_on_the_thread_that_carries_the_promise(self):
+        ch = FakeChannels(bell=("sent", "bell_1"), intercom=("sent", "mid_1"))
+        out, asked = self._tick(ch, lambda c, t: "conv_900")
+        self.assertEqual(asked, [("contact_1", "credit")])
+        self.assertEqual(ch.calls, ["intercom"], "the bell would have told them in the app and left the thread silent")
+        self.assertEqual(ch.intercoms[0]["conversation_id"], "conv_900")
+        self.assertEqual(out["sent"][0]["channel"], "intercom")
+
+    def test_with_no_open_commitment_the_ladder_is_unchanged(self):
+        ch = FakeChannels(bell=("unconfirmed", "visibility all false"), intercom=("sent", "mid_1"))
+        self._tick(ch, lambda c, t: "")
+        self.assertEqual(ch.calls[:2], ["bell", "intercom"])
+        self.assertEqual(ch.intercoms[0]["conversation_id"], "")
+
+    def test_a_refused_thread_reply_still_falls_back_to_the_other_rungs(self):
+        ch = FakeChannels(bell=("sent", "bell_1"), intercom=("rejected", ""))
+        out, _ = self._tick(ch, lambda c, t: "conv_900")
+        self.assertEqual(ch.calls[:2], ["intercom", "bell"])
+        self.assertEqual(out["sent"][0]["channel"], "bell")
+
+    def test_an_unreadable_ledger_never_stops_a_status_line(self):
+        def broken(contact_id, request_type):
+            raise RuntimeError("ledger locked")
+
+        ch = FakeChannels(bell=("unconfirmed", "visibility all false"), intercom=("sent", "mid_1"))
+        out, _ = self._tick(ch, broken)
+        self.assertEqual(ch.intercoms[0]["conversation_id"], "")
+        self.assertEqual(out["sent"][0]["status"], "sent")
+
+    def test_a_request_that_names_its_own_thread_keeps_it(self):
+        r = req(typ="erasure", rid="7", uid="u@example.com", state="received", waiting="us",
+                detail={"contact_id": "c_7", "conversation_id": "conv_7", "pages": [],
+                        "slot": "no_page_link", "date": "1 November 2026"})
+        ch = FakeChannels(intercom=("sent", "mid_1"))
+        _, asked = self._tick(ch, lambda c, t: "conv_other",
+                              request=FakeSources([r], reports=[SourceReport("erasure", "ok", 1)]))
+        self.assertEqual(asked, [], "the register's thread is the one the acknowledgement promised to answer on")
+        self.assertEqual(ch.intercoms[0]["conversation_id"], "conv_7")
+
+    def test_with_intercom_switched_off_the_ledger_is_not_consulted(self):
+        ch = FakeChannels(bell=("sent", "bell_1"))
+        _, asked = self._tick(ch, lambda c, t: "conv_900", policy=live_policy(intercom=False))
+        self.assertEqual(asked, [])
+        self.assertNotIn("intercom", ch.calls)
+
+    def test_a_dry_run_asks_nothing_and_sends_nothing(self):
+        asked = []
+        ch = FakeChannels()
+        driver.tick(self.cfg(FakeSources([req(state="received")]), channels=ch, bans=FakeBans(),
+                             identity=lambda e, u, d: "contact_1",
+                             thread_for=lambda c, t: asked.append(c) or "conv_900"))
+        self.assertEqual((ch.calls, asked), ([], []))
+
+
 if __name__ == "__main__":
     unittest.main()
