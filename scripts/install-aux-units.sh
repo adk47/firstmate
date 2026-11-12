@@ -496,6 +496,9 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/request-comms.py or its copy policy is missing"
 [[ -f "$HYDRA_ROOT/scripts/check-request-status-lines.py" ]] \
   || fail "$HYDRA_ROOT/scripts/check-request-status-lines.py missing"
+[[ -f "$HYDRA_ROOT/scripts/claim-list-build.py" && -f "$HYDRA_ROOT/scripts/credit_review/claim_list.py" \
+   && -f "$HYDRA_ROOT/scripts/credit_review/claim_audience.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/claim-list-build.py or its credit_review modules are missing"
 [[ -f "$HYDRA_ROOT/scripts/resolution-matcher.py" ]] \
   || fail "$HYDRA_ROOT/scripts/resolution-matcher.py missing"
 [[ -f "$HYDRA_ROOT/scripts/caroline-behavior-digest.py" ]] \
@@ -2894,6 +2897,74 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 CRONCLAIMSTATUS
 chmod 644 /etc/cron.d/hydra-claim-status
 
+# ─── Claim list: rebuilt, signed and installed on a schedule ─────────────────────
+# credit-verify-outbound's claim families (claim-proof-ask, claim-status) send from ONE file,
+# /var/lib/hydra/credit-verify-outbound/claim-list.json, and refuse it unless it is signed on the
+# deployed head (`list_signed_on_stale`) and under 30 h old. It used to be built by hand from lane
+# tooling, so every deploy made it stale until somebody rebuilt it: last built 2026-11-07, refused
+# on every tick until 2026-11-12, five days in which no claimant heard from us.
+#
+# claim-list-build.py builds it on the deployed head, signs it and installs it with a backup and one
+# atomic rename. Two triggers, one service:
+#   - claim-list-build.timer: every 2 h at :20, forty minutes ahead of the outbound tick (0 */2),
+#     so each tick reads a list built for it.
+#   - claim-list-build.path:  /opt/hydra/.deployed-sha changed. deploy.sh writes that file LAST,
+#     after the sync and this installer, so the new head gets a list signed on it within minutes
+#     instead of at the next timer fire.
+# READ-ONLY against prod data and it sends nothing. A read that does not answer is exit 1: nothing
+# is installed, the live list stays byte-for-byte what it was, and OnFailure (the table below)
+# pages #clio_devops. Stop switch: /etc/hydra/claim-list-build.disabled (exit 0, nothing built).
+# State, run dirs and the backups of every replaced list live in /var/lib/hydra/claim-list-build,
+# NOT /opt/hydra, which the deploy rsync overwrites. docs/credit-verification/claim-list-build.md.
+install -d -m 700 /var/lib/hydra/claim-list-build
+
+cat > /etc/systemd/system/claim-list-build.service << CLAIMLISTSVC
+[Unit]
+Description=HYDRA rebuild, sign and install the claim list on the deployed head
+
+[Service]
+Type=oneshot
+TimeoutStartSec=5400
+Nice=10
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+EnvironmentFile=-/etc/openclaw/shared.env
+EnvironmentFile=-/etc/openclaw/main.env
+ExecStart=/usr/bin/python3 $HYDRA_ROOT/scripts/claim-list-build.py
+CLAIMLISTSVC
+
+cat > /etc/systemd/system/claim-list-build.timer << CLAIMLISTTMR
+[Unit]
+Description=HYDRA claim list rebuild, every 2 h ahead of the outbound tick
+
+[Timer]
+OnCalendar=*-*-* 1/2:20:00
+Persistent=true
+Unit=claim-list-build.service
+
+[Install]
+WantedBy=timers.target
+CLAIMLISTTMR
+
+cat > /etc/systemd/system/claim-list-build.path << CLAIMLISTPATH
+[Unit]
+Description=HYDRA claim list rebuild when the deployed head changes
+
+[Path]
+PathChanged=$HYDRA_ROOT/.deployed-sha
+Unit=claim-list-build.service
+
+[Install]
+WantedBy=multi-user.target
+CLAIMLISTPATH
+
+systemctl daemon-reload
+for mon in claim-list-build.timer claim-list-build.path; do
+  systemctl enable "$mon" >/dev/null 2>&1 || log "WARN: could not enable $mon"
+  systemctl start "$mon" >/dev/null 2>&1 || log "WARN: could not start $mon"
+  log "  $mon: $(systemctl is-active "$mon" 2>/dev/null || echo unknown)"
+done
+
 # ─── Codex OAuth keepalive at 15-min cadence ──────────────────
 # PROACTIVE complement to the watchdog: openclaw-watchdog.sh pages REACTIVELY
 # (journal 401 signature, after the fleet is already on the mini fallback);
@@ -4579,6 +4650,7 @@ done
 AUX_ONFAILURE_UNITS=(
   caroline-behavior-digest.service
   caroline-safety-daily.service
+  claim-list-build.service
   ops-intake-digest.service
   ops-intake-redteam.service
   clickup-drain-data-deletion.service

@@ -2478,6 +2478,11 @@ jobs:
           # readable surfaces only, send-log export, segment/budget/reminder rules.
           # The gate and Trino are faked. Stdlib only.
           python3 scripts/tests/test_claim_proof_ask.py
+          # Scheduled claim-list build (credit_review/claim_list.py, claim-list-build.timer): the
+          # audience rules of the signed batches, core's proof code vectors, and an unmeasured read
+          # fails the run and leaves the live list untouched. Every read is faked. Stdlib only.
+          python3 scripts/tests/test_claim_list.py
+          python3 scripts/tests/test_claim_audience.py
           # Merge-outcome notifier (scripts/merge-outcome-notify.py): fixed in-thread copy per
           # (kind, outcome), 7-day outcome age, first-run seed, at most one per ticket ever.
           # Network faked. Stdlib only.
