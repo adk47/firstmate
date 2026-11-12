@@ -439,7 +439,7 @@ class MergeOutcomeGate(FamilyCase):
         tm.MergeOutcomeNotifyTests.setUp(self)      # its fakes; it also stubs the gate to "approved"
         self.addCleanup(tm.MergeOutcomeNotifyTests.tearDown, self)
         self.merge_dir = self.dir
-        mon.sendgate._ask = self.gate_ask = sendgate_real_ask
+        mon.sendgate._ask = self.gate_ask = _never_the_real_gate     # the real ask, refused at the real path
         mon.MERGE_OUTCOME_COPY_APPROVED = True
 
     wire = tm.MergeOutcomeNotifyTests.wire
@@ -541,46 +541,83 @@ class MergeOutcomeGate(FamilyCase):
 
 sendgate_real_ask = sendgate._ask
 
+# No case in this file may ask the gate at its REAL path: that gate's store is the live review queue. An ask that
+# would reach it is refused here (it never runs), recorded, and fails the module in tearDownModule, because a
+# sender under test may swallow the exception and report a hold.
+REAL_PATH_ASKS: list[str] = []
+
+
+def _never_the_real_gate(*args, **kwargs):
+    if Path(sendgate.GATE_PATH).resolve() == Path(PINNED_GATE_PATH).resolve():
+        REAL_PATH_ASKS.append(str(kwargs.get("campaign") or (args[2:3] or ["?"])[0]))
+        raise AssertionError("a test asked the checked-in gate at its real path; its store is the live review queue")
+    return sendgate_real_ask(*args, **kwargs)
+
+
+def setUpModule():
+    sendgate._ask = _never_the_real_gate
+
+
+def tearDownModule():
+    sendgate._ask = sendgate_real_ask
+    if REAL_PATH_ASKS:
+        raise AssertionError(f"asked the gate at its real path (live store): {REAL_PATH_ASKS}")
+
 
 class RealGateContract(unittest.TestCase):
     """The stand-in above answers in gate.py's own shape. When gate.py is in this tree, hold the
-    two together: a body the real gate has never seen is not approved."""
+    two together: a body the real gate has never seen is not approved.
+
+    Every case here runs a byte-for-byte copy of the checked-in gate with ONE literal rewritten: where it
+    keeps its store. The gate at its real path keeps its store at /var/lib/hydra/outbound-copy, and a suite
+    run as root on node-8 can write there. The first case once asked that gate, and each QA review left a
+    body in the LIVE review queue (three found 2026-11-12): a body a reviewer is asked to read, the stall
+    page counts and the campaign's backlog report carries. It stayed green in CI because the pod cannot
+    create that directory and the case accepted "the gate could not run" as an answer."""
 
     REAL = ROOT / "scripts" / "outbound_copy" / "gate.py"
+    LIVE_STORE = 'STORE_DEFAULT = "/var/lib/hydra/outbound-copy"'
 
-    @unittest.skipUnless(REAL.is_file(), "scripts/outbound_copy/gate.py is not in this tree yet")
-    def test_the_real_gate_never_approves_a_body_it_has_no_verdict_for(self):
-        saved = sendgate.LOG_PATH
-        sendgate.LOG_PATH = Path(tempfile.mkdtemp(prefix="sendgate-real-")) / "sendgate.jsonl"
-        self.addCleanup(setattr, sendgate, "LOG_PATH", saved)
-        # Whatever mode the shipped table gives this campaign and whether or not this host can write the gate's
-        # store, the answer is never an approval: it is a hold, or an observed send that names no verdict.
-        try:
-            with redirect_stderr(StringIO()):
-                permit = sendgate.require_verdict("a body no reviewer has seen " + os.urandom(8).hex(),
-                                                  family="contract", campaign="resolve-notify")
-        except sendgate.NotApproved as exc:
-            self.assertIn(exc.result, ("pending", "error"))
-        else:
-            self.assertEqual((permit.verdict_id, permit.verdict_sha256), ("", ""))
-
-    @unittest.skipUnless(REAL.is_file(), "scripts/outbound_copy/gate.py is not in this tree yet")
-    def test_the_real_gate_in_a_scratch_tree_observes_or_holds_by_its_own_table(self):
-        tmp = Path(tempfile.mkdtemp(prefix="sendgate-modes-"))
+    def scratch(self, *policies: str) -> Path:
+        """A tree holding the checked-in gate with its store moved under it; sendgate asks that gate."""
+        tmp = Path(tempfile.mkdtemp(prefix="sendgate-real-"))
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         (tmp / "scripts" / "outbound_copy").mkdir(parents=True)
         (tmp / "policies").mkdir()
         src = self.REAL.read_text(encoding="utf-8")
-        needle = 'STORE_DEFAULT = "/var/lib/hydra/outbound-copy"'
-        self.assertEqual(src.count(needle), 1, "the store default moved; this test rewrites that one literal")
+        self.assertEqual(src.count(self.LIVE_STORE), 1, "the store default moved; this test rewrites that one literal")
         gate = tmp / "scripts" / "outbound_copy" / "gate.py"
-        gate.write_text(src.replace(needle, f"STORE_DEFAULT = {str(tmp / 'store')!r}"), encoding="utf-8")
-        for name in ("outbound-copy-rubric.md", "outbound-copy-reviewer.allowed_signers"):
+        gate.write_text(src.replace(self.LIVE_STORE, f"STORE_DEFAULT = {str(tmp / 'store')!r}"), encoding="utf-8")
+        for name in ("outbound-copy-rubric.md", "outbound-copy-reviewer.allowed_signers", *policies):
             shutil.copy(ROOT / "policies" / name, tmp / "policies" / name)
-        modes = tmp / "policies" / "outbound-copy-enforce.json"
         saved = (sendgate.GATE_PATH, sendgate.LOG_PATH)
         sendgate.GATE_PATH, sendgate.LOG_PATH = gate, tmp / "sendgate.jsonl"
         self.addCleanup(lambda: (setattr(sendgate, "GATE_PATH", saved[0]), setattr(sendgate, "LOG_PATH", saved[1])))
+        return tmp
+
+    @unittest.skipUnless(REAL.is_file(), "scripts/outbound_copy/gate.py is not in this tree yet")
+    def test_the_real_gate_never_approves_a_body_it_has_no_verdict_for(self):
+        tmp = self.scratch("outbound-copy-enforce.json")
+        body = "a body no reviewer has seen"
+        # Whatever mode the SHIPPED table gives this campaign, the answer is never an approval: it is a hold, or an
+        # observed send that names no verdict. "The gate could not run" is not accepted: the shipped table and
+        # rubric are read here, so one that cannot be read fails this case instead of passing it.
+        try:
+            with redirect_stderr(StringIO()):
+                permit = sendgate.require_verdict(body, family="contract", campaign="resolve-notify")
+        except sendgate.NotApproved as exc:
+            self.assertEqual((exc.result, exc.reason), ("pending", "copy_review_pending"))
+        else:
+            self.assertEqual((permit.verdict_id, permit.verdict_sha256), ("", ""))
+        # The body is queued in the scratch store. A gate writes to one store, so this is also the proof that the
+        # ask did not reach the live queue.
+        queued = [json.loads(q.read_text(encoding="utf-8")) for q in (tmp / "store" / "pending").glob("*.json")]
+        self.assertEqual([q["body"] for q in queued], [body])
+
+    @unittest.skipUnless(REAL.is_file(), "scripts/outbound_copy/gate.py is not in this tree yet")
+    def test_the_real_gate_in_a_scratch_tree_observes_or_holds_by_its_own_table(self):
+        tmp = self.scratch()
+        modes = tmp / "policies" / "outbound-copy-enforce.json"
 
         def ask(body):
             with redirect_stderr(StringIO()):
