@@ -222,9 +222,12 @@ declare -A FULL_CAP_FROM=()
 # bats only (cfg reads env only under the harness): one dated full-cap entry "family=ISO" to test a REACHED date
 FULL_CAP_FROM_TEST="$(cfg CVO_FULL_CAP_FROM_TEST "")"
 [ -z "$FULL_CAP_FROM_TEST" ] || FULL_CAP_FROM["${FULL_CAP_FROM_TEST%%=*}"]="${FULL_CAP_FROM_TEST#*=}"
-# FirstMate ruling 2 (3 Nov): the missing-document ask (proof-need-ask) goes to FREE users first; its PAID segment does
-# not run at all until a date is set HERE (one clean monitored UTC day + Jan's review). Independent of .paid-enabled.
-# Unset = held. Constants only - a date moves by PR, never by env or a state file. [key=family]=ISO, same format as above.
+# FirstMate ruling 2 (3 Nov, AMENDED 2026-11-11 by the captain - [key=paid-need-ask-no-barrier]): the missing-document
+# ask (proof-need-ask) goes to FREE users first. Its PAID segment runs when this date is UNSET (no barrier) or ALREADY
+# REACHED; a FUTURE date here holds it until that date. Independent of .paid-enabled. The row is still the sequencing
+# lever and the file is still the only place it moves: constants only, never env or a state file.
+# [key=family]=ISO, same format as above. (Before the amendment an unset row meant "never", because reached("") is false,
+# so the paid family could never run and paid users were never asked.)
 declare -A PAID_FROM=()
 # bats only (same seam as FULL_CAP_FROM_TEST): one dated entry "family=ISO" to test a REACHED / future paid date
 PAID_FROM_TEST="$(cfg CVO_PAID_FROM_TEST "")"
@@ -1518,7 +1521,8 @@ fi
 # [key=proof-need-ask-family] (b1 / Fable 17:5xZ): the per-need ask (E) - need_asks.py, --check-recipients (#1582);
 # SIGNED-only until E's first clean coded batch sets UNSIGNED_FROM[proof-need-ask]. QA #1587: a deployed runner that
 # predates #1582 (no --check-recipients) cannot be checked - logged and skipped, never a failed tick.
-# Ruling 2 (3 Nov): free before paid; paid is held in code until PAID_FROM[proof-need-ask] is reached. Runs LAST in every
+# Ruling 2 (3 Nov, amended 2026-11-11): free before paid; the paid segment runs when PAID_FROM[proof-need-ask] is unset
+# (no barrier, [key=paid-need-ask-no-barrier]) or already reached, and a FUTURE date still holds it. Runs LAST in every
 # tick (CTO MUS-27638: one need-ask segment measured ~85 min / ~50 s per recipient on node-8, reviewer 13:41Z, and free is
 # checked-only until UNSIGNED_FROM is dated - first would spend the tick on zero sends and starve the paid families)
 need_families() {
@@ -1526,10 +1530,14 @@ need_families() {
     # Defect B: rebuilt right here, immediately before the stage that enforces its facts header
     build_need_list "rebuild before need families" || return 1
     family proof-need-ask free "$NEED_LIST" "$CAP" need-send || return $?
-    if reached "${PAID_FROM[proof-need-ask]:-}"; then
+    # firstmate 2026-11-11 (Aaron: "remove whatever limiters", paid users complaining):
+    # an UNSET PAID_FROM meant "never", so the paid proof-need-ask family could never run
+    # and paid users were never asked. Unset now means no barrier; a set date still holds
+    # the family until that date, so the sequencing lever is preserved.
+    if [ -z "${PAID_FROM[proof-need-ask]:-}" ] || reached "${PAID_FROM[proof-need-ask]:-}"; then
       family proof-need-ask paid "$NEED_LIST" "$CAP" need-send || return $?
     else
-      log "proof-need-ask paid: held until PAID_FROM[proof-need-ask] is set (ruling 2: free first); skipped"
+      log "proof-need-ask paid: held until PAID_FROM[proof-need-ask]=${PAID_FROM[proof-need-ask]} is reached; skipped"
     fi
   else
     log "proof-need-ask: the deployed need_asks.py has no --check-recipients (#1582 not deployed); skipped"

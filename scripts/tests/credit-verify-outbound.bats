@@ -951,27 +951,30 @@ first_line() { grep -n -m1 -- "$1" "$CVO_OUT_ROOT"/*/tick.log | cut -d: -f1; }
   done
 }
 
-@test "outbound tick (ruling 2): production-equivalent (CVO_UNSIGNED_ALL=0, no UNSIGNED_FROM date) - the free need ask is checked (last) and never applied; no need ask is sent until a separate dated PR" {
+@test "outbound tick (ruling 2, [key=paid-need-ask-no-barrier]): production-equivalent (CVO_UNSIGNED_ALL=0, no UNSIGNED_FROM date) - BOTH segments are checked (last) and neither applies, because the arming date is what holds the apply, not the paid barrier" {
   touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
   export STUB_NEED_USERS=1 CVO_UNSIGNED_ALL=0
   run -0 "$SCRIPT"
   grep -q -- "need-asks.json --segment free .*--mode dry-run .*--check-recipients" "$CALLS"
+  grep -q -- "need-asks.json --segment paid .*--mode dry-run .*--check-recipients" "$CALLS"
   grep -q "proof-need-ask-free check (rc=0)" "$CVO_OUT_ROOT"/*/tick.log
   grep -q "proof-need-ask-free: SIGNED-only family (no read-back date in UNSIGNED_FROM): checked, not applied" "$CVO_OUT_ROOT"/*/tick.log
-  if grep -q -- "need-asks.json .*--mode apply" "$CALLS"; then false; fi    # argv: no need-ask apply, free or paid
-  if grep -q -- "need-asks.json --segment paid" "$CALLS"; then false; fi
+  grep -q "proof-need-ask-paid: SIGNED-only family (no read-back date in UNSIGNED_FROM): checked, not applied" "$CVO_OUT_ROOT"/*/tick.log
+  # argv: the paid family is now REACHED (firstmate 2026-11-12) but still cannot apply until its own date is set
+  if grep -q -- "need-asks.json .*--mode apply" "$CALLS"; then false; fi    # no need-ask apply, free or paid
 }
 
-@test "outbound tick (ruling 2): with PAID_FROM[proof-need-ask] unset the PAID need ask is never invoked - even with .paid-enabled present; the hold is logged and free still applies" {
+@test "outbound tick (ruling 2, [key=paid-need-ask-no-barrier]): with PAID_FROM[proof-need-ask] UNSET there is NO barrier - the PAID need ask runs after free (Aaron 2026-11-11: \"remove whatever limiters\", paid users were never asked because unset read as never)" {
   touch "$CVO_ETC/credit-verify-outbound.live" "$CVO_ETC/credit-verify-outbound.paid-enabled"
   export STUB_NEED_USERS=1
   unset CVO_PAID_FROM_TEST
   run -0 "$SCRIPT"
-  if grep -q -- "need-asks.json --segment paid" "$CALLS"; then false; fi     # the runner argv is the proof
   grep -q -- "need-asks.json --segment free .*--mode apply" "$CALLS"
-  grep -q "proof-need-ask paid: held until PAID_FROM\[proof-need-ask\] is set (ruling 2: free first); skipped" "$CVO_OUT_ROOT"/*/tick.log
-  # the other paid families are unchanged by the hold
-  grep -q -- "--segment paid .*--mode apply" "$CALLS"
+  grep -q -- "need-asks.json --segment paid .*--mode apply" "$CALLS"        # the runner argv is the proof
+  f="$(grep -n -m1 -- "need-asks.json --segment free .*--mode apply" "$CALLS" | cut -d: -f1)"
+  p="$(grep -n -m1 -- "need-asks.json --segment paid .*--mode apply" "$CALLS" | cut -d: -f1)"
+  [ -n "$f" ] && [ -n "$p" ] && [ "$f" -lt "$p" ]                           # ruling 2's ORDER survives: free first
+  if grep -q "proof-need-ask paid: held" "$CVO_OUT_ROOT"/*/tick.log; then false; fi
 }
 
 @test "outbound tick (ruling 2): a REACHED PAID_FROM date runs paid need ask after free; a FUTURE date holds it" {
