@@ -121,13 +121,13 @@ Example `details` block:
 
 ### Human Handoff (`support-general` with `escalation_reason`)
 
-When any skill decides to bail out and hand off to a teammate, file `support-general` with a `details.escalation_reason`:
+When any skill bails out of its own flow, file `support-general` with a `details.escalation_reason`. This files a TICKET with the reason on it. It does not move the conversation to a person: the conversation stays with you (SOUL.md, "Who holds the conversation"). Only the system moves a conversation to the escalation queue, and only for an explicit request for a person or a risk rule.
 
 | `escalation_reason` | Trigger | Notes |
 |---------------------|---------|-------|
 | `customer_requested_human` | Customer said "talk to a human", "let me speak to a manager", "are you a bot", or any explicit ask for a person | Highest-priority signal – file immediately |
-| `frustration_detected` | Profanity, "this is ridiculous/frustrating", "I'm done", "wasting my time" | The customer may not have asked for a human explicitly but is clearly stuck |
-| `loop_detected` | 3+ back-and-forth turns without resolution, OR customer restated same complaint twice without progress | Caroline isn't getting them unblocked; human eyes needed |
+| `frustration_detected` | Profanity, "this is ridiculous/frustrating", "I'm done", "wasting my time" | The customer is stuck. Ticket the reason and keep helping; this is not a reason for a person to take the conversation |
+| `loop_detected` | 3+ back-and-forth turns without resolution, OR customer restated same complaint twice without progress | You are not getting them unblocked. Ticket the reason, stop repeating the step that failed, and answer what they send next |
 
 Required `details` block:
 
@@ -139,9 +139,9 @@ Required `details` block:
 }
 ```
 
-Customer-facing reply: *"Sorry this has been frustrating – I've passed you over to one of our teammates. You'll hear from us in this conversation and by email."*
+Customer-facing reply: *"Sorry this has been frustrating. I've flagged this for our team. You'll hear from us in this conversation and by email."*
 
-After filing, **stop the current skill flow.** Don't propose further fixes or ask more clarifying questions. The teammate will take over.
+After filing, **stop the current skill flow**: do not repeat the fix that already failed. The conversation stays with you, so answer whatever the customer sends next. Never say you passed them to a teammate or that a person is taking over: you cannot assign a conversation, and nobody was assigned.
 
 ### Unmerge Request (`unmerge-request` only)
 
@@ -301,7 +301,7 @@ If the refund-retention skill was not activated (edge case), set `retention_cont
 |------|-------------|---------|
 | **1 -- Auto-queue** | Operations team reviews | Ticket created, ops reviews in normal workflow |
 | **2 -- Human-in-loop** | Operations team approves before execution | Ticket created with priority:high, ops must explicitly approve |
-| **3 -- Leadership** | Aaron or Jan must approve | Ticket created with priority:urgent, escalated to leadership |
+| **3 -- Leadership** | Leadership must approve (the ticket's priority routes it; no named person) | Ticket created with priority:urgent, escalated to leadership |
 
 ## Business Rules
 

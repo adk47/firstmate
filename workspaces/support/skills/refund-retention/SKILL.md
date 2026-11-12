@@ -198,7 +198,7 @@ If the customer skipped gates (said "just give me the refund" early):
 }
 ```
 
-This context helps Operations/Jan understand why the customer wants out and whether retention was attempted.
+This context helps Operations understand why the customer wants out and whether retention was attempted.
 
 ---
 

@@ -164,10 +164,15 @@ export class MockIntercomClient implements IntercomClient {
     return { messageId: `mock_msg_${this.messageCounter}` };
   }
 
+  /**
+   * `assigneeType: "team"` places the conversation in a TEAM inbox (assignment-policy.ts: the
+   * escalation queue). Intercom refuses an admin id sent as a team, which is the point.
+   */
   async assignConversation(params: {
     conversationId: string;
     adminId: string;
     assigneeId: string;
+    assigneeType?: "admin" | "team";
   }): Promise<void> {
     this.calls.assignConversation.push(params);
   }
@@ -327,10 +332,15 @@ export class RealIntercomClient implements IntercomClient {
     return { messageId: lastPart?.id ?? "" };
   }
 
+  /**
+   * `assigneeType: "team"` places the conversation in a TEAM inbox (assignment-policy.ts: the
+   * escalation queue). Intercom refuses an admin id sent as a team, which is the point.
+   */
   async assignConversation(params: {
     conversationId: string;
     adminId: string;
     assigneeId: string;
+    assigneeType?: "admin" | "team";
   }): Promise<void> {
     const url = `${this.baseUrl}/conversations/${params.conversationId}/parts`;
     const response = await fetch(url, {
@@ -338,7 +348,7 @@ export class RealIntercomClient implements IntercomClient {
       headers: this.headers(),
       body: JSON.stringify({
         message_type: "assignment",
-        type: "admin",
+        type: params.assigneeType === "team" ? "team" : "admin",
         admin_id: params.adminId,
         assignee_id: params.assigneeId,
       }),
@@ -692,10 +702,15 @@ export class SanitizingIntercomClient implements IntercomClient {
     return this.inner.replyToConversation({ ...params, body: refPass.body });
   }
 
+  /**
+   * `assigneeType: "team"` places the conversation in a TEAM inbox (assignment-policy.ts: the
+   * escalation queue). Intercom refuses an admin id sent as a team, which is the point.
+   */
   async assignConversation(params: {
     conversationId: string;
     adminId: string;
     assigneeId: string;
+    assigneeType?: "admin" | "team";
   }): Promise<void> {
     return this.inner.assignConversation(params);
   }
@@ -817,23 +832,11 @@ export class IntercomAssignmentConflictError extends Error {
 }
 
 /**
- * Does this error mean a HUMAN already holds the conversation at the target we asked for?
- *
- * One predicate, both hand-off paths (guardOutbound and handleDroppedReply), because they drifted once (QA on
- * #1673): the dropped-reply path honoured a conflict naming the BOT and reported it as a completed hand-off, so
- * supervision was told a human had it while the bot still owned it.
- *
- * A conflict only counts when the target is CONFIGURED and is NOT the bot: `"0"`/unset is Intercom's Unassign
- * (no "already assigned to" meaning), and a target equal to the bot is not a hand-off at all.
+ * "Already assigned to that target": Intercom's answer to a repeat assignment. For an escalation
+ * (assignment-policy.ts applyHandOff) that is the desired end state, not a failure.
  */
-export function isHandoffConflict(
-  err: unknown,
-  account: { botAdminId: string; defaultInboxId?: string },
-): boolean {
-  if (!(err instanceof IntercomAssignmentConflictError)) return false;
-  const target = account.defaultInboxId || "";
-  if (!target || target === account.botAdminId) return false;
-  return (err.assigneeId || target) === target;
+export function isAssignmentConflict(err: unknown): boolean {
+  return err instanceof IntercomAssignmentConflictError;
 }
 
 export function trackOutboundMessageId(messageId: string, outboundIds: string[]): void {

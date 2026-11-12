@@ -35,7 +35,9 @@ function messageFrom(authorId: string, body: string, eventId = "evt_restricted")
   } as IntercomWebhookPayload;
 }
 
-function clientWithLiveAssignee(assignee: { type: "admin"; id: string; name: string }) {
+// `stale: true` = the human assignee never acted in the conversation (assignment-policy.ts
+// humanHold: a human holds a conversation only while a human is working it).
+function clientWithLiveAssignee(assignee: { type: "admin"; id: string; name: string }, opts: { stale?: boolean } = {}) {
   const client = new MockIntercomClient();
   client.getConversation = async (params) => {
     client.calls.getConversation.push(params);
@@ -48,7 +50,14 @@ function clientWithLiveAssignee(assignee: { type: "admin"; id: string; name: str
       open: true,
       state: "open" as const,
       assignee,
-    };
+      conversation_parts: {
+        type: "conversation_part.list" as const,
+        total_count: opts.stale ? 0 : 1,
+        conversation_parts: opts.stale
+          ? []
+          : [{ type: "conversation_part" as const, id: "p1", part_type: "comment", body: "on it", created_at: Math.floor(Date.now() / 1000) - 60, author: { type: "admin", id: assignee.id } }],
+      },
+    } as never;
   };
   return client;
 }
@@ -124,6 +133,42 @@ describe("handleWebhookEvent - restricted accounts", () => {
     expect(updated?.handoffMode).toBe("human_takeover");
     expect(updated?.currentAssigneeId).toBe("human_admin_1");
     expect(updated?.currentAssigneeType).toBe("admin");
+  });
+
+  it("a STALE human assignee does not keep a restricted contact: reassign to the escalation queue", async () => {
+    const state = createInitialSessionState("conv_123", "ws_1");
+    const client = clientWithLiveAssignee({ type: "admin", id: "5465657", name: "Jan" }, { stale: true });
+    const { result, state: updated } = await handleWebhookEvent(
+      messageFrom(RESTRICTED_ID, "Any update on my cancellation?", "evt_stale_r"),
+      state,
+      BOT_ADMIN_ID,
+      client,
+    );
+    expect(result.action).toBe("restricted_hold");
+    if (result.action === "restricted_hold") expect(result.reassign).toBe(true);
+    // Caroline still stays out: a restricted contact is never answered by the agent.
+    expect(updated?.handoffMode).toBe("human_takeover");
+  });
+
+  it("a restricted contact already in the escalation team is not reassigned again", async () => {
+    const state = createInitialSessionState("conv_123", "ws_1");
+    const client = new MockIntercomClient();
+    client.getConversation = async (params) => {
+      client.calls.getConversation.push(params);
+      return {
+        type: "conversation" as const, id: params.conversationId, title: null, created_at: 1, updated_at: 1,
+        open: true, state: "open" as const, admin_assignee_id: null, team_assignee_id: 7111842,
+        conversation_parts: { conversation_parts: [
+          { part_type: "assignment", created_at: 1, author: { type: "admin", id: BOT_ADMIN_ID }, assigned_to: { type: "team", id: "7111842" } },
+        ] },
+      } as never;
+    };
+    const { result } = await handleWebhookEvent(
+      messageFrom(RESTRICTED_ID, "hello?", "evt_team_r"), state, BOT_ADMIN_ID, client,
+      { humanHold: { escalationTeamId: "7111842" } },
+    );
+    expect(result.action).toBe("restricted_hold");
+    if (result.action === "restricted_hold") expect(result.reassign).toBe(false);
   });
 
   it("still filters a non-restricted contact whose conversation a human admin holds", async () => {

@@ -34,7 +34,7 @@ const account = {
   token: "t",
   webhookSecret: "s",
   botAdminId: "bot",
-  defaultInboxId: "5465657",
+  escalationTeamId: "7111842",
   fallbackSlackSupervisionChannel: "https://hooks.slack.example",
   fallbackAcknowledgement: "We'll get back to you.",
   requireMappedHumanAdmin: true,
@@ -199,6 +199,37 @@ describe("executeEscalation", () => {
       postSlack: async () => {},
       log: { info: () => {}, warn: () => {}, error: () => {} },
     })).resolves.not.toThrow();
+  });
+
+  // intercom-no-human-assignment-k1: the ONE remaining path to a human. It goes to the escalation
+  // TEAM (never an admin id) and the reason travels with it.
+  it("escalates to the escalation team with type team, and logs the reason", async () => {
+    const state = makeState();
+    const assigns: Record<string, unknown>[] = [];
+    const info: string[] = [];
+    await executeEscalation({
+      state,
+      conversationId: "conv1",
+      assessment,
+      currentMessage: "i want a refund please",
+      account,
+      client: {
+        replyToConversation: async () => ({ messageId: "m1" }),
+        assignConversation: async (p: Record<string, unknown>) => { assigns.push(p); },
+        getConversation: async () => ({} as any),
+      } as never,
+      saveState: async () => {},
+      createTicket: async () => ({ ok: true, ticketId: "T1", sla: "x" }),
+      postSlack: async () => {},
+      log: { info: (m: string) => info.push(m), warn: () => {}, error: () => {} },
+    });
+    expect(assigns).toEqual([
+      { conversationId: "conv1", adminId: "bot", assigneeId: "0" },
+      { conversationId: "conv1", adminId: "bot", assigneeId: "7111842", assigneeType: "team" },
+    ]);
+    const line = info.find((m) => m.includes("[intercom:escalation] reassigned conv=conv1"));
+    expect(line).toContain("team:7111842");
+    expect(line).toContain(`reason=${assessment.source}/${assessment.reason}`);
   });
 
   it("threads currentMessage into the ticket conversation summary", async () => {

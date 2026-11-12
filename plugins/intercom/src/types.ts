@@ -84,6 +84,8 @@ export interface IntercomConversationPart {
   // none. URLs are short-lived signed downloads.intercomcdn.com links
   // (~30 min TTL) — fetch bytes synchronously at receive time.
   attachments?: IntercomPartAttachment[];
+  /** On assignment parts: who the conversation was assigned to (`type` is "admin" or "team"). */
+  assigned_to?: { type?: string; id?: string | number } | null;
 }
 
 // Intercom v2.11 webhook `attachment` shape. Most fields are present on
@@ -237,7 +239,24 @@ export interface IntercomAccountConfig {
   token: string;
   webhookSecret: string;
   botAdminId: string;
-  defaultInboxId: string;
+  /**
+   * @deprecated RETIRED (intercom-no-human-assignment-k1, 2026-11-11). It was the default
+   * hand-off target and the live value was one person's admin id, which made that person the
+   * owner of every blocked reply. It is never read for an assignment any more; config.ts warns
+   * when a host still sets it. See assignment-policy.ts.
+   */
+  defaultInboxId?: string;
+  /**
+   * Intercom TEAM id of the escalation queue (digits). An explicit escalation with a reason goes
+   * here, sent with `type: "team"`, so it can never be a person. Unset = Intercom's Unassigned
+   * inbox. See assignment-policy.ts.
+   */
+  escalationTeamId?: string;
+  /**
+   * How long a human admin assignee silences Caroline after their last action in a conversation.
+   * Default 72. Zero or negative = a human assignee always holds (the pre-k1 behaviour).
+   */
+  humanHoldHours?: number;
   fallbackSlackSupervisionChannel: string;
   // NB: the priority signal no longer pages from this lane. On `[[PRIORITY]]`,
   // Caroline's conversation is just TAGGED `ai:data-complaint` (priority-signal.ts);

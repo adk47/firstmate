@@ -8,7 +8,7 @@ import {
   normalizeReply,
   OUTPUT_GUARD_MODE,
 } from "../src/caroline-output-guard.js";
-import { ANSWER_BANK, BLOCKED_REPLY_FALLBACK, HANDOFF_LINE, bankEntry } from "../src/answer-bank.js";
+import { AI_QUEUE_FALLBACK, ANSWER_BANK, BLOCKED_REPLY_FALLBACK, HANDOFF_LINE, bankEntry } from "../src/answer-bank.js";
 
 const rules = (reply: string, extra: Partial<Parameters<typeof evaluateReply>[0]> = {}) =>
   evaluateReply({ reply, ...extra })
@@ -23,9 +23,13 @@ describe("output guard: constants (no env switch)", () => {
     const safety = readFileSync(new URL("../src/caroline-safety.ts", import.meta.url), "utf8");
     expect(safety).not.toMatch(/process\.env/);
   });
-  it("the fallback is the approved hand-off line", () => {
-    expect(BLOCKED_REPLY_FALLBACK).toBe(HANDOFF_LINE);
-    expect(guardCarolineReply({ reply: "Your credit has been approved." }).body).toBe(HANDOFF_LINE);
+  it("the fallback is the approved AI-queue line, never the hand-off line (k1: a block assigns nobody)", () => {
+    expect(BLOCKED_REPLY_FALLBACK).toBe(AI_QUEUE_FALLBACK);
+    expect(BLOCKED_REPLY_FALLBACK).not.toBe(HANDOFF_LINE);
+    expect(bankEntry("ai_queue_fallback")?.text).toBe(AI_QUEUE_FALLBACK);
+    expect(guardCarolineReply({ reply: "Your credit has been approved." }).body).toBe(BLOCKED_REPLY_FALLBACK);
+    // The fallback itself is an approved line: it passes the guard it stands in for.
+    expect(guardCarolineReply({ reply: AI_QUEUE_FALLBACK })).toMatchObject({ verdict: "pass", flags: [] });
   });
 });
 
@@ -216,7 +220,7 @@ describe("fact-conditioned lines (Fable r5: status_chase only on the open-reques
     const r = guardCarolineReply({ reply: line, facts: { openRequest: false } });
     expect(r.verdict).toBe("block");
     expect(r.flags.map((f) => f.rule)).toContain("fact_false:status_chase");
-    expect(r.body).toBe(HANDOFF_LINE);
+    expect(r.body).toBe(BLOCKED_REPLY_FALLBACK);
   });
   it("a known-true fact passes clean", () => {
     const r = guardCarolineReply({ reply: line, facts: { openRequest: true } });
@@ -227,7 +231,7 @@ describe("fact-conditioned lines (Fable r5: status_chase only on the open-reques
     const r = guardCarolineReply({ reply: line });
     expect(r.verdict).toBe("block");
     expect(r.flags.map((f) => f.rule)).toEqual(["fact_unverified:status_chase"]);
-    expect(r.body).toBe(HANDOFF_LINE);
+    expect(r.body).toBe(BLOCKED_REPLY_FALLBACK);
   });
 });
 
@@ -285,7 +289,7 @@ describe("canary token (per-deploy leak detector)", () => {
     expect(out.verdict).toBe("block");
     expect(out.flags.map((f) => f.rule)).toContain("canary_token");
     expect(out.flags.find((f) => f.rule === "canary_token")?.family).toBe("reveal");
-    expect(out.body).toBe(HANDOFF_LINE);
+    expect(out.body).toBe(BLOCKED_REPLY_FALLBACK);
   });
 
   it("never copies the token into the flag excerpt (it is logged, ledgered and digested)", () => {

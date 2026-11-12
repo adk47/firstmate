@@ -53,6 +53,33 @@ describe("listIntercomAccountIds", () => {
 });
 
 describe("resolveIntercomAccount", () => {
+  // intercom-no-human-assignment-k1: `defaultInboxId` was one person's admin id in production and
+  // every hand-off path assigned to it. It is retired; the only human target is a TEAM.
+  describe("assignment targets", () => {
+    const withAccount = (extra: Record<string, unknown>) => ({
+      channels: { intercom: { accounts: { default: { ...validConfig.channels.intercom.accounts.default, ...extra } } } },
+    });
+    it("never passes a retired defaultInboxId through to the resolved account", () => {
+      const account = resolveIntercomAccount(withAccount({ defaultInboxId: "5465657" }));
+      expect((account as unknown as Record<string, unknown>).defaultInboxId).toBeUndefined();
+      expect(JSON.stringify(account)).not.toContain("5465657");
+    });
+    it("passes escalationTeamId and humanHoldHours through", () => {
+      const account = resolveIntercomAccount(withAccount({ escalationTeamId: "7111842", humanHoldHours: 72 }));
+      expect(account.escalationTeamId).toBe("7111842");
+      expect(account.humanHoldHours).toBe(72);
+    });
+    it.each(["jan", "team_ops", "0", "-5", "71 11"])("refuses a non-numeric escalationTeamId (%s)", (bad) => {
+      expect(() => resolveIntercomAccount(withAccount({ escalationTeamId: bad }))).toThrow(/escalationTeamId must be an Intercom TEAM id/);
+    });
+    it("refuses the bot's own id as the escalation queue", () => {
+      expect(() => resolveIntercomAccount(withAccount({ botAdminId: "5763097", escalationTeamId: "5763097" }))).toThrow(/escalationTeamId/);
+    });
+    it("refuses a non-numeric humanHoldHours", () => {
+      expect(() => resolveIntercomAccount(withAccount({ humanHoldHours: "three days" }))).toThrow(/humanHoldHours/);
+    });
+  });
+
   it("resolves default account", () => {
     const account = resolveIntercomAccount(validConfig);
     expect(account.accountId).toBe("default");

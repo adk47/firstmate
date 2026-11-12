@@ -4,7 +4,8 @@ import type {
   IntercomClient,
   RiskAssessment,
 } from "./types.js";
-import { IntercomAssignmentConflictError } from "./outbound.js";
+import { isAssignmentConflict } from "./outbound.js";
+import { applyHandOff } from "./assignment-policy.js";
 import { intercomDeeplink, getTierForAction, TIER_SLAS } from "./ticket-format.js";
 
 export interface TicketResult {
@@ -375,23 +376,24 @@ export async function executeEscalation(deps: ExecuteEscalationDeps): Promise<vo
     log.error(`[intercom:escalation] farewell post failed conv=${conversationId}: ${err}`);
   }
 
-  // Step 4 — reassign to default escalation target.
+  // Step 4 — move to the escalation QUEUE, carrying the reason (assignment-policy.ts). Never a
+  // person: the target is the configured escalation team, or Intercom's Unassigned inbox.
+  const escalationReason = `${assessment.source}/${assessment.reason || "unspecified"}`;
   let assignOk = false;
   try {
-    await client.assignConversation({
+    const applied = await applyHandOff({
+      client,
+      account,
       conversationId,
-      adminId: account.botAdminId,
-      assigneeId: account.defaultInboxId || "0",
+      kind: "risk_escalation",
+      reason: escalationReason,
+      isConflict: isAssignmentConflict,
+      log,
     });
-    assignOk = true;
-    log.info(`[intercom:escalation] reassigned conv=${conversationId} → ${account.defaultInboxId || "Unassigned"}`);
+    assignOk = applied.outcome !== "failed";
+    if (assignOk) log.info(`[intercom:escalation] reassigned conv=${conversationId} → ${applied.label} reason=${escalationReason}`);
   } catch (err) {
-    if (err instanceof IntercomAssignmentConflictError) {
-      assignOk = true;
-      log.info(`[intercom:escalation] reassign conflict (human already on it) conv=${conversationId}`);
-    } else {
-      log.error(`[intercom:escalation] reassign failed conv=${conversationId}: ${err}`);
-    }
+    log.error(`[intercom:escalation] reassign failed conv=${conversationId}: ${err}`);
   }
 
   // Step 5 — Slack ping.

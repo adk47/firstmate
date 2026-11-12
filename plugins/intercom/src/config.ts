@@ -7,6 +7,9 @@ let capturedConfig: Record<string, unknown> | null = null;
 
 let fallbackLogged = false;
 
+// One warning per account per process for the retired defaultInboxId key.
+const retiredInboxWarned = new Set<string>();
+
 export function setCapturedConfig(cfg: Record<string, unknown>): void {
   if (capturedConfig !== null) {
     console.warn("[intercom:config] overwriting previously captured config");
@@ -57,7 +60,6 @@ export function resolveIntercomAccount(
       token: "",
       webhookSecret: "",
       botAdminId: "",
-      defaultInboxId: "",
       fallbackSlackSupervisionChannel: "",
       fallbackAcknowledgement: DEFAULT_FALLBACK_ACK,
       requireMappedHumanAdmin: true,
@@ -168,6 +170,27 @@ export function resolveIntercomAccount(
     }
   }
 
+  // Assignment policy (assignment-policy.ts). The escalation target is a TEAM, never a person.
+  const escalationTeamId = typeof account.escalationTeamId === "string" ? account.escalationTeamId.trim() : "";
+  if (account.escalationTeamId !== undefined && !/^[1-9][0-9]*$/.test(escalationTeamId)) {
+    throw new Error(
+      `intercom: account "${id}" escalationTeamId must be an Intercom TEAM id (digits only), got: ${JSON.stringify(account.escalationTeamId)}`,
+    );
+  }
+  if (escalationTeamId && escalationTeamId === account.botAdminId) {
+    throw new Error(`intercom: account "${id}" escalationTeamId must be a team, not the bot admin id`);
+  }
+  if (account.humanHoldHours !== undefined && (typeof account.humanHoldHours !== "number" || !Number.isFinite(account.humanHoldHours))) {
+    throw new Error(`intercom: account "${id}" humanHoldHours must be a number (got: ${JSON.stringify(account.humanHoldHours)})`);
+  }
+  if (typeof account.defaultInboxId === "string" && account.defaultInboxId.trim() !== "" && !retiredInboxWarned.has(id)) {
+    retiredInboxWarned.add(id);
+    console.warn(
+      `[intercom:config] account "${id}" still sets defaultInboxId. That key is RETIRED and ignored: nothing is assigned to it. ` +
+        `Remove it; an explicit escalation goes to escalationTeamId (a team) or Unassigned.`,
+    );
+  }
+
   return {
     accountId: id,
     enabled: account.enabled ?? false,
@@ -175,7 +198,9 @@ export function resolveIntercomAccount(
     token: account.token,
     webhookSecret: account.webhookSecret,
     botAdminId: account.botAdminId,
-    defaultInboxId: account.defaultInboxId ?? "",
+    // `defaultInboxId` is deliberately NOT passed through: it is retired and nothing may assign to it.
+    ...(escalationTeamId ? { escalationTeamId } : {}),
+    ...(typeof account.humanHoldHours === "number" ? { humanHoldHours: account.humanHoldHours } : {}),
     fallbackSlackSupervisionChannel: account.fallbackSlackSupervisionChannel ?? "",
     fallbackAcknowledgement: account.fallbackAcknowledgement ?? DEFAULT_FALLBACK_ACK,
     requireMappedHumanAdmin: account.requireMappedHumanAdmin ?? true,

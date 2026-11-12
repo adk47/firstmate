@@ -772,6 +772,34 @@ frozen labelled sets in `scripts/verifier_eval/sets/` (false-approve, approve-on
 violations must be 0; nightly board in `/var/lib/hydra/verifier-eval/latest/`):
 `docs/credit-verification/verifier-eval.md`.
 
+## Intercom: no conversation is assigned to a person by default
+
+The AI queue is "assigned to Caroline" (admin `5763097`); Intercom has no AI team. Who holds a
+conversation is decided in ONE module, `plugins/intercom/src/assignment-policy.ts` (captain
+2026-11-11; measurements in `data/intercom-no-human-assignment-k1/report.md`):
+
+- **A blocked, dropped or leaked reply stays with Caroline.** The customer gets
+  `BLOCKED_REPLY_FALLBACK` (bank entry `ai_queue_fallback`, which promises no person) and nobody is
+  assigned. Before this, 404 of the 478 conversations the plugin put on one person in 14 days were
+  Caroline's own reply failing the output guard.
+- **A human only on an explicit escalation, and an escalation carries a reason**
+  (`applyHandOff` throws without one). It goes to the TEAM queue `escalationTeamId` with
+  `type: "team"`, never to an admin id. `defaultInboxId` is retired and ignored;
+  `scripts/check-intercom-no-personal-assignee.sh` (PR Validation) fails on it, on a person's id as
+  the escalation queue, and on any `assignConversation` call outside the policy module.
+- **A human assignee silences Caroline only while that human is working the thread**
+  (`humanHold`, `humanHoldHours`, default 72). A stale assignment is reclaimed on the customer's
+  next message. Hand-back from the escalation queue is "assign to Caroline".
+- **A writer outside the plugin that posts as Caroline re-opens the conversation ON its old
+  assignee.** On 2026-11-11 one notification campaign re-opened 312 long-closed conversations on a
+  person in 52 minutes; no assignment part is written, so an assignment count alone misses it. The
+  plugin reclaims on that webhook; a new sender should still assign to Caroline before it posts.
+- A ticket (`create_ticket`) is never a hand-off: Caroline's workspace doctrine says so
+  (`workspaces/support/AGENTS.md` "Who holds the conversation").
+- Clearing a person's queue is `scripts/intercom-queue-reassign.py` (plan / apply / revert /
+  verify): assignment parts and internal notes only, a ledger row with the inverse before each
+  write, never a close or a customer message.
+
 ## The Ops bot's staff asks are routed, not answered by an agent turn
 
 Every message on the `operations` Slack account is intercepted by

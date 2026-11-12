@@ -18,7 +18,7 @@ import {
 } from "../src/injection-watch.js";
 import { SAFETY_LEDGER_PATH, emailSha256 } from "../src/safety-ledger.js";
 import { classifyText, classifierBlocksOutbound, SAFETY_CLASSIFIER_URL } from "../src/safety-classifier.js";
-import { ANSWER_BANK, BANK_VERSION, HANDOFF_LINE } from "../src/answer-bank.js";
+import { ANSWER_BANK, BANK_VERSION, BLOCKED_REPLY_FALLBACK, HANDOFF_LINE } from "../src/answer-bank.js";
 import { MERGE_PARAGRAPH, HANDOFF_LINE as MERGE_HANDOFF } from "../src/merge-reply-guard.js";
 import { IntercomAssignmentConflictError } from "../src/outbound.js";
 
@@ -28,7 +28,7 @@ function fakeClient() {
     assignConversation: vi.fn(async () => ({})),
   };
 }
-const account = { botAdminId: "bot", defaultInboxId: "inbox-1", fallbackSlackSupervisionChannel: "https://hooks.example/x" };
+const account = { botAdminId: "bot", escalationTeamId: "777", fallbackSlackSupervisionChannel: "https://hooks.example/x" };
 
 function deps(over: Record<string, unknown> = {}) {
   const rows: Record<string, unknown>[] = [];
@@ -276,110 +276,50 @@ describe("guardOutbound", () => {
     expect(rows).toEqual([]);
     expect(client.assignConversation).not.toHaveBeenCalled();
   });
-  it("an enforced block posts the hand-off line, reassigns to the team inbox, tags, records and pages", async () => {
+  // intercom-no-human-assignment-k1 (captain 2026-11-11: "cut this to zero and have Caroline handle
+  // all of them"): 404 of the 478 conversations this plugin put on one person in 14 days were THIS
+  // path. A blocked reply is the model's mistake; it never moves the conversation to a human.
+  it("an enforced block posts the AI-queue fallback, ASSIGNS NOBODY, tags, records and pages", async () => {
     const client = fakeClient();
     const { rows, pages, d } = deps();
     const o = await guardOutbound({
       client, account, conversationId: "c9", reply: "Your credits will be approved by Friday.", customerText: "when?", tag: "t", deps: d,
     });
     expect(o.blocked).toBe(true);
-    expect(o.body).toBe(HANDOFF_LINE);
-    expect(client.assignConversation).toHaveBeenCalledWith({ conversationId: "c9", adminId: "bot", assigneeId: "inbox-1" });
+    expect(o.body).toBe(BLOCKED_REPLY_FALLBACK);
+    expect(o.assignment).toBe("ai_queue");
+    expect(client.assignConversation).not.toHaveBeenCalled();
     expect(client.addTag).toHaveBeenCalledWith("c9", OUTPUT_GUARD_TAG, "bot");
-    expect(rows[0]).toMatchObject({ kind: "output_guard", enforced: true, bank_version: BANK_VERSION });
+    expect(rows[0]).toMatchObject({ kind: "output_guard", enforced: true, assignment: "ai_queue", bank_version: BANK_VERSION });
     expect(pages[0]).toMatch(/blocked by the output guard/);
+    expect(pages[0]).toMatch(/STAYS with Caroline/);
+    expect(pages[0]).not.toMatch(/please answer it/);
+  });
+  it("the fallback promises no person, no outcome and no time", () => {
+    expect(BLOCKED_REPLY_FALLBACK).not.toBe(HANDOFF_LINE);
+    expect(BLOCKED_REPLY_FALLBACK).not.toMatch(/teammate|team|someone|person|colleague|human|agent|specialist/i);
+    expect(BLOCKED_REPLY_FALLBACK).not.toMatch(/soon|shortly|today|tomorrow|hours?|days?|within|by (mon|tue|wed|thu|fri|sat|sun)/i);
+    expect(ANSWER_BANK.some((e) => e.text === BLOCKED_REPLY_FALLBACK)).toBe(true);
+  });
+  it("a retired defaultInboxId on the account is never used as a target", async () => {
+    const client = fakeClient();
+    const { d } = deps();
+    const o = await guardOutbound({
+      client, account: { ...account, defaultInboxId: "5465657" } as never, conversationId: "c13",
+      reply: "I've approved your credit.", customerText: "", tag: "t", deps: d,
+    });
+    expect(o.assignment).toBe("ai_queue");
+    expect(client.assignConversation).not.toHaveBeenCalled();
   });
   it("a failing side effect never turns a block into a pass", async () => {
-    const client = { addTag: vi.fn(async () => { throw new Error("tag"); }), assignConversation: vi.fn(async () => { throw new Error("assign"); }) };
+    const client = { addTag: vi.fn(async () => { throw new Error("tag"); }) };
     const { d } = deps({
       appendLedger: async () => "EACCES",
       page: async () => { throw new Error("slack"); },
     });
     const o = await guardOutbound({ client, account, conversationId: "c", reply: "I've approved your credit.", customerText: "", tag: "t", deps: d });
     expect(o.blocked).toBe(true);
-    expect(o.body).toBe(HANDOFF_LINE);
-  });
-  it("a failed reassignment is retried once, recorded as FAILED, and the page says the bot still holds it", async () => {
-    const client = { addTag: vi.fn(async () => {}), assignConversation: vi.fn(async () => { throw new Error("403"); }) };
-    const { rows, pages, d } = deps();
-    const o = await guardOutbound({ client, account, conversationId: "c7", reply: "I've approved your credit.", customerText: "", tag: "t", deps: d });
-    expect(o.blocked).toBe(true);
-    expect(o.assignment).toBe("FAILED");
-    expect(client.assignConversation).toHaveBeenCalledTimes(2);
-    expect(rows[0]).toMatchObject({ kind: "output_guard", assignment: "FAILED" });
-    expect(pages[0]).toMatch(/REASSIGNMENT FAILED/);
-    expect(pages[0]).toMatch(/STILL ASSIGNED TO THE BOT/);
-    expect(pages[0]).not.toMatch(/now with the team inbox/);
-  });
-  it("a conflict naming the hand-off target is a hand-off, not a FAILED page (read-back conv 215476670359602)", async () => {
-    // Intercom answers conversation_already_assigned_to_assignee when the conversation is ALREADY with
-    // the target admin. On 2026-11-02 that was a human (5465657) and the guard paged "STILL ASSIGNED TO
-    // THE BOT", an alarm that was simply false.
-    const client = {
-      addTag: vi.fn(async () => {}),
-      assignConversation: vi.fn(async ({ conversationId, assigneeId }: { conversationId: string; assigneeId: string }) => {
-        throw new IntercomAssignmentConflictError(`${conversationId} already assigned to ${assigneeId}`, assigneeId);
-      }),
-    };
-    const { rows, pages, d } = deps();
-    const o = await guardOutbound({ client, account, conversationId: "c10", reply: "I've approved your credit.", customerText: "", tag: "t", deps: d });
-    expect(o.blocked).toBe(true);
-    expect(o.assignment).toBe("already_assigned");
-    expect(client.assignConversation).toHaveBeenCalledTimes(1);
-    expect(rows[0]).toMatchObject({ kind: "output_guard", assignment: "already_assigned" });
-    expect(pages[0]).toMatch(/ALREADY assigned to the hand-off target/);
-    expect(pages[0]).not.toMatch(/STILL ASSIGNED TO THE BOT/);
-    expect(pages[0]).not.toMatch(/REASSIGNMENT FAILED/);
-  });
-  it("a conflict naming the BOT as the hand-off target is a failure (QA on #1673)", async () => {
-    // A misconfigured defaultInboxId equal to the bot must not turn a bot-owned conversation into a hand-off.
-    const client = {
-      addTag: vi.fn(async () => {}),
-      assignConversation: vi.fn(async ({ conversationId, assigneeId }: { conversationId: string; assigneeId: string }) => {
-        throw new IntercomAssignmentConflictError(`${conversationId} already assigned to ${assigneeId}`, assigneeId);
-      }),
-    };
-    const { rows, pages, d } = deps();
-    const o = await guardOutbound({
-      client, account: { ...account, defaultInboxId: account.botAdminId }, conversationId: "c12",
-      reply: "I've approved your credit.", customerText: "", tag: "t", deps: d,
-    });
-    expect(o.assignment).toBe("FAILED");
-    expect(rows[0]).toMatchObject({ kind: "output_guard", assignment: "FAILED" });
-    expect(pages[0]).toMatch(/STILL ASSIGNED TO THE BOT/);
-    expect(pages[0]).not.toMatch(/ALREADY assigned to the hand-off target/);
-  });
-  it("a conflict naming the BOT is still a failure: that conversation really is bot-owned", async () => {
-    const client = {
-      addTag: vi.fn(async () => {}),
-      assignConversation: vi.fn(async () => {
-        throw new IntercomAssignmentConflictError("c11 already assigned to bot", "bot");
-      }),
-    };
-    const { rows, pages, d } = deps();
-    const o = await guardOutbound({ client, account, conversationId: "c11", reply: "I've approved your credit.", customerText: "", tag: "t", deps: d });
-    expect(o.assignment).toBe("FAILED");
-    expect(rows[0]).toMatchObject({ assignment: "FAILED" });
-    expect(pages[0]).toMatch(/STILL ASSIGNED TO THE BOT/);
-  });
-  it("a retry that succeeds reports the team inbox", async () => {
-    let n = 0;
-    const client = { addTag: vi.fn(async () => {}), assignConversation: vi.fn(async () => { if (n++ === 0) throw new Error("blip"); return {}; }) };
-    const { rows, pages, d } = deps();
-    const o = await guardOutbound({ client, account, conversationId: "c8", reply: "I've approved your credit.", customerText: "", tag: "t", deps: d });
-    expect(o.assignment).toBe("team_inbox");
-    expect(rows[0]).toMatchObject({ assignment: "team_inbox" });
-    expect(pages[0]).toMatch(/now with the team inbox/);
-  });
-  it("no defaultInboxId: reported as unassigned, never as the team inbox", async () => {
-    const client = fakeClient();
-    const { pages, d } = deps();
-    const o = await guardOutbound({
-      client, account: { ...account, defaultInboxId: undefined }, conversationId: "c", reply: "I've approved your credit.",
-      customerText: "", tag: "t", deps: d,
-    });
-    expect(o.assignment).toBe("unassigned");
-    expect(pages[0]).toMatch(/UNASSIGNED/);
+    expect(o.body).toBe(BLOCKED_REPLY_FALLBACK);
   });
   it("the classifier can add a block but never remove one", async () => {
     const client = fakeClient();
@@ -439,7 +379,7 @@ describe("guardOutbound", () => {
       deps: d,
     });
     expect(o.blocked).toBe(true);
-    expect(o.body).toBe(HANDOFF_LINE);
+    expect(o.body).toBe(BLOCKED_REPLY_FALLBACK);
   });
   it("an ABSENT safetyClassifier config keeps the historical force (enforce), not shadow", async () => {
     // The direction matters: a host that never sets the key must not silently stop enforcing.
@@ -487,7 +427,7 @@ describe("guardOutbound", () => {
       deps: d,
     });
     expect(o.blocked).toBe(true);
-    expect(o.body).toBe(HANDOFF_LINE);
+    expect(o.body).toBe(BLOCKED_REPLY_FALLBACK);
   });
   it("a paraphrased bank line is posted and recorded as a note", async () => {
     const client = fakeClient();
@@ -504,7 +444,7 @@ describe("guardOutbound", () => {
 });
 
 describe("status_chase fails closed through guardOutbound (r5 [key=status-chase-fact])", () => {
-  it("no fact at send -> hand-off + reassign", async () => {
+  it("no fact at send -> blocked to the AI-queue fallback, nobody assigned", async () => {
     const client = fakeClient();
     const { d } = deps();
     const o = await guardOutbound({
@@ -512,8 +452,9 @@ describe("status_chase fails closed through guardOutbound (r5 [key=status-chase-
       reply: "I understand. Your request is in the verification queue and the outcome comes to this conversation and to your email; if the team needs anything from you they will ask here.",
     });
     expect(o.blocked).toBe(true);
-    expect(o.body).toBe(HANDOFF_LINE);
-    expect(client.assignConversation).toHaveBeenCalled();
+    expect(o.body).toBe(BLOCKED_REPLY_FALLBACK);
+    // The largest single source of human assignments (352 of 414 guard blocks): it stays with Caroline.
+    expect(client.assignConversation).not.toHaveBeenCalled();
   });
 });
 

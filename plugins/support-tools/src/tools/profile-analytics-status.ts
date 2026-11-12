@@ -234,8 +234,69 @@ function diagnosisForDeny(reason: AnalyticsDenyReason): string {
     case "owner_undetermined":
     case "account_not_resolved":
     case "check_unavailable":
-      return "We could not confirm your account access to this profile's analytics right now. A team member will follow up.";
+      // No person is promised here (intercom-no-human-assignment-k1): an unconfirmed access
+      // check is a reason to ask the customer for the detail that resolves it, not a hand-off.
+      return "We could not confirm your account access to this profile's analytics right now, so no analytics detail can be given in this reply.";
   }
+}
+
+/** Where every field of `data_freshness` comes from. Stated in the payload so an answer names its source. */
+export const DATA_FRESHNESS_SOURCE =
+  "core admin API GET /api/v3/admin/profile/{id}/analytics-status (freshness + latestRun), read live in this call";
+
+function isoOrEmpty(v: unknown): string {
+  return typeof v === "string" ? v : "";
+}
+
+function numOrNull(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/**
+ * The data-freshness read (intercom-no-human-assignment-k1, Part 4): "is my data current, when was
+ * it last updated, is something known to be wrong". Three answers, each with its source, and an
+ * unmeasured leg is `null` / `measured: false`, never a healthy default:
+ *
+ *   - is_current: latest observed age against the BACKEND's own `staleAfterHours`. No threshold is
+ *     invented here; when the backend sends no threshold or no age, the answer is null.
+ *   - last_updated_at / last_run: the profile's last observed update and the last processing run.
+ *   - known_issue: NOT MEASURED. No machine-readable known-issue source is reachable from the edge
+ *     gateway (the V4 staleness sentinel's finding ledger lives in platform-data-processing). The
+ *     payload says so, so "no known issue" is never asserted from silence.
+ *
+ * It carries dates and counts of TRACKS processed, never a stream figure, and it is only built on
+ * the entitled branch (the entitlement gate above is unchanged).
+ */
+export function buildDataFreshness(
+  freshness: Record<string, unknown>,
+  latestRun: Record<string, unknown>,
+): Record<string, unknown> {
+  const age = numOrNull(freshness.latestObservedAgeHours);
+  const staleAfter = numOrNull(freshness.staleAfterHours);
+  const isCurrent = age !== null && staleAfter !== null && staleAfter > 0 ? age <= staleAfter : null;
+  return {
+    source: DATA_FRESHNESS_SOURCE,
+    is_current: isCurrent,
+    is_current_basis:
+      isCurrent === null
+        ? "unmeasured: the backend returned no observed age or no stale threshold for this profile"
+        : `latest observed update is ${age}h old against the backend's stale threshold of ${staleAfter}h`,
+    last_updated_at: isoOrEmpty(freshness.latestObservedAt),
+    age_hours: age,
+    stale_after_hours: staleAfter,
+    last_run: {
+      date: isoOrEmpty(latestRun.date),
+      updated_at: isoOrEmpty(latestRun.updatedAt),
+      tracks_in_progress: numOrNull(latestRun.inProgressTracksCount),
+      tracks_updated: numOrNull(latestRun.numTracksUpdated),
+      tracks_total: numOrNull(latestRun.tracksCount),
+    },
+    known_issue: {
+      measured: false,
+      reason:
+        "no machine-readable known-issue source is reachable from this tool; do not tell the customer there is or is not a known issue",
+    },
+  };
 }
 
 export function createProfileAnalyticsStatusTool(deps: ToolDeps): AgentTool<typeof Parameters, unknown> {
@@ -245,7 +306,7 @@ export function createProfileAnalyticsStatusTool(deps: ToolDeps): AgentTool<type
     name: "profile_analytics_status",
     label: "Profile Analytics Status",
     description:
-      "Read-only support diagnosis for a profile's analytics state. Use after profile_status and subscription_status on analytics, streams, stale numbers, or missing-data complaints. Gated on the verified customer's own access to that profile's analytics (an ACTIVE seat) — a non-entitled customer gets a diagnosis with no figures. Returns structured JSON; never triggers refreshes or writes.",
+      "Read-only support diagnosis for a profile's analytics state, including the data-freshness read (`data_freshness`: is the data current, when it was last updated, with its source). Use after profile_status and subscription_status on analytics, streams, stale numbers, or missing-data complaints. Gated on the verified customer's own access to that profile's analytics (an ACTIVE seat) — a non-entitled customer gets a diagnosis with no figures. Returns structured JSON; never triggers refreshes or writes.",
     parameters: Parameters,
     async execute(_toolCallId: string, params: Params): Promise<AgentToolResult<unknown>> {
       try {
@@ -401,6 +462,7 @@ export function createProfileAnalyticsStatusTool(deps: ToolDeps): AgentTool<type
               latest_observed_at: String(freshness.latestObservedAt ?? ""),
               latest_observed_age_hours: freshness.latestObservedAgeHours ?? null,
             },
+            data_freshness: buildDataFreshness(freshness, latestRun),
             processing: {
               latest_run_date: String(latestRun.date ?? ""),
               in_progress_tracks_count: Number(latestRun.inProgressTracksCount ?? 0),

@@ -38,7 +38,15 @@ export function handleAssignment(
 ): void {
   state.currentAssigneeId = assigneeId;
   state.currentAssigneeType = assigneeType;
-  state.handoffMode = isHumanAdmin(assigneeType, assigneeId, botAdminId) ? "human_takeover" : "agent_active";
+  if (isHumanAdmin(assigneeType, assigneeId, botAdminId)) {
+    state.handoffMode = "human_takeover";
+  } else if (assigneeId === botAdminId || !state.escalationFiredAt) {
+    state.handoffMode = "agent_active";
+  }
+  // else: an assignment to nobody or to a team while an explicit escalation is active. That is
+  // the escalation itself landing in its queue (assignment-policy.ts applyHandOff unassigns the
+  // bot, then places the team), so it must NOT hand the conversation back to Caroline. Only an
+  // explicit assignment TO THE BOT ends an escalation.
   state.updatedAt = new Date().toISOString();
 }
 

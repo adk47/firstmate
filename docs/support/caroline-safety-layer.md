@@ -180,14 +180,20 @@ node /opt/hydra/scripts/caroline-redteam.mjs
 A block on a reply that was actually fine is a false positive. To fix it, add the reply as a `safe_reply` case in
 the corpus and narrow the rule. Do not widen the masking.
 
-A `REASSIGNMENT FAILED ... STILL ASSIGNED TO THE BOT` page means the hand-off target really was not reached. An
-`IntercomAssignmentConflictError` naming the target (Intercom code `conversation_already_assigned_to_assignee`) is the
-OPPOSITE: the conversation is already with that admin — a human picked it up — so the ledger records
-`assignment="already_assigned"` and the page says so. A conflict naming the BOT stays `FAILED`. Both hand-off
-paths share one predicate, `isHandoffConflict` in `outbound.ts` (QA on #1673: the dropped-reply path honoured a
-conflict naming the bot and told supervision a human held a conversation the bot still owned). It counts a conflict
-only when the target is CONFIGURED and is not the bot, so an unset/`"0"` target (Intercom's Unassign) or a
-`defaultInboxId` misconfigured to `botAdminId` never reads as a completed hand-off. The digest's
+**A blocked reply no longer assigns the conversation to anyone** (intercom-no-human-assignment-k1, captain
+2026-11-11). Until then every block assigned the thread to `defaultInboxId`, which on the live host was one
+person's admin id: 404 of the 478 assignments that person received from this plugin in 14 days were output-guard
+blocks, 352 of them the single rule `fact_unverified:status_chase`. Now a block (and a reply emptied by the
+help-link gate, and a reasoning leak) posts `BLOCKED_REPLY_FALLBACK`, which is the AI-queue line
+(`ai_queue_fallback` in the answer bank: no person, no time), the conversation stays with Caroline, the ledger row
+records `assignment="ai_queue"`, and the Slack line says it is for the fix loop, not a task. Who holds a
+conversation is decided in ONE module, `plugins/intercom/src/assignment-policy.ts`: an explicit escalation
+(risk rule, restricted account, legacy pattern) must carry a reason and goes to the `escalationTeamId` TEAM queue
+(or Intercom's Unassigned when unset), never to a personal admin id; `defaultInboxId` is retired and
+`scripts/check-intercom-no-personal-assignee.sh` fails CI on it. A human assignee silences Caroline only while a
+human is working the thread (`humanHoldHours`, default 72): a stale assignment is reclaimed on the customer's next
+message. `ledger.jsonl` rows written before this change carry `assignment` values `team_inbox`,
+`already_assigned`, `FAILED`. The digest's
 `classifier_unavailable` count is per-call durable rows while `classifier_calls` comes from 15-minute windows that
 can count fewer, so the summary prints a ratio only when the window total covers the rows and otherwise says
 "per-call rows are authoritative".

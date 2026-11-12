@@ -38,9 +38,26 @@ setup() {
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"verdict":"block"'
   echo "$output" | grep -q '"family":"promise"'
-  # The enforced fallback is the approved hand-off line, so the customer is never left unpromised
-  # AND unhelped.
-  echo "$output" | grep -qi 'teammate'
+  # The enforced fallback is the bank's own blocked-reply line, read from the real bank rather
+  # than spelled here. Since 2026-11-11 a blocked reply assigns nobody, so that line must not say
+  # a person is coming (it was the hand-off line while a block also reassigned the thread). The
+  # Ops path never sends this body: a block proposes nothing (answer._reply_request).
+  blocked="$output"
+  run node --experimental-strip-types --no-warnings --import "$HOOKS" "$BRIDGE" --bank
+  [ "$status" -eq 0 ]
+  run python3 -c '
+import json, sys
+blocked = json.loads(sys.argv[1].strip().splitlines()[-1])
+bank = json.loads(sys.argv[2].strip().splitlines()[-1])
+lines = {e["id"]: e["text"] for e in bank["entries"]}
+body = blocked["body"]
+assert body == lines["ai_queue_fallback"], body
+assert body != lines["handoff_line"], body
+assert "teammate" not in body.lower(), body
+print("fallback-is-the-bank-line")
+' "$blocked" "$output"
+  [ "$status" -eq 0 ]
+  [ "$output" = "fallback-is-the-bank-line" ]
 }
 
 @test "the real guard PASSES an approved bank line verbatim" {

@@ -57,6 +57,26 @@ describe("handleAssignment", () => {
     handleAssignment(state, "0", "nobody_admin", BOT_ADMIN_ID);
     expect(state.handoffMode).toBe("agent_active");
   });
+
+  // intercom-no-human-assignment-k1: an explicit escalation now lands in a QUEUE (bot unassigned,
+  // then the escalation team), and Intercom reports both steps as assignment webhooks. Neither
+  // may hand the conversation back to Caroline.
+  it("an unassign or team assignment during an active escalation does NOT re-activate the agent", () => {
+    const state = createInitialSessionState("conv_1", "ws_1");
+    state.handoffMode = "human_takeover";
+    state.escalationFiredAt = new Date().toISOString();
+    handleAssignment(state, "0", "nobody_admin", BOT_ADMIN_ID);
+    expect(state.handoffMode).toBe("human_takeover");
+    handleAssignment(state, "7111842", "team", BOT_ADMIN_ID);
+    expect(state.handoffMode).toBe("human_takeover");
+  });
+  it("an explicit assignment TO THE BOT ends an escalation (a human hands it back)", () => {
+    const state = createInitialSessionState("conv_1", "ws_1");
+    state.handoffMode = "human_takeover";
+    state.escalationFiredAt = new Date().toISOString();
+    handleAssignment(state, BOT_ADMIN_ID, "admin", BOT_ADMIN_ID);
+    expect(state.handoffMode).toBe("agent_active");
+  });
 });
 
 describe("handleAdminReply", () => {

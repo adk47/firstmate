@@ -61,14 +61,15 @@ formats, the address field-mapping table, and the 40-character rule.
 ## Step 0 – Bail-out check (runs first, every turn)
 
 Same as the other support skills. If the customer asks for a human, is frustrated, or
-the conversation is looping, stop and file `support-general` with the matching
+the conversation is looping, stop this flow and file `support-general` with the matching
 `details.escalation_reason` (`customer_requested_human` | `frustration_detected` |
 `loop_detected`) – see `action-request/SKILL.md` "Human Handoff" – then reply:
 
-> "Sorry this has been frustrating – I've passed you over to one of our teammates.
+> "Sorry this has been frustrating. I've flagged this for our team.
 > You'll hear from us in this conversation and by email."
 
-Then stop.
+Then stop this flow. The conversation stays with you (a ticket is not a hand-off); never say a
+teammate has taken over.
 
 ## Step 1 – Which lane? (sender check)
 

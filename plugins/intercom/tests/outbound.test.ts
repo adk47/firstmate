@@ -15,7 +15,7 @@ import {
   REPLY_BASE_BACKOFF_MS,
   REPLY_MAX_TOTAL_WAIT_MS,
   IntercomAssignmentConflictError,
-  isHandoffConflict,
+  isAssignmentConflict,
 } from "../src/outbound.js";
 import type { IntercomClient, IntercomConversation } from "../src/types.js";
 
@@ -1073,26 +1073,38 @@ describe("SanitizingIntercomClient help-centre link gate", () => {
   });
 });
 
-describe("isHandoffConflict (one rule for both hand-off paths)", () => {
-  const conflict = (assigneeId: string) => new IntercomAssignmentConflictError(`already ${assigneeId}`, assigneeId);
-  it("counts a conflict naming a configured, non-bot target", () => {
-    expect(isHandoffConflict(conflict("inbox_7"), { botAdminId: "bot", defaultInboxId: "inbox_7" })).toBe(true);
+describe("isAssignmentConflict (a repeat assignment is the desired end state, not a failure)", () => {
+  it("is true only for Intercom's already-assigned conflict", () => {
+    expect(isAssignmentConflict(new IntercomAssignmentConflictError("already 0", "0"))).toBe(true);
+    expect(isAssignmentConflict(new Error("boom"))).toBe(false);
+    expect(isAssignmentConflict(null)).toBe(false);
   });
-  it("counts a conflict with no reported id when the target itself is a real hand-off target", () => {
-    expect(isHandoffConflict(conflict(""), { botAdminId: "bot", defaultInboxId: "inbox_7" })).toBe(true);
+});
+
+describe("assignConversation assignee type (assignment-policy.ts: an escalation goes to a TEAM)", () => {
+  const originalFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
   });
-  it("never counts a conflict naming the BOT (the conversation really is bot-owned)", () => {
-    expect(isHandoffConflict(conflict("bot"), { botAdminId: "bot", defaultInboxId: "bot" })).toBe(false);
+  const capture = () => {
+    const seen: { url: string; body: any }[] = [];
+    globalThis.fetch = vi.fn(async (url: any, init: any) => {
+      seen.push({ url: String(url), body: JSON.parse(init.body) });
+      return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as unknown as typeof fetch;
+    return seen;
+  };
+  it("defaults to type admin (the bot's self-assign, the unassign)", async () => {
+    const seen = capture();
+    await new RealIntercomClient("tok").assignConversation({ conversationId: "215", adminId: "5763097", assigneeId: "0" });
+    expect(seen[0].url).toBe("https://api.intercom.io/conversations/215/parts");
+    expect(seen[0].body).toMatchObject({ message_type: "assignment", type: "admin", admin_id: "5763097", assignee_id: "0" });
   });
-  it("never counts unset or '0' as a hand-off target (Intercom's Unassign)", () => {
-    expect(isHandoffConflict(conflict("0"), { botAdminId: "bot" })).toBe(false);
-    expect(isHandoffConflict(conflict("0"), { botAdminId: "bot", defaultInboxId: "" })).toBe(false);
-  });
-  it("ignores errors that are not assignment conflicts", () => {
-    expect(isHandoffConflict(new Error("boom"), { botAdminId: "bot", defaultInboxId: "inbox_7" })).toBe(false);
-    expect(isHandoffConflict(null, { botAdminId: "bot", defaultInboxId: "inbox_7" })).toBe(false);
-  });
-  it("ignores a conflict on a DIFFERENT assignee than the one we asked for", () => {
-    expect(isHandoffConflict(conflict("someone_else"), { botAdminId: "bot", defaultInboxId: "inbox_7" })).toBe(false);
+  it("sends type team when asked, so an admin id configured as the escalation queue is refused by Intercom", async () => {
+    const seen = capture();
+    await new RealIntercomClient("tok").assignConversation({
+      conversationId: "215", adminId: "5763097", assigneeId: "7111842", assigneeType: "team",
+    });
+    expect(seen[0].body).toMatchObject({ message_type: "assignment", type: "team", admin_id: "5763097", assignee_id: "7111842" });
   });
 });

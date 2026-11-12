@@ -13,6 +13,7 @@ import { RateLimitError } from "./outbound.js";
 import { classifyEvent, createEventIdSet, isEventProcessed, trackEventId, isSelfReply } from "./filters.js";
 import { checkEscalation, assessRisk, type AssessRiskDeps } from "./escalation.js";
 import { restrictionFor } from "./restricted-accounts.js";
+import { humanHold } from "./assignment-policy.js";
 import { updateKnownFacts } from "./extractors.js";
 import { shouldEnrich, type VerifiedIdentity } from "./enrichment.js";
 import {
@@ -222,6 +223,10 @@ export type HandlerAction =
   // conversation with the human admin who already holds it.
   | { action: "restricted_hold"; conversationId: string; category: string; note: string; body: string; reassign: boolean }
   | { action: "state_updated"; conversationId: string; description: string }
+  // A writer outside this plugin posted AS Caroline (a notifier, the ops write wrapper) into a
+  // conversation parked on a person nobody is working: the reply re-opened it on that person.
+  // channel.ts assigns it back to Caroline. Nothing is sent to the customer.
+  | { action: "reclaim"; conversationId: string; reason: string }
   | { action: "filtered"; conversationId: string; reason: string }
   | { action: "ignored"; reason: string }
   | { action: "duplicate"; eventId: string }
@@ -240,6 +245,10 @@ export interface HandlerOptions {
   // the live-check and risk paths run. Used to disable Caroline on social
   // channels (instagram, facebook, x, etc.). See IntercomAccountConfig.
   blockedChannelTags?: string[];
+  // Human-hold rule (assignment-policy.ts humanHold): how long a human admin assignee silences
+  // Caroline after their last action, and which team is the explicit escalation queue. Absent =
+  // the default window and no escalation team. `nowMs` is a test seam.
+  humanHold?: { hours?: number; escalationTeamId?: string; nowMs?: () => number };
   // Personalization gate + hook. When `personalization.enabled` and the message
   // is from a verified `type: "user"` author, `enrich` is invoked just before a
   // dispatch (never on escalate/filter paths) to populate state.enrichment.
@@ -346,6 +355,9 @@ export async function handleWebhookEvent(
       }
 
       const restriction = restrictionFor(classified.authorId);
+      // Set by the live check below; read by the restricted hold (assignment-policy.ts).
+      let staleHumanAssignee = false;
+      let escalationQueueHolds = false;
 
       // Populated by the live check below (Finding 2) — feeds
       // buildRecentPartsFromLiveConversation ahead of assessRisk/runJev.
@@ -415,10 +427,29 @@ export async function handleWebhookEvent(
                   ? conversation.assignee.id
                   : null;
 
-            if (adminAssigneeId && adminAssigneeId !== botAdminId) {
+            const teamAssigneeId: string | null =
+              conversation.team_assignee_id != null ? String(conversation.team_assignee_id) : null;
+            // ONE rule decides whether a human holds this conversation (assignment-policy.ts).
+            // Before k1 any non-bot admin assignee silenced Caroline for ever, so a customer
+            // who replied on a thread parked on a person weeks ago was simply dropped (168 such
+            // replies in 24 h, measured 2026-11-11). Now a human holds it only while a human is
+            // working it, or while it sits in the explicit escalation queue.
+            const hold = humanHold({
+              adminAssigneeId,
+              teamAssigneeId,
+              botAdminId,
+              escalationTeamId: options?.humanHold?.escalationTeamId,
+              parts: liveConversationParts,
+              escalationFiredAt: state.escalationFiredAt,
+              nowMs: options?.humanHold?.nowMs?.() ?? Date.now(),
+              holdHours: options?.humanHold?.hours,
+            });
+
+            if (hold.held) {
+              escalationQueueHolds = !adminAssigneeId;
               state.handoffMode = "human_takeover";
               state.currentAssigneeId = adminAssigneeId;
-              state.currentAssigneeType = "admin";
+              state.currentAssigneeType = adminAssigneeId ? "admin" : null;
               state.updatedAt = new Date().toISOString();
               // A restricted contact still gets the hold below (alert + note), but
               // with reassign: false so the human keeps the conversation.
@@ -426,28 +457,47 @@ export async function handleWebhookEvent(
                 result: {
                   action: "filtered",
                   conversationId: classified.conversationId,
-                  reason: `live check: human assignee ${adminAssigneeId}`,
+                  reason: `live check: ${hold.reason}`,
                 },
                 state,
               };
+            } else if (hold.reclaim) {
+              // Stale human assignment: Caroline takes the conversation back. currentAssigneeId
+              // keeps the human's id so the dispatch path self-assigns the bot; the escalation
+              // gate and the exchange counter restart, so a genuine risk on this new turn can
+              // still escalate (with a reason, to the escalation queue) instead of being
+              // swallowed by an escalation that fired weeks ago.
+              console.warn(
+                `[intercom:handler] reclaim conv=${classified.conversationId} for the AI queue: ${hold.reason}`,
+              );
+              staleHumanAssignee = true;
+              state.handoffMode = "agent_active";
+              state.currentAssigneeId = adminAssigneeId;
+              state.currentAssigneeType = "admin";
+              state.escalationFiredAt = null;
+              state.escalationTicketId = null;
+              state.escalationTicketActionType = null;
+              state.userExchangeCount = 0;
+              state.userTurnCount = 0;
+              state.updatedAt = new Date().toISOString();
+            } else {
+              // No human admin assigned per the API. DO NOT touch handoffMode
+              // — a prior handleAdminReply may have set human_takeover without
+              // changing assignment (Intercom allows admins to reply without
+              // assigning, and the bot self-assigns every dispatch so the API
+              // ~always reports the bot as assignee). Downgrades back to
+              // agent_active belong to the explicit
+              // conversation.admin.assigned (handleAssignment) and
+              // conversation.admin.opened (handleImplicitReopen) webhook
+              // paths. Reproduced via conv=215474192304895 on 2026-05-06:
+              // Jan replied → handoff = human_takeover; customer replied 7
+              // min later → live check saw bot as assignee (because we'd
+              // self-assigned earlier) → unconditional reset wiped Jan's
+              // takeover and the bot replied over him.
+              state.currentAssigneeId = adminAssigneeId;
+              state.currentAssigneeType = adminAssigneeId ? "admin" : null;
+              state.updatedAt = new Date().toISOString();
             }
-
-            // No human admin assigned per the API. DO NOT touch handoffMode
-            // — a prior handleAdminReply may have set human_takeover without
-            // changing assignment (Intercom allows admins to reply without
-            // assigning, and the bot self-assigns every dispatch so the API
-            // ~always reports the bot as assignee). Downgrades back to
-            // agent_active belong to the explicit
-            // conversation.admin.assigned (handleAssignment) and
-            // conversation.admin.opened (handleImplicitReopen) webhook
-            // paths. Reproduced via conv=215474192304895 on 2026-05-06:
-            // Jan replied → handoff = human_takeover; customer replied 7
-            // min later → live check saw bot as assignee (because we'd
-            // self-assigned earlier) → unconditional reset wiped Jan's
-            // takeover and the bot replied over him.
-            state.currentAssigneeId = adminAssigneeId;
-            state.currentAssigneeType = adminAssigneeId ? "admin" : null;
-            state.updatedAt = new Date().toISOString();
           } else {
             // Unexpected API shape — preserve existing state, fall through.
             // Warn once per conv per process so shape drift surfaces in logs
@@ -475,13 +525,17 @@ export async function handleWebhookEvent(
       }
 
       if (restriction) {
-        // reassign only when no human admin holds it. The holder comes from the live check
-        // when it succeeded, else from cached state (a failed lookup must not move a
-        // human-held conversation to the default inbox).
+        // reassign (to the escalation queue, reason = the restriction category) only when no
+        // human is working it. The holder comes from the live check when it succeeded, else
+        // from cached state (a failed lookup must not move a human-held conversation). A
+        // STALE human assignee does not hold it: a restricted contact parked on one person
+        // weeks ago goes to the escalation queue like any other. Already in that queue = stay.
         const humanHolds =
-          !!state?.currentAssigneeId &&
-          state.currentAssigneeType === "admin" &&
-          state.currentAssigneeId !== botAdminId;
+          escalationQueueHolds ||
+          (!staleHumanAssignee &&
+            !!state?.currentAssigneeId &&
+            state.currentAssigneeType === "admin" &&
+            state.currentAssigneeId !== botAdminId);
         // Caroline stays out of this conversation until a human hands it back.
         if (state) {
           state.handoffMode = "human_takeover";
@@ -873,6 +927,50 @@ export async function handleWebhookEvent(
           result: { action: "filtered", conversationId: classified.conversationId, reason: "self-reply" },
           state,
         };
+      }
+
+      // A reply posted as Caroline by something other than this plugin (a notifier script, the
+      // ops write wrapper). Measured 2026-11-11 17:33-18:25Z: one notification campaign replied
+      // into 312 long-closed conversations whose assignee was a person; each reply re-opened the
+      // conversation ON that person and his open queue went from 581 to 913 in an hour. Caroline
+      // sent the message, so Caroline holds the thread, unless a human is really working it
+      // (assignment-policy.ts humanHold: same rule as the customer-message live check).
+      if (classified.adminId === botAdminId && client && classified.conversationId) {
+        try {
+          const conversation = await client.getConversation({ conversationId: classified.conversationId });
+          const adminAssigneeId: string | null =
+            conversation.admin_assignee_id != null
+              ? String(conversation.admin_assignee_id)
+              : conversation.assignee?.type === "admin"
+                ? conversation.assignee.id
+                : null;
+          if (conversation.state === "open" && adminAssigneeId && adminAssigneeId !== botAdminId) {
+            const hold = humanHold({
+              adminAssigneeId,
+              teamAssigneeId: conversation.team_assignee_id != null ? String(conversation.team_assignee_id) : null,
+              botAdminId,
+              escalationTeamId: options?.humanHold?.escalationTeamId,
+              parts: conversation.conversation_parts?.conversation_parts,
+              escalationFiredAt: state.escalationFiredAt,
+              nowMs: options?.humanHold?.nowMs?.() ?? Date.now(),
+              holdHours: options?.humanHold?.hours,
+            });
+            if (hold.reclaim) {
+              state.handoffMode = "agent_active";
+              state.lifecycleState = "open";
+              state.currentAssigneeId = adminAssigneeId;
+              state.currentAssigneeType = "admin";
+              state.updatedAt = new Date().toISOString();
+              return {
+                result: { action: "reclaim", conversationId: classified.conversationId, reason: hold.reason },
+                state,
+              };
+            }
+          }
+        } catch {
+          // Unreadable: change nothing. The customer-message live check applies the same rule
+          // when the customer next writes.
+        }
       }
 
       // Human admin reply triggers takeover; bot replies are filtered

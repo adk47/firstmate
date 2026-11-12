@@ -14,8 +14,10 @@ import {
   createIntercomClient,
   trackOutboundMessageId,
   IntercomAssignmentConflictError,
-  isHandoffConflict,
+  isAssignmentConflict,
 } from "./outbound.js";
+import { applyHandOff } from "./assignment-policy.js";
+import { BLOCKED_REPLY_FALLBACK } from "./answer-bank.js";
 import { sanitizeReasoningLeak } from "./sanitize-reasoning-leak.js";
 import { prepareMergeReply } from "./merge-reply-guard.js";
 import { renderCanaryLine, resolveCanaryToken } from "./canary-token.js";
@@ -447,46 +449,40 @@ export async function postSupervisionAlert(params: {
 }
 
 /**
- * A reply the help-link gate emptied was never posted. Hand the conversation to
- * a human (same steps as the reasoning-leak escalate path), then notify. Assign
- * first: the durable state change must not depend on the webhook.
+ * A reply the help-link gate emptied was never posted. The conversation STAYS with Caroline
+ * (assignment-policy.ts: a code gate stopping the model's own text is not a reason for a person
+ * to own the thread), and the customer gets the approved AI-queue fallback line instead of
+ * silence: nothing else would wake Caroline before the customer writes again. Then notify.
+ *
+ * `handedOff` is always false and is kept only so callers and the supervision text can never
+ * claim a human holds it.
  */
 export async function handleDroppedReply(params: {
-  client: Pick<IntercomClient, "assignConversation">;
-  account: { botAdminId: string; defaultInboxId?: string; fallbackSlackSupervisionChannel?: string };
+  client: Pick<IntercomClient, "replyToConversation">;
+  account: { botAdminId: string; fallbackSlackSupervisionChannel?: string };
   conversationId: string;
   tag: string;
   log?: { info?: (m: string) => void; error?: (m: string) => void };
   fetchImpl?: typeof fetch;
-}): Promise<{ handedOff: boolean; notified: boolean }> {
+}): Promise<{ handedOff: false; fallbackPosted: boolean; notified: boolean }> {
   const { client, account, conversationId, tag, log, fetchImpl } = params;
-  let handedOff = false;
+  let fallbackPosted = false;
   try {
-    await client.assignConversation({
+    const reply = await client.replyToConversation({
       conversationId,
       adminId: account.botAdminId,
-      assigneeId: account.defaultInboxId || "0",
+      body: BLOCKED_REPLY_FALLBACK,
     });
-    handedOff = true;
-    log?.info?.(`[${tag}] reassigned conv=${conversationId} to ${account.defaultInboxId || "Unassigned"} (reply dropped by help-link gate)`);
+    fallbackPosted = !reply.dropped;
+    log?.info?.(`[${tag}] conv=${conversationId} stays in the AI queue (reply dropped by help-link gate); fallback line posted=${fallbackPosted}`);
   } catch (err) {
-    // Already assigned to the target is the desired end state (a human holds it), not a failure:
-    // reporting "still bot-owned" there is how a false alarm page gets invented (read-back 2026-11-03).
-    // The SAME predicate as guardOutbound: only a configured, non-bot target counts, so a conflict naming the
-    // bot is never reported as a completed hand-off (QA on #1673).
-    if (isHandoffConflict(err, account)) {
-      const assigneeId = err instanceof IntercomAssignmentConflictError ? err.assigneeId : "";
-      handedOff = true;
-      log?.info?.(`[${tag}] conv=${conversationId} already assigned to ${assigneeId}: hand-off already held (reply dropped by help-link gate)`);
-    } else {
-      log?.error?.(`[intercom:ALERT] [${tag}] dropped-reply reassignment failed conv=${conversationId}: ${err}`);
-    }
+    log?.error?.(`[intercom:ALERT] [${tag}] dropped-reply fallback post failed conv=${conversationId}: ${err}`);
   }
   let notified = false;
   if (account.fallbackSlackSupervisionChannel) {
-    const text = handedOff
-      ? `:warning: Caroline's reply was emptied by the help-link gate and nothing was posted (conv ${conversationId}). The conversation was handed to a human \u2014 please follow up.`
-      : `:warning: Caroline's reply was emptied by the help-link gate and nothing was posted (conv ${conversationId}). The handoff failed, so the conversation is still bot-owned \u2014 please follow up.`;
+    const text = fallbackPosted
+      ? `:warning: Caroline's reply was emptied by the help-link gate (conv ${conversationId}). The customer got the AI-queue fallback line instead. The conversation stays with Caroline: no human was assigned.`
+      : `:warning: Caroline's reply was emptied by the help-link gate and the fallback line could not be posted (conv ${conversationId}), so the customer got NO answer. The conversation stays with Caroline: no human was assigned.`;
     notified = await postSupervisionAlert({
       url: account.fallbackSlackSupervisionChannel,
       text,
@@ -496,17 +492,17 @@ export async function handleDroppedReply(params: {
       fetchImpl,
     });
   }
-  return { handedOff, notified };
+  return { handedOff: false, fallbackPosted, notified };
 }
 
 /**
  * The sendText delivery step. A reply the help-link gate emptied was never
- * posted: hand the conversation to a human like the flush path does, and
- * return a dropped result instead of a delivered id.
+ * posted: post the AI-queue fallback like the flush path does (the conversation
+ * stays with Caroline), and return a dropped result instead of a delivered id.
  */
 export async function sendTextReply(params: {
-  client: Pick<IntercomClient, "replyToConversation" | "assignConversation" | "addTag">;
-  account: { accountId: string; botAdminId: string; defaultInboxId?: string; fallbackSlackSupervisionChannel?: string };
+  client: Pick<IntercomClient, "replyToConversation" | "addTag">;
+  account: { accountId: string; botAdminId: string; fallbackSlackSupervisionChannel?: string };
   conversationId: string;
   body: string;
   /** What the customer last said / verified identity, so the PII rule can tell an echo from a leak. */
@@ -522,8 +518,8 @@ export async function sendTextReply(params: {
   const tag = `intercom:${account.accountId}`;
   // caroline-guard-g1 (Fable s1 finding on #1628): the channel adapter's outbound sendText is a
   // second door into a customer conversation (agent / cron / hooks callers). It passes the SAME
-  // output guard as the main dispatch: a barred body becomes the approved hand-off line and the
-  // conversation is reassigned to the team inbox. There is no path that posts model text unguarded.
+  // output guard as the main dispatch: a barred body becomes the approved AI-queue fallback line
+  // and the conversation stays with Caroline. There is no path that posts model text unguarded.
   const og = await guardOutbound({
     client,
     account,
@@ -1723,20 +1719,30 @@ export const intercomPlugin = createChatChannelPlugin({
               log?.error?.(
                 `[intercom:reasoning-leak] [${tag}] ESCALATED conv=${result.conversationId} reason=${guard.reason} markers=${JSON.stringify(guard.matchedMarkers)} sample=${JSON.stringify(guard.droppedSample ?? "")}`,
               );
+              // The conversation STAYS with Caroline (assignment-policy.ts, kind reasoning_leak):
+              // the customer gets the approved AI-queue fallback line, never the leaked text and
+              // never a promise of a person.
+              let leakFallbackPosted = false;
               try {
-                await client.assignConversation({
+                const fb = await client.replyToConversation({
                   conversationId: result.conversationId,
                   adminId: account.botAdminId,
-                  assigneeId: account.defaultInboxId || "0",
+                  body: BLOCKED_REPLY_FALLBACK,
                 });
-                log?.info?.(`[${tag}] reassigned conv=${result.conversationId} to ${account.defaultInboxId || "Unassigned"} (reasoning-leak)`);
+                leakFallbackPosted = !fb.dropped;
+                log?.info?.(`[${tag}] conv=${result.conversationId} stays in the AI queue (reasoning-leak); fallback line posted=${leakFallbackPosted}`);
               } catch (err) {
-                log?.error?.(`[${tag}] reasoning-leak reassignment failed conv=${result.conversationId}: ${err}`);
+                log?.error?.(`[intercom:ALERT] [${tag}] reasoning-leak fallback post failed conv=${result.conversationId}: ${err}`);
               }
               if (account.fallbackSlackSupervisionChannel) {
                 await postSupervisionAlert({
                   url: account.fallbackSlackSupervisionChannel,
-                  text: `:warning: Caroline suppressed a reply that leaked internal reasoning (conv ${result.conversationId}, reason=${guard.reason}). The conversation was handed to a human \u2014 please follow up.`,
+                  text:
+                    `:warning: Caroline suppressed a reply that leaked internal reasoning (conv ${result.conversationId}, reason=${guard.reason}). ` +
+                    (leakFallbackPosted
+                      ? "The customer got the AI-queue fallback line instead. "
+                      : "The fallback line could not be posted, so the customer got NO answer. ") +
+                    "The conversation stays with Caroline: no human was assigned.",
                   tag,
                   conversationId: result.conversationId,
                   log,
@@ -1762,8 +1768,8 @@ export const intercomPlugin = createChatChannelPlugin({
               }
               guard.body = mergePrep.body;
               // OUTPUT GUARD (caroline-guard-g1): the last code-owned gate before the customer sees
-              // anything. A blocked reply becomes the approved hand-off line and the conversation
-              // goes to the team inbox (caroline-safety.ts); nothing a prompt says can relax it.
+              // anything. A blocked reply becomes the approved AI-queue fallback line and the
+              // conversation stays with Caroline (caroline-safety.ts); nothing a prompt says can relax it.
               let outputBlocked = false;
               if (guard.body.trim().length > 0) {
                 const og = await guardOutbound({
@@ -2055,6 +2061,7 @@ export const intercomPlugin = createChatChannelPlugin({
                     {
                       ...riskOptions,
                       blockedChannelTags: account.blockedChannelTags ?? [],
+                      humanHold: { hours: account.humanHoldHours, escalationTeamId: account.escalationTeamId },
                       personalization: account.personalization,
                       enrich: enrichFn,
                       kbRetrieval: account.kbRetrieval,
@@ -2200,6 +2207,25 @@ export const intercomPlugin = createChatChannelPlugin({
                     } else {
                       await runDispatchBatch(result.conversationId, [queuedMessage]);
                     }
+                  } else if (result.action === "reclaim") {
+                    // AI queue is the default (assignment-policy.ts): a reply posted as Caroline
+                    // re-opened this conversation on a person nobody is working it for.
+                    try {
+                      await client.assignConversation({
+                        conversationId: result.conversationId,
+                        adminId: account.botAdminId,
+                        assigneeId: account.botAdminId,
+                      });
+                      state.currentAssigneeId = account.botAdminId;
+                      saveSessions(accountSessions).catch(() => {});
+                      log?.info?.(`[${tag}] reclaimed conv=${result.conversationId} for the AI queue: ${result.reason}`);
+                    } catch (err) {
+                      if (err instanceof IntercomAssignmentConflictError) {
+                        state.currentAssigneeId = account.botAdminId;
+                      } else {
+                        log?.warn?.(`[${tag}] reclaim FAILED conv=${result.conversationId} (${result.reason}): ${err}`);
+                      }
+                    }
                   } else if (result.action === "escalate") {
                     const { executeEscalation } = await import("./escalation-action.js");
                     await executeEscalation({
@@ -2245,17 +2271,18 @@ export const intercomPlugin = createChatChannelPlugin({
                     } catch (err) {
                       log?.error?.(`[${tag}] restricted hold note failed conv=${result.conversationId}: ${err}`);
                     }
-                    // 2. Hand to the human team unless a human admin already holds it.
+                    // 2. Explicit escalation, reason = the restriction category: to the escalation
+                    //    QUEUE (never a person; assignment-policy.ts) unless a human admin already holds it.
                     if (result.reassign) {
-                      try {
-                        await client.assignConversation({
-                          conversationId: result.conversationId,
-                          adminId: account.botAdminId,
-                          assigneeId: account.defaultInboxId || "0",
-                        });
-                      } catch (err) {
-                        log?.error?.(`[${tag}] restricted hold reassignment failed conv=${result.conversationId}: ${err}`);
-                      }
+                      await applyHandOff({
+                        client,
+                        account,
+                        conversationId: result.conversationId,
+                        kind: "restricted_hold",
+                        reason: result.category,
+                        isConflict: isAssignmentConflict,
+                        log,
+                      });
                     }
                     // 3. Slack alert (same supervision channel as escalations).
                     await postSupervisionAlert({
@@ -2280,16 +2307,16 @@ export const intercomPlugin = createChatChannelPlugin({
                     } catch (err) {
                       log?.error?.(`[${tag}] escalation ack failed conv=${result.conversationId}: ${err}`);
                     }
-                    try {
-                      await client.assignConversation({
-                        conversationId: result.conversationId,
-                        adminId: account.botAdminId,
-                        assigneeId: account.defaultInboxId || "0",
-                      });
-                      log?.info?.(`[${tag}] reassigned conv=${result.conversationId} to ${account.defaultInboxId || "Unassigned"}`);
-                    } catch (err) {
-                      log?.error?.(`[${tag}] reassignment failed conv=${result.conversationId}: ${err}`);
-                    }
+                    // Explicit escalation with its reason, to the escalation QUEUE (never a person).
+                    await applyHandOff({
+                      client,
+                      account,
+                      conversationId: result.conversationId,
+                      kind: "legacy_escalation",
+                      reason: `legacy/${result.category}:${result.matchedPattern}`,
+                      isConflict: isAssignmentConflict,
+                      log,
+                    });
                     await postSupervisionAlert({
                       conversationId: result.conversationId,
                       category: result.category,

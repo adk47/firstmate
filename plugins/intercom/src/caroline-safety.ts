@@ -1,18 +1,21 @@
 /**
  * Side-effect half of the Caroline safety layer (caroline-guard-g1). The decisions are pure and
  * live in caroline-output-guard.ts (outbound) and injection-watch.ts (inbound); this file only
- * records and routes them: ledger row, conversation tag, hand-off to the human inbox, supervision
- * page. channel.ts calls exactly two functions: watchInbound() and guardOutbound().
+ * records and routes them: ledger row, conversation tag, supervision page. channel.ts calls
+ * exactly two functions: watchInbound() and guardOutbound().
  *
  * Invariants (pinned by tests/caroline-safety.test.ts):
  *   - watchInbound never changes, delays past its timeout, or drops the customer's message; it
  *     returns nothing the dispatch uses. Detection only.
- *   - guardOutbound returns the body to post. On an enforced block that is the approved hand-off
- *     line AND the conversation is reassigned to the human inbox (the line is then true). A
- *     failure in any side effect (ledger, tag, page) never turns a block into a pass.
+ *   - guardOutbound returns the body to post. On an enforced block that is the approved AI-queue
+ *     fallback line, and the conversation STAYS with Caroline: a code gate tripping on the model's
+ *     text is not a reason for a person to own the thread (assignment-policy.ts; measured
+ *     2026-11-11: 404 of 478 plugin assignments to one person in 14 days were this path). The
+ *     fallback promises no person, so it is true with no assignment. A failure in any side effect
+ *     (ledger, tag, page) never turns a block into a pass.
  */
 import { guardCarolineReply, OUTPUT_GUARD_MODE, type GuardResult } from "./caroline-output-guard.js";
-import { isHandoffConflict } from "./outbound.js";
+import { resolveHandOffTarget } from "./assignment-policy.js";
 import {
   INJECTION_TAG,
   INJECTION_WATCH_VERSION,
@@ -36,12 +39,10 @@ export interface SafetyLog {
 
 export interface SafetyClient {
   addTag(conversationId: string, name: string, adminId: string): Promise<void>;
-  assignConversation(params: { conversationId: string; adminId: string; assigneeId: string }): Promise<unknown>;
 }
 
 export interface SafetyAccount {
   botAdminId: string;
-  defaultInboxId?: string;
   fallbackSlackSupervisionChannel?: string;
   /**
    * Classifier rollout stage (IntercomAccountConfig.safetyClassifier). Absent = "enforce", the
@@ -265,8 +266,11 @@ export interface OutboundGuardOutcome {
   blocked: boolean;
   result: GuardResult;
   classifier: ClassifierResult;
-  /** Blocked + enforced only: where the conversation actually ended up. */
-  assignment?: "team_inbox" | "already_assigned" | "unassigned" | "FAILED" | "not_enforced";
+  /**
+   * Where the conversation is after a block. Always `ai_queue` when enforced: a blocked reply
+   * never moves a conversation to a person (assignment-policy.ts).
+   */
+  assignment?: "ai_queue" | "not_enforced";
 }
 
 export async function guardOutbound(p: OutboundGuardParams): Promise<OutboundGuardOutcome> {
@@ -348,49 +352,11 @@ export async function guardOutbound(p: OutboundGuardParams): Promise<OutboundGua
     p.log?.warn?.(`[intercom:output-guard] [${p.tag}] tag ${OUTPUT_GUARD_TAG} failed conv=${p.conversationId}: ${e}`),
   );
 
-  // The fallback says a teammate takes it from here: make that true before it is posted. One retry;
-  // the ACTUAL outcome is what the ledger row and the page report (QA on #1628: a failed reassign
-  // must never be reported as "with the team inbox").
-  let assignment: "team_inbox" | "already_assigned" | "unassigned" | "FAILED" | "not_enforced" = "not_enforced";
-  if (enforced) {
-    const assigneeId = p.account.defaultInboxId || "0";
-    // A conflict naming the NON-BOT assignee we asked for is the desired end state, not a failure
-    // (read-back 2026-11-03: conv 215476670359602 paged "STILL ASSIGNED TO THE BOT" while a human,
-    // admin 5465657, already held it). Same rule escalation-action.ts already applies to conflicts.
-    // A conflict naming the BOT is NOT a hand-off: that conversation really is still bot-owned.
-    // Only a REAL hand-off target counts (configured, and not the bot): see isHandoffConflict.
-    const alreadyWithTarget = (e: unknown) => isHandoffConflict(e, p.account);
-    let lastErr: unknown = null;
-    let already = false;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        await p.client.assignConversation({ conversationId: p.conversationId, adminId: p.account.botAdminId, assigneeId });
-        lastErr = null;
-        break;
-      } catch (e) {
-        lastErr = e;
-        if (alreadyWithTarget(e)) {
-          already = true;
-          lastErr = null;
-          break;
-        }
-      }
-    }
-    assignment = lastErr
-      ? "FAILED"
-      : already
-        ? "already_assigned"
-        : p.account.defaultInboxId
-          ? "team_inbox"
-          : "unassigned";
-    if (lastErr) {
-      p.log?.error?.(`[intercom:ALERT] [${p.tag}] output-guard reassignment FAILED twice conv=${p.conversationId}: ${lastErr}`);
-    } else if (already) {
-      p.log?.info?.(
-        `[intercom:output-guard] [${p.tag}] conv=${p.conversationId} already assigned to ${assigneeId}: hand-off already held, no reassignment needed`,
-      );
-    }
-  }
+  // A blocked reply keeps the conversation in the AI queue. The policy module is the one place
+  // that decides this; guardOutbound makes NO assignment call. The fallback line it posts
+  // promises no person, so nothing has to be made true by a reassignment.
+  const target = resolveHandOffTarget(p.account, "output_guard");
+  const assignment: "ai_queue" | "not_enforced" = enforced && target.queue === "ai" ? "ai_queue" : "not_enforced";
 
   const err = await d.appendLedger({
     ts: new Date(d.now()).toISOString(),
@@ -408,19 +374,11 @@ export async function guardOutbound(p: OutboundGuardParams): Promise<OutboundGua
   if (err) p.log?.error?.(`[intercom:ALERT] [${p.tag}] output-guard ledger append failed conv=${p.conversationId}: ${err}`);
   if (!enforced) return { body: p.reply, blocked: false, result, classifier, assignment };
 
-  const where =
-    assignment === "team_inbox"
-      ? "The conversation is now with the team inbox: please answer it."
-      : assignment === "already_assigned"
-        ? "The conversation was ALREADY assigned to the hand-off target: a human already holds it, nothing to do."
-        : assignment === "unassigned"
-        ? "The conversation is now UNASSIGNED (no defaultInboxId configured): please pick it up from Unassigned."
-        : "REASSIGNMENT FAILED: the conversation is STILL ASSIGNED TO THE BOT, so no human queue holds it. " +
-          "Assign it to yourself in Intercom now and answer it.";
   await d
     .page(
-      `${assignment === "FAILED" ? ":rotating_light:" : ":no_entry:"} Caroline's reply was blocked by the output guard ` +
-        `(conv ${p.conversationId}; ${rules.join(", ")}). The customer got the hand-off line. ${where}`,
+      `:no_entry: Caroline's reply was blocked by the output guard (conv ${p.conversationId}; ${rules.join(", ")}). ` +
+        `The customer got the AI-queue fallback line (no person promised). The conversation STAYS with Caroline: ` +
+        `no human was assigned and none is needed. This line is for the fix loop, not a task.`,
     )
     .catch(() => false);
   return { body: result.body, blocked: true, result, classifier, assignment };

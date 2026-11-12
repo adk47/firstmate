@@ -244,6 +244,198 @@ describe("handleWebhookEvent", () => {
   });
 
   describe("live check", () => {
+    // intercom-no-human-assignment-k1: a human assignee holds a conversation only while a human
+    // is working it. Measured 2026-11-11: 168 customer replies in 24 h were dropped because the
+    // assignee was a person who had never answered.
+    const liveConv = (extra: Record<string, unknown>) => (client: MockIntercomClient) => {
+      client.getConversation = async (params) => {
+        client.calls.getConversation.push(params);
+        return {
+          type: "conversation" as const,
+          id: params.conversationId,
+          title: null,
+          created_at: Date.now() / 1000,
+          updated_at: Date.now() / 1000,
+          open: true,
+          state: "open" as const,
+          ...extra,
+        } as never;
+      };
+    };
+    const humanPart = (ageSeconds: number, id = "5465657") => ({
+      type: "conversation_part.list", total_count: 1, conversation_parts: [
+        { type: "conversation_part", id: "p1", part_type: "comment", body: "x", created_at: Math.floor(Date.now() / 1000) - ageSeconds, author: { type: "admin", id } },
+      ],
+    });
+
+    it("RECLAIMS a stale human assignment: no human action at all -> Caroline answers", async () => {
+      const state = createInitialSessionState("conv_123", "ws_1");
+      state.handoffMode = "human_takeover";
+      state.escalationFiredAt = new Date(Date.now() - 30 * 86400_000).toISOString();
+      state.userExchangeCount = 9;
+      const client = new MockIntercomClient();
+      liveConv({ admin_assignee_id: 5465657, team_assignee_id: null })(client);
+      const { result, state: updated } = await handleWebhookEvent(
+        { ...userCreated, id: "evt_stale_1" } as IntercomWebhookPayload, state, BOT_ADMIN_ID, client,
+      );
+      expect(result.action).toBe("dispatch_to_agent");
+      expect(updated?.handoffMode).toBe("agent_active");
+      // The human's id stays as the cached assignee so the dispatch path self-assigns the bot.
+      expect(updated?.currentAssigneeId).toBe("5465657");
+      // The old escalation no longer gates a fresh one.
+      expect(updated?.escalationFiredAt).toBeNull();
+    });
+
+    // A notifier posting AS Caroline into an old conversation re-opens it on its assignee.
+    const botReplied = (id: string) => ({
+      ...adminReplied,
+      id,
+      data: {
+        ...adminReplied.data,
+        item: {
+          ...adminReplied.data.item,
+          conversation_parts: {
+            conversation_parts: [{
+              ...adminReplied.data.item.conversation_parts.conversation_parts[0],
+              id: `part_${id}`,
+              author: { type: "admin", id: BOT_ADMIN_ID, name: "Caroline" },
+            }],
+          },
+        },
+      },
+    }) as IntercomWebhookPayload;
+
+    it("a reply posted as Caroline OUTSIDE the plugin on a stale human's thread -> reclaim", async () => {
+      const state = createInitialSessionState("conv_123", "ws_1");
+      const client = new MockIntercomClient();
+      liveConv({ admin_assignee_id: 5465657, conversation_parts: humanPart(200 * 86400) })(client);
+      const { result, state: updated } = await handleWebhookEvent(botReplied("evt_ext_1"), state, BOT_ADMIN_ID, client);
+      expect(result.action).toBe("reclaim");
+      if (result.action === "reclaim") expect(result.reason).toMatch(/stale human assignee 5465657/);
+      expect(updated?.handoffMode).toBe("agent_active");
+    });
+
+    it("... but not while that human is working it, and not when Caroline already holds it", async () => {
+      const working = new MockIntercomClient();
+      liveConv({ admin_assignee_id: 5465657, conversation_parts: humanPart(3600) })(working);
+      const a = await handleWebhookEvent(botReplied("evt_ext_2"), createInitialSessionState("conv_123", "ws_1"), BOT_ADMIN_ID, working);
+      expect(a.result.action).toBe("filtered");
+
+      const mine = new MockIntercomClient();
+      liveConv({ admin_assignee_id: Number(BOT_ADMIN_ID) || BOT_ADMIN_ID })(mine);
+      const b = await handleWebhookEvent(botReplied("evt_ext_3"), createInitialSessionState("conv_123", "ws_1"), BOT_ADMIN_ID, mine);
+      expect(b.result.action).toBe("filtered");
+    });
+
+    it("... and never for the plugin's own reply, a closed conversation, or an unreadable one", async () => {
+      const own = createInitialSessionState("conv_123", "ws_1");
+      own.outboundMessageIds = ["part_evt_ext_4"];
+      const client = new MockIntercomClient();
+      liveConv({ admin_assignee_id: 5465657 })(client);
+      const a = await handleWebhookEvent(botReplied("evt_ext_4"), own, BOT_ADMIN_ID, client);
+      expect(a.result).toMatchObject({ action: "filtered", reason: "self-reply" });
+
+      const closed = new MockIntercomClient();
+      liveConv({ admin_assignee_id: 5465657, state: "closed" })(closed);
+      const b = await handleWebhookEvent(botReplied("evt_ext_5"), createInitialSessionState("conv_123", "ws_1"), BOT_ADMIN_ID, closed);
+      expect(b.result.action).toBe("filtered");
+
+      const broken = new MockIntercomClient();
+      broken.getConversation = async () => { throw new Error("503"); };
+      const c = await handleWebhookEvent(botReplied("evt_ext_6"), createInitialSessionState("conv_123", "ws_1"), BOT_ADMIN_ID, broken);
+      expect(c.result.action).toBe("filtered");
+    });
+
+    it("RECLAIMS when the human's last action is older than the hold window", async () => {
+      const state = createInitialSessionState("conv_123", "ws_1");
+      const client = new MockIntercomClient();
+      liveConv({ admin_assignee_id: 5465657, conversation_parts: humanPart(73 * 3600) })(client);
+      const { result } = await handleWebhookEvent(
+        { ...userCreated, id: "evt_stale_2" } as IntercomWebhookPayload, state, BOT_ADMIN_ID, client,
+        { humanHold: { hours: 72 } },
+      );
+      expect(result.action).toBe("dispatch_to_agent");
+    });
+
+    it("HOLDS while the human acted inside the window", async () => {
+      const state = createInitialSessionState("conv_123", "ws_1");
+      const client = new MockIntercomClient();
+      liveConv({ admin_assignee_id: 5465657, conversation_parts: humanPart(71 * 3600) })(client);
+      const { result, state: updated } = await handleWebhookEvent(
+        { ...userCreated, id: "evt_held_1" } as IntercomWebhookPayload, state, BOT_ADMIN_ID, client,
+        { humanHold: { hours: 72 } },
+      );
+      expect(result.action).toBe("filtered");
+      expect(updated?.handoffMode).toBe("human_takeover");
+    });
+
+    it("HOLDS a fresh explicit escalation even though no human has acted yet", async () => {
+      const state = createInitialSessionState("conv_123", "ws_1");
+      state.escalationFiredAt = new Date(Date.now() - 3600_000).toISOString();
+      const client = new MockIntercomClient();
+      liveConv({ admin_assignee_id: 5465657 })(client);
+      const { result } = await handleWebhookEvent(
+        { ...userCreated, id: "evt_held_2" } as IntercomWebhookPayload, state, BOT_ADMIN_ID, client,
+      );
+      expect(result.action).toBe("filtered");
+      if (result.action === "filtered") expect(result.reason).toContain("(escalated)");
+    });
+
+    it("a conversation that merely SITS in the escalation team (years of history do) is not held", async () => {
+      const state = createInitialSessionState("conv_123", "ws_1");
+      const client = new MockIntercomClient();
+      liveConv({ admin_assignee_id: null, team_assignee_id: 7111842 })(client);
+      const { result } = await handleWebhookEvent(
+        { ...userCreated, id: "evt_team_legacy" } as IntercomWebhookPayload, state, BOT_ADMIN_ID, client,
+        { humanHold: { escalationTeamId: "7111842" } },
+      );
+      expect(result.action).toBe("dispatch_to_agent");
+    });
+
+    it("HOLDS a conversation the bot escalated into the escalation team, with no admin on it", async () => {
+      const state = createInitialSessionState("conv_123", "ws_1");
+      const client = new MockIntercomClient();
+      liveConv({
+        admin_assignee_id: null,
+        team_assignee_id: 7111842,
+        conversation_parts: {
+          conversation_parts: [
+            { type: "conversation_part", id: "p_esc", body: "", part_type: "assignment", created_at: 1,
+              author: { type: "admin", id: BOT_ADMIN_ID }, assigned_to: { type: "team", id: "7111842" } },
+          ],
+        },
+      })(client);
+      const { result, state: updated } = await handleWebhookEvent(
+        { ...userCreated, id: "evt_held_3" } as IntercomWebhookPayload, state, BOT_ADMIN_ID, client,
+        { humanHold: { escalationTeamId: "7111842" } },
+      );
+      expect(result.action).toBe("filtered");
+      if (result.action === "filtered") expect(result.reason).toContain("escalation team 7111842");
+      expect(updated?.handoffMode).toBe("human_takeover");
+    });
+
+    it("another team with no admin is NOT a hold (the workspace default assignment lands there)", async () => {
+      const state = createInitialSessionState("conv_123", "ws_1");
+      const client = new MockIntercomClient();
+      liveConv({ admin_assignee_id: null, team_assignee_id: 2238258 })(client);
+      const { result } = await handleWebhookEvent(
+        { ...userCreated, id: "evt_free_1" } as IntercomWebhookPayload, state, BOT_ADMIN_ID, client,
+        { humanHold: { escalationTeamId: "7111842" } },
+      );
+      expect(result.action).toBe("dispatch_to_agent");
+    });
+
+    it("hours <= 0 keeps the legacy rule: any human assignee holds for ever", async () => {
+      const state = createInitialSessionState("conv_123", "ws_1");
+      const client = new MockIntercomClient();
+      liveConv({ admin_assignee_id: 5465657 })(client);
+      const { result } = await handleWebhookEvent(
+        { ...userCreated, id: "evt_legacy_1" } as IntercomWebhookPayload, state, BOT_ADMIN_ID, client,
+        { humanHold: { hours: 0 } },
+      );
+      expect(result.action).toBe("filtered");
+    });
+
     it("filters when live check finds human assignee", async () => {
       const state = createInitialSessionState("conv_123", "ws_1");
       const client = new MockIntercomClient();
@@ -258,6 +450,10 @@ describe("handleWebhookEvent", () => {
           open: true,
           state: "open" as const,
           assignee: { type: "admin" as const, id: "human_admin_1", name: "Jan" },
+          // A human is WORKING it (acted inside the hold window): assignment-policy.ts humanHold.
+          conversation_parts: { type: "conversation_part.list" as const, total_count: 1, conversation_parts: [
+            { type: "conversation_part" as const, id: "p1", part_type: "comment", body: "on it", created_at: Math.floor(Date.now() / 1000) - 60, author: { type: "admin", id: "human_admin_1" } },
+          ] },
         };
       };
 
@@ -467,6 +663,10 @@ describe("handleWebhookEvent", () => {
           // Real API v2.11 shape — no `assignee` object.
           admin_assignee_id: 9999,
           team_assignee_id: null,
+          // A human is WORKING it (acted inside the hold window): assignment-policy.ts humanHold.
+          conversation_parts: { type: "conversation_part.list" as const, total_count: 1, conversation_parts: [
+            { type: "conversation_part" as const, id: "p1", part_type: "comment", body: "on it", created_at: Math.floor(Date.now() / 1000) - 60, author: { type: "admin", id: "9999" } },
+          ] },
         };
       };
 
@@ -562,6 +762,10 @@ describe("handleWebhookEvent", () => {
           admin_assignee_id: 5465657,
           // Stale webhook-shape field says the bot owns it — must be ignored.
           assignee: { type: "admin" as const, id: BOT_ADMIN_ID, name: "Bot" },
+          // A human is WORKING it (acted inside the hold window): assignment-policy.ts humanHold.
+          conversation_parts: { type: "conversation_part.list" as const, total_count: 1, conversation_parts: [
+            { type: "conversation_part" as const, id: "p1", part_type: "comment", body: "on it", created_at: Math.floor(Date.now() / 1000) - 60, author: { type: "admin", id: "5465657" } },
+          ] },
         };
       };
 

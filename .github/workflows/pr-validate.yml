@@ -970,6 +970,18 @@ jobs:
           bash scripts/check-intercom-ops-write-doctrine.sh
           echo "::endgroup::"
 
+      - name: Intercom assignment doctrine check — no conversation defaults to a person
+        # 2026-11-11: openclaw-edge.json carried `defaultInboxId` = one person's admin id and
+        # six plugin call sites assigned to it. 478 of the 485 assignments that person got in
+        # 14 days were made by the plugin, 404 of them Caroline's own reply failing the output
+        # guard. This gate fails if a config sets the retired key, if the escalation queue is a
+        # person's admin id, or if plugin code assigns a conversation outside
+        # plugins/intercom/src/assignment-policy.ts.
+        run: |
+          echo "::group::Intercom assignment doctrine check"
+          bash scripts/check-intercom-no-personal-assignee.sh
+          echo "::endgroup::"
+
       - name: God-mode allowlist must be workspace-only — never in the canonical skill
         # Since 2026-08-26 the god-mode self-approve branch of the bulk-destructive
         # gate ships in BOTH copies of muso-admin-api.sh, because the parity gate
@@ -2138,6 +2150,15 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest -v tests.test_intercom_identity
+      - name: Run Intercom queue-reassign tests
+        # scripts/intercom-queue-reassign.py moves a person's open Intercom queue back to
+        # Caroline (2026-11-11: 581 open on one person, 511 put there by the plugin). It
+        # writes to a live customer inbox, so these lock what it may never do: close,
+        # send a customer-visible message, post as anyone but Caroline, move a thread a
+        # human is entitled to keep, or write without a ledger row carrying the inverse.
+        run: |
+          set -euo pipefail
+          python3 -m unittest -v tests.test_intercom_queue_reassign
       - name: Run abuse-block list tests
         # skills-all/muso-abuse-block/scripts/abuse-block.py is CUSTOMER-FACING:
         # tagging a contact silences Caroline for them. These lock the dry-run

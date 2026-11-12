@@ -1,5 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
-import { createProfileAnalyticsStatusTool } from "../src/tools/profile-analytics-status.js";
+import {
+  buildDataFreshness,
+  createProfileAnalyticsStatusTool,
+  DATA_FRESHNESS_SOURCE,
+} from "../src/tools/profile-analytics-status.js";
 import { RateLimiter } from "../src/rate-limiter.js";
 import type { MusoAdminClient, AdminClientResult } from "../src/muso-admin-client.js";
 import type { IntercomReader } from "../src/intercom-client.js";
@@ -596,5 +600,75 @@ describe("profile_analytics_status — entitlement gate", () => {
     const out = await call(tool, { profile_id: ENTITLED_PROFILE_ID });
 
     expect(JSON.stringify(out)).not.toMatch(DENY_FIELD_PATTERN);
+  });
+});
+
+// intercom-no-human-assignment-k1, Part 4: the data-freshness read. "Is my data current, when was it
+// last updated" is answered from a stated source; an unmeasured leg is null, never a healthy default.
+describe("data_freshness (the data-freshness read)", () => {
+  it("names its source and states is_current against the BACKEND's threshold", () => {
+    const f = buildDataFreshness(
+      { latestObservedAt: "2026-11-10T04:00:00.000Z", latestObservedAgeHours: 30, staleAfterHours: 48 },
+      { date: "2026-11-10T00:00:00.000Z", updatedAt: "2026-11-10T04:00:00.000Z", inProgressTracksCount: 2, numTracksUpdated: 40, tracksCount: 42 },
+    );
+    expect(f.source).toBe(DATA_FRESHNESS_SOURCE);
+    expect(String(f.source)).toContain("/api/v3/admin/profile/{id}/analytics-status");
+    expect(f.is_current).toBe(true);
+    expect(f.last_updated_at).toBe("2026-11-10T04:00:00.000Z");
+    expect(f.age_hours).toBe(30);
+    expect(f.stale_after_hours).toBe(48);
+    expect(f.last_run).toEqual({
+      date: "2026-11-10T00:00:00.000Z",
+      updated_at: "2026-11-10T04:00:00.000Z",
+      tracks_in_progress: 2,
+      tracks_updated: 40,
+      tracks_total: 42,
+    });
+  });
+
+  it("older than the backend's threshold is not current", () => {
+    const f = buildDataFreshness({ latestObservedAt: "2026-11-01T00:00:00.000Z", latestObservedAgeHours: 250, staleAfterHours: 48 }, {});
+    expect(f.is_current).toBe(false);
+    expect(String(f.is_current_basis)).toContain("250h");
+  });
+
+  it("no age or no threshold is UNMEASURED (null), never current", () => {
+    expect(buildDataFreshness({ latestObservedAt: "2026-11-10T04:00:00.000Z", latestObservedAgeHours: 3 }, {}).is_current).toBeNull();
+    expect(buildDataFreshness({ staleAfterHours: 48 }, {}).is_current).toBeNull();
+    const empty = buildDataFreshness({}, {});
+    expect(empty.is_current).toBeNull();
+    expect(String(empty.is_current_basis)).toMatch(/^unmeasured/);
+    expect(empty.last_updated_at).toBe("");
+    expect((empty.last_run as Record<string, unknown>).tracks_total).toBeNull();
+  });
+
+  it("the known-issue leg says it is not measured, so silence is never read as 'no issue'", () => {
+    const k = buildDataFreshness({}, {}).known_issue as Record<string, unknown>;
+    expect(k.measured).toBe(false);
+    expect(String(k.reason)).toMatch(/do not tell the customer there is or is not a known issue/);
+  });
+
+  it("carries no stream figure", () => {
+    const f = buildDataFreshness(
+      { latestObservedAt: "2026-11-10T04:00:00.000Z", latestObservedAgeHours: 30, staleAfterHours: 48, streams: 999 },
+      { date: "2026-11-10T00:00:00.000Z", streams: 999 },
+    );
+    expect(JSON.stringify(f)).not.toContain("999");
+  });
+
+  it("is part of the entitled payload of profile_analytics_status", async () => {
+    const { tool } = makeSequencedTool([WARM]);
+    const res = await tool.execute("t", { profile_id: COLD_PROFILE_ID } as never);
+    const out = JSON.parse((res.content[0] as { text: string }).text);
+    expect(out.analytics.data_freshness.is_current).toBe(true);
+    expect(out.analytics.data_freshness.last_updated_at).toBe("2026-08-18T04:00:00.000Z");
+    expect(out.analytics.data_freshness.source).toBe(DATA_FRESHNESS_SOURCE);
+  });
+
+  it("an unconfirmed access check promises no person", async () => {
+    const src = await import("node:fs").then((fs) =>
+      fs.readFileSync(new URL("../src/tools/profile-analytics-status.ts", import.meta.url), "utf8"),
+    );
+    expect(src).not.toMatch(/team member will follow up/i);
   });
 });

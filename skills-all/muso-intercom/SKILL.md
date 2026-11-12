@@ -125,10 +125,14 @@ on 2026-08-31 escalation follow-ups posted with Nick's id showed customers
 "Nicholas Sollazzo" mid-thread instead of Caroline. (Same rationale as
 muso-ops-dedup, which pins `INTERCOM_ADMIN_ID=5763097` "so the reply matches the
 rest of the thread".) Internal notes carry `5763097` too. On an assignment call
-`5763097` is the ACTOR (`admin_id`), never the ASSIGNEE: an escalated conversation
-is assigned to the configured human escalation inbox (`defaultInboxId`) so a
-teammate picks it up – assigning it back to Caroline leaves the bot active and the
-handoff silently never happens. The only exception to any of this is a human
+`5763097` is the ACTOR (`admin_id`). **Caroline is also the default ASSIGNEE: the AI
+queue is "assigned to `5763097`", and no conversation is assigned to a person by
+default** (captain 2026-11-11; `plugins/intercom/src/assignment-policy.ts`). Only an
+explicit escalation that carries a reason leaves her, and it goes to the escalation
+TEAM queue (`escalationTeamId`, sent with `type: "team"`), never to an individual's
+admin id. `defaultInboxId` is retired: `scripts/check-intercom-no-personal-assignee.sh`
+fails CI if a config sets it. Assigning an escalated conversation back to Caroline is
+the hand-back: she answers the customer's next message. The only exception to any of this is a human
 posting as themselves from the Intercom UI.
 
 ## Authentication

@@ -25,7 +25,7 @@
  * `node --experimental-strip-types` to dump the bank, with no plugin build.
  */
 
-export const BANK_VERSION = "2026-11-01.4";
+export const BANK_VERSION = "2026-11-11.1";
 
 export interface BankEntry {
   /** Stable id: the guard's flags, the red-team cases and the ledger name it. */
@@ -64,6 +64,13 @@ export interface BankEntry {
 export const HANDOFF_LINE = "I'm pulling in a teammate to take this from here.";
 /** SOUL.md honesty fallback (sanitize-handoff-claim.ts): intent, never a completed-action claim. */
 export const HONEST_FALLBACK = "I'll make sure this gets to the team.";
+/**
+ * What the customer gets when a code gate stopped Caroline's own reply (intercom-no-human-assignment-k1).
+ * It promises no person, no outcome and no time, because none is true: the conversation stays in
+ * the AI queue (assignment-policy.ts) and Caroline answers the customer's next message. It asks
+ * for that next message, which is the only thing that wakes her.
+ */
+export const AI_QUEUE_FALLBACK = "I want to get this right for you. Could you tell me a little more about what you need help with?";
 
 export const ANSWER_BANK: readonly BankEntry[] = [
   {
@@ -210,6 +217,13 @@ export const ANSWER_BANK: readonly BankEntry[] = [
     text: HANDOFF_LINE,
   },
   {
+    id: "ai_queue_fallback",
+    intents: ["reply_blocked"],
+    source: "intercom-no-human-assignment-k1 (captain 2026-11-11: no human assignment by default)",
+    anchor: "AGENTS.md",
+    text: AI_QUEUE_FALLBACK,
+  },
+  {
     id: "honest_fallback",
     intents: ["handoff_without_ticket"],
     source: "SOUL.md honesty rule (sanitize-handoff-claim.ts FALLBACK)",
@@ -220,11 +234,13 @@ export const ANSWER_BANK: readonly BankEntry[] = [
 ];
 
 /**
- * What the output guard posts in place of a blocked reply. The hand-off line is the one approved
- * sentence that is true in every case: the guard reassigns the conversation to the human inbox in
- * the same step, so a teammate really does take it from here.
+ * What the output guard posts in place of a blocked reply. Until 2026-11-11 this was the hand-off
+ * line, made true by reassigning the conversation to a person in the same step; that reassignment
+ * was 85% of one teammate's inbox (404 of 478 plugin assignments in 14 days). A blocked reply is
+ * the model's mistake, not a reason for a person to own the thread, so the conversation now stays
+ * with Caroline and the line promises nobody.
  */
-export const BLOCKED_REPLY_FALLBACK = HANDOFF_LINE;
+export const BLOCKED_REPLY_FALLBACK = AI_QUEUE_FALLBACK;
 
 export function bankEntry(id: string): BankEntry | undefined {
   return ANSWER_BANK.find((e) => e.id === id);

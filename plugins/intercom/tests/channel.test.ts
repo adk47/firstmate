@@ -24,7 +24,7 @@ import {
 import { decide, type JevActionsConfig, type JevAnswers, type JevBands } from "../src/jev-router.js";
 import { IntercomAssignmentConflictError, MockIntercomClient } from "../src/outbound.js";
 import { readFileSync } from "node:fs";
-import { HANDOFF_LINE } from "../src/answer-bank.js";
+import { BLOCKED_REPLY_FALLBACK, HANDOFF_LINE } from "../src/answer-bank.js";
 import { canAgentReply } from "../src/handoff.js";
 import { stripModelFallbackNotice } from "../src/sanitize-model-fallback.js";
 
@@ -323,94 +323,53 @@ describe("postSupervisionAlert (a rejected webhook must be loud)", () => {
   });
 });
 
-describe("handleDroppedReply (a dropped reply is handed to a human, durably)", () => {
-  const account = { botAdminId: "bot_1", defaultInboxId: "inbox_7", fallbackSlackSupervisionChannel: "https://hooks.example/x" };
+describe("handleDroppedReply (a dropped reply stays with Caroline; the customer gets the fallback line)", () => {
+  // intercom-no-human-assignment-k1: this path used to assign the conversation to
+  // `account.defaultInboxId`, which in production was one person's admin id.
+  const account = { botAdminId: "bot_1", escalationTeamId: "777", fallbackSlackSupervisionChannel: "https://hooks.example/x" };
   const base = { conversationId: "conv_1", tag: "intercom:acct_1" };
   const ok = (async () => new Response("ok", { status: 200 })) as never;
-  it("reassigns to the default inbox, then notifies", async () => {
+  it("posts the AI-queue fallback, assigns NOBODY, then notifies", async () => {
     const client = new MockIntercomClient();
-    const texts: string[] = [];
-    const r = await handleDroppedReply({ ...base, client, account, fetchImpl: (async (_u: string, init: { body: string }) => { texts.push(JSON.parse(init.body).text); return new Response("ok"); }) as never });
-    expect(client.calls.assignConversation).toEqual([{ conversationId: "conv_1", adminId: "bot_1", assigneeId: "inbox_7" }]);
-    expect(r).toEqual({ handedOff: true, notified: true });
-    expect(texts[0]).toContain("handed to a human");
+    const r = await handleDroppedReply({ ...base, client, account, fetchImpl: ok });
+    expect(client.calls.assignConversation).toEqual([]);
+    expect(client.calls.replyToConversation).toHaveLength(1);
+    expect((client.calls.replyToConversation[0] as { body: string }).body).toBe(BLOCKED_REPLY_FALLBACK);
+    expect(r).toEqual({ handedOff: false, fallbackPosted: true, notified: true });
   });
-  it("falls back to assignee 0 when there is no default inbox", async () => {
+  it("a retired defaultInboxId on the account is ignored", async () => {
     const client = new MockIntercomClient();
-    await handleDroppedReply({ ...base, client, account: { ...account, defaultInboxId: "" }, fetchImpl: ok });
-    expect(client.calls.assignConversation[0].assigneeId).toBe("0");
+    await handleDroppedReply({ ...base, client, account: { ...account, defaultInboxId: "5465657" } as never, fetchImpl: ok });
+    expect(client.calls.assignConversation).toEqual([]);
   });
-  it.each([
-    ["rejects", (async () => { throw new Error("down"); }) as never],
-    ["returns 500", (async () => new Response("x", { status: 500 })) as never],
-  ])("still reassigns when the webhook %s", async (_n, fetchImpl) => {
+  it("never tells supervision a human holds it", async () => {
     const client = new MockIntercomClient();
-    const r = await handleDroppedReply({ ...base, client, account, fetchImpl, log: { error: () => {} } });
-    expect(client.calls.assignConversation).toHaveLength(1);
-    expect(r).toEqual({ handedOff: true, notified: false });
+    let text = "";
+    const fetchImpl = (async (_u: string, init: { body: string }) => { text = JSON.parse(init.body).text; return new Response("ok", { status: 200 }); }) as never;
+    await handleDroppedReply({ ...base, client, account, fetchImpl });
+    expect(text).toMatch(/stays with Caroline: no human was assigned/);
+    expect(text).not.toMatch(/handed to a human|please follow up/);
   });
-  it("never claims a handoff that failed", async () => {
+  it("a failed fallback post is loud and says the customer got no answer", async () => {
     const client = new MockIntercomClient();
-    client.assignConversation = async () => { throw new Error("nope"); };
+    client.replyToConversation = (async () => { throw new Error("intercom 500"); }) as never;
     const errors: string[] = [];
-    const texts: string[] = [];
-    const r = await handleDroppedReply({ ...base, client, account, log: { error: (m) => errors.push(m) }, fetchImpl: (async (_u: string, init: { body: string }) => { texts.push(JSON.parse(init.body).text); return new Response("ok"); }) as never });
-    expect(r).toEqual({ handedOff: false, notified: true });
-    expect(errors.some((m) => m.startsWith("[intercom:ALERT] [intercom:acct_1] dropped-reply reassignment failed conv=conv_1"))).toBe(true);
-    expect(texts[0]).toContain("still bot-owned");
-    expect(texts[0]).not.toContain("handed to a human");
+    let text = "";
+    const fetchImpl = (async (_u: string, init: { body: string }) => { text = JSON.parse(init.body).text; return new Response("ok", { status: 200 }); }) as never;
+    const r = await handleDroppedReply({ ...base, client, account, log: { error: (m) => errors.push(m) }, fetchImpl });
+    expect(r).toEqual({ handedOff: false, fallbackPosted: false, notified: true });
+    expect(errors[0]).toMatch(/^\[intercom:ALERT\] \[intercom:acct_1\] dropped-reply fallback post failed conv=conv_1/);
+    expect(text).toMatch(/customer got NO answer/);
   });
-  it("a conflict naming the target inbox is a hand-off, never 'still bot-owned'", async () => {
+  it("still posts the fallback when the webhook rejects", async () => {
     const client = new MockIntercomClient();
-    client.assignConversation = async ({ conversationId, assigneeId }: { conversationId: string; assigneeId: string }) => {
-      throw new IntercomAssignmentConflictError(`${conversationId} already assigned to ${assigneeId}`, assigneeId);
-    };
-    const errors: string[] = [];
-    const texts: string[] = [];
-    const r = await handleDroppedReply({
-      ...base, client, account, log: { error: (m) => errors.push(m) },
-      fetchImpl: (async (_u: string, init: { body: string }) => { texts.push(JSON.parse(init.body).text); return new Response("ok"); }) as never,
-    });
-    expect(r).toEqual({ handedOff: true, notified: true });
-    expect(errors).toEqual([]);
-    expect(texts[0]).toContain("handed to a human");
-    expect(texts[0]).not.toContain("still bot-owned");
-  });
-  it("a conflict naming the BOT is never a hand-off, even when the target is misconfigured to the bot", async () => {
-    // QA on #1673: with defaultInboxId === botAdminId a conflict on that id used to be reported as a completed
-    // hand-off, so supervision was told a human held a conversation the bot still owned.
-    const client = new MockIntercomClient();
-    client.assignConversation = async ({ conversationId, assigneeId }: { conversationId: string; assigneeId: string }) => {
-      throw new IntercomAssignmentConflictError(`${conversationId} already assigned to ${assigneeId}`, assigneeId);
-    };
-    const errors: string[] = [];
-    const texts: string[] = [];
-    const r = await handleDroppedReply({
-      ...base, client, account: { ...account, defaultInboxId: "bot_1" }, log: { error: (m) => errors.push(m) },
-      fetchImpl: (async (_u: string, init: { body: string }) => { texts.push(JSON.parse(init.body).text); return new Response("ok"); }) as never,
-    });
-    expect(r).toEqual({ handedOff: false, notified: true });
-    expect(errors.some((m) => m.includes("dropped-reply reassignment failed"))).toBe(true);
-    expect(texts[0]).toContain("still bot-owned");
-    expect(texts[0]).not.toContain("handed to a human");
-  });
-  it("a conflict with no configured inbox is not a hand-off: '0' is Intercom's Unassign", async () => {
-    const client = new MockIntercomClient();
-    client.assignConversation = async ({ conversationId, assigneeId }: { conversationId: string; assigneeId: string }) => {
-      throw new IntercomAssignmentConflictError(`${conversationId} already assigned to ${assigneeId}`, assigneeId);
-    };
-    const texts: string[] = [];
-    const r = await handleDroppedReply({
-      ...base, client, account: { ...account, defaultInboxId: "" },
-      fetchImpl: (async (_u: string, init: { body: string }) => { texts.push(JSON.parse(init.body).text); return new Response("ok"); }) as never,
-    });
-    expect(r.handedOff).toBe(false);
-    expect(texts[0]).toContain("still bot-owned");
+    const r = await handleDroppedReply({ ...base, client, account, log: { error: () => {} }, fetchImpl: (async () => new Response("no", { status: 500 })) as never });
+    expect(r).toEqual({ handedOff: false, fallbackPosted: true, notified: false });
   });
   it("skips the webhook when none is configured", async () => {
     const client = new MockIntercomClient();
-    const r = await handleDroppedReply({ ...base, client, account: { ...account, fallbackSlackSupervisionChannel: undefined } });
-    expect(r).toEqual({ handedOff: true, notified: false });
+    const r = await handleDroppedReply({ ...base, client, account: { botAdminId: "bot_1" } });
+    expect(r).toEqual({ handedOff: false, fallbackPosted: true, notified: false });
   });
 });
 
@@ -1164,19 +1123,19 @@ describe("jevShadowRunnerConfig (MUS-3192: shadow call has its own timeout)", ()
   });
 });
 
-describe("sendTextReply (the sendText path hands a gate-dropped reply to a human)", () => {
-  const account = { accountId: "acct_1", botAdminId: "bot_1", defaultInboxId: "inbox_7" };
+describe("sendTextReply (a gate-dropped or blocked reply on the sendText path stays with Caroline)", () => {
+  const account = { accountId: "acct_1", botAdminId: "bot_1", escalationTeamId: "777" };
   class DroppingClient extends MockIntercomClient {
     async replyToConversation(p: never) {
       await super.replyToConversation(p);
       return { messageId: "", dropped: true as const };
     }
   }
-  it("reassigns the conversation and reports dropped, never a delivered id", async () => {
+  it("assigns nobody and reports dropped, never a delivered id", async () => {
     const client = new DroppingClient();
     const errors: string[] = [];
     const r = await sendTextReply({ client, account, conversationId: "conv_1", body: "x", log: { error: (m) => errors.push(m) }, safetyDeps: quiet });
-    expect(client.calls.assignConversation).toEqual([{ conversationId: "conv_1", adminId: "bot_1", assigneeId: "inbox_7" }]);
+    expect(client.calls.assignConversation).toEqual([]);
     expect(r.messageId).toBe("");
     expect(r.meta).toEqual({ dropped: true, reason: "empty-after-sanitize" });
     expect(errors.some((m) => m.startsWith("[intercom:ALERT]"))).toBe(true);
@@ -1196,7 +1155,7 @@ describe("sendTextReply (the sendText path hands a gate-dropped reply to a human
     ["reveal", "Your document got a high risk score from our checks."],
     ["contradict", "Nothing else is needed from you."],
     ["off_topic", "Here's a poem about the sea."],
-  ])("a barred-family body (%s) via sendText is replaced by the hand-off line and reassigned", async (_family, body) => {
+  ])("a barred-family body (%s) via sendText is replaced by the AI-queue fallback and nobody is assigned", async (_family, body) => {
     const client = new MockIntercomClient();
     const pages: string[] = [];
     const r = await sendTextReply({
@@ -1204,15 +1163,15 @@ describe("sendTextReply (the sendText path hands a gate-dropped reply to a human
       safetyDeps: { ...quiet, page: async (t: string) => { pages.push(t); return true; } },
     });
     expect(client.calls.replyToConversation).toHaveLength(1);
-    expect((client.calls.replyToConversation[0] as { body: string }).body).toBe(HANDOFF_LINE);
-    expect(client.calls.assignConversation).toEqual([{ conversationId: "conv_9", adminId: "bot_1", assigneeId: "inbox_7" }]);
+    expect((client.calls.replyToConversation[0] as { body: string }).body).toBe(BLOCKED_REPLY_FALLBACK);
+    expect(client.calls.assignConversation).toEqual([]);
     expect(pages).toHaveLength(1);
     expect(r.messageId).not.toBe("");
   });
   it("a phone number on this path fails closed (no customer turn to echo)", async () => {
     const client = new MockIntercomClient();
     await sendTextReply({ client, account, conversationId: "conv_9", body: "Call them on +44 7700 900123.", safetyDeps: quiet });
-    expect((client.calls.replyToConversation[0] as { body: string }).body).toBe(HANDOFF_LINE);
+    expect((client.calls.replyToConversation[0] as { body: string }).body).toBe(BLOCKED_REPLY_FALLBACK);
   });
   it("the adapter sendText hands every body to sendTextReply (no unguarded post)", () => {
     const src = readFileSync(new URL("../src/channel.ts", import.meta.url), "utf8");

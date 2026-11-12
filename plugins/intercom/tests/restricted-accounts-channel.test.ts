@@ -50,7 +50,7 @@ const cfg = {
           token: "tok",
           webhookSecret: SECRET,
           botAdminId: BOT,
-          defaultInboxId: "team_ops",
+          escalationTeamId: "777111",
           fallbackSlackSupervisionChannel: SLACK,
           coalesceDispatch: false,
         },
@@ -62,6 +62,9 @@ const cfg = {
 type Call = { method: string; url: string; body: any };
 let calls: Call[] = [];
 let liveAssignee: { type: string; id: string } | null = null;
+// A human assignee holds a conversation only while a human is WORKING it (assignment-policy.ts
+// humanHold). false = that human acted a minute ago; true = nobody human ever touched it.
+let liveStale = false;
 let slackStatus = 200;
 let liveGetStatus = 200;
 const errors: string[] = [];
@@ -94,12 +97,17 @@ const replies = () =>
 const notes = () =>
   calls.filter((c) => c.method === "POST" && c.url.endsWith("/reply") && c.body.message_type === "note");
 const reassigns = () => calls.filter((c) => c.method === "POST" && c.url.endsWith("/parts"));
+// An explicit escalation = take the bot off ("0"), then place the escalation TEAM (type team).
+const expectEscalatedToTeam = () => {
+  expect(reassigns().map((c) => [c.body.type, c.body.assignee_id])).toEqual([["admin", "0"], ["team", "777111"]]);
+};
 const slack = () => calls.filter((c) => c.url === SLACK);
 
 beforeEach(async () => {
   calls = [];
   dispatched.length = 0;
   liveAssignee = null;
+  liveStale = false;
   slackStatus = 200;
   liveGetStatus = 200;
   errors.length = 0;
@@ -110,7 +118,14 @@ beforeEach(async () => {
     if (method === "GET") {
       if (liveGetStatus !== 200) return new Response("unavailable", { status: liveGetStatus });
       return new Response(
-        JSON.stringify({ type: "conversation", id: url.split("/").pop(), open: true, state: "open", assignee: liveAssignee }),
+        JSON.stringify({
+          type: "conversation", id: url.split("/").pop(), open: true, state: "open", assignee: liveAssignee,
+          conversation_parts: {
+            conversation_parts: liveAssignee && !liveStale
+              ? [{ id: "p1", part_type: "comment", created_at: Math.floor(Date.now() / 1000) - 60, author: { type: "admin", id: liveAssignee.id } }]
+              : [],
+          },
+        }),
         { status: 200 },
       );
     }
@@ -131,12 +146,11 @@ beforeEach(async () => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("channel webhook - restricted accounts (end to end)", () => {
-  it("restricted contact, bot holds conversation: no agent, no ack, reassigned to humans, Slack alert carries hold note", async () => {
+  it("restricted contact, bot holds conversation: no agent, no ack, reassigned to the escalation TEAM, Slack alert carries hold note", async () => {
     await deliver(message(RESTRICTED_ID, "My subscription was cancelled unexpectedly, please restore it", "e1", "conv_r1"));
     expect(dispatched).toHaveLength(0);
     expect(replies()).toHaveLength(0);
-    expect(reassigns()).toHaveLength(1);
-    expect(reassigns()[0].body.assignee_id).toBe("team_ops");
+    expectEscalatedToTeam();
     expect(slack()).toHaveLength(1);
     expect(JSON.stringify(slack()[0].body)).toContain(RESTRICTED_NOTE);
     expect(notes()).toHaveLength(1);
@@ -182,20 +196,19 @@ describe("channel webhook - restricted accounts (end to end)", () => {
     expect(dispatched).toHaveLength(0);
     expect(replies()).toHaveLength(0);
     expect(slack()).toHaveLength(1);
-    expect(reassigns()).toHaveLength(1);
-    expect(reassigns()[0].body.assignee_id).toBe("team_ops");
+    expectEscalatedToTeam();
     expect(notes()).toHaveLength(1);
     expect(notes()[0].url).toContain("/conversations/conv_r6/reply");
     expect(notes()[0].body.body).toBe(RESTRICTED_NOTE);
     expect(errors.some((e) => e.includes("Slack escalation notification rejected: 500"))).toBe(true);
   });
 
-  it("keyword escalation (legacy), Slack rejects the alert (500): ack and reassignment unchanged, rejection logged", async () => {
+  it("keyword escalation (legacy), Slack rejects the alert (500): ack unchanged, escalated to the team, rejection logged", async () => {
     slackStatus = 500;
     await deliver(message("user_abc", "I'm filing a chargeback", "e14", "conv_n4"));
     expect(replies()).toHaveLength(1);
     expect(replies()[0].body.body).toBe(DEFAULT_FALLBACK_ACK);
-    expect(reassigns()).toHaveLength(1);
+    expectEscalatedToTeam();
     expect(slack()).toHaveLength(1);
     expect(errors.some((e) => e.includes("Slack escalation notification rejected: 500"))).toBe(true);
   });
@@ -237,7 +250,7 @@ describe("channel webhook - restricted accounts (end to end)", () => {
     await deliver(message(PROOF_REVIEW_ID, "Some of my credits are still hidden", "e9", "conv_p1"));
     expect(dispatched).toHaveLength(0);
     expect(replies()).toHaveLength(0);
-    expect(reassigns()).toHaveLength(1);
+    expectEscalatedToTeam();
     expect(slack()).toHaveLength(1);
     expect(JSON.stringify(slack()[0].body)).toContain(PROOF_REVIEW_NOTE);
     expect(JSON.stringify(slack()[0].body)).not.toContain(RESTRICTED_NOTE);
@@ -266,8 +279,28 @@ describe("channel webhook - restricted accounts (end to end)", () => {
     expect(replies()).toHaveLength(1);
     expect(replies()[0].body.body).toBe(DEFAULT_FALLBACK_ACK);
     expect(notes()).toHaveLength(0);
-    expect(reassigns()).toHaveLength(1);
+    expectEscalatedToTeam();
     expect(slack()).toHaveLength(1);
+  });
+
+  it("restricted contact parked on a STALE human assignee: moved to the escalation team, never left on the person", async () => {
+    liveAssignee = { type: "admin", id: "5465657" };
+    liveStale = true;
+    await deliver(message(RESTRICTED_ID, "Any update on my refund?", "e30", "conv_r30"));
+    expect(dispatched).toHaveLength(0);
+    expect(replies()).toHaveLength(0);
+    expectEscalatedToTeam();
+    expect(notes()).toHaveLength(1);
+  });
+
+  it("non-restricted contact parked on a STALE human assignee: Caroline reclaims it and answers", async () => {
+    liveAssignee = { type: "admin", id: "5465657" };
+    liveStale = true;
+    await deliver(message("user_abc", "Any update?", "e31", "conv_n31"));
+    expect(dispatched).toHaveLength(1);
+    // The only assignment is the bot taking it back.
+    expect(reassigns().map((c) => [c.body.type, c.body.assignee_id])).toEqual([["admin", BOT]]);
+    expect(slack()).toHaveLength(0);
   });
 
   it("non-restricted contact, human admin holds conversation: still filtered, nothing sent", async () => {
