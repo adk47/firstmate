@@ -1088,6 +1088,11 @@ def filter_support(db: sqlite3.Connection, decisions: list["Decision"], res: "Ru
             note(d, "hold", f"{STAGE2_ASK_HOLD} ({stage2_outcome(ask)}): the user is asked through "
                  f"intercom-verify-request.sh --campaign {ask}, never by a support write")
             res.held_stage2_ask += 1
+            # QA 1912 f2: a PARTIAL row keeps its decision (R90), so it is NOT in res.held even
+            # though it is handed to the stage-2 ask. Count the ones that really became HOLD
+            # separately, so the headline's held split never borrows a partial row's ask.
+            if d.decision != PARTIAL:
+                res.held_stage2_in_held += 1
         elif proof.covers(d):
             note(d, "hold", f"{DOC_ON_FILE_HOLD} (a document is already on file; never ask again)")
             res.held_proof += 1
@@ -2167,6 +2172,7 @@ class RunResult:
     support_candidates: int = 0
     held_proof: int = 0
     held_stage2_ask: int = 0
+    held_stage2_in_held: int = 0
     held_reasked: int = 0
     deferred_window: int = 0
     deferred_ask_cap: int = 0
@@ -2184,36 +2190,82 @@ class RunResult:
     note: str = ""
 
     def line(self) -> str:
+        # [key=decide-line-union] (firstmate 2026-11-12): the FIELD SET is data, the formatting is
+        # prose - never lose a field to gain a line break. node-8 carried a readability rewrite of
+        # this line (short run id, comma-joined headline, one closing sentence) that dropped every
+        # field main had added since; main's version was a 400-character dump whose first number was
+        # always "0 would approve" and whose last clause said "would be sent" for rows that were only
+        # queued. This is the union: live's shape, main's fields, each one still printed.
+        # Pinned by scripts/tests/test_credit_review.py::RunResultLineTests, which asserts every
+        # field's VALUE is present - presence, not equality, so a cosmetic change stays free and a
+        # dropped field fails.
         sk = sum(self.skipped_by_server.values())
         skd = ", ".join(f"{k} {v}" for k, v in sorted(self.skipped_by_server.items()))
         verb = "would approve" if self.mode in ("shadow", "judge") else "approved (provisional)"
         verb2 = "would request support" if self.mode in ("shadow", "judge") else "support requested"
         jev = f", {self.jev_calls} Jev (Codex unavailable; support or defer only)" if self.jev_calls else ""
-        return (f"credit-trust-decide {self.mode} run {self.run_id}: {self.scanned} held rows decided - "
-                f"{self.approved} {verb}, {self.support} {verb2}, {self.deferred} deferred, {self.held} held for a human, "
-                f"{sk} skipped by the server{f' ({skd})' if skd else ''}, {self.n1} one-person contradictions flagged, "
-                f"{self.cas_unreadable_refusals} CAS-unreadable refusals, "
-                + (f"{self.partial} per-role partial approval(s) recorded and not written "
-                   f"({PARTIAL_WRITE_REFUSAL}), " if self.partial else "")
-                + f"{self.web_checked} web-checked ({self.model_calls - self.paid_calls} Codex calls at $0, {self.paid_calls} "
-                f"OpenRouter fallback ${self.spend_usd:.2f}{jev}; the rest had no free source to cite), "
-                f"{self.errors} evidence errors. Support asks: {self.support_candidates} before filters, "
-                f"{self.held_proof} held for proof on file, "
-                + (f"{self.held_stage2_ask} held for proof on file and handed to the stage-2 ask (gap-ask / "
-                   "uvn-status), " if self.held_stage2_ask else "")
-                + f"{self.held_reasked} held as already asked once, "
-                f"{self.deferred_window} deferred for the per-user 24h window, {self.deferred_ask_cap} deferred by the "
-                f"daily ask cap, {self.deferred_run_cap} deferred by the per-run ask cap, {self.deferred_proof_unknown} deferred "
-                f"(proof status unknown), {self.support} {'would be sent' if self.mode in ('shadow', 'judge') else 'sent'}."
-                + (f" {self.doc_approved} approved by a dv-4 verified document (provisional "
-                   f"{doc_approve.PROVISIONAL_DAYS}d)." if self.doc_approved else "")
-                + (f" {self.doc_indeterminate} doc approval(s) INDETERMINATE (core may have committed; "
-                   "reconcile before releasing)." if self.doc_indeterminate else "")
-                + (f" {self.held_approve_arm} approve verdict(s) recorded and NOT written (support-only arm)"
-                   if self.held_approve_arm else "")
-                + (f" doc class {self.doc_audit}" if getattr(self, "doc_audit", "") else "")
-                + (f" {self.note}" if self.note else "")
-                + (f" WRITE ERRORS: {'; '.join(self.write_errors)[:400]}" if self.write_errors else ""))
+        bits = [f"{self.scanned} rows reviewed"]
+        if self.support:
+            # QA 1912 f1: shadow/judge write no support request, so the headline must not say a
+            # customer WAS asked. Same mode split as `verb`/`verb2` below.
+            asked = "would be asked for proof" if self.mode in ("shadow", "judge") else "asked for proof"
+            bits.append(f"{self.support} customer(s) {asked}")
+        if self.approved:
+            bits.append(f"{self.approved} {verb}")
+        if self.held:
+            # QA 1912 f2: `held_stage2_ask` also counts PARTIAL rows, which `held` does not, so
+            # subtracting it could print a negative review count. `held_stage2_in_held` counts only
+            # the stage-2 asks that really became HOLD rows, so the split is exact; a partial row's
+            # ask is reported by the `partial` clause in the detail tail.
+            stage2_in_held = min(self.held_stage2_in_held, self.held)
+            bits.append(f"{self.held} held ({self.held - stage2_in_held} review, "
+                        f"{stage2_in_held} proof ask)")
+        if self.deferred:
+            bits.append(f"{self.deferred} deferred")
+        if self.errors:
+            bits.append(f"{self.errors} ERRORS")
+        tail = f" ({self.web_checked} web-checked)" if self.web_checked else ""
+        # The detail tail: every number main's dump reported, in the order an operator reads it.
+        detail = [
+            f"{sk} skipped by the server" + (f" ({skd})" if skd else ""),
+            f"{self.n1} one-person contradictions flagged",
+            f"{self.cas_unreadable_refusals} CAS-unreadable refusals",
+            f"{self.model_calls - self.paid_calls} Codex calls at $0, {self.paid_calls} OpenRouter "
+            f"fallback ${self.spend_usd:.2f}{jev}",
+            f"Support asks: {self.support_candidates} before filters",
+            f"{self.held_proof} held for proof on file",
+            f"{self.held_reasked} held as already asked once",
+            f"{self.deferred_window} deferred for the per-user 24h window",
+            f"{self.deferred_ask_cap} deferred by the daily ask cap",
+            f"{self.deferred_run_cap} deferred by the per-run ask cap",
+            f"{self.deferred_proof_unknown} deferred (proof status unknown)",
+            f"{self.support} {'would be sent' if self.mode in ('shadow', 'judge') else 'sent'}",
+        ]
+        if self.held_stage2_ask:
+            detail.append(f"{self.held_stage2_ask} held for proof on file and handed to the stage-2 ask "
+                          "(gap-ask / uvn-status)")
+        if self.partial:
+            detail.append(f"{self.partial} per-role partial approval(s) recorded and not written "
+                          f"({PARTIAL_WRITE_REFUSAL})")
+        if self.doc_approved:
+            detail.append(f"{self.doc_approved} approved by a dv-4 verified document "
+                          f"(provisional {doc_approve.PROVISIONAL_DAYS}d)")
+        if self.doc_indeterminate:
+            detail.append(f"{self.doc_indeterminate} doc approval(s) INDETERMINATE (core may have "
+                          "committed; reconcile before releasing)")
+        if self.held_approve_arm:
+            detail.append(f"{self.held_approve_arm} approve verdict(s) recorded and NOT written "
+                          "(support-only arm)")
+        if getattr(self, "doc_audit", ""):
+            detail.append(f"doc class {self.doc_audit}")
+        if self.note:
+            detail.append(f"{self.note}")
+        if self.write_errors:
+            detail.append(f"WRITE ERRORS: {'; '.join(self.write_errors)[:400]}")
+        return (f"credit-trust-decide {self.run_id.split('-')[-1]}: " + ", ".join(bits) + tail
+                + ". " + ", ".join(detail)
+                + ". Judge routes to support and never approves; approvals come from the validator "
+                  "and precedent_v1.")
 
 
 def request_decision(req: dict[str, Any]) -> Decision:

@@ -2196,5 +2196,89 @@ def tearDownModule():
     _module_log_dir.cleanup()
 
 
+class RunResultLineTests(unittest.TestCase):
+    """[key=decide-line-union] (firstmate 2026-11-12): the field set is data, the formatting is prose.
+
+    node-8 carried a readability rewrite of RunResult.line() that dropped every field main had added
+    since. The union keeps live's shape and main's fields. This pins PRESENCE, not equality: a
+    cosmetic change stays free, and a field silently dropped fails. Each field gets a distinct
+    sentinel so the assertion names the field that went missing.
+    """
+
+    def _line(self, **over):
+        from credit_review import decide
+        kw = dict(
+            run_id="run-2026-11-12-abc", mode="apply",
+            scanned=101, approved=102, support=103, deferred=104, held=105,
+            skipped_by_server={"no_roles": 106}, errors=107, web_checked=108,
+            model_calls=109, paid_calls=10, jev_calls=111,
+            doc_approved=112, doc_indeterminate=113, doc_audit="114-audit",
+            held_approve_arm=115, partial=116, support_candidates=117,
+            held_proof=118, held_stage2_ask=95, held_reasked=120,
+            deferred_window=121, deferred_ask_cap=122, deferred_run_cap=123,
+            deferred_proof_unknown=124, spend_usd=1.25, n1=125,
+            write_errors=["126-write-error"], cas_unreadable_refusals=127,
+            note="128-note",
+        )
+        kw.update(over)
+        return decide.RunResult(**kw).line()
+
+    def test_the_line_carries_every_field_main_reported(self):
+        line = self._line()
+        # field -> the sentinel that proves it reached the line
+        for field, sentinel in {
+            "scanned": "101", "approved": "102", "support": "103", "deferred": "104",
+            "held": "105", "skipped_by_server": "106", "errors": "107",
+            "web_checked": "108", "paid_calls": "10",
+            "jev_calls": "111", "doc_approved": "112", "doc_indeterminate": "113",
+            "doc_audit": "114-audit", "held_approve_arm": "115", "partial": "116",
+            "support_candidates": "117", "held_proof": "118", "held_stage2_ask": "95",
+            "held_reasked": "120", "deferred_window": "121", "deferred_ask_cap": "122",
+            "deferred_run_cap": "123", "deferred_proof_unknown": "124",
+            "spend_usd": "1.25", "n1": "125", "write_errors": "126-write-error",
+            "cas_unreadable_refusals": "127", "note": "128-note",
+        }.items():
+            self.assertIn(sentinel, line, f"{field} is missing from the status line: {line}")
+        # model_calls is reported as the FREE-call difference (main's contract: "N Codex calls at $0"),
+        # so 109 model calls with 10 paid ones must read as 99 free calls, not as the raw total.
+        self.assertIn("99 Codex calls at $0", line)
+
+    def test_the_line_still_reads_as_a_sentence(self):
+        line = self._line()
+        self.assertTrue(line.startswith("credit-trust-decide abc: "), line)
+        self.assertIn("101 rows reviewed", line)
+        self.assertIn("Judge routes to support and never approves", line)
+        self.assertNotIn("\n", line)
+
+    def test_a_shadow_run_says_would_approve_and_would_be_sent(self):
+        line = self._line(mode="shadow")
+        self.assertIn("102 would approve", line)
+        self.assertIn("103 would be sent", line)
+
+    def test_a_shadow_run_does_not_claim_a_customer_was_asked(self):
+        # QA 1912 f1: shadow/judge write no support request, so the headline must not read as a
+        # sent customer ask. The detail already says "would be sent"; the headline must agree.
+        for mode in ("shadow", "judge"):
+            line = self._line(mode=mode)
+            self.assertIn("103 customer(s) would be asked for proof", line)
+            self.assertNotIn("103 customer(s) asked for proof", line)
+        self.assertIn("103 customer(s) asked for proof", self._line(mode="apply"))
+
+    def test_a_partial_stage2_ask_is_not_counted_as_a_held_row(self):
+        # QA 1912 f2: held_stage2_ask also counts PARTIAL rows, which `held` does not (a PARTIAL row
+        # keeps its decision, R90). The headline split uses held_stage2_in_held, the asks that really
+        # became HOLD rows, so a partial row's ask is never borrowed into the held split.
+        line = self._line(held=0, held_stage2_ask=1, held_stage2_in_held=0, partial=1)
+        self.assertNotIn("held (", line)  # no held rows, so no held bit at all
+        self.assertIn("1 per-role partial approval(s) recorded and not written", line)
+        # QA's mixed case: five ordinary HOLD rows plus two PARTIAL stage-2 asks. All five held rows
+        # need review; neither proof ask is a held row.
+        mixed = self._line(held=5, held_stage2_ask=7, held_stage2_in_held=0)
+        self.assertIn("5 held (5 review, 0 proof ask)", mixed)
+        # and the ordinary split still works when the stage-2 asks ARE held rows
+        self.assertIn("5 held (3 review, 2 proof ask)",
+                      self._line(held=5, held_stage2_ask=2, held_stage2_in_held=2))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
