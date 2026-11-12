@@ -103,7 +103,34 @@ test_d_a_needs_decision_row_is_main_owned_through_its_status_key() {
   pass "a needs-decision row is main-owned through its status-shaped key"
 }
 
+test_e_an_ordinary_batch_row_for_a_decision_owned_secondmate_stays_on_main() {
+  local dir payload out
+  dir="$TMP_ROOT/dispatcher-batch-decision"
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  new_case "$dir"
+  printf 'project=%s/projects/approved\nwindow=mate-window\nkind=secondmate\n' "$dir" > "$dir/state/task-b.meta"
+  printf 'needs-decision: pick one\n' > "$dir/state/task-b.status"
+  printf 'signal-batch-fff\t%s/task-a.status %s/task-b.turn-ended\n' "$dir/state" "$dir/state" \
+    > "$dir/state/.signal-batch-paths"
+  payload="signal: 2 files (1 status, 1 turn-end): ${dir}/state/task-a.status +1 more"
+  queue_row "$dir" 1 signal-batch-fff "$payload"
+  out=$(LIB="$ROOT/.pi/extensions/lib/fm-branch-dispatch.ts" STATE="${dir}/state" MESSAGE="$payload" \
+    node --input-type=module --no-warnings -e '
+import { pathToFileURL } from "node:url";
+const lib = await import(pathToFileURL(process.env.LIB).href);
+const verdict = lib.branchOfferForWake(process.env.STATE, process.env.MESSAGE, false);
+process.stdout.write(JSON.stringify({
+  eligible: verdict.eligible,
+  needsDecisionKeys: verdict.scope.needsDecisionKeys,
+}));
+' 2>&1) || fail "[batch decision] the dispatcher offer probe failed: $out"
+  expect_scope "batch decision" "$out" '"eligible":false' '"task-b.status"'
+  pass "an ordinary batch row for a decision-owned secondmate stays on main"
+}
+
 test_a_compact_payload_resolves_the_batch_from_the_private_record
 test_b_a_recordless_compact_payload_surfaces_instead_of_trusting_the_summary
 test_c_a_summary_token_is_never_read_as_a_path
 test_d_a_needs_decision_row_is_main_owned_through_its_status_key
+test_e_an_ordinary_batch_row_for_a_decision_owned_secondmate_stays_on_main

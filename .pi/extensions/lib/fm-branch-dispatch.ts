@@ -122,12 +122,13 @@ export interface UnreadWakeScope {
    */
   corrupted: boolean;
   /**
-   * The exact "key" field of every decision-owned signal or stale row this
-   * scan excluded. Signal rows are marked by bin/fm-watch.sh; stale rows are
-   * decision-owned when their task has an open needs-decision or its current
-   * declaration is captain-held. fm-primary-pi-watch.ts cross-references these
-   * keys against the current trigger so its entire coalesced batch is forced
-   * to main.
+   * A task-resolvable key for every decision-owned signal or stale row this
+   * scan excluded. A needs-decision signal row is keyed by its status file; an
+   * ordinary signal batch is keyed by each owned task's status file because its
+   * own key is an opaque batch identity. Stale rows are decision-owned when
+   * their task has an open needs-decision or its current declaration is
+   * captain-held. fm-primary-pi-watch.ts cross-references these keys against
+   * the current trigger so its entire coalesced batch is forced to main.
    */
   needsDecisionKeys: string[];
   /**
@@ -617,15 +618,15 @@ export function scopeForUnreadWake(state: string, heartbeat: boolean, afk = fals
       // the row to the branch. A crewmate's signal keeps its own rule - Pi
       // judges only the row payload, while the attended host reads the whole
       // log - so only those two cases consult the log here.
-      let signalDecisionOwned = false;
+      const signalDecisionTasks: string[] = [];
       for (const rowTask of rowTasks) {
         if (!attendedHost && !secondmates.has(rowTask)) continue;
         const owned = decisionOwnedFor(rowTask, "signal");
         if (owned === "unsafe") return UNSAFE_SCOPE;
-        if (owned) signalDecisionOwned = true;
+        if (owned) signalDecisionTasks.push(rowTask);
       }
-      if (signalDecisionOwned) {
-        needsDecisionKeys.push(key);
+      if (signalDecisionTasks.length > 0) {
+        for (const rowTask of signalDecisionTasks) needsDecisionKeys.push(`${rowTask}.status`);
         if (!afk) continue;
       }
       eligibleSeqs.push(seq);
