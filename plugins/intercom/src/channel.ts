@@ -22,6 +22,10 @@ import { sanitizeReasoningLeak } from "./sanitize-reasoning-leak.js";
 import { prepareMergeReply } from "./merge-reply-guard.js";
 import { renderCanaryLine, resolveCanaryToken } from "./canary-token.js";
 import { guardOutbound, watchInbound, type SafetyDeps } from "./caroline-safety.js";
+import { echoesGuardFeedback, GUARD_MAX_RETRIES, renderGuardFeedback } from "./guard-feedback.js";
+import { readOpenRequestFact, resetOpenRequestFact } from "./request-state-signal.js";
+import { stripUnbackedHandoff, UNBACKED_HANDOFF_RULE } from "./unbacked-handoff.js";
+import { appendSafetyLedger } from "./safety-ledger.js";
 import { surfaceLinkTargets } from "./filters.js";
 import { initStateStore, loadSessions, saveSessions } from "./state-store.js";
 import {
@@ -862,7 +866,7 @@ export function mergeBatchMedia(messages: ResolvedInboundMessage[]): {
 // [CONVERSATION_CONTEXT] / [KNOWLEDGE_BASE] block that the agent would otherwise
 // treat as authoritative ground truth (SOUL tells it to ground in [KNOWLEDGE_BASE],
 // so a forged one is especially dangerous when real retrieval returns nothing).
-const INJECTION_MARKER_REGEX = /\[\/?(?:CONVERSATION_CONTEXT|CUSTOMER_MESSAGE|KNOWLEDGE_BASE|ATTACHMENT_STATUS)\]/gi;
+const INJECTION_MARKER_REGEX = /\[\/?(?:CONVERSATION_CONTEXT|CUSTOMER_MESSAGE|KNOWLEDGE_BASE|ATTACHMENT_STATUS|OUTPUT_GUARD)\]/gi;
 
 export function sanitizeCustomerMessage(message: string): string {
   if (!INJECTION_MARKER_REGEX.test(message)) return message;
@@ -1099,6 +1103,25 @@ export function resolveJevBlockForDispatch(
   return renderJevBlock(jev);
 }
 
+/**
+ * Turn the chunks of a guard-retry turn into a candidate reply, or null when there is nothing
+ * safe to send. Same passes, same order, as the first attempt: gateway notices, the no-reply and
+ * priority tokens, our own context blocks, the reasoning-leak guard. A retry that stays silent,
+ * leaks its plan, or repeats the guard's notice is not a reply, so the caller sends the fallback.
+ * It does NOT run the output guard: the caller does, on what this returns.
+ */
+export function cleanGuardRetryReply(chunks: string[]): string | null {
+  const raw = joinDeliveryChunks(chunks);
+  const joined = findModelFallbackNotices(raw) ? stripModelFallbackNotice(raw) : raw;
+  if (joined.trim().length === 0 || isIntentionalNoReply(joined)) return null;
+  const text = stripKnowledgeBase(stripConversationContext(stripPrioritySentinel(stripNoReplySentinel(joined))));
+  const leak = sanitizeReasoningLeak(text);
+  if (leak.action === "escalate") return null;
+  const body = leak.body.trim();
+  if (body.length === 0 || echoesGuardFeedback(body)) return null;
+  return body;
+}
+
 export function buildAgentRawBody(
   message: string,
   facts: KnownFacts,
@@ -1107,6 +1130,13 @@ export function buildAgentRawBody(
   unreadable?: UnreadableAttachment[],
   jevBlock?: string | null,
   canary?: string | null,
+  /**
+   * The output guard's reasons for refusing the previous attempt at THIS message
+   * (guard-feedback.ts). Code-authored. It sits directly above [CUSTOMER_MESSAGE] so it is never
+   * inside customer text, and the customer cannot forge one: the marker is stripped from what
+   * they send (INJECTION_MARKER_REGEX).
+   */
+  guardFeedback?: string | null,
 ): string {
   const sanitized = sanitizeCustomerMessage(surfaceLinkTargets(message));
   const kbBlock = renderKnowledgeBaseBlock(kbSnippets ?? []);
@@ -1134,13 +1164,14 @@ export function buildAgentRawBody(
   // block (docs/designs/2026-09-22-jev-caroline-router.md §B) goes last,
   // immediately before [CUSTOMER_MESSAGE], so it reads as "…and here is how
   // to handle what follows".
-  if (!kbBlock && !contextBlock && !attachmentBlock && !jevBlock && !canaryLine) return sanitized;
+  if (!kbBlock && !contextBlock && !attachmentBlock && !jevBlock && !canaryLine && !guardFeedback) return sanitized;
   return [
     ...(canaryLine ? [canaryLine] : []),
     ...(kbBlock ? [kbBlock] : []),
     ...(contextBlock ? [contextBlock] : []),
     ...(attachmentBlock ? [attachmentBlock] : []),
     ...(jevBlock ? [jevBlock] : []),
+    ...(guardFeedback ? [guardFeedback] : []),
     "[CUSTOMER_MESSAGE]",
     sanitized,
   ].join("\n");
@@ -1506,7 +1537,11 @@ export const intercomPlugin = createChatChannelPlugin({
           // alerting. On timeout we set dispatchTimedOut, fall through,
           // post nothing, and page #cs-escalations below.
           const dispatchTimeoutMs = account.dispatchTimeoutMs ?? DEFAULT_DISPATCH_TIMEOUT_MS;
-          const dispatchPromise = dispatchInboundDirectDmWithRuntime({
+          // One agent turn. Called once for the customer's message, and at most once more when the
+          // output guard refuses the reply and explains why (guard-feedback.ts). `sink` receives the
+          // customer-facing chunks of that turn only.
+          const runAgentTurn = (turn: { messageId: string; sink: string[]; guardFeedback?: string }) =>
+            raceDispatchWithTimeout(dispatchInboundDirectDmWithRuntime({
             cfg,
             // openclaw@2026.8.1 types this param as the full PluginRuntime, but the 8.1
             // implementation reads ONLY runtime.channel(.reply/.inbound) — verified
@@ -1531,8 +1566,9 @@ export const intercomPlugin = createChatChannelPlugin({
               unreadable,
               resolveJevBlockForDispatch(account.jev?.enabled, state.jev),
               resolveCanaryToken(),
+              turn.guardFeedback,
             ),
-            messageId: latest.messageId,
+            messageId: turn.messageId,
             timestamp: latest.timestamp,
             extraContext: mediaExtraContext,
             deliver: async (replyPayload: any) => {
@@ -1592,18 +1628,21 @@ export const intercomPlugin = createChatChannelPlugin({
                 return;
               }
 
-              bufferedChunks.push(text);
+              turn.sink.push(text);
             },
             onRecordError: (err) =>
               log?.error?.(`[${tag}] session record error: ${err}`),
             onDispatchError: (err, info) =>
               log?.error?.(`[${tag}] dispatch error (${info.kind}): ${err}`),
-          });
+          }), dispatchTimeoutMs);
+          // "Measured" means measured in THIS turn: forget any open-request fact an earlier
+          // message's read left behind before the agent runs (request-state-signal.ts).
+          resetOpenRequestFact(result.conversationId);
           // Bound the wedge: on timeout we page below and post nothing;
           // on a real throw we record it for the silent alarm. Either way
           // the flush + alarm below run even though dispatch never
           // delivered. (Without this the await could never settle.)
-          const dispatchOutcome = await raceDispatchWithTimeout(dispatchPromise, dispatchTimeoutMs);
+          const dispatchOutcome = await runAgentTurn({ messageId: latest.messageId, sink: bufferedChunks });
           dispatchTimedOut = dispatchOutcome.timedOut;
           dispatchThrew = dispatchOutcome.threw;
 
@@ -1759,34 +1798,139 @@ export const intercomPlugin = createChatChannelPlugin({
               // out exactly once per conversation, a profile-link turn never gets the document
               // thank-you, and any merge judgement sentence is dropped. The "sent" marker is
               // committed only after a DELIVERED reply and then persisted (QA on #1530).
-              const mergePrep = prepareMergeReply(state, bodyForDispatch, guard.body, new Date().toISOString());
-              if (mergePrep.result.actions.length > 0) {
-                log?.warn?.(
-                  `[intercom:merge-guard] [${tag}] conv=${result.conversationId} actions=${mergePrep.result.actions.join(",")}` +
-                    (mergePrep.result.droppedJudgements.length ? ` dropped=${JSON.stringify(mergePrep.result.droppedJudgements)}` : ""),
-                );
-              }
+              let mergePrep = prepareMergeReply(state, bodyForDispatch, guard.body, new Date().toISOString());
+              const logMergePrep = (mp: typeof mergePrep) => {
+                if (mp.result.actions.length > 0) {
+                  log?.warn?.(
+                    `[intercom:merge-guard] [${tag}] conv=${result.conversationId} actions=${mp.result.actions.join(",")}` +
+                      (mp.result.droppedJudgements.length ? ` dropped=${JSON.stringify(mp.result.droppedJudgements)}` : ""),
+                  );
+                }
+              };
+              logMergePrep(mergePrep);
               guard.body = mergePrep.body;
+              // A promise of a person in a model-written reply is never backed (unbacked-handoff.ts):
+              // remove the sentence and keep the answer. When the promise was the WHOLE reply there is
+              // nothing to keep, so she gets the reason and one retry instead. Merge threads keep
+              // their own closing line (merge-reply-guard.ts).
+              const dropUnbackedHandoff = async (body: string, mp: typeof mergePrep, attempt: 1 | 2): Promise<{ body: string; onlyPromise: boolean }> => {
+                if (mp.result.mergeIntent) return { body, onlyPromise: false };
+                const uh = stripUnbackedHandoff(body);
+                if (uh.removed.length === 0) return { body, onlyPromise: false };
+                log?.warn?.(
+                  `[intercom:unbacked-handoff] [${tag}] conv=${result.conversationId} attempt=${attempt} removed=${uh.removed.length} only_promise=${uh.onlyPromise}`,
+                );
+                const ledgerErr = await appendSafetyLedger({
+                  ts: new Date().toISOString(),
+                  kind: "unbacked_handoff",
+                  source: "intercom",
+                  ref: result.conversationId,
+                  attempt,
+                  removed: uh.removed.length,
+                  action: uh.onlyPromise ? (attempt === 1 ? "retry" : "fallback") : "stripped",
+                });
+                if (ledgerErr) log?.error?.(`[intercom:ALERT] [${tag}] unbacked-handoff ledger append failed conv=${result.conversationId}: ${ledgerErr}`);
+                return { body: uh.body, onlyPromise: uh.onlyPromise };
+              };
               // OUTPUT GUARD (caroline-guard-g1): the last code-owned gate before the customer sees
-              // anything. A blocked reply becomes the approved AI-queue fallback line and the
-              // conversation stays with Caroline (caroline-safety.ts); nothing a prompt says can relax it.
+              // anything. A refused reply is explained to Caroline and she gets ONE corrected retry,
+              // which passes the same guard (guard-feedback.ts). A reply refused twice, or one that
+              // cannot be retried, becomes the approved AI-queue fallback line and the conversation
+              // stays with Caroline (caroline-safety.ts); nothing a prompt says can relax it.
               let outputBlocked = false;
-              if (guard.body.trim().length > 0) {
-                const og = await guardOutbound({
+              const runOutputGuard = (reply: string, attempt: 1 | 2) =>
+                guardOutbound({
                   client,
                   account,
                   conversationId: result.conversationId,
-                  reply: guard.body,
+                  reply,
                   customerText: bodyForDispatch,
                   customerNames: [state.enrichment?.verifiedName ?? ""].filter(Boolean),
                   customerEmails: [state.enrichment?.verifiedEmail ?? "", state.knownFacts?.accountEmail ?? ""].filter(Boolean),
+                  // Set only by a read tool that measured the signed-in contact's own requests in
+                  // this turn (request-state-signal.ts). undefined = not measured = fail closed.
+                  facts: { openRequest: readOpenRequestFact(result.conversationId) },
                   canary: resolveCanaryToken() ?? undefined,
+                  retryAvailable: attempt === 1 && GUARD_MAX_RETRIES > 0,
+                  attempt,
                   tag,
                   log,
                   deps: { page: safetyPage },
                 });
+              let guardFeedback: string | null = null;
+              const first = await dropUnbackedHandoff(guard.body, mergePrep, 1);
+              guard.body = first.body;
+              if (first.onlyPromise) {
+                guardFeedback =
+                  GUARD_MAX_RETRIES > 0 ? renderGuardFeedback([{ family: "promise", rule: UNBACKED_HANDOFF_RULE, excerpt: "" }]) : null;
+                guard.body = BLOCKED_REPLY_FALLBACK;
+                outputBlocked = true;
+              } else if (guard.body.trim().length > 0) {
+                const og = await runOutputGuard(guard.body, 1);
                 guard.body = og.body;
                 outputBlocked = og.blocked;
+                guardFeedback = og.feedback ?? null;
+              }
+              if (guardFeedback) {
+                // Until the retry produces a reply that passes, the customer gets the fallback line.
+                guard.body = BLOCKED_REPLY_FALLBACK;
+                outputBlocked = true;
+                const retryChunks: string[] = [];
+                // A person took the conversation while she was writing: no second turn is run, and
+                // the pending row is still closed below (pending = passed + refused + unusable).
+                const pausedBeforeRetry = !canAgentReply(state);
+                // A distinct message id: the gateway drops a second inbound with the same id as a
+                // duplicate for 20 minutes (openclaw inbound-dedupe), which would make the retry a
+                // silent no-op.
+                const retryOutcome = pausedBeforeRetry
+                  ? { timedOut: false, threw: null }
+                  : await runAgentTurn({
+                      messageId: `${latest.messageId}:guard-retry`,
+                      sink: retryChunks,
+                      guardFeedback,
+                    });
+                const retryText =
+                  retryOutcome.timedOut || retryOutcome.threw || !canAgentReply(state) ? null : cleanGuardRetryReply(retryChunks);
+                // Every "pending" row gets a closing row: passed and refused are written by
+                // guardOutbound (attempt 2); a retry that produced nothing usable is written here.
+                const retryUnusable = async (why: string) => {
+                  log?.error?.(
+                    `[intercom:output-guard] [${tag}] conv=${result.conversationId} RETRY-UNUSABLE why=${why} chunks=${retryChunks.length} (fallback line posted)`,
+                  );
+                  const ledgerErr = await appendSafetyLedger({
+                    ts: new Date().toISOString(),
+                    kind: "output_guard_retry",
+                    source: "intercom",
+                    ref: result.conversationId,
+                    outcome: "unusable",
+                    why,
+                  });
+                  if (ledgerErr) log?.error?.(`[intercom:ALERT] [${tag}] output-guard ledger append failed conv=${result.conversationId}: ${ledgerErr}`);
+                  await safetyPage(
+                    `:no_entry: Caroline's reply was refused by the output guard and her corrected retry was not usable (conv ${result.conversationId}; ${why}). ` +
+                      `The customer got the AI-queue fallback line (no person promised). The conversation STAYS with Caroline. This line is for the fix loop, not a task.`,
+                  ).catch(() => false);
+                };
+                if (retryText === null) {
+                  await retryUnusable(
+                    retryOutcome.timedOut ? "timed_out" : retryOutcome.threw ? "threw" : !canAgentReply(state) ? "agent_paused" : "no_usable_text",
+                  );
+                } else {
+                  const retryMerge = prepareMergeReply(state, bodyForDispatch, retryText, new Date().toISOString());
+                  logMergePrep(retryMerge);
+                  const second = await dropUnbackedHandoff(retryMerge.body, retryMerge, 2);
+                  if (!second.onlyPromise && second.body.trim().length > 0) {
+                    const og2 = await runOutputGuard(second.body, 2);
+                    guard.body = og2.body;
+                    outputBlocked = og2.blocked;
+                    if (!og2.blocked) {
+                      mergePrep = retryMerge;
+                      log?.info?.(`[intercom:output-guard] [${tag}] conv=${result.conversationId} RETRY-PASSED (corrected reply posted)`);
+                    }
+                  } else {
+                    await retryUnusable(second.onlyPromise ? "only_person_promise" : "empty_after_merge_guard");
+                  }
+                }
               }
               // A blocked reply did not carry the merge paragraph to the customer, so the
               // once-per-conversation marker must not be committed for it.

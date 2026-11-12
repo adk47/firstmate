@@ -297,10 +297,8 @@
           "deny": [
             "exec",
             "credits_verify",
-            "credit_verification_check",
             "profiles_claim_self",
             "profiles_consolidate",
-            "profile_claim_status",
             "profile_credits_status",
             "dedupe_check",
             "remove_credits",

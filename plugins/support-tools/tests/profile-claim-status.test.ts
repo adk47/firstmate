@@ -1,8 +1,22 @@
 import { describe, it, expect, vi } from "vitest";
-import { createProfileClaimStatusTool, supportActionFor, failClosedVerdict, type ClaimRow } from "../src/tools/profile-claim-status.js";
+import { createProfileClaimStatusTool, supportActionFor, diagnosisFor, failClosedVerdict, type ClaimRow } from "../src/tools/profile-claim-status.js";
 import { RateLimiter } from "../src/rate-limiter.js";
 import type { MusoAdminClient, AdminClientResult } from "../src/muso-admin-client.js";
 import type { IntercomReader } from "../src/intercom-client.js";
+
+// The read tools anchor on the conversation's SIGNED-IN Intercom contact (resolveOwnerAnchor:
+// role=user, external_id, contact older than 24 h), so the mock reader answers getContactIdentity.
+// getAuthorEmail stays on the mock to prove the tools no longer consult it.
+function signedInReader(email: string | null = "owner@example.com", over: Record<string, unknown> = {}) {
+  return {
+    getAuthorEmail: vi.fn(async () => email),
+    getContactIdentity: vi.fn(async () =>
+      email
+        ? { email, role: "user", externalId: "ext-1", contactCreatedAt: 1_700_000_000, conversationCreatedAt: 1_793_000_000, ...over }
+        : null,
+    ),
+  } as any;
+}
 
 const OWNER_EMAIL = "owner@example.com";
 const OTHER_EMAIL = "rival@example.com";
@@ -15,6 +29,12 @@ interface MockWorld {
   // value returned under {data:{claiming: ...}} for GET /claiming/<id>
   claimById?: Record<string, ClaimRow | null>;
   malformedList?: boolean;
+  // How the fake list endpoint departs from the real one (which returns `total` for the
+  // filtered list and honours `page`, verified read-only against prod 2026-11-12).
+  noTotal?: boolean;
+  ignorePage?: boolean;
+  failListPage?: number;
+  listCalls?: string[];
   failPaths?: RegExp[];
 }
 
@@ -24,8 +44,15 @@ function makeAdminClient(world: MockWorld): MusoAdminClient {
       return { ok: false, status: 500, error: "boom" };
     }
     if (/^\/api\/v3\/admin\/claiming\?profilesIds=/.test(path)) {
+      world.listCalls?.push(path);
       if (world.malformedList) return { ok: true, status: 200, data: { data: {} } };
-      return { ok: true, status: 200, data: { data: { items: world.claims ?? [] } } };
+      const q = new URLSearchParams(path.split("?")[1]);
+      const limit = Number(q.get("limit") ?? "20");
+      const page = world.ignorePage ? 1 : Number(q.get("page") ?? "1");
+      if (world.failListPage === Number(q.get("page") ?? "1")) return { ok: false, status: 500, error: "boom" };
+      const all = world.claims ?? [];
+      const items = all.slice((page - 1) * limit, page * limit);
+      return { ok: true, status: 200, data: { data: world.noTotal ? { items } : { items, total: all.length } } };
     }
     let m = path.match(/^\/api\/v3\/admin\/claiming\/([^/?]+)$/);
     if (m) {
@@ -48,7 +75,7 @@ function makeAdminClient(world: MockWorld): MusoAdminClient {
 function makeDeps(world: MockWorld, overrides: Record<string, unknown> = {}) {
   return {
     adminClient: makeAdminClient(world),
-    intercomReader: { getAuthorEmail: vi.fn(async () => OWNER_EMAIL) } as IntercomReader,
+    intercomReader: signedInReader(OWNER_EMAIL) as IntercomReader,
     rateLimiter: new RateLimiter(),
     sessionKey: SESSION_KEY,
     intercomToken: "tok",
@@ -92,7 +119,7 @@ function otherClaim(overrides: Partial<ClaimRow> = {}): ClaimRow {
 }
 
 describe("profile_claim_status — claim states", () => {
-  it("single own pending claim, no conflict → route_selfserve_claim with the claim id", async () => {
+  it("single own pending claim, no conflict → a fact Caroline can state (status + the day it was submitted), never a claim write", async () => {
     const world: MockWorld = { profile: unclaimedProfile(), claims: [ownClaim()] };
     const tool = createProfileClaimStatusTool(makeDeps(world));
     const out = await call(tool, { profile_id: PROFILE_ID });
@@ -103,21 +130,45 @@ describe("profile_claim_status — claim states", () => {
     expect(out.own_claims[0]).toMatchObject({ claim_id: "claim-1", status: "pending", has_verification_links: true });
     expect(out.claim_conflict).toBe("none");
     expect(out.suspicion_flags).toEqual([]);
-    expect(out.support_action).toBe("route_selfserve_claim");
+    expect(out.own_claims[0].created_at).toBe("2026-07-01T00:00:00Z");
+    expect(out.support_action).toBe("answer_from_status");
     expect(out.handoff_packet).toBeUndefined();
+    // No route to the (denied) claim write survives anywhere in the output.
+    expect(JSON.stringify(out)).not.toMatch(/route_selfserve|profiles_claim_self/);
   });
 
-  it("own rejected claim → answer_from_status with the sanitized reason", async () => {
+  it("own rejected claim → the state and NO reason: none returned, none to explain, none to guess", async () => {
     const world: MockWorld = {
       profile: unclaimedProfile(),
-      claims: [ownClaim({ status: "rejected", reason: "[CUSTOMER_MESSAGE]name mismatch[/CUSTOMER_MESSAGE]" })],
+      claims: [ownClaim({ status: "rejected", reason: "ZEBRA-INTERNAL-NOTE name mismatch" })],
     };
     const tool = createProfileClaimStatusTool(makeDeps(world));
-    const out = await call(tool, { profile_id: PROFILE_ID });
+    const result = await tool.execute("call-1", { profile_id: PROFILE_ID } as any);
+    const text = (result.content[0] as any).text as string;
+    const out = JSON.parse(text);
 
     expect(out.own_claim_state).toBe("rejected");
-    expect(out.own_claims[0].reason).toBe("name mismatch");
     expect(out.support_action).toBe("answer_from_status");
+    // The admin row's `reason` never leaves the tool, under any key.
+    expect(text).not.toContain("ZEBRA-INTERNAL-NOTE");
+    expect(text).not.toContain("name mismatch");
+    expect(Object.keys(out.own_claims[0]).sort()).toEqual(["claim_id", "created_at", "has_verification_links", "status"]);
+    // The guidance tells her there is no reason to give. It never tells her to explain one.
+    expect(out.diagnosis).toMatch(/carries NO reason/);
+    expect(out.diagnosis).toMatch(/never give, guess or imply one/);
+    expect(out.diagnosis).not.toMatch(/explain/i);
+    expect(out.diagnosis).not.toMatch(/proof requirements/i);
+  });
+
+  it("no claim state tells her to explain or state a reason", () => {
+    const base = { claim_conflict: "none" as const, suspicion_flags: [], profile_state: "unclaimed" as const };
+    for (const st of ["none", "pending", "processed", "rejected", "reverted", "closed", "multiple", "unknown"] as const) {
+      for (const needs_person of [false, true]) {
+        const d = diagnosisFor({ ...base, own_claim_state: st, needs_person });
+        expect(d, st).not.toMatch(/explain the (rejection )?reason|state the reason|tell them why/i);
+      }
+    }
+    expect(diagnosisFor({ ...base, own_claim_state: "closed" })).toMatch(/never give, guess or imply one/);
   });
 
   it("own processed claim → answer_from_status (already approved)", async () => {
@@ -138,7 +189,6 @@ describe("profile_claim_status — claim states", () => {
     expect(out.own_claim_state).toBe("reverted");
     expect(out.support_action).toBe("create_handoff_ticket");
     expect(out.handoff_packet.action_type).toBe("profile-claim");
-    expect(out.suspicion_flags).toContain("prior_reverted_claim_on_profile");
   });
 
   it("multiple own claims → multiple → handoff", async () => {
@@ -172,36 +222,34 @@ describe("profile_claim_status — claim states", () => {
 });
 
 describe("profile_claim_status — conflicts and suspicion", () => {
-  it("pending claim by someone else → handoff; NO third-party email, link, or claim id in the output", async () => {
-    const world: MockWorld = { profile: unclaimedProfile(), claims: [otherClaim()] };
-    const tool = createProfileClaimStatusTool(makeDeps(world));
-    const out = await call(tool, { profile_id: PROFILE_ID });
+  // caroline-read-state-tools-r1: nothing about another account's claims leaves the tool. Not a
+  // count, not a conflict value, not a flag, and not a changed route (a hand-off that fires only
+  // when a stranger has a pending claim is a one-bit answer about that stranger).
+  it("a pending claim by someone else is invisible: the output is byte-identical to a profile with no claims", async () => {
+    const withRival = await call(createProfileClaimStatusTool(makeDeps({ profile: unclaimedProfile(), claims: [otherClaim()] })), { profile_id: PROFILE_ID });
+    const empty = await call(createProfileClaimStatusTool(makeDeps({ profile: unclaimedProfile(), claims: [] })), { profile_id: PROFILE_ID });
 
-    expect(out.own_claim_state).toBe("none");
-    expect(out.claim_conflict).toBe("pending_claim_by_other");
-    expect(out.other_claims).toEqual({ pending_count: 1, prior_processed_or_reverted: false });
-    expect(out.support_action).toBe("create_handoff_ticket");
-    const raw = JSON.stringify(out);
+    expect(withRival).toEqual(empty);
+    expect(withRival.own_claim_state).toBe("none");
+    expect(withRival.claim_conflict).toBe("none");
+    expect(withRival.other_claims).toBeUndefined();
+    expect(withRival.support_action).toBe("answer_from_status");
+    const raw = JSON.stringify(withRival);
     expect(raw).not.toContain(OTHER_EMAIL);
     expect(raw).not.toContain("rival.example.com");
     expect(raw).not.toContain("claim-9");
     expect(raw).not.toContain("Rival Team");
+    expect(raw).not.toMatch(/pending_claim_by_other|other_pending|multiple_pending_claims/);
   });
 
-  it("own pending claim + competing pending claim → handoff, not self-serve", async () => {
-    const world: MockWorld = { profile: unclaimedProfile(), claims: [ownClaim(), otherClaim()] };
-    const tool = createProfileClaimStatusTool(makeDeps(world));
-    const out = await call(tool, { profile_id: PROFILE_ID });
-
-    expect(out.own_claim_state).toBe("pending");
-    expect(out.claim_conflict).toBe("pending_claim_by_other");
-    expect(out.suspicion_flags).toContain("multiple_pending_claims_on_profile");
-    expect(out.support_action).toBe("create_handoff_ticket");
-    expect(out.handoff_packet).toMatchObject({
-      action_type: "profile-claim",
-      claim_conflict: "pending_claim_by_other",
-      evidence: { other_pending_count: 1 },
-    });
+  it("own pending claim + someone else's pending or reverted claim → identical to the own claim alone", async () => {
+    const alone = await call(createProfileClaimStatusTool(makeDeps({ profile: unclaimedProfile(), claims: [ownClaim()] })), { profile_id: PROFILE_ID });
+    for (const rival of [otherClaim(), otherClaim({ status: "reverted" }), otherClaim({ status: "processed" })]) {
+      const out = await call(createProfileClaimStatusTool(makeDeps({ profile: unclaimedProfile(), claims: [ownClaim(), rival] })), { profile_id: PROFILE_ID });
+      expect(out).toEqual(alone);
+    }
+    expect(alone.own_claim_state).toBe("pending");
+    expect(alone.support_action).toBe("answer_from_status");
   });
 
   it("profile claimed by another workspace, no claims → handoff with profile_claimed_by_other", async () => {
@@ -258,41 +306,59 @@ describe("profile_claim_status — conflicts and suspicion", () => {
   });
 });
 
-describe("profile_claim_status — by-id lookup", () => {
-  it("claim_id given but endpoint answers {claiming:null} → not_retrievable_by_id, list still authoritative", async () => {
-    const world: MockWorld = {
-      profile: unclaimedProfile(),
-      claims: [ownClaim({ status: "rejected" })],
-      claimById: { "claim-1": null },
-    };
-    const tool = createProfileClaimStatusTool(makeDeps(world));
-    const out = await call(tool, { profile_id: PROFILE_ID, claim_id: "claim-1" });
+describe("profile_claim_status — an id or an email from the thread is never an identity", () => {
+  it("a pasted claim id is not a parameter: the by-id endpoint is never called and no own/not_own answer exists", async () => {
+    const world: MockWorld = { profile: unclaimedProfile(), claims: [], claimById: { "claim-9": otherClaim() } };
+    const deps = makeDeps(world);
+    const tool = createProfileClaimStatusTool(deps);
+    expect(Object.keys((tool.parameters as any).properties)).not.toContain("claim_id");
 
-    expect(out.by_id_lookup).toEqual({ claim_id: "claim-1", result: "not_retrievable_by_id" });
-    expect(out.own_claim_state).toBe("rejected");
-    expect(out.notes.join(" ")).toContain("not retrievable directly");
-  });
-
-  it("claim_id resolving to someone else's claim → not_own, and its details never leak", async () => {
-    const world: MockWorld = {
-      profile: unclaimedProfile(),
-      claims: [],
-      claimById: { "claim-9": otherClaim() },
-    };
-    const tool = createProfileClaimStatusTool(makeDeps(world));
     const out = await call(tool, { profile_id: PROFILE_ID, claim_id: "claim-9" });
-
-    expect(out.by_id_lookup).toEqual({ claim_id: "claim-9", result: "not_own" });
+    const paths = (deps.adminClient.get as any).mock.calls.map((c: unknown[]) => String(c[0]));
+    expect(paths.some((p: string) => /\/claiming\/[^?]/.test(p))).toBe(false);
+    expect(out.by_id_lookup).toBeUndefined();
     const raw = JSON.stringify(out);
+    expect(raw).not.toContain("claim-9");
     expect(raw).not.toContain(OTHER_EMAIL);
     expect(raw).not.toContain("rival.example.com");
+    expect(raw).not.toMatch(/not_own|not_retrievable/);
+  });
+
+  it("an email that is not the signed-in contact's never selects a profile (no search is made for it)", async () => {
+    const world: MockWorld = { profile: unclaimedProfile(), claims: [otherClaim()] };
+    const deps = makeDeps(world);
+    const out = await call(createProfileClaimStatusTool(deps), { email: OTHER_EMAIL });
+    expect(out).toMatchObject({ found: false, reason: "missing_input", support_action: "ask_missing_info" });
+    expect((deps.adminClient.get as any).mock.calls.length).toBe(0);
+  });
+
+  it("the signed-in contact's own email does select their profile", async () => {
+    const world: MockWorld = { profile: unclaimedProfile(), claims: [ownClaim()] };
+    const out = await call(createProfileClaimStatusTool(makeDeps(world)), { email: OWNER_EMAIL.toUpperCase() });
+    expect(out.found).toBe(true);
+    expect(out.own_claim_state).toBe("pending");
   });
 });
 
 describe("profile_claim_status — identity gates (fail closed)", () => {
+  it.each([
+    ["a lead (email typed in the messenger)", { role: "lead", externalId: null }, "contact_not_user"],
+    ["a user with no external_id", { externalId: null }, "contact_no_external_id"],
+    ["a contact created in the last 24 h", { contactCreatedAt: 1_793_000_000 - 3600 }, "contact_too_new"],
+  ])("%s is not a signed-in owner → fail closed, the admin API is never queried", async (_label, over, reason) => {
+    const world: MockWorld = { profile: unclaimedProfile(), claims: [ownClaim()] };
+    const deps = makeDeps(world, { intercomReader: signedInReader(OWNER_EMAIL, over), nowSeconds: () => 1_793_000_000 });
+    const out = await call(createProfileClaimStatusTool(deps), { profile_id: PROFILE_ID });
+    expect(out.found).toBe(false);
+    expect(out.owner_undetermined).toBe(true);
+    expect(out.own_claims).toEqual([]);
+    expect(out.notes.join(" ")).toContain(reason);
+    expect((deps.adminClient.get as any).mock.calls.length).toBe(0);
+  });
+
   it("unverifiable anchor → fail-closed verdict; the claiming endpoints are NOT queried", async () => {
     const world: MockWorld = { profile: unclaimedProfile(), claims: [ownClaim()] };
-    const deps = makeDeps(world, { intercomReader: { getAuthorEmail: vi.fn(async () => null) } });
+    const deps = makeDeps(world, { intercomReader: signedInReader(null) });
     const tool = createProfileClaimStatusTool(deps);
     const out = await call(tool, { profile_id: PROFILE_ID });
 
@@ -305,13 +371,13 @@ describe("profile_claim_status — identity gates (fail closed)", () => {
 
   it("non-intercom session key (no convId) fails closed without any network call", async () => {
     const world: MockWorld = { profile: unclaimedProfile() };
-    const reader = { getAuthorEmail: vi.fn(async () => OWNER_EMAIL) } as IntercomReader;
+    const reader = signedInReader(OWNER_EMAIL) as IntercomReader;
     const deps = makeDeps(world, { intercomReader: reader, sessionKey: "agent:support:main" });
     const tool = createProfileClaimStatusTool(deps);
     const out = await call(tool, { profile_id: PROFILE_ID });
 
     expect(out.owner_undetermined).toBe(true);
-    expect(reader.getAuthorEmail).not.toHaveBeenCalled();
+    expect(reader.getContactIdentity).not.toHaveBeenCalled();
     expect((deps.adminClient.get as any).mock.calls.length).toBe(0);
   });
 
@@ -348,12 +414,83 @@ describe("profile_claim_status — resolution and failure paths", () => {
     expect(out).toMatchObject({ found: false, reason: "lookup_unavailable" });
   });
 
-  it("more than the cap → truncation note", async () => {
-    const claims = Array.from({ length: 21 }, (_, i) => otherClaim({ id: `c-${i}`, status: "rejected" }));
-    const world: MockWorld = { profile: unclaimedProfile(), claims };
-    const tool = createProfileClaimStatusTool(makeDeps(world));
-    const out = await call(tool, { profile_id: PROFILE_ID });
-    expect(out.notes.join(" ")).toContain("truncated");
+  // ---- the list is read whole, or declared unread (QA review of hydra#1902) ----------------
+  const others = (n: number) => Array.from({ length: n }, (_, i) => otherClaim({ id: `o-${i}`, status: i % 2 ? "pending" : "rejected" }));
+
+  it("the customer's own claim is found wherever it sits in the list, not only in the first rows", async () => {
+    for (const at of [0, 20, 25, 99, 100, 250]) {
+      const claims = others(260);
+      claims.splice(at, 0, ownClaim({ id: "mine" }));
+      const world: MockWorld = { profile: unclaimedProfile(), claims };
+      const out = await call(createProfileClaimStatusTool(makeDeps(world)), { profile_id: PROFILE_ID });
+      expect(out.own_claim_state, `own row at ${at}`).toBe("pending");
+      expect(out.own_claims.map((c: any) => c.claim_id), `own row at ${at}`).toEqual(["mine"]);
+      expect(out.support_action, `own row at ${at}`).toBe("answer_from_status");
+      expect(out.notes, `own row at ${at}`).toEqual([]);
+    }
+  });
+
+  it("other accounts' claims change NOTHING in the answer: 0, 1, 21, 100, 101 and 400 of them read the same", async () => {
+    const answer = async (claims: ClaimRow[]) => {
+      const result = await createProfileClaimStatusTool(makeDeps({ profile: unclaimedProfile(), claims })).execute("call-1", { profile_id: PROFILE_ID } as any);
+      return (result.content[0] as any).text as string;
+    };
+    const none = await answer([]);
+    expect(JSON.parse(none)).toMatchObject({ own_claim_state: "none", support_action: "answer_from_status", notes: [] });
+    for (const n of [1, 21, 100, 101, 400]) expect(await answer(others(n)), `${n} other claims`).toBe(none);
+    // And the same with an own pending claim in the list.
+    const mine = await answer([ownClaim({ id: "mine" })]);
+    for (const n of [21, 101, 400]) expect(await answer([...others(n), ownClaim({ id: "mine" })]), `${n} other claims`).toBe(mine);
+  });
+
+  const unread: Array<[string, Partial<MockWorld>, number]> = [
+    ["more pages than the cap", {}, 501],
+    ["paging is not honoured (every page is the first one)", { ignorePage: true }, 150],
+    ["a later page fails", { failListPage: 2 }, 150],
+    ["a full page with no total", { noTotal: true }, 100],
+  ];
+  for (const [why, world, n] of unread) {
+    it(`a list that could not be read whole is NEVER "you have no claim": ${why}`, async () => {
+      const result = await createProfileClaimStatusTool(makeDeps({ profile: unclaimedProfile(), claims: others(n), ...world })).execute("call-1", { profile_id: PROFILE_ID } as any);
+      const text = (result.content[0] as any).text as string;
+      const out = JSON.parse(text);
+      expect(out.own_claim_state).toBe("unknown");
+      expect(out.support_action).toBe("create_handoff_ticket");
+      expect(out.diagnosis).toMatch(/could not be read/);
+      expect(out.diagnosis).toMatch(/Never say they have none/);
+      expect(text).not.toMatch(/no claim request of their own/);
+      // Neutral: it says the read was partial, never how many claims the profile carries.
+      expect(out.notes.join(" ")).toContain("could not be read in full");
+      expect(text).not.toContain(String(n));
+      expect(out.notes.join(" ")).not.toMatch(/\d/);
+      expect(text).not.toContain(OTHER_EMAIL);
+    });
+  }
+
+  it("a partial list that does show an own pending claim goes to a person, and still marks the open request", async () => {
+    const claims = [ownClaim({ id: "mine" }), ...others(600)];
+    const out = await call(createProfileClaimStatusTool(makeDeps({ profile: unclaimedProfile(), claims })), { profile_id: PROFILE_ID });
+    expect(out.own_claim_state).toBe("pending");
+    expect(out.support_action).toBe("create_handoff_ticket");
+    expect(out.notes.join(" ")).toContain("could not be read in full");
+  });
+
+  it("a short page with no total is the whole list", async () => {
+    const out = await call(createProfileClaimStatusTool(makeDeps({ profile: unclaimedProfile(), claims: others(3), noTotal: true })), { profile_id: PROFILE_ID });
+    expect(out).toMatchObject({ own_claim_state: "none", support_action: "answer_from_status", notes: [] });
+  });
+
+  it("one read for an ordinary profile; further pages only while the total is not reached", async () => {
+    const one: string[] = [];
+    await call(createProfileClaimStatusTool(makeDeps({ profile: unclaimedProfile(), claims: others(21), listCalls: one })), { profile_id: PROFILE_ID });
+    expect(one).toHaveLength(1);
+    expect(one[0]).not.toContain("page=");
+    const three: string[] = [];
+    await call(createProfileClaimStatusTool(makeDeps({ profile: unclaimedProfile(), claims: others(250), listCalls: three })), { profile_id: PROFILE_ID });
+    expect(three.map((u) => new URLSearchParams(u.split("?")[1]).get("page"))).toEqual([null, "2", "3"]);
+    const capped: string[] = [];
+    await call(createProfileClaimStatusTool(makeDeps({ profile: unclaimedProfile(), claims: others(5000), listCalls: capped })), { profile_id: PROFILE_ID });
+    expect(capped).toHaveLength(5);
   });
 
   it("rate limit → rate_limited structured failure", async () => {
@@ -372,10 +509,11 @@ describe("profile_claim_status — pure helpers", () => {
     profile_state: "unclaimed" as const,
   };
 
-  it("supportActionFor: pending self-serves only when clean", () => {
-    expect(supportActionFor({ ...base, own_claim_state: "pending" })).toBe("route_selfserve_claim");
-    expect(supportActionFor({ ...base, own_claim_state: "pending", claim_conflict: "pending_claim_by_other" })).toBe("create_handoff_ticket");
-    expect(supportActionFor({ ...base, own_claim_state: "pending", suspicion_flags: ["prior_reverted_claim_on_profile"] })).toBe("create_handoff_ticket");
+  it("supportActionFor: a pending own claim is answered from status only when clean, and never routes to a claim write", () => {
+    expect(supportActionFor({ ...base, own_claim_state: "pending" })).toBe("answer_from_status");
+    expect(supportActionFor({ ...base, own_claim_state: "pending", claim_conflict: "profile_claimed_by_other" })).toBe("create_handoff_ticket");
+    expect(supportActionFor({ ...base, own_claim_state: "pending", suspicion_flags: ["own_claim_missing_verification_links"] })).toBe("create_handoff_ticket");
+    expect(supportActionFor({ ...base, own_claim_state: "pending", needs_person: true })).toBe("create_handoff_ticket");
   });
 
   it("supportActionFor: terminal states", () => {
@@ -390,5 +528,39 @@ describe("profile_claim_status — pure helpers", () => {
   it("failClosedVerdict carries no claim data and routes to a human", () => {
     const v = failClosedVerdict(["note"]);
     expect(v).toMatchObject({ found: false, owner_undetermined: true, own_claims: [], support_action: "human_review" });
+  });
+
+  // The open_request fact the outbound guard reads (request-state-signal.ts).
+  describe("open_request fact", () => {
+    const FACT_KEY = "__musoSupportRequestState";
+    const fact = () => ((globalThis as any)[FACT_KEY] as Map<string, { open: boolean }> | undefined)?.get("12345");
+    const clear = () => ((globalThis as any)[FACT_KEY] as Map<string, unknown> | undefined)?.delete("12345");
+
+    it("an own pending claim is a measured open request", async () => {
+      clear();
+      await call(createProfileClaimStatusTool(makeDeps({ profile: unclaimedProfile(), claims: [ownClaim()] })), { profile_id: PROFILE_ID });
+      expect(fact()?.open).toBe(true);
+    });
+
+    it("no own pending claim writes NOTHING: it is not a measurement of 'no open request'", async () => {
+      clear();
+      await call(createProfileClaimStatusTool(makeDeps({ profile: unclaimedProfile(), claims: [] })), { profile_id: PROFILE_ID });
+      expect(fact()).toBeUndefined();
+      await call(createProfileClaimStatusTool(makeDeps({ profile: unclaimedProfile(), claims: [ownClaim({ status: "rejected" })] })), { profile_id: PROFILE_ID });
+      expect(fact()).toBeUndefined();
+    });
+
+    it("someone else's pending claim never writes the fact", async () => {
+      clear();
+      await call(createProfileClaimStatusTool(makeDeps({ profile: unclaimedProfile(), claims: [otherClaim()] })), { profile_id: PROFILE_ID });
+      expect(fact()).toBeUndefined();
+    });
+
+    it("a contact that fails the signed-in screen writes nothing", async () => {
+      clear();
+      const reader = signedInReader(null);
+      await call(createProfileClaimStatusTool(makeDeps({ profile: unclaimedProfile(), claims: [ownClaim()] }, { intercomReader: reader })), { profile_id: PROFILE_ID });
+      expect(fact()).toBeUndefined();
+    });
   });
 });

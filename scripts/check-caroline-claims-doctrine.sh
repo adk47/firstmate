@@ -121,13 +121,45 @@ forbid "$CAP" "Q1 no admin review step" "3. Admin review"
 # Captain 2026-10-28 12:1xZ / 12:3xZ: Caroline only hands off on credits, documents, claims
 # and merges. Q2-Q9 and Q11 now assert the HAND-OFF answer: no look-up, the ticket kind + the
 # handoff tag, the one approved handoff line, no status / outcome / timeframe.
+#
+# ai-support-quality-v1 (2026-11-12) changed two things here, both measured on the live inbox
+# (data/ai-support-quality-v1/report.md, 417 conversations in 24h):
+#   1. The closing line "I'm pulling in a teammate to take this from here." is RETIRED from the
+#      doctrine. It was sent to 268 customers in a day; a person was assigned in 63 and replied
+#      in none. Caroline cannot assign a conversation (captain 2026-11-11), so the sentence is
+#      false whenever she writes it, and plugins/intercom/src/unbacked-handoff.ts removes it at
+#      send. The doctrine must not teach a line the code deletes.
+#   2. ONE look-up is allowed: the signed-in customer's own request state, and only to decide
+#      whether the approved status paragraph (§2.8) is true for them. The output guard already
+#      required that fact in code and nothing supplied it, so the paragraph was refused every
+#      time (56 conversations in the same 24h). Everything else stays hand-off only.
 HANDOFF_LINE="I'm pulling in a teammate to take this from here."
-for f in "$AGENTS" "$CV"; do
-  require "$f" "hand-off line is the approved one, verbatim" "$HANDOFF_LINE"
+for f in "$CV" "$CI" "$CAP"; do
+  forbid "$f" "the retired closing line is not taught (unbacked promise of a person)" "$HANDOFF_LINE"
 done
+# AGENTS.md names the sentence exactly once, as the SYSTEM's words on a real escalation (it is the
+# answer-bank anchor for `handoff_line`: escalation-action.ts and merge-reply-guard.ts still send it).
+require "$AGENTS" "the closing line is the system's, never Caroline's" "They are the system's and only the system's: you never write that sentence."
+n_line="$(grep -oF "pulling in a teammate" "$AGENTS" | wc -l | tr -d " ")"
+if [ "$n_line" != "1" ]; then
+  echo "FAIL: ${AGENTS#"$ROOT"/}: the system's closing line appears $n_line times (expected once, as the system's words)" >&2
+  fail=1
+fi
+forbid "$AGENTS" "no instruction to say the retired closing line" "say the handoff line verbatim"
+forbid "$CV" "no instruction to say the retired closing line" "Last, always, the handoff line"
+require "$AGENTS" "never a closing sentence that promises a person" "Never end a reply with a sentence that says a person is coming"
+require "$CV" "never a closing sentence that promises a person" "Never end a reply with a sentence that says a person is coming"
+require "$CV" "the one read: own rows only" "read ONLY the signed-in customer's own rows"
+require "$CV" "the one read: null is not 'no request'" "the read did not happen. Do not send the status paragraph and never say there is no request"
+require "$CV" "the one read: nothing beyond the tool's note" "and nothing else from the result"
+require "$AGENTS" "the one read is named in the always-loaded contract" "Apart from the one read of the customer's OWN request state"
+# The one read is two tools that fail closed without a signed-in customer. profile_credits_status
+# looks up any profile typed in the conversation and scans for duplicates, so it stays off.
+require "$CV" "the one read does not include the any-profile diagnosis" '`profile_credits_status`, `dedupe_check`, `remove_credits`'
+require "$CV" "the one read returns nothing without a signed-in customer" "without a signed-in customer they return nothing"
 
 # --- Q2 "My claim is pending, how long will it take?" ------------------------------
-require "$CI" "Q2 claim: hand off only, no look-up" "Do not look up the claim and say nothing about its state."
+require "$CI" "Q2 claim: hand off only, the one read is the only look-up" "is the only look-up; say nothing about its state beyond what that skill allows."
 require "$CV" "Q2 claim: profile-claim ticket, claim tag" '| their profile claim (status, rejected, stuck, on behalf of an artist) | `profile-claim` | `claim` |'
 require "$CV" "Q2 never a claim code or a surface" "no claim code, no surface to put a code on"
 forbid "$CI" "Q2 no business-day wait on claims" "within normal review time"
@@ -199,7 +231,7 @@ require "$CI" "Q6 never say which profiles are claimed" "Never say which of thei
 
 # --- Q7 "Where is my credit request?" -----------------------------------------------
 require "$CV" "Q7 credit status: credit-verify ticket, credit-status tag" '| a pending / stuck credit, "where is my credit request" | `credit-verify` | `credit-status` |'
-require "$CI" "Q7 credit: hand off only, no look-up" "**Hand off only** for anything about THEIR credit (missing, wrong, pending, stuck). Do not look it up."
+require "$CI" "Q7 credit: hand off only, the one read is the only look-up" "**Hand off only** for anything about THEIR credit (missing, wrong, pending, stuck). The one read in \`verification-handoff\` is the only look-up."
 forbid "$AGENTS" "Q7 no credit-status look-up" '-> `profile_credits_status` first'
 forbid "$CI" "Q7 no business-day promise on credit errors" "what the correct credit should be. SLA: 2 business days"
 
@@ -274,7 +306,7 @@ done
 require "$FAQ" "Q13 the approved credit paragraph (§2.1)" "we check it automatically against public credit sources."
 require "$CV" "Q13 the process-never-judgement rule" "Explain the PROCESS (what happens, in what order, where they hear from us, what they can do)."
 require "$AGENTS" "Q13 process-never-judgement in the always-loaded contract" "Explain the process, never the judgement"
-require "$CV" "Q13 status chasing: the approved queue paragraph (§2.8), only with a filed item" "ONLY when this conversation already holds a"
+require "$CV" "Q13 status chasing: the approved queue paragraph (§2.8), only after a measured open request" "ONLY when the one read (Hard lines) returned \`open_request: true\` in this turn"
 require "$FAQ" "Q13 merges: the approved merge paragraph (§2.4)" "Merges work like this: claim every profile that is yours first"
 require "$CAP" "Q13 removals: the approved removal paragraph (§2.5)" "A credit is only removed from a profile after we've checked it against the streaming platforms' own credits"
 

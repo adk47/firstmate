@@ -396,7 +396,10 @@ describe("merge-reply guard on the 2026-10-30 transcripts (firstmate 017)", () =
 
   it("channel.ts commits the sent marker only after delivery, and persists it (wiring)", () => {
     const src = readFileSync(new URL("../src/channel.ts", import.meta.url), "utf8");
-    const prep = src.indexOf("const mergePrep = prepareMergeReply(state, bodyForDispatch, guard.body,");
+    // `let`, not `const`: when the output guard refuses the reply and the corrected retry passes,
+    // the retry's own merge prep replaces this one, so the marker is committed for the reply that
+    // was actually delivered (ai-support-quality-v1). Every assertion below is unchanged.
+    const prep = src.indexOf("let mergePrep = prepareMergeReply(state, bodyForDispatch, guard.body,");
     const send = src.indexOf("const reply = await client.replyToConversation({", prep);
     const delivered = src.indexOf("commitMerge(outcome.delivered);", send);
     const failed = src.indexOf("commitMerge(false);", delivered);
@@ -408,6 +411,9 @@ describe("merge-reply guard on the 2026-10-30 transcripts (firstmate 017)", () =
     // caroline-guard-g1: a reply the output guard replaced never carried the paragraph.
     expect(src.slice(prep, send)).toMatch(/if \(mergePrep\.commit\(delivered && !outputBlocked\)\) saveSessions\(accountSessions\)/);
     expect(src.slice(prep, send)).toContain("guard.body = mergePrep.body;");
+    // The swap happens only for a retry the output guard passed.
+    expect(src.slice(prep, send)).toMatch(/if \(!og2\.blocked\) \{\s*mergePrep = retryMerge;/);
+    expect(src.slice(prep, send).match(/mergePrep = /g)).toHaveLength(2);
   });
 
 });

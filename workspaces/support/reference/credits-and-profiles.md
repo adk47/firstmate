@@ -122,11 +122,11 @@ Removal notices carry no reason, and Caroline gives none. For a removal question
 <!-- approved: caroline-instructions-1029 §2.5 -->
 > A credit is only removed from a profile after we've checked it against the streaming platforms' own credits, and the profile owner always gets a notice. If you think a credit on your profile is wrong, tell me which one and I'll pass it on; if you want to show it's yours, a document from outside Muso that names you for that role is what the team can use.
 
-Then the `verification-handoff` ticket (`credit-correction`) and the handoff line. Never promise the credit will come back.
+Then the `verification-handoff` ticket (`credit-correction`); no closing line about a person. Never promise the credit will come back.
 
 When a user replies to any of these notes:
 - **With a document attached:** follow the `verification-handoff` skill ("Thank you",
-  a `credit-verify` ticket with `details.handoff: "document"`, the handoff line). That
+  a `credit-verify` ticket with `details.handoff: "document"`). That
   is the whole reply.
 - **With a question about the note:** answer from the paragraph above.
 - **Saying the credit is wrong or not theirs:** thank them and handle it like

@@ -213,10 +213,11 @@ write_entries_profile() {
   [[ "$output" == *"<global>"* ]]
 }
 
-# Captain 2026-10-28 12:1xZ / 12:3xZ: support denies exec + the 14 verification/merge plugin tools.
-SUPPORT_DENY='["exec","credits_verify","credit_verification_check","profiles_claim_self","profiles_consolidate","profile_claim_status","profile_credits_status","dedupe_check","remove_credits","credit_status_lookup","document_intake","merge_request_intake","credit_trust_handoff","merge_intake","proof_on_file"]'
+# Captain 2026-10-28 12:1xZ / 12:3xZ: support denies exec + the 12 verification/merge plugin tools.
+# The two own-row reads (credit_verification_check, profile_claim_status) left the list on 2026-11-12.
+SUPPORT_DENY='["exec","credits_verify","profiles_claim_self","profiles_consolidate","profile_credits_status","dedupe_check","remove_credits","credit_status_lookup","document_intake","merge_request_intake","credit_trust_handoff","merge_intake","proof_on_file"]'
 
-@test "check8: documented exception (edge:support: exec + the 14 verification/merge tools) PASSES" {
+@test "check8: documented exception (edge:support: exec + the 12 verification/merge tools) PASSES" {
   write_policy_profile "{\"deny\":$SUPPORT_DENY}" 'support' 'openclaw-edge.json'
   run "$SCRIPT" "$PROFILE"
   [ "$status" -eq 0 ]
@@ -227,6 +228,13 @@ SUPPORT_DENY='["exec","credits_verify","credit_verification_check","profiles_cla
   run "$SCRIPT" "$PROFILE"
   [ "$status" -eq 1 ]
   [[ "$output" == *'STALE EXCEPTION "openclaw-edge.json:support:dedupe_check"'* ]]
+}
+
+@test "check8: support re-denying an own-row read with no exception row FAILS (the deny and its row move together)" {
+  write_policy_profile "{\"deny\":$(jq -c '. + ["credit_verification_check"]' <<<"$SUPPORT_DENY")}" 'support' 'openclaw-edge.json'
+  run "$SCRIPT" "$PROFILE"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"credit_verification_check"* ]]
 }
 
 @test "check8: documented exception (main:operations:web_search) PASSES" {

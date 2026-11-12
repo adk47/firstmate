@@ -212,8 +212,11 @@ export const ANSWER_BANK: readonly BankEntry[] = [
   {
     id: "handoff_line",
     intents: ["handoff"],
+    // The SYSTEM's line (escalation-action.ts farewell, merge-reply-guard.ts fallback). Since
+    // ai-support-quality-v1 the doctrine teaches it only as that: Caroline never writes it, and
+    // unbacked-handoff.ts removes it from a model-written reply. Text unchanged, so no version bump.
     source: "#1451 hand-off-only doctrine",
-    anchor: "skills/verification-handoff/SKILL.md",
+    anchor: "AGENTS.md",
     text: HANDOFF_LINE,
   },
   {

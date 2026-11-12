@@ -10,9 +10,12 @@ import {
   sanitizeStr,
   classifyOwnership,
   creditRequestRoles,
+  requestedOn,
   type CreditRequestItem,
   type ProfileBody,
 } from "./credit-verification-check.js";
+import { resolveOwnerAnchor } from "../owner-anchor.js";
+import { markOpenRequestFact } from "../request-state-signal.js";
 
 // profile_credits_status — READ-ONLY diagnosis of a customer's credit/profile
 // state for "my credit is missing / on the wrong profile / is there a
@@ -27,14 +30,19 @@ import {
 // profiles_consolidate) and the credit-correction/profile-merge handoffs stay
 // behind their own gates.
 //
-// Ownership is anchored to the Intercom contact's REAL email (deriveConvId →
-// getAuthorEmail, same anti-spoof as dedupe_check) but — unlike
-// credit_verification_check, which lists private pending data — an
+// Ownership is anchored to the conversation's SIGNED-IN Intercom contact
+// (deriveConvId → resolveOwnerAnchor: role=user, external_id, contact older
+// than 24 h; a lead's email is typed in the browser and anchors nothing) but —
+// unlike credit_verification_check, which lists private pending data — an
 // unverifiable anchor DEGRADES this tool instead of failing it closed:
 // claim/duplicate/credit-existence facts are exactly what public
 // muso.ai shows, so they are returned with the ownership-derived
 // fields marked owner_undetermined. Ownership-dependent self-serve routing is
 // only ever suggested when the anchor verified.
+//
+// An `email` argument only selects a profile when it IS the signed-in
+// contact's email: an address typed into the thread never decides whose
+// profile is looked up (caroline-read-state-tools-r1).
 
 const MAX_DUPLICATE_CANDIDATES = 5;
 const MAX_MATCHED_TRACKS = 3;
@@ -43,7 +51,7 @@ const MAX_UVN_CREDITS = 100;
 const Parameters = Type.Object({
   profile_id: Type.Optional(Type.String({ description: "Bare Muso profile UUID" })),
   profile_url: Type.Optional(Type.String({ description: "Full https://muso.ai/profile/<uuid> URL" })),
-  email: Type.Optional(Type.String({ description: "Customer account email — used for lookup, never echoed back" })),
+  email: Type.Optional(Type.String({ description: "Used to find the profile ONLY when it equals the signed-in contact's email; any other address is ignored. Never echoed back." })),
   name: Type.Optional(Type.String({ description: "Profile display name to resolve via search" })),
   target_profile_url: Type.Optional(
     Type.String({ description: "Profile URL the customer says the credit SHOULD be on (or wrongly is on), when different from their own" }),
@@ -64,6 +72,19 @@ export interface ProfileCreditsStatusDeps {
   rateLimiter: RateLimiter;
   sessionKey: string;
   intercomToken: string;
+  /** Injected clock (ms) for the signed-in-contact age screen and the open_request fact (tests). */
+  now?: () => number;
+}
+
+/** One private queue for the verified sole owner: how many, and the first and last day requested. */
+interface QueueDates {
+  oldest_requested_on: string | null;
+  newest_requested_on: string | null;
+}
+
+function queueDates(items: CreditRequestItem[]): QueueDates {
+  const days = items.map(requestedOn).filter((d): d is string => !!d).sort();
+  return { oldest_requested_on: days[0] ?? null, newest_requested_on: days[days.length - 1] ?? null };
 }
 
 type ProfileState =
@@ -272,7 +293,7 @@ export function createProfileCreditsStatusTool(deps: ProfileCreditsStatusDeps): 
     name: "profile_credits_status",
     label: "Profile Credits Status",
     description:
-      "Read-only diagnosis for missing-credit, wrong-profile, duplicate-profile, and did-my-credit-sync questions. Resolves the profile, scans same-name duplicate candidates, checks whether a referenced credit exists (here, on a candidate, or on a stated target profile), and — for the verified sole owner ONLY — reads the pending-verification queue and the queue of credits awaiting our team's review (private data; suppressed for anyone else; a failed read is null, never 0). " +
+      "Read-only diagnosis for missing-credit, wrong-profile, duplicate-profile, and did-my-credit-sync questions. Resolves the profile, scans same-name duplicate candidates, checks whether a referenced credit exists (here, on a candidate, or on a stated target profile), and — for the signed-in sole owner ONLY — reads the pending-verification queue and the queue of credits awaiting our team's review, with how many and the first and last day requested (private data; suppressed for anyone else; a failed read is null, never 0). Who the owner is comes from the conversation's signed-in Intercom contact and nothing else: an email, a name or an id written in the thread never selects an account. " +
       "Returns a structured diagnosis with the suggested support action (answer, ask for one missing fact, route self-serve claim/consolidate, or a ticket-ready handoff packet). " +
       "It NEVER writes — credit corrections and merges stay on their gated paths. Rate limit: 10 calls / 60 min per session.",
     parameters: Parameters,
@@ -283,12 +304,20 @@ export function createProfileCreditsStatusTool(deps: ProfileCreditsStatusDeps): 
         }
 
         // Best-effort ownership anchor — degrades to owner_undetermined
-        // instead of failing closed (public catalog facts only).
+        // instead of failing closed (public catalog facts only). The anchor is
+        // the SIGNED-IN contact, never the messenger author email alone.
         const notes: string[] = [];
+        const nowFn = deps.now ?? Date.now;
         let trustedEmail: string | null = null;
         const convId = deriveConvId(sessionKey);
         if (convId && intercomToken) {
-          trustedEmail = await intercomReader.getAuthorEmail(convId, intercomToken);
+          const anchor = await resolveOwnerAnchor({
+            sessionKey,
+            intercomReader,
+            intercomToken,
+            nowSeconds: () => Math.floor(nowFn() / 1000),
+          });
+          if (anchor.ok) trustedEmail = anchor.email;
         }
         if (!trustedEmail) notes.push("ownership could not be verified; claim ownership fields are undetermined");
 
@@ -306,7 +335,13 @@ export function createProfileCreditsStatusTool(deps: ProfileCreditsStatusDeps): 
         if (params.profile_id) profileId = params.profile_id.trim();
         else if (params.profile_url) profileId = extractProfileIdFromUrl(params.profile_url);
 
-        if (!profileId && !params.email && !params.name) {
+        // An email only selects a profile when it is the signed-in contact's
+        // own; any other address was typed by someone and is ignored.
+        const typedEmail = params.email?.trim() ? lc(params.email.trim()) : null;
+        const searchEmail = trustedEmail && typedEmail === lc(trustedEmail) ? trustedEmail : null;
+        const searchName = params.name?.trim() ? params.name.trim() : null;
+
+        if (!profileId && !searchEmail && !searchName) {
           return structuredFailure("missing_input", {
             support_action: "ask_missing_info",
             missing_fields: ["profile URL"],
@@ -318,7 +353,7 @@ export function createProfileCreditsStatusTool(deps: ProfileCreditsStatusDeps): 
           profile = await fetchProfile(profileId);
           if (!profile) return structuredFailure("lookup_unavailable");
         } else {
-          const query = params.email ?? params.name ?? "";
+          const query = searchEmail ?? searchName ?? "";
           const searchResp = await adminClient.get<{ data?: ProfileRow[] }>(
             `/api/v3/admin/profile/search?keyword=${encodeURIComponent(query)}&limit=${MAX_DUPLICATE_CANDIDATES}`,
           );
@@ -440,8 +475,8 @@ export function createProfileCreditsStatusTool(deps: ProfileCreditsStatusDeps): 
         // before exposing it), so it is read ONLY for the verified sole owner
         // of the resolved profile — unlike the public catalog facts above,
         // which degrade. A non-owner must not learn whether/what is pending.
-        let pending: { count: number; truncated: boolean; referenced_track_pending: boolean } | null = null;
-        let awaiting_review: { count: number; truncated: boolean; referenced_track_awaiting_review: boolean } | null = null;
+        let pending: ({ count: number; truncated: boolean; referenced_track_pending: boolean } & QueueDates) | null = null;
+        let awaiting_review: ({ count: number; truncated: boolean; referenced_track_awaiting_review: boolean } & QueueDates) | null = null;
         if (ownership === "owned") {
           // Fetch one more than surfaced so >MAX profiles are detectable
           // (same truncation guard as credit_verification_check).
@@ -452,10 +487,10 @@ export function createProfileCreditsStatusTool(deps: ProfileCreditsStatusDeps): 
             const items = (uvnResp.data as any)?.data?.items;
             if (Array.isArray(items)) {
               const truncated = items.length > MAX_UVN_CREDITS;
-              const surfaced = items.slice(0, MAX_UVN_CREDITS) as Array<{ spotifyTrackTitle?: string }>;
+              const surfaced = items.slice(0, MAX_UVN_CREDITS) as CreditRequestItem[];
               const referenced_track_pending =
                 credit_queried && surfaced.some((it) => lc(String(it.spotifyTrackTitle ?? "")).includes(lc(trackTitle)));
-              pending = { count: surfaced.length, truncated, referenced_track_pending };
+              pending = { count: surfaced.length, truncated, referenced_track_pending, ...queueDates(surfaced) };
               if (credit_state === "not_found" && referenced_track_pending) {
                 credit_state = "pending_verification";
               }
@@ -485,6 +520,7 @@ export function createProfileCreditsStatusTool(deps: ProfileCreditsStatusDeps): 
                     lc(String(it.spotifyTrackTitle ?? "").trim()) === lc(trackTitle) &&
                     (wantedRole === null || creditRequestRoles(it).some((r) => lc(r) === wantedRole)),
                 ),
+              ...queueDates(arSurfaced),
             };
             if (credit_state === "not_found" && awaiting_review.referenced_track_awaiting_review) {
               credit_state = "awaiting_review";
@@ -502,6 +538,13 @@ export function createProfileCreditsStatusTool(deps: ProfileCreditsStatusDeps): 
             if (credit_state === "not_found") credit_state = "not_checked";
             notes.push("awaiting-review queue unavailable; do NOT tell the customer nothing is pending");
           }
+          // The `open_request` fact for the outbound guard: written only from
+          // what was MEASURED for the signed-in sole owner. Any open request is
+          // true; false needs BOTH queues read and empty; an unread queue with
+          // nothing found elsewhere writes nothing (unknown is not "none").
+          const anyOpen = (pending?.count ?? 0) > 0 || (awaiting_review?.count ?? 0) > 0;
+          if (anyOpen) markOpenRequestFact(convId, true, nowFn());
+          else if (pending && awaiting_review) markOpenRequestFact(convId, false, nowFn());
         } else {
           notes.push("pending-verification state requires verified profile ownership; not assessed");
         }

@@ -204,10 +204,10 @@
       "resolves": "ClickUp task creation in list 901000600160"
     },
     {
-      "kind": "write",
+      "kind": "read",
       "name": "credit_verification_check",
-      "requires": "undocumented",
-      "resolves": "undocumented"
+      "requires": "the conversation's signed-in Intercom contact only (role user, external id, contact older than 24 hours).",
+      "resolves": "GET /api/v3/admin/credit-requests (LIST only) for the signed-in customer's own profile(s), plus the proof-on-file read."
     },
     {
       "kind": "read",
@@ -258,10 +258,10 @@
       "resolves": "GET /api/v3/admin/profile/search?keyword=<q>&limit=5 for resolution, GET /api/v3/admin/profile/{id} for direct UUID profile context, and GET /api/v3/admin/profile/{id}/analytics-status for the read-only analytics…"
     },
     {
-      "kind": "write",
+      "kind": "read",
       "name": "profile_claim_status",
-      "requires": "undocumented",
-      "resolves": "undocumented"
+      "requires": "same signed-in contact anchor as #18.",
+      "resolves": "GET /api/v3/admin/claiming (LIST only) for one profile."
     },
     {
       "kind": "write",

@@ -222,18 +222,23 @@ print('ok')
   [[ "$output" == *"ok"* ]]
 }
 
-@test "verification and merge tools never appear in first_tool criteria (captain 2026-10-28: Caroline hands off)" {
-  # They left TOOLS.md (and the edge allowlist); the router must never suggest them, whatever
-  # the plugin still registers until the code removal lands.
+@test "verification and merge WRITE tools never appear in first_tool criteria; only the two own-row reads do (captain 2026-10-28, narrowed 2026-11-12)" {
+  # The write, merge, dedupe and any-profile tools are not in TOOLS.md (nor the edge allowlist);
+  # the router must never suggest them, whatever the plugin still registers. The 2026-11-12
+  # narrowing (ai-support-quality-v1) lets exactly two read-only tools back in: they fail closed
+  # without a signed-in contact and return that customer's own rows only.
   run "$GEN" --out-dir "$TEST_TMPDIR/run"
   [ "$status" -eq 0 ]
 
   run python3 -c "
 import json
 q = json.load(open('$TEST_TMPDIR/run/caroline-questions.json'))
-for name in ('credit_verification_check', 'credits_verify', 'remove_credits', 'profiles_consolidate',
-             'profiles_claim_self', 'dedupe_check', 'profile_claim_status', 'profile_credits_status'):
+for name in ('credits_verify', 'remove_credits', 'profiles_consolidate',
+             'profiles_claim_self', 'dedupe_check', 'profile_credits_status'):
     assert name not in q['first_tool']['criteria'], name
+own_row_reads = ('credit_verification_check', 'profile_claim_status')
+for name in own_row_reads:
+    assert name in q['first_tool']['criteria'], name
 assert 'create_ticket' in q['first_tool']['criteria']
 print('ok')
 "

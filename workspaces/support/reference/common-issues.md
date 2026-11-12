@@ -26,14 +26,15 @@ Decision-tree reference for the 10 most frequent customer scenarios, based on re
 
 **Customer says:** "I tried to claim my profile but nothing is happening" / "My claim was rejected."
 
-**Hand off only** (`AGENTS.md`, "Credits, documents, claims and merges: hand off only"). Do not look
-up the claim and say nothing about its state.
+**Hand off only** (`AGENTS.md`, "Credits, documents, claims and merges: hand off only"). The one read
+in `verification-handoff` (`profile_claim_status`, their own claim only) is the only look-up; say
+nothing about its state beyond what that skill allows.
 1. If they asked how claiming works, the approved claim paragraph in `faq.md` ("How do I claim my
    profile?"); a closed or rejected claim: the decline paragraph in `credits-and-profiles.md`.
 2. File one `create_ticket` with `actionType: "profile-claim"`, the profile link and what they said.
    Proof they send: add `details.handoff: "document"` and use the approved thank-you paragraph in
    `verification-handoff`.
-3. End with the handoff line: "I'm pulling in a teammate to take this from here." Timing: only
+3. End on the approved paragraph; never a sentence that says a person is coming. Timing: only
    "usually within a day once the step is done"; no outcome, never a claim code or a surface.
 4. If the customer says the profile belongs to someone else they represent, use 2b.
 
@@ -50,7 +51,8 @@ This is an **on-behalf claim**, decided by the claim lane on the organization pa
    (`details.handoff: "document"` when they attached proof). Set
    `details.escalation_reason: "on_behalf_claim_manual_review"` (historical tag name; it routes to
    the organization path, not a person).
-3. Reply with the handoff line. No timeframe, no "manual review", no outcome.
+3. Reply from the approved claim paragraph. No timeframe, no "manual review", no outcome, no
+   promise of a person.
 4. Follow-ups append to the same ticket; never re-promise anything.
 
 ---
@@ -82,7 +84,8 @@ There is **no self-service merge UI** in app.muso.ai yet. Do NOT direct customer
 
 **Customer says:** "My credit isn't showing" / "The credit is wrong."
 
-**Hand off only** for anything about THEIR credit (missing, wrong, pending, stuck). Do not look it up.
+**Hand off only** for anything about THEIR credit (missing, wrong, pending, stuck). The one read in
+`verification-handoff` is the only look-up.
 1. General answers you may give from the reference library:
    - how to add a missing credit: web: own profile > Summary panel > Add Credits > search or paste
      the Spotify link > role > submit; app: track/album > Add Missing Credits > role > submit;
@@ -95,7 +98,8 @@ There is **no self-service merge UI** in app.muso.ai yet. Do NOT direct customer
    track links and what they said.
 3. If they asked how credit checks work, the approved credit paragraph in `faq.md` ("How long does
    credit verification take?"); a declined credit or "that credit isn't mine", the paragraphs in
-   `credits-and-profiles.md`. Then the handoff line. No timeframe, no status, no outcome.
+   `credits-and-profiles.md`. No timeframe, no outcome, no promise of a person; a status only as
+   the approved status paragraph after the one read.
 
 ---
 
@@ -109,7 +113,7 @@ paragraph's one generic list (`faq.md`, "How long does credit verification take?
 1. File one `create_ticket` with `actionType: "credit-verify"` and `details.handoff: "credit-status"`
    (a question) or `"document"` (they sent a document, screenshot or link).
 2. Reply: a question gets the approved credit paragraph; a document gets the approved thank-you
-   paragraph in `verification-handoff`; then the handoff line. None of the barred phrases in
+   paragraph in `verification-handoff`, and nothing about a person coming. None of the barred phrases in
    `verification-handoff`.
 3. Never tell a customer their credit was flagged, doubted or held for review of their honesty.
 

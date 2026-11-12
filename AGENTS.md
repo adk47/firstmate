@@ -743,7 +743,16 @@ every row as a credit decision. Code never links on a name alone and never relin
 ## Caroline's replies pass a code output guard
 
 Every Caroline reply passes `plugins/intercom/src/caroline-output-guard.ts` (promises, secret sauce,
-process contradictions, off-topic -> approved hand-off line + reassignment). Approved lines live ONCE in
+process contradictions, off-topic). A refusal is explained to her and she retries ONCE through the same
+guard (`guard-feedback.ts`); only a second refusal posts the `ai_queue_fallback` line, and the conversation
+stays with her. The status line needs an `open_request` fact MEASURED in the same turn by one of her two
+own-row reads (`credit_verification_check`, `profile_claim_status`: fail closed without a signed-in
+contact; `profile_credits_status` stays denied because a typed id selects any profile). Unmeasured is not
+false. A model-written promise of a person is removed at send (`unbacked-handoff.ts`); only the system's
+escalation writes that line. Resolution rate and still-waiting are read daily by
+`scripts/support-resolution-daily.py` (`docs/support/resolution-daily.md`): a bulk sender's holding copy
+must be added to its rules or it reads as resolutions (2026-11-12: 13.9% read as 24.9% with nothing
+deployed). Approved lines live ONCE in
 `answer-bank.ts` (pinned by `scripts/check-caroline-answer-bank.sh`). Inbound Intercom, support@ and proof
 text pass the detection-only injection watch (TS + Python copies pinned equal). Changing a rule = add a red-team
 case (`plugins/intercom/redteam/`); a case that gets through fails CI and the daily replay pages. See

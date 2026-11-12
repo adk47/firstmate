@@ -6,20 +6,24 @@ import type { IntercomReader } from "../intercom-client.js";
 import { extractProfileIdFromUrl } from "./profile-lookup.js";
 import { deriveConvId } from "./dedupe-check.js";
 import { checkProofOnFile, DEFAULT_PROOF_ON_FILE_PATH, type ProofOnFileResult } from "./proof-on-file.js";
+import { resolveOwnerAnchor } from "../owner-anchor.js";
+import { clearOpenRequestFact, markOpenRequestFact } from "../request-state-signal.js";
 
-// credit_verification_check — READ-ONLY lookup for a customer's credits that are
-// stuck in `user_verification_needed` (UVN). It anchors ownership to the
-// Intercom contact's REAL email (anti-spoof), confirms the requester owns the
-// profile, and returns a PII-safe structured list of that profile's pending
-// credits (claimed role / track / artist / ISRC) for the
-// `customer-credit-verification` skill to work from.
+// credit_verification_check — READ-ONLY lookup of the signed-in customer's OWN open credit
+// requests: the ones that need a document from them (`user_verification_needed`, UVN) and the
+// ones waiting for our review (`unverified`), as counts and request dates, plus whether a
+// document is already on file and the one boolean `open_request`.
+//
+// Whose requests: the conversation's SIGNED-IN Intercom contact (resolveOwnerAnchor: role=user,
+// external_id, contact older than 24 h), and only for a profile that contact solely owns. There is
+// no request-id parameter, and an email, a name or an id typed into the thread never selects whose
+// data is read (caroline-read-state-tools-r1; a lead's messenger email is browser-typed, so the
+// earlier `getAuthorEmail` anchor was not enough for a private read).
 //
 // It NEVER approves, never rejects, never writes, never reaches a credit-request
-// mutation endpoint (this tool's MusoAdminClient is structurally GET-only). The only
-// state change Caroline ever makes is filing a recommend-approve ticket via
-// create_ticket; the irreversible PUT status=approved stays behind
-// enforce_credit_approve_gate in muso-admin-api.sh, executed by a human/ops.
-// Mirrors the dedupe_check pattern (plugins/support-tools/src/tools/dedupe-check.ts).
+// mutation endpoint (this tool's MusoAdminClient is structurally GET-only). The irreversible
+// PUT status=approved stays behind enforce_credit_approve_gate in muso-admin-api.sh, executed by
+// a human/ops.
 
 const MAX_PROFILE_CANDIDATES = 5; // bound the owner-resolution search
 const MAX_UVN_CREDITS = 100;
@@ -130,6 +134,9 @@ export interface CreditRequestItem {
   spotifyTrackArtists?: Array<string | { name?: string }>;
   credits?: Array<string | { child?: string }>;
   metadata?: { isrc?: string | null };
+  // When the request was submitted (same field scripts/credit_review/evidence.py reads off these
+  // rows). Surfaced as a calendar date only; an absent or unparseable value is null, never guessed.
+  createdAt?: string | null;
   // The submitting user (full row from GET /admin/credit-requests; `user` is its include).
   // Used only to look the submitter up in proof-on-file, never surfaced.
   userId?: number | string | null;
@@ -142,6 +149,26 @@ export interface UvnCredit {
   track_title: string;
   artist: string;
   isrc: string | null;
+  // The day the request was submitted (YYYY-MM-DD, UTC), or null when the row carries no readable date.
+  requested_on: string | null;
+}
+
+/** A row's submission day as YYYY-MM-DD (UTC), or null. Never a guess, never "today". */
+export function requestedOn(item: CreditRequestItem): string | null {
+  const raw = item?.createdAt;
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  const ms = Date.parse(raw);
+  if (!Number.isFinite(ms)) return null;
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+export interface AwaitingReview {
+  count: number;
+  truncated: boolean;
+  // Oldest / newest submission day among the rows read (YYYY-MM-DD). null = no row carried a
+  // readable date; when `truncated`, these cover only the rows read.
+  oldest_requested_on: string | null;
+  newest_requested_on: string | null;
 }
 
 export interface Verdict {
@@ -164,7 +191,7 @@ export interface Verdict {
   // failed); never read null as zero. Since 2026-10-11 this queue holds
   // thousands of credits, and reading only UVN told those customers "nothing
   // is pending".
-  awaiting_review: { count: number; truncated: boolean } | null;
+  awaiting_review: AwaitingReview | null;
   // Per-status counts for the verified owner's profile; a status whose lookup
   // failed is null, not 0.
   pending_by_status: { user_verification_needed: number; unverified: number | null } | null;
@@ -172,6 +199,10 @@ export interface Verdict {
   // needs-proof credits? on_file = never ask; none = ask ONCE; asked_before = already asked
   // in another conversation, do NOT ask again; unknown = do NOT ask, route to a human. null = not assessed (no needs-proof credits, or a fail-closed verdict).
   proof_on_file: ProofOnFileResult | null;
+  // The one boolean: does the signed-in owner have an open credit request right now?
+  // true = at least one measured; false = BOTH queues measured empty; null = not measured
+  // (fail-closed verdict, or a queue could not be read). null is never "no".
+  open_request: boolean | null;
   notes: string[];
 }
 
@@ -186,6 +217,7 @@ export function failClosedVerdict(notes: string[] = []): Verdict {
     awaiting_review: null,
     pending_by_status: null,
     proof_on_file: null,
+    open_request: null,
     notes: notes.map(sanitizeStr),
   };
 }
@@ -254,6 +286,7 @@ export function toUvnCredit(item: CreditRequestItem): UvnCredit {
     track_title: sanitizeStr(extractTrackTitle(item)),
     artist: sanitizeStr(extractArtist(item)),
     isrc: isrcRaw ? sanitizeStr(isrcRaw) : null,
+    requested_on: requestedOn(item),
   };
 }
 
@@ -379,23 +412,32 @@ export function createCreditVerificationCheckTool(
   // customer has nothing to act on, so no per-item list is surfaced. null on
   // any failure or schema drift, so the caller never reports a failed lookup
   // as "nothing pending".
-  async function fetchAwaitingReview(profileId: string): Promise<{ count: number; truncated: boolean } | null> {
-    const resp = await adminClient.get<{ data?: { items?: unknown[] } }>(
+  async function fetchAwaitingReview(profileId: string): Promise<AwaitingReview | null> {
+    const resp = await adminClient.get<{ data?: { items?: CreditRequestItem[] } }>(
       `/api/v3/admin/credit-requests?profilesIds=${encodeURIComponent(profileId)}&status=unverified&limit=${MAX_UVN_CREDITS + 1}`,
     );
     if (!resp.ok) return null;
     const items = (resp.data as any)?.data?.items;
     if (!Array.isArray(items)) return null;
-    return { count: Math.min(items.length, MAX_UVN_CREDITS), truncated: items.length > MAX_UVN_CREDITS };
+    const days = (items.slice(0, MAX_UVN_CREDITS) as CreditRequestItem[])
+      .map(requestedOn)
+      .filter((d): d is string => d !== null)
+      .sort();
+    return {
+      count: Math.min(items.length, MAX_UVN_CREDITS),
+      truncated: items.length > MAX_UVN_CREDITS,
+      oldest_requested_on: days.length > 0 ? days[0] : null,
+      newest_requested_on: days.length > 0 ? days[days.length - 1] : null,
+    };
   }
 
   return {
     name: "credit_verification_check",
-    label: "Look up a customer's pending credits: needs-proof and awaiting-review (read-only)",
+    label: "The signed-in customer's own open credit requests: counts, dates, document on file (read-only)",
     description:
-      "Read-only lookup of the credits a customer has stuck in 'user verification needed'. Anchors ownership to the Intercom contact's real email (anti-spoof), confirms the requester owns the profile, and returns a PII-safe structured list of pending credits (claimed role, track, artist, ISRC) for the credit-verification flow, plus awaiting_review (credits waiting for OUR review, where the customer has nothing to do) and pending_by_status counts. Never tell a customer nothing is pending unless BOTH counts are 0. " +
-      "It NEVER approves, rejects, or writes anything — after verifying, ask for proof only when proof_on_file is 'none' (never when 'on_file', 'asked_before' or 'unknown') (see the customer-credit-verification skill) and (when warranted) file a recommend-approve ticket via create_ticket for a human to execute the gated approval. " +
-      "Fails closed (owner_undetermined) when ownership cannot be verified. Rate limit: 10 calls / 60 min per session.",
+      "Read-only lookup of the signed-in customer's OWN open credit requests. Whose requests are read is decided by the conversation's signed-in Intercom contact and by nothing else: an email, a name or a request id written in the thread never selects an account, and there is no request-id parameter. Returns the credits that need a document from them (uvn_credits: role, track, artist, requested_on), awaiting_review (credits waiting for OUR review: count, oldest_requested_on, newest_requested_on; the customer has nothing to do), pending_by_status counts, proof_on_file (is a document already on file for them) and open_request (true / false / null). Never tell a customer nothing is pending unless BOTH counts are 0, and never read null or 'unknown' as zero. " +
+      "It NEVER approves, rejects or writes anything, and it decides nothing: state the counts and dates it returns, never an outcome, a reason or a date by which something will happen. " +
+      "Fails closed (owner_undetermined, no data) when the contact is not signed in or does not solely own the profile. Rate limit: 10 calls / 60 min per session.",
     parameters: Parameters,
     async execute(_toolCallId: string, params: Params): Promise<AgentToolResult<unknown>> {
       // Dark-ship gate (cheapest first): when the feature flag is off the tool
@@ -413,10 +455,25 @@ export function createCreditVerificationCheckTool(
         // anti-spoof anchor is in hand.
         const convId = deriveConvId(sessionKey);
         if (!convId) return textResult(JSON.stringify(failClosedVerdict(["conversation id unavailable; cannot verify ownership"])));
+        // A fresh read replaces whatever an earlier read in this conversation measured: every
+        // path below that cannot measure leaves the open_request fact UNKNOWN, never stale.
+        clearOpenRequestFact(convId);
         if (!intercomToken) return textResult(JSON.stringify(failClosedVerdict(["intercom token unavailable; cannot verify ownership"])));
 
-        const trustedAuthorEmail = await intercomReader.getAuthorEmail(convId, intercomToken);
-        if (!trustedAuthorEmail) return textResult(JSON.stringify(failClosedVerdict(["could not read the verified contact email; routed for human verification"])));
+        // The signed-in contact (role=user, external_id, older than 24 h), never the messenger
+        // author email alone: a lead's email is typed in the browser.
+        const anchor = await resolveOwnerAnchor({
+          sessionKey,
+          intercomReader,
+          intercomToken,
+          nowSeconds: () => Math.floor(nowFn() / 1000),
+        });
+        if (!anchor.ok) {
+          return textResult(JSON.stringify(failClosedVerdict([
+            `could not confirm a signed-in account on this conversation (${anchor.reason}); no request state was read, routed for human verification`,
+          ])));
+        }
+        const trustedAuthorEmail = anchor.email;
 
         // Trim before comparing: stray whitespace in a relayed email must not
         // hard-stop a matching customer with a security-flavored refusal.
@@ -485,15 +542,24 @@ export function createCreditVerificationCheckTool(
             }
           }
           if (proof_on_file.state === "on_file") {
-            notes.push("proof is on file for this customer: never ask for proof again; route the needs-proof credits (skill Steps 3-4)");
+            notes.push("proof is on file for this customer: never ask for proof again; you may tell them a document is on file for their requests, never whether it is enough");
           } else if (proof_on_file.state === "asked_before") {
-            notes.push("we already asked this customer for proof in another conversation: do NOT ask again; file a needs-human credit-verify ticket and tell the customer the team is reviewing it");
+            notes.push("we already asked this customer for proof in another conversation: do NOT ask again; hand off with a credit-verify ticket");
           } else if (proof_on_file.state === "none") {
-            notes.push("no proof is on file for this customer: you may ask for proof ONCE, covering all needs-proof credits together (skill Step 2)");
+            notes.push("no proof is on file for this customer: never tell them a document was received; if they ask what to send, the approved credit paragraph is the only proof wording");
           } else {
-            notes.push(`proof-on-file could not be confirmed (${proof_on_file.reason}): do NOT ask for proof, and do NOT tell the customer nothing is needed; file a needs-human credit-verify ticket`);
+            notes.push(`proof-on-file could not be confirmed (${proof_on_file.reason}): do NOT ask for proof, and do NOT tell the customer nothing is needed; hand off with a credit-verify ticket`);
           }
         }
+        // The one boolean. true needs one measured open request; false needs BOTH queues measured
+        // empty; anything else is unknown and stays out of the cross-plugin fact.
+        const open_request: boolean | null =
+          uvn_credits.length > 0 || (awaiting_review !== null && awaiting_review.count > 0)
+            ? true
+            : awaiting_review === null
+              ? null
+              : false;
+        if (open_request !== null) markOpenRequestFact(convId, open_request, nowFn());
         const verdict: Verdict = {
           verified_owner: true,
           owner_undetermined: false,
@@ -507,6 +573,7 @@ export function createCreditVerificationCheckTool(
             unverified: awaiting_review === null ? null : awaiting_review.count,
           },
           proof_on_file,
+          open_request,
           notes,
         };
         return textResult(JSON.stringify(verdict));

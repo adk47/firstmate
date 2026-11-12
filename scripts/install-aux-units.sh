@@ -507,6 +507,10 @@ install -d -m 700 /var/lib/hydra-dr
   || fail "$HYDRA_ROOT/scripts/caroline-behavior-digest.py missing"
 [[ -x "$HYDRA_ROOT/scripts/caroline-safety-daily.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/caroline-safety-daily.sh missing or not executable"
+[[ -x "$HYDRA_ROOT/scripts/support-resolution-daily.sh" ]] \
+  || fail "$HYDRA_ROOT/scripts/support-resolution-daily.sh missing or not executable"
+[[ -f "$HYDRA_ROOT/scripts/support-resolution-daily.py" ]] \
+  || fail "$HYDRA_ROOT/scripts/support-resolution-daily.py missing"
 [[ -x "$HYDRA_ROOT/scripts/ops-intake-redteam-daily.sh" ]] \
   || fail "$HYDRA_ROOT/scripts/ops-intake-redteam-daily.sh missing or not executable"
 [[ -f "$HYDRA_ROOT/scripts/ops_intake/router.py" ]] \
@@ -2107,6 +2111,48 @@ csd=caroline-safety-daily.timer
 systemctl enable "$csd" >/dev/null 2>&1 || log "WARN: could not enable $csd"
 systemctl start "$csd" >/dev/null 2>&1 || log "WARN: could not start $csd"
 log "  $csd: $(systemctl is-active "$csd" 2>/dev/null || echo unknown)"
+
+# ─── Caroline: daily resolution rate + customers still waiting (06:30 UTC) ──────
+# ai-support-quality-v1 (captain 2026-11-12). READ-ONLY on Intercom (search + read) and on
+# the safety ledger; no model call, no customer message, no close, no tag. Posts one line to
+# #clio_devops: of the conversations where a customer wrote in the last 24h, how many Caroline
+# answered with nothing left waiting, and how many are still waiting on us. A day it could not
+# measure exits 3 and says UNMEASURED: the unit fails (-> OnFailure) rather than print a rate.
+# The Intercom token is read by the script from /etc/openclaw/{edge,shared}.env; it is never
+# in the unit. See scripts/support-resolution-daily.py and docs/support/resolution-daily.md.
+install -d -m 700 /var/lib/hydra/support-resolution
+cat > /etc/systemd/system/support-resolution-daily.service << SUPPORTRESSVC
+[Unit]
+Description=Caroline daily resolution rate + customers still waiting (#clio_devops; read-only on Intercom)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/openclaw/shared.env
+Environment=MUSO_BIN=/usr/local/bin/muso
+TimeoutStartSec=1800
+ExecStart=/bin/bash $HYDRA_ROOT/scripts/support-resolution-daily.sh
+SUPPORTRESSVC
+
+cat > /etc/systemd/system/support-resolution-daily.timer << SUPPORTRESTMR
+[Unit]
+Description=Daily at 06:30 UTC: Caroline resolution rate + customers still waiting
+
+[Timer]
+OnCalendar=*-*-* 06:30:00 UTC
+Persistent=true
+RandomizedDelaySec=120
+Unit=support-resolution-daily.service
+
+[Install]
+WantedBy=timers.target
+SUPPORTRESTMR
+
+systemctl daemon-reload
+srd=support-resolution-daily.timer
+systemctl enable "$srd" >/dev/null 2>&1 || log "WARN: could not enable $srd"
+systemctl start "$srd" >/dev/null 2>&1 || log "WARN: could not start $srd"
+log "  $srd: $(systemctl is-active "$srd" 2>/dev/null || echo unknown)"
 
 # ─── ops-intake: daily red-team replay + register digest (firstmate j2 / j-w1) ──
 # The operations Slack account's asks are routed by plugins/ops-intake to coded
@@ -4708,6 +4754,7 @@ AUX_ONFAILURE_UNITS=(
   caroline-monitor.service
   caroline-safety-daily.service
   claim-list-build.service
+  support-resolution-daily.service
   ops-intake-digest.service
   ops-intake-redteam.service
   clickup-drain-data-deletion.service

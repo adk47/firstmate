@@ -28,6 +28,7 @@ import { createHash } from "node:crypto";
 import { appendSafetyLedger, emailSha256 } from "./safety-ledger.js";
 import { classifierBlocksOutbound, classifyText, OUTBOUND_BLOCK_SCORE, type ClassifierResult } from "./safety-classifier.js";
 import { BLOCKED_REPLY_FALLBACK } from "./answer-bank.js";
+import { renderGuardFeedback } from "./guard-feedback.js";
 
 export const OUTPUT_GUARD_TAG = "ai:output-guard";
 
@@ -254,6 +255,14 @@ export interface OutboundGuardParams {
   facts?: { openRequest?: boolean };
   /** Per-deploy canary token (see GuardInput.canary). Resolved by the caller, never read from env here. */
   canary?: string;
+  /**
+   * The caller can run ONE corrective turn (guard-feedback.ts). When set and the refusal is
+   * retryable, a block returns `feedback` and does NOT tag or page: nothing reached the customer
+   * yet. The caller must then call again with `attempt: 2`; that call is final.
+   */
+  retryAvailable?: boolean;
+  /** 2 = this reply is the corrected retry. Recorded on every ledger row it writes. */
+  attempt?: 1 | 2;
   tag: string;
   log?: SafetyLog;
   deps?: SafetyDeps;
@@ -271,10 +280,16 @@ export interface OutboundGuardOutcome {
    * never moves a conversation to a person (assignment-policy.ts).
    */
   assignment?: "ai_queue" | "not_enforced";
+  /**
+   * Set only when the block is retryable and the caller said it can retry: the reasons, written
+   * for Caroline, to append to one corrective turn. Never customer text.
+   */
+  feedback?: string;
 }
 
 export async function guardOutbound(p: OutboundGuardParams): Promise<OutboundGuardOutcome> {
   const d = deps(p.deps, p.account, p.tag, p.conversationId, p.log);
+  const attempt: 1 | 2 = p.attempt === 2 ? 2 : 1;
   const result = guardCarolineReply({
     reply: p.reply,
     customerText: p.customerText,
@@ -339,15 +354,48 @@ export async function guardOutbound(p: OutboundGuardParams): Promise<OutboundGua
       });
       if (noteErr) p.log?.error?.(`[intercom:ALERT] [${p.tag}] output-guard ledger append failed conv=${p.conversationId}: ${noteErr}`);
     }
+    if (attempt === 2) {
+      // The corrected retry passed: the customer gets a real answer where the first attempt would
+      // have become the fallback line. One row, so "refused, then fixed" is countable.
+      const okErr = await d.appendLedger({
+        ts: new Date(d.now()).toISOString(),
+        kind: "output_guard_retry",
+        source: "intercom",
+        ref: p.conversationId,
+        outcome: "passed",
+        guard_version: result.guardVersion,
+        bank_version: result.bankVersion,
+      });
+      if (okErr) p.log?.error?.(`[intercom:ALERT] [${p.tag}] output-guard ledger append failed conv=${p.conversationId}: ${okErr}`);
+    }
     return { body: result.body, blocked: false, result, classifier };
   }
 
   const enforced = OUTPUT_GUARD_MODE === "enforce";
   const rules = result.flags.map((f) => `${f.family}/${f.rule}`);
+  // A refusal the caller can still correct: explain it and send nothing. No tag, no page, because
+  // nothing reached the customer; the ledger row says the retry is pending so a reader never
+  // counts it as a fallback the customer saw.
+  const feedback = enforced && p.retryAvailable && attempt === 1 ? renderGuardFeedback(result.flags) : null;
   p.log?.error?.(
-    `[intercom:output-guard] [${p.tag}] conv=${p.conversationId} ${enforced ? "BLOCKED" : "SHADOW-BLOCK"} rules=${rules.join(",")} ` +
+    `[intercom:output-guard] [${p.tag}] conv=${p.conversationId} ${enforced ? (feedback ? "REFUSED-RETRYING" : "BLOCKED") : "SHADOW-BLOCK"} attempt=${attempt} rules=${rules.join(",")} ` +
       `excerpts=${JSON.stringify(result.flags.map((f) => f.excerpt))} guard=${result.guardVersion} bank=${result.bankVersion}`,
   );
+  if (feedback) {
+    const retryErr = await d.appendLedger({
+      ts: new Date(d.now()).toISOString(),
+      kind: "output_guard_retry",
+      source: "intercom",
+      ref: p.conversationId,
+      outcome: "pending",
+      flags: result.flags,
+      classifier,
+      guard_version: result.guardVersion,
+      bank_version: result.bankVersion,
+    });
+    if (retryErr) p.log?.error?.(`[intercom:ALERT] [${p.tag}] output-guard ledger append failed conv=${p.conversationId}: ${retryErr}`);
+    return { body: result.body, blocked: true, result, classifier, assignment: "ai_queue", feedback };
+  }
   p.client.addTag(p.conversationId, OUTPUT_GUARD_TAG, p.account.botAdminId).catch((e) =>
     p.log?.warn?.(`[intercom:output-guard] [${p.tag}] tag ${OUTPUT_GUARD_TAG} failed conv=${p.conversationId}: ${e}`),
   );
@@ -366,6 +414,7 @@ export async function guardOutbound(p: OutboundGuardParams): Promise<OutboundGua
     mode: result.mode,
     enforced,
     assignment,
+    attempt,
     flags: result.flags,
     classifier,
     guard_version: result.guardVersion,
@@ -376,7 +425,7 @@ export async function guardOutbound(p: OutboundGuardParams): Promise<OutboundGua
 
   await d
     .page(
-      `:no_entry: Caroline's reply was blocked by the output guard (conv ${p.conversationId}; ${rules.join(", ")}). ` +
+      `:no_entry: Caroline's reply was blocked by the output guard${attempt === 2 ? " twice (the corrected retry was refused too)" : ""} (conv ${p.conversationId}; ${rules.join(", ")}). ` +
         `The customer got the AI-queue fallback line (no person promised). The conversation STAYS with Caroline: ` +
         `no human was assigned and none is needed. This line is for the fix loop, not a task.`,
     )

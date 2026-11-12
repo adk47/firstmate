@@ -152,6 +152,15 @@ type PriorAsk = "found" | "not_found" | "unknown";
 function reader(prior: PriorAsk = "not_found") {
   return {
     getAuthorEmail: vi.fn(async () => "owner@example.com"),
+    // The tool reads whose requests these are from the signed-in contact (owner-anchor.ts):
+    // role=user, an external id, and a contact created more than 24 h before `now`.
+    getContactIdentity: vi.fn(async () => ({
+      email: "owner@example.com",
+      role: "user",
+      externalId: "ext-1",
+      contactCreatedAt: 1_700_000_000,
+      conversationCreatedAt: 1_700_000_000,
+    })),
     findBotMarkerInOtherConversations: vi.fn(async (_p: Record<string, unknown>) => prior),
   };
 }
@@ -178,10 +187,14 @@ const run = async (t: ReturnType<typeof createCreditVerificationCheckTool>) =>
 const item = (id: string, userId: number) => ({ id, userId, spotifyTrackTitle: "Champagne", spotifyTrackArtists: [{ name: "Remi Wolf" }], credits: ["Co-Writer"] });
 
 describe("credit_verification_check: proof_on_file drives the Step 2 ask", () => {
-  it("none: a returning customer with NO proof on file may be asked once (the 2026-10-17 'nothing needed' case)", async () => {
+  it("none: a returning customer with NO proof on file is never told a document arrived or that nothing is needed (the 2026-10-17 case)", async () => {
     const out = await run(tool([item("req-z", 34135)], fileWith(doc())));
     expect(out.proof_on_file.state).toBe("none");
-    expect(out.notes.join(" ")).toMatch(/ask for proof ONCE/);
+    // The ask itself is not hers to send (one reviewed ask path, need_asks.py): the note only
+    // stops the two false statements, and points at the approved paragraph for "what do I send".
+    expect(out.notes.join(" ")).toMatch(/no proof is on file for this customer: never tell them a document was received/);
+    expect(out.notes.join(" ")).toMatch(/approved credit paragraph is the only proof wording/);
+    expect(out.notes.join(" ")).not.toMatch(/nothing (else )?is needed|ask for proof/i);
   });
   it("on_file: never ask", async () => {
     const out = await run(tool([item("req-z", 111)], fileWith(doc())));
@@ -227,7 +240,7 @@ describe("credit_verification_check: none = ask ONCE across conversations", () =
   it("asked_before: an earlier ask in another conversation blocks a second one", async () => {
     const out = await run(tool([item("req-z", 34135)], fileWith(doc()), { reader: reader("found") }));
     expect(out.proof_on_file.state).toBe("asked_before");
-    expect(out.notes.join(" ")).toMatch(/do NOT ask again; file a needs-human credit-verify ticket/);
+    expect(out.notes.join(" ")).toMatch(/do NOT ask again; hand off with a credit-verify ticket/);
   });
   it("unknown when the earlier-ask lookup fails or is truncated", async () => {
     const out = await run(tool([item("req-z", 34135)], fileWith(doc()), { reader: reader("unknown") }));

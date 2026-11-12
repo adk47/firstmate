@@ -3,11 +3,13 @@
     "criteria": {
       "billing_status": "muso subscription billing-summary --email <verified-email> --env prod --json (read-only; muso-cli >=0.10.0 -> GET /admin/team/:id/billing-summary).",
       "create_ticket": "ClickUp task creation in list 901000600160",
+      "credit_verification_check": "GET /api/v3/admin/credit-requests (LIST only) for the signed-in customer's own profile(s), plus the proof-on-file read.",
       "credits_search": "GET /api/v3/admin/profile/{profileId}/credits?limit=<L>&offset=<O>",
       "founding_status": "muso founding status --email <verified-email> --env prod --json (GET /admin/team; the founder envelope lives on the list items).",
       "none": "No tool call is the right first step for this message.",
       "order_lookup": "GET /api/v3/admin/orders/{ref} via MusoAdminClient (GET-only, allowlisted).",
       "profile_analytics_status": "GET /api/v3/admin/profile/search?keyword=<q>&limit=5 for resolution, GET /api/v3/admin/profile/{id} for direct UUID profile context, and GET /api/v3/admin/profile/{id}/analytics-status for the read-only analytics…",
+      "profile_claim_status": "GET /api/v3/admin/claiming (LIST only) for one profile.",
       "profile_lookup": "GET /api/v3/admin/profile/search?keyword=<q>",
       "profile_status": "admin profile/search (resolution), profile/{id}, profile/{id}/credits?limit=20.",
       "retention_offer_check": "muso subscription retention-offer --email <verified-email> --env prod --json (read-only).",

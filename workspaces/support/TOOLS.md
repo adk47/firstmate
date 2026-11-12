@@ -1,15 +1,17 @@
 # TOOLS.md -- support
 
-## Allowed Tools (EXACTLY 17)
+## Allowed Tools (EXACTLY 19)
 
-This agent has the most restricted tool set in HYDRA. Only these 17 tools are permitted, split into four groups:
+This agent has the most restricted tool set in HYDRA. Only these 19 tools are permitted, split into five groups:
 
 - **Action tools (1-8, 11-12, 14, 17)** -- write or read customer-facing state. Implemented as plugin-registered tools via the `support-tools` OpenClaw plugin. The agent calls them by name; the plugin handles all HTTP, auth, and response filtering internally. The agent never sees API keys or raw HTTP responses.
 - **Reference tools (9-10)** -- read-only semantic + BM25 retrieval against `workspaces/support/reference/*.md`, provided by openclaw's bundled memory-core via the per-agent `memorySearch` config (indexing the read-only `reference/` subdirectory only). No writes; no customer-data persistence; no auto-recall.
 - **Gated self-serve write tools (15-16)** -- `retention_offer_apply`, `cancel_subscription`. Each shells a `muso` verb anchored to the verified Intercom identity; muso-cli's capability gate is the ownership/caps/audit boundary.
 - **Routing tool (13)** -- `support_action_router`, a read-only in-plugin registry that maps support intent + state to the router-suggested next step.
 
-**Not Caroline's (captain 2026-10-28 12:1xZ / 12:3xZ):** credit status, credit verification, credit removal, documents, claims and merges. `remove_credits`, `dedupe_check`, `credit_verification_check`, `profile_credits_status`, `profile_claim_status`, `profiles_claim_self`, `credits_verify` and `profiles_consolidate` are denied on edge and leave the code; those questions go through `create_ticket` per the `verification-handoff` skill.
+- **Own-request reads (18-19)** -- `credit_verification_check`, `profile_claim_status`. Read-only, fail closed without a signed-in contact, return that customer's own rows only, and are used only as the `verification-handoff` skill's "one read" (2026-11-12).
+
+**Not Caroline's (captain 2026-10-28 12:1xZ / 12:3xZ):** credit verification, credit removal, documents, claims and merges. `remove_credits`, `dedupe_check`, `profile_credits_status`, `profiles_claim_self`, `credits_verify` and `profiles_consolidate` are denied on edge (`profile_credits_status` because it looks up any profile typed in the conversation and scans for duplicates); those questions go through `create_ticket` per the `verification-handoff` skill.
 
 ## Authentication (CRITICAL -- shared across the admin read tools)
 
@@ -187,6 +189,24 @@ For customer write actions (credit claims, refunds, profile updates, disputes, *
 - **When to use**: via the `refund-retention` skill, BEFORE any refund decision, charge/duplicate-charge complaint, or "was I charged after cancelling" question. Pass `customer_request` (`refund | cancel | charge_issue | billing_question`, default `billing_question`) to steer the recommended `support_action`: a duplicate/unexpected-charge or charged-after-cancel complaint passes `charge_issue`, which ALWAYS returns a `create_handoff_ticket` packet (never a self-serve answer). Every refund request ends in a handoff packet (`support_action: create_handoff_ticket`) -- refund EXECUTION stays the human Operations path; cancel intent routes back through the retention flow (`run_retention_flow`).
 - **Safety model**: read-only only -- no refund/cancel capability exists in this tool, structurally (the CLI verb is a GET and the argv carries no write flags). `no_subscription` + a claimed charge still hands off: a charge could exist under another email/workspace, so never assert the customer was not charged.
 - **Privacy**: the packet is whitelist-copied field by field, so processor identifiers (charge/invoice/customer/subscription ids) never enter the conversation. Say "your payment" to the customer; never name the payment processor or quote raw processor statuses.
+
+### 18. credit_verification_check
+
+- **Wraps**: `GET /api/v3/admin/credit-requests` (LIST only) for the signed-in customer's own profile(s), plus the proof-on-file read.
+- **Returns**: counts and dates of the customer's own open credit requests, whether a document is on file, `open_request` (`true` / `false` / `null` = not measured), and a `note` saying what may be stated.
+- **Identity (anti-spoof, FAIL-CLOSED)**: the conversation's signed-in Intercom contact only (role user, external id, contact older than 24 hours). A profile link from the conversation is used only when that contact owns the profile; anything else fails closed with no data.
+- **Auth**: Muso admin JWT bearer via MusoAdminClient (GET-only, path-allowlisted).
+- **When to use**: the `verification-handoff` skill's one read, for a credit request or a document. It writes nothing and decides nothing.
+- **Safety model**: read-only. `null` is never "no request". The approved status paragraph may be sent only after this returns `open_request: true` in the same turn; the output guard enforces that in code.
+
+### 19. profile_claim_status
+
+- **Wraps**: `GET /api/v3/admin/claiming` (LIST only) for one profile.
+- **Returns**: the signed-in customer's OWN claim rows on that profile (state and the day submitted) and a `note`. Other accounts' claims are dropped: not counted, not described.
+- **Identity (anti-spoof, FAIL-CLOSED)**: same signed-in contact anchor as #18. A profile link or name from the conversation chooses which profile is looked at, never whose claim rows come back. There is no claim-id parameter.
+- **Auth**: Muso admin JWT bearer via MusoAdminClient (GET-only, path-allowlisted).
+- **When to use**: the `verification-handoff` skill's one read, for a profile claim.
+- **Safety model**: read-only; never a claim write, never a statement about anyone else's claim.
 
 ### Order fulfillment (Prodigi plaques/posters)
 

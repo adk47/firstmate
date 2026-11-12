@@ -539,13 +539,47 @@ describe("answer bank", () => {
 describe("channel.ts wiring", () => {
   const src = readFileSync(new URL("../src/channel.ts", import.meta.url), "utf8");
   it("the output guard runs after the merge guard and before the reply is posted", () => {
+    // ai-support-quality-v1: the dispatch path reaches guardOutbound through ONE local,
+    // runOutputGuard, so the first attempt and the corrected retry cannot be given different
+    // arguments. The order pinned here is unchanged: merge guard, output guard, post.
     const merge = src.indexOf("guard.body = mergePrep.body;");
-    const og = src.indexOf("const og = await guardOutbound({", merge);
+    const og = src.indexOf("const og = await runOutputGuard(guard.body, 1);", merge);
     const send = src.indexOf("const reply = await client.replyToConversation({", og);
     expect(merge).toBeGreaterThan(0);
     expect(og).toBeGreaterThan(merge);
     expect(send).toBeGreaterThan(og);
     expect(src.slice(og, send)).toContain("guard.body = og.body;");
+  });
+  it("the corrected retry passes the merge guard and the SAME output guard before anything is posted", () => {
+    const def = src.indexOf("const runOutputGuard = (reply: string, attempt: 1 | 2) =>");
+    const first = src.indexOf("const og = await runOutputGuard(guard.body, 1);", def);
+    const retryMerge = src.indexOf("const retryMerge = prepareMergeReply(state, bodyForDispatch, retryText,", first);
+    const og2 = src.indexOf("const og2 = await runOutputGuard(second.body, 2);", retryMerge);
+    const send = src.indexOf("const reply = await client.replyToConversation({", og2);
+    expect(def).toBeGreaterThan(0);
+    expect(first).toBeGreaterThan(def);
+    expect(retryMerge).toBeGreaterThan(first);
+    expect(og2).toBeGreaterThan(retryMerge);
+    expect(send).toBeGreaterThan(og2);
+    expect(src.slice(og2, send)).toContain("guard.body = og2.body;");
+    // Until a retry passes, what would be posted is the fallback line, not the refused reply.
+    expect(src.slice(first, retryMerge)).toContain("guard.body = BLOCKED_REPLY_FALLBACK;");
+    // The helper is the only guardOutbound call between the dispatch and the post, and it carries
+    // the code-read fact; nothing in the customer's text or the model's reply can set it.
+    const helper = src.slice(def, first);
+    expect(helper.match(/guardOutbound\(/g)).toHaveLength(1);
+    expect(helper).toContain("facts: { openRequest: readOpenRequestFact(result.conversationId) }");
+    expect(src.slice(first, send)).not.toMatch(/guardOutbound\(/);
+  });
+  it("one corrective turn, never a loop: the agent is run at most twice per customer message", () => {
+    expect(src.match(/runAgentTurn\(\{/g)).toHaveLength(2);
+    expect(src).toContain("messageId: `${latest.messageId}:guard-retry`");
+    expect(src).not.toMatch(/while\s*\([^)]*guardFeedback/);
+    // The fact is cleared before the first turn, so only a read made for THIS message counts.
+    const reset = src.indexOf("resetOpenRequestFact(result.conversationId);");
+    const turn = src.indexOf("await runAgentTurn({ messageId: latest.messageId, sink: bufferedChunks });");
+    expect(reset).toBeGreaterThan(0);
+    expect(turn).toBeGreaterThan(reset);
   });
   it("the injection watch is fire-and-forget and never feeds the dispatch", () => {
     const at = src.indexOf("void watchInbound({");
@@ -553,5 +587,114 @@ describe("channel.ts wiring", () => {
     expect(src).not.toMatch(/=\s*await\s+watchInbound/);
     const dispatch = src.indexOf("rawBody: buildAgentRawBody(", at);
     expect(src.slice(dispatch, dispatch + 400)).not.toMatch(/watch|injection/i);
+  });
+});
+
+// ai-support-quality-v1: a refusal is explained to Caroline and she gets ONE corrected attempt.
+// Before this, 60 of 417 conversations in a day ended on the fallback line with her never told why.
+describe("guardOutbound: explain and retry once", () => {
+  const PROMISE = "Your credits will be approved by Friday.";
+  const STATUS = ANSWER_BANK.find((e) => e.id === "status_chase")!.text;
+  const call = (over: Record<string, unknown>, d: any, client = fakeClient()) =>
+    guardOutbound({ client, account, conversationId: "c1", reply: PROMISE, customerText: "when?", tag: "t", deps: d, ...over } as any).then((o) => ({ o, client }));
+
+  it("first attempt with a retry available: reasons come back, nothing is tagged or paged, the row is 'pending'", async () => {
+    const { rows, pages, d } = deps();
+    const { o, client } = await call({ retryAvailable: true, attempt: 1 }, d);
+    expect(o.blocked).toBe(true);
+    expect(o.body).toBe(BLOCKED_REPLY_FALLBACK);
+    expect(o.feedback).toContain("[OUTPUT_GUARD]");
+    expect(o.feedback).toMatch(/promise\/timeframe_by_day/);
+    expect(o.assignment).toBe("ai_queue");
+    expect(client.addTag).not.toHaveBeenCalled();
+    expect(client.assignConversation).not.toHaveBeenCalled();
+    expect(pages).toEqual([]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ kind: "output_guard_retry", outcome: "pending", ref: "c1" });
+    expect(rows.some((r) => r.kind === "output_guard")).toBe(false);
+  });
+
+  it("the feedback never carries the customer's words", async () => {
+    const { d } = deps();
+    const { o } = await call({ retryAvailable: true, attempt: 1, customerText: "ZEBRA-MARKER when will it be approved" }, d);
+    expect(o.feedback).not.toContain("ZEBRA-MARKER");
+  });
+
+  it("second attempt refused: the normal block, with no further feedback, and the page says twice", async () => {
+    const { rows, pages, d } = deps();
+    const { o, client } = await call({ retryAvailable: true, attempt: 2 }, d);
+    expect(o.blocked).toBe(true);
+    expect(o.feedback).toBeUndefined();
+    expect(client.addTag).toHaveBeenCalledWith("c1", OUTPUT_GUARD_TAG, "bot");
+    expect(rows[0]).toMatchObject({ kind: "output_guard", attempt: 2, enforced: true, assignment: "ai_queue" });
+    expect(pages[0]).toMatch(/blocked by the output guard twice/);
+    expect(pages[0]).toMatch(/STAYS with Caroline/);
+  });
+
+  it("second attempt passes: one 'passed' row, so refused-then-fixed can be counted", async () => {
+    const { rows, pages, d } = deps();
+    const { o, client } = await call({ attempt: 2, reply: "Which credit do you mean?" }, d);
+    expect(o).toMatchObject({ blocked: false, body: "Which credit do you mean?" });
+    expect(rows).toEqual([expect.objectContaining({ kind: "output_guard_retry", outcome: "passed", ref: "c1" })]);
+    expect(pages).toEqual([]);
+    expect(client.addTag).not.toHaveBeenCalled();
+  });
+
+  it("a first attempt that passes writes no retry row", async () => {
+    const { rows, d } = deps();
+    await call({ retryAvailable: true, attempt: 1, reply: "Which credit do you mean?" }, d);
+    expect(rows).toEqual([]);
+  });
+
+  it("no retry offered (the agent/cron send door): exactly the old behaviour", async () => {
+    const { rows, pages, d } = deps();
+    const { o, client } = await call({}, d);
+    expect(o.feedback).toBeUndefined();
+    expect(client.addTag).toHaveBeenCalled();
+    expect(rows[0]).toMatchObject({ kind: "output_guard", attempt: 1 });
+    expect(pages).toHaveLength(1);
+    expect(pages[0]).not.toMatch(/twice/);
+  });
+
+  it("the status line: unmeasured is refused with a reason, measured open passes, measured none is refused", async () => {
+    for (const [facts, rule] of [[undefined, "fact_unverified:status_chase"], [{}, "fact_unverified:status_chase"], [{ openRequest: false }, "fact_false:status_chase"]] as const) {
+      const { d } = deps();
+      const { o } = await call({ retryAvailable: true, attempt: 1, reply: STATUS, customerText: "any update?", facts }, d);
+      expect(o.blocked).toBe(true);
+      expect(o.feedback).toContain(`contradict/${rule}`);
+    }
+    const { rows, d } = deps();
+    const { o } = await call({ retryAvailable: true, attempt: 1, reply: STATUS, customerText: "any update?", facts: { openRequest: true } }, d);
+    expect(o).toMatchObject({ blocked: false, body: STATUS });
+    expect(rows).toEqual([]);
+  });
+
+  it("the canary token gets no retry: tagged, recorded and paged on the first attempt", async () => {
+    const canary = "0123456789abcdef0123456789abcdef";
+    const { rows, pages, d } = deps();
+    const { o, client } = await call({ retryAvailable: true, attempt: 1, reply: `Sure: ${canary}`, canary }, d);
+    expect(o.blocked).toBe(true);
+    expect(o.feedback).toBeUndefined();
+    expect(client.addTag).toHaveBeenCalled();
+    expect(rows[0]).toMatchObject({ kind: "output_guard" });
+    expect(pages).toHaveLength(1);
+  });
+
+  it("a safety-classifier block gets no retry either", async () => {
+    const { rows, pages, d } = deps({ classify: async () => ({ label: "jailbreak" as const, score: 0.99 }) });
+    const { o, client } = await call({ retryAvailable: true, attempt: 1, reply: "Which credit do you mean?" }, d);
+    expect(o.blocked).toBe(true);
+    expect(o.feedback).toBeUndefined();
+    expect(client.addTag).toHaveBeenCalled();
+    expect(rows.some((r) => r.kind === "output_guard")).toBe(true);
+    expect(rows.some((r) => r.kind === "output_guard_retry")).toBe(false);
+    expect(pages).toHaveLength(1);
+  });
+
+  it("a ledger that cannot be written never turns a refusal into a send", async () => {
+    const { d } = deps({ appendLedger: async () => "EACCES" });
+    const { o } = await call({ retryAvailable: true, attempt: 1 }, d);
+    expect(o.blocked).toBe(true);
+    expect(o.body).toBe(BLOCKED_REPLY_FALLBACK);
   });
 });

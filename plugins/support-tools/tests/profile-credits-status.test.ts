@@ -4,6 +4,20 @@ import { RateLimiter } from "../src/rate-limiter.js";
 import type { MusoAdminClient, AdminClientResult } from "../src/muso-admin-client.js";
 import type { IntercomReader } from "../src/intercom-client.js";
 
+// The read tools anchor on the conversation's SIGNED-IN Intercom contact (resolveOwnerAnchor:
+// role=user, external_id, contact older than 24 h), so the mock reader answers getContactIdentity.
+// getAuthorEmail stays on the mock to prove the tools no longer consult it.
+function signedInReader(email: string | null = "owner@example.com", over: Record<string, unknown> = {}) {
+  return {
+    getAuthorEmail: vi.fn(async () => email),
+    getContactIdentity: vi.fn(async () =>
+      email
+        ? { email, role: "user", externalId: "ext-1", contactCreatedAt: 1_700_000_000, conversationCreatedAt: 1_793_000_000, ...over }
+        : null,
+    ),
+  } as any;
+}
+
 const OWNER_EMAIL = "owner@example.com";
 const SESSION_KEY = "agent:support:intercom:direct:12345";
 const PROFILE_ID = "90b6866c-7026-458e-a1af-48b1c1ac1c37";
@@ -66,7 +80,7 @@ function makeAdminClient(world: MockWorld): MusoAdminClient {
 }
 
 function makeIntercomReader(email: string | null = OWNER_EMAIL): IntercomReader {
-  return { getAuthorEmail: vi.fn(async () => email) };
+  return signedInReader(email);
 }
 
 function makeDeps(world: MockWorld, overrides: Record<string, unknown> = {}) {
@@ -317,10 +331,19 @@ describe("profile_credits_status — resolution and failure paths", () => {
   });
 
   it("no search match → no_match structured failure", async () => {
-    const world: MockWorld = { profiles: {}, searches: { "nobody@example.com": [] } };
+    const world: MockWorld = { profiles: {}, searches: { [OWNER_EMAIL]: [] } };
     const tool = createProfileCreditsStatusTool(makeDeps(world));
-    const out = await call(tool, { email: "nobody@example.com" });
+    const out = await call(tool, { email: OWNER_EMAIL });
     expect(out).toMatchObject({ found: false, reason: "no_match" });
+  });
+
+  it("an email that is not the signed-in contact's never selects a profile (no search is made for it)", async () => {
+    const stranger = ownedProfile({ workspaces: [{ email: "stranger@example.com", isClaimed: true }] });
+    const world: MockWorld = { profiles: { [PROFILE_ID]: stranger }, searches: { "stranger@example.com": [stranger] } };
+    const deps = makeDeps(world);
+    const out = await call(createProfileCreditsStatusTool(deps), { email: "stranger@example.com" });
+    expect(out).toMatchObject({ found: false, reason: "missing_input", support_action: "ask_missing_info" });
+    expect((deps.adminClient.get as any).mock.calls.length).toBe(0);
   });
 
   it("no identifying input at all → missing_input with ask_missing_info", async () => {
@@ -463,7 +486,7 @@ describe("profile_credits_status — ownership anchor", () => {
     const out = await call(tool, { profile_id: PROFILE_ID });
 
     expect(out.owner_undetermined).toBe(true);
-    expect(reader.getAuthorEmail).not.toHaveBeenCalled();
+    expect(reader.getContactIdentity).not.toHaveBeenCalled();
   });
 
   it("typed email mismatching the verified contact → impersonation_flag + human_review", async () => {
@@ -587,7 +610,7 @@ describe("profile_credits_status — credits awaiting our review (status unverif
     expect(out.ask_classification).toBe("credit_awaiting_review");
     expect(out.support_action).toBe("answer_from_status");
     expect(out.handoff_packet).toBeUndefined();
-    expect(out.credit.awaiting_review).toEqual({ count: 1, truncated: false, referenced_track_awaiting_review: true });
+    expect(out.credit.awaiting_review).toEqual({ count: 1, truncated: false, referenced_track_awaiting_review: true, oldest_requested_on: null, newest_requested_on: null });
     expect(out.diagnosis).toMatch(/waiting for our team to review/i);
     expect(out.diagnosis).toMatch(/not missing/i);
     expect(out.diagnosis).toMatch(/1 credit\(s\) on this profile are awaiting our team's review/);
@@ -604,7 +627,7 @@ describe("profile_credits_status — credits awaiting our review (status unverif
     expect(out.credit.state).toBe("not_found");
     expect(out.ask_classification).toBe("credit_add");
     expect(out.support_action).toBe("create_handoff_ticket");
-    expect(out.credit.awaiting_review).toEqual({ count: 1, truncated: false, referenced_track_awaiting_review: false });
+    expect(out.credit.awaiting_review).toEqual({ count: 1, truncated: false, referenced_track_awaiting_review: false, oldest_requested_on: null, newest_requested_on: null });
     expect(out.handoff_packet.evidence.awaiting_review_count).toBe(1);
   });
 
@@ -634,7 +657,7 @@ describe("profile_credits_status — credits awaiting our review (status unverif
     const out = await call(createProfileCreditsStatusTool(makeDeps(world)), { profile_id: PROFILE_ID, track_title: "Ghost Song", credit_role: "Producer" });
     expect(out.credit.state).toBe("not_found");
     expect(out.ask_classification).toBe("credit_add");
-    expect(out.credit.awaiting_review).toEqual({ count: 1, truncated: false, referenced_track_awaiting_review: false });
+    expect(out.credit.awaiting_review).toEqual({ count: 1, truncated: false, referenced_track_awaiting_review: false, oldest_requested_on: null, newest_requested_on: null });
   });
 
   it("referenced credit not among the first 100 of a larger queue: unassessed, never a credit-add handoff", async () => {
@@ -711,7 +734,7 @@ describe("profile_credits_status — credits awaiting our review (status unverif
     };
     const out = await call(createProfileCreditsStatusTool(makeDeps(world)), { profile_id: PROFILE_ID });
     expect(out.credit.pending).toBeNull();
-    expect(out.credit.awaiting_review).toEqual({ count: 49, truncated: false, referenced_track_awaiting_review: false });
+    expect(out.credit.awaiting_review).toEqual({ count: 49, truncated: false, referenced_track_awaiting_review: false, oldest_requested_on: null, newest_requested_on: null });
     expect(out.diagnosis).toMatch(/49 credit\(s\) on this profile are awaiting our team's review/);
     expect(out.notes.join(" ")).toContain("pending-verification queue unavailable");
   });

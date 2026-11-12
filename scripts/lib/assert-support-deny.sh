@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # assert-support-deny.sh <openclaw-edge.json>: the edge `support` agent (Caroline) must deny exec + the
-# 14 verification/merge tools (captain 2026-10-28 12:1xZ / 12:3xZ). Every deploy that targets edge
+# 12 verification/merge tools: every write and intake tool, and the profile_credits_status
+# diagnosis (captain 2026-10-28 12:1xZ / 12:3xZ). Every deploy that targets edge
 # syncs this file over /root/.openclaw-edge/openclaw.json, so a missing entry re-opens that tool to a
 # customer-facing agent. Called by deploy.sh Step 1 for EVERY deploy that targets edge (including
 # `--target edge`), by validate-shared-config.sh, and mirrored by
@@ -10,10 +11,18 @@ set -euo pipefail
 cfg="${1:?usage: assert-support-deny.sh <openclaw-edge.json>}"
 python3 - "$cfg" <<'PY'
 import json, sys
-NEED = ["exec", "credits_verify", "credit_verification_check", "profiles_claim_self", "profiles_consolidate",
-        "profile_claim_status", "profile_credits_status", "dedupe_check", "remove_credits",
+NEED = ["exec", "credits_verify", "profiles_claim_self", "profiles_consolidate",
+        "profile_credits_status", "dedupe_check", "remove_credits",
         "credit_status_lookup", "document_intake", "merge_request_intake", "credit_trust_handoff",
         "merge_intake", "proof_on_file"]
+# Not in NEED since ai-support-quality-v1 (2026-11-12): the two READS that fail closed on the
+# conversation's signed-in contact and return that customer's OWN rows only
+# (credit_verification_check, profile_claim_status). They write nothing and are the source of the
+# open_request fact the output guard needs before the approved status line may be sent.
+# profile_credits_status STAYS denied: it does not fail closed, it resolves any profile typed in
+# the thread and it scans same-name duplicate candidates, which is the dedupe work the captain
+# kept away from her on 2026-10-28. Every write, merge, dedupe, removal and proof-filing tool
+# stays denied.
 try:
     cfg = json.load(open(sys.argv[1], encoding="utf-8"))
 except (OSError, ValueError) as exc:

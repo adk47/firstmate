@@ -154,12 +154,77 @@ PY
   [[ "$output" == *"Q12 merge kinds tag merge"* ]]
 }
 
-@test "CAN FAIL: a hand-off line that is not the approved one is caught" {
+# ai-support-quality-v1 (2026-11-12): the closing line that promised a person is retired, and one
+# read of the customer's own request state is allowed. One mutation per rule.
+@test "CAN FAIL: the retired 'teammate is coming' closing line coming back is caught" {
   CV_MD="$FAKE/workspaces/support/skills/verification-handoff/SKILL.md"
-  sed -i.bak "s/I'm pulling in a teammate to take this from here./I've passed this to our team and checked it./" "$CV_MD"
+  printf "\n   - Last, end with: \"I'm pulling in a teammate to take this from here.\"\n" >> "$CV_MD"
   run_gate
   [ "$status" -eq 1 ]
-  [[ "$output" == *"hand-off line is the approved one"* ]]
+  [[ "$output" == *"the retired closing line is not taught"* ]]
+}
+
+@test "CAN FAIL: the retired closing line coming back in a reference file is caught" {
+  printf "\n3. End with the handoff line: \"I'm pulling in a teammate to take this from here.\"\n" >> "$CI_MD"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"the retired closing line is not taught"* ]]
+}
+
+@test "CAN FAIL: dropping the never-promise-a-person rule is caught" {
+  CV_MD="$FAKE/workspaces/support/skills/verification-handoff/SKILL.md"
+  sed -i.bak 's/Never end a reply with/You may end a reply with/' "$CV_MD"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"never a closing sentence that promises a person"* ]]
+}
+
+@test "CAN FAIL: the status paragraph allowed without a measured open request is caught" {
+  CV_MD="$FAKE/workspaces/support/skills/verification-handoff/SKILL.md"
+  sed -i.bak 's/ONLY when the one$/whenever the one/' "$CV_MD"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"only after a measured open request"* ]]
+}
+
+@test "CAN FAIL: an unread request state treated as 'no request' is caught" {
+  CV_MD="$FAKE/workspaces/support/skills/verification-handoff/SKILL.md"
+  sed -i.bak 's/and never say there is no request/and say there is no request/' "$CV_MD"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"null is not 'no request'"* ]]
+}
+
+@test "CAN FAIL: the one read widened beyond the customer's own rows is caught" {
+  CV_MD="$FAKE/workspaces/support/skills/verification-handoff/SKILL.md"
+  sed -i.bak "s/read ONLY the signed-in customer's own rows/read any customer's rows/" "$CV_MD"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"the one read: own rows only"* ]]
+}
+
+@test "CAN FAIL: the system's closing line taught to Caroline a second time in AGENTS is caught" {
+  AG_MD="$FAKE/workspaces/support/AGENTS.md"
+  printf '\nEnd with: I am pulling in a teammate to take this from here.\n' >> "$AG_MD"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"appears 2 times"* ]]
+}
+
+@test "CAN FAIL: AGENTS no longer saying the closing line is the system's alone is caught" {
+  AG_MD="$FAKE/workspaces/support/AGENTS.md"
+  sed -i.bak "s/you never write that sentence/you may write that sentence/" "$AG_MD"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"the closing line is the system's, never Caroline's"* ]]
+}
+
+@test "CAN FAIL: the any-profile diagnosis handed to Caroline as part of the one read is caught" {
+  CV_MD="$FAKE/workspaces/support/skills/verification-handoff/SKILL.md"
+  sed -i.bak 's/`profile_credits_status`, `dedupe_check`, `remove_credits`/`dedupe_check`, `remove_credits`/' "$CV_MD"
+  run_gate
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"the one read does not include the any-profile diagnosis"* ]]
 }
 
 @test "CAN FAIL: Jaxsta coming back into any support doctrine file is caught (captain 2026-10-29)" {

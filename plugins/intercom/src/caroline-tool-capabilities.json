@@ -56,14 +56,15 @@
     {
       "name": "credit_verification_check",
       "answers": [
-        "why are my submitted credits stuck / pending verification",
-        "do I have any credits waiting on proof"
+        "where is my credit request / is my request still open",
+        "do I have credits waiting on proof, and is a document on file for them"
       ],
       "cannot_answer": [
         "approve or reject a pending credit (read-only; approval is credits_verify)",
-        "verify a credit on a profile the customer doesn't own"
+        "anything about a request on an account other than the signed-in customer's own",
+        "whether a document on file is enough, or why a request was declined"
       ],
-      "needs": "verified Intercom contact email; ownership re-verified server-side against the profile."
+      "needs": "the conversation's signed-in Intercom contact (role user, external id, older than 24 hours); a profile link is used only when that contact owns the profile, anything else fails closed."
     },
     {
       "name": "credits_search",
@@ -163,14 +164,14 @@
       "name": "profile_claim_status",
       "answers": [
         "where is my pending profile claim",
-        "why was my claim rejected",
-        "is someone else claiming my profile"
+        "is my own claim still open or already decided"
       ],
       "cannot_answer": [
         "approve a claim (read-only; the write tool is profiles_claim_self)",
-        "show another person's claim details (fails closed to aggregate counters)"
+        "anything about another person's claim, including whether one exists",
+        "why a claim was declined (a decline carries no reason)"
       ],
-      "needs": "verified Intercom contact email; profile resolved by search or id."
+      "needs": "the conversation's signed-in Intercom contact; a typed profile link or name chooses which profile is looked at, never whose claim rows come back."
     },
     {
       "name": "profile_credits_status",
