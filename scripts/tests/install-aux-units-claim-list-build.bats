@@ -7,6 +7,12 @@
 # installer writes to /etc/systemd/system and runs systemctl as root, so the unit heredocs are
 # extracted, written to a temp dir and handed to systemd's own parser; the installer's enable
 # loop and OnFailure table are evaluated as the shell declarations they are.
+#
+# Running the whole installer hermetically is not possible here: it requires root, writes
+# /etc/systemd/system and /var/lib, and shells out to openclaw and a dozen host scripts. The
+# enable step is therefore evaluated against a stub systemctl, and a separate check fails when
+# that step is no longer a top-level statement of the installer (moved into a function, guarded
+# by a condition, or deleted) - the "tested program that never runs" failure this file exists for.
 bats_require_minimum_version 1.5.0
 
 HYDRA_REPO="$(cd "$(dirname "${BATS_TEST_FILENAME}")/../.." && pwd)"
@@ -109,25 +115,88 @@ enable_step() {
   ' "$INSTALLER"
 }
 
-@test "both triggers are enabled and started by the installer" {
+# The control-structure depth at the enable loop, ignoring function bodies and heredoc bodies.
+# Empty means the loop is not on the installer's top-level execution path at all.
+enable_step_depth() {
+  awk '
+    heredoc != "" { if ($0 == heredoc) heredoc = ""; next }
+    match($0, /<<-?[ ]*[\047\042]?[A-Za-z_][A-Za-z0-9_]*/) {
+      tag = substr($0, RSTART, RLENGTH); sub(/^<<-?[ ]*[\047\042]?/, "", tag); heredoc = tag; next
+    }
+    /^[A-Za-z_][A-Za-z0-9_]*\(\)/ { if ($0 !~ /}[[:space:]]*$/) infunc = 1; next }
+    infunc { if ($0 == "}") infunc = 0; next }
+    /^for mon in .*claim-list-build\.timer/ { print depth; exit }
+    /^if([[:space:]]|$)/ { if ($0 !~ /[;[:space:]]fi([[:space:];]|$)/) depth++ }
+    /^fi([[:space:]]|$)/ { depth-- }
+    /^(for|while|until)([[:space:]]|$)/ { if ($0 !~ /[;[:space:]]done([[:space:];]|$)/) depth++ }
+    /^done([[:space:]]|$)/ { depth-- }
+    /^case([[:space:]]|$)/ { if ($0 !~ /[;[:space:]]esac([[:space:];]|$)/) depth++ }
+    /^esac([[:space:]]|$)/ { depth-- }
+  ' "$INSTALLER"
+}
+
+# The installer's enable step, run for real against a stub systemctl. STUB_FAIL names one
+# "<verb> <unit>" call that fails; STUB_INACTIVE names a unit that reports inactive.
+run_enable_step() {
   mkdir -p "$BATS_TEST_TMPDIR/bin"
   cat > "$BATS_TEST_TMPDIR/bin/systemctl" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
-[ "$1" = is-active ] && echo active
+[ "$*" = "${STUB_FAIL:-}" ] && exit 1
+if [ "$1" = is-active ]; then
+  [ "$2" = "${STUB_INACTIVE:-}" ] && { echo inactive; exit 3; }
+  echo active
+fi
 exit 0
 STUB
   chmod +x "$BATS_TEST_TMPDIR/bin/systemctl"
   export SYSTEMCTL_LOG="$BATS_TEST_TMPDIR/systemctl.log"
+  : > "$SYSTEMCTL_LOG"
   step="$(enable_step)"
   [ -n "$step" ]
+  # log() and fail() are the installer's own two definitions (install-aux-units.sh), not copies.
+  helpers="$(grep -E '^(log|fail)\(\) ' "$INSTALLER")"
+  [ "$(grep -c . <<< "$helpers")" -eq 2 ]
   run env PATH="$BATS_TEST_TMPDIR/bin:$PATH" SYSTEMCTL_LOG="$SYSTEMCTL_LOG" \
-    bash -c 'log() { :; }; eval "$1"' _ "$step"
+    STUB_FAIL="${STUB_FAIL:-}" STUB_INACTIVE="${STUB_INACTIVE:-}" \
+    bash -c 'set -euo pipefail; eval "$1"; eval "$2"; echo STEP-COMPLETED' _ "$helpers" "$step"
+}
+
+@test "the enable step is a top-level statement of the installer" {
+  run enable_step_depth
   [ "$status" -eq 0 ]
+  [ "$output" = 0 ]
+}
+
+@test "both triggers are enabled and started by the installer" {
+  run_enable_step
+  [ "$status" -eq 0 ]
+  [[ "$output" == *STEP-COMPLETED* ]]
   for u in claim-list-build.timer claim-list-build.path; do
     grep -qx "enable $u" "$SYSTEMCTL_LOG"
     grep -qx "start $u" "$SYSTEMCTL_LOG"
   done
+}
+
+@test "a trigger that cannot be enabled stops the install" {
+  STUB_FAIL="enable claim-list-build.timer" run_enable_step
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"FATAL: could not enable claim-list-build.timer"* ]]
+  [[ "$output" != *STEP-COMPLETED* ]]
+}
+
+@test "a trigger that cannot be started stops the install" {
+  STUB_FAIL="start claim-list-build.path" run_enable_step
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"FATAL: could not start claim-list-build.path"* ]]
+  [[ "$output" != *STEP-COMPLETED* ]]
+}
+
+@test "a trigger that started but is not active stops the install" {
+  STUB_INACTIVE="claim-list-build.timer" run_enable_step
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"FATAL: claim-list-build.timer is not active after start"* ]]
+  [[ "$output" != *STEP-COMPLETED* ]]
 }
 
 @test "a failed build pages: the service is in the OnFailure table" {

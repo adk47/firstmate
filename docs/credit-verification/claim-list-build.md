@@ -17,7 +17,10 @@ as one run. Nothing in it is new policy: the audience rules are the ones of the 
 | `claim-list-build.timer` | every 2 h at :20 (odd hours UTC) | 40 min ahead of the outbound tick (`0 */2`) |
 | `claim-list-build.path` | `/opt/hydra/.deployed-sha` changed | a deploy gets a list signed on the new head within minutes |
 
-Both start `claim-list-build.service`. All three are written by `scripts/install-aux-units.sh`.
+Both start `claim-list-build.service`. All three are written by `scripts/install-aux-units.sh`, which
+**fails the deploy** if either trigger cannot be enabled, started, or is not `active` afterwards: with
+neither running the list is never rebuilt, both claim families go silent, and the service's `OnFailure`
+cannot page because the service never runs.
 
 ## What one run does
 
@@ -31,6 +34,18 @@ Both start `claim-list-build.service`. All three are written by `scripts/install
 4. Classifies: a proof ask for a person claim in band B/C with `request_proof` and a readable bound
    surface that was never asked; a status line for the rest. Held accounts, the decline tray and
    class A are never listed. Then one audience per user, the no-channel tray, the 7-day rule.
+   Two questions are kept apart, and the ledger rows are read **once** per build so the answers
+   cannot disagree about a row the outbound tick commits mid-build:
+   - *may this claim be asked again?* — any blocking row, or `rejected` at the attempt cap. A
+     `deferred` row sent nothing, so the claim is offered again.
+   - *did this user receive something?* — only `sent` or `attempted` (a send whose outcome was never
+     recorded, so it may have landed). `refused`, `skipped` and `rejected` delivered nothing.
+
+   A claim with a delivered ask is `status_already_asked` and gets no row (the user owes the code).
+   A claim that is blocked from re-asking but whose ask was never delivered gets a status line under
+   `status_ask_not_delivered`, so the claimant is told the wait is on us instead of hearing nothing.
+   The per-user audience is the superset: users with a delivered ask on a still-pending claim, plus
+   this list's own proof asks.
 5. Adds each ask's proof code (core's `codeFor`, pinned to core's own vectors), `daily_check` and
    `signed_on`. A code that would differ from one already issued refuses the run.
 6. Runs the deployed loader (`claim_proof_ask.load_list`) on the staged file. That is the sign-off.

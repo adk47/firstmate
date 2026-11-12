@@ -190,30 +190,67 @@ def _claim_ids(raw: Any) -> set[int]:
             and str(k).startswith("claim-") and str(k)[6:].isdigit()}
 
 
-def read_asked(rows: Callable[[str], list[tuple]] = ledger_rows) -> set[int]:
-    """Claim ids that already got the code ask: the ledger's own BLOCKING semantics, so a deferred or retryable
-    rejected row (nothing was sent) is not an ask and the claim is offered again."""
+ASKED = BLOCKING + ("rejected",)      # a row that stops another ask: BLOCKING, or rejected at the attempt cap
+DELIVERED = ("attempted", "sent")      # a row that reached the user: refused / skipped / rejected sent nothing
+
+
+def _ask_rows(rows: Callable[[str], list[tuple]]) -> list[tuple[set[int], str, str]]:
+    """(claim ids, account, status) of every claim-proof-ask row that counts as an ask.
+
+    Two different questions read this: "may this claim be asked again?" (`read_asked`: the ledger's BLOCKING
+    semantics, a deferred or retryable rejected row sent nothing so it is offered again) and "did this user
+    receive something?" (`read_delivered` / `read_ask_users`: only an attempted or sent row did; a refused or
+    skipped row is blocking but delivered nothing). `build` calls this ONCE and derives all three sets from the
+    returned snapshot, so a row the outbound tick commits mid-build cannot make them disagree."""
+    out: list[tuple[set[int], str, str]] = []
+    for raw, status, attempts, account in rows("select request_ids_json, status, attempts, account_id "
+                                               "from verify_messages where campaign='claim-proof-ask'"):
+        if status in ASKED and (status != "rejected" or int(attempts or 0) >= MAX_ATTEMPTS):
+            out.append((_claim_ids(raw), str(account or "").strip(), status))
+    return out
+
+
+def asked_claims(ask_rows: list[tuple[set[int], str, str]]) -> set[int]:
+    """Claim ids that already got the code ask; a claim whose ask was only deferred is offered again."""
     asked: set[int] = set()
-    for raw, status, attempts in rows("select request_ids_json, status, attempts from verify_messages "
-                                      "where campaign='claim-proof-ask'"):
-        if status in BLOCKING or (status == "rejected" and int(attempts or 0) >= MAX_ATTEMPTS):
-            asked |= _claim_ids(raw)
+    for ids, _, _ in ask_rows:
+        asked |= ids
     return asked
+
+
+def delivered_claims(ask_rows: list[tuple[set[int], str, str]]) -> set[int]:
+    """Claim ids whose ask reached the user (attempted = a send whose outcome was never recorded, so it may
+    have landed). A refused or skipped ask reached nobody."""
+    delivered: set[int] = set()
+    for ids, _, status in ask_rows:
+        if status in DELIVERED:
+            delivered |= ids
+    return delivered
+
+
+def read_asked(rows: Callable[[str], list[tuple]] = ledger_rows) -> set[int]:
+    return asked_claims(_ask_rows(rows))
+
+
+def read_delivered(rows: Callable[[str], list[tuple]] = ledger_rows) -> set[int]:
+    return delivered_claims(_ask_rows(rows))
 
 
 def _accounts(rows: Callable[[str], list[tuple]], sql: str) -> set[str]:
     return {str(a).strip() for (a,) in rows(sql) if str(a).strip()}
 
 
+def owing_accounts(pending: set[int], ask_rows: list[tuple[set[int], str, str]]) -> set[str]:
+    """Accounts that OWE a code: a DELIVERED ask on a claim that is STILL pending. An ask on a claim that has
+    since closed does not silence a new claim, and an ask that was refused, skipped or merely deferred is not
+    delivered: nothing reached that user, so if the claim can no longer be asked (no readable surface now) its
+    status line must still go out - otherwise the claimant gets neither message (QA review 5869802116 of
+    hydra#1903)."""
+    return {account for ids, account, status in ask_rows if account and status in DELIVERED and ids & pending}
+
+
 def read_ask_users(pending: set[int], rows: Callable[[str], list[tuple]] = ledger_rows) -> set[str]:
-    """Accounts with a claim-proof-ask row whose claim is STILL pending: the per-user audience is computed over
-    open claims, so an ask on a claim that has since closed does not silence a new one."""
-    out: set[str] = set()
-    for raw, account in rows("select request_ids_json, account_id from verify_messages "
-                             "where campaign='claim-proof-ask' and account_id is not null"):
-        if _claim_ids(raw) & pending and str(account).strip():
-            out.add(str(account).strip())
-    return out
+    return owing_accounts(pending, _ask_rows(rows))
 
 
 def read_forbidden(rows: Callable[[str], list[tuple]] = ledger_rows) -> set[str]:
@@ -319,14 +356,16 @@ def deployed_head() -> str:
 
 def classify(decider: Decider, facts: csl.Facts, asked: set[int], held: set[str],
              prof: dict[str, dict[str, Any] | None],
-             bound: Callable[[dict[str, Any]], Any] = csl.bound_surfaces) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+             bound: Callable[[dict[str, Any]], Any] = csl.bound_surfaces,
+             delivered: set[int] | None = None) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """One row per listed claim and the count of every group that is not. The rule set of the signed batches,
     line for line; the tests pin each branch."""
     byid = {c["id"]: c for c in facts.claims}
+    delivered_set = delivered or set()
     counts: dict[str, Any] = {k: 0 for k in (
         "decider_paid", "not_pending_now", "decline_tray", "ask", "status", "status_org", "status_hold",
         "status_band_d", "status_no_readable_surface", "status_account_held", "status_already_asked",
-        "status_profile_unreadable")}
+        "status_ask_not_delivered", "status_profile_unreadable")}
     counts["decider_paid"] = sum(1 for v in decider.paid.values() if v)
     counts["decider_free"] = sum(1 for v in decider.paid.values() if not v)
     rows: list[dict[str, Any]] = []
@@ -354,7 +393,7 @@ def classify(decider: Decider, facts: csl.Facts, asked: set[int], held: set[str]
         elif pr is None:
             why = "status_profile_unreadable"
         elif cid in asked:
-            why = "status_already_asked"
+            why = "status_already_asked" if cid in delivered_set else "status_ask_not_delivered"
         else:
             surfaces = bound(pr)
             plat = next((p for pre, p in READABLE if any(s.startswith(pre) for s in surfaces)), None)
@@ -505,15 +544,17 @@ def build(reads: Reads, run_dir: Path, head: str) -> dict[str, Any]:
         raise Unmeasured("facts_unreadable", f"{type(exc).__name__}: {exc}") from exc
     if not facts.claims:
         raise Unmeasured("facts_unreadable", "the replica returned no pending claim")
-    asked = read_asked(reads.ledger)
+    ask_rows = _ask_rows(reads.ledger)
+    asked = asked_claims(ask_rows)
+    delivered = delivered_claims(ask_rows)
     holds = reads.holds()
     held = holds.ids
     byid = {c["id"]: c for c in facts.claims}
     pids = sorted({byid[c]["profile_id"] for c in decider.band
                    if c in byid and csl.UUIDISH.match(byid[c]["profile_id"])})
     prof = read_profiles(pids, reads.profile)
-    rows, counts = classify(decider, facts, asked, held, prof, reads.bound)
-    rows = apply_audience(rows, counts, ask_users=read_ask_users(set(byid), reads.ledger),
+    rows, counts = classify(decider, facts, asked, held, prof, reads.bound, delivered)
+    rows = apply_audience(rows, counts, ask_users=owing_accounts(set(byid), ask_rows),
                           forbidden=read_forbidden(reads.ledger), messaged=read_messaged_7d(reads.ledger))
     counts["decider_in_scope"] = decider.in_scope
     counts["decider_unreadable"] = decider.unreadable

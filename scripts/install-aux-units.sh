@@ -2959,10 +2959,14 @@ WantedBy=multi-user.target
 CLAIMLISTPATH
 
 systemctl daemon-reload
+# A trigger that did not come up is FATAL, not a WARN: with neither running the list is never rebuilt,
+# both claim families go silent again, and the service's OnFailure cannot page because the service
+# never runs. The deploy must stop here rather than report success (QA review of hydra#1903).
 for mon in claim-list-build.timer claim-list-build.path; do
-  systemctl enable "$mon" >/dev/null 2>&1 || log "WARN: could not enable $mon"
-  systemctl start "$mon" >/dev/null 2>&1 || log "WARN: could not start $mon"
-  log "  $mon: $(systemctl is-active "$mon" 2>/dev/null || echo unknown)"
+  systemctl enable "$mon" >/dev/null 2>&1 || fail "could not enable $mon: the claim list would not be rebuilt"
+  systemctl start "$mon" >/dev/null 2>&1 || fail "could not start $mon: the claim list would not be rebuilt"
+  [[ "$(systemctl is-active "$mon" 2>/dev/null)" == active ]] || fail "$mon is not active after start: the claim list would not be rebuilt"
+  log "  $mon: active"
 done
 
 # ─── Codex OAuth keepalive at 15-min cadence ──────────────────

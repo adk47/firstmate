@@ -259,7 +259,7 @@ class ReadTests(unittest.TestCase):
         empty = self.dir / "empty.sqlite3"
         sqlite3.connect(empty).close()
         self.assertEqual(self.code(cl.read_asked, lambda s: cl.ledger_rows(s, empty)), "ledger_unreadable")
-        self.assertEqual(self.code(cl.read_asked, lambda s: [("not json", "sent", 1)]), "ledger_unreadable")
+        self.assertEqual(self.code(cl.read_asked, lambda s: [("not json", "sent", 1, "6")]), "ledger_unreadable")
 
     def test_ledger_reads(self):
         led = self.dir / "l.sqlite3"
@@ -268,6 +268,9 @@ class ReadTests(unittest.TestCase):
             ("claim-proof-ask", "13", '["claim-113"]', "deferred", "", "", None, now_iso(1)),
             ("claim-proof-ask", "14", '["claim-114"]', "rejected", "", "", None, now_iso(1)),
             ("claim-proof-ask", "15", '["claim-115"]', "rejected", "", "", None, now_iso(1)),
+            ("claim-proof-ask", "16", '["claim-116"]', "sent", "", "", now_iso(1), now_iso(1)),
+            ("claim-proof-ask", "17", '["claim-117"]', "attempted", "", "", None, now_iso(1)),
+            ("claim-proof-ask", "18", '["claim-118"]', "skipped", "", "", None, now_iso(1)),
             ("uvn-status", "9", "[]", "failed", "Intercom: ACTION_FORBIDDEN", "", None, now_iso(1)),
             ("uvn-status", "10", "[]", "sent", "", "", now_iso(24), now_iso(24)),
             ("uvn-status", "11", "[]", "sent", "", "", now_iso(24 * 8), now_iso(24 * 8)),
@@ -277,11 +280,16 @@ class ReadTests(unittest.TestCase):
         con.commit()
         con.close()
         rows = lambda s: cl.ledger_rows(s, led)   # noqa: E731
-        self.assertEqual(cl.read_asked(rows), {106, 115})   # deferred / retryable rejected are not asks
-        self.assertEqual(cl.read_ask_users({106, 113, 114, 115}, rows), {"6", "13", "14", "15"})
-        self.assertEqual(cl.read_ask_users({106}, rows), {"6"})   # a closed claim's ask does not silence a new one
+        self.assertEqual(cl.read_asked(rows), {106, 115, 116, 117, 118})   # deferred / retryable rejected are not asks
+        self.assertEqual(cl.read_delivered(rows), {116, 117})   # refused / skipped / rejected reached nobody
+        # only a delivered ask makes a user owe a code: 6 (refused), 15 (rejected at the cap) and 18 (skipped)
+        # were sent nothing, so their status lines must still go out
+        self.assertEqual(cl.read_ask_users({106, 113, 114, 115, 116, 117, 118}, rows), {"16", "17"})
+        self.assertEqual(cl.read_ask_users({106}, rows), set())
+        self.assertEqual(cl.read_ask_users({116}, rows), {"16"})   # a closed claim's ask does not silence a new one
+        self.assertEqual(cl.read_ask_users({113, 114}, rows), set())
         self.assertEqual(cl.read_forbidden(rows), {"9"})
-        self.assertEqual(cl.read_messaged_7d(rows), {"10"})
+        self.assertEqual(cl.read_messaged_7d(rows), {"10", "16"})
 
     def test_daily_check_must_be_named_and_recent(self):
         p = self.dir / "last-run.json"
@@ -321,7 +329,9 @@ class ClassifyTests(unittest.TestCase):
     def go(self, **kw):
         args = dict(asked={106}, held={"7"}, prof=self.prof)
         args.update(kw)
-        return cl.classify(self.decider, facts(), args["asked"], args["held"], args["prof"], self.bound)
+        args.setdefault("delivered", args["asked"])
+        return cl.classify(self.decider, facts(), args["asked"], args["held"], args["prof"], self.bound,
+                           args["delivered"])
 
     def test_the_rule_set_of_the_signed_batches(self):
         rows, counts = self.go()
@@ -346,6 +356,12 @@ class ClassifyTests(unittest.TestCase):
     def test_an_asked_claim_is_never_asked_again_nor_told_we_are_working(self):
         rows, _ = self.go(asked={101, 106})
         self.assertNotIn(101, {r["claim_id"] for r in rows})
+
+    def test_an_asked_claim_whose_ask_never_reached_the_user_is_told_the_wait_is_on_us(self):
+        rows, counts = self.go(asked={101}, delivered=set())
+        by = {r["claim_id"]: r for r in rows}
+        self.assertEqual(by[101]["audience"], "status")     # blocked from a re-ask, but nothing was delivered
+        self.assertEqual(counts["status_ask_not_delivered"], 1)
 
     def test_the_trays_are_never_listed(self):
         tray = sorted(cl.DECLINE_TRAY)[0]
@@ -393,6 +409,105 @@ class RunTests(unittest.TestCase):
         self.assertEqual(o.holds, "1")
         self.assertEqual(oct(self.env.live.stat().st_mode & 0o777), "0o600")
         self.assertIn("INSTALLED sha256 " + o.sha256, cl.render(o))
+
+    def ledger_add(self, account: str, claim: int, status: str, *, hours_ago: float = 1,
+                   sent_at: str | None = None) -> None:
+        con = sqlite3.connect(self.env.ledger)
+        con.execute("insert into verify_messages (campaign, account_id, request_ids_json, status, sent_at, created_at) "
+                    "values ('claim-proof-ask', ?, ?, ?, ?, ?)",
+                    (account, f'["claim-{claim}"]', status, sent_at, now_iso(hours_ago)))
+        con.commit()
+        con.close()
+
+    def built(self, **kw) -> dict:
+        o = self.env.run(**kw)
+        self.assertEqual(o.result, "installed", cl.render(o))
+        return json.loads(self.env.live.read_text())
+
+    def listed(self) -> dict[int, str]:
+        return {r["claim_id"]: r["audience"] for r in self.built()["claims"]}
+
+    def test_a_deferred_ask_on_a_claim_that_can_no_longer_be_asked_still_gets_its_status_line(self):
+        # QA review 5869802116: claim 105 has no readable surface now, and its only ask was deferred (nothing
+        # was sent). The user owes no code, so the status line must go out; before, they got neither message.
+        self.ledger_add("5", 105, "deferred")
+        self.assertEqual(self.listed().get(105), "status")
+
+    def test_a_deferred_ask_on_a_claim_that_can_still_be_asked_is_offered_again(self):
+        self.ledger_add("1", 101, "deferred")
+        self.assertEqual(self.listed().get(101), "proof_ask")
+
+    def test_a_delivered_ask_still_silences_the_users_status_line(self):
+        # Dated past the 7-day messaged window so only the delivered-ask rule can remove the row.
+        before = self.built()["counts"]["status_already_asked"]
+        self.ledger_add("5", 105, "sent", hours_ago=24 * 8, sent_at=now_iso(24 * 8))
+        doc = self.built()
+        self.assertNotIn(105, {r["claim_id"] for r in doc["claims"]})
+        self.assertEqual(doc["counts"]["status_already_asked"], before + 1)
+        self.assertEqual(doc["counts"].get("dropped_messaged_7d", 0), 0)
+
+    def test_an_attempted_ask_is_treated_as_delivered(self):
+        # A send whose outcome was never recorded may have landed; dated past the 7-day window.
+        before = self.built()["counts"]["status_already_asked"]
+        self.ledger_add("5", 105, "attempted", hours_ago=24 * 8)
+        doc = self.built()
+        self.assertNotIn(105, {r["claim_id"] for r in doc["claims"]})
+        self.assertEqual(doc["counts"]["status_already_asked"], before + 1)
+        self.assertEqual(doc["counts"].get("dropped_messaged_7d", 0), 0)
+
+    def test_a_refused_ask_never_silences_the_status_line(self):
+        self.ledger_add("5", 105, "refused")        # the gate refused it: nothing reached the user
+        self.assertEqual(self.listed().get(105), "status")
+
+    def test_a_skipped_ask_never_silences_the_status_line(self):
+        self.ledger_add("5", 105, "skipped")
+        self.assertEqual(self.listed().get(105), "status")
+
+    def test_a_rejected_ask_at_the_attempt_cap_never_silences_the_status_line(self):
+        self.ledger_add("5", 105, "rejected")
+        con = sqlite3.connect(self.env.ledger)
+        con.execute("update verify_messages set attempts=3 where account_id='5'")
+        con.commit()
+        con.close()
+        self.assertEqual(self.listed().get(105), "status")
+
+    def test_a_delivered_ask_still_drops_the_users_other_status_rows(self):
+        # user 1 owes the code on 101: no status line for 108 either. Dated past the 7-day window so the owes
+        # rule, not drop_messaged_7d, is what removes 108.
+        before = self.built()["counts"]
+        self.ledger_add("1", 101, "sent", hours_ago=24 * 8, sent_at=now_iso(24 * 8))
+        doc = self.built()
+        ids = {r["claim_id"] for r in doc["claims"]}
+        self.assertNotIn(101, ids)
+        self.assertNotIn(108, ids)
+        self.assertEqual(doc["counts"]["status_already_asked"], before["status_already_asked"] + 1)
+        self.assertEqual(doc["counts"]["status_user_owes_code_ask_elsewhere"],
+                         before.get("status_user_owes_code_ask_elsewhere", 0) + 1)
+        self.assertEqual(doc["counts"].get("dropped_messaged_7d", 0), 0)
+
+    def test_the_three_ask_sets_come_from_one_ledger_snapshot(self):
+        # The outbound tick can commit a send while the build runs. A row that appears after the first read must
+        # not make "asked" and "delivered" disagree: 101 would then be asked a second time and the user's status
+        # rows dropped, so the claimant would get neither message.
+        calls: list[str] = []
+
+        def ledger(sql: str) -> list[tuple]:
+            calls.append(sql)
+            rows = cl.ledger_rows(sql, self.env.ledger)
+            if "campaign='claim-proof-ask'" in sql and len(calls) > 1:
+                return rows + [('["claim-101"]', "sent", 0, "1")]
+            return rows
+
+        doc = self.built(reads=self.env.reads(ledger=ledger))
+        self.assertEqual(sum("campaign='claim-proof-ask'" in sql for sql in calls), 1)
+        self.assertEqual({r["claim_id"]: r["audience"] for r in doc["claims"]}.get(101), "proof_ask")
+        self.assertEqual(doc["counts"]["status_already_asked"], 1)
+
+    def test_a_recently_messaged_user_is_still_dropped_by_the_7d_rule(self):
+        self.ledger_add("5", 999, "sent", hours_ago=1, sent_at=now_iso(1))
+        doc = self.built()
+        self.assertNotIn(105, {r["claim_id"] for r in doc["claims"]})
+        self.assertEqual(doc["counts"]["dropped_messaged_7d"], 1)
 
     def test_the_deployed_loader_accepts_what_was_installed(self):
         self.env.run()
