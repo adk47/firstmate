@@ -1944,10 +1944,24 @@ families_for_changed_path() {
           || printf '%s\n' "__unmapped__:$path"
       fi
       ;;
-    tests/*)
-      printf '%s\n' "__unmapped__:$path"
+    tests/captures/*/*)
+      # A recorded capture belongs to whichever suite reads its directory, by
+      # the same reference scan and directory key used for fixtures.
+      capture_ref=${path#tests/captures/}
+      capture_ref=${capture_ref%%/*}
+      if [ -d "tests/captures/$capture_ref" ]; then
+        families_for_test_reference "captures/$capture_ref" \
+          || printf '%s\n' "__unmapped__:$path"
+      fi
       ;;
-    README.md|LICENSE|assets/*|docs/*|.gitignore)
+    tests/*)
+      # A shared test helper or asset belongs to whichever suite names it,
+      # found by the same reference scan used for shared helpers. A new
+      # *.test.sh is handled above and still fails closed.
+      families_for_test_reference "$path" "$(basename "$path")" \
+        || printf '%s\n' "__unmapped__:$path"
+      ;;
+    README.md|GROK_BOT.md|VISION.md|LICENSE|assets/*|docs/*|.gitignore)
       ;;
     *)
       if [ -e "$path" ]; then
