@@ -52,6 +52,39 @@ CLAIM = {"paid": False, "n": 1, "oldest": "2026-01-01 00:00:00.000000 UTC",
          "profiles": ["p1"], "claims": ["11"]}
 
 
+class OpenStatusIndexTests(unittest.TestCase):
+    """[key=open-status-index] The credits population must be read through the POSITIVE status
+    list. `status NOT IN ('approved','rejected')` is not pushed down, so it scans the whole
+    credit_requests table and dies on the session's 90s cap. On 2026-11-12 that is exactly what
+    the reporter's credits query did ("Query exceeded the maximum execution time limit of
+    90.00s"), which aborted the whole report and left last.json at 2026-11-10 12:01Z - so the
+    untold count could not be measured at all."""
+
+    def test_the_credits_query_filters_on_the_open_statuses_not_the_closed_ones(self):
+        seen = []
+
+        def fake_trino(sql, *a, **kw):
+            seen.append(sql)
+            return []
+
+        with mock.patch.object(vqr, "trino", fake_trino):
+            vqr.credit_rows()
+        self.assertTrue(seen, "credit_rows made no query")
+        sql = seen[0]
+        self.assertIn("cr.status in ('unverified', 'processing', 'user_verification_needed')", sql)
+        # the negated form is the defect: it cannot use the status index
+        self.assertNotIn("status not in (", sql.replace("\n", " ").lower())
+
+    def test_the_open_statuses_agree_with_the_send_path(self):
+        sys.path.insert(0, os.path.join(REPO, "scripts"))
+        try:
+            from credit_review import owing_proof
+        finally:
+            sys.path.pop(0)
+        self.assertEqual(tuple(vqr.OPEN_STATUSES), tuple(owing_proof.OPEN_STATUSES))
+        self.assertEqual(tuple(vqr.CLOSED_STATUSES), tuple(owing_proof.CLOSED_STATUSES))
+
+
 class CreditBuckets(unittest.TestCase):
     def test_nothing_written_anywhere_is_not_touched(self):
         self.assertEqual(vqr.classify_credit(7, facts(), CREDIT, frozenset()), "untouched")

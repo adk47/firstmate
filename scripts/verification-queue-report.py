@@ -85,6 +85,19 @@ SENTINEL_STATE = os.environ.get("VQR_SENTINEL_STATE",
 SENTINEL_KILL = os.environ.get("VQR_SENTINEL_KILL", "/etc/hydra/backlog-sentinel.disabled")
 TRINO_SESSION = "SET SESSION query_max_execution_time='90s'; "
 
+# [key=open-status-index] The open filter must be a POSITIVE status list, the way core's status
+# index can serve it. `status NOT IN ('approved','rejected')` is not pushed down, so it reads the
+# whole table (5.65M rows, 76 GB of JSON) and dies on the session's 90s cap: on 2026-11-12 the
+# reporter's credits query was the piece that failed, "Query exceeded the maximum execution time
+# limit of 90.00s", and it took the whole report down with it (last.json stuck at 2026-11-10
+# 12:01Z, so "the untold count fell" could not be measured). The consumer that actually sends
+# (owing_proof.REPLICA_SQL) already uses this exact list after #1893: 106.9 s whole-table vs
+# 8.2 s on the index. Keep this beside CREDIT_OPEN_STATUSES' owner; a test asserts the two agree
+# so they cannot drift apart.
+CLOSED_STATUSES = ("approved", "rejected")
+OPEN_STATUSES = ("unverified", "processing", "user_verification_needed")
+OPEN_STATUS_LIST = ", ".join(f"'{s}'" for s in OPEN_STATUSES)
+
 # Campaigns in the hydra ledger that ASK the user for something (see
 # scripts/credit_review/verify_ledger.py ASK_CAMPAIGNS). A note from one of these is
 # "the user has been told"; any other campaign (a status note, a take-back notice) is
@@ -281,7 +294,7 @@ select cast(cr.userid as varchar),
  cast(sum(case when cr.workspaceid in {PAID_TEAMS} then 1 else 0 end) as varchar),
  cast(max(cr.createdat) as varchar)
 from postgresql_core.public.credit_requests cr
-where cr.deletedat is null and cr.status not in ('approved','rejected')
+where cr.deletedat is null and cr.status in ({OPEN_STATUS_LIST})
 group by 1""")
     return {int(r[0]): {"paid": r[1] == "1", "n": int(r[2]), "oldest": r[3],
                         "core_ask": r[4] == "1",
