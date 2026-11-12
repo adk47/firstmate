@@ -153,6 +153,16 @@ caps (credits 50/call, 100/day) are advisory under concurrency.
 `bi` to `postgresql_analytics.public`. `postgresql_industry` SELECT is permission-denied for
 the Trino PG role (SHOW TABLES works, SELECT fails).
 
+**A `NOT IN` / `<>` filter on a `postgresql_core` column is not pushed to Postgres; an `IN` list is.**
+The connector keeps a negated predicate as a Trino-side `filterPredicate`, so every row of the
+table (JSON columns included) crosses the wire first. On `credit_requests` (5.65M rows, 76 GB,
+~97k open) `status NOT IN ('approved','rejected')` took 107 s to more than the replica's statement
+timeout, and the same rows came back in 8-10 s as `status IN (<open statuses>)` from core's own
+status index (2026-11-12; `EXPLAIN` shows `constraint on [..., status, ...]` only for the list).
+The two are equal only while every status is known, so a positive list ships with a check that
+refuses on an unknown one: `credit_review/owing_proof.py` (`OPEN_STATUSES`, `check_statuses`).
+Read the `EXPLAIN` before blaming the replica, and do not add a date bound to make a scan fit.
+
 **`postgresql_stats` is a hot-standby replica that kills long queries.** Multi-minute scans
 die with `canceling statement due to conflict with recovery` or an idle-in-transaction
 timeout. Use only point lookups and indexed filters; for any per-profile-over-time metric,

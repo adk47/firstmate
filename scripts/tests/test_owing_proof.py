@@ -25,6 +25,18 @@ ROWS = [["1", "u1", "user_verification_needed", "2026-09-01", "0", "0", "0", "0"
         ["7", "r7", "user_verification_needed", "2026-10-02", "1", "0", "0", "0"]]    # paid U, at-risk
 
 
+def q(rows, statuses=None, seen=None):
+    """A replica fake: the status guard is answered with the statuses in the table (default: the ones in `rows`), every
+    other statement with `rows`. `seen` collects the SQL in the order it ran."""
+    def run(sql):
+        if seen is not None:
+            seen.append(sql)
+        if sql == op.STATUS_GUARD_SQL:
+            return [[st] for st in (sorted({r[2] for r in rows}) if statuses is None else statuses)]
+        return [list(r) for r in rows]
+    return run
+
+
 class OwingProofTest(unittest.TestCase):
     def setUp(self):
         d = Path(tempfile.mkdtemp())
@@ -42,7 +54,7 @@ class OwingProofTest(unittest.TestCase):
         self.d = d
 
     def build(self, **kw):
-        return op.build(**{"query": lambda sql: [list(r) for r in ROWS], "ledger_path": self.ledger,
+        return op.build(**{"query": q(ROWS), "ledger_path": self.ledger,
                            "holds_path": self.holds, "at_risk_path": self.risk, **kw})
 
     def test_audience_classes_never_told_and_order(self):
@@ -62,8 +74,8 @@ class OwingProofTest(unittest.TestCase):
         self.assertEqual(res["counts"]["at_risk_source"], "missing")
 
     def test_inputs_fail_closed(self):
-        for kw in ({"query": lambda sql: [["1", "x", "unverified", "d", "1", "maybe", "0", "0"]]},
-                   {"query": lambda sql: [["1", "x", "unverified", "d", "1", "0", "0", "yes"]]},
+        for kw in ({"query": q([["1", "x", "unverified", "d", "1", "maybe", "0", "0"]])},
+                   {"query": q([["1", "x", "unverified", "d", "1", "0", "0", "yes"]])},
                    {"ledger_path": str(self.d / "nodir" / "l.sqlite3")}, {"holds_path": str(self.d / "nope.jsonl")}):
             with self.assertRaises(op.OwingProofError, msg=str(kw)):
                 self.build(**kw)
@@ -81,7 +93,7 @@ class ProofRequiredAudienceTest(OwingProofTest):
         db = sqlite3.connect(self.ledger)
         db.execute("INSERT INTO verify_messages VALUES ('9', 'sent', 'status-team-review', '[]'), ('10', 'sent', 'uvn-status', '[\"p10\"]')")
         db.commit(); db.close()
-        res = self.build(query=lambda sql: [list(r) for r in rows])
+        res = self.build(query=q(rows))
         got = {u["user_id"]: (u["class"], u["request_ids"], u["facts"]) for u in res["users"]}
         self.assertEqual(got, {"8": ("uvn", ["p8"], [["p8", "unverified", True]]),
                                "9": ("uvn", ["p9"], [["p9", "unverified", True]])})
@@ -89,7 +101,7 @@ class ProofRequiredAudienceTest(OwingProofTest):
         self.assertIn("proof_required", res["replica_facts"]["query"])
         # r5: the header's query is the EXACT runnable SQL the build ran (and verify_facts re-runs), with its sha256
         seen = []
-        res = self.build(query=lambda sql: seen.append(sql) or [list(r) for r in rows])
+        res = self.build(query=q(rows, seen=seen))
         self.assertIn(res["replica_facts"]["query"], seen)
         self.assertTrue(res["replica_facts"]["query"].startswith("SELECT "))
         import hashlib
@@ -100,39 +112,39 @@ class ProofRequiredAudienceTest(OwingProofTest):
 
     def test_verify_facts_flags_a_user_whose_rows_changed(self):
         rows = [["8", "p8", "unverified", "2026-09-05", "1", "0", "0", "1"]]
-        lst = self.build(query=lambda sql: [list(r) for r in rows])
-        self.assertEqual(self.vf(lst, lambda sql: [list(r) for r in rows]), [])
+        lst = self.build(query=q(rows))
+        self.assertEqual(self.vf(lst, q(rows)), [])
         moved = [["8", "p8", "approved", "2026-09-05", "1", "0", "0", "1"]]            # decided since the build
-        self.assertEqual(len(self.vf(lst, lambda sql: [list(r) for r in moved])), 1)
+        self.assertEqual(len(self.vf(lst, q(moved))), 1)
         cleared = [["8", "p8", "unverified", "2026-09-05", "1", "0", "0", "0"]]        # proof no longer required
-        self.assertEqual(len(self.vf(lst, lambda sql: [list(r) for r in cleared])), 1)
+        self.assertEqual(len(self.vf(lst, q(cleared))), 1)
     def test_verify_facts_sees_a_request_owed_after_the_build_and_an_edited_list(self):
         # QA #1565: the owed set is RECOMPUTED - a second proof_required row that appeared after the build is a change
         rows = [["8", "p8", "unverified", "2026-09-05", "1", "0", "0", "1"]]
-        lst = self.build(query=lambda sql: [list(r) for r in rows])
-        self.assertEqual(self.vf(lst, lambda sql: [list(r) for r in rows]), [])
+        lst = self.build(query=q(rows))
+        self.assertEqual(self.vf(lst, q(rows)), [])
         more = rows + [["8", "p9", "processing", "2026-10-30", "1", "0", "0", "1"]]
-        self.assertEqual(len(self.vf(lst, lambda sql: [list(r) for r in more])), 1)
+        self.assertEqual(len(self.vf(lst, q(more))), 1)
         import copy
         edited = copy.deepcopy(lst)
         u8 = next(u for u in edited["users"] if u["user_id"] == "8")
         u8["request_ids"] = []                                                    # ids no longer what is owed
-        self.assertTrue(any(d.startswith("8:") for d in self.vf(edited, lambda sql: [list(r) for r in rows])))
+        self.assertTrue(any(d.startswith("8:") for d in self.vf(edited, q(rows))))
         tampered = copy.deepcopy(lst)
         next(u for u in tampered["users"] if u["user_id"] == "8")["facts"] = [["p8", "unverified", False]]
-        self.assertTrue(any(d.startswith("header:") for d in self.vf(tampered, lambda sql: [list(r) for r in rows])))
+        self.assertTrue(any(d.startswith("header:") for d in self.vf(tampered, q(rows))))
 
 
     def test_the_builders_class_list_verifies_and_a_rewrite_carrying_the_parent_header_does_not(self):
         # r5 776: the 08:00Z dry tick's split kept the full list's facts sha -> the uvn check refused it (rightly)
-        q = lambda sql: [list(r) for r in ROWS]
+        replica = q(ROWS)
         res = self.build()
         uvn = op.class_list(res, "uvn")
         self.assertEqual([u["user_id"] for u in uvn["users"]], ["7", "1"])
         self.assertEqual(uvn["split_of"], {"class": "uvn", "users": 4, "sha256": res["replica_facts"]["sha256"]})
-        self.assertEqual(self.vf(uvn, q), [])                                   # the split list verifies
+        self.assertEqual(self.vf(uvn, replica), [])                             # the split list verifies
         old_way = {**res, "users": uvn["users"]}                                # the tick's old rewrite
-        self.assertTrue(any(d.startswith("header:") for d in self.vf(old_way, q)))
+        self.assertTrue(any(d.startswith("header:") for d in self.vf(old_way, replica)))
         # the CLI writes it with signed_on, from the same build
         import json, unittest.mock
         out, cls = self.d / "owing.json", self.d / "owing-uvn.json"
@@ -155,18 +167,78 @@ class ProofRequiredAudienceTest(OwingProofTest):
             ["9", "m9", "user_verification_needed", "2026-09-01", "0", "0", "1", "0"],
             ["9", "n9", "user_verification_needed", "2026-10-21", "0", "0", "0", "0"],
             ["5", "m5b", "user_verification_needed", "2026-07-02", "0", "0", "1", "0"]]   # every owed row marked: none
-        res = self.build(query=lambda sql: [list(r) for r in rows])
+        res = self.build(query=q(rows))
         got = {u["user_id"]: (u["class"], u["request_ids"]) for u in res["users"] if u["class"] == op.NEW_ROWS}
         self.assertEqual(got, {"4": (op.NEW_ROWS, ["t4b"]), "9": (op.NEW_ROWS, ["n9"])})
         self.assertEqual((res["counts"]["list_uvn_new_rows_paid"], res["counts"]["list_uvn_new_rows_free"]), (1, 1))
         # the class list verifies against the replica + the ledger (its owed set = only the un-asked rows)
         lst = op.class_list(res, op.NEW_ROWS)
-        self.assertEqual(self.vf(lst, lambda sql: [list(r) for r in rows]), [])
+        self.assertEqual(self.vf(lst, q(rows)), [])
         db.execute("UPDATE verify_messages SET request_ids_json = '[\"t4\", \"t4b\"]' WHERE account_id = '4'")
         db.commit()                                              # asked since the build: user 4's set changed
-        self.assertTrue(any(d.startswith("4:") for d in self.vf(lst, lambda sql: [list(r) for r in rows])))
+        self.assertTrue(any(d.startswith("4:") for d in self.vf(lst, q(rows))))
         # never in the uvn-status family's list
         self.assertNotIn("4", [u["user_id"] for u in op.class_list(res, "uvn")["users"]])
+
+
+class OpenStatusPushdownTest(OwingProofTest):
+    """2026-11-12: `status NOT IN ('approved', 'rejected')` is not pushed to Postgres by the Trino connector, so the
+    owing read pulled all 5.65M rows (76 GB of JSON) and died on the statement timeout - census UNMEASURED, the
+    uvn-status family skipped. The open statuses are listed positively (pushed down, core's status index, ~10 s), and
+    a guard refuses the read whenever the table holds a status this module does not know."""
+
+    def test_the_query_lists_the_open_statuses_positively(self):
+        self.assertNotIn("NOT IN", op.REPLICA_SQL)                                # the unpushable form must not return
+        self.assertIn("AND cr.status IN ('unverified', 'processing', 'user_verification_needed')", op.REPLICA_SQL)
+        self.assertEqual(set(op.OPEN_STATUSES) & set(op.CLOSED_STATUSES), set())
+
+    def test_every_status_the_owed_rule_acts_on_is_read(self):
+        # owed() names rows by status; a status it acts on that the query never returns would be owed and never asked
+        for st in ("user_verification_needed", "unverified", "processing"):
+            owe, _ = op.owed([["1", "x", st, "d", "0", "1", "0", "1"]], held=True)
+            self.assertEqual(sorted(owe), ["x"], st)
+            self.assertIn(st, op.OPEN_STATUSES)
+
+    def test_the_guard_runs_first_and_the_header_names_it(self):
+        import hashlib
+        seen = []
+        res = self.build(query=q(ROWS, seen=seen))
+        self.assertEqual(seen, [op.STATUS_GUARD_SQL, op.REPLICA_SQL])
+        head = res["replica_facts"]
+        self.assertEqual(head["guard_query"], op.STATUS_GUARD_SQL)
+        self.assertEqual(head["guard_query_sha256"], hashlib.sha256(op.STATUS_GUARD_SQL.encode()).hexdigest())
+        self.assertEqual(head["query_sha256"], hashlib.sha256(op.REPLICA_SQL.encode()).hexdigest())
+
+    def test_closed_statuses_in_the_table_are_fine(self):
+        res = self.build(query=q(ROWS, statuses=["approved", "rejected", "unverified", "processing",
+                                                 "user_verification_needed"]))
+        self.assertEqual(len(res["users"]), 4)
+
+    def test_an_unknown_status_refuses_the_build_and_the_signing_read(self):
+        lst = self.build()
+        for where in ("build", "verify_facts"):
+            seen = []
+            fake = q(ROWS, statuses=["approved", "on_hold", "unverified"], seen=seen)
+            with self.assertRaises(op.OwingProofError, msg=where) as cm:
+                if where == "build":
+                    self.build(query=fake)
+                else:
+                    op.verify_facts(lst, fake, holds_path=self.holds, ledger_path=self.ledger)
+            self.assertIn("on_hold", str(cm.exception))
+            self.assertEqual(seen, [op.STATUS_GUARD_SQL], where)                 # refused BEFORE the audience read
+
+    def test_an_unreadable_guard_is_a_refusal_never_a_pass(self):
+        for statuses in ([], [""], ["   "]):                                      # nothing read / an empty status
+            with self.assertRaises(op.OwingProofError, msg=repr(statuses)):
+                self.build(query=q(ROWS, statuses=statuses))
+        with self.assertRaises(op.OwingProofError):                               # the wrong shape: audience rows
+            self.build(query=lambda sql: [list(r) for r in ROWS])
+
+    def test_a_guard_that_raises_stops_the_read(self):
+        def down(sql):
+            raise RuntimeError("trino failed: connection refused")
+        with self.assertRaises(RuntimeError):
+            self.build(query=down)
 
 
 if __name__ == "__main__":

@@ -49,6 +49,29 @@ class OwingProofError(RuntimeError):
     pass
 
 
+# The open statuses are listed POSITIVELY, and that is the whole scale fix (measured on the live replica 2026-11-12,
+# 5.65M rows / 76 GB, 96.6k of them open):
+#   - `status NOT IN ('approved', 'rejected')` is NOT pushed to Postgres by the Trino connector (EXPLAIN: a Trino-side
+#     `filterPredicate = $not(status IN ...)` over a scan constrained on deletedAt/userId only), so every row - both
+#     JSON columns included - crossed the wire to be filtered afterwards. It could not finish inside the replica's
+#     statement timeout, the census read `UNMEASURED`, and the uvn-status family was skipped for hours.
+#   - `status IN (<open>)` IS pushed (`constraint on [deletedAt, status, userId]`), Postgres answers it from core's own
+#     status index, and the same rows come back in ~10 s. Core's index is the owing index: transactionally current,
+#     nothing to backfill, no copy that can go stale and ask a user whose request was decided a minute ago.
+# The two forms are equal only while every status in the table is one this module knows, so that is CHECKED on every
+# read (STATUS_GUARD_SQL / check_statuses) and an unknown status refuses the read: a positive list must never narrow
+# the audience silently. Adding a status here is a decision about who is asked - classify it, never just append it.
+CLOSED_STATUSES = ("approved", "rejected")
+OPEN_STATUSES = ("unverified", "processing", "user_verification_needed")
+# Every distinct status in the table, by a loose index scan on core's status index (milliseconds in Postgres, and it
+# stays that way as the table grows; `SELECT status ... GROUP BY status` through Trino scans the column instead). The
+# statement goes to Postgres verbatim through the connector's read-only passthrough (precedent: cs_proof_feed/replica).
+STATUS_GUARD_SQL = ("SELECT status FROM TABLE(postgresql_core.system.query(query => '"
+                    "WITH RECURSIVE t AS ((SELECT status FROM public.credit_requests ORDER BY status LIMIT 1) "
+                    "UNION ALL SELECT (SELECT status FROM public.credit_requests WHERE status > t.status "
+                    "ORDER BY status LIMIT 1) FROM t WHERE t.status IS NOT NULL) "
+                    "SELECT status FROM t WHERE status IS NOT NULL'))")
+
 # r5 signing rule: the list header carries THIS exact, runnable SQL (and its sha256) - one string, the one replica_rows
 # runs at build and verify_facts re-runs at signing
 REPLICA_SQL = ("SELECT CAST(cr.userid AS varchar), lower(CAST(cr.id AS varchar)), cr.status, CAST(cr.createdat AS varchar), "
@@ -57,10 +80,27 @@ REPLICA_SQL = ("SELECT CAST(cr.userid AS varchar), lower(CAST(cr.id AS varchar))
                "CAST(CASE WHEN json_extract(cr.metadata, '$.proofRequest') IS NOT NULL THEN 1 ELSE 0 END AS varchar), "
                f"CAST(CASE WHEN {PROOF_REQUIRED} THEN 1 ELSE 0 END AS varchar) "
                "FROM postgresql_core.public.credit_requests cr WHERE cr.deletedat IS NULL AND cr.userid IS NOT NULL "
-               "AND cr.status NOT IN ('approved', 'rejected')")
+               "AND cr.status IN (" + ", ".join(f"'{s}'" for s in OPEN_STATUSES) + ")")
+
+
+def check_statuses(query: Query) -> list[str]:
+    """The statuses in the table right now; raises unless every one is known. Unreadable, empty or misshapen is a
+    refusal too - 'I could not read the statuses' must never pass as 'there are no unknown statuses'."""
+    rows = query(STATUS_GUARD_SQL)
+    if not rows or any(len(r) != 1 or not str(r[0]).strip() for r in rows):
+        raise OwingProofError("status guard unreadable: expected one status per row, got "
+                              f"{len(rows)} row(s) of shape {sorted({len(r) for r in rows})}")
+    seen = sorted({str(r[0]) for r in rows})
+    unknown = [s for s in seen if s not in CLOSED_STATUSES + OPEN_STATUSES]
+    if unknown:
+        raise OwingProofError(f"unknown credit_requests status {unknown}: the open-status list would silently leave "
+                              "those rows out, so the read is refused. Classify each as open or closed in "
+                              "owing_proof.OPEN_STATUSES / CLOSED_STATUSES")
+    return seen
 
 
 def replica_rows(query: Query) -> list[list[str]]:
+    check_statuses(query)
     rows = query(REPLICA_SQL)
     if any(len(r) != 8 or not str(r[0]).isdigit() or r[4] not in ("0", "1") or r[5] not in ("0", "1")
            or r[6] not in ("0", "1") or r[7] not in ("0", "1") for r in rows):
@@ -197,6 +237,9 @@ def facts_header(users: list[dict[str, Any]]) -> dict[str, Any]:
     core status, proof_required) as read at list-build time. `verify_facts` re-runs the same query at signing."""
     blob = json.dumps(sorted([u["user_id"], u["facts"]] for u in users), separators=(",", ":"))
     return {"query": REPLICA_SQL, "query_sha256": hashlib.sha256(REPLICA_SQL.encode()).hexdigest(),
+            # the header describes what actually ran: the positive status list is sound only with this guard, which
+            # replica_rows runs before the query at build and again at signing
+            "guard_query": STATUS_GUARD_SQL, "guard_query_sha256": hashlib.sha256(STATUS_GUARD_SQL.encode()).hexdigest(),
             "sha256": hashlib.sha256(blob.encode()).hexdigest()}
 
 

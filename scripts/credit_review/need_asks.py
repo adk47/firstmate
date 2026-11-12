@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from credit_review import comm_state, receipts, uvn_status, verify_notify  # noqa: E402
+from credit_review import comm_state, owing_proof, receipts, uvn_status, verify_notify  # noqa: E402
 
 CAMPAIGN = "proof-need-ask"
 LOCK = "PROOF_NEED_ASK_COPY_APPROVED"
@@ -271,13 +271,23 @@ def build(*, dv_store: str = DV_STORE, proof_store: str = PROOF_STORE, paying_pa
 # r5 #1582 (c): an E list carries the SAME signing header as owing_proof's - the exact runnable SQL, its sha256, and a
 # sha256 over every listed user's per-request facts (request id, core status, proof_required) as read at build time;
 # `verify-facts` re-runs THIS string at signing and names every user whose facts changed (they are out of the batch)
+#
+# The open statuses are owing_proof's ONE positive list, for the reason recorded there: `status NOT IN (...)` is not
+# pushed to Postgres by the Trino connector, so this read pulled every row of the table (measured on the live replica
+# 2026-11-12: 106.9 s as NOT IN, 8.2 s as the list, the same 96,767 rows with 0 differing ids or facts). A closed
+# request reads as `gone` here either way; a status nobody has classified would too, which is why the read runs
+# owing_proof's guard first and refuses on one.
 FACTS_SQL = ("SELECT CAST(cr.userid AS varchar), lower(CAST(cr.id AS varchar)), cr.status, "
              "CAST(coalesce(CAST(json_extract(cr.verificationdata, '$.proof_required') AS boolean), false) AS varchar) "
              "FROM postgresql_core.public.credit_requests cr WHERE cr.deletedat IS NULL AND cr.userid IS NOT NULL "
-             "AND cr.status NOT IN ('approved', 'rejected')")
+             "AND cr.status IN (" + ", ".join(f"'{s}'" for s in owing_proof.OPEN_STATUSES) + ")")
 
 
 def replica_facts(query: uvn_status.Query) -> dict[str, list[str]]:
+    try:
+        owing_proof.check_statuses(query)
+    except owing_proof.OwingProofError as exc:
+        raise NeedError(str(exc)) from exc
     rows = query(FACTS_SQL)
     if any(len(r) != 4 or not str(r[0]).isdigit() for r in rows):
         raise NeedError("unexpected replica facts row shape")
@@ -292,7 +302,10 @@ def facts_of(u: dict[str, Any], facts: dict[str, list[str]]) -> list[list[str]]:
 
 def facts_header(users: list[dict[str, Any]]) -> dict[str, str]:
     blob = json.dumps(sorted([u["user_id"], u.get("facts")] for u in users), separators=(",", ":"))
+    guard = owing_proof.STATUS_GUARD_SQL
     return {"query": FACTS_SQL, "query_sha256": hashlib.sha256(FACTS_SQL.encode()).hexdigest(),
+            # the header describes what actually ran: replica_facts runs this guard before the query, build and signing
+            "guard_query": guard, "guard_query_sha256": hashlib.sha256(guard.encode()).hexdigest(),
             "sha256": hashlib.sha256(blob.encode()).hexdigest()}
 
 

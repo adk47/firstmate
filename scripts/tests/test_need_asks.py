@@ -69,6 +69,9 @@ class NeedAsksTest(unittest.TestCase):
     def q(self, sql):
         if "FROM postgresql_core.public.users" in sql:
             return [[str(u), f"u{u}@x.com", "Jane", "", ""] for u in self.pending]
+        if sql == na.owing_proof.STATUS_GUARD_SQL:                # every status in the table, read before the facts
+            return [[s] for s in getattr(self, "table_statuses",
+                                         ("approved", "rejected", "unverified", "user_verification_needed"))]
         if sql == na.FACTS_SQL:                                   # r5 #1582 (c): the signing header's facts read
             st = getattr(self, "facts_status", {})
             return [[str(u), r.lower(), st.get(r, "user_verification_needed"), "false"]
@@ -770,6 +773,33 @@ class NeedAsksTest(unittest.TestCase):
         edited = copy.deepcopy(lst)
         edited["users"][0]["facts"] = [["x", "y", "z"]]
         self.assertTrue(any(d.startswith("header:") for d in na.verify_facts(edited, self.q)))
+
+    def test_the_facts_read_lists_open_statuses_and_refuses_a_status_nobody_classified(self):
+        # the NOT IN form is not pushed to Postgres (the whole table crossed the wire: 106.9 s vs 8.2 s live); the
+        # positive list is only equal to it while every status is known, so an unknown one refuses build AND signing
+        import hashlib
+        self.assertNotIn("NOT IN", na.FACTS_SQL)
+        self.assertIn("cr.status IN ('unverified', 'processing', 'user_verification_needed')", na.FACTS_SQL)
+        seen = []
+        real = self.q
+        lst = na.build(dv_store=self.dv, proof_store=self.proof, paying_path=str(self.paying),
+                       query=lambda sql: seen.append(sql) or real(sql))
+        guard = na.owing_proof.STATUS_GUARD_SQL
+        self.assertLess(seen.index(guard), seen.index(na.FACTS_SQL))                # the guard runs first
+        head = lst["replica_facts"]
+        self.assertEqual((head["guard_query"], head["guard_query_sha256"]),
+                         (guard, hashlib.sha256(guard.encode()).hexdigest()))
+        for bad in (("approved", "on_hold", "unverified"), (), ("",)):               # unknown, unreadable, blank
+            self.table_statuses = bad
+            seen.clear()
+            with self.assertRaises(na.NeedError):
+                na.build(dv_store=self.dv, proof_store=self.proof, paying_path=str(self.paying),
+                         query=lambda sql: seen.append(sql) or real(sql))
+            self.assertNotIn(na.FACTS_SQL, seen)                                    # refused before the facts read
+            with self.assertRaises(na.NeedError):
+                na.verify_facts(lst, self.q)
+        del self.table_statuses
+        self.assertEqual(na.verify_facts(lst, self.q), [])
 
     def test_an_identity_held_user_is_named_and_the_run_stays_balanced(self):
         # QA #1582: no professional id -> held before the gate -> named in filtered (never vanishes)
