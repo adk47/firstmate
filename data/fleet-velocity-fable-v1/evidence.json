@@ -1,0 +1,1815 @@
+{
+ "deploys": [
+  {
+   "conclusion": "failure",
+   "created_at": "2026-11-11T04:04:10Z",
+   "event": "schedule",
+   "head_sha": "28dbf31cf6c967d8da679fbf5437d9bc3f995e72",
+   "id": 42956794649,
+   "updated_at": "2026-11-11T04:04:20Z"
+  },
+  {
+   "conclusion": "failure",
+   "created_at": "2026-11-10T04:04:05Z",
+   "event": "schedule",
+   "head_sha": "87027e7404d56b5e97f7029933fc54c908a08228",
+   "id": 42753441441,
+   "updated_at": "2026-11-10T04:04:16Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-09T22:49:33Z",
+   "event": "workflow_dispatch",
+   "head_sha": "87027e7404d56b5e97f7029933fc54c908a08228",
+   "id": 42715288057,
+   "updated_at": "2026-11-09T23:09:28Z"
+  },
+  {
+   "conclusion": "cancelled",
+   "created_at": "2026-11-09T22:27:17Z",
+   "event": "workflow_dispatch",
+   "head_sha": "87027e7404d56b5e97f7029933fc54c908a08228",
+   "id": 42712018740,
+   "updated_at": "2026-11-09T22:49:37Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-09T22:23:49Z",
+   "event": "workflow_dispatch",
+   "head_sha": "87027e7404d56b5e97f7029933fc54c908a08228",
+   "id": 42711492712,
+   "updated_at": "2026-11-09T22:52:56Z"
+  },
+  {
+   "conclusion": "failure",
+   "created_at": "2026-11-09T22:12:19Z",
+   "event": "workflow_dispatch",
+   "head_sha": "87027e7404d56b5e97f7029933fc54c908a08228",
+   "id": 42709720944,
+   "updated_at": "2026-11-09T22:12:40Z"
+  },
+  {
+   "conclusion": "failure",
+   "created_at": "2026-11-09T22:06:50Z",
+   "event": "workflow_dispatch",
+   "head_sha": "2438c06810d11cef6135e09fb1dc08a39095530e",
+   "id": 42708831986,
+   "updated_at": "2026-11-09T22:07:21Z"
+  },
+  {
+   "conclusion": "failure",
+   "created_at": "2026-11-09T21:51:19Z",
+   "event": "workflow_dispatch",
+   "head_sha": "2438c06810d11cef6135e09fb1dc08a39095530e",
+   "id": 42706421007,
+   "updated_at": "2026-11-09T21:51:47Z"
+  },
+  {
+   "conclusion": "failure",
+   "created_at": "2026-11-09T21:41:23Z",
+   "event": "workflow_dispatch",
+   "head_sha": "2438c06810d11cef6135e09fb1dc08a39095530e",
+   "id": 42704859948,
+   "updated_at": "2026-11-09T21:42:12Z"
+  },
+  {
+   "conclusion": "failure",
+   "created_at": "2026-11-09T04:04:34Z",
+   "event": "schedule",
+   "head_sha": "cb339541647b0198000b9b8c9b2d8a81fb3b1fd6",
+   "id": 42559761930,
+   "updated_at": "2026-11-09T04:04:49Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-08T05:08:31Z",
+   "event": "workflow_dispatch",
+   "head_sha": "685a9e598838f291365368d42b108f9b9db3cc84",
+   "id": 42449584733,
+   "updated_at": "2026-11-08T05:31:02Z"
+  },
+  {
+   "conclusion": "failure",
+   "created_at": "2026-11-08T04:03:58Z",
+   "event": "schedule",
+   "head_sha": "9f25b0b23c31f66f744d4bfdbd0c6452786c22e7",
+   "id": 42445264723,
+   "updated_at": "2026-11-08T04:04:13Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-08T02:30:20Z",
+   "event": "workflow_dispatch",
+   "head_sha": "9f25b0b23c31f66f744d4bfdbd0c6452786c22e7",
+   "id": 42438822283,
+   "updated_at": "2026-11-08T02:54:14Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-07T15:31:56Z",
+   "event": "workflow_dispatch",
+   "head_sha": "678c667a3fb771032a5ee6ba8df2c3d56064c922",
+   "id": 42386827768,
+   "updated_at": "2026-11-07T15:53:37Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-07T09:06:50Z",
+   "event": "workflow_dispatch",
+   "head_sha": "07378d145d0299405b53915d6aba4fa0e5dd9a9d",
+   "id": 42358325991,
+   "updated_at": "2026-11-07T09:27:38Z"
+  },
+  {
+   "conclusion": "failure",
+   "created_at": "2026-11-07T04:04:15Z",
+   "event": "schedule",
+   "head_sha": "0f6f8d41df248bf6c24e057298d0e75f0527a92a",
+   "id": 42336790465,
+   "updated_at": "2026-11-07T04:04:23Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-07T03:35:21Z",
+   "event": "workflow_dispatch",
+   "head_sha": "0f6f8d41df248bf6c24e057298d0e75f0527a92a",
+   "id": 42334694768,
+   "updated_at": "2026-11-07T03:56:30Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-06T21:37:16Z",
+   "event": "workflow_dispatch",
+   "head_sha": "132bc06a1020f7a8abf67dc42bda4bc9dda6eab4",
+   "id": 42298230831,
+   "updated_at": "2026-11-06T22:03:22Z"
+  },
+  {
+   "conclusion": "failure",
+   "created_at": "2026-11-06T20:19:54Z",
+   "event": "workflow_dispatch",
+   "head_sha": "26026ec6908d2681f7565f196bd5487754f0e0c2",
+   "id": 42287427559,
+   "updated_at": "2026-11-06T20:20:07Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-06T19:36:02Z",
+   "event": "workflow_dispatch",
+   "head_sha": "1e36d03fe1f255b93ee2e90a196d8480b6cb8286",
+   "id": 42281056053,
+   "updated_at": "2026-11-06T19:59:35Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-06T19:33:40Z",
+   "event": "workflow_dispatch",
+   "head_sha": "1e36d03fe1f255b93ee2e90a196d8480b6cb8286",
+   "id": 42280695491,
+   "updated_at": "2026-11-06T19:59:26Z"
+  },
+  {
+   "conclusion": "failure",
+   "created_at": "2026-11-06T19:06:48Z",
+   "event": "workflow_dispatch",
+   "head_sha": "1e36d03fe1f255b93ee2e90a196d8480b6cb8286",
+   "id": 42276748779,
+   "updated_at": "2026-11-06T19:07:02Z"
+  },
+  {
+   "conclusion": "failure",
+   "created_at": "2026-11-06T18:59:52Z",
+   "event": "workflow_dispatch",
+   "head_sha": "1e36d03fe1f255b93ee2e90a196d8480b6cb8286",
+   "id": 42275689227,
+   "updated_at": "2026-11-06T19:00:17Z"
+  },
+  {
+   "conclusion": "failure",
+   "created_at": "2026-11-06T18:49:34Z",
+   "event": "workflow_dispatch",
+   "head_sha": "1e36d03fe1f255b93ee2e90a196d8480b6cb8286",
+   "id": 42274189385,
+   "updated_at": "2026-11-06T18:49:44Z"
+  },
+  {
+   "conclusion": "failure",
+   "created_at": "2026-11-06T13:49:50Z",
+   "event": "workflow_dispatch",
+   "head_sha": "b1ca6d37a3a219e8bd2f92758683f3b88b0d6207",
+   "id": 42228658226,
+   "updated_at": "2026-11-06T14:01:03Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-06T13:11:46Z",
+   "event": "workflow_dispatch",
+   "head_sha": "e10f4a38fea4f20d5e4f7d5f03c044338ad457b1",
+   "id": 42223530301,
+   "updated_at": "2026-11-06T13:35:09Z"
+  },
+  {
+   "conclusion": "failure",
+   "created_at": "2026-11-06T13:02:57Z",
+   "event": "workflow_dispatch",
+   "head_sha": "e10f4a38fea4f20d5e4f7d5f03c044338ad457b1",
+   "id": 42222344994,
+   "updated_at": "2026-11-06T13:03:10Z"
+  },
+  {
+   "conclusion": "failure",
+   "created_at": "2026-11-06T12:36:08Z",
+   "event": "workflow_dispatch",
+   "head_sha": "e10f4a38fea4f20d5e4f7d5f03c044338ad457b1",
+   "id": 42218924105,
+   "updated_at": "2026-11-06T12:36:24Z"
+  },
+  {
+   "conclusion": "cancelled",
+   "created_at": "2026-11-06T11:21:02Z",
+   "event": "workflow_dispatch",
+   "head_sha": "b9fc186ea28ad53e02a3a427052584eb05bbd077",
+   "id": 42209589778,
+   "updated_at": "2026-11-06T11:21:24Z"
+  },
+  {
+   "conclusion": "failure",
+   "created_at": "2026-11-06T11:20:43Z",
+   "event": "workflow_dispatch",
+   "head_sha": "b9fc186ea28ad53e02a3a427052584eb05bbd077",
+   "id": 42209551100,
+   "updated_at": "2026-11-06T11:38:06Z"
+  },
+  {
+   "conclusion": "failure",
+   "created_at": "2026-11-06T09:58:37Z",
+   "event": "workflow_dispatch",
+   "head_sha": "36226d6ce6803a7db76e30335a86f6f8d36196df",
+   "id": 42199067199,
+   "updated_at": "2026-11-06T10:03:56Z"
+  },
+  {
+   "conclusion": "failure",
+   "created_at": "2026-11-06T09:46:00Z",
+   "event": "workflow_dispatch",
+   "head_sha": "36226d6ce6803a7db76e30335a86f6f8d36196df",
+   "id": 42197499324,
+   "updated_at": "2026-11-06T10:03:35Z"
+  },
+  {
+   "conclusion": "failure",
+   "created_at": "2026-11-06T09:38:38Z",
+   "event": "workflow_dispatch",
+   "head_sha": "36226d6ce6803a7db76e30335a86f6f8d36196df",
+   "id": 42196550980,
+   "updated_at": "2026-11-06T09:39:53Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-06T05:42:32Z",
+   "event": "workflow_dispatch",
+   "head_sha": "c2a0d7dc3f5e25af183c62bebe2d9d136827a9bb",
+   "id": 42170004793,
+   "updated_at": "2026-11-06T06:01:47Z"
+  },
+  {
+   "conclusion": "failure",
+   "created_at": "2026-11-06T04:04:34Z",
+   "event": "schedule",
+   "head_sha": "edd2fa6bffc230c28e856fba2b90ccd3a79032f2",
+   "id": 42160299996,
+   "updated_at": "2026-11-06T04:05:17Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-05T11:48:49Z",
+   "event": "workflow_dispatch",
+   "head_sha": "78c4b751530d2ae4fa865ebb75685a3b9b41a2b7",
+   "id": 42021981460,
+   "updated_at": "2026-11-05T12:25:59Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-05T04:04:26Z",
+   "event": "schedule",
+   "head_sha": "9206d49989f69f5669c62d9b8a0aaa056a4e92e8",
+   "id": 41965490673,
+   "updated_at": "2026-11-05T04:39:03Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-04T21:10:51Z",
+   "event": "workflow_dispatch",
+   "head_sha": "e671731b85d113c5ee4ec5ddcbf95e29c37fc9cf",
+   "id": 41913636998,
+   "updated_at": "2026-11-04T21:40:26Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-04T20:01:22Z",
+   "event": "workflow_dispatch",
+   "head_sha": "587cec0059ace9fccd4d4878242ce61f82ba852f",
+   "id": 41902560096,
+   "updated_at": "2026-11-04T20:29:57Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-04T12:18:01Z",
+   "event": "workflow_dispatch",
+   "head_sha": "b5fb98300981a154418a7e987780933f3b766dce",
+   "id": 41828068176,
+   "updated_at": "2026-11-04T12:41:23Z"
+  },
+  {
+   "conclusion": "failure",
+   "created_at": "2026-11-04T10:32:06Z",
+   "event": "workflow_dispatch",
+   "head_sha": "f419b62697b5f35ccb6855165eccd4a0550b638b",
+   "id": 41814809552,
+   "updated_at": "2026-11-04T10:58:24Z"
+  },
+  {
+   "conclusion": "failure",
+   "created_at": "2026-11-04T09:57:23Z",
+   "event": "workflow_dispatch",
+   "head_sha": "a88909d1cd56c471bad2b4ead2770612dc58e78f",
+   "id": 41810962337,
+   "updated_at": "2026-11-04T10:29:46Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-04T08:18:26Z",
+   "event": "workflow_dispatch",
+   "head_sha": "45e62298ff6d7d1edbefb1630e63c7e983450649",
+   "id": 41798487598,
+   "updated_at": "2026-11-04T08:40:27Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-04T07:55:31Z",
+   "event": "workflow_dispatch",
+   "head_sha": "88e417b65491a84f32c7238bd5db246102962e9f",
+   "id": 41795636763,
+   "updated_at": "2026-11-04T08:17:12Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-04T04:04:16Z",
+   "event": "schedule",
+   "head_sha": "0ea2692a27dba884c131134bf4042e7f5e6f8aaf",
+   "id": 41770933002,
+   "updated_at": "2026-11-04T04:26:06Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-04T03:08:19Z",
+   "event": "workflow_dispatch",
+   "head_sha": "0ea2692a27dba884c131134bf4042e7f5e6f8aaf",
+   "id": 41765211276,
+   "updated_at": "2026-11-04T03:27:35Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-03T19:06:25Z",
+   "event": "workflow_dispatch",
+   "head_sha": "e1b974999a8bf91b22c3b5405d5f039fe8a92a0b",
+   "id": 41700131211,
+   "updated_at": "2026-11-03T19:23:39Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-03T17:13:57Z",
+   "event": "workflow_dispatch",
+   "head_sha": "6b643ed702ab06d3a8c9708fc8b736502bd57ec1",
+   "id": 41682199054,
+   "updated_at": "2026-11-03T17:30:20Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-03T16:38:37Z",
+   "event": "workflow_dispatch",
+   "head_sha": "9b804e62dffb69b65e22e4c3d20f4e78857c628d",
+   "id": 41676292968,
+   "updated_at": "2026-11-03T16:58:45Z"
+  },
+  {
+   "conclusion": "cancelled",
+   "created_at": "2026-11-03T15:12:13Z",
+   "event": "workflow_dispatch",
+   "head_sha": "ed37f313a4e25b5d463f933a2cdf90dfb8673004",
+   "id": 41661411341,
+   "updated_at": "2026-11-03T15:12:36Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-03T15:05:12Z",
+   "event": "workflow_dispatch",
+   "head_sha": "ed37f313a4e25b5d463f933a2cdf90dfb8673004",
+   "id": 41660177716,
+   "updated_at": "2026-11-03T15:21:18Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-03T12:19:39Z",
+   "event": "workflow_dispatch",
+   "head_sha": "a1e931825d62613208c9783cabdccd4f8f744950",
+   "id": 41634761168,
+   "updated_at": "2026-11-03T12:37:03Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-03T11:35:14Z",
+   "event": "workflow_dispatch",
+   "head_sha": "ff8c694170eae8b37ea085db83ed753865979a13",
+   "id": 41628726339,
+   "updated_at": "2026-11-03T11:50:55Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-03T04:04:23Z",
+   "event": "schedule",
+   "head_sha": "801b37046a88b17b88ec15b2c1f3a49aec4e6086",
+   "id": 41575922508,
+   "updated_at": "2026-11-03T04:19:43Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-02T14:27:49Z",
+   "event": "workflow_dispatch",
+   "head_sha": "93b85994560028703ba4fa5075b8211827c4cd85",
+   "id": 41462152053,
+   "updated_at": "2026-11-02T14:42:17Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-02T04:04:21Z",
+   "event": "schedule",
+   "head_sha": "e4cedc0cc4cb8fec055a304c9e48ff924b9786ed",
+   "id": 41386404552,
+   "updated_at": "2026-11-02T04:19:42Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-02T02:24:29Z",
+   "event": "workflow_dispatch",
+   "head_sha": "e4cedc0cc4cb8fec055a304c9e48ff924b9786ed",
+   "id": 41377558931,
+   "updated_at": "2026-11-02T02:38:07Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-01T23:26:49Z",
+   "event": "workflow_dispatch",
+   "head_sha": "78c1a90a1a93f420c256ecf199a9ab2f12086f5f",
+   "id": 41362141145,
+   "updated_at": "2026-11-01T23:40:02Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-01T15:30:54Z",
+   "event": "workflow_dispatch",
+   "head_sha": "5e733e0f3a2fc986e408c9df73a2d66a38465527",
+   "id": 41321603155,
+   "updated_at": "2026-11-01T15:48:28Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-01T14:16:00Z",
+   "event": "workflow_dispatch",
+   "head_sha": "b6f4a8135bcead0b4f6d9fd7c5f2d632606763fc",
+   "id": 41315329370,
+   "updated_at": "2026-11-01T14:34:28Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-01T09:35:40Z",
+   "event": "workflow_dispatch",
+   "head_sha": "231d6c47dfeb01950bfc20613e972a0dd21059eb",
+   "id": 41293806685,
+   "updated_at": "2026-11-01T09:51:23Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-01T06:49:39Z",
+   "event": "workflow_dispatch",
+   "head_sha": "e4f65c4aa2d44f10cb161e38d1d0c8ef18b984ee",
+   "id": 41282365809,
+   "updated_at": "2026-11-01T07:07:53Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-01T04:04:27Z",
+   "event": "schedule",
+   "head_sha": "ac5037ce32e4b770fd95a0f498eea0dd6b792338",
+   "id": 41271628860,
+   "updated_at": "2026-11-01T04:20:22Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-11-01T00:13:52Z",
+   "event": "workflow_dispatch",
+   "head_sha": "de903f20022dc4073f04fb502b68b2804416f223",
+   "id": 41255822809,
+   "updated_at": "2026-11-01T00:35:14Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-31T20:57:12Z",
+   "event": "workflow_dispatch",
+   "head_sha": "4d9549f66bd15754154d24d109d0d092540afea9",
+   "id": 41241281233,
+   "updated_at": "2026-10-31T21:16:02Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-31T18:16:11Z",
+   "event": "workflow_dispatch",
+   "head_sha": "76704a1479475c410e69a266071c89072e9806c9",
+   "id": 41228567806,
+   "updated_at": "2026-10-31T18:36:47Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-31T16:21:11Z",
+   "event": "workflow_dispatch",
+   "head_sha": "45786183b182f9bb563a3e12eb8a588153dfc002",
+   "id": 41219270583,
+   "updated_at": "2026-10-31T16:42:35Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-31T12:21:35Z",
+   "event": "workflow_dispatch",
+   "head_sha": "3a5db4eed61949e3b7069a1554334f7a521ce92f",
+   "id": 41200745485,
+   "updated_at": "2026-10-31T12:42:27Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-31T10:35:25Z",
+   "event": "workflow_dispatch",
+   "head_sha": "3a4c66fce8b01d478591d93fb1993e5720f9556f",
+   "id": 41193373988,
+   "updated_at": "2026-10-31T10:55:47Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-31T10:12:33Z",
+   "event": "workflow_dispatch",
+   "head_sha": "619249a440053e32b35c4b0e0c9883323a3a5cee",
+   "id": 41191809459,
+   "updated_at": "2026-10-31T10:33:08Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-31T09:44:07Z",
+   "event": "workflow_dispatch",
+   "head_sha": "03c46a0b42922e4e8180c643ac454ea64f5b0801",
+   "id": 41189890065,
+   "updated_at": "2026-10-31T10:06:08Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-31T07:23:29Z",
+   "event": "workflow_dispatch",
+   "head_sha": "a8b536114241ca15e96aed58a0b9f422986f8324",
+   "id": 41180418051,
+   "updated_at": "2026-10-31T07:44:22Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-31T06:06:43Z",
+   "event": "workflow_dispatch",
+   "head_sha": "09795799703b87b812b5fe5b8ce0bcff45d943bc",
+   "id": 41175242353,
+   "updated_at": "2026-10-31T06:26:29Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-31T04:37:09Z",
+   "event": "workflow_dispatch",
+   "head_sha": "0ef752e2bf99c71d7eb3e760a42782a77596e3ec",
+   "id": 41169309828,
+   "updated_at": "2026-10-31T04:54:42Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-31T04:04:13Z",
+   "event": "schedule",
+   "head_sha": "9b3037aa1c3f6cfba57f4c5e557e1634c8287825",
+   "id": 41167012510,
+   "updated_at": "2026-10-31T04:19:20Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-31T02:22:22Z",
+   "event": "workflow_dispatch",
+   "head_sha": "6f48ec91ac03501ecd8ad01e13183027372c8f5d",
+   "id": 41159703176,
+   "updated_at": "2026-10-31T02:37:45Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-31T00:21:13Z",
+   "event": "workflow_dispatch",
+   "head_sha": "f7e7108a15da5ffe90725ed700f1ae5458451a53",
+   "id": 41149700229,
+   "updated_at": "2026-10-31T00:39:04Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-30T22:36:37Z",
+   "event": "workflow_dispatch",
+   "head_sha": "088280d5a3824a28525e79c1e3c77a01650d5c3f",
+   "id": 41139262178,
+   "updated_at": "2026-10-30T22:53:47Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-30T21:21:35Z",
+   "event": "workflow_dispatch",
+   "head_sha": "940d699ba5a3011b97dabb96cb17ffdaaa6b87bb",
+   "id": 41130454623,
+   "updated_at": "2026-10-30T21:36:41Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-30T18:06:36Z",
+   "event": "workflow_dispatch",
+   "head_sha": "a9f76a07bf6ef8f180f9efebd3c49ff428a63e0d",
+   "id": 41104011630,
+   "updated_at": "2026-10-30T18:27:33Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-30T13:50:54Z",
+   "event": "workflow_dispatch",
+   "head_sha": "3f4b3e5df31e104ec989992de539d0e06b40bb90",
+   "id": 41066643674,
+   "updated_at": "2026-10-30T14:07:41Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-30T12:15:35Z",
+   "event": "workflow_dispatch",
+   "head_sha": "a51ebe71b7eb157e6a50871dbbcf0f182c9331c0",
+   "id": 41053994306,
+   "updated_at": "2026-10-30T12:35:45Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-30T07:40:13Z",
+   "event": "workflow_dispatch",
+   "head_sha": "2c43aa3aadb32e67527dc4ab93759df78681e1a9",
+   "id": 41021498046,
+   "updated_at": "2026-10-30T07:52:25Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-30T04:25:32Z",
+   "event": "workflow_dispatch",
+   "head_sha": "8f526deba538f3d1ad2bf10eb3cad1458a0b4992",
+   "id": 41002816544,
+   "updated_at": "2026-10-30T04:45:42Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-30T04:04:55Z",
+   "event": "schedule",
+   "head_sha": "f0a980e898e4a7e64e614fd6cf6cc8ae23d0b5e9",
+   "id": 41000880358,
+   "updated_at": "2026-10-30T04:22:48Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-30T01:33:03Z",
+   "event": "workflow_dispatch",
+   "head_sha": "f0a980e898e4a7e64e614fd6cf6cc8ae23d0b5e9",
+   "id": 40986510384,
+   "updated_at": "2026-10-30T01:46:09Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-30T00:59:18Z",
+   "event": "workflow_dispatch",
+   "head_sha": "11e5b4753b1824dc9ba0dd8e63cf682613791591",
+   "id": 40983085691,
+   "updated_at": "2026-10-30T01:20:41Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-29T22:15:10Z",
+   "event": "workflow_dispatch",
+   "head_sha": "bfa5ec6108a7286c9c0106c58e1a8dd842a39f88",
+   "id": 40964408089,
+   "updated_at": "2026-10-29T22:34:55Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-29T21:19:25Z",
+   "event": "workflow_dispatch",
+   "head_sha": "95c66b9def6c0e8bff106d0168cf01a9bc4dbd0d",
+   "id": 40956800254,
+   "updated_at": "2026-10-29T21:35:43Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-29T20:18:50Z",
+   "event": "workflow_dispatch",
+   "head_sha": "b76b5045847388e14f4af1422b5f8f737823bcfd",
+   "id": 40947897246,
+   "updated_at": "2026-10-29T20:38:13Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-29T16:49:09Z",
+   "event": "workflow_dispatch",
+   "head_sha": "6732c82bfe885fa2ca03eebe5f4aef8f0fbad133",
+   "id": 40915286753,
+   "updated_at": "2026-10-29T17:10:58Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-29T10:30:18Z",
+   "event": "workflow_dispatch",
+   "head_sha": "34a40594db28172eca7fd071a55ee1fe465077d2",
+   "id": 40858073599,
+   "updated_at": "2026-10-29T10:47:01Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-29T06:07:34Z",
+   "event": "workflow_dispatch",
+   "head_sha": "a7c475946aa02b6eb1f982ba632371b054167077",
+   "id": 40827335427,
+   "updated_at": "2026-10-29T06:26:11Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-29T04:05:07Z",
+   "event": "schedule",
+   "head_sha": "67a67f1abe6cf744c9c10aa2c1ab4a8702c5af13",
+   "id": 40815730685,
+   "updated_at": "2026-10-29T04:18:16Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-29T02:55:08Z",
+   "event": "workflow_dispatch",
+   "head_sha": "4424eda144c47375a70604dde50d36bd3dd221e3",
+   "id": 40809163388,
+   "updated_at": "2026-10-29T03:12:14Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-29T00:57:31Z",
+   "event": "workflow_dispatch",
+   "head_sha": "f126582bb9da824f3553bab5cf3f42e6794020f3",
+   "id": 40797399263,
+   "updated_at": "2026-10-29T01:13:14Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-28T23:06:39Z",
+   "event": "workflow_dispatch",
+   "head_sha": "602d8b401f1839accf1e94a3738dc001da6bd9ea",
+   "id": 40784981697,
+   "updated_at": "2026-10-28T23:23:43Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-28T19:44:09Z",
+   "event": "workflow_dispatch",
+   "head_sha": "c0363711cc58e55e763976026975870358d48b4e",
+   "id": 40756943393,
+   "updated_at": "2026-10-28T20:11:23Z"
+  },
+  {
+   "conclusion": "success",
+   "created_at": "2026-10-28T16:54:46Z",
+   "event": "workflow_dispatch",
+   "head_sha": "e077ee9e0469f20570a499ee621dad85cf4e3554",
+   "id": 40730596294,
+   "updated_at": "2026-10-28T17:21:15Z"
+  },
+  {
+   "conclusion": "failure",
+   "created_at": "2026-10-28T16:05:41Z",
+   "event": "workflow_dispatch",
+   "head_sha": "30755af5130157230513095902deef03fc448f49",
+   "id": 40722546980,
+   "updated_at": "2026-10-28T16:16:58Z"
+  }
+ ],
+ "main_order": [
+  "994867229d0100b226514e19a2573831f232cee3",
+  "d9e67e21b44832638a3c56dd952147357c03d7b8",
+  "2e3e55ac664cd372b7078565d85f5a3a26a5c1cd",
+  "3a3bdcd4519c145fee4086ad8cbc5d81ee1195b9",
+  "466feac87f4bed27d5288c8752404a5d41b9a98f",
+  "583886f3a0d60679d63fdb5181a725203be05035",
+  "28dbf31cf6c967d8da679fbf5437d9bc3f995e72",
+  "9da5123b50dce5495c8ab8443b5e35d00c39991f",
+  "36fd678eaaeabc842a2687c3b681b5cca162b9cd",
+  "87027e7404d56b5e97f7029933fc54c908a08228",
+  "928fa680d5d0683d3017168848da2704351906fa",
+  "2438c06810d11cef6135e09fb1dc08a39095530e",
+  "b2110f9c8e6de07630452efb1f456445f8946a07",
+  "1074f8b7aed8e2ced8ebaa2a58187ee85a0ff6f1",
+  "479447b91d7db7bf1b601288b5d3c476c72cfbd1",
+  "6d267aeb58d44bb38e0964dd5d5a1ceacf8b818e",
+  "39182205cf5949a4afd0482c5de57d799ca405b9",
+  "68c9e4f91e95a25f0114e74276328bff931df072",
+  "d9f0d9d7de2bc1500b610974c9cac5df4a0db967",
+  "94fbfb19e7cf6544d86b39aaaf5cbfa7d95a9c4e",
+  "092a54ee4554e39301e3b60f604fc51e0bcb0cca",
+  "439a4f3b5ffb5476aaed4482664613114478e0aa",
+  "31c7f8ce3160a8ce23c1289f8ffab27e79df482e",
+  "5333c2d75482ceeccf5c77f3c6aa2a49a2e1d856",
+  "fbc9cacc87a3b945252f6a1f07dcd8bd77c38bed",
+  "9bdb57281d47324aa59356a71a64d3f63f517454",
+  "e864b275e8213d7451850ec44272393ef1c3caca",
+  "5afb95206002c69c262b318b1c41eb89738d186d",
+  "bb600ebcb99d1a42614263b3d32f7d5a3cbe5e93",
+  "2403e4d3d5e477b7c4a60a3077c386fc0cd023a7",
+  "62b27b2a4f80fc82851c5420ff28b5ed39c5f563",
+  "cb339541647b0198000b9b8c9b2d8a81fb3b1fd6",
+  "f36a13df7f04470a656acbd2bc94850fe8b04df9",
+  "1b2ecc3cd4c360f33b77f441afc78d6932e30588",
+  "ccd58cd42222679f17aa9b6201bb993dd0dc6702",
+  "f36c371f4a3750d2bee5b3dc411a440dacc7c8ae",
+  "c9227bff5d46629a3b4c74e0c9a429e0aebc5aee",
+  "3cc1af89018e52fbf6c7680437a66670bd6da9b1",
+  "20f4b8966346972c87f232ac2a3a7803345dbf75",
+  "45a929200fcd3fb4d167a31fe7ca22d46869df7b",
+  "4ab73608047a7f736e110bfd1045b9079ba751a6",
+  "88ab4b29c8bcc25504fd51abb2ce75fa81ebb982",
+  "37c897b19c7cbe2bad5455cbf3e86e9d4a2f14e5",
+  "c149026c38a4f4ff7fa9d2c3d0b42882ae4116fd",
+  "d3be1d11f18927f9d36fed5e5fc1df8485cdd7d2",
+  "c4ba93af253ac1d7bdc5461277d3413dab3505c0",
+  "b767acf570ead3c67b3c91748515f8a413f6c0c1",
+  "77dffb0e67c8e090a53488f857f81c7eda8de125",
+  "a161d5aecb1d5e30bc78dece525c0ba629c781d3",
+  "2d0d8642edbac06df506efc4c5fc84b0e3e41f32",
+  "685a9e598838f291365368d42b108f9b9db3cc84",
+  "9f25b0b23c31f66f744d4bfdbd0c6452786c22e7",
+  "bf68dd31e65b491a7d2386cb83b37f35b43f086b",
+  "121a502af2605eb52e6a761149d438cf152aae61",
+  "d4bdac948497e3445d2c92507bcc8dd8815a3799",
+  "8eef0a5d2bc963feafa558ade6493b356d5147c5",
+  "a21bc57d824a4757e788a7d0ec3b2046adc27fa9",
+  "678c667a3fb771032a5ee6ba8df2c3d56064c922",
+  "455c0177f68137d5408e3b3e66997587b7f4a4be",
+  "3583a4838ddef01edaec970c2d1f1ed6e418e953",
+  "e58f8f75f91fea58746abb6df9c967235ead3215",
+  "9303c33a72c47d1f35dd62a191322e2c4cb71689",
+  "57689890fc5dd62a9eac7e45eb16cf47acb902de",
+  "07378d145d0299405b53915d6aba4fa0e5dd9a9d",
+  "867a424ad0e8465bbd43b8e5f0c4e7401e3029e5",
+  "0f6f8d41df248bf6c24e057298d0e75f0527a92a",
+  "b325c36ccf7e574e7479226477cff3ab00b6303e",
+  "e685d60df00188b5333b0f97c701595bcaf08901",
+  "2594f084ec3ce01361275dac8f9a45604803babb",
+  "0c7d3ef98014d5ebe1c7434d647dab4a7fa1a086",
+  "2dff611f32df8eac4ce8031eb45acadac102053c",
+  "7aea72daee62d7c29cd7616824e4564acc43d5ac",
+  "201a03c5b775f9d05b22fae5c775c01d46a9a8fb",
+  "132bc06a1020f7a8abf67dc42bda4bc9dda6eab4",
+  "39d5c63c42a957dc7c67b15bfd78ba125bda99a7",
+  "01f860cc9448ee83a18d3fddf466e1f8a54bafe7",
+  "26026ec6908d2681f7565f196bd5487754f0e0c2",
+  "d83ff9a00a050ef8702a5b9061e836bfb351a9f1",
+  "090fa0121914d1734e914beea48e17afcc4ec125",
+  "740ace056b4cd3cbff8af06ae9dc87823590b48d",
+  "1e36d03fe1f255b93ee2e90a196d8480b6cb8286",
+  "d78c6739fe65b21827214581b09879a5fd7ffecb",
+  "7053e0d9267151cffd0dab79c076956ed123691f",
+  "428b23e65710b39311dba6b16238de7f147303e1",
+  "61956c66c3a5eec737ca92a79c8b82a4a8ec7aba",
+  "362e9eeaf671cf4342c316e0c8c719f4f8c5633f",
+  "913ccbea1f3aab6ac52b2d7466935c603b978d6c",
+  "aebc1a02d3b82e8e908b662e06d59faa96bc10c9",
+  "c97ff0c0993f0f70d98dad9f863ff9bc9fc01a91",
+  "b1ca6d37a3a219e8bd2f92758683f3b88b0d6207",
+  "1925c21babe13b37a79aa1807219119eae0b4d0f",
+  "7ab67ac3849d6cd3c4f33bbc9f40339e19d5bb5e",
+  "e10f4a38fea4f20d5e4f7d5f03c044338ad457b1",
+  "e38efe1a030494efe9e8fca784ad5771f45aee6a",
+  "cf2ef8bb494828f88016404d9d8c506c2ebef868",
+  "eec0c9773911c38501b4d88ae75ef43f993f37fa",
+  "b9fc186ea28ad53e02a3a427052584eb05bbd077",
+  "36226d6ce6803a7db76e30335a86f6f8d36196df",
+  "d2b3fb4158eed0ee0c21f4feccc8dff1a609a915",
+  "8e41a09861feddb55469acd6054de306531d70b9"
+ ],
+ "prs": [
+  {
+   "closed_at": "2026-11-11T18:50:38Z",
+   "commit_times": [
+    "2026-11-11T04:36:32Z",
+    "2026-11-11T06:16:37Z",
+    "2026-11-11T06:25:39Z",
+    "2026-11-11T07:15:13Z",
+    "2026-11-11T11:52:04Z",
+    "2026-11-11T12:42:54Z"
+   ],
+   "created_at": "2026-11-11T04:36:47Z",
+   "head_sha": "db0d5994aca590e8be31a8ac1432e12b550cf23d",
+   "merge_commit_sha": "2e3e55ac664cd372b7078565d85f5a3a26a5c1cd",
+   "merged_at": "2026-11-11T18:50:38Z",
+   "number": 1882,
+   "reviews": [
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot (automated review)**\n\n\u26d4 **Verdict: NO-GO** \u2014 0 Critical, 2 Important blocking findings.\n\n\ud83d\udfe1 **Important #1 \u2014 tier missing (PR metadata).** This targets `main` and changes the production outbound-send tick, but the PR has no `tier:N` label and no `Tier: N, because ...` body line. A production-reachable change without either declaration cannot pass the required impact classification. ",
+     "commit_id": "d59b1eed272a036e45baabcad7d638b4d5ea642b",
+     "submitted_at": "2026-11-11T05:23:59Z"
+    },
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot** (automated review)\n\n\u26d4 **Verdict: NO-GO** \u2014 1 unresolved \ud83d\udfe1 Important code finding; 0 \ud83d\udd34 Critical. The prior alert-delivery finding is fixed and its thread is resolved.\n\n**Finding 1 \u2014 \ud83d\udfe1 Important:** A deferred wait-apology family is treated as an ordinary failure, so credit_families continues into later families. When a deploy apply lock or transient Trino read makes wait-apology pa",
+     "commit_id": "1de7783a602d0279594d34775c85b3ffd8f4823b",
+     "submitted_at": "2026-11-11T06:31:12Z"
+    },
+    {
+     "body": "",
+     "commit_id": "1de7783a602d0279594d34775c85b3ffd8f4823b",
+     "submitted_at": "2026-11-11T06:31:38Z"
+    },
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot (automated review)**\n\n\u26d4 **Verdict: NO-GO** \u2014 0 Critical, 1 Important blocking finding carried forward from the prior review.\n\n\ud83d\udfe1 **Important #1 \u2014 wait-apology deferral is converted to failure and does not stop the credit group** (scripts/credit-verify-outbound.sh:1520, 1551). When wait-apology paid encounters a held deploy lock or transient Trino read, family returns rc 2, but apolo",
+     "commit_id": "1de7783a602d0279594d34775c85b3ffd8f4823b",
+     "submitted_at": "2026-11-11T07:10:20Z"
+    },
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot (automated review)**\n\n**Verdict: GO \u2014 0 unresolved Critical, 0 unresolved Important.** Reviewed `0a34028` through the 8 lenses. The deadline guard makes an impossible send budget visible, confirmed delivery failure is logged, and `fam` preserves failures without swallowing deferrals or hard-stop conditions. The previous wait-apology deferral finding is fixed and its thread resolved",
+     "commit_id": "0a340286d3b5d8e42a8d14ed5105f3e10956d099",
+     "submitted_at": "2026-11-11T07:23:03Z"
+    },
+    {
+     "body": "",
+     "commit_id": "0a340286d3b5d8e42a8d14ed5105f3e10956d099",
+     "submitted_at": "2026-11-11T07:23:21Z"
+    },
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot (automated review)**\n\n\u26a0\ufe0f **REBASE WARNING [0a34028] \u2014 acknowledged.** CI flags 9 deleted lines in `scripts/credit-verify-outbound.sh` from recent main commits. These are the old immediate-return call sites and apology return mapping replaced by `fam` and rc propagation; the owing-list rebuild hard stops remain. The warning was inspected and its thread resolved on this head.\n\n\u26d4 **Ve",
+     "commit_id": "0a340286d3b5d8e42a8d14ed5105f3e10956d099",
+     "submitted_at": "2026-11-11T07:57:43Z"
+    },
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot (automated review)**\n\n**Verdict: GO \u2014 0 unresolved Critical, 0 unresolved Important.** Reviewed head `3375c8b` through all 8 lenses across the four changed files. The prior fail-then-defer Important finding is fixed: `fam` returns failure when an earlier family failed, and the regression test confirms the tick reports rc 1. Its old thread is resolved.\n\n\u26a0\ufe0f **REBASE WARNING [3375c8b]",
+     "commit_id": "3375c8b1e5dd923ea730b2b95c8179de921a068a",
+     "submitted_at": "2026-11-11T11:55:32Z"
+    },
+    {
+     "body": "",
+     "commit_id": "3375c8b1e5dd923ea730b2b95c8179de921a068a",
+     "submitted_at": "2026-11-11T11:55:52Z"
+    },
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot (automated review)**\n\n**Verdict: GO \u2014 0 Critical, 0 Important.** Reviewed head `3375c8b` through all eight lenses across the four changed files. The prior tier, alert-delivery, wait-apology deferral, and fail-then-defer findings are fixed; no blocking review threads remain unresolved.\n\n\u26a0\ufe0f **REBASE WARNING [3375c8b] \u2014 acknowledged.** CI reports `erased-recent-base-work`: nine recent",
+     "commit_id": "3375c8b1e5dd923ea730b2b95c8179de921a068a",
+     "submitted_at": "2026-11-11T12:34:46Z"
+    },
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot (automated review)**\n\n**Verdict: GO \u2014 0 Critical, 0 Important.** Reviewed head `3375c8b` across all four changed files through the eight review lenses. The prior tier, rejected-page, wait-apology deferral, and fail-then-defer findings are fixed; no unresolved review threads remain.\n\n\u26a0\ufe0f **REBASE WARNING [3375c8b] \u2014 acknowledged.** CI reports `erased-recent-base-work`: nine recently ",
+     "commit_id": "3375c8b1e5dd923ea730b2b95c8179de921a068a",
+     "submitted_at": "2026-11-11T12:36:44Z"
+    },
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot (automated review)**\n\n**Verdict: GO \u2014 0 Critical, 0 Important code findings.** Reviewed `db0d599` through all eight lenses across both changed files. Prior alert-delivery, wait-apology deferral, and fail-then-defer findings are fixed; no prior blocking thread remains open. The fresh rebase warning below is being acknowledged after inspection, before the GO status and approval attem",
+     "commit_id": "db0d5994aca590e8be31a8ac1432e12b550cf23d",
+     "submitted_at": "2026-11-11T13:29:19Z"
+    },
+    {
+     "body": "",
+     "commit_id": "db0d5994aca590e8be31a8ac1432e12b550cf23d",
+     "submitted_at": "2026-11-11T13:30:59Z"
+    }
+   ],
+   "runs": [
+    {
+     "conclusion": "success",
+     "created_at": "2026-11-11T13:29:01Z",
+     "head_sha": "db0d5994aca590e8be31a8ac1432e12b550cf23d",
+     "id": 43029515459,
+     "name": "PR Validation",
+     "queue_s": 1,
+     "updated_at": "2026-11-11T13:29:08Z"
+    },
+    {
+     "conclusion": "success",
+     "created_at": "2026-11-11T12:43:01Z",
+     "head_sha": "db0d5994aca590e8be31a8ac1432e12b550cf23d",
+     "id": 43022740207,
+     "name": "PR Validation",
+     "queue_s": 7,
+     "updated_at": "2026-11-11T13:27:01Z"
+    },
+    {
+     "conclusion": "success",
+     "created_at": "2026-11-11T12:32:41Z",
+     "head_sha": "3375c8b1e5dd923ea730b2b95c8179de921a068a",
+     "id": 43021249779,
+     "name": "PR Validation",
+     "queue_s": 1,
+     "updated_at": "2026-11-11T12:32:49Z"
+    },
+    {
+     "conclusion": "failure",
+     "created_at": "2026-11-11T11:52:20Z",
+     "head_sha": "3375c8b1e5dd923ea730b2b95c8179de921a068a",
+     "id": 43015511728,
+     "name": "PR Validation",
+     "queue_s": 1,
+     "updated_at": "2026-11-11T11:52:28Z"
+    },
+    {
+     "conclusion": "success",
+     "created_at": "2026-11-11T11:52:11Z",
+     "head_sha": "3375c8b1e5dd923ea730b2b95c8179de921a068a",
+     "id": 43015492389,
+     "name": "PR Validation",
+     "queue_s": 6,
+     "updated_at": "2026-11-11T12:34:35Z"
+    },
+    {
+     "conclusion": "skipped",
+     "created_at": "2026-11-11T07:15:48Z",
+     "head_sha": "0a340286d3b5d8e42a8d14ed5105f3e10956d099",
+     "id": 42978207344,
+     "name": "PR Validation",
+     "updated_at": "2026-11-11T07:15:49Z"
+    },
+    {
+     "conclusion": "success",
+     "created_at": "2026-11-11T07:15:25Z",
+     "head_sha": "0a340286d3b5d8e42a8d14ed5105f3e10956d099",
+     "id": 42978157445,
+     "name": "PR Validation",
+     "queue_s": 6,
+     "updated_at": "2026-11-11T07:54:47Z"
+    },
+    {
+     "conclusion": "skipped",
+     "created_at": "2026-11-11T06:26:36Z",
+     "head_sha": "1de7783a602d0279594d34775c85b3ffd8f4823b",
+     "id": 42972453679,
+     "name": "PR Validation",
+     "updated_at": "2026-11-11T06:26:44Z"
+    },
+    {
+     "conclusion": "success",
+     "created_at": "2026-11-11T06:25:48Z",
+     "head_sha": "1de7783a602d0279594d34775c85b3ffd8f4823b",
+     "id": 42972359991,
+     "name": "PR Validation",
+     "queue_s": 10,
+     "updated_at": "2026-11-11T07:08:36Z"
+    },
+    {
+     "conclusion": "cancelled",
+     "created_at": "2026-11-11T06:16:50Z",
+     "head_sha": "1d773dda5467f30fa3484d368d7dd02d2590a1a9",
+     "id": 42971317071,
+     "name": "PR Validation",
+     "updated_at": "2026-11-11T06:26:06Z"
+    },
+    {
+     "conclusion": "success",
+     "created_at": "2026-11-11T04:36:51Z",
+     "head_sha": "d59b1eed272a036e45baabcad7d638b4d5ea642b",
+     "id": 42960379202,
+     "name": "PR Validation",
+     "queue_s": 10,
+     "updated_at": "2026-11-11T05:21:49Z"
+    }
+   ],
+   "state": "closed",
+   "title": "fix(credit-verify): a deadline too short for the send family must page, not starve the send"
+  },
+  {
+   "closed_at": "2026-11-11T18:27:16Z",
+   "commit_times": [
+    "2026-11-11T02:20:01Z",
+    "2026-11-11T02:47:03Z",
+    "2026-11-11T03:09:46Z",
+    "2026-11-11T03:48:14Z",
+    "2026-11-11T03:52:49Z",
+    "2026-11-11T03:53:52Z",
+    "2026-11-11T04:02:53Z",
+    "2026-11-11T04:09:38Z",
+    "2026-11-11T04:14:51Z",
+    "2026-11-11T04:31:27Z",
+    "2026-11-11T04:46:07Z",
+    "2026-11-11T04:51:38Z",
+    "2026-11-11T05:01:27Z",
+    "2026-11-11T08:04:36Z",
+    "2026-11-11T08:58:01Z",
+    "2026-11-11T09:11:36Z",
+    "2026-11-11T09:57:47Z",
+    "2026-11-11T10:58:14Z",
+    "2026-11-11T13:38:55Z",
+    "2026-11-11T15:47:57Z",
+    "2026-11-11T16:06:43Z",
+    "2026-11-11T17:36:26Z"
+   ],
+   "created_at": "2026-11-11T05:01:45Z",
+   "head_sha": "f1959ffc46a4d62bae163c6bb0ab0df915f8ec75",
+   "merge_commit_sha": "3a3bdcd4519c145fee4086ad8cbc5d81ee1195b9",
+   "merged_at": "2026-11-11T18:27:16Z",
+   "number": 1883,
+   "reviews": [
+    {
+     "body": "\ud83e\udd16 Muso QA Bot (automated review)\n\nNO-GO \u2014 3 blocking findings (1 \ud83d\udd34 Critical, 2 \ud83d\udfe1 Important). Eight lenses checked: correctness, silent failures, tests, invariants, docs, simplification, security/guidelines, and gate evasion.\n\n1. \ud83d\udd34 Critical \u2014 the scale-drain approval/reject gates accept `--requester scale-drain@hydra-ops`, `SCALE_DRAIN=1`, and a well-formed digest supplied by the caller; neither pr",
+     "commit_id": "463f560d3c9c6ad6eb72a62f1783e0125a40aa1c",
+     "submitted_at": "2026-11-11T05:49:45Z"
+    },
+    {
+     "body": "",
+     "commit_id": "463f560d3c9c6ad6eb72a62f1783e0125a40aa1c",
+     "submitted_at": "2026-11-11T05:50:03Z"
+    },
+    {
+     "body": "\ud83e\udd16 Muso QA Bot (automated review)\n\n**Verdict: NO-GO \u2014 4 blocking findings (1 \ud83d\udd34 Critical, 3 \ud83d\udfe1 Important).** Reviewed fd5e1ce \u2014 the branch moved from dispatched 463f560.\n\n**Carried forward, still unresolved**\n1. \ud83d\udd34 skills-all/muso-ops-admin/scripts/muso-admin-api.sh:373 \u2014 **Forgeable approval/reject bypass.** The --requester flag, SCALE_DRAIN, and EVIDENCE_EXCERPT are caller-controlled. An arbitrary t",
+     "commit_id": "fd5e1ce6b9e88de2fc52dad148a670db47a8466c",
+     "submitted_at": "2026-11-11T08:07:53Z"
+    },
+    {
+     "body": "\ud83e\udd16 Muso QA Bot (automated review)\n\nVerdict: NO-GO \u2014 4 blocking findings (1 \ud83d\udd34 Critical, 3 \ud83d\udfe1 Important). Reviewed fd5e1ce; this is a re-review of the same head, with the four open findings carried forward. No new findings.\n\n1. \ud83d\udd34 Critical \u2014 Forgeable scale-drain approval/reject bypass (skills-all/muso-ops-admin/scripts/muso-admin-api.sh:373). --requester, SCALE_DRAIN, and EVIDENCE_EXCERPT are caller-c",
+     "commit_id": "fd5e1ce6b9e88de2fc52dad148a670db47a8466c",
+     "submitted_at": "2026-11-11T08:10:33Z"
+    },
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot (automated review)**\n\n\u26d4 **Verdict: NO-GO** \u2014 1 Critical and 4 Important findings on `fd5e1ce` (four unresolved findings carried forward, one new). Do not merge until the blockers are fixed and re-reviewed.\n\n### Blocking findings\n1. \ud83d\udd34 **Critical \u2014 forgeable approval/duplicate-close evidence** (`skills-all/muso-ops-admin/scripts/muso-admin-api.sh:373`, `:668`). `--requester`, `SCALE_",
+     "commit_id": "fd5e1ce6b9e88de2fc52dad148a670db47a8466c",
+     "submitted_at": "2026-11-11T08:52:44Z"
+    },
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot (automated review)**\n\n\u26d4 **Verdict: NO-GO** \u2014 2 Critical, 4 Important blocking findings (1 new Critical; 5 carried forward). Reviewed `5fbbe93`.\n\n**New finding**\n1. \ud83d\udd34 **Critical \u2014 proof anchor verification fails open** (`scripts/credit_review/verify_anchor.py:122-134`). The verifier selects the newest verdict for the supplied *proof ID*, not the newest verdict for the *request*, and",
+     "commit_id": "5fbbe93d239507f384ce5b0f890e47d46ebf3927",
+     "submitted_at": "2026-11-11T09:02:58Z"
+    },
+    {
+     "body": "\ud83e\udd16 Muso QA Bot (automated review)\n\n## NO-GO \u2014 1 Critical, 2 Important\n\n1. \ud83d\udd34 **Critical \u2014 approval evidence remains caller-forgeable** (`scripts/credit_review/verify_anchor.py:40`; `skills-all/muso-ops-admin/scripts/muso-admin-api.sh:427`). The wrapper inherits caller-controlled `CREDIT_PROOF_STORE` and `HYDRA_ROOT`. A caller can point the verifier at a writable SQLite containing a fabricated `GENUI",
+     "commit_id": "dae3b881f39c886a6421b2c8732d3240f9ce6ac9",
+     "submitted_at": "2026-11-11T09:18:42Z"
+    },
+    {
+     "body": "",
+     "commit_id": "dae3b881f39c886a6421b2c8732d3240f9ce6ac9",
+     "submitted_at": "2026-11-11T09:54:00Z"
+    },
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot** (automated review)\n\n\u26d4 **Verdict: NO-GO** \u2014 1 \ud83d\udd34 Critical (carried forward, unresolved); 0 \ud83d\udfe1 Important. Do not merge.\n\n\ud83d\udd34 **Critical \u2014 duplicate-close authorization remains forgeable** (`skills-all/muso-ops-admin/scripts/muso-admin-api.sh:708`; [open thread](https://github.com/Muso-AI/hydra/pull/1883#discussion_r4536407282)). The caller chooses `SCALE_DRAIN_TOKEN_FILE`; a caller-cre",
+     "commit_id": "dae3b881f39c886a6421b2c8732d3240f9ce6ac9",
+     "submitted_at": "2026-11-11T09:57:24Z"
+    },
+    {
+     "body": "\ud83e\udd16 Muso QA Bot (automated review)\n\n## Verdict: NO-GO \u2014 1 Critical carried forward, 1 Important new\n\n1. \ud83d\udd34 **Critical (unresolved prior thread)** \u2014 `skills-all/muso-ops-admin/scripts/muso-admin-api.sh:708-725,778-792`: duplicate-close authorization is still caller-forgeable. `SCALE_DRAIN_TOKEN_FILE` selects the token file, and the gate accepts mode 600 owned by the invoking user. A caller can create ",
+     "commit_id": "92953918d0870b8e18a98a494b3d8da0ec7b97b0",
+     "submitted_at": "2026-11-11T10:03:14Z"
+    },
+    {
+     "body": "\ud83e\udd16 Muso QA Bot (automated review)\n\n## Verdict: NO-GO \u2014 1 Critical, 1 Important\n\nReviewed `a4ef3d7`. Both prior blocking threads remain unresolved and the current head does not fix them.\n\n1. \ud83d\udd34 **Critical \u2014 duplicate-close authorization is caller-forgeable** (`skills-all/muso-ops-admin/scripts/muso-admin-api.sh:708-792`). `SCALE_DRAIN_TOKEN_FILE` remains caller-selectable; a caller can create a mode-",
+     "commit_id": "a4ef3d7d01b5b9d15823a469a924024afc2cafba",
+     "submitted_at": "2026-11-11T10:11:36Z"
+    },
+    {
+     "body": "",
+     "commit_id": "05687badc2695952b50052a76e36174fa2f9b4ed",
+     "submitted_at": "2026-11-11T10:58:53Z"
+    },
+    {
+     "body": "",
+     "commit_id": "05687badc2695952b50052a76e36174fa2f9b4ed",
+     "submitted_at": "2026-11-11T10:59:43Z"
+    },
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot (automated review)**\n\n**Verdict: NO-GO \u2014 1 Critical, 1 Important (2 blocking findings).** Reviewed `a4ef3d7` across correctness, error handling, test coverage, invariants, documentation, simplification, security/project guidance, and gate integrity.\n\n1. \ud83d\udd34 **Critical \u2014 approval evidence remains caller-forgeable** ([thread](https://github.com/Muso-AI/hydra/pull/1883#discussion_r45344",
+     "commit_id": "a4ef3d7d01b5b9d15823a469a924024afc2cafba",
+     "submitted_at": "2026-11-11T11:00:10Z"
+    },
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot (automated review)**\n\n\u26d4 **Verdict: NO-GO \u2014 2 blocking findings (1 Critical, 1 Important).** Reviewed head `05687ba` (same as dispatch). Tier `2` label and body rationale are present. No `Dark:` claim.\n\n1. \ud83d\udd34 **Critical \u2014 prior forgeable approval/duplicate-close gate remains open.** `scripts/credit_review/verify_anchor.py:182` creates `BatchAdmin()` without a pinned script, and `scri",
+     "commit_id": "05687badc2695952b50052a76e36174fa2f9b4ed",
+     "submitted_at": "2026-11-11T11:44:27Z"
+    },
+    {
+     "body": "\ud83e\udd16 Muso QA Bot (automated review)\n\n**Verdict: NO-GO \u2014 2 blocking findings (1 \ud83d\udd34 Critical carried forward, 1 \ud83d\udfe1 Important new).** Reviewed head 9f36abf.\n\n\ud83d\udd34 **Critical \u2014 prior approval-bypass thread remains unresolved** (`skills-all/muso-ops-admin/scripts/muso-admin-api.sh:399`). The anchor verifier now checks the target against the claimed precedent/proof, but the approval predicate still has no prote",
+     "commit_id": "9f36abf9dd7c50240b3e3486a88b0262e0376ef5",
+     "submitted_at": "2026-11-11T14:25:04Z"
+    },
+    {
+     "body": "\ud83e\udd16 Muso QA Bot (automated review)\n\nVerdict: NO-GO \u2014 1 Critical and 1 Important new finding. The earlier Critical duplicate-gate thread remains open because the bulk variant below still bypasses its per-target check; it is the same underlying gate issue, not an additional distinct defect. The prior crash-after-API/before-ledger finding is confirmed fixed by durable intents, live reconciliation, and ",
+     "commit_id": "aec3c5c848be1017d7997f99448e5ab033ba9f30",
+     "submitted_at": "2026-11-11T16:11:34Z"
+    },
+    {
+     "body": "",
+     "commit_id": "aec3c5c848be1017d7997f99448e5ab033ba9f30",
+     "submitted_at": "2026-11-11T16:16:06Z"
+    },
+    {
+     "body": "\ud83e\udd16 Muso QA Bot (automated review)\n\n**Verdict: NO-GO \u2014 1 Critical, 1 Important (both carried forward, unresolved); 0 new blocking findings.** Reviewed `aec3c5c` on `main`. Tier label `tier:2` and body rationale are present.\n\n### Blocking findings\n1. \ud83d\udd34 **Critical \u2014 bulk duplicate close bypasses per-target verification** ([existing thread](https://github.com/Muso-AI/hydra/pull/1883#discussion_r4540278",
+     "commit_id": "aec3c5c848be1017d7997f99448e5ab033ba9f30",
+     "submitted_at": "2026-11-11T16:17:35Z"
+    },
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot (automated review)**\n\n**Verdict: NO-GO \u2014 1 Critical, 1 Important (both carried forward; no new blocking finding).** Reviewed `aec3c5c`.\n\n1. \ud83d\udd34 **Critical \u2014 bulk duplicate close bypasses per-target verification** (`skills-all/muso-ops-admin/scripts/muso-admin-api.sh:831-862`; mirrored operations wrapper). The body accepts up to 50 request IDs, but `dup_target` reads only `.requestIds",
+     "commit_id": "aec3c5c848be1017d7997f99448e5ab033ba9f30",
+     "submitted_at": "2026-11-11T16:56:35Z"
+    },
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot (automated review)**\n\n**Verdict: NO-GO \u2014 1 Critical, 1 Important.** Reviewed `c5be3df`. Both are carried-forward, unresolved findings; no new blocking finding.\n\n1. \ud83d\udd34 **Critical \u2014 bulk duplicate close bypasses per-target verification** ([existing thread](https://github.com/Muso-AI/hydra/pull/1883#discussion_r4540278384); `skills-all/muso-ops-admin/scripts/muso-admin-api.sh:831-889`,",
+     "commit_id": "c5be3df8da8af5a41cedc2fba217ad0762821238",
+     "submitted_at": "2026-11-11T17:04:40Z"
+    },
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot (automated review)**\n\n**Verdict: GO \u2014 0 Critical, 0 Important.** Reviewed `f1959ff`; the branch moved from dispatched `c5be3df`.\n\nThe two prior blocking findings are fixed and their threads resolved: duplicate closes now require exactly one request ID; proof approvals verify every role claimed by the live request. Focused regressions passed (4 Python cases, 1 Bats case). The broade",
+     "commit_id": "f1959ffc46a4d62bae163c6bb0ab0df915f8ec75",
+     "submitted_at": "2026-11-11T17:40:51Z"
+    },
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot (automated review)**\n\n**Verdict: GO \u2014 0 Critical, 0 Important.** Reviewed `f1959ff` on `main` across correctness, silent failures, tests, invariants, documentation, simplification, security/guidelines, and gate evasion. The head matches this dispatch. The same head's earlier review found no blockers; all 11 review threads are resolved. The two prior blockers are fixed: duplicate cl",
+     "commit_id": "f1959ffc46a4d62bae163c6bb0ab0df915f8ec75",
+     "submitted_at": "2026-11-11T18:20:12Z"
+    }
+   ],
+   "runs": [
+    {
+     "conclusion": "success",
+     "created_at": "2026-11-11T18:17:44Z",
+     "head_sha": "f1959ffc46a4d62bae163c6bb0ab0df915f8ec75",
+     "id": 43076394451,
+     "name": "PR Validation",
+     "queue_s": 1,
+     "updated_at": "2026-11-11T18:17:52Z"
+    },
+    {
+     "conclusion": "success",
+     "created_at": "2026-11-11T17:36:44Z",
+     "head_sha": "f1959ffc46a4d62bae163c6bb0ab0df915f8ec75",
+     "id": 43069839402,
+     "name": "PR Validation",
+     "queue_s": 6,
+     "updated_at": "2026-11-11T18:17:11Z"
+    },
+    {
+     "conclusion": "failure",
+     "created_at": "2026-11-11T17:01:58Z",
+     "head_sha": "c5be3df8da8af5a41cedc2fba217ad0762821238",
+     "id": 43064136387,
+     "name": "PR Validation",
+     "queue_s": 1,
+     "updated_at": "2026-11-11T17:02:06Z"
+    },
+    {
+     "conclusion": "cancelled",
+     "created_at": "2026-11-11T17:01:52Z",
+     "head_sha": "c5be3df8da8af5a41cedc2fba217ad0762821238",
+     "id": 43064119157,
+     "name": "PR Validation",
+     "updated_at": "2026-11-11T17:37:01Z"
+    },
+    {
+     "conclusion": "failure",
+     "created_at": "2026-11-11T16:12:24Z",
+     "head_sha": "aec3c5c848be1017d7997f99448e5ab033ba9f30",
+     "id": 43055987433,
+     "name": "PR Validation",
+     "queue_s": 6,
+     "updated_at": "2026-11-11T16:12:38Z"
+    },
+    {
+     "conclusion": "failure",
+     "created_at": "2026-11-11T16:06:55Z",
+     "head_sha": "aec3c5c848be1017d7997f99448e5ab033ba9f30",
+     "id": 43055062444,
+     "name": "PR Validation",
+     "queue_s": 7,
+     "updated_at": "2026-11-11T16:53:04Z"
+    },
+    {
+     "conclusion": "cancelled",
+     "created_at": "2026-11-11T15:48:14Z",
+     "head_sha": "3af8332ff6774244427501793d219740f6bb1f28",
+     "id": 43051982411,
+     "name": "PR Validation",
+     "updated_at": "2026-11-11T16:07:13Z"
+    },
+    {
+     "conclusion": "success",
+     "created_at": "2026-11-11T13:39:18Z",
+     "head_sha": "9f36abf9dd7c50240b3e3486a88b0262e0376ef5",
+     "id": 43031074914,
+     "name": "PR Validation",
+     "queue_s": 8,
+     "updated_at": "2026-11-11T14:21:14Z"
+    },
+    {
+     "conclusion": "success",
+     "created_at": "2026-11-11T10:58:24Z",
+     "head_sha": "05687badc2695952b50052a76e36174fa2f9b4ed",
+     "id": 43008043547,
+     "name": "PR Validation",
+     "queue_s": 8,
+     "updated_at": "2026-11-11T11:41:45Z"
+    },
+    {
+     "conclusion": "failure",
+     "created_at": "2026-11-11T10:06:47Z",
+     "head_sha": "a4ef3d7d01b5b9d15823a469a924024afc2cafba",
+     "id": 43000840913,
+     "name": "PR Validation",
+     "queue_s": 8,
+     "updated_at": "2026-11-11T10:56:25Z"
+    },
+    {
+     "conclusion": "failure",
+     "created_at": "2026-11-11T09:59:09Z",
+     "head_sha": "92953918d0870b8e18a98a494b3d8da0ec7b97b0",
+     "id": 42999746297,
+     "name": "PR Validation",
+     "queue_s": 4,
+     "updated_at": "2026-11-11T09:59:21Z"
+    },
+    {
+     "conclusion": "cancelled",
+     "created_at": "2026-11-11T09:58:00Z",
+     "head_sha": "92953918d0870b8e18a98a494b3d8da0ec7b97b0",
+     "id": 42999590393,
+     "name": "PR Validation",
+     "updated_at": "2026-11-11T10:07:05Z"
+    },
+    {
+     "conclusion": "skipped",
+     "created_at": "2026-11-11T09:12:22Z",
+     "head_sha": "dae3b881f39c886a6421b2c8732d3240f9ce6ac9",
+     "id": 42993202048,
+     "name": "PR Validation",
+     "updated_at": "2026-11-11T09:12:23Z"
+    },
+    {
+     "conclusion": "skipped",
+     "created_at": "2026-11-11T09:12:05Z",
+     "head_sha": "dae3b881f39c886a6421b2c8732d3240f9ce6ac9",
+     "id": 42993162519,
+     "name": "PR Validation",
+     "updated_at": "2026-11-11T09:12:07Z"
+    },
+    {
+     "conclusion": "success",
+     "created_at": "2026-11-11T09:11:50Z",
+     "head_sha": "dae3b881f39c886a6421b2c8732d3240f9ce6ac9",
+     "id": 42993125372,
+     "name": "PR Validation",
+     "queue_s": 7,
+     "updated_at": "2026-11-11T09:50:42Z"
+    },
+    {
+     "conclusion": "skipped",
+     "created_at": "2026-11-11T08:58:54Z",
+     "head_sha": "5fbbe93d239507f384ce5b0f890e47d46ebf3927",
+     "id": 42991320687,
+     "name": "PR Validation",
+     "updated_at": "2026-11-11T08:58:56Z"
+    },
+    {
+     "conclusion": "skipped",
+     "created_at": "2026-11-11T08:58:26Z",
+     "head_sha": "5fbbe93d239507f384ce5b0f890e47d46ebf3927",
+     "id": 42991260524,
+     "name": "PR Validation",
+     "updated_at": "2026-11-11T08:58:38Z"
+    },
+    {
+     "conclusion": "cancelled",
+     "created_at": "2026-11-11T08:58:14Z",
+     "head_sha": "5fbbe93d239507f384ce5b0f890e47d46ebf3927",
+     "id": 42991234824,
+     "name": "PR Validation",
+     "updated_at": "2026-11-11T09:12:07Z"
+    },
+    {
+     "conclusion": "success",
+     "created_at": "2026-11-11T08:04:47Z",
+     "head_sha": "fd5e1ce6b9e88de2fc52dad148a670db47a8466c",
+     "id": 42984190229,
+     "name": "PR Validation",
+     "queue_s": 7,
+     "updated_at": "2026-11-11T08:48:53Z"
+    },
+    {
+     "conclusion": "skipped",
+     "created_at": "2026-11-11T08:04:08Z",
+     "head_sha": "463f560d3c9c6ad6eb72a62f1783e0125a40aa1c",
+     "id": 42984110350,
+     "name": "PR Validation",
+     "updated_at": "2026-11-11T08:04:17Z"
+    },
+    {
+     "conclusion": "skipped",
+     "created_at": "2026-11-11T05:46:21Z",
+     "head_sha": "463f560d3c9c6ad6eb72a62f1783e0125a40aa1c",
+     "id": 42967923157,
+     "name": "PR Validation",
+     "updated_at": "2026-11-11T05:46:27Z"
+    },
+    {
+     "conclusion": "success",
+     "created_at": "2026-11-11T05:01:49Z",
+     "head_sha": "463f560d3c9c6ad6eb72a62f1783e0125a40aa1c",
+     "id": 42963020474,
+     "name": "PR Validation",
+     "queue_s": 15,
+     "updated_at": "2026-11-11T05:43:48Z"
+    }
+   ],
+   "state": "closed",
+   "title": "feat(credit_review): deterministic scale drain for the verification backlog"
+  },
+  {
+   "closed_at": "2026-11-11T14:34:13Z",
+   "commit_times": [
+    "2026-11-11T05:10:35Z",
+    "2026-11-11T11:42:24Z",
+    "2026-11-11T11:47:20Z",
+    "2026-11-11T12:06:06Z",
+    "2026-11-11T13:28:05Z"
+   ],
+   "created_at": "2026-11-11T10:01:31Z",
+   "head_sha": "2b751bd972d917538de0e0797bc250a77da6b57e",
+   "merge_commit_sha": "466feac87f4bed27d5288c8752404a5d41b9a98f",
+   "merged_at": "2026-11-11T14:34:13Z",
+   "number": 1884,
+   "reviews": [
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot (automated review)**\n\n**Verdict: NO-GO \u2014 1 \ud83d\udd34 Critical, 3 \ud83d\udfe1 Important.** Reviewed head `0876c23` (the dispatched head). The 4 new apply-pool tests pass locally, but they do not exercise an early systemic stop with workers still in flight. The production-tier label/body contract is missing.\n\n**Findings**\n1. \ud83d\udd34 **Critical \u2014 active sends escape the stop and the apply lock** (`scripts/cr",
+     "commit_id": "0876c23cc47a4acbcafd3224898f6d90d15f140a",
+     "submitted_at": "2026-11-11T10:51:46Z"
+    },
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot (automated review)**\n\n**NO-GO \u2014 4 distinct blocking issues (1 Critical, 3 Important).** Reviewed f94583e; the branch moved from dispatched 09e929d.\n\n1. \ud83d\udd34 **Critical \u2014 prior finding still open:** scripts/credit_review/verify_notify.py:1671 still shuts down the apply pool with wait=False. If a systemic/unmeasured stop fires while other gate calls are in flight, they can send after th",
+     "commit_id": "f94583e7fe615f36d45cab9b39f344197801f425",
+     "submitted_at": "2026-11-11T11:50:00Z"
+    },
+    {
+     "body": "",
+     "commit_id": "a665a9149fe2609624bf63acf1bae57e01f41a93",
+     "submitted_at": "2026-11-11T12:13:21Z"
+    },
+    {
+     "body": "",
+     "commit_id": "a665a9149fe2609624bf63acf1bae57e01f41a93",
+     "submitted_at": "2026-11-11T12:13:23Z"
+    },
+    {
+     "body": "",
+     "commit_id": "a665a9149fe2609624bf63acf1bae57e01f41a93",
+     "submitted_at": "2026-11-11T12:13:25Z"
+    },
+    {
+     "body": "",
+     "commit_id": "a665a9149fe2609624bf63acf1bae57e01f41a93",
+     "submitted_at": "2026-11-11T12:13:27Z"
+    },
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot** (automated review)\n\n**Verdict: GO after rebase-warning acknowledgment** \u2014 0 unresolved code blockers on a665a91. Reviewed all six changed files across correctness, failures, tests, invariants, docs, simplification, security, and gates. The prior stop/lock race and pacing findings are fixed; their threads have been resolved with evidence.\n\n\u26a0\ufe0f **REBASE WARNING [a665a91]** \u2014 CI repo",
+     "commit_id": "a665a9149fe2609624bf63acf1bae57e01f41a93",
+     "submitted_at": "2026-11-11T12:14:26Z"
+    },
+    {
+     "body": "",
+     "commit_id": "a665a9149fe2609624bf63acf1bae57e01f41a93",
+     "submitted_at": "2026-11-11T12:14:48Z"
+    },
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot (automated review)**\n\n**Verdict: NO-GO \u2014 0 Critical, 1 Important.** Reviewed `a665a91` across correctness, failures, tests, invariants, docs, simplification, security, and gates.\n\n1. \ud83d\udfe1 **Important \u2014 the apply pool makes a required test order-dependent.** The current-head Python unit-test job fails at `scripts/tests/test_claim_proof_ask.py:257`: the pool calls the gate in worker-sch",
+     "commit_id": "a665a9149fe2609624bf63acf1bae57e01f41a93",
+     "submitted_at": "2026-11-11T12:58:07Z"
+    },
+    {
+     "body": "",
+     "commit_id": "2b751bd972d917538de0e0797bc250a77da6b57e",
+     "submitted_at": "2026-11-11T14:14:13Z"
+    },
+    {
+     "body": "",
+     "commit_id": "2b751bd972d917538de0e0797bc250a77da6b57e",
+     "submitted_at": "2026-11-11T14:14:29Z"
+    },
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot (automated review)**\n\n**Verdict: GO \u2014 0 Critical, 0 Important; 1 Nice-to-have.** Reviewed head `2b751bd` (the dispatched head). `tier:1` label and `Tier: 1, because ...` body match the narrow outbound-notification change. No `Dark:` claim.\n\n\u26a0\ufe0f **REBASE WARNING [2b751bd] acknowledged.** CI flagged recent-main deletions in `scripts/credit-verify-outbound.sh` (6 lines), `scripts/credi",
+     "commit_id": "2b751bd972d917538de0e0797bc250a77da6b57e",
+     "submitted_at": "2026-11-11T14:15:07Z"
+    },
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot** (automated review)\n\n**Verdict: GO** \u2014 0 new code defects (0 Critical, 0 Important). The REBASE WARNING marker below is acknowledged only after checking the deleted lines and resolving its thread; an open marker blocks approval.\n\n**Tier:** tier:1, matching the live outbound-notification and tick behavior. No Dark claim.\n**Blast radius: HIGH.** CI signals: cron-reach \u2014 scripts/cred",
+     "commit_id": "2b751bd972d917538de0e0797bc250a77da6b57e",
+     "submitted_at": "2026-11-11T14:20:52Z"
+    },
+    {
+     "body": "",
+     "commit_id": "2b751bd972d917538de0e0797bc250a77da6b57e",
+     "submitted_at": "2026-11-11T14:21:18Z"
+    }
+   ],
+   "runs": [
+    {
+     "conclusion": "success",
+     "created_at": "2026-11-11T14:15:57Z",
+     "head_sha": "2b751bd972d917538de0e0797bc250a77da6b57e",
+     "id": 43036808256,
+     "name": "PR Validation",
+     "queue_s": 7,
+     "updated_at": "2026-11-11T14:16:10Z"
+    },
+    {
+     "conclusion": "success",
+     "created_at": "2026-11-11T13:28:13Z",
+     "head_sha": "2b751bd972d917538de0e0797bc250a77da6b57e",
+     "id": 43029401377,
+     "name": "PR Validation",
+     "queue_s": 7,
+     "updated_at": "2026-11-11T14:15:05Z"
+    },
+    {
+     "conclusion": "failure",
+     "created_at": "2026-11-11T12:06:48Z",
+     "head_sha": "a665a9149fe2609624bf63acf1bae57e01f41a93",
+     "id": 43017525321,
+     "name": "PR Validation",
+     "queue_s": 7,
+     "updated_at": "2026-11-11T12:07:00Z"
+    },
+    {
+     "conclusion": "failure",
+     "created_at": "2026-11-11T12:06:23Z",
+     "head_sha": "a665a9149fe2609624bf63acf1bae57e01f41a93",
+     "id": 43017468748,
+     "name": "PR Validation",
+     "queue_s": 13,
+     "updated_at": "2026-11-11T12:55:07Z"
+    },
+    {
+     "conclusion": "cancelled",
+     "created_at": "2026-11-11T11:47:27Z",
+     "head_sha": "f94583e7fe615f36d45cab9b39f344197801f425",
+     "id": 43014844829,
+     "name": "PR Validation",
+     "updated_at": "2026-11-11T12:06:42Z"
+    },
+    {
+     "conclusion": "failure",
+     "created_at": "2026-11-11T11:45:56Z",
+     "head_sha": "09e929df8ae67e06e5372d1c80a2a92702cb8e00",
+     "id": 43014634661,
+     "name": "PR Validation",
+     "queue_s": 5,
+     "updated_at": "2026-11-11T11:46:07Z"
+    },
+    {
+     "conclusion": "failure",
+     "created_at": "2026-11-11T11:44:09Z",
+     "head_sha": "09e929df8ae67e06e5372d1c80a2a92702cb8e00",
+     "id": 43014387454,
+     "name": "PR Validation",
+     "queue_s": 6,
+     "updated_at": "2026-11-11T11:44:21Z"
+    },
+    {
+     "conclusion": "failure",
+     "created_at": "2026-11-11T11:42:56Z",
+     "head_sha": "09e929df8ae67e06e5372d1c80a2a92702cb8e00",
+     "id": 43014218617,
+     "name": "PR Validation",
+     "queue_s": 1,
+     "updated_at": "2026-11-11T11:43:04Z"
+    },
+    {
+     "conclusion": "cancelled",
+     "created_at": "2026-11-11T11:42:34Z",
+     "head_sha": "09e929df8ae67e06e5372d1c80a2a92702cb8e00",
+     "id": 43014168134,
+     "name": "PR Validation",
+     "updated_at": "2026-11-11T11:47:45Z"
+    },
+    {
+     "conclusion": "failure",
+     "created_at": "2026-11-11T10:01:34Z",
+     "head_sha": "0876c23cc47a4acbcafd3224898f6d90d15f140a",
+     "id": 43000095231,
+     "name": "PR Validation",
+     "queue_s": 7,
+     "updated_at": "2026-11-11T10:47:57Z"
+    }
+   ],
+   "state": "closed",
+   "title": "fix(credit-verify): cut the page to fit so the tick reaches the send, then apply six at a time"
+  },
+  {
+   "closed_at": null,
+   "commit_times": [
+    "2026-11-11T10:15:39Z",
+    "2026-11-11T10:27:50Z"
+   ],
+   "created_at": "2026-11-11T10:15:56Z",
+   "head_sha": "cc461d0804553e4b2a01b0b4476208021a83f424",
+   "merge_commit_sha": null,
+   "merged_at": null,
+   "number": 1885,
+   "reviews": [
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot** (automated review)\n\n\u2705 **Verdict: GO** \u2014 0 Critical, 0 Important; no unresolved prior findings.\n\nReviewed cc461d0 \u2014 the branch had moved from the dispatched dc17495.\n\nBlast radius: LOW. CI signal: deploy-path (info) \u2014 scripts/tests/test_owing_proof.py is repo-side only; this signal does not lower the tier. Skipped: none. Limitations:\n- grep cannot prove a negative: a caller reache",
+     "commit_id": "cc461d0804553e4b2a01b0b4476208021a83f424",
+     "submitted_at": "2026-11-11T10:30:13Z"
+    },
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot** (automated review)\n\n\u2705 **Verdict: GO** \u2014 0 Critical, 0 Important; no unresolved prior findings. Reviewed cc461d0.\n\nBlast radius: LOW. CI signal: deploy-path (info) \u2014 scripts/tests/test_owing_proof.py is repo-side only; this signal never lowers the tier. Skipped: none. Limitations:\n- grep cannot prove a negative: a caller reached through a variable, eval, or a built-up path is invi",
+     "commit_id": "cc461d0804553e4b2a01b0b4476208021a83f424",
+     "submitted_at": "2026-11-11T10:38:36Z"
+    },
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot (automated review)**\n\n**Verdict: GO** \u2014 0 Critical, 0 Important, 0 carried-forward blockers. Reviewed head cc461d0 (2 files).\n\n**Eight-lens review:** The signing re-read uses the existing replica SQL with a listed-user predicate, retaining the row-shape check on every chunk. Query errors still stop verification; the signed query and review-firing rule are unchanged. The listed-user",
+     "commit_id": "cc461d0804553e4b2a01b0b4476208021a83f424",
+     "submitted_at": "2026-11-11T11:24:45Z"
+    },
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot (automated review)**\n\n\u2705 **Verdict: GO** \u2014 0 Critical, 0 Important; no unresolved prior findings. Reviewed cc461d0 (2 files).\n\n**8-lens review:** The changed signing re-read appends a numeric listed-user predicate to the existing replica SQL, chunks the IDs, and validates every returned row. `verify_facts` only compares rows for listed users; the owed-set and sorted facts/request-ID",
+     "commit_id": "cc461d0804553e4b2a01b0b4476208021a83f424",
+     "submitted_at": "2026-11-11T13:32:05Z"
+    }
+   ],
+   "runs": [
+    {
+     "conclusion": "success",
+     "created_at": "2026-11-11T13:30:09Z",
+     "head_sha": "cc461d0804553e4b2a01b0b4476208021a83f424",
+     "id": 43029683297,
+     "name": "PR Validation",
+     "queue_s": 1,
+     "updated_at": "2026-11-11T13:30:17Z"
+    },
+    {
+     "conclusion": "success",
+     "created_at": "2026-11-11T13:29:08Z",
+     "head_sha": "cc461d0804553e4b2a01b0b4476208021a83f424",
+     "id": 43029532107,
+     "name": "PR Validation",
+     "queue_s": 5,
+     "updated_at": "2026-11-11T13:29:20Z"
+    },
+    {
+     "conclusion": "success",
+     "created_at": "2026-11-11T11:18:29Z",
+     "head_sha": "cc461d0804553e4b2a01b0b4476208021a83f424",
+     "id": 43010855921,
+     "name": "PR Validation",
+     "queue_s": 5,
+     "updated_at": "2026-11-11T11:18:41Z"
+    },
+    {
+     "conclusion": "success",
+     "created_at": "2026-11-11T11:17:15Z",
+     "head_sha": "cc461d0804553e4b2a01b0b4476208021a83f424",
+     "id": 43010683381,
+     "name": "PR Validation",
+     "queue_s": 5,
+     "updated_at": "2026-11-11T11:17:27Z"
+    },
+    {
+     "conclusion": "success",
+     "created_at": "2026-11-11T10:36:37Z",
+     "head_sha": "cc461d0804553e4b2a01b0b4476208021a83f424",
+     "id": 43005057856,
+     "name": "PR Validation",
+     "queue_s": 7,
+     "updated_at": "2026-11-11T10:36:50Z"
+    },
+    {
+     "conclusion": "success",
+     "created_at": "2026-11-11T10:27:59Z",
+     "head_sha": "cc461d0804553e4b2a01b0b4476208021a83f424",
+     "id": 43003836114,
+     "name": "PR Validation",
+     "queue_s": 10,
+     "updated_at": "2026-11-11T11:16:19Z"
+    },
+    {
+     "conclusion": "cancelled",
+     "created_at": "2026-11-11T10:16:01Z",
+     "head_sha": "dc17495c51878e8361e99872ff14789f832e4cda",
+     "id": 43002167300,
+     "name": "PR Validation",
+     "updated_at": "2026-11-11T10:28:17Z"
+    }
+   ],
+   "state": "open",
+   "title": "fix(credit-review): the signing re-read is filtered and chunked, not a full scan"
+  },
+  {
+   "closed_at": null,
+   "commit_times": [
+    "2026-11-11T11:38:11Z",
+    "2026-11-11T12:55:55Z"
+   ],
+   "created_at": "2026-11-11T11:38:25Z",
+   "head_sha": "13f7328be7a537ab2dc0b409d0d7ec612708f536",
+   "merge_commit_sha": null,
+   "merged_at": null,
+   "number": 1886,
+   "reviews": [
+    {
+     "body": "\ud83e\udd16 Muso QA Bot (automated review)\n\n**Verdict: NO-GO \u2014 0 Critical, 2 Important.** Reviewed head 18455de; no prior unresolved threads. Rebase integrity: CLEAN.\n\n1. \ud83d\udfe1 **Important \u2014 tier missing (PR metadata).** This targets main but has no tier:0/1/2/3 label and no `Tier: N, because ...` line in the PR body. The required production-branch classification is absent, so the change cannot pass the tier re",
+     "commit_id": "18455ded214dc6dac5722a138747493ded1ff4af",
+     "submitted_at": "2026-11-11T11:45:00Z"
+    },
+    {
+     "body": "\ud83e\udd16 Muso QA Bot (automated review)\n\n**Verdict: NO-GO \u2014 0 Critical, 2 Important.** Reviewed head 18455de. Rebase integrity: CLEAN.\n\n1. \ud83d\udfe1 **Important \u2014 tier missing (PR metadata).** This PR targets `main`, but has neither a `tier:0`\u2013`tier:3` label nor a `Tier: N, because ...` line. Add exactly one matching tier label and rationale before merge.\n2. \ud83d\udfe1 **Important \u2014 prior finding remains unresolved** (`s",
+     "commit_id": "18455ded214dc6dac5722a138747493ded1ff4af",
+     "submitted_at": "2026-11-11T12:21:37Z"
+    },
+    {
+     "body": "",
+     "commit_id": "13f7328be7a537ab2dc0b409d0d7ec612708f536",
+     "submitted_at": "2026-11-11T12:58:00Z"
+    },
+    {
+     "body": "\ud83e\udd16 **Muso QA Bot** (automated review)\n\n**Verdict: NO-GO \u2014 0 Critical, 1 Important.** Reviewed head `13f7328`; the branch moved from dispatched `18455de`. Prior `uvn_new_rows` finding is fixed, tested, and its thread resolved. Rebase integrity: CLEAN.\n\n1. \ud83d\udfe1 **Important \u2014 missing tier rationale and stale PR description (PR metadata).** This PR targets `main` and has a `tier:1` label, but its body has",
+     "commit_id": "13f7328be7a537ab2dc0b409d0d7ec612708f536",
+     "submitted_at": "2026-11-11T12:58:39Z"
+    },
+    {
+     "body": "\ud83e\udd16 Muso QA Bot (automated review)\n\n**Verdict: GO \u2014 0 Critical, 0 Important.** Reviewed head 13f7328. Both earlier findings are fixed: the tier:1 label and matching rationale are present, and the scope excludes previously asked uvn_new_rows users; the prior inline thread is resolved. Rebase integrity: CLEAN.\n\n**Review:** The new builder limits its candidate source to band users, filters to never-tol",
+     "commit_id": "13f7328be7a537ab2dc0b409d0d7ec612708f536",
+     "submitted_at": "2026-11-11T13:02:48Z"
+    },
+    {
+     "body": "\ud83e\udd16 Muso QA Bot (automated review)\n\n**Verdict: GO \u2014 0 Critical, 0 Important.** Reviewed head `13f7328`. The prior `uvn_new_rows` finding is fixed and its thread resolved; the `tier:1` label and matching rationale are present. Rebase integrity: CLEAN.\n\n**Review:** The builder narrows the replica read to band users, lists never-told paid users, applies the sender\u2019s 90-day lock before the cap, refuses ",
+     "commit_id": "13f7328be7a537ab2dc0b409d0d7ec612708f536",
+     "submitted_at": "2026-11-11T13:47:13Z"
+    }
+   ],
+   "runs": [
+    {
+     "conclusion": "failure",
+     "created_at": "2026-11-11T13:00:47Z",
+     "head_sha": "13f7328be7a537ab2dc0b409d0d7ec612708f536",
+     "id": 43025286085,
+     "name": "PR Validation",
+     "queue_s": 5,
+     "updated_at": "2026-11-11T13:00:58Z"
+    },
+    {
+     "conclusion": "success",
+     "created_at": "2026-11-11T12:56:03Z",
+     "head_sha": "13f7328be7a537ab2dc0b409d0d7ec612708f536",
+     "id": 43024617314,
+     "name": "PR Validation",
+     "queue_s": 7,
+     "updated_at": "2026-11-11T13:45:44Z"
+    },
+    {
+     "conclusion": "success",
+     "created_at": "2026-11-11T12:55:52Z",
+     "head_sha": "18455ded214dc6dac5722a138747493ded1ff4af",
+     "id": 43024591667,
+     "name": "PR Validation",
+     "queue_s": 5,
+     "updated_at": "2026-11-11T12:56:03Z"
+    },
+    {
+     "conclusion": "failure",
+     "created_at": "2026-11-11T11:42:03Z",
+     "head_sha": "18455ded214dc6dac5722a138747493ded1ff4af",
+     "id": 43014098783,
+     "name": "PR Validation",
+     "queue_s": 5,
+     "updated_at": "2026-11-11T11:42:15Z"
+    },
+    {
+     "conclusion": "failure",
+     "created_at": "2026-11-11T11:39:31Z",
+     "head_sha": "18455ded214dc6dac5722a138747493ded1ff4af",
+     "id": 43013752468,
+     "name": "PR Validation",
+     "queue_s": 5,
+     "updated_at": "2026-11-11T11:39:42Z"
+    },
+    {
+     "conclusion": "success",
+     "created_at": "2026-11-11T11:38:29Z",
+     "head_sha": "18455ded214dc6dac5722a138747493ded1ff4af",
+     "id": 43013617228,
+     "name": "PR Validation",
+     "queue_s": 7,
+     "updated_at": "2026-11-11T12:20:15Z"
+    }
+   ],
+   "state": "open",
+   "title": "feat(credit): a bounded paid-band ask lane at 400 users/day for the never-told paying users"
+  }
+ ],
+ "recorded_at": "2026-11-12T01:51:32Z",
+ "repo": "Muso-AI/hydra"
+}

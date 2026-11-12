@@ -2541,6 +2541,9 @@ jobs:
           # the standing review (docs/standing-review.md): only a defect pages, a clean pass prints nothing,
           # "could not review" is never "clean", and a pass writes nowhere but its own state directory.
           python3 scripts/tests/test_standing_review.py
+          # the delivery cycle-time table (scripts/cycle-time.py): an unfinished stage is never a zero, an
+          # unmeasured one never a number, a failed or older deploy never "deployed". Stdlib only.
+          python3 scripts/tests/test_cycle_time.py
           for f in scripts/paid-status/*.py; do python3 -m py_compile "$f"; done
           # The stage-2 release from the proof-on-file hold (credit_review/stage2_verdicts.py):
           # uvn-status for no_document, gap-ask for need_more, the gap-ask ledger rules. Stdlib only.

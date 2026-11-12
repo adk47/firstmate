@@ -2354,6 +2354,29 @@ if [[ "$REPORT_ONLY" == "1" ]]; then
   exit 0
 fi
 
+# -- the send-tick wait, BEFORE any lock (measured 2026-11-12) --
+# Four of the five scheduled deploys 11-07..11-11 died in their first second on "7200 tick-in-flight ... would exceed
+# 900s": the gate further down compares a held flock's worst case (a whole cadence) to its budget before it sleeps
+# once, so its bounded wait never waited, and every PR merged after 11-09 22:49Z stayed off node-8. That gate cannot
+# be made patient where it stands: it runs UNDER the apply lock taken just below, and a tick that finds the apply
+# lock held defers its sends - a deploy waiting there would be why the tick sent nothing. So the waiting is done
+# here, holding nothing, and the gate under the locks keeps its one look and its refusal.
+DEPLOY_TICK_HOLD_MIN="${HYDRA_DEPLOY_TICK_HOLD_MIN:-10}"
+DEPLOY_TICK_HOLD_MAX_S="${HYDRA_DEPLOY_TICK_HOLD_MAX_S:-900}"
+DEPLOY_TICK_CADENCE_S="${HYDRA_DEPLOY_TICK_CADENCE_S:-7200}"
+DEPLOY_TICK_PREWAIT_MAX_S="${HYDRA_DEPLOY_TICK_PREWAIT_MAX_S:-900}"
+if [ "${HYDRA_DEPLOY_SKIP_TICK_HOLD:-0}" != "1" ]; then
+  prewait_rc=0
+  bash "$SCRIPT_DIR/lib/deploy-send-tick-wait.sh" --max "$DEPLOY_TICK_PREWAIT_MAX_S" --poll 60 \
+       --cadence "$DEPLOY_TICK_CADENCE_S" --hold-min "$DEPLOY_TICK_HOLD_MIN" || prewait_rc=$?
+  case "$prewait_rc" in
+    0) ;;
+    1) fail "deploy refused: a credit send tick was still in the way after the ${DEPLOY_TICK_PREWAIT_MAX_S}s wait (the line above says which). No lock was taken and nothing was changed; main stays UNDEPLOYED until a run gets through - re-dispatch outside the tick's window (or HYDRA_DEPLOY_SKIP_TICK_HOLD=1 to override)." ;;
+    *) fail "the send-tick wait cannot decide (rc=$prewait_rc, see above); refusing to deploy without it (no lock was taken, nothing was changed)" ;;
+  esac
+fi
+# -- end of the send-tick wait --
+
 # Fable [key=signed-on-sha] (2) / r5 747 / QA #1604 (11-01 04:21Z: a deploy landed between a signed batch and its
 # apply): the deploy holds the credit-message apply lock EXCLUSIVELY with the prune lock below, for its whole run - an
 # apply in flight refuses the deploy (nothing changed), and no apply can start while it mutates node-8.
@@ -2387,9 +2410,10 @@ fi
 # that begins 3 minutes after the rsync does. #1756 gives the outbound script deploy-lock awareness; until it lands
 # the deploy side holds the line - no deploy STARTS within HOLD_MIN of a tick boundary, and none starts while a tick
 # holds its flock. We WAIT (bounded) for the window, then fail closed: nothing is changed, a human re-dispatches.
-DEPLOY_TICK_HOLD_MIN="${HYDRA_DEPLOY_TICK_HOLD_MIN:-10}"
-DEPLOY_TICK_HOLD_MAX_S="${HYDRA_DEPLOY_TICK_HOLD_MAX_S:-900}"
-DEPLOY_TICK_CADENCE_S="${HYDRA_DEPLOY_TICK_CADENCE_S:-7200}"
+# This is the GATE, and it is deliberately impatient about a tick in flight (no --poll: the guard answers a whole
+# cadence, which no budget here covers) - the patient wait already happened above, before the locks. Reaching this
+# line with a tick running means one started in the seconds between that wait and the locks.
+# (DEPLOY_TICK_HOLD_MIN / _MAX_S / _CADENCE_S are set with the wait above.)
 if [ "${HYDRA_DEPLOY_SKIP_TICK_HOLD:-0}" != "1" ]; then
   hold_spent=0
   hold_last=""

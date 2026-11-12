@@ -8,7 +8,12 @@ name: Deploy HYDRA
 # deploys" keeps refusing anything that isn't that tip.
 on:
   schedule:
-    - cron: '0 4 * * *'   # 04:00 UTC = 06:00 Rome (CEST); one deploy of main per day
+    # 05:00 UTC = 06:00 Rome (CET) / 07:00 (CEST); one deploy of main per day. It was 04:00 until
+    # 2026-11-12: that is a 2-hourly credit send tick boundary (even hours UTC), so the run met the
+    # tick it must not interrupt and deploy.sh refused it on 4 of 5 nights (11-07, 11-08, 11-10,
+    # 11-11). An odd hour is the furthest point from both boundaries. Keep it on an odd hour:
+    # scripts/tests/deploy-send-tick-hold.bats fails if this minute falls in a tick's hold window.
+    - cron: '0 5 * * *'
   workflow_dispatch:
     inputs:
       target:
