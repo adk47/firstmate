@@ -1193,10 +1193,29 @@ secondmate_oldest_queue_row() {  # <queue-path>
 # verdict, a queue frozen past the bound) is NOT an active turn, so a frozen
 # queue still escalates.
 secondmate_in_active_turn() {  # <window> <idle>
-  local w=$1 idle=$2 tail40
+  local w=$1 idle=$2 tail40 task rec
   [ -n "$w" ] || return 1
   [ "$idle" -lt "$BUSY_TURN_MAX_SECS" ] || return 1
-  watcher_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" || return 1
+  # A semantic busy record is positive proof of a turn in flight, but only while
+  # the endpoint it describes can still be read: a gone window keeps its last
+  # record, and trusting that record would silence the rung for a mate that is
+  # not there to drain anything. An endpoint whose window inventory cannot be
+  # read at all is therefore never exempted, whatever the record or a stale
+  # capture says. A readable inventory that simply does not name the window is
+  # left to the capture below, because a backend may report a window under a
+  # different name than the one this home recorded.
+  case "$(fm_backend_agent_state "$(window_backend "$w")" "$w" 2>/dev/null || true)" in
+    unreadable) return 1 ;;
+  esac
+  watcher_capture "$(window_backend "$w")" "$w" 40 "$(window_label "$w")" || {
+    # No readable pane: the semantic record is the only positive read left, and a
+    # transient capture failure must not turn a provably busy mate into a stall.
+    task=$(window_to_task "$w" "$STATE")
+    [ -n "$task" ] || return 1
+    rec=$(fm_busy_record_read "$STATE" "$task" 2>/dev/null) || return 1
+    case "$rec" in busy\ *) return 0 ;; esac
+    return 1
+  }
   tail40=$WATCHER_CAPTURE
   window_is_busy "$w" "$tail40"
 }

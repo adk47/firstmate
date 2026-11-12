@@ -1307,7 +1307,12 @@ test_secondmate_stall_skips_historical_malformed_branch_line() {
   touch -d '16 minutes ago' "$sub/state/branch-session/old.jsonl" 2>/dev/null \
     || touch -t "$(date -v-16M +%Y%m%d%H%M 2>/dev/null || date -d '16 minutes ago' +%Y%m%d%H%M)" "$sub/state/branch-session/old.jsonl"
   printf '%s\n' "$sub/state/branch-session/old.jsonl" > "$sub/state/.branch-session"
-  printf '%s\t7\tsignal\trouted\tsignal: routed row\n' "$(( $(date +%s) - 1020 ))" > "$sub/state/.wake-queue"
+  row_epoch=$(( $(date +%s) - 1020 ))
+  printf '%s\t7\tsignal\trouted\tsignal: routed row\n' "$row_epoch" > "$sub/state/.wake-queue"
+  # The rung alerts only after a full threshold of no progress on the same row,
+  # so the first observation is seeded here; the branch read is what this test
+  # is about, not the observation window.
+  printf '%s %s-7\n' "$(( row_epoch + 20 ))" "$row_epoch" > "$dir/state/.secondmate-wake-progress-mate"
   secondmate_stall_checkpoint "$dir" watch-historical-malformed-branch-line 900
   grep -F 'check: secondmate wake-loop stalled: mate=mate row=7' "$dir/watch-historical-malformed-branch-line.out" >/dev/null \
     || fail "a historical malformed line silenced an idle branch: $(cat "$dir/watch-historical-malformed-branch-line.out")"

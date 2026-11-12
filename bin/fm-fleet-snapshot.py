@@ -962,6 +962,7 @@ class Snapshot:
             "harness": meta_get(meta, "harness"),
             "mode": meta_get(meta, "mode"),
             "yolo": meta_get(meta, "yolo"),
+            "branch": meta_get(meta, "branch") or None,
             "project": meta_get(meta, "project"),
             "spawn_gen": meta_get(meta, "spawn_gen") or None,
             "backend": t["backend"],
@@ -977,7 +978,7 @@ class Snapshot:
             "current_state": cur,
             "endpoint": {"target": t["target"] or None, "exists": exists, "agent_alive": alive,
                          "status": endpoint_status, "observed_at": self.now, "freshness": "fresh"},
-            "pr": {"url": pr or None, "source": pr_source},
+            "pr": {"url": pr or None, "source": pr_source, "head": meta_get(meta, "pr_head") or None},
             "hints": {
                 "pending_decision": any(d["verb"] == "needs-decision" for d in decisions),
                 "blocked_event": any(d["verb"] == "blocked" for d in decisions),

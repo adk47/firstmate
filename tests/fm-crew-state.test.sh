@@ -1612,13 +1612,17 @@ test_terminal_passed_with_skips() {
   fm_write_meta "$d/state/feat-skips.meta" "window=fm:fm-feat-skips" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_passed_with_skips fm/feat-skips)"
   local out; out=$(run_crew_state "$d" feat-skips)
-  assert_contains "$out" "state: done" "passed-with-skips run -> done, not unknown"
+  # This fork maps passed-with-skips to failed on purpose: no-mistakes v1.64
+  # skips the CI step whenever `gh auth status` fails for any configured account
+  # and still ends the run completed, so 42 such runs read as green before the
+  # 2026-10-18 audit. A skipped CI step is never a green verdict here.
+  assert_contains "$out" "state: failed" "passed-with-skips run -> failed, never green"
   assert_contains "$out" "source: run-step" "passed-with-skips -> run-step source"
-  assert_contains "$out" "run passed: PR merged" "passed-with-skips run reports merged only after the PR record says merged"
-  assert_contains "$out" "publication/CI verification skipped" "passed-with-skips keeps the skip visible, unlike a clean pass"
+  assert_contains "$out" "CI verification skipped" "passed-with-skips names the skipped verification"
+  assert_not_contains "$out" "state: done" "passed-with-skips must not read as a green verdict"
   assert_not_contains "$out" "state: unknown" "passed-with-skips must not fall through to unknown"
   assert_not_contains "$out" "outcome: passed-with-skips" "passed-with-skips must not surface as a raw unmapped outcome detail"
-  pass "terminal passed-with-skips run reads done with the skip kept visible"
+  pass "terminal passed-with-skips run reads failed with the skip named"
 }
 
 test_terminal_passed_uses_matching_retirement_receipt_without_forge() {

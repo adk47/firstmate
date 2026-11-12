@@ -1153,7 +1153,15 @@ status_open_decisions() {  # <status-file> [<kind>]
 # the latest recognized event, stands when nothing is open.
 # Actual run/pane evidence is still reconciled by fm-crew-state.sh.
 status_current_line() {  # <status-file> <kind>
-  local open key verb note current=''
+  local open key verb note current='' last
+  # A declared wait appended as the newest event is the crew's current state, so
+  # it outranks an older still-open decision: the fold below would otherwise keep
+  # reporting the decision the crew has already parked behind.
+  last=$(last_status_line "$1")
+  if status_is_paused "$last"; then
+    printf '%s\n' "$last"
+    return
+  fi
   open=$(status_open_decisions "$1" "$2")
   while IFS=$'\t' read -r key verb note; do
     case "$verb" in ?*) current="$verb [key=$key]: $note" ;; esac

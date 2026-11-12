@@ -55,6 +55,10 @@ make_secondmate_case() {  # <name> <harness> <id>
   printf '# Firstmate\n' > "$mate/AGENTS.md"
   printf '%s\n' "$id" > "$mate/.fm-secondmate-home"
   printf '# Charter\n' > "$mate/data/charter.md"
+  # A real secondmate home is a firstmate clone, and the launch installs the
+  # AI-trailer strip hooks into it, which fails closed on a worktree that is not
+  # git. seed_secondmate_home() does the same for the same reason.
+  fm_git_init_commit "$mate"
   : > "$mate/pane"
   printf '%s\n' "$case_dir|$home|$mate|$mate|$fakebin"
 }

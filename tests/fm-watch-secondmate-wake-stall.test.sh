@@ -64,6 +64,10 @@ make_spawned_mate() {  # <name> <pane-file> <capture-fails> [harness]
   printf '# Firstmate\n' > "$mate/AGENTS.md"
   printf 'mate\n' > "$mate/.fm-secondmate-home"
   printf '# Charter\n' > "$mate/data/charter.md"
+  # A real secondmate home is a firstmate clone, and the launch installs the
+  # AI-trailer strip hooks into it, which fails closed on a worktree that is not
+  # git.
+  fm_git_init_commit "$mate"
   fm_test_spawn_home "$home" "$harness"
   spawnbin=$(make_spawn_fakebin "$spawnbin" pi)
   out=$(GROK_HOME="$dir/grok-home" \
@@ -79,7 +83,10 @@ make_spawned_mate() {  # <name> <pane-file> <capture-fails> [harness]
   cat > "$fakebin/tmux" <<SH
 #!/usr/bin/env bash
 case "\${1:-}" in
-  list-windows) printf '%s\n' 'firstmate:fm-mate' ;;
+  # The liveness probe reads #{window_name}, so the inventory line is the bare
+  # window name; a session-qualified line would read as a missing endpoint and
+  # the auto-relaunch rung would publish a notification this case never asked for.
+  list-windows) printf '%s\n' 'fm-mate' ;;
   capture-pane)
     [ "$fails" = 1 ] && exit 1
     cat "$pane"
@@ -145,9 +152,9 @@ test_idle_mate_from_real_spawn_reports() {
 
   run_stall_checkpoint "$dir" 8 "$out"
 
-  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7 age=' "$out" >/dev/null \
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7 idle=' "$out" >/dev/null \
     || fail "an idle mate's aged row did not report: $(cat "$out"); err=$(cat "$dir/watch.err")"
-  grep -E 'check: secondmate wake-loop stalled: mate=mate row=7 age=[0-9]+s branch=none$' "$out" >/dev/null \
+  grep -E 'check: secondmate wake-loop stalled: mate=mate row=7 idle=[0-9]+s branch=none$' "$out" >/dev/null \
     || fail "the reported reason text changed shape: $(cat "$out")"
   [ -s "$state/.wake-queue" ] || fail "the idle mate's stall was not published durably"
   [ -e "$state/.secondmate-wake-stall-mate" ] \
@@ -187,7 +194,7 @@ test_grok_capture_failure_still_reports() {
 
   run_stall_checkpoint "$dir" 8 "$out"
 
-  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7 age=' "$out" >/dev/null \
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7 idle=' "$out" >/dev/null \
     || fail "a grok mate with no readable pane was silently exempted: $(cat "$out"); err=$(cat "$dir/watch.err")"
   [ -s "$state/.wake-queue" ] \
     || fail "a grok mate with no readable pane published no durable notification"
@@ -222,7 +229,7 @@ test_grok_rendered_tail_decides_the_rung() {
   printf 'Working... (279k context)\n' > "$TMP_ROOT/grok-pane.txt"
   run_stall_checkpoint "$dir" 8 "$out"
 
-  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7 age=' "$out" >/dev/null \
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7 idle=' "$out" >/dev/null \
     || fail "a grok mate with no busy footer was silently exempted: $(cat "$out")"
   pass "a grok mate's rendered tail decides the rung: busy footer silent, unprovable reports"
 }
@@ -255,7 +262,7 @@ SH
 
   run_stall_checkpoint "$dir" 8 "$out"
 
-  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7 age=' "$out" >/dev/null \
+  grep -F 'check: secondmate wake-loop stalled: mate=mate row=7 idle=' "$out" >/dev/null \
     || fail "a gone endpoint with a stale busy record silenced the rung: $(cat "$out"); err=$(cat "$dir/watch.err")"
   [ -s "$state/.wake-queue" ] \
     || fail "a gone endpoint with a stale busy record published no durable notification"

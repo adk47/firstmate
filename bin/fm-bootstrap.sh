@@ -1385,22 +1385,13 @@ backlog_record_reconcile() {
     echo "BACKLOG_RECONCILE: unsafe worker record refused: $FM_BACKLOG_TRANSITION_ERROR"
     return 2
   fi
-  # Only a queued row is ever healed, so one listing of the queued rows picks
-  # the candidates; every other record skips its lock and per-row read. When
-  # the listing cannot be trusted every record is probed, as before.
-  local queued listed=0
-  if queued=$(fm_backlog_queued_ids "$DATA"); then
-    listed=1
-  fi
+  # Every owned record is probed, not only the queued ones: a read that wedges
+  # is the failure this sweep exists to report, and a queued-listing shortcut
+  # would skip exactly the record whose row cannot be read, turning a wedged
+  # backend into silence. The per-row read is bounded, so the cost stays flat.
   for meta in "${metas[@]}"; do
     id=${meta##*/}
     id=${id%.meta}
-    if [ "$listed" = 1 ]; then
-      case $'\n'"$queued"$'\n' in
-        *$'\n'"$id"$'\n'*) ;;
-        *) continue ;;
-      esac
-    fi
     meta_lock=$(fm_meta_lock_path "$meta") || continue
     fm_lock_try_acquire "$meta_lock" || continue
     if [ -e "$STATE/$id.backlog-close" ] || [ -L "$STATE/$id.backlog-close" ]; then

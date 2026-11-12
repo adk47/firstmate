@@ -1055,19 +1055,45 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       && [ "$(strip_quotes "$(nm_field runs_on_current_branch)")" = 0 ]; then
       run_choice="status-absent"
     else
-      overview_ok=1
-      run_overview=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi) || overview_ok=0
-      [ -n "$run_overview" ] || emit unknown run-step "run inventory unavailable; run id: $(strip_quotes "$(nm_field id)")"
-      run_choice=$(fm_nm_select_run "$CREW_BRANCH" "$run_overview" "$WT" "$NM_TIMEOUT")
-      [ "$overview_ok" = 1 ] || emit unknown run-step "run inventory unreadable; run ids: $(strip_quotes "$(nm_field id)"), ${run_choice##*|}"
+      run_branch=$(strip_quotes "$(nm_field branch)")
+      if [ -n "$run_branch" ] && [ "$run_branch" != "$CREW_BRANCH" ]; then
+        # The primary answer is another branch's run, so there is no run
+        # evidence about this crew to read: the ledger fallback below decides,
+        # and leaves HAVE_RUN=0 when this branch has no run at all. Reading the
+        # overview here would only turn a foreign answer into a vague unknown.
+        run_choice="foreign-branch"
+      else
+        overview_ok=1
+        run_overview=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" axi) || overview_ok=0
+        if [ -z "$run_overview" ]; then
+          # No inventory to read: the primary answer is the only evidence, and
+          # the fallback below already verifies its branch and head before it
+          # binds, so an unreadable inventory is not by itself an unknown crew.
+          run_choice="primary-only"
+        else
+          run_choice=$(fm_nm_select_run "$CREW_BRANCH" "$run_overview" "$WT" "$NM_TIMEOUT")
+          [ "$overview_ok" = 1 ] || emit unknown run-step "run inventory unreadable; run ids: $(strip_quotes "$(nm_field id)"), ${run_choice##*|}"
+        fi
+      fi
     fi
     case "$run_choice" in
+      foreign-branch|primary-only)
+        # No run on this branch is named, or no inventory was readable: the
+        # ledger fallback below decides.
+        ;;
       unknown\|*)
         known_run_id=""
         if [ "$(strip_quotes "$(nm_field branch)")" = "$CREW_BRANCH" ]; then
           known_run_id=$(strip_quotes "$(nm_field id)")
         fi
-        emit unknown run-step "${run_choice#*|}${known_run_id:+; last reported run id: $known_run_id}"
+        # An unreadable inventory only says something about this crew when the
+        # primary answer already names a run on this branch. A foreign-branch
+        # answer is no evidence at all, so it falls through to the ledger
+        # fallback below, which leaves HAVE_RUN=0 when this branch has no run
+        # and lets the pane and status log decide instead of reporting unknown.
+        if [ -n "$known_run_id" ]; then
+          emit unknown run-step "${run_choice#*|}${known_run_id:+; last reported run id: $known_run_id}"
+        fi
         ;;
       selected\|*)
         IFS='|' read -r _ selected_id selected_status candidate_ids <<< "$run_choice"
@@ -1246,7 +1272,7 @@ if [ "$HAVE_RUN" = 1 ]; then
         else
           RUN_STATE=failed; RUN_DETAIL="run failed"
         fi ;;
-      cancelled) RUN_STATE=unknown; RUN_DETAIL="run cancelled: no verdict" ;;
+      cancelled) RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
       *)         RUN_STATE=unknown; RUN_DETAIL="runs list status: $COARSE_STATUS" ;;
     esac
   else
@@ -1272,7 +1298,7 @@ if [ "$HAVE_RUN" = 1 ]; then
           fi ;;
         cancelled)
           if nm_reclassify_failed_run_as_held_green; then :; else
-            RUN_STATE=unknown; RUN_DETAIL="run cancelled: no verdict"
+            RUN_STATE=failed; RUN_DETAIL="run cancelled"
           fi ;;
         *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
       esac
@@ -1305,7 +1331,7 @@ if [ "$HAVE_RUN" = 1 ]; then
           fi ;;
         cancelled)
           if nm_reclassify_failed_run_as_held_green; then :; else
-            RUN_STATE=unknown; RUN_DETAIL="run cancelled: no verdict"
+            RUN_STATE=failed; RUN_DETAIL="run cancelled"
           fi ;;
         "")             RUN_STATE=working; RUN_DETAIL="run active" ;;
         *)              RUN_STATE=working; RUN_DETAIL="run active ($status)" ;;

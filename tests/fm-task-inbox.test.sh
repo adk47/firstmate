@@ -453,28 +453,29 @@ test_acknowledged_record_is_not_a_lost_steer() {
   pass "inbox: a record acknowledged while publishing is delivered, not lost"
 }
 
-# The doorbell is a worker's primary instruction, so both acknowledgement forms
-# it names must run exactly where the record lives. A state path with a space is
-# supported (the brief scaffold quotes the same command for that reason).
-test_doorbell_acknowledgement_forms_run_for_a_quoted_state_path() {
-  local state rec line rename helper
+# The doorbell is a constant, short line: a home nested deep must not lengthen
+# it, because a long line wraps past what a composer read can prove and a Herdr
+# submit then reports it never reached the pane. The acknowledgement forms with
+# their literal paths therefore live in the brief scaffold, and
+# tests/fm-brief.test.sh proves they run for a quoted home path.
+test_doorbell_stays_short_and_names_the_inbox_once() {
+  local state rec line
   state="$TMP_ROOT/doorbell quoted state/state"; mkdir -p "$state"
   rec=$(inbox_lib "$state" fm_task_inbox_write "$state" t1 "instruction one")
-  inbox_lib "$state" fm_task_inbox_write "$state" t1 "instruction two" >/dev/null
   line=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$rec")
-  rename=$(printf '%s' "$line" | sed -n 's/.*The plain form is \(.*\)\. Where that helper path.*/\1/p')
-  [ -n "$rename" ] || fail "the doorbell did not name the plain rename acknowledgement: $line"
-  sh -c "${rename//NNN/001}" >/dev/null 2>&1 \
-    || fail "the doorbell's rename acknowledgement does not run for a quoted state path: $rename"
-  [ -f "$state/t1.inbox/handled/001.msg" ] \
-    || fail "the doorbell's rename acknowledgement did not acknowledge the record"
-  helper=$(printf '%s' "$line" | sed -n 's/.*Where that helper path is reachable, \(.*\) acknowledges the same way.*/\1/p')
-  [ -n "$helper" ] || fail "the doorbell did not name the ack helper command: $line"
-  sh -c "${helper//NNN/002}" >/dev/null 2>&1 \
-    || fail "the doorbell's helper acknowledgement does not run for a quoted state path: $helper"
-  [ -f "$state/t1.inbox/handled/002.msg" ] \
-    || fail "the doorbell's helper acknowledgement did not acknowledge the record"
-  pass "inbox: the doorbell's acknowledgement forms run for a quoted state path"
+  [ "${#line}" -le 200 ] || fail "the doorbell must stay under 200 characters, got ${#line}: $line"
+  case "$line" in
+    *"$state"*) fail "the doorbell must not carry the home's absolute path: $line" ;;
+  esac
+  case "$line" in
+    *'list "$FM_TASK_INBOX"/*.msg'*) : ;;
+    *) fail "the doorbell must list through FM_TASK_INBOX: $line" ;;
+  esac
+  case "$line" in
+    *"'t1.inbox' steering inbox"*) : ;;
+    *) fail "the doorbell must name the steering inbox: $line" ;;
+  esac
+  pass "inbox: the doorbell stays short and names the inbox once"
 }
 
 test_idempotent_write_dedups_exact_body() {
@@ -1150,7 +1151,9 @@ test_doorbell_names_the_inbox_for_a_handled_record() {
   line=$(inbox_lib "$state" fm_task_inbox_doorbell_line "$state/t1.inbox/handled/001.msg")
   assert_not_contains "$line" "handled.inbox" \
     "the doorbell derived a nonsense inbox from a handled record"
-  assert_contains "$line" "$state/t1.inbox" "the doorbell should name the inbox itself"
+  # The doorbell names the inbox by its basename, never by absolute path: a home
+  # nested deep must not lengthen the line (tests/fm-send-inbox.test.sh).
+  assert_contains "$line" "'t1.inbox'" "the doorbell should name the inbox itself"
   pass "inbox: the doorbell names the real inbox for a record already in handled/"
 }
 
@@ -1852,7 +1855,7 @@ test_writer_reclaims_stale_lock_without_clobbering
 test_concurrent_acknowledgements_lose_nothing
 test_write_refuses_an_unconfirmed_record
 test_acknowledged_record_is_not_a_lost_steer
-test_doorbell_acknowledgement_forms_run_for_a_quoted_state_path
+test_doorbell_stays_short_and_names_the_inbox_once
 test_worker_deletion_is_repaired
 test_deleted_record_keeps_its_sequence
 test_coalesced_superseded_record_is_not_resurrected

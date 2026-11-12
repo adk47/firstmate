@@ -476,7 +476,11 @@ fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mod
   if want=$(mktemp "$dir/.dedup.XXXXXX") && have=$(mktemp "$dir/.dedup.XXXXXX"); then
     if printf '%s' "$text" > "$want"; then
       [ -n "$text" ] || first_line=--
-      for f in "$dir"/*.msg "$dir/handled"/*.msg "$shadow"/*; do
+      # Read the prefiltered candidates rather than every record: a home with a
+      # thousand unrelated steers must not pay a body read and a comparison for
+      # each one. The hidden links in the shadow dir point at the same records
+      # the pending scan already covers, so they need no separate pass.
+      while IFS= read -r -d '' f; do
         if [ "$delivery_mode" = fire-and-forget ]; then
           fm_task_inbox_is_fire_and_forget "$f" || continue
         elif fm_task_inbox_is_fire_and_forget "$f"; then
@@ -520,6 +524,12 @@ fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mod
             [ "$?" -eq 1 ] || printf '%s\0' "$scan_dir"/*.msg
           }
         done
+        # A record whose visible copy the worker's cleanup deleted survives only
+        # as its hidden link, so the shadow dir is scanned too; its entries carry
+        # the sequence as the whole name, with no .msg suffix.
+        LC_ALL=C grep -lFx --null -- "$first_line" "$shadow"/* 2>/dev/null || {
+          [ "$?" -eq 1 ] || printf '%s\0' "$shadow"/*
+        }
       )
     else
       status=1
@@ -726,28 +736,28 @@ fm_task_inbox_quote() {  # <word>
 # granted paths permit; the helper comes second because it acknowledges the same
 # way and retires the hidden link immediately.
 fm_task_inbox_doorbell_line() {  # <record-path>
-  local dir=${1%/*} abs task state ack inbox
+  local dir=${1%/*} abs name quoted LC_ALL=C
   abs=$(cd "$dir" 2>/dev/null && pwd) || abs=$dir
-  # A non-printable path fails without output so terminal controls never reach
-  # the pane's line discipline.
-  case "$abs" in
-    *[![:print:]]*) return 1 ;;
-  esac
   # A record the worker already acknowledged sits in handled/; the inbox it
   # belongs to is one level up, and the command must name that inbox rather than
   # a "<id>.inbox/handled.inbox" that cannot exist.
-  case "${abs##*/}" in
-    handled) abs=${abs%/*} ;;
+  abs=${abs%/handled}
+  name=${abs##*/}
+  # A non-printable path fails without output so terminal controls never reach
+  # the pane's line discipline.
+  case "$name" in
+    ''|*[![:print:]]*) return 1 ;;
   esac
-  task=${abs##*/}
-  task=${task%.inbox}
-  state=${abs%/*}
-  ack=$(fm_task_inbox_ack_command)
-  inbox=$(fm_task_inbox_quote "$abs")
-  printf ': Firstmate instruction waiting: list %s/*.msg and, in numeric order, read and act on each, then acknowledge each handled record by moving it into %s/handled/. The plain form is mv %s/NNN.msg %s/handled/. Where that helper path is reachable, %s %s %s NNN acknowledges the same way and also retires the hidden link. Never delete or clear the inbox, because deleting is not acknowledging.' \
-    "$inbox" "$inbox" "$inbox" "$inbox" \
-    "$(fm_task_inbox_quote "$ack")" "$(fm_task_inbox_quote "$state")" \
-    "$(fm_task_inbox_quote "$task")"
+  quoted=$(printf '%s' "$name" | sed "s/'/'\\\\''/g")
+  # The line stays short on purpose: a home nested deep must not lengthen it,
+  # because a long line wraps past what a composer read can prove and a Herdr
+  # submit then reports it never reached the pane, so every re-ring fails the
+  # same way. The listing and the move both go through FM_TASK_INBOX, which the
+  # worker's own environment already carries, so no absolute path appears here.
+  # The acknowledgement forms with their literal paths live in the brief
+  # scaffold (bin/fm-brief.sh), which is not typed into a pane.
+  printf ": Firstmate instruction waiting: list \"\$FM_TASK_INBOX\"/*.msg in your '%s' steering inbox, read and act on each in numeric order, then mv each into its handled/." \
+    "$quoted"
 }
 
 # Ring the doorbell, best-effort: one endpoint-liveness pre-check, one advisory
